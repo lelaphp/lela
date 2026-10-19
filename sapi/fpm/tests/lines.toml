@@ -420,3 +420,20 @@ params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
+
+# The realpath cache is the child's, `CWDG(realpath_cache)` a process
+# global (#2941): the second request lists what the first entered, each
+# entry's time to live counting from the first request, a second earlier,
+# and resolves its program's path from it.
+[[line]]
+name = "a-second-request-lists-the-realpath-cache-the-first-entered"
+args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\n", "index.php" = '<?php if (isset($_GET["first"])) { sleep(1); return; } $c = realpath_cache_get(); ksort($c); foreach ($c as $k => $v) if (str_starts_with($k, __DIR__)) echo substr($k, strlen(__DIR__)) ?: ".", $v["is_dir"] ? " dir " : " file ", $v["expires"] - time() < 120 ? "entered earlier" : "entered now", "\n"; echo realpath_cache_size(), "\n";' }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "first=1"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]

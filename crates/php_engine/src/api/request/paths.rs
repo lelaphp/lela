@@ -1,14 +1,15 @@
 //! The paths area of a request: a path made absolute against the
 //! request's working directory, `realpath()` through `CWDG(realpath_cache)`
 //! and the cache's listing and clearing, and how a path names a stream
-//! wrapper. The cache is [`Paths`]'s, whose field no file but this one
-//! reads.
+//! wrapper. The cache is the engine's, which every request reads under
+//! the settings it started with, [`Paths`]'s, whose field no file but
+//! this one reads.
 
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use crate::engine::Shared;
-use crate::virtual_cwd::RealpathCache;
+use crate::virtual_cwd::Settings;
 
 use super::{Request, Resolve};
 
@@ -25,18 +26,20 @@ pub struct RealpathEntry {
     pub size: i64,
 }
 
-/// `CWDG(realpath_cache)`, whose field no file but this one reads.
+/// How the request reads `CWDG(realpath_cache)`, whose field no file but
+/// this one reads.
 pub(super) struct Paths {
-    /// `CWDG(realpath_cache)`, which every absolute path resolved through
-    /// [`Request::virtual_file_ex`] is entered in (`crate::virtual_cwd`).
-    realpath_cache: RealpathCache,
+    /// The limit and time to live every absolute path resolved through
+    /// [`Request::virtual_file_ex`] is entered in the engine's cache under
+    /// (`crate::virtual_cwd`).
+    realpath_cache: Settings,
 }
 
 impl Paths {
-    /// The cache as the request starts, sized by the engine's entries.
+    /// The settings as the request starts, from the engine's entries.
     pub(super) fn startup(shared: &Shared) -> Paths {
         Paths {
-            realpath_cache: RealpathCache::startup(shared),
+            realpath_cache: Settings::startup(shared),
         }
     }
 }
@@ -88,7 +91,23 @@ impl Request {
     /// }
     /// ```
     pub fn virtual_file_ex(&mut self, cwd: &[u8], path: &[u8], how: Resolve) -> Option<Vec<u8>> {
-        crate::virtual_cwd::virtual_file_ex(&mut self.paths.realpath_cache, cwd, path, how)
+        let settings = self.paths.realpath_cache;
+        crate::virtual_cwd::virtual_file_ex(&self.shared.realpath_cache, settings, cwd, path, how)
+    }
+
+    /// `php_request_startup`'s `Disable realpath cache if an open_basedir
+    /// is set` (`Z/main/main.c:1918`), once the host's ini
+    /// is applied: an `open_basedir` the request starts under turns the
+    /// engine's cache off, for this request and every one after it, as
+    /// php's process global stays off.
+    pub(crate) fn realpath_cache_startup(&mut self) {
+        if self
+            .ini_get(b"open_basedir")
+            .is_some_and(|list| !list.is_empty())
+        {
+            self.shared.realpath_cache.turn_off();
+            self.paths.realpath_cache = self.paths.realpath_cache.turned_off();
+        }
     }
 
     /// `CWDG(realpath_cache)` as `realpath_cache_get()` walks it, slot by
@@ -97,26 +116,22 @@ impl Request {
     /// when it expires, and the bytes `realpath_cache_size()` counts it as.
     #[must_use]
     pub fn realpath_cache(&self) -> Vec<RealpathEntry> {
-        self.paths
-            .realpath_cache
-            .buckets()
-            .map(|bucket| RealpathEntry {
-                path: bucket.path.clone(),
-                realpath: bucket.realpath.clone(),
-                key: bucket.key,
-                is_dir: bucket.is_dir,
-                expires: bucket.expires,
-                size: bucket.size(),
-            })
-            .collect()
+        self.shared.realpath_cache.listed(|bucket| RealpathEntry {
+            path: bucket.path.clone(),
+            realpath: bucket.realpath.clone(),
+            key: bucket.key,
+            is_dir: bucket.is_dir,
+            expires: bucket.expires,
+            size: bucket.size(),
+        })
     }
 
     /// `clearstatcache(true, ...)`'s half: `realpath_cache_del` of one
     /// path, or with none `realpath_cache_clean`.
     pub fn realpath_cache_clear(&mut self, path: Option<&[u8]>) {
         match path {
-            Some(path) => self.paths.realpath_cache.delete(path),
-            None => self.paths.realpath_cache.clean(),
+            Some(path) => self.shared.realpath_cache.delete(path),
+            None => self.shared.realpath_cache.clean(),
         }
     }
 }

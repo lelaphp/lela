@@ -7,13 +7,22 @@
 //! beside it, `CWDG(realpath_cache)`, which every absolute path resolved
 //! under `CWD_FILEPATH` or `CWD_REALPATH` is entered in and read from,
 //! and which `realpath_cache_get()` and `realpath_cache_size()` show. The
-//! separator is `/` alone and [`MAXPATHLEN`] is the host's. The cache
-//! is the request's, where php's is the thread's: a request starts with
-//! none, as php's CLI does.
+//! separator is `/` alone and [`MAXPATHLEN`] is the host's.
+//!
+//! The cache is the engine's (#2941): php's is the process's in the
+//! non-ZTS build php-fpm runs, so a child's second request finds what its
+//! first entered and stats nothing until an entry's `realpath_cache_ttl`
+//! expires, and here one engine is what a child is, serving every thread
+//! (design §5.14). Each lookup and each entry takes the cache's mutex for
+//! itself alone, so no system call is made under it; an entry another
+//! request made between a lookup and its entry stands, and the second is
+//! not made, which php's one thread never meets.
 
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// `MAXPATHLEN` (`Z/Zend/zend_virtual_cwd.h:39`), the host's
 /// `PATH_MAX`: 4096 on Linux, 1024 on macOS and the BSDs. The one value
@@ -77,24 +86,38 @@ fn len_of(n: usize) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
-/// `CWDG(realpath_cache)` with `realpath_cache_size`, the bytes its
-/// buckets count, and the two ini entries read at startup,
-/// `realpath_cache_size` as the limit and `realpath_cache_ttl`.
-#[derive(Debug, Clone)]
+/// `CWDG(realpath_cache)`, the engine's: the buckets every request's
+/// resolutions enter and read, and whether an `open_basedir` has turned
+/// it off, `CWDG(realpath_cache_size_limit) = 0`, which php never turns on
+/// again in the process.
+#[derive(Debug)]
 pub(crate) struct RealpathCache {
+    buckets: Mutex<Buckets>,
+    off: AtomicBool,
+}
+
+/// The slots and `CWDG(realpath_cache_size)`, the bytes their buckets
+/// count.
+#[derive(Debug)]
+struct Buckets {
     slots: Vec<Vec<Bucket>>,
     size: i64,
+}
+
+/// `CWDG(realpath_cache_size_limit)` and `CWDG(realpath_cache_ttl)` as a
+/// request reads them: the master values of `realpath_cache_size` and
+/// `realpath_cache_ttl`, `PHP_INI_SYSTEM` both, and a limit of zero while
+/// the cache is off.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Settings {
     limit: i64,
     ttl: i64,
 }
 
-impl RealpathCache {
-    /// The cache a request starts with: empty, its limit and time to
-    /// live the startup values of `realpath_cache_size` and
-    /// `realpath_cache_ttl`, `PHP_INI_SYSTEM` both, read into `CWDG` once;
-    /// a startup `open_basedir` turns it off, the limit zero
-    /// (`php_request_startup`, `Z/main/main.c:1918`).
-    pub(crate) fn startup(shared: &crate::engine::Shared) -> RealpathCache {
+impl Settings {
+    /// What a request starts with; a startup `open_basedir` turns the
+    /// cache off, as `php_module_startup` does (`Z/main/main.c:2312`).
+    pub(crate) fn startup(shared: &crate::engine::Shared) -> Settings {
         let read = |name: &[u8]| {
             shared
                 .ini_default(name)
@@ -103,21 +126,56 @@ impl RealpathCache {
         let guarded = shared
             .ini_default(b"open_basedir")
             .is_some_and(|list| !list.is_empty());
-        let limit = if guarded {
+        if guarded {
+            shared.realpath_cache.turn_off();
+        }
+        let limit = if shared.realpath_cache.is_off() {
             0
         } else {
             read(b"realpath_cache_size")
         };
-        RealpathCache::new(limit, read(b"realpath_cache_ttl"))
+        Settings {
+            limit,
+            ttl: read(b"realpath_cache_ttl"),
+        }
     }
 
-    fn new(limit: i64, ttl: i64) -> RealpathCache {
+    /// The limit zero: the cache is off for the rest of the request.
+    pub(crate) fn turned_off(self) -> Settings {
+        Settings { limit: 0, ..self }
+    }
+}
+
+impl Default for RealpathCache {
+    fn default() -> RealpathCache {
         RealpathCache {
-            slots: vec![Vec::new(); SLOTS],
-            size: 0,
-            limit,
-            ttl,
+            buckets: Mutex::new(Buckets {
+                slots: vec![Vec::new(); SLOTS],
+                size: 0,
+            }),
+            off: AtomicBool::new(false),
         }
+    }
+}
+
+impl RealpathCache {
+    fn buckets(&self) -> std::sync::MutexGuard<'_, Buckets> {
+        self.buckets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `CWDG(realpath_cache_size_limit) = 0` where an `open_basedir` is
+    /// set at a request's start (`php_request_startup`,
+    /// `Z/main/main.c:1918`): off for every request after it, as php's
+    /// process global stays.
+    pub(crate) fn turn_off(&self) {
+        self.off.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether an `open_basedir` has turned the cache off.
+    pub(crate) fn is_off(&self) -> bool {
+        self.off.load(Ordering::Relaxed)
     }
 
     /// `realpath_cache_key`: FNV-1 over the path's bytes, each read as
@@ -135,16 +193,16 @@ impl RealpathCache {
 
     /// `realpath_cache_find`: the bucket for `path`, the expired buckets
     /// met on its chain dropped on the way.
-    fn find(&mut self, path: &[u8], now: i64) -> Option<Bucket> {
+    fn find(&self, path: &[u8], now: i64, ttl: i64) -> Option<Bucket> {
         let key = RealpathCache::key(path);
-        let ttl = self.ttl;
-        let chain = &mut self.slots[RealpathCache::slot(key)];
-        let mut freed = 0;
+        let mut buckets = self.buckets();
+        let Buckets { slots, size } = &mut *buckets;
+        let chain = &mut slots[RealpathCache::slot(key)];
         let mut found = None;
         let mut at = 0;
         while at < chain.len() {
             if ttl != 0 && chain[at].expires < now {
-                freed += chain.remove(at).size();
+                *size -= chain.remove(at).size();
                 continue;
             }
             if chain[at].key == key && chain[at].path == path {
@@ -153,47 +211,56 @@ impl RealpathCache {
             }
             at += 1;
         }
-        self.size -= freed;
         found
     }
 
-    /// `realpath_cache_add`, where the limit leaves room.
-    fn add(&mut self, path: &[u8], realpath: &[u8], is_dir: bool, now: i64) {
+    /// `realpath_cache_add`, where the limit leaves room and no other
+    /// request entered `path` since this one looked.
+    fn add(&self, path: &[u8], realpath: &[u8], is_dir: bool, now: i64, settings: Settings) {
         let bucket = Bucket {
             key: RealpathCache::key(path),
             path: path.to_vec(),
             realpath: realpath.to_vec(),
             is_dir,
-            expires: now.saturating_add(self.ttl),
+            expires: now.saturating_add(settings.ttl),
         };
-        let size = bucket.size();
-        if self.size + size <= self.limit {
-            self.slots[RealpathCache::slot(bucket.key)].insert(0, bucket);
-            self.size += size;
+        let bytes = bucket.size();
+        let mut buckets = self.buckets();
+        let Buckets { slots, size } = &mut *buckets;
+        let chain = &mut slots[RealpathCache::slot(bucket.key)];
+        let entered = chain
+            .iter()
+            .any(|had| had.key == bucket.key && had.path == bucket.path);
+        if !entered && *size + bytes <= settings.limit {
+            chain.insert(0, bucket);
+            *size += bytes;
         }
     }
 
     /// `realpath_cache_del`: the bucket for `path` dropped.
-    pub(crate) fn delete(&mut self, path: &[u8]) {
+    pub(crate) fn delete(&self, path: &[u8]) {
         let key = RealpathCache::key(path);
-        let chain = &mut self.slots[RealpathCache::slot(key)];
+        let mut buckets = self.buckets();
+        let Buckets { slots, size } = &mut *buckets;
+        let chain = &mut slots[RealpathCache::slot(key)];
         if let Some(at) = chain.iter().position(|b| b.key == key && b.path == path) {
-            self.size -= chain.remove(at).size();
+            *size -= chain.remove(at).size();
         }
     }
 
     /// `realpath_cache_clean`: every bucket dropped.
-    pub(crate) fn clean(&mut self) {
-        for chain in &mut self.slots {
+    pub(crate) fn clean(&self) {
+        let mut buckets = self.buckets();
+        for chain in &mut buckets.slots {
             chain.clear();
         }
-        self.size = 0;
+        buckets.size = 0;
     }
 
-    /// The buckets in `realpath_cache_get()`'s order: slot by slot, each
-    /// chain newest first.
-    pub(crate) fn buckets(&self) -> impl Iterator<Item = &Bucket> {
-        self.slots.iter().flatten()
+    /// Each bucket, as `shown`, in `realpath_cache_get()`'s order: slot by
+    /// slot, each chain newest first.
+    pub(crate) fn listed<T>(&self, shown: impl FnMut(&Bucket) -> T) -> Vec<T> {
+        self.buckets().slots.iter().flatten().map(shown).collect()
     }
 }
 
@@ -317,10 +384,10 @@ fn realpath_r(
             };
         }
         let mut save = how != Resolve::Expand;
-        if start > 0 && save && walk.cache.limit != 0 {
+        if start > 0 && save && walk.settings.limit != 0 {
             // The cache lookup for an absolute path.
             let now = walk.now.get();
-            if let Some(bucket) = walk.cache.find(&p.head(len), now) {
+            if let Some(bucket) = walk.cache.find(&p.head(len), now, walk.settings.ttl) {
                 if is_dir && !bucket.is_dir {
                     return None;
                 }
@@ -333,6 +400,8 @@ fn realpath_r(
         }
         let tmp = p.head(len);
         let meta = if save {
+            #[cfg(test)]
+            tests::LOOKED_UP.with(|n| n.set(n.get() + 1));
             std::fs::symlink_metadata(host(&tmp)).ok()
         } else {
             None
@@ -413,20 +482,22 @@ fn realpath_r(
 }
 
 /// What one `virtual_file_ex` carries down its recursion: the links
-/// followed, `*ll`, the time, `*t`, and the cache it reads and fills.
+/// followed, `*ll`, the time, `*t`, and the cache it reads and fills
+/// under the request's settings.
 struct Walk<'c> {
     links: i32,
     now: Now,
-    cache: &'c mut RealpathCache,
+    cache: &'c RealpathCache,
+    settings: Settings,
 }
 
 impl Walk<'_> {
     /// `realpath_cache_add(tmp, len, path, j, directory, *t)` for an
     /// absolute path, where the cache is on.
     fn save(&mut self, start: usize, path: &[u8], realpath: &[u8], is_dir: bool) {
-        if start > 0 && self.cache.limit != 0 {
+        if start > 0 && self.settings.limit != 0 {
             let now = self.now.get();
-            self.cache.add(path, realpath, is_dir, now);
+            self.cache.add(path, realpath, is_dir, now, self.settings);
         }
     }
 }
@@ -436,7 +507,8 @@ impl Walk<'_> {
 /// php answers `1`, an empty path or one of `MAXPATHLEN` or more among
 /// them.
 pub(crate) fn virtual_file_ex(
-    cache: &mut RealpathCache,
+    cache: &RealpathCache,
+    settings: Settings,
     cwd: &[u8],
     path: &[u8],
     how: Resolve,
@@ -468,6 +540,7 @@ pub(crate) fn virtual_file_ex(
         links: 0,
         now: Now { at: None },
         cache,
+        settings,
     };
     let mut len = realpath_r(&mut walk, &mut buf, start, length, how, false, None)?;
     if start == 0 && len == 0 {
@@ -485,7 +558,13 @@ pub(crate) fn virtual_file_ex(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    thread_local! {
+        /// The paths this thread's resolutions asked the file system
+        /// about, `lstat`, since the thread began.
+        pub(crate) static LOOKED_UP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
     /// Linux's `PATH_MAX` is 4096, which php's `MAXPATHLEN` and so
     /// `PHP_MAXPATHLEN` are there; the macOS oracle, at 1024, cannot
     /// show it, so no witness holds it.

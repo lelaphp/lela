@@ -935,6 +935,11 @@ pub(crate) struct Shared {
     /// by the engine because a heap is its request's and dropped with it
     /// (#2940).
     pub(crate) chunks: Arc<php_heap::ChunkCache>,
+    /// `CWDG(realpath_cache)` (design §5.14): the process's in php's
+    /// non-ZTS build, so every request of the engine reads what earlier
+    /// ones entered until an entry's `realpath_cache_ttl` expires, as
+    /// every request of one php-fpm child does (#2941).
+    pub(crate) realpath_cache: crate::virtual_cwd::RealpathCache,
     /// The engine's interned strings (design §5.2, §5.14): what a unit's
     /// constant strings enter as it is published, grown here alone and
     /// read by every request thread with nothing taken.
@@ -3592,6 +3597,7 @@ impl EngineBuilder {
                 layer,
                 timer: crate::interrupt::Timer::default(),
                 chunks: Arc::default(),
+                realpath_cache: crate::virtual_cwd::RealpathCache::default(),
                 strings: Mutex::new(strings),
                 names,
                 default_strings,
@@ -5028,6 +5034,7 @@ impl Engine {
         // extensions' `RINIT`; what can fail is the memory limit, which the
         // first allocation after it meets again.
         req.apply_host_ini();
+        req.realpath_cache_startup();
         req.read_post_at_startup();
         if web && req.ini_flag(b"expose_php") && req.headers_sent().is_none() {
             let line = format!("X-Powered-By: PHP/{}", crate::api::request::PHP_VERSION);
@@ -7489,6 +7496,66 @@ mod tests {
     impl Drop for Files {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.dir).ok();
+        }
+    }
+
+    /// The realpath cache is the engine's, as php's is a php-fpm child's
+    /// (#2941): the second request resolves its program's path, and an
+    /// include's, from what the first entered, asking the file system
+    /// nothing while the entries' time to live holds; once the cache is
+    /// cleaned, as `clearstatcache(true)` cleans it, the next request asks
+    /// again.
+    #[test]
+    fn a_second_request_resolves_its_paths_from_the_engine_s_realpath_cache() {
+        use crate::virtual_cwd::tests::LOOKED_UP;
+        let files = Files::new(
+            "realpath-cache",
+            &[
+                ("b.php", "<?php\n"),
+                ("main.php", "<?php\ninclude 'b.php';\necho \"ok\\n\";\n"),
+            ],
+        );
+        let engine = Engine::cli_builder().build();
+        let mut asked = Vec::new();
+        let mut serve = || {
+            let before = LOOKED_UP.with(std::cell::Cell::get);
+            let (body, observables) = files.serve(&engine, "main.php");
+            assert_eq!((body.as_str(), observables.exit_code), ("ok\n", 0));
+            asked.push(LOOKED_UP.with(std::cell::Cell::get) - before);
+        };
+        serve();
+        serve();
+        let entered = engine
+            .shared
+            .realpath_cache
+            .listed(|bucket| bucket.path.clone());
+        assert!(
+            entered.iter().any(|path| path.ends_with(b"/b.php")),
+            "the include's path stands in the cache"
+        );
+        engine.shared.realpath_cache.clean();
+        serve();
+        assert!(asked[0] > 0, "the first request asks the file system");
+        assert_eq!(asked[1], 0, "the second asks nothing: {asked:?}");
+        assert!(asked[2] > 0, "once the cache is cleaned it asks again");
+    }
+
+    /// What turns php's cache off or past its entries still asks the
+    /// file system on every request: an expired entry, and an
+    /// `open_basedir`, which turns the cache off.
+    #[test]
+    fn an_expired_entry_and_an_open_basedir_ask_the_file_system_again() {
+        use crate::virtual_cwd::tests::LOOKED_UP;
+        let files = Files::new("realpath-ttl", &[("main.php", "<?php\n")]);
+        for (name, value) in [("realpath_cache_ttl", "-1"), ("open_basedir", "/")] {
+            let engine = Engine::cli_builder().ini_default(name, value).build();
+            for request in 0..2 {
+                let before = LOOKED_UP.with(std::cell::Cell::get);
+                let (body, observables) = files.serve(&engine, "main.php");
+                assert_eq!(observables.exit_code, 0, "{body}");
+                let asked = LOOKED_UP.with(std::cell::Cell::get) - before;
+                assert!(asked > 0, "{name}={value}: request {request} asked nothing");
+            }
         }
     }
 
