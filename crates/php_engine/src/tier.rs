@@ -25,7 +25,9 @@
 
 use std::sync::atomic::AtomicU32;
 
-use crate::api::abi::Extension;
+/// What a tier declares its state with, as an extension does (design
+/// §4.4; `jit-design.md` §4, §5.3).
+pub use crate::api::abi::{Extension, ExtensionBuilder, Refusal, Start, StartupIni};
 use crate::observer::{Declared, ObservedOpcodes, Telling, Untold};
 use crate::{exec, interrupt};
 use php_unit::OpArray;

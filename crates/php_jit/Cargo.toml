@@ -17,7 +17,13 @@ workspace = true
 
 [dependencies]
 php_engine = { path = "../php_engine" }
+php_unit = { path = "../php_unit" }       # the ini entries the tier declares (decl::IniDecl), through unit.lock
 libc = { workspace = true }               # the code arena's mapping and its cache maintenance on macOS (jit-design.md §4.4), already in the lock
+
+[dev-dependencies]
+# `tier::Epoch::fixture`, an epoch over one unit, so policy's state machine
+# is driven through a `Holder::Root` with no engine (jit-design.md §4.7).
+php_engine = { path = "../php_engine", features = ["test"] }
 
 [features]
 # The bench bar's program and the `bench` module it runs (#2742); off in
