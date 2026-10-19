@@ -1763,10 +1763,12 @@ pub(crate) fn init_fcall_by_name<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_init_fcall(req, frame, op, req.vm().opline(frame)) {
+    if let Some(edge) = inline_init_fcall(req, frame, op, at) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     let written = ConstIdx(op.op2);
     let lowered = ConstIdx(op.op2.saturating_add(1));
     init_call(req, frame, code, op, &[lowered], written)
@@ -2247,10 +2249,12 @@ pub(crate) fn send_val_ex<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
     if let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type), true) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     let reserved = match reserve_arg(req, frame, code, op) {
         Ok(reserved) => reserved,
         Err(edge) => return edge,
@@ -2317,10 +2321,12 @@ pub(crate) fn send_var_ex<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
     if let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type), true) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     let reserved = match reserve_arg(req, frame, code, op) {
         Ok(reserved) => reserved,
         Err(edge) => return edge,
@@ -11634,10 +11640,12 @@ pub(crate) fn init_ns_fcall_by_name<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_init_fcall(req, frame, op, req.vm().opline(frame)) {
+    if let Some(edge) = inline_init_fcall(req, frame, op, at) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     let written = ConstIdx(op.op2);
     let lowered = ConstIdx(op.op2.saturating_add(1));
     let unqualified = ConstIdx(op.op2.saturating_add(2));
@@ -24749,12 +24757,12 @@ mod tests {
         let call = code.oplines.get(2).copied().unwrap_or_default();
 
         assert_eq!(
-            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
+            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init, at)),
             Ok(Stepped::Same(frame))
         );
         assert!(!req.is_pending(), "the lowered constant is the table's key");
         assert_eq!(
-            served!(req, frame, at => send_val_ex::<Nop>(&mut req, frame, code, &send)),
+            served!(req, frame, at => send_val_ex::<Nop>(&mut req, frame, code, &send, at)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(
@@ -24782,7 +24790,7 @@ mod tests {
         assert_eq!(req.cached(frame, CacheSlot(init.out)), Cached::Unprimed);
 
         assert_eq!(
-            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
+            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init, at)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.vm().lookups, 1, "the first pass looks the table up");
@@ -24795,7 +24803,7 @@ mod tests {
         );
 
         assert_eq!(
-            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
+            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init, at)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.vm().lookups, 1, "the second pass reads the slot");
@@ -24903,7 +24911,7 @@ mod tests {
                 })
                 .map_or(main, |activated| activated.frame);
             assert_eq!(
-                served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, &code, &init)),
+                served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, &code, &init, at)),
                 Ok(Stepped::Same(frame)),
                 "call {call}"
             );
@@ -24972,7 +24980,7 @@ mod tests {
         let strlen = req.function_named(Bare::resolved(b"strlen"));
 
         assert_eq!(
-            served!(req, frame, at => init_ns_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
+            served!(req, frame, at => init_ns_fcall_by_name::<Nop>(&mut req, frame, code, &init, at)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.vm().lookups, 2, "foo\\strlen misses, strlen hits");
@@ -24983,7 +24991,7 @@ mod tests {
         assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
 
         assert_eq!(
-            served!(req, frame, at => init_ns_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
+            served!(req, frame, at => init_ns_fcall_by_name::<Nop>(&mut req, frame, code, &init, at)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.vm().lookups, 2, "the second pass looks nothing up");
@@ -25023,7 +25031,7 @@ mod tests {
         let init = code.oplines.first().copied().unwrap_or_default();
         for pass in 1..=2 {
             assert_eq!(
-                served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
+                served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init, at)),
                 Ok(Stepped::Threw(frame))
             );
             assert_eq!(req.vm().lookups, pass);
@@ -25689,7 +25697,7 @@ mod tests {
         let init = code.oplines.first().copied().unwrap_or_default();
 
         assert_eq!(
-            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
+            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init, at)),
             Ok(Stepped::Threw(frame))
         );
         assert_eq!(pending_message(&req), "Call to undefined function NoPe()");
