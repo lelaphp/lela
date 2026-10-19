@@ -50,6 +50,10 @@ pub(crate) struct Refcounted {
     type_info: Cell<u32>,
 }
 
+/// Where in a counted value's header its count is, php's `GC_REFCOUNT`:
+/// the word with the pin above the count.
+pub(crate) const REFCOUNT_AT: usize = std::mem::offset_of!(Refcounted, refcount);
+
 /// The first of the walks' pins over a block other than an object, whose
 /// pins are counted ([`crate::Obj::pin`]) (design §4.4, #2197, #2230,
 /// #2291), the pins past the first counted beside it ([`Nested`]): the

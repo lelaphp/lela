@@ -304,6 +304,16 @@ const _: () = assert!(std::mem::offset_of!(Zval, value) == 0);
 const _: () = assert!(std::mem::size_of::<Word>() == 8);
 
 impl Zval {
+    /// Where php's `Z_TYPE_INFO` starts, the type byte (`Z_TYPE`), the
+    /// flags byte after it and the extra bits above them, one 32-bit word
+    /// on the targets compiled code runs on, all little-endian: what the
+    /// compiled tier loads and stores a slot's type through, on the frame
+    /// layout the interpreter's (`jit-design.md` §4.3).
+    pub const TYPE_AT: usize = std::mem::offset_of!(Zval, kind);
+    /// Where php's `Z_TYPE_FLAGS` is, the byte that says whether the
+    /// value is refcounted ([`Zval::TYPE_REFCOUNTED`]).
+    pub const FLAGS_AT: usize = std::mem::offset_of!(Zval, type_flags);
+
     /// The all-zero zval, `IS_UNDEF`.
     pub const UNDEF: Zval = Zval {
         value: Word::bits(0),
@@ -688,8 +698,9 @@ impl Zval {
     /// `Z_FROM_WEAKMAP`.
     const FROM_WEAKMAP: u16 = 1 << 1;
 
-    /// `IS_TYPE_REFCOUNTED`.
-    const TYPE_REFCOUNTED: u8 = 1;
+    /// `IS_TYPE_REFCOUNTED`, a bit of the flags byte at
+    /// [`Zval::FLAGS_AT`].
+    pub const TYPE_REFCOUNTED: u8 = 1;
     /// `IS_TYPE_COLLECTABLE`: may be part of a cycle.
     const TYPE_COLLECTABLE: u8 = 1 << 1;
 }

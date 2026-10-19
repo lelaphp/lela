@@ -506,6 +506,21 @@ unsafe impl Sync for FrozenEmpty {}
 unsafe impl Send for FrozenEmpty {}
 
 impl Arr {
+    /// Where in `zend_array` its count is, `GC_REFCOUNT`, the word whose
+    /// pin sits above the count: one with nothing else in it names an
+    /// array its one holder may write in place, where its zval says it is
+    /// refcounted, as an immutable array's does not. What the compiled
+    /// tier reads its packed arrays through (`jit-design.md` §4.3).
+    pub const REFCOUNT_AT: usize = std::mem::offset_of!(ArrHeader, gc) + crate::gc::REFCOUNT_AT;
+    /// Where `u.flags` is, `HT_FLAGS`.
+    pub const FLAGS_AT: usize = std::mem::offset_of!(ArrHeader, flags);
+    /// php's `HASH_FLAG_PACKED`, a bit of the flags at [`Arr::FLAGS_AT`].
+    pub const PACKED: u32 = PACKED;
+    /// Where `arPacked` is: a packed array's slots, sixteen bytes each.
+    pub const DATA_AT: usize = std::mem::offset_of!(ArrHeader, data);
+    /// Where `nNumUsed` is: past it a packed array has no slot.
+    pub const USED_AT: usize = std::mem::offset_of!(ArrHeader, num_used);
+
     fn header(&self) -> &ArrHeader {
         // SAFETY: an `Arr` names an array `init` laid down, live while
         // its owner holds it, which is php's `zend_array *` contract.
