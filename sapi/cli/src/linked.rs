@@ -5,8 +5,11 @@
 //! and hands it snippets.
 //!
 //! `php-linked --serve` reads one directory per line on stdin. Each holds
-//! a request as files: `source`, the program; `script_name`, what the
-//! request is named; `cwd`, the directory it is served in; `ini`, one
+//! a request as files: `script_name`, the program's file, which the
+//! harness has written in `cwd`, the directory it is served in, and
+//! which is served as `php <script_name>` serves it there, compiled as a
+//! file (#2985); `source`, the bytes it holds, which the harness's own
+//! stand-ins read; `ini`, one
 //! `name=value` per line, laid over the CLI's own defaults as `-d` lays
 //! them; and `extended`, `1` where it is compiled with extended info as
 //! `-e` builds it. It serves the request under this process's
@@ -75,7 +78,6 @@ fn environ() -> Vec<(Vec<u8>, Vec<u8>)> {
 /// the status it ended on.
 fn serve(dir: &Path) -> i32 {
     let read = |name: &str| fs::read_to_string(dir.join(name)).unwrap_or_default();
-    let source = read("source");
     let name = read("script_name");
     let cwd = read("cwd");
     let ini_text = read("ini");
@@ -90,7 +92,6 @@ fn serve(dir: &Path) -> i32 {
         engine(&ini, extended).serve_capture_traced_in(
             Path::new(cwd.trim_end_matches('\n')),
             name.as_bytes(),
-            &source,
             environ(),
             Capture::default(),
         )

@@ -18,6 +18,7 @@ tier::Called
 tier::ClassId
 tier::Epoch
 tier::Epoch::fixture
+tier::Epoch::tier_state
 tier::Epoch::word
 tier::Evaluated
 tier::Extension
@@ -50,8 +51,10 @@ tier::UnitView::cache_slot
 tier::UnitView::class
 tier::UnitView::hold
 tier::UnitView::hold_class
+tier::UnitView::is_main
 tier::UnitView::new
 tier::UnitView::op_array
+tier::UnitView::parameters
 tier::Word
 tier::Word::halves
 tier::Word::sealed
@@ -63,6 +66,7 @@ tier::catches
 tier::class_number
 tier::entry
 tier::epoch
+tier::epoch_state
 tier::evaluate
 tier::evaluate_code
 tier::exit
@@ -77,6 +81,7 @@ tier::set_argv
 tier::set_aside
 tier::set_stdin
 tier::set_trace_num
+tier::sink
 tier::step
 tier::trace_num
 tier::unwind

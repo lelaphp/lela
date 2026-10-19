@@ -537,9 +537,9 @@ impl ReflectionProperty {
     /// string(7) "message"
     /// ```
     #[php(tentative)]
-    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getName(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let (_, name, _) = this_declared(req, this.object())?;
-        PhpString::interned(req, &name)
+        PhpString::declared(req, &name)
     }
 
     /// `ReflectionProperty::getMangledName()`: `prop->name`, the key the
@@ -1933,9 +1933,9 @@ impl ReflectionClassConstant {
     /// string(13) "IS_DEPRECATED"
     /// ```
     #[php(tentative)]
-    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getName(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let (name, _, _) = this_constant(req, this.object())?;
-        PhpString::interned(req, &name)
+        PhpString::declared(req, &name)
     }
 
     /// `ReflectionClassConstant::getValue()`: the constant expression
@@ -2281,9 +2281,9 @@ impl ReflectionConstant {
     /// ```expect
     /// string(7) "PHP_EOL"
     /// ```
-    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getName(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let name = this_global_constant(req, this.object())?;
-        PhpString::interned(req, &name)
+        PhpString::declared(req, &name)
     }
 
     /// `ReflectionConstant::getNamespaceName()`: the name before the last

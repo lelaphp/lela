@@ -571,10 +571,9 @@ impl Request {
                 return Err(thrown);
             }
         };
-        // The case's name is the constant's, an interned string, as
-        // `zend_enum_new` copies `case_name`.
-        let spelled = self.declared_string(name)?;
-        let spelled = Owner::take(self, Value::string(spelled));
+        // The case's name is the constant's, as `zend_enum_new` copies
+        // `case_name`.
+        let spelled = self.declared_string(name)?.into_value();
         write_prop(self, &case, b"name", spelled)?;
         if let Some(value) = value {
             write_prop(self, &case, b"value", Owner::adopt(value))?;

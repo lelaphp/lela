@@ -131,7 +131,7 @@ fn read(s: &mut Session, here: &mut Here<'_>, files: Vec<Vec<u8>>, started: bool
             continue;
         }
         let Ok(text) = std::fs::read(path) else {
-            out::error(
+            s.out.error(
                 format!(
                     "Failed to open {} for initialization",
                     String::from_utf8_lossy(&file)
@@ -165,7 +165,7 @@ fn finish(s: &mut Session, here: &mut Here<'_>, started: bool) {
     if s.stopped.is_none()
         && let Some(carried) = s.carried.take()
     {
-        out::discarded(|| {
+        out::discarded(s, |s| {
             lines(s, here, None, &carried, 0);
         });
     }
@@ -267,7 +267,7 @@ fn lines(
         // unquotes the copy it reads in place, and the message below
         // quotes that copy.
         s.read_after_run |= s.init_cleaning;
-        let mut line = input::remembered(line);
+        let mut line = input::remembered(s, line);
         let Ok(commands) = cmd::parse(&mut line) else {
             continue;
         };
@@ -293,7 +293,7 @@ fn lines(
                         at + 1
                     ),
                 };
-                out::error(message.as_bytes());
+                s.out.error(message.as_bytes());
             }
         }
     }
@@ -301,7 +301,7 @@ fn lines(
 }
 
 /// A code block evaluated where the init file stands, with the session
-/// lent back to its cell, so the loop that serves it reports what it
+/// lent back to the request's sink, so the loop that serves it reports what it
 /// leaves uncaught and stops there, which the checks between handlers
 /// do before they give way to `PHPDBG_IS_INITIALIZING`.
 fn block(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Read {
@@ -311,7 +311,7 @@ fn block(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Read {
     let Some(req) = here.request() else {
         return Read::Whole;
     };
-    let evaluated = crate::session::lend(s, || tier::evaluate_code(req, CODE, code));
+    let evaluated = crate::session::lend(req, s, |req| tier::evaluate_code(req, CODE, code));
     if s.stopped.is_some() {
         return Read::Stopped;
     }

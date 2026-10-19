@@ -1,0 +1,43 @@
+trace enter e1, stop recursive call
+frame f0 e1 root, 1 cvs 6 temps
+frame f1 e1 callee of f0, 1 cvs 6 temps
+frame f2 e1 callee of f1, 1 cvs 6 temps
+entry
+  #0 f0.CV0 [long]
+loop at 0, recursive call, interrupt exit 0
+  #1 f0.CV0 [long] = phi(#0, #5)
+0001 f0 IS_SMALLER #1, int(2) fused inline
+  checks direction taken -> exit 1
+0005 f0 INIT_FCALL_BY_NAME const#1 inline map 0 leaves -> exit 2
+     f0 init e1
+0006 f0 SUB #1, int(1) inline
+  -> #2 f0.T1 [long] reg
+  checks #2 long -> exit 3
+0007 f0 SEND_VAL_EX #2 inline leaves -> exit 4
+0008 f0 DO_FCALL_BY_NAME inline leaves -> exit 5
+     f1 enter e1
+  -> #3 f1.CV0 [long]
+0001 f1 IS_SMALLER #3, int(2) fused inline
+  checks direction taken -> exit 6
+0005 f1 INIT_FCALL_BY_NAME const#1 inline map 0 leaves -> exit 7
+     f1 init e1
+0006 f1 SUB #3, int(1) inline
+  -> #4 f1.T1 [long] reg
+  checks #4 long -> exit 8
+0007 f1 SEND_VAL_EX #4 inline leaves -> exit 9
+0008 f1 DO_FCALL_BY_NAME inline leaves -> exit 10
+     f2 enter e1
+  -> #5 f2.CV0 [long]
+end: back to 0
+exit 0: f0 0001 plain
+exit 1: f0 0002 plain f0.T0=true
+exit 2: f0 0005 plain
+exit 3: f0 0006 restore call
+exit 4: f0 0007 restore call f0.T1=#2
+exit 5: f0 0008 restore call
+exit 6: f1 0002 plain f1.T0=true
+exit 7: f1 0005 plain
+exit 8: f1 0006 restore call
+exit 9: f1 0007 restore call f1.T1=#4
+exit 10: f1 0008 restore call
+map 0: offset 1 slot 0

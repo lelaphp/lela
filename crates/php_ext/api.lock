@@ -940,6 +940,10 @@ request::ScannerFile::load
 request::ScannerFile::open
 request::Siginfo
 request::SocketOptions
+request::StandaloneHeap
+request::StandaloneHeap::gc
+request::StandaloneHeap::shutdown
+request::StandaloneHeap::startup
 request::Standard
 request::StartHandler
 request::Stream
@@ -1169,6 +1173,7 @@ test::Engine::serve_capture
 test::Engine::serve_capture_as
 test::Engine::serve_capture_in
 test::Engine::serve_capture_traced_in
+test::Engine::serve_through
 test::Engine::start_up
 test::Engine::startup_errors
 test::Engine::strip
@@ -1372,6 +1377,7 @@ values::PhpRef::separate_array
 values::PhpRef::set
 values::PhpString
 values::PhpString::as_bytes
+values::PhpString::declared
 values::PhpString::existing_interned
 values::PhpString::filled
 values::PhpString::interned

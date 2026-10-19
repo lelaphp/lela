@@ -11,12 +11,13 @@
 //! function, class and constant reaches one API of the engine. Here
 //! `test.c`'s are [`functions`] and [`classes`], with its weak table
 //! [`weakmap`] and the functions that reach past the program [`internals`],
-//! which names the three left out and why; `iterators.c`'s is [`iterators`] and `object_handlers.c`'s
+//! whose one act in C's terms, `zend_test_crash`'s `SIGSEGV`, is `ffi`'s
+//! (`unsafe.homes`); `iterators.c`'s is [`iterators`] and `object_handlers.c`'s
 //! are [`object_handlers`]. The observer of `observer.c` is [`observer`], the one
 //! bundled user of design §4.3 seam 9, and the allocator hooks of
 //! `zend_mm_custom_handlers.c` are ported by observation
 //! ([`mm_custom_handlers`], #2024).
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
     clippy::unwrap_used,
@@ -30,6 +31,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod classes;
+mod ffi;
 mod fiber;
 mod functions;
 mod internals;

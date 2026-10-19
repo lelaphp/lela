@@ -117,7 +117,7 @@ impl Request {
         standing: bool,
     ) -> Result<Option<PhpString>, Thrown> {
         let name = if standing {
-            self.declared_string(lowered)?
+            self.standing_string(lowered)?
         } else {
             self.string(lowered)?
         };

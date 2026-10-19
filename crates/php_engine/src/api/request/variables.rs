@@ -120,9 +120,11 @@ impl Request {
             // `ZSTR_KNOWN(ZEND_STR_ARGV)` and `ZEND_STR_ARGC`
             // (`php_build_argv`, `Z/main/php_variables.c:703`).
             let words_name = self.known(Known::Argv)?;
-            self.symbol_update(TableId::GLOBAL, words_name, words);
+            self.symbol_update(TableId::GLOBAL, *words_name, words);
+            words_name.give_up(self);
             let count_name = self.known(Known::Argc)?;
-            self.symbol_update(TableId::GLOBAL, count_name, Value::int(count));
+            self.symbol_update(TableId::GLOBAL, *count_name, Value::int(count));
+            count_name.give_up(self);
         }
         // `php_startup_auto_globals` (`Z/main/php_variables.c:973`): with
         // `auto_globals_jit`, `$_ENV` and `$_REQUEST` are made when named,
@@ -233,9 +235,11 @@ impl Request {
             let table = self.global_table();
             let words_name = self.known(Known::Argv)?;
             let list = Owner::take(self, words);
-            self.symbol_update_ind(table, words_name, list.hand_on(), Overwrite::InPlace);
+            self.symbol_update_ind(table, *words_name, list.hand_on(), Overwrite::InPlace);
+            words_name.give_up(self);
             let count_name = self.known(Known::Argc)?;
-            self.symbol_update_ind(table, count_name, count, Overwrite::InPlace);
+            self.symbol_update_ind(table, *count_name, count, Overwrite::InPlace);
+            count_name.give_up(self);
         }
         if server {
             let held = Owner::take(self, words);
@@ -431,7 +435,8 @@ impl Request {
                 Some(files) => {
                     self.addref(&Value::array(files));
                     let name = self.declared_string(global.name())?;
-                    self.symbol_update(TableId::GLOBAL, name, Value::array(files));
+                    self.symbol_update(TableId::GLOBAL, *name, Value::array(files));
+                    name.give_up(self);
                     return Ok(());
                 }
                 None => PhpArray::new(self)?,
@@ -451,7 +456,8 @@ impl Request {
         // The auto-global's name, `zend_register_auto_global`'s string,
         // which php interned at startup.
         let name = self.declared_string(global.name())?;
-        self.symbol_update(TableId::GLOBAL, name, value);
+        self.symbol_update(TableId::GLOBAL, *name, value);
+        name.give_up(self);
         Ok(())
     }
 
@@ -622,8 +628,8 @@ impl Request {
                 // `ZSTR_KNOWN(ZEND_STR_ARGV)` and `ZEND_STR_ARGC`, the
                 // engine's own strings, which cost the request nothing.
                 for (name, value) in [(Known::Argv, words), (Known::Argc, count)] {
-                    let name = Key::Str(self.known(name)?);
-                    server.set(self, Owner::take(self, name), Owner::take(self, value))?;
+                    let name = self.known(name)?.into_key();
+                    server.set(self, name, Owner::take(self, value))?;
                 }
             }
         } else if self.ini_flag(b"register_argc_argv") {

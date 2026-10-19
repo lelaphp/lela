@@ -1826,24 +1826,6 @@ impl crate::Heap {
         Ok(a)
     }
 
-    /// The request's half of [`crate::Intern::constant_array`]: the
-    /// entries written in order, then `IS_ARRAY_IMMUTABLE`; no entries,
-    /// the process's [`Arr::empty`].
-    pub(crate) fn array_constant(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
-        if entries.is_empty() {
-            return Ok(Arr::empty());
-        }
-        let a = self.array_sized(u32::try_from(entries.len()).unwrap_or(u32::MAX))?;
-        for (key, z) in entries {
-            match *key {
-                Key::Long(n) => write_long(&mut self.tables(), a, n, *z, Write::Update)?,
-                Key::Str(s) => write_str(&mut self.tables(), a, s, *z)?,
-            };
-        }
-        a.header().gc.add_flags(gc::IMMUTABLE);
-        Ok(a)
-    }
-
     /// `zend_hash_update` or `zend_hash_index_update` over `a`: `z` is
     /// the array's from here, and what `key` held is released last, after
     /// the write, through `hooks`, which is where a destructor is served
@@ -2767,7 +2749,7 @@ mod tests {
     }
 
     #[test]
-    fn a_constant_array_is_immutable_in_either_home_and_finds_its_keys() {
+    fn a_constant_array_is_immutable_and_finds_its_keys() {
         use crate::{Intern, Strings};
         let mut strings = Strings::new();
         let Ok(s) = strings.intern(b"s") else {
@@ -2791,15 +2773,6 @@ mod tests {
         assert_eq!(a.get(Key::Long(2)), None);
         let keys: Vec<Key> = a.iter().map(|(k, _)| k).collect();
         assert_eq!(keys, entries.map(|(k, _)| k));
-        let mut heap = Heap::new();
-        let Ok(t) = heap.intern(b"t") else {
-            return;
-        };
-        let Ok(b) = heap.constant_array(&[(Key::Str(t), Zval::long(1))]) else {
-            return;
-        };
-        assert!(b.is_immutable());
-        assert_eq!(b.get(Key::Str(t)).and_then(Zval::as_long), Some(1));
         drop(strings);
     }
 
@@ -2809,14 +2782,19 @@ mod tests {
     use crate::serial::alone;
 
     /// The hooks the array's tests pass: a heap and nothing to serve,
-    /// since no element here is an object.
+    /// since no element here is an object, and a table the keys are
+    /// interned into, off the heap as the engine's are.
     struct Nothing {
         heap: Heap,
+        strings: crate::Strings,
     }
 
     impl Nothing {
         fn new() -> Nothing {
-            Nothing { heap: Heap::new() }
+            Nothing {
+                heap: Heap::new(),
+                strings: crate::Strings::new(),
+            }
         }
     }
 
@@ -2836,8 +2814,8 @@ mod tests {
     }
 
     /// `zend_empty_array`: one array for the process, immutable, empty
-    /// and uninitialised, what either home answers for a constant array
-    /// of no entries, which no home frees, and which a write separates
+    /// and uninitialised, what the engine's table answers for a constant
+    /// array of no entries, which nothing frees, and which a write separates
     /// into a table of the request's own.
     #[test]
     fn the_empty_array_is_the_process_s_one_and_a_write_separates_it() {
@@ -2851,7 +2829,6 @@ mod tests {
         assert!(strings.constant_array(&[]).is_ok_and(|a| a.is_same(e)));
         drop(strings);
         let mut nothing = Nothing::new();
-        assert!(nothing.heap.constant_array(&[]).is_ok_and(|a| a.is_same(e)));
         let before = nothing.heap.memory_usage(false);
         let Ok(copy) = nothing.heap.separate(e) else {
             return;
@@ -2874,7 +2851,7 @@ mod tests {
         let _alone = alone();
         let mut nothing = Nothing::new();
         let Ok(a) = nothing
-            .heap
+            .strings
             .constant_array(&[(Key::Long(0), Zval::long(1))])
         else {
             return;
@@ -2910,8 +2887,8 @@ mod tests {
         let _alone = alone();
         let mut nothing = Nothing::new();
         let (Ok(a), Ok(b), Ok(c)) = (
-            nothing.heap.intern(b"a"),
-            nothing.heap.intern(b"b"),
+            nothing.strings.intern(b"a"),
+            nothing.strings.intern(b"b"),
             nothing.heap.array(),
         ) else {
             return;
@@ -3173,7 +3150,7 @@ mod tests {
         let mut nothing = Nothing::new();
         let start = nothing.heap.memory_usage(false);
         let Ok(a) = nothing.heap.array() else { return };
-        let Ok(key) = nothing.heap.intern(b"k") else {
+        let Ok(key) = nothing.strings.intern(b"k") else {
             return;
         };
         assert!(Heap::array_update(&mut nothing, a, Key::Str(key), Zval::long(0)).is_ok());
@@ -3472,7 +3449,7 @@ mod tests {
     fn hash_of(nothing: &mut Nothing, n: i64) -> Option<Arr> {
         let a = nothing.heap.array().ok()?;
         for i in 0..n {
-            let key = nothing.heap.intern(format!("k{i}").as_bytes()).ok()?;
+            let key = nothing.strings.intern(format!("k{i}").as_bytes()).ok()?;
             Heap::array_update(nothing, a, Key::Str(key), Zval::long(i)).ok()?;
         }
         Some(a)
@@ -3493,7 +3470,7 @@ mod tests {
         let at_end = nothing.heap.iterator_add(a, 8);
         assert_eq!(a.iterators_count(), 2);
         for k in [b"k1", b"k2"] {
-            let Ok(key) = nothing.heap.intern(k) else {
+            let Ok(key) = nothing.strings.intern(k) else {
                 return;
             };
             assert!(Heap::array_del(&mut nothing, a, Key::Str(key)));
@@ -3539,7 +3516,7 @@ mod tests {
             return;
         };
         let past = nothing.heap.iterator_add(a, 3);
-        let Ok(key) = nothing.heap.intern(b"k2") else {
+        let Ok(key) = nothing.strings.intern(b"k2") else {
             return;
         };
         assert!(Heap::array_del(&mut nothing, a, Key::Str(key)));
@@ -3562,7 +3539,7 @@ mod tests {
             return;
         };
         let walk = nothing.heap.iterator_add(a, 3);
-        let Ok(key) = nothing.heap.intern(b"k0") else {
+        let Ok(key) = nothing.strings.intern(b"k0") else {
             return;
         };
         assert!(Heap::array_del(&mut nothing, a, Key::Str(key)));

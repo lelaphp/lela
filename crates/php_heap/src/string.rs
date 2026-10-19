@@ -680,12 +680,12 @@ impl std::fmt::Debug for Str {
 /// its two handlers (`Z/Zend/zend_string.c:363-373`), which the compiler
 /// and the engine call without knowing which home answers.
 ///
-/// The two homes differ in one thing, where the bytes are allocated and
-/// so when they are freed: [`Strings`], an engine's, on the system
-/// allocator for the life of the engine, and [`crate::Heap`], a
-/// request's, out of the request's own memory and gone with it. Both
-/// answer from the frozen table first, so the empty string and a string
-/// of one byte are allocated nowhere at all.
+/// [`Strings`], an engine's, interns on the system allocator for the life
+/// of the engine. A request's compile of a unit no cache keeps installs
+/// opcache's handler instead, `accel_new_interned_string_for_php`, which
+/// interns nothing and hands back a string out of the request's memory
+/// that the unit owns. Both answer from the frozen table first, so the
+/// empty string and a string of one byte are allocated nowhere at all.
 pub trait Intern {
     /// The one string for these bytes in this home, interned on the first
     /// ask, and the fatal the allocator raised when there is no memory
@@ -702,12 +702,12 @@ pub trait Intern {
     /// `zend_interned_string_ht_lookup` finds it.
     fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal>;
 
-    /// A constant array of a unit in this home (design §5.3), php's
-    /// `IS_ARRAY_IMMUTABLE`: the entries in this order, the keys strings
-    /// this home interned or integers, the values scalars; immutable
-    /// from here, so no owner is counted and it lives as long as the
-    /// home does. What a `switch` or a `match` jump table is
-    /// (`zend_compile_switch`, `zend_compile_match`).
+    /// A constant array of a unit in this home (design §5.3): the
+    /// entries in this order, the keys strings this home made or
+    /// integers. An engine's is php's `IS_ARRAY_IMMUTABLE`, no owner
+    /// counted and living as long as the home does; a request's compile
+    /// makes one its unit owns. What a `switch` or a `match` jump table
+    /// is (`zend_compile_switch`, `zend_compile_match`).
     fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal>;
 }
 
@@ -900,87 +900,6 @@ impl Permanent {
     /// Every string here, for the table that frees what it laid down.
     fn strings(&self) -> impl Iterator<Item = Str> {
         self.slots.values().flatten().map(|held| held.0)
-    }
-}
-
-/// One request's own strings of its declarations: the constants and
-/// names of the units it compiled for itself and the names read off its
-/// declarations, held once so that a declaration's name is one string,
-/// as php's op arrays and class entries hold theirs. Under opcache, the
-/// regime a request's memory is held to from its first line (design
-/// §5.13, #2863), php keeps no `CG(interned_strings)` on the request's
-/// heap: `zend_string_init_interned` and `zend_new_interned_string` are
-/// `accel_init_interned_string_for_php` and
-/// `accel_new_interned_string_for_php`
-/// (`Z/ext/opcache/ZendAccelerator.c`), which hand out a plain string of
-/// the request's heap at the size `zend_string_init` takes, so php's
-/// 40960-byte bucket array, which `php -n` `emalloc`s on the first string
-/// a request interns, is not on it. Here the strings are the request's
-/// heap's, at that size, and the table that finds them again is a
-/// [`Permanent`] on the system allocator, which nothing counts.
-///
-/// That is the regime the witness reads: under `php -n` php's compile
-/// lays the 40960 down before the first line, which the divergence
-/// row `witness:cf4528199e…` accepts with the rest of that compile.
-///
-/// ```php
-/// var_dump(memory_get_usage());
-/// ```
-/// ```expect exit=0
-/// int(464552)
-/// ```
-///
-/// A string the request interns costs its own bytes and nothing beside
-/// them, the first as every one after, and `get_class` and its kin hand
-/// out names the classes hold already:
-///
-/// ```php
-/// $m = memory_get_usage();
-/// $c = get_class(new ArrayObject);
-/// echo memory_get_usage() - $m < 4096 ? "no table laid down here\n" : "a table laid down here\n";
-/// ```
-/// ```expect
-/// no table laid down here
-/// ```
-#[derive(Debug, Default)]
-pub(crate) struct Table {
-    held: Permanent,
-}
-
-impl Table {
-    /// A table holding nothing: what a request starts with.
-    pub(crate) fn new() -> Table {
-        Table::default()
-    }
-
-    /// The string here whose bytes are `bytes`, if it is here.
-    pub(crate) fn find(&self, hash: u64, bytes: &[u8]) -> Option<Str> {
-        self.held.find(hash, bytes)
-    }
-
-    /// Publish `s`, interned already and hashed under `hash`, so the
-    /// next lookup of its bytes finds it; the room the table takes is
-    /// the system's.
-    pub(crate) fn add(&mut self, hash: u64, s: Str) {
-        self.held.add(hash, s);
-    }
-
-    /// How many strings are here.
-    pub(crate) fn count(&self) -> usize {
-        self.held.count()
-    }
-
-    /// `zend_interned_strings_deactivate` (`Z/Zend/zend_string.c:346`) in
-    /// a debug build's teardown before the request leak sensor: every
-    /// string the request interned freed, and the table emptied.
-    #[cfg(debug_assertions)]
-    pub(crate) fn destroy(&mut self, mm: &mut Mm) {
-        for s in self.held.strings() {
-            // SAFETY: the string was interned out of `mm` and the
-            // table, emptied with it, is its last name.
-            unsafe { mm.free(s.address()) };
-        }
-        self.held = Permanent::default();
     }
 }
 

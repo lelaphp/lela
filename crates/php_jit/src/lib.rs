@@ -34,6 +34,7 @@ use php_engine::tier::{
 
 mod compiler;
 mod dispatch;
+mod lower;
 mod policy;
 mod record;
 mod table;
@@ -89,8 +90,9 @@ pub(crate) struct JitEngine {
 
 /// What a safepoint, a recording and the pipeline read, by `Arc` so a
 /// worker can hold it past the request that submitted a job
-/// (`jit-design.md` §4.8): the `Policy` read once at engine start, the
-/// lines that start logged, and the epoch's numbers of published traces.
+/// (`jit-design.md` §4.8): the `Policy` read once at engine start and the
+/// lines that start logged. The trace table is not here: it is the
+/// epoch's (`table::of`), so a restart's epoch starts with none.
 ///
 /// The tier's lines go where php's `opcache.jit_debug` lines go, to
 /// `stderr` (`Z/ext/opcache/jit/zend_jit_trace.c:8152-8250`), which for a
@@ -101,7 +103,8 @@ pub(crate) struct Shared {
     started: Box<[policy::Note]>,
     /// Whether a request wrote the start's lines yet: once per engine.
     told: AtomicBool,
-    table: table::TraceTable,
+    /// The engine's `PERF` outputs, which every epoch's table writes to.
+    perf: table::Outputs,
 }
 
 impl Shared {
@@ -128,12 +131,17 @@ impl JitEngine {
     fn of(ini: &StartupIni) -> JitEngine {
         let mut started = Vec::new();
         let policy = policy::Policy::from_ini(ini, &mut started);
+        let perf = if policy.mode() == policy::Mode::Off {
+            table::Outputs::none()
+        } else {
+            table::Outputs::start(policy.debug())
+        };
         JitEngine {
             shared: Arc::new(Shared {
                 policy,
                 started: started.into_boxed_slice(),
                 told: AtomicBool::new(false),
-                table: table::TraceTable::new(),
+                perf,
             }),
         }
     }
@@ -182,6 +190,7 @@ mod tests {
 
     /// The start's lines are written once, by the first request, and only
     /// where `opcache.jit_debug` asks for any: php's default writes none.
+    #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
     #[test]
     fn the_start_logs_once_and_only_under_jit_debug() {
         let quiet = testing::serve::<Lane>(&[("jit.mode", "force")], "echo 1;");

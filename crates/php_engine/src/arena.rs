@@ -183,6 +183,28 @@ pub(crate) struct Arena {
     /// shares, so what holds an epoch reads a class of the engine's as it
     /// reads one the epoch published ([`Arena::linked_class`]).
     natives: Arc<[LinkedClass<ClassId>]>,
+    /// The compiled tier's value for the epoch, its trace table
+    /// (`jit-design.md` §4.5): made by the tier the first time it asks,
+    /// read by every request of the epoch with nothing taken, and
+    /// dropped with the epoch, so a restart's epoch starts with none
+    /// ([`crate::tier::epoch_state`]).
+    pub(crate) tier: OnceLock<Box<dyn std::any::Any + Send + Sync>>,
+    /// The engine's interned strings, which a held unit's constants and
+    /// names and the engine's classes' names are: kept by the epoch so
+    /// what holds it reads them after the engine that made them is
+    /// dropped. Last, so the units go before the strings they name.
+    interned: Interned,
+}
+
+/// The engine's two tables of interned strings (design §5.2): the
+/// permanent names its startup interned, frozen after, and the table a
+/// unit's constant strings enter as it is published, grown by one
+/// publisher at a time. Shared by the engine and every epoch it hands out, so neither
+/// outlives the strings the other's units name.
+#[derive(Clone, Default)]
+pub(crate) struct Interned {
+    pub(crate) names: Arc<php_heap::Strings>,
+    pub(crate) strings: Arc<Mutex<php_heap::Strings>>,
 }
 
 impl Arena {
@@ -193,20 +215,34 @@ impl Arena {
     pub(crate) fn past(classes: usize, functions: usize, files: crate::unit_cache::Files) -> Arena {
         let first_class = u32::try_from(classes).unwrap_or(ClassId::LOCAL);
         let first_function = u32::try_from(functions).unwrap_or(Function::CLASS_NATIVE);
-        Arena::numbered(None, [first_class, first_function, 0], files, Arc::from([]))
+        let natives = Arc::from([]);
+        Arena::numbered(
+            None,
+            [first_class, first_function, 0],
+            files,
+            natives,
+            Interned::default(),
+        )
     }
 
     /// An empty arena over an engine whose classes linked to `natives`,
     /// past them and past `functions` natives and native methods,
-    /// holding `files`.
+    /// holding `files` and keeping `interned`.
     pub(crate) fn of_engine(
         natives: Arc<[LinkedClass<ClassId>]>,
         functions: usize,
         files: crate::unit_cache::Files,
+        interned: Interned,
     ) -> Arena {
         let first_class = u32::try_from(natives.len()).unwrap_or(ClassId::LOCAL);
         let first_function = u32::try_from(functions).unwrap_or(Function::CLASS_NATIVE);
-        Arena::numbered(None, [first_class, first_function, 0], files, natives)
+        Arena::numbered(
+            None,
+            [first_class, first_function, 0],
+            files,
+            natives,
+            interned,
+        )
     }
 
     /// An empty arena numbered from `first` (its classes, functions and
@@ -216,6 +252,7 @@ impl Arena {
         first: [u32; 3],
         files: crate::unit_cache::Files,
         natives: Arc<[LinkedClass<ClassId>]>,
+        interned: Interned,
     ) -> Arena {
         let [first_class, first_function, first_class_native] = first;
         Arena {
@@ -229,6 +266,8 @@ impl Arena {
             inheritance: crate::inheritance_cache::InheritanceCache::default(),
             files,
             natives,
+            tier: OnceLock::new(),
+            interned,
         }
     }
 
@@ -243,7 +282,8 @@ impl Arena {
         ];
         let files = base.files.emptied();
         let natives = Arc::clone(&base.natives);
-        Arena::numbered(Some(base), first, files, natives)
+        let interned = base.interned.clone();
+        Arena::numbered(Some(base), first, files, natives, interned)
     }
 
     /// The arena a restart hands on: empty, over what this one is laid
@@ -255,7 +295,14 @@ impl Arena {
             self.first_class_native,
         ];
         let natives = Arc::clone(&self.natives);
-        Arena::numbered(self.below.clone(), first, self.files.emptied(), natives)
+        let interned = self.interned.clone();
+        Arena::numbered(
+            self.below.clone(),
+            first,
+            self.files.emptied(),
+            natives,
+            interned,
+        )
     }
 
     /// The arena a number below this one's first names a row of: the
@@ -501,6 +548,26 @@ mod tests {
         );
         assert_eq!(second.reserve_class(), Some(ClassId(11)));
         assert!(Arc::ptr_eq(&second, &epochs.enter(|_| false)));
+    }
+
+    /// The tier's value is the epoch's (`jit-design.md` §4.5): what the
+    /// tier made for one epoch every request of it reads, a restart's
+    /// epoch starts with none, and the old value goes with the old epoch.
+    #[test]
+    fn a_restarts_epoch_starts_with_no_tier_value() {
+        let epochs = Epochs::of(Arena::past(0, 0, crate::unit_cache::Files::new(16)));
+        let first = epochs.enter(|_| false);
+        let made = first.tier.get_or_init(|| Box::new(Arc::new(7_u32)));
+        let held = made.downcast_ref::<Arc<u32>>().map(Arc::downgrade);
+        assert!(Arc::ptr_eq(&first, &epochs.enter(|_| false)));
+        let second = epochs.enter(|_| true);
+        assert!(second.tier.get().is_none(), "a new epoch's has none");
+        assert!(held.as_ref().is_some_and(|held| held.upgrade().is_some()));
+        drop(first);
+        assert!(
+            held.is_some_and(|held| held.upgrade().is_none()),
+            "gone with its epoch"
+        );
     }
 
     #[test]

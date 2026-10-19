@@ -55,7 +55,7 @@ pub use frames::{
 };
 use held::{Kept, Units};
 pub use sampled::{Building, Sample, building, class_number, numbered_class, on_heap, sample};
-pub use view::{Epoch, FuncRef, MapPtrRaw, UnitView, epoch, func, word};
+pub use view::{Epoch, FuncRef, MapPtrRaw, UnitView, epoch, epoch_state, func, word};
 
 pub use crate::api::values::ClassId;
 
@@ -216,6 +216,18 @@ pub fn trace_num(req: &Request) -> TraceNum {
 /// the tier's recording guard sets and clears it ([`trace_num`]).
 pub fn set_trace_num(req: &mut Request, n: TraceNum) {
     req.set_trace_num(n);
+}
+
+/// The sink the host lent the request, where it is the host's `T`: the
+/// value a host hands each request it serves and takes back at its end
+/// ([`crate::engine::Engine::serve`]), so what the host keeps across its
+/// requests, as php's phpdbg keeps `PHPDBG_G` across the cycles of its
+/// main loop, its tier and its natives reach from the request and from
+/// nowhere else (design §5.14 *Threads*, `jit-design.md` §8). None where
+/// the request writes to another sink, as one the host lints with.
+#[must_use]
+pub fn sink<T: crate::engine::OutputSink>(req: &mut Request) -> Option<&mut T> {
+    req.sink_as()
 }
 
 /// `source` served on `engine` as the test face serves a program named

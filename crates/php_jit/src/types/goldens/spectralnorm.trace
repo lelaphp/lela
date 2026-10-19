@@ -1,0 +1,25 @@
+start loop
+root e2
+op e2 8 - - - -
+init e1
+op e2 9 long - - -
+op e2 10 long - - -
+op e2 11 - - - -
+enter e1
+op e1 2 long long - -
+op e1 3 undef long - -
+op e1 4 long - - -
+op e1 5 long long - -
+op e1 6 long - - -
+op e1 7 long long - -
+op e1 8 long - - -
+op e1 9 - long - -
+op e1 10 double - - -
+op e1 11 double - - -
+back
+op e2 12 array.packed long - -
+op e2 13 double double - -
+op e2 14 double double - -
+op e2 15 long - - -
+op e2 16 long long - taken
+stop loop

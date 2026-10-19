@@ -136,7 +136,7 @@ fn in_execution(s: &Session, here: &Here<'_>) -> bool {
 /// Whether the user answered `question` with a yes; the input ending
 /// first ends the session, as php's read bails out quitting.
 fn permitted(s: &mut Session, question: &[u8]) -> bool {
-    match input::ask(question) {
+    match input::ask(s, question) {
         input::Answer::Yes => true,
         input::Answer::No => false,
         input::Answer::End => {
@@ -210,7 +210,7 @@ fn prompt_loop(s: &mut Session, here: &mut Here<'_>) -> Outcome {
         }
         let commands = if s.queued.is_empty() {
             let prompt = [s.prompt.as_slice(), b" "].concat();
-            match input::read_input(&prompt) {
+            match input::read_input(s, &prompt) {
                 Line::End => {
                     s.stopped = Some(Stop::Quit);
                     return Outcome::Stopped;
@@ -218,7 +218,7 @@ fn prompt_loop(s: &mut Session, here: &mut Here<'_>) -> Outcome {
                 Line::Read(mut line) => match cmd::parse(&mut line) {
                     Ok(commands) => commands,
                     Err(cmd::Malformed(message)) => {
-                        out::error(format!("Parse Error: {message}").as_bytes());
+                        s.out.error(format!("Parse Error: {message}").as_bytes());
                         continue;
                     }
                 },
@@ -227,7 +227,7 @@ fn prompt_loop(s: &mut Session, here: &mut Here<'_>) -> Outcome {
             std::mem::take(&mut s.queued)
         };
         if commands.is_empty() {
-            out::error(b"The stack contains nothing !");
+            s.out.error(b"The stack contains nothing !");
             continue;
         }
         let mut rest = commands.into_iter();
@@ -252,7 +252,7 @@ fn prompt_loop(s: &mut Session, here: &mut Here<'_>) -> Outcome {
                         return Outcome::Resume;
                     }
                     if !in_execution(s, here) {
-                        out::error(b"Not running");
+                        s.out.error(b"Not running");
                     }
                     return Outcome::NotRunning;
                 }
@@ -275,7 +275,7 @@ pub fn run_queued(s: &mut Session) {
             Ret::Success => {}
             Ret::Failure | Ret::Run => return,
             Ret::Resume => {
-                out::error(b"Not running");
+                s.out.error(b"Not running");
                 return;
             }
         }
@@ -363,7 +363,7 @@ fn execute(s: &mut Session, here: &mut Here<'_>, command: &Command) -> Ret {
                     if !call_registered(s, here, params)
                         && let Some(error) = error
                     {
-                        out::error(error.as_bytes());
+                        s.out.error(error.as_bytes());
                     }
                     Ret::Failure
                 }
@@ -829,13 +829,13 @@ fn call_registered(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> bo
         crate::host::idle(s, Command::Params(params.to_vec()));
         return true;
     };
-    match crate::session::lend(s, || tier::call(req, under, &lowered, &arguments)) {
-        tier::Called::Returned => out::out(b"\n"),
+    match crate::session::lend(req, s, |req| tier::call(req, under, &lowered, &arguments)) {
+        tier::Called::Returned => s.out.out(b"\n"),
         tier::Called::Threw => {
             if let tier::Under::Frame(frame) = under {
                 s.thrown_into = Some(frame);
             }
-            out::out(b"\n");
+            s.out.out(b"\n");
         }
         tier::Called::Exited => bailed_out(s),
         tier::Called::Rendered => {}
@@ -906,11 +906,12 @@ fn exec(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     let shown = String::from_utf8_lossy(path).into_owned();
     let os = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
     let Ok(meta) = std::fs::metadata(os) else {
-        out::error(format!("Cannot stat {shown}, ensure the file exists").as_bytes());
+        s.out
+            .error(format!("Cannot stat {shown}, ensure the file exists").as_bytes());
         return Ret::Success;
     };
     if !meta.is_file() {
-        out::error(
+        s.out.error(
             format!("Cannot use {shown} as execution context, not a valid file or symlink")
                 .as_bytes(),
         );
@@ -918,7 +919,7 @@ fn exec(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     }
     let resolved = crate::host::real_path(path);
     if s.exec.as_deref() == Some(resolved.as_slice()) {
-        out::notice(b"Execution context not changed");
+        s.out.notice(b"Execution context not changed");
         return Ret::Success;
     }
     if in_execution(s, here)
@@ -930,19 +931,19 @@ fn exec(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
         return Ret::Failure;
     }
     if let Some(old) = &s.exec {
-        out::notice(
+        s.out.notice(
             [&b"Unsetting old execution context: "[..], old]
                 .concat()
                 .as_slice(),
         );
     }
     if here.compiled() {
-        out::notice(b"Destroying compiled opcodes");
+        s.out.notice(b"Destroying compiled opcodes");
     }
     if let Some(dir) = std::path::Path::new(std::ffi::OsStr::from_bytes(&resolved)).parent() {
         std::env::set_current_dir(dir).ok();
     }
-    out::notice(
+    s.out.notice(
         [&b"Set execution context: "[..], &resolved]
             .concat()
             .as_slice(),
@@ -950,7 +951,7 @@ fn exec(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     s.exec = Some(resolved);
     s.stdin_code = None;
     s.refused.clear();
-    s.exec_in_log = !in_execution(s, here) && out::logging();
+    s.exec_in_log = !in_execution(s, here) && s.out.logging();
     s.context = if in_execution(s, here) {
         Context::Announced
     } else {
@@ -970,7 +971,7 @@ fn stdin(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     };
     let mut code = Vec::new();
     loop {
-        match input::consume_line() {
+        match input::consume_line(s) {
             Line::End => break,
             Line::Read(line) => {
                 let bare = line.strip_suffix(b"\n").unwrap_or(&line);
@@ -1024,7 +1025,7 @@ fn run_command(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 /// `PHPDBG_COMMAND(run)`.
 fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Ret {
     if s.exec.is_none() {
-        out::error(b"Nothing to execute!");
+        s.out.error(b"Nothing to execute!");
         return Ret::Success;
     }
     let args = args.filter(|args| !args.is_empty()).map(<[u8]>::to_vec);
@@ -1059,7 +1060,7 @@ fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Ret {
             crate::host::set_arguments(s, args);
             if let Some(path) = s.stdin_file.take() {
                 let Ok(file) = std::fs::File::open(&path) else {
-                    out::error(
+                    s.out.error(
                         format!("Could not open '{}' for reading from stdin", path.display())
                             .as_bytes(),
                     );
@@ -1296,7 +1297,7 @@ fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
     let stepping = std::mem::take(&mut s.stepping);
     crate::watch::freeze(s, req);
     s.origin = Origin::Eval;
-    let evaluated = crate::session::lend(s, || tier::evaluate(req, under, code));
+    let evaluated = crate::session::lend(req, s, |req| tier::evaluate(req, under, code));
     // An exit or a fatal served where nothing was executing bailed out of
     // the `phpdbg_execute_ex` that `zend_execute` entered.
     if under == tier::Under::Nothing
@@ -1311,8 +1312,8 @@ fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
         // `zend_print_zval_r` writes through the program's output, which
         // `PHPDBG_DISCARD_OUTPUT` does not hold; the newline is phpdbg's.
         tier::Evaluated::Printed(printed) => {
-            php_sapi::OutputSink::write(&mut out::Sink, &printed).ok();
-            out::out(b"\n");
+            s.out.program(&printed);
+            s.out.out(b"\n");
         }
         // The compiler threw with the frame executing, which
         // `zend_throw_exception_internal` leaves at `EG(exception_op)`.
@@ -1354,7 +1355,7 @@ fn skip_line(s: &mut Session, here: &mut Here<'_>) -> Ret {
 /// `PHPDBG_COMMAND(until)`.
 fn until(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     if !here.executing() {
-        out::error(b"Not executing");
+        s.out.error(b"Not executing");
         return Ret::Success;
     }
     skip_line(s, here)
@@ -1363,7 +1364,7 @@ fn until(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 /// `PHPDBG_COMMAND(next)`.
 fn next(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     if !here.executing() {
-        out::error(b"Not executing");
+        s.out.error(b"Not executing");
         return Ret::Success;
     }
     s.stepping = true;
@@ -1392,7 +1393,7 @@ fn seek_to_end(s: &mut Session, here: &mut Here<'_>, kind: SeekKind) -> bool {
 /// `PHPDBG_COMMAND(finish)`.
 fn finish(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     if !here.executing() {
-        out::error(b"Not executing");
+        s.out.error(b"Not executing");
         return Ret::Success;
     }
     seek_to_end(s, here, SeekKind::Finish);
@@ -1402,11 +1403,11 @@ fn finish(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 /// `PHPDBG_COMMAND(leave)`.
 fn leave(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     if !here.executing() {
-        out::error(b"Not executing");
+        s.out.error(b"Not executing");
         return Ret::Success;
     }
     if seek_to_end(s, here, SeekKind::Leave) {
-        out::notice(b"Already at the end of the function");
+        s.out.notice(b"Already at the end of the function");
         return Ret::Success;
     }
     Ret::Resume
@@ -1420,7 +1421,7 @@ fn print(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
         Some(Param::Str(_)) => print_func(s, here, params),
         Some(Param::Method { .. }) => print_method(s, here, params),
         Some(_) => {
-            out::error(
+            s.out.error(
                 b"Invalid arguments to print, expected nothing, function name or method name",
             );
             Ret::Success
@@ -1437,7 +1438,7 @@ fn lossy(bytes: &[u8]) -> String {
 /// writes its notice, once a cycle.
 fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let Some(exec) = s.exec.clone() else {
-        out::error(b"No execution context set");
+        s.out.error(b"No execution context set");
         return Ret::Success;
     };
     // The compiler refuses the context again, its log written again.
@@ -1452,7 +1453,8 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
             && let Some(code) = s.ran_code.clone()
         {
             compiled_in_init(s);
-            out::notice(format!("Context {} ({} ops)", lossy(&exec), code.ops.len()).as_bytes());
+            s.out
+                .notice(format!("Context {} ({} ops)", lossy(&exec), code.ops.len()).as_bytes());
             out::dump(&code.dump);
         }
         return Ret::Success;
@@ -1461,7 +1463,8 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let entry = tier::entry(req);
     let main = main_frame(req, entry);
     if let Some(code) = read::frame_code(req, main) {
-        out::notice(format!("Context {} ({} ops)", lossy(&exec), code.ops.len()).as_bytes());
+        s.out
+            .notice(format!("Context {} ({} ops)", lossy(&exec), code.ops.len()).as_bytes());
         out::dump(&code.dump);
     }
     Ret::Success
@@ -1501,11 +1504,11 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 pub fn refused_again(s: &mut Session, here: Option<&mut Here<'_>>) {
     // Inside the log, `php_log_err`'s guard logs nothing, and so lists
     // nothing, while `php_error_cb` displays each diagnostic all the same.
-    if out::logging() {
+    if s.out.logging() {
         s.status = Some(255);
-        s.left_log = out::in_log_prompt();
-        out::stick_log();
-        out::replay(&s.refused.clone(), || AfterLog::Returned);
+        s.left_log = s.out.in_log_prompt();
+        s.out.stick_log();
+        out::replay(s, &s.refused.clone(), |_| AfterLog::Returned);
         return;
     }
     // What a fatal's log is followed by, `php_sapi_phpdbg_log_message`'s
@@ -1513,12 +1516,12 @@ pub fn refused_again(s: &mut Session, here: Option<&mut Here<'_>>) {
     // `php_error_cb` displays it and writes the status 255, which a prompt
     // that bailed out of the log leaves as it was.
     let refused = s.refused.clone();
-    let after = out::replay(&refused, || {
+    let after = out::replay(s, &refused, |s| {
         crate::list::code(s, NO_ACTIVE_FILE, 0);
         let Some(here) = here.filter(|_| s.started) else {
             return AfterLog::Returned;
         };
-        out::in_log(|| interactive(s, here)).after_log(s.stopped.is_some())
+        out::in_log(s, |s| interactive(s, here)).after_log(s.stopped.is_some())
     });
     if after == AfterLog::Returned {
         s.status = Some(255);
@@ -1538,7 +1541,7 @@ pub fn compiled_in_init(s: &mut Session) {
         } else {
             [&b"Successful compilation of "[..], exec].concat()
         };
-        out::notice(&message);
+        s.out.notice(&message);
     }
 }
 
@@ -1618,11 +1621,11 @@ fn main_frame(req: &Request, frame: FrameRef) -> FrameRef {
 /// ```stderr
 /// L0003 0001 T2 = ADD CV0($x) int(1)
 /// ```
-fn print_opline(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+fn print_opline(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let executing = here.executing();
     match here.standing() {
         Some((req, frame)) if executing => print_opline_ex(req, frame),
-        _ => out::error(b"Not Executing!"),
+        _ => s.out.error(b"Not Executing!"),
     }
     Ret::Success
 }
@@ -1647,13 +1650,14 @@ fn opline_line(dump: &[u8], at: u32) -> Option<&[u8]> {
 }
 
 /// `PHPDBG_PRINT(class)`.
-fn print_class(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
+fn print_class(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     let Some(Param::Str(name)) = params.first() else {
         return Ret::Failure;
     };
     let class = here.request().and_then(|req| read::class_named(req, name));
     let Some(class) = class else {
-        out::error(format!("The class {} could not be found", lossy(name)).as_bytes());
+        s.out
+            .error(format!("The class {} could not be found", lossy(name)).as_bytes());
         return Ret::Success;
     };
     let shape = match class.shape {
@@ -1661,7 +1665,7 @@ fn print_class(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
         read::Shape::AbstractClass => "Abstract Class",
         read::Shape::Class => "Class",
     };
-    out::notice(
+    s.out.notice(
         format!(
             "{} {shape}: {} ({} methods)",
             if class.user { "User" } else { "Internal" },
@@ -1671,13 +1675,13 @@ fn print_class(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
         .as_bytes(),
     );
     for method in &class.methods {
-        print_function(method);
+        print_function(s, method);
     }
     Ret::Success
 }
 
 /// `phpdbg_print_function_helper`.
-fn print_function(code: &read::Code) {
+fn print_function(s: &mut Session, code: &read::Code) {
     if code.user {
         out::dump(&code.dump);
         return;
@@ -1686,11 +1690,11 @@ fn print_function(code: &read::Code) {
         Some(class) => format!("\tInternal {}::{}()", lossy(class), lossy(&code.name)),
         None => format!("\tInternal {}()", lossy(&code.name)),
     };
-    out::writeln(line.as_bytes());
+    s.out.writeln(line.as_bytes());
 }
 
 /// `PHPDBG_PRINT(method)`.
-fn print_method(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
+fn print_method(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     let Some(Param::Method { class, name }) = params.first() else {
         return Ret::Failure;
     };
@@ -1699,7 +1703,7 @@ fn print_method(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     });
     match found {
         read::Named::Code(code) => {
-            out::notice(
+            s.out.notice(
                 format!(
                     "{} Method {} ({} ops)",
                     if code.user { "User" } else { "Internal" },
@@ -1708,9 +1712,9 @@ fn print_method(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
                 )
                 .as_bytes(),
             );
-            print_function(&code);
+            print_function(s, &code);
         }
-        read::Named::NoFunction => out::error(
+        read::Named::NoFunction => s.out.error(
             format!(
                 "The method {}::{} could not be found",
                 lossy(class),
@@ -1719,14 +1723,15 @@ fn print_method(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
             .as_bytes(),
         ),
         read::Named::NoClass => {
-            out::error(format!("The class {} could not be found", lossy(class)).as_bytes());
+            s.out
+                .error(format!("The class {} could not be found", lossy(class)).as_bytes());
         }
     }
     Ret::Success
 }
 
 /// `PHPDBG_PRINT(func)`.
-fn print_func(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
+fn print_func(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     let Some(Param::Str(name)) = params.first() else {
         return Ret::Failure;
     };
@@ -1735,7 +1740,7 @@ fn print_func(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     });
     match found {
         read::Named::Code(code) => {
-            out::notice(
+            s.out.notice(
                 format!(
                     "{} {} {} ({} ops)",
                     if code.user { "User" } else { "Internal" },
@@ -1749,20 +1754,21 @@ fn print_func(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
                 )
                 .as_bytes(),
             );
-            print_function(&code);
+            print_function(s, &code);
         }
         read::Named::NoFunction | read::Named::NoClass => {
-            out::error(format!("The function {} could not be found", lossy(name)).as_bytes());
+            s.out
+                .error(format!("The function {} could not be found", lossy(name)).as_bytes());
         }
     }
     Ret::Success
 }
 
 /// `PHPDBG_PRINT(stack)`.
-fn print_stack(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+fn print_stack(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let executing = here.executing();
     let Some((req, frame)) = here.standing().filter(|_| executing) else {
-        out::error(b"Not Executing!");
+        s.out.error(b"Not Executing!");
         return Ret::Success;
     };
     let Some(code) = read::frame_code(req, frame) else {
@@ -1778,8 +1784,8 @@ fn print_stack(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
         ),
         (None, false) => format!("Stack in {}() ({} ops)", lossy(&code.name), code.ops.len()),
     };
-    out::notice(title.as_bytes());
-    print_function(&code);
+    s.out.notice(title.as_bytes());
+    print_function(s, &code);
     Ret::Success
 }
 
@@ -1810,19 +1816,22 @@ fn breakpoint(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
         .map(|position| (position.file, position.line));
     match params.first() {
         None => match (&s.exec, current) {
-            (Some(_), Some((file, line))) => s.breaks.set_file(Some(file), &[], i64::from(line)),
+            (Some(_), Some((file, line))) => {
+                s.breaks
+                    .set_file(&mut s.out, Some(file), &[], i64::from(line));
+            }
             (Some(_), None) => crate::host::file_break(s, NO_ACTIVE_FILE, 0),
-            (None, _) => out::error(b"Execution context not set!"),
+            (None, _) => s.out.error(b"Execution context not set!"),
         },
         Some(Param::Num(line)) => match &s.exec {
             Some(exec) => {
                 let file = current.map_or_else(|| exec.clone(), |(file, _)| file);
-                s.breaks.set_file(Some(file), &[], *line);
+                s.breaks.set_file(&mut s.out, Some(file), &[], *line);
             }
-            None => out::error(b"Execution context not set!"),
+            None => s.out.error(b"Execution context not set!"),
         },
         Some(Param::File { name, line }) => crate::host::file_break(s, name, *line),
-        Some(Param::Method { class, name }) => s.breaks.set_method(class, name),
+        Some(Param::Method { class, name }) => s.breaks.set_method(&mut s.out, class, name),
         Some(Param::NumericMethod { class, name, num }) => opline_break(
             s,
             here,
@@ -1848,8 +1857,8 @@ fn breakpoint(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
                 opline: opline_of(*line),
             },
         ),
-        Some(Param::Str(name)) => s.breaks.set_symbol(name),
-        Some(Param::Op(name)) => s.breaks.set_opcode(name),
+        Some(Param::Str(name)) => s.breaks.set_symbol(&mut s.out, name),
+        Some(Param::Op(name)) => s.breaks.set_opcode(&mut s.out, name),
         Some(_) => {}
     }
     Ret::Success
@@ -1900,13 +1909,9 @@ fn opline_of(num: i64) -> u32 {
 /// ```
 fn opline_break(s: &mut Session, here: &mut Here<'_>, kind: Kind) {
     let id = s.breaks.next_id();
-    let refused = |message: String| {
-        out::error(message.as_bytes());
-        None
-    };
     let resolved = match &kind {
         Kind::FileOpline { file, opline } => match executing_code(here, file) {
-            Some(last) if last <= *opline => refused(format!(
+            Some(last) if last <= *opline => Err(format!(
                 "There are only {last} oplines in file {} (breaking at opline {opline} impossible)",
                 lossy(file)
             )),
@@ -1916,9 +1921,9 @@ fn opline_break(s: &mut Session, here: &mut Here<'_>, kind: Kind) {
                     function: None,
                     class: None,
                 };
-                Some(Resolution::At(crate::bp::address(op, *opline)))
+                Ok(Resolution::At(crate::bp::address(op, *opline)))
             }
-            None => Some(Resolution::Pending),
+            None => Ok(Resolution::Pending),
         },
         Kind::FunctionOpline { name, opline } => named_opline(here, None, name, *opline),
         Kind::MethodOpline {
@@ -1926,10 +1931,11 @@ fn opline_break(s: &mut Session, here: &mut Here<'_>, kind: Kind) {
             name,
             opline,
         } => named_opline(here, Some(class), name, *opline),
-        _ => None,
+        _ => return,
     };
-    if let Some(found) = resolved {
-        s.breaks.set_named_opline(id, kind, found);
+    match resolved {
+        Ok(found) => s.breaks.set_named_opline(&mut s.out, id, kind, found),
+        Err(refused) => s.out.error(refused.as_bytes()),
     }
 }
 
@@ -1953,14 +1959,14 @@ fn executing_code(here: &mut Here<'_>, name: &[u8]) -> Option<u32> {
 }
 
 /// `phpdbg_resolve_opline_break` for a function or a method: the opline
-/// where the function exists, pending where it does not yet, and none
-/// where it is refused, said so.
+/// where the function exists, pending where it does not yet, and the
+/// error where it is refused.
 fn named_opline(
     here: &mut Here<'_>,
     class: Option<&Vec<u8>>,
     name: &[u8],
     opline: u32,
-) -> Option<Resolution> {
+) -> Result<Resolution, String> {
     let found = match here.request() {
         Some(req) => match class {
             Some(class) => read::method_named(req, class, name),
@@ -1999,40 +2005,39 @@ fn named_opline(
                 function: Some(&code.name),
                 class: code.class.as_deref(),
             };
-            return Some(Resolution::At(crate::bp::address(op, opline)));
+            return Ok(Resolution::At(crate::bp::address(op, opline)));
         }
         read::Named::NoFunction if class.is_some() => format!(
             "Method {} doesn't exist in class {}",
             lossy(name),
             class.map(|c| lossy(c)).unwrap_or_default()
         ),
-        read::Named::NoFunction | read::Named::NoClass => return Some(Resolution::Pending),
+        read::Named::NoFunction | read::Named::NoClass => return Ok(Resolution::Pending),
     };
-    out::error(message.as_bytes());
-    None
+    Err(message)
 }
 
 /// `PHPDBG_BREAK(del)`.
 fn break_del(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
     if let Some(Param::Num(id)) = params.first() {
-        s.breaks.delete(*id);
+        s.breaks.delete(&mut s.out, *id);
     }
     Ret::Success
 }
 
 /// `PHPDBG_COMMAND(back)`: from the frame the commands read.
-fn back(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
+fn back(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     let executing = here.executing();
     let above = here.frame_num();
     let Some((req, frame)) = here.standing().filter(|_| executing) else {
-        out::error(b"Not executing!");
+        s.out.error(b"Not executing!");
         return Ret::Success;
     };
     let limit = match params.first() {
         Some(Param::Num(n)) => usize::try_from(*n).unwrap_or(0),
         _ => 0,
     };
-    crate::info::backtrace(req, frame, above, limit);
+    crate::info::backtrace(&mut s.out, req, frame, above, limit);
     Ret::Success
 }
 
@@ -2174,11 +2179,13 @@ fn back(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 fn frame(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     let num = here.frame_num();
     let Some(Param::Num(asked)) = params.first() else {
-        out::notice(format!("Currently in frame #{num}").as_bytes());
+        s.out
+            .notice(format!("Currently in frame #{num}").as_bytes());
         return Ret::Success;
     };
     if i64::from(num) == *asked {
-        out::notice(format!("Already in frame #{asked}").as_bytes());
+        s.out
+            .notice(format!("Already in frame #{asked}").as_bytes());
         return Ret::Success;
     }
     let Here::Paused {
@@ -2187,7 +2194,7 @@ fn frame(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
         switched,
     } = here
     else {
-        out::error(format!("No frame #{asked}").as_bytes());
+        s.out.error(format!("No frame #{asked}").as_bytes());
         return Ret::Success;
     };
     let stopped = switched.map_or(*frame, |switched| switched.stopped);
@@ -2199,15 +2206,15 @@ fn frame(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
         at.map(|at| (to, at))
     });
     let Some((to, target)) = target else {
-        out::error(format!("No frame #{asked}").as_bytes());
+        s.out.error(format!("No frame #{asked}").as_bytes());
         return Ret::Success;
     };
     *frame = target;
     *switched = (to > 0).then_some(Switched { num: to, stopped });
     let switched = format!("Switched to frame #{to}");
     match crate::info::stackframe(req, target, to) {
-        Some(call) => out::notice(format!("{switched}: {call}").as_bytes()),
-        None => out::notice(switched.as_bytes()),
+        Some(call) => s.out.notice(format!("{switched}: {call}").as_bytes()),
+        None => s.out.notice(switched.as_bytes()),
     }
     if let Some(position) = read::position(req, target) {
         crate::list::code(s, &position.file, position.line);
@@ -2225,7 +2232,7 @@ fn list(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
         (position.file.clone(), position.line)
     } else {
         let Some(exec) = &s.exec else {
-            out::error(b"Not executing, and execution context not set");
+            s.out.error(b"Not executing, and execution context not set");
             return Ret::Success;
         };
         (exec.clone(), 0)
@@ -2288,14 +2295,14 @@ fn list(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 /// prompt>
 /// ```
 fn info_overview(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
-    out::out(b"Execution Context Information\n\n");
-    out::writeln(b"Readline   no");
-    out::writeln(b"Libedit    yes");
+    s.out.out(b"Execution Context Information\n\n");
+    s.out.writeln(b"Readline   no");
+    s.out.writeln(b"Libedit    yes");
     let exec = s
         .exec
         .as_deref()
         .map_or_else(|| String::from("none"), lossy);
-    out::writeln(format!("Exec       {exec}").as_bytes());
+    s.out.writeln(format!("Exec       {exec}").as_bytes());
     let main = if here.compiled() {
         here.request().and_then(|req| {
             let entry = tier::entry(req);
@@ -2306,24 +2313,30 @@ fn info_overview(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     };
     let on = |on: bool| if on { "on" } else { "off" };
     let yes = |yes: bool| if yes { "yes" } else { "no" };
-    out::writeln(format!("Compiled   {}", yes(main.is_some())).as_bytes());
-    out::writeln(format!("Stepping   {}", on(s.stepping)).as_bytes());
-    out::writeln(format!("Quietness  {}", on(s.quiet)).as_bytes());
+    s.out
+        .writeln(format!("Compiled   {}", yes(main.is_some())).as_bytes());
+    s.out
+        .writeln(format!("Stepping   {}", on(s.stepping)).as_bytes());
+    s.out
+        .writeln(format!("Quietness  {}", on(s.quiet)).as_bytes());
     if let Some(main) = &main {
-        out::writeln(format!("Opcodes    {}", main.ops.len()).as_bytes());
-        out::writeln(format!("Variables  {}", main.vars.saturating_sub(1)).as_bytes());
+        s.out
+            .writeln(format!("Opcodes    {}", main.ops.len()).as_bytes());
+        s.out
+            .writeln(format!("Variables  {}", main.vars.saturating_sub(1)).as_bytes());
     }
     let executing = in_execution(s, here);
-    out::writeln(format!("Executing  {}", yes(executing)).as_bytes());
+    s.out
+        .writeln(format!("Executing  {}", yes(executing)).as_bytes());
     if executing {
-        out::writeln(format!("VM Return  {}", s.vmret).as_bytes());
+        s.out.writeln(format!("VM Return  {}", s.vmret).as_bytes());
     }
     let [classes, functions, constants, included] =
         here.request().map_or([0; 4], |req| read::table_sizes(req));
-    out::writeln(format!("Classes    {classes}").as_bytes());
-    out::writeln(format!("Functions  {functions}").as_bytes());
-    out::writeln(format!("Constants  {constants}").as_bytes());
-    out::writeln(format!("Included   {included}").as_bytes());
+    s.out.writeln(format!("Classes    {classes}").as_bytes());
+    s.out.writeln(format!("Functions  {functions}").as_bytes());
+    s.out.writeln(format!("Constants  {constants}").as_bytes());
+    s.out.writeln(format!("Included   {included}").as_bytes());
     Ret::Success
 }
 
@@ -2334,39 +2347,40 @@ fn clean(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     {
         return Ret::Success;
     }
-    out::out(b"Cleaning Execution Environment\n");
+    s.out.out(b"Cleaning Execution Environment\n");
     let [classes, functions, constants, includes] =
         here.request().map_or([0; 4], |req| read::table_sizes(req));
-    out::writeln(format!("Classes    {classes}").as_bytes());
-    out::writeln(format!("Functions  {functions}").as_bytes());
-    out::writeln(format!("Constants  {constants}").as_bytes());
-    out::writeln(format!("Includes   {includes}").as_bytes());
+    s.out.writeln(format!("Classes    {classes}").as_bytes());
+    s.out.writeln(format!("Functions  {functions}").as_bytes());
+    s.out.writeln(format!("Constants  {constants}").as_bytes());
+    s.out.writeln(format!("Includes   {includes}").as_bytes());
     s.stopped = Some(Stop::Clean);
     Ret::Success
 }
 
 /// `PHPDBG_COMMAND(clear)`.
 fn clear(s: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
-    s.breaks.clear();
+    s.breaks.clear(&mut s.out);
     Ret::Success
 }
 
 /// `PHPDBG_COMMAND(help)`, as far as a topic nobody has.
-fn help(_: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
+fn help(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
     if let Some(Param::Str(topic)) = params.first()
         && !ROOT.iter().any(|def| {
             def.name.as_bytes().starts_with(topic.as_slice())
                 || (topic.len() == 1 && def.alias == Some(topic[0]))
         })
     {
-        out::error(format!("No help topic found for {}", lossy(topic)).as_bytes());
+        s.out
+            .error(format!("No help topic found for {}", lossy(topic)).as_bytes());
     }
     Ret::Success
 }
 
 /// `PHPDBG_COMMAND(set)`: a word no row of `set` names.
-fn set(_: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
-    out::error(b"No set command selected!");
+fn set(s: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
+    s.out.error(b"No set command selected!");
     Ret::Success
 }
 
@@ -2397,7 +2411,9 @@ fn set_prompt(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
                 .map(|b| if *b & 0x80 == 0 { *b } else { b'?' })
                 .collect();
         }
-        _ => out::writeln(&[&b"Current prompt: "[..], &s.prompt, b" "].concat()),
+        _ => s
+            .out
+            .writeln(&[&b"Current prompt: "[..], &s.prompt, b" "].concat()),
     }
     Ret::Success
 }
@@ -2425,16 +2441,18 @@ fn set_prompt(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
 /// %s0;31m[Script ended normally]%s
 /// prompt>
 /// ```
-fn set_color(_: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
+fn set_color(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
     let [Param::Str(element), Param::Str(name), ..] = params else {
         return Ret::Failure;
     };
     let Some(colour) = out::find_colour(name) else {
-        out::error(format!("Failed to find the requested color ({})", lossy(name)).as_bytes());
+        s.out
+            .error(format!("Failed to find the requested color ({})", lossy(name)).as_bytes());
         return Ret::Success;
     };
     let Some(element) = out::Element::named(element) else {
-        out::error(format!("Failed to find the requested element ({})", lossy(element)).as_bytes());
+        s.out
+            .error(format!("Failed to find the requested element ({})", lossy(element)).as_bytes());
         return Ret::Success;
     };
     let named = match element {
@@ -2442,8 +2460,9 @@ fn set_color(_: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
         out::Element::Error => "error",
         out::Element::Notice => "notice",
     };
-    out::notice(format!("setting {named} color to {} ({})", colour.name, colour.code).as_bytes());
-    out::set_colour(element, colour);
+    s.out
+        .notice(format!("setting {named} color to {} ({})", colour.name, colour.code).as_bytes());
+    s.out.set_colour(element, colour);
     Ret::Success
 }
 
@@ -2469,21 +2488,23 @@ fn set_color(_: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
 /// [Script ended normally]
 /// prompt>
 /// ```
-fn set_colors(_: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
+fn set_colors(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
     match params.first() {
         None => {
-            let shown = match out::colours() {
+            let shown = match s.out.colours() {
                 out::Colours::On => "on",
                 out::Colours::Off => "off",
             };
-            out::writeln(format!("Colors {shown}").as_bytes());
+            s.out.writeln(format!("Colors {shown}").as_bytes());
         }
-        Some(Param::Num(on)) => out::set_colours(if *on != 0 {
+        Some(Param::Num(on)) => s.out.set_colours(if *on != 0 {
             out::Colours::On
         } else {
             out::Colours::Off
         }),
-        Some(_) => out::error(b"set colors used incorrectly: set colors <on|off>"),
+        Some(_) => s
+            .out
+            .error(b"set colors used incorrectly: set colors <on|off>"),
     }
     Ret::Success
 }
@@ -2538,12 +2559,16 @@ fn set_break(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
     match params {
         [Param::Num(id), Param::Num(on), ..] => s.breaks.enable(*id, *on != 0),
         [Param::Num(id), ..] => match s.breaks.enabled(*id) {
-            Some(on) => out::writeln(
-                format!("Breakpoint #{id} {}", if on { "on" } else { "off" }).as_bytes(),
-            ),
-            None => out::error(format!("Failed to find breakpoint #{id}").as_bytes()),
+            Some(on) => s
+                .out
+                .writeln(format!("Breakpoint #{id} {}", if on { "on" } else { "off" }).as_bytes()),
+            None => s
+                .out
+                .error(format!("Failed to find breakpoint #{id}").as_bytes()),
         },
-        _ => out::error(b"set break used incorrectly: set break [id] <on|off>"),
+        _ => s
+            .out
+            .error(b"set break used incorrectly: set break [id] <on|off>"),
     }
     Ret::Success
 }
@@ -2584,7 +2609,7 @@ fn set_break(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
 /// ```
 fn set_breaks(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
     match params.first() {
-        None => out::writeln(
+        None => s.out.writeln(
             format!(
                 "Breakpoints {}",
                 if s.breaks.disabled { "off" } else { "on" }
@@ -2592,7 +2617,9 @@ fn set_breaks(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
             .as_bytes(),
         ),
         Some(Param::Num(on)) => s.breaks.disabled = *on == 0,
-        Some(_) => out::error(b"set breaks used incorrectly: set breaks <on|off>"),
+        Some(_) => s
+            .out
+            .error(b"set breaks used incorrectly: set breaks <on|off>"),
     }
     Ret::Success
 }
@@ -2645,12 +2672,13 @@ fn set_breaks(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
 fn set_quiet(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
     match params.first() {
         None => {
-            out::writeln(format!("Quietness {}", if s.quiet { "on" } else { "off" }).as_bytes());
+            s.out
+                .writeln(format!("Quietness {}", if s.quiet { "on" } else { "off" }).as_bytes());
         }
         Some(Param::Num(on)) => s.quiet = *on != 0,
-        Some(param) => out::error(
-            format!("Unsupported parameter type ({}) for command", param.kind()).as_bytes(),
-        ),
+        Some(param) => s
+            .out
+            .error(format!("Unsupported parameter type ({}) for command", param.kind()).as_bytes()),
     }
     Ret::Success
 }
@@ -2681,7 +2709,7 @@ fn register(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     };
     let lowered = name.to_ascii_lowercase();
     if s.registered.contains(&lowered) {
-        out::error(
+        s.out.error(
             format!("The requested name ({}) is already in use", lossy(&lowered)).as_bytes(),
         );
         return Ret::Success;
@@ -2697,10 +2725,11 @@ fn register(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
         return Ret::Success;
     };
     if php_ext::call::lookup_function(req, &lowered).is_some() {
-        out::notice(format!("Registered {}", lossy(&lowered)).as_bytes());
+        s.out
+            .notice(format!("Registered {}", lossy(&lowered)).as_bytes());
         s.registered.push(lowered);
     } else {
-        out::error(
+        s.out.error(
             format!(
                 "The requested function ({}) could not be found",
                 lossy(name)
