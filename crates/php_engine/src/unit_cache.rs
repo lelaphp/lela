@@ -313,6 +313,10 @@ pub(crate) struct Files {
     /// `ZCSG(restart_pending)` with `ZCSG(restart_reason)`: the restart
     /// scheduled to replace this epoch, under the first schedule's reason.
     restart: OnceLock<Reason>,
+    /// Each op array of every unit held in this epoch, with its safepoint
+    /// words, kept until the epoch is dropped whatever replaces the file
+    /// (`jit-design.md` §3.1; [`crate::tier::published`]).
+    pub(crate) funcs: crate::tier::published::Funcs,
 }
 
 impl Files {
@@ -328,12 +332,17 @@ impl Files {
             wasted: AtomicU64::new(0),
             exhausted: AtomicBool::new(false),
             restart: OnceLock::new(),
+            funcs: crate::tier::published::Funcs::numbered_from(0),
         }
     }
 
-    /// The files the next epoch starts with: none, under as many names.
+    /// The files the next epoch starts with: none, under as many names,
+    /// their op arrays numbered past this epoch's.
     pub(crate) fn emptied(&self) -> Files {
-        Files::new(self.capacity)
+        Files {
+            funcs: self.funcs.after(),
+            ..Files::new(self.capacity)
+        }
     }
 
     /// A hit on `held`, counted on the epoch and on the file, which was
@@ -854,6 +863,9 @@ impl UnitCache {
         );
         if held.order == order {
             files.used.fetch_add(size, Ordering::Relaxed);
+            if let Ok(unit) = &held.unit {
+                files.funcs.publish(unit);
+            }
         }
         held
     }
