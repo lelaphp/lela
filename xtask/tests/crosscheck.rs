@@ -285,7 +285,6 @@ fn every_default_extension_reads_the_ports_reach_in_both_columns_and_the_floor_h
         Section::Crosscheck,
         Format::Md,
         None,
-        None,
         false,
     )
     .unwrap();

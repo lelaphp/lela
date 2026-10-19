@@ -846,7 +846,7 @@ pub(crate) fn reading(
         u64::from(!uncreated && matches!(runner, Runner::Stale(_))),
     )?;
     // The burndown's number: what met its expectation, over the tests the
-    // subset holds, so a `[[week]]` bar can read one figure.
+    // subset holds, as one figure.
     reading
         .numbers
         .insert("percent".to_owned(), tally.percent().into());

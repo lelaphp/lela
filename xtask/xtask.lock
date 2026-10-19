@@ -110,7 +110,6 @@ manifest::Manifest::rule_checked_by
 manifest::Manifest::scope_path
 manifest::Manifest::variant_of
 manifest::Manifest::variants
-manifest::Measure
 manifest::OneOrMany
 manifest::OneOrMany::adr_cited
 manifest::OneOrMany::adr_field
@@ -135,7 +134,6 @@ manifest::Section
 manifest::Section::name
 manifest::Section::readers
 manifest::Telemetry
-manifest::Week
 manifest::Where
 manifest::scope_matches
 miri::CRATES

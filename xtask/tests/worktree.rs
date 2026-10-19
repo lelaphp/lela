@@ -622,7 +622,6 @@ fn retiring_appends_the_readings_to_the_main_store_and_removes_the_worktree() {
         &root,
         Section::Permits,
         Format::Json,
-        None,
         Some("the-retired-agent"),
         false,
     )
