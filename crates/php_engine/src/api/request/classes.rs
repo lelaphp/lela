@@ -1890,12 +1890,14 @@ impl Request {
     }
 
     /// The home the units it compiles for itself make their constant
-    /// strings in ([`super::memory::RequestStrings`]), beside its
+    /// strings in ([`super::memory::RequestStrings`]), keeping them
+    /// where `home` says, beside its
     /// classes as the compiler asks after one
     /// ([`php_compile::RequestClasses`]), and the arena its compiles
     /// parse into, borrowed apart so all three are handed to one compile.
     pub(crate) fn compiling<R>(
         &mut self,
+        home: super::memory::ConstantHome,
         compile: impl FnOnce(
             &mut dyn Intern,
             php_compile::RequestClasses<'_>,
@@ -1904,11 +1906,17 @@ impl Request {
     ) -> R {
         let (shared, declared, aliases) = (&self.shared, &self.declared, &self.aliases);
         let holds = |name: &[u8]| class_in(shared, declared, aliases, name).is_some();
+        let keeper = match home {
+            super::memory::ConstantHome::Unit => {
+                super::memory::Keeper::Unit(self.unit_strings.compiling_mut())
+            }
+            super::memory::ConstantHome::Request => super::memory::Keeper::Request,
+        };
         let mut strings = super::memory::RequestStrings {
             shared,
             hold: self.shared_hold,
             heap: &mut self.heap,
-            made: self.unit_strings.compiling_mut(),
+            keeper,
         };
         compile(
             &mut strings,

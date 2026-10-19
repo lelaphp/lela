@@ -22,11 +22,13 @@ use super::{Hooks, Request};
 /// the engine's string where the request has taken its [`SharedHold`] and
 /// the engine's table, opcache's buffer, holds the bytes, which costs the
 /// request nothing, and else a string of the request's that the unit owns
-/// and gives up with its op arrays ([`super::unit_strings`]), made once
-/// per bytes within the unit. The empty string and one byte are the
+/// and gives up with its op arrays ([`super::unit_strings`]), one per
+/// time the compile asks, as php's scanner makes one per occurrence and
+/// nothing finds it again. The empty string and one byte are the
 /// process's, as the scanner makes them (`ZVAL_STRINGL_FAST`). So a
 /// constant an `eval` folds away or reads once is gone when the `eval`
-/// returns, and one a variable keeps is the variable's:
+/// returns, one a variable keeps is the variable's, and two written
+/// alike are two strings:
 ///
 /// ```php
 /// $m = memory_get_usage(); eval('strlen("abcdef");'); echo memory_get_usage() - $m, "\n";
@@ -34,6 +36,8 @@ use super::{Hooks, Request};
 /// $m = memory_get_usage(); eval('echo "zzzzzzzzqq";'); echo memory_get_usage() - $m, "\n";
 /// $m = memory_get_usage(); eval('$y = "abcdefgh";'); echo memory_get_usage() - $m, "\n";
 /// $m = memory_get_usage(); eval('$y = "abcdefgh";'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); eval('$a = "xxxxxxxx"; $b = "xxxxxxxx";'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); eval('$c = "yyyyyyyy"; $d = "yyyyyyyy"; $e = "yyyyyyyy";'); echo memory_get_usage() - $m, "\n";
 /// ```
 /// ```expect regime=jit-off
 /// 0
@@ -41,16 +45,43 @@ use super::{Hooks, Request};
 /// zzzzzzzzqq0
 /// 40
 /// 0
+/// 80
+/// 120
 /// ```
 pub(super) struct RequestStrings<'a> {
     pub(super) shared: &'a crate::engine::Shared,
     pub(super) hold: SharedHold,
     pub(super) heap: &'a mut Heap,
-    pub(super) made: &'a mut super::unit_strings::Compiling,
+    pub(super) keeper: Keeper<'a>,
+}
+
+/// Where a compile for one request alone keeps the constant strings it
+/// makes ([`RequestStrings`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConstantHome {
+    /// The unit, which gives them up with its op arrays: an `eval`'s
+    /// and an uncached include's, as opcache leaves them.
+    Unit,
+    /// The request's own table, to its end: the program a host handed
+    /// over as its source, which stands where php reads the file its
+    /// cache interns, the witness lane's snippet among them.
+    Request,
+}
+
+/// [`ConstantHome`] with what the unit's home keeps the strings in.
+pub(super) enum Keeper<'a> {
+    Unit(&'a mut super::unit_strings::Compiling),
+    Request,
 }
 
 impl Intern for RequestStrings<'_> {
     fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
+        let Keeper::Unit(made) = &mut self.keeper else {
+            return match self.shared.existing_interned(bytes) {
+                Some(held) => Ok(held),
+                None => self.heap.intern_marked(bytes, valid_utf8),
+            };
+        };
         if bytes.len() <= 1 {
             return self.heap.intern_marked(bytes, valid_utf8);
         }
@@ -59,14 +90,11 @@ impl Intern for RequestStrings<'_> {
         {
             return Ok(held);
         }
-        if let Some(made) = self.made.find(bytes) {
-            return Ok(made);
-        }
         let s = self.heap.string(bytes)?;
         if valid_utf8 {
             s.mark_valid_utf8();
         }
-        self.made.add(s);
+        made.add(s);
         Ok(s)
     }
 

@@ -37,8 +37,8 @@ use crate::api::abi::{
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{
-    BuildDefs, CoreQuantity, Ending, ExtensionId, HandlePath, Placed, PropertyInfo, Request,
-    TypedIni, placed_of,
+    BuildDefs, ConstantHome, CoreQuantity, Ending, ExtensionId, HandlePath, Placed, PropertyInfo,
+    Request, TypedIni, placed_of,
 };
 use crate::api::values::{ClassId, Value};
 use crate::exec;
@@ -1654,10 +1654,11 @@ impl Shared {
 
     /// One source compiled for one request alone, under the request's
     /// ini and working directory, its constant strings made in the
-    /// request's own memory and owned by the unit, gone with it (design
-    /// §5.2): a source the host handed over, and the string an `eval` hands over
-    /// ([`SourceKind::EVAL`]), as php holds what it compiles for `-r`
-    /// and for `eval`. Such a unit is never published: nothing outside
+    /// request's own memory and kept where `home` says (design §5.2): a
+    /// source the host handed over, its strings the request's to its
+    /// end, and the string an `eval` hands over ([`SourceKind::EVAL`]) or
+    /// an uncached include's bytes, their strings the unit's and gone
+    /// with it, as php holds what it compiles for `-r` and for `eval`. Such a unit is never published: nothing outside
     /// the request reaches it, and it lives as long as the frame serving
     /// it or the functions and classes it declared.
     ///
@@ -1681,6 +1682,7 @@ impl Shared {
         source: &[u8],
         filename: &[u8],
         kind: SourceKind,
+        home: ConstantHome,
     ) -> Result<PublishedUnit, CompileError> {
         let ini = CompileIni {
             precision: req.precision(),
@@ -1697,7 +1699,7 @@ impl Shared {
             extended_info: self.extended_info && !req.compiling_host_string,
             ..self.declared()
         };
-        let unit = req.compiling(|heap, request_classes, arena| {
+        let unit = req.compiling(home, |heap, request_classes, arena| {
             let origin = Origin {
                 filename,
                 cwd: &cwd,
@@ -1717,7 +1719,9 @@ impl Shared {
         };
         req.count_keys_made(unit.runtime_keys.len());
         let unit = req.take_unit(unit);
-        req.hold_compiled(&unit);
+        if home == ConstantHome::Unit {
+            req.hold_compiled(&unit);
+        }
         Ok(unit)
     }
 
@@ -5216,10 +5220,13 @@ impl Engine {
             let script = req
                 .script_name()
                 .map_or_else(|| b"Standard input code".to_vec(), <[u8]>::to_vec);
-            return Some(
-                self.shared
-                    .compile_for(req, source, &script, SourceKind::File),
-            );
+            return Some(self.shared.compile_for(
+                req,
+                source,
+                &script,
+                SourceKind::File,
+                ConstantHome::Request,
+            ));
         }
         let script = req.script_name().map(<[u8]>::to_vec).unwrap_or_default();
         // A bare program is opened as phpdbg's `phpdbg_compile` opens it,

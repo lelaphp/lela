@@ -95,6 +95,7 @@ pub use limits::{Interrupt, TimeLimitSuspended};
 mod linking;
 mod load_file;
 mod memory;
+pub(crate) use memory::ConstantHome;
 pub use memory::{Allocation, AllocationObserverId, ObserveAllocations};
 pub use memory::{ecalloc, efree, emalloc, erealloc};
 mod methods;
