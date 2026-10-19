@@ -14,6 +14,8 @@ use php_unit::decl::{IniDecl, Name};
 
 use crate::policy::Policy;
 
+pub(crate) mod records;
+
 /// The request every program is served by: its file included, so the
 /// file is held by the epoch's cache.
 const MAIN: &str = "<?php include 'body.php';";

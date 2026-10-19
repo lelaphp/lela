@@ -1046,7 +1046,7 @@ fn position(req: &Request, frame: FrameRef) -> OplineIdx {
 
 /// The loop header standing at `at`: a safepoint past the entry whose
 /// opline is `at` and that is no return's own number.
-fn header_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
+pub(crate) fn header_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
     let op = code.oplines.get(at.0 as usize)?;
     code.safepoints
         .iter()
@@ -1080,7 +1080,7 @@ fn unsupported(opcode: Opcode) -> bool {
 }
 
 /// The oplines whose site is a return's.
-fn returns(opcode: Opcode) -> bool {
+pub(crate) fn returns(opcode: Opcode) -> bool {
     matches!(
         opcode,
         Opcode::Return | Opcode::ReturnByRef | Opcode::GeneratorReturn
