@@ -1118,7 +1118,11 @@ fn drop_values(req: &mut Request, generator: PhpObject) {
 /// generator whose body a resumption of `orig` runs until it yields,
 /// returns or throws, following the delegation tree. A throwable the
 /// body left is left pending, as php leaves `EG(exception)` set for the
-/// frame that resumed it; the `Err` is a fatal.
+/// frame that resumed it; the `Err` is a fatal. The body runs at no
+/// trace number and the resumer's is restored after it, as php backs
+/// `EG(jit_trace_num)` up with `EG(current_execute_data)` (`:793-797`,
+/// `:818`, `:865`), so a recording on the resumer's execution does not
+/// shut the generator's out and outlives none of its own.
 pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
     let mut generator = current(req, orig);
     if !has_frame(req, generator) {
@@ -1154,7 +1158,10 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
         if let Some(orig) = through {
             req.link_room(orig, fake_room);
         }
+        let resumer_trace = req.trace_num();
+        req.set_trace_num(crate::tier::TraceNum::NONE);
         let turned = turn(req, generator, through, standing);
+        req.set_trace_num(resumer_trace);
         if let Some(orig) = through {
             req.unlink_room(orig, |g: &ZendGenerator| g.execute_fake.as_deref());
         }

@@ -21,6 +21,7 @@ use super::{Overwrite, Request};
 use crate::api::raising::{Level, Thrown, docref};
 use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, walk};
 use crate::c_number::is_space;
+use crate::engine::Known;
 use crate::exec::TableId;
 
 /// Where a variable php registers came from, php's `PARSE_*` as
@@ -108,18 +109,20 @@ impl Request {
     pub(crate) fn hash_environment(&mut self) -> Result<(), Thrown> {
         if !self.description.argv.is_empty() {
             let mut words = PhpArray::new(self)?;
+            // `ZVAL_STRING`, `zend_string_init`, which makes even a word
+            // of one byte a string of its own.
             for word in self.description.argv.clone() {
-                let word = PhpString::new(self, &word)?;
+                let word = Owner::adopt(self.string_init(&word)?);
                 words.append(self, word.into_value())?;
             }
             let count = i64::try_from(self.description.argv.len()).unwrap_or(i64::MAX);
             let words = words.into_value().hand_on();
-            self.with_name(b"argv", |req, name| {
-                req.symbol_update(TableId::GLOBAL, name, words);
-            })?;
-            self.with_name(b"argc", |req, name| {
-                req.symbol_update(TableId::GLOBAL, name, Value::int(count));
-            })?;
+            // `ZSTR_KNOWN(ZEND_STR_ARGV)` and `ZEND_STR_ARGC`
+            // (`php_build_argv`, `Z/main/php_variables.c:703`).
+            let words_name = self.known(Known::Argv)?;
+            self.symbol_update(TableId::GLOBAL, words_name, words);
+            let count_name = self.known(Known::Argc)?;
+            self.symbol_update(TableId::GLOBAL, count_name, Value::int(count));
         }
         // `php_startup_auto_globals` (`Z/main/php_variables.c:973`): with
         // `auto_globals_jit`, `$_ENV` and `$_REQUEST` are made when named,
@@ -184,12 +187,17 @@ impl Request {
     /// bucket otherwise, a name the table has not added to it; `None` is
     /// `zend_delete_global_variable`, `zend_hash_del_ind`. What stood
     /// there is released after the write, where a destructor is served.
-    /// The session binds `$_SESSION` so (`php_session_track_init`).
+    /// The session binds `$_SESSION` so (`php_session_track_init`), and
+    /// the CLI's `-R` binds `$argn` and `$argi`. The name is keyed as
+    /// `ZSTR_INIT_LITERAL` and `zend_hash_str_update` key it,
+    /// `zend_string_init`, a string of the request's that the table keeps
+    /// where it adds the name and that goes where the name stood already.
     pub fn set_global(&mut self, name: &[u8], value: Option<Owner<Value>>) {
         let table = self.global_table();
         match value {
-            Some(value) => match PhpString::existing_interned(self, name) {
+            Some(value) => match self.string_init(name) {
                 Ok(key) => {
+                    let key = Owner::adopt(key);
                     self.symbol_update_ind(table, *key, value.hand_on(), Overwrite::InPlace);
                     key.give_up(self);
                 }
@@ -220,10 +228,14 @@ impl Request {
         let words = words.into_value().hand_on();
         let count = Value::int(i64::try_from(self.description.argv.len()).unwrap_or(i64::MAX));
         if !self.description.argv.is_empty() {
+            // `zend_hash_update(&EG(symbol_table), ZSTR_KNOWN(ZEND_STR_ARGV))`
+            // and `ZEND_STR_ARGC`'s, through the CV a frame attached.
+            let table = self.global_table();
+            let words_name = self.known(Known::Argv)?;
             let list = Owner::take(self, words);
-            self.set_global(b"argv", Some(list));
-            let number = Owner::take(self, count);
-            self.set_global(b"argc", Some(number));
+            self.symbol_update_ind(table, words_name, list.hand_on(), Overwrite::InPlace);
+            let count_name = self.known(Known::Argc)?;
+            self.symbol_update_ind(table, count_name, count, Overwrite::InPlace);
         }
         if server {
             let held = Owner::take(self, words);
@@ -418,9 +430,8 @@ impl Request {
             AutoGlobal::Files => match self.http_globals.files {
                 Some(files) => {
                     self.addref(&Value::array(files));
-                    self.with_name(global.name(), |req, name| {
-                        req.symbol_update(TableId::GLOBAL, name, Value::array(files));
-                    })?;
+                    let name = self.declared_string(global.name())?;
+                    self.symbol_update(TableId::GLOBAL, name, Value::array(files));
                     return Ok(());
                 }
                 None => PhpArray::new(self)?,
@@ -437,9 +448,11 @@ impl Request {
                 self.release(Value::array(kept));
             }
         }
-        self.with_name(global.name(), |req, name| {
-            req.symbol_update(TableId::GLOBAL, name, value);
-        })
+        // The auto-global's name, `zend_register_auto_global`'s string,
+        // which php interned at startup.
+        let name = self.declared_string(global.name())?;
+        self.symbol_update(TableId::GLOBAL, name, value);
+        Ok(())
     }
 
     /// The request of the web the host described, where it described one.
@@ -593,11 +606,11 @@ impl Request {
         }
         // `sapi_get_request_time`, when the request started.
         let now = self.started().as_secs_f64();
-        let name = PhpString::new(self, b"REQUEST_TIME_FLOAT")?;
-        server.set(self, name.into_key(), Owner::float(now))?;
-        let name = PhpString::new(self, b"REQUEST_TIME")?;
+        let name = self.registered_key(b"REQUEST_TIME_FLOAT")?;
+        server.set(self, name, Owner::float(now))?;
+        let name = self.registered_key(b"REQUEST_TIME")?;
         let whole = self.request_time();
-        server.set(self, name.into_key(), Owner::int(whole))?;
+        server.set(self, name, Owner::int(whole))?;
         // `zend_hash_find_ex_ind` of both, and neither where one is
         // missing: the zval as the table holds it, a reference kept one.
         let found = |req: &mut Request, name: &[u8]| {
@@ -606,9 +619,11 @@ impl Request {
         };
         if !self.description.argv.is_empty() {
             if let (Some(count), Some(words)) = (found(self, b"argc"), found(self, b"argv")) {
-                for (name, value) in [(b"argv".as_slice(), words), (b"argc", count)] {
-                    let name = PhpString::new(self, name)?;
-                    server.set(self, name.into_key(), Owner::take(self, value))?;
+                // `ZSTR_KNOWN(ZEND_STR_ARGV)` and `ZEND_STR_ARGC`, the
+                // engine's own strings, which cost the request nothing.
+                for (name, value) in [(Known::Argv, words), (Known::Argc, count)] {
+                    let name = Key::Str(self.known(name)?);
+                    server.set(self, Owner::take(self, name), Owner::take(self, value))?;
                 }
             }
         } else if self.ini_flag(b"register_argc_argv") {
@@ -696,8 +711,7 @@ impl Request {
             if name.is_empty() || name.iter().any(|b| matches!(b, b' ' | b'.' | b'[')) {
                 continue;
             }
-            let name = PhpString::new(self, &name)?;
-            let name = Key::from_string(self, name);
+            let name = self.registered_key(&name)?;
             let value = match PhpString::new(self, &value) {
                 Ok(value) => value,
                 Err(thrown) => {
@@ -950,6 +964,17 @@ impl Request {
         }
     }
 
+    /// The key `php_register_variable_quick` writes a variable's name
+    /// under: an integer where `ZEND_HANDLE_NUMERIC_STR` reads one, with
+    /// no string made, and otherwise `zend_string_init_interned`'s
+    /// string ([`Request::interned`]), which the array keeps.
+    fn registered_key(&mut self, name: &[u8]) -> Result<Owner<Key>, Thrown> {
+        match php_heap::canonical_int(name) {
+            Some(index) => Ok(Owner::index(index)),
+            None => Ok(self.interned(name)?.into_key()),
+        }
+    }
+
     /// `php_register_variable_ex` into `track`, with `cookie` saying the
     /// track is `$_COOKIE`'s, whose plain name already there keeps the
     /// first value (RFC 2965's more specific path first). `value` is the
@@ -1168,19 +1193,19 @@ impl Request {
             value.give_up(self);
             return Ok(());
         }
-        let name = match PhpString::new(self, index) {
-            Ok(name) => name,
+        // `zend_symtable_str_exists` before the name is made, as
+        // `php_register_variable_ex` asks it.
+        if place.cookie && path.is_empty() && container.find_symtable(index).is_some() {
+            value.give_up(self);
+            return Ok(());
+        }
+        let key = match self.registered_key(index) {
+            Ok(key) => key,
             Err(thrown) => {
                 value.give_up(self);
                 return Err(thrown);
             }
         };
-        if place.cookie && path.is_empty() && container.get(&Key::lookup(*name)).is_some() {
-            name.give_up(self);
-            value.give_up(self);
-            return Ok(());
-        }
-        let key = Key::from_string(self, name);
         container.set(self, key, value)
     }
 

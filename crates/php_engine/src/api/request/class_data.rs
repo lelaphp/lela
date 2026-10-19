@@ -458,18 +458,7 @@ impl Request {
     /// out being none (`zend_compile_class_decl`, and
     /// `zend_do_inheritance_ex` clearing the bit for what it inherits).
     fn holds_no_expression(&self, class: ClassId) -> bool {
-        let written = |expr: &php_unit::decl::ConstExpr| {
-            use php_unit::decl::ConstExpr;
-            matches!(
-                expr,
-                ConstExpr::Null
-                    | ConstExpr::Bool(_)
-                    | ConstExpr::Long { .. }
-                    | ConstExpr::Double(_)
-                    | ConstExpr::Str(_)
-                    | ConstExpr::ImmutableArray(_)
-            )
-        };
+        let written = super::linking::is_literal;
         let constants = self
             .constants_in_order(class)
             .iter()

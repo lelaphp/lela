@@ -396,10 +396,13 @@ impl Request {
     /// the current frame and the entry slot with it, so neither is
     /// saved on its own; the chain of open observed frames goes with the
     /// stack its frames stand on, the swap php's observer makes at the
-    /// switch's notice (`Z/Zend/zend_observer.c:423-424`).
+    /// switch's notice (`Z/Zend/zend_observer.c:423-424`). The trace
+    /// number goes with the error-reporting level and the stack limit,
+    /// which [`Request::on_stack`] leaves the running fiber's.
     pub(crate) fn switch_execution(&mut self, other: &mut crate::fiber::Execution) {
         self.switch_stack(other);
         self.swap_error_reporting(&mut other.error_reporting);
+        self.swap_trace_num(&mut other.trace_num);
         self.swap_stack_limit(&mut other.stack_limit);
         std::mem::swap(&mut self.fibers.active, &mut other.active);
     }
@@ -420,11 +423,11 @@ impl Request {
     /// moved there: that stack is the running one for `f`, the fibers
     /// above it set aside, so the chain runs from it into the stacks
     /// below, and its frames are the ones a [`FrameRef`] names. The
-    /// error-reporting level and the machine stack's limit stay the
-    /// running fiber's, as php moves neither, and no fiber starts,
-    /// suspends or resumes meanwhile, since `f` is served on the
-    /// running fiber's machine stack. `None` where no stack stands
-    /// there.
+    /// error-reporting level, the trace number and the machine stack's
+    /// limit stay the running fiber's, as php moves none of them, and no
+    /// fiber starts, suspends or resumes meanwhile, since `f` is served
+    /// on the running fiber's machine stack. `None` where no stack
+    /// stands there.
     pub(super) fn on_stack<R>(
         &mut self,
         stack: usize,
@@ -457,9 +460,9 @@ impl Request {
     /// `EG(symbol_table)`'s CVs are read where they stand, and the serve
     /// holds one owner of each coroutine's object on the chain, so nothing
     /// `f` does destroys one meanwhile. As in [`Request::on_stack`], the
-    /// error-reporting level and the machine stack's limit stay the
-    /// running fiber's, and no fiber starts, suspends or resumes
-    /// meanwhile. `None` where the coroutine holds no execution.
+    /// error-reporting level, the trace number and the machine stack's
+    /// limit stay the running fiber's, and no fiber starts, suspends or
+    /// resumes meanwhile. `None` where the coroutine holds no execution.
     pub(super) fn on_held_stack<R>(
         &mut self,
         coroutine: crate::fiber::Context,
@@ -536,7 +539,7 @@ impl Request {
         let mut header = exec::Header::of(None, code);
         // `zend_execute`'s `ZEND_CALL_TOP_CODE`.
         header.info.set_top_code(true);
-        exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
+        exec::init_runtime_cache(&mut self.map, &mut self.heap, code, exec::Body::Main)?;
         self.forget_main_statics(code.runtime_cache);
         // `zend_execute` gives the main op array's frame `EG(symbol_table)`
         // and `i_init_code_execute_data` attaches it, so every CV name
@@ -614,7 +617,7 @@ impl Request {
         header.set_returns_to(returns_to.map(|(_, slot)| slot));
         header.set_caller(exec::Caller::Opline(caller));
         let table = self.rebuild_symbol_table(caller);
-        exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
+        exec::init_runtime_cache(&mut self.map, &mut self.heap, code, exec::Body::Main)?;
         self.forget_main_statics(code.runtime_cache);
         header.annex = Some(self.annexes.insert(exec::Annex {
             unit: Some(unit),
@@ -1324,7 +1327,9 @@ impl Request {
         });
         // A closure with a cache of its own reads it in place of its
         // function's (`zend_create_closure_ex`).
-        let cache = self.closure_own_cache(closure).unwrap_or(shape.cache);
+        let own_cache = self.closure_own_cache(closure);
+        let cache = own_cache.unwrap_or(shape.cache);
+        let own_cache = own_cache.is_some();
         // The declared parameters, which is php's `common.num_args` and
         // excludes a variadic: an argument from the variadic's position
         // on is an extra one, where php leaves it past the temporaries
@@ -1353,7 +1358,11 @@ impl Request {
                 }
             }
         }
-        exec::lay_runtime_cache(&mut self.map, cache, shape.cache_size);
+        if own_cache {
+            exec::lay_own_cache(&mut self.map, cache, shape.cache_size);
+        } else {
+            exec::lay_runtime_cache(&mut self.map, &mut self.heap, cache, shape.cache_size)?;
+        }
         crate::observer::call(self, call);
         Ok(exec::Activated {
             frame: call,
@@ -1913,15 +1922,34 @@ impl Request {
         }
     }
 
-    /// A cache of the request's own for a closure, laid down at its
-    /// first call ([`exec::RuntimeCaches::own_cache`]).
-    pub(crate) fn own_cache(&mut self) -> exec::CacheAt {
-        self.map.own_cache()
+    /// A cache of the request's own for a closure, its `cache_size`
+    /// bytes `emalloc`ed as `zend_create_closure_ex` allocates them
+    /// (`Z/Zend/zend_closures.c:813`) and its slots laid down at its
+    /// first call ([`exec::RuntimeCaches::own_cache`]). A closure bound
+    /// to another scope takes sixteen bytes more than one bound to its
+    /// own, the cache of its two calls, and gives them back with it:
+    ///
+    /// ```php
+    /// class A {} function g() {}
+    /// $c = function () { g(); g(); };
+    /// $m = memory_get_usage(); $b = Closure::bind($c, null, A::class); echo memory_get_usage() - $m, " ";
+    /// $m = memory_get_usage(); $d = Closure::bind($c, null, null); echo memory_get_usage() - $m, " ";
+    /// $m = memory_get_usage(); unset($b); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 400 384 -400
+    /// ```
+    ///
+    /// The `Err` is the memory limit's fatal.
+    pub(crate) fn own_cache(&mut self, cache_size: u32) -> Result<exec::CacheAt, Thrown> {
+        let room = self.heap.block(cache_size as usize);
+        let room = self.fatal_of(room)?;
+        Ok(self.map.own_cache(Some(room)))
     }
 
-    /// A closure's own cache given back with it.
+    /// A closure's own cache given back with it, its room to the heap.
     pub(crate) fn give_back_cache(&mut self, at: exec::CacheAt) {
-        self.map.give_back(at);
+        self.map.give_back(&mut self.heap, at);
     }
 
     /// Whether the cache at `at` is laid down, `RUN_TIME_CACHE` not
@@ -1943,8 +1971,10 @@ impl Request {
         at: exec::CacheAt,
         cache_size: u32,
         scope: Option<crate::api::values::ClassId>,
-    ) {
-        exec::lay_runtime_cache(&mut self.map, at, cache_size);
+    ) -> Result<(), Thrown> {
+        let laid = exec::lay_runtime_cache(&mut self.map, &mut self.heap, at, cache_size);
+        self.fatal_of(laid)?;
         self.map.map(at).laid_for = scope;
+        Ok(())
     }
 }

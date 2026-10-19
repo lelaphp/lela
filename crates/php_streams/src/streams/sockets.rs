@@ -43,7 +43,7 @@ use crate::streams::persistent::Persistent;
 /// `sizeof(php_netstream_data_t)` on the pinned 64-bit build: the
 /// socket, `is_blocked` and `timeout_event` and their padding, the
 /// `timeout` timeval and `ownsize` (`Z/main/php_network.h:319-325`).
-const NETSTREAM_DATA_SIZE: usize = 32;
+pub(crate) const NETSTREAM_DATA_SIZE: usize = 32;
 
 const STREAM_OOB: i64 = 1;
 const STREAM_PEEK: i64 = 2;

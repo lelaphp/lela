@@ -458,22 +458,11 @@ pub(crate) fn judge(
     corpus: &Corpus,
 ) -> Result<Tally> {
     let files = corpus.files()?;
-    let (Some(compiler), None) = (compiler(runner), oracle_absent) else {
+    let (Some(compiler), None) = (runner.binary(), oracle_absent) else {
         return Ok(Tally::found(files.len()));
     };
     let dumps = dump::Dumps::new(oracle, registry, compiler, regimes)?;
     Tally::judge(&files, |file| dumps.judge(corpus, file))
-}
-
-/// The binary that takes the engine's side of the dump, and none where
-/// the runner found nothing to measure. A regime's arguments go to it on
-/// its command line as they go to php's, so every regime is one it can
-/// dump under.
-fn compiler(runner: &Runner) -> Option<&Path> {
-    match runner {
-        Runner::Engine(binary) | Runner::Control(binary) => Some(binary),
-        Runner::Linked | Runner::Stale(_) | Runner::Absent(_) => None,
-    }
 }
 
 /// The corpus one file on request is named inside: the pinned tree's,
@@ -508,7 +497,7 @@ fn one(
     if let Some(why) = oracle_absent {
         bail!("{INSTRUMENT}: {why}");
     }
-    let Some(compiler) = compiler(runner) else {
+    let Some(compiler) = runner.binary() else {
         bail!("{INSTRUMENT}: there is nothing to dump the file with; build the engine's binary");
     };
     let dumps = dump::Dumps::new(oracle, registry, compiler, regimes)?;

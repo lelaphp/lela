@@ -14,6 +14,12 @@
 //! the face `php_streams` alone reaches, which no extension can name
 //! (#1959).
 #![forbid(unsafe_code)]
+// Design §5.8: the dispatch threaded by tail calls is measured on nightly.
+#![cfg_attr(
+    dispatch = "tailcall",
+    feature(explicit_tail_calls, rust_preserve_none_cc)
+)]
+#![cfg_attr(dispatch = "tailcall", allow(incomplete_features))]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
     clippy::unwrap_used,

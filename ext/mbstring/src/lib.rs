@@ -160,6 +160,7 @@ pub fn extension() -> Extension {
         .encodings(zend::bind)
         .process_state(|| Ok(regex::initialize()))
         .request_state::<State>()
+        .rinit(rinit)
         .rshutdown(rshutdown);
     for (name, handler) in settings::handlers() {
         builder = builder.on_modify(name, handler);
@@ -170,9 +171,21 @@ pub fn extension() -> Extension {
     builder.build("mbstring")
 }
 
-/// `PHP_RSHUTDOWN_FUNCTION(mbstring)`: the owner of `mb_list_encodings()`'s
-/// array given back, and the regex state's.
+/// `PHP_RINIT_FUNCTION(mbstring)`'s `php_mb_populate_current_detect_order_list`:
+/// the room for the detect order's pointers, 16 bytes for the neutral
+/// language's two, which `memory_get_usage()` counts from the first line.
+fn rinit(req: &mut Request) -> Result<(), Thrown> {
+    let entries = settings(req).detect_order.len();
+    settings::lay_detect_order_room(req, entries)
+}
+
+/// `PHP_RSHUTDOWN_FUNCTION(mbstring)`: the detect order's room freed, the
+/// owner of `mb_list_encodings()`'s array given back, and the regex
+/// state's.
 fn rshutdown(req: &mut Request) {
+    if let Some(room) = req.state::<State>().detect_order_room.take() {
+        room.free(req);
+    }
     if let Some(all) = req.state::<State>().all_encodings.take() {
         all.give_up(req);
     }
@@ -462,11 +475,20 @@ fn mb_detect_order(
         let list = settings(req).detect_order.clone();
         return Ok(Union::A(names(req, &list)?));
     };
+    // `php_mb_parse_encoding_array`'s and `php_mb_parse_encoding_list`'s
+    // `ecalloc`: room for each element or name, and the language's
+    // default list beside them for an `auto`.
+    let given_entries = match &given {
+        Union::A(array) => array.len(),
+        Union::B(names) => names.as_bytes().split(|b| *b == b',').count(),
+    };
     let list = settings::encodings(req, given, 1)?;
     if list.is_empty() {
         return Err(value_error(req, 1, "must specify at least one encoding"));
     }
+    let entries = given_entries + settings(req).default_detect.len();
     settings(req).detect_order = list;
+    settings::lay_detect_order_room(req, entries)?;
     Ok(Union::B(true))
 }
 

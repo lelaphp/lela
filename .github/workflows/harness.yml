@@ -189,6 +189,25 @@ jobs:
           if-no-files-found: warn
           retention-days: 1 # read by `done`'s job, minutes later
 
+  tailcall:
+    name: the threaded dispatch, checked on its dated nightly
+    # The lane that holds `cfg(dispatch = "tailcall")` (#2905), as Mitchell
+    # ruled on #2970 (harness-design.md §7, design §5.8): per commit,
+    # php_engine checked under the cfg on the dated nightly
+    # scripts/ci/tailcall.sh pins, which installs it here where the runner
+    # has not yet. The match loop on the pinned stable toolchain is what
+    # ships; this keeps the threaded variant compiling. It writes no
+    # reading, so its failure is the run's and red-main's, and in no store.
+    # php_engine links no platform library, so none is installed.
+    runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+      - uses: ./.github/actions/workspace
+      - run: scripts/ci/tailcall.sh check
+
   oracle:
     name: the witnesses, the crosscheck and the oracle's tests
     # Skipped while DAX_BUILD_RUNNER is set: the Mac is not online, and a
@@ -333,7 +352,7 @@ jobs:
   # `DRY_RUN=1` prints what it would write.
   red-main:
     name: a red main, filed
-    needs: [regions, per-commit, miri, oracle, done]
+    needs: [regions, per-commit, miri, tailcall, oracle, done]
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
     permissions:

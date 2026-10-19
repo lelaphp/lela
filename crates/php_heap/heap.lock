@@ -104,6 +104,7 @@ Heap::array_update
 Heap::block
 Heap::block_resize
 Heap::call_destructors
+Heap::carve
 Heap::close_resources
 Heap::dup_value
 Heap::fatal_leaving
@@ -121,7 +122,6 @@ Heap::gc_status
 Heap::holds
 Heap::in_memory_limit_error
 Heap::interned
-Heap::interned_find
 Heap::iterator_add
 Heap::iterator_del
 Heap::iterator_lead
@@ -134,7 +134,6 @@ Heap::iterators_advance
 Heap::iterators_carry
 Heap::iterators_lower_pos
 Heap::iterators_update
-Heap::lay_interned_table
 Heap::lend
 Heap::mark_destructed
 Heap::memory_limit

@@ -19,6 +19,11 @@ and `--tree DIR` builds from another checkout of the pinned tag than
       target/oracle/<platform>/<variant>/php, and the last line is the
       platform's table for the pin. On macOS a person lays it at the
       table's path, the prefix, which is root's (`sudo mkdir -p` and `cp`).
+      The darwin-arm64 table names the digest of the pin's `[closure]`, the
+      Homebrew kegs the build is made against, beside its md5 (#2935).
+  scripts/oracle-build.py closure
+      Print that digest: SHA-256 over each keg's `name=version\n` in name
+      order, as xtask's `Closure::digest` makes it and its tests hold.
   scripts/oracle-build.py test <platform> <variant> <phpt>...
       `php -n -m`, then php's own run-tests.php over the named tests of the
       build's tree, with the build as TEST_PHP_EXECUTABLE.
@@ -40,7 +45,8 @@ What makes two runs give the same md5, each neutralised here:
     under `env -i` with only the variables named here, TZ=UTC and LC_ALL=C.
   - Libraries and tools: Linux's come from the base image pinned by digest
     and Ubuntu's archive snapshot SNAPSHOT; macOS's are the maintainer's
-    Homebrew, which a person keeps at the versions the keg links.
+    Homebrew, which a person keeps at the versions `[closure]` records, and
+    the table names that record's digest (#2935).
 """
 
 import argparse
@@ -152,6 +158,7 @@ class Pin:
         try:
             self.oracle = pin["oracle"]
             self.source = pin["source"]
+            self.closure = pin.get("closure", {})
             if variant == "main":
                 self.flags, self.tables = [], {}
             else:
@@ -183,6 +190,13 @@ class Pin:
             ["git", "-C", self.tree(), "log", "-1", "--format=%ct", commit],
             check=True, capture_output=True, text=True,
         ).stdout.strip()
+
+    def closure_digest(self) -> str:
+        """The digest of `[closure]`, as xtask's `Closure::digest` makes it."""
+        if not self.closure:
+            fail("the pin records no [closure], which a darwin-arm64 build is made against and names (#2935)")
+        kegs = "".join(f"{keg}={version}\n" for keg, version in sorted(self.closure.items()))
+        return "sha256:" + hashlib.sha256(kegs.encode()).hexdigest()
 
     def base(self, plat: str) -> str:
         image = self.tables.get(plat, {}).get("image")
@@ -265,14 +279,12 @@ def build(pin: Pin, plat: str, jobs: int, fresh: bool) -> None:
     out.mkdir(parents=True, exist_ok=True)
     print("configure line:", shlex.join(args), file=sys.stderr)
     if plat == "darwin-arm64":
-        image = None
+        made = f'closure = "{pin.closure_digest()}"'
         build_darwin(pin, commit, epoch, args, jobs, out)
     else:
-        image = build_linux(pin, plat, commit, epoch, args, jobs, fresh, out)
+        made = f'image = "{build_linux(pin, plat, commit, epoch, args, jobs, fresh, out)}"'
     digest = md5(out / "php")
-    table = f'path = "{PREFIX}/{pin.variant}/bin/php", md5 = "{digest}"'
-    if image:
-        table += f', image = "{image}"'
+    table = f'path = "{PREFIX}/{pin.variant}/bin/php", md5 = "{digest}", {made}'
     (out / "pin.toml").write_text(f"{plat} = {{ {table} }}\n")
     print(f"{digest}  {out / 'php'}")
     print(f"{plat} = {{ {table} }}")
@@ -377,6 +389,7 @@ def main() -> None:
     parser.add_argument("--tree", type=Path, help="a checkout of the pinned tag, in place of [source]'s path")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("configure-line")
+    sub.add_parser("closure")
     build_command = sub.add_parser("build")
     build_command.add_argument("platform", choices=PLATFORMS)
     build_command.add_argument("variant")
@@ -390,6 +403,8 @@ def main() -> None:
     pin = Pin(opts.pin, getattr(opts, "variant", "main"), opts.tree)
     if opts.command == "configure-line":
         configure_line(pin)
+    elif opts.command == "closure":
+        print(pin.closure_digest())
     elif opts.command == "build":
         build(pin, opts.platform, opts.jobs, opts.fresh)
     else:

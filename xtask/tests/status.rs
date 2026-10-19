@@ -770,6 +770,20 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
         assert_eq!(laid["md5"], built.md5.as_str(), "{name}");
         assert_eq!(laid["path"], built.path.to_str().unwrap(), "{name}");
         assert_eq!(laid["platform"], Platform::this().unwrap().key(), "{name}");
+        let pinned = pin.variant[name].build(Platform::this().unwrap()).unwrap();
+        let closure = pinned.provenance.closure.as_ref().map(ToString::to_string);
+        assert_eq!(laid["closure"], serde_json::json!(closure), "{name}");
+    }
+    // The record's digest, SHA-256 over each `name=version\n` in name
+    // order (#2935), computed here from the kegs the section names.
+    if let Some(kegs) = json["closure"].as_object() {
+        use sha2::Digest as _;
+        let mut sha = sha2::Sha256::new();
+        for (keg, version) in kegs {
+            sha.update(format!("{keg}={}\n", version.as_str().unwrap()));
+        }
+        let hex: Vec<String> = sha.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(json["closure_digest"], format!("sha256:{}", hex.concat()));
     }
     let pinned_here = pin
         .variant
@@ -788,6 +802,17 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
         )),
         "{md}"
     );
+    for (name, laid) in json["variants"].as_object().unwrap() {
+        let row = md
+            .lines()
+            .find(|l| l.starts_with(&format!("| variant {name} |")));
+        let md5 = format!("md5 {}", laid["md5"].as_str().unwrap());
+        let state = match laid["closure"].as_str() {
+            Some(closure) => format!("{md5}, closure {closure} |"),
+            None => format!("{md5} |"),
+        };
+        assert!(row.is_some_and(|row| row.ends_with(&state)), "{md}");
+    }
 }
 
 /// The pin's tag and commit as `[source]` states them (#66), beside its

@@ -13,7 +13,7 @@ use php_link::NameHasher;
 use php_unit::decl::Attribute;
 
 use crate::api::raising::Thrown;
-use crate::api::values::{Owner, PhpArray, PhpString, Value, adopted};
+use crate::api::values::{Emalloc, Owner, PhpArray, PhpString, Value, adopted};
 
 use super::{ExtensionId, Request, Standard};
 
@@ -45,12 +45,28 @@ enum ConstantOwner {
     User(Option<Box<[u8]>>),
 }
 
+/// `sizeof(zend_constant)`: the value, the name, the attributes and the
+/// file, which `zend_register_constant` `pemalloc`s for every constant a
+/// request registers (`zend_hash_add_constant`,
+/// `Z/Zend/zend_constants.c`).
+const ZEND_CONSTANT: usize = 40;
+
 /// One row a request added to `EG(zend_constants)`: its owner, its name
 /// as `zend_register_constant` keys it, its value, and
 /// `zend_constant::attributes`, what a `DECLARE_ATTRIBUTED_CONST` hung
 /// on it, with `CONST_DEPRECATED` decoded from them where it was
 /// registered.
 struct ConstantRow {
+    /// php's `zend_constant` on the request's heap, which the row is in
+    /// the engine's own shape; none where the memory limit refused it,
+    /// whose fatal ends the request.
+    room: Option<Emalloc>,
+    /// `c->name` where the registration made it, a host's or an
+    /// extension's name through `zend_string_init_interned`
+    /// ([`Request::interned`]), released with the row; none for
+    /// `define()`'s and `const`'s, which is the program's own string, or
+    /// where the memory limit refused it.
+    named: Option<Owner<PhpString>>,
     owner: ConstantOwner,
     /// The key `EG(zend_constants)` holds the row under: the name with
     /// its namespace lowered, which every lookup compares against.
@@ -63,8 +79,16 @@ struct ConstantRow {
 }
 
 impl ConstantRow {
-    fn new(owner: ConstantOwner, name: Vec<u8>, value: Value) -> ConstantRow {
+    fn new(
+        room: Option<Emalloc>,
+        named: Option<Owner<PhpString>>,
+        owner: ConstantOwner,
+        name: Vec<u8>,
+        value: Value,
+    ) -> ConstantRow {
         ConstantRow {
+            room,
+            named,
             owner,
             given: name.clone(),
             name,
@@ -159,8 +183,45 @@ impl Request {
     pub(super) fn free_constants(&mut self) {
         self.constants.index.clear();
         for row in std::mem::take(&mut self.constants.rows).into_iter().rev() {
-            self.release(row.value);
+            self.free_row(row);
         }
+    }
+
+    /// A row out of `EG(zend_constants)`: its value given up and its
+    /// `zend_constant` freed, `free_zend_constant`.
+    fn free_row(&mut self, row: ConstantRow) {
+        self.release(row.value);
+        if let Some(room) = row.room {
+            room.free(self);
+        }
+        if let Some(named) = row.named {
+            named.give_up(self);
+        }
+    }
+
+    /// `zend_register_constant`'s `pemalloc(sizeof(zend_constant))` for a
+    /// row the request adds: what `define()` costs the request, and what
+    /// a host's or an extension's constant registered while it runs costs
+    /// beside its name:
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); define('ABCDEF', 1); const GHIJKL = 2; echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 80
+    /// ```
+    fn constant_room(&mut self) -> Option<Emalloc> {
+        Emalloc::new(self, ZEND_CONSTANT).ok()
+    }
+
+    /// The name of a constant a host or an extension registers while the
+    /// request runs, `zend_string_init_interned` ([`Request::interned`]):
+    /// a string of the request's own before its first file compiles, as
+    /// `do_cli` and `cli_register_file_handles` register theirs, and the
+    /// engine's where its table holds the name after. The memory limit's
+    /// fatal is recorded and ends the request.
+    fn constant_name(&mut self, name: &[u8]) -> Option<Owner<PhpString>> {
+        self.interned(name).ok()
     }
 
     /// `PHP_SAPI` as `php_module_startup` registers it: the engine's
@@ -284,13 +345,9 @@ impl Request {
         value: Owner<Value>,
         attributes: Vec<Attribute>,
     ) -> bool {
-        // `zend_register_constant`'s key: the namespace lowered and the
-        // name itself as written, which the row keeps as given.
+        // The row keeps the name as given.
         let given = name;
-        let mut key = given.to_vec();
-        if let Some(slash) = key.iter().rposition(|b| *b == b'\\') {
-            key[..slash].make_ascii_lowercase();
-        }
+        let key = Request::constant_key(given);
         let name = key.as_slice();
         let special = name == HALT_OFFSET
             || name.eq_ignore_ascii_case(b"true")
@@ -307,7 +364,10 @@ impl Request {
             .and_then(crate::exec::FrameAt::code)
             .map(|code| code.filename.0.clone());
         let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
+        let room = self.constant_room();
         self.constants.push(ConstantRow {
+            room,
+            named: None,
             owner: ConstantOwner::User(file),
             name: name.to_vec(),
             given: given.to_vec(),
@@ -364,7 +424,11 @@ impl Request {
     /// `Core`'s group and before what the program defines. A sink: the
     /// row takes the value's owner.
     pub(crate) fn register_host_constant(&mut self, name: &'static [u8], value: Owner<Value>) {
+        let named = self.constant_name(name);
+        let room = self.constant_room();
         self.constants.push(ConstantRow::new(
+            room,
+            named,
             ConstantOwner::Core,
             name.to_vec(),
             value.hand_on(),
@@ -401,7 +465,11 @@ impl Request {
             return false;
         }
         let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
+        let named = self.constant_name(name);
+        let room = self.constant_room();
         self.constants.push(ConstantRow {
+            room,
+            named,
             owner: ConstantOwner::Extension(extension),
             name: name.to_vec(),
             given: name.to_vec(),
@@ -493,7 +561,7 @@ impl Request {
         handles.set_stdin(stdin);
         for name in [&b"STDIN"[..], b"STDOUT", b"STDERR"] {
             if let Some(row) = self.constants.remove(name) {
-                self.release(row.value);
+                self.free_row(row);
             }
         }
         self.register_file_handles(true)
@@ -604,6 +672,17 @@ impl Request {
             let file = self.current_file().filter(|_| name == HALT_OFFSET)?;
             self.constant_named(&halt_offset_key(file))
         })
+    }
+
+    /// `zend_register_constant`'s key for `name`, which every lookup of
+    /// a namespaced constant compares against: the namespace, the bytes
+    /// before the last `\`, lowered, and the name itself as written.
+    pub(crate) fn constant_key(name: &[u8]) -> Vec<u8> {
+        let mut key = name.to_vec();
+        if let Some(slash) = key.iter().rposition(|b| *b == b'\\') {
+            key[..slash].make_ascii_lowercase();
+        }
+        key
     }
 
     pub(crate) fn constant_named(&self, name: &[u8]) -> Option<Value> {

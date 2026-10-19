@@ -16,8 +16,14 @@
 //! neither is a keg. A keg the record names that nothing loads, the trust
 //! store `ca-certificates` among them, is read at `<prefix>/opt/<keg>`,
 //! the link Homebrew points at the version it installed.
+//!
+//! **What a build was made against** is the record's [`ClosureDigest`]: a
+//! variant's macOS build is made against the Homebrew the record names, so
+//! its pin names the digest beside its md5, as a Linux build names its
+//! image (#2935).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::{self, Write as _};
 use std::fs::{self, File};
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
@@ -34,6 +40,21 @@ impl Closure {
     /// Each keg and its version, by name.
     pub(crate) fn kegs(&self) -> &BTreeMap<String, String> {
         &self.0
+    }
+
+    /// The record's digest: SHA-256 over each keg's `name=version\n`, in
+    /// name order, so one closure always gives one digest (#2935).
+    pub(crate) fn digest(&self) -> ClosureDigest {
+        use sha2::Digest as _;
+        let mut sha = sha2::Sha256::new();
+        for (keg, version) in &self.0 {
+            sha.update(format!("{keg}={version}\n"));
+        }
+        let hex = sha.finalize().iter().fold(String::new(), |mut hex, b| {
+            write!(hex, "{b:02x}").ok();
+            hex
+        });
+        ClosureDigest(format!("sha256:{hex}"))
     }
 
     /// The closure `binaries` load against the record: a keg loaded at a
@@ -68,6 +89,18 @@ impl Closure {
             );
         }
         Ok(())
+    }
+}
+
+/// A [`Closure`]'s digest, `sha256:<hex>`: what a variant's macOS build
+/// names of the record it was made against (#2935).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct ClosureDigest(String);
+
+impl fmt::Display for ClosureDigest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -322,6 +355,18 @@ mod tests {
         ("zip", "1.12_1"),
         ("zstd", "1.5.7_1"),
     ];
+
+    #[test]
+    fn the_digest_is_sha256_over_each_name_and_version_in_name_order() {
+        let digest = closure(&RECORD).digest().to_string();
+        // `printf 'ca-certificates=2026-09-25\nzip=1.12_1\nzstd=1.5.7_1\n' | shasum -a 256`
+        let sum = "2193cacfbfb406fc46a4d40757fc61cd4d645c785025a210eeede5bfbf697fd9";
+        assert_eq!(digest, format!("sha256:{sum}"));
+        let mut reversed = RECORD;
+        reversed.reverse();
+        assert_eq!(closure(&reversed).digest().to_string(), digest);
+        assert_ne!(closure(&RECORD[..2]).digest().to_string(), digest);
+    }
 
     #[test]
     fn the_closure_a_binary_loads_holds_where_it_is_the_record() {
