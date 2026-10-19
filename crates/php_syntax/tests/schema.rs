@@ -124,7 +124,7 @@ fn real_grammar_parses_validates_and_generates() {
         "PIPE_GT,",
         "WHITESPACE,",
         "EOF,",
-        "pub fn from_keyword(ident: &str) -> Option<Self>",
+        "pub fn from_keyword(ident: &[u8]) -> Option<Self>",
     ] {
         assert!(
             generated.contains(needle),
@@ -154,14 +154,14 @@ fn the_included_enum_answers_for_the_schema() {
     assert!(!SyntaxKind::CLASS_DECL.is_keyword());
     assert!(!SyntaxKind::CLASS_DECL.is_punct());
     assert_eq!(
-        SyntaxKind::from_keyword("FUNCTION"),
+        SyntaxKind::from_keyword(b"FUNCTION"),
         Some(SyntaxKind::FUNCTION_KW)
     );
     assert_eq!(
-        SyntaxKind::from_keyword("__halt_compiler"),
+        SyntaxKind::from_keyword(b"__halt_compiler"),
         Some(SyntaxKind::HALT_COMPILER_KW)
     );
-    assert_eq!(SyntaxKind::from_keyword("foo"), None);
+    assert_eq!(SyntaxKind::from_keyword(b"foo"), None);
 }
 
 /// The typed nodes `build.rs` wrote and `tree.rs` includes, read back as

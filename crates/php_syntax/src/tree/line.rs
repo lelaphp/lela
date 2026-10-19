@@ -54,8 +54,10 @@ pub(super) struct Site<'a> {
     /// The last significant token consumed: the node's last, or `before`
     /// for a node with no token.
     pub(super) last: Option<usize>,
-    /// The next significant token after the node.
-    pub(super) next: Option<usize>,
+    /// The next token after the node not yet passed over, from which
+    /// [`Site::next`] finds the next significant one where a rule reads
+    /// it.
+    pub(super) raw: usize,
     /// The kind of the innermost open node that opened before this one,
     /// which is where the node stands: a chained parent that opened at
     /// the same token is the same place.
@@ -63,6 +65,12 @@ pub(super) struct Site<'a> {
 }
 
 impl Site<'_> {
+    /// The next significant token after the node, the one php's parser
+    /// reads as its lookahead where a state needs one.
+    fn next(&self) -> Option<usize> {
+        (self.raw..self.tokens.len()).find(|&i| !self.tokens[i].kind.is_trivia())
+    }
+
     /// The line the token's last byte is on, `CG(zend_lineno)` after the
     /// scanner returned it; `1` where there is no token, the scanner's
     /// line before the first (`zend_language_scanner.l:588`).
@@ -365,7 +373,7 @@ pub(super) fn of(kind: SyntaxKind, children: &[Element], site: &Site<'_>) -> u32
         // `for_exprs: %empty` reduces on the lookahead, which is the `;`
         // or `)` after it.
         K::FOR_INIT | K::FOR_COND | K::FOR_STEP => {
-            by_rule_1().unwrap_or_else(|| site.end_line(site.next))
+            by_rule_1().unwrap_or_else(|| site.end_line(site.next()))
         }
         // `ZEND_AST_ARRAY_ELEM` is `(value, key)` (`:1646-1647`), and an
         // elided element is `NULL`, whose list takes the lookahead's line
@@ -389,7 +397,7 @@ pub(super) fn of(kind: SyntaxKind, children: &[Element], site: &Site<'_>) -> u32
                     .and_then(|(_, range, _)| site.raw_at(range.start))
                     .is_some_and(SyntaxKind::is_keyword) =>
         {
-            site.end_line(site.next)
+            site.end_line(site.next())
         }
         // A named argument's label that is a keyword is reduced after the
         // `:` in argument position (#601: `identifier: semi_reserved`).
@@ -399,7 +407,7 @@ pub(super) fn of(kind: SyntaxKind, children: &[Element], site: &Site<'_>) -> u32
         // `zend_ast_create_ex(ZEND_AST_MAGIC_CONST, …)` has no child: its
         // own line, or the lookahead's in argument position (#601 row
         // 13, pin 13).
-        K::MAGIC_CONST_EXPR if site.in_argument_position() => site.end_line(site.next),
+        K::MAGIC_CONST_EXPR if site.in_argument_position() => site.end_line(site.next()),
         // `exit`'s and `clone`'s name zval is made when `T_EXIT
         // ctor_arguments` or `T_CLONE clone_argument_list` reduces, after
         // the `)`, and for the bare and the operand forms after the
@@ -408,11 +416,11 @@ pub(super) fn of(kind: SyntaxKind, children: &[Element], site: &Site<'_>) -> u32
             if node_of(children, K::ARG_LIST).is_some() {
                 site.end_line(site.last)
             } else {
-                site.end_line(site.next)
+                site.end_line(site.next())
             }
         }
         // `'(' T_ELLIPSIS ')'` is `zend_ast_create_fcc()` after the `)`.
-        K::VARIADIC_PLACEHOLDER => site.end_line(site.next),
+        K::VARIADIC_PLACEHOLDER => site.end_line(site.next()),
         K::CALL_EXPR => call(children, site),
         K::SCOPED_ACCESS_EXPR | K::TRAIT_METHOD_REF => class_name(kind, children, site),
         // Rule 1, and the last token the scanner returned where php's
@@ -515,7 +523,7 @@ fn value_before_key(children: &[Element], key_kind: SyntaxKind, site: &Site<'_>)
         .find_map(|(_, child)| child_line(*child, site));
     value
         .or(key.map(|(_, _, line)| line))
-        .unwrap_or_else(|| site.end_line(site.next))
+        .unwrap_or_else(|| site.end_line(site.next()))
 }
 
 /// `ZEND_AST_CALL` over a name takes the name's line; over a

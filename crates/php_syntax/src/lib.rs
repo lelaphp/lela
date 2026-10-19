@@ -139,7 +139,12 @@ impl Parsed<'_> {
 #[must_use]
 pub fn parse<'a>(arena: &'a Arena, source: &'a [u8], options: &Options) -> Parsed<'a> {
     let file = options.file;
-    let mut scratch = arena.take_scratch();
+    let mut lent = arena.scratch();
+    let mut own = None;
+    let scratch = match lent.as_deref_mut() {
+        Some(scratch) => scratch,
+        None => own.insert(arena::Scratch::default()),
+    };
     let lines = LineIndex::new(arena, source);
     let lexed = lexer::lex_with_lines(
         file,
@@ -165,7 +170,7 @@ pub fn parse<'a>(arena: &'a Arena, source: &'a [u8], options: &Options) -> Parse
     let tokens = arena.copy(&lexed.tokens);
     let diagnostics = in_php_order(tokens, lexed.diagnostics, built.diagnostics);
     scratch.tokens = lexed.tokens;
-    arena.put_back(scratch);
+    scratch.trim();
     Parsed {
         source,
         tokens,
@@ -203,6 +208,9 @@ fn in_php_order(
     lexed: Vec<Diagnostic>,
     parsed: Vec<Diagnostic>,
 ) -> Vec<Diagnostic> {
+    if lexed.is_empty() && parsed.is_empty() {
+        return parsed;
+    }
     let token_start = |offset: u32| -> u32 {
         let next = tokens.partition_point(|token| token.offset <= offset);
         let Some(i) = next.checked_sub(1) else {

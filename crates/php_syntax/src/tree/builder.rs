@@ -182,7 +182,7 @@ struct Builder<'s, 'a> {
     /// between chains so a chain costs no allocation of its own.
     chain: Vec<SyntaxKind>,
     nodes: Building<'a>,
-    pools: Pools<'a>,
+    pools: &'s mut Pools,
     missing: Vec<Missing>,
 }
 
@@ -202,16 +202,20 @@ pub fn build<'a>(
 }
 
 /// The builder's stacks that die with the build: the open frames, their
-/// pending children, a forward-parent chain and the event stream once
-/// read. A parse lends them ([`crate::parse`]) and takes them back
-/// empty, so a thread that parses again reuses their room and a small
-/// parse allocates none of them.
+/// pending children, a forward-parent chain, the event stream once
+/// read, the count of each node kind's `Start`s and the lists' pools
+/// before they are copied into the arena. A parse lends them
+/// ([`crate::parse`]) and takes them back empty, so a thread that
+/// parses again reuses their room and a small parse allocates none of
+/// them, and lays down only the counts and the pools its tree has.
 #[derive(Default)]
 pub(crate) struct Stacks {
     pub(crate) events: Vec<Event>,
     pending: Vec<Element>,
     frames: Vec<Frame>,
     chain: Vec<SyntaxKind>,
+    counts: Vec<u32>,
+    pools: Pools,
 }
 
 impl Stacks {
@@ -222,6 +226,7 @@ impl Stacks {
             && self.pending.capacity() * size_of::<Element>() <= bytes
             && self.frames.capacity() * size_of::<Frame>() <= bytes
             && self.chain.capacity() * size_of::<SyntaxKind>() <= bytes
+            && self.pools.within(bytes)
     }
 }
 
@@ -257,7 +262,7 @@ pub(crate) fn build_in<'a>(
         .count();
     let shaped = opened().count() + consumed;
     let bump = arena.bump();
-    let nodes = Building::new(bump, opened());
+    let nodes = Building::new(bump, opened(), std::mem::take(&mut stacks.counts));
     let mut builder = Builder {
         tokens,
         lines,
@@ -269,7 +274,7 @@ pub(crate) fn build_in<'a>(
         frames: lent(&mut stacks.frames, OPEN),
         chain: std::mem::take(&mut stacks.chain),
         nodes,
-        pools: Pools::new(bump),
+        pools: &mut stacks.pools,
         missing: Vec::new(),
     };
     let mut diagnostics = Vec::new();
@@ -288,37 +293,8 @@ pub(crate) fn build_in<'a>(
             } => builder.start(kind),
             Event::Start {
                 kind,
-                forward_parent,
-            } => {
-                // The forward-parent chain: the innermost first, so the
-                // chain is opened in reverse, and each later `Start` is
-                // tombstoned so it is not opened twice.
-                let mut chain = std::mem::take(&mut builder.chain);
-                chain.push(kind);
-                let mut next = forward_parent;
-                let mut at = i;
-                while let Some(delta) = next {
-                    at += delta as usize;
-                    match events.get_mut(at) {
-                        Some(Event::Start {
-                            kind,
-                            forward_parent,
-                        }) if *kind != TOMBSTONE => {
-                            chain.push(*kind);
-                            next = *forward_parent;
-                            *kind = TOMBSTONE;
-                        }
-                        // A link into nothing, or into a tombstone, ends the
-                        // chain; the parser does not emit either.
-                        _ => next = None,
-                    }
-                }
-                for &kind in chain.iter().rev() {
-                    builder.start(kind);
-                }
-                chain.clear();
-                builder.chain = chain;
-            }
+                forward_parent: Some(delta),
+            } => builder.start_chain(&mut events, i, kind, delta),
             Event::Finish => builder.finish(),
             Event::Token { remap } => builder.token(remap),
             Event::Error(diagnostic) => diagnostics.push(*diagnostic),
@@ -329,27 +305,69 @@ pub(crate) fn build_in<'a>(
     while !builder.frames.is_empty() {
         builder.finish();
     }
+    let Builder {
+        elements,
+        mut pending,
+        frames,
+        mut chain,
+        nodes,
+        pools,
+        missing,
+        ..
+    } = builder;
+    let lists = bump.alloc(pools.freeze(bump));
+    let (nodes, counts) = nodes.freeze();
     events.clear();
-    builder.pending.clear();
-    builder.chain.clear();
-    *stacks = Stacks {
-        events,
-        pending: builder.pending,
-        frames: builder.frames,
-        chain: builder.chain,
-    };
+    pending.clear();
+    chain.clear();
+    stacks.events = events;
+    stacks.pending = pending;
+    stacks.frames = frames;
+    stacks.chain = chain;
+    stacks.counts = counts;
     Built {
         tree: Tree {
-            elements: builder.elements.into_bump_slice(),
-            nodes: bump.alloc(builder.nodes.freeze()),
-            lists: bump.alloc(builder.pools.freeze()),
+            elements: elements.into_bump_slice(),
+            nodes,
+            lists,
         },
         diagnostics,
-        missing: builder.missing,
+        missing,
     }
 }
 
 impl Builder<'_, '_> {
+    /// Open a forward-parent chain from the `Start` at `at` in `events`,
+    /// of `kind`, whose parent's `Start` stands `delta` further on: the
+    /// innermost first, so the chain is opened in reverse, and each later
+    /// `Start` is tombstoned so it is not opened twice.
+    fn start_chain(&mut self, events: &mut [Event], mut at: usize, kind: SyntaxKind, delta: u32) {
+        let mut chain = std::mem::take(&mut self.chain);
+        chain.push(kind);
+        let mut next = Some(delta);
+        while let Some(delta) = next {
+            at += delta as usize;
+            match events.get_mut(at) {
+                Some(Event::Start {
+                    kind,
+                    forward_parent,
+                }) if *kind != TOMBSTONE => {
+                    chain.push(*kind);
+                    next = *forward_parent;
+                    *kind = TOMBSTONE;
+                }
+                // A link into nothing, or into a tombstone, ends the
+                // chain; the parser does not emit either.
+                _ => next = None,
+            }
+        }
+        for &kind in chain.iter().rev() {
+            self.start(kind);
+        }
+        chain.clear();
+        self.chain = chain;
+    }
+
     /// Pass over the whitespace and comments before the next significant
     /// token, tracking php's pending doc comment.
     fn skip_insignificant(&mut self) {
@@ -472,14 +490,14 @@ impl Builder<'_, '_> {
             lines: self.lines,
             before: frame.before,
             last: self.prev,
-            next: self.peek(),
+            raw: self.raw,
             enclosing: frame.enclosing,
         };
         let children = &self.pending[frame.children_from..];
         let line = line::of(frame.kind, children, &site);
         let (kind, index) = match resolve(
             &mut self.nodes,
-            &mut self.pools,
+            self.pools,
             frame.kind,
             range,
             line,
@@ -503,14 +521,6 @@ impl Builder<'_, '_> {
         self.elements[frame.at] = element;
         self.pending.truncate(frame.children_from);
         self.pending.push(element);
-    }
-
-    /// The next significant token, the one php's parser reads as its
-    /// lookahead where a state needs one; read without passing over the
-    /// whitespace and comments before it, since a doc comment among them
-    /// is taken only where the grammar's event stands.
-    fn peek(&self) -> Option<usize> {
-        (self.raw..self.tokens.len()).find(|&i| !self.tokens[i].kind.is_trivia())
     }
 
     fn start_of(&self, element: Element) -> u32 {

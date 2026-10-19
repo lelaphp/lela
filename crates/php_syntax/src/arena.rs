@@ -18,7 +18,7 @@
 //! the builder's frames, lent to each parse and taken back empty, so
 //! their room is reused too.
 
-use std::cell::Cell;
+use std::cell::{RefCell, RefMut};
 
 use bumpalo::Bump;
 
@@ -29,10 +29,10 @@ use crate::lexer::Token;
 #[derive(Default)]
 pub struct Arena {
     bump: Bump,
-    /// The stacks [`crate::parse`] lends its stages, taken for a parse
-    /// and put back after it, so a parse nested in another finds none
+    /// The stacks [`crate::parse`] lends its stages, borrowed where they
+    /// stand for a parse, so a parse nested in another finds them taken
     /// and makes its own.
-    scratch: Cell<Scratch>,
+    scratch: RefCell<Scratch>,
 }
 
 impl std::fmt::Debug for Arena {
@@ -59,6 +59,14 @@ impl Scratch {
     /// The most room of one stack an arena keeps between parses: a parse
     /// of a large file pays for its own and gives it up.
     const KEPT: usize = 64 * 1024;
+
+    /// The room kept for the next parse: every stack as it stands where
+    /// each is within what an arena keeps, none where one is not.
+    pub(crate) fn trim(&mut self) {
+        if !self.within(Scratch::KEPT) {
+            *self = Scratch::default();
+        }
+    }
 
     fn within(&self, bytes: usize) -> bool {
         self.tokens.capacity() * size_of::<Token>() <= bytes
@@ -89,17 +97,10 @@ impl Arena {
         }
     }
 
-    /// The parse's stacks, lent until [`Arena::put_back`].
-    pub(crate) fn take_scratch(&self) -> Scratch {
-        self.scratch.take()
-    }
-
-    /// The parse's stacks back, kept where their room is within what an
-    /// arena keeps.
-    pub(crate) fn put_back(&self, scratch: Scratch) {
-        if scratch.within(Scratch::KEPT) {
-            self.scratch.set(scratch);
-        }
+    /// The parse's stacks, borrowed where they stand; none while a parse
+    /// already holds them.
+    pub(crate) fn scratch(&self) -> Option<RefMut<'_, Scratch>> {
+        self.scratch.try_borrow_mut().ok()
     }
 
     /// The bump allocator under the arena, for the builders of this

@@ -487,14 +487,14 @@ impl Lexer<'_> {
 
         self.pos = label_end;
         let word = &self.text[start..label_end];
-        let kind = if MAGIC_CONSTS.iter().any(|m| word.eq_ignore_ascii_case(m)) {
+        // Every magic constant opens with `__`, so a label that does not
+        // is read against the keywords alone.
+        let kind = if word.starts_with(b"__")
+            && MAGIC_CONSTS.iter().any(|m| word.eq_ignore_ascii_case(m))
+        {
             SyntaxKind::MAGIC_CONST
         } else {
-            // Keywords are ASCII; a label with high bytes is never one.
-            std::str::from_utf8(word)
-                .ok()
-                .and_then(SyntaxKind::from_keyword)
-                .unwrap_or(SyntaxKind::IDENT)
+            SyntaxKind::from_keyword(word).unwrap_or(SyntaxKind::IDENT)
         };
         self.emit(kind, start);
     }
