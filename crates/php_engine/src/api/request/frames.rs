@@ -1482,7 +1482,7 @@ impl Request {
             held.copy.free(self);
         }
         if names {
-            self.release_unit_names(annex.unit.as_ref());
+            self.release_unit_strings(annex.unit.as_ref());
         }
     }
 

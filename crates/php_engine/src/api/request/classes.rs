@@ -1889,8 +1889,8 @@ impl Request {
         class_in(&self.shared, &self.declared, &self.aliases, name.bytes())
     }
 
-    /// The request's strings, which the units it compiles for itself
-    /// intern into ([`super::memory::RequestStrings`]), beside its
+    /// The home the units it compiles for itself make their constant
+    /// strings in ([`super::memory::RequestStrings`]), beside its
     /// classes as the compiler asks after one
     /// ([`php_compile::RequestClasses`]), and the arena its compiles
     /// parse into, borrowed apart so all three are handed to one compile.
@@ -1906,7 +1906,9 @@ impl Request {
         let holds = |name: &[u8]| class_in(shared, declared, aliases, name).is_some();
         let mut strings = super::memory::RequestStrings {
             shared,
+            hold: self.shared_hold,
             heap: &mut self.heap,
+            made: self.unit_strings.compiling_mut(),
         };
         compile(
             &mut strings,

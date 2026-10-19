@@ -1653,9 +1653,9 @@ impl Shared {
     }
 
     /// One source compiled for one request alone, under the request's
-    /// ini and working directory, its constant strings interned into the
-    /// request's own memory and gone with it (design §5.2): a source the
-    /// host handed over, and the string an `eval` hands over
+    /// ini and working directory, its constant strings made in the
+    /// request's own memory and owned by the unit, gone with it (design
+    /// §5.2): a source the host handed over, and the string an `eval` hands over
     /// ([`SourceKind::EVAL`]), as php holds what it compiles for `-r`
     /// and for `eval`. Such a unit is never published: nothing outside
     /// the request reaches it, and it lives as long as the frame serving
@@ -1707,9 +1707,18 @@ impl Shared {
                 multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
             };
             compile(source, origin, ini, declared, stack, heap, arena)
-        })?;
+        });
+        let unit = match unit {
+            Ok(unit) => unit,
+            Err(refused) => {
+                req.release_compiled();
+                return Err(refused);
+            }
+        };
         req.count_keys_made(unit.runtime_keys.len());
-        Ok(req.take_unit(unit))
+        let unit = req.take_unit(unit);
+        req.hold_compiled(&unit);
+        Ok(unit)
     }
 
     /// `zend_call_stack_init` on the calling thread, from the startup
@@ -5445,7 +5454,7 @@ impl Engine {
         req.destroy_symbol_table();
         req.destroy_static_vars();
         req.free_default_arguments();
-        req.release_all_unit_names();
+        req.release_all_unit_strings();
         #[cfg(debug_assertions)]
         if self.shared.sense_leaks.armed() {
             req.free_executor_values();

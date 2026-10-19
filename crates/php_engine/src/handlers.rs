@@ -3620,7 +3620,7 @@ fn included(
         req.addref(&value);
         copy.free(req);
         // `destroy_op_array`: its names go with it.
-        req.release_unit_names(Some(&unit));
+        req.release_unit_strings(Some(&unit));
         return answered(req, frame, returns_to, value);
     }
     let callee = req.push_code_frame(unit, frame, returns_to)?;
@@ -12802,13 +12802,13 @@ fn data_value(
 
 /// The value an assignment's inline path takes, one rule for `ASSIGN`'s
 /// `op2` and the `OP_DATA` of `ASSIGN_OBJ` and `ASSIGN_DIM`, as
-/// `zend_assign_to_variable` takes it: a constant that counts no owner
-/// copied, a temporary moved out of its slot and a CV copied with one
-/// more owner, and, under `RETURN_VALUE_USED`, one more owner for the
+/// `zend_assign_to_variable` takes it: a temporary moved out of its
+/// slot, and a CV or a constant copied with one more owner where it
+/// counts one, a constant of a unit compiled for the request alone
+/// among them, and, under `RETURN_VALUE_USED`, one more owner for the
 /// temporary, which takes it too. None, with nothing touched, for a
 /// value nothing wrote, whose warning is the kernel's, a reference,
-/// whose value is what is assigned, a refcounted constant, and a
-/// temporary holding an owner.
+/// whose value is what is assigned, and a temporary holding an owner.
 ///
 /// ```php
 /// $a = str_repeat('a', 3); $o = new stdClass; $d = [];
@@ -12835,10 +12835,7 @@ fn taken_value(
     let z = value.read(slots, code, field);
     let used = op.out_type != OperandKind::Unused;
     let out = exec::temporary_slot(code, op.out) as usize;
-    if !crate::operand::movable(z)
-        || (value.kind() == OperandKind::Const && !crate::operand::owns_nothing(z))
-        || (used && slots.get(out)?.is_refcounted())
-    {
+    if !crate::operand::movable(z) || (used && slots.get(out)?.is_refcounted()) {
         return None;
     }
     if matches!(value.kind(), OperandKind::Tmp | OperandKind::Var) {

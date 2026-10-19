@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 pub use php_heap::{Allocation, AllocationObserverId, ObserveAllocations};
-use php_heap::{Arr, Fatal, Heap, Intern, Ref, SortEntry, ZvalRef};
+use php_heap::{Arr, Fatal, Heap, Intern, Key, Ref, SortEntry, Str, Zval, ZvalRef};
 pub use php_heap::{ecalloc, efree, emalloc, erealloc};
 
 use crate::api::abi::{Beneath, chain};
@@ -16,30 +16,93 @@ use crate::api::values::{Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, a
 
 use super::{Hooks, Request};
 
-/// The home a unit this request alone serves interns its strings into,
-/// php's `zend_new_interned_string_request` (`Z/Zend/zend_string.c:227`):
-/// the engine's table first, `interned_strings_permanent` and what
-/// publication interned, so an `eval`'s constant string that names a
-/// function, a class or a key php interned at startup costs nothing, then the
-/// request's own table ([`Heap`]'s [`Intern`]).
+/// The home a unit this request alone serves makes its constant strings
+/// in, its compile's `zend_new_interned_string` as opcache installs it,
+/// `accel_new_interned_string_for_php` (`Z/ext/opcache/ZendAccelerator.c:577`):
+/// the engine's string where the request has taken its [`SharedHold`] and
+/// the engine's table, opcache's buffer, holds the bytes, which costs the
+/// request nothing, and else a string of the request's that the unit owns
+/// and gives up with its op arrays ([`super::unit_strings`]), made once
+/// per bytes within the unit. The empty string and one byte are the
+/// process's, as the scanner makes them (`ZVAL_STRINGL_FAST`). So a
+/// constant an `eval` folds away or reads once is gone when the `eval`
+/// returns, and one a variable keeps is the variable's:
+///
+/// ```php
+/// $m = memory_get_usage(); eval('strlen("abcdef");'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); eval('strlen("abcdef");'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); eval('echo "zzzzzzzzqq";'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); eval('$y = "abcdefgh";'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); eval('$y = "abcdefgh";'); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect regime=jit-off
+/// 0
+/// 0
+/// zzzzzzzzqq0
+/// 40
+/// 0
+/// ```
 pub(super) struct RequestStrings<'a> {
     pub(super) shared: &'a crate::engine::Shared,
+    pub(super) hold: SharedHold,
     pub(super) heap: &'a mut Heap,
+    pub(super) made: &'a mut super::unit_strings::Compiling,
 }
 
 impl Intern for RequestStrings<'_> {
-    fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<php_heap::Str, Fatal> {
-        match self.shared.existing_interned(bytes) {
-            Some(held) => Ok(held),
-            None => self.heap.intern_marked(bytes, valid_utf8),
+    fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
+        if bytes.len() <= 1 {
+            return self.heap.intern_marked(bytes, valid_utf8);
         }
+        if self.hold == SharedHold::Taken
+            && let Some(held) = self.shared.existing_interned(bytes)
+        {
+            return Ok(held);
+        }
+        if let Some(made) = self.made.find(bytes) {
+            return Ok(made);
+        }
+        let s = self.heap.string(bytes)?;
+        if valid_utf8 {
+            s.mark_valid_utf8();
+        }
+        self.made.add(s);
+        Ok(s)
     }
 
-    fn constant_array(
-        &mut self,
-        entries: &[(php_heap::Key, php_heap::Zval)],
-    ) -> Result<Arr, Fatal> {
-        self.heap.constant_array(entries)
+    /// The constant array lives to the request's end, immutable, where a
+    /// value copied out of it takes no owner, so the strings it is
+    /// written with are the request's own table's ([`Heap`]'s
+    /// [`Intern`]), never the unit's, which go with the unit.
+    fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
+        let unit_owned = |s: Str| !s.is_interned();
+        let any = entries.iter().any(|(key, z)| {
+            matches!(*key, Key::Str(s) if unit_owned(s)) || z.as_str().is_some_and(unit_owned)
+        });
+        if !any {
+            return self.heap.constant_array(entries);
+        }
+        let mut held = Vec::with_capacity(entries.len());
+        for &(key, z) in entries {
+            let key = match key {
+                Key::Str(s) if unit_owned(s) => Key::Str(self.held_to_the_end(s)?),
+                key => key,
+            };
+            let z = match z.as_str() {
+                Some(s) if unit_owned(s) => Zval::string(self.held_to_the_end(s)?),
+                _ => z,
+            };
+            held.push((key, z));
+        }
+        self.heap.constant_array(&held)
+    }
+}
+
+impl RequestStrings<'_> {
+    /// The request's own string for the bytes of `s`, a string the unit
+    /// owns, which lives to the request's end.
+    fn held_to_the_end(&mut self, s: Str) -> Result<Str, Fatal> {
+        self.heap.intern_marked(s.bytes(), s.is_valid_utf8())
     }
 }
 
@@ -62,10 +125,8 @@ pub(crate) enum SharedHold {
 }
 
 impl Request {
-    /// The request's own memory, for the compilation whose unit is this
-    /// request's alone (design §5.2): what a host handed the source for,
-    /// an `eval` and an uncached include, whose constant strings are
-    /// interned here and are gone when the request ends.
+    /// The request's own memory (design §5.2, §5.13), which every value
+    /// of the request's is allocated out of.
     pub(crate) fn heap_mut(&mut self) -> &mut Heap {
         &mut self.heap
     }
@@ -767,10 +828,10 @@ impl Request {
     /// the engine holds already, a name its startup interned
     /// ([`crate::engine::Shared::permanent`]) or a string a published
     /// unit's compilation interned (design §5.2), which costs the request
-    /// nothing, else the one a unit compiled for this request alone holds
-    /// ([`php_heap::Heap`]'s [`Intern`]), made on the first ask where that
-    /// unit made none and the same string at every ask after; the `Err`
-    /// is the memory limit refusing it. Not php's
+    /// nothing, else the request's own ([`php_heap::Heap`]'s [`Intern`]),
+    /// made on the first ask and the same string at every ask after, where
+    /// php reads the string a unit compiled for the request alone owns;
+    /// the `Err` is the memory limit refusing it. Not php's
     /// `zend_string_init_interned`, which hands a string of its own to
     /// its caller.
     ///
