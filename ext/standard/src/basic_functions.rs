@@ -1401,7 +1401,8 @@ fn error_log(
 /// `ini_get_all(?string $extension = null, bool $details = true):
 /// array|false`, php's `PHP_FUNCTION(ini_get_all)`: `EG(ini_directives)`
 /// sorted by `zend_ini_sort_entries`, a case-blind comparison of the
-/// names, each entry as its current value or, with `$details`, as its
+/// names, for the rest of the request ([`Request::ini_sort_entries`]),
+/// before the extension is looked up, each entry as its current value or, with `$details`, as its
 /// `global_value`, `local_value` and `access`; with an extension named
 /// as `module_registry` keys it, lower-case, its own entries alone,
 /// `core` being the one name every entry is walked for. A name no
@@ -1463,13 +1464,8 @@ fn ini_get_all(
     #[php(default = null)] extension: Option<PhpString>,
     #[php(default = true)] details: bool,
 ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
+    req.ini_sort_entries();
     let mut entries = req.ini_entries();
-    entries.sort_by(|a, b| {
-        let (a, b) = (a.decl.name.0.as_ref(), b.decl.name.0.as_ref());
-        a.to_ascii_lowercase()
-            .cmp(&b.to_ascii_lowercase())
-            .then(a.len().cmp(&b.len()))
-    });
     if let Some(name) = extension {
         let name = name.as_bytes();
         let registered = name.iter().all(|c| !c.is_ascii_uppercase());

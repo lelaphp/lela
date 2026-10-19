@@ -807,6 +807,7 @@ request::Request::ini_parse_uquantity
 request::Request::ini_restore
 request::Request::ini_set
 request::Request::ini_set_string
+request::Request::ini_sort_entries
 request::Request::ini_stage
 request::Request::ini_value
 request::Request::input_variables
