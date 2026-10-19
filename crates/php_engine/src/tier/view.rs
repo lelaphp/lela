@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use php_link::LinkedClass;
+use php_unit::decl::Parameter;
 use php_unit::{CacheSlot, MapPtrOffset, OpArray};
 
 use super::published::SEALED;
@@ -218,6 +219,18 @@ impl UnitView {
             return None;
         }
         Some(self.epoch.func(f)?.is_main())
+    }
+
+    /// The parameters the declaration of the op array `f` names lists,
+    /// php's `arg_info`, with their types and whether each is passed by
+    /// reference; none unless [`UnitView::hold`] accepted it, and an
+    /// empty list for a file's own code.
+    #[must_use]
+    pub fn parameters(&self, f: FuncRef) -> Option<&[Parameter]> {
+        if !self.funcs.contains(&f) {
+            return None;
+        }
+        self.epoch.func(f)?.parameters()
     }
 
     /// The linked record of class `c`; none unless

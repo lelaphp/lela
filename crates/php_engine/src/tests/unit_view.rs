@@ -184,6 +184,59 @@ fn a_view_tells_a_files_own_code_from_its_functions() {
     assert_eq!(mains, [Some(true), Some(false)]);
 }
 
+/// A held function's view lists its declaration's parameters, their
+/// types and how each is passed, which a `RECV`'s mask does not carry;
+/// a file's own code lists none.
+#[test]
+fn a_view_lists_a_functions_parameters() {
+    VIEWS.with(|views| views.borrow_mut().clear());
+    let dir = scratch(
+        "parameters",
+        "<?php function typed(int $n, Foo|int $o, array &$a, $b = 1) { return hold_caller(); }\n\
+         hold_caller(); $x = []; typed(1, 2, $x);",
+    );
+    let engine = Engine::cli_builder().extensions(&[viewing()]).build();
+    serve(&engine, &dir, "<?php include __DIR__ . '/inc.php';");
+    std::fs::remove_dir_all(&dir).ok();
+    let views = VIEWS.with(RefCell::take);
+    let listed: Vec<Option<Vec<(String, bool)>>> = views
+        .iter()
+        .map(|(view, f)| {
+            view.parameters(*f).map(|parameters| {
+                parameters
+                    .iter()
+                    .map(|p| (String::from_utf8_lossy(&p.name.0).into_owned(), p.by_ref))
+                    .collect()
+            })
+        })
+        .collect();
+    let named = |name: &str, by_ref| (name.to_owned(), by_ref);
+    assert_eq!(
+        listed,
+        [
+            Some(vec![]),
+            Some(vec![
+                named("n", false),
+                named("o", false),
+                named("a", true),
+                named("b", false)
+            ]),
+        ]
+    );
+    let (typed_view, typed) = &views[1];
+    let masks: Vec<u32> = typed_view
+        .parameters(*typed)
+        .unwrap_or_default()
+        .iter()
+        .map(|p| p.ty.as_ref().map_or(0, php_unit::decl::Type::mask))
+        .collect();
+    assert_eq!(
+        masks,
+        [1 << 4, 1 << 4, 1 << 7, 0],
+        "a class name adds no bit to the mask"
+    );
+}
+
 /// A held function's entry word is zero at publication and one word for
 /// every request of the epoch: the second request's bump finds the
 /// first's. An `eval`'s function reads the sealed word.
