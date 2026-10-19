@@ -13,8 +13,9 @@
 //!
 //! So here the compile's home ([`super::memory::RequestStrings`]) makes
 //! each constant a string of the request's with one owner, the unit's,
-//! one per time the compile asks; an `eval`'s names are made when the
-//! unit is noted. The main op array's constants are given up when its
+//! one per time the compile asks; an `eval`'s file name is made before
+//! its compile, as php makes it, and its other names when the unit is
+//! noted. The main op array's constants are given up when its
 //! execution ends, as `destroy_op_array` frees an `eval`'s at its
 //! return, and the rest, what a declared function, closure, method or
 //! class carries, once nothing holds the unit. A value copied out of a
@@ -54,6 +55,10 @@ pub(crate) struct UnitStrings {
     /// The strings kept to the request's end for names no unit holds,
     /// one owner each ([`Request::kept_string`]).
     kept: HashMap<Box<[u8]>, PhpString, NameHasher>,
+    /// How many living units hold their file's name as [`Held::file`],
+    /// which `by_bytes` has no entry for.
+    files: usize,
+    dead_files: Vec<PhpString>,
     compiling: Compiling,
 }
 
@@ -84,6 +89,12 @@ struct Held {
     names: Vec<PhpString>,
     /// Whether the names were made, which a unit's noting does once.
     named: bool,
+    /// The file's name of an `eval` that declares nothing, the string its
+    /// name was made as before its compile ([`Request::name_unit`]),
+    /// held to the main op array's end with no entry of `by_bytes`, so
+    /// the `eval` hashes nothing for it: a copy of it is found by
+    /// [`UnitStrings::find`] looking over the few that stand.
+    file: Option<PhpString>,
     /// The strings of `main` that stand for a name a declaration is read
     /// by, its variables', which [`UnitStrings::by_bytes`] may point at
     /// until the main op array ends: views, the owners being `main`'s.
@@ -220,7 +231,16 @@ impl UnitStrings {
     /// `bytes`, else the one the request keeps for it to its end
     /// ([`Request::kept_string`]); a view, no owner taken.
     pub(super) fn find(&self, bytes: &[u8]) -> Option<PhpString> {
-        (self.by_bytes.get(bytes).copied().flatten()).or_else(|| self.kept.get(bytes).copied())
+        (self.by_bytes.get(bytes).copied().flatten())
+            .or_else(|| self.kept.get(bytes).copied())
+            .or_else(|| {
+                (self.files > 0)
+                    .then(|| {
+                        (self.units.iter().rev())
+                            .find_map(|held| held.file.filter(|file| file.as_bytes() == bytes))
+                    })
+                    .flatten()
+            })
     }
 
     /// `s`, a string of the request's with one owner, the kept string
@@ -246,6 +266,7 @@ impl UnitStrings {
         let mut dead = std::mem::take(&mut self.dead);
         let mut constants = std::mem::take(&mut self.dead_constants);
         let mut found = std::mem::take(&mut self.dead_found);
+        let mut files = std::mem::take(&mut self.dead_files);
         let spare = &mut self.spare;
         self.units.retain_mut(|held| {
             let alive = held.unit.strong_count() > 0;
@@ -259,6 +280,7 @@ impl UnitStrings {
                 return true;
             }
             dead.append(&mut held.names);
+            files.extend(held.file.take());
             constants.append(&mut held.constants);
             found.append(&mut held.found);
             spare.names.push(std::mem::take(&mut held.names));
@@ -285,6 +307,11 @@ impl UnitStrings {
         }
         found.clear();
         self.dead_found = found;
+        // A file's name `by_bytes` has no entry for is given up with no
+        // name to point anew.
+        self.files = self.files.saturating_sub(files.len());
+        dead.append(&mut files);
+        self.dead_files = files;
         (dead, constants)
     }
 
@@ -306,6 +333,7 @@ impl UnitStrings {
             constants: self.spare.constants.pop().unwrap_or_default(),
             names: self.spare.names.pop().unwrap_or_default(),
             named: false,
+            file: None,
             found_main: self.spare.names.pop().unwrap_or_default(),
             found: self.spare.names.pop().unwrap_or_default(),
         });
@@ -358,15 +386,15 @@ impl Request {
         // ([`Request::hold_unit_names`]).
         let mut seen = HashSet::with_hasher(NameHasher);
         for name in php_compile::op_array_names(unit) {
-            if !seen.insert(name) {
-                continue;
-            }
             let Some(at) = made
                 .iter()
                 .rposition(|z| z.as_str().is_some_and(|s| s.bytes() == name))
             else {
                 continue;
             };
+            if !seen.insert(name) {
+                continue;
+            }
             let Some(s) = made.swap_remove(at).as_str().map(PhpString::of) else {
                 continue;
             };
@@ -414,6 +442,35 @@ impl Request {
         self.unit_strings.compiling.made = made;
     }
 
+    /// The name an `eval`'s string was compiled under
+    /// ([`Request::eval_string`]), made before its compile as
+    /// `zend_make_compiled_string_description` makes it, held by `unit`
+    /// as its file's name from here, one owner given up with the unit's
+    /// other names, as `destroy_op_array` releases `op_array->filename`:
+    /// for a unit that declares nothing, which has no other name, as its
+    /// [`Held::file`], and for one that declares, among its names. A unit
+    /// that holds a name of those bytes already leaves the string to be
+    /// given up now.
+    pub(crate) fn name_unit(&mut self, unit: &PublishedUnit, name: PhpString) {
+        let strings = &mut self.unit_strings;
+        let at = strings.held(unit);
+        let Some(held) = strings.units.get_mut(at).filter(|held| {
+            held.file.is_none()
+                && !(held.names.iter()).any(|held| held.as_bytes() == name.as_bytes())
+        }) else {
+            self.release(Value::string(name));
+            return;
+        };
+        if held.declares {
+            held.names.push(name);
+            point(&mut strings.by_bytes, name);
+        } else {
+            held.file = Some(name);
+            held.named = true;
+            strings.files += 1;
+        }
+    }
+
     /// `zend_compile`'s names for a request-only unit: the file's name
     /// and each name [`php_compile::op_array_names`] lists, made as
     /// strings of the request and held while the unit lives. The `Err`
@@ -433,7 +490,10 @@ impl Request {
                 .units
                 .get(at)
                 .map_or(&[][..], |held| &held.names[..]);
-            let again = if names.len() < SCANNED_NAMES {
+            let file = (self.unit_strings.units.get(at)).and_then(|held| held.file);
+            let again = if file.is_some_and(|file| file.as_bytes() == name) {
+                true
+            } else if names.len() < SCANNED_NAMES {
                 names.iter().any(|made| made.as_bytes() == name)
             } else {
                 if seen.is_empty() {
@@ -470,8 +530,10 @@ impl Request {
         }
         let ended = ended.map(PublishedUnit::as_ptr);
         let (mut dead, mut constants) = self.unit_strings.take(ended);
+        // `zend_string_release`: a string is no possible root, and
+        // destroying one runs nothing.
         for s in dead.drain(..) {
-            self.release(Value::string(s));
+            self.heap.release_string(s.heap());
         }
         for z in constants.drain(..) {
             self.release(Value::of_zval(z));
@@ -489,7 +551,7 @@ impl Request {
         }
         let mut constants = held.compiling.made;
         for held in held.units {
-            for s in held.names {
+            for s in held.names.into_iter().chain(held.file) {
                 self.release(Value::string(s));
             }
             constants.extend(held.main);

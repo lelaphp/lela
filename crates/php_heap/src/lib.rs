@@ -16,6 +16,10 @@
 //! frame is memory the limit bounds as any value is. Nothing here
 //! panics: a slot that is not there reads as `UNDEF`, as php's
 //! uninitialised zval does.
+#![expect(
+    clippy::disallowed_macros,
+    reason = "ADR-0014's lend: one slot per thread for the length of one C call (lend.rs)"
+)]
 #![deny(
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block

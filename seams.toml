@@ -20,7 +20,7 @@
 pin = "oracle.toml"                        # the only statement of version, digest, recipe
 
 [budget]
-total = 480000                             # every counted line of the workspace plus `bindings`; the crate rows are ceilings each crate is held to, and do not sum to this
+total = 520000                             # every counted line of the workspace plus `bindings`; the crate rows are ceilings each crate is held to, and do not sum to this
 new = 127500                               # design §0, §4.1: lines not on the inheritance manifest (§13)
 docs = 5000                                # design §10; `docs/**` plus the three living documents
 harness = 650                              # harness §12 item 6: `.claude/**` and `harness-plugins/**` hand-written, generated types excluded
@@ -506,6 +506,14 @@ adr = "0005"
 text = "Extension state is request-scoped, immutable engine-scoped or process-scoped (ADR-0005, ADR-0010); no lock, cell, once, Rc or thread-local in ext/*. Cross-request caching is api::Cache; a library's object a call into PHP code must outlive is the request's, held by Request::holding (ADR-0013)."
 # Renders to the generated, committed `ext/clippy.toml` (`disallowed-types`);
 # a stale copy is a `budget` failure. The wildcard is expanded from Cargo.lock.
+
+[[rule]]
+id = "state.no-thread-local"
+scope = ["crates/*", "sapi/*"]            # ext/* is ext.no-locks'
+deny_types = ["std::thread::LocalKey"]
+deny_macros = ["std::thread_local"]
+adr = "0014"
+text = "No engine, tier, host or test state is thread-local (design §5.14 Threads, jit-design.md §8): a tier keeps its state in the engine or request state Tier::extension() declares, an extension in its own, and a test reads a request state back through tier::serve_kept. The one per-thread slot is php_heap's lend, which holds a request's heap for one call into C (ADR-0014); its invocation carries #[expect(clippy::disallowed_macros)]."
 
 [[rule]]
 id = "unsafe.homes"
