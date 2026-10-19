@@ -284,11 +284,11 @@ pub(crate) fn index_add_new(mm: &mut Mm, a: Arr, index: i64, z: Zval) -> Result<
 /// destructor, as `list_entry_destructor` is `EG(regular_list)`'s
 /// (`Z/Zend/zend_list.c:174`). `None` for an index that is not there.
 pub(crate) fn index_del(a: Arr, index: i64) -> Option<Zval> {
-    let idx = a.find(Key::Long(index))?;
-    if !a.is_packed() {
+    let pos = a.find(Key::Long(index))?;
+    if let Pos::Bucket(idx) = pos {
         a.unlink(idx);
     }
-    Some(a.del_at(idx, None))
+    Some(a.del_at(pos.index(), None))
 }
 
 /// `pefree` over a [`persistent_array`]: the data, then the header.
@@ -407,6 +407,25 @@ struct Bucket {
     val: Zval,
     h: u64,
     key: Option<Str>,
+}
+
+/// Where an element stands in its table, by the layout the table has:
+/// a packed table's slot or a hash table's bucket, each at its position
+/// below `nNumUsed`. What a lookup answers, so the layout is tested once
+/// and every use of the answer knows which it holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Pos {
+    Slot(u32),
+    Bucket(u32),
+}
+
+impl Pos {
+    /// The position, `idx` in php's `arData[idx]` or `arPacked[idx]`.
+    const fn index(self) -> u32 {
+        match self {
+            Pos::Slot(idx) | Pos::Bucket(idx) => idx,
+        }
+    }
 }
 
 /// An array key after php's normalisation (`ZEND_HANDLE_NUMERIC_STR`
@@ -866,13 +885,16 @@ impl Arr {
         self.header().data.set(unsafe { at.add(hash) }.as_ptr());
     }
 
-    /// The bucket at `idx`, which is below `nTableSize`.
+    /// The bucket at `idx` of a hash table, which is below `nTableSize`.
     fn bucket(self, idx: u32) -> NonNull<Bucket> {
         let data = self.header().data.get().cast::<Bucket>();
         // SAFETY: `idx` is below the table size, so the bucket is inside
         // the data allocation.
         let at = unsafe { data.add(idx as usize) };
-        NonNull::new(at).unwrap_or(NonNull::dangling())
+        // SAFETY: a table with buckets is initialised, and an initialised
+        // table's data pointer is its allocation, never null; only an
+        // uninitialised one's is, and it has no bucket to name.
+        unsafe { NonNull::new_unchecked(at) }
     }
 
     fn read_bucket(self, idx: u32) -> Bucket {
@@ -887,13 +909,16 @@ impl Arr {
         unsafe { self.bucket(idx).write(b) };
     }
 
-    /// The packed slot at `idx`, which is below `nTableSize`.
+    /// The slot at `idx` of a packed table, which is below `nTableSize`.
     fn slot(self, idx: u32) -> NonNull<Zval> {
         let data = self.header().data.get().cast::<Zval>();
         // SAFETY: `idx` is below the table size, so the slot is inside
         // the data allocation.
         let at = unsafe { data.add(idx as usize) };
-        NonNull::new(at).unwrap_or(NonNull::dangling())
+        // SAFETY: a packed table is initialised (`zend_hash_real_init_packed`
+        // lays its data down before it sets the flag), and an initialised
+        // table's data pointer is its allocation, never null.
+        unsafe { NonNull::new_unchecked(at) }
     }
 
     fn read_slot(self, idx: u32) -> Zval {
@@ -1021,32 +1046,95 @@ impl Arr {
         None
     }
 
-    /// The bucket or slot index `key` is at, in either layout.
-    fn find(self, key: Key) -> Option<u32> {
-        if self.is_uninitialized() {
-            return None;
-        }
-        match key {
-            Key::Long(n) if self.is_packed() => {
-                let h = n.cast_unsigned();
-                (h < u64::from(self.num_used()) && !self.read_slot(h as u32).is_undef())
-                    .then_some(h as u32)
+    /// Where `key` stands, `ZEND_HASH_INDEX_FIND`'s shape
+    /// (`Z/Zend/zend_execute.c`, `zend_fetch_dimension_address_inner`)
+    /// and `zend_hash_find`'s: the layout is tested once. A packed table
+    /// is `HASH_FLAG_PACKED`, the bound against `nNumUsed` and the slot's
+    /// `UNDEF` test; an uninitialised table is not marked packed and has
+    /// `nNumUsed` at zero, so the bound alone answers for it under an
+    /// integer key, as php's `uninitialized_bucket` answers for it under
+    /// any. A hash table is its chain walk.
+    ///
+    /// ```php
+    /// $p = [1, 2, 3]; unset($p[1]); $h = ["k" => 1, 7 => 2]; $u = [];
+    /// var_dump(array_key_exists(0, $p), array_key_exists(1, $p), array_key_exists(5, $p), array_key_exists("0", $p), array_key_exists("k", $p), array_key_exists("k", $h), array_key_exists(7, $h), array_key_exists(8, $h), array_key_exists(0, $u), array_key_exists("k", $u));
+    /// unset($p[2], $h["k"], $h[9], $u[0]);
+    /// var_dump($p, $h, $u);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// array(1) {
+    ///   [0]=>
+    ///   int(1)
+    /// }
+    /// array(1) {
+    ///   [7]=>
+    ///   int(2)
+    /// }
+    /// array(0) {
+    /// }
+    /// ```
+    #[inline(always)] // the packed test and its slot, at every element access
+    #[allow(clippy::inline_always)]
+    fn find(self, key: Key) -> Option<Pos> {
+        if let Key::Long(n) = key
+            && self.flags() & PACKED != 0
+        {
+            let h = n.cast_unsigned();
+            if h >= u64::from(self.num_used()) {
+                return None;
             }
-            Key::Long(n) => self.find_long(n.cast_unsigned()),
-            Key::Str(_) if self.is_packed() => None,
-            Key::Str(s) => self.find_str(s),
+            let idx = h as u32;
+            return (!self.read_slot(idx).is_undef()).then_some(Pos::Slot(idx));
+        }
+        self.find_hashed(key)
+    }
+
+    /// [`Arr::find`] past a packed table's integer key, out of line as
+    /// `zend_hash_find` and `zend_hash_index_find` are, so the packed
+    /// test and its slot stay small enough to inline at every element
+    /// access: a string key over a packed table, an uninitialised table,
+    /// and a hash table's chain walk.
+    #[inline(never)]
+    fn find_hashed(self, key: Key) -> Option<Pos> {
+        let flags = self.flags();
+        match key {
+            _ if flags & (UNINITIALIZED | PACKED) != 0 => None,
+            Key::Long(n) => self.find_long(n.cast_unsigned()).map(Pos::Bucket),
+            Key::Str(s) => self.find_str(s).map(Pos::Bucket),
+        }
+    }
+
+    /// The value at `pos` in place: the slot itself, or the bucket's
+    /// `val`, its first field, so `&p->val` is the bucket's address.
+    #[inline]
+    fn value_ptr(self, pos: Pos) -> NonNull<Zval> {
+        match pos {
+            Pos::Slot(idx) => self.slot(idx),
+            Pos::Bucket(idx) => self.bucket(idx).cast::<Zval>(),
         }
     }
 
     /// `zend_hash_find` and `zend_hash_index_find`: the value at `key`,
     /// copied, no owner taken.
     #[must_use]
+    #[inline]
     pub fn get(&self, key: Key) -> Option<Zval> {
-        self.find(key).map(|idx| self.value_at(idx))
+        self.value_ref(key).map(ZvalRef::read)
     }
 
     /// `zend_hash_exists`, `array_key_exists`.
     #[must_use]
+    #[inline]
     pub fn contains(&self, key: Key) -> bool {
         self.find(key).is_some()
     }
@@ -1063,17 +1151,10 @@ impl Arr {
     /// asked for it and the `ASSIGN*` beside it and no further; php
     /// holds `zval *` under the same rule.
     #[must_use]
+    #[inline(always)] // as `find`: a dimension handler's inline path reads through it
+    #[allow(clippy::inline_always)]
     pub fn value_ref(&self, key: Key) -> Option<ZvalRef> {
-        let idx = self.find(key)?;
-        let at = if self.is_packed() {
-            self.slot(idx)
-        } else {
-            // `val` is the bucket's first field and the struct is
-            // `repr(C)`, so this is `&p->val`; the cast itself reads
-            // nothing.
-            self.bucket(idx).cast::<Zval>()
-        };
-        Some(ZvalRef::new(at))
+        Some(ZvalRef::new(self.value_ptr(self.find(key)?)))
     }
 
     /// Where the value at position `pos` stands, php's
@@ -1643,6 +1724,9 @@ impl Iterator for ArrIter {
 enum Write {
     Update,
     Next,
+    /// `HASH_ADD_NEW`: the caller knows the key is not there, so a hash
+    /// table is not searched for it.
+    New,
 }
 
 impl crate::Heap {
@@ -1807,21 +1891,49 @@ impl crate::Heap {
         Ok(self.array_write_long(a, a.next_free(), z, Write::Next)? != Written::Refused)
     }
 
-    /// `zend_hash_lookup` (`Z/Zend/zend_hash.c:1004`), what
+    /// `zend_hash_lookup` and `zend_hash_index_lookup`
+    /// (`Z/Zend/zend_hash.c:1004`, `:1196`), what
     /// `zend_fetch_dimension_address_inner` under `BP_VAR_W` reads: the
     /// entry at `key` in place, laid down holding `null` where the table
     /// has none, which is why an unwritten `$a['k']` is `NULL` after
-    /// `$a['k'][0] = 1`. The array has one owner, which the engine's
-    /// `SEPARATE_ARRAY` made sure of, and the name is one until the next
-    /// write, as [`Arr::value_ref`] says.
-    pub fn array_lookup(&mut self, a: Arr, key: Key) -> Result<Option<ZvalRef>, Fatal> {
-        if a.find(key).is_none() {
-            match key {
-                Key::Long(n) => self.array_write_long(a, n, Zval::null(), Write::Update)?,
-                Key::Str(s) => self.array_write_str(a, s, Zval::null())?,
-            };
+    /// `$a['k'][0] = 1`. One walk: the entry found is the one answered,
+    /// and a key not found is added where it goes with no second search
+    /// (`HASH_LOOKUP`, `HASH_ADD_NEW`). The array has one owner, which
+    /// the engine's `SEPARATE_ARRAY` made sure of, and the name is one
+    /// until the next write, as [`Arr::value_ref`] says.
+    ///
+    /// ```php
+    /// $p = [[1], [2], [3]]; $h = ["k" => [1], 5 => [2]]; $e = [];
+    /// $p[1][] = 4; unset($p[0]); $p[0][] = 5; $p[4][] = 6;
+    /// $h["k"][] = 7; $h[5][] = 8; $h["n"][] = 9; $h[6][] = 10;
+    /// $e[0][] = 11; $f = []; $f["s"][] = 12;
+    /// echo json_encode([$p, $h, $e, $f]), "\n";
+    /// ```
+    /// ```expect
+    /// [{"1":[2,4],"2":[3],"0":[5],"4":[6]},{"k":[1,7],"5":[2,8],"n":[9],"6":[10]},[[11]],{"s":[12]}]
+    /// ```
+    #[inline]
+    pub fn array_lookup(&mut self, a: Arr, key: Key) -> Result<ZvalRef, Fatal> {
+        if let Some(pos) = a.find(key) {
+            return Ok(ZvalRef::new(a.value_ptr(pos)));
         }
-        Ok(a.value_ref(key))
+        self.array_add_null(a, key)
+    }
+
+    /// The miss of [`Heap::array_lookup`]: `null` added under a key the
+    /// table has not got, and where it went.
+    #[inline(never)]
+    fn array_add_null(&mut self, a: Arr, key: Key) -> Result<ZvalRef, Fatal> {
+        let pos = match key {
+            Key::Long(n) => self.array_write_long(a, n, Zval::null(), Write::New)?,
+            Key::Str(s) => Written::Added(append_str(&mut self.tables(), a, s, Zval::null())?),
+        };
+        match pos {
+            Written::Added(pos) => Ok(ZvalRef::new(a.value_ptr(pos))),
+            Written::Replaced(_) | Written::Refused => Err(Fatal::error(
+                "InternalError: zend_hash_lookup added a key and found it already there",
+            )),
+        }
     }
 
     /// `zend_hash_next_index_insert` of `EG(uninitialized_zval)`, what
@@ -1832,10 +1944,12 @@ impl crate::Heap {
     pub fn array_next_entry(&mut self, a: Arr) -> Result<Option<ZvalRef>, Fatal> {
         let index = a.next_free();
         let index = if index == i64::MIN { 0 } else { index };
-        if self.array_write_long(a, index, Zval::null(), Write::Next)? == Written::Refused {
-            return Ok(None);
-        }
-        Ok(a.value_ref(Key::Long(index)))
+        Ok(
+            match self.array_write_long(a, index, Zval::null(), Write::Next)? {
+                Written::Added(pos) => Some(ZvalRef::new(a.value_ptr(pos))),
+                Written::Replaced(_) | Written::Refused => None,
+            },
+        )
     }
 
     /// `_zend_hash_index_add_or_update_i`: what it did, the value it
@@ -1899,13 +2013,13 @@ fn write_long(
             a.packed_to_hash(mm)?;
         } else if h < u64::from(a.table_size()) {
             a.add_to_packed(h as u32, z);
-            return Ok(Written::Added);
+            return Ok(Written::Added(Pos::Slot(h as u32)));
         } else if (h >> 1) < u64::from(a.table_size())
             && (a.table_size() >> 1) < header.num_elements.get()
         {
             a.packed_grow(mm)?;
             a.add_to_packed(h as u32, z);
-            return Ok(Written::Added);
+            return Ok(Written::Added(Pos::Slot(h as u32)));
         } else {
             if a.num_used() >= a.table_size() {
                 header.table_size.set(a.table_size() + a.table_size());
@@ -1916,11 +2030,13 @@ fn write_long(
         if h < u64::from(a.table_size()) {
             a.real_init_packed(mm)?;
             a.add_to_packed(h as u32, z);
-            return Ok(Written::Added);
+            return Ok(Written::Added(Pos::Slot(h as u32)));
         }
         a.real_init_mixed(mm)?;
     } else {
-        if let Some(idx) = a.find_long(h) {
+        if write != Write::New
+            && let Some(idx) = a.find_long(h)
+        {
             if write == Write::Next {
                 return Ok(Written::Refused);
             }
@@ -1954,7 +2070,7 @@ fn write_long(
         });
     }
     header.num_elements.set(header.num_elements.get() + 1);
-    Ok(Written::Added)
+    Ok(Written::Added(Pos::Bucket(idx)))
 }
 
 /// `_zend_hash_add_or_update_i` with `HASH_UPDATE` over whichever
@@ -1968,21 +2084,19 @@ fn write_str(mm: &mut dyn Allocate, a: Arr, key: Str, z: Zval) -> Result<Written
     {
         return Ok(Written::Replaced(a.replace_at(idx, z)));
     }
-    append_str(mm, a, key, z)?;
-    Ok(Written::Added)
+    Ok(Written::Added(append_str(mm, a, key, z)?))
 }
 
 /// `_zend_hash_add_or_update_i` with `HASH_ADD_NEW`, past the lookup a
 /// release build leaves out: a bucket appended under `key` and linked at
 /// the head of its chain, so a table that held the key already holds it
 /// twice and a lookup finds this one, as php's does.
-fn append_str(mm: &mut dyn Allocate, a: Arr, key: Str, z: Zval) -> Result<(), Fatal> {
+fn append_str(mm: &mut dyn Allocate, a: Arr, key: Str, z: Zval) -> Result<Pos, Fatal> {
     a.make_room_for_str(mm)?;
     if !key.is_interned() {
         key.addref();
     }
-    a.place_str(key, z);
-    Ok(())
+    Ok(a.place_str(key, z))
 }
 
 impl Arr {
@@ -2026,8 +2140,8 @@ impl Arr {
 
     /// The bucket of `key` and `z` appended to a table with room for it
     /// and linked at the head of its chain. The bucket takes the owner of
-    /// `key` it is handed.
-    fn place_str(self, key: Str, z: Zval) {
+    /// `key` it is handed. Where it went is answered.
+    fn place_str(self, key: Str, z: Zval) -> Pos {
         let h = key.hash();
         let header = self.header();
         if !key.is_interned() {
@@ -2045,6 +2159,7 @@ impl Arr {
             },
         );
         self.link(idx);
+        Pos::Bucket(idx)
     }
 }
 
@@ -2053,16 +2168,16 @@ impl crate::Heap {
     /// gone, its value released through `hooks` and its string key given
     /// up; `false` for a key that is not there.
     pub fn array_del(hooks: &mut dyn HeapHooks, a: Arr, key: Key) -> bool {
-        let Some(idx) = a.find(key) else {
+        let Some(pos) = a.find(key) else {
             return false;
         };
-        if !a.is_packed() {
+        if let Pos::Bucket(idx) = pos {
             a.unlink(idx);
             if let Some(k) = a.read_bucket(idx).key {
                 hooks.heap().release_string(k);
             }
         }
-        let old = a.del_at(idx, Some(&mut hooks.heap().iterators));
+        let old = a.del_at(pos.index(), Some(&mut hooks.heap().iterators));
         Heap::release(hooks, old);
         true
     }
@@ -2209,7 +2324,9 @@ impl crate::Heap {
     /// php's add admits.
     pub fn array_add_new(&mut self, a: Arr, key: Key, z: Zval) -> Result<(), Fatal> {
         match key {
-            Key::Str(name) => append_str(&mut self.tables(), a, name, z)?,
+            Key::Str(name) => {
+                append_str(&mut self.tables(), a, name, z)?;
+            }
             Key::Long(n) => {
                 self.array_write_long(a, n, z, Write::Update)?;
             }
@@ -2606,12 +2723,13 @@ impl Arr {
     }
 }
 
-/// What a write did: the element added, an element's value replaced and
-/// handed back for the release that may reach user code, or the
-/// next-index insert refused because `ZEND_LONG_MAX` is taken.
+/// What a write did: the element added, and where it went, an
+/// element's value replaced and handed back for the release that may
+/// reach user code, or the next-index insert refused because
+/// `ZEND_LONG_MAX` is taken.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Written {
-    Added,
+    Added(Pos),
     Replaced(Zval),
     Refused,
 }
