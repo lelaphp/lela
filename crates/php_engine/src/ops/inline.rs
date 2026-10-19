@@ -148,7 +148,19 @@ fn value_number(v: &Value) -> Option<Number> {
         .or_else(|| v.as_float().map(Number::Double))
 }
 
-/// The value a number is.
+/// The value a number is, which a kernel hands back for what a rule
+/// computed over the numbers it converted.
+///
+/// ```php
+/// $six = "6"; $seven = "7.0";
+/// var_dump($six / 3, $seven / 2, $six / "4", 9 / $six);
+/// ```
+/// ```expect
+/// int(2)
+/// float(3.5)
+/// float(1.5)
+/// float(1.5)
+/// ```
 #[inline(always)] // as `number`
 #[allow(clippy::inline_always)]
 pub(crate) fn number_value(n: Number) -> Value {
@@ -338,30 +350,16 @@ fn binary_numbers(op: Binary, a: Number, b: Number) -> Option<Number> {
     }
 }
 
-/// A binary opcode's inline pair over two zvals as they stand, which is
-/// also `ZEND_PRE_INC`'s and `ZEND_PRE_DEC`'s, `+ 1` and `- 1` with the
-/// same overflow (`fast_long_increment_function`), and a compound
-/// assignment's: what `op` comes to over two numbers, by its rule
-/// ([`Binary`]), and None for everything else.
+/// A binary opcode's inline pair over two zvals as they stand, and a
+/// compound assignment's: what `op` comes to over two numbers, by its
+/// rule ([`Binary`]), and None for everything else.
 ///
 /// ```php
 /// $max = PHP_INT_MAX; $one = 1; $half = 1.5; $two = -2;
-/// var_dump($max + $one, $max - $two, $max * $two, $half + $one, $one - $half, $half * $half, $one + $two);
-/// $i = $max; $i++; $j = -$max - 1; --$j; $d = 0.5; ++$d;
-/// var_dump($i, $j, $d);
-/// var_dump($max / $two, $half / $two, $max % $two, $two << $one, $two >> $one, $two | $one, $two ^ $one, $two & $one);
+/// var_dump($max + $one, $max / $two, $half / $two, $max % $two, $two << $one, $two >> $one, $two | $one, $two ^ $one, $two & $one);
 /// ```
 /// ```expect
 /// float(9.223372036854776E+18)
-/// float(9.223372036854776E+18)
-/// float(-1.8446744073709552E+19)
-/// float(2.5)
-/// float(-0.5)
-/// float(2.25)
-/// int(-1)
-/// float(9.223372036854776E+18)
-/// float(-9.223372036854776E+18)
-/// float(1.5)
 /// float(-4.611686018427388E+18)
 /// float(-0.75)
 /// int(1)
@@ -384,6 +382,27 @@ pub(crate) fn binary(op: Binary, a: Zval, b: Zval) -> Option<Zval> {
 /// the inline pair `ZEND_ADD`, `ZEND_SUB` and `ZEND_MUL` are
 /// monomorphised over (design §5.8), and the step of `ZEND_PRE_INC`
 /// and its kin, read with the operator known where it is written.
+/// `ZEND_PRE_INC`'s and `ZEND_PRE_DEC`'s step is `+ 1` and `- 1` with the
+/// same overflow (`fast_long_increment_function`).
+///
+/// ```php
+/// $max = PHP_INT_MAX; $one = 1; $half = 1.5; $two = -2;
+/// var_dump($max + $one, $max - $two, $max * $two, $half + $one, $one - $half, $half * $half, $one + $two);
+/// $i = $max; $i++; $j = -$max - 1; --$j; $d = 0.5; ++$d;
+/// var_dump($i, $j, $d);
+/// ```
+/// ```expect
+/// float(9.223372036854776E+18)
+/// float(9.223372036854776E+18)
+/// float(-1.8446744073709552E+19)
+/// float(2.5)
+/// float(-0.5)
+/// float(2.25)
+/// int(-1)
+/// float(9.223372036854776E+18)
+/// float(-9.223372036854776E+18)
+/// float(1.5)
+/// ```
 #[inline(always)] // as `computed`
 #[allow(clippy::inline_always)]
 pub(crate) fn arith(op: Arith, a: Zval, b: Zval) -> Option<Zval> {
@@ -474,6 +493,20 @@ pub(crate) fn arith_numbers(op: Arith, a: Number, b: Number) -> Value {
 /// type `kind`, in php's `IS_*` numbering, is one of the `MAY_BE_*` bits
 /// in `mask`, `(extended_value >> Z_TYPE_P(value)) & 1`. What
 /// [`crate::ops::type_check`] reads of the value it dereferenced.
+///
+/// ```php
+/// $s = "x"; $r = &$s; $i = 1; $q = &$i; $a = [1]; $p = &$a;
+/// var_dump(is_string($r), is_scalar($r), is_int($q), is_float($q), is_array($p), is_null($p), is_bool($q));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// ```
 #[inline(always)] // a shift and a test, on an inline path
 #[allow(clippy::inline_always)]
 pub(crate) fn has_type(mask: u32, kind: ZvalType) -> bool {
