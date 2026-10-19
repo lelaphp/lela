@@ -183,6 +183,12 @@ pub(crate) struct Arena {
     /// shares, so what holds an epoch reads a class of the engine's as it
     /// reads one the epoch published ([`Arena::linked_class`]).
     natives: Arc<[LinkedClass<ClassId>]>,
+    /// The compiled tier's value for the epoch, its trace table
+    /// (`jit-design.md` §4.5): made by the tier the first time it asks,
+    /// read by every request of the epoch with nothing taken, and
+    /// dropped with the epoch, so a restart's epoch starts with none
+    /// ([`crate::tier::epoch_state`]).
+    pub(crate) tier: OnceLock<Box<dyn std::any::Any + Send + Sync>>,
     /// The engine's interned strings, which a held unit's constants and
     /// names and the engine's classes' names are: kept by the epoch so
     /// what holds it reads them after the engine that made them is
@@ -260,6 +266,7 @@ impl Arena {
             inheritance: crate::inheritance_cache::InheritanceCache::default(),
             files,
             natives,
+            tier: OnceLock::new(),
             interned,
         }
     }
@@ -541,6 +548,26 @@ mod tests {
         );
         assert_eq!(second.reserve_class(), Some(ClassId(11)));
         assert!(Arc::ptr_eq(&second, &epochs.enter(|_| false)));
+    }
+
+    /// The tier's value is the epoch's (`jit-design.md` §4.5): what the
+    /// tier made for one epoch every request of it reads, a restart's
+    /// epoch starts with none, and the old value goes with the old epoch.
+    #[test]
+    fn a_restarts_epoch_starts_with_no_tier_value() {
+        let epochs = Epochs::of(Arena::past(0, 0, crate::unit_cache::Files::new(16)));
+        let first = epochs.enter(|_| false);
+        let made = first.tier.get_or_init(|| Box::new(Arc::new(7_u32)));
+        let held = made.downcast_ref::<Arc<u32>>().map(Arc::downgrade);
+        assert!(Arc::ptr_eq(&first, &epochs.enter(|_| false)));
+        let second = epochs.enter(|_| true);
+        assert!(second.tier.get().is_none(), "a new epoch's has none");
+        assert!(held.as_ref().is_some_and(|held| held.upgrade().is_some()));
+        drop(first);
+        assert!(
+            held.is_some_and(|held| held.upgrade().is_none()),
+            "gone with its epoch"
+        );
     }
 
     #[test]
