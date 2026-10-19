@@ -696,6 +696,24 @@ impl Heap {
         true
     }
 
+    /// One owner of `z` given up as `zval_ptr_dtor_nogc` gives it up where
+    /// another owner stands: `GC_DELREF` and nothing after it, which is
+    /// all php's `FREE_OP` does to a temporary whose count stays above
+    /// zero, since a temporary is offered to no collector. Whether it
+    /// held; where it does not, the owner was the last, nothing is
+    /// touched, and the owner is the caller's to give up through
+    /// [`Heap::release_nogc`].
+    #[must_use]
+    #[inline]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn release_nogc_kept(z: Zval) -> bool {
+        let Some(header) = counted_header(z).filter(|header| header.refcount() > 1) else {
+            return false;
+        };
+        header.delref();
+        true
+    }
+
     /// `i_zval_ptr_dtor` up to `rc_dtor_func`: the refcount decrement,
     /// and at zero a string, an object or a resource freed here, while a
     /// table or a reference cell is handed back undestroyed, since what
