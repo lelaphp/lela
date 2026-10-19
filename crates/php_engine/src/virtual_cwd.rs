@@ -21,8 +21,8 @@
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// `MAXPATHLEN` (`Z/Zend/zend_virtual_cwd.h:39`), the host's
 /// `PATH_MAX`: 4096 on Linux, 1024 on macOS and the BSDs. The one value
@@ -60,7 +60,7 @@ const BUCKET_SIZE: i64 = 48;
 
 /// One `realpath_cache_bucket`: a path as it was written, after `.` and
 /// `..`, and what it resolved to.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct Bucket {
     pub(crate) key: u64,
     pub(crate) path: Vec<u8>,
@@ -99,10 +99,11 @@ pub(crate) struct RealpathCache {
 }
 
 /// The slots and `CWDG(realpath_cache_size)`, the bytes their buckets
-/// count.
+/// count. A bucket is shared, so a lookup that finds one copies a pointer
+/// under the mutex and reads the bucket after it.
 #[derive(Debug)]
 struct Buckets {
-    slots: Vec<Vec<Bucket>>,
+    slots: Vec<Vec<Arc<Bucket>>>,
     size: i64,
 }
 
@@ -177,7 +178,7 @@ impl RealpathCache {
 
     /// `realpath_cache_find`: the bucket for `path`, the expired buckets
     /// met on its chain dropped on the way.
-    fn find(&self, path: &[u8], now: i64) -> Option<Bucket> {
+    fn find(&self, path: &[u8], now: i64) -> Option<Arc<Bucket>> {
         let key = RealpathCache::key(path);
         let mut buckets = self.buckets();
         let Buckets { slots, size } = &mut *buckets;
@@ -189,7 +190,7 @@ impl RealpathCache {
                 continue;
             }
             if chain[at].key == key && chain[at].path == path {
-                return Some(chain[at].clone());
+                return Some(Arc::clone(&chain[at]));
             }
             at += 1;
         }
@@ -199,13 +200,13 @@ impl RealpathCache {
     /// `realpath_cache_add`, where the limit leaves room and no other
     /// request entered `path` since this one looked.
     fn add(&self, path: &[u8], realpath: &[u8], is_dir: bool, now: i64) {
-        let bucket = Bucket {
+        let bucket = Arc::new(Bucket {
             key: RealpathCache::key(path),
             path: path.to_vec(),
             realpath: realpath.to_vec(),
             is_dir,
             expires: now.saturating_add(self.ttl),
-        };
+        });
         let bytes = bucket.size();
         let mut buckets = self.buckets();
         let Buckets { slots, size } = &mut *buckets;
@@ -241,8 +242,13 @@ impl RealpathCache {
 
     /// Each bucket, as `shown`, in `realpath_cache_get()`'s order: slot by
     /// slot, each chain newest first.
-    pub(crate) fn listed<T>(&self, shown: impl FnMut(&Bucket) -> T) -> Vec<T> {
-        self.buckets().slots.iter().flatten().map(shown).collect()
+    pub(crate) fn listed<T>(&self, mut shown: impl FnMut(&Bucket) -> T) -> Vec<T> {
+        self.buckets()
+            .slots
+            .iter()
+            .flatten()
+            .map(|bucket| shown(bucket))
+            .collect()
     }
 }
 
