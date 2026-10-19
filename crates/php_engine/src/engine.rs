@@ -930,6 +930,17 @@ pub(crate) struct Shared {
     /// started by the first deadline a request sets, parked between
     /// requests, and joined before a fork and at the engine's end.
     pub(crate) timer: crate::interrupt::Timer,
+    /// What `zend_mm_shutdown(full=0)` leaves of each ended heap, which
+    /// the next request's heap starts from (design §5.13, §5.14): what a
+    /// php-fpm child keeps of its heap from one request to the next, kept
+    /// by the engine because a heap is its request's and dropped with it
+    /// (#2940).
+    pub(crate) chunks: Arc<php_heap::ChunkCache>,
+    /// `CWDG(realpath_cache)` (design §5.14): the process's in php's
+    /// non-ZTS build, so every request of the engine reads what earlier
+    /// ones entered until an entry's `realpath_cache_ttl` expires, as
+    /// every request of one php-fpm child does (#2941).
+    pub(crate) realpath_cache: crate::virtual_cwd::RealpathCache,
     /// The engine's interned strings (design §5.2, §5.14): what a unit's
     /// constant strings enter as it is published, grown here alone and
     /// read by every request thread with nothing taken.
@@ -1960,9 +1971,11 @@ impl Shared {
     }
 
     /// The master value of the entry `name` set to `value`, the entry
-    /// moved last, and the typed entries with it.
+    /// moved last, and the typed entries and the realpath cache's
+    /// `CWDG` values with it.
     fn set_ini_default(&mut self, name: Vec<u8>, value: Option<Vec<u8>>) {
         self.typed_ini.update(&name, value.as_deref());
+        self.realpath_cache.update(&name, value.as_deref());
         self.ini.retain(|(n, _)| *n != name);
         self.ini.push((name, value));
     }
@@ -3548,6 +3561,7 @@ impl EngineBuilder {
             crate::unit_cache::Files::new(MAX_ACCELERATED_FILES),
         ));
         let layer = supplied.stream_hooks.get().map(|hooks| (hooks.state)());
+        let realpath_cache = crate::virtual_cwd::RealpathCache::of(|name| master_of(&ini, name));
         let mut engine = Engine {
             shared: Arc::new(Shared {
                 extensions,
@@ -3608,6 +3622,8 @@ impl EngineBuilder {
                 arena,
                 layer,
                 timer: crate::interrupt::Timer::default(),
+                chunks: Arc::default(),
+                realpath_cache,
                 strings: Mutex::new(strings),
                 names,
                 default_strings,
@@ -4356,6 +4372,7 @@ impl Engine {
         for (name, value) in taken {
             shared.set_ini_default(name, value);
         }
+        (shared.realpath_cache).engine_startup(shared.ini_default(b"open_basedir"));
         shared.startup_errors.extend_from_slice(&failed);
         shared.script_encodings = script_encodings;
         shared.startup_errors.extend_from_slice(&written);
@@ -4598,6 +4615,35 @@ impl Engine {
     #[must_use]
     pub fn ini_get(&self, name: &[u8]) -> Option<Vec<u8>> {
         self.shared.ini_default(name).map(<[u8]>::to_vec)
+    }
+
+    /// `tsrm_realpath(path, NULL)` outside any request
+    /// (`Z/Zend/zend_virtual_cwd.c:1717`): `path` with every link
+    /// resolved, through the engine's realpath cache, which it reads and
+    /// enters as a request's resolutions do; a relative path against the
+    /// process's working directory, and an empty one that directory.
+    /// php-cgi's and php-fpm's `init_request_info` asks it whether the
+    /// program's path resolves before the request starts, so a child's
+    /// next request stats nothing for that path while the entries' time
+    /// to live holds. `None` where the path is not there.
+    #[must_use]
+    pub fn realpath(&self, path: &[u8]) -> Option<Vec<u8>> {
+        let getcwd = || {
+            std::env::current_dir()
+                .map(|dir| dir.into_os_string().into_encoded_bytes())
+                .unwrap_or_default()
+        };
+        let (cwd, path) = match path.first() {
+            None => (Vec::new(), std::borrow::Cow::Owned(getcwd())),
+            Some(b'/') => (Vec::new(), std::borrow::Cow::Borrowed(path)),
+            Some(_) => (getcwd(), std::borrow::Cow::Borrowed(path)),
+        };
+        crate::virtual_cwd::virtual_file_ex(
+            &self.shared.realpath_cache,
+            &cwd,
+            &path,
+            crate::virtual_cwd::Resolve::RealPath,
+        )
     }
 
     /// `INI_STR` outside any request: the value each request starts
@@ -5045,6 +5091,7 @@ impl Engine {
         // extensions' `RINIT`; what can fail is the memory limit, which the
         // first allocation after it meets again.
         req.apply_host_ini();
+        req.realpath_cache_startup();
         req.read_post_at_startup();
         if web && req.ini_flag(b"expose_php") && req.headers_sent().is_none() {
             let line = format!("X-Powered-By: PHP/{}", crate::api::request::PHP_VERSION);
@@ -7528,6 +7575,123 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.dir).ok();
         }
+    }
+
+    /// The realpath cache is the engine's, as php's is a php-fpm child's
+    /// (#2941): the second request resolves its program's path, and an
+    /// include's, from what the first entered, asking the file system
+    /// nothing while the entries' time to live holds; once the cache is
+    /// cleaned, as `clearstatcache(true)` cleans it, the next request asks
+    /// again.
+    #[test]
+    fn a_second_request_resolves_its_paths_from_the_engine_s_realpath_cache() {
+        let files = Files::new(
+            "realpath-cache",
+            &[
+                ("b.php", "<?php\n"),
+                ("main.php", "<?php\ninclude 'b.php';\necho \"ok\\n\";\n"),
+            ],
+        );
+        let engine = Engine::cli_builder().build();
+        let mut asked = Vec::new();
+        let mut serve = || {
+            let before = engine.shared.realpath_cache.looked_up();
+            let (body, observables) = files.serve(&engine, "main.php");
+            assert_eq!((body.as_str(), observables.exit_code), ("ok\n", 0));
+            asked.push(engine.shared.realpath_cache.looked_up() - before);
+        };
+        serve();
+        serve();
+        let entered = engine
+            .shared
+            .realpath_cache
+            .listed(|bucket| bucket.path.clone());
+        assert!(
+            entered.iter().any(|path| path.ends_with(b"/b.php")),
+            "the include's path stands in the cache"
+        );
+        engine.shared.realpath_cache.clean();
+        serve();
+        assert!(asked[0] > 0, "the first request asks the file system");
+        assert_eq!(asked[1], 0, "the second asks nothing: {asked:?}");
+        assert!(asked[2] > 0, "once the cache is cleaned it asks again");
+    }
+
+    /// What turns php's cache off or past its entries still asks the
+    /// file system on every request: an expired entry, and an
+    /// `open_basedir`, which turns the cache off.
+    #[test]
+    fn an_expired_entry_and_an_open_basedir_ask_the_file_system_again() {
+        let files = Files::new("realpath-ttl", &[("main.php", "<?php\n")]);
+        for (name, value) in [("realpath_cache_ttl", "-1"), ("open_basedir", "/")] {
+            let engine = Engine::cli_builder().ini_default(name, value).build();
+            for request in 0..2 {
+                let before = engine.shared.realpath_cache.looked_up();
+                let (body, observables) = files.serve(&engine, "main.php");
+                assert_eq!(observables.exit_code, 0, "{body}");
+                let asked = engine.shared.realpath_cache.looked_up() - before;
+                assert!(asked > 0, "{name}={value}: request {request} asked nothing");
+            }
+        }
+    }
+
+    /// A `realpath_cache_ttl` of zero leaves the time unread, `*t` at
+    /// php's `-1` (`Z/Zend/zend_virtual_cwd.c:1140`), which each bucket
+    /// is entered as expiring at, as the oracle's
+    /// `php -n -d realpath_cache_ttl=0` lists it in `realpath_cache_get()`;
+    /// no entry expires.
+    #[test]
+    fn a_time_to_live_of_zero_enters_each_bucket_expiring_at_minus_one() {
+        let files = Files::new("realpath-ttl0", &[("main.php", "<?php\n")]);
+        let engine = Engine::cli_builder()
+            .ini_default("realpath_cache_ttl", "0")
+            .build();
+        for _ in 0..2 {
+            let (_, observables) = files.serve(&engine, "main.php");
+            assert_eq!(observables.exit_code, 0);
+        }
+        let expires = engine.shared.realpath_cache.listed(|bucket| bucket.expires);
+        assert!(!expires.is_empty(), "the program's path was entered");
+        assert!(expires.iter().all(|&at| at == -1), "{expires:?}");
+    }
+
+    /// The host's `tsrm_realpath`, which php-fpm's `init_request_info`
+    /// asks of the program's path before each request, reads and enters
+    /// the engine's realpath cache: the first asks the file system, the
+    /// next asks nothing, and the request after it resolves its program
+    /// from what the host entered. A path that is not there resolves to
+    /// nothing.
+    #[test]
+    fn the_host_s_realpath_reads_and_enters_the_engine_s_realpath_cache() {
+        let files = Files::new("realpath-host", &[("main.php", "<?php\necho \"ok\\n\";\n")]);
+        let engine = Engine::cli_builder().build();
+        let program = files
+            .dir
+            .join("main.php")
+            .into_os_string()
+            .into_encoded_bytes();
+        let mut asked = Vec::new();
+        let mut resolved = Vec::new();
+        for _ in 0..2 {
+            let before = engine.shared.realpath_cache.looked_up();
+            resolved.push(engine.realpath(&program));
+            asked.push(engine.shared.realpath_cache.looked_up() - before);
+        }
+        let before = engine.shared.realpath_cache.looked_up();
+        let (body, observables) = files.serve(&engine, "main.php");
+        assert_eq!((body.as_str(), observables.exit_code), ("ok\n", 0));
+        asked.push(engine.shared.realpath_cache.looked_up() - before);
+        assert!(resolved[0].is_some(), "the program resolves");
+        assert_eq!(resolved[0], resolved[1]);
+        assert!(asked[0] > 0, "the first resolution asks the file system");
+        assert_eq!(
+            &asked[1..],
+            [0, 0],
+            "the second and the request ask nothing"
+        );
+        let mut missing = files.dir.as_os_str().as_encoded_bytes().to_vec();
+        missing.extend_from_slice(b"/missing.php");
+        assert_eq!(engine.realpath(&missing), None);
     }
 
     /// The once forms over a second file (#396): the file is served the

@@ -358,8 +358,6 @@ pub struct Request {
     /// The umask, the locale names and the start time
     /// ([`environment::Environment`]).
     environment: environment::Environment,
-    /// `CWDG(realpath_cache)` ([`paths::Paths`]).
-    paths: paths::Paths,
     cwd: PathBuf,
     /// The fibers running on this request, innermost last, each with the
     /// execution state of the stack that resumed it, and where each
@@ -959,7 +957,7 @@ impl Request {
         // VM stack, out of the heap the object store's table stands in.
         // The main chunk holds it, so nothing refuses it; a heap that
         // did would refuse the first push again, with php's fatal.
-        let mut heap = Heap::new();
+        let mut heap = Heap::new_in(Arc::clone(&shared.chunks));
         #[cfg(debug_assertions)]
         if shared.sense_leaks == crate::engine::LeakSensor::Traced {
             heap.trace_allocations();
@@ -977,10 +975,8 @@ impl Request {
         let typed_ini = shared.typed_ini;
         let mut req = Request {
             // Fields are made in the order written: the request stands
-            // inside the engine before its deadlines are laid, and the
-            // paths are read before `shared` moves in.
+            // inside the engine before its deadlines are laid.
             _inside: crate::fork::Inside::enter(),
-            paths: paths::Paths::startup(&shared),
             limits: limits::Limits::new(&shared.timer),
             shared,
             description,

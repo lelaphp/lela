@@ -70,6 +70,7 @@ pub use fiber::{FiberStack, Host, StackRefused, Suspensions, Switched, suspend};
 pub use hooks::{Fatal, FatalReason, GcTable, HeapHooks};
 pub use lend::{ecalloc, efree, emalloc, erealloc};
 pub use map::{MapPtr, MapTable};
+pub use mm::ChunkCache;
 pub use numeric::{
     Exponent, Number, double_to_string, numeric_prefix, power, shift_left, shift_right,
 };
@@ -161,7 +162,38 @@ impl Heap {
     /// before the host and the extensions start it.
     #[must_use]
     pub fn new() -> Heap {
-        let mut mm = mm::Mm::new();
+        Heap::over(mm::Mm::new())
+    }
+
+    /// A heap that starts from the newest heap the engine's `cache` keeps
+    /// and is kept there when it drops, as a php-fpm child keeps its heap
+    /// from one request to the next (`zend_mm_shutdown(full=0)`): the kept
+    /// heap's main chunk laid down again, its cached chunks counted in
+    /// `memory_get_usage(true)` and its real peak, and its
+    /// `avg_chunks_count` carried on; [`Heap::new`]'s one mapped chunk
+    /// where the cache keeps none. Each chunk it grows by comes from its
+    /// own cached chunks before it maps one. A request of a php-fpm child
+    /// whose last request held one chunk starts on that chunk:
+    ///
+    /// ```php
+    /// echo memory_get_usage(true), ' ', memory_get_peak_usage(true), ' ', ini_get('memory_limit'), "\n";
+    /// ```
+    /// ```request fpm
+    /// --GET--
+    /// q=1
+    /// ```
+    /// ```expect
+    /// X-Powered-By: PHP/8.5.9
+    /// Content-type: text/html; charset=UTF-8
+    ///
+    /// 2097152 2097152 128M
+    /// ```
+    #[must_use]
+    pub fn new_in(cache: std::sync::Arc<ChunkCache>) -> Heap {
+        Heap::over(mm::Mm::new_in(cache))
+    }
+
+    fn over(mut mm: mm::Mm) -> Heap {
         let arena = zend_arena::ZendArena::new(&mut mm);
         let store = object::Store::new(&mut mm);
         let mut gc = collector::Collector::new();
@@ -537,6 +569,15 @@ impl Heap {
     #[cfg(debug_assertions)]
     pub fn trace_allocations(&mut self) {
         self.mm.trace_allocations();
+    }
+
+    /// php's fast shutdown begins, `zend_shutdown_executor_values(1)`,
+    /// which leaves what the request held to `zend_mm_shutdown`: a chunk
+    /// the engine's teardown empties from here on is cached and never
+    /// unmapped, so the heap the engine keeps for the next request
+    /// ([`Heap::new_in`]) is the one php's child keeps.
+    pub fn fast_shutdown(&mut self) {
+        self.mm.keep_emptied();
     }
 
     /// One more owner of `z`: a refcount increment for a refcounted
