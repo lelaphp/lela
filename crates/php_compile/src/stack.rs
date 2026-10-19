@@ -203,6 +203,7 @@ impl StackLimit {
             raised: Vec::new(),
             thrown: false,
             stage: crate::Stage::Compiling,
+            declared: None,
         })
     }
 }

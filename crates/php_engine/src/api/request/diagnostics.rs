@@ -1450,7 +1450,11 @@ impl Request {
             Ok(arguments) => {
                 let record = self.record_set_aside();
                 let answer = crate::api::call::call_made(self, &handler, &arguments);
-                self.record_restored(record);
+                // A handler that bailed out jumped past the line that puts
+                // the record back, which stays off and empty.
+                if !self.bailing_out() {
+                    self.record_restored(record);
+                }
                 for argument in arguments {
                     self.release(argument);
                 }

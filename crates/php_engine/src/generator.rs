@@ -1121,8 +1121,8 @@ fn drop_values(req: &mut Request, generator: PhpObject) {
 /// frame that resumed it; the `Err` is a fatal. The body runs at no
 /// trace number and the resumer's is restored after it, as php backs
 /// `EG(jit_trace_num)` up with `EG(current_execute_data)` (`:793-797`,
-/// `:818`, `:865`), so a recording on the resumer's execution does not
-/// shut the generator's out and outlives none of its own.
+/// `:818`, `:865`), so a trace executing on the resumer's execution is
+/// not taken for one executing in the body.
 pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
     let mut generator = current(req, orig);
     if !has_frame(req, generator) {

@@ -5,11 +5,10 @@
 //!
 //! Under `Mode::Off` no word is read or written. Otherwise a visit reads
 //! the word: a compiled one is entered, a cold one is bumped and, at its
-//! threshold, claimed, unless the running execution records already
-//! (its trace number set, revision 9), when it is bumped and left, as
-//! php's `zend_jit_loop_trace_counter_handler` bumps and returns while
-//! `JIT_G(tracing)`. A
-//! claimed word is recorded from at once, the recording handed to the
+//! threshold, claimed, unless the request records already
+//! ([`record::recording`], revision NEXT), when it is bumped and left,
+//! as php's `zend_jit_trace_hot_root` returns at once while
+//! `JIT_G(tracing)`. A claimed word is recorded from at once, the recording handed to the
 //! pipeline with its claim, and the interpreter resumed where the
 //! recording stopped; a stop at an inner loop records that loop at once,
 //! as php's `ZEND_JIT_TRACE_STOP_REPEAT` does.
@@ -26,7 +25,7 @@
 use std::sync::Arc;
 
 use php_engine::tier::Flow;
-use php_engine::tier::{self, FrameRef, Request, SafepointIdx, Site, TraceNum, Word};
+use php_engine::tier::{self, FrameRef, Request, SafepointIdx, Site, Word};
 
 use crate::compiler::{self, Job};
 use crate::policy::{self, Claim, Holder, Mode, Outcome, Place, Policy, State, TraceEvent};
@@ -50,7 +49,7 @@ pub(crate) enum Visited {
 
 /// The one state machine over a word, for either home: `holder` is the
 /// home's, built only on the claim path; `claims` is false where the
-/// running execution records already or the site cannot take a recording,
+/// request records already or the site cannot take a recording,
 /// when a cold word is bumped and left. A sealed word reads blacklisted
 /// and takes the last arm.
 #[inline(always)] // jit-design.md §4.9: one load and a match on every visit
@@ -103,12 +102,12 @@ fn visited(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
         Site::Entry => Start::Enter,
         Site::Return(_) => Start::Return,
     };
+    let claims = site == Site::Entry && !record::recording(req);
     let (decided, shared) = {
         let req: &Request = req;
         let Some(engine) = req.engine::<JitEngine>() else {
             return Flow::Continue;
         };
-        let claims = site == Site::Entry && tier::trace_num(req) == TraceNum::NONE;
         // A table a hot root found full stopped its counters, as php's
         // `zend_jit_stop_counter_handlers` does: no word is claimed more.
         let holder = || {
@@ -138,15 +137,14 @@ fn visited(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
 /// recording, and the pipeline with its claim, then, for a stop at an
 /// inner loop, the same at that loop's header, as php's
 /// `zend_jit_trace_hot_root` repeats; the interpreter resumes wherever
-/// the last recording stopped. Recording is exclusive per execution:
-/// `record::run` holds the running execution's trace number.
+/// the last recording stopped. Recording is exclusive per request:
+/// `record::run` holds the request's exclusion, php's `JIT_G(tracing)`.
 ///
 /// A destructor that runs a hot loop inside a recording: the program's
 /// own code is the root, and the destructor's loop, served by a nested
 /// `execute` while it records, is bumped and not recorded, so one
-/// `TRACE start` is written; php's `zend_jit_trace_hot_root` returns at once
-/// while
-/// `JIT_G(tracing)`.
+/// `TRACE start` is written; php's `zend_jit_trace_hot_root` returns at
+/// once while `JIT_G(tracing)`.
 ///
 /// ```php
 /// class D { function __destruct() { $s = 0; for ($i = 0; $i < 3; $i++) { $s += $i; } echo "d $s\n"; } }

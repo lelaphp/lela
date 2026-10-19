@@ -172,6 +172,7 @@ impl Tier for Lane {
             ExtensionBuilder::default()
                 .ini(ini)
                 .engine_state(crate::JitEngine::new)
+                .request_state::<crate::JitRequest>()
                 .rinit(crate::JitEngine::request_started)
                 .build("jit"),
         )

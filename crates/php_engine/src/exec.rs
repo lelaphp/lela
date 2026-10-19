@@ -1025,6 +1025,23 @@ pub(crate) struct Annex {
     /// interception's, and one more for each
     /// [`crate::api::call::passthrough`] to the entry that one replaced.
     pub(crate) beneath: usize,
+    /// Where a file's frame finds its main op array's `static` table;
+    /// none for a function's frame.
+    pub(crate) statics: Option<FileStatics>,
+}
+
+/// php's `ZEND_MAP_PTR(static_variables_ptr)` of the main op array a
+/// file's frame runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileStatics {
+    /// The op array opcache loaded, whose map pointer every include of
+    /// the file shares; `kept` where the frame's leave keeps the table,
+    /// as `spl_autoload` serves a file with `zend_execute` and then
+    /// `destroy_op_array` alone (`Z/ext/spl/php_spl.c:262`).
+    Shared { kept: bool },
+    /// An op array compiled afresh, whose table is its own, by the
+    /// request's number for it.
+    Own(u32),
 }
 
 impl Annex {

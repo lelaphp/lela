@@ -315,9 +315,9 @@ impl Request {
                     .map(|key| key.bytes().to_vec())
             })
             .collect();
-        let loaded = (self.accel_loaded.take())
+        let loaded = (self.accel_loaded.as_ref())
             .filter(|(loaded, _)| PublishedUnit::ptr_eq(loaded, unit))
-            .map(|(_, served)| served);
+            .map(|(_, served)| *served);
         let served = loaded.or_else(|| self.preloading.is_some().then_some(AccelServed::Hit));
         let early = (self.early_bound.take())
             .filter(|(loaded, _)| PublishedUnit::ptr_eq(loaded, unit))
@@ -1814,6 +1814,36 @@ impl Request {
             Some(false) => true,
             None => false,
         }
+    }
+
+    /// What a file's compile had added to `CG(function_table)` when it
+    /// refused, none of which its `zend_bailout` takes back
+    /// ([`php_compile::Declared`]): each function declared in its turn,
+    /// what was raised before it noted first, so one the request holds
+    /// already is `Cannot redeclare` after what php had raised by then
+    /// and before the rest. How many of `refused`'s raised it noted, or
+    /// none where a redeclaration ended the request. The unit is the
+    /// request's own, compiled for it alone.
+    pub(crate) fn declare_refused(
+        &mut self,
+        refused: &php_compile::CompileError,
+        unit: Option<&PublishedUnit>,
+        file: &[u8],
+    ) -> Option<usize> {
+        let (Some(declared), Some(unit)) = (&refused.declared, unit) else {
+            return Some(0);
+        };
+        let mut noted = 0;
+        for (at, before) in declared.raised_before.iter().copied().enumerate() {
+            for raised in refused.raised.get(noted..before).unwrap_or_default() {
+                self.note_error_in(raised.level, &raised.message, file, raised.line);
+            }
+            noted = noted.max(before);
+            if !self.declare_function_told(unit, at) {
+                return None;
+            }
+        }
+        Some(noted)
     }
 
     /// Every function `unit` declares at its top level, as

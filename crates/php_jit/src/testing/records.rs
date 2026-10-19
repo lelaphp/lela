@@ -5,12 +5,12 @@
 
 use php_engine::tier::{
     self, Extension, ExtensionBuilder, Flow, FrameRef, FuncRef, Refusal, Request, SafepointIdx,
-    Site, Start as EngineStart, Stepped, Tier, TraceNum, UnitView,
+    Site, Start as EngineStart, Stepped, Tier, UnitView,
 };
 use php_unit::{MapPtrOffset, OplineIdx};
 
 use crate::policy::{self, Holder, Outcome, Policy};
-use crate::record::{Bailed, Recorded, Start, Stop, TraceRecord, header_at, returns, run};
+use crate::record::{self, Bailed, Recorded, Start, Stop, TraceRecord, header_at, returns, run};
 use crate::table::TraceId;
 use crate::testing::{self, function_of};
 
@@ -33,13 +33,13 @@ pub(crate) const PLAN: [&str; 6] = [
 ];
 
 /// What the recording tier keeps, the request's: the op arrays of the
-/// functions it met, the records it took, and the trace number every
-/// site was asked at.
+/// functions it met, the records it took, and whether the request
+/// recorded when each site was asked.
 #[derive(Debug, Default)]
 pub(crate) struct Kept {
     pub(crate) funcs: Vec<(Vec<u8>, FuncRef)>,
     pub(crate) taken: Vec<Recorded>,
-    pub(crate) asked: Vec<TraceNum>,
+    pub(crate) asked: Vec<bool>,
     pub(crate) done: bool,
 }
 
@@ -52,7 +52,7 @@ pub(crate) struct Records;
 
 impl Tier for Records {
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
-        let asked = tier::trace_num(req);
+        let asked = record::recording(req);
         req.state::<Kept>().asked.push(asked);
         if site != Site::Entry {
             return Flow::Continue;
