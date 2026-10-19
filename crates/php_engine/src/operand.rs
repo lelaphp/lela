@@ -174,7 +174,10 @@ pub(crate) fn owns_nothing(z: Zval) -> bool {
 #[inline(always)] // a test of the type byte, on an inline path
 #[allow(clippy::inline_always)]
 pub(crate) fn deref(z: Zval) -> Zval {
-    z.as_reference().map_or(z, |cell| cell.val())
+    match z.as_reference() {
+        Some(cell) => cell.val(),
+        None => z,
+    }
 }
 
 /// Whether a zval is a value an assignment or a send may take as it

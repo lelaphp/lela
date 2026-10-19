@@ -8290,6 +8290,25 @@ pub(crate) fn fetch_obj_func_arg<T: Tier>(
 /// NULL
 /// Cannot use [] for reading
 /// ```
+///
+/// By value it is the read's own inline path over an element the array
+/// has, the warning of one it has not got the kernel's; by reference
+/// the element is laid down:
+///
+/// ```php
+/// function k(array $a, array &$b, $j, $s) { return [g($a[$j]), g($a[$s]), g($b[$j]), r($b[$j]), r($b[5]), g($a[9])]; }
+/// function g($v) { return $v; }
+/// function r(&$v) { $v .= "!"; return $v; }
+/// $a = [1.5, "k" => "v"]; $b = [2.5];
+/// echo json_encode([k($a, $b, 0, "k"), $b]), "\n";
+/// ```
+/// ```expect
+///
+/// Warning: Undefined array key 9 in %s on line 2
+/// [[1.5,"v",2.5,"2.5!","!",null],{"0":"2.5!","5":"!"}]
+/// ```
+#[inline(always)] // as `fetch_dim_r`, whose body the by-value arm is
+#[allow(clippy::inline_always)]
 pub(crate) fn fetch_dim_func_arg<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -8301,6 +8320,12 @@ pub(crate) fn fetch_dim_func_arg<T: Tier>(
             return use_tmp_in_write_context(req, frame, code, op);
         }
         return fetched_dim_place(req, frame, code, op);
+    }
+    // `ZEND_VM_DISPATCH_TO_HANDLER(ZEND_FETCH_DIM_R)`: the read's body,
+    // its inline path first.
+    let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
+    if let Some(edge) = inline_fetch_dim_r(req, frame, code, op, kinds) {
+        return edge;
     }
     if op.op2_type == OperandKind::Unused {
         // `zend_use_undef_in_read_context_helper`.
@@ -10272,7 +10297,7 @@ fn held_alone<T>(
 fn write_entry(req: &mut Request, array: PhpArray, at: WriteAt) -> Result<Landing, Thrown> {
     match at {
         WriteAt::Next => req.array_next_entry(array.heap()).map(Landing::from),
-        WriteAt::At(key) => req.array_lookup(array.heap(), key).map(Landing::from),
+        WriteAt::At(key) => req.array_lookup(array.heap(), key).map(Landing::Entry),
         WriteAt::Gone => Ok(Landing::Gone),
     }
 }
@@ -10404,7 +10429,8 @@ pub(crate) fn fetch_dim_w<T: Tier, A: Operand + Default, B: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_fetch_dim_w(req, frame, code, op, at, (A::default(), B::default())) {
+    let kinds = (A::default(), B::default());
+    if let Some(edge) = inline_fetch_dim_w(req, frame, (code, op, at), DimRead::Silent, kinds) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -10418,32 +10444,76 @@ fn fetched_dim_place(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Op
     fetch_dim_place(req, frame, code, op, DimRead::Silent, Keep::Nothing)
 }
 
-/// The inline path of `ZEND_FETCH_DIM_W` over a CV
-/// (`zend_fetch_dimension_address_W` into
-/// `zend_fetch_dimension_address_inner_W`): an array the CV alone owns,
-/// so `SEPARATE_ARRAY` copies nothing, whose element at the key holds a
-/// value, named in place by the `VAR` as an `IS_INDIRECT` for the write
-/// after it; and the same over a `VAR` a `FETCH_*_W` before it left
-/// naming such an array, `$a[1][0] = ...`'s inner link. `None`, with
-/// nothing touched, for every other container, a
-/// key the array has not got, which the write lays down, an element
-/// that is a reference or a symbol table's `IS_INDIRECT`, and a `VAR`
-/// holding an owner.
+/// The inline path of `ZEND_FETCH_DIM_W` and `ZEND_FETCH_DIM_RW` over a
+/// CV (`zend_fetch_dimension_address_W` and `_RW` into
+/// `zend_fetch_dimension_address_inner`): an array the CV alone owns,
+/// or the one a reference it holds names, so `SEPARATE_ARRAY` copies
+/// nothing, whose element at the key holds a value, named in place by
+/// the `VAR` as an `IS_INDIRECT` for the write after it; and the same
+/// over a `VAR` a `FETCH_*_W` before it left naming such an array,
+/// `$a[1][0] = ...`'s inner link. `read` is the fetch's: under
+/// [`DimRead::Silent`], `_W`, a key the array has not got is laid down
+/// here, and under [`DimRead::Warning`], `_RW`, it is the kernel's,
+/// which warns `Undefined array key` before it lays the entry down; that
+/// is all the two differ in. `None`, with nothing touched, for every
+/// other container, an element that is a reference or a symbol table's
+/// `IS_INDIRECT`, and a `VAR` holding an owner.
+///
+/// ```php
+/// function w(array &$a, array &$n) { $a[0][1] = 2; $a[] = 3; $a[1]--; $a[5]++; $n[0][0] += 1; return $a; }
+/// $a = [[1], 7]; $n = [[1]]; $b = $a; $r = &$a[1];
+/// var_dump(w($a, $n), $b[1], $r, $n);
+/// $c = [1, 2]; $c[1]--; $c[0]++; --$c[0]; $c[1] *= 3;
+/// var_dump($c);
+/// ```
+/// ```expect
+///
+/// Warning: Undefined array key 5 in %s on line 2
+/// array(4) {
+///   [0]=>
+///   array(2) {
+///     [0]=>
+///     int(1)
+///     [1]=>
+///     int(2)
+///   }
+///   [1]=>
+///   &int(6)
+///   [2]=>
+///   int(3)
+///   [5]=>
+///   int(1)
+/// }
+/// int(7)
+/// int(6)
+/// array(1) {
+///   [0]=>
+///   array(1) {
+///     [0]=>
+///     int(2)
+///   }
+/// }
+/// array(2) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(3)
+/// }
+/// ```
 #[inline(always)] // as `inline_fetch_dim_r`
 #[allow(clippy::inline_always)]
 fn inline_fetch_dim_w(
     req: &mut Request,
     frame: FrameRef,
-    code: &OpArray,
-    op: &Opline,
-    at: u32,
+    (code, op, at): (&OpArray, &Opline, u32),
+    read: DimRead,
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
     let out = exec::temporary_slot(code, op.out) as usize;
     if req.slots_mut(frame).get(out)?.is_refcounted() {
         return None;
     }
-    let placed = match owned_entry(req, frame, (code, op, at), a, b)? {
+    let placed = match owned_entry(req, frame, (code, op, at), read, (a, b))? {
         Ok(placed) => placed,
         Err(edge) => return Some(edge),
     };
@@ -10455,73 +10525,108 @@ fn inline_fetch_dim_w(
     Some(Ok(advanced()))
 }
 
-/// The element a dimension write's inline path writes in place, as
-/// `zend_fetch_dimension_address_inner_W` finds or lays it down: the
-/// array a CV holds, or the place a `FETCH_*_W` left in a `VAR` as an
-/// `IS_INDIRECT` holds (`GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_W)`), where
-/// that array is refcounted with one owner and is no reference's, so
-/// `SEPARATE_ARRAY` copies nothing; the entry at the key [`inline_key`]
-/// reads, or the next one for an append, laid down holding `null` where
-/// the table has none (`zend_hash_lookup`, `zend_hash_next_index_insert`),
-/// which serves no code. None, with nothing touched, for every other
-/// container, an entry that is a reference or a symbol table's
-/// `IS_INDIRECT`, and an append past the last index, whose `Error` is
-/// the kernel's; the memory limit a laying-down meets is raised at the
-/// opline at `at`, the `Err`.
+/// The array a dimension write's inline path writes into, as
+/// `GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_W)` and the handler's
+/// `Z_ISREF_P` arm find it: the array a CV holds, or the place a
+/// `FETCH_*_W` left in a `VAR` as an `IS_INDIRECT` holds, and in either
+/// the one a reference there names (`Z_REFVAL_P`, `goto
+/// try_assign_dim_array`), where that array is refcounted with one
+/// owner, so `SEPARATE_ARRAY` copies nothing. The array's zval is
+/// answered beside it. None for every other container.
 #[inline(always)] // as `inline_fetch_dim_r`
 #[allow(clippy::inline_always)]
-fn owned_entry(
-    req: &mut Request,
-    frame: FrameRef,
-    (code, op, at): (&OpArray, &Opline, u32),
+fn owned_array(
+    slots: &[Zval],
+    code: &OpArray,
+    op: &Opline,
     a: impl Operand,
-    b: impl Operand,
-) -> Option<Result<OwnedEntry, Edge>> {
-    let slots = req.slots_mut(frame);
+) -> Option<(php_heap::Arr, Zval)> {
     let held = a.read(slots, code, op.op1);
     let held = match a.kind() {
         OperandKind::Cv => held,
         OperandKind::Var => held.as_indirect()?.read(),
         _ => return None,
     };
+    let held = crate::operand::deref(held);
     let array = held.as_arr()?;
-    if !held.is_refcounted() || array.refcount() != 1 {
-        return None;
-    }
+    (held.is_refcounted() && array.refcount() == 1).then_some((array, held))
+}
+
+/// The element a dimension write's inline path writes in place, as
+/// `zend_fetch_dimension_address_inner` finds or lays it down: in the
+/// array [`owned_array`] finds, the entry at the key [`inline_key`]
+/// reads, or the next one for an append. Under [`DimRead::Silent`],
+/// `BP_VAR_W`, a key the table has not got is laid down holding `null`
+/// (`zend_hash_lookup`, `zend_hash_next_index_insert`), which serves no
+/// code; under [`DimRead::Warning`], `BP_VAR_RW`, it and an append are
+/// the kernel's, which warns first. None, with nothing touched, for
+/// every other container, an entry that is a reference or a symbol
+/// table's `IS_INDIRECT`, and an append past the last index, whose
+/// `Error` is the kernel's; the memory limit a laying-down meets is
+/// raised at the opline at `at`, the `Err`.
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn owned_entry(
+    req: &mut Request,
+    frame: FrameRef,
+    (code, op, at): (&OpArray, &Opline, u32),
+    read: DimRead,
+    (a, b): (impl Operand, impl Operand),
+) -> Option<Result<OwnedEntry, Edge>> {
+    let slots = req.slots_mut(frame);
+    let (array, table) = owned_array(slots, code, op, a)?;
     let key = match b.kind() {
         OperandKind::Unused => None,
         _ => Some(inline_key(slots, code, op, b)?),
     };
+    // `ZEND_HASH_INDEX_LOOKUP`'s shape: the hit found inline, and only a
+    // miss handed to the lookup that lays the entry down.
     let found = match key {
         Some((key, _)) => array.value_ref(key),
         None => None,
     };
-    let entry = if let Some(entry) = found {
-        entry
-    } else {
-        let laid = match key {
-            Some((key, _)) => req.array_lookup(array, key),
-            None => req.array_next_entry(array),
-        };
-        match laid {
-            Ok(entry) => entry?,
-            Err(thrown) => {
-                req.vm_mut().stand(frame, at);
-                return Some(Err(threw(req, frame, &thrown)));
-            }
-        }
+    let entry = match (found, read) {
+        (Some(entry), _) => entry,
+        (None, DimRead::Warning) => return None,
+        (None, DimRead::Silent) => match laid_down(req, (frame, at), array, key)? {
+            Ok(entry) => entry,
+            Err(edge) => return Some(Err(edge)),
+        },
     };
-    let z = entry.read();
-    let plain = !z.is_undef()
-        && !matches!(
-            z.kind(),
-            php_heap::ZvalType::Reference | php_heap::ZvalType::Indirect
-        );
+    let plain = !matches!(
+        entry.read().kind(),
+        php_heap::ZvalType::Undef | php_heap::ZvalType::Reference | php_heap::ZvalType::Indirect
+    );
     plain.then_some(Ok(OwnedEntry {
         entry,
-        table: held,
+        table,
         free_dim: key.is_some_and(|(_, free)| free),
     }))
+}
+
+/// The miss of [`owned_entry`] under `BP_VAR_W`: the entry laid down
+/// holding `null` at the key (`zend_hash_lookup`) or appended for `$a[]`
+/// (`zend_hash_next_index_insert`); None for an append past the last
+/// index, whose `Error` is the kernel's, and the memory limit raised at
+/// the opline at `at`, the `Err`.
+#[inline(never)]
+fn laid_down(
+    req: &mut Request,
+    (frame, at): (FrameRef, u32),
+    array: php_heap::Arr,
+    key: Option<(php_heap::Key, bool)>,
+) -> Option<Result<php_heap::ZvalRef, Edge>> {
+    let laid = match key {
+        Some((key, _)) => req.array_lookup(array, key).map(Some),
+        None => req.array_next_entry(array),
+    };
+    match laid {
+        Ok(entry) => entry.map(Ok),
+        Err(thrown) => {
+            req.vm_mut().stand(frame, at);
+            Some(Err(threw(req, frame, &thrown)))
+        }
+    }
 }
 
 /// An entry [`owned_entry`] found or laid down: the place, the zval of
@@ -10606,6 +10711,11 @@ pub(crate) fn fetch_dim_rw<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    let at = req.vm().opline(frame);
+    let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
+    if let Some(edge) = inline_fetch_dim_w(req, frame, (code, op, at), DimRead::Warning, kinds) {
+        return edge;
+    }
     fetch_dim_place(req, frame, code, op, DimRead::Warning, Keep::Nothing)
 }
 
@@ -12780,8 +12890,8 @@ fn inline_assign_obj(
     Some(Ok(Next::jump(at.saturating_add(2))))
 }
 
-/// The `OP_DATA` value the inline path of `ASSIGN_OBJ` or `ASSIGN_DIM`
-/// takes, by [`taken_value`]'s rule: the `OP_DATA` opline after `at`,
+/// The `OP_DATA` value the inline path of `ASSIGN_OBJ` takes, by
+/// [`taken_value`]'s rule: the `OP_DATA` opline after `at`,
 /// whose `op1` is of the kind `data` is, as the assignment's handler was
 /// resolved over it where its unit was published (`php_unit::Handler`),
 /// php's `_OP_DATA_CV` and the rest, so neither its opcode nor its kind
@@ -12800,15 +12910,78 @@ fn data_value(
     taken_value(req, frame, code, op, data, field)
 }
 
+/// What [`taken_value`] takes, found with nothing touched: the zval,
+/// the temporary it is moved out of, and the temporary that takes it
+/// too under `RETURN_VALUE_USED`. Asking first is what an inline path
+/// that lays an element down does before it lays it, so an element it
+/// laid down is never one the kernel lays down a second time.
+#[derive(Clone, Copy)]
+struct Taking {
+    z: Zval,
+    moved: Option<usize>,
+    out: Option<usize>,
+}
+
+/// The [`Taking`] of the value `field` names, by [`taken_value`]'s rule.
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn taking(
+    slots: &[Zval],
+    code: &OpArray,
+    op: &Opline,
+    value: impl Operand,
+    field: u32,
+) -> Option<Taking> {
+    let z = value.read(slots, code, field);
+    if !crate::operand::movable(z)
+        || (value.kind() == OperandKind::Const && !crate::operand::owns_nothing(z))
+    {
+        return None;
+    }
+    let out = if op.out_type == OperandKind::Unused {
+        None
+    } else {
+        let out = exec::temporary_slot(code, op.out) as usize;
+        if slots.get(out)?.is_refcounted() {
+            return None;
+        }
+        Some(out)
+    };
+    let moved = match value.kind() {
+        OperandKind::Tmp | OperandKind::Var => Some(value.slot(code, field)?),
+        _ => None,
+    };
+    Some(Taking { z, moved, out })
+}
+
+impl Taking {
+    /// The value taken: moved out of its temporary or one more owner of
+    /// it taken, and one more for the temporary that takes it too.
+    #[inline(always)] // as `inline_fetch_dim_r`
+    #[allow(clippy::inline_always)]
+    fn take(self, req: &mut Request, frame: FrameRef) -> Option<Zval> {
+        let Taking { z, moved, out } = self;
+        match moved {
+            Some(at) => *req.slots_mut(frame).get_mut(at)? = Zval::UNDEF,
+            None => req.heap_mut().addref(z),
+        }
+        if let Some(out) = out {
+            req.heap_mut().addref(z);
+            *req.slots_mut(frame).get_mut(out)? = z;
+        }
+        Some(z)
+    }
+}
+
 /// The value an assignment's inline path takes, one rule for `ASSIGN`'s
 /// `op2` and the `OP_DATA` of `ASSIGN_OBJ` and `ASSIGN_DIM`, as
-/// `zend_assign_to_variable` takes it: a temporary moved out of its
-/// slot, and a CV or a constant copied with one more owner where it
-/// counts one, a constant of a unit compiled for the request alone
-/// among them, and, under `RETURN_VALUE_USED`, one more owner for the
+/// `zend_assign_to_variable` takes it: a constant that counts no owner
+/// copied, a temporary moved out of its slot and a CV copied with one
+/// more owner, and, under `RETURN_VALUE_USED`, one more owner for the
 /// temporary, which takes it too. None, with nothing touched, for a
 /// value nothing wrote, whose warning is the kernel's, a reference,
-/// whose value is what is assigned, and a temporary holding an owner.
+/// whose value is what is assigned, a refcounted constant, and a
+/// temporary holding an owner.
 ///
 /// ```php
 /// $a = str_repeat('a', 3); $o = new stdClass; $d = [];
@@ -12831,23 +13004,7 @@ fn taken_value(
     value: impl Operand,
     field: u32,
 ) -> Option<Zval> {
-    let slots = req.slots_mut(frame);
-    let z = value.read(slots, code, field);
-    let used = op.out_type != OperandKind::Unused;
-    let out = exec::temporary_slot(code, op.out) as usize;
-    if !crate::operand::movable(z) || (used && slots.get(out)?.is_refcounted()) {
-        return None;
-    }
-    if matches!(value.kind(), OperandKind::Tmp | OperandKind::Var) {
-        *slots.get_mut(value.slot(code, field)?)? = Zval::UNDEF;
-    } else {
-        req.heap_mut().addref(z);
-    }
-    if used {
-        req.heap_mut().addref(z);
-        *req.slots_mut(frame).get_mut(out)? = z;
-    }
-    Some(z)
+    taking(req.slots_mut(frame), code, op, value, field)?.take(req, frame)
 }
 
 /// `ASSIGN_OBJ` past its inline path: the value, the receiver and the
@@ -14336,11 +14493,31 @@ pub(crate) fn assign_dim<
 
 /// The inline path of `ZEND_ASSIGN_DIM` over a CV
 /// (`ZEND_ASSIGN_DIM_SPEC_CV_*`, `Z/Zend/zend_vm_def.h:2621-2660`): an
-/// array the CV alone owns, whose element at the key holds a value that
-/// owns nothing, takes the `OP_DATA` value ([`data_value`]); nothing is
-/// given up, so nothing runs. `None`, with nothing touched, as
-/// [`inline_fetch_dim_w`]'s, for an append, an element holding an
-/// owner, and a value or a temporary [`data_value`] refuses.
+/// array the CV alone owns, or the one a reference it holds names
+/// ([`owned_array`]), whose element at the key holds a value and no
+/// reference, takes the `OP_DATA` value ([`taken_value`]), as
+/// `zend_assign_to_variable` writes it, and the temporary takes it
+/// under `RETURN_VALUE_USED`. What the element held is given up after
+/// both, `GC_DTOR_NO_REF(garbage)`: a string serves no destructor and is
+/// offered to no collector, so it is given up inline, and any other
+/// owner, an array or an object, is released with the opline standing,
+/// where a destructor it serves runs and a throw it leaves is the edge's.
+/// `None`, with nothing touched, as [`inline_fetch_dim_w`]'s, for an
+/// element that is a reference, and a value or a temporary
+/// [`taken_value`] refuses, which is asked before an element is laid
+/// down, so the kernel never lays down a second one for a key the
+/// table did not have or for an append.
+///
+/// ```php
+/// $a = [1]; $a[] = 7; $r = 2; $x = &$r; $a[] = $x; $a[9] = $x; $a["k"] = $u;
+/// function f() { static $n = 0, $seen = []; $n++; $seen[] = $n; return count($seen); }
+/// echo json_encode($a), f(), f(), f(), "\n";
+/// ```
+/// ```expect
+///
+/// Warning: Undefined variable $u in %s on line 2
+/// {"0":1,"1":7,"2":2,"9":2,"k":null}123
+/// ```
 ///
 /// ```php
 /// $a = [1, 2, 3]; $h = ["x" => 1, "y" => [1]]; $b = $a; $s = str_repeat("s", 2);
@@ -14368,6 +14545,79 @@ pub(crate) fn assign_dim<
 /// }
 /// string(2) "ss"
 /// ```
+///
+/// What the element held is given up after the write, so a destructor
+/// it serves reads the array with the value in it, before the next
+/// statement runs, and a throw from it is raised at the assignment:
+///
+/// ```php
+/// class D { function __construct(public $n) {} function __destruct() { global $a; echo "dtor {$this->n} sees ", $a[0] instanceof D ? "D" : $a[0], "\n"; } }
+/// class T { function __destruct() { throw new Exception("from dtor"); } }
+/// $a = [new D(1), str_repeat("s", 3), [1, [2]]]; $s = str_repeat("t", 2);
+/// $a[0] = 5; echo "next\n";
+/// $a[1] = $s; $a[1] = 7; debug_zval_dump($s);
+/// $c = [new T];
+/// try { $c[0] = 1; echo "never\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// var_dump($c, $a);
+/// ```
+/// ```expect
+/// dtor 1 sees 5
+/// next
+/// string(2) "tt" refcount(2)
+/// caught from dtor
+/// array(1) {
+///   [0]=>
+///   int(1)
+/// }
+/// array(3) {
+///   [0]=>
+///   int(5)
+///   [1]=>
+///   int(7)
+///   [2]=>
+///   array(2) {
+///     [0]=>
+///     int(1)
+///     [1]=>
+///     array(1) {
+///       [0]=>
+///       int(2)
+///     }
+///   }
+/// }
+/// ```
+///
+/// An array given up is released as `zval_ptr_dtor` releases it, a
+/// possible root of the collector where an owner of it stands:
+///
+/// ```php
+/// $x = [new stdClass]; $a = [$x, [new stdClass], 2];
+/// $before = gc_status()["roots"];
+/// $a[0] = 0;
+/// $kept = gc_status()["roots"] - $before;
+/// $a[1] = 0;
+/// var_dump($kept, gc_status()["roots"] - $before, $a);
+/// function f(array &$v) { $v[1] = [3]; $v[1] = 4; }
+/// $b = [1, 2]; f($b); var_dump($b);
+/// ```
+/// ```expect
+/// int(1)
+/// int(1)
+/// array(3) {
+///   [0]=>
+///   int(0)
+///   [1]=>
+///   int(0)
+///   [2]=>
+///   int(2)
+/// }
+/// array(2) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(4)
+/// }
+/// ```
 #[inline(always)] // as `inline_fetch_dim_r`
 #[allow(clippy::inline_always)]
 fn inline_assign_dim(
@@ -14378,17 +14628,26 @@ fn inline_assign_dim(
     at: u32,
     (a, b, data): (impl Operand, impl Operand, impl Operand),
 ) -> Option<Edge> {
-    let placed = match owned_entry(req, frame, (code, op, at), a, b)? {
+    let field = exec::opline_at(code, at.saturating_add(1))?.op1;
+    let taking = taking(req.slots_mut(frame), code, op, data, field)?;
+    let placed = match owned_entry(req, frame, (code, op, at), DimRead::Silent, (a, b))? {
         Ok(placed) => placed,
         Err(edge) => return Some(edge),
     };
-    if placed.entry.read().is_refcounted() {
-        return None;
-    }
-    let z = data_value(req, frame, code, op, at, data)?;
+    let garbage = placed.entry.read();
+    let z = taking.take(req, frame)?;
     placed.entry.write(z);
     free_dim_operands(req, frame, code, op, (a, placed.free_dim));
-    Some(Ok(Next::jump(at.saturating_add(2))))
+    if !garbage.is_refcounted() {
+        return Some(Ok(Next::jump(at.saturating_add(2))));
+    }
+    if let Some(text) = garbage.as_str() {
+        req.heap_mut().release_string(text);
+        return Some(Ok(Next::jump(at.saturating_add(2))));
+    }
+    req.vm_mut().stand(frame, at);
+    req.release(exec::value_of(garbage));
+    Some(Ok(advance_over_data(req, frame, at)))
 }
 
 /// `ASSIGN_DIM` past its inline path: the container placed for the
@@ -14617,10 +14876,14 @@ impl From<Option<php_heap::ZvalRef>> for Landing {
 /// walk ([`write_entry`]) does not raise. The `UNUSED` dimension of
 /// `$a[] op= v` is an entry appended with nothing in it
 /// (`zend_hash_next_index_insert(ht, &EG(uninitialized_zval))`), which
-/// raises no warning at all.
+/// raises no warning at all. A key the table holds is found once, and
+/// the entry found is the one answered.
 fn rw_entry(req: &mut Request, array: PhpArray, at: WriteAt) -> Result<Landing, Thrown> {
     match at {
-        WriteAt::At(key) if array.heap().get(key).is_none() => undefined_key_write(req, array, key),
+        WriteAt::At(key) => match array.heap().value_ref(key) {
+            Some(entry) => Ok(Landing::Entry(entry)),
+            None => undefined_key_write(req, array, key),
+        },
         at => write_entry(req, array, at),
     }
 }
@@ -14688,7 +14951,7 @@ fn undefined_key_write(
     } else if left.not_alone() {
         Ok(Landing::Gone)
     } else {
-        req.array_lookup(array.heap(), key).map(Landing::from)
+        req.array_lookup(array.heap(), key).map(Landing::Entry)
     };
     if let Some(name) = name {
         name.let_go(req);
@@ -14847,6 +15110,141 @@ pub(crate) fn assign_dim_op<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
+    if let Some(edge) = inline_assign_dim_op(req, frame, code, op, kinds) {
+        return edge;
+    }
+    assigned_dim_op(req, frame, code, op)
+}
+
+/// The inline path of `ZEND_ASSIGN_DIM_OP` over a CV
+/// (`ZEND_ASSIGN_DIM_OP_SPEC_CV_*`, `Z/Zend/zend_vm_def.h:1156-1200`,
+/// `assign_dim_op_array`): in the array the CV alone owns, or the one a
+/// reference it holds names ([`owned_array`]), the element at the key
+/// [`inline_key`] reads, where it holds a number, and an `OP_DATA` value
+/// that is a number as it stands, under an operator
+/// [`inline::compound`] names, computed by [`inline::arith`] as the
+/// binary opcode's own inline pair computes it, and written in place and,
+/// under `RETURN_VALUE_USED`, into the temporary. Nothing is converted,
+/// warned of or given up, so nothing runs. `None`, with nothing touched,
+/// for everything else, which is the kernel's: a key the array has not
+/// got and its `Undefined array key` warning, an append, an element that
+/// is a reference or no number, a value that is no number, another
+/// operator, `.=` among them, and a shared array, which the kernel
+/// separates.
+///
+/// ```php
+/// function f(array &$v) { $v[0] += 0.5; $v[1] -= 1; $v["k"] *= 3; return $v; }
+/// $a = [1, PHP_INT_MAX, 1.5, "k" => 2]; $b = $a; $i = 1; $one = 1;
+/// $a[0] += 2; $a[$i] += $one; $a[2] *= 2; $a["k"] -= 0.5;
+/// var_dump($a, $b[1]);
+/// $r = ($a[0] += 2); $t = ($a[0] -= $r);
+/// var_dump($r, $t);
+/// $c = [1, 2]; var_dump(f($c), $c);
+/// $d = [1]; $d[] = 2; $e = $d; $d[0] += 1; var_dump($d[0], $e[0]);
+/// $m = [1]; $m[1] += 1; $m[0] .= "x"; $m[] += 2; var_dump($m);
+/// $x = 5; $n = [1]; $n[0] = &$x; $n[0] += 1; var_dump($x);
+/// $s = ["3"]; $s[0] += 1; $u = [1]; $u[0] += "2"; $w = [2]; $w[0] /= 2; $p = [2]; $p[0] **= 3; var_dump($s, $u, $w, $p);
+/// ```
+/// ```expect
+/// array(4) {
+///   [0]=>
+///   int(3)
+///   [1]=>
+///   float(9.223372036854776E+18)
+///   [2]=>
+///   float(3)
+///   ["k"]=>
+///   float(1.5)
+/// }
+/// int(9223372036854775807)
+/// int(5)
+/// int(0)
+///
+/// Warning: Undefined array key "k" in %s on line 2
+/// array(3) {
+///   [0]=>
+///   float(1.5)
+///   [1]=>
+///   int(1)
+///   ["k"]=>
+///   int(0)
+/// }
+/// array(3) {
+///   [0]=>
+///   float(1.5)
+///   [1]=>
+///   int(1)
+///   ["k"]=>
+///   int(0)
+/// }
+/// int(2)
+/// int(1)
+///
+/// Warning: Undefined array key 1 in %s on line 10
+/// array(3) {
+///   [0]=>
+///   string(2) "1x"
+///   [1]=>
+///   int(1)
+///   [2]=>
+///   int(2)
+/// }
+/// int(6)
+/// array(1) {
+///   [0]=>
+///   int(4)
+/// }
+/// array(1) {
+///   [0]=>
+///   int(3)
+/// }
+/// array(1) {
+///   [0]=>
+///   int(1)
+/// }
+/// array(1) {
+///   [0]=>
+///   int(8)
+/// }
+/// ```
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn inline_assign_dim_op(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    (a, b): (impl Operand, impl Operand),
+) -> Option<Edge> {
+    let arith = inline::compound(op.extended_value)?;
+    if a.kind() != OperandKind::Cv {
+        return None;
+    }
+    let at = req.vm().opline(frame);
+    let data = *exec::opline_at(code, at.saturating_add(1))
+        .filter(|data| data.opcode == Opcode::OpData)?;
+    let slots = req.slots_mut(frame);
+    let (array, _) = owned_array(slots, code, op, a)?;
+    let (key, free_dim) = inline_key(slots, code, op, b)?;
+    let entry = array.value_ref(key)?;
+    let value = ByKind(data.op1_type).read(slots, code, data.op1);
+    let z = inline::arith(arith, entry.read(), value)?;
+    if op.out_type != OperandKind::Unused {
+        write_owning_nothing(slots, code, op, z)?;
+    }
+    entry.write(z);
+    if free_dim {
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    }
+    Some(Ok(Next::jump(at.saturating_add(2))))
+}
+
+/// `ASSIGN_DIM_OP` past its inline path: the container walked, the
+/// entry found or laid down after its warning, and the kernel over it.
+/// A call of its own, as [`assigned_dim`] is.
+#[inline(never)]
+fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let Some(kernel) = binary_op_of(op.extended_value) else {
         return Err(Fatal::error(format!(
             "InternalError: ZEND_ASSIGN_DIM_OP over the operator {}, which is no binary operation",
@@ -16586,11 +16984,9 @@ fn unset_entry(
 ) -> Result<php_heap::Zval, Thrown> {
     let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
     let key = crate::ops::array_offset(req, &dim, op.op2_type == OperandKind::Const)?;
-    if array.heap().get(key).is_none() {
-        return Ok(php_heap::Zval::null());
-    }
-    Ok(req
-        .array_lookup(array.heap(), key)?
+    Ok(array
+        .heap()
+        .value_ref(key)
         .map_or_else(php_heap::Zval::null, php_heap::Zval::indirect))
 }
 
@@ -17502,11 +17898,7 @@ fn send_unpacked_array(
             req.addref(&element);
             element
         } else if variable {
-            let Some(entry) = req.array_lookup(array.heap(), key.heap())? else {
-                return fatal(Fatal::error(
-                    "InternalError: SEND_UNPACK lost an element of the array it spreads",
-                ));
-            };
+            let entry = req.array_lookup(array.heap(), key.heap())?;
             bound_at(req, entry)?
         } else {
             req.addref(&element);
