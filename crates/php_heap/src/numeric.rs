@@ -35,8 +35,9 @@ impl Number {
         }
     }
 
-    /// `zend_compare`'s four numeric pairs: two longs as longs, and any
-    /// other pair as doubles under `ZEND_THREEWAY_COMPARE`, equal, less,
+    /// `zend_compare`'s four numeric pairs as one match, in its order: two
+    /// longs as longs, two doubles as they are, and a mixed pair with its
+    /// long converted, the doubles under `ZEND_THREEWAY_COMPARE`, equal, less,
     /// else greater, which is where a NAN lands whichever side it is on.
     /// The one home of the rule: [`crate::compare`] takes it for its
     /// numeric pairs and the engine's handlers for their inline ones
@@ -48,10 +49,11 @@ impl Number {
         reason = "php's `(a) == (b)`, the exact equality being copied"
     )]
     pub fn compare(self, other: Number) -> Ordering {
-        if let (Number::Long(a), Number::Long(b)) = (self, other) {
-            return a.cmp(&b);
-        }
-        let (a, b) = (self.double(), other.double());
+        let (a, b) = match (self, other) {
+            (Number::Long(a), Number::Long(b)) => return a.cmp(&b),
+            (Number::Double(a), Number::Double(b)) => (a, b),
+            _ => (self.double(), other.double()),
+        };
         if a == b {
             Ordering::Equal
         } else if a < b {

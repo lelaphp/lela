@@ -1,10 +1,13 @@
 //! The zval (design §5.1): sixteen bytes, `Copy`, no `Drop`. Zend's type
 //! numbering is kept so that the all-zero value is `IS_UNDEF`.
+// The `expect` fence's `regime=` is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::ptr::NonNull;
 
 use crate::Str;
 use crate::array::Arr;
+use crate::gc::Counted;
 use crate::object::Obj;
 use crate::reference::Ref;
 use crate::resource::Res;
@@ -148,8 +151,7 @@ impl ZvalRef {
     /// The `u2` word a slot does carry is written by
     /// [`set_fe_pos`](ZvalRef::set_fe_pos) and by nothing else.
     pub fn write(self, z: Zval) {
-        let mut z = z;
-        z.u2 = self.read().u2;
+        let z = z.with_u2_of(self.read());
         // SAFETY: as `read`; the slot is sixteen aligned bytes the frame
         // or the object laid down.
         unsafe { self.0.as_ptr().write(z) };
@@ -171,11 +173,12 @@ impl ZvalRef {
     /// property slot, its `u2` word alone, the value it holds untouched.
     pub fn set_prop_bit(self, flag: PropBit, on: bool) {
         let mut z = self.read();
-        if on {
-            z.u2 |= flag.bit();
+        let u2 = z.u2();
+        z.set_u2(if on {
+            u2 | flag.bit()
         } else {
-            z.u2 &= !flag.bit();
-        }
+            u2 & !flag.bit()
+        });
         // SAFETY: as `read`.
         unsafe { self.0.as_ptr().write(z) };
     }
@@ -269,21 +272,26 @@ impl std::fmt::Debug for Word {
     }
 }
 
-/// One value slot: a payload word, the type byte, the type flags and the
-/// opline-specific `u2` word. Copying a zval is a bitwise copy and touches
-/// no refcount; [`crate::Heap::addref`] and [`crate::Heap::release`] are
-/// explicit.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// One value slot as two words: the payload word, then php's
+/// `u1.type_info` and `u2` in one, the type byte at the zval's byte 8,
+/// the type flags at 9, the extra bits at 10 and 11 and `u2` at 12 to
+/// 15 (design §5.1), so that a copy is one pair of loads and one pair
+/// of stores and a fresh number one pair of stores, as php's
+/// `ZVAL_COPY_VALUE` and `ZVAL_DOUBLE` are. Each part is placed by its
+/// bytes in memory order, whatever the target's byte order. Copying a
+/// zval is a bitwise copy and touches no refcount; [`Zval::addref`] and
+/// [`crate::Heap::release`] are explicit.
+#[derive(Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct Zval {
     value: Word,
-    kind: ZvalType,
-    type_flags: u8,
-    /// The extra bits of php's `Z_TYPE_INFO` above the type flags,
-    /// where the cycle collector marks a `WeakMap` entry
-    /// ([`WeakMarks`]) and nothing else writes.
-    extra: u16,
-    u2: u32,
+    /// The type byte, the type flags, the extra bits of php's
+    /// `Z_TYPE_INFO` above them, where the cycle collector marks a
+    /// `WeakMap` entry ([`WeakMarks`]) and nothing else writes, and the
+    /// `u2` word. The type byte holds one of [`ZvalType`]'s
+    /// discriminants and nothing else: [`Zval::typed`] is the one place
+    /// it is written.
+    info: u64,
 }
 
 // SAFETY: a zval is the sixteen bytes php's is, and what its word points
@@ -298,33 +306,109 @@ unsafe impl Send for Zval {}
 // published unit, whose values are immutable and never refcounted.
 unsafe impl Sync for Zval {}
 
-// The layout the design names: sixteen bytes, the word first.
+// The layout the design names: sixteen bytes, the word first, and the
+// type byte, the flags, the extra bits and `u2` at bytes 8, 9, 10 and 12.
 const _: () = assert!(std::mem::size_of::<Zval>() == 16);
 const _: () = assert!(std::mem::offset_of!(Zval, value) == 0);
+const _: () = assert!(std::mem::offset_of!(Zval, info) == 8);
 const _: () = assert!(std::mem::size_of::<Word>() == 8);
+const _: () = {
+    let z = Zval::typed(ZvalType::Double, Zval::TYPE_REFCOUNTED, Word::bits(0)).with_weak_marks(
+        WeakMarks {
+            from_key: true,
+            from_map: false,
+        },
+    );
+    let mut with_u2 = z;
+    with_u2.set_u2(0x0403_0201);
+    let b = with_u2.info.to_ne_bytes();
+    let extra = 1u16.to_ne_bytes();
+    let u2 = 0x0403_0201u32.to_ne_bytes();
+    assert!(b[0] == ZvalType::Double as u8 && b[1] == Zval::TYPE_REFCOUNTED);
+    assert!(b[2] == extra[0] && b[3] == extra[1]);
+    assert!(b[4] == u2[0] && b[5] == u2[1] && b[6] == u2[2] && b[7] == u2[3]);
+};
+
+impl std::fmt::Debug for Zval {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Zval")
+            .field("value", &self.value)
+            .field("kind", &self.kind())
+            .field("type_flags", &self.info.to_ne_bytes()[1])
+            .field("extra", &self.extra())
+            .field("u2", &self.u2())
+            .finish()
+    }
+}
 
 impl Zval {
     /// The all-zero zval, `IS_UNDEF`.
     pub const UNDEF: Zval = Zval {
         value: Word::bits(0),
-        kind: ZvalType::Undef,
-        type_flags: 0,
-        extra: 0,
-        u2: 0,
+        info: 0,
     };
 
-    const fn scalar(kind: ZvalType, value: u64) -> Zval {
-        Zval::with_word(kind, Word::bits(value))
-    }
+    /// The bytes of the info word that hold the type byte, the zval's
+    /// byte 8.
+    const INFO_TYPE: u64 = u64::from_ne_bytes([0xff, 0, 0, 0, 0, 0, 0, 0]);
+    /// The bytes of the info word that hold `u2`, the zval's 12 to 15.
+    const INFO_U2: u64 = u64::from_ne_bytes([0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
 
-    const fn with_word(kind: ZvalType, value: Word) -> Zval {
+    /// The zval of `kind` over `value` with the type flags `flags`, no
+    /// extra bits and a `u2` of zero: the one place a type byte is
+    /// written.
+    const fn typed(kind: ZvalType, flags: u8, value: Word) -> Zval {
         Zval {
             value,
-            kind,
-            type_flags: 0,
-            extra: 0,
-            u2: 0,
+            info: u64::from_ne_bytes([kind as u8, flags, 0, 0, 0, 0, 0, 0]),
         }
+    }
+
+    /// The `u2` word.
+    const fn u2(self) -> u32 {
+        let b = self.info.to_ne_bytes();
+        u32::from_ne_bytes([b[4], b[5], b[6], b[7]])
+    }
+
+    /// The `u2` word written, the value and its type untouched.
+    const fn set_u2(&mut self, u2: u32) {
+        let u = u2.to_ne_bytes();
+        self.info =
+            (self.info & !Zval::INFO_U2) | u64::from_ne_bytes([0, 0, 0, 0, u[0], u[1], u[2], u[3]]);
+    }
+
+    /// This value with `slot`'s `u2` word in place of its own, what a
+    /// write into a slot that keeps its `u2` writes ([`ZvalRef::write`]).
+    const fn with_u2_of(self, slot: Zval) -> Zval {
+        Zval {
+            value: self.value,
+            info: (self.info & !Zval::INFO_U2) | (slot.info & Zval::INFO_U2),
+        }
+    }
+
+    /// The extra bits, the two bytes past the type flags.
+    const fn extra(self) -> u16 {
+        let b = self.info.to_ne_bytes();
+        u16::from_ne_bytes([b[2], b[3]])
+    }
+
+    /// The extra bits written, everything else untouched.
+    const fn set_extra(&mut self, extra: u16) {
+        let mut b = self.info.to_ne_bytes();
+        let e = extra.to_ne_bytes();
+        b[2] = e[0];
+        b[3] = e[1];
+        self.info = u64::from_ne_bytes(b);
+    }
+
+    /// Whether `bit` of the type flags is set: a test of one bit of the
+    /// info word.
+    const fn has_flag(self, bit: u8) -> bool {
+        self.info & u64::from_ne_bytes([0, bit, 0, 0, 0, 0, 0, 0]) != 0
+    }
+
+    const fn scalar(kind: ZvalType, value: u64) -> Zval {
+        Zval::typed(kind, 0, Word::bits(value))
     }
 
     /// `ZVAL_NULL`.
@@ -356,60 +440,42 @@ impl Zval {
     /// (`Z/Zend/zend_types.h:1093-1100`).
     #[must_use]
     pub fn string(s: Str) -> Zval {
-        Zval {
-            value: s.payload(),
-            kind: ZvalType::String,
-            type_flags: if s.is_interned() {
-                0
-            } else {
-                Zval::TYPE_REFCOUNTED
-            },
-            extra: 0,
-            u2: 0,
-        }
+        let flags = if s.is_interned() {
+            0
+        } else {
+            Zval::TYPE_REFCOUNTED
+        };
+        Zval::typed(ZvalType::String, flags, s.payload())
     }
 
     /// `ZVAL_ARR`: the array, refcounted unless it is immutable, which is
     /// what a compiled program's constant array is (design §5.3).
     #[must_use]
     pub fn array(a: Arr) -> Zval {
-        Zval {
-            value: a.payload(),
-            kind: ZvalType::Array,
-            type_flags: if a.is_immutable() {
-                0
-            } else {
-                Zval::TYPE_REFCOUNTED | Zval::TYPE_COLLECTABLE
-            },
-            extra: 0,
-            u2: 0,
-        }
+        let flags = if a.is_immutable() {
+            0
+        } else {
+            Zval::TYPE_REFCOUNTED | Zval::TYPE_COLLECTABLE
+        };
+        Zval::typed(ZvalType::Array, flags, a.payload())
     }
 
     /// `ZVAL_OBJ`: the object, refcounted and collectable, as every
     /// object is (design §5.4).
     #[must_use]
     pub fn object(o: Obj) -> Zval {
-        Zval {
-            value: o.payload(),
-            kind: ZvalType::Object,
-            type_flags: Zval::TYPE_REFCOUNTED | Zval::TYPE_COLLECTABLE,
-            extra: 0,
-            u2: 0,
-        }
+        Zval::typed(
+            ZvalType::Object,
+            Zval::TYPE_REFCOUNTED | Zval::TYPE_COLLECTABLE,
+            o.payload(),
+        )
     }
 
     /// `ZVAL_RES`: the resource, refcounted and never collectable
     /// (`IS_RESOURCE_EX`, design §5.5).
     #[must_use]
     pub fn resource(r: Res) -> Zval {
-        Zval {
-            value: r.payload(),
-            kind: ZvalType::Resource,
-            type_flags: Zval::TYPE_REFCOUNTED,
-            extra: 0,
-            u2: 0,
-        }
+        Zval::typed(ZvalType::Resource, Zval::TYPE_REFCOUNTED, r.payload())
     }
 
     /// `ZVAL_REF`: the reference, refcounted and collectable
@@ -417,13 +483,11 @@ impl Zval {
     /// holds may close a cycle.
     #[must_use]
     pub fn reference(r: Ref) -> Zval {
-        Zval {
-            value: r.payload(),
-            kind: ZvalType::Reference,
-            type_flags: Zval::TYPE_REFCOUNTED | Zval::TYPE_COLLECTABLE,
-            extra: 0,
-            u2: 0,
-        }
+        Zval::typed(
+            ZvalType::Reference,
+            Zval::TYPE_REFCOUNTED | Zval::TYPE_COLLECTABLE,
+            r.payload(),
+        )
     }
 
     /// `ZVAL_AST`: the constant expression at `at` of the op array's own
@@ -436,7 +500,7 @@ impl Zval {
     /// `Z_ASTVAL` of an `IS_CONSTANT_AST`, else `None`.
     #[must_use]
     pub fn as_const_expr(self) -> Option<u32> {
-        match self.kind {
+        match self.kind() {
             ZvalType::ConstExpr => u32::try_from(self.value.as_bits()).ok(),
             _ => None,
         }
@@ -451,7 +515,7 @@ impl Zval {
     /// `Z_PTR` of an `IS_PTR`, else `None`.
     #[must_use]
     pub fn as_ptr(self) -> Option<u32> {
-        match self.kind {
+        match self.kind() {
             ZvalType::Ptr => u32::try_from(self.value.as_bits()).ok(),
             _ => None,
         }
@@ -460,13 +524,13 @@ impl Zval {
     /// `ZVAL_INDIRECT`: the zval that says where another stands.
     #[must_use]
     pub fn indirect(at: ZvalRef) -> Zval {
-        Zval::with_word(ZvalType::Indirect, at.payload())
+        Zval::typed(ZvalType::Indirect, 0, at.payload())
     }
 
     /// `Z_INDIRECT` of an `Indirect`, else `None`.
     #[must_use]
     pub fn as_indirect(self) -> Option<ZvalRef> {
-        match self.kind {
+        match self.kind() {
             // SAFETY: the word of an `Indirect` was written by
             // `Zval::indirect` from a `ZvalRef`.
             ZvalType::Indirect => unsafe { ZvalRef::from_payload(self.value) },
@@ -477,7 +541,12 @@ impl Zval {
     /// The type byte.
     #[must_use]
     pub const fn kind(self) -> ZvalType {
-        self.kind
+        let byte = self.info.to_ne_bytes()[0];
+        // SAFETY: the type byte is written by `Zval::typed` alone, from a
+        // `ZvalType`, or is the zero of `Zval::UNDEF`, so it holds one of
+        // the enum's discriminants; every other writer of the info word
+        // writes its other bytes and keeps this one as it stood.
+        unsafe { std::mem::transmute::<u8, ZvalType>(byte) }
     }
 
     /// Whether `other` is the same value of the same type: the identity
@@ -487,8 +556,8 @@ impl Zval {
     /// is itself.
     #[must_use]
     pub fn is_same_value(self, other: Zval) -> bool {
-        self.kind == other.kind
-            && match self.kind {
+        self.kind() == other.kind()
+            && match self.kind() {
                 ZvalType::Undef | ZvalType::Null | ZvalType::False | ZvalType::True => true,
                 ZvalType::Long
                 | ZvalType::Double
@@ -506,18 +575,18 @@ impl Zval {
     /// `Z_ISUNDEF`.
     #[must_use]
     pub const fn is_undef(self) -> bool {
-        matches!(self.kind, ZvalType::Undef)
+        self.info & Zval::INFO_TYPE == 0
     }
 
     /// `Z_NEXT`: the `u2` word, which inside an array's bucket is the
     /// next bucket of the hash chain.
     pub(crate) const fn next(self) -> u32 {
-        self.u2
+        self.u2()
     }
 
     /// Write `Z_NEXT`.
     pub(crate) const fn set_next(&mut self, next: u32) {
-        self.u2 = next;
+        self.set_u2(next);
     }
 
     /// `Z_FE_POS`: the same `u2` word read as a `foreach`'s position in
@@ -527,25 +596,25 @@ impl Zval {
     /// a loop at the beginning.
     #[must_use]
     pub const fn fe_pos(self) -> u32 {
-        self.u2
+        self.u2()
     }
 
     /// Write `Z_FE_POS`.
     pub const fn set_fe_pos(&mut self, pos: u32) {
-        self.u2 = pos;
+        self.set_u2(pos);
     }
 
     /// Whether one of `Z_PROP_FLAG_P(z)`'s bits is set on a declared
     /// property slot ([`ZvalRef::set_prop_bit`]).
     #[must_use]
     pub const fn prop_bit(self, flag: PropBit) -> bool {
-        self.u2 & flag.bit() != 0
+        self.u2() & flag.bit() != 0
     }
 
     /// The payload of a `Long`, else `None`.
     #[must_use]
     pub const fn as_long(self) -> Option<i64> {
-        match self.kind {
+        match self.kind() {
             ZvalType::Long => Some(self.value.as_bits().cast_signed()),
             _ => None,
         }
@@ -554,7 +623,7 @@ impl Zval {
     /// The payload of a `Double`, else `None`.
     #[must_use]
     pub const fn as_double(self) -> Option<f64> {
-        match self.kind {
+        match self.kind() {
             ZvalType::Double => Some(f64::from_bits(self.value.as_bits())),
             _ => None,
         }
@@ -564,7 +633,7 @@ impl Zval {
     /// owner, as php's `Z_STR` does not.
     #[must_use]
     pub fn as_str(self) -> Option<Str> {
-        match self.kind {
+        match self.kind() {
             // SAFETY: the payload of a `String` was written by
             // `Zval::string` from a live string, and a zval that names a
             // freed string is the same mistake in php.
@@ -577,7 +646,7 @@ impl Zval {
     /// owner, as php's `Z_ARR` does not.
     #[must_use]
     pub fn as_arr(self) -> Option<Arr> {
-        match self.kind {
+        match self.kind() {
             // SAFETY: the payload of an `Array` was written by
             // `Zval::array` from a live array, and a zval that names a
             // freed array is the same mistake in php.
@@ -590,7 +659,7 @@ impl Zval {
     /// an owner, as php's `Z_OBJ` does not.
     #[must_use]
     pub fn as_obj(self) -> Option<Obj> {
-        match self.kind {
+        match self.kind() {
             // SAFETY: the payload of an `Object` was written by
             // `Zval::object` from a live object, and a zval that names a
             // freed object is the same mistake in php.
@@ -603,7 +672,7 @@ impl Zval {
     /// take an owner, as php's `Z_RES` does not.
     #[must_use]
     pub fn as_resource(self) -> Option<Res> {
-        match self.kind {
+        match self.kind() {
             // SAFETY: the payload of a `Resource` was written by
             // `Zval::resource` from a live resource, and a zval that
             // names a freed resource is the same mistake in php.
@@ -617,7 +686,7 @@ impl Zval {
     /// take an owner.
     #[must_use]
     pub fn as_reference(self) -> Option<Ref> {
-        match self.kind {
+        match self.kind() {
             // SAFETY: the payload of a `Reference` was written by
             // `Zval::reference` from a live reference, and a zval that
             // names a freed reference is the same mistake in php.
@@ -629,57 +698,98 @@ impl Zval {
     /// `Some(true)` for `True`, `Some(false)` for `False`, else `None`.
     #[must_use]
     pub const fn as_bool(self) -> Option<bool> {
-        match self.kind {
+        match self.kind() {
             ZvalType::True => Some(true),
             ZvalType::False => Some(false),
             _ => None,
         }
     }
 
-    /// The block a refcounted value's header stands at, `Z_COUNTED`; none
-    /// for a value that carries no header.
-    #[cfg(debug_assertions)]
-    pub(crate) fn counted(self) -> Option<NonNull<u8>> {
+    /// `Z_COUNTED`: the refcounted header of the block a refcounted value
+    /// names, at the block's start for every counted kind, so no kind is
+    /// asked; none for a value that carries no count, which a scalar, an
+    /// interned string and an immutable array are, by their type flags
+    /// ([`Zval::string`], [`Zval::array`]).
+    #[inline(always)] // a bit test and the word, on every addref and release
+    #[allow(clippy::inline_always)]
+    pub(crate) fn counted(self) -> Option<Counted> {
         if !self.is_refcounted() {
             return None;
         }
         // SAFETY: a refcounted zval's word is the pointer its value's
         // `payload` wrote.
-        unsafe { self.value.as_pointer() }
+        let block = unsafe { self.value.as_pointer::<u8>() }?;
+        // SAFETY: a counted kind's block starts with its header, which
+        // each kind's header asserts, and stands while a zval names it, as
+        // a zval naming a freed block is the same mistake in php.
+        Some(unsafe { Counted::new(block) })
+    }
+
+    /// `Z_TRY_ADDREF`: one more owner of what this zval holds, php's
+    /// `Z_OPT_REFCOUNTED` test of the type flags and `GC_ADDREF` on the
+    /// header at the block's start, and nothing for a scalar, an interned
+    /// string or an immutable array, which carry no `IS_TYPE_REFCOUNTED`
+    /// bit. Needs
+    /// no request and no heap: an inline path that copies a value takes
+    /// its owner where it holds the slots. A debug build's freed-use guard
+    /// is the header's, and names the caller.
+    ///
+    /// ```php
+    /// $i = "interned"; $l = [1, 2]; $c = str_repeat("c", mt_rand(3, 3));
+    /// $x = $i; $y = $l; $z = $c;
+    /// debug_zval_dump($x, $y, $z);
+    /// ```
+    /// ```expect regime=immutable-literals
+    /// string(8) "interned" interned
+    /// array(2) packed interned {
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// string(3) "ccc" refcount(3)
+    /// ```
+    #[inline]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn addref(self) {
+        if let Some(header) = self.counted() {
+            header.addref();
+        }
     }
 
     /// Whether the value carries a refcounted header (`Z_REFCOUNTED`): a
     /// bit test, never a type-range test.
     #[must_use]
     pub const fn is_refcounted(self) -> bool {
-        self.type_flags & Zval::TYPE_REFCOUNTED != 0
+        self.has_flag(Zval::TYPE_REFCOUNTED)
     }
 
     /// `Z_COLLECTABLE`: a mutable array, an object or a reference, the
     /// values a cycle can pass through.
     #[must_use]
     pub(crate) const fn is_collectable(self) -> bool {
-        self.type_flags & Zval::TYPE_COLLECTABLE != 0
+        self.has_flag(Zval::TYPE_COLLECTABLE)
     }
 
     /// The marks the cycle collector left on this zval, a `WeakMap`
     /// entry's.
     pub(crate) const fn weak_marks(self) -> WeakMarks {
         WeakMarks {
-            from_key: self.extra & Zval::FROM_WEAKMAP_KEY != 0,
-            from_map: self.extra & Zval::FROM_WEAKMAP != 0,
+            from_key: self.extra() & Zval::FROM_WEAKMAP_KEY != 0,
+            from_map: self.extra() & Zval::FROM_WEAKMAP != 0,
         }
     }
 
     /// The zval with `marks` in place of the ones it carried.
     pub(crate) const fn with_weak_marks(mut self, marks: WeakMarks) -> Zval {
-        self.extra &= !(Zval::FROM_WEAKMAP_KEY | Zval::FROM_WEAKMAP);
+        let mut extra = self.extra() & !(Zval::FROM_WEAKMAP_KEY | Zval::FROM_WEAKMAP);
         if marks.from_key {
-            self.extra |= Zval::FROM_WEAKMAP_KEY;
+            extra |= Zval::FROM_WEAKMAP_KEY;
         }
         if marks.from_map {
-            self.extra |= Zval::FROM_WEAKMAP;
+            extra |= Zval::FROM_WEAKMAP;
         }
+        self.set_extra(extra);
         self
     }
 
