@@ -522,11 +522,13 @@ impl Draw {
 }
 
 /// `dump` then `parse` is the identity, over records drawn from every
-/// event, sample, start and stop; and `parse` refuses a text with no stop
+/// event, sample, start and stop, two thousand natively and twenty under
+/// Miri, which interprets each; and `parse` refuses a text with no stop
 /// or with a word it does not know.
 #[test]
 fn dump_then_parse_is_the_identity() {
-    for seed in 0..2000 {
+    let seeds = if cfg!(miri) { 20 } else { 2000 };
+    for seed in 0..seeds {
         let record = Draw(seed).record();
         let text = record.dump();
         assert_eq!(
