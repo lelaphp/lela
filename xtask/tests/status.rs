@@ -771,7 +771,7 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
         assert_eq!(laid["path"], built.path.to_str().unwrap(), "{name}");
         assert_eq!(laid["platform"], Platform::this().unwrap().key(), "{name}");
         let pinned = pin.variant[name].build(Platform::this().unwrap()).unwrap();
-        let closure = pinned.closure.as_ref().map(ToString::to_string);
+        let closure = pinned.provenance.closure.as_ref().map(ToString::to_string);
         assert_eq!(laid["closure"], serde_json::json!(closure), "{name}");
     }
     // The record's digest, SHA-256 over each `name=version\n` in name

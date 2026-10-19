@@ -194,6 +194,7 @@ oracle::Promised::holds
 oracle::Promised::load
 oracle::Promised::or_skip
 oracle::Promised::parse
+oracle::Provenance
 oracle::Recipe
 oracle::Regime
 oracle::Runner
