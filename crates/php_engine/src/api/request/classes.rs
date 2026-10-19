@@ -315,9 +315,9 @@ impl Request {
                     .map(|key| key.bytes().to_vec())
             })
             .collect();
-        let loaded = (self.accel_loaded.take())
+        let loaded = (self.accel_loaded.as_ref())
             .filter(|(loaded, _)| PublishedUnit::ptr_eq(loaded, unit))
-            .map(|(_, served)| served);
+            .map(|(_, served)| *served);
         let served = loaded.or_else(|| self.preloading.is_some().then_some(AccelServed::Hit));
         let early = (self.early_bound.take())
             .filter(|(loaded, _)| PublishedUnit::ptr_eq(loaded, unit))

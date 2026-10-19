@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use php_heap::FrameRef;
-use php_unit::OpArray;
+use php_unit::{MapPtrOffset, OpArray, PublishedUnit};
 
 use crate::api::call::{Function, Target};
 use crate::api::raising::Thrown;
@@ -19,11 +19,14 @@ use super::Request;
 
 /// Whose `static` table the request holds: a linked function's, the
 /// `zend_function` a request's function table or a class's method table
-/// holds, or a file's main op array's, by its map pointer.
+/// holds, or a file's main op array's, by its map pointer where opcache
+/// loaded it and by the request's number for the op array where it was
+/// compiled afresh ([`exec::FileStatics`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Statics {
     Function(Function),
     Main(php_unit::MapPtrOffset),
+    Own(u32),
 }
 
 /// Where the `static` variables of what a frame runs stand: in a
@@ -44,10 +47,13 @@ pub(super) struct StaticVars {
     /// [`php_unit::OpArray::bound_vars`], which the published unit never
     /// holds (design §5.14). A closure's are its object's.
     tables: HashMap<Statics, PhpArray>,
-    /// How many of `tables` are a main op array's, which every code
-    /// frame's push forgets ([`Request::forget_main_statics`]) and which
-    /// most requests have none of.
+    /// How many of `tables` are a main op array's, which a file's frame
+    /// gives up as it leaves ([`Request::destroy_file_statics`]) and
+    /// which most requests have none of.
     mains: usize,
+    /// The number the next op array compiled afresh takes, never handed
+    /// out twice, so a table a fatal left standing is no other's.
+    next_own: u32,
 }
 
 impl Request {
@@ -98,6 +104,12 @@ impl Request {
         let Some(state) = self.vm.at(frame) else {
             return StaticsAt::Table(Statics::Main(code.runtime_cache));
         };
+        let file = |annex: Option<exec::AnnexId>| match annex
+            .and_then(|id| self.annexes().get(id)?.statics)
+        {
+            Some(exec::FileStatics::Own(number)) => Statics::Own(number),
+            _ => Statics::Main(code.runtime_cache),
+        };
         if let Some(object) = state.closure
             && object.closure(self).is_some_and(|closure| !closure.fake)
         {
@@ -105,7 +117,7 @@ impl Request {
         }
         match state.function {
             Some(function) => StaticsAt::Table(Statics::Function(function)),
-            None => StaticsAt::Table(Statics::Main(code.runtime_cache)),
+            None => StaticsAt::Table(file(state.annex)),
         }
     }
 
@@ -138,7 +150,7 @@ impl Request {
                     let table = exec::starting_statics(self, code)?;
                     if let Some(table) = table
                         && self.static_vars.tables.insert(of, table).is_none()
-                        && matches!(of, Statics::Main(_))
+                        && !matches!(of, Statics::Function(_))
                     {
                         self.static_vars.mains += 1;
                     }
@@ -204,14 +216,101 @@ impl Request {
             .collect()
     }
 
-    /// The `static` variables of the main op array whose map pointer is
-    /// `offset` given up: php compiles a file afresh at each include, so
-    /// its main op array's table starts over each time it is entered.
-    pub(super) fn forget_main_statics(&mut self, offset: php_unit::MapPtrOffset) {
+    /// Where the frame about to serve `unit`'s main op array finds its
+    /// `static` table: the map pointer, where opcache loaded the unit
+    /// (`zend_accel_load_script`'s copy keeps the persisted op array's
+    /// offset), and otherwise a table of the frame's own, as php's
+    /// `zend_compile` gives every op array its own pointer. A file the
+    /// cache holds is one op array whose pointer every include of it
+    /// shares, so an include of it entered while another stands counts
+    /// on in the same table, and the first of them to leave starts it
+    /// over ([`Request::destroy_file_statics`]); a file compiled afresh
+    /// at each include has a table of its own each time:
+    ///
+    /// ```php
+    /// $depth = ($depth ?? 0) + 1;
+    /// static $calls = 0;
+    /// $calls++;
+    /// if ($depth < 3) { include __FILE__; include __FILE__; }
+    /// echo $depth, ":", $calls, "\n";
+    /// $depth--;
+    /// ```
+    /// ```expect regime=jit-off
+    /// 3:3
+    /// 3:1
+    /// 2:1
+    /// 3:2
+    /// 3:1
+    /// 2:1
+    /// 1:1
+    /// ```
+    ///
+    /// ```php
+    /// $depth = ($depth ?? 0) + 1;
+    /// static $calls = 0;
+    /// $calls++;
+    /// if ($depth < 3) { include __FILE__; include __FILE__; }
+    /// echo $depth, ":", $calls, "\n";
+    /// $depth--;
+    /// ```
+    /// ```expect
+    /// 3:1
+    /// 3:1
+    /// 2:1
+    /// 3:1
+    /// 3:1
+    /// 2:1
+    /// 1:1
+    /// ```
+    pub(super) fn file_statics(&mut self, unit: &PublishedUnit) -> exec::FileStatics {
+        let loaded = (self
+            .accel_loaded
+            .take_if(|(loaded, _)| PublishedUnit::ptr_eq(loaded, unit)))
+        .is_some_and(|_| matches!(exec::code_of(unit).runtime_cache, MapPtrOffset::Engine(_)));
+        if loaded {
+            return exec::FileStatics::Shared { kept: false };
+        }
+        let number = self.static_vars.next_own;
+        self.static_vars.next_own = number.wrapping_add(1);
+        exec::FileStatics::Own(number)
+    }
+
+    /// `frame`, a file's frame a native serves, keeps the map pointer's
+    /// table as it leaves, as `spl_autoload` serves a file
+    /// ([`exec::FileStatics::Shared`]).
+    pub(super) fn keep_file_statics(&mut self, frame: FrameRef) {
+        if let Some(extra) = self.annex_mut(frame)
+            && let Some(exec::FileStatics::Shared { kept }) = extra.statics.as_mut()
+        {
+            *kept = true;
+        }
+    }
+
+    /// The `static` table a file's frame destroys as it leaves, none for
+    /// a function's frame, after a fatal, which unwinds nothing, and
+    /// for a frame that keeps its table ([`exec::FileStatics::Shared`]).
+    pub(super) fn leaving_statics(&self, annex: Option<exec::AnnexId>) -> Option<Statics> {
+        if self.bailout {
+            return None;
+        }
+        let annex = self.annexes().get(annex?)?;
+        match annex.statics? {
+            exec::FileStatics::Own(number) => Some(Statics::Own(number)),
+            exec::FileStatics::Shared { kept: true } => None,
+            exec::FileStatics::Shared { kept: false } => Some(Statics::Main(
+                exec::code_of(annex.unit.as_ref()?).runtime_cache,
+            )),
+        }
+    }
+
+    /// `zend_destroy_static_vars` of a file's main op array as its frame
+    /// leaves (`Z/Zend/zend_vm_def.h:3035`, `Z/Zend/zend.c:1988`): the
+    /// table given up and the pointer emptied.
+    pub(super) fn destroy_file_statics(&mut self, of: Statics) {
         if self.static_vars.mains == 0 {
             return;
         }
-        if let Some(table) = self.static_vars.tables.remove(&Statics::Main(offset)) {
+        if let Some(table) = self.static_vars.tables.remove(&of) {
             self.static_vars.mains -= 1;
             self.release(Value::array(table));
         }
