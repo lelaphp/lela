@@ -981,10 +981,43 @@ impl Request {
         }
     }
 
+    /// The key `zend_symtable_str_update_ind` makes a container of the
+    /// walk under: an integer where `ZEND_HANDLE_NUMERIC_STR` reads one,
+    /// and otherwise `zend_hash_str_update_ind`'s `zend_string_init`, a
+    /// string of its own however short, never the one-byte string
+    /// [`PhpString::new`] would share.
+    fn container_key(&mut self, index: &[u8]) -> Result<Owner<Key>, Thrown> {
+        match php_heap::canonical_int(index) {
+            Some(index) => Ok(Owner::index(index)),
+            None => Ok(Owner::adopt(self.string_init(index)?).into_key()),
+        }
+    }
+
     /// `php_register_variable_ex` into `track`, with `cookie` saying the
     /// track is `$_COOKIE`'s, whose plain name already there keeps the
     /// first value (RFC 2965's more specific path first). `value` is the
     /// array's from here, and so is each key the walk makes.
+    ///
+    /// A plain name is `php_register_variable_quick`'s, and a bracketed
+    /// name's containers are `zend_symtable_str_update_ind`'s, each a
+    /// string of its own whatever its length:
+    ///
+    /// ```php
+    /// foreach (['x=1', 'xy=1', 'x[a]=1', 'xy[a]=1', 'x[ab]=1', 'xy[ab]=1', 'x[a][b]=1', '1[a]=1', 'x[1]=1'] as $q) {
+    ///     $m = memory_get_usage(); parse_str($q, $r); $n = memory_get_usage() - $m; unset($r); echo $q, " ", $n, "\n";
+    /// }
+    /// ```
+    /// ```expect regime=jit-off
+    /// x=1 408
+    /// xy=1 440
+    /// x[a]=1 816
+    /// xy[a]=1 816
+    /// x[ab]=1 848
+    /// xy[ab]=1 848
+    /// x[a][b]=1 1224
+    /// 1[a]=1 624
+    /// x[1]=1 656
+    /// ```
     pub(crate) fn register_in(
         &mut self,
         track: PhpArray,
@@ -1116,8 +1149,8 @@ impl Request {
                         value.give_up(self);
                         return Ok(());
                     }
-                    match PhpString::new(self, index) {
-                        Ok(index) => Some(Key::from_string(self, index)),
+                    match self.container_key(index) {
+                        Ok(key) => Some(key),
                         Err(thrown) => {
                             value.give_up(self);
                             return Err(thrown);
