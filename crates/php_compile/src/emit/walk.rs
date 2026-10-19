@@ -347,6 +347,7 @@ impl Emit<'_> {
             raised: Vec::new(),
             thrown: false,
             stage: crate::Stage::Compiling,
+            declared: None,
         }
     }
 
@@ -1312,6 +1313,7 @@ impl Emit<'_> {
                 raised: Vec::new(),
                 thrown: false,
                 stage: crate::Stage::Compiling,
+                declared: None,
             });
         }
         for declarator in self.list(node.property_declarators) {
@@ -1396,6 +1398,7 @@ pub(super) fn unread(line: u32, what: &str) -> CompileError {
         raised: Vec::new(),
         thrown: false,
         stage: crate::Stage::Compiling,
+        declared: None,
     }
 }
 
@@ -1419,6 +1422,7 @@ pub(super) fn refused(line: u32, message: impl Into<Cow<'static, str>>) -> Compi
         raised: Vec::new(),
         thrown: false,
         stage: crate::Stage::Compiling,
+        declared: None,
     }
 }
 
