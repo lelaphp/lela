@@ -47,6 +47,7 @@ fn tight_limit_fatal_releases_every_date_and_serves_again() {
         .ini("memory_limit", "2M")
         .sense_leaks(LeakSensor::Armed)
         .build();
+    let mut first = None;
     for _ in 0..2 {
         let served = engine.serve_capture_as(
             b"witness.php",
@@ -54,7 +55,7 @@ fn tight_limit_fatal_releases_every_date_and_serves_again() {
             Capture::default(),
         );
         assert_eq!(served.exit_code, 255);
-        let stdout = String::from_utf8_lossy(&served.stdout);
+        let stdout = String::from_utf8_lossy(&served.stdout).into_owned();
         assert!(
             stdout.starts_with(
                 "\nFatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate "
@@ -62,7 +63,7 @@ fn tight_limit_fatal_releases_every_date_and_serves_again() {
             "{stdout}"
         );
         assert!(stdout.ends_with("witness.php on line 5\n"), "{stdout}");
-        assert!(!stdout.contains("unexpected success"), "{stdout}");
+        assert_eq!(first.get_or_insert_with(|| stdout.clone()), &stdout);
     }
 }
 

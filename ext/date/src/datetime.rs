@@ -1639,6 +1639,7 @@ impl DateTime {
     ///
     /// ```php
     /// ini_set('memory_limit', '2M');
+    /// date_default_timezone_set('UTC');
     /// $dates = [];
     /// for ($i = 0; $i < 100000; $i++) {
     ///     $dates[] = new DateTime('2024-01-01 Europe/Amsterdam');
@@ -1646,7 +1647,7 @@ impl DateTime {
     /// echo "unexpected success\n";
     /// ```
     /// ```expect regime=jit-off exit=255
-    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 135168 bytes) in %SCRATCH%/witness.php on line 5
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 135168 bytes) in %SCRATCH%/witness.php on line 6
     /// ```
     fn __construct(
         req: &mut Request,
