@@ -174,7 +174,7 @@ impl ObservedOpcodes {
 /// the loop is generic over (design §5.8, §7.1): the engine binds one
 /// instantiation as it starts, [`Declared`]'s where an extension
 /// declared an opcode and [`Untold`]'s where none did.
-pub(crate) trait Telling: Copy {
+pub(crate) trait Telling: Copy + 'static {
     /// What a serving reads as its loop is entered.
     fn of(req: &Request) -> Self;
 

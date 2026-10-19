@@ -63,6 +63,8 @@ fn main() {
     let bodies = root.join("src/handlers.rs");
     println!("cargo:rerun-if-changed={}", spec.display());
     println!("cargo:rerun-if-changed={}", bodies.display());
+    // Design §5.8: the dispatch threaded by tail calls, nightly's alone.
+    println!("cargo::rustc-check-cfg=cfg(dispatch, values(\"tailcall\"))");
     let sources = [
         "../php_syntax/src",
         "../php_compile/src",
@@ -223,6 +225,14 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
          \x20       )))"
             .to_owned(),
     );
+    // `become` is refused by a stable parser even where a `cfg` leaves it
+    // out, so the threaded calls are written only into the build that sets
+    // the `cfg`, which cargo names to a build script in its environment.
+    let tails = if env::var("CARGO_CFG_DISPATCH").is_ok_and(|dispatch| dispatch == "tailcall") {
+        tails(&calls)
+    } else {
+        String::new()
+    };
     let mut arms = String::new();
     for (call, variants) in &calls {
         let pattern = variants
@@ -274,8 +284,103 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
          \x20   match op.handler {{\n\
          {arms}\
          \x20   }}\n\
-         }}\n"
+         }}\n\
+         {tails}"
     ))
+}
+
+/// The same calls threaded, `crate::tier::tail` (design §5.8): under
+/// `cfg(dispatch = "tailcall")`, one function per call, which serves its
+/// opline, finds the next and becomes its handler, and the table of them
+/// by `php_unit::Handler`, one entry per variant, so that an index past
+/// it is a build error in the table's constant and an entry no variant
+/// names is the unresolved handler's internal error.
+fn tails(calls: &[(String, Vec<String>)]) -> String {
+    let handlers: usize = calls.iter().map(|(_, variants)| variants.len()).sum();
+    // An entry the table's assignments leave is the unresolved handler's,
+    // whose internal error names the opcode, never another opcode's body.
+    let unfilled = calls
+        .iter()
+        .position(|(_, variants)| variants.iter().any(|variant| variant == "Unresolved"))
+        .unwrap_or_default();
+    let mut table = String::new();
+    let mut bodies = String::new();
+    for (number, (call, variants)) in calls.iter().enumerate() {
+        for variant in variants {
+            writeln!(
+                table,
+                "        table[Handler::{variant} as usize] = tail_{number}::<T, D>;"
+            )
+            .ok();
+        }
+        // A call that is the internal error reads nothing it is handed.
+        let (unread, body) = if call.starts_with("Err(") {
+            ("#[allow(unused_variables)]\n", format!("    {call}\n"))
+        } else {
+            (
+                "",
+                format!(
+                    "    let next = {call}?;\n\
+                     \x20   #[cfg(debug_assertions)]\n\
+                     \x20   req.sensed_after(code, op)?;\n\
+                     \x20   let (op, at) = match onward(req, frame, oplines, at, next, told)? {{\n\
+                     \x20       ControlFlow::Continue(on) => on,\n\
+                     \x20       ControlFlow::Break(next) => return Ok(next),\n\
+                     \x20   }};\n\
+                     \x20   become (table.of(op.handler))(req, frame, code, oplines, op, at, told, table)\n"
+                ),
+            )
+        };
+        write!(
+            bodies,
+            "\n{unread}\
+             extern \"rust-preserve-none\" fn tail_{number}<T: Tier, D: Telling>(\n\
+             \x20   req: &mut Request,\n\
+             \x20   frame: FrameRef,\n\
+             \x20   code: &OpArray,\n\
+             \x20   oplines: &[Opline],\n\
+             \x20   op: &Opline,\n\
+             \x20   at: u32,\n\
+             \x20   told: &D,\n\
+             \x20   table: &Table<D>,\n\
+             ) -> Result<Next, Fatal> {{\n\
+             {body}\
+             }}\n"
+        )
+        .ok();
+    }
+    format!(
+        "\n/// The calls of [`dispatch`] threaded (`crate::tier::tail`).\n\
+         #[cfg(dispatch = \"tailcall\")]\n\
+         pub(super) mod tails {{\n\
+         use std::marker::PhantomData;\n\
+         use std::ops::ControlFlow;\n\
+         \n\
+         use php_heap::{{Fatal, FrameRef}};\n\
+         use php_unit::{{Handler, OpArray, Opline}};\n\
+         \n\
+         use crate::api::request::Request;\n\
+         use crate::observer::Telling;\n\
+         use crate::tier::tail::{{Tail, Table, onward}};\n\
+         use crate::tier::{{Next, Tier}};\n\
+         \n\
+         /// How many `php_unit::Handler`s there are, one entry of the table\n\
+         /// each.\n\
+         pub(crate) const HANDLERS: usize = {handlers};\n\
+         \n\
+         /// Each handler's function by its `php_unit::Handler`.\n\
+         pub(crate) struct Tails<T, D>(PhantomData<(T, D)>);\n\
+         \n\
+         impl<T: Tier, D: Telling> Tails<T, D> {{\n\
+         \x20   pub(crate) const TABLE: &Table<D> = &Table({{\n\
+         \x20       let mut table = [tail_{unfilled}::<T, D> as Tail<D>; HANDLERS];\n\
+         {table}\
+         \x20       table\n\
+         \x20   }});\n\
+         }}\n\
+         {bodies}\
+         }}\n"
+    )
 }
 
 /// One `php_unit::Handler`: its name, the kinds of `op1` and `op2` it is

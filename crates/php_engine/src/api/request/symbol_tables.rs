@@ -76,7 +76,7 @@ impl Request {
                     // The interned string the unit's compile made of the
                     // name ([`Request::frame_var_names`]); a refusal has
                     // ended the request.
-                    let Ok(name) = self.interned(&name.0) else {
+                    let Ok(name) = self.declared_string(&name.0) else {
                         return;
                     };
                     self.table_push(table, name, Symbol::Indirect(frame, at));
@@ -128,7 +128,7 @@ impl Request {
                 entries[index].1 = Symbol::Value(value);
                 continue;
             }
-            match self.interned(&name.0) {
+            match self.declared_string(&name.0) {
                 Ok(name) => self.symbol_update(table, name, value),
                 Err(_) => self.release(value),
             }
@@ -196,7 +196,7 @@ impl Request {
         };
         code.vars
             .iter()
-            .map(|name| self.interned(&name.0))
+            .map(|name| self.declared_string(&name.0))
             .collect()
     }
 
@@ -643,23 +643,6 @@ impl Request {
         place.write(Value::undef().to_zval());
         self.release(cell.as_value());
         value
-    }
-
-    /// `write` handed the string a symbol table keys `name` by where the
-    /// caller holds no string of its own, `zend_string_init_existing_interned`:
-    /// the interned string the engine or this request holds, an
-    /// auto-global's and a CV's among them, else a new string of the
-    /// request's, which the table keeps where `write` adds the name. The
-    /// `Err` is the memory limit.
-    pub(super) fn with_name<R>(
-        &mut self,
-        name: &[u8],
-        write: impl FnOnce(&mut Request, PhpString) -> R,
-    ) -> Result<R, Thrown> {
-        let name = PhpString::existing_interned(self, name)?;
-        let written = write(self, *name);
-        name.give_up(self);
-        Ok(written)
     }
 
     /// `EG(symbol_table)`, laid down where nothing has written it yet.

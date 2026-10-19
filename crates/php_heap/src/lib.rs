@@ -57,6 +57,7 @@ mod sort;
 mod stack;
 mod string;
 mod table_copy;
+mod zend_arena;
 mod zval;
 
 pub use array::DeclaredRows;
@@ -113,13 +114,15 @@ pub struct Heap {
     /// Declared before `mm` for the same reason the store is.
     resources: resource::RegularList,
     mm: mm::Mm,
-    /// php's `CG(interned_strings)`: the strings this request interned,
-    /// live until the request ends (`Z/Zend/zend_string.c:346-353`).
-    /// The strings are the request's own memory and are counted as such,
-    /// and so is the table's data, one [`Arr`] whose 40960 bytes the
-    /// first string it interns lays down, doubling where php's doubles.
-    /// Declared after `mm` so that the chunks holding that data are gone
-    /// before the table frees its header.
+    /// php's `CG(arena)`, the compiler's arena: 64 KiB laid down before
+    /// anything else of the request's ([`Heap::new`]), carved and never
+    /// freed a piece at a time ([`Heap::carve`]).
+    arena: zend_arena::ZendArena,
+    /// The strings the units this request compiled for itself hold and
+    /// the names its declarations are read by, each once and live until
+    /// the request ends ([`Heap`]'s [`Intern`]): the request's own memory
+    /// and counted as such, in a table of the system allocator's, which
+    /// nothing counts ([`string::Table`]).
     interned: string::Table,
     /// php's `EG(ht_iterators)`: the positions the walks of this
     /// request's tables are registered at.
@@ -150,9 +153,11 @@ impl Default for Heap {
 }
 
 impl Heap {
-    /// A heap with php's main chunk mapped and the object store's table
-    /// laid down in it, which is what `init_executor` allocates before
-    /// the request serves a line, and nothing else.
+    /// A heap with php's main chunk mapped and laid down in it, in
+    /// `zend_activate`'s order, the compiler's arena `init_compiler`
+    /// creates and the object store's table `init_executor` allocates,
+    /// and nothing else: what a request's heap holds of the engine's own
+    /// before the host and the extensions start it.
     #[must_use]
     pub fn new() -> Heap {
         Heap::over(mm::Mm::new())
@@ -183,6 +188,7 @@ impl Heap {
     }
 
     fn over(mut mm: mm::Mm) -> Heap {
+        let arena = zend_arena::ZendArena::new(&mut mm);
         let store = object::Store::new(&mut mm);
         let mut gc = collector::Collector::new();
         gc.enable(true);
@@ -190,6 +196,7 @@ impl Heap {
             store,
             resources: resource::RegularList::new(),
             mm,
+            arena,
             interned: string::Table::new(),
             iterators: iterators::Iterators::default(),
             gc,
@@ -200,22 +207,15 @@ impl Heap {
         }
     }
 
-    /// The request's table of interned strings laid down, the 40960 bytes
-    /// php's compiler lays down with the first string it interns while it
-    /// compiles the primary file (`zend_add_interned_string`), so what
-    /// `memory_get_usage()` counts from the file's first line on is php's
-    /// whether or not anything is interned after it:
-    ///
-    /// ```php
-    /// $m = memory_get_usage();
-    /// $c = get_class(new ArrayObject);
-    /// echo memory_get_usage() - $m < 4096 ? "no table laid down here\n" : "a table laid down here\n";
-    /// ```
-    /// ```expect
-    /// no table laid down here
-    /// ```
-    pub fn lay_interned_table(&mut self) -> Result<(), Fatal> {
-        self.interned.lay_down(&mut self.mm)
+    /// `zend_arena_alloc(&CG(arena), size)`: `size` bytes, rounded up to
+    /// eight, carved from the compiler's arena, which takes a block of
+    /// the request's heap only where the newest has not the room, and
+    /// gives nothing back before the request ends. What php keeps in the
+    /// bytes, a runtime cache's slots among them, the engine keeps
+    /// typed and elsewhere, so the carve is the room php's takes and
+    /// hands out no memory. The `Err` is the memory limit's fatal.
+    pub fn carve(&mut self, size: usize) -> Result<(), Fatal> {
+        self.arena.carve(&mut self.mm, size)
     }
 
     /// Bytes in use: the bin accounting for `real == false`, the bytes
@@ -417,22 +417,11 @@ impl Heap {
         Ok(unsafe { Str::init_with(at, size - header + l, 0, fill) })
     }
 
-    /// How many strings this request has interned, php's
-    /// `zend_hash_num_elements(&CG(interned_strings))`.
+    /// How many strings this request's own table holds ([`Heap`]'s
+    /// [`Intern`]).
     #[must_use]
     pub fn interned(&self) -> usize {
         self.interned.count()
-    }
-
-    /// The string for `bytes` the frozen table or this request's
-    /// interned table already holds, php's `zend_interned_string_ht_lookup`
-    /// over `CG(interned_strings)`; nothing is interned.
-    #[must_use]
-    pub fn interned_find(&self, bytes: &[u8]) -> Option<Str> {
-        if let Some(frozen) = string::frozen_string(bytes) {
-            return Some(frozen);
-        }
-        self.interned.find(string::hash_func(bytes), bytes)
     }
 
     /// `zend_string_release`: one owner fewer, and the string is freed
@@ -522,9 +511,9 @@ impl Heap {
     /// itself keeps for the request's lifetime freed by name, the
     /// constant arrays of the units this request alone served, the
     /// resource list (`zend_destroy_rsrc_list`), the object store's
-    /// buckets (`zend_objects_store_destroy`) and the strings the request
-    /// interned with their table (`zend_interned_strings_deactivate`),
-    /// then every block still held named, `zend_mm_check_leaks`. What it
+    /// buckets (`zend_objects_store_destroy`), the strings the request
+    /// interned with their table (`zend_interned_strings_deactivate`)
+    /// and the compiler's arena (`shutdown_compiler`), then every block still held named, `zend_mm_check_leaks`. What it
     /// finds is recorded as the sensors record and raised by
     /// [`Heap::take_sensed`]: the blocks never freed, their bytes and the
     /// first of them, with what `name` calls the [`Origin`] that block was
@@ -544,6 +533,7 @@ impl Heap {
         self.resources.destroy(&mut self.mm);
         self.store.destroy(&mut self.mm);
         self.interned.destroy(&mut self.mm);
+        self.arena.destroy(&mut self.mm);
         self.mm.sense_leaks(name);
     }
 
@@ -886,18 +876,22 @@ pub(crate) enum Last {
 }
 
 impl Intern for Heap {
-    /// php's `zend_string_init_interned_request`
-    /// (`Z/Zend/zend_string.c:297-327`): the frozen table, then this
-    /// request's own, then a short-living interned string out of this
-    /// request's memory, which the request's end takes with everything
-    /// else. It is flagged interned and never persistent, so no release
-    /// frees it and no thread but this one can name it.
+    /// The home of the strings a declaration of this request holds: the
+    /// constants and names of a unit compiled for this request alone, an
+    /// `eval` or an uncached include, as its compile's
+    /// `zend_new_interned_string` keeps them in its op arrays and class
+    /// entries, and a name read off a declaration that its unit made no
+    /// string for. The frozen table, then this request's own, then a
+    /// string out of this request's memory at the size `zend_string_init`
+    /// takes, which the request's end takes with everything else. It is
+    /// flagged interned and never persistent, so no release frees it and
+    /// no thread but this one can name it, and the table that finds it
+    /// again costs nothing ([`string::Table`]).
     ///
-    /// The string is allocated before the table takes room for it, php's
-    /// order: `zend_string_init` and then `zend_add_interned_string` over
-    /// `zend_hash_add_new`, whose first call is what lays the bucket
-    /// array down. So the first string a request interns costs its own
-    /// bytes and the table's 40960 beside them, exactly as php's does.
+    /// It is not php's `zend_string_init_interned`: under opcache that is
+    /// `accel_init_interned_string_for_php`, a string of its caller's own
+    /// where opcache's buffer has none, which a request makes with
+    /// [`Heap::string`] and never finds again.
     fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
         if let Some(frozen) = string::frozen_string(bytes) {
             return Ok(frozen);
@@ -913,7 +907,7 @@ impl Intern for Heap {
         if valid_utf8 {
             s.mark_valid_utf8();
         }
-        self.interned.add(&mut self.mm, s)?;
+        self.interned.add(hash, s);
         Ok(s)
     }
 
@@ -930,6 +924,11 @@ impl Intern for Heap {
         Ok(a)
     }
 }
+
+/// What a fresh heap holds: the compiler's arena and the object
+/// store's table ([`Heap::new`]).
+#[cfg(test)]
+pub(crate) const STARTED: usize = zend_arena::FIRST_BLOCK + object::INIT_BYTES;
 
 // The mappings the allocator's tests count are the process's, and the
 // test runner `runs` its tests beside each other, in every file at once,
@@ -965,8 +964,9 @@ mod tests {
         let mut heap = Heap::new();
         let start = heap.memory_usage(false);
         let real = heap.memory_usage(true);
-        // The object store's table, and nothing else, before a line runs.
-        assert_eq!(start, object::INIT_BYTES);
+        // The compiler's arena and the object store's table, and nothing
+        // else, before a line runs.
+        assert_eq!(start, STARTED);
         assert_eq!(real, mm::CHUNK_SIZE);
         let mut strings = Vec::new();
         for len in [0usize, 1, 7, 8, 100, 3000, 5000, 3_000_000] {
@@ -997,14 +997,15 @@ mod tests {
 
     /// What a request interns is the request's own memory (design §5.2):
     /// the strings are allocated out of this heap, so `memory_get_usage()`
-    /// counts them as php counts `CG(interned_strings)`'s, and the second
-    /// request reads what the first read before it, because the first
-    /// request's end took every one of them.
+    /// counts them as php under opcache counts the plain strings it hands
+    /// out in their place, and the second request reads what the first
+    /// read before it, because the first request's end took every one of
+    /// them.
     ///
     /// **Every number here is php's own**, the bin arithmetic of design
     /// §5.13 over php's sizes: 40 bytes for a string of eight, 32 for one
-    /// of four, and 40960 for the table the first intern lays down, over
-    /// the object store's 8192 that every request starts with.
+    /// of four, and nothing for the table that finds them again, over
+    /// what every request starts with.
     #[test]
     fn what_a_request_interned_is_its_own_and_the_next_request_starts_where_it_did() {
         use std::sync::atomic::Ordering::Relaxed;
@@ -1013,8 +1014,8 @@ mod tests {
         let mut started_at = Vec::new();
         for _ in 0..2 {
             let mut heap = Heap::new();
-            started_at.push(heap.memory_usage(false) - object::INIT_BYTES);
-            let heap_start = object::INIT_BYTES;
+            started_at.push(heap.memory_usage(false) - STARTED);
+            let heap_start = STARTED;
             // The frozen table answers first and allocates nothing.
             let frozen = heap.intern(b"");
             assert!(matches!(frozen, Ok(s) if s.is_empty()));
@@ -1030,9 +1031,8 @@ mod tests {
             assert_eq!(first.address(), again.address());
             assert_eq!(heap.interned(), 1);
             // Eight bytes, the header and the NUL: php's forty-byte bin,
-            // and the table's own 40960 beside it, laid down by this
-            // first intern and by no earlier act.
-            assert_eq!(heap.memory_usage(false), heap_start + 40 + 40960);
+            // and nothing beside it.
+            assert_eq!(heap.memory_usage(false), heap_start + 40);
             assert!(first.is_interned());
             assert!(
                 !first.is_persistent(),
@@ -1041,15 +1041,15 @@ mod tests {
             // A release never frees an interned string, as php's does not;
             // the request's end is what takes it.
             heap.release_string(first);
-            assert_eq!(heap.memory_usage(false), heap_start + 41000);
+            assert_eq!(heap.memory_usage(false), heap_start + 40);
             // A string the request made and gave up goes back at once.
             let made = heap.string(b"made");
             assert!(made.is_ok());
             if let Ok(made) = made {
-                assert_eq!(heap.memory_usage(false), heap_start + 41032);
+                assert_eq!(heap.memory_usage(false), heap_start + 72);
                 heap.release_string(made);
             }
-            assert_eq!(heap.memory_usage(false), heap_start + 41000);
+            assert_eq!(heap.memory_usage(false), heap_start + 40);
         }
         assert_eq!(started_at, vec![0, 0], "every request starts at zero");
         assert_eq!(
@@ -1059,46 +1059,27 @@ mod tests {
         );
     }
 
-    /// The table's own storage is accounted where php accounts it
-    /// (design §5.13): nothing at request start, because
-    /// `zend_interned_strings_activate` inits `CG(interned_strings)` with
-    /// `persistent` 0 and no eager real-init, and one allocation of
-    /// `HT_SIZE_EX(1024, HT_SIZE_TO_MASK(1024))` on the first string the
-    /// request interns — 1024 buckets of 32 bytes and 2048 hash slots of
-    /// 4, 40960 bytes, ten whole pages of the request's heap.
-    ///
-    /// **Every number here is php's own.** The table doubles where php's
-    /// doubles, on the add that fills it, and php allocates the larger
-    /// array before it frees the smaller, which is what the peak reads.
+    /// The table's own storage is the system's (design §5.13, #2863):
+    /// under opcache php lays no `CG(interned_strings)` down on the
+    /// request's heap, so a request that interns 1025 strings pays their
+    /// bins and nothing else, where `php -n` pays a 40960-byte bucket
+    /// array on the first and doubles it on the 1025th. The frozen table
+    /// answers before this one and holds no string of the request's.
     #[test]
-    fn the_interned_table_s_storage_is_php_s_and_doubles_where_php_s_doubles() {
+    fn the_interned_table_s_storage_is_off_the_request_s_heap() {
         let _alone = alone();
         let mut heap = Heap::new();
         let start = heap.memory_usage(false);
-        // The frozen table answers before this one and lays nothing down,
-        // so a request that interns only what the process froze pays
-        // nothing at all.
         assert!(matches!(heap.intern(b""), Ok(s) if s.is_empty()));
         assert!(matches!(heap.intern(b"a"), Ok(s) if s.len() == 1));
         assert_eq!(heap.memory_usage(false), start);
-        // The first string that is this table's brings the whole array
-        // with it, beside the 32-byte bin the string itself takes.
-        assert!(heap.intern(b"s0").is_ok(), "the heap would not intern");
-        assert_eq!(heap.memory_usage(false), start + 40960 + 32);
-        for i in 1..1024u32 {
+        for i in 0..1025u32 {
             let interned = heap.intern(format!("s{i}").as_bytes());
             assert!(interned.is_ok(), "the heap would not intern s{i}");
         }
-        assert_eq!(heap.interned(), 1024);
-        // 1024 strings of the 32-byte bin, and the array they fill.
-        assert_eq!(heap.memory_usage(false), start + 40960 + 1024 * 32);
-        assert_eq!(heap.memory_peak(), start + 40960 + 1024 * 32);
-        // The one that fills it doubles it: the 2048-bucket array is
-        // allocated, what the smaller held is copied over, and the
-        // smaller goes back, so the peak holds both for that long.
-        assert!(heap.intern(b"s1024").is_ok(), "the heap would not grow");
-        assert_eq!(heap.memory_usage(false), start + 81920 + 1025 * 32);
-        assert_eq!(heap.memory_peak(), start + 81920 + 40960 + 1025 * 32);
+        assert_eq!(heap.interned(), 1025);
+        assert_eq!(heap.memory_usage(false), start + 1025 * 32);
+        assert_eq!(heap.memory_peak(), start + 1025 * 32);
     }
 
     /// A string past 2 MiB is a huge block, and php rounds one to the
@@ -1273,9 +1254,9 @@ mod tests {
                 Err(f) => break f,
             }
         };
-        // 511 free pages to a chunk, two of them the object store's
-        // table, two to an allocation.
-        assert_eq!(held.len(), 254);
+        // 511 free pages to a chunk, sixteen of them the compiler's
+        // arena and two the object store's table, two to an allocation.
+        assert_eq!(held.len(), 246);
         assert_eq!(
             fatal,
             Fatal::error(
@@ -1296,9 +1277,9 @@ mod tests {
         let mut heap = Heap::new();
         heap.set_memory_limit(2 * mm::CHUNK_SIZE);
         // A string of 3000 bytes is the 3072-byte bin, four slots to a
-        // `run` of three pages, so two chunks, less the two pages of the
-        // object store's table, hold 339 `runs` and the next one meets
-        // the limit.
+        // `run` of three pages, so two chunks, less the sixteen pages of
+        // the compiler's arena and the two of the object store's table,
+        // hold 334 `runs` and the next one meets the limit.
         let mut held = Vec::new();
         let fatal = loop {
             match heap.string(&[b'x'; 3000]) {
@@ -1306,7 +1287,7 @@ mod tests {
                 Err(f) => break f,
             }
         };
-        assert_eq!(held.len(), 339 * 4);
+        assert_eq!(held.len(), 334 * 4);
         assert_eq!(heap.memory_usage(true), 2 * mm::CHUNK_SIZE);
         assert_eq!(
             fatal,
@@ -1335,14 +1316,14 @@ mod tests {
         for s in held.drain(..) {
             heap.release_string(s);
         }
-        assert_eq!(heap.memory_usage(false), object::INIT_BYTES);
+        assert_eq!(heap.memory_usage(false), STARTED);
         assert_eq!(heap.memory_usage(true), 2 * mm::CHUNK_SIZE);
         let swept = heap.string(&[b'x'; 1760]);
         assert!(swept.is_ok(), "the sweep did not give the free runs back");
-        // The 1017 pages of the 339 `runs`, and the chunk the sweep
+        // The 1002 pages of the 334 `runs`, and the chunk the sweep
         // emptied kept against the next growth, as php keeps one.
         assert_eq!(heap.memory_usage(true), 2 * mm::CHUNK_SIZE);
-        assert_eq!(heap.memory_usage(false), object::INIT_BYTES + 1792);
+        assert_eq!(heap.memory_usage(false), STARTED + 1792);
         if let Ok(s) = swept {
             heap.release_string(s);
         }
@@ -1429,7 +1410,7 @@ mod tests {
             for s in held {
                 heap.release_string(s);
             }
-            assert_eq!(heap.memory_usage(false), object::INIT_BYTES);
+            assert_eq!(heap.memory_usage(false), STARTED);
         }
         assert_eq!(mm::MAPPINGS.load(Relaxed), before);
     }

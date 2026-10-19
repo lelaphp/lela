@@ -28,12 +28,16 @@
 use std::io::Write as _;
 
 use php_ext::abi::{ExtensionBuilder, IniStage};
-use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::{Allocation, AllocationObserverId, ObserveAllocations, Request};
 
+use crate::{Entry, Modifiable};
+
 /// `zend_test.zend_mm_custom_handlers.enabled`.
 pub(crate) const ENABLED: &[u8] = b"zend_test.zend_mm_custom_handlers.enabled";
+
+/// The switch's row of `zend_mm_custom_handlers.c`'s `PHP_INI_BEGIN`.
+pub(crate) const ENTRY: Entry = Entry::boolean(ENABLED, b"0", Modifiable::User);
 
 /// The switch and its `on_modify`; the extension's `RINIT` and
 /// `RSHUTDOWN` serve [`rinit`] and [`rshutdown`], which put the observer
@@ -52,13 +56,7 @@ pub(crate) const ENABLED: &[u8] = b"zend_test.zend_mm_custom_handlers.enabled";
 /// ```
 pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
     builder
-        .ini(vec![IniDecl {
-            name: Name(ENABLED.into()),
-            default: Some(b"0".as_slice().into()),
-            user: true,
-            per_dir: false,
-            system: false,
-        }])
+        .ini(vec![ENTRY.decl()])
         .on_modify(ENABLED, on_update_enabled)
 }
 

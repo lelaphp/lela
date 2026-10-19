@@ -5090,6 +5090,7 @@ impl<'a> Emit<'a> {
             bound_vars: std::mem::take(&mut self.static_vars),
             no_receiver: self.fn_flags.is_static,
             strict_types: self.typing == Typing::Strict,
+            return_mask: self.return_type.as_ref().map_or(0, Type::mask),
             numeric_dims: std::mem::take(&mut self.numeric_dims),
         })
     }

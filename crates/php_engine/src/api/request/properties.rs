@@ -8,7 +8,7 @@
 //! the source lists and the scope a write names are [`Properties`]'s,
 //! whose fields no file but this one reads.
 
-use php_heap::{Fatal, Heap, Intern, Obj, Ref, TableRow, Zval};
+use php_heap::{Fatal, Heap, Obj, Ref, TableRow, Zval};
 use php_link::Row;
 use php_unit::decl::{PropertyDecl, Visibility};
 
@@ -374,10 +374,7 @@ impl Request {
             let z = o.slot(i);
             return (!z.is_undef()).then(|| Value::of_zval(z));
         }
-        o.properties()?
-            .iter()
-            .find(|(k, _)| matches!(k, php_heap::Key::Str(s) if s.bytes() == name))
-            .map(|(_, z)| Value::of_zval(z))
+        Self::dynamic_prop(o, name)
     }
 
     /// `zend_get_property_offset` over the placed instance properties:
@@ -1239,11 +1236,7 @@ impl Request {
                     && !o.slot_uninit(placed.slot)
                     && !self.lazy_slot(o, placed.slot)
             }
-            None => !o.properties().is_some_and(|table| {
-                table
-                    .iter()
-                    .any(|(k, _)| matches!(k, php_heap::Key::Str(s) if s.bytes() == name))
-            }),
+            None => Self::dynamic_prop(o, name).is_none(),
         }
     }
 
@@ -1761,7 +1754,7 @@ impl Request {
         name: &[u8],
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
-        let interned = self.interned(name)?;
+        let interned = self.declared_string(name)?;
         let mut sent = Vec::with_capacity(arguments.len().saturating_add(1));
         sent.push(Value::string(interned));
         sent.extend_from_slice(arguments);
@@ -1920,16 +1913,8 @@ impl Request {
                 return Err(self.unplaced_error(class, name, miss));
             }
             wrong = true;
-        } else {
-            let dynamic = o
-                .properties()
-                .into_iter()
-                .flat_map(|table| table.iter().collect::<Vec<_>>())
-                .find(|(k, _)| matches!(k, php_heap::Key::Str(s) if s.bytes() == name))
-                .map(|(_, z)| Value::of_zval(z));
-            if let Some(value) = dynamic {
-                return Ok(Owner::take(self, value.deref()));
-            }
+        } else if let Some(value) = Self::dynamic_prop(o, name) {
+            return Ok(Owner::take(self, value.deref()));
         }
         let getter = self.magic_accessor(class, b"__get");
         let issetter = silent
@@ -2005,11 +1990,29 @@ impl Request {
         if p.readonly && !o.slot_bit(p.slot, php_heap::PropBit::Reinitable) {
             return Some(self.readonly_modification(p.declaring, name, "modify"));
         }
-        let set = p.set_visibility?;
-        if self.has_set_access(p.declaring, p.root, set) {
-            return None;
-        }
-        Some(self.set_inaccessible_property(p.declaring, set, p.readonly, name, "modify"))
+        self.set_refusal(p, name, "modify")
+    }
+
+    /// The set visibility of the declared slot `placed` where the scope
+    /// lacks it (`zend_asymmetric_property_has_set_access`), none where
+    /// it has it or the property has none.
+    fn set_barred(&self, placed: &DeclaredSlot) -> Option<Visibility> {
+        let set = placed.set_visibility?;
+        (!self.has_set_access(placed.declaring, placed.root, set)).then_some(set)
+    }
+
+    /// [`Request::set_inaccessible_property`]'s `Error` for `operation`
+    /// on the declared slot `placed`, where its set visibility refuses the
+    /// scope ([`Request::set_barred`]); none where it lets it through.
+    fn set_refusal(
+        &mut self,
+        placed: &DeclaredSlot,
+        name: &[u8],
+        operation: &str,
+    ) -> Option<Thrown> {
+        let set = self.set_barred(placed)?;
+        let (declaring, readonly) = (placed.declaring, placed.readonly);
+        Some(self.set_inaccessible_property(declaring, set, readonly, name, operation))
     }
 
     /// Whether `zend_std_get_property_ptr_ptr`
@@ -2040,10 +2043,7 @@ impl Request {
         if !self.may_access(placed.declaring, placed.visibility) {
             return false;
         }
-        placed.readonly
-            || placed
-                .set_visibility
-                .is_some_and(|set| !self.has_set_access(placed.declaring, placed.root, set))
+        placed.readonly || self.set_barred(&placed).is_some()
     }
 
     /// `zend_get_property_offset` at a write site, what `FETCH_OBJ_W`
@@ -2165,16 +2165,8 @@ impl Request {
         // property `IS_PROP_REINITABLE` has passed: `__clone` and a
         // `clone with` write it once more only from a scope that may set
         // it (`zend_std_write_property`).
-        if let Some(set) = placed.set_visibility
-            && !self.has_set_access(placed.declaring, placed.root, set)
-        {
-            return Err(self.set_inaccessible_property(
-                placed.declaring,
-                set,
-                placed.readonly,
-                name,
-                operation,
-            ));
+        if let Some(thrown) = self.set_refusal(&placed, name, operation) {
+            return Err(thrown);
         }
         Ok(Some((placed.slot, placed.typed)))
     }
@@ -2239,10 +2231,7 @@ impl Request {
         let Some(placed) = self.declared_slot(object.class(), name) else {
             return false;
         };
-        let barred = placed.readonly
-            || placed
-                .set_visibility
-                .is_some_and(|set| !self.has_set_access(placed.declaring, placed.root, set));
+        let barred = placed.readonly || self.set_barred(&placed).is_some();
         let held = object.heap().slot(placed.slot);
         barred
             && self.reaches(&placed)
@@ -2628,11 +2617,8 @@ impl Request {
         // `__set` makes on its own property, under the guard, meets.
         if let Some(placed) = self.declared_slot(class, &bytes)
             && !placed.readonly
-            && let Some(set) = placed.set_visibility
-            && !self.has_set_access(placed.declaring, placed.root, set)
+            && let Some(thrown) = self.set_refusal(&placed, &bytes, "modify")
         {
-            let thrown =
-                self.set_inaccessible_property(placed.declaring, set, false, &bytes, "modify");
             value.give_up(self);
             name.give_up(self);
             return Err(thrown);
@@ -3303,8 +3289,7 @@ impl Request {
                         "InternalError: an object walk's slot with no declaration",
                     ));
                 };
-                let interned = self.heap.intern(&name);
-                let key = self.fatal_of(interned).map(php_heap::Key::Str)?;
+                let key = php_heap::Key::Str(self.declared_string(&name)?.heap());
                 Ok(Some((key, Walked::Slot(slot))))
             }
             Some((_, TableRow::Entry(key), _)) => Ok(Some((key, Walked::Dynamic(key)))),
@@ -3444,7 +3429,7 @@ impl Request {
                     return Ok(None);
                 };
                 let (visibility, name) = (decl.visibility, decl.name.0.clone());
-                let name = self.interned(&name)?;
+                let name = self.declared_string(&name)?;
                 let row = (Key::Str(name), value, Some((info.declaring, visibility)));
                 Ok(Some((row, TableRow::Slot(slot))))
             }
@@ -3477,8 +3462,7 @@ impl Request {
         else {
             return Ok(key);
         };
-        let interned = self.heap.intern(prop);
-        self.fatal_of(interned).map(php_heap::Key::Str)
+        Ok(php_heap::Key::Str(self.declared_string(prop)?.heap()))
     }
 
     /// What [`Request::object_walk`] found at a place: the value, a view
@@ -3726,8 +3710,7 @@ impl Request {
             if z.is_undef() {
                 continue;
             }
-            let interned = self.heap.intern(name);
-            let name = self.fatal_of(interned).map(PhpString::of)?;
+            let name = self.declared_string(name)?;
             entries.push((Key::Str(name), Value::of_zval(z)));
         }
         if let Some(table) = o.properties() {
@@ -4148,16 +4131,8 @@ impl Request {
                     {
                         return Err(self.readonly_modification(placed.declaring, name, "unset"));
                     }
-                    if let Some(set) = placed.set_visibility
-                        && !self.has_set_access(placed.declaring, placed.root, set)
-                    {
-                        return Err(self.set_inaccessible_property(
-                            placed.declaring,
-                            set,
-                            placed.readonly,
-                            name,
-                            "unset",
-                        ));
+                    if let Some(thrown) = self.set_refusal(&placed, name, "unset") {
+                        return Err(thrown);
                     }
                     if !empty {
                         self.empty_slot(object, placed.slot);
@@ -4185,7 +4160,7 @@ impl Request {
             }
             wrong = true;
         } else if let Some(table) = o.properties() {
-            let key = self.interned(name)?;
+            let key = self.declared_string(name)?;
             let key = php_heap::Key::Str(key.heap());
             if table.contains(key) {
                 let table = self.separated_properties(o)?;

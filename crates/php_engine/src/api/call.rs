@@ -1926,7 +1926,7 @@ fn autoload_as(req: &mut Request, name: &[u8], keyed: bool) -> Result<Option<Cla
             let class = if bare.len() < name.len() {
                 req.string(bare)?
             } else {
-                req.existing_interned(bare)?
+                req.declared_string(bare)?
             };
             let returned = serve(req, loader.target(), &[Value::string(class)], &[]);
             req.release(Value::string(class));
@@ -2043,16 +2043,13 @@ fn global_constant(
     name: &[u8],
     fallback: Option<&[u8]>,
 ) -> Result<Value, Thrown> {
-    let found = match name.iter().rposition(|b| *b == b'\\') {
-        Some(separator) => {
-            let (namespace, constant_name) = name.split_at(separator);
-            let mut lowered = namespace.to_ascii_lowercase();
-            lowered.extend_from_slice(constant_name);
-            req.constant_named(&lowered)
-                .map(|value| (lowered, value))
-                .or_else(|| fallback.and_then(|global| unqualified_constant(req, global)))
-        }
-        None => unqualified_constant(req, name),
+    let found = if name.contains(&b'\\') {
+        let key = Request::constant_key(name);
+        req.constant_named(&key)
+            .map(|value| (key, value))
+            .or_else(|| fallback.and_then(|global| unqualified_constant(req, global)))
+    } else {
+        unqualified_constant(req, name)
     };
     let Some((key, value)) = found else {
         return Err(throw_error(
@@ -2304,7 +2301,7 @@ pub(crate) fn eval_declared_made(
     scope: Option<ClassId>,
 ) -> Result<Value, Thrown> {
     if let ConstExpr::Str(s) = expr {
-        return Ok(Value::string(req.interned(s)?));
+        return Ok(Value::string(req.declared_string(s)?));
     }
     eval_const_expr_made(req, expr, scope)
 }
@@ -2620,7 +2617,7 @@ fn class_name_node(
     // `ZVAL_STR_COPY(result, ce->name)`: the class's interned name, which
     // for a class the engine or the bundle declared costs the request
     // nothing.
-    Ok(Value::string(req.interned(&name)?))
+    Ok(Value::string(req.declared_string(&name)?))
 }
 
 /// `_IS_BOOL`, the type code a `(bool)` cast carries.

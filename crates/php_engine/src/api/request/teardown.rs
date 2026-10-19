@@ -65,6 +65,7 @@ impl Request {
         let dropped = stack.close(&mut self.heap);
         self.vm.stack = stack;
         self.drop_frames(dropped);
+        self.free_rooms();
         self.free_hash_tables();
         self.drop_request_states();
         let shared = &self.shared;

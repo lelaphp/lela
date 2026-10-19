@@ -278,7 +278,7 @@ impl Request {
             _ => None,
         };
         let message = if compile_time.is_some() {
-            string_prop(self, throwable, b"message")
+            self.throwable_prop_bytes(throwable, b"message")
         } else {
             // The class's own `__toString`, which a user class may
             // override; a string it answers is kept in the base class's
@@ -310,7 +310,7 @@ impl Request {
             }
             [
                 b"Uncaught ".as_slice(),
-                &string_prop(self, throwable, b"string"),
+                &self.throwable_prop_bytes(throwable, b"string"),
                 b"\n  thrown",
             ]
             .concat()
@@ -523,15 +523,8 @@ impl Request {
 
     /// The `file` and `line` a throwable recorded where it was made.
     fn throw_site(&self, throwable: PhpObject) -> (Vec<u8>, u32) {
-        let file = throwable
-            .prop(self, b"file")
-            .and_then(|value| value.as_str_bytes().map(<[u8]>::to_vec))
-            .unwrap_or_default();
-        let line = throwable
-            .prop(self, b"line")
-            .and_then(|value| value.as_int())
-            .and_then(|line| u32::try_from(line).ok())
-            .unwrap_or(0);
+        let file = self.throwable_prop_bytes(throwable, b"file");
+        let line = u32::try_from(self.throwable_prop_int(throwable, b"line")).unwrap_or(0);
         (file, line)
     }
 
@@ -850,13 +843,4 @@ pub enum Raised {
     /// for it, a throwable one of them delayed is given up, and one
     /// raised while it stands replaces it.
     GracefulExit,
-}
-
-/// One string property of a throwable, its bytes as they stand, empty
-/// where there is none.
-fn string_prop(req: &Request, object: PhpObject, name: &[u8]) -> Vec<u8> {
-    object
-        .prop(req, name)
-        .and_then(|value| value.as_str_bytes().map(<[u8]>::to_vec))
-        .unwrap_or_default()
 }

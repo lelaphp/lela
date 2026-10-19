@@ -43,12 +43,21 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 /// `[variant.<name>]` with one platform's table, at `path` by `md5`; a
-/// Linux table names an image, as the grammar asks of it.
+/// Linux table names an image and the macOS one the closure the tracked
+/// macOS build names, as the grammar asks of each.
 fn variant_table(name: &str, key: &str, path: &Path, md5: &str) -> String {
     let image = if key.starts_with("linux") {
-        "image = \"sha256:stand-in\"\n"
+        "image = \"sha256:stand-in\"\n".to_owned()
     } else {
-        ""
+        let pin = Pin::parse(&tracked_text()).unwrap();
+        let closure = pin
+            .variant
+            .values()
+            .find_map(|v| v.build(Platform::DarwinArm64));
+        format!(
+            "closure = \"{}\"\n",
+            closure.unwrap().provenance.closure.as_ref().unwrap()
+        )
     };
     format!(
         "\n[variant.{name}]\nflags = [\"--enable-zend-test\"]\n[variant.{name}.{key}]\npath = {:?}\nmd5 = \"{md5}\"\n{image}",
@@ -929,4 +938,62 @@ fn phpt_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_it() {
         "{}",
         reading.message
     );
+}
+
+/// The negative controls of the closure (#2935), one fixture each under
+/// `xtask/fixtures/oracle/closure/`: a macOS build naming no closure, a
+/// Linux build naming one, and a macOS build made against a `[closure]`
+/// the pin has moved past. Each pin is refused on load, on any machine,
+/// naming the variant's table and the person's re-pin.
+#[test]
+fn the_fixtures_whose_build_the_closure_does_not_hold_are_refused_on_load() {
+    let moved = "was made against the closure sha256:f3f950ce43447203da79ea7a1a4391bdbdc1963bf63528f58b46da443e68e2b8, and the pin's [closure] is sha256:f22ee36557db677d4e720a3e315fa3aa26230a9d9e6c0489eee4826a4bae71e4, so its build predates the closure";
+    for (name, key, refusal) in [
+        (
+            "unnamed",
+            "darwin-arm64",
+            "names no closure, so its build predates the pin's [closure]",
+        ),
+        ("linux", "linux-x86_64", "names the closure sha256:f22ee365"),
+        ("moved", "darwin-arm64", moved),
+    ] {
+        let path = fixture("closure").join(format!("{name}.toml"));
+        let err = format!("{:#}", Pin::load(&path).unwrap_err());
+        let at = format!("[variant.closure.{key}] ");
+        let repin = format!("`scripts/oracle-build.py build {key} closure` is a person's act");
+        assert!(
+            err.contains(&(at + refusal)) && err.contains(&repin),
+            "{name}: {err}"
+        );
+    }
+}
+
+/// The recipe prints the closure digest a darwin-arm64 build is made
+/// against (#2935) as xtask makes it: `scripts/oracle-build.py closure`
+/// over the tracked pin is the digest its macOS build names, which the
+/// pin's grammar holds to `[closure]`'s. Run where the macOS build is
+/// made, whose runner installs the recipe's Python.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_recipe_prints_the_closure_digest_the_tracked_macos_build_names() {
+    let out = std::process::Command::new("python3")
+        .arg("-I")
+        .arg(workspace().join("scripts/oracle-build.py"))
+        .arg("closure")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let pin = Pin::parse(&tracked_text()).unwrap();
+    let named = (pin.variant.values()).filter_map(|variant| {
+        variant
+            .build(Platform::DarwinArm64)?
+            .provenance
+            .closure
+            .clone()
+    });
+    let named: Vec<String> = named.map(|digest| digest.to_string()).collect();
+    assert!(!named.is_empty(), "the tracked pin names a macOS build");
+    for digest in named {
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), digest);
+    }
 }

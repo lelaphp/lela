@@ -165,7 +165,7 @@ impl Request {
             self.addref(&Value::string(held));
             return Ok(held);
         }
-        self.interned(bytes)
+        self.declared_string(bytes)
     }
 
     /// `destroy_op_array`'s release of the names of each request-only

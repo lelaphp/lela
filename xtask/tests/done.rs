@@ -840,25 +840,20 @@ fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_
     assert!(verdict.unmet.iter().any(unrun("ext/pcre")), "{verdict:#?}");
 }
 
-/// A reading taken under the oracle's recipe is stale once the pin's values
-/// move, as one taken over a crate is once its tree does (#1387): an entry
-/// laid under `oracle.toml`'s `[recipe.env]` stales the touched crate's
-/// `witness` and `crosscheck` readings and its kept phpt run, which
-/// carries the pin's digest (#2725), and nothing else, each naming the pin
-/// as what changed. Before the change all are fresh; after it, a run taken
-/// again here leaves the base's stale, naming the call that takes it.
-#[test]
-fn a_reading_under_the_recipe_is_stale_once_the_recipe_changes() {
-    let root = scratch("recipe");
+/// The touched crate's readings and kept runs met, then the pin rewritten
+/// by `edit`: what `done` calls stale for it naming the pin as what
+/// changed is the crate's instruments of [`UNDER_RECIPE`], its kept phpt
+/// run among them (#2725), where `stales`, and nothing where not.
+fn after_the_pin_moves(name: &str, edit: impl Fn(&str) -> String, stales: bool) -> Tree {
+    let root = scratch(name);
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
     record_asked(&Store::of_workspace(&root), &root, "ext/pcre");
     assert!(judge(&root).met(), "{:#?}", judge(&root));
 
     let pin = root.join("oracle.toml");
-    let entry = read("xtask/fixtures/witness/recipe-env/env.toml");
     let text = std::fs::read_to_string(&pin).unwrap();
-    let changed = text.replacen("[recipe.env]\n", &format!("[recipe.env]\n{entry}"), 1);
-    assert_ne!(changed, text, "the pin has a [recipe.env]");
+    let changed = edit(&text);
+    assert_ne!(changed, text, "the edit changes the pin");
     std::fs::write(&pin, changed).unwrap();
     let verdict = judge(&root);
     let mut stale: Vec<&str> = verdict
@@ -876,8 +871,24 @@ fn a_reading_under_the_recipe_is_stale_once_the_recipe_changes() {
         .collect();
     under.sort_unstable();
     under.dedup();
-    assert_eq!(stale, under, "{verdict:#?}");
     assert!(under.contains(&"phpt"));
+    under.retain(|_| stales);
+    assert_eq!(stale, under, "{verdict:#?}");
+    root
+}
+
+/// A reading taken under the oracle's recipe is stale once the pin's values
+/// move, as one taken over a crate is once its tree does (#1387): an entry
+/// laid under `oracle.toml`'s `[recipe.env]` stales the touched crate's
+/// `witness` and `crosscheck` readings and its kept phpt run, which
+/// carries the pin's digest (#2725), and nothing else, each naming the pin
+/// as what changed. Before the change all are fresh; after it, a run taken
+/// again here leaves the base's stale, naming the call that takes it.
+#[test]
+fn a_reading_under_the_recipe_is_stale_once_the_recipe_changes() {
+    let entry = read("xtask/fixtures/witness/recipe-env/env.toml");
+    let env = |text: &str| text.replacen("[recipe.env]\n", &format!("[recipe.env]\n{entry}"), 1);
+    let root = after_the_pin_moves("recipe", env, true);
 
     // The run here taken again under the new recipe, and the base's still
     // under the old: the base's is stale and names the call that takes it
@@ -911,6 +922,49 @@ fn a_failing_or_skipped_reading_is_unmet_with_its_message() {
         ["budget: ext/pcre fail: ext/pcre: 7000 lines over the ceiling of 6000"],
         "{verdict:#?}"
     );
+}
+
+/// The pin's digest leaves out a build's provenance and nothing else
+/// (#2969): a Linux build's `image` changed keeps the touched crate's
+/// readings under the recipe and its kept run fresh.
+#[test]
+fn changing_a_builds_image_keeps_the_runs_under_the_recipe_fresh() {
+    let image = |text: &str| text.replacen("image = \"sha256:", "image = \"sha256:0", 1);
+    after_the_pin_moves("image", image, false);
+}
+
+/// A variant build's `md5` is its binary's identity, not its provenance:
+/// changing it stales every run under the recipe (#2969).
+#[test]
+fn changing_a_variant_builds_md5_stales_every_run_under_the_recipe() {
+    let md5 = |text: &str| {
+        let (head, variants) = text.split_at(text.find("[variant.").unwrap());
+        format!(
+            "{head}{}",
+            variants.replacen(", md5 = \"", ", md5 = \"0", 1)
+        )
+    };
+    after_the_pin_moves("variant-md5", md5, true);
+}
+
+/// `[oracle]`'s `md5`, a `[closure]` keg and a `[recipe]` ini line are
+/// values of the pin, each digested: changing one stales every run under
+/// the recipe (#2969). The keg's move re-pins the macOS build against the
+/// moved record, as a person re-pins it, and that is its provenance.
+#[test]
+fn changing_the_oracles_md5_a_closure_keg_or_a_recipe_ini_stales_every_run() {
+    let oracle = |text: &str| text.replacen("\nmd5 = \"", "\nmd5 = \"0", 1);
+    after_the_pin_moves("oracle-md5", oracle, true);
+    let keg = |text: &str| {
+        let moved = text.replacen("\nzstd = \"", "\nzstd = \"0", 1);
+        let refused = xtask::oracle::Pin::parse(&moved).unwrap_err().to_string();
+        let (_, at) = refused.split_once("made against the closure ").unwrap();
+        let (was, at) = at.split_once(", and the pin's [closure] is ").unwrap();
+        moved.replace(was, at.split(',').next().unwrap())
+    };
+    after_the_pin_moves("closure-keg", keg, true);
+    let ini = |text: &str| text.replacen("\"precision=14\"", "\"precision=13\"", 1);
+    after_the_pin_moves("recipe-ini", ini, true);
 }
 
 /// A touched crate's subset is held to no regression against the base

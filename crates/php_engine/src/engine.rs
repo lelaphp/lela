@@ -3641,6 +3641,8 @@ pub(crate) enum Known {
     IncludeOnce = 16,
     RequireOnce = 17,
     Trace = 30,
+    Argv = 49,
+    Argc = 50,
 }
 
 impl Known {
@@ -5025,6 +5027,7 @@ impl Engine {
         }
         let web = description.web.is_some();
         let mut req = Request::lent(Arc::clone(&self.shared), description, sink);
+        req.lay_start_rooms();
         if traced || self.shared.trace_to.is_some() {
             req.trace_natives();
         }
@@ -5115,6 +5118,14 @@ impl Engine {
         // `php_execute_script_ex` leaves as it is beside the expanded
         // `opened_path`, and which opcache makes the file's key of.
         let written = req.script_name().map(<[u8]>::to_vec);
+        let old_cwd = req.old_cwd();
+        if script
+            && source.is_none()
+            && let Some(written) = &written
+        {
+            // The memory limit's fatal is recorded and ends the request.
+            req.open_primary_handle(written).ok();
+        }
         let mut left = None;
         if script {
             // php-cgi and php-fpm open the file before
@@ -5135,6 +5146,8 @@ impl Engine {
         if let Some(left) = left {
             req.go_back(left);
         }
+        req.give_back_old_cwd(old_cwd);
+        req.close_primary_handle();
         ran
     }
 
@@ -5202,12 +5215,9 @@ impl Engine {
         source: Option<&[u8]>,
         written: Option<&[u8]>,
     ) -> Option<Result<PublishedUnit, CompileError>> {
-        let laid = req.heap_mut().lay_interned_table();
-        if let Err(thrown) = req.fatal_of(laid) {
-            req.leave_pending(&thrown);
-            return None;
-        }
         if let Some(source) = source {
+            // A source the host read is still `zend_compile_file`'s.
+            req.take_shared_hold();
             let script = req
                 .script_name()
                 .map_or_else(|| b"Standard input code".to_vec(), <[u8]>::to_vec);
@@ -5874,13 +5884,24 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit, entry: Loop) -
         return false;
     }
     let standing = req.vm().depth();
+    // The op array `zend_accel_load_script` copies out of the cache, or
+    // `zend_compile` makes, and its runtime cache, the request's while
+    // the file runs, as an include's are (design §6.3).
+    let Ok(copy) = crate::api::values::Emalloc::new(req, crate::exec::OP_ARRAY_SIZE) else {
+        return false;
+    };
     let frame = match req.push_frame(PublishedUnit::clone(unit)) {
         Ok(frame) => frame,
         Err(fatal) => {
+            copy.free(req);
             req.end_in(&fatal);
             return false;
         }
     };
+    if req.hold_op_array(frame, copy).is_err() {
+        req.pop_frame();
+        return false;
+    }
     if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
     }
@@ -7816,12 +7837,13 @@ mod tests {
                 "what the request interned is the request's own memory"
             );
         }
-        // The object store's table and the VM stack's first page, and
-        // nothing else, before a line runs (design §5.4, §5.6): 1024
+        // The compiler's arena, the object store's table and the VM
+        // stack's first page, and nothing else, before a line runs
+        // (design §5.4, §5.6, §5.13): `zend_arena_create(64 * 1024)`, 1024
         // buckets of a pointer each, and `ZEND_VM_STACK_PAGE_SIZE`.
         assert_eq!(
             started_at,
-            vec![8192 + 262_144, 8192 + 262_144],
+            vec![65_536 + 8192 + 262_144, 65_536 + 8192 + 262_144],
             "every request starts where the one before it did"
         );
         assert_eq!(

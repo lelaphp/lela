@@ -1,0 +1,35 @@
+# A negative control (#2935): the grammar's least pin with a [closure], and a
+# Linux build that names a closure: it is made in its image, against no
+# Homebrew closure. `Pin::load` must refuse it (xtask/tests/variant.rs).
+[oracle]
+version = "8.5.9"
+path = "/nowhere/php"
+md5 = "00000000000000000000000000000000"
+
+[source]
+tag = "php-8.5.9"
+commit = "dd6e76cc"
+path = "/nowhere/php-src"
+phpt_files = 0
+
+[recipe]
+script_name = "witness.php"
+preamble = "<?php\n"
+args = ["-n"]
+ini = []
+env_clear = true
+
+[recipe.limits]
+timeout_s = 60
+
+[recipe.normalise]
+crlf_to_lf = true
+trim = " \t\n\r\u0000\u000B"
+scratch_token = "%SCRATCH%"
+
+[closure]
+zstd = "1.5.7_1"
+
+[variant.closure]
+flags = ["--enable-zend-test"]
+linux-x86_64 = { path = "php", md5 = "00000000000000000000000000000000", image = "sha256:0000000000000000000000000000000000000000000000000000000000000000", closure = "sha256:f22ee36557db677d4e720a3e315fa3aa26230a9d9e6c0489eee4826a4bae71e4" }

@@ -1,0 +1,36 @@
+# A negative control (#2935): the grammar's least pin with a [closure], and a
+# macOS build that names no closure: built before the pin recorded one, or
+# with no record of what it was made against. `Pin::load` must refuse it
+# (xtask/tests/variant.rs).
+[oracle]
+version = "8.5.9"
+path = "/nowhere/php"
+md5 = "00000000000000000000000000000000"
+
+[source]
+tag = "php-8.5.9"
+commit = "dd6e76cc"
+path = "/nowhere/php-src"
+phpt_files = 0
+
+[recipe]
+script_name = "witness.php"
+preamble = "<?php\n"
+args = ["-n"]
+ini = []
+env_clear = true
+
+[recipe.limits]
+timeout_s = 60
+
+[recipe.normalise]
+crlf_to_lf = true
+trim = " \t\n\r\u0000\u000B"
+scratch_token = "%SCRATCH%"
+
+[closure]
+zstd = "1.5.7_1"
+
+[variant.closure]
+flags = ["--enable-zend-test"]
+darwin-arm64 = { path = "php", md5 = "00000000000000000000000000000000" }

@@ -823,7 +823,7 @@ fn get_class(req: &mut Request, object: Passed<PhpObject>) -> Result<PhpString, 
         }
     };
     let name = req.class_name_bytes(class);
-    req.interned(&name)
+    req.declared_string(&name)
 }
 
 /// `strlen(string $string): int`, php's `ZEND_FUNCTION(strlen)`
@@ -1147,11 +1147,8 @@ fn defined(req: &mut Request, constant_name: PhpString) -> Result<bool, Thrown> 
         };
         return Ok(class.is_some_and(|class| req.class_constant_defined(class, constant)));
     }
-    if let Some(separator) = bytes.iter().rposition(|b| *b == b'\\') {
-        let (namespace, constant) = bytes.split_at(separator);
-        let mut lowered = namespace.to_ascii_lowercase();
-        lowered.extend_from_slice(constant);
-        return Ok(req.constant_named(&lowered).is_some());
+    if bytes.contains(&b'\\') {
+        return Ok(req.constant_named(&Request::constant_key(bytes)).is_some());
     }
     Ok(crate::ops::defined(req, bytes))
 }
@@ -2485,6 +2482,25 @@ mod tests {
     use crate::test::Capture;
 
     /// What the engine wrote and what ended it, for one source.
+    /// The bin `virtual_cwd_activate`'s copy of the working directory
+    /// takes, `CWD_STATE_COPY`'s `emalloc(cwd_length + 1)`
+    /// (`Z/Zend/zend_virtual_cwd.c:233`, `api::request::rooms`): the one
+    /// part of a request's starting usage that depends on where it
+    /// starts, which for these tests is the directory cargo runs them
+    /// in, 80 bytes in a worktree's `crates/php_engine` and 56 in the
+    /// main checkout's, whose path is sixteen bytes shorter.
+    fn cwd_copy() -> usize {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let mut heap = php_heap::Heap::new();
+        let before = heap.memory_usage(false);
+        let Ok(block) = heap.block(cwd.as_os_str().len() + 1) else {
+            return 0;
+        };
+        let size = heap.memory_usage(false).saturating_sub(before);
+        heap.free_block(block);
+        size
+    }
+
     fn served(source: &str) -> (String, Option<String>) {
         let served = Engine::builder()
             .build()
@@ -2512,11 +2528,19 @@ mod tests {
     /// `zend_mm_init` maps into `real_size` before a request runs a line
     /// (`Z/Zend/zend_alloc.c:2047-2081`), and the oracle answers it too.
     ///
-    /// 315536 is the object store's table, the VM stack's first page,
+    /// 344616 and the working directory's copy ([`cwd_copy`]) is the
+    /// compiler's arena, the object store's table, the VM
+    /// stack's first page, `PHP_CLI_PROCESS_TITLE`'s `zend_constant` and
+    /// name, the main op array's copy and runtime cache,
+    /// as an include's (`exec::HeapOpArray`), the rooms php keeps for
+    /// request state the engine keeps elsewhere (`api::request::rooms`:
+    /// `EG(main_fiber_context)`, the working directory's copy and, on Apple's platforms,
+    /// `php_execute_script`'s buffer for the directory it entered in),
     /// `EG(symbol_table)`'s data, the variables `php_hash_environment`
     /// and the CLI lay down, and what this source's interning costs, and
     /// every byte of it but the variables' is php's own
-    /// arithmetic. `init_executor` lays `EG(objects_store)` down
+    /// arithmetic. `init_compiler` lays `CG(arena)` down at 64 KiB
+    /// (`Z/Zend/zend_compile.c:455`), and `init_executor` lays `EG(objects_store)` down
     /// before the request serves a line, 1024 buckets of a pointer each,
     /// 8192 bytes of the request heap (`Z/Zend/zend_execute_API.c:171`,
     /// design §5.4), and `zend_vm_stack_init` the stack's first 262144
@@ -2534,16 +2558,13 @@ mod tests {
     /// `ZEND_MM_ALIGNED_SIZE(_ZSTR_STRUCT_SIZE(len))` over a 24-byte
     /// header, the bytes and the NUL, where `var_dump` and
     /// `memory_get_usage` are function names php interned at startup and
-    /// cost nothing. The 40960 beside them is the
-    /// table's own bucket array, which php `emalloc`s on the first string
-    /// a request interns and not at request start: 1024 buckets of 32
-    /// bytes and 2048 hash slots of 4, `HT_SIZE_EX(1024,
-    /// HT_SIZE_TO_MASK(1024))` (`Z/Zend/zend_types.h:486-493`) over the
-    /// `nTableSize` `zend_interned_strings_activate` sets
-    /// (`Z/Zend/zend_string.c:78-84`, `:346-349`). `STDIN`, `STDOUT` and
+    /// cost nothing. The table that finds the string again is off the
+    /// request's heap, as opcache keeps php's (`php_heap`'s
+    /// `string::Table`), where `php -n` `emalloc`s a 40960-byte bucket
+    /// array on the first string a request interns. `STDIN`, `STDOUT` and
     /// `STDERR`, which `do_cli` opens before a line runs, are the stream
     /// layer's, and an engine with none, as this test's, opens none of
-    /// them; under the bundle they cost 1200 more. The 1632 is `$argv`
+    /// them; under the bundle they cost 1648 more. The 1568 is `$argv`
     /// with its one word, the four empty arrays of
     /// `$_GET`, `$_POST`, `$_COOKIE` and `$_FILES`, and `$_SERVER` with
     /// the CLI's nine rows, laid into `EG(symbol_table)` before a line
@@ -2566,8 +2587,9 @@ mod tests {
         let (flagged, _) = served("<?php var_dump(memory_get_usage(true));");
         let (coerced, _) = served("<?php var_dump(memory_get_usage(1));");
         assert_eq!(
-            unflagged, "int(315536)\n",
-            "the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1632, the interned table's 40960 and the one string in it, the file's name's 48; an engine with no stream layer opens no standard streams"
+            unflagged,
+            format!("int({})\n", 344_616 + cwd_copy()),
+            "the compiler's arena's 65536, the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1568, the one string the request interns, the file's name's 48, the start's rooms; an engine with no stream layer opens no standard streams"
         );
         assert_eq!(flagged, "int(2097152)\n");
         assert_eq!(coerced, flagged, "php's Z_PARAM_BOOL coerces 1 to true");
@@ -2630,15 +2652,17 @@ mod tests {
     ///
     /// **The second number is the oracle's; the first is this engine's
     /// own accounting**, for the reason the pin above states at length.
-    /// 2097152 is php's one 2 MiB chunk. 315536 is the object store's
-    /// 8192, the VM stack's first page of 262144, `EG(symbol_table)`'s
-    /// data of 2560 (an engine with no
+    /// 2097152 is php's one 2 MiB chunk. 344632 and the working
+    /// directory's copy ([`cwd_copy`]) is the usage of the pin
+    /// above, and the sixteen bytes more the peak the reset leaves stood
+    /// at as the reset ran: the compiler's arena's
+    /// first block of 65536, the rooms of the pin above, the object
+    /// store's 8192, the VM stack's
+    /// first page of 262144, `EG(symbol_table)`'s data of 2560 (an engine with no
     /// stream layer opens none of the three standard streams `do_cli`
-    /// opens, which cost 1200 under the bundle), the 1632 of the variables
+    /// opens, which cost 1648 under the bundle), the 1568 of the variables
     /// `php_hash_environment` and the CLI lay down, and what this source's
-    /// interning costs the request: the
-    /// table's own 40960 bucket array on the first string it interns,
-    /// and then the file's name 48 bytes; the three function names are
+    /// interning costs the request: the file's name, 48 bytes; the three function names are
     /// php's startup names and cost nothing. php counts its own interning the same
     /// way and then counts a request heap this engine does not have yet,
     /// so its number for this source, under the recipe as `witness.php`,
@@ -2651,8 +2675,9 @@ mod tests {
         );
         assert_eq!(fatal, None);
         assert_eq!(
-            body, "int(315536)\nint(2097152)\n",
-            "the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1632, the interned table's 40960 and the one string in it, the file's name's 48; an engine with no stream layer opens no standard streams"
+            body,
+            format!("int({})\nint(2097152)\n", 344_632 + cwd_copy()),
+            "the compiler's arena's 65536, the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1568, the one string the request interns, the file's name's 48, the start's rooms; an engine with no stream layer opens no standard streams"
         );
     }
 }

@@ -161,13 +161,15 @@ impl PhpString {
         Ok(Owner::adopt(made))
     }
 
-    /// `zend_string_init_interned`: the one interned string for these
-    /// bytes, never refcounted, what php hands out for a name a
-    /// declaration made (`ce->name`, `fptr->common.function_name`,
-    /// `prop_info->name`): the engine's string where its startup or a
-    /// published unit interned these bytes, which costs the request
-    /// nothing, else the request's own, allocated on its first ask and
-    /// shared by every later one. The `Err` is the memory limit.
+    /// The string a declaration holds for these bytes, never refcounted,
+    /// what php copies out of a name a declaration made (`ce->name`,
+    /// `fptr->common.function_name`, `prop_info->name`) or out of
+    /// `ZSTR_KNOWN`: the engine's string where its startup or a published
+    /// unit interned these bytes, which costs the request nothing, else
+    /// the request's own, allocated on its first ask and the same string
+    /// at every later one. php's `zend_string_init_interned`, which hands
+    /// its caller a string of its own, is [`PhpString::existing_interned`].
+    /// The `Err` is the memory limit.
     ///
     /// ```php
     /// $r = new ReflectionClass('stdClass');
@@ -179,19 +181,21 @@ impl PhpString {
     /// int(96)
     /// ```
     pub fn interned(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
-        req.interned(bytes)
+        req.declared_string(bytes)
     }
 
-    /// `zend_string_init_existing_interned`: the interned string for
-    /// these bytes where the engine or the request holds one already, a
-    /// name or a constant some unit declared, which costs nothing and
-    /// interns nothing new; a new string of the request's otherwise, as
-    /// [`PhpString::new`] makes it. What php's unserializer makes of an
-    /// array's or an object's key. The `Err` is the memory limit.
+    /// `zend_string_init_existing_interned` and
+    /// `zend_string_init_interned` as opcache installs them,
+    /// `accel_init_interned_string_for_php`: the engine's string for these
+    /// bytes, a name or a constant the engine's startup or a published
+    /// unit holds, which costs nothing, once the request has compiled a
+    /// file; a string of the request's own otherwise, `zend_string_init`
+    /// whatever its length, and never one kept to be found again. What
+    /// php's unserializer makes of an array's or an object's key. The
+    /// `Err` is the memory limit.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn existing_interned(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
-        let made = req.existing_interned(bytes)?;
-        Ok(Owner::adopt(made))
+        req.interned(bytes)
     }
 
     /// A string of `len` bytes written in place by `fill`, php's
@@ -698,13 +702,28 @@ impl PhpArray {
         key: Owner<Key>,
         value: Owner<Value>,
     ) -> Result<(), Thrown> {
+        self.write_at(req, key, value, Request::array_update)
+    }
+
+    /// [`PhpArray::set`] and [`PhpArray::add_new`] past the one call that
+    /// tells them apart, `write`: the array separated, or the key and the
+    /// value given up where it cannot be, and the key's owner given up
+    /// once the bucket took its own.
+    #[cfg_attr(debug_assertions, track_caller)]
+    fn write_at(
+        &mut self,
+        req: &mut Request,
+        key: Owner<Key>,
+        value: Owner<Value>,
+        write: fn(&mut Request, php_heap::Arr, php_heap::Key, Value) -> Result<(), Thrown>,
+    ) -> Result<(), Thrown> {
         if let Err(thrown) = self.separate(req) {
             key.give_up(req);
             value.give_up(req);
             return Err(thrown);
         }
         let key = key.hand_on();
-        let written = req.array_update(self.0, key.heap(), value.hand_on());
+        let written = write(req, self.0, key.heap(), value.hand_on());
         if let Key::Str(s) = key {
             req.release(Value::string(s));
         }
@@ -804,17 +823,7 @@ impl PhpArray {
         key: Owner<Key>,
         value: Owner<Value>,
     ) -> Result<(), Thrown> {
-        if let Err(thrown) = self.separate(req) {
-            key.give_up(req);
-            value.give_up(req);
-            return Err(thrown);
-        }
-        let key = key.hand_on();
-        let written = req.array_add_new(self.0, key.heap(), value.hand_on());
-        if let Key::Str(s) = key {
-            req.release(Value::string(s));
-        }
-        written
+        self.write_at(req, key, value, Request::array_add_new)
     }
 
     /// Replace the value at `key` in place; `false`, and `value` given
@@ -3373,12 +3382,13 @@ mod tests {
             Some(7),
             "the destructor ran once, reading the payload"
         );
-        assert_eq!(req.memory_usage(false) - start, 160 + 32);
+        // The destructor's `define()` took a `zend_constant`'s 40.
+        assert_eq!(req.memory_usage(false) - start, 160 + 32 + 40);
         req.release(v);
         assert_eq!(req.resource(1), None);
         assert_eq!(
             req.memory_usage(false),
-            start + 160,
+            start + 160 + 40,
             "the list's table stays until the request ends"
         );
         let Ok(next) = Resource::new(&mut req, kind, 0u8).map(Owner::hand_on) else {

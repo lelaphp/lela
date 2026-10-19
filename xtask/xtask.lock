@@ -149,6 +149,7 @@ oracle::Binary::absent
 oracle::Binary::file
 oracle::Binary::variant
 oracle::Build
+oracle::ClosureDigest
 oracle::ENGINE
 oracle::Ended
 oracle::Host
@@ -193,6 +194,7 @@ oracle::Promised::holds
 oracle::Promised::load
 oracle::Promised::or_skip
 oracle::Promised::parse
+oracle::Provenance
 oracle::Recipe
 oracle::Regime
 oracle::Runner

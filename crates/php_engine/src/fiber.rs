@@ -264,8 +264,8 @@ pub enum Transfer {
 
 /// `zend_fiber_vm_state` under this engine's names: what a switch
 /// swaps, the stack the request runs on with the frames' engine half,
-/// the error-reporting level, the call-stack limit and
-/// `EG(active_fiber)`; and the chain of the stack's open observed
+/// the error-reporting level, the trace number, the call-stack limit
+/// and `EG(active_fiber)`; and the chain of the stack's open observed
 /// frames, which php keeps on the `zend_fiber_context` as
 /// `top_observed_frame` and swaps at the switch's notice
 /// ([`crate::observer`]).
@@ -274,6 +274,9 @@ pub(crate) struct Execution {
     pub(crate) vm: Vm,
     pub(crate) observing: ObservedChain,
     pub(crate) error_reporting: i64,
+    /// `EG(jit_trace_num)`, the tier's recording exclusion on this
+    /// execution ([`crate::tier::trace_num`]).
+    pub(crate) trace_num: crate::tier::TraceNum,
     pub(crate) stack_limit: StackLimit,
     /// `EG(active_fiber)` as the stack left it, which the switch back
     /// onto it restores: so a suspend that passes through a `Fiber` to
@@ -2334,6 +2337,9 @@ fn lay_down<P: HoldsCoroutine>(
         vm: Vm::fiber(),
         observing: ObservedChain::default(),
         error_reporting,
+        // A fiber's body starts at no trace (`zend_fiber_execute`,
+        // `Z/Zend/zend_fibers.c:599`).
+        trace_num: crate::tier::TraceNum::NONE,
         stack_limit: StackLimit::fiber(stack.base(), stack.end(), reserved),
         // Taken from the first resume ([`switch_into`]).
         active: None,
