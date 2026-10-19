@@ -6,10 +6,12 @@
 //!
 //! The tier declares its state as an extension does (`jit-design.md`
 //! §4): `jit.mode` and `jit.compile`, and `JitEngine`, whose `policy`
-//! reads php's `opcache.jit*` directives at engine start. No `Backend`
-//! lowers a trace yet (#2955), so `Mode` is `Off` whatever they say: a
-//! safepoint answers `Continue` before it reads any word, and an engine
-//! bound to `Jit` runs as one bound to `Nop` does.
+//! reads php's `opcache.jit*` directives at engine start. Under
+//! `Mode::Off` a safepoint answers `Continue` before it reads any word,
+//! and an engine bound to `Jit` runs as one bound to `Nop` does;
+//! otherwise a hot safepoint records (`dispatch`, `record`) and the
+//! pipeline numbers what would compile (`compiler`). No `Backend` lowers
+//! a trace yet (#2955), so nothing is entered.
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -21,13 +23,22 @@
     clippy::unimplemented
 )]
 
+use std::fmt::Write as _;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use php_engine::tier::{
-    Extension, ExtensionBuilder, Flow, FrameRef, Refusal, Request, Site, Start, StartupIni, Tier,
+    Extension, ExtensionBuilder, Flow, FrameRef, Refusal, Request, Site, Start, StartupIni, Thrown,
+    Tier,
 };
 
+mod compiler;
+mod dispatch;
 mod policy;
 mod record;
 mod table;
+#[cfg(test)]
+mod testing;
 mod types;
 
 // The crossing has no caller until a trace calls a kernel, so it is built
@@ -42,17 +53,17 @@ mod enter;
 pub use enter::bench;
 
 /// The compiled tier (`jit-design.md` §2.4): asked at the loop's three
-/// safepoints, under `Mode::Off` it answers [`Flow::Continue`] before it
-/// reads the word the site carries, so it touches no shared state and
-/// the loop runs `frame.opline` as it would under `Nop`.
+/// safepoints, it visits the word the site carries, and under `Mode::Off`
+/// answers [`Flow::Continue`] before it reads it, so it touches no shared
+/// state and the loop runs `frame.opline` as it would under `Nop`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Jit;
 
 impl Tier for Jit {
     #[inline(always)] // jit-design.md §4: one constant under Mode::Off, so the branch on `Flow` folds as `Nop`'s does
     #[allow(clippy::inline_always)]
-    fn safepoint(_: &mut Request, _: FrameRef, _: Site) -> Flow {
-        Flow::Continue
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+        dispatch::safepoint(req, frame, site)
     }
 
     /// The tier's state (`jit-design.md` §4): its two directives and
@@ -63,25 +74,43 @@ impl Tier for Jit {
             ExtensionBuilder::default()
                 .ini(policy::ini())
                 .engine_state(JitEngine::new)
+                .rinit(JitEngine::request_started)
                 .build("jit"),
         )
     }
 }
 
-/// The tier's engine state (`jit-design.md` §4): the `Policy` read once at
-/// engine start, and the lines its start logs, kept for the tier's log
-/// until the engine has a sink a tier writes to.
+/// The tier's engine state (`jit-design.md` §4): what the request
+/// threads and the pipeline share.
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "dispatch (#2952) reads the policy and the tier's log (#2949's ticket) its lines"
-    )
-)]
 pub(crate) struct JitEngine {
+    shared: Arc<Shared>,
+}
+
+/// What a safepoint, a recording and the pipeline read, by `Arc` so a
+/// worker can hold it past the request that submitted a job
+/// (`jit-design.md` §4.8): the `Policy` read once at engine start, the
+/// lines that start logged, and the epoch's numbers of published traces.
+///
+/// The tier's lines go where php's `opcache.jit_debug` lines go, to
+/// `stderr` (`Z/ext/opcache/jit/zend_jit_trace.c:8152-8250`), which for a
+/// request is the host's error stream: the CLI's `stderr`, as php's.
+#[derive(Debug)]
+pub(crate) struct Shared {
     policy: policy::Policy,
     started: Box<[policy::Note]>,
+    /// Whether a request wrote the start's lines yet: once per engine.
+    told: AtomicBool,
+    table: table::TraceTable,
+}
+
+impl Shared {
+    /// `event` as php's `jit_debug` line, where `opcache.jit_debug` asks for it,
+    /// added to `lines`.
+    fn dump(&self, lines: &mut Vec<u8>, event: &policy::TraceEvent<'_>) {
+        // Writing to a `Vec` does not fail.
+        self.policy.dump(lines, event).unwrap_or_default();
+    }
 }
 
 impl JitEngine {
@@ -94,46 +123,77 @@ impl JitEngine {
         Ok(JitEngine::of(start.ini()))
     }
 
-    /// The state over the startup ini: the `Policy` as the directives say,
-    /// then `Off` with its one line, since no `Backend` lowers a trace on
-    /// any target yet (#2955).
+    /// The state over the startup ini: the `Policy` as the directives
+    /// say, and the lines its start logged.
     fn of(ini: &StartupIni) -> JitEngine {
         let mut started = Vec::new();
-        let policy = policy::Policy::from_ini(ini, &mut started).without_backend(&mut started);
+        let policy = policy::Policy::from_ini(ini, &mut started);
         JitEngine {
-            policy,
-            started: started.into_boxed_slice(),
+            shared: Arc::new(Shared {
+                policy,
+                started: started.into_boxed_slice(),
+                told: AtomicBool::new(false),
+                table: table::TraceTable::new(),
+            }),
         }
+    }
+
+    /// The first request's start writes the lines the engine's start
+    /// logged, once and where `opcache.jit_debug` asks for any line, so
+    /// php's default writes nothing (`jit-design.md` §4).
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "a request start answers a Thrown where it fails; this one never does"
+    )]
+    fn request_started(req: &mut Request) -> Result<(), Thrown> {
+        let Some(engine) = req.engine::<JitEngine>() else {
+            return Ok(());
+        };
+        let shared = &engine.shared;
+        if !shared.policy.debugs() || shared.told.swap(true, Ordering::Relaxed) {
+            return Ok(());
+        }
+        let mut lines = String::new();
+        for note in &shared.started {
+            // Writing to a `String` does not fail.
+            writeln!(lines, "{note}").unwrap_or_default();
+        }
+        req.write_stderr(lines.as_bytes());
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use php_engine::tier::StartupIni;
-
     use super::JitEngine;
-    use crate::policy::{Mode, Note, OffBecause};
+    use crate::policy::Mode;
+    use crate::testing::{self, Lane, ini};
 
-    fn ini(entries: &[(&str, &str)]) -> StartupIni {
-        StartupIni {
-            entries: entries
-                .iter()
-                .map(|(name, value)| (name.as_bytes().to_vec(), Some(value.as_bytes().to_vec())))
-                .collect(),
-        }
+    /// The engine start reads the `Policy` and runs the `Mode` it names,
+    /// whether or not a `Backend` lowers a trace.
+    #[test]
+    fn the_engine_start_runs_the_mode_asked() {
+        assert_eq!(JitEngine::of(&ini(&[])).shared.policy.mode(), Mode::Off);
+        let asked = JitEngine::of(&ini(&[("opcache.jit", "tracing")]));
+        assert_eq!(asked.shared.policy.mode(), Mode::Tracing);
+        let lane = JitEngine::of(&ini(&[("jit.mode", "force")]));
+        assert_eq!(lane.shared.policy.mode(), Mode::Force);
     }
 
-    /// The engine start reads the `Policy` and is `Off` with one line:
-    /// php's default because `opcache.jit` is `disable`, and an
-    /// `opcache.jit` that asks for the tier because no `Backend` lowers a
-    /// trace yet.
+    /// The start's lines are written once, by the first request, and only
+    /// where `opcache.jit_debug` asks for any: php's default writes none.
     #[test]
-    fn the_engine_start_runs_off_with_one_line_saying_why() {
-        let started = JitEngine::of(&ini(&[]));
-        assert_eq!(started.policy.mode(), Mode::Off);
-        assert_eq!(&*started.started, &[Note::Off(OffBecause::Disabled)]);
-        let asked = JitEngine::of(&ini(&[("opcache.jit", "tracing")]));
-        assert_eq!(asked.policy.mode(), Mode::Off);
-        assert_eq!(&*asked.started, &[Note::Off(OffBecause::NoBackend)]);
+    fn the_start_logs_once_and_only_under_jit_debug() {
+        let quiet = testing::serve::<Lane>(&[("jit.mode", "force")], "echo 1;");
+        assert_eq!(String::from_utf8_lossy(&quiet.stderr), "");
+        let scratch = testing::Scratch::new();
+        let engine = testing::engine::<Lane>(&[("jit.mode", "force"), ("opcache.jit_debug", "1")]);
+        let first = scratch.serve(&engine, "echo 1;");
+        assert_eq!(
+            String::from_utf8_lossy(&first.stderr),
+            "JIT: jit.mode=force\n"
+        );
+        let second = scratch.serve(&engine, "echo 1;");
+        assert_eq!(String::from_utf8_lossy(&second.stderr), "");
     }
 }
