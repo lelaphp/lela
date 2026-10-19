@@ -172,7 +172,7 @@ impl Word {
 }
 
 /// The trace number of an execution, php's `EG(jit_trace_num)`
-/// (`jit-design.md` §4.9, revisions 23 and NEXT-2; design §5.11,
+/// (`jit-design.md` §4.9, revisions 23 and NEXT; design §5.11,
 /// revision 52): one word the engine keeps per execution and only the
 /// tier reads, the number of the trace executing on that execution. It
 /// excludes nothing: the tier's recording exclusion is the request's, as
