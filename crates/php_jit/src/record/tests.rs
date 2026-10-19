@@ -4,11 +4,11 @@
 //! list it takes, each held to the record it wrote and to `dump` then
 //! `parse`; and the text form as a property over generated records.
 
-use php_engine::tier::{self, FuncRef, Sample, TraceNum};
+use php_engine::tier::{self, FuncRef, Sample};
 use php_heap::ZvalType;
 use php_unit::{MapPtrOffset, OplineIdx};
 
-use super::{Event, RECORDING, Start, Stop, TraceRecord};
+use super::{Event, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 use crate::testing;
 use crate::testing::records::{at, kept, recorded, trace};
@@ -345,8 +345,8 @@ fn recursion_into_the_root_stops_as_a_recursive_call() -> Result<(), String> {
 }
 
 /// A fatal a step raised ends the recording with no record, and the
-/// running execution's trace number is put back: the shutdown function
-/// the fatal leaves to serve is asked with none.
+/// request records no more: the shutdown function the fatal leaves to
+/// serve is asked with the exclusion clear.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_fatal_from_a_step_ends_the_recording_with_no_record() {
@@ -371,14 +371,14 @@ fn a_fatal_from_a_step_ends_the_recording_with_no_record() {
         "{}",
         testing::stdout(&served)
     );
-    assert_eq!(kept.asked.last(), Some(&TraceNum::NONE), "{:?}", kept.asked);
+    assert_eq!(kept.asked.last(), Some(&false), "{:?}", kept.asked);
 }
 
-/// While a recording runs, the running execution's trace number is set,
-/// so a nested `execute` is asked with it, and it is none again after.
+/// While a recording runs, the request records, so a nested `execute` is
+/// asked with the exclusion set, and it is clear again after.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
-fn the_trace_number_is_set_for_the_recording_alone() {
+fn the_exclusion_is_set_for_the_recording_alone() {
     let (kept, served) = kept(
         &at("f", "enter"),
         "class D { function __destruct() { $s = 0; for ($i = 0; $i < 3; $i++) { $s += $i; } echo $s; } }
@@ -388,11 +388,11 @@ fn the_trace_number_is_set_for_the_recording_alone() {
     assert_eq!(testing::stdout(&served), "31\n");
     assert_eq!(kept.taken.len(), 1);
     assert!(
-        kept.asked.contains(&RECORDING),
+        kept.asked.contains(&true),
         "the destructor's loop was asked while recording: {:?}",
         kept.asked
     );
-    assert_eq!(kept.asked.last(), Some(&TraceNum::NONE), "{:?}", kept.asked);
+    assert_eq!(kept.asked.last(), Some(&false), "{:?}", kept.asked);
 }
 
 /// Every stop by its code and back, a link coding as none, and php's
