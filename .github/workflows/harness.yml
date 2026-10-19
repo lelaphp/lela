@@ -348,7 +348,7 @@ jobs:
   # run's verdict and the one before it decide. Two red runs in a row file
   # one `ci:red-main` ticket; a third comments on it; a green run comments
   # that main is green again and leaves the ticket for its builder to close
-  # through `xtask ticket close`. scripts/ci/red-main.sh says how, and
+  # through `xtask ticket close`. scripts/ci/red.sh says how, and
   # `DRY_RUN=1` prints what it would write.
   red-main:
     name: a red main, filed
@@ -373,4 +373,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RED: ${{ contains(needs.*.result, 'failure') }}
           UNMET: ${{ needs.done.outputs.unmet }}
-        run: scripts/ci/red-main.sh
+        run: scripts/ci/red.sh main
