@@ -8283,6 +8283,25 @@ pub(crate) fn fetch_obj_func_arg<T: Tier>(
 /// NULL
 /// Cannot use [] for reading
 /// ```
+///
+/// By value it is the read's own inline path over an element the array
+/// has, the warning of one it has not got the kernel's; by reference
+/// the element is laid down:
+///
+/// ```php
+/// function k(array $a, array &$b, $j, $s) { return [g($a[$j]), g($a[$s]), g($b[$j]), r($b[$j]), r($b[5]), g($a[9])]; }
+/// function g($v) { return $v; }
+/// function r(&$v) { $v .= "!"; return $v; }
+/// $a = [1.5, "k" => "v"]; $b = [2.5];
+/// echo json_encode([k($a, $b, 0, "k"), $b]), "\n";
+/// ```
+/// ```expect
+///
+/// Warning: Undefined array key 9 in %s on line 2
+/// [[1.5,"v",2.5,"2.5!","!",null],{"0":"2.5!","5":"!"}]
+/// ```
+#[inline(always)] // as `fetch_dim_r`, whose body the by-value arm is
+#[allow(clippy::inline_always)]
 pub(crate) fn fetch_dim_func_arg<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -8294,6 +8313,12 @@ pub(crate) fn fetch_dim_func_arg<T: Tier>(
             return use_tmp_in_write_context(req, frame, code, op);
         }
         return fetched_dim_place(req, frame, code, op);
+    }
+    // `ZEND_VM_DISPATCH_TO_HANDLER(ZEND_FETCH_DIM_R)`: the read's body,
+    // its inline path first.
+    let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
+    if let Some(edge) = inline_fetch_dim_r(req, frame, code, op, kinds) {
+        return edge;
     }
     if op.op2_type == OperandKind::Unused {
         // `zend_use_undef_in_read_context_helper`.
