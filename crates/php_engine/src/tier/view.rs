@@ -208,6 +208,18 @@ impl UnitView {
         self.epoch.func(f)?.op_array()
     }
 
+    /// Whether the op array `f` names is its file's own code, whose
+    /// variables a symbol table reaches, php's `!op_array->function_name`
+    /// (`zend_jit_var_may_alias`, `Z/ext/opcache/jit/zend_jit_trace.c:363`);
+    /// none unless [`UnitView::hold`] accepted it.
+    #[must_use]
+    pub fn is_main(&self, f: FuncRef) -> Option<bool> {
+        if !self.funcs.contains(&f) {
+            return None;
+        }
+        Some(self.epoch.func(f)?.is_main())
+    }
+
     /// The linked record of class `c`; none unless
     /// [`UnitView::hold_class`] accepted it.
     #[must_use]

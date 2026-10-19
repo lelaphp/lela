@@ -163,6 +163,25 @@ fn a_view_holds_a_held_units_function_refuses_an_evals_and_outlives_its_request(
     );
     assert!(own_view.op_array(own).is_none());
     assert!(held_view.op_array(own).is_none(), "never asked to hold it");
+    assert_eq!(held_view.is_main(held), Some(false), "a function's own");
+    assert_eq!(own_view.is_main(own), None, "refused, so unread");
+}
+
+/// A held file's own code is its main op array, whose variables a symbol
+/// table reaches, and the view says so; a function of it is not.
+#[test]
+fn a_view_tells_a_files_own_code_from_its_functions() {
+    VIEWS.with(|views| views.borrow_mut().clear());
+    let dir = scratch(
+        "main",
+        "<?php function inner() { return hold_caller(); } hold_caller(); inner();",
+    );
+    let engine = Engine::cli_builder().extensions(&[viewing()]).build();
+    serve(&engine, &dir, "<?php include __DIR__ . '/inc.php';");
+    std::fs::remove_dir_all(&dir).ok();
+    let views = VIEWS.with(RefCell::take);
+    let mains: Vec<Option<bool>> = views.iter().map(|(view, f)| view.is_main(*f)).collect();
+    assert_eq!(mains, [Some(true), Some(false)]);
 }
 
 /// A held function's entry word is zero at publication and one word for

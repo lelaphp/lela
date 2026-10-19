@@ -41,6 +41,11 @@ impl Func {
         exec::body_of(&self.unit, self.body)
     }
 
+    /// Whether the op array is its file's own code, the main op array.
+    pub(crate) fn is_main(&self) -> bool {
+        matches!(self.body, Body::Main)
+    }
+
     /// The word of safepoint `at`; the sealed word past the last.
     pub(crate) fn word(&self, at: SafepointIdx) -> &Word {
         usize::try_from(at.0)
