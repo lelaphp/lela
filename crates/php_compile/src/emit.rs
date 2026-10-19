@@ -641,6 +641,13 @@ pub(crate) struct Emit<'a> {
     /// pushed and popped beside it, so an entry records how many loops
     /// stood open under it and the walk interleaves the two again.
     unwind: Vec<Unwind>,
+    /// How many entries `CG(loop_var_stack)` holds, across every op array
+    /// being compiled: a loop's (`zend_begin_loop`), a `finally`'s and
+    /// the separator `zend_compile_func_decl` pushes for each function
+    /// body, which no op array sets aside.
+    loop_vars: u32,
+    /// The most [`Emit::loop_vars`] has held ([`Unit::loop_vars`]).
+    loop_var_peak: u32,
     /// `CG(context).fast_call_var`: the temporary the innermost
     /// `finally` keeps its return address and its delayed throwable in,
     /// and none outside one.
@@ -1390,6 +1397,8 @@ impl<'a> Emit<'a> {
             labels: Vec::new(),
             try_catch: Vec::new(),
             unwind: Vec::new(),
+            loop_vars: 0,
+            loop_var_peak: 0,
             fast_call_var: None,
             try_catch_offset: None,
             generators: walk::generators(&parsed.tree),
@@ -1487,6 +1496,7 @@ pub(crate) fn unit(
         top_level: emit.top_level,
         constants: emit.attributed_constants,
         halt_offset: emit.halted,
+        loop_vars: emit.loop_var_peak,
         cell: emit.cell,
     })
 }
@@ -3177,6 +3187,7 @@ impl<'a> Emit<'a> {
                 try_catch_offset: offset,
                 loops: self.loops_open(),
             });
+            self.loop_var_pushed();
         }
         self.try_catch_offset = Some(offset);
         self.block(node.body)?;
@@ -3355,6 +3366,7 @@ impl<'a> Emit<'a> {
         });
         self.update_jump_target_to_next(over);
         self.unwind.pop();
+        self.loop_vars = self.loop_vars.saturating_sub(1);
         Ok(())
     }
 
@@ -4974,6 +4986,7 @@ impl<'a> Emit<'a> {
     /// aside, and the emitter over an empty one whose entry safepoint
     /// stands at opline zero until the prologue is known.
     fn begin_body(&mut self, name: &[u8], this_in_scope: bool, fn_flags: FnFlags) -> Saved {
+        self.loop_var_pushed();
         Saved {
             return_type: self.return_type.take(),
             returns_by_ref: std::mem::take(&mut self.returns_by_ref),
@@ -5009,6 +5022,7 @@ impl<'a> Emit<'a> {
     /// `zend_oparray_context_end`: the enclosing op array's state back
     /// on the emitter.
     fn end_body(&mut self, saved: Saved) {
+        self.loop_vars = self.loop_vars.saturating_sub(1);
         self.oplines = saved.oplines;
         self.constants = saved.constants;
         self.const_exprs = saved.const_exprs;
@@ -9440,6 +9454,7 @@ impl<'a> Emit<'a> {
     /// has one, and the header's safepoint number where a `continue`
     /// jumps back to it.
     fn begin_loop(&mut self, var: Option<LoopVar>, header: Option<u32>, is_switch: bool) {
+        self.loop_var_pushed();
         self.loops.push(Loop {
             parent: self.current_loop,
             is_switch,
@@ -9451,10 +9466,18 @@ impl<'a> Emit<'a> {
         self.current_loop = Some(self.loops.len() - 1);
     }
 
+    /// `zend_stack_push(&CG(loop_var_stack), ..)`: one entry more, and
+    /// the peak the unit reports raised to it.
+    fn loop_var_pushed(&mut self) {
+        self.loop_vars = self.loop_vars.saturating_add(1);
+        self.loop_var_peak = self.loop_var_peak.max(self.loop_vars);
+    }
+
     /// `zend_end_loop`: `continue` lands at `cont`, `break` at the
     /// opline about to be emitted, and the loop outside is the innermost
     /// again.
     fn end_loop(&mut self, cont: u32) {
+        self.loop_vars = self.loop_vars.saturating_sub(1);
         let brk = self.next();
         if let Some(current) = self.current_loop
             && let Some(open) = self.loops.get_mut(current)
@@ -19691,6 +19714,8 @@ mod tests {
             labels: Vec::new(),
             try_catch: Vec::new(),
             unwind: Vec::new(),
+            loop_vars: 0,
+            loop_var_peak: 0,
             fast_call_var: None,
             try_catch_offset: None,
             generators: Vec::new(),

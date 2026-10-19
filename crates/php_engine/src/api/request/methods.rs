@@ -11,7 +11,7 @@ use php_unit::decl::{Bare, ClassKind, MethodDecl, PropertyDecl, Visibility};
 
 use crate::api::call::{ClassNative, Function};
 use crate::api::raising::{Thrown, none_pending};
-use crate::api::values::{ClassId, PhpObject, PhpString};
+use crate::api::values::{ClassId, Owner, PhpObject, PhpString};
 use crate::engine::{MethodAt, NativeMethod};
 
 use super::{Member, MemberAt, Request};
@@ -872,16 +872,16 @@ impl Request {
         ))
     }
 
-    /// The name a call frame carries for a native method, the interned
-    /// string of its declared name, and the empty string for the pass
-    /// function, which has none.
+    /// The name a call frame carries for a native method, its declared
+    /// name with one owner the caller's ([`Request::declared_string`]),
+    /// and the empty string for the pass function, which has none.
     pub(crate) fn method_name_string(&mut self, function: Function) -> Result<PhpString, Thrown> {
         let name = if function == Function::PASS {
             String::new()
         } else {
             self.declared_name(function)
         };
-        self.declared_string(name.as_bytes())
+        self.declared_string(name.as_bytes()).map(Owner::hand_on)
     }
 
     /// [`Request::qualified_name`] for a raise about a method called on

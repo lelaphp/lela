@@ -6,25 +6,21 @@
 //! the URI parsers through ext/standard and ext/uri (design §4.10). Each
 //! is laid into [`crate::functions`]' list at its place in the stub.
 //!
-//! Three of `test.stub.php`'s functions are not carried, each because it
-//! exists to break what the engine holds:
+//! Three of `test.stub.php`'s functions #2388 set out, each because it
+//! breaks what the engine holds, are ported as php's (ruled on #2937 and
+//! #2976):
 //!
-//! - `zend_delref(mixed $variable)` drops a count by hand, so the value is
-//!   freed while the program still holds it. The face hands a native
-//!   owners (`Owner<_>`), never a count to write, and a native that could
-//!   free what a frame still names is what the design rules out.
-//! - `zend_test_crash(?string $message = null)` prints through an invalid
-//!   pointer to fault the process. This crate forbids `unsafe`, and no
-//!   panic reaches a request (design §10), so there is nothing to carry
-//!   it over.
+//! - `zend_test_crash(?string $message = null)` prints its message and
+//!   ends the process with the `SIGSEGV` php's read of `(char *) 1`
+//!   takes, raised in `crate::ffi` (`unsafe.homes`) rather than read.
 //! - `zend_test_gh18756()` starts a heap apart from the request's,
 //!   collects it twice and shuts it down, the regression GH-18756 where
-//!   `zend_mm_gc` freed a heap's main chunk. The face gives an extension
-//!   the request's heap alone, and a second heap for one test would be a
-//!   face item no extension has a use for; the property is `php_heap`'s,
-//!   held there by its own test (a heap collected twice keeps its main
-//!   chunk), and `Zend/tests/gh18756.phpt` misses for want of the
-//!   function.
+//!   `zend_mm_gc` freed a heap's main chunk, over `php_heap`'s
+//!   [`StandaloneHeap`], a safe item.
+//!
+//! The third, `zend_delref(mixed $variable)`, drops a count by hand. It
+//! waits on #3014, and until it lands the engine's `--re` lacks the one
+//! function of php's list.
 //!
 //! `zend_test_set_fmode` is Windows' alone, and is left out as php
 //! leaves it out on every other platform.
@@ -32,7 +28,7 @@
 use php_ext::abi::{FromArgument as _, Raw};
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, argument_error};
-use php_ext::request::Request;
+use php_ext::request::{Request, StandaloneHeap};
 use php_ext::values::{Emalloc, Owner, PhpArray, PhpString, Value};
 use php_ext_standard::UriParser;
 use php_ext_uri::{ReadAs, UriStruct};
@@ -265,6 +261,56 @@ pub(crate) fn zend_test_is_zend_ptr(req: &mut Request, addr: i64) -> bool {
 #[php_function]
 pub(crate) fn zend_test_log_err_debug(req: &mut Request, str: PhpString) {
     req.log_err_with_severity(str.as_bytes(), LOG_DEBUG);
+}
+
+/// `zend_test_crash(?string $message = null): void`: `$message` printed
+/// as `php_printf` prints it, what the host holds pushed as
+/// `sapi_flush` pushes it, so the message is seen before the end as
+/// php's unbuffered CLI shows it, and the process ended by `SIGSEGV`, the
+/// signal php's read of `(char *) 1` delivers (`crate::ffi`, #2976). No
+/// witness reaches the end; `tests/crash.rs` holds it to the oracle's
+/// bytes and signal.
+///
+/// ```php
+/// try { zend_test_crash("a", "b"); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// try { zend_test_crash([]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// zend_test_crash() expects at most 1 argument, 2 given
+/// zend_test_crash(): Argument #1 ($message) must be of type ?string, array given
+/// ```
+#[php_function]
+pub(crate) fn zend_test_crash(
+    req: &mut Request,
+    #[php(default = null)] message: Option<PhpString>,
+) {
+    if let Some(message) = message {
+        req.write(message.as_bytes());
+    }
+    req.flush();
+    crate::ffi::segfault()
+}
+
+/// `zend_test_gh18756(): void`: `zend_mm_startup`, `zend_mm_gc` twice and
+/// `zend_mm_shutdown(heap, true, false)`, on a heap apart from the
+/// request's, which keeps its main chunk through both sweeps
+/// (GH-18756).
+///
+/// ```php
+/// zend_test_gh18756();
+/// echo "==DONE==\n";
+/// try { zend_test_gh18756(1); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// ==DONE==
+/// zend_test_gh18756() expects exactly 0 arguments, 1 given
+/// ```
+#[php_function]
+pub(crate) fn zend_test_gh18756() {
+    let mut heap = StandaloneHeap::startup();
+    heap.gc();
+    heap.gc();
+    heap.shutdown();
 }
 
 /// `zend_test_opcache_preloading(): bool`, `opcache_preloading()`:
