@@ -50,6 +50,7 @@ mod table_copy;
 pub(crate) mod test_ext;
 mod time_limit;
 mod trace_num;
+mod unit_view;
 #[cfg(debug_assertions)]
 mod walks;
 #[cfg(debug_assertions)]

@@ -25,7 +25,9 @@
 
 use std::sync::atomic::AtomicU32;
 
-use crate::api::abi::Extension;
+/// What a tier declares its state with, as an extension does (design
+/// §4.4; `jit-design.md` §4, §5.3).
+pub use crate::api::abi::{Extension, ExtensionBuilder, Refusal, Start, StartupIni};
 use crate::observer::{Declared, ObservedOpcodes, Telling, Untold};
 use crate::{exec, interrupt};
 use php_unit::OpArray;
@@ -36,13 +38,18 @@ pub use php_heap::{Fatal, FrameRef};
 
 mod frames;
 mod held;
+pub(crate) mod published;
 #[cfg(dispatch = "tailcall")]
 mod tail;
+mod view;
 pub use frames::{
     Argument, Aside, Called, Evaluated, Under, begin, below, call, catches, entry, evaluate,
     evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
 };
 use held::{Kept, Units};
+pub use view::{Epoch, FuncRef, MapPtrRaw, UnitView, epoch, func, word};
+
+pub use crate::api::values::ClassId;
 
 /// The number of a safepoint within its op array; zero is the entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -149,7 +156,7 @@ impl Word {
     /// A word no tier acts on: every bit set. Allocated for every
     /// safepoint of a request-scoped op array.
     #[must_use]
-    pub fn sealed() -> Word {
+    pub const fn sealed() -> Word {
         Word {
             halves: [AtomicU32::new(u32::MAX), AtomicU32::new(u32::MAX)],
         }
