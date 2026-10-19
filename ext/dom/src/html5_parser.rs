@@ -20,9 +20,9 @@ use php_ext_lexbor::ffi::{self as lexbor, Lent, Owned as _};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{DocString, Kind, Node, NodeObject, Ns, Quirks};
 
+use crate::dom_throw;
 use crate::object::Code;
-use crate::private::{self, HTML_NS, MATHML_NS, SVG_NS, XLINK_NS};
-use crate::{dom_mut, dom_throw};
+use crate::private::{HTML_NS, Handed, MATHML_NS, Mapper, Private, SVG_NS, XLINK_NS};
 
 /// `HTML_PARSE_NOERROR`, `XML_PARSE_NOERROR` under another name.
 const NOERROR: i64 = 1 << 5;
@@ -609,9 +609,9 @@ fn parse(
 ///
 /// Every lexbor call of the parse and the bridge is under a lend
 /// (ADR-0014), so what lexbor holds is the request's memory as php's is:
-/// a parse grows `memory_get_peak_usage()` by php's number past what one
-/// document costs whatever it holds, and meets `memory_limit` where php's
-/// does, on php's request.
+/// a parse grows `memory_get_peak_usage()` by php's number, for a document
+/// of one element as for one of twenty thousand, and meets
+/// `memory_limit` where php's does, on php's request.
 ///
 /// ```php
 /// $peak = function ($n) {
@@ -620,13 +620,14 @@ fn parse(
 ///     $d = Dom\HTMLDocument::createFromString($html, LIBXML_NOERROR);
 ///     return memory_get_peak_usage() - $m;
 /// };
-/// var_dump($peak(20000) - $peak(1));
+/// var_dump($peak(1), $peak(20000));
 /// ini_set('memory_limit', '8M');
 /// Dom\HTMLDocument::createFromString(str_repeat('<div class=a><p>hello <b>world</b></p></div>', 20000), LIBXML_NOERROR);
 /// echo "parsed\n";
 /// ```
 /// ```expect capture exit=255
-/// int(30352568)
+/// int(1172688)
+/// int(31525256)
 ///
 /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 36864 bytes) in %SCRATCH%/witness.php on line 10
 /// ```
@@ -668,14 +669,17 @@ struct AttrNs {
 
 /// The bridge's attribute loop: each of `node`'s attributes made on
 /// `element` in order, a local name without its prefix, its value one
-/// text child, its namespace the mapper's, and an HTML `id` an ID.
+/// text child, its namespace the mapper's, and an HTML `id` an ID. `None`
+/// where libxml refused a node; the `Err` is the memory limit, met where
+/// the mapper makes a declaration.
 fn convert_attributes(
-    obj: &mut NodeObject,
+    req: &mut Request,
+    mapper: &mut Mapper,
     doc: Node,
     node: HtmlNode<'_>,
     element: Node,
     attr_ns: &mut AttrNs,
-) -> Option<()> {
+) -> Result<Option<()>, Thrown> {
     let mut last: Option<Node> = None;
     for attr in node.attributes() {
         let mut local = attr.qualified_name();
@@ -685,29 +689,43 @@ fn convert_attributes(
             local = local.get(colon + 1..).unwrap_or_default();
         }
         let value = attr.value();
-        let lattr = Node::new_attr(Some(doc), local, None)?;
-        let text = Node::new_text_len(Some(doc), value)?;
+        let Some(lattr) = Node::new_attr(Some(doc), local, None) else {
+            return Ok(None);
+        };
+        let Some(text) = Node::new_text_len(Some(doc), value) else {
+            lattr.free();
+            return Ok(None);
+        };
         lattr.add_child(text);
         lattr.set_parent(Some(element));
-        let mapper = &mut private::of(obj)?.mapper;
         let ns = match attr.namespace() {
-            Namespace::Xmlns if local == b"xmlns" => mapper.prefixless_xmlns(Some(doc)),
+            Namespace::Xmlns if local == b"xmlns" => mapper.prefixless_xmlns(req, Some(doc))?,
             Namespace::Xmlns => {
                 if attr_ns.prefixed_xmlns.is_none() {
-                    attr_ns.prefixed_xmlns =
-                        mapper.get(Some(doc), b"xmlns", crate::document::XMLNS_NS);
+                    attr_ns.prefixed_xmlns = mapper.get_raw(
+                        req,
+                        Some(doc),
+                        Some(b"xmlns"),
+                        Some(crate::document::XMLNS_NS),
+                    )?;
                 }
                 attr_ns.prefixed_xmlns
             }
             Namespace::XLink => {
                 if attr_ns.xlink.is_none() {
-                    attr_ns.xlink = mapper.get(Some(doc), b"xlink", XLINK_NS);
+                    attr_ns.xlink =
+                        mapper.get_raw(req, Some(doc), Some(b"xlink"), Some(XLINK_NS))?;
                 }
                 attr_ns.xlink
             }
             Namespace::Xml => {
                 if attr_ns.xml.is_none() {
-                    attr_ns.xml = mapper.get(Some(doc), b"xml", crate::document::XML_NS);
+                    attr_ns.xml = mapper.get_raw(
+                        req,
+                        Some(doc),
+                        Some(b"xml"),
+                        Some(crate::document::XML_NS),
+                    )?;
                 }
                 attr_ns.xml
             }
@@ -726,119 +744,102 @@ fn convert_attributes(
             lattr.set_atype(php_ext_libxml::ffi::XML_ATTRIBUTE_ID);
         }
     }
-    Some(())
+    Ok(Some(()))
 }
 
-/// `lexbor_libxml2_bridge_convert` for `object`'s document: the bridge
-/// made under one lend of the request, whose node object it borrows for
-/// the length of it, so the work list php keeps on lexbor's allocator is
-/// the request's memory as php's is. `None` where the bridge failed; the
-/// `Err` is the memory limit's fatal.
+/// `lexbor_libxml2_bridge_convert`: `start` and the siblings before it,
+/// and all their descendants, made libxml2 nodes under `root`, the
+/// namespaces the mapper of `private`'s, each template's contents a
+/// fragment it keeps. The mapper's HTML namespace comes first, then the
+/// work list php keeps on lexbor's allocator, which is the request's
+/// memory as php's is: each lexbor call is under a lend of its own
+/// (ADR-0014), so the mapper reaches the request between them. Answers
+/// the template elements whose namespaces `dom_add_element_ns_hook` tags,
+/// which the caller tags through the document's object
+/// ([`tag_templates`]); `None` where the bridge failed, and the `Err` is
+/// the memory limit's fatal.
 fn bridge(
     req: &mut Request,
-    object: PhpObject,
+    private: &mut Private,
     start: Option<HtmlNode<'_>>,
     doc: Node,
     root: Node,
     create_default_ns: bool,
-) -> Result<Option<()>, Thrown> {
-    let Some(mut obj) = dom_mut(req, object).map(|d| d.obj.borrow()) else {
+) -> Result<Option<Vec<Node>>, Thrown> {
+    let html_ns = private.mapper.html(req, Some(doc))?;
+    let Some(work) = lexbor::lent(req, |lent| ArrayObj::new(lent, WORK_LIST_INIT_SIZE))? else {
         return Ok(None);
     };
-    lexbor::lent(req, |lent| {
-        let mut work = ArrayObj::new(lent, WORK_LIST_INIT_SIZE)?;
-        let converted = convert(
-            lent,
-            &mut obj,
-            &mut work,
-            start,
-            doc,
-            root,
-            create_default_ns,
-        );
-        work.give_back(lent);
-        converted
+    let to = Into {
+        doc,
+        root,
+        html_ns,
+        create_default_ns,
+    };
+    lexbor::kept(req, work, |req, work| {
+        convert(req, private, work, start, &to)
     })
 }
 
-/// `lexbor_libxml2_bridge_convert`: `start` and the siblings before it,
-/// and all their descendants, made libxml2 nodes under `root`, through
-/// `work`, the work list.
-fn convert<'doc>(
-    lent: &Lent,
-    obj: &mut NodeObject,
-    work: &mut ArrayObj<Work<'doc>>,
-    start: Option<HtmlNode<'doc>>,
+/// What the bridge converts into: the document, the node the top items
+/// hang from, the mapper's HTML namespace, and whether elements are put
+/// in their namespaces at all.
+struct Into {
     doc: Node,
     root: Node,
+    html_ns: Option<Ns>,
     create_default_ns: bool,
-) -> Option<()> {
-    let html_ns = private::of(obj)?.mapper.html(Some(doc));
-    let mut attr_ns = AttrNs::default();
+}
+
+/// `lexbor_libxml2_bridge_work_list_item_push`, under a lend of its own;
+/// `None` where lexbor could not grow the list.
+fn push<'doc>(
+    req: &mut Request,
+    work: &mut ArrayObj<Work<'doc>>,
+    item: Work<'doc>,
+) -> Result<Option<()>, Thrown> {
+    Ok(lexbor::lent(req, |lent| work.push(lent, item))?.then_some(()))
+}
+
+/// What the walk has made for the whole conversion: the attributes'
+/// declarations, and the template elements in the order they were made.
+#[derive(Default)]
+struct Made {
+    attr_ns: AttrNs,
+    templates: Vec<Node>,
+}
+
+/// The bridge's walk of the work list.
+fn convert<'doc>(
+    req: &mut Request,
+    private: &mut Private,
+    work: &mut ArrayObj<Work<'doc>>,
+    start: Option<HtmlNode<'doc>>,
+    to: &Into,
+) -> Result<Option<Vec<Node>>, Thrown> {
+    let doc = to.doc;
+    let mut made = Made::default();
     let mut at = start;
     while let Some(node) = at {
         let item = Work {
             node,
             active: None,
-            parent: root,
+            parent: to.root,
             ns: None,
         };
-        work.push(lent, item).then_some(())?;
+        if push(req, work, item)?.is_none() {
+            return Ok(None);
+        }
         at = node.prev();
     }
     while let Some(item) = work.pop() {
         let node = item.node;
-        match node.kind() {
-            NodeKind::Element => {
-                let element = Node::new_element(Some(doc), None, node.qualified_name(), None)?;
-                item.parent.add_child(element);
-                element.set_line(node.line());
-                let entering = node.namespace();
-                let mut current = item.ns;
-                if create_default_ns && Some(entering) != item.active {
-                    current = if entering == Namespace::Html {
-                        html_ns
-                    } else {
-                        let uri = match entering {
-                            Namespace::Svg => SVG_NS,
-                            Namespace::MathMl => MATHML_NS,
-                            _ => HTML_NS,
-                        };
-                        private::of(obj)?.mapper.get(Some(doc), b"", uri)
-                    };
-                }
-                element.set_ns(current);
-                let mut child_parent = element;
-                let mut child = node.last_child();
-                if node.is_template() {
-                    if create_default_ns {
-                        let fragment = Node::new_fragment(Some(doc))?;
-                        fragment.set_parent(Some(element));
-                        obj.add_ns_tag(element);
-                        private::of(obj)?.add_template(element, fragment);
-                        child_parent = fragment;
-                    }
-                    if let Some(content) = node.template_content() {
-                        child = content.last_child();
-                    }
-                }
-                while let Some(c) = child {
-                    let item = Work {
-                        node: c,
-                        active: Some(entering),
-                        parent: child_parent,
-                        ns: current,
-                    };
-                    work.push(lent, item).then_some(())?;
-                    child = c.prev();
-                }
-                convert_attributes(obj, doc, node, element, &mut attr_ns)?;
-            }
-            NodeKind::Text => {
-                let text = Node::new_text_len(Some(doc), node.data())?;
+        let converted = match node.kind() {
+            NodeKind::Element => convert_element(req, private, work, item, to, &mut made)?,
+            NodeKind::Text => Node::new_text_len(Some(doc), node.data()).map(|text| {
                 item.parent.add_child(text);
                 text.set_line(node.line());
-            }
+            }),
             NodeKind::DocumentType => {
                 let public = node.doctype_public_id();
                 let system = node.doctype_system_id();
@@ -847,18 +848,103 @@ fn convert<'doc>(
                     node.doctype_name(),
                     (!public.is_empty()).then_some(public),
                     (!system.is_empty()).then_some(system),
-                )?;
+                )
+                .map(drop)
             }
             NodeKind::Comment => {
-                let data = node.data();
-                let comment = Node::new_comment(Some(doc), php_ext::coerce::c_str(data))?;
-                item.parent.add_child(comment);
-                comment.set_line(node.line());
+                let data = php_ext::coerce::c_str(node.data());
+                Node::new_comment(Some(doc), data).map(|comment| {
+                    item.parent.add_child(comment);
+                    comment.set_line(node.line());
+                })
             }
-            _ => {}
+            _ => Some(()),
+        };
+        if converted.is_none() {
+            return Ok(None);
         }
     }
-    Some(())
+    Ok(Some(made.templates))
+}
+
+/// One element of the walk: made under its parent in the namespace it
+/// enters, a template's contents a fragment of their own, its children
+/// pushed last first, then its attributes.
+fn convert_element<'doc>(
+    req: &mut Request,
+    private: &mut Private,
+    work: &mut ArrayObj<Work<'doc>>,
+    item: Work<'doc>,
+    to: &Into,
+    made: &mut Made,
+) -> Result<Option<()>, Thrown> {
+    let (doc, node) = (to.doc, item.node);
+    let Some(element) = Node::new_element(Some(doc), None, node.qualified_name(), None) else {
+        return Ok(None);
+    };
+    item.parent.add_child(element);
+    element.set_line(node.line());
+    let entering = node.namespace();
+    let mut current = item.ns;
+    if to.create_default_ns && Some(entering) != item.active {
+        current = if entering == Namespace::Html {
+            to.html_ns
+        } else {
+            let uri = match entering {
+                Namespace::Svg => SVG_NS,
+                Namespace::MathMl => MATHML_NS,
+                _ => HTML_NS,
+            };
+            private
+                .mapper
+                .get_ns(req, Some(doc), Handed::Empty, Handed::Made(uri))?
+        };
+    }
+    element.set_ns(current);
+    let mut child_parent = element;
+    let mut child = node.last_child();
+    if node.is_template() {
+        if to.create_default_ns {
+            let Some(fragment) = Node::new_fragment(Some(doc)) else {
+                return Ok(None);
+            };
+            fragment.set_parent(Some(element));
+            made.templates.push(element);
+            private.add_template(element, fragment);
+            child_parent = fragment;
+        }
+        if let Some(content) = node.template_content() {
+            child = content.last_child();
+        }
+    }
+    while let Some(c) = child {
+        let item = Work {
+            node: c,
+            active: Some(entering),
+            parent: child_parent,
+            ns: current,
+        };
+        if push(req, work, item)?.is_none() {
+            return Ok(None);
+        }
+        child = c.prev();
+    }
+    convert_attributes(
+        req,
+        &mut private.mapper,
+        doc,
+        node,
+        element,
+        &mut made.attr_ns,
+    )
+}
+
+/// `dom_add_element_ns_hook` for each template element the bridge made,
+/// through the document's object, whose reference the tag names.
+fn tag_templates(obj: &mut NodeObject, templates: Vec<Node>) {
+    for element in templates {
+        obj.add_ns_tag(element);
+    }
 }
 
 /// `dom_search_child`.
@@ -922,40 +1008,102 @@ fn new_html_doc(req: &mut Request) -> Result<Node, Thrown> {
     }
 }
 
-/// The document object for a parsed tree: the tree converted into a
-/// fresh HTML document the object stands for, the parser's observations
-/// applied.
-fn finish(
+/// What the bridge made of a parsed document, before its object is: the
+/// tree, its private data, the template elements whose namespaces are
+/// still to be tagged, and what the parser observed.
+struct Converted {
+    doc: Node,
+    private: Private,
+    templates: Vec<Node>,
+    seen: Observations,
+}
+
+/// `lexbor_libxml2_bridge_convert_document` with the private data
+/// `html_document.c` makes just before it: the parsed tree converted into
+/// a fresh HTML document, and the parser's observations copied, while
+/// lexbor's document still stands.
+fn convert_document(
     req: &mut Request,
     parsed: &HtmlDocument,
+    options: i64,
+) -> Result<Converted, Thrown> {
+    let mut private = Private::new(req)?;
+    let doc = match new_html_doc(req) {
+        Ok(doc) => doc,
+        Err(thrown) => {
+            private.free(req);
+            return Err(thrown);
+        }
+    };
+    let create_default_ns = options & crate::modern_constants::HTML_NO_DEFAULT_NS == 0;
+    let start = parsed.node().last_child();
+    let bridged = bridge(req, &mut private, start, doc, doc, create_default_ns);
+    let failed = match bridged {
+        Ok(Some(templates)) => {
+            return Ok(Converted {
+                doc,
+                private,
+                templates,
+                seen: parsed.observations(),
+            });
+        }
+        Ok(None) => None,
+        Err(thrown) => Some(thrown),
+    };
+    doc.free_document();
+    private.free(req);
+    Err(failed.unwrap_or_else(|| dom_throw(req, Code::InvalidState)))
+}
+
+/// The document object for a converted tree, made once lexbor's document
+/// is given back, as `html_document.c` instantiates it last: the parser's
+/// observations applied, the encoding and the URL set, then the object,
+/// the template elements tagged through it.
+///
+/// So a document of one element costs the request php's memory, and its
+/// parse peaks where php's does:
+///
+/// ```php
+/// $f = fn () => Dom\HTMLDocument::createFromString('<p>x</p>', LIBXML_NOERROR);
+/// $d = $f(); unset($d);
+/// $m = memory_get_usage(); memory_reset_peak_usage();
+/// $d = $f();
+/// echo memory_get_usage() - $m, ' ', memory_get_peak_usage() - $m, "\n";
+/// unset($d);
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 1064 1172688
+/// 32
+/// ```
+fn finish(
+    req: &mut Request,
+    converted: Converted,
     encoding: Encoding,
     options: i64,
     url: Option<Vec<u8>>,
 ) -> Result<Owner<Value>, Thrown> {
-    let doc = new_html_doc(req)?;
-    let private = crate::private::Private::new(req)?;
-    let object = crate::modern::document_object(req, "Dom\\HTMLDocument", doc, private)?;
-    let create_default_ns = options & crate::modern_constants::HTML_NO_DEFAULT_NS == 0;
-    let start = parsed.node().last_child();
-    let converted = match bridge(req, *object, start, doc, doc, create_default_ns) {
-        Ok(converted) => converted,
-        Err(thrown) => {
-            object.give_up(req);
-            return Err(thrown);
-        }
-    };
-    if converted.is_none() {
-        object.give_up(req);
-        return Err(dom_throw(req, Code::InvalidState));
-    }
-    let seen = parsed.observations();
+    let Converted {
+        doc,
+        private,
+        templates,
+        seen,
+    } = converted;
     post_process(doc, options, seen);
     doc.set_doc_string(DocString::Encoding, Some(encoding.name()));
     if let Some(url) = url {
         doc.set_doc_string(DocString::Url, Some(&url));
     }
-    if let Some(d) = dom_mut(req, *object) {
-        d.obj.set_quirks(quirks_of(seen.quirks));
+    let object = match crate::modern::document_object(req, "Dom\\HTMLDocument", doc, private) {
+        Ok(object) => object,
+        Err(thrown) => {
+            doc.free_document();
+            return Err(thrown);
+        }
+    };
+    if let Some(mut obj) = crate::libxml_half(req, *object) {
+        tag_templates(&mut obj, templates);
+        obj.set_quirks(quirks_of(seen.quirks));
     }
     Ok(object.into_value())
 }
@@ -1027,8 +1175,18 @@ pub(crate) fn parse_fragment(
             return Err(dom_throw(req, Code::InvalidState));
         };
         let start = fragment.root().last_child();
-        match bridge(req, object, start, doc, root, true) {
-            Ok(Some(())) => Ok(root),
+        let mut obj = crate::libxml_half(req, object);
+        let bridged = match obj.as_deref_mut().and_then(crate::private::of) {
+            Some(private) => bridge(req, private, start, doc, root, true),
+            None => Ok(None),
+        };
+        match bridged {
+            Ok(Some(templates)) => {
+                if let Some(obj) = obj.as_deref_mut() {
+                    tag_templates(obj, templates);
+                }
+                Ok(root)
+            }
             Ok(None) => {
                 root.free();
                 Err(dom_throw(req, Code::InvalidState))
@@ -1093,7 +1251,7 @@ pub(crate) fn create_from_string(
 ) -> Result<Owner<Value>, Thrown> {
     check_options(req, 2, options)?;
     let encoding = override_encoding(req, 3, given_encoding)?;
-    with_document(req, |req, doc| {
+    let (converted, found) = with_document(req, |req, doc| {
         let found = parse(
             req,
             doc,
@@ -1102,8 +1260,9 @@ pub(crate) fn create_from_string(
             options,
             encoding,
         )?;
-        finish(req, doc, found, options, None)
-    })
+        Ok((convert_document(req, doc, options)?, found))
+    })?;
+    finish(req, converted, found, options, None)
 }
 
 /// `Dom\HTMLDocument::createFromFile`'s body. A file that does not
@@ -1171,12 +1330,13 @@ pub(crate) fn create_from_file(
     };
     stream.free(req);
     read?;
-    with_document(req, |req, doc| {
+    let (converted, found) = with_document(req, |req, doc| {
         let input = Input::File(&source, chunks);
         let found = parse(req, doc, &path, &input, options, encoding)?;
-        let url = file_url(req, &path);
-        finish(req, doc, found, options, Some(url))
-    })
+        Ok((convert_document(req, doc, options)?, found))
+    })?;
+    let url = file_url(req, &path);
+    finish(req, converted, found, options, Some(url))
 }
 
 /// The document's URL: a stream's path as given, a file's absolute path

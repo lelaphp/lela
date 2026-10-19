@@ -441,7 +441,10 @@ fn import_simplexml_common(
             Some(mut obj) => obj.set_private_data(req, Box::new(private)),
             None => private.free(req),
         }
-        modern::convert_to_modern(req, *made, doc);
+        if let Err(thrown) = modern::convert_to_modern(req, *made, doc) {
+            made.give_up(req);
+            return Err(thrown);
+        }
     }
     Ok(made.into_value())
 }
@@ -1436,12 +1439,22 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>
         let cloned = if modern::follows_spec(req, object) {
             if n.kind().is_document() {
                 let mut private = private::Private::new(req)?;
-                let cloned = node::clone_node_modern(&mut private.mapper, n, n.doc(), true);
+                let cloned = node::clone_node_modern(req, &mut private.mapper, n, n.doc(), true);
+                let cloned = match cloned {
+                    Ok(cloned) => cloned,
+                    Err(thrown) => {
+                        private.free(req);
+                        return Err(thrown);
+                    }
+                };
                 fresh = Some(private);
                 cloned
             } else {
-                match dom_mut(req, object).and_then(|d| private::of(&mut d.obj)) {
-                    Some(p) => node::clone_node_modern(&mut p.mapper, n, n.doc(), true),
+                match libxml_half(req, object) {
+                    Some(mut obj) => match private::of(&mut obj) {
+                        Some(p) => node::clone_node_modern(req, &mut p.mapper, n, n.doc(), true)?,
+                        None => clone_node(n, n.doc(), true),
+                    },
                     None => clone_node(n, n.doc(), true),
                 }
             }
@@ -1688,10 +1701,13 @@ fn validate_and_extract(
 /// `php_dom_adopt_node`: the node moved into `doc`, every object of its
 /// subtree counting `doc`'s reference after. The modern classes unlink it,
 /// set the tree's document and point its namespaces at `doc`'s mapper,
-/// where the legacy ones hand it to `xmlDOMWrapAdoptNode`.
-fn adopt(req: &mut Request, doc_obj: PhpObject, node: Node, doc: Node) -> bool {
+/// where the legacy ones hand it to `xmlDOMWrapAdoptNode`. The `Err` is
+/// the memory limit, met where the mapper makes a
+/// declaration, after the subtree is the document's.
+fn adopt(req: &mut Request, doc_obj: PhpObject, node: Node, doc: Node) -> Result<bool, Thrown> {
     node.invalidate_document_lists();
     let old = node.doc();
+    let mut reconciled = Ok(());
     if old == Some(doc) {
         node.unlink();
     } else {
@@ -1699,11 +1715,12 @@ fn adopt(req: &mut Request, doc_obj: PhpObject, node: Node, doc: Node) -> bool {
         if modern::follows_spec(req, doc_obj) {
             node.unlink();
             node.set_tree_doc(Some(doc));
-            if let Some(private) = dom_mut(req, doc_obj).and_then(|d| private::of(&mut d.obj)) {
-                private.mapper.reconcile(Some(doc), node);
-            }
+            reconciled = private::mapped(req, doc_obj, |mapper, req| {
+                mapper.reconcile(req, Some(doc), node).map(Some)
+            })
+            .map(drop);
         } else if !node.adopt_into(doc) {
-            return false;
+            return Ok(false);
         }
         node.undict(old, doc);
         undict_subtree(node, old, doc);
@@ -1726,7 +1743,7 @@ fn adopt(req: &mut Request, doc_obj: PhpObject, node: Node, doc: Node) -> bool {
             }
         }
     }
-    true
+    reconciled.map(|()| true)
 }
 
 /// `php_set_attribute_id`.

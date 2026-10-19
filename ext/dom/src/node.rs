@@ -179,16 +179,27 @@ pub(crate) fn replace_child(
 
 /// `dom_clone_container_helper`: the node alone, an element with its
 /// declarations turned into `xmlns` attributes and its attributes copied,
-/// every namespace the original's until reconciliation.
-fn clone_container(mapper: &mut Mapper, src: Node, doc: Option<Node>) -> Option<Node> {
-    let clone = src.copy(doc, 0)?;
+/// every namespace the original's until reconciliation. The `Err` is the
+/// memory limit, met where the mapper makes a declaration.
+fn clone_container(
+    req: &mut Request,
+    mapper: &mut Mapper,
+    src: Node,
+    doc: Option<Node>,
+) -> Result<Option<Node>, Thrown> {
+    let Some(clone) = src.copy(doc, 0) else {
+        return Ok(None);
+    };
     clone.set_ns(src.ns());
     if src.kind() == Kind::Element {
         let mut last_added = None;
         if let Some(first) = src.ns_def() {
             let mut at = Some(first);
             while let Some(ns) = at {
-                mapper.mark_attribute(clone, ns);
+                if let Err(thrown) = mapper.mark_attribute(req, clone, ns) {
+                    clone.free();
+                    return Err(thrown);
+                }
                 at = ns.next();
             }
             last_added = clone.properties();
@@ -200,7 +211,7 @@ fn clone_container(mapper: &mut Mapper, src: Node, doc: Option<Node>) -> Option<
         while let Some(a) = attr {
             let Some(copy) = a.copy(doc, 0) else {
                 clone.free();
-                return None;
+                return Ok(None);
             };
             match last_added {
                 None => clone.set_properties(Some(copy)),
@@ -215,26 +226,30 @@ fn clone_container(mapper: &mut Mapper, src: Node, doc: Option<Node>) -> Option<
             attr = a.next();
         }
     }
-    Some(clone)
+    Ok(Some(clone))
 }
 
 /// `dom_clone_helper`: the node, and with `recursive` what hangs from an
 /// element, a fragment or a document, copied in tree order; a document's
-/// internal subset copied once, as the subset it is.
+/// internal subset copied once, as the subset it is. The `Err` is the
+/// memory limit, what was copied freed.
 fn clone_helper(
+    req: &mut Request,
     mapper: &mut Mapper,
     src: Node,
     doc: Option<Node>,
     recursive: bool,
-) -> Option<Node> {
-    let outer = clone_container(mapper, src, doc)?;
+) -> Result<Option<Node>, Thrown> {
+    let Some(outer) = clone_container(req, mapper, src, doc)? else {
+        return Ok(None);
+    };
     if !recursive
         || !matches!(
             src.kind(),
             Kind::Element | Kind::Fragment | Kind::Document | Kind::HtmlDocument
         )
     {
-        return Some(outer);
+        return Ok(Some(outer));
     }
     let mut dst_doc = doc;
     if src.kind().is_document() {
@@ -242,7 +257,7 @@ fn clone_helper(
         if let Some(subset) = src.int_subset() {
             let Some(copy) = subset.copy_dtd(Some(outer)) else {
                 outer.free();
-                return None;
+                return Ok(None);
             };
             outer.set_int_subset(Some(copy));
             copy.set_parent(Some(outer));
@@ -254,7 +269,13 @@ fn clone_helper(
     let mut at = src.children();
     while let Some(n) = at {
         let cloned = match n.kind() {
-            Kind::Element => clone_container(mapper, n, dst_doc),
+            Kind::Element => match clone_container(req, mapper, n, dst_doc) {
+                Ok(cloned) => cloned,
+                Err(thrown) => {
+                    outer.free();
+                    return Err(thrown);
+                }
+            },
             Kind::Dtd => None,
             _ => n.copy(dst_doc, 1),
         };
@@ -283,10 +304,10 @@ fn clone_helper(
         let mut up = n;
         at = loop {
             let Some(p) = up.parent() else {
-                return Some(outer);
+                return Ok(Some(outer));
             };
             if p == src {
-                return Some(outer);
+                return Ok(Some(outer));
             }
             if let Some(cp) = cloned_parent.parent() {
                 cloned_parent = cp;
@@ -297,7 +318,7 @@ fn clone_helper(
             up = p;
         };
     }
-    Some(outer)
+    Ok(Some(outer))
 }
 
 /// `dom_clone_node` with a namespace mapper, as a document that follows
@@ -329,32 +350,46 @@ fn clone_helper(
 /// string(1) "p"
 /// bool(true)
 /// ```
+///
+/// The `Err` is the memory limit, met where the mapper makes a
+/// declaration, the copy freed.
 pub(crate) fn clone_node_modern(
+    req: &mut Request,
     mapper: &mut Mapper,
     node: Node,
     doc: Option<Node>,
     recursive: bool,
-) -> Option<Node> {
+) -> Result<Option<Node>, Thrown> {
     if node.kind() == Kind::Dtd {
-        return node.copy_dtd(doc);
+        return Ok(node.copy_dtd(doc));
     }
-    let clone = clone_helper(mapper, node, doc, recursive)?;
+    let Some(clone) = clone_helper(req, mapper, node, doc, recursive)? else {
+        return Ok(None);
+    };
     if clone.doc() != node.doc() {
         let doc = clone.doc();
-        if matches!(
+        let reconciled = if matches!(
             clone.kind(),
             Kind::Document | Kind::HtmlDocument | Kind::Fragment
         ) {
+            let mut reconciled = Ok(());
             let mut at = clone.children();
-            while let Some(child) = at {
-                mapper.reconcile(doc, child);
+            while let Some(child) = at
+                && reconciled.is_ok()
+            {
+                reconciled = mapper.reconcile(req, doc, child);
                 at = child.next();
             }
+            reconciled
         } else {
-            mapper.reconcile(doc, clone);
+            mapper.reconcile(req, doc, clone)
+        };
+        if let Err(thrown) = reconciled {
+            clone.free();
+            return Err(thrown);
         }
     }
-    Some(clone)
+    Ok(Some(clone))
 }
 
 /// The document of the `Dom\` classes a document node's copy is handed out
@@ -1145,17 +1180,23 @@ fn clone_node_of(
     if follows_spec(req, this) {
         if is_document {
             let mut private = Private::new(req)?;
-            let Some(node) = clone_node_modern(&mut private.mapper, n, n.doc(), recursive) else {
+            let cloned = clone_node_modern(req, &mut private.mapper, n, n.doc(), recursive);
+            let Ok(Some(node)) = cloned else {
                 private.free(req);
-                return Ok(Owner::bool(false));
+                return cloned.map(|_| Owner::bool(false));
             };
             let copy =
                 crate::modern::document_object(req, modern_document_class(n), node, private)?;
             copy_document_ref(req, this, *copy);
             return Ok(copy.into_value());
         }
-        let cloned = match crate::dom_mut(req, this).and_then(|d| crate::private::of(&mut d.obj)) {
-            Some(private) => clone_node_modern(&mut private.mapper, n, n.doc(), recursive),
+        let cloned = match crate::libxml_half(req, this) {
+            Some(mut obj) => match crate::private::of(&mut obj) {
+                Some(private) => {
+                    clone_node_modern(req, &mut private.mapper, n, n.doc(), recursive)?
+                }
+                None => clone_node(n, n.doc(), recursive),
+            },
             None => clone_node(n, n.doc(), recursive),
         };
         let Some(node) = cloned else {

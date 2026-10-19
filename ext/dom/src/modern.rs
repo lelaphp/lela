@@ -16,7 +16,7 @@ use crate::node::DOMNode;
 use crate::object::{Code, Dom};
 use crate::parent::is_parent_invalid;
 use crate::private::Private;
-use crate::{dom, dom_mut, dom_throw, fetch, invalidate, object_for, returned};
+use crate::{dom, dom_throw, fetch, invalidate, object_for, returned};
 
 /// `php_dom_follow_spec_intern`: whether the object's document hands out
 /// the `Dom\` classes.
@@ -244,7 +244,10 @@ pub(crate) fn xml_load(
     }
     let private = Private::new(req)?;
     let object = document_object(req, "Dom\\XMLDocument", doc, private)?;
-    convert_to_modern(req, *object, doc);
+    if let Err(thrown) = convert_to_modern(req, *object, doc) {
+        object.give_up(req);
+        return Err(thrown);
+    }
     Ok(object)
 }
 
@@ -260,17 +263,22 @@ pub(crate) fn xml_load(
 /// xmlns:b=urn:b 'http://www.w3.org/2000/xmlns/'
 /// c=1 NULL
 /// ```
-pub(crate) fn convert_to_modern(req: &mut Request, object: PhpObject, doc: f::Node) {
-    let Some(private) = dom_mut(req, object).and_then(|d| crate::private::of(&mut d.obj)) else {
-        return;
-    };
-    let mut at = doc.children();
-    while let Some(node) = at {
-        if node.kind() == php_ext_libxml::ffi::Kind::Element {
-            private.mapper.mark_attribute_list(node);
+pub(crate) fn convert_to_modern(
+    req: &mut Request,
+    object: PhpObject,
+    doc: f::Node,
+) -> Result<(), Thrown> {
+    crate::private::mapped(req, object, |mapper, req| {
+        let mut at = doc.children();
+        while let Some(node) = at {
+            if node.kind() == php_ext_libxml::ffi::Kind::Element {
+                mapper.mark_attribute_list(req, node)?;
+            }
+            at = crate::next_in_tree_order_from(node, None);
         }
-        at = crate::next_in_tree_order_from(node, None);
-    }
+        Ok(Some(()))
+    })
+    .map(drop)
 }
 
 /// `Dom\import_simplexml`'s answer, `Dom\Attr|Dom\Element`.

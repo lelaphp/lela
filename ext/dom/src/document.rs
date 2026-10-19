@@ -933,9 +933,10 @@ fn create_element_ns(
 fn create_attribute_ns(
     req: &mut Request,
     this: PhpObject,
-    uri: Option<&[u8]>,
+    namespace: Option<PhpString>,
     name: &[u8],
 ) -> Result<Owner<Value>, Thrown> {
+    let uri = namespace.as_ref().map(PhpString::as_bytes);
     let doc = fetch(req, this)?;
     let modern = crate::modern::follows_spec(req, this);
     let root = doc.root();
@@ -957,8 +958,16 @@ fn create_attribute_ns(
         let Some(node) = Node::new_attr(Some(doc), &local, None) else {
             return Err(crate::dom_throw(req, Code::InvalidState));
         };
-        if let Some(uri) = uri.filter(|u| !u.is_empty()) {
-            let ns = crate::element::mapped_ns(req, this, Some(doc), prefix.as_deref(), Some(uri));
+        if let Some(namespace) = namespace.filter(|u| !u.is_empty()) {
+            let ns =
+                crate::element::mapped_ns(req, this, Some(doc), prefix.as_deref(), Some(namespace));
+            let ns = match ns {
+                Ok(ns) => ns,
+                Err(thrown) => {
+                    node.free();
+                    return Err(thrown);
+                }
+            };
             node.set_ns(ns);
         }
         return object_for(req, node, Some(this));
@@ -1046,9 +1055,9 @@ fn modern_import(
     if node.doc() == Some(doc) {
         return object_for(req, node, Some(this));
     }
-    let copy = dom_mut(req, this)
-        .and_then(|d| crate::private::of(&mut d.obj))
-        .and_then(|p| crate::node::clone_node_modern(&mut p.mapper, node, Some(doc), deep));
+    let copy = crate::private::mapped(req, this, |mapper, req| {
+        crate::node::clone_node_modern(req, mapper, node, Some(doc), deep)
+    })?;
     let Some(copy) = copy else {
         return Err(crate::dom_throw(req, Code::InvalidState));
     };
@@ -1105,7 +1114,7 @@ fn adopt_node(
         return Ok(Owner::bool(false));
     }
     let doc = fetch(req, this)?;
-    if !adopt(req, this, node, doc) {
+    if !adopt(req, this, node, doc)? {
         if modern {
             return Err(crate::dom_throw(req, Code::InvalidState));
         }
@@ -1352,8 +1361,7 @@ impl DOMDocument {
         namespace: Option<PhpString>,
         qualifiedName: PhpString,
     ) -> Result<Untyped<Owner<Value>>, Thrown> {
-        let uri = namespace.as_ref().map(PhpString::as_bytes);
-        create_attribute_ns(req, this.object(), uri, qualifiedName.as_bytes()).map(Untyped)
+        create_attribute_ns(req, this.object(), namespace, qualifiedName.as_bytes()).map(Untyped)
     }
 
     /// `DOMDocument::createCDATASection(string $data)`.
@@ -2119,9 +2127,7 @@ impl Document {
             return Err(crate::dom_throw(req, Code::InvalidCharacter));
         }
         let node = if doc.kind() == Kind::HtmlDocument {
-            let ns = dom_mut(req, this)
-                .and_then(|d| crate::private::of(&mut d.obj))
-                .and_then(|p| p.mapper.html(Some(doc)));
+            let ns = crate::private::mapped(req, this, |mapper, req| mapper.html(req, Some(doc)))?;
             Node::new_element(Some(doc), ns, &name.to_ascii_lowercase(), None)
         } else {
             Node::new_element(Some(doc), None, name, None)
@@ -2167,7 +2173,8 @@ impl Document {
         let doc = fetch(req, this)?;
         let made = match validate_and_extract(uri, qualifiedName.as_bytes()) {
             Ok((local, prefix)) => {
-                let ns = crate::element::mapped_ns(req, this, Some(doc), prefix.as_deref(), uri);
+                let ns =
+                    crate::element::mapped_ns(req, this, Some(doc), prefix.as_deref(), namespace)?;
                 match Node::new_element(Some(doc), ns, &local, None) {
                     Some(node) => object_for(req, node, Some(this))?,
                     None => return Err(crate::dom_throw(req, Code::InvalidState)),

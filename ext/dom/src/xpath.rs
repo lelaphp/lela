@@ -727,10 +727,10 @@ fn eval(
         return Err(throw_error(req, "Error", "Node from wrong document"));
     }
     let in_scope = match node {
-        Some(n) if register && modern => dom_mut(req, this)
-            .and_then(|d| crate::private::of(&mut d.obj))
-            .map(|p| p.mapper.in_scope(n, false))
-            .unwrap_or_default(),
+        Some(n) if register && modern => crate::private::mapped(req, this, |mapper, req| {
+            mapper.in_scope(req, n, false).map(Some)
+        })?
+        .unwrap_or_default(),
         _ => Vec::new(),
     };
     let scope = match (register, modern) {
