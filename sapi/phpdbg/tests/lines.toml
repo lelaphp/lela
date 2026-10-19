@@ -272,12 +272,29 @@ stdin = "r\nr\nq\n"
 # Under `-r` php's startup run compiles a context that does not compile once
 # the session is fully started, so its log stands at a prompt, and nothing is
 # logged from there: a `run` or a `print exec` refused again writes nothing,
-# and `ev` no warning.
+# and `ev` no warning. Under `display_errors=1` the warning is displayed: a
+# parse error leaves `zend_compile` as it returns, so `compile_file` emits
+# its record and stops it before phpdbg renders the `ParseError`.
 [[line]]
 name = "a-refusal-inside-the-log-leaves-its-guard-set"
 args = ["-qrb", "-n", "{dir}/t.php"]
 files = { "t.php" = "<?php\nfunction (\n" }
 stdin = "ev 2\nr\nev $x\nprint exec\nr\nq\n"
+[[line.then]]
+args = ["-qrb", "-n", "-d", "display_errors=1", "{dir}/t.php"]
+
+# The same past a compile error, which bails out of `zend_compile` past
+# `compile_file`'s `zend_emit_recorded_errors`, so `EG(record_errors)` stands
+# on with the fatal held: `ev`'s warning is held too, logged nowhere and
+# displayed nowhere (#2901), and the next compile emits the record, its
+# fatal bailing out ahead of its own.
+[[line]]
+name = "a-compile-error-s-record-holds-back-an-ev-warning"
+args = ["-qrb", "-n", "-d", "display_errors=1", "{dir}/t.php"]
+files = { "t.php" = "<?php\n$a = 1;\nbreak 2;\n" }
+stdin = "ev 2\nr\nev $x\nprint exec\nr\nq\n"
+[[line.then]]
+args = ["-qrb", "-n", "{dir}/t.php"]
 
 # Such a refusal bails out of the log past the line that clears its guard, so
 # nothing is logged after it either.
