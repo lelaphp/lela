@@ -96,6 +96,10 @@ pub(crate) struct RealpathCache {
     buckets: Mutex<Buckets>,
     limit: AtomicI64,
     ttl: i64,
+    /// The paths the resolutions through this cache asked the file
+    /// system about, `lstat`, for the tests to hold a request to none.
+    #[cfg(test)]
+    looked_up: std::sync::atomic::AtomicUsize,
 }
 
 /// The slots and `CWDG(realpath_cache_size)`, the bytes their buckets
@@ -120,6 +124,8 @@ impl RealpathCache {
             }),
             limit: AtomicI64::new(0),
             ttl: 0,
+            #[cfg(test)]
+            looked_up: std::sync::atomic::AtomicUsize::new(0),
         };
         for name in [
             &b"realpath_cache_size"[..],
@@ -148,6 +154,13 @@ impl RealpathCache {
         self.buckets
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// How many paths the resolutions through this cache asked the file
+    /// system about since it was made.
+    #[cfg(test)]
+    pub(crate) fn looked_up(&self) -> usize {
+        self.looked_up.load(Ordering::Relaxed)
     }
 
     /// `CWDG(realpath_cache_size_limit)`, zero while the cache is off.
@@ -397,7 +410,7 @@ fn realpath_r(
         let tmp = p.head(len);
         let meta = if save {
             #[cfg(test)]
-            tests::LOOKED_UP.with(|n| n.set(n.get() + 1));
+            walk.cache.looked_up.fetch_add(1, Ordering::Relaxed);
             std::fs::symlink_metadata(host(&tmp)).ok()
         } else {
             None
@@ -550,13 +563,7 @@ pub(crate) fn virtual_file_ex(
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    thread_local! {
-        /// The paths this thread's resolutions asked the file system
-        /// about, `lstat`, since the thread began.
-        pub(crate) static LOOKED_UP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    }
-
+mod tests {
     /// Linux's `PATH_MAX` is 4096, which php's `MAXPATHLEN` and so
     /// `PHP_MAXPATHLEN` are there; the macOS oracle, at 1024, cannot
     /// show it, so no witness holds it.

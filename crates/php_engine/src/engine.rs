@@ -7531,7 +7531,6 @@ mod tests {
     /// again.
     #[test]
     fn a_second_request_resolves_its_paths_from_the_engine_s_realpath_cache() {
-        use crate::virtual_cwd::tests::LOOKED_UP;
         let files = Files::new(
             "realpath-cache",
             &[
@@ -7542,10 +7541,10 @@ mod tests {
         let engine = Engine::cli_builder().build();
         let mut asked = Vec::new();
         let mut serve = || {
-            let before = LOOKED_UP.with(std::cell::Cell::get);
+            let before = engine.shared.realpath_cache.looked_up();
             let (body, observables) = files.serve(&engine, "main.php");
             assert_eq!((body.as_str(), observables.exit_code), ("ok\n", 0));
-            asked.push(LOOKED_UP.with(std::cell::Cell::get) - before);
+            asked.push(engine.shared.realpath_cache.looked_up() - before);
         };
         serve();
         serve();
@@ -7569,15 +7568,14 @@ mod tests {
     /// `open_basedir`, which turns the cache off.
     #[test]
     fn an_expired_entry_and_an_open_basedir_ask_the_file_system_again() {
-        use crate::virtual_cwd::tests::LOOKED_UP;
         let files = Files::new("realpath-ttl", &[("main.php", "<?php\n")]);
         for (name, value) in [("realpath_cache_ttl", "-1"), ("open_basedir", "/")] {
             let engine = Engine::cli_builder().ini_default(name, value).build();
             for request in 0..2 {
-                let before = LOOKED_UP.with(std::cell::Cell::get);
+                let before = engine.shared.realpath_cache.looked_up();
                 let (body, observables) = files.serve(&engine, "main.php");
                 assert_eq!(observables.exit_code, 0, "{body}");
-                let asked = LOOKED_UP.with(std::cell::Cell::get) - before;
+                let asked = engine.shared.realpath_cache.looked_up() - before;
                 assert!(asked > 0, "{name}={value}: request {request} asked nothing");
             }
         }
