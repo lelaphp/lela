@@ -1372,13 +1372,14 @@ pub(crate) fn init_dynamic_call<T: Tier>(
 
 /// What a dynamic call resolved to: the callee, the name the call frame
 /// carries for a method, the receiver it holds one owner of, the called
-/// scope, and the closure the frame holds one owner of.
+/// scope, and the closure the frame holds one owner of, with whether it
+/// reads a runtime cache of its own ([`crate::classes::ClosureCache`]).
 struct DynamicTarget {
     function: Function,
     name: Option<PhpString>,
     this: Option<PhpObject>,
     called_scope: Option<crate::api::values::ClassId>,
-    closure: Option<PhpObject>,
+    closure: Option<(PhpObject, bool)>,
 }
 
 /// `zend_init_dynamic_call_object` (`Z/Zend/zend_execute.c:5152`): the
@@ -1387,17 +1388,26 @@ struct DynamicTarget {
 /// object where its class declares one, and php's `Error` naming the
 /// class otherwise.
 fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTarget, Thrown> {
-    if let Some(closure) = object.closure(req).cloned() {
+    // The payload read once for all the call takes of it, its own cache
+    // among it, as php's `get_closure` hands `fbc` and the object over
+    // in one call.
+    if let Some(closure) = object.native::<crate::classes::ClosureObject>(req) {
+        let (function, this, called_scope) = (
+            closure.info.function,
+            closure.info.this,
+            closure.info.called_scope,
+        );
+        let own_cache = matches!(closure.cache, crate::classes::ClosureCache::Own(_));
         req.addref(&object.as_value());
-        if let Some(this) = closure.this {
+        if let Some(this) = this {
             req.addref(&this.as_value());
         }
         return Ok(DynamicTarget {
-            function: closure.function,
+            function,
             name: None,
-            this: closure.this,
-            called_scope: closure.called_scope,
-            closure: Some(object),
+            this,
+            called_scope,
+            closure: Some((object, own_cache)),
         });
     }
     let class = object.class();
@@ -2714,8 +2724,11 @@ fn push_dynamic(
     let mut header = exec::Header::call(target.function, op.extended_value);
     header.set_receiver(target.this.map(exec::Receiver::Owned));
     header.set_called_scope(target.called_scope);
-    header.closure = target.closure;
+    header.closure = target.closure.map(|(closure, _)| closure);
     header.info.set_dynamic(true);
+    header
+        .info
+        .set_own_cache(target.closure.is_some_and(|(_, own)| own));
     if let Some(name) = target.name {
         req.release(Value::string(name));
     }

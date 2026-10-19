@@ -1264,6 +1264,37 @@ impl Request {
     /// raised; `returns_to` is the slot of `caller`'s that takes what it
     /// returns, none where the call opline reads nothing. None, with
     /// nothing touched, for every other call, which those two serve.
+    ///
+    /// The `INIT` writes whether the entry is plain
+    /// ([`exec::CallInfo::plain_entry`]); one that is not, a function
+    /// with `#[\Deprecated]` or `#[\NoDiscard]` or a closure bound into
+    /// another scope, which reads a cache of its own, is asked here,
+    /// and a closure's statics are its own on every call:
+    ///
+    /// ```php
+    /// #[\Deprecated("use g")] function d() { return 1; }
+    /// if (PHP_VERSION_ID > 0) { #[\NoDiscard] function n() { return 2; } }
+    /// class A { private $p = 'A::p'; }
+    /// $read = function () { return $this->p; };
+    /// $counter = function () { static $n = 0; return ++$n; };
+    /// $bound = Closure::bind($read, new A, A::class);
+    /// for ($i = 0; $i < 2; $i++) {
+    ///     $x = d();
+    ///     n();
+    ///     echo $bound(), ' ', $counter(), "\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// Deprecated: Function d() is deprecated, use g in %s on line 9
+    ///
+    /// Warning: The return value of function n() should either be used or intentionally ignored by casting it as (void) in %s on line 10
+    /// A::p 1
+    ///
+    /// Deprecated: Function d() is deprecated, use g in %s on line 9
+    ///
+    /// Warning: The return value of function n() should either be used or intentionally ignored by casting it as (void) in %s on line 10
+    /// A::p 2
+    /// ```
     #[inline(always)] // once per call, in the loop's DO_*CALL arms
     #[allow(clippy::inline_always)]
     pub(crate) fn enter_call(
@@ -1280,17 +1311,21 @@ impl Request {
         let function = header.function?;
         let passed = header.num_args;
         let len = top.len();
-        let own = self.closure_own_cache(header.closure);
         let user = self.user_function(function)?;
         let shape = user.shape;
-        let cache = own.unwrap_or(shape.cache);
-        let refused =
-            flagged && (user.flags.deprecated || user.flags.no_discard && returns_to.is_none());
-        if refused
-            || passed > shape.parameters
-            || len < shape.slots as usize
-            || !self.map.laid(cache)
-        {
+        // The `INIT` found the entry plain where it could
+        // ([`exec::CallInfo::plain_entry`]): the function's own cache, and
+        // no attribute to raise. Otherwise both are asked here.
+        let cache = if header.info.plain_entry() {
+            shape.cache
+        } else {
+            if flagged && (user.flags.deprecated || user.flags.no_discard && returns_to.is_none()) {
+                return None;
+            }
+            self.closure_own_cache(header.closure)
+                .unwrap_or(shape.cache)
+        };
+        if passed > shape.parameters || len < shape.slots as usize || !self.map.laid(cache) {
             return None;
         }
         let opline =

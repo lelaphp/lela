@@ -765,10 +765,12 @@ pub(crate) struct FrameShape {
     /// off the shape and not off the declaration
     /// ([`Request::arg_send_mode`]).
     pub(crate) by_ref: bool,
-    /// php's `quick_arg_flags`, which of the first twelve arguments the
-    /// function takes by value, as the `INIT` of a call to it writes
-    /// them into the call's flags for the `SEND_*_EX` oplines to test
-    /// with no lookup ([`exec::CallInfo::sends_by_value`]).
+    /// What the `INIT` of a call to the function writes into the call's
+    /// flags: php's `quick_arg_flags`, which of the first twelve
+    /// arguments it takes by value, for the `SEND_*_EX` oplines to test
+    /// with no lookup ([`exec::CallInfo::sends_by_value`]); and whether
+    /// its activation is plain, no `#[\Deprecated]` or `#[\NoDiscard]`
+    /// to raise ([`exec::CallInfo::plain_entry`]).
     pub(crate) sent: exec::CallInfo,
 }
 
@@ -797,6 +799,10 @@ impl FrameShape {
             by_ref: decl.parameters.iter().any(|p| p.by_ref),
             sent: exec::CallInfo::sent(|number| {
                 sent_parameter(decl, number).is_some_and(|parameter| parameter.by_ref)
+            })
+            .with_plain_entry({
+                let flags = crate::attributes::Flags::of(&decl.attributes);
+                !flags.deprecated && !flags.no_discard
             }),
         }
     }

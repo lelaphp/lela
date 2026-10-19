@@ -781,6 +781,15 @@ impl CallInfo {
     /// `MAX_ARG_FLAG_NUM`: how many arguments [`CallInfo::BY_VALUE_AT`]
     /// covers.
     const QUICK: u32 = 12;
+    /// The `INIT` found the callee a user function that raises neither
+    /// a deprecation nor a discarded value's warning
+    /// ([`crate::api::request::FrameShape::sent`]), so its activation
+    /// asks neither ([`crate::api::request::Request::enter_call`]).
+    const PLAIN_ENTRY: u32 = 1 << 23;
+    /// The call is a closure's that reads a runtime cache of its own
+    /// (`ZEND_ACC_HEAP_RT_CACHE`), which its activation reads in place
+    /// of its function's: a [`CallInfo::PLAIN_ENTRY`] it overrides.
+    const OWN_CACHE: u32 = 1 << 24;
 
     /// The flags as another process read them ([`crate::readable`]).
     pub(crate) fn of(bits: u32) -> CallInfo {
@@ -913,6 +922,27 @@ impl CallInfo {
     pub(crate) fn sends_by_value(self, number: u32) -> bool {
         let at = number.wrapping_sub(1);
         at < Self::QUICK && self.0 & 1 << (Self::BY_VALUE_AT + at) != 0
+    }
+
+    /// [`CallInfo::sent`] with [`CallInfo::PLAIN_ENTRY`] where `plain`.
+    pub(crate) fn with_plain_entry(self, plain: bool) -> CallInfo {
+        CallInfo(if plain {
+            self.0 | Self::PLAIN_ENTRY
+        } else {
+            self.0
+        })
+    }
+
+    /// An activation that reads the function's own cache and raises
+    /// nothing for its attributes: [`CallInfo::PLAIN_ENTRY`] and no
+    /// [`CallInfo::OWN_CACHE`].
+    #[inline]
+    pub(crate) fn plain_entry(self) -> bool {
+        self.0 & (Self::PLAIN_ENTRY | Self::OWN_CACHE) == Self::PLAIN_ENTRY
+    }
+
+    pub(crate) fn set_own_cache(&mut self, on: bool) {
+        self.set(Self::OWN_CACHE, on);
     }
 
     /// The bits `more` sets set here too: what an `INIT` writes of its
