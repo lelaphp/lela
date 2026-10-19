@@ -363,6 +363,32 @@ files = { "t.php" = "<?php\n$a = 1;\nbreak 2;\n" }
 stdin = "print exec\nprint exec\nc\nprint exec\nq\n"
 streams = "merged"
 
+# A context that declares functions before its refusal: php declares each as
+# its compile finishes it and the fatal's jump takes none back, so they stand in
+# the request (#2900). The second compile, `print exec`'s, records its own
+# deprecation behind the first's record, still standing, and meets `f` as
+# `Cannot redeclare`, whose fatal emits that record first: the first's
+# fatal bails out ahead of it, inside the log, and its prompt's `print exec`
+# compiles a third time with no record standing, its deprecation and its
+# `Cannot redeclare` displayed and logged nowhere, bailing out of the log to
+# the prompt outside it, where `info funcs` lists both functions and a fourth
+# compile emits the record the third left standing, the same two displayed.
+[[line]]
+name = "a-second-compile-of-a-refused-context-meets-its-functions"
+args = ["-qb", "-n", "-d", "display_errors=1", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f(int $a = null) {}\nfunction g(int $b = null) {}\nbreak 2;\n" }
+stdin = "print exec\nprint exec\nc\ninfo funcs\nprint exec\nq\n"
+streams = "merged"
+
+# The same under `-r`, `run` compiling it after the startup run's refusal
+# left its log: `Cannot redeclare` logged, listed and displayed.
+[[line]]
+name = "under-r-a-run-after-a-refusal-meets-its-functions"
+args = ["-qrb", "-n", "-d", "display_errors=1", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f(int $a = null) {}\nfunction g(int $b = null) {}\nbreak 2;\n" }
+stdin = "ev 1\nc\nr\nq\n"
+streams = "merged"
+
 # The auto compile under `-r` comes after the init files whatever they left:
 # where their code bailed out, its displays come before the startup run asks
 # to restart (`n`, the session at the prompt); php is fully started after it,

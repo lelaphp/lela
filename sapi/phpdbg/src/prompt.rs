@@ -950,7 +950,6 @@ fn exec(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     );
     s.exec = Some(resolved);
     s.stdin_code = None;
-    s.refused.clear();
     s.exec_in_log = !in_execution(s, here) && s.out.logging();
     s.context = if in_execution(s, here) {
         Context::Announced
@@ -994,7 +993,6 @@ fn stdin(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     s.exec = Some(b"Standard input code".to_vec());
     s.stdin_code = Some(code);
     s.context = Context::Unannounced;
-    s.refused.clear();
     s.stopped = Some(Stop::Exec);
     Ret::Success
 }
@@ -1044,7 +1042,7 @@ fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Ret {
     // `phpdbg_compile` before anything of the run: the compiler refuses
     // the context again, in its log, and bails out of the run.
     if s.context == Context::Refused && !here.compiled() {
-        refused_again(s, Some(here));
+        refused_again(s, here);
         return Ret::Success;
     }
     // In the init files, php's `run` compiles the context and runs it
@@ -1443,7 +1441,7 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     };
     // The compiler refuses the context again, its log written again.
     if s.context == Context::Refused {
-        refused_again(s, Some(here));
+        refused_again(s, here);
         return Ret::Success;
     }
     let Some(req) = here.request() else {
@@ -1470,13 +1468,17 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     Ret::Success
 }
 
-/// What `phpdbg_compile` writes where the compiler refuses the context:
-/// the diagnostic, displayed or logged, and where it was logged, the
-/// listing where nothing executes and, once the session is fully started,
-/// a prompt inside the log, under which nothing more is logged; and the
-/// status 255. Inside the log already, nothing is written, and the
-/// refusal bails out of the log with its guard left set, and of the
-/// prompt inside it.
+/// `phpdbg_compile` where the compiler refuses the context: the context
+/// compiled again in the request the prompt stands in ([`tier::compile`]),
+/// its diagnostics displayed and logged, and where its fatal was logged,
+/// the listing where nothing executes and, once the session is fully
+/// started, a prompt inside the log, under which nothing more is logged;
+/// and the status 255. What the request's earlier compiles left stands
+/// for it as php's one request keeps it: the record a refusal leaves
+/// standing, emitted ahead of the next one's fatal, and the functions it
+/// had declared, which the next meets as `Cannot redeclare`. Inside the
+/// log already, nothing is logged, and the refusal bails out of the log
+/// with its guard left set, and of the prompt inside it.
 ///
 /// ```php
 /// $a = 1;
@@ -1501,30 +1503,26 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 /// prompt> [Not running]
 /// prompt>
 /// ```
-pub fn refused_again(s: &mut Session, here: Option<&mut Here<'_>>) {
-    // Inside the log, `php_log_err`'s guard logs nothing, and so lists
-    // nothing, while `php_error_cb` displays each diagnostic all the same.
-    if s.out.logging() {
-        s.status = Some(255);
-        s.left_log = s.out.in_log_prompt();
-        s.out.stick_log();
-        out::replay(s, &s.refused.clone(), |_| AfterLog::Returned);
+pub fn refused_again(s: &mut Session, here: &mut Here<'_>) {
+    let (Some(exec), Some(req)) = (s.exec.clone(), here.request()) else {
         return;
-    }
-    // What a fatal's log is followed by, `php_sapi_phpdbg_log_message`'s
-    // listing and prompt, where the compiler's fatal was logged, before
-    // `php_error_cb` displays it and writes the status 255, which a prompt
-    // that bailed out of the log leaves as it was.
-    let refused = s.refused.clone();
-    let after = out::replay(s, &refused, |s| {
-        crate::list::code(s, NO_ACTIVE_FILE, 0);
-        let Some(here) = here.filter(|_| s.started) else {
-            return AfterLog::Returned;
-        };
-        out::in_log(s, |s| interactive(s, here)).after_log(s.stopped.is_some())
-    });
-    if after == AfterLog::Returned {
-        s.status = Some(255);
+    };
+    // A refusal inside the log bails out of it, past the line that
+    // clears `PG(in_error_log)`, and of the prompt inside it.
+    let logging = s.out.logging();
+    let in_log_prompt = s.out.in_log_prompt();
+    let code = s.stdin_code.clone();
+    let compiled = crate::session::lend(req, s, |req| tier::compile(req, &exec, code.as_deref()));
+    match compiled {
+        tier::Compiled::Refused if logging => {
+            s.left_log = in_log_prompt;
+            s.out.stick_log();
+        }
+        tier::Compiled::Refused => {}
+        tier::Compiled::Compiled => crate::debugger::announce(s),
+        tier::Compiled::Unopened => s
+            .out
+            .error(format!("Could not open file {}", String::from_utf8_lossy(&exec)).as_bytes()),
     }
 }
 

@@ -282,9 +282,6 @@ pub struct Session {
     /// The init files have been run once: `phpdbg_fully_started` is set
     /// after the first cycle's, and stays set.
     pub init_ran: bool,
-    /// What the compiler wrote of a context it refused, which a cycle's
-    /// request for its init files writes after them.
-    pub refused: Vec<crate::out::Written>,
     /// The request for the init files stands where a run was asked for.
     pub init_runs: bool,
     /// The init files being run have compiled the context, which php's
@@ -352,7 +349,6 @@ impl Session {
             initializing: false,
             init_ran: false,
             init_compiled: false,
-            refused: Vec::new(),
             init_runs: false,
             line_colours: Colours::On,
             out: Out::default(),
