@@ -652,8 +652,9 @@ const RESERVED: [&str; 10] = [
 
 /// Programs that run the rest of their words as a command, with the
 /// options each reads a value after and the operands it reads before the
-/// command: `timeout`'s duration (#2668).
-const WRAPPERS: [(&str, &[&str], usize); 8] = [
+/// command: `timeout`'s duration (#2668), and `caffeinate`'s, which keeps
+/// the machine awake while its command runs (#2990).
+const WRAPPERS: [(&str, &[&str], usize); 9] = [
     ("command", &[], 0),
     ("builtin", &[], 0),
     ("exec", &["-a"], 0),
@@ -662,6 +663,7 @@ const WRAPPERS: [(&str, &[&str], usize); 8] = [
     ("env", &["-u", "-C", "-S"], 0),
     ("nice", &["-n"], 0),
     ("timeout", &["-s", "--signal", "-k", "--kill-after"], 1),
+    ("caffeinate", &["-t", "-w"], 0),
 ];
 
 /// Programs that read commands, from a `-c` argument, a file or stdin.
@@ -1223,6 +1225,14 @@ mod tests {
         );
         assert_eq!(words("{ git commit; }"), vec![vec!["git", "commit"]]);
         assert_eq!(words("A=1"), Vec::<Vec<String>>::new());
+        assert_eq!(
+            words("CARGO_BUILD_JOBS=2 caffeinate -i git merge main"),
+            vec![vec!["git", "merge", "main"]]
+        );
+        assert_eq!(
+            words("caffeinate -t 60 -i git commit"),
+            vec![vec!["git", "commit"]]
+        );
     }
 
     /// #2607: the directory a `cd`, `pushd` or git `-C` names by a
