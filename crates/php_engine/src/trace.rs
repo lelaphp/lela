@@ -39,7 +39,8 @@ impl Entered {
 }
 
 /// `trace` appended to `path` in one write, so a forked child's request
-/// and its parent's land whole beside each other. A file that cannot be
+/// and its parent's land whole beside each other: each native once per
+/// request ([`Request::entered`](crate::api::request::Request)). A file that cannot be
 /// written loses the lines, and the harness that reads it reports the
 /// natives as not entered.
 pub(crate) fn append_trace(path: &Path, trace: &[Entered]) {
