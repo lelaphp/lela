@@ -13,61 +13,31 @@
 //! `PHP_JIT_BLESS=1` set, the test writes both files instead of reading
 //! them.
 
-use std::path::PathBuf;
-
 use php_unit::Opcode;
 
 use super::{
-    Check, Def, End, Form, Frame, Landing, Op, OpId, Operand, Repeat, Slot, TraceIr, ValueId, build,
+    Check, Def, End, Form, Frame, Landing, Op, OpId, Operand, Repeat, Slot, TraceIr, ValueId,
 };
 use crate::lower::dump;
-use crate::record::{Stop, TraceRecord};
-use crate::testing::records::recording;
+use crate::record::Stop;
+use crate::testing::goldens::{
+    self, FIB, Fixture, MANDELBROT, NBODY, SPECTRALNORM, held, traced as built,
+};
 
-/// Where the goldens are.
-fn goldens() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/types/goldens")
-}
-
-/// Whether the test writes its goldens rather than reading them.
-fn blessing() -> bool {
-    std::env::var_os("PHP_JIT_BLESS").is_some_and(|on| on == "1")
-}
-
-/// `text` held to the golden `name`, or written to it.
-fn held(name: &str, text: &str) -> Result<(), String> {
-    let path = goldens().join(name);
-    if blessing() {
-        return std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()));
-    }
-    let golden = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    if golden == text {
-        return Ok(());
-    }
-    Err(format!(
-        "{name} is not what was built; with PHP_JIT_BLESS=1 the test writes it\n--- golden\n{golden}\n--- built\n{text}"
-    ))
-}
-
-/// A program of `goldens/`, less its open tag, which the scratch file
-/// the tests serve writes itself.
-fn program(name: &str) -> Result<String, String> {
-    let path = goldens().join(format!("{name}.php"));
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(text.strip_prefix("<?php\n").unwrap_or(&text).to_owned())
-}
-
-/// The program `name` recorded under `plan`: its record held to
+/// The fixture recorded under its plan: its record held to
 /// `<name>.trace`, which is parsed and built through the recording's
 /// view, the trace rendered and held to `<name>.ir`.
-fn golden(name: &str, plan: &[(&str, &str)]) -> Result<TraceIr, String> {
-    let (recorded, _) = recording(plan, &program(name)?)?;
-    held(&format!("{name}.trace"), &recorded.record.dump())?;
-    let path = goldens().join(format!("{name}.trace"));
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let record = TraceRecord::parse(&text).map_err(|e| format!("{name}.trace: {e:?}"))?;
-    let ir = build(&record, &recorded.view).map_err(|abort| format!("{name}: {abort:?}"))?;
-    held(&format!("{name}.ir"), &dump::render(&ir))?;
+fn golden(fixture: Fixture) -> Result<TraceIr, String> {
+    let recorded = goldens::recorded(fixture)?;
+    held(
+        &goldens::types().join(format!("{}.trace", fixture.name)),
+        &recorded.record.dump(),
+    )?;
+    let ir = goldens::built(fixture, &recorded)?;
+    held(
+        &goldens::types().join(format!("{}.ir", fixture.name)),
+        &dump::render(&ir),
+    )?;
     Ok(ir)
 }
 
@@ -76,10 +46,7 @@ fn golden(name: &str, plan: &[(&str, &str)]) -> Result<TraceIr, String> {
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn fib_enters_and_recurses() -> Result<(), String> {
-    let ir = golden(
-        "fib",
-        &[("record.function", "fib"), ("record.start", "enter")],
-    )?;
+    let ir = golden(FIB)?;
     assert_eq!(ir.entry.stop, Stop::RecursiveCall);
     assert!(matches!(ir.end, End::Loop(header) if header.repeat == Repeat::Call));
     Ok(())
@@ -90,14 +57,7 @@ fn fib_enters_and_recurses() -> Result<(), String> {
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn mandelbrot_loops_in_file_scope() -> Result<(), String> {
-    let ir = golden(
-        "mandelbrot",
-        &[
-            ("record.function", ""),
-            ("record.start", "loop"),
-            ("record.headers", "2"),
-        ],
-    )?;
+    let ir = golden(MANDELBROT)?;
     assert_eq!(ir.entry.stop, Stop::Loop);
     Ok(())
 }
@@ -107,14 +67,7 @@ fn mandelbrot_loops_in_file_scope() -> Result<(), String> {
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn nbody_advances_in_a_loop() -> Result<(), String> {
-    let ir = golden(
-        "nbody",
-        &[
-            ("record.function", "advance"),
-            ("record.start", "loop"),
-            ("record.headers", "1"),
-        ],
-    )?;
+    let ir = golden(NBODY)?;
     assert_eq!(ir.entry.stop, Stop::Loop);
     Ok(())
 }
@@ -124,25 +77,10 @@ fn nbody_advances_in_a_loop() -> Result<(), String> {
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn spectralnorm_inlines_its_call() -> Result<(), String> {
-    let ir = golden(
-        "spectralnorm",
-        &[
-            ("record.function", "eval_A_times_u"),
-            ("record.start", "loop"),
-            ("record.headers", "1"),
-        ],
-    )?;
+    let ir = golden(SPECTRALNORM)?;
     assert_eq!(ir.entry.stop, Stop::Loop);
     assert!(ir.ops.iter().any(|op| matches!(op, Op::Enter { .. })));
     Ok(())
-}
-
-/// The program recorded under `plan`, built from its record's text.
-fn built(plan: &[(&str, &str)], program: &str) -> Result<TraceIr, String> {
-    let (recorded, _) = recording(plan, program)?;
-    let record = TraceRecord::parse(&recorded.record.dump())
-        .map_err(|e| format!("the record's text: {e:?}"))?;
-    build(&record, &recorded.view).map_err(|abort| format!("{abort:?}"))
 }
 
 /// The place of the first stepped opline of `opcode`.
