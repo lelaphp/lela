@@ -220,7 +220,11 @@ fn a_full_arena_is_full_of_code_and_stops_the_table() {
     let full = Err(Unpublished::Full(Full::Code));
     assert_eq!(table.publish(compiled(&[0; 16], vec![]), Start::Loop), full);
     assert!(table.full());
-    assert_eq!(table.publish(compiled(&[0; 16], vec![]), Start::Loop), full);
+    assert_eq!(
+        table.publish(compiled(&[0; 4], vec![]), Start::Loop),
+        full,
+        "a body the tail would hold is refused too: the table compiles nothing more"
+    );
     assert_eq!(table.next(), Some(trace(2)), "no id was taken");
 }
 
@@ -254,6 +258,19 @@ fn a_malformed_trace_is_refused_and_counts_nothing() {
         table.publish(compiled(&[0; 4], vec![exit(Some(trace(1)))]), Start::Loop),
         Err(Unpublished::Malformed("a link to no trace numbered"))
     );
+    let mut huge = compiled(&vec![0; CHUNK + 1], vec![]);
+    let odd = Compiled {
+        align: 3,
+        ..compiled(&[0; 4], vec![])
+    };
+    for refused in [huge.clone(), odd] {
+        assert!(matches!(
+            table.publish(refused, Start::Loop),
+            Err(Unpublished::Malformed(_))
+        ));
+    }
+    huge.bytes.truncate(CHUNK);
+    assert!(!table.full(), "a body the backend made wrong fills nothing");
     assert_eq!(table.next(), Some(trace(1)));
     assert_eq!(table.writer().counts, super::Counts::default());
 }

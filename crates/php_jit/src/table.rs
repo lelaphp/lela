@@ -453,6 +453,14 @@ impl<P: Pages> TraceTable<P> {
         if compiled.entry_offset >= compiled.bytes.len() {
             return Err(Unpublished::Malformed("an entry past the trace's bytes"));
         }
+        if compiled.bytes.len() > code::CHUNK || !compiled.align.is_power_of_two() {
+            return Err(Unpublished::Malformed(
+                "a body no chunk holds, or an alignment no power of two",
+            ));
+        }
+        if self.code_full.load(Ordering::Relaxed) {
+            return Err(Full::Code.into());
+        }
         let mut links: Vec<TraceId> = compiled.exits.iter().filter_map(|e| e.link).collect();
         if links.iter().any(|link| *link >= admitted.id) {
             return Err(Unpublished::Malformed("a link to no trace numbered"));
@@ -474,6 +482,9 @@ impl<P: Pages> TraceTable<P> {
             return Err(Full::Code.into());
         };
         let (id, entry) = (admitted.id, code.entry());
+        if !self.vacant(id) {
+            return Err(Unpublished::Malformed("a slot written twice"));
+        }
         writer
             .perf
             .published(id, &compiled.name, entry, &compiled.bytes);
@@ -509,6 +520,17 @@ impl<P: Pages> TraceTable<P> {
         self.next
             .store(admitted.id.get().saturating_add(1), Ordering::Release);
         Ok(admitted.id)
+    }
+
+    /// Whether the slot `id` names stands unwritten, so [`TraceTable::fill`]
+    /// will write it: asked before a publish writes its `PERF` line.
+    fn vacant(&self, id: TraceId) -> bool {
+        let (segment, slot) = id.slot();
+        self.segments.get(segment).is_some_and(|slots| {
+            slots
+                .get()
+                .is_none_or(|slots| slots.get(slot).is_some_and(|slot| slot.get().is_none()))
+        })
     }
 
     /// `trace` written to the slot `id` names, its segment laid down the
