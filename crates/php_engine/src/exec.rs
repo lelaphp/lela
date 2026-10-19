@@ -30,7 +30,7 @@ use crate::api::values::{ClassId, Owner, PhpObject, PhpString, TypeTag, Value};
 
 mod caches;
 
-pub(crate) use caches::{CacheAt, RuntimeCaches, main_alone, op_arrays_mut};
+pub(crate) use caches::{CacheAt, RuntimeCaches, op_arrays_mut};
 
 /// The VM stack a request or a fiber runs on, its frames' headers the
 /// engine's ([`php_heap::VmStack`]).

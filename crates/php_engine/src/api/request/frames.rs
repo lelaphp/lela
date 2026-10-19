@@ -539,16 +539,6 @@ impl Request {
         self.map.take(unit)
     }
 
-    /// `destroy_op_array` of `unit`'s main op array, its execution over,
-    /// its frame popped or never pushed: the strings its compile left it
-    /// ([`Request::release_unit_strings`]), and the runtime cache of a
-    /// request-only unit with no other op array
-    /// ([`exec::RuntimeCaches::main_ended`]).
-    pub(crate) fn main_ended(&mut self, unit: &PublishedUnit) {
-        self.map.main_ended(unit);
-        self.release_unit_strings(Some(unit));
-    }
-
     /// Push a frame for `unit`'s op array: its shape on the VM stack and
     /// its engine state, which are pushed and popped together and share a
     /// `FrameRef`. A VM stack whose page the memory limit refuses is
@@ -1497,18 +1487,17 @@ impl Request {
 
     /// What a frame's [`exec::Annex`] holds given up as the frame leaves
     /// the stack: `destroy_op_array`, which frees the heap runtime cache,
-    /// then `efree_size(EX(func))`, and, where `ended`, what the unit
-    /// whose main op array it served gives up as that ends
-    /// ([`Request::main_ended`]).
-    fn give_up_annex(&mut self, mut annex: exec::Annex, ended: bool) {
+    /// then `efree_size(EX(func))`, and, where `names`, the names the
+    /// compile of the unit it served made.
+    fn give_up_annex(&mut self, mut annex: exec::Annex, names: bool) {
         if let Some(held) = annex.op_array.take() {
             if let Some(cache) = held.run_time_cache {
                 cache.free(self);
             }
             held.copy.free(self);
         }
-        if ended && let Some(unit) = &annex.unit {
-            self.main_ended(unit);
+        if names {
+            self.release_unit_strings(annex.unit.as_ref());
         }
     }
 

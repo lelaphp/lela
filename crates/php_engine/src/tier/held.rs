@@ -1,6 +1,5 @@
 //! What the loop holds across the frames it serves (design §5.8): a
-//! share of the last [`HELD`] units it entered and of the last unit
-//! served once that it entered ([`Units`]), and which of
+//! share of the last [`HELD`] units it entered ([`Units`]), and which of
 //! those units and which body the op array of each frame it entered and
 //! of each function it called is ([`Kept`]), so a call and a return take
 //! the op array up without asking the function table, as php's
@@ -31,13 +30,6 @@ const HELD: usize = 4;
 /// which a recursion deeper than this pays once per return.
 const KEPT: usize = 16;
 
-/// The place among the held units of the last unit the loop entered a
-/// frame of that is served once: an `eval`'s or an included file's, with no
-/// op array but its main one, which no frame enters again once its own
-/// is popped. So a loop of `eval`s takes the place of the last one and
-/// leaves the units of the frames it returns to where they stand.
-const TRANSIENT: usize = HELD;
-
 /// One op array the loop holds: the place among the held units of its
 /// unit, and its body there.
 #[derive(Debug, Clone, Copy)]
@@ -51,7 +43,7 @@ pub(super) struct Code {
 /// enters a frame afresh.
 #[derive(Default)]
 pub(super) struct Units {
-    units: [Option<PublishedUnit>; HELD + 1],
+    units: [Option<PublishedUnit>; HELD],
     oldest: usize,
 }
 
@@ -85,13 +77,8 @@ impl Units {
         let place = if let Some(place) = found {
             place
         } else {
-            let place = if served_once(header, unit) {
-                TRANSIENT
-            } else {
-                let place = self.oldest;
-                self.oldest = (self.oldest + 1) % HELD;
-                place
-            };
+            let place = self.oldest;
+            self.oldest = (self.oldest + 1) % HELD;
             *self.units.get_mut(place)? = Some(PublishedUnit::clone(unit));
             kept.lost(place);
             place
@@ -109,14 +96,6 @@ impl Units {
     pub(super) fn code(&self, code: Code) -> Option<&OpArray> {
         exec::body_of(self.units.get(code.place)?.as_deref()?, code.body)
     }
-}
-
-/// Whether the frame `header` heads serves a unit's main op array that
-/// is served this once: a file's or an `eval`'s an `INCLUDE_OR_EVAL` pushed,
-/// not the program's own, whose unit has no other op array a call could
-/// enter.
-fn served_once(header: &exec::Header, unit: &PublishedUnit) -> bool {
-    header.function.is_none() && !header.info.top_code() && exec::main_alone(unit)
 }
 
 impl Kept {
