@@ -17,7 +17,7 @@
 //! An op array is its map-pointer offset, `e` for the engine's and `r`
 //! for a request's; an operand not sampled is `-`, a sampled one its
 //! type with what was followed to it and its class, `object#3`; a
-//! fused branch is `taken` or `fell`; a side trace's start is
+//! conditional jump is `taken` or `fell`; a side trace's start is
 //! `side <parent>/<exit>`, and a link's stop `link <trace>`.
 
 use std::fmt::Write as _;
@@ -26,7 +26,7 @@ use php_engine::tier::{self, FuncRef, Sample};
 use php_heap::ZvalType;
 use php_unit::{MapPtrOffset, OplineIdx};
 
-use super::{Event, Start, Stop, TraceRecord};
+use super::{Event, Start, Stop, TraceRecord, func_name as func};
 use crate::table::TraceId;
 use crate::types::ExitId;
 
@@ -61,10 +61,7 @@ impl TraceRecord {
     /// The record's text form.
     pub(crate) fn dump(&self) -> String {
         let mut text = String::new();
-        let start = match self.start {
-            Start::Side { parent, exit } => format!("side {}/{}", parent.get(), exit.0),
-            other => other.describe().to_owned(),
-        };
+        let start = self.start.written();
         // Writing to a `String` does not fail.
         writeln!(text, "start {start}").unwrap_or_default();
         writeln!(text, "root {}", func(self.root)).unwrap_or_default();
@@ -99,11 +96,7 @@ impl TraceRecord {
             }
             .unwrap_or_default();
         }
-        match self.stop {
-            Stop::Link(to) => writeln!(text, "stop link {}", to.get()),
-            other => writeln!(text, "stop {}", other.describe()),
-        }
-        .unwrap_or_default();
+        writeln!(text, "stop {}", self.stop.written()).unwrap_or_default();
         text
     }
 
@@ -141,14 +134,6 @@ fn refused(line: usize, found: &str) -> ParseError {
     ParseError {
         line,
         found: found.to_owned(),
-    }
-}
-
-/// An op array's name in the text form.
-fn func(f: FuncRef) -> String {
-    match f.offset() {
-        MapPtrOffset::Engine(n) => format!("e{n}"),
-        MapPtrOffset::Request(n) => format!("r{n}"),
     }
 }
 

@@ -1,0 +1,861 @@
+//! What the trace SSA knows of each opcode, in one place: which slots an
+//! opline reads and writes, what it writes, the operands php's guard
+//! switch names (`Z/ext/opcache/jit/zend_jit_trace.c:1835-2245`), and the
+//! parameters an op array's `RECV` oplines declare.
+
+use php_engine::tier::Sample;
+use php_heap::ZvalType;
+use php_unit::decl::{Parameter, Type};
+use php_unit::{ConstIdx, OpArray, Opcode, OperandKind, Opline};
+
+use super::lattice::{self, Types};
+use super::{Constant, Frame, Layout, Slot};
+
+/// php's `MAX_ARG_FLAG_NUM`: past it, how a send passes is read late.
+const MAX_ARG_FLAG_NUM: u32 = 12;
+/// php's `ZEND_FETCH_LOCAL`: a fetch by name from the frame's variables.
+const FETCH_LOCAL: u32 = 1 << 2;
+/// php's `ZEND_ISEMPTY`.
+const ISEMPTY: u32 = 1 << 0;
+/// php's `ZEND_BIND_REF` and `ZEND_ARRAY_ELEMENT_REF`.
+const BY_REF: u32 = 1 << 0;
+/// The functions that read their caller's variables by name, php's
+/// `zend_optimizer_classify_function`.
+const BY_NAME: [&[u8]; 4] = [b"extract", b"compact", b"get_defined_vars", b"db2_execute"];
+
+/// The slot an operand of an opline of `frame` names, where it names one.
+pub(super) fn slot_of(frame: Frame, code: &OpArray, kind: OperandKind, field: u32) -> Option<Slot> {
+    let var = match kind {
+        OperandKind::Cv => field,
+        OperandKind::Tmp | OperandKind::Var => code.num_cvs.checked_add(field)?,
+        OperandKind::Const | OperandKind::Unused => return None,
+    };
+    Some(Slot { frame, var })
+}
+
+/// Whether an op array reads its own variables by name, php's
+/// `ZEND_FUNC_INDIRECT_VAR_ACCESS` (`Z/Zend/Optimizer/zend_cfg.c:316-420`):
+/// an `include` or `eval`, a fetch by name from the frame, or a call to a
+/// function that reads its caller's variables.
+pub(super) fn reads_by_name(code: &OpArray) -> bool {
+    code.oplines.iter().any(|op| match op.opcode {
+        Opcode::IncludeOrEval => true,
+        Opcode::FetchR
+        | Opcode::FetchW
+        | Opcode::FetchRw
+        | Opcode::FetchFuncArg
+        | Opcode::FetchIs
+        | Opcode::FetchUnset
+        | Opcode::UnsetVar
+        | Opcode::IssetIsemptyVar => op.extended_value & FETCH_LOCAL != 0,
+        Opcode::InitFcall | Opcode::InitNsFcallByName => {
+            // `INIT_NS_FCALL_BY_NAME`'s third constant is the lowered
+            // unqualified name.
+            let at = if op.opcode == Opcode::InitNsFcallByName {
+                op.op2.saturating_add(2)
+            } else {
+                op.op2
+            };
+            code.literals
+                .get(at as usize)
+                .and_then(|name| name.as_str())
+                .is_some_and(|name| BY_NAME.contains(&name.bytes()))
+        }
+        _ => false,
+    })
+}
+
+/// What an opline writes beside its `out` slot: a variable `op1`, an
+/// `op2`, the `OP_DATA`'s `op1` (php's `_zend_ssa_rename_op`, less the
+/// writes reference-count inference alone adds).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Writes {
+    pub(super) op1: bool,
+    pub(super) op2: bool,
+    pub(super) data: bool,
+}
+
+pub(super) fn writes(op: &Opline, data: Option<&Opline>) -> Writes {
+    let cv1 = op.op1_type == OperandKind::Cv;
+    let op1 = match op.opcode {
+        Opcode::VerifyReturnType => matches!(
+            op.op1_type,
+            OperandKind::Cv | OperandKind::Tmp | OperandKind::Var
+        ),
+        Opcode::InitArray | Opcode::AddArrayElement => cv1 && op.extended_value & BY_REF != 0,
+        Opcode::Assign
+        | Opcode::AssignRef
+        | Opcode::AssignDim
+        | Opcode::AssignObj
+        | Opcode::AssignDimOp
+        | Opcode::AssignObjOp
+        | Opcode::AssignOp
+        | Opcode::PreInc
+        | Opcode::PreDec
+        | Opcode::PostInc
+        | Opcode::PostDec
+        | Opcode::BindGlobal
+        | Opcode::BindStatic
+        | Opcode::BindInitStaticOrJmp
+        | Opcode::SendVarNoRef
+        | Opcode::SendVarNoRefEx
+        | Opcode::SendVarEx
+        | Opcode::SendFuncArg
+        | Opcode::SendRef
+        | Opcode::SendUnpack
+        | Opcode::FeResetRw
+        | Opcode::MakeRef
+        | Opcode::PreIncObj
+        | Opcode::PreDecObj
+        | Opcode::PostIncObj
+        | Opcode::PostDecObj
+        | Opcode::UnsetDim
+        | Opcode::UnsetObj
+        | Opcode::FetchDimW
+        | Opcode::FetchDimRw
+        | Opcode::FetchDimFuncArg
+        | Opcode::FetchDimUnset
+        | Opcode::FetchListW
+        | Opcode::UnsetCv
+        | Opcode::Yield => cv1,
+        _ => false,
+    };
+    let op2 = match op.opcode {
+        Opcode::AssignRef => op.op2_type == OperandKind::Cv,
+        Opcode::FeFetchR | Opcode::FeFetchRw => {
+            matches!(
+                op.op2_type,
+                OperandKind::Cv | OperandKind::Var | OperandKind::Tmp
+            )
+        }
+        Opcode::BindLexical => op.op2_type == OperandKind::Cv && op.extended_value & BY_REF != 0,
+        _ => false,
+    };
+    let data = matches!(
+        op.opcode,
+        Opcode::AssignObjRef | Opcode::AssignStaticPropRef
+    ) && data.is_some_and(|data| data.op1_type == OperandKind::Cv);
+    Writes { op1, op2, data }
+}
+
+/// Whether an operand kind names a slot.
+fn slotted(kind: OperandKind) -> bool {
+    matches!(kind, OperandKind::Cv | OperandKind::Tmp | OperandKind::Var)
+}
+
+/// The slots an opline reads: its operands, and its `OP_DATA`'s.
+pub(super) fn reads(code: &OpArray, op: &Opline, after: Option<&Opline>) -> Vec<u32> {
+    let mut vars = Vec::with_capacity(3);
+    for (kind, field) in [(op.op1_type, op.op1), (op.op2_type, op.op2)] {
+        if let Some(slot) = slot_of(Frame::ROOT, code, kind, field) {
+            vars.push(slot.var);
+        }
+    }
+    if let Some(data) = after.filter(|data| data.opcode == Opcode::OpData)
+        && let Some(slot) = slot_of(Frame::ROOT, code, data.op1_type, data.op1)
+    {
+        vars.push(slot.var);
+    }
+    vars
+}
+
+/// The slots an opline writes.
+pub(super) fn written(code: &OpArray, op: &Opline, after: Option<&Opline>) -> Vec<u32> {
+    let data = after.filter(|data| data.opcode == Opcode::OpData);
+    let writes = writes(op, data);
+    let mut vars = Vec::with_capacity(3);
+    let mut add = |kind: OperandKind, field: u32| {
+        if let Some(slot) = slot_of(Frame::ROOT, code, kind, field) {
+            vars.push(slot.var);
+        }
+    };
+    if slotted(op.out_type) {
+        add(op.out_type, op.out);
+    }
+    if writes.op1 {
+        add(op.op1_type, op.op1);
+    }
+    if writes.op2 {
+        add(op.op2_type, op.op2);
+    }
+    if let (true, Some(data)) = (writes.data, data) {
+        add(data.op1_type, data.op1);
+    }
+    vars
+}
+
+/// What a value of `t` becomes once assigned: what a reference holds,
+/// and null for an unset variable, as php's read of one gives.
+pub(super) fn assigned(t: Types) -> Types {
+    let t = lattice::deref(t);
+    if t.meets(Types::UNDEF) {
+        t.without(Types::UNDEF).or(Types::NULL)
+    } else {
+        t
+    }
+}
+
+/// What an opline writes to its `out` slot, php's `zend_update_type_info`
+/// for the scalar core and anything past it.
+pub(super) fn out_types(op: &Opline, t1: Types, t2: Types, td: Types, code: &OpArray) -> Types {
+    match op.opcode {
+        Opcode::Add
+        | Opcode::Sub
+        | Opcode::Mul
+        | Opcode::Div
+        | Opcode::Pow
+        | Opcode::Mod
+        | Opcode::Sl
+        | Opcode::Sr
+        | Opcode::BwOr
+        | Opcode::BwAnd
+        | Opcode::BwXor
+        | Opcode::Concat
+        | Opcode::FastConcat
+        | Opcode::IsEqual
+        | Opcode::IsNotEqual
+        | Opcode::IsSmaller
+        | Opcode::IsSmallerOrEqual
+        | Opcode::IsIdentical
+        | Opcode::IsNotIdentical
+        | Opcode::Case
+        | Opcode::CaseStrict
+        | Opcode::BoolXor => lattice::binary(op.opcode, t1, t2),
+        Opcode::AssignOp => lattice::binary_of(op.extended_value)
+            .map_or(Types::ANY, |binary| lattice::binary(binary, t1, t2)),
+        Opcode::Assign => assigned(t2),
+        Opcode::AssignDim => assigned(td),
+        Opcode::QmAssign | Opcode::PostInc | Opcode::PostDec => assigned(t1),
+        Opcode::PreInc | Opcode::PreDec => lattice::stepped(t1),
+        Opcode::BoolNot
+        | Opcode::Bool
+        | Opcode::JmpzEx
+        | Opcode::JmpnzEx
+        | Opcode::IssetIsemptyCv
+        | Opcode::IssetIsemptyDimObj
+        | Opcode::IssetIsemptyPropObj
+        | Opcode::IssetIsemptyVar
+        | Opcode::IssetIsemptyStaticProp
+        | Opcode::IssetIsemptyThis
+        | Opcode::TypeCheck
+        | Opcode::Instanceof
+        | Opcode::Defined
+        | Opcode::InArray
+        | Opcode::ArrayKeyExists => Types::BOOL,
+        Opcode::Count | Opcode::Strlen | Opcode::FuncNumArgs => Types::LONG,
+        Opcode::RopeEnd => Types::STRING,
+        Opcode::InitArray | Opcode::AddArrayElement => Types::of_tag(ZvalType::Array),
+        Opcode::VerifyReturnType => returned(code, t1),
+        Opcode::Cast => cast(op.extended_value),
+        _ => Types::UNKNOWN.without(Types::UNDEF),
+    }
+}
+
+/// What a `VERIFY_RETURN_TYPE` leaves of `t`.
+fn returned(code: &OpArray, t: Types) -> Types {
+    let declared = Types::of_mask(code.return_mask).without(Types::REF);
+    let kept = assigned(t).and(declared);
+    if kept.kinds() == Types::NONE {
+        declared
+    } else {
+        kept
+    }
+}
+
+/// php's `_IS_BOOL`, the type code a `(bool)` cast names, past the
+/// `IS_*` a zval carries.
+const IS_BOOL: u32 = 18;
+
+/// What a `CAST` to php's type code `to` makes: the `IS_*` it names, a
+/// boolean for `_IS_BOOL`.
+fn cast(to: u32) -> Types {
+    if to == IS_BOOL {
+        return Types::BOOL;
+    }
+    Types::of_code(to).unwrap_or(Types::ANY)
+}
+
+/// What an opline writes to its variable `op1`, where it writes it.
+pub(super) fn op1_types(
+    op: &Opline,
+    t1: Types,
+    t2: Types,
+    sample1: Option<Sample>,
+    code: &OpArray,
+) -> Types {
+    let written = match op.opcode {
+        Opcode::Assign => assigned(t2),
+        Opcode::AssignOp => lattice::binary_of(op.extended_value)
+            .map_or(Types::ANY, |binary| lattice::binary(binary, t1, t2)),
+        Opcode::PreInc | Opcode::PreDec | Opcode::PostInc | Opcode::PostDec => lattice::stepped(t1),
+        // A packed array whose element is written in place stays packed
+        // (`zend_jit_trace.c:2357-2372`).
+        Opcode::AssignDimOp
+            if sample1.is_some_and(|s| s.packed) && t1 == Types::ARRAY.laid_out(Layout::Packed) =>
+        {
+            t1
+        }
+        Opcode::AssignDim | Opcode::AssignDimOp => Types::of_tag(ZvalType::Array),
+        Opcode::VerifyReturnType => returned(code, t1),
+        Opcode::UnsetCv => return Types::UNDEF,
+        _ => Types::UNKNOWN,
+    };
+    if t1.meets(Types::REF) {
+        written.or(Types::REF)
+    } else {
+        written
+    }
+}
+
+/// One parameter: the variable its `RECV` writes, its place among the
+/// arguments, from one, and what it holds once the `RECV` ran.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Param {
+    pub(super) cv: u32,
+    pub(super) number: u32,
+    pub(super) declared: Declared,
+}
+
+/// What a parameter's declaration says it holds, php's `arg_info` as
+/// `zend_fetch_arg_info_type` reads it.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Declared {
+    /// No type: whatever was sent.
+    Untyped,
+    /// A type, which an argument of another is coerced to or refused by.
+    Typed(Types),
+    /// Passed by reference: a reference to anything of the type.
+    Referenced(Types),
+}
+
+/// The parameters an op array's leading `RECV` oplines take, each as its
+/// declaration in `declared` says, where the view lists it.
+pub(super) fn params(code: &OpArray, declared: Option<&[Parameter]>) -> Vec<Param> {
+    code.oplines
+        .iter()
+        .map_while(|op| {
+            if !matches!(
+                op.opcode,
+                Opcode::Recv | Opcode::RecvInit | Opcode::RecvVariadic
+            ) {
+                return None;
+            }
+            let parameter = declared.and_then(|list| list.get(op.op1.saturating_sub(1) as usize));
+            let declared = match parameter {
+                Some(p) if p.by_ref => Declared::Referenced(of_type(p.ty.as_ref(), p.variadic)),
+                Some(p) if p.ty.is_some() || p.variadic => {
+                    Declared::Typed(of_type(p.ty.as_ref(), p.variadic))
+                }
+                Some(_) => Declared::Untyped,
+                // A declaration the view does not list: what the `RECV`'s
+                // mask allows, with an object a class name may add.
+                None => match op.opcode {
+                    Opcode::Recv => Declared::Typed(Types::of_mask(op.op2).without(Types::REF)),
+                    Opcode::RecvVariadic => Declared::Typed(Types::of_tag(ZvalType::Array)),
+                    _ => Declared::Untyped,
+                },
+            };
+            Some(Param {
+                cv: op.out,
+                number: op.op1,
+                declared,
+            })
+        })
+        .collect()
+}
+
+/// The kinds a declared type allows, `zend_fetch_arg_info_type`'s mask:
+/// a class name, `object`, `static`, `self`, `parent` and an intersection
+/// an object, `iterable` an array or an object, `callable` a string, an
+/// array or an object; a variadic parameter is an array of them.
+fn of_type(ty: Option<&Type>, variadic: bool) -> Types {
+    if variadic {
+        return Types::of_tag(ZvalType::Array);
+    }
+    let Some(ty) = ty else {
+        return Types::ANY;
+    };
+    match ty {
+        Type::Mixed => Types::ANY,
+        Type::Void | Type::Null => Types::NULL,
+        Type::Never => Types::NONE,
+        Type::Bool => Types::BOOL,
+        Type::False => Types::FALSE,
+        Type::True => Types::TRUE,
+        Type::Int => Types::LONG,
+        Type::Float => Types::DOUBLE,
+        Type::String => Types::STRING,
+        Type::Array => Types::of_tag(ZvalType::Array),
+        Type::Iterable => Types::of_tag(ZvalType::Array).or(Types::OBJECT),
+        Type::Callable => Types::STRING
+            .or(Types::of_tag(ZvalType::Array))
+            .or(Types::OBJECT),
+        Type::Object
+        | Type::CalledClass
+        | Type::SelfClass
+        | Type::ParentClass
+        | Type::Named(_)
+        | Type::Intersection(_) => Types::OBJECT,
+        Type::Nullable(inner) => of_type(Some(inner), false).or(Types::NULL),
+        Type::Union(members) => members.iter().fold(Types::NONE, |all, member| {
+            all.or(of_type(Some(member), false))
+        }),
+    }
+}
+
+/// What a parameter holds once its `RECV` ran: what was sent where the
+/// declaration keeps it unchanged, what is declared otherwise, as php's
+/// trace SSA propagates an argument's type into an untyped parameter
+/// (`zend_jit_trace.c:2130-2170`).
+pub(super) fn param_types(declared: Declared, sent: Option<Types>) -> Types {
+    let sent = sent.filter(|t| t.kinds() != Types::NONE && !t.meets(Types::REF));
+    match declared {
+        Declared::Untyped => sent.unwrap_or(Types::ANY),
+        Declared::Typed(types) => match sent {
+            Some(t) if t.within(types) => t,
+            _ => types,
+        },
+        Declared::Referenced(types) => types.or(Types::REF),
+    }
+}
+
+/// Whether an opline may make variable `var` a reference: an assignment
+/// or a binding by reference, a send that may pass it by reference, a
+/// `foreach` by reference, an array element or a closure's `use` by
+/// reference, a return by reference.
+pub(super) fn referenced(code: &OpArray, var: u32) -> bool {
+    code.oplines.iter().enumerate().any(|(at, op)| {
+        let cv1 = op.op1_type == OperandKind::Cv && op.op1 == var;
+        let cv2 = op.op2_type == OperandKind::Cv && op.op2 == var;
+        match op.opcode {
+            Opcode::AssignRef => cv1 || cv2,
+            Opcode::BindGlobal
+            | Opcode::BindStatic
+            | Opcode::BindInitStaticOrJmp
+            | Opcode::SendRef
+            | Opcode::SendVarEx
+            | Opcode::SendVarNoRef
+            | Opcode::SendVarNoRefEx
+            | Opcode::SendFuncArg
+            | Opcode::SendUser
+            | Opcode::FeResetRw
+            | Opcode::MakeRef
+            | Opcode::ReturnByRef
+            | Opcode::Yield
+            | Opcode::YieldFrom => cv1,
+            Opcode::InitArray | Opcode::AddArrayElement => cv1 && op.extended_value & BY_REF != 0,
+            Opcode::FeFetchRw => cv2,
+            Opcode::BindLexical => cv2 && op.extended_value & BY_REF != 0,
+            Opcode::AssignObjRef | Opcode::AssignStaticPropRef => code
+                .oplines
+                .get(at + 1)
+                .is_some_and(|data| data.op1_type == OperandKind::Cv && data.op1 == var),
+            _ => false,
+        }
+    })
+}
+
+/// Whether an opline past the leading `RECV` oplines writes variable `var`.
+pub(super) fn written_after_entry(code: &OpArray, var: u32) -> bool {
+    let start = code
+        .oplines
+        .iter()
+        .take_while(|op| {
+            matches!(
+                op.opcode,
+                Opcode::Recv | Opcode::RecvInit | Opcode::RecvVariadic
+            )
+        })
+        .count();
+    code.oplines.iter().enumerate().skip(start).any(|(at, op)| {
+        let after = code.oplines.get(at + 1);
+        written(code, op, after).contains(&var)
+    })
+}
+
+/// A constant operand: a scalar by its value.
+pub(super) fn constant(code: &OpArray, at: u32) -> Constant {
+    let Some(value) = code.literals.get(at as usize) else {
+        return Constant::Other(ConstIdx(at));
+    };
+    match value.kind() {
+        ZvalType::Null => Constant::Null,
+        ZvalType::False => Constant::False,
+        ZvalType::True => Constant::True,
+        ZvalType::Long => value
+            .as_long()
+            .map_or(Constant::Other(ConstIdx(at)), Constant::Long),
+        ZvalType::Double => value
+            .as_double()
+            .map_or(Constant::Other(ConstIdx(at)), Constant::Double),
+        _ => Constant::Other(ConstIdx(at)),
+    }
+}
+
+/// What a constant operand is.
+pub(super) fn constant_types(constant: Constant, code: &OpArray) -> Types {
+    match constant {
+        Constant::Null => Types::NULL,
+        Constant::False => Types::FALSE,
+        Constant::True => Types::TRUE,
+        Constant::Long(_) => Types::LONG,
+        Constant::Double(_) => Types::DOUBLE,
+        Constant::Other(at) => code
+            .literals
+            .get(at.0 as usize)
+            .map_or(Types::ANY, Types::of_constant),
+    }
+}
+
+/// The oplines whose handler leaves a temporary it reads alive: a
+/// `switch`'s or a `match`'s subject, a `foreach`'s iterator, a `list()`'s
+/// array, a copied temporary, a coalescing jump's value.
+pub(super) fn keeps_temporaries(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::Case
+            | Opcode::CaseStrict
+            | Opcode::SwitchLong
+            | Opcode::SwitchString
+            | Opcode::Match
+            | Opcode::FeFetchR
+            | Opcode::FeFetchRw
+            | Opcode::FetchListR
+            | Opcode::FetchListW
+            | Opcode::CopyTmp
+            | Opcode::JmpSet
+            | Opcode::Coalesce
+            | Opcode::JmpNull
+    )
+}
+
+/// The operands an inline arithmetic serves: two numbers, long or
+/// double each, or two longs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Arith {
+    Numbers,
+    Longs,
+}
+
+impl Arith {
+    /// Whether operands of `a` and `b` are the ones served.
+    pub(super) fn serves(self, a: Types, b: Types) -> bool {
+        let one = |t: Types, of: Types| t == of;
+        match self {
+            Arith::Numbers => {
+                (one(a, Types::LONG) || one(a, Types::DOUBLE))
+                    && (one(b, Types::LONG) || one(b, Types::DOUBLE))
+            }
+            Arith::Longs => one(a, Types::LONG) && one(b, Types::LONG),
+        }
+    }
+}
+
+/// The arithmetic the scalar core serves inline, and over what.
+pub(super) fn arith(opcode: Opcode) -> Option<Arith> {
+    match opcode {
+        Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => Some(Arith::Numbers),
+        Opcode::Mod | Opcode::Sl | Opcode::Sr | Opcode::BwAnd | Opcode::BwOr | Opcode::BwXor => {
+            Some(Arith::Longs)
+        }
+        _ => None,
+    }
+}
+
+/// The oplines that make a frame of a call.
+pub(super) fn is_call(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::DoFcall | Opcode::DoIcall | Opcode::DoUcall | Opcode::DoFcallByName
+    )
+}
+
+/// The inline oplines that may not finish, and leave the trace for the
+/// interpreter to serve them again: a division by zero or a shift by a
+/// negative number throws, an element past a packed array is a hole, a
+/// call's frame may not fit, a value sent where the callee takes a
+/// reference is refused, a parameter's check may fail.
+pub(super) fn inline_may_leave(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::Div
+            | Opcode::Mod
+            | Opcode::Sl
+            | Opcode::Sr
+            | Opcode::AssignOp
+            | Opcode::FetchDimR
+            | Opcode::AssignDim
+            | Opcode::InitFcall
+            | Opcode::InitFcallByName
+            | Opcode::InitNsFcallByName
+            | Opcode::SendValEx
+            | Opcode::DoUcall
+            | Opcode::DoFcall
+            | Opcode::DoFcallByName
+    )
+}
+
+/// One operand of an opline: its `op1`, its `op2`, its `OP_DATA`'s `op1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Site {
+    Op1 = 0,
+    Op2 = 1,
+    Data = 2,
+}
+
+/// The type of a sample php's guard compares, `op_type` with a reference
+/// or an indirect one `IS_UNKNOWN`.
+fn kind_of(sample: Option<Sample>) -> Option<ZvalType> {
+    sample
+        .filter(|s| !s.reference && !s.indirect)
+        .map(|s| s.kind)
+}
+
+/// Whether a constant `op2` is a non-empty string, a property's name.
+fn named(op: &Opline, code: &OpArray) -> bool {
+    op.op2_type == OperandKind::Const
+        && code
+            .literals
+            .get(op.op2 as usize)
+            .and_then(|name| name.as_str())
+            .is_some_and(|name| !name.bytes().is_empty())
+}
+
+/// The operands php's switch in `zend_jit_trace_build_tssa` adds a guard
+/// for (`ADD_OP1_TRACE_GUARD`, `ADD_OP2_TRACE_GUARD`,
+/// `ADD_OP1_DATA_TRACE_GUARD`), in its order.
+#[allow(
+    clippy::too_many_lines,
+    clippy::match_same_arms,
+    reason = "php's switch, case for case and in its order"
+)]
+pub(super) fn guard_sites(
+    op: &Opline,
+    data: Option<&Opline>,
+    samples: [Option<Sample>; 3],
+    t1: Types,
+    code: &OpArray,
+) -> Vec<Site> {
+    use Site::{Data, Op1, Op2};
+    let [k1, k2, _] = samples.map(kind_of);
+    let cv1 = op.op1_type == OperandKind::Cv;
+    let self_assigned =
+        || cv1 && data.is_some_and(|d| d.op1_type == OperandKind::Cv && d.op1 == op.op1);
+    match op.opcode {
+        Opcode::AssignOp => {
+            let unguarded = matches!(
+                lattice::binary_of(op.extended_value),
+                Some(Opcode::Pow | Opcode::Div)
+            );
+            if unguarded || !cv1 || op.out_type != OperandKind::Unused {
+                vec![]
+            } else {
+                vec![Op1, Op2]
+            }
+        }
+        Opcode::AssignDimOp if op.out_type != OperandKind::Unused => vec![],
+        Opcode::AssignDim if self_assigned() => vec![],
+        Opcode::AssignDimOp => vec![Data, Op2, Op1],
+        Opcode::AssignDim if cv1 => vec![Data, Op2, Op1],
+        Opcode::AssignDim => vec![Op2, Op1],
+        Opcode::AssignObjOp
+            if matches!(
+                lattice::binary_of(op.extended_value),
+                Some(Opcode::Pow | Opcode::Div)
+            ) || op.out_type != OperandKind::Unused =>
+        {
+            vec![]
+        }
+        Opcode::AssignObj | Opcode::AssignObjOp if !named(op, code) || self_assigned() => vec![],
+        Opcode::AssignObj | Opcode::AssignObjOp => vec![Data, Op1],
+        Opcode::PreIncObj | Opcode::PreDecObj | Opcode::PostIncObj | Opcode::PostDecObj => {
+            if named(op, code) { vec![Op1] } else { vec![] }
+        }
+        Opcode::Concat | Opcode::FastConcat => {
+            let strung = |kind: OperandKind, k: Option<ZvalType>| {
+                kind == OperandKind::Const || k == Some(ZvalType::String)
+            };
+            if strung(op.op1_type, k1) && strung(op.op2_type, k2) {
+                vec![Op2, Op1]
+            } else {
+                vec![]
+            }
+        }
+        Opcode::Add | Opcode::Sub | Opcode::Mul
+            if k1 == Some(ZvalType::Undef) || k2 == Some(ZvalType::Undef) =>
+        {
+            vec![]
+        }
+        Opcode::Add
+        | Opcode::Sub
+        | Opcode::Mul
+        | Opcode::IsEqual
+        | Opcode::IsNotEqual
+        | Opcode::IsSmaller
+        | Opcode::IsSmallerOrEqual
+        | Opcode::Case
+        | Opcode::IsIdentical
+        | Opcode::IsNotIdentical
+        | Opcode::CaseStrict
+        | Opcode::BwOr
+        | Opcode::BwAnd
+        | Opcode::BwXor
+        | Opcode::Sl
+        | Opcode::Sr
+        | Opcode::Mod => vec![Op2, Op1],
+        Opcode::Echo
+        | Opcode::Strlen
+        | Opcode::Count
+        | Opcode::QmAssign
+        | Opcode::FeResetR
+        | Opcode::FeFetchR
+        | Opcode::Jmpz
+        | Opcode::Jmpnz
+        | Opcode::JmpzEx
+        | Opcode::JmpnzEx
+        | Opcode::Bool
+        | Opcode::BoolNot
+        | Opcode::Return => vec![Op1],
+        Opcode::VerifyReturnType => {
+            if matches!(op.op1_type, OperandKind::Unused | OperandKind::Const) {
+                vec![]
+            } else {
+                vec![Op1]
+            }
+        }
+        Opcode::PreInc | Opcode::PreDec | Opcode::PostInc | Opcode::PostDec if cv1 => vec![Op1],
+        Opcode::Assign if cv1 => {
+            if k1.is_some() && t1.meets(Types::REF) {
+                vec![Op2, Op1]
+            } else {
+                vec![Op2]
+            }
+        }
+        Opcode::Cast if k1.is_some_and(|k| op.extended_value == u32::from(k as u8)) => vec![Op1],
+        Opcode::IssetIsemptyCv if op.extended_value & ISEMPTY == 0 => vec![Op1],
+        Opcode::InArray if !matches!(op.op1_type, OperandKind::Var | OperandKind::Tmp) => {
+            vec![Op1]
+        }
+        Opcode::IssetIsemptyDimObj if op.extended_value & ISEMPTY != 0 => vec![],
+        Opcode::IssetIsemptyDimObj
+        | Opcode::FetchDimR
+        | Opcode::FetchDimIs
+        | Opcode::FetchListR => {
+            vec![Op1, Op2]
+        }
+        Opcode::FetchDimW | Opcode::FetchDimRw | Opcode::FetchListW
+            if cv1 || samples[0].is_some_and(|s| s.indirect) =>
+        {
+            vec![Op1, Op2]
+        }
+        Opcode::SendValEx | Opcode::SendVarEx | Opcode::SendVarNoRefEx
+            if op.op2_type == OperandKind::Const || op.op2 > MAX_ARG_FLAG_NUM =>
+        {
+            vec![]
+        }
+        Opcode::SendValEx
+        | Opcode::SendVarEx
+        | Opcode::SendVarNoRefEx
+        | Opcode::SendVal
+        | Opcode::SendVar
+        | Opcode::SendVarNoRef
+        | Opcode::SendFuncArg
+            if op.op2_type != OperandKind::Const =>
+        {
+            vec![Op1]
+        }
+        Opcode::FetchObjR | Opcode::FetchObjIs | Opcode::FetchObjW
+            if named(op, code)
+                && op.op1_type != OperandKind::Unused
+                && k1 == Some(ZvalType::Object) =>
+        {
+            vec![Op1]
+        }
+        Opcode::InitMethodCall if named(op, code) => vec![Op1],
+        Opcode::TypeCheck => {
+            // php's `MAY_BE_RESOURCE` is no exact check; guards only for
+            // exact ones, "to avoid code duplication".
+            let resource = 1 << 9;
+            match k1 {
+                Some(k) if op.extended_value != resource => {
+                    let bit = 1u32 << (k as u8);
+                    if op.extended_value == bit || op.extended_value == 0x3fe - bit {
+                        vec![Op1]
+                    } else {
+                        vec![]
+                    }
+                }
+                _ => vec![],
+            }
+        }
+        Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd if k2 == Some(ZvalType::String) => {
+            vec![Op2]
+        }
+        _ => vec![],
+    }
+}
+
+/// php's packed guard over an array `op1` read or written by a long key
+/// (`MAY_BE_PACKED_GUARD`): the layout it holds, where php adds one.
+pub(super) fn packed_guard(
+    op: &Opline,
+    samples: [Option<Sample>; 3],
+    code: &OpArray,
+) -> Option<Layout> {
+    let first = samples[0].filter(|s| !s.reference && !s.indirect && s.kind == ZvalType::Array)?;
+    let recorded = if first.packed {
+        Layout::Packed
+    } else {
+        Layout::Hash
+    };
+    let long_key = if op.op2_type == OperandKind::Const {
+        code.literals
+            .get(op.op2 as usize)
+            .is_some_and(|key| key.kind() == ZvalType::Long)
+    } else {
+        kind_of(samples[1]) == Some(ZvalType::Long)
+    };
+    let read = op.op1_type != OperandKind::Const && long_key;
+    match op.opcode {
+        Opcode::FetchDimR | Opcode::FetchDimIs | Opcode::FetchListR => read.then_some(recorded),
+        Opcode::IssetIsemptyDimObj if op.extended_value & ISEMPTY == 0 => read.then_some(recorded),
+        Opcode::AssignDim | Opcode::FetchDimW | Opcode::FetchDimRw | Opcode::FetchListW => {
+            (long_key && recorded == Layout::Hash).then_some(Layout::Hash)
+        }
+        Opcode::AssignDimOp if long_key && recorded == Layout::Hash => Some(Layout::Hash),
+        Opcode::AssignDimOp if long_key => samples[2]
+            .filter(|s| s.kind != ZvalType::Undef)
+            .map(|_| Layout::Packed),
+        Opcode::FeFetchR => Some(recorded),
+        _ => None,
+    }
+}
+
+/// How an inline op holds a guard on what it computes: an arithmetic
+/// checks its overflow and leaves for the interpreter to serve it again; a
+/// fetch checks the element's type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Within {
+    Rerun,
+    Fetched,
+}
+
+pub(super) fn within(opcode: Opcode, tag: ZvalType) -> Option<Within> {
+    match opcode {
+        Opcode::Add
+        | Opcode::Sub
+        | Opcode::Mul
+        | Opcode::Div
+        | Opcode::PreInc
+        | Opcode::PreDec
+        | Opcode::PostInc
+        | Opcode::PostDec
+        | Opcode::AssignOp
+            if matches!(tag, ZvalType::Long | ZvalType::Double) =>
+        {
+            Some(Within::Rerun)
+        }
+        Opcode::FetchDimR => Some(Within::Fetched),
+        _ => None,
+    }
+}

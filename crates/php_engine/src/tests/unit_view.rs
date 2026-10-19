@@ -121,6 +121,21 @@ fn serve(engine: &Engine, dir: &std::path::Path, program: &str) -> String {
     String::from_utf8_lossy(&served.stdout).into_owned()
 }
 
+/// The views a program that includes `inc.php` in `dir` built, kept past
+/// its request ([`tier::serve_kept`]); `dir` is removed after.
+fn kept(dir: &std::path::Path) -> Vec<(UnitView, FuncRef)> {
+    let engine = Engine::cli_builder().extensions(&[viewing()]).build();
+    let main = dir.join("main.php");
+    let (_, views) = tier::serve_kept::<Views>(
+        &engine,
+        dir,
+        main.to_string_lossy().as_bytes(),
+        "<?php include __DIR__ . '/inc.php';",
+    );
+    std::fs::remove_dir_all(dir).ok();
+    views.map(|views| views.0).unwrap_or_default()
+}
+
 /// A function of a file the cache holds is held by the view; one an
 /// `eval` declared, whose unit is the request's alone, is refused. The
 /// view of the held one reads its op array after the request ended and
@@ -167,6 +182,70 @@ fn a_view_holds_a_held_units_function_refuses_an_evals_and_outlives_its_request(
     );
     assert!(own_view.op_array(own).is_none());
     assert!(held_view.op_array(own).is_none(), "never asked to hold it");
+    assert_eq!(held_view.is_main(held), Some(false), "a function's own");
+    assert_eq!(own_view.is_main(own), None, "refused, so unread");
+}
+
+/// A held file's own code is its main op array, whose variables a symbol
+/// table reaches, and the view says so; a function of it is not.
+#[test]
+fn a_view_tells_a_files_own_code_from_its_functions() {
+    let dir = scratch(
+        "main",
+        "<?php function inner() { return hold_caller(); } hold_caller(); inner();",
+    );
+    let views = kept(&dir);
+    let mains: Vec<Option<bool>> = views.iter().map(|(view, f)| view.is_main(*f)).collect();
+    assert_eq!(mains, [Some(true), Some(false)]);
+}
+
+/// A held function's view lists its declaration's parameters, their
+/// types and how each is passed, which a `RECV`'s mask does not carry;
+/// a file's own code lists none.
+#[test]
+fn a_view_lists_a_functions_parameters() {
+    let dir = scratch(
+        "parameters",
+        "<?php function typed(int $n, Foo|int $o, array &$a, $b = 1) { return hold_caller(); }\n\
+         hold_caller(); $x = []; typed(1, 2, $x);",
+    );
+    let views = kept(&dir);
+    let listed: Vec<Option<Vec<(String, bool)>>> = views
+        .iter()
+        .map(|(view, f)| {
+            view.parameters(*f).map(|parameters| {
+                parameters
+                    .iter()
+                    .map(|p| (String::from_utf8_lossy(&p.name.0).into_owned(), p.by_ref))
+                    .collect()
+            })
+        })
+        .collect();
+    let named = |name: &str, by_ref| (name.to_owned(), by_ref);
+    assert_eq!(
+        listed,
+        [
+            Some(vec![]),
+            Some(vec![
+                named("n", false),
+                named("o", false),
+                named("a", true),
+                named("b", false)
+            ]),
+        ]
+    );
+    let (typed_view, typed) = &views[1];
+    let masks: Vec<u32> = typed_view
+        .parameters(*typed)
+        .unwrap_or_default()
+        .iter()
+        .map(|p| p.ty.as_ref().map_or(0, php_unit::decl::Type::mask))
+        .collect();
+    assert_eq!(
+        masks,
+        [1 << 4, 1 << 4, 1 << 7, 0],
+        "a class name adds no bit to the mask"
+    );
 }
 
 /// A held function's entry word is zero at publication and one word for

@@ -50,8 +50,10 @@ tier::UnitView::cache_slot
 tier::UnitView::class
 tier::UnitView::hold
 tier::UnitView::hold_class
+tier::UnitView::is_main
 tier::UnitView::new
 tier::UnitView::op_array
+tier::UnitView::parameters
 tier::Word
 tier::Word::halves
 tier::Word::sealed
