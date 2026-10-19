@@ -5,6 +5,9 @@
 //! an op array or a linked table holds, a tier reads through the native
 //! face (#1911).
 
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt as _;
+
 use php_compile::SourceKind;
 use php_heap::{Fatal, FrameRef};
 use php_unit::PublishedUnit;
@@ -13,7 +16,7 @@ use super::{Request, Symbol};
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{PhpObject, PhpString, TypeTag, Value};
 use crate::exec::TableId;
-use crate::tier::{Called, Evaluated, Under};
+use crate::tier::{Called, Compiled, Evaluated, Under};
 
 /// What [`Request::eval_returning`] did with a string.
 pub(super) enum Evaluation {
@@ -123,6 +126,79 @@ impl Request {
             _ => {
                 self.catch_bailout();
                 Evaluated::BailedOut
+            }
+        }
+    }
+
+    /// phpdbg's `phpdbg_compile` (`Z/sapi/phpdbg/phpdbg_prompt.c:534-560`):
+    /// the file at `path`, or `source` under its name where the host read
+    /// it itself, compiled as `zend_compile_file` compiles it,
+    /// with nothing executing, and dropped. What the compile raises is
+    /// recorded and raised as php raises it, the refusal's fatal through
+    /// the host's log and display, and its `zend_bailout` caught as phpdbg's
+    /// `zend_try` around the compile catches it, the status 255 left
+    /// and the request standing; what php leaves behind it stands too:
+    /// the record ([`Request::emit_recorded`]) and the functions the
+    /// compile had declared ([`Request::declare_refused`]).
+    pub(crate) fn compile_context(&mut self, path: &[u8], source: Option<&[u8]>) -> Compiled {
+        let read;
+        let source = match source {
+            Some(source) => source,
+            None => match std::fs::read(self.cwd().join(OsStr::from_bytes(path))) {
+                Ok(bytes) => {
+                    read = bytes;
+                    &read
+                }
+                Err(_) => return Compiled::Unopened,
+            },
+        };
+        let ending = self.ending.take();
+        let compiled = self.nothing_executing(|req| req.compile_context_over(path, source));
+        self.ending = ending;
+        if self.bailing_out() {
+            self.catch_bailout();
+            return Compiled::Refused;
+        }
+        compiled
+    }
+
+    /// The compile itself, its unit the request's alone, with its names.
+    fn compile_context_over(&mut self, path: &[u8], source: &[u8]) -> Compiled {
+        self.take_shared_hold();
+        let shared = std::sync::Arc::clone(&self.shared);
+        let compiled = shared.compile_declaring(self, source, path);
+        match compiled {
+            Ok(unit) => {
+                crate::engine::note_compiled(self, &unit, SourceKind::File);
+                Compiled::Compiled
+            }
+            Err((refused, declared)) => {
+                let recording = self.begin_recording();
+                // A parse error, and a refusal php throws, leave
+                // `zend_compile` as it returns, so `compile_file` emits
+                // what it recorded before phpdbg renders the throwable
+                // and bails out; a compile error bails out of the compile
+                // itself, past the emit, and after what it had declared.
+                let thrown = refused.level == Level::Parse
+                    || refused.thrown
+                    || refused.stage == php_compile::Stage::Opening;
+                let noted = if thrown {
+                    Some(0)
+                } else {
+                    self.declare_refused(&refused, declared.as_ref(), path)
+                };
+                if let Some(noted) = noted {
+                    let rest = refused.raised.get(noted..).unwrap_or_default();
+                    for raised in rest {
+                        self.note_error_in(raised.level, &raised.message, path, raised.line);
+                    }
+                    if thrown {
+                        self.emit_recorded(recording);
+                    }
+                    crate::engine::refusal_raised(self, &refused, path);
+                }
+                self.emit_recorded(recording);
+                Compiled::Refused
             }
         }
     }

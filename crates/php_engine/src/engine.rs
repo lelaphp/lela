@@ -1696,6 +1696,61 @@ impl Shared {
         filename: &[u8],
         kind: SourceKind,
     ) -> Result<PublishedUnit, CompileError> {
+        match self.compiled_for(req, source, filename, kind) {
+            Ok(unit) => Ok(Self::held_for(req, unit)),
+            Err(refused) => {
+                req.release_compiled();
+                Err(refused)
+            }
+        }
+    }
+
+    /// [`Shared::compile_for`] over a file whose refusal stands in the
+    /// request after it: the functions the refused compile had declared
+    /// ([`php_compile::Declared`]) handed back as a unit of the request's
+    /// beside the refusal, holding the strings the compile made, for the
+    /// caller to declare ([`Request::declare_refused`]).
+    pub(crate) fn compile_declaring(
+        &self,
+        req: &mut Request,
+        source: &[u8],
+        filename: &[u8],
+    ) -> Result<PublishedUnit, (CompileError, Option<PublishedUnit>)> {
+        match self.compiled_for(req, source, filename, SourceKind::File) {
+            Ok(unit) => Ok(Self::held_for(req, unit)),
+            Err(refused) => {
+                let declared = refused.declared.as_ref().map(|declared| {
+                    let unit = req.take_unit(declared.unit.clone());
+                    req.hold_compiled(&unit);
+                    unit
+                });
+                if declared.is_none() {
+                    req.release_compiled();
+                }
+                Err((refused, declared))
+            }
+        }
+    }
+
+    /// A unit compiled for `req` taken into it, the strings its compile
+    /// made held by it.
+    fn held_for(req: &mut Request, unit: Unit) -> PublishedUnit {
+        req.count_keys_made(unit.runtime_keys.len());
+        req.note_loop_vars(unit.loop_vars);
+        let unit = req.take_unit(unit);
+        req.hold_compiled(&unit);
+        unit
+    }
+
+    /// The compile [`Shared::compile_for`] makes, before its unit is the
+    /// request's or the strings of a refused one are given up.
+    fn compiled_for(
+        &self,
+        req: &mut Request,
+        source: &[u8],
+        filename: &[u8],
+        kind: SourceKind,
+    ) -> Result<Unit, CompileError> {
         let ini = CompileIni {
             precision: req.precision(),
             short_open_tag: req.short_open_tag(),
@@ -1711,7 +1766,7 @@ impl Shared {
             extended_info: self.extended_info && !req.compiling_host_string,
             ..self.declared()
         };
-        let unit = req.compiling(|heap, request_classes, arena| {
+        req.compiling(|heap, request_classes, arena| {
             let origin = Origin {
                 filename,
                 cwd: &cwd,
@@ -1721,19 +1776,7 @@ impl Shared {
                 multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
             };
             compile(source, origin, ini, declared, stack, heap, arena)
-        });
-        let unit = match unit {
-            Ok(unit) => unit,
-            Err(refused) => {
-                req.release_compiled();
-                return Err(refused);
-            }
-        };
-        req.count_keys_made(unit.runtime_keys.len());
-        req.note_loop_vars(unit.loop_vars);
-        let unit = req.take_unit(unit);
-        req.hold_compiled(&unit);
-        Ok(unit)
+        })
     }
 
     /// `zend_call_stack_init` on the calling thread, from the startup
@@ -5873,6 +5916,12 @@ pub(crate) fn refused_program(req: &mut Request, refused: &CompileError, file: &
     for raised in &refused.raised {
         req.note_error_in(raised.level, &raised.message, file, raised.line);
     }
+    refusal_raised(req, refused, file);
+}
+
+/// The refusal itself, past what was raised before it
+/// ([`refused_program`]).
+pub(crate) fn refusal_raised(req: &mut Request, refused: &CompileError, file: &[u8]) {
     match (refused.stage, refused.thrown) {
         // Opened before anything compiled or ran: `zend_error` finds no
         // file compiling and none executing.
