@@ -312,6 +312,10 @@ Scalar::is_true
 Slot
 SortEntry
 StackRefused
+StandaloneHeap
+StandaloneHeap::gc
+StandaloneHeap::shutdown
+StandaloneHeap::startup
 Str
 Str::addref
 Str::bytes

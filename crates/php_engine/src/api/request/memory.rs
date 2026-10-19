@@ -6,6 +6,10 @@
 
 use std::sync::Arc;
 
+/// A heap apart from the request's, `zend_mm_startup`'s: started, swept
+/// and shut down whole by whoever holds it, and never a place a value of
+/// the request's is allocated from (`zend_test_gh18756`).
+pub use php_heap::StandaloneHeap;
 pub use php_heap::{Allocation, AllocationObserverId, ObserveAllocations};
 use php_heap::{Arr, Fatal, Heap, Intern, Key, Ref, SortEntry, Str, Zval, ZvalRef};
 pub use php_heap::{ecalloc, efree, emalloc, erealloc};

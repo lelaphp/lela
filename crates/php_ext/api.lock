@@ -940,6 +940,10 @@ request::ScannerFile::load
 request::ScannerFile::open
 request::Siginfo
 request::SocketOptions
+request::StandaloneHeap
+request::StandaloneHeap::gc
+request::StandaloneHeap::shutdown
+request::StandaloneHeap::startup
 request::Standard
 request::StartHandler
 request::Stream

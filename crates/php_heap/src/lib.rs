@@ -55,6 +55,7 @@ mod resource;
 mod sensed;
 mod sort;
 mod stack;
+mod standalone;
 mod string;
 mod table_copy;
 mod zend_arena;
@@ -85,6 +86,7 @@ pub use sort::zend_sort;
 pub use stack::{
     EntryGuard, FakeRoom, Frame, FrameRef, FramesAside, HEADER_AT, ROOM_BYTES, Slot, VmStack,
 };
+pub use standalone::StandaloneHeap;
 pub use string::{FreshStr, Intern, Str, Strings};
 pub use zval::{PropBit, Zval, ZvalRef, ZvalType};
 
