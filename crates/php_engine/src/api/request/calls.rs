@@ -1207,10 +1207,15 @@ impl Request {
     }
 
     /// One native entered, where the request records them; what the
-    /// entry a macro expansion builds calls on its way in.
+    /// entry a macro expansion builds calls on its way in. Each native
+    /// once per request, in the order the request first entered it: what
+    /// the trace is read for is which natives a request entered, so a
+    /// program that calls one in a loop records it once.
     #[inline]
     pub(crate) fn entered(&mut self, native: crate::trace::Entered) {
-        if let Some(trace) = &mut self.calls.trace {
+        if let Some(trace) = &mut self.calls.trace
+            && !trace.contains(&native)
+        {
             trace.push(native);
         }
     }

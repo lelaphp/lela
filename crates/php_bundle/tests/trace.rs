@@ -56,3 +56,26 @@ fn a_request_served_without_the_trace_records_nothing() {
     let served = engine().serve_capture_in(&dir, b"trace.php", SCRIPT, Capture::default());
     assert!(served.entered.is_empty(), "{:?}", served.entered);
 }
+
+/// A request that calls one native many times records it once: the trace
+/// is the set of natives the request entered, in the order it first
+/// entered each, not a line per call.
+#[test]
+fn a_traced_request_records_a_native_it_calls_many_times_once() {
+    let dir = std::env::temp_dir().join(format!("php-bundle-trace-loop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("loop.php"),
+        "<?php for ($i = 0; $i < 100; $i++) { proto_count([1]); } echo proto_count([1, 2]), \"\\n\";",
+    )
+    .unwrap();
+    let served =
+        engine().serve_capture_traced_in(&dir, b"loop.php", Vec::new(), Capture::default());
+    std::fs::remove_dir_all(&dir).ok();
+    let entered = ours(&served.entered);
+    let times = entered
+        .iter()
+        .filter(|e| **e == (None, "proto_count"))
+        .count();
+    assert_eq!(times, 1, "{entered:?}");
+}

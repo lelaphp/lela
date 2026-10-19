@@ -1514,7 +1514,7 @@ impl Request {
     /// no extension declared, the engine's own, in the table's order,
     /// which `phpinfo()` has sorted by name before it prints them
     /// ([`Request::ini_sort_entries`]), each value through the entry's
-    /// displayer ([`IniDisplayer`]). What `PHP_MINFO_FUNCTION(core)` and
+    /// displayer ([`IniDisplayer`]). What `PHP_MINFO_FUNCTION(php_core)` and
     /// `phpinfo()`'s `PHP Core` print.
     ///
     /// ```php

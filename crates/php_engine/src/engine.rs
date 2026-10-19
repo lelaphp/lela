@@ -1962,14 +1962,16 @@ impl Shared {
             .is_some_and(|decl| self.function_names.find(&self.functions, &decl.name.0) == Some(at))
     }
 
-    /// The master value of the entry `name` set to `value`, the entry
-    /// moved last, and the typed entries and the realpath cache's
-    /// `CWDG` values with it.
+    /// The master value of the entry `name` set to `value` where it
+    /// stands, which keeps the table in registration order, and the
+    /// typed entries and the realpath cache's `CWDG` values with it.
     fn set_ini_default(&mut self, name: Vec<u8>, value: Option<Vec<u8>>) {
         self.typed_ini.update(&name, value.as_deref());
         self.realpath_cache.update(&name, value.as_deref());
-        self.ini.retain(|(n, _)| *n != name);
-        self.ini.push((name, value));
+        match self.ini.iter_mut().find(|(n, _)| *n == name) {
+            Some(entry) => entry.1 = value,
+            None => self.ini.push((name, value)),
+        }
     }
 
     /// The value the entry `name` starts every request with as php holds
@@ -2070,13 +2072,22 @@ impl Shared {
     }
 }
 
-/// The core ini entries and their defaults: php's `main.c` table and
-/// six entries of `Zend/zend.c`'s, the two a throwable's trace reads,
-/// the two the stack limit reads (`Shared::stack_limit`),
-/// `zend.enable_gc`, which turns the cycle collector on, and
-/// `fatal_error_backtraces`, php 8.5's, `On` by default
-/// (`Z/Zend/zend.c:263`), which a fatal's trace reads; the CLI's
+/// The core ini entries and their defaults, in the order php registers
+/// them, which is the order `EG(ini_directives)` holds them in until a
+/// request sorts it (the request's `IniOrder`):
+/// `php_module_startup`'s `zend_register_ini_entries_ex(ini_entries)`,
+/// `main.c`'s table (`Z/main/main.c:792-892`, `Z/main/main.c:2292`),
+/// then `zend_register_standard_ini_entries`, `zend.c`'s
+/// (`Z/Zend/zend.c:261-282`, `Z/main/main.c:2295`). The CLI's
 /// `HARDCODED_INI` is its host's first `ini_entries`, not these.
+///
+/// ```php
+/// echo implode(' ', array_keys((new ReflectionExtension('Core'))->getINIEntries())), "\n";
+/// ```
+/// ```expect
+/// highlight.comment highlight.default highlight.html highlight.keyword highlight.string display_errors display_startup_errors enable_dl expose_php docref_root docref_ext html_errors xmlrpc_errors xmlrpc_error_number max_input_time ignore_user_abort implicit_flush log_errors ignore_repeated_errors ignore_repeated_source report_memleaks report_zend_debug output_buffering output_handler register_argc_argv auto_globals_jit short_open_tag unserialize_callback_func serialize_precision arg_separator.output arg_separator.input auto_append_file auto_prepend_file doc_root default_charset default_mimetype internal_encoding input_encoding output_encoding error_log error_log_mode extension_dir sys_temp_dir include_path max_execution_time open_basedir file_uploads upload_max_filesize post_max_size upload_tmp_dir max_input_nesting_level max_input_vars user_dir variables_order request_order error_append_string error_prepend_string SMTP smtp_port mail.add_x_header mail.mixed_lf_and_crlf mail.cr_lf_mode mail.log browscap max_memory_limit memory_limit precision sendmail_from sendmail_path mail.force_extra_parameters disable_functions max_file_uploads max_multipart_body_parts allow_url_fopen allow_url_include enable_post_data_reading realpath_cache_size realpath_cache_ttl user_ini.filename user_ini.cache_ttl hard_timeout syslog.facility syslog.ident syslog.filter error_reporting fatal_error_backtraces zend.assertions zend.enable_gc zend.multibyte zend.script_encoding zend.detect_unicode zend.signal_check zend.exception_ignore_args zend.exception_string_param_max_len fiber.stack_size zend.max_allowed_stack_size zend.reserved_stack_size
+/// ```
+///
 /// An entry php registers with no value, `NULL`, has `None`: `ini_get()`
 /// reads it as the empty string, while its `on_modify` is handed it
 /// apart from one set empty. `error_prepend_string` and
@@ -2098,69 +2109,157 @@ impl Shared {
 /// string(10) "ISO-8859-1"
 /// ```
 const CORE_INI: &[(&str, Option<&str>)] = &[
-    ("short_open_tag", Some("1")),
-    ("fatal_error_backtraces", Some("1")),
-    ("precision", Some("14")),
-    ("serialize_precision", Some("-1")),
-    // `error_reporting`, `NULL` in php's table (`Z/Zend/zend.c:262`),
-    // which `ini_get` reads as the empty string, phpinfo as `no value`
-    // and `OnUpdateErrorReporting` as `E_ALL`.
-    ("error_reporting", None),
+    // `main.c`'s table (`Z/main/main.c:792-892`).
+    // `highlight.*`, `php_get_highlight_struct`'s colours, which
+    // `highlight_string()`, `highlight_file()` and `php -s` read
+    // (`Z/main/main.c:793-797`, `Z/main/php_ini.h`'s `HL_*_COLOR`).
+    ("highlight.comment", Some("#FF8000")),
+    ("highlight.default", Some("#0000BB")),
+    ("highlight.html", Some("#000000")),
+    ("highlight.keyword", Some("#007700")),
+    ("highlight.string", Some("#DD0000")),
     ("display_errors", Some("1")),
-    // `display_startup_errors`, `On` (`Z/main/main.c:800`): whether what
-    // is raised while php starts is displayed ([`Request::display_errors`]).
+    // `display_startup_errors`, `On`: whether what is raised while php
+    // starts is displayed ([`Request::display_errors`]).
     ("display_startup_errors", Some("1")),
-    ("log_errors", Some("0")),
-    // `error_log`, `NULL` in php's table, and `error_log_mode`, both
-    // `PHP_INI_ALL` (`Z/main/main.c:835-836`): the file `php_log_err`
-    // appends to and the permissions it creates one with.
-    ("error_log", None),
-    ("error_log_mode", Some("0644")),
-    ("html_errors", Some("1")),
+    // `enable_dl` and, below, `extension_dir`, `PHP_INI_SYSTEM`: the two
+    // `dl()` reads.
+    ("enable_dl", Some("1")),
+    // `expose_php`: the `X-Powered-By` header a request of the web
+    // carries.
+    ("expose_php", Some("1")),
     // `docref_root` and `docref_ext`, `PHP_INI_ALL`: where a function's
     // diagnostic under `html_errors` links to (`raising::origin`).
     ("docref_root", Some("")),
     ("docref_ext", Some("")),
-    ("error_prepend_string", None),
-    ("error_append_string", None),
-    ("ignore_repeated_errors", Some("0")),
-    ("ignore_repeated_source", Some("0")),
-    ("report_zend_debug", Some("0")),
+    ("html_errors", Some("1")),
     ("xmlrpc_errors", Some("0")),
     ("xmlrpc_error_number", Some("0")),
-    // `max_memory_limit`, `PHP_INI_SYSTEM`, declared before
-    // `memory_limit`, whose handler holds it under the maximum, and
-    // `report_memleaks`, deprecated when off (`Z/main/main.c:814-866`).
-    ("max_memory_limit", Some("-1")),
-    ("memory_limit", Some("128M")),
+    ("max_input_time", Some("-1")),
+    // `ignore_user_abort`, `PG(ignore_user_abort)`.
+    ("ignore_user_abort", Some("0")),
+    ("implicit_flush", Some("0")),
+    ("log_errors", Some("0")),
+    ("ignore_repeated_errors", Some("0")),
+    ("ignore_repeated_source", Some("0")),
+    // `report_memleaks`, deprecated when off.
     ("report_memleaks", Some("1")),
-    ("max_execution_time", Some("30")),
-    // `hard_timeout`, `PHP_INI_SYSTEM` (`Z/main/main.c:885`): the seconds
-    // past a timeout the execution timer waits for the loop to take it
-    // before it ends the process ([`crate::interrupt::Timer`]).
-    ("hard_timeout", Some("2")),
+    ("report_zend_debug", Some("0")),
+    // `output_buffering` and `output_handler`, `PHP_INI_PERDIR|
+    // PHP_INI_SYSTEM` (`Z/main/main.c:816-817`): the buffer a request
+    // starts with ([`crate::output::start_at_request`]).
+    ("output_buffering", Some("0")),
+    ("output_handler", None),
+    // `register_argc_argv` and `auto_globals_jit`: `$_SERVER['argv']`,
+    // and the auto-globals made when named.
+    ("register_argc_argv", Some("0")),
+    ("auto_globals_jit", Some("1")),
+    ("short_open_tag", Some("1")),
+    // `unserialize_callback_func` and, below, `browscap`: two `main.c`
+    // registers for ext/standard to read (`Z/main/main.c:822, 863`).
+    ("unserialize_callback_func", None),
+    ("serialize_precision", Some("-1")),
+    // `arg_separator.output` and `arg_separator.input`: what the URL
+    // rewriter and `http_build_query` join with, and what `parse_str`
+    // splits on.
+    ("arg_separator.output", Some("&")),
+    ("arg_separator.input", Some("&")),
+    // `auto_append_file` and `auto_prepend_file`,
+    // `PHP_INI_SYSTEM|PHP_INI_PERDIR`: required after and before the
+    // primary script (`php_execute_script`).
+    ("auto_append_file", None),
+    ("auto_prepend_file", None),
+    // `doc_root`, `user_dir` and `user_ini.*`, `PHP_INI_SYSTEM`
+    // (`Z/main/main.c:829-884`): what a host of the web reads to find a
+    // request's program and its `.user.ini` files.
+    ("doc_root", None),
     ("default_charset", Some("UTF-8")),
     ("default_mimetype", Some("text/html")),
     ("internal_encoding", None),
     ("input_encoding", None),
     ("output_encoding", None),
+    // `error_log`, `NULL` in php's table, and `error_log_mode`, both
+    // `PHP_INI_ALL` (`Z/main/main.c:835-836`): the file `php_log_err`
+    // appends to and the permissions it creates one with.
+    ("error_log", None),
+    ("error_log_mode", Some("0644")),
+    ("extension_dir", Some(crate::constants::PHP_EXTENSION_DIR)),
+    ("sys_temp_dir", None),
     // `PHP_INCLUDE_PATH`, this build's `.:${PEAR_INSTALLDIR}`, which
     // `DEFAULT_INCLUDE_PATH` says too.
     ("include_path", Some(crate::constants::PHP_INCLUDE_PATH)),
-    // `allow_url_fopen` and `allow_url_include`, `PHP_INI_SYSTEM`
-    // (`Z/main/main.c:876-877`): whether a URL wrapper opens, and opens
-    // for an include (`php_stream_locate_url_wrapper`).
-    ("allow_url_fopen", Some("1")),
-    ("allow_url_include", Some("0")),
+    ("max_execution_time", Some("30")),
     // `open_basedir`, `PHP_INI_ALL` and `NULL` in php's table
     // (`Z/main/main.c:841`): the base directories the guard holds a path
     // to ([`Request::check_open_basedir`]), any list at startup and only
     // a tighter one after (`OnUpdateBaseDir`).
     ("open_basedir", None),
-    ("zend.exception_ignore_args", Some("0")),
-    ("zend.exception_string_param_max_len", Some("15")),
-    ("zend.max_allowed_stack_size", Some("0")),
-    ("zend.reserved_stack_size", Some("0")),
+    // The body of a request of the web, its limits, and the uploads.
+    ("file_uploads", Some("1")),
+    ("upload_max_filesize", Some("2M")),
+    ("post_max_size", Some("8M")),
+    ("upload_tmp_dir", None),
+    ("max_input_nesting_level", Some("64")),
+    ("max_input_vars", Some("1000")),
+    ("user_dir", None),
+    // `variables_order` and `request_order`, `PHP_INI_SYSTEM|PHP_INI_PERDIR`
+    // (`Z/main/main.c:851-852`): which auto-globals the request fills and
+    // the order `$_REQUEST` merges them in, read as each is made.
+    ("variables_order", Some("EGPCS")),
+    ("request_order", None),
+    ("error_append_string", None),
+    ("error_prepend_string", None),
+    // The entries for `mail()`, `PHP_INI_SYSTEM` or
+    // `PHP_INI_SYSTEM|PHP_INI_PERDIR` but `SMTP` and `smtp_port`.
+    ("SMTP", Some("localhost")),
+    ("smtp_port", Some("25")),
+    ("mail.add_x_header", Some("0")),
+    ("mail.mixed_lf_and_crlf", Some("0")),
+    ("mail.cr_lf_mode", Some("crlf")),
+    ("mail.log", None),
+    ("browscap", None),
+    // `max_memory_limit`, `PHP_INI_SYSTEM`, declared before
+    // `memory_limit`, whose handler holds it under the maximum
+    // (`Z/main/main.c:865-866`).
+    ("max_memory_limit", Some("-1")),
+    ("memory_limit", Some("128M")),
+    ("precision", Some("14")),
+    ("sendmail_from", None),
+    ("sendmail_path", Some("/usr/sbin/sendmail -t -i")),
+    ("mail.force_extra_parameters", None),
+    // `disable_functions`, `PHP_INI_SYSTEM` (`Z/main/main.c:872`): read
+    // once, as the function table is built (`function_table`).
+    ("disable_functions", Some("")),
+    ("max_file_uploads", Some("20")),
+    ("max_multipart_body_parts", Some("-1")),
+    // `allow_url_fopen` and `allow_url_include`, `PHP_INI_SYSTEM`
+    // (`Z/main/main.c:876-877`): whether a URL wrapper opens, and opens
+    // for an include (`php_stream_locate_url_wrapper`).
+    ("allow_url_fopen", Some("1")),
+    ("allow_url_include", Some("0")),
+    ("enable_post_data_reading", Some("1")),
+    // `realpath_cache_size` and `realpath_cache_ttl`, `PHP_INI_SYSTEM`,
+    // the realpath cache's limit and time to live (`crate::virtual_cwd`).
+    ("realpath_cache_size", Some("4096K")),
+    ("realpath_cache_ttl", Some("120")),
+    ("user_ini.filename", Some(".user.ini")),
+    ("user_ini.cache_ttl", Some("300")),
+    // `hard_timeout`, `PHP_INI_SYSTEM` (`Z/main/main.c:885`): the seconds
+    // past a timeout the execution timer waits for the loop to take it
+    // before it ends the process ([`crate::interrupt::Timer`]).
+    ("hard_timeout", Some("2")),
+    // `php_syslog`'s, `PHP_INI_SYSTEM` but `syslog.filter`.
+    ("syslog.facility", Some("LOG_USER")),
+    ("syslog.ident", Some("php")),
+    ("syslog.filter", Some("no-ctrl")),
+    // `zend.c`'s table (`Z/Zend/zend.c:261-282`).
+    // `error_reporting`, `NULL` in php's table (`Z/Zend/zend.c:262`),
+    // which `ini_get` reads as the empty string, phpinfo as `no value`
+    // and `OnUpdateErrorReporting` as `E_ALL`.
+    ("error_reporting", None),
+    // `fatal_error_backtraces`, php 8.5's, `On` (`Z/Zend/zend.c:263`),
+    // which a fatal's trace reads.
+    ("fatal_error_backtraces", Some("1")),
     // `zend.assertions`, `1` (`Z/Zend/zend.c:264`), `EG(assertions)`:
     // what `zend_compile_assert` compiles under and `ASSERT_CHECK`
     // reads, moved between `-1` and the rest only at startup
@@ -2180,94 +2279,15 @@ const CORE_INI: &[(&str, Option<&str>)] = &[
     // (`Z/Zend/zend.c:270`): whether shutdown checks the signal handlers
     // `zend_signal` installed were left in place.
     ("zend.signal_check", Some("0")),
+    // The two a throwable's trace reads.
+    ("zend.exception_ignore_args", Some("0")),
+    ("zend.exception_string_param_max_len", Some("15")),
     // `fiber.stack_size`, `NULL` in php's table, which `ini_get` reads
     // as the empty string and `OnUpdateFiberStackSize` as php's default.
     ("fiber.stack_size", None),
-    // `disable_functions`, `PHP_INI_SYSTEM` (`Z/main/main.c:872`): read
-    // once, as the function table is built (`function_table`).
-    ("disable_functions", Some("")),
-    // `variables_order` and `request_order`, `PHP_INI_SYSTEM|PHP_INI_PERDIR`
-    // (`Z/main/main.c:851`): which auto-globals the request fills and
-    // the order `$_REQUEST` merges them in, read as each is made.
-    ("variables_order", Some("EGPCS")),
-    ("request_order", None),
-    // `main.c`'s entries for `mail()` and `php_syslog`, and
-    // `sys_temp_dir`, `PHP_INI_SYSTEM` or `PHP_INI_SYSTEM|PHP_INI_PERDIR`
-    // but `SMTP`, `smtp_port` and `syslog.filter`; a `NULL` default is
-    // `None`, as the two error strings' above are.
-    ("sys_temp_dir", None),
-    ("SMTP", Some("localhost")),
-    ("smtp_port", Some("25")),
-    ("mail.add_x_header", Some("0")),
-    ("mail.mixed_lf_and_crlf", Some("0")),
-    ("mail.cr_lf_mode", Some("crlf")),
-    ("mail.log", None),
-    ("sendmail_path", Some("/usr/sbin/sendmail -t -i")),
-    ("sendmail_from", None),
-    ("mail.force_extra_parameters", None),
-    ("syslog.facility", Some("LOG_USER")),
-    ("syslog.ident", Some("php")),
-    ("syslog.filter", Some("no-ctrl")),
-    // `main.c`'s `highlight.*`, `php_get_highlight_struct`'s colours,
-    // which `highlight_string()`, `highlight_file()` and `php -s` read
-    // (`Z/main/main.c:763-767`, `Z/main/php_ini.h`'s `HL_*_COLOR`).
-    ("highlight.comment", Some("#FF8000")),
-    ("highlight.default", Some("#0000BB")),
-    ("highlight.html", Some("#000000")),
-    ("highlight.keyword", Some("#007700")),
-    ("highlight.string", Some("#DD0000")),
-    // `ignore_user_abort`, `PG(ignore_user_abort)`, and the two `dl()`
-    // reads, `enable_dl` and `extension_dir`, `PHP_INI_SYSTEM`.
-    ("ignore_user_abort", Some("0")),
-    ("implicit_flush", Some("0")),
-    // `realpath_cache_size` and `realpath_cache_ttl`, `PHP_INI_SYSTEM`,
-    // the realpath cache's limit and time to live (`crate::virtual_cwd`).
-    ("realpath_cache_size", Some("4096K")),
-    // `arg_separator.input` and `arg_separator.output`, `PHP_INI_ALL`:
-    // what `parse_str` splits on and what the URL rewriter and
-    // `http_build_query` join with.
-    ("arg_separator.input", Some("&")),
-    ("arg_separator.output", Some("&")),
-    // `auto_prepend_file` and `auto_append_file`,
-    // `PHP_INI_SYSTEM|PHP_INI_PERDIR`: required before and after the
-    // primary script (`php_execute_script`).
-    ("auto_prepend_file", None),
-    ("auto_append_file", None),
-    ("realpath_cache_ttl", Some("120")),
-    // `main.c`'s entries for what a request of the web carries
-    // (`Z/main/main.c:802-878`): the `X-Powered-By` header, the auto
-    // globals made when named, `$_SERVER['argv']`, the body and its
-    // limits, and the uploads.
-    ("expose_php", Some("1")),
-    ("auto_globals_jit", Some("1")),
-    ("register_argc_argv", Some("0")),
-    ("enable_post_data_reading", Some("1")),
-    ("post_max_size", Some("8M")),
-    ("max_input_time", Some("-1")),
-    ("max_input_nesting_level", Some("64")),
-    ("max_input_vars", Some("1000")),
-    ("file_uploads", Some("1")),
-    ("upload_max_filesize", Some("2M")),
-    ("upload_tmp_dir", None),
-    ("max_file_uploads", Some("20")),
-    ("max_multipart_body_parts", Some("-1")),
-    ("enable_dl", Some("1")),
-    ("extension_dir", Some(crate::constants::PHP_EXTENSION_DIR)),
-    // Two `main.c` registers for ext/standard to read (`Z/main/main.c:822, 863`).
-    ("unserialize_callback_func", None),
-    ("browscap", None),
-    // `doc_root`, `user_dir` and `user_ini.*`, `PHP_INI_SYSTEM`
-    // (`Z/main/main.c:829-884`): what a host of the web reads to find a
-    // request's program and its `.user.ini` files.
-    // `output_buffering` and `output_handler`, `PHP_INI_PERDIR|
-    // PHP_INI_SYSTEM` (`Z/main/main.c:816-817`): the buffer a request
-    // starts with ([`crate::output::start_at_request`]).
-    ("output_buffering", Some("0")),
-    ("output_handler", None),
-    ("doc_root", None),
-    ("user_dir", None),
-    ("user_ini.filename", Some(".user.ini")),
-    ("user_ini.cache_ttl", Some("300")),
+    // The two the stack limit reads (`Shared::stack_limit`).
+    ("zend.max_allowed_stack_size", Some("0")),
+    ("zend.reserved_stack_size", Some("0")),
 ];
 
 /// `php_ini_builder_define`'s line (`Z/main/php_ini_builder.c:63-81`)
@@ -3466,14 +3486,14 @@ impl EngineBuilder {
             // `zend_register_ini_entries_ex` reads that table by the
             // names it registers and by no other.
             // `zend_register_ini_entries_ex` takes the value only where
-            // the entry's `on_modify` does, and the default stays.
-            if !ini.iter().any(|(n, _)| *n == name)
-                || Request::ini_verdict(&name, &value) == crate::api::abi::IniVerdict::Rejected
-            {
+            // the entry's `on_modify` does, and the default stays. The
+            // entry keeps its place: the table is in registration order.
+            if Request::ini_verdict(&name, &value) == crate::api::abi::IniVerdict::Rejected {
                 continue;
             }
-            ini.retain(|(n, _)| *n != name);
-            ini.push((name, Some(value)));
+            if let Some(entry) = ini.iter_mut().find(|(n, _)| *n == name) {
+                entry.1 = Some(value);
+            }
         }
         let on = |name: &str| {
             ini.iter()

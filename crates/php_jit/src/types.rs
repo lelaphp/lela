@@ -222,13 +222,41 @@ pub(crate) struct Line {
     pub(crate) out: Option<ValueId>,
     pub(crate) op1_def: Option<ValueId>,
     pub(crate) op2_def: Option<ValueId>,
-    /// Whether the opline is a comparison fused to the jump one opline
-    /// on, one compare-and-branch (design §5.8).
-    pub(crate) fused: bool,
+    /// The jump one opline on that a comparison is fused to, one
+    /// compare-and-branch (design §5.8), where it is.
+    pub(crate) fused: Option<Fused>,
+    /// What the opline names beside its operands that its inline form
+    /// reads.
+    pub(crate) imm: Imm,
     pub(crate) form: Form,
     /// The slot of [`TraceIr::map_ptrs`] the opline reads.
     pub(crate) map_ptr: Option<usize>,
     pub(crate) exit: Option<ExitId>,
+    /// Where it leaves where, done, freeing a temporary it read threw:
+    /// an inline fetch from a temporary array.
+    pub(crate) freed: Option<ExitId>,
+}
+
+/// The jump a comparison is fused to: which value of the comparison it
+/// jumps on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Fused {
+    /// `JMPZ`: it jumps where the comparison is false.
+    Jmpz,
+    /// `JMPNZ`: it jumps where the comparison is true.
+    Jmpnz,
+}
+
+/// What an opline names beside its operands, where its inline form reads
+/// it: php's `op2.num` of a send, an `UNUSED` operand that is a number,
+/// and the operator an `ASSIGN_OP`'s `extended_value` names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Imm {
+    None,
+    /// The argument a send writes, from one.
+    Arg(u32),
+    /// The binary operator of an `ASSIGN_OP`.
+    Binary(Opcode),
 }
 
 /// An operand as the op reads it.
