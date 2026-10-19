@@ -1147,11 +1147,8 @@ fn defined(req: &mut Request, constant_name: PhpString) -> Result<bool, Thrown> 
         };
         return Ok(class.is_some_and(|class| req.class_constant_defined(class, constant)));
     }
-    if let Some(separator) = bytes.iter().rposition(|b| *b == b'\\') {
-        let (namespace, constant) = bytes.split_at(separator);
-        let mut lowered = namespace.to_ascii_lowercase();
-        lowered.extend_from_slice(constant);
-        return Ok(req.constant_named(&lowered).is_some());
+    if bytes.contains(&b'\\') {
+        return Ok(req.constant_named(&Request::constant_key(bytes)).is_some());
     }
     Ok(crate::ops::defined(req, bytes))
 }

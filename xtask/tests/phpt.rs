@@ -2122,11 +2122,12 @@ fn two_runs_over_one_directory_at_once_never_meet_in_it() {
 /// so the sweep in the window is made, not met by chance, and the copy is
 /// gone after it whoever swept it. The test's php, sleeping past the
 /// recipe's limit, outlives the killed run, and that other run, in a
-/// `TMPDIR` of its own, stops it as it starts: the dead copy's lock came,
-/// and in the one directory every session shares the lock is the only
-/// guard (#2663); a copy whose lock a live run holds is left alone, which
-/// `scratch`'s own test holds. A php still running after the next run is
-/// killed by this test, which fails.
+/// `TMPDIR` of its own, stops it as it starts where no other process's
+/// run has stopped it first: the dead copy's lock came, and in the one
+/// directory every session shares the lock is the only guard (#2663); a
+/// copy whose lock a live run holds is left alone, which `scratch`'s own
+/// test holds. A php still running after the next run is killed by this
+/// test, which fails.
 #[test]
 fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
     use std::io::{BufRead, BufReader};
@@ -2175,12 +2176,14 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
         copy.join("Zend/tests/beside").exists(),
         "the test ran in {copy:?}"
     );
-    first.kill().unwrap();
-    first.wait().unwrap();
+    // Read while the run lives and holds its copy's lock, which no sweep
+    // passes: once it is killed, any process's run may stop its php (#2942).
     let pid = fs::read_to_string(&held).unwrap();
     let pid = pid.trim();
     let php = started_at(pid);
-    assert!(!php.is_empty(), "the killed run's php runs on");
+    assert!(!php.is_empty(), "the run's php runs");
+    first.kill().unwrap();
+    first.wait().unwrap();
 
     // Another process's run, in the machine's temporary directory, whose
     // first scratch tree sweeps every dead run's standing there.
@@ -2192,8 +2195,8 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
     )
     .unwrap();
     let swept = other.run(&one, "Zend/tests").wait_with_output().unwrap();
-    // A run in another temporary directory stops the killed one's php:
-    // its copy stood in /tmp with its lock let go.
+    // A run in another temporary directory stops the killed one's php,
+    // if no other process's has: its copy stood in /tmp with its lock let go.
     let stopped_by_other = started_at(pid) != php;
     assert!(swept.status.success(), "{swept:?}");
 

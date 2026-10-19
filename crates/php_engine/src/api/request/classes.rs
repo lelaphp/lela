@@ -601,8 +601,18 @@ impl Request {
     /// ```
     fn redeclaration(&self, existing: ClassId) -> String {
         match self.class_decl(existing) {
-            Some(earlier) => redeclaration(earlier),
+            Some(earlier) => redeclaration(earlier, &earlier.name.0),
             None => String::from("InternalError: a class redeclared over none"),
+        }
+    }
+
+    /// `zend_class_redeclaration_error_ex` over `alias`, the name
+    /// `class_alias()` could not give `class`: the wordings
+    /// [`Request::redeclaration`] has, over `class`'s declaration.
+    pub(crate) fn alias_redeclaration(&self, class: ClassId, alias: &[u8]) -> String {
+        match self.class_decl(class) {
+            Some(decl) => redeclaration(decl, alias),
+            None => format!("Cannot redeclare class {}", String::from_utf8_lossy(alias)),
         }
     }
 
@@ -1333,7 +1343,7 @@ impl Request {
             .and_then(|existing| self.class_decl(existing))
             .or_else(|| self.unlinked_decl(&decl.name.0));
         if let Some(existing) = existing {
-            let message = redeclaration(existing);
+            let message = redeclaration(existing, &existing.name.0);
             let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
             let line = self.current_line();
             self.end_in_compile_time(Level::CompileError, &message, &file, line);
@@ -1637,20 +1647,8 @@ impl Request {
         if self.preloaded_function(unit, exec::Body::Dynamic(at)) {
             return Ok(());
         }
-        let name = String::from_utf8_lossy(&decl.name.0).into_owned();
         if let Some(earlier) = self.function_named(Bare::resolved(lowered)) {
-            let site = self
-                .user_function(earlier)
-                .and_then(user_function_decl)
-                .map(|decl| {
-                    format!(
-                        " (previously declared in {}:{})",
-                        String::from_utf8_lossy(&decl.file.0),
-                        decl.line
-                    )
-                })
-                .unwrap_or_default();
-            let message = format!("Cannot redeclare function {name}(){site}");
+            let message = self.function_redeclaration(earlier, &decl.name.0);
             return Err(crate::api::raising::fatal(self, &message));
         }
         let declared = Function::local(self.user_functions.len());
@@ -1826,6 +1824,24 @@ impl Request {
         (0..unit.functions.len()).all(|at| self.declare_function(unit, at).is_some())
     }
 
+    /// `do_bind_function`'s and `zend_begin_func_decl`'s redeclaration
+    /// text: the function `name` redeclared over `earlier`, and the
+    /// earlier one's site where it is a user function.
+    fn function_redeclaration(&self, earlier: Function, name: &[u8]) -> String {
+        let site = self
+            .user_function(earlier)
+            .and_then(user_function_decl)
+            .map(|decl| {
+                let file = String::from_utf8_lossy(&decl.file.0);
+                format!(" (previously declared in {file}:{})", decl.line)
+            })
+            .unwrap_or_default();
+        format!(
+            "Cannot redeclare function {}(){site}",
+            String::from_utf8_lossy(name)
+        )
+    }
+
     /// `zend_hash_add_ptr(CG(function_table), …)` for the function at
     /// `at` of those the unit declares at its top level, before its
     /// main op array runs: php binds one at compile time and the
@@ -1847,21 +1863,7 @@ impl Request {
             return Some(false);
         }
         if let Some(earlier) = self.function_named((&decl.name).into()) {
-            let site = self
-                .user_function(earlier)
-                .and_then(user_function_decl)
-                .map(|decl| {
-                    format!(
-                        " (previously declared in {}:{})",
-                        String::from_utf8_lossy(&decl.file.0),
-                        decl.line
-                    )
-                })
-                .unwrap_or_default();
-            let message = format!(
-                "Cannot redeclare function {}(){site}",
-                String::from_utf8_lossy(&decl.name.0)
-            );
+            let message = self.function_redeclaration(earlier, &decl.name.0);
             let file = decl.file.0.to_vec();
             self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
             return None;
@@ -2209,12 +2211,13 @@ fn dynamic_traits(unit: &Unit, at: u32) -> (crate::attributes::Flags, FrameShape
         .unwrap_or_default()
 }
 
-/// `zend_class_redeclaration_error`'s two wordings over the earlier
-/// declaration: what it is and its own name, and its site when it was a
-/// user class.
-fn redeclaration(earlier: &ClassDecl) -> String {
+/// `zend_class_redeclaration_error_ex`'s two wordings over the earlier
+/// declaration: what it is, the name redeclared, and the earlier one's
+/// site when it was a user class. `zend_class_redeclaration_error` names
+/// the earlier declaration's own name.
+fn redeclaration(earlier: &ClassDecl, name: &[u8]) -> String {
     let what = php_link::object_type(earlier.kind);
-    let name = String::from_utf8_lossy(&earlier.name.0);
+    let name = String::from_utf8_lossy(name);
     if earlier.file.0.is_empty() {
         return format!("Cannot redeclare {what} {name}");
     }

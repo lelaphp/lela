@@ -308,6 +308,25 @@ fn entries_of(req: &Request, map: PhpObject) -> Option<PhpArray> {
         .and_then(|payload| payload.entries)
 }
 
+/// The key a map's `entries` hold `key`'s value under: the object's
+/// index, where php keys by `zend_object_to_weakref_key`'s pointer.
+fn entry_key(key: PhpObject) -> Key {
+    Key::Int(i64::from(key.index()))
+}
+
+/// The value the map holds for `key`, a view; none where it holds none.
+fn entry_of(req: &Request, map: PhpObject, key: PhpObject) -> Option<Value> {
+    entries_of(req, map)?.get(&entry_key(key))
+}
+
+/// `zend_weakmap_read_dimension`'s `Error` for a key the map holds
+/// nothing under.
+fn not_contained(req: &mut Request, key: PhpObject) -> Thrown {
+    let class = req.class_name(key.class());
+    let message = format!("Object {class}#{} not contained in WeakMap", key.index());
+    throw_error(req, "Error", &message)
+}
+
 impl ObjectHandlers for WeakMapHandlers {
     fn core_table(&self) -> crate::api::abi::CoreTable {
         crate::api::abi::CoreTable::of(crate::api::abi::Core::WeakMap)
@@ -376,17 +395,11 @@ impl ObjectHandlers for WeakMapHandlers {
             return Err(throw_error(req, "Error", "Cannot append to WeakMap"));
         };
         let key = map_key(req, offset)?;
-        let found = entries_of(req, object).and_then(|e| e.get(&Key::Int(i64::from(key.index()))));
-        let Some(value) = found else {
+        let Some(value) = entry_of(req, object, key) else {
             if read == DimensionRead::Silent {
                 return Ok(Owner::null());
             }
-            let class = req.class_name(key.class());
-            return Err(throw_error(
-                req,
-                "Error",
-                &format!("Object {class}#{} not contained in WeakMap", key.index()),
-            ));
+            return Err(not_contained(req, key));
         };
         Ok(Owner::take(req, value.deref()))
     }
@@ -459,7 +472,7 @@ impl ObjectHandlers for WeakMapHandlers {
             }
             made
         };
-        let at = Key::Int(i64::from(key.index()));
+        let at = entry_key(key);
         if !entries.contains(&at) {
             register(req, key, Holder::Map(object.index()));
         }
@@ -476,9 +489,7 @@ impl ObjectHandlers for WeakMapHandlers {
         not_empty: bool,
     ) -> Result<bool, Thrown> {
         let key = map_key(req, offset)?;
-        let Some(value) =
-            entries_of(req, object).and_then(|e| e.get(&Key::Int(i64::from(key.index()))))
-        else {
+        let Some(value) = entry_of(req, object, key) else {
             return Ok(false);
         };
         if not_empty {
@@ -497,9 +508,7 @@ impl ObjectHandlers for WeakMapHandlers {
         offset: &Value,
     ) -> Result<(), Thrown> {
         let key = map_key(req, offset)?;
-        let held = entries_of(req, object)
-            .is_some_and(|entries| entries.contains(&Key::Int(i64::from(key.index()))));
-        if held {
+        if entry_of(req, object, key).is_some() {
             unregister(req, key, Holder::Map(object.index()), true);
         }
         Ok(())
@@ -721,18 +730,10 @@ fn weakmap_place(
         return Err(throw_error(req, "Error", "Cannot append to WeakMap"));
     };
     let key = map_key(req, offset)?;
-    let at = Key::Int(i64::from(key.index()));
-    let entries = entries_of(req, object);
-    let held = entries.and_then(|entries| entries.get(&at).map(|value| (entries, value)));
-    let Some((entries, value)) = held else {
-        let class = req.class_name(key.class());
-        return Err(throw_error(
-            req,
-            "Error",
-            &format!("Object {class}#{} not contained in WeakMap", key.index()),
-        ));
+    let at = entry_key(key);
+    let Some(entries) = entries_of(req, object).filter(|entries| entries.contains(&at)) else {
+        return Err(not_contained(req, key));
     };
-    let _ = value;
     match entries.heap().value_ref(at.heap()) {
         Some(place) => Ok(place),
         None => Err(throw_error(req, "Error", "Cannot append to WeakMap")),

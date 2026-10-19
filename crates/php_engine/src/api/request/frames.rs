@@ -396,10 +396,13 @@ impl Request {
     /// the current frame and the entry slot with it, so neither is
     /// saved on its own; the chain of open observed frames goes with the
     /// stack its frames stand on, the swap php's observer makes at the
-    /// switch's notice (`Z/Zend/zend_observer.c:423-424`).
+    /// switch's notice (`Z/Zend/zend_observer.c:423-424`). The trace
+    /// number goes with the error-reporting level and the stack limit,
+    /// which [`Request::on_stack`] leaves the running fiber's.
     pub(crate) fn switch_execution(&mut self, other: &mut crate::fiber::Execution) {
         self.switch_stack(other);
         self.swap_error_reporting(&mut other.error_reporting);
+        self.swap_trace_num(&mut other.trace_num);
         self.swap_stack_limit(&mut other.stack_limit);
         std::mem::swap(&mut self.fibers.active, &mut other.active);
     }
@@ -420,11 +423,11 @@ impl Request {
     /// moved there: that stack is the running one for `f`, the fibers
     /// above it set aside, so the chain runs from it into the stacks
     /// below, and its frames are the ones a [`FrameRef`] names. The
-    /// error-reporting level and the machine stack's limit stay the
-    /// running fiber's, as php moves neither, and no fiber starts,
-    /// suspends or resumes meanwhile, since `f` is served on the
-    /// running fiber's machine stack. `None` where no stack stands
-    /// there.
+    /// error-reporting level, the trace number and the machine stack's
+    /// limit stay the running fiber's, as php moves none of them, and no
+    /// fiber starts, suspends or resumes meanwhile, since `f` is served
+    /// on the running fiber's machine stack. `None` where no stack
+    /// stands there.
     pub(super) fn on_stack<R>(
         &mut self,
         stack: usize,
@@ -457,9 +460,9 @@ impl Request {
     /// `EG(symbol_table)`'s CVs are read where they stand, and the serve
     /// holds one owner of each coroutine's object on the chain, so nothing
     /// `f` does destroys one meanwhile. As in [`Request::on_stack`], the
-    /// error-reporting level and the machine stack's limit stay the
-    /// running fiber's, and no fiber starts, suspends or resumes
-    /// meanwhile. `None` where the coroutine holds no execution.
+    /// error-reporting level, the trace number and the machine stack's
+    /// limit stay the running fiber's, and no fiber starts, suspends or
+    /// resumes meanwhile. `None` where the coroutine holds no execution.
     pub(super) fn on_held_stack<R>(
         &mut self,
         coroutine: crate::fiber::Context,
