@@ -61,8 +61,15 @@ struct Lending {
     refused: Option<Fatal>,
 }
 
+// The crate's root carries the macro's expectation: clippy 1.95 reports
+// `disallowed_macros` for this invocation at the crate, past any attribute
+// nearer to it; the type's is the static's own.
 std::thread_local! {
     /// The lend in force on this thread, none outside one.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "ADR-0014's lend: one slot per thread for the length of one C call"
+    )]
     static LENT: Cell<Option<NonNull<Lending>>> = const { Cell::new(None) };
 }
 
