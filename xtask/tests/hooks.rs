@@ -899,6 +899,50 @@ fn a_merge_reaches_ticket_merged_and_a_plain_commit_does_not() {
     );
 }
 
+/// A merge into the main checkout that changes the harness rebuilds
+/// `target/release/xtask`, the judge every tool call tries first, in the
+/// background (#2982); one that leaves the harness alone does not.
+#[test]
+fn a_merge_that_changes_the_harness_rebuilds_the_release_judge() {
+    let scratch = scratch("rebuild", &Computed::Rendered);
+    let main = scratch
+        .git(&["symbolic-ref", "--short", "HEAD"], false)
+        .trim()
+        .to_owned();
+    let rebuilds = |scratch: &Scratch| {
+        let built = || {
+            scratch
+                .calls("cargo")
+                .iter()
+                .filter(|call| call.as_str() == "build -q --release -p xtask")
+                .count()
+        };
+        for _ in 0..50 {
+            if built() > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        built()
+    };
+    for (n, path) in [
+        ("7", "crates/php_heap/src/lib.rs"),
+        ("8", "xtask/src/lib.rs"),
+    ] {
+        scratch.git(&["checkout", "-q", "-b", &format!("t{n}"), &main], false);
+        write(&scratch.root, path, &format!("// the work of #{n}\n"));
+        scratch.git(&["add", "--", path], false);
+        scratch.git(&["commit", "-q", "-m", &format!("the work of #{n}")], false);
+    }
+    scratch.git(&["checkout", "-q", &main], false);
+    scratch.git(&["merge", "-q", "--no-ff", "--no-commit", "t7"], false);
+    scratch.git(&["commit", "-q", "-m", "Merge t7: the work (#7)"], true);
+    assert_eq!(rebuilds(&scratch), 0, "{:?}", scratch.calls("cargo"));
+    scratch.git(&["merge", "-q", "--no-ff", "--no-commit", "t8"], false);
+    scratch.git(&["commit", "-q", "-m", "Merge t8: the work (#8)"], true);
+    assert_eq!(rebuilds(&scratch), 1, "{:?}", scratch.calls("cargo"));
+}
+
 // ---------------------------------------------------------------- pre-merge-commit
 
 /// A merge `git merge` commits itself runs no pre-commit, only
