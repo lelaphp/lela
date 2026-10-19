@@ -1371,6 +1371,7 @@ values::PhpRef::separate_array
 values::PhpRef::set
 values::PhpString
 values::PhpString::as_bytes
+values::PhpString::declared
 values::PhpString::existing_interned
 values::PhpString::filled
 values::PhpString::interned

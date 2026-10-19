@@ -480,12 +480,8 @@ impl Request {
             if let Some(table) = req.frame_at(at).and_then(FrameAt::symbol_table) {
                 return req.symbol_value(table, name);
             }
-            let cv = req
-                .frame_var_names(at)
-                .ok()?
-                .iter()
-                .position(|held| held.as_bytes() == name)?;
-            Some(req.slot(at, u32::try_from(cv).ok()?))
+            let cv = req.frame_var_at(at, name)?;
+            Some(req.slot(at, cv))
         })
         .flatten()
     }

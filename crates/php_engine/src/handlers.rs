@@ -7170,7 +7170,8 @@ pub(crate) fn fetch_class_constant<T: Tier>(
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     let value = if op.op2_type != OperandKind::Const && name.eq_ignore_ascii_case(b"class") {
         let written = req.class_name_bytes(class);
-        req.declared_string(&written).map(Value::string)
+        req.declared_string(&written)
+            .map(|name| name.into_value().hand_on())
     } else {
         req.class_constant(class, &name)
     };
@@ -11341,7 +11342,7 @@ pub(crate) fn fetch_class_name<T: Tier>(
         Ok(name) => name,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    set_out(req, frame, code, op, Value::string(name));
+    set_out(req, frame, code, op, name.into_value().hand_on());
     Ok(advance(req, frame))
 }
 
@@ -18695,8 +18696,9 @@ fn fetched_element(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
         ));
     };
     // A hooked property's value is the walk's own owner, given up once
-    // the loop's variable holds its own.
+    // the loop's variable holds its own, and so is an object's key.
     let mut owned = None;
+    let mut owned_key = None;
     let (key, value) = match foreach_var(req, at.read()) {
         ForeachVar::Array { array, pos } => {
             let Some((found, key, value)) = array.live_from(pos) else {
@@ -18718,7 +18720,9 @@ fn fetched_element(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
                 if walked.owned() {
                     owned = Some(value);
                 }
-                (key, value)
+                let view = key.heap();
+                owned_key = Some(key);
+                (view, value)
             }
             Ok(None) => {
                 return jump_to(op.extended_value);
@@ -18734,6 +18738,9 @@ fn fetched_element(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
     };
     if let Some(key) = fe_key_kept(req, op, key) {
         set_out(req, frame, code, op, key);
+    }
+    if let Some(key) = owned_key {
+        key.give_up(req);
     }
     let assigned = fe_assign(req, frame, code, op, value);
     if let Some(owned) = owned {
@@ -19288,14 +19295,22 @@ fn fe_walk_object_rw(req: &mut Request, op: &Opline, object: PhpObject, walk: Ha
     let owned = walked.owned();
     let cell = match req.walked_reference(object, walked) {
         Ok(cell) => cell,
-        Err(thrown) => return Ok(Err(thrown)),
+        Err(thrown) => {
+            key.give_up(req);
+            return Ok(Err(thrown));
+        }
     };
     let key = match req.walked_key(key) {
         Ok(key) => key,
         Err(thrown) => return Ok(Err(thrown)),
     };
-    let key = fe_key_kept(req, op, key);
-    Ok(Ok(Some(BoundRw { key, cell, owned })))
+    let kept = fe_key_kept(req, op, key.heap());
+    key.give_up(req);
+    Ok(Ok(Some(BoundRw {
+        key: kept,
+        cell,
+        owned,
+    })))
 }
 
 /// `FE_FETCH_RW`'s iterator arm (`Z/Zend/zend_vm_def.h:7358`): the
@@ -21319,7 +21334,7 @@ fn class_name_into(
         Ok(name) => name,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    set_out(req, frame, code, op, Value::string(name));
+    set_out(req, frame, code, op, name.into_value().hand_on());
     Ok(advance(req, frame))
 }
 

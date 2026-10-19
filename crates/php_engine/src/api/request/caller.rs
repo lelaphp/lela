@@ -170,11 +170,7 @@ impl Request {
             self.set_table_var_named(frame, name, value);
             return true;
         }
-        let at = self
-            .frame_var_names(frame)
-            .ok()
-            .and_then(|names| names.iter().position(|var| var.as_bytes() == name))
-            .and_then(|at| u32::try_from(at).ok());
+        let at = self.frame_var_at(frame, name);
         let slot = |req: &mut Request| req.vm.stack.frame_mut(frame)?.slot_ptr(Slot(at?));
         if slot(self).is_none() {
             if force {

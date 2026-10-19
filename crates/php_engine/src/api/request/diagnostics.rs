@@ -15,7 +15,7 @@ use std::sync::Arc;
 use crate::api::abi::{AfterLog, Callable, IniStage};
 use crate::api::abi::{Beneath, chain};
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{Charset, Key, Owner, PhpArray, PhpString, Value, ValueRef, adopted_some};
+use crate::api::values::{Charset, Owner, PhpArray, PhpString, Value, ValueRef, adopted_some};
 use crate::supplied::Bail;
 use crate::supplied::chain::ErrorArgs;
 
@@ -707,7 +707,9 @@ impl Request {
         if let Some(path) = held {
             self.addref(&Value::string(path));
         }
-        if let Some(file) = held.map_or_else(|| self.op_array_string(file).ok(), Some) {
+        if let Some(file) =
+            held.map_or_else(|| self.declared_string(file).ok().map(Owner::hand_on), Some)
+        {
             self.addref(&Value::string(string));
             self.diagnostics.last_error = Some(LastError {
                 level,
@@ -1138,13 +1140,11 @@ impl Request {
             (b"line", Value::int(i64::from(last.line))),
         ] {
             // `ZSTR_KNOWN`, the four names permanent.
-            let key = Key::Str(self.declared_string(name)?);
-            let key = Owner::take(self, key);
+            let key = self.declared_string(name)?.into_key();
             array.set(self, key, Owner::take(self, value))?;
         }
         if let Some((Some(trace), _)) = self.diagnostics.last_fatal_error_backtrace {
-            let key = Key::Str(self.declared_string(b"trace")?);
-            let key = Owner::take(self, key);
+            let key = self.declared_string(b"trace")?.into_key();
             array.set(self, key, Owner::take(self, Value::array(trace)))?;
         }
         Ok(Some(array))
@@ -1436,7 +1436,7 @@ impl Request {
         let arguments = (|| -> Result<[Value; 4], Thrown> {
             // `ZVAL_STR_COPY(&params[2], error_filename)`: the op array's
             // file name, one more owner of it as a trace row takes.
-            let file = Value::string(self.op_array_string(file)?);
+            let file = self.declared_string(file)?.into_value().hand_on();
             // `ZVAL_STR_COPY(&params[1], message)`.
             self.addref(&Value::string(message));
             Ok([

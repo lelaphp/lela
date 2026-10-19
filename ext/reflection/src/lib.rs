@@ -5011,10 +5011,14 @@ fn set_string_prop(
     prop: &[u8],
     value: &[u8],
 ) -> Result<(), Thrown> {
-    let key = PhpString::interned(req, prop)?;
-    let value = PhpString::interned(req, value)?;
-    let key = Owner::take(req, key);
-    let value = Owner::take(req, Value::string(value));
+    let key = PhpString::declared(req, prop)?;
+    let value = match PhpString::declared(req, value) {
+        Ok(value) => value.into_value(),
+        Err(thrown) => {
+            key.give_up(req);
+            return Err(thrown);
+        }
+    };
     Std.write_property(req, this, key, value)
 }
 

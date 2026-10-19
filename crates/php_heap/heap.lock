@@ -121,7 +121,6 @@ Heap::gc_startup
 Heap::gc_status
 Heap::holds
 Heap::in_memory_limit_error
-Heap::interned
 Heap::iterator_add
 Heap::iterator_del
 Heap::iterator_lead
