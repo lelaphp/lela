@@ -48,6 +48,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::api::call::{ClassNative, Function};
 use crate::api::request::{Declared, UserFunction};
 use crate::api::values::ClassId;
+use php_link::LinkedClass;
 
 /// How many slots a column's first segment holds; each segment after
 /// holds twice the one before.
@@ -82,7 +83,7 @@ fn locate(at: u32) -> Option<(usize, usize)> {
 impl<T> Column<T> {
     /// An empty column whose numbers stay below `limit`, and below the
     /// rows its segments hold.
-    fn below(limit: u32) -> Column<T> {
+    pub(crate) fn below(limit: u32) -> Column<T> {
         let held = FIRST.saturating_mul((1 << SEGMENTS) - 1);
         let held = u32::try_from(held).unwrap_or(u32::MAX);
         Column {
@@ -126,6 +127,18 @@ impl<T> Column<T> {
         }
     }
 
+    /// The row at a number its publisher chose rather than reserved,
+    /// written once: every number below it counts as reserved, its row
+    /// unfilled where no publisher places one. `Err` gives the row back
+    /// past the limit and where the slot was filled.
+    pub(crate) fn place(&self, at: u32, row: T) -> Result<(), T> {
+        let Some(end) = at.checked_add(1).filter(|end| *end <= self.limit) else {
+            return Err(row);
+        };
+        self.reserved.fetch_max(end, Ordering::AcqRel);
+        self.fill(at, row)
+    }
+
     /// The row at `at`, where it was filled.
     pub(crate) fn get(&self, at: u32) -> Option<&T> {
         let (segment, offset) = locate(at)?;
@@ -166,15 +179,34 @@ pub(crate) struct Arena {
     /// are rows here, php's `ZCSG(hash)` and what is counted of the
     /// memory under it ([`crate::unit_cache::Files`]).
     pub(crate) files: crate::unit_cache::Files,
+    /// The engine's own classes' linked records, which every epoch
+    /// shares, so what holds an epoch reads a class of the engine's as it
+    /// reads one the epoch published ([`Arena::linked_class`]).
+    natives: Arc<[LinkedClass<ClassId>]>,
 }
 
 impl Arena {
     /// An empty arena over an engine of `classes` classes and
-    /// `functions` natives and native methods, holding `files`.
+    /// `functions` natives and native methods, holding `files`, for a
+    /// test that links no class.
+    #[cfg(test)]
     pub(crate) fn past(classes: usize, functions: usize, files: crate::unit_cache::Files) -> Arena {
         let first_class = u32::try_from(classes).unwrap_or(ClassId::LOCAL);
         let first_function = u32::try_from(functions).unwrap_or(Function::CLASS_NATIVE);
-        Arena::numbered(None, [first_class, first_function, 0], files)
+        Arena::numbered(None, [first_class, first_function, 0], files, Arc::from([]))
+    }
+
+    /// An empty arena over an engine whose classes linked to `natives`,
+    /// past them and past `functions` natives and native methods,
+    /// holding `files`.
+    pub(crate) fn of_engine(
+        natives: Arc<[LinkedClass<ClassId>]>,
+        functions: usize,
+        files: crate::unit_cache::Files,
+    ) -> Arena {
+        let first_class = u32::try_from(natives.len()).unwrap_or(ClassId::LOCAL);
+        let first_function = u32::try_from(functions).unwrap_or(Function::CLASS_NATIVE);
+        Arena::numbered(None, [first_class, first_function, 0], files, natives)
     }
 
     /// An empty arena numbered from `first` (its classes, functions and
@@ -183,6 +215,7 @@ impl Arena {
         below: Option<Arc<Arena>>,
         first: [u32; 3],
         files: crate::unit_cache::Files,
+        natives: Arc<[LinkedClass<ClassId>]>,
     ) -> Arena {
         let [first_class, first_function, first_class_native] = first;
         Arena {
@@ -195,6 +228,7 @@ impl Arena {
             first_class_native,
             inheritance: crate::inheritance_cache::InheritanceCache::default(),
             files,
+            natives,
         }
     }
 
@@ -208,7 +242,8 @@ impl Arena {
             base.first_class_native.saturating_add(class_natives),
         ];
         let files = base.files.emptied();
-        Arena::numbered(Some(base), first, files)
+        let natives = Arc::clone(&base.natives);
+        Arena::numbered(Some(base), first, files, natives)
     }
 
     /// The arena a restart hands on: empty, over what this one is laid
@@ -219,7 +254,8 @@ impl Arena {
             self.first_function,
             self.first_class_native,
         ];
-        Arena::numbered(self.below.clone(), first, self.files.emptied())
+        let natives = Arc::clone(&self.natives);
+        Arena::numbered(self.below.clone(), first, self.files.emptied(), natives)
     }
 
     /// The arena a number below this one's first names a row of: the
@@ -238,6 +274,25 @@ impl Arena {
         }
         let base = self.base()?;
         base.classes.get(number.checked_sub(base.first_class)?)
+    }
+
+    /// The linked record of a class every request shares: one of the
+    /// engine's, or one the epoch published; none for a request's.
+    pub(crate) fn linked_class(&self, class: ClassId) -> Option<&LinkedClass<ClassId>> {
+        let number = usize::try_from(class.published_number()?).ok()?;
+        match self.natives.get(number) {
+            Some(native) => Some(native),
+            None => self.class(class)?.record(),
+        }
+    }
+
+    /// The held op array at engine map-pointer offset `offset`, this
+    /// epoch's or the preload's below it ([`crate::tier::published`]).
+    pub(crate) fn func(&self, offset: u32) -> Option<&crate::tier::published::Func> {
+        self.files
+            .funcs
+            .get(offset)
+            .or_else(|| self.base()?.files.funcs.get(offset))
     }
 
     /// The published user function or method `function` names; none for
