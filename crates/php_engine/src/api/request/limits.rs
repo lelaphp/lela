@@ -187,10 +187,9 @@ pub(super) struct Limits {
     /// (`zend_call_stack_init`) from the two `zend.*_stack_size`
     /// entries; what the compiler is held to (design §5.6).
     stack_limit: StackLimit,
-    /// php's `EG(jit_trace_num)`, the running execution's trace
-    /// number: none at request start, swapped by a fiber switch with the
-    /// stack limit ([`Request::switch_execution`]) and set aside around
-    /// a generator's body ([`crate::tier::trace_num`]).
+    /// php's `EG(jit_trace_num)`, the running execution's trace number
+    /// ([`crate::tier::trace_num`]), kept here beside the stack limit
+    /// because a fiber switch swaps both ([`Request::switch_execution`]).
     trace_num: TraceNum,
     /// How a function C calls back reaches the request
     /// ([`Request::reentry`]), made at the first ask and closed as the

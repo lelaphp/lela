@@ -45,7 +45,7 @@ fn set_trace_num(req: &mut Request, n: i64) {
 /// `pause()` begun: `trace_num()` evaluated in the frame below the
 /// caller, as a debugger serves a frame below a fiber, and what it read
 /// written out.
-fn stop(observed: &mut Observed<'_>) {
+fn eval_below_caller(observed: &mut Observed<'_>) {
     let Some(frame) = observed
         .caller()
         .and_then(|at| at.caller())
@@ -75,7 +75,7 @@ fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
         .and_then(|function| observed.function_decl(function))
         .is_some_and(|decl| decl.name.0.as_ref() == b"pause");
     ObserverHandlers {
-        begin: named.then_some(stop as fn(&mut Observed<'_>)),
+        begin: named.then_some(eval_below_caller as fn(&mut Observed<'_>)),
         end: None,
     }
 }
@@ -103,12 +103,12 @@ fn serve(source: &str) -> String {
 }
 
 /// A fiber's body reads [`TraceNum::NONE`] whatever its resumer's
-/// execution holds; a
-/// number set on each execution before a suspend reads again after the
-/// resume on that execution and not on the other, and the fiber's last
-/// write stays with it when its body returns. A fiber left suspended
-/// with its number set leaves its resumer's as it was, which is why the
-/// exclusion cannot stick on a request (revision 9).
+/// execution holds; a number set on each execution before a suspend
+/// reads again after the resume on that execution and not on the other,
+/// and the fiber's last write stays with it when its body returns. A
+/// fiber left suspended with its number set leaves its resumer's as it
+/// was, which is why the exclusion cannot stick on a request (revision
+/// 9).
 #[test]
 fn a_fiber_switch_saves_each_executions_trace_number_and_a_body_starts_at_none() {
     let out = serve(
