@@ -13,7 +13,7 @@ use std::sync::atomic::Ordering;
 
 use php_engine::tier::{
     self, Epoch, Extension, ExtensionBuilder, Fatal, Flow, FrameRef, FuncRef, Request,
-    SafepointIdx, Site, Tier, Word,
+    SafepointIdx, Site, Tier, TraceNum, Word,
 };
 use php_unit::{OpArray, OplineIdx, Unit};
 
@@ -266,11 +266,13 @@ fn a_full_table_refuses_one_root_and_stops_the_counters() {
     );
 }
 
-/// What the panicking tier saw: whether the request recorded after the
-/// panic, and the state of the word it claimed.
+/// What the panicking tier saw after the panic: whether the request
+/// recorded, the running execution's trace number, and the state of the
+/// word it claimed.
 #[derive(Debug, Default)]
 struct Unwound {
     after: Option<bool>,
+    trace: Option<TraceNum>,
     word: Option<State>,
 }
 
@@ -290,8 +292,10 @@ impl Tier for Panics {
         let caught = catch_unwind(AssertUnwindSafe(|| super::safepoint(req, frame, site)));
         let word = policy::read(tier::word(req, frame, SafepointIdx::ENTRY));
         let after = record::recording(req);
+        let trace = tier::trace_num(req);
         let unwound = req.state::<Unwound>();
         unwound.after = Some(after);
+        unwound.trace = Some(trace);
         unwound.word = Some(word);
         match caught {
             Ok(flow) => flow,
@@ -313,8 +317,8 @@ impl Tier for Panics {
 }
 
 /// A recording a panic unwound out of leaves the request's exclusion
-/// clear, and its claim settled itself as a failed attempt: the word is
-/// cold again.
+/// clear and the trace number zero, which a recording never writes, and
+/// its claim settled itself as a failed attempt: the word is cold again.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn the_exclusion_is_clear_after_a_recording_a_panic_unwound() {
@@ -330,6 +334,7 @@ fn the_exclusion_is_clear_after_a_recording_a_panic_unwound() {
     assert!(fatal.contains("the recording panicked"), "{fatal}");
     let unwound = unwound.unwrap_or_default();
     assert_eq!(unwound.after, Some(false));
+    assert_eq!(unwound.trace, Some(TraceNum::NONE));
     assert_eq!(unwound.word, Some(State::Cold));
 }
 
