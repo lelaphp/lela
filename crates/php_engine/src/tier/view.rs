@@ -25,8 +25,10 @@ use crate::api::values::ClassId;
 use crate::arena::Arena;
 
 /// A hold on the epoch a request started in (design §5.14): its arena,
-/// whose published classes, held units and their words stand while any
-/// hold does, whatever restart replaced it since. `Send` and `Sync`, so
+/// whose published classes, held units and their words, and the
+/// engine's interned strings they name, stand while any hold does,
+/// whatever restart replaced it since and whether or not the engine
+/// still stands. `Send` and `Sync`, so
 /// a claim and a view can leave the request's thread.
 #[derive(Clone)]
 pub struct Epoch(Arc<Arena>);
@@ -55,6 +57,15 @@ impl Epoch {
         }
     }
 
+    /// The tier's value for this epoch where the tier made one
+    /// ([`epoch_state`]) and it is a `T`: what a holder that outlives
+    /// its request reads, as an exit's claim reads its trace's word
+    /// (`jit-design.md` §4.5, §4.7).
+    #[must_use]
+    pub fn tier_state<T: std::any::Any>(&self) -> Option<&T> {
+        self.0.tier.get()?.downcast_ref()
+    }
+
     /// Whether `req` started in this epoch.
     fn of(&self, req: &Request) -> bool {
         Arc::ptr_eq(&self.0, req.arena())
@@ -71,7 +82,7 @@ impl Epoch {
         let unit = unit.published();
         let files = crate::unit_cache::Files::new(1);
         files.funcs.publish(&unit);
-        let arena = Arena::of_engine(Arc::from([]), 0, files);
+        let arena = Arena::of_engine(Arc::from([]), 0, files, crate::arena::Interned::default());
         (Epoch(Arc::new(arena)), FuncRef(unit.main.runtime_cache))
     }
 }
@@ -80,6 +91,19 @@ impl Epoch {
 #[must_use]
 pub fn epoch(req: &Request) -> Epoch {
     Epoch(Arc::clone(req.arena()))
+}
+
+/// The tier's value for the epoch `req` started in, `make`'s the first
+/// time any request of the epoch asks, so it is the epoch's and goes
+/// with it: the trace table, which a restart's epoch starts without
+/// (`jit-design.md` §4.5). A borrow of the request's own hold, which
+/// takes nothing; none where the epoch holds a value of another type.
+pub fn epoch_state<T: std::any::Any + Send + Sync>(
+    req: &Request,
+    make: impl FnOnce() -> T,
+) -> Option<&T> {
+    let held = req.arena().tier.get_or_init(|| Box::new(make()));
+    held.downcast_ref()
 }
 
 /// One op array as the tier names it (`jit-design.md` §3.1): by the

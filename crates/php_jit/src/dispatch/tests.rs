@@ -192,6 +192,7 @@ fn lines(served: &php_engine::test::Served) -> Vec<String> {
 /// bumped and not recorded, so one `TRACE start` is written, the root's;
 /// the next request records a root of its own, the function the first
 /// recorded inside its root.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_destructors_hot_loop_inside_a_recording_starts_no_second_trace() {
     let scratch = testing::Scratch::new();
@@ -219,6 +220,47 @@ fn a_destructors_hot_loop_inside_a_recording_starts_no_second_trace() {
             "---- TRACE 2 start (enter) f() body.php:3",
             "---- TRACE 2 stop (return)",
             "---- TRACE 2 compiled",
+            "",
+        ]
+    );
+}
+
+/// A full table, as php's `opcache.jit_max_root_traces` fills it: the
+/// first root hot after it is refused with `too many traces` and
+/// blacklisted, and the counters stop, so no later root starts, as
+/// `zend_jit_trace_hot_root` refuses one and
+/// `zend_jit_stop_counter_handlers` stops the rest. php under the
+/// recipe's hot counters with `opcache.jit_max_root_traces=3` writes the
+/// same for this program's `b`, its third trace, a side trace of `a`'s
+/// loop taking the second, which no `Backend` compiles here yet:
+/// `---- TRACE 3 start (enter) b() …:3`, `---- TRACE 3 abort (too many
+/// traces)`, `---- TRACE 3 blacklisted`, and nothing for `c` or `d`.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_full_table_refuses_one_root_and_stops_the_counters() {
+    let mut ini = DUMPED.to_vec();
+    ini.push(("opcache.jit_max_root_traces", "2"));
+    let engine = testing::engine::<Lane>(&ini);
+    let program = "function a($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $i; } return $s; }
+        function b($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s -= $i; } return $s; }
+        function c($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += 2; } return $s; }
+        function d($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += 3; } return $s; }
+        echo a(5), b(5), c(5), d(5), \"\\n\";";
+    let served = testing::Scratch::new().serve(&engine, program);
+    assert_eq!(testing::stdout(&served), "10-101015\n");
+    assert_eq!(
+        lines(&served),
+        [
+            "JIT: jit.mode=force",
+            "---- TRACE 1 start (enter) $main() body.php:6",
+            "---- TRACE 1 abort (inner loop)",
+            "---- TRACE 1 start (loop) a() body.php:2",
+            "---- TRACE 1 stop (loop)",
+            "---- TRACE 1 compiled",
+            "",
+            "---- TRACE 2 start (enter) b() body.php:3",
+            "---- TRACE 2 abort (too many traces)",
+            "---- TRACE 2 blacklisted",
             "",
         ]
     );
@@ -273,6 +315,7 @@ impl Tier for Panics {
 /// A recording a panic unwound out of leaves the running execution's
 /// trace number none, and its claim settled itself as a failed attempt:
 /// the word is cold again.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn the_trace_number_is_none_after_a_recording_a_panic_unwound() {
     let scratch = testing::Scratch::new();
@@ -293,6 +336,7 @@ fn the_trace_number_is_none_after_a_recording_a_panic_unwound() {
 /// A fiber suspended inside a recording and never resumed: its
 /// execution's trace number went with it, so the resumer records a root
 /// of its own while the fiber's recording stands (revision 9).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_fiber_suspended_inside_a_recording_leaves_its_resumer_recording() {
     let scratch = testing::Scratch::new();
@@ -363,6 +407,7 @@ impl Tier for Spy {
 /// program with loops, calls and returns and no word is written; the same
 /// program
 /// under `force` writes words.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn under_off_no_word_is_written() {
     let program = "function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $i; } return $s; }

@@ -18,6 +18,7 @@ tier::Called
 tier::ClassId
 tier::Epoch
 tier::Epoch::fixture
+tier::Epoch::tier_state
 tier::Epoch::word
 tier::Evaluated
 tier::Extension
@@ -65,6 +66,7 @@ tier::catches
 tier::class_number
 tier::entry
 tier::epoch
+tier::epoch_state
 tier::evaluate
 tier::evaluate_code
 tier::exit

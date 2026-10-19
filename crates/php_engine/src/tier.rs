@@ -55,7 +55,7 @@ pub use frames::{
 };
 use held::{Kept, Units};
 pub use sampled::{Building, Sample, building, class_number, numbered_class, on_heap, sample};
-pub use view::{Epoch, FuncRef, MapPtrRaw, UnitView, epoch, func, word};
+pub use view::{Epoch, FuncRef, MapPtrRaw, UnitView, epoch, epoch_state, func, word};
 
 pub use crate::api::values::ClassId;
 

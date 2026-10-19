@@ -280,3 +280,42 @@ fn a_view_holds_a_published_class_and_refuses_a_request_local_one() {
     assert_eq!(out, "bool(true)\nbool(true)\nbool(false)\n");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A held function's constant string reads through a view the request
+/// kept after the engine that served it is dropped, the epoch the view
+/// holds keeping the unit and what its op arrays name, as it reads
+/// during the request.
+#[test]
+fn a_held_functions_constant_string_reads_through_a_view_past_its_engine() {
+    let dir = scratch(
+        "strings",
+        "<?php function said() { $s = 'a constant string'; return hold_caller(); }",
+    );
+    let engine = Engine::cli_builder().extensions(&[viewing()]).build();
+    let main = dir.join("main.php");
+    let (served, views) = tier::serve_kept::<Views>(
+        &engine,
+        &dir,
+        main.to_string_lossy().as_bytes(),
+        "<?php include __DIR__ . '/inc.php'; var_dump(said());",
+    );
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "bool(true)\n");
+    let strings = |views: &[(UnitView, FuncRef)]| -> Vec<Vec<u8>> {
+        views
+            .iter()
+            .filter_map(|(view, f)| view.op_array(*f))
+            .flat_map(|code| code.literals.iter())
+            .filter_map(|literal| literal.as_str())
+            .map(|s| s.bytes().to_vec())
+            .collect()
+    };
+    let views = views.map(|views| views.0).unwrap_or_default();
+    let before = strings(&views);
+    drop(engine);
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(
+        before.contains(&b"a constant string".to_vec()),
+        "read while the engine stands: {before:?}"
+    );
+    assert_eq!(strings(&views), before, "read past the engine");
+}

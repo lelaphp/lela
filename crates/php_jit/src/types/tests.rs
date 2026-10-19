@@ -73,6 +73,7 @@ fn golden(name: &str, plan: &[(&str, &str)]) -> Result<TraceIr, String> {
 
 /// `fib`, entered: a call into its own root, inlined to the recursive
 /// call, the parameter's phi carried by the argument sent.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn fib_enters_and_recurses() -> Result<(), String> {
     let ir = golden(
@@ -86,6 +87,7 @@ fn fib_enters_and_recurses() -> Result<(), String> {
 
 /// `mandelbrot`'s escape loop, in the file's own code: every variable a
 /// symbol table reaches, guarded at each read and never narrowed.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn mandelbrot_loops_in_file_scope() -> Result<(), String> {
     let ir = golden(
@@ -102,6 +104,7 @@ fn mandelbrot_loops_in_file_scope() -> Result<(), String> {
 
 /// `nbody`'s inner loop of `advance`: packed arrays by reference read
 /// and written by a long key, around a call to `sqrt`.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn nbody_advances_in_a_loop() -> Result<(), String> {
     let ir = golden(
@@ -118,6 +121,7 @@ fn nbody_advances_in_a_loop() -> Result<(), String> {
 
 /// `spectralnorm`'s inner loop of `eval_A_times_u`, which inlines its
 /// call to `eval_A`.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn spectralnorm_inlines_its_call() -> Result<(), String> {
     let ir = golden(
@@ -220,6 +224,7 @@ const IN_F: [(&str, &str); 2] = [("record.function", "f"), ("record.start", "loo
 /// A native's call, `DO_ICALL`: the array a reference passed in is read
 /// again after it and guarded again where it is read; the sum the trace
 /// keeps in a register is not.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_natives_call_reloads_what_a_reference_holds() -> Result<(), String> {
     let ir = built(
@@ -246,6 +251,7 @@ fn a_natives_call_reloads_what_a_reference_holds() -> Result<(), String> {
 }
 
 /// A call php resolves by name, `DO_FCALL_BY_NAME`, to a native.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_call_by_name_to_a_native_reloads_what_a_reference_holds() -> Result<(), String> {
     let ir = built(
@@ -263,6 +269,7 @@ fn a_call_by_name_to_a_native_reloads_what_a_reference_holds() -> Result<(), Str
 
 /// A frameless call, `FRAMELESS_ICALL_2`, in a file's own code, whose
 /// every variable a symbol table reaches: each is read again.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_frameless_call_reloads_every_variable_of_a_files_code() -> Result<(), String> {
     let ir = built(
@@ -276,6 +283,7 @@ fn a_frameless_call_reloads_every_variable_of_a_files_code() -> Result<(), Strin
 }
 
 /// A dynamic call to a native, `DO_FCALL`.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_dynamic_call_to_a_native_reloads_what_a_reference_holds() -> Result<(), String> {
     let ir = built(
@@ -293,6 +301,7 @@ fn a_dynamic_call_to_a_native_reloads_what_a_reference_holds() -> Result<(), Str
 
 /// A `TICKS` opline, which calls what `register_tick_function` registered:
 /// user code.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn ticks_reload_what_a_reference_holds() -> Result<(), String> {
     let ir = built(
@@ -310,6 +319,7 @@ fn ticks_reload_what_a_reference_holds() -> Result<(), String> {
 
 /// A kernel that may throw and calls nothing, a cast to string, reads
 /// nothing again: it may only leave.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_throwing_kernel_reloads_nothing_but_may_leave() -> Result<(), String> {
     let ir = built(
@@ -333,6 +343,7 @@ fn a_throwing_kernel_reloads_nothing_but_may_leave() -> Result<(), String> {
 
 /// A return trace: its root's return lands in a caller the guard holds,
 /// and the trace goes on there.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_return_trace_guards_the_caller_it_lands_in() -> Result<(), String> {
     let ir = built(
@@ -352,6 +363,7 @@ fn a_return_trace_guards_the_caller_it_lands_in() -> Result<(), String> {
 /// A trace that reaches a compiled entry links to it: it leaves through
 /// its last exit, in the frame the call pushed, standing where the frame
 /// stands, naming the trace.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_link_leaves_through_the_exit_that_names_its_trace() -> Result<(), String> {
     let ir = built(
@@ -381,6 +393,7 @@ fn a_link_leaves_through_the_exit_that_names_its_trace() -> Result<(), String> {
 /// A fetched element's guard leaves past the fetch with the element
 /// stored, and frees the temporary array the fetch read, which compiled
 /// code has not freed: `Landing::FreeTemps`.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_fetched_elements_guard_frees_the_temporary_it_read() -> Result<(), String> {
     let ir = built(
