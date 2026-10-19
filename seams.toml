@@ -10,8 +10,8 @@
 # locks, §10 the lints and profiles, and the harness's §12 item 6 the harness's
 # own prose; each cites this file and none of the three design documents
 # restates a number (design ledger 14, jit ledger 6, harness ledger 38).
-# `xtask` refuses a manifest with a key outside this grammar:
-#   [oracle] [budget] [telemetry] [divergence] [[crate]] [[seam]] [[edge]] [[rule]] [[week]]
+# `xtask` refuses a manifest with a key outside the grammar `Manifest` reads
+# (xtask/src/manifest.rs); this comment does not restate the list.
 # Keys beyond the harness's §4.1 example, added here because §10 states a rule
 # the example had no predicate for, are marked `# grammar:` where they first
 # appear. Each is one predicate, as the grammar requires.
