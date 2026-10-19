@@ -156,6 +156,53 @@ impl Word {
     }
 }
 
+/// The trace number of an execution, php's `EG(jit_trace_num)`
+/// (`jit-design.md` §4.9, revisions 9 and 23; design §5.11, revision
+/// 52): one word the engine keeps per execution and only the tier reads,
+/// nonzero while the tier records on that execution, which is its
+/// recording exclusion. As with [`Word`], zero is no trace and the bits
+/// are the tier's; where the engine saves, sets and restores it is
+/// [`trace_num`]'s to say.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TraceNum(u32);
+
+impl TraceNum {
+    /// No trace: what a request and a fiber's body start at and what a
+    /// generator's body runs at ([`trace_num`]).
+    pub const NONE: TraceNum = TraceNum(0);
+
+    /// The tier's number as the engine keeps it.
+    #[must_use]
+    pub fn from_raw(n: u32) -> TraceNum {
+        TraceNum(n)
+    }
+
+    /// The tier's number back.
+    #[must_use]
+    pub fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+/// The trace number of the execution the request runs on: the tier's,
+/// as php's tracing tier reads `EG(jit_trace_num)`. A fiber switch
+/// saves and restores it and a fiber's body starts at [`TraceNum::NONE`]
+/// (`Z/Zend/zend_fibers.c:105-155`, `:599`); a generator's body runs at
+/// `NONE` and its resumer reads its own again after it
+/// (`Z/Zend/zend_generators.c:793-865`); a debugger serving a frame
+/// below a fiber leaves it the running fiber's, as phpdbg moves
+/// `EG(current_execute_data)` alone (`Z/sapi/phpdbg/phpdbg_frame.c:116`).
+#[must_use]
+pub fn trace_num(req: &Request) -> TraceNum {
+    req.trace_num()
+}
+
+/// The trace number of the execution the request runs on written, as
+/// the tier's recording guard sets and clears it ([`trace_num`]).
+pub fn set_trace_num(req: &mut Request, n: TraceNum) {
+    req.set_trace_num(n);
+}
+
 /// What one `step` did to the frame chain (`jit-design.md` §2.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stepped {
