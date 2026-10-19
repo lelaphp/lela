@@ -551,7 +551,27 @@ impl Request {
     /// caches' numbers handed out again and its room kept for the next
     /// unit the request compiles, as php's `destroy_op_array` frees an
     /// `eval`'s op array to the request's heap (#3028); else the share
-    /// dropped.
+    /// dropped. The next unit then stands where this one stood, its main
+    /// op array's oplines too, so nothing may know a unit by its address
+    /// past its last share: the loop's held units and the op arrays it
+    /// kept are lost with the share, the runtime caches' numbers are
+    /// handed back here, and a tier never records or claims a
+    /// request-only op array, whose words are sealed. Two `eval`s whose
+    /// loops differ, in turns, each in the room of the last, while the
+    /// loop around them is hot:
+    ///
+    /// ```php
+    /// $s = 0;
+    /// for ($i = 0; $i < 300; $i++) {
+    ///     $s += eval($i % 2
+    ///         ? 'for ($j = 0, $t = 0; $j < 100; $j++) { $t += $j; } return $t;'
+    ///         : 'for ($j = 0, $t = 1; $j < 100; $j++) { $t -= 1; } return $t;');
+    /// }
+    /// echo $s, "\n";
+    /// ```
+    /// ```expect regime=jit-tracing
+    /// 727650
+    /// ```
     pub(crate) fn give_back(&mut self, unit: PublishedUnit) {
         self.map.release(&unit);
         if let Ok(spare) = PublishedUnit::into_spare(unit) {
