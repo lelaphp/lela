@@ -10265,7 +10265,7 @@ fn held_alone<T>(
 fn write_entry(req: &mut Request, array: PhpArray, at: WriteAt) -> Result<Landing, Thrown> {
     match at {
         WriteAt::Next => req.array_next_entry(array.heap()).map(Landing::from),
-        WriteAt::At(key) => req.array_lookup(array.heap(), key).map(Landing::from),
+        WriteAt::At(key) => req.array_lookup(array.heap(), key).map(Landing::Entry),
         WriteAt::Gone => Ok(Landing::Gone),
     }
 }
@@ -10493,7 +10493,7 @@ fn owned_entry(
         entry
     } else {
         let laid = match key {
-            Some((key, _)) => req.array_lookup(array, key),
+            Some((key, _)) => req.array_lookup(array, key).map(Some),
             None => req.array_next_entry(array),
         };
         match laid {
@@ -14613,10 +14613,14 @@ impl From<Option<php_heap::ZvalRef>> for Landing {
 /// walk ([`write_entry`]) does not raise. The `UNUSED` dimension of
 /// `$a[] op= v` is an entry appended with nothing in it
 /// (`zend_hash_next_index_insert(ht, &EG(uninitialized_zval))`), which
-/// raises no warning at all.
+/// raises no warning at all. A key the table holds is found once, and
+/// the entry found is the one answered.
 fn rw_entry(req: &mut Request, array: PhpArray, at: WriteAt) -> Result<Landing, Thrown> {
     match at {
-        WriteAt::At(key) if array.heap().get(key).is_none() => undefined_key_write(req, array, key),
+        WriteAt::At(key) => match array.heap().value_ref(key) {
+            Some(entry) => Ok(Landing::Entry(entry)),
+            None => undefined_key_write(req, array, key),
+        },
         at => write_entry(req, array, at),
     }
 }
@@ -14684,7 +14688,7 @@ fn undefined_key_write(
     } else if left.not_alone() {
         Ok(Landing::Gone)
     } else {
-        req.array_lookup(array.heap(), key).map(Landing::from)
+        req.array_lookup(array.heap(), key).map(Landing::Entry)
     };
     if let Some(name) = name {
         name.let_go(req);
@@ -16582,11 +16586,9 @@ fn unset_entry(
 ) -> Result<php_heap::Zval, Thrown> {
     let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
     let key = crate::ops::array_offset(req, &dim, op.op2_type == OperandKind::Const)?;
-    if array.heap().get(key).is_none() {
-        return Ok(php_heap::Zval::null());
-    }
-    Ok(req
-        .array_lookup(array.heap(), key)?
+    Ok(array
+        .heap()
+        .value_ref(key)
         .map_or_else(php_heap::Zval::null, php_heap::Zval::indirect))
 }
 
@@ -17498,11 +17500,7 @@ fn send_unpacked_array(
             req.addref(&element);
             element
         } else if variable {
-            let Some(entry) = req.array_lookup(array.heap(), key.heap())? else {
-                return fatal(Fatal::error(
-                    "InternalError: SEND_UNPACK lost an element of the array it spreads",
-                ));
-            };
+            let entry = req.array_lookup(array.heap(), key.heap())?;
             bound_at(req, entry)?
         } else {
             req.addref(&element);

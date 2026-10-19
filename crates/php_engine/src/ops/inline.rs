@@ -226,12 +226,49 @@ pub(crate) fn dim_key(dim: Zval, constant: bool) -> Option<Key> {
 /// bool(true)
 /// bool(false)
 /// ```
+///
+/// A packed table's hole, a string key over a packed table and an
+/// uninitialised table are each a key the table has not got:
+///
+/// ```php
+/// $p = [1.5, 2.5, 3.5]; unset($p[1]); $h = ["k" => 1, 7 => 2]; $u = []; $r = [1, 2]; $x = &$r[1]; $x = 9;
+/// $k = "k"; $one = 1; $s = "0"; $nine = 9;
+/// var_dump($p[0], $p[$s], $p[2], $h[$k], $h[7], $r[$one], isset($p[1]), isset($p["k"]), array_key_exists(-1, $p), isset($h[8]), isset($u[0]), isset($u["k"]));
+/// echo $p[$one], $p[$k], $u[0], $u[$k], $h[$nine];
+/// ```
+/// ```expect
+/// float(1.5)
+/// float(1.5)
+/// float(3.5)
+/// int(1)
+/// int(2)
+/// int(9)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+///
+/// Warning: Undefined array key 1 in %s on line 5
+///
+/// Warning: Undefined array key "k" in %s on line 5
+///
+/// Warning: Undefined array key 0 in %s on line 5
+///
+/// Warning: Undefined array key "k" in %s on line 5
+///
+/// Warning: Undefined array key 9 in %s on line 5
+/// ```
 #[inline(always)] // as `dim_key`
 #[allow(clippy::inline_always)]
 pub(crate) fn element(array: Arr, key: Key) -> Option<Zval> {
-    let found = array.get(key)?;
-    let found = found.as_reference().map_or(found, |cell| cell.val());
-    (!found.is_undef() && found.kind() != ZvalType::Indirect).then_some(found)
+    let found = array.value_ref(key)?.read();
+    match found.kind() {
+        ZvalType::Reference => found.as_reference().map(|cell| cell.val()),
+        ZvalType::Indirect | ZvalType::Undef => None,
+        _ => Some(found),
+    }
 }
 
 /// `zend_is_identical` (`Z/Zend/zend_operators.c:2445`) over two zvals

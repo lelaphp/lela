@@ -275,7 +275,7 @@ impl Request {
             Row::Slot(i) => o.slot_ref(i),
             Row::Dynamic(k) => {
                 let table = self.separated_properties(o)?;
-                self.array_lookup(table, k)?
+                Some(self.array_lookup(table, k)?)
             }
         };
         place.ok_or_else(|| {
