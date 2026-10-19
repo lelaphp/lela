@@ -1,63 +1,58 @@
-//! The engine's free chunks ([`ChunkCache`]): what php's worker keeps
-//! across requests, held where one engine serves many threads.
+//! The heaps the engine keeps between requests ([`ChunkCache`]): what a
+//! php-fpm child keeps of its heap from one request to the next, held
+//! where one engine serves many threads.
 //!
 //! php's `zend_mm_shutdown(heap, full=0, silent)` (`Z/Zend/zend_alloc.c:2434`)
-//! ends a request without giving its heap back: the main chunk is laid
-//! down again where it stands and the other chunks join
-//! `heap->cached_chunks`, so a php-fpm child maps nothing for a request
-//! that fits in what it already holds. Here a heap is the request's and
-//! is dropped with it (design §3.4), and the state that outlives a
-//! request is the engine's (§5.14), so the chunks a heap gives up at its
-//! end go to the engine's cache, and the next heap of any thread takes
-//! its main chunk, and every chunk it grows by, from there before it maps
-//! one.
+//! ends a request without giving its heap back. The huge blocks are
+//! unmapped; every chunk but the main one joins `heap->cached_chunks`;
+//! `avg_chunks_count` becomes the mean of itself and the request's
+//! `peak_chunks_count`, and cached chunks are unmapped while there are
+//! more than it keeps (`cached_chunks_count + 0.9 > avg_chunks_count`); and
+//! the main chunk is laid down again. The next request starts holding the
+//! main chunk and what was cached, and `memory_get_usage(true)` reads them
+//! all: a child's request after one that peaked at five chunks starts at
+//! three, then two, then one (`zend_mm_shutdown`'s `real_size =
+//! (cached_chunks_count + 1) * ZEND_MM_CHUNK_SIZE`).
 //!
-//! What a heap reads is untouched by where its chunks came from: a chunk
-//! taken from the cache is laid down by `zend_mm_chunk_init` as a fresh
-//! one is, and counted as a fresh one is, so `memory_get_usage(true)` at
-//! a request's first line is the one chunk php's second request reads.
-//! php zeroes nothing of a cached chunk but its header (`memset(p, 0,
-//! sizeof(zend_mm_chunk))`), and nothing here reads a chunk's pages before
-//! a heap hands them out.
-//!
-//! The cache keeps as many chunks as heaps have stood at once, the most
-//! main chunks it could be asked for together; a chunk given back past
-//! that is unmapped. A heap reaches the cache once as it starts and once
-//! as it ends, and never on an allocation.
+//! Here a heap is its request's and is dropped with it (design §3.4), and
+//! the state that outlives a request is the engine's (§5.14), so what
+//! `zend_mm_shutdown(full=0)` keeps of a heap, its main chunk, its cached
+//! chunks and its average, is handed at the heap's drop to the engine's
+//! cache, and the next heap made in it starts from the newest kept: one
+//! kept heap for each heap that stood at once, as a pool of php-fpm
+//! children keeps one heap each, and a host that serves a request after
+//! another on one thread reads at each first line what one child reads.
+//! php zeroes nothing of a kept chunk but its header, laid down again
+//! before a heap hands out its pages, and nothing here reads one before.
+//! A heap reaches the cache once as it starts and once as it ends, and
+//! never on an allocation.
 
 use std::ptr::NonNull;
 use std::sync::Mutex;
 
-use super::{CHUNK_SIZE, Chunk, chunk_alloc, chunk_free};
+use super::{CHUNK_SIZE, Chunk, chunk_free};
 
-/// The engine's cache of free chunks, which every heap made with
-/// [`crate::Heap::new_in`] takes its chunks from and gives them back to
-/// at its end, as a php-fpm child's heap keeps its own across requests
-/// (`zend_mm_shutdown(full=0)`). Dropping it unmaps what it holds.
+/// The heaps the engine keeps between requests, which every heap made
+/// with [`crate::Heap::new_in`] starts from and is kept in at its end,
+/// as a php-fpm child keeps its heap (`zend_mm_shutdown(full=0)`).
+/// Dropping it unmaps every chunk it keeps.
 #[derive(Debug, Default)]
 pub struct ChunkCache {
-    kept: Mutex<Kept>,
+    kept: Mutex<Vec<Kept>>,
 }
 
-/// What the cache holds and how many heaps it serves.
-#[derive(Debug, Default)]
-struct Kept {
-    /// The free chunks, the newest given back last.
-    free: Vec<Free>,
-    /// The heaps standing now, and the most that have stood at once,
-    /// which bounds `free`.
-    heaps: usize,
-    peak_heaps: usize,
-}
-
-/// One chunk no heap holds: a mapping of [`CHUNK_SIZE`] bytes aligned to
-/// its size, whose header the next heap to take it writes again.
+/// What `zend_mm_shutdown(full=0)` leaves of one heap: its main chunk,
+/// the chunks it caches, the newest last, and its `avg_chunks_count`.
 #[derive(Debug)]
-struct Free(NonNull<Chunk>);
+pub(super) struct Kept {
+    pub(super) main: NonNull<Chunk>,
+    pub(super) cached: Vec<NonNull<Chunk>>,
+    pub(super) avg_chunks_count: f64,
+}
 
-// SAFETY: a free chunk is a mapping no heap names and nothing reads; the
-// cache's lock is what hands it to one thread's heap at a time.
-unsafe impl Send for Free {}
+// SAFETY: a kept heap's chunks are mappings no heap names and nothing
+// reads; the cache's mutex hands them to one thread's heap at a time.
+unsafe impl Send for Kept {}
 
 impl ChunkCache {
     /// An empty cache: the first heap maps its main chunk.
@@ -66,66 +61,20 @@ impl ChunkCache {
         ChunkCache::default()
     }
 
-    fn kept(&self) -> std::sync::MutexGuard<'_, Kept> {
+    fn kept(&self) -> std::sync::MutexGuard<'_, Vec<Kept>> {
         self.kept
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// One heap more, and its main chunk: the newest the cache holds, or
-    /// a fresh mapping where it holds none.
-    pub(super) fn enter(&self) -> Option<NonNull<Chunk>> {
-        let taken = {
-            let mut kept = self.kept();
-            kept.heaps += 1;
-            kept.peak_heaps = kept.peak_heaps.max(kept.heaps);
-            kept.free.pop()
-        };
-        taken.map_or_else(|| chunk_alloc(CHUNK_SIZE), |Free(chunk)| Some(chunk))
+    /// The heap kept last, for a heap that starts.
+    pub(super) fn take(&self) -> Option<Kept> {
+        self.kept().pop()
     }
 
-    /// One more chunk for a heap that grows: the cache's newest, or a
-    /// fresh mapping.
-    pub(super) fn take(&self) -> Option<NonNull<Chunk>> {
-        let taken = self.kept().free.pop();
-        taken.map_or_else(|| chunk_alloc(CHUNK_SIZE), |Free(chunk)| Some(chunk))
-    }
-
-    /// A chunk a standing heap gave up, kept while the cache is under its
-    /// bound and unmapped past it.
-    pub(super) fn give(&self, chunk: NonNull<Chunk>) {
-        let past = {
-            let mut kept = self.kept();
-            if kept.free.len() < kept.peak_heaps {
-                kept.free.push(Free(chunk));
-                None
-            } else {
-                Some(chunk)
-            }
-        };
-        if let Some(chunk) = past {
-            chunk_free(chunk, CHUNK_SIZE);
-        }
-    }
-
-    /// A heap's end: every chunk it held, kept while the cache is under
-    /// its bound and unmapped past it, and one heap fewer.
-    pub(super) fn leave(&self, chunks: impl Iterator<Item = NonNull<Chunk>>) {
-        let mut past = Vec::new();
-        {
-            let mut kept = self.kept();
-            for chunk in chunks {
-                if kept.free.len() < kept.peak_heaps {
-                    kept.free.push(Free(chunk));
-                } else {
-                    past.push(chunk);
-                }
-            }
-            kept.heaps = kept.heaps.saturating_sub(1);
-        }
-        for chunk in past {
-            chunk_free(chunk, CHUNK_SIZE);
-        }
+    /// A heap that ended, kept for the next.
+    pub(super) fn keep(&self, kept: Kept) {
+        self.kept().push(kept);
     }
 }
 
@@ -135,8 +84,11 @@ impl Drop for ChunkCache {
             .kept
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for Free(chunk) in kept.free.drain(..) {
-            chunk_free(chunk, CHUNK_SIZE);
+        for heap in kept.drain(..) {
+            chunk_free(heap.main, CHUNK_SIZE);
+            for chunk in heap.cached {
+                chunk_free(chunk, CHUNK_SIZE);
+            }
         }
     }
 }
@@ -163,6 +115,19 @@ mod tests {
         ]
     }
 
+    /// Whole pages held until the heap holds `chunks` chunks.
+    fn grow_to(heap: &mut Heap, chunks: usize) -> Vec<crate::Str> {
+        let mut held = Vec::new();
+        while heap.memory_usage(true) < chunks * CHUNK_SIZE {
+            let allocated = heap.string(&[b'x'; 4000]);
+            assert!(allocated.is_ok(), "the heap would not allocate a run");
+            if let Ok(s) = allocated {
+                held.push(s);
+            }
+        }
+        held
+    }
+
     /// php-fpm's child maps its heap once (`zend_mm_shutdown(full=0)`):
     /// the second request of a host that serves many maps nothing, and
     /// reads at its first line what the first read.
@@ -181,11 +146,7 @@ mod tests {
                 "request {request} holds the one mapping"
             );
             drop(heap);
-            assert_eq!(
-                MAPPINGS.load(Relaxed),
-                before + 1,
-                "and leaves it to the cache"
-            );
+            assert_eq!(MAPPINGS.load(Relaxed), before + 1, "and the cache keeps it");
         }
         assert_eq!(read[0], read[1]);
         assert_eq!(read[0][1], CHUNK_SIZE);
@@ -193,68 +154,70 @@ mod tests {
         assert_eq!(MAPPINGS.load(Relaxed), before, "the cache's end unmaps it");
     }
 
-    /// A request that grew past its main chunk gives every chunk back,
-    /// and the next one grows into them without a mapping; what it reads
-    /// at its first line is still the one chunk, since a chunk counts
-    /// where a heap holds it.
+    /// The numbers a php-fpm child reads at the first line of each request
+    /// after one that peaked at five chunks: `memory_get_usage(true)` and
+    /// its peak at three chunks, then two, then one, as
+    /// `zend_mm_shutdown(full=0)` keeps cached chunks against an average
+    /// it halves towards each request's peak; a kept chunk is taken before
+    /// a mapping as the heap grows again.
     #[test]
-    fn a_heap_grows_into_the_chunks_an_earlier_one_gave_back() {
+    fn a_request_after_one_that_peaked_at_five_chunks_starts_at_three_then_two_then_one() {
         let _alone = alone();
         let before = MAPPINGS.load(Relaxed);
         let cache = Arc::new(ChunkCache::new());
-        // Two heaps at once, so the cache keeps two chunks.
-        let other = Heap::new_in(Arc::clone(&cache));
-        let mut mapped = Vec::new();
-        for _ in 0..2 {
-            let mut heap = Heap::new_in(Arc::clone(&cache));
-            assert_eq!(heap.memory_usage(true), CHUNK_SIZE);
-            let mut held = Vec::new();
-            // Runs of a whole page each, past what one chunk holds.
-            for _ in 0..600 {
-                let allocated = heap.string(&[b'x'; 4000]);
-                assert!(allocated.is_ok(), "the heap would not allocate a run");
-                if let Ok(s) = allocated {
-                    held.push(s);
-                }
-            }
-            assert_eq!(heap.memory_usage(true), 2 * CHUNK_SIZE);
-            mapped.push(MAPPINGS.load(Relaxed) - before);
-            for s in held {
-                heap.release_string(s);
-            }
+        let mut heap = Heap::new_in(Arc::clone(&cache));
+        // php's fast shutdown frees none of what the request holds before
+        // `zend_mm_shutdown`, so what the engine's teardown frees after
+        // its start leaves every chunk to be kept or unmapped there.
+        let held = grow_to(&mut heap, 5);
+        assert_eq!(heap.memory_usage(true), 5 * CHUNK_SIZE);
+        heap.fast_shutdown();
+        for s in held {
+            heap.release_string(s);
         }
-        assert_eq!(mapped, vec![3, 3], "the second request mapped nothing");
-        drop(other);
+        drop(heap);
+        assert_eq!(MAPPINGS.load(Relaxed) - before, 3, "three chunks are kept");
+        let mut started = Vec::new();
+        for _ in 0..3 {
+            let heap = Heap::new_in(Arc::clone(&cache));
+            started.push((heap.memory_usage(true), heap.memory_real_peak()));
+        }
+        let chunks = |n| (n * CHUNK_SIZE, n * CHUNK_SIZE);
+        assert_eq!(started, vec![chunks(3), chunks(2), chunks(1)]);
+        let mut heap = Heap::new_in(Arc::clone(&cache));
+        let mapped = MAPPINGS.load(Relaxed);
+        let held = grow_to(&mut heap, 2);
+        assert_eq!(
+            MAPPINGS.load(Relaxed),
+            mapped + 1,
+            "a heap of one maps its second"
+        );
+        for s in held {
+            heap.release_string(s);
+        }
+        drop(heap);
         drop(cache);
         assert_eq!(MAPPINGS.load(Relaxed), before);
     }
 
-    /// The cache keeps as many chunks as heaps have stood at once and
-    /// unmaps what is given back past that.
+    /// Each heap that stood at once is kept, as each php-fpm child keeps
+    /// its own, and a request after them takes one and maps nothing.
     #[test]
-    fn the_cache_keeps_a_chunk_for_each_heap_that_stood_at_once() {
+    fn the_cache_keeps_a_heap_for_each_that_stood_at_once() {
         let _alone = alone();
         let before = MAPPINGS.load(Relaxed);
         let cache = Arc::new(ChunkCache::new());
         let three: Vec<Heap> = (0..3).map(|_| Heap::new_in(Arc::clone(&cache))).collect();
-        let mut big = Heap::new_in(Arc::clone(&cache));
-        let mut held = Vec::new();
-        for _ in 0..1200 {
-            if let Ok(s) = big.string(&[b'x'; 4000]) {
-                held.push(s);
-            }
-        }
-        assert_eq!(big.memory_usage(true), 3 * CHUNK_SIZE);
-        for s in held {
-            big.release_string(s);
-        }
         drop(three);
-        drop(big);
+        assert_eq!(MAPPINGS.load(Relaxed) - before, 3);
+        let heap = Heap::new_in(Arc::clone(&cache));
         assert_eq!(
             MAPPINGS.load(Relaxed) - before,
-            4,
-            "four heaps stood at once, so four chunks are kept"
+            3,
+            "the fourth mapped nothing"
         );
+        assert_eq!(heap.memory_usage(true), CHUNK_SIZE);
+        drop(heap);
         drop(cache);
         assert_eq!(MAPPINGS.load(Relaxed), before);
     }

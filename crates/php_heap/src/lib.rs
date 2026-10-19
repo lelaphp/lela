@@ -575,6 +575,15 @@ impl Heap {
         self.mm.trace_allocations();
     }
 
+    /// php's fast shutdown begins, `zend_shutdown_executor_values(1)`,
+    /// which leaves what the request held to `zend_mm_shutdown`: a chunk
+    /// the engine's teardown empties from here on is cached and never
+    /// unmapped, so the heap the engine keeps for the next request
+    /// ([`Heap::new_in`]) is the one php's child keeps.
+    pub fn fast_shutdown(&mut self) {
+        self.mm.keep_emptied();
+    }
+
     /// One more owner of `z`: a refcount increment for a refcounted
     /// value, nothing for a scalar or an immutable value (`ZVAL_COPY`).
     /// A debug build's freed-use guard is the header's, which this

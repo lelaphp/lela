@@ -277,14 +277,16 @@ pub(crate) struct Mm {
     /// ([`Mm::set_origin`]).
     #[cfg(debug_assertions)]
     origin: crate::sensed::Origin,
-    /// The engine's free chunks this heap takes its chunks from and gives
-    /// them back to ([`ChunkCache`]); none for a heap that maps its own
-    /// and unmaps them at its end.
+    /// The engine's cache this heap started from and is kept in at its
+    /// end ([`ChunkCache`]); none for a heap that unmaps everything at its
+    /// end.
     cache: Option<Arc<ChunkCache>>,
     /// A debug build's backtrace of every block it has out, where
     /// allocations are traced ([`Mm::trace_allocations`]).
     #[cfg(debug_assertions)]
     traces: Option<std::collections::HashMap<usize, std::backtrace::Backtrace>>,
+    /// php's fast shutdown has begun ([`Mm::keep_emptied`]).
+    keep_emptied: bool,
 }
 
 impl Mm {
@@ -297,25 +299,28 @@ impl Mm {
         Mm::over(None)
     }
 
-    /// A heap whose chunks come from `cache` and go back to it at its
-    /// end, as `zend_mm_shutdown(full=0)` leaves php's main chunk laid
-    /// down again for the next request: what it reads is [`Mm::new`]'s.
+    /// A heap that starts from what `cache` kept of the last heap to end
+    /// in it, as `zend_mm_shutdown(full=0)` leaves php's heap for the next
+    /// request: its main chunk laid down again, its cached chunks counted
+    /// in `memory_get_usage(true)`, and its average; [`Mm::new`]'s where
+    /// the cache keeps none.
     pub(crate) fn new_in(cache: Arc<ChunkCache>) -> Mm {
         Mm::over(Some(cache))
     }
 
     fn over(cache: Option<Arc<ChunkCache>>) -> Mm {
-        let main = match &cache {
-            Some(cache) => cache.enter(),
-            None => chunk_alloc(CHUNK_SIZE),
+        let kept = cache.as_ref().and_then(|cache| cache.take());
+        let (main, cached, avg_chunks_count) = match kept {
+            Some(kept) => (Some(kept.main), kept.cached, kept.avg_chunks_count),
+            None => (chunk_alloc(CHUNK_SIZE), Vec::new(), 1.0),
         };
         let mut mm = Mm {
             chunks: Vec::new(),
-            cached: Vec::new(),
+            cached,
             free_slot: [std::ptr::null_mut(); BINS],
             huge: Vec::new(),
             peak_chunks_count: 0,
-            avg_chunks_count: 1.0,
+            avg_chunks_count,
             last_delete_boundary: 0,
             last_delete_count: 0,
             size: 0,
@@ -335,13 +340,14 @@ impl Mm {
             cache,
             #[cfg(debug_assertions)]
             traces: None,
+            keep_emptied: false,
         };
         if let Some(chunk) = main {
             mm.chunk_init(chunk, 0);
             mm.chunks.push(chunk);
             mm.peak_chunks_count = 1;
-            mm.real_size = CHUNK_SIZE;
-            mm.real_peak = CHUNK_SIZE;
+            mm.real_size = (mm.cached.len() + 1) * CHUNK_SIZE;
+            mm.real_peak = mm.real_size;
         }
         mm
     }
@@ -391,7 +397,7 @@ impl Mm {
                 let Some(chunk) = self.cached.pop() else {
                     break;
                 };
-                self.unmap_chunk(chunk);
+                chunk_free(chunk, CHUNK_SIZE);
                 self.real_size -= CHUNK_SIZE;
             }
             return true;
@@ -1113,9 +1119,9 @@ impl Mm {
                     return Err(self.refuse(limit_exhausted(self.limit, asked)));
                 }
             }
-            let mapped = match self.map_chunk() {
+            let mapped = match chunk_alloc(CHUNK_SIZE) {
                 Some(chunk) => Some(chunk),
-                None if self.gc_heap() != 0 => self.map_chunk(),
+                None if self.gc_heap() != 0 => chunk_alloc(CHUNK_SIZE),
                 None => None,
             };
             let Some(chunk) = mapped else {
@@ -1163,9 +1169,19 @@ impl Mm {
         }
     }
 
+    /// php's fast shutdown has begun, `zend_shutdown_executor_values(1)`,
+    /// which frees none of what the request held and leaves every chunk
+    /// on the list for `zend_mm_shutdown`: a chunk the engine's teardown
+    /// empties from here on is cached, never unmapped, so what the heap
+    /// keeps for the next request ([`Mm::keep`]) is what php's keeps.
+    pub(crate) fn keep_emptied(&mut self) {
+        self.keep_emptied = true;
+    }
+
     /// `zend_mm_delete_chunk` (`Z/Zend/zend_alloc.c:1140`): a chunk that
     /// emptied is kept mapped while the request has been using about that
-    /// many, and given back otherwise.
+    /// many, and given back otherwise; past the fast shutdown's start
+    /// ([`Mm::keep_emptied`]) it is kept.
     fn delete_chunk(&mut self, chunk: NonNull<Chunk>) {
         let Some(at) = self.chunks.iter().position(|c| *c == chunk) else {
             return;
@@ -1175,10 +1191,14 @@ impl Mm {
         origins::give_back(chunk);
         let count = self.chunks.len();
         // php compares the chunks a request holds against a running
-        // average of what it has been holding; a heap here serves one
-        // request and is dropped, so the average stays the 1.0 that
-        // `zend_mm_init` leaves.
+        // average of what its heap has been holding, which a heap kept
+        // between requests carries ([`ChunkCache`]) and a new one starts
+        // at the 1.0 `zend_mm_init` leaves.
         let held = (count + self.cached.len()) as f64;
+        if self.keep_emptied {
+            self.cached.push(chunk);
+            return;
+        }
         if held < self.avg_chunks_count + 0.1
             || (count == self.last_delete_boundary && self.last_delete_count >= 4)
         {
@@ -1205,9 +1225,9 @@ impl Mm {
             num > cached_num
         });
         if newer {
-            self.unmap_chunk(chunk);
+            chunk_free(chunk, CHUNK_SIZE);
         } else if let Some(cached) = self.cached.pop() {
-            self.unmap_chunk(cached);
+            chunk_free(cached, CHUNK_SIZE);
             self.cached.push(chunk);
         }
     }
@@ -1412,11 +1432,11 @@ impl std::fmt::Debug for Mm {
 }
 
 impl Drop for Mm {
-    /// Mass release at request end (design §5.13): every huge block this
-    /// request mapped is unmapped, and every chunk and cached chunk goes
-    /// back to the engine's cache where the heap has one
-    /// (`zend_mm_shutdown(full=0)`), and is unmapped where it has none, so
-    /// nothing a request allocated outlives it.
+    /// Mass release at request end (design §5.13), so nothing a request
+    /// allocated outlives it: every huge block is unmapped, and where the
+    /// heap has a cache what `zend_mm_shutdown(full=0)` keeps of it is
+    /// kept there for the next heap ([`Mm::keep`]); every chunk is
+    /// unmapped where it has none.
     fn drop(&mut self) {
         for block in self.huge.drain(..) {
             huge_unmap(block.at, block.size);
@@ -1425,31 +1445,54 @@ impl Drop for Mm {
         for chunk in &self.chunks {
             origins::give_back(*chunk);
         }
-        let held = self.chunks.drain(..).chain(self.cached.drain(..));
-        match &self.cache {
-            Some(cache) => cache.leave(held),
-            None => held.for_each(|chunk| chunk_free(chunk, CHUNK_SIZE)),
+        if let Some(cache) = self.cache.take() {
+            self.keep(&cache);
+            return;
+        }
+        for chunk in self.chunks.drain(..).chain(self.cached.drain(..)) {
+            chunk_free(chunk, CHUNK_SIZE);
         }
     }
 }
 
 impl Mm {
-    /// One chunk more for this heap: the engine cache's, or a fresh
-    /// mapping (`zend_mm_chunk_alloc`).
-    fn map_chunk(&self) -> Option<NonNull<Chunk>> {
-        match &self.cache {
-            Some(cache) => cache.take(),
-            None => chunk_alloc(CHUNK_SIZE),
+    /// `zend_mm_shutdown(heap, full=0, silent)` (`Z/Zend/zend_alloc.c:2434`)
+    /// past its huge blocks: every chunk but the main one moved into the
+    /// cached chunks, each to the head, the average taken with the
+    /// request's peak, the cached chunks past what it keeps unmapped from
+    /// the head, and what is left kept in `cache` for the next heap.
+    fn keep(&mut self, cache: &ChunkCache) {
+        let mut chunks = self.chunks.drain(..);
+        let Some(main) = chunks.next() else {
+            for chunk in self.cached.drain(..) {
+                chunk_free(chunk, CHUNK_SIZE);
+            }
+            return;
+        };
+        self.cached.extend(chunks);
+        #[allow(clippy::cast_precision_loss)] // a count of chunks
+        let peak = self.peak_chunks_count as f64;
+        let avg_chunks_count = f64::midpoint(self.avg_chunks_count, peak);
+        #[allow(clippy::cast_precision_loss)]
+        while self.cached.len() as f64 + 0.9 > avg_chunks_count {
+            let Some(chunk) = self.cached.pop() else {
+                break;
+            };
+            chunk_free(chunk, CHUNK_SIZE);
         }
-    }
-
-    /// A chunk this heap gives up while it stands: to the engine's cache,
-    /// or unmapped (`zend_mm_chunk_free`).
-    fn unmap_chunk(&self, chunk: NonNull<Chunk>) {
-        match &self.cache {
-            Some(cache) => cache.give(chunk),
-            None => chunk_free(chunk, CHUNK_SIZE),
+        // php clears a cached chunk's header, `memset(p, 0,
+        // sizeof(zend_mm_chunk))`; its `num` is the one field read before
+        // `chunk_init` lays it down again.
+        for chunk in &self.cached {
+            // SAFETY: a cached chunk is a mapping of this heap's that no
+            // list names, so nothing else reads or writes its header.
+            unsafe { (*chunk.as_ptr()).num = 0 };
         }
+        cache.keep(cache::Kept {
+            main,
+            cached: std::mem::take(&mut self.cached),
+            avg_chunks_count,
+        });
     }
 }
 

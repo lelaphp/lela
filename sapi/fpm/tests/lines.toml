@@ -398,3 +398,25 @@ params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
+
+# A child's request starts on what its heap kept of the last (#2940):
+# `zend_mm_shutdown(full=0)` keeps the main chunk and caches the others
+# against an average it halves towards each request's peak, and
+# `memory_get_usage(true)` counts the cached chunks, so after a request that
+# peaked at five chunks the next three start at three, two and one.
+[[line]]
+name = "a-request-starts-on-the-chunks-the-child-kept-of-the-last"
+args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\n", "index.php" = '<?php echo memory_get_usage(true), " ", memory_get_peak_usage(true), " ", ini_get("memory_limit"), "\n"; if (isset($_GET["big"])) { $s = []; for ($i = 0; $i < 3000; $i++) $s[] = str_repeat("x", 3000); echo memory_get_peak_usage(true), "\n"; }' }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "big=1"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]

@@ -852,6 +852,9 @@ impl Request {
     /// the request by now, `zend_objects_store_call_destructors` having
     /// marked every object, so this frees and serves nothing.
     pub(crate) fn destroy_symbol_table(&mut self) {
+        // php's fast shutdown frees none of it, so no chunk it empties
+        // leaves the heap php's child keeps (#2940).
+        self.heap.fast_shutdown();
         while let Some((name, symbol)) = self.globals().pop() {
             self.release_symbol(symbol);
             self.release(Value::string(name));
