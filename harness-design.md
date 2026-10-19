@@ -714,7 +714,7 @@ if ! computed check $regions >/dev/null 2>&1; then
 step $X clippy --staged
 step $X test --staged
 ```
-<!-- /computed in=dd2f41e5e3a2683cc2c8e12d623e761683dcedb5c286f2c5eb62c11eaa517268 out=2e3abed831cc5964ea5020bffd271112cdac94dc26e003c21a1fa988dd83b0a7 -->
+<!-- /computed in=610050b6732bb5dc60af70801f44bebdd79aa4810306eb7fd5df47b9d559e5c1 out=2e3abed831cc5964ea5020bffd271112cdac94dc26e003c21a1fa988dd83b0a7 -->
 
 Pre-push: `xtask done`. Post-commit, on a merge commit, and post-merge: `xtask ticket merged`, which closes each open ticket the merge commits name as `#n` with the successors its ready record names, one record per ticket of a branch (#2358), and closes nothing off `main` (revision 98). The hooks are held by `cargo test -p xtask --test hooks`, which runs them in a scratch repository with a stand-in `cargo` (#52). The plugin:
 

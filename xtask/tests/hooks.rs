@@ -823,6 +823,28 @@ fn a_vocab_refusal_ends_the_hook_before_clippy_runs() {
     assert_eq!(scratch.calls("computed"), Vec::<String>::new());
 }
 
+/// A ledger revision a branch adds is written `NEXT` and numbered by the
+/// merge into `main` (#2982): a commit on a branch carries one, and a
+/// commit on `main` that still does is refused before anything runs,
+/// naming the line.
+#[test]
+fn a_ledger_revision_still_next_is_refused_on_main_and_not_on_a_branch() {
+    let scratch = scratch("next", &Computed::Rendered);
+    scratch.git(&["checkout", "-q", "-B", "main"], false);
+    let ledger = "# a region file\n\n**NEXT. Revision NEXT (2026-10-19).** A change.\n";
+    write(&scratch.root, "harness-design.md", ledger);
+    scratch.git(&["add", "--", "harness-design.md"], false);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "a ledger row"], true);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("harness-design.md:3:"), "{out}");
+    assert!(out.contains("is still NEXT"), "{out}");
+    assert_eq!(scratch.calls("cargo"), Vec::<String>::new());
+
+    scratch.git(&["checkout", "-q", "-b", "t9"], false);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "a ledger row"], true);
+    assert_eq!(code, 0, "{out}");
+}
+
 // ---------------------------------------------------------- post-commit, post-merge
 
 /// A merge closes the tickets it names (#2311): a merge `git merge`
