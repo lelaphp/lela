@@ -37,11 +37,14 @@ use php_ext::abi::{
 };
 use php_ext::call::{Function, lookup_function};
 use php_ext::coerce::type_name;
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::Thrown;
 use php_ext::request::{ChainFrame, FrameView, Raised, Request};
 use php_ext::values::{ClassId, Value};
 use php_ext_standard::php_var_export_ex;
+
+use crate::Entry;
+use crate::Modifiable::{All, System};
 
 /// `zend_test.observer.enabled`.
 const ENABLED: &[u8] = b"zend_test.observer.enabled";
@@ -54,28 +57,30 @@ const SHOW_OPCODE_IN_USER_HANDLER: &[u8] = b"zend_test.observer.show_opcode_in_u
 /// functions observed by name, comma-separated.
 const OBSERVE_FUNCTION_NAMES: &[u8] = b"zend_test.observer.observe_function_names";
 
-/// `observer.c`'s `PHP_INI_BEGIN` table, in its order: each entry's name,
-/// its default, and whether a request may change it (`PHP_INI_ALL`) or
-/// only the host (`PHP_INI_SYSTEM`).
-pub(crate) const ENTRIES: [(&[u8], &[u8], bool); 18] = [
-    (ENABLED, b"0", false),
-    (b"zend_test.observer.show_output", b"1", false),
-    (b"zend_test.observer.observe_all", b"0", false),
-    (b"zend_test.observer.observe_includes", b"0", false),
-    (b"zend_test.observer.observe_functions", b"0", false),
-    (b"zend_test.observer.observe_declaring", b"0", false),
-    (OBSERVE_FUNCTION_NAMES, b"", true),
-    (b"zend_test.observer.show_return_type", b"0", false),
-    (b"zend_test.observer.show_return_value", b"0", false),
-    (b"zend_test.observer.show_init_backtrace", b"0", false),
-    (b"zend_test.observer.show_opcode", b"0", false),
-    (SHOW_OPCODE_IN_USER_HANDLER, b"", false),
-    (b"zend_test.observer.set_vm_interrupt_on_begin", b"0", false),
-    (b"zend_test.observer.fiber_init", b"0", false),
-    (b"zend_test.observer.fiber_switch", b"0", false),
-    (b"zend_test.observer.fiber_destroy", b"0", false),
-    (b"zend_test.observer.execute_internal", b"0", false),
-    (b"zend_test.observer.reserve_op_array_handle", b"0", false),
+/// `observer.c`'s `PHP_INI_BEGIN` table, in its order.
+pub(crate) const ENTRIES: [Entry; 18] = [
+    Entry::boolean(ENABLED, b"0", System),
+    Entry::boolean(b"zend_test.observer.show_output", b"1", System),
+    Entry::boolean(b"zend_test.observer.observe_all", b"0", System),
+    Entry::boolean(b"zend_test.observer.observe_includes", b"0", System),
+    Entry::boolean(b"zend_test.observer.observe_functions", b"0", System),
+    Entry::boolean(b"zend_test.observer.observe_declaring", b"0", System),
+    Entry::plain(OBSERVE_FUNCTION_NAMES, b"", All),
+    Entry::boolean(b"zend_test.observer.show_return_type", b"0", System),
+    Entry::boolean(b"zend_test.observer.show_return_value", b"0", System),
+    Entry::boolean(b"zend_test.observer.show_init_backtrace", b"0", System),
+    Entry::boolean(b"zend_test.observer.show_opcode", b"0", System),
+    Entry::plain(SHOW_OPCODE_IN_USER_HANDLER, b"", System),
+    Entry::boolean(
+        b"zend_test.observer.set_vm_interrupt_on_begin",
+        b"0",
+        System,
+    ),
+    Entry::boolean(b"zend_test.observer.fiber_init", b"0", System),
+    Entry::boolean(b"zend_test.observer.fiber_switch", b"0", System),
+    Entry::boolean(b"zend_test.observer.fiber_destroy", b"0", System),
+    Entry::boolean(b"zend_test.observer.execute_internal", b"0", System),
+    Entry::boolean(b"zend_test.observer.reserve_op_array_handle", b"0", System),
 ];
 
 /// The observer as `zend_test_observer_init` registers it at `MINIT`:
@@ -113,16 +118,7 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
 
 /// The table as the extension declares it.
 fn ini() -> Vec<IniDecl> {
-    ENTRIES
-        .iter()
-        .map(|&(name, default, user)| IniDecl {
-            name: Name(name.into()),
-            default: Some(default.into()),
-            user,
-            per_dir: user,
-            system: true,
-        })
-        .collect()
+    ENTRIES.iter().map(Entry::decl).collect()
 }
 
 /// The `PHP_INI_SYSTEM` switches as the engine started with them,
@@ -197,8 +193,8 @@ fn startup_value<'a>(start: &'a Start, name: &[u8]) -> &'a [u8] {
         .map(|(_, value)| value.as_deref().unwrap_or_default());
     let default = ENTRIES
         .iter()
-        .find(|entry| entry.0 == name)
-        .map_or(&b""[..], |entry| entry.1);
+        .find(|entry| entry.name == name)
+        .map_or(&b""[..], |entry| entry.default);
     set.unwrap_or(default)
 }
 
