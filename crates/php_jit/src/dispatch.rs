@@ -31,7 +31,7 @@ use php_engine::tier::{self, FrameRef, Request, SafepointIdx, Site, TraceNum, Wo
 use crate::compiler::{self, Job};
 use crate::policy::{self, Claim, Holder, Mode, Outcome, Place, Policy, State, TraceEvent};
 use crate::record::{self, Bailed, Ended, Start, Stop};
-use crate::table::TraceId;
+use crate::table::{self, TraceId};
 use crate::{JitEngine, Shared};
 
 #[cfg(test)]
@@ -109,7 +109,13 @@ fn visited(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
             return Flow::Continue;
         };
         let claims = site == Site::Entry && tier::trace_num(req) == TraceNum::NONE;
+        // A table that stopped compiles nothing more until the restart,
+        // as php's stopped counters do: its words are claimed no more.
         let holder = || {
+            let table = table::of(req, &engine.shared.policy)?;
+            if table.stopped() {
+                return None;
+            }
             Some(Holder::Root {
                 epoch: tier::epoch(req),
                 func: tier::func(req, frame)?,
@@ -167,12 +173,12 @@ pub(crate) fn hot(
     let mut stepped = false;
     let flow = loop {
         let start = claim.start();
-        let number = shared.table.next();
-        if let Some(trace) = number {
+        let epoch = table::held(req, &shared.policy);
+        let table = table::of_epoch(&epoch);
+        if let Some(trace) = table.and_then(table::TraceTable::next) {
             started(req, shared, frame, trace, start);
         }
-        let full = number.is_none_or(|trace| trace.get() >= shared.policy.max_root_traces());
-        if full {
+        if table.is_none_or(table::TraceTable::stopped) {
             let recorded = record::refused(req, frame, start, Stop::TooManyTraces);
             let mut lines = Vec::new();
             compiler::submit(shared, Job { recorded, claim }, &mut lines);
@@ -246,7 +252,8 @@ fn rerooted(req: &mut Request, shared: &Shared, claim: Claim, ended: &Ended) -> 
         at: header,
     };
     let claimed = policy::claim(root, &shared.policy, Start::Loop)?;
-    if let Some(trace) = shared.table.next() {
+    let next = table::of(req, &shared.policy).and_then(table::TraceTable::next);
+    if let Some(trace) = next {
         started(req, shared, ended.at, trace, Start::Loop);
     }
     Some(claimed)

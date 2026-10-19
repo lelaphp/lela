@@ -13,7 +13,12 @@
 //! views are one address and the per-thread `pthread_jit_write_protect_np`
 //! toggle around each write, with `sys_icache_invalidate` over the bytes
 //! written. Linux's `memfd` adapter, two mappings of one sealed file,
-//! joins when the Linux targets are measured.
+//! joins when the Linux targets are measured; until then [`Unmapped`]
+//! maps nothing there, and a table over it compiles nothing.
+//!
+//! Beside the arena, the three calls the `PERF_DUMP` record needs that
+//! only `unsafe` reaches: the jitdump's one mapping, the monotonic clock
+//! its records are stamped with, and the thread that wrote them.
 #![deny(
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block
@@ -234,10 +239,38 @@ impl<P: Pages> Arena<P> {
     }
 
     /// How many chunks are filling or hold a live `Code`.
+    #[cfg(test)]
     pub(crate) fn chunks_in_use(&self) -> usize {
-        (self.region.free.iter())
+        self.region.in_use()
+    }
+
+    /// A watch on the arena's mapping that holds nothing of it.
+    #[cfg(test)]
+    pub(crate) fn watch(&self) -> Watch<P> {
+        Watch(Arc::downgrade(&self.region))
+    }
+}
+
+#[cfg(test)]
+impl<P> Region<P> {
+    /// How many chunks are filling or hold a live `Code`.
+    fn in_use(&self) -> usize {
+        (self.free.iter())
             .filter(|flag| !flag.load(Ordering::Acquire))
             .count()
+    }
+}
+
+/// What a test sees of an arena's mapping without keeping it.
+#[cfg(test)]
+pub(crate) struct Watch<P>(std::sync::Weak<Region<P>>);
+
+#[cfg(test)]
+impl<P> Watch<P> {
+    /// How many chunks are in use; none once the arena and every `Code`
+    /// in it are gone, and the pages with them.
+    pub(crate) fn chunks_in_use(&self) -> Option<usize> {
+        Some(self.0.upgrade()?.in_use())
     }
 }
 
@@ -288,6 +321,89 @@ impl HeapPages {
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use mac::MapJit;
+
+/// The adapter of a target with none yet: it maps nothing, so an arena
+/// over it is never made.
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+pub(crate) struct Unmapped;
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+impl Pages for Unmapped {
+    fn map_pair(_: usize) -> io::Result<Self> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "no code arena on this target yet",
+        ))
+    }
+
+    unsafe fn write(&self, _: usize, _: &[u8]) {}
+
+    unsafe fn sync(&self, _: Range<usize>) {}
+
+    fn rx(&self, _: usize) -> NonNull<u8> {
+        NonNull::dangling()
+    }
+}
+
+/// `file` mapped once, readable and executable, and unmapped: the
+/// `mmap` event `perf inject` finds a jitdump by, which php's
+/// `ir_perf_jitdump_open` makes.
+#[cfg(unix)]
+pub(crate) fn map_once(file: &std::fs::File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    const PAGE: usize = 4096;
+    // SAFETY: a fresh private mapping of an open file, overlapping
+    // nothing, read by nothing.
+    let at = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            PAGE,
+            libc::PROT_READ | libc::PROT_EXEC,
+            libc::MAP_PRIVATE,
+            file.as_raw_fd(),
+            0,
+        )
+    };
+    if at == libc::MAP_FAILED {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the mapping just made, which nothing else names.
+    unsafe { libc::munmap(at, PAGE) };
+    Ok(())
+}
+
+/// The monotonic clock in nanoseconds, the clock `perf record -k 1`
+/// stamps with and php's `ir_perf_timestamp` reads; zero where it
+/// cannot be read.
+pub(crate) fn monotonic_ns() -> u64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a live `timespec` the call writes.
+    let read = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut now) };
+    if read != 0 {
+        return 0;
+    }
+    let seconds = u64::try_from(now.tv_sec).unwrap_or(0);
+    let nanos = u64::try_from(now.tv_nsec).unwrap_or(0);
+    seconds.saturating_mul(1_000_000_000).saturating_add(nanos)
+}
+
+/// The calling thread's id as a jitdump record names it: `gettid` on
+/// Linux, where php writes records; zero elsewhere, where it writes none.
+pub(crate) fn thread_id() -> u32 {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `gettid` reads the calling thread's id and nothing else.
+        let tid = unsafe { libc::gettid() };
+        u32::try_from(tid).unwrap_or(0)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        0
+    }
+}
 
 /// The macOS adapter (`jit-design.md` §4.4, `research/jit-research.r1.md`
 /// §B.8): one `MAP_JIT` mapping, the one span the platform allows, its
@@ -507,6 +623,18 @@ mod tests {
     }
 }
 
+/// The body at `entry` as a function of no arguments returning `u32`: a
+/// test's way into a `mov; ret` body it published, until `enter` names
+/// the `Entry` type.
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64", not(miri)))]
+pub(crate) fn callable(entry: NonNull<u8>) -> extern "C" fn() -> u32 {
+    // SAFETY: every entry a test hands here is the first byte of a
+    // complete `mov; ret` body in executable memory a live `Code` keeps,
+    // which follows the C calling convention for a function of no
+    // arguments returning `u32`.
+    unsafe { std::mem::transmute::<*mut u8, extern "C" fn() -> u32>(entry.as_ptr()) }
+}
+
 /// The tests on the target itself (`jit-design.md` §4.4, §7's `table` row):
 /// a body published through `MAP_JIT` and entered, a chunk published into
 /// while another thread runs code in it, and a reused chunk entered from a
@@ -522,7 +650,7 @@ mod native {
     use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
     use std::time::{Duration, Instant};
 
-    use super::{Arena, CHUNK, Code, Full, MapJit};
+    use super::{Arena, CHUNK, Code, Full, MapJit, callable};
 
     /// `mov w0, #value; ret`: a body that returns `value`, a 16-bit
     /// immediate.
@@ -549,15 +677,6 @@ mod native {
     /// entry, until `enter` names the `Entry` type.
     fn entered(code: &Code<MapJit>) -> extern "C" fn() -> u32 {
         callable(code.entry())
-    }
-
-    /// The body at `entry` as a function.
-    fn callable(entry: NonNull<u8>) -> extern "C" fn() -> u32 {
-        // SAFETY: every entry a test hands here is the first byte of a
-        // complete `mov; ret` body in executable memory a live `Code`
-        // keeps, which follows the C calling convention for a function of
-        // no arguments returning `u32`.
-        unsafe { std::mem::transmute::<*mut u8, extern "C" fn() -> u32>(entry.as_ptr()) }
     }
 
     /// This thread's own instruction synchronisation barrier, `isb`.
