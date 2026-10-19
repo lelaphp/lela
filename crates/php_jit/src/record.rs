@@ -46,7 +46,7 @@ mod tests;
     not(test),
     expect(
         dead_code,
-        reason = "types (#2954) reads recorded traces as fixtures; until then the tests alone do"
+        reason = "the tests of record and of types read recorded traces back as fixtures"
     )
 )]
 mod text;
@@ -269,7 +269,10 @@ pub(crate) struct TraceRecord {
 #[derive(Debug)]
 pub(crate) struct Recorded {
     pub(crate) record: TraceRecord,
-    #[expect(dead_code, reason = "types::build reads the trace through it (#2954)")]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the pipeline hands it to types::build with #2958")
+    )]
     pub(crate) view: UnitView,
 }
 

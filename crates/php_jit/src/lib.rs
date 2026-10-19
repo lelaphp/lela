@@ -34,6 +34,7 @@ use php_engine::tier::{
 
 mod compiler;
 mod dispatch;
+mod lower;
 mod policy;
 mod record;
 mod table;
