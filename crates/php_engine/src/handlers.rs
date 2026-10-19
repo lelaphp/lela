@@ -22088,7 +22088,24 @@ pub(crate) fn switch_string<T: Tier>(
 
 /// `ZEND_MATCH`: [`crate::ops::match_target`] over the subject and the
 /// jump table in `op2`; an undefined CV is `ZVAL_UNDEFINED_OP1`, the
-/// warning [`exec::operand`] raises, and then the default.
+/// warning [`exec::operand`] raises, and then the default, unless a
+/// handler of the warning threw, which php's handler raises there
+/// (`HANDLE_EXCEPTION`) before any arm runs.
+///
+/// ```php
+/// set_error_handler(function ($no, $text) { throw new Exception($text); });
+/// try { echo match ($u) { default => "never\n", 1, 2, 3, 4, 5 => "no\n" }; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// try { echo match ($v) { default => "never\n", "1", "2", "3", "4", "5" => "no\n" }; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// restore_error_handler();
+/// echo match ($w) { default => "default\n", 1 => "one\n" };
+/// ```
+/// ```expect
+/// Undefined variable $u
+/// Undefined variable $v
+///
+/// Warning: Undefined variable $w in %s on line 6
+/// default
+/// ```
 pub(crate) fn r#match<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -22098,6 +22115,9 @@ pub(crate) fn r#match<T: Tier>(
     let mut subject = exec::operand_undef(req, frame, code, op.op1_type, op.op1);
     if subject.tag() == TypeTag::Undef {
         subject = exec::operand(req, frame, code, op.op1_type, op.op1);
+        if req.is_pending() {
+            return Ok(Stepped::Threw(frame).into());
+        }
     }
     let table = jump_table(code, op, "MATCH")?;
     let target = crate::ops::match_target(&subject, table);
