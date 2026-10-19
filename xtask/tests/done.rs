@@ -640,6 +640,22 @@ fn the_stop_hook_holds_a_turn_against_mains_base() {
     );
 }
 
+/// The Stop hook walks the built binaries before cargo, as permit's does
+/// (#2982), so a build apart from the manifest in front of it judges no
+/// turn: it exits 1, prints no verdict and names the manifest, and the
+/// walk's next candidate holds the turn.
+#[test]
+fn a_stale_build_judges_no_turn_and_hands_it_on() {
+    let root = scratch("hook-stale");
+    let stale = std::fs::read_to_string(fixtures().join("stale/seams.toml")).unwrap();
+    std::fs::write(root.join("seams.toml"), stale).unwrap();
+    let stdin = "{\"session_id\":\"s\",\"stop_hook_active\":false}";
+    let (code, out, err) = xtask(&root, &["done", "--hook"], Some(stdin));
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.trim().is_empty(), "{out}");
+    assert!(err.contains("seams.toml"), "{err}");
+}
+
 #[test]
 fn an_unchanged_tree_is_done() {
     let root = scratch("unchanged");

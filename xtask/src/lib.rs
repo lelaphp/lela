@@ -250,6 +250,9 @@ fn command_line() -> Result<()> {
         Command::Permit { diff: true, .. } => permit::run_diff(&root, &manifest),
         Command::Permit { .. } => bail!("permit: the judge at the tool call is run above"),
         Command::Done { hook: true, .. } => {
+            // A build apart from the tree exits 1 and judges no turn, so
+            // the hook's next candidate does, as permit's walk (#2982).
+            built::judges(&root, &root, &built_root())?;
             done::run_hook(&root, &manifest, &Registry::load(&root)?, &store);
             Ok(())
         }
