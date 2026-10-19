@@ -50,9 +50,22 @@ impl Request {
     /// again when the code frame leaves, so a variable the included
     /// file wrote is the includer's.
     pub(crate) fn attach_symbol_table(&mut self, frame: FrameRef) {
-        let Some(table) = self.annex_of(frame).and_then(|extra| extra.symbol_table) else {
+        let Some((table, cvs)) = self.cv_table(frame) else {
             return;
         };
+        // Every CV's bucket names it already, as an includer's do when
+        // the file it included leaves them as it found them: what each
+        // would move is where it stands.
+        let attached = (self
+            .tables
+            .get(table.0 as usize)
+            .map_or(&[][..], |table| &table.entries[..])
+            .iter())
+        .filter(|(_, symbol)| matches!(*symbol, Symbol::Indirect(at, _) if at == frame))
+        .count();
+        if attached == cvs {
+            return;
+        }
         let Some((unit, body)) = self.frame_unit(frame) else {
             return;
         };
@@ -69,6 +82,9 @@ impl Request {
                 ))
             });
             let value = match found {
+                // The bucket names this CV already: the value is where
+                // it stands.
+                Some(Symbol::Indirect(other, slot)) if other == frame && slot == at => continue,
                 Some(Symbol::Value(value)) => value,
                 Some(Symbol::Held(cell)) => self.unhold(cell),
                 Some(Symbol::Indirect(other, slot)) => self.take_slot(other, slot),
@@ -104,7 +120,7 @@ impl Request {
     /// [`Request::shutdown_destructors`], and the includer's for a code
     /// frame, whose re-attach takes them back.
     pub(crate) fn detach_symbol_table(&mut self, frame: FrameRef) {
-        let Some(table) = self.annex_of(frame).and_then(|extra| extra.symbol_table) else {
+        let Some((table, _)) = self.cv_table(frame) else {
             return;
         };
         let Some((unit, body)) = self.frame_unit(frame) else {
@@ -133,6 +149,24 @@ impl Request {
                 Err(_) => self.release(value),
             }
         }
+    }
+
+    /// The table `frame` is attached to, `EX(symbol_table)`, and how many
+    /// CVs the op array it serves has, read with no share of its unit
+    /// taken: none for a frame with no table, or whose op array has no
+    /// CV, an `eval`'s of an expression among them, which attaching and
+    /// detaching move nothing of.
+    fn cv_table(&self, frame: FrameRef) -> Option<(TableId, usize)> {
+        let header = self.vm.at(frame)?;
+        let annex = self.annexes.get(header.annex?)?;
+        let table = annex.symbol_table?;
+        // A file's frame has its unit in the annex read already.
+        let (unit, body) = match (header.function, &annex.unit) {
+            (None, Some(unit)) => (unit, exec::Body::Main),
+            _ => self.unit_of(header)?,
+        };
+        let cvs = exec::body_of(unit, body)?.vars.len();
+        (cvs > 0).then_some((table, cvs))
     }
 
     /// `zend_rebuild_symbol_table` (`Z/Zend/zend_execute_API.c:1810`) for
@@ -243,9 +277,10 @@ impl Request {
     }
 
     /// `zend_clean_and_cache_symbol_table` when the frame that rebuilt a
-    /// table pops: its values released and the table gone, its bytes
-    /// kept in `EG(symtable_cache)`. A bucket still pointing at a CV
-    /// points at a slot the pop is giving up, and owns nothing.
+    /// table pops, `table` the one it names: its values released and the
+    /// table gone, its bytes kept in `EG(symtable_cache)`. A bucket still
+    /// pointing at a CV points at a slot the pop is giving up, and owns
+    /// nothing.
     ///
     /// The table is the one the frame names, php's `EX(symbol_table)`,
     /// and only where it was rebuilt for this frame: a code frame shares
@@ -275,10 +310,7 @@ impl Request {
     /// are built in the order frames are pushed, except where a frame
     /// below the innermost is given one, as an evaluation in a paused
     /// frame gives it ([`Request::eval_in_frame`]).
-    pub(super) fn free_rebuilt_table(&mut self, frame: FrameRef) {
-        let Some(table) = self.annex_of(frame).and_then(|extra| extra.symbol_table) else {
-            return;
-        };
+    pub(super) fn free_rebuilt_table(&mut self, frame: FrameRef, table: TableId) {
         let at = table.0 as usize;
         if self
             .tables

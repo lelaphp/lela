@@ -76,8 +76,6 @@ impl Request {
         let mut header = exec::Header::of(None, code);
         // `zend_execute`'s `ZEND_CALL_TOP_CODE`.
         header.info.set_top_code(true);
-        let record = Box::new(exec::code_record(&unit));
-        header.callee = record.at();
         let pushed = self.vm.push(&mut self.heap, slots, 0, header.clone());
         let frame = self.fatal_of(pushed)?;
         let table = caller.map(|caller| self.rebuild_symbol_table(caller));
@@ -85,12 +83,13 @@ impl Request {
         self.fatal_of(laid)?;
         self.forget_main_statics(code.runtime_cache);
         header.set_caller(caller.map_or(exec::Caller::Outside, exec::Caller::Opline));
-        header.annex = Some(self.annexes_mut().insert(exec::Annex {
+        let annex = self.annexes_mut().insert(exec::Annex {
             unit: Some(unit),
-            record: Some(record),
             symbol_table: table,
             ..exec::Annex::default()
-        }));
+        });
+        header.annex = Some(annex);
+        header.callee = self.annexes_mut().callee(annex);
         if let Some(laid) = self.vm.at_mut(frame) {
             *laid = header;
         }

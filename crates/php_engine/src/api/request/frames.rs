@@ -587,14 +587,9 @@ impl Request {
         mut header: exec::Header,
         extra: exec::Annex,
     ) -> Result<FrameRef, Fatal> {
-        let mut extra = extra;
-        if let Some(unit) = &extra.unit {
-            let record = Box::new(exec::code_record(unit));
-            header.callee = record.at();
-            extra.record = Some(record);
-        }
         let id = self.annexes.insert(extra);
         header.annex = Some(id);
+        header.callee = self.annexes.callee(id);
         let pushed = self.vm.push(&mut self.heap, slots, 0, header);
         if pushed.is_err() {
             self.annexes.take(id);
@@ -625,34 +620,50 @@ impl Request {
     ) -> Result<FrameRef, Fatal> {
         let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
+        let cvs = !code.vars.is_empty();
+        // The includer read once: its receiver, its scopes and the table
+        // it has, where it has one.
+        let (this, called_scope, scope, table) =
+            self.frame_at(caller)
+                .map_or((None, None, None, None), |state| {
+                    let header = state.header();
+                    let scope = self.scope_of(state);
+                    (
+                        header.this(),
+                        header.called_scope(),
+                        scope,
+                        state.symbol_table(),
+                    )
+                });
         let mut header = exec::Header::of(None, code);
-        let record = Box::new(exec::code_record(&unit));
-        header.callee = record.at();
-        let reserved = self.vm.push(&mut self.heap, slots, 0, header.clone())?;
-        let (this, called_scope, scope) = self.vm.at(caller).map_or((None, None, None), |state| {
-            (state.this(), state.called_scope(), self.frame_scope(caller))
-        });
         // `ZEND_CALL_HAS_THIS` carried from the including frame, whose
         // `$this` that frame keeps: no `ZEND_CALL_RELEASE_THIS`.
         header.set_receiver(this.map(exec::Receiver::lent));
         header.set_called_scope(called_scope);
         header.set_returns_to(returns_to.map(|(_, slot)| slot));
         header.set_caller(exec::Caller::Opline(caller));
-        let table = self.rebuild_symbol_table(caller);
+        let reserved = self.vm.push(&mut self.heap, slots, 0, header)?;
+        let table = match table {
+            Some(table) => table,
+            None => self.rebuild_symbol_table(caller),
+        };
         exec::init_runtime_cache(&mut self.map, &mut self.heap, code, exec::Body::Main)?;
         self.forget_main_statics(code.runtime_cache);
-        header.annex = Some(self.annexes.insert(exec::Annex {
+        let annex = self.annexes.insert(exec::Annex {
             unit: Some(unit),
-            record: Some(record),
             scope,
             symbol_table: Some(table),
             ..exec::Annex::default()
-        }));
+        });
+        let record = self.annexes.callee(annex);
         if let Some(laid) = self.vm.at_mut(reserved) {
-            *laid = header;
+            laid.annex = Some(annex);
+            laid.callee = record;
         }
         let frame = reserved;
-        self.attach_symbol_table(frame);
+        if cvs {
+            self.attach_symbol_table(frame);
+        }
         crate::observer::call(self, frame);
         Ok(frame)
     }
@@ -686,25 +697,27 @@ impl Request {
         frame: FrameRef,
         copy: crate::api::values::Emalloc,
     ) -> Result<(), Thrown> {
-        let size = self
-            .frame_at(frame)
-            .and_then(|state| state.code().map(|code| code.cache_size))
-            .unwrap_or(0);
-        if let Some(extra) = self.annex_mut(frame) {
+        let annex = self.vm.at(frame).and_then(|header| header.annex);
+        let size = (annex.and_then(|id| self.annexes.get(id)))
+            .and_then(|extra| extra.unit.as_ref())
+            .map_or(0, |unit| unit.main.cache_size);
+        let cache =
+            crate::api::values::Emalloc::new(self, usize::try_from(size).unwrap_or(usize::MAX));
+        let (run_time_cache, refused) = match cache {
+            Ok(cache) => (Some(cache), Ok(())),
+            Err(thrown) => (None, Err(thrown)),
+        };
+        let extra = match annex {
+            Some(id) => self.annexes.get_mut(id),
+            None => self.annex_mut(frame),
+        };
+        if let Some(extra) = extra {
             extra.op_array = Some(exec::HeapOpArray {
                 copy,
-                run_time_cache: None,
+                run_time_cache,
             });
         }
-        let cache =
-            crate::api::values::Emalloc::new(self, usize::try_from(size).unwrap_or(usize::MAX))?;
-        if let Some(held) = self
-            .annex_mut(frame)
-            .and_then(|extra| extra.op_array.as_mut())
-        {
-            held.run_time_cache = Some(cache);
-        }
-        Ok(())
+        refused
     }
 
     /// `zend_leave_helper`'s arm for a nested code frame
@@ -1471,8 +1484,10 @@ impl Request {
         if !self.bailout {
             self.release_frame(frame, function, annex, num_args, receiver, closure);
         }
-        let annex = annex.and_then(|id| self.annexes.take(id));
+        // The annex stands, and the record the header names in it, until
+        // the frame is off the stack.
         self.vm.stack.pop_frame(&mut self.heap);
+        let annex = annex.and_then(|id| self.annexes.take(id));
         if let Some(annex) = annex {
             // An `eval`'s main op array is destroyed when its execution
             // ends, and the names its compile made with it.
@@ -1564,7 +1579,9 @@ impl Request {
         // (`ZendGenerator::closure`), which keeps it until it is freed.
         let mut generator = None;
         if let Some(id) = annex {
-            self.free_rebuilt_table(frame);
+            if let Some(table) = self.annexes.get(id).and_then(|annex| annex.symbol_table) {
+                self.free_rebuilt_table(frame, table);
+            }
             let named = self.annexes.get_mut(id).map(|annex| {
                 generator = annex.generator;
                 std::mem::take(&mut annex.extra_named)
