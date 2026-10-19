@@ -115,7 +115,8 @@ impl RealpathCache {
     /// The entries php keeps in `CWDG`, `PHP_INI_SYSTEM` both, from what
     /// `value` gives their master values, as `OnUpdateLong` writes them
     /// (`Z/main/main.c:880`); an `open_basedir` among them turns the cache
-    /// off, as `php_module_startup` does (`Z/main/main.c:2312`).
+    /// off, as `php_module_startup` does (`Z/main/main.c:2312`,
+    /// [`RealpathCache::engine_startup`]).
     pub(crate) fn of<'a>(value: impl Fn(&[u8]) -> Option<&'a [u8]>) -> RealpathCache {
         let mut cache = RealpathCache {
             buckets: Mutex::new(Buckets {
@@ -127,26 +128,37 @@ impl RealpathCache {
             #[cfg(test)]
             looked_up: std::sync::atomic::AtomicUsize::new(0),
         };
-        for name in [
-            &b"realpath_cache_size"[..],
-            b"realpath_cache_ttl",
-            b"open_basedir",
-        ] {
+        for name in [&b"realpath_cache_size"[..], b"realpath_cache_ttl"] {
             cache.update(name, value(name));
         }
+        cache.engine_startup(value(b"open_basedir"));
         cache
     }
 
     /// The master value of `name` set to `value`, where `name` is one the
-    /// cache keeps: the limit, the time to live, or an `open_basedir`,
-    /// which turns it off.
+    /// cache keeps, the limit or the time to live, as `OnUpdateLong` writes
+    /// it. An `open_basedir` set here turns nothing off: php checks it at
+    /// the engine's startup and at each request's
+    /// ([`RealpathCache::engine_startup`], [`RealpathCache::turn_off`]),
+    /// so a php-fpm pool's `php_admin_value[open_basedir]`, set on the
+    /// master value after the engine started, leaves the cache on until
+    /// the child's first request starts, and that request's
+    /// `init_request_info` enters its program's path.
     pub(crate) fn update(&mut self, name: &[u8], value: Option<&[u8]>) {
         let parsed = || value.map_or(0, crate::api::request::Request::ini_parse_bytes);
         match name {
             b"realpath_cache_size" => *self.limit.get_mut() = parsed(),
             b"realpath_cache_ttl" => self.ttl = parsed(),
-            b"open_basedir" if value.is_some_and(|list| !list.is_empty()) => self.turn_off(),
             _ => {}
+        }
+    }
+
+    /// `php_module_startup`'s `Disable realpath cache if an open_basedir is
+    /// set` (`Z/main/main.c:2312`), over the master `open_basedir` the
+    /// engine started with.
+    pub(crate) fn engine_startup(&self, open_basedir: Option<&[u8]>) {
+        if open_basedir.is_some_and(|list| !list.is_empty()) {
+            self.turn_off();
         }
     }
 

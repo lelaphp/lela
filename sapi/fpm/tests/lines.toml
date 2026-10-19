@@ -438,6 +438,24 @@ params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["Q
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 
+# The child's `init_request_info` asks `tsrm_realpath` whether the
+# program's path resolves (`Z/sapi/fpm/fpm/fpm_main.c:1124`), through the
+# realpath cache, before `php_request_startup` turns the cache off for the
+# pool's `open_basedir` (`Z/main/main.c:1918`): each request lists what that
+# first resolution entered, and its own resolutions enter nothing.
+[[line]]
+name = "the-child-enters-its-program-s-path-in-the-realpath-cache-before-an-open-basedir-turns-it-off"
+args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\nphp_admin_value[open_basedir] = {dir}\n", "index.php" = '<?php include __DIR__ . "/b.php"; $c = realpath_cache_get(); ksort($c); foreach ($c as $k => $v) if (str_starts_with($k, __DIR__)) echo substr($k, strlen(__DIR__)) ?: ".", $v["is_dir"] ? " dir" : " file", "\n"; echo realpath_cache_size() > 0 ? "entered" : "empty", "\n";', "b.php" = "<?php\n" }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
+
 # A `realpath_cache_ttl` of zero leaves the child's time unread, `*t` at
 # `-1` (`Z/Zend/zend_virtual_cwd.c:1140`), so each entry expires at -1 and
 # none expires: the second request lists what the first entered as the

@@ -18,8 +18,9 @@ use php_proto::cgi::{CNumber, Environment, Files, RequestInfo, Settings, Shape, 
 use crate::ini::enabled;
 use crate::{Engine, HostPage, IniEvent, IniValue, Method, ResponseHead, WebRequest};
 
-/// The file system as `init_request_info` and the built-in server's path
-/// rules (`php_proto::vpath`) ask it, each path read as `realpath(3)` and
+/// The file system as the built-in server's path rules (`php_proto::vpath`)
+/// ask it, and as [`CachedDisk`] asks what `stat(2)` finds, each path read
+/// as `realpath(3)` and
 /// `stat(2)` read the C string php hands them: up to its first NUL. So
 /// `run.php\0.txt` finds `run.php`, as php -S's walk finds it before
 /// refusing the path for its NUL (#2695).
@@ -40,6 +41,25 @@ impl Files for Disk {
         } else {
             Stat::Other(meta.len())
         })
+    }
+}
+
+/// The file system as php-cgi's and php-fpm's `init_request_info` asks
+/// it: whether the program's path resolves is `tsrm_realpath`, through
+/// the engine's realpath cache ([`Engine::realpath`]), so a host serving
+/// many requests stats a program's path once per `realpath_cache_ttl`,
+/// as a php-fpm child does; what `stat(2)` finds is [`Disk`]'s. Each
+/// path is read up to its first NUL, as [`Disk`] reads it.
+#[derive(Clone, Copy)]
+pub struct CachedDisk<'e>(pub &'e Engine);
+
+impl Files for CachedDisk<'_> {
+    fn resolves(&self, path: &[u8]) -> bool {
+        self.0.realpath(c_str(path)).is_some()
+    }
+
+    fn stat(&self, path: &[u8]) -> Option<Stat> {
+        Disk.stat(path)
     }
 }
 

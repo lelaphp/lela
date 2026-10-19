@@ -4349,6 +4349,7 @@ impl Engine {
         for (name, value) in taken {
             shared.set_ini_default(name, value);
         }
+        (shared.realpath_cache).engine_startup(shared.ini_default(b"open_basedir"));
         shared.startup_errors.extend_from_slice(&failed);
         shared.script_encodings = script_encodings;
         shared.startup_errors.extend_from_slice(&written);
@@ -4591,6 +4592,35 @@ impl Engine {
     #[must_use]
     pub fn ini_get(&self, name: &[u8]) -> Option<Vec<u8>> {
         self.shared.ini_default(name).map(<[u8]>::to_vec)
+    }
+
+    /// `tsrm_realpath(path, NULL)` outside any request
+    /// (`Z/Zend/zend_virtual_cwd.c:1717`): `path` with every link
+    /// resolved, through the engine's realpath cache, which it reads and
+    /// enters as a request's resolutions do; a relative path against the
+    /// process's working directory, and an empty one that directory.
+    /// php-cgi's and php-fpm's `init_request_info` asks it whether the
+    /// program's path resolves before the request starts, so a child's
+    /// next request stats nothing for that path while the entries' time
+    /// to live holds. `None` where the path is not there.
+    #[must_use]
+    pub fn realpath(&self, path: &[u8]) -> Option<Vec<u8>> {
+        let getcwd = || {
+            std::env::current_dir()
+                .map(|dir| dir.into_os_string().into_encoded_bytes())
+                .unwrap_or_default()
+        };
+        let (cwd, path) = match path.first() {
+            None => (Vec::new(), std::borrow::Cow::Owned(getcwd())),
+            Some(b'/') => (Vec::new(), std::borrow::Cow::Borrowed(path)),
+            Some(_) => (getcwd(), std::borrow::Cow::Borrowed(path)),
+        };
+        crate::virtual_cwd::virtual_file_ex(
+            &self.shared.realpath_cache,
+            &cwd,
+            &path,
+            crate::virtual_cwd::Resolve::RealPath,
+        )
     }
 
     /// `INI_STR` outside any request: the value each request starts
@@ -7599,6 +7629,45 @@ mod tests {
         let expires = engine.shared.realpath_cache.listed(|bucket| bucket.expires);
         assert!(!expires.is_empty(), "the program's path was entered");
         assert!(expires.iter().all(|&at| at == -1), "{expires:?}");
+    }
+
+    /// The host's `tsrm_realpath`, which php-fpm's `init_request_info`
+    /// asks of the program's path before each request, reads and enters
+    /// the engine's realpath cache: the first asks the file system, the
+    /// next asks nothing, and the request after it resolves its program
+    /// from what the host entered. A path that is not there resolves to
+    /// nothing.
+    #[test]
+    fn the_host_s_realpath_reads_and_enters_the_engine_s_realpath_cache() {
+        let files = Files::new("realpath-host", &[("main.php", "<?php\necho \"ok\\n\";\n")]);
+        let engine = Engine::cli_builder().build();
+        let program = files
+            .dir
+            .join("main.php")
+            .into_os_string()
+            .into_encoded_bytes();
+        let mut asked = Vec::new();
+        let mut resolved = Vec::new();
+        for _ in 0..2 {
+            let before = engine.shared.realpath_cache.looked_up();
+            resolved.push(engine.realpath(&program));
+            asked.push(engine.shared.realpath_cache.looked_up() - before);
+        }
+        let before = engine.shared.realpath_cache.looked_up();
+        let (body, observables) = files.serve(&engine, "main.php");
+        assert_eq!((body.as_str(), observables.exit_code), ("ok\n", 0));
+        asked.push(engine.shared.realpath_cache.looked_up() - before);
+        assert!(resolved[0].is_some(), "the program resolves");
+        assert_eq!(resolved[0], resolved[1]);
+        assert!(asked[0] > 0, "the first resolution asks the file system");
+        assert_eq!(
+            &asked[1..],
+            [0, 0],
+            "the second and the request ask nothing"
+        );
+        let mut missing = files.dir.as_os_str().as_encoded_bytes().to_vec();
+        missing.extend_from_slice(b"/missing.php");
+        assert_eq!(engine.realpath(&missing), None);
     }
 
     /// The once forms over a second file (#396): the file is served the

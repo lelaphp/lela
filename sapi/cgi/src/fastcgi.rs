@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use php_proto::cgi::{Environment, RequestInfo};
 use php_proto::fcgi::{self, Input, Kind, Outgoing};
-use php_sapi::cgi::{C_NUMBER, Disk};
+use php_sapi::cgi::{C_NUMBER, CachedDisk};
 use php_sapi::fcgi::{Conn, allowed, allowed_clients};
 use php_sapi::{
     Aborted, Body, Chdir, Engine, Forked, HostServes, IniOrigin, OutputSink, RequestDescription,
@@ -497,8 +497,13 @@ fn serve_one(engine: &Engine, params: Environment, wire: &Arc<Mutex<Wire>>) -> O
     let mut env = params.cut_at_nul();
     let settings = php_sapi::cgi::settings(engine);
     let doc_root = engine.ini_get(b"doc_root").filter(|root| !root.is_empty());
-    let info: RequestInfo =
-        php_proto::cgi::request_info(&mut env, settings, doc_root.as_deref(), &Disk, C_NUMBER);
+    let info: RequestInfo = php_proto::cgi::request_info(
+        &mut env,
+        settings,
+        doc_root.as_deref(),
+        &CachedDisk(engine),
+        C_NUMBER,
+    );
     let path = info.path_translated.clone();
     let mut ini = path.as_deref().map_or_else(Vec::new, |path| {
         engine.activated_ini(env.get(b"SERVER_NAME"), path)

@@ -1162,6 +1162,7 @@ test::Engine::lint
 test::Engine::loaded_extensions
 test::Engine::loaded_zend_extensions
 test::Engine::parse_ini
+test::Engine::realpath
 test::Engine::refused
 test::Engine::serve
 test::Engine::serve_capture
