@@ -20427,16 +20427,20 @@ pub(crate) fn post_inc<T: Tier>(
 /// Warning: Decrement on type null has no effect, this will change in the next major version of PHP in %s on line 2
 /// ||5533
 /// ```
-pub(crate) fn pre_dec<T: Tier>(
+#[cfg_attr(not(debug_assertions), inline(always))] // design §5.8, as `pre_inc`
+#[cfg_attr(debug_assertions, inline(never))] // a debug `serve_frame` holds every inlined arm's locals
+#[allow(clippy::inline_always)]
+pub(crate) fn pre_dec<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    let step = (Arith::Sub, false);
-    if let Some(edge) = inline_incdec(req, frame, code, op, step, ByKind(op.op1_type)) {
+    if let Some(edge) = inline_incdec(req, frame, code, op, (Arith::Sub, false), A::default()) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     incdec(req, frame, code, op, false, crate::ops::decrement)
 }
 

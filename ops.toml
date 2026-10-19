@@ -710,7 +710,7 @@ result = "used"
 effects = ["throw", "alloc"]
 throw_cond = "return (t1 & (MAY_BE_NULL|MAY_BE_FALSE|MAY_BE_TRUE|MAY_BE_STRING|MAY_BE_ARRAY|MAY_BE_OBJECT|MAY_BE_RESOURCE));; op1 CV undefined -> warning; op1 TMP/VAR destructor"
 spec = "RETVAL"
-specialise = false
+specialise = true
 type_spec = ["PRE_DEC_LONG_NO_OVERFLOW", "PRE_DEC_LONG"]
 doc = "pre decrement"
 

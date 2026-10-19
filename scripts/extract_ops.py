@@ -35,7 +35,7 @@ HOT_LIST = {
     "FETCH_OBJ_W", "ASSIGN_OBJ", "SEND_VAR", "SEND_VAL", "INIT_FCALL", "DO_UCALL",
     "DO_ICALL", "RETURN", "PRE_INC", "CONCAT", "FAST_CONCAT", "ROPE_INIT",
     "ROPE_ADD", "ROPE_END", "FE_FETCH_R", "COUNT", "ISSET_ISEMPTY_DIM_OBJ",
-    "FETCH_DIM_FUNC_ARG", "ASSIGN_DIM_OP", "FETCH_DIM_RW",
+    "FETCH_DIM_FUNC_ARG", "ASSIGN_DIM_OP", "FETCH_DIM_RW", "PRE_DEC",
 }
 
 # Safepoint candidates (design section 5.7 / jit-design section 3.1) and the
