@@ -247,10 +247,16 @@ impl Request {
         sink
     }
 
-    /// The request's own sink, where no host lent it one.
-    fn kept(&mut self) -> Option<&mut Kept> {
+    /// The sink the request writes to, where it is a `T`: the host's own
+    /// type, or the request's [`Kept`].
+    pub(crate) fn sink_as<T: OutputSink>(&mut self) -> Option<&mut T> {
         let sink: &mut dyn std::any::Any = self.response.sink.as_mut();
         sink.downcast_mut()
+    }
+
+    /// The request's own sink, where no host lent it one.
+    fn kept(&mut self) -> Option<&mut Kept> {
+        self.sink_as()
     }
 
     /// The body the request's own sink kept, for a test that serves no

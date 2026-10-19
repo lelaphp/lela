@@ -274,15 +274,16 @@ fn expand(root: &Shown, name: Vec<u8>, parts: &[Option<Vec<u8>>]) -> Vec<(Vec<Ve
 /// where nothing is executing, `phpdbg_rebuild_symtable`'s refusal.
 fn add(s: &mut Session, here: &mut Here<'_>, input: &[u8], kind: Kind) {
     let Some((req, frame)) = here.standing() else {
-        out::error(b"No active op array!");
+        s.out.error(b"No active op array!");
         return;
     };
     let Some((variable, parts)) = parse(input) else {
-        out::error(b"Malformed input");
+        s.out.error(b"Malformed input");
         return;
     };
     let Some(root) = shown::variable(req, frame, &variable, DEPTH) else {
-        out::error(format!("{} is undefined", lossy(input)).as_bytes());
+        s.out
+            .error(format!("{} is undefined", lossy(input)).as_bytes());
         return;
     };
     let table = shown::variables(req, frame);
@@ -293,7 +294,8 @@ fn add(s: &mut Session, here: &mut Here<'_>, input: &[u8], kind: Kind) {
     let named = [b"$".as_slice(), &variable].concat();
     for (path, name) in expand(&root, named, &parts) {
         let Some(old) = walk(&root, &path).cloned() else {
-            out::error(format!("{} is undefined", lossy(&name)).as_bytes());
+            s.out
+                .error(format!("{} is undefined", lossy(&name)).as_bytes());
             continue;
         };
         let name = if kind == Kind::Array {
@@ -327,7 +329,7 @@ fn add(s: &mut Session, here: &mut Here<'_>, input: &[u8], kind: Kind) {
         };
         // Only the recursive root announces itself as recursive.
         let root = kind == Kind::Recursive && element == Element::Zval;
-        out::notice(
+        s.out.notice(
             format!(
                 "Added{} watchpoint #{id} for {}",
                 if root { " recursive" } else { "" },
@@ -376,9 +378,11 @@ pub fn delete(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
         match s.watches.list.iter().position(|w| i64::from(w.id) == *id) {
             Some(at) => {
                 s.watches.list.remove(at);
-                out::notice(format!("Removed watchpoint {id}").as_bytes());
+                s.out.notice(format!("Removed watchpoint {id}").as_bytes());
             }
-            None => out::error(b"Nothing was deleted, no corresponding watchpoint found"),
+            None => s
+                .out
+                .error(b"Nothing was deleted, no corresponding watchpoint found"),
         }
     }
     Ret::Success
@@ -387,7 +391,7 @@ pub fn delete(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
 /// `phpdbg_list_watchpoints`.
 pub fn list(s: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
     for watch in &s.watches.list {
-        out::writeln(
+        s.out.writeln(
             format!(
                 "{} ({}, {})",
                 lossy(&watch.listed()),
@@ -446,7 +450,7 @@ fn zval_differs(old: &Shown, new: &Shown) -> bool {
 /// Whether the report must stop: what it wrote ran PHP code, a header
 /// callback, that ended the request, `quit` at a prompt inside it.
 fn ended(req: &mut Request) -> bool {
-    read::exiting(req) || session::with(|s| s.stopped.is_some()).unwrap_or(true)
+    read::exiting(req) || session::with(req, |s| s.stopped.is_some()).unwrap_or(true)
 }
 
 /// `phpdbg_print_watch_diff` for a zval: the labels to phpdbg's own
@@ -456,43 +460,49 @@ fn ended(req: &mut Request) -> bool {
 /// debugger, before the rest is written; `false` where that ended the
 /// request.
 fn report_zval(req: &mut Request, name: &[u8], old: &Shown, new: &Shown) -> bool {
-    out::notice(format!("Breaking on watchpoint {}", lossy(name)).as_bytes());
+    session::say(req, |o| {
+        o.notice(format!("Breaking on watchpoint {}", lossy(name)).as_bytes());
+    });
     if old.counted() {
-        out::writeln(b"Old value inaccessible or destroyed");
+        session::say(req, |o| o.writeln(b"Old value inaccessible or destroyed"));
     } else {
-        out::out(b"Old value: ");
-        out::interruptible(|| req.write(&flat(old)));
+        session::say(req, |o| o.out(b"Old value: "));
+        out::interruptible(req, |req| req.write(&flat(old)));
         if ended(req) {
             return false;
         }
-        out::out(b"\n");
+        session::say(req, |o| o.out(b"\n"));
     }
     let reference = matches!(new, Shown::Reference { .. });
-    out::out(format!("New value{}: ", if reference { " (reference)" } else { "" }).as_bytes());
-    out::interruptible(|| req.write(&flat(new)));
+    session::say(req, |o| {
+        o.out(format!("New value{}: ", if reference { " (reference)" } else { "" }).as_bytes());
+    });
+    out::interruptible(req, |req| req.write(&flat(new)));
     if ended(req) {
         return false;
     }
-    out::out(b"\n");
+    session::say(req, |o| o.out(b"\n"));
     true
 }
 
 /// `phpdbg_print_watch_diff` for a string changed in place, its bytes
 /// written with `zend_write` as the zval's are.
 fn report_str(req: &mut Request, name: &[u8], old: &[u8], new: &[u8]) -> bool {
-    out::notice(format!("Breaking on watchpoint {}", lossy(name)).as_bytes());
-    out::out(b"Old value: ");
-    out::interruptible(|| req.write(old));
+    session::say(req, |o| {
+        o.notice(format!("Breaking on watchpoint {}", lossy(name)).as_bytes());
+    });
+    session::say(req, |o| o.out(b"Old value: "));
+    out::interruptible(req, |req| req.write(old));
     if ended(req) {
         return false;
     }
-    out::out(b"\n");
-    out::out(b"New value: ");
-    out::interruptible(|| req.write(new));
+    session::say(req, |o| o.out(b"\n"));
+    session::say(req, |o| o.out(b"New value: "));
+    out::interruptible(req, |req| req.write(new));
     if ended(req) {
         return false;
     }
-    out::out(b"\n");
+    session::say(req, |o| o.out(b"\n"));
     true
 }
 
@@ -549,11 +559,11 @@ fn key_text(key: &Key) -> Vec<u8> {
 /// ```
 fn recursive_report(req: &mut Request, name: &[u8], old: &Shown, new: &Shown) -> bool {
     if zval_differs(old, new) {
-        session::with(|s| s.watch_hit = true);
+        session::with(req, |s| s.watch_hit = true);
         return report_zval(req, name, old, new);
     }
     if let Some((was, now)) = str_changed(old, new) {
-        session::with(|s| s.watch_hit = true);
+        session::with(req, |s| s.watch_hit = true);
         return report_str(req, name, was, now);
     }
     let (
@@ -576,26 +586,30 @@ fn recursive_report(req: &mut Request, name: &[u8], old: &Shown, new: &Shown) ->
         .rev()
         .take_while(|(key, _)| !before.iter().any(|(held, _)| held == key));
     for (key, _) in added {
-        session::with(|s| s.watch_hit = true);
-        out::notice(
-            [
-                &b"Element "[..],
-                &key_text(key),
-                b" has been added to watchpoint",
-            ]
-            .concat()
-            .as_slice(),
-        );
+        session::with(req, |s| s.watch_hit = true);
+        session::say(req, |o| {
+            o.notice(
+                [
+                    &b"Element "[..],
+                    &key_text(key),
+                    b" has been added to watchpoint",
+                ]
+                .concat()
+                .as_slice(),
+            );
+        });
     }
     if was != now {
-        session::with(|s| s.watch_hit = true);
-        out::notice(format!("Breaking on watchpoint {}[]", lossy(name)).as_bytes());
+        session::with(req, |s| s.watch_hit = true);
+        session::say(req, |o| {
+            o.notice(format!("Breaking on watchpoint {}[]", lossy(name)).as_bytes());
+        });
         let message = if was > now {
             format!("{} elements were removed from the array", was - now)
         } else {
             format!("{} elements were added to the array", now - was)
         };
-        out::writeln(message.as_bytes());
+        session::say(req, |o| o.writeln(message.as_bytes()));
     }
     for (key, value) in after {
         let Some((_, held)) = before.iter().find(|(held, _)| held == key) else {
@@ -628,8 +642,8 @@ fn str_changed<'a>(old: &'a Shown, new: &'a Shown) -> Option<(&'a [u8], &'a [u8]
 
 /// The copy the session holds of watch `id` now: what a check the report
 /// re-entered left there, or none where it is gone.
-fn held(id: u32) -> Option<Shown> {
-    session::with(|s| {
+fn held(req: &mut Request, id: u32) -> Option<Shown> {
+    session::with(req, |s| {
         s.watches
             .list
             .iter()
@@ -642,12 +656,12 @@ fn held(id: u32) -> Option<Shown> {
 /// `phpdbg_print_changed_zvals`: every watch read again and compared
 /// with what it held, each change reported and then kept as what it
 /// holds; whether any was, `PHPDBG_G(watchpoint_hit)` read and cleared.
-/// The session stands in its cell throughout, so a header callback a
+/// The session stands in the request's sink throughout, so a header callback a
 /// report's first byte runs is checked by the debugger too, and finds
 /// the same change, as php's does; the hit it takes is cleared before
 /// this check reads it.
 pub fn changed(req: &mut Request) -> bool {
-    let Some((list, frozen)) = session::with(|s| {
+    let Some((list, frozen)) = session::with(req, |s| {
         let frozen = (s.origin == Origin::Eval)
             .then(|| s.watches.frozen.last().cloned())
             .flatten();
@@ -666,22 +680,24 @@ pub fn changed(req: &mut Request) -> bool {
             _ => read(req, &watch),
         };
         let Some((new, freed)) = read else {
-            out::notice(
-                format!(
-                    "{} has been removed, removing watchpoint{}",
-                    lossy(&watch.name),
-                    if watch.kind == Kind::Recursive {
-                        " recursively"
-                    } else {
-                        ""
-                    }
-                )
-                .as_bytes(),
-            );
-            session::with(|s| s.watches.list.retain(|w| w.id != watch.id));
+            session::say(req, |o| {
+                o.notice(
+                    format!(
+                        "{} has been removed, removing watchpoint{}",
+                        lossy(&watch.name),
+                        if watch.kind == Kind::Recursive {
+                            " recursively"
+                        } else {
+                            ""
+                        }
+                    )
+                    .as_bytes(),
+                );
+            });
+            session::with(req, |s| s.watches.list.retain(|w| w.id != watch.id));
             continue;
         };
-        let Some(old) = held(watch.id) else {
+        let Some(old) = held(req, watch.id) else {
             continue;
         };
         let reported = match watch.kind {
@@ -693,26 +709,28 @@ pub fn changed(req: &mut Request) -> bool {
                 if let (Some(old), Some(new)) = (count(&old), count(&new))
                     && old != new
                 {
-                    session::with(|s| s.watch_hit = true);
-                    out::notice(
-                        format!("Breaking on watchpoint {}", lossy(&watch.name)).as_bytes(),
-                    );
+                    session::with(req, |s| s.watch_hit = true);
+                    session::say(req, |o| {
+                        o.notice(
+                            format!("Breaking on watchpoint {}", lossy(&watch.name)).as_bytes(),
+                        );
+                    });
                     let message = if old > new {
                         format!("{} elements were removed from the array", old - new)
                     } else {
                         format!("{} elements were added to the array", new - old)
                     };
-                    out::writeln(message.as_bytes());
+                    session::say(req, |o| o.writeln(message.as_bytes()));
                 }
                 true
             }
             Kind::Recursive => recursive_report(req, &watch.name, &old, &new),
             Kind::Simple => {
                 if zval_differs(&old, &new) {
-                    session::with(|s| s.watch_hit = true);
+                    session::with(req, |s| s.watch_hit = true);
                     report_zval(req, &watch.name, &old, &new)
                 } else if let Some((was, now)) = str_changed(&old, &new) {
-                    session::with(|s| s.watch_hit = true);
+                    session::with(req, |s| s.watch_hit = true);
                     report_str(req, &watch.name, was, now)
                 } else {
                     true
@@ -722,14 +740,14 @@ pub fn changed(req: &mut Request) -> bool {
         if !reported {
             return false;
         }
-        session::with(|s| {
+        session::with(req, |s| {
             if let Some(kept) = s.watches.list.iter_mut().find(|w| w.id == watch.id) {
                 kept.old = new;
                 kept.freed = freed;
             }
         });
     }
-    session::with(|s| std::mem::take(&mut s.watch_hit)).unwrap_or(false)
+    session::with(req, |s| std::mem::take(&mut s.watch_hit)).unwrap_or(false)
 }
 
 /// What each watch reads as an `ev` begins, kept for the length of the
@@ -835,7 +853,7 @@ pub fn removed_at_end(s: &mut Session) {
         .iter()
         .flat_map(|name| table.iter().filter(move |watch| watch.variable == *name));
     for watch in arrays.iter().chain(table) {
-        out::notice(
+        s.out.notice(
             format!(
                 "{} has been removed, removing watchpoint{}",
                 lossy(&watch.name),

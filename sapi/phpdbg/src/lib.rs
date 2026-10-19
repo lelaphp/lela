@@ -210,7 +210,7 @@ pub fn main_with(argv: &[Vec<u8>], beside: &[Extension]) -> ExitCode {
     if line.boring {
         session.line_colours = out::Colours::Off;
     }
-    out::set_colours(session.line_colours);
+    session.out.set_colours(session.line_colours);
     if let Some(delimiter) = &line.stdin_delimiter {
         session.queued.push(Command::Params(vec![
             Param::Str(b"stdin".to_vec()),
@@ -221,6 +221,5 @@ pub fn main_with(argv: &[Vec<u8>], beside: &[Extension]) -> ExitCode {
         session.stopped = Some(Stop::RunWith(None));
         session.context = session::Context::Announced;
     }
-    session::install(session);
-    php_sapi::exit_code(host::serve(&engine))
+    php_sapi::exit_code(host::serve(&engine, session))
 }

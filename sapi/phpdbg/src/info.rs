@@ -5,7 +5,7 @@
 use php_sapi::tier::{FrameRef, Request};
 
 use crate::cmd::Param;
-use crate::out;
+use crate::out::Out;
 use crate::prompt::{Here, Ret};
 use crate::read;
 use crate::session::Session;
@@ -17,18 +17,19 @@ fn lossy(bytes: &[u8]) -> String {
 
 /// `PHPDBG_INFO(break)`.
 pub fn breaks(s: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
-    s.breaks.print();
+    s.breaks.print(&mut s.out);
     Ret::Success
 }
 
 /// `PHPDBG_INFO(files)`.
-pub fn files(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+pub fn files(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let files = here
         .request()
         .map_or_else(Vec::new, |req| req.included_files());
-    out::notice(format!("Included files: {}", files.len()).as_bytes());
+    s.out
+        .notice(format!("Included files: {}", files.len()).as_bytes());
     for file in files {
-        out::writeln(format!("File: {}", lossy(&file)).as_bytes());
+        s.out.writeln(format!("File: {}", lossy(&file)).as_bytes());
     }
     Ret::Success
 }
@@ -43,11 +44,12 @@ fn class_word(shape: read::Shape) -> &'static str {
 }
 
 /// `PHPDBG_INFO(classes)`.
-pub fn classes(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+pub fn classes(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let classes = here.request().map_or_else(Vec::new, read::user_classes);
-    out::notice(format!("User Classes ({})", classes.len()).as_bytes());
+    s.out
+        .notice(format!("User Classes ({})", classes.len()).as_bytes());
     for class in classes {
-        out::writeln(
+        s.out.writeln(
             format!(
                 "User {} {} ({})",
                 class_word(class.shape),
@@ -57,7 +59,7 @@ pub fn classes(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
             .as_bytes(),
         );
         if let Some(parent) = &class.unlinked_parent {
-            out::writeln(
+            s.out.writeln(
                 format!(
                     "|-------- User Class {} (not yet linked because declaration for parent was not encountered when declaring the class)",
                     lossy(parent)
@@ -65,7 +67,7 @@ pub fn classes(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
                 .as_bytes(),
             );
         }
-        out::writeln(
+        s.out.writeln(
             format!("|---- in {} on line {}", lossy(&class.file), class.lines.0).as_bytes(),
         );
     }
@@ -73,14 +75,16 @@ pub fn classes(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 }
 
 /// `PHPDBG_INFO(funcs)`.
-pub fn funcs(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+pub fn funcs(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let functions = here
         .request()
         .map_or_else(Vec::new, |req| read::user_functions(req));
-    out::notice(format!("User Functions ({})", functions.len()).as_bytes());
+    s.out
+        .notice(format!("User Functions ({})", functions.len()).as_bytes());
     for function in functions {
-        out::write(format!("|-------- {}", lossy(&function.name)).as_bytes());
-        out::writeln(
+        s.out
+            .write(format!("|-------- {}", lossy(&function.name)).as_bytes());
+        s.out.writeln(
             format!(" in {} on line {}", lossy(&function.file), function.lines.0).as_bytes(),
         );
     }
@@ -88,9 +92,9 @@ pub fn funcs(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 }
 
 /// `PHPDBG_INFO(error)`.
-pub fn error(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+pub fn error(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     match here.request().and_then(read::last_error) {
-        Some((message, file, line)) => out::writeln(
+        Some((message, file, line)) => s.out.writeln(
             format!(
                 "Last error: {} at {} line {line}",
                 lossy(&message),
@@ -98,7 +102,7 @@ pub fn error(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
             )
             .as_bytes(),
         ),
-        None => out::notice(b"No error found!"),
+        None => s.out.notice(b"No error found!"),
     }
     Ret::Success
 }
@@ -122,7 +126,7 @@ fn type_name(value: &Shown) -> &'static str {
 /// `VARIABLEINFO` over one row: the address column php prints a pointer
 /// in, the owners, the type, the name, and the value where the type has
 /// a short form.
-fn variable_row(name: &[u8], refs: u32, value: &Shown, sigil: &str, address: usize) {
+fn variable_row(out: &mut Out, name: &[u8], refs: u32, value: &Shown, sigil: &str, address: usize) {
     let (isref, value) = match value {
         Shown::Reference { value, .. } => ("&", value.as_ref()),
         other => ("", other),
@@ -152,14 +156,14 @@ fn variable_row(name: &[u8], refs: u32, value: &Shown, sigil: &str, address: usi
         Shown::Resource { .. } => String::from("\n|-------(typeof)------> (unknown)\n"),
         _ => String::new(),
     };
-    out::writeln(format!("{head}{tail}").as_bytes());
+    out.writeln(format!("{head}{tail}").as_bytes());
 }
 
 /// `phpdbg_print_symbols(0)`.
-pub fn vars(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+pub fn vars(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let executing = here.executing();
     let Some((req, frame)) = here.standing().filter(|_| executing) else {
-        out::error(b"No active op array!");
+        s.out.error(b"No active op array!");
         return Ret::Success;
     };
     let rows = shown::variables(req, frame);
@@ -183,52 +187,78 @@ pub fn vars(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
             format!("Variables in {} ({})", lossy(&file), rows.len())
         }
     };
-    out::notice(title.as_bytes());
+    s.out.notice(title.as_bytes());
     if !rows.is_empty() {
-        out::out(b"Address            Refs    Type      Variable\n");
+        s.out
+            .out(b"Address            Refs    Type      Variable\n");
         for (at, row) in rows.iter().enumerate() {
-            variable_row(&row.name, row.refs, &row.value, "$", 0x1000 + at * 16);
+            variable_row(
+                &mut s.out,
+                &row.name,
+                row.refs,
+                &row.value,
+                "$",
+                0x1000 + at * 16,
+            );
         }
     }
     Ret::Success
 }
 
 /// `phpdbg_print_symbols(1)`.
-pub fn globals(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+pub fn globals(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let executing = here.executing();
     let Some((req, _)) = here.standing().filter(|_| executing) else {
-        out::error(b"No active op array!");
+        s.out.error(b"No active op array!");
         return Ret::Success;
     };
     let rows = shown::superglobals(req);
-    out::notice(format!("Superglobal variables ({})", rows.len()).as_bytes());
+    s.out
+        .notice(format!("Superglobal variables ({})", rows.len()).as_bytes());
     if !rows.is_empty() {
-        out::out(b"Address            Refs    Type      Variable\n");
+        s.out
+            .out(b"Address            Refs    Type      Variable\n");
         for (at, row) in rows.iter().enumerate() {
-            variable_row(&row.name, row.refs, &row.value, "$", 0x2000 + at * 16);
+            variable_row(
+                &mut s.out,
+                &row.name,
+                row.refs,
+                &row.value,
+                "$",
+                0x2000 + at * 16,
+            );
         }
     }
     Ret::Success
 }
 
 /// `PHPDBG_INFO(constants)`.
-pub fn constants(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+pub fn constants(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let rows = here.request().map_or_else(Vec::new, shown::user_constants);
-    out::notice(format!("User-defined constants ({})", rows.len()).as_bytes());
+    s.out
+        .notice(format!("User-defined constants ({})", rows.len()).as_bytes());
     if !rows.is_empty() {
-        out::out(b"Address            Refs    Type      Constant\n");
+        s.out
+            .out(b"Address            Refs    Type      Constant\n");
         for (at, row) in rows.iter().enumerate() {
-            variable_row(&row.name, row.refs, &row.value, "", 0x3000 + at * 16);
+            variable_row(
+                &mut s.out,
+                &row.name,
+                row.refs,
+                &row.value,
+                "",
+                0x3000 + at * 16,
+            );
         }
     }
     Ret::Success
 }
 
 /// `PHPDBG_INFO(literal)`.
-pub fn literal(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+pub fn literal(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let executing = here.executing();
     let Some((req, frame)) = here.standing().filter(|_| executing) else {
-        out::error(b"Not executing!");
+        s.out.error(b"Not executing!");
         return Ret::Success;
     };
     let literals = shown::literals(req, frame);
@@ -252,14 +282,15 @@ pub fn literal(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
             format!("Literal Constants in {} ({count})", lossy(&file))
         }
     };
-    out::notice(title.as_bytes());
+    s.out.notice(title.as_bytes());
     for (at, literal) in literals.iter().enumerate() {
         if matches!(literal, Shown::Null) {
             continue;
         }
-        out::write(format!("|-------- C{at} -------> [").as_bytes());
-        out::write(&flat(literal));
-        out::out(b"]\n");
+        s.out
+            .write(format!("|-------- C{at} -------> [").as_bytes());
+        s.out.write(&flat(literal));
+        s.out.out(b"]\n");
     }
     Ret::Success
 }
@@ -536,7 +567,7 @@ pub fn stackframe(req: &mut Request, frame: FrameRef, above: u32) -> Option<Stri
 /// frame #4: {main} at %SCRATCH%/witness.php:13
 /// prompt>
 /// ```
-pub fn backtrace(req: &mut Request, frame: FrameRef, above: u32, limit: usize) {
+pub fn backtrace(out: &mut Out, req: &mut Request, frame: FrameRef, above: u32, limit: usize) {
     let rows = trace_from(req, above, limit);
     let position = read::position(req, frame);
     let mut file = position.as_ref().map(|p| p.file.clone());
@@ -546,7 +577,7 @@ pub fn backtrace(req: &mut Request, frame: FrameRef, above: u32, limit: usize) {
     for row in &rows {
         match &file {
             Some(file) => {
-                out::out(
+                out.out(
                     format!(
                         "frame #{at}: {} at {}:{line}\n",
                         prototype(req, row),
@@ -557,7 +588,7 @@ pub fn backtrace(req: &mut Request, frame: FrameRef, above: u32, limit: usize) {
                 at += 1;
             }
             None => {
-                out::out(format!(" => {} (internal function)\n", prototype(req, row)).as_bytes());
+                out.out(format!(" => {} (internal function)\n", prototype(req, row)).as_bytes());
             }
         }
         file.clone_from(&row.file);
@@ -570,5 +601,5 @@ pub fn backtrace(req: &mut Request, frame: FrameRef, above: u32, limit: usize) {
         None => format!(" => {} (internal function)", lossy(&last_function)),
         Some(file) => format!("frame #{at}: {{main}} at {}:{line}", lossy(&file)),
     };
-    out::writeln(last.as_bytes());
+    out.writeln(last.as_bytes());
 }
