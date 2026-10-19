@@ -59,6 +59,7 @@ pub mod reading;
 mod reply;
 mod rust;
 pub mod scratch;
+mod seat;
 mod sources;
 pub mod status;
 pub mod steer;
@@ -235,6 +236,7 @@ fn command_line() -> Result<()> {
     }
     let manifest = Manifest::load(&root)?;
     let store = Store::of_workspace(&root);
+    let _seat = seat::of_command(&cli.command);
     match cli.command {
         ask @ Command::Status { .. } => status_command(&manifest, &store, &root, ask),
         // The judge itself returned above; what is left of `permit` are the

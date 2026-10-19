@@ -95,6 +95,7 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
     if crates.is_empty() {
         return Ok(Vec::new());
     }
+    let _seat = crate::seat::Seats::of_env().take(INSTRUMENT);
     let mut readings = Vec::with_capacity(crates.len());
     for run in batch::runs(root, &crates)? {
         let built = Run::of(root, &["build", "--keep-going"], &run, Targets::Tests)?;
