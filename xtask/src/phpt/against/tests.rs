@@ -298,13 +298,13 @@ fn after_asks_git_nothing_while_the_engines_sources_stand_still() {
     };
     let written = "the engine's sources were written while the subset ran";
 
-    let (said, asked) = git::asked(|| (0..5).map(|_| after()).collect::<Vec<_>>());
+    let (said, asked) = git::asked(root, || (0..5).map(|_| after()).collect::<Vec<_>>());
     assert_eq!(asked, Vec::<Vec<String>>::new());
     assert!(said.iter().all(|m| !m.contains(written)), "{said:?}");
 
     // Outside the engine's sources, a file written is no question.
     fs::write(root.join("notes.txt"), "beside the engine\n").unwrap();
-    let (said, asked) = git::asked(after);
+    let (said, asked) = git::asked(root, after);
     assert!(
         asked.is_empty() && !said.contains(written),
         "{asked:?} {said}"
@@ -314,10 +314,10 @@ fn after_asks_git_nothing_while_the_engines_sources_stand_still() {
     let source = root.join("crates/php_engine/src/lib.rs");
     let bytes = fs::read(&source).unwrap();
     fs::write(&source, &bytes).unwrap();
-    let (said, asked) = git::asked(|| (after(), after()));
+    let (said, asked) = git::asked(root, || (after(), after()));
     assert!(!asked.is_empty() && !said.0.contains(written), "{said:?}");
     assert!(!said.1.contains(written), "{said:?}");
-    let (_, again) = git::asked(after);
+    let (_, again) = git::asked(root, after);
     assert!(again.is_empty(), "{again:?}");
 
     fs::write(&source, "// written while the subset ran\n").unwrap();
