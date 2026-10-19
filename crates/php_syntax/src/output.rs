@@ -13,8 +13,6 @@
 //! [`token_text`] and [`TokenValue::of`] answer from, so the compiler
 //! reads a filtered name or string the way it reads an unfiltered one.
 
-use std::collections::BTreeMap;
-
 use crate::tree::{
     HeredocExpr, InterpolatedStringExpr, LiteralExpr, ShellExecExpr, StringPart, TokenId, Tree,
 };
@@ -24,15 +22,20 @@ use crate::{Parsed, SyntaxKind, TokenValue};
 /// What the token filter made of each token it converted, by the
 /// token's index: a name's whole text, its `$`, `\` or `namespace\`
 /// prefix kept as written and the rest converted, or a string's bytes
-/// once its escapes are read. Empty where no filter stands.
+/// once its escapes are read, in the order of the tokens. Empty where no
+/// filter stands, which a parse gives up with nothing to walk.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Filtered(BTreeMap<u32, Box<[u8]>>);
+pub struct Filtered(Vec<(u32, Box<[u8]>)>);
 
 impl Filtered {
     /// What the filter made of `token`, where it converted it.
     #[must_use]
     pub fn get(&self, token: TokenId) -> Option<&[u8]> {
-        self.0.get(&token.0).map(|bytes| &bytes[..])
+        let at = self
+            .0
+            .binary_search_by_key(&token.0, |(index, _)| *index)
+            .ok()?;
+        self.0.get(at).map(|(_, bytes)| &bytes[..])
     }
 }
 
@@ -75,7 +78,7 @@ impl Parsed<'_> {
     /// hands through it, and keep what it made ([`Filtered`]).
     fn filter_tokens(&mut self, filter: &mut dyn FnMut(&[u8]) -> Vec<u8>) {
         self.filtered = Filtered::default();
-        let mut made = BTreeMap::new();
+        let mut made = Vec::new();
         for (index, token) in self.tokens.iter().enumerate() {
             let Some(from) = copied_from(token.kind) else {
                 continue;
@@ -87,7 +90,7 @@ impl Parsed<'_> {
             let from = from.min(text.len());
             let mut converted = text[..from].to_vec();
             converted.extend(filter(&text[from..]));
-            made.insert(index, converted.into_boxed_slice());
+            made.push((index, converted.into_boxed_slice()));
         }
         let tree = &self.tree;
         let mut strings: Vec<(Holder<'_>, TokenId)> = Vec::new();
@@ -125,9 +128,14 @@ impl Parsed<'_> {
         }
         for (holder, token) in strings {
             if let Some(TokenValue::Bytes(bytes)) = TokenValue::of(self, holder, token) {
-                made.insert(token.0, filter(&bytes).into_boxed_slice());
+                made.push((token.0, filter(&bytes).into_boxed_slice()));
             }
         }
+        // A token made twice keeps what it was made last, as a map would.
+        made.sort_by_key(|(index, _)| *index);
+        made.reverse();
+        made.dedup_by_key(|(index, _)| *index);
+        made.reverse();
         self.filtered = Filtered(made);
     }
 }

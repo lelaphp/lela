@@ -491,7 +491,7 @@ impl<'a> Building<'a> {
         } = self;
         counts.fill(0);
         let stores = bump.alloc_slice_fill_iter(stores.into_iter().map(Growing::freeze));
-        (bump.alloc(Nodes { slots, stores }), counts)
+        (bump.alloc_with(|| Nodes { slots, stores }), counts)
     }
 }
 

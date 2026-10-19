@@ -315,7 +315,7 @@ pub(crate) fn build_in<'a>(
         missing,
         ..
     } = builder;
-    let lists = bump.alloc(pools.freeze(bump));
+    let lists = bump.alloc_with(|| pools.freeze(bump));
     let (nodes, counts) = nodes.freeze();
     events.clear();
     pending.clear();
