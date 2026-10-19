@@ -41,7 +41,13 @@ pub(crate) trait Operand: Copy {
         } else {
             self.slot(code, field).and_then(|at| slots.get(at))
         };
-        found.copied().unwrap_or(Zval::UNDEF)
+        // The zval copied out of the reference itself, never through an
+        // `Option<Zval>`: inlined into every arm, such a temporary is a
+        // stack slot of its own in the debug build's `serve_frame`.
+        match found {
+            Some(z) => *z,
+            None => Zval::UNDEF,
+        }
     }
 }
 
