@@ -374,11 +374,7 @@ impl Request {
     /// `zend_hash_lookup` over `a`, which has one owner: the entry at
     /// `key` in place, laid down holding `null` where the table has none,
     /// which is what a `FETCH_DIM_W` and an `ASSIGN_DIM` write through.
-    pub(crate) fn array_lookup(
-        &mut self,
-        a: Arr,
-        key: php_heap::Key,
-    ) -> Result<Option<ZvalRef>, Thrown> {
+    pub(crate) fn array_lookup(&mut self, a: Arr, key: php_heap::Key) -> Result<ZvalRef, Thrown> {
         let entry = self.heap.array_lookup(a, key);
         self.fatal_of(entry)
     }
