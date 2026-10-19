@@ -941,17 +941,11 @@ pub(crate) struct Shared {
     /// ones entered until an entry's `realpath_cache_ttl` expires, as
     /// every request of one php-fpm child does (#2941).
     pub(crate) realpath_cache: crate::virtual_cwd::RealpathCache,
-    /// The engine's interned strings (design §5.2, §5.14): what a unit's
-    /// constant strings enter as it is published, grown here alone and
-    /// read by every request thread with nothing taken.
-    strings: Mutex<Strings>,
-    /// php's `interned_strings_permanent` as `zend_interned_strings_switch_storage`
-    /// leaves it after `MINIT`: `zend_known_strings`, and every name and
-    /// string the engine's and the bundle's registrations intern
-    /// ([`permanent_names`]), interned at startup and frozen, so a request
-    /// asking for one finds it here and allocates nothing
-    /// ([`Shared::permanent`]).
-    names: Strings,
+    /// The engine's interned strings (design §5.2, §5.14), the permanent
+    /// names and the table a unit's constant strings enter as it is
+    /// published, which every epoch keeps too
+    /// ([`crate::arena::Interned`]).
+    interned: crate::arena::Interned,
     /// The string a native's parameter defaults to where its stub writes
     /// a string, made once at startup and immutable after: an omitted
     /// argument is php's C default, which costs the request nothing, and
@@ -1637,7 +1631,7 @@ impl Shared {
         origin: Origin<'_>,
         stack: StackLimit,
     ) -> Result<Unit, CompileError> {
-        let mut strings = match self.strings.lock() {
+        let mut strings = match self.interned.strings.lock() {
             Ok(strings) => strings,
             // The table is append-only and every string in it was
             // finished before it was published, so what a thread that
@@ -1651,7 +1645,7 @@ impl Shared {
             self.declared(),
             stack,
             &mut PermanentStrings {
-                names: &self.names,
+                names: &self.interned.names,
                 strings: &mut strings,
             },
             // A unit for every request is compiled on the thread that
@@ -1836,7 +1830,7 @@ impl Shared {
     /// ([`Shared::publish_compiled`]); none where the bytes are no whole
     /// unit.
     pub(crate) fn decode_kept(&self, body: &[u8]) -> Option<Unit> {
-        let mut strings = match self.strings.lock() {
+        let mut strings = match self.interned.strings.lock() {
             Ok(strings) => strings,
             // As in `publish`: the table is append-only and consistent.
             Err(poisoned) => poisoned.into_inner(),
@@ -1844,7 +1838,7 @@ impl Shared {
         crate::unit_cache::decode(
             body,
             &mut PermanentStrings {
-                names: &self.names,
+                names: &self.interned.names,
                 strings: &mut strings,
             },
         )
@@ -1895,14 +1889,14 @@ impl Shared {
     /// declared, or `None` for one no declaration made
     /// (`zend_string_init_interned_request`'s first lookup).
     pub(crate) fn permanent(&self, bytes: &[u8]) -> Option<php_heap::Str> {
-        self.names.find(bytes)
+        self.interned.names.find(bytes)
     }
 
     /// `ZSTR_KNOWN(known)`: the permanent string startup interned for
     /// it, read by its position with no hash; `None` where the table
     /// refused it.
     pub(crate) fn known(&self, known: Known) -> Option<php_heap::Str> {
-        self.names.known(known as usize)
+        self.interned.names.known(known as usize)
     }
 
     /// The string a native's parameter defaults to where its stub writes
@@ -1920,7 +1914,7 @@ impl Shared {
         if let Some(name) = self.permanent(bytes) {
             return Some(name);
         }
-        let strings = match self.strings.lock() {
+        let strings = match self.interned.strings.lock() {
             Ok(strings) => strings,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -1930,7 +1924,7 @@ impl Shared {
     /// How many strings the engine's table holds, opcache's
     /// `interned_strings_usage.number_of_strings`.
     pub(crate) fn interned_strings(&self) -> usize {
-        match self.strings.lock() {
+        match self.interned.strings.lock() {
             Ok(strings) => strings.count(),
             Err(poisoned) => poisoned.into_inner().count(),
         }
@@ -2021,7 +2015,7 @@ impl Shared {
         if let Some((_, z)) = self.sapi_names.iter().find(|(n, _)| n.as_ref() == sapi) {
             return Some(exec::value_of(*z));
         }
-        let mut strings = match self.strings.lock() {
+        let mut strings = match self.interned.strings.lock() {
             Ok(strings) => strings,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -3555,10 +3549,15 @@ impl EngineBuilder {
         let mut strings = Strings::new();
         let sapi_names = crate::constants::host_names(&mut strings);
         let units = UnitCache::new(self.hooked, self.extended_info, &functions, &classes);
+        let interned = crate::arena::Interned {
+            names: Arc::new(names),
+            strings: Arc::new(Mutex::new(strings)),
+        };
         let arena = crate::arena::Epochs::of(crate::arena::Arena::of_engine(
             Arc::clone(&records),
             functions.len().saturating_add(methods.len()),
             crate::unit_cache::Files::new(MAX_ACCELERATED_FILES),
+            interned.clone(),
         ));
         let layer = supplied.stream_hooks.get().map(|hooks| (hooks.state)());
         let realpath_cache = crate::virtual_cwd::RealpathCache::of(|name| master_of(&ini, name));
@@ -3624,8 +3623,7 @@ impl EngineBuilder {
                 timer: crate::interrupt::Timer::default(),
                 chunks: Arc::default(),
                 realpath_cache,
-                strings: Mutex::new(strings),
-                names,
+                interned,
                 default_strings,
                 map_ptr_last: AtomicU32::new(0),
                 started: OnceLock::new(),
@@ -7412,7 +7410,7 @@ mod tests {
 
     /// How many strings the engine's table holds.
     fn strings_of(engine: &Engine) -> usize {
-        match engine.shared.strings.lock() {
+        match engine.shared.interned.strings.lock() {
             Ok(strings) => strings.count(),
             Err(poisoned) => poisoned.into_inner().count(),
         }

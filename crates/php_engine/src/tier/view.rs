@@ -25,8 +25,10 @@ use crate::api::values::ClassId;
 use crate::arena::Arena;
 
 /// A hold on the epoch a request started in (design §5.14): its arena,
-/// whose published classes, held units and their words stand while any
-/// hold does, whatever restart replaced it since. `Send` and `Sync`, so
+/// whose published classes, held units and their words, and the
+/// engine's interned strings they name, stand while any hold does,
+/// whatever restart replaced it since and whether or not the engine
+/// still stands. `Send` and `Sync`, so
 /// a claim and a view can leave the request's thread.
 #[derive(Clone)]
 pub struct Epoch(Arc<Arena>);
@@ -71,7 +73,7 @@ impl Epoch {
         let unit = unit.published();
         let files = crate::unit_cache::Files::new(1);
         files.funcs.publish(&unit);
-        let arena = Arena::of_engine(Arc::from([]), 0, files);
+        let arena = Arena::of_engine(Arc::from([]), 0, files, crate::arena::Interned::default());
         (Epoch(Arc::new(arena)), FuncRef(unit.main.runtime_cache))
     }
 }
