@@ -93,6 +93,16 @@ enum IniOrder {
     Sorted,
 }
 
+impl IniOrder {
+    /// `rows`, handed over in registration order, put in this order,
+    /// each named by `name`.
+    fn arrange<T>(self, rows: &mut [T], name: impl Fn(&T) -> &[u8]) {
+        if self == IniOrder::Sorted {
+            rows.sort_by(|a, b| ini_key_compare(name(a), name(b)));
+        }
+    }
+}
+
 /// `ini_key_compare` (`Z/Zend/zend_ini.c:178`) over two names:
 /// `zend_binary_strcasecmp`, the bytes compared ASCII case-blind up to
 /// the shorter, and the shorter first where one is the other's prefix.
@@ -992,7 +1002,7 @@ impl Request {
             .filter_map(|at| u32::try_from(at).ok())
             .flat_map(|at| self.registered_ini(ExtensionId(at)))
             .collect();
-        self.walked(entries)
+        self.in_table_order(entries)
     }
 
     /// `zend_ini_sort_entries()` (`Z/Zend/zend_ini.c:195`), which
@@ -1013,12 +1023,12 @@ impl Request {
         self.ini.order = IniOrder::Sorted;
     }
 
-    /// Entries in registration order, as the table holds them now
-    /// ([`IniOrder`]).
-    fn walked(&self, mut entries: Vec<IniEntry>) -> Vec<IniEntry> {
-        if self.ini.order == IniOrder::Sorted {
-            entries.sort_by(|a, b| ini_key_compare(&a.decl.name.0, &b.decl.name.0));
-        }
+    /// Entries handed over in registration order, put in the order the
+    /// table holds them now ([`IniOrder`]).
+    fn in_table_order(&self, mut entries: Vec<IniEntry>) -> Vec<IniEntry> {
+        self.ini
+            .order
+            .arrange(&mut entries, |entry| &entry.decl.name.0);
         entries
     }
 
@@ -1394,14 +1404,14 @@ impl Request {
     }
 
     /// The ini entries an extension declared, in the order
-    /// `EG(ini_directives)` holds them ([`IniOrder`]): as it declared
-    /// them, where `zend_register_ini_entries` put them, until the
-    /// request sorts the table: each with the value in force, the
-    /// request's `ini_set` over the engine's startup value, and the
-    /// startup value again as `original` where the request changed it.
+    /// `EG(ini_directives)` holds them ([`IniOrder`]), which is the
+    /// order `zend_register_ini_entries` put them in until the request
+    /// sorts the table. Each carries the value in force, the request's
+    /// `ini_set` over the engine's startup value, and the startup value
+    /// again as `original` where the request changed it.
     #[must_use]
     pub fn extension_ini(&self, extension: ExtensionId) -> Vec<IniEntry> {
-        self.walked(self.registered_ini(extension))
+        self.in_table_order(self.registered_ini(extension))
     }
 
     /// An extension's entries in the order it declared them.
@@ -1868,9 +1878,9 @@ impl Request {
             return;
         }
         let mut rows: Vec<&(String, IniCell, IniCell)> = rows.iter().collect();
-        if self.ini.order == IniOrder::Sorted {
-            rows.sort_by(|(a, ..), (b, ..)| ini_key_compare(a.as_bytes(), b.as_bytes()));
-        }
+        self.ini
+            .order
+            .arrange(&mut rows, |(name, ..)| name.as_bytes());
         let text = self.phpinfo_as_text();
         let mut out = Vec::new();
         let value = |out: &mut Vec<u8>, cell: &IniCell| match cell {

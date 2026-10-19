@@ -1402,8 +1402,9 @@ fn error_log(
 /// array|false`, php's `PHP_FUNCTION(ini_get_all)`: `EG(ini_directives)`
 /// sorted by `zend_ini_sort_entries`, a case-blind comparison of the
 /// names, for the rest of the request ([`Request::ini_sort_entries`]),
-/// before the extension is looked up, each entry as its current value or, with `$details`, as its
-/// `global_value`, `local_value` and `access`; with an extension named
+/// before the extension is looked up, each entry as its current value
+/// or, with `$details`, as its `global_value`, `local_value` and
+/// `access`; with an extension named
 /// as `module_registry` keys it, lower-case, its own entries alone,
 /// `core` being the one name every entry is walked for. A name no
 /// extension of the bundle has is the warning and `false`. An entry with
