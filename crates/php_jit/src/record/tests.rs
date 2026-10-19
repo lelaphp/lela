@@ -22,12 +22,15 @@ use crate::types::ExitId;
 /// included file's own code), then, for `record.start=loop`, the first
 /// loop header it reaches and, for `return`, the first return, stepping
 /// only within that frame. `record.compiled` and `record.blacklisted`
-/// name functions met before whose entry words are settled so first.
-const PLAN: [&str; 4] = [
+/// name functions met before whose entry words are settled so first;
+/// `record.compiled_inner` names one whose loop headers after its first
+/// are settled compiled.
+const PLAN: [&str; 5] = [
     "record.function",
     "record.start",
     "record.compiled",
     "record.blacklisted",
+    "record.compiled_inner",
 ];
 
 /// What the recording tier keeps, the request's: the op arrays of the
@@ -140,13 +143,7 @@ fn settle_words(req: &mut Request) {
             .map(|name| (name, Outcome::Blacklist(Stop::NotSupported))),
     );
     for (name, outcome) in settled {
-        let func = req
-            .state::<Kept>()
-            .funcs
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, f)| *f);
-        let Some(func) = func else { continue };
+        let Some(func) = met(req, name) else { continue };
         let holder = Holder::Root {
             epoch: tier::epoch(req),
             func,
@@ -156,6 +153,39 @@ fn settle_words(req: &mut Request) {
             policy::settle(claim, &outcome);
         }
     }
+    let inner = plan(req, "record.compiled_inner").unwrap_or_default();
+    let Some(func) = met(req, &inner) else { return };
+    let mut view = UnitView::new(req);
+    let headers: Vec<SafepointIdx> = view
+        .hold(req, func)
+        .then(|| view.op_array(func))
+        .flatten()
+        .map(|code| {
+            (0..code.oplines.len())
+                .filter_map(|at| header_at(code, OplineIdx(u32::try_from(at).ok()?)))
+                .skip(1)
+                .collect()
+        })
+        .unwrap_or_default();
+    for at in headers {
+        let holder = Holder::Root {
+            epoch: tier::epoch(req),
+            func,
+            at,
+        };
+        if let Some(claim) = policy::claim(holder, &policy, Start::Loop) {
+            policy::settle(claim, &Outcome::Published(trace(7)));
+        }
+    }
+}
+
+/// The op array of the function `name` the tier met.
+fn met(req: &mut Request, name: &[u8]) -> Option<FuncRef> {
+    req.state::<Kept>()
+        .funcs
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, f)| *f)
 }
 
 /// `frame` stepped within itself to where `start` records from: the
@@ -445,7 +475,8 @@ fn the_stops_before_a_step() -> Result<(), String> {
 /// php's stops at a header and at a call: an entry trace reaching a loop
 /// stops at the inner loop, a loop trace leaving its function exits the
 /// loop, an outer loop's trace stops at its inner loop, a callee whose
-/// entry is compiled is linked to, and a blacklisted one stops the trace.
+/// entry is compiled is linked to, a blacklisted one stops the trace, and
+/// an outer loop's trace reaching a compiled inner loop stops there.
 #[test]
 fn the_stops_at_a_header_and_a_call() -> Result<(), String> {
     let (record, _) = recorded(
@@ -476,6 +507,37 @@ fn the_stops_at_a_header_and_a_call() -> Result<(), String> {
     plan.push(("record.blacklisted", "g"));
     let (record, _) = recorded(&plan, calls)?;
     assert_eq!(record.stop, Stop::BlackList);
+    let mut plan = at("f", "loop");
+    plan.push(("record.compiled_inner", "f"));
+    let (record, out) = recorded(
+        &plan,
+        "function f() { $s = 0; for ($i = 0; $i < 2; $i++) { for ($j = 0; $j < 2; $j++) { $s++; } } return $s; }
+        echo f(), \"\\n\";",
+    )?;
+    assert_eq!(
+        (record.stop, out.as_str()),
+        (Stop::CompiledLoop, "4\n"),
+        "an outer loop's trace reaching a compiled inner loop"
+    );
+    Ok(())
+}
+
+/// php's megamorphic call under `opcache.jit_max_polymorphic_calls=0`: a
+/// method call is one the interpreter makes (`zend_jit_may_be_polymorphic_call`).
+#[test]
+fn a_megamorphic_call_stops_for_the_interpreter() -> Result<(), String> {
+    let program = "class C { function m() { return 1; } }
+        function f($o) { return $o->m() + 1; } echo f(new C), \"\\n\";";
+    let mut plan = at("f", "enter");
+    plan.push(("opcache.jit_max_polymorphic_calls", "0"));
+    let (record, out) = recorded(&plan, program)?;
+    assert_eq!((record.stop, out.as_str()), (Stop::Interpreter, "2\n"));
+    let (record, _) = recorded(&at("f", "enter"), program)?;
+    assert_ne!(
+        record.stop,
+        Stop::Interpreter,
+        "two polymorphic calls are php's default"
+    );
     Ok(())
 }
 
