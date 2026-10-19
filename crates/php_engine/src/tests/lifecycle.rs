@@ -10,7 +10,8 @@ use crate::api::abi::{
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::engine::{
-    Engine, HostPage, HostServes, IniOrigin, Method, NotAlone, RequestDescription, WebRequest,
+    Engine, EngineBuilder, HostPage, HostServes, IniOrigin, Method, NotAlone, RequestDescription,
+    WebRequest,
 };
 use crate::test::{Capture, handed_back};
 
@@ -1102,4 +1103,68 @@ fn a_diagnostic_raised_at_engine_end_is_displayed_and_logged_where_the_host_left
     serve(&unheard);
     drop(unheard);
     assert_eq!(rec.events().handed(&EngineEnd(None)), [0, 0]);
+}
+
+/// A tier whose state is `test_ext_3`'s: its request and engine states,
+/// its lifecycle and its ini entry `test_ext_3.observe_allocations`.
+struct Declaring;
+
+impl crate::tier::Tier for Declaring {
+    fn safepoint(
+        _: &mut Request,
+        _: php_heap::FrameRef,
+        _: crate::tier::Site,
+    ) -> crate::tier::Flow {
+        crate::tier::Flow::Continue
+    }
+
+    fn extension() -> Option<Extension> {
+        Some(TestExt::<3>::observing_allocations())
+    }
+}
+
+/// What a program reads of the loaded extensions and of `test_ext_3`'s ini entry
+/// on an engine the builder makes, and what `test_ext_3` was handed from
+/// the engine's build to its drop.
+fn lived(builder: EngineBuilder) -> (String, Events) {
+    let rec = Recording::start();
+    let engine = builder.build();
+    let served = engine.serve_capture(
+        "<?php foreach (get_loaded_extensions() as $m) { echo $m, ','; }\n\
+         $ini = ini_get('test_ext_3.observe_allocations');\n\
+         echo '|', extension_loaded('test_ext_3') ? 'loaded' : 'not loaded', '|', \
+         $ini === false ? 'no entry' : $ini;",
+        Capture::default(),
+    );
+    drop(engine);
+    (
+        String::from_utf8_lossy(&served.stdout).into_owned(),
+        rec.events(),
+    )
+}
+
+/// The tier declares its state as an extension declares it and is no
+/// extension (`jit-design.md` §2.3, §4; #2988): an engine bound to a
+/// tier whose extension is named `test_ext_3` lists the bundle's
+/// extensions and no other, in `get_loaded_extensions()` and `extension_loaded()`,
+/// while the tier's ini entry answers `ini_get`, and its request and
+/// engine states are built, reached and dropped as the same extension's
+/// are in the bundle.
+#[test]
+fn a_tiers_extension_is_served_as_the_bundles_are_and_is_no_module() {
+    let (plain, _) = lived(Engine::cli_builder());
+    let (bundled, as_bundled) =
+        lived(Engine::cli_builder().extensions(&[TestExt::<3>::observing_allocations()]));
+    let (tiered, as_tier) = lived(Engine::cli_builder().tier::<Declaring>());
+    let loaded = plain.split('|').next().unwrap_or_default();
+    assert_eq!(plain, format!("{loaded}|not loaded|no entry"));
+    assert_eq!(bundled, format!("{loaded}test_ext_3,|loaded|0"));
+    assert_eq!(tiered, format!("{loaded}|not loaded|0"));
+    assert!(
+        as_tier.handed(&EngineStateBuilt(0)) == [3]
+            && as_tier.handed(&Rinit(Some(0))) == [3]
+            && as_tier.handed(&EngineStateDropped(0)) == [3],
+        "{as_tier:?}"
+    );
+    assert_eq!(as_tier, as_bundled);
 }

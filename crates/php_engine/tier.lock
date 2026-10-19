@@ -1,10 +1,19 @@
-# tier.lock: what php_jit imports from php_engine, and the face php_sapi re-exports for the debugging host (design §4.5, §5.8 revision 51; jit-design.md §2, §2.4 revisions 8 and 15; ADR-0006), in two sections, face and kernels. The face is the mechanism and the writes and nothing that reads: a host reads frames, op arrays and the linked tables through the native face (#1911). Diffed per section by api-check once it measures sectioned locks; php_jit runs Mode::Off and imports from the face alone, which holds the items month one has laid down and the debugging host drives, and the kernels section is empty until the kernels! list names its first ops kernel.
+# tier.lock: what php_jit imports from php_engine, and the face php_sapi re-exports for the debugging host (design §4.5, §5.8 revision 51; jit-design.md §2, §2.4 revisions 8 and 15; ADR-0006), in two sections, face and kernels. The face is the mechanism and the writes and nothing that reads: a host reads frames, op arrays and the linked tables through the native face (#1911). Diffed per section by api-check once it measures sectioned locks; php_jit records under its lanes and imports from the face alone, which holds the items month one has laid down, the debugging host drives and the recorder reads between its steps (an operand's sample, a heap frame, the call being built), with the test face's serve_kept, through which a tier's test reads back the request state it kept; the kernels section is empty until the kernels! list names its first ops kernel.
 [face]
 api::request::Interrupt
 api::request::Interrupt::raised
+api::request::Request::bailing_out
+api::request::Request::engine
 api::request::Request::interrupt
+api::request::Request::state
+api::request::Request::write_stderr
+test::Capture
+test::Engine
+test::Served
+tier
 tier::Argument
 tier::Aside
+tier::Building
 tier::Called
 tier::ClassId
 tier::Epoch
@@ -17,15 +26,19 @@ tier::Fatal
 tier::Flow
 tier::FrameRef
 tier::FuncRef
+tier::FuncRef::at
+tier::FuncRef::offset
 tier::Hooked
 tier::MapPtrRaw
 tier::Refusal
 tier::Request
 tier::SafepointIdx
+tier::Sample
 tier::Site
 tier::Start
 tier::StartupIni
 tier::Stepped
+tier::Thrown
 tier::Tier
 tier::TraceNum
 tier::TraceNum::NONE
@@ -44,8 +57,10 @@ tier::Word::halves
 tier::Word::sealed
 tier::begin
 tier::below
+tier::building
 tier::call
 tier::catches
+tier::class_number
 tier::entry
 tier::epoch
 tier::evaluate
@@ -53,7 +68,11 @@ tier::evaluate_code
 tier::exit
 tier::frame
 tier::func
+tier::numbered_class
+tier::on_heap
 tier::restore
+tier::sample
+tier::serve_kept
 tier::set_argv
 tier::set_aside
 tier::set_stdin

@@ -388,7 +388,8 @@ mod tests {
     /// #2720 as it happened: an agent's `git merge` is admitted, and before
     /// the merge writes its marker a sibling agent of the same session has
     /// a line admitted that `cd`s into its own worktree past its first
-    /// command and runs `git merge --ff-only` there. The merge stays its
+    /// command and, joined by `&&` (#2995), runs `git merge --ff-only`
+    /// there. The merge stays its
     /// starter's: `allow-starter-commit.json` and the starter's abort pass,
     /// and `deny-sibling-commit.json` and the sibling's abort are refused.
     #[test]
@@ -416,7 +417,7 @@ mod tests {
         };
         admit(&saying(&own, "git merge --no-ff --no-commit t2634"));
         let elsewhere = format!(
-            "S=/var/empty; cat $S/owner; cd /var/empty/t2645; git merge --ff-only main; \
+            "S=/var/empty; cat $S/owner; cd /var/empty/t2645 && git merge --ff-only main; \
              cd {}; git log --oneline -3",
             dir.display()
         );

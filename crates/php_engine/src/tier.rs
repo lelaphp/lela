@@ -20,7 +20,10 @@
 //! stack they stand on, and the code a tier has the engine serve on its
 //! own account. What a frame, an op array or a linked table holds, a
 //! tier reads through the native face, as an extension does ([`frame`]
-//! hands a frame a step named over to it; #1911). `php_sapi` re-exports
+//! hands a frame a step named over to it; #1911). What no extension
+//! reads, the recorder reads here between its steps (`jit-design.md`
+//! §4.1): the type an operand's slot holds, whether a frame is a
+//! generator's, and the call an `INIT_*` began. `php_sapi` re-exports
 //! this face, so a host that binds a tier names none of `php_engine`.
 
 use std::sync::atomic::AtomicU32;
@@ -28,6 +31,9 @@ use std::sync::atomic::AtomicU32;
 /// What a tier declares its state with, as an extension does (design
 /// §4.4; `jit-design.md` §4, §5.3).
 pub use crate::api::abi::{Extension, ExtensionBuilder, Refusal, Start, StartupIni};
+/// What a tier's request start answers where it fails, as an
+/// extension's `rinit` does.
+pub use crate::api::raising::Thrown;
 use crate::observer::{Declared, ObservedOpcodes, Telling, Untold};
 use crate::{exec, interrupt};
 use php_unit::OpArray;
@@ -39,6 +45,7 @@ pub use php_heap::{Fatal, FrameRef};
 mod frames;
 mod held;
 pub(crate) mod published;
+mod sampled;
 #[cfg(dispatch = "tailcall")]
 mod tail;
 mod view;
@@ -47,6 +54,7 @@ pub use frames::{
     evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
 };
 use held::{Kept, Units};
+pub use sampled::{Building, Sample, building, class_number, numbered_class, on_heap, sample};
 pub use view::{Epoch, FuncRef, MapPtrRaw, UnitView, epoch, func, word};
 
 pub use crate::api::values::ClassId;
@@ -180,7 +188,7 @@ impl TraceNum {
 
     /// The tier's number as the engine keeps it.
     #[must_use]
-    pub fn from_raw(n: u32) -> TraceNum {
+    pub const fn from_raw(n: u32) -> TraceNum {
         TraceNum(n)
     }
 
@@ -208,6 +216,25 @@ pub fn trace_num(req: &Request) -> TraceNum {
 /// the tier's recording guard sets and clears it ([`trace_num`]).
 pub fn set_trace_num(req: &mut Request, n: TraceNum) {
     req.set_trace_num(n);
+}
+
+/// `source` served on `engine` as the test face serves a program named
+/// `name` in `dir` ([`crate::test::Engine::serve_capture_in`]), and the
+/// request state of type `T` as the request left it once it ended: what
+/// a tier under test kept in the state it declared through
+/// [`Tier::extension`], or an extension under test in the state it
+/// declared, read back by the test that served the program, since
+/// neither keeps anything anywhere else (`jit-design.md` §8, design
+/// §5.14 *Threads*). None where the request built no such state.
+#[cfg(any(test, feature = "test"))]
+#[must_use]
+pub fn serve_kept<T: Send + 'static>(
+    engine: &crate::engine::Engine,
+    dir: &std::path::Path,
+    name: &[u8],
+    source: &str,
+) -> (crate::test::Served, Option<T>) {
+    engine.serve_capture_keeping(dir, name, source)
 }
 
 /// What one `step` did to the frame chain (`jit-design.md` §2.2).

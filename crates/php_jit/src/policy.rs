@@ -152,8 +152,6 @@ pub(crate) enum OffBecause {
     Invalid,
     /// `opcache.jit_buffer_size` is zero.
     NoBuffer,
-    /// No `Backend` lowers a trace on this target.
-    NoBackend,
 }
 
 /// A line the tier's start logs (`jit-design.md` §4, §4.7).
@@ -190,7 +188,6 @@ impl std::fmt::Display for Note {
                 OffBecause::NotOn => "JIT: off: opcache.jit is not on",
                 OffBecause::Invalid => "JIT: off: opcache.jit is invalid",
                 OffBecause::NoBuffer => "JIT: off: opcache.jit_buffer_size is 0",
-                OffBecause::NoBackend => "JIT: off: no backend lowers a trace on this target",
             }),
         }
     }
@@ -419,16 +416,6 @@ impl Policy {
         }
     }
 
-    /// The `Policy` with no `Backend` to lower a trace: [`Mode::Off`], and
-    /// the one line that says why where it was on.
-    pub(crate) fn without_backend(mut self, notes: &mut Vec<Note>) -> Policy {
-        if self.mode != Mode::Off {
-            self.mode = Mode::Off;
-            notes.push(Note::Off(OffBecause::NoBackend));
-        }
-        self
-    }
-
     /// How the tier runs.
     #[inline(always)] // jit-design.md §4.9: one field load before any word is read
     #[allow(clippy::inline_always)]
@@ -443,6 +430,8 @@ impl Policy {
 
     /// The heat at which a word of `start`'s kind is claimed; none where
     /// php's `opcache.jit_hot_*` for it is zero, which installs no handler.
+    /// Under `force` and `exit-fuzz` every eligible root is claimed at its
+    /// first visit (`jit-design.md` §7), so the heat is one.
     #[inline(always)] // jit-design.md §4.9: one field load at a threshold test
     #[allow(clippy::inline_always)]
     pub(crate) fn threshold(&self, start: Start) -> Option<u32> {
@@ -452,7 +441,8 @@ impl Policy {
             Start::Return => self.hot_return,
             Start::Side { .. } => self.hot_side_exit,
         };
-        (hot != 0).then_some(u32::from(hot))
+        let lane = matches!(self.mode, Mode::Force | Mode::ExitFuzz);
+        (hot != 0).then_some(if lane { 1 } else { u32::from(hot) })
     }
 
     /// How many failed attempts blacklist a word of `start`'s kind:
@@ -464,6 +454,44 @@ impl Policy {
             Start::Loop | Start::Enter | Start::Return => self.blacklist_root,
         };
         limit.min(ATTEMPTS_MAX)
+    }
+
+    /// `opcache.jit_max_trace_length`: how many records a recording holds
+    /// before it stops with `TooLong`.
+    pub(crate) fn max_trace_length(&self) -> u32 {
+        self.max_trace_length
+    }
+
+    /// `opcache.jit_max_root_traces`: how many traces the tier numbers
+    /// before a root stops with `TooManyTraces`.
+    pub(crate) fn max_root_traces(&self) -> u32 {
+        self.max_root_traces
+    }
+
+    /// `opcache.jit_max_loop_unrolls`.
+    pub(crate) fn max_loop_unrolls(&self) -> u8 {
+        self.max_loop_unrolls
+    }
+
+    /// `opcache.jit_max_recursive_calls`.
+    pub(crate) fn max_recursive_calls(&self) -> u8 {
+        self.max_recursive_calls
+    }
+
+    /// `opcache.jit_max_recursive_returns`.
+    pub(crate) fn max_recursive_returns(&self) -> u8 {
+        self.max_recursive_returns
+    }
+
+    /// `opcache.jit_max_polymorphic_calls`.
+    pub(crate) fn max_polymorphic_calls(&self) -> u32 {
+        self.max_polymorphic_calls
+    }
+
+    /// Whether `opcache.jit_debug` asks for any line at all, which is
+    /// when the start's lines are written (`jit-design.md` §4).
+    pub(crate) fn debugs(&self) -> bool {
+        self.debug.0 != 0
     }
 
     /// One of php's `TRACE` lines for `event`, where `opcache.jit_debug`
@@ -591,13 +619,24 @@ pub(crate) enum Outcome {
     /// Blacklisted now, whatever the count: php's stops past
     /// `COMPILER_ERROR`, which no attempt recovers.
     Blacklist(Stop),
+    /// Cold again with no attempt counted: the recording became the trace
+    /// of another word, a loop php unrolled and rooted the trace at
+    /// (`zend_jit_trace_subtrace`), and this word's heat starts again as
+    /// php's `zend_jit_trace_hot_root` starts a root's count again.
+    Released,
 }
 
 /// The word's state, by one relaxed load: all ones reads blacklisted.
 #[inline(always)] // jit-design.md §4.9: the load at every visit of a word
 #[allow(clippy::inline_always)]
 pub(crate) fn read(word: &Word) -> State {
-    let held = word.halves()[1].load(Ordering::Relaxed);
+    decoded(word.halves()[1].load(Ordering::Relaxed))
+}
+
+/// The state a word's second half says.
+#[inline(always)] // one mask and a compare, inside `read`
+#[allow(clippy::inline_always)]
+fn decoded(held: u32) -> State {
     match held & STATE {
         COLD => State::Cold,
         RECORDING => State::Recording,
@@ -662,30 +701,36 @@ impl Claim {
         self.start
     }
 
-    /// The one release store that ends the claim.
-    fn store(&self, outcome: &Outcome) {
+    /// The one release store that ends the claim; the state it left.
+    fn store(&self, outcome: &Outcome) -> State {
         let [heat, state] = self.holder.word().halves();
         let held = state.load(Ordering::Relaxed);
         let mut attempts = u8::try_from((held >> ATTEMPTS_SHIFT) & u32::from(ATTEMPTS_MAX))
             .unwrap_or(ATTEMPTS_MAX);
         let next = match outcome {
             Outcome::Published(trace) => (trace.get() << ID_SHIFT) | COMPILED,
-            Outcome::Abort(_) => {
+            Outcome::Abort(stop) => {
                 attempts = attempts.saturating_add(1).min(ATTEMPTS_MAX);
                 // php's counter starts again when it fires (`zend_jit_trace_hot_root`).
                 heat.store(0, Ordering::Relaxed);
                 if attempts >= self.attempts {
                     BLACKLISTED
                 } else {
-                    COLD
+                    // The stop kept where the trace number would stand,
+                    // php's bad root cache entry for the word
+                    // (`zend_jit_trace_is_bad_root`), read by [`bad_stop`].
+                    (u32::from(stop.code()) << ID_SHIFT) | COLD
                 }
             }
             Outcome::Blacklist(_) => BLACKLISTED,
+            Outcome::Released => {
+                heat.store(0, Ordering::Relaxed);
+                held & !STATE & !(u32::from(ATTEMPTS_MAX) << ATTEMPTS_SHIFT)
+            }
         };
-        state.store(
-            next | (u32::from(attempts) << ATTEMPTS_SHIFT),
-            Ordering::Release,
-        );
+        let settled = next | (u32::from(attempts) << ATTEMPTS_SHIFT);
+        state.store(settled, Ordering::Release);
+        decoded(settled)
     }
 }
 
@@ -719,10 +764,25 @@ pub(crate) fn claim(holder: Holder, policy: &Policy, start: Start) -> Option<Cla
 }
 
 /// End `claim` with `outcome`, one release store; an abort also stores
-/// zero to the heat, as php's hot root starts its count again.
-pub(crate) fn settle(mut claim: Claim, outcome: &Outcome) {
-    claim.store(outcome);
+/// zero to the heat, as php's hot root starts its count again. The
+/// state the word was left in, which says whether an abort blacklisted
+/// it.
+pub(crate) fn settle(mut claim: Claim, outcome: &Outcome) -> State {
     claim.settled = true;
+    claim.store(outcome)
+}
+
+/// The stop the word's last failed attempt ended on, where it has failed
+/// at least `times` times and stands cold or recording: php's
+/// `zend_jit_trace_bad_stop_event` over the bad root cache, whose entry
+/// for an opline is the word's own attempts and stop here.
+pub(crate) fn bad_stop(word: &Word, times: u8) -> Option<Stop> {
+    let held = word.halves()[1].load(Ordering::Relaxed);
+    let attempts = (held >> ATTEMPTS_SHIFT) & u32::from(ATTEMPTS_MAX);
+    if held & STATE > RECORDING || attempts < u32::from(times) {
+        return None;
+    }
+    u8::try_from(held >> ID_SHIFT).ok().and_then(Stop::of_code)
 }
 
 #[cfg(test)]

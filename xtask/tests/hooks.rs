@@ -845,6 +845,125 @@ fn a_ledger_revision_still_next_is_refused_on_main_and_not_on_a_branch() {
     assert_eq!(code, 0, "{out}");
 }
 
+/// The lines of the workspace's .gitattributes that set a
+/// `conflict-marker-size`, the one place a file is exempted (#2996).
+fn marker_exemptions() -> String {
+    fs::read_to_string(workspace().join(".gitattributes"))
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#') && line.contains("conflict-marker-size"))
+        .flat_map(|line| [line, "\n"])
+        .collect()
+}
+
+/// A commit whose staged text adds a line git's check reads as a
+/// conflict marker left in is refused before anything runs, naming file and
+/// line (#2996); a reStructuredText section rule of the same seven `=`
+/// is admitted by the workspace's .gitattributes.
+#[test]
+fn a_conflict_marker_left_in_is_refused_naming_file_and_line() {
+    let scratch = scratch("markers", &Computed::Rendered);
+    write(&scratch.root, ".gitattributes", &marker_exemptions());
+    write(&scratch.root, "doc.rst", "Title\n=======\n");
+    scratch.git(&["add", "--", ".gitattributes", "doc.rst"], false);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "a section rule"], true);
+    assert_eq!(code, 0, "{out}");
+
+    let left = "a\n<<<<<<< ours\nb\n=======\nc\n>>>>>>> theirs\n";
+    write(&scratch.root, "notes.txt", left);
+    scratch.git(&["add", "--", "notes.txt"], false);
+    fs::remove_file(scratch.dir.join("cargo.log")).unwrap();
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "a conflict"], true);
+    assert_eq!(code, 1, "{out}");
+    for line in [2, 4, 6] {
+        let named = format!("notes.txt:{line}: leftover conflict marker");
+        assert!(out.contains(&named), "{named}: {out}");
+    }
+    assert_eq!(scratch.calls("cargo"), Vec::<String>::new());
+}
+
+/// Both sides of a merge change one line; `git commit` concluding it with
+/// the markers left in and staged is refused naming them, and so is a
+/// merge `git merge` commits itself, through pre-merge-commit, whose other
+/// side carries a marker line (#2996). Each merge stands uncommitted.
+#[test]
+fn a_merge_that_carries_a_conflict_marker_is_refused() {
+    let scratch = scratch("merge-markers", &Computed::Rendered);
+    let main = scratch
+        .git(&["symbolic-ref", "--short", "HEAD"], false)
+        .trim()
+        .to_owned();
+    write(&scratch.root, "notes.txt", "a\n");
+    scratch.git(&["add", "--", "notes.txt"], false);
+    scratch.git(&["commit", "-q", "-m", "notes"], false);
+    scratch.git(&["checkout", "-q", "-b", "t9"], false);
+    write(&scratch.root, "notes.txt", "b\n");
+    scratch.git(&["commit", "-q", "-am", "the work of #9"], false);
+    scratch.git(&["checkout", "-q", &main], false);
+    write(&scratch.root, "notes.txt", "c\n");
+    scratch.git(&["commit", "-q", "-am", "the work on main"], false);
+    let before = scratch.head();
+    let (code, _) = scratch.run(&["merge", "-q", "--no-ff", "--no-commit", "t9"], false);
+    assert_ne!(code, 0, "the merge conflicts");
+    scratch.git(&["add", "--", "notes.txt"], false);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "Merge t9: the work (#9)"], true);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("notes.txt:1: leftover conflict marker"),
+        "{out}"
+    );
+    assert_eq!(scratch.head(), before, "{out}");
+    scratch.git(&["merge", "--abort"], false);
+
+    scratch.git(&["checkout", "-q", "-b", "t8", &main], false);
+    write(&scratch.root, "other.txt", "x\n>>>>>>> theirs\n");
+    scratch.git(&["add", "--", "other.txt"], false);
+    scratch.git(&["commit", "-q", "-m", "the work of #8"], false);
+    scratch.git(&["checkout", "-q", &main], false);
+    let (code, out) = scratch.run(
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "t8",
+            "-m",
+            "Merge t8: the work (#8)",
+        ],
+        true,
+    );
+    assert_ne!(code, 0, "{out}");
+    assert!(
+        out.contains("other.txt:2: leftover conflict marker"),
+        "{out}"
+    );
+    assert!(out.contains("pre-merge-commit"), "{out}");
+    assert_eq!(scratch.head(), before, "{out}");
+}
+
+/// No file the workspace's index holds carries a line the commit hooks
+/// would refuse as a conflict marker left in: each that holds one on
+/// purpose is exempted in .gitattributes (#2996).
+#[test]
+fn no_tracked_file_carries_a_conflict_marker_left_in() {
+    let empty = Command::new("git")
+        .args(["hash-object", "-t", "tree", "/dev/null"])
+        .current_dir(workspace())
+        .output()
+        .unwrap();
+    let empty = String::from_utf8(empty.stdout).unwrap();
+    let out = Command::new("git")
+        .args(["diff", "--cached", "--check", empty.trim()])
+        .current_dir(workspace())
+        .output()
+        .unwrap();
+    let markers: Vec<_> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| line.ends_with(": leftover conflict marker"))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(markers, Vec::<String>::new());
+}
+
 // ---------------------------------------------------------- post-commit, post-merge
 
 /// A merge closes the tickets it names (#2311): a merge `git merge`

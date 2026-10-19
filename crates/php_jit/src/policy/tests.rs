@@ -10,7 +10,7 @@ use php_unit::{OpArray, OplineIdx, Unit};
 
 use super::{
     Claim, Compile, Holder, JitDebug, Mode, Note, OffBecause, Outcome, Place, Policy, Setting,
-    State, TraceEvent, bump, claim, read, settle,
+    State, TraceEvent, bad_stop, bump, claim, read, settle,
 };
 use crate::record::{Start, Stop};
 use crate::table::TraceId;
@@ -414,4 +414,55 @@ fn the_tier_declares_jit_mode_and_jit_compile_as_system_ini() {
             .iter()
             .all(|decl| decl.system && !decl.user && !decl.per_dir)
     );
+}
+
+/// Under `force` and `exit-fuzz` every eligible root is claimed at its
+/// first visit, and one whose `opcache.jit_hot_*` is zero still at none.
+#[test]
+fn the_lanes_claim_at_the_first_visit() {
+    let (force, _) = read_ini(&[("jit.mode", "force")]);
+    let (fuzz, _) = read_ini(&[("jit.mode", "exit-fuzz"), ("opcache.jit_hot_return", "0")]);
+    for start in [Start::Loop, Start::Enter, Start::Return, side()] {
+        assert_eq!(force.threshold(start), Some(1));
+    }
+    assert_eq!(fuzz.threshold(Start::Loop), Some(1));
+    assert_eq!(fuzz.threshold(Start::Return), None);
+}
+
+/// An abort keeps its stop in the word, php's `bad_root_cache` slot: read
+/// back once the word failed at least as often as asked, and gone once the
+/// word compiles; a release leaves the word cold with its attempts and its
+/// stop as they were and no heat.
+#[test]
+fn a_failed_attempt_keeps_its_stop_and_a_release_counts_none() {
+    let (policy, _) = read_ini(&[]);
+    let (epoch, func) = fixture();
+    let holder = root(&epoch, func, 1);
+    let word = holder.word();
+    for stop in [Stop::InnerLoop, Stop::LoopExit] {
+        if let Some(claimed) = claim(holder.clone(), &policy, Start::Loop) {
+            assert_eq!(settle(claimed, &Outcome::Abort(stop)), State::Cold);
+        }
+    }
+    assert_eq!(bad_stop(word, 2), Some(Stop::LoopExit));
+    assert_eq!(bad_stop(word, 3), None);
+    bump(word);
+    if let Some(claimed) = claim(holder.clone(), &policy, Start::Loop) {
+        assert_eq!(
+            bad_stop(word, 2),
+            Some(Stop::LoopExit),
+            "kept while recording"
+        );
+        assert_eq!(settle(claimed, &Outcome::Released), State::Cold);
+    }
+    assert_eq!((attempts(word), heat(word)), (2, 0));
+    assert_eq!(bad_stop(word, 2), Some(Stop::LoopExit));
+    if let Some(claimed) = claim(holder.clone(), &policy, Start::Loop) {
+        assert_eq!(
+            settle(claimed, &Outcome::Published(trace(4))),
+            State::Compiled(trace(4))
+        );
+    }
+    assert_eq!(bad_stop(word, 0), None);
+    assert_eq!(bad_stop(&Word::sealed(), 0), None);
 }

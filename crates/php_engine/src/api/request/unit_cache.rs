@@ -587,7 +587,13 @@ impl Request {
             self.open_include_stream(full, args.handle);
         }
         let shared = Arc::clone(&self.shared);
-        Some(shared.compile_for(self, &source, args.path, SourceKind::File))
+        Some(shared.compile_for(
+            self,
+            &source,
+            args.path,
+            SourceKind::File,
+            super::ConstantHome::Unit,
+        ))
     }
 
     /// `do_validate_timestamps` over a held copy whose stat is due

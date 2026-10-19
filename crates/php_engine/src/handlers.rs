@@ -3620,7 +3620,7 @@ fn included(
         req.addref(&value);
         copy.free(req);
         // `destroy_op_array`: its names go with it.
-        req.release_unit_names(Some(&unit));
+        req.release_unit_strings(Some(&unit));
         return answered(req, frame, returns_to, value);
     }
     let callee = req.push_code_frame(unit, frame, returns_to)?;

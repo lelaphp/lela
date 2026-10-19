@@ -135,9 +135,11 @@ fn owners() -> Extension {
 /// An owner of each counted kind dropped unconsumed, a counted string,
 /// an array and an object, ends the request at the next sensing point in
 /// the `InternalError` naming the line that took it, and nothing after it
-/// runs. An owner of what no count owns, an interned string or an
-/// integer, leaks nothing and is reported nowhere: its line is kept
-/// beside a block, and it has none (#2246).
+/// runs. An owner of what no count owns, a string the engine's table
+/// holds or an integer, leaks nothing and is reported nowhere: its line
+/// is kept beside a block, and it has none (#2246). A constant string the
+/// engine's table does not hold is the unit's own string, counted, as a
+/// request-only unit's constants are under opcache (#2930).
 #[test]
 fn an_owner_dropped_unconsumed_is_reported_with_the_line_that_made_it() {
     let engine = Engine::cli_builder().extensions(&[owners()]).build();
@@ -161,7 +163,7 @@ fn an_owner_dropped_unconsumed_is_reported_with_the_line_that_made_it() {
         assert!(!stdout.contains("went on"), "{value}: {stdout}");
         assert_eq!(served.exit_code, 255, "{value}");
     }
-    for value in ["'interned'", "1"] {
+    for value in ["'strlen'", "1"] {
         let served = engine.serve_capture(
             &format!("<?php echo 'a';\ndrop_owner({value});\necho 'went on';\n"),
             Capture::default(),

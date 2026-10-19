@@ -88,6 +88,23 @@ pub fn epoch(req: &Request) -> Epoch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FuncRef(MapPtrOffset);
 
+impl FuncRef {
+    /// The map-pointer offset that names the op array, as a recorded
+    /// trace's text form writes it (`jit-design.md` §4.1).
+    #[must_use]
+    pub fn offset(self) -> MapPtrOffset {
+        self.0
+    }
+
+    /// The op array `offset` names, read back from a recorded trace's
+    /// text form; whether an epoch holds a row there is
+    /// [`Epoch::word`]'s and [`UnitView::hold`]'s to say.
+    #[must_use]
+    pub const fn at(offset: MapPtrOffset) -> FuncRef {
+        FuncRef(offset)
+    }
+}
+
 /// The op array `frame` serves; none for a frame that serves none.
 #[must_use]
 pub fn func(req: &Request, frame: FrameRef) -> Option<FuncRef> {

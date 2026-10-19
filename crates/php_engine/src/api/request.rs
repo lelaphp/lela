@@ -95,6 +95,7 @@ pub use limits::{Interrupt, TimeLimitSuspended};
 mod linking;
 mod load_file;
 mod memory;
+pub(crate) use memory::ConstantHome;
 pub use memory::{Allocation, AllocationObserverId, ObserveAllocations};
 pub use memory::{ecalloc, efree, emalloc, erealloc};
 mod methods;
@@ -145,7 +146,7 @@ pub(crate) mod temporary;
 mod ticks;
 mod traces;
 mod unit_cache;
-mod unit_names;
+mod unit_strings;
 pub(crate) use unit_cache::HandlePath;
 mod variables;
 mod zone;
@@ -469,9 +470,10 @@ pub struct Request {
     /// class's native and a trampoline, each made the first time a
     /// frame serves it ([`Request::callee_at`]).
     named_callees: std::collections::HashMap<Function, Box<crate::readable::Named>>,
-    /// The names the request-only units it compiled carry, held while
-    /// each unit lives ([`unit_names::UnitNames`]).
-    unit_names: unit_names::UnitNames,
+    /// The strings the request-only units it compiled own, their
+    /// constants and their names, held while each unit lives
+    /// ([`unit_strings::UnitStrings`]).
+    unit_strings: unit_strings::UnitStrings,
     /// php's `EG(function_table)` past the natives, each function under
     /// its name: the preload's, published, in the order its table holds
     /// them, then each the request declared, in the order declared. A
@@ -1043,7 +1045,7 @@ impl Request {
             aliases: tables.aliases,
             user_functions: PinnedRows::default(),
             named_callees: std::collections::HashMap::new(),
-            unit_names: unit_names::UnitNames::default(),
+            unit_strings: unit_strings::UnitStrings::default(),
             functions: tables.functions,
             static_vars: static_vars::StaticVars::default(),
             preloading: None,
