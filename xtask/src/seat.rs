@@ -46,8 +46,13 @@ pub(crate) struct Seat {
 }
 
 impl Drop for Seat {
+    /// The lock is given back by name, not by closing the file: `flock`
+    /// is the open file description's, and a child another thread forks
+    /// holds a duplicate of the descriptor until its `exec` closes it, so
+    /// a close alone leaves the seat held for that window (#3004).
     fn drop(&mut self) {
-        if self.held.take().is_some() {
+        if let Some(file) = self.held.take() {
+            file.unlock().ok();
             HELD.store(false, Ordering::Relaxed);
         }
     }
@@ -184,8 +189,13 @@ mod tests {
         assert!(seats.try_take("clippy").unwrap().is_none());
         assert_eq!(seats.holders().len(), 1);
         assert!(seats.holders()[0].starts_with("test pid "));
+        // A duplicate of the descriptor, as a child forked by a sibling
+        // test holds one until its `exec` (#3004): the seat comes back
+        // when it drops all the same.
+        let forked = first.held.as_ref().unwrap().try_clone().unwrap();
         drop(first);
         assert!(seats.try_take("clippy").unwrap().is_some());
+        drop(forked);
     }
 
     #[test]

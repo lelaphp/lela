@@ -379,6 +379,24 @@ fn a_kept_change_is_unmet_in_done_until_a_person_commits_or_restores_it() {
     assert_eq!(unmet(&root), Vec::<String>::new(), "the record is spent");
 }
 
+/// #2995: a kept file the call left at `HEAD`'s blob, as a `git switch`
+/// leaves one, is no record, so its note says `done` lists nothing.
+#[test]
+fn a_kept_change_back_at_head_says_done_lists_nothing() {
+    let root = scratch("kept-at-head");
+    let pin = "oracle.toml";
+    let edited = format!("{}\n# a person's edit\n", read(&root, pin));
+    std::fs::write(root.join(pin), edited).unwrap();
+    let (out, _) =
+        through_the_hooks_while(&root, "toolu_kept_at_head", "git status --short", || {
+            git(&root, &["checkout", "HEAD", "--", pin]);
+        });
+    assert_kept(&root, &out, pin);
+    assert!(out.contains("`done` lists nothing"), "{out}");
+    assert!(!out.contains("lists it as unmet"), "{out}");
+    assert_eq!(unmet(&root), Vec::<String>::new());
+}
+
 /// A call whose line names the manifest without writing it, a reader of
 /// it and a note about it, is no writer of it either: the person's edit
 /// made while it runs stands.
