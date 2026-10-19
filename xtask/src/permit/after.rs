@@ -318,20 +318,16 @@ fn sort_moved(record: &Record, call: &Call, held: &Path) -> Vec<Moved> {
                     "{operation} in progress in this checkout has staged it, so it is kept as \
                      it stands for the operation's commit"
                 );
-                (
-                    Verdict::Kept,
-                    format!("{path}: {}", kept_words(&why, was.as_deref())),
-                )
+                let said = kept_words(&guarded.checkout, path, &why, was.as_deref());
+                (Verdict::Kept, format!("{path}: {said}"))
             } else if writes {
                 let what = restore(&guarded.checkout, path, was.as_deref(), now.as_deref());
                 (Verdict::PutBack, format!("{} {path}: {what}", guarded.text))
             } else {
                 let why = "its line cannot write it, so it is kept as it stands: a person's \
                            edit, or a write the line does not show";
-                (
-                    Verdict::Kept,
-                    format!("{path}: {}", kept_words(why, was.as_deref())),
-                )
+                let said = kept_words(&guarded.checkout, path, why, was.as_deref());
+                (Verdict::Kept, format!("{path}: {said}"))
             };
             moved.push(Moved {
                 checkout: guarded.checkout.clone(),
@@ -379,14 +375,17 @@ fn approved(checkout: &Path, path: &str, was: Option<&str>, call: &Call) -> Opti
         .admits(Path::new(path), before.as_deref(), now.as_deref())
 }
 
-/// What a kept file says when it moved: `why` it is kept, and where what
-/// it was before stands.
-fn kept_words(why: &str, was: Option<&str>) -> String {
+/// What a kept file says when it moved: `why` it is kept, where what it
+/// was before stands, and, where it does not stand at `HEAD`'s blob and
+/// so [`kept::keep`] records it, that `done` lists it; a file a `git
+/// switch` left at `HEAD`'s blob is no record (#2995).
+fn kept_words(checkout: &Path, path: &str, why: &str, was: Option<&str>) -> String {
     let before = kept::before_the_call(was);
-    format!(
-        "changed while the call ran, and {why}; {before}; until a person commits it or \
-         restores it to HEAD, `done` lists it as unmet"
-    )
+    let listed = match kept::at_head(checkout, path) {
+        Ok(true) => "it stands at HEAD's blob, so `done` lists nothing",
+        _ => "until a person commits it or restores it to HEAD, `done` lists it as unmet",
+    };
+    format!("changed while the call ran, and {why}; {before}; {listed}")
 }
 
 /// One guarded file where a call stood, as [`writes::can_write`] asks

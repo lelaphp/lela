@@ -114,7 +114,14 @@ pub(crate) fn kept_changes(store: &Store, checkout: &Path) -> Result<Vec<Kept>> 
 /// it, or one followed by another edit, leaves it standing, the backstop
 /// erring toward holding.
 fn stands(checkout: &Path, kept: &Kept) -> Result<bool> {
-    Ok(on_disk(&checkout.join(&kept.path)) != head_blob(checkout, &kept.path)?)
+    Ok(!at_head(checkout, &kept.path)?)
+}
+
+/// Whether the file at `path` in `checkout` stands at `HEAD`'s blob, as a
+/// `git switch` or a merge leaves it: a change [`keep`] writes no record
+/// of.
+pub(super) fn at_head(checkout: &Path, path: &str) -> Result<bool> {
+    Ok(on_disk(&checkout.join(path)) == head_blob(checkout, path)?)
 }
 
 /// The blob of `path` at `HEAD`, `None` where `HEAD` has no such file.
