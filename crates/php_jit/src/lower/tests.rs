@@ -1,0 +1,331 @@
+//! `lower` at its seam (`jit-design.md` §4.3 *Tested*, §7): the CLIF of
+//! each `types` fixture's trace, held to a golden file, every loop's
+//! carrying the interrupt test; the same function compiled to bytes for
+//! the golden's ISA and the host's, a mark per recorded opline; and a
+//! host with no ISA refused as `Unsupported`.
+//!
+//! The goldens are lowered for x86-64 on the System V convention whatever
+//! the host, with the kernels at made-up addresses, so the text is one on
+//! every machine; with `PHP_JIT_BLESS=1` set, the tests write them.
+
+use std::path::PathBuf;
+
+use cranelift_codegen::isa;
+
+use super::{ABANDONED, Backend, INTERRUPT_AT, Kernel, Symbols, Unsupported};
+use crate::table::TraceName;
+use crate::testing::goldens::{self, FIB, Fixture, MANDELBROT, NBODY, SPECTRALNORM, held};
+use crate::testing::policy;
+use crate::types::{End, Op, TraceIr};
+
+/// Where `lower`'s goldens are.
+fn goldens_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lower/goldens")
+}
+
+/// Each kernel at an address of its own that no code is at.
+fn symbols() -> Symbols {
+    Symbols::new(|kernel| 0x7000_0000 + 0x100 * kernel.index())
+}
+
+/// The `Backend` the goldens are lowered with: x86-64 on System V.
+fn golden_backend() -> Result<Backend, Unsupported> {
+    Backend::on(
+        || isa::lookup_by_name("x86_64-unknown-linux-gnu").map_err(|_| "x86-64 is not built"),
+        &policy(&[]),
+        symbols(),
+    )
+}
+
+/// What a profiler would name a fixture's trace.
+fn named(fixture: Fixture) -> TraceName {
+    TraceName {
+        at: fixture.name.as_bytes().into(),
+        line: 1,
+    }
+}
+
+/// The fixture's trace lowered: its CLIF held to `<name>.clif`, the
+/// interrupt test found in it where the trace loops, and the function
+/// compiled for the golden's ISA and the host's.
+fn lowered(fixture: Fixture) -> Result<TraceIr, String> {
+    let recorded = goldens::recorded(fixture)?;
+    let ir = goldens::built(fixture, &recorded)?;
+    let backend = golden_backend().map_err(|e| format!("{e:?}"))?;
+    let clif = backend
+        .clif(&ir)
+        .map_err(|abort| format!("{}: {abort:?}", fixture.name))?
+        .display()
+        .to_string();
+    held(&goldens_dir().join(format!("{}.clif", fixture.name)), &clif)?;
+    if let End::Loop(header) = ir.end {
+        interrupt_test(&clif, header.interrupt.0)?;
+    }
+    let host = Backend::new(&policy(&[]), symbols()).map_err(|e| format!("{e:?}"))?;
+    for backend in [&backend, &host] {
+        let compiled = backend
+            .compile(&ir, named(fixture))
+            .map_err(|abort| format!("{}: {abort:?}", fixture.name))?;
+        assert!(!compiled.bytes.is_empty());
+        assert!(compiled.align.is_power_of_two());
+        assert_eq!(compiled.exits.len(), ir.exits.len());
+        assert_eq!(compiled.map_ptrs.len(), ir.map_ptrs.len());
+        let lines = ir.ops.iter().filter(|op| matches!(op, Op::Line(_))).count();
+        assert_eq!(compiled.marks.len(), lines, "a mark per recorded opline");
+        let end = u32::try_from(compiled.bytes.len()).unwrap_or(u32::MAX);
+        assert!(compiled.marks.iter().all(|mark| mark.offset <= end));
+    }
+    Ok(ir)
+}
+
+/// The interrupt test in a loop's CLIF (`jit-design.md` §4.3): the
+/// interrupt pointer loaded from the `ExitCtx` once, and the byte it
+/// points to loaded and branched on to a block that answers the header's
+/// interrupt exit.
+fn interrupt_test(clif: &str, exit: u16) -> Result<(), String> {
+    let lines: Vec<&str> = clif.lines().map(instruction).collect();
+    let pointer = lines
+        .iter()
+        .find_map(|line| {
+            let (value, load) = line.split_once(" = ")?;
+            (load == format!("load.i64 notrap aligned v0+{INTERRUPT_AT}")).then_some(value)
+        })
+        .ok_or_else(|| format!("no interrupt pointer loaded:\n{clif}"))?;
+    let flag = lines
+        .iter()
+        .find_map(|line| {
+            let (value, load) = line.split_once(" = ")?;
+            (load == format!("load.i8 notrap aligned {pointer}")).then_some(value)
+        })
+        .ok_or_else(|| format!("the interrupt flag is never loaded:\n{clif}"))?;
+    let branch = lines
+        .iter()
+        .find(|line| line.starts_with(&format!("brif {flag}, ")))
+        .ok_or_else(|| format!("the interrupt flag is never branched on:\n{clif}"))?;
+    let target = branch
+        .trim_start_matches(&format!("brif {flag}, "))
+        .split(',')
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if answer(clif, target) == Some(i64::from(exit)) {
+        Ok(())
+    } else {
+        Err(format!(
+            "the interrupt test's block does not answer exit {exit}:\n{clif}"
+        ))
+    }
+}
+
+/// What the cold block `block` of `clif` answers: the number it returns,
+/// the last constant it makes, past the type words it stores.
+fn answer(clif: &str, block: &str) -> Option<i64> {
+    clif.lines()
+        .map(instruction)
+        .skip_while(|line| *line != format!("{block} cold:"))
+        .skip(1)
+        .take_while(|line| !line.ends_with(':'))
+        .filter_map(|line| line.split_once("iconst.i32 ")?.1.parse().ok())
+        .last()
+}
+
+/// A line of CLIF text as its instruction: the indent and the source
+/// location before it dropped.
+fn instruction(line: &str) -> &str {
+    let line = line.trim();
+    match line.strip_prefix('@') {
+        Some(located) => located
+            .split_once(char::is_whitespace)
+            .map_or(line, |(_, rest)| rest.trim_start()),
+        None => line,
+    }
+}
+
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn fib_lowers_its_recursion_with_the_interrupt_test() -> Result<(), String> {
+    lowered(FIB).map(drop)
+}
+
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn mandelbrot_lowers_its_escape_loop_with_the_interrupt_test() -> Result<(), String> {
+    lowered(MANDELBROT).map(drop)
+}
+
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn nbody_lowers_its_inner_loop_with_the_interrupt_test() -> Result<(), String> {
+    lowered(NBODY).map(drop)
+}
+
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn spectralnorm_lowers_its_inlined_call_with_the_interrupt_test() -> Result<(), String> {
+    lowered(SPECTRALNORM).map(drop)
+}
+
+/// A host Cranelift has no ISA for is `Unsupported`, which runs the
+/// tier `Off` (`jit-design.md` §4.3): the ISA lookup stubbed to find none.
+#[test]
+fn a_host_with_no_isa_is_unsupported() {
+    let backend = Backend::on(|| Err("no backend"), &policy(&[]), symbols());
+    assert_eq!(backend.err(), Some(Unsupported("no backend")));
+}
+
+/// `program`'s trace under `plan`, compiled for the goldens' ISA and the
+/// host's, and its CLIF.
+fn compiled(plan: &[(&str, &str)], program: &str) -> Result<(TraceIr, String), String> {
+    let ir = goldens::traced(plan, program)?;
+    let golden = golden_backend().map_err(|e| format!("{e:?}"))?;
+    let host = Backend::new(&policy(&[]), symbols()).map_err(|e| format!("{e:?}"))?;
+    for backend in [&golden, &host] {
+        backend
+            .compile(
+                &ir,
+                TraceName {
+                    at: b"f".as_slice().into(),
+                    line: 1,
+                },
+            )
+            .map_err(|abort| format!("{abort:?}"))?;
+    }
+    let clif = golden
+        .clif(&ir)
+        .map_err(|abort| format!("{abort:?}"))?
+        .display()
+        .to_string();
+    Ok((ir, clif))
+}
+
+/// The calls of `kernel` in `clif`, each with the block its status
+/// branches to where it is not zero.
+fn calls_of(clif: &str, kernel: Kernel) -> Vec<String> {
+    let address = format!("{:#x}", symbols().address(kernel)).replace("0x7000", "0x7000_");
+    let lines: Vec<&str> = clif.lines().map(instruction).collect();
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains("call_indirect") && line.contains(&address))
+        .filter_map(|(at, line)| {
+            let status = line.split_once(" = ")?.0;
+            let branch = lines.get(at + 1)?;
+            let to = branch.strip_prefix(&format!("brif {status}, "))?;
+            Some(to.split(',').next()?.trim().to_owned())
+        })
+        .collect()
+}
+
+/// A loop in `f`, where the plan records.
+const IN_F: [(&str, &str); 2] = [("record.function", "f"), ("record.start", "loop")];
+
+/// A fetch from a temporary array frees it through [`Kernel::Release`],
+/// whose refusal leaves through the exit `types` gives the free, never
+/// abandoned; the fetched element's guard copies it through
+/// [`Kernel::Copy`] for the exit that goes on past the fetch.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_temporary_arrays_free_leaves_through_its_exit() -> Result<(), String> {
+    let (ir, clif) = compiled(
+        &IN_F,
+        "function g() { $a = []; $a[] = 1.5; return $a; }
+        function f(int $n) {
+            $s = 0.0;
+            for ($i = 0; $i < $n; $i++) { $s += g()[0]; }
+            return $s;
+        }
+        echo f(3), \"\\n\";",
+    )?;
+    let freed = ir
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            Op::Line(line) => line.freed,
+            _ => None,
+        })
+        .ok_or("no fetch frees a temporary")?;
+    let releases = calls_of(&clif, Kernel::Release);
+    assert!(!releases.is_empty(), "{clif}");
+    for to in releases {
+        assert_eq!(answer(&clif, &to), Some(i64::from(freed.0)), "{clif}");
+    }
+    // A copy names no exit of its own: a fatal or a panic in it is
+    // answered as abandoned, for `enter` to read what the kernel kept.
+    let copies = calls_of(&clif, Kernel::Copy);
+    assert!(!copies.is_empty(), "{clif}");
+    for to in copies {
+        assert_eq!(
+            answer(&clif, &to),
+            Some(i64::from(ABANDONED.cast_signed())),
+            "{clif}"
+        );
+    }
+    Ok(())
+}
+
+/// A return trace lands in a caller php's IP guard holds: the caller's op
+/// array and opline read from where the return's kernel stood.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_return_trace_holds_its_caller_by_where_the_return_stood() -> Result<(), String> {
+    let (ir, clif) = compiled(
+        &[("record.function", "g"), ("record.start", "return")],
+        "function g(int $x) { return $x + 1; }
+        function f() { $a = g(1); return $a * 2; }
+        echo f(), \"\\n\";",
+    )?;
+    assert!(matches!(ir.end, End::Leave(_)));
+    assert!(
+        clif.contains("stack_addr.i64 ss0+16") && clif.contains("stack_addr.i64 ss0+20"),
+        "the landed op array and opline are read:\n{clif}"
+    );
+    Ok(())
+}
+
+/// A trace that links leaves through its last exit, which names the
+/// trace dispatch follows.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_link_answers_its_last_exit() -> Result<(), String> {
+    let (ir, clif) = compiled(
+        &[
+            ("record.function", "f"),
+            ("record.start", "enter"),
+            ("record.compiled", "g"),
+        ],
+        "function g($x) { return $x + 1; }
+        function f() { $a = g(1); return $a * 2; }
+        g(0); echo f(), \"\\n\";",
+    )?;
+    let End::Leave(exit) = ir.end else {
+        return Err("a link loops".to_owned());
+    };
+    let last = clif
+        .lines()
+        .map(instruction)
+        .filter_map(|line| line.strip_prefix("jump "))
+        .find(|to| answer(&clif, to.trim()) == Some(i64::from(exit.0)));
+    assert!(
+        last.is_some(),
+        "the trace's end jumps to its last exit:\n{clif}"
+    );
+    Ok(())
+}
+
+/// A native's call is served whole through [`Kernel::Step`], the operands
+/// it reads stored first.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_natives_call_is_stepped() -> Result<(), String> {
+    let (_, clif) = compiled(
+        &IN_F,
+        "function f(array &$a, int $n) {
+            $s = 0;
+            for ($i = 0; $i < $n; $i++) { $s += $a[0]; strcmp('a', 'b'); $s += $a[0]; }
+            return $s;
+        }
+        $x = [1]; echo f($x, 3), \"\\n\";",
+    )?;
+    assert!(!calls_of(&clif, Kernel::Step).is_empty(), "{clif}");
+    Ok(())
+}

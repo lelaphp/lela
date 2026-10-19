@@ -101,6 +101,9 @@ quote = "1"                         # php_macros: the expansion as tokens (ADR-0
 proc-macro2 = "1"                   # php_macros: tokens outside a macro invocation, for its own tests; already in the lock under syn
 md5 = "0.8"
 libc = "0.2"                        # the platform's headers, for `php_heap`'s probe of the thread's bounds (design §4.1)
+cranelift-codegen = { version = "0.135.6", default-features = false, features = ["core", "x86", "arm64"] }  # php_jit::lower: a trace's CLIF to final bytes for x86-64 and aarch64, the core set #2945 ruled with the ceiling of 190 (jit-design.md §4.3, §6)
+cranelift-frontend = { version = "0.135.6", default-features = false, features = ["core"] }  # php_jit::lower: the FunctionBuilder a trace is laid down with, in #2945's core set
+cranelift-native = { version = "0.135.6", default-features = false, features = ["core"] }  # php_jit::lower: the host ISA and its features, `Backend::new`'s lookup, in #2945's core set
 nix = { version = "0.31", default-features = false }  # ext/posix and ext/pcntl: the process, its credentials, its signals and the user database (design §7.2, revision 35)
 corosensei = "0.3"                  # a fiber's machine stack and the switch onto it, in `php_heap` (design §4.1, §5.11)
 cc = "1"                            # ext/date's build.rs compiles the vendored timelib (design §7.2, §12)
