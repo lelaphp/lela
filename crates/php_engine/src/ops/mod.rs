@@ -15,7 +15,7 @@ use std::ops::ControlFlow;
 
 pub(crate) mod inline;
 
-use inline::Arith;
+use inline::{Arith, Binary, Bitwise, Shift};
 
 use php_heap::{Exponent, Number, Scalar, ZvalType, double_to_string, numeric_prefix};
 
@@ -1877,6 +1877,9 @@ fn not_converted(req: &mut Request, value: &Value, to: &str) {
 /// 3
 /// ```
 pub(crate) fn add(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    if let Some(value) = inline::binary_values(Binary::Arith(Arith::Add), left, right) {
+        return Ok(value);
+    }
     if let (Some(a), Some(b)) = (left.deref().as_array(), right.deref().as_array()) {
         return Ok(merged(req, *a, *b)?.into_value().hand_on());
     }
@@ -1898,6 +1901,9 @@ pub(crate) fn add(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
 /// 0|0|1|-9.2233720368548E+18
 /// ```
 pub(crate) fn sub(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    if let Some(value) = inline::binary_values(Binary::Arith(Arith::Sub), left, right) {
+        return Ok(value);
+    }
     if let Some(value) = object_operation(req, BinaryOp::Sub, left, right)? {
         return Ok(value);
     }
@@ -1916,6 +1922,9 @@ pub(crate) fn sub(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
 /// 6|3.75|6|9.2233720368548E+18
 /// ```
 pub(crate) fn mul(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    if let Some(value) = inline::binary_values(Binary::Arith(Arith::Mul), left, right) {
+        return Ok(value);
+    }
     if let Some(value) = object_operation(req, BinaryOp::Mul, left, right)? {
         return Ok(value);
     }
@@ -1950,33 +1959,22 @@ pub(crate) fn mul(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
 ///   thrown in %s on line 2
 /// ```
 pub(crate) fn div(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    if let Some(value) = inline::binary_values(Binary::Div, left, right) {
+        return Ok(value);
+    }
     if let Some(value) = object_operation(req, BinaryOp::Div, left, right)? {
         return Ok(value);
     }
     let (a, b) = numbers(req, "/", left, right)?;
-    match (a, b) {
-        (Number::Long(a), Number::Long(b)) => {
-            if b == 0 {
-                return Err(throw_error(req, "DivisionByZeroError", "Division by zero"));
-            }
-            // php's own case, "prevent overflow error/crash".
-            if b == -1 && a == i64::MIN {
-                return Ok(Value::float(wide(a) / -1.0));
-            }
-            Ok(if a % b == 0 {
-                Value::int(a / b)
-            } else {
-                Value::float(wide(a) / wide(b))
-            })
-        }
-        (a, b) => {
-            let (a, b) = (a.double(), b.double());
-            if b == 0.0 {
-                return Err(throw_error(req, "DivisionByZeroError", "Division by zero"));
-            }
-            Ok(Value::float(a / b))
-        }
+    if let Some(n) = inline::quotient(a, b) {
+        return Ok(inline::number_value(n));
     }
+    if b.double() == 0.0 {
+        return Err(throw_error(req, "DivisionByZeroError", "Division by zero"));
+    }
+    // php's own case, "prevent overflow error/crash": `PHP_INT_MIN / -1`
+    // as a double, the one other pair the rule refuses.
+    Ok(Value::float(a.double() / b.double()))
 }
 
 /// `mod_function` (`Zend/zend_operators.c:1541`): both operands as the
@@ -2043,18 +2041,17 @@ pub(crate) fn div(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
 ///   thrown in %s on line 2
 /// ```
 pub(crate) fn r#mod(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    if let Some(value) = inline::binary_values(Binary::Mod, left, right) {
+        return Ok(value);
+    }
     if let Some(value) = object_operation(req, BinaryOp::Mod, left, right)? {
         return Ok(value);
     }
     let (a, b) = longs(req, "%", left, right)?;
-    if b == 0 {
-        return Err(throw(req, "DivisionByZeroError", "Modulo by zero"));
+    match inline::remainder(a, b) {
+        Some(n) => Ok(Value::int(n)),
+        None => Err(throw(req, "DivisionByZeroError", "Modulo by zero")),
     }
-    // php's own case, "prevent overflow error/crash if op1==LONG_MIN".
-    if b == -1 {
-        return Ok(Value::int(0));
-    }
-    Ok(Value::int(a % b))
 }
 
 /// `pow_function` and `pow_function_base`
@@ -2132,10 +2129,18 @@ pub(crate) fn pow(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
 ///   thrown in %s on line 2
 /// ```
 pub(crate) fn shift_left(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    if let Some(value) = inline::binary_values(Binary::Shift(Shift::Left), left, right) {
+        return Ok(value);
+    }
     if let Some(value) = object_operation(req, BinaryOp::ShiftLeft, left, right)? {
         return Ok(value);
     }
     let (a, b) = longs(req, "<<", left, right)?;
+    if let Some(n) = inline::shifted(Shift::Left, a, b) {
+        return Ok(Value::int(n));
+    }
+    // A count of 64 or more, which the rule leaves here, and a negative
+    // one.
     match u64::try_from(b) {
         Ok(by) => Ok(Value::int(php_heap::shift_left(a, by))),
         Err(_) => Err(throw(
@@ -2166,10 +2171,18 @@ pub(crate) fn shift_left(req: &mut Request, left: &Value, right: &Value) -> Resu
 ///   thrown in %s on line 2
 /// ```
 pub(crate) fn shift_right(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    if let Some(value) = inline::binary_values(Binary::Shift(Shift::Right), left, right) {
+        return Ok(value);
+    }
     if let Some(value) = object_operation(req, BinaryOp::ShiftRight, left, right)? {
         return Ok(value);
     }
     let (a, b) = longs(req, ">>", left, right)?;
+    if let Some(n) = inline::shifted(Shift::Right, a, b) {
+        return Ok(Value::int(n));
+    }
+    // A count of 64 or more, which the rule leaves here, and a negative
+    // one.
     match u64::try_from(b) {
         Ok(by) => Ok(Value::int(php_heap::shift_right(a, by))),
         Err(_) => Err(throw(
@@ -2180,16 +2193,8 @@ pub(crate) fn shift_right(req: &mut Request, left: &Value, right: &Value) -> Res
     }
 }
 
-/// Which of the three bitwise operators a call of [`bitwise`] is: the
-/// one thing `bitwise_or_function`, `bitwise_xor_function` and
-/// `bitwise_and_function` differ by.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Bitwise {
-    Or,
-    Xor,
-    And,
-}
-
+/// What [`bitwise`] reads of its operator past the long pair
+/// [`Bitwise::long`] computes.
 impl Bitwise {
     /// The operator as php's grammar spells it, which is what
     /// `zend_binop_error` puts between the two type names.
@@ -2218,15 +2223,6 @@ impl Bitwise {
             Bitwise::And => left & right,
         }
     }
-
-    /// The operator over two longs.
-    const fn long(self, left: i64, right: i64) -> i64 {
-        match self {
-            Bitwise::Or => left | right,
-            Bitwise::Xor => left ^ right,
-            Bitwise::And => left & right,
-        }
-    }
 }
 
 /// `bitwise_or_function` (`Zend/zend_operators.c:1698`),
@@ -2239,6 +2235,9 @@ impl Bitwise {
 /// `convert_op1_op2_long` reads it, which is [`to_long`] on each with
 /// `zend_binop_error`'s `TypeError` for the one that failed.
 fn bitwise(req: &mut Request, op: Bitwise, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    if let Some(value) = inline::binary_values(Binary::Bitwise(op), left, right) {
+        return Ok(value);
+    }
     let (a, b) = (left.deref(), right.deref());
     if let (Some(x), Some(y)) = (a.as_php_string(), b.as_php_string()) {
         let (x, y) = (x.as_bytes(), y.as_bytes());
@@ -3855,8 +3854,8 @@ fn increment_string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown
 /// ```
 pub(crate) fn strlen(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
     let value = &value.deref();
-    if let Some(s) = value.as_php_string() {
-        return Ok(Value::int(i64::try_from(s.len()).unwrap_or(i64::MAX)));
+    if let Some(n) = inline::string_length(value.to_zval()) {
+        return Ok(Value::int(n));
     }
     if !req.strict_types() {
         match value.as_ref() {
@@ -3926,7 +3925,7 @@ pub(crate) fn strlen(req: &mut Request, value: &Value) -> Result<Value, Thrown> 
 /// ```
 pub(crate) fn type_check(value: &Value, mask: u32) -> bool {
     let value = &value.deref();
-    if (mask >> php_type(value)) & 1 == 0 {
+    if !inline::has_type(mask, php_type(value)) {
         return false;
     }
     match value.as_ref() {
@@ -4877,8 +4876,8 @@ const MAY_BE_RESOURCE: u32 = 1 << (ZvalType::Resource as u32);
 /// `Z_TYPE_P`: php's number for a value's type, the `IS_*` of
 /// `zend_types.h`, which `ZEND_TYPE_CHECK` shifts its mask by. A bool is
 /// two of them, `IS_FALSE` and `IS_TRUE`.
-fn php_type(value: &Value) -> u32 {
-    let ty = match value.as_ref() {
+fn php_type(value: &Value) -> ZvalType {
+    match value.as_ref() {
         ValueRef::Undef => ZvalType::Undef,
         ValueRef::Null => ZvalType::Null,
         ValueRef::Bool(false) => ZvalType::False,
@@ -4890,8 +4889,7 @@ fn php_type(value: &Value) -> u32 {
         ValueRef::Object(_) => ZvalType::Object,
         ValueRef::Resource(_) => ZvalType::Resource,
         ValueRef::Reference(_) => ZvalType::Reference,
-    };
-    ty as u32
+    }
 }
 
 /// `zend_zval_value_name` (`Z/Zend/zend_API.c:157`): what a `TypeError`
