@@ -160,14 +160,36 @@ fn a_leak_from_a_lifecycle_hook_names_its_extension() {
 
 /// With allocations traced the leak names the line of the faulty native
 /// that allocated the block, beside its extension.
+///
+/// Each allocation captures a backtrace, and the unwinder that walks the
+/// debug build's `serve_frame`, a frame of about 600 KB, takes about
+/// 1.4 MB of stack in libunwind's `parseFDEInstructions` beside it, which
+/// is more than libtest's 2 MiB thread holds (measured at #2894, where
+/// 7 KB more of `serve_frame` overflowed it). So the request is served on
+/// a thread of the 8 MiB the CLI's main thread has.
 #[test]
 fn the_backtrace_mode_names_the_leaking_line() {
-    let engine = Engine::cli_builder()
-        .extensions(&[faulty()])
-        .sense_leaks(LeakSensor::Traced)
-        .build();
-    let served = engine.serve_capture("<?php dropped_owner();\n", Capture::default());
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let served = std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(|| {
+            let engine = Engine::cli_builder()
+                .extensions(&[faulty()])
+                .sense_leaks(LeakSensor::Traced)
+                .build();
+            let served = engine.serve_capture("<?php dropped_owner();\n", Capture::default());
+            (
+                String::from_utf8_lossy(&served.stdout).into_owned(),
+                served.exit_code,
+            )
+        })
+        .map(std::thread::JoinHandle::join);
+    assert!(
+        matches!(served, Ok(Ok(_))),
+        "the request's thread did not run to its end"
+    );
+    let Ok(Ok((stdout, exit_code))) = served else {
+        return;
+    };
     let source = include_str!("leak_sensor.rs");
     let line = source
         .lines()
@@ -181,7 +203,7 @@ fn the_backtrace_mode_names_the_leaking_line() {
         stdout.contains(", allocated by leak_sensor at:\n"),
         "{stdout}"
     );
-    assert_eq!(served.exit_code, 255);
+    assert_eq!(exit_code, 255);
 }
 
 /// The same dropped owner in a request that then ends in a fatal: the
