@@ -33,7 +33,7 @@ mod variant;
 pub(crate) use closure::Closure;
 pub use closure::ClosureDigest;
 pub use fastcgi::{Mapping, Param, Piece, Sent, Split, Variable};
-pub use variant::{Build, Oracles, Platform, Variant};
+pub use variant::{Build, Oracles, Platform, Provenance, Variant};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -205,6 +205,20 @@ pub struct Pin {
     /// on Linux (#1482), set by [`Pin::wrapped`].
     #[serde(skip)]
     wrapper: Vec<String>,
+}
+
+/// [`Pin::digest`] of the pin's text: the git blob id of its values with
+/// the keys [`Provenance`] declares taken out of each variant's builds.
+fn digest(text: &str) -> Result<String> {
+    let mut table: toml::Table = toml::from_str(text)?;
+    let variants = table.get_mut("variant").and_then(toml::Value::as_table_mut);
+    for (_, variant) in variants.into_iter().flatten() {
+        let builds = variant.as_table_mut().into_iter().flatten();
+        for build in builds.filter_map(|(_, build)| build.as_table_mut()) {
+            build.retain(|key, _| !Provenance::KEYS.contains(&key));
+        }
+    }
+    Ok(crate::git::blob_id(table.to_string().as_bytes()))
 }
 
 /// `[sapi]`: the binaries upstream's run-tests.php finds beside `php` for
@@ -709,15 +723,16 @@ impl Pin {
         for (name, variant) in &pin.variant {
             variant.held(name, closure.as_ref())?;
         }
-        pin.digest =
-            crate::git::blob_id(toml::from_str::<toml::Table>(text)?.to_string().as_bytes());
+        pin.digest = digest(text)?;
         Ok(pin)
     }
 
     /// The digest of the pin's values, every section's and none of its
-    /// comments: what a reading taken under the oracle's recipe records, so
-    /// a change to the recipe, its environment or the binary stales it as
-    /// a change to its crate's tree does (#1387). Computed here and nowhere
+    /// comments, leaving out each build's [`Provenance`] and nothing else
+    /// (#2969): what a reading taken under the oracle's recipe records, so
+    /// a change to the recipe, its environment or a binary stales it as a
+    /// change to its crate's tree does (#1387), and a record of what a
+    /// binary was made from does not. Computed by [`digest`] and nowhere
     /// else.
     pub fn digest(&self) -> &str {
         &self.digest

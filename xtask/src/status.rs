@@ -1640,7 +1640,7 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 "platform": platform.map(Platform::key),
                 "path": build.path.display().to_string(),
                 "md5": build.md5,
-                "closure": build.closure.as_ref().map(ToString::to_string),
+                "closure": build.provenance.closure.as_ref().map(ToString::to_string),
             }))).collect::<serde_json::Map<_, _>>(),
         }))?,
         Table::Md => {
@@ -1680,7 +1680,7 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
             closure_row(o, pin.closure.as_ref());
             for (name, build) in &builds {
                 let fact = format!("variant {name}");
-                let closure = build.closure.as_ref().map(|c| format!(", closure {c}"));
+                let closure = (build.provenance.closure.as_ref()).map(|c| format!(", closure {c}"));
                 let md5 = format!("md5 {}{}", build.md5, closure.unwrap_or_default());
                 row(o, &fact, "", &build.path.display().to_string(), &md5);
             }
