@@ -429,6 +429,28 @@ fn a_fused_branch_is_one_op_taken_each_way() -> Result<(), String> {
     Ok(())
 }
 
+/// A conditional jump of its own, on a value no comparison wrote, says
+/// which way it went too, so a trace that ends on one says where it ends.
+#[test]
+fn a_conditional_jump_says_which_way_it_went() -> Result<(), String> {
+    for (a, taken) in [("true", Some(false)), ("false", Some(true))] {
+        let program = format!(
+            "function f($a) {{ if ($a) {{ echo \"yes\"; }} return 1; }}
+            echo f({a}), \"\\n\";"
+        );
+        let (record, _) = recorded(&at("f", "enter"), &program)?;
+        let branch = record.events.iter().find_map(|event| match event {
+            Event::Op { branch, .. } => *branch,
+            _ => None,
+        });
+        assert_eq!(
+            branch, taken,
+            "f({a}): JMPZ jumps over the echo when $a is false"
+        );
+    }
+    Ok(())
+}
+
 /// A call into a function an `eval` declared: its op array is the
 /// request's, which no trace may read, and the recorder stops at it.
 #[test]

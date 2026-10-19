@@ -228,9 +228,12 @@ impl Stop {
 pub(crate) enum Event {
     /// An opline about to be served, `ZEND_JIT_TRACE_VM`: where it stands and
     /// its three operands sampled, `data` being the `OP_DATA` after an
-    /// assignment's; `branch` for a fused compare-and-branch, one
-    /// handler over two oplines (design §5.8), whether its jump was
-    /// taken.
+    /// assignment's; `branch` for a conditional jump, whether it was
+    /// taken: the opline's own, or the jump a fused compare-and-branch
+    /// serves with it, one handler over two oplines (design §5.8). php
+    /// reads where its trace went from the next record and from its
+    /// `END`'s opline; this record has no `END`, so a trace that ends on
+    /// a jump says which way it went here.
     Op {
         func: FuncRef,
         opline: OplineIdx,
@@ -605,9 +608,9 @@ impl<'p> Recorder<'p> {
         }
     }
 
-    /// A step that went on in a frame: a fused compare-and-branch's
-    /// direction written on its `Op`, and a call an `INIT_*` began
-    /// written down.
+    /// A step that went on in a frame: the direction of a conditional
+    /// jump, or of the fused compare-and-branch the opline began,
+    /// written on its `Op`, and a call an `INIT_*` began written down.
     fn same(
         &mut self,
         req: &Request,
@@ -618,8 +621,10 @@ impl<'p> Recorder<'p> {
         before: Option<Building>,
     ) -> Went {
         let now = position(req, frame);
-        if let Some(jump) = after.filter(|jump| op.fuses(jump))
-            && now.0 != at.0.wrapping_add(1)
+        let jump = after
+            .filter(|jump| op.fuses(jump) && now.0 != at.0.wrapping_add(1))
+            .or_else(|| conditional(op).then_some(op));
+        if let Some(jump) = jump
             && let Some(Event::Op { branch, .. }) = self.events.last_mut()
         {
             *branch = Some(jump.jump_target() == Some(now));
@@ -1050,6 +1055,23 @@ fn header_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
         .find(|(number, site)| **site == at && !(returns(op.opcode) && op.out as usize == *number))
         .and_then(|(number, _)| u32::try_from(number).ok())
         .map(SafepointIdx)
+}
+
+/// Whether `op` jumps or falls through as its operand says: an opline
+/// with a jump target that is no unconditional `JMP`, no `CATCH` or
+/// `FAST_CALL`, and no `SWITCH_*` or `MATCH`, whose target is only the
+/// default of a table.
+pub(crate) fn conditional(op: &Opline) -> bool {
+    op.jump_target().is_some()
+        && !matches!(
+            op.opcode,
+            Opcode::Jmp
+                | Opcode::Catch
+                | Opcode::FastCall
+                | Opcode::SwitchLong
+                | Opcode::SwitchString
+                | Opcode::Match
+        )
 }
 
 /// php's `zend_jit_trace_supported`.

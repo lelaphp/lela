@@ -17,7 +17,7 @@
 //! An op array is its map-pointer offset, `e` for the engine's and `r`
 //! for a request's; an operand not sampled is `-`, a sampled one its
 //! type with what was followed to it and its class, `object#3`; a
-//! fused branch is `taken` or `fell`; a side trace's start is
+//! conditional jump is `taken` or `fell`; a side trace's start is
 //! `side <parent>/<exit>`, and a link's stop `link <trace>`.
 
 use std::fmt::Write as _;
