@@ -98,14 +98,6 @@ impl Variant {
         }
     }
 
-    fn build_mut(&mut self, platform: Platform) -> Option<&mut Build> {
-        match platform {
-            Platform::DarwinArm64 => self.darwin_arm64.as_mut(),
-            Platform::LinuxX86_64 => self.linux_x86_64.as_mut(),
-            Platform::LinuxAarch64 => self.linux_aarch64.as_mut(),
-        }
-    }
-
     /// Hold each platform's table to what the platform's build is: a Linux
     /// build names the base image's manifest digest, which the recipe pins
     /// and rebuilds from (#1948), and no closure; the macOS one, made on no
@@ -153,10 +145,13 @@ impl Variant {
     /// pin's own, so a build a recipe lays down inside the checkout is named
     /// as the file stands and found from wherever a lane runs.
     pub(super) fn placed(&mut self, dir: &Path) {
-        for platform in Platform::ALL {
-            if let Some(build) = self.build_mut(platform)
-                && build.path.is_relative()
-            {
+        let builds = [
+            &mut self.darwin_arm64,
+            &mut self.linux_x86_64,
+            &mut self.linux_aarch64,
+        ];
+        for build in builds.into_iter().flatten() {
+            if build.path.is_relative() {
                 build.path = dir.join(&build.path);
             }
         }
