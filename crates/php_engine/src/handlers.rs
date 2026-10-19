@@ -8308,33 +8308,32 @@ pub(crate) fn fetch_obj_func_arg<T: Tier>(
 /// Warning: Undefined array key 9 in %s on line 2
 /// [[1.5,"v",2.5,"2.5!","!",null],{"0":"2.5!","5":"!"}]
 /// ```
-#[inline(always)] // as `fetch_dim_r`, whose body the by-value arm is
+#[cfg_attr(not(debug_assertions), inline(always))] // design §5.8, as `fetch_dim_r`
+#[cfg_attr(debug_assertions, inline(never))] // a debug `serve_frame` holds every inlined arm's locals
 #[allow(clippy::inline_always)]
-pub(crate) fn fetch_dim_func_arg<T: Tier>(
+pub(crate) fn fetch_dim_func_arg<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
     if sends_arg_by_ref(req) {
-        if matches!(op.op1_type, OperandKind::Const | OperandKind::Tmp) {
+        req.vm_mut().stand(frame, at);
+        if matches!(A::default().kind(), OperandKind::Const | OperandKind::Tmp) {
             return use_tmp_in_write_context(req, frame, code, op);
         }
         return fetched_dim_place(req, frame, code, op);
     }
-    // `ZEND_VM_DISPATCH_TO_HANDLER(ZEND_FETCH_DIM_R)`: the read's body,
-    // its inline path first.
-    let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
-    if let Some(edge) = inline_fetch_dim_r(req, frame, code, op, kinds) {
-        return edge;
-    }
-    if op.op2_type == OperandKind::Unused {
+    if B::default().kind() == OperandKind::Unused {
         // `zend_use_undef_in_read_context_helper`.
+        req.vm_mut().stand(frame, at);
         let thrown = crate::api::raising::throw_error(req, "Error", "Cannot use [] for reading");
         exec::free_operand(req, frame, code, op.op1_type, op.op1);
         return threw(req, frame, &thrown);
     }
-    fetched_dim(req, frame, code, op)
+    // `ZEND_VM_DISPATCH_TO_HANDLER(ZEND_FETCH_DIM_R)`: the read's body.
+    fetch_dim_r::<T, A, B>(req, frame, code, op, at)
 }
 
 /// `ZEND_FETCH_STATIC_PROP_FUNC_ARG` (`Z/Zend/zend_vm_def.h:1912`), a
@@ -10706,17 +10705,21 @@ fn free_dim_operands(
 ///   }
 /// }
 /// ```
-pub(crate) fn fetch_dim_rw<T: Tier>(
+#[cfg_attr(not(debug_assertions), inline(always))] // design §5.8, as `fetch_dim_r`
+#[cfg_attr(debug_assertions, inline(never))] // a debug `serve_frame` holds every inlined arm's locals
+#[allow(clippy::inline_always)]
+pub(crate) fn fetch_dim_rw<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    let at = req.vm().opline(frame);
-    let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
+    let kinds = (A::default(), B::default());
     if let Some(edge) = inline_fetch_dim_w(req, frame, (code, op, at), DimRead::Warning, kinds) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     fetch_dim_place(req, frame, code, op, DimRead::Warning, Keep::Nothing)
 }
 
@@ -15159,16 +15162,21 @@ fn undefined_key_write(
 /// Cannot use assign-op operators with string offsets
 /// Exception: String offset cast occurred
 /// ```
-pub(crate) fn assign_dim_op<T: Tier>(
+#[cfg_attr(not(debug_assertions), inline(always))] // design §5.8, as `fetch_dim_r`
+#[cfg_attr(debug_assertions, inline(never))] // a debug `serve_frame` holds every inlined arm's locals
+#[allow(clippy::inline_always)]
+pub(crate) fn assign_dim_op<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
-    if let Some(edge) = inline_assign_dim_op(req, frame, code, op, kinds) {
+    let kinds = (A::default(), B::default());
+    if let Some(edge) = inline_assign_dim_op(req, frame, (code, op, at), kinds) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     assigned_dim_op(req, frame, code, op)
 }
 
@@ -15268,21 +15276,20 @@ pub(crate) fn assign_dim_op<T: Tier>(
 fn inline_assign_dim_op(
     req: &mut Request,
     frame: FrameRef,
-    code: &OpArray,
-    op: &Opline,
+    (code, op, at): (&OpArray, &Opline, u32),
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
     let rule = inline::compound(op.extended_value)?;
     if a.kind() != OperandKind::Cv {
         return None;
     }
-    let at = req.vm().opline(frame);
     let data = *exec::opline_at(code, at.saturating_add(1))
         .filter(|data| data.opcode == Opcode::OpData)?;
     let slots = req.slots_mut(frame);
     let (array, _) = owned_array(slots, code, op, a)?;
     let (key, free_dim) = inline_key(slots, code, op, b)?;
     let entry = array.value_ref(key)?;
+    // `get_op_data_zval_ptr_r`: php specialises no `OP_DATA` kind here.
     let value = ByKind(data.op1_type).read(slots, code, data.op1);
     let z = inline::binary(rule, entry.read(), value)?;
     if op.out_type != OperandKind::Unused {

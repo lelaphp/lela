@@ -24,15 +24,18 @@ import sys
 # Hand tables. Each carries the reason it is not derived.
 # ---------------------------------------------------------------------------
 
-# The design's hot list (third-engine-design.md section 5.8). A design decision,
-# not a property of php-src; php's own SPEC(...) clause is emitted beside it in
-# `spec` so the two can be compared.
+# The opcodes specialised on their operand kinds, ops.toml's `specialise`, which
+# third-engine-design.md section 5.8 renders. Not a property of php-src: an opcode
+# php's zend_vm_gen.php specialises joins in the commit that measures its run-time
+# operand decoding (section 5.8, #2997). php's own SPEC(...) clause is emitted
+# beside it in `spec` so the two can be compared.
 HOT_LIST = {
     "ASSIGN", "ADD", "SUB", "MUL", "IS_SMALLER", "IS_EQUAL", "IS_IDENTICAL",
     "JMPZ", "JMPNZ", "FETCH_DIM_R", "FETCH_DIM_W", "ASSIGN_DIM", "FETCH_OBJ_R",
     "FETCH_OBJ_W", "ASSIGN_OBJ", "SEND_VAR", "SEND_VAL", "INIT_FCALL", "DO_UCALL",
     "DO_ICALL", "RETURN", "PRE_INC", "CONCAT", "FAST_CONCAT", "ROPE_INIT",
     "ROPE_ADD", "ROPE_END", "FE_FETCH_R", "COUNT", "ISSET_ISEMPTY_DIM_OBJ",
+    "FETCH_DIM_FUNC_ARG", "ASSIGN_DIM_OP", "FETCH_DIM_RW",
 }
 
 # Safepoint candidates (design section 5.7 / jit-design section 3.1) and the

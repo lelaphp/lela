@@ -575,7 +575,7 @@ ext = "OP"
 effects = ["throw", "alloc"]
 throw_cond = "default (zend_may_throw_ex has no case); op1 CV undefined -> warning; op1 TMP/VAR destructor; op2 CV undefined -> warning; op2 TMP/VAR destructor"
 spec = ""
-specialise = false
+specialise = true
 doc = "assign dimension with operator"
 
 [[op]]
@@ -1543,7 +1543,7 @@ result = "used"
 effects = ["throw", "alloc"]
 throw_cond = "default (zend_may_throw_ex has no case); op1 CV undefined -> warning; op1 TMP/VAR destructor; op2 CV undefined -> warning; op2 TMP/VAR destructor"
 spec = ""
-specialise = false
+specialise = true
 doc = "fetch dimension for read-write"
 
 [[op]]
@@ -1643,7 +1643,7 @@ result = "used"
 effects = ["throw", "alloc"]
 throw_cond = "default (zend_may_throw_ex has no case); op1 CV undefined -> warning; op1 TMP/VAR destructor; op2 CV undefined -> warning; op2 TMP/VAR destructor"
 spec = ""
-specialise = false
+specialise = true
 doc = "fetch dimension for function argument"
 
 [[op]]
