@@ -1,0 +1,1 @@
+{"tool_name":"Write","tool_input":{"file_path":"crates/php_engine/src/tests/kept.rs","content":"thread_local! { static SEEN: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }\n"}}

@@ -508,6 +508,14 @@ text = "Extension state is request-scoped, immutable engine-scoped or process-sc
 # a stale copy is a `budget` failure. The wildcard is expanded from Cargo.lock.
 
 [[rule]]
+id = "state.no-thread-local"
+scope = ["crates/*", "sapi/*"]            # ext/* is ext.no-locks'
+deny_types = ["std::thread::LocalKey"]
+deny_macros = ["std::thread_local"]
+adr = "0014"
+text = "No engine, tier, host or test state is thread-local (design §5.14 Threads, jit-design.md §8): a tier keeps its state in the engine or request state Tier::extension() declares, an extension in its own, and a test reads a request state back through tier::serve_kept. The one per-thread slot is php_heap's lend, which holds a request's heap for one call into C (ADR-0014); its invocation carries #[expect(clippy::disallowed_macros)]."
+
+[[rule]]
 id = "unsafe.homes"
 allow = ["php_heap", "php_process", "ext/*/src/ffi/", "sapi/*/src/ffi/", "timelib_sys", "php_jit::table::code", "php_jit::enter"]
 adr = "0006"
