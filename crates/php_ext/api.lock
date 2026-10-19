@@ -895,7 +895,6 @@ request::Request::set_local_var
 request::Request::set_locale_name
 request::Request::set_response_code
 request::Request::set_shutdown_function
-request::Request::set_trace_num
 request::Request::set_umask
 request::Request::stack_limit_address
 request::Request::stack_overflowed
@@ -913,7 +912,6 @@ request::Request::take_uploaded_file
 request::Request::temp_dir
 request::Request::this
 request::Request::this_object
-request::Request::trace_num
 request::Request::trampoline
 request::Request::umask
 request::Request::unit_cache

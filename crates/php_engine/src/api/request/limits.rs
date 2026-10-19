@@ -15,6 +15,7 @@ use php_compile::StackLimit;
 
 use super::{Forked, Periodic, Receiving, Reentry, Request};
 use crate::api::abi::{Beneath, chain};
+use crate::tier::TraceNum;
 
 /// One request's interrupt (design §5.8; `CONTEXT.md`, Interrupt), as
 /// the thread that raises it sees it: `Send` and `Sync`, and cloned so
@@ -187,10 +188,10 @@ pub(super) struct Limits {
     /// entries; what the compiler is held to (design §5.6).
     stack_limit: StackLimit,
     /// php's `EG(jit_trace_num)`, the running execution's trace
-    /// number: zero at request start, swapped by a fiber switch with the
+    /// number: none at request start, swapped by a fiber switch with the
     /// stack limit ([`Request::switch_execution`]) and set aside around
-    /// a generator's body ([`Request::trace_num`]).
-    trace_num: u32,
+    /// a generator's body ([`crate::tier::trace_num`]).
+    trace_num: TraceNum,
     /// How a function C calls back reaches the request
     /// ([`Request::reentry`]), made at the first ask and closed as the
     /// request is dropped.
@@ -217,7 +218,7 @@ impl Limits {
             deadlines: crate::interrupt::Deadlines::new(timer, &interrupt),
             interrupt,
             stack_limit: StackLimit::UNCHECKED,
-            trace_num: 0,
+            trace_num: TraceNum::NONE,
             reentry: None,
         }
     }
@@ -241,7 +242,7 @@ impl Request {
     /// state does at a fiber switch ([`Request::switch_execution`]):
     /// `zend_fiber_capture_vm_state` and `zend_fiber_restore_vm_state`
     /// carry `EG(jit_trace_num)` (`Z/Zend/zend_fibers.c:131`, `:148`).
-    pub(super) fn swap_trace_num(&mut self, other: &mut u32) {
+    pub(super) fn swap_trace_num(&mut self, other: &mut TraceNum) {
         std::mem::swap(&mut self.limits.trace_num, other);
     }
 
@@ -462,29 +463,16 @@ impl Request {
         &self.limits.interrupt
     }
 
-    /// The trace number of the execution the request runs on, php's
-    /// `EG(jit_trace_num)` (`jit-design.md` §4.9, revision 9; design
-    /// §5.11, revision 52): one word the engine stores per execution and
-    /// only the tier interprets, nonzero while the tier records on this
-    /// execution, which is its recording exclusion. The engine keeps it
-    /// with the execution state and never reads it: a fiber switch saves
-    /// and restores it, a fiber's body starts at zero
-    /// (`Z/Zend/zend_fibers.c:105-155`, `:599`), and a generator's body
-    /// runs at zero and its resumer reads its own again after it
-    /// (`Z/Zend/zend_generators.c:793-865`). A debugger serving a frame
-    /// below a fiber leaves it the running fiber's, as phpdbg moves
-    /// `EG(current_execute_data)` alone. A `tier.lock` item, and the
-    /// tier's alone: an extension has nothing to read in it and no
-    /// reason to write it.
-    #[must_use]
-    pub fn trace_num(&self) -> u32 {
+    /// The trace number of the execution the request runs on, which
+    /// the tier reads through [`crate::tier::trace_num`] and the
+    /// generator's resume sets aside around a body.
+    pub(crate) fn trace_num(&self) -> TraceNum {
         self.limits.trace_num
     }
 
-    /// The running execution's trace number written
-    /// ([`Request::trace_num`]): what the tier's recording guard sets
-    /// and clears. A `tier.lock` item.
-    pub fn set_trace_num(&mut self, trace_num: u32) {
+    /// The trace number of the execution the request runs on written
+    /// ([`crate::tier::set_trace_num`]).
+    pub(crate) fn set_trace_num(&mut self, trace_num: TraceNum) {
         self.limits.trace_num = trace_num;
     }
 

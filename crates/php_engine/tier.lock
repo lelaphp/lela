@@ -3,8 +3,6 @@
 api::request::Interrupt
 api::request::Interrupt::raised
 api::request::Request::interrupt
-api::request::Request::set_trace_num
-api::request::Request::trace_num
 tier::Argument
 tier::Aside
 tier::Called
@@ -18,6 +16,10 @@ tier::SafepointIdx
 tier::Site
 tier::Stepped
 tier::Tier
+tier::TraceNum
+tier::TraceNum::NONE
+tier::TraceNum::from_raw
+tier::TraceNum::raw
 tier::Under
 tier::begin
 tier::below
@@ -32,6 +34,8 @@ tier::restore
 tier::set_argv
 tier::set_aside
 tier::set_stdin
+tier::set_trace_num
 tier::step
+tier::trace_num
 tier::unwind
 [kernels]
