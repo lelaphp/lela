@@ -3187,20 +3187,38 @@ fn harness_self_shell_judges_a_write_where_it_runs_and_only_in_a_checkout() {
         assert!(!refused(main, &line), "{line}");
         assert!(!refused(&linked, &line), "{line}");
     }
+    let piped = format!("cd {scratch}/repo && printf x 2>&1 | tee -a docs/divergence.toml");
+    assert!(!refused(main, &piped), "{piped}");
+    std::fs::create_dir(outside.join("links")).unwrap();
+    std::os::unix::fs::symlink(main.join("seams.toml"), outside.join("links/seams.toml")).unwrap();
+    std::fs::write(outside.join("file"), "").unwrap();
+    let main_dir = main.display();
     for line in [
         // Into a checkout by an assigned variable, by a later `cd`, by a
-        // subshell's and by git's `-C`.
+        // subshell's, by git's `-C` and through a link.
         format!("W={worktree} && cd \"$W\" && {write}"),
-        format!("cd {scratch}/repo && ls; cd {worktree} && {write}"),
+        format!("cd {scratch}/repo && ls && cd {worktree} && {write}"),
         format!("cd {scratch}/repo && (cd {worktree} && {write})"),
         format!("cd {scratch}/repo && git -C {worktree} checkout -- seams.toml"),
+        format!("cd {scratch}/links && sed -i '' 's/a/b/' seams.toml"),
         // Where `permit` cannot say: a variable the line did not assign,
-        // `cd -`, a directory not on disk, a program's own directory.
+        // `cd -`, a directory not on disk or no directory, a change that
+        // may fail or run in a shell of its own before what follows it,
+        // one a program runs unread, and a program's own directory.
         format!("cd \"$S/repo\" && {write}"),
         format!("cd {scratch}/repo && cd - && {write}"),
         format!("cd {scratch}/missing && {write}"),
+        format!("cd {scratch}/file && {write}"),
+        format!("cd {scratch}/repo; {write}"),
+        format!("cd {scratch}/repo || true && {write}"),
+        format!("cd {scratch}/repo & {write}"),
+        format!("cd {scratch}/repo | true && {write}"),
+        format!("cd {scratch}/repo\n{write}"),
+        format!("cd {scratch}/repo && xargs sh -c 'cd {worktree} && {write}' < /dev/null"),
         format!("cd {scratch}/repo && env -C {worktree} sed -i '' 's/a/b/' seams.toml"),
         format!("cd {scratch}/repo && patch -d {worktree} seams.toml < fix.diff"),
+        format!("cd {scratch}/repo && GIT_WORK_TREE={worktree} git checkout -- seams.toml"),
+        format!("cd {scratch}/repo && ln -sf {main_dir}/seams.toml . && {write}"),
     ] {
         assert!(refused(main, &line), "{line}");
     }

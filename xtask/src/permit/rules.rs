@@ -322,35 +322,75 @@ fn judges_where(root: &Path, rule: &Rule, line: Option<&Line>, call: &Call) -> S
 /// repository ([`crate::track::checkouts`]): where it stands
 /// ([`runs_in`]) or where [`placed`] puts any of its commands, each by its
 /// canonical path, so a scratch repository's `docs/divergence.toml` is not
-/// this repository's (#2887). It fails safe, reading each of these as
-/// inside one: a directory change the line does not say where it goes; a
-/// place not on disk, which a `cd` cannot enter and so leaves the shell
-/// where it stood; a program moved by its own option ([`MOVES_ITSELF`]);
-/// and a repository git cannot list.
+/// this repository's (#2887), and a relative path the line names that
+/// resolves into one, through a link, is in one. It fails safe, reading
+/// as inside one: a line `permit` does not follow past its directory
+/// changes ([`unfollowed`]); a place that is no directory on disk, which
+/// a `cd` cannot enter; and a repository git cannot list.
 fn in_a_checkout(root: &Path, line: Option<&Line>) -> bool {
     let (placed, lost) = line.map(|line| walk(root, line)).unwrap_or_default();
-    if lost || line.is_some_and(|line| regex(MOVES_ITSELF).is_match(line.text())) {
+    if lost || line.is_some_and(unfollowed) {
         return true;
     }
     let Ok(checkouts) = crate::track::checkouts(root) else {
         return true;
     };
+    let inside = |path: &Path| checkouts.iter().any(|c| path.starts_with(c));
+    let named: Vec<&String> = line.map_or_else(Vec::new, |line| {
+        let words = line.commands().iter().flat_map(Argv::words);
+        words.chain(line.written()).collect()
+    });
+    // A name the line spells there that resolves into a checkout.
+    let reaches = |dir: &Path| {
+        named.iter().any(|name| {
+            Path::new(name).is_relative()
+                && fs::canonicalize(dir.join(name)).is_ok_and(|path| inside(&path))
+        })
+    };
+    let stands = placed.into_iter().map(|(_, at)| at);
     std::iter::once(runs_in(root, line))
-        .chain(placed.into_iter().map(|(_, at)| at))
-        .any(|dir| {
-            fs::canonicalize(dir).map_or(true, |dir| checkouts.iter().any(|c| dir.starts_with(c)))
+        .chain(stands)
+        .any(|dir| match fs::canonicalize(dir) {
+            Ok(dir) => !dir.is_dir() || inside(&dir) || reaches(&dir),
+            Err(_) => true,
         })
 }
 
-/// A program the shell starts in one directory that writes in another,
-/// by an option of its own the argv does not place: `env -C`, `find
-/// -execdir`, `patch -d`, and a target directory of `cp`, `mv`, `ln` or
-/// `install`. git's `-C` is placed ([`moved`]).
-const MOVES_ITSELF: &str = r"(?x)
+/// Whether `permit` cannot follow a line past its directory changes
+/// ([`UNFOLLOWED`]), or the line spells a change it did not read as a
+/// command, one a program it does not peel runs (`xargs sh -c 'cd …'`).
+fn unfollowed(line: &Line) -> bool {
+    let changes = |argv: &&Argv| matches!(argv.program(), "cd" | "pushd" | "popd");
+    let read = line.commands().iter().filter(changes).count();
+    let spelled = regex(r"(?:^|[^\w./-])(?:cd|pushd|popd)\b");
+    spelled.find_iter(line.text()).count() > read
+        || (read > 0 && regex(SEQUENCED).is_match(line.text()))
+        || regex(UNFOLLOWED).is_match(line.text())
+}
+
+/// What runs a command where the shell did not move to: a program moved
+/// by its own option the argv does not place (`env -C`, `find -execdir`,
+/// `patch -d`, a target directory of `cp`, `mv` or `install`; git's `-C`
+/// is placed by [`moved`]), git pointed at a tree by its environment, and
+/// a link the line makes, through which a write lands elsewhere.
+const UNFOLLOWED: &str = r"(?x)
   \benv\b[^|;&\n]*\s(?:-[a-zA-Z]*C|--chdir)
 | \bfind\b[^|;&\n]*\s-(?:execdir|okdir)\b
 | \bpatch\b[^|;&\n]*\s(?:-[a-zA-Z]*d|--directory)\b
-| \b(?:cp|mv|ln|install)\b[^|;&\n]*\s(?:-[a-zA-Z]*t|--target-directory)\b";
+| \b(?:cp|mv|install)\b[^|;&\n]*\s(?:-[a-zA-Z]*t|--target-directory)\b
+| \bGIT_(?:DIR|WORK_TREE)=
+| \bln\b";
+
+/// What runs a command after a directory change that failed, where the
+/// shell stood before it, or runs the change in a shell of its own: `;`,
+/// `||`, a lone `&` and a newline between commands, and a change piped.
+/// A line of changes joined by `&&` alone stops where one fails.
+const SEQUENCED: &str = r"(?x)
+  ;
+| \|\|
+| (?:^|[^&<>|])&(?:[^&>]|$)
+| (?:^|[^\\])\n\s*\S
+| \b(?:cd|pushd|popd)\b[^;&|\n]*\|";
 
 /// Whether a command the rule fires on runs in a checkout whose branch
 /// records a ticket, or one the harness cannot tell does not
@@ -489,8 +529,8 @@ fn walk<'a>(root: &Path, line: &'a Line) -> (Vec<(&'a Argv, PathBuf)>, bool) {
     let mut entered: Vec<(u32, PathBuf, Vec<PathBuf>)> = Vec::new();
     // How many shells were open at a change the line does not say where
     // it goes: nothing is placed until that shell has closed.
-    let mut lost: Option<usize> = None;
-    let (mut placed, mut ever) = (Vec::new(), false);
+    let mut lost_at: Option<usize> = None;
+    let (mut placed, mut lost) = (Vec::new(), false);
     for (argv, shells) in line.commands().iter().zip(line.shells()) {
         let kept = entered
             .iter()
@@ -502,19 +542,19 @@ fn walk<'a>(root: &Path, line: &'a Line) -> (Vec<(&'a Argv, PathBuf)>, bool) {
                 (dir, pushed) = (back, stack);
             }
         }
-        lost = lost.filter(|depth| entered.len() >= *depth);
+        lost_at = lost_at.filter(|depth| entered.len() >= *depth);
         let left = shells.get(kept..).unwrap_or_default();
         entered.extend(left.iter().map(|id| (*id, dir.clone(), pushed.clone())));
-        if lost.is_some() || change(&mut dir, &mut pushed, argv) {
+        if lost_at.is_some() || change(&mut dir, &mut pushed, argv) {
             continue;
         }
         if matches!(argv.program(), "cd" | "pushd" | "popd") {
-            (lost, ever) = (Some(entered.len()), true);
+            (lost_at, lost) = (Some(entered.len()), true);
             continue;
         }
         placed.push((argv, moved(dir.clone(), argv)));
     }
-    (placed, ever)
+    (placed, lost)
 }
 
 /// Where each command of `line` that `fires` runs: where the line stands
