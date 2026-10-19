@@ -260,6 +260,8 @@ pub(crate) fn watch(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) 
     served.args(ask.accept.args());
     served.args(ask.scope.args());
     served.arg("--journal").arg(&journal);
+    // The served run is this one's child, seated with it (#2982).
+    crate::seat::lend(&mut served);
     let status = served
         .status()
         .with_context(|| format!("starting {} witness", exe.display()))?;

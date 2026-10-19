@@ -373,3 +373,62 @@ fn executables_run_side_by_side_where_declared_and_apart_where_they_share_a_key(
     );
     assert!(int(&reading, "ms") >= 2100, "{reading:#?}");
 }
+
+/// Under `--staged` an executable the crate names in `own` runs only
+/// where a path of its own is staged, and a pass with one left out is not
+/// recorded, since `done` asks the whole crate's run (#2982); staged, it
+/// runs, and the reading is the whole crate's.
+#[test]
+fn staged_leaves_out_an_executable_whose_own_paths_are_not_staged() {
+    let root = scratch("test-own");
+    let heap = root.join("crates/php_heap");
+    std::fs::write(heap.join("src/lib.rs"), "//! Nothing to test.\n").unwrap();
+    std::fs::create_dir_all(heap.join("tests")).unwrap();
+    for test in ["a", "b"] {
+        let body = SPAN.replace("NAME", test);
+        std::fs::write(heap.join(format!("tests/{test}.rs")), body).unwrap();
+    }
+    let declared = "\n[package.metadata.xtask.test]\nexecutables = \"side-by-side\"\n\
+                    own = { b = [\"tests/b.rs\"] }\n";
+    let toml = std::fs::read_to_string(heap.join("Cargo.toml")).unwrap();
+    std::fs::write(heap.join("Cargo.toml"), format!("{toml}{declared}")).unwrap();
+    let root = committed(root);
+    let staged = |path: &str, line: &str| {
+        let file = heap.join(path);
+        let text = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, format!("{text}{line}\n")).unwrap();
+        sh(
+            &root,
+            &["git", "add", "--", &format!("crates/php_heap/{path}")],
+        );
+        let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
+            .arg("--root")
+            .arg(root.path())
+            .args(["test", "--staged"])
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            out.status.success(),
+            "{said}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        said
+    };
+    let ran = |test: &str| root.join(format!("target/tmp/{test}.span")).exists();
+    let read = || {
+        Store::of_workspace(root.path())
+            .read("test", "php_heap")
+            .unwrap()
+    };
+
+    let said = staged("src/lib.rs", "//! Changed.");
+    assert!(said.contains("under --staged b left out"), "{said}");
+    assert!(ran("a") && !ran("b"));
+    assert!(read().is_none(), "{said}");
+
+    let said = staged("tests/b.rs", "// Changed.");
+    assert!(ran("b"), "{said}");
+    let reading = read().unwrap();
+    assert_eq!(int(&reading, "passed"), 2, "{reading:#?}");
+}

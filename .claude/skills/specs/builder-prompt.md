@@ -14,7 +14,9 @@ Read first: AGENTS.md, CONTEXT.md, ext/AGENTS.md, the stage-commit skill, and <t
 
 Validate in the build skill's four tiers (#663 holds them until the skill does). Pass `--jobs 3` to every `cargo xtask phpt`: three builders and the coordinator's merges share the machine's 12 cores, and at a load of 70 a test's time limit fails what it would meet. Run phpt only through `cargo xtask phpt`, never a program of your own written into the pinned php-src tree. The one subset run, at the end, goes to a file read through `awk -f <checkout>/.claude/skills/specs/first-failures.awk <file> | sort | uniq -c | sort -rn`, never raw: it prints about 200k lines. Regressions against the merge base are the coordinator's.
 
-Commit each piece as soon as it's done: sessions restart, and committed work survives them.
+Commit each piece as soon as it's done: sessions restart, and committed work survives them. The commit's hook is the measurement (stage-commit, step 4): make every source change, `cargo fmt` and `witness --accept` included, before `git commit`, and never chain a plain `cargo test` or your own clippy and test run before it. Witness runs once, `cargo xtask witness --crate <name>` before the branch is ready, not in the hook. A design ledger revision you add is `NEXT`, which the merge numbers (merging.md).
+
+Wait on anything, a merge, a worktree, a background run, by ending your turn or with a background `Monitor`, never a foreground `sleep` loop.
 
 Run a command you will wait on in the foreground with timeout set on the call, up to 45 minutes; background only what you will not wait on.
 

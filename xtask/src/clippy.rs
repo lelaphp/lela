@@ -58,6 +58,7 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
     // The key each reading carries is the tree's before cargo built it,
     // so a file written while the crates are measured stales the reading.
     let snapshot = Snapshot::disk(root)?;
+    let _seat = (!crates.is_empty()).then(|| crate::seat::Seats::of_env().take(INSTRUMENT));
     let mut release = Vec::new();
     for krate in &crates {
         if splits(root, krate)? {
