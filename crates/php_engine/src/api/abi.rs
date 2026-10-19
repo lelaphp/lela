@@ -953,6 +953,16 @@ pub struct Extension {
     pub(crate) declarations: Declarations,
 }
 
+impl Extension {
+    /// The extension as the tier's: its ini entries, states and
+    /// lifecycle served as any extension's, and unlisted in
+    /// `module_registry` ([`ExtensionEntry::listed`]).
+    pub(crate) fn unlisted(mut self) -> Extension {
+        self.entry.listed = false;
+        self
+    }
+}
+
 /// One extension as the engine holds it once built, php's
 /// `zend_module_entry` with its function table registered and gone: the
 /// name, version, ini entries, lifecycle functions and the two state
@@ -961,6 +971,15 @@ pub struct Extension {
 #[derive(Clone)]
 pub(crate) struct ExtensionEntry {
     pub(crate) name: String,
+    /// Whether the entry stands in `module_registry` as a program reads
+    /// it, listed and found by name: `get_loaded_extensions()`,
+    /// `extension_loaded()`, `ReflectionExtension`, `--re`, `--ri` and
+    /// `phpinfo()`. Every extension's does, and the tier's does not
+    /// ([`Extension::unlisted`]): the tier declares its state as an
+    /// extension declares it and is no extension (`jit-design.md` §4),
+    /// as php's tracing tier is part of `Zend OPcache` and has no
+    /// `zend_module_entry` of its own.
+    pub(crate) listed: bool,
     /// `zend_module_entry.version`, what [`ExtensionBuilder::version`]
     /// declared, `PHP_VERSION` where it declared none.
     pub(crate) version: &'static str,
@@ -1944,6 +1963,7 @@ impl ExtensionBuilder {
         Extension {
             entry: ExtensionEntry {
                 name: name.to_owned(),
+                listed: true,
                 version: self.version.unwrap_or(crate::api::request::PHP_VERSION),
                 ini: self.ini,
                 on_modify: self.on_modify,

@@ -705,7 +705,8 @@ const MAX_ACCELERATED_FILES: usize = 10_000;
 pub(crate) struct Shared {
     /// `module_registry`: `Core`, then the bundle in startup order, each
     /// at its [`ExtensionId`], its declarations moved into the tables
-    /// below.
+    /// below; and the tier's entry where it declares one, served as an
+    /// extension's and unlisted ([`Shared::listed`]).
     pub(crate) extensions: Vec<ExtensionEntry>,
     /// `CG(function_table)`'s natives, the engine's own and then each
     /// extension's in bundle order, less what the startup ini's
@@ -1544,6 +1545,13 @@ pub(crate) struct Declared<'a> {
 }
 
 impl Shared {
+    /// `module_registry` as a program reads it, each entry at its place
+    /// in [`Shared::extensions`]: every entry but the tier's
+    /// ([`ExtensionEntry::listed`]).
+    pub(crate) fn listed(&self) -> impl Iterator<Item = (usize, &ExtensionEntry)> {
+        (self.extensions.iter().enumerate()).filter(|(_, entry)| entry.listed)
+    }
+
     /// Where the record of a native or a native method stands
     /// ([`Shared::callees`]); none for every other function.
     #[inline]
@@ -3340,11 +3348,13 @@ impl EngineBuilder {
     /// Bind the tier: `execute::<T>` becomes the loop, its instantiation
     /// chosen as the engine starts by whether the bundle declares an
     /// opcode (design §5.8, §7.1), and the tier's state is declared
-    /// under seam 3 (design §4.3 seam 8).
+    /// under seam 3 (design §4.3 seam 8): its extension is served as the
+    /// bundle's are, and a program neither lists it nor finds it by name
+    /// (`jit-design.md` §4).
     #[must_use]
     pub fn tier<T: Tier>(mut self) -> EngineBuilder {
         self.bind_loops = Loops::bound::<T>;
-        self.tier_extension = T::extension();
+        self.tier_extension = T::extension().map(Extension::unlisted);
         self.hooked = T::HOOKED;
         self
     }
@@ -4609,10 +4619,8 @@ impl Engine {
     /// CLI's `-m` list them: what a host prints without a request.
     #[must_use]
     pub fn loaded_extensions(&self) -> Vec<String> {
-        self.shared
-            .extensions
-            .iter()
-            .map(|e| e.name.clone())
+        (self.shared.listed())
+            .map(|(_, e)| e.name.clone())
             .collect()
     }
 
