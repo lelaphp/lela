@@ -140,22 +140,26 @@ fn ids_run_across_a_segment_boundary() {
 
 /// `opcache.jit_max_root_traces` bounds every id, sides as well, as php's
 /// `ZEND_JIT_TRACE_NUM` does: no id reaches it, and the table that met it
-/// has stopped, numbering and publishing nothing more.
+/// is full, numbering and publishing nothing more; the hot root that finds
+/// it so stops its counters, which stand stopped.
 #[test]
 fn the_ids_bound_is_full_of_traces_and_stops_the_table() {
     let table = table(&[("opcache.jit_max_root_traces", "3")]);
     assert_eq!(table.number(Start::Enter), Ok(trace(1)));
-    assert!(!table.stopped());
+    assert!(!table.full());
     assert_eq!(
         table.publish(compiled(&[0; 4], vec![]), side(1)),
         Ok(trace(2))
     );
-    assert!(table.stopped(), "the next id is the bound");
+    assert!(table.full(), "the next id is the bound");
     let full = Err(Unpublished::Full(Full::Traces));
     assert_eq!(table.publish(compiled(&[0; 4], vec![]), Start::Loop), full);
     assert_eq!(table.number(Start::Loop), full);
     assert_eq!(table.next(), Some(trace(3)));
     assert_eq!(Full::Traces.stop(), crate::record::Stop::TooManyTraces);
+    assert!(!table.stopped(), "until a hot root finds it full");
+    table.stop();
+    assert!(table.stopped());
 }
 
 /// `opcache.jit_max_side_traces` bounds the sides of each root, counted
@@ -175,7 +179,7 @@ fn a_roots_sides_are_bounded_at_the_root() {
     assert_eq!(table.number(side(1)), full);
     assert_eq!(table.number(Start::Loop), Ok(trace(4)));
     assert_eq!(table.number(side(4)), Ok(trace(5)));
-    assert!(!table.stopped(), "a root's bound stops no other root");
+    assert!(!table.full(), "a root's bound stops no other root");
     assert_eq!(
         table.number(side(9)),
         Err(Unpublished::Malformed("a side trace of no trace numbered"))
@@ -201,11 +205,11 @@ fn the_epochs_exits_are_bounded() {
         table.publish(compiled(&[0; 4], vec![]), Start::Loop),
         Ok(trace(2))
     );
-    assert!(!table.stopped());
+    assert!(!table.full());
 }
 
 /// An arena with no room is `Full::Code`, php's full buffer, and the
-/// table has stopped: nothing it holds is freed before the restart.
+/// table is full: nothing it holds is freed before the restart.
 #[test]
 fn a_full_arena_is_full_of_code_and_stops_the_table() {
     let table = table(&[]);
@@ -215,25 +219,25 @@ fn a_full_arena_is_full_of_code_and_stops_the_table() {
     );
     let full = Err(Unpublished::Full(Full::Code));
     assert_eq!(table.publish(compiled(&[0; 16], vec![]), Start::Loop), full);
-    assert!(table.stopped());
+    assert!(table.full());
     assert_eq!(table.publish(compiled(&[0; 16], vec![]), Start::Loop), full);
     assert_eq!(table.next(), Some(trace(2)), "no id was taken");
 }
 
 /// A table whose arena could not be mapped, as on a target with no
 /// adapter yet, numbers as the interim pipeline does and finds its
-/// first publish full, which stops it.
+/// first publish full, which fills it.
 #[test]
 fn a_table_with_no_arena_numbers_and_publishes_nothing() {
     let policy = testing::policy(&[("opcache.jit_buffer_size", "64K")]);
     let table: TraceTable<Unmapped> = TraceTable::with_perf(&policy, Perf::none());
     assert_eq!(table.number(Start::Loop), Ok(trace(1)));
-    assert!(!table.stopped());
+    assert!(!table.full());
     assert_eq!(
         table.publish(compiled(&[0; 4], vec![]), Start::Loop),
         Err(Unpublished::Full(Full::Code))
     );
-    assert!(table.stopped());
+    assert!(table.full());
 }
 
 /// What does not hold together is refused before anything is counted.
@@ -266,7 +270,7 @@ fn a_new_epochs_table_starts_empty() {
     let exit_word = super::exit_word(&epoch, trace(1), ExitId(0));
     assert!(crate::policy::read(exit_word) == crate::policy::State::Blacklisted);
     let table = table(&[]);
-    assert_eq!((table.next(), table.stopped()), (Some(trace(1)), false));
+    assert_eq!((table.next(), table.full()), (Some(trace(1)), false));
     assert!(table.get(trace(1)).is_none());
 }
 

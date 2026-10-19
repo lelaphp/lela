@@ -24,9 +24,11 @@
 //! of the epoch asks for it, dropped with the epoch, so a restart's epoch
 //! starts with none, as `zend_jit_restart` empties php's buffer, and no
 //! trace is freed alone. A table whose next id reached its bound, or
-//! whose arena is full, has stopped ([`TraceTable::stopped`]): it compiles
-//! nothing more until the restart, as `zend_jit_stop_counter_handlers`
-//! stops php's.
+//! whose arena is full, is full ([`TraceTable::full`]): the next hot root
+//! is refused with `TOO_MANY_TRACES` and stops it
+//! ([`TraceTable::stop`]), after which no word of the epoch is claimed
+//! until the restart, as php's `zend_jit_trace_hot_root` refuses one root
+//! and `zend_jit_stop_counter_handlers` stops its counters.
 //!
 //! **php's `PERF` and `PERF_DUMP` writers** ([`Perf`]) are the table's,
 //! written under the mutex by the publish that places the code.
@@ -335,6 +337,9 @@ pub(crate) struct TraceTable<P: Pages = Native> {
     next: AtomicU32,
     /// Whether the arena was found with no room for a body.
     code_full: AtomicBool,
+    /// Whether a hot root found the table full: php's
+    /// `ZCSG(jit_counters_stopped)`.
+    stopped: AtomicBool,
     bounds: Bounds,
     compile: Mutex<Writer<P>>,
 }
@@ -375,6 +380,7 @@ impl<P: Pages> TraceTable<P> {
             segments: (0..segments).map(|_| OnceLock::new()).collect(),
             next: AtomicU32::new(1),
             code_full: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
             bounds,
             compile: Mutex::new(Writer {
                 arena,
@@ -400,12 +406,24 @@ impl<P: Pages> TraceTable<P> {
         TraceId::new(self.next.load(Ordering::Relaxed))
     }
 
-    /// Whether the table compiles nothing more until the restart: its
-    /// next id reached `opcache.jit_max_root_traces`, or its arena had no
-    /// room, as php's `zend_jit_stop_counter_handlers` stops its counters.
-    pub(crate) fn stopped(&self) -> bool {
+    /// Whether no trace more can be published: the next id reached
+    /// `opcache.jit_max_root_traces`, php's `ZEND_JIT_TRACE_NUM >=
+    /// max_root_traces` at a hot root, or the arena had no room.
+    pub(crate) fn full(&self) -> bool {
         self.code_full.load(Ordering::Relaxed)
             || self.next.load(Ordering::Relaxed) >= self.bounds.traces
+    }
+
+    /// The table full, its counters stopped: php's
+    /// `zend_jit_stop_counter_handlers`, which the hot root that found it
+    /// full calls, so no word of the epoch is claimed until the restart.
+    pub(crate) fn stop(&self) {
+        self.stopped.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether [`TraceTable::stop`] stopped it.
+    pub(crate) fn stopped(&self) -> bool {
+        self.stopped.load(Ordering::Relaxed)
     }
 
     /// The compile mutex, taken as a thread that panicked holding it left

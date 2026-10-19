@@ -109,8 +109,8 @@ fn visited(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
             return Flow::Continue;
         };
         let claims = site == Site::Entry && tier::trace_num(req) == TraceNum::NONE;
-        // A table that stopped compiles nothing more until the restart,
-        // as php's stopped counters do: its words are claimed no more.
+        // A table a hot root found full stopped its counters, as php's
+        // `zend_jit_stop_counter_handlers` does: no word is claimed more.
         let holder = || {
             let table = table::of(req, &engine.shared.policy)?;
             if table.stopped() {
@@ -178,7 +178,10 @@ pub(crate) fn hot(
         if let Some(trace) = table.and_then(table::TraceTable::next) {
             started(req, shared, frame, trace, start);
         }
-        if table.is_none_or(table::TraceTable::stopped) {
+        if table.is_none_or(table::TraceTable::full) {
+            if let Some(table) = table {
+                table.stop();
+            }
             let recorded = record::refused(req, frame, start, Stop::TooManyTraces);
             let mut lines = Vec::new();
             compiler::submit(shared, Job { recorded, claim }, &mut lines);
