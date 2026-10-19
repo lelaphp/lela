@@ -13,8 +13,9 @@
 //!
 //! So here the compile's home ([`super::memory::RequestStrings`]) makes
 //! each constant a string of the request's with one owner, the unit's,
-//! one per time the compile asks; an `eval`'s names are made when the
-//! unit is noted. The main op array's constants are given up when its
+//! one per time the compile asks; an `eval`'s file name is made before
+//! its compile, as php makes it, and its other names when the unit is
+//! noted. The main op array's constants are given up when its
 //! execution ends, as `destroy_op_array` frees an `eval`'s at its
 //! return, and the rest, what a declared function, closure, method or
 //! class carries, once nothing holds the unit. A value copied out of a
@@ -38,23 +39,118 @@ const SCANNED_NAMES: usize = 16;
 
 /// The strings of the request-only units the request holds: each unit's,
 /// one owner apiece, beside the unit they go with, the newest name string
-/// held for each name, where a copy finds it, and the constants of the
-/// compile under way. A name no living unit holds keeps its key with no
-/// string, so the next unit of that name, an `eval` in a loop's, makes no
-/// key of its own; and the vectors a unit's strings stood in are kept for
-/// the next unit's.
+/// held for each name, where a copy finds it ([`Names`]), and the
+/// constants of the compile under way. The units stand in the first
+/// `live` places, in the order they were taken; past them stand the
+/// places of units that are over, their vectors emptied and kept for
+/// the next units to take.
 #[derive(Default)]
 pub(crate) struct UnitStrings {
     units: Vec<Held>,
-    by_bytes: HashMap<Box<[u8]>, Option<PhpString>, NameHasher>,
-    spare: Vec<Vec<PhpString>>,
+    live: usize,
+    names: Names,
     dead: Vec<PhpString>,
     compiling: Compiling,
 }
 
-/// One request-only unit and the strings it owns.
+/// Every name a request-only unit's string has stood for, each hashed
+/// once, as the first unit of the name holds it, to the row the units
+/// that hold a string of it keep beside the string ([`HeldName`]), so a
+/// unit letting one go hashes nothing. A name no living unit holds keeps
+/// its row with no string, so the next unit of that name makes no key of
+/// its own. An `eval`'s file name is held with no row
+/// ([`Names::hold_unindexed`]) and hashed only where a copy of it is
+/// asked for while its unit stands ([`UnitStrings::newest`]), so an
+/// `eval` in a loop hashes nothing.
+#[derive(Default)]
+struct Names {
+    by_bytes: HashMap<Box<[u8]>, u32, NameHasher>,
+    rows: Vec<Named>,
+    /// How many names living units hold with no row.
+    unindexed: usize,
+}
+
+/// One name's row: the newest string a living unit holds of it, where a
+/// copy finds it, and how many living units hold one.
+#[derive(Default)]
+struct Named {
+    newest: Option<PhpString>,
+    holders: u32,
+}
+
+/// One of a unit's names: its string, one owner the unit's, and the row
+/// of the name it stands for, [`UNINDEXED`] for none yet.
+#[derive(Clone, Copy)]
+struct HeldName {
+    string: PhpString,
+    row: u32,
+}
+
+/// The row of a name held with no row ([`Names::hold_unindexed`]).
+const UNINDEXED: u32 = u32::MAX;
+
+impl Names {
+    /// `string` held by one more unit, the newest string of its name.
+    fn hold(&mut self, string: PhpString) -> HeldName {
+        let bytes = string.as_bytes();
+        let row = if let Some(&row) = self.by_bytes.get(bytes) {
+            row
+        } else {
+            let row = u32::try_from(self.rows.len()).unwrap_or(UNINDEXED - 1);
+            self.rows.push(Named::default());
+            self.by_bytes.insert(bytes.into(), row);
+            row
+        };
+        if let Some(named) = self.rows.get_mut(row as usize) {
+            named.newest = Some(string);
+            named.holders = named.holders.saturating_add(1);
+        }
+        HeldName { string, row }
+    }
+
+    /// `string` held by one more unit with no row, which is given it
+    /// where a copy of it is asked for.
+    fn hold_unindexed(&mut self, string: PhpString) -> HeldName {
+        self.unindexed += 1;
+        HeldName {
+            string,
+            row: UNINDEXED,
+        }
+    }
+
+    /// `name` let go by the unit that held it: whether its row's newest
+    /// string was it while another living unit holds one, which is then
+    /// to be found among theirs ([`UnitStrings::take`]).
+    fn let_go(&mut self, name: HeldName) -> bool {
+        if name.row == UNINDEXED {
+            self.unindexed = self.unindexed.saturating_sub(1);
+            return false;
+        }
+        let Some(named) = self.rows.get_mut(name.row as usize) else {
+            return false;
+        };
+        named.holders = named.holders.saturating_sub(1);
+        if !named
+            .newest
+            .is_some_and(|newest| newest.heap().is_same(name.string.heap()))
+        {
+            return false;
+        }
+        named.newest = None;
+        named.holders > 0
+    }
+
+    /// The newest string a living unit holds of `bytes`.
+    fn newest(&self, bytes: &[u8]) -> Option<PhpString> {
+        let row = *self.by_bytes.get(bytes)?;
+        self.rows.get(row as usize)?.newest
+    }
+}
+
+/// One request-only unit and the strings it owns; a place no unit stands
+/// in any longer, past the live ones, has none.
 struct Held {
-    unit: WeakUnit,
+    unit: Option<WeakUnit>,
     /// Whether it declared a function, a closure or a class, which hold
     /// it past its main op array's end.
     declares: bool,
@@ -66,8 +162,9 @@ struct Held {
     /// holds it.
     constants: Vec<PhpString>,
     /// Its op arrays' names ([`php_compile::op_array_names`]): those a
-    /// file's compile made, and an `eval`'s, made as it is noted.
-    names: Vec<PhpString>,
+    /// file's compile made, and an `eval`'s, its file's made before its
+    /// compile ([`Request::name_unit`]) and the rest as it is noted.
+    names: Vec<HeldName>,
     /// Whether the names were made, which a unit's noting does once.
     named: bool,
 }
@@ -159,64 +256,105 @@ impl UnitStrings {
     /// string a living unit holds, or at none.
     fn take(&mut self, ended: Option<*const Unit>) -> Vec<PhpString> {
         let mut dead = std::mem::take(&mut self.dead);
-        let mut constants = Vec::new();
-        let spare = &mut self.spare;
-        self.units.retain_mut(|held| {
-            let alive = held.unit.strong_count() > 0;
-            let ends = ended == Some(held.unit.as_ptr());
-            if alive && !ends {
-                return true;
-            }
-            constants.append(&mut held.main);
-            if alive && held.declares {
-                return true;
-            }
-            dead.append(&mut held.names);
-            constants.append(&mut held.constants);
-            spare.push(std::mem::take(&mut held.names));
-            spare.push(std::mem::take(&mut held.constants));
-            spare.push(std::mem::take(&mut held.main));
-            false
-        });
-        for name in &dead {
-            let bytes = name.as_bytes();
-            let Some(held) = self.by_bytes.get_mut(bytes) else {
-                continue;
+        let mut stale = Vec::new();
+        let mut kept = 0;
+        for at in 0..self.live {
+            let Some(held) = self.units.get_mut(at) else {
+                break;
             };
-            if held.is_some_and(|held| held.heap().is_same(name.heap())) {
-                *held = self
-                    .units
-                    .iter()
-                    .rev()
-                    .flat_map(|held| &held.names)
-                    .find(|held| held.as_bytes() == bytes)
-                    .copied();
+            let unit = held.unit.as_ref();
+            let alive = unit.is_some_and(|unit| unit.strong_count() > 0);
+            let ends = unit.is_some_and(|unit| ended == Some(unit.as_ptr()));
+            if (!alive || ends) && !held.main.is_empty() {
+                dead.append(&mut held.main);
+            }
+            if alive && (!ends || held.declares) {
+                self.units.swap(kept, at);
+                kept += 1;
+                continue;
+            }
+            held.unit = None;
+            for name in held.names.drain(..) {
+                if self.names.let_go(name) {
+                    stale.push(name.row);
+                }
+                dead.push(name.string);
+            }
+            if !held.constants.is_empty() {
+                dead.append(&mut held.constants);
             }
         }
-        dead.append(&mut constants);
+        self.live = kept;
+        for row in stale {
+            let newest = (self.units.iter().take(self.live).rev())
+                .flat_map(|held| &held.names)
+                .find(|held| held.row == row)
+                .map(|held| held.string);
+            if let Some(named) = self.names.rows.get_mut(row as usize) {
+                named.newest = newest;
+            }
+        }
         dead
     }
 
-    /// The entry for `unit`, laid down where there is none.
+    /// The units standing, in the order they were taken.
+    fn live(&self) -> &[Held] {
+        self.units.get(..self.live).unwrap_or_default()
+    }
+
+    /// The newest string a living unit holds of `bytes`: the one its row
+    /// names, else one held with no row, the newest unit's first, which
+    /// is given its row here.
+    fn newest(&mut self, bytes: &[u8]) -> Option<PhpString> {
+        if let Some(held) = self.names.newest(bytes) {
+            return Some(held);
+        }
+        if self.names.unindexed == 0 {
+            return None;
+        }
+        let (unit, at) = (self.live().iter().enumerate().rev()).find_map(|(unit, held)| {
+            let at = (held.names.iter())
+                .position(|name| name.row == UNINDEXED && name.string.as_bytes() == bytes)?;
+            Some((unit, at))
+        })?;
+        let name = self.units.get_mut(unit)?.names.get_mut(at)?;
+        let string = name.string;
+        self.names.unindexed = self.names.unindexed.saturating_sub(1);
+        *name = self.names.hold(string);
+        Some(string)
+    }
+
+    /// The entry for `unit`, laid down where there is none, in the first
+    /// place past the live ones.
     fn held(&mut self, unit: &PublishedUnit) -> usize {
-        if let Some(at) = self
-            .units
-            .iter()
-            .position(|held| std::ptr::eq(held.unit.as_ptr(), PublishedUnit::as_ptr(unit)))
-        {
+        let ptr = PublishedUnit::as_ptr(unit);
+        if let Some(at) = (self.live().iter()).position(|held| {
+            held.unit
+                .as_ref()
+                .is_some_and(|held| std::ptr::eq(held.as_ptr(), ptr))
+        }) {
             return at;
         }
-        self.units.push(Held {
-            unit: PublishedUnit::downgrade(unit),
-            declares: !(unit.functions.is_empty()
-                && unit.dynamic.is_empty()
-                && unit.classes.is_empty()),
-            main: self.spare.pop().unwrap_or_default(),
-            constants: self.spare.pop().unwrap_or_default(),
-            names: self.spare.pop().unwrap_or_default(),
-            named: false,
-        });
-        self.units.len() - 1
+        let taken = Some(PublishedUnit::downgrade(unit));
+        let declares =
+            !(unit.functions.is_empty() && unit.dynamic.is_empty() && unit.classes.is_empty());
+        match self.units.get_mut(self.live) {
+            Some(place) => {
+                place.unit = taken;
+                place.declares = declares;
+                place.named = false;
+            }
+            None => self.units.push(Held {
+                unit: taken,
+                declares,
+                main: Vec::new(),
+                constants: Vec::new(),
+                names: Vec::new(),
+                named: false,
+            }),
+        }
+        self.live += 1;
+        self.live - 1
     }
 }
 
@@ -227,7 +365,11 @@ impl Request {
     pub(crate) fn declared_for_the_request(&self, class: crate::api::values::ClassId) -> bool {
         self.declared_row(class).is_some_and(|row| {
             let unit = PublishedUnit::as_ptr(&row.unit);
-            (self.unit_strings.units.iter()).any(|held| std::ptr::eq(held.unit.as_ptr(), unit))
+            (self.unit_strings.live().iter()).any(|held| {
+                held.unit
+                    .as_ref()
+                    .is_some_and(|held| std::ptr::eq(held.as_ptr(), unit))
+            })
         })
     }
 
@@ -265,20 +407,14 @@ impl Request {
         // ([`Request::hold_unit_names`]).
         let mut seen = HashSet::with_hasher(NameHasher);
         for name in php_compile::op_array_names(unit) {
-            if !seen.insert(name) {
-                continue;
-            }
             let Some(at) = made.iter().rposition(|s| s.as_bytes() == name) else {
                 continue;
             };
-            let s = made.swap_remove(at);
-            held.names.push(s);
-            match strings.by_bytes.get_mut(name) {
-                Some(named) => *named = Some(s),
-                None => {
-                    strings.by_bytes.insert(name.into(), Some(s));
-                }
+            if !seen.insert(name) {
+                continue;
             }
+            let s = made.swap_remove(at);
+            held.names.push(strings.names.hold(s));
         }
         if held.declares {
             main_constants(unit, made, &mut held.main, &mut held.constants);
@@ -295,6 +431,30 @@ impl Request {
             self.release(Value::string(s));
         }
         self.unit_strings.compiling.made = made;
+    }
+
+    /// The name an `eval`'s string was compiled under
+    /// ([`Request::eval_string`]), made before its compile as
+    /// `zend_make_compiled_string_description` makes it, held by `unit`
+    /// as its file's name from here, one owner given up with the unit's
+    /// other names, as `destroy_op_array` releases `op_array->filename`.
+    /// A unit that holds a name of those bytes already leaves the string
+    /// to be given up now.
+    pub(crate) fn name_unit(&mut self, unit: &PublishedUnit, name: PhpString) {
+        let strings = &mut self.unit_strings;
+        let at = strings.held(unit);
+        let named = strings.units.get_mut(at).filter(|held| {
+            !(held.names.iter()).any(|held| held.string.as_bytes() == name.as_bytes())
+        });
+        match named {
+            Some(held) => {
+                held.names.push(strings.names.hold_unindexed(name));
+                // A unit that declares nothing has no name but its file's.
+                held.named |=
+                    unit.functions.is_empty() && unit.dynamic.is_empty() && unit.classes.is_empty();
+            }
+            None => self.release(Value::string(name)),
+        }
     }
 
     /// `zend_compile`'s names for a request-only unit: the file's name
@@ -317,10 +477,10 @@ impl Request {
                 .get(at)
                 .map_or(&[][..], |held| &held.names[..]);
             let again = if names.len() < SCANNED_NAMES {
-                names.iter().any(|made| made.as_bytes() == name)
+                names.iter().any(|made| made.string.as_bytes() == name)
             } else {
                 if seen.is_empty() {
-                    seen.extend(names.iter().map(|made| made.as_bytes().to_vec()));
+                    seen.extend(names.iter().map(|made| made.string.as_bytes().to_vec()));
                 }
                 !seen.insert(name.to_vec())
             };
@@ -328,13 +488,9 @@ impl Request {
                 continue;
             }
             let made = self.string(name)?;
-            match self.unit_strings.by_bytes.get_mut(name) {
-                Some(held) => *held = Some(made),
-                None => {
-                    self.unit_strings.by_bytes.insert(name.into(), Some(made));
-                }
-            }
-            if let Some(held) = self.unit_strings.units.get_mut(at) {
+            let strings = &mut self.unit_strings;
+            let made = strings.names.hold(made);
+            if let Some(held) = strings.units.get_mut(at) {
                 held.names.push(made);
             }
         }
@@ -371,7 +527,7 @@ impl Request {
         if let Some(held) = self.shared.existing_interned(bytes) {
             return Ok(PhpString::of(held));
         }
-        if let Some(held) = self.unit_strings.by_bytes.get(bytes).copied().flatten() {
+        if let Some(held) = self.unit_strings.newest(bytes) {
             self.addref(&Value::string(held));
             return Ok(held);
         }
@@ -385,13 +541,15 @@ impl Request {
     /// held by what it declared), and every unit nothing holds any
     /// longer.
     pub(crate) fn release_unit_strings(&mut self, ended: Option<&PublishedUnit>) {
-        if self.unit_strings.units.is_empty() {
+        if self.unit_strings.live == 0 {
             return;
         }
         let ended = ended.map(PublishedUnit::as_ptr);
         let mut dead = self.unit_strings.take(ended);
+        // `zend_string_release`: a string is no possible root, and
+        // destroying one runs nothing.
         for s in dead.drain(..) {
-            self.release(Value::string(s));
+            self.heap.release_string(s.heap());
         }
         self.unit_strings.dead = dead;
     }
@@ -404,8 +562,7 @@ impl Request {
             .units
             .into_iter()
             .flat_map(|held| {
-                held.names
-                    .into_iter()
+                (held.names.into_iter().map(|name| name.string))
                     .chain(held.main)
                     .chain(held.constants)
             })

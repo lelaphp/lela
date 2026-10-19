@@ -15,6 +15,7 @@ use php_unit::PublishedUnit;
 use crate::ProgramFile;
 use crate::api::abi::{Beneath, chain};
 use crate::api::raising::{Level, Thrown};
+use crate::api::values::PhpString;
 use crate::exec::IncludeKind;
 use crate::supplied::chain::{FileArgs, StringArgs};
 
@@ -794,22 +795,51 @@ impl Request {
     /// string(7) "closure"
     /// bool(true)
     /// ```
-    pub(crate) fn eval_string(&mut self, code: &[u8]) -> Result<Opened, Thrown> {
-        // `zend_make_compiled_string_description`'s `%s(%d) : %s`, laid
-        // in one buffer of its length.
-        const TAIL: &[u8] = b") : eval()'d code";
+    pub(crate) fn eval_string(
+        &mut self,
+        code: &[u8],
+        (file, line): (&[u8], u32),
+    ) -> Result<Opened, Thrown> {
         if code.is_empty() {
             return Ok(Opened::Failed);
         }
-        let line = self.current_line();
-        let file = self.current_file().unwrap_or_default();
-        // The file, `(`, at most ten digits and the tail.
-        let mut name = Vec::with_capacity(file.len() + 11 + TAIL.len());
-        name.extend_from_slice(file);
-        name.push(b'(');
-        std::io::Write::write_fmt(&mut name, format_args!("{line}")).ok();
-        name.extend_from_slice(TAIL);
-        Ok(Opened::Unit(self.compile_eval(code, &name)?))
+        let name = self.eval_name(file, line)?;
+        match self.compile_eval(code, name.as_bytes()) {
+            Ok(unit) => {
+                self.name_unit(&unit, name);
+                Ok(Opened::Unit(unit))
+            }
+            Err(thrown) => {
+                self.release(crate::api::values::Value::string(name));
+                Err(thrown)
+            }
+        }
+    }
+
+    /// `zend_make_compiled_string_description`'s `%s(%d) : %s` for an
+    /// `eval` at `line` of `file`, the op array and the opline its
+    /// `INCLUDE_OR_EVAL` stands at, which are what
+    /// `zend_get_executed_filename` and `zend_get_executed_lineno` read
+    /// there: a string of the request's, one allocation of its length
+    /// with the file and the line written in place, which the unit
+    /// compiled under it holds as its file's name
+    /// ([`Request::name_unit`]). The `Err` is the memory limit.
+    fn eval_name(&mut self, file: &[u8], line: u32) -> Result<PhpString, Thrown> {
+        const TAIL: &[u8] = b") : eval()'d code";
+        let mut buffer = [0; 10];
+        let at = decimal(line, &mut buffer);
+        let digits = buffer.get(at..).unwrap_or_default();
+        let parts = [file, b"(", digits, TAIL];
+        let len = parts.iter().map(|part| part.len()).sum();
+        self.string_with(len, |mut into| {
+            for part in parts {
+                let Some((head, rest)) = into.split_at_mut_checked(part.len()) else {
+                    break;
+                };
+                head.copy_from_slice(part);
+                into = rest;
+            }
+        })
     }
 
     /// `zend_compile_string`, every string compiled as an `eval`
@@ -1203,4 +1233,19 @@ fn unreadable(path: &[u8]) -> std::io::Error {
     readable(path)
         .err()
         .unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+}
+
+/// `n` in decimal, written at the end of `digits`: where the first
+/// digit stands.
+fn decimal(mut n: u32, digits: &mut [u8; 10]) -> usize {
+    let mut at = digits.len();
+    for digit in digits.iter_mut().rev() {
+        *digit = b'0' + u8::try_from(n % 10).unwrap_or(0);
+        at -= 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    at
 }

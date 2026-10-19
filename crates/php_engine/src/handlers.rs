@@ -3526,7 +3526,8 @@ pub(crate) fn include_or_eval<T: Tier>(
         Ok(string) => {
             let written = string.as_bytes().to_vec();
             req.release(Value::string(string));
-            included(req, frame, kind, &written, returns_to)
+            let site = (&*code.filename.0, op.lineno);
+            included(req, frame, kind, &written, site, returns_to)
         }
         Err(thrown) => threw(req, frame, &thrown),
     };
@@ -3582,10 +3583,11 @@ fn included(
     frame: FrameRef,
     kind: exec::IncludeKind,
     written: &[u8],
+    site: (&[u8], u32),
     returns_to: Option<(FrameRef, u32)>,
 ) -> Edge {
     let opened = match kind {
-        exec::IncludeKind::Eval => req.eval_string(written),
+        exec::IncludeKind::Eval => req.eval_string(written, site),
         exec::IncludeKind::Include
         | exec::IncludeKind::IncludeOnce
         | exec::IncludeKind::Require
