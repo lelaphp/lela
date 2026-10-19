@@ -343,6 +343,17 @@ impl Request {
         }
     }
 
+    /// [`Request::release`] over a zval a slot held, the owner it held
+    /// given up with no `Value` made of it, so no kind is asked before the
+    /// decrement: what `UNSET_CV` gives up of the variable it empties.
+    #[cfg_attr(debug_assertions, track_caller)]
+    #[inline]
+    pub(crate) fn release_zval(&mut self, z: php_heap::Zval) {
+        if z.is_refcounted() {
+            Heap::release(&mut Hooks(self), z);
+        }
+    }
+
     /// [`Request::release_nogc`] over a zval a slot or a call's record
     /// held, the owner it held given up with no `Value` made of it: what
     /// a frameless call's record gives up of its operands as the call

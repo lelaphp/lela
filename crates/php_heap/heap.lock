@@ -368,6 +368,7 @@ VmStack::top_mut
 VmStack::unlink_room
 Zval
 Zval::UNDEF
+Zval::addref
 Zval::array
 Zval::as_arr
 Zval::as_bool

@@ -41,6 +41,10 @@ pub(crate) struct RefHeader {
     sources: Cell<usize>,
 }
 
+// The header at the block's start, where `Zval::counted` reads it for
+// every counted kind without asking which.
+const _: () = assert!(std::mem::offset_of!(RefHeader, gc) == 0);
+
 /// One reference: php's `zend_reference *`. Naming one does not keep it
 /// alive, exactly as php's pointer does not; the engine's kernels take
 /// and give up owners through [`crate::Heap::addref`] and

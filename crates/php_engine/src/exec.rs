@@ -2255,7 +2255,7 @@ pub(crate) fn frameless_operand(
                 .get(field as usize)
                 .copied()
                 .unwrap_or_else(Zval::null);
-            req.heap_mut().addref(z);
+            z.addref();
             return z;
         }
         OperandKind::Cv => field as usize,
@@ -2270,7 +2270,7 @@ pub(crate) fn frameless_operand(
         return take_operand(req, frame, code, kind, field).to_zval();
     }
     if kind == OperandKind::Cv {
-        req.heap_mut().addref(z);
+        z.addref();
     } else {
         *slot = Zval::UNDEF;
     }

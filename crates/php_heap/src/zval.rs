@@ -1,10 +1,13 @@
 //! The zval (design §5.1): sixteen bytes, `Copy`, no `Drop`. Zend's type
 //! numbering is kept so that the all-zero value is `IS_UNDEF`.
+// The `expect` fence's `regime=` is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::ptr::NonNull;
 
 use crate::Str;
 use crate::array::Arr;
+use crate::gc::Counted;
 use crate::object::Obj;
 use crate::reference::Ref;
 use crate::resource::Res;
@@ -702,16 +705,56 @@ impl Zval {
         }
     }
 
-    /// The block a refcounted value's header stands at, `Z_COUNTED`; none
-    /// for a value that carries no header.
-    #[cfg(debug_assertions)]
-    pub(crate) fn counted(self) -> Option<NonNull<u8>> {
+    /// `Z_COUNTED`: the refcounted header of the block a refcounted value
+    /// names, at the block's start for every counted kind, so no kind is
+    /// asked; none for a value that carries no count, which a scalar, an
+    /// interned string and an immutable array are, by their type flags
+    /// ([`Zval::string`], [`Zval::array`]).
+    #[inline(always)] // a bit test and the word, on every addref and release
+    #[allow(clippy::inline_always)]
+    pub(crate) fn counted(self) -> Option<Counted> {
         if !self.is_refcounted() {
             return None;
         }
         // SAFETY: a refcounted zval's word is the pointer its value's
         // `payload` wrote.
-        unsafe { self.value.as_pointer() }
+        let block = unsafe { self.value.as_pointer::<u8>() }?;
+        // SAFETY: a counted kind's block starts with its header, which
+        // each kind's header asserts, and stands while a zval names it, as
+        // a zval naming a freed block is the same mistake in php.
+        Some(unsafe { Counted::new(block) })
+    }
+
+    /// `Z_TRY_ADDREF`: one more owner of what this zval holds, php's
+    /// `Z_OPT_REFCOUNTED` test of the type flags and `GC_ADDREF` on the
+    /// header at the block's start, and nothing for a scalar, an interned
+    /// string or an immutable array, which carry no `IS_TYPE_REFCOUNTED`
+    /// bit. Needs
+    /// no request and no heap: an inline path that copies a value takes
+    /// its owner where it holds the slots. A debug build's freed-use guard
+    /// is the header's, and names the caller.
+    ///
+    /// ```php
+    /// $i = "interned"; $l = [1, 2]; $c = str_repeat("c", mt_rand(3, 3));
+    /// $x = $i; $y = $l; $z = $c;
+    /// debug_zval_dump($x, $y, $z);
+    /// ```
+    /// ```expect regime=immutable-literals
+    /// string(8) "interned" interned
+    /// array(2) packed interned {
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// string(3) "ccc" refcount(3)
+    /// ```
+    #[inline]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn addref(self) {
+        if let Some(header) = self.counted() {
+            header.addref();
+        }
     }
 
     /// Whether the value carries a refcounted header (`Z_REFCOUNTED`): a

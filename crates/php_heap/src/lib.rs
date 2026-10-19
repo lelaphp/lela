@@ -440,6 +440,13 @@ impl Heap {
         if s.is_interned() || s.gc().release() != gc::Release::Last {
             return;
         }
+        self.free_string(s);
+    }
+
+    /// A string whose last owner went freed: outside the request's heap
+    /// at once unless a pin names it, inside it through
+    /// [`Heap::give_back`].
+    fn free_string(&mut self, s: Str) {
         if s.is_persistent() {
             // Outside the request's heap nothing is counted, so a pinned
             // one is freed whole at its pin's let-go.
@@ -580,26 +587,14 @@ impl Heap {
         self.mm.keep_emptied();
     }
 
-    /// One more owner of `z`: a refcount increment for a refcounted
-    /// value, nothing for a scalar or an immutable value (`ZVAL_COPY`).
-    /// A debug build's freed-use guard is the header's, which this
-    /// reaches as each type's own addref does, and names the caller.
+    /// One more owner of `z`, [`Zval::addref`]: a refcount increment
+    /// for a refcounted value, nothing for a scalar or an immutable value
+    /// (`ZVAL_COPY`). A debug build's freed-use guard is the header's,
+    /// and names the caller.
+    #[inline]
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn addref(&self, z: Zval) {
-        if !z.is_refcounted() {
-            return;
-        }
-        if let Some(s) = z.as_str() {
-            s.addref();
-        } else if let Some(a) = z.as_arr() {
-            a.addref();
-        } else if let Some(o) = z.as_obj() {
-            o.addref();
-        } else if let Some(r) = z.as_resource() {
-            r.addref();
-        } else if let Some(r) = z.as_reference() {
-            r.addref();
-        }
+        z.addref();
     }
 
     /// One owner fewer, `zval_ptr_dtor`: a refcount decrement, and when
@@ -613,16 +608,22 @@ impl Heap {
     /// may re-enter, and the heap is theirs: it is asked for at each
     /// step and again after every call up, since the destructor may have
     /// grown it.
+    ///
+    /// Shaped as php's `i_zval_ptr_dtor`: a test of the type flags, the
+    /// decrement of the header at the block's start, and a call out of
+    /// line only to destroy at zero, `rc_dtor_func`, or, for a value
+    /// that may be a root, `gc_check_possible_root`; no kind is asked
+    /// before the decrement.
     #[inline]
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn release(hooks: &mut dyn HeapHooks, z: Zval) {
-        if !z.is_refcounted() {
+        let Some(header) = z.counted() else {
             return;
-        }
-        match Heap::give_up(hooks, z) {
-            GivenUp::Owned => Heap::gc_check_possible_root(hooks, z),
-            GivenUp::Freed => {}
-            GivenUp::Last(last) => Heap::destroy(hooks, last),
+        };
+        match Heap::give_up(header) {
+            gc::Release::Owned => Heap::owners_left(hooks, z, header),
+            gc::Release::Last => Heap::rc_dtor(hooks, z),
+            gc::Release::Ownerless => {}
         }
     }
 
@@ -634,16 +635,16 @@ impl Heap {
     #[inline]
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn release_nogc(hooks: &mut dyn HeapHooks, z: Zval) -> bool {
-        if !z.is_refcounted() {
+        let Some(header) = z.counted() else {
             return false;
-        }
-        match Heap::give_up(hooks, z) {
-            GivenUp::Owned => true,
-            GivenUp::Freed => false,
-            GivenUp::Last(last) => {
-                Heap::destroy(hooks, last);
+        };
+        match Heap::give_up(header) {
+            gc::Release::Owned => true,
+            gc::Release::Last => {
+                Heap::rc_dtor(hooks, z);
                 false
             }
+            gc::Release::Ownerless => false,
         }
     }
 
@@ -657,7 +658,7 @@ impl Heap {
     #[must_use = "the last owner kept is the caller's InternalError"]
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn release_held(hooks: &mut dyn HeapHooks, z: Zval) -> bool {
-        if counted_header(z).is_some_and(|header| header.refcount() <= 1) {
+        if z.counted().is_some_and(|header| header.refcount() <= 1) {
             return false;
         }
         Heap::release(hooks, z);
@@ -674,7 +675,8 @@ impl Heap {
     /// such an object.
     #[must_use]
     pub fn releases_quietly(z: Zval) -> bool {
-        counted_header(z).is_some_and(|header| header.refcount() > 1 && !header.may_leak())
+        z.counted()
+            .is_some_and(|header| header.refcount() > 1 && !header.may_leak())
     }
 
     /// One owner of `z` given up where [`Heap::releases_quietly`] holds,
@@ -687,8 +689,9 @@ impl Heap {
     #[inline]
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn release_quietly(z: Zval) -> bool {
-        let Some(header) =
-            counted_header(z).filter(|header| header.refcount() > 1 && !header.may_leak())
+        let Some(header) = z
+            .counted()
+            .filter(|header| header.refcount() > 1 && !header.may_leak())
         else {
             return false;
         };
@@ -707,57 +710,68 @@ impl Heap {
     #[inline]
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn release_nogc_kept(z: Zval) -> bool {
-        let Some(header) = counted_header(z).filter(|header| header.refcount() > 1) else {
+        let Some(header) = z.counted().filter(|header| header.refcount() > 1) else {
             return false;
         };
         header.delref();
         true
     }
 
-    /// `i_zval_ptr_dtor` up to `rc_dtor_func`: the refcount decrement,
-    /// and at zero a string, an object or a resource freed here, while a
-    /// table or a reference cell is handed back undestroyed, since what
-    /// it holds may be the last owner of another and [`Heap::destroy`]
-    /// takes them apart without recursing.
+    /// `GC_DELREF` as a release asks it, on the header at the block's
+    /// start: what it left of the count ([`Counted::release`]).
+    ///
+    /// A release does more than the decrement: a count left over makes
+    /// the value a possible root and the last one destroys it, and both
+    /// read and write the header the free list's link is written over. So
+    /// a debug build's freed-use guard asks the header's question first,
+    /// and a refused release answers no owner, so nothing at all is done.
+    #[inline(always)] // the decrement of every release
+    #[allow(clippy::inline_always)]
     #[cfg_attr(debug_assertions, track_caller)]
-    fn give_up(hooks: &mut dyn HeapHooks, z: Zval) -> GivenUp {
-        if !z.is_refcounted() {
-            return GivenUp::Freed;
-        }
-        // A release does more than the decrement: a count left over
-        // makes the value a possible root and the last one destroys it,
-        // and both read and write the header the free list's link is
-        // written over. So the question the header's decrement asks is
-        // asked first here, and a refused release does nothing at all.
+    pub(crate) fn give_up(header: Counted) -> gc::Release {
         #[cfg(debug_assertions)]
-        if let Some(at) = z.counted()
-            && gc::refuses_freed(at, sensed::Use::Release, std::panic::Location::caller())
-        {
-            return GivenUp::Freed;
+        if gc::refuses_freed(
+            header.block(),
+            sensed::Use::Release,
+            std::panic::Location::caller(),
+        ) {
+            return gc::Release::Ownerless;
         }
+        header.release()
+    }
+
+    /// `gc_check_possible_root` after a decrement that left owners, its
+    /// own tests inline as php's are: a value that can be no root is
+    /// passed by, a reference is looked through out of line, and anything
+    /// else is offered there only where `GC_MAY_LEAK` holds of its header.
+    #[inline(always)] // the tests of every release that leaves owners
+    #[allow(clippy::inline_always)]
+    pub(crate) fn owners_left(hooks: &mut dyn HeapHooks, z: Zval, header: Counted) {
+        if z.is_collectable() && (z.kind() == ZvalType::Reference || header.may_leak()) {
+            Heap::gc_check_possible_root(hooks, z);
+        }
+    }
+
+    /// `rc_dtor_func`: the value whose last owner went destroyed, a
+    /// string freed, a table or a reference cell taken apart without
+    /// recursing ([`Heap::destroy`]), an object's destructor and free
+    /// served through `hooks` and a resource's per-type destructor the
+    /// same way. At zero the block is destroyed whether or not a pin
+    /// stands: a pin keeps only its bytes ([`Heap::give_back`]). A call
+    /// of its own, as php's is, so a release stays a decrement inline.
+    #[inline(never)]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn rc_dtor(hooks: &mut dyn HeapHooks, z: Zval) {
         if let Some(s) = z.as_str() {
-            hooks.heap().release_string(s);
-            return GivenUp::Freed;
-        }
-        // At zero the block is destroyed whether or not a pin stands:
-        // a pin keeps only its bytes ([`Heap::give_back`]).
-        match counted_header(z).map(Counted::release) {
-            Some(gc::Release::Owned) => GivenUp::Owned,
-            Some(gc::Release::Last) => {
-                if let Some(a) = z.as_arr() {
-                    GivenUp::Last(Last::Table(a))
-                } else if let Some(r) = z.as_reference() {
-                    GivenUp::Last(Last::Cell(r))
-                } else {
-                    if let Some(o) = z.as_obj() {
-                        Heap::store_del(hooks, o);
-                    } else if let Some(r) = z.as_resource() {
-                        Heap::resource_free(hooks, r);
-                    }
-                    GivenUp::Freed
-                }
-            }
-            Some(gc::Release::Ownerless) | None => GivenUp::Freed,
+            hooks.heap().free_string(s);
+        } else if let Some(a) = z.as_arr() {
+            Heap::destroy(hooks, Last::Table(a));
+        } else if let Some(r) = z.as_reference() {
+            Heap::destroy(hooks, Last::Cell(r));
+        } else if let Some(o) = z.as_obj() {
+            Heap::store_del(hooks, o);
+        } else if let Some(r) = z.as_resource() {
+            Heap::resource_free(hooks, r);
         }
     }
 
@@ -823,7 +837,7 @@ impl Heap {
     pub fn pin_block(&mut self, z: Zval) {
         if let Some(o) = z.as_obj() {
             o.pin();
-        } else if let Some(header) = counted_header(z)
+        } else if let Some(header) = z.counted()
             && header.pin()
         {
             self.nested.add(header.block());
@@ -840,7 +854,7 @@ impl Heap {
             self.unpin(o);
             return;
         }
-        let Some(header) = counted_header(z) else {
+        let Some(header) = z.counted() else {
             return;
         };
         if self.nested.let_go(header.block()) || header.unpin() != 0 {
@@ -861,33 +875,6 @@ impl Heap {
             unsafe { self.mm.free_retired(header.block()) };
         }
     }
-}
-
-/// The refcounted header of the block `z` names, `Z_COUNTED`; none for
-/// a value that carries no count.
-fn counted_header(z: Zval) -> Option<Counted> {
-    if !z.is_refcounted() {
-        return None;
-    }
-    if let Some(s) = z.as_str() {
-        (!s.is_interned()).then(|| s.gc())
-    } else if let Some(a) = z.as_arr() {
-        Some(a.gc())
-    } else if let Some(o) = z.as_obj() {
-        Some(o.gc())
-    } else if let Some(r) = z.as_resource() {
-        Some(r.gc())
-    } else {
-        z.as_reference().map(Ref::gc)
-    }
-}
-
-/// What one owner fewer left: owners still, nothing to free or freed
-/// already, or a table or a reference cell whose last owner it was.
-enum GivenUp {
-    Owned,
-    Freed,
-    Last(Last),
 }
 
 /// A table or a reference cell no owner is left of, whose contents are
@@ -1860,7 +1847,7 @@ mod tests {
                 h.resource(ResourceType(3)).map(Zval::resource)
             }),
         ];
-        let at = |z: Zval| z.counted().map(|at| at.as_ptr().addr());
+        let at = |z: Zval| z.counted().map(|at| at.block().as_ptr().addr());
         for (kind, make) in kinds {
             let made = (make(&mut hooks.heap), make(&mut hooks.heap));
             assert!(
