@@ -22806,7 +22806,7 @@ fn inline_truth<const NOT: bool>(
 /// (`Z/Zend/zend_vm_def.h:1490-1683`): a CV, or the element a `VAR`
 /// names through the `IS_INDIRECT` a `FETCH_DIM_RW` left there, as
 /// `GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_RW)` reads it. `+ 1` or `- 1` as
-/// [`inline::arith`] computes it, into the variable and, under
+/// [`inline::step`] computes it, into the variable and, under
 /// `RETURN_VALUE_USED`, the temporary, which takes what the variable
 /// held before the step for a `POST_*`; the `VAR` is given up as
 /// `FREE_OP1` gives up an `IS_INDIRECT`, which owns nothing. `None`, with
@@ -22854,7 +22854,7 @@ fn inline_incdec(
     match a.kind() {
         OperandKind::Cv => {
             let held = *slots.get(at)?;
-            let stepped = inline::arith(arith, held, Zval::long(1))?;
+            let stepped = inline::step(arith, held)?;
             if op.out_type != OperandKind::Unused {
                 write_owning_nothing(slots, code, op, if post { held } else { stepped })?;
             }
@@ -22863,7 +22863,7 @@ fn inline_incdec(
         OperandKind::Var => {
             let entry = slots.get(at)?.as_indirect()?;
             let held = entry.read();
-            let stepped = inline::arith(arith, held, Zval::long(1))?;
+            let stepped = inline::step(arith, held)?;
             if op.out_type != OperandKind::Unused {
                 write_owning_nothing(slots, code, op, if post { held } else { stepped })?;
             }

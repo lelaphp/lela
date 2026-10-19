@@ -170,30 +170,57 @@ pub(crate) fn number_value(n: Number) -> Value {
     }
 }
 
-/// `add_function`'s, `sub_function`'s and `mul_function`'s two numeric
-/// type pairs: two longs as longs, with the double
-/// `fast_long_add_function`, `fast_long_sub_function` and
-/// `ZEND_SIGNED_MULTIPLY_LONG` compute where the long overflowed, and
-/// any other pair as doubles.
+impl Arith {
+    /// The operator over two longs, none where it overflowed.
+    #[inline]
+    fn longs(self, x: i64, y: i64) -> Option<i64> {
+        match self {
+            Arith::Add => x.checked_add(y),
+            Arith::Sub => x.checked_sub(y),
+            Arith::Mul => x.checked_mul(y),
+        }
+    }
+
+    /// The operator over two doubles.
+    #[inline]
+    fn doubles(self, x: f64, y: f64) -> f64 {
+        match self {
+            Arith::Add => x + y,
+            Arith::Sub => x - y,
+            Arith::Mul => x * y,
+        }
+    }
+}
+
+/// Two longs whose sum, difference or product overflowed, as doubles: the
+/// rare arm, as php's `UNEXPECTED` marks it, kept out of line so the
+/// long pair branches to it rather than computing a double beside every
+/// long and selecting it away.
+#[cold]
+#[inline(never)]
+fn overflowed(op: Arith, x: i64, y: i64) -> Number {
+    Number::Double(op.doubles(Number::Long(x).double(), Number::Long(y).double()))
+}
+
+/// `add_function`'s, `sub_function`'s and `mul_function`'s numeric type
+/// pairs as one match, in the order `ZEND_ADD` and `ZEND_MUL` test them:
+/// two longs as longs, with the double `fast_long_add_function`,
+/// `fast_long_sub_function` and `ZEND_SIGNED_MULTIPLY_LONG` compute
+/// where the long overflowed, two doubles as they are, and a mixed pair
+/// with its long converted.
 #[inline(always)] // the arithmetic of an inline path
 #[allow(clippy::inline_always)]
 fn computed(op: Arith, a: Number, b: Number) -> Number {
     if let (Number::Long(x), Number::Long(y)) = (a, b) {
-        let stayed = match op {
-            Arith::Add => x.checked_add(y),
-            Arith::Sub => x.checked_sub(y),
-            Arith::Mul => x.checked_mul(y),
+        return match op.longs(x, y) {
+            Some(n) => Number::Long(n),
+            None => overflowed(op, x, y),
         };
-        if let Some(n) = stayed {
-            return Number::Long(n);
-        }
     }
-    let (x, y) = (a.double(), b.double());
-    Number::Double(match op {
-        Arith::Add => x + y,
-        Arith::Sub => x - y,
-        Arith::Mul => x * y,
-    })
+    if let (Number::Double(x), Number::Double(y)) = (a, b) {
+        return Number::Double(op.doubles(x, y));
+    }
+    Number::Double(op.doubles(a.double(), b.double()))
 }
 
 /// `div_function_base` (`Z/Zend/zend_operators.c:1454`) over two
@@ -372,24 +399,17 @@ fn binary_numbers(op: Binary, a: Number, b: Number) -> Option<Number> {
 #[inline(always)] // as `computed`
 #[allow(clippy::inline_always)]
 pub(crate) fn binary(op: Binary, a: Zval, b: Zval) -> Option<Zval> {
-    Some(match binary_numbers(op, number(a)?, number(b)?)? {
-        Number::Long(n) => Zval::long(n),
-        Number::Double(d) => Zval::double(d),
-    })
+    binary_numbers(op, number(a)?, number(b)?).map(number_zval)
 }
 
 /// [`binary`] for [`Arith`]'s three, which every pair of numbers meets:
 /// the inline pair `ZEND_ADD`, `ZEND_SUB` and `ZEND_MUL` are
-/// monomorphised over (design §5.8), and the step of `ZEND_PRE_INC`
-/// and its kin, read with the operator known where it is written.
-/// `ZEND_PRE_INC`'s and `ZEND_PRE_DEC`'s step is `+ 1` and `- 1` with the
-/// same overflow (`fast_long_increment_function`).
+/// monomorphised over (design §5.8), with the operator known where it
+/// is written.
 ///
 /// ```php
 /// $max = PHP_INT_MAX; $one = 1; $half = 1.5; $two = -2;
 /// var_dump($max + $one, $max - $two, $max * $two, $half + $one, $one - $half, $half * $half, $one + $two);
-/// $i = $max; $i++; $j = -$max - 1; --$j; $d = 0.5; ++$d;
-/// var_dump($i, $j, $d);
 /// ```
 /// ```expect
 /// float(9.223372036854776E+18)
@@ -399,17 +419,64 @@ pub(crate) fn binary(op: Binary, a: Zval, b: Zval) -> Option<Zval> {
 /// float(-0.5)
 /// float(2.25)
 /// int(-1)
+/// ```
+///
+/// Two doubles are computed as they stand and a mixed pair with its long
+/// converted, so a signed zero, an infinity and a NAN come out as php's:
+///
+/// ```php
+/// $nz = -0.0; $one = 1.0; $inf = INF; $zero = 0.0; $nan = NAN; $i = 1; $half = 0.5; $max = PHP_INT_MAX;
+/// var_dump($nz * $one, $inf * $zero, $nan + $i, $i * $half, $max + $i);
+/// ```
+/// ```expect
+/// float(-0)
+/// float(NAN)
+/// float(NAN)
+/// float(0.5)
+/// float(9.223372036854776E+18)
+/// ```
+#[inline(always)] // as `computed`
+#[allow(clippy::inline_always)]
+pub(crate) fn arith(op: Arith, a: Zval, b: Zval) -> Option<Zval> {
+    Some(number_zval(computed(op, number(a)?, number(b)?)))
+}
+
+/// The step of `ZEND_PRE_INC`, `ZEND_PRE_DEC` and their `POST_` pair over
+/// a zval as it stands: `+ 1` or `- 1` as [`arith`] computes it, with the
+/// same overflow (`fast_long_increment_function`), and a long tested
+/// before anything else and expected, as php's handler tests `IS_LONG`
+/// first under `EXPECTED` (`Z/Zend/zend_vm_def.h:1490`), so the common
+/// step takes one compare.
+///
+/// ```php
+/// $max = PHP_INT_MAX;
+/// $i = $max; $i++; $j = -$max - 1; --$j; $d = 0.5; ++$d;
+/// var_dump($i, $j, $d);
+/// ```
+/// ```expect
 /// float(9.223372036854776E+18)
 /// float(-9.223372036854776E+18)
 /// float(1.5)
 /// ```
 #[inline(always)] // as `computed`
 #[allow(clippy::inline_always)]
-pub(crate) fn arith(op: Arith, a: Zval, b: Zval) -> Option<Zval> {
-    Some(match computed(op, number(a)?, number(b)?) {
+pub(crate) fn step(op: Arith, z: Zval) -> Option<Zval> {
+    if let Some(n) = z.as_long() {
+        return Some(number_zval(computed(op, Number::Long(n), Number::Long(1))));
+    }
+    // php's `EXPECTED(Z_TYPE_INFO_P(var_ptr) == IS_LONG)`.
+    std::hint::cold_path();
+    arith(op, z, Zval::long(1))
+}
+
+/// The zval a number is, which an inline path writes.
+#[inline(always)] // as `number`
+#[allow(clippy::inline_always)]
+fn number_zval(n: Number) -> Zval {
+    match n {
         Number::Long(n) => Zval::long(n),
         Number::Double(d) => Zval::double(d),
-    })
+    }
 }
 
 /// An operator a handler's inline path computes over two zvals as they
