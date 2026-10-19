@@ -324,10 +324,10 @@ pub(crate) use mac::MapJit;
 
 /// The adapter of a target with none yet: it maps nothing, so an arena
 /// over it is never made.
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(test, not(all(target_os = "macos", target_arch = "aarch64"))))]
 pub(crate) struct Unmapped;
 
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(test, not(all(target_os = "macos", target_arch = "aarch64"))))]
 impl Pages for Unmapped {
     fn map_pair(_: usize) -> io::Result<Self> {
         Err(io::Error::new(

@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use php_engine::tier::Epoch;
 use php_unit::{OpArray, OplineIdx, Unit};
 
-use super::code::{CHUNK, HeapPages};
+use super::code::{CHUNK, HeapPages, Unmapped};
 use super::perf::{self, Captured, Loaded};
 use super::{Full, Perf, TraceId, TraceName, TraceTable, Unpublished};
 use crate::lower::Compiled;
@@ -27,13 +27,13 @@ type Heap = TraceTable<HeapPages>;
 
 /// A table over the heap adapter under `entries`, with one chunk of
 /// code unless they say otherwise, writing to `perf`.
-fn table_to(entries: &[(&str, &str)], perf: Perf) -> Result<Heap, String> {
+fn table_to(entries: &[(&str, &str)], perf: Perf) -> Heap {
     let mut all = entries.to_vec();
     all.push(("opcache.jit_buffer_size", "64K"));
-    TraceTable::with_perf(&testing::policy(&all), perf).map_err(|e| e.to_string())
+    TraceTable::with_perf(&testing::policy(&all), perf)
 }
 
-fn table(entries: &[(&str, &str)]) -> Result<Heap, String> {
+fn table(entries: &[(&str, &str)]) -> Heap {
     table_to(entries, Perf::none())
 }
 
@@ -80,7 +80,7 @@ fn side(parent: u32) -> Start {
 /// where the code says; an id not yet published reads as none.
 #[test]
 fn a_published_trace_is_got_by_its_id_with_its_exits() -> Result<(), String> {
-    let table = table(&[])?;
+    let table = table(&[]);
     assert_eq!(table.next(), Some(trace(1)));
     let first = table.publish(compiled(&[1, 2, 3, 4], vec![exit(None)]), Start::Loop);
     assert_eq!(first, Ok(trace(1)));
@@ -120,8 +120,8 @@ fn a_published_trace_is_got_by_its_id_with_its_exits() -> Result<(), String> {
 /// takes the next id; ids go on across the first segment into the
 /// second, each read back from its own.
 #[test]
-fn ids_run_across_a_segment_boundary() -> Result<(), String> {
-    let table = table(&[("opcache.jit_max_root_traces", "2000")])?;
+fn ids_run_across_a_segment_boundary() {
+    let table = table(&[("opcache.jit_max_root_traces", "2000")]);
     for n in 1..=1022 {
         assert_eq!(table.number(Start::Loop), Ok(trace(n)));
     }
@@ -136,15 +136,14 @@ fn ids_run_across_a_segment_boundary() -> Result<(), String> {
         assert_eq!(table.get(trace(n)).map(|t| t.id), Some(trace(n)));
     }
     assert_eq!(trace(1024).slot(), (1, 0));
-    Ok(())
 }
 
 /// `opcache.jit_max_root_traces` bounds every id, sides as well, as php's
 /// `ZEND_JIT_TRACE_NUM` does: no id reaches it, and the table that met it
 /// has stopped, numbering and publishing nothing more.
 #[test]
-fn the_ids_bound_is_full_of_traces_and_stops_the_table() -> Result<(), String> {
-    let table = table(&[("opcache.jit_max_root_traces", "3")])?;
+fn the_ids_bound_is_full_of_traces_and_stops_the_table() {
+    let table = table(&[("opcache.jit_max_root_traces", "3")]);
     assert_eq!(table.number(Start::Enter), Ok(trace(1)));
     assert!(!table.stopped());
     assert_eq!(
@@ -157,15 +156,14 @@ fn the_ids_bound_is_full_of_traces_and_stops_the_table() -> Result<(), String> {
     assert_eq!(table.number(Start::Loop), full);
     assert_eq!(table.next(), Some(trace(3)));
     assert_eq!(Full::Traces.stop(), crate::record::Stop::TooManyTraces);
-    Ok(())
 }
 
 /// `opcache.jit_max_side_traces` bounds the sides of each root, counted
 /// at the root whichever trace a side grew from; another root's sides
 /// still publish.
 #[test]
-fn a_roots_sides_are_bounded_at_the_root() -> Result<(), String> {
-    let table = table(&[("opcache.jit_max_side_traces", "2")])?;
+fn a_roots_sides_are_bounded_at_the_root() {
+    let table = table(&[("opcache.jit_max_side_traces", "2")]);
     assert_eq!(table.number(Start::Loop), Ok(trace(1)));
     assert_eq!(table.number(side(1)), Ok(trace(2)));
     assert_eq!(
@@ -182,15 +180,14 @@ fn a_roots_sides_are_bounded_at_the_root() -> Result<(), String> {
         table.number(side(9)),
         Err(Unpublished::Malformed("a side trace of no trace numbered"))
     );
-    Ok(())
 }
 
 /// `opcache.jit_max_exit_counters` bounds the epoch's exits as php's
 /// `ZEND_JIT_EXIT_COUNTERS + exit_count >= max` does: the trace whose
 /// exits would reach it is refused, and one with none still publishes.
 #[test]
-fn the_epochs_exits_are_bounded() -> Result<(), String> {
-    let table = table(&[("opcache.jit_max_exit_counters", "3")])?;
+fn the_epochs_exits_are_bounded() {
+    let table = table(&[("opcache.jit_max_exit_counters", "3")]);
     let two = vec![exit(None), exit(None)];
     assert_eq!(
         table.publish(compiled(&[0; 4], two), Start::Loop),
@@ -205,14 +202,13 @@ fn the_epochs_exits_are_bounded() -> Result<(), String> {
         Ok(trace(2))
     );
     assert!(!table.stopped());
-    Ok(())
 }
 
 /// An arena with no room is `Full::Code`, php's full buffer, and the
 /// table has stopped: nothing it holds is freed before the restart.
 #[test]
-fn a_full_arena_is_full_of_code_and_stops_the_table() -> Result<(), String> {
-    let table = table(&[])?;
+fn a_full_arena_is_full_of_code_and_stops_the_table() {
+    let table = table(&[]);
     assert_eq!(
         table.publish(compiled(&vec![0; CHUNK - 8], vec![]), Start::Loop),
         Ok(trace(1))
@@ -222,13 +218,28 @@ fn a_full_arena_is_full_of_code_and_stops_the_table() -> Result<(), String> {
     assert!(table.stopped());
     assert_eq!(table.publish(compiled(&[0; 16], vec![]), Start::Loop), full);
     assert_eq!(table.next(), Some(trace(2)), "no id was taken");
-    Ok(())
+}
+
+/// A table whose arena could not be mapped, as on a target with no
+/// adapter yet, numbers as the interim pipeline does and finds its
+/// first publish full, which stops it.
+#[test]
+fn a_table_with_no_arena_numbers_and_publishes_nothing() {
+    let policy = testing::policy(&[("opcache.jit_buffer_size", "64K")]);
+    let table: TraceTable<Unmapped> = TraceTable::with_perf(&policy, Perf::none());
+    assert_eq!(table.number(Start::Loop), Ok(trace(1)));
+    assert!(!table.stopped());
+    assert_eq!(
+        table.publish(compiled(&[0; 4], vec![]), Start::Loop),
+        Err(Unpublished::Full(Full::Code))
+    );
+    assert!(table.stopped());
 }
 
 /// What does not hold together is refused before anything is counted.
 #[test]
-fn a_malformed_trace_is_refused_and_counts_nothing() -> Result<(), String> {
-    let table = table(&[])?;
+fn a_malformed_trace_is_refused_and_counts_nothing() {
+    let table = table(&[]);
     let mut past = compiled(&[0; 4], vec![]);
     past.entry_offset = 4;
     assert_eq!(
@@ -241,13 +252,12 @@ fn a_malformed_trace_is_refused_and_counts_nothing() -> Result<(), String> {
     );
     assert_eq!(table.next(), Some(trace(1)));
     assert_eq!(table.writer().counts, super::Counts::default());
-    Ok(())
 }
 
 /// A new epoch keeps no table until a request of it asks for one, and a
 /// new table holds nothing: a restart's epoch starts empty.
 #[test]
-fn a_new_epochs_table_starts_empty() -> Result<(), String> {
+fn a_new_epochs_table_starts_empty() {
     let (epoch, _) = Epoch::fixture(Unit {
         main: OpArray::default(),
         ..Unit::default()
@@ -255,10 +265,9 @@ fn a_new_epochs_table_starts_empty() -> Result<(), String> {
     assert!(super::of_epoch(&epoch).is_none());
     let exit_word = super::exit_word(&epoch, trace(1), ExitId(0));
     assert!(crate::policy::read(exit_word) == crate::policy::State::Blacklisted);
-    let table = table(&[])?;
+    let table = table(&[]);
     assert_eq!((table.next(), table.stopped()), (Some(trace(1)), false));
     assert!(table.get(trace(1)).is_none());
-    Ok(())
 }
 
 /// A `Write` that panics while armed.
@@ -279,10 +288,10 @@ impl Write for Tripwire {
 /// the slots and the next id as they were, and the mutex it held is taken
 /// again: the next publish takes the id the panicked one would have.
 #[test]
-fn a_publish_that_panics_leaves_the_counts_as_they_were() -> Result<(), String> {
+fn a_publish_that_panics_leaves_the_counts_as_they_were() {
     let armed = Arc::new(AtomicBool::new(false));
     let perf = Perf::to(Some(Box::new(Tripwire(Arc::clone(&armed)))), None);
-    let table = table_to(&[("opcache.jit_max_side_traces", "1")], perf)?;
+    let table = table_to(&[("opcache.jit_max_side_traces", "1")], perf);
     assert_eq!(
         table.publish(compiled(&[0; 4], vec![exit(None)]), Start::Loop),
         Ok(trace(1))
@@ -306,7 +315,6 @@ fn a_publish_that_panics_leaves_the_counts_as_they_were() -> Result<(), String> 
         Err(Unpublished::Full(Full::Children)),
         "the side the panicked publish did not count is counted once"
     );
-    Ok(())
 }
 
 /// No trace is freed alone: the chunks a table's traces hold stay in
@@ -314,7 +322,7 @@ fn a_publish_that_panics_leaves_the_counts_as_they_were() -> Result<(), String> 
 /// returns them, the pages going with the last.
 #[test]
 fn a_dropped_table_returns_its_chunks() -> Result<(), String> {
-    let table = table(&[("opcache.jit_buffer_size", "128K")])?;
+    let table = table(&[("opcache.jit_buffer_size", "128K")]);
     assert_eq!(
         table.publish(compiled(&vec![0; CHUNK], vec![]), Start::Loop),
         Ok(trace(1))
@@ -323,7 +331,12 @@ fn a_dropped_table_returns_its_chunks() -> Result<(), String> {
         table.publish(compiled(&[0; 8], vec![]), Start::Loop),
         Ok(trace(2))
     );
-    let watch = table.writer().arena.watch();
+    let watch = table
+        .writer()
+        .arena
+        .as_ref()
+        .map(super::code::Arena::watch)
+        .ok_or("an arena")?;
     assert_eq!(watch.chunks_in_use(), Some(2));
     drop(table);
     assert_eq!(watch.chunks_in_use(), None);
@@ -375,7 +388,7 @@ fn masked(line: &str) -> Option<String> {
 #[test]
 fn a_traces_perf_line_is_phps() -> Result<(), String> {
     let map = Captured::default();
-    let table = table_to(&[], Perf::to(Some(Box::new(map.clone())), None))?;
+    let table = table_to(&[], Perf::to(Some(Box::new(map.clone())), None));
     let mut loop_f = compiled(&[0; 0xa4], vec![]);
     loop_f.name = TraceName::of(&Place {
         scope: None,
@@ -454,8 +467,7 @@ mod native {
     #[test]
     fn mov_ret_runs_through_publish_and_get() -> Result<(), String> {
         let policy = testing::policy(&[("opcache.jit_buffer_size", "64K")]);
-        let table: TraceTable<MapJit> =
-            TraceTable::with_perf(&policy, Perf::none()).map_err(|e| e.to_string())?;
+        let table: TraceTable<MapJit> = TraceTable::with_perf(&policy, Perf::none());
         let published = table.publish(compiled(&returning(7), vec![]), Start::Loop);
         assert_eq!(published, Ok(trace(1)));
         let got = table.get(trace(1)).ok_or("published")?;

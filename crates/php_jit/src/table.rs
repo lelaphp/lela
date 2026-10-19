@@ -38,7 +38,6 @@
     )
 )]
 
-use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
@@ -65,7 +64,8 @@ pub(crate) use perf::{Perf, start as start_perf};
 /// The `Pages` adapter a trace's code is mapped through on this target
 /// (`jit-design.md` §4.4): `MAP_JIT` on macOS aarch64; under Miri the
 /// heap adapter, the only one it runs; elsewhere none yet, so a table
-/// maps no arena and its epoch compiles nothing.
+/// maps no arena and publishes no code, numbering as the interim
+/// pipeline does.
 #[cfg(miri)]
 pub(crate) type Native = code::HeapPages;
 #[cfg(all(not(miri), target_os = "macos", target_arch = "aarch64"))]
@@ -317,10 +317,10 @@ impl Counts {
 /// One segment of the read side: [`SEGMENT`] slots, each written once.
 type Segment<P> = Box<[OnceLock<Box<Trace<P>>>]>;
 
-/// What the compile mutex guards: the arena, the counts and where the
-/// `PERF` lines go.
+/// What the compile mutex guards: the arena, none where it could not
+/// be mapped, the counts and where the `PERF` lines go.
 struct Writer<P: Pages> {
-    arena: Arena<P>,
+    arena: Option<Arena<P>>,
     counts: Counts,
     perf: Perf,
 }
@@ -351,26 +351,27 @@ impl<P: Pages> std::fmt::Debug for TraceTable<P> {
 impl<P: Pages> TraceTable<P> {
     /// An empty table under `policy`'s bounds, its arena mapped as
     /// `opcache.jit_buffer_size` asks, in whole chunks and at least one,
-    /// its `PERF` and `PERF_DUMP` writers opened as `opcache.jit_debug`
-    /// asks.
-    pub(crate) fn new(policy: &Policy) -> io::Result<TraceTable<P>> {
+    /// its `PERF` lines and `PERF_DUMP` records written as
+    /// `opcache.jit_debug` asks. An arena that cannot be mapped is none:
+    /// the table numbers, and the first publish finds it full.
+    pub(crate) fn new(policy: &Policy) -> TraceTable<P> {
         TraceTable::with_perf(policy, Perf::of(policy.debug()))
     }
 
     /// [`TraceTable::new`] with the writers given.
-    pub(crate) fn with_perf(policy: &Policy, perf: Perf) -> io::Result<TraceTable<P>> {
+    pub(crate) fn with_perf(policy: &Policy, perf: Perf) -> TraceTable<P> {
         let chunk = u64::try_from(code::CHUNK).unwrap_or(u64::MAX);
         let chunks = usize::try_from(policy.buffer_size() / chunk)
             .unwrap_or(usize::MAX)
             .max(1);
-        let arena = Arena::new(chunks.saturating_mul(code::CHUNK))?;
+        let arena = Arena::new(chunks.saturating_mul(code::CHUNK)).ok();
         let bounds = Bounds {
             traces: policy.max_root_traces().min(TraceId::LIMIT),
             sides: policy.max_side_traces(),
             exits: policy.max_exit_counters(),
         };
         let segments = (bounds.traces as usize).div_ceil(SEGMENT);
-        Ok(TraceTable {
+        TraceTable {
             segments: (0..segments).map(|_| OnceLock::new()).collect(),
             next: AtomicU32::new(1),
             code_full: AtomicBool::new(false),
@@ -380,7 +381,7 @@ impl<P: Pages> TraceTable<P> {
                 counts: Counts::default(),
                 perf,
             }),
-        })
+        }
     }
 
     /// The trace `id` names: two acquire loads, nothing taken. None for
@@ -448,7 +449,9 @@ impl<P: Pages> TraceTable<P> {
                 word: Word::default(),
             })
             .collect();
-        let Ok(code) = writer.arena.publish(&compiled.bytes, compiled.align) else {
+        let placed =
+            (writer.arena.as_mut()).map(|arena| arena.publish(&compiled.bytes, compiled.align));
+        let Some(Ok(code)) = placed else {
             self.code_full.store(true, Ordering::Relaxed);
             return Err(Full::Code.into());
         };
@@ -505,10 +508,10 @@ impl<P: Pages> TraceTable<P> {
 }
 
 /// The trace table of the epoch `req` started in, made the first time a
-/// request of it asks, over `policy`'s bounds; none where its arena could
-/// not be mapped, when the epoch compiles nothing.
+/// request of it asks, over `policy`'s bounds; none only where the
+/// epoch's slot holds another tier's value.
 pub(crate) fn of<'r>(req: &'r Request, policy: &Policy) -> Option<&'r Table> {
-    tier::epoch_state(req, || Table::new(policy).ok())?.as_ref()
+    tier::epoch_state(req, || Table::new(policy))
 }
 
 /// The epoch `req` started in, held, its trace table made as [`of`]
@@ -521,7 +524,7 @@ pub(crate) fn held(req: &Request, policy: &Policy) -> Epoch {
 
 /// The trace table `epoch` keeps, where a request of it made one.
 pub(crate) fn of_epoch(epoch: &Epoch) -> Option<&Table> {
-    epoch.tier_state::<Option<Table>>()?.as_ref()
+    epoch.tier_state::<Table>()
 }
 
 /// The word of exit `exit` of trace `trace` in `epoch`'s table; the
