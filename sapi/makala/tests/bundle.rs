@@ -15,40 +15,9 @@ use std::process::{Command, Stdio};
 
 use common::{Server, read_response};
 
-/// The `features` a host's manifest turns on in its `php_bundle`
-/// dependency, as written on its one line.
-fn bundle_features(manifest: &str) -> Vec<&str> {
-    let line = manifest
-        .lines()
-        .find(|line| line.starts_with("php_bundle = "))
-        .unwrap_or_else(|| panic!("a php_bundle dependency on one line"));
-    let (_, list) = line
-        .split_once("features = [")
-        .unwrap_or_else(|| panic!("the dependency names its features"));
-    let (list, _) = list
-        .split_once(']')
-        .unwrap_or_else(|| panic!("the list closes on its line"));
-    list.split(',')
-        .map(|feature| feature.trim().trim_matches('"'))
-        .filter(|feature| !feature.is_empty())
-        .collect()
-}
-
-#[test]
-fn the_bundle_is_the_clis_without_pcntl_and_posix() {
-    let makala = include_str!("../Cargo.toml");
-    let cli = include_str!("../../cli/Cargo.toml");
-    let threaded: Vec<&str> = bundle_features(cli)
-        .into_iter()
-        .filter(|feature| !matches!(*feature, "pcntl" | "posix"))
-        .collect();
-    assert_eq!(bundle_features(makala), threaded);
-}
-
 /// The engine makala starts carries neither `pcntl` nor `posix`, though
 /// the build turns both features on, as the bundle's `host` does for every
-/// host (#3081): the host
-/// leaves them out as a host that serves on threads
+/// host (#3081): the host leaves them out as a host that serves on threads
 /// (`php_bundle::Serving::Threads`, design §7.2), and its configure line
 /// says so.
 #[test]
