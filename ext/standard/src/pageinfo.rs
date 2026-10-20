@@ -35,9 +35,10 @@ fn statpage(req: &mut Request) -> Page {
         return page;
     }
     let meta = req
+        .environment()
         .script_name()
         .map(<[u8]>::to_vec)
-        .and_then(|script| std::fs::metadata(req.absolutize(&script)).ok());
+        .and_then(|script| std::fs::metadata(req.environment().absolutize(&script)).ok());
     let page = match meta {
         Some(meta) => Page {
             uid: i64::from(meta.uid()),

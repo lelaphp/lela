@@ -144,7 +144,7 @@ impl Request {
         let read;
         let source = match source {
             Some(source) => source,
-            None => match std::fs::read(self.cwd().join(OsStr::from_bytes(path))) {
+            None => match std::fs::read(self.environment().cwd().join(OsStr::from_bytes(path))) {
                 Ok(bytes) => {
                     read = bytes;
                     &read

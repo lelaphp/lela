@@ -682,8 +682,13 @@ fn remember(req: &mut Request, id: ArchiveId, alias: Option<&[u8]>) {
 /// directory, `.` and `..` taken out and links resolved where the file is
 /// there.
 pub(crate) fn expand_filepath(req: &mut Request, path: &[u8]) -> Option<Vec<u8>> {
-    let cwd = req.cwd().into_os_string().into_encoded_bytes();
-    req.virtual_file_ex(&cwd, path, php_ext::request::Resolve::FilePath)
+    let cwd = req
+        .environment()
+        .cwd()
+        .into_os_string()
+        .into_encoded_bytes();
+    req.environment_mut()
+        .virtual_file_ex(&cwd, path, php_ext::request::Resolve::FilePath)
 }
 
 /// A byte string for a message.

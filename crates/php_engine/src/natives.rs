@@ -2235,7 +2235,10 @@ fn ini_set(
     if matches!(
         option.as_bytes(),
         b"java.class.path" | b"java.home" | b"java.library.path" | b"vpopmail.directory"
-    ) && req.check_open_basedir(value.as_bytes(), true).is_err()
+    ) && req
+        .environment_mut()
+        .check_open_basedir(value.as_bytes(), true)
+        .is_err()
     {
         value.give_up(req);
         return Ok(OrFalse::False);

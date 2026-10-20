@@ -1120,7 +1120,7 @@ fn throw_from_dtor(req: &mut Request, _resource: Resource) -> Result<(), Thrown>
 /// ```
 #[php_function]
 fn get_open_basedir(req: &mut Request) -> Result<Option<Owner<PhpString>>, Thrown> {
-    match req.open_basedir() {
+    match req.environment().open_basedir() {
         Some(dir) => {
             let dir = dir.to_vec();
             PhpString::new(req, &dir).map(Some)

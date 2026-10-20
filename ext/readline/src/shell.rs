@@ -483,9 +483,9 @@ fn names(req: &Request, list: PhpArray) -> Vec<Vec<u8>> {
 /// code at a time, `exit` or `quit` alone on a line, or the end of input,
 /// leaving; the status the request's.
 pub(crate) fn run(req: &mut Request) -> i32 {
-    let history = req.env(b"PHP_HISTFILE").map_or_else(
+    let history = req.environment().env(b"PHP_HISTFILE").map_or_else(
         || {
-            let home = req.env(b"HOME").unwrap_or(b"(null)");
+            let home = req.environment().env(b"HOME").unwrap_or(b"(null)");
             [home, b"/.php_history"].concat()
         },
         <[u8]>::to_vec,

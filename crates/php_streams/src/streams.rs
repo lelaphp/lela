@@ -2799,9 +2799,17 @@ fn plain_open(
     // `_php_stream_fopen`'s `expand_filepath`, under `CWD_FILEPATH`, which
     // enters the path in the realpath cache; where it refuses, the host
     // is handed the path as written and answers for it.
-    let cwd = req.cwd().into_os_string().into_encoded_bytes();
+    let cwd = req
+        .environment()
+        .cwd()
+        .into_os_string()
+        .into_encoded_bytes();
     let written = path.as_os_str().as_encoded_bytes();
-    let host = match req.virtual_file_ex(&cwd, written, crate::api::request::Resolve::FilePath) {
+    let host = match req.environment_mut().virtual_file_ex(
+        &cwd,
+        written,
+        crate::api::request::Resolve::FilePath,
+    ) {
         Some(expanded) => std::path::PathBuf::from(
             <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(&expanded),
         ),
@@ -3977,7 +3985,7 @@ impl StreamLayer for Request {
                             let real = if resolved {
                                 Some(path_to_open.clone())
                             } else {
-                                self.expand_filepath(&path_to_open)
+                                self.environment_mut().expand_filepath(&path_to_open)
                             };
                             self.streams().opened_path = real;
                         }
@@ -4068,7 +4076,7 @@ impl StreamLayer for Request {
         let guarded = if options.disable_open_basedir {
             Ok(self.unguarded_host_path(path))
         } else {
-            self.check_open_basedir(path, true)
+            self.environment_mut().check_open_basedir(path, true)
         };
         match guarded {
             Ok(host) => plain_open(self, &host, mode, options.for_include && !options.held),
@@ -4241,7 +4249,10 @@ impl StreamLayer for Request {
             // the guard, which warns, then `opendir(3)`.
             Located::Plain => (
                 PLAIN_FILES,
-                match self.check_open_basedir(&path_to_open, true) {
+                match self
+                    .environment_mut()
+                    .check_open_basedir(&path_to_open, true)
+                {
                     Err(refused) => Err(strerror(&refused.into())),
                     Ok(dir) => match std::fs::read_dir(&dir) {
                         Ok(entries) => {

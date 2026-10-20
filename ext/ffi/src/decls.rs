@@ -104,7 +104,7 @@ impl FFI {
         validate_api_restriction(req)?;
         let lib = match lib {
             Some(path) => match Library::open(&crate::preload::library_path(
-                Some(&req.cwd()),
+                Some(&req.environment().cwd()),
                 path.as_bytes(),
             )) {
                 Ok(lib) => Some(lib),
@@ -894,7 +894,7 @@ fn load_read(
     shown: &str,
 ) -> Result<Owner<Instance<FFI>>, Thrown> {
     let from = types(req).len();
-    let cwd = req.cwd();
+    let cwd = req.environment().cwd();
     let loaded = match crate::preload::load_header(file, Some(&cwd), types(req), attr::STORED, None)
     {
         Ok(loaded) => loaded,

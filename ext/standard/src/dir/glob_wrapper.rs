@@ -74,7 +74,7 @@ fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown
     let mut pattern = path.to_vec();
     let mut cwd_skip = 0;
     if pattern.first() != Some(&b'/') {
-        let cwd = req.cwd().as_os_str().as_bytes().to_vec();
+        let cwd = req.environment().cwd().as_os_str().as_bytes().to_vec();
         cwd_skip = cwd.len() + 1;
         let mut prefixed = cwd;
         prefixed.push(b'/');
@@ -93,7 +93,7 @@ fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown
     let matches = matches
         .into_iter()
         .map(|m| m.get(cwd_skip..).unwrap_or(&m[..]).to_vec())
-        .filter(|m| req.check_open_basedir(m, false).is_ok())
+        .filter(|m| req.environment_mut().check_open_basedir(m, false).is_ok())
         .collect();
     Ok(Some(DirListing::Glob {
         pattern: path.to_vec(),

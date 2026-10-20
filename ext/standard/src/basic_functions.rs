@@ -214,7 +214,7 @@ fn getenv(
     #[php(default = false)] local_only: bool,
 ) -> Result<Union<Owner<PhpArray>, OrFalse<Owner<PhpString>>>, Thrown> {
     let Some(name) = name else {
-        let pairs = req.loaded_env();
+        let pairs = req.environment().loaded_env();
         let mut array = PhpArray::new(req)?;
         for (name, value) in pairs {
             if name.is_empty() || name.iter().any(|c| matches!(c, b' ' | b'.' | b'[')) {
@@ -229,11 +229,11 @@ fn getenv(
     };
     let name = c_str(name.as_bytes());
     let value = if local_only {
-        (req.env_pairs().iter())
+        (req.environment().env_pairs().iter())
             .find(|(n, _)| n.as_slice() == name)
             .map(|(_, value)| value.clone())
     } else {
-        req.env(name).map(<[u8]>::to_vec)
+        req.environment().env(name).map(<[u8]>::to_vec)
     };
     match value {
         // `RETVAL_STRING` and `php_getenv`'s `zend_string_init`: an
@@ -352,8 +352,10 @@ fn putenv(req: &mut Request, assignment: PhpString) -> Result<bool, Thrown> {
     }
     let text = c_str(bytes).to_vec();
     match text.iter().position(|c| *c == b'=') {
-        Some(at) => req.set_env(&text[..at], Some(&text[at + 1..])),
-        None => req.set_env(&text, None),
+        Some(at) => req
+            .environment_mut()
+            .set_env(&text[..at], Some(&text[at + 1..])),
+        None => req.environment_mut().set_env(&text, None),
     };
     Ok(true)
 }
@@ -405,7 +407,12 @@ fn getopt(
     rest_index.set(req, Untyped(Value::int(1)))?;
     // `$_SERVER['argv']` as `php_build_argv` wrote it, each argument a C
     // string; the one place `getopt` reads the host's `argv`.
-    let argv: Vec<Vec<u8>> = req.argv().iter().map(|a| c_str(a).to_vec()).collect();
+    let argv: Vec<Vec<u8>> = req
+        .environment()
+        .argv()
+        .iter()
+        .map(|a| c_str(a).to_vec())
+        .collect();
     if argv.is_empty() {
         return Ok(OrFalse::False);
     }
@@ -1254,9 +1261,10 @@ fn get_current_user(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
 /// which `php_sdl.c` names its cache files by.
 pub fn php_get_current_user(req: &mut Request) -> Vec<u8> {
     use std::os::unix::fs::MetadataExt;
-    req.script_name()
+    req.environment()
+        .script_name()
         .map(<[u8]>::to_vec)
-        .and_then(|script| req.realpath(&script))
+        .and_then(|script| req.environment_mut().realpath(&script))
         .and_then(|path| std::fs::metadata(path).ok())
         .and_then(|meta| crate::ffi::user_name(meta.uid()))
         .unwrap_or_default()
@@ -1742,7 +1750,10 @@ fn move_uploaded_file(req: &mut Request, from: Path, to: Path) -> bool {
     if !req.variables().is_uploaded_file(from.as_bytes()) {
         return false;
     }
-    let Ok(target) = req.check_open_basedir(to.as_bytes(), true) else {
+    let Ok(target) = req
+        .environment_mut()
+        .check_open_basedir(to.as_bytes(), true)
+    else {
         return false;
     };
     let Some(source) = req.variables_mut().take_uploaded_file(from.as_bytes()) else {
@@ -1817,7 +1828,10 @@ fn ftok(req: &mut Request, filename: Path, project_id: PhpString) -> Result<i64,
     let &[project] = project.as_bytes() else {
         return Err(arg_value_error(req, 2, "be a single character"));
     };
-    let Ok(full) = req.check_open_basedir(path.as_bytes(), true) else {
+    let Ok(full) = req
+        .environment_mut()
+        .check_open_basedir(path.as_bytes(), true)
+    else {
         return Ok(-1);
     };
     match crate::ffi::ftok(full.as_os_str().as_bytes(), project) {
@@ -1972,7 +1986,11 @@ fn highlight_file(
     #[php(default = false)] r#return: bool,
 ) -> Result<Union<Owner<PhpString>, bool>, Thrown> {
     let (Path(filename), returned) = (filename, r#return);
-    if req.check_open_basedir(filename.as_bytes(), true).is_err() {
+    if req
+        .environment_mut()
+        .check_open_basedir(filename.as_bytes(), true)
+        .is_err()
+    {
         return Ok(Union::B(false));
     }
     let Some(source) = scanned_file(req, filename.as_bytes())? else {

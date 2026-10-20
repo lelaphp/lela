@@ -89,20 +89,20 @@ fn close_fd(req: &mut Request) {
 /// php's `%s (%d)` of an `errno`, `strerror` and the number.
 fn errno_text(req: &Request, error: &std::io::Error) -> String {
     let errno = error.raw_os_error().unwrap_or(0);
-    format!("{} ({errno})", req.os_error_text(errno))
+    format!("{} ({errno})", req.environment().os_error_text(errno))
 }
 
 /// `VCWD_STAT`: the host's `stat(2)` of the path against the working
 /// directory, as `mod_files.c` makes it, past every wrapper and so past
 /// the `open_basedir` guard, which php asks only of the save path.
 fn exists(req: &Request, path: &[u8]) -> Option<std::fs::Metadata> {
-    std::fs::metadata(req.absolutize(path)).ok()
+    std::fs::metadata(req.environment().absolutize(path)).ok()
 }
 
 /// `VCWD_UNLINK`, as [`exists`] states: `false` where it failed, with
 /// nothing said.
 fn unlink(req: &Request, path: &[u8]) -> bool {
-    std::fs::remove_file(req.absolutize(path)).is_ok()
+    std::fs::remove_file(req.environment().absolutize(path)).is_ok()
 }
 
 /// `ps_files_open`: the file for `key` opened and locked, unless it is
@@ -167,7 +167,7 @@ fn open_key(req: &mut Request, key: &[u8]) {
     if let Some(files) = data(req) {
         files.last_key = Some(key.to_vec());
     }
-    let host = req.absolutize(&path);
+    let host = req.environment().absolutize(&path);
     let existed = std::fs::symlink_metadata(&host).is_ok();
     let filemode = data(req).map_or(0o600, |d| d.filemode);
     let mode = u32::try_from(filemode & 0o7777).unwrap_or(0o600);
@@ -210,7 +210,7 @@ fn open_key(req: &mut Request, key: &[u8]) {
     // The mode as php's process has it: `open(2)` takes the process's own
     // umask off, and `umask()` sets the request's.
     if !existed {
-        file.set_permissions(Permissions::from_mode(mode & !req.umask()))
+        file.set_permissions(Permissions::from_mode(mode & !req.environment().umask()))
             .ok();
     }
     file.lock().ok();
@@ -291,7 +291,7 @@ fn write_key(req: &mut Request, key: &[u8], val: &[u8]) -> Result<bool, Thrown> 
 /// ```
 pub(super) fn open(req: &mut Request, save_path: &[u8]) -> bool {
     let path = if save_path.is_empty() {
-        let dir = req.temp_dir();
+        let dir = req.environment().temp_dir();
         let dir = dir.to_string_lossy();
         let trimmed = dir.trim_end_matches('/');
         let dir = if trimmed.is_empty() {
@@ -300,7 +300,11 @@ pub(super) fn open(req: &mut Request, save_path: &[u8]) -> bool {
             trimmed.as_bytes().to_vec()
         };
         // The temporary directory is held to the guard, which warns.
-        if req.check_open_basedir(&dir, true).is_err() {
+        if req
+            .environment_mut()
+            .check_open_basedir(&dir, true)
+            .is_err()
+        {
             return false;
         }
         dir
@@ -459,7 +463,7 @@ pub(super) fn update_timestamp(req: &mut Request, key: &[u8], val: &[u8]) -> Res
     let times = std::fs::FileTimes::new()
         .set_accessed(now)
         .set_modified(now);
-    let host = req.absolutize(&path);
+    let host = req.environment().absolutize(&path);
     let touched = File::open(&host)
         .or_else(|_| OpenOptions::new().write(true).open(&host))
         .and_then(|file| file.set_times(times));
@@ -517,12 +521,12 @@ pub(super) fn gc(req: &mut Request, maxlifetime: i64) -> i64 {
             &format!(
                 "ps_files_cleanup_dir: opendir({}) failed: {} (2)",
                 String::from_utf8_lossy(&dir),
-                req.os_error_text(2)
+                req.environment().os_error_text(2)
             ),
         );
         return -1;
     }
-    let Ok(listing) = std::fs::read_dir(req.absolutize(&dir)) else {
+    let Ok(listing) = std::fs::read_dir(req.environment().absolutize(&dir)) else {
         return -1;
     };
     let now = std::time::SystemTime::now()

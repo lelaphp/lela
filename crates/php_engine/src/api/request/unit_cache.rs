@@ -274,7 +274,7 @@ impl Request {
         else {
             return None;
         };
-        let now = self.request_time();
+        let now = self.environment().request_time();
         if !held.trusted(validation, now) {
             return None;
         }
@@ -484,7 +484,7 @@ impl Request {
                 false,
             ),
         };
-        let now = self.request_time();
+        let now = self.environment().request_time();
         if memory
             && matches!(handle, HandlePath::Filename | HandlePath::Kept)
             && let Some(held) = shared.units.find(&self.arena.files, &UnitKey::full(&full))
@@ -765,7 +765,7 @@ impl UnitCache<'_> {
             Admission::KeptOut | Admission::OnDisk { .. } => return Ok(false),
             Admission::Held { validation, .. } => validation,
         };
-        let now = req.request_time();
+        let now = req.environment().request_time();
         if held.trusted(validation, now) {
             return Ok(true);
         }
@@ -856,7 +856,7 @@ impl UnitCache<'_> {
         // name: of the resolved path, or the held unit's, and of the path
         // as written where none resolved.
         let resolved = match resolved {
-            Ok(path) => match req.check_open_basedir(&path, true) {
+            Ok(path) => match req.environment_mut().check_open_basedir(&path, true) {
                 Ok(_) => Ok(path),
                 Err(refused) => {
                     req.open_stream_failed(IncludeKind::Include, &path, &refused.into());
@@ -866,7 +866,7 @@ impl UnitCache<'_> {
                 }
             },
             Err(Unresolved::Missing(reason)) if !written.contains(&0) => {
-                match req.check_open_basedir(written, true) {
+                match req.environment_mut().check_open_basedir(written, true) {
                     Ok(_) => Err(Unresolved::Missing(reason)),
                     Err(refused) => Err(Unresolved::Missing(refused.into())),
                 }

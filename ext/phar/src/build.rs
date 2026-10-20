@@ -113,7 +113,7 @@ pub(crate) fn add_file(
         }
     }
     let mode = stream.and_then(|s| s.stat(req)).map(|sb| sb[2]);
-    let umask = req.umask();
+    let umask = req.environment().umask();
     if let Some(e) = slot.and_then(|slot| {
         archives(req)
             .get_mut(id)
@@ -874,7 +874,11 @@ fn build_one(req: &mut Request, b: &mut Build, it: php_ext::call::Iter) -> Resul
         }
         key = rest.to_vec();
     }
-    if req.check_open_basedir(&fname, true).is_err() {
+    if req
+        .environment_mut()
+        .check_open_basedir(&fname, true)
+        .is_err()
+    {
         return bad(
             req,
             "UnexpectedValueException",
@@ -951,7 +955,7 @@ fn add_built(
     };
     b.buffer.extend_from_slice(&bytes);
     let mode = source.stat(req).map(|sb| sb[2]);
-    let umask = req.umask();
+    let umask = req.environment().umask();
     let mut replaced = None;
     if let Target::Slot(slot) = data.target
         && let Some(e) = archives(req)

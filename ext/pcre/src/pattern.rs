@@ -124,7 +124,7 @@ pub(super) fn compiled_under(
     };
     let jit = crate::limits(req).jit;
     let mut jit_failure = None;
-    let ctype = req.ctype_locale().map(<[u8]>::to_vec);
+    let ctype = req.environment().ctype_locale().map(<[u8]>::to_vec);
     let tables = |patterns: Option<&Patterns>| {
         let name = ctype.as_deref()?;
         let make = || Tables::make().map(Arc::new);

@@ -81,7 +81,7 @@ pub(crate) fn handle(
     if ok
         && !enabled
         && let Some(dir) = &directory
-        && !req.within_basedir(dir, filename)
+        && !req.environment_mut().within_basedir(dir, filename)
     {
         conn.error.client(
             req,
@@ -118,7 +118,12 @@ fn send_file(
         conn.net.send(req, &[], &mut conn.stats, &mut conn.error)?;
         Ok::<_, Thrown>((false, true))
     };
-    if open_basedir && req.check_open_basedir(filename, false).is_err() {
+    if open_basedir
+        && req
+            .environment_mut()
+            .check_open_basedir(filename, false)
+            .is_err()
+    {
         return refused(
             conn,
             req,

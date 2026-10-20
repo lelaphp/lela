@@ -407,17 +407,22 @@ fn valid_file_path(req: &mut Request, source: &[u8]) -> Option<Vec<u8>> {
         }
         local = &source[skip..];
     }
-    let resolved = if let Some(path) = req.realpath(local) {
+    let resolved = if let Some(path) = req.environment_mut().realpath(local) {
         path.to_string_lossy().into_owned().into_bytes()
     } else {
         // `expand_filepath`.
-        let cwd = req.cwd().into_os_string().into_encoded_bytes();
-        req.virtual_file_ex(&cwd, local, Resolve::FilePath)?
+        let cwd = req
+            .environment()
+            .cwd()
+            .into_os_string()
+            .into_encoded_bytes();
+        req.environment_mut()
+            .virtual_file_ex(&cwd, local, Resolve::FilePath)?
     };
     // `zend_dirname` of the path as written, and `php_sys_stat` of it.
     if let Some(at) = local.iter().rposition(|b| *b == b'/') {
         let dir = if at == 0 { &b"/"[..] } else { &local[..at] };
-        if !req.absolutize(dir).exists() {
+        if !req.environment().absolutize(dir).exists() {
             return None;
         }
     }

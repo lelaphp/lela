@@ -1037,7 +1037,7 @@ fn stream_socket_pair(
             Ok(pair) => pair,
             Err(error) => {
                 let code = error.raw_os_error().unwrap_or(0);
-                let text = req.os_error_text(code);
+                let text = req.environment().os_error_text(code);
                 let text = text
                     .split_once(" (os error")
                     .map_or(text.as_str(), |(t, _)| t);

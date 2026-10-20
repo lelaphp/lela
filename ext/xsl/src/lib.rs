@@ -419,7 +419,7 @@ fn apply<R>(
         );
         return Err(throw_error(req, "Error", &message));
     };
-    let profile = profiling.filter(|p| req.check_open_basedir(p, true).is_ok());
+    let profile = profiling.filter(|p| req.environment_mut().check_open_basedir(p, true).is_ok());
     let answer = id.held(req, |req, sheet| {
         let mut holder = NodeObject::default();
         let doc = if has_keys {

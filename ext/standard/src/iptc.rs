@@ -166,7 +166,10 @@ fn iptcembed(
     #[php(default = 0)] spool: i64,
 ) -> Result<Union<Owner<PhpString>, bool>, Thrown> {
     let (data, Path(file)) = (iptc_data.as_bytes().to_vec(), filename);
-    let Ok(jpeg) = req.check_open_basedir(file.as_bytes(), true) else {
+    let Ok(jpeg) = req
+        .environment_mut()
+        .check_open_basedir(file.as_bytes(), true)
+    else {
         return Ok(Union::B(false));
     };
     if data.len() >= usize::MAX - PSHEADER.len() - 1026 {

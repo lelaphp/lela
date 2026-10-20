@@ -945,6 +945,7 @@ impl Request {
             String::from_utf8_lossy(self.ini().get(b"include_path").unwrap_or_default())
                 .into_owned();
         let path = self
+            .environment()
             .cwd()
             .join(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(script));
         let reason = std::fs::File::open(path)
@@ -952,7 +953,7 @@ impl Request {
             .and_then(|error| error.raw_os_error())
             .map_or_else(
                 || String::from("No such file or directory"),
-                |code| self.os_error_text(code),
+                |code| self.environment().os_error_text(code),
             );
         crate::api::raising::raise_at(
             self,

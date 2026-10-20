@@ -72,7 +72,7 @@ fn free_dir(req: &mut Request, res: Resource) -> Result<(), Thrown> {
     let Some(mut za) = res.native_mut::<Dir>(req).and_then(|d| d.za.take()) else {
         return Ok(());
     };
-    let umask = req.umask();
+    let umask = req.environment().umask();
     if za.close(&mut None_, umask).is_err() {
         docref(req, Level::Warning, "Cannot destroy the zip context");
     }

@@ -447,7 +447,12 @@ impl Phar {
     ) -> Result<(), Thrown> {
         let id = held(req, this.object())?;
         let file = filename.0.as_bytes().to_vec();
-        if !file.windows(3).any(|w| w == b"://") && req.check_open_basedir(&file, true).is_err() {
+        if !file.windows(3).any(|w| w == b"://")
+            && req
+                .environment_mut()
+                .check_open_basedir(&file, true)
+                .is_err()
+        {
             return Err(throw(
                 req,
                 "RuntimeException",

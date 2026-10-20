@@ -291,11 +291,22 @@ fn open(
 ) -> Result<Option<Magic>, Thrown> {
     let file = match magic_database.map(|path| path.0.as_bytes().to_vec()) {
         Some(file) if !file.is_empty() => {
-            if req.check_open_basedir(&file, true).is_err() {
+            if req
+                .environment_mut()
+                .check_open_basedir(&file, true)
+                .is_err()
+            {
                 return Ok(None);
             }
-            let cwd = req.cwd().into_os_string().into_encoded_bytes();
-            let Some(resolved) = req.virtual_file_ex(&cwd, &file, Resolve::Expand) else {
+            let cwd = req
+                .environment()
+                .cwd()
+                .into_os_string()
+                .into_encoded_bytes();
+            let Some(resolved) =
+                req.environment_mut()
+                    .virtual_file_ex(&cwd, &file, Resolve::Expand)
+            else {
                 return Ok(None);
             };
             Some(resolved)

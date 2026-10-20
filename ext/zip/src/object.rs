@@ -506,7 +506,7 @@ fn close_with_hooks(
             i.cancel.as_deref().map(|k| (**k).clone()),
         )
     });
-    let umask = req.umask();
+    let umask = req.environment().umask();
     let mut file = file(req, object.native::<Intern>(req).map_or(0, |i| i.id));
     archive.lend(&mut file);
     let mut hooks = PhpHooks {
@@ -578,13 +578,20 @@ fn stat_array(req: &mut Request, st: &za::Stat) -> Result<Owner<PhpArray>, Throw
 
 /// `expand_filepath`: the path against the working directory, or `None`.
 pub(crate) fn expand(req: &mut Request, path: &[u8]) -> Option<Vec<u8>> {
-    let cwd = req.cwd().into_os_string().into_encoded_bytes();
-    req.virtual_file_ex(&cwd, path, php_ext::request::Resolve::FilePath)
+    let cwd = req
+        .environment()
+        .cwd()
+        .into_os_string()
+        .into_encoded_bytes();
+    req.environment_mut()
+        .virtual_file_ex(&cwd, path, php_ext::request::Resolve::FilePath)
 }
 
 /// `ZIP_OPENBASEDIR_CHECKPATH`: `true` where `open_basedir` refuses.
 pub(crate) fn basedir_refuses(req: &mut Request, path: &[u8]) -> bool {
-    req.check_open_basedir(path, true).is_err()
+    req.environment_mut()
+        .check_open_basedir(path, true)
+        .is_err()
 }
 
 fn host(path: &[u8]) -> PathBuf {

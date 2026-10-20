@@ -222,7 +222,7 @@ fn file_start(req: &mut Request, read: i64, name: &[u8], filename: &[u8]) -> Res
         .is_some_and(|progress| progress.data.is_none());
     if first {
         let freq = freq(req);
-        let start_time = req.request_time();
+        let start_time = req.environment().request_time();
         with(req, |progress| {
             progress.update_step = if freq >= 0 {
                 freq

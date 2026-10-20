@@ -303,7 +303,7 @@ fn on_update_cache_dir(req: &mut Request, value: Option<&[u8]>) -> Result<bool, 
         }
         None => value,
     };
-    Ok(dir.is_empty() || req.check_open_basedir(dir, true).is_ok())
+    Ok(dir.is_empty() || req.environment_mut().check_open_basedir(dir, true).is_ok())
 }
 
 /// `PHP_MINFO_FUNCTION(soap)`: the two rows, then the ini entries.

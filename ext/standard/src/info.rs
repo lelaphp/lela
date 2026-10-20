@@ -256,8 +256,8 @@ fn general(req: &mut Request) {
         print(req, &format!("PHP Version => {PHP_VERSION}\n"));
     }
     let uname = String::from_utf8_lossy(&get_uname(b'a')).into_owned();
-    let api = pretty_name(req.sapi_name()).to_owned();
-    let defs = req.build_defs().clone();
+    let api = pretty_name(req.environment().sapi_name()).to_owned();
+    let defs = req.environment().build_defs().clone();
     let [ini_path, loaded, scan_dir, scanned] = ini_cells(req);
     let wrappers: Vec<Vec<u8>> = req
         .stream_wrappers()
@@ -517,6 +517,7 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
     if flag & INFO_ENVIRONMENT != 0 {
         section(req, "Environment");
         let pairs: Vec<(String, String)> = req
+            .environment()
             .env_pairs()
             .iter()
             .map(|(name, value)| {
@@ -945,7 +946,7 @@ fn phpcredits(req: &mut Request, #[php(default = CREDITS_ALL)] flags: i64) -> Tr
 /// ```
 #[php_function]
 fn php_sapi_name(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    let name = req.sapi_name().to_owned();
+    let name = req.environment().sapi_name().to_owned();
     PhpString::new(req, name.as_bytes()).map(OrFalse::Value)
 }
 

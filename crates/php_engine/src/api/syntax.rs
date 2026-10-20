@@ -167,7 +167,7 @@ where
     }
 
     fn env(&mut self, name: &[u8]) -> Option<Vec<u8>> {
-        self.req.env(name).map(<[u8]>::to_vec)
+        self.req.environment().env(name).map(<[u8]>::to_vec)
     }
 
     fn double(&mut self, d: f64) -> Result<Vec<u8>, Thrown> {

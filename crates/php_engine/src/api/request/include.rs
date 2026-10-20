@@ -161,7 +161,7 @@ impl Request {
     /// the host handed over, `php -r` and stdin, has no path and is
     /// nowhere in the table, as php's `Standard input code` is not.
     pub(crate) fn note_primary_file(&mut self, script: &[u8]) {
-        if let Some(real) = self.realpath(script) {
+        if let Some(real) = self.environment_mut().realpath(script) {
             // The memory limit's fatal is recorded and ends the request.
             self.note_included(real.as_os_str().as_encoded_bytes()).ok();
         }
@@ -326,7 +326,7 @@ impl Request {
         let script = self.description.script_name.clone();
         if served {
             if let Some(script) = script.filter(|name| name != b"Standard input code")
-                && let Some(expanded) = self.expand_filepath(&script)
+                && let Some(expanded) = self.environment_mut().expand_filepath(&script)
             {
                 self.note_included(&expanded).ok();
                 self.description.script_name = Some(expanded);
@@ -334,7 +334,10 @@ impl Request {
             return;
         }
         let script = script.unwrap_or_default();
-        let expanded = self.expand_filepath(&script).unwrap_or(script);
+        let expanded = self
+            .environment_mut()
+            .expand_filepath(&script)
+            .unwrap_or(script);
         if self.description.program_file.noted_before_prepend() {
             self.note_included(&expanded).ok();
         }
@@ -674,7 +677,7 @@ impl Request {
     /// ```
     fn include_guard(&mut self, kind: IncludeKind, path: &[u8]) -> Result<HostPath, Refused> {
         let outer = self.include.including.replace((kind, self.vm.depth()));
-        let guarded = self.check_open_basedir(path, true);
+        let guarded = self.environment_mut().check_open_basedir(path, true);
         self.include.including = outer;
         guarded
     }
@@ -1109,6 +1112,7 @@ impl Request {
         // resolve.
         const ENOENT: i32 = 2;
         let real = self
+            .environment_mut()
             .realpath(path)
             .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?;
         if !real.is_file() {

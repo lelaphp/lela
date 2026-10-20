@@ -822,7 +822,12 @@ pub(crate) fn setopt(
         }
         Opt::Path => {
             let path = with_string(req, value, <[u8]>::to_vec)?;
-            if !path.is_empty() && req.check_open_basedir(&path, true).is_err() {
+            if !path.is_empty()
+                && req
+                    .environment_mut()
+                    .check_open_basedir(&path, true)
+                    .is_err()
+            {
                 return Ok(false);
             }
             option_str(req, object, option, &path)

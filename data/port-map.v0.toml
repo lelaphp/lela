@@ -987,7 +987,7 @@ mahout = "RequestCtx::cwd"
 sites = 16
 crates = 2
 status = "same"
-api = "request::Request::cwd"
+api = "request::Environment::cwd"
 
 [[item]]
 mahout = "RequestCtx::write_output"
@@ -1022,7 +1022,7 @@ mahout = "RequestCtx::create_mode"
 sites = 8
 crates = 1
 status = "renamed"
-api = "request::Request::umask"
+api = "request::Environment::umask"
 
 [[item]]
 mahout = "RequestCtx::superglobal"
@@ -1071,7 +1071,7 @@ mahout = "RequestCtx::umask"
 sites = 4
 crates = 1
 status = "same"
-api = "request::Request::umask"
+api = "request::Environment::umask"
 
 [[item]]
 mahout = "RequestCtx::loaded_extensions"
@@ -1120,7 +1120,7 @@ mahout = "RequestCtx::temp_dir"
 sites = 3
 crates = 1
 status = "same"
-api = "request::Request::temp_dir"
+api = "request::Environment::temp_dir"
 
 [[item]]
 mahout = "RequestCtx::arm_time_limit"
@@ -1232,7 +1232,7 @@ mahout = "RequestCtx::script_name"
 sites = 2
 crates = 1
 status = "same"
-api = "request::Request::script_name"
+api = "request::Environment::script_name"
 
 [[item]]
 mahout = "RequestCtx::set_assert_callback"
@@ -1386,14 +1386,14 @@ mahout = "RequestCtx::env_lookup"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::env"
+api = "request::Environment::env"
 
 [[item]]
 mahout = "RequestCtx::env_pairs"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::env_pairs"
+api = "request::Environment::env_pairs"
 
 [[item]]
 mahout = "RequestCtx::flush_output"
@@ -1596,7 +1596,7 @@ mahout = "RequestCtx::sapi_name"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::sapi_name"
+api = "request::Environment::sapi_name"
 
 [[item]]
 mahout = "RequestCtx::set_callable_dep_pre_emitted"
@@ -1617,14 +1617,14 @@ mahout = "RequestCtx::set_cwd"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::set_cwd"
+api = "request::Environment::set_cwd"
 
 [[item]]
 mahout = "RequestCtx::set_env_override"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::set_env"
+api = "request::Environment::set_env"
 
 [[item]]
 mahout = "RequestCtx::set_header_callback"
@@ -1645,7 +1645,7 @@ mahout = "RequestCtx::set_umask"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::set_umask"
+api = "request::Environment::set_umask"
 
 [[item]]
 mahout = "RequestCtx::silence_cancel"
@@ -1982,7 +1982,7 @@ mahout = "RequestCtx::settings.sys_temp_dir"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::temp_dir"
+api = "request::Environment::temp_dir"
 
 [[item]]
 mahout = "RequestCtx::settings.zend_assertions"
@@ -2228,7 +2228,7 @@ mahout = "semantics::check_fs_access"
 sites = 27
 crates = 3
 status = "renamed"
-api = "request::Request::check_open_basedir"
+api = "request::Environment::check_open_basedir"
 
 [[item]]
 mahout = "semantics::ArrayOrString"
@@ -2291,7 +2291,7 @@ mahout = "semantics::absolutize"
 sites = 12
 crates = 2
 status = "same"
-api = "request::Request::absolutize"
+api = "request::Environment::absolutize"
 
 [[item]]
 mahout = "semantics::cast_float"
@@ -2389,7 +2389,7 @@ mahout = "semantics::resolve_path_realpath"
 sites = 6
 crates = 1
 status = "renamed"
-api = "request::Request::realpath"
+api = "request::Environment::realpath"
 
 [[item]]
 mahout = "semantics::ConstScope"
@@ -2417,7 +2417,7 @@ mahout = "semantics::check_fs_access_display"
 sites = 5
 crates = 1
 status = "renamed"
-api = "request::Request::check_open_basedir"
+api = "request::Environment::check_open_basedir"
 
 [[item]]
 mahout = "semantics::class_lookup"
@@ -2963,7 +2963,7 @@ mahout = "semantics::fs_path_allowed"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::check_open_basedir"
+api = "request::Environment::check_open_basedir"
 
 [[item]]
 mahout = "semantics::function_to_string"
@@ -4117,7 +4117,7 @@ mahout = "mahout_runtime::resources::io_error_text"
 sites = 10
 crates = 3
 status = "renamed"
-api = "request::Request::os_error_text"
+api = "request::Environment::os_error_text"
 
 [[item]]
 mahout = "mahout_runtime::Reentrant::call_value_named"

@@ -123,7 +123,7 @@ fn get_line(req: &mut Request, value: &Value) -> Option<Vec<u8>> {
 /// (`zend_get_executed_filename`), which is how a file beside the
 /// primary file is found from another working directory.
 /// `tsrm_realpath` is the kernel's canonical path against the
-/// request's working directory ([`Request::realpath`]), and here a
+/// request's working directory ([`Environment::realpath`]), and here a
 /// regular file alone, which is the `S_ISREG` the plain-files wrapper
 /// holds an include to when it opens; php reports a directory with
 /// whatever `errno` the failed open left, and this engine as a file

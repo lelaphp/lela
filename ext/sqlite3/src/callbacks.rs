@@ -220,7 +220,11 @@ impl Callbacks for Sqlite3 {
                 Some(b":memory:" | b"") => {}
                 Some(name) if name.starts_with(b"file:") => return Ok(SQLITE_DENY),
                 Some(name) => {
-                    if req.check_open_basedir(name, true).is_err() {
+                    if req
+                        .environment_mut()
+                        .check_open_basedir(name, true)
+                        .is_err()
+                    {
                         return Ok(SQLITE_DENY);
                     }
                 }

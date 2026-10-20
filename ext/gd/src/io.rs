@@ -945,7 +945,11 @@ fn output_gd(
         .filter(|p| !p.is_empty());
     let stream = match &file {
         Some(path) => {
-            if req.check_open_basedir(path, true).is_err() {
+            if req
+                .environment_mut()
+                .check_open_basedir(path, true)
+                .is_err()
+            {
                 docref(req, Level::Warning, "Invalid filename");
                 return Ok(false);
             }

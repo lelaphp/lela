@@ -180,7 +180,7 @@ impl PlainFiles for Request {
     /// stat cache and the realpath cache emptied.
     fn forget_stats_and_realpaths(&mut self) {
         self.forget_stats();
-        self.realpath_cache_clear(None);
+        self.environment_mut().realpath_cache_clear(None);
     }
 
     /// What `chdir` does to the stat cache (`Z/ext/standard/dir.c:367`):
@@ -290,9 +290,10 @@ impl PlainFiles for Request {
                 // which `php_stat` sets after asking the guard itself,
                 // with a warning, and `_php_stream_stat_path` does not.
                 let guarded = if cached {
-                    self.check_open_basedir(local, true)
+                    self.environment_mut().check_open_basedir(local, true)
                 } else {
-                    self.check_open_basedir(strip_file_scheme(local), !quiet)
+                    self.environment_mut()
+                        .check_open_basedir(strip_file_scheme(local), !quiet)
                 };
                 match guarded {
                     Err(_) => UrlStat::Refused,
@@ -435,7 +436,7 @@ impl PlainFiles for Request {
     /// cleared where it did not.
     fn plain_unlink(&mut self, url: &[u8]) -> bool {
         let url = strip_file_scheme(url);
-        let Ok(target) = self.check_open_basedir(url, true) else {
+        let Ok(target) = self.environment_mut().check_open_basedir(url, true) else {
             return false;
         };
         match std::fs::remove_file(&target) {
@@ -518,10 +519,10 @@ impl PlainFiles for Request {
     fn plain_rename(&mut self, from: &[u8], to: &[u8]) -> bool {
         let from = strip_file_scheme(from);
         let to = strip_file_scheme(to);
-        let Ok(source) = self.check_open_basedir(from, true) else {
+        let Ok(source) = self.environment_mut().check_open_basedir(from, true) else {
             return false;
         };
-        let Ok(target) = self.check_open_basedir(to, true) else {
+        let Ok(target) = self.environment_mut().check_open_basedir(to, true) else {
             return false;
         };
         let docref2 = |req: &mut Request, error: &std::io::Error| {
@@ -584,7 +585,7 @@ impl PlainFiles for Request {
     /// given, `mode & ~umask` as `open(2)` and `mkdir(2)` apply the mask
     /// php's `umask()` set, whatever the process's own mask took off.
     fn apply_umask(&self, path: &Path, mode: u32) {
-        let want = mode & 0o777 & !self.umask();
+        let want = mode & 0o777 & !self.environment().umask();
         if let Ok(meta) = std::fs::metadata(path) {
             let have = meta.permissions().mode();
             if have & 0o777 != want {
@@ -616,7 +617,7 @@ impl PlainFiles for Request {
         let dir = strip_file_scheme(dir);
         let mode = low_bits(mode, 0o7777);
         if !recursive {
-            let Ok(target) = self.check_open_basedir(dir, true) else {
+            let Ok(target) = self.environment_mut().check_open_basedir(dir, true) else {
                 return false;
             };
             return match self.make_dir(&target, mode) {
@@ -628,13 +629,18 @@ impl PlainFiles for Request {
             };
         }
         // `expand_filepath_with_mode(dir, buf, NULL, 0, CWD_EXPAND)`.
-        let cwd = self.cwd().into_os_string().into_encoded_bytes();
-        let Some(mut buf) = self.virtual_file_ex(&cwd, dir, crate::api::request::Resolve::Expand)
-        else {
+        let cwd = self.environment().cwd().into_os_string();
+        let expand = crate::api::request::Resolve::Expand;
+        let env = self.environment_mut();
+        let Some(mut buf) = env.virtual_file_ex(cwd.as_encoded_bytes(), dir, expand) else {
             docref(self, Level::Warning, "Invalid path");
             return false;
         };
-        if self.check_open_basedir(&buf, true).is_err() {
+        if self
+            .environment_mut()
+            .check_open_basedir(&buf, true)
+            .is_err()
+        {
             return false;
         }
         let e = buf.len();
@@ -716,7 +722,7 @@ impl PlainFiles for Request {
     /// where it failed, and the stat cache cleared where it did not.
     fn plain_rmdir(&mut self, url: &[u8]) -> bool {
         let url = strip_file_scheme(url);
-        let Ok(target) = self.check_open_basedir(url, true) else {
+        let Ok(target) = self.environment_mut().check_open_basedir(url, true) else {
             return false;
         };
         match std::fs::remove_dir(&target) {
@@ -778,7 +784,7 @@ impl PlainFiles for Request {
     /// clears the stat cache.
     fn plain_metadata(&mut self, url: &[u8], op: WrapperOp<'_>) -> bool {
         let url = strip_file_scheme(url);
-        let Ok(host) = self.check_open_basedir(url, true) else {
+        let Ok(host) = self.environment_mut().check_open_basedir(url, true) else {
             return false;
         };
         let done = match op {

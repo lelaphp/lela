@@ -575,7 +575,10 @@ fn connected(req: &mut Request, handle: Mysqlnd) -> Result<(), Thrown> {
     let allow = ini_bool(req, b"mysqli.allow_local_infile");
     handle.option(req, ClientOption::LocalInfile(allow))?;
     if let Some(dir) = ini_string(req, b"mysqli.local_infile_directory")
-        && req.check_open_basedir(&dir, false).is_ok()
+        && req
+            .environment_mut()
+            .check_open_basedir(&dir, false)
+            .is_ok()
     {
         handle.option(req, ClientOption::LoadDataLocalDir(Some(&dir)))?;
     }

@@ -280,7 +280,7 @@ impl Request {
         let array = match global {
             AutoGlobal::Server if order.contains(&b'S') => self.create_server()?,
             AutoGlobal::Env if order.contains(&b'E') => {
-                let env = self.environment()?;
+                let env = self.environment_array()?;
                 self.register_params(*env)?;
                 env
             }
@@ -475,7 +475,7 @@ impl Request {
     /// }
     /// ```
     fn create_server(&mut self) -> Result<Owner<PhpArray>, Thrown> {
-        let mut server = self.environment()?;
+        let mut server = self.environment_array()?;
         self.register_params(*server)?;
         // The host's rows each through the input filter, `PARSE_SERVER`,
         // as `cli_register_variables` and `sapi_cgi_register_variables`
@@ -490,7 +490,7 @@ impl Request {
         let name = self.registered_key(b"REQUEST_TIME_FLOAT")?;
         server.set(self, name, Owner::float(now))?;
         let name = self.registered_key(b"REQUEST_TIME")?;
-        let whole = self.request_time();
+        let whole = self.environment().request_time();
         server.set(self, name, Owner::int(whole))?;
         // `zend_hash_find_ex_ind` of both, and neither where one is
         // missing: the zval as the table holds it, a reference kept one.
@@ -586,7 +586,7 @@ impl Request {
     /// name that reads as an integer as that integer, in the order the
     /// environment has them. What `$_ENV` is under a `variables_order`
     /// that names `E`, and the first rows of `$_SERVER`.
-    fn environment(&mut self) -> Result<Owner<PhpArray>, Thrown> {
+    fn environment_array(&mut self) -> Result<Owner<PhpArray>, Thrown> {
         let mut array = PhpArray::new(self)?;
         for (name, value) in self.description.env.clone() {
             if name.is_empty() || name.iter().any(|b| matches!(b, b' ' | b'.' | b'[')) {

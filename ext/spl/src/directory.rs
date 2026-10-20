@@ -515,7 +515,7 @@ impl SplFileInfo {
         this: This<Self>,
     ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let name = file_name(req, this.object())?;
-        let host = req.absolutize(&name);
+        let host = req.environment().absolutize(&name);
         match std::fs::read_link(&host) {
             Ok(target) => Ok(OrFalse::Value(PhpString::new(
                 req,
@@ -587,7 +587,7 @@ impl SplFileInfo {
             None => fs(req, this, |it| it.file_name.clone())?,
         };
         let name = name.map(|n| if n.is_empty() { b".".to_vec() } else { n });
-        match name.and_then(|n| req.realpath(&n)) {
+        match name.and_then(|n| req.environment_mut().realpath(&n)) {
             Some(real) => Ok(OrFalse::Value(PhpString::new(
                 req,
                 real.as_os_str().as_encoded_bytes(),

@@ -1282,7 +1282,7 @@ pub(crate) fn get_sdl(
     if uri.contains(&b':') || uri.first() == Some(&b'/') {
         uri_len = uri.len();
     } else {
-        match req.realpath(&uri) {
+        match req.environment_mut().realpath(&uri) {
             None => cache_wsdl = 0,
             Some(path) => {
                 uri = path.as_os_str().as_encoded_bytes().to_vec();
@@ -1305,13 +1305,13 @@ pub(crate) fn get_sdl(
     if cache_wsdl & WSDL_CACHE_DISK != 0 && uri_len < MAXPATHLEN {
         let dir = req.ini().get(ini::CACHE_DIR).unwrap_or_default().to_vec();
         let name = cache_key(req, &dir, &key_uri);
-        let path = req.absolutize(&name);
+        let path = req.environment().absolutize(&name);
         if let Some((sdl, cached)) = get_sdl_from_cache(&path, &key_uri, now().saturating_sub(ttl))
         {
             t = cached;
             return Ok(cache_in_memory(req, cache_wsdl, &key_uri, t, sdl));
         }
-        key = Some((req.absolutize(&dir), path));
+        key = Some((req.environment().absolutize(&dir), path));
     }
 
     let sdl = fetch(req, this, &uri, uri_len)?;

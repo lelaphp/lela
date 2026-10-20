@@ -358,7 +358,8 @@ fn select_over(
             let text = format!(
                 "Unable to select [{}]: {} (max_fd={max_fd})",
                 error.raw_os_error().unwrap_or(0),
-                req.os_error_text(error.raw_os_error().unwrap_or(0))
+                req.environment()
+                    .os_error_text(error.raw_os_error().unwrap_or(0))
             );
             docref(req, Level::Warning, &text);
             return Ok(OrFalse::False);

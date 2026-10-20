@@ -226,7 +226,7 @@ fn popen(
 /// `strerror(errno)`: the host's text for an `errno`, without the
 /// ` (os error N)` Rust puts after it.
 fn strerror(req: &Request, code: i32) -> String {
-    let text = req.os_error_text(code);
+    let text = req.environment().os_error_text(code);
     text.split_once(" (os error")
         .map_or(text.clone(), |(text, _)| text.to_owned())
 }
@@ -260,11 +260,11 @@ pub(crate) fn shell(req: &Request, command: &[u8]) -> Command {
 /// name the process's directory, `getcwd(3)` failing, was given none and
 /// stands in it (#2917).
 fn in_request(req: &Request, command: &mut Command) {
-    let cwd = req.cwd();
+    let cwd = req.environment().cwd();
     if !cwd.as_os_str().is_empty() && crate::ffi::process_dir().as_ref() != Some(&cwd) {
         command.current_dir(cwd);
     }
-    crate::ffi::environment(command, req.env_pairs());
+    crate::ffi::environment(command, req.environment().env_pairs());
 }
 
 /// `pclose($handle): int`, `PHP_FUNCTION(pclose)`

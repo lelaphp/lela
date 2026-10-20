@@ -294,7 +294,7 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: IniStage) -> b
             };
             stage != IniStage::Runtime
                 || dir.is_empty()
-                || req.check_open_basedir(dir, true).is_ok()
+                || req.environment_mut().check_open_basedir(dir, true).is_ok()
         }
         b"session.name" => {
             let forbidden = value.iter().any(|c| b"=,;.[ \t\r\n\x0b\x0c".contains(c));

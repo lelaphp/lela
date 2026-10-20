@@ -221,7 +221,7 @@ fn sem_get(
     #[php(default = true)] auto_release: bool,
 ) -> Result<OrFalse<Owner<Instance<SysvSemaphore>>>, Thrown> {
     let warn = |req: &mut Request, what: &str, errno: i32| {
-        let text = req.os_error_text(errno);
+        let text = req.environment().os_error_text(errno);
         docref(
             req,
             Level::Warning,
@@ -327,7 +327,7 @@ fn php_sysvsem_semop(
     if let Err(errno) = semop(id, &[op]) {
         if errno != libc::EAGAIN {
             let what = if acquire { "acquire" } else { "release" };
-            let text = req.os_error_text(errno);
+            let text = req.environment().os_error_text(errno);
             docref(
                 req,
                 Level::Warning,
@@ -430,7 +430,7 @@ fn sem_remove(req: &mut Request, semaphore: Instance<SysvSemaphore>) -> Result<b
         return Ok(false);
     }
     if let Err(errno) = ffi::remove(id) {
-        let text = req.os_error_text(errno);
+        let text = req.environment().os_error_text(errno);
         docref(
             req,
             Level::Warning,

@@ -80,7 +80,7 @@ impl Status {
             return format!("Unknown error {}", self.zip);
         };
         match kind {
-            "S" => format!("{sentence}: {}", req.os_error_text(self.sys)),
+            "S" => format!("{sentence}: {}", req.environment().os_error_text(self.sys)),
             "Z" => format!("{sentence}: {}", z_error(self.sys)),
             _ => sentence.to_owned(),
         }

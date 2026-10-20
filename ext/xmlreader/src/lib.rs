@@ -361,11 +361,16 @@ fn valid_file_path(req: &mut Request, source: &[u8]) -> Option<Vec<u8>> {
             return Some(source.to_vec());
         }
     }
-    if let Some(path) = req.realpath(local) {
+    if let Some(path) = req.environment_mut().realpath(local) {
         return Some(path.to_string_lossy().into_owned().into_bytes());
     }
-    let cwd = req.cwd().into_os_string().into_encoded_bytes();
-    req.virtual_file_ex(&cwd, local, Resolve::FilePath)
+    let cwd = req
+        .environment()
+        .cwd()
+        .into_os_string()
+        .into_encoded_bytes();
+    req.environment_mut()
+        .virtual_file_ex(&cwd, local, Resolve::FilePath)
 }
 
 /// Whether an object's own `open` or `XML` refuses as php's warning or a
@@ -461,7 +466,11 @@ pub(crate) fn from_string(
     valid_encoding(req, encoding)?;
     // The script's directory as the document's base, `xmlCanonicPath` of
     // the working directory with its slash.
-    let mut cwd = req.cwd().into_os_string().into_encoded_bytes();
+    let mut cwd = req
+        .environment()
+        .cwd()
+        .into_os_string()
+        .into_encoded_bytes();
     if cwd.last() != Some(&b'/') {
         cwd.push(b'/');
     }

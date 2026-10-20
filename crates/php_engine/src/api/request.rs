@@ -70,6 +70,7 @@ pub(crate) use diagnostics::{append_escaped, escape_html};
 mod ending;
 pub(crate) use ending::{Ending, Phase};
 mod environment;
+pub use environment::Environment;
 mod execution;
 mod extensions;
 pub use extensions::Extensions;
@@ -363,8 +364,8 @@ pub struct Request {
     /// The autoloaders and `EG(in_autoload)` ([`autoload::Autoload`]).
     autoload: autoload::Autoload,
     /// The umask, the locale names and the start time
-    /// ([`environment::Environment`]).
-    environment: environment::Environment,
+    /// ([`environment::EnvironmentState`]).
+    environment: environment::EnvironmentState,
     cwd: PathBuf,
     /// The fibers running on this request, innermost last, each with the
     /// execution state of the stack that resumed it, and where each
@@ -1070,7 +1071,7 @@ impl Request {
             shutdown_functions: shutdown::ShutdownFunctions::default(),
             ticks: ticks::Ticks::default(),
             autoload: autoload::Autoload::default(),
-            environment: environment::Environment::new(),
+            environment: environment::EnvironmentState::new(),
             cwd,
             fibers: crate::fiber::Fibers::default(),
             raised: None,

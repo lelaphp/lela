@@ -1063,10 +1063,10 @@ fn cache_limiter(req: &mut Request) -> Result<i32, Thrown> {
         req.response_mut().header_add(header.as_bytes(), true, 0);
     }
     if limiter != b"nocache"
-        && let Some(script) = req.script_name().map(<[u8]>::to_vec)
+        && let Some(script) = req.environment().script_name().map(<[u8]>::to_vec)
         // `VCWD_STAT(path_translated)`, the host's own stat, which no
         // wrapper and no `open_basedir` guard stands before.
-        && let Ok(stat) = std::fs::metadata(req.absolutize(&script))
+        && let Ok(stat) = std::fs::metadata(req.environment().absolutize(&script))
     {
         use std::os::unix::fs::MetadataExt;
         req.response_mut().header_add(

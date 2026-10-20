@@ -245,7 +245,11 @@ fn apply_config(req: &mut Request, id: DocId, config: Config, arg: u32) -> Resul
     match config {
         None => Ok(true),
         Some(Union::B(path)) => {
-            if req.check_open_basedir(path.as_bytes(), true).is_err() {
+            if req
+                .environment_mut()
+                .check_open_basedir(path.as_bytes(), true)
+                .is_err()
+            {
                 return Ok(false);
             }
             with_doc(req, id, |req, doc| load_config(req, doc, path.as_bytes()))?;

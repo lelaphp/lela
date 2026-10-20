@@ -192,7 +192,7 @@ impl Step {
             Step::Stat => "get shared memory segment information",
             Step::Attach => "attach to shared memory segment",
         };
-        let text = req.os_error_text(errno);
+        let text = req.environment().os_error_text(errno);
         docref(req, Level::Warning, &format!("Unable to {what} \"{text}\""));
         None
     }

@@ -98,7 +98,11 @@ pub(crate) fn open_from_filename(
         Err(Some(error)) => return Ok(Err(Some(error))),
         Err(None) => {}
     }
-    if req.check_open_basedir(fname, true).is_err() {
+    if req
+        .environment_mut()
+        .check_open_basedir(fname, true)
+        .is_err()
+    {
         return Ok(Err(None));
     }
     let Some((actual, bytes)) = open_file(req, fname)? else {
@@ -525,7 +529,11 @@ pub(crate) fn create_or_parse(
     is_data: bool,
     report: bool,
 ) -> Result<Opened, Thrown> {
-    if req.check_open_basedir(fname, true).is_err() {
+    if req
+        .environment_mut()
+        .check_open_basedir(fname, true)
+        .is_err()
+    {
         return Ok(Err(None));
     }
     if let Some((actual, bytes)) = open_file(req, fname)? {
@@ -691,7 +699,11 @@ pub(crate) fn open_executed(
             )));
         }
     }
-    if req.check_open_basedir(&fname, true).is_err() {
+    if req
+        .environment_mut()
+        .check_open_basedir(&fname, true)
+        .is_err()
+    {
         return Ok(Err(None));
     }
     let Some(bytes) = archive::read_file(req, &fname, true)? else {

@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use php_unit::decl::{IniDecl, Name};
 
+use super::Environment;
 use super::hash_bytes::HashBytes;
 use super::{
     DISPLAY_ERRORS_STDERR, ExtensionId, InfoRow, IniFiles, Request, display_errors_mode_of,
@@ -343,35 +344,6 @@ impl CoreQuantity {
 }
 
 impl Request {
-    /// `PG(open_basedir)`, the list the `open_basedir` guard reads
-    /// ([`Request::check_open_basedir`]): the entry's value as it was set
-    /// at startup, and, once `ini_set()` or a `.user.ini` tightened it, the
-    /// list it took with each directory expanded (`OnUpdateBaseDir`,
-    /// `Z/main/fopen_wrappers.c:74`), where `ini_get()` still answers the
-    /// value as set. `None` where the entry holds php's `NULL`.
-    ///
-    /// ```php
-    /// set_error_handler(function ($no, $msg) { echo str_replace(__DIR__, 'DIR', $msg), "\n"; return true; });
-    /// ini_set('open_basedir', __DIR__ . '/./a/..' . PATH_SEPARATOR . __DIR__ . '/b/../');
-    /// var_dump(str_replace(__DIR__, 'DIR', ini_get('open_basedir')), fopen('/', 'r'));
-    /// var_dump(str_replace(__DIR__, 'DIR', ini_set('open_basedir', __DIR__ . '/.')), str_replace(__DIR__, 'DIR', ini_get('open_basedir')));
-    /// ```
-    /// ```expect
-    /// fopen(): open_basedir restriction in effect. File(/) is not within the allowed path(s): (DIR:DIR/)
-    /// fopen(/): Failed to open stream: Operation not permitted
-    /// string(20) "DIR/./a/..:DIR/b/../"
-    /// bool(false)
-    /// string(20) "DIR/./a/..:DIR/b/../"
-    /// string(5) "DIR/."
-    /// ```
-    #[must_use]
-    pub fn open_basedir(&self) -> Option<&[u8]> {
-        match &self.ini.open_basedir {
-            Some(expanded) => Some(expanded),
-            None => self.ini().value(b"open_basedir"),
-        }
-    }
-
     /// The host's entries for this request, each as its
     /// [`crate::engine::IniOrigin`] says, before anything reads them.
     pub(crate) fn apply_host_ini(&mut self) {
@@ -459,7 +431,10 @@ impl Request {
         if name == b"error_log"
             && !value.is_empty()
             && value != b"syslog"
-            && self.check_open_basedir(value, true).is_err()
+            && self
+                .environment_mut()
+                .check_open_basedir(value, true)
+                .is_err()
         {
             return Ok(None);
         }
@@ -1254,6 +1229,37 @@ impl Request {
             return false;
         }
         true
+    }
+}
+
+impl<'r> Environment<&'r Request> {
+    /// `PG(open_basedir)`, the list the `open_basedir` guard reads
+    /// ([`Environment::check_open_basedir`]): the entry's value as it was set
+    /// at startup, and, once `ini_set()` or a `.user.ini` tightened it, the
+    /// list it took with each directory expanded (`OnUpdateBaseDir`,
+    /// `Z/main/fopen_wrappers.c:74`), where `ini_get()` still answers the
+    /// value as set. `None` where the entry holds php's `NULL`.
+    ///
+    /// ```php
+    /// set_error_handler(function ($no, $msg) { echo str_replace(__DIR__, 'DIR', $msg), "\n"; return true; });
+    /// ini_set('open_basedir', __DIR__ . '/./a/..' . PATH_SEPARATOR . __DIR__ . '/b/../');
+    /// var_dump(str_replace(__DIR__, 'DIR', ini_get('open_basedir')), fopen('/', 'r'));
+    /// var_dump(str_replace(__DIR__, 'DIR', ini_set('open_basedir', __DIR__ . '/.')), str_replace(__DIR__, 'DIR', ini_get('open_basedir')));
+    /// ```
+    /// ```expect
+    /// fopen(): open_basedir restriction in effect. File(/) is not within the allowed path(s): (DIR:DIR/)
+    /// fopen(/): Failed to open stream: Operation not permitted
+    /// string(20) "DIR/./a/..:DIR/b/../"
+    /// bool(false)
+    /// string(20) "DIR/./a/..:DIR/b/../"
+    /// string(5) "DIR/."
+    /// ```
+    #[must_use]
+    pub fn open_basedir(self) -> Option<&'r [u8]> {
+        match &self.0.ini.open_basedir {
+            Some(expanded) => Some(expanded),
+            None => self.0.ini().value(b"open_basedir"),
+        }
     }
 }
 

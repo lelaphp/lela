@@ -638,7 +638,7 @@ struct Located {
 /// under any other; `None` where the path does not name the archive.
 fn locate(req: &mut Request, basename: &[u8]) -> Option<Located> {
     let cgi = matches!(
-        req.sapi_name(),
+        req.environment().sapi_name(),
         "cgi-fcgi" | "fpm-fcgi" | "cgi" | "litespeed"
     );
     if !cgi {
@@ -666,7 +666,8 @@ fn locate(req: &mut Request, basename: &[u8]) -> Option<Located> {
         });
     }
     let env = |req: &Request, name: &[u8]| {
-        req.env_pairs()
+        req.environment()
+            .env_pairs()
             .iter()
             .find(|(had, _)| had == name)
             .map(|(_, value)| value.clone())

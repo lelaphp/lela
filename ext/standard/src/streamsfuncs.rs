@@ -1115,14 +1115,15 @@ fn stream_resolve_include_path(
     filename: Path,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let filename = filename.0.as_bytes().to_vec();
-    let cwd = req.cwd().as_os_str().as_bytes().to_vec();
+    let cwd = req.environment().cwd().as_os_str().as_bytes().to_vec();
     let realpath = |req: &mut Request, path: &[u8]| {
         let base: &[u8] = if path.first() == Some(&b'/') {
             b""
         } else {
             &cwd
         };
-        req.virtual_file_ex(base, path, Resolve::RealPath)
+        req.environment_mut()
+            .virtual_file_ex(base, path, Resolve::RealPath)
     };
     let scheme = filename
         .iter()

@@ -352,7 +352,10 @@ fn readline_clear_history() -> True {
 fn readline_read_history(req: &mut Request, #[php(default = null)] filename: Option<Path>) -> bool {
     let file = filename.map(|f| f.0.as_bytes().to_vec());
     if let Some(file) = &file
-        && req.check_open_basedir(file, true).is_err()
+        && req
+            .environment_mut()
+            .check_open_basedir(file, true)
+            .is_err()
     {
         return false;
     }
@@ -377,7 +380,10 @@ fn readline_write_history(
 ) -> bool {
     let file = filename.map(|f| f.0.as_bytes().to_vec());
     if let Some(file) = &file
-        && req.check_open_basedir(file, true).is_err()
+        && req
+            .environment_mut()
+            .check_open_basedir(file, true)
+            .is_err()
     {
         return false;
     }

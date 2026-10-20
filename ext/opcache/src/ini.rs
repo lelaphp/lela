@@ -441,7 +441,7 @@ fn on_enable(req: &mut Request, value: &[u8]) -> bool {
     if stage == IniStage::Activate {
         // `ZEND_INI_STAGE_ACTIVATE`: a host's own value, which php-fpm's
         // pools set, logged rather than raised.
-        let message = if req.sapi_name() == "fpm-fcgi" {
+        let message = if req.environment().sapi_name() == "fpm-fcgi" {
             "Zend OPcache can't be temporarily enabled. Are you using php_admin_value[opcache.enable]=1 in an individual pool's configuration?"
         } else {
             "Zend OPcache can't be temporarily enabled (it may be only disabled until the end of request)"

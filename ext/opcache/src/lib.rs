@@ -184,7 +184,7 @@ pub(crate) fn verdict(req: &Request) -> Startup {
 
 /// `accel_sapi_is_cli`: the command line, or phpdbg.
 pub(crate) fn cli(req: &Request) -> bool {
-    matches!(req.sapi_name(), "cli" | "phpdbg")
+    matches!(req.environment().sapi_name(), "cli" | "phpdbg")
 }
 
 /// What the unit cache does with the file at the full path `path`, as
@@ -330,6 +330,7 @@ fn api_allowed(req: &mut Request) -> bool {
     let restrict = value(req, "opcache.restrict_api").to_vec();
     if restrict.is_empty()
         || req
+            .environment()
             .script_name()
             .is_some_and(|script| script.starts_with(&restrict))
     {

@@ -297,9 +297,15 @@ pub(super) fn safe_filename(req: &mut Request, name: Option<&[u8]>) -> Option<Ve
     if name.is_empty() || name == b":memory:" {
         return Some(name.to_vec());
     }
-    let cwd = req.cwd().into_os_string().into_encoded_bytes();
-    let full = req.virtual_file_ex(&cwd, name, php_ext::request::Resolve::FilePath)?;
-    let full = req.check_open_basedir(&full, true).ok()?;
+    let cwd = req
+        .environment()
+        .cwd()
+        .into_os_string()
+        .into_encoded_bytes();
+    let full =
+        req.environment_mut()
+            .virtual_file_ex(&cwd, name, php_ext::request::Resolve::FilePath)?;
+    let full = req.environment_mut().check_open_basedir(&full, true).ok()?;
     Some(full.as_os_str().as_encoded_bytes().to_vec())
 }
 

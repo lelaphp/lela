@@ -282,7 +282,10 @@ impl Request {
             self.log_to_host(entry);
             return true;
         }
-        let path = self.cwd().join(std::ffi::OsStr::from_bytes(named));
+        let path = self
+            .environment()
+            .cwd()
+            .join(std::ffi::OsStr::from_bytes(named));
         let mode = self.ini().long(b"error_log_mode");
         let mode = u32::try_from(mode)
             .ok()

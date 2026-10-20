@@ -508,7 +508,10 @@ impl Form<'_> {
             return self.flow();
         };
         match self.step(req, |req, _| {
-            Ok(req.check_open_basedir(&path, true).is_ok())
+            Ok(req
+                .environment_mut()
+                .check_open_basedir(&path, true)
+                .is_ok())
         }) {
             Some(true) => {}
             // `goto out_string`.

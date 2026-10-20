@@ -246,7 +246,7 @@ impl Sqlite {
         let this = this.object();
         php_ext_pdo::connector::with_connection(req, this, |req, conn| {
             let shown = String::from_utf8_lossy(&name).into_owned();
-            let Some(full) = req.realpath(&name) else {
+            let Some(full) = req.environment_mut().realpath(&name) else {
                 return Err(throw(
                     req,
                     "PDOException",

@@ -156,12 +156,20 @@ pub(crate) fn check_path(
     let (fatal, text) = if path.contains(&0) {
         (true, "must not contain any null bytes")
     } else {
-        let cwd = req.cwd().into_os_string().into_encoded_bytes();
-        match req.virtual_file_ex(&cwd, path, Resolve::FilePath) {
+        let cwd = req
+            .environment()
+            .cwd()
+            .into_os_string()
+            .into_encoded_bytes();
+        match req
+            .environment_mut()
+            .virtual_file_ex(&cwd, path, Resolve::FilePath)
+        {
             // The expanded path is held to the `open_basedir` guard,
             // which warns (`php_check_open_basedir`).
             Some(real) => {
                 return req
+                    .environment_mut()
                     .check_open_basedir(&real, true)
                     .ok()
                     .map(|_| c_string(&real));

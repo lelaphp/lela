@@ -315,8 +315,13 @@ fn opened_path(req: &mut Request, path: &[u8]) -> Option<Vec<u8>> {
         Some(at) if path[at] == b':' && path[..at].eq_ignore_ascii_case(b"data") => return None,
         _ => path,
     };
-    let cwd = req.cwd().into_os_string().into_encoded_bytes();
-    req.virtual_file_ex(&cwd, path, Resolve::FilePath)
+    let cwd = req
+        .environment()
+        .cwd()
+        .into_os_string()
+        .into_encoded_bytes();
+    req.environment_mut()
+        .virtual_file_ex(&cwd, path, Resolve::FilePath)
 }
 
 /// `php_stream_open_wrapper` under `STREAM_MUST_SEEK`, `IGNORE_PATH`
@@ -440,7 +445,11 @@ fn library_path(req: &Request, path: &[u8]) -> Vec<u8> {
     if path.first() == Some(&b'/') {
         return path.to_vec();
     }
-    let mut at = req.cwd().into_os_string().into_encoded_bytes();
+    let mut at = req
+        .environment()
+        .cwd()
+        .into_os_string()
+        .into_encoded_bytes();
     at.push(b'/');
     at.extend_from_slice(path);
     at

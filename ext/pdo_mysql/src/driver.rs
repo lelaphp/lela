@@ -535,7 +535,7 @@ fn driver_options(
         h.local_infile = true;
     }
     if let Some(dir) = option_string(req, options, Mysql::ATTR_LOCAL_INFILE_DIRECTORY)?
-        && req.check_open_basedir(&dir, true).is_ok()
+        && req.environment_mut().check_open_basedir(&dir, true).is_ok()
         && !server.option(req, ClientOption::LoadDataLocalDir(Some(&dir)))?
     {
         return Ok(false);

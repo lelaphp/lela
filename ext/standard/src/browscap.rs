@@ -286,7 +286,7 @@ fn loaded(req: &mut Request) -> Result<(), Thrown> {
     if file.is_empty() {
         return Ok(());
     }
-    let path = req.absolutize(&file);
+    let path = req.environment().absolutize(&file);
     let Ok(bytes) = std::fs::read(path) else {
         return Ok(());
     };

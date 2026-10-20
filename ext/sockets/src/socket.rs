@@ -407,7 +407,7 @@ pub(crate) fn strerror(req: &Request, error: i32) -> String {
         };
         return String::from_utf8_lossy(&crate::ffi::hstrerror(h)).into_owned();
     }
-    req.os_error_text(error)
+    req.environment().os_error_text(error)
 }
 
 /// `EAGAIN`, `EWOULDBLOCK` and `EINPROGRESS`: what a socket that does

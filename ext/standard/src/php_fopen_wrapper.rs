@@ -158,7 +158,7 @@ fn fd(
     mode: &[u8],
     opening: Opening,
 ) -> Result<Option<Owner<Stream>>, Thrown> {
-    if req.sapi_name() != "cli" {
+    if req.environment().sapi_name() != "cli" {
         if opening.warn {
             docref(
                 req,

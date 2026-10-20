@@ -2265,7 +2265,7 @@ const CORE_INI: &[(&str, Option<&str>)] = &[
     ("max_execution_time", Some("30")),
     // `open_basedir`, `PHP_INI_ALL` and `NULL` in php's table
     // (`Z/main/main.c:841`): the base directories the guard holds a path
-    // to ([`Request::check_open_basedir`]), any list at startup and only
+    // to ([`Environment::check_open_basedir`]), any list at startup and only
     // a tighter one after (`OnUpdateBaseDir`).
     ("open_basedir", None),
     // The body of a request of the web, its limits, and the uploads.
@@ -5092,6 +5092,7 @@ impl Engine {
             // `open_file_for_scanning` over the program: the source the
             // host handed over, or the file read whole.
             let script = req
+                .environment()
                 .script_name()
                 .map_or_else(|| b"Standard input code".to_vec(), <[u8]>::to_vec);
             let text = source.or_else(|| std::fs::read(cwd.join(OsStr::from_bytes(&script))).ok());
@@ -5271,7 +5272,7 @@ impl Engine {
         // The name the host wrote, `primary_file->filename`, which
         // `php_execute_script_ex` leaves as it is beside the expanded
         // `opened_path`, and which opcache makes the file's key of.
-        let written = req.script_name().map(<[u8]>::to_vec);
+        let written = req.environment().script_name().map(<[u8]>::to_vec);
         let old_cwd = req.old_cwd();
         if script
             && source.is_none()
@@ -5392,6 +5393,7 @@ impl Engine {
             // A source the host read is still `zend_compile_file`'s.
             req.take_shared_hold();
             let script = req
+                .environment()
                 .script_name()
                 .map_or_else(|| b"Standard input code".to_vec(), <[u8]>::to_vec);
             return Some(
@@ -5399,7 +5401,11 @@ impl Engine {
                     .compile_for(req, source, &script, SourceKind::File),
             );
         }
-        let script = req.script_name().map(<[u8]>::to_vec).unwrap_or_default();
+        let script = req
+            .environment()
+            .script_name()
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default();
         // A bare program is opened as phpdbg's `phpdbg_compile` opens it,
         // a stream through `php_stream_open_for_zend_ex`, and spends a
         // resource id where the CLI's `FILE *` spends none; the built-in
@@ -5529,6 +5535,7 @@ impl Engine {
             return Routed::Taken;
         }
         let path = req
+            .environment_mut()
             .expand_filepath(router)
             .unwrap_or_else(|| router.to_vec());
         let ran = match Engine::compile_program(req, &path, router, HandlePath::Kept) {

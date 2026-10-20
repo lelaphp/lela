@@ -448,11 +448,22 @@ fn open(req: &mut Request, object: PhpObject, filename: &[u8], flags: i64) -> Re
     let path = if filename.is_empty() || filename == b":memory:" {
         filename.to_vec()
     } else {
-        let cwd = req.cwd().into_os_string().into_encoded_bytes();
-        let Some(full) = req.virtual_file_ex(&cwd, filename, Resolve::FilePath) else {
+        let cwd = req
+            .environment()
+            .cwd()
+            .into_os_string()
+            .into_encoded_bytes();
+        let Some(full) = req
+            .environment_mut()
+            .virtual_file_ex(&cwd, filename, Resolve::FilePath)
+        else {
             return Err(throw(req, "Exception", "Unable to expand filepath"));
         };
-        if req.check_open_basedir(&full, true).is_err() {
+        if req
+            .environment_mut()
+            .check_open_basedir(&full, true)
+            .is_err()
+        {
             let shown = text(&full);
             return Err(throw(
                 req,
@@ -692,7 +703,7 @@ fn load_extension(
         lib.push(b'/');
     }
     lib.extend_from_slice(name);
-    let Some(full) = req.realpath(&lib) else {
+    let Some(full) = req.environment_mut().realpath(&lib) else {
         let message = format!("Unable to load extension at '{}'", text(&lib));
         fail(req, exceptions, None, 0, &message)?;
         return Ok(false);

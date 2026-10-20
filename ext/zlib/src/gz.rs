@@ -38,7 +38,7 @@ impl GzStream {
         {
             let text = format!(
                 "{verb} of {count} bytes failed with errno={errno} {}",
-                req.os_error_text(errno)
+                req.environment().os_error_text(errno)
             );
             docref(req, Level::Notice, &text);
         }

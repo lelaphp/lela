@@ -1404,7 +1404,7 @@ fn file_url(req: &mut Request, path: &[u8]) -> Vec<u8> {
     if crate::modern::is_stream_path(path) {
         path.to_vec()
     } else {
-        let absolute = req.realpath(path).map_or_else(
+        let absolute = req.environment_mut().realpath(path).map_or_else(
             || path.to_vec(),
             |p| p.to_string_lossy().into_owned().into_bytes(),
         );
