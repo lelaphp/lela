@@ -101,6 +101,20 @@ struct Module {
     dir: PathBuf,
 }
 
+impl Module {
+    /// The paths of the module's `use` items, flattened; its `pub use`
+    /// items' alone with `public`.
+    fn uses(&self, public: bool) -> Vec<UsePath> {
+        (self.items.iter())
+            .filter_map(|item| match item {
+                Item::Use(u) if !public || is_pub(&u.vis) => Some(flatten(&u.tree)),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+}
+
 /// What a `use` path names.
 enum Target {
     Module(ModId),
@@ -418,15 +432,7 @@ impl<'a> Inventory<'a> {
         let Some((first, rest)) = segs.split_first() else {
             return Ok(fallback);
         };
-        let uses: Vec<UsePath> = module
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                Item::Use(u) => Some(flatten(&u.tree)),
-                _ => None,
-            })
-            .flatten()
-            .collect();
+        let uses = module.uses(false);
         let named = uses
             .iter()
             .find(|p| matches!(&p.leaf, Leaf::Name(alias) if alias == first));
@@ -441,13 +447,9 @@ impl<'a> Inventory<'a> {
         };
         if matches!(target, Target::Opaque) && rest.is_empty() {
             for path in uses.iter().filter(|p| p.leaf == Leaf::Glob) {
-                if let Some(m) = self.resolve(id, &path.segs, 0)?.module()
-                    && m != *id
-                {
-                    target = self.find(&m, first, 0)?;
-                    if !matches!(target, Target::Opaque) {
-                        break;
-                    }
+                target = self.through_glob(id, path, first, 0)?;
+                if !matches!(target, Target::Opaque) {
+                    break;
                 }
             }
         }
@@ -572,34 +574,36 @@ impl<'a> Inventory<'a> {
                 });
             }
         }
-        let reexports: Vec<UsePath> = module
-            .items
-            .iter()
-            .filter_map(|i| match i {
-                Item::Use(u) if is_pub(&u.vis) => Some(flatten(&u.tree)),
-                _ => None,
-            })
-            .flatten()
-            .collect();
-        for path in &reexports {
+        for path in &module.uses(true) {
             match &path.leaf {
                 Leaf::Name(alias) if alias == name => {
                     return self.resolve(id, &path.segs, depth + 1);
                 }
                 Leaf::Glob => {
-                    if let Some(m) = self.resolve(id, &path.segs, depth + 1)?.module()
-                        && m != *id
-                    {
-                        let found = self.find(&m, name, depth + 1)?;
-                        if !matches!(found, Target::Opaque) {
-                            return Ok(found);
-                        }
+                    let found = self.through_glob(id, path, name, depth + 1)?;
+                    if !matches!(found, Target::Opaque) {
+                        return Ok(found);
                     }
                 }
                 Leaf::Name(_) => {}
             }
         }
         Ok(Target::Opaque)
+    }
+
+    /// What `name` is in the module the glob `path`, written in module
+    /// `id`, reads; nothing where it reads `id` itself or no module.
+    fn through_glob(
+        &mut self,
+        id: &ModId,
+        path: &UsePath,
+        name: &str,
+        depth: usize,
+    ) -> Result<Target> {
+        match self.resolve(id, &path.segs, depth)?.module() {
+            Some(m) if m != *id => self.find(&m, name, depth),
+            _ => Ok(Target::Opaque),
+        }
     }
 
     /// The module `id`, parsed once; `None` when the crate has no library
@@ -671,11 +675,9 @@ fn generates(module: &Module, name: &str) -> bool {
                 && m.mac.tokens.to_string().contains("OUT_DIR"))
     });
     includes
-        && !module.items.iter().any(|item| {
-            matches!(item, Item::Use(u) if flatten(&u.tree).iter().any(|p| match &p.leaf {
-                Leaf::Glob => true,
-                Leaf::Name(alias) => alias == name,
-            }))
+        && !module.uses(false).iter().any(|p| match &p.leaf {
+            Leaf::Glob => true,
+            Leaf::Name(alias) => alias == name,
         })
 }
 

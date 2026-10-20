@@ -479,7 +479,7 @@ fn imports(
     };
     let items = inventory.public_items(producer)?;
     for consumer in crates.iter() {
-        if !seam.consumers.iter().any(|c| matches(c, &consumer.name)) {
+        if !any_matches(&seam.consumers, &consumer.name) {
             continue;
         }
         let Some(dep) = consumer.deps.iter().find(|d| d.name == producer.name) else {
@@ -489,7 +489,7 @@ fn imports(
         for other in manifest.seams.iter().filter(|o| {
             o.name != seam.name
                 && o.producer == seam.producer
-                && o.consumers.iter().any(|c| matches(c, &consumer.name))
+                && any_matches(&o.consumers, &consumer.name)
         }) {
             let home = manifest.lock_home(&other.lock);
             if let Some(krate) = home.and_then(|h| crates.named(&h)) {
@@ -543,7 +543,7 @@ fn strangers(crates: &Crates, seam: &Seam) -> Result<Vec<String>> {
         return Ok(out);
     };
     for krate in crates.iter() {
-        if krate.name == producer.name || seam.consumers.iter().any(|c| matches(c, &krate.name)) {
+        if krate.name == producer.name || any_matches(&seam.consumers, &krate.name) {
             continue;
         }
         let Some(dep) = krate.deps.iter().find(|d| d.name == producer.name) else {
@@ -608,7 +608,7 @@ fn sections(
         .collect();
     let mut problems = Vec::new();
     for (consumer, imports) in found {
-        let reads = |section: &Section| section.readers(seam).iter().any(|r| matches(r, &consumer));
+        let reads = |section: &Section| any_matches(section.readers(seam), &consumer);
         let Some(first) = seam.sections.iter().position(reads) else {
             continue;
         };
@@ -644,15 +644,12 @@ fn kernel_lines(crates: &Crates, seam: &Seam) -> Result<BTreeSet<String>> {
     let Some(section) = seam.sections.iter().find(|s| s.name() == KERNELS) else {
         return Ok(out);
     };
-    for krate in crates.iter() {
-        if section
-            .readers(seam)
-            .iter()
-            .any(|r| matches(r, &krate.name))
-        {
-            for file in krate.sources()? {
-                out.extend(kernels_named(&file)?);
-            }
+    for krate in crates
+        .iter()
+        .filter(|k| any_matches(section.readers(seam), &k.name))
+    {
+        for file in krate.sources()? {
+            out.extend(kernels_named(&file)?);
         }
     }
     Ok(out)
@@ -870,6 +867,11 @@ fn matches(pattern: &str, name: &str) -> bool {
         Some(prefix) => name.starts_with(prefix) && name[prefix.len()..].starts_with('/'),
         None => pattern == name,
     }
+}
+
+/// Whether any of the manifest patterns matches a crate name.
+fn any_matches(patterns: &[String], name: &str) -> bool {
+    patterns.iter().any(|p| matches(p, name))
 }
 
 /// The module the lines `api_private_items` holds stand under: the helpers
