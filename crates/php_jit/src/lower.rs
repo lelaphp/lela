@@ -52,7 +52,7 @@ use php_unit::OplineIdx;
 use crate::policy::{JitDebug, Policy};
 use crate::record::Stop;
 use crate::table::TraceName;
-use crate::types::{Abort, ExitSpec, Op, TraceIr};
+use crate::types::{Abort, End, ExitId, ExitSpec, Op, TraceIr};
 
 /// A trace in final bytes (`jit-design.md` §4.3), what the `Backend` makes
 /// and `table::TraceTable::publish` copies into the code arena once:
@@ -68,6 +68,10 @@ pub(crate) struct Compiled {
     /// A power of two.
     pub(crate) align: usize,
     pub(crate) exits: Box<[ExitSpec]>,
+    /// The exit a trace that does not loop ends through, none for a loop:
+    /// php's return to the interpreter at a trace's end
+    /// (`zend_jit_trace_return`), which no side trace grows from.
+    pub(crate) leaves: Option<ExitId>,
     /// The slots of the requests' runtime caches the code reads, which
     /// `enter` lays down on a request's first entry.
     pub(crate) map_ptrs: Box<[MapPtrRaw]>,
@@ -257,6 +261,10 @@ impl Backend {
             entry_offset: 0,
             align,
             exits: ir.exits.clone().into_boxed_slice(),
+            leaves: match ir.end {
+                End::Leave(exit) => Some(exit),
+                End::Loop(_) => None,
+            },
             map_ptrs: ir.map_ptrs.clone().into_boxed_slice(),
             marks,
             name,

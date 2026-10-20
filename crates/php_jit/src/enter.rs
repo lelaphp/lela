@@ -38,10 +38,6 @@
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block
 )]
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "dispatch enters a trace with #2959")
-)]
 
 use std::any::Any;
 use std::marker::PhantomData;
@@ -740,4 +736,4 @@ pub mod bench {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

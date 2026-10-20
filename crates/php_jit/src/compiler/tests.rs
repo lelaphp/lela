@@ -99,6 +99,7 @@ fn body(len: usize) -> Compiled {
         entry_offset: 0,
         align: 16,
         exits: Box::new([]),
+        leaves: None,
         map_ptrs: Box::new([]),
         marks: Box::new([]),
         name: TraceName {

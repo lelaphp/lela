@@ -146,25 +146,42 @@ pub(crate) enum Kind {
 
 /// One published trace (`jit-design.md` §4.5): its code, final, and what
 /// the crossing and the dispatch read of it, none of it written again.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "what dispatch::run and enter read of a trace they enter (#2959) and the disassembly reads"
-    )
-)]
 pub(crate) struct Trace<P: Pages = Native> {
     pub(crate) code: Code<P>,
     entry_offset: usize,
     pub(crate) id: TraceId,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "a region over hot traces is month three's kind")
+    )]
     pub(crate) kind: Kind,
     pub(crate) start: Start,
     /// The root it grew from: itself for a root.
     pub(crate) root: TraceId,
     pub(crate) exits: Box<[Exit]>,
+    /// The exit it ends through where it does not loop.
+    pub(crate) leaves: Option<ExitId>,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "enter lays them down once lower reads past the request's map base"
+        )
+    )]
     pub(crate) map_ptrs: Box<[MapPtrRaw]>,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the disassembly reads them; no host prints one yet"
+        )
+    )]
     pub(crate) marks: Box<[Mark]>,
     /// Every trace an exit links to, each once, ascending.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "what a disassembly and the PERF_DUMP walk read")
+    )]
     pub(crate) links: Box<[TraceId]>,
 }
 
@@ -193,10 +210,6 @@ impl<P: Pages> std::fmt::Debug for Trace<P> {
 /// links to, and its own word, zero at publication, which grows a side
 /// trace by the machine that grew the root.
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "dispatch::run follows a link (#2959)")
-)]
 pub(crate) struct Exit {
     pub(crate) opline: Option<OplineIdx>,
     pub(crate) landing: Landing,
@@ -464,6 +477,12 @@ impl<P: Pages> TraceTable<P> {
         if compiled.entry_offset >= compiled.bytes.len() {
             return Err(Unpublished::Malformed("an entry past the trace's bytes"));
         }
+        if compiled
+            .leaves
+            .is_some_and(|exit| usize::from(exit.0) >= compiled.exits.len())
+        {
+            return Err(Unpublished::Malformed("an end past the trace's exits"));
+        }
         if compiled.bytes.len() > code::CHUNK || !compiled.align.is_power_of_two() {
             return Err(Unpublished::Malformed(
                 "a body no chunk holds, or an alignment no power of two",
@@ -508,6 +527,7 @@ impl<P: Pages> TraceTable<P> {
             start,
             root: admitted.root,
             exits: built,
+            leaves: compiled.leaves,
             map_ptrs: compiled.map_ptrs,
             marks: compiled.marks,
             links: links.into_boxed_slice(),

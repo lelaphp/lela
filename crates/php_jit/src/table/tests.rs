@@ -59,6 +59,7 @@ fn compiled(bytes: &[u8], exits: Vec<ExitSpec>) -> Compiled {
         entry_offset: 0,
         align: 4,
         exits: exits.into(),
+        leaves: None,
         map_ptrs: Box::new([]),
         marks: Box::new([]),
         name: TraceName {
@@ -270,6 +271,14 @@ fn a_malformed_trace_is_refused_and_counts_nothing() {
     assert_eq!(
         table.publish(compiled(&[0; 4], vec![exit(Some(trace(1)))]), Start::Loop),
         Err(Unpublished::Malformed("a link to no trace numbered"))
+    );
+    let ended = Compiled {
+        leaves: Some(ExitId(1)),
+        ..compiled(&[0; 4], vec![exit(None)])
+    };
+    assert_eq!(
+        table.publish(ended, Start::Loop),
+        Err(Unpublished::Malformed("an end past the trace's exits"))
     );
     let mut huge = compiled(&vec![0; CHUNK + 1], vec![]);
     let odd = Compiled {
