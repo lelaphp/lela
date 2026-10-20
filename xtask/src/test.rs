@@ -768,7 +768,71 @@ impl Counts {
 
 #[cfg(test)]
 mod tests {
-    use super::{Counts, Pin};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use super::{Beside, Counts, Executable, Pin};
+
+    /// The `.rs` files under `dir`, at any depth.
+    fn sources(dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                found.extend(sources(&path));
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                found.push(path);
+            }
+        }
+        found
+    }
+
+    /// A staged topic of `tests/common` runs every binary that includes it
+    /// as `mod common { pub mod <topic>; }`, the library's unit tests among
+    /// them, under the `[package.metadata.xtask.test]` this crate declares:
+    /// a binary its `own` names lists `tests/common` among its paths (#3087).
+    #[test]
+    fn a_staged_topic_runs_every_binary_that_includes_it() {
+        let dir = crate::package_dir();
+        let cargo: toml::Table =
+            toml::from_str(&fs::read_to_string(dir.join("Cargo.toml")).unwrap()).unwrap();
+        let declared = serde_json::to_value(&cargo["package"]["metadata"]["xtask"]["test"]);
+        let beside: Beside = serde_json::from_value(declared.unwrap()).unwrap();
+        let binary = |path: &Path| match path.strip_prefix(dir.join("tests")) {
+            Ok(file) if file.components().count() == 1 => (file_stem(file), "test"),
+            _ => ("xtask".to_owned(), "lib"),
+        };
+        let includers: Vec<(String, PathBuf)> = sources(&dir.join("src"))
+            .into_iter()
+            .chain(sources(&dir.join("tests")))
+            .map(|path| (fs::read_to_string(&path).unwrap(), path))
+            .filter(|(text, _)| text.contains("mod common {\n"))
+            .collect();
+        for topic in sources(&dir.join("tests/common")) {
+            let topic = file_stem(&topic);
+            let by_name = format!("    pub mod {topic};\n");
+            let staged = [format!("xtask/tests/common/{topic}.rs")];
+            let mut found = 0;
+            for (_, path) in includers.iter().filter(|(text, _)| text.contains(&by_name)) {
+                let (name, kind) = binary(path);
+                let executable = Executable {
+                    path: PathBuf::new(),
+                    name: name.clone(),
+                    kind: kind.to_owned(),
+                };
+                assert!(
+                    beside.runs(&executable, Path::new("xtask"), Some(&staged)),
+                    "{kind} {name} includes tests/common/{topic}.rs and does not run where it is staged"
+                );
+                found += 1;
+            }
+            assert!(found > 0, "no binary includes tests/common/{topic}.rs");
+        }
+    }
+
+    fn file_stem(path: &Path) -> String {
+        path.file_stem().unwrap().to_string_lossy().into_owned()
+    }
 
     #[test]
     fn the_counts_are_summed_over_every_test_binary() {

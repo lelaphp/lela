@@ -20,6 +20,17 @@
 //! it.
 #![deny(unsafe_code)]
 
+// The unit tests' own name for this crate, so the topics of `tests/common`
+// they share with the integration tests name its items as those do.
+#[cfg(test)]
+extern crate self as xtask;
+#[cfg(test)]
+#[path = "../tests/common"]
+mod common {
+    pub mod phpt_tree;
+    pub mod registry;
+}
+
 pub mod api_check;
 mod batch;
 pub mod bench;

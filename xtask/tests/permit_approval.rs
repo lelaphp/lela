@@ -14,8 +14,10 @@ use xtask::manifest::Manifest;
 use xtask::permit::{Call, Kind, judge};
 use xtask::scratch::Tree;
 
-mod common;
-use common::scratch_workspace;
+mod common {
+    pub mod repo;
+}
+use common::repo::scratch_workspace;
 
 const SESSION: &str = "5d0c7a1e-2b4f-4e8a-9c61-0f3b8d2e7a45";
 const ASK: &str = "toolu_01AskFixtureApproval0001";

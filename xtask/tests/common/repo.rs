@@ -1,6 +1,13 @@
-//! What the integration tests share, included with `mod common;` by the
-//! test files that need it. Every item here has a caller in each file that
-//! includes the module, since an unused one is a warning in that binary.
+//! A scratch git repository holding the workspace's harness files, for
+//! the tests that provoke readings.
+//! Each file of `tests/common` is one topic: an integration test includes
+//! the topics it calls by name, as `mod common { pub mod repo; }`, and
+//! the unit tests under `src` include theirs once, in lib.rs, by `#[path]`.
+//! A binary takes a topic whole and may call part of it.
+#![allow(
+    dead_code,
+    reason = "a binary includes the topic whole and calls part of it"
+)]
 
 use std::path::Path;
 use std::process::Command;

@@ -18,6 +18,8 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use super::*;
+use crate::common::phpt_tree::fixture_tree;
+use crate::common::registry::registry;
 use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest};
 use crate::oracle::{Program, Promise, Runner};
@@ -68,18 +70,6 @@ fn tracked_over_fixture(tree: &Path) -> Manifest {
     manifest
 }
 
-/// A tree standing where the pinned php-src would, with the directories
-/// the per-commit lane's rows name and no test in them: what a subset
-/// resolves to is held here, and what one runs to is held over the real
-/// corpus by the tests that skip without it.
-fn fixture_tree() -> Tree {
-    let tree = Tree::new("phpt-tree").unwrap();
-    for under in ["Zend/tests", "tests", "sapi/cli/tests", "ext/pcre/tests"] {
-        fs::create_dir_all(tree.join(under)).unwrap();
-    }
-    tree
-}
-
 /// `Subset::resolve` over the tree the manifest's pin answers.
 fn resolve(manifest: &Manifest, name: &str) -> Result<Subset> {
     Subset::resolve(manifest, &manifest.pin.source.tree()?, name)
@@ -117,10 +107,6 @@ fn subset(name: &str, tests: &[(&str, &str)]) -> (Tree, Subset) {
         holds: Holds::Every,
     };
     (dir, subset)
-}
-
-fn registry(text: &str) -> Registry {
-    Registry::parse(text).unwrap()
 }
 
 /// Run one subset with the pinned oracle standing in for the engine.

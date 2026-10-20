@@ -7,14 +7,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::*;
+use crate::common::registry::registry;
 use crate::manifest::Crate;
 
 fn fixtures() -> PathBuf {
     crate::package_dir().join("fixtures/crosscheck")
-}
-
-fn registry(text: &str) -> Registry {
-    Registry::parse(text).unwrap()
 }
 
 #[test]

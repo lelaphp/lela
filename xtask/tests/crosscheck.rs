@@ -17,14 +17,17 @@ use std::path::{Path, PathBuf};
 use xtask::carried::Carried;
 use xtask::cli::{Format, Section};
 use xtask::crosscheck::{self, Ask, Column};
-use xtask::divergence::Registry;
 use xtask::manifest::Manifest;
 use xtask::oracle::{self, Promise};
 use xtask::reading::{Number, Reading, Status, Store};
 use xtask::scratch::Tree;
 
-mod common;
-use common::scratch_workspace;
+mod common {
+    pub mod registry;
+    pub mod repo;
+}
+use common::registry::registry;
+use common::repo::scratch_workspace;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -45,10 +48,6 @@ fn oracle() -> Option<PathBuf> {
 
 fn fixtures() -> PathBuf {
     xtask::package_dir().join("fixtures/crosscheck")
-}
-
-fn registry() -> Registry {
-    Registry::parse("").unwrap()
 }
 
 /// A workspace of this test's own: a git repository holding the tracked
@@ -74,7 +73,7 @@ impl Scratch {
 
     fn run(&self, ask: &Ask) -> Vec<Reading> {
         let readings =
-            crosscheck::run(&self.root, &self.manifest, &registry(), &self.store, ask).unwrap();
+            crosscheck::run(&self.root, &self.manifest, &registry(""), &self.store, ask).unwrap();
         self.store.record(&readings).unwrap();
         readings
     }
@@ -279,7 +278,7 @@ fn every_default_extension_reads_the_ports_reach_in_both_columns_and_the_floor_h
     );
     let rendered = xtask::status::render(
         &scratch.manifest,
-        &registry(),
+        &registry(""),
         xtask::status::Against::Checkout(&scratch.store),
         &scratch.root,
         Section::Crosscheck,

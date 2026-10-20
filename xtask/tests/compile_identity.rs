@@ -35,8 +35,12 @@ use xtask::oracle::{Promise, Regime};
 use xtask::reading::{Number, Reading, Status};
 use xtask::scratch::Tree;
 
-mod common;
-use common::scratch_workspace;
+mod common {
+    pub mod registry;
+    pub mod repo;
+}
+use common::registry::registry;
+use common::repo::scratch_workspace;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -80,10 +84,6 @@ fn source() -> Option<PathBuf> {
 
 fn fixtures() -> PathBuf {
     xtask::package_dir().join("fixtures/compile-identity")
-}
-
-fn registry(text: &str) -> Registry {
-    Registry::parse(text).unwrap()
 }
 
 /// php's own dump recipe (design §6.1) as a `[regime.dump]` of the pin:
