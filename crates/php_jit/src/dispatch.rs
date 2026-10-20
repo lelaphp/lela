@@ -151,12 +151,37 @@ fn visited(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
 /// a word that reads compiled whose slot is empty, the window §3.2 names
 /// or a table that keeps no code (#2943), entered nothing: `Continue`.
 /// After an exit a trace has done its work, so a link or a side whose
-/// slot is empty, and
-/// an exit word that reads cold, recording or blacklisted, are a `Resume`
-/// of the landed frame; so is a throwable a kernel left pending, which
-/// the loop unwinds from where it was raised. A cold exit word is bumped
-/// and claimed by nothing: what records a side trace from a hot exit is
-/// #2964's, so until then no exit word reads compiled.
+/// slot is empty, and an exit word that reads cold, recording or
+/// blacklisted, are a `Resume` of the landed frame; so is a throwable a
+/// kernel left pending, which the loop unwinds from where it was raised.
+/// A cold exit word is bumped and claimed by nothing: what records a side
+/// trace from a hot exit is #2964's, so until then no exit word reads
+/// compiled.
+///
+/// A compiled loop leaves through its interrupt test once the engine's
+/// timer raises the interrupt, and the `Resume` hands the loop its
+/// interrupt check (§2.2), which raises php's fatal at the loop's line:
+///
+/// ```php
+/// set_time_limit(1); for (;;) {}
+/// ```
+/// ```expect exit=255 regime=jit-tracing process wall=1s
+/// Fatal error: Maximum execution time of 1 second exceeded in %s on line 2
+/// ```
+///
+/// A signal `pcntl_async_signals` delivers while a compiled loop spins is
+/// handled at the loop's check after the interrupt exit, and the loop
+/// goes on to see what the handler wrote:
+///
+/// ```php
+/// pcntl_async_signals(true); $done = false;
+/// pcntl_signal(SIGALRM, function () use (&$done) { $done = true; echo "alarm\n"; });
+/// pcntl_alarm(1); $n = 0; while (!$done) { $n++; } echo $n > 1000 ? "spun\n" : "short\n";
+/// ```
+/// ```expect exit=0 regime=jit-tracing process wall=1s
+/// alarm
+/// spun
+/// ```
 #[inline(never)]
 pub(crate) fn run(req: &mut Request, frame: FrameRef, id: TraceId, shared: &Shared) -> Flow {
     let epoch = table::holding(req, &shared.policy, &shared.perf);

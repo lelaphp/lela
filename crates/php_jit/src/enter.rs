@@ -509,6 +509,22 @@ type Entry = unsafe extern "C" fn(*mut ExitCtx<'_>, *mut u8) -> u32;
 /// is resumed and a fatal returned, read before the exit; otherwise the
 /// exit is landed ([`land`]). Reads no word and follows no link: what
 /// happens next is `dispatch`'s.
+///
+/// The crossing's invariant is per fiber stack (§4.6): a fiber's compiled
+/// loop suspends from inside the kernel that serves `Fiber::suspend`, its
+/// machine frame and `ExitCtx` waiting on the fiber's stack, while
+/// `$main`'s compiled loop resumes it from inside the kernel that serves
+/// `resume`, each loop going on where it stood:
+///
+/// ```php
+/// $f = new Fiber(function () { $s = 0; for ($i = 0; $i < 300; $i++) { $s += Fiber::suspend($i); } return $s; });
+/// $v = $f->start(); $t = 0;
+/// for ($j = 0; $j < 300; $j++) { $t += $v; $v = $f->resume($j); }
+/// echo $t, " ", $f->getReturn(), "\n";
+/// ```
+/// ```expect exit=0 regime=jit-tracing process
+/// 44850 44850
+/// ```
 pub(crate) fn enter(req: &mut Request, frame: FrameRef, trace: &Trace) -> Result<Exited, Fatal> {
     let room = tier::room(req, frame)
         .ok_or_else(|| internal("a trace entered on a frame with no room"))?;
