@@ -1,5 +1,5 @@
 //! The tripwire #1960's ruling asks for: each extension closes the
-//! persistent entries of its own `api::Pool`s in its own engine-end
+//! persistent entries of its own `abi::Pool`s in its own engine-end
 //! function, which `end_phase` serves in reverse bundle order, where php
 //! destroys every extension's entries in `EG(persistent_list)` before
 //! any `MSHUTDOWN` (`Z/Zend/zend.c:1166-1170`). That order is not
@@ -12,60 +12,107 @@
 //! served in reverse bundle order before the engine-end phase) is decided
 //! then. A pool whose entries only release, with no engine end, is a
 //! `Drop` (ADR-0010) and trips nothing: ext/curl's persistent shares
-//! (daeef7b3, #1334) are one. Read from the sources, as
-//! `configure.rs` reads them, so a crate's commit trips it whatever the
-//! features of this build.
+//! (daeef7b3, #1334) are one. Read from the sources' syntax and the
+//! manifests' tables, so a crate's commit trips it whatever the features
+//! of this build.
 
 use std::path::{Path, PathBuf};
 
-/// The extensions that hold an `api::Pool`, each closing it in its
+use syn::visit::{self, Visit};
+
+/// The extensions that hold an `abi::Pool`, each closing it in its
 /// engine-end function, as #1960's ruling and #1961 left them.
 const POOLED_ENDS: &[&str] = &["dba", "mysqli", "pdo"];
+
+/// The face's pool, as a path names it.
+const POOL: [&str; 3] = ["php_ext", "abi", "Pool"];
 
 /// One `ext/*` crate as its sources say it.
 struct Crate {
     name: String,
-    /// Every `.rs` file under its `src/`, one after another.
-    source: String,
-    manifest: String,
+    /// What its `src/` names, read from the syntax.
+    named: Named,
+    /// Its `[dependencies]`, by package name.
+    dependencies: toml::Table,
 }
 
 impl Crate {
     fn ends(&self) -> bool {
-        self.source.contains(".engine_end(")
+        self.named.ends
     }
 
-    /// Whether it names `api::Pool`, as an engine state's field or the
-    /// pool it builds; a `Pool` of its own (lexbor's arena) is not one.
+    /// Whether it names the face's `abi::Pool`, imported or by its path; a
+    /// `Pool` of its own (mysqlnd's arena for a fetched row set) is not one.
     fn pools(&self) -> bool {
-        let ident = |c: char| c.is_alphanumeric() || c == '_';
-        let mut named = false;
-        for (at, _) in self.source.match_indices("Pool") {
-            let (before, after) = (&self.source[..at], &self.source[at + 4..]);
-            if before.ends_with(ident) || after.starts_with(ident) {
-                continue;
-            }
-            if before.ends_with("struct ") {
-                return false;
-            }
-            named |= after.starts_with('<') || after.starts_with("::new(");
-        }
-        named
+        self.named.pools
     }
 
     /// Whether its library links `ext/<name>`'s crate.
     fn requires(&self, name: &str) -> bool {
-        let dependencies = self
-            .manifest
-            .split("[dependencies]")
-            .nth(1)
-            .and_then(|rest| rest.split("\n[").next())
-            .unwrap_or_default();
-        dependencies.contains(&format!("php_ext_{name} "))
+        self.dependencies.contains_key(&format!("php_ext_{name}"))
     }
 }
 
-fn sources(dir: &Path, into: &mut String) {
+/// What one crate's sources name: a `.engine_end(..)` call on its builder,
+/// and the face's `Pool`.
+#[derive(Default)]
+struct Named {
+    ends: bool,
+    pools: bool,
+}
+
+impl Named {
+    /// Whether `use` tree `tree`, under the segments `prefix`, imports the
+    /// face's `Pool`.
+    fn imports_pool(prefix: &mut Vec<String>, tree: &syn::UseTree) -> bool {
+        let names_pool = |prefix: &[String], ident: &syn::Ident| {
+            ident == POOL[2]
+                && prefix
+                    .iter()
+                    .map(String::as_str)
+                    .eq(POOL[..2].iter().copied())
+        };
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                let found = Named::imports_pool(prefix, &path.tree);
+                prefix.pop();
+                found
+            }
+            syn::UseTree::Name(name) => names_pool(prefix, &name.ident),
+            syn::UseTree::Rename(rename) => names_pool(prefix, &rename.ident),
+            syn::UseTree::Group(group) => group
+                .items
+                .iter()
+                .any(|tree| Named::imports_pool(prefix, tree)),
+            syn::UseTree::Glob(_) => false,
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for Named {
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        self.ends |= call.method == "engine_end";
+        visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        self.pools |= Named::imports_pool(&mut Vec::new(), &item.tree);
+    }
+
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        self.pools |= path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .take(POOL.len())
+            .eq(POOL);
+        visit::visit_path(self, path);
+    }
+}
+
+/// Every `.rs` file under `dir`, parsed and visited into `named`.
+fn sources(dir: &Path, named: &mut Named) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -73,9 +120,13 @@ fn sources(dir: &Path, into: &mut String) {
     paths.sort();
     for path in paths {
         if path.is_dir() {
-            sources(&path, into);
+            sources(&path, named);
         } else if path.extension().is_some_and(|e| e == "rs") {
-            into.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} is read: {e}", path.display()));
+            let file =
+                syn::parse_file(&text).unwrap_or_else(|e| panic!("{} parses: {e}", path.display()));
+            named.visit_file(&file);
         }
     }
 }
@@ -100,12 +151,21 @@ fn crates() -> Vec<Crate> {
     dirs.sort();
     dirs.into_iter()
         .map(|dir| {
-            let mut source = String::new();
-            sources(&dir.join("src"), &mut source);
+            let mut named = Named::default();
+            sources(&dir.join("src"), &mut named);
+            let manifest = dir.join("Cargo.toml");
+            let mut table: toml::Table = std::fs::read_to_string(&manifest)
+                .map_err(|e| e.to_string())
+                .and_then(|text| toml::from_str(&text).map_err(|e| e.to_string()))
+                .unwrap_or_else(|e| panic!("{} parses: {e}", manifest.display()));
+            let dependencies = match table.remove("dependencies") {
+                Some(toml::Value::Table(dependencies)) => dependencies,
+                _ => toml::Table::new(),
+            };
             Crate {
                 name: dir.file_name().unwrap().to_string_lossy().into_owned(),
-                source,
-                manifest: std::fs::read_to_string(dir.join("Cargo.toml")).unwrap_or_default(),
+                named,
+                dependencies,
             }
         })
         .collect()
@@ -122,7 +182,7 @@ fn dba_mysqli_and_pdo_alone_close_a_pool_in_an_engine_end_as_1960_ruled() {
             .unwrap_or_else(|| panic!("ext/{name} is read"));
         assert!(
             c.pools() && c.ends(),
-            "{name} no longer holds an api::Pool closed in its own engine end, as #1961 left it \
+            "{name} no longer holds an abi::Pool closed in its own engine end, as #1961 left it \
              (ADR-0010): this list is to shorten"
         );
     }
@@ -131,7 +191,7 @@ fn dba_mysqli_and_pdo_alone_close_a_pool_in_an_engine_end_as_1960_ruled() {
         .find(|c| c.pools() && c.ends() && !POOLED_ENDS.contains(&c.name.as_str()))
     {
         panic!(
-            "{} holds an api::Pool and declares an engine end beside dba, mysqli and pdo: its \
+            "{} holds an abi::Pool and declares an engine end beside dba, mysqli and pdo: its \
              entries close in its own engine end (ADR-0010), drained in reverse bundle order \
              while the others' entries are still open, where php closes them all before any \
              MSHUTDOWN, and #1960's option 2 (a phase closing persistent entries alone, in \

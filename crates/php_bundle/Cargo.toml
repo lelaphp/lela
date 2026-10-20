@@ -216,3 +216,7 @@ php_jit = { path = "../php_jit", optional = true }
 # crate (ADR-0007).
 [dev-dependencies]
 php_ext = { path = "../php_ext", features = ["test"] }
+# `tests/engine_end.rs` reads the extensions' sources as syntax and their
+# manifests as tables (#3081).
+syn.workspace = true
+toml.workspace = true
