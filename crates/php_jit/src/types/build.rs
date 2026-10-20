@@ -14,8 +14,8 @@ use php_unit::{CacheSlot, Effects, OpArray, Opcode, OperandKind, Opline, OplineI
 use super::lattice::{self, Types};
 use super::opcodes::{
     Declared, Within, arith, assigned, constant, constant_types, guard_sites, inline_may_leave,
-    is_call, keeps_temporaries, op1_types, out_types, packed_guard, param_types, params, reads,
-    reads_by_name, referenced, slot_of, within, writes, written, written_after_entry,
+    is_call, keeps_temporaries, may_exit, op1_types, out_types, packed_guard, param_types, params,
+    reads, reads_by_name, referenced, slot_of, within, writes, written, written_after_entry,
 };
 use super::{
     Abort, Check, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo, Fused, Guard, GuardAt,
@@ -587,14 +587,10 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// php's IP guard after a handler that may leave
-    /// (`zend_jit_trace_may_exit`, `Z/ext/opcache/jit/zend_jit_trace.c:261-320`,
-    /// held by `zend_jit_trace_handler`, `zend_jit_ir.c:17129-17236`) where
-    /// the record does not say where the opline goes: a table's jump
-    /// (`SWITCH_LONG`, `SWITCH_STRING`, `MATCH`), a `NEW` that skips the
-    /// `DO_FCALL` after it where the class has no constructor, and a
-    /// `DO_FCALL`, whose callee a method's, a closure's or a dynamic call
-    /// may vary. It is held to the opline the trace serves next.
+    /// php's IP guard after an opline whose handler may go elsewhere than
+    /// the record says ([`may_exit`]), held by `zend_jit_trace_handler`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:17129-17236`) to the opline the
+    /// trace serves next.
     fn stands(
         &mut self,
         idx: OpId,
@@ -603,20 +599,22 @@ impl<'a> Builder<'a> {
         after: Option<&Opline>,
         ahead: &[Event],
     ) {
-        let may_leave = match op.opcode {
-            Opcode::SwitchLong | Opcode::SwitchString | Opcode::Match | Opcode::DoFcall => true,
-            Opcode::New => {
-                op.extended_value == 0 && after.is_some_and(|after| after.opcode == Opcode::DoFcall)
-            }
-            _ => false,
-        };
-        if let Some((func, opline)) = self.following(ahead).filter(|_| may_leave) {
-            self.guards.push(Placed {
-                at: GuardAt::Within(idx),
-                check: Check::Stands { func, opline },
-                exit: draft(Point::After(idx), frame, At::Stands),
-            });
+        if !may_exit(op, after) {
+            return;
         }
+        if let Some((func, opline)) = self.following(ahead) {
+            self.stands_at(idx, frame, func, opline);
+        }
+    }
+
+    /// `Check::Stands` within the op at `idx`, leaving where the step or
+    /// the return left the interpreter, in `frame`.
+    fn stands_at(&mut self, idx: OpId, frame: Frame, func: FuncRef, opline: OplineIdx) {
+        self.guards.push(Placed {
+            at: GuardAt::Within(idx),
+            check: Check::Stands { func, opline },
+            exit: draft(Point::After(idx), frame, At::Stands),
+        });
     }
 
     /// The opline the trace serves next, where the record says it: the
@@ -830,8 +828,7 @@ impl<'a> Builder<'a> {
             let call_at = next_op
                 .and_then(|(_, at)| at.0.checked_sub(1))
                 .map(OplineIdx);
-            let guard = next_op.map(|(func, opline)| Check::Stands { func, opline });
-            (caller, call_at, guard)
+            (caller, call_at, next_op)
         };
         let code = self.meta(caller).code;
         let out = call_at
@@ -844,13 +841,8 @@ impl<'a> Builder<'a> {
             });
         self.returned = Types::NULL;
         self.ops.push(Op::Back { frame: caller, out });
-        if let Some(check) = guard {
-            let exit = draft(Point::After(idx), caller, At::Stands);
-            self.guards.push(Placed {
-                at: GuardAt::Within(idx),
-                check,
-                exit,
-            });
+        if let Some((func, opline)) = guard {
+            self.stands_at(idx, caller, func, opline);
         }
         Ok(())
     }
