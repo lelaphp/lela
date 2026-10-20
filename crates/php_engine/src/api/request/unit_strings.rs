@@ -619,9 +619,16 @@ impl Request {
         }
     }
 
-    /// The request-only unit `function` is a function of, where it is one.
+    /// The request-only unit `function` is a function of, where it is one:
+    /// none at once where the request holds no such unit, the common
+    /// program's every closure, or where the function is not one of the
+    /// request's own, whose unit is the engine's or the cache's.
     fn closure_unit(&mut self, function: crate::api::call::Function) -> Option<&mut Held> {
-        let unit = PublishedUnit::as_ptr(&self.user_function(function)?.unit);
+        if self.unit_strings.units.is_empty() {
+            return None;
+        }
+        let user = self.user_functions.get(function.local_at()?)?;
+        let unit = PublishedUnit::as_ptr(&user.unit);
         (self.unit_strings.units.iter_mut()).find(|held| std::ptr::eq(held.unit.as_ptr(), unit))
     }
 
