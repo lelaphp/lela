@@ -19,18 +19,19 @@ use crate::test::{Capture, Served};
 
 /// What the request's heap counts, as `memory_get_usage()` reads it.
 fn used(req: &mut Request) -> i64 {
-    i64::try_from(req.memory().usage(false)).unwrap()
+    i64::try_from(req.memory().usage(false)).unwrap_or(i64::MAX)
 }
 
-/// `$len` as the length a native asks for.
+/// `$len` as the length a native asks for; a negative one asks for
+/// none.
 fn length(len: i64) -> usize {
-    usize::try_from(len).unwrap()
+    usize::try_from(len).unwrap_or(0)
 }
 
 /// The byte a test writes at `at`: never zero, so a byte a resize zeroes
 /// is not mistaken for one it kept.
 fn written(at: usize) -> u8 {
-    u8::try_from(at % 251).unwrap() + 1
+    u8::try_from(at % 251).unwrap_or(0) + 1
 }
 
 /// `block_held(int $len): string`: one block of `$len` bytes made and
@@ -86,17 +87,17 @@ fn kept_freed(req: &mut Request) {
     }
 }
 
-/// `block_kept(string $how): void`: a 24-byte block made and freed now
-/// (`free`), kept in the request's state to its end (`request`), or
-/// forgotten, with no free at all (`forget`).
+/// `block_kept(string $how): void`: a 24-byte block made and kept in
+/// the request's state to its end (`request`), forgotten, with no free
+/// at all (`forget`), or freed now (any other word).
 #[php_function]
 fn block_kept(req: &mut Request, how: PhpString) -> Result<(), Thrown> {
     let block = Emalloc::new(req, 24)?;
     match how.as_bytes() {
-        b"free" => block.free(req),
         b"request" => req.state::<Kept>().0.push(block),
-        // `forget`: the block goes out of scope with no free.
-        _ => {}
+        // The block goes out of scope with no free.
+        b"forget" => {}
+        _ => block.free(req),
     }
     Ok(())
 }
@@ -208,14 +209,22 @@ fn storage() -> Extension {
         .build("storage")
 }
 
-/// `src` served by a CLI engine with [`storage`] and the leak sensor
-/// `sensor`.
-fn served(sensor: LeakSensor, src: &str) -> Served {
-    Engine::cli_builder()
+/// A CLI engine with [`storage`], the leak sensor `sensor` and, where
+/// one is named, `memory_limit` at `limit`.
+fn engine(sensor: LeakSensor, limit: Option<&str>) -> Engine {
+    let builder = Engine::cli_builder()
         .extensions(&[storage()])
-        .sense_leaks(sensor)
-        .build()
-        .serve_capture(src, Capture::default())
+        .sense_leaks(sensor);
+    match limit {
+        Some(limit) => builder.ini("memory_limit", limit),
+        None => builder,
+    }
+    .build()
+}
+
+/// `src` served by [`engine`] with the leak sensor `sensor`.
+fn served(sensor: LeakSensor, src: &str) -> Served {
+    engine(sensor, None).serve_capture(src, Capture::default())
 }
 
 /// What a clean request served with the sensor armed wrote.
@@ -280,10 +289,7 @@ fn a_forgotten_block_is_named_by_the_armed_sensor() {
 /// the engine serves the next.
 #[test]
 fn unarmed_a_forgotten_block_is_released_by_the_request_s_end() {
-    let engine = Engine::cli_builder()
-        .extensions(&[storage()])
-        .sense_leaks(LeakSensor::Off)
-        .build();
+    let engine = engine(LeakSensor::Off, None);
     for _ in 0..2 {
         let served = engine.serve_capture(
             "<?php block_kept('forget'); echo 'served';",
@@ -299,11 +305,7 @@ fn unarmed_a_forgotten_block_is_released_by_the_request_s_end() {
 /// engine serves the next request.
 #[test]
 fn a_refused_allocation_ends_the_request_in_the_limit_s_fatal() {
-    let engine = Engine::cli_builder()
-        .extensions(&[storage()])
-        .sense_leaks(LeakSensor::Armed)
-        .ini("memory_limit", "2M")
-        .build();
+    let engine = engine(LeakSensor::Armed, Some("2M"));
     for src in [
         "<?php block_refused(4194304); echo 'unreached';",
         "<?php string_refused(4194304, 0); echo 'unreached';",
