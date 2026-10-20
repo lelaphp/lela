@@ -761,6 +761,16 @@ impl<'u> Parts<'u> {
         for var in self.main_vars {
             strings.intern(&var.0)?;
         }
+        // An `eval` that declares nothing, the most of them, walks no
+        // declaration.
+        if self.functions.is_empty()
+            && self.dynamic.is_empty()
+            && self.methods.is_empty()
+            && self.hooks.is_empty()
+            && self.classes.is_empty()
+        {
+            return Ok(());
+        }
         for name in self.declared_names() {
             strings.intern(&name)?;
         }
