@@ -2034,6 +2034,11 @@ fn sent(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge
 /// value, as php's `_EX` handlers go to the same arm once
 /// `ARG_SHOULD_BE_SENT_BY_REF` is clear, which `ex` asks of the callee
 /// ([`exec::CallInfo::sends_by_value`], then [`Request::arg_send_mode`]).
+/// The callee on top and the caller below it are lent together, one
+/// look at the frame table for both
+/// ([`php_heap::VmStack::top_and_frame_mut`]); only a number past the
+/// bits the `INIT` wrote looks them up again, after the declaration is
+/// read.
 ///
 /// ```php
 /// function f($a, $b, $c) { return "$a|$b|$c"; }
@@ -2066,22 +2071,45 @@ fn inline_send(
         return None;
     }
     let to = (op.op2 as usize).checked_sub(1)?;
-    let (call, callee) = req.vm().stack.top()?;
-    let header = callee.header();
-    if !header.info.building()
-        || to >= header.num_args as usize
-        || !callee.slots().get(to)?.is_undef()
-        || match sending {
-            Sending::Value => false,
-            Sending::Declared => {
-                !header.info.sends_by_value(op.op2) && req.arg_send_mode(header.function?, op.op2).0
-            }
-            Sending::Checked => header.info.send_by_ref(),
-        }
-    {
+    let (call, from) = req.vm_mut().stack.top_and_frame_mut(frame)?;
+    let header = call.header();
+    let (info, num_args, function) = (header.info, header.num_args, header.function);
+    if !info.building() || to >= num_args as usize {
         return None;
     }
-    let slots = req.slots_mut(frame);
+    let declared = match sending {
+        Sending::Checked if info.send_by_ref() => return None,
+        Sending::Value | Sending::Checked => false,
+        Sending::Declared => !info.sends_by_value(op.op2),
+    };
+    if declared {
+        // Past the bits the `INIT` wrote, the declaration says, which the
+        // request reads: asked with the two frames given back, and the
+        // two lent again only where it says by value.
+        if req.arg_send_mode(function?, op.op2).0 {
+            return None;
+        }
+        let (call, from) = req.vm_mut().stack.top_and_frame_mut(frame)?;
+        return placed(from.slots_mut(), call.slots_mut().get_mut(to)?, code, op, a);
+    }
+    placed(from.slots_mut(), call.slots_mut().get_mut(to)?, code, op, a)
+}
+
+/// [`inline_send`]'s write: the operand read off the caller's `slots`
+/// into the callee's slot `into`, which must be empty, by php's rule of
+/// what a send copies, moves or leaves to the kernel.
+#[inline(always)] // the handler's fast half, as `inline_send`
+#[allow(clippy::inline_always)]
+fn placed(
+    slots: &mut [Zval],
+    into: &mut Zval,
+    code: &OpArray,
+    op: &Opline,
+    a: impl Operand,
+) -> Option<Edge> {
+    if !into.is_undef() {
+        return None;
+    }
     let z = a.read(slots, code, op.op1);
     match a.kind() {
         OperandKind::Const if crate::operand::owns_nothing(z) => {}
@@ -2091,17 +2119,7 @@ fn inline_send(
         OperandKind::Cv if crate::operand::movable(z) => z.addref(),
         _ => return None,
     }
-    let placed = req
-        .vm_mut()
-        .stack
-        .frame_mut(call)
-        .and_then(|callee| callee.slots_mut().get_mut(to));
-    match placed {
-        Some(placed) => *placed = z,
-        // The callee's slot was read above and the frame is the same
-        // one, so this arm is unreachable; what was taken is given back.
-        None => req.release(Value::of_slot(z)),
-    }
+    *into = z;
     Some(Ok(advanced()))
 }
 
