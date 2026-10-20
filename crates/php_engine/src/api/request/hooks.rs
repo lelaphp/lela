@@ -1091,23 +1091,22 @@ impl Request {
     pub(crate) fn hooked_walk_start(&mut self, object: PhpObject, at: u32) -> Result<(), Thrown> {
         let iterator = self.heap.block(HOOKED_ITERATOR);
         let iterator = self.fatal_of(iterator)?;
-        match self.hooked_object_table(object, HookedBuild::Iterator) {
-            Ok(Some(built)) => {
-                let (table, rows) = (built.table.hand_on(), built.rows);
-                let walk = HookedWalk {
-                    at,
-                    iterator,
-                    table,
-                    rows,
-                };
-                self.properties.hooked_walks.push(walk);
-                Ok(())
-            }
+        let built = match self.hooked_object_table(object, HookedBuild::Iterator) {
+            Ok(Some(built)) => built,
             built => {
                 self.heap.free_block(iterator);
-                built.map(|_| ())
+                return built.map(|_| ());
             }
-        }
+        };
+        let (table, rows) = (built.table.hand_on(), built.rows);
+        let walk = HookedWalk {
+            at,
+            iterator,
+            table,
+            rows,
+        };
+        self.properties.hooked_walks.push(walk);
+        Ok(())
     }
 
     /// The end of the loop [`Request::hooked_walk_start`] began at hash
@@ -1610,14 +1609,10 @@ impl Request {
             HookedBuild::Json => false,
             HookedBuild::Iterator => row.visibility != Visibility::Public,
         };
-        let copy = if copied {
-            Some(Owner::adopt(self.string_init(&row.name)?))
-        } else {
-            None
-        };
+        let copy = copied.then(|| self.string_init(&row.name)).transpose()?;
         let read = self.read_hooked(object, &row.name, hooked, PropertyRead::Silent);
         if let Some(copy) = copy {
-            copy.give_up(self);
+            Owner::adopt(copy).give_up(self);
         }
         read.map(Owner::adopt)
     }
