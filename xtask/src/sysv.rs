@@ -951,7 +951,7 @@ impl Claims {
                     continue;
                 };
                 drop(group);
-                gone(pid);
+                wait_gone(pid);
                 if let Some(journal) = journal.as_mut() {
                     writeln!(journal, "{ENDED} {number}").ok();
                 }
@@ -1380,7 +1380,7 @@ impl fmt::Display for Namespace {
 }
 
 /// Wait, as long as a second, for the process `pid` to be gone.
-pub(crate) fn gone(pid: u32) {
+pub(crate) fn wait_gone(pid: u32) {
     for _ in 0..100 {
         if !alive(pid) {
             break;

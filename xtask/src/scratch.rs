@@ -699,7 +699,7 @@ impl Stray {
         } else {
             kill(pid, Signal::SIGKILL).ok();
         }
-        crate::sysv::gone(self.pid);
+        crate::sysv::wait_gone(self.pid);
     }
 }
 

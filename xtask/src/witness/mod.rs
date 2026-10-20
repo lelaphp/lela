@@ -154,7 +154,7 @@ use crate::sources;
 use crate::tally::{self, Outcome};
 use anchor::Record;
 use fence::Extracted;
-pub(crate) use process::{Binary, served_as, under_recipe};
+pub(crate) use process::{Binary, host_of, served_as, under_recipe};
 use watch::{Journal, Watch};
 
 /// The instrument's name, the reading's `instrument` field.

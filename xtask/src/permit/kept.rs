@@ -126,8 +126,11 @@ pub(super) fn at_head(checkout: &Path, path: &str) -> Result<bool> {
 
 /// The blob of `path` at `HEAD`, `None` where `HEAD` has no such file.
 fn head_blob(checkout: &Path, path: &str) -> Result<Option<String>> {
-    let listed = git::blobs(checkout, "HEAD", &[path])?;
-    Ok(listed.into_iter().next().map(|(_, id)| id))
+    let listing = git::git(checkout, &["ls-tree", "-r", "-z", "HEAD", "--", path], None)?;
+    Ok(listing
+        .split_once('\t')
+        .and_then(|(entry, _)| entry.rsplit(' ').next())
+        .map(str::to_owned))
 }
 
 /// The record at `file`, `None` where there is none.

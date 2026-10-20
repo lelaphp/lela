@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::Column;
-use crate::oracle::hosts::{CGI, CLI, FPM};
+use crate::oracle::hosts::CLI;
 use crate::oracle::{self, Ended, Observation, Oracle, normalise_in};
 use crate::scratch::Tree;
 use crate::witness::fence::Served;
@@ -114,15 +114,21 @@ pub(crate) fn oracle_side(
     let served = match host {
         Host::Cli => bail!("the CLI renders {module} by its flags, not as a request"),
         Host::Cgi | Host::Fpm => {
-            let (served, path) = match host {
-                Host::Fpm => (Served::Fpm, oracle.pinned_host(FPM)?),
-                _ => (Served::Cgi, oracle.pinned_host(CGI)?),
-            };
+            let served = requested(host);
+            let path = oracle.pinned_host(crate::witness::host_of(served))?;
             crate::witness::served_as(oracle, served, &path, &program, REQUEST, None, &[])?
         }
         Host::Server => served_by_server(oracle, &oracle.pin().oracle.path, &program)?,
     };
     Ok(body(oracle, served))
+}
+
+/// How a witness fence names the host that serves `host`'s request.
+fn requested(host: Host) -> Served {
+    match host {
+        Host::Fpm => Served::Fpm,
+        Host::Cli | Host::Cgi | Host::Server => Served::Cgi,
+    }
 }
 
 /// The engine's rendering through `host`: its witness build serving the
@@ -137,14 +143,10 @@ pub(crate) fn engine_side(
     let program = column.program(module);
     let served = match host {
         Host::Cli => bail!("the CLI renders {module} by its flags, not as a request"),
-        Host::Cgi => {
+        Host::Cgi | Host::Fpm => {
+            let served = requested(host);
             binary
-                .serve_request(oracle, Served::Cgi, &program, REQUEST, None)?
-                .0
-        }
-        Host::Fpm => {
-            binary
-                .serve_request(oracle, Served::Fpm, &program, REQUEST, None)?
+                .serve_request(oracle, served, &program, REQUEST, None)?
                 .0
         }
         Host::Server => served_by_server(oracle, &binary.host(CLI)?, &program)?,

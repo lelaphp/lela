@@ -159,7 +159,7 @@ pub fn render(
     let (rows, columns): (Vec<Row>, Columns) = match section {
         Section::Rules => (
             rules(manifest, &readings),
-            if uncut { RULES } else { &RULES[..4] },
+            if uncut { RULES } else { &RULES[..RULE_TEXT] },
         ),
         Section::Locks => (locks(manifest, root, &readings)?, LOCKS),
         Section::Budget => (
@@ -1590,8 +1590,11 @@ const AT: Column = Cell("at", |r| r.of(|x| x.at.to_string()));
 
 /// The rules as the map carries them: rule, ADR, predicate and reading.
 /// The text a rule's failure prints is the last column, which `--uncut`
-/// and JSON show, so the map holds its room under the engine's cap with
+/// and JSON alone show, so the map holds its room under the engine's cap with
 /// every row at "no reading" (harness-design.md §4.6, #1772).
+/// Where [`RULES`]' text column stands, the columns before it the map's.
+const RULE_TEXT: usize = 4;
+
 const RULES: Columns = &[
     Cell("rule", |r| r.fact("id")),
     Fact("adr"),
