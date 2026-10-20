@@ -90,14 +90,15 @@ impl Emit<'_> {
     /// The fold [`Self::constant_expr`] made of a node, kept where it is
     /// `zend_eval_const_expr`'s: the node is replaced by its value.
     pub(super) fn record_fold(&mut self, expr: tree::Expr, folded: &Result<Zval, CompileError>) {
-        // A value php's parser made, a number or a string written out, is
-        // the same `ZEND_AST_ZVAL` before the evaluator and after it, so
-        // it is kept nowhere and keeps the line it was written at.
-        if super::written(self.parsed, expr).is_some() {
-            return;
-        }
+        // Only `zend_eval_const_expr` replaces a node, and a value php's
+        // parser made, a number or a string written out, is the same
+        // `ZEND_AST_ZVAL` before the evaluator and after it, so it is
+        // kept nowhere and keeps the line it was written at: asked last,
+        // since a compile's fold, which records nothing, would read the
+        // literal a second time to learn it.
         if self.fold == Fold::EvalConstExpr
             && let Ok(value) = folded
+            && super::written(self.parsed, expr).is_none()
         {
             self.rewrites.record(expr, Rewrite::Value(*value));
         }

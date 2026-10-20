@@ -464,9 +464,9 @@ impl Request {
     /// below it while a suspend that passed through leaves each waiting
     /// on the one under it, to the bottom frame of the last, where
     /// `zend_fiber_suspend` cut `prev_execute_data`
-    /// ([`crate::fiber::take_chain`]). The request's own stack is kept
-    /// where [`crate::fiber::Fibers::request_stack`] finds it, so
-    /// `EG(symbol_table)`'s CVs are read where they stand, and the serve
+    /// ([`crate::fiber::take_chain`]). The request's own stack stays
+    /// where it stands, so `EG(symbol_table)`'s buckets still name its
+    /// CVs, and the serve
     /// holds one owner of each coroutine's object on the chain, so nothing
     /// `f` does destroys one meanwhile. As in [`Request::on_stack`], the
     /// error-reporting level, the trace number and the machine stack's
@@ -532,9 +532,27 @@ impl Request {
     /// here on: its op arrays take runtime caches of the request's own,
     /// as php gives them caches on the heap, and none of the engine's
     /// offsets ([`exec::RuntimeCaches::take`]).
-    pub(crate) fn take_unit(&mut self, unit: Unit) -> PublishedUnit {
-        let room = self.spare_unit.take();
-        self.map.take(unit, room)
+    pub(crate) fn take_unit(&mut self, mut unit: Unit) -> PublishedUnit {
+        let room = self.ready_unit(&mut unit);
+        let unit = unit.published(room);
+        self.hold_published(&unit);
+        unit
+    }
+
+    /// [`Request::take_unit`]'s first half, for a caller that publishes
+    /// the unit where it stands, so it is moved once, into the room: its
+    /// op arrays numbered, and the room it is published in, the last unit
+    /// the request gave up.
+    pub(crate) fn ready_unit(&mut self, unit: &mut Unit) -> Option<php_unit::SpareUnit> {
+        self.map.number(unit);
+        self.spare_unit.take()
+    }
+
+    /// [`Request::take_unit`]'s second half: the unit
+    /// [`Request::ready_unit`] readied, published since, held with the
+    /// numbers its op arrays were given.
+    pub(crate) fn hold_published(&mut self, unit: &PublishedUnit) {
+        self.map.hold(unit);
     }
 
     /// The room the next compile lays its unit's main op array down in,

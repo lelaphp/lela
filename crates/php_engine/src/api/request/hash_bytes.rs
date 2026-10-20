@@ -1,18 +1,14 @@
-//! Three of php's `HashTable`s the engine keeps in a shape of its own,
+//! Two of php's `HashTable`s the engine keeps in a shape of its own,
 //! with the bytes php's take on the request's heap held beside them
 //! (design §5.13): `EG(included_files)`, keyed by the path of every file
-//! the request opened, the symbol table `zend_rebuild_symbol_table`
-//! gives a function frame, with `EG(symtable_cache)`, the tables a
-//! frame's end cleaned and kept for the next rebuild, and
-//! `EG(modified_ini_directives)`. The first two go with the heap at the
-//! request's end, as `shutdown_executor`'s fast shutdown leaves them to
-//! the memory manager; the third is the ini area's, which lays it down
+//! the request opened, which goes with the heap at the request's end, as
+//! `shutdown_executor`'s fast shutdown leaves it to the memory manager,
+//! and `EG(modified_ini_directives)`, the ini area's, which lays it down
 //! and frees it by `zend_ini_deactivate` (`super::ini`).
 
-use super::{Request, SymbolTable};
+use super::Request;
 use crate::api::raising::Thrown;
 use crate::api::values::{Emalloc, PhpString};
-use crate::exec::TableId;
 
 /// `sizeof(zend_array)`, what `ALLOC_HASHTABLE` takes.
 const HEADER: usize = 56;
@@ -20,9 +16,6 @@ const HEADER: usize = 56;
 /// `HT_SIZE_EX(n, HT_SIZE_TO_MASK(n))` over `n`: a 32-byte `Bucket`
 /// and two `uint32_t` hash slots for each element of the table's size.
 const PER_ELEMENT: usize = 40;
-
-/// `SYMTABLE_CACHE_SIZE` (`Z/Zend/zend_globals.h:61`).
-const SYMTABLE_CACHE_SIZE: usize = 32;
 
 /// `zend_hash_check_size`: eight, or the power of two at or above `n`.
 fn check_size(n: u32) -> u32 {
@@ -114,23 +107,6 @@ impl HashBytes {
         Ok(())
     }
 
-    /// `zend_hash_extend(ht, n, 0)`: room for `n` elements.
-    fn extend(&mut self, req: &mut Request, n: u32) -> Result<(), Thrown> {
-        if n == 0 {
-            return Ok(());
-        }
-        if self.data.is_none() {
-            if n > self.size {
-                self.size = check_size(n);
-            }
-            return self.real_init(req);
-        }
-        if n > self.size {
-            self.grow(req, check_size(n))?;
-        }
-        Ok(())
-    }
-
     /// `zend_array_destroy`: the data, then the header.
     pub(super) fn free(self, req: &mut Request) {
         if let Some(data) = self.data {
@@ -186,36 +162,6 @@ impl IncludedFiles {
     }
 }
 
-impl SymbolTable {
-    /// `EG(symbol_table)` as `init_executor` lays it down,
-    /// `zend_hash_init(&EG(symbol_table), 64, ...)`: embedded in `EG`,
-    /// its data laid down at the first name written, sixty-four buckets
-    /// wide, and grown as php's grows.
-    pub(super) fn global() -> SymbolTable {
-        SymbolTable {
-            owner: None,
-            entries: Vec::new(),
-            bytes: Some(HashBytes::embedded(64)),
-            changes: 0,
-        }
-    }
-
-    /// `nTableSize` of the table.
-    pub(super) fn size(&self) -> Option<u32> {
-        self.bytes.as_ref().map(|bytes| bytes.size)
-    }
-}
-
-/// The rebuilt symbol tables' bytes kept for the next rebuild, whose fields no file but this one
-/// reads.
-#[derive(Default)]
-pub(super) struct HashTables {
-    /// `EG(symtable_cache)`: the rebuilt symbol tables' bytes a frame's
-    /// end cleaned and kept for the next rebuild, at most
-    /// `SYMTABLE_CACHE_SIZE`.
-    symtable_cache: Vec<HashBytes>,
-}
-
 impl Request {
     /// `zend_hash_add_empty_element(&EG(included_files), opened_path)`:
     /// `path` put in the table where it is not there yet, its string
@@ -269,102 +215,11 @@ impl Request {
     /// release, as php's fast shutdown leaves them.
     #[cfg(debug_assertions)]
     pub(super) fn free_hash_tables(&mut self) {
-        for bytes in std::mem::take(&mut self.hash_bytes.symtable_cache) {
-            bytes.free(self);
-        }
-        // `EG(symbol_table)`'s data, where no destroy of the table freed it.
-        if let Some(bytes) = self.tables.first_mut().and_then(|table| table.bytes.take()) {
-            bytes.free(self);
-        }
+        self.free_symbol_tables();
         let included = std::mem::take(&mut self.included_files);
         for path in included.paths {
             self.release(crate::api::values::Value::string(path));
         }
         included.table.free(self);
-    }
-
-    /// `zend_rebuild_symbol_table`'s table for a function frame with
-    /// `last_var` CVs, before they are appended: one `EG(symtable_cache)`
-    /// kept, extended to them (`zend_hash_extend`), or a new one,
-    /// `zend_new_array(last_var)` with its data laid down where there is
-    /// a CV to append. A function that includes a file keeps the table
-    /// in the cache when it returns, 56 bytes and the 320 of its data,
-    /// and the next rebuild, here `get_defined_vars()`'s, takes it back:
-    ///
-    /// ```php
-    /// $f = realpath(__DIR__) . '/rebuilt.inc'; file_put_contents($f, '<?php $x = 1;'); include $f;
-    /// function g($f) { $a = 1; include $f; return $a; }
-    /// function h() { $b = 1; return count(get_defined_vars()); }
-    /// $m = memory_get_usage(); g($f); echo memory_get_usage() - $m, "\n";
-    /// $m = memory_get_usage(); h(); echo memory_get_usage() - $m, "\n";
-    /// unlink($f);
-    /// ```
-    /// ```expect
-    /// 376
-    /// 0
-    /// ```
-    ///
-    /// Forty-one frames that each rebuild one before any returns keep
-    /// the thirty-two the cache has room for, and free the rest:
-    ///
-    /// ```php
-    /// function s($n) { $y = 2; get_defined_vars(); if ($n > 0) s($n - 1); return $n; }
-    /// $m = memory_get_usage(); s(40); echo memory_get_usage() - $m, "\n";
-    /// $m = memory_get_usage(); s(40); echo memory_get_usage() - $m, "\n";
-    /// ```
-    /// ```expect
-    /// 12032
-    /// 0
-    /// ```
-    pub(crate) fn rebuilt_table_bytes(&mut self, last_var: u32) -> Option<HashBytes> {
-        let mut bytes = if let Some(mut bytes) = self.hash_bytes.symtable_cache.pop() {
-            bytes.extend(self, last_var).ok()?;
-            bytes
-        } else {
-            let mut bytes = HashBytes::new_array(self, last_var).ok()?;
-            if last_var != 0 {
-                bytes.real_init(self).ok()?;
-            }
-            bytes
-        };
-        for _ in 0..last_var {
-            bytes.add(self).ok()?;
-        }
-        Some(bytes)
-    }
-
-    /// `zend_clean_and_cache_symbol_table` over the bytes of a rebuilt
-    /// table whose values are released: cleaned, and kept in
-    /// `EG(symtable_cache)` where it has room, freed where it has none.
-    pub(super) fn cache_symbol_table(&mut self, table: SymbolTable) {
-        let Some(mut bytes) = table.bytes else {
-            return;
-        };
-        bytes.used = 0;
-        bytes.count = 0;
-        if self.hash_bytes.symtable_cache.len() >= SYMTABLE_CACHE_SIZE {
-            bytes.free(self);
-        } else {
-            self.hash_bytes.symtable_cache.push(bytes);
-        }
-    }
-
-    /// One bucket appended to `table`'s bytes, or deleted from them,
-    /// the last of the table's where `last` says so. A refusal has
-    /// ended the request.
-    pub(super) fn table_bytes(&mut self, table: TableId, added: bool, last: bool) {
-        let at = table.0 as usize;
-        let Some(mut bytes) = self.tables.get_mut(at).and_then(|t| t.bytes.take()) else {
-            return;
-        };
-        if added {
-            // The memory limit's fatal is recorded and ends the request.
-            bytes.add(self).ok();
-        } else {
-            bytes.del(last);
-        }
-        if let Some(t) = self.tables.get_mut(at) {
-            t.bytes = Some(bytes);
-        }
     }
 }

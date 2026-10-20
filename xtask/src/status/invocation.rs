@@ -6,7 +6,6 @@
 //! the field's rustdoc's last paragraph, one of [`Group`]'s two sentences,
 //! so a field that names neither fails the rendering, naming it.
 
-use std::fmt::Write;
 use std::fs;
 use std::path::Path;
 
@@ -14,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use syn::{Fields, GenericArgument, Item, PathArguments, Type};
 
-use super::{Table, cell};
+use super::{Table, cell, grid};
 
 /// The file the type is read from, relative to the workspace root: the
 /// region's input beside this renderer.
@@ -82,22 +81,13 @@ pub(super) fn render(root: &Path, format: Table) -> Result<String> {
                 })
                 .collect::<Vec<Value>>(),
         )?,
-        Table::Md => {
-            let mut out =
-                String::from("| field | type | group | what it is |\n|---|---|---|---|\n");
-            for f in &fields {
-                writeln!(
-                    out,
-                    "| `{}` | `{}` | {} | {} |",
-                    f.name,
-                    f.ty,
-                    f.group.said(),
-                    cell(&f.sentence)
-                )
-                .ok();
-            }
-            out
-        }
+        Table::Md => grid(
+            &["field", "type", "group", "what it is"],
+            fields.iter().map(|f| {
+                let (name, ty) = (format!("`{}`", f.name), format!("`{}`", f.ty));
+                [name, ty, f.group.said(), cell(&f.sentence)]
+            }),
+        ),
     })
 }
 

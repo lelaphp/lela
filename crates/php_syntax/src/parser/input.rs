@@ -23,25 +23,19 @@ impl<'t> Input<'t> {
     #[must_use]
     #[cfg(test)]
     pub fn new(text: &'t [u8], tokens: &'t [Token]) -> Input<'t> {
-        Input::new_in(text, tokens, Vec::new())
+        let significant = tokens
+            .iter()
+            .enumerate()
+            .filter(|(_, token)| !token.kind.is_trivia())
+            .map(|(i, _)| u32::try_from(i).unwrap_or(u32::MAX))
+            .collect();
+        Input::indexed(text, tokens, significant)
     }
 
-    /// [`Input::new`] into the room `significant` lends, which
+    /// The cursor over `tokens` whose significant ones the lexer indexed
+    /// as it emitted them, `significant`, which
     /// [`Input::into_significant`] hands back.
-    pub(crate) fn new_in(
-        text: &'t [u8],
-        tokens: &'t [Token],
-        mut significant: Vec<u32>,
-    ) -> Input<'t> {
-        significant.clear();
-        significant.reserve(tokens.len());
-        significant.extend(
-            tokens
-                .iter()
-                .enumerate()
-                .filter(|(_, token)| !token.kind.is_trivia())
-                .map(|(i, _)| u32::try_from(i).unwrap_or(u32::MAX)),
-        );
+    pub(crate) fn indexed(text: &'t [u8], tokens: &'t [Token], significant: Vec<u32>) -> Input<'t> {
         Input {
             text,
             tokens,

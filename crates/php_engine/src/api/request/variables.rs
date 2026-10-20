@@ -156,23 +156,15 @@ impl Request {
     /// `phpinfo()` and the URL rewriter read `$_SERVER` so, and see the
     /// program's writes to it, where [`Request::superglobal`] does not.
     pub fn global(&mut self, name: &[u8]) -> Option<Value> {
-        let table = self.global_table();
-        self.symbol_value(table, name)
+        self.symbol_value(TableId::GLOBAL, name)
     }
 
     /// The names `EG(symbol_table)` holds, in its order, what the
     /// shell's completion of a `$` walks
     /// (`cli_completion_generator_var`).
     pub fn global_names(&mut self) -> Vec<Vec<u8>> {
-        let table = self.global_table();
-        self.table_mut(table)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .map(|(name, _)| name.as_bytes().to_vec())
-                    .collect()
-            })
-            .unwrap_or_default()
+        let names = self.symbol_entries(TableId::GLOBAL).into_iter();
+        names.map(|(name, _)| name.as_bytes().to_vec()).collect()
     }
 
     /// A variable of `EG(symbol_table)` written or deleted, what an
@@ -188,7 +180,7 @@ impl Request {
     /// `zend_string_init`, a string of the request's that the table keeps
     /// where it adds the name and that goes where the name stood already.
     pub fn set_global(&mut self, name: &[u8], value: Option<Owner<Value>>) {
-        let table = self.global_table();
+        let table = TableId::GLOBAL;
         match value {
             Some(value) => match self.string_init(name) {
                 Ok(key) => {
@@ -225,7 +217,7 @@ impl Request {
         if !self.description.argv.is_empty() {
             // `zend_hash_update(&EG(symbol_table), ZSTR_KNOWN(ZEND_STR_ARGV))`
             // and `ZEND_STR_ARGC`'s, through the CV a frame attached.
-            let table = self.global_table();
+            let table = TableId::GLOBAL;
             let words_name = self.known(Known::Argv)?;
             let list = Owner::take(self, words);
             self.symbol_update_ind(table, *words_name, list.hand_on(), Overwrite::InPlace);

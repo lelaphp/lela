@@ -806,28 +806,25 @@ fn divergence(
                 .filter(|r| uncut || r.status == Status::Open)
                 .collect();
             let reason: fn(&str) -> String = if uncut { cell } else { clipped };
-            if !shown.is_empty() {
-                writeln!(out, "| id | kind | cause | status | since | reason |").ok();
-                writeln!(out, "|---|---|---|---|---|---|").ok();
-            }
-            for row in &shown {
+            let lines = shown.iter().map(|row| {
                 let id = match row.covers.len() {
                     0 => cell(row.id.as_str()),
                     n => format!("{} (covers {n})", cell(row.id.as_str())),
                 };
-                writeln!(
-                    out,
-                    "| {id} | {} | {} | {} | {} | {} |",
-                    row.kind.as_str(),
-                    row.cause.as_str(),
-                    row.status.as_str(),
-                    row.since,
+                let said = [row.kind.as_str(), row.cause.as_str(), row.status.as_str()];
+                let [kind, cause, status] = said.map(str::to_owned);
+                [
+                    id,
+                    kind,
+                    cause,
+                    status,
+                    row.since.clone(),
                     reason(&row.reason),
-                )
-                .ok();
-            }
+                ]
+            });
             if !shown.is_empty() {
-                writeln!(out).ok();
+                let head = ["id", "kind", "cause", "status", "since", "reason"];
+                writeln!(out, "{}", grid(&head, lines)).ok();
             }
             counts_table(&counts, &mut out);
             writeln!(out, "\n{}", against_target(manifest)).ok();
@@ -846,26 +843,26 @@ fn divergence(
 /// total of those, which the day-30 target reads, then a line per other
 /// cause a row is of (#2220, #2462).
 fn counts_table(counts: &Counts, out: &mut String) {
-    let line = |out: &mut String, name: &str, of: &dyn Fn(Status) -> u64| {
+    let line = |name: &str, of: &dyn Fn(Status) -> u64| {
         let rows: u64 = Status::ALL.into_iter().map(of).sum();
-        writeln!(
-            out,
-            "| {name} | {} | {} | {} | {rows} |",
-            of(Status::Open),
-            of(Status::Accepted),
-            of(Status::Fixed)
-        )
-        .ok();
+        let [open, accepted, fixed] = [Status::Open, Status::Accepted, Status::Fixed].map(of);
+        let counted = [open, accepted, fixed, rows].map(|n| n.to_string());
+        [name.to_owned()]
+            .into_iter()
+            .chain(counted)
+            .collect::<Vec<_>>()
     };
-    writeln!(out, "| kind or cause | open | accepted | fixed | rows |").ok();
-    writeln!(out, "|---|---|---|---|---|").ok();
-    for kind in counts.debt_kinds() {
-        line(out, kind.as_str(), &|s| counts.debt(kind, s));
-    }
-    line(out, "total", &|s| counts.total(s));
+    let mut lines: Vec<_> = (counts.debt_kinds().into_iter())
+        .map(|kind| line(kind.as_str(), &|s| counts.debt(kind, s)))
+        .collect();
+    lines.push(line("total", &|s| counts.total(s)));
     for cause in counts.apart() {
-        line(out, cause.as_str(), &|s| counts.of(cause, None, s));
+        lines.push(line(cause.as_str(), &|s| counts.of(cause, None, s)));
     }
+    out.push_str(&grid(
+        &["kind or cause", "open", "accepted", "fixed", "rows"],
+        lines,
+    ));
 }
 
 /// Every reading of one instrument, one row per scope, the numbers as
@@ -1048,33 +1045,25 @@ fn permits(
         Table::Md => {
             let mut out = table(if uncut { PERMITS_UNCUT } else { PERMITS }, &rules, &[]);
             writeln!(out).ok();
-            let (head, rule) = if window.is_some() {
-                (" silent |", "---|")
-            } else {
-                ("", "")
-            };
-            writeln!(
-                out,
-                "| instrument | readings | failures | last failure |{head}"
-            )
-            .ok();
-            writeln!(out, "|---|---|---|---|{rule}").ok();
-            for i in &instruments {
-                let candidate = match i.silent {
-                    Some(true) => " candidate |",
-                    Some(false) => "  |",
-                    None => "",
-                };
-                writeln!(
-                    out,
-                    "| {} | {} | {} | {} |{candidate}",
-                    cell(&i.name),
-                    i.readings,
-                    i.failures,
-                    i.last_failure.as_deref().unwrap_or("")
-                )
-                .ok();
-            }
+            let head = [
+                "instrument",
+                "readings",
+                "failures",
+                "last failure",
+                "silent",
+            ];
+            let head = &head[..if window.is_some() { 5 } else { 4 }];
+            out.push_str(&grid(
+                head,
+                instruments.iter().map(|i| {
+                    let candidate = i.silent.map(|s| if s { "candidate" } else { "" });
+                    let (readings, failures) = (i.readings.to_string(), i.failures.to_string());
+                    let last = i.last_failure.clone().unwrap_or_default();
+                    [cell(&i.name), readings, failures, last]
+                        .into_iter()
+                        .chain(candidate.map(str::to_owned))
+                }),
+            ));
             if window.is_none() {
                 writeln!(
                     out,
@@ -1308,23 +1297,20 @@ fn modules(manifest: &Manifest, readings: &[Reading], format: Table) -> Result<S
     Ok(match format {
         Table::Json => serde_json::to_string_pretty(&rows)?,
         Table::Md if rows.is_empty() => format!("{NO_READING}\n"),
-        Table::Md => {
-            let mut out =
-                String::from("| seam | module | items | share | commit |\n|---|---|---|---|---|\n");
-            for row in &rows {
-                writeln!(
-                    out,
-                    "| {} | {} | {} | {:.1}% | {} |",
-                    cell(row.seam),
-                    cell(row.module),
-                    row.items,
-                    row.share * 100.0,
-                    short(row.commit),
-                )
-                .ok();
-            }
-            out
-        }
+        Table::Md => grid(
+            &["seam", "module", "items", "share", "commit"],
+            rows.iter().map(|row| {
+                let share = format!("{:.1}%", row.share * 100.0);
+                let (seam, module) = (cell(row.seam), cell(row.module));
+                [
+                    seam,
+                    module,
+                    row.items.to_string(),
+                    share,
+                    short(row.commit).to_owned(),
+                ]
+            }),
+        ),
     })
 }
 
@@ -1786,20 +1772,29 @@ const BUNDLE: Columns = (
 
 /// The rows as a Markdown table, less the columns `omit` names.
 fn table((head, line): Columns, rows: &[Row], omit: &[&str]) -> String {
-    let kept = |cells: Vec<String>| -> Vec<String> {
-        cells
-            .into_iter()
-            .zip(head)
+    let kept = |cells: Vec<String>| {
+        (cells.into_iter().zip(head))
             .filter(|(_, h)| !omit.contains(h))
             .map(|(c, _)| c)
-            .collect()
     };
-    let head = kept(head.iter().map(|h| (*h).to_owned()).collect());
-    let mut out = String::new();
-    writeln!(out, "| {} |", head.join(" | ")).ok();
-    writeln!(out, "|{}", "---|".repeat(head.len())).ok();
+    let shown: Vec<&str> = head.iter().copied().filter(|h| !omit.contains(h)).collect();
+    grid(&shown, rows.iter().map(|row| kept(line(row))))
+}
+
+/// A Markdown table: its head, the rule under it, and a line per row of
+/// cells, each already escaped.
+pub(crate) fn grid<R: IntoIterator<Item = String>>(
+    head: &[&str],
+    rows: impl IntoIterator<Item = R>,
+) -> String {
+    let mut out = format!("| {} |\n|{}\n", head.join(" | "), "---|".repeat(head.len()));
     for row in rows {
-        writeln!(out, "| {} |", kept(line(row)).join(" | ")).ok();
+        writeln!(
+            out,
+            "| {} |",
+            row.into_iter().collect::<Vec<_>>().join(" | ")
+        )
+        .ok();
     }
     out
 }

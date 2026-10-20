@@ -6831,7 +6831,7 @@ pub(crate) fn isset_isempty_var<T: Tier>(
         }
     };
     let table = if op.extended_value & FETCH_GLOBAL != 0 {
-        req.global_table()
+        exec::TableId::GLOBAL
     } else {
         req.rebuild_symbol_table(frame)
     };
@@ -6914,7 +6914,7 @@ pub(crate) fn unset_var<T: Tier>(
         }
     };
     let table = if op.extended_value & FETCH_GLOBAL != 0 {
-        req.global_table()
+        exec::TableId::GLOBAL
     } else {
         req.rebuild_symbol_table(frame)
     };
@@ -6996,7 +6996,7 @@ fn fetch_named(
     let global = op.extended_value & (FETCH_GLOBAL | FETCH_GLOBAL_LOCK) != 0;
     let out = exec::temporary_slot(code, op.out);
     let table = if global {
-        req.global_table()
+        exec::TableId::GLOBAL
     } else {
         req.rebuild_symbol_table(frame)
     };
@@ -7039,11 +7039,12 @@ fn fetch_named(
             if req.is_pending() {
                 None
             } else {
-                let place = match req.symbol_place(table, name, mode != ByName::Unset) {
-                    Ok(place) => place,
-                    Err(thrown) => return threw(req, frame, &thrown),
-                };
-                let Some(place) = place else {
+                // What the `VAR` held is given up before the fetch: a
+                // destructor it serves can grow the table, which moves
+                // the bucket the place names.
+                let previous = req.take_slot(frame, out);
+                req.release(previous);
+                let Some(place) = req.symbol_place(table, name, mode != ByName::Unset) else {
                     return Err(Fatal::error(format!(
                         "InternalError: a fetch by name laid ${shown} down and the table does not hold it"
                     )));
@@ -7051,8 +7052,6 @@ fn fetch_named(
                 if Value::of_slot(place.read()).tag() == TypeTag::Undef {
                     place.write(php_heap::Zval::null());
                 }
-                let previous = req.take_slot(frame, out);
-                req.release(previous);
                 if let Some(var) = req.slot_ptr(frame, out) {
                     var.write(php_heap::Zval::indirect(place));
                 }
@@ -19240,11 +19239,11 @@ fn fetched_element(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
             // value write is `ZVAL_COPY_VALUE` and leaves `u2` standing
             // (#491).
             at.set_fe_pos(found.saturating_add(1));
-            (key, Value::of_slot(value))
+            (Some(key), Value::of_slot(value))
         }
         ForeachVar::Properties { object, walk } => match req.object_walk(object, walk.0, false) {
             Ok(Some((key, walked))) => {
-                let key = match req.walked_key(key) {
+                owned_key = match req.walked_key(key, op.out_type != OperandKind::Unused) {
                     Ok(key) => key,
                     Err(thrown) => return threw(req, frame, &thrown),
                 };
@@ -19252,9 +19251,7 @@ fn fetched_element(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
                 if walked.owned() {
                     owned = Some(value);
                 }
-                let view = key.heap();
-                owned_key = Some(key);
-                (view, value)
+                (owned_key.as_ref().map(|key| key.heap()), value)
             }
             Ok(None) => {
                 return jump_to(op.extended_value);
@@ -19268,7 +19265,7 @@ fn fetched_element(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
             ));
         }
     };
-    if let Some(key) = fe_key_kept(req, op, key) {
+    if let Some(key) = key.and_then(|key| fe_key_kept(req, op, key)) {
         set_out(req, frame, code, op, key);
     }
     if let Some(key) = owned_key {
@@ -19825,19 +19822,18 @@ fn fe_walk_object_rw(req: &mut Request, op: &Opline, object: PhpObject, walk: Ha
     // A `&get` hook's answer is the walk's own owner of the cell, as an
     // iterator's element is.
     let owned = walked.owned();
-    let cell = match req.walked_reference(object, walked) {
-        Ok(cell) => cell,
-        Err(thrown) => {
-            key.give_up(req);
-            return Ok(Err(thrown));
-        }
+    let cell = req.walked_reference(object, walked);
+    // The key is read once the cell is bound, and not where binding threw.
+    let key = req.walked_key(key, cell.is_ok() && op.out_type != OperandKind::Unused);
+    let (cell, key) = match (cell, key) {
+        (Ok(cell), Ok(key)) => (cell, key),
+        (Err(thrown), _) | (_, Err(thrown)) => return Ok(Err(thrown)),
     };
-    let key = match req.walked_key(key) {
-        Ok(key) => key,
-        Err(thrown) => return Ok(Err(thrown)),
-    };
-    let kept = fe_key_kept(req, op, key.heap());
-    key.give_up(req);
+    let kept = key.and_then(|key| {
+        let kept = fe_key_kept(req, op, key.heap());
+        key.give_up(req);
+        kept
+    });
     Ok(Ok(Some(BoundRw {
         key: kept,
         cell,

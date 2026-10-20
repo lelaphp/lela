@@ -678,10 +678,10 @@ impl Request {
     /// the name itself for a public one, the string the declaration
     /// holds ([`Request::kept_string`]), views.
     pub(crate) fn slot_names(&mut self, class: ClassId) -> Result<Vec<php_heap::Str>, Thrown> {
-        let slots = self.placed_properties(class).len();
-        let mut names = Vec::with_capacity(slots);
-        for at in 0..slots {
-            if let Some(name) = self.slot_name_at(class, at)? {
+        let slots = self.class_slots(class);
+        let mut names = Vec::with_capacity(self.placed_properties(class).len());
+        for slot in 0..slots {
+            if let Some(name) = self.slot_name(class, slot)? {
                 names.push(name);
             }
         }
@@ -695,14 +695,7 @@ impl Request {
         class: ClassId,
         slot: u32,
     ) -> Result<Option<php_heap::Str>, Thrown> {
-        match usize::try_from(slot) {
-            Ok(at) => self.slot_name_at(class, at),
-            Err(_) => Ok(None),
-        }
-    }
-
-    fn slot_name_at(&mut self, class: ClassId, at: usize) -> Result<Option<php_heap::Str>, Thrown> {
-        let Some((declaring, property)) = self.placed_property(class, at) else {
+        let Some((declaring, property)) = self.placed_property(class, slot) else {
             return Ok(None);
         };
         let prefix = self

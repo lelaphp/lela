@@ -108,9 +108,13 @@ impl ZvalRef {
     /// owner taken.
     #[must_use]
     pub fn read(self) -> Zval {
-        // SAFETY: the pointer was taken from a live frame slot or object
-        // slot by `Frame::slot_ptr` or `Obj::slot_ref`, and a name kept
-        // past the slot's life is the same mistake in php.
+        // SAFETY: the pointer was taken from a live slot by the one
+        // place that lays it down: a frame slot (`Frame::slot_ptr`), an
+        // object slot (`Obj::slot_ref`), an array's bucket
+        // (`Arr::value_ref`, `Arr::str_value_ref`) or a reference's value
+        // (`Ref::val_ref`); a name kept past the slot's life, or past a
+        // resize of the table whose bucket it is, is the same mistake in
+        // php.
         unsafe { self.0.as_ptr().read() }
     }
 
@@ -152,8 +156,8 @@ impl ZvalRef {
     /// [`set_fe_pos`](ZvalRef::set_fe_pos) and by nothing else.
     pub fn write(self, z: Zval) {
         let z = z.with_u2_of(self.read());
-        // SAFETY: as `read`; the slot is sixteen aligned bytes the frame
-        // or the object laid down.
+        // SAFETY: as `read`; the slot is sixteen aligned bytes the one
+        // that laid it down laid.
         unsafe { self.0.as_ptr().write(z) };
     }
 

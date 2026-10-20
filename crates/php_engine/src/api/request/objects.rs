@@ -242,9 +242,11 @@ impl Request {
     pub(crate) fn placed_property(
         &self,
         class: ClassId,
-        slot: usize,
+        slot: u32,
     ) -> Option<(ClassId, &PropertyDecl)> {
-        let info = *self.placed_properties(class).get(slot)?;
+        let info = *self
+            .placed_properties(class)
+            .get(usize::try_from(slot).ok()?)?;
         Some((info.declaring, self.property_decl(info)?))
     }
 
@@ -718,19 +720,25 @@ impl Request {
     /// d3
     /// ```
     pub(crate) fn shutdown_destructors(&mut self) {
+        let Some(arr) = self.symbol_arr(crate::exec::TableId::GLOBAL) else {
+            return;
+        };
         loop {
-            let symbols = self.globals().len();
-            let mut at = symbols;
+            let symbols = arr.len();
+            let mut at = arr.num_used();
             while at > 0 && !self.objects.shutdown_walk_ended {
                 at -= 1;
-                let alone = (self.globals().get(at))
-                    .and_then(|(_, symbol)| symbol.view(|_, _| None))
-                    .is_some_and(|value| value.as_object().is_some() && value.refcount() == 1);
-                if alone && let Some(symbol) = self.table_remove(crate::exec::TableId::GLOBAL, at) {
-                    self.release_symbol(symbol);
+                // `zval_call_destructor`: an `IS_INDIRECT` row followed
+                // to its CV first.
+                let alone = arr.entry_at(at).is_some_and(|(_, z)| {
+                    let value = Value::of_zval(z.as_indirect().map_or(z, php_heap::ZvalRef::read));
+                    value.as_object().is_some() && value.refcount() == 1
+                });
+                if alone && let Some(z) = self.heap.array_take_at(arr, at) {
+                    self.release_row(z);
                 }
             }
-            if symbols == self.globals().len() || self.objects.shutdown_walk_ended {
+            if symbols == arr.len() || self.objects.shutdown_walk_ended {
                 break;
             }
         }

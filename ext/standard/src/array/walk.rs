@@ -15,7 +15,7 @@ use php_ext::coerce::{truthy, value_name};
 use php_ext::raising::{Thrown, arg_type_error, call_stack_end, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk::Hold;
-use php_ext::values::{Key, Owner, PhpArray, PhpRef, Value, ValueRef, walk};
+use php_ext::values::{Emalloc, Key, Layout, Owner, PhpArray, PhpRef, Value, ValueRef, walk};
 
 use super::constants::{ARRAY_FILTER_USE_BOTH, ARRAY_FILTER_USE_KEY};
 use super::copied;
@@ -773,6 +773,30 @@ fn array_all(req: &mut Request, array: PhpArray, callback: Callable) -> Result<b
 /// array_map(): Argument #3 must be of type array, int given
 /// array_map(): Argument #1 ($callback) must be a valid callback or null, function "nope" not found or invalid function name
 /// ```
+///
+/// The answer is laid down before the first call, packed at the input's
+/// used slots or a hash at its count, and over several arrays sized for
+/// the longest beside php's `array_pos` and `params`, so a callback's
+/// own allocations peak on top of it as php's do.
+///
+/// ```php
+/// $f = function () { $x = str_repeat('a', 1000); unset($x); return 1; };
+/// $h = range(1, 9); unset($h[0]);
+/// foreach ([[$f, [1]], [$f, ['k' => 1]], [fn ($v) => $v, $h], [fn ($a, $b) => 1, range(1, 9), [1]], [null, range(1, 9), [1]]] as $c) {
+///   array_map(...$c);
+///   $s = memory_get_usage(); memory_reset_peak_usage();
+///   $r = array_map(...$c);
+///   echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n";
+///   unset($r);
+/// }
+/// ```
+/// ```expect
+/// 1496 248
+/// 1656 376
+/// 376 376
+/// 424 376
+/// 2336 2320
+/// ```
 #[php_function]
 fn array_map(
     req: &mut Request,
@@ -849,7 +873,17 @@ fn mapped(
     if array.is_empty() {
         return Ok(Some(Owner::take(req, array)));
     }
-    let mut out = PhpArray::new(req)?;
+    // The answer laid down before the first call, as php's
+    // `array_init_size` and `zend_hash_real_init_packed` (`_mixed` for a
+    // map) are (`Z/ext/standard/array.c:6819`): packed at the input's
+    // `nNumUsed`, its holes kept, or a hash at its count.
+    let mut out = if array.is_packed() {
+        let used = packed_used(req, array);
+        PhpArray::sized(req, used, Layout::Packed)?
+    } else {
+        let len = u32::try_from(array.len()).unwrap_or(u32::MAX);
+        PhpArray::sized(req, len, Layout::Hash)?
+    };
     // `ZEND_HASH_MAP_FOREACH_KEY_VAL(input, num_key, str_key,
     // fci.params)` (`Z/ext/standard/array.c:6854`), no owner of the table taken:
     // the argument holds it while the callback runs. An answer of
@@ -879,6 +913,20 @@ fn mapped(
     Ok(Some(out))
 }
 
+/// A packed table's `nNumUsed`, the slot past its last element, which is
+/// its key: the count where no key below `nNextFreeElement` is missing,
+/// the last key's next where a hole stands.
+fn packed_used(req: &Request, array: PhpArray) -> u32 {
+    let len = u32::try_from(array.len()).unwrap_or(u32::MAX);
+    if array.next_free() == i64::from(len) {
+        return len;
+    }
+    match walk::rows(req, array).last() {
+        Some((Key::Int(last), _)) => u32::try_from(last.saturating_add(1)).unwrap_or(len),
+        _ => len,
+    }
+}
+
 /// `array_map` over two arrays or more. A call of its own, so that what
 /// it holds is not in the frame a recursion through a one-array
 /// `array_map` stands on (#3022).
@@ -888,17 +936,54 @@ fn mapped_together(
     callback: Option<&Callable>,
     arrays: &[PhpArray],
 ) -> Result<Option<Owner<PhpArray>>, Thrown> {
+    // php's `ecalloc`'d `array_pos` and `safe_emalloc`'d `params` stand on
+    // the request's heap beside the answer, `array_init_size`d at the
+    // longest (`Z/ext/standard/array.c:6871`, `:6880`, `:6929`), whose
+    // table its first write lays.
+    let longest = arrays.iter().map(PhpArray::len).max().unwrap_or(0);
+    let mut positions = vec![0u32; arrays.len()];
+    let array_pos = Emalloc::new(req, arrays.len() * 4)?;
+    let mut out = PhpArray::init_size(req, u32::try_from(longest).unwrap_or(u32::MAX))?;
+    let params = match callback {
+        Some(_) => Some(Emalloc::new(req, arrays.len() * 16)?),
+        None => None,
+    };
+    let mapped = map_together(req, callback, arrays, longest, &mut positions, &mut out);
+    if let Some(params) = params {
+        params.free(req);
+    }
+    array_pos.free(req);
+    match mapped {
+        Ok(true) => Ok(Some(out)),
+        Ok(false) => {
+            out.give_up(req);
+            Ok(None)
+        }
+        Err(thrown) => {
+            out.give_up(req);
+            Err(thrown)
+        }
+    }
+}
+
+/// `array_map`'s steps over several arrays into `out`, `false` where the
+/// callback answered nothing.
+fn map_together(
+    req: &mut Request,
+    callback: Option<&Callable>,
+    arrays: &[PhpArray],
+    longest: usize,
+    positions: &mut [u32],
+    out: &mut Owner<PhpArray>,
+) -> Result<bool, Thrown> {
     // The arrays read at once by bucket position, as php reads each at its
     // `array_pos[i]` (`Z/ext/standard/array.c:6889`, `:6933`): the value at the next
     // bucket that holds one as it stands at the step, `null` past the end,
     // no owner of any table taken while the callback runs.
-    let longest = arrays.iter().map(PhpArray::len).max().unwrap_or(0);
-    let mut positions = vec![0u32; arrays.len()];
-    let mut out = PhpArray::new(req)?;
     for _ in 0..longest {
         let row: Vec<Value> = arrays
             .iter()
-            .zip(&mut positions)
+            .zip(&mut *positions)
             .map(|(array, at)| match array.live_from(*at) {
                 Some((found, _, value)) => {
                     *at = found.saturating_add(1);
@@ -909,26 +994,23 @@ fn mapped_together(
             .collect();
         let element = match callback {
             None => {
-                let mut tuple = PhpArray::new(req)?;
+                let n = u32::try_from(arrays.len()).unwrap_or(u32::MAX);
+                let mut tuple = PhpArray::init_size(req, n)?;
                 for value in row {
                     tuple.append(req, Owner::take(req, value))?;
                 }
                 tuple.into_value()
             }
-            Some(callback) => match call(req, callback, &row) {
-                Ok(answer) if matches!(answer.as_ref(), ValueRef::Undef) => {
+            Some(callback) => {
+                let answer = call(req, callback, &row)?;
+                if matches!(answer.as_ref(), ValueRef::Undef) {
                     answer.give_up(req);
-                    out.give_up(req);
-                    return Ok(None);
+                    return Ok(false);
                 }
-                Ok(answer) => answer,
-                Err(thrown) => {
-                    out.give_up(req);
-                    return Err(thrown);
-                }
-            },
+                answer
+            }
         };
         out.append(req, element)?;
     }
-    Ok(Some(out))
+    Ok(true)
 }

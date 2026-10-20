@@ -495,17 +495,13 @@ fn path_text(path: &syn::Path) -> String {
 /// `[workspace.lints]` where the crate inherits them: `clippy::<name>`
 /// for a linter's table, the name alone for `rust`'s.
 fn cargo_lints(root: &Path, krate: &Crate) -> Result<Levels> {
-    let read = |path: PathBuf| -> Result<toml::Table> {
-        let text = crate::read(&path)?;
-        toml::from_str(&text).with_context(|| format!("{}", path.display()))
-    };
-    let own = read(root.join(krate.path()).join("Cargo.toml"))?;
+    let own: toml::Table = crate::read_toml(&root.join(krate.path()).join("Cargo.toml"))?;
     let Some(lints) = own.get("lints").and_then(toml::Value::as_table) else {
         return Ok(Levels::new());
     };
     let workspace;
     let lints = if lints.get("workspace").and_then(toml::Value::as_bool) == Some(true) {
-        workspace = read(root.join("Cargo.toml"))?;
+        workspace = crate::read_toml::<toml::Table>(&root.join("Cargo.toml"))?;
         match workspace
             .get("workspace")
             .and_then(|w| w.get("lints"))

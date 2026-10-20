@@ -223,18 +223,14 @@ fn held_twice(mut pair: impl FnMut() -> Result<[Vec<u8>; 2]>) -> Result<Came> {
 /// makala's response with its own `SERVER_SOFTWARE`, `makala/<version>`,
 /// replaced by the mapping's, `nginx/<version>`: known difference 3.
 fn software(response: &[u8], own: &str, nginx: &str) -> Vec<u8> {
-    let theirs = format!("nginx/{nginx}");
-    let (mut out, mut rest) = (Vec::new(), response);
-    while let Some(at) = (!own.is_empty())
-        .then(|| rest.windows(own.len()).position(|w| w == own.as_bytes()))
-        .flatten()
-    {
-        out.extend_from_slice(&rest[..at]);
-        out.extend_from_slice(theirs.as_bytes());
-        rest = &rest[at + own.len()..];
+    if own.is_empty() {
+        return response.to_vec();
     }
-    out.extend_from_slice(rest);
-    out
+    crate::oracle::replace(
+        response,
+        own.as_bytes(),
+        format!("nginx/{nginx}").as_bytes(),
+    )
 }
 
 /// A rendered response with its header lines in the order of their names,

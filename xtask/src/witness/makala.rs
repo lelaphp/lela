@@ -454,6 +454,11 @@ impl Fpm {
         round(stream, pairs, Some(&self.body))
     }
 
+    /// The pool's master, whose children answer its requests.
+    pub(crate) fn pid(&self) -> u32 {
+        (self.pool.lock().unwrap_or_else(PoisonError::into_inner)).pid()
+    }
+
     /// Once the request last asked has ended in the pool's child, as well
     /// as its response (`Pool::settle`).
     fn settle(&mut self) -> Result<()> {

@@ -330,28 +330,26 @@ fn built_suite(subset: &Path) -> Option<PathBuf> {
 /// where the tree was absent, a line saying the unbuilt are the measured
 /// ones alone.
 fn markdown(parity: &Parity) -> String {
-    let mut out = String::from("| suite | state | met | target | outside | predated | reading |\n");
-    out.push_str("|---|---|---|---|---|---|---|\n");
-    for suite in &parity.suites {
-        let counts = match suite.state {
-            State::Held { target } => {
-                [target.met, target.n, target.outside, target.predated].map(|n| n.to_string())
-            }
-            _ => Default::default(),
-        };
-        let status = suite
-            .reading
-            .as_ref()
-            .map_or(super::NO_READING, |r| r.status.as_str());
-        writeln!(
-            out,
-            "| {} | {} | {} | {status} |",
-            cell(&suite.name),
-            suite.state.as_str(),
-            counts.join(" | ")
-        )
-        .ok();
-    }
+    let head = [
+        "suite", "state", "met", "target", "outside", "predated", "reading",
+    ];
+    let mut out = super::grid(
+        &head,
+        parity.suites.iter().map(|suite| {
+            let counts = match suite.state {
+                State::Held { target } => {
+                    [target.met, target.n, target.outside, target.predated].map(|n| n.to_string())
+                }
+                _ => Default::default(),
+            };
+            let status = suite
+                .reading
+                .as_ref()
+                .map_or(super::NO_READING, |r| r.status.as_str());
+            let named = [cell(&suite.name), suite.state.as_str().to_owned()];
+            named.into_iter().chain(counts).chain([status.to_owned()])
+        }),
+    );
     let total = &parity.total;
     writeln!(
         out,
