@@ -269,10 +269,12 @@ pub fn main() -> ExitCode {
     let engine = |ini: &[Define]| engine(ini, &startup);
     let status = match ask {
         // `main` starts php before it answers `-h`
-        // (`Z/sapi/fpm/fpm/fpm_main.c:1694-1697`).
+        // (`Z/sapi/fpm/fpm/fpm_main.c:1694-1697`), and ends it after,
+        // so what C's `stdout` held is written after the usage.
         Ask::Usage(code) => {
-            drop(engine(&ini));
+            let engine = engine(&ini);
             print(&usage(&argv0));
+            drop(engine);
             code
         }
         Ask::Modules => {
@@ -356,8 +358,10 @@ impl php_sapi::OutputSink for Stdout {
         Ok(())
     }
 
+    /// `sapi_cgibin_flush` with no request, `fflush(stdout)`: what C's
+    /// `stdout` holds, a startup diagnostic among it, after the page.
     fn flush(&mut self) {
-        std::io::stdout().lock().flush().ok();
+        php_sapi::stdio::flush();
     }
 
     fn send_headers(&mut self, _head: &php_sapi::ResponseHead) {}

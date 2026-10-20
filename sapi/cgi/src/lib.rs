@@ -385,8 +385,11 @@ impl OutputSink for Process {
             .map_err(|_| Aborted { exit_status: None })
     }
 
+    /// `sapi_cgi_flush`, `fflush(stdout)`: what C's `stdout` holds, a
+    /// startup diagnostic among it, written after the body so far, as
+    /// `flush()` and the request's end (`sapi_cgi_deactivate`) write it.
     fn flush(&mut self) {
-        std::io::stdout().lock().flush().ok();
+        php_sapi::stdio::flush();
     }
 
     /// `sapi_cgi_send_headers`, the head [`php_sapi::cgi::head`] writes.
@@ -717,16 +720,21 @@ pub fn environment() -> Environment {
 /// }
 /// ```
 pub fn serve(engine: &Engine, invocation: &Invocation, env: Environment) -> i32 {
+    // `printf` and `fflush(stdout)`, so a startup diagnostic C's `stdout`
+    // held is written before it.
     if invocation.interactive {
-        Process.write(b"Interactive mode enabled\n\n").ok();
+        php_sapi::stdio::write(b"Interactive mode enabled\n\n");
+        php_sapi::stdio::flush();
     }
     if invocation.behavior == Behavior::Lint {
         return lint(engine, invocation, &env);
     }
     let (description, primary) = match describe(engine, invocation, env) {
         Ok(described) => described,
+        // `PUTS` with no request started, to C's `stdout`
+        // (`php_output_direct`).
         Err(Refusal::Redirect) => {
-            Process.write(SECURITY_ALERT.as_bytes()).ok();
+            php_sapi::stdio::write(SECURITY_ALERT.as_bytes());
             return 255;
         }
     };
@@ -825,21 +833,21 @@ pub fn main() -> ExitCode {
         // `main` starts php before its second pass answers the usage
         // (`Z/sapi/cgi/cgi_main.c:1879`, `:2260-2269`).
         Ask::Usage { stderr, exit_code } => {
-            drop(engine(&options.ini, Origin::Shell, false));
+            let engine = engine(&options.ini, Origin::Shell, false);
             std::io::stderr().lock().write_all(stderr.as_bytes()).ok();
-            std::io::stdout()
-                .lock()
-                .write_all(usage_text(&argv0).as_bytes())
-                .ok();
+            php_sapi::stdio::write(usage_text(&argv0).as_bytes());
+            drop(engine);
             *exit_code
         }
-        // `-v` and `-m` are read by the pass a shell's line alone is given.
+        // `-v` and `-m` are read by the pass a shell's line alone is given:
+        // `-v` in a request, its `write(2)` ahead of what C's `stdout`
+        // holds, and `-m` with none started, a `php_printf` to it.
         Ask::Version => print(&version(&engine(&options.ini, Origin::Shell, false))),
-        Ask::Extensions => print(&php_sapi::modules(&engine(
-            &options.ini,
-            Origin::Shell,
-            false,
-        ))),
+        Ask::Extensions => {
+            let engine = engine(&options.ini, Origin::Shell, false);
+            php_sapi::stdio::write(php_sapi::modules(&engine).as_bytes());
+            0
+        }
         Ask::Serve(invocation) => serve(
             &engine(&options.ini, invocation.origin, invocation.extended_info),
             invocation,
@@ -852,7 +860,7 @@ pub fn main() -> ExitCode {
     php_sapi::exit_code(status)
 }
 
-/// `text` on stdout, and the status 0.
+/// `text` on stdout, as a request's body, and the status 0.
 fn print(text: &str) -> i32 {
     std::io::stdout().lock().write_all(text.as_bytes()).ok();
     0

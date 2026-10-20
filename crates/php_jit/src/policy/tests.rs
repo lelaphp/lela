@@ -197,6 +197,17 @@ fn the_directives_take_phps_defaults_and_bounds_and_jit_mode_names_the_lane() {
         (policy.mode(), policy.compile()),
         (Mode::Tracing, Compile::Inline)
     );
+    // A root's end lines are written on its request, so asking for one
+    // compiles there; the start line or a `PERF` map alone does not.
+    for (debug, compile) in [
+        ("8192", Compile::Inline),
+        ("65536", Compile::Inline),
+        ("4096", Compile::Thread),
+        ("16", Compile::Thread),
+    ] {
+        let (policy, _) = read_ini(&[("opcache.jit", "tracing"), ("opcache.jit_debug", debug)]);
+        assert_eq!(policy.compile(), compile, "jit_debug={debug}");
+    }
 }
 
 /// One row of the state machine: a word of `start`'s kind, cold, heated

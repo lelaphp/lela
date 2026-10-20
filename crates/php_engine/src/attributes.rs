@@ -57,38 +57,69 @@ fn find<'a>(attributes: &'a [AttributeDecl], name: &[u8]) -> Option<&'a Attribut
         .find(|one| one.name.0.eq_ignore_ascii_case(name))
 }
 
-/// `zend_get_attribute_object` with no call frame of its own, over the
-/// internal attribute `class` names among `attributes`, and the string
-/// each of its `properties` holds: `None` where the list
-/// carries no such attribute or one with no argument, which is the
-/// empty suffix php reads the two as; the object's constructor is the
-/// one that holds each argument to its `?string` under the caller's
-/// `strict_types`, and what it threw is the `Err`.
-fn internal_strings(
+/// The suffix php prints after a `#[\Deprecated]` or `#[\NoDiscard]`
+/// diagnostic, as `get_deprecation_suffix_from_attribute` and
+/// `get_nodiscard_suffix_from_attribute` hand it back: `None` is
+/// `ZSTR_EMPTY_ALLOC`, which costs nothing, and otherwise the string
+/// `zend_strpprintf` laid down on the request's heap, which the caller
+/// holds while its message is raised and gives up after it
+/// (`zend_string_release(message_suffix)`).
+pub(crate) struct Suffix(Option<PhpString>);
+
+impl Suffix {
+    /// The string given up.
+    pub(crate) fn give_up(self, req: &mut Request) {
+        if let Some(text) = self.0 {
+            req.release(Value::string(text));
+        }
+    }
+}
+
+impl std::fmt::Display for Suffix {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(text) => f.write_str(&String::from_utf8_lossy(text.as_bytes())),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The two `get_*_suffix_from_attribute`s over the internal attribute
+/// `class` names among `attributes`: none where the list carries no
+/// such attribute or one with no argument; otherwise its object made
+/// with no call frame of its own (`zend_get_attribute_object`), whose
+/// constructor holds each argument to its `?string` under the caller's
+/// `strict_types` and whose throw is the `Err`, the string each of
+/// `properties` holds read off it, and the suffix `worded` makes of
+/// them laid down by `zend_strpprintf` while the object stands, the
+/// object given up after it.
+fn attribute_suffix(
     req: &mut Request,
     attributes: &[AttributeDecl],
     class: &[u8],
     properties: &[&[u8]],
     scope: Option<ClassId>,
-) -> Result<Option<Vec<Vec<u8>>>, Thrown> {
+    worded: impl FnOnce(&[&[u8]]) -> Vec<u8>,
+) -> Result<Suffix, Thrown> {
     let Some(attribute) = find(attributes, class).filter(|one| !one.arguments.is_empty()) else {
-        return Ok(None);
+        return Ok(Suffix(None));
     };
     let Some(class) = req.class_named(Bare::resolved(class)) else {
-        return Ok(None);
+        return Ok(Suffix(None));
     };
     let object = attribute_object_made(req, class, attribute, scope, None)?;
-    let read = properties
+    let read: Vec<Value> = properties
         .iter()
-        .map(|name| {
-            object
-                .prop(req, name)
-                .and_then(|value| value.as_str_bytes().map(<[u8]>::to_vec))
-                .unwrap_or_default()
-        })
+        .map(|name| object.prop(req, name).unwrap_or_default())
         .collect();
+    let read: Vec<&[u8]> = read
+        .iter()
+        .map(|value| value.as_str_bytes().unwrap_or_default())
+        .collect();
+    let text = worded(&read);
+    let suffix = crate::api::raising::strpprintf(req, &text);
     req.release(object.as_value());
-    Ok(Some(read))
+    Ok(Suffix(Some(suffix?)))
 }
 
 /// `Method C::m()` or `Function f()`, as `zend_deprecated_function` and
@@ -159,6 +190,31 @@ fn callee_named(req: &Request, function: Function, method: &str, function_word: 
 /// not run
 /// Caught: Function test() is deprecated, 1234
 /// ```
+///
+/// The suffix is a string of the request's, laid down as
+/// `zend_strpprintf` lays it while the object stands and given up after
+/// the message, and the object's constructor is served with php's
+/// argument array and named table ([`attribute_object_made`]), so a
+/// silenced call peaks where php's does, a native's as a program's:
+///
+/// ```php
+/// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+/// pk(fn () => @strftime('', 0));
+/// pk(fn () => @mhash_count());
+/// #[\Deprecated] function dep() { return 1; }
+/// #[\Deprecated(since: "8.1")] function d3() { return false; }
+/// #[\Deprecated("use IntlDateFormatter::format() instead", "8.1")] function d2() { return false; }
+/// pk(fn () => @dep());
+/// pk(fn () => @d3());
+/// pk(fn () => @d2());
+/// ```
+/// ```expect
+/// 552 32
+/// 472 0
+/// 312 0
+/// 472 0
+/// 448 0
+/// ```
 pub(crate) fn deprecated_function(req: &mut Request, function: Function) -> Result<(), Thrown> {
     let attributes = req
         .function_decl(function)
@@ -173,6 +229,7 @@ pub(crate) fn deprecated_function(req: &mut Request, function: Function) -> Resu
     };
     let named = callee_named(req, function, "Method", "Function");
     raise(req, level, &format!("{named} is deprecated{suffix}"));
+    suffix.give_up(req);
     none_pending(req)
 }
 
@@ -210,12 +267,14 @@ pub(crate) fn no_discard_function(req: &mut Request, function: Function) -> Resu
         .map(|decl| decl.attributes.clone())
         .unwrap_or_default();
     let scope = req.method_class(function);
-    let suffix = match internal_strings(req, &attributes, b"NoDiscard", &[b"message"], scope)? {
-        Some(read) if !read[0].is_empty() => {
-            format!(", {}", String::from_utf8_lossy(&read[0]))
-        }
-        _ => String::new(),
-    };
+    let suffix = attribute_suffix(
+        req,
+        &attributes,
+        b"NoDiscard",
+        &[b"message"],
+        scope,
+        |read| joined_suffix(read[0], b""),
+    )?;
     let level = if req.user_function(function).is_some() {
         Level::UserWarning
     } else {
@@ -229,6 +288,7 @@ pub(crate) fn no_discard_function(req: &mut Request, function: Function) -> Resu
             "The return value of {named} should either be used or intentionally ignored by casting it as (void){suffix}"
         ),
     );
+    suffix.give_up(req);
     none_pending(req)
 }
 
@@ -285,6 +345,7 @@ pub(crate) fn deprecated_class_constant(
         String::from_utf8_lossy(name)
     );
     raise(req, level, &message);
+    suffix.give_up(req);
     none_pending(req)
 }
 
@@ -297,32 +358,29 @@ pub(crate) fn deprecation_suffix(
     req: &mut Request,
     attributes: &[AttributeDecl],
     scope: Option<ClassId>,
-) -> Result<String, Thrown> {
-    Ok(
-        match internal_strings(
-            req,
-            attributes,
-            b"Deprecated",
-            &[b"message", b"since"],
-            scope,
-        )? {
-            Some(read) => joined_suffix(&read[0], &read[1]),
-            None => String::new(),
-        },
+) -> Result<Suffix, Thrown> {
+    attribute_suffix(
+        req,
+        attributes,
+        b"Deprecated",
+        &[b"message", b"since"],
+        scope,
+        |read| joined_suffix(read[0], read[1]),
     )
 }
 
-/// What php prints after `is deprecated`: ` since <since>` and
-/// `, <message>`, each only where it is no empty string.
-fn joined_suffix(message: &[u8], since: &[u8]) -> String {
-    let mut out = String::new();
+/// What php prints after `is deprecated`, `"%s%S%s%S"`: ` since <since>`
+/// and `, <message>`, each only where it is no empty string; the
+/// `NoDiscard` suffix is the message's half.
+fn joined_suffix(message: &[u8], since: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
     if !since.is_empty() {
-        out.push_str(" since ");
-        out.push_str(&String::from_utf8_lossy(since));
+        out.extend_from_slice(b" since ");
+        out.extend_from_slice(since);
     }
     if !message.is_empty() {
-        out.push_str(", ");
-        out.push_str(&String::from_utf8_lossy(message));
+        out.extend_from_slice(b", ");
+        out.extend_from_slice(message);
     }
     out
 }
@@ -793,7 +851,9 @@ impl DelayedTargetValidation {}
 
 /// `zend_update_property_ex` over a readonly property from its class's
 /// own constructor: the first write initialises it, and a second is
-/// php's `Cannot modify readonly property`.
+/// php's `Cannot modify readonly property`. The name is the property's
+/// own, `ZSTR_KNOWN(ZEND_STR_MESSAGE)` and its kind, which costs the
+/// request nothing.
 fn initialise(
     req: &mut Request,
     this: PhpObject,
@@ -804,5 +864,12 @@ fn initialise(
         value.give_up(req);
         return Err(req.readonly_modification(this.class(), name, "modify"));
     }
-    crate::api::call::write_prop(req, &this, name, value)
+    let name = match req.declared_string(name) {
+        Ok(name) => name,
+        Err(thrown) => {
+            value.give_up(req);
+            return Err(thrown);
+        }
+    };
+    this.set_prop(req, name, value)
 }

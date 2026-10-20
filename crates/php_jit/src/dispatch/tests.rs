@@ -232,7 +232,8 @@ fn a_destructors_hot_loop_inside_a_recording_starts_no_second_trace() {
 /// `zend_jit_stop_counter_handlers` stops the rest. php under the
 /// recipe's hot counters with `opcache.jit_max_root_traces=3` writes the
 /// same for this program's `b`, its third trace, a side trace of `a`'s
-/// loop taking the second, which no `Backend` compiles here yet:
+/// loop taking the second, which nothing here grows until a trace is
+/// entered (#2959):
 /// `---- TRACE 3 start (enter) b() …:3`, `---- TRACE 3 abort (too many
 /// traces)`, `---- TRACE 3 blacklisted`, and nothing for `c` or `d`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -434,4 +435,35 @@ fn under_off_no_word_is_written() {
     let force = testing::Scratch::new();
     let (_, spied) = force.serve_kept::<Spied>(&testing::engine::<Spy>(&DUMPED), program);
     assert!(spied.unwrap_or_default().written > 0);
+}
+
+/// A loop in `$main` that no call activates is a root of its own: the
+/// entry's recording stops at the `eval`, whose code is no root, and the
+/// loop's header claims when its back-edge visits it, the recording
+/// handed back through the jump's `Resume`. php under the recipe writes
+/// the same `TRACE 2 start (loop) $main() …:4` line, after a return root
+/// at `$main`'s landing past the `eval` that aborts at the inner loop
+/// (`zend_jit_trace_setup_ret_counter`), which this tier does not root
+/// yet, and before the side trace its compiled loop exits into.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_main_loop_no_call_activates_is_a_root_at_its_header() {
+    let engine = testing::engine::<Lane>(&DUMPED);
+    let program = "eval(\"\\$x = 1;\");\n$s = 0;\nfor ($i = 0; $i < 3; $i++) { $s += $i; }\necho $s, \"\\n\";";
+    let served = testing::Scratch::new().serve(&engine, program);
+    assert_eq!(testing::stdout(&served), "3\n");
+    assert_eq!(
+        lines(&served),
+        [
+            "JIT: jit.mode=force",
+            "---- TRACE 1 start (enter) $main() body.php:2",
+            "---- TRACE 1 stop (exit to VM interpreter)",
+            "---- TRACE 1 compiled",
+            "",
+            "---- TRACE 2 start (loop) $main() body.php:4",
+            "---- TRACE 2 stop (loop)",
+            "---- TRACE 2 compiled",
+            "",
+        ]
+    );
 }

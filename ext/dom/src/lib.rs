@@ -60,7 +60,7 @@ use php_ext::request::{MAXPATHLEN, Request};
 use php_ext::values::walk;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{
-    Borrowed, ClassType, DocProps, Exported, Kind, Name, Node, NodeObject, Ns, SharedDoc,
+    Borrowed, ClassType, DocProps, Exported, Kind, Name, Node, NodeObject, Ns, SharedDoc, Switches,
     XML_ATTRIBUTE_ID,
 };
 
@@ -427,7 +427,7 @@ fn import_simplexml_common(
         ));
     };
     let base = class(req, name)?;
-    let class = mapped(&exported.props(), base);
+    let class = exported.mapped(base);
     let made = new_object(req, class)?;
     if let Some(mut obj) = libxml_half(req, *made) {
         obj.attach(req, node, exported.document());
@@ -480,7 +480,7 @@ fn shared_doc(req: &Request, object: PhpObject) -> Option<SharedDoc> {
 }
 
 /// `dom_get_doc_props_read_only(obj->document)`.
-fn props_of(req: &Request, object: PhpObject) -> DocProps {
+fn props_of(req: &Request, object: PhpObject) -> Switches {
     dom(req, object).map(|d| d.obj.props()).unwrap_or_default()
 }
 
@@ -731,7 +731,7 @@ fn object_for(
     };
     let base = class(req, name)?;
     let class = match context {
-        Some(ctx) => mapped(&props_of(req, ctx), base),
+        Some(ctx) => dom(req, ctx).map_or(base, |d| d.obj.mapped(base)),
         None => base,
     };
     instantiate(req, class, node, context)
@@ -786,7 +786,7 @@ pub fn create_object_in(
             &format!("Unsupported node type: {n}"),
         ));
     };
-    let class = mapped(&doc.props(), class(req, name)?);
+    let class = doc.mapped(class(req, name)?);
     let object = new_object(req, class)?;
     if let Some(mut obj) = libxml_half(req, *object) {
         obj.attach(req, node, doc.shared_doc());
@@ -1378,21 +1378,33 @@ fn clone_node(node: Node, doc: Option<Node>, recursive: bool) -> Option<Node> {
 }
 
 /// `dom_copy_document_ref`: the switches, the class map, the class family
-/// and the serialiser carried to a copy's document.
-fn copy_document_ref(req: &mut Request, from: PhpObject, to: PhpObject) {
-    let (props, class_type, handlers) = match dom(req, from) {
-        Some(d) if d.obj.has_document() => {
-            (d.obj.props(), d.obj.class_type(), d.obj.document_handlers())
-        }
-        _ => return,
+/// and the serialiser carried to a copy's document, whose props
+/// `dom_get_doc_props` lays down; the `Err` is the memory limit.
+fn copy_document_ref(req: &mut Request, from: PhpObject, to: PhpObject) -> Result<(), Thrown> {
+    let (switches, rows, class_type, handlers) = match dom(req, from) {
+        Some(d) if d.obj.has_document() => (
+            d.obj.props(),
+            d.obj.doc_props().and_then(DocProps::class_rows),
+            d.obj.class_type(),
+            d.obj.document_handlers(),
+        ),
+        _ => return Ok(()),
     };
-    if let Some(d) = dom_mut(req, to) {
-        if let Some(p) = d.obj.props_mut() {
-            *p = props;
-        }
-        d.obj.set_class_type(class_type);
-        d.obj.set_document_handlers(handlers);
+    let Some(mut obj) = libxml_half(req, to) else {
+        return Ok(());
+    };
+    if !obj.has_document() {
+        return Ok(());
     }
+    if let Some(p) = obj.props_mut(req)? {
+        p.switches = switches;
+        if let Some(rows) = rows {
+            p.copy_classmap(req, rows)?;
+        }
+    }
+    obj.set_class_type(class_type);
+    obj.set_document_handlers(handlers);
+    Ok(())
 }
 
 /// `dom_objects_store_clone_obj`: the object cloned with a copy of its
@@ -1485,8 +1497,13 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>
     }
     if let Some((n, cloned)) = copied
         && cloned.doc() != n.doc()
+        && let Err(thrown) = copy_document_ref(req, object, *clone)
     {
-        copy_document_ref(req, object, *clone);
+        if let Some(private) = fresh {
+            private.free(req);
+        }
+        clone.give_up(req);
+        return Err(thrown);
     }
     if let Some(private) = fresh {
         match libxml_half(req, *clone) {
@@ -2144,16 +2161,6 @@ fn handler(req: &mut Request, object: PhpObject, name: &[u8]) -> Option<&'static
         .iter()
         .flat_map(|t| t.iter())
         .find(|p| p.name == name)
-}
-
-/// `dom_get_doc_classmap`: the class a program registered in place of
-/// `base` for the document, `base` where it registered none.
-fn mapped(props: &DocProps, base: ClassId) -> ClassId {
-    props
-        .classmap
-        .iter()
-        .find(|(b, _)| *b == base)
-        .map_or(base, |(_, c)| *c)
 }
 
 /// `libxml_fixup_name_and_content_outer` below the node itself.

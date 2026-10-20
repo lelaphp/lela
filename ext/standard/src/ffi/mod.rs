@@ -1208,6 +1208,53 @@ pub(super) fn place_fds(command: &mut std::process::Command, moves: Vec<(RawFd, 
     unsafe { command.pre_exec(placed) };
 }
 
+/// The process's working directory, the one a child started with no
+/// `chdir` inherits, as the kernel names it: `proc_pidinfo(2)`'s
+/// `PROC_PIDVNODEPATHINFO` on macOS, whose `getcwd(3)` opens `.` to name
+/// it and so fails where the caller may not read the directory, which
+/// is the case a child that inherits it must still start in (#2917).
+#[cfg(target_os = "macos")]
+pub(super) fn process_dir() -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let pid = c_int::try_from(std::process::id()).ok()?;
+    let size = c_int::try_from(size_of::<libc::proc_vnodepathinfo>()).ok()?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
+    // SAFETY: `info` is live storage of `size` bytes, which the call
+    // writes within and nothing else.
+    let wrote = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if wrote != size {
+        return None;
+    }
+    // SAFETY: the struct is integers and arrays of them, valid zeroed,
+    // and the call answered that it wrote all of it.
+    let info = unsafe { info.assume_init() };
+    let path: Vec<u8> = info
+        .pvi_cdir
+        .vip_path
+        .as_flattened()
+        .iter()
+        .map(|c| c.to_ne_bytes()[0])
+        .take_while(|b| *b != 0)
+        .collect();
+    (!path.is_empty()).then(|| std::ffi::OsString::from_vec(path).into())
+}
+
+/// The process's working directory, the one a child started with no
+/// `chdir` inherits: `getcwd(3)`, which the kernel answers without
+/// reading the directory.
+#[cfg(not(target_os = "macos"))]
+pub(super) fn process_dir() -> Option<std::path::PathBuf> {
+    std::env::current_dir().ok()
+}
+
 /// The `envp` a child is started with, each `name=value` in the order
 /// given, which php hands `posix_spawn` and `execve` as it is: made before
 /// the fork and made the child's `environ` between `fork` and `exec`,

@@ -65,7 +65,9 @@ pub(crate) enum Mode {
 
 /// Where a trace compiles: on the engine's compile thread, or on the
 /// request's at the claim (`jit.compile`). `Force` and `ExitFuzz` imply
-/// `Inline`.
+/// `Inline`, and so does an `opcache.jit_debug` that asks for a root's
+/// `stop`, `compiled`, `abort` or `blacklisted` line, which php writes
+/// on the request in one order a worker could not keep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Compile {
     Thread,
@@ -158,6 +160,8 @@ pub(crate) enum OffBecause {
     Invalid,
     /// `opcache.jit_buffer_size` is zero.
     NoBuffer,
+    /// The host has no `Backend` (`lower::Unsupported`): why.
+    NoBackend(&'static str),
 }
 
 /// A line the tier's start logs (`jit-design.md` §4, §4.7).
@@ -194,6 +198,7 @@ impl std::fmt::Display for Note {
                 OffBecause::NotOn => "JIT: off: opcache.jit is not on",
                 OffBecause::Invalid => "JIT: off: opcache.jit is invalid",
                 OffBecause::NoBuffer => "JIT: off: opcache.jit_buffer_size is 0",
+                OffBecause::NoBackend(why) => return write!(f, "JIT: off: no backend: {why}"),
             }),
         }
     }
@@ -383,6 +388,15 @@ impl Policy {
                 Mode::Off
             }
         };
+        let debug = JitDebug(u32::try_from(long(ini, "opcache.jit_debug", 0)).unwrap_or(0));
+        // A root's lines after its start are php's in the order its
+        // request writes them, which a worker could not keep.
+        let ends = debug.any(
+            JitDebug::TRACE_STOP
+                | JitDebug::TRACE_COMPILED
+                | JitDebug::TRACE_ABORT
+                | JitDebug::TRACE_BLACKLIST,
+        );
         let compile = match (mode, value(ini, "jit.compile").unwrap_or_default()) {
             (Mode::Force | Mode::ExitFuzz, _) | (_, b"inline") => Compile::Inline,
             (_, b"" | b"thread") => Compile::Thread,
@@ -394,6 +408,7 @@ impl Policy {
                 Compile::Thread
             }
         };
+        let compile = if ends { Compile::Inline } else { compile };
         Policy {
             mode,
             compile,
@@ -418,8 +433,14 @@ impl Policy {
             max_recursive_returns: small(ini, "opcache.jit_max_recursive_returns", 2, 0..=3),
             max_polymorphic_calls: count(ini, "opcache.jit_max_polymorphic_calls", 2),
             buffer_size: u64::try_from(buffer_size).unwrap_or(0),
-            debug: JitDebug(u32::try_from(long(ini, "opcache.jit_debug", 0)).unwrap_or(0)),
+            debug,
         }
+    }
+
+    /// The tier off, as a host with no `Backend` runs it
+    /// (`jit-design.md` §4.3).
+    pub(crate) fn off(&mut self) {
+        self.mode = Mode::Off;
     }
 
     /// How the tier runs.

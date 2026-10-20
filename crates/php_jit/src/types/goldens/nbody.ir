@@ -20,10 +20,10 @@ entry
   #49 f0.CV6 [packed array]
   #69 f0.CV8 [long]
   guard #23 long -> exit 0
-  guard #6 long -> exit 1
-  guard #49 packed -> exit 2
-  guard #69 long -> exit 3
-loop at 0, loop, interrupt exit 4
+  guard #6 long -> exit 0
+  guard #49 packed -> exit 0
+  guard #69 long -> exit 0
+loop at 0, loop, interrupt exit 1
   #1 f0.CV3 [undef, ref, any] = phi(#0, #63)
   #3 f0.CV4 [undef, ref, any] = phi(#2, #65)
   #5 f0.CV5 [undef, ref, any] = phi(#4, #67)
@@ -35,41 +35,41 @@ loop at 0, loop, interrupt exit 4
   #17 f0.CV15 [undef, any] = phi(#16, #48)
   #19 f0.CV16 [undef, any] = phi(#18, #52)
   #21 f0.CV17 [undef, any] = phi(#20, #55)
-  guard #22 ref to array -> exit 5
-0014 f0 FETCH_DIM_R #22, #23 step leaves -> exit 6
+  guard #22 ref to array -> exit 1
+0014 f0 FETCH_DIM_R #22, #23 step leaves -> exit 1
   -> #24 f0.T4 [double]
-  guard #22 ref to array -> exit 7
-0015 f0 FETCH_DIM_R #22, #7 step leaves -> exit 8
+  guard #22 ref to array -> exit 2
+0015 f0 FETCH_DIM_R #22, #7 step leaves -> exit 2
   -> #25 f0.T5 [double]
-  guard #25 double -> exit 9
-  guard #24 double -> exit 10
+  guard #25 double -> exit 3
+  guard #24 double -> exit 3
 0016 f0 SUB #24, #25 inline
   -> #26 f0.T6 [double] reg
-0017 f0 ASSIGN #9, #26 inline leaves -> exit 11
+0017 f0 ASSIGN #9, #26 inline leaves -> exit 4
   -> #27 f0.CV11 [double] reg
-  guard #28 ref to array -> exit 12
-0018 f0 FETCH_DIM_R #28, #23 step leaves -> exit 13
+  guard #28 ref to array -> exit 5
+0018 f0 FETCH_DIM_R #28, #23 step leaves -> exit 5
   -> #29 f0.T8 [double]
-  guard #28 ref to array -> exit 14
-0019 f0 FETCH_DIM_R #28, #7 step leaves -> exit 15
+  guard #28 ref to array -> exit 6
+0019 f0 FETCH_DIM_R #28, #7 step leaves -> exit 6
   -> #30 f0.T9 [double]
-  guard #30 double -> exit 16
-  guard #29 double -> exit 17
+  guard #30 double -> exit 7
+  guard #29 double -> exit 7
 0020 f0 SUB #29, #30 inline
   -> #31 f0.T10 [double] reg
-0021 f0 ASSIGN #11, #31 inline leaves -> exit 18
+0021 f0 ASSIGN #11, #31 inline leaves -> exit 8
   -> #32 f0.CV12 [double] reg
-  guard #33 ref to array -> exit 19
-0022 f0 FETCH_DIM_R #33, #23 step leaves -> exit 20
+  guard #33 ref to array -> exit 9
+0022 f0 FETCH_DIM_R #33, #23 step leaves -> exit 9
   -> #34 f0.T12 [double]
-  guard #33 ref to array -> exit 21
-0023 f0 FETCH_DIM_R #33, #7 step leaves -> exit 22
+  guard #33 ref to array -> exit 10
+0023 f0 FETCH_DIM_R #33, #7 step leaves -> exit 10
   -> #35 f0.T13 [double]
-  guard #35 double -> exit 23
-  guard #34 double -> exit 24
+  guard #35 double -> exit 11
+  guard #34 double -> exit 11
 0024 f0 SUB #34, #35 inline
   -> #36 f0.T14 [double] reg
-0025 f0 ASSIGN #13, #36 inline leaves -> exit 25
+0025 f0 ASSIGN #13, #36 inline leaves -> exit 12
   -> #37 f0.CV13 [double] reg
 0026 f0 MUL #27, #27 inline
   -> #38 f0.T16 [double] reg
@@ -81,113 +81,100 @@ loop at 0, loop, interrupt exit 4
   -> #41 f0.T19 [double] reg
 0030 f0 ADD #40, #41 inline
   -> #42 f0.T20 [double] reg
-0031 f0 ASSIGN #15, #42 inline leaves -> exit 26
+0031 f0 ASSIGN #15, #42 inline leaves -> exit 13
   -> #43 f0.CV14 [double] reg
-0032 f0 POW #43, float(0.5) step leaves -> exit 27
+0032 f0 POW #43, float(0.5) step leaves -> exit 14
   -> #44 f0.T22 [double]
 0033 f0 MUL #43, #44 inline
   -> #45 f0.T23 [double] reg
-0034 f0 DIV #46, #45 inline leaves -> exit 28
+0034 f0 DIV #46, #45 inline leaves -> exit 15
   -> #47 f0.T24 [double] reg
-0035 f0 ASSIGN #17, #47 inline leaves -> exit 29
+0035 f0 ASSIGN #17, #47 inline leaves -> exit 16
   -> #48 f0.CV15 [double] reg
-0036 f0 FETCH_DIM_R #49, #7 inline leaves -> exit 31
+0036 f0 FETCH_DIM_R #49, #7 inline leaves -> exit 18
   -> #50 f0.T26 [double] reg
-  checks #50 double -> exit 30
+  checks #50 double -> exit 17
 0037 f0 MUL #48, #50 inline
   -> #51 f0.T27 [double] reg
-0038 f0 ASSIGN #19, #51 inline leaves -> exit 32
+0038 f0 ASSIGN #19, #51 inline leaves -> exit 19
   -> #52 f0.CV16 [double] reg
-0039 f0 FETCH_DIM_R #49, #23 inline leaves -> exit 34
+0039 f0 FETCH_DIM_R #49, #23 inline leaves -> exit 21
   -> #53 f0.T29 [double] reg
-  checks #53 double -> exit 33
+  checks #53 double -> exit 20
 0040 f0 MUL #48, #53 inline
   -> #54 f0.T30 [double] reg
-0041 f0 ASSIGN #21, #54 inline leaves -> exit 35
+0041 f0 ASSIGN #21, #54 inline leaves -> exit 22
   -> #55 f0.CV17 [double] reg
 0042 f0 MUL #27, #52 inline
   -> #56 f0.T33 [double] reg
-  guard #1 ref to array -> exit 36
-0043 f0 ASSIGN_DIM_OP #1, #23, #56 step leaves -> exit 37
+  guard #1 ref to array -> exit 23
+0043 f0 ASSIGN_DIM_OP #1, #23, #56 step leaves -> exit 24
   -> #57 f0.CV3 [ref, array]
 0045 f0 MUL #32, #52 inline
   -> #58 f0.T35 [double] reg
-  guard #3 ref to array -> exit 38
-0046 f0 ASSIGN_DIM_OP #3, #23, #58 step leaves -> exit 39
+  guard #3 ref to array -> exit 25
+0046 f0 ASSIGN_DIM_OP #3, #23, #58 step leaves -> exit 26
   -> #59 f0.CV4 [ref, array]
 0048 f0 MUL #37, #52 inline
   -> #60 f0.T37 [double] reg
-  guard #5 ref to array -> exit 40
-0049 f0 ASSIGN_DIM_OP #5, #23, #60 step leaves -> exit 41
+  guard #5 ref to array -> exit 27
+0049 f0 ASSIGN_DIM_OP #5, #23, #60 step leaves -> exit 28
   -> #61 f0.CV5 [ref, array]
 0051 f0 MUL #27, #55 inline
   -> #62 f0.T39 [double] reg
-  guard #57 ref to array -> exit 42
-0052 f0 ASSIGN_DIM_OP #57, #7, #62 step leaves -> exit 43
+  guard #57 ref to array -> exit 29
+0052 f0 ASSIGN_DIM_OP #57, #7, #62 step leaves -> exit 30
   -> #63 f0.CV3 [ref, array]
 0054 f0 MUL #32, #55 inline
   -> #64 f0.T41 [double] reg
-  guard #59 ref to array -> exit 44
-0055 f0 ASSIGN_DIM_OP #59, #7, #64 step leaves -> exit 45
+  guard #59 ref to array -> exit 31
+0055 f0 ASSIGN_DIM_OP #59, #7, #64 step leaves -> exit 32
   -> #65 f0.CV4 [ref, array]
 0057 f0 MUL #37, #55 inline
   -> #66 f0.T43 [double] reg
-  guard #61 ref to array -> exit 46
-0058 f0 ASSIGN_DIM_OP #61, #7, #66 step leaves -> exit 47
+  guard #61 ref to array -> exit 33
+0058 f0 ASSIGN_DIM_OP #61, #7, #66 step leaves -> exit 34
   -> #67 f0.CV5 [ref, array]
 0060 f0 PRE_INC #7 inline
   -> #68 f0.CV10 [long] reg
-  checks #68 long -> exit 48
+  checks #68 long -> exit 35
 0061 f0 IS_SMALLER #68, #69 fused inline
-  checks direction taken -> exit 49
+  checks direction taken -> exit 36
 end: back to 0
 exit 0: f0 0014 plain
-exit 1: f0 0014 plain
-exit 2: f0 0014 plain
-exit 3: f0 0014 plain
-exit 4: f0 0014 plain f0.CV10=#7
-exit 5: f0 0014 plain f0.CV10=#7
-exit 6: f0 0014 plain f0.CV10=#7
-exit 7: f0 0015 plain f0.CV10=#7
-exit 8: f0 0015 plain f0.CV10=#7
-exit 9: f0 0016 plain f0.CV10=#7
-exit 10: f0 0016 plain f0.CV10=#7
-exit 11: f0 0017 plain f0.CV10=#7 f0.CV11=#27
-exit 12: f0 0018 plain f0.CV10=#7 f0.CV11=#27
-exit 13: f0 0018 plain f0.CV10=#7 f0.CV11=#27
-exit 14: f0 0019 plain f0.CV10=#7 f0.CV11=#27
-exit 15: f0 0019 plain f0.CV10=#7 f0.CV11=#27
-exit 16: f0 0020 plain f0.CV10=#7 f0.CV11=#27
-exit 17: f0 0020 plain f0.CV10=#7 f0.CV11=#27
-exit 18: f0 0021 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32
-exit 19: f0 0022 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32
-exit 20: f0 0022 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32
-exit 21: f0 0023 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32
-exit 22: f0 0023 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32
-exit 23: f0 0024 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32
-exit 24: f0 0024 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32
-exit 25: f0 0025 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37
-exit 26: f0 0031 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43
-exit 27: f0 0032 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43
-exit 28: f0 0034 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.T23=#45
-exit 29: f0 0035 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48
-exit 30: f0 0037 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.T26=#50
-exit 31: f0 0036 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48
-exit 32: f0 0038 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52
-exit 33: f0 0040 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.T29=#53
-exit 34: f0 0039 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52
-exit 35: f0 0041 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
-exit 36: f0 0043 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T33=#56
-exit 37: f0 0043 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
-exit 38: f0 0046 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T35=#58
-exit 39: f0 0046 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
-exit 40: f0 0049 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T37=#60
-exit 41: f0 0049 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
-exit 42: f0 0052 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T39=#62
-exit 43: f0 0052 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
-exit 44: f0 0055 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T41=#64
-exit 45: f0 0055 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
-exit 46: f0 0058 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T43=#66
-exit 47: f0 0058 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
-exit 48: f0 0060 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
-exit 49: f0 0062 plain f0.CV10=#68 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T45=false
+exit 1: f0 0014 plain f0.CV10=#7
+exit 2: f0 0015 plain f0.CV10=#7
+exit 3: f0 0016 plain f0.CV10=#7
+exit 4: f0 0017 plain f0.CV10=#7 f0.CV11=#27
+exit 5: f0 0018 plain f0.CV10=#7 f0.CV11=#27
+exit 6: f0 0019 plain f0.CV10=#7 f0.CV11=#27
+exit 7: f0 0020 plain f0.CV10=#7 f0.CV11=#27
+exit 8: f0 0021 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32
+exit 9: f0 0022 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32
+exit 10: f0 0023 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32
+exit 11: f0 0024 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32
+exit 12: f0 0025 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37
+exit 13: f0 0031 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43
+exit 14: f0 0032 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43
+exit 15: f0 0034 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.T23=#45
+exit 16: f0 0035 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48
+exit 17: f0 0037 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.T26=copied #50
+exit 18: f0 0036 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48
+exit 19: f0 0038 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52
+exit 20: f0 0040 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.T29=copied #53
+exit 21: f0 0039 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52
+exit 22: f0 0041 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
+exit 23: f0 0043 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T33=#56
+exit 24: f0 0043 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
+exit 25: f0 0046 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T35=#58
+exit 26: f0 0046 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
+exit 27: f0 0049 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T37=#60
+exit 28: f0 0049 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
+exit 29: f0 0052 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T39=#62
+exit 30: f0 0052 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
+exit 31: f0 0055 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T41=#64
+exit 32: f0 0055 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
+exit 33: f0 0058 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T43=#66
+exit 34: f0 0058 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
+exit 35: f0 0060 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
+exit 36: f0 0062 plain f0.CV10=#68 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T45=false

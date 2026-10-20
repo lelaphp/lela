@@ -41,19 +41,14 @@
 //! - **An [`ExitSpec`] per exit**, naming the frame and opline the
 //!   interpreter goes on at, the [`Landing`], the slots whose values live
 //!   in registers and are stored, and the trace a `Link` stop links to.
+//!   Places that leave with an equal spec naming an opline share one
+//!   exit, php's reuse in `zend_jit_trace_get_exit_point`.
 //!
 //! What it is not: php's ranges and reference counts. A long arithmetic is
 //! long or double here where php's range inference proves it stays long,
 //! so it carries a guard php's does not; and what a loop variable written
 //! before its loop holds is guarded once at entry where php's static
 //! inference over the whole function already knew it.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the pipeline builds what it records with #2958, and lower compiles it with #2955"
-    )
-)]
 
 mod build;
 pub(crate) mod lattice;
@@ -334,7 +329,18 @@ pub(crate) enum Layout {
 
 /// What an exit does: where the interpreter goes on, what the trampoline
 /// does first, what compiled code stores, and the trace it links to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// It is all an exit is: two places that leave with an equal spec that
+/// names an opline leave through one exit, as php's
+/// `zend_jit_trace_get_exit_point` reuses one whose opline, `flags` and
+/// stack map match (`Z/ext/opcache/jit/zend_jit_trace.c:168-185`). php
+/// never reuses a method call's exit, `ZEND_JIT_EXIT_METHOD_CALL`, which
+/// keeps the callee it guarded for a side trace; no guard here holds a
+/// method call's callee, so no exit is one. php's stack map also holds
+/// each slot's known type, and its `flags` `ZEND_JIT_EXIT_TO_VM`, which
+/// a spec does not carry until side traces read them (#2964), so entry
+/// guards and a loop's interrupt test share exits php keeps apart.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ExitSpec {
     pub(crate) frame: Frame,
     /// The opline the interpreter goes on at; none where the frame
@@ -347,24 +353,31 @@ pub(crate) struct ExitSpec {
 }
 
 /// One slot an exit writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct Store {
     pub(crate) slot: Slot,
     pub(crate) from: Stored,
 }
 
 /// What an exit writes to a slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Stored {
     /// A value the trace holds.
     Value(ValueId),
     /// A boolean the exit knows: a mispredicted comparison's.
     Bool(bool),
+    /// A fetched element whose type its guard did not hold, which the
+    /// guard's own place copies into the fetch's slot as the fetch copies
+    /// it before it leaves: the slot is written, and the exit stores
+    /// nothing there. No other place leaves with it, as php's stack map
+    /// keeps that slot in memory where the next opline's keeps it in a
+    /// register.
+    Copied(ValueId),
 }
 
 /// What the trampoline does at an exit before the interpreter goes on
 /// (the glossary's Landing).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Landing {
     Plain,
     /// The opline before the exit's read these temporaries, and compiled
@@ -412,7 +425,8 @@ pub(crate) enum Repeat {
 /// Why a record builds no trace: the stop it counts as, and in what way
 /// the record did not fit (`jit-design.md` §4.2). A record that stopped
 /// on a failed attempt is refused with its own stop; one with more exits
-/// than php's `ZEND_JIT_TRACE_MAX_EXITS` with `TooManyExits`; one that
+/// than php's `ZEND_JIT_TRACE_MAX_EXITS`, once those that match share
+/// one, with `TooManyExits`; one that
 /// does not fit the op arrays its view holds is php's `COMPILER_ERROR`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Abort {

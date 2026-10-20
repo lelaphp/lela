@@ -574,6 +574,27 @@ fn add_hooked_var(
 /// ```expect
 /// 752
 /// ```
+///
+/// The array is laid down at the size php's is, never grown from eight
+/// while it fills ([`vars_laid`]): the element count of the table read,
+/// and the size of the object's own table where php copies it whole, so
+/// `memory_get_peak_usage()` reads no table the copy outgrew:
+///
+/// ```php
+/// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+/// class Nine { public $a=1; public $b=1; public $c=1; public $d=1; public $e=1; public $f=1; public $g=1; public $h=1; public $i=1; }
+/// $n = new Nine;
+/// pk(fn () => get_object_vars($n));
+/// $i = new DateInterval('P1D'); get_object_vars($i);
+/// pk(fn () => get_object_vars($i));
+/// $p = DatePeriod::createFromISO8601String('R2/2012-07-01T00:00:00Z/P7D');
+/// pk(fn () => get_object_vars($p));
+/// ```
+/// ```expect
+/// 696 728
+/// 696 696
+/// 1504 1128
+/// ```
 #[php_function]
 fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let class = object.class();
@@ -605,14 +626,14 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
     // class that answers the purpose itself hands back its table.
     let table = match req.properties_answered(object, PropertyPurpose::GetObjectVars)? {
         PropertiesFor::Table(Table::Object(table)) => table,
-        PropertiesFor::Table(Table::Array(array)) => return answered_vars(req, class, array),
+        PropertiesFor::Table(Table::Array(array)) => return answered_vars(req, object, array),
         PropertiesFor::Temporary(table) => {
-            let made = answered_vars(req, class, *table);
+            let made = answered_vars(req, object, *table);
             table.give_up(req);
             return made;
         }
         PropertiesFor::Debug(info) => {
-            let made = answered_vars(req, class, *info.table);
+            let made = answered_vars(req, object, *info.table);
             info.table.give_up(req);
             return made;
         }
@@ -625,7 +646,13 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
         return Ok(Owner::adopt(array));
     }
     let rows = req.property_rows(&table)?;
-    let mut array = PhpArray::new(req)?;
+    let numeric = || {
+        rows.iter().any(|(key, _, declared)| {
+            declared.is_none() && matches!(key, Key::Str(name) if numeric_name(*name))
+        })
+    };
+    let elements = table.positions().len();
+    let mut array = vars_laid(req, object, table.dynamic(), elements, numeric)?;
     for (key, value, declared) in rows {
         // An integer key, which only a loophole such as
         // `object_properties_load` leaves in the table, is no name the
@@ -684,11 +711,17 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
 /// ```
 fn answered_vars(
     req: &mut Request,
-    class: ClassId,
+    object: PhpObject,
     table: PhpArray,
 ) -> Result<Owner<PhpArray>, Thrown> {
+    let class = object.class();
     let rows: Vec<(Key, Value)> = walk::rows(req, table).collect();
-    let mut array = PhpArray::new(req)?;
+    let numeric = || {
+        rows.iter()
+            .any(|(key, _)| matches!(key, Key::Str(name) if numeric_name(*name)))
+    };
+    let elements = u32::try_from(table.len()).unwrap_or(u32::MAX);
+    let mut array = vars_laid(req, object, table, elements, numeric)?;
     for (key, value) in rows {
         // An integer key is an element the class shows among its
         // properties, which no access rule holds (`zend_hash_index_add`).
@@ -714,6 +747,35 @@ fn answered_vars(
         array.add_new(req, key, Owner::adopt(value))?;
     }
     Ok(array)
+}
+
+/// The array `get_object_vars()` fills from `source`, a table of
+/// `elements` rows, laid down where php lays its: the fast copy's
+/// ([`crate::ops::symtable_laid`]) over the object's own table where its
+/// class declares nothing (`Z/Zend/zend_builtin_functions.c:852`), and
+/// `array_init_size(return_value, zend_hash_num_elements(properties))`
+/// otherwise. `numeric` says whether a name of the table reads as an
+/// integer, which only the fast copy asks.
+fn vars_laid(
+    req: &mut Request,
+    object: PhpObject,
+    source: PhpArray,
+    elements: u32,
+    numeric: impl FnOnce() -> bool,
+) -> Result<Owner<PhpArray>, Thrown> {
+    let o = object.heap();
+    let own = o
+        .properties()
+        .is_some_and(|table| table.is_same(source.heap()));
+    if o.slots() == 0 && own && !source.is_recursive() {
+        return crate::ops::symtable_laid(req, source, elements, numeric());
+    }
+    PhpArray::init_size(req, elements)
+}
+
+/// Whether `name` reads as an integer key, `ZEND_HANDLE_NUMERIC`.
+fn numeric_name(name: PhpString) -> bool {
+    php_heap::canonical_int(name.as_bytes()).is_some()
 }
 
 /// `get_mangled_object_vars(object $object): array`, php's

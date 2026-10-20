@@ -348,6 +348,7 @@ impl Emit<'_> {
             thrown: false,
             stage: crate::Stage::Compiling,
             declared: None,
+            keys_made: 0,
         }
     }
 
@@ -1314,6 +1315,7 @@ impl Emit<'_> {
                 thrown: false,
                 stage: crate::Stage::Compiling,
                 declared: None,
+                keys_made: 0,
             });
         }
         for declarator in self.list(node.property_declarators) {
@@ -1399,6 +1401,7 @@ pub(super) fn unread(line: u32, what: &str) -> CompileError {
         thrown: false,
         stage: crate::Stage::Compiling,
         declared: None,
+        keys_made: 0,
     }
 }
 
@@ -1423,6 +1426,7 @@ pub(super) fn refused(line: u32, message: impl Into<Cow<'static, str>>) -> Compi
         thrown: false,
         stage: crate::Stage::Compiling,
         declared: None,
+        keys_made: 0,
     }
 }
 

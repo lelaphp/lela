@@ -10,8 +10,10 @@
 //! `Mode::Off` a safepoint answers `Continue` before it reads any word,
 //! and an engine bound to `Jit` runs as one bound to `Nop` does;
 //! otherwise a hot safepoint records (`dispatch`, `record`) and the
-//! pipeline numbers what would compile (`compiler`). No `Backend` lowers
-//! a trace yet (#2955), so nothing is entered.
+//! pipeline compiles what it recorded through the engine's `Backend`
+//! and publishes it in the epoch's trace table (`compiler`). What enters
+//! a published trace is #2959's, so nothing is entered yet. A host with
+//! no `Backend` runs the tier `Off`.
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -88,18 +90,21 @@ pub(crate) struct JitRequest {
     recording: bool,
 }
 
-/// The tier's engine state (`jit-design.md` §4): what the request
-/// threads and the pipeline share.
+/// The tier's engine state (`jit-design.md` §4): where a recording
+/// compiles, and what the request threads and the pipeline share. The
+/// field order joins the worker before what it shares drops.
 #[derive(Debug)]
 pub(crate) struct JitEngine {
+    compiler: compiler::Compiler,
     shared: Arc<Shared>,
 }
 
 /// What a safepoint, a recording and the pipeline read, by `Arc` so a
 /// worker can hold it past the request that submitted a job
-/// (`jit-design.md` §4.8): the `Policy` read once at engine start and the
-/// lines that start logged. The trace table is not here: it is the
-/// epoch's (`table::of`), so a restart's epoch starts with none.
+/// (`jit-design.md` §4.8): the `Policy` read once at engine start, the
+/// host's `Backend`, none under `Mode::Off`, and the lines that start
+/// logged. The trace table is not here: it is the epoch's (`table::of`),
+/// so a restart's epoch starts with none.
 ///
 /// The tier's lines go where php's `opcache.jit_debug` lines go, to
 /// `stderr` (`Z/ext/opcache/jit/zend_jit_trace.c:8152-8250`), which for a
@@ -107,6 +112,7 @@ pub(crate) struct JitEngine {
 #[derive(Debug)]
 pub(crate) struct Shared {
     policy: policy::Policy,
+    backend: Option<lower::Backend>,
     started: Box<[policy::Note]>,
     /// Whether a request wrote the start's lines yet: once per engine.
     told: AtomicBool,
@@ -134,22 +140,47 @@ impl JitEngine {
     }
 
     /// The state over the startup ini: the `Policy` as the directives
-    /// say, and the lines its start logged.
+    /// say, the host's `Backend` over the kernels `enter` lists, or the
+    /// tier `Off` where the host has none, the lines its start logged,
+    /// and the [`compiler::Compiler`] it runs.
     fn of(ini: &StartupIni) -> JitEngine {
+        JitEngine::over(ini, lower::Backend::new)
+    }
+
+    /// [`JitEngine::of`] with the `Backend` `backend` makes for the host.
+    fn over(
+        ini: &StartupIni,
+        backend: impl FnOnce(
+            &policy::Policy,
+            lower::Symbols,
+        ) -> Result<lower::Backend, lower::Unsupported>,
+    ) -> JitEngine {
         let mut started = Vec::new();
-        let policy = policy::Policy::from_ini(ini, &mut started);
+        let mut policy = policy::Policy::from_ini(ini, &mut started);
+        let backend = (policy.mode() != policy::Mode::Off)
+            .then(|| backend(&policy, enter::wrapped::symbols()))
+            .and_then(|made| {
+                made.map_err(|lower::Unsupported(why)| {
+                    policy.off();
+                    started.push(policy::Note::Off(policy::OffBecause::NoBackend(why)));
+                })
+                .ok()
+            });
         let perf = if policy.mode() == policy::Mode::Off {
             table::Outputs::none()
         } else {
             table::Outputs::start(policy.debug())
         };
+        let shared = Arc::new(Shared {
+            policy,
+            backend,
+            started: started.into_boxed_slice(),
+            told: AtomicBool::new(false),
+            perf,
+        });
         JitEngine {
-            shared: Arc::new(Shared {
-                policy,
-                started: started.into_boxed_slice(),
-                told: AtomicBool::new(false),
-                perf,
-            }),
+            compiler: compiler::Compiler::new(&shared),
+            shared,
         }
     }
 
@@ -184,15 +215,36 @@ mod tests {
     use crate::policy::Mode;
     use crate::testing::{self, Lane, ini};
 
-    /// The engine start reads the `Policy` and runs the `Mode` it names,
-    /// whether or not a `Backend` lowers a trace.
+    /// The engine start reads the `Policy`, runs the `Mode` it names and
+    /// builds the host's `Backend` for it, none under `Off`.
     #[test]
     fn the_engine_start_runs_the_mode_asked() {
-        assert_eq!(JitEngine::of(&ini(&[])).shared.policy.mode(), Mode::Off);
+        let off = JitEngine::of(&ini(&[]));
+        assert_eq!(off.shared.policy.mode(), Mode::Off);
+        assert!(off.shared.backend.is_none());
         let asked = JitEngine::of(&ini(&[("opcache.jit", "tracing")]));
         assert_eq!(asked.shared.policy.mode(), Mode::Tracing);
+        assert!(asked.shared.backend.is_some(), "this host has a backend");
         let lane = JitEngine::of(&ini(&[("jit.mode", "force")]));
         assert_eq!(lane.shared.policy.mode(), Mode::Force);
+    }
+
+    /// A host with no `Backend` runs the tier `Off`, and its start says
+    /// why (`jit-design.md` §4.3).
+    #[test]
+    fn a_host_with_no_backend_runs_off() {
+        let none = JitEngine::over(&ini(&[("opcache.jit", "tracing")]), |_, _| {
+            Err(crate::lower::Unsupported("a test's host"))
+        });
+        assert_eq!(none.shared.policy.mode(), Mode::Off);
+        assert!(none.shared.backend.is_none());
+        let said: Vec<String> = none
+            .shared
+            .started
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(said, ["JIT: off: no backend: a test's host"]);
     }
 
     /// The start's lines are written once, by the first request, and only

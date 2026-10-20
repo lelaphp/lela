@@ -116,23 +116,18 @@ fn a_published_trace_is_got_by_its_id_with_its_exits() -> Result<(), String> {
     Ok(())
 }
 
-/// A trace numbered with no code reads as none, and the next published
-/// takes the next id; ids go on across the first segment into the
-/// second, each read back from its own.
+/// Ids go on across the first segment into the second, each read back
+/// from its own.
 #[test]
 fn ids_run_across_a_segment_boundary() {
     let table = table(&[("opcache.jit_max_root_traces", "2000")]);
-    for n in 1..=1022 {
-        assert_eq!(table.number(Start::Loop), Ok(trace(n)));
-    }
-    for n in 1023..=1025 {
+    for n in 1..=1025 {
         assert_eq!(
             table.publish(compiled(&[0; 4], vec![]), Start::Loop),
             Ok(trace(n))
         );
     }
-    assert!(table.get(trace(1022)).is_none(), "numbered with no code");
-    for n in 1023..=1025 {
+    for n in 1022..=1025 {
         assert_eq!(table.get(trace(n)).map(|t| t.id), Some(trace(n)));
     }
     assert_eq!(trace(1024).slot(), (1, 0));
@@ -140,12 +135,15 @@ fn ids_run_across_a_segment_boundary() {
 
 /// `opcache.jit_max_root_traces` bounds every id, sides as well, as php's
 /// `ZEND_JIT_TRACE_NUM` does: no id reaches it, and the table that met it
-/// is full, numbering and publishing nothing more; the hot root that finds
+/// is full, publishing nothing more; the hot root that finds
 /// it so stops its counters, which stand stopped.
 #[test]
 fn the_ids_bound_is_full_of_traces_and_stops_the_table() {
     let table = table(&[("opcache.jit_max_root_traces", "3")]);
-    assert_eq!(table.number(Start::Enter), Ok(trace(1)));
+    assert_eq!(
+        table.publish(compiled(&[0; 4], vec![]), Start::Enter),
+        Ok(trace(1))
+    );
     assert!(!table.full());
     assert_eq!(
         table.publish(compiled(&[0; 4], vec![]), side(1)),
@@ -154,7 +152,6 @@ fn the_ids_bound_is_full_of_traces_and_stops_the_table() {
     assert!(table.full(), "the next id is the bound");
     let full = Err(Unpublished::Full(Full::Traces));
     assert_eq!(table.publish(compiled(&[0; 4], vec![]), Start::Loop), full);
-    assert_eq!(table.number(Start::Loop), full);
     assert_eq!(table.next(), Some(trace(3)));
     assert_eq!(Full::Traces.stop(), crate::record::Stop::TooManyTraces);
     assert!(!table.stopped(), "until a hot root finds it full");
@@ -168,20 +165,32 @@ fn the_ids_bound_is_full_of_traces_and_stops_the_table() {
 #[test]
 fn a_roots_sides_are_bounded_at_the_root() {
     let table = table(&[("opcache.jit_max_side_traces", "2")]);
-    assert_eq!(table.number(Start::Loop), Ok(trace(1)));
-    assert_eq!(table.number(side(1)), Ok(trace(2)));
+    assert_eq!(
+        table.publish(compiled(&[0; 4], vec![]), Start::Loop),
+        Ok(trace(1))
+    );
+    assert_eq!(
+        table.publish(compiled(&[0; 4], vec![]), side(1)),
+        Ok(trace(2))
+    );
     assert_eq!(
         table.publish(compiled(&[0; 4], vec![]), side(2)),
         Ok(trace(3))
     );
     let full = Err(Unpublished::Full(Full::Children));
     assert_eq!(table.publish(compiled(&[0; 4], vec![]), side(3)), full);
-    assert_eq!(table.number(side(1)), full);
-    assert_eq!(table.number(Start::Loop), Ok(trace(4)));
-    assert_eq!(table.number(side(4)), Ok(trace(5)));
+    assert_eq!(table.publish(compiled(&[0; 4], vec![]), side(1)), full);
+    assert_eq!(
+        table.publish(compiled(&[0; 4], vec![]), Start::Loop),
+        Ok(trace(4))
+    );
+    assert_eq!(
+        table.publish(compiled(&[0; 4], vec![]), side(4)),
+        Ok(trace(5))
+    );
     assert!(!table.full(), "a root's bound stops no other root");
     assert_eq!(
-        table.number(side(9)),
+        table.publish(compiled(&[0; 4], vec![]), side(9)),
         Err(Unpublished::Malformed("a side trace of no trace numbered"))
     );
 }
@@ -210,7 +219,7 @@ fn the_epochs_exits_are_bounded() {
 
 /// An arena with no room for a body is `Full::Code`, php's
 /// `COMPILER_ERROR`, an attempt the word recovers from, and the table is
-/// not full: it numbers on, and nothing stops (#3015's ruling).
+/// not full: the next id stands, and nothing stops (#3015's ruling).
 #[test]
 fn a_full_arena_is_a_compiler_error_and_stops_nothing() {
     let table = table(&[]);
@@ -224,23 +233,28 @@ fn a_full_arena_is_a_compiler_error_and_stops_nothing() {
     assert!(!table.full(), "a full arena is no bound");
     assert_eq!(Full::Code.stop(), crate::record::Stop::CompilerError);
     assert!(Full::Code.stop().recovers());
-    assert_eq!(table.number(Start::Loop), Ok(trace(2)));
 }
 
 /// A table whose arena could not be mapped, as on a target with no
-/// adapter yet, numbers as the interim pipeline does and finds no room
-/// at any publish, which fills no bound.
+/// adapter yet, numbers each trace it publishes under the same bounds
+/// and keeps no code: its slot stays empty.
 #[test]
-fn a_table_with_no_arena_numbers_and_publishes_nothing() {
-    let policy = testing::policy(&[("opcache.jit_buffer_size", "64K")]);
+fn a_table_with_no_arena_numbers_and_keeps_no_code() {
+    let policy = testing::policy(&[
+        ("opcache.jit_buffer_size", "64K"),
+        ("opcache.jit_max_root_traces", "2"),
+    ]);
     let table: TraceTable<Unmapped> = TraceTable::with_perf(&policy, Perf::none());
-    assert_eq!(table.number(Start::Loop), Ok(trace(1)));
-    assert!(!table.full());
     assert_eq!(
         table.publish(compiled(&[0; 4], vec![]), Start::Loop),
-        Err(Unpublished::Full(Full::Code))
+        Ok(trace(1))
     );
-    assert!(!table.full());
+    assert!(table.get(trace(1)).is_none(), "numbered with no code");
+    assert_eq!((table.next(), table.full()), (Some(trace(2)), true));
+    assert_eq!(
+        table.publish(compiled(&[0; 4], vec![]), Start::Loop),
+        Err(Unpublished::Full(Full::Traces))
+    );
 }
 
 /// What does not hold together is refused before anything is counted.
@@ -521,6 +535,8 @@ mod epoch {
         self, Extension, ExtensionBuilder, Flow, FrameRef, Request, Site, Tier,
     };
 
+    use std::fmt::Write as _;
+
     use super::{compiled, exit, side, trace};
     use crate::policy::{self, Holder, State};
     use crate::record::Start;
@@ -632,30 +648,82 @@ mod epoch {
     }
 
     /// A spent arena stops nothing (#3015's ruling): the hot root after
-    /// it is recorded, not refused with `too many traces`, and the next
-    /// request's hot root is recorded too, the table never stopped.
-    /// Until a pipeline publishes through a `Backend` (#2958) the
-    /// recording is numbered as compiled; php's writes `TRACE 2 abort (JIT
-    /// compilation error)` for it.
+    /// it is recorded, not refused with `too many traces`, and aborts as
+    /// php's `COMPILER_ERROR`, `TRACE 2 abort (JIT compilation error)`,
+    /// one attempt counted; the next request's visit records it again,
+    /// the table never stopped.
+    #[cfg_attr(
+        not(all(target_os = "macos", target_arch = "aarch64")),
+        ignore = "no code arena on this target until #2943"
+    )]
     #[test]
     fn a_spent_arena_refuses_no_hot_root() {
         let engine = testing::engine::<Spent>(&[
             ("jit.mode", "force"),
-            ("jit.compile", "inline"),
             ("opcache.jit_debug", "258048"),
             ("opcache.jit_buffer_size", "64K"),
         ]);
         let scratch = testing::Scratch::new();
         let program = "function f() { return 1; } echo f();";
-        let first = String::from_utf8_lossy(&scratch.serve(&engine, program).stderr).into_owned();
+        let aborted = "---- TRACE 2 start (enter) $main() ";
+        for request in 0..2 {
+            let served = scratch.serve(&engine, program);
+            let lines = String::from_utf8_lossy(&served.stderr).into_owned();
+            assert!(
+                lines.contains(aborted)
+                    && lines.ends_with(
+                        "\n---- TRACE 2 stop (return)\n---- TRACE 2 abort (JIT compilation error)\n\n"
+                    ),
+                "request {request}: {lines}"
+            );
+            assert_eq!(testing::stdout(&served), "1");
+        }
+    }
+
+    /// The arena filled by the traces a program compiles: once a body
+    /// finds no room each root after it aborts as `JIT compilation error`
+    /// and none is refused or blacklisted, as php's do under a small
+    /// `opcache.jit_buffer_size` (`zend_jit_trace.c:7612-7622`,
+    /// `:8164-8167`).
+    #[cfg_attr(
+        not(all(target_os = "macos", target_arch = "aarch64")),
+        ignore = "no code arena on this target until #2943"
+    )]
+    #[test]
+    fn traces_that_fill_the_arena_abort_the_roots_after() {
+        let engine = testing::engine::<testing::Lane>(&[
+            ("jit.mode", "force"),
+            ("opcache.jit_debug", "258048"),
+            ("opcache.jit_buffer_size", "64K"),
+        ]);
+        let functions = 800;
+        let mut program = String::new();
+        for k in 0..functions {
+            writeln!(program, "function f{k}($a) {{ return $a * {k} + 1; }}").unwrap_or_default();
+        }
+        write!(
+            program,
+            "$t = 0; for ($k = 0; $k < {functions}; $k++) {{ $f = \"f$k\"; $t += $f(2); }} echo $t;"
+        )
+        .unwrap_or_default();
+        let served = testing::Scratch::new().serve(&engine, &program);
+        let lines = String::from_utf8_lossy(&served.stderr).into_owned();
+        let compiled = lines.matches(" compiled\n").count();
+        let aborted = lines.matches(" abort (JIT compilation error)\n").count();
         assert!(
-            first.contains("---- TRACE 2 start (enter) $main()") && !first.contains("too many"),
-            "{first}"
+            compiled > 0 && aborted > 0,
+            "{compiled} compiled, {aborted} aborted"
         );
-        let second = String::from_utf8_lossy(&scratch.serve(&engine, program).stderr).into_owned();
+        let first = lines.find(" abort (JIT compilation error)").unwrap_or(0);
         assert!(
-            second.contains("---- TRACE 3 start (enter) f()"),
-            "{second}"
+            !lines[first..].contains(" compiled\n"),
+            "nothing compiles once the arena is spent"
         );
+        assert!(
+            !lines.contains("too many") && !lines.contains("blacklisted"),
+            "{lines}"
+        );
+        let sum: i64 = (0..functions).map(|k| 2 * k + 1).sum();
+        assert_eq!(testing::stdout(&served), sum.to_string());
     }
 }

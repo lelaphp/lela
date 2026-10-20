@@ -73,9 +73,14 @@ struct Spare {
 /// One request-only unit and the strings it owns.
 struct Held {
     unit: WeakUnit,
-    /// Whether it declared a function, a closure or a class, which hold
-    /// it past its main op array's end.
+    /// Whether it declared a function, a closure or a class, whose
+    /// constants are apart from its main op array's.
     declares: bool,
+    /// What holds what it declared past its main op array's end.
+    past: Past,
+    /// Whether its main op array's execution has ended, its constants
+    /// given up.
+    over: bool,
     /// The constant strings and arrays of its main op array,
     /// `op_array->literals` and the names `zend_compile` keeps beside
     /// them, given up when the main op array's execution ends
@@ -103,6 +108,21 @@ struct Held {
     /// function's variables' and a declared property's, pointed at while
     /// the unit lives: views, the owners being `constants`'.
     found: Vec<PhpString>,
+}
+
+/// What holds a request-only unit's declarations, and so its strings,
+/// past its main op array's end.
+enum Past {
+    /// The closures over a function it declared that stand, each one
+    /// more count of the op array, `(*op_array->refcount)++` in
+    /// `zend_create_closure_ex`, given back by `zend_closure_free_storage`.
+    /// A closure's function is in the request's table from its first
+    /// closure on, and the loop keeps a share of the unit it last
+    /// entered, so neither holds the unit's strings: only a closure does.
+    Closures(usize),
+    /// The request's tables, which hold a function or a class it
+    /// declared, and the unit with it, while the unit lives.
+    Tables,
 }
 
 /// The constant strings and arrays the compile under way has made, one
@@ -259,7 +279,8 @@ impl UnitStrings {
     /// holds any longer, and those of `ended`, a unit whose main op
     /// array has finished, whatever share of it the loop still holds for
     /// the opline that returned: its main op array's constants, and,
-    /// where it declared nothing a later call could reach, the rest.
+    /// where it bound no function or class and no closure over what it
+    /// declared stands, the rest.
     /// Each name one of those strings stood for is pointed at an equal
     /// string a living unit holds, or at none.
     fn take(&mut self, ended: Option<*const Unit>) -> (Vec<PhpString>, Vec<Zval>) {
@@ -271,12 +292,13 @@ impl UnitStrings {
         self.units.retain_mut(|held| {
             let alive = held.unit.strong_count() > 0;
             let ends = ended == Some(held.unit.as_ptr());
-            if alive && !ends {
+            if alive && !ends && !held.over {
                 return true;
             }
+            held.over = true;
             constants.append(&mut held.main);
             found.append(&mut held.found_main);
-            if alive && held.declares {
+            if alive && !matches!(held.past, Past::Closures(0)) {
                 return true;
             }
             dead.append(&mut held.names);
@@ -329,6 +351,12 @@ impl UnitStrings {
             declares: !(unit.functions.is_empty()
                 && unit.dynamic.is_empty()
                 && unit.classes.is_empty()),
+            past: if unit.functions.is_empty() && unit.classes.is_empty() {
+                Past::Closures(0)
+            } else {
+                Past::Tables
+            },
+            over: false,
             main: self.spare.constants.pop().unwrap_or_default(),
             constants: self.spare.constants.pop().unwrap_or_default(),
             names: self.spare.names.pop().unwrap_or_default(),
@@ -524,9 +552,10 @@ impl Request {
     /// `destroy_op_array`'s release of the strings of each request-only
     /// unit that is over, its constants and its names: those of `ended`'s
     /// main op array, whose frame was just popped, the rest of it too
-    /// where it declared no function, closure or class (one that did is
-    /// held by what it declared), and every unit nothing holds any
-    /// longer.
+    /// where it bound no function or class and no closure over what it
+    /// declared stands (a closure holds the op array its function is,
+    /// as php's holds the op array's refcount), and every unit nothing
+    /// holds any longer.
     pub(crate) fn release_unit_strings(&mut self, ended: Option<&PublishedUnit>) {
         if self.unit_strings.units.is_empty() {
             return;
@@ -543,6 +572,67 @@ impl Request {
         }
         self.unit_strings.dead = dead;
         self.unit_strings.dead_constants = constants;
+    }
+
+    /// `zend_create_closure_ex`'s `(*op_array->refcount)++`: one more
+    /// closure over `function`, which holds the strings of the
+    /// request-only unit that declared it.
+    pub(crate) fn count_closure(&mut self, function: crate::api::call::Function) {
+        if let Some(Held {
+            past: Past::Closures(count),
+            ..
+        }) = self.closure_unit(function)
+        {
+            *count += 1;
+        }
+    }
+
+    /// `zend_closure_free_storage`'s `destroy_op_array`: a closure over
+    /// `function` gone, and with the last one over a request-only unit
+    /// whose main op array has ended and which bound nothing, the
+    /// unit's strings, as php frees the op array at its last count. An
+    /// `eval` whose closure goes before it returns, or after, costs
+    /// nothing past it:
+    ///
+    /// ```php
+    /// eval('while(0){}');
+    /// $m = memory_get_usage(); eval('fn () => 1;'); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); eval('$y = 2;'); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); eval('if (0) { fn () => 1; }'); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $f = eval('return fn () => "abcdefghijklmnopqrstuvwxyz";'); $g = $f; unset($f, $g); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 0
+    /// 0
+    /// 0
+    /// 0
+    /// ```
+    pub(crate) fn uncount_closure(&mut self, function: crate::api::call::Function) {
+        let Some(Held {
+            past: Past::Closures(count),
+            over,
+            ..
+        }) = self.closure_unit(function)
+        else {
+            return;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 && *over {
+            self.release_unit_strings(None);
+        }
+    }
+
+    /// The request-only unit `function` is a function of, where it is one:
+    /// none at once where the request holds no such unit, the common
+    /// program's every closure, or where the function is not one of the
+    /// request's own, whose unit is the engine's or the cache's.
+    fn closure_unit(&mut self, function: crate::api::call::Function) -> Option<&mut Held> {
+        if self.unit_strings.units.is_empty() {
+            return None;
+        }
+        let user = self.user_functions.get(function.local_at()?)?;
+        let unit = PublishedUnit::as_ptr(&user.unit);
+        (self.unit_strings.units.iter_mut()).find(|held| std::ptr::eq(held.unit.as_ptr(), unit))
     }
 
     /// Every request-only unit's strings given up at the request's end,

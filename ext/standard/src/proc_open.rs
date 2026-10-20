@@ -239,7 +239,7 @@ const fn libc_einval() -> i32 {
 
 /// `/bin/sh -c command`, as `popen(3)` and `proc_open`'s string form hand
 /// a command, `sh` its `argv[0]`, in the request's working directory and
-/// environment. What `exec`'s `VCWD_POPEN` and `mail`'s `popen` start
+/// environment ([`in_request`]). What `exec`'s `VCWD_POPEN` and `mail`'s `popen` start
 /// too, so a shell's own message names itself `sh` as php's children do.
 pub(crate) fn shell(req: &Request, command: &[u8]) -> Command {
     use std::os::unix::process::CommandExt;
@@ -251,9 +251,19 @@ pub(crate) fn shell(req: &Request, command: &[u8]) -> Command {
 
 /// The request's working directory and environment, where a child of
 /// the process would have the process's: the environment handed over in
-/// its own order, as php hands `posix_spawn` its `envp`.
+/// its own order, as php hands `posix_spawn` its `envp`. php adds no
+/// `chdir` to a spawn with no `$cwd` (`Z/ext/standard/proc_open.c:1394`),
+/// so the child inherits the process's directory, which `exec(2)` needs
+/// no access to; the engine's requests share one process and each stands
+/// in a directory of its own, so the child is changed into the request's
+/// only where that is not the process's. A request whose host could not
+/// name the process's directory, `getcwd(3)` failing, was given none and
+/// stands in it (#2917).
 fn in_request(req: &Request, command: &mut Command) {
-    command.current_dir(req.cwd());
+    let cwd = req.cwd();
+    if !cwd.as_os_str().is_empty() && crate::ffi::process_dir().as_ref() != Some(&cwd) {
+        command.current_dir(cwd);
+    }
     crate::ffi::environment(command, req.env_pairs());
 }
 

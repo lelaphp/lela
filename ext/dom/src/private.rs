@@ -24,6 +24,7 @@ use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_libxml::ffi::{Kind, Node, NodeObject, Ns, PrivateData};
+use php_ext_libxml::table::Table;
 
 use crate::document::XMLNS_NS;
 
@@ -41,153 +42,8 @@ pub(crate) const XLINK_NS: &[u8] = b"http://www.w3.org/1999/xlink";
 /// declarations, and `template_fragments` (`Z/ext/dom/private_data.h`).
 const PRIVATE_DATA: usize = 96;
 
-/// `HT_MIN_SIZE`, the size `zend_hash_real_init_mixed` lays a table down
-/// at.
-const HT_MIN_SIZE: usize = 8;
-
-/// `sizeof(HashTable)`, what `ALLOC_HASHTABLE` `emalloc`s.
-const HASH_TABLE: usize = 56;
-
-/// `HT_SIZE_EX(size, HT_SIZE_TO_MASK(size))`: a bucket a slot and two
-/// hash words a slot.
-const fn hash_size(size: usize) -> usize {
-    size * 40
-}
-
 /// `sizeof(xmlNsPtr)`, a slot of the in-scope list.
 const NS_PTR: usize = 8;
-
-/// A `HashTable` with no destructor as the request's heap sees it: its
-/// rows in their order, each at the bucket it was added at, its data
-/// laid down at `HT_MIN_SIZE` by `zend_hash_real_init_mixed`, and the
-/// 56-byte struct where php `ALLOC_HASHTABLE`s it rather than embedding
-/// it. A full table is compacted in place where deletions left more than
-/// a thirty-second of its buckets empty, and doubled otherwise, the new
-/// data allocated before the old is freed (`zend_hash_do_resize`); a row
-/// deleted from the end gives back the empty buckets before it
-/// (`_zend_hash_del_el_ex`). So what a table costs is php's, the lookup
-/// a walk of the rows.
-struct Table<R> {
-    /// The rows in order, each with its bucket.
-    rows: Vec<(usize, R)>,
-    /// `nNumUsed`: one past the last bucket a row stands in.
-    used: usize,
-    data: Option<Emalloc>,
-    /// `ALLOC_HASHTABLE`'s struct, `None` for a table php embeds.
-    header: Option<Emalloc>,
-}
-
-impl<R> Default for Table<R> {
-    /// `zend_hash_init`: an embedded table, nothing laid down.
-    fn default() -> Table<R> {
-        Table {
-            rows: Vec::new(),
-            used: 0,
-            data: None,
-            header: None,
-        }
-    }
-}
-
-impl<R> Table<R> {
-    /// `ALLOC_HASHTABLE`, `zend_hash_init` and
-    /// `zend_hash_real_init_mixed`; the `Err` is the memory limit.
-    fn allocated(req: &mut Request) -> Result<Table<R>, Thrown> {
-        let mut table = Table {
-            header: Some(Emalloc::new(req, HASH_TABLE)?),
-            ..Table::default()
-        };
-        if let Err(thrown) = table.real_init(req) {
-            table.free(req);
-            return Err(thrown);
-        }
-        Ok(table)
-    }
-
-    /// `zend_hash_real_init_mixed`; the `Err` is the memory limit.
-    fn real_init(&mut self, req: &mut Request) -> Result<(), Thrown> {
-        if self.data.is_none() {
-            self.data = Some(Emalloc::new(req, hash_size(HT_MIN_SIZE))?);
-        }
-        Ok(())
-    }
-
-    /// `ZEND_HASH_IF_FULL_DO_RESIZE`, before a row is added: the data laid
-    /// down at the first, and a full table compacted or doubled; the `Err`
-    /// is the memory limit.
-    fn make_room(&mut self, req: &mut Request) -> Result<(), Thrown> {
-        let size = match &self.data {
-            None => return self.real_init(req),
-            Some(data) => data.len() / hash_size(1),
-        };
-        if self.used < size {
-            return Ok(());
-        }
-        let len = self.rows.len();
-        if self.used > len + (len >> 5) {
-            for (bucket, row) in self.rows.iter_mut().enumerate() {
-                row.0 = bucket;
-            }
-            self.used = len;
-            return Ok(());
-        }
-        let grown = Emalloc::new(req, hash_size(size * 2))?;
-        if let Some(old) = self.data.replace(grown) {
-            old.free(req);
-        }
-        Ok(())
-    }
-
-    /// A row added in the room [`Table::make_room`] made.
-    fn push(&mut self, row: R) {
-        self.rows.push((self.used, row));
-        self.used += 1;
-    }
-
-    /// `zend_hash_add_new`: room made, then the row; the `Err` is the
-    /// memory limit, the row not added.
-    fn add(&mut self, req: &mut Request, row: R) -> Result<(), Thrown> {
-        self.make_room(req)?;
-        self.push(row);
-        Ok(())
-    }
-
-    /// The rows, in order.
-    fn rows(&self) -> impl Iterator<Item = &R> {
-        self.rows.iter().map(|(_, row)| row)
-    }
-
-    fn len(&self) -> usize {
-        self.rows.len()
-    }
-
-    /// `zend_hash_del_bucket` of the row at `at` in order: nothing is
-    /// freed.
-    fn remove(&mut self, at: usize) -> R {
-        let (bucket, row) = self.rows.remove(at);
-        if bucket + 1 == self.used {
-            self.used = self.rows.last().map_or(0, |(b, _)| b + 1);
-        }
-        row
-    }
-
-    /// The rows taken out in order, for `zend_hash_destroy`'s walk.
-    fn take_rows(&mut self) -> Vec<R> {
-        self.used = 0;
-        self.rows.drain(..).map(|(_, row)| row).collect()
-    }
-
-    /// `zend_hash_destroy`'s `efree` of the data, then `FREE_HASHTABLE`'s
-    /// of the struct; the rows are the caller's, taken first.
-    fn free(&mut self, req: &mut Request) {
-        if let Some(data) = self.data.take() {
-            data.free(req);
-        }
-        if let Some(header) = self.header.take() {
-            header.free(req);
-        }
-    }
-}
 
 /// `sizeof(xmlNs)` on the pinned 64-bit build, what `dom_create_owned_ns`
 /// `emalloc`s for a declaration.
@@ -432,10 +288,14 @@ struct UriRow {
 
 /// `uri_to_prefix_map`, the [`Table`] php embeds in the private data, so
 /// only its data is an allocation of its own.
-impl Table<UriRow> {
+#[derive(Default)]
+struct UriMap(Table<UriRow>);
+
+impl UriMap {
     /// `zend_hash_find`: the prefix table `uri` keys.
     fn find(&self, uri: &[u8]) -> Option<PhpArray> {
-        self.rows()
+        self.0
+            .rows()
             .find(|row| row.key.as_bytes() == uri)
             .map(|row| *row.prefixes)
     }
@@ -443,24 +303,24 @@ impl Table<UriRow> {
     /// `zend_hash_add_new`: room made for the row, then the row; the
     /// `Err` is the memory limit, the row given up.
     fn add_uri(&mut self, req: &mut Request, row: UriRow) -> Result<PhpArray, Thrown> {
-        if let Err(thrown) = self.make_room(req) {
+        if let Err(thrown) = self.0.make_room(req) {
             row.key.give_up(req);
             row.prefixes.give_up(req);
             return Err(thrown);
         }
         let prefixes = *row.prefixes;
-        self.push(row);
+        self.0.push(row);
         Ok(prefixes)
     }
 
     /// `zend_hash_destroy`: each prefix table destroyed and each key
     /// released, in order, then the data freed.
     fn destroy(&mut self, req: &mut Request) {
-        for row in self.take_rows() {
+        for row in self.0.take_rows() {
             row.prefixes.give_up(req);
             row.key.give_up(req);
         }
-        self.free(req);
+        self.0.free(req);
     }
 }
 
@@ -473,7 +333,7 @@ pub(crate) struct Mapper {
     prefixless_xmlns: Option<Ns>,
     /// `uri_to_prefix_map`: each URI's table, whose prefixes key the
     /// places of their declarations in `decls`.
-    table: Table<UriRow>,
+    table: UriMap,
     /// The declarations the prefix tables name.
     decls: Vec<Decl>,
 }

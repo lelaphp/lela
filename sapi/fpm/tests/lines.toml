@@ -472,3 +472,20 @@ stop = "SIGTERM"
 params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
+
+# What php displays while it starts goes to C's `stdout`, an `fwrite`
+# (`php_output_direct`, `php_output_stdout`), fully buffered where stdout is
+# a pipe, while `-i`'s page and `-h`'s usage go out past it with `write(2)`
+# (`sapi_cgibin_ub_write` with no request, under `php_output_activate`): so
+# a startup warning, the timezone's or the memory limit's, reaches the pipe
+# after the page's last line and after the usage, as `exit` flushes it
+# (#2899). The page past its first line and the usage's default prefix name
+# the build, which is not the oracle's.
+[[line]]
+name = "a-startup-warning-is-held-behind-the-page"
+args = ["-n", "-i", "-d", "date.timezone=Foo/Bar"]
+mask = [['(?s)phpinfo\(\)\n.*?(\n<br />|\n== run)', 'phpinfo() (the page)$1'], ['\(default: /[^)]*\)', '(default: <prefix>)']]
+[[line.then]]
+args = ["-n", "-i", "-d", "memory_limit=600K"]
+[[line.then]]
+args = ["-n", "-h", "-d", "date.timezone=Foo/Bar"]

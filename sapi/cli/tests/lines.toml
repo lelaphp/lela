@@ -25,6 +25,18 @@ name = "the-error-stream-and-the-body-interleave-on-one-pipe"
 args = ["-n", "-r", '''echo "a\n"; fwrite(STDERR, "b\n"); echo "c\n"; ini_set('display_errors', 'stderr'); echo $u; echo "d\n";''']
 streams = "merged"
 
+# What php displays while it starts goes to C's `stdout`, an `fwrite`
+# (`php_output_direct`), where a pipe holds it; the CLI's `deactivate`,
+# which `php_module_startup` calls as it ends, flushes it, so a startup
+# warning stands before the body the CLI writes with `write(2)`, where
+# php-cgi's stands after it (#2899).
+[[line]]
+name = "a-startup-warning-is-written-before-the-body"
+args = ["-n", "-d", "date.timezone=Foo/Bar", "b.php"]
+files = { "b.php" = "<?php echo \"body\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "date.timezone=Foo/Bar", "-r", 'echo "body\n"; flush(); echo "end\n";']
+
 # A process ends its engine, and a `pcntl_fork` child that returns ends the
 # copy the fork made, as php's child calls `php_module_shutdown` over the
 # persistent list it inherited: a `dba_popen` `cdb_make` file is finished

@@ -64,6 +64,15 @@ name = "run-twice-on-the-line-quits-without-the-closing-notice"
 args = ["-qrr", "-n", "{dir}/t.php"]
 files = { "t.php" = "<?php echo \"x\\n\";\n" }
 
+# What php logs while it starts, before phpdbg is booted, goes to C's
+# `stdout`, an `fprintf` (`php_sapi_phpdbg_log_message`), where a pipe holds
+# it to the exit, while the program's output goes out past it with
+# `write(2)`: so a startup warning's log line stands after the body (#2899).
+[[line]]
+name = "a-startup-log-line-is-held-behind-the-body"
+args = ["-qrr", "-n", "-d", "date.timezone=Foo/Bar", "{dir}/t.php"]
+files = { "t.php" = "<?php echo \"body\\n\";\n" }
+
 # `-rr` over a program that exits with 3.
 [[line]]
 name = "run-twice-on-the-line-quits-with-the-program-s-exit-status"
@@ -404,6 +413,18 @@ name = "under-r-a-run-after-a-refusal-meets-its-functions"
 args = ["-qrb", "-n", "-d", "display_errors=1", "{dir}/t.php"]
 files = { "t.php" = "<?php\nfunction f(int $a = null) {}\nfunction g(int $b = null) {}\nbreak 2;\n" }
 stdin = "ev 1\nc\nr\nq\n"
+streams = "merged"
+
+# A context whose compile bound classes early before its refusal: php binds a
+# top-level class with no parent, interfaces or traits as it compiles it
+# (`zend_compile_class_decl`), and the fatal's jump takes none back, so each
+# stands beside the functions declared around it; one its opline binds does
+# not (#3029).
+[[line]]
+name = "a-refused-context-leaves-its-early-bound-classes-standing"
+args = ["-qb", "-n", "-d", "display_errors=1", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f() {}\nclass A {}\ninterface I {}\nclass C implements I {}\nfunction g() {}\nbreak 2;\n" }
+stdin = "ev var_dump(function_exists(\"f\"), class_exists(\"A\", false), interface_exists(\"I\", false), class_exists(\"C\", false), function_exists(\"g\"))\nq\n"
 streams = "merged"
 
 # The auto compile under `-r` comes after the init files whatever they left:

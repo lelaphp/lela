@@ -300,10 +300,6 @@ pub(crate) struct TraceRecord {
 #[derive(Debug)]
 pub(crate) struct Recorded {
     pub(crate) record: TraceRecord,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the pipeline hands it to types::build with #2958")
-    )]
     pub(crate) view: UnitView,
 }
 

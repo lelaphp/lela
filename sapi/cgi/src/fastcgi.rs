@@ -362,7 +362,7 @@ fn keep_children(children: i32) -> Option<()> {
     nix::unistd::setsid().ok();
     if crate::ffi::kill_group_on_stop(nix::unistd::getpgrp()).is_err() {
         eprintln!("Can't set signals: {}", std::io::Error::last_os_error());
-        std::process::exit(1);
+        php_sapi::exit(1);
     }
     let mut running = 0;
     loop {
@@ -375,7 +375,7 @@ fn keep_children(children: i32) -> Option<()> {
                 Ok(Forked::Parent { .. }) => running += 1,
                 Err(e) => {
                     eprintln!("php (pre-forking): {e}");
-                    std::process::exit(1);
+                    php_sapi::exit(1);
                 }
             }
         }

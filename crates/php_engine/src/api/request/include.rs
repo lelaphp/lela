@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use php_compile::{CompileError, SourceKind};
+use php_compile::SourceKind;
 use php_heap::Fatal;
 use php_unit::PublishedUnit;
 
@@ -18,6 +18,7 @@ use crate::api::raising::{Level, Thrown};
 use crate::api::values::PhpString;
 use crate::exec::IncludeKind;
 use crate::supplied::chain::{FileArgs, StringArgs};
+use crate::unit_cache::CompileRefused;
 
 use super::{HandlePath, HostPath, Opened, Refused, Request, Unresolved, is_wrapper_url};
 
@@ -128,7 +129,7 @@ impl Request {
         path: &[u8],
         written: Option<&[u8]>,
         handle: HandlePath,
-    ) -> Result<Option<Result<PublishedUnit, CompileError>>, Thrown> {
+    ) -> Result<Option<Result<PublishedUnit, CompileRefused>>, Thrown> {
         self.compile_through(FileArgs::new(path, written, handle))
     }
 
@@ -137,7 +138,7 @@ impl Request {
     fn compile_through(
         &mut self,
         args: FileArgs<'_>,
-    ) -> Result<Option<Result<PublishedUnit, CompileError>>, Thrown> {
+    ) -> Result<Option<Result<PublishedUnit, CompileRefused>>, Thrown> {
         let shared = Arc::clone(&self.shared);
         let top = Beneath::<chain::CompileFile>::top(shared.supplied.compile_file.links(), args);
         Ok(top.serve(self)?.map(|compiled| compiled.0))
@@ -494,7 +495,7 @@ impl Request {
         // every link; any other file is compiled through them all, inside
         // the include, as `zend_include_or_eval` calls `zend_compile_file`.
         let cached = if let Some(held) = held {
-            Some(held.unit.clone())
+            Some(self.held_answer(&held))
         } else {
             let outer = self.include.including.replace((kind, self.vm.depth()));
             let compiled = self.compile_file(&path, Some(written), handle);
@@ -855,7 +856,7 @@ impl Request {
         code: &[u8],
         name: &[u8],
         position: php_compile::syntax::Position,
-    ) -> Result<Result<PublishedUnit, CompileError>, Thrown> {
+    ) -> Result<Result<PublishedUnit, CompileRefused>, Thrown> {
         let shared = Arc::clone(&self.shared);
         let args = StringArgs::new(code, name, position);
         let top =
@@ -925,8 +926,15 @@ impl Request {
             ..php_compile::Options::default()
         };
         let mut strings = php_heap::Strings::new();
-        php_compile::export_source(&mut self.compile_arena, source, &options, &mut strings)
-            .map_err(|refused| self.refused_include(&refused, b"", SourceKind::EVAL))
+        php_compile::export_source(&mut self.compile_arena, source, &options, &mut strings).map_err(
+            |error| {
+                let refused = CompileRefused {
+                    error,
+                    declared: None,
+                };
+                self.refused_include(&refused, b"", SourceKind::EVAL)
+            },
+        )
     }
 
     /// `f` over a string the host evaluates of its own, `-r`'s code, the
@@ -971,7 +979,7 @@ impl Request {
         source: &[u8],
         name: &[u8],
         position: php_compile::syntax::Position,
-    ) -> Result<PublishedUnit, CompileError> {
+    ) -> Result<PublishedUnit, CompileRefused> {
         Arc::clone(&self.shared).compile_for(self, source, name, SourceKind::Eval(position))
     }
 
@@ -1159,32 +1167,33 @@ impl Request {
     /// ```
     pub(super) fn refused_include(
         &mut self,
-        refused: &CompileError,
+        refused: &CompileRefused,
         path: &[u8],
         kind: SourceKind,
     ) -> Thrown {
-        if refused.stage == php_compile::Stage::Opening {
+        let error = &refused.error;
+        if error.stage == php_compile::Stage::Opening {
             // `open_file_for_scanning` refused before anything compiled:
             // `zend_error` places it where the request is executing.
             let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
             let line = self.current_line();
-            self.end_in_compile_time(refused.level, &refused.message, &file, line);
+            self.end_in_compile_time(error.level, &error.message, &file, line);
             return Thrown::of(None);
         }
-        let raised = refused.raised.iter();
-        if matches!(kind, SourceKind::Eval(_)) {
-            for raised in raised.clone() {
-                self.note_error_in(raised.level, &raised.message, path, raised.line);
+        let raised = error.raised.iter();
+        if error.level == Level::Parse || error.thrown {
+            if matches!(kind, SourceKind::Eval(_)) {
+                for raised in raised.clone() {
+                    self.note_error_in(raised.level, &raised.message, path, raised.line);
+                }
             }
-        }
-        if refused.level == Level::Parse || refused.thrown {
-            let class = if refused.level == Level::Parse {
+            let class = if error.level == Level::Parse {
                 "ParseError"
             } else {
                 "CompileError"
             };
             let thrown =
-                crate::api::raising::throw_at(self, class, &refused.message, path, refused.line);
+                crate::api::raising::throw_at(self, class, &error.message, path, error.line);
             if kind == SourceKind::File {
                 self.while_pending(&thrown, |req| {
                     for raised in raised {
@@ -1195,14 +1204,17 @@ impl Request {
             return thrown;
         }
         // `compile_file` records what the file's compile raises, its
-        // fatal last; `compile_string` begins no record.
+        // fatal last; `compile_string` begins no record. What the compile
+        // had declared stands, each in its turn among what it raised
+        // ([`Request::declare_refused`]), unless one of them ended the
+        // request.
         let recording = (kind == SourceKind::File).then(|| self.begin_recording());
-        if recording.is_some() {
-            for raised in raised {
+        if let Some(noted) = self.declare_refused(refused, path) {
+            for raised in error.raised.get(noted..).unwrap_or_default() {
                 self.note_error_in(raised.level, &raised.message, path, raised.line);
             }
+            self.end_in_compile_time(error.level, &error.message, path, error.line);
         }
-        self.end_in_compile_time(refused.level, &refused.message, path, refused.line);
         if let Some(recording) = recording {
             self.emit_recorded(recording);
         }

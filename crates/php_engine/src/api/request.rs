@@ -429,9 +429,10 @@ pub struct Request {
     /// for a compile or a link to emit ([`recording::Record`]).
     record: recording::Record,
     /// `CG(rtd_key_counter)` over the units this request compiled for
-    /// itself: the runtime definition keys and anonymous class names
-    /// they made, which the next one counts on from
-    /// ([`crate::engine::Shared::compile_for`]).
+    /// itself and every refused compile it raised: the runtime definition
+    /// keys and anonymous class names they made, which the next one
+    /// counts on from ([`crate::engine::Shared::compile_for`],
+    /// [`Request::declare_refused`]).
     keys_made: u32,
     /// The arena every compile this request makes parses into and keeps
     /// its temporaries in, reset after each (#2810): what php's
@@ -774,6 +775,13 @@ pub(crate) struct FrameShape {
     /// off the shape and not off the declaration
     /// ([`Request::arg_send_mode`]).
     pub(crate) by_ref: bool,
+    /// What the `INIT` of a call to the function writes into the call's
+    /// flags: php's `quick_arg_flags`, which of the first twelve
+    /// arguments it takes by value, for the `SEND_*_EX` oplines to test
+    /// with no lookup ([`exec::CallInfo::sends_by_value`]); and whether
+    /// its activation is plain, no `#[\Deprecated]` or `#[\NoDiscard]`
+    /// to raise ([`exec::CallInfo::plain_entry`]).
+    pub(crate) sent: exec::CallInfo,
 }
 
 impl FrameShape {
@@ -799,8 +807,31 @@ impl FrameShape {
             }),
             cache_size: code.map_or(0, |code| code.cache_size),
             by_ref: decl.parameters.iter().any(|p| p.by_ref),
+            sent: exec::CallInfo::sent(|number| {
+                sent_parameter(decl, number).is_some_and(|parameter| parameter.by_ref)
+            })
+            .with_plain_entry({
+                let flags = crate::attributes::Flags::of(&decl.attributes);
+                !flags.deprecated && !flags.no_discard
+            }),
         }
     }
+}
+
+/// The parameter of `decl` the argument numbered `number` is sent to,
+/// `zend_check_arg_send_type`'s `arg_info`: the declared one at its
+/// place, or past the declared ones the variadic; none past them
+/// without one.
+pub(crate) fn sent_parameter(
+    decl: &FunctionDecl,
+    number: u32,
+) -> Option<&php_unit::decl::Parameter> {
+    let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
+    let variadic = decl.parameters.last().filter(|last| last.variadic);
+    decl.parameters
+        .get(at)
+        .filter(|parameter| !parameter.variadic)
+        .or(variadic)
 }
 
 /// A method as its class holds it: the class, `common.scope`, and
@@ -1131,10 +1162,9 @@ impl Request {
         self.keys_made
     }
 
-    /// The `made` runtime definition keys of a unit this request just
-    /// compiled for itself, counted on, saturating at `u32::MAX`.
-    pub(crate) fn count_keys_made(&mut self, made: usize) {
-        let made = u32::try_from(made).unwrap_or(u32::MAX);
+    /// The `made` runtime definition keys of a compile this request just
+    /// made for itself, counted on, saturating at `u32::MAX`.
+    pub(crate) fn count_keys_made(&mut self, made: u32) {
         self.keys_made = self.keys_made.saturating_add(made);
     }
 }

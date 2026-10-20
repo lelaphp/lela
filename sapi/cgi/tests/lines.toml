@@ -294,3 +294,25 @@ stop = "SIGTERM"
 params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
+
+# What php displays while it starts goes to C's `stdout`, an `fwrite`
+# (`php_output_direct`, `php_output_stdout`), fully buffered where stdout is
+# a pipe, while the head and the body go out past it with `write(2)`
+# (`sapi_cgi_single_write`): so a startup warning reaches the pipe after
+# them, where the request's end flushes stdout (`sapi_cgi_deactivate`), or
+# where the program's `flush()` does (`sapi_cgi_flush`). The usage and a
+# refused redirect's alert, written with no request started, are buffered
+# behind it, and `-a`'s line is flushed with it (#2899).
+[[line]]
+name = "a-startup-warning-is-held-behind-the-body"
+args = ["-n", "-d", "date.timezone=Foo/Bar", "b.php"]
+files = { "b.php" = "<?php echo \"body\\n\";\n", "f.php" = "<?php echo \"a\\n\"; flush(); echo \"b\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "date.timezone=Foo/Bar", "f.php"]
+[[line.then]]
+args = ["-n", "-d", "date.timezone=Foo/Bar", "-h"]
+[[line.then]]
+args = ["-n", "-d", "date.timezone=Foo/Bar", "-a", "b.php"]
+[[line.then]]
+args = ["-n", "-d", "date.timezone=Foo/Bar", "-d", "cgi.redirect_status_env="]
+env = { GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/b.php" }

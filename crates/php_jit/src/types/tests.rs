@@ -13,6 +13,8 @@
 //! `PHP_JIT_BLESS=1` set, the test writes both files instead of reading
 //! them.
 
+use std::fmt::Write as _;
+
 use php_unit::Opcode;
 
 use super::{
@@ -371,5 +373,38 @@ fn a_fetched_elements_guard_frees_the_temporary_it_read() -> Result<(), String> 
     let exit = &ir.exits[usize::from(freed.0)];
     assert_eq!(exit.opline, Some(fetch.opline));
     assert_ne!(Some(freed), fetch.exit);
+    Ok(())
+}
+
+/// A loop of 250 `$s += $i * k;` statements, which php compiles: its
+/// places that leave with one spec share one exit, as php's
+/// `zend_jit_trace_get_exit_point` reuses them, so it builds under php's
+/// 512. Each statement leaves at two oplines: the `MUL`'s overflow, and
+/// the `ASSIGN_OP`'s overflow and its own exit (the first's guard on
+/// `$s` too), at its opline storing what the `MUL` left. With the entry
+/// guard, the `$i++` and the loop's test that is 503, where an exit per
+/// place was 754; the interrupt test shares the first `MUL`'s, which
+/// php's `ZEND_JIT_EXIT_TO_VM` keeps apart once a spec carries it (#2964).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_long_loop_shares_its_exits_as_php_reuses_them() -> Result<(), String> {
+    let mut body = String::new();
+    for k in 1..=250 {
+        writeln!(body, "$s += $i * {k};").map_err(|e| e.to_string())?;
+    }
+    let ir = built(
+        &IN_F,
+        &format!(
+            "function f(int $n) {{ $s = 0; for ($i = 0; $i < $n; $i++) {{\n{body}}} return $s; }}
+            echo f(3), \"\\n\";"
+        ),
+    )?;
+    assert_eq!(ir.exits.len(), 503, "{}", dump::render(&ir));
+    for (at, exit) in ir.exits.iter().enumerate() {
+        assert!(
+            !ir.exits[..at].contains(exit),
+            "exit {at} is an earlier one's"
+        );
+    }
     Ok(())
 }
