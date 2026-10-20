@@ -81,7 +81,7 @@ impl Tier for Jit {
 
 /// The tier's request state (`jit-design.md` §4): whether a recording is
 /// under way on the request, php's `JIT_G(tracing)`, which no fiber switch
-/// saves (§4.9, revision NEXT), set and cleared by `record`'s guard
+/// saves (§4.9, revision 30), set and cleared by `record`'s guard
 /// alone and read through `record::recording`.
 #[derive(Debug, Default)]
 pub(crate) struct JitRequest {

@@ -15,7 +15,6 @@
 
 use std::io::Write;
 
-use php_ext::abi::AfterLog;
 use php_sapi::tier::Request;
 use php_sapi::{Aborted, OutputSink, ResponseHead};
 
@@ -389,25 +388,14 @@ impl OutputSink for Sink {
     }
 }
 
-/// What a request wrote, one write at a time, on each of its streams.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Written {
-    Out(Vec<u8>),
-    Log(Vec<u8>),
-    Err(Vec<u8>),
-}
-
-/// A sink that keeps what it is given and writes nothing: what the host
-/// serves to learn what the compiler would say, said later, through
-/// [`Sink`], where php says it.
+/// A sink that writes nothing: what the host serves to learn whether the
+/// compiler refuses the execution context, before the request that
+/// compiles it where php does.
 #[derive(Debug, Default)]
-pub struct Kept {
-    pub written: Vec<Written>,
-}
+pub struct Unwritten;
 
-impl OutputSink for Kept {
-    fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
-        self.written.push(Written::Out(bytes.to_vec()));
+impl OutputSink for Unwritten {
+    fn write(&mut self, _: &[u8]) -> Result<(), Aborted> {
         Ok(())
     }
 
@@ -415,50 +403,7 @@ impl OutputSink for Kept {
 
     fn send_headers(&mut self, _: &ResponseHead) {}
 
-    fn log(&mut self, entry: &[u8]) {
-        self.written.push(Written::Log(entry.to_vec()));
-    }
+    fn log(&mut self, _: &[u8]) {}
 
-    fn write_stderr(&mut self, bytes: &[u8]) {
-        self.written.push(Written::Err(bytes.to_vec()));
-    }
-}
-
-/// What a [`Kept`] sink kept, written as the request would have written
-/// it, each diagnostic's entry before its display, and `fatal` served
-/// once the entry logged last is written: a refused compile ends at its
-/// fatal, which `php_sapi_phpdbg_log_message` follows with its listing,
-/// and its prompt once php is fully started, inside the log and so
-/// before `php_error_cb` displays the fatal
-/// (`Z/sapi/phpdbg/phpdbg.c:731-770`, `Z/main/main.c:1411-1495`). A log
-/// that bailed out leaves the display unwritten; nothing logged serves
-/// no `fatal`. Which of the two it was is the answer, `Returned` where
-/// nothing was logged.
-pub fn replay(
-    s: &mut Session,
-    written: &[Written],
-    fatal: impl FnOnce(&mut Session) -> AfterLog,
-) -> AfterLog {
-    let logged = written
-        .iter()
-        .rposition(|each| matches!(each, Written::Log(_)))
-        .map_or(0, |at| at + 1);
-    let (through_fatal, displayed) = written.split_at(logged);
-    let write = |s: &mut Session, each: &Written| match each {
-        Written::Out(bytes) => s.out.program(bytes),
-        Written::Log(entry) => s.out.log(entry),
-        Written::Err(bytes) => {
-            std::io::stderr().lock().write_all(bytes).ok();
-        }
-    };
-    for each in through_fatal {
-        write(s, each);
-    }
-    if logged > 0 && fatal(s) == AfterLog::BailedOut {
-        return AfterLog::BailedOut;
-    }
-    for each in displayed {
-        write(s, each);
-    }
-    AfterLog::Returned
+    fn write_stderr(&mut self, _: &[u8]) {}
 }
