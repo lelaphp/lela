@@ -232,7 +232,8 @@ fn a_destructors_hot_loop_inside_a_recording_starts_no_second_trace() {
 /// `zend_jit_stop_counter_handlers` stops the rest. php under the
 /// recipe's hot counters with `opcache.jit_max_root_traces=3` writes the
 /// same for this program's `b`, its third trace, a side trace of `a`'s
-/// loop taking the second, which no `Backend` compiles here yet:
+/// loop taking the second, which nothing here grows until a trace is
+/// entered (#2959):
 /// `---- TRACE 3 start (enter) b() …:3`, `---- TRACE 3 abort (too many
 /// traces)`, `---- TRACE 3 blacklisted`, and nothing for `c` or `d`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]

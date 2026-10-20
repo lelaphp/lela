@@ -40,10 +40,7 @@
 )]
 #![cfg_attr(
     not(test),
-    expect(
-        dead_code,
-        reason = "dispatch enters a trace with #2959, and the pipeline builds its Backend over symbols() with #2958"
-    )
+    expect(dead_code, reason = "dispatch enters a trace with #2959")
 )]
 
 use std::any::Any;

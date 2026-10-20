@@ -27,7 +27,9 @@ use crate::api::raising::{
 };
 use crate::api::request::Request;
 use crate::api::values::walk::{self, Table};
-use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+use crate::api::values::{
+    Key, Layout, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef,
+};
 
 /// `zval_get_string` (`Z/Zend/zend_operators.c:1066`): a value as the
 /// string php converts it to, which is what `ECHO`, `print`, `.` and
@@ -944,6 +946,32 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
 /// ```expect
 /// s=1
 /// ```
+///
+/// The array is laid down at the size php's is, never grown from eight
+/// while it fills ([`symtable_laid`]): from the slots alone where no
+/// table stands, `zend_new_array(ce->default_properties_count)`, and
+/// otherwise at the size of the table php duplicates, so
+/// `memory_get_peak_usage()` reads no table the copy outgrew:
+///
+/// ```php
+/// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+/// class Nine { public $a=1; public $b=1; public $c=1; public $d=1; public $e=1; public $f=1; public $g=1; public $h=1; public $i=1; }
+/// $n = new Nine;
+/// pk(fn () => (array) $n);
+/// pk(fn () => get_mangled_object_vars($n));
+/// $i = new DateInterval('P1D'); get_object_vars($i);
+/// pk(fn () => (array) $i);
+/// #[AllowDynamicProperties] class Dyn { public $a = 1; }
+/// $d = new Dyn; foreach (range(1, 9) as $k) { $d->{"p$k"} = $k; }
+/// unset($d->p1, $d->p2, $d->p3, $d->p4, $d->p5);
+/// pk(fn () => (array) $d);
+/// ```
+/// ```expect
+/// 696 728
+/// 696 696
+/// 696 696
+/// 696 696
+/// ```
 pub(crate) fn mangled_array(
     req: &mut Request,
     object: PhpObject,
@@ -962,8 +990,38 @@ pub(crate) fn mangled_array(
     let duplicate = declared
         || req.own_handlers(object.class()).is_some()
         || source.is_some_and(|table| table.is_recursive());
-    let rows: Vec<(Key, Value)> = crate::api::values::walk::rows(req, table).collect();
-    let mut array = req.array()?;
+    // What php lays the array down from: the slots alone where no table
+    // stands (`zend_std_build_object_properties_array`), and otherwise
+    // the table `zend_proptable_to_symtable` copies, with its element
+    // count, every declared row among them.
+    let laid_from = match &table {
+        Table::Object(rows) if rows.owner().heap().properties().is_none() => None,
+        Table::Object(rows) => Some((rows.dynamic(), rows.positions().len())),
+        Table::Array(rows) => Some((*rows, u32::try_from(rows.len()).unwrap_or(u32::MAX))),
+    };
+    // A declared row's mangled name is no number; a dynamic one is read
+    // as a symbol table reads it, so `"1"` is `1`, and a table with one
+    // that reads so is the one php converts.
+    let mut convert = false;
+    let rows: Vec<(Key, Value)> = walk::rows(req, table)
+        .map(|(key, entry)| match key {
+            Key::Int(n) => (Key::Int(n), entry),
+            Key::Str(name) => {
+                let key = Key::lookup(name);
+                convert |= matches!(key, Key::Int(_));
+                (key, entry)
+            }
+        })
+        .collect();
+    let mut array = match laid_from {
+        // `zend_new_array(ce->default_properties_count)`, laid down at
+        // once where there is a slot (`zend_hash_real_init_mixed`).
+        None => {
+            let slots = o.slots();
+            req.array_sized(slots, slots == 0)?
+        }
+        Some((source, elements)) => symtable_laid(req, source, elements, convert)?.hand_on(),
+    };
     for (key, entry) in rows {
         // The table php hands on as it stands holds each row as it is;
         // a copy of it holds each as its copy does.
@@ -974,15 +1032,58 @@ pub(crate) fn mangled_array(
             entry
         };
         let entry = Owner::adopt(entry);
-        // A declared row's mangled name is no number; a dynamic one is
-        // read as a symbol table reads it, so `"1"` is `1`.
-        let key = match key {
-            Key::Int(n) => Key::Int(n),
-            Key::Str(name) => Key::lookup(name),
-        };
         array.set(req, Owner::take(req, key), entry)?;
     }
     Ok(array)
+}
+
+/// The array `zend_proptable_to_symtable` (`Z/Zend/zend_hash.c:3396`)
+/// makes of an object's table `source`, laid down empty for a caller
+/// that fills it row by row, at the size php's is: `zend_new_array` of
+/// `elements`, php's `zend_hash_num_elements` of the source, where a
+/// name reads as an integer (`convert`), and otherwise
+/// `zend_array_dup`'s table, the source's own size and layout, or the
+/// uninitialised one where the source holds nothing. So a copy of nine
+/// or more rows is never grown from eight while it fills, and
+/// `memory_get_peak_usage()` never reads the table it outgrew. A table
+/// with a name that reads as an integer is converted at its element
+/// count, and one rows were deleted from is copied at the size it grew
+/// to:
+///
+/// ```php
+/// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+/// $i = new DateInterval('P1D'); @$i->{'7'} = 0;
+/// pk(fn () => (array) $i);
+/// pk(fn () => get_object_vars($i));
+/// #[AllowDynamicProperties] class Dyn { public $a = 1; }
+/// $d = new Dyn; foreach (range(1, 20) as $k) { $d->{"p$k"} = $k; }
+/// foreach (range(1, 15) as $k) { unset($d->{"p$k"}); }
+/// pk(fn () => get_mangled_object_vars($d));
+/// ```
+/// ```expect
+/// 1016 728
+/// 1016 696
+/// 1336 1336
+/// ```
+pub(crate) fn symtable_laid(
+    req: &mut Request,
+    source: PhpArray,
+    elements: u32,
+    convert: bool,
+) -> Result<Owner<PhpArray>, Thrown> {
+    if convert {
+        return PhpArray::init_size(req, elements);
+    }
+    if elements == 0 {
+        return PhpArray::new(req);
+    }
+    let source = source.heap();
+    let layout = if source.is_packed() {
+        Layout::Packed
+    } else {
+        Layout::Hash
+    };
+    PhpArray::sized(req, source.table_size(), layout)
 }
 
 /// `zend_proptable_to_symtable` over the object's own table where php

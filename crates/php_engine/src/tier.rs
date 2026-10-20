@@ -39,6 +39,10 @@ use crate::{exec, interrupt};
 use php_unit::OpArray;
 
 pub use crate::api::request::Request;
+/// The compiled tier's compile thread (`jit-design.md` §4.8), an engine's
+/// thread as ADR-0010's Threads has them: started through the engine's
+/// one home and joined before every fork.
+pub use crate::fork::{Parked, Worker};
 pub use php_compile::Hooked;
 pub use php_heap::{Fatal, FrameRef};
 
@@ -174,7 +178,7 @@ impl Word {
 }
 
 /// The trace number of an execution, php's `EG(jit_trace_num)`
-/// (`jit-design.md` §4.9, revisions 23 and NEXT; design §5.11,
+/// (`jit-design.md` §4.9, revisions 23 and 33; design §5.11,
 /// revision 52): one word the engine keeps per execution and only the
 /// tier reads, the number of the trace executing on that execution. It
 /// excludes nothing: the tier's recording exclusion is the request's, as

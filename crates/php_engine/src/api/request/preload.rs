@@ -398,7 +398,9 @@ impl Request {
                 .scripts
                 .push((full, PublishedUnit::clone(unit), size));
         }
-        Some(unit)
+        Some(unit.map_err(|error| {
+            crate::unit_cache::CompileRefused::published(error, |unit| self.take_unit(unit))
+        }))
     }
 
     /// Whether the class at `at` of `unit` is one the preload holds,

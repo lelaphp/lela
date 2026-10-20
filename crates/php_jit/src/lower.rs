@@ -28,15 +28,15 @@
 //! one branch per iteration, php's cost (`rfc-jit.md:118`).
 //!
 //! [`ExitId`]: crate::types::ExitId
-#![cfg_attr(
+
+mod clif;
+#[cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "the pipeline compiles what it builds with #2958, over the kernel table #2957 lists"
+        reason = "the goldens' text; no host prints a trace's IR yet"
     )
 )]
-
-mod clif;
 pub(crate) mod dump;
 #[cfg(test)]
 mod tests;

@@ -33,6 +33,7 @@ tier::FuncRef::at
 tier::FuncRef::offset
 tier::Hooked
 tier::MapPtrRaw
+tier::Parked
 tier::Refusal
 tier::Request
 tier::SafepointIdx
@@ -60,6 +61,9 @@ tier::UnitView::parameters
 tier::Word
 tier::Word::halves
 tier::Word::sealed
+tier::Worker
+tier::Worker::new
+tier::Worker::wake
 tier::at_room
 tier::begin
 tier::below

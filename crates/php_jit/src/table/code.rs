@@ -105,6 +105,13 @@ impl<P: Pages> Drop for Chunk<P> {
 
 /// One published body (`jit-design.md` §4.4): its entry in the executable
 /// view, and the chunk it keeps from reuse.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the chunk is held, not read, so it is not reused while the body stands; the length is the disassembly's"
+    )
+)]
 pub(crate) struct Code<P: Pages> {
     entry: NonNull<u8>,
     len: usize,
@@ -119,11 +126,13 @@ impl<P: Pages> Code<P> {
     }
 
     /// How many bytes the body is.
+    #[cfg_attr(not(test), expect(dead_code, reason = "the disassembly's"))]
     pub(crate) fn len(&self) -> usize {
         self.len
     }
 
     /// Which chunk of the arena the body is in.
+    #[cfg(test)]
     pub(crate) fn chunk(&self) -> ChunkIdx {
         self.chunk.index
     }
