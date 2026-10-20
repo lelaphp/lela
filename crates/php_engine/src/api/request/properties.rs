@@ -3667,7 +3667,22 @@ impl Request {
     /// (`ZVAL_NEW_EMPTY_REF`), the place keeping the owner it had. A
     /// declared `readonly` slot is php's `Error` and no cell; a typed
     /// one puts its type on the cell it makes (`ZEND_REF_ADD_TYPE_SOURCE`),
-    /// so a write through the loop's variable is held to it.
+    /// so a write through the loop's variable is held to it. The
+    /// `readonly` `Error` names the property by the bucket's key, which
+    /// for a protected or a private one is mangled and prints as nothing:
+    ///
+    /// ```php
+    /// class A { public readonly int $a; function __construct() { $this->a = 1; } }
+    /// class B { protected readonly int $b; function __construct() { $this->b = 2; } }
+    /// class C { private readonly int $c; function __construct() { $this->c = 3; } function f() { try { foreach ($this as $k => &$v) {} } catch (Error $e) { echo $e->getMessage(), "\n"; } } }
+    /// foreach ([new A, new B] as $o) { (function () { try { foreach ($this as $k => &$v) {} } catch (Error $e) { echo $e->getMessage(), "\n"; } })->call($o); }
+    /// (new C)->f();
+    /// ```
+    /// ```expect
+    /// Cannot acquire reference to readonly property A::$a
+    /// Cannot acquire reference to readonly property B::$
+    /// Cannot acquire reference to readonly property C::$
+    /// ```
     pub(crate) fn walked_reference(
         &mut self,
         object: PhpObject,
@@ -3683,16 +3698,21 @@ impl Request {
                 let declared = self
                     .placed_property(object.class(), slot)
                     .map(|(declaring, p)| {
-                        (declaring, p.is_readonly, p.name.0.to_vec(), p.ty.clone())
+                        let readonly = p.is_readonly.then_some(p.visibility);
+                        (declaring, readonly, p.name.0.to_vec(), p.ty.clone())
                     });
                 let Some((declaring, readonly, name, ty)) = declared else {
                     return self.fatal_of(Err(Fatal::error(format!(
                         "InternalError: a walk over slot {slot}, which the class does not declare"
                     ))));
                 };
-                if readonly {
+                // php names it by the bucket's key, `ZSTR_VAL(p->key)`, which
+                // a protected or a private property's leading `\0` ends.
+                if let Some(visibility) = readonly {
+                    let public = visibility == Visibility::Public;
+                    let shown = if public { &name[..] } else { b"" };
                     let operation = "acquire reference to";
-                    return Err(self.readonly_modification(declaring, &name, operation));
+                    return Err(self.readonly_modification(declaring, shown, operation));
                 }
                 let cell = self.reference(held)?;
                 if let Some(place) = o.slot_ref(slot) {
