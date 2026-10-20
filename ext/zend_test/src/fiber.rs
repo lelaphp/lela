@@ -13,7 +13,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::php_class;
 use php_ext::call::{call_named, new_object};
-use php_ext::raising::{Thrown, throw_error};
+use php_ext::raising::{Thrown, clear, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpObject, PhpString, Value};
 
@@ -275,6 +275,25 @@ impl _ZendTestFiber {
     /// <!-- destroy: #3 -->
     /// <!-- init var_dump() -->
     /// NULL
+    /// ```
+    ///
+    /// A body that throws ends into its target all the same: the
+    /// throwable is lost to the transfer the target's start overwrites,
+    /// and the target is served with the value nothing wrote, an
+    /// argument not passed (#2871):
+    ///
+    /// ```php
+    /// $f = new _ZendTestFiber(function () { throw new Exception('boom'); });
+    /// $f->pipeTo(function ($x) { echo "target "; var_dump($x); });
+    /// try { var_dump($f->start()); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// echo "end\n";
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ArgumentCountError: {closure:%s:3}(): Argument #1 ($x) not passed in %s:3
+    /// Stack trace:
+    /// #0 [internal function]: {closure:%s:3}(NULL)
+    /// #1 {main}
+    ///   thrown in %s on line 3
     /// ```
     fn pipeTo(
         req: &mut Request,
@@ -608,16 +627,30 @@ fn lay_down(
         for owner in [held, param].into_iter().flatten() {
             owner.give_up(req);
         }
-        let value = outcome?;
-        let returned = *value;
-        let fiber = payload(req, object)?;
-        fiber.result = Some(value);
-        let Some(target) = fiber.target.as_deref().copied() else {
+        let Some(target) = payload(req, object)?.target.as_deref().copied() else {
+            let value = outcome?;
+            let returned = *value;
+            payload(req, object)?.result = Some(value);
             return Ok(CoroutineEnd::Return(Owner::take(req, returned)));
         };
-        let argument = Owner::take(req, returned);
-        payload(req, target)?.result = Some(argument);
-        lay_down(req, target, vec![returned], Vec::new())?;
+        // The target is laid down whatever the body ended with. A
+        // throwable is cleared into the error transfer the target's own
+        // start overwrites, so it is lost, and the target's argument is
+        // `fiber->result`, which nothing wrote, `IS_UNDEF`.
+        let argument = match outcome {
+            Ok(value) => {
+                let returned = *value;
+                payload(req, object)?.result = Some(value);
+                let argument = Owner::take(req, returned);
+                payload(req, target)?.result = Some(argument);
+                returned
+            }
+            Err(thrown) => {
+                clear(req, thrown)?;
+                Value::unpassed()
+            }
+        };
+        lay_down(req, target, vec![argument], Vec::new())?;
         req.state::<State>().active_fiber = Some(target);
         Ok(CoroutineEnd::Into(target))
     })

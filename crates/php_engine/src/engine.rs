@@ -3738,6 +3738,13 @@ impl Known {
     }
 }
 
+/// Whether `bytes` is one of php's known strings, which `gen_stub.php`
+/// hands a native's attribute as `ZSTR_KNOWN` where it would otherwise
+/// make a persistent string of its own.
+pub(crate) fn is_known(bytes: &[u8]) -> bool {
+    KNOWN_STRINGS.iter().any(|known| known.as_bytes() == bytes)
+}
+
 /// `ZEND_KNOWN_STRINGS` (`Z/Zend/zend_string.h`): what
 /// `zend_interned_strings_init` interns before any extension starts, the
 /// keys of a backtrace's rows and of a `Throwable`'s properties, `->` and
