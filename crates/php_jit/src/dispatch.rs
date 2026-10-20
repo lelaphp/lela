@@ -1,10 +1,11 @@
 //! The one machine over a word (`jit-design.md` §4.9): [`visit`], what a
 //! safepoint does with the word it carries, [`hot`], the cold path that
-//! records from a word it claimed, and [`safepoint`], what
-//! `Jit::safepoint` is.
+//! records from a word it claimed, [`run`], which enters a compiled
+//! word's trace and follows it from trace to trace, and [`safepoint`],
+//! what `Jit::safepoint` is.
 //!
 //! Under `Mode::Off` no word is read or written. Otherwise a visit reads
-//! the word: a compiled one is entered, a cold one is bumped and, at its
+//! the word: a compiled one is entered ([`run`]), a cold one is bumped and, at its
 //! threshold, claimed, unless the request records already
 //! ([`record::recording`], revision 30), when it is bumped and left,
 //! as php's `zend_jit_trace_hot_root` returns at once while
@@ -25,12 +26,16 @@
 //! is the callee's `RETURN` and every one is armed (#3036).
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use php_engine::tier::Flow;
-use php_engine::tier::{self, FrameRef, Request, SafepointIdx, Site, Word};
+use php_engine::tier::{self, Fatal, FrameRef, Request, SafepointIdx, Site, Word};
 
 use crate::compiler::{self, Job};
-use crate::policy::{self, Claim, Holder, Mode, Outcome, Place, Policy, State, TraceEvent};
+use crate::enter::{self, Crossed as _, Exited};
+use crate::policy::{
+    self, Claim, Holder, JitDebug, Mode, Outcome, Place, Policy, State, TraceEvent,
+};
 use crate::record::{self, Bailed, Ended, Start, Stop};
 use crate::table::{self, TraceId, TraceName};
 use crate::{JitEngine, Shared};
@@ -44,7 +49,7 @@ pub(crate) enum Visited {
     /// Nothing happened: the interpreter runs the opline.
     Continue,
     /// The word names a compiled trace to enter.
-    Enter(#[cfg_attr(not(test), expect(dead_code, reason = "run enters it (#2959)"))] TraceId),
+    Enter(TraceId),
     /// The word was claimed for a recording, which starts here.
     Hot(Claim),
 }
@@ -128,11 +133,128 @@ fn visited(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
         (decided, Arc::clone(&engine.shared))
     };
     match decided {
-        // What enters a published trace is `run` (#2959); until then the
-        // interpreter runs the opline, as for a word not compiled (§3.2).
-        Visited::Enter(_) | Visited::Continue => Flow::Continue,
+        Visited::Continue => Flow::Continue,
+        Visited::Enter(id) => run(req, frame, id, &shared),
         Visited::Hot(claim) => hot(req, frame, claim, at, &shared),
     }
+}
+
+/// Trace to trace (`jit-design.md` §4.9): `id` entered on `frame`, then,
+/// for as long as the exit it left through names a trace published in
+/// the epoch's table, that trace entered on the frame the exit landed:
+/// the exit's link, a build-time fact followed without reading a word, or
+/// the side trace its word names. Each trace is borrowed from the table
+/// of the epoch the request holds, whose slots are written once, so
+/// entering one takes no hold of its own.
+///
+/// The three meanings of "not compiled" have three answers. At the root,
+/// a word that reads compiled whose slot is empty, the window §3.2 names
+/// or a table that keeps no code (#2943), entered nothing: `Continue`.
+/// After an exit a trace has done its work, so a link or a side whose
+/// slot is empty, and an exit word that reads cold, recording or
+/// blacklisted, are a `Resume` of the landed frame; so is a throwable a
+/// kernel left pending, which the loop unwinds from where it was raised.
+/// A cold exit word is bumped and claimed by nothing: what records a side
+/// trace from a hot exit is #2964's, so until then no exit word reads
+/// compiled.
+///
+/// A compiled loop leaves through its interrupt test once the engine's
+/// timer raises the interrupt, and the `Resume` hands the loop its
+/// interrupt check (§2.2), which raises php's fatal at the loop's line:
+///
+/// ```php
+/// set_time_limit(1); for (;;) {}
+/// ```
+/// ```expect exit=255 regime=jit-tracing process wall=1s
+/// Fatal error: Maximum execution time of 1 second exceeded in %s on line 2
+/// ```
+///
+/// A signal `pcntl_async_signals` delivers while a compiled loop spins is
+/// handled at the loop's check after the interrupt exit, and the loop
+/// goes on to see what the handler wrote:
+///
+/// ```php
+/// pcntl_async_signals(true); $done = false;
+/// pcntl_signal(SIGALRM, function () use (&$done) { $done = true; echo "alarm\n"; });
+/// pcntl_alarm(1); $n = 0; while (!$done) { $n++; } echo $n > 1000 ? "spun\n" : "short\n";
+/// ```
+/// ```expect exit=0 regime=jit-tracing process wall=1s
+/// alarm
+/// spun
+/// ```
+#[inline(never)]
+pub(crate) fn run(req: &mut Request, frame: FrameRef, id: TraceId, shared: &Shared) -> Flow {
+    let epoch = table::holding(req, &shared.policy, &shared.perf);
+    let Some(table) = table::of_epoch(&epoch) else {
+        return Flow::Continue;
+    };
+    let Some(mut trace) = table.get(id) else {
+        return Flow::Continue;
+    };
+    let mut frame = frame;
+    loop {
+        let exited = match enter::enter(req, frame, trace) {
+            Ok(exited) => exited,
+            Err(fatal) => return Flow::Bail(fatal),
+        };
+        frame = exited.frame;
+        let Some(exit) = trace.exits.get(usize::from(exited.exit.0)) else {
+            return Flow::Bail(Fatal::error(
+                "InternalError: a trace landed an exit it does not have",
+            ));
+        };
+        if req.thrown() {
+            return Flow::Resume(frame);
+        }
+        let next = match exit.link {
+            Some(link) => Some(link),
+            // A trace's end is no side exit: php returns to the interpreter.
+            None if trace.leaves == Some(exited.exit) => None,
+            None => sided(req, shared, trace.id, exited, &exit.word),
+        };
+        match next.and_then(|next| table.get(next)) {
+            Some(next) => trace = next,
+            None => return Flow::Resume(frame),
+        }
+    }
+}
+
+/// What an exit with no link goes on to (`jit-design.md` §4.9): the side
+/// trace its word names, entered with no line written, as php's exit is
+/// patched to jump to it; otherwise none, a cold word bumped toward
+/// `opcache.jit_hot_side_exit` and claimed by nothing, recording a side
+/// trace being #2964's, and php's
+/// `TRACE n exit m` line written for the place it landed, as
+/// `zend_jit_trace_exit` writes it unless the interrupt is raised or the
+/// request records (`Z/ext/opcache/jit/zend_jit_trace.c:8806-8824`).
+fn sided(
+    req: &mut Request,
+    shared: &Shared,
+    trace: TraceId,
+    exited: Exited,
+    word: &Word,
+) -> Option<TraceId> {
+    match policy::read(word) {
+        State::Compiled(side) => return Some(side),
+        State::Cold => {
+            policy::bump(word);
+        }
+        State::Recording | State::Blacklisted => {}
+    }
+    let quiet = req.interrupt().raised().load(Ordering::Relaxed) || record::recording(req);
+    if !quiet && shared.policy.debug().any(JitDebug::TRACE_EXIT) {
+        let mut lines = Vec::new();
+        placed(req, exited.frame, false, |at| {
+            let event = TraceEvent::Exit {
+                trace,
+                exit: exited.exit,
+                at,
+            };
+            shared.dump(&mut lines, &event);
+        });
+        req.write_stderr(&lines);
+    }
+    None
 }
 
 /// The cold path (`jit-design.md` §4.9): the `TRACE start` line, the
@@ -320,7 +442,7 @@ fn started(
     start: Start,
 ) -> Option<TraceName> {
     let mut lines = Vec::new();
-    let name = placed(req, frame, start, |at| {
+    let name = placed(req, frame, start == Start::Enter, |at| {
         if let Some(trace) = trace {
             shared.dump(&mut lines, &TraceEvent::Start { trace, start, at });
         }
@@ -330,12 +452,13 @@ fn started(
     name
 }
 
-/// What `with` makes of the [`Place`] a root at `frame` starts at; none
-/// where the frame shows no op array.
+/// What `with` makes of the [`Place`] `frame` stands at, at its opline's
+/// line or, for an `entry` php counts at a typed prologue, its first
+/// `RECV`'s; none where the frame shows no op array.
 fn placed<T>(
     req: &Request,
     frame: FrameRef,
-    start: Start,
+    entry: bool,
     with: impl FnOnce(Place<'_>) -> T,
 ) -> Option<T> {
     let view = tier::frame(req, frame)?;
@@ -345,8 +468,7 @@ fn placed<T>(
     let scope = function
         .and(view.function_scope())
         .map(|class| req.class_name(class).into_bytes());
-    let typed = start == Start::Enter
-        && decl.is_some_and(|decl| decl.parameters.iter().any(|p| p.ty.is_some()));
+    let typed = entry && decl.is_some_and(|decl| decl.parameters.iter().any(|p| p.ty.is_some()));
     let line = if typed {
         view.op_array()
             .and_then(|code| code.opline(php_unit::OplineIdx(0)))

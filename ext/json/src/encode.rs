@@ -1,5 +1,5 @@
 //! `php_json_encode_zval` and what it calls: `json_encoder.c` at the
-//! tag, one `Vec<u8>` where php has a `smart_str`.
+//! tag, filling the `smart_str` php fills ([`SmartStr`]).
 //!
 //! What is copied exactly, because it is observable: the byte map that
 //! decides which characters are escaped and the escape each is given;
@@ -22,7 +22,8 @@ use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold, Unwritten};
 use php_ext::values::{
-    ClassId, HeldProperties, Key, Owner, PhpArray, PhpObject, RecursionGuard, Value, ValueRef,
+    ClassId, HeldProperties, Key, Owner, PhpArray, PhpObject, RecursionGuard, SmartStr, Value,
+    ValueRef,
 };
 
 use crate::constants::{
@@ -73,26 +74,26 @@ type Wrote = Result<bool, Thrown>;
 /// `php_json_encode_zval`: the value's arm, a reference followed first.
 pub(super) fn encode(
     req: &mut Request,
-    buf: &mut Vec<u8>,
+    buf: &mut SmartStr,
     value: &Value,
     options: i64,
     enc: &mut Encoder,
 ) -> Wrote {
     let value = value.deref();
     match value.as_ref() {
-        ValueRef::Undef | ValueRef::Null => buf.extend_from_slice(b"null"),
-        ValueRef::Bool(true) => buf.extend_from_slice(b"true"),
-        ValueRef::Bool(false) => buf.extend_from_slice(b"false"),
-        ValueRef::Int(n) => buf.extend_from_slice(n.to_string().as_bytes()),
+        ValueRef::Undef | ValueRef::Null => buf.append(req, b"null")?,
+        ValueRef::Bool(true) => buf.append(req, b"true")?,
+        ValueRef::Bool(false) => buf.append(req, b"false")?,
+        ValueRef::Int(n) => buf.append(req, n.to_string().as_bytes())?,
         ValueRef::Float(f) => {
             if f.is_finite() {
-                encode_double(buf, f, options, enc.precision);
+                encode_double(req, buf, f, options, enc.precision)?;
             } else {
                 enc.error_code = JSON_ERROR_INF_OR_NAN;
-                buf.push(b'0');
+                buf.append(req, b"0")?;
             }
         }
-        ValueRef::Str(s) => return Ok(escape_string(buf, s.as_bytes(), options, enc)),
+        ValueRef::Str(s) => return escape_string(req, buf, s.as_bytes(), options, enc),
         ValueRef::Object(o) => {
             let object = *o;
             if enc
@@ -111,9 +112,7 @@ pub(super) fn encode(
         ValueRef::Array(_) => return held(req, buf, &value, options, enc),
         ValueRef::Resource(_) | ValueRef::Reference(_) => {
             enc.error_code = JSON_ERROR_UNSUPPORTED_TYPE;
-            if options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
-                buf.extend_from_slice(b"null");
-            }
+            partial_null(req, buf, options)?;
             return Ok(false);
         }
     }
@@ -138,7 +137,7 @@ pub(super) fn encode(
 /// ```
 fn held(
     req: &mut Request,
-    buf: &mut Vec<u8>,
+    buf: &mut SmartStr,
     value: &Value,
     options: i64,
     enc: &mut Encoder,
@@ -152,63 +151,84 @@ fn held(
 /// `php_json_encode_double`: `zend_gcvt` at `serialize_precision`, with
 /// `.0` appended under `JSON_PRESERVE_ZERO_FRACTION` where the text
 /// carries no decimal point.
-fn encode_double(buf: &mut Vec<u8>, value: f64, options: i64, precision: i32) {
-    let text = float_format(value, precision, Exponent::Lower);
-    let bare = !text.contains('.');
-    buf.extend_from_slice(text.as_bytes());
-    if options & JSON_PRESERVE_ZERO_FRACTION != 0 && bare {
-        buf.extend_from_slice(b".0");
+fn encode_double(
+    req: &mut Request,
+    buf: &mut SmartStr,
+    value: f64,
+    options: i64,
+    precision: i32,
+) -> Result<(), Thrown> {
+    let mut text = float_format(value, precision, Exponent::Lower);
+    if options & JSON_PRESERVE_ZERO_FRACTION != 0 && !text.contains('.') {
+        text.push_str(".0");
     }
+    buf.append(req, text.as_bytes())
+}
+
+/// The `null` written in a failed value's place under
+/// `JSON_PARTIAL_OUTPUT_ON_ERROR`, and nothing without it.
+fn partial_null(req: &mut Request, buf: &mut SmartStr, options: i64) -> Result<(), Thrown> {
+    if options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
+        buf.append(req, b"null")?;
+    }
+    Ok(())
 }
 
 /// `php_json_escape_string`: the quoted text of one string, or the
-/// number itself under `JSON_NUMERIC_CHECK`.
-fn escape_string(buf: &mut Vec<u8>, s: &[u8], options: i64, enc: &mut Encoder) -> bool {
+/// number itself under `JSON_NUMERIC_CHECK`; room for the string and
+/// its quotes taken first (`smart_str_alloc`), and each stretch of bytes
+/// that need no escape appended whole.
+fn escape_string(
+    req: &mut Request,
+    buf: &mut SmartStr,
+    s: &[u8],
+    options: i64,
+    enc: &mut Encoder,
+) -> Wrote {
     if s.is_empty() {
-        buf.extend_from_slice(b"\"\"");
-        return true;
+        buf.append(req, b"\"\"")?;
+        return Ok(true);
     }
     if options & JSON_NUMERIC_CHECK != 0
         && let Some(number) = numeric_string(s)
     {
         if let Some(n) = number.as_int() {
-            buf.extend_from_slice(n.to_string().as_bytes());
-            return true;
+            buf.append(req, n.to_string().as_bytes())?;
+            return Ok(true);
         }
         if let Some(f) = number.as_float()
             && f.is_finite()
         {
-            encode_double(buf, f, options, enc.precision);
-            return true;
+            encode_double(req, buf, f, options, enc.precision)?;
+            return Ok(true);
         }
     }
-    let checkpoint = buf.len();
-    buf.push(b'"');
-    let mut at = 0;
-    while at < s.len() {
-        let byte = s.get(at).copied().unwrap_or(0);
+    let checkpoint = buf.as_bytes().len();
+    buf.reserve(req, s.len().saturating_add(2))?;
+    buf.append(req, b"\"")?;
+    let (mut at, mut run) = (0, 0);
+    while let Some(&byte) = s.get(at) {
         if !escaped(byte) {
-            buf.push(byte);
             at += 1;
             continue;
         }
-        if byte >= 0x80 {
-            let Some(next) = escape_utf8(buf, s, at, options) else {
-                buf.truncate(checkpoint);
-                enc.error_code = JSON_ERROR_UTF8;
-                if options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
-                    buf.extend_from_slice(b"null");
-                }
-                return false;
-            };
+        buf.append(req, s.get(run..at).unwrap_or_default())?;
+        if byte < 0x80 {
+            escape_ascii(req, buf, byte, options)?;
+            at += 1;
+        } else if let Some(next) = escape_utf8(req, buf, s, at, options)? {
             at = next;
-            continue;
+        } else {
+            buf.remove(checkpoint..usize::MAX);
+            enc.error_code = JSON_ERROR_UTF8;
+            partial_null(req, buf, options)?;
+            return Ok(false);
         }
-        escape_ascii(buf, byte, options);
-        at += 1;
+        run = at;
     }
-    buf.push(b'"');
-    true
+    buf.append(req, s.get(run..).unwrap_or_default())?;
+    buf.append(req, b"\"")?;
+    Ok(true)
 }
 
 /// `php_json_escape_string`'s `charmap`: the control characters, the six
@@ -224,79 +244,81 @@ fn escaped(byte: u8) -> bool {
 /// control character is always `\u00XX`. The case of the hex digits is
 /// php's own: `<` and `>` carry a capital where nothing else
 /// does.
-fn escape_ascii(buf: &mut Vec<u8>, byte: u8, options: i64) {
-    let one_of = |buf: &mut Vec<u8>, on: bool, escape: &[u8], bare: u8| {
-        if on {
-            buf.extend_from_slice(escape);
-        } else {
-            buf.push(bare);
-        }
+fn escape_ascii(
+    req: &mut Request,
+    buf: &mut SmartStr,
+    byte: u8,
+    options: i64,
+) -> Result<(), Thrown> {
+    let one_of =
+        |on: bool, escape: &'static [u8], bare: &'static [u8]| if on { escape } else { bare };
+    let escape: &[u8] = match byte {
+        b'"' => one_of(options & JSON_HEX_QUOT != 0, b"\\u0022", b"\\\""),
+        b'\\' => b"\\\\",
+        b'/' => one_of(options & JSON_UNESCAPED_SLASHES == 0, b"\\/", b"/"),
+        0x08 => b"\\b",
+        0x0c => b"\\f",
+        b'\n' => b"\\n",
+        b'\r' => b"\\r",
+        b'\t' => b"\\t",
+        b'<' => one_of(options & JSON_HEX_TAG != 0, b"\\u003C", b"<"),
+        b'>' => one_of(options & JSON_HEX_TAG != 0, b"\\u003E", b">"),
+        b'&' => one_of(options & JSON_HEX_AMP != 0, b"\\u0026", b"&"),
+        b'\'' => one_of(options & JSON_HEX_APOS != 0, b"\\u0027", b"'"),
+        _ => return push_hex(req, buf, u32::from(byte)),
     };
-    match byte {
-        b'"' => buf.extend_from_slice(if options & JSON_HEX_QUOT != 0 {
-            &b"\\u0022"[..]
-        } else {
-            &b"\\\""[..]
-        }),
-        b'\\' => buf.extend_from_slice(b"\\\\"),
-        b'/' => one_of(buf, options & JSON_UNESCAPED_SLASHES == 0, b"\\/", b'/'),
-        0x08 => buf.extend_from_slice(b"\\b"),
-        0x0c => buf.extend_from_slice(b"\\f"),
-        b'\n' => buf.extend_from_slice(b"\\n"),
-        b'\r' => buf.extend_from_slice(b"\\r"),
-        b'\t' => buf.extend_from_slice(b"\\t"),
-        b'<' => one_of(buf, options & JSON_HEX_TAG != 0, b"\\u003C", b'<'),
-        b'>' => one_of(buf, options & JSON_HEX_TAG != 0, b"\\u003E", b'>'),
-        b'&' => one_of(buf, options & JSON_HEX_AMP != 0, b"\\u0026", b'&'),
-        b'\'' => one_of(buf, options & JSON_HEX_APOS != 0, b"\\u0027", b'\''),
-        _ => push_hex(buf, u32::from(byte)),
-    }
+    buf.append(req, escape)
 }
 
 /// `php_next_utf8_char` and the three arms that follow it: the sequence
 /// written as it stands under `JSON_UNESCAPED_UNICODE`, as `\uXXXX`
 /// otherwise, and the two `INVALID_UTF8_*` answers for a malformed one.
 /// `None` is the refusal the caller turns into `PHP_JSON_ERROR_UTF8`.
-fn escape_utf8(buf: &mut Vec<u8>, s: &[u8], at: usize, options: i64) -> Option<usize> {
+fn escape_utf8(
+    req: &mut Request,
+    buf: &mut SmartStr,
+    s: &[u8],
+    at: usize,
+    options: i64,
+) -> Result<Option<usize>, Thrown> {
     let (code, next, ok) = next_utf8_char(s, at);
     if !ok {
         if options & JSON_INVALID_UTF8_IGNORE != 0 {
-            return Some(next);
+            return Ok(Some(next));
         }
         if options & JSON_INVALID_UTF8_SUBSTITUTE != 0 {
             if options & JSON_UNESCAPED_UNICODE != 0 {
-                buf.extend_from_slice("\u{fffd}".as_bytes());
+                buf.append(req, "\u{fffd}".as_bytes())?;
             } else {
-                buf.extend_from_slice(b"\\ufffd");
+                buf.append(req, b"\\ufffd")?;
             }
-            return Some(next);
+            return Ok(Some(next));
         }
-        return None;
+        return Ok(None);
     }
     let bare = options & JSON_UNESCAPED_UNICODE != 0
         && (options & JSON_UNESCAPED_LINE_TERMINATORS != 0 || !(0x2028..=0x2029).contains(&code));
     if bare {
-        buf.extend_from_slice(s.get(at..next).unwrap_or_default());
-        return Some(next);
-    }
-    if code >= 0x10000 {
+        buf.append(req, s.get(at..next).unwrap_or_default())?;
+    } else if code >= 0x10000 {
         let rest = code - 0x10000;
-        push_hex(buf, ((rest >> 10) | 0xd800) & 0xffff);
-        push_hex(buf, (rest & 0x3ff) | 0xdc00);
+        push_hex(req, buf, ((rest >> 10) | 0xd800) & 0xffff)?;
+        push_hex(req, buf, (rest & 0x3ff) | 0xdc00)?;
     } else {
-        push_hex(buf, code);
+        push_hex(req, buf, code)?;
     }
-    Some(next)
+    Ok(Some(next))
 }
 
 /// One `\uXXXX` with php's lowercase hex digits.
-fn push_hex(buf: &mut Vec<u8>, code: u32) {
+fn push_hex(req: &mut Request, buf: &mut SmartStr, code: u32) -> Result<(), Thrown> {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    buf.extend_from_slice(b"\\u");
-    for shift in [12, 8, 4, 0] {
+    let mut hex = *b"\\u0000";
+    for (digit, shift) in hex[2..].iter_mut().zip([12, 8, 4, 0]) {
         let nibble = usize::try_from((code >> shift) & 0xf).unwrap_or(0);
-        buf.push(DIGITS.get(nibble).copied().unwrap_or(b'0'));
+        *digit = DIGITS.get(nibble).copied().unwrap_or(b'0');
     }
+    buf.append(req, &hex)
 }
 
 /// `php_next_utf8_char` over `s` from `at`: the code point, where the
@@ -374,16 +396,14 @@ fn illegal_run(s: &[u8], at: usize, width: usize) -> usize {
 /// ```
 fn serializable(
     req: &mut Request,
-    buf: &mut Vec<u8>,
+    buf: &mut SmartStr,
     object: PhpObject,
     options: i64,
     enc: &mut Encoder,
 ) -> Wrote {
     if object.is_recursive_in(req, RecursionGuard::Json) {
         enc.error_code = JSON_ERROR_RECURSION;
-        if options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
-            buf.extend_from_slice(b"null");
-        }
+        partial_null(req, buf, options)?;
         return Ok(false);
     }
     object.protect_in(req, RecursionGuard::Json);
@@ -392,9 +412,7 @@ fn serializable(
         Ok(answer) => answer,
         Err(thrown) => {
             object.unprotect_in(req, RecursionGuard::Json);
-            if options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
-                buf.extend_from_slice(b"null");
-            }
+            partial_null(req, buf, options)?;
             return Err(thrown);
         }
     };
@@ -417,7 +435,7 @@ fn serializable(
 /// a pure one the refusal php has no representation for.
 fn enum_case(
     req: &mut Request,
-    buf: &mut Vec<u8>,
+    buf: &mut SmartStr,
     object: PhpObject,
     options: i64,
     enc: &mut Encoder,
@@ -427,7 +445,7 @@ fn enum_case(
         .is_some_and(|decl| decl.backing != EnumBacking::Pure);
     if !backed {
         enc.error_code = JSON_ERROR_NON_BACKED_ENUM;
-        buf.push(b'0');
+        buf.append(req, b"0")?;
         return Ok(false);
     }
     let case = object.prop(req, b"value").unwrap_or_default();
@@ -464,16 +482,14 @@ fn enum_case(
 /// ```
 fn encode_array(
     req: &mut Request,
-    buf: &mut Vec<u8>,
+    buf: &mut SmartStr,
     value: &Value,
     options: i64,
     enc: &mut Encoder,
 ) -> Wrote {
     if req.stack_overflowed() {
         enc.error_code = JSON_ERROR_DEPTH;
-        if options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
-            buf.extend_from_slice(b"null");
-        }
+        partial_null(req, buf, options)?;
         return Ok(false);
     }
     if let Some(object) = value.as_object().copied() {
@@ -543,9 +559,29 @@ impl Guard {
 /// {"a":1,"v":"v"}{"y":2}
 /// {"date":"2000-01-01 00:00:00.000000","timezone_type":3,"timezone":"UTC"}
 /// ```
+///
+/// A hooked row is read through its hook only once the walk reaches
+/// it and the row is not stepped over (`Z/ext/json/json_encoder.c:259`),
+/// so a protected or private property's hook is never called, and a
+/// public one's is called after the rows before it are written:
+///
+/// ```php
+/// class S { private $p { get { echo "p read\n"; return 1; } } public $q { get { echo "q read\n"; return 2; } } }
+/// echo json_encode(new S), "\n";
+/// class J implements JsonSerializable { function jsonSerialize(): mixed { echo "js\n"; return 1; } }
+/// class O { public $a; public $b { get { echo "b\n"; return 2; } } function __construct() { $this->a = new J; } }
+/// echo json_encode(new O), "\n";
+/// ```
+/// ```expect
+/// q read
+/// {"q":2}
+/// js
+/// b
+/// {"a":1,"b":2}
+/// ```
 fn encode_object(
     req: &mut Request,
-    buf: &mut Vec<u8>,
+    buf: &mut SmartStr,
     object: PhpObject,
     options: i64,
     enc: &mut Encoder,
@@ -591,7 +627,7 @@ enum Rows<'h> {
 /// recursion error where a walk is inside what `guard` stands on already.
 fn guarded(
     req: &mut Request,
-    buf: &mut Vec<u8>,
+    buf: &mut SmartStr,
     guard: Guard,
     rows: Rows<'_>,
     options: i64,
@@ -600,7 +636,7 @@ fn guarded(
 ) -> Wrote {
     if guard.is_recursive() {
         enc.error_code = JSON_ERROR_RECURSION;
-        buf.extend_from_slice(b"null");
+        buf.append(req, b"null")?;
         return Ok(false);
     }
     guard.protect();
@@ -629,13 +665,13 @@ fn guarded(
 /// ```
 fn write_rows(
     req: &mut Request,
-    buf: &mut Vec<u8>,
+    buf: &mut SmartStr,
     rows: Rows<'_>,
     options: i64,
     enc: &mut Encoder,
     as_object: bool,
 ) -> Wrote {
-    buf.push(if as_object { b'{' } else { b'[' });
+    buf.append(req, if as_object { b"{" } else { b"[" })?;
     enc.depth += 1;
     let mut comma = false;
     let object = !matches!(rows, Rows::Array(_));
@@ -651,7 +687,7 @@ fn write_rows(
         if object && matches!(row.key(), Key::Str(name) if name.as_bytes().first() == Some(&0)) {
             return Ok(ControlFlow::Continue(()));
         }
-        let element = row.value().deref();
+        let element = row.read(req)?.deref();
         let row = (row.key(), &element);
         if write_row(req, buf, row, options, enc, as_object, &mut comma)? {
             Ok(ControlFlow::Continue(()))
@@ -675,9 +711,9 @@ fn write_rows(
     }
     enc.depth -= 1;
     if comma {
-        pretty_break(buf, options, enc);
+        pretty_break(req, buf, options, enc)?;
     }
-    buf.push(if as_object { b'}' } else { b']' });
+    buf.append(req, if as_object { b"}" } else { b"]" })?;
     Ok(true)
 }
 
@@ -687,7 +723,7 @@ fn write_rows(
 /// there, without `JSON_PARTIAL_OUTPUT_ON_ERROR`.
 fn write_row(
     req: &mut Request,
-    buf: &mut Vec<u8>,
+    buf: &mut SmartStr,
     (key, element): (&Key, &Value),
     options: i64,
     enc: &mut Encoder,
@@ -695,16 +731,20 @@ fn write_row(
     comma: &mut bool,
 ) -> Wrote {
     if *comma {
-        buf.push(b',');
+        buf.append(req, b",")?;
     }
     *comma = true;
-    pretty_break(buf, options, enc);
+    pretty_break(req, buf, options, enc)?;
     if as_object {
-        write_key(buf, key, options, enc);
-        buf.push(b':');
-        if options & JSON_PRETTY_PRINT != 0 {
-            buf.push(b' ');
-        }
+        write_key(req, buf, key, options, enc)?;
+        buf.append(
+            req,
+            if options & JSON_PRETTY_PRINT != 0 {
+                b": "
+            } else {
+                b":"
+            },
+        )?;
     }
     Ok(encode(req, buf, element, options, enc)? || options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0)
 }
@@ -712,32 +752,47 @@ fn write_row(
 /// One key of an object: the string escaped with `JSON_NUMERIC_CHECK`
 /// taken off it, and an integer key quoted as php's
 /// `smart_str_append_long` between two quotes.
-fn write_key(buf: &mut Vec<u8>, key: &Key, options: i64, enc: &mut Encoder) {
+fn write_key(
+    req: &mut Request,
+    buf: &mut SmartStr,
+    key: &Key,
+    options: i64,
+    enc: &mut Encoder,
+) -> Result<(), Thrown> {
     match key {
         Key::Str(name) => {
-            let at = buf.len();
-            let wrote = escape_string(buf, name.as_bytes(), options & !JSON_NUMERIC_CHECK, enc);
+            let at = buf.as_bytes().len();
+            let wrote = escape_string(
+                req,
+                buf,
+                name.as_bytes(),
+                options & !JSON_NUMERIC_CHECK,
+                enc,
+            )?;
             if !wrote && options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
-                buf.truncate(at);
-                buf.extend_from_slice(b"\"\"");
+                buf.remove(at..usize::MAX);
+                buf.append(req, b"\"\"")?;
             }
+            Ok(())
         }
-        Key::Int(n) => {
-            buf.push(b'"');
-            buf.extend_from_slice(n.to_string().as_bytes());
-            buf.push(b'"');
-        }
+        Key::Int(n) => buf.append(req, format!("\"{n}\"").as_bytes()),
     }
 }
 
 /// `php_json_pretty_print_char` and `php_json_pretty_print_indent`: the
 /// newline and the four spaces a level, and nothing without the option.
-fn pretty_break(buf: &mut Vec<u8>, options: i64, enc: &Encoder) {
+fn pretty_break(
+    req: &mut Request,
+    buf: &mut SmartStr,
+    options: i64,
+    enc: &Encoder,
+) -> Result<(), Thrown> {
     if options & JSON_PRETTY_PRINT == 0 {
-        return;
+        return Ok(());
     }
-    buf.push(b'\n');
+    buf.append(req, b"\n")?;
     for _ in 0..enc.depth {
-        buf.extend_from_slice(b"    ");
+        buf.append(req, b"    ")?;
     }
+    Ok(())
 }

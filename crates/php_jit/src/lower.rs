@@ -41,18 +41,21 @@ pub(crate) mod dump;
 #[cfg(test)]
 mod tests;
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicU8;
+
 use cranelift_codegen::control::ControlPlane;
-use cranelift_codegen::ir::{Function, SourceLoc};
+use cranelift_codegen::ir::SourceLoc;
 use cranelift_codegen::isa::{self, OwnedTargetIsa};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::{Context, Final, MachSrcLoc};
 use php_engine::tier::{FuncRef, MapPtrRaw};
 use php_unit::OplineIdx;
 
-use crate::policy::{JitDebug, Policy};
+use crate::policy::{JitDebug, Mode, Policy};
 use crate::record::Stop;
 use crate::table::TraceName;
-use crate::types::{Abort, ExitSpec, Op, TraceIr};
+use crate::types::{Abort, End, ExitId, ExitSpec, Op, TraceIr};
 
 /// A trace in final bytes (`jit-design.md` §4.3), what the `Backend` makes
 /// and `table::TraceTable::publish` copies into the code arena once:
@@ -60,7 +63,7 @@ use crate::types::{Abort, ExitSpec, Op, TraceIr};
 /// needs, one [`ExitSpec`] per exit in [`ExitId`](crate::types::ExitId)
 /// order, the runtime-cache slots the code reads, where each recorded
 /// opline's code begins, and what a profiler names the trace by.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub(crate) struct Compiled {
     pub(crate) bytes: Vec<u8>,
     /// The offset in `bytes` the trace is entered at.
@@ -68,6 +71,10 @@ pub(crate) struct Compiled {
     /// A power of two.
     pub(crate) align: usize,
     pub(crate) exits: Box<[ExitSpec]>,
+    /// The exit a trace that does not loop ends through, none for a loop:
+    /// php's return to the interpreter at a trace's end
+    /// (`zend_jit_trace_return`), which no side trace grows from.
+    pub(crate) leaves: Option<ExitId>,
     /// The slots of the requests' runtime caches the code reads, which
     /// `enter` lays down on a request's first entry.
     pub(crate) map_ptrs: Box<[MapPtrRaw]>,
@@ -75,6 +82,32 @@ pub(crate) struct Compiled {
     /// php's `zend_jit_trace_name` but the number, which the table
     /// assigns: the job's, named where the trace's `TRACE start` line is.
     pub(crate) name: TraceName,
+    /// Under `jit.mode=exit-fuzz`, the byte per guard the code marks as
+    /// the guard fails once, once per trace and so per process; the code
+    /// holds their address, so they live as long as it. Empty otherwise.
+    pub(crate) fuzzed: Fuzzed,
+}
+
+/// The bytes compiled code reads and writes under `jit.mode=exit-fuzz`
+/// (`jit-design.md` §4.6, §7): one per guard, zero until the guard has
+/// failed once, at an address the code holds as a constant, so a clone
+/// shares them as it shares the bytes that name them.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Fuzzed(Arc<[AtomicU8]>);
+
+impl Fuzzed {
+    /// `n` bytes, none failed yet.
+    fn new(n: usize) -> Fuzzed {
+        Fuzzed((0..n).map(|_| AtomicU8::new(0)).collect())
+    }
+
+    /// The bytes as the lowering hands them out.
+    fn fuzz(&self) -> clif::Fuzz {
+        clif::Fuzz {
+            base: self.0.as_ptr().addr(),
+            len: self.0.len(),
+        }
+    }
 }
 
 /// Where one recorded opline's code begins: the op array, named with
@@ -192,6 +225,8 @@ pub(crate) struct Stood {
 pub(crate) struct Backend {
     isa: OwnedTargetIsa,
     symbols: Symbols,
+    /// Whether every guard fails once, `jit.mode=exit-fuzz`.
+    fuzz: bool,
 }
 
 impl std::fmt::Debug for Backend {
@@ -230,7 +265,11 @@ impl Backend {
         if isa.pointer_bits() != 64 {
             return Err(Unsupported("a 32-bit host"));
         }
-        Ok(Backend { isa, symbols })
+        Ok(Backend {
+            isa,
+            symbols,
+            fuzz: policy.mode() == Mode::ExitFuzz,
+        })
     }
 
     /// `ir` in final bytes, named `name`: the function [`clif::lower`]
@@ -240,7 +279,16 @@ impl Backend {
     /// addresses are constants, so a trace's bytes work wherever the arena
     /// places them.
     pub(crate) fn compile(&self, ir: &TraceIr, name: TraceName) -> Result<Compiled, Abort> {
-        let func = self.clif(ir)?;
+        let config = self.isa.frontend_config();
+        // Under exit-fuzz a first pass counts the guards, one byte each.
+        let fuzzed = if self.fuzz {
+            let (_, sites) = clif::lower(ir, config, &self.symbols, Some(clif::Fuzz::COUNTING))?;
+            Fuzzed::new(sites)
+        } else {
+            Fuzzed::default()
+        };
+        let fuzz = self.fuzz.then(|| fuzzed.fuzz());
+        let (func, _) = clif::lower(ir, config, &self.symbols, fuzz)?;
         let mut ctx = Context::for_function(func);
         let code = ctx
             .compile(&*self.isa, &mut ControlPlane::default())
@@ -257,16 +305,22 @@ impl Backend {
             entry_offset: 0,
             align,
             exits: ir.exits.clone().into_boxed_slice(),
+            leaves: match ir.end {
+                End::Leave(exit) => Some(exit),
+                End::Loop(_) => None,
+            },
             map_ptrs: ir.map_ptrs.clone().into_boxed_slice(),
             marks,
             name,
+            fuzzed,
         })
     }
 
     /// The function `ir` lowers to, before Cranelift's passes: the CLIF
     /// the goldens hold.
-    fn clif(&self, ir: &TraceIr) -> Result<Function, Abort> {
-        clif::lower(ir, self.isa.frontend_config(), &self.symbols)
+    #[cfg(test)]
+    fn clif(&self, ir: &TraceIr) -> Result<cranelift_codegen::ir::Function, Abort> {
+        clif::lower(ir, self.isa.frontend_config(), &self.symbols, None).map(|(func, _)| func)
     }
 }
 

@@ -2,6 +2,7 @@
 Body
 Case
 Case::FOLDED
+ClassHooks
 Collision
 Composed
 Exact

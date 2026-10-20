@@ -53,7 +53,7 @@ use php_heap::{Arr, PropertyTable, Str, TableRow, Zval};
 
 use crate::api::abi::Ref;
 use crate::api::raising::{Thrown, fatal, throw_error, throw_error_chained};
-use crate::api::request::Request;
+use crate::api::request::{HookedBuild, HookedDeclared, Request};
 use crate::api::values::{
     HeldProperties, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, View,
 };
@@ -483,6 +483,17 @@ pub fn properties<B>(
     let table = held.table.clone();
     table.pin();
     let watch = Watch::over(*held.owner);
+    // A hooked table's declared rows come first, in its order.
+    let mut declared = held.hooked.iter().flat_map(|rows| {
+        let hook = |row: &HookedDeclared| (rows.object, row.clone(), rows.build);
+        rows.declared
+            .iter()
+            .map(move |row| row.hooked.map(|_| hook(row)))
+    });
+    let mut body = |req: &mut Request, row: &mut Row| {
+        row.hook = declared.next().flatten();
+        body(req, row)
+    };
     let walked = foreach_steps(req, &table, watch, unwritten, &mut body);
     table.unpin(req);
     walked
@@ -812,6 +823,7 @@ fn next_lent(
         at,
         watch,
         uninitialized,
+        hook: None,
     })
 }
 
@@ -956,6 +968,9 @@ pub struct Row {
     /// The type's text of the typed property nothing has written that
     /// the row stands for ([`Unwritten::Shown`]).
     uninitialized: Option<String>,
+    /// The `IS_PTR` row of a hooked table the row stands for, unread
+    /// ([`Row::read`]).
+    hook: Option<(PhpObject, HookedDeclared, HookedBuild)>,
 }
 
 /// How a walk knows the table its rows are in still stands.
@@ -1033,6 +1048,20 @@ impl Row {
     #[must_use]
     pub fn value(&self) -> &Value {
         self.value.get()
+    }
+
+    /// The row's value as php's readers of the hooks' table read it
+    /// ([`crate::api::abi::PropertiesFor::Hooked`]): an `IS_PTR` row's
+    /// read through its property's `get` hook, once, when the reader
+    /// asks, so a row it steps over is never read; any other row's as
+    /// [`Row::value`] answers it. The `Err` is what the hook threw.
+    pub fn read(&mut self, req: &mut Request) -> Result<&Value, Thrown> {
+        if let Some((object, row, build)) = self.hook.take() {
+            let value = req.read_deferred(object, &row, build)?;
+            self.value.let_go(req);
+            self.value = Keep::Owned(value);
+        }
+        Ok(self.value.get())
     }
 
     /// Where the row stands for a typed property nothing has written,
@@ -1386,6 +1415,7 @@ fn next_row(req: &mut Request, holder: PhpRef, at: u32) -> Result<Option<Row>, T
             at: At::Bucket(table, found),
             watch: Watch::Iterator(at),
             uninitialized: None,
+            hook: None,
         }));
     }
     if let Some(held) = now.as_object().copied() {
@@ -1442,6 +1472,7 @@ fn object_row(
         at,
         watch: Watch::Iterator(iterator),
         uninitialized: None,
+        hook: None,
     }))
 }
 
