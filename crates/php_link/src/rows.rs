@@ -47,9 +47,30 @@ pub struct LinkedClass<H> {
     /// `ce->destructor`: the position of `__destruct`'s row in
     /// `methods`, set as [`LinkedClass::constructor`] is.
     pub destructor: Option<u32>,
-    /// `ce->num_hooked_props != 0`: whether a row of `properties` has
-    /// hooks, so a property access on a class with none asks no hook.
-    pub hooked: bool,
+    /// Where the class's property hooks are: `ce->num_hooked_props != 0`,
+    /// or a parent's private hooked property only that parent's scope
+    /// reaches, so a property access on a class with neither asks no
+    /// hook.
+    pub hooks: ClassHooks,
+}
+
+/// Where a linked class's property hooks are, as `do_inherit_property`
+/// counts `ce->num_hooked_props` and as a property access finds a
+/// `prop_info->hooks` under its scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClassHooks {
+    /// No property of the class's chain has hooks.
+    #[default]
+    Absent,
+    /// No row of `properties` has hooks, `ce->num_hooked_props == 0`, but
+    /// a parent's private hooked property the class redeclares is still
+    /// read through its hooks under that parent's scope
+    /// (`zend_get_parent_private_property`).
+    ParentPrivate,
+    /// A row of `properties` has hooks, `ce->num_hooked_props != 0`:
+    /// `get_object_vars`, the encoders and `foreach` read the object
+    /// through the hooks' table and iterator.
+    Rows,
 }
 
 impl<H> Default for LinkedClass<H> {
@@ -62,7 +83,7 @@ impl<H> Default for LinkedClass<H> {
             interfaces: Box::default(),
             constructor: None,
             destructor: None,
-            hooked: false,
+            hooks: ClassHooks::Absent,
         }
     }
 }

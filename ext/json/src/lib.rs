@@ -37,7 +37,7 @@ use php_ext::abi::{Extension, ExtensionBuilder, OrFalse};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::raising::{Thrown, arg_value_error, new_throwable, pending, throw_value};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpString, Value};
+use php_ext::values::{Owner, PhpString, SmartStr, Value};
 
 use constants::{
     JSON_ERROR_CTRL_CHAR, JSON_ERROR_DEPTH, JSON_ERROR_INF_OR_NAN,
@@ -330,6 +330,25 @@ fn depth_within(req: &mut Request, depth: i64, position: u32) -> Result<(), Thro
 /// string(18) "Recursion detected"
 /// string(13) "{"prop":null}"
 /// ```
+///
+/// The text is written into a `smart_str` on the request's heap, laid
+/// down at 231 bytes and grown to the page past what it holds, and
+/// `smart_str_extract` trims it to the answer, so the peak counts the
+/// buffer beside the string it hands back:
+///
+/// ```php
+/// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); $p = memory_get_peak_usage(); $u = memory_get_usage(); echo $p - $s, ' ', $u - $s, "\n"; }
+/// class N { public $a=1; public $b=1; }
+/// $n = new N; $long = str_repeat('x', 300);
+/// pk(fn () => json_encode($n));
+/// pk(fn () => json_encode([1,2,3]));
+/// pk(fn () => json_encode([$long, $long]));
+/// ```
+/// ```expect
+/// 296 40
+/// 288 32
+/// 4312 640
+/// ```
 #[php_function]
 fn json_encode(
     req: &mut Request,
@@ -338,22 +357,33 @@ fn json_encode(
     #[php(default = 512)] depth: i64,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let mut encoder = encode::Encoder::new(req, depth)?;
-    let mut buffer = Vec::new();
-    encode::encode(req, &mut buffer, &value, flags, &mut encoder)?;
+    let mut buffer = SmartStr::default();
+    let wrote = encode::encode(req, &mut buffer, &value, flags, &mut encoder);
     let partial = flags & JSON_PARTIAL_OUTPUT_ON_ERROR != 0;
+    let failed = wrote.is_err() || encoder.error_code != JSON_ERROR_NONE && !partial;
+    // `smart_str_free(&buf)` where no string is answered.
+    if failed {
+        buffer.free(req);
+    }
+    wrote?;
     if flags & JSON_THROW_ON_ERROR == 0 || partial {
         set_error(req, encoder.error_code);
-        if encoder.error_code != JSON_ERROR_NONE && !partial {
+        if failed {
             pending(req)?;
             return Ok(OrFalse::False);
         }
-    } else if encoder.error_code != JSON_ERROR_NONE {
+    } else if failed {
         return Err(throw_json(req, encoder.error_code));
     }
-    // What a reader of an object's properties left pending, a lazy
-    // object's initializer that threw, is thrown once the encoder is done.
-    pending(req)?;
-    Ok(OrFalse::Value(PhpString::new(req, &buffer)?))
+    // `smart_str_extract`, and what a reader of an object's properties
+    // left pending, a lazy object's initializer that threw, thrown once
+    // the encoder is done.
+    let answer = buffer.extract(req)?;
+    if let Err(thrown) = pending(req) {
+        answer.give_up(req);
+        return Err(thrown);
+    }
+    Ok(OrFalse::Value(answer))
 }
 
 /// `json_decode(string $json, ?bool $associative = null, int $depth =

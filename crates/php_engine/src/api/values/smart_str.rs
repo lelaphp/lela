@@ -63,24 +63,36 @@ impl SmartStr {
         self.append_grown(req, bytes)
     }
 
+    /// `smart_str_alloc`: room for `more` bytes after what is held, the
+    /// allocation laid down first where there is none and grown where
+    /// what it would hold reaches its size, as `smart_str_erealloc`
+    /// grows it, to 231 bytes first and then to the page past what is
+    /// asked; nothing is appended. The `Err` is the memory limit's fatal.
+    pub fn reserve(&mut self, req: &mut Request, more: usize) -> Result<(), Thrown> {
+        let len = self.len.saturating_add(more);
+        let room = self.buf.as_ref().map(FreshStr::len);
+        if room.is_some_and(|room| len < room) {
+            return Ok(());
+        }
+        let grown = if room.is_none() && len <= START_LEN {
+            START_LEN
+        } else {
+            len.saturating_add(OVERHEAD).next_multiple_of(PAGE) - OVERHEAD
+        };
+        let buf = match self.buf.take() {
+            None => req.heap_mut().string_fresh(grown),
+            Some(buf) => req.heap_mut().string_extend(buf, grown),
+        };
+        self.buf = Some(req.fatal_of(buf)?);
+        Ok(())
+    }
+
     /// [`SmartStr::append`] where the allocation is to be laid down or
     /// grown first.
     #[cold]
     fn append_grown(&mut self, req: &mut Request, bytes: &[u8]) -> Result<(), Thrown> {
+        self.reserve(req, bytes.len())?;
         let len = self.len.saturating_add(bytes.len());
-        let room = self.buf.as_ref().map_or(0, FreshStr::len);
-        if self.buf.is_none() || len >= room {
-            let grown = if self.buf.is_none() && len <= START_LEN {
-                START_LEN
-            } else {
-                len.saturating_add(OVERHEAD).next_multiple_of(PAGE) - OVERHEAD
-            };
-            let buf = match self.buf.take() {
-                None => req.heap_mut().string_fresh(grown),
-                Some(buf) => req.heap_mut().string_extend(buf, grown),
-            };
-            self.buf = Some(req.fatal_of(buf)?);
-        }
         if let Some(buf) = &mut self.buf {
             buf.bytes_mut()[self.len..len].copy_from_slice(bytes);
         }

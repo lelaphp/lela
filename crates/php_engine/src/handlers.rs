@@ -18991,6 +18991,7 @@ impl ForeachVar {
     pub(crate) fn iterator_del(req: &mut Request, held: php_heap::Zval) {
         match foreach_var(req, held) {
             ForeachVar::Properties { walk, .. } | ForeachVar::Reference { walk, .. } => {
+                req.hooked_walk_end(walk.0);
                 req.heap_mut().iterator_del(walk.0);
             }
             ForeachVar::Array { .. } | ForeachVar::Iterator(_) | ForeachVar::Skipped => {}
