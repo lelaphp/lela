@@ -186,8 +186,10 @@ standing a person gives a run, and moves no baseline.
 
 ## 9. Honest limitations
 
-Wall time only: no cycles, no instructions, no cache misses, no resident
-size. A code-layout confound of the kind Mytkowicz described would not be
+The verdict is wall time alone. A makala bar also states what each arm's
+server retired per request, instructions, cycles, CPU and runnable time,
+read with `proc_pid_rusage`, as evidence beside the rate and never as the
+verdict (#3062). A code-layout confound of the kind Mytkowicz described would not be
 caught here. The `NOISE-SWAMPED` rule is a quartile rule and not a
 hypothesis test: it has no confidence level, no *p* and no power analysis.
 That two arms are comparable at all is asserted by whoever declared the bar

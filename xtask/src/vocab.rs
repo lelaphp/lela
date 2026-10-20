@@ -164,7 +164,7 @@ fn rule_over<'a>(
     let path = krate.path();
     let covering: Vec<(&Rule, &Glossary)> = rules
         .iter()
-        .filter(|(rule, _)| rule.scope.iter().any(|pattern| matches(pattern, &path)))
+        .filter(|(rule, _)| rule.covers(&path))
         .map(|(rule, glossary)| (*rule, glossary))
         .collect();
     match covering.as_slice() {
@@ -409,26 +409,6 @@ fn without_code_spans(text: &str) -> String {
     out
 }
 
-/// Whether a manifest scope pattern covers a crate path: segment by segment,
-/// `*` matching one segment and `**` the rest.
-fn matches(pattern: &str, path: &Path) -> bool {
-    let segments: Vec<&str> = path
-        .iter()
-        .filter_map(|s| s.to_str())
-        .filter(|s| *s != ".")
-        .collect();
-    let mut pattern = pattern.split('/').filter(|p| !p.is_empty()).peekable();
-    let mut segments = segments.into_iter().peekable();
-    loop {
-        match (pattern.next(), segments.next()) {
-            (None, None) | (Some("**"), _) => return true,
-            (Some("*"), Some(_)) => {}
-            (Some(p), Some(s)) if p == s => {}
-            _ => return false,
-        }
-    }
-}
-
 /// Every `.rs` file under `dir`, in path order; `target/` is skipped, and
 /// so is `fixtures/`, whose files are other crates' sources.
 fn rust_files(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -450,7 +430,7 @@ fn rust_files(dir: &Path) -> Result<Vec<PathBuf>> {
 mod tests {
     use std::path::Path;
 
-    use super::{Items, Scan, Where, identifier_words, matches, scan_source, use_name};
+    use super::{Items, Scan, Where, identifier_words, scan_source, use_name};
     use crate::glossary::Glossary;
 
     #[test]
@@ -555,16 +535,16 @@ mod tests {
         );
     }
 
+    /// A rule's scope covers a crate path in the manifest's one grammar,
+    /// which `rule_over` reads through `Rule::covers`.
     #[test]
     fn scope_patterns_cover_crate_paths() {
-        assert!(matches("crates/*", Path::new("crates/php_heap")));
-        assert!(matches("ext/*", Path::new("ext/pcre")));
-        assert!(!matches("crates/*", Path::new("ext/pcre")));
-        assert!(!matches("crates/*", Path::new("xtask")));
-        assert!(!matches(
-            "crates/php_ext/api.lock",
-            Path::new("crates/php_ext")
-        ));
-        assert!(matches("crates/**", Path::new("crates/php_ext/src")));
+        let matches = |pattern, path| crate::manifest::scope_matches(pattern, Path::new(path));
+        assert!(matches("crates/*", "crates/php_heap"));
+        assert!(matches("ext/*", "ext/pcre"));
+        assert!(!matches("crates/*", "ext/pcre"));
+        assert!(!matches("crates/*", "xtask"));
+        assert!(!matches("crates/php_ext/api.lock", "crates/php_ext"));
+        assert!(matches("crates/**", "crates/php_ext/src"));
     }
 }
