@@ -121,7 +121,7 @@ impl Phpt {
                     .or_default()
                     .extend_from_slice(line);
             }
-            if in_file && trimmed_end(line) == b"===DONE===" {
+            if in_file && line.trim_ascii_end() == b"===DONE===" {
                 done = true;
             }
         }
@@ -276,17 +276,6 @@ fn opener(line: &[u8]) -> Option<String> {
         return None;
     }
     String::from_utf8(rest[..width].to_vec()).ok()
-}
-
-/// The line without the whitespace at its end.
-fn trimmed_end(line: &[u8]) -> &[u8] {
-    let width = line.len()
-        - line
-            .iter()
-            .rev()
-            .take_while(|b| b.is_ascii_whitespace())
-            .count();
-    &line[..width]
 }
 
 #[cfg(test)]

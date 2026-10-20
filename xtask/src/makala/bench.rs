@@ -50,6 +50,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::{Entry, workloads};
+use crate::bench::spent::{Retired, Spent};
 use crate::bench::{Declared, Held, PROTOCOL, Sample, Side, Sides, Stream, Unit};
 use crate::manifest::Manifest;
 use crate::oracle::hosts::MAKALA;
@@ -165,13 +166,15 @@ fn sides(root: &Path, entry: &Entry, held: Held, load: Load) -> Result<Sides> {
     let (threads, children) = load.hosts();
     let served = Arc::new(Served::start(root, &manifest, entry, threads)?);
     let makala = |name| -> Box<dyn Side> {
-        let (served, program) = (Arc::clone(&served), served.binary.clone());
+        let (pid, program) = (served.server.pid(), served.binary.clone());
+        let served = Arc::clone(&served);
         let ask = Box::new(move || served.body());
         Box::new(ByRequest {
             name,
             program,
             load,
             ask,
+            pid,
         })
     };
     if held == Held::Control {
@@ -186,12 +189,14 @@ fn sides(root: &Path, entry: &Entry, held: Held, load: Load) -> Result<Sides> {
         (&ini(), Ports::default()),
         children,
     )?;
+    let pid = pool.pid();
     let ask = Box::new(move || fpm_body(pool.ask()?));
     let fpm = ByRequest {
         name: "php-fpm",
         program,
         load,
         ask,
+        pid,
     };
     Ok(Ok([makala("makala"), Box::new(fpm)]))
 }
@@ -269,12 +274,14 @@ fn fpm_body((stdout, stderr): (Vec<u8>, Vec<u8>)) -> Result<Vec<u8>> {
 }
 
 /// An arm that asks a host the workload's request, `ask` giving the
-/// response's body, under its bar's [`Load`].
+/// response's body, under its bar's [`Load`], and reads what the server's
+/// process `pid` and its children retired across each rep (#3013).
 struct ByRequest {
     name: &'static str,
     program: PathBuf,
     load: Load,
     ask: Box<dyn Fn() -> Result<Vec<u8>> + Sync>,
+    pid: u32,
 }
 
 impl Side for ByRequest {
@@ -295,15 +302,16 @@ impl Side for ByRequest {
     }
 
     fn once(&mut self) -> Result<Sample> {
+        let before = Retired::of(self.pid);
         let start = Instant::now();
         let sample = match self.load {
-            Load::One => (self.ask)().map(|wrote| Sample {
-                value: start.elapsed().as_secs_f64() * 1000.0,
-                wrote,
-            }),
+            Load::One => (self.ask)()
+                .map(|wrote| (Sample::of(start.elapsed().as_secs_f64() * 1000.0, wrote), 1)),
             Load::Clients => clients(&*self.ask, CLIENTS, ASKING),
         };
-        sample.with_context(|| format!("the arm {}", self.name))
+        let (sample, answered) = sample.with_context(|| format!("the arm {}", self.name))?;
+        let spent = Spent::over(before, Retired::of(self.pid), answered);
+        Ok(Sample { spent, ..sample })
     }
 }
 
@@ -311,12 +319,12 @@ impl Side for ByRequest {
 /// began, each finishing the request it has in flight: the requests a
 /// second the rep was answered at, over the time its last client took to
 /// end, and the body every answer carried, an answer that carried another
-/// refusing the rep (§5).
+/// refusing the rep (§5); and how many were answered.
 fn clients(
     ask: &(dyn Fn() -> Result<Vec<u8>> + Sync),
     count: usize,
     time: Duration,
-) -> Result<Sample> {
+) -> Result<(Sample, u32)> {
     let start = Instant::now();
     let until = start + time;
     let each: Vec<(u32, Vec<u8>)> = std::thread::scope(|scope| {
@@ -350,10 +358,7 @@ fn clients(
         bail!("two clients of one rep were answered different bodies ({PROTOCOL} §5)");
     }
     let answered: u32 = each.iter().map(|(n, _)| n).sum();
-    Ok(Sample {
-        value: f64::from(answered) / seconds,
-        wrote,
-    })
+    Ok((Sample::of(f64::from(answered) / seconds, wrote), answered))
 }
 
 #[cfg(test)]
@@ -404,6 +409,7 @@ mod tests {
             program: PathBuf::new(),
             load,
             ask: Box::new(|| Ok(b"x".to_vec())),
+            pid: std::process::id(),
         };
         assert_eq!(
             (arm(Load::One).unit(), arm(Load::Clients).unit()),
@@ -425,7 +431,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
             Ok(b"body".to_vec())
         };
-        let sample = clients(&slow, 4, Duration::from_millis(50)).unwrap();
+        let (sample, answered) = clients(&slow, 4, Duration::from_millis(50)).unwrap();
+        assert!((8..=21).contains(&answered), "{answered}");
         assert_eq!(sample.wrote, b"body");
         assert!((150.0..=420.0).contains(&sample.value), "{}", sample.value);
         let asked = std::sync::atomic::AtomicU32::new(0);

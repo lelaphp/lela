@@ -23,6 +23,7 @@
 //! a diagnostic that copies a name does (`ZVAL_STR_COPY`), so nothing a
 //! unit made is held to the request's end for being made.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use php_heap::{Str, Zval};
@@ -48,7 +49,7 @@ const SCANNED_NAMES: usize = 16;
 pub(crate) struct UnitStrings {
     units: Vec<Held>,
     by_bytes: HashMap<Box<[u8]>, Option<PhpString>, NameHasher>,
-    spare: Spare,
+    spare: Vec<Spare>,
     dead: Vec<PhpString>,
     dead_constants: Vec<Zval>,
     dead_found: Vec<PhpString>,
@@ -62,12 +63,16 @@ pub(crate) struct UnitStrings {
     compiling: Compiling,
 }
 
-/// The vectors a unit's strings and arrays stood in, kept for the next
-/// unit's.
+/// The vectors one unit's strings and arrays stood in, emptied, kept
+/// together for the next unit's: an `eval` in a loop takes them back
+/// with one pop.
 #[derive(Default)]
 struct Spare {
-    names: Vec<Vec<PhpString>>,
-    constants: Vec<Vec<Zval>>,
+    main: Vec<Zval>,
+    constants: Vec<Zval>,
+    names: Vec<PhpString>,
+    found_main: Vec<PhpString>,
+    found: Vec<PhpString>,
 }
 
 /// One request-only unit and the strings it owns.
@@ -212,28 +217,13 @@ fn main_constants(
     }
 }
 
-/// The names `unit`'s declarations are read by beside their op arrays'
-/// ([`php_compile::op_array_names`]), as [`php_compile::intern_declared`]
-/// makes them: each declared function's, closure's, method's and hook's
-/// variables' (`op_array->vars`) and each declared property's, under the
-/// key `prop_info->name` is too, mangled for a protected or a private
-/// one. The main op array's variables are not among them.
+/// The names `unit`'s declarations are read by
+/// ([`php_compile::declared_names`]), as a set; the main op array's
+/// variables are not among them.
 fn declared_names(unit: &Unit) -> HashSet<Vec<u8>, NameHasher> {
-    let bodies = (unit.functions.iter().chain(&unit.dynamic))
-        .map(|(_, body)| body)
-        .chain(unit.methods.iter().map(|method| &method.body))
-        .chain(unit.hooks.iter().map(|hook| &hook.body));
-    let mut names: HashSet<Vec<u8>, NameHasher> = HashSet::with_hasher(NameHasher);
-    names.extend(bodies.flat_map(|body| body.vars.iter().map(|var| var.0.to_vec())));
-    for class in &unit.classes {
-        for property in &class.properties {
-            names.insert(property.name.0.to_vec());
-            if let Some(prefix) = php_compile::mangling(property.visibility, &class.name.0) {
-                names.insert([prefix.as_slice(), &property.name.0].concat());
-            }
-        }
-    }
-    names
+    php_compile::declared_names(unit)
+        .map(Cow::into_owned)
+        .collect()
 }
 
 /// `by_bytes`'s entry for `bytes` pointed at `s`.
@@ -305,11 +295,13 @@ impl UnitStrings {
             files.extend(held.file.take());
             constants.append(&mut held.constants);
             found.append(&mut held.found);
-            spare.names.push(std::mem::take(&mut held.names));
-            spare.names.push(std::mem::take(&mut held.found));
-            spare.names.push(std::mem::take(&mut held.found_main));
-            spare.constants.push(std::mem::take(&mut held.constants));
-            spare.constants.push(std::mem::take(&mut held.main));
+            spare.push(Spare {
+                main: std::mem::take(&mut held.main),
+                constants: std::mem::take(&mut held.constants),
+                names: std::mem::take(&mut held.names),
+                found_main: std::mem::take(&mut held.found_main),
+                found: std::mem::take(&mut held.found),
+            });
             false
         });
         for name in dead.iter().chain(&found) {
@@ -346,6 +338,7 @@ impl UnitStrings {
         {
             return at;
         }
+        let spare = self.spare.pop().unwrap_or_default();
         self.units.push(Held {
             unit: PublishedUnit::downgrade(unit),
             declares: !(unit.functions.is_empty()
@@ -357,13 +350,13 @@ impl UnitStrings {
                 Past::Tables
             },
             over: false,
-            main: self.spare.constants.pop().unwrap_or_default(),
-            constants: self.spare.constants.pop().unwrap_or_default(),
-            names: self.spare.names.pop().unwrap_or_default(),
+            main: spare.main,
+            constants: spare.constants,
+            names: spare.names,
             named: false,
             file: None,
-            found_main: self.spare.names.pop().unwrap_or_default(),
-            found: self.spare.names.pop().unwrap_or_default(),
+            found_main: spare.found_main,
+            found: spare.found,
         });
         self.units.len() - 1
     }
@@ -411,23 +404,26 @@ impl Request {
         // ([`php_compile::intern_names`]), which a copy of one finds
         // ([`Request::declared_string`]) while the unit lives; an
         // `eval`'s made none, and they are made as it is noted
-        // ([`Request::hold_unit_names`]).
-        let mut seen = HashSet::with_hasher(NameHasher);
-        for name in php_compile::op_array_names(unit) {
-            let Some(at) = made
-                .iter()
-                .rposition(|z| z.as_str().is_some_and(|s| s.bytes() == name))
-            else {
-                continue;
-            };
-            if !seen.insert(name) {
-                continue;
+        // ([`Request::hold_unit_names`]). A compile that made no string
+        // has none of them to find.
+        if !made.is_empty() {
+            let mut seen = HashSet::with_hasher(NameHasher);
+            for name in php_compile::op_array_names(unit) {
+                let Some(at) = made
+                    .iter()
+                    .rposition(|z| z.as_str().is_some_and(|s| s.bytes() == name))
+                else {
+                    continue;
+                };
+                if !seen.insert(name) {
+                    continue;
+                }
+                let Some(s) = made.swap_remove(at).as_str().map(PhpString::of) else {
+                    continue;
+                };
+                held.names.push(s);
+                point(&mut strings.by_bytes, s);
             }
-            let Some(s) = made.swap_remove(at).as_str().map(PhpString::of) else {
-                continue;
-            };
-            held.names.push(s);
-            point(&mut strings.by_bytes, s);
         }
         let (main_from, from) = (held.main.len(), held.constants.len());
         if held.declares {
@@ -533,12 +529,7 @@ impl Request {
                 continue;
             }
             let made = self.string(name)?;
-            match self.unit_strings.by_bytes.get_mut(name) {
-                Some(held) => *held = Some(made),
-                None => {
-                    self.unit_strings.by_bytes.insert(name.into(), Some(made));
-                }
-            }
+            point(&mut self.unit_strings.by_bytes, made);
             if let Some(held) = self.unit_strings.units.get_mut(at) {
                 held.names.push(made);
             }

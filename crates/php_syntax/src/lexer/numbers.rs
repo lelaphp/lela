@@ -28,6 +28,7 @@ impl Lexer<'_> {
     /// ```expect exit=255
     /// Parse error: Invalid numeric literal in %s on line 2
     /// ```
+    #[inline(never)]
     pub(crate) fn lex_number(&mut self) {
         let start = self.pos;
         // Radix-prefixed forms: HNUM, BNUM, ONUM. Without a digit after

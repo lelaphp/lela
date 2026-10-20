@@ -633,16 +633,7 @@ impl Request {
             }
             return self.write_backing(object, name, value, hooked);
         }
-        if let Some(set_visibility) = hooked.set_visibility
-            && !self.has_set_access(hooked.declaring, hooked.root, set_visibility)
-        {
-            let thrown = self.set_inaccessible_property(
-                object.class(),
-                set_visibility,
-                false,
-                &bytes,
-                "modify",
-            );
+        if let Some(thrown) = self.hooked_set_refused(object.class(), hooked, &bytes) {
             value.give_up(self);
             name.give_up(self);
             return Err(thrown);
@@ -653,6 +644,23 @@ impl Request {
         let answered = served?;
         self.release(answered);
         Ok(())
+    }
+
+    /// The `Error` a write to the hooked property `name` is refused with
+    /// where it is `private(set)` or `protected(set)` beyond the executing
+    /// scope (`zend_std_write_property`'s `zend_asymmetric_property_has_set_access`
+    /// check), the hook's write and the backing value's alike.
+    fn hooked_set_refused(
+        &mut self,
+        class: ClassId,
+        hooked: Hooked,
+        name: &[u8],
+    ) -> Option<Thrown> {
+        let set_visibility = hooked.set_visibility?;
+        if self.has_set_access(hooked.declaring, hooked.root, set_visibility) {
+            return None;
+        }
+        Some(self.set_inaccessible_property(class, set_visibility, false, name, "modify"))
     }
 
     /// The backing value written, as `zend_std_write_property`'s
@@ -666,16 +674,7 @@ impl Request {
         value: Owner<Value>,
         hooked: Hooked,
     ) -> Result<(), Thrown> {
-        if let Some(set_visibility) = hooked.set_visibility
-            && !self.has_set_access(hooked.declaring, hooked.root, set_visibility)
-        {
-            let thrown = self.set_inaccessible_property(
-                object.class(),
-                set_visibility,
-                false,
-                name.as_bytes(),
-                "modify",
-            );
+        if let Some(thrown) = self.hooked_set_refused(object.class(), hooked, name.as_bytes()) {
             value.give_up(self);
             name.give_up(self);
             return Err(thrown);
@@ -1187,7 +1186,7 @@ impl Request {
                 }
                 let value = self.read_deferred(object, &row, HookedBuild::Iterator)?;
                 let walked = super::Walked::Hooked(value.hand_on());
-                return self.iterator_key(&row).map(|key| Some((key, walked)));
+                return Ok(Some((self.walk_key(&row.name, row.visibility)?, walked)));
             }
             let Some(slot) = self.slot_declared_by(class, row.declaring, &row.name) else {
                 continue;
@@ -1196,18 +1195,25 @@ impl Request {
                 continue;
             }
             let walked = super::Walked::Slot(slot);
-            return self.iterator_key(&row).map(|key| Some((key, walked)));
+            return Ok(Some((self.walk_key(&row.name, row.visibility)?, walked)));
         }
     }
 
-    /// `zho_declared_it_fetch_current`'s `current_key`: the declared
-    /// name, or a string of its own for a protected or a private row,
-    /// whose name the table holds mangled (`zend_string_init` of the
-    /// unmangled part).
-    fn iterator_key(&mut self, row: &HookedDeclared) -> Result<Owner<PhpString>, Thrown> {
-        match row.visibility {
-            Visibility::Public => self.declared_string(&row.name),
-            _ => self.string_init(&row.name).map(Owner::adopt),
+    /// The key a walk over an object's properties hands out for the
+    /// declared property `name`: the declared name, or a string of its
+    /// own for a protected or a private one, whose name the table holds
+    /// mangled, `zend_string_init` of the unmangled part. The hooked
+    /// iterator's `current_key` (`zho_declared_it_fetch_current`) and
+    /// `FE_FETCH`'s key (`zend_fe_fetch_object_helper`'s `ZVAL_STRINGL`)
+    /// are both this.
+    pub(super) fn walk_key(
+        &mut self,
+        name: &[u8],
+        visibility: Visibility,
+    ) -> Result<Owner<PhpString>, Thrown> {
+        match visibility {
+            Visibility::Public => self.declared_string(name),
+            _ => self.string_init(name).map(Owner::adopt),
         }
     }
 
@@ -1379,7 +1385,7 @@ impl Request {
                 let hooked = self.row_hooked(declaring, &name);
                 // `check_access`: `zend_check_property_access` under the scope.
                 if iterator {
-                    if let Err(thrown) = self.access_name_copy(&name, visibility) {
+                    if let Err(thrown) = self.access_name_copy(name.len(), visibility) {
                         break 'laid Err(thrown);
                     }
                     if !self.property_row_visible(class, &name, Some(declaring))
@@ -1562,9 +1568,11 @@ impl Request {
 
     /// `zend_check_property_access` over a declared row php's table keys
     /// by its mangled name, a protected or a private one: the copy of the
-    /// unmangled name it looks the property up by (`zend_string_init`),
-    /// released before it answers, so `memory_get_peak_usage()` counts it
-    /// above the table being filled.
+    /// unmangled name, `len` bytes, it looks the property up by
+    /// (`zend_string_init`), released before it answers, so
+    /// `memory_get_peak_usage()` counts it above the table being filled
+    /// and above a `foreach`'s last key. Its bytes are never read; its
+    /// size is what php's heap sees.
     ///
     /// ```php
     /// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); $p = memory_get_peak_usage(); $u = memory_get_usage(); echo $p - $s, ' ', $u - $s, "\n"; }
@@ -1580,11 +1588,11 @@ impl Request {
     /// ```
     pub(crate) fn access_name_copy(
         &mut self,
-        name: &[u8],
+        len: usize,
         visibility: Visibility,
     ) -> Result<(), Thrown> {
         if visibility != Visibility::Public {
-            let copy = Owner::adopt(self.string_init(name)?);
+            let copy = Owner::adopt(self.string_with(len, |_| {})?);
             copy.give_up(self);
         }
         Ok(())

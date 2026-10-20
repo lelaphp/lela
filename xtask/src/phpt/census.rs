@@ -27,7 +27,7 @@
 use std::collections::BTreeMap;
 
 use super::miss::{Miss, Signature};
-use super::{CORPUS, Judgement, Tally};
+use super::{Judgement, Tally};
 use crate::tally::Judgement as _;
 
 /// At most this many tests are named under an unread construct; the rest
@@ -79,14 +79,6 @@ pub(crate) fn verdicts(tally: &Tally) -> impl Iterator<Item = (&str, Judgement, 
         .map(|judged| (judged.id.as_str(), judged.judgement, judged.miss.as_ref()))
 }
 
-/// A test's path in the corpus, from its divergence key.
-fn test_of(id: &str) -> &str {
-    id.strip_prefix("phpt:")
-        .and_then(|path| path.strip_prefix(CORPUS))
-        .and_then(|path| path.strip_prefix('/'))
-        .unwrap_or(id)
-}
-
 impl Census {
     /// Every miss added under its signature, each test by its divergence
     /// key.
@@ -95,7 +87,7 @@ impl Census {
             self.by_signature
                 .entry(miss.signature.clone())
                 .or_default()
-                .push(test_of(id).to_owned());
+                .push(super::target::named(id).to_owned());
         }
     }
 
@@ -113,7 +105,7 @@ impl Census {
                 continue;
             }
             counted += 1;
-            let test = test_of(id);
+            let test = super::target::named(id);
             let Some(miss) = miss else {
                 return Err(format!(
                     "{test} is a {} and kept no miss, so no group of the census holds it",

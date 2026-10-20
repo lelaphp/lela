@@ -128,6 +128,12 @@ pub(crate) fn read(path: &Path) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
 }
 
+/// The TOML file at `path` as a `T`, an error naming it where it cannot be
+/// read or is not one.
+pub(crate) fn read_toml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    toml::from_str(&read(path)?).with_context(|| format!("{}", path.display()))
+}
+
 /// The text of the file at `path`, `None` where there is no such file, an
 /// error naming it where it cannot be read.
 pub(crate) fn read_if(path: &Path) -> Result<Option<String>> {

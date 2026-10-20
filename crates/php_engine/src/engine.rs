@@ -1728,8 +1728,29 @@ impl Shared {
         filename: &[u8],
         kind: SourceKind,
     ) -> Result<PublishedUnit, CompileRefused> {
-        match self.compiled_for(req, source, filename, kind) {
-            Ok(unit) => Ok(Self::held_for(req, unit)),
+        // The unit is readied through a borrow of what the compile handed
+        // back and published out of it, so it is moved on its way into
+        // the room only by the call that publishes it, where moving it to
+        // and from a function of its own cost a copy of its 600 bytes
+        // each way.
+        let mut made = self.compiled_for(req, source, filename, kind);
+        let room = match &mut made {
+            Ok(unit) => {
+                req.count_keys_made(u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX));
+                req.note_loop_vars(unit.loop_vars);
+                req.ready_unit(unit)
+            }
+            Err(_) => None,
+        };
+        match made {
+            Ok(unit) => {
+                // Taken into the request, the strings its compile made
+                // held by it.
+                let unit = unit.published(room);
+                req.hold_published(&unit);
+                req.hold_compiled(&unit);
+                Ok(unit)
+            }
             // What the refused compile had declared stands in the
             // request after it, and the keys it made are counted, as the
             // refusal is raised ([`Request::declare_refused`]): a unit of
@@ -1752,16 +1773,6 @@ impl Shared {
                 Err(refused)
             }
         }
-    }
-
-    /// A unit compiled for `req` taken into it, the strings its compile
-    /// made held by it.
-    fn held_for(req: &mut Request, unit: Unit) -> PublishedUnit {
-        req.count_keys_made(u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX));
-        req.note_loop_vars(unit.loop_vars);
-        let unit = req.take_unit(unit);
-        req.hold_compiled(&unit);
-        unit
     }
 
     /// The compile [`Shared::compile_for`] makes, before its unit is the

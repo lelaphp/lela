@@ -79,6 +79,16 @@ pub(crate) enum Walked {
     Answered(Value),
 }
 
+/// The key of a row [`Request::object_walk`] found, as php's walk holds
+/// it until `FE_FETCH` reads it where the loop keeps one
+/// ([`Request::walked_key`]): one the walk holds an owner of, a hooked
+/// iterator's `current_key` or a bucket's key, or a declared property's
+/// name, which the table holds mangled where it is not public.
+pub(crate) enum WalkKey {
+    Held(Owner<Key>),
+    Declared(Box<[u8]>, Visibility),
+}
+
 impl Walked {
     /// Whether the walk holds an owner of the value it found.
     pub(crate) fn owned(self) -> bool {
@@ -1072,9 +1082,8 @@ impl Request {
     /// is unset, reset or freed. A slot of an untyped property typed
     /// nothing.
     pub(crate) fn slot_source_gone(&mut self, object: PhpObject, slot: u32, cell: Ref) {
-        let typed = usize::try_from(slot)
-            .ok()
-            .and_then(|at| self.placed_property(object.class(), at))
+        let typed = self
+            .placed_property(object.class(), slot)
             .filter(|(_, p)| p.ty.is_some())
             .map(|(declaring, p)| (declaring, p.name.0.clone()));
         if let Some((declaring, name)) = typed {
@@ -1181,7 +1190,7 @@ impl Request {
         class: ClassId,
         slot: u32,
     ) -> Option<(TypedProperty, Vec<u8>)> {
-        let (declaring, p) = self.placed_property(class, usize::try_from(slot).ok()?)?;
+        let (declaring, p) = self.placed_property(class, slot)?;
         let name = p.name.0.to_vec();
         let typed = TypedProperty {
             declaring,
@@ -1197,10 +1206,7 @@ impl Request {
     /// others, since another object's slot of the same property may
     /// hold it as well. A slot of an untyped property types nothing.
     pub(crate) fn slot_source_added(&mut self, object: PhpObject, slot: u32, cell: Ref) {
-        let Some((declaring, p)) = usize::try_from(slot)
-            .ok()
-            .and_then(|at| self.placed_property(object.class(), at))
-        else {
+        let Some((declaring, p)) = self.placed_property(object.class(), slot) else {
             return;
         };
         if let Some(ty) = p.ty.clone() {
@@ -3107,16 +3113,16 @@ impl Request {
         object: PhpObject,
         key: &[u8],
     ) -> Result<(), Thrown> {
-        let Some(at) = self.unserialize_slot(object, key) else {
+        let Some(index) = self.unserialize_slot(object, key) else {
+            return Ok(());
+        };
+        let Ok(index) = u32::try_from(index) else {
             return Ok(());
         };
         let Some((declaring, ty, name)) = self
-            .placed_property(object.class(), at)
+            .placed_property(object.class(), index)
             .and_then(|(declaring, p)| Some((declaring, p.ty.clone()?, p.name.0.to_vec())))
         else {
-            return Ok(());
-        };
-        let Ok(index) = u32::try_from(at) else {
             return Ok(());
         };
         let o = object.heap();
@@ -3351,15 +3357,42 @@ impl Request {
     /// behind an `IS_INDIRECT`, and one the executing scope may not
     /// reach is stepped over as php steps over a mangled key
     /// `zend_check_property_access` refuses. `None` is nothing left,
-    /// which is the fetch's jump past the loop. The `Err` is the memory
-    /// limit refusing the intern of a declared name; php's key is
-    /// interned already and takes no allocation.
+    /// which is the fetch's jump past the loop. The key is handed on
+    /// unmade ([`WalkKey`]) and made by [`Request::walked_key`] only
+    /// where the loop keeps one, as `RETURN_VALUE_USED` guards php's: a
+    /// public property's the interned name, a protected or a private
+    /// one's a string of its own ([`Request::walk_key`]), so a loop that
+    /// holds the last key while the next is made peaks at both. Asking
+    /// whether the scope reaches a protected or a private slot costs the
+    /// copy of its name `zend_check_property_access` makes and frees
+    /// ([`Request::access_name_copy`]), key or none.
+    ///
+    /// ```php
+    /// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); $p = memory_get_peak_usage(); $u = memory_get_usage(); echo $p - $s, ' ', $u - $s, "\n"; }
+    /// class P3 { public $a = 1; private $pp = 3; protected $qq = 4; function w() { $o = []; foreach ($this as $k => $v) $o[] = $k; return 1; } function z() { foreach ($this as $k => $v) {} return 1; } function r() { foreach ($this as $k => &$v) {} return 1; } function n() { foreach ($this as $v) {} return 1; } }
+    /// $p = new P3;
+    /// pk(fn () => $p->w());
+    /// pk(fn () => $p->z());
+    /// pk(fn () => $p->r());
+    /// pk(fn () => $p->n());
+    /// $o = (object)["\0A\0b" => 42, "\0*\0c" => 24, "d" => 1];
+    /// pk(function () use ($o) { foreach ($o as $k => $v) {} return 1; });
+    /// pk(function () use ($o) { foreach ($o as $v) {} return 1; });
+    /// ```
+    /// ```expect
+    /// 280 0
+    /// 64 0
+    /// 96 0
+    /// 32 0
+    /// 64 0
+    /// 0 0
+    /// ```
     pub(crate) fn object_walk(
         &mut self,
         object: PhpObject,
         idx: u32,
         by_ref: bool,
-    ) -> Result<Option<(Owner<Key>, Walked)>, Thrown> {
+    ) -> Result<Option<(WalkKey, Walked)>, Thrown> {
         let o = object.heap();
         let class = object.class();
         if self.object_handlers(o).properties_overloaded() {
@@ -3381,7 +3414,7 @@ impl Request {
             self.heap
                 .iterator_set_lead(idx, u32::try_from(lead).unwrap_or(u32::MAX));
             if let Some((key, walked)) = found? {
-                return Ok(Some((key.into_key(), walked)));
+                return Ok(Some((WalkKey::Held(key.into_key()), walked)));
             }
             walk::Stepped::Dynamic
         } else {
@@ -3397,36 +3430,35 @@ impl Request {
             (table, stepped),
             walk::Advance::Past,
             |req, row| match row {
-                TableRow::Slot(slot) => req
-                    .placed(class)
-                    .find(|(at, _, _)| u32::try_from(*at).ok() == Some(*slot))
-                    .is_some_and(|(_, declaring, p)| {
-                        req.property_row_visible(class, &p.name.0, Some(declaring))
-                    }),
-                TableRow::Entry(php_heap::Key::Str(name)) => {
-                    req.property_row_visible(class, name.bytes(), None)
+                TableRow::Slot(slot) => {
+                    let Some((declaring, p)) = req.placed_property(class, *slot) else {
+                        return Ok(false);
+                    };
+                    let (len, visibility) = (p.name.0.len(), p.visibility);
+                    let visible = req.property_row_visible(class, &p.name.0, Some(declaring));
+                    req.access_name_copy(len, visibility)?;
+                    Ok(visible)
                 }
-                TableRow::Entry(php_heap::Key::Long(_)) => true,
+                TableRow::Entry(php_heap::Key::Str(name)) => {
+                    Ok(req.property_row_visible(class, name.bytes(), None))
+                }
+                TableRow::Entry(php_heap::Key::Long(_)) => Ok(true),
             },
-        );
+        )?;
         match found {
             None => Ok(None),
             Some((_, TableRow::Slot(slot), _)) => {
-                let Some(name) = self
-                    .placed(class)
-                    .find(|(at, _, _)| u32::try_from(*at).ok() == Some(slot))
-                    .map(|(_, _, p)| p.name.0.clone())
-                else {
+                let Some((_, p)) = self.placed_property(class, slot) else {
                     return Err(crate::api::raising::fatal(
                         self,
                         "InternalError: an object walk's slot with no declaration",
                     ));
                 };
-                let key = self.declared_string(&name)?.into_key();
+                let key = WalkKey::Declared(p.name.0.clone(), p.visibility);
                 Ok(Some((key, Walked::Slot(slot))))
             }
             Some((_, TableRow::Entry(key), _)) => Ok(Some((
-                Owner::take(self, Key::of(key)),
+                WalkKey::Held(Owner::take(self, Key::of(key))),
                 Walked::Dynamic(key),
             ))),
         }
@@ -3471,11 +3503,29 @@ impl Request {
     /// string(3) "own"
     /// int(2)
     /// ```
+    ///
+    /// A declared row the table holds mangled is asked about through a
+    /// copy of its name ([`Request::access_name_copy`]) and keyed by a
+    /// string of its own ([`WalkKey::Declared`]), as the std walk is:
+    ///
+    /// ```php
+    /// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); $p = memory_get_peak_usage(); $u = memory_get_usage(); echo $p - $s, ' ', $u - $s, "\n"; }
+    /// class D extends DateTime { public $own = 1; protected $hidden = 2; private $pv = 3;
+    ///   function z() { foreach ($this as $k => $v) {} return 1; } function n() { foreach ($this as $v) {} return 1; } }
+    /// $d = new D('2020-01-01');
+    /// pk(fn () => $d->z()); pk(fn () => $d->n());
+    /// pk(function () use ($d) { foreach ($d as $k => $v) {} return 1; });
+    /// ```
+    /// ```expect
+    /// 64 0
+    /// 32 0
+    /// 32 0
+    /// ```
     fn answered_walk(
         &mut self,
         object: PhpObject,
         idx: u32,
-    ) -> Result<Option<(Owner<Key>, Walked)>, Thrown> {
+    ) -> Result<Option<(WalkKey, Walked)>, Thrown> {
         let class = object.class();
         let handlers = self.object_handlers(object.heap());
         let mut at = self.heap.iterator_lead(idx);
@@ -3493,22 +3543,31 @@ impl Request {
                 let Some(((name, _, declared), row)) = self.table_row_named(&table, pos)? else {
                     continue;
                 };
-                // An integer key is no name `zend_check_property_access`
-                // is asked about.
-                if let Key::Str(name) = name
-                    && !self.property_row_visible(
-                        class,
-                        name.as_bytes(),
-                        declared.map(|(declaring, _)| declaring),
-                    )
-                {
-                    continue;
-                }
                 let walked = match row {
                     TableRow::Slot(slot) => Walked::Slot(slot),
                     TableRow::Entry(key) => Walked::Dynamic(key),
                 };
-                break Some((Owner::take(self, name), walked));
+                // A declared row is asked about through a copy of its
+                // name, and an integer key is no name
+                // `zend_check_property_access` is asked about.
+                let key = match (&name, declared) {
+                    (Key::Str(text), Some((declaring, visibility))) => {
+                        let visible =
+                            self.property_row_visible(class, text.as_bytes(), Some(declaring));
+                        self.access_name_copy(text.as_bytes().len(), visibility)?;
+                        if !visible {
+                            continue;
+                        }
+                        WalkKey::Declared(text.as_bytes().into(), visibility)
+                    }
+                    (Key::Str(text), None)
+                        if !self.property_row_visible(class, text.as_bytes(), None) =>
+                    {
+                        continue;
+                    }
+                    _ => WalkKey::Held(Owner::take(self, name)),
+                };
+                break Some((key, walked));
             },
             // A table the class keeps in place of the object's: each row
             // the value it answered.
@@ -3520,14 +3579,12 @@ impl Request {
                         Key::Str(name) => self.property_row_visible(class, name.as_bytes(), None),
                         Key::Int(_) => true,
                     });
-                match row {
-                    Some((i, (key, value))) => {
-                        at = u32::try_from(i).unwrap_or(u32::MAX).saturating_add(1);
-                        self.addref(&value);
-                        Some((Owner::take(self, key), Walked::Answered(value)))
-                    }
-                    None => None,
-                }
+                row.map(|(i, (key, value))| {
+                    at = u32::try_from(i).unwrap_or(u32::MAX).saturating_add(1);
+                    self.addref(&value);
+                    let key = WalkKey::Held(Owner::take(self, key));
+                    (key, Walked::Answered(value))
+                })
             }
         };
         self.heap.iterator_set_lead(idx, at);
@@ -3556,26 +3613,24 @@ impl Request {
             TableRow::Entry(key) => Ok(Some(((Key::of(key), value, None), row))),
             TableRow::Slot(slot) => {
                 let class = table.owner().class();
-                let info = usize::try_from(slot)
-                    .ok()
-                    .and_then(|slot| self.placed_properties(class).get(slot).copied());
-                let Some((info, decl)) =
-                    info.and_then(|info| Some((info, self.property_decl(info)?)))
-                else {
+                let Some((declaring, decl)) = self.placed_property(class, slot) else {
                     return Ok(None);
                 };
                 let (visibility, name) = (decl.visibility, decl.name.0.clone());
                 let name = self.kept_string(&name)?;
-                let row = (Key::Str(name), value, Some((info.declaring, visibility)));
+                let row = (Key::Str(name), value, Some((declaring, visibility)));
                 Ok(Some((row, TableRow::Slot(slot))))
             }
         }
     }
 
     /// The key `FE_FETCH` hands a loop over an object's table for the row
-    /// [`Request::object_walk`] found: a name as it is, and a mangled
-    /// one, which a cast of an array can leave in the dynamic table,
-    /// with its class part dropped (`zend_unmangle_property_name_ex`).
+    /// [`Request::object_walk`] found, where the loop keeps one (`keyed`),
+    /// and none otherwise, a key the walk held given up: a declared
+    /// property's as [`Request::walk_key`] makes it, a held name as it
+    /// is, and a mangled one, which a cast of an array can leave in the
+    /// dynamic table, a string of its own with its class part dropped
+    /// (`zend_unmangle_property_name_ex`).
     ///
     /// ```php
     /// $obj = (object)["\0A\0b" => 42, "\0*\0c" => 24, "d" => 1];
@@ -3589,18 +3644,33 @@ impl Request {
     /// string(1) "d"
     /// int(1)
     /// ```
-    pub(crate) fn walked_key(&mut self, key: Owner<Key>) -> Result<Owner<Key>, Thrown> {
+    pub(crate) fn walked_key(
+        &mut self,
+        key: WalkKey,
+        keyed: bool,
+    ) -> Result<Option<Owner<Key>>, Thrown> {
+        let key = match key {
+            WalkKey::Held(key) if keyed => key,
+            WalkKey::Declared(name, visibility) if keyed => {
+                return Ok(Some(self.walk_key(&name, visibility)?.into_key()));
+            }
+            WalkKey::Held(key) => {
+                key.give_up(self);
+                return Ok(None);
+            }
+            WalkKey::Declared(..) => return Ok(None),
+        };
         let Key::Str(name) = *key else {
-            return Ok(key);
+            return Ok(Some(key));
         };
         let crate::natives::Unmangled::Mangled { prop, .. } =
             crate::natives::unmangle_property_name(name.as_bytes())
         else {
-            return Ok(key);
+            return Ok(Some(key));
         };
         let made = self.string_init(prop);
         key.give_up(self);
-        Ok(Owner::adopt(made?).into_key())
+        Ok(Some(Owner::adopt(made?).into_key()))
     }
 
     /// What [`Request::object_walk`] found at a place: the value, a view
@@ -3624,7 +3694,22 @@ impl Request {
     /// (`ZVAL_NEW_EMPTY_REF`), the place keeping the owner it had. A
     /// declared `readonly` slot is php's `Error` and no cell; a typed
     /// one puts its type on the cell it makes (`ZEND_REF_ADD_TYPE_SOURCE`),
-    /// so a write through the loop's variable is held to it.
+    /// so a write through the loop's variable is held to it. The
+    /// `readonly` `Error` names the property by the bucket's key, which
+    /// for a protected or a private one is mangled and prints as nothing:
+    ///
+    /// ```php
+    /// class A { public readonly int $a; function __construct() { $this->a = 1; } }
+    /// class B { protected readonly int $b; function __construct() { $this->b = 2; } }
+    /// class C { private readonly int $c; function __construct() { $this->c = 3; } function f() { try { foreach ($this as $k => &$v) {} } catch (Error $e) { echo $e->getMessage(), "\n"; } } }
+    /// foreach ([new A, new B] as $o) { (function () { try { foreach ($this as $k => &$v) {} } catch (Error $e) { echo $e->getMessage(), "\n"; } })->call($o); }
+    /// (new C)->f();
+    /// ```
+    /// ```expect
+    /// Cannot acquire reference to readonly property A::$a
+    /// Cannot acquire reference to readonly property B::$
+    /// Cannot acquire reference to readonly property C::$
+    /// ```
     pub(crate) fn walked_reference(
         &mut self,
         object: PhpObject,
@@ -3637,19 +3722,24 @@ impl Request {
         }
         match walked {
             Walked::Slot(slot) => {
-                let declared =
-                    self.placed_property(object.class(), slot as usize)
-                        .map(|(declaring, p)| {
-                            (declaring, p.is_readonly, p.name.0.to_vec(), p.ty.clone())
-                        });
+                let declared = self
+                    .placed_property(object.class(), slot)
+                    .map(|(declaring, p)| {
+                        let readonly = p.is_readonly.then_some(p.visibility);
+                        (declaring, readonly, p.name.0.to_vec(), p.ty.clone())
+                    });
                 let Some((declaring, readonly, name, ty)) = declared else {
                     return self.fatal_of(Err(Fatal::error(format!(
                         "InternalError: a walk over slot {slot}, which the class does not declare"
                     ))));
                 };
-                if readonly {
+                // php names it by the bucket's key, `ZSTR_VAL(p->key)`, which
+                // a protected or a private property's leading `\0` ends.
+                if let Some(visibility) = readonly {
+                    let public = visibility == Visibility::Public;
+                    let shown = if public { &name[..] } else { b"" };
                     let operation = "acquire reference to";
-                    return Err(self.readonly_modification(declaring, &name, operation));
+                    return Err(self.readonly_modification(declaring, shown, operation));
                 }
                 let cell = self.reference(held)?;
                 if let Some(place) = o.slot_ref(slot) {

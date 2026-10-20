@@ -548,28 +548,19 @@ fn emit_from_keyword(buf: &mut String, kinds: &Kinds) {
     buf.push_str(
         "    /// The keyword kind of an identifier, if it is one. PHP keywords\n    \
          /// match case-insensitively (`php.ungram`'s header: \"the lexer is\n    \
-         /// case-insensitive\"). The lowercase copy is on the stack, as\n    \
-         /// long as the longest keyword: the lexer asks once per name, and\n    \
-         /// its bytes, since a label with a byte past ASCII is never one.\n",
+         /// case-insensitive\"). The lexer asks once per name, so the\n    \
+         /// name's length and first letter choose the few keywords it is\n    \
+         /// compared with, and nothing is copied.\n",
     );
     buf.push_str("    pub fn from_keyword(ident: &[u8]) -> Option<Self> {\n");
     if kinds.keywords.is_empty() {
         buf.push_str("        let _ = ident;\n        None\n    }\n");
         return;
     }
-    let longest = kinds
-        .keywords
-        .iter()
-        .map(|(t, _)| t.len())
-        .max()
-        .unwrap_or(0);
-    writeln!(buf, "        let mut lower = [0_u8; {longest}];").ok();
     buf.push_str(
-        "        let lower = lower.get_mut(..ident.len())?;\n        \
-         lower.copy_from_slice(ident);\n        \
-         lower.make_ascii_lowercase();\n",
+        "        let first = ident.first()?.to_ascii_lowercase();\n        \
+         let kind = match (ident.len(), first) {\n",
     );
-    buf.push_str("        let kind = match &*lower {\n");
     let mut by_text: Vec<(&str, &str)> = kinds
         .keywords
         .iter()
@@ -577,7 +568,13 @@ fn emit_from_keyword(buf: &mut String, kinds: &Kinds) {
         .collect();
     by_text.sort_by(|a, b| a.0.cmp(b.0));
     for (text, variant) in by_text {
-        writeln!(buf, "            b\"{text}\" => Self::{variant},").ok();
+        let first = text.as_bytes().first().copied().unwrap_or(b'_') as char;
+        writeln!(
+            buf,
+            "            ({}, b'{first}') if ident.eq_ignore_ascii_case(b\"{text}\") => Self::{variant},",
+            text.len()
+        )
+        .ok();
     }
     buf.push_str("            _ => return None,\n        };\n        Some(kind)\n    }\n");
 }
