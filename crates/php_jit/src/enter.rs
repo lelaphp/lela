@@ -522,7 +522,7 @@ type Entry = unsafe extern "C" fn(*mut ExitCtx<'_>, *mut u8) -> u32;
 /// for ($j = 0; $j < 300; $j++) { $t += $v; $v = $f->resume($j); }
 /// echo $t, " ", $f->getReturn(), "\n";
 /// ```
-/// ```expect exit=0 regime=jit-tracing process
+/// ```expect exit=0 regime=jit-force process
 /// 44850 44850
 /// ```
 pub(crate) fn enter(req: &mut Request, frame: FrameRef, trace: &Trace) -> Result<Exited, Fatal> {
