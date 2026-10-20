@@ -316,3 +316,20 @@ args = ["-n", "-d", "date.timezone=Foo/Bar", "-a", "b.php"]
 [[line.then]]
 args = ["-n", "-d", "date.timezone=Foo/Bar", "-d", "cgi.redirect_status_env="]
 env = { GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/b.php" }
+
+# php-cgi's copy of the program's path stands while the program runs, the
+# one `init_request_info` `estrdup`s from a server's `SCRIPT_FILENAME` or
+# the one `main` makes of the file a shell named (`-f`'s or the first
+# word's, `Z/sapi/cgi/cgi_main.c:2315, 2404`), and it is freed before the
+# request shuts down, with the program's handle, which php-cgi destroys
+# whether or not the scanner listed it (`:2558`): the last line and the
+# shutdown function read the same under both (#3059).
+[[line]]
+name = "the-program-s-path-copy-and-handle-are-freed-before-the-shutdown-functions"
+args = ["-n", "-d", "opcache.file_update_protection=0", "end.php"]
+files = { "end.php" = '<?php register_shutdown_function(function () { echo "shutdown ", memory_get_usage(), "\n"; }); $o = new class { function __destruct() { echo "destructor ", memory_get_usage(), "\n"; } }; echo "last ", memory_get_usage(), "\n";' }
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=0", "-f", "{dir}/end.php"]
+[[line.then]]
+args = ["-n", "-d", "opcache.file_update_protection=0"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/end.php" }
