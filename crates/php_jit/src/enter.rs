@@ -68,7 +68,7 @@ pub(crate) trait Crossed {
 
 impl Crossed for Request {
     fn interrupt(&self) -> &AtomicBool {
-        Request::interrupt(self).raised()
+        self.limits().interrupt().raised()
     }
 
     fn thrown(&self) -> bool {

@@ -529,8 +529,8 @@ fn waited(
             ));
         }
     }
-    // The wait lends the request ([`Request::blocking`], #2401).
-    let (number, posted) = match req.blocking(|| ffi::wait_info(&set, timeout)) {
+    // The wait lends the request ([`Limits::blocking`], #2401).
+    let (number, posted) = match req.limits_mut().blocking(|| ffi::wait_info(&set, timeout)) {
         Ok(taken) => taken,
         Err(nix::errno::Errno::EAGAIN) if timeout.is_some() => return Ok(OrFalse::False),
         Err(errno) => {
@@ -655,7 +655,7 @@ pub(crate) fn pcntl_async_signals(
     );
     match enable {
         Some(true) if !was => {
-            let receiving = req.interrupt().receive_signals();
+            let receiving = req.limits().interrupt().receive_signals();
             req.state::<State>().signals.delivery = Delivery::Asynchronous {
                 _receiving: receiving,
             };

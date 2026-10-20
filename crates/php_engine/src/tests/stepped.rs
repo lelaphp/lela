@@ -54,7 +54,7 @@ fn stepping() -> Extension {
 /// raised once a request, at the first entry that takes it.
 fn fire(req: &mut Request) {
     if !std::mem::replace(&mut req.state::<Stepping>().fired, true) {
-        req.interrupt().elapsed(1);
+        req.limits().interrupt().elapsed(1);
     }
 }
 

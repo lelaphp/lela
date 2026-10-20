@@ -10,7 +10,7 @@
 //! `xmlSaveCtxt`, both converting into the document's encoding ([`Dump`]).
 //! php recurses over the tree and raises "Maximum call stack size
 //! reached" where the stack comes down to its limit; so does this, the
-//! limit being the one `Request::stack_overflowed` reads.
+//! limit being the one `Limits::stack_overflowed` reads.
 
 use std::ffi::c_int;
 
@@ -382,7 +382,7 @@ impl Serializer<'_> {
         namespace: Option<&[u8]>,
         indent: i32,
     ) -> Step {
-        if self.req.stack_overflowed() {
+        if self.req.limits().stack_overflowed() {
             return Err(Failed::Deep);
         }
         let Some(frame) = self.node(node, map, namespace, indent)? else {

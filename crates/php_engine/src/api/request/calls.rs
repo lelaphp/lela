@@ -513,7 +513,7 @@ impl Request {
         let Ok(value) = served else {
             return served;
         };
-        if !self.interrupt().raised().load(Ordering::Relaxed) {
+        if !self.limits().interrupt().raised().load(Ordering::Relaxed) {
             return Ok(value);
         }
         match crate::interrupt::interrupted(self) {

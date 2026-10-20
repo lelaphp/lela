@@ -410,10 +410,10 @@ pub fn php_mail(
     }
     body.extend_from_slice(line_sep);
     // The message written and sendmail waited for with the request lent
-    // ([`Request::blocking`]), as every wait on a child is (#2401); the
+    // ([`Limits::blocking`]), as every wait on a child is (#2401); the
     // pipe closes before the wait, which is sendmail's end of input.
     let stdin = child.stdin.take();
-    let waited = req.blocking(|| {
+    let waited = req.limits_mut().blocking(|| {
         if let Some(mut stdin) = stdin {
             stdin.write_all(&body).ok();
         }

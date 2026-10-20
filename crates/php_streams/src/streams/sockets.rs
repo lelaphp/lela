@@ -475,7 +475,7 @@ impl Ops for Socket {
                 self.timeout_event = false;
                 let timeout = self.timeout;
                 loop {
-                    let polled = req.blocking(|| {
+                    let polled = req.limits_mut().blocking(|| {
                         crate::api::layer::poll_fd(sock.fd(), Readiness::Readable, timeout)
                     });
                     match polled {
@@ -492,7 +492,7 @@ impl Ops for Socket {
         let read = if dont_wait {
             Socket::read_now(sock, buf)
         } else {
-            req.blocking(|| sock.read(buf))
+            req.limits_mut().blocking(|| sock.read(buf))
         };
         match read {
             Ok(0) => {
@@ -648,8 +648,10 @@ impl Ops for Socket {
     fn xport(&mut self, req: &mut Request, op: XportOp<'_>) -> Option<Xported> {
         if let XportOp::Accept { timeout, want_peer } = op {
             // `stream_socket_accept`'s wait for a client lends the
-            // request ([`Request::blocking`], #2401).
-            let accepted = req.blocking(|| self.accept(timeout, want_peer));
+            // request ([`Limits::blocking`], #2401).
+            let accepted = req
+                .limits_mut()
+                .blocking(|| self.accept(timeout, want_peer));
             return Some(Xported::Accepted(accepted));
         }
         let sock = self.sock.as_mut()?;

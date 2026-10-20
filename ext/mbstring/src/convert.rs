@@ -788,7 +788,7 @@ fn mb_convert_kana(
 /// The strings under a value, arrays and objects walked, a recursion
 /// stopping the walk (`mb_recursive_find_strings`).
 fn find_strings(req: &mut Request, value: &Value, out: &mut Vec<Vec<u8>>) -> Result<bool, Thrown> {
-    if req.stack_overflowed() {
+    if req.limits().stack_overflowed() {
         php_ext::raising::call_stack_limit(req)?;
         return Ok(true);
     }
@@ -861,7 +861,7 @@ fn convert_value(
     from: Encoding,
     to: Encoding,
 ) -> Result<Walk, Thrown> {
-    if req.stack_overflowed() {
+    if req.limits().stack_overflowed() {
         php_ext::raising::call_stack_limit(req)?;
         return Ok(Walk::Stopped);
     }

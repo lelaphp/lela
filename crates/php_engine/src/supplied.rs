@@ -579,7 +579,7 @@ mod tests {
         ];
         let engine = Engine::cli_builder().extensions(&extensions).build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-        req.interrupt().raise();
+        req.limits().interrupt().raise();
         assert_eq!(crate::interrupt::check(&mut req), Ok(false));
         assert_eq!(served(&LOG), ["later", "earlier"]);
     }

@@ -1207,7 +1207,7 @@ pub trait Streams {
     /// `wait` with each of `streams` taken out of its resource for its
     /// length, as one operation on a stream takes it, an owner of the
     /// resource held, and put back after. A callback a lent wait serves
-    /// ([`Request::blocking`]) that `fclose`s one of them closes its
+    /// ([`Limits::blocking`]) that `fclose`s one of them closes its
     /// resource, and the stream, its fd with it, is freed as the wait
     /// returns, so the fds a wait stands on stay open until it does, as
     /// php's, during whose wait nothing runs (#2664). A stream that is

@@ -585,7 +585,8 @@ fn time_nanosleep(
             "Nanoseconds was not in the range 0 to 999 999 999 or seconds was negative",
         ));
     }
-    req.blocking(|| std::thread::sleep(std::time::Duration::new(seconds, nanoseconds)));
+    req.limits_mut()
+        .blocking(|| std::thread::sleep(std::time::Duration::new(seconds, nanoseconds)));
     Ok(Union::B(true))
 }
 
@@ -1175,7 +1176,8 @@ fn usleep(req: &mut Request, microseconds: i64) -> Result<(), Thrown> {
     };
     // `usleep((unsigned int)num)`: the count as C's cast leaves it.
     let micros = micros & u64::from(u32::MAX);
-    req.blocking(|| std::thread::sleep(std::time::Duration::from_micros(micros)));
+    req.limits_mut()
+        .blocking(|| std::thread::sleep(std::time::Duration::from_micros(micros)));
     Ok(())
 }
 
@@ -1221,7 +1223,8 @@ fn time_sleep_until(req: &mut Request, timestamp: f64) -> Result<bool, Thrown> {
         );
         return Ok(false);
     }
-    req.blocking(|| std::thread::sleep(std::time::Duration::from_nanos(target_ns - current_ns)));
+    req.limits_mut()
+        .blocking(|| std::thread::sleep(std::time::Duration::from_nanos(target_ns - current_ns)));
     Ok(true)
 }
 
@@ -2605,6 +2608,7 @@ fn sleep(req: &mut Request, seconds: i64) -> Result<i64, Thrown> {
     let Ok(seconds) = u64::try_from(seconds) else {
         return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
     };
-    req.blocking(|| std::thread::sleep(std::time::Duration::from_secs(seconds)));
+    req.limits_mut()
+        .blocking(|| std::thread::sleep(std::time::Duration::from_secs(seconds)));
     Ok(0)
 }

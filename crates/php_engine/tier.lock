@@ -5,9 +5,11 @@ api::request::Diagnostics::bailing_out
 api::request::Diagnostics::raised
 api::request::Interrupt
 api::request::Interrupt::raised
+api::request::Limits
+api::request::Limits::interrupt
 api::request::Request::diagnostics
 api::request::Request::engine
-api::request::Request::interrupt
+api::request::Request::limits
 api::request::Request::state
 api::request::Request::write_stderr
 test::Capture

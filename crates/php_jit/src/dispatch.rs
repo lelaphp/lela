@@ -241,7 +241,7 @@ fn sided(
         }
         State::Recording | State::Blacklisted => {}
     }
-    let quiet = req.interrupt().raised().load(Ordering::Relaxed) || record::recording(req);
+    let quiet = req.limits().interrupt().raised().load(Ordering::Relaxed) || record::recording(req);
     if !quiet && shared.policy.debug().any(JitDebug::TRACE_EXIT) {
         let mut lines = Vec::new();
         placed(req, exited.frame, false, |at| {

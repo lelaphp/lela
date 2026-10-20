@@ -1312,7 +1312,7 @@ impl Request {
         right: &Value,
     ) -> Result<Option<std::cmp::Ordering>, Thrown> {
         use std::cmp::Ordering;
-        if self.stack_overflowed() {
+        if self.limits().stack_overflowed() {
             return Err(crate::api::raising::throw_error(
                 self,
                 "Error",

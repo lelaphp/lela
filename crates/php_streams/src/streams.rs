@@ -2479,7 +2479,7 @@ impl Ops for Stdio {
     /// stat cache cleared after it, since the file's atime moved.
     fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
         let file = self.file.as_mut()?;
-        let read = req.blocking(|| file.read(buf));
+        let read = req.limits_mut().blocking(|| file.read(buf));
         req.forget_stats();
         match read {
             Ok(0) => {
@@ -2528,9 +2528,9 @@ impl Ops for Stdio {
         }
         if let Some(mut child) = self.process.take() {
             use std::os::unix::process::ExitStatusExt;
-            // The wait lends the request ([`Request::blocking`]), as
+            // The wait lends the request ([`Limits::blocking`]), as
             // every wait on a child is (#2401).
-            return match req.blocking(|| child.wait()) {
+            return match req.limits_mut().blocking(|| child.wait()) {
                 Ok(status) => status.code().unwrap_or_else(|| status.into_raw()),
                 Err(_) => -1,
             };
@@ -2625,15 +2625,15 @@ impl Ops for Stdio {
     /// (`Z/main/streams/plain_wrapper.c:774`): `flock(2)`, `LOCK_SH`,
     /// `LOCK_EX` or `LOCK_UN`, without blocking under `LOCK_NB`; a
     /// `flock(2)` that waits for another holder lends the request while
-    /// it waits ([`Request::blocking`], #2401).
+    /// it waits ([`Limits::blocking`], #2401).
     fn flock(&mut self, req: &mut Request, operation: i64) -> Option<bool> {
         let nonblocking = operation & LOCK_NB != 0;
         let file = self.file.as_ref()?;
         let taken = match operation & !LOCK_NB {
             LOCK_SH if nonblocking => file.try_lock_shared().is_ok(),
-            LOCK_SH => req.blocking(|| file.lock_shared()).is_ok(),
+            LOCK_SH => req.limits_mut().blocking(|| file.lock_shared()).is_ok(),
             LOCK_EX if nonblocking => file.try_lock().is_ok(),
-            LOCK_EX => req.blocking(|| file.lock()).is_ok(),
+            LOCK_EX => req.limits_mut().blocking(|| file.lock()).is_ok(),
             LOCK_UN => file.unlock().is_ok(),
             _ => false,
         };

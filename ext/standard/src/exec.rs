@@ -109,12 +109,14 @@ fn popen(req: &Request, command: &[u8]) -> Option<Child> {
 
 /// `pclose`'s answer as the plain files kind hands it back: the exit
 /// status where the command exited, the raw wait status otherwise. The
-/// wait lends the request ([`Request::blocking`]), as every wait of the
+/// wait lends the request ([`Limits::blocking`]), as every wait of the
 /// command's does.
 fn pclose(req: &mut Request, mut child: Child) -> i64 {
-    req.blocking(|| child.wait()).map_or(-1, |status| {
-        i64::from(status.code().unwrap_or_else(|| status.into_raw()))
-    })
+    req.limits_mut()
+        .blocking(|| child.wait())
+        .map_or(-1, |status| {
+            i64::from(status.code().unwrap_or_else(|| status.into_raw()))
+        })
 }
 
 /// `strip_trailing_whitespace`: the line with C's `isspace` bytes taken
@@ -153,7 +155,7 @@ enum Mode {
 /// php's warning and `false` where the shell could not be started. The
 /// pipe is php's plain stream, whose reads clear the stat cache. Each
 /// read and the wait for the child lend the request
-/// ([`Request::blocking`]), so a callback C makes from another thread
+/// ([`Limits::blocking`]), so a callback C makes from another thread
 /// meanwhile is served there (#2401).
 fn php_exec(
     req: &mut Request,
@@ -175,7 +177,7 @@ fn php_exec(
     req.clear_stat_cache();
     if mode == Mode::Raw {
         let mut chunk = vec![0u8; 4096];
-        while let Ok(read) = req.blocking(|| reader.read(&mut chunk)) {
+        while let Ok(read) = req.limits_mut().blocking(|| reader.read(&mut chunk)) {
             if read == 0 {
                 break;
             }
@@ -186,7 +188,10 @@ fn php_exec(
     let mut last: Vec<u8> = Vec::new();
     loop {
         let mut line = Vec::new();
-        match req.blocking(|| reader.read_until(b'\n', &mut line)) {
+        match req
+            .limits_mut()
+            .blocking(|| reader.read_until(b'\n', &mut line))
+        {
             Ok(0) | Err(_) => break,
             Ok(_) => {}
         }
@@ -582,7 +587,9 @@ fn shell_exec(
     };
     let mut written = Vec::new();
     if let Some(mut pipe) = child.stdout.take() {
-        req.blocking(|| pipe.read_to_end(&mut written)).ok();
+        req.limits_mut()
+            .blocking(|| pipe.read_to_end(&mut written))
+            .ok();
     }
     pclose(req, child);
     // The pipe is read through php's plain stream, whose reads clear the

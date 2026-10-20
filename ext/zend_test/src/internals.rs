@@ -102,14 +102,14 @@ pub(crate) fn zend_leak_bytes(
 pub(crate) fn zend_test_zend_call_stack_get(
     req: &mut Request,
 ) -> Result<Option<Owner<PhpArray>>, Thrown> {
-    let Some(stack) = req.call_stack_bounds() else {
+    let Some(stack) = req.limits().call_stack_bounds() else {
         return Ok(None);
     };
     let rows = [
         (&b"base"[..], stack.base),
         (b"max_size", stack.max_size),
         (b"position", position()),
-        (b"EG(stack_limit)", req.stack_limit_address()),
+        (b"EG(stack_limit)", req.limits().stack_limit_address()),
     ];
     let mut array = PhpArray::new(req)?;
     for (name, address) in rows {
@@ -136,11 +136,14 @@ pub(crate) fn zend_test_zend_call_stack_get(
 /// ```
 #[php_function]
 pub(crate) fn zend_test_zend_call_stack_use_all(req: &mut Request) -> Result<Raw<i64>, Thrown> {
-    let counted = req.call_stack_bounds().map_or(Value::null(), |stack| {
-        // `zend_call_stack_limit(base, max_size, 4096)`.
-        let limit = (stack.base.saturating_sub(stack.max_size)).saturating_add(4096);
-        Value::int(use_all(limit))
-    });
+    let counted = req
+        .limits()
+        .call_stack_bounds()
+        .map_or(Value::null(), |stack| {
+            // `zend_call_stack_limit(base, max_size, 4096)`.
+            let limit = (stack.base.saturating_sub(stack.max_size)).saturating_add(4096);
+            Value::int(use_all(limit))
+        });
     Raw::from_value(req, counted)
 }
 

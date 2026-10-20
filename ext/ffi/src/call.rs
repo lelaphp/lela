@@ -509,7 +509,7 @@ pub(crate) fn create_callback(
     let Some(sig) = Signature::prepare(shape.abi, &ret, &layouts, None) else {
         return Err(ffi_error(req, "Cannot prepare callback CIF"));
     };
-    let reentry = req.reentry();
+    let reentry = req.limits_mut().reentry();
     let index = req.state::<State>().callbacks.len();
     let closure = match Closure::new(sig, reentry, callback, index) {
         Ok(closure) => closure,
@@ -686,7 +686,7 @@ pub(crate) fn serve_deferred(
     if req.state::<State>().callbacks.is_empty() {
         return beneath.serve(req);
     }
-    let reentry = req.reentry();
+    let reentry = req.limits_mut().reentry();
     reentry.serve_waiting(|call| ffi::serve_waiting(req, call));
     for mut deferred in reentry.take_deferred() {
         let Some(addrs) = req

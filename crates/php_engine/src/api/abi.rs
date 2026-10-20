@@ -1404,8 +1404,8 @@ impl ExtensionBuilder {
     /// request's [`Interrupt`](crate::api::request::Interrupt) was raised
     /// by something other than the execution timer (design §5.8): signal
     /// delivery, or a periodic interrupt an extension started with
-    /// [`Request::start_periodic`], whose periods the hook reads with
-    /// [`Request::periods_elapsed`]. What
+    /// [`Limits::start_periodic`], whose periods the hook reads with
+    /// [`Limits::periods_elapsed`]. What
     /// it answers is left pending where the loop stands, as
     /// `zend_interrupt_helper` leaves `EG(exception)`. Two extensions'
     /// hooks chain as php's saved pointer does: the later is served

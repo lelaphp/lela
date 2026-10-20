@@ -349,7 +349,8 @@ fn select_over(
     // callback's `fclose` of one closes no fd the wait stands on until it
     // returns (#2664).
     let waited = req.holding_streams(&streams, |req| {
-        req.blocking(|| crate::ffi::select([read_set, write_set, except_set], timeout))
+        req.limits_mut()
+            .blocking(|| crate::ffi::select([read_set, write_set, except_set], timeout))
     });
     let (retval, ready) = match waited {
         Ok(answered) => answered,

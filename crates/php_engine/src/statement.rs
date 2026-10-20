@@ -78,7 +78,7 @@ impl Statement<'_> {
         self.req.frame_view(self.frame)
     }
 
-    /// [`Request::suspend_time_limit`] over the statement: the guard
+    /// [`Limits::suspend_time_limit`] over the statement: the guard
     /// derefs to this, so the frame's reads stay the handler's while it
     /// blocks, as a debugger's does at a breakpoint waiting on its client.
     pub fn suspend_time_limit(&mut self) -> TimeLimitSuspended<'_, Self> {

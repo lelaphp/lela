@@ -20,7 +20,7 @@
 //!
 //! **A forked child.** `pcntl_fork` copies the process with its calling
 //! thread alone, as php's does, through the engine's one home for fork
-//! ([`Request::fork`], #1807): the engine joins every thread of its own
+//! ([`Limits::fork`], #1807): the engine joins every thread of its own
 //! first, the engine's timer among them, and forks only while this
 //! request is the one inside the engine, so nothing a thread of the
 //! engine's held is left held in the child. The child goes on in its request's own

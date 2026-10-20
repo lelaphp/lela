@@ -348,7 +348,7 @@ impl Observed<'_> {
         }
     }
 
-    /// [`Request::suspend_time_limit`] over the observed frame: the
+    /// [`Limits::suspend_time_limit`] over the observed frame: the
     /// guard derefs to this, so the frame's reads stay the handler's while
     /// it blocks, a debugger's answers to its client among them.
     pub fn suspend_time_limit(&mut self) -> TimeLimitSuspended<'_, Self> {

@@ -311,7 +311,7 @@ impl Query<'_> {
         if table.array().is_recursive() {
             return Ok(());
         }
-        if req.stack_overflowed() {
+        if req.limits().stack_overflowed() {
             return Err(throw_error(
                 req,
                 "Error",

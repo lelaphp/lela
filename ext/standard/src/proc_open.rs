@@ -322,7 +322,7 @@ fn process_type(req: &mut Request) -> ResourceType {
 /// `waitpid_cached` (`Z/ext/standard/proc_open.c:235`): the status the
 /// resource cached once the child exited, else `waitpid(2)`, whose answer
 /// is cached where it says the child exited. A wait that blocks lends
-/// the request ([`Request::blocking`]), `proc_close`'s (#2401); the
+/// the request ([`Limits::blocking`]), `proc_close`'s (#2401); the
 /// resource is read before it and written after it, never during.
 fn waitpid_cached(req: &mut Request, res: Resource, options: i32) -> std::io::Result<(i32, i32)> {
     let Some(process) = res.native::<Process>(req) else {
@@ -339,7 +339,7 @@ fn waitpid_cached(req: &mut Request, res: Resource, options: i32) -> std::io::Re
         }
     };
     let answered = if options & crate::ffi::WNOHANG == 0 {
-        req.blocking(wait)
+        req.limits_mut().blocking(wait)
     } else {
         wait()
     };

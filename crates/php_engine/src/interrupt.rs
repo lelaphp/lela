@@ -37,7 +37,7 @@ use crate::api::request::{Interrupt, Request};
 /// leaves `EG(exception)` for the opline it re-enters.
 #[inline]
 pub(crate) fn check(req: &mut Request) -> Result<bool, Fatal> {
-    if req.interrupt().raised().load(Ordering::Relaxed) {
+    if req.limits().interrupt().raised().load(Ordering::Relaxed) {
         return interrupted(req);
     }
     Ok(false)
@@ -67,7 +67,7 @@ pub(crate) fn check(req: &mut Request) -> Result<bool, Fatal> {
 /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 2
 /// ```
 pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
-    if let Some(seconds) = req.interrupt().taken() {
+    if let Some(seconds) = req.limits().interrupt().taken() {
         return Err(Fatal::error(format!(
             "Maximum execution time of {seconds} second{} exceeded",
             if seconds == 1 { "" } else { "s" }
@@ -119,7 +119,7 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// the first.
 ///
 /// While a handler holds the time limit suspended
-/// ([`Request::suspend_time_limit`], #1814) the execution timer is no
+/// ([`Limits::suspend_time_limit`], #1814) the execution timer is no
 /// deadline but the time it had left, which neither stage counts down,
 /// and the resume makes it a deadline again that much from then.
 ///
@@ -502,7 +502,7 @@ pub(crate) struct Deadlines {
     interrupt: Interrupt,
     /// How many periodic interrupts were started, which numbers the next.
     periodics: u32,
-    /// How many [`Request::suspend_time_limit`] guards stand: while any
+    /// How many [`Limits::suspend_time_limit`] guards stand: while any
     /// does, the execution timer is held as the time it has left.
     suspended: u32,
 }
@@ -571,7 +571,7 @@ impl Deadlines {
         self.interrupt.timer_unset();
     }
 
-    /// [`Request::suspend_time_limit`]: the execution timer's deadline
+    /// [`Limits::suspend_time_limit`]: the execution timer's deadline
     /// taken out of the schedule and the time it had left kept, by the
     /// first of the guards that stand; the thread waits parked where
     /// nothing else is scheduled, and serves the rest on where something
@@ -603,7 +603,7 @@ impl Deadlines {
         }
     }
 
-    /// [`Request::start_periodic`]. `None` where no thread could be
+    /// [`Limits::start_periodic`]. `None` where no thread could be
     /// started to serve it.
     pub(crate) fn start_periodic(
         &mut self,
@@ -635,7 +635,7 @@ impl Deadlines {
         Some(id)
     }
 
-    /// [`Request::periods_elapsed`]: the periods elapsed since the last
+    /// [`Limits::periods_elapsed`]: the periods elapsed since the last
     /// time this was asked, and none counted from here.
     pub(crate) fn periods_elapsed(&mut self, id: Periodic) -> u64 {
         let control = self.timer.control();
@@ -647,7 +647,7 @@ impl Deadlines {
         period.map_or(0, |period| std::mem::take(&mut period.elapsed))
     }
 
-    /// [`Request::stop_periodic`]: its deadline gone and its count with it.
+    /// [`Limits::stop_periodic`]: its deadline gone and its count with it.
     pub(crate) fn stop_periodic(&mut self, id: Periodic) {
         self.change(|scheduled| scheduled.periodic.retain(|period| period.id != id));
     }
@@ -733,7 +733,7 @@ struct Scheduled {
 }
 
 /// One periodic interrupt a request was asked for (#1806), by the number
-/// its request's deadlines gave it: what [`Request::start_periodic`]
+/// its request's deadlines gave it: what [`Limits::start_periodic`]
 /// answers and the extension that asked keeps, in its request state, to
 /// read its periods with and to stop it by. The number is its request's
 /// alone: another request numbers its own from the same start.
@@ -1060,7 +1060,7 @@ mod tests {
         let engine = Engine::cli_builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), description());
         let frame = req.pushed(looping());
-        req.interrupt().elapsed(1);
+        req.limits().interrupt().elapsed(1);
 
         assert_eq!(
             execute::<Probe, Untold>(&mut req, frame),
@@ -1654,18 +1654,18 @@ mod tests {
         let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), description());
 
-        req.interrupt().raise();
+        req.limits().interrupt().raise();
         assert_eq!(check(&mut req), Ok(false));
-        assert!(!req.interrupt().raised().load(Ordering::Relaxed));
+        assert!(!req.limits().interrupt().raised().load(Ordering::Relaxed));
 
-        req.interrupt().elapsed(30);
+        req.limits().interrupt().elapsed(30);
         assert_eq!(
             check(&mut req),
             Err(Fatal::error(
                 "Maximum execution time of 30 seconds exceeded"
             ))
         );
-        assert!(!req.interrupt().raised().load(Ordering::Relaxed));
+        assert!(!req.limits().interrupt().raised().load(Ordering::Relaxed));
         // The second check finds nothing: php's helper clears both words.
         assert_eq!(check(&mut req), Ok(false));
     }

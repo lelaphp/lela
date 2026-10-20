@@ -35,7 +35,7 @@ pub use crate::virtual_cwd::{MAXPATHLEN, Resolve};
 pub(crate) use callable::{Deprecations, Refusal, compound_split};
 pub use execution::Execution;
 /// `zend_call_stack`: a thread's machine stack as the platform describes
-/// it, its `base` and `max_size` ([`Request::call_stack_bounds`]).
+/// it, its `base` and `max_size` ([`Limits::call_stack_bounds`]).
 pub use php_heap::CallStack;
 pub use unit_cache::{
     CacheBudget, CacheStatus, CachedFile, Invalidation, PreloadStatistics, Restart, UnitCache,
@@ -94,6 +94,7 @@ mod hooks;
 mod inspect;
 mod lazy;
 mod limits;
+pub use limits::Limits;
 pub use limits::{Interrupt, TimeLimitSuspended};
 mod linking;
 mod load_file;
@@ -204,15 +205,15 @@ pub use crate::interrupt::Periodic;
 /// asynchronous delivery raises this request's interrupt. The record is
 /// the engine's, since signal dispositions are the process's and an
 /// extension holds no atomic (ADR-0005). Beside it, [`Reentry`] is how a
-/// function C calls back reaches its request ([`Request::reentry`]):
+/// function C calls back reaches its request ([`Limits::reentry`]):
 /// [`Lent`] while the request waits in a call into C or blocks
-/// ([`Request::blocking`]), and otherwise a [`Deferred`] call or one a
+/// ([`Limits::blocking`]), and otherwise a [`Deferred`] call or one a
 /// thread waits on ([`Waited`]) that the interrupt check serves.
 pub use crate::signal::{
     DEFERRED_WORDS, Deferred, Lent, Receiving, Reentry, SIGNAL_POST, Siginfo, Waited, take_signals,
 };
 
-/// Which side of [`Request::fork`] the caller stands on, and the child's
+/// Which side of [`Limits::fork`] the caller stands on, and the child's
 /// id the parent is handed: `php_process`'s, which the engine's one home
 /// for fork calls (#1807).
 pub use crate::fork::{Forked, Pid};
@@ -391,8 +392,8 @@ pub struct Request {
     objects: objects::Objects,
     /// What the entry frame of the innermost serving returned.
     returned: Value,
-    /// The interrupt, the timer and the stack limit ([`limits::Limits`]).
-    limits: limits::Limits,
+    /// The interrupt, the timer and the stack limit ([`limits::LimitsState`]).
+    limits: limits::LimitsState,
     /// What a debug build's sensors have made of the request
     /// ([`sensing::Sensing`]).
     #[cfg(debug_assertions)]
@@ -516,7 +517,7 @@ pub struct Request {
     /// opcache's `ZCG(counted)` ([`memory::SharedHold`]).
     shared_hold: memory::SharedHold,
     /// The request in flight, which no fork but its own happens beside
-    /// (#1807, [`Request::fork`]): entered before its deadlines are laid
+    /// (#1807, [`Limits::fork`]): entered before its deadlines are laid
     /// on the engine's timer and left after they are taken out, so no
     /// fork copies the timer's mutex as the request holds it.
     _inside: crate::fork::Inside,
@@ -1027,7 +1028,7 @@ impl Request {
             // Fields are made in the order written: the request stands
             // inside the engine before its deadlines are laid.
             _inside: crate::fork::Inside::enter(),
-            limits: limits::Limits::new(&shared.timer),
+            limits: limits::LimitsState::new(&shared.timer),
             shared,
             description,
             inspect: inspect::Inspected::default(),

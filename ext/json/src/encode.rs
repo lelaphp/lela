@@ -487,7 +487,7 @@ fn encode_array(
     options: i64,
     enc: &mut Encoder,
 ) -> Wrote {
-    if req.stack_overflowed() {
+    if req.limits().stack_overflowed() {
         enc.error_code = JSON_ERROR_DEPTH;
         partial_null(req, buf, options)?;
         return Ok(false);

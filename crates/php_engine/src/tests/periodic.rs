@@ -58,21 +58,21 @@ macro_rules! sampling {
             .extensions(&[ExtensionBuilder::default()
                 .request_state::<Sampler>()
                 .rinit(|req| {
-                    let periodic = req.start_periodic(PERIOD, Some(PERIOD));
+                    let periodic = req.limits_mut().start_periodic(PERIOD, Some(PERIOD));
                     req.state::<Sampler>().0 = periodic;
-                    noted(&$seen).interrupt = Some(req.interrupt().clone());
+                    noted(&$seen).interrupt = Some(req.limits().interrupt().clone());
                     Ok(())
                 })
                 .interrupt(|req, beneath| {
                     if let Some(periodic) = req.state::<Sampler>().0 {
-                        match req.periods_elapsed(periodic) {
+                        match req.limits_mut().periods_elapsed(periodic) {
                             0 => {}
                             periods => noted(&$seen).periods.push(periods),
                         }
                     }
                     beneath.serve(req)
                 })
-                .rshutdown(|req| noted(&$seen).at_rshutdown = req.interrupt().holders())
+                .rshutdown(|req| noted(&$seen).at_rshutdown = req.limits().interrupt().holders())
                 .build("sampler")])
             .build()
     };

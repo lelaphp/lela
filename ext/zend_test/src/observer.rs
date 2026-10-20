@@ -525,7 +525,7 @@ fn show_init_backtrace(observed: &mut Observed<'_>) {
 fn begin(observed: &mut Observed<'_>) {
     let switches = Switches::of(observed);
     if switches.set_vm_interrupt_on_begin {
-        observed.interrupt().raise();
+        observed.limits().interrupt().raise();
     }
     if !switches.show_output {
         return;

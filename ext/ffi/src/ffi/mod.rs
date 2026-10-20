@@ -477,7 +477,7 @@ fn place(
 
 /// `ffi_call(&cif, target, ret, args)`: the C function at `target`
 /// called with the argument values at `args`, the return written into
-/// `ret`. The request is lent while C runs ([`Request::blocking`]), for
+/// `ret`. The request is lent while C runs ([`Limits::blocking`]), for
 /// a callback C makes back into PHP code, and taken back once C returns.
 pub(crate) fn call(
     req: &mut Request,
@@ -494,7 +494,7 @@ pub(crate) fn call(
     };
     let cif = &raw mut *sig.cif;
     let ret = ret.as_mut_ptr().cast();
-    req.blocking(|| {
+    req.limits_mut().blocking(|| {
         // SAFETY: the cif was prepared for exactly these argument values,
         // each standing across the call, and `ret` holds at least
         // `sizeof(ffi_arg)` and the return type's size; `target` is the

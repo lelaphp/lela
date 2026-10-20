@@ -24851,7 +24851,7 @@ mod tests {
         let code = crate::exec::code_of(&unit);
         let back = code.oplines.get(1).copied().unwrap_or_default();
         req.vm_mut().stand(frame, 1);
-        req.interrupt().elapsed(1);
+        req.limits().interrupt().elapsed(1);
 
         assert_eq!(
             served!(req, frame, at => jmp::<Probe>(&mut req, frame, code, &back)),
