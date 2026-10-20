@@ -931,6 +931,11 @@ fn emit_struct(
         .ok();
     }
     buf.push_str("}\n");
+    let (open, close) = if has_required(fields) {
+        ("", "")
+    } else {
+        ("Ok(", ")")
+    };
     write!(
         buf,
         "impl Node for {name} {{\n    \
@@ -939,15 +944,32 @@ fn emit_struct(
              fn line(&self) -> u32 {{\n        self.line\n    }}\n    \
              fn all<'t>(nodes: &Nodes<'t>) -> &'t [Self] {{\n        \
                  match nodes.store({slot}) {{\n            \
-                     Some(Store::{name}(nodes)) => nodes,\n            \
+                     Some(Store::{name}(nodes)) => nodes.as_slice(),\n            \
                      _ => &[],\n        \
                  }}\n    \
+             }}\n\
+         }}\n\
+         impl Stored for {name} {{\n    \
+             const SLOT: usize = {slot};\n    \
+             const FIELD: &'static str = \"Nodes.{snake}\";\n    \
+             fn store(nodes: BumpVec<'_, Self>) -> Store<'_> {{\n        \
+                 Store::{name}(nodes)\n    \
+             }}\n    \
+             fn stored<'a, 'g>(store: &'g mut Store<'a>) -> Option<&'g mut BumpVec<'a, Self>> {{\n        \
+                 match store {{\n            \
+                     Store::{name}(nodes) => Some(nodes),\n            \
+                     _ => None,\n        \
+                 }}\n    \
+             }}\n    \
+             fn resolved(at: &Finished<'_>, pools: &mut Pools) -> Result<Self, &'static str> {{\n        \
+                 {open}Self::resolve(at.range, at.line, at.children, at.doc_comment, pools){close}\n    \
              }}\n\
          }}\n",
         slot = model.slot_of(name).unwrap_or_else(|| {
             errors.push(Error::global(format!("{name} has no slot in `Nodes`")));
             0
-        })
+        }),
+        snake = snake_case(name),
     )
     .ok();
     emit_resolver(buf, model, def, fields, errors);
@@ -1124,46 +1146,21 @@ fn has_required(fields: &[Field]) -> bool {
 /// and no node pays for the width of another kind's struct. A kind's
 /// slice is made when its first node is, so a tree pays for the kinds
 /// it holds and not for every kind the schema names: `Store` is one
-/// kind's slice, and a slot per kind says where in `stores` it stands.
-/// `Growing` is a kind's vector while the builder fills it, laid down
-/// at the count of the kind's `Start` events, and `slot_of` is the
-/// slot of a kind.
+/// kind's vector in the arena, laid down at the count of the kind's
+/// nodes, filled by the builder and read by the tree as it stands, and a
+/// slot per kind says where in `stores` it stands; `slot_of` is the slot
+/// of a kind.
 fn emit_nodes(buf: &mut String, model: &Model<'_>) {
     buf.push_str(
         "/// One kind's nodes in the arena, by the kind's struct.\n\
-         #[derive(Clone, Copy, Debug, PartialEq, Eq)]\n\
+         #[derive(Debug, PartialEq, Eq)]\n\
          enum Store<'a> {\n",
-    );
-    for info in model.structs() {
-        let name = &info.def.name;
-        writeln!(buf, "    {name}(&'a [{name}]),").ok();
-    }
-    buf.push_str(
-        "}\n\n\
-         /// One kind's nodes while the builder fills them.\n\
-         enum Growing<'a> {\n",
     );
     for info in model.structs() {
         let name = &info.def.name;
         writeln!(buf, "    {name}(BumpVec<'a, {name}>),").ok();
     }
-    buf.push_str(
-        "}\n\n\
-         impl<'a> Growing<'a> {\n    \
-             /// The kind's nodes as the tree keeps them.\n    \
-             #[allow(clippy::too_many_lines)]\n    \
-             fn freeze(self) -> Store<'a> {\n        \
-                 match self {\n",
-    );
-    for info in model.structs() {
-        let name = &info.def.name;
-        writeln!(
-            buf,
-            "            Growing::{name}(nodes) => Store::{name}(nodes.into_bump_slice()),"
-        )
-        .ok();
-    }
-    buf.push_str("        }\n    }\n}\n\n");
+    buf.push_str("}\n\n");
     write!(
         buf,
         "/// How many struct node kinds there are, each with a slot in `Nodes`.\n\
@@ -1259,12 +1256,12 @@ fn emit_lists(buf: &mut String, bases: &BTreeSet<String>) {
     buf.push_str(&within.join("\n            && "));
     buf.push_str(
         "\n    }\n\n    \
-             /// The pools as the tree keeps them: each pool written since the\n    \
-             /// last freeze copied into `bump` and emptied, and every other\n    \
-             /// list no slice, so a tree pays for the pools it wrote.\n    \
+             /// The pools as the tree keeps them, in `bump`: each pool written\n    \
+             /// since the last freeze copied there and emptied, and every\n    \
+             /// other list no slice, so a tree pays for the pools it wrote.\n    \
              #[allow(clippy::too_many_lines)]\n    \
-             pub(crate) fn freeze<'a>(&mut self, bump: &'a bumpalo::Bump) -> Lists<'a> {\n        \
-                 let mut lists = NO_LISTS;\n        \
+             pub(crate) fn freeze<'a>(&mut self, bump: &'a bumpalo::Bump) -> &'a Lists<'a> {\n        \
+                 let lists = bump.alloc(NO_LISTS);\n        \
                  let mut used = std::mem::take(&mut self.used);\n        \
                  while used != 0 {\n            \
                      let pool = used.trailing_zeros();\n            \
@@ -1315,28 +1312,18 @@ fn emit_resolve(buf: &mut String, model: &Model<'_>) {
              nodes: &mut Building<'_>,\n    \
              pools: &mut Pools,\n    \
              kind: SyntaxKind,\n    \
-             range: TextRange,\n    \
-             line: u32,\n    \
-             children: &[Element],\n    \
-             doc_comment: Option<TokenId>,\n\
+             at: &Finished<'_>,\n\
          ) -> Resolved {\n    \
              match kind {\n",
     );
-    for (slot, info) in model.structs().enumerate() {
+    for info in model.structs() {
         let name = &info.def.name;
-        // The fields were derived, and their errors reported, when the
-        // struct was emitted.
-        let fallible = has_required(&fields_of(model, info.def, &mut Vec::new()));
-        let (open, close) = if fallible { ("", "") } else { ("Ok(", ")") };
         writeln!(
             buf,
-            "        SyntaxKind::{} => match nodes.open({slot}, Growing::{name}) {{\n            \
-                 Some(Growing::{name}(nodes)) => push(nodes, {open}{name}::resolve(range, line, children, doc_comment, pools){close}),\n            \
-                 _ => Resolved::Missing(\"Nodes.{}\"),\n        \
-             }},",
+            "        SyntaxKind::{} => place::<{name}>(nodes, pools, at),",
             screaming_snake(name),
-            snake_case(name)
-        ).ok();
+        )
+        .ok();
     }
     buf.push_str("        _ => Resolved::Untyped,\n    }\n}\n\n");
 }
@@ -1971,14 +1958,13 @@ mod tests {
              Member = '->' name:<member_ident>\n",
         );
         for needle in [
-            "enum Store<'a> {\n    Root(&'a [Root]),\n    Decl(&'a [Decl]),",
-            "enum Growing<'a> {\n    Root(BumpVec<'a, Root>),",
+            "enum Store<'a> {\n    Root(BumpVec<'a, Root>),\n    Decl(BumpVec<'a, Decl>),",
             "const SLOTS: usize = 6;",
             "        SyntaxKind::DECL => Some(1),",
             "pub struct Lists<'a> {\n    item: &'a [Item],\n}",
             "impl Listed for Item {",
             "    slots: [Option<StoreAt>; SLOTS],",
-            "fn all<'t>(nodes: &Nodes<'t>) -> &'t [Self] {\n        match nodes.store(1) {\n            Some(Store::Decl(nodes)) => nodes,\n            _ => &[],\n        }\n    }",
+            "fn all<'t>(nodes: &Nodes<'t>) -> &'t [Self] {\n        match nodes.store(1) {\n            Some(Store::Decl(nodes)) => nodes.as_slice(),\n            _ => &[],\n        }\n    }",
             "impl Decl {",
             "    ) -> Result<Self, &'static str> {",
             "        let Some(name) = token(children, &[], &[SyntaxKind::IDENT]) else {\n            \
@@ -1997,8 +1983,11 @@ mod tests {
             "        if let Element::Token { kind: SyntaxKind::IDENT, id } = *element {\n            \
                  return Some(Self::Ident(id));",
             "pub(crate) fn resolve(",
-            "        SyntaxKind::DECL => match nodes.open(1, Growing::Decl) {\n            Some(Growing::Decl(nodes)) => push(nodes, Decl::resolve(range, line, children, doc_comment, pools)),\n            _ => Resolved::Missing(\"Nodes.decl\"),\n        },",
-            "        SyntaxKind::ROOT => match nodes.open(0, Growing::Root) {\n            Some(Growing::Root(nodes)) => push(nodes, Ok(Root::resolve(range, line, children, doc_comment, pools))),\n            _ => Resolved::Missing(\"Nodes.root\"),\n        },",
+            "        SyntaxKind::DECL => place::<Decl>(nodes, pools, at),",
+            "        SyntaxKind::ROOT => place::<Root>(nodes, pools, at),",
+            "impl Stored for Decl {\n    const SLOT: usize = 1;\n    const FIELD: &'static str = \"Nodes.decl\";",
+            "        Self::resolve(at.range, at.line, at.children, at.doc_comment, pools)\n",
+            "        Ok(Self::resolve(at.range, at.line, at.children, at.doc_comment, pools))\n",
             "        _ => Resolved::Untyped,",
         ] {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");

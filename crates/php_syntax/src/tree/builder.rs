@@ -77,7 +77,7 @@ use crate::lexer::Token;
 use crate::line_index::LineIndex;
 use crate::source::TextRange;
 
-use super::{Building, Census, Element, Pools, Resolved, TokenId, Tree, line, resolve};
+use super::{Building, Census, Element, Finished, Pools, Resolved, TokenId, Tree, line, resolve};
 
 /// One parser event. The parser emits a flat stream; the builder assembles
 /// the tree, so the parser is tested without trees and the builder without
@@ -309,7 +309,7 @@ pub(crate) fn build_in<'a>(
         missing,
         ..
     } = builder;
-    let lists = bump.alloc_with(|| pools.freeze(bump));
+    let lists = pools.freeze(bump);
     let (nodes, counts) = nodes.freeze();
     events.clear();
     pending.clear();
@@ -488,15 +488,13 @@ impl Builder<'_, '_> {
         };
         let children = &self.pending[frame.children_from..];
         let line = line::of(frame.kind, children, &site);
-        let (kind, index) = match resolve(
-            &mut self.nodes,
-            self.pools,
-            frame.kind,
+        let finished = Finished {
             range,
             line,
             children,
-            frame.doc_comment,
-        ) {
+            doc_comment: frame.doc_comment,
+        };
+        let (kind, index) = match resolve(&mut self.nodes, self.pools, frame.kind, &finished) {
             Resolved::Node(index) => (frame.kind, index),
             Resolved::Missing(field) => {
                 self.missing.push(Missing { field, range });

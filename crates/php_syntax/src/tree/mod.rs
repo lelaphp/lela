@@ -491,7 +491,7 @@ impl Census {
 pub(crate) struct Building<'a> {
     bump: &'a Bump,
     slots: [Option<StoreAt>; SLOTS],
-    stores: BumpVec<'a, Growing<'a>>,
+    stores: BumpVec<'a, Store<'a>>,
     counts: Vec<u32>,
 }
 
@@ -506,31 +506,26 @@ impl<'a> Building<'a> {
         }
     }
 
-    /// The vector of the struct kind at `slot`, made by `empty` with the
-    /// kind's first node. `None` only where the slot is not a kind's, or
-    /// more kinds stand than a slot counts; the caller's match on the
-    /// kind's variant is what reads the vector.
-    fn open<T>(
-        &mut self,
-        slot: usize,
-        empty: fn(BumpVec<'a, T>) -> Growing<'a>,
-    ) -> Option<&mut Growing<'a>> {
-        let at = if let Some(at) = *self.slots.get(slot)? {
+    /// The vector of `T`'s kind, made with the kind's first node. `None`
+    /// only where more kinds stand than a slot counts, which the
+    /// codegen's count of slots rules out.
+    fn open<T: Stored>(&mut self) -> Option<&mut BumpVec<'a, T>> {
+        let at = if let Some(at) = *self.slots.get(T::SLOT)? {
             at
         } else {
             let at = StoreAt::new(self.stores.len())?;
-            let room = self.counts.get_mut(slot).map_or(0, std::mem::take) as usize;
+            let room = self.counts.get_mut(T::SLOT).map_or(0, std::mem::take) as usize;
             self.stores
-                .push(empty(BumpVec::with_capacity_in(room, self.bump)));
-            *self.slots.get_mut(slot)? = Some(at);
+                .push(T::store(BumpVec::with_capacity_in(room, self.bump)));
+            *self.slots.get_mut(T::SLOT)? = Some(at);
             at
         };
-        self.stores.get_mut(at.index())
+        T::stored(self.stores.get_mut(at.index())?)
     }
 
-    /// The arena as the tree keeps it, in the arena, each vector frozen
-    /// to its slice; and the counts back, at zero, each taken as its
-    /// kind was opened.
+    /// The arena as the tree keeps it, in the arena, each kind's vector
+    /// read where the builder filled it; and the counts back, at zero,
+    /// each taken as its kind was opened.
     pub(crate) fn freeze(self) -> (&'a Nodes<'a>, Vec<u32>) {
         let Building {
             bump,
@@ -538,21 +533,54 @@ impl<'a> Building<'a> {
             stores,
             counts,
         } = self;
-        let stores = bump.alloc_slice_fill_iter(stores.into_iter().map(Growing::freeze));
+        let stores = stores.into_bump_slice();
         (bump.alloc_with(|| Nodes { slots, stores }), counts)
     }
 }
 
-/// One node into its kind's vector, and where it went.
-fn push<T>(nodes: &mut BumpVec<'_, T>, node: Result<T, &'static str>) -> Resolved {
-    match node {
+/// A node as the builder hands it to [`resolve`] at its `Finish`: where it
+/// stands, php's line for it, its direct children and the doc comment it
+/// took.
+pub(crate) struct Finished<'c> {
+    pub(crate) range: TextRange,
+    pub(crate) line: u32,
+    pub(crate) children: &'c [Element],
+    pub(crate) doc_comment: Option<TokenId>,
+}
+
+/// What a struct node kind is to the arena while the builder fills it:
+/// its slot, its vector's variant of `Store`, and its resolution from a
+/// finished node, the emitted `resolve` beside its struct.
+trait Stored: Sized + 'static {
+    /// The kind's slot in `Nodes`.
+    const SLOT: usize;
+    /// What [`Resolved::Missing`] names where the arena has no vector to
+    /// put the kind in.
+    const FIELD: &'static str;
+    /// The kind's vector as a `Store`.
+    fn store(nodes: BumpVec<'_, Self>) -> Store<'_>;
+    /// The kind's vector, if `store` is the kind's.
+    fn stored<'a, 'g>(store: &'g mut Store<'a>) -> Option<&'g mut BumpVec<'a, Self>>;
+    /// The node from its children, or the required child that is absent.
+    fn resolved(at: &Finished<'_>, pools: &mut Pools) -> Result<Self, &'static str>;
+}
+
+/// One finished node of `T`'s kind resolved into its kind's vector, and
+/// where it went: the one body every kind's arm of [`resolve`] calls, kept
+/// out of line so the dispatch over the kinds is a jump and nothing more.
+#[inline(never)]
+fn place<T: Stored>(nodes: &mut Building<'_>, pools: &mut Pools, at: &Finished<'_>) -> Resolved {
+    let Some(stored) = nodes.open::<T>() else {
+        return Resolved::Missing(T::FIELD);
+    };
+    match T::resolved(at, pools) {
         Ok(node) => {
             // A file the lexer accepts is under `u32::MAX` bytes and a
             // node without a token of its own is bounded by the parser's
             // forward-progress fuel per token, so the count fits; the
             // conversion saturates rather than fails.
-            let index = u32::try_from(nodes.len()).unwrap_or(u32::MAX);
-            nodes.push(node);
+            let index = u32::try_from(stored.len()).unwrap_or(u32::MAX);
+            stored.push(node);
             Resolved::Node(index)
         }
         Err(field) => Resolved::Missing(field),
