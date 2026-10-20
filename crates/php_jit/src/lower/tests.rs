@@ -15,7 +15,7 @@ use cranelift_codegen::isa;
 use super::{ABANDONED, Backend, INTERRUPT_AT, Kernel, Symbols, Unsupported};
 use crate::table::TraceName;
 use crate::testing::goldens::{self, FIB, Fixture, MANDELBROT, NBODY, SPECTRALNORM, held};
-use crate::testing::policy;
+use crate::testing::{self, Lane, policy};
 use crate::types::{End, Op, TraceIr};
 
 /// Where `lower`'s goldens are.
@@ -328,4 +328,35 @@ fn a_natives_call_is_stepped() -> Result<(), String> {
     )?;
     assert!(!calls_of(&clif, Kernel::Step).is_empty(), "{clif}");
     Ok(())
+}
+
+/// A guard on a boolean the trace keeps in a register is tested there:
+/// each loop, compiled at its first iteration under `jit.mode=force`,
+/// where `$i < 100` was true, leaves where it turns false, so each counts
+/// the hundred iterations php counts rather than going the recorded way
+/// to the end, its loop compiled rather than aborted on a guard the
+/// lowering does not serve (#3076).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_guarded_boolean_is_tested_where_the_trace_runs() {
+    let ini = [
+        ("jit.mode", "force"),
+        ("jit.compile", "inline"),
+        ("opcache.jit_debug", "258048"),
+    ];
+    for program in [
+        "function f() { $h = 0; for ($i = 0; $i < 200; $i++) { if ($i < 100 && $i >= 0) { $h++; } } return $h; }
+        echo f(), \"\\n\";",
+        "function f() { $h = 0; $b = true; for ($i = 0; $i < 200; $i++) { if ($b) { $h++; } $b = $i < 99; } return $h; }
+        echo f(), \"\\n\";",
+    ] {
+        let served = testing::serve::<Lane>(&ini, program);
+        let lines = String::from_utf8_lossy(&served.stderr).into_owned();
+        assert_eq!(testing::stdout(&served), "100\n", "{program}\n{lines}");
+        assert!(
+            lines.contains("---- TRACE 1 stop (loop)\n---- TRACE 1 compiled"),
+            "{lines}"
+        );
+        assert!(!testing::MAPS_CODE || lines.contains(" exit "), "{lines}");
+    }
 }

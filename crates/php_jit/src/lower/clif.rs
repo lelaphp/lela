@@ -457,16 +457,28 @@ impl<'a> Emit<'a> {
     }
 
     /// A guard held at entry or before an op: what it holds read from the
-    /// value's slot, leaving through its exit where it does not hold.
+    /// value's slot, or from its register where a boolean is held to the
+    /// one the recording saw (#3076), leaving through its exit where it
+    /// does not hold.
     fn guard(&mut self, guard: Guard) -> Result<(), Abort> {
         match guard.check {
             Check::Type { value, tag: t } => {
                 let held = self.value(value)?;
                 if held.home == Home::Register {
-                    return if Kind::of(held.types) == Kind::of_tag(t) {
-                        Ok(())
-                    } else {
-                        Err(mismatch("a register guarded as another type"))
+                    return match (Kind::of(held.types), Kind::of_tag(t)) {
+                        (kind, wanted) if kind == wanted => Ok(()),
+                        (Some(Kind::Bool), Some(wanted @ (Kind::False | Kind::True))) => {
+                            let Scalar::Bool(truth) = self.register(value)? else {
+                                return Err(mismatch("a boolean register read as another kind"));
+                            };
+                            let other = self.b.ins().icmp_imm_s(
+                                IntCC::NotEqual,
+                                truth,
+                                i64::from(wanted == Kind::True),
+                            );
+                            self.leave_if(other, guard.exit)
+                        }
+                        _ => Err(mismatch("a register guarded as another type")),
                     };
                 }
                 let (room, at) = self.place(held.slot)?;
