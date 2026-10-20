@@ -1309,19 +1309,30 @@ mod tests {
         let _alone = alone();
         let mut heap = Heap::new();
         let mut stack = VmStack::<Head>::new();
-        let (Ok(sending), Ok(called)) = (
-            stack.push_frame(&mut heap, 2, 0, Head::default()),
-            stack.push_frame(&mut heap, 3, 0, Head::default()),
-        ) else {
+        let sending = stack.push_frame(&mut heap, 2, 0, Head::default());
+        let called = stack.push_frame(&mut heap, 3, 0, Head::default());
+        assert!(
+            sending.is_ok() && called.is_ok(),
+            "two frames fit the first page"
+        );
+        let (Ok(sending), Ok(called)) = (sending, called) else {
             return;
         };
-        if let Some((top, below)) = stack.top_and_frame_mut(sending) {
+        let lent = stack.top_and_frame_mut(sending);
+        assert!(lent.is_some(), "a frame below the top is lent with it");
+        if let Some((top, below)) = lent {
             below.set(Slot(1), Zval::long(4));
             top.set(Slot(2), below.slot(Slot(1)));
+            top.set(Slot(0), Zval::long(5));
+            below.set(Slot(0), top.slot(Slot(0)));
         }
         assert_eq!(
             stack.frame(called).map(|f| f.slot(Slot(2))),
             Some(Zval::long(4))
+        );
+        assert_eq!(
+            stack.frame(sending).map(|f| f.slot(Slot(0))),
+            Some(Zval::long(5))
         );
         assert!(stack.top_and_frame_mut(called).is_none());
         assert!(stack.top_and_frame_mut(FrameRef(7)).is_none());

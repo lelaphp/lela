@@ -2077,22 +2077,23 @@ fn inline_send(
     if !info.building() || to >= num_args as usize {
         return None;
     }
-    let declared = match sending {
+    let asks_declaration = match sending {
         Sending::Checked if info.send_by_ref() => return None,
         Sending::Value | Sending::Checked => false,
         Sending::Declared => !info.sends_by_value(op.op2),
     };
-    if declared {
+    let (call, from) = if asks_declaration {
         // Past the bits the `INIT` wrote, the declaration says, which the
         // request reads: asked with the two frames given back, and the
         // two lent again only where it says by value.
         if req.arg_send_mode(function?, op.op2).0 {
             return None;
         }
-        let (call, from) = req.vm_mut().stack.top_and_frame_mut(frame)?;
-        return placed(from.slots_mut(), call.slots_mut().get_mut(to)?, code, op, a);
-    }
-    placed(from.slots_mut(), call.slots_mut().get_mut(to)?, code, op, a)
+        req.vm_mut().stack.top_and_frame_mut(frame)?
+    } else {
+        (call, from)
+    };
+    sent_into(from.slots_mut(), call.slots_mut().get_mut(to)?, code, op, a)
 }
 
 /// [`inline_send`]'s write: the operand read off the caller's `slots`
@@ -2100,7 +2101,7 @@ fn inline_send(
 /// what a send copies, moves or leaves to the kernel.
 #[inline(always)] // the handler's fast half, as `inline_send`
 #[allow(clippy::inline_always)]
-fn placed(
+fn sent_into(
     slots: &mut [Zval],
     into: &mut Zval,
     code: &OpArray,
