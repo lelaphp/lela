@@ -4,6 +4,8 @@
 //! loop, then the exits numbered and laid out from the state the trace
 //! held where each leaves.
 
+use std::collections::HashMap;
+
 use php_engine::tier::{FuncRef, MapPtrRaw, Sample, UnitView};
 use php_heap::ZvalType;
 use php_unit::decl::Parameter;
@@ -1333,7 +1335,8 @@ impl<'a> Builder<'a> {
     /// held at entry, a loop's interrupt test at its header, then op by
     /// op the guards before it, those it holds itself and its own exit,
     /// and last the exit a trace that does not loop ends through. Each
-    /// guard and each opline that leaves names its exit.
+    /// guard and each opline that leaves names its exit, one an earlier
+    /// place took where their specs match ([`Exits::take`]).
     fn number(&mut self, loops: bool) -> Result<Numbered, Abort> {
         let mut order: Vec<(Order, Source)> = Vec::new();
         for (at, guard) in self.guards.iter().enumerate() {
@@ -1354,21 +1357,22 @@ impl<'a> Builder<'a> {
         });
         // Stable: within one place, in the order they were placed.
         order.sort_by_key(|(key, _)| *key);
-        if order.len() > MAX_EXITS {
-            return Err(Abort {
-                stop: Stop::TooManyExits,
-                why: "more exits than php's ZEND_JIT_TRACE_MAX_EXITS",
-            });
-        }
+        let mut exits = Exits::default();
         let mut numbered = Numbered {
-            exits: Vec::with_capacity(order.len()),
+            exits: Vec::new(),
             guards: Vec::with_capacity(self.guards.len()),
             interrupt: None,
             end: None,
         };
-        for (number, (_, source)) in order.iter().enumerate() {
-            let id = ExitId(u16::try_from(number).map_err(|_| mismatch("too many exits"))?);
-            let draft = match *source {
+        for (_, source) in order {
+            let draft = match source {
+                Source::Guard(at) => self.guards[at].exit,
+                Source::Leave(at) => self.leaves[at].2,
+                Source::Interrupt => self.interrupt(),
+                Source::End => self.end_draft.unwrap_or_else(|| self.start()),
+            };
+            let id = exits.take(self.spec(&draft))?;
+            match source {
                 Source::Guard(at) => {
                     let placed = self.guards[at];
                     numbered.guards.push(Guard {
@@ -1376,29 +1380,21 @@ impl<'a> Builder<'a> {
                         check: placed.check,
                         exit: id,
                     });
-                    placed.exit
                 }
                 Source::Leave(at) => {
-                    let (op, leaves, draft) = self.leaves[at];
+                    let (op, leaves, _) = self.leaves[at];
                     if let Some(Op::Line(line)) = self.ops.get_mut(op.index()) {
                         match leaves {
                             Leaves::Unfinished => line.exit = Some(id),
                             Leaves::Freed => line.freed = Some(id),
                         }
                     }
-                    draft
                 }
-                Source::Interrupt => {
-                    numbered.interrupt = Some(id);
-                    self.interrupt()
-                }
-                Source::End => {
-                    numbered.end = Some(id);
-                    self.end_draft.unwrap_or_else(|| self.start())
-                }
-            };
-            numbered.exits.push(self.spec(&draft));
+                Source::Interrupt => numbered.interrupt = Some(id),
+                Source::End => numbered.end = Some(id),
+            }
         }
+        numbered.exits = exits.specs;
         Ok(numbered)
     }
 
@@ -1538,7 +1534,7 @@ impl<'a> Builder<'a> {
                 } else {
                     extra = Some(Store {
                         slot: self.val(out).slot,
-                        from: Stored::Value(out),
+                        from: Stored::Copied(out),
                     });
                     let landing = if op1 || op2 {
                         Landing::FreeTemps { op1, op2 }
@@ -1624,6 +1620,43 @@ fn draft(point: Point, frame: Frame, at: At) -> Draft {
         at,
         extra: None,
         link: None,
+    }
+}
+
+/// The exits a trace has taken so far, by number, and where each spec
+/// that names an opline was taken.
+#[derive(Default)]
+struct Exits {
+    specs: Vec<ExitSpec>,
+    taken: HashMap<ExitSpec, ExitId>,
+}
+
+impl Exits {
+    /// The exit that leaves as `spec` says: php's
+    /// `zend_jit_trace_get_exit_point`, which reuses an exit whose opline,
+    /// `flags` and stack map match one taken
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:168-185`), and refuses the
+    /// trace with `TooManyExits` where a new one would pass
+    /// `ZEND_JIT_TRACE_MAX_EXITS`. An exit that names no opline
+    /// is never reused, as php reuses none whose `to_opline` is null.
+    fn take(&mut self, spec: ExitSpec) -> Result<ExitId, Abort> {
+        if spec.opline.is_some()
+            && let Some(id) = self.taken.get(&spec)
+        {
+            return Ok(*id);
+        }
+        if self.specs.len() == MAX_EXITS {
+            return Err(Abort {
+                stop: Stop::TooManyExits,
+                why: "more exits than php's ZEND_JIT_TRACE_MAX_EXITS",
+            });
+        }
+        let id = ExitId(u16::try_from(self.specs.len()).map_err(|_| mismatch("too many exits"))?);
+        if spec.opline.is_some() {
+            self.taken.insert(spec.clone(), id);
+        }
+        self.specs.push(spec);
+        Ok(id)
     }
 }
 
