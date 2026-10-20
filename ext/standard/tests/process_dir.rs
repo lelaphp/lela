@@ -3,7 +3,8 @@
 //! adds no `chdir` to the spawn then (`Z/ext/standard/proc_open.c:1394`),
 //! and `exec(2)` needs no access to the directory it is called in
 //! (#2917). Where the request stands elsewhere, the child is still
-//! changed into the request's directory.
+//! changed into the request's directory. A request given no directory,
+//! its host's `getcwd(3)` having failed, stands in the process's.
 //!
 //! This binary holds one test: it moves the process's working directory,
 //! which every test of a binary shares, so no other test may stand
@@ -78,6 +79,10 @@ fn a_child_inherits_the_process_s_directory_it_cannot_enter_and_is_moved_into_an
     let entered = std::env::set_current_dir(&locked).is_ok()
         && fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).is_ok();
     let in_locked = served(&engine, &locked, EVERY_SPAWN);
+    // A request its host could give no directory, `getcwd(3)` having
+    // failed under the CLI in a directory like this one, stands in the
+    // process's.
+    let in_none = served(&engine, Path::new(""), EVERY_SPAWN);
     let in_other = served(&engine, &other, WHERE);
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).ok();
     if let Ok(before) = before {
@@ -86,14 +91,9 @@ fn a_child_inherits_the_process_s_directory_it_cannot_enter_and_is_moved_into_an
     fs::remove_dir_all(&base).ok();
 
     assert!(entered, "the process entered the directory and locked it");
-    assert_eq!(
-        in_locked,
-        (
-            "proc_open array\nproc_open string\nexec\nshell_exec\nsystem\npassthru\npopen\n"
-                .to_owned(),
-            None
-        )
-    );
+    let every = "proc_open array\nproc_open string\nexec\nshell_exec\nsystem\npassthru\npopen\n";
+    assert_eq!(in_locked, (every.to_owned(), None));
+    assert_eq!(in_none, (every.to_owned(), None));
     let other = other.display();
     assert_eq!(in_other, (format!("{other}\n{other}\n"), None));
 }
