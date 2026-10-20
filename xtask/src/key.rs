@@ -143,13 +143,7 @@ impl Snapshot {
                 .split_once(' ')
                 .with_context(|| format!("git ls-files -t wrote {entry:?}"))?;
             let file = root.join(path);
-            let id = if file.is_file() {
-                let bytes =
-                    fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
-                Some(git::blob_id(&bytes))
-            } else {
-                None
-            };
+            let id = file.is_file().then(|| blob(&file)).transpose()?;
             if tag != "?" {
                 tracked.insert(
                     path.to_owned(),
@@ -203,11 +197,7 @@ impl Snapshot {
                 Some(id) if !differs.contains(path) => Some(Ok(id.clone())),
                 _ => {
                     let file = root.join(path);
-                    file.is_file().then(|| {
-                        fs::read(&file)
-                            .map(|bytes| git::blob_id(&bytes))
-                            .with_context(|| format!("reading {}", file.display()))
-                    })
+                    file.is_file().then(|| blob(&file))
                 }
             }
         };
@@ -555,6 +545,12 @@ pub(crate) fn fixture(name: &str) -> crate::scratch::Tree {
     let fixture = crate::built_root().join("xtask/fixtures/closure");
     crate::scratch::repository(&fixture, &tree, &["."]).unwrap();
     tree
+}
+
+/// The blob id git gives the file's bytes.
+fn blob(file: &Path) -> Result<String> {
+    let bytes = fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    Ok(git::blob_id(&bytes))
 }
 
 #[cfg(test)]

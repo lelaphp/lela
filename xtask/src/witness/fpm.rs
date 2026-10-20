@@ -15,12 +15,12 @@ use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::{SocketAddr, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
-use crate::oracle::{Ended, Observation, Oracle, normalise_in};
+use crate::oracle::{Observation, Oracle};
 use crate::scratch::Tree;
 
 /// `FCGI_BEGIN_REQUEST`, `FCGI_END_REQUEST`, `FCGI_PARAMS`, `FCGI_STDIN`,
@@ -186,8 +186,7 @@ pub(crate) fn served_as_fpm(
     env: &[(String, OsString)],
 ) -> Result<Observation> {
     let recipe = &oracle.pin().recipe;
-    let own = oracle.tree("witness-fpm")?;
-    let program = own.write(&recipe.script_name, format!("{}{snippet}", recipe.preamble))?;
+    let (own, program) = super::process::program(oracle, "witness-fpm", snippet)?;
     let program = crate::oracle::run_by(&program)?;
     let described = super::process::described(&own, &program, request, &[])?;
     // A later entry of a name stands over an earlier, as for php-cgi; the
@@ -205,15 +204,9 @@ pub(crate) fn served_as_fpm(
     let stream = pool.connect()?;
     stream.set_read_timeout(Some(timeout))?;
     let uri = format!("/{}", recipe.script_name);
-    let (stdout, stderr) = exchange(stream, &uri, &given, described.stdin.as_deref())?;
+    let streams = exchange(stream, &uri, &given, described.stdin.as_deref())?;
     pool.settle(timeout)?;
-    let rules = &recipe.normalise;
-    Ok(Observation {
-        stdout: normalise_in(rules, own.path(), stdout),
-        stderr: normalise_in(rules, own.path(), stderr),
-        exit: Ended::Status(0),
-        wall: started.elapsed(),
-    })
+    Ok(super::process::answered(oracle, &own, streams, started))
 }
 
 impl Pool {
@@ -253,15 +246,7 @@ impl Pool {
             .with_context(|| format!("opening {}", log.display()))?;
         let mut master = Command::new(host);
         master.args(["-n", "-F", "-O", "-y"]).arg(&conf);
-        for ini in recipe.ini.iter().chain(ini) {
-            master.arg("-d").arg(ini);
-        }
-        recipe
-            .environ(&mut master)?
-            .envs(env.iter().map(|(name, value)| (name, value)))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(logged);
+        super::process::under_recipe(recipe, &mut master, ini, env)?.stderr(logged);
         Ok(Pool {
             master: master
                 .spawn()

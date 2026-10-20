@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use super::INSTRUMENT;
+use super::hand_off::ask;
 use crate::git::git;
 use crate::key::Snapshot;
 use crate::manifest::{self, Manifest};
@@ -98,21 +99,13 @@ fn bench(root: &Path, runs: usize) -> Result<Bench> {
         let which = i % shapes.len();
         let stdin = shapes[which].1.to_string();
         let start = Instant::now();
-        let mut child = Command::new(&exe)
-            .arg("--root")
-            .arg(&scratch)
-            .arg("permit")
+        let mut permit = Command::new(&exe);
+        permit.arg("--root").arg(&scratch).arg("permit");
+        permit
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("spawning xtask permit")?;
-        if let Some(mut pipe) = child.stdin.take() {
-            std::io::Write::write_all(&mut pipe, stdin.as_bytes()).context("feeding the call")?;
-        }
-        let out = child
-            .wait_with_output()
-            .context("waiting for xtask permit")?;
+            .stderr(Stdio::piped());
+        let out = ask(permit, &stdin).context("running xtask permit")?;
         times[which].push(start.elapsed().as_secs_f64() * 1000.0);
         if !out.status.success() {
             bail!(

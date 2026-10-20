@@ -343,7 +343,7 @@ impl<'a> Builder<'a> {
                         return Err(mismatch("an opline past its op array"));
                     };
                     let after = meta.code.oplines.get(opline.0 as usize + 1);
-                    for var in reads(meta.code, op, after) {
+                    for var in reads(op, after) {
                         if let (Some(false), Some(use_)) = (
                             defined.get(var as usize).copied(),
                             used.get_mut(var as usize),
@@ -351,7 +351,7 @@ impl<'a> Builder<'a> {
                             *use_ = true;
                         }
                     }
-                    for var in written(meta.code, op, after) {
+                    for var in written(op, after) {
                         if let Some(def) = defined.get_mut(var as usize) {
                             *def = true;
                         }
@@ -540,7 +540,7 @@ impl<'a> Builder<'a> {
         let code = self.meta(frame).code;
         let [t1, t2, td] = seen.types;
         let writes = writes(op, data_line);
-        let slot = slot_of(frame, code, op.out_type, op.out);
+        let slot = slot_of(frame, op.out_type, op.out);
         let pushes = form == Form::Inline && is_call(op.opcode);
         let out = match slot {
             Some(slot) if !pushes && !fused => {
@@ -548,7 +548,7 @@ impl<'a> Builder<'a> {
             }
             _ => None,
         };
-        let op1 = match slot_of(frame, code, op.op1_type, op.op1) {
+        let op1 = match slot_of(frame, op.op1_type, op.op1) {
             Some(slot) if writes.op1 => {
                 let types = op1_types(op, t1, t2, sample1, code);
                 // A write through a reference leaves the slot one.
@@ -561,12 +561,12 @@ impl<'a> Builder<'a> {
             }
             _ => None,
         };
-        let op2 = match slot_of(frame, code, op.op2_type, op.op2) {
+        let op2 = match slot_of(frame, op.op2_type, op.op2) {
             Some(slot) if writes.op2 => Some(self.define(slot, Types::UNKNOWN, idx, form)),
             _ => None,
         };
         if let (true, Some(data)) = (writes.data, data_line)
-            && let Some(slot) = slot_of(frame, code, data.op1_type, data.op1)
+            && let Some(slot) = slot_of(frame, data.op1_type, data.op1)
         {
             self.define(slot, Types::UNKNOWN, idx, form);
         }
@@ -792,7 +792,7 @@ impl<'a> Builder<'a> {
         let out = call_at
             .and_then(|at| code.oplines.get(at.0 as usize))
             .filter(|call| is_call(call.opcode))
-            .and_then(|call| slot_of(caller, code, call.out_type, call.out))
+            .and_then(|call| slot_of(caller, call.out_type, call.out))
             .map(|slot| {
                 let returned = self.returned;
                 self.define(slot, returned, idx, Form::Step)
@@ -977,7 +977,7 @@ impl<'a> Builder<'a> {
             OperandKind::Unused => Operand::Unused,
             OperandKind::Const => Operand::Constant(constant(code, field)),
             _ => {
-                let slot = slot_of(frame, code, kind, field)
+                let slot = slot_of(frame, kind, field)
                     .ok_or_else(|| mismatch("an operand past its frame"))?;
                 if slot.var as usize >= self.slots[usize::from(frame.0)].len() {
                     return Err(mismatch("an operand past its frame"));

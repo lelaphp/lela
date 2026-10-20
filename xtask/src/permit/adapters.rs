@@ -3,7 +3,7 @@
 //! the command both are over: the call on stdin, the hook's JSON on stdout,
 //! the findings as readings, and the refusal when this build cannot judge.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -99,17 +99,7 @@ pub(super) fn record(
 /// caller for that reason: a build that cannot read it must record the
 /// refusal before it exits.
 pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
-    let text = json.map_or_else(
-        || {
-            let mut bytes = Vec::new();
-            std::io::stdin()
-                .read_to_end(&mut bytes)
-                .context("reading the tool call from stdin")
-                .map(|_| String::from_utf8_lossy(&bytes).into_owned())
-        },
-        |json| Ok(json.to_owned()),
-    );
-    let call = text.and_then(|text| Call::parse(&text).map(|call| (text, call)));
+    let call = Call::text(json).and_then(|text| Call::parse(&text).map(|call| (text, call)));
     let (text, mut call) = match call {
         Ok(read) => read,
         Err(err) => {

@@ -211,6 +211,11 @@ const PROC: &str = "/proc/sysvipc";
 pub(crate) struct Standing(pub Vec<Object>);
 
 impl Standing {
+    /// The objects standing that `keep` holds for, in order.
+    fn having(&self, keep: impl Fn(&Object) -> bool) -> Vec<&Object> {
+        self.0.iter().filter(|o| keep(o)).collect()
+    }
+
     /// The machine's objects now, read from `/proc/sysvipc` where the
     /// machine has it and through `ipcs` where it has not, and, for each
     /// semaphore set's processes, through `perl`.
@@ -609,11 +614,7 @@ pub(crate) fn claimed<'a>(
     (runner, clock): (&Runner, &Clock),
     alive: impl Fn(u32) -> bool,
 ) -> Vec<&'a Object> {
-    standing
-        .0
-        .iter()
-        .filter(|o| forsaken(o, runner, &alive) && made_within(o, windows, clock))
-        .collect()
+    standing.having(|o| forsaken(o, runner, &alive) && made_within(o, windows, clock))
 }
 
 /// The objects of `standing` the programs a cut-off run's journals name
@@ -626,11 +627,7 @@ pub(crate) fn journaled<'a>(
     (windows, clock): (&[(i64, i64)], &Clock),
     alive: impl Fn(u32) -> bool,
 ) -> Vec<&'a Object> {
-    standing
-        .0
-        .iter()
-        .filter(|o| spawned_left(o, spawned, &alive) && made_within(o, windows, clock))
-        .collect()
+    standing.having(|o| spawned_left(o, spawned, &alive) && made_within(o, windows, clock))
 }
 
 /// The segments of `standing` forsaken by `runner` that name a process:
@@ -642,10 +639,7 @@ pub(crate) fn abandoned<'a>(
     alive: impl Fn(u32) -> bool,
 ) -> Vec<&'a Object> {
     standing
-        .0
-        .iter()
-        .filter(|o| o.kind == Kind::Memory && !o.named.is_empty() && forsaken(o, runner, &alive))
-        .collect()
+        .having(|o| o.kind == Kind::Memory && !o.named.is_empty() && forsaken(o, runner, &alive))
 }
 
 /// What one sweep did: the objects it removed, each kind's ids in the
@@ -957,12 +951,7 @@ impl Claims {
                     continue;
                 };
                 drop(group);
-                for _ in 0..100 {
-                    if !alive(pid) {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
+                wait_gone(pid);
                 if let Some(journal) = journal.as_mut() {
                     writeln!(journal, "{ENDED} {number}").ok();
                 }
@@ -1387,6 +1376,16 @@ impl fmt::Display for Namespace {
             "each program runs in a private IPC namespace (unshare {})",
             flags.join(" ")
         )
+    }
+}
+
+/// Wait, as long as a second, for the process `pid` to be gone.
+pub(crate) fn wait_gone(pid: u32) {
+    for _ in 0..100 {
+        if !alive(pid) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 

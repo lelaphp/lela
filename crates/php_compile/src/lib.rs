@@ -2298,8 +2298,8 @@ mod tests {
         assert_eq!(unit.main.oplines[3].op2_type, OperandKind::Unused);
         assert_eq!(unit.main.oplines[3].out, 1, "the increment's temporary");
         assert_eq!(
-            unit.main.oplines[4].out, 2,
-            "the comparison's, which the JMPNZ tests"
+            unit.main.oplines[4].out, 3,
+            "the comparison's slot, which the JMPNZ tests"
         );
         assert_eq!(
             &*unit.main.safepoints,
@@ -2738,12 +2738,12 @@ mod tests {
             [
                 (Opcode::Assign, Cv, 0, Const, 0, 0),
                 (Opcode::Echo, Cv, 0, Unused, 0, 0),
-                (Opcode::Mul, Cv, 0, Const, 1, 1),
-                (Opcode::Echo, Tmp, 1, Unused, 0, 0),
+                (Opcode::Mul, Cv, 0, Const, 1, 5),
+                (Opcode::Echo, Tmp, 5, Unused, 0, 0),
                 (Opcode::Echo, Cv, 1, Unused, 0, 0),
-                (Opcode::Add, Cv, 0, Const, 2, 2),
-                (Opcode::Assign, Cv, 3, Tmp, 2, 3),
-                (Opcode::Assign, Cv, 2, Tmp, 3, 4),
+                (Opcode::Add, Cv, 0, Const, 2, 6),
+                (Opcode::Assign, Cv, 3, Tmp, 6, 7),
+                (Opcode::Assign, Cv, 2, Tmp, 7, 4),
                 (Opcode::Return, Const, 3, Unused, 0, 1),
             ]
         );
@@ -2809,11 +2809,15 @@ mod tests {
             .map(|op| (op.opcode, op.out_type, op.out))
             .collect();
         assert_eq!(marks[0], (Opcode::Assign, Unused, 0), "numbered, unread");
-        assert_eq!(marks[1], (Opcode::Add, Tmp, 1));
+        assert_eq!(
+            marks[1],
+            (Opcode::Add, Tmp, 2),
+            "the slot, as php prints it"
+        );
         assert_eq!(marks[2], (Opcode::Free, Unused, 0));
         assert_eq!(unit.main.oplines[2].op1_type, Tmp);
-        assert_eq!(unit.main.oplines[2].op1, 1, "the ADD's temporary");
-        assert_eq!(marks[6], (Opcode::DoIcall, Var, 2));
+        assert_eq!(unit.main.oplines[2].op1, 2, "the ADD's temporary");
+        assert_eq!(marks[6], (Opcode::DoIcall, Var, 3));
         assert_eq!(marks[11], (Opcode::DoIcall, Unused, 4), "numbered, unread");
         assert_eq!(marks[12], (Opcode::PreInc, Unused, 5), "numbered, unread");
         assert_eq!(

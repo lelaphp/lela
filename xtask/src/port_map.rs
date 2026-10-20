@@ -560,14 +560,14 @@ pub(crate) fn read(root: &Path, tree: Option<&Path>) -> Result<(Source, Vec<Coun
         return Ok((Source::Seed, Vec::new()));
     };
     let tree = tree.to_path_buf();
+    let refused = |tree, why| -> Result<(Source, Vec<Counted>)> {
+        Ok((Source::Refused { tree, why }, Vec::new()))
+    };
     if !tree.join("crates").is_dir() {
-        return Ok((
-            Source::Refused {
-                tree,
-                why: "it holds no crates/, so it is no Mahout tree".to_owned(),
-            },
-            Vec::new(),
-        ));
+        return refused(
+            tree,
+            "it holds no crates/, so it is no Mahout tree".to_owned(),
+        );
     }
     let recipe = root.join(CENSUS);
     let run = Command::new(&recipe)
@@ -582,18 +582,11 @@ pub(crate) fn read(root: &Path, tree: Option<&Path>) -> Result<(Source, Vec<Coun
             .rfind(|l| !l.trim().is_empty())
             .unwrap_or("without a word")
             .trim();
-        let why = format!("{CENSUS} refused it: {said}");
-        return Ok((Source::Refused { tree, why }, Vec::new()));
+        return refused(tree, format!("{CENSUS} refused it: {said}"));
     }
     let rows = census(&String::from_utf8_lossy(&run.stdout));
     if rows.is_empty() {
-        return Ok((
-            Source::Refused {
-                tree,
-                why: format!("{CENSUS} read it and printed no table row"),
-            },
-            Vec::new(),
-        ));
+        return refused(tree, format!("{CENSUS} read it and printed no table row"));
     }
     Ok((Source::Tree(tree), rows))
 }
@@ -801,32 +794,30 @@ pub(crate) fn reading(
     );
     if !unmatched.is_empty() {
         reading.status = reading::Status::Fail;
-        reading.message = format!(
-            "{}. {} row{} name an api item {lock} does not carry: {}",
+        write!(
             reading.message,
+            ". {} row{} name an api item {lock} does not carry: {}",
             unmatched.len(),
             plural(unmatched.len()),
             unmatched.join(", ")
-        );
+        )
+        .ok();
         return Ok(reading);
     }
     if join.stale > 0 {
-        reading.message = format!(
-            "{}; {} row{} the census no longer finds",
-            reading.message,
-            join.stale,
-            plural(join.stale)
-        );
+        let (n, s) = (join.stale, plural(join.stale));
+        write!(reading.message, "; {n} row{s} the census no longer finds").ok();
     }
     if !join.uncovered.is_empty() {
         reading.status = reading::Status::Fail;
-        reading.message = format!(
-            "{}. {} census item{} have no row in {SEED}: {}",
+        write!(
             reading.message,
+            ". {} census item{} have no row in {SEED}: {}",
             join.uncovered.len(),
             plural(join.uncovered.len()),
             join.uncovered.join(", ")
-        );
+        )
+        .ok();
         return Ok(reading);
     }
     reading.status = reading::Status::Pass;

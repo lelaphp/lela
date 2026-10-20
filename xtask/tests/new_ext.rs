@@ -220,9 +220,10 @@ fn the_bundle_gains_the_feature_and_the_enabled_line() {
     let manifest = Manifest::load(&root).unwrap();
     let laid = new_ext::run(&root, &manifest, "demo").unwrap();
 
-    // The optional dependency, the feature in default, and the `enabled()`
-    // line behind the feature (#14; ADR-0004); the tier's alias as it was,
-    // and never in `enabled()`.
+    // The optional dependency, the feature in default and in host, which
+    // linked is built of and so names unchanged (#3081), and the
+    // `enabled()` line behind the feature (#14; ADR-0004); the tier's alias
+    // as it was, and never in `enabled()`.
     let bundle: toml::Table = toml::from_str(&read(&root, "crates/php_bundle/Cargo.toml")).unwrap();
     assert_eq!(
         bundle["features"]["demo"]
@@ -231,7 +232,7 @@ fn the_bundle_gains_the_feature_and_the_enabled_line() {
         Some("dep:php_ext_demo"),
         "{bundle:?}"
     );
-    for list in ["default", "linked"] {
+    for list in ["default", "host"] {
         assert!(
             bundle["features"][list]
                 .as_array()
@@ -241,6 +242,11 @@ fn the_bundle_gains_the_feature_and_the_enabled_line() {
             "{list}: {bundle:?}"
         );
     }
+    assert_eq!(
+        bundle["features"]["linked"].as_array().map(Vec::len),
+        Some(2),
+        "{bundle:?}"
+    );
     assert_eq!(bundle["features"]["jit"].as_array().map(Vec::len), Some(0));
     let dep = bundle["dependencies"]["php_ext_demo"].as_table().unwrap();
     assert_eq!(dep["path"].as_str(), Some("../../ext/demo"));
@@ -276,7 +282,7 @@ fn the_bundle_gains_the_feature_and_the_enabled_line() {
             .any(|n| n.starts_with("crates/php_bundle/Cargo.toml:")
                 && n.contains("demo = [\"dep:php_ext_demo\"]")
                 && n.contains("in default")
-                && n.contains("in linked")
+                && n.contains("in host")
                 && n.contains("php_ext_demo as an optional dependency at ext/demo")),
         "{:#?}",
         laid.notes

@@ -15,7 +15,6 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use clap::ValueEnum;
 use serde_json::{Map, Value, json};
 
 mod conditions;
@@ -132,9 +131,7 @@ fn refuse_under_tracked(section: Section, against: Against<'_>) -> Result<()> {
     if alone && matches!(against, Against::Tree) {
         bail!(
             "the {} section is this checkout's, and --tracked renders the tree alone",
-            section
-                .to_possible_value()
-                .map_or_else(String::new, |v| v.get_name().to_owned())
+            every::name(section)
         );
     }
     Ok(())
@@ -162,7 +159,7 @@ pub fn render(
     let (rows, columns): (Vec<Row>, Columns) = match section {
         Section::Rules => (
             rules(manifest, &readings),
-            if uncut { RULES_UNCUT } else { RULES },
+            if uncut { RULES } else { &RULES[..RULE_TEXT] },
         ),
         Section::Locks => (locks(manifest, root, &readings)?, LOCKS),
         Section::Budget => (
@@ -171,11 +168,7 @@ pub fn render(
         ),
         Section::Divergence => return divergence(manifest, registry, format, uncut),
         Section::Phpt => {
-            let rows = standing(against.checkout()?, root)?
-                .into_iter()
-                .filter(|row| !outlived(manifest, row))
-                .collect();
-            let rows = fold_uncreated(rows, "scope")?;
+            let rows = fold_uncreated(standing(manifest, against.checkout()?, root)?, "scope")?;
             match format {
                 Table::Md => (compared(outermost(rows)), PHPT),
                 Table::Json => (rows, INSTRUMENT),
@@ -392,8 +385,9 @@ pub fn session(
         facts.push('\n');
     }
     // A log the week cannot be read from costs the line, never the block.
-    let week = tickets::line(store, root).unwrap_or_else(|err| format!("unread: {err:#}"));
-    write!(facts, "\n## tickets\n\n{week}\n").ok();
+    let week = tickets::render(store, root, Table::Md);
+    let week = week.unwrap_or_else(|err| format!("unread: {err:#}\n"));
+    write!(facts, "\n## tickets\n\n{week}").ok();
     if let Some(id) = session_id {
         let log = store.history(permit::INSTRUMENT)?;
         let rows: Vec<Row> = permit_rows(
@@ -509,10 +503,10 @@ impl Row {
 
     fn json(&self) -> Result<Value> {
         let mut object = self.facts.clone();
-        let reading = match &self.reading {
-            Some(r) => r.to_json()?,
-            None => Value::Null,
-        };
+        let reading = self
+            .reading
+            .as_ref()
+            .map_or(Ok(Value::Null), Reading::to_json)?;
         object.insert("reading".to_owned(), reading);
         Ok(Value::Object(object))
     }
@@ -533,10 +527,8 @@ impl Row {
     }
 
     fn status(&self) -> String {
-        match &self.reading {
-            Some(r) => r.status.as_str().to_owned(),
-            None => NO_READING.to_owned(),
-        }
+        let reading = self.reading.as_ref();
+        reading.map_or(NO_READING, |r| r.status.as_str()).to_owned()
     }
 
     /// What `cell` makes of the reading, empty where there is none.
@@ -548,12 +540,6 @@ impl Row {
     /// characters, the last an ellipsis where it was cut.
     fn message(&self) -> String {
         self.of(|x| clipped(&x.message))
-    }
-
-    /// Every number of the reading but those at zero, as `key=value`,
-    /// space-separated.
-    fn numbers(&self) -> String {
-        self.numbers_but(&[])
     }
 
     /// Every number of the reading but those at zero and the keys named,
@@ -597,11 +583,12 @@ impl Row {
     }
 
     fn number(&self, key: &str) -> String {
-        self.reading
-            .as_ref()
-            .and_then(|r| r.numbers.get(key))
-            .map(ToString::to_string)
-            .unwrap_or_default()
+        self.of(|x| {
+            x.numbers
+                .get(key)
+                .map(ToString::to_string)
+                .unwrap_or_default()
+        })
     }
 }
 
@@ -676,30 +663,15 @@ fn listed(
 /// `[budget] scripts`, whose ceiling cell is empty while a person has not
 /// written the row.
 fn budget(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
-    let mut rows: Vec<Row> = manifest
-        .crates
-        .iter()
-        .map(|krate| {
-            Row::new(
-                &[
-                    ("crate", json!(krate.name)),
-                    ("ceiling", json!(krate.budget)),
-                ],
-                latest_of(readings, "budget", &krate.name),
-            )
+    let scripts = manifest.budget.scripts.as_ref().map(|s| s.ceiling);
+    (manifest.crates.iter())
+        .map(|krate| (krate.name.as_str(), Some(krate.budget)))
+        .chain([(SCRIPTS, scripts)])
+        .map(|(name, ceiling)| {
+            let facts = [("crate", json!(name)), ("ceiling", json!(ceiling))];
+            Row::new(&facts, latest_of(readings, "budget", name))
         })
-        .collect();
-    rows.push(Row::new(
-        &[
-            ("crate", json!(SCRIPTS)),
-            (
-                "ceiling",
-                json!(manifest.budget.scripts.as_ref().map(|s| s.ceiling)),
-            ),
-        ],
-        latest_of(readings, "budget", SCRIPTS),
-    ));
-    rows
+        .collect()
 }
 
 /// The rows whose reading says its crate is not yet created, folded into
@@ -773,25 +745,13 @@ fn divergence(
                     })
                 })
                 .collect();
-            let cells = |of: &dyn Fn(Status) -> u64| -> Value {
-                Value::Object(
-                    Status::ALL
-                        .into_iter()
-                        .map(|s| (s.as_str().to_owned(), json!(of(s))))
-                        .collect(),
-                )
-            };
-            let mut lines = Map::new();
-            for kind in counts.debt_kinds() {
-                lines.insert(kind.as_str().to_owned(), cells(&|s| counts.debt(kind, s)));
-            }
-            lines.insert("total".to_owned(), cells(&|s| counts.total(s)));
-            for cause in counts.apart() {
-                lines.insert(
-                    cause.as_str().to_owned(),
-                    cells(&|s| counts.of(cause, None, s)),
-                );
-            }
+            let lines: Map<String, Value> = (count_lines(&counts).into_iter())
+                .map(|(name, of)| {
+                    let by = Status::ALL.into_iter().zip(of);
+                    let cells = by.map(|(s, n)| (s.as_str().to_owned(), json!(n)));
+                    (name.to_owned(), Value::Object(cells.collect()))
+                })
+                .collect();
             Ok(serde_json::to_string_pretty(&json!({
                 "rows": rows,
                 "counts": lines,
@@ -843,26 +803,29 @@ fn divergence(
 /// total of those, which the day-30 target reads, then a line per other
 /// cause a row is of (#2220, #2462).
 fn counts_table(counts: &Counts, out: &mut String) {
-    let line = |name: &str, of: &dyn Fn(Status) -> u64| {
-        let rows: u64 = Status::ALL.into_iter().map(of).sum();
-        let [open, accepted, fixed] = [Status::Open, Status::Accepted, Status::Fixed].map(of);
-        let counted = [open, accepted, fixed, rows].map(|n| n.to_string());
-        [name.to_owned()]
-            .into_iter()
-            .chain(counted)
-            .collect::<Vec<_>>()
-    };
-    let mut lines: Vec<_> = (counts.debt_kinds().into_iter())
-        .map(|kind| line(kind.as_str(), &|s| counts.debt(kind, s)))
-        .collect();
-    lines.push(line("total", &|s| counts.total(s)));
-    for cause in counts.apart() {
-        lines.push(line(cause.as_str(), &|s| counts.of(cause, None, s)));
-    }
+    let lines = (count_lines(counts).into_iter()).map(|(name, [open, accepted, fixed])| {
+        let counted = [open, accepted, fixed, open + accepted + fixed];
+        std::iter::once(name.to_owned()).chain(counted.map(|n| n.to_string()))
+    });
     out.push_str(&grid(
         &["kind or cause", "open", "accepted", "fixed", "rows"],
         lines,
     ));
+}
+
+/// The divergence counts, a line each: per kind a debt row is of, the
+/// total of those, then per other cause a row is of, each line's counts
+/// in [`Status::ALL`]'s order.
+fn count_lines(counts: &Counts) -> Vec<(&'static str, [u64; 3])> {
+    let of = |n: &dyn Fn(Status) -> u64| Status::ALL.map(n);
+    let mut lines: Vec<_> = (counts.debt_kinds().into_iter())
+        .map(|kind| (kind.as_str(), of(&|s| counts.debt(kind, s))))
+        .collect();
+    lines.push(("total", of(&|s| counts.total(s))));
+    for cause in counts.apart() {
+        lines.push((cause.as_str(), of(&|s| counts.of(cause, None, s))));
+    }
+    lines
 }
 
 /// Every reading of one instrument, one row per scope, the numbers as
@@ -887,13 +850,15 @@ fn instrument(readings: &[Reading], name: &str) -> Vec<Row> {
 /// retired branch's appended after it (#787). This is xtask's rule; the
 /// dashboard keeps one of its own, the latest reading in time on the
 /// chain, read off the store's log itself and not off this section, as its
-/// README says (#845, #1717).
-fn standing(store: &Store, root: &Path) -> Result<Vec<Row>> {
+/// README says (#845, #1717). A reading that [`outlived`] its subset is
+/// left out.
+fn standing(manifest: &Manifest, store: &Store, root: &Path) -> Result<Vec<Row>> {
     let log = store.history("phpt")?;
     let chain = reading::Chain::of_head(root)?;
     let rows = chain.standing(&log.readings, "phpt").into_iter();
     Ok(rows
         .map(|r| Row::new(&[("scope", json!(r.scope))], Some(r.clone())))
+        .filter(|row| !outlived(manifest, row))
         .collect())
 }
 
@@ -1043,7 +1008,17 @@ fn permits(
         }))?,
         Table::Md if rules.is_empty() && instruments.is_empty() => format!("{NO_READING}\n"),
         Table::Md => {
-            let mut out = table(if uncut { PERMITS_UNCUT } else { PERMITS }, &rules, &[]);
+            let whole: Column = Cell("sessions", |r| r.sessions(None));
+            let columns: Vec<Column> = (PERMITS.iter())
+                .map(|&c| {
+                    if uncut && c.head() == "sessions" {
+                        whole
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            let mut out = table(&columns, &rules, &[]);
             writeln!(out).ok();
             let head = [
                 "instrument",
@@ -1576,77 +1551,95 @@ fn latest_of(readings: &[Reading], instrument: &str, scope: &str) -> Option<Read
     latest(readings, |r| r.instrument == instrument && r.scope == scope)
 }
 
-/// A Markdown table's columns: the header, and the cells of one row.
-type Columns = (&'static [&'static str], fn(&Row) -> Vec<String>);
-
-/// The rules as the map carries them: rule, ADR, predicate and reading.
-/// The text a rule's failure prints is [`RULES_UNCUT`]'s and JSON's, so the
-/// map holds its room under the engine's cap with every row at "no
-/// reading" (harness-design.md §4.6, #1772).
-const RULES: Columns = (&["rule", "adr", "predicate", "reading"], |r| {
-    rule_cells(r, false)
-});
-
-const RULES_UNCUT: Columns = (&["rule", "adr", "predicate", "reading", "text"], |r| {
-    rule_cells(r, true)
-});
-
-/// One rule's cells, its text last when `text` asks for it.
-fn rule_cells(r: &Row, text: bool) -> Vec<String> {
-    let mut cells = vec![r.fact("id"), r.fact("adr"), r.fact("predicate"), r.status()];
-    if text {
-        cells.push(r.fact("text"));
-    }
-    cells
+/// One column of a Markdown table: a fact or a number of the row shown
+/// under its own name, or a head and the cell it shows of a row.
+#[derive(Clone, Copy)]
+enum Column {
+    Fact(&'static str),
+    Number(&'static str),
+    Cell(&'static str, fn(&Row) -> String),
 }
 
-const LOCKS: Columns = (&["seam", "lock", "items", "ceiling", "reading"], |r| {
-    vec![
-        r.fact("seam"),
-        r.fact("lock"),
-        r.fact("items"),
-        r.fact("ceiling"),
-        r.status(),
-    ]
-});
+impl Column {
+    fn head(self) -> &'static str {
+        match self {
+            Column::Fact(head) | Column::Number(head) | Column::Cell(head, _) => head,
+        }
+    }
 
-const BUDGET: Columns = (&["crate", "lines", "ceiling", "reading", "message"], |r| {
-    vec![
-        r.fact("crate"),
-        r.number("lines"),
-        r.fact("ceiling"),
-        r.status(),
-        r.message(),
-    ]
-});
+    fn cell(self, row: &Row) -> String {
+        match self {
+            Column::Fact(key) => row.fact(key),
+            Column::Number(key) => row.number(key),
+            Column::Cell(_, cell) => cell(row),
+        }
+    }
+}
 
-const INSTRUMENT: Columns = (&["scope", "reading", "numbers", "message"], |r| {
-    vec![r.fact("scope"), r.status(), r.numbers(), r.message()]
-});
+/// A Markdown table's columns, in order.
+type Columns = &'static [Column];
 
-/// The `phpt` section as Markdown, after [`compared`].
-const PHPT: Columns = (
-    &[
-        "scope", "reading", "numbers", "against", "control", "message",
-    ],
-    |r| {
+use Column::{Cell, Fact, Number};
+
+const READING: Column = Cell("reading", Row::status);
+const NUMBERS: Column = Cell("numbers", |r| r.numbers_but(&[]));
+const MESSAGE: Column = Cell("message", Row::message);
+const COMMIT: Column = Cell("commit", |r| r.of(|x| x.commit.clone()));
+const SESSION: Column = Cell("session", |r| r.of(|x| short(&x.session).to_owned()));
+const AT: Column = Cell("at", |r| r.of(|x| x.at.to_string()));
+
+/// The rules as the map carries them: rule, ADR, predicate and reading.
+/// The text a rule's failure prints is the last column, which `--uncut`
+/// and JSON alone show, so the map holds its room under the engine's cap with
+/// every row at "no reading" (harness-design.md §4.6, #1772).
+/// Where [`RULES`]' text column stands, the columns before it the map's.
+const RULE_TEXT: usize = 4;
+
+const RULES: Columns = &[
+    Cell("rule", |r| r.fact("id")),
+    Fact("adr"),
+    Fact("predicate"),
+    READING,
+    Fact("text"),
+];
+
+const LOCKS: Columns = &[
+    Fact("seam"),
+    Fact("lock"),
+    Fact("items"),
+    Fact("ceiling"),
+    READING,
+];
+
+const BUDGET: Columns = &[
+    Fact("crate"),
+    Number("lines"),
+    Fact("ceiling"),
+    READING,
+    MESSAGE,
+];
+
+const INSTRUMENT: Columns = &[Fact("scope"), READING, NUMBERS, MESSAGE];
+
+/// The `phpt` section as Markdown, after [`compared`]: a passing row's
+/// message is left out, a failing one's less its scope.
+const PHPT: Columns = &[
+    Fact("scope"),
+    READING,
+    NUMBERS,
+    Fact("against"),
+    Fact("control"),
+    Cell("message", |r| {
         let failing = r
             .reading
             .as_ref()
             .filter(|x| x.status != reading::Status::Pass);
-        vec![
-            r.fact("scope"),
-            r.status(),
-            r.numbers(),
-            r.fact("against"),
-            r.fact("control"),
-            failing.map_or_else(String::new, |x| {
-                let own = format!("{}: ", x.scope);
-                clipped(x.message.strip_prefix(&own).unwrap_or(&x.message))
-            }),
-        ]
-    },
-);
+        failing.map_or_else(String::new, |x| {
+            let own = format!("{}: ", x.scope);
+            clipped(x.message.strip_prefix(&own).unwrap_or(&x.message))
+        })
+    }),
+];
 
 /// The first eight characters of a session id, enough to tell sessions
 /// apart in a row.
@@ -1656,21 +1649,14 @@ fn short(id: &str) -> &str {
 
 /// The `ticket` section: one row per ticket the instrument read, with
 /// what closed it, the commit and the session, from the store alone.
-const TICKET: Columns = (
-    &[
-        "ticket", "reading", "numbers", "commit", "session", "message",
-    ],
-    |r| {
-        vec![
-            r.fact("scope"),
-            r.status(),
-            r.numbers(),
-            r.of(|x| x.commit.clone()),
-            r.of(|x| short(&x.session).to_owned()),
-            r.message(),
-        ]
-    },
-);
+const TICKET: Columns = &[
+    Cell("ticket", |r| r.fact("scope")),
+    READING,
+    NUMBERS,
+    COMMIT,
+    SESSION,
+    MESSAGE,
+];
 
 /// The numbers the `track` section shows in columns of their own: what
 /// the ticket's session spent (#210), blank where no usage reading said.
@@ -1680,105 +1666,72 @@ const SPENT: [&str; 3] = ["usd", "tokens", "turn"];
 /// worked, its outcome, what its session spent, the commit its branch is
 /// at and the reason; the run's own row says `run`, carries its counts
 /// and the `usd` total.
-const TRACK: Columns = (
-    &[
-        "ticket", "reading", "usd", "tokens", "turn", "numbers", "commit", "message",
-    ],
-    |r| {
-        vec![
-            r.fact("ticket"),
-            r.status(),
-            r.number("usd"),
-            r.number("tokens"),
-            r.number("turn"),
-            r.numbers_but(&SPENT),
-            r.of(|x| x.commit.clone()),
-            r.message(),
-        ]
-    },
-);
+const TRACK: Columns = &[
+    Fact("ticket"),
+    READING,
+    Number("usd"),
+    Number("tokens"),
+    Number("turn"),
+    Cell("numbers", |r| r.numbers_but(&SPENT)),
+    COMMIT,
+    MESSAGE,
+];
 
 /// The `usage` section: the last reading per scope, the session it was
 /// taken in, the turn it reached, its tokens and its usd, when, and the
 /// window's fill as the message.
-const USAGE: Columns = (
-    &["scope", "session", "turn", "tokens", "usd", "at", "message"],
-    |r| {
-        vec![
-            r.fact("scope"),
-            r.of(|x| short(&x.session).to_owned()),
-            r.number("turn"),
-            r.number("tokens"),
-            r.number("usd"),
-            r.of(|x| x.at.to_string()),
-            r.message(),
-        ]
-    },
-);
+const USAGE: Columns = &[
+    Fact("scope"),
+    SESSION,
+    Number("turn"),
+    Number("tokens"),
+    Number("usd"),
+    AT,
+    MESSAGE,
+];
 
 /// The sessions a rule's `sessions` cell names without `--uncut`, the
 /// newest; the rest are one `+N more`.
 const SESSIONS_SHOWN: usize = 3;
 
-const PERMITS_HEAD: &[&str] = &[
-    "rule",
-    "adr",
-    "reading",
-    "at",
-    "denials",
-    "handed on",
-    "this session",
-    "sessions",
-    "message",
+/// The permits section's rules; `--uncut` shows its `sessions` whole.
+const PERMITS: Columns = &[
+    Fact("rule"),
+    Fact("adr"),
+    READING,
+    AT,
+    Fact("denials"),
+    Cell("handed on", |r| r.fact("handed_on")),
+    FIRED,
+    Cell("sessions", |r| r.sessions(Some(SESSIONS_SHOWN))),
+    MESSAGE,
 ];
-
-/// One rule's cells, its `sessions` cut to the newest `keep`, or whole.
-fn permit_cells(r: &Row, keep: Option<usize>) -> Vec<String> {
-    vec![
-        r.fact("rule"),
-        r.fact("adr"),
-        r.status(),
-        r.of(|x| x.at.to_string()),
-        r.fact("denials"),
-        r.fact("handed_on"),
-        r.fact("this_session"),
-        r.sessions(keep),
-        r.message(),
-    ]
-}
-
-const PERMITS: Columns = (PERMITS_HEAD, |r| permit_cells(r, Some(SESSIONS_SHOWN)));
-
-const PERMITS_UNCUT: Columns = (PERMITS_HEAD, |r| permit_cells(r, None));
 
 /// The rules this session fired, each with its count: the rest of each
 /// row is the local facts' `permits` section already (#1210).
-const THIS_SESSION: Columns = (&["rule", "this session"], |r| {
-    vec![r.fact("rule"), r.fact("this_session")]
-});
+const THIS_SESSION: Columns = &[Fact("rule"), FIRED];
 
-const BUNDLE: Columns = (
-    &["crate", "order", "extensions", "reading", "message"],
-    |r| {
-        vec![
-            r.fact("crate"),
-            r.fact("order"),
-            r.number("extensions"),
-            r.status(),
-            r.message(),
-        ]
-    },
-);
+/// How often a rule fired in this session.
+const FIRED: Column = Cell("this session", |r| r.fact("this_session"));
+
+const BUNDLE: Columns = &[
+    Fact("crate"),
+    Fact("order"),
+    Number("extensions"),
+    READING,
+    MESSAGE,
+];
 
 /// The rows as a Markdown table, less the columns `omit` names.
-fn table((head, line): Columns, rows: &[Row], omit: &[&str]) -> String {
-    let kept = |cells: Vec<String>| {
-        (cells.into_iter().zip(head))
-            .filter(|(_, h)| !omit.contains(h))
-            .map(|(c, _)| c)
-    };
-    let shown: Vec<&str> = head.iter().copied().filter(|h| !omit.contains(h)).collect();
-    grid(&shown, rows.iter().map(|row| kept(line(row))))
+fn table(columns: &[Column], rows: &[Row], omit: &[&str]) -> String {
+    let shown: Vec<Column> = (columns.iter().copied())
+        .filter(|c| !omit.contains(&c.head()))
+        .collect();
+    let head: Vec<&str> = shown.iter().map(|c| c.head()).collect();
+    grid(
+        &head,
+        rows.iter().map(|row| shown.iter().map(|c| c.cell(row))),
+    )
 }
 
 /// A Markdown table: its head, the rule under it, and a line per row of

@@ -74,6 +74,17 @@ pub struct Arguments {
 }
 
 impl Call {
+    /// The text of the call `json` carries, or else the one on stdin.
+    pub(super) fn text(json: Option<&str>) -> Result<String> {
+        if let Some(json) = json {
+            return Ok(json.to_owned());
+        }
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes)
+            .context("reading the tool call from stdin")?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     /// The call from the hook's JSON.
     pub fn parse(text: &str) -> Result<Call> {
         serde_json::from_str(text).context("reading the tool call")

@@ -70,15 +70,23 @@ pub(crate) struct Choice {
     description: String,
 }
 
-/// One question the person answered by choosing an option that carries a
-/// preview.
-#[derive(Debug, Clone)]
-struct Approval {
+/// What the person was asked and answered: the `AskUserQuestion` call,
+/// its question, the options it offered, the one chosen and the notes
+/// written beside it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct Answered {
     ask: String,
     question: String,
     options: Vec<Choice>,
     answer: String,
     notes: Option<String>,
+}
+
+/// One question the person answered by choosing an option that carries a
+/// preview.
+#[derive(Debug, Clone)]
+struct Approval {
+    answered: Answered,
     preview: String,
 }
 
@@ -88,11 +96,8 @@ struct Approval {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct Admission {
     pub(crate) file: String,
-    pub(crate) ask: String,
-    question: String,
-    options: Vec<Choice>,
-    answer: String,
-    notes: Option<String>,
+    #[serde(flatten)]
+    answered: Answered,
     diff: String,
     diff_hash: String,
     before: Option<String>,
@@ -105,7 +110,7 @@ impl Admission {
         format!(
             "{} is changed as the person approved in this session: they answered \"{}\" to \
              AskUserQuestion {} (\"{}\").",
-            self.file, self.answer, self.ask, self.question
+            self.file, self.answered.answer, self.answered.ask, self.answered.question
         )
     }
 }
@@ -165,7 +170,7 @@ impl Approvals {
         let blob = |text: Option<&str>| text.map(|text| git::blob_id(text.as_bytes()));
         self.0
             .iter()
-            .filter(|approval| approval.question.contains(name))
+            .filter(|approval| approval.answered.question.contains(name))
             .find_map(|approval| {
                 let file = FileDiff::all(&approval.preview)
                     .into_iter()
@@ -173,11 +178,7 @@ impl Approvals {
                 let left = file.apply(before).filter(|left| fits(left))?;
                 Some(Admission {
                     file: name.to_owned(),
-                    ask: approval.ask.clone(),
-                    question: approval.question.clone(),
-                    options: approval.options.clone(),
-                    answer: approval.answer.clone(),
-                    notes: approval.notes.clone(),
+                    answered: approval.answered.clone(),
                     diff_hash: git::blob_id(file.text.as_bytes()),
                     diff: file.text,
                     before: blob(before),
@@ -230,20 +231,21 @@ impl Approval {
                         .and_then(|a| a.get(&question))
                         .and_then(|a| a.get("notes")),
                 );
-                Some(Approval {
-                    ask: asked.tool_use_id.clone(),
-                    options: options
-                        .iter()
-                        .map(|o| Choice {
-                            label: text(o.get("label")).unwrap_or_default(),
-                            description: text(o.get("description")).unwrap_or_default(),
-                        })
-                        .collect(),
+                let options = (options.iter())
+                    .map(|o| Choice {
+                        label: text(o.get("label")).unwrap_or_default(),
+                        description: text(o.get("description")).unwrap_or_default(),
+                    })
+                    .collect();
+                let ask = asked.tool_use_id.clone();
+                let answered = Answered {
+                    ask,
                     question,
+                    options,
                     answer,
                     notes,
-                    preview,
-                })
+                };
+                Some(Approval { answered, preview })
             })
             .collect()
     }

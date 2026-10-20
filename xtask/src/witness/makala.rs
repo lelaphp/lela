@@ -35,9 +35,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 
 use super::fpm::{Pool, round, terminate};
-use crate::oracle::{
-    Ended, Mapping, Observation, Oracle, Piece, Recipe, Sent, Variable, normalise_in,
-};
+use super::process;
+use crate::oracle::{Mapping, Observation, Oracle, Piece, Recipe, Sent, Variable};
 use crate::phpt::cgi;
 use crate::scratch::Tree;
 
@@ -161,18 +160,12 @@ pub(crate) fn served(
     request: &str,
     env: &[(String, OsString)],
 ) -> Result<Observation> {
-    let recipe = &oracle.pin().recipe;
-    let own = oracle.tree("witness-makala")?;
-    let program = own.write(&recipe.script_name, format!("{}{snippet}", recipe.preamble))?;
+    let (own, program) = process::program(oracle, "witness-makala", snippet)?;
     let http = Http::of(&own, &program, request)?;
     let started = Instant::now();
-    let answered = by_makala(recipe, host, &program, &http, &[], env)?;
-    Ok(Observation {
-        stdout: normalise_in(&recipe.normalise, own.path(), from_http(&answered.response)),
-        stderr: normalise_in(&recipe.normalise, own.path(), php_logged(&answered.logged)),
-        exit: Ended::Status(0),
-        wall: started.elapsed(),
-    })
+    let by = by_makala(&oracle.pin().recipe, host, &program, &http, &[], env)?;
+    let streams = (from_http(&by.response), php_logged(&by.logged));
+    Ok(process::answered(oracle, &own, streams, started))
 }
 
 /// What one makala answered for one request: the response as it came, the
@@ -259,20 +252,12 @@ impl Server {
     ) -> Result<Server> {
         let mut server = Command::new(host);
         server.arg("-n");
-        for ini in recipe.ini.iter().chain(ini) {
-            server.arg("-d").arg(ini);
-        }
+        process::under_recipe(recipe, &mut server, ini, env)?.stderr(Stdio::piped());
         server.args(["--listen", "127.0.0.1:0"]);
         if let Some(threads) = threads {
             server.arg("--threads").arg(threads.to_string());
         }
         server.arg("--root").arg(root).arg("--error-log").arg(log);
-        recipe
-            .environ(&mut server)?
-            .envs(env.iter().map(|(name, value)| (name, value)))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
         let mut child = server
             .spawn()
             .with_context(|| format!("running {}", host.display()))?;
@@ -358,18 +343,16 @@ pub(crate) fn served_by_mapping(
     snippet: &str,
     request: &str,
 ) -> Result<Observation> {
-    let recipe = &oracle.pin().recipe;
-    let own = oracle.tree("witness-makala-fpm")?;
-    let program = own.write(&recipe.script_name, format!("{}{snippet}", recipe.preamble))?;
+    let (own, program) = process::program(oracle, "witness-makala-fpm", snippet)?;
     let http = Http::of(&own, &program, request)?;
     let started = Instant::now();
     let (stdout, stderr) = by_fpm(oracle, host, &program, &http, &[], Ports::default())?;
-    Ok(Observation {
-        stdout: normalise_in(&recipe.normalise, own.path(), from_cgi(&stdout)),
-        stderr: normalise_in(&recipe.normalise, own.path(), stderr),
-        exit: Ended::Status(0),
-        wall: started.elapsed(),
-    })
+    Ok(process::answered(
+        oracle,
+        &own,
+        (from_cgi(&stdout), stderr),
+        started,
+    ))
 }
 
 /// `http` handed by a pool of its own of the php-fpm at `host` to

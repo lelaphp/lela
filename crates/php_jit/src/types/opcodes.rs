@@ -23,11 +23,12 @@ const BY_REF: u32 = 1 << 0;
 /// `zend_optimizer_classify_function`.
 const BY_NAME: [&[u8]; 4] = [b"extract", b"compact", b"get_defined_vars", b"db2_execute"];
 
-/// The slot an operand of an opline of `frame` names, where it names one.
-pub(super) fn slot_of(frame: Frame, code: &OpArray, kind: OperandKind, field: u32) -> Option<Slot> {
+/// The slot an operand of an opline of `frame` names, where it names
+/// one: the field itself, a temporary's folded past the CVs by the
+/// compiler as `pass_two` folds it.
+pub(super) fn slot_of(frame: Frame, kind: OperandKind, field: u32) -> Option<Slot> {
     let var = match kind {
-        OperandKind::Cv => field,
-        OperandKind::Tmp | OperandKind::Var => code.num_cvs.checked_add(field)?,
+        OperandKind::Cv | OperandKind::Tmp | OperandKind::Var => field,
         OperandKind::Const | OperandKind::Unused => return None,
     };
     Some(Slot { frame, var })
@@ -144,15 +145,15 @@ fn slotted(kind: OperandKind) -> bool {
 }
 
 /// The slots an opline reads: its operands, and its `OP_DATA`'s.
-pub(super) fn reads(code: &OpArray, op: &Opline, after: Option<&Opline>) -> Vec<u32> {
+pub(super) fn reads(op: &Opline, after: Option<&Opline>) -> Vec<u32> {
     let mut vars = Vec::with_capacity(3);
     for (kind, field) in [(op.op1_type, op.op1), (op.op2_type, op.op2)] {
-        if let Some(slot) = slot_of(Frame::ROOT, code, kind, field) {
+        if let Some(slot) = slot_of(Frame::ROOT, kind, field) {
             vars.push(slot.var);
         }
     }
     if let Some(data) = after.filter(|data| data.opcode == Opcode::OpData)
-        && let Some(slot) = slot_of(Frame::ROOT, code, data.op1_type, data.op1)
+        && let Some(slot) = slot_of(Frame::ROOT, data.op1_type, data.op1)
     {
         vars.push(slot.var);
     }
@@ -160,12 +161,12 @@ pub(super) fn reads(code: &OpArray, op: &Opline, after: Option<&Opline>) -> Vec<
 }
 
 /// The slots an opline writes.
-pub(super) fn written(code: &OpArray, op: &Opline, after: Option<&Opline>) -> Vec<u32> {
+pub(super) fn written(op: &Opline, after: Option<&Opline>) -> Vec<u32> {
     let data = after.filter(|data| data.opcode == Opcode::OpData);
     let writes = writes(op, data);
     let mut vars = Vec::with_capacity(3);
     let mut add = |kind: OperandKind, field: u32| {
-        if let Some(slot) = slot_of(Frame::ROOT, code, kind, field) {
+        if let Some(slot) = slot_of(Frame::ROOT, kind, field) {
             vars.push(slot.var);
         }
     };
@@ -469,7 +470,7 @@ pub(super) fn written_after_entry(code: &OpArray, var: u32) -> bool {
         .count();
     code.oplines.iter().enumerate().skip(start).any(|(at, op)| {
         let after = code.oplines.get(at + 1);
-        written(code, op, after).contains(&var)
+        written(op, after).contains(&var)
     })
 }
 

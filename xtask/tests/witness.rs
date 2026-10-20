@@ -1140,15 +1140,17 @@ fn with_no_binary_built_the_linked_engine_carries_each_feature_extension() {
 }
 
 /// What makes the two above true, held where it is written: the bundle's
-/// `linked` feature is every extension feature the bundle declares, so the
-/// linked engine is the extensions the oracle has and not the default set
-/// (harness §7, revision 43), save `pcntl`, which the CLI's own build
-/// carries (revision 61); `php-linked`, the binary the lanes serve a
-/// snippet through, is `sapi/cli` built with that set; and `xtask` links no
-/// bundle of its own (revision 84; #2166). The two lists are one file,
-/// which `new-ext` writes both of, so an extension a branch adds is linked
-/// at its merge (#1252). A feature the bundle gains and `linked` does not
-/// name is this test red, and so is `pcntl` named.
+/// `linked` feature is built of `default`, `one_thread` (`host` with pcntl
+/// and posix) and the extensions no host links, and between them they name
+/// every extension feature the
+/// bundle declares, so the linked engine is the extensions the oracle has
+/// and not the default set (harness §7, revision 43), `pcntl` among them
+/// as the CLI carries it (revision 84); `php-linked`, the binary the lanes
+/// serve a snippet through, is `sapi/cli` built with that set; and `xtask`
+/// links no bundle of its own (revision 84; #2166). `new-ext` writes a new
+/// crate into `default` and `host`, so an extension a branch adds is
+/// linked at its merge (#1252, #3081). A feature the bundle gains that
+/// none of the four names is this test red.
 #[test]
 fn php_linked_is_the_cli_with_every_extension_feature_and_xtask_links_none() {
     let bundle: toml::Value = toml::from_str(
@@ -1167,22 +1169,28 @@ fn php_linked_is_the_cli_with_every_extension_feature_and_xtask_links_none() {
         .map(|(name, _)| name.as_str())
         .collect();
     assert!(declared.contains(&"standard"), "{declared:?}");
-    let linked: Vec<&str> = features["linked"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|f| f.as_str().unwrap())
-        .collect();
-    for feature in declared.iter().filter(|f| **f != "pcntl") {
+    let named = |set: &str| -> Vec<&str> {
+        features[set]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f.as_str().unwrap())
+            .collect()
+    };
+    let linked = named("linked");
+    assert!(
+        linked.contains(&"default") && linked.contains(&"one_thread"),
+        "{linked:?}"
+    );
+    let one_thread = named("one_thread");
+    assert!(one_thread.contains(&"host"), "{one_thread:?}");
+    let reached: Vec<&str> = [named("default"), named("host"), one_thread, linked].concat();
+    for feature in &declared {
         assert!(
-            linked.contains(feature),
-            "the bundle's `linked` does not name {feature}: {linked:?}"
+            reached.contains(feature),
+            "the bundle's `linked` does not reach {feature}: {reached:?}"
         );
     }
-    assert!(
-        declared.contains(&"pcntl") && !linked.contains(&"pcntl"),
-        "the bundle's `linked` names pcntl: {linked:?}"
-    );
     let cli: toml::Value =
         toml::from_str(&fs::read_to_string(workspace().join("sapi/cli/Cargo.toml")).unwrap())
             .unwrap();

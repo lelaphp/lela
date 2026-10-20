@@ -21,13 +21,9 @@ name = "php-cgi"
 path = "src/main.rs"
 
 [dependencies]
-# The CLI's set (sapi/cli/Cargo.toml says why each): php's configure
-# builds an extension of the `cli` class for the CLI, CGI, embed and
-# phpdbg alike (`EXT_CLI_STATIC`, `Z/build/php.m4`) and every other one
-# for every host, so the oracle's `php-cgi -m` lists every module its
-# `php -m` does (#1477). The test `the_bundle_is_the_clis` holds the two
-# lists equal.
-php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli", "dba", "zip", "gmp", "tidy", "soap", "gd", "sodium", "gettext", "readline", "ffi", "intl"] }
+# The bundle's default set and `one_thread`, the set a host serving on
+# one thread links, whose comment and `host`'s say why each (#1477, #3081).
+php_bundle = { path = "../../crates/php_bundle", features = ["one_thread"] }
 php_proto = { path = "../../crates/php_proto" }
 php_sapi = { path = "../../crates/php_sapi" }
 # The face `cgi_module_entry`'s natives are declared with, as an extension
