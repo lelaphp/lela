@@ -22,7 +22,7 @@ pin = "oracle.toml"                        # the only statement of version, dige
 [budget]
 total = 520000                             # every counted line of the workspace plus `bindings`; the crate rows are ceilings each crate is held to, and do not sum to this
 new = 127500                               # design §0, §4.1: lines not on the inheritance manifest (§13)
-docs = 5000                                # design §10; `docs/**` plus the three living documents
+docs = 6500                                # design §10; `docs/**` plus the three living documents
 harness = 650                              # harness §12 item 6: `.claude/**` and `harness-plugins/**` hand-written, generated types excluded
 lock_packages = 190                        # design §4.1: third-party `Cargo.lock` packages (those with a `source`); a workspace crate is held by its [[crate]] row and ceiling (#1335); 164 is stage 1's TLS as #2333 ruled, 190 adds the compiled tier's Cranelift core set and rustix as #2945 ruled
 clean_build_release_s = 90                 # design §10: `cargo build --release` from clean on the dev machine
@@ -69,7 +69,7 @@ name = "php_compile"
 budget = 24000
 [[crate]]
 name = "php_engine"
-budget = 75000
+budget = 80000
 lock = ["api.lock", "sapi.lock", "tier.lock"]
 lock_from = { "api.lock" = "php_ext" }
 [[crate]]
@@ -513,17 +513,17 @@ scope = ["crates/*", "sapi/*"]            # ext/* is ext.no-locks'
 deny_types = ["std::thread::LocalKey"]
 deny_macros = ["std::thread_local"]
 adr = "0014"
-text = "No engine, tier, host or test state is thread-local (design §5.14 Threads, jit-design.md §8): a tier keeps its state in the engine or request state Tier::extension() declares, an extension in its own, and a test reads a request state back through tier::serve_kept. The one per-thread slot is php_heap's lend, which holds a request's heap for one call into C (ADR-0014); its invocation carries #[expect(clippy::disallowed_macros)]."
+text = "No engine, tier, host or test state is thread-local (design §5.14 Threads, jit-design.md §8): a tier keeps its state in the engine or request state Tier::extension() declares, an extension in its own, and a test reads a request state back through tier::serve_kept. The one per-thread slot is php_heap's lend, which holds a request's heap for one call into C (ADR-0014); its static carries #[expect(clippy::disallowed_types)] and php_heap's root #![expect(clippy::disallowed_macros)], where clippy reports the macro."
 
 [[rule]]
 id = "unsafe.homes"
-allow = ["php_heap", "php_process", "ext/*/src/ffi/", "sapi/*/src/ffi/", "timelib_sys", "php_jit::table::code", "php_jit::enter"]
+allow = ["php_heap", "php_process", "ext/*/src/ffi/", "sapi/*/src/ffi/", "timelib_sys", "php_jit::table::code", "php_jit::enter", "xtask::bench::spent::read"]
 adr = "0006"
-text = "unsafe is permitted only in the homes this rule names; see design §4.1. Every other crate is #![forbid(unsafe_code)]; php_jit, and an extension or a host with bindings, are #![deny(unsafe_code)] with the allowance on the named module alone."
+text = "unsafe is permitted only in the homes this rule names; see design §4.1. Every other crate is #![forbid(unsafe_code)]; php_jit, xtask (its bench reader, #3062), and an extension or a host with bindings, are #![deny(unsafe_code)] with the allowance on the named module alone."
 
 [[rule]]
 id = "unsafe.one-op"
-scope = ["crates/php_heap/**", "crates/php_process/**", "ext/*/src/ffi/**", "sapi/*/src/ffi/**", "crates/timelib_sys/src/**", "crates/php_jit/src/table/code.rs", "crates/php_jit/src/enter.rs"]
+scope = ["crates/php_heap/**", "crates/php_process/**", "ext/*/src/ffi/**", "sapi/*/src/ffi/**", "crates/timelib_sys/src/**", "crates/php_jit/src/table/code.rs", "crates/php_jit/src/enter.rs", "xtask/src/bench/spent/read.rs"]
 deny_lints = ["clippy::undocumented_unsafe_blocks", "clippy::multiple_unsafe_ops_per_block"]   # grammar: deny_lints, design §10
 text = "Every unsafe block is one operation with a SAFETY comment."
 
