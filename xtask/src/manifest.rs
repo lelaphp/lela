@@ -612,9 +612,9 @@ pub struct Predicates {
     /// The `deny_lints` lints a test may still trip, each rendered as
     /// clippy's own `allow-*-in-tests` key ([`IN_TESTS`]) into the
     /// `clippy.toml` the scope reaches, so a `#[test]` fn and a
-    /// `#[cfg(test)]` module may `unwrap`, `expect` and `panic!` while
-    /// the deny holds every other line (#3078). A lint clippy has no such
-    /// key for, or one the rule does not deny, is refused.
+    /// `#[cfg(test)]` module may trip them while the deny holds every
+    /// other line (#3078). A lint clippy has no such key for, or one the
+    /// rule does not deny, is refused.
     pub allow_in_tests: Option<Vec<String>>,
     pub check: Option<String>,
     pub avoid_from: Option<AvoidFrom>,
@@ -686,21 +686,15 @@ impl AvoidFrom {
     }
 }
 
-/// Each lint clippy exempts a test from by a key of its own
-/// configuration, with that key: what `allow_in_tests` may list and
-/// [`crate::generated`] renders. `unreachable`, `todo` and
-/// `unimplemented` have none; `allow-print-in-tests` covers two lints and
-/// is left out, so a key never allows more than the lint the row names.
-pub(crate) const IN_TESTS: [(&str, &str); 6] = [
+/// Each lint `lints.no-panic` denies that clippy exempts a test from by a
+/// key of its own configuration, with that key: what `allow_in_tests` may
+/// list and [`crate::generated`] renders (#3078). `unreachable`, `todo`
+/// and `unimplemented` have none. Another of clippy's in-tests keys joins
+/// with the rule that first denies its lint.
+pub(crate) const IN_TESTS: [(&str, &str); 3] = [
     ("clippy::unwrap_used", "allow-unwrap-in-tests"),
     ("clippy::expect_used", "allow-expect-in-tests"),
     ("clippy::panic", "allow-panic-in-tests"),
-    ("clippy::dbg_macro", "allow-dbg-in-tests"),
-    (
-        "clippy::indexing_slicing",
-        "allow-indexing-slicing-in-tests",
-    ),
-    ("clippy::useless_vec", "allow-useless-vec-in-tests"),
 ];
 
 /// The clippy key that exempts tests from `lint`, where it has one.
@@ -1055,7 +1049,7 @@ impl Manifest {
                 in_tests_key(lint).is_none() || !p.deny_lints.iter().flatten().any(|d| d == *lint)
             }) {
                 bail!(
-                    "rule \"{}\" allows {lint} in tests; `allow_in_tests` lists lints the rule denies that clippy has an allow-*-in-tests key for: {}",
+                    "rule \"{}\" allows {lint} in tests; `allow_in_tests` lists lints the rule denies, each one clippy has an allow-*-in-tests key for: {}",
                     rule.id,
                     IN_TESTS.map(|(lint, _)| lint).join(", ")
                 );
