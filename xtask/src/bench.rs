@@ -603,7 +603,7 @@ const CALL: &str = r#"{"tool_name":"Edit","tool_input":{"file_path":"seams.toml"
 /// `makala::bench`). The other perf bars of harness-design.md §3 join them
 /// as the engine reaches what they measure.
 fn declared(root: &Path) -> Result<Vec<Declared>> {
-    const W: &str = "wrapper";
+    const WRAPPER: &str = "wrapper";
     const BARE: &str = "wrapper-bare";
     const DIRECT: &str = "direct";
     let exe = std::env::current_exe().context("locating this binary")?;
@@ -630,9 +630,9 @@ fn declared(root: &Path) -> Result<Vec<Declared>> {
     bars.extend(crate::makala::bench::declared(root)?);
     bars.extend(
         [
-            ("jit-wrapper", [W, DIRECT], Held::Series),
-            ("jit-wrapper-aa", [W, W], Held::Control),
-            ("jit-wrapper-unwind", [W, BARE], Held::Series),
+            ("jit-wrapper", [WRAPPER, DIRECT], Held::Series),
+            ("jit-wrapper-aa", [WRAPPER, WRAPPER], Held::Control),
+            ("jit-wrapper-unwind", [WRAPPER, BARE], Held::Series),
             ("jit-wrapper-frame", [BARE, DIRECT], Held::Series),
             ("jit-wrapper-bare-aa", [BARE, BARE], Held::Control),
         ]
@@ -669,7 +669,8 @@ fn wrapper(root: &Path, id: &str, [a, b]: [&'static str; 2], held: Held) -> Decl
                     args,
                     stdin,
                 };
-                Box::new(PerCall(Spawned { arm, program }, CALLS))
+                let side = Spawned { arm, program };
+                Box::new(PerCall { side, calls: CALLS })
             };
             // An A/A control's second arm is named apart from its first.
             let second = format!("{b}{}", if a == b { "-b" } else { "" });
@@ -678,22 +679,25 @@ fn wrapper(root: &Path, id: &str, [a, b]: [&'static str; 2], held: Held) -> Decl
     }
 }
 
-/// A process arm that makes a known count of calls, each run read in
-/// nanoseconds per call.
-struct PerCall(Spawned, u32);
+/// A process arm that makes a known count of calls, each run, which
+/// [`Spawned`] reads in milliseconds, read in nanoseconds per call.
+struct PerCall {
+    side: Spawned,
+    calls: u32,
+}
 
 impl Side for PerCall {
     fn name(&self) -> &str {
-        self.0.name()
+        self.side.name()
     }
 
     fn program(&self) -> &Path {
-        self.0.program()
+        self.side.program()
     }
 
     fn once(&mut self) -> Result<Sample> {
-        let ran = self.0.once()?;
-        let value = ran.value * 1e6 / f64::from(self.1);
+        let ran = self.side.once()?;
+        let value = ran.value * 1e6 / f64::from(self.calls);
         Ok(Sample { value, ..ran })
     }
 
