@@ -336,7 +336,10 @@ pub(crate) enum Layout {
 /// stack map match (`Z/ext/opcache/jit/zend_jit_trace.c:168-185`). php
 /// never reuses a method call's exit, `ZEND_JIT_EXIT_METHOD_CALL`, which
 /// keeps the callee it guarded for a side trace; no guard here holds a
-/// method call's callee, so no exit is one.
+/// method call's callee, so no exit is one. php's stack map also holds
+/// each slot's known type, and its `flags` `ZEND_JIT_EXIT_TO_VM`, which
+/// a spec does not carry until side traces read them (#2964), so entry
+/// guards and a loop's interrupt test share exits php keeps apart.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ExitSpec {
     pub(crate) frame: Frame,

@@ -1367,7 +1367,10 @@ impl<'a> Builder<'a> {
         for (_, source) in order {
             let draft = match source {
                 Source::Guard(at) => self.guards[at].exit,
-                Source::Leave(at) => self.leaves[at].2,
+                Source::Leave(at) => {
+                    let (_, _, draft) = self.leaves[at];
+                    draft
+                }
                 Source::Interrupt => self.interrupt(),
                 Source::End => self.end_draft.unwrap_or_else(|| self.start()),
             };
