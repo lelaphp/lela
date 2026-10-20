@@ -6,9 +6,8 @@
 //! the URI parsers through ext/standard and ext/uri (design §4.10). Each
 //! is laid into [`crate::functions`]' list at its place in the stub.
 //!
-//! Three of `test.stub.php`'s functions #2388 set out, each because it
-//! breaks what the engine holds, are ported as php's (ruled on #2937 and
-//! #2976):
+//! Three of `test.stub.php`'s functions #2388 set out break what the
+//! engine holds. Two are ported as php's (ruled on #2937 and #2976):
 //!
 //! - `zend_test_crash(?string $message = null)` prints its message and
 //!   ends the process with the `SIGSEGV` php's read of `(char *) 1`
@@ -18,9 +17,10 @@
 //!   `zend_mm_gc` freed a heap's main chunk, over `php_heap`'s
 //!   [`StandaloneHeap`], a safe item.
 //!
-//! The third, `zend_delref(mixed $variable)`, drops a count by hand. It
-//! waits on #3014, and until it lands the engine's `--re` lacks the one
-//! function of php's list.
+//! The third, `zend_delref(mixed $variable)`, is registered as php
+//! declares it and takes no count off, where php's drops one by hand: the
+//! engine exposes no unsound refcount decrement, a `by-design` row
+//! (`trace:zend-delref-no-decrement`, ruled on #3016).
 //!
 //! `zend_test_set_fmode` is Windows' alone, and is left out as php
 //! leaves it out on every other platform.
@@ -69,6 +69,26 @@ pub(crate) fn zend_leak_bytes(
     let leaked = Emalloc::new(req, size)?;
     req.state::<crate::State>().leaked_bytes.push(leaked);
     Ok(())
+}
+
+/// `zend_delref(mixed $variable): void`: php's body takes one count off
+/// a refcounted argument with `Z_TRY_DELREF_P` and frees nothing
+/// (`Z/ext/zend_test/test.c:213-224`); this one takes the argument and
+/// returns null, the divergence `trace:zend-delref-no-decrement`
+/// (ruled on #3016). php's own tests reach it only with `null` or the
+/// wrong argument count, where the two do the same.
+///
+/// ```php
+/// try { zend_delref(); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(zend_delref(null));
+/// ```
+/// ```expect
+/// zend_delref() expects exactly 1 argument, 0 given
+/// NULL
+/// ```
+#[php_function]
+pub(crate) fn zend_delref(variable: Value) {
+    let _ = variable;
 }
 
 /// `zend_test_zend_call_stack_get(): ?array`: the calling thread's
