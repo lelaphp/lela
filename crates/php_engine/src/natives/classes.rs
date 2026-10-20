@@ -498,7 +498,7 @@ fn add_hooked_vars(
     for (key, value) in rows {
         let (key, value) = match (key, declared.next()) {
             (Key::Str(name), Some(row)) => {
-                req.access_name_copy(&row.name, row.visibility)?;
+                req.access_name_copy(row.name.len(), row.visibility)?;
                 if !visible(req, row.declaring, row.visibility, scope) {
                     continue;
                 }
@@ -748,7 +748,7 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
             Key::Str(name) => name,
         };
         if let Some((_, visibility)) = declared {
-            req.access_name_copy(name.as_bytes(), visibility)?;
+            req.access_name_copy(name.len(), visibility)?;
         }
         let seen = req.property_row_visible(
             class,

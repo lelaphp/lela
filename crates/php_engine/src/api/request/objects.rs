@@ -242,9 +242,11 @@ impl Request {
     pub(crate) fn placed_property(
         &self,
         class: ClassId,
-        slot: usize,
+        slot: u32,
     ) -> Option<(ClassId, &PropertyDecl)> {
-        let info = *self.placed_properties(class).get(slot)?;
+        let info = *self
+            .placed_properties(class)
+            .get(usize::try_from(slot).ok()?)?;
         Some((info.declaring, self.property_decl(info)?))
     }
 
