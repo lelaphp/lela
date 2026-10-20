@@ -1,31 +1,8 @@
 //! The binary carries the CLI's extensions: php's configure builds an
 //! extension of the `cli` class for the CLI, CGI, embed and phpdbg alike
 //! (`EXT_CLI_STATIC`, `Z/build/php.m4`) and every other one for every host,
-//! so the two hosts' `php_bundle` features are one list (#1477).
-
-/// The `features` a host's manifest turns on in its `php_bundle`
-/// dependency, as written on its one line.
-fn bundle_features(manifest: &str) -> Vec<&str> {
-    let line = manifest
-        .lines()
-        .find(|line| line.starts_with("php_bundle = "))
-        .expect("a php_bundle dependency on one line");
-    let (_, list) = line
-        .split_once("features = [")
-        .expect("the dependency names its features");
-    let (list, _) = list.split_once(']').expect("the list closes on its line");
-    list.split(',')
-        .map(|feature| feature.trim().trim_matches('"'))
-        .filter(|feature| !feature.is_empty())
-        .collect()
-}
-
-#[test]
-fn the_bundle_is_the_clis() {
-    let cgi = include_str!("../Cargo.toml");
-    let cli = include_str!("../../cli/Cargo.toml");
-    assert_eq!(bundle_features(cgi), bundle_features(cli));
-}
+//! so the host turns on the bundle's `host`, the set every host links
+//! (#1477, #3081), and `php-cgi -n -m` lists what it carries.
 
 /// `php-cgi -n -m` lists the ten a build of this crate alone lacked while
 /// its features were the CLI's first eight.

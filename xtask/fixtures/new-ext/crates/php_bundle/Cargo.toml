@@ -7,8 +7,10 @@ edition = "2024"
 
 [features]
 default = []
-# The engine the harness links; `new-ext` lists each crate here too.
-linked = []
+# The set every host links; `new-ext` lists each crate here too.
+host = []
+# The engine the harness links, built of the two.
+linked = ["default", "host"]
 # A name that enables nothing until php_jit exists.
 jit = []
 
