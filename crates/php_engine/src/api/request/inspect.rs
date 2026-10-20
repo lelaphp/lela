@@ -333,8 +333,8 @@ impl Request {
     /// set aside with it, as a fiber's switch leaves both
     /// ([`Request::switch_execution`]). The global table's names that
     /// stand in a frame's CV are taken back into the table first, as
-    /// `zend_detach_symbol_table` takes them, since a name binds a CV by
-    /// the frame's number on the stack; those frames are attached again
+    /// `zend_detach_symbol_table` takes them, so a frame `f` attaches to
+    /// the table finds them there; those frames are attached again
     /// after, the lowest first, and what `f` left in the table is theirs.
     pub(crate) fn nothing_executing<R>(&mut self, f: impl FnOnce(&mut Request) -> R) -> R {
         let bound = self.unbind_globals();
