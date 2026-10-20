@@ -79,7 +79,7 @@ use crate::observer::OnThrow;
 use crate::operand::{ByKind, Operand};
 use crate::ops::inline::{self, Arith, Binary, Bitwise, Shift};
 use crate::ops::{DimRead, Offset, Switched, array_entry, string_dim_offset, string_offset};
-use crate::tier::{Next, SafepointIdx, Site, Stepped, Tier, continued};
+use crate::tier::{Flow, Next, SafepointIdx, Site, Stepped, Tier};
 use branch::Branch;
 use php_unit::Opcode;
 
@@ -21957,7 +21957,11 @@ fn jumped<T: Tier>(req: &mut Request, frame: FrameRef, at: u32, target: u32, num
         if crate::interrupt::check(req)? {
             return Ok(Stepped::Threw(frame).into());
         }
-        continued(T::safepoint(req, frame, Site::Loop(SafepointIdx(number))))?;
+        match T::safepoint(req, frame, Site::Loop(SafepointIdx(number))) {
+            Flow::Continue => {}
+            // The tier ran the jump and on past it (`jit-design.md` §2.2).
+            flow => return crate::tier::resumed(req, flow, frame),
+        }
     }
     Ok(Next::jump(target))
 }
@@ -22559,8 +22563,30 @@ pub(crate) fn r#return<T: Tier, A: Operand + Default>(
 /// before it keeps to the registers it needs.
 #[inline(never)]
 fn returned<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
+    if let Some(edge) = return_site::<T>(req, frame, op) {
+        return edge;
+    }
     let returned = exec::take_operand(req, frame, code, op.op1_type, op.op1);
-    returned_to_caller::<T>(req, frame, op, returned)
+    returned_to_caller(req, frame, returned)
+}
+
+/// The return safepoint of a `RETURN*` (design §5.8, `jit-design.md`
+/// §2.2), raised for every frame but the entry frame of this serving
+/// with the number the compiler wrote in `result`, before the handler
+/// takes its operand: `None` where the tier answered `Continue`, and
+/// otherwise the edge it resumed at, since a tier that recorded ran the
+/// return and the caller's landing already and nothing of the return is
+/// left to do here.
+#[inline(always)] // once per return, in the RETURN arms
+#[allow(clippy::inline_always)]
+fn return_site<T: Tier>(req: &mut Request, frame: FrameRef, op: &Opline) -> Option<Edge> {
+    if req.stack_mut().entry() == frame {
+        return None;
+    }
+    match T::safepoint(req, frame, Site::Return(SafepointIdx(op.out))) {
+        Flow::Continue => None,
+        flow => Some(crate::tier::resumed(req, flow, frame)),
+    }
 }
 
 /// The inline path of `ZEND_RETURN` (`ZEND_RETURN_SPEC_CONST`, `_TMP`,
@@ -22639,28 +22665,25 @@ fn return_plainly<T: Tier>(
     site: SafepointIdx,
 ) -> Option<Edge> {
     let leave = req.leaves_plainly(frame, cvs, moved, z)?;
-    if let Err(fatal) = continued(T::safepoint(req, frame, Site::Return(site))) {
-        return Some(Err(fatal));
+    match T::safepoint(req, frame, Site::Return(site)) {
+        Flow::Continue => {}
+        // The tier ran the return and the caller's landing
+        // (`jit-design.md` §2.2); the frame it left is not this one.
+        flow => return Some(crate::tier::resumed(req, flow, frame)),
     }
     Some(Ok(req.leave_plainly(leave, z).into()))
 }
 
 /// The half of `RETURN` that leaves the frame, which `RETURN_BY_REF`
-/// shares: the return safepoint, the frame popped, and `returned` into
-/// the `VAR` the call opline named, or released where the caller reads
-/// nothing.
-fn returned_to_caller<T: Tier>(
-    req: &mut Request,
-    frame: FrameRef,
-    op: &Opline,
-    returned: Value,
-) -> Edge {
+/// shares, once its return safepoint ([`return_site`]) is behind it:
+/// the frame popped, and `returned` into the `VAR` the call opline
+/// named, or released where the caller reads nothing.
+fn returned_to_caller(req: &mut Request, frame: FrameRef, returned: Value) -> Edge {
     crate::observer::returned(req, frame, Some(&returned));
     if req.stack_mut().entry() == frame {
         req.set_returned(returned);
         return Ok(Stepped::Done.into());
     }
-    continued(T::safepoint(req, frame, Site::Return(SafepointIdx(op.out))))?;
     let (caller, returns_to) = req.returning(frame);
     req.leave_frame(frame);
     if handed_back(req, returns_to, returned) {
@@ -24171,6 +24194,9 @@ pub(crate) fn return_by_ref<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if let Some(edge) = return_site::<T>(req, frame, op) {
+        return edge;
+    }
     let by_value = match op.op1_type {
         OperandKind::Const | OperandKind::Tmp => true,
         OperandKind::Var => op.extended_value == RETURNS_VALUE,
@@ -24227,7 +24253,7 @@ pub(crate) fn return_by_ref<T: Tier>(
             "InternalError: RETURN_BY_REF over an operand that is no place",
         ));
     };
-    returned_to_caller::<T>(req, frame, op, returned)
+    returned_to_caller(req, frame, returned)
 }
 
 /// `ZEND_GENERATOR_CREATE` (`Z/Zend/zend_vm_def.h:4652`): the frame

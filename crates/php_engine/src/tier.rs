@@ -378,23 +378,18 @@ mod dispatch {
     include!(concat!(env!("OUT_DIR"), "/dispatch.rs"));
 }
 
-/// What a handler does with the flow a safepoint answered. `Continue` is
-/// the whole of it while `Nop` is the only adapter; a handler cannot
-/// dispatch from another frame, so a tier that served code at a
-/// handler's site lands with `php_jit` (ADR-0006). The loop's own sites
-/// take a `Resume` through [`answered`]. Inlined into every handler
-/// that raises a site, so that under `Nop` the whole of it folds away
-/// with the site (design §5.7).
-#[inline(always)]
-#[allow(clippy::inline_always)]
-pub(crate) fn continued(flow: Flow) -> Result<(), Fatal> {
-    match flow {
-        Flow::Continue => Ok(()),
-        Flow::Bail(fatal) => Err(fatal),
-        Flow::Resume(_) | Flow::Returned => Err(Fatal::error(
-            "InternalError: a tier served code and this loop has no resumption for it yet",
-        )),
-    }
+/// What a handler's site, a backward `JMP*` or a `RETURN*`, does with a
+/// flow the tier answered other than `Continue`, which the handler goes
+/// on past itself, the hot path: what the loop's own site does
+/// ([`answered`]), as an edge. The tier stepped past the site's opline
+/// before it answered (`jit-design.md` §2.2), the jump taken or the frame
+/// popped and its caller landed, so the handler does neither: a `Resume`
+/// goes on in the frame it names, after the interrupt check and the
+/// pending test, and `Returned` is the serving's end.
+#[cold]
+#[inline(never)]
+pub(crate) fn resumed(req: &mut Request, flow: Flow, frame: FrameRef) -> Result<Next, Fatal> {
+    answered(req, flow, frame).map(Next::from)
 }
 
 /// What the loop does with the flow a safepoint answered
