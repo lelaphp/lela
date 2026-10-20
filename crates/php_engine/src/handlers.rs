@@ -1944,7 +1944,7 @@ pub(crate) fn send_val<T: Tier, A: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_send(req, frame, code, op, A::default(), false) {
+    if let Some(edge) = inline_send(req, frame, code, op, A::default(), Sending::Value) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -1974,7 +1974,7 @@ pub(crate) fn send_var<T: Tier, A: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_send(req, frame, code, op, A::default(), false) {
+    if let Some(edge) = inline_send(req, frame, code, op, A::default(), Sending::Value) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -2037,7 +2037,7 @@ fn inline_send(
     code: &OpArray,
     op: &Opline,
     a: impl Operand,
-    ex: bool,
+    sending: Sending,
 ) -> Option<Edge> {
     if op.op2_type == OperandKind::Const {
         return None;
@@ -2048,9 +2048,13 @@ fn inline_send(
     if !header.info.building()
         || to >= header.num_args as usize
         || !callee.slots().get(to)?.is_undef()
-        || ex
-            && !header.info.sends_by_value(op.op2)
-            && req.arg_send_mode(header.function?, op.op2).0
+        || match sending {
+            Sending::Value => false,
+            Sending::Declared => {
+                !header.info.sends_by_value(op.op2) && req.arg_send_mode(header.function?, op.op2).0
+            }
+            Sending::Checked => header.info.send_by_ref(),
+        }
     {
         return None;
     }
@@ -2076,6 +2080,19 @@ fn inline_send(
         None => req.release(Value::of_zval(z)),
     }
     Some(Ok(advanced()))
+}
+
+/// Who says an argument [`inline_send`] places goes by value: the
+/// compiler, which emitted `SEND_VAL` or `SEND_VAR`; the callee's
+/// parameter, which a `SEND_*_EX` reads
+/// (`ARG_SHOULD_BE_SENT_BY_REF`); or the `CHECK_FUNC_ARG` before a
+/// `SEND_FUNC_ARG`, which read it for the call
+/// (`ZEND_CALL_SEND_ARG_BY_REF`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sending {
+    Value,
+    Declared,
+    Checked,
 }
 
 /// `ZEND_SEND_REF` (`Z/Zend/zend_vm_def.h:5087`), the argument a call
@@ -2326,7 +2343,7 @@ pub(crate) fn send_val_ex<T: Tier>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type), true) {
+    if let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type), Sending::Declared) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -2398,7 +2415,7 @@ pub(crate) fn send_var_ex<T: Tier>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type), true) {
+    if let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type), Sending::Declared) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -2556,7 +2573,18 @@ pub(crate) fn check_func_arg<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    // By number, where the `INIT` wrote the parameter's by-value bit, the
+    // call being built read once and written once.
+    if let ArgAt::Number(number) = ArgAt::of(op)
+        && let Some(call) = req.vm_mut().building_mut()
+        && call.info.sends_by_value(number)
+    {
+        call.info.set_send_by_ref(false);
+        return Ok(advanced());
+    }
+    req.vm_mut().stand(frame, at);
     let number = match ArgAt::of(op) {
         ArgAt::Number(number) => Some(number),
         ArgAt::Name(at) => {
@@ -2613,12 +2641,58 @@ pub(crate) fn check_func_arg<T: Tier>(
 ///   }
 /// }
 /// ```
+///
+/// By value it is `SEND_VAR`'s inline path over what the read left,
+/// for a container that is a CV, a constant or what a call returned and
+/// a key that is a CV, a constant or a temporary, a string's offset
+/// among them; a key the array has not got and an offset past the string
+/// warn as the read does, by reference the element is laid down, and
+/// `[]` read is php's `Error`:
+///
+/// ```php
+/// if (PHP_VERSION_ID > 0) { function v($x) { return $x; } function r(&$x) { $x = 'w'; } }
+/// $a = [1, 2]; $s = 'str'; $j = 1;
+/// echo v($a[$j]), v($a[1]), v($a[$j + 0]), v([5, 6][$j]), v([5, 6][1]), v((fn () => [7, 8])()[$j]), v($s[1]), v($s[$j + 1]), v(($a + [])[$j]), "\n";
+/// var_dump(v($a[7]), v($s[5]));
+/// r($b['k']);
+/// r($a[]);
+/// var_dump($b, $a);
+/// try { v($a[]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// 222668tr2
+///
+/// Warning: Undefined array key 7 in %s on line 5
+///
+/// Warning: Uninitialized string offset 5 in %s on line 5
+/// NULL
+/// string(0) ""
+/// array(1) {
+///   ["k"]=>
+///   string(1) "w"
+/// }
+/// array(3) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+///   [2]=>
+///   string(1) "w"
+/// }
+/// Cannot use [] for reading
+/// ```
 pub(crate) fn send_func_arg<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    // By value, `SEND_VAR`'s body (`ZEND_VM_C_GOTO(send_var)`).
+    if let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type), Sending::Checked) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
     let reserved = match reserve_arg(req, frame, code, op) {
         Ok(reserved) => reserved,
         Err(edge) => return edge,

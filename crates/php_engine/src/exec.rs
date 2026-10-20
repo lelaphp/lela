@@ -1963,6 +1963,15 @@ impl Vm {
         frame.header().info.building().then_some(top)
     }
 
+    /// The header of the call being built, mutably, what a
+    /// `CHECK_FUNC_ARG` writes of `EX(call)`.
+    #[inline]
+    pub(crate) fn building_mut(&mut self) -> Option<&mut Header> {
+        let (_, frame) = self.stack.top_mut()?;
+        let header = frame.header_mut();
+        header.info.building().then_some(header)
+    }
+
     /// The header of the call being built ([`Vm::building_at`]), what a
     /// `SEND_*` reads of `EX(call)`.
     #[inline]
