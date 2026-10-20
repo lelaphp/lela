@@ -1,0 +1,10 @@
+[package]
+name = "php_jit"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+php_engine = { path = "../php_engine" }
+
+[lints]
+workspace = true

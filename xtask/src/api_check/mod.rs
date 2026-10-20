@@ -70,7 +70,7 @@ use crate::manifest::{Edge, LockCeiling, Manifest, Seam, Section};
 use crate::reading::{Reading, Status, Store};
 use crate::sources::Standing;
 
-use inventory::{Inventory, Leaf, kernels_named, uses};
+use inventory::{Inventory, Leaf, Written, kernels_named, uses};
 use lock::{Block, Diff, Lock, list};
 use surfaces::Surfaces;
 use workspace::{Crates, Present};
@@ -297,7 +297,7 @@ fn seam_reading(
             LockKind::Items => {
                 lines_counted_by_module(inventory, krate, seam.module.as_deref(), &mut reading)?
             }
-            LockKind::Imports => imports(manifest, crates, seam)?
+            LockKind::Imports => imports(manifest, crates, inventory, seam)?
                 .into_values()
                 .flatten()
                 .collect(),
@@ -305,7 +305,8 @@ fn seam_reading(
         };
         (vec![Block::of(None, lines)], Vec::new())
     } else {
-        sections(manifest, crates, seam, &shown, committed.as_ref())?
+        let found = imports(manifest, crates, inventory, seam)?;
+        sections(crates, seam, &shown, committed.as_ref(), found)?
     };
     let generated: BTreeSet<String> = blocks.iter().flat_map(|b| b.lines.clone()).collect();
     reading.count(numbers::ITEMS, u64::try_from(generated.len())?)?;
@@ -452,19 +453,31 @@ fn hold_lock<'s>(
     Ok(problems)
 }
 
-/// The paths each of the seam's consumers `use` from its producer, as lock
-/// lines, less what the lock of another seam it consumes from the producer
-/// holds (#1369): `php_sapi`'s `tier::*` imports are `tier.lock`'s face, and
-/// so not `sapi.lock`'s. An import neither lists is missing from both.
+/// The paths each of the seam's consumers imports from its producer, as
+/// lock lines, less what the lock of another seam it consumes from the
+/// producer holds (#1369): `php_sapi`'s `tier::*` imports are `tier.lock`'s
+/// face, and so not `sapi.lock`'s. An import neither lists is missing from
+/// both.
+///
+/// A `use` is its path; a path the code writes through a module of the
+/// producer, `tier::room(..)` beside `use php_engine::tier` or
+/// `php_engine::tier::room` written in place, is the item it reaches, cut
+/// to the longest of its prefixes that names a public item of the
+/// producer, so `tier::Flow::Exit` is `tier::Flow` and an associated
+/// function its own line, and kept whole where none does (#3033). A path
+/// written through a type or a function the consumer imports, and a
+/// method call, add nothing past the `use` of the type.
 fn imports(
     manifest: &Manifest,
     crates: &Crates,
+    inventory: &mut Inventory<'_>,
     seam: &Seam,
 ) -> Result<BTreeMap<String, BTreeSet<String>>> {
     let mut out = BTreeMap::new();
     let Some(producer) = crates.named(&seam.producer) else {
         return Ok(out);
     };
+    let items = inventory.public_items(producer)?;
     for consumer in crates.iter() {
         if !seam.consumers.iter().any(|c| matches(c, &consumer.name)) {
             continue;
@@ -489,13 +502,27 @@ fn imports(
         let lines: &mut BTreeSet<String> = out.entry(consumer.name.clone()).or_default();
         for file in consumer.sources()? {
             for path in uses(&file)? {
-                if path.segs.first() != Some(&dep.alias) || path.segs.len() < 2 {
+                let Some((_, segs)) = path
+                    .segs
+                    .split_first()
+                    .filter(|(first, rest)| **first == dep.alias && !rest.is_empty())
+                else {
                     continue;
-                }
-                let mut line = path.segs[1..].join("::");
-                if path.leaf == Leaf::Glob {
-                    line.push_str("::*");
-                }
+                };
+                let line = match path.written {
+                    Written::Use(Leaf::Name(_)) => segs.join("::"),
+                    Written::Use(Leaf::Glob) => format!("{}::*", segs.join("::")),
+                    Written::Path { import } => {
+                        if !inventory.names_module(producer, &segs[..import - 1])? {
+                            continue;
+                        }
+                        (1..=segs.len())
+                            .rev()
+                            .map(|n| segs[..n].join("::"))
+                            .find(|line| items.contains(line))
+                            .unwrap_or_else(|| segs.join("::"))
+                    }
+                };
                 if !held.contains(&line) {
                     lines.insert(line);
                 }
@@ -547,13 +574,13 @@ fn strangers(crates: &Crates, seam: &Seam) -> Result<Vec<String>> {
 /// missing; one listed only under a section the consumer does not read is
 /// a failure, `kernels` being `php_jit`'s alone. An allowlist keeps every
 /// line it lists in a section the manifest names, but [`KERNELS`], which
-/// is generated.
+/// is generated. `found` is each consumer's [`imports`].
 fn sections(
-    manifest: &Manifest,
     crates: &Crates,
     seam: &Seam,
     shown: &str,
     committed: Option<&Lock>,
+    found: BTreeMap<String, BTreeSet<String>>,
 ) -> Result<(Vec<Block>, Vec<String>)> {
     let lines = |section: &Section| {
         let listed = committed.and_then(|l| l.section(section.name()));
@@ -580,7 +607,7 @@ fn sections(
         })
         .collect();
     let mut problems = Vec::new();
-    for (consumer, imports) in imports(manifest, crates, seam)? {
+    for (consumer, imports) in found {
         let reads = |section: &Section| section.readers(seam).iter().any(|r| matches(r, &consumer));
         let Some(first) = seam.sections.iter().position(reads) else {
             continue;
@@ -926,4 +953,30 @@ fn adr_cite(manifest: &Manifest, adr: &[&str]) -> String {
         })
         .collect();
     format!(" ({})", cites.join("; "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `tier-module` fixture (#3033): `tier.lock`'s `[face]` lists the
+    /// module `tier`, `tier::Flow` and `tier::listed`, and `php_jit` reaches
+    /// four more items through the module, by its name, a rename, a path
+    /// written in place and a `use` inside a function, each of which fails
+    /// the `tier` reading; `tier::Flow::Exit` is the listed `tier::Flow`,
+    /// and the inline `mod tier` `php_jit` defines reaches nothing.
+    #[test]
+    fn an_item_reached_through_an_imported_module_needs_its_own_line() {
+        let workspace = crate::package_dir().parent().unwrap().to_owned();
+        let manifest = Manifest::load(&workspace).unwrap();
+        let fixture = crate::package_dir().join("fixtures/api-check/tier-module");
+        let readings = hold(&manifest, &fixture, false).unwrap();
+        let tier = readings.iter().find(|r| r.scope == "tier").unwrap();
+        assert_eq!(tier.status, Status::Fail, "{}", tier.message);
+        assert_eq!(
+            tier.message,
+            "4 imports from php_engine have no line in crates/php_engine/tier.lock [face]: \
+             tier::in_place, tier::renamed, tier::scoped, tier::unlisted"
+        );
+    }
 }

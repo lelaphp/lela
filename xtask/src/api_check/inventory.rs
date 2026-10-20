@@ -169,6 +169,16 @@ impl<'a> Inventory<'a> {
             .collect())
     }
 
+    /// Whether `segs`, a path from the root of `krate`, names a module:
+    /// the root itself where `segs` is empty.
+    pub fn names_module(&mut self, krate: &Present, segs: &[String]) -> Result<bool> {
+        let path: Vec<String> = std::iter::once("self".to_owned())
+            .chain(segs.iter().cloned())
+            .collect();
+        let root = ModId::root(&krate.name);
+        Ok(self.resolve(&root, &path, 0)?.module().is_some())
+    }
+
     fn lines(&mut self, krate: &Present) -> Result<Lines> {
         let mut out = Lines::new();
         let mut seen = HashSet::new();
@@ -726,11 +736,11 @@ fn self_type_path(ty: &Type) -> Option<Vec<String>> {
 
 /// One path a `use` item imports, with its tree flattened.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UsePath {
+struct UsePath {
     /// The path as written, `self` and `super` included; for a name or a
     /// rename, the last segment is the name imported.
-    pub segs: Vec<String>,
-    pub leaf: Leaf,
+    segs: Vec<String>,
+    leaf: Leaf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -740,9 +750,33 @@ pub enum Leaf {
     Glob,
 }
 
-impl UsePath {
+/// One path a file reaches a crate or a module by ([`uses`]): a `use`
+/// item's, or one its code writes, read as the import it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Import {
+    /// The path from where it starts, `crate`, `self` and `super`
+    /// included: a `use` item's as written, and a written path's with
+    /// its first segment replaced by the path of the `use` that names it.
+    pub segs: Vec<String>,
+    pub written: Written,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Written {
+    /// A `use` item's path, ending in the name it imports or a glob.
+    Use(Leaf),
+    /// A path of two or more segments written in an expression, a type, a
+    /// pattern, a macro's name or an attribute, whose first `import`
+    /// segments are the path of the `use` in scope that names its first
+    /// segment, `tier::room` read as `php_engine::tier::room` beside `use
+    /// php_engine::tier`; 1 for a path no `use` names, written from a
+    /// crate's name, `crate`, `self` or `super` (#3033).
+    Path { import: usize },
+}
+
+impl Import {
     /// The path relative to the crate root for a `crate::`, `self::` or
-    /// `super::` import written in the module `at`, else `None`.
+    /// `super::` path written in the module `at`, else `None`.
     pub fn in_crate(&self, at: &[String]) -> Option<Vec<String>> {
         let mut base: Vec<String>;
         let mut rest = self.segs.as_slice();
@@ -769,14 +803,25 @@ impl UsePath {
     }
 }
 
-/// Every `use` path in a file, inline modules and function bodies
-/// included.
-pub fn uses(file: &Path) -> Result<Vec<UsePath>> {
+/// Every path a file reaches a crate or a module by, inline modules and
+/// function bodies included, in one walk ([`Walk`]): each `use` item's,
+/// and each path its code writes through a `use` in scope or from a
+/// crate's name, so `tier::room(..)` beside `use php_engine::tier` is the
+/// import `php_engine::tier::room` (#3033).
+///
+/// A `use` is in scope in the module or block that writes it and the
+/// blocks inside, never inside an inline `mod`, as rustc reads it; an
+/// item of the type namespace a module or block defines (`mod`, a type,
+/// a trait) shadows an outer `use` of its name, and a `let` binding never
+/// does, a path of two segments never starting from one. Not read: a name a glob
+/// brings in, a `use` whose path starts from another `use`'s name, a
+/// generic parameter shadowing a `use`, and the paths inside a macro's
+/// tokens, `format!`'s arguments and a `macro_rules!` body among them,
+/// `kernels!` lists being read by [`kernels_named`].
+pub fn uses(file: &Path) -> Result<Vec<Import>> {
     let text = crate::read(file)?;
     let parsed = syn::parse_file(&text).with_context(|| format!("parsing {}", file.display()))?;
-    let mut collector = Collector(Vec::new());
-    collector.visit_file(&parsed);
-    Ok(collector.0)
+    Ok(Walk::of(&parsed))
 }
 
 /// The `php_engine` paths the `kernels!` lists in a file name, each
@@ -836,11 +881,137 @@ fn served_through(input: syn::parse::ParseStream<'_>) -> syn::Result<Vec<String>
     Ok(out)
 }
 
-struct Collector(Vec<UsePath>);
+/// The walk [`uses`] takes, with the scopes the paths it meets are read
+/// through, the innermost last.
+struct Walk {
+    out: Vec<Import>,
+    scopes: Vec<Scope>,
+}
 
-impl<'ast> Visit<'ast> for Collector {
+/// The names one module or block brings into scope. A module's scope is
+/// `closed`: a name it does not bring in is not looked for in the scopes
+/// around it.
+struct Scope {
+    names: HashMap<String, Bound>,
+    closed: bool,
+}
+
+/// What a scope binds a name of the type namespace to.
+enum Bound {
+    /// A `use`, by its path.
+    Use(Vec<String>),
+    /// An item the scope defines, a `mod`, a type or a trait.
+    Item,
+}
+
+impl Scope {
+    fn of<'i>(items: impl IntoIterator<Item = &'i Item>, closed: bool) -> Scope {
+        let mut names = HashMap::new();
+        for item in items {
+            let defined = match item {
+                Item::Use(u) => {
+                    for path in flatten(&u.tree) {
+                        if let Leaf::Name(alias) = path.leaf {
+                            names.insert(alias, Bound::Use(path.segs));
+                        }
+                    }
+                    continue;
+                }
+                Item::Mod(i) => &i.ident,
+                Item::Struct(i) => &i.ident,
+                Item::Enum(i) => &i.ident,
+                Item::Union(i) => &i.ident,
+                Item::Trait(i) => &i.ident,
+                Item::Type(i) => &i.ident,
+                _ => continue,
+            };
+            names.entry(defined.to_string()).or_insert(Bound::Item);
+        }
+        Scope { names, closed }
+    }
+}
+
+impl Walk {
+    fn of(file: &syn::File) -> Vec<Import> {
+        let mut walk = Walk {
+            out: Vec::new(),
+            scopes: vec![Scope::of(&file.items, true)],
+        };
+        walk.visit_file(file);
+        walk.out
+    }
+
+    /// What `name` is in the innermost scope that brings it in, `None`
+    /// where no scope it is looked for in names it.
+    fn named(&self, name: &str) -> Option<&Bound> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(found) = scope.names.get(name) {
+                return Some(found);
+            }
+            if scope.closed {
+                break;
+            }
+        }
+        None
+    }
+
+    fn within(&mut self, scope: Scope, walk: impl FnOnce(&mut Walk)) {
+        self.scopes.push(scope);
+        walk(self);
+        self.scopes.pop();
+    }
+}
+
+impl<'ast> Visit<'ast> for Walk {
     fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
-        self.0.extend(flatten(&item.tree));
+        self.out
+            .extend(flatten(&item.tree).into_iter().map(|p| Import {
+                segs: p.segs,
+                written: Written::Use(p.leaf),
+            }));
+    }
+
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        match &item.content {
+            Some((_, items)) => self.within(Scope::of(items, true), |walk| {
+                syn::visit::visit_item_mod(walk, item);
+            }),
+            None => syn::visit::visit_item_mod(self, item),
+        }
+    }
+
+    fn visit_block(&mut self, block: &'ast syn::Block) {
+        let items = block.stmts.iter().filter_map(|stmt| match stmt {
+            syn::Stmt::Item(item) => Some(item),
+            _ => None,
+        });
+        self.within(Scope::of(items, false), |walk| {
+            syn::visit::visit_block(walk, block);
+        });
+    }
+
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        if let [first, rest @ ..] = segs.as_slice()
+            && !rest.is_empty()
+        {
+            let named = path.leading_colon.is_none().then(|| self.named(first));
+            let import = match named.flatten() {
+                Some(Bound::Use(import)) => Some(import.iter().chain(rest).cloned().collect()),
+                Some(Bound::Item) => None,
+                None => Some(segs.clone()),
+            };
+            if let Some(import) = import {
+                let written = Written::Path {
+                    import: import.len() - rest.len(),
+                };
+                self.out.push(Import {
+                    segs: import,
+                    written,
+                });
+            }
+        }
+        syn::visit::visit_path(self, path);
     }
 }
 
