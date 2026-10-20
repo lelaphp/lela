@@ -146,6 +146,7 @@ impl Drop for Outputs {
 
 impl Perf {
     /// Nowhere: no line and no record.
+    #[cfg(test)]
     pub(crate) fn none() -> Perf {
         Perf {
             map: None,

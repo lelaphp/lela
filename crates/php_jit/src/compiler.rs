@@ -1,65 +1,279 @@
-//! What becomes of a recording (`jit-design.md` §4.8), so far the
-//! pipeline's ends without its middle: no `Backend` lowers a trace yet
-//! (#2955), so [`submit`] runs on the request, writes the stop php
-//! writes, numbers a trace that would compile as published in the
-//! epoch's table (`TraceTable::number`), and settles the claim, so the
-//! tier records and dumps under `jit.mode=force` and
-//! `jit.compile=inline` as php does under `opcache.jit_debug`.
+//! What becomes of a recording (`jit-design.md` §4.8): [`pipeline`],
+//! `types::build`, then the engine's `Backend`, then the epoch's
+//! `TraceTable::publish`, then `policy::settle`, with each failure mapped
+//! to the one [`Outcome`] php settles it as; and [`Compiler`], where a
+//! job runs, on the request under `jit.compile=inline` and on the
+//! engine's one worker under `thread`.
 //!
-//! A numbered trace has no code: its word reads `compiled` and enters
-//! nothing, since the table's `get` answers none for it, which every
-//! reader takes as "not compiled" (`jit-design.md` §3.2, §4.9), and a
-//! later recording that reaches it links to it by that number, as php's
-//! does. #2958 replaces the middle of [`pipeline`], `types::build`,
-//! `Backend::compile` and `TraceTable::publish` of the `Compiled`, on one
-//! worker or inline, and keeps its two ends and this one representation
-//! of a job.
+//! A published trace is in the table and its word reads `compiled`; what
+//! enters it is `dispatch::run` (#2959), so until then every reader takes
+//! the interpreter's path as before.
+//!
+//! **The worker** (`jit-design.md` §4.8, ADR-0010's Threads) is the
+//! engine's [`tier::Worker`]: no thread until the first job, one at most,
+//! parked between jobs, joined before every fork and started again after
+//! it. It touches no request, frame or map pointer: a [`Job`] is a
+//! [`Recorded`], whose view holds the epoch and through it the units and
+//! the engine's interned strings it reads, and a [`Claim`], which holds
+//! its word's epoch, so a job outlives the request and the engine that
+//! made it. Dropping the [`Compiler`] drops the jobs still queued, each
+//! claim settling itself, and joins the one under way.
+
+use std::collections::VecDeque;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+
+use php_engine::tier::{self, Parked};
 
 use crate::Shared;
-use crate::policy::{self, Claim, Outcome, State, TraceEvent};
-use crate::record::{Recorded, Stop};
-use crate::table::{self, Unpublished};
+use crate::lower::Compiled;
+use crate::policy::{self, Claim, Compile, Mode, Outcome, State, TraceEvent};
+use crate::record::{Recorded, Start, Stop};
+use crate::table::{self, Table, TraceName, Unpublished};
+use crate::types::{self, Abort, TraceIr};
 
-/// A recording and the claim on the word it grew from: what the pipeline
-/// takes, on the request or off it.
+#[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test starts its own threads (seams.toml rule fork.threads)"
+)]
+mod tests;
+
+/// A recording, the claim on the word it grew from, and the name its
+/// trace is published under, the place its `TRACE start` line named:
+/// what the pipeline takes, on the request or off it.
 #[derive(Debug)]
 pub(crate) struct Job {
     pub(crate) recorded: Recorded,
     pub(crate) claim: Claim,
+    pub(crate) name: TraceName,
 }
 
-/// The job through the pipeline on the calling thread, which is every
-/// job until a worker exists: what it settled the claim with, its lines
-/// added to `lines`.
-pub(crate) fn submit(shared: &Shared, job: Job, lines: &mut Vec<u8>) -> Outcome {
-    pipeline(shared, job, lines)
+/// Where a job compiles: on the request that submits it, or queued for
+/// the engine's worker.
+#[derive(Debug)]
+pub(crate) struct Compiler {
+    worker: Option<Worker>,
+}
+
+/// The engine's worker and the queue its body serves.
+#[derive(Debug)]
+struct Worker {
+    thread: Arc<tier::Worker>,
+    queue: Arc<Queue>,
+}
+
+/// The jobs waiting for the worker, and what its body needs to serve
+/// them.
+#[derive(Debug)]
+struct Queue {
+    shared: Arc<Shared>,
+    held: Mutex<Held>,
+    /// Signalled when a job is queued or done, and when the body is asked
+    /// to end.
+    changed: Condvar,
+}
+
+/// What the queue's mutex guards.
+#[derive(Debug, Default)]
+struct Held {
+    jobs: VecDeque<Job>,
+    /// How many jobs a thread is serving.
+    serving: usize,
+    /// Whether the body is asked to return (`tier::Parked::end`).
+    ending: bool,
+}
+
+impl Compiler {
+    /// A worker under `jit.compile=thread`, which `force`, `exit-fuzz`
+    /// and a `jit_debug` that asks for a trace's end lines make `inline`
+    /// (`Policy`); none under `Mode::Off`. Its thread starts with the
+    /// first job.
+    pub(crate) fn new(shared: &Arc<Shared>) -> Compiler {
+        let threaded =
+            shared.policy.mode() != Mode::Off && shared.policy.compile() == Compile::Thread;
+        let worker = threaded.then(|| {
+            let queue = Arc::new(Queue {
+                shared: Arc::clone(shared),
+                held: Mutex::default(),
+                changed: Condvar::new(),
+            });
+            let thread = tier::Worker::new("php-jit", Arc::clone(&queue) as Arc<dyn Parked>);
+            Worker { thread, queue }
+        });
+        Compiler { worker }
+    }
+
+    /// `job` through the [`pipeline`]: here, its lines added to `lines`,
+    /// and what it settled the claim with; or queued for the worker,
+    /// which writes no line (`Policy` compiles inline wherever a line is
+    /// asked), and none. Where the system refuses the worker a thread,
+    /// the queue is served here.
+    pub(crate) fn submit(&self, shared: &Shared, job: Job, lines: &mut Vec<u8>) -> Option<Outcome> {
+        let Some(worker) = &self.worker else {
+            return Some(pipeline(shared, job, lines));
+        };
+        worker.queue.held().jobs.push_back(job);
+        worker.queue.changed.notify_all();
+        if !worker.thread.wake() {
+            worker.queue.drain();
+        }
+        None
+    }
+
+    /// Every queued job served to completion, those this thread takes
+    /// from the queue here, and the worker's under way waited for: what
+    /// a test calls before it reads a word.
+    #[cfg(test)]
+    pub(crate) fn drain(&self) {
+        if let Some(worker) = &self.worker {
+            worker.queue.drain();
+        }
+    }
+}
+
+impl Drop for Compiler {
+    /// The queued jobs dropped, each claim settling itself as a failed
+    /// attempt; the field's drop then joins the worker, once the job it
+    /// serves is done.
+    fn drop(&mut self) {
+        if let Some(worker) = &self.worker {
+            let jobs = std::mem::take(&mut worker.queue.held().jobs);
+            drop(jobs);
+        }
+    }
+}
+
+impl Queue {
+    /// The queue's mutex, taken as a thread that panicked holding it
+    /// left it: nothing it guards is written in two steps.
+    fn held(&self) -> MutexGuard<'_, Held> {
+        self.held.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `job` through the pipeline off any request, counted as served
+    /// until it is done however it ends. No line is written: `Policy`
+    /// compiles inline wherever `opcache.jit_debug` asks for one.
+    fn serve(&self, job: Job) {
+        let _done = Served(self);
+        pipeline(&self.shared, job, &mut Vec::new());
+    }
+
+    /// Every job served on this thread, and those under way elsewhere
+    /// waited for.
+    fn drain(&self) {
+        loop {
+            let job = {
+                let mut held = self.held();
+                loop {
+                    if let Some(job) = held.jobs.pop_front() {
+                        held.serving += 1;
+                        break Some(job);
+                    }
+                    if held.serving == 0 {
+                        break None;
+                    }
+                    held = self
+                        .changed
+                        .wait(held)
+                        .unwrap_or_else(PoisonError::into_inner);
+                }
+            };
+            match job {
+                Some(job) => self.serve(job),
+                None => return,
+            }
+        }
+    }
+}
+
+/// A job a thread took from the queue, served until this drops.
+struct Served<'q>(&'q Queue);
+
+impl Drop for Served<'_> {
+    fn drop(&mut self) {
+        self.0.held().serving -= 1;
+        self.0.changed.notify_all();
+    }
+}
+
+impl Parked for Queue {
+    /// The worker's body: each job as it is queued, and between two of
+    /// them, where it is asked to end, a return.
+    fn run(&self) {
+        loop {
+            let job = {
+                let mut held = self.held();
+                loop {
+                    if held.ending {
+                        held.ending = false;
+                        return;
+                    }
+                    if let Some(job) = held.jobs.pop_front() {
+                        held.serving += 1;
+                        break job;
+                    }
+                    held = self
+                        .changed
+                        .wait(held)
+                        .unwrap_or_else(PoisonError::into_inner);
+                }
+            };
+            self.serve(job);
+        }
+    }
+
+    fn end(&self) {
+        self.held().ending = true;
+        self.changed.notify_all();
+    }
 }
 
 /// php's `zend_jit_trace_hot_root` after the recording
-/// (`Z/ext/opcache/jit/zend_jit_trace.c:8200-8245`): a stop that compiles
-/// is written as `TRACE n stop` and the trace numbered in the table of
-/// the epoch its claim holds, or failed with the stop of the bound the
-/// table met; any other is an attempt failed ([`failed`]), written as
-/// `TRACE n abort` and, where it blacklisted the word,
-/// `TRACE n blacklisted`, each added to `lines`. The claim is settled
-/// once, here.
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:8200-8245`) over the engine's
+/// `Backend`: a stop that compiles is written as `TRACE n stop`, built,
+/// lowered and published in the table of the epoch its claim holds,
+/// `TRACE n compiled`; any other stop, and any stage that fails, is an
+/// attempt failed ([`failed`]), written as `TRACE n abort` and, where it
+/// blacklisted the word, `TRACE n blacklisted`, each added to `lines`. A
+/// stage that panics is caught here and is php's `COMPILER_ERROR`, as
+/// php reports a compile that failed. The claim is settled once, here.
 pub(crate) fn pipeline(shared: &Shared, job: Job, lines: &mut Vec<u8>) -> Outcome {
-    let Job { recorded, claim } = job;
+    match &shared.backend {
+        Some(backend) => pipeline_with(shared, |ir, name| backend.compile(ir, name), job, lines),
+        None => pipeline_with(shared, |_, _| Err(no_backend()), job, lines),
+    }
+}
+
+/// [`pipeline`] over the `Backend` that `compile` stands for: the seam its
+/// tests drive each stage's failure through.
+fn pipeline_with(
+    shared: &Shared,
+    compile: impl Fn(&TraceIr, TraceName) -> Result<Compiled, Abort>,
+    job: Job,
+    lines: &mut Vec<u8>,
+) -> Outcome {
+    let Job {
+        recorded,
+        claim,
+        name,
+    } = job;
     let stop = recorded.record.stop;
     let table = table::of_epoch(claim.epoch());
-    let number = table.and_then(table::TraceTable::next);
-    let outcome = if stop.compiles() {
-        if let Some(trace) = number {
-            shared.dump(lines, &TraceEvent::Stop { trace, stop });
+    let number = table.and_then(Table::next);
+    let outcome = match table {
+        Some(table) if stop.compiles() => {
+            if let Some(trace) = number {
+                shared.dump(lines, &TraceEvent::Stop { trace, stop });
+            }
+            let start = claim.start();
+            catch_unwind(AssertUnwindSafe(|| {
+                published(&recorded, name, &compile, table, start)
+            }))
+            .unwrap_or(Outcome::Abort(Stop::CompilerError))
         }
-        match table.map(|table| table.number(claim.start())) {
-            Some(Ok(trace)) => Outcome::Published(trace),
-            Some(Err(Unpublished::Full(full))) => failed(full.stop()),
-            Some(Err(Unpublished::Malformed(_))) => failed(Stop::CompilerError),
-            None => failed(Stop::TooManyTraces),
-        }
-    } else {
-        failed(stop)
+        Some(_) => failed(stop),
+        None => failed(Stop::TooManyTraces),
     };
     let settled = policy::settle(claim, &outcome);
     match (outcome, number) {
@@ -73,6 +287,35 @@ pub(crate) fn pipeline(shared: &Shared, job: Job, lines: &mut Vec<u8>) -> Outcom
         _ => {}
     }
     outcome
+}
+
+/// The pipeline's middle: the record built through its view, the trace
+/// compiled under `name`, and the code published into `table`, or the
+/// failure of the first stage that failed.
+fn published(
+    recorded: &Recorded,
+    name: TraceName,
+    compile: &impl Fn(&TraceIr, TraceName) -> Result<Compiled, Abort>,
+    table: &Table,
+    start: Start,
+) -> Outcome {
+    let compiled = types::build(&recorded.record, &recorded.view).and_then(|ir| compile(&ir, name));
+    match compiled.map(|compiled| table.publish(compiled, start)) {
+        Ok(Ok(trace)) => Outcome::Published(trace),
+        Err(abort) => failed(abort.stop),
+        Ok(Err(Unpublished::Full(full))) => failed(full.stop()),
+        Ok(Err(Unpublished::Malformed(_))) => failed(Stop::CompilerError),
+    }
+}
+
+/// What a pipeline with no `Backend` compiles to: nothing, php's
+/// `COMPILER_ERROR`. No engine runs one, since a host with no `Backend`
+/// runs the tier `Off` (`jit-design.md` §4).
+fn no_backend() -> Abort {
+    Abort {
+        stop: Stop::CompilerError,
+        why: "no backend",
+    }
 }
 
 /// An attempt failed with `stop`: one counted toward the word's
