@@ -55,7 +55,7 @@ pub use frames::{
     Argument, Aside, Called, Compiled, Evaluated, Under, begin, below, call, catches, compile,
     entry, evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
 };
-use held::{Kept, Units};
+use held::{Entered, Kept, Units};
 pub use sampled::{Building, Sample, building, class_number, numbered_class, on_heap, sample};
 pub use view::{Epoch, FuncRef, MapPtrRaw, UnitView, epoch, epoch_state, func, word};
 
@@ -174,7 +174,7 @@ impl Word {
 }
 
 /// The trace number of an execution, php's `EG(jit_trace_num)`
-/// (`jit-design.md` §4.9, revisions 23 and NEXT; design §5.11,
+/// (`jit-design.md` §4.9, revisions 23 and 33; design §5.11,
 /// revision 52): one word the engine keeps per execution and only the
 /// tier reads, the number of the trace executing on that execution. It
 /// excludes nothing: the tier's recording exclusion is the request's, as
@@ -378,23 +378,18 @@ mod dispatch {
     include!(concat!(env!("OUT_DIR"), "/dispatch.rs"));
 }
 
-/// What a handler does with the flow a safepoint answered. `Continue` is
-/// the whole of it while `Nop` is the only adapter; a handler cannot
-/// dispatch from another frame, so a tier that served code at a
-/// handler's site lands with `php_jit` (ADR-0006). The loop's own sites
-/// take a `Resume` through [`answered`]. Inlined into every handler
-/// that raises a site, so that under `Nop` the whole of it folds away
-/// with the site (design §5.7).
-#[inline(always)]
-#[allow(clippy::inline_always)]
-pub(crate) fn continued(flow: Flow) -> Result<(), Fatal> {
-    match flow {
-        Flow::Continue => Ok(()),
-        Flow::Bail(fatal) => Err(fatal),
-        Flow::Resume(_) | Flow::Returned => Err(Fatal::error(
-            "InternalError: a tier served code and this loop has no resumption for it yet",
-        )),
-    }
+/// What a handler's site, a backward `JMP*` or a `RETURN*`, does with a
+/// flow the tier answered other than `Continue`, which the handler goes
+/// on past itself, the hot path: what the loop's own site does
+/// ([`answered`]), as an edge. The tier stepped past the site's opline
+/// before it answered (`jit-design.md` §2.2), the jump taken or the frame
+/// popped and its caller landed, so the handler does neither: a `Resume`
+/// goes on in the frame it names, after the interrupt check and the
+/// pending test, and `Returned` is the serving's end.
+#[cold]
+#[inline(never)]
+pub(crate) fn resumed(req: &mut Request, flow: Flow, frame: FrameRef) -> Result<Next, Fatal> {
+    answered(req, flow, frame).map(Next::from)
 }
 
 /// What the loop does with the flow a safepoint answered
@@ -631,10 +626,35 @@ fn refused_at_entry(req: &mut Request) -> bool {
 /// has nothing to tell and no test, so the loop of an engine where none
 /// is declared pays nothing for them (design §5.8, §7.1), in a callee's
 /// prologue too.
+///
+/// The units the loop holds a share of are held until the serving ends
+/// or a frame's unit has no place ([`held::Units`]); then the loop gives
+/// them back to the request and takes the edge up again holding none.
 fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
+    let mut stepped = first;
+    loop {
+        let units = Units::default();
+        let served = serve_held::<T, D>(req, stepped, &units)?;
+        units.give_back(req);
+        match served {
+            Some(again) => stepped = again,
+            None => return Ok(()),
+        }
+    }
+}
+
+/// [`serve_frame`] while `units` has a place for every unit its frames
+/// enter: `None` where the serving is over, and the edge it was taking
+/// up where every place is taken.
+#[inline(always)] // the loop's body, called once a serving
+#[allow(clippy::inline_always)]
+fn serve_held<'u, T: Tier, D: Telling>(
+    req: &mut Request,
+    first: Stepped,
+    units: &'u Units,
+) -> Result<Option<Stepped>, Fatal> {
     let declared = D::of(req);
-    let mut units = Units::default();
-    let mut kept = Kept::default();
+    let mut kept = Kept::<'u>::default();
     let mut stepped = first;
     loop {
         // An edge the loop takes up the frame of afresh, through the
@@ -655,20 +675,22 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
                     // The entry frame caught nothing: the throwable stays
                     // pending for the caller, the native that re-entered
                     // the loop or `serve` once the main frame is popped.
-                    return Ok(());
+                    return Ok(None);
                 }
                 stepped = unwound;
                 continue;
             }
-            Stepped::Done => return Ok(()),
+            Stepped::Done => return Ok(None),
         };
-        let mut body = units
-            .enter(req, &mut kept, frame)
-            .and_then(|code| units.code(code))
-            .ok_or_else(|| no_frame(frame))?;
+        let mut body = match units.enter(req, &mut kept, frame) {
+            Some(Entered::Held(code)) => code,
+            Some(Entered::Full) => return Ok(Some(stepped)),
+            None => return Err(no_frame(frame)),
+        };
         if pushed {
             let start = req.vm().opline(frame);
-            match entered::<T, D>(req, frame, body, start, declared)? {
+            let entry = exec::entry_of(body);
+            match entered::<T, D>(req, frame, body, (start, entry), declared)? {
                 Stepped::Same(at) if at == frame => {}
                 other => {
                     stepped = other;
@@ -701,7 +723,7 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
                 // A return to a frame the loop entered: its op array as
                 // the loop left it for the call.
                 Way::Left(stepped @ (Stepped::Popped(to) | Stepped::Moved(to))) => {
-                    let Some(code) = kept.returned(to).and_then(|code| units.code(code)) else {
+                    let Some(code) = kept.returned(to) else {
                         break stepped;
                     };
                     frame = to;
@@ -719,14 +741,12 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
                     else {
                         break stepped;
                     };
-                    let Some(code) = kept.called(function) else {
+                    let Some(callee_body) = kept.called(function) else {
                         break stepped;
                     };
-                    let Some(callee_body) = units.code(code) else {
-                        break stepped;
-                    };
-                    kept.keep(callee, code);
-                    match entered::<T, D>(req, callee, callee_body, start, declared)? {
+                    kept.keep(callee, callee_body);
+                    let entry = exec::entry_of(callee_body);
+                    match entered::<T, D>(req, callee, callee_body, (start, entry), declared)? {
                         Stepped::Same(at) if at == callee => {}
                         other => break other,
                     }
@@ -735,7 +755,7 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
                     oplines = &*body.oplines;
                     // A prologue served moved the callee on; with none, it
                     // stands where its activation put it.
-                    at = if start < exec::entry_of(body) {
+                    at = if start < entry {
                         req.vm().opline(frame)
                     } else {
                         start
@@ -749,19 +769,19 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
 
 /// A callee just pushed taken up by the loop, standing at `start`: what
 /// is left of its `RECV*` prologue served over `code`, the op array the
-/// loop holds for it (design §5.6), and then its activation, the
-/// interrupt check and `Site::Entry`. `Threw` of the callee where a
-/// `RECV` raised.
+/// loop holds for it (design §5.6), up to `entry`, its entry safepoint
+/// ([`exec::entry_of`]), and then its activation, the interrupt check
+/// and `Site::Entry`. `Threw` of the callee where a `RECV` raised.
 #[inline(always)] // once per call edge, in the loop
 #[allow(clippy::inline_always)]
 fn entered<T: Tier, D: Telling>(
     req: &mut Request,
     callee: FrameRef,
     code: &OpArray,
-    start: u32,
+    (start, entry): (u32, u32),
     told: D,
 ) -> Result<Stepped, Fatal> {
-    if start < exec::entry_of(code) {
+    if start < entry {
         // The parameters php's `RECV` passes on its first test, read off
         // the frame in one run where nothing observes the opcode; the
         // handlers serve the rest from the first that does not pass.
@@ -773,7 +793,7 @@ fn entered<T: Tier, D: Telling>(
         if at != start {
             req.vm_mut().stand(callee, at);
         }
-        if at < exec::entry_of(code)
+        if at < entry
             && let Some(threw) = exec::prologue(req, callee, code, told)?
         {
             return Ok(Stepped::Threw(threw));
@@ -840,7 +860,8 @@ pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
             let told = Declared::of(req);
             let code = exec::serving_code(&serving, callee)?;
             let start = req.vm().opline(callee);
-            match entered::<Nop, Declared>(req, callee, code, start, told)? {
+            let entry = exec::entry_of(code);
+            match entered::<Nop, Declared>(req, callee, code, (start, entry), told)? {
                 Stepped::Threw(at) => Ok(Stepped::Threw(at)),
                 _ => Ok(Stepped::Pushed(callee)),
             }

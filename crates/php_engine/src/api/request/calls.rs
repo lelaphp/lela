@@ -617,15 +617,9 @@ impl Request {
         let Some(decl) = self.function_decl(function) else {
             return (false, false);
         };
-        let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
-        let variadic = decl.parameters.last().filter(|last| last.variadic);
-        decl.parameters
-            .get(at)
-            .filter(|parameter| !parameter.variadic)
-            .or(variadic)
-            .map_or((false, false), |parameter| {
-                (parameter.by_ref, parameter.by_ref && parameter.prefer_ref)
-            })
+        super::sent_parameter(decl, number).map_or((false, false), |parameter| {
+            (parameter.by_ref, parameter.by_ref && parameter.prefer_ref)
+        })
     }
 
     /// `fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE`: `function` is the

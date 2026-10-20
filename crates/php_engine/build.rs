@@ -497,14 +497,24 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String)>, String>
                 out.push((variant.name, unlisted.to_owned()));
                 continue;
             }
-            let call = format!(
-                "{{\n\
-                 \x20           req.vm_mut().stand(frame, at);\n\
-                 \x20           crate::handlers::{}::<T{}>(req, frame, code, op)\n\
-                 \x20       }}",
-                handler.ident,
-                branch(&variant)?
-            );
+            // A handler that takes the opline's place stands the frame
+            // there itself, where something outside the loop can read it.
+            let call = if handler.at {
+                format!(
+                    "crate::handlers::{}::<T{}>(req, frame, code, op, at)",
+                    handler.ident,
+                    branch(&variant)?
+                )
+            } else {
+                format!(
+                    "{{\n\
+                     \x20           req.vm_mut().stand(frame, at);\n\
+                     \x20           crate::handlers::{}::<T{}>(req, frame, code, op)\n\
+                     \x20       }}",
+                    handler.ident,
+                    branch(&variant)?
+                )
+            };
             out.push((variant.name, call));
         }
         return Ok(out);
@@ -695,6 +705,10 @@ struct Handler {
     /// Whether the handler is generic over its comparison's branch, the
     /// `S: Branch` after its kinds (`crate::handlers::branch`).
     branched: bool,
+    /// Whether the handler takes the place of its opline, `at: u32`, and
+    /// stands the frame there itself where something outside the loop
+    /// reads it; a handler generic over operand kinds always takes it.
+    at: bool,
 }
 
 /// The handlers `src/handlers.rs` declares, each read off the line that
@@ -726,7 +740,15 @@ fn handlers(path: &Path) -> Result<Vec<Handler>, String> {
             .and_then(|rest| rest.strip_prefix('<'))
             .and_then(|rest| rest.split_once(">("))
             .map_or("", |(generics, _)| generics);
+        // The parameters, down to the line that closes them.
+        let at_param = lines
+            .iter()
+            .skip(at)
+            .take_while(|line| !line.contains(") -> "))
+            .chain(lines.get(at))
+            .any(|line| line.contains(" at: u32"));
         out.push(Handler {
+            at: at_param,
             name: ident.trim_start_matches("r#").to_owned(),
             ident: ident.to_owned(),
             operands: generics.matches(": Operand").count(),

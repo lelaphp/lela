@@ -13,14 +13,16 @@
 //! recording stopped; a stop at an inner loop records that loop at once,
 //! as php's `ZEND_JIT_TRACE_STOP_REPEAT` does.
 //!
-//! **Where a claim is taken.** At the activation of a frame alone, for
-//! now: the loop takes a `Flow::Resume` there and goes on in the frame
-//! the tier names, where a back-edge's handler and a return's go on
-//! where they stood (`tier::continued`), so a recording that ran the
-//! program forward from one of those has nowhere to hand it back. A visit
-//! at a loop header or a return bumps and never claims until a handler
-//! can take a `Resume` (`jit-design.md` §2.2); php's inner-loop repeat
-//! records the loops an entry's recording reaches.
+//! **Where a claim is taken.** At a frame's activation and at a loop
+//! header: each site takes a `Flow::Resume` and goes on in the frame the
+//! tier names, a back-edge's handler after the recording ran past the
+//! jump (`tier::resumed`), so a loop in `$main` that no call activates
+//! is a root of its own, as php's `opcache.jit_hot_loop` makes it. A
+//! return's handler takes a `Resume` too, but a visit there bumps and
+//! does not claim: php roots a return at the caller's landing past a
+//! call, armed only once a trace returned into it
+//! (`zend_jit_trace_setup_ret_counter`), where this tier's return word
+//! is the callee's `RETURN` and every one is armed (#3036).
 
 use std::sync::Arc;
 
@@ -102,7 +104,7 @@ fn visited(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
         Site::Entry => Start::Enter,
         Site::Return(_) => Start::Return,
     };
-    let claims = site == Site::Entry && !record::recording(req);
+    let claims = start != Start::Return && !record::recording(req);
     let (decided, shared) = {
         let req: &Request = req;
         let Some(engine) = req.engine::<JitEngine>() else {

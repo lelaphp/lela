@@ -670,40 +670,6 @@ impl Heap {
         true
     }
 
-    /// Whether giving up one owner of `z` serves nothing past the
-    /// decrement: another owner stands, and the value is in the
-    /// collector's buffer already or can be no possible root
-    /// (`!GC_MAY_LEAK`), so `gc_check_possible_root` takes nothing and no
-    /// collection follows ([`Heap::release`]). What a frame's leave asks
-    /// of the receiver it owns before giving it up with no PHP code
-    /// served, as `OBJ_RELEASE` in `zend_leave_helper` serves none for
-    /// such an object.
-    #[must_use]
-    pub fn releases_quietly(z: Zval) -> bool {
-        z.counted()
-            .is_some_and(|header| header.refcount() > 1 && !header.may_leak())
-    }
-
-    /// One owner of `z` given up where [`Heap::releases_quietly`] holds,
-    /// `GC_DELREF` and nothing after it, since `gc_check_possible_root`
-    /// would take nothing; whether it held. Where it does not, nothing
-    /// is touched and the owner is the caller's to give up through
-    /// [`Heap::release`]. What a frame's leave does with the receiver it
-    /// owns once it has asked.
-    #[must_use]
-    #[inline]
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub fn release_quietly(z: Zval) -> bool {
-        let Some(header) = z
-            .counted()
-            .filter(|header| header.refcount() > 1 && !header.may_leak())
-        else {
-            return false;
-        };
-        header.delref();
-        true
-    }
-
     /// One owner of `z` given up as `zval_ptr_dtor_nogc` gives it up where
     /// another owner stands: `GC_DELREF` and nothing after it, which is
     /// all php's `FREE_OP` does to a temporary whose count stays above
