@@ -777,6 +777,12 @@ pub enum Written {
 }
 
 impl Import {
+    /// Whether this is a path the code writes through a `use` in scope,
+    /// which reaches into nothing that `use` does not import already.
+    pub fn through_use(&self) -> bool {
+        matches!(self.written, Written::Path { import } if import > 1)
+    }
+
     /// The path relative to the crate root for a `crate::`, `self::` or
     /// `super::` path written in the module `at`, else `None`.
     pub fn in_crate(&self, at: &[String]) -> Option<Vec<String>> {
@@ -815,7 +821,8 @@ impl Import {
 /// blocks inside, never inside an inline `mod`, as rustc reads it; an
 /// item of the type namespace a module or block defines (`mod`, a type,
 /// a trait) shadows an outer `use` of its name, and a `let` binding never
-/// does, a path of two segments never starting from one. Not read: a name a glob
+/// does, a path of two segments never starting from one. Not read: an
+/// `extern crate` rename, a name a glob
 /// brings in, a `use` whose path starts from another `use`'s name, a
 /// generic parameter shadowing a `use`, and the paths inside a macro's
 /// tokens, `format!`'s arguments and a `macro_rules!` body among them,
@@ -1072,6 +1079,40 @@ mod tests {
 
     use super::*;
     use crate::manifest::Manifest;
+
+    /// The walk reads a written path through the `use` in scope where it
+    /// is written (#3033): a block's `use` inside the block alone, a type
+    /// the block defines shadowing the file's `use` of its name, an inline
+    /// `mod` seeing none of the file's, and `::`-rooted and in-crate paths
+    /// as written; only a path through a `use` is `through_use`.
+    #[test]
+    fn a_written_path_is_read_through_the_use_in_scope_where_it_is_written() {
+        let file = syn::parse_str::<syn::File>(
+            "use php_engine::tier;
+             fn a() { tier::room(); { struct tier; tier::new(); } }
+             fn b() { use php_engine::api as tier; tier::Request::state(); }
+             mod own { fn c() { tier::mine(); } }
+             fn d() { ::php_engine::tier::stand(); crate::serve::go(); }",
+        )
+        .unwrap();
+        let written: Vec<(String, bool)> = Walk::of(&file)
+            .into_iter()
+            .filter(|i| matches!(i.written, Written::Path { .. }))
+            .map(|i| (i.segs.join("::"), i.through_use()))
+            .collect();
+        let expected = [
+            ("php_engine::tier::room", true),
+            ("php_engine::api::Request::state", true),
+            ("tier::mine", false),
+            ("php_engine::tier::stand", false),
+            ("crate::serve::go", false),
+        ];
+        let expected: Vec<(String, bool)> = expected
+            .iter()
+            .map(|(s, t)| ((*s).to_owned(), *t))
+            .collect();
+        assert_eq!(written, expected);
+    }
 
     /// The `same-name` fixture: `reading::Outcome` and `work::Outcome`, with
     /// `work.rs` writing impls as a plain name, `self::`, `crate::` and a

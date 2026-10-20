@@ -535,8 +535,10 @@ fn imports(
 /// The `use` paths into a seam's `module` of its producer written by a
 /// crate outside the seam's consumers (#1959): `php_ext` re-exporting
 /// `php_engine::layer`, or an extension reaching past its facade for it,
-/// each a face the seam keeps for its consumers alone. None for a seam
-/// that is no module.
+/// each a face the seam keeps for its consumers alone, and the paths into
+/// it written in place, each once per file; a path written through a
+/// `use` says nothing past the `use` (#3033). None for a seam that is no
+/// module.
 fn strangers(crates: &Crates, seam: &Seam) -> Result<Vec<String>> {
     let mut out = Vec::new();
     let (Some(module), Some(producer)) = (&seam.module, crates.named(&seam.producer)) else {
@@ -550,15 +552,18 @@ fn strangers(crates: &Crates, seam: &Seam) -> Result<Vec<String>> {
             continue;
         };
         for file in krate.sources()? {
-            for path in uses(&file)? {
+            for path in uses(&file)?.iter().filter(|p| !p.through_use()) {
                 if path.segs.first() == Some(&dep.alias) && path.segs.get(1) == Some(module) {
-                    out.push(format!(
-                        "{} uses {}; {}::{module} is {}'s alone",
-                        crates.relative(&file).display(),
-                        path.segs.join("::"),
-                        producer.ident(),
-                        seam.consumers.join(", "),
-                    ));
+                    push_new(
+                        &mut out,
+                        format!(
+                            "{} uses {}; {}::{module} is {}'s alone",
+                            crates.relative(&file).display(),
+                            path.segs.join("::"),
+                            producer.ident(),
+                            seam.consumers.join(", "),
+                        ),
+                    );
                 }
             }
         }
@@ -773,7 +778,9 @@ fn crate_reading(
 }
 
 /// The `use` paths of `krate` that cross a `deny = true` module edge such
-/// as `php_engine::{executor,kernels}` to `php_engine::{serve,...}`.
+/// as `php_engine::{executor,kernels}` to `php_engine::{serve,...}`, and
+/// the `crate::`, `self::` and `super::` paths written in place that do,
+/// each once per file (#3033).
 fn denied_uses(manifest: &Manifest, krate: &Present) -> Result<Vec<String>> {
     let rows: Vec<(Vec<String>, Vec<String>)> = manifest
         .edges
@@ -806,22 +813,25 @@ fn denied_uses(manifest: &Manifest, krate: &Present) -> Result<Vec<String>> {
             if !from_mods.contains(top) {
                 continue;
             }
-            for path in uses(&file)? {
+            for path in uses(&file)?.iter().filter(|p| !p.through_use()) {
                 let Some(resolved) = path.in_crate(&at) else {
                     continue;
                 };
                 if let Some(target) = resolved.first()
                     && to_mods.contains(target)
                 {
-                    out.push(format!(
-                        "{} uses crate::{}; {}::{{{}}} may not use {}::{{{}}} (design §4.2)",
-                        krate.relative(&file).display(),
-                        resolved.join("::"),
-                        krate.ident(),
-                        from_mods.join(","),
-                        krate.ident(),
-                        to_mods.join(","),
-                    ));
+                    push_new(
+                        &mut out,
+                        format!(
+                            "{} uses crate::{}; {}::{{{}}} may not use {}::{{{}}} (design §4.2)",
+                            krate.relative(&file).display(),
+                            resolved.join("::"),
+                            krate.ident(),
+                            from_mods.join(","),
+                            krate.ident(),
+                            to_mods.join(","),
+                        ),
+                    );
                 }
             }
         }
@@ -866,6 +876,14 @@ fn matches(pattern: &str, name: &str) -> bool {
     match pattern.strip_suffix("/*") {
         Some(prefix) => name.starts_with(prefix) && name[prefix.len()..].starts_with('/'),
         None => pattern == name,
+    }
+}
+
+/// `said` after what `out` says already, unless it says it: a path written
+/// twice in a file is one finding.
+fn push_new(out: &mut Vec<String>, said: String) {
+    if !out.contains(&said) {
+        out.push(said);
     }
 }
 
