@@ -177,43 +177,36 @@ impl Census {
     /// An empty one says so rather than printing a heading over nothing:
     /// a subset with no such test is the answer, not the absence of one.
     pub(crate) fn print(&self, scope: &str) {
+        let groups = |rows: &[Row], count: usize, what: &str, of: &str| {
+            let plural = if rows.len() == 1 { "" } else { "s" };
+            println!(
+                "phpt census {scope}: {count} {what} over {} {of}{plural}",
+                rows.len()
+            );
+        };
         let unread = self.unread_rows();
         if unread.is_empty() {
             println!("phpt census {scope}: no test was refused by the compiler");
         } else {
+            groups(&unread, self.unread(), "unread", "construct");
+        }
+        for row in &unread {
             println!(
-                "phpt census {scope}: {} unread over {} construct{}",
-                self.unread(),
-                unread.len(),
-                if unread.len() == 1 { "" } else { "s" }
+                "  {:>5}  {}: {}",
+                row.tests.len(),
+                row.signature,
+                row.named()
             );
-            for row in &unread {
-                println!(
-                    "  {:>5}  {}: {}",
-                    row.tests.len(),
-                    row.signature,
-                    row.named()
-                );
-            }
         }
         let rows = self.rows();
         if rows.is_empty() {
             println!("phpt census {scope}: no test missed");
             return;
         }
-        println!(
-            "phpt census {scope}: {} missed over {} signature{}",
-            self.missed(),
-            rows.len(),
-            if rows.len() == 1 { "" } else { "s" }
-        );
+        groups(&rows, self.missed(), "missed", "signature");
         for row in &rows {
-            println!(
-                "  {:>5}  {}: {}",
-                row.tests.len(),
-                row.signature,
-                row.tests.join(", ")
-            );
+            let tests = row.tests.join(", ");
+            println!("  {:>5}  {}: {tests}", row.tests.len(), row.signature);
         }
     }
 }
