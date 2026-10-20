@@ -449,7 +449,7 @@ fn fingerprint(req: &Request, value: &Value) -> Fingerprint {
         ValueRef::Str(text) => Fingerprint::Text(text.as_bytes().to_vec()),
         ValueRef::Array(array) => {
             let mut pairs = Vec::new();
-            for (key, item) in walk::rows(req, *array) {
+            for (key, item) in walk::rows(req, array) {
                 let item = item.deref();
                 match (key, item.as_ref()) {
                     (Key::Str(algo), ValueRef::Str(expected)) => {
@@ -468,7 +468,7 @@ fn fingerprint(req: &Request, value: &Value) -> Fingerprint {
 /// `zval_try_get_string` converts it.
 fn sni_option(req: &mut Request, value: &Value) -> Result<SniOption, Thrown> {
     let value = value.deref();
-    let Some(array) = value.as_array().copied() else {
+    let Some(array) = value.as_array() else {
         return Ok(SniOption::NotArray);
     };
     let mut entries = Vec::new();
@@ -486,7 +486,7 @@ fn sni_option(req: &mut Request, value: &Value) -> Result<SniOption, Thrown> {
             ValueRef::Array(pair) => {
                 let mut local_cert = None;
                 let mut local_pk = None;
-                walk::foreach(req, *pair, Hold::None, |req, row| -> walk::Step {
+                walk::foreach(req, pair, Hold::None, |req, row| -> walk::Step {
                     match row.key() {
                         Key::Str(k) if k.as_bytes() == b"local_cert" => {
                             local_cert = Some(with_string(req, row.value(), <[u8]>::to_vec)?);

@@ -423,7 +423,7 @@ fn visit(req: &mut Request, reference: PhpRef, key: &Key, walk: &Walk) -> Result
         }
         nested.protect();
         let walked = walk_level(req, reference, walk);
-        if reference.get().as_array() == Some(&nested) {
+        if reference.get().as_array() == Some(nested) {
             nested.unprotect();
         }
         return walked;
@@ -471,7 +471,7 @@ fn array_reduce(
         let answer = call(req, &callback, &[*held, *row.value()]);
         held.give_up(req);
         let mut next = answer?;
-        if let Some(reference) = next.as_php_ref().copied() {
+        if let Some(reference) = next.as_php_ref() {
             let inner = Owner::take(req, reference.get());
             next.give_up(req);
             next = inner;

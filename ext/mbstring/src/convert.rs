@@ -110,7 +110,6 @@ fn convert_array(
                 Ok(Some(Owner::take(req, value)))
             }
             ValueRef::Array(inner) => {
-                let inner = *inner;
                 convert_array(req, inner, to, from).map(|array| {
                     Some(match array {
                         Some(array) => array.into_value(),
@@ -589,8 +588,8 @@ fn check_array(req: &mut Request, array: PhpArray, enc: Encoding) -> bool {
         }
         let value = row.value().deref();
         let ok = match value.as_ref() {
-            ValueRef::Str(s) => check_string(*s, enc),
-            ValueRef::Array(inner) => check_array(req, *inner, enc),
+            ValueRef::Str(s) => check_string(s, enc),
+            ValueRef::Array(inner) => check_array(req, inner, enc),
             ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Null | ValueRef::Bool(_) => true,
             _ => false,
         };
@@ -799,14 +798,13 @@ fn find_strings(req: &mut Request, value: &Value, out: &mut Vec<Vec<u8>>) -> Res
             // `Z_PROTECT_RECURSION_P(var)` and `ZEND_HASH_FOREACH_VAL_IND(ht,
             // entry)` (`Z/ext/mbstring/mbstring.c:3774`): a guarded walk
             // holding nothing, the argument holding the table.
-            let walked =
-                walk::foreach_guarded(req, *array, Hold::None, |req, row| -> walk::Step {
-                    Ok(if find_strings(req, row.value(), out)? {
-                        ControlFlow::Break(())
-                    } else {
-                        ControlFlow::Continue(())
-                    })
-                })?;
+            let walked = walk::foreach_guarded(req, array, Hold::None, |req, row| -> walk::Step {
+                Ok(if find_strings(req, row.value(), out)? {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                })
+            })?;
             match walked {
                 Guarded::Recursive | Guarded::Walked(Some(())) => return Ok(true),
                 Guarded::Walked(None) => {}
@@ -817,7 +815,6 @@ fn find_strings(req: &mut Request, value: &Value, out: &mut Vec<Vec<u8>>) -> Res
             // over `HASH_OF(var)` (`Z/ext/mbstring/mbstring.c:3771`), the
             // object's `Z_OBJPROP`: a walk holding nothing, the argument
             // holding the object.
-            let object = *object;
             if object.is_recursive() {
                 return Ok(true);
             }
@@ -867,11 +864,10 @@ fn convert_value(
     }
     match value.as_ref() {
         ValueRef::Reference(r) => {
-            let r = *r;
             let inner = r.get();
             match inner.as_ref() {
                 ValueRef::Array(array) if !array.is_recursive() => {
-                    let original = *array;
+                    let original = array;
                     original.protect();
                     let walked = match r.separate_array(req)? {
                         Some(separated) => convert_array_in(req, separated, from, to)?,
@@ -889,7 +885,7 @@ fn convert_value(
             Ok(Walk::Replace(new_string(req, &out)?.into_value()))
         }
         ValueRef::Array(array) => {
-            let original = *array;
+            let original = array;
             if original.is_recursive() {
                 return Ok(Walk::Stopped);
             }
@@ -917,7 +913,6 @@ fn convert_value(
             // object's `Z_OBJPROP`, no owner of it taken: the argument
             // holds the object, and each row is written where it stands,
             // a declared one in its slot.
-            let object = *object;
             let table = object.property_table(req)?;
             let walked = walk::foreach_guarded(req, table, Hold::None, |req, row| {
                 match convert_value(req, row.value(), from, to)? {

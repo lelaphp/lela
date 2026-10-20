@@ -604,7 +604,7 @@ fn with<R>(
 fn index(req: &mut Request, offset: &Value) -> Result<Option<usize>, Thrown> {
     let n = match offset.deref().as_ref() {
         ValueRef::Int(n) => n,
-        ValueRef::Str(s) => match Key::lookup(*s) {
+        ValueRef::Str(s) => match Key::lookup(s) {
             Key::Int(n) => n,
             Key::Str(_) => return Err(illegal(req, offset)),
         },

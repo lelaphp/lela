@@ -1670,7 +1670,7 @@ fn gregorian_body(req: &mut Request, object: PhpObject, constructor: bool) -> Re
         let Some(zone) = process_timezone_argument(req, zone, &mut Outside::Request)? else {
             return Err(throw(req, "IntlException", "Constructor failed"));
         };
-        let locale = locale_name(req, locale.as_php_string().copied());
+        let locale = locale_name(req, locale.as_php_string());
         let mut status = Code::ZERO;
         let made = cal::php_intl_cal_greg_create(
             Some(zone),
@@ -1752,10 +1752,10 @@ fn zone_argument(req: &mut Request, zone: Option<Value>) -> Result<ZoneArg, Thro
                 .native::<crate::timezone::TimeZoneObject>(req)
                 .is_some() =>
         {
-            Some(Union::A(Instance::of(*object)))
+            Some(Union::A(Instance::of(object)))
         }
-        ValueRef::Object(object) => Some(Union::B(Union::A(Instance::of(*object)))),
-        ValueRef::Str(text) => Some(Union::B(Union::B(*text))),
+        ValueRef::Object(object) => Some(Union::B(Union::A(Instance::of(object)))),
+        ValueRef::Str(text) => Some(Union::B(Union::B(text))),
         _ => None,
     })
 }

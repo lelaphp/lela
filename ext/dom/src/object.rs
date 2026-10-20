@@ -47,7 +47,7 @@ pub(crate) enum Extra {
     XPath(Box<XPathState>),
     /// `dom_object_namespace_node::parent_intern`, the object's owner of
     /// its element's object.
-    NamespaceParent(Owner<Value>),
+    NamespaceParent(Owner<PhpObject>),
     /// `dom_token_list_object`'s own fields.
     TokenList(Box<crate::token_list::TokenSet>),
 }

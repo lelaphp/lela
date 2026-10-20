@@ -216,7 +216,7 @@ fn merge_recursive(
         };
         let src_value = src_entry.deref();
         let dest_value = dest_entry.deref();
-        let thash = dest_value.as_array().copied();
+        let thash = dest_value.as_array();
         // `src_entry == dest_entry && Z_ISREF_P(dest_entry) &&
         // (Z_REFCOUNT_P(dest_entry) % 2)`: the two rows are one slot, which
         // they are where the tables are one, as a key finds one bucket in
@@ -239,7 +239,7 @@ fn merge_recursive(
             _ => to_array(req, &dest_value)?,
         };
         let (src_array, temporary) = match src_value.as_ref() {
-            ValueRef::Array(array) => (Some(*array), None),
+            ValueRef::Array(array) => (Some(array), None),
             ValueRef::Object(_) => match to_array(req, &src_value) {
                 Ok(temporary) => (Some(*temporary), Some(temporary)),
                 Err(thrown) => {
@@ -399,11 +399,8 @@ fn replace_recursive(
         let key = row.key().clone();
         let src_entry = *row.value();
         let src_value = src_entry.deref();
-        let dest_array = dest
-            .get(&key)
-            .and_then(|entry| entry.deref().as_array().copied());
-        let (Some(src_array), Some(dest_array)) = (src_value.as_array().copied(), dest_array)
-        else {
+        let dest_array = dest.get(&key).and_then(|entry| entry.deref().as_array());
+        let (Some(src_array), Some(dest_array)) = (src_value.as_array(), dest_array) else {
             let value = copied(req, *row.value());
             let key = Owner::take(req, key.clone());
             dest.set(req, key, value)?;

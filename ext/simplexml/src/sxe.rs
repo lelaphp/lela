@@ -545,7 +545,7 @@ fn complex(req: &mut Request, value: &Value, access: Access) -> Option<String> {
 fn plain_text(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
     let value = value.deref();
     if let Some(o) = value.as_object() {
-        return Ok(cast_text(req, *o)?.unwrap_or_default());
+        return Ok(cast_text(req, o)?.unwrap_or_default());
     }
     with_string(req, &value, <[u8]>::to_vec)
 }
@@ -1629,7 +1629,7 @@ impl ObjectHandlers for Handlers {
     ) -> Result<Option<std::cmp::Ordering>, Thrown> {
         let (l, r) = (left.deref(), right.deref());
         let pair = match (l.as_object(), r.as_object()) {
-            (Some(a), Some(b)) => sxe(req, *a).zip(sxe(req, *b)).map(|(x, y)| {
+            (Some(a), Some(b)) => sxe(req, a).zip(sxe(req, b)).map(|(x, y)| {
                 let nodes = (x.obj.bound(), y.obj.bound());
                 let docs = (x.obj.document_node(), y.obj.document_node());
                 (nodes, docs)

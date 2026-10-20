@@ -272,7 +272,7 @@ fn hex2bin(hex: &[u8], out: &mut [u8]) -> bool {
 /// twice the word's width in hex, read into `out`.
 fn read_word(data: PhpArray, at: usize, out: &mut [u8]) -> bool {
     let key = Key::Int(i64::try_from(at).unwrap_or(i64::MAX));
-    match data.get(&key).and_then(|v| v.as_php_string().copied()) {
+    match data.get(&key).and_then(|v| v.as_php_string()) {
         Some(s) if s.len() == 2 * out.len() => hex2bin(s.as_bytes(), out),
         _ => false,
     }

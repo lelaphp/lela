@@ -422,7 +422,7 @@ fn keyed(
 /// The key [`set_key`] places a value under, one owner of a string key.
 fn zval_key(req: &mut Request, key: &Value) -> Result<Owner<Key>, Thrown> {
     if let Some(s) = key.as_php_string() {
-        return key_of(req, &Value::string(*s));
+        return key_of(req, &Value::string(s));
     }
     if let Some(n) = key.as_int() {
         return Ok(Owner::index(n));
@@ -621,7 +621,7 @@ fn load_members(req: &mut Request, object: PhpObject, members: &Value) -> Result
         // …)` (`Z/Zend/zend_API.c:1752`), no owner of the table taken: the
         // argument holds it while a write runs a hook or a deprecation
         // reaches the program.
-        walk::foreach(req, *members, Hold::None, |req, row| -> walk::Step {
+        walk::foreach(req, members, Hold::None, |req, row| -> walk::Step {
             let key = row.key().clone();
             let value = row.value().deref();
             if let Key::Int(h) = key {

@@ -78,7 +78,7 @@ fn shown(
                     .unwrap_or_default();
                 let trace = throwable
                     .prop(req, b"trace")
-                    .and_then(|trace| trace.as_array().copied())
+                    .and_then(|trace| trace.as_array())
                     .filter(|_| traced)
                     .map(|trace| format!("\n{}", req.trace_to_string(trace, true)))
                     .unwrap_or_default();

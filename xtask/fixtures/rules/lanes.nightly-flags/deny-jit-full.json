@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cargo xtask phpt --jit force --full","description":"Run the tier's lane over the whole corpus"}}

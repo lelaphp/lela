@@ -165,7 +165,7 @@ impl Res {
     }
 
     /// The payload word of a zval naming this resource.
-    pub(crate) fn payload(self) -> crate::zval::Word {
+    pub(crate) const fn payload(self) -> crate::zval::Word {
         crate::zval::Word::pointer(self.0)
     }
 

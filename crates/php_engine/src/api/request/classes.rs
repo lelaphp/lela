@@ -786,6 +786,7 @@ impl Request {
     /// methods are natives it lays under its own scope, an enum's own
     /// `cases`, `from` and `tryFrom` and a native trait's methods.
     pub(super) fn members_of(&self, row: &Declared, class: ClassId) -> Option<Members> {
+        let observed = crate::observer::observing(self);
         let decl = row.decl()?;
         let enum_backing = (decl.kind == ClassKind::Enum).then_some(decl.backing);
         let served: Vec<Option<ClassNative>> = (0u32..)
@@ -820,7 +821,7 @@ impl Request {
                 at: MemberAt::Method(method),
             });
             let flags = crate::attributes::Flags::of(&decl.function.attributes);
-            let shape = FrameShape::of(&decl.function, exec::body_of(&unit, body));
+            let shape = FrameShape::of(&decl.function, exec::body_of(&unit, body), observed);
             let record = UserFunction::record(&unit, body, &decl.function.name.0);
             rows.push(MemberRow {
                 method: Some(method),
@@ -850,7 +851,7 @@ impl Request {
                     at: MemberAt::Hook { property, kind },
                 });
                 let flags = crate::attributes::Flags::of(&hook.function.attributes);
-                let shape = FrameShape::of(&hook.function, exec::body_of(&unit, body));
+                let shape = FrameShape::of(&hook.function, exec::body_of(&unit, body), observed);
                 let record = UserFunction::record(&unit, body, &hook.function.name.0);
                 rows.push(MemberRow {
                     method: None,
@@ -1657,7 +1658,7 @@ impl Request {
             return Err(crate::api::raising::fatal(self, &message));
         }
         let declared = Function::local(self.user_functions.len());
-        let (flags, shape) = dynamic_traits(unit, at);
+        let (flags, shape) = dynamic_traits(unit, at, crate::observer::observing(self));
         self.user_functions.push(UserFunction {
             unit: PublishedUnit::clone(unit),
             body: exec::Body::Dynamic(at),
@@ -1695,7 +1696,7 @@ impl Request {
             return Function::local(position);
         }
         let function = Function::local(self.user_functions.len())?;
-        let (flags, shape) = dynamic_traits(unit, at);
+        let (flags, shape) = dynamic_traits(unit, at, crate::observer::observing(self));
         let name = unit
             .dynamic
             .get(usize::try_from(at).ok()?)
@@ -2005,7 +2006,11 @@ impl Request {
             body,
             member: None,
             flags: crate::attributes::Flags::of(&decl.attributes),
-            shape: FrameShape::of(decl, exec::body_of(unit, body)),
+            shape: FrameShape::of(
+                decl,
+                exec::body_of(unit, body),
+                crate::observer::observing(self),
+            ),
             record: UserFunction::record(unit, body, &decl.name.0),
         });
         self.functions.push(&decl.name.0, declared);
@@ -2073,7 +2078,7 @@ impl Request {
         if let Some(name) = held.as_str_bytes() {
             return String::from_utf8_lossy(name).into_owned();
         }
-        if let Some(array) = held.as_array().copied() {
+        if let Some(array) = held.as_array() {
             let pair =
                 (array.len() == 2).then(|| (array.get(&Key::Int(0)), array.get(&Key::Int(1))));
             if let Some((Some(first), Some(second))) = pair
@@ -2090,7 +2095,7 @@ impl Request {
             }
             return String::from("Array");
         }
-        if let Some(object) = held.as_object().copied() {
+        if let Some(object) = held.as_object() {
             if let Some(closure) = object.closure(self) {
                 let name = self.declared_name(closure.function);
                 return match closure.scope.filter(|_| closure.fake) {
@@ -2332,14 +2337,14 @@ fn class_in(
 /// The flags and the arity of the function at `at` of a unit's
 /// `dynamic` table, one a `DECLARE_FUNCTION` binds or a closure is made
 /// of.
-fn dynamic_traits(unit: &Unit, at: u32) -> (crate::attributes::Flags, FrameShape) {
+fn dynamic_traits(unit: &Unit, at: u32, observed: bool) -> (crate::attributes::Flags, FrameShape) {
     usize::try_from(at)
         .ok()
         .and_then(|at| unit.dynamic.get(at))
         .map(|(decl, code)| {
             (
                 crate::attributes::Flags::of(&decl.attributes),
-                FrameShape::of(decl, Some(code)),
+                FrameShape::of(decl, Some(code), observed),
             )
         })
         .unwrap_or_default()

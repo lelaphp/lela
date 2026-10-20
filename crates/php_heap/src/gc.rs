@@ -197,7 +197,7 @@ impl Refcounted {
     }
 
     /// `GC_FLAGS`.
-    pub(crate) fn flags(&self) -> u32 {
+    pub(crate) const fn flags(&self) -> u32 {
         self.type_info.get() & FLAGS_MASK
     }
 

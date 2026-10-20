@@ -563,15 +563,13 @@ impl Randomizer {
         if data.len() != 1 {
             return Err(crate::invalid_data(req, CLASS, None));
         }
-        let Some(members) = data.get(&Key::Int(0)).and_then(|v| v.as_array().copied()) else {
+        let Some(members) = data.get(&Key::Int(0)).and_then(|v| v.as_array()) else {
             return Err(crate::invalid_data(req, CLASS, None));
         };
         if let Err(thrown) = crate::properties_load(req, this, members) {
             return Err(crate::invalid_data(req, CLASS, Some(thrown)));
         }
-        let engine = this
-            .prop(req, b"engine")
-            .and_then(|v| v.as_object().copied());
+        let engine = this.prop(req, b"engine").and_then(|v| v.as_object());
         let is_engine = match (engine, lookup_class(req, b"Random\\Engine")?) {
             (Some(engine), Some(class)) => engine.instance_of(req, class),
             _ => false,

@@ -595,7 +595,7 @@ fn list_items(
         }
         Ok(())
     };
-    if let Some(arr) = data.as_array().copied() {
+    if let Some(arr) = data.as_array() {
         let read = super::array::rows(req, arr);
         super::array::with_rows(req, &read, |req, rows| {
             for (_, v) in rows {
@@ -653,7 +653,7 @@ pub(super) fn to_xml_any(
     style: Use,
     parent: Node,
 ) -> Res<Option<Node>> {
-    if let Some(arr) = data.as_array().copied() {
+    if let Some(arr) = data.as_array() {
         let enc = super::get_conversion(ty::XSD_ANYXML)?;
         let read = super::array::rows(req, arr);
         return super::array::with_rows(req, &read, |req, rows| {

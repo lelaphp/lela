@@ -1240,7 +1240,7 @@ impl<'a> FrameAt<'a> {
             .unwrap_or_default()
             .iter()
             .take(count)
-            .map(|z| Value::of_zval(*z))
+            .map(|z| Value::of_slot(*z))
             .collect()
     }
 
@@ -1843,7 +1843,7 @@ impl Vm {
     /// `IS_UNDEF` until an opline or a placed argument writes it
     /// (`i_init_func_execute_data`), which is what a read of a CV warns
     /// of. A page the memory limit refuses is the fatal php raises there.
-    #[inline]
+    #[inline(never)] // the loop's call, its body out of the loop's
     pub(crate) fn push(
         &mut self,
         heap: &mut php_heap::Heap,
@@ -1855,15 +1855,16 @@ impl Vm {
     }
 
     /// The frame of an unobserved frameless call, off the VM stack's
-    /// pages ([`php_heap::VmStack::push_frameless`]): `slots` slots,
-    /// every one `IS_UNDEF` until its operand is placed; more than three
-    /// is the engine's error.
+    /// pages ([`php_heap::VmStack::push_frameless`]): its slots the
+    /// `operands`; more than three is the engine's error.
+    #[inline(always)] // the one call site is the frameless handler's
+    #[allow(clippy::inline_always)]
     pub(crate) fn push_frameless(
         &mut self,
-        slots: usize,
+        operands: &[Zval],
         header: Header,
     ) -> Result<FrameRef, Fatal> {
-        self.stack.push_frameless(slots, header)
+        self.stack.push_frameless(operands, header)
     }
 
     /// A frame that was off the stack back on top of it, the half of a
@@ -2286,7 +2287,9 @@ pub(crate) fn container(
                 return Ok(Value::undef());
             };
             let z = at.read();
-            Ok(value_of(z.as_indirect().map_or(z, php_heap::ZvalRef::read)))
+            Ok(Value::of_slot(
+                z.as_indirect().map_or(z, php_heap::ZvalRef::read),
+            ))
         }
         OperandKind::Unused => req.vm().this(frame).map_or_else(
             || {
@@ -2338,7 +2341,7 @@ pub(crate) fn take_operand(
 /// `ZVAL_DEREF` over a value one owner of which the caller holds: what
 /// the reference held, with the owner moved onto it.
 pub(crate) fn owned_deref(req: &mut Request, value: Value) -> Value {
-    let Some(cell) = value.as_php_ref().copied() else {
+    let Some(cell) = value.as_php_ref() else {
         return value;
     };
     let held = cell.get();
@@ -2364,16 +2367,18 @@ pub(crate) fn key_value(req: &mut Request, key: php_heap::Key) -> Value {
 
 /// `GET_OP*_ZVAL_PTR_DEREF(BP_VAR_R)` as a frameless call reads its
 /// operand into its record (`ZEND_FRAMELESS_ICALL_*`,
-/// `Z/Zend/zend_vm_def.h:9786`): the zval as it stands, with an owner
-/// taken only where the operand needs one to stand for the call. A
-/// `TMP` or a `VAR` is moved, its slot left `UNDEF`, and the record's
-/// owner is the one php's `FREE_OP*` gives up after the call; a `CV`'s
-/// or a `CONST`'s value that counts owners takes one more, since the
-/// native may serve code that writes over the variable while it reads
-/// the value, and one that counts none takes nothing and is given up
-/// as nothing. A `CV` nothing wrote, and a reference in any slot, are
-/// read as [`take_operand`] reads them, the warning and the value the
-/// reference holds.
+/// `Z/Zend/zend_vm_def.h:9786`): the zval as it stands, and whether the
+/// record owns it. A `TMP` or a `VAR` is moved, its slot left `UNDEF`,
+/// and the record's owner is the one php's `FREE_OP*` gives up after the
+/// call. A `CONST` is borrowed, as php reads its pointer, and so is a
+/// `CV` of a frame no name reaches, since only the frame's own code
+/// writes one and none runs while the native does; a `CV` of a frame
+/// whose variables a symbol table names (`named`, the main file's or
+/// one a `$GLOBALS` write, an `include` or `extract` reaches) takes one
+/// more owner, since the native may serve code that writes over the
+/// variable while it reads the value. A `CV` nothing wrote, and a
+/// reference in any slot, are read as [`take_operand`] reads them, the
+/// warning and the value the reference holds, which the record owns.
 ///
 /// The owner a `CV`'s string takes keeps it for the call when the
 /// autoloader the native serves writes over the variable, and a
@@ -2399,36 +2404,34 @@ pub(crate) fn frameless_operand(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
-    kind: OperandKind,
-    field: u32,
-) -> Zval {
+    (kind, field): (OperandKind, u32),
+    named: bool,
+) -> (Zval, bool) {
     let at = match kind {
         OperandKind::Const => {
-            let z = code
-                .literals
-                .get(field as usize)
-                .copied()
-                .unwrap_or_else(Zval::null);
-            z.addref();
-            return z;
+            let z = code.literals.get(field as usize).copied();
+            return (z.unwrap_or_else(Zval::null), false);
         }
         OperandKind::Cv => field as usize,
         OperandKind::Tmp | OperandKind::Var => temporary_slot(code, field) as usize,
-        OperandKind::Unused => return take_operand(req, frame, code, kind, field).to_zval(),
+        OperandKind::Unused => usize::MAX,
     };
-    let Some(slot) = req.slots_mut(frame).get_mut(at) else {
-        return take_operand(req, frame, code, kind, field).to_zval();
+    let slot = req.slots_mut(frame).get_mut(at);
+    let z = slot.as_deref().copied().unwrap_or(Zval::UNDEF);
+    let (false, Some(slot)) = (
+        z.is_undef() || z.kind() == php_heap::ZvalType::Reference,
+        slot,
+    ) else {
+        return (take_operand(req, frame, code, kind, field).to_zval(), true);
     };
-    let z = *slot;
-    if z.is_undef() || z.kind() == php_heap::ZvalType::Reference {
-        return take_operand(req, frame, code, kind, field).to_zval();
-    }
-    if kind == OperandKind::Cv {
-        z.addref();
-    } else {
+    if kind != OperandKind::Cv {
         *slot = Zval::UNDEF;
+        return (z, true);
     }
-    z
+    if named {
+        z.addref();
+    }
+    (z, named)
 }
 
 /// `FREE_OP`: a `TMP` or a `VAR` operand read by [`operand`] and done
@@ -2748,7 +2751,7 @@ pub(crate) fn free_container_var(req: &mut Request, frame: FrameRef, code: &OpAr
         if let Some(var) = req.slot_ptr(frame, out)
             && let Some(place) = var.read().as_indirect()
         {
-            let held = value_of(place.read());
+            let held = Value::of_slot(place.read());
             req.addref(&held);
             var.write(held.to_zval());
         }
@@ -2784,7 +2787,7 @@ pub(crate) fn starting_statics(
         let value = if var.lexical {
             Value::null()
         } else {
-            value_of(var.value)
+            Value::of_slot(var.value)
         };
         let set = req.declared_string(&var.name.0).and_then(|name| {
             let name = name.into_key();
@@ -2820,7 +2823,7 @@ pub(crate) fn statics_values(
                 if var.lexical {
                     Value::undef()
                 } else {
-                    value_of(var.value)
+                    Value::of_slot(var.value)
                 }
             })
             .collect(),
@@ -2832,7 +2835,7 @@ pub(crate) fn constant(code: &OpArray, at: ConstIdx) -> Value {
     code.literals
         .get(at.0 as usize)
         .copied()
-        .map_or_else(Value::null, value_of)
+        .map_or_else(Value::null, Value::of_slot)
 }
 
 /// `RT_CONSTANT(opline, opline->op2)` as `ZEND_RECV_INIT` reads it: the
@@ -2868,13 +2871,6 @@ pub(crate) fn default_value(
     let value = constant(code, at);
     req.addref(&value);
     Ok((value, false))
-}
-
-/// A zval as the value vocabulary holds it, no owner taken: the string
-/// or the array is named and not copied, as php's `ZVAL_COPY_VALUE`
-/// names it.
-pub(crate) fn value_of(zval: Zval) -> Value {
-    Value::of_zval(zval)
 }
 
 /// The opline at `at` of `code`, if there is one.
@@ -3243,7 +3239,7 @@ pub(crate) fn unfinished_execution_gc(
         visit(closure.as_value());
     }
     let code = state.code()?;
-    let slot = |at: u32| Value::of_zval(state.frame.slot(php_heap::Slot(at)));
+    let slot = |at: u32| Value::of_slot(state.frame.slot(php_heap::Slot(at)));
     let table = state.symbol_table();
     if table.is_none() {
         for cv in 0..code.num_cvs {

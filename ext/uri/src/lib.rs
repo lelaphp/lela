@@ -642,7 +642,7 @@ fn unserialize<P: UriParser>(
     }
     let no_properties = data
         .get(&Key::Int(1))
-        .and_then(|value| value.as_array().map(PhpArray::is_empty))
+        .and_then(|value| value.as_array().map(|v| v.is_empty()))
         .unwrap_or(false);
     if no_properties {
         Ok(())

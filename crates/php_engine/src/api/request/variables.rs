@@ -194,7 +194,7 @@ impl Request {
         if !self.description.argv.is_empty() {
             // `zend_hash_update(&EG(symbol_table), ZSTR_KNOWN(ZEND_STR_ARGV))`
             // and `ZEND_STR_ARGC`'s, through the CV a frame attached.
-            let table = self.global_table();
+            let table = TableId::GLOBAL;
             let words_name = self.known(Known::Argv)?;
             let list = Owner::take(self, words);
             self.symbol_update_ind(table, *words_name, list.hand_on(), Overwrite::InPlace);
@@ -407,8 +407,8 @@ impl Request {
             .map(|(key, value)| (key, value.deref()))
             .collect();
         for (key, value) in rows {
-            let into = dest.get(&key).and_then(|had| had.as_array().copied());
-            if let (Some(nested), Some(into)) = (value.as_array().copied(), into) {
+            let into = dest.get(&key).and_then(|had| had.as_array());
+            if let (Some(nested), Some(into)) = (value.as_array(), into) {
                 let into = into.copy(self)?;
                 let merged = self.merge(into, nested)?;
                 let key = Owner::take(self, key);
@@ -632,24 +632,15 @@ impl Variables<&mut Request> {
     /// `phpinfo()` and the URL rewriter read `$_SERVER` so, and see the
     /// program's writes to it, where [`Variables::superglobal`] does not.
     pub fn global(self, name: &[u8]) -> Option<Value> {
-        let table = self.0.global_table();
-        self.0.symbol_value(table, name)
+        self.0.symbol_value(TableId::GLOBAL, name)
     }
 
     /// The names `EG(symbol_table)` holds, in its order, what the
     /// shell's completion of a `$` walks
     /// (`cli_completion_generator_var`).
     pub fn global_names(self) -> Vec<Vec<u8>> {
-        let table = self.0.global_table();
-        self.0
-            .table_mut(table)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .map(|(name, _)| name.as_bytes().to_vec())
-                    .collect()
-            })
-            .unwrap_or_default()
+        let names = self.0.symbol_entries(TableId::GLOBAL).into_iter();
+        names.map(|(name, _)| name.as_bytes().to_vec()).collect()
     }
 
     /// A variable of `EG(symbol_table)` written or deleted, what an
@@ -665,7 +656,7 @@ impl Variables<&mut Request> {
     /// `zend_string_init`, a string of the request's that the table keeps
     /// where it adds the name and that goes where the name stood already.
     pub fn set_global(self, name: &[u8], value: Option<Owner<Value>>) {
-        let table = self.0.global_table();
+        let table = TableId::GLOBAL;
         match value {
             Some(value) => match self.0.string_init(name) {
                 Ok(key) => {
@@ -1317,7 +1308,7 @@ struct Place<'a> {
 fn descend(track: PhpArray, path: &[Owner<Key>]) -> PhpArray {
     let mut current = track;
     for key in path {
-        match current.get(key).and_then(|v| v.as_array().copied()) {
+        match current.get(key).and_then(|v| v.as_array()) {
             Some(next) => current = next,
             None => break,
         }

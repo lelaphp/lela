@@ -467,7 +467,7 @@ fn soap_check_zval_ref(req: &mut Request, cx: &mut Cx, data: &Value, node: Node)
         ValueRef::Object(o) => Some(Ident::Object(o.index())),
         ValueRef::Array(a) => cx
             .slot
-            .filter(|r| r.get().as_array().is_some_and(|held| held.is_same(*a)))
+            .filter(|r| r.get().as_array().is_some_and(|held| held.is_same(a)))
             .map(Ident::Ref),
         _ => None,
     };
@@ -644,23 +644,23 @@ fn master_to_xml_held(
     check_class_map: bool,
 ) -> Res<Option<Node>> {
     if let ValueRef::Reference(r) = data.as_ref() {
-        cx.slot = Some(*r);
+        cx.slot = Some(r);
     }
     let data = data.deref();
     let sdl = sdl(req);
     if let ValueRef::Object(o) = data.as_ref()
         && Some(o.class()) == lookup_class(req, b"SoapVar")?
     {
-        return soap_var_to_xml(req, cx, encode, *o, style, parent, sdl.as_ref());
+        return soap_var_to_xml(req, cx, encode, o, style, parent, sdl.as_ref());
     }
     let mut add_type = false;
     if check_class_map
         && let ValueRef::Object(o) = data.as_ref()
         && !o.is_recursive()
         && let Some(map) = req.state::<State>().class_map
-        && let Some(map) = map.deref().as_array().copied()
+        && let Some(map) = map.deref().as_array()
     {
-        let name = class_name(req, *o);
+        let name = class_name(req, o);
         for (key, tmp) in walk::rows(req, map) {
             let php_ext::values::Key::Str(type_name) = key else {
                 continue;

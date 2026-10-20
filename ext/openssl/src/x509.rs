@@ -408,7 +408,7 @@ pub(crate) fn name_entries(
         let found = inner.find(&label);
         match found.as_ref().map(Value::as_ref) {
             Some(ValueRef::Array(list)) => {
-                let mut list = *list;
+                let mut list = list;
                 list.append(req, text)?;
             }
             Some(ValueRef::Str(_)) => {

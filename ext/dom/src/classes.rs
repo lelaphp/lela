@@ -313,7 +313,7 @@ impl DOMImplementation {
             doc.set_root(root);
         }
         let value = object_for(req, doc, None)?;
-        if let (Some(dtd), Some(object)) = (doctype, value.as_object().copied())
+        if let (Some(dtd), Some(object)) = (doctype, value.as_object())
             && let Some(shared) = crate::shared_doc(req, object)
         {
             dtd.share_document(req, shared);

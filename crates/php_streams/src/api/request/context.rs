@@ -278,7 +278,7 @@ impl StreamCtx {
     pub fn option(self, req: &Request, wrapper: &[u8], option: &[u8]) -> Option<Value> {
         let options = self.options(req)?;
         let level = options.find(wrapper).map(|v| v.deref());
-        let level = level.as_ref().and_then(Value::as_array).copied()?;
+        let level = level.as_ref().and_then(Value::as_array)?;
         level.find(option).map(|v| v.deref())
     }
 
@@ -627,7 +627,7 @@ fn put_option(
         }
     };
     let mut category = match existing.as_ref().and_then(Value::as_array) {
-        Some(array) => Owner::take(req, *array),
+        Some(array) => Owner::take(req, array),
         None => match PhpArray::new(req) {
             Ok(array) => array,
             Err(thrown) => {
@@ -657,7 +657,7 @@ fn unset_in(
     let found = options
         .find(wrapper)
         .map(|v| v.deref())
-        .and_then(|v| v.as_array().copied());
+        .and_then(|v| v.as_array());
     let Some(category) = found else {
         return Ok(());
     };

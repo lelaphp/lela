@@ -304,7 +304,7 @@ fn read_warnings(req: &mut Request, conn: Mysqlnd) -> Result<Vec<Warning>, Throw
 /// One row of `SHOW WARNINGS` made a warning, `None` past the last.
 fn read_warning(req: &mut Request, set: &mut ResultSet) -> Result<Option<Warning>, Thrown> {
     let row = set.fetch_into(req, 2)?;
-    let Some(array) = row.as_array().copied() else {
+    let Some(array) = row.as_array() else {
         row.give_up(req);
         return Ok(None);
     };
@@ -452,7 +452,7 @@ fn links_of(req: &mut Request, array: PhpArray) -> Result<Vec<(Value, Mysqlnd)>,
         i += 1;
         let element = row.value().deref();
         let object = match element.as_ref() {
-            ValueRef::Object(o) if o.instance_of(req, class) => *o,
+            ValueRef::Object(o) if o.instance_of(req, class) => o,
             _ => {
                 let given = php_ext::coerce::value_name(req, &element);
                 let n = u32::try_from(i).unwrap_or(u32::MAX);

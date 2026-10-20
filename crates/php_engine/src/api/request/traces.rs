@@ -161,7 +161,7 @@ impl Request {
     pub(crate) fn trace_string_of(&mut self, throwable: PhpObject) -> String {
         match throwable
             .prop(self, b"trace")
-            .and_then(|value| value.as_array().copied())
+            .and_then(|value| value.as_array())
         {
             Some(trace) => self.trace_to_string(trace, true),
             None => String::from("#0 {main}"),
@@ -1080,7 +1080,7 @@ impl Request {
         // looks it up, when it is read; the walk's pin of the frame keeps
         // it for the step.
         let walked = walk::foreach(self, trace, Hold::None, |req, frame| -> walk::Step {
-            let Some(row) = frame.value().as_array().copied() else {
+            let Some(row) = frame.value().as_array() else {
                 let index = match frame.key() {
                     Key::Int(n) => n.to_string(),
                     Key::Str(_) => String::from("0"),
@@ -1125,7 +1125,7 @@ impl Request {
             out.push('(');
             if let Some(args) = field(b"args") {
                 match args.as_array() {
-                    Some(args) => out.push_str(&req.trace_arguments(*args)?),
+                    Some(args) => out.push_str(&req.trace_arguments(args)?),
                     None => crate::api::raising::warning(req, "args element is not an array"),
                 }
             }
@@ -1244,7 +1244,6 @@ impl Request {
                 // `Z_OBJ_HANDLER_P(arg, get_class_name)`, then
                 // `smart_str_appends(str, ZSTR_VAL(class_name))`: up to
                 // the NUL of an anonymous class's name.
-                let object = *object;
                 let table = self.object_handlers(object.heap());
                 let name = table.get_class_name(self, object);
                 let class = php_unit::decl::shown(&name).into_owned();
@@ -1311,7 +1310,7 @@ impl Request {
                     .class_decl(object.class())
                     .filter(|decl| decl.kind == ClassKind::Enum)?;
                 // `zend_enum_fetch_case_name`: the case's `name`.
-                let case = object.prop(self, b"name")?.as_php_string().copied()?;
+                let case = object.prop(self, b"name")?.as_php_string()?;
                 out.push_str(&String::from_utf8_lossy(&decl.name.0));
                 out.push_str("::");
                 out.push_str(&String::from_utf8_lossy(case.as_bytes()));
@@ -1361,7 +1360,7 @@ impl Request {
         let mut arguments: Vec<Value> = (0..passed.saturating_sub(extra.len()))
             .map(|slot| {
                 let slot = Slot(u32::try_from(slot).unwrap_or(u32::MAX));
-                Value::of_zval(state.frame.slot(slot))
+                Value::of_slot(state.frame.slot(slot))
             })
             .collect();
         if let Some(table) = state.symbol_table() {
@@ -1374,7 +1373,7 @@ impl Request {
                 .map_or(0, |decl| decl.parameters.len());
             for (at, argument) in arguments.iter_mut().enumerate().take(declared) {
                 if let Some(name) = names.get(at)
-                    && let Some(value) = self.symbol_view(table, &name.0)
+                    && let Some(value) = self.symbol_value(table, &name.0)
                 {
                     *argument = value;
                 }

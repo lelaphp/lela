@@ -563,7 +563,7 @@ pub(crate) fn sql_exception(
         return Ok(());
     }
     let value = new_throwable(req, "mysqli_sql_exception", message.as_bytes())?;
-    if let Some(object) = value.as_object().copied() {
+    if let Some(object) = value.as_object() {
         let facts = [
             ("sqlstate", Fact::Text(sqlstate)),
             ("code", Fact::Int(i64::from(errno))),

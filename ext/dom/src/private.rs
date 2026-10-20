@@ -967,7 +967,7 @@ mod tests {
     /// laid over the one `$document` holds.
     #[php_function]
     fn replace_private(req: &mut Request, document: Value) -> Result<(), Thrown> {
-        let Some(object) = document.as_object().copied() else {
+        let Some(object) = document.as_object() else {
             return Ok(());
         };
         let private = Private::new(req)?;

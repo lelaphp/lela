@@ -135,6 +135,7 @@ abi::ExtensionBuilder::input_filter
 abi::ExtensionBuilder::intercept
 abi::ExtensionBuilder::interrupt
 abi::ExtensionBuilder::observer
+abi::ExtensionBuilder::observer_when
 abi::ExtensionBuilder::on_modify
 abi::ExtensionBuilder::on_update_long
 abi::ExtensionBuilder::opcodes
@@ -269,6 +270,7 @@ abi::ObservedFiber::status
 abi::ObservedFiber::threw
 abi::ObserverHandlers
 abi::ObserverInit
+abi::ObserverRegistered
 abi::OnModify
 abi::OpcodeHandler
 abi::Opcodes

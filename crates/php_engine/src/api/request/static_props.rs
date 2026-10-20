@@ -477,7 +477,7 @@ impl Request {
     pub(crate) fn static_slot_cell(&self, info: PropertyInfo) -> Option<PhpRef> {
         self.static_props
             .slot(info)
-            .and_then(|value| value.as_php_ref().copied())
+            .and_then(super::super::values::Value::as_php_ref)
     }
 
     /// `zend_assign_to_variable_reference` over a `static` property's

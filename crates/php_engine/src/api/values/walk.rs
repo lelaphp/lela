@@ -187,7 +187,7 @@ impl Iterator for Rows<'_> {
             Walked::Positions { table, pos, end } => {
                 let (found, key, value, _) = table.held_from(*pos, *end)?;
                 *pos = found.saturating_add(1);
-                Some((key, Value::of_zval(value)))
+                Some((key, Value::of_slot(value)))
             }
         }
     }
@@ -818,7 +818,7 @@ fn next_lent(
     let lent = Lent::of(watch, at);
     Some(Row {
         key: Keep::lent(req, key, lent),
-        value: Keep::lent(req, Value::of_zval(value), lent),
+        value: Keep::lent(req, Value::of_slot(value), lent),
         at,
         watch,
         uninitialized,
@@ -1088,7 +1088,7 @@ impl Row {
     /// too.
     pub fn make_ref(&mut self, req: &mut Request) -> Result<PhpRef, Thrown> {
         if let Some(cell) = self.value().as_php_ref() {
-            return Ok(*cell);
+            return Ok(cell);
         }
         let moved = |req: &mut Request| {
             fatal(
@@ -1109,14 +1109,14 @@ impl Row {
                 table,
                 slot,
             } if watch.writable(req, table)
-                && holder.is_none_or(|(holder, held)| holder.get().as_object() == Some(&held)) =>
+                && holder.is_none_or(|(holder, held)| holder.get().as_object() == Some(held)) =>
             {
                 let at = owner.heap().slot_ref(slot);
                 if let Some(at) = at.filter(|at| at.read().is_same_value(self.value().to_zval()))
                     && let Some((typed, name)) = req.slot_typed_property(owner.class(), slot)
                 {
                     req.fetch_typed_slot_ref(at, &typed, &name)?;
-                    let Some(cell) = Value::of_zval(at.read()).as_php_ref().copied() else {
+                    let Some(cell) = Value::of_slot(at.read()).as_php_ref() else {
                         return Err(moved(req));
                     };
                     return Ok(self.lend(req, cell));
@@ -1208,7 +1208,7 @@ pub fn live<B>(
 /// all.
 fn registered(req: &mut Request, holder: PhpRef) -> Result<Option<u32>, Thrown> {
     let now = holder.get();
-    if let Some(object) = now.as_object().copied() {
+    if let Some(object) = now.as_object() {
         let (_, table) = req.pointer_table(object, false)?;
         if table.is_empty() {
             return Ok(None);
@@ -1403,21 +1403,21 @@ pub(crate) enum Stepped {
 /// past the last row.
 fn next_row(req: &mut Request, holder: PhpRef, at: u32) -> Result<Option<Row>, Thrown> {
     let now = holder.get();
-    if let Some(array) = now.as_array().copied() {
+    if let Some(array) = now.as_array() {
         let stepped = array_step(req, holder, array, at, Advance::NextLive);
         let Some((table, found, key, value)) = req.fatal_of(stepped)? else {
             return Ok(None);
         };
         return Ok(Some(Row {
             key: Keep::lent(req, Key::of(key), Lent::Owned),
-            value: Keep::lent(req, Value::of_zval(value), Lent::Owned),
+            value: Keep::lent(req, Value::of_slot(value), Lent::Owned),
             at: At::Bucket(table, found),
             watch: Watch::Iterator(at),
             uninitialized: None,
             hook: None,
         }));
     }
-    if let Some(held) = now.as_object().copied() {
+    if let Some(held) = now.as_object() {
         let (owner, table) = req.pointer_table(held, false)?;
         return object_row(req, holder, at, held, owner, table);
     }
@@ -1468,7 +1468,7 @@ fn object_row(
     };
     Ok(Some(Row {
         key: Keep::lent(req, key, Lent::Owned),
-        value: Keep::lent(req, Value::of_zval(value), Lent::Owned),
+        value: Keep::lent(req, Value::of_slot(value), Lent::Owned),
         at,
         watch: Watch::Iterator(iterator),
         uninitialized: None,

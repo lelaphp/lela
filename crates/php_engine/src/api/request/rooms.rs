@@ -8,6 +8,7 @@
 //! own working directory, its fibers and its unit cache are where they
 //! always were.
 
+use crate::ProgramFile;
 use crate::api::raising::Thrown;
 use crate::api::values::{Emalloc, PhpString, Value};
 
@@ -53,7 +54,8 @@ pub(crate) struct Rooms {
     accel_cwd: Option<PhpString>,
     /// The primary file's `zend_file_handle`, from the host's
     /// `zend_stream_init_fp` until `zend_destroy_file_handle` after
-    /// `php_execute_script`.
+    /// `php_execute_script`, or until the request ends where php-fpm's
+    /// scanner listed it ([`Request::close_primary_handle`]).
     primary: PrimaryHandle,
 }
 
@@ -145,9 +147,28 @@ impl Request {
         Ok(())
     }
 
-    /// `zend_destroy_file_handle` over the primary file's `zend_file_handle` once the
-    /// program has been served, its element off `CG(open_files)` first.
+    /// The host's `zend_destroy_file_handle` over the primary file's
+    /// `zend_file_handle` once the program has been served, its element off
+    /// `CG(open_files)` first; except php-fpm's where the compile listed it,
+    /// since `fpm_main` destroys no `zend_file_handle` that is `in_list`
+    /// (`Z/sapi/fpm/fpm/fpm_main.c:1905`), and `shutdown_executor`'s
+    /// `zend_stream_shutdown` frees its buffer, its element and its name
+    /// after the shutdown functions and the destructors
+    /// ([`Request::destroy_primary_handle`]). `sapi/fpm`'s line
+    /// `a-program-s-listed-file-handle-stands-through-its-shutdown-functions`
+    /// holds a miss's shutdown function to the three and a hit's to none.
     pub(crate) fn close_primary_handle(&mut self) {
+        let in_list = self.rooms.primary.listed.is_some();
+        if in_list && self.description.program_file == ProgramFile::Listed {
+            return;
+        }
+        self.destroy_primary_handle();
+    }
+
+    /// `zend_file_handle_dtor` over the primary file's `zend_file_handle`:
+    /// its element, `zend_stream_fixup`'s buffer and its name freed,
+    /// whichever of them it holds.
+    pub(crate) fn destroy_primary_handle(&mut self) {
         let primary = std::mem::take(&mut self.rooms.primary);
         if let Some(listed) = primary.listed {
             listed.free(self);
@@ -190,7 +211,7 @@ impl Request {
     /// the working directory's copy.
     #[cfg(debug_assertions)]
     pub(super) fn free_rooms(&mut self) {
-        self.close_primary_handle();
+        self.destroy_primary_handle();
         self.free_path_copies();
         let rooms = std::mem::take(&mut self.rooms);
         if let Some(cwd) = rooms.accel_cwd {

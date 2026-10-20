@@ -475,7 +475,7 @@ impl Request {
     /// hash as `zend_hash_find` finds it; none where the object has no
     /// table or the table no such key.
     pub(crate) fn dynamic_prop(o: Obj, name: &[u8]) -> Option<Value> {
-        o.properties()?.str_find(name).map(Value::of_zval)
+        o.properties()?.str_find(name).map(Value::of_slot)
     }
 
     /// A property read, `zend_std_read_property` without the handler
@@ -484,7 +484,7 @@ impl Request {
     pub(crate) fn object_prop(&self, o: Obj, name: &[u8]) -> Option<Value> {
         if let Some(i) = self.prop_slot(ClassId(o.class()), name) {
             let z = o.slot(i);
-            return (!z.is_undef()).then(|| Value::of_zval(z));
+            return (!z.is_undef()).then(|| Value::of_slot(z));
         }
         Self::dynamic_prop(o, name)
     }
@@ -1132,7 +1132,7 @@ impl Request {
         typed: &TypedProperty,
         name: &[u8],
     ) -> Result<(), Thrown> {
-        let held = Value::of_zval(at.read());
+        let held = Value::of_slot(at.read());
         self.refuse_unwritten_ref(&held, typed, name)?;
         if held.as_php_ref().is_none() {
             let cell = self.reference(held.undef_as_null())?;
@@ -1468,7 +1468,7 @@ impl Request {
         };
         let strict = self.function_strict_types(getter);
         let held = got.deref();
-        let cell = got.as_php_ref().copied();
+        let cell = got.as_php_ref();
         // A cell some typed property is already a source of converts
         // nothing: it holds the type as it is, or it is refused.
         if let Some(bound) = cell.filter(|cell| cell.heap().sources() != 0) {
@@ -1997,7 +1997,7 @@ impl Request {
             if self.reaches(&placed) {
                 let z = o.slot(placed.slot);
                 if !z.is_undef() {
-                    return Ok(Owner::take(self, Value::of_zval(z).deref()));
+                    return Ok(Owner::take(self, Value::of_slot(z).deref()));
                 }
                 // `IS_PROP_UNINIT | IS_PROP_LAZY`: a slot that waits for
                 // the initializer skips `__get` too, and the object is
@@ -2355,7 +2355,7 @@ impl Request {
         let held = object.heap().slot(placed.slot);
         barred
             && self.reaches(&placed)
-            && (Value::of_zval(held).deref().as_object().is_some() || (unset && held.is_undef()))
+            && (Value::of_slot(held).deref().as_object().is_some() || (unset && held.is_undef()))
     }
 
     /// The `zend_property_info` beside a typed slot, what
@@ -2540,7 +2540,7 @@ impl Request {
             }
             return Ok((cell.get(), garbage));
         }
-        let garbage = Value::of_zval(o.slot(i));
+        let garbage = Value::of_slot(o.slot(i));
         self.addref(&garbage);
         Heap::object_set_slot(&mut Hooks(self), o, i, value.into_zval());
         Ok((value, garbage))
@@ -2918,7 +2918,7 @@ impl Request {
             let bound = o
                 .properties()
                 .and_then(|table| table.get(key))
-                .and_then(|found| Value::of_zval(found).as_php_ref().copied());
+                .and_then(|found| Value::of_slot(found).as_php_ref());
             if let Some(cell) = bound {
                 name.give_up(self);
                 let strict = self.property_strict_types();
@@ -3121,7 +3121,7 @@ impl Request {
         if o.slot_bit(index, php_heap::PropBit::PlainRow) {
             return Ok(());
         }
-        let held = Value::of_zval(o.slot(index));
+        let held = Value::of_slot(o.slot(index));
         let checked = match held.as_php_ref() {
             Some(cell) => {
                 let cell = cell.heap();
@@ -3597,7 +3597,7 @@ impl Request {
         if z.is_undef() {
             return Ok(None);
         }
-        let value = Value::of_zval(z);
+        let value = Value::of_slot(z);
         match row {
             TableRow::Entry(key) => Ok(Some(((Key::of(key), value, None), row))),
             TableRow::Slot(slot) => {
@@ -3674,7 +3674,7 @@ impl Request {
                 .unwrap_or(php_heap::Zval::UNDEF),
             Walked::Hooked(value) | Walked::Answered(value) => return value,
         };
-        Value::of_zval(z)
+        Value::of_slot(z)
     }
 
     /// `FE_FETCH_RW`'s bind over an object's property
@@ -3707,7 +3707,7 @@ impl Request {
         let o = object.heap();
         let held = Request::walked_value(object, walked);
         if let Some(cell) = held.as_php_ref() {
-            return Ok(*cell);
+            return Ok(cell);
         }
         match walked {
             Walked::Slot(slot) => {
@@ -3928,11 +3928,11 @@ impl Request {
                 continue;
             }
             let name = self.kept_string(name)?;
-            entries.push((Key::Str(name), Value::of_zval(z)));
+            entries.push((Key::Str(name), Value::of_slot(z)));
         }
         if let Some(table) = o.properties() {
             for (k, z) in &table {
-                entries.push((Key::of(k), Value::of_zval(z)));
+                entries.push((Key::of(k), Value::of_slot(z)));
             }
         }
         Ok(entries)
@@ -4063,7 +4063,7 @@ impl Request {
                 if self.reaches(&placed) {
                     placed_slot = Some(placed.slot);
                     let z = o.slot(placed.slot);
-                    (!z.is_undef()).then(|| Value::of_zval(z))
+                    (!z.is_undef()).then(|| Value::of_slot(z))
                 } else {
                     None
                 }

@@ -327,7 +327,7 @@ fn header_of(req: &Request, value: &Value) -> Option<Vec<u8>> {
     let joined = match value.as_ref() {
         ValueRef::Array(lines) => {
             let mut joined = Vec::new();
-            for (_, line) in walk::rows(req, *lines) {
+            for (_, line) in walk::rows(req, lines) {
                 if let Some(line) = line.deref().as_str_bytes() {
                     joined.extend_from_slice(line);
                     joined.extend_from_slice(b"\r\n");
@@ -634,7 +634,7 @@ fn tunnel(
     {
         match value.as_ref() {
             ValueRef::Array(lines) => {
-                for (_, line) in walk::rows(req, *lines) {
+                for (_, line) in walk::rows(req, lines) {
                     if let Some(line) = line.deref().as_str_bytes()
                         && proxy_authorization(line, &mut header)
                     {

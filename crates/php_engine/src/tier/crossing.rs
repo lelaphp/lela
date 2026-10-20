@@ -83,7 +83,7 @@ pub fn primed(req: &Request, frame: FrameRef, at: OplineIdx) -> Option<FuncRef> 
 /// php's `zval_ptr_dtor` of `zval`, a counted value compiled code gives
 /// up: a destructor it runs may leave a throwable pending.
 pub fn release(req: &mut Request, zval: Zval) {
-    req.release(Value::of_zval(zval));
+    req.release(Value::of_slot(zval));
 }
 
 /// `FREE_OP1` and `FREE_OP2` of the opline at `at` of `frame`, as the

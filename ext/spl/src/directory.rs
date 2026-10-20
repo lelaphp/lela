@@ -1480,7 +1480,7 @@ impl SplFileObject {
             return Ok(OrFalse::False);
         }
         let csv = fs(req, this, |it| it.csv.as_deref().copied())?;
-        Ok(match csv.and_then(|c| c.as_array().copied()) {
+        Ok(match csv.and_then(|c| c.as_array()) {
             Some(csv) => OrFalse::Value(csv),
             None => OrFalse::False,
         })
@@ -1800,7 +1800,7 @@ impl SplFileObject {
         {
             return Ok(OrFalse::Value(Union::A(PhpString::new(req, &line)?)));
         }
-        Ok(match csv.and_then(|c| c.as_array().copied()) {
+        Ok(match csv.and_then(|c| c.as_array()) {
             Some(csv) => OrFalse::Value(Union::B(Owner::take(req, csv))),
             None => OrFalse::False,
         })

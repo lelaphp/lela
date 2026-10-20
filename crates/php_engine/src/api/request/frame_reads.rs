@@ -613,14 +613,9 @@ impl Frames<&mut Request> {
         self.0
             .in_frame(frame, |req, at| {
                 let table = req.rebuild_symbol_table(at);
-                let entries = req.table_mut(table).map(|rows| rows.clone())?;
+                let vars = req.symbol_vars(table).into_iter();
                 Some(
-                    entries
-                        .into_iter()
-                        .map(|(name, symbol)| {
-                            let value = req.symbol_read(table, symbol);
-                            (name.as_bytes().to_vec(), value)
-                        })
+                    vars.map(|(name, value)| (name.as_bytes().to_vec(), value))
                         .collect(),
                 )
             })

@@ -461,7 +461,7 @@ impl Request {
     pub(crate) fn release_compiled(&mut self) {
         let mut made = std::mem::take(&mut self.unit_strings.compiling.made);
         for z in made.drain(..) {
-            self.release(Value::of_zval(z));
+            self.release(Value::of_slot(z));
         }
         self.unit_strings.compiling.made = made;
     }
@@ -556,7 +556,7 @@ impl Request {
             self.heap.release_string(s.heap());
         }
         for z in constants.drain(..) {
-            self.release(Value::of_zval(z));
+            self.release(Value::of_slot(z));
         }
         self.unit_strings.dead = dead;
         self.unit_strings.dead_constants = constants;
@@ -639,7 +639,7 @@ impl Request {
             constants.extend(held.constants);
         }
         for z in constants {
-            self.release(Value::of_zval(z));
+            self.release(Value::of_slot(z));
         }
     }
 }

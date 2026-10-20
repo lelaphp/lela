@@ -498,13 +498,13 @@ fn scrubbed(req: &mut Request, thrown: Thrown) -> Thrown {
 fn scrub(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
     let Some(trace) = object
         .prop(req, b"trace")
-        .and_then(|value| value.as_array().copied())
+        .and_then(|value| value.as_array())
     else {
         return Ok(());
     };
     let framed: Vec<(Key, PhpArray)> = walk::rows(req, trace)
         .filter_map(|(key, frame)| {
-            let frame = frame.as_array().copied()?;
+            let frame = frame.as_array()?;
             frame.find(b"args").map(|_| (key, frame))
         })
         .collect();

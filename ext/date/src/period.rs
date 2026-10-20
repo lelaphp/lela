@@ -151,7 +151,7 @@ fn copied(req: &mut Request, object: PhpObject) -> Result<PeriodObj, Thrown> {
 
 /// Whether `value` is an object of the class named.
 fn is_a(req: &mut Request, value: &Value, class: &str) -> Result<Option<PhpObject>, Thrown> {
-    let Some(object) = value.deref().as_object().copied() else {
+    let Some(object) = value.deref().as_object() else {
         return Ok(None);
     };
     let class = class_id(req, class)?;

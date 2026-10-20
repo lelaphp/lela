@@ -448,6 +448,27 @@ params = [["SCRIPT_FILENAME", "{dir}/two.php"], ["REQUEST_METHOD", "GET"]]
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/two.php"], ["REQUEST_METHOD", "GET"]]
 
+# The program's `zend_file_handle` stands to the request's end where the
+# scanner listed it (#3059): on a miss `open_file_for_scanning` puts it on
+# `CG(open_files)`, `fpm_main` destroys no handle that is listed
+# (`Z/sapi/fpm/fpm/fpm_main.c:1905`), and `shutdown_executor`'s
+# `zend_stream_shutdown` frees `zend_stream_fixup`'s buffer, the list's
+# element and the name only after the shutdown functions and the
+# destructors; on a hit opcache never opens the file, and the loop
+# destroys the handle before the request shuts down.
+[[line]]
+name = "a-program-s-listed-file-handle-stands-through-its-shutdown-functions"
+args = ["-R", "-n", "-F", "-d", "opcache.file_update_protection=0", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\n", "end.php" = '<?php register_shutdown_function(function () { echo "shutdown ", memory_get_usage(), "\n"; }); $o = new class { function __destruct() { echo "destructor ", memory_get_usage(), "\n"; } }; echo "last ", memory_get_usage(), "\n";' }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/end.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/end.php"], ["REQUEST_METHOD", "GET"]]
+
 # The realpath cache is the child's, `CWDG(realpath_cache)` a process
 # global (#2941): the second request lists what the first entered, each
 # entry's time to live counting from the first request, a second earlier,

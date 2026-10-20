@@ -60,7 +60,7 @@ fn assign(req: &mut Request, name: PhpString, value: Value) -> Result<(), Thrown
     if let Some(cell) = req
         .frames_mut()
         .caller_var(name.as_bytes())
-        .and_then(|held| held.as_php_ref().copied())
+        .and_then(|held| held.as_php_ref())
     {
         return cell.set(req, value);
     }
@@ -627,7 +627,6 @@ fn compact_var(
     let entry = entry.deref();
     match entry.as_ref() {
         ValueRef::Str(name) => {
-            let name = *name;
             let bytes = name.as_bytes().to_vec();
             if let Some(value) = req.frames_mut().caller_var(&bytes) {
                 let value = value.deref();
@@ -659,7 +658,7 @@ fn compact_var(
             // (`Z/ext/standard/array.c:2707`), no owner of the table taken:
             // the argument holds it while an undefined variable's warning
             // reaches the program.
-            let done = walk::foreach(req, *array, Hold::None, |req, row| -> walk::Step {
+            let done = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
                 compact_var(req, out, row.value(), position)?;
                 Ok(ControlFlow::Continue(()))
             });

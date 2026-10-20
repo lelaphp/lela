@@ -425,7 +425,7 @@ impl Str {
     }
 
     /// The header.
-    fn header(&self) -> &StrHeader {
+    const fn header(&self) -> &StrHeader {
         // SAFETY: a `Str` names a string that was laid down by `init` and
         // is live while its owner holds it, which is the same contract
         // php's `zend_string *` carries.
@@ -464,6 +464,21 @@ impl Str {
     #[must_use]
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn bytes(&self) -> &[u8] {
+        // SAFETY: the borrow is of this name, which names a live string
+        // while its owner holds it, the contract of every `Str`.
+        unsafe { self.bytes_held() }
+    }
+
+    /// [`Str::bytes`] borrowed for as long as whatever holds this name
+    /// is, a zval's slot among them ([`crate::Zval::str_bytes`]).
+    ///
+    /// # Safety
+    ///
+    /// The string stays live for `'a`: the bytes live while the string
+    /// does, the contract php's `ZSTR_VAL` carries, and not while the
+    /// name `self` does.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) unsafe fn bytes_held<'a>(self) -> &'a [u8] {
         let len = self.len();
         // SAFETY: the bytes are inside the allocation, right after the
         // header.
@@ -573,7 +588,7 @@ impl Str {
     /// `ZSTR_IS_INTERNED`: one of a table's strings, which is never
     /// refcounted and is freed by that table alone.
     #[must_use]
-    pub fn is_interned(&self) -> bool {
+    pub const fn is_interned(&self) -> bool {
         self.header().gc.flags() & gc::IMMUTABLE != 0
     }
 
@@ -628,7 +643,7 @@ impl Str {
 
     /// The payload word of a zval naming this string: the pointer, as
     /// php stores it, with its provenance.
-    pub(crate) fn payload(self) -> crate::zval::Word {
+    pub(crate) const fn payload(self) -> crate::zval::Word {
         crate::zval::Word::pointer(self.0)
     }
 

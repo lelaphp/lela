@@ -207,7 +207,7 @@ fn sapi_filter(
     // `php_default_treat_data` to register with
     // `php_register_variable_safe`'s `ZVAL_STRINGL_FAST`: a value of one
     // byte is the process's string, and allocates nothing.
-    let ValueRef::Str(&filtered) = handed.as_ref() else {
+    let ValueRef::Str(filtered) = handed.as_ref() else {
         return Ok(Some(handed));
     };
     let fast = string_value(req, filtered.as_bytes());
@@ -629,7 +629,7 @@ fn zval_filter(
 ) -> Result<Owner<Value>, Thrown> {
     let (name, function) = find_filter(filter);
     let flags = run.flags;
-    let filtered = if let Some(object) = (*value).deref().as_object().copied()
+    let filtered = if let Some(object) = (*value).deref().as_object()
         && !has_to_string(req, object.class())
     {
         // #49274: an object with no `__toString` fails nicely, and
@@ -704,7 +704,7 @@ fn zval_filter_recursive(
     filter: i64,
     run: &Run,
 ) -> Result<Owner<Value>, Thrown> {
-    let Some(array) = (*value).deref().as_array().copied() else {
+    let Some(array) = (*value).deref().as_array() else {
         return zval_filter(req, value, filter, run);
     };
     let copied = filtered_copy(req, array, filter, run);
@@ -827,7 +827,6 @@ fn filter_elements(
         let key = row.key().clone();
         let element = *row.value();
         if let ValueRef::Reference(cell) = element.as_ref() {
-            let cell = *cell;
             if let Some(mut held) = cell.separate_array(req)? {
                 filter_in_place(req, &mut held, filter, run)?;
             } else {
@@ -989,7 +988,7 @@ fn array_handler(
         };
         let element = element.deref();
         let arguments = if let Some(array) = element.as_array() {
-            Union::A(*array)
+            Union::A(array)
         } else {
             let id = to_long(req, &element)?;
             if !id_exists(id) {

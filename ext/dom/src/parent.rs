@@ -43,7 +43,7 @@ fn pieces(
         let position = u32::try_from(i + 1).unwrap_or(u32::MAX);
         let v = value.0.deref();
         match v.as_ref() {
-            ValueRef::Object(o) if instance_of(req, *o, class) => out.push(Piece::Node(*o)),
+            ValueRef::Object(o) if instance_of(req, o, class) => out.push(Piece::Node(o)),
             ValueRef::Str(s) if i32::try_from(s.len()).is_err() => {
                 return Err(arg_value_error(
                     req,

@@ -747,7 +747,7 @@ fn count(
         ));
     }
     match value.deref().as_array() {
-        Some(array) if mode == COUNT_RECURSIVE => count_recursive(req, *array),
+        Some(array) if mode == COUNT_RECURSIVE => count_recursive(req, array),
         _ => php_ext::coerce::count(req, &value),
     }
 }
@@ -771,7 +771,7 @@ fn count_recursive(req: &mut Request, array: PhpArray) -> Result<i64, Thrown> {
     // nothing: a nested warning can reach a handler.
     let walked = rows::foreach(req, array, Hold::None, |req, row| -> rows::Step {
         if let Some(nested) = row.value().deref().as_array() {
-            count = count.saturating_add(count_recursive(req, *nested)?);
+            count = count.saturating_add(count_recursive(req, nested)?);
         }
         Ok(ControlFlow::Continue(()))
     });

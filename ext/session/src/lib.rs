@@ -394,7 +394,7 @@ fn session_array(req: &mut Request) -> Option<PhpArray> {
     req.state::<State>()
         .vars
         .as_deref()
-        .and_then(|vars| vars.get().as_array().copied())
+        .and_then(|vars| vars.get().as_array())
 }
 
 /// The session's array made writable in place, `SEPARATE_ARRAY` over

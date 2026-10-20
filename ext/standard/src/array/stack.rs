@@ -260,7 +260,7 @@ fn array_pop(req: &mut Request, array: Ref<PhpArray>) -> Result<Owner<Value>, Th
 /// that referred to the array itself hands back the array as it is left.
 /// `taken` is the owner the native took of the element.
 fn unwrapped(req: &mut Request, taken: Owner<Value>) -> Owner<Value> {
-    let Some(reference) = taken.as_php_ref().copied() else {
+    let Some(reference) = taken.as_php_ref() else {
         return taken;
     };
     let value = Owner::take(req, reference.get().deref());
@@ -635,7 +635,7 @@ fn array_splice(
     Stack::over(req, array, |req, stack| {
         let replacement = match replacement {
             Passed::Given(given) => Some(match given.as_array() {
-                Some(array) => Owner::take(req, *array),
+                Some(array) => Owner::take(req, array),
                 None => to_array(req, &given)?,
             }),
             Passed::Omitted => None,

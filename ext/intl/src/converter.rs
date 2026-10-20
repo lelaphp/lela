@@ -1092,7 +1092,7 @@ impl Served<'_> {
                 // Read first: the appends write the converter, which
                 // holds the request the rows walk borrows; no code of
                 // the program runs in them.
-                let values: Vec<Value> = walk::rows(self.req, *array).map(|(_, v)| v).collect();
+                let values: Vec<Value> = walk::rows(self.req, array).map(|(_, v)| v).collect();
                 for value in values {
                     self.append_to_unicode(value, target);
                 }
@@ -1120,7 +1120,7 @@ impl Served<'_> {
             }
             ValueRef::Array(array) => {
                 // Read first, as `append_to_unicode` reads them.
-                let values: Vec<Value> = walk::rows(self.req, *array).map(|(_, v)| v).collect();
+                let values: Vec<Value> = walk::rows(self.req, array).map(|(_, v)| v).collect();
                 for value in values {
                     self.append_from_unicode(value, target);
                 }

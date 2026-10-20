@@ -448,7 +448,7 @@ pub(crate) fn user_completion(req: &mut Request, text: &[u8], start: i64, end: i
     let mut candidates = Vec::new();
     // `ZEND_HASH_FOREACH_VAL` and `zval_get_string`, which may serve
     // `__toString`; the callback's answer holds the array.
-    let walked = walk::foreach(req, *array, Hold::None, |req, row| -> walk::Step {
+    let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
         let found = with_string(req, row.value(), |member| {
             member.starts_with(text).then(|| member.to_vec())
         });

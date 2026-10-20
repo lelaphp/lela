@@ -1293,8 +1293,8 @@ fn get_cfg_var(
         return Ok(Union::B(OrFalse::False));
     };
     let answer = match entry.as_ref() {
-        ValueRef::Str(value) => Union::A(Owner::take(req, *value)),
-        ValueRef::Array(entries) => Union::B(OrFalse::Value(Owner::take(req, *entries))),
+        ValueRef::Str(value) => Union::A(Owner::take(req, value)),
+        ValueRef::Array(entries) => Union::B(OrFalse::Value(Owner::take(req, entries))),
         _ => Union::B(OrFalse::False),
     };
     entry.give_up(req);

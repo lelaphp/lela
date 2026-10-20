@@ -248,7 +248,6 @@ pub(crate) fn serialize_parameter(
     let mut val = param_val.deref();
     let mut name = name.map(<[u8]>::to_vec);
     if let ValueRef::Object(o) = val.as_ref() {
-        let o = *o;
         let is_param = lookup_class(req, b"SoapParam")?.is_some_and(|c| o.class() == c);
         if is_param {
             let pname = slot(o, PARAM_NAME);
@@ -429,7 +428,7 @@ fn serialize_response_call2(
         };
         let failed = walk::foreach(
             req,
-            *arr,
+            arr,
             Hold::None,
             |req, row| -> walk::Step<crate::Error> {
                 let key = row.key().clone();
@@ -610,7 +609,7 @@ fn serialize_response_body(
     let mut head: Option<Node> = None;
     let ret = ret.deref();
     let fault_obj = match ret.as_ref() {
-        ValueRef::Object(o) if instance_of(req, *o, "SoapFault") => Some(*o),
+        ValueRef::Object(o) if instance_of(req, o, "SoapFault") => Some(o),
         _ => None,
     };
     let body;
@@ -626,9 +625,8 @@ fn serialize_response_body(
             let mut hdr_name = first.function_name.clone();
             head = envelope.new_child(ns, b"Header", None);
             if let ValueRef::Object(h) = headerfault.as_ref()
-                && instance_of(req, *h, "SoapHeader")
+                && instance_of(req, h, "SoapHeader")
             {
-                let h = *h;
                 let mut key = Vec::new();
                 if let Some(n) = slot_str(h, HEADER_NAMESPACE) {
                     key.extend_from_slice(&n);
@@ -900,7 +898,7 @@ fn serialize_response_body(
                 let mut hdr_ns = h.hdr.and_then(|x| x.ns.clone());
                 let mut hdr_name = h.function_name.clone();
                 let header_object = match h.retval.deref().as_ref() {
-                    ValueRef::Object(o) if instance_of(req, *o, "SoapHeader") => Some(*o),
+                    ValueRef::Object(o) if instance_of(req, o, "SoapHeader") => Some(o),
                     _ => None,
                 };
                 if let Some(ho) = header_object {
@@ -1132,7 +1130,7 @@ pub(crate) fn serialize_function_call(
         if let (Some(head), Some(headers)) = (head, soap_headers) {
             for header in headers {
                 let header = header.deref();
-                let Some(h) = header.as_object().copied() else {
+                let Some(h) = header.as_object() else {
                     continue;
                 };
                 if !instance_of(req, h, "SoapHeader") {
@@ -1530,7 +1528,7 @@ pub(crate) fn soap_create_typemap(
         let mut to_xml: Option<Value> = None;
         let mut to_zval: Option<Value> = None;
         if !entry.is_packed() {
-            for (k, v) in walk::rows(req, *entry) {
+            for (k, v) in walk::rows(req, entry) {
                 let PhpKey::Str(name) = &k else { continue };
                 let v = v.deref();
                 match name.as_bytes() {

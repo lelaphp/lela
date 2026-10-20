@@ -113,7 +113,7 @@ impl<'a> OpArrayView<'a> {
         self.code
             .literals
             .get(at.0 as usize)
-            .map(|zval| Value::of_zval(*zval))
+            .map(|zval| Value::of_slot(*zval))
     }
 
     /// `op_array->vars[cv]`: the name, without its `$`, of the compiled

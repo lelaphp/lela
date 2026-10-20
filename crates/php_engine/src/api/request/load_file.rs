@@ -4,7 +4,6 @@
 
 use super::Request;
 use crate::api::raising::Thrown;
-use crate::api::values::Value;
 use crate::exec;
 
 impl Request {
@@ -82,7 +81,7 @@ impl Request {
         // wrote to a variable of the caller's is in the caller's CV.
         self.leave_code(standing, frame);
         served?;
-        let returned = std::mem::replace(&mut self.returned, Value::null());
+        let returned = std::mem::take(&mut self.returned);
         self.release(returned);
         match self.take_pending_view() {
             Some(pending) => Err(Thrown::of(Some(pending))),

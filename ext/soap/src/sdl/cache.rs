@@ -1336,7 +1336,7 @@ fn client_context(
     context: &mut Option<Owner<StreamCtx>>,
 ) -> Res<(bool, bool)> {
     let tmp = client_slot(this, ClientSlot::StreamCtx);
-    if let Some(r) = tmp.as_resource().copied() {
+    if let Some(r) = tmp.as_resource() {
         // `php_stream_context_from_zval(tmp, 0)`, one owner more.
         let c = StreamCtx::fetch(req, r)?;
         *context = Some(Owner::take(req, c));

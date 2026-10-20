@@ -1034,7 +1034,7 @@ pub(crate) fn holds(req: &mut Request, value: &Value, ty: &Type, scopes: Scopes)
 /// of the two is not observable.
 pub(crate) fn holding(req: &Request, value: &Value, ty: &Type, scopes: Scopes) -> Holding {
     let value = value.deref();
-    let object = value.as_object().map(PhpObject::class);
+    let object = value.as_object().map(|v| v.class());
     let is = |class: Option<ClassId>| {
         Holding::of(
             object
@@ -1212,7 +1212,7 @@ pub(crate) fn scalar_type_hint(
             // no `__toString`.
             ValueRef::Object(object) => {
                 let table = req.object_handlers(object.heap());
-                if let Some(text) = table.cast_object(req, *object, TypeTag::String)? {
+                if let Some(text) = table.cast_object(req, object, TypeTag::String)? {
                     return Ok(Some(text.hand_on()));
                 }
             }

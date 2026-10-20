@@ -1033,7 +1033,7 @@ fn method_exists(
     object_or_class: Untyped<Value>,
     method: PhpString,
 ) -> Result<bool, Thrown> {
-    let object = object_or_class.0.deref().as_object().copied();
+    let object = object_or_class.0.deref().as_object();
     let (class, is_object) = class_of_argument(req, object_or_class.0)?;
     let Some(class) = class else {
         return Ok(false);
@@ -1133,7 +1133,6 @@ fn property_exists(
         return Ok(true);
     }
     if is_object && let Some(object) = given.as_object() {
-        let object = *object;
         let table = req.object_handlers(object.heap());
         let name = name.to_vec();
         return table.has_property(req, object, &name, PropertyTest::Exists);

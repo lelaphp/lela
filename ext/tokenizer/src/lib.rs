@@ -375,7 +375,7 @@ impl PhpToken {
                 // (`Z/ext/tokenizer/tokenizer.c:166`), no owner of the
                 // table taken: the argument holds it while a property read
                 // or the `TypeError` reaches the program.
-                walk::foreach(req, *kinds, Hold::None, |req, row| -> walk::Step {
+                walk::foreach(req, kinds, Hold::None, |req, row| -> walk::Step {
                     let entry = row.value().deref();
                     match entry.as_ref() {
                         ValueRef::Int(n) => {
@@ -583,7 +583,7 @@ fn token_id(req: &mut Request, this: PhpObject) -> Result<i64, Thrown> {
 fn token_text(req: &mut Request, this: PhpObject) -> Result<PhpString, Thrown> {
     match this
         .prop(req, b"text")
-        .and_then(|text| text.deref().as_php_string().copied())
+        .and_then(|text| text.deref().as_php_string())
     {
         Some(text) => Ok(text),
         None => Err(throw_error(

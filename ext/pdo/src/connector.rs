@@ -795,7 +795,7 @@ impl ParameterMap {
     /// `position` stood for, a view the caller takes an owner of.
     pub(crate) fn name(&self, position: i64) -> Option<PhpString> {
         match self.table.get(&Key::Int(position))?.as_ref() {
-            ValueRef::Str(name) => Some(*name),
+            ValueRef::Str(name) => Some(name),
             _ => None,
         }
     }

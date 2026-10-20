@@ -525,7 +525,6 @@ pub(crate) fn create_callback(
         .value()
         .deref()
         .as_object()
-        .copied()
         .filter(|object| object.closure(req).is_some())
         .map(|object| Owner::take(req, object));
     req.state::<State>().callbacks.push(Callback {

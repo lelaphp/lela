@@ -1002,7 +1002,7 @@ fn define(
     let value = if let Some(array) = value.as_array()
         && value.is_refcounted()
     {
-        if !constant_array_is_acyclic(req, *array)? {
+        if !constant_array_is_acyclic(req, array)? {
             return Err(argument_error(
                 req,
                 "ValueError",
@@ -1010,7 +1010,7 @@ fn define(
                 "cannot be a recursive array",
             ));
         }
-        copy_constant_array(req, *array)?.into_value()
+        copy_constant_array(req, array)?.into_value()
     } else {
         Owner::take(req, value)
     };
@@ -1032,7 +1032,7 @@ fn constant_array_is_acyclic(req: &mut Request, array: PhpArray) -> Result<bool,
     // code of the program, and the array, being a constant's value, is
     // held by what defines it.
     let nested: Vec<PhpArray> = walk::rows(req, array)
-        .filter_map(|(_, v)| v.deref().as_array().copied())
+        .filter_map(|(_, v)| v.deref().as_array())
         .collect();
     for nested in nested {
         acyclic = constant_array_is_acyclic(req, nested);
@@ -1060,7 +1060,7 @@ fn copy_constant_array(req: &mut Request, array: PhpArray) -> Result<Owner<PhpAr
         let value = if let Some(nested) = value.as_array()
             && value.is_refcounted()
         {
-            copy_constant_array(req, *nested)?.into_value()
+            copy_constant_array(req, nested)?.into_value()
         } else {
             Owner::take(req, value)
         };
@@ -1538,10 +1538,10 @@ fn dump(req: &mut Request, value: &Value, level: usize) {
             .write(format!("{common}string({}) \"", s.len()).as_bytes());
         req.response_mut().write(s.as_bytes());
         req.response_mut().write(b"\"\n");
-    } else if let Some(array) = value.as_array().copied() {
+    } else if let Some(array) = value.as_array() {
         dump_array(req, common, array, level);
     } else if let Some(object) = value.as_object() {
-        dump_object(req, common, *object, level);
+        dump_object(req, common, object, level);
     } else if let Some(resource) = value.as_resource() {
         // `IS_RESOURCE`: the list's id and the type's name through
         // `zend_rsrc_list_get_rsrc_type`, which is `Unknown` once

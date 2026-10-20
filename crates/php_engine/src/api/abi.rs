@@ -33,8 +33,8 @@ mod marshal;
 pub use crate::fiber::{Coroutine, CoroutineEnd, CoroutineStatus, HoldsCoroutine};
 pub use crate::observer::{
     BeginHandler, EndHandler, ErrorNotice, FiberHandler, FiberStatus, FiberSwitchHandler, Observed,
-    ObservedFiber, ObserverHandlers, ObserverInit, OpcodeHandler, Opcodes, OpcodesDeclared,
-    Removed,
+    ObservedFiber, ObserverHandlers, ObserverInit, ObserverRegistered, OpcodeHandler, Opcodes,
+    OpcodesDeclared, Removed,
 };
 use crate::observer::{ClassLinked, ErrorObserver, FunctionDeclared};
 pub use crate::statement::{Statement, StatementHandler};
@@ -1524,7 +1524,22 @@ impl ExtensionBuilder {
     /// pays one load and one branch at the push and one at the return.
     #[must_use]
     pub fn observer(mut self, init: ObserverInit) -> ExtensionBuilder {
-        self.supplies.observers.push(init);
+        self.supplies.observers.push((init, None));
+        self
+    }
+
+    /// [`ExtensionBuilder::observer`] registered only where `registered`
+    /// says so of the engine's start, as `zend_test`'s `MINIT` registers
+    /// its observer under `zend_test.observer.enabled`: an observer not
+    /// registered is never asked, and counts for none of what a declared
+    /// observer changes, a native call's room among them.
+    #[must_use]
+    pub fn observer_when(
+        mut self,
+        init: ObserverInit,
+        registered: ObserverRegistered,
+    ) -> ExtensionBuilder {
+        self.supplies.observers.push((init, Some(registered)));
         self
     }
 

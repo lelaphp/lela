@@ -91,7 +91,7 @@ fn build_elem(
             out.extend_from_slice(b"\r\n");
             Ok(())
         }
-        ValueRef::Array(array) => build_elems(req, out, key, *array),
+        ValueRef::Array(array) => build_elems(req, out, key, array),
         _ => {
             let given = value_name(req, &value.deref());
             let message = format!("Header \"{name}\" must be of type array|string, {given} given");

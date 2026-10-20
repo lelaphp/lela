@@ -1765,13 +1765,13 @@ fn implode_frameless(
 ) -> Result<Owner<PhpString>, Thrown> {
     if req.frames().argument_count() < 2 {
         // `zend_parse_arg_array(arg1, &pieces, false, false)`.
-        let Some(pieces) = separator.value().as_array().copied() else {
+        let Some(pieces) = separator.value().as_array() else {
             return Err(not_an_array(req));
         };
         return implode_array(req, b"", true, pieces);
     }
     let glue = coerce_param(req, &separator.value(), &Type::String, 1)?;
-    let Some(glue) = glue.as_php_string().copied() else {
+    let Some(glue) = glue.as_php_string() else {
         return Err(php_ext::raising::fatal(
             req,
             "InternalError: a separator held as a string is no string",

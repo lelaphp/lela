@@ -34,7 +34,7 @@ impl Request {
 
     /// What the entry frame last returned, taken, `null` left in its place.
     pub(crate) fn take_returned(&mut self) -> Value {
-        std::mem::replace(&mut self.returned, Value::null())
+        std::mem::take(&mut self.returned)
     }
 
     /// Leave what a raise made pending where the loop reads it, php's
@@ -767,7 +767,7 @@ impl Request {
     fn previous_of(&self, throwable: PhpObject) -> Option<PhpObject> {
         throwable
             .prop(self, b"previous")
-            .and_then(|value| value.deref().as_object().copied())
+            .and_then(|value| value.deref().as_object())
     }
 
     /// Whether php's `EG(exception)` holds a throwable or an exit, or the

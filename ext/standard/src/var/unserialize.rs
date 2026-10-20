@@ -881,7 +881,7 @@ pub fn php_unserialize_with_options(
     };
     // A reference is unwrapped, per calling convention, after the delayed
     // calls, which may have changed what it holds.
-    if let Some(cell) = answer.as_php_ref().copied() {
+    if let Some(cell) = answer.as_php_ref() {
         let inner = Owner::take(req, cell.get());
         answer.give_up(req);
         return Ok(inner);
@@ -1026,7 +1026,7 @@ impl<'a> Unserializer<'a> {
         if !read? {
             return Ok(None);
         }
-        Ok(Some(value.as_php_ref().map_or(value, PhpRef::get)))
+        Ok(Some(value.as_php_ref().map_or(value, |v| v.get())))
     }
 
     /// `php_var_unserialize` of one value into a zval of the caller's
@@ -1045,7 +1045,7 @@ impl<'a> Unserializer<'a> {
             value.give_up(req);
             return read.map(|_| None);
         }
-        let Some(cell) = value.as_php_ref().copied() else {
+        let Some(cell) = value.as_php_ref() else {
             return Ok(Some(value));
         };
         let inner = Owner::take(req, cell.get());
@@ -1126,7 +1126,7 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
             ValueRef::Array(list) => {
                 let count = u32::try_from(list.len()).unwrap_or(u32::MAX);
                 let mut names = PhpArray::init_size(req, count)?;
-                if let Err(thrown) = allowed_names(req, &mut names, *list, function) {
+                if let Err(thrown) = allowed_names(req, &mut names, list, function) {
                     // `goto cleanup`, which frees what was added so far.
                     names.give_up(req);
                     return Err(thrown);
@@ -1458,7 +1458,7 @@ impl State<'_> {
                         return Ok(false);
                     }
                     let cell = if let Some(cell) = held.as_php_ref() {
-                        *cell
+                        cell
                     } else {
                         let owned = Owner::take(req, held);
                         let made = PhpRef::new(req, owned)?;

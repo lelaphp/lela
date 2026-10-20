@@ -340,7 +340,7 @@ fn cancelled(req: &Request, vars: PhpArray, key: &[u8]) -> bool {
         _ => None,
     });
     found
-        .and_then(|value| value.deref().as_array().copied())
+        .and_then(|value| value.deref().as_array())
         .and_then(|array| array.find(b"cancel_upload"))
         .and_then(|value| value.deref().as_bool())
         .unwrap_or(false)

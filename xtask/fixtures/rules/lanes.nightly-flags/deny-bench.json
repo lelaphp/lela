@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cargo xtask bench --jit force --subset Zend/tests","description":"Run the bench under the tier, a subset named"}}

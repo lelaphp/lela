@@ -579,7 +579,7 @@ fn literal_of(req: &Request, value: &Value) -> Option<ConstExpr> {
         ValueRef::Str(s) => ConstExpr::Str(s.as_bytes().into()),
         ValueRef::Array(array) => {
             let mut elements = Vec::new();
-            for (key, element) in walk::rows(req, *array) {
+            for (key, element) in walk::rows(req, array) {
                 let key = match key {
                     Key::Int(i) => ConstExpr::long(i),
                     Key::Str(s) => ConstExpr::Str(s.as_bytes().into()),

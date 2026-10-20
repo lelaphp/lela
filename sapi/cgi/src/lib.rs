@@ -542,6 +542,10 @@ fn describe(
         let user = php_sapi::cgi::user_ini(engine, &dir, doc_root);
         activated.extend(user.into_iter().map(|(k, v)| (k, v, IniOrigin::PerDir)));
     }
+    // `init_request_info`'s `estrdup` of the program's path, or the one
+    // `main` makes of the file a shell named in its place
+    // (`Z/sapi/cgi/cgi_main.c:1438, 2315, 2404`): one copy either way.
+    let path_copies = usize::from(path.is_some());
     let primary = Primary::of(path, invocation);
     // The request starts in the process's directory, and
     // `php_execute_script` enters the program's but under `-C`,
@@ -568,6 +572,7 @@ fn describe(
         body: php_sapi::Body::from(body),
         no_headers: invocation.head == Head::Quiet,
         response_code: info.response_code,
+        path_copies,
         ..php_sapi::cgi::web(&env, &info)
     };
     let (script_name, source) = match &primary {

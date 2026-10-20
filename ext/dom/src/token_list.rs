@@ -591,7 +591,7 @@ pub(crate) const PROPS: &[crate::props::Prop] = &[
 fn offset(req: &mut Request, value: &Value) -> Result<Option<i64>, Thrown> {
     let v = value.deref();
     Ok(match v.as_ref() {
-        ValueRef::Str(s) => match Key::lookup(*s) {
+        ValueRef::Str(s) => match Key::lookup(s) {
             Key::Int(n) => Some(n),
             Key::Str(_) => None,
         },

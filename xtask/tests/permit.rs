@@ -111,14 +111,16 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
             }
         }
         // `allow-main.json` is a neighbour in main's checkout, where a
-        // ticketed rule does not judge, and an `allow-starter*.json` one
+        // ticketed rule does not judge, an `allow-starter*.json` one
         // in a checkout whose operation the fixture's session started,
-        // which a walk does not record: each one's own test holds it.
+        // which a walk does not record, and an `allow-excused*.json` one
+        // under an `unless_argv` a person has yet to paste (#3068): each
+        // one's own test holds it.
         let neighbours = named("allow").into_iter().filter(|p| {
-            let starter = p
-                .file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with("allow-starter"));
-            !starter && (rule.within == Where::Anywhere || !p.ends_with("allow-main.json"))
+            let name = p.file_name().unwrap().to_string_lossy();
+            !name.starts_with("allow-starter")
+                && !unpasted(rule, &name)
+                && (rule.within == Where::Anywhere || !p.ends_with("allow-main.json"))
         });
         for neighbour in neighbours {
             let judgement = judge(&manifest, workspace(), &call(&neighbour)).unwrap();
@@ -130,6 +132,13 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
             );
         }
     }
+}
+
+/// An `allow-excused*.json` neighbour, the call an `unless_argv` lets
+/// through, while the tracked row carries none: a person has yet to paste
+/// it, and the row's own test holds it under the row as proposed (#3068).
+fn unpasted(rule: &Rule, name: &str) -> bool {
+    name.starts_with("allow-excused") && rule.predicate.unless_argv.is_none()
 }
 
 /// Every rule with a `tool` or a `scope` is either judged here, with its
@@ -282,6 +291,73 @@ fn bash(line: &str) -> Call {
         &serde_json::json!({"tool_name": "Bash", "tool_input": {"command": line}}).to_string(),
     )
     .unwrap()
+}
+
+/// The `lanes.nightly-flags` row #3052 ruled and #3068 proposes, as a
+/// person would paste it: `--jit` passes on `xtask phpt` where `--subset`
+/// names one subset, and `--full`, `--jit` with no subset and `xtask
+/// bench --jit` stay denied.
+const PROPOSED_NIGHTLY_FLAGS: &str = r#"
+[[rule]]
+id = "lanes.nightly-flags"
+tool = "Bash"
+deny_argv = ["--full", "--jit"]
+unless_argv = { "--jit" = "xtask phpt --subset" }   # grammar: unless_argv, a denied element let through where the phrase runs bounded by the option, as require_argv reads one: the tier's one-subset reading (#3052, #3068)
+with = ["xtask phpt", "xtask bench"]   # xtask however it is run: the cargo alias, cargo run -p xtask, a path, a variable the line assigns (#1860)
+text = "Nightly lanes run in CI only; run the per-crate subset, and the tier's `--jit` lane on one subset named by `--subset` (#3052)."
+"#;
+
+/// `lanes.nightly-flags`' fixtures under the row as proposed, pasted after
+/// the tracked manifest and taking its place: every `deny*.json` denied
+/// and every `allow*.json` let through. Under the row as tracked the same,
+/// save that until the paste the `allow-excused*.json` lines, the tier's
+/// one-subset reading, are denied with the rest (#3068).
+#[test]
+fn the_nightly_flags_let_the_tier_s_one_subset_reading_through() {
+    let text = std::fs::read_to_string(workspace().join("seams.toml")).unwrap();
+    let tracked = Manifest::parse(&text).unwrap();
+    let mut proposed = Manifest::parse(&(text + PROPOSED_NIGHTLY_FLAGS)).unwrap();
+    let at = proposed
+        .rules
+        .iter()
+        .position(|r| r.id == "lanes.nightly-flags")
+        .unwrap();
+    proposed.rules.remove(at);
+    let pasted = tracked
+        .rule("lanes.nightly-flags")
+        .is_some_and(|r| r.predicate.unless_argv.is_some());
+    let quiet = checkout("nightly-flags-quiet", None);
+    let dir = fixtures().join("rules/lanes.nightly-flags");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    for name in [
+        "allow-excused.json",
+        "deny-jit-full.json",
+        "deny-jit.json",
+        "deny-bench.json",
+    ] {
+        assert!(names.iter().any(|n| n == name), "{name}: {names:?}");
+    }
+    let denied = |manifest: &Manifest, name: &str| {
+        judge(manifest, quiet.path(), &call(&dir.join(name)))
+            .unwrap()
+            .findings
+            .iter()
+            .any(|f| f.rule == "lanes.nightly-flags")
+    };
+    for name in &names {
+        let expect = name.starts_with("deny");
+        assert_eq!(denied(&proposed, name), expect, "proposed row: {name}");
+        let excused = name.starts_with("allow-excused");
+        assert_eq!(
+            denied(&tracked, name),
+            expect || (excused && !pasted),
+            "tracked row: {name}"
+        );
+    }
 }
 
 /// The `git.no-verify` row #1001 proposes: `with` names git's `commit` and
@@ -3414,9 +3490,10 @@ fn the_nightly_rule_judges_what_the_call_runs_and_not_a_heredoc_that_cites_it() 
 /// A rule scoped `where = "ticketed"` is judged in a checkout whose branch
 /// records a ticket, but for an `allow-main*` call, the merge check's,
 /// which passes in main's checkout alone. A rule with an `exempt_label`
-/// asks the tracker, and an `allow-starter*` call passes an operation its
-/// session started, which a walk does not record: each is held by its
-/// own test.
+/// asks the tracker, an `allow-starter*` call passes an operation its
+/// session started, which a walk does not record, and an
+/// `allow-excused*` call an `unless_argv` yet to be pasted: each is held
+/// by its own test.
 #[test]
 fn every_bash_rule_holds_to_each_of_its_fixtures() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -3445,7 +3522,10 @@ fn every_bash_rule_holds_to_each_of_its_fixtures() {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
-        for name in names.iter().filter(|n| !n.starts_with("allow-starter")) {
+        for name in names
+            .iter()
+            .filter(|n| !n.starts_with("allow-starter") && !unpasted(rule, n))
+        {
             let root = match rule.within {
                 Where::Ticketed if name.starts_with("allow-main") => main.path(),
                 Where::Ticketed => ticketed.path(),

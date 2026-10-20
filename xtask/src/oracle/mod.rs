@@ -186,12 +186,10 @@ pub struct Pin {
     pub variant: BTreeMap<String, Variant>,
     /// `[fastcgi]`: the HTTP-to-FastCGI mapping `[sapi] fpm` is driven
     /// under for a host php does not ship (#2334); [`Pin::fastcgi`].
-    #[serde(default)]
     fastcgi: Option<Mapping>,
     /// `[closure]`: the Homebrew kegs the pinned binaries load, each at
     /// its version (#2657), held beside the digest. While the pin records
     /// none, nothing the binaries load is held.
-    #[serde(default)]
     pub(crate) closure: Option<closure::Closure>,
     /// How many times the digest was asserted through this pin; not a
     /// value of the file.
@@ -612,7 +610,6 @@ pub struct Normalise {
     /// stood, the module's load number in `php --re`'s first line, which
     /// is the oracle's build order and never the bundle's (#317). Absent
     /// from the pin, the number is compared as any other byte.
-    #[serde(default)]
     pub extension_number_token: Option<String>,
 }
 

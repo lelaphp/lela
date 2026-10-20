@@ -58,7 +58,7 @@ pub(super) fn exempted(root: &Path, rule: &Rule, commands: &[Argv]) -> bool {
 fn the_act(rule: &Rule, argv: &Argv) -> bool {
     let p = &rule.predicate;
     match &p.deny_argv {
-        Some(denied) => argv.denies(denied, &p.with),
+        Some(denied) => argv.denies(denied, &p.with, p.unless_argv.as_ref()),
         None => argv.invokes(&p.with),
     }
 }

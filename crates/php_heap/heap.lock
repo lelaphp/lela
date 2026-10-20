@@ -36,6 +36,7 @@ Arr::set_declared_rows
 Arr::set_has_empty_ind
 Arr::set_next_free
 Arr::str_find
+Arr::str_value_ref
 Arr::table_size
 Arr::unprotect
 Arr::value_ref
@@ -52,6 +53,10 @@ ChunkCache
 ChunkCache::new
 DeclaredRows
 Direction
+EmbeddedArr
+EmbeddedArr::arr
+EmbeddedArr::free_data
+EmbeddedArr::new
 EntryGuard
 Exponent
 Exponent::as_char
@@ -106,7 +111,9 @@ Heap::array_next_entry
 Heap::array_packed
 Heap::array_sized
 Heap::array_sort
+Heap::array_str_take
 Heap::array_str_update
+Heap::array_take_at
 Heap::array_update
 Heap::block
 Heap::block_resize
@@ -202,6 +209,7 @@ Heap::string_fresh
 Heap::string_safe_alloc
 Heap::string_truncate
 Heap::string_with
+Heap::symtable_clean
 Heap::symtable_to_proptable
 Heap::take_sensed
 Heap::trace_allocations
@@ -409,6 +417,7 @@ Zval::ptr
 Zval::reference
 Zval::resource
 Zval::set_fe_pos
+Zval::str_bytes
 Zval::string
 ZvalRef
 ZvalRef::read

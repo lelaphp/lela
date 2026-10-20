@@ -500,7 +500,7 @@ fn stdclass_or_string(
         ValueRef::Object(object) if stdclass.is_some_and(|class| object.class() == class) => {
             return Instance::from_value(req, value).map(|held| Some(Union::A(held)));
         }
-        ValueRef::Str(string) => return Ok(Some(Union::B(Owner::take(req, *string)))),
+        ValueRef::Str(string) => return Ok(Some(Union::B(Owner::take(req, string)))),
         ValueRef::Null if nullable => return Ok(None),
         ValueRef::Null if !strict => {
             php_ext::raising::arg_null_deprecated(req, 1, "string");
@@ -741,7 +741,7 @@ fn zend_call_method(
     arg2: Passed<Value>,
 ) -> Result<Owner<Value>, Thrown> {
     let (object, class) = match obj_or_class.value().as_ref() {
-        ValueRef::Object(object) => (Some(*object), object.class()),
+        ValueRef::Object(object) => (Some(object), object.class()),
         ValueRef::Str(name) => {
             let Some(class) = lookup_class(req, name.as_bytes())? else {
                 let text = format!(

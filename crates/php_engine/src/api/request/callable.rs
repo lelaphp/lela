@@ -440,11 +440,11 @@ impl Request {
         // `case IS_REFERENCE: goto again`.
         let held = value.deref();
         let mut fcc = Fcc::default();
-        if let Some(object) = held.as_object().copied() {
+        if let Some(object) = held.as_object() {
             return self.callable_object(held, object);
         }
         let mut strict = false;
-        let method = if let Some(array) = held.as_array().copied() {
+        let method = if let Some(array) = held.as_array() {
             if array.len() != 2 {
                 return Err("array callback must have exactly two members".into());
             }
@@ -460,7 +460,7 @@ impl Request {
                 return Err("second array member is not a valid method".into());
             };
             let method = method.to_vec();
-            if let Some(object) = first.as_object().copied() {
+            if let Some(object) = first.as_object() {
                 fcc.calling = Some(object.class());
                 fcc.object = Some(object);
             } else if let Some(class) = first.as_str_bytes() {

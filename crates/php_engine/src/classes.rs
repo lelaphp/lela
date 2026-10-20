@@ -452,7 +452,7 @@ impl ObjectHandlers for ClosureHandlers {
         left: &Value,
         right: &Value,
     ) -> Result<Option<Ordering>, Thrown> {
-        let (Some(a), Some(b)) = (left.as_object().copied(), right.as_object().copied()) else {
+        let (Some(a), Some(b)) = (left.as_object(), right.as_object()) else {
             return req.compare_objects(left, right);
         };
         let (Some(x), Some(y)) = (a.closure(req), b.closure(req)) else {
@@ -1181,14 +1181,14 @@ impl Closure {
         callback: Raw<Callable>,
     ) -> Result<Owner<Instance<Closure>>, Thrown> {
         let given = callback.value();
-        if let Some(object) = given.as_object().copied()
+        if let Some(object) = given.as_object()
             && object.closure(req).is_some()
         {
             return Ok(Owner::take(req, object).into_instance());
         }
         // A trampoline a `get_closure` handler made has no scope, which
         // `zend_create_closure_from_callable` refuses with no reason.
-        if let Some(object) = given.as_object().copied()
+        if let Some(object) = given.as_object()
             && req.handler_closure(object).is_some()
         {
             return Err(throw_over_pending(

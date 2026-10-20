@@ -534,10 +534,7 @@ fn stat_array(
     ty: Fs,
 ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let answer = php_stat(req, filename.as_bytes(), ty)?;
-    let array = answer
-        .as_array()
-        .copied()
-        .map(|array| Owner::take(req, array));
+    let array = answer.as_array().map(|array| Owner::take(req, array));
     answer.give_up(req);
     Ok(array.map_or(OrFalse::False, OrFalse::Value))
 }
@@ -691,10 +688,7 @@ fn filesize(req: &mut Request, filename: PhpString) -> Result<OrFalse<i64>, Thro
 #[php_function]
 fn filetype(req: &mut Request, filename: PhpString) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let answer = php_stat(req, filename.as_bytes(), Fs::Type)?;
-    let name = answer
-        .as_php_string()
-        .copied()
-        .map(|name| Owner::take(req, name));
+    let name = answer.as_php_string().map(|name| Owner::take(req, name));
     answer.give_up(req);
     Ok(name.map_or(OrFalse::False, OrFalse::Value))
 }

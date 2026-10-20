@@ -49,7 +49,7 @@ impl Request {
                 };
             }
             let evaluated = req.eval_returning(Some(at), code, name);
-            let returned = std::mem::replace(&mut req.returned, Value::null());
+            let returned = std::mem::take(&mut req.returned);
             let served = match req.fatal_of(evaluated) {
                 Ok(Evaluation::Served) if !req.is_pending() => return Ok(returned),
                 Ok(_) => Err(Thrown::of(req.take_pending_view())),

@@ -14,6 +14,7 @@ use crate::api::raising::Level;
 use crate::api::values::Value;
 use crate::supplied::Bail;
 use crate::supplied::chain::ErrorArgs;
+use crate::supplied::tell;
 
 use diagnostics::{Display, Message};
 
@@ -186,7 +187,14 @@ impl Request {
         // released after: the throwable's bytes as they stand, which
         // every display form writes.
         if let Ok(string) = self.string(message) {
-            crate::observer::uncaught(self, level, file, line, string.as_bytes());
+            crate::observer::error(
+                self,
+                level,
+                file,
+                line,
+                string.as_bytes(),
+                crate::observer::Told::Uncaught,
+            );
             let text = String::from_utf8_lossy(message);
             self.zend_error_cb(level, Bail::DontBail, string, &text, file, line);
             self.release(Value::string(string));
@@ -469,10 +477,7 @@ impl Request {
     ///
     /// [`ExtensionBuilder::program_ended`]: crate::api::abi::ExtensionBuilder::program_ended
     pub(crate) fn program_ended(&mut self) {
-        let shared = Arc::clone(&self.shared);
-        for (by, hook) in shared.supplied.program_ended.iter() {
-            self.serve_for(by, hook);
-        }
+        tell!(self, program_ended, |req, hook| hook(req));
     }
 
     /// The host's log for a fatal it took, `sapi_module.log_message`,

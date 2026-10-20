@@ -825,7 +825,7 @@ fn add_header(
         return out.set_symtable_str(req, name, value);
     };
     let mut list = if let Some(list) = previous.as_array() {
-        *list
+        list
     } else {
         let mut list = PhpArray::new(req)?;
         list.append(req, Owner::take(req, previous))?;

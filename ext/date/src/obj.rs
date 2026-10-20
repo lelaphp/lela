@@ -779,7 +779,7 @@ impl ObjectHandlers for DateHandlers {
         left: &Value,
         right: &Value,
     ) -> Result<Option<Ordering>, Thrown> {
-        let (Some(a), Some(b)) = (left.as_object().copied(), right.as_object().copied()) else {
+        let (Some(a), Some(b)) = (left.as_object(), right.as_object()) else {
             return Std.compare(req, left, right);
         };
         let (Some(da), Some(db)) = (a.native::<DateObj>(req), b.native::<DateObj>(req)) else {
@@ -899,7 +899,7 @@ impl ObjectHandlers for TzHandlers {
         left: &Value,
         right: &Value,
     ) -> Result<Option<Ordering>, Thrown> {
-        let (Some(a), Some(b)) = (left.as_object().copied(), right.as_object().copied()) else {
+        let (Some(a), Some(b)) = (left.as_object(), right.as_object()) else {
             return Std.compare(req, left, right);
         };
         let (Some(ta), Some(tb)) = (a.native::<TzObj>(req), b.native::<TzObj>(req)) else {

@@ -248,7 +248,7 @@ pub(crate) fn fetch_object(
         ));
     }
     let row = with_rows(req, on.object, |req, set| fetch_row(req, set, ASSOC))?;
-    let Some(array) = row.as_array().copied() else {
+    let Some(array) = row.as_array() else {
         return Ok(AsIs::new(row));
     };
     let made = new_object(req, target)?;
@@ -462,7 +462,7 @@ pub(crate) fn fetch_column(req: &mut Request, on: On, column: i64) -> Result<Col
         ));
     }
     let row = with_rows(req, on.object, |req, set| fetch_row(req, set, NUM))?;
-    let Some(array) = row.as_array().copied() else {
+    let Some(array) = row.as_array() else {
         row.give_up(req);
         return Ok(AsIs::new(Owner::bool(false)));
     };

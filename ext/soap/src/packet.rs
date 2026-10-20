@@ -450,7 +450,7 @@ fn read_body(
                     if v.has_name() {
                         let name = v.name();
                         if let Some(existing) = return_value.find(&name) {
-                            if let Some(arr) = existing.deref().as_array().copied() {
+                            if let Some(arr) = existing.deref().as_array() {
                                 let mut arr = Owner::take(req, arr);
                                 arr.append(req, tmp)?;
                                 return_value.set_str(req, &name, arr.into_value())?;

@@ -235,10 +235,9 @@ impl Serializer {
         let (held, is_ref, recorded) = match value.as_ref() {
             ValueRef::Reference(cell) => match cell.get().as_object() {
                 Some(object) => (Held::Object(object.index()), true, cell.get()),
-                None => (Held::Reference(*cell), true, *value),
+                None => (Held::Reference(cell), true, *value),
             },
             ValueRef::Object(object) => {
-                let object = *object;
                 if !in_rcn_array
                     && value.refcount() == 1
                     && !object.properties_shared()
@@ -379,9 +378,9 @@ fn write(
         ValueRef::Array(array) => {
             out.extend_from_slice(b"a:");
             let shared = !is_root && (in_rcn_array || refcount > 1);
-            nested(req, out, &value, *array, hash, shared, false)?;
+            nested(req, out, &value, array, hash, shared, false)?;
         }
-        ValueRef::Object(object) => object_value(req, out, *object, hash)?,
+        ValueRef::Object(object) => object_value(req, out, object, hash)?,
         _ => out.extend_from_slice(b"i:0;"),
     }
     Ok(())
@@ -504,7 +503,7 @@ fn nested(
             _ => *row.value(),
         };
         if let (Some(inner), Some(outer_array)) = (data.as_array(), outer.as_array())
-            && inner.is_same(*outer_array)
+            && inner.is_same(outer_array)
         {
             hash.add(req, outer, in_rcn_array);
             out.extend_from_slice(b"N;");
@@ -549,7 +548,7 @@ fn serialized_data(
     hash: &mut Serializer,
 ) -> Result<(), Thrown> {
     let data = locked(req, |req| call_method(req, &object, b"__serialize", &[]))?;
-    let Some(array) = data.as_array().copied() else {
+    let Some(array) = data.as_array() else {
         data.give_up(req);
         let shown = String::from_utf8_lossy(name).into_owned();
         return Err(throw_error(
@@ -689,7 +688,7 @@ fn sleep_serialized(
     hash: &mut Serializer,
 ) -> Result<(), Thrown> {
     let names = locked(req, |req| call_method(req, &object, b"__sleep", &[]))?;
-    let Some(list) = names.as_array().copied() else {
+    let Some(list) = names.as_array() else {
         names.give_up(req);
         let shown = String::from_utf8_lossy(name).into_owned();
         docref(

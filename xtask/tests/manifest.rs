@@ -162,6 +162,40 @@ fn a_deny_argv_element_of_no_known_shape_is_refused() {
     );
 }
 
+/// `unless_argv` excuses a `deny_argv` element by one `with` phrase and
+/// the option that bounds it (#3068): an element the row does not deny,
+/// a phrase it does not name, or an excuse with no option is refused,
+/// naming the row and the excuse.
+#[test]
+fn an_unless_argv_excuse_names_a_denied_element_and_one_with_phrase() {
+    let row = |excuse: &str| {
+        format!(
+            "{MINIMAL}\n[[rule]]\nid = \"x.lane\"\ntool = \"Bash\"\ndeny_argv = [\"--full\", \"--jit\"]\nunless_argv = {{ {excuse} }}\nwith = [\"xtask phpt\", \"xtask bench\"]\ntext = \"t\"\n"
+        )
+    };
+    let parsed = Manifest::parse(&row(r#""--jit" = "xtask phpt --subset""#)).unwrap();
+    assert_eq!(
+        parsed.rule("x.lane").unwrap().predicate.named(),
+        ["deny_argv"]
+    );
+    for excuse in [
+        r#""--census" = "xtask phpt --subset""#,
+        r#""--jit" = "xtask soak --subset""#,
+        r#""--jit" = "xtask phpt""#,
+    ] {
+        let err = Manifest::parse(&row(excuse)).unwrap_err().to_string();
+        assert!(
+            err.contains("x.lane") && err.contains("unless_argv"),
+            "{excuse}: {err}"
+        );
+    }
+    let text = format!(
+        "{MINIMAL}\n[[rule]]\nid = \"x.orphan\"\ntool = \"Bash\"\nrequire_argv = \"--subset\"\nunless_argv = {{ \"--jit\" = \"xtask phpt --subset\" }}\nwith = \"xtask phpt\"\ntext = \"t\"\n"
+    );
+    let err = Manifest::parse(&text).unwrap_err().to_string();
+    assert!(err.contains("`unless_argv` beside `require_argv`"), "{err}");
+}
+
 #[test]
 fn a_qualifier_without_its_predicate_is_refused() {
     let text = format!(

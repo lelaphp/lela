@@ -530,7 +530,7 @@ fn set_hook(
 /// fetches it and `php_stream_cast(PHP_STREAM_AS_STDIO)` casts it: the
 /// stream and its fd, or php's `TypeError` or warning.
 fn stream_of(req: &mut Request, value: &Value) -> Result<Option<(Stream, i32)>, Thrown> {
-    let Some(resource) = value.as_resource().copied() else {
+    let Some(resource) = value.as_resource() else {
         let text = format!(
             "{}(): supplied argument is not a valid File-Handle resource",
             req.frames().active_function_name()
@@ -632,7 +632,7 @@ fn set_stream(req: &mut Request, object: PhpObject, which: StreamOpt, value: &Va
 
 /// A list option: each element's string, one line each.
 fn set_list(req: &mut Request, object: PhpObject, option: i64, value: &Value) -> Set {
-    let Some(array) = value.deref().as_array().copied() else {
+    let Some(array) = value.deref().as_array() else {
         let text = format!(
             "{}(): The {} option must have an array value",
             req.frames().active_function_name(),
@@ -662,7 +662,7 @@ fn set_list(req: &mut Request, object: PhpObject, option: i64, value: &Value) ->
 /// body's bytes.
 fn set_post_fields(req: &mut Request, object: PhpObject, value: &Value) -> Set {
     let value = value.deref();
-    if let Some(array) = value.as_array().copied() {
+    if let Some(array) = value.as_array() {
         if array.is_empty() {
             let easy = easy_of(req, object)?;
             let code = easy.set_post_fields(req, b"");
@@ -679,7 +679,7 @@ fn set_post_fields(req: &mut Request, object: PhpObject, value: &Value) -> Set {
 /// `CURLOPT_SHARE`: a share kept by the easy one and by the
 /// object; anything else is ignored, as php ignores it.
 fn set_share(req: &mut Request, object: PhpObject, value: &Value) -> Set {
-    let Some(share) = value.deref().as_object().copied() else {
+    let Some(share) = value.deref().as_object() else {
         return saved(req, object, 0);
     };
     let Some(handle) = crate::share::share_of(req, share) else {

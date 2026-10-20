@@ -2354,7 +2354,7 @@ impl RecursiveTreeIterator {
         #[php(default = RecursiveTreeIterator::SELF_FIRST)] mode: Raw<i64>,
     ) -> Result<(), Thrown> {
         let this = this.object();
-        let Some(given) = iterator.value().as_object().copied() else {
+        let Some(given) = iterator.value().as_object() else {
             return Err(arg_type_error(
                 req,
                 1,
@@ -3229,7 +3229,7 @@ fn regex_run(
         Mode::Split => {
             regex_replace_data(req, this, None)?;
             let pieces = pattern.split_impl(req, subject.as_bytes(), -1, regex.preg_flags)?;
-            let count = pieces.as_array().map_or(0, PhpArray::len);
+            let count = pieces.as_array().map_or(0, |v| v.len());
             regex_replace_data(req, this, Some(pieces))?;
             Ok(Some(count > 1))
         }

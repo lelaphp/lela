@@ -290,9 +290,7 @@ pub(super) fn pathinfo(
         return Ok(Union::A(tmp));
     }
     // `RETVAL_COPY_DEREF` of the first element, then the array let go.
-    let first = tmp
-        .cursor_current()
-        .and_then(|value| value.as_php_string().copied());
+    let first = tmp.cursor_current().and_then(|value| value.as_php_string());
     let answer = match first {
         Some(first) => Ok(Owner::take(req, first)),
         None => PhpString::new(req, b""),

@@ -1287,7 +1287,7 @@ impl RecursiveArrayIterator {
             return Ok(None);
         };
         let value = value.deref();
-        if let Some(object) = value.as_object().copied() {
+        if let Some(object) = value.as_object() {
             if flags & Self::CHILD_ARRAYS_ONLY != 0 {
                 return Ok(None);
             }
@@ -1626,7 +1626,7 @@ impl Table {
     ) -> Result<Owner<PhpRef>, Thrown> {
         match self {
             Table::Array(owner, _) => {
-                if let Some(cell) = found.and_then(|v| v.as_php_ref().copied()) {
+                if let Some(cell) = found.and_then(|v| v.as_php_ref()) {
                     return Ok(Owner::take(req, cell));
                 }
                 let mut array = separated(req, owner)?;
@@ -1676,7 +1676,7 @@ fn hash_key(req: &mut Request, offset: &Value) -> Result<Option<Key>, Thrown> {
             // `ZSTR_EMPTY_ALLOC()`: the interned empty string, no owner.
             Key::Str(PhpString::interned(req, b"")?)
         }
-        ValueRef::Str(s) => Key::lookup(*s),
+        ValueRef::Str(s) => Key::lookup(s),
         ValueRef::Resource(r) => {
             let id = r.id();
             warning(
@@ -2458,7 +2458,7 @@ impl ObjectHandlers for Handlers {
         left: &Value,
         right: &Value,
     ) -> Result<Option<Ordering>, Thrown> {
-        let (Some(l), Some(r)) = (left.as_object().copied(), right.as_object().copied()) else {
+        let (Some(l), Some(r)) = (left.as_object(), right.as_object()) else {
             return Std.compare(req, left, right);
         };
         if l.native::<SplArrayObject>(req).is_none() || r.native::<SplArrayObject>(req).is_none() {
@@ -2620,11 +2620,11 @@ fn set_array(
         // one more owner (`ZVAL_COPY`); a shared one, and an immutable
         // one, whose count php keeps at two, copied (`zend_array_dup`).
         if given.is_refcounted() && given.refcount() == 1 {
-            Held::Array(Owner::take(req, *array))
+            Held::Array(Owner::take(req, array))
         } else {
             Held::Array(array.copy(req)?)
         }
-    } else if let Some(other) = given.as_object().copied() {
+    } else if let Some(other) = given.as_object() {
         let what = if crate::is_a(req, object.class(), b"ArrayIterator") {
             "ArrayIterator"
         } else {
