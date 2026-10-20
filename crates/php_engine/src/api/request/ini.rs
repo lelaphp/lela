@@ -503,7 +503,8 @@ impl Request {
     /// Whether the entry is `PHP_INI_PERDIR`: its declaration's
     /// `per_dir`, or the core table's.
     fn ini_per_dir(&self, name: &[u8]) -> bool {
-        extension_ini(&self.shared, name)
+        self.shared
+            .extension_ini(name)
             .map_or(Request::ini_modifiable(name).1, |decl| decl.per_dir)
     }
 
@@ -791,7 +792,7 @@ impl Request {
     /// `user`; an entry no extension declared is the core table's, which
     /// [`Request::ini_modifiable`] answers for.
     fn ini_user(&self, name: &[u8]) -> bool {
-        extension_ini(&self.shared, name).is_none_or(|decl| decl.user)
+        self.shared.extension_ini(name).is_none_or(|decl| decl.user)
     }
 
     /// A core entry's `modifiable` bits as [`IniDecl`] spells them,
@@ -1435,7 +1436,7 @@ impl Request {
         self.shared
             .ini_defaults()
             .iter()
-            .filter(|(name, _)| extension_ini(&self.shared, name).is_none())
+            .filter(|(name, _)| self.shared.extension_ini(name).is_none())
             .map(|(name, default)| {
                 let (user, per_dir, system) = Request::ini_modifiable(name);
                 let decl = IniDecl {
@@ -1747,7 +1748,7 @@ impl Request {
             .ini_defaults()
             .iter()
             .map(|(name, _)| name.as_slice())
-            .filter(|name| extension_ini(&shared, name).is_none())
+            .filter(|name| shared.extension_ini(name).is_none())
             .collect();
         let rows: Vec<(String, IniCell, IniCell)> = names
             .iter()
@@ -2135,17 +2136,6 @@ impl IniDisplayer {
 enum IniCell {
     Value(String),
     Displayed(String),
-}
-
-/// The declaration of the entry `name` among the extensions' own,
-/// `zend_hash_find_ptr(EG(ini_directives))` over what each extension
-/// registered; none for an entry of the core table or none at all.
-fn extension_ini<'s>(shared: &'s crate::engine::Shared, name: &[u8]) -> Option<&'s IniDecl> {
-    shared
-        .extensions
-        .iter()
-        .flat_map(|extension| extension.ini.iter())
-        .find(|decl| decl.name.0.as_ref() == name)
 }
 
 #[cfg(test)]

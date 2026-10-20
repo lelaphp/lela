@@ -839,43 +839,55 @@ fn mapped(
     array: PhpArray,
     arrays: Variadic<PhpArray>,
 ) -> Result<Option<Owner<PhpArray>>, Thrown> {
-    let arrays: Vec<PhpArray> = std::iter::once(array).chain(arrays.0).collect();
-    if let [input] = arrays[..] {
-        let Some(callback) = callback else {
-            return Ok(Some(Owner::take(req, input)));
-        };
-        if input.is_empty() {
-            return Ok(Some(Owner::take(req, input)));
-        }
-        let mut out = PhpArray::new(req)?;
-        // `ZEND_HASH_MAP_FOREACH_KEY_VAL(input, num_key, str_key,
-        // fci.params)` (`Z/ext/standard/array.c:6854`), no owner of the table taken:
-        // the argument holds it while the callback runs. An answer of
-        // nothing, a callback that threw past its frame, ends the walk with
-        // no array.
-        let walked = walk::foreach(req, input, Hold::None, |req, row| -> walk::Step {
-            let answer = call(req, &callback, &[*row.value()])?;
-            if matches!(answer.as_ref(), ValueRef::Undef) {
-                answer.give_up(req);
-                return Ok(ControlFlow::Break(()));
-            }
-            let key = Owner::take(req, row.key().clone());
-            out.set(req, key, answer)?;
-            Ok(ControlFlow::Continue(()))
-        });
-        match walked {
-            Ok(None) => {}
-            Ok(Some(())) => {
-                out.give_up(req);
-                return Ok(None);
-            }
-            Err(thrown) => {
-                out.give_up(req);
-                return Err(thrown);
-            }
-        }
-        return Ok(Some(out));
+    if !arrays.0.is_empty() {
+        let arrays: Vec<PhpArray> = std::iter::once(array).chain(arrays.0).collect();
+        return mapped_together(req, callback.as_ref(), &arrays);
     }
+    let Some(callback) = callback else {
+        return Ok(Some(Owner::take(req, array)));
+    };
+    if array.is_empty() {
+        return Ok(Some(Owner::take(req, array)));
+    }
+    let mut out = PhpArray::new(req)?;
+    // `ZEND_HASH_MAP_FOREACH_KEY_VAL(input, num_key, str_key,
+    // fci.params)` (`Z/ext/standard/array.c:6854`), no owner of the table taken:
+    // the argument holds it while the callback runs. An answer of
+    // nothing, a callback that threw past its frame, ends the walk with
+    // no array.
+    let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let answer = call(req, &callback, &[*row.value()])?;
+        if matches!(answer.as_ref(), ValueRef::Undef) {
+            answer.give_up(req);
+            return Ok(ControlFlow::Break(()));
+        }
+        let key = Owner::take(req, row.key().clone());
+        out.set(req, key, answer)?;
+        Ok(ControlFlow::Continue(()))
+    });
+    match walked {
+        Ok(None) => {}
+        Ok(Some(())) => {
+            out.give_up(req);
+            return Ok(None);
+        }
+        Err(thrown) => {
+            out.give_up(req);
+            return Err(thrown);
+        }
+    }
+    Ok(Some(out))
+}
+
+/// `array_map` over two arrays or more. A call of its own, so that what
+/// it holds is not in the frame a recursion through a one-array
+/// `array_map` stands on (#3022).
+#[inline(never)]
+fn mapped_together(
+    req: &mut Request,
+    callback: Option<&Callable>,
+    arrays: &[PhpArray],
+) -> Result<Option<Owner<PhpArray>>, Thrown> {
     // The arrays read at once by bucket position, as php reads each at its
     // `array_pos[i]` (`Z/ext/standard/array.c:6889`, `:6933`): the value at the next
     // bucket that holds one as it stands at the step, `null` past the end,
@@ -895,7 +907,7 @@ fn mapped(
                 None => Value::null(),
             })
             .collect();
-        let element = match &callback {
+        let element = match callback {
             None => {
                 let mut tuple = PhpArray::new(req)?;
                 for value in row {

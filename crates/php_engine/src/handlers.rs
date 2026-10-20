@@ -8867,8 +8867,7 @@ impl FetchFlag {
 /// (`Z/Zend/zend_compile.h:1089-1096`).
 const FETCH_REF: u32 = 1;
 const FETCH_DIM_WRITE: u32 = 2;
-/// `MAY_BE_DOUBLE` and `MAY_BE_ARRAY` (`Z/Zend/zend_type_info.h`).
-const MAY_BE_DOUBLE: u32 = 1 << 5;
+/// `MAY_BE_ARRAY` (`Z/Zend/zend_type_info.h`).
 const MAY_BE_ARRAY: u32 = 1 << 7;
 
 /// What [`property_place`] found: the property's place, the object and
@@ -14096,8 +14095,13 @@ fn static_prop_step(
     let stepped = match ty {
         None => stepped,
         Some(ty) if crate::ops::steps_past_int(&held, &stepped, &ty) => {
-            let (thrown, limit) =
-                crate::ops::incdec_prop_error(req, &ty, info.declaring, &name, increment);
+            let (thrown, limit) = crate::ops::incdec_prop_error(
+                req,
+                &ty,
+                info.declaring,
+                &name,
+                (increment, crate::ops::Holder::Property),
+            );
             req.release(held);
             req.release(stepped);
             // php writes the limit into the slot and raises beside it,
@@ -16968,7 +16972,7 @@ fn typed_step(
             &declared.ty,
             declared.declaring,
             bytes,
-            step.increment,
+            (step.increment, crate::ops::Holder::Property),
         );
         req.release(stepped);
         // The slot holds no cell another property types, which the
@@ -22388,10 +22392,7 @@ pub(crate) fn in_array<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let table = exec::constant(code, ConstIdx(op.op2));
-    let Some(table) = table.as_array().copied() else {
-        return Err(no_table("IN_ARRAY"));
-    };
+    let table = jump_table(code, op, "IN_ARRAY")?;
     let strict = op.extended_value != 0;
     let computed = unary_kernel(req, frame, code, op, |req, needle| {
         crate::ops::in_array(req, needle, table, strict).map(Value::bool)
@@ -22436,7 +22437,7 @@ pub(crate) fn case<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let computed = compared(req, frame, code, op, crate::ops::is_equal);
+    let computed = binary_kernel(req, frame, code, op, crate::ops::is_equal);
     smart_branch::<T, branch::Peeked>(req, frame, code, op, computed)
 }
 
@@ -22448,7 +22449,7 @@ pub(crate) fn case_strict<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let computed = compared(req, frame, code, op, crate::ops::is_identical);
+    let computed = binary_kernel(req, frame, code, op, crate::ops::is_identical);
     smart_branch::<T, branch::Peeked>(req, frame, code, op, computed)
 }
 
@@ -22773,7 +22774,9 @@ fn binary_by_kind(
 }
 
 /// [`binary`] up to the write: what the kernel computed, both operands
-/// freed.
+/// freed, `FREE_OP1` then `FREE_OP2`; `CASE` and `CASE_STRICT` keep
+/// `op1`, `FREE_OP2` alone, since the subject is read again by the next
+/// case.
 fn binary_kernel(
     req: &mut Request,
     frame: FrameRef,
@@ -22784,7 +22787,9 @@ fn binary_kernel(
     let left = exec::operand(req, frame, code, op.op1_type, op.op1);
     let right = exec::operand(req, frame, code, op.op2_type, op.op2);
     let computed = kernel(req, &left, &right);
-    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    if !matches!(op.opcode, Opcode::Case | Opcode::CaseStrict) {
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    }
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     computed
 }
@@ -23345,36 +23350,16 @@ fn step_through_typed_ref(
     increment: bool,
     strict: bool,
 ) -> RefStep {
-    if stepped.as_float().is_some() && held.as_int().is_some() {
-        let refusing = req
-            .ref_type_sources(cell.heap())
-            .iter()
-            .find(|source| source.ty.mask() & MAY_BE_DOUBLE == 0)
-            .map(|source| {
-                (
-                    source.declaring,
-                    php_unit::type_to_string(&source.ty),
-                    String::from_utf8_lossy(&source.name).into_owned(),
-                )
-            });
-        let Some((declaring, ty, name)) = refusing else {
-            return RefStep::Landed(stepped);
-        };
+    let refusing = req
+        .ref_type_sources(cell.heap())
+        .iter()
+        .find(|source| crate::ops::steps_past_int(held, &stepped, &source.ty))
+        .map(|source| (source.declaring, source.ty.clone(), source.name.clone()));
+    if let Some((declaring, ty, name)) = refusing {
         req.release(stepped);
-        let class = req.class_name(declaring);
-        let (word, end, bound) = if increment {
-            ("increment", "maximal", i64::MAX)
-        } else {
-            ("decrement", "minimal", i64::MIN)
-        };
-        let thrown = crate::api::raising::throw_error(
-            req,
-            "TypeError",
-            &format!(
-                "Cannot {word} a reference held by property {class}::${name} of type {ty} past its {end} value"
-            ),
-        );
-        return RefStep::Clamped(Value::int(bound), thrown);
+        let step = (increment, crate::ops::Holder::Reference);
+        let (thrown, limit) = crate::ops::incdec_prop_error(req, &ty, declaring, &name, step);
+        return RefStep::Clamped(limit, thrown);
     }
     let verdict = crate::ops::verify_ref_assignable(req, cell.heap(), &stepped, strict);
     match crate::ops::landed(req, stepped, verdict) {
@@ -23462,22 +23447,6 @@ fn incdec(
     }
 }
 
-/// The body `CASE` and `CASE_STRICT` share: [`binary`] with `op1` kept,
-/// `FREE_OP2` alone, since the subject is read again by the next case.
-fn compared(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-    op: &Opline,
-    kernel: fn(&mut Request, &Value, &Value) -> Result<Value, Thrown>,
-) -> Result<Value, Thrown> {
-    let left = exec::operand(req, frame, code, op.op1_type, op.op1);
-    let right = exec::operand(req, frame, code, op.op2_type, op.op2);
-    let computed = kernel(req, &left, &right);
-    exec::free_operand(req, frame, code, op.op2_type, op.op2);
-    computed
-}
-
 /// Where a jump-table opcode sends the frame: `ZEND_VM_SET_RELATIVE_OPCODE`
 /// to the target or to `extended_value`, or `ZEND_VM_NEXT_OPCODE` on to
 /// the chain. Every target is forward, so none is a safepoint site.
@@ -23489,20 +23458,16 @@ fn switched(req: &Request, frame: FrameRef, switched: Switched, op: &Opline) -> 
     }
 }
 
-/// The jump table a `SWITCH_LONG`, `SWITCH_STRING` or `MATCH` carries
-/// as the constant `op2` names, or [`no_table`]'s fatal.
+/// The table a `SWITCH_LONG`, `SWITCH_STRING`, `MATCH` or `IN_ARRAY`
+/// carries as the constant `op2` names, or the fatal for an `op2` that
+/// is no array, which no unit the compiler wrote has (design §10).
 fn jump_table(code: &OpArray, op: &Opline, opcode: &str) -> Result<PhpArray, Fatal> {
     let table = exec::constant(code, ConstIdx(op.op2)).as_array().copied();
-    table.ok_or_else(|| no_table(opcode))
-}
-
-/// The fatal for an opcode over a constant table, a jump table or
-/// `IN_ARRAY`'s, whose `op2` is no array, which no unit the compiler
-/// wrote has (design §10).
-fn no_table(opcode: &str) -> Fatal {
-    Fatal::error(format!(
-        "InternalError: {opcode} names a constant that is no table"
-    ))
+    table.ok_or_else(|| {
+        Fatal::error(format!(
+            "InternalError: {opcode} names a constant that is no table"
+        ))
+    })
 }
 
 /// `ZEND_VM_NEXT_OPCODE`: the same frame, at the opline after this one,

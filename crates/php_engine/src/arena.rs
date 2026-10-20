@@ -43,7 +43,7 @@
 //! row borrowed from the arena lives as long as the arena.
 
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use crate::api::call::{ClassNative, Function};
 use crate::api::request::{Declared, UserFunction};
@@ -205,6 +205,17 @@ pub(crate) struct Arena {
 pub(crate) struct Interned {
     pub(crate) names: Arc<php_heap::Strings>,
     pub(crate) strings: Arc<Mutex<php_heap::Strings>>,
+}
+
+impl Interned {
+    /// The table a unit's constant strings enter, its one publisher at a
+    /// time. The table is append-only and every string in it was
+    /// finished before it was published, so what a thread that panicked
+    /// holding the `Mutex` left is consistent, and a poisoned guard is
+    /// taken as it stands.
+    pub(crate) fn strings(&self) -> MutexGuard<'_, php_heap::Strings> {
+        self.strings.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 impl Arena {
