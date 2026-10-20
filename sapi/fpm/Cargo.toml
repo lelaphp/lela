@@ -23,9 +23,9 @@ name = "php-fpm"
 path = "src/main.rs"
 
 [dependencies]
-# The bundle's default set and `host`, the set every host links, whose
-# comment says why each (#1477, #3081).
-php_bundle = { path = "../../crates/php_bundle", features = ["host"] }
+# The bundle's default set and `one_thread`, the set a host serving on
+# one thread links, whose comment and `host`'s say why each (#1477, #3081).
+php_bundle = { path = "../../crates/php_bundle", features = ["one_thread"] }
 php_proto = { path = "../../crates/php_proto" }
 php_sapi = { path = "../../crates/php_sapi" }
 # The face its `cgi_module_entry`'s natives are declared with, as an

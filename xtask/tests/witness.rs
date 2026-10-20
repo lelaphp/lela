@@ -1140,8 +1140,9 @@ fn with_no_binary_built_the_linked_engine_carries_each_feature_extension() {
 }
 
 /// What makes the two above true, held where it is written: the bundle's
-/// `linked` feature is built of `default`, `host` and the extensions no
-/// host links, and between them they name every extension feature the
+/// `linked` feature is built of `default`, `one_thread` (`host` with pcntl
+/// and posix) and the extensions no host links, and between them they name
+/// every extension feature the
 /// bundle declares, so the linked engine is the extensions the oracle has
 /// and not the default set (harness §7, revision 43), `pcntl` among them
 /// as the CLI carries it (revision 84); `php-linked`, the binary the lanes
@@ -1149,7 +1150,7 @@ fn with_no_binary_built_the_linked_engine_carries_each_feature_extension() {
 /// links no bundle of its own (revision 84; #2166). `new-ext` writes a new
 /// crate into `default` and `host`, so an extension a branch adds is
 /// linked at its merge (#1252, #3081). A feature the bundle gains that
-/// none of the three names is this test red.
+/// none of the four names is this test red.
 #[test]
 fn php_linked_is_the_cli_with_every_extension_feature_and_xtask_links_none() {
     let bundle: toml::Value = toml::from_str(
@@ -1178,10 +1179,12 @@ fn php_linked_is_the_cli_with_every_extension_feature_and_xtask_links_none() {
     };
     let linked = named("linked");
     assert!(
-        linked.contains(&"default") && linked.contains(&"host"),
+        linked.contains(&"default") && linked.contains(&"one_thread"),
         "{linked:?}"
     );
-    let reached: Vec<&str> = [named("default"), named("host"), linked].concat();
+    let one_thread = named("one_thread");
+    assert!(one_thread.contains(&"host"), "{one_thread:?}");
+    let reached: Vec<&str> = [named("default"), named("host"), one_thread, linked].concat();
     for feature in &declared {
         assert!(
             reached.contains(feature),

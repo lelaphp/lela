@@ -25,8 +25,10 @@ path = "src/main.rs"
 
 [dependencies]
 # The bundle's default set and `host`, the set every host links, whose
-# comment says why each (#3081); this host's engine leaves out its `pcntl`
-# and `posix` (`php_bundle::Serving::Threads`).
+# comment says why each (#3081), without `one_thread`'s `pcntl` and
+# `posix`, which no host that serves requests on threads carries (design
+# §7.2): a fork of this process would copy its other request threads'
+# state in the middle of their work.
 php_bundle = { path = "../../crates/php_bundle", features = ["host"] }
 php_proto = { path = "../../crates/php_proto" }
 php_sapi = { path = "../../crates/php_sapi" }
@@ -47,3 +49,11 @@ tokio-rustls = { workspace = true }
 # `EACCES` and `ENOENT`, the errno values php-fpm's refusal of a script
 # reads and leaves (#2767); no package is added.
 libc = { workspace = true }
+
+[dev-dependencies]
+# pcntl and posix turned on for the tests' build, as one build of the
+# workspace turns them on for every host beside the CLI: the binary the
+# tests start is then built with them, and the bundle test holds that
+# makala leaves them out by its own choice
+# (`php_bundle::Serving::Threads`), never by cargo's features alone.
+php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix"] }

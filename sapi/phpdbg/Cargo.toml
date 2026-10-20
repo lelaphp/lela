@@ -21,9 +21,9 @@ name = "phpdbg"
 path = "src/main.rs"
 
 [dependencies]
-# The bundle's default set and `host`, the set every host links, whose
-# comment says why each (#1450, #3081).
-php_bundle = { path = "../../crates/php_bundle", features = ["host"] }
+# The bundle's default set and `one_thread`, the set a host serving on
+# one thread links, whose comment and `host`'s say why each (#1450, #3081).
+php_bundle = { path = "../../crates/php_bundle", features = ["one_thread"] }
 php_sapi = { path = "../../crates/php_sapi" }
 # The face its natives are declared with, as an extension declares its own
 # (ADR-0008, #1348).
