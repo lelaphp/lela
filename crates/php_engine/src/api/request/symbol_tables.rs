@@ -204,7 +204,21 @@ impl Request {
     /// why `$a = new A;` is still an owner while the shutdown
     /// functions are served and the destructor waits for
     /// [`Request::shutdown_destructors`], and the includer's for a code
-    /// frame, whose re-attach takes them back.
+    /// frame, whose re-attach takes them back. A fatal in nested code
+    /// leaves each frame's variables in the table for the shutdown
+    /// functions, as php's leaves them:
+    ///
+    /// ```php
+    /// register_shutdown_function(function () { $a = [1]; var_dump($GLOBALS['inner'], $GLOBALS['outer'], $GLOBALS['main']); });
+    /// $main = 'm';
+    /// eval('$outer = "o"; $main .= "2"; eval(\'$inner = "i"; $outer .= "!"; ini_set("memory_limit", "2M"); str_repeat("x", 4 << 20);\');');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %s on line 1
+    /// string(1) "i"
+    /// string(2) "o!"
+    /// string(2) "m2"
+    /// ```
     pub(crate) fn detach_symbol_table(&mut self, frame: FrameRef) {
         let Some((table, _)) = self.cv_table(frame) else {
             return;
@@ -406,10 +420,10 @@ impl Request {
     /// ```
     fn rebuilt_table(&mut self, last_var: u32) -> Option<Arr> {
         let Some(arr) = self.symtable_cache.pop() else {
-            return self
-                .array_sized(last_var, last_var == 0)
-                .ok()
-                .map(PhpArray::heap);
+            // `zend_new_array(last_var)`, its data laid down at once
+            // where there is a CV to append.
+            let packed = last_var == 0;
+            return self.array_sized(last_var, packed).ok().map(PhpArray::heap);
         };
         let extended = self.heap.array_extend(arr, last_var);
         if self.fatal_of(extended).is_err() {
