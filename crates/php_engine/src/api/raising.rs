@@ -314,6 +314,7 @@ pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) -> Result<(), T
         level,
         &format!("Constant {name} is deprecated{suffix}"),
     );
+    suffix.give_up(req);
     none_pending(req)?;
     Ok(())
 }

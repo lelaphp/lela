@@ -1512,6 +1512,7 @@ impl Request {
             String::from_utf8_lossy(used_by)
         );
         crate::api::raising::raise(self, level, &message);
+        suffix.give_up(self);
         none_pending(self)?;
         Ok(())
     }
