@@ -3,6 +3,8 @@ AbbrZone
 AbbrZone::abbr
 DateParts
 Offset
+Offset::is_dst
+Offset::offset
 TzKind
 Zone
 Zone::name

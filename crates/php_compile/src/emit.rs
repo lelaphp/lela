@@ -586,6 +586,10 @@ pub(crate) struct Emit<'a> {
     /// entry landing once its body has compiled, which is when php's
     /// `ZEND_ACC_DONE_PASS_TWO` lets a call site know it.
     functions_declared: Vec<(FunctionDecl, OpArray)>,
+    /// How many diagnostics had been raised when each of
+    /// `functions_declared` landed, which a refusal after it carries
+    /// ([`crate::Declared::raised_before`]).
+    raised_before: Vec<usize>,
     /// The functions the file declares that no name binds while it
     /// compiles, [`Unit::dynamic`]: php's `dynamic_func_defs` over every
     /// op array of the file, in the order `zend_add_dynamic_func_def`
@@ -1387,6 +1391,7 @@ impl<'a> Emit<'a> {
             attributed_constants: Vec::new(),
             keys_before: options.keys_before,
             functions_declared: Vec::new(),
+            raised_before: Vec::new(),
             dynamic: Vec::new(),
             cell: php_unit::UnitCell::default(),
             function_callables: 0,
@@ -1474,6 +1479,21 @@ pub(crate) fn unit(
     // it already rendered, so those travel with it.
     if let Err(mut refused) = emit.source_file() {
         refused.raised = emit.diagnostics;
+        // What php's compile had added to `CG(function_table)` before it
+        // bailed out, which nothing takes back.
+        if !emit.functions_declared.is_empty() {
+            let top_level = (0..emit.functions_declared.len())
+                .map(|at| TopLevel::Function(u32::try_from(at).unwrap_or(u32::MAX)))
+                .collect();
+            refused.declared = Some(Box::new(crate::Declared {
+                unit: Unit {
+                    functions: emit.functions_declared,
+                    top_level,
+                    ..Unit::default()
+                },
+                raised_before: emit.raised_before,
+            }));
+        }
         return Err(refused);
     }
     // `CG(zend_lineno) = last_lineno` before `zend_emit_final_return`
@@ -1496,6 +1516,7 @@ pub(crate) fn unit(
                 raised: emit.diagnostics,
                 thrown: false,
                 stage: crate::Stage::Compiling,
+                declared: None,
             });
         };
         dynamic.push(def);
@@ -1633,6 +1654,7 @@ fn headers_numbered(oplines: &[Opline], safepoints: &[OplineIdx]) -> Result<(), 
             raised: Vec::new(),
             thrown: false,
             stage: crate::Stage::Compiling,
+            declared: None,
         };
         if !op.opcode.is_safepoint_site() {
             return Err(refused("with no safepoint column for its number"));
@@ -1784,6 +1806,7 @@ impl<'a> Emit<'a> {
             raised: Vec::new(),
             thrown: false,
             stage: crate::Stage::Compiling,
+            declared: None,
         }
     }
 
@@ -3419,6 +3442,19 @@ impl<'a> Emit<'a> {
     /// wordings, the earlier declaration's file and first line named
     /// when it was a user function. A function declared inside a block,
     /// a loop or another body is [`Self::nested_function_decl`].
+    ///
+    /// php adds the function once its body has compiled, so what the body
+    /// raised comes before the redeclaration:
+    ///
+    /// ```php
+    /// function f() {}
+    /// function f(int $a = null) {}
+    /// ```
+    /// ```expect exit=255
+    /// Deprecated: f(): Implicitly marking parameter $a as nullable is deprecated, the explicit nullable type must be used instead in %s on line 3
+    ///
+    /// Fatal error: Cannot redeclare function f() (previously declared in %s:2) in %s on line 3
+    /// ```
     fn function_decl(&mut self, function: &Function) -> Result<(), CompileError> {
         let name = self.declare_symbol(Symbol::Function, &function.name)?;
         // `zend_begin_func_decl`, after the import check and before either
@@ -3432,6 +3468,12 @@ impl<'a> Emit<'a> {
         if self.depth != 1 {
             return self.nested_function_decl(function, &name);
         }
+        let line = self.line;
+        let declared = self.body(function, &name, None, false, FnFlags::default())?;
+        // "Only register the function after a successful compile": what
+        // the body raised is raised before a name the table holds is
+        // refused, at the declaration's first line.
+        self.line = line;
         let lowered = self.arena.lowercase(&name);
         if let Some((earlier, body)) = self
             .functions_declared
@@ -3451,10 +3493,10 @@ impl<'a> Emit<'a> {
                 String::from_utf8_lossy(&name)
             )));
         }
-        let declared = self.body(function, &name, None, false, FnFlags::default())?;
         let at = u32::try_from(self.functions_declared.len()).unwrap_or(u32::MAX);
         self.top_level.push(TopLevel::Function(at));
         self.functions_declared.push(declared);
+        self.raised_before.push(self.diagnostics.len());
         Ok(())
     }
 
@@ -6558,6 +6600,7 @@ impl<'a> Emit<'a> {
             raised: Vec::new(),
             thrown: false,
             stage: crate::Stage::Compiling,
+            declared: None,
         };
         if !on_target && !delayed {
             return Err(refused(format!(
@@ -7326,6 +7369,7 @@ impl<'a> Emit<'a> {
                 raised: Vec::new(),
                 thrown: false,
                 stage: crate::Stage::Compiling,
+                declared: None,
             }),
         }
     }
@@ -9960,6 +10004,7 @@ impl<'a> Emit<'a> {
             raised: Vec::new(),
             thrown: false,
             stage: crate::Stage::Compiling,
+            declared: None,
         };
         let name = self
             .constants
@@ -10072,6 +10117,7 @@ impl<'a> Emit<'a> {
                 raised: Vec::new(),
                 thrown: false,
                 stage: crate::Stage::Compiling,
+                declared: None,
             });
         }
         Ok(())
@@ -10689,6 +10735,7 @@ impl<'a> Emit<'a> {
             raised: Vec::new(),
             thrown: false,
             stage: crate::Stage::Compiling,
+            declared: None,
         }
     }
 
@@ -19726,6 +19773,7 @@ mod tests {
             attributed_constants: Vec::new(),
             keys_before: 0,
             functions_declared: Vec::new(),
+            raised_before: Vec::new(),
             dynamic: Vec::new(),
             cell: php_unit::UnitCell::default(),
             function_callables: 0,

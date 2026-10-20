@@ -42,6 +42,7 @@ pub use crate::api::request::Request;
 pub use php_compile::Hooked;
 pub use php_heap::{Fatal, FrameRef};
 
+mod crossing;
 mod frames;
 mod held;
 pub(crate) mod published;
@@ -49,9 +50,10 @@ mod sampled;
 #[cfg(dispatch = "tailcall")]
 mod tail;
 mod view;
+pub use crossing::{at_room, current, free_operands, primed, release, room, stand};
 pub use frames::{
-    Argument, Aside, Called, Evaluated, Under, begin, below, call, catches, entry, evaluate,
-    evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
+    Argument, Aside, Called, Compiled, Evaluated, Under, begin, below, call, catches, compile,
+    entry, evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
 };
 use held::{Kept, Units};
 pub use sampled::{Building, Sample, building, class_number, numbered_class, on_heap, sample};
@@ -172,11 +174,12 @@ impl Word {
 }
 
 /// The trace number of an execution, php's `EG(jit_trace_num)`
-/// (`jit-design.md` §4.9, revisions 9 and 23; design §5.11, revision
-/// 52): one word the engine keeps per execution and only the tier reads,
-/// nonzero while the tier records on that execution, which is its
-/// recording exclusion. As with [`Word`], zero is no trace and the bits
-/// are the tier's; where the engine saves, sets and restores it is
+/// (`jit-design.md` §4.9, revisions 23 and NEXT; design §5.11,
+/// revision 52): one word the engine keeps per execution and only the
+/// tier reads, the number of the trace executing on that execution. It
+/// excludes nothing: the tier's recording exclusion is the request's, as
+/// php's `JIT_G(tracing)` is. As with [`Word`], zero is no trace and the
+/// bits are the tier's; where the engine saves, sets and restores it is
 /// [`trace_num`]'s to say.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TraceNum(u32);
@@ -213,7 +216,7 @@ pub fn trace_num(req: &Request) -> TraceNum {
 }
 
 /// The trace number of the execution the request runs on written, as
-/// the tier's recording guard sets and clears it ([`trace_num`]).
+/// the tier sets it around a trace it executes ([`trace_num`]).
 pub fn set_trace_num(req: &mut Request, n: TraceNum) {
     req.set_trace_num(n);
 }

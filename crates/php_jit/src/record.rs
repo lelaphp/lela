@@ -22,20 +22,22 @@
 //! them. Where php's bad root cache remembers why a root failed, the
 //! word does ([`policy::bad_stop`]).
 //!
-//! While [`run`] runs, the running execution's trace number is set
-//! (`tier::trace_num`, revision 9), so a nested `execute` a native or a
-//! destructor serves does not record: its safepoints bump and do not
-//! claim (`dispatch`). A guard puts it back on every way out, a fatal or
-//! a panic included.
+//! While [`run`] runs, the request records ([`JitRequest`], php's
+//! `JIT_G(tracing)`; `jit-design.md` §4.9, revision 30), so a nested
+//! `execute` a native, a destructor or a fiber serves does not record:
+//! its safepoints bump and do not claim (`dispatch`). A guard clears it
+//! on every way out, a fatal, a panic and the unwind that destroys a
+//! fiber suspended inside the recording included.
 
 use std::ops::{Deref, DerefMut};
 
 use php_engine::tier::{
     self, Building, Epoch, Fatal, FrameRef, FuncRef, Request, SafepointIdx, Sample, Stepped,
-    TraceNum, UnitView,
+    UnitView,
 };
 use php_unit::{OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
+use crate::JitRequest;
 use crate::policy::{self, Policy, State};
 use crate::table::TraceId;
 use crate::types::ExitId;
@@ -333,25 +335,55 @@ const MAX_RET_DEPTH: u32 = 4;
 /// takes before its first opline.
 const HEAD: u32 = 2;
 
-/// The trace number a recording runs at: none of a trace's, which are
-/// below `2^24`, so a nested `execute` reads it as recording and no
-/// compiled trace's number is ever taken for it.
-pub(crate) const RECORDING: TraceNum = TraceNum::from_raw(u32::MAX);
+/// Whether a recording is under way on the request, on whichever
+/// execution: php's `JIT_G(tracing)`, which `zend_jit_trace_hot_root`
+/// tests before it records (`Z/ext/opcache/jit/zend_jit_trace.c:8140`).
+///
+/// A fiber suspended inside its own recording: `$main`'s recording stops
+/// at the `eval`, whose code is no root, so the fiber's `body()` roots;
+/// while it stands suspended the request records, and the resumer's hot
+/// `work()` roots nothing; destroying the fiber unwinds its recording,
+/// and the next `work()` roots (#2999's ruling).
+///
+/// ```php
+/// function body() { Fiber::suspend(1); echo "never\n"; }
+/// function work() { return 2; }
+/// eval('$f = new Fiber("body"); $f->start(); echo work(), "\n"; $f = null; echo work(), "\n"; exit;');
+/// ```
+/// ```expect regime=jit-inline process
+/// 2
+/// 2
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:4
+/// ---- TRACE 1 stop (exit to VM interpreter)
+/// ---- TRACE 1 compiled
+///
+/// ---- TRACE 2 start (enter) body() %s:2
+/// ---- TRACE 2 abort (exception)
+///
+/// ---- TRACE 2 start (enter) work() %s:3
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+///
+/// ```
+pub(crate) fn recording(req: &mut Request) -> bool {
+    req.state::<JitRequest>().recording
+}
 
-/// The running execution's trace number set for the length of a
-/// recording, as php's `JIT_G(tracing)` is, and put back on drop, so a
-/// fatal out of a step or a panic leaves no execution recording. Holds
-/// the request and lends it on.
+/// The request recording for the length of a recording, as php sets
+/// `JIT_G(tracing)` around its recorder (`zend_jit_trace.c:8170-8173`),
+/// and clear again on drop, so a fatal out of a step, a panic, or the
+/// unwind that destroys a fiber suspended inside the recording leaves the
+/// request free to record. Holds the request and lends it on.
 struct Recording<'r> {
     req: &'r mut Request,
-    was: TraceNum,
 }
 
 impl<'r> Recording<'r> {
     fn set(req: &'r mut Request) -> Recording<'r> {
-        let was = tier::trace_num(req);
-        tier::set_trace_num(req, RECORDING);
-        Recording { req, was }
+        req.state::<JitRequest>().recording = true;
+        Recording { req }
     }
 }
 
@@ -371,7 +403,7 @@ impl DerefMut for Recording<'_> {
 
 impl Drop for Recording<'_> {
     fn drop(&mut self) {
-        tier::set_trace_num(self.req, self.was);
+        self.req.state::<JitRequest>().recording = false;
     }
 }
 

@@ -70,7 +70,7 @@ use crate::manifest::{Edge, LockCeiling, Manifest, Seam, Section};
 use crate::reading::{Reading, Status, Store};
 use crate::sources::Standing;
 
-use inventory::{Inventory, Leaf, uses};
+use inventory::{Inventory, Leaf, kernels_named, uses};
 use lock::{Block, Diff, Lock, list};
 use surfaces::Surfaces;
 use workspace::{Crates, Present};
@@ -407,12 +407,18 @@ fn hold_lock<'s>(
                 list(&diff.missing, 8)
             ));
         }
-        // An allowlist may name more than its consumer imports today.
-        if !diff.stale.is_empty() && !seam.is_some_and(|s| s.allowlist) {
+        // An allowlist may name more than its consumer imports today; the
+        // kernels section is generated, never kept.
+        let generated = block.name.as_deref() == Some(KERNELS);
+        if !diff.stale.is_empty() && (generated || !seam.is_some_and(|s| s.allowlist)) {
             problems.push(format!(
                 "{} lines of {shown}{at} name no {}: {}",
                 diff.stale.len(),
-                kind.line(),
+                if generated {
+                    "kernel a kernels! list names"
+                } else {
+                    kind.line()
+                },
                 list(&diff.stale, 8)
             ));
         }
@@ -540,7 +546,8 @@ fn strangers(crates: &Crates, seam: &Seam) -> Result<Vec<String>> {
 /// to the first section the consumer reads, where the diff finds it
 /// missing; one listed only under a section the consumer does not read is
 /// a failure, `kernels` being `php_jit`'s alone. An allowlist keeps every
-/// line it lists in a section the manifest names.
+/// line it lists in a section the manifest names, but [`KERNELS`], which
+/// is generated.
 fn sections(
     manifest: &Manifest,
     crates: &Crates,
@@ -548,16 +555,28 @@ fn sections(
     shown: &str,
     committed: Option<&Lock>,
 ) -> Result<(Vec<Block>, Vec<String>)> {
-    let listed = |section: &Section| committed.and_then(|l| l.section(section.name()));
+    let lines = |section: &Section| {
+        let listed = committed.and_then(|l| l.section(section.name()));
+        listed.map(|b| b.lines.clone()).unwrap_or_default()
+    };
+    let others: BTreeSet<String> = (seam.sections.iter())
+        .filter(|s| s.name() != KERNELS)
+        .flat_map(lines)
+        .collect();
+    let kernels: BTreeSet<String> = kernel_lines(crates, seam)?
+        .difference(&others)
+        .cloned()
+        .collect();
+    let held = |section: &Section| match section.name() {
+        KERNELS => kernels.clone(),
+        _ => lines(section),
+    };
     let mut blocks: Vec<Block> = seam
         .sections
         .iter()
         .map(|section| {
-            let kept = listed(section).filter(|_| seam.allowlist);
-            Block::of(
-                Some(section.name()),
-                kept.map(|b| b.lines.clone()).unwrap_or_default(),
-            )
+            let kept = (seam.allowlist || section.name() == KERNELS).then(|| held(section));
+            Block::of(Some(section.name()), kept.unwrap_or_default())
         })
         .collect();
     let mut problems = Vec::new();
@@ -567,10 +586,7 @@ fn sections(
             continue;
         };
         for line in imports {
-            let under = seam
-                .sections
-                .iter()
-                .position(|s| listed(s).is_some_and(|b| b.lines.contains(&line)));
+            let under = seam.sections.iter().position(|s| held(s).contains(&line));
             match under {
                 Some(at) if !reads(&seam.sections[at]) => problems.push(format!(
                     "{consumer} imports {line}, which {shown} lists under [{}], read by {} alone",
@@ -587,6 +603,32 @@ fn sections(
         }
     }
     Ok((blocks, problems))
+}
+
+/// The section of a sectioned lock that no committed line keeps
+/// (`jit-design.md` §5.3): every `php_engine` path a `kernels!` list of
+/// a consumer that reads it names, which no other section lists.
+const KERNELS: &str = "kernels";
+
+/// The paths the `kernels!` lists of the seam's [`KERNELS`] readers name
+/// ([`kernels_named`]); none where the seam has no such section.
+fn kernel_lines(crates: &Crates, seam: &Seam) -> Result<BTreeSet<String>> {
+    let mut out = BTreeSet::new();
+    let Some(section) = seam.sections.iter().find(|s| s.name() == KERNELS) else {
+        return Ok(out);
+    };
+    for krate in crates.iter() {
+        if section
+            .readers(seam)
+            .iter()
+            .any(|r| matches(r, &krate.name))
+        {
+            for file in krate.sources()? {
+                out.extend(kernels_named(&file)?);
+            }
+        }
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------- crates

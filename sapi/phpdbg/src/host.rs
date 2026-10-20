@@ -51,10 +51,7 @@ pub fn serve(engine: &Engine, mut s: Session) -> i32 {
                 if let Some(args) = args {
                     set_arguments(&mut s, &args);
                 }
-                if s.init_due
-                    && let Some(refused) = refused(engine, &s)
-                {
-                    s.refused = refused;
+                if s.init_due && refuses(engine, &s) {
                     s.context = Context::Refused;
                     s.init_runs = true;
                     Plan::Init
@@ -64,28 +61,19 @@ pub fn serve(engine: &Engine, mut s: Session) -> i32 {
             }
             Some(Stop::Idle) => Plan::Idle,
             Some(Stop::Clean | Stop::Exec) | None => {
-                if s.exec.is_none() {
+                // No context, or one the compiler refused, which the
+                // prompt compiles again in the request.
+                if s.exec.is_none() || s.context == Context::Refused {
                     Plan::Idle
-                } else if s.context == Context::Refused {
-                    if s.refused.is_empty() {
-                        s.refused = refused(engine, &s).unwrap_or_default();
-                    }
-                    Plan::Idle
-                } else if std::mem::take(&mut s.exec_in_log)
-                    && let Some(refused) = refused(engine, &s)
-                {
+                } else if std::mem::take(&mut s.exec_in_log) && refuses(engine, &s) {
                     // `exec`'s compile inside the log: its refusal is
                     // logged nowhere and bails out of the log with its
                     // guard left set, to the prompt outside it.
-                    s.refused = refused;
                     s.context = Context::Refused;
                     s.status = Some(255);
                     s.out.stick_log();
                     Plan::Idle
-                } else if s.init_due
-                    && let Some(refused) = refused(engine, &s)
-                {
-                    s.refused = refused;
+                } else if s.init_due && refuses(engine, &s) {
                     s.context = Context::Refused;
                     Plan::Init
                 } else {
@@ -214,6 +202,11 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
     if std::mem::take(&mut s.inline_run) {
         inline_ran(s, plan);
     } else {
+        // `run`'s `phpdbg_clean(1, 0)` once its program is over lets the
+        // line the cycle parsed last go.
+        if execution == Execution::Run && s.stopped.is_none() {
+            s.command_line = None;
+        }
         stopped(s, execution, cycle_ended);
     }
     // The next cycle's `main` sets `PHPDBG_G(flags)` from the line again
@@ -286,7 +279,7 @@ fn inline_ran(s: &mut Session, plan: Plan) {
     // A startup run the init files counted resubmits the line the last
     // cycle kept, which bails out at once, where it kept one.
     let counted = std::mem::take(&mut s.startup_run);
-    if plan == Plan::Run || counted && !s.resubmit {
+    if plan == Plan::Run || counted && s.first_command.is_none() {
         // `-rr` quits whatever the answer. Else a yes asks for the run
         // again and a no does not; the input's end bails out quitting,
         // which the cycle being cleaned turns into its end, so the
@@ -302,7 +295,9 @@ fn inline_ran(s: &mut Session, plan: Plan) {
             return;
         }
         match answer {
-            input::Answer::Yes if !s.read_after_run => s.stopped = Some(Stop::Restart(None)),
+            input::Answer::Yes if s.command_line.is_none() => {
+                s.stopped = Some(Stop::Restart(None));
+            }
             input::Answer::No => cycle_notice(s),
             input::Answer::Yes | input::Answer::End => {}
         }
@@ -348,24 +343,18 @@ fn cycle_notice(s: &mut Session) {
     input::forget(s);
 }
 
-/// What the compiler says where the execution context does not compile,
-/// learned from a lint of it, whose sink holds no session, so
-/// the log stops at no prompt: php runs the init files before its
-/// compile, so a context that will be refused has them run first and
-/// the log written after them, in a request of their own that the
-/// prompt then stands in ([`crate::debugger`]'s `Plan::Init`). None
-/// where it compiles.
-fn refused(engine: &Engine, s: &Session) -> Option<Vec<out::Written>> {
+/// Whether the compiler refuses the execution context, learned from a
+/// lint of it whose sink writes nothing: php runs the init files before
+/// its compile, so a context that will be refused has them run first and
+/// its compile after them, in a request of their own that the prompt then
+/// stands in ([`crate::debugger`]'s `Plan::Init`), where the compile is
+/// made again and says what it says ([`prompt::refused_again`]).
+fn refuses(engine: &Engine, s: &Session) -> bool {
     let mut description = describe(s, Plan::Hold);
     description.file_handles = None;
     description.exit_status = 0;
-    let (linted, kept) = engine.lint(description, Box::new(out::Kept::default()));
-    let kept: Box<dyn std::any::Any> = kept;
-    let written = kept
-        .downcast::<out::Kept>()
-        .map(|kept| kept.written)
-        .unwrap_or_default();
-    (linted.exit_code != 0).then_some(written)
+    let (linted, _) = engine.lint(description, Box::new(out::Unwritten));
+    linted.exit_code != 0
 }
 
 /// `run`'s arguments, split as php's `run` splits them

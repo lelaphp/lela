@@ -272,12 +272,29 @@ stdin = "r\nr\nq\n"
 # Under `-r` php's startup run compiles a context that does not compile once
 # the session is fully started, so its log stands at a prompt, and nothing is
 # logged from there: a `run` or a `print exec` refused again writes nothing,
-# and `ev` no warning.
+# and `ev` no warning. Under `display_errors=1` the warning is displayed: a
+# parse error leaves `zend_compile` as it returns, so `compile_file` emits
+# its record and stops it before phpdbg renders the `ParseError`.
 [[line]]
 name = "a-refusal-inside-the-log-leaves-its-guard-set"
 args = ["-qrb", "-n", "{dir}/t.php"]
 files = { "t.php" = "<?php\nfunction (\n" }
 stdin = "ev 2\nr\nev $x\nprint exec\nr\nq\n"
+[[line.then]]
+args = ["-qrb", "-n", "-d", "display_errors=1", "{dir}/t.php"]
+
+# The same past a compile error, which bails out of `zend_compile` past
+# `compile_file`'s `zend_emit_recorded_errors`, so `EG(record_errors)` stands
+# on with the fatal held: `ev`'s warning is held too, logged nowhere and
+# displayed nowhere (#2901), and the next compile emits the record, its
+# fatal bailing out ahead of its own.
+[[line]]
+name = "a-compile-error-s-record-holds-back-an-ev-warning"
+args = ["-qrb", "-n", "-d", "display_errors=1", "{dir}/t.php"]
+files = { "t.php" = "<?php\n$a = 1;\nbreak 2;\n" }
+stdin = "ev 2\nr\nev $x\nprint exec\nr\nq\n"
+[[line.then]]
+args = ["-qrb", "-n", "{dir}/t.php"]
 
 # Such a refusal bails out of the log past the line that clears its guard, so
 # nothing is logged after it either.
@@ -363,6 +380,32 @@ files = { "t.php" = "<?php\n$a = 1;\nbreak 2;\n" }
 stdin = "print exec\nprint exec\nc\nprint exec\nq\n"
 streams = "merged"
 
+# A context that declares functions before its refusal: php declares each as
+# its compile finishes it and the fatal's jump takes none back, so they stand in
+# the request (#2900). The second compile, `print exec`'s, records its own
+# deprecation behind the first's record, still standing, and meets `f` as
+# `Cannot redeclare`, whose fatal emits that record first: the first's
+# fatal bails out ahead of it, inside the log, and its prompt's `print exec`
+# compiles a third time with no record standing, its deprecation and its
+# `Cannot redeclare` displayed and logged nowhere, bailing out of the log to
+# the prompt outside it, where `info funcs` lists both functions and a fourth
+# compile emits the record the third left standing, the same two displayed.
+[[line]]
+name = "a-second-compile-of-a-refused-context-meets-its-functions"
+args = ["-qb", "-n", "-d", "display_errors=1", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f(int $a = null) {}\nfunction g(int $b = null) {}\nbreak 2;\n" }
+stdin = "print exec\nprint exec\nc\ninfo funcs\nprint exec\nq\n"
+streams = "merged"
+
+# The same under `-r`, `run` compiling it after the startup run's refusal
+# left its log: `Cannot redeclare` logged, listed and displayed.
+[[line]]
+name = "under-r-a-run-after-a-refusal-meets-its-functions"
+args = ["-qrb", "-n", "-d", "display_errors=1", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f(int $a = null) {}\nfunction g(int $b = null) {}\nbreak 2;\n" }
+stdin = "ev 1\nc\nr\nq\n"
+streams = "merged"
+
 # The auto compile under `-r` comes after the init files whatever they left:
 # where their code bailed out, its displays come before the startup run asks
 # to restart (`n`, the session at the prompt); php is fully started after it,
@@ -382,6 +425,29 @@ name = "under-r-a-restart-s-auto-compile-quit-inside-its-log-leaves-the-status"
 args = ["-qrb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
 files = { "t.php" = "<?php\nfunction f(int $a = null) {}\nfunction g(int $b = null) {}\nbreak 2;\n", "init" = "ev ini_set(\"memory_limit\", \"2M\")\nev str_repeat(\"x\", 4 << 20)\n" }
 stdin = "y\nq\n"
+streams = "merged"
+
+# The restarted cycle's startup run is not `run` but the line the cycle
+# before parsed last, `first_command`, here the init file's `ev` (#2912): `c`
+# leaves the auto compile's invisible log prompt, its fatal displayed, and
+# the resubmitted `ev` meets the memory limit again, whose fatal emits the
+# record the refusal left standing first, the refusal's fatal last with the
+# trace of where the `ev` stands, which bails out of it to the prompt; `ev`'s
+# `zend_catch` writes the status 0, and nothing asks to restart again.
+[[line]]
+name = "under-r-a-restart-resubmits-the-line-the-cycle-before-parsed-last"
+args = ["-qrb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f(int $a = null) {}\nfunction g(int $b = null) {}\nbreak 2;\n", "init" = "ev ini_set(\"memory_limit\", \"2M\")\nev str_repeat(\"x\", 4 << 20)\n" }
+stdin = "y\nev 1\nc\nq\n"
+streams = "merged"
+
+# The same over a context that compiles: the resubmitted `ev` meets the
+# memory limit again, and the prompt stands where nothing executes.
+[[line]]
+name = "a-restart-resubmits-the-init-file-s-line-over-a-context-that-compiles"
+args = ["-qrb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\necho \"hi\\n\";\n", "init" = "ev ini_set(\"memory_limit\", \"2M\")\nev str_repeat(\"x\", 4 << 20)\n" }
+stdin = "y\nev 7\nq\n"
 streams = "merged"
 
 # `run` with arguments in the init file rebuilds `argv` in the request the

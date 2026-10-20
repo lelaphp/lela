@@ -729,14 +729,14 @@ fn eval(
     let in_scope = match node {
         Some(n) if register && modern => {
             crate::private::with_mapper(req, this, |mapper, req| mapper.in_scope(req, n, false))?
-                .unwrap_or_default()
         }
-        _ => Vec::new(),
+        _ => None,
     };
+    let list = in_scope.as_ref().map_or(&[][..], |s| &s.list);
     let scope = match (register, modern) {
         (false, _) => Scope::None,
         (true, false) => Scope::InScope,
-        (true, true) => Scope::List(&in_scope),
+        (true, true) => Scope::List(list),
     };
     let at = CallbacksAt {
         object: this,
@@ -746,9 +746,11 @@ fn eval(
     let mut handler = |req: &mut Request, called: Called, operands: Vec<Operand>| {
         XPathCallbacks::call(req, at, called, operands, modern, &mut proxy)
     };
-    let Some((answer, raised, thrown)) =
-        ffi::XPath::eval_held(req, id, expr, node, scope, &mut handler)
-    else {
+    let evaluated = ffi::XPath::eval_held(req, id, expr, node, scope, &mut handler);
+    if let Some(in_scope) = in_scope {
+        in_scope.free(req);
+    }
+    let Some((answer, raised, thrown)) = evaluated else {
         return Err(throw_error(req, "Error", "Invalid XPath Context"));
     };
     let mut raised = raised;

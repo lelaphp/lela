@@ -3,10 +3,10 @@
 //! sealed word, and with the running execution recording; then the
 //! machine on real requests through `Lane`, the tier as the `jit` build
 //! binds it: one `TRACE start` for a destructor's hot loop inside a
-//! recording and a second root on the next request, the trace number
-//! none again after a recording a panic unwound, a fiber suspended
-//! inside a recording that leaves its resumer recording, and no word
-//! written under `Off`.
+//! recording and a second root on the next request, the request's
+//! exclusion clear again after a recording a panic unwound, a fiber
+//! suspended inside a recording that keeps its resumer from recording
+//! until the fiber is destroyed, and no word written under `Off`.
 
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::Ordering;
@@ -19,7 +19,7 @@ use php_unit::{OpArray, OplineIdx, Unit};
 
 use super::{Visited, visit};
 use crate::policy::{self, Holder, Outcome, State};
-use crate::record::{Start, Stop};
+use crate::record::{self, Start, Stop};
 use crate::table::TraceId;
 use crate::testing::{self, Lane, function_of};
 use crate::types::ExitId;
@@ -151,7 +151,7 @@ fn visit_as_a_table_over_state_and_start() {
     assert_eq!(policy::read(&sealed), State::Blacklisted);
 }
 
-/// With the running execution recording, a visit that crosses the
+/// With the request recording, a visit that crosses the
 /// threshold answers `Continue` and leaves the word bumped and cold, as
 /// php's `zend_jit_loop_trace_counter_handler` bumps and returns while
 /// `JIT_G(tracing)`.
@@ -266,22 +266,24 @@ fn a_full_table_refuses_one_root_and_stops_the_counters() {
     );
 }
 
-/// What the panicking tier saw: the trace number after the panic, and
-/// the state of the word it claimed.
+/// What the panicking tier saw after the panic: whether the request
+/// recorded, the running execution's trace number, and the state of the
+/// word it claimed.
 #[derive(Debug, Default)]
 struct Unwound {
-    after: Option<TraceNum>,
+    after: Option<bool>,
+    trace: Option<TraceNum>,
     word: Option<State>,
 }
 
 /// `Lane` at the activation of `f` alone, the recording there made under
 /// a catch of a panic, and a site a nested `execute` asks at while the
-/// running execution records panicking.
+/// request records panicking.
 struct Panics;
 
 impl Tier for Panics {
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
-        if tier::trace_num(req) != TraceNum::NONE {
+        if record::recording(req) {
             resume_unwind(Box::new("a kernel panicked under a recording"));
         }
         if site != Site::Entry || function_of(req, frame).as_deref() != Some(b"f") {
@@ -289,9 +291,11 @@ impl Tier for Panics {
         }
         let caught = catch_unwind(AssertUnwindSafe(|| super::safepoint(req, frame, site)));
         let word = policy::read(tier::word(req, frame, SafepointIdx::ENTRY));
-        let after = tier::trace_num(req);
+        let after = record::recording(req);
+        let trace = tier::trace_num(req);
         let unwound = req.state::<Unwound>();
         unwound.after = Some(after);
+        unwound.trace = Some(trace);
         unwound.word = Some(word);
         match caught {
             Ok(flow) => flow,
@@ -312,12 +316,12 @@ impl Tier for Panics {
     }
 }
 
-/// A recording a panic unwound out of leaves the running execution's
-/// trace number none, and its claim settled itself as a failed attempt:
-/// the word is cold again.
+/// A recording a panic unwound out of leaves the request's exclusion
+/// clear and the trace number zero, which a recording never writes, and
+/// its claim settled itself as a failed attempt: the word is cold again.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
-fn the_trace_number_is_none_after_a_recording_a_panic_unwound() {
+fn the_exclusion_is_clear_after_a_recording_a_panic_unwound() {
     let scratch = testing::Scratch::new();
     let engine = testing::engine::<Panics>(&DUMPED);
     let (served, unwound) = scratch.serve_kept::<Unwound>(
@@ -329,37 +333,46 @@ fn the_trace_number_is_none_after_a_recording_a_panic_unwound() {
     let fatal = served.fatal.unwrap_or_default();
     assert!(fatal.contains("the recording panicked"), "{fatal}");
     let unwound = unwound.unwrap_or_default();
-    assert_eq!(unwound.after, Some(TraceNum::NONE));
+    assert_eq!(unwound.after, Some(false));
+    assert_eq!(unwound.trace, Some(TraceNum::NONE));
     assert_eq!(unwound.word, Some(State::Cold));
 }
 
-/// A fiber suspended inside a recording and never resumed: its
-/// execution's trace number went with it, so the resumer records a root
-/// of its own while the fiber's recording stands (revision 9).
+/// A fiber suspended inside a recording: the request records, as php's
+/// `JIT_G(tracing)` stays set while the fiber's recorder is suspended, so
+/// the resumer's hot `work()` records no root; destroying the fiber
+/// unwinds the recording and clears the exclusion, so the next hot
+/// `work()` is recorded (revision 30). The first request records
+/// `$main`, inside which nothing else roots; the second finds `$main`
+/// numbered and roots in the fiber.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
-fn a_fiber_suspended_inside_a_recording_leaves_its_resumer_recording() {
+fn a_fiber_suspended_inside_a_recording_keeps_its_resumer_from_recording_until_destroyed() {
     let scratch = testing::Scratch::new();
     let engine = testing::engine::<Lane>(&DUMPED);
     let program = "function body() { Fiber::suspend(1); echo \"never\\n\"; }
         function work() { return 2; }
         $f = new Fiber('body');
         $f->start();
+        echo work(), \"\\n\";
+        $f = null;
         echo work(), \"\\n\";";
     let first = scratch.serve(&engine, program);
-    assert_eq!(testing::stdout(&first), "2\n", "{:?}", lines(&first));
+    assert_eq!(testing::stdout(&first), "2\n2\n", "{:?}", lines(&first));
     let second = scratch.serve(&engine, program);
-    assert_eq!(testing::stdout(&second), "2\n");
-    let written = lines(&second);
-    let fiber = written
-        .iter()
-        .position(|line| line.contains("start (enter) body()"));
-    let resumer = written
-        .iter()
-        .position(|line| line.contains("start (enter) work()"));
-    assert!(
-        fiber.is_some() && resumer.is_some() && fiber < resumer,
-        "the fiber's recording and then the resumer's: {written:?} after {:?}",
+    assert_eq!(testing::stdout(&second), "2\n2\n");
+    assert_eq!(
+        lines(&second),
+        [
+            "---- TRACE 2 start (enter) body() body.php:2",
+            "---- TRACE 2 abort (exception)",
+            "",
+            "---- TRACE 2 start (enter) work() body.php:3",
+            "---- TRACE 2 stop (return)",
+            "---- TRACE 2 compiled",
+            "",
+        ],
+        "after {:?}",
         lines(&first)
     );
 }

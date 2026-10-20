@@ -88,9 +88,10 @@ pub fn strerror(error: &std::io::Error) -> String {
 /// the native face, as an extension does ([`tier::frame`]; #1911).
 pub mod tier {
     pub use php_engine::tier::{
-        Argument, Aside, Called, Evaluated, Flow, FrameRef, Hooked, Request, SafepointIdx, Site,
-        Stepped, Tier, Under, begin, below, call, catches, entry, evaluate, evaluate_code, exit,
-        frame, restore, set_argv, set_aside, set_stdin, sink, step, unwind,
+        Argument, Aside, Called, Compiled, Evaluated, Flow, FrameRef, Hooked, Request,
+        SafepointIdx, Site, Stepped, Tier, Under, begin, below, call, catches, compile, entry,
+        evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin, sink, step,
+        unwind,
     };
 }
 

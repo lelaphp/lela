@@ -42,9 +42,6 @@ mod table;
 mod testing;
 mod types;
 
-// The crossing has no caller until a trace calls a kernel, so it is built
-// for its tests and the bench bar alone (#2742).
-#[cfg(any(test, feature = "bench"))]
 #[allow(unsafe_code, reason = "seams.toml rule unsafe.homes: php_jit::enter")]
 mod enter;
 
@@ -67,18 +64,28 @@ impl Tier for Jit {
         dispatch::safepoint(req, frame, site)
     }
 
-    /// The tier's state (`jit-design.md` §4): its two directives and
+    /// The tier's state (`jit-design.md` §4): its two directives,
     /// [`JitEngine`], built last at engine start, after the opcache
-    /// extension registered php's `opcache.jit*`.
+    /// extension registered php's `opcache.jit*`, and [`JitRequest`].
     fn extension() -> Option<Extension> {
         Some(
             ExtensionBuilder::default()
                 .ini(policy::ini())
                 .engine_state(JitEngine::new)
+                .request_state::<JitRequest>()
                 .rinit(JitEngine::request_started)
                 .build("jit"),
         )
     }
+}
+
+/// The tier's request state (`jit-design.md` §4): whether a recording is
+/// under way on the request, php's `JIT_G(tracing)`, which no fiber switch
+/// saves (§4.9, revision 30), set and cleared by `record`'s guard
+/// alone and read through `record::recording`.
+#[derive(Debug, Default)]
+pub(crate) struct JitRequest {
+    recording: bool,
 }
 
 /// The tier's engine state (`jit-design.md` §4): what the request

@@ -497,7 +497,9 @@ pub struct Request {
     /// The unit opcache last served, `zend_accel_load_script`'s: one it
     /// held or keeps in its file cache, compiled with
     /// `ZEND_COMPILE_DELAYED_BINDING` ([`Request::class_load`]), and
-    /// whether this request's miss compiled it.
+    /// whether this request's miss compiled it; taken by the frame that
+    /// runs it, whose `static` table is then the unit's map pointer's
+    /// ([`Request::file_statics`]).
     accel_loaded: Option<(PublishedUnit, AccelServed)>,
     /// php's bytes for state the engine keeps typed elsewhere
     /// ([`rooms::Rooms`]).

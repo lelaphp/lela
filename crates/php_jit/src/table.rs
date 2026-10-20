@@ -23,12 +23,16 @@
 //! **The table is the epoch's** ([`of`]): made the first time a request
 //! of the epoch asks for it, dropped with the epoch, so a restart's epoch
 //! starts with none, as `zend_jit_restart` empties php's buffer, and no
-//! trace is freed alone. A table whose next id reached its bound, or
-//! whose arena is full, is full ([`TraceTable::full`]): the next hot root
-//! is refused with `TOO_MANY_TRACES` and stops it
-//! ([`TraceTable::stop`]), after which no word of the epoch is claimed
-//! until the restart, as php's `zend_jit_trace_hot_root` refuses one root
-//! and `zend_jit_stop_counter_handlers` stops its counters.
+//! trace is freed alone. A table whose next id reached its bound is full
+//! ([`TraceTable::full`]): the next hot root is refused with
+//! `TOO_MANY_TRACES` and stops it ([`TraceTable::stop`]), after which no
+//! word of the epoch is claimed until the restart, as php's
+//! `zend_jit_trace_hot_root` refuses one root and
+//! `zend_jit_stop_counter_handlers` stops its counters
+//! (`Z/ext/opcache/jit/zend_jit_trace.c:8164-8167`). A full arena stops
+//! nothing: each publish that finds no room is [`Full::Code`], php's
+//! `COMPILER_ERROR`, and the next may find room for a smaller body
+//! (`jit-design.md` §4.5, #3015's ruling).
 //!
 //! **php's `PERF` and `PERF_DUMP` writers** ([`Perf`]) are the table's,
 //! written under the mutex by the publish that places the code.
@@ -199,7 +203,8 @@ pub(crate) struct Exit {
 
 /// Which bound a publish met (`jit-design.md` §4.5): php's
 /// `TOO_MANY_TRACES`, `TOO_MANY_CHILDREN` and `TOO_MANY_EXITS`, and a code
-/// arena with no room, which php's full buffer is.
+/// arena with no room for the body, php's full buffer, where its emit
+/// fails with `IR_ERROR_CODE_MEM_OVERFLOW`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Full {
     Traces,
@@ -209,10 +214,13 @@ pub(crate) enum Full {
 }
 
 impl Full {
-    /// The stop php blacklists the word with.
+    /// The stop php settles the word with: a bound's, which blacklists
+    /// it, or for a full arena `COMPILER_ERROR`, which counts one attempt
+    /// (`zend_jit_trace.c:7612-7622`, `:8452-8461`).
     pub(crate) fn stop(self) -> Stop {
         match self {
-            Full::Traces | Full::Code => Stop::TooManyTraces,
+            Full::Traces => Stop::TooManyTraces,
+            Full::Code => Stop::CompilerError,
             Full::Children => Stop::TooManyChildren,
             Full::Exits => Stop::TooManyExits,
         }
@@ -335,8 +343,6 @@ pub(crate) struct TraceTable<P: Pages = Native> {
     /// The id the next trace takes, php's `ZEND_JIT_TRACE_NUM`: written
     /// under the mutex after the trace's slot, read with nothing taken.
     next: AtomicU32,
-    /// Whether the arena was found with no room for a body.
-    code_full: AtomicBool,
     /// Whether a hot root found the table full: php's
     /// `ZCSG(jit_counters_stopped)`.
     stopped: AtomicBool,
@@ -358,8 +364,8 @@ impl<P: Pages> TraceTable<P> {
     /// `opcache.jit_buffer_size` asks, in whole chunks and at least one,
     /// its `PERF` lines and `PERF_DUMP` records written as
     /// the engine's `outputs` started them. An arena that cannot be
-    /// mapped is none: the table numbers, and the first publish finds it
-    /// full.
+    /// mapped is none: the table numbers, and every publish finds no room,
+    /// [`Full::Code`].
     pub(crate) fn new(policy: &Policy, outputs: &Outputs) -> TraceTable<P> {
         TraceTable::with_perf(policy, Perf::of(outputs))
     }
@@ -380,7 +386,6 @@ impl<P: Pages> TraceTable<P> {
         TraceTable {
             segments: (0..segments).map(|_| OnceLock::new()).collect(),
             next: AtomicU32::new(1),
-            code_full: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             bounds,
             compile: Mutex::new(Writer {
@@ -409,10 +414,9 @@ impl<P: Pages> TraceTable<P> {
 
     /// Whether no trace more can be published: the next id reached
     /// `opcache.jit_max_root_traces`, php's `ZEND_JIT_TRACE_NUM >=
-    /// max_root_traces` at a hot root, or the arena had no room.
+    /// max_root_traces` at a hot root. A full arena is not this.
     pub(crate) fn full(&self) -> bool {
-        self.code_full.load(Ordering::Relaxed)
-            || self.next.load(Ordering::Relaxed) >= self.bounds.traces
+        self.next.load(Ordering::Relaxed) >= self.bounds.traces
     }
 
     /// The table full, its counters stopped: php's
@@ -459,9 +463,6 @@ impl<P: Pages> TraceTable<P> {
                 "a body no chunk holds, or an alignment no power of two",
             ));
         }
-        if self.code_full.load(Ordering::Relaxed) {
-            return Err(Full::Code.into());
-        }
         let mut links: Vec<TraceId> = compiled.exits.iter().filter_map(|e| e.link).collect();
         if links.iter().any(|link| *link >= admitted.id) {
             return Err(Unpublished::Malformed("a link to no trace numbered"));
@@ -479,7 +480,6 @@ impl<P: Pages> TraceTable<P> {
         let placed =
             (writer.arena.as_mut()).map(|arena| arena.publish(&compiled.bytes, compiled.align));
         let Some(Ok(code)) = placed else {
-            self.code_full.store(true, Ordering::Relaxed);
             return Err(Full::Code.into());
         };
         let (id, entry) = (admitted.id, code.entry());

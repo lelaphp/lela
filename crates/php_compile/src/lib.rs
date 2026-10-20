@@ -305,7 +305,7 @@ impl SourceKind {
 /// for a fatal after the parse every one of them, then the compiler's
 /// own; each in the order raised, for the engine to render before the
 /// fatal as php's request shows them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompileError {
     pub level: Level,
     /// php's text, a constant one borrowed where it is one, so a
@@ -323,6 +323,26 @@ pub struct CompileError {
     /// Where php stood when it refused, which is where `zend_error`
     /// places it.
     pub stage: Stage,
+    /// The functions a file's compile had declared at its top level
+    /// before it refused, none where it declared none.
+    pub declared: Option<Box<Declared>>,
+}
+
+/// What php's compile of a file had added to `CG(function_table)` when
+/// it refused: `zend_compile_func_decl` adds each function at the top
+/// level once its body has compiled (`Z/Zend/zend_compile.c:8601-8606`),
+/// and the fatal's `zend_bailout` out of `zend_compile` takes none of them back, so they
+/// stand in the request after the refusal, and a second compile of the
+/// file in the request meets the first of them as `Cannot redeclare`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Declared {
+    /// The functions, each with its body, as a unit of their own: no
+    /// main op array, nothing else declared, each named in
+    /// [`Unit::top_level`].
+    pub unit: Unit,
+    /// For each of the unit's functions, how many of the refusal's
+    /// [`CompileError::raised`] php had raised when it declared it.
+    pub raised_before: Vec<usize>,
 }
 
 /// Where php stood when it refused a source.
@@ -493,6 +513,7 @@ fn compile_in(
             raised: Vec::new(),
             thrown: false,
             stage: Stage::Opening,
+            declared: None,
         })?;
     let parsed = php_syntax::parse(arena, &opened.text, &syntax_options(options));
     let scanning = multibyte::Scanning {
@@ -535,6 +556,7 @@ fn export_in(
             raised: Vec::new(),
             thrown: false,
             stage: Stage::Compiling,
+            declared: None,
         });
     }
     emit::export(arena, &parsed, options, strings)
@@ -608,6 +630,7 @@ fn compile_scanned<'p>(
                 raised,
                 thrown: false,
                 stage: crate::Stage::Compiling,
+                declared: None,
             });
         }
         raised.push(Diagnostic {
@@ -661,10 +684,23 @@ fn unit_raised<'p>(
                     raised: std::mem::take(&mut unit.diagnostics),
                     thrown: false,
                     stage: Stage::Compiling,
+                    declared: None,
                 });
             }
         }
         Err(refused) => {
+            // The scanner's stand before every one the compiler raised.
+            if let Some(declared) = &mut refused.declared {
+                for before in &mut declared.raised_before {
+                    *before += raised.len();
+                }
+                // The names php's compile made for them, as a file's.
+                if options.kind == SourceKind::File
+                    && intern_names(&declared.unit, strings).is_err()
+                {
+                    refused.declared = None;
+                }
+            }
             raised.append(&mut refused.raised);
             refused.raised = raised;
         }
@@ -2079,6 +2115,7 @@ mod tests {
                 raised: vec![overflow(2)],
                 thrown: false,
                 stage: crate::Stage::Compiling,
+                declared: None,
             })
         );
         assert_eq!(
@@ -2090,6 +2127,7 @@ mod tests {
                 raised: vec![overflow(2), overflow(4)],
                 thrown: false,
                 stage: crate::Stage::Compiling,
+                declared: None,
             })
         );
     }
@@ -4110,6 +4148,7 @@ mod tests {
                 raised: Vec::new(),
                 thrown: false,
                 stage: crate::Stage::Compiling,
+                declared: None,
             })
         );
     }
@@ -4139,6 +4178,7 @@ mod tests {
                 raised: Vec::new(),
                 thrown: false,
                 stage: crate::Stage::Compiling,
+                declared: None,
             })
         );
     }
@@ -4240,6 +4280,7 @@ mod tests {
                 raised: Vec::new(),
                 thrown: false,
                 stage: crate::Stage::Compiling,
+                declared: None,
             }),
             "`zend_is_allowed_in_const_expr` has no `ZEND_AST_SILENCE`"
         );
@@ -4343,6 +4384,7 @@ mod tests {
                 raised: Vec::new(),
                 thrown: false,
                 stage: crate::Stage::Compiling,
+                declared: None,
             }),
             "`zend_is_allowed_in_const_expr` has no `ZEND_AST_ENCAPS_LIST`"
         );
@@ -4657,6 +4699,7 @@ mod tests {
             raised: Vec::new(),
             thrown: false,
             stage: crate::Stage::Compiling,
+            declared: None,
         };
         let error = refused(b"<?php\n$a = (function () { declare(ticks=0): enddeclare; });\n")
             .unwrap_or_else(compiled);
@@ -5224,6 +5267,7 @@ mod tests {
                 raised: Vec::new(),
                 thrown: false,
                 stage: crate::Stage::Compiling,
+                declared: None,
             });
             assert_eq!(error.level, Level::CompileError, "{message}");
             assert_eq!(error.message, message);
@@ -8852,6 +8896,7 @@ $f = fn (): float => 1.5;
                 raised: Vec::new(),
                 thrown: false,
                 stage: crate::Stage::Compiling,
+                declared: None,
             });
             assert_eq!(error.level, Level::CompileError, "{message}");
             assert_eq!(error.message, message);
