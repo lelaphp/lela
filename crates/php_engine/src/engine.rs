@@ -1699,8 +1699,13 @@ impl Shared {
         filename: &[u8],
         kind: SourceKind,
     ) -> Result<PublishedUnit, CompileError> {
-        match self.compiled_for(req, source, filename, kind) {
-            Ok(unit) => Ok(Self::held_for(req, unit)),
+        let mut made = self.compiled_for(req, source, filename, kind);
+        let room = match &mut made {
+            Ok(unit) => Self::ready_for(req, unit),
+            Err(_) => None,
+        };
+        match made {
+            Ok(unit) => Ok(Self::held_for(req, unit.published(room))),
             Err(refused) => {
                 req.release_compiled();
                 Err(refused)
@@ -1719,8 +1724,13 @@ impl Shared {
         source: &[u8],
         filename: &[u8],
     ) -> Result<PublishedUnit, (CompileError, Option<PublishedUnit>)> {
-        match self.compiled_for(req, source, filename, SourceKind::File) {
-            Ok(unit) => Ok(Self::held_for(req, unit)),
+        let mut made = self.compiled_for(req, source, filename, SourceKind::File);
+        let room = match &mut made {
+            Ok(unit) => Self::ready_for(req, unit),
+            Err(_) => None,
+        };
+        match made {
+            Ok(unit) => Ok(Self::held_for(req, unit.published(room))),
             Err(refused) => {
                 let declared = refused.declared.as_ref().map(|declared| {
                     let unit = req.take_unit(declared.unit.clone());
@@ -1735,12 +1745,22 @@ impl Shared {
         }
     }
 
-    /// A unit compiled for `req` taken into it, the strings its compile
-    /// made held by it.
-    fn held_for(req: &mut Request, unit: Unit) -> PublishedUnit {
+    /// A unit compiled for `req` readied to be taken into it
+    /// ([`Request::ready_unit`]), and the room its caller publishes it in:
+    /// readied through a borrow of what the compile handed back and
+    /// published out of it, so the unit is moved on its way into the room
+    /// only by the call that publishes it, where moving it to and from a
+    /// function of its own cost a copy of its 600 bytes each way.
+    fn ready_for(req: &mut Request, unit: &mut Unit) -> Option<php_unit::SpareUnit> {
         req.count_keys_made(unit.runtime_keys.len());
         req.note_loop_vars(unit.loop_vars);
-        let unit = req.take_unit(unit);
+        req.ready_unit(unit)
+    }
+
+    /// The unit [`Shared::ready_for`] readied, published, taken into
+    /// `req`, the strings its compile made held by it.
+    fn held_for(req: &mut Request, unit: PublishedUnit) -> PublishedUnit {
+        req.took_unit(&unit);
         req.hold_compiled(&unit);
         unit
     }

@@ -99,6 +99,9 @@ pub(crate) struct RuntimeCaches {
     /// The vectors of numbers units nothing holds any longer stood in,
     /// emptied, for the next units to take.
     spare: Vec<Vec<u32>>,
+    /// The numbers [`RuntimeCaches::number`] gave the unit about to be
+    /// published, until [`RuntimeCaches::hold`] holds them beside it.
+    numbering: Vec<u32>,
 }
 
 impl RuntimeCaches {
@@ -188,19 +191,16 @@ impl RuntimeCaches {
         self.spare.push(numbers);
     }
 
-    /// A unit compiled for this request alone, shared from here on, and
-    /// published in `room`, a unit the request gave up, where there is
-    /// one: each of its op arrays given a number of the request's, one
-    /// handed back first. A unit's last holder hands its numbers back as
-    /// it gives the unit up ([`RuntimeCaches::release`]); the scan here
-    /// finds those of a unit whose last share went another way, a
-    /// function or a closure it declared dropped with it, and empties
-    /// their caches as php frees a heap cache with its op array.
-    pub(crate) fn take(
-        &mut self,
-        mut unit: Unit,
-        room: Option<php_unit::SpareUnit>,
-    ) -> PublishedUnit {
+    /// A unit compiled for this request alone, about to be shared, where
+    /// its caller publishes it: each of its op arrays given a number of
+    /// the request's, one handed back first, which [`RuntimeCaches::hold`]
+    /// holds beside it once it is published. A unit's last holder hands
+    /// its numbers back as it gives the unit up
+    /// ([`RuntimeCaches::release`]); the scan here finds those of a unit
+    /// whose last share went another way, a function or a closure it
+    /// declared dropped with it, and empties their caches as php frees a
+    /// heap cache with its op array.
+    pub(crate) fn number(&mut self, unit: &mut Unit) {
         let (free, request, spare) = (&mut self.free, &mut self.request, &mut self.spare);
         // Asked first, as the scan finds nothing where every unit gone
         // was given back by its last holder, which is the rule.
@@ -218,14 +218,19 @@ impl RuntimeCaches {
             });
         }
         let mut numbers = self.spare.pop().unwrap_or_default();
-        for code in op_arrays_mut(&mut unit) {
+        for code in op_arrays_mut(unit) {
             let number = self.next_number();
             code.runtime_cache = MapPtrOffset::Request(number);
             numbers.push(number);
         }
-        let unit = unit.published(room);
-        self.held.push((PublishedUnit::downgrade(&unit), numbers));
-        unit
+        self.numbering = numbers;
+    }
+
+    /// `unit`, numbered ([`RuntimeCaches::number`]) and published since,
+    /// held with its numbers.
+    pub(crate) fn hold(&mut self, unit: &PublishedUnit) {
+        let numbers = std::mem::take(&mut self.numbering);
+        self.held.push((PublishedUnit::downgrade(unit), numbers));
     }
 }
 

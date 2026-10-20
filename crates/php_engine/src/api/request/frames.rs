@@ -531,9 +531,27 @@ impl Request {
     /// here on: its op arrays take runtime caches of the request's own,
     /// as php gives them caches on the heap, and none of the engine's
     /// offsets ([`exec::RuntimeCaches::take`]).
-    pub(crate) fn take_unit(&mut self, unit: Unit) -> PublishedUnit {
-        let room = self.spare_unit.take();
-        self.map.take(unit, room)
+    pub(crate) fn take_unit(&mut self, mut unit: Unit) -> PublishedUnit {
+        let room = self.ready_unit(&mut unit);
+        let unit = unit.published(room);
+        self.took_unit(&unit);
+        unit
+    }
+
+    /// [`Request::take_unit`]'s first half, for a caller that publishes
+    /// the unit where it stands, so it is moved once, into the room: its
+    /// op arrays numbered, and the room it is published in, the last unit
+    /// the request gave up.
+    pub(crate) fn ready_unit(&mut self, unit: &mut Unit) -> Option<php_unit::SpareUnit> {
+        self.map.number(unit);
+        self.spare_unit.take()
+    }
+
+    /// [`Request::take_unit`]'s second half: the unit
+    /// [`Request::ready_unit`] readied, published since, held with the
+    /// numbers its op arrays were given.
+    pub(crate) fn took_unit(&mut self, unit: &PublishedUnit) {
+        self.map.hold(unit);
     }
 
     /// The room the next compile lays its unit's main op array down in,
