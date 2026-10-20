@@ -639,18 +639,22 @@ fn all<T: Child + Pooled>(pools: &mut Pools, children: &[Element]) -> List<T> {
     listed(pools, children.iter().filter_map(T::of))
 }
 
-/// What `items` yields, appended to its pool as one stretch.
-fn listed<T: Pooled>(pools: &mut Pools, items: impl Iterator<Item = T> + Clone) -> List<T> {
-    let count = items.clone().count();
+/// What `items` yields, appended to its pool as one stretch, in one
+/// pass: the pools keep their room between builds, so a stretch seldom
+/// grows its pool.
+fn listed<T: Pooled>(pools: &mut Pools, items: impl Iterator<Item = T>) -> List<T> {
+    let pool = T::pool_mut(pools);
+    let start = pool.len();
+    pool.extend(items);
+    let count = pool.len() - start;
     if count == 0 {
         return List::default();
     }
     pools.used |= T::BIT;
-    let pool = T::pool_mut(pools);
-    let start = u32::try_from(pool.len()).unwrap_or(u32::MAX);
-    pool.reserve(count);
-    pool.extend(items);
-    List::new(start, u32::try_from(count).unwrap_or(u32::MAX))
+    List::new(
+        u32::try_from(start).unwrap_or(u32::MAX),
+        u32::try_from(count).unwrap_or(u32::MAX),
+    )
 }
 
 /// The first token whose kind is in `kinds`, after a token in `anchors`
