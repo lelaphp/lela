@@ -30,6 +30,7 @@ impl Lexer<'_> {
     /// `'…'` with `\\` and `\'` escapes (lexically `\` always consumes the
     /// next byte; the flex pattern is `b?'([^'\\]|\\[^])*'`), with the
     /// optional `b`/`B` prefix.
+    #[inline(never)]
     pub(crate) fn lex_single_quoted(&mut self, start: usize) {
         let quote_at = if matches!(self.byte(start), b'b' | b'B') {
             start + 1
