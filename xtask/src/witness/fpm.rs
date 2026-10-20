@@ -80,6 +80,11 @@ pub(super) struct Pool {
 }
 
 impl Pool {
+    /// The master's process.
+    pub(super) fn pid(&self) -> u32 {
+        self.master.id()
+    }
+
     /// A connection to the pool once the master listens. A master that
     /// ends first is named by its exit and the log's last lines as soon as
     /// it has ended, and one still not listening after [`PATIENCE`] by

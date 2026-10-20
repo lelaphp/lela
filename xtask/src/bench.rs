@@ -42,6 +42,7 @@
 
 pub(crate) mod row;
 mod series;
+pub(crate) mod spent;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -55,6 +56,7 @@ use serde::Deserialize;
 use crate::inputs;
 use crate::key::Snapshot;
 use crate::reading::{Reading, Status, Store};
+use spent::Spent;
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "bench";
@@ -263,11 +265,25 @@ impl Correctness {
     }
 }
 
-/// One run of one arm: what it measured in its arm's [`Unit`], and what it
-/// wrote, the bytes the two arms' runs of one rep are held equal by (§5).
+/// One run of one arm: what it measured in its arm's [`Unit`], what it
+/// wrote, the bytes the two arms' runs of one rep are held equal by (§5),
+/// and what a server arm's processes spent per request (#3013).
 pub(crate) struct Sample {
     pub(crate) value: f64,
     pub(crate) wrote: Vec<u8>,
+    pub(crate) spent: Spent,
+}
+
+impl Sample {
+    /// A run that states its value and what it wrote, and nothing it spent.
+    pub(crate) fn of(value: f64, wrote: Vec<u8>) -> Sample {
+        let spent = Spent::Unasked;
+        Sample {
+            value,
+            wrote,
+            spent,
+        }
+    }
 }
 
 /// What a rep of an arm measures (§3): the milliseconds one run took, a
@@ -409,8 +425,8 @@ impl Side for Spawned {
 }
 
 /// What one bar measured, in its unit: the two arms, their paired delta,
-/// the delta as a percentage of the candidate arm's median, and how the
-/// bytes compared.
+/// the delta as a percentage of the candidate arm's median, how the bytes
+/// compared, and what each arm spent per request.
 struct Measured {
     unit: Unit,
     a: Stats,
@@ -418,6 +434,7 @@ struct Measured {
     delta: Stats,
     paired_pct: f64,
     correctness: Correctness,
+    spent: [Spent; 2],
 }
 
 /// §6: one program as one read of it, digested with the byte count that
@@ -513,10 +530,7 @@ fn once(arm: &Arm, program: &Path) -> Result<Sample> {
             String::from_utf8_lossy(&done.stderr).trim()
         );
     }
-    Ok(Sample {
-        value,
-        wrote: done.stdout,
-    })
+    Ok(Sample::of(value, done.stdout))
 }
 
 /// One bar measured: `reps` paired reps after [`WARMUP`] discarded ones,
@@ -529,6 +543,7 @@ fn measure(id: &str, [a, b]: &mut [Box<dyn Side>; 2], reps: usize) -> Result<Mea
     let programs = [a.program().to_path_buf(), b.program().to_path_buf()];
     let before = [Pin::take(&programs[0])?, Pin::take(&programs[1])?];
     let (mut a_values, mut b_values, mut delta) = (Vec::new(), Vec::new(), Vec::new());
+    let mut spent = [Vec::new(), Vec::new()];
     let mut vacuous = false;
     for r in 1..=(WARMUP + reps) {
         let (sa, sb) = if r % 2 == 0 {
@@ -549,6 +564,8 @@ fn measure(id: &str, [a, b]: &mut [Box<dyn Side>; 2], reps: usize) -> Result<Mea
             delta.push(sa.value - sb.value);
             a_values.push(sa.value);
             b_values.push(sb.value);
+            spent[0].push(sa.spent);
+            spent[1].push(sb.spent);
         }
     }
     holds(&programs, &before)?;
@@ -569,6 +586,7 @@ fn measure(id: &str, [a, b]: &mut [Box<dyn Side>; 2], reps: usize) -> Result<Mea
         } else {
             Correctness::Bytes(stream)
         },
+        spent: spent.map(|reps| Spent::median(&reps)),
     })
 }
 
@@ -887,19 +905,21 @@ fn rendered(
     load: Option<[f64; 3]>,
 ) -> String {
     let unit = measured.unit.suffix();
-    let stat = |name: &str, s: &Stats| {
+    let stat = |name: &str, s: &Stats, spent: &str| {
         format!(
-            "  {name}: median {:.3} {unit}, IQR {:.3} (q1 {:.3}, q3 {:.3}, min {:.3}, max {:.3}, n {})\n",
+            "  {name}: median {:.3} {unit}, IQR {:.3} (q1 {:.3}, q3 {:.3}, min {:.3}, max {:.3}, n {}){spent}\n",
             s.median, s.iqr, s.q1, s.q3, s.min, s.max, s.n
         )
     };
+    let [a, b] = (measured.spent)
+        .map(|spent| (spent.text()).map_or_else(String::new, |t| format!("; per request: {t}")));
     format!(
         "bench {}: {}; {reps} reps (+{WARMUP} warm-up) per arm, order alternated; load {}\n{}{}  paired delta: median {:.3} {unit} ({:+.2}%), IQR {:.3} (q1 {:.3}, q3 {:.3}); {}\n  correctness {}; {}\n",
         bar.id,
         label.as_str(),
         load_text(load),
-        stat(bar.names[0], &measured.a),
-        stat(bar.names[1], &measured.b),
+        stat(bar.names[0], &measured.a, &a),
+        stat(bar.names[1], &measured.b, &b),
         measured.delta.median,
         measured.paired_pct,
         measured.delta.iqr,
@@ -988,7 +1008,11 @@ fn recorded(
         ("delta_iqr", measured.delta.iqr),
     ];
     let numbers = (numbers.into_iter()).map(|(key, value)| (measured.unit.key(key), value));
-    for (key, value) in numbers.chain([("paired_pct".to_owned(), measured.paired_pct)]) {
+    let [a, b] = measured.spent;
+    let spent = (a.numbers("a").into_iter()).chain(b.numbers("b"));
+    for (key, value) in
+        (numbers.chain(spent)).chain([("paired_pct".to_owned(), measured.paired_pct)])
+    {
         if value.is_finite() {
             reading.numbers.insert(key, rounded(value).into());
         }
@@ -1003,8 +1027,11 @@ fn recorded(
     } else {
         format!(" ({})", note.trim())
     };
+    let spent: String = (bar.names.iter().zip(measured.spent))
+        .filter_map(|(name, spent)| Some(format!("; {name} per request: {}", spent.text()?)))
+        .collect();
     reading.message = format!(
-        "{}: paired delta {:.3} {unit} ({:+.2}%) over {reps} reps, {verdict}; correctness {}; {}; {}{reservation}; load {} ({PROTOCOL} §4.3, §7)",
+        "{}: paired delta {:.3} {unit} ({:+.2}%) over {reps} reps, {verdict}; correctness {}; {}{spent}; {}{reservation}; load {} ({PROTOCOL} §4.3, §7)",
         bar.about,
         measured.delta.median,
         measured.paired_pct,
@@ -1069,6 +1096,7 @@ mod tests {
             delta: stats(deltas),
             paired_pct,
             correctness: Correctness::Bytes(Stream::Body),
+            spent: [super::Spent::Unasked; 2],
         };
         let behind = [4.0, 5.0, 6.0, 7.0];
         assert!(close(to_go(&measured(&behind, 250.0)).unwrap(), 250.0));
@@ -1090,7 +1118,8 @@ mod tests {
     }
 
     /// A rate arm's reps are paired as a time's are, the delta in requests
-    /// a second, `a - b`: 50 against 100 is a delta of -50 and 50% to go.
+    /// a second, `a - b`: 50 against 100 is a delta of -50 and 50% to go;
+    /// a server arm whose figures are absent still measures its rate.
     #[test]
     fn a_rate_bar_pairs_its_requests_a_second_per_rep() {
         struct Rate(f64, std::path::PathBuf);
@@ -1106,9 +1135,11 @@ mod tests {
             }
             fn once(&mut self) -> anyhow::Result<super::Sample> {
                 self.0 += 0.001;
+                let spent = super::Spent::over(None, None, 1);
+                let wrote = b"x".to_vec();
                 Ok(super::Sample {
-                    value: self.0,
-                    wrote: b"x".to_vec(),
+                    spent,
+                    ..super::Sample::of(self.0, wrote)
                 })
             }
         }
@@ -1123,6 +1154,20 @@ mod tests {
         assert!(close(measured.delta.median, -50.0) && close(measured.paired_pct.round(), -50.0));
         assert!(close(to_go(&measured).unwrap().round(), 50.0));
         assert_eq!(measured.correctness, Correctness::Bytes(Stream::Stdout));
+        // Each rep's server read nothing, as on a platform without
+        // proc_pid_rusage: the rate stands, and each arm says why its
+        // figures are absent (#3013).
+        let absent = super::Spent::over(None, None, 1);
+        assert_eq!(measured.spent, [absent; 2]);
+        let bar = super::Shown {
+            id: "c8",
+            about: "a rate",
+            held: Held::Series,
+            names: ["a", "b"],
+        };
+        let shown = super::rendered(&bar, &measured, 12, super::Label::Smoke, None);
+        let said = "n 12); per request: absent: this build reads no process's proc_pid_rusage";
+        assert!(shown.contains(said), "{shown}");
     }
 
     /// A GitHub-hosted runner is refused, and a machine of ours or one
