@@ -113,6 +113,23 @@ pub(crate) fn name_of_package(package: &str) -> Option<String> {
     (package.starts_with("php_") || package == HARNESS).then(|| package.to_owned())
 }
 
+/// A path with its `.` and `..` components folded, without touching the
+/// filesystem: how a pathspec, a manifest's `path` and a dep-info's
+/// `crates/php_engine/../../ops.toml` name a file.
+pub(crate) fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;

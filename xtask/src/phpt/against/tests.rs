@@ -186,7 +186,10 @@ fn a_run_kept_in_a_linked_worktree_at_the_base_is_found_from_main() {
     );
 
     let run = fixture("base.json");
-    let file = path(&linked, &base.tree, "ext/fixture");
+    let unlisted = base
+        .snapshot
+        .tracked_over(&BuiltFrom::Unlisted.keyed(&main));
+    let file = path(&linked, &unlisted.unwrap(), "ext/fixture");
     fs::create_dir_all(file.parent().unwrap()).unwrap();
     fs::write(&file, serde_json::to_string_pretty(&run).unwrap()).unwrap();
     let recipe = run.recipe.clone();
@@ -230,12 +233,8 @@ fn a_carried_run_replaces_an_older_one_under_another_pin_and_no_other() {
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(&file, serde_json::to_string(&run).unwrap()).unwrap();
     };
-    let recipe = |root: &Path, scope: &str| {
-        read(&[root.to_path_buf()], "tree", scope)
-            .unwrap()
-            .unwrap()
-            .recipe
-    };
+    let recipe =
+        |root: &Path, scope: &str| read(&path(root, "tree", scope)).unwrap().unwrap().recipe;
     keep(&into, "ext/stale", "old");
     keep(&into, "ext/same", "new");
     std::thread::sleep(std::time::Duration::from_millis(20));
@@ -270,7 +269,8 @@ fn after_asks_git_nothing_while_the_engines_sources_stand_still() {
     let manifest = Manifest::load(&crate::built_root()).unwrap();
     let runs = Runs::new(root, &manifest, Some("HEAD")).unwrap();
     let base = runs.base.as_ref().unwrap();
-    let file = path(root, &base.tree, "ext/ctype");
+    let unlisted = base.snapshot.tracked_over(&BuiltFrom::Unlisted.keyed(root));
+    let file = path(root, &unlisted.unwrap(), "ext/ctype");
     fs::create_dir_all(file.parent().unwrap()).unwrap();
     let was = Run {
         commit: base.commit.clone(),
@@ -335,4 +335,109 @@ fn after_asks_git_nothing_while_the_engines_sources_stand_still() {
     assert!(!after().contains(written), "an untracked file is no source");
     committing(root, &["add", "--", "crates/php_engine/src/new.rs"]);
     assert!(after().contains(written));
+}
+
+/// A git workspace whose `php_engine` and `sapi/cli` the binary at
+/// `target/release-da/php` is built from, as the dep-info beside it says,
+/// and whose `php_jit`, generated clippy configuration, guide and manifest
+/// it is not; committed once.
+fn workspace_with_a_binary(name: &str) -> (Tree, PathBuf) {
+    let tree = Tree::new(name).unwrap();
+    committing(&tree, &["init", "-q", "-b", "main"]);
+    let files = [
+        (".gitignore", "target/\n"),
+        ("Cargo.toml", "[workspace]\n"),
+        ("crates/php_engine/Cargo.toml", "[package]\n"),
+        ("crates/php_engine/src/lib.rs", "// the kernels\n"),
+        ("crates/php_jit/src/lib.rs", "// the compiled tier\n"),
+        ("sapi/cli/src/main.rs", "fn main() {}\n"),
+        ("ext/clippy.toml", "# generated\n"),
+        ("ext/AGENTS.md", "# extensions\n"),
+        ("seams.toml", "# the manifest\n"),
+    ];
+    for (file, text) in files {
+        fs::create_dir_all(tree.join(file).parent().unwrap()).unwrap();
+        fs::write(tree.join(file), text).unwrap();
+    }
+    committing(&tree, &["add", "-A"]);
+    committing(&tree, &["commit", "-q", "-m", "a"]);
+    let binary = tree.join("target/release-da/php");
+    fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    fs::write(&binary, "the engine").unwrap();
+    let deps = ["crates/php_engine/src/lib.rs", "sapi/cli/src/main.rs"];
+    let deps: Vec<String> = deps
+        .iter()
+        .map(|d| tree.join(d).display().to_string())
+        .collect();
+    let info = format!("{}: {}\n", binary.display(), deps.join(" "));
+    fs::write(format!("{}.d", binary.display()), info).unwrap();
+    (tree, binary)
+}
+
+/// `files` written with new text at `root`, and committed.
+fn commit_writing(root: &Path, files: &[&str]) {
+    for file in files {
+        let path = root.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, format!("// {file}, written again\n")).unwrap();
+    }
+    committing(root, &["add", "-A"]);
+    committing(root, &["commit", "-q", "-m", "written"]);
+}
+
+/// A run is kept under what its binary is built from (#3109): the
+/// commits #3082 and #3103 made on 2026-10-20, `seams.toml` text,
+/// `ext/clippy.toml` and a guide, with the compiled tier's crate the
+/// default binary does not link, as `c5c2fb025` wrote, leave the run
+/// standing, so `done` finds it as this tree's and, once that commit is
+/// `origin/main`, as the next branch's base without a `--base` run
+/// (#3110); a commit that writes a source the binary is compiled from
+/// moves the key, and the kept run is refused, here and as the base.
+#[test]
+fn a_commit_that_leaves_the_binary_keeps_its_runs_and_one_that_moves_it_does_not() {
+    let (tree, binary) = workspace_with_a_binary("against-built-from");
+    let root: &Path = &tree;
+    let manifest = Manifest::load(&crate::built_root()).unwrap();
+    let pin = &manifest.pin;
+    let (scope, engine) = ("ext/ctype", Runner::Engine(binary));
+    let runs = Runs::new(root, &manifest, None).unwrap();
+    let subset = Reading::new(INSTRUMENT, scope);
+    let held_as = Scope::of(scope);
+    let kept = runs.after(
+        &manifest,
+        &held_as,
+        (&Tally::default(), &engine),
+        &subset,
+        None,
+    );
+    assert_eq!(kept.unwrap(), None);
+    assert!(kept_at(root, pin, "HEAD", scope).unwrap().is_ok());
+
+    commit_writing(
+        root,
+        &[
+            "seams.toml",
+            "ext/clippy.toml",
+            "ext/AGENTS.md",
+            "harness-design.md",
+            "crates/php_jit/src/lib.rs",
+        ],
+    );
+    let now = Snapshot::disk(root).unwrap();
+    assert!(
+        !kept_run(&now, scope).unwrap().exists(),
+        "the old key moved"
+    );
+    assert!(kept_at(root, pin, "HEAD", scope).unwrap().is_ok());
+    assert_eq!(regressed(&now, "HEAD", pin, scope).unwrap(), Against::Held);
+
+    commit_writing(root, &["crates/php_engine/src/lib.rs"]);
+    let now = Snapshot::disk(root).unwrap();
+    let why = kept_at(root, pin, "HEAD", scope).unwrap().unwrap_err();
+    assert!(why.contains("no run of ext/ctype is kept at "), "{why}");
+    let unrun = regressed(&now, "HEAD", pin, scope).unwrap();
+    assert!(
+        matches!(&unrun, Against::Unrun(why) if why.contains("no run of ext/ctype")),
+        "{unrun:?}"
+    );
 }

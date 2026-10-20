@@ -43,6 +43,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::git::{self, Index, Stamp};
+use crate::layout::normalize;
 
 /// Each file of the workspace and its blob id, read once, and the key of
 /// any scope a lookup on it ([`Snapshot::key`]). Taken from one of three
@@ -82,6 +83,10 @@ pub struct Snapshot {
     /// scope twice, as `done` stamps the workspace for its verdict and
     /// holds its ticket's reading to it, hashes the listing once.
     keys: Mutex<BTreeMap<PathBuf, String>>,
+    /// Each key over tracked files asked of it, by its paths: `done` asks
+    /// one per set of sources a phpt run was kept over, for every touched
+    /// crate ([`Snapshot::tracked_over`]).
+    tracked_keys: Mutex<BTreeMap<Vec<PathBuf>, String>>,
 }
 
 /// The commits read in this process, by root and id: a commit's files
@@ -108,6 +113,7 @@ impl Snapshot {
             tracked,
             covers: None,
             keys: Mutex::default(),
+            tracked_keys: Mutex::default(),
         }
     }
 
@@ -295,8 +301,17 @@ impl Snapshot {
     /// an edit to a tracked one, and an untracked `.DS_Store` would
     /// otherwise leave a clean checkout matching no commit.
     pub(crate) fn tracked_over(&self, paths: &[PathBuf]) -> Result<String> {
+        let asked = self.tracked_keys.lock().ok();
+        if let Some(key) = asked.as_ref().and_then(|k| k.get(paths)) {
+            return Ok(key.clone());
+        }
+        drop(asked);
         self.covering(paths)?;
-        Ok(git::listing_id(&under(&self.tracked, paths)))
+        let key = git::listing_id(&under(&self.tracked, paths));
+        if let Ok(mut asked) = self.tracked_keys.lock() {
+            asked.insert(paths.to_vec(), key.clone());
+        }
+        Ok(key)
     }
 
     /// Refuse `paths` where the snapshot was read under others: the files
@@ -311,7 +326,7 @@ impl Snapshot {
             .filter(|p| {
                 !covers
                     .iter()
-                    .any(|c| whole(c) || clean(p).starts_with(clean(c)))
+                    .any(|c| whole(c) || normalize(p).starts_with(normalize(c)))
             })
             .map(|p| p.display().to_string())
             .collect();
@@ -341,13 +356,6 @@ fn closure(root: &Path, path: &Path) -> Result<Vec<PathBuf>> {
     }
 }
 
-/// `path` without its `.` components, as git's pathspec reads it.
-fn clean(path: &Path) -> PathBuf {
-    path.components()
-        .filter(|c| !matches!(c, Component::CurDir))
-        .collect()
-}
-
 /// Whether `path` names the whole tree.
 fn whole(path: &Path) -> bool {
     path.components().all(|c| matches!(c, Component::CurDir))
@@ -359,7 +367,7 @@ fn under(listing: &[(String, String)], scopes: &[PathBuf]) -> Vec<(String, Strin
     if scopes.iter().any(|s| whole(s)) {
         return listing.to_vec();
     }
-    let scopes: Vec<PathBuf> = scopes.iter().map(|s| clean(s)).collect();
+    let scopes: Vec<PathBuf> = scopes.iter().map(|s| normalize(s)).collect();
     listing
         .iter()
         .filter(|(path, _)| scopes.iter().any(|s| Path::new(path).starts_with(s)))
