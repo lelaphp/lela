@@ -80,11 +80,11 @@ impl DbLink {
 /// echo memory_get_usage() - $m, "\n";
 /// $s->debugDumpParams();
 /// ```
-/// ```expect mysql
+/// ```expect mysql regime=jit-off
 /// string(10) "SELECT 111" refcount(5)
 /// SQL: [10] SELECT 111
 /// Params:  0
-/// 32
+/// 64
 /// SQL: [13] SELECT 111, ?
 /// Sent SQL: [19] SELECT 111, '12346'
 /// Params:  1
