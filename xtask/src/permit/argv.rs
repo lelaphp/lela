@@ -1017,11 +1017,28 @@ impl Argv {
     }
 
     /// `deny_argv` with `with`: one of the phrases names this command and
-    /// one of the denied elements stands in it (see [`Element`]).
-    pub(super) fn denies(&self, denied: &[String], with: &OneOrMany) -> bool {
+    /// one of the denied elements stands in it (see [`Element`]), save an
+    /// element `unless` excuses here: the phrase its excuse names runs,
+    /// bounded by the excuse's option as [`Argv::unbounded`] reads one,
+    /// `xtask phpt --jit force --subset Zend/tests` (#3068).
+    pub(super) fn denies(
+        &self,
+        denied: &[String],
+        with: &OneOrMany,
+        unless: Option<&BTreeMap<String, String>>,
+    ) -> bool {
+        let excused = |element: &String| {
+            unless
+                .and_then(|u| u.get(element))
+                .and_then(|e| e.rsplit_once(' '))
+                .is_some_and(|(phrase, option)| {
+                    self.runs(phrase) && !self.unbounded(option, &OneOrMany::One(phrase.to_owned()))
+                })
+        };
         self.invocations(with).any(|invocation| {
             denied
                 .iter()
+                .filter(|d| !excused(d))
                 .filter_map(|d| Element::parse(d))
                 .any(|element| invocation.carries(&element))
         })
@@ -1603,6 +1620,40 @@ mod tests {
         assert!(!denies("cargo xtask phpt -- --full", &lane, with));
     }
 
+    /// `lanes.nightly-flags` with the excuse #3052 ruled, `{ "--jit" =
+    /// "xtask phpt --subset" }`: the tier's lane passes on `xtask phpt`
+    /// bounded by one subset, before or after `--jit`, and on nothing else
+    /// (#3068).
+    #[test]
+    fn a_subset_excuses_the_tier_s_lane_on_phpt_alone() {
+        let lane = ["--full".to_owned(), "--jit".to_owned()];
+        let with = OneOrMany::Many(vec!["xtask phpt".to_owned(), "xtask bench".to_owned()]);
+        let unless = BTreeMap::from([("--jit".to_owned(), "xtask phpt --subset".to_owned())]);
+        let denied = |line: &str| {
+            commands(line)
+                .iter()
+                .any(|a| a.denies(&lane, &with, Some(&unless)))
+        };
+        for line in [
+            "cargo xtask phpt --jit force --full",
+            "cargo xtask phpt --jit force",
+            "cargo xtask phpt --jit=exit-fuzz --subset",
+            "cargo xtask phpt --subset . --jit force",
+            "cargo xtask phpt --full --subset Zend/tests",
+            "cargo xtask bench --jit force --subset Zend/tests",
+            "cargo xtask phpt --subset Zend/tests; cargo xtask phpt --jit force",
+        ] {
+            assert!(denied(line), "{line}");
+        }
+        for line in [
+            "cargo xtask phpt --jobs 3 --jit force --subset Zend/tests --engine target/featured/jit/release-da/php",
+            "cargo run -q -p xtask -- phpt --subset=Zend/tests --jit exit-fuzz",
+            "target/release/xtask phpt --jit=force --subset tests",
+        ] {
+            assert!(!denied(line), "{line}");
+        }
+    }
+
     fn denies(line: &str, denied: &[&str], with: &str) -> bool {
         let denied: Vec<String> = denied.iter().map(|d| (*d).to_owned()).collect();
         let with = if with.is_empty() {
@@ -1612,7 +1663,7 @@ mod tests {
         };
         commands(line)
             .iter()
-            .any(|argv| argv.denies(&denied, &with))
+            .any(|argv| argv.denies(&denied, &with, None))
     }
 
     #[test]

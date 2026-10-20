@@ -416,7 +416,7 @@ fn linked(dir: &Path) -> bool {
 fn fires(rule: &Rule, argv: &Argv) -> bool {
     let p = &rule.predicate;
     match (&p.deny_argv, &p.require_argv, &p.deny_pattern) {
-        (Some(denied), _, _) => argv.denies(denied, &p.with),
+        (Some(denied), _, _) => argv.denies(denied, &p.with, p.unless_argv.as_ref()),
         (None, Some(separator), _) => argv.unbounded(separator, &p.with),
         (None, None, Some(pattern)) => {
             let words = argv.words().join(" ");

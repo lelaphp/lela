@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cargo xtask phpt --jobs 3 --jit force --subset Zend/tests --engine target/featured/jit/release-da/php","description":"Take the tier's force reading on the engine subset (#3052)"}}

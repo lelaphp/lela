@@ -153,7 +153,7 @@ impl Operation {
 /// own words.
 fn starts(git: &Argv, subcommand: &str) -> bool {
     let flags = STEPPING.map(str::to_owned);
-    git.runs(subcommand) && !git.denies(&flags, &OneOrMany::One(subcommand.to_owned()))
+    git.runs(subcommand) && !git.denies(&flags, &OneOrMany::One(subcommand.to_owned()), None)
 }
 
 impl fmt::Display for Operation {

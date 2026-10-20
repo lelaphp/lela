@@ -574,8 +574,9 @@ pub enum Where {
 /// `Manifest::parse` then holds every rule to exactly one. `unless` and
 /// `unless_pattern` qualify `deny_pattern`; `with` qualifies `deny_argv` and
 /// `require_argv`, one phrase or a list of them, a word or a command and
-/// its subcommand (`"git add"`); `deny_macros` qualifies `deny_types`; each
-/// is refused beside any other predicate.
+/// its subcommand (`"git add"`); `unless_argv` qualifies `deny_argv`;
+/// `deny_macros` qualifies `deny_types`; each is refused beside any other
+/// predicate.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -602,6 +603,11 @@ pub struct Predicates {
     /// second pattern and not a clause of the first.
     pub unless_pattern: Option<String>,
     pub deny_argv: Option<Vec<String>>,
+    /// A `deny_argv` element let through where one `with` phrase runs
+    /// bounded by an option, as `require_argv` reads one: `{ "--jit" =
+    /// "xtask phpt --subset" }`, the tier's one-subset reading (#3052,
+    /// #3068).
+    pub unless_argv: Option<BTreeMap<String, String>>,
     pub require_argv: Option<String>,
     #[serde(default)]
     pub with: OneOrMany,
@@ -736,7 +742,8 @@ impl Predicates {
 
     /// A qualifier that has no predicate to qualify: `unless` without
     /// `deny_pattern`, `with` without `deny_argv` or `require_argv`,
-    /// `deny_macros` without `deny_types`.
+    /// `unless_argv` without `deny_argv`, `deny_macros` without
+    /// `deny_types`.
     pub fn orphaned_qualifier(&self) -> Option<&'static str> {
         if self.unless.is_some() && self.deny_pattern.is_none() {
             Some("unless")
@@ -744,6 +751,8 @@ impl Predicates {
             Some("unless_pattern")
         } else if !self.with.is_empty() && self.deny_argv.is_none() && self.require_argv.is_none() {
             Some("with")
+        } else if self.unless_argv.is_some() && self.deny_argv.is_none() {
+            Some("unless_argv")
         } else if self.deny_macros.is_some() && self.deny_types.is_none() {
             Some("deny_macros")
         } else {
@@ -1007,9 +1016,23 @@ impl Manifest {
             }
             if let Some(qualifier) = rule.predicate.orphaned_qualifier() {
                 bail!(
-                    "rule \"{}\" has `{qualifier}` beside `{}`; `unless` and `unless_pattern` qualify deny_pattern, `with` qualifies deny_argv or require_argv and `deny_macros` qualifies deny_types",
+                    "rule \"{}\" has `{qualifier}` beside `{}`; `unless` and `unless_pattern` qualify deny_pattern, `with` qualifies deny_argv or require_argv, `unless_argv` qualifies deny_argv and `deny_macros` qualifies deny_types",
                     rule.id,
                     named[0]
+                );
+            }
+            let p = &rule.predicate;
+            if let Some((element, excuse)) =
+                p.unless_argv.iter().flatten().find(|(element, excuse)| {
+                    !p.deny_argv.iter().flatten().any(|d| d == *element)
+                        || !excuse.rsplit_once(' ').is_some_and(|(phrase, option)| {
+                            option.starts_with('-') && p.with.iter().any(|w| w == phrase)
+                        })
+                })
+            {
+                bail!(
+                    "rule \"{}\" excuses {element:?} by {excuse:?}; `unless_argv` maps a `deny_argv` element to one `with` phrase and the option that bounds it (`\"--jit\" = \"xtask phpt --subset\"`)",
+                    rule.id
                 );
             }
         }
