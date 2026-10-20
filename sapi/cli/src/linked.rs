@@ -47,11 +47,18 @@ fn main() -> ExitCode {
     // An fd beyond its three streams is one the harness's other
     // threads leaked into it, which it must not hold while idle (#2550).
     php_sapi_cli::close_inherited_fds();
+    // Served on the stack the CLI serves on, as `php` serves them.
+    php_sapi::main_on_request_stack(served)
+}
+
+/// Each line's request served, until the input ends: 0, or 1 where a line
+/// could not be read or answered.
+fn served() -> i32 {
     let pid = std::process::id();
     let stdout = io::stdout();
     for line in io::stdin().lock().lines() {
         let Ok(dir) = line else {
-            return ExitCode::FAILURE;
+            return 1;
         };
         let exit = serve(Path::new(&dir));
         if std::process::id() != pid {
@@ -60,10 +67,10 @@ fn main() -> ExitCode {
         }
         let mut out = stdout.lock();
         if writeln!(out, "served").and_then(|()| out.flush()).is_err() {
-            return ExitCode::FAILURE;
+            return 1;
         }
     }
-    ExitCode::SUCCESS
+    0
 }
 
 /// The CLI's environment, the process's: what the harness started this
