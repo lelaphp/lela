@@ -75,14 +75,16 @@ use crate::SyntaxKind;
 use crate::arena::Arena;
 use crate::lexer::Token;
 use crate::line_index::LineIndex;
-use crate::source::{Diagnostic, TextRange};
+use crate::source::TextRange;
 
 use super::{Building, Element, Pools, Resolved, TokenId, Tree, line, resolve};
 
 /// One parser event. The parser emits a flat stream; the builder assembles
 /// the tree, so the parser is tested without trees and the builder without
-/// a grammar.
-#[derive(Debug)]
+/// a grammar. A diagnostic the parser raises is the parser's, beside the
+/// stream ([`crate::parser::Parser::finish`]), so an event is plain
+/// data and the stream is given up with nothing to drop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     /// Opens a node. `forward_parent` chains to a later `Start` that
     /// becomes this node's parent: `Marker::precede`, which the Pratt core
@@ -101,8 +103,6 @@ pub enum Event {
         /// The kind the tree reads.
         remap: SyntaxKind,
     },
-    /// A diagnostic raised at this point of the stream.
-    Error(Box<Diagnostic>),
     /// php's `backup_doc_comment` at this position of the grammar: the
     /// innermost open node takes the pending doc comment, and none is
     /// pending after (the docs above).
@@ -135,8 +135,6 @@ pub struct Missing {
 pub struct Built<'a> {
     /// The tree, in the arena the build was handed.
     pub tree: Tree<'a>,
-    /// The diagnostics the parser raised, in stream order.
-    pub diagnostics: Vec<Diagnostic>,
     /// Every required child the parser did not supply, in finish order.
     pub missing: Vec<Missing>,
 }
@@ -249,20 +247,9 @@ pub(crate) fn build_in<'a>(
     // The shape holds an element per `Start` and per `Token`, so it is
     // laid down once at that length, and grows only where the root takes
     // tokens the parser left unconsumed; each kind's nodes are laid down
-    // at the count of its `Start`s.
-    let opened = || {
-        events.iter().filter_map(|event| match event {
-            Event::Start { kind, .. } if *kind != TOMBSTONE => Some(*kind),
-            _ => None,
-        })
-    };
-    let consumed = events
-        .iter()
-        .filter(|event| matches!(event, Event::Token { .. }))
-        .count();
-    let shaped = opened().count() + consumed;
+    // at the count of its `Start`s. One pass counts both.
     let bump = arena.bump();
-    let nodes = Building::new(bump, opened(), std::mem::take(&mut stacks.counts));
+    let (nodes, shaped) = Building::new(bump, &events, std::mem::take(&mut stacks.counts));
     let mut builder = Builder {
         tokens,
         lines,
@@ -277,15 +264,13 @@ pub(crate) fn build_in<'a>(
         pools: &mut stacks.pools,
         missing: Vec::new(),
     };
-    let mut diagnostics = Vec::new();
-    let tombstone = || Event::Start {
-        kind: TOMBSTONE,
-        forward_parent: None,
-    };
     for i in 0..events.len() {
-        // A chain only reaches forward, so an event once passed is never
-        // read again and can be taken out.
-        match std::mem::replace(&mut events[i], tombstone()) {
+        // A chain only reaches forward and tombstones the `Start`s it
+        // opened, so an event once passed is never read again.
+        let Some(&event) = events.get(i) else {
+            break;
+        };
+        match event {
             Event::Start { kind, .. } if kind == TOMBSTONE => {}
             Event::Start {
                 kind,
@@ -297,7 +282,6 @@ pub(crate) fn build_in<'a>(
             } => builder.start_chain(&mut events, i, kind, delta),
             Event::Finish => builder.finish(),
             Event::Token { remap } => builder.token(remap),
-            Event::Error(diagnostic) => diagnostics.push(*diagnostic),
             Event::DocComment => builder.take_doc_comment(),
             Event::DocCommentRestore => builder.restore_doc_comment(),
         }
@@ -331,7 +315,6 @@ pub(crate) fn build_in<'a>(
             nodes,
             lists,
         },
-        diagnostics,
         missing,
     }
 }
@@ -867,38 +850,5 @@ mod tests {
              ERROR@10..10\n"
         );
         assert_eq!(built.missing.len(), 1, "{:?}", built.missing);
-    }
-
-    /// `Error` events are the diagnostics, in stream order.
-    #[test]
-    fn error_events_are_the_diagnostics() {
-        use crate::source::Span;
-        let source = b"<?php";
-        let tokens = lexed(source);
-        let built = build_over(
-            source,
-            &tokens,
-            vec![
-                start(SyntaxKind::SOURCE_FILE),
-                Event::Error(Box::new(Diagnostic::new(
-                    Span::new(FileId(0), 0, 5),
-                    1,
-                    "one",
-                ))),
-                token(SyntaxKind::OPEN_TAG),
-                Event::Error(Box::new(Diagnostic::new(
-                    Span::new(FileId(0), 5, 5),
-                    1,
-                    "two",
-                ))),
-                Event::Finish,
-            ],
-        );
-        let messages: Vec<&str> = built
-            .diagnostics
-            .iter()
-            .map(|d| d.message.as_str())
-            .collect();
-        assert_eq!(messages, ["one", "two"]);
     }
 }

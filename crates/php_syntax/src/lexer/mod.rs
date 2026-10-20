@@ -638,7 +638,20 @@ pub(crate) fn is_label_start(b: u8) -> bool {
     b.is_ascii_alphabetic() || b == b'_' || b >= 0x80
 }
 
-/// A later byte of a PHP label: `[a-zA-Z0-9_\x80-\xFF]`.
+/// A later byte of a PHP label: `[a-zA-Z0-9_\x80-\xFF]`, read from a
+/// table, as re2c's scanner reads its classes, since a name's every byte
+/// asks.
 pub(crate) fn is_label_continue(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80
+    LABEL_CONTINUE[usize::from(b)]
 }
+
+/// [`is_label_continue`] for every byte.
+static LABEL_CONTINUE: [bool; 256] = {
+    let mut table = [false; 256];
+    let mut b = 0;
+    while b < 256 {
+        table[b] = matches!(b, 0x30..=0x39 | 0x41..=0x5A | 0x5F | 0x61..=0x7A | 0x80..=0xFF);
+        b += 1;
+    }
+    table
+};

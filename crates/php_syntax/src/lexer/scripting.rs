@@ -427,15 +427,16 @@ impl Lexer<'_> {
     // ----- identifiers, keywords, names, b-prefixed strings ---------------------------
 
     pub(crate) fn label_len(&self, at: usize) -> usize {
-        let mut i = at;
-        if !is_label_start(self.byte(i)) {
-            return 0;
+        let rest = self.text.get(at..).unwrap_or_default();
+        match rest.split_first() {
+            Some((&first, tail)) if is_label_start(first) => {
+                1 + tail
+                    .iter()
+                    .position(|&b| !is_label_continue(b))
+                    .unwrap_or(tail.len())
+            }
+            _ => 0,
         }
-        i += 1;
-        while is_label_continue(self.byte(i)) {
-            i += 1;
-        }
-        i - at
     }
 
     fn lex_ident_like(&mut self) {

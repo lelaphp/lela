@@ -60,6 +60,12 @@ impl Scratch {
     /// of a large file pays for its own and gives it up.
     const KEPT: usize = 64 * 1024;
 
+    /// The longest source whose parse grows no stack near
+    /// [`Scratch::KEPT`]: every stack holds a few entries per token at
+    /// most, and a token is a byte at least, so a parse of a source this
+    /// long needs no [`Scratch::trim`] after it.
+    pub(crate) const GROWN: usize = 256;
+
     /// The room kept for the next parse: every stack as it stands where
     /// each is within what an arena keeps, none where one is not.
     pub(crate) fn trim(&mut self) {

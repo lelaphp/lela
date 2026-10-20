@@ -435,27 +435,36 @@ pub(crate) struct Building<'a> {
 
 impl<'a> Building<'a> {
     /// An empty arena in `bump`, to hold as many nodes of each kind as
-    /// `kinds` names, counted into `counts`, which [`Building::freeze`]
-    /// hands back at zero.
+    /// `events` opens, counted into `counts`, which [`Building::freeze`]
+    /// hands back at zero; and how many elements the shape of `events`
+    /// holds, a node per `Start` and a token per `Token`.
     pub(crate) fn new(
         bump: &'a Bump,
-        kinds: impl Iterator<Item = SyntaxKind>,
+        events: &[Event],
         mut counts: Vec<u32>,
-    ) -> Building<'a> {
+    ) -> (Building<'a>, usize) {
         counts.resize(SLOTS, 0);
-        let mut held = 0;
-        for kind in kinds {
-            if let Some(count) = slot_of(kind).and_then(|slot| counts.get_mut(slot)) {
-                held += usize::from(*count == 0);
-                *count = count.saturating_add(1);
+        let (mut held, mut shaped) = (0, 0);
+        for event in events {
+            match *event {
+                Event::Start { kind, .. } if kind != TOMBSTONE => {
+                    shaped += 1;
+                    if let Some(count) = slot_of(kind).and_then(|slot| counts.get_mut(slot)) {
+                        held += usize::from(*count == 0);
+                        *count = count.saturating_add(1);
+                    }
+                }
+                Event::Token { .. } => shaped += 1,
+                _ => {}
             }
         }
-        Building {
+        let building = Building {
             bump,
             slots: [None; SLOTS],
             stores: BumpVec::with_capacity_in(held, bump),
             counts,
-        }
+        };
+        (building, shaped)
     }
 
     /// The vector of the struct kind at `slot`, made by `empty` with the
