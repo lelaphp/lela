@@ -296,6 +296,7 @@ fn check(check: Check) -> String {
         Check::Direction { taken } => {
             format!("direction {}", if taken { "taken" } else { "fell" })
         }
+        Check::Table => "table".to_owned(),
         Check::Caller { func: f, opline } => format!("caller {} {:04}", func(f), opline.0),
     }
 }

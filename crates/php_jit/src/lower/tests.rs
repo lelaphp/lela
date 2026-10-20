@@ -360,3 +360,46 @@ fn a_guarded_boolean_is_tested_where_the_trace_runs() {
         assert!(!testing::MAPS_CODE || lines.contains(" exit "), "{lines}");
     }
 }
+
+/// A table's jump, `SWITCH_STRING`, `SWITCH_LONG` or `MATCH`, served
+/// through `step`, is held to the opline the trace serves next, as php's
+/// `zend_jit_switch` leaves for any target the trace did not follow: each
+/// loop, compiled at its first iteration under `jit.mode=force` where the
+/// table went to its default, leaves where it goes to a case, so each
+/// prints what php prints rather than the recorded way to the end; under
+/// `exit-fuzz` the guard is failed once too, its exit landing where the
+/// step left the frame (Zend/tests/match/001.phpt, match/008.phpt,
+/// switch/bug26696.phpt).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_tables_jump_leaves_where_it_goes_another_way() {
+    for (program, printed) in [
+        (
+            "function f($a) { for ($i = 0; $i < 4; $i++) { switch ($a[$i]) { case 'b': echo 'T'; break; case 'c': echo 'C'; break; default: echo 'd'; } } }
+            f(['a', 'a', 'b', 'c']); echo \"\\n\";",
+            "ddTC\n",
+        ),
+        (
+            "function f() { for ($i = 0; $i < 7; $i++) { switch ($i) { case 2: echo 'b'; break; case 3: echo 'c'; break; case 4: echo 'd'; break; case 5: echo 'e'; break; case 6: echo 'f'; break; default: echo '-'; } } }
+            f(); echo \"\\n\";",
+            "--bcdef\n",
+        ),
+        (
+            "function f() { for ($i = 0; $i < 4; $i++) { echo match ($i) { 1 => 'one', 2 => 'two', 3 => 'three', default => 'none' }, ' '; } }
+            f(); echo \"\\n\";",
+            "none one two three \n",
+        ),
+    ] {
+        for mode in ["force", "exit-fuzz"] {
+            let ini = [
+                ("jit.mode", mode),
+                ("jit.compile", "inline"),
+                ("opcache.jit_debug", "258048"),
+            ];
+            let served = testing::serve::<Lane>(&ini, program);
+            let lines = String::from_utf8_lossy(&served.stderr).into_owned();
+            assert_eq!(testing::stdout(&served), printed, "{mode} {program}\n{lines}");
+            assert!(lines.contains("---- TRACE 1 compiled"), "{lines}");
+        }
+    }
+}

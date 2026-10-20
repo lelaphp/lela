@@ -516,7 +516,7 @@ impl<'a> Emit<'a> {
                 let other = self.b.ins().icmp_imm_s(cc, packed, 0);
                 self.leave_if(other, guard.exit)?;
             }
-            Check::Direction { .. } | Check::Caller { .. } => {
+            Check::Direction { .. } | Check::Table | Check::Caller { .. } => {
                 return Err(mismatch("an op's own guard held before it"));
             }
         }
@@ -788,26 +788,45 @@ impl<'a> Emit<'a> {
             self.calls.pop();
         }
         for guard in self.within(at) {
-            let Check::Direction { .. } = guard.check else {
-                return Err(mismatch("a stepped opline holds a guard of another kind"));
-            };
             let went = self.stood_word(I32, STOOD_OPLINE);
-            let other = if let Some(next) = self.successor(at, line.frame) {
-                self.b
-                    .ins()
-                    .icmp_imm_u(IntCC::NotEqual, went, i64::from(next))
-            } else {
-                let landing = self
-                    .ir
-                    .exits
-                    .get(usize::from(guard.exit.0))
-                    .and_then(|exit| exit.opline)
-                    .ok_or_else(|| mismatch("a stepped jump with nowhere to hold"))?;
-                self.b
-                    .ins()
-                    .icmp_imm_u(IntCC::Equal, went, i64::from(landing.0))
-            };
-            self.leave_where(other, guard.exit)?;
+            let next = self.successor(at, line.frame);
+            match guard.check {
+                Check::Direction { .. } => {
+                    let other = if let Some(next) = next {
+                        self.b
+                            .ins()
+                            .icmp_imm_u(IntCC::NotEqual, went, i64::from(next))
+                    } else {
+                        let landing = self
+                            .ir
+                            .exits
+                            .get(usize::from(guard.exit.0))
+                            .and_then(|exit| exit.opline)
+                            .ok_or_else(|| mismatch("a stepped jump with nowhere to hold"))?;
+                        self.b
+                            .ins()
+                            .icmp_imm_u(IntCC::Equal, went, i64::from(landing.0))
+                    };
+                    self.leave_where(other, guard.exit)?;
+                }
+                // A trace that ends at the table goes on where the jump
+                // went, so there is nothing to hold.
+                Check::Table => {
+                    if let Some(next) = next {
+                        let other = self
+                            .b
+                            .ins()
+                            .icmp_imm_u(IntCC::NotEqual, went, i64::from(next));
+                        self.leave_if(other, guard.exit)?;
+                    }
+                }
+                Check::Type { .. }
+                | Check::Deref { .. }
+                | Check::Layout { .. }
+                | Check::Caller { .. } => {
+                    return Err(mismatch("a stepped opline holds a guard of another kind"));
+                }
+            }
         }
         Ok(())
     }

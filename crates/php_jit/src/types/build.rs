@@ -493,6 +493,7 @@ impl<'a> Builder<'a> {
         let target = jump.and_then(|jump| jump.jump_target());
         self.successor = went(at, &op, target, len, branch);
         self.own_exit(idx, frame, &op, form, t1);
+        self.table(idx, frame, op.opcode);
         if let Some(taken) = branch {
             let jump = if fused { after } else { None };
             self.direction(
@@ -581,6 +582,23 @@ impl<'a> Builder<'a> {
             out,
             op1,
             op2,
+        }
+    }
+
+    /// The guard of a table's jump, served through `step`: it goes to the
+    /// opline the trace serves next, and where it does not the interpreter
+    /// goes on where the step left the frame, as php's `zend_jit_switch`
+    /// leaves through an exit for each target the trace does not follow.
+    fn table(&mut self, idx: OpId, frame: Frame, opcode: Opcode) {
+        if matches!(
+            opcode,
+            Opcode::SwitchLong | Opcode::SwitchString | Opcode::Match
+        ) {
+            self.guards.push(Placed {
+                at: GuardAt::Within(idx),
+                check: Check::Table,
+                exit: draft(Point::After(idx), frame, At::Stands),
+            });
         }
     }
 
