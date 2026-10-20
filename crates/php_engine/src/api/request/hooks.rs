@@ -1386,7 +1386,7 @@ impl Request {
                 let hooked = self.row_hooked(declaring, &name);
                 // `check_access`: `zend_check_property_access` under the scope.
                 if iterator {
-                    if let Err(thrown) = self.access_name_copy(&name, visibility) {
+                    if let Err(thrown) = self.access_name_copy(name.len(), visibility) {
                         break 'laid Err(thrown);
                     }
                     if !self.property_row_visible(class, &name, Some(declaring))
@@ -1569,9 +1569,11 @@ impl Request {
 
     /// `zend_check_property_access` over a declared row php's table keys
     /// by its mangled name, a protected or a private one: the copy of the
-    /// unmangled name it looks the property up by (`zend_string_init`),
-    /// released before it answers, so `memory_get_peak_usage()` counts it
-    /// above the table being filled.
+    /// unmangled name, `len` bytes, it looks the property up by
+    /// (`zend_string_init`), released before it answers, so
+    /// `memory_get_peak_usage()` counts it above the table being filled
+    /// and above a `foreach`'s last key. Its bytes are never read; its
+    /// size is what php's heap sees.
     ///
     /// ```php
     /// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); $p = memory_get_peak_usage(); $u = memory_get_usage(); echo $p - $s, ' ', $u - $s, "\n"; }
@@ -1587,11 +1589,11 @@ impl Request {
     /// ```
     pub(crate) fn access_name_copy(
         &mut self,
-        name: &[u8],
+        len: usize,
         visibility: Visibility,
     ) -> Result<(), Thrown> {
         if visibility != Visibility::Public {
-            let copy = Owner::adopt(self.string_init(name)?);
+            let copy = Owner::adopt(self.string_with(len, |_| {})?);
             copy.give_up(self);
         }
         Ok(())

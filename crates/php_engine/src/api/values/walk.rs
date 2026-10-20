@@ -1344,8 +1344,8 @@ pub(crate) fn object_step(
     at: u32,
     (table, stepped): (PropertyTable, Stepped),
     advance: Advance,
-    mut admits: impl FnMut(&Request, &TableRow) -> bool,
-) -> Option<(u32, TableRow, Zval)> {
+    mut admits: impl FnMut(&mut Request, &TableRow) -> Result<bool, Thrown>,
+) -> Result<Option<(u32, TableRow, Zval)>, Thrown> {
     let declared = table.declared();
     let pos = req.heap_mut().iterator_pos(at, table.table());
     let lead = req.heap_mut().iterator_lead(at);
@@ -1359,7 +1359,7 @@ pub(crate) fn object_step(
             break None;
         };
         from = found.saturating_add(1);
-        if admits(req, &row) {
+        if admits(req, &row)? {
             break Some((found, row, value));
         }
     };
@@ -1383,7 +1383,7 @@ pub(crate) fn object_step(
         }
         heap.iterator_set_pos(at, next - declared);
     }
-    found
+    Ok(found)
 }
 
 /// What an [`object_step`] walks of an object's positions.
@@ -1440,8 +1440,9 @@ fn object_row(
         iterator,
         (table, Stepped::Positions),
         Advance::NextLive,
-        |_, _| true,
-    ) else {
+        |_, _| Ok(true),
+    )?
+    else {
         return Ok(None);
     };
     let (key, at) = match row {

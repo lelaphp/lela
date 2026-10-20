@@ -3362,15 +3362,19 @@ impl Request {
     /// where the loop keeps one, as `RETURN_VALUE_USED` guards php's: a
     /// public property's the interned name, a protected or a private
     /// one's a string of its own ([`Request::walk_key`]), so a loop that
-    /// holds the last key while the next is made peaks at both.
+    /// holds the last key while the next is made peaks at both. Asking
+    /// whether the scope reaches a protected or a private slot costs the
+    /// copy of its name `zend_check_property_access` makes and frees
+    /// ([`Request::access_name_copy`]), key or none.
     ///
     /// ```php
     /// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); $p = memory_get_peak_usage(); $u = memory_get_usage(); echo $p - $s, ' ', $u - $s, "\n"; }
-    /// class P3 { public $a = 1; private $pp = 3; protected $qq = 4; function w() { $o = []; foreach ($this as $k => $v) $o[] = $k; return 1; } function z() { foreach ($this as $k => $v) {} return 1; } function r() { foreach ($this as $k => &$v) {} return 1; } }
+    /// class P3 { public $a = 1; private $pp = 3; protected $qq = 4; function w() { $o = []; foreach ($this as $k => $v) $o[] = $k; return 1; } function z() { foreach ($this as $k => $v) {} return 1; } function r() { foreach ($this as $k => &$v) {} return 1; } function n() { foreach ($this as $v) {} return 1; } }
     /// $p = new P3;
     /// pk(fn () => $p->w());
     /// pk(fn () => $p->z());
     /// pk(fn () => $p->r());
+    /// pk(fn () => $p->n());
     /// $o = (object)["\0A\0b" => 42, "\0*\0c" => 24, "d" => 1];
     /// pk(function () use ($o) { foreach ($o as $k => $v) {} return 1; });
     /// pk(function () use ($o) { foreach ($o as $v) {} return 1; });
@@ -3379,6 +3383,7 @@ impl Request {
     /// 280 0
     /// 64 0
     /// 96 0
+    /// 32 0
     /// 64 0
     /// 0 0
     /// ```
@@ -3427,17 +3432,20 @@ impl Request {
             walk::Advance::Past,
             |req, row| match row {
                 TableRow::Slot(slot) => {
-                    req.placed_property(class, *slot)
-                        .is_some_and(|(declaring, p)| {
-                            req.property_row_visible(class, &p.name.0, Some(declaring))
-                        })
+                    let Some((declaring, p)) = req.placed_property(class, *slot) else {
+                        return Ok(false);
+                    };
+                    let (len, visibility) = (p.name.0.len(), p.visibility);
+                    let visible = req.property_row_visible(class, &p.name.0, Some(declaring));
+                    req.access_name_copy(len, visibility)?;
+                    Ok(visible)
                 }
                 TableRow::Entry(php_heap::Key::Str(name)) => {
-                    req.property_row_visible(class, name.bytes(), None)
+                    Ok(req.property_row_visible(class, name.bytes(), None))
                 }
-                TableRow::Entry(php_heap::Key::Long(_)) => true,
+                TableRow::Entry(php_heap::Key::Long(_)) => Ok(true),
             },
-        );
+        )?;
         match found {
             None => Ok(None),
             Some((_, TableRow::Slot(slot), _)) => {
