@@ -22436,7 +22436,7 @@ pub(crate) fn case<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let computed = compared(req, frame, code, op, crate::ops::is_equal);
+    let computed = binary_kernel(req, frame, code, op, crate::ops::is_equal);
     smart_branch::<T, branch::Peeked>(req, frame, code, op, computed)
 }
 
@@ -22448,7 +22448,7 @@ pub(crate) fn case_strict<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let computed = compared(req, frame, code, op, crate::ops::is_identical);
+    let computed = binary_kernel(req, frame, code, op, crate::ops::is_identical);
     smart_branch::<T, branch::Peeked>(req, frame, code, op, computed)
 }
 
@@ -22773,7 +22773,9 @@ fn binary_by_kind(
 }
 
 /// [`binary`] up to the write: what the kernel computed, both operands
-/// freed.
+/// freed, `FREE_OP1` then `FREE_OP2`; `CASE` and `CASE_STRICT` keep
+/// `op1`, `FREE_OP2` alone, since the subject is read again by the next
+/// case.
 fn binary_kernel(
     req: &mut Request,
     frame: FrameRef,
@@ -22784,7 +22786,9 @@ fn binary_kernel(
     let left = exec::operand(req, frame, code, op.op1_type, op.op1);
     let right = exec::operand(req, frame, code, op.op2_type, op.op2);
     let computed = kernel(req, &left, &right);
-    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    if !matches!(op.opcode, Opcode::Case | Opcode::CaseStrict) {
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    }
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     computed
 }
@@ -23460,22 +23464,6 @@ fn incdec(
             threw(req, frame, &thrown)
         }
     }
-}
-
-/// The body `CASE` and `CASE_STRICT` share: [`binary`] with `op1` kept,
-/// `FREE_OP2` alone, since the subject is read again by the next case.
-fn compared(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-    op: &Opline,
-    kernel: fn(&mut Request, &Value, &Value) -> Result<Value, Thrown>,
-) -> Result<Value, Thrown> {
-    let left = exec::operand(req, frame, code, op.op1_type, op.op1);
-    let right = exec::operand(req, frame, code, op.op2_type, op.op2);
-    let computed = kernel(req, &left, &right);
-    exec::free_operand(req, frame, code, op.op2_type, op.op2);
-    computed
 }
 
 /// Where a jump-table opcode sends the frame: `ZEND_VM_SET_RELATIVE_OPCODE`
