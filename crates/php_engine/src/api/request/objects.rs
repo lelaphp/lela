@@ -1846,7 +1846,7 @@ impl Request {
         if place == crate::api::abi::PropertyPlace::Handlers {
             return table.write_property(self, object, name, value);
         }
-        let silent = self.serves_accessor(object.class(), b"__set");
+        let silent = self.serves_accessor(object.class(), super::Accessor::Set);
         let slot = match self.declared_slot_for_write(object, &bytes, "modify", silent) {
             Ok(placed) => placed.map(|(slot, _)| slot),
             Err(thrown) => {

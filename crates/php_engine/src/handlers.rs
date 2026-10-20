@@ -13478,7 +13478,7 @@ fn assign_property(
         // accessor there, which is where php raises the `Error` if the
         // guard stands.
         PropertyPlace::Std => {
-            let silent = req.serves_accessor(object.class(), b"__set");
+            let silent = req.serves_accessor(object.class(), crate::api::request::Accessor::Set);
             match req.declared_slot_for_write(object, bytes, "modify", silent) {
                 Ok(placed) => placed,
                 Err(thrown) => {
@@ -16211,7 +16211,7 @@ fn step_property(
                 Ok(stepped) => stepped,
                 Err(thrown) => return Ok(Err(thrown)),
             };
-            let silent = req.serves_accessor(object.class(), b"__get");
+            let silent = req.serves_accessor(object.class(), crate::api::request::Accessor::Get);
             match req.declared_slot_for_write(object, &bytes, "modify", silent) {
                 Ok(Some((slot, typed))) => step_slot(
                     req,
@@ -16380,7 +16380,7 @@ fn property_ptr(
         // place for a property the scope may not reach and takes the
         // overloaded arm over it instead.
         PropertyPlace::Std => {
-            let silent = req.serves_accessor(object.class(), b"__get");
+            let silent = req.serves_accessor(object.class(), crate::api::request::Accessor::Get);
             // `BP_VAR_RW` reads an unwritten slot before the placement.
             req.read_before_write(object, bytes)?;
             if req.place_withheld(object, bytes) {

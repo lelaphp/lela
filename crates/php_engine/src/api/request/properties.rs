@@ -40,6 +40,28 @@ const IN_UNSET: u32 = 1 << 2;
 
 const IN_ISSET: u32 = 1 << 3;
 
+/// One of the four magic methods a property access is served by,
+/// `ce->__get`, `ce->__set`, `ce->__isset` and `ce->__unset`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Accessor {
+    Get,
+    Set,
+    Isset,
+    Unset,
+}
+
+impl Accessor {
+    /// The position of this accessor's row among a record's methods.
+    fn of(self, accessors: &php_link::Accessors) -> Option<u32> {
+        match self {
+            Accessor::Get => accessors.get,
+            Accessor::Set => accessors.set,
+            Accessor::Isset => accessors.isset,
+            Accessor::Unset => accessors.unset,
+        }
+    }
+}
+
 /// Why `zend_get_property_offset` answered its wrong offset for a name
 /// no declared instance property holds.
 #[derive(Clone, Copy)]
@@ -1337,7 +1359,7 @@ impl Request {
     /// ```
     pub(crate) fn overloaded_fetch(&self, object: PhpObject, name: &[u8]) -> bool {
         let class = object.class();
-        if !self.serves_accessor(class, b"__get") {
+        if !self.serves_accessor(class, Accessor::Get) {
             return false;
         }
         if self.wrong_name(class, name) {
@@ -1696,22 +1718,49 @@ impl Request {
     }
 
     /// `zobj->ce->__get` and its three neighbours: the magic accessor
-    /// `lowered` names, which php resolves once at link time and holds
-    /// on the class entry as the pointer every handler tests. Each of
-    /// the four is public and takes a receiver, which
-    /// `zend_check_magic_method_implementation` refuses a class that
-    /// declares otherwise, so the scope that reached the property never
-    /// bars the call.
-    fn magic_accessor(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
-        self.symbols().method_named(class, lowered)
+    /// `accessor` names, which the link resolved once and the class's
+    /// record holds by position ([`php_link::Accessors`]), so asking is
+    /// a read and never a lookup by name, as php holds the pointer every
+    /// handler tests on the class entry. Each of the four is public and
+    /// takes a receiver, which `zend_check_magic_method_implementation`
+    /// refuses a class that declares otherwise, so the scope that reached
+    /// the property never bars the call. A parent's accessor, a trait's
+    /// and one declared in another case are each the class's:
+    ///
+    /// ```php
+    /// trait T { function __set($n, $v) { echo "T::__set $n\n"; } }
+    /// class P { function __get($n) { return "P::__get $n"; } function __isset($n) { echo "P::__isset $n\n"; return true; } }
+    /// class Q extends P { use T; function __unset($n) { echo "Q::__unset $n\n"; } }
+    /// class R extends Q { function __GET($n) { return "R::__get $n"; } }
+    /// foreach ([new Q, new R] as $o) { echo $o->a, "\n"; $o->b = 1; var_dump(isset($o->c), empty($o->d)); unset($o->e); }
+    /// ```
+    /// ```expect
+    /// P::__get a
+    /// T::__set b
+    /// P::__isset c
+    /// P::__isset d
+    /// bool(true)
+    /// bool(false)
+    /// Q::__unset e
+    /// R::__get a
+    /// T::__set b
+    /// P::__isset c
+    /// P::__isset d
+    /// bool(true)
+    /// bool(false)
+    /// Q::__unset e
+    /// ```
+    fn magic_accessor(&self, class: ClassId, accessor: Accessor) -> Option<Function> {
+        self.resolved_method(class, |record| accessor.of(&record.accessors))
     }
 
     /// `zobj->ce->__set != NULL`, the test a handler makes before it
     /// places a name: whether the class serves the magic accessor
-    /// `lowered` names, which is what makes a placement silent
+    /// `accessor` names, which is what makes a placement silent
     /// ([`Request::declared_slot_for_write`]).
-    pub(crate) fn serves_accessor(&self, class: ClassId, lowered: &[u8]) -> bool {
-        self.magic_accessor(class, lowered).is_some()
+    pub(crate) fn serves_accessor(&self, class: ClassId, accessor: Accessor) -> bool {
+        self.linked_class(class)
+            .is_some_and(|record| accessor.of(&record.accessors).is_some())
     }
 
     /// `ce->ce_flags & ZEND_ACC_USE_GUARDS`: whether `class` or a class
@@ -2012,8 +2061,8 @@ impl Request {
                 // an `unset` emptied is the magic methods' where the class
                 // has one that answers, and the same error where not
                 // (`uninit_error` with `prop_info` set).
-                let magic = self.serves_accessor(class, b"__get")
-                    || (silent && self.serves_accessor(class, b"__isset"));
+                let magic = self.serves_accessor(class, Accessor::Get)
+                    || (silent && self.serves_accessor(class, Accessor::Isset));
                 if placed.typed && (o.slot_uninit(placed.slot) || !magic) {
                     if quiet {
                         return Ok(Owner::null());
@@ -2021,24 +2070,26 @@ impl Request {
                     return Err(self.uninitialized_property(placed.declaring, name));
                 }
             } else {
-                if !silent && !self.serves_accessor(class, b"__get") {
+                if !silent && !self.serves_accessor(class, Accessor::Get) {
                     return Err(self.inaccessible_property(class, placed.visibility, name));
                 }
                 wrong = true;
             }
-        } else if let Some(miss) =
-            self.unplaced(class, name, silent || self.serves_accessor(class, b"__get"))
-        {
-            if !silent && !self.serves_accessor(class, b"__get") {
+        } else if let Some(miss) = self.unplaced(
+            class,
+            name,
+            silent || self.serves_accessor(class, Accessor::Get),
+        ) {
+            if !silent && !self.serves_accessor(class, Accessor::Get) {
                 return Err(self.unplaced_error(class, name, miss));
             }
             wrong = true;
         } else if let Some(value) = Self::dynamic_prop(o, name) {
             return Ok(Owner::take(self, value.deref()));
         }
-        let getter = self.magic_accessor(class, b"__get");
+        let getter = self.magic_accessor(class, Accessor::Get);
         let issetter = silent
-            .then(|| self.magic_accessor(class, b"__isset"))
+            .then(|| self.magic_accessor(class, Accessor::Isset))
             .flatten();
         let guard_bit = if issetter.is_some() { IN_ISSET } else { IN_GET };
         // GH-21478: a proxy that forwards, read from inside the
@@ -2261,7 +2312,7 @@ impl Request {
         if o.slot(placed.slot).is_undef()
             && !o.slot_uninit(placed.slot)
             && !self.lazy_slot(o, placed.slot)
-            && self.serves_accessor(class, b"__set")
+            && self.serves_accessor(class, Accessor::Set)
         {
             return Ok(None);
         }
@@ -2316,8 +2367,8 @@ impl Request {
         {
             return Ok(());
         }
-        let magic =
-            self.serves_accessor(class, b"__get") && self.guard_word(object, name) & IN_GET == 0;
+        let magic = self.serves_accessor(class, Accessor::Get)
+            && self.guard_word(object, name) & IN_GET == 0;
         if magic && !o.slot_uninit(placed.slot) {
             return Ok(());
         }
@@ -2646,7 +2697,7 @@ impl Request {
             if self.hooked_accessible(&hooked) {
                 return self.write_hooked(object, name, value, hooked);
             }
-            if !self.serves_accessor(class, b"__set") {
+            if !self.serves_accessor(class, Accessor::Set) {
                 let thrown = self.inaccessible_property(class, hooked.visibility, name.as_bytes());
                 value.give_up(self);
                 name.give_up(self);
@@ -2680,7 +2731,7 @@ impl Request {
         // reach, silent only for a class with a `__set` to serve it.
         if let Some(p) = placed.as_ref()
             && !self.reaches(p)
-            && !self.serves_accessor(class, b"__set")
+            && !self.serves_accessor(class, Accessor::Set)
         {
             let thrown = self.inaccessible_property(class, p.visibility, name.as_bytes());
             value.give_up(self);
@@ -2688,7 +2739,7 @@ impl Request {
             return Err(thrown);
         }
         let bad_name = placed.is_none() && Self::bad_property_name(name.as_bytes());
-        if bad_name && !self.serves_accessor(class, b"__set") {
+        if bad_name && !self.serves_accessor(class, Accessor::Set) {
             let thrown = self.bad_property_name_error();
             value.give_up(self);
             name.give_up(self);
@@ -2708,7 +2759,7 @@ impl Request {
         {
             return self.write_property(instance, name, value);
         }
-        let Some(setter) = self.magic_accessor(class, b"__set") else {
+        let Some(setter) = self.magic_accessor(class, Accessor::Set) else {
             if lazy {
                 return self.lazy_write(object, name, value, false);
             }
@@ -3850,7 +3901,7 @@ impl Request {
     /// and `write_property`, which is a class with a `__get` that the
     /// guard is not already holding.
     pub(crate) fn overloaded_place(&self, object: PhpObject, name: &[u8]) -> bool {
-        self.serves_accessor(object.class(), b"__get")
+        self.serves_accessor(object.class(), Accessor::Get)
             && (self.guard_word(object, name) & IN_GET == 0
                 || self.wrong_name(object.class(), name))
     }
@@ -4107,7 +4158,7 @@ impl Request {
         {
             return self.has_property(instance, name, test);
         }
-        let issetter = self.magic_accessor(class, b"__isset");
+        let issetter = self.magic_accessor(class, Accessor::Isset);
         if issetter.is_some() && test == PropertyTest::Exists {
             return Ok(false);
         }
@@ -4174,7 +4225,7 @@ impl Request {
             return Ok(truthy);
         }
         let Some(getter) = self
-            .magic_accessor(object.class(), b"__get")
+            .magic_accessor(object.class(), Accessor::Get)
             .filter(|_| self.guard_word(object, name) & IN_GET == 0)
         else {
             return Ok(false);
@@ -4216,7 +4267,7 @@ impl Request {
         test: PropertyTest,
     ) -> Result<bool, Thrown> {
         let instance = self.lazy_init(object)?;
-        if self.serves_accessor(instance.class(), b"__isset")
+        if self.serves_accessor(instance.class(), Accessor::Isset)
             && self.guard_word(instance, name) & IN_ISSET == 0
         {
             self.guard_take(instance, name, IN_ISSET);
@@ -4324,7 +4375,7 @@ impl Request {
         {
             return Err(self.unset_hooked(object, name));
         }
-        let unsetter = self.magic_accessor(class, b"__unset");
+        let unsetter = self.magic_accessor(class, Accessor::Unset);
         let mut wrong = false;
         if let Some(placed) = self.declared_slot(class, name) {
             if self.reaches(&placed) {

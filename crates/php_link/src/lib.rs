@@ -58,8 +58,8 @@ mod rows;
 mod traits;
 
 pub use rows::{
-    Case, ClassHooks, Exact, Folded, Indexed, LinkedClass, NameHash, NameHasher, NameMap, Named,
-    Names, Row, Rows,
+    Accessors, Case, ClassHooks, Exact, Folded, Indexed, LinkedClass, NameHash, NameHasher,
+    NameMap, Named, Names, Row, Rows,
 };
 
 pub use hooks::{
@@ -2037,12 +2037,19 @@ impl<'a, H: Copy> Linker<'a, H> {
                 .and_then(|(at, _)| u32::try_from(at).ok())
         };
         let (constructor, destructor) = (magic(b"__construct"), magic(b"__destruct"));
+        let accessors = Accessors {
+            get: magic(b"__get"),
+            set: magic(b"__set"),
+            isset: magic(b"__isset"),
+            unset: magic(b"__unset"),
+        };
         let properties = self.member_rows::<PropertyDecl>(child, usize::MAX)?;
         let hooks = self.class_hooks(child, &properties);
         Some(LinkedClass {
             prototypes: self.prototypes(child, &methods)?,
             constructor,
             destructor,
+            accessors,
             methods,
             constants: self.member_rows::<ClassConstDecl>(child, usize::MAX)?,
             properties,
