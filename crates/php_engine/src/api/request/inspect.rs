@@ -166,36 +166,32 @@ impl Request {
     fn compile_context_over(&mut self, path: &[u8], source: &[u8]) -> Compiled {
         self.take_shared_hold();
         let shared = std::sync::Arc::clone(&self.shared);
-        let compiled = shared.compile_declaring(self, source, path);
+        let compiled = shared.compile_for(self, source, path, SourceKind::File);
         match compiled {
             Ok(unit) => {
                 crate::engine::note_compiled(self, &unit, SourceKind::File);
                 Compiled::Compiled
             }
-            Err((refused, declared)) => {
+            Err(refused) => {
                 let recording = self.begin_recording();
                 // A parse error, and a refusal php throws, leave
-                // `zend_compile` as it returns, so `compile_file` emits
-                // what it recorded before phpdbg renders the throwable
-                // and bails out; a compile error bails out of the compile
-                // itself, past the emit, and after what it had declared.
-                let thrown = refused.level == Level::Parse
-                    || refused.thrown
-                    || refused.stage == php_compile::Stage::Opening;
-                let noted = if thrown {
-                    Some(0)
-                } else {
-                    self.declare_refused(&refused, declared.as_ref(), path)
-                };
-                if let Some(noted) = noted {
-                    let rest = refused.raised.get(noted..).unwrap_or_default();
-                    for raised in rest {
+                // `zend_compile` as it returns, having declared nothing,
+                // so `compile_file` emits what it recorded before phpdbg
+                // renders the throwable and bails out; a compile error
+                // bails out of the compile itself, past the emit, and
+                // after what it had declared.
+                let error = &refused.error;
+                let thrown = error.level == Level::Parse
+                    || error.thrown
+                    || error.stage == php_compile::Stage::Opening;
+                if let Some(noted) = self.declare_refused(&refused, path) {
+                    for raised in error.raised.get(noted..).unwrap_or_default() {
                         self.note_error_in(raised.level, &raised.message, path, raised.line);
                     }
                     if thrown {
                         self.emit_recorded(recording);
                     }
-                    crate::engine::refusal_raised(self, &refused, path);
+                    crate::engine::refusal_raised(self, error, path);
                 }
                 self.emit_recorded(recording);
                 Compiled::Refused

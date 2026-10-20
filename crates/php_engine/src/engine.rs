@@ -47,7 +47,7 @@ use crate::natives::StubPlace;
 use crate::supplied::{Keyed, Resolved, Suppliers};
 use crate::tier::{BindLoops, Loop, Loops, Nop, Tier};
 pub(crate) use crate::unit_cache::Cached;
-use crate::unit_cache::UnitCache;
+use crate::unit_cache::{CompileRefused, UnitCache};
 
 /// Everything a host knows about one request before it starts (design
 /// §4.3 seam 4): one plain `Send` value, handed over once.
@@ -1695,39 +1695,29 @@ impl Shared {
         source: &[u8],
         filename: &[u8],
         kind: SourceKind,
-    ) -> Result<PublishedUnit, CompileError> {
+    ) -> Result<PublishedUnit, CompileRefused> {
         match self.compiled_for(req, source, filename, kind) {
             Ok(unit) => Ok(Self::held_for(req, unit)),
-            Err(refused) => {
-                req.release_compiled();
-                Err(refused)
-            }
-        }
-    }
-
-    /// [`Shared::compile_for`] over a file whose refusal stands in the
-    /// request after it: the functions the refused compile had declared
-    /// ([`php_compile::Declared`]) handed back as a unit of the request's
-    /// beside the refusal, holding the strings the compile made, for the
-    /// caller to declare ([`Request::declare_refused`]).
-    pub(crate) fn compile_declaring(
-        &self,
-        req: &mut Request,
-        source: &[u8],
-        filename: &[u8],
-    ) -> Result<PublishedUnit, (CompileError, Option<PublishedUnit>)> {
-        match self.compiled_for(req, source, filename, SourceKind::File) {
-            Ok(unit) => Ok(Self::held_for(req, unit)),
-            Err(refused) => {
-                let declared = refused.declared.as_ref().map(|declared| {
-                    let unit = req.take_unit(declared.unit.clone());
+            // What the refused compile had declared stands in the
+            // request after it ([`Request::declare_refused`]), a unit of
+            // the request's holding the strings the compile made, which a
+            // refusal that declared nothing gives up.
+            Err(error) => {
+                let refused = CompileRefused::published(error, |unit| {
+                    req.count_keys_made(unit.runtime_keys.len());
+                    let unit = req.take_unit(unit);
                     req.hold_compiled(&unit);
+                    // An `eval`'s names, made as php's compile made them;
+                    // the memory limit refusing them ends the request.
+                    if matches!(kind, SourceKind::Eval(_)) {
+                        req.hold_unit_names(&unit).ok();
+                    }
                     unit
                 });
-                if declared.is_none() {
+                if refused.declared.is_none() {
                     req.release_compiled();
                 }
-                Err((refused, declared))
+                Err(refused)
             }
         }
     }
@@ -5346,7 +5336,7 @@ impl Engine {
         req: &mut Request,
         source: Option<&[u8]>,
         written: Option<&[u8]>,
-    ) -> Option<Result<PublishedUnit, CompileError>> {
+    ) -> Option<Result<PublishedUnit, CompileRefused>> {
         if let Some(source) = source {
             // A source the host read is still `zend_compile_file`'s.
             req.take_shared_hold();
@@ -5380,7 +5370,7 @@ impl Engine {
         path: &[u8],
         written: &[u8],
         handle: HandlePath,
-    ) -> Option<Result<PublishedUnit, CompileError>> {
+    ) -> Option<Result<PublishedUnit, CompileRefused>> {
         req.compile_file(path, Some(written), handle)
             .unwrap_or_else(|thrown| {
                 req.leave_pending(&thrown);
@@ -5937,11 +5927,37 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &PublishedUnit, kind: Sourc
 /// ```expect exit=255
 /// Fatal error: Encoding must be a literal in %s on line 2
 /// ```
-pub(crate) fn refused_program(req: &mut Request, refused: &CompileError, file: &[u8]) {
-    for raised in &refused.raised {
+///
+/// What its compile had declared before the refusal stands, as after an
+/// `include` ([`Request::declare_refused`]), where a file the request
+/// served before it, `auto_prepend_file`'s, looks:
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/refused' . getmypid(); @mkdir($dir);
+/// file_put_contents("$dir/pre.php", '<?php register_shutdown_function(function () { var_dump(function_exists("f"), class_exists("A", false)); });');
+/// file_put_contents("$dir/main.php", "<?php\nfunction f() {}\nclass A {}\nbreak 2;\n");
+/// echo shell_exec(escapeshellarg(PHP_BINARY) . " -n -d auto_prepend_file=$dir/pre.php $dir/main.php");
+/// exec('rm -rf ' . escapeshellarg($dir));
+/// ```
+/// ```expect exit=0 process
+///
+/// Fatal error: 'break' not in the 'loop' or 'switch' context in %s on line 4
+/// Stack trace:
+/// #0 {main}
+/// bool(true)
+/// bool(true)
+/// ```
+pub(crate) fn refused_program(req: &mut Request, refused: &CompileRefused, file: &[u8]) {
+    // What the compile had declared stands, each in its turn among what
+    // it raised ([`Request::declare_refused`]).
+    let Some(noted) = req.declare_refused(refused, file) else {
+        return;
+    };
+    let error = &refused.error;
+    for raised in error.raised.get(noted..).unwrap_or_default() {
         req.note_error_in(raised.level, &raised.message, file, raised.line);
     }
-    refusal_raised(req, refused, file);
+    refusal_raised(req, error, file);
 }
 
 /// The refusal itself, past what was raised before it
