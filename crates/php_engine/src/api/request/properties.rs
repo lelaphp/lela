@@ -1072,9 +1072,8 @@ impl Request {
     /// is unset, reset or freed. A slot of an untyped property typed
     /// nothing.
     pub(crate) fn slot_source_gone(&mut self, object: PhpObject, slot: u32, cell: Ref) {
-        let typed = usize::try_from(slot)
-            .ok()
-            .and_then(|at| self.placed_property(object.class(), at))
+        let typed = self
+            .placed_property(object.class(), slot)
             .filter(|(_, p)| p.ty.is_some())
             .map(|(declaring, p)| (declaring, p.name.0.clone()));
         if let Some((declaring, name)) = typed {
@@ -1181,7 +1180,7 @@ impl Request {
         class: ClassId,
         slot: u32,
     ) -> Option<(TypedProperty, Vec<u8>)> {
-        let (declaring, p) = self.placed_property(class, usize::try_from(slot).ok()?)?;
+        let (declaring, p) = self.placed_property(class, slot)?;
         let name = p.name.0.to_vec();
         let typed = TypedProperty {
             declaring,
@@ -1197,10 +1196,7 @@ impl Request {
     /// others, since another object's slot of the same property may
     /// hold it as well. A slot of an untyped property types nothing.
     pub(crate) fn slot_source_added(&mut self, object: PhpObject, slot: u32, cell: Ref) {
-        let Some((declaring, p)) = usize::try_from(slot)
-            .ok()
-            .and_then(|at| self.placed_property(object.class(), at))
-        else {
+        let Some((declaring, p)) = self.placed_property(object.class(), slot) else {
             return;
         };
         if let Some(ty) = p.ty.clone() {
@@ -3107,16 +3103,16 @@ impl Request {
         object: PhpObject,
         key: &[u8],
     ) -> Result<(), Thrown> {
-        let Some(at) = self.unserialize_slot(object, key) else {
+        let Some(index) = self.unserialize_slot(object, key) else {
+            return Ok(());
+        };
+        let Ok(index) = u32::try_from(index) else {
             return Ok(());
         };
         let Some((declaring, ty, name)) = self
-            .placed_property(object.class(), at)
+            .placed_property(object.class(), index)
             .and_then(|(declaring, p)| Some((declaring, p.ty.clone()?, p.name.0.to_vec())))
         else {
-            return Ok(());
-        };
-        let Ok(index) = u32::try_from(at) else {
             return Ok(());
         };
         let o = object.heap();
@@ -3397,12 +3393,12 @@ impl Request {
             (table, stepped),
             walk::Advance::Past,
             |req, row| match row {
-                TableRow::Slot(slot) => req
-                    .placed(class)
-                    .find(|(at, _, _)| u32::try_from(*at).ok() == Some(*slot))
-                    .is_some_and(|(_, declaring, p)| {
-                        req.property_row_visible(class, &p.name.0, Some(declaring))
-                    }),
+                TableRow::Slot(slot) => {
+                    req.placed_property(class, *slot)
+                        .is_some_and(|(declaring, p)| {
+                            req.property_row_visible(class, &p.name.0, Some(declaring))
+                        })
+                }
                 TableRow::Entry(php_heap::Key::Str(name)) => {
                     req.property_row_visible(class, name.bytes(), None)
                 }
@@ -3413,9 +3409,8 @@ impl Request {
             None => Ok(None),
             Some((_, TableRow::Slot(slot), _)) => {
                 let Some(name) = self
-                    .placed(class)
-                    .find(|(at, _, _)| u32::try_from(*at).ok() == Some(slot))
-                    .map(|(_, _, p)| p.name.0.clone())
+                    .placed_property(class, slot)
+                    .map(|(_, p)| p.name.0.clone())
                 else {
                     return Err(crate::api::raising::fatal(
                         self,
@@ -3520,14 +3515,11 @@ impl Request {
                         Key::Str(name) => self.property_row_visible(class, name.as_bytes(), None),
                         Key::Int(_) => true,
                     });
-                match row {
-                    Some((i, (key, value))) => {
-                        at = u32::try_from(i).unwrap_or(u32::MAX).saturating_add(1);
-                        self.addref(&value);
-                        Some((Owner::take(self, key), Walked::Answered(value)))
-                    }
-                    None => None,
-                }
+                row.map(|(i, (key, value))| {
+                    at = u32::try_from(i).unwrap_or(u32::MAX).saturating_add(1);
+                    self.addref(&value);
+                    (Owner::take(self, key), Walked::Answered(value))
+                })
             }
         };
         self.heap.iterator_set_lead(idx, at);
@@ -3556,17 +3548,12 @@ impl Request {
             TableRow::Entry(key) => Ok(Some(((Key::of(key), value, None), row))),
             TableRow::Slot(slot) => {
                 let class = table.owner().class();
-                let info = usize::try_from(slot)
-                    .ok()
-                    .and_then(|slot| self.placed_properties(class).get(slot).copied());
-                let Some((info, decl)) =
-                    info.and_then(|info| Some((info, self.property_decl(info)?)))
-                else {
+                let Some((declaring, decl)) = self.placed_property(class, slot) else {
                     return Ok(None);
                 };
                 let (visibility, name) = (decl.visibility, decl.name.0.clone());
                 let name = self.kept_string(&name)?;
-                let row = (Key::Str(name), value, Some((info.declaring, visibility)));
+                let row = (Key::Str(name), value, Some((declaring, visibility)));
                 Ok(Some((row, TableRow::Slot(slot))))
             }
         }
@@ -3637,11 +3624,11 @@ impl Request {
         }
         match walked {
             Walked::Slot(slot) => {
-                let declared =
-                    self.placed_property(object.class(), slot as usize)
-                        .map(|(declaring, p)| {
-                            (declaring, p.is_readonly, p.name.0.to_vec(), p.ty.clone())
-                        });
+                let declared = self
+                    .placed_property(object.class(), slot)
+                    .map(|(declaring, p)| {
+                        (declaring, p.is_readonly, p.name.0.to_vec(), p.ty.clone())
+                    });
                 let Some((declaring, readonly, name, ty)) = declared else {
                     return self.fatal_of(Err(Fatal::error(format!(
                         "InternalError: a walk over slot {slot}, which the class does not declare"
