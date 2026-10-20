@@ -185,7 +185,7 @@ name = "ext/zlib"
 budget = 4000     # #924: zlib.c, its filter and its compress.zlib:// wrapper; a pure-Rust deflate first, libz-sys where its bytes cannot match (design revision 34)
 [[crate]]
 name = "ext/pcntl"
-budget = 2500     # pcntl.c: fork, wait, signals through Request::interrupt, alarm, exec, priority; the CLI binary alone, as php builds pcntl for cli (Mitchell, 2026-09-27)
+budget = 2500     # pcntl.c: fork, wait, signals through Limits::interrupt, alarm, exec, priority; the CLI binary alone, as php builds pcntl for cli (Mitchell, 2026-09-27)
 feature = "pcntl"
 [[crate]]
 name = "ext/posix"
@@ -503,7 +503,7 @@ deny_types = ["std::sync::Mutex", "std::sync::RwLock", "std::cell::Cell", "std::
               "std::rc::Rc"]
 deny_macros = ["std::thread_local"]
 adr = "0005"
-text = "Extension state is request-scoped, immutable engine-scoped or process-scoped (ADR-0005, ADR-0010); no lock, cell, once, Rc or thread-local in ext/*. Cross-request caching is api::Cache; a library's object a call into PHP code must outlive is the request's, held by Request::holding (ADR-0013)."
+text = "Extension state is request-scoped, immutable engine-scoped or process-scoped (ADR-0005, ADR-0010); no lock, cell, once, Rc or thread-local in ext/*. Cross-request caching is api::Cache; a library's object a call into PHP code must outlive is the request's, held by Memory::holding (ADR-0013)."
 # Renders to the generated, committed `ext/clippy.toml` (`disallowed-types`);
 # a stale copy is a `budget` failure. The wildcard is expanded from Cargo.lock.
 

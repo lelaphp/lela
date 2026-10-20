@@ -52,3 +52,4 @@ Mitchell ruled on #1658 (2026-10-03), option 2: a scoped lend of the heap, in `p
 - The cache's own table is still a Rust `HashMap` where php's `DATEG(tzcache)` is a `HashTable` on the request's heap, so the first zone a request parses leaves 424 bytes fewer in `memory_get_usage()` than php's.
 - lexbor and libmbfl, which allocate with `malloc` today, may take the same lend, each on its own ticket.
 - A future reader will want `efree` outside a lend to call `free`, "as the fallback says". Do not: the block may be a heap's. This file is the answer.
+- *Renamed 2026-10-20 by #696 (#3103):* `Request::lend_heap` is `Memory::lend_heap`, reached through `req.memory_mut()`, and `api.lock` lists it as `request::Memory::lend_heap`. The decision is unchanged.
