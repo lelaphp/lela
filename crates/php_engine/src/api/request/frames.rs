@@ -1909,13 +1909,17 @@ impl Request {
     /// is not live, where every operand reads as `UNDEF` and the inline
     /// path stands aside for the kernel.
     ///
-    /// The lookup is the frame table's bounds check on `frame`, the
-    /// table's base and the frame's slot base and count: eight
-    /// instructions of an inline `JMPZ` over a CV, before the operand's
-    /// own bounds check, where php indexes off `execute_data` in a
-    /// register (#2516). A frame cursor the loop keeps valid across
-    /// handlers would be an `unsafe` contract across the heap seam,
-    /// which #2540 ruled out for this term.
+    /// The lookup is the frame table's length and base read off the
+    /// request, the bounds check on `frame`, the frame's place in the
+    /// table and its slot base and count: nine instructions at every
+    /// handler entry, and then each operand's own bounds check, a
+    /// compare and a branch, where php indexes off `execute_data` in a
+    /// register. Single-stepped over an iteration of #2892's
+    /// assign.php, 470 instructions and eight handler entries, the
+    /// lookups are 72 (15.3%) and the operands' bounds checks 32
+    /// (6.8%). A frame cursor the loop keeps valid across handlers
+    /// would be an `unsafe` contract across the heap seam, which #2540
+    /// ruled out for this term.
     pub(crate) fn slots_mut(&mut self, frame: FrameRef) -> &mut [Zval] {
         self.vm
             .stack
