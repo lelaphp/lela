@@ -36,10 +36,11 @@ impl Places {
             at.write(z);
             return at;
         }
-        let room = Box::new(Cell::new(z));
-        let at = ZvalRef::new(NonNull::from(&*room).cast());
-        self.rooms.push(room);
-        at
+        // Named once the box is in the list: moving it there retags it,
+        // and a name taken before would be a stranger to the box freed.
+        self.rooms.push(Box::new(Cell::new(z)));
+        let room: &Cell<Zval> = &self.rooms[self.rooms.len() - 1];
+        ZvalRef::new(NonNull::from(room).cast())
     }
 
     /// The room `at` names given back, a place [`Places::lay`] answered:
