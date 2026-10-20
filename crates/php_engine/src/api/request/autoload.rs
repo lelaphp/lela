@@ -223,7 +223,7 @@ impl Request {
     /// registered as an object, a closure or an invokable one, is that
     /// object (`alfi->closure`).
     fn autoload_listed(&mut self, target: Target, value: &Value) -> Result<Value, Thrown> {
-        if let Some(object) = value.deref().as_object().copied() {
+        if let Some(object) = value.deref().as_object() {
             self.addref(&object.as_value());
             return Ok(object.as_value());
         }

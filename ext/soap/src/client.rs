@@ -390,13 +390,13 @@ impl SoapClient {
                 // `soap_headers = Z_ARRVAL_P(headers)` (`Z/ext/soap/soap.c:2694`):
                 // php keeps the table and reads its rows as views, as these
                 // are read under the borrowed request.
-                let list: Vec<Value> = walk::rows(req, *a).map(|(_, v)| v.deref()).collect();
+                let list: Vec<Value> = walk::rows(req, a).map(|(_, v)| v.deref()).collect();
                 if !verify_soap_headers(req, &list) {
                     return Err(docref_error(req, "Invalid SOAP header").raise(req));
                 }
                 Some(list)
             }
-            ValueRef::Object(o) if instance_of(req, *o, "SoapHeader") => Some(vec![headers]),
+            ValueRef::Object(o) if instance_of(req, o, "SoapHeader") => Some(vec![headers]),
             _ => {
                 let shown = value_name(req, &headers);
                 return Err(argument_error(
@@ -619,7 +619,7 @@ impl SoapClient {
         let cookies = client_slot(object, ClientSlot::Cookies);
         let mut cookies = match cookies.as_ref() {
             ValueRef::Array(a) => {
-                let mut a = Owner::take(req, *a);
+                let mut a = Owner::take(req, a);
                 a.separate(req)?;
                 a
             }
@@ -652,10 +652,7 @@ impl SoapClient {
     #[php(tentative)]
     #[allow(clippy::unnecessary_wraps)] // the native's return shape
     fn __getCookies(req: &mut Request, this: This<Self>) -> R<Owner<PhpArray>> {
-        match client_slot(this.object(), ClientSlot::Cookies)
-            .as_array()
-            .copied()
-        {
+        match client_slot(this.object(), ClientSlot::Cookies).as_array() {
             Some(a) => Ok(Owner::take(req, a)),
             None => PhpArray::new(req),
         }
@@ -690,14 +687,14 @@ impl SoapClient {
             ValueRef::Array(a) => {
                 // `verify_soap_headers_array(Z_ARRVAL_P(headers))`
                 // (`Z/ext/soap/soap.c:2906`) reads the rows only.
-                let list: Vec<Value> = walk::rows(req, *a).map(|(_, v)| v.deref()).collect();
+                let list: Vec<Value> = walk::rows(req, a).map(|(_, v)| v.deref()).collect();
                 if !verify_soap_headers(req, &list) {
                     return Err(docref_error(req, "Invalid SOAP header").raise(req));
                 }
                 let headers = Owner::take(req, headers);
                 set_client_slot(req, object, ClientSlot::DefaultHeaders, headers)?;
             }
-            ValueRef::Object(o) if instance_of(req, *o, "SoapHeader") => {
+            ValueRef::Object(o) if instance_of(req, o, "SoapHeader") => {
                 let mut list = PhpArray::new(req)?;
                 let headers = Owner::take(req, headers);
                 list.append(req, headers)?;
@@ -748,7 +745,7 @@ impl SoapClient {
 /// A view of a string slot, none for `null`: returned as it stands, the
 /// engine takes its own owner (`RETURN_COPY`).
 fn slot_string(this: PhpObject, which: ClientSlot) -> Option<PhpString> {
-    client_slot(this, which).as_php_string().copied()
+    client_slot(this, which).as_php_string()
 }
 
 /// `FETCH_THIS_SDL`.
@@ -759,7 +756,7 @@ fn this_sdl(req: &Request, this: PhpObject) -> Option<std::sync::Arc<Sdl>> {
 /// `verify_soap_headers_array`: every element a `SoapHeader`.
 fn verify_soap_headers(req: &mut Request, list: &[Value]) -> bool {
     list.iter().all(|v| match v.deref().as_ref() {
-        ValueRef::Object(o) => instance_of(req, *o, "SoapHeader"),
+        ValueRef::Object(o) => instance_of(req, o, "SoapHeader"),
         _ => false,
     })
 }
@@ -894,7 +891,7 @@ fn context_options(
         && let ValueRef::Array(a) = tm.as_ref()
         && !a.is_empty()
     {
-        *typemap_ht = Some(*a);
+        *typemap_ht = Some(a);
     }
     if let Some(ValueRef::Int(f)) = ht
         .find(b"features")
@@ -973,7 +970,7 @@ fn construct(
         // `php_stream_context_from_zval(tmp, 1)` and one owner more, or
         // `php_stream_context_alloc()`.
         let context = if let Some(v) = ht.find(b"stream_context").map(|v| v.deref())
-            && let Some(r) = v.as_resource().copied()
+            && let Some(r) = v.as_resource()
         {
             let context = StreamCtx::fetch(req, r)?;
             Owner::take(req, context)
@@ -1081,7 +1078,7 @@ fn call_common(
     if let ValueRef::Array(defaults) = client_slot(this, ClientSlot::DefaultHeaders).as_ref() {
         // `ZEND_HASH_FOREACH_VAL(default_headers, tmp)`
         // (`Z/ext/soap/soap.c:2590`), read only, views of the rows.
-        let defaults: Vec<Value> = walk::rows(req, *defaults).map(|(_, v)| v.deref()).collect();
+        let defaults: Vec<Value> = walk::rows(req, defaults).map(|(_, v)| v.deref()).collect();
         match &mut headers {
             Some(list) => list.extend(
                 defaults
@@ -1448,7 +1445,7 @@ fn soap_call_body(
         }
     };
     if let ValueRef::Object(o) = return_value.as_ref()
-        && instance_of(req, *o, "SoapFault")
+        && instance_of(req, o, "SoapFault")
         && client_throws(this)
     {
         let thrown = throw_value(req, &return_value);

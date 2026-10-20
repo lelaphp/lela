@@ -112,7 +112,7 @@ fn to_fd_set(
         let element = element.deref();
         let (object, fd) = match element.as_ref() {
             ValueRef::Object(object) if object.native::<Sock>(req).is_some() => {
-                (*object, object.native::<Sock>(req).and_then(Sock::fd))
+                (object, object.native::<Sock>(req).and_then(Sock::fd))
             }
             _ => {
                 refused = Some(Refused::Given(value_name(req, &element)));

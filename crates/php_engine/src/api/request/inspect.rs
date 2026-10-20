@@ -208,7 +208,7 @@ impl Request {
             return Ok(Evaluated::NotCompiled);
         }
         self.serve_eval(None, unit)?;
-        let returned = std::mem::replace(&mut self.returned, Value::null());
+        let returned = std::mem::take(&mut self.returned);
         self.release(returned);
         Ok(Evaluated::Rendered)
     }
@@ -232,7 +232,7 @@ impl Request {
         if self.is_pending() {
             return Ok(self.evaluation_uncaught());
         }
-        let returned = std::mem::replace(&mut self.returned, Value::null());
+        let returned = std::mem::take(&mut self.returned);
         let printed = self.print_r(&returned);
         self.release(returned);
         Ok(Evaluated::Printed(printed))

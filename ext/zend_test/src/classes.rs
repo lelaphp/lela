@@ -340,7 +340,7 @@ impl _ZendTestClass {
     ) -> Result<(), Thrown> {
         let _ = this;
         let given = arg.value();
-        let ValueRef::Object(&object) = given.as_ref() else {
+        let ValueRef::Object(object) = given.as_ref() else {
             let text = format!(
                 "be of type object, {} given",
                 php_ext::coerce::value_name(req, &arg.value())

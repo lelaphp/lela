@@ -287,7 +287,7 @@ impl CURLStringFile {
 
 /// Whether `value` is an object of `class` or a class extending it.
 fn is_a(req: &mut Request, value: &Value, class: &[u8]) -> Result<Option<PhpObject>, Thrown> {
-    let Some(object) = value.as_object().copied() else {
+    let Some(object) = value.as_object() else {
         return Ok(None);
     };
     let Some(id) = lookup_class(req, class)? else {
@@ -489,7 +489,7 @@ impl Form<'_> {
             None => return self.flow(),
         }
         if let ValueRef::Array(inner) = value.as_ref() {
-            return self.list(req, name, *inner);
+            return self.list(req, name, inner);
         }
         self.field(req, name, value)
     }

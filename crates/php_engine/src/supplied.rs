@@ -41,8 +41,8 @@ use php_unit::decl::Name;
 use crate::api::abi::{
     AdmissionHook, CachedHook, CompileFileHook, CompileStringHook, EncodingsHook, Entry, ErrorHook,
     Extension, FatalLoggedHook, FiberHandler, FiberSwitchHandler, GcCollectHook, InputFilterHook,
-    InterruptHook, ObserverInit, OptimizerPass, PostStartupHook, ResolvePathHook, Shell,
-    ThrownHook, TicksHook, TreatDataHook, UploadHook,
+    InterruptHook, ObserverInit, ObserverRegistered, OptimizerPass, PostStartupHook,
+    ResolvePathHook, Shell, ThrownHook, TicksHook, TreatDataHook, UploadHook,
 };
 use crate::api::request::{ExtensionId, Request};
 use crate::layer::StreamHooks;
@@ -123,7 +123,7 @@ pub(crate) struct Supplies {
     pub(crate) encodings: Option<EncodingsHook>,
     pub(crate) intercepts: Vec<(Name, Entry)>,
     pub(crate) registered: Vec<(TypeId, Registered)>,
-    pub(crate) observers: Vec<ObserverInit>,
+    pub(crate) observers: Vec<(ObserverInit, Option<ObserverRegistered>)>,
     pub(crate) error_observers: Vec<ErrorObserver>,
     pub(crate) functions_declared: Vec<FunctionDeclared>,
     pub(crate) classes_linked: Vec<ClassLinked>,
@@ -263,7 +263,7 @@ pub(crate) struct Resolved {
     /// appends to it at each `MINIT` and each Zend extension's startup,
     /// and `zend_observer_fcall_install` asks every one of a function in
     /// that order (design §4.3 seam 9, [`crate::observer`]).
-    pub(crate) observers: Listed<ObserverInit>,
+    pub(crate) observers: Listed<(ObserverInit, Option<ObserverRegistered>)>,
     /// `zend_observer_error_callbacks`, as `zend_observer_error_register`
     /// (`Z/Zend/zend_observer.c:367`) appends to it, every one told of
     /// each diagnostic in that order ([`crate::observer::error`]).
@@ -454,11 +454,31 @@ impl<H: Copy> Listed<H> {
         self.0.is_empty()
     }
 
+    /// The hooks `keep` keeps, in the order they stood.
+    pub(crate) fn retain(&mut self, keep: impl Fn(&H) -> bool) {
+        self.0.retain(|(_, hook)| keep(hook));
+    }
+
     /// How many the list holds, as a `u32`.
     pub(crate) fn count(&self) -> u32 {
         u32::try_from(self.0.len()).unwrap_or(u32::MAX)
     }
 }
+
+/// Each hook of the [`Listed`] `$list` of what the extensions supplied
+/// served as the extension that supplied it ([`Request::serve_for`]),
+/// in supplier order, `$hook` naming it and `$req` the request for the
+/// body: the walk every notice and hook list makes, over the engine's
+/// lists held for the walk so the hook has the request whole.
+macro_rules! tell {
+    ($on:expr, $list:ident, |$req:ident, $hook:pat_param| $body:expr) => {{
+        let shared = ::std::sync::Arc::clone(&$on.shared);
+        for (by, $hook) in shared.supplied.$list.iter() {
+            $on.serve_for(by, |$req| $body);
+        }
+    }};
+}
+pub(crate) use tell;
 
 /// A slot each supplier overwrites: the last one's, with the extension
 /// that wrote it.

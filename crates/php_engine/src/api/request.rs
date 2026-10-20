@@ -755,6 +755,11 @@ pub(crate) struct FrameShape {
     pub(crate) cvs: u32,
     /// The CVs and the temporaries.
     pub(crate) slots: u32,
+    /// Whether an observer was registered as the function was linked,
+    /// which gives its frame the temporary `pass_two` reserves for the
+    /// observers (`op_array->T += ZEND_OBSERVER_ENABLED`,
+    /// `Z/Zend/zend_opcode.c:1130`), past its own.
+    pub(crate) observed: bool,
     /// The first opline past the `RECV*` prologue, `safepoints[0]`.
     pub(crate) entry: u32,
     /// `ZEND_MAP_PTR(op_array->run_time_cache)`.
@@ -782,17 +787,22 @@ impl FrameShape {
     /// past the declared parameters, which the activation moves past
     /// them (`zend_copy_extra_args`).
     pub(crate) fn room(self, count: u32) -> u32 {
-        self.slots
+        (self.slots.saturating_add(u32::from(self.observed)))
             .saturating_add(count.saturating_sub(self.parameters))
     }
 
-    pub(crate) fn of(decl: &FunctionDecl, code: Option<&php_unit::OpArray>) -> FrameShape {
+    pub(crate) fn of(
+        decl: &FunctionDecl,
+        code: Option<&php_unit::OpArray>,
+        observed: bool,
+    ) -> FrameShape {
         let declared = decl.parameters.iter().filter(|p| !p.variadic).count();
         FrameShape {
             parameters: u32::try_from(declared).unwrap_or(u32::MAX),
             typed: decl.parameters.iter().any(|p| p.ty.is_some()),
             cvs: code.map_or(0, |code| code.num_cvs),
             slots: code.map_or(0, |code| code.num_cvs.saturating_add(code.num_tmps)),
+            observed,
             entry: code.map_or(0, exec::entry_of),
             cache: code.map_or_else(exec::CacheAt::default, |code| {
                 exec::CacheAt::of(code.runtime_cache)

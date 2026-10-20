@@ -797,7 +797,7 @@ fn build_one(req: &mut Request, b: &mut Build, it: php_ext::call::Iter) -> Resul
                     ),
                 );
             }
-            let seen = spl::filesystem(req, *object);
+            let seen = spl::filesystem(req, object);
             value.give_up(req);
             let path = match seen {
                 Some(Filesystem::Dir { path, entry }) => {

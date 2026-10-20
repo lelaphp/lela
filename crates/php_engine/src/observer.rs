@@ -124,6 +124,7 @@ use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{ChainFrame, FrameId, FrameView, OpenCall, Request, TimeLimitSuspended};
 use crate::api::values::{ClassId, Owner, PhpObject, Value};
+use crate::supplied::tell;
 
 pub(crate) use opcodes::{
     Declared, ObservedOpcodes, OpcodeObserver, Telling, Untold, tell_before, told,
@@ -216,6 +217,12 @@ pub(crate) enum OnThrow {
 /// frame on its activation, what handlers observe it; the default,
 /// neither, declines it, as php's answers `{NULL, NULL}`.
 pub type ObserverInit = fn(&mut Observed<'_>) -> ObserverHandlers;
+
+/// Whether an observer is registered for the engine that starts, asked
+/// once its extension's start is over, as php's `MINIT` calls
+/// `zend_observer_fcall_register` under a switch of its ini
+/// ([`crate::api::abi::ExtensionBuilder::observer_when`]).
+pub type ObserverRegistered = fn(&crate::api::abi::Start) -> bool;
 
 /// `zend_observer_fcall_begin_handler`: a frame begun, before its
 /// parameters are received.
@@ -445,25 +452,27 @@ impl Slot {
     /// and holds the caller to that (`ZEND_UNREACHABLE`), where this
     /// answers false.
     pub(crate) fn add_begin(&mut self, begin: BeginHandler, room: usize) -> bool {
-        match self.handlers_for_adding() {
-            Some(handlers) if handlers.begin.len() < room => {
-                handlers.begin.push(begin);
-                true
-            }
-            _ => {
-                self.settle();
-                false
-            }
-        }
+        self.add(room, |held| &mut held.begin, |list| list.push(begin))
     }
 
     /// `zend_observer_add_end_handler` (`Z/Zend/zend_observer.c:216-230`):
     /// `end` before the end handlers the slot holds, so they stay the
     /// reverse of the begin handlers, where fewer than `room` stand.
     pub(crate) fn add_end(&mut self, end: EndHandler, room: usize) -> bool {
-        match self.handlers_for_adding() {
-            Some(handlers) if handlers.end.len() < room => {
-                handlers.end.insert(0, end);
+        self.add(room, |held| &mut held.end, |list| list.insert(0, end))
+    }
+
+    /// The addition both make: `put` over the list `side` names where
+    /// fewer than `room` stand in it.
+    fn add<H>(
+        &mut self,
+        room: usize,
+        side: fn(&mut Installed) -> &mut Vec<H>,
+        put: impl FnOnce(&mut Vec<H>),
+    ) -> bool {
+        match self.handlers_for_adding().map(side) {
+            Some(list) if list.len() < room => {
+                put(list);
                 true
             }
             _ => {
@@ -477,33 +486,31 @@ impl Slot {
     /// `begin` taken out where the slot holds it, the handlers after it
     /// moved up, and the one now in its place handed back.
     pub(crate) fn remove_begin(&mut self, begin: BeginHandler) -> Option<Removed<BeginHandler>> {
-        let Slot::Installed(handlers) = self else {
-            return None;
-        };
-        let at = handlers
-            .begin
-            .iter()
-            .position(|held| std::ptr::fn_addr_eq(*held, begin))?;
-        let handlers = Arc::make_mut(handlers);
-        handlers.begin.remove(at);
-        let next = handlers.begin.get(at).copied();
-        self.settle();
-        Some(Removed { next })
+        self.remove(
+            |held| &mut held.begin,
+            |held| std::ptr::fn_addr_eq(held, begin),
+        )
     }
 
     /// `zend_observer_remove_end_handler` (`Z/Zend/zend_observer.c:232-244`):
     /// as [`Slot::remove_begin`], over the end handlers.
     pub(crate) fn remove_end(&mut self, end: EndHandler) -> Option<Removed<EndHandler>> {
+        self.remove(|held| &mut held.end, |held| std::ptr::fn_addr_eq(held, end))
+    }
+
+    /// The removal both make, over the list `side` names.
+    fn remove<H: Copy>(
+        &mut self,
+        side: fn(&mut Installed) -> &mut Vec<H>,
+        is: impl Fn(H) -> bool,
+    ) -> Option<Removed<H>> {
         let Slot::Installed(handlers) = self else {
             return None;
         };
-        let at = handlers
-            .end
-            .iter()
-            .position(|held| std::ptr::fn_addr_eq(*held, end))?;
-        let handlers = Arc::make_mut(handlers);
-        handlers.end.remove(at);
-        let next = handlers.end.get(at).copied();
+        let list = side(Arc::make_mut(handlers));
+        let at = list.iter().position(|&held| is(held))?;
+        list.remove(at);
+        let next = list.get(at).copied();
         self.settle();
         Some(Removed { next })
     }
@@ -715,14 +722,13 @@ fn begin_native(req: &mut Request, function: Function) -> Option<NativeCall> {
 /// `zend_observer_fcall_install` (`Z/Zend/zend_observer.c:116-156`): every observer asked of the frame in
 /// declaration order, and what they answered written into its slot.
 fn resolve(req: &mut Request, at: Observable) -> Slot {
-    let shared = Arc::clone(&req.shared);
     let mut begin = Vec::new();
     let mut end = Vec::new();
-    for (by, init) in shared.supplied.observers.iter() {
-        let handlers = req.serve_for(by, |req| init(&mut Observed::standing(req, at)));
+    tell!(req, observers, |req, (init, _)| {
+        let handlers = init(&mut Observed::standing(req, at));
         begin.extend(handlers.begin);
         end.extend(handlers.end);
-    }
+    });
     end.reverse();
     let slot = if begin.is_empty() && end.is_empty() {
         Slot::Declined
@@ -884,7 +890,17 @@ pub struct ErrorNotice<'a> {
     file: &'a [u8],
     line: u32,
     message: &'a [u8],
-    uncaught: bool,
+    told: Told,
+}
+
+/// Which of php's two error notices a diagnostic is told as
+/// (`zend_observer_error_notify`'s callers): one `zend_error` raised,
+/// or an uncaught throwable `zend_exception_error` renders, told with
+/// `E_DONT_BAIL` ([`ErrorNotice::uncaught`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Told {
+    Raised,
+    Uncaught,
 }
 
 impl<'a> ErrorNotice<'a> {
@@ -922,7 +938,7 @@ impl<'a> ErrorNotice<'a> {
     /// (`Z/Zend/zend.c:1514`).
     #[must_use]
     pub fn uncaught(&self) -> bool {
-        self.uncaught
+        self.told == Told::Uncaught
     }
 }
 
@@ -949,9 +965,16 @@ pub(crate) type ClassLinked = fn(&mut Request, ClassId, &[u8]);
 /// nothing of how the diagnostic is served; a link of `zend_error_cb`
 /// serves the diagnostics the user's handler leaves, and may serve one
 /// in place of php's own `php_error_cb`. Nothing more than one check of
-/// the list while none is declared.
+/// the list while none is declared; `told` says which notice it is.
 #[inline]
-pub(crate) fn error(req: &mut Request, level: Level, file: &[u8], line: u32, message: &[u8]) {
+pub(crate) fn error(
+    req: &mut Request,
+    level: Level,
+    file: &[u8],
+    line: u32,
+    message: &[u8],
+    told: Told,
+) {
     if req.shared.supplied.error_observers.is_empty() {
         return;
     }
@@ -962,26 +985,7 @@ pub(crate) fn error(req: &mut Request, level: Level, file: &[u8], line: u32, mes
             file,
             line,
             message,
-            uncaught: false,
-        },
-    );
-}
-
-/// [`error`] for an uncaught throwable `zend_exception_error` renders,
-/// told with php's `E_DONT_BAIL` ([`ErrorNotice::uncaught`]).
-#[inline]
-pub(crate) fn uncaught(req: &mut Request, level: Level, file: &[u8], line: u32, message: &[u8]) {
-    if req.shared.supplied.error_observers.is_empty() {
-        return;
-    }
-    notify_error(
-        req,
-        ErrorNotice {
-            level,
-            file,
-            line,
-            message,
-            uncaught: true,
+            told,
         },
     );
 }
@@ -989,10 +993,7 @@ pub(crate) fn uncaught(req: &mut Request, level: Level, file: &[u8], line: u32, 
 #[cold]
 #[inline(never)]
 fn notify_error(req: &mut Request, notice: ErrorNotice<'_>) {
-    let shared = Arc::clone(&req.shared);
-    for (by, observer) in shared.supplied.error_observers.iter() {
-        req.serve_for(by, |req| observer(req, &notice));
-    }
+    tell!(req, error_observers, |req, observer| observer(req, &notice));
 }
 
 /// `zend_observer_function_declared_notify`
@@ -1006,10 +1007,9 @@ pub(crate) fn function_declared(req: &mut Request, function: Function, lowered: 
     if !functions_declared_observed(req) {
         return;
     }
-    let shared = Arc::clone(&req.shared);
-    for (by, observer) in shared.supplied.functions_declared.iter() {
-        req.serve_for(by, |req| observer(req, function, lowered));
-    }
+    tell!(req, functions_declared, |req, observer| observer(
+        req, function, lowered
+    ));
 }
 
 /// `zend_observer_class_linked_notify` (`Z/Zend/zend_observer.h:146-150`):
@@ -1024,10 +1024,9 @@ pub(crate) fn class_linked(req: &mut Request, class: ClassId, lowered: &[u8]) {
     if !classes_linked_observed(req) {
         return;
     }
-    let shared = Arc::clone(&req.shared);
-    for (by, observer) in shared.supplied.classes_linked.iter() {
-        req.serve_for(by, |req| observer(req, class, lowered));
-    }
+    tell!(req, classes_linked, |req, observer| observer(
+        req, class, lowered
+    ));
 }
 
 /// `zend_observer_function_declared_observed`: whether an observer of
@@ -1243,10 +1242,7 @@ pub(crate) fn fiber_initialized(req: &mut Request, fiber: ObservedFiber) {
     if req.shared.supplied.fiber_init.is_empty() {
         return;
     }
-    let shared = Arc::clone(&req.shared);
-    for (by, handler) in shared.supplied.fiber_init.iter() {
-        req.serve_for(by, |req| handler(req, fiber));
-    }
+    tell!(req, fiber_init, |req, handler| handler(req, fiber));
 }
 
 /// `zend_observer_fiber_switch_notify` (`Z/Zend/zend_observer.c:409-425`)
@@ -1263,10 +1259,7 @@ pub(crate) fn fiber_switched(req: &mut Request, from: ObservedFiber, to: Observe
     if req.shared.supplied.fiber_switch.is_empty() {
         return;
     }
-    let shared = Arc::clone(&req.shared);
-    for (by, handler) in shared.supplied.fiber_switch.iter() {
-        req.serve_for(by, |req| handler(req, from, to));
-    }
+    tell!(req, fiber_switch, |req, handler| handler(req, from, to));
 }
 
 /// `zend_observer_fiber_destroy_notify` (`Z/Zend/zend_observer.c:427-436`):
@@ -1277,8 +1270,5 @@ pub(crate) fn fiber_destroyed(req: &mut Request, fiber: ObservedFiber) {
     if req.shared.supplied.fiber_destroy.is_empty() {
         return;
     }
-    let shared = Arc::clone(&req.shared);
-    for (by, handler) in shared.supplied.fiber_destroy.iter() {
-        req.serve_for(by, |req| handler(req, fiber));
-    }
+    tell!(req, fiber_destroy, |req, handler| handler(req, fiber));
 }

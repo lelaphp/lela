@@ -124,7 +124,7 @@ fn get_headers(
     let meta = stream.meta_data(req)?;
     let lines = meta
         .find(b"wrapper_data")
-        .and_then(|value| value.deref().as_array().copied());
+        .and_then(|value| value.deref().as_array());
     let Some(lines) = lines else {
         meta.give_up(req);
         stream.free(req);
@@ -177,7 +177,7 @@ fn add_header(
         return headers.set_symtable_str(req, &line[..at], value);
     };
     if let Some(list) = previous.as_array() {
-        let mut list = *list;
+        let mut list = list;
         return list.append(req, value);
     }
     let mut list = PhpArray::new(req)?;

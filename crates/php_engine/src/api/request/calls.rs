@@ -18,6 +18,7 @@ use crate::api::values::{
 use crate::engine::{MethodAt, NativeMethod};
 use crate::exec;
 use crate::observer::OnThrow;
+use crate::trampoline::CallTrampoline;
 use php_heap::FrameRef;
 
 use super::{ExtensionId, Link, Request, UserFunction};
@@ -786,7 +787,7 @@ impl Request {
             // unwinder to go on from the call opline; a fatal leaves the
             // native as it left the callback.
             None if self.is_pending() => Err(Thrown::of(None)),
-            None => Ok(std::mem::replace(&mut self.returned, Value::null())),
+            None => Ok(std::mem::take(&mut self.returned)),
         }
     }
 
@@ -855,6 +856,17 @@ impl Request {
             None => self.shared.entries.get(at).copied(),
             Some(method) => self.shared.methods.get(method).map(|m| m.entry),
         }
+    }
+
+    /// The entry of a native function, `fbc->internal_function.handler`:
+    /// one read of the engine's table, and none for any other function,
+    /// a native method, a class's native or a trampoline among them,
+    /// which [`Request::serve_native`] finds.
+    #[inline]
+    pub(crate) fn native_entry(&self, function: Function) -> Option<crate::api::abi::Entry> {
+        // One row per native function, so a number past them is none.
+        let at = usize::try_from(function.0).ok()?;
+        self.shared.entries.get(at).copied()
     }
 
     /// Whether `function` is a native, php's `ZEND_INTERNAL_FUNCTION`:
@@ -985,23 +997,13 @@ impl Request {
                 b"__call"
             },
         )?;
-        let held = self
-            .calls
-            .trampolines
-            .iter()
-            .position(|trampoline| trampoline.is(magic, name));
-        let at = if let Some(at) = held {
-            at
-        } else {
-            let of = self.method_decl(magic)?.clone();
-            self.calls
-                .trampolines
-                .push(crate::trampoline::CallTrampoline::new(
-                    magic, name, is_static, &of,
-                ));
-            self.calls.trampolines.len().checked_sub(1)?
-        };
-        crate::trampoline::number(at, crate::trampoline::Served::Trampoline)
+        self.trampoline_made(
+            |made| made.is(magic, name),
+            |req| {
+                let of = req.method_decl(magic)?;
+                Some(CallTrampoline::new(magic, name, is_static, of))
+            },
+        )
     }
 
     /// `zend_get_closure_invoke_method` (`Z/Zend/zend_closures.c:484`):
@@ -1012,18 +1014,30 @@ impl Request {
     pub(crate) fn invoke_trampoline(&mut self, closure: PhpObject) -> Option<Function> {
         let function = closure.closure(self)?.function;
         let via = crate::trampoline::Via::Invoke(function);
-        let at = if let Some(at) = self
-            .calls
-            .trampolines
-            .iter()
-            .position(|made| made.via == via)
-        {
+        self.trampoline_made(
+            |made| made.via == via,
+            |req| {
+                Some(CallTrampoline::invoke(
+                    function,
+                    req.function_decl(function)?,
+                ))
+            },
+        )
+    }
+
+    /// The number of the trampoline the request made that `held` picks,
+    /// or of the one `make` makes, kept for the request so a number
+    /// names one trampoline for its life; none where `make` makes none.
+    fn trampoline_made(
+        &mut self,
+        held: impl Fn(&CallTrampoline) -> bool,
+        make: impl FnOnce(&Request) -> Option<CallTrampoline>,
+    ) -> Option<Function> {
+        let at = if let Some(at) = self.calls.trampolines.iter().position(held) {
             at
         } else {
-            let decl = self.function_decl(function)?.clone();
-            self.calls
-                .trampolines
-                .push(crate::trampoline::CallTrampoline::invoke(function, &decl));
+            let trampoline = make(self)?;
+            self.calls.trampolines.push(trampoline);
             self.calls.trampolines.len().checked_sub(1)?
         };
         crate::trampoline::number(at, crate::trampoline::Served::Trampoline)
@@ -1095,6 +1109,8 @@ impl Request {
     /// [`Request::serve_native`] past the entry's lookup, for a caller
     /// that holds `function`'s entry already, as a frameless call's
     /// handler reads it off the frameless table (`ZEND_FLF_HANDLER`).
+    #[inline(always)] // design §5.8: every native call's, frameless or not
+    #[allow(clippy::inline_always)]
     pub(crate) fn serve_entry(
         &mut self,
         function: Function,
@@ -1113,20 +1129,22 @@ impl Request {
         if let Some(outer) = outer {
             self.heap.set_origin(outer);
         }
-        let deferred = self.stream_thrown.take();
-        crate::observer::native_returned(self, begun, &served, deferred.as_ref(), on_throw);
-        match (served, deferred) {
-            (Ok(value), Some(thrown)) => {
+        let Some(deferred) = self.stream_thrown.take() else {
+            crate::observer::native_returned(self, begun, &served, None, on_throw);
+            return served;
+        };
+        crate::observer::native_returned(self, begun, &served, Some(&deferred), on_throw);
+        match served {
+            Ok(value) => {
                 self.release(value);
-                Err(thrown)
+                Err(deferred)
             }
-            (Err(thrown), Some(deferred)) => {
+            Err(thrown) => {
                 if let Some(object) = deferred.exception() {
                     self.release(object.as_value());
                 }
                 Err(thrown)
             }
-            (served, None) => served,
         }
     }
 
@@ -1205,13 +1223,21 @@ impl Request {
     /// once per request, in the order the request first entered it: what
     /// the trace is read for is which natives a request entered, so a
     /// program that calls one in a loop records it once.
-    #[inline]
+    #[cold]
+    #[inline(never)]
     pub(crate) fn entered(&mut self, native: crate::trace::Entered) {
         if let Some(trace) = &mut self.calls.trace
             && !trace.contains(&native)
         {
             trace.push(native);
         }
+    }
+
+    /// Whether the natives this request enters are recorded
+    /// ([`Request::trace_natives`]).
+    #[inline]
+    pub(crate) fn tracing_natives(&self) -> bool {
+        self.calls.trace.is_some()
     }
 
     /// The natives recorded, given up at the request's end; none where
@@ -1295,25 +1321,15 @@ impl Request {
         entry: crate::api::abi::Entry,
         is_instance: bool,
     ) -> Option<Function> {
-        let held = self.calls.trampolines.iter().position(|made| {
-            matches!(made.via, crate::trampoline::Via::Native(made_entry)
+        self.trampoline_made(
+            |made| {
+                matches!(made.via, crate::trampoline::Via::Native(made_entry)
                 if std::ptr::fn_addr_eq(made_entry, entry))
-                && *made.decl.function.name.0 == *name
-                && made.decl.is_instance == is_instance
-        });
-        let at = if let Some(at) = held {
-            at
-        } else {
-            self.calls
-                .trampolines
-                .push(crate::trampoline::CallTrampoline::native(
-                    entry,
-                    name,
-                    is_instance,
-                ));
-            self.calls.trampolines.len().checked_sub(1)?
-        };
-        crate::trampoline::number(at, crate::trampoline::Served::Trampoline)
+                    && *made.decl.function.name.0 == *name
+                    && made.decl.is_instance == is_instance
+            },
+            |_| Some(CallTrampoline::native(entry, name, is_instance)),
+        )
     }
 
     /// `ce->get_iterator` on a class that is no `Traversable`

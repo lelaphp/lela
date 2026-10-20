@@ -274,7 +274,7 @@ pub(crate) fn cert_stack(
         }
         Ok(true)
     };
-    let Some(array) = value.as_array().copied() else {
+    let Some(array) = value.as_array() else {
         let pushed = pushed(req, value, Origin::Arg(arg))?;
         return Ok(pushed.then_some(stack));
     };

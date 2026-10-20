@@ -399,7 +399,7 @@ impl Mt19937 {
             let class = crate::class_name(req, this);
             crate::invalid_data(req, &class, pending)
         };
-        let part = |at: i64| data.get(&Key::Int(at)).and_then(|v| v.as_array().copied());
+        let part = |at: i64| data.get(&Key::Int(at)).and_then(|v| v.as_array());
         if data.len() != 2 {
             return Err(invalid(req, None));
         }

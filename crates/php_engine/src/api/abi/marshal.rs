@@ -24,7 +24,7 @@ use crate::api::coerce;
 use crate::api::raising::{Thrown, arg_type_error, arg_value_error, fatal};
 use crate::api::request::Request;
 use crate::api::values::{
-    Owner, PhpArray, PhpObject, PhpRef, PhpString, Resource, Value, ValueRef,
+    Owner, PhpArray, PhpObject, PhpRef, PhpString, Resource, TypeTag, Value, ValueRef,
 };
 
 /// `MAY_BE_NULL`, `MAY_BE_FALSE` and the rest of `zend_type_info.h`'s
@@ -81,7 +81,7 @@ const fn nullable_mask(inner: u32) -> u32 {
 /// The argument as the call gave it, none where it gave none.
 #[inline]
 fn given(given: Value) -> Option<Value> {
-    (!matches!(given.as_ref(), ValueRef::Undef)).then_some(given)
+    (!given.to_zval().is_undef()).then_some(given)
 }
 
 /// Whether `mask` admits `value` as it is, `ZEND_TYPE_CONTAINS_CODE`.
@@ -104,6 +104,15 @@ fn held_as<T: FromArgument>(req: &mut Request, value: Value, position: u32) -> R
         Some(ty) => coerce::coerce_param(req, &value, &ty, position)?,
         None => value,
     };
+    T::from_value(req, held)
+}
+
+/// [`FromArgument::hold`] past the argument its declaration admits as it
+/// is: the coercion, out of line, so the hold a native's entry makes of
+/// an argument of its type is a test of the type byte.
+#[inline(never)]
+fn coerced<T: FromArgument>(req: &mut Request, given: Value, position: u32) -> Result<T, Thrown> {
+    let held = coerce::argument(req, given, position)?;
     T::from_value(req, held)
 }
 
@@ -140,7 +149,8 @@ pub trait FromArgument: Sized {
     /// [`FromArgument::MASK`] admits, and otherwise through
     /// [`coerce::argument`], with the 8.1 null deprecation and php's
     /// `TypeError`; `None` where the call gave none.
-    #[inline]
+    #[inline(always)] // a type byte's test in every native's entry; the coercion is out of line
+    #[allow(clippy::inline_always)]
     fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
         let Some(given) = self::given(given) else {
             return Ok(None);
@@ -149,8 +159,7 @@ pub trait FromArgument: Sized {
         if admits(Self::MASK, &plain) {
             return Self::from_value(req, plain).map(Some);
         }
-        let held = coerce::argument(req, given, position)?;
-        Self::from_value(req, held).map(Some)
+        coerced(req, given, position).map(Some)
     }
     /// The absent argument: the declaration's default, `absent` as the
     /// entry lays it down, evaluated in `scope`, the declaring class, and
@@ -282,31 +291,37 @@ impl FromArgument for Value {
 }
 
 macro_rules! scalar {
-    ($t:ty, $ty:expr, $mask:expr, $pat:ident, $what:literal) => {
+    ($t:ty, $ty:expr, $mask:expr, $read:ident, $what:literal) => {
         impl FromArgument for $t {
             const MASK: u32 = $mask;
             fn declared() -> Option<Type> {
                 Some($ty)
             }
             fn accepts(value: &Value) -> bool {
-                matches!(value.as_ref(), ValueRef::$pat(_))
+                value.$read().is_some()
             }
             #[inline]
             fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown> {
-                match value.as_ref() {
-                    ValueRef::$pat(held) => Ok(held.clone()),
-                    _ => mismatch(req, $what),
+                match value.$read() {
+                    Some(held) => Ok(held),
+                    None => mismatch(req, $what),
                 }
             }
         }
     };
 }
-scalar!(bool, Type::Bool, bits::FALSE | bits::TRUE, Bool, "bool");
-scalar!(i64, Type::Int, bits::LONG, Int, "int");
-scalar!(f64, Type::Float, bits::DOUBLE, Float, "float");
-scalar!(PhpString, Type::String, bits::STRING, Str, "string");
-scalar!(PhpArray, Type::Array, bits::ARRAY, Array, "array");
-scalar!(PhpObject, Type::Object, bits::OBJECT, Object, "object");
+scalar!(bool, Type::Bool, bits::FALSE | bits::TRUE, as_bool, "bool");
+scalar!(i64, Type::Int, bits::LONG, as_int, "int");
+scalar!(f64, Type::Float, bits::DOUBLE, as_float, "float");
+scalar!(
+    PhpString,
+    Type::String,
+    bits::STRING,
+    as_php_string,
+    "string"
+);
+scalar!(PhpArray, Type::Array, bits::ARRAY, as_array, "array");
+scalar!(PhpObject, Type::Object, bits::OBJECT, as_object, "object");
 
 /// No declared type, the resource `Z_PARAM_RESOURCE` holds: "must be of
 /// type resource, X given".
@@ -320,7 +335,7 @@ impl FromArgument for Resource {
     }
     fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown> {
         match value.as_ref() {
-            ValueRef::Resource(held) => Ok(*held),
+            ValueRef::Resource(held) => Ok(held),
             _ => mismatch(req, "resource"),
         }
     }
@@ -330,7 +345,7 @@ impl FromArgument for Resource {
         };
         let given = given.deref();
         if let ValueRef::Resource(held) = given.as_ref() {
-            return Ok(Some(*held));
+            return Ok(Some(held));
         }
         let name = coerce::value_name(req, &given);
         Err(arg_type_error(
@@ -407,27 +422,34 @@ impl<T: FromArgument> FromArgument for Option<T> {
             _ => T::from_value(req, value).map(Some),
         }
     }
+    #[inline(always)] // as `FromArgument::hold`
+    #[allow(clippy::inline_always)]
     fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
-        match self::given(given) {
-            None => Ok(None),
-            Some(given) if matches!(given.deref().as_ref(), ValueRef::Null) => Ok(Some(None)),
-            // `Z_PARAM_RESOURCE_OR_NULL`: an untyped resource's refusal
-            // names the `null` it also takes.
-            Some(given)
-                if T::MASK == bits::RESOURCE
-                    && T::declared().is_none()
-                    && !matches!(given.deref().as_ref(), ValueRef::Resource(_)) =>
-            {
-                let name = coerce::value_name(req, &given.deref());
-                Err(arg_type_error(
-                    req,
-                    position,
-                    &format!("be of type resource or null, {name} given"),
-                ))
-            }
-            Some(given) => T::hold(req, given, position).map(|held| held.map(Some)),
+        let Some(given) = self::given(given) else {
+            return Ok(None);
+        };
+        let plain = given.deref();
+        if plain.tag() == TypeTag::Null {
+            return Ok(Some(None));
         }
+        // `Z_PARAM_RESOURCE_OR_NULL`: an untyped resource's refusal
+        // names the `null` it also takes.
+        if T::MASK == bits::RESOURCE && T::declared().is_none() && plain.as_resource().is_none() {
+            return Err(resource_or_null(req, &plain, position));
+        }
+        T::hold(req, given, position).map(|held| held.map(Some))
     }
+}
+
+/// `Z_PARAM_RESOURCE_OR_NULL`'s refusal of what is neither.
+#[cold]
+fn resource_or_null(req: &mut Request, given: &Value, position: u32) -> Thrown {
+    let name = coerce::value_name(req, given);
+    arg_type_error(
+        req,
+        position,
+        &format!("be of type resource or null, {name} given"),
+    )
 }
 
 /// No declared type, held as `T`: php's untyped parameters whose ZPP
@@ -507,7 +529,7 @@ impl<C: Class> FromArgument for Instance<C> {
     }
     fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown> {
         match value.as_ref() {
-            ValueRef::Object(object) => Ok(Instance::of(*object)),
+            ValueRef::Object(object) => Ok(Instance::of(object)),
             _ => mismatch(req, "object"),
         }
     }
@@ -615,8 +637,8 @@ impl FromArgument for Iterable {
     }
     fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown> {
         match value.as_ref() {
-            ValueRef::Array(array) => Ok(Iterable::Array(*array)),
-            ValueRef::Object(object) => Ok(Iterable::Traversable(*object)),
+            ValueRef::Array(array) => Ok(Iterable::Array(array)),
+            ValueRef::Object(object) => Ok(Iterable::Traversable(object)),
             _ => mismatch(req, "iterable"),
         }
     }
@@ -645,6 +667,8 @@ impl<T: FromArgument> FromArgument for Passed<T> {
     fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown> {
         T::from_value(req, value).map(Passed::Given)
     }
+    #[inline(always)] // as `FromArgument::hold`
+    #[allow(clippy::inline_always)]
     fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
         Ok(Some(match T::hold(req, given, position)? {
             Some(held) => Passed::Given(held),
@@ -826,7 +850,7 @@ impl<T: FromArgument> FromArgument for Ref<T> {
         true
     }
     fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown> {
-        let cell = value.as_php_ref().copied();
+        let cell = value.as_php_ref();
         let held = held_as::<T>(req, value, 0)?;
         Ok(Ref {
             cell,
@@ -837,7 +861,7 @@ impl<T: FromArgument> FromArgument for Ref<T> {
         let Some(given) = self::given(given) else {
             return Ok(None);
         };
-        let cell = given.as_php_ref().copied();
+        let cell = given.as_php_ref();
         let held = held_as::<T>(req, given, position)?;
         Ok(Some(Ref {
             cell,

@@ -146,6 +146,8 @@ pub fn attribute(name: &[u8], arguments: Vec<(Option<&[u8]>, ConstExpr)>) -> Att
 /// min() expects at least 1 argument, 0 given
 /// mt_srand() expects at most 2 arguments, 3 given
 /// ```
+#[inline(always)] // every native's entry reads its call here, once
+#[allow(clippy::inline_always)]
 pub fn arguments<const N: usize>(
     req: &mut Request,
     min: usize,
@@ -261,5 +263,7 @@ pub fn entered(
     owner: Option<&'static str>,
     name: &'static str,
 ) {
-    req.entered(crate::trace::Entered { krate, owner, name });
+    if req.tracing_natives() {
+        req.entered(crate::trace::Entered { krate, owner, name });
+    }
 }

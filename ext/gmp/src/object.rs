@@ -152,7 +152,7 @@ impl GMP {
         // `object_properties_load`'s `ZEND_HASH_FOREACH_KEY_VAL(properties, …)`
         // (`Z/Zend/zend_API.c:1752`), no owner of the table taken: what
         // unserializes it holds it while a deprecation reaches the program.
-        walk::foreach(req, *props, Hold::None, |req, row| -> walk::Step {
+        walk::foreach(req, props, Hold::None, |req, row| -> walk::Step {
             let key = row.key().clone();
             let value = row.value().deref();
             let value = Owner::take(req, value);
@@ -426,7 +426,7 @@ impl ObjectHandlers for Handlers {
     ) -> Result<Option<Owner<Value>>, Thrown> {
         let n = match (op, right) {
             (BinaryOp::BitwiseNot, _) => match left.deref().as_object() {
-                Some(object) => held(req, *object, Mpz::com),
+                Some(object) => held(req, object, Mpz::com),
                 None => return Ok(None),
             },
             (BinaryOp::Concat, _) | (_, None) => return Ok(None),
@@ -531,10 +531,7 @@ fn read_custom(
         .value(req)?
         .and_then(|num| num.as_php_string().map(|text| text.as_bytes().to_vec()));
     set(req, object, text.as_deref(), 10)?;
-    let Some(props) = reader
-        .value(req)?
-        .and_then(|props| props.as_array().copied())
-    else {
+    let Some(props) = reader.value(req)?.and_then(|props| props.as_array()) else {
         return Err(throw(req, "Exception", "Could not unserialize properties"));
     };
     // `object_properties_load`'s `ZEND_HASH_FOREACH_KEY_VAL(properties, …)`

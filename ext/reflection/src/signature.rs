@@ -504,7 +504,7 @@ fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Th
             // `zval_try_get_string` over a class that is no object and
             // over the method, so a `Stringable` names either.
             let (class, object) = if let ValueRef::Object(object) = class.deref().as_ref() {
-                (object.class(), Some(*object))
+                (object.class(), Some(object))
             } else {
                 let name = with_string(req, &class, <[u8]>::to_vec)?;
                 (class_named(req, &name)?, None)
@@ -539,7 +539,6 @@ fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Th
         // the object is a `Closure`, else its class's `__invoke` or
         // `Method C::__invoke() does not exist`.
         ValueRef::Object(object) => {
-            let object = *object;
             if closure_decl(req, object).is_some() {
                 FunctionRef::Closure(object)
             } else if let Some(found) = super::table_method(req, object.class(), b"__invoke") {

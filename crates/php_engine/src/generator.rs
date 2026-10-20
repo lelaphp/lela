@@ -616,7 +616,7 @@ fn update_current(req: &mut Request, generator: PhpObject) -> PhpObject {
                 let slot = out?;
                 let old = suspended.frame.slot(php_heap::Slot(slot));
                 suspended.frame.set(php_heap::Slot(slot), retval.to_zval());
-                Some(Value::of_zval(old))
+                Some(Value::of_slot(old))
             })
             .flatten();
             if let Some(old) = written {
@@ -991,7 +991,7 @@ pub(crate) fn yield_from(
         });
         return Ok(From::Delegating);
     }
-    let object = value.as_object().copied().filter(|_| !constant);
+    let object = value.as_object().filter(|_| !constant);
     let Some(object) = object else {
         req.release(value);
         return Err(throw_error(
@@ -1062,7 +1062,7 @@ fn next_delegated(req: &mut Request, generator: PhpObject) -> bool {
                 req.release(array);
                 return false;
             };
-            let value = exec::value_of(value);
+            let value = Value::of_slot(value);
             req.addref(&value);
             let key = exec::key_value(req, key);
             let old = with(req, generator, |g| {
@@ -1518,7 +1518,7 @@ fn release_frame(req: &mut Request, suspended: Suspended, finished: bool) {
     let take = |slots: &mut crate::exec::HeapFrame, at: u32| {
         let z = slots.slot(php_heap::Slot(at));
         slots.set(php_heap::Slot(at), php_heap::Zval::UNDEF);
-        Value::of_zval(z)
+        Value::of_slot(z)
     };
     for at in 0..num_cvs {
         let value = take(&mut slots, at);
@@ -1735,7 +1735,7 @@ pub(crate) fn iterator_current_ref(
     let root = current(req, generator);
     let value = read(req, root, |g| g.value).unwrap_or_else(Value::undef);
     let cell = if let Some(cell) = value.as_php_ref() {
-        *cell
+        cell
     } else {
         let cell = req.reference(value.undef_as_null())?;
         with(req, root, |g| g.value = cell.as_value());
@@ -1971,7 +1971,7 @@ impl Generator {
                 Execution::Suspended(suspended) => {
                     let old = suspended.frame.slot(php_heap::Slot(slot));
                     suspended.frame.set(php_heap::Slot(slot), sent.to_zval());
-                    Some(Value::of_zval(old))
+                    Some(Value::of_slot(old))
                 }
                 _ => None,
             })

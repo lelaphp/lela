@@ -166,7 +166,9 @@ fn sdl_set_uri_credentials(req: &mut Request, ctx: &mut Ctx, uri: &[u8]) -> Resu
     // `php_libxml_switch_context(NULL, &context)` and back: the stream
     // libxml loads with, read where it stands.
     let context = php_ext_libxml::switch_stream_ctx(req, None);
-    let resource = context.as_deref().and_then(|c| c.as_resource().copied());
+    let resource = context
+        .as_deref()
+        .and_then(php_ext::values::Value::as_resource);
     if let Some(none) = php_ext_libxml::switch_stream_ctx(req, context) {
         none.give_up(req);
     }

@@ -171,7 +171,7 @@ pub fn sniff_charset_from_stream(
     let meta = stream.meta_data(req)?;
     let headers = meta
         .find(b"wrapper_data")
-        .and_then(|data| data.deref().as_array().copied());
+        .and_then(|data| data.deref().as_array());
     let charset = headers.and_then(|headers| charset_of_headers(req, headers));
     meta.give_up(req);
     Ok(charset)

@@ -336,7 +336,7 @@ fn a64i(req: &mut Request, value: &Value) -> Result<i64, Thrown> {
 /// ```
 fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(), Thrown> {
     let date_string = find(hash, b"date_string").and_then(|v| match v.as_ref() {
-        ValueRef::Str(s) => Some(*s),
+        ValueRef::Str(s) => Some(s),
         _ => None,
     });
     if let Some(date_string) = date_string {

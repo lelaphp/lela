@@ -434,7 +434,7 @@ fn operand(req: &mut Request, value: &Value) -> Result<Operand, Thrown> {
         return Ok(Operand::Other(*value));
     };
     let name = Name(b"__tostring".as_slice().into());
-    if known_method(req, object.class(), &name, Some(*object)).is_none() {
+    if known_method(req, object.class(), &name, Some(object)).is_none() {
         return Ok(Operand::Other(*value));
     }
     let bytes = coerce::with_string(req, value, <[u8]>::to_vec)?;

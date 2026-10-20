@@ -450,7 +450,7 @@ fn modern_index(req: &mut Request, value: &Value) -> Result<Index, Thrown> {
     Ok(match v.as_ref() {
         ValueRef::Int(n) => Index::Long(n),
         ValueRef::Float(f) => Index::Long(float_offset(req, f)?),
-        ValueRef::Str(s) => match Key::lookup(*s) {
+        ValueRef::Str(s) => match Key::lookup(s) {
             Key::Int(n) => Index::Long(n),
             Key::Str(s) => Index::Str(s),
         },
@@ -530,7 +530,7 @@ fn offset(req: &mut Request, value: &Value) -> Result<Result<i64, PhpString>, Th
     let v = value.deref();
     if let ValueRef::Str(s) = v.as_ref() {
         return Ok(match numeric_string(s.as_bytes()) {
-            None => Err(*s),
+            None => Err(s),
             Some(n) => Ok(to_long(req, &n)?),
         });
     }
@@ -831,7 +831,10 @@ impl ClassIterator for NodeIter {
         if !named_keys(req, object) {
             return Ok(Owner::int(self.index));
         }
-        let current = self.current.as_deref().and_then(|o| o.as_object().copied());
+        let current = self
+            .current
+            .as_deref()
+            .and_then(php_ext::values::Value::as_object);
         let Some(node) = current.and_then(|o| node_of(req, o)) else {
             return Ok(Owner::null());
         };
@@ -850,7 +853,7 @@ impl ClassIterator for NodeIter {
             return Ok(());
         };
         self.index += 1;
-        let next = match garbage.as_object().copied() {
+        let next = match garbage.as_object() {
             Some(old) => self.next(req, object, old),
             None => Ok(Owner::null()),
         };

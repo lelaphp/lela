@@ -90,7 +90,7 @@ impl Namespace {
             self.mode = Mode::All;
             return Ok(());
         };
-        if let Some(array) = restrict.as_array().copied() {
+        if let Some(array) = restrict.as_array() {
             // `ZEND_HASH_FOREACH_STR_KEY_VAL`, holding nothing: a
             // conversion may serve `__toString`.
             walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
@@ -444,10 +444,14 @@ fn item_object(
                 return Ok(Owner::null());
             };
             let parent_value = proxy(req, parent)?;
-            let Some(parent_obj) = parent_value.as_object().copied() else {
-                parent_value.give_up(req);
-                return Ok(Owner::null());
+            let parent_value = match parent_value.into_object() {
+                Ok(parent_value) => parent_value,
+                Err(other) => {
+                    other.give_up(req);
+                    return Ok(Owner::null());
+                }
             };
+            let parent_obj = *parent_value;
             let Some(fake) = Node::fake_namespace_decl(parent, href.as_deref(), prefix.as_deref())
             else {
                 parent_value.give_up(req);
@@ -460,7 +464,7 @@ fn item_object(
                     return Err(thrown);
                 }
             };
-            if let Some(object) = value.as_object().copied()
+            if let Some(object) = value.as_object()
                 && let Some(d) = dom_mut(req, object)
             {
                 // The parent's owner is the namespace node's from here.
@@ -668,8 +672,8 @@ fn dispatch(
     let answer = answered?;
     let node_class = if modern { "Dom\\Node" } else { "DOMNode" };
     let returned = match answer.as_ref() {
-        ValueRef::Object(o) if crate::instance_of(req, *o, node_class) => {
-            match crate::node_of(req, *o) {
+        ValueRef::Object(o) if crate::instance_of(req, o, node_class) => {
+            match crate::node_of(req, o) {
                 Some(node) => {
                     at.keep(req, answer);
                     return Ok(Returned::Node(node));

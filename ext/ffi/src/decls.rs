@@ -1191,7 +1191,7 @@ fn data_or_type(req: &mut Request, value: Option<Value>) -> Result<TypeId, Throw
     }
     let class = classes(req)?.ctype;
     if let Some(object) = value.as_object().filter(|object| object.class() == class) {
-        return Ok(ctype_of(req, *object));
+        return Ok(ctype_of(req, object));
     }
     let given = value_name(req, &value);
     Err(arg_type_error(

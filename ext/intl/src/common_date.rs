@@ -162,7 +162,6 @@ pub(crate) fn zval_to_millis(
         ValueRef::Int(n) => Ok(MILLIS * n as f64),
         ValueRef::Float(d) => Ok(MILLIS * d),
         ValueRef::Object(object) => {
-            let object = *object;
             if is_a(req, object, b"DateTimeInterface")? {
                 let parts = datetime_decompose(req, object, false, outside)?;
                 return Ok(parts.map_or(f64::NAN, |(millis, _)| millis));
@@ -263,10 +262,10 @@ pub(crate) fn zone_sorted<R>(
 ) -> Result<R, Thrown> {
     let arg = match value.as_ref() {
         ValueRef::Object(object) if object.native::<TimeZoneObject>(req).is_some() => {
-            Some(Union::A(Instance::of(*object)))
+            Some(Union::A(Instance::of(object)))
         }
-        ValueRef::Object(object) if is_a(req, *object, b"DateTimeZone")? => {
-            Some(Union::B(Union::A(Instance::of(*object))))
+        ValueRef::Object(object) if is_a(req, object, b"DateTimeZone")? => {
+            Some(Union::B(Union::A(Instance::of(object))))
         }
         ValueRef::Object(_) => {
             let cast = to_string(req, &value)?;
@@ -274,7 +273,7 @@ pub(crate) fn zone_sorted<R>(
             cast.give_up(req);
             return answer;
         }
-        ValueRef::Str(text) => Some(Union::B(Union::B(*text))),
+        ValueRef::Str(text) => Some(Union::B(Union::B(text))),
         _ => None,
     };
     then(req, arg)

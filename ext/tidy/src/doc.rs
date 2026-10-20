@@ -963,7 +963,7 @@ fn getopt(
         return Err(invalid_option(req, name, arg));
     };
     let answer = match value.as_ref() {
-        ValueRef::Str(s) => Union::A(Owner::take(req, *s)),
+        ValueRef::Str(s) => Union::A(Owner::take(req, s)),
         ValueRef::Int(n) => Union::B(Union::A(n)),
         _ => Union::B(Union::B(value.as_bool().unwrap_or(false))),
     };

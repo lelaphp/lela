@@ -209,6 +209,6 @@ pub(crate) fn new_sdl_object(req: &mut Request, sdl: Arc<Sdl>) -> R<Owner<PhpObj
 
 /// The description a `Soap\Sdl` value holds.
 pub(crate) fn sdl_of(req: &Request, value: &Value) -> Option<Arc<Sdl>> {
-    let object = value.deref().as_object().copied()?;
+    let object = value.deref().as_object()?;
     object.native::<SdlPayload>(req)?.sdl.clone()
 }

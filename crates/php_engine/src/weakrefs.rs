@@ -279,7 +279,7 @@ struct WeakMapHandlers;
 /// The key a `WeakMap` dimension names, `ZVAL_DEREF(offset)` and php's
 /// `TypeError` for one that is no object.
 fn map_key(req: &mut Request, offset: &Value) -> Result<PhpObject, Thrown> {
-    match offset.deref().as_object().copied() {
+    match offset.deref().as_object() {
         Some(object) => Ok(object),
         None => Err(throw_error(
             req,

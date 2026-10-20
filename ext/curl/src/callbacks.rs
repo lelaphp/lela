@@ -164,8 +164,7 @@ pub(crate) fn read(cx: &mut Cx<'_>, object: PhpObject, buffer: &mut [u8]) -> usi
             }
         }
         ReadFrom::User => {
-            let resource = stream
-                .and_then(|value| value.as_resource().map(php_ext::values::Resource::as_value));
+            let resource = stream.and_then(|value| value.as_resource().map(|v| v.as_value()));
             let size = i64::try_from(buffer.len()).unwrap_or(i64::MAX);
             let arguments = [resource.unwrap_or_else(Value::null), Value::int(size)];
             let Some(returned) = user(cx, object, |curl| curl.read.handler.as_ref(), &arguments)

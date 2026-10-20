@@ -171,7 +171,7 @@ fn state_of(
         let ValueRef::Reference(context) = held.value.as_ref() else {
             return None;
         };
-        Some((*context, held.row))
+        Some((context, held.row))
     });
     held.ok_or_else(|| {
         php_ext::raising::fatal(req, "InternalError: an aggregate without its reference")

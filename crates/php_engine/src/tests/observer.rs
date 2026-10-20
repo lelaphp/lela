@@ -823,6 +823,59 @@ fn an_observed_frameless_call_takes_a_full_calls_room_and_a_declined_one_none() 
     );
 }
 
+/// A native's room under a registered observer is php's, its arguments
+/// and the temporary `zend_observer_post_startup` gives every native
+/// (`++zif->T`), so a recursion one slot short of a page's end
+/// that ends in a native call opens the next page where php's does
+/// (#2755); an observer its start does not register adds none, as with
+/// none declared.
+#[test]
+fn a_natives_room_takes_the_observers_temporary_where_one_is_registered() {
+    let rooms: [(crate::api::abi::ObserverRegistered, usize); 2] = [(|_| true, 3), (|_| false, 2)];
+    for (registered, room) in rooms {
+        let engine = Engine::cli_builder()
+            .extensions(&[ExtensionBuilder::default()
+                .observer_when(declining, registered)
+                .build("observer_room")])
+            .build();
+        let req = Request::new(
+            std::sync::Arc::clone(&engine.shared),
+            crate::engine::RequestDescription::default(),
+        );
+        let native = req.function_named(php_unit::decl::Bare::resolved(b"strlen"));
+        assert_eq!(native.map(|f| req.call_room(f, 2).0), Some(room));
+    }
+}
+
+/// A user frame under a registered observer takes the temporary php's
+/// `pass_two` reserves for it too (`op_array->T += ZEND_OBSERVER_ENABLED`,
+/// #3065): a recursion opens its next VM stack page at a lesser depth
+/// than beside an observer its start does not register, which takes no
+/// room, as none declared takes none.
+#[test]
+fn a_user_frame_takes_the_observers_temporary_where_one_is_registered() {
+    const DEPTH: &str = "<?php\n\
+        function f($n) { return $n ? f($n - 1) : 0; }\n\
+        function opens($d) { memory_reset_peak_usage(); $base = memory_get_usage(); f($d); return memory_get_peak_usage() - $base >= 262144; }\n\
+        $lo = 1; $hi = 8192;\n\
+        while ($lo < $hi) { $mid = ($lo + $hi) >> 1; if (opens($mid)) { $hi = $mid; } else { $lo = $mid + 1; } }\n\
+        echo $lo;";
+    let depth = |registered: crate::api::abi::ObserverRegistered| {
+        let engine = Engine::cli_builder()
+            .extensions(&[ExtensionBuilder::default()
+                .observer_when(declining, registered)
+                .build("observer_room")])
+            .build();
+        let served = engine.serve_capture(DEPTH, Capture::default());
+        String::from_utf8_lossy(&served.stdout).parse::<u32>().ok()
+    };
+    let (registered, declined) = (depth(|_| true), depth(|_| false));
+    assert!(
+        registered.zip(declined).is_some_and(|(on, off)| on < off),
+        "{registered:?} {declined:?}"
+    );
+}
+
 /// An end handler that records whether a throwable stands pending as it
 /// is called, under extension number 9.
 fn pending_init(_: &mut Observed<'_>) -> ObserverHandlers {

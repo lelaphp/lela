@@ -412,7 +412,7 @@ fn assert(
         } else {
             let error = new_throwable(req, "AssertionError", message)?;
             if let Some(object) = error.as_object() {
-                coded(req, object)?;
+                coded(req, &object)?;
             }
             let thrown = throw_value(req, &error);
             error.give_up(req);

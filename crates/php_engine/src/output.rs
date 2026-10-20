@@ -1841,7 +1841,7 @@ pub(crate) fn captured(
     body(req);
     let contents = contents(req)?;
     stack_pop(req, POP_DISCARD | POP_TRY);
-    Ok(contents.and_then(|value| value.as_php_string().copied()))
+    Ok(contents.and_then(|value| value.as_php_string()))
 }
 
 /// The active handler's name and level, for a notice.

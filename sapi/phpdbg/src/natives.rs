@@ -496,7 +496,7 @@ fn phpdbg_get_executable(
         let mut files = Vec::new();
         // Holding nothing, the option holds the array: a conversion may
         // serve `__toString`.
-        walk::foreach(req, *named, Hold::None, |req, row| -> walk::Step {
+        walk::foreach(req, named, Hold::None, |req, row| -> walk::Step {
             files.push(with_string(req, row.value(), <[u8]>::to_vec)?);
             Ok(std::ops::ControlFlow::Continue(()))
         })?;

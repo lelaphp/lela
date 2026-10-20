@@ -1126,7 +1126,7 @@ pub(super) fn statement_class(
         Some(at) => argument_error(req, "TypeError", at, tail),
         None => throw_error(req, "TypeError", tail),
     };
-    let Some(array) = value.as_array().copied() else {
+    let Some(array) = value.as_array() else {
         let given = value_name(req, value);
         return Err(type_error(
             req,
@@ -1164,7 +1164,7 @@ pub(super) fn statement_class(
     }
     let args = match array.get(&Key::Int(1)) {
         Some(args) => {
-            if let Some(args) = args.deref().as_array().copied() {
+            if let Some(args) = args.deref().as_array() {
                 Some(args)
             } else {
                 let given = value_name(req, value);

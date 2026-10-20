@@ -266,7 +266,7 @@ fn socket_get_option(
 /// ```
 fn table(req: &mut Request, value: &Value, option: &str) -> Result<Owner<PhpArray>, Thrown> {
     match value.as_ref() {
-        ValueRef::Array(array) => Ok(Owner::take(req, *array)),
+        ValueRef::Array(array) => Ok(Owner::take(req, array)),
         ValueRef::Object(object) => {
             // The rows read under the borrowed request first, then laid
             // into the table the option reads.

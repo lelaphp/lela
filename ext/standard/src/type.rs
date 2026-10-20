@@ -833,7 +833,7 @@ fn is_callable(
         match value.as_ref() {
             ValueRef::Str(_) => true,
             ValueRef::Array(array) => {
-                let mut rows = walk::rows(req, *array).map(|(_, value)| value.deref());
+                let mut rows = walk::rows(req, array).map(|(_, value)| value.deref());
                 array.len() == 2
                     && rows.next().is_some_and(|v| {
                         matches!(v.as_ref(), ValueRef::Str(_) | ValueRef::Object(_))
@@ -858,7 +858,7 @@ fn is_callable(
 /// Whether the object is an instance of the interface `name`, where the
 /// engine has linked one.
 fn implements(req: &mut Request, value: &Value, name: &[u8]) -> Result<bool, Thrown> {
-    let Some(object) = value.as_object().copied() else {
+    let Some(object) = value.as_object() else {
         return Ok(false);
     };
     let Some(class) = lookup_class(req, name)? else {

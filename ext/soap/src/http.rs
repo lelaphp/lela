@@ -159,7 +159,7 @@ pub(crate) fn http_context_headers(
             http_context_add_header(s.as_bytes(), flags.0, flags.1, flags.2, soap_headers);
         }
         ValueRef::Array(a) => {
-            for (_, value) in walk::rows(req, *a) {
+            for (_, value) in walk::rows(req, a) {
                 if let ValueRef::Str(s) = value.deref().as_ref()
                     && !s.is_empty()
                 {
@@ -797,7 +797,7 @@ fn drop_connection(req: &mut Request, this: PhpObject, stream: Stream, forget_ur
 /// the array with one owner, the caller's, to write back with
 /// [`set_client_slot`]; a fresh one where the slot holds none.
 fn slot_array(req: &mut Request, this: PhpObject, which: ClientSlot) -> R<Owner<PhpArray>> {
-    match client_slot(this, which).as_array().copied() {
+    match client_slot(this, which).as_array() {
         Some(array) => {
             let mut array = Owner::take(req, array);
             array.separate(req)?;
@@ -848,7 +848,7 @@ fn same_target(
     use_proxy: bool,
 ) -> bool {
     let url = client_slot(this, ClientSlot::HttpUrl);
-    let Some(object) = url.as_object().copied() else {
+    let Some(object) = url.as_object() else {
         return false;
     };
     if !instance_of(req, object, "Soap\\Url") {
@@ -994,7 +994,7 @@ fn send(req: &mut Request, this: PhpObject, call: &Call<'_>) -> Res<Sent> {
     // of a resource the slot holds.
     let context = client_slot(this, ClientSlot::StreamCtx)
         .as_resource()
-        .map(|&res| StreamCtx::fetch(req, res))
+        .map(|res| StreamCtx::fetch(req, res))
         .transpose()?;
     let mut redirect_max: i64 = 20;
     if let Some(context) = context
@@ -1504,7 +1504,7 @@ fn cookie_header(
     let host = host_of(uri);
     let mut first = true;
     h.extend_from_slice(b"Cookie: ");
-    for (key, data) in walk::rows(req, *cookies) {
+    for (key, data) in walk::rows(req, cookies) {
         let data = data.deref();
         let (Key::Str(name), Some(data)) = (key, data.as_array()) else {
             continue;

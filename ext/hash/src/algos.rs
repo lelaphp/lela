@@ -353,7 +353,7 @@ pub(crate) fn serialize(
 /// ```
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) fn unserialize(state: &mut dyn State, data: &Value) -> Result<(), Refusal> {
-    let data = data.deref().as_array().copied().ok_or(Refusal::Malformed)?;
+    let data = data.deref().as_array().ok_or(Refusal::Malformed)?;
     let mut next = 0;
     let mut element = || {
         let value = data.get(&Key::Int(next));

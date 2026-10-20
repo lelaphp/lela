@@ -755,7 +755,7 @@ fn parse_url(req: &mut Request, s: &[u8]) -> Result<Option<UriStruct>, Thrown> {
     let parts = call(req, &parse_url, &[*subject]);
     subject.give_up(req);
     let parts = parts?;
-    let Some(array) = parts.as_array().copied() else {
+    let Some(array) = parts.as_array() else {
         parts.give_up(req);
         return Ok(None);
     };

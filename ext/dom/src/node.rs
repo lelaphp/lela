@@ -651,9 +651,7 @@ fn c14n_query(
         ));
     };
     let mut namespaces = Vec::new();
-    if let Some(table) = xpath
-        .find(b"namespaces")
-        .and_then(|v| v.deref().as_array().copied())
+    if let Some(table) = xpath.find(b"namespaces").and_then(|v| v.deref().as_array())
         && !table.is_list()
     {
         for (k, v) in walk::rows(req, table) {
@@ -1218,7 +1216,7 @@ fn clone_node_of(
     };
     if is_document {
         let value = object_for(req, node, None)?;
-        if let Some(copy) = value.as_object().copied()
+        if let Some(copy) = value.as_object()
             && let Err(thrown) = copy_document_ref(req, this, copy)
         {
             value.give_up(req);

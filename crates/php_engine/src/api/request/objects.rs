@@ -1251,7 +1251,7 @@ impl Request {
         match value.as_array() {
             // The array the method returned, its one owner the caller's,
             // which is php's `*is_temp = 1` over the same table.
-            Some(array) => Ok(Some(Owner::adopt(*array))),
+            Some(array) => Ok(Some(Owner::adopt(array))),
             None if value.tag() == TypeTag::Null => {
                 self.release(value);
                 let class = self.class_name(object.class());
@@ -1322,7 +1322,7 @@ impl Request {
                 "Maximum call stack size reached during object comparison",
             ));
         }
-        let (a, b) = match (left.as_object().copied(), right.as_object().copied()) {
+        let (a, b) = match (left.as_object(), right.as_object()) {
             (Some(a), Some(b)) => (a, b),
             (Some(object), None) => return self.compare_cast(object, right, true).map(Some),
             (None, Some(object)) => return self.compare_cast(object, left, false).map(Some),
@@ -1374,7 +1374,7 @@ impl Request {
                 (true, true) => continue,
                 (true, false) | (false, true) => Ordering::Greater,
                 (false, false) => {
-                    match crate::ops::compare(self, &Value::of_zval(p), &Value::of_zval(q)) {
+                    match crate::ops::compare(self, &Value::of_slot(p), &Value::of_slot(q)) {
                         Ok(Ordering::Equal) => continue,
                         Ok(order) => order,
                         Err(thrown) => {
@@ -1500,7 +1500,7 @@ impl Request {
                 (true, false) => Ordering::Less,
                 (false, true) => Ordering::Greater,
                 (false, false) => {
-                    crate::ops::compare(self, &Value::of_zval(p), &Value::of_zval(q))?
+                    crate::ops::compare(self, &Value::of_slot(p), &Value::of_slot(q))?
                 }
             };
             if order != Ordering::Equal {
@@ -1661,7 +1661,7 @@ impl Request {
         }
         let displaced = self.heap.object_clone_members_into(new.heap(), old.heap());
         for held in self.fatal_of(displaced)? {
-            self.release(Value::of_zval(held));
+            self.release(Value::of_slot(held));
         }
         self.clone_slot_sources(new);
         self.serve_clone_method(new)

@@ -784,12 +784,8 @@ impl SplDoublyLinkedList {
     fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
         let this = this.object();
         let flags = data.get(&Key::Int(0)).and_then(|f| f.deref().as_int());
-        let storage = data
-            .get(&Key::Int(1))
-            .and_then(|s| s.deref().as_array().copied());
-        let members = data
-            .get(&Key::Int(2))
-            .and_then(|m| m.deref().as_array().copied());
+        let storage = data.get(&Key::Int(1)).and_then(|s| s.deref().as_array());
+        let members = data.get(&Key::Int(2)).and_then(|m| m.deref().as_array());
         let (Some(flags), Some(storage), Some(members)) = (flags, storage, members) else {
             return Err(throw(
                 req,

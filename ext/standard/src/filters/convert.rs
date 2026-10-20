@@ -871,7 +871,7 @@ pub(super) fn create(
     persistent: bool,
 ) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
     let filtername = String::from_utf8_lossy(name).into_owned();
-    let options = params.map(|value| value.as_array().copied());
+    let options = params.map(php_ext::values::Value::as_array);
     if options == Some(None) {
         let text = format!("Stream filter ({filtername}): invalid filter parameter");
         docref(req, Level::Warning, &text);

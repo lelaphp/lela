@@ -516,7 +516,7 @@ impl Owner<Value> {
     /// handed. The owner is handed back as it is where the value is no
     /// object.
     pub fn into_object(self) -> Result<Owner<PhpObject>, Owner<Value>> {
-        match self.view.as_object().copied() {
+        match self.view.as_object() {
             Some(object) => Ok(self.recast(object, ())),
             None => Err(self),
         }
@@ -565,7 +565,7 @@ impl Owner<Value> {
     /// int(1)
     /// ```
     pub fn convert(&mut self, req: &mut Request, value: Owner<Value>) {
-        match self.view.as_php_ref().copied() {
+        match self.view.as_php_ref() {
             Some(cell) => cell.convert(req, value),
             None => std::mem::replace(self, value).give_up(req),
         }

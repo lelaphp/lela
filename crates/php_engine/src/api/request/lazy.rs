@@ -652,7 +652,7 @@ impl Request {
             }
             Ok(_) => {
                 for held in snapshot {
-                    self.release(Value::of_zval(held));
+                    self.release(Value::of_slot(held));
                 }
                 if let Some(table) = table {
                     self.release(Value::array(PhpArray::of(table)));
@@ -728,7 +728,7 @@ impl Request {
     ) -> Result<PhpObject, Thrown> {
         let o = object.heap();
         let class = self.class_name(object.class());
-        let Some(instance) = returned.as_object().copied() else {
+        let Some(instance) = returned.as_object() else {
             o.set_laziness(Laziness::Proxy);
             let shown = crate::ops::value_name(self, &returned);
             self.release(returned);

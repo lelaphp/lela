@@ -416,7 +416,7 @@ pub(crate) fn entry(options: PhpArray) -> Option<(KeyKind, PhpArray)> {
         if let Some(value) = options.find(name)
             && let ValueRef::Array(data) = value.as_ref()
         {
-            return Some((kind, *data));
+            return Some((kind, data));
         }
     }
     None

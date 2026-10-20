@@ -464,7 +464,7 @@ impl ReflectionEnumBackedCase {
         // constant keeps the case.
         let backing = match (value.as_int(), value.as_php_string()) {
             (Some(int), _) => Some(Union::A(int)),
-            (None, Some(&string)) => Some(Union::B(string)),
+            (None, Some(string)) => Some(Union::B(string)),
             (None, None) => None,
         };
         case.give_up(req);

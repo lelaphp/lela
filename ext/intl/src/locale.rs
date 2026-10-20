@@ -397,7 +397,7 @@ fn append_multiple(req: &Request, out: &mut Vec<u8>, array: PhpArray, key: &str)
     };
     if let Some(value) = array.find(key.as_bytes()).map(|v| v.deref()) {
         if let Some(list) = value.as_array() {
-            for (_, element) in walk::rows(req, *list) {
+            for (_, element) in walk::rows(req, list) {
                 if !add(out, element) {
                     return Appended::NotString;
                 }

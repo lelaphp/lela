@@ -563,7 +563,7 @@ impl Request {
         let o = object.heap();
         let z = o.slot(placed.slot);
         if !z.is_undef() {
-            let value = Value::of_zval(z).deref();
+            let value = Value::of_slot(z).deref();
             self.addref(&value);
             return Ok(value);
         }
@@ -766,7 +766,7 @@ impl Request {
             }
             return Ok(false);
         }
-        let value = Value::of_zval(z).deref();
+        let value = Value::of_slot(z).deref();
         Ok(match test {
             PropertyTest::Exists => true,
             PropertyTest::Isset => value.tag() != TypeTag::Null,
@@ -1417,7 +1417,7 @@ impl Request {
         let rows: Vec<(Key, Value)> = dynamic.map_or_else(Vec::new, |dynamic| {
             dynamic
                 .iter()
-                .map(|(key, z)| (Key::of(key), Value::of_zval(z)))
+                .map(|(key, z)| (Key::of(key), Value::of_slot(z)))
                 .collect()
         });
         for (key, value) in rows {
@@ -1470,7 +1470,7 @@ impl Request {
                 if z.is_undef() {
                     return Ok(false);
                 }
-                self.dup_value(Value::of_zval(z), None)
+                self.dup_value(Value::of_slot(z), None)
             }
         };
         let value = Owner::adopt(value);

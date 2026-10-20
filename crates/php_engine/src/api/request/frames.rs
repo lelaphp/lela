@@ -628,7 +628,11 @@ impl Request {
         from: CodeFrom,
     ) -> Result<FrameRef, Fatal> {
         let code = exec::code_of(&unit);
-        let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
+        // The CVs, the temporaries and, under a registered observer, the
+        // temporary `pass_two` reserves for it.
+        let observed = u32::from(crate::observer::observing(self));
+        let slots = code.num_cvs.saturating_add(code.num_tmps);
+        let slots = usize::try_from(slots.saturating_add(observed)).unwrap_or(0);
         let cvs = !code.vars.is_empty();
         let mut header = exec::Header::of(None, code);
         let (caller, scope, table) = match from {
@@ -1184,7 +1188,9 @@ impl Request {
     /// `INIT_*` says `count` arguments are passed, past the header:
     /// `zend_vm_calc_used_stack`, the user function's CVs and
     /// temporaries and the arguments past its declared parameters, a
-    /// native's arguments alone, and for `__call`'s trampoline the
+    /// native's arguments and, while an observer is registered, the
+    /// temporary `zend_observer_post_startup` gives every native
+    /// (`++zif->T`, [`Request::native_room`]), and for `__call`'s trampoline the
     /// arguments and the magic method's CVs and temporaries, at least
     /// two, as `zend_get_call_trampoline_func` sizes the frame it
     /// reuses.
@@ -1226,11 +1232,18 @@ impl Request {
             .and_then(|(trampoline, _)| trampoline.magic())
             && let Some(magic) = shape(magic)
         {
-            count.saturating_add(magic.slots.max(2))
+            count.saturating_add(magic.room(0).max(2))
         } else {
-            count
+            self.native_room(count)
         };
         (usize::try_from(room).unwrap_or(usize::MAX), callee)
+    }
+
+    /// A native's room for `count` arguments, `count + fbc->common.T`:
+    /// one slot more while an observer is registered, the observer's
+    /// temporary php adds every native at startup (`++zif->T`).
+    pub(crate) fn native_room(&self, count: u32) -> u32 {
+        count.saturating_add(u32::from(crate::observer::observing(self)))
     }
 
     /// `zend_vm_stack_push_call_frame`: a call to `function` pushed with
@@ -1247,54 +1260,99 @@ impl Request {
         self.push_room(room, header)
     }
 
-    /// The call of a frameless native, `FRAMELESS_ICALL_*`'s: php's full
-    /// call where the native is observed
+    /// The call of the frameless native `function` over `operands`,
+    /// `FRAMELESS_ICALL_*`'s, laid down being served: php's
+    /// full call where the native is observed
     /// ([`crate::observer::frameless_observed`]), on the VM stack as
     /// [`Request::push_call`] pushes it, and any other off the stack's
     /// pages ([`php_heap::VmStack::push_frameless`]), since php serves it
     /// over no frame and it takes no room php's call does not.
-    /// A frameless native's call takes one slot per operand, as
-    /// [`Request::call_room`] sizes any native's call.
-    pub(crate) fn push_frameless(&mut self, header: exec::Header) -> Result<FrameRef, Fatal> {
-        let Some(function) = header.function else {
-            return Err(Fatal::error("InternalError: a call pushed with no callee"));
-        };
-        let room = header.num_args as usize;
-        if crate::observer::frameless_observed(self, function) {
-            return self.push_room(room, header);
+    /// An observed frameless native's call takes one slot per operand
+    /// and the observer's, as [`Request::call_room`] sizes any native's
+    /// call.
+    #[inline(always)] // the one call site is the frameless handler's
+    #[allow(clippy::inline_always)]
+    pub(crate) fn push_frameless(
+        &mut self,
+        function: Function,
+        operands: &[php_heap::Zval],
+    ) -> Result<FrameRef, Fatal> {
+        let count = u32::try_from(operands.len()).unwrap_or(u32::MAX);
+        let mut header = exec::Header::call(function, count);
+        header.info.set_serving();
+        header.info.set_frameless(true);
+        if !crate::observer::frameless_observed(self, function) {
+            return self.vm.push_frameless(operands, header);
         }
-        self.vm.push_frameless(room, header)
+        let call = self.push_room(self.native_room(count) as usize, header)?;
+        let slots = self
+            .vm
+            .stack
+            .frame_mut(call)
+            .map(exec::HeapFrame::slots_mut);
+        if let Some(slots) = slots.and_then(|slots| slots.get_mut(..operands.len())) {
+            slots.copy_from_slice(operands);
+        }
+        Ok(call)
     }
 
     /// The frameless call on top popped ([`Request::push_frameless`]),
-    /// its operands given up as php's `FREE_OP*` after the frameless
-    /// handler frees them, `zval_ptr_dtor_nogc`, once the call is on no
-    /// chain. A frameless call is pushed with no receiver and no
-    /// closure, and an annex only where an argument's coercion kept a
-    /// value there; a record carrying any of them is popped as any call
-    /// is ([`Request::pop_call`]).
-    pub(crate) fn pop_frameless(&mut self) {
+    /// the operands it owns, the bits of `owned`, given up as php's
+    /// `FREE_OP*` after the frameless handler frees them,
+    /// `zval_ptr_dtor_nogc`, once the call is on no chain; an operand
+    /// it borrowed is the caller's ([`exec::frameless_operand`]). A
+    /// frameless call is pushed with no receiver and no closure, and an
+    /// annex only where an argument's coercion kept a value there; a
+    /// record carrying one is popped as any call is
+    /// ([`Request::pop_call`]), its borrowed operands left out.
+    #[inline(always)] // the one call site is the frameless handler's
+    #[allow(clippy::inline_always)]
+    pub(crate) fn pop_frameless(&mut self, owned: u8) {
         /// `ZEND_FRAMELESS_ICALL_3`'s, the most operands a frameless
         /// call passes.
         const OPERANDS: usize = 3;
         let call = self.vm.stack.current();
-        let Some(header) = self.vm.at_mut(call) else {
+        let Some(frame) = self.vm.stack.frame_mut(call) else {
             return;
         };
-        if header.annex.is_some() || header.closure.is_some() || header.receiver().is_some() {
+        let header = frame.header_mut();
+        debug_assert!(header.closure.is_none() && header.receiver().is_none());
+        header.info.set_leaving(true);
+        let carries = header.annex.is_some();
+        let slots = frame.slots_mut();
+        if carries {
+            for (at, slot) in slots.iter_mut().enumerate() {
+                if owned >> at & 1 == 0 {
+                    *slot = php_heap::Zval::UNDEF;
+                }
+            }
             return self.pop_call();
         }
-        header.info.set_leaving(true);
-        let mut operands = [php_heap::Zval::UNDEF; OPERANDS];
-        if let Some(frame) = self.vm.stack.frame_mut(call) {
-            for (operand, slot) in operands.iter_mut().zip(frame.slots_mut()) {
-                *operand = std::mem::replace(slot, php_heap::Zval::UNDEF);
+        if owned != 0 {
+            let mut operands = [php_heap::Zval::UNDEF; OPERANDS];
+            let count = slots.len().min(OPERANDS);
+            for (at, (operand, slot)) in operands.iter_mut().zip(slots).enumerate() {
+                if owned >> at & 1 != 0 {
+                    *operand = *slot;
+                }
+            }
+            for &operand in operands.get(..count).unwrap_or_default() {
+                self.release_zval_nogc(operand);
             }
         }
-        for operand in operands {
-            self.release_zval_nogc(operand);
-        }
         self.vm.stack.pop_frame(&mut self.heap);
+    }
+
+    /// A native's call pushed with `room` slots past its header, its
+    /// record named, laid in its `INIT_FCALL` ([`Request::push_room`]).
+    #[inline(always)] // as `php_heap::VmStack::push_frame`
+    #[allow(clippy::inline_always)]
+    pub(crate) fn push_native(
+        &mut self,
+        room: usize,
+        header: exec::Header,
+    ) -> Result<FrameRef, Fatal> {
+        self.vm.stack.push_frame(&mut self.heap, room, 0, header)
     }
 
     /// A call pushed with `room` slots past its header, which the caller
@@ -1829,7 +1887,7 @@ impl Request {
             .enumerate()
             .skip(from)
             .find(|(_, cell)| cell.is_refcounted())?;
-        Some((at, Value::of_zval(std::mem::replace(cell, Zval::UNDEF))))
+        Some((at, Value::of_slot(std::mem::replace(cell, Zval::UNDEF))))
     }
 
     /// The value in a slot of `frame`, a view of it: `ZVAL_COPY_VALUE`,
@@ -1839,7 +1897,7 @@ impl Request {
         self.vm
             .stack
             .frame(frame)
-            .map_or(Value::undef(), |f| Value::of_zval(f.slot(Slot(at))))
+            .map_or(Value::undef(), |f| Value::of_slot(f.slot(Slot(at))))
     }
 
     /// Every slot of `frame` in place ([`crate::exec::HeapFrame::slots_mut`]),
@@ -1871,7 +1929,7 @@ impl Request {
         };
         let z = f.slot(Slot(at));
         f.set(Slot(at), Zval::UNDEF);
-        Value::of_zval(z)
+        Value::of_slot(z)
     }
 
     /// `value` into a slot, the slot owning it from here, and what the
@@ -1904,7 +1962,7 @@ impl Request {
         if old.is_refcounted() {
             self.sense_dirty_temporary(frame, at, old.kind());
         }
-        Value::of_zval(old)
+        Value::of_slot(old)
     }
 
     /// `value` into a slot of `frame` and what it held handed back, with
@@ -1918,13 +1976,14 @@ impl Request {
             .frame_mut(frame)
             .and_then(|f| f.slots_mut().get_mut(at as usize))
         {
-            Some(slot) => Value::of_zval(std::mem::replace(slot, value.to_zval())),
+            Some(slot) => Value::of_slot(std::mem::replace(slot, value.to_zval())),
             None => value,
         }
     }
 
     /// [`Request::set_slot`] and what the slot held released after the
     /// write, the `zval_ptr_dtor` php's assignment over a slot ends with.
+    #[inline]
     pub(crate) fn replace_slot(&mut self, frame: FrameRef, at: u32, value: Value) {
         let Some(slot) = self
             .vm
@@ -1936,10 +1995,18 @@ impl Request {
         };
         let old = std::mem::replace(slot, value.to_zval());
         if old.is_refcounted() {
-            #[cfg(debug_assertions)]
-            self.sense_dirty_temporary(frame, at, old.kind());
-            php_heap::Heap::release(&mut super::Hooks(self), old);
+            self.release_replaced(frame, at, old);
         }
+    }
+
+    /// What [`Request::replace_slot`] wrote over, where it counts owners.
+    #[inline(never)]
+    fn release_replaced(&mut self, frame: FrameRef, at: u32, old: php_heap::Zval) {
+        #[cfg(debug_assertions)]
+        self.sense_dirty_temporary(frame, at, old.kind());
+        #[cfg(not(debug_assertions))]
+        let _ = (frame, at);
+        php_heap::Heap::release(&mut super::Hooks(self), old);
     }
 
     /// The zval in a slot of `frame` in place, php's `EX_VAR(var)`
@@ -1996,6 +2063,8 @@ impl Request {
     /// int(0)
     /// int(1)
     /// ```
+    #[inline(always)] // every native call's pop, the carrying case out of line
+    #[allow(clippy::inline_always)]
     pub(crate) fn pop_call(&mut self) {
         let call = self.vm.stack.current();
         // `EG(current_execute_data) = execute_data` before the arguments
@@ -2004,25 +2073,36 @@ impl Request {
             return;
         };
         header.info.set_leaving(true);
+        if header.annex.is_some() || header.closure.is_some() || header.receiver().is_some() {
+            return self.pop_carrying(call);
+        }
+        self.release_arguments(call);
+        self.vm.stack.pop_frame(&mut self.heap);
+    }
+
+    /// [`Request::pop_call`] of a call that carries a receiver, a
+    /// closure or an annex, each given up after the arguments.
+    #[inline(never)]
+    fn pop_carrying(&mut self, call: FrameRef) {
+        let Some(header) = self.vm.at_mut(call) else {
+            return;
+        };
         let receiver = header.receiver();
         header.set_receiver(None);
         let closure = header.closure.take();
-        let annex = header.annex.take();
-        let annex = annex
-            .and_then(|id| self.annexes.take(id))
-            .unwrap_or_default();
+        let mut annex = header.annex.take().and_then(|id| self.annexes.take(id));
         // `zend_vm_stack_free_args`, whose `zval_ptr_dtor_nogc` makes no
         // argument a possible root; the receiver and the closure after
         // them are `OBJ_RELEASE`, which does.
-        for value in annex.coerced {
+        for value in annex
+            .as_mut()
+            .map(|annex| std::mem::take(&mut annex.coerced))
+            .unwrap_or_default()
+        {
             self.release_nogc(value);
         }
-        let mut from = 0;
-        while let Some((at, value)) = self.take_next_owner(call, from, usize::MAX) {
-            self.release_nogc(value);
-            from = at.saturating_add(1);
-        }
-        if let Some(name) = annex.name {
+        self.release_arguments(call);
+        if let Some(name) = annex.as_mut().and_then(|annex| annex.name.take()) {
             self.release(Value::string(name));
         }
         if let Some(receiver) = receiver {
@@ -2031,8 +2111,22 @@ impl Request {
         if let Some(closure) = closure {
             self.release(closure.as_value());
         }
-        self.release_named(annex.extra_named);
+        if let Some(annex) = annex {
+            self.release_named(annex.extra_named);
+        }
         self.vm.stack.pop_frame(&mut self.heap);
+    }
+
+    /// `zend_vm_stack_free_args` over the call `call`: each argument
+    /// that counts owners given up, `zval_ptr_dtor_nogc`.
+    #[inline(always)] // as `pop_call`
+    #[allow(clippy::inline_always)]
+    fn release_arguments(&mut self, call: FrameRef) {
+        let mut from = 0;
+        while let Some((at, value)) = self.take_next_owner(call, from, usize::MAX) {
+            self.release_nogc(value);
+            from = at.saturating_add(1);
+        }
     }
 
     /// `zend_free_extra_named_params`: each name and value of a call's
@@ -2100,7 +2194,7 @@ impl Request {
 /// [`Request::leaves_plainly`] asks of the frame's receiver, its closure
 /// and each CV that owns anything but a string.
 fn kept_by_another(z: Zval) -> bool {
-    Value::of_zval(z).refcount() > 1
+    Value::of_slot(z).refcount() > 1
 }
 
 /// Whether a leaving frame's receiver and closure, where it has them, are

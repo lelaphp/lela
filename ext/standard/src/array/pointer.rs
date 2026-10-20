@@ -327,7 +327,7 @@ impl Pointed {
 /// ```
 fn pointed(req: &mut Request, given: &Value, name: &str) -> Result<Pointed, Thrown> {
     match given.as_ref() {
-        ValueRef::Array(array) => Ok(Pointed::Array(*array)),
+        ValueRef::Array(array) => Ok(Pointed::Array(array)),
         ValueRef::Object(object) => {
             docref(
                 req,
@@ -337,7 +337,7 @@ fn pointed(req: &mut Request, given: &Value, name: &str) -> Result<Pointed, Thro
             if let walk::Table::Array(array) = object.property_table(req)? {
                 return Ok(Pointed::Array(array));
             }
-            Ok(Pointed::Object(*object))
+            Ok(Pointed::Object(object))
         }
         _ => Err(not_an_array(req, given)),
     }
@@ -576,7 +576,7 @@ fn extreme(
         // only where it is strictly beyond.
         let mut best: Option<Value> = None;
         // Holding nothing: a comparison may serve `__toString`.
-        walk::foreach(req, *array, walk::Hold::None, |req, row| -> walk::Step {
+        walk::foreach(req, array, walk::Hold::None, |req, row| -> walk::Step {
             let value = row.value().deref();
             best = Some(match best {
                 None => value,

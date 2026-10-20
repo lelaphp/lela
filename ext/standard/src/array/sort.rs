@@ -872,7 +872,7 @@ fn array_multisort(
                 order = SORT_ASC;
                 kind = SORT_REGULAR;
             }
-            let separated = argument.separated(req)?.unwrap_or(*array);
+            let separated = argument.separated(req)?.unwrap_or(array);
             arrays.push((separated, *argument));
             order_allowed = true;
             kind_allowed = true;

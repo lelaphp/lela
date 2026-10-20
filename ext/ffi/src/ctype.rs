@@ -629,7 +629,6 @@ impl ObjectHandlers for Handlers {
             value
                 .deref()
                 .as_object()
-                .copied()
                 .filter(|object| object.class() == class)
         };
         if let (Some(a), Some(b)) = (of(left), of(right)) {

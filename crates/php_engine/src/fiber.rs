@@ -630,7 +630,7 @@ impl ObjectHandlers for FiberHandlers {
             return;
         };
         let callable = fiber.callable.take();
-        let result = std::mem::replace(&mut fiber.result, Value::null());
+        let result = std::mem::take(&mut fiber.result);
         if let Some(callable) = callable {
             req.release(callable.value());
         }

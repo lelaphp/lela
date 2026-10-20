@@ -926,7 +926,7 @@ impl SoapServer {
                 let class = s
                     .object
                     .as_ref()
-                    .and_then(|o| o.as_object().copied())
+                    .and_then(|o| o.as_object())
                     .map(|o| o.class());
                 class.map_or_else(Vec::new, |c| public_methods(req, c))
             }
@@ -984,7 +984,7 @@ impl SoapServer {
                     s.functions_all = false;
                     s.functions = Some(Table::new());
                 }
-                let names: Vec<Option<Vec<u8>>> = walk::rows(req, *list)
+                let names: Vec<Option<Vec<u8>>> = walk::rows(req, list)
                     .map(|(_, f)| f.deref().as_str_bytes().map(<[u8]>::to_vec))
                     .collect();
                 for name in names {
@@ -1155,7 +1155,7 @@ fn all_functions(req: &mut Request) -> R<Vec<Vec<u8>>> {
     let mut out = Vec::new();
     for (_, group) in walk::rows(req, *all) {
         if let ValueRef::Array(list) = group.deref().as_ref() {
-            for (_, name) in walk::rows(req, *list) {
+            for (_, name) in walk::rows(req, list) {
                 if let Some(n) = name.deref().as_str_bytes() {
                     out.push(n.to_vec());
                 }
@@ -1248,7 +1248,7 @@ fn construct(
         && let ValueRef::Array(a) = tm.as_ref()
         && !a.is_empty()
     {
-        typemap_ht = Some(*a);
+        typemap_ht = Some(a);
     }
     if let Some(ValueRef::Int(f)) = option(opts, b"features").as_ref().map(Value::as_ref) {
         service.features = f;
@@ -1587,10 +1587,7 @@ fn has_function(
     let lc = name.to_ascii_lowercase();
     match kind {
         ServiceKind::Class | ServiceKind::Object => {
-            let Some(class) = object
-                .and_then(|o| o.as_object().copied())
-                .map(|o| o.class())
-            else {
+            let Some(class) = object.and_then(|o| o.as_object()).map(|o| o.class()) else {
                 return false;
             };
             php_ext::call::known_method(
@@ -1744,7 +1741,7 @@ fn serve(
                 }
                 let retval = parsed.headers[i].retval.deref();
                 if let ValueRef::Object(o) = retval.as_ref()
-                    && instance_of(req, *o, "SoapFault")
+                    && instance_of(req, o, "SoapFault")
                 {
                     discard(req);
                     let one = std::slice::from_ref(&parsed.headers[i]);
@@ -1816,7 +1813,7 @@ fn serve(
             });
         }
         if let ValueRef::Object(o) = retval.deref().as_ref()
-            && instance_of(req, *o, "SoapFault")
+            && instance_of(req, o, "SoapFault")
         {
             discard(req);
             let r = soap_server_fault_ex(req, sdl, function, *retval, &[]);
@@ -1928,13 +1925,13 @@ fn session_object(req: &mut Request, class: ClassId) -> Res<Option<Value>> {
     let Some(sess) = session_array(req) else {
         return Ok(None);
     };
-    let Some(arr) = sess.deref().as_array().copied() else {
+    let Some(arr) = sess.deref().as_array() else {
         return Ok(None);
     };
     let Some(v) = arr.find(SESSION_KEY).map(|v| v.deref()) else {
         return Ok(None);
     };
-    let Some(o) = v.as_object().copied() else {
+    let Some(o) = v.as_object() else {
         return Ok(None);
     };
     if o.class() == class {
@@ -1956,7 +1953,7 @@ fn store_session_object(req: &mut Request, value: Owner<Value>) -> Res<Option<Ow
     let Some(sess) = session_array(req) else {
         return Ok(Some(value));
     };
-    let Some(cell) = sess.as_php_ref().copied() else {
+    let Some(cell) = sess.as_php_ref() else {
         return Ok(Some(value));
     };
     let mut arr = match cell.separate_array(req) {

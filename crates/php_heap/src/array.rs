@@ -585,7 +585,7 @@ impl Arr {
     /// Where `nNumUsed` is: past it a packed array has no slot.
     pub const USED_AT: usize = std::mem::offset_of!(ArrHeader, num_used);
 
-    fn header(&self) -> &ArrHeader {
+    const fn header(&self) -> &ArrHeader {
         // SAFETY: an `Arr` names an array `init` laid down, live while
         // its owner holds it, which is php's `zend_array *` contract.
         unsafe { self.0.as_ref() }
@@ -597,7 +597,7 @@ impl Arr {
     }
 
     /// The payload word of a zval naming this array.
-    pub(crate) fn payload(self) -> crate::zval::Word {
+    pub(crate) const fn payload(self) -> crate::zval::Word {
         crate::zval::Word::pointer(self.0)
     }
 
@@ -856,7 +856,7 @@ impl Arr {
     /// `IS_ARRAY_IMMUTABLE`: a compiled program's constant array, never
     /// refcounted, separated before any write.
     #[must_use]
-    pub fn is_immutable(&self) -> bool {
+    pub const fn is_immutable(&self) -> bool {
         self.header().gc.flags() & gc::IMMUTABLE != 0
     }
 

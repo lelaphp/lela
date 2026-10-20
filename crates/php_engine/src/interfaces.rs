@@ -733,7 +733,7 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
         return Ok((Funcs::Class, object, Some(class_iter)));
     }
     let answered = crate::api::call::call_method(req, &object, b"getIterator", &[])?;
-    match answered.deref().as_object().copied() {
+    match answered.deref().as_object() {
         Some(inner) if native && internal_walked(req, inner) == Some(object) => {
             answered.give_up(req);
             if by_ref {

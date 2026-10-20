@@ -1623,6 +1623,8 @@ impl Shared {
     /// test where none is, as php resolves an opline's handler when it
     /// compiles it (design §5.8, §7.1).
     fn observe_opcodes(&mut self, start: &Start, bind_loops: BindLoops) {
+        (self.supplied.observers).retain(|(_, registered)| registered.is_none_or(|r| r(start)));
+        self.observers = self.supplied.observers.count();
         self.opcodes = crate::observer::ObservedOpcodes::start(&self.supplied.opcodes, start);
         self.loops = bind_loops(&self.opcodes);
     }
@@ -2087,11 +2089,11 @@ impl Shared {
     /// request finds it.
     pub(crate) fn sapi_constant(&self, sapi: &[u8]) -> Option<Value> {
         if let Some((_, z)) = self.sapi_names.iter().find(|(n, _)| n.as_ref() == sapi) {
-            return Some(exec::value_of(*z));
+            return Some(Value::of_slot(*z));
         }
         let mut strings = self.interned.strings();
         let interned = strings.intern(sapi).ok()?;
-        Some(exec::value_of(Zval::string(interned)))
+        Some(Value::of_slot(Zval::string(interned)))
     }
 
     pub(crate) fn constant(&self, name: &[u8]) -> Option<Value> {
@@ -2110,7 +2112,7 @@ impl Shared {
     /// [`Shared::constant`] reads it.
     pub(crate) fn constant_at(&self, at: usize) -> Option<Value> {
         let (z, _) = self.constant_values.get(at)?.as_ref()?;
-        Some(exec::value_of(*z))
+        Some(Value::of_slot(*z))
     }
 
     /// `ZEND_CONSTANT_MODULE_NUMBER` of the constant `name` an extension

@@ -106,8 +106,10 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
         .ini(ini())
         .on_modify(OBSERVE_FUNCTION_NAMES, on_update_function_names)
         .engine_state(Switches::start)
-        .observer(fcall_init)
-        .observer(execute_internal_init)
+        .observer_when(fcall_init, |start| started_on(start, ENABLED))
+        .observer_when(execute_internal_init, |start| {
+            started_on(start, b"zend_test.observer.execute_internal")
+        })
         .opcodes(observed_opcodes, show_opcode_in_user_handler)
         .fiber_init(fiber_init)
         .fiber_switch(fiber_switch)
@@ -154,7 +156,7 @@ impl Switches {
         reason = "the engine start's shape, which a start that refuses needs"
     )]
     fn start(start: &Start) -> Result<Switches, Refusal> {
-        let on = |name: &[u8]| Request::ini_parse_bool(startup_value(start, name));
+        let on = |name: &[u8]| started_on(start, name);
         let switch = |suffix: &str| on(format!("zend_test.observer.{suffix}").as_bytes());
         Ok(Switches {
             enabled: on(ENABLED),
@@ -179,6 +181,15 @@ impl Switches {
     fn of(req: &Request) -> Switches {
         req.engine::<Switches>().copied().unwrap_or_default()
     }
+}
+
+/// Whether the switch `name` is on in the startup ini: what `MINIT`
+/// reads to register the call observer, `zend_observer_fcall_register`
+/// under `ZT_G(observer_enabled)`, and its `zend_execute_internal` under
+/// `ZT_G(observer_execute_internal)`, which the engine serves as an
+/// observer too.
+fn started_on(start: &Start, name: &[u8]) -> bool {
+    Request::ini_parse_bool(startup_value(start, name))
 }
 
 /// An entry's value in the startup ini, its default where the host set

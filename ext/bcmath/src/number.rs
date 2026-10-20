@@ -828,7 +828,7 @@ fn given_scale(
 fn method_operand(req: &mut Request, raw: Operand, position: u32) -> Result<Decimal, Thrown> {
     let value = raw.value();
     let decimal = match value.as_ref() {
-        ValueRef::Object(&object) if object.native::<Slot>(req).is_some() => held(req, object)?,
+        ValueRef::Object(object) if object.native::<Slot>(req).is_some() => held(req, object)?,
         ValueRef::Str(text) => crate::operand(req, text.as_bytes(), position)?,
         ValueRef::Int(n) => Decimal::from_long(n),
         ValueRef::Bool(b) => Decimal::from_long(i64::from(b)),
@@ -840,7 +840,7 @@ fn method_operand(req: &mut Request, raw: Operand, position: u32) -> Result<Deci
             Some(n) => Decimal::from_long(n),
             None => stringified(req, &value, position)?,
         },
-        ValueRef::Object(&object) if has_to_string(req, object) => {
+        ValueRef::Object(object) if has_to_string(req, object) => {
             stringified(req, &value, position)?
         }
         _ => {
@@ -910,7 +910,7 @@ fn long_weak(req: &mut Request, f: f64) -> Option<i64> {
 fn operator_operand(req: &mut Request, value: &Value) -> Result<Option<Decimal>, Unreadable> {
     let value = value.deref();
     Ok(Some(match value.as_ref() {
-        ValueRef::Object(object) => match held_of(req, *object) {
+        ValueRef::Object(object) => match held_of(req, object) {
             Some(decimal) => decimal,
             None => return Ok(None),
         },

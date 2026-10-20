@@ -742,7 +742,7 @@ impl Request {
             self.release(value);
             return;
         };
-        let held = Value::of_zval(at.read());
+        let held = Value::of_slot(at.read());
         let released = match order {
             Overwrite::After => {
                 at.write(value.to_zval());
@@ -763,7 +763,7 @@ impl Request {
             self.release(value);
             return;
         };
-        let left = Value::of_zval(at.read());
+        let left = Value::of_slot(at.read());
         at.write(value.to_zval());
         let by_program = match released {
             Some(released) => released.wrote_over(self, left),

@@ -1147,10 +1147,7 @@ const STAT_NAMES: [&[u8]; 13] = [
 #[php_function]
 fn fstat(req: &mut Request, stream: Stream) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let answer = php_fstat(req, stream)?;
-    let array = answer
-        .as_array()
-        .copied()
-        .map(|array| Owner::take(req, array));
+    let array = answer.as_array().map(|array| Owner::take(req, array));
     answer.give_up(req);
     Ok(array.map_or(OrFalse::False, OrFalse::Value))
 }
@@ -1735,7 +1732,7 @@ fn write_data(
             // (`Z/ext/standard/file.c:531`), no owner of the table taken:
             // the argument holds it while `__toString` and the stream's
             // wrapper run.
-            let walked = walk::foreach(req, *array, Hold::None, |req, row| -> walk::Step {
+            let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
                 let element = row.value().deref();
                 let text = to_string(req, &element)?;
                 let len = text.len();
@@ -1762,7 +1759,7 @@ fn write_data(
             Ok(Some(numbytes))
         }
         ValueRef::Object(object) => {
-            if !has_to_string(req, *object)? {
+            if !has_to_string(req, object)? {
                 return Ok(None);
             }
             let text = to_string(req, data)?;
@@ -2890,7 +2887,7 @@ fn fscanf(
     };
     let scanned = crate::scanf::php_sscanf_internal(req, &line, format.as_bytes(), 3, count)?;
     let answer = match scanned.as_ref() {
-        ValueRef::Array(array) => Some(OrFalse::Value(Union::A(Owner::take(req, *array)))),
+        ValueRef::Array(array) => Some(OrFalse::Value(Union::A(Owner::take(req, array)))),
         ValueRef::Int(n) => Some(OrFalse::Value(Union::B(n))),
         ValueRef::Bool(false) => Some(OrFalse::False),
         _ => None,

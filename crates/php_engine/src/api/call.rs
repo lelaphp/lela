@@ -2920,7 +2920,7 @@ fn prop_link(
 
 /// [`prop_link`]'s read of `name` off `object`.
 fn prop_read(req: &mut Request, object: &Value, name: &[u8]) -> Result<Chained, Thrown> {
-    let Some(instance) = object.as_object().copied() else {
+    let Some(instance) = object.as_object() else {
         let shown = crate::ops::value_name(req, &object.undef_as_null());
         crate::api::raising::warning(
             req,
@@ -3290,7 +3290,7 @@ fn add_unpacked_element(
     array: &mut PhpArray,
     spread: &Value,
 ) -> Result<(), Thrown> {
-    let Some(source) = spread.deref().as_array().copied() else {
+    let Some(source) = spread.deref().as_array() else {
         return Err(throw_error(
             req,
             "Error",

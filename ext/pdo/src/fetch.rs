@@ -288,7 +288,7 @@ impl Out {
 
     fn object(&self) -> Option<PhpObject> {
         match self {
-            Out::Value(value) => value.as_object().copied(),
+            Out::Value(value) => value.as_object(),
             Out::Array(_) => None,
         }
     }
@@ -438,7 +438,7 @@ fn common(
     })
     .unwrap_or_default();
     for (position, cell, ty) in bound {
-        let Some(cell) = cell.as_php_ref().copied() else {
+        let Some(cell) = cell.as_php_ref() else {
             continue;
         };
         let fetched = value(req, object, position, Some(ty))?;
@@ -951,7 +951,7 @@ fn named(
         return Ok(());
     };
     let current = array.find(name.as_bytes());
-    if let Some(mut list) = current.and_then(|current| current.as_array().copied()) {
+    if let Some(mut list) = current.and_then(|current| current.as_array()) {
         return list.append(req, fetched);
     }
     let stored = match current {
@@ -1230,7 +1230,7 @@ pub(super) fn setup_mode(
             if total != first {
                 return Err(count_error(req, "exactly", first));
             }
-            let Some(into) = args[0].as_object().copied() else {
+            let Some(into) = args[0].as_object() else {
                 let shown = value_name(req, &args[0]);
                 return Err(argument_error(
                     req,
@@ -1331,7 +1331,7 @@ fn class_target(
                             "must be empty when class provided in argument #2 ($class) does not have a constructor",
                         ));
                     }
-                    ctor_args = Some(Owner::take(req, *array));
+                    ctor_args = Some(Owner::take(req, array));
                 }
             }
             _ => {
@@ -1532,7 +1532,7 @@ fn all_class(
         },
     };
     let args = match third {
-        Some(args) => match args.as_array().copied() {
+        Some(args) => match args.as_array() {
             Some(args) if !args.is_empty() => {
                 if !has_constructor(req, class) {
                     return Err(argument_error(

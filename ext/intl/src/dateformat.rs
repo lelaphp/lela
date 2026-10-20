@@ -714,7 +714,7 @@ fn format(req: &mut Request, object: PhpObject, datetime: Value) -> Answer<Owner
             return Ok(OrFalse::False);
         }
         let mut pending = None;
-        let millis = array_millis(req, object, *array, &mut pending);
+        let millis = array_millis(req, object, array, &mut pending);
         // `INTL_METHOD_CHECK_STATUS`, raised over what the array threw.
         let code = error::object_code::<DateFormatObject>(req, object);
         error::set_code(req, code);
@@ -800,7 +800,7 @@ fn format_styles(
                 error::set(req, Code::ILLEGAL_ARGUMENT, message)?;
                 return Ok(None);
             }
-            let styles: Vec<Option<i32>> = walk::rows(req, *array)
+            let styles: Vec<Option<i32>> = walk::rows(req, array)
                 .map(|(_, v)| valid_style(&v.deref()))
                 .collect();
             match (

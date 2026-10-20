@@ -109,7 +109,7 @@ fn arrays_of(req: &mut Request, values: &[Value]) -> Result<Vec<PhpArray>, Throw
 fn array_at(req: &mut Request, position: u32, value: &Value) -> Result<PhpArray, Thrown> {
     let held = php_ext::coerce::coerce_param(req, value, &Type::Array, position)?;
     match held.as_array() {
-        Some(array) => Ok(*array),
+        Some(array) => Ok(array),
         None => Ok(PhpArray::empty()),
     }
 }
