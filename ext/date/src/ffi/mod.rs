@@ -24,7 +24,7 @@
 //! under a lend gives its memory back ([`crate::lent`]).
 //!
 //! Beside timelib is the one call into the platform's C library,
-//! [`strftime`], which reads the calling thread's `LC_TIME`, the
+//! [`Strftime`], which reads the calling thread's `LC_TIME`, the
 //! request's own once ext/standard's `setlocale()` has installed one
 //! (design §5.14, revision 40).
 //!
@@ -49,7 +49,7 @@ use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::NameHasher;
 
-use crate::lent::{Lent, lent};
+use crate::lent::{Lent, kept, lent};
 
 #[cfg(test)]
 mod tests;
@@ -267,17 +267,6 @@ pub(crate) struct Location {
     pub comments: Vec<u8>,
 }
 
-/// `timelib_time_offset`, copied out, with php's field names: the
-/// offset from UTC in seconds, whether it is daylight saving time, and
-/// the abbreviation.
-#[derive(Debug, Clone)]
-#[allow(clippy::struct_field_names)]
-pub struct Offset {
-    pub offset: i32,
-    pub is_dst: bool,
-    pub abbr: Vec<u8>,
-}
-
 /// An owned abbreviation: a NUL-terminated copy timelib's allocator made
 /// on the request's heap, `timelib_strdup`'s, as php's `tzi.z.abbr` and
 /// a parse's `dummy_t.tz_abbr` are, freed by its drop (`timelib_free`)
@@ -328,9 +317,10 @@ impl Abbr {
 /// request's heap where php's `date_format` makes the local time's
 /// offset and `timelib_get_time_zone_info` answers a zone's, and freed by
 /// its drop, `timelib_time_offset_dtor`, under a lend where php frees it.
-pub(crate) struct TimeOffset(NonNull<sys::TimeOffset>);
+/// What [`Zone::offset_at`] lends another extension to read.
+pub struct Offset(NonNull<sys::TimeOffset>);
 
-impl Drop for TimeOffset {
+impl Drop for Offset {
     fn drop(&mut self) {
         // SAFETY: the offset timelib's allocator made, its abbreviation
         // null or a block of the same allocator, and this its one owner.
@@ -338,24 +328,24 @@ impl Drop for TimeOffset {
     }
 }
 
-impl TimeOffset {
+impl Offset {
     /// An offset timelib allocated; a null answer is an allocation
     /// failing, which the process does not outlive.
-    fn adopt(raw: *mut sys::TimeOffset) -> TimeOffset {
-        TimeOffset(NonNull::new(raw).unwrap_or_else(|| std::process::abort()))
+    fn adopt(raw: *mut sys::TimeOffset) -> Offset {
+        Offset(NonNull::new(raw).unwrap_or_else(|| std::process::abort()))
     }
 
     /// `timelib_time_offset_ctor()`: every field zero, no abbreviation.
-    pub(crate) fn new(_: &Lent<'_>) -> TimeOffset {
+    pub(crate) fn new(_: &Lent<'_>) -> Offset {
         // SAFETY: the call takes nothing; the offset answered is ours.
-        TimeOffset::adopt(unsafe { sys::timelib_time_offset_ctor() })
+        Offset::adopt(unsafe { sys::timelib_time_offset_ctor() })
     }
 
     /// The offset as `date_format` makes it for an abbreviation's time:
     /// `offset`, `is_dst`, and `timelib_strdup(abbr)`, the time's
     /// abbreviation, cut at a NUL as C reads it.
-    pub(crate) fn of_abbr(lent: &Lent<'_>, offset: i32, is_dst: bool, abbr: &[u8]) -> TimeOffset {
-        let mut made = TimeOffset::new(lent);
+    pub(crate) fn of_abbr(lent: &Lent<'_>, offset: i32, is_dst: bool, abbr: &[u8]) -> Offset {
+        let mut made = Offset::new(lent);
         let copy = Abbr::dup(lent, abbr).into_raw();
         made.write(offset, is_dst, copy);
         made
@@ -364,8 +354,8 @@ impl TimeOffset {
     /// The offset as `date_format` makes it for a fixed offset's time:
     /// `offset`, and `timelib_malloc(9)` written with
     /// `snprintf(abbr, 9, "GMT%c%02d%02d", ...)`.
-    pub(crate) fn of_fixed(lent: &Lent<'_>, offset: i32) -> TimeOffset {
-        let mut made = TimeOffset::new(lent);
+    pub(crate) fn of_fixed(lent: &Lent<'_>, offset: i32) -> Offset {
+        let mut made = Offset::new(lent);
         let text = format!(
             "GMT{}{:02}{:02}",
             if offset < 0 { '-' } else { '+' },
@@ -397,31 +387,24 @@ impl TimeOffset {
         o.abbr = abbr;
     }
 
-    /// The offset from UTC in seconds.
-    pub(crate) fn offset(&self) -> i32 {
+    /// The offset from UTC in seconds, `offset->offset`.
+    #[must_use]
+    pub fn offset(&self) -> i32 {
         // SAFETY: a live offset owned by `self`.
         unsafe { self.0.as_ref() }.offset
     }
 
-    /// Whether it is daylight saving time.
-    pub(crate) fn is_dst(&self) -> bool {
+    /// Whether it is daylight saving time, `offset->is_dst`.
+    #[must_use]
+    pub fn is_dst(&self) -> bool {
         // SAFETY: a live offset owned by `self`.
         unsafe { self.0.as_ref() }.is_dst != 0
     }
 
-    /// The abbreviation, empty where there is none.
+    /// The abbreviation, `offset->abbr`, empty where there is none.
     pub(crate) fn abbr(&self) -> &[u8] {
         // SAFETY: a live offset owned by `self`.
         bytes_of(unsafe { self.0.as_ref() }.abbr)
-    }
-
-    /// The fields copied out, what the surface hands over.
-    fn copied(&self) -> Offset {
-        Offset {
-            offset: self.offset(),
-            is_dst: self.is_dst(),
-            abbr: self.abbr().to_vec(),
-        }
     }
 }
 
@@ -533,20 +516,27 @@ impl Zone {
     /// `timelib_get_time_zone_info(ts, tz)` with the request's heap lent
     /// for it, what ext/standard's `gettimeofday` asks of the default
     /// zone (design §4.10): the zone's offset in force at the Unix time
-    /// `ts`, made and freed on the request's heap as php's is.
+    /// `ts`, timelib's own on the request's heap, standing while `call`
+    /// reads it and freed after, `timelib_time_offset_dtor`, as php's is.
     ///
     /// # Errors
     ///
-    /// The memory limit.
-    pub fn offset_at(&self, req: &mut Request, ts: i64) -> Result<Offset, Thrown> {
-        lent(req, |l| self.offset_in(l, ts).copied())
+    /// The memory limit, or what `call` threw.
+    pub fn offset_at<R>(
+        &self,
+        req: &mut Request,
+        ts: i64,
+        call: impl FnOnce(&mut Request, &Offset) -> Result<R, Thrown>,
+    ) -> Result<R, Thrown> {
+        let offset = lent(req, |l| self.offset_in(l, ts))?;
+        kept(req, offset, call)
     }
 
     /// `timelib_get_time_zone_info(ts, tz)`: the zone's offset in force
     /// at the Unix time `ts`, timelib's own, freed where it is dropped.
-    pub(crate) fn offset_in(&self, _: &Lent<'_>, ts: i64) -> TimeOffset {
+    pub(crate) fn offset_in(&self, _: &Lent<'_>, ts: i64) -> Offset {
         // SAFETY: a live zone, read only; the offset answered is ours.
-        TimeOffset::adopt(unsafe { sys::timelib_get_time_zone_info(ts, self.ptr()) })
+        Offset::adopt(unsafe { sys::timelib_get_time_zone_info(ts, self.ptr()) })
     }
 
     /// `timelib_get_transitions_for_year`: the POSIX string's transitions
@@ -1458,47 +1448,57 @@ pub(crate) struct BrokenDown<'a> {
     pub zone: &'a [u8],
 }
 
-/// `strftime(3)` under the thread's `LC_TIME`, as `php_strftime`
-/// (`Z/ext/date/php_date.c:1335`) calls it: into 256 bytes, then twice
-/// as many each time it answers nothing, up to 4096, so `None` both
-/// where the text is longer than 4095 bytes and where it is empty.
-/// The format and the zone are read to their first NUL.
-pub(crate) fn strftime(format: &[u8], tm: &BrokenDown<'_>) -> Option<Vec<u8>> {
-    let format = c_string(format);
-    let zone = c_string(tm.zone);
-    let int = |n: i64| c_int::try_from(n).unwrap_or(c_int::MAX);
-    let fields = libc::tm {
-        tm_sec: int(tm.sec),
-        tm_min: int(tm.min),
-        tm_hour: int(tm.hour),
-        tm_mday: int(tm.mday),
-        tm_mon: int(tm.mon),
-        tm_year: int(tm.year),
-        tm_wday: int(tm.wday),
-        tm_yday: int(tm.yday),
-        tm_isdst: c_int::from(tm.isdst),
-        tm_gmtoff: libc::c_long::try_from(tm.gmtoff).unwrap_or(0),
-        tm_zone: zone.as_ptr().cast_mut(),
-    };
-    let mut len = 256;
-    for _ in 0..5 {
-        let mut buf = vec![0u8; len];
-        // SAFETY: `buf` has `len` writable bytes, `strftime` writes at
-        // most that many, and the format and the `tm` it reads, whose
-        // zone points at `zone`, outlive the call.
-        let written = unsafe {
+/// `strftime(3)` under the thread's `LC_TIME` over one `struct tm` and
+/// one format, as `php_strftime` (`Z/ext/date/php_date.c:1335`) calls it
+/// into the request's string it grows: the format and the zone read to
+/// their first NUL, terminated once here, and the fields laid out as C's.
+pub(crate) struct Strftime {
+    format: CString,
+    zone: CString,
+    tm: libc::tm,
+}
+
+impl Strftime {
+    /// The format and the `struct tm` of `tm`, ready to write.
+    pub(crate) fn new(format: &[u8], tm: &BrokenDown<'_>) -> Strftime {
+        let int = |n: i64| c_int::try_from(n).unwrap_or(c_int::MAX);
+        Strftime {
+            format: c_string(format),
+            zone: c_string(tm.zone),
+            tm: libc::tm {
+                tm_sec: int(tm.sec),
+                tm_min: int(tm.min),
+                tm_hour: int(tm.hour),
+                tm_mday: int(tm.mday),
+                tm_mon: int(tm.mon),
+                tm_year: int(tm.year),
+                tm_wday: int(tm.wday),
+                tm_yday: int(tm.yday),
+                tm_isdst: c_int::from(tm.isdst),
+                tm_gmtoff: libc::c_long::try_from(tm.gmtoff).unwrap_or(0),
+                tm_zone: ptr::null_mut(),
+            },
+        }
+    }
+
+    /// `strftime(buf, sizeof buf, format, &tm)`: the bytes written into
+    /// `buf` before its NUL, or 0 where the text and its NUL do not fit
+    /// or the text is empty.
+    pub(crate) fn write(&self, buf: &mut [u8]) -> usize {
+        let fields = libc::tm {
+            tm_zone: self.zone.as_ptr().cast_mut(),
+            ..self.tm
+        };
+        // SAFETY: `buf` has `buf.len()` writable bytes, `strftime` writes
+        // at most that many, and the format and the `tm` it reads, whose
+        // zone points at `self.zone`, outlive the call.
+        unsafe {
             libc::strftime(
                 buf.as_mut_ptr().cast::<c_char>(),
-                len,
-                format.as_ptr(),
+                buf.len(),
+                self.format.as_ptr(),
                 &raw const fields,
             )
-        };
-        if written != 0 && written != len {
-            buf.truncate(written);
-            return Some(buf);
         }
-        len *= 2;
     }
-    None
 }
