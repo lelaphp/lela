@@ -129,5 +129,9 @@ mod tests {
             (Some("rps"), &serde_json::json!(-8.0))
         );
         assert_eq!(line["delta_iqr"], 2.0);
+        let mut per_call = Reading::new(INSTRUMENT, "jit-wrapper-unwind");
+        (per_call.numbers).insert("delta_median_ns".to_owned(), Number::Float(0.5));
+        let line = serde_json::to_value(Row::of(&per_call)).unwrap();
+        assert_eq!(line["unit"].as_str(), Some("ns"));
     }
 }
