@@ -242,9 +242,18 @@ impl Request {
     /// end; what the request writes after goes to a [`Kept`] of its own,
     /// which no host reads.
     pub(crate) fn release_sink(&mut self) -> Box<dyn OutputSink + Send> {
-        let mut sink = std::mem::replace(&mut self.response.sink, Box::new(Kept::default()));
+        let mut sink = self.take_sink();
         sink.flush();
         sink
+    }
+
+    /// The sink handed back unflushed, where php makes no `sapi_flush`:
+    /// `php_error_cb` displaying what php's startup raised, and the
+    /// `zend_post_startup_cb` chain, neither of which is a request, so
+    /// what they wrote stays where the host holds it, as C's `stdout`
+    /// holds it.
+    pub(crate) fn take_sink(&mut self) -> Box<dyn OutputSink + Send> {
+        std::mem::replace(&mut self.response.sink, Box::new(Kept::default()))
     }
 
     /// The sink the request writes to, where it is a `T`: the host's own

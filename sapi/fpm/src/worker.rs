@@ -288,7 +288,7 @@ pub(crate) struct Worker {
 pub(crate) fn init(fpm: &mut Fpm, pool: usize, slot: usize) -> Worker {
     let failed = |name: &str| -> ! {
         zlog!(Error @ fpm_child_init:202, "[pool {name}] child failed to initialize");
-        std::process::exit(i32::from(EXIT_SOFTWARE));
+        php_sapi::exit(i32::from(EXIT_SOFTWARE));
     };
     let name = fpm.pools[pool].name();
     let config = fpm.pools[pool].config.clone();

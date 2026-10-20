@@ -64,6 +64,15 @@ name = "run-twice-on-the-line-quits-without-the-closing-notice"
 args = ["-qrr", "-n", "{dir}/t.php"]
 files = { "t.php" = "<?php echo \"x\\n\";\n" }
 
+# What php logs while it starts, before phpdbg is booted, goes to C's
+# `stdout`, an `fprintf` (`php_sapi_phpdbg_log_message`), where a pipe holds
+# it to the exit, while the program's output goes out past it with
+# `write(2)`: so a startup warning's log line stands after the body (#2899).
+[[line]]
+name = "a-startup-log-line-is-held-behind-the-body"
+args = ["-qrr", "-n", "-d", "date.timezone=Foo/Bar", "{dir}/t.php"]
+files = { "t.php" = "<?php echo \"body\\n\";\n" }
+
 # `-rr` over a program that exits with 3.
 [[line]]
 name = "run-twice-on-the-line-quits-with-the-program-s-exit-status"

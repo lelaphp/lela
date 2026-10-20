@@ -33,7 +33,9 @@ impl Engine {
     /// (`accel_finish_startup_preload`). No extension's `rinit` runs. The
     /// status the process ends with where the startup failed, 1 where an
     /// `E_CORE_ERROR` bailed out of it, or the chain's refusal; `None`
-    /// where it started; and `sink`, handed back.
+    /// where it started; and `sink`, handed back, flushed only where a
+    /// preload's request ended with `preload_flush`, as php flushes stdout
+    /// nowhere else while it starts.
     pub fn start_up(
         &self,
         env: Vec<(Vec<u8>, Vec<u8>)>,
@@ -55,7 +57,7 @@ impl Engine {
             sink,
         );
         let failed = self.show_startup_raised(&mut req);
-        let sink = req.release_sink();
+        let sink = req.take_sink();
         if failed {
             return (Some(1), sink);
         }
@@ -104,8 +106,8 @@ impl Engine {
         let mut req = Request::lent(Arc::clone(&self.shared), description(), sink);
         let answer = Beneath::<chain::PostStartup>::top(links, ()).serve(&mut req);
         match answer {
-            PostStartup::Serve => (Started::Serving, req.release_sink()),
-            PostStartup::Refuse { status } => (Started::Refused(status), req.release_sink()),
+            PostStartup::Serve => (Started::Serving, req.take_sink()),
+            PostStartup::Refuse { status } => (Started::Refused(status), req.take_sink()),
             PostStartup::Preload {
                 script,
                 thread: None,
@@ -116,7 +118,7 @@ impl Engine {
             } => {
                 // The chain's request ends here: the preload's is made on
                 // its thread, and only one stands at a time.
-                let sink = req.release_sink();
+                let sink = req.take_sink();
                 drop(req);
                 self.preload_on(thread, description(), sink, script)
             }
