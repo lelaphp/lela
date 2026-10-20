@@ -27,8 +27,7 @@ const BLOCK: usize = 16;
 
 /// How many blocks [`Units`] grows to: a serving whose frames enter more
 /// units than all of them hold lets every share go and takes the units
-/// up afresh ([`Entered::Full`]), so what it holds stays bounded, an
-/// `eval` in a loop's units among it.
+/// up afresh ([`Entered::Full`]), so what it holds stays bounded.
 const BLOCKS: usize = 16;
 
 /// How many frames, and how many functions, the loop keeps the op array
@@ -38,17 +37,25 @@ const BLOCKS: usize = 16;
 const KEPT: usize = 16;
 
 /// The units the loop holds a share of while it serves, each kept from
-/// the first frame that entered it to the end of the serving: added to
-/// and never changed, so what is borrowed from one stands as long as
-/// the loop does. A block is laid down where the one before it is full.
+/// the first frame that entered it until the loop lets them all go:
+/// added to and never changed, so what is borrowed from one stands as
+/// long as the loop holds it. A block is laid down where the one before
+/// it is full. At most one is a file's unit the request compiled for
+/// itself ([`Request::took_unit`]): a frame of a second lets them all go
+/// ([`Entered::Full`]), and each is given back to the request
+/// ([`Units::give_back`]), so an `eval` in a loop is compiled in the room
+/// of the one before it.
 #[derive(Default)]
 pub(super) struct Units {
     blocks: [OnceCell<Box<[OnceCell<PublishedUnit>; BLOCK]>>; BLOCKS],
     len: Cell<usize>,
+    /// Whether a unit the request compiled for itself is among them.
+    took: Cell<bool>,
 }
 
 /// A frame the loop enters afresh, as [`Units::enter`] found it: its op
-/// array, out of a held unit, or no place left for its unit.
+/// array, out of a held unit, or no place for its unit until the units
+/// held are let go.
 pub(super) enum Entered<'u> {
     Held(&'u OpArray),
     Full,
@@ -86,7 +93,11 @@ impl Units {
     ) -> Option<Entered<'u>> {
         let header = req.vm().at(frame)?;
         let (unit, body) = req.unit_of(header)?;
-        let Some(held) = self.hold(unit) else {
+        // A file's frame whose unit the request compiled for itself: an
+        // `eval`'s, or a file no cache keeps. A function's unit is held by
+        // the function table as long as the request is.
+        let took = header.function.is_none() && req.took_unit(unit);
+        let Some(held) = self.hold(unit, took) else {
             return Some(Entered::Full);
         };
         let code = exec::body_of(held, body)?;
@@ -98,8 +109,9 @@ impl Units {
     }
 
     /// The share of `unit` the loop holds, taken now where it holds none;
-    /// none where every place is taken.
-    fn hold(&self, unit: &PublishedUnit) -> Option<&PublishedUnit> {
+    /// none where every place is taken, or where `unit` is a second one
+    /// the request compiled for itself (`took`).
+    fn hold(&self, unit: &PublishedUnit, took: bool) -> Option<&PublishedUnit> {
         let len = self.len.get();
         // The unit entered last first: a program's frames mostly enter
         // the units they entered lately.
@@ -109,6 +121,9 @@ impl Units {
         if found.is_some() {
             return found;
         }
+        if took && self.took.get() {
+            return None;
+        }
         let block = self
             .blocks
             .get(len / BLOCK)?
@@ -117,7 +132,24 @@ impl Units {
             .get(len % BLOCK)?
             .get_or_init(|| PublishedUnit::clone(unit));
         self.len.set(len + 1);
+        self.took.set(self.took.get() || took);
         Some(held)
+    }
+
+    /// Every share given back to the request, the last taken first
+    /// ([`Request::give_back`]), which keeps the room of a unit nothing
+    /// else holds for its next compile, as php frees an `eval`'s op array
+    /// to the request's heap.
+    pub(super) fn give_back(self, req: &mut Request) {
+        let Units { blocks, len, .. } = self;
+        let shares = blocks
+            .into_iter()
+            .filter_map(OnceCell::into_inner)
+            .flat_map(|block| block.into_iter().filter_map(OnceCell::into_inner))
+            .take(len.get());
+        for share in shares {
+            req.give_back(share);
+        }
     }
 
     /// The unit held at `at`.

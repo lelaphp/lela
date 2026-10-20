@@ -96,6 +96,9 @@ pub struct Parser<'t> {
     /// anchored after the previous token yields to an error already
     /// raised at or after its offset.
     errors_high_water: Option<u32>,
+    /// The diagnostics raised, in the order the grammar raised them,
+    /// which is the event stream's.
+    diagnostics: Vec<Diagnostic>,
 }
 
 const FUEL: u32 = 256;
@@ -220,6 +223,7 @@ impl<'t> Parser<'t> {
             grants: Grants::default(),
             stmt_clause: None,
             errors_high_water: None,
+            diagnostics: Vec::new(),
         }
     }
 
@@ -384,7 +388,7 @@ impl<'t> Parser<'t> {
     pub fn error(&mut self, diagnostic: Diagnostic) {
         let start = diagnostic.span.start;
         self.errors_high_water = Some(self.errors_high_water.map_or(start, |hw| hw.max(start)));
-        self.events.push(Event::Error(Box::new(diagnostic)));
+        self.diagnostics.push(diagnostic);
     }
 
     /// Has a diagnostic been raised at or after byte offset `pos`? What
@@ -800,11 +804,11 @@ impl<'t> Parser<'t> {
         );
     }
 
-    /// Ends the parse: the event stream, for the builder, and the room of
+    /// Ends the parse: the event stream, for the builder, the room of
     /// the delimiter stack beside it, for a parse that lends it to the
-    /// next.
-    pub fn finish(self) -> (Vec<Event>, Vec<(SyntaxKind, Span)>) {
-        (self.events, self.delims)
+    /// next, and the diagnostics raised, in stream order.
+    pub fn finish(self) -> (Vec<Event>, Vec<(SyntaxKind, Span)>, Vec<Diagnostic>) {
+        (self.events, self.delims, self.diagnostics)
     }
 }
 

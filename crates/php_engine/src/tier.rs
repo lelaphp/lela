@@ -628,13 +628,15 @@ fn refused_at_entry(req: &mut Request) -> bool {
 /// prologue too.
 ///
 /// The units the loop holds a share of are held until the serving ends
-/// or every place is taken ([`held::Units`]); then the loop lets them go
-/// and takes the edge up again holding none.
+/// or a frame's unit has no place ([`held::Units`]); then the loop gives
+/// them back to the request and takes the edge up again holding none.
 fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
     let mut stepped = first;
     loop {
         let units = Units::default();
-        match serve_held::<T, D>(req, stepped, &units)? {
+        let served = serve_held::<T, D>(req, stepped, &units)?;
+        units.give_back(req);
+        match served {
             Some(again) => stepped = again,
             None => return Ok(()),
         }
