@@ -302,11 +302,17 @@ impl EmbeddedArr {
 
     /// The end of `zend_hash_destroy` once the caller has given up every
     /// row: the data back to `heap`, and the table uninitialised again,
-    /// so a write after lays down data of its own.
+    /// so a write after lays down data of its own. A table that still
+    /// holds a row keeps its data.
     pub fn free_data(&self, heap: &mut Heap) {
+        if !self.0.is_empty() {
+            return;
+        }
         if let Some(data) = self.0.data_addr() {
-            // SAFETY: the data was laid down out of `mm` and its rows
-            // are given up, so nothing names it.
+            // SAFETY: the data was laid down out of `mm` and holds no
+            // row, so nothing the table owns is in it; a `zval *` into a
+            // bucket is a name until the table is written, as
+            // [`Arr::value_ref`] says.
             unsafe { heap.mm.free(data) };
         }
         self.0.emptied();
@@ -316,8 +322,9 @@ impl EmbeddedArr {
 impl Drop for EmbeddedArr {
     fn drop(&mut self) {
         let header = self.0.0.cast::<std::mem::MaybeUninit<ArrHeader>>();
-        // SAFETY: the header is the box `new` leaked, and this is the one
-        // name of it left.
+        // SAFETY: the header is the box `new` leaked and nothing else
+        // frees it; an `Arr` copied out by `arr` is a name its holder
+        // stops using with the table, as with any table destroyed.
         drop(unsafe { Box::from_raw(header.as_ptr()) });
     }
 }
