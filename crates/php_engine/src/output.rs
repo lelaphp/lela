@@ -192,6 +192,60 @@ pub struct HttpStatus {
     code: i64,
 }
 
+/// `sizeof(zend_llist_element) + sizeof(sapi_header_struct) - 1`, the
+/// cell `zend_llist_add_element` copies a header into: a 24-byte element
+/// whose one byte of `data` the 16-byte `sapi_header_struct` overlays.
+const HEADER_CELL: usize = 24 + 16 - 1;
+
+/// One line of `SG(sapi_headers).headers` and the request heap it holds
+/// there (`Z/main/SAPI.c:656-673`): `sapi_header_struct.header`, the
+/// bytes in the block `sapi_header_op` `estrndup`'d for them before it
+/// cut the trailing whitespace (or the `Content-type: ` line it
+/// `emalloc`s in its place, `:806`), and the cell the list copies the
+/// struct into. Both are freed as the line leaves the list, by a
+/// replace, a `header_remove()` or `sapi_deactivate`. A web host's
+/// request holds `X-Powered-By` from its start, which the first line's
+/// `memory_get_usage()` counts, and the default `Content-type` once the
+/// first byte has sent the block:
+///
+/// ```php
+/// $m = memory_get_usage(); header('X-Long: ' . str_repeat('v', 30) . "  "); $added = memory_get_usage() - $m;
+/// header('X-Long: w', true); $replaced = memory_get_usage() - $m;
+/// header_remove('X-Long'); $removed = memory_get_usage() - $m;
+/// $m = memory_get_usage(); echo $added, ' ', $replaced, ' ', $removed, "\n"; echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```request fpm
+/// --GET--
+/// q=1
+/// ```
+/// ```expect
+/// X-Powered-By: PHP/8.5.9
+/// Content-type: text/html; charset=UTF-8
+///
+/// 88 56 0
+/// 112
+/// ```
+#[derive(Debug)]
+struct HeaderLine {
+    bytes: Block,
+    len: usize,
+    cell: Block,
+}
+
+impl HeaderLine {
+    /// The line, its NUL and what the cut left past it off.
+    fn line(&self) -> &[u8] {
+        &self.bytes.bytes()[..self.len]
+    }
+
+    /// `sapi_free_header` and the cell's `efree`, as
+    /// `zend_llist_del_element` and `zend_llist_destroy` free them.
+    fn free(self, heap: &mut Heap) {
+        heap.free_block(self.bytes);
+        heap.free_block(self.cell);
+    }
+}
+
 /// `zend_output_globals` (`Z/main/php_output.h:139-146`), and the
 /// `sapi_globals` the header ops and the first write move:
 /// `SG(sapi_headers)` and `SG(headers_sent)`.
@@ -221,7 +275,7 @@ pub(crate) struct Output {
     mimetype: Option<Block>,
     /// `SG(sapi_headers).headers`: the lines the host will be handed, in
     /// the order `sapi_header_add_op` took them.
-    headers: Vec<Vec<u8>>,
+    headers: Vec<HeaderLine>,
     /// `SG(sapi_headers).send_default_content_type`: on until a
     /// `Content-Type` header is taken or the block is sent.
     send_default_content_type: bool,
@@ -280,8 +334,15 @@ impl Output {
     }
 
     /// `SG(sapi_headers).headers`, in order.
-    pub(crate) fn headers(&self) -> &[Vec<u8>] {
-        &self.headers
+    pub(crate) fn headers(&self) -> impl Iterator<Item = &[u8]> {
+        self.headers.iter().map(HeaderLine::line)
+    }
+
+    /// `zend_llist_clean(&SG(sapi_headers).headers)`: every line freed.
+    fn clean_headers(&mut self, heap: &mut Heap) {
+        for line in self.headers.drain(..) {
+            line.free(heap);
+        }
     }
 
     /// `SG(sapi_headers).send_default_content_type = 0`: no default
@@ -1032,16 +1093,15 @@ fn send_headers(req: &mut Request) -> bool {
             }
         }
         // `default_header.header`, `Content-type: ` and the mimetype, on
-        // the request heap while `sapi_header_add_op` decides; a line the
-        // host takes is kept as bytes of the list, and the list's own
-        // `zend_llist` cells are not laid down, since no witness runs
-        // under a web host.
+        // the request heap: the list's where the host takes it.
         let mut line = b"Content-type: ".to_vec();
         line.extend_from_slice(&mimetype);
-        if let Ok(block) = req.heap_mut().block(line.len() + 1) {
-            req.heap_mut().free_block(block);
+        let Some(bytes) = header_bytes(req, &line, line.len()) else {
+            return false;
+        };
+        if !header_add_op(req, false, bytes, line.len()) {
+            return false;
         }
-        header_add_op(req, false, line);
         req.output_mut().send_default_content_type = false;
     }
     if let Some(callback) = req.take_header_callback() {
@@ -1163,29 +1223,69 @@ fn trimmed_end(line: &[u8]) -> &[u8] {
 
 /// `sapi_remove_header` (`Z/main/SAPI.c:600`): every line whose name is
 /// `name`, case aside, with `:` after it; with `prefix_len` set, one
-/// whose first `name.len()` bytes are `name` however it goes on.
-fn remove_header(headers: &mut Vec<Vec<u8>>, name: &[u8], prefix_len: usize) {
-    headers.retain(|header| {
-        !(header.len() > name.len()
+/// whose first `name.len()` bytes are `name` however it goes on; each
+/// freed as `zend_llist_del_element` frees it.
+fn remove_header(req: &mut Request, name: &[u8], prefix_len: usize) {
+    let (output, heap) = req.output_and_heap();
+    let mut kept = Vec::with_capacity(output.headers.len());
+    for line in output.headers.drain(..) {
+        let header = line.line();
+        if header.len() > name.len()
             && (header[name.len()] == b':' || (prefix_len != 0 && name.len() > prefix_len))
-            && header[..name.len()].eq_ignore_ascii_case(name))
-    });
+            && header[..name.len()].eq_ignore_ascii_case(name)
+        {
+            line.free(heap);
+        } else {
+            kept.push(line);
+        }
+    }
+    output.headers = kept;
 }
 
-/// `sapi_header_add_op` (`Z/main/SAPI.c:656`): the line to the host's
-/// `header_handler`, which under the CLI answers zero and frees it;
-/// where the host takes it, a replace drops the lines of the same
-/// name first, and the line goes on the end.
-fn header_add_op(req: &mut Request, replace: bool, line: Vec<u8>) {
-    let output = req.output_mut();
-    if !output.takes_headers {
-        return;
+/// `sapi_header_op`'s `estrndup(p->line, p->line_len)` over a line
+/// written `written` bytes long, holding `line`, what the cut of its
+/// trailing whitespace leaves of it; `None` where the heap refused, the
+/// memory limit's fatal having ended the request.
+fn header_bytes(req: &mut Request, line: &[u8], written: usize) -> Option<Block> {
+    match req.heap_mut().block(written + 1) {
+        Ok(mut bytes) => {
+            bytes.bytes_mut()[..line.len()].copy_from_slice(line);
+            Some(bytes)
+        }
+        Err(fatal) => {
+            req.end_in(&fatal);
+            None
+        }
     }
-    if replace && let Some(colon) = line.iter().position(|b| *b == b':') {
-        let name = line[..colon].to_vec();
-        remove_header(&mut output.headers, &name, 0);
+}
+
+/// `sapi_header_add_op` (`Z/main/SAPI.c:656`): the line, `len` bytes of
+/// `bytes`, to the host's `header_handler`, which under the CLI answers
+/// zero and frees it; where the host takes it, a replace drops the
+/// lines of the same name first, and the line goes on the end in the
+/// cell `zend_llist_add_element` lays down. Whether the heap took the
+/// cell, which a refusal answers by ending the request.
+fn header_add_op(req: &mut Request, replace: bool, bytes: Block, len: usize) -> bool {
+    if !req.output().takes_headers {
+        req.heap_mut().free_block(bytes);
+        return true;
     }
-    output.headers.push(line);
+    if replace && let Some(colon) = bytes.bytes()[..len].iter().position(|b| *b == b':') {
+        let name = bytes.bytes()[..colon].to_vec();
+        remove_header(req, &name, 0);
+    }
+    let cell = match req.heap_mut().block(HEADER_CELL) {
+        Ok(cell) => cell,
+        Err(fatal) => {
+            req.heap_mut().free_block(bytes);
+            req.end_in(&fatal);
+            return false;
+        }
+    };
+    req.output_mut()
+        .headers
+        .push(HeaderLine { bytes, len, cell });
+    true
 }
 
 /// `sapi_header_op` for `SAPI_HEADER_ADD` and `SAPI_HEADER_REPLACE`
@@ -1222,6 +1322,7 @@ pub(crate) fn header_add(
     if !header_modifiable(req) || line.is_empty() {
         return false;
     }
+    let written = line.len();
     let line = trimmed_end(line);
     // The safety check walks the line once, and the first byte it trips
     // on names the refusal (`Z/main/SAPI.c:740-755`).
@@ -1248,7 +1349,10 @@ pub(crate) fn header_add(
         }
         return true;
     }
-    let mut held = line.to_vec();
+    let Some(mut held) = header_bytes(req, line, written) else {
+        return false;
+    };
+    let mut len = line.len();
     if let Some(colon) = line.iter().position(|b| *b == b':') {
         let name = &line[..colon];
         if name.eq_ignore_ascii_case(b"Content-Type") {
@@ -1265,10 +1369,18 @@ pub(crate) fn header_add(
                 output.mimetype = Some(block);
             }
             if applied {
-                held = b"Content-type: ".to_vec();
-                held.extend_from_slice(&mimetype);
+                // `newheader = emalloc(newlen)`, then `efree(header_line)`.
+                let mut rewritten = b"Content-type: ".to_vec();
+                rewritten.extend_from_slice(&mimetype);
+                let Some(bytes) = header_bytes(req, &rewritten, rewritten.len()) else {
+                    req.heap_mut().free_block(held);
+                    return false;
+                };
+                req.heap_mut()
+                    .free_block(std::mem::replace(&mut held, bytes));
+                len = rewritten.len();
             }
-            output.send_default_content_type = false;
+            req.output_mut().send_default_content_type = false;
         } else if name.eq_ignore_ascii_case(b"Location") {
             let code = req.output().response_code;
             if !(300..=399).contains(&code) && code != 201 {
@@ -1292,8 +1404,7 @@ pub(crate) fn header_add(
     if response_code != 0 {
         update_response_code(req, response_code);
     }
-    header_add_op(req, replace, held);
-    true
+    header_add_op(req, replace, held, len)
 }
 
 /// `sapi_header_op` for `SAPI_HEADER_DELETE` and `SAPI_HEADER_DELETE_ALL`
@@ -1307,7 +1418,8 @@ pub(crate) fn header_remove(req: &mut Request, name: Option<&[u8]>) -> bool {
         return false;
     }
     let Some(name) = name else {
-        req.output_mut().headers.clear();
+        let (output, heap) = req.output_and_heap();
+        output.clean_headers(heap);
         return true;
     };
     if name.is_empty() {
@@ -1318,7 +1430,7 @@ pub(crate) fn header_remove(req: &mut Request, name: Option<&[u8]>) -> bool {
         req.note_error(Level::Warning, "Header to delete may not contain colon.");
         return false;
     }
-    remove_header(&mut req.output_mut().headers, name, 0);
+    remove_header(req, name, 0);
     true
 }
 
@@ -1333,7 +1445,7 @@ pub(crate) fn header_remove_prefix(req: &mut Request, prefix: &[u8], name_len: u
         return false;
     }
     let prefix = trimmed_end(prefix);
-    remove_header(&mut req.output_mut().headers, prefix, name_len);
+    remove_header(req, prefix, name_len);
     true
 }
 
@@ -1545,6 +1657,7 @@ pub(crate) fn deactivate(req: &mut Request) {
     if let Some(mimetype) = output.mimetype.take() {
         heap.free_block(mimetype);
     }
+    output.clean_headers(heap);
     send_headers_free(req);
 }
 
