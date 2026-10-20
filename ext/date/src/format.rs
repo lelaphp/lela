@@ -12,7 +12,7 @@ use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{FreshString, Layout, Owner, PhpArray, PhpString, SmartStr};
 
-use crate::ffi::{self, Time, TimeOffset, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
+use crate::ffi::{self, Offset, Time, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
 use crate::lent::{Lent, kept, lent, release};
 use crate::obj::{set_str, set_string};
 use crate::zone::default_zone;
@@ -108,16 +108,16 @@ pub(super) fn c_int(n: i64) -> i64 {
 /// The offset `date_format` makes for a local time, timelib's own and
 /// held until the string is made: the abbreviation's, the fixed
 /// offset's under `GMT±hhmm`, or the zone's at the time.
-fn local_offset(lent: &Lent<'_>, t: &Time) -> TimeOffset {
+fn local_offset(lent: &Lent<'_>, t: &Time) -> Offset {
     match t.zone_type {
-        ZONETYPE_ABBR => TimeOffset::of_abbr(lent, t.z + t.dst * 3600, t.dst != 0, t.tz_abbr()),
-        ZONETYPE_OFFSET => TimeOffset::of_fixed(lent, t.z),
+        ZONETYPE_ABBR => Offset::of_abbr(lent, t.z + t.dst * 3600, t.dst != 0, t.tz_abbr()),
+        ZONETYPE_OFFSET => Offset::of_fixed(lent, t.z),
         ZONETYPE_ID => match t.zone() {
             Some(zone) => zone.offset_in(lent, t.sse),
-            None => TimeOffset::new(lent),
+            None => Offset::new(lent),
         },
         // "Shouldn't happen, but code defensively."
-        _ => TimeOffset::new(lent),
+        _ => Offset::new(lent),
     }
 }
 
@@ -154,7 +154,7 @@ fn format_built(
     req: &mut Request,
     format: &[u8],
     t: &Time,
-    offset: Option<&TimeOffset>,
+    offset: Option<&Offset>,
 ) -> Result<Owner<PhpString>, Thrown> {
     let mut out = SmartStr::default();
     match format_into(req, &mut out, format, t, offset) {
@@ -175,10 +175,10 @@ fn format_into(
     out: &mut SmartStr,
     format: &[u8],
     t: &Time,
-    offset: Option<&TimeOffset>,
+    offset: Option<&Offset>,
 ) -> Result<(), Thrown> {
     let localtime = offset.is_some();
-    let off = offset.map_or(0, TimeOffset::offset);
+    let off = offset.map_or(0, Offset::offset);
     let sign = if localtime && off < 0 { '-' } else { '+' };
     let oh = (off / 3600).abs();
     let om = ((off % 3600) / 60).abs();
@@ -242,9 +242,9 @@ fn format_into(
             b's' => format!("{:02}", c_int(t.s)),
             b'u' => format!("{:06}", c_int(t.us)),
             b'v' => format!("{:03}", c_int(t.us / 1000)),
-            b'I' => i32::from(offset.is_some_and(TimeOffset::is_dst)).to_string(),
+            b'I' => i32::from(offset.is_some_and(Offset::is_dst)).to_string(),
             b'p' | b'P' | b'O' => {
-                let abbr = offset.map_or(&[][..], TimeOffset::abbr);
+                let abbr = offset.map_or(&[][..], Offset::abbr);
                 if c == b'p' && (!localtime || matches!(abbr, b"UTC" | b"Z" | b"GMT+0000")) {
                     "Z".to_owned()
                 } else {
@@ -945,7 +945,7 @@ fn strftime_into(req: &mut Request, tm: &ffi::Strftime) -> Result<(FreshString, 
 /// The `struct tm` `php_strftime` fills from `t` and its offset, `GMT`
 /// with none where the time is UTC, and the format, ready for
 /// `strftime(3)`.
-fn strftime_of(format: &[u8], t: &Time, offset: Option<&TimeOffset>) -> ffi::Strftime {
+fn strftime_of(format: &[u8], t: &Time, offset: Option<&Offset>) -> ffi::Strftime {
     let tm = ffi::BrokenDown {
         sec: t.s,
         min: t.i,
@@ -955,9 +955,9 @@ fn strftime_of(format: &[u8], t: &Time, offset: Option<&TimeOffset>) -> ffi::Str
         year: t.y - 1900,
         wday: ffi::day_of_week(t.y, t.m, t.d),
         yday: ffi::day_of_year(t.y, t.m, t.d),
-        isdst: offset.is_some_and(TimeOffset::is_dst),
-        gmtoff: i64::from(offset.map_or(0, TimeOffset::offset)),
-        zone: offset.map_or(b"GMT", TimeOffset::abbr),
+        isdst: offset.is_some_and(Offset::is_dst),
+        gmtoff: i64::from(offset.map_or(0, Offset::offset)),
+        zone: offset.map_or(b"GMT", Offset::abbr),
     };
     ffi::Strftime::new(format, &tm)
 }
