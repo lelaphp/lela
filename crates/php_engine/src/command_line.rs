@@ -10,13 +10,14 @@
 //! what the oracle prints (`sapi/cli/tests/process_stdin.rs`). `-a` is
 //! the shell an extension provides ([`Shell`](crate::api::abi::Shell)),
 //! served where `do_cli` serves it, each block of its code through
-//! [`Request::eval_stringl`].
+//! [`Code::eval_stringl`].
 
 use std::sync::Arc;
 
 use php_compile::SourceKind;
 
 use crate::api::raising::{Level, Thrown};
+use crate::api::request::Code;
 use crate::api::request::Request;
 use crate::api::values::{Owner, PhpString};
 use crate::engine::{Engine, Observables, OutputSink, RequestDescription};
@@ -162,7 +163,7 @@ fn eval_string(req: &mut Request, code: &[u8], name: &[u8]) -> bool {
     eval(req, code, name, Some(Level::Error))
 }
 
-impl Request {
+impl Code<&mut Request> {
     /// `zend_eval_stringl(code, len, NULL, name)` in a `zend_try`, as
     /// the shell serves each block of code (`readline_shell_run`): the
     /// code compiled as an `eval` names it and served at the top of the
@@ -172,15 +173,15 @@ impl Request {
     /// uncaught is the `Err`, `EG(exception)` for the caller to render
     /// with [`uncaught_at`](crate::api::raising::uncaught_at) where php's
     /// does.
-    pub fn eval_stringl(&mut self, code: &[u8], name: &[u8]) -> Result<(), Thrown> {
-        eval(self, code, name, None);
-        self.catch_bailout();
-        if let Some(exception) = self.take_pending_view() {
+    pub fn eval_stringl(self, code: &[u8], name: &[u8]) -> Result<(), Thrown> {
+        eval(self.0, code, name, None);
+        self.0.catch_bailout();
+        if let Some(exception) = self.0.take_pending_view() {
             return Err(Thrown::of(Some(exception)));
         }
-        if self.is_pending() {
+        if self.0.is_pending() {
             // The unwind exit, which `zend_exception_error` gives up.
-            self.exception_error(Level::Warning).ok();
+            self.0.exception_error(Level::Warning).ok();
         }
         Ok(())
     }

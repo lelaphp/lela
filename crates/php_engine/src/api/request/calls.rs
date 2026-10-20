@@ -21,6 +21,7 @@ use crate::observer::OnThrow;
 use crate::trampoline::CallTrampoline;
 use php_heap::FrameRef;
 
+use super::Code;
 use super::Symbols;
 use super::{ExtensionId, Link, Request, UserFunction};
 
@@ -1141,40 +1142,7 @@ impl Request {
             #[cfg(debug_assertions)]
             origin: extension.origin(),
         };
-        self.serve_supplied(supplier, serve)
-    }
-
-    /// The code this request is serving now, for a hook it supplies to
-    /// be served as later ([`Request::serve_supplied`]): what an
-    /// extension registers from its native or lifecycle hook, a stream
-    /// wrapper or a filter, is called from wherever the program reaches
-    /// it, and a debug build tags what it allocates there with the
-    /// extension that supplied it, as it tags the extension's natives
-    /// (#1993, #2113). A release build keeps nothing.
-    #[must_use]
-    pub fn supplier(&self) -> Supplier {
-        Supplier {
-            #[cfg(debug_assertions)]
-            origin: self.heap.origin(),
-        }
-    }
-
-    /// `serve` served as `supplier`'s code: in a debug build, what the
-    /// heap allocates meanwhile is tagged with it, so a leak it leaves
-    /// names it, and the origin standing before is put back after.
-    pub fn serve_supplied<T>(
-        &mut self,
-        supplier: Supplier,
-        serve: impl FnOnce(&mut Request) -> T,
-    ) -> T {
-        #[cfg(debug_assertions)]
-        let outer = self.heap.set_origin(supplier.origin);
-        #[cfg(not(debug_assertions))]
-        let _ = supplier;
-        let served = serve(self);
-        #[cfg(debug_assertions)]
-        self.heap.set_origin(outer);
-        served
+        self.code_mut().serve_supplied(supplier, serve)
     }
 
     /// The extension whose code a native is, for a debug build's heap to
@@ -1311,6 +1279,39 @@ impl Request {
     pub(crate) fn serving_function(&self) -> Option<Function> {
         self.active_native_function()
     }
+}
+
+impl Code<&Request> {
+    /// The code this request is serving now, for a hook it supplies to
+    /// be served as later ([`Code::serve_supplied`]): what an
+    /// extension registers from its native or lifecycle hook, a stream
+    /// wrapper or a filter, is called from wherever the program reaches
+    /// it, and a debug build tags what it allocates there with the
+    /// extension that supplied it, as it tags the extension's natives
+    /// (#1993, #2113). A release build keeps nothing.
+    #[must_use]
+    pub fn supplier(self) -> Supplier {
+        Supplier {
+            #[cfg(debug_assertions)]
+            origin: self.0.heap.origin(),
+        }
+    }
+}
+
+impl Code<&mut Request> {
+    /// `serve` served as `supplier`'s code: in a debug build, what the
+    /// heap allocates meanwhile is tagged with it, so a leak it leaves
+    /// names it, and the origin standing before is put back after.
+    pub fn serve_supplied<T>(self, supplier: Supplier, serve: impl FnOnce(&mut Request) -> T) -> T {
+        #[cfg(debug_assertions)]
+        let outer = self.0.heap.set_origin(supplier.origin);
+        #[cfg(not(debug_assertions))]
+        let _ = supplier;
+        let served = serve(self.0);
+        #[cfg(debug_assertions)]
+        self.0.heap.set_origin(outer);
+        served
+    }
 
     /// `zend_fiber_switch_block()` before `f` and
     /// `zend_fiber_switch_unblock()` after it: while `f` is under way no
@@ -1319,10 +1320,10 @@ impl Request {
     /// since a switch would leave `f` standing on a stack it does not
     /// return to. What a `ZEND_TICKS` round serves its functions under,
     /// and `pcntl_signal_dispatch` its handlers.
-    pub fn with_fiber_switch_blocked<R>(&mut self, f: impl FnOnce(&mut Request) -> R) -> R {
-        self.fibers.block_switch();
-        let out = f(self);
-        self.fibers.unblock_switch();
+    pub fn with_fiber_switch_blocked<R>(self, f: impl FnOnce(&mut Request) -> R) -> R {
+        self.0.fibers.block_switch();
+        let out = f(self.0);
+        self.0.fibers.unblock_switch();
         out
     }
 }
@@ -1405,8 +1406,8 @@ impl Symbols<&mut Request> {
     }
 }
 
-/// Whose code supplied a hook, as [`Request::supplier`] took it where
-/// the hook was registered, for [`Request::serve_supplied`] to serve the
+/// Whose code supplied a hook, as [`Code::supplier`] took it where
+/// the hook was registered, for [`Code::serve_supplied`] to serve the
 /// hook as: the extension a debug build tags what the hook allocates
 /// with, and nothing in a release build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

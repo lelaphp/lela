@@ -88,6 +88,7 @@ pub(crate) use frames::CodeFrom;
 use frames::{Expand, Link, Slots, links_of};
 mod hash_bytes;
 mod include;
+pub use include::Code;
 mod ini;
 pub use ini::Ini;
 pub(crate) mod ini_files;
@@ -239,7 +240,7 @@ pub fn select(
     php_process::select_fds(sets, timeout)
 }
 
-/// Why [`Request::resolve_path`] found no file: the last attempt's
+/// Why [`Code::resolve_path`] found no file: the last attempt's
 /// reason, or the throwable a wrapper's `url_stat` raised.
 #[derive(Debug)]
 pub enum Unresolved {

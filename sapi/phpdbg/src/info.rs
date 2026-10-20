@@ -25,7 +25,7 @@ pub fn breaks(s: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
 pub fn files(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let files = here
         .request()
-        .map_or_else(Vec::new, |req| req.included_files());
+        .map_or_else(Vec::new, |req| req.code().included_files());
     s.out
         .notice(format!("Included files: {}", files.len()).as_bytes());
     for file in files {

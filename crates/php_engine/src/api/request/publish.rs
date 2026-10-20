@@ -145,7 +145,11 @@ mod tests {
         let mut seen = Vec::new();
         for _ in 0..2 {
             let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-            assert!(req.eval_stringl(code.as_bytes(), b"loader").is_ok());
+            assert!(
+                req.code_mut()
+                    .eval_stringl(code.as_bytes(), b"loader")
+                    .is_ok()
+            );
             let (p, c, d) = (
                 req.class_named(php_unit::decl::Bare::resolved(b"p")),
                 req.class_named(php_unit::decl::Bare::resolved(b"c")),

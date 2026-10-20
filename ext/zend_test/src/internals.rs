@@ -184,7 +184,7 @@ fn position() -> usize {
 /// ```
 #[php_function]
 pub(crate) fn zend_get_map_ptr_last(req: &mut Request) -> i64 {
-    i64::from(req.unit_cache().map_ptr_last())
+    i64::from(req.code_mut().unit_cache().map_ptr_last())
 }
 
 /// `zend_test_override_libxml_global_state(): void`: libxml's deprecated
@@ -328,7 +328,7 @@ pub(crate) fn zend_test_gh18756() {
 /// ```
 #[php_function]
 pub(crate) fn zend_test_opcache_preloading(req: &mut Request) -> bool {
-    req.preloading()
+    req.code().preloading()
 }
 
 /// `zend_test_uri_parser(string $uri, string $parser): array`: `$uri`

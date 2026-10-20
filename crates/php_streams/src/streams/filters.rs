@@ -638,6 +638,7 @@ impl FilterLayer for Request {
         // with `EG(exception)` set: refused, and the throwable kept for
         // the native.
         let create = |req: &mut Request, (found, by): (FilterFactory, Supplier)| match req
+            .code_mut()
             .serve_supplied(by, |req| found(req, name, params, persistent))
         {
             Ok(filter) => filter.map(|filter| crate::supplied::filter(by, filter)),

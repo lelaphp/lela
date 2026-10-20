@@ -36,7 +36,7 @@ fn in_cache(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     };
     if let Some(name) = named
         && overriding(req)
-        && req.unit_cache().holds(&name, None)?
+        && req.code_mut().unit_cache().holds(&name, None)?
     {
         return Ok(Owner::bool(true));
     }

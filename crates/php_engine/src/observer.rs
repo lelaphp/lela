@@ -66,7 +66,7 @@
 //!
 //! The slot is the request's, never the unit's: a handler added to or
 //! removed from one function while a request is served
-//! ([`Request::add_begin_handler`] and its kin, php's
+//! ([`Code::add_begin_handler`] and its kin, php's
 //! `zend_observer_add_begin_handler`) writes the slot in that request's
 //! runtime cache, or its table of natives' slots for a native, so the
 //! unit every request shares stays as published
@@ -392,7 +392,7 @@ pub(crate) enum Slot {
 /// The handlers a slot resolved to: begin in declaration order, end in
 /// reverse, as `zend_observer_fcall_install` lays them out, and as
 /// handlers added and removed while the request is served leave them
-/// ([`Request::add_begin_handler`] and its kin). php's slot holds one
+/// ([`Code::add_begin_handler`] and its kin). php's slot holds one
 /// begin and one end handler per observer declared, so neither list
 /// grows past that count.
 #[derive(Debug, Clone)]
@@ -527,7 +527,7 @@ impl Slot {
 }
 
 /// What removing a handler from a function hands back
-/// ([`Request::remove_begin_handler`], [`Request::remove_end_handler`]),
+/// ([`Code::remove_begin_handler`], [`Code::remove_end_handler`]),
 /// php's `next` out-parameter: the handler that moved into the removed
 /// one's place, if any. A handler that removes itself while the slot is
 /// being walked moves that one into its own place, which the walk then

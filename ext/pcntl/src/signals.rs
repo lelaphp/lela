@@ -280,7 +280,9 @@ pub(crate) fn dispatch(req: &mut Request) -> Result<(), Thrown> {
     .is_ok();
     req.state::<State>().signals.dispatching = true;
     // "Prevent switching fibers when handling signals".
-    let played = req.with_fiber_switch_blocked(|req| play(req, &taken));
+    let played = req
+        .code_mut()
+        .with_fiber_switch_blocked(|req| play(req, &taken));
     req.state::<State>().signals.dispatching = false;
     if masked {
         sigprocmask(SigmaskHow::SIG_SETMASK, Some(&unmasked), None).ok();

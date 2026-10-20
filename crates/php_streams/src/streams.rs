@@ -3925,7 +3925,7 @@ impl StreamLayer for Request {
         }
         let mut resolved = None;
         if options.use_path {
-            match self.resolve_path(path) {
+            match self.code_mut().resolve_path(path) {
                 Ok(found) => {
                     resolved = Some(PhpString::filled(self, found.len(), |b| {
                         b.copy_from_slice(&found);

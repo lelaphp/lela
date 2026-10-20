@@ -1244,7 +1244,9 @@ fn session_status(req: &mut Request) -> i64 {
 #[php_function]
 fn session_register_shutdown(req: &mut Request) -> Result<(), Thrown> {
     let callable = named(req, b"session_write_close")?;
-    req.register_shutdown_function(Owner::take(req, callable), Vec::new())
+    let callable = Owner::take(req, callable);
+    req.code_mut()
+        .register_shutdown_function(callable, Vec::new())
 }
 
 /// The callable a native's name is: the name the bundle declared,
@@ -1453,9 +1455,11 @@ fn session_set_save_handler(
         if register {
             let callable = named(req, b"session_register_shutdown")?;
             let callable = Owner::take(req, callable);
-            req.set_shutdown_function(b"session_shutdown", Some((callable, Vec::new())))?;
+            req.code_mut()
+                .set_shutdown_function(b"session_shutdown", Some((callable, Vec::new())))?;
         } else {
-            req.set_shutdown_function(b"session_shutdown", None)?;
+            req.code_mut()
+                .set_shutdown_function(b"session_shutdown", None)?;
         }
         let state = req.state::<State>();
         if state.status != Status::Active && state.module != Some(Module::User) {
@@ -1503,7 +1507,8 @@ fn session_set_save_handler(
         return Ok(false);
     }
     req.state::<State>().class_name = None;
-    req.set_shutdown_function(b"session_shutdown", None)?;
+    req.code_mut()
+        .set_shutdown_function(b"session_shutdown", None)?;
     if req.state::<State>().module != Some(Module::User) {
         user_ini(req)?;
     }

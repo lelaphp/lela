@@ -427,7 +427,7 @@ struct GcFiber {
 
 impl Fibers {
     /// `zend_fiber_switch_block()`, as
-    /// [`Request::with_fiber_switch_blocked`] takes it.
+    /// [`Code::with_fiber_switch_blocked`] takes it.
     pub(crate) fn block_switch(&mut self) {
         self.switch_blocking = self.switch_blocking.saturating_add(1);
     }
@@ -2271,7 +2271,7 @@ fn lay_down<P: HoldsCoroutine>(
 /// a switch would break stands, which `start`, `resume`, `throw` and
 /// `suspend` each refuse to go past. The callers that block the switch
 /// are a `ZEND_TICKS` round and `ext/pcntl`'s dispatch, each through
-/// [`Request::with_fiber_switch_blocked`].
+/// [`Code::with_fiber_switch_blocked`].
 fn switch_refused(req: &mut Request) -> Result<(), Thrown> {
     if !req.fibers().switch_blocked() {
         return Ok(());

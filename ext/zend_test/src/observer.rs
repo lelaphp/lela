@@ -311,12 +311,12 @@ fn on_update_function_names(req: &mut Request, value: Option<&[u8]>) -> Result<b
             .collect()
     };
     for function in named(req, req.ini().get(OBSERVE_FUNCTION_NAMES)) {
-        let _ = req.remove_begin_handler(function, begin);
-        let _ = req.remove_end_handler(function, end);
+        let _ = req.code_mut().remove_begin_handler(function, begin);
+        let _ = req.code_mut().remove_end_handler(function, end);
     }
     for function in named(req, value) {
-        req.add_begin_handler(function, begin);
-        req.add_end_handler(function, end);
+        req.code_mut().add_begin_handler(function, begin);
+        req.code_mut().add_end_handler(function, end);
     }
     Ok(true)
 }

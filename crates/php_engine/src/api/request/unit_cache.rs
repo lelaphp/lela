@@ -4,7 +4,7 @@
 //! since 8.5 makes opcache always present. The cache is the engine's and
 //! shared by every request of an epoch (`crate::unit_cache`,
 //! `crate::arena::Epochs`); an extension reaches it
-//! through [`Request::unit_cache`] and nothing else, and decides for
+//! through [`Code::unit_cache`] and nothing else, and decides for
 //! itself whether its configuration lets it answer, as opcache's
 //! `accelerator_enabled` does.
 
@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use php_compile::SourceKind;
 
+use super::Code;
 use super::{AccelServed, Request, Unresolved};
 use crate::api::abi::{Admission, FileCache, Lookup, Validation};
 use crate::api::raising::Thrown;
@@ -55,7 +56,7 @@ pub(crate) enum HandlePath {
     Stream,
 }
 
-/// The unit cache for one request: [`Request::unit_cache`].
+/// The unit cache for one request: [`Code::unit_cache`].
 pub struct UnitCache<'r> {
     req: &'r mut Request,
 }
@@ -177,11 +178,6 @@ pub enum Invalidation {
 }
 
 impl Request {
-    /// The unit cache (design §6.3), as `opcache_*` read it.
-    pub fn unit_cache(&mut self) -> UnitCache<'_> {
-        UnitCache { req: self }
-    }
-
     /// The one question the unit cache asks about the file at the full
     /// path `full` (design §6.3): the last supplier's answer, and with
     /// none, php without the cache.
@@ -661,7 +657,7 @@ impl Request {
     /// kept at where the answer for it validates timestamps; what a
     /// wrapper's `url_stat` throws on the way is thrown.
     fn kept_on_disk(&mut self, written: &[u8], file_cache: &FileCache) -> Result<bool, Thrown> {
-        let full = match self.resolve_path(written) {
+        let full = match self.code_mut().resolve_path(written) {
             Ok(full) => full,
             Err(Unresolved::Missing(_)) => return Ok(false),
             Err(Unresolved::Threw(thrown)) => return Err(thrown),
@@ -724,6 +720,13 @@ impl Request {
     }
 }
 
+impl<'r> Code<&'r mut Request> {
+    /// The unit cache (design §6.3), as `opcache_*` read it.
+    pub fn unit_cache(self) -> UnitCache<'r> {
+        UnitCache { req: self.0 }
+    }
+}
+
 impl UnitCache<'_> {
     /// The cache's counters and scripts.
     #[must_use]
@@ -764,7 +767,7 @@ impl UnitCache<'_> {
         if held.trusted(validation, now) {
             return Ok(true);
         }
-        match req.resolve_path(written) {
+        match req.code_mut().resolve_path(written) {
             Ok(path) if path != held.path => return Ok(false),
             Ok(_) | Err(Unresolved::Missing(_)) => {}
             Err(Unresolved::Threw(thrown)) => return Err(thrown),
@@ -813,7 +816,7 @@ impl UnitCache<'_> {
     /// bool(true)
     /// ```
     pub fn invalidate(&mut self, written: &[u8], how: Invalidation) -> Result<bool, Thrown> {
-        let (path, on_disk) = match self.req.resolve_path(written) {
+        let (path, on_disk) = match self.req.code_mut().resolve_path(written) {
             Ok(path) => (path, true),
             Err(Unresolved::Missing(_)) => (written.to_vec(), false),
             Err(Unresolved::Threw(thrown)) => return Err(thrown),
@@ -844,7 +847,7 @@ impl UnitCache<'_> {
         } else {
             match req.held_as_written(written) {
                 Some(held) => (Ok(held.path.clone()), Some(req.held_answer(&held))),
-                None => (req.resolve_path(written), None),
+                None => (req.code_mut().resolve_path(written), None),
             }
         };
         // The plain files opener's guard, which warns under the native's

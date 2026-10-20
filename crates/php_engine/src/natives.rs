@@ -2428,7 +2428,7 @@ fn register_shutdown_function(
     for value in &args.0 {
         req.addref(value);
     }
-    req.register_shutdown_function(callback, args.0)
+    req.code_mut().register_shutdown_function(callback, args.0)
 }
 
 /// `php_call_shutdown_functions` (`Z/ext/standard/basic_functions.c:1650`),

@@ -668,8 +668,14 @@ mod tests {
         ];
         let engine = Engine::cli_builder().extensions(&extensions).build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-        assert_eq!(req.resolve_path(b"a").ok(), Some(b"/above".to_vec()));
-        assert_eq!(req.resolve_path(b"z").ok(), Some(b"/beneath".to_vec()));
+        assert_eq!(
+            req.code_mut().resolve_path(b"a").ok(),
+            Some(b"/above".to_vec())
+        );
+        assert_eq!(
+            req.code_mut().resolve_path(b"z").ok(),
+            Some(b"/beneath".to_vec())
+        );
     }
 
     /// A listed kind, `PG(tick_functions)` as `php_add_tick_function`

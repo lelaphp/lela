@@ -22,7 +22,7 @@ impl Request {
         if written.contains(&0) {
             return Ok(false);
         }
-        let path = match self.resolve_path(written) {
+        let path = match self.code_mut().resolve_path(written) {
             Ok(path) => path,
             Err(super::Unresolved::Threw(thrown)) => return Err(thrown),
             // A path a stream wrapper serves is opened as it is written,

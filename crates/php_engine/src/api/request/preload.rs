@@ -19,6 +19,7 @@ use php_link::{Folded, Linked, NameMap, Obligation};
 use php_unit::decl::{Bare, ClassDecl, Name, shown};
 use php_unit::{AutoGlobal, Level, PublishedUnit};
 
+use super::Code;
 use super::Frames;
 use super::{PreloadStatistics, Request, UserFunction, user_function_decl};
 use crate::api::call::Function;
@@ -276,7 +277,7 @@ fn address(unit: &PublishedUnit) -> usize {
 pub(crate) struct Preloading {
     scripts: Vec<(Vec<u8>, PublishedUnit, u64)>,
     aliases_before: usize,
-    /// `ZEND_COMPILE_PRELOAD_IN_CHILD` ([`Request::preloading_in_child`]).
+    /// `ZEND_COMPILE_PRELOAD_IN_CHILD` ([`Code::preloading_in_child`]).
     in_child: bool,
 }
 
@@ -302,27 +303,6 @@ enum Row {
 }
 
 impl Request {
-    /// `CG(compiler_options) & ZEND_COMPILE_PRELOAD`: whether this is the
-    /// request `opcache.preload`'s file is served in, whose declarations
-    /// every request after starts from, as `FFI::load` registers the
-    /// scope a header names for `FFI::scope` in it (`zend_ffi_load`).
-    #[must_use]
-    pub fn preloading(&self) -> bool {
-        self.preloading.is_some()
-    }
-
-    /// `CG(compiler_options) & ZEND_COMPILE_PRELOAD_IN_CHILD`: whether
-    /// this is the preload's request served on a thread of its own
-    /// ([`crate::api::abi::PreloadThread`]), php's preload child, as
-    /// opcache serves it under `opcache.preload_user`, where `FFI::load`
-    /// refuses to load a header (`Z/ext/ffi/ffi.c:3628`).
-    #[must_use]
-    pub fn preloading_in_child(&self) -> bool {
-        self.preloading
-            .as_ref()
-            .is_some_and(|preloading| preloading.in_child)
-    }
-
     /// The request, started, is the preload's from here: every file it
     /// compiles is compiled into the preload. `in_child` where it is
     /// served on the thread that took `opcache.preload_user`'s
@@ -870,6 +850,30 @@ impl Request {
     }
 }
 
+impl Code<&Request> {
+    /// `CG(compiler_options) & ZEND_COMPILE_PRELOAD`: whether this is the
+    /// request `opcache.preload`'s file is served in, whose declarations
+    /// every request after starts from, as `FFI::load` registers the
+    /// scope a header names for `FFI::scope` in it (`zend_ffi_load`).
+    #[must_use]
+    pub fn preloading(self) -> bool {
+        self.0.preloading.is_some()
+    }
+
+    /// `CG(compiler_options) & ZEND_COMPILE_PRELOAD_IN_CHILD`: whether
+    /// this is the preload's request served on a thread of its own
+    /// ([`crate::api::abi::PreloadThread`]), php's preload child, as
+    /// opcache serves it under `opcache.preload_user`, where `FFI::load`
+    /// refuses to load a header (`Z/ext/ffi/ffi.c:3628`).
+    #[must_use]
+    pub fn preloading_in_child(self) -> bool {
+        self.0
+            .preloading
+            .as_ref()
+            .is_some_and(|preloading| preloading.in_child)
+    }
+}
+
 impl Frames<&Request> {
     /// `EX(prev_execute_data)->func->common.fn_flags &
     /// ZEND_ACC_PRELOADED`: whether the native being served was called
@@ -1017,7 +1021,7 @@ mod tests {
                     let code = format!(
                         "class P{round} {{ function m() {{ return {round}; }} }} class Q{round} extends P{round} {{}}"
                     );
-                    assert!(req.eval_stringl(code.as_bytes(), b"publisher").is_ok());
+                    assert!(req.code_mut().eval_stringl(code.as_bytes(), b"publisher").is_ok());
                     let Some(preloaded) = req.publish_preload() else {
                         return Err(format!("round {round} published nothing"));
                     };
@@ -1045,7 +1049,11 @@ mod tests {
                 for round in 0..ROUNDS {
                     let name = format!("R{round}");
                     let code = format!("class {name} {{ function m() {{ return {round}; }} }}");
-                    assert!(req.eval_stringl(code.as_bytes(), b"request").is_ok());
+                    assert!(
+                        req.code_mut()
+                            .eval_stringl(code.as_bytes(), b"request")
+                            .is_ok()
+                    );
                     let Some(class) =
                         req.class_named(php_unit::decl::Bare::resolved(name.as_bytes()))
                     else {
@@ -1117,7 +1125,11 @@ mod tests {
         let code = "trait T { public $t; function t() {} } \
                     class P { public $p; private $q; function p() {} } \
                     class_alias('P', 'PA'); class C extends PA { use T; public $c; public $p; }";
-        assert!(req.eval_stringl(code.as_bytes(), b"preload").is_ok());
+        assert!(
+            req.code_mut()
+                .eval_stringl(code.as_bytes(), b"preload")
+                .is_ok()
+        );
         let mut rows = req.class_rows(Vec::new(), 0);
         let child = req.class_named(php_unit::decl::Bare::resolved(b"c"));
         let at = rows

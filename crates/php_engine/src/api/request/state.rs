@@ -264,7 +264,7 @@ impl Request {
     /// [`Request::registered`], each value beside the [`Supplier`] of the
     /// extension that registered it, for code of another extension's that
     /// calls into the value to serve that call as its supplier's
-    /// ([`Request::serve_supplied`]), as ext/pdo serves a connector's
+    /// ([`Code::serve_supplied`]), as ext/pdo serves a connector's
     /// calls as the connector's extension (#2864).
     pub fn registered_by<T: Send + Sync + 'static>(&self) -> impl Iterator<Item = (Supplier, &T)> {
         self.shared

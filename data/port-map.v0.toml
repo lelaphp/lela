@@ -1505,7 +1505,7 @@ mahout = "RequestCtx::included_files"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::included_files"
+api = "request::Code::included_files"
 
 [[item]]
 mahout = "RequestCtx::iter_funcs"
@@ -1561,14 +1561,14 @@ mahout = "RequestCtx::register_shutdown_function"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::register_shutdown_function"
+api = "request::Code::register_shutdown_function"
 
 [[item]]
 mahout = "RequestCtx::register_tick_function"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::register_tick_function"
+api = "request::Code::register_tick_function"
 
 [[item]]
 mahout = "RequestCtx::request_headers"
@@ -1729,7 +1729,7 @@ mahout = "RequestCtx::unregister_tick_function"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::unregister_tick_function"
+api = "request::Code::unregister_tick_function"
 
 [[item]]
 mahout = "RequestCtx::unset_dying_count"

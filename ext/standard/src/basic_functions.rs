@@ -1675,7 +1675,7 @@ fn ignore_user_abort(
 /// ```
 #[php_function]
 fn register_tick_function(req: &mut Request, callback: Callable, args: Variadic<Value>) -> bool {
-    req.register_tick_function(callback, args.0)
+    req.code_mut().register_tick_function(callback, args.0)
 }
 
 /// `unregister_tick_function(callable $callback): void`: the first
@@ -1710,7 +1710,7 @@ fn register_tick_function(req: &mut Request, callback: Callable, args: Variadic<
 /// ```
 #[php_function]
 fn unregister_tick_function(req: &mut Request, callback: Callable) -> Result<(), Thrown> {
-    req.unregister_tick_function(&callback).map(drop)
+    req.code_mut().unregister_tick_function(&callback).map(drop)
 }
 
 /// `is_uploaded_file(string $filename): bool`: whether the request's

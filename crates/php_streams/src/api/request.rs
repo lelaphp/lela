@@ -1870,7 +1870,7 @@ impl Streams for Request {
         if !self.add_url_wrapper(row) {
             return false;
         }
-        let by = self.supplier();
+        let by = self.code().supplier();
         self.streams().wrappers.push(Supplied { row: wrapper, by });
         true
     }
@@ -1890,7 +1890,7 @@ impl Streams for Request {
     }
 
     fn register_filter(&mut self, name: &[u8], factory: FilterFactory) -> bool {
-        let by = self.supplier();
+        let by = self.code().supplier();
         let rows = &mut self.streams().filters;
         if rows.iter().any(|(n, _)| n.as_slice() == name) {
             return false;

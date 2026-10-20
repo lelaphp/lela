@@ -263,7 +263,8 @@ fn zend_test_compile_string(
         2 => Position::AfterOpenTag,
         _ => Position::AtOpenTag,
     };
-    req.serve_string(source_string.as_bytes(), filename.0.as_bytes(), position)
+    req.code_mut()
+        .serve_string(source_string.as_bytes(), filename.0.as_bytes(), position)
 }
 
 /// `zend_test_deprecated(mixed $arg = null): void`, `@deprecated`.
@@ -1181,7 +1182,7 @@ fn zend_test_cast_fread(req: &mut Request, stream: Resource) -> Result<(), Throw
 /// ```
 #[php_function]
 fn zend_test_compile_to_ast(req: &mut Request, str: PhpString) -> Result<Owner<PhpString>, Thrown> {
-    let exported = req.export_tree(str.as_bytes())?;
+    let exported = req.code_mut().export_tree(str.as_bytes())?;
     PhpString::new(req, &exported)
 }
 

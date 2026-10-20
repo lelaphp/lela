@@ -129,7 +129,7 @@ pub(crate) fn as_driver<R>(
     f: impl FnOnce(&mut Request) -> R,
 ) -> R {
     match driver.and_then(|driver| supplier_of(req, driver)) {
-        Some(supplier) => req.serve_supplied(supplier, f),
+        Some(supplier) => req.code_mut().serve_supplied(supplier, f),
         None => f(req),
     }
 }

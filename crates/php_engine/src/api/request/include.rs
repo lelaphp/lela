@@ -22,6 +22,28 @@ use crate::unit_cache::CompileRefused;
 
 use super::{HandlePath, HostPath, Opened, Refused, Request, Unresolved, is_wrapper_url};
 
+/// The request's code facet (design §4.4): the code the request compiles
+/// and serves beside its main file, includes and their resolution,
+/// `eval`, a string served, the unit cache and preloading, and what it
+/// serves at ticks, at shutdown and around calls, with the code a hook is
+/// served as. [`Request::code`] reads it and [`Request::code_mut`]
+/// changes it; either is the whole request, since nearly every operation
+/// can serve PHP code.
+pub struct Code<R>(pub(crate) R);
+
+impl Request {
+    /// The code facet, to read.
+    #[must_use]
+    pub fn code(&self) -> Code<&Request> {
+        Code(self)
+    }
+
+    /// The code facet, to change.
+    pub fn code_mut(&mut self) -> Code<&mut Request> {
+        Code(self)
+    }
+}
+
 /// Which include is being opened, and the files the request holds open,
 /// whose fields no file but this one reads.
 #[derive(Default)]
@@ -92,13 +114,6 @@ impl Request {
             .including
             .filter(|_| self.serving_include())
             .map(|(kind, _)| kind)
-    }
-
-    /// `get_included_files()`: the paths, as `EG(included_files)` holds
-    /// them, the primary file's first.
-    #[must_use]
-    pub fn included_files(&self) -> Vec<Vec<u8>> {
-        self.included_files.paths()
     }
 
     /// `zend_compile_file` over the file at the full path `path`, named
@@ -406,7 +421,7 @@ impl Request {
 
     /// `zend_include_or_eval` (`Z/Zend/zend_execute.c:5287`) for the four
     /// file constructs: the once forms resolve the path first
-    /// ([`Request::resolve_path`]) and answer [`Opened::Already`] for one
+    /// ([`Code::resolve_path`]) and answer [`Opened::Already`] for one
     /// the table has, then put the path in the table before the file is
     /// compiled, so a file whose compile is refused is in the table
     /// still; the other two compile first, `compile_filename`, and put
@@ -516,7 +531,7 @@ impl Request {
         let held = self.held_as_written(written);
         let resolved = match &held {
             Some(held) => Ok(held.path.clone()),
-            None => self.resolve_path(written),
+            None => self.code_mut().resolve_path(written),
         };
         if kind.once()
             && held.is_none()
@@ -944,79 +959,6 @@ impl Request {
         Ok(top.serve(self)?.0)
     }
 
-    /// `compile_string(source, name, position)` and `zend_execute` of
-    /// the op array it made: the string compiled through the
-    /// `zend_compile_string` links ([`Request::compile_string`]) from
-    /// where `position` begins the scanner, under `name`, which
-    /// `__FILE__` folds to and a diagnostic raised in it names; then
-    /// served as code at the top of a frame of its own over the
-    /// variables of the native's caller, where `zend_execute` serves it
-    /// with `EG(current_execute_data)` at the native. A parse error is
-    /// the `ParseError` `zendparse` throws at `name`, a refusal after
-    /// the parse the `E_COMPILE_ERROR` that ends the request, and what
-    /// the code left uncaught or ended in is the `Err`. What the test
-    /// extension's `zend_test_compile_string` serves, the witness there.
-    pub fn serve_string(
-        &mut self,
-        source: &[u8],
-        name: &[u8],
-        position: php_compile::syntax::Position,
-    ) -> Result<(), Thrown> {
-        let kind = SourceKind::Eval(position);
-        let unit = match self.compile_string(source, name, position)? {
-            Ok(unit) => unit,
-            Err(refused) => return Err(self.refused_include(&refused, name, kind)),
-        };
-        if !crate::engine::note_compiled(self, &unit, kind) || self.diagnostics().bailing_out() {
-            return Err(Thrown::of(self.take_pending_view()));
-        }
-        let standing = self.vm.depth();
-        let from = (self.caller_frame()).map_or(super::CodeFrom::Top(None), |frame| {
-            super::CodeFrom::Nested(frame, None)
-        });
-        let callee = self.push_code_frame(unit, from);
-        let callee = self.fatal_of(callee)?;
-        crate::observer::call(self, callee);
-        let reenter = self.shared.loops.reenter;
-        let served = reenter(self, callee);
-        while self.vm.depth() > standing {
-            let top = self.vm.stack.current();
-            self.leave_frame(top);
-        }
-        self.fatal_of(served)?;
-        let returned = std::mem::take(&mut self.returned);
-        self.release(returned);
-        if self.is_pending() {
-            return Err(Thrown::of(self.take_pending_view()));
-        }
-        Ok(())
-    }
-
-    /// `zend_compile_string_to_ast` and `zend_ast_export("", ast, "")`
-    /// (`Z/Zend/zend_language_scanner.l:604`, `Z/Zend/zend_ast.c:2954`):
-    /// the source parsed from an open tag as a file is, and php's text
-    /// of its tree, the text `assert()`'s description is written by,
-    /// over the whole file. A parse error is the `ParseError` `zendparse`
-    /// throws. What the test extension's `zend_test_compile_to_ast`
-    /// answers, the witness there.
-    pub fn export_tree(&mut self, source: &[u8]) -> Result<Vec<u8>, Thrown> {
-        let options = php_compile::Options {
-            precision: self.ini().precision(),
-            short_open_tag: self.short_open_tag(),
-            ..php_compile::Options::default()
-        };
-        let mut strings = php_heap::Strings::new();
-        php_compile::export_source(&mut self.compile_arena, source, &options, &mut strings).map_err(
-            |error| {
-                let refused = CompileRefused {
-                    error,
-                    declared: None,
-                };
-                self.refused_include(&refused, b"", SourceKind::EVAL)
-            },
-        )
-    }
-
     /// `f` over a string the host evaluates of its own, `-r`'s code, the
     /// shell's and a debugger's, compiled as `zend_eval_stringl` compiles
     /// it: `CG(compiler_options)` set to `ZEND_COMPILE_DEFAULT_FOR_EVAL`
@@ -1072,19 +1014,6 @@ impl Request {
     ) -> Result<PublishedUnit, Thrown> {
         self.compile_string(code, name, php_compile::syntax::Position::AfterOpenTag)?
             .map_err(|refused| self.refused_include(&refused, name, SourceKind::EVAL))
-    }
-
-    /// `zend_resolve_path`: the chain of the extensions' overrides
-    /// entered from the top
-    /// ([`crate::api::abi::ExtensionBuilder::resolve_path`]), with the
-    /// engine's own resolution beneath every link
-    /// ([`Request::resolve_path_own`]). The `Err` is the last attempt's
-    /// reason, which the stream warning prints, or the throwable an
-    /// override or a wrapper's `url_stat` raised.
-    pub fn resolve_path(&mut self, written: &[u8]) -> Result<Vec<u8>, Unresolved> {
-        let shared = Arc::clone(&self.shared);
-        Beneath::<chain::ResolvePath>::top(shared.supplied.resolve_path.links(), written)
-            .serve(self)
     }
 
     /// The `zend_resolve_path` beneath every override: the stream layer's
@@ -1305,6 +1234,103 @@ impl Request {
             self.emit_recorded(recording);
         }
         Thrown::of(None)
+    }
+}
+
+impl Code<&Request> {
+    /// `get_included_files()`: the paths, as `EG(included_files)` holds
+    /// them, the primary file's first.
+    #[must_use]
+    pub fn included_files(self) -> Vec<Vec<u8>> {
+        self.0.included_files.paths()
+    }
+}
+
+impl Code<&mut Request> {
+    /// `compile_string(source, name, position)` and `zend_execute` of
+    /// the op array it made: the string compiled through the
+    /// `zend_compile_string` links ([`Request::compile_string`]) from
+    /// where `position` begins the scanner, under `name`, which
+    /// `__FILE__` folds to and a diagnostic raised in it names; then
+    /// served as code at the top of a frame of its own over the
+    /// variables of the native's caller, where `zend_execute` serves it
+    /// with `EG(current_execute_data)` at the native. A parse error is
+    /// the `ParseError` `zendparse` throws at `name`, a refusal after
+    /// the parse the `E_COMPILE_ERROR` that ends the request, and what
+    /// the code left uncaught or ended in is the `Err`. What the test
+    /// extension's `zend_test_compile_string` serves, the witness there.
+    pub fn serve_string(
+        self,
+        source: &[u8],
+        name: &[u8],
+        position: php_compile::syntax::Position,
+    ) -> Result<(), Thrown> {
+        let kind = SourceKind::Eval(position);
+        let unit = match self.0.compile_string(source, name, position)? {
+            Ok(unit) => unit,
+            Err(refused) => return Err(self.0.refused_include(&refused, name, kind)),
+        };
+        if !crate::engine::note_compiled(self.0, &unit, kind) || self.0.diagnostics().bailing_out()
+        {
+            return Err(Thrown::of(self.0.take_pending_view()));
+        }
+        let standing = self.0.vm.depth();
+        let from = (self.0.caller_frame()).map_or(super::CodeFrom::Top(None), |frame| {
+            super::CodeFrom::Nested(frame, None)
+        });
+        let callee = self.0.push_code_frame(unit, from);
+        let callee = self.0.fatal_of(callee)?;
+        crate::observer::call(self.0, callee);
+        let reenter = self.0.shared.loops.reenter;
+        let served = reenter(self.0, callee);
+        while self.0.vm.depth() > standing {
+            let top = self.0.vm.stack.current();
+            self.0.leave_frame(top);
+        }
+        self.0.fatal_of(served)?;
+        let returned = std::mem::take(&mut self.0.returned);
+        self.0.release(returned);
+        if self.0.is_pending() {
+            return Err(Thrown::of(self.0.take_pending_view()));
+        }
+        Ok(())
+    }
+
+    /// `zend_compile_string_to_ast` and `zend_ast_export("", ast, "")`
+    /// (`Z/Zend/zend_language_scanner.l:604`, `Z/Zend/zend_ast.c:2954`):
+    /// the source parsed from an open tag as a file is, and php's text
+    /// of its tree, the text `assert()`'s description is written by,
+    /// over the whole file. A parse error is the `ParseError` `zendparse`
+    /// throws. What the test extension's `zend_test_compile_to_ast`
+    /// answers, the witness there.
+    pub fn export_tree(self, source: &[u8]) -> Result<Vec<u8>, Thrown> {
+        let options = php_compile::Options {
+            precision: self.0.ini().precision(),
+            short_open_tag: self.0.short_open_tag(),
+            ..php_compile::Options::default()
+        };
+        let mut strings = php_heap::Strings::new();
+        php_compile::export_source(&mut self.0.compile_arena, source, &options, &mut strings)
+            .map_err(|error| {
+                let refused = CompileRefused {
+                    error,
+                    declared: None,
+                };
+                self.0.refused_include(&refused, b"", SourceKind::EVAL)
+            })
+    }
+
+    /// `zend_resolve_path`: the chain of the extensions' overrides
+    /// entered from the top
+    /// ([`crate::api::abi::ExtensionBuilder::resolve_path`]), with the
+    /// engine's own resolution beneath every link
+    /// ([`Request::resolve_path_own`]). The `Err` is the last attempt's
+    /// reason, which the stream warning prints, or the throwable an
+    /// override or a wrapper's `url_stat` raised.
+    pub fn resolve_path(self, written: &[u8]) -> Result<Vec<u8>, Unresolved> {
+        let shared = Arc::clone(&self.0.shared);
+        Beneath::<chain::ResolvePath>::top(shared.supplied.resolve_path.links(), written)
+            .serve(self.0)
     }
 }
 

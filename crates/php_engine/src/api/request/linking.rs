@@ -971,7 +971,11 @@ mod tests {
         let mut seen = Vec::new();
         for _ in 0..2 {
             let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-            assert!(req.eval_stringl(code.as_bytes(), b"loader").is_ok());
+            assert!(
+                req.code_mut()
+                    .eval_stringl(code.as_bytes(), b"loader")
+                    .is_ok()
+            );
             let c = req.class_named(php_unit::decl::Bare::resolved(b"c"));
             let q = req.class_named(php_unit::decl::Bare::resolved(b"q"));
             assert!(c.is_some_and(ClassId::is_published), "C is published");

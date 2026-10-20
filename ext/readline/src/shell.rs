@@ -117,7 +117,7 @@ fn prompt(req: &mut Request, block: &[u8], prompt: u8) -> Vec<u8> {
                 let code = spec[at + 1..at + 1 + len].to_vec();
                 state(req).capture = Some(Vec::new());
                 // php leaves what the code threw pending; it is given up.
-                if let Err(thrown) = req.eval_stringl(&code, b"php prompt code") {
+                if let Err(thrown) = req.code_mut().eval_stringl(&code, b"php prompt code") {
                     clear(req, thrown).ok();
                 }
                 if let Some(captured) = state(req).capture.take() {
@@ -529,7 +529,7 @@ pub(crate) fn run(req: &mut Request) -> i32 {
             ffi::write_history(Some(&history));
             unwritten = 0;
         }
-        let left = req.eval_stringl(&code, b"php shell code");
+        let left = req.code_mut().eval_stringl(&code, b"php shell code");
         code.clear();
         let shell = state(req);
         if shell.pager.is_none() && shell.last != 0 && shell.last != b'\n' {

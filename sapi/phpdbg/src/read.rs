@@ -450,7 +450,7 @@ pub fn table_sizes(req: &Request) -> [usize; 4] {
         classes,
         req.symbols().functions().len(),
         req.symbols().constant_table().len(),
-        req.included_files().len(),
+        req.code().included_files().len(),
     ]
 }
 

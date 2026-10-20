@@ -552,26 +552,29 @@ fn acted(what: String) {
 fn add(observed: &mut Observed<'_>) {
     let function = target(observed);
     let untouched = observed.function_named(Bare::resolved(b"untouched"));
-    let added = observed.add_begin_handler(function, extra_begin);
-    let untouched = untouched.is_some_and(|f| observed.add_begin_handler(f, extra_begin));
+    let added = observed.code_mut().add_begin_handler(function, extra_begin);
+    let untouched =
+        untouched.is_some_and(|f| observed.code_mut().add_begin_handler(f, extra_begin));
     acted(format!("add {added} untouched {untouched}"));
 }
 
 fn add_end(observed: &mut Observed<'_>) {
     let function = target(observed);
-    let added = observed.add_end_handler(function, extra_end);
+    let added = observed.code_mut().add_end_handler(function, extra_end);
     acted(format!("add_end {added}"));
 }
 
 fn remove(observed: &mut Observed<'_>) {
     let function = target(observed);
-    let removed = observed.remove_begin_handler(function, extra_begin);
+    let removed = observed
+        .code_mut()
+        .remove_begin_handler(function, extra_begin);
     acted(format!("remove {}", removed.is_some()));
 }
 
 fn remove_end(observed: &mut Observed<'_>) {
     let function = target(observed);
-    let removed = observed.remove_end_handler(function, extra_end);
+    let removed = observed.code_mut().remove_end_handler(function, extra_end);
     acted(format!("remove_end {}", removed.is_some()));
 }
 
@@ -646,7 +649,9 @@ fn first_begin(observed: &mut Observed<'_>) {
     let Some(function) = observed.function() else {
         return;
     };
-    if let Some(Removed { next: Some(next) }) = observed.remove_begin_handler(function, first_begin)
+    if let Some(Removed { next: Some(next) }) = observed
+        .code_mut()
+        .remove_begin_handler(function, first_begin)
     {
         next(observed);
     }
@@ -716,14 +721,14 @@ fn native_init(observed: &mut Observed<'_>) -> ObserverHandlers {
 fn add_to_native(observed: &mut Observed<'_>) {
     let native = observed.function_named(Bare::resolved(b"strcmp"));
     let strncmp = observed.function_named(Bare::resolved(b"strncmp"));
-    let added = native.is_some_and(|f| observed.add_begin_handler(f, extra_begin));
-    let unresolved = strncmp.is_some_and(|f| observed.add_begin_handler(f, extra_begin));
+    let added = native.is_some_and(|f| observed.code_mut().add_begin_handler(f, extra_begin));
+    let unresolved = strncmp.is_some_and(|f| observed.code_mut().add_begin_handler(f, extra_begin));
     acted(format!("add {added} unresolved {unresolved}"));
 }
 
 fn remove_from_native(observed: &mut Observed<'_>) {
     let native = observed.function_named(Bare::resolved(b"strcmp"));
-    let removed = native.and_then(|f| observed.remove_begin_handler(f, extra_begin));
+    let removed = native.and_then(|f| observed.code_mut().remove_begin_handler(f, extra_begin));
     acted(format!("remove {}", removed.is_some()));
 }
 

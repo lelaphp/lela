@@ -387,7 +387,7 @@ fn function_exists(req: &mut Request, function: PhpString) -> bool {
 #[php_function(aliases(get_required_files))]
 fn get_included_files(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
-    for path in req.included_files() {
+    for path in req.code().included_files() {
         let path = PhpString::new(req, &path)?.into_value();
         array.append(req, path)?;
     }

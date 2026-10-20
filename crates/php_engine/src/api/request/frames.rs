@@ -448,7 +448,7 @@ impl Request {
         }
         let mut other = std::mem::take(self.fibers.set_aside_above(stack)?);
         self.switch_stack(&mut other);
-        let served = self.with_fiber_switch_blocked(f);
+        let served = self.code_mut().with_fiber_switch_blocked(f);
         self.switch_stack(&mut other);
         if let Some(slot) = self.fibers.set_aside_execution() {
             *slot = other;
@@ -488,7 +488,7 @@ impl Request {
         }
         self.switch_stack(&mut execution);
         self.fibers.set_aside_for(coroutine, execution, below);
-        let served = self.with_fiber_switch_blocked(f);
+        let served = self.code_mut().with_fiber_switch_blocked(f);
         if let Some((coroutine, mut execution, below)) = self.fibers.take_back() {
             self.switch_stack(&mut execution);
             let held = std::iter::once(crate::fiber::HeldStack {

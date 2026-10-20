@@ -208,7 +208,7 @@ impl Engine {
         // `zend_compile_file(ZEND_REQUIRE)`: the script opened as a
         // `require` opens it, so it is filed under the path it resolves
         // to, as every include of it after finds it.
-        let compiled = match req.resolve_path(script) {
+        let compiled = match req.code_mut().resolve_path(script) {
             Ok(resolved) => {
                 req.note_primary_file(&resolved);
                 req.cached_file(&resolved, None, crate::api::request::HandlePath::Opened)
@@ -297,8 +297,8 @@ mod tests {
         seen.push((
             format!("{what} {script}"),
             std::thread::current().id(),
-            req.preloading(),
-            req.preloading_in_child(),
+            req.code().preloading(),
+            req.code().preloading_in_child(),
         ));
     }
 
