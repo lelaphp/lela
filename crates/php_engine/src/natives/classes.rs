@@ -17,6 +17,7 @@ use crate::api::raising::{Thrown, arg_type_error, deprecated, none_pending, thro
 use crate::api::request::{HookRows, Hooked, HookedDeclared, HookedTable, PropertyInfo, Request};
 use crate::api::values::walk::{self, Table};
 use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use crate::natives::{Unmangled, unmangle_property_name};
 
 /// `zend_lookup_class_ex`: one leading `\` dropped, the table under
 /// the name whatever its case, and the autoloaders where the table has
@@ -505,12 +506,7 @@ fn add_hooked_vars(
                     Some(property) => hooked_var(req, hooked.object, row, property)?,
                     None => Owner::take(req, value),
                 };
-                let key = if name.as_bytes().first() == Some(&0) {
-                    req.declared_string(&row.name).map(Owner::into_key)
-                } else {
-                    Ok(Owner::take(req, Key::Str(name)))
-                };
-                match key {
+                match declared_var_key(req, name, row.visibility) {
                     Ok(key) => (key, value),
                     Err(thrown) => {
                         value.give_up(req);
@@ -527,6 +523,49 @@ fn add_hooked_vars(
         array.add_new(req, key, value)?;
     }
     Ok(())
+}
+
+/// The key `get_object_vars()` lays a declared row under, its name
+/// unmangled: the name itself for a public property, as
+/// `zend_symtable_add_new` keys it, and a string of its own for a
+/// protected or a private one, whose name php's table holds mangled and
+/// `zend_hash_str_add_new` copies the unmangled part of, so the array
+/// costs what php's does:
+///
+/// ```php
+/// class A { private $xx = 1; protected $yy = 2; public $zz = 3; function f() { return get_object_vars($this); } }
+/// class B { private $xx = 1; protected $yy = 2; public $zz { get => 3; } function f() { return get_object_vars($this); } }
+/// $a = new A; $b = new B;
+/// $m = memory_get_usage(); $x = $a->f(); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $y = $b->f(); echo memory_get_usage() - $m, "\n";
+/// var_dump($y);
+/// ```
+/// ```expect
+/// 816
+/// 440
+/// array(3) {
+///   ["xx"]=>
+///   int(1)
+///   ["yy"]=>
+///   int(2)
+///   ["zz"]=>
+///   int(3)
+/// }
+/// ```
+fn declared_var_key(
+    req: &mut Request,
+    name: PhpString,
+    visibility: Visibility,
+) -> Result<Owner<Key>, Thrown> {
+    if visibility == Visibility::Public {
+        return Ok(Owner::take(req, Key::Str(name)));
+    }
+    let bytes = name.as_bytes();
+    let bytes = match unmangle_property_name(bytes) {
+        Unmangled::Mangled { prop, .. } => prop,
+        Unmangled::Plain | Unmangled::Illegal(_) => bytes,
+    };
+    Ok(Owner::adopt(req.string_init(bytes)?).into_key())
 }
 
 /// A hooked row of `get_object_vars()`' table read through its hook,
@@ -735,12 +774,10 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
         if !seen {
             continue;
         }
-        let key = if declared.is_some() {
-            Key::Str(name)
-        } else {
-            Key::lookup(name)
+        let key = match declared {
+            Some((_, visibility)) => declared_var_key(req, name, visibility)?,
+            None => Owner::take(req, Key::lookup(name)),
         };
-        let key = Owner::take(req, key);
         let value = req.dup_value(value, None);
         array.add_new(req, key, Owner::adopt(value))?;
     }
