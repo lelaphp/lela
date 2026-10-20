@@ -202,17 +202,21 @@ impl RuntimeCaches {
         room: Option<php_unit::SpareUnit>,
     ) -> PublishedUnit {
         let (free, request, spare) = (&mut self.free, &mut self.request, &mut self.spare);
-        self.held.retain_mut(|(unit, numbers)| {
-            if unit.strong_count() > 0 {
-                return true;
-            }
-            for &number in numbers.iter() {
-                *request.map(MapPtr::new(number)) = RuntimeCache::default();
-            }
-            free.append(numbers);
-            spare.push(std::mem::take(numbers));
-            false
-        });
+        // Asked first, as the scan finds nothing where every unit gone
+        // was given back by its last holder, which is the rule.
+        if self.held.iter().any(|(unit, _)| unit.strong_count() == 0) {
+            self.held.retain_mut(|(unit, numbers)| {
+                if unit.strong_count() > 0 {
+                    return true;
+                }
+                for &number in numbers.iter() {
+                    *request.map(MapPtr::new(number)) = RuntimeCache::default();
+                }
+                free.append(numbers);
+                spare.push(std::mem::take(numbers));
+                false
+            });
+        }
         let mut numbers = self.spare.pop().unwrap_or_default();
         for code in op_arrays_mut(&mut unit) {
             let number = self.next_number();

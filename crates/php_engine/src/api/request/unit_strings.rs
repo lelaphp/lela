@@ -383,23 +383,26 @@ impl Request {
         // ([`php_compile::intern_names`]), which a copy of one finds
         // ([`Request::declared_string`]) while the unit lives; an
         // `eval`'s made none, and they are made as it is noted
-        // ([`Request::hold_unit_names`]).
-        let mut seen = HashSet::with_hasher(NameHasher);
-        for name in php_compile::op_array_names(unit) {
-            let Some(at) = made
-                .iter()
-                .rposition(|z| z.as_str().is_some_and(|s| s.bytes() == name))
-            else {
-                continue;
-            };
-            if !seen.insert(name) {
-                continue;
+        // ([`Request::hold_unit_names`]). A compile that made no string
+        // has none of them to find.
+        if !made.is_empty() {
+            let mut seen = HashSet::with_hasher(NameHasher);
+            for name in php_compile::op_array_names(unit) {
+                let Some(at) = made
+                    .iter()
+                    .rposition(|z| z.as_str().is_some_and(|s| s.bytes() == name))
+                else {
+                    continue;
+                };
+                if !seen.insert(name) {
+                    continue;
+                }
+                let Some(s) = made.swap_remove(at).as_str().map(PhpString::of) else {
+                    continue;
+                };
+                held.names.push(s);
+                point(&mut strings.by_bytes, s);
             }
-            let Some(s) = made.swap_remove(at).as_str().map(PhpString::of) else {
-                continue;
-            };
-            held.names.push(s);
-            point(&mut strings.by_bytes, s);
         }
         let (main_from, from) = (held.main.len(), held.constants.len());
         if held.declares {
