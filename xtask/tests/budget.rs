@@ -390,6 +390,65 @@ fn a_rule_added_under_ext_lands_in_ext_clippy_toml_without_naming_the_file() {
     );
 }
 
+/// A `deny_lints` rule's `allow_in_tests` renders as clippy's
+/// `allow-*-in-tests = true`, one key per lint, into the `clippy.toml` its
+/// scope reaches, and keeps its `exempt`, since a key only lifts a lint
+/// inside tests (#3078); the committed files carry the three keys the
+/// tracked `lints.no-panic` row lists.
+#[test]
+fn allow_in_tests_renders_clippys_in_tests_keys_beside_the_lists() {
+    let fixture = ruled_fixture();
+    let text = std::fs::read_to_string(fixture.join("seams.toml")).unwrap();
+    let added = format!(
+        "{text}\n[[rule]]\nid = \"fixture.no-panic\"\nscope = \"ext/*\"\nexempt = [\"ext/demo\"]\n\
+         deny_lints = [\"clippy::unwrap_used\", \"clippy::panic\", \"clippy::todo\"]\n\
+         allow_in_tests = [\"clippy::panic\", \"clippy::unwrap_used\"]\ntext = \"t\"\n"
+    );
+    let manifest = Manifest::parse(&added).unwrap();
+    let root = scratch("allow-in-tests");
+    std::fs::copy(fixture.join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
+    let written = generated::write_all(&root, &manifest).unwrap();
+    let rendered = std::fs::read_to_string(&written[0]).unwrap();
+    let parsed: toml::Table = toml::from_str(&rendered).unwrap();
+    let keys: Vec<&str> = parsed
+        .keys()
+        .map(String::as_str)
+        .filter(|k| k.ends_with("-in-tests"))
+        .collect();
+    assert_eq!(
+        keys,
+        ["allow-panic-in-tests", "allow-unwrap-in-tests"],
+        "{rendered}"
+    );
+    assert!(parsed["disallowed-types"].is_array(), "{rendered}");
+
+    let manifest = Manifest::load(workspace()).unwrap();
+    let rule = manifest.rule("lints.no-panic").unwrap();
+    assert_eq!(
+        rule.predicate.allow_in_tests.as_deref().unwrap_or_default(),
+        [
+            "clippy::unwrap_used",
+            "clippy::expect_used",
+            "clippy::panic"
+        ]
+    );
+    for file in ["crates/clippy.toml", "ext/clippy.toml", "sapi/clippy.toml"] {
+        let text = std::fs::read_to_string(workspace().join(file)).unwrap();
+        let parsed: toml::Table = toml::from_str(&text).unwrap();
+        for key in [
+            "allow-unwrap-in-tests",
+            "allow-expect-in-tests",
+            "allow-panic-in-tests",
+        ] {
+            assert_eq!(
+                parsed.get(key),
+                Some(&toml::Value::Boolean(true)),
+                "{file}: {key}"
+            );
+        }
+    }
+}
+
 /// `deny_macros` renders to `disallowed-macros` beside `deny_types`'
 /// `disallowed-types`, each row with the rule's text and ADR as its
 /// reason (#1888): the ruled row's `std::thread_local`, which no type ban

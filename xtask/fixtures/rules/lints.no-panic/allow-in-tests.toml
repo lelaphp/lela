@@ -1,0 +1,23 @@
+# A negative-control fixture (harness-design.md §4.1): a manifest the reader
+# must refuse, named for what it is and not `seams.toml`, so no instrument
+# takes it for the manifest of the workspace it stands in. `allow_in_tests`
+# lists clippy::todo, which clippy has no allow-*-in-tests key for, so no
+# clippy.toml could render it (#3078).
+[oracle]
+pin = "../../../../oracle.toml"
+[budget]
+total = 1000
+new = 1000
+docs = 1000
+harness = 1000
+lock_packages = 1000
+clean_build_release_s = 1000
+api_items = 1000
+bindings = 1000
+
+[[rule]]
+id = "lints.no-panic"
+scope = "crates/*"
+deny_lints = ["clippy::unwrap_used", "clippy::expect_used", "clippy::panic", "clippy::unreachable", "clippy::todo", "clippy::unimplemented"]
+allow_in_tests = ["clippy::unwrap_used", "clippy::todo"]
+text = "Internal invariant failures are InternalError fatals with a message, not panics (fixture)."

@@ -7,8 +7,10 @@
 //! `deny_types` renders to `disallowed-types`, with the rule's text as each reason and wildcards
 //! expanded from `Cargo.lock` to the paths a package's types are reachable
 //! at (#1910); its `deny_macros` to `disallowed-macros` (#1781); and
-//! `deny_methods` to `disallowed-methods` (#1950). The committed copies are
-//! held to the rendering by `budget`.
+//! `deny_methods` to `disallowed-methods` (#1950); and a `deny_lints`
+//! rule's `allow_in_tests` to clippy's `allow-*-in-tests = true`, one key
+//! per lint listed ([`crate::manifest::IN_TESTS`], #3078). The committed
+//! copies are held to the rendering by `budget`.
 //!
 //! Clippy reads the nearest configuration alone and merges nothing, and
 //! in one directory a `.clippy.toml` before a `clippy.toml`: a crate
@@ -89,19 +91,29 @@ pub(crate) fn render(root: &Path, manifest: &Manifest, file: &str) -> Result<Str
     }
 }
 
-/// Whether a rule renders into a `clippy.toml`: a `deny_types` rule, with
-/// the `deny_macros` beside it, or a `deny_methods` rule.
-fn renders_to_clippy(rule: &Rule) -> bool {
+/// Whether a rule renders a `disallowed-*` list into a `clippy.toml`: a
+/// `deny_types` rule, with the `deny_macros` beside it, or a
+/// `deny_methods` rule.
+fn disallows(rule: &Rule) -> bool {
     rule.predicate.deny_types.is_some() || rule.predicate.deny_methods.is_some()
+}
+
+/// Whether a rule renders into a `clippy.toml`: one that [`disallows`],
+/// or a `deny_lints` rule with `allow_in_tests`.
+fn renders_to_clippy(rule: &Rule) -> bool {
+    disallows(rule) || rule.predicate.allow_in_tests.is_some()
 }
 
 /// The directories a clippy rule's scope names: each pattern less a
 /// trailing `/*` or `/**`, the directory whose `clippy.toml` reaches it.
 /// A wildcard anywhere else names files no one `clippy.toml` stands
-/// above, and an `exempt` is a path clippy never reads, so both are
-/// refused: a site the rule allows carries its own `#[expect]`.
+/// above, so it is refused. An `exempt` is a path clippy never reads, so
+/// a rule that [`disallows`] is refused one: a site the rule allows
+/// carries its own `#[expect]`. An `allow_in_tests` key only lifts a lint
+/// inside tests, and an exempt path is held to no lint of the rule's for
+/// it to lift, so its rule keeps its `exempt`.
 fn clippy_dirs(rule: &Rule) -> Result<Vec<&str>> {
-    if !rule.exempt.is_empty() {
+    if disallows(rule) && !rule.exempt.is_empty() {
         bail!(
             "rule {} renders to clippy.toml and carries `exempt`, which clippy cannot read; a site it allows carries #[expect]",
             rule.id
@@ -271,6 +283,7 @@ fn clippy_toml(root: &Path, manifest: &Manifest, file: &str, dir: &str) -> Resul
     let mut types = String::new();
     let mut macros = String::new();
     let mut methods = String::new();
+    let mut in_tests = Vec::new();
     for rule in &rules {
         let cited = rule.adr.adr_cited();
         let reason = if cited.is_empty() {
@@ -289,6 +302,14 @@ fn clippy_toml(root: &Path, manifest: &Manifest, file: &str, dir: &str) -> Resul
         for path in rule.predicate.deny_methods.iter().flatten() {
             entry(&mut methods, path, &reason, third_party(&lock, path));
         }
+        // The manifest reader refused a lint with no key.
+        let keys = rule.predicate.allow_in_tests.iter().flatten();
+        in_tests.extend(keys.filter_map(|lint| crate::manifest::in_tests_key(lint)));
+    }
+    in_tests.sort_unstable();
+    in_tests.dedup();
+    for key in in_tests {
+        writeln!(out, "{key} = true").ok();
     }
     for (key, rows) in [
         ("disallowed-types", types),
