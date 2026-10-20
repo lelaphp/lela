@@ -101,9 +101,9 @@ pub fn free_operands(req: &mut Request, frame: FrameRef, at: OplineIdx, op1: boo
         return;
     };
     if op1 {
-        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        exec::free_operand(req, frame, op.op1_type, op.op1);
     }
     if op2 {
-        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+        exec::free_operand(req, frame, op.op2_type, op.op2);
     }
 }

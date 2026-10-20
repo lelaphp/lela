@@ -5233,9 +5233,10 @@ impl<'a> Emit<'a> {
     #[inline(always)]
     fn op_array(&mut self, filename: Name, line_start: u32, line_end: u32) -> OpArray {
         let mut oplines = std::mem::take(&mut self.oplines);
-        let live_ranges = crate::live::live_ranges(&mut oplines, self.temporaries);
+        let mut live_ranges = crate::live::live_ranges(&mut oplines, self.temporaries);
         let vars = std::mem::take(&mut self.vars);
         let num_cvs = u32::try_from(vars.len()).unwrap_or(u32::MAX);
+        crate::live::fold_slots(&mut oplines, &mut live_ranges, num_cvs);
         OpArray {
             oplines,
             literals: std::mem::take(&mut self.constants),
