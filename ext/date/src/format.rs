@@ -10,7 +10,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpString, SmartStr};
+use php_ext::values::{Layout, Owner, PhpArray, PhpString, SmartStr};
 
 use crate::ffi::{self, Time, TimeOffset, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
 use crate::lent::{Lent, kept, lent};
@@ -743,6 +743,20 @@ fn local_time(req: &mut Request, ts: i64) -> Result<Time, Thrown> {
 ///     [tm_isdst] => 0
 /// )
 /// ```
+///
+/// Its peak is php's: the list's table is laid down for nine rows at
+/// once and the fields' at the first row, `array_init_size(9)`, so
+/// neither doubles while the timelib time stands.
+///
+/// ```php
+/// date_default_timezone_set('Europe/Amsterdam');
+/// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+/// pk(fn () => localtime(0)); pk(fn () => localtime(0, true));
+/// ```
+/// ```expect capture
+/// 648 408
+/// 1264 992
+/// ```
 #[php_function]
 fn localtime(
     req: &mut Request,
@@ -771,7 +785,14 @@ fn localtime_rows(
         (b"tm_yday", ffi::day_of_year(t.y, t.m, t.d)),
         (b"tm_isdst", i64::from(t.dst)),
     ];
-    let mut array = PhpArray::new(req)?;
+    // `array_init_size(return_value, 9)`, the list's table laid down at
+    // once by `zend_hash_real_init_packed`, the fields' at the first
+    // `add_assoc_long`.
+    let mut array = if associative {
+        PhpArray::init_size(req, 9)?
+    } else {
+        PhpArray::sized(req, 9, Layout::Packed)?
+    };
     for (name, value) in rows {
         if associative {
             set_str(req, &mut array, name, Owner::int(value))?;
@@ -804,6 +825,18 @@ fn localtime_rows(
 ///     [0] => 1700000000
 /// )
 /// ```
+///
+/// Its peak is php's, the table sized for its eleven rows,
+/// `array_init_size(11)`, while the timelib time stands.
+///
+/// ```php
+/// date_default_timezone_set('Europe/Amsterdam');
+/// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+/// pk(fn () => getdate(0));
+/// ```
+/// ```expect capture
+/// 1360 1120
+/// ```
 #[php_function]
 fn getdate(
     req: &mut Request,
@@ -816,7 +849,8 @@ fn getdate(
 
 /// The rows of `getdate()` over the local time `t` of `ts`.
 fn getdate_rows(req: &mut Request, t: &Time, ts: i64) -> Result<Owner<PhpArray>, Thrown> {
-    let mut array = PhpArray::new(req)?;
+    // `array_init_size(return_value, 11)`.
+    let mut array = PhpArray::init_size(req, 11)?;
     let rows: [(&[u8], i64); 8] = [
         (b"seconds", t.s),
         (b"minutes", t.i),
