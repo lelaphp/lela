@@ -1045,7 +1045,26 @@ pub(crate) fn mangled_array(
 /// `zend_array_dup`'s table, the source's own size and layout, or the
 /// uninitialised one where the source holds nothing. So a copy of nine
 /// or more rows is never grown from eight while it fills, and
-/// `memory_get_peak_usage()` never reads the table it outgrew.
+/// `memory_get_peak_usage()` never reads the table it outgrew. A table
+/// with a name that reads as an integer is converted at its element
+/// count, and one rows were deleted from is copied at the size it grew
+/// to:
+///
+/// ```php
+/// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+/// $i = new DateInterval('P1D'); @$i->{'7'} = 0;
+/// pk(fn () => (array) $i);
+/// pk(fn () => get_object_vars($i));
+/// #[AllowDynamicProperties] class Dyn { public $a = 1; }
+/// $d = new Dyn; foreach (range(1, 20) as $k) { $d->{"p$k"} = $k; }
+/// foreach (range(1, 15) as $k) { unset($d->{"p$k"}); }
+/// pk(fn () => get_mangled_object_vars($d));
+/// ```
+/// ```expect
+/// 1016 728
+/// 1016 696
+/// 1336 1336
+/// ```
 pub(crate) fn symtable_laid(
     req: &mut Request,
     source: PhpArray,
