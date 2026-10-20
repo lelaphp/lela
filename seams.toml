@@ -98,7 +98,7 @@ budget = 10000                              # php's main/streams/ and main/netwo
 phpt = ["ext/standard/tests/streams"]
 [[crate]]
 name = "xtask"
-budget = 40000                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here; 36k for #1975's host-bytes instrument (#2468, option C); 38k for #2597's permit --after fix and the harness tickets after it (2026-10-10); 40k for the harness tickets this wave's rulings asked for (#2707, 2026-10-12)
+budget = 42000                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here; 36k for #1975's host-bytes instrument (#2468, option C); 38k for #2597's permit --after fix and the harness tickets after it (2026-10-10); 40k for the harness tickets this wave's rulings asked for (#2707, 2026-10-12); 42k for the testing tier's harness work (#3082, 2026-10-20)
 lock = "xtask.lock"                        # harness §4.1, revision 16: the harness holds its own interface
 
 # ---------------------------------------------------------------- ext/
