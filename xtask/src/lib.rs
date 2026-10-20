@@ -18,7 +18,7 @@
 //! both sides of the harness's own tests make one of. Everything else is
 //! crate-private, and a test that needs an internal is a unit test beside
 //! it.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 pub mod api_check;
 mod batch;
