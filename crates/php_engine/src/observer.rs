@@ -949,9 +949,18 @@ pub(crate) type ClassLinked = fn(&mut Request, ClassId, &[u8]);
 /// nothing of how the diagnostic is served; a link of `zend_error_cb`
 /// serves the diagnostics the user's handler leaves, and may serve one
 /// in place of php's own `php_error_cb`. Nothing more than one check of
-/// the list while none is declared.
+/// the list while none is declared. `uncaught` is an uncaught
+/// throwable `zend_exception_error` renders, told with php's
+/// `E_DONT_BAIL` ([`ErrorNotice::uncaught`]).
 #[inline]
-pub(crate) fn error(req: &mut Request, level: Level, file: &[u8], line: u32, message: &[u8]) {
+pub(crate) fn error(
+    req: &mut Request,
+    level: Level,
+    file: &[u8],
+    line: u32,
+    message: &[u8],
+    uncaught: bool,
+) {
     if req.shared.supplied.error_observers.is_empty() {
         return;
     }
@@ -962,26 +971,7 @@ pub(crate) fn error(req: &mut Request, level: Level, file: &[u8], line: u32, mes
             file,
             line,
             message,
-            uncaught: false,
-        },
-    );
-}
-
-/// [`error`] for an uncaught throwable `zend_exception_error` renders,
-/// told with php's `E_DONT_BAIL` ([`ErrorNotice::uncaught`]).
-#[inline]
-pub(crate) fn uncaught(req: &mut Request, level: Level, file: &[u8], line: u32, message: &[u8]) {
-    if req.shared.supplied.error_observers.is_empty() {
-        return;
-    }
-    notify_error(
-        req,
-        ErrorNotice {
-            level,
-            file,
-            line,
-            message,
-            uncaught: true,
+            uncaught,
         },
     );
 }

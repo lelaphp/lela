@@ -192,7 +192,7 @@ impl Request {
         // released after: the throwable's bytes as they stand, which
         // every display form writes.
         if let Ok(string) = self.string(message) {
-            crate::observer::uncaught(self, level, file, line, string.as_bytes());
+            crate::observer::error(self, level, file, line, string.as_bytes(), true);
             let text = String::from_utf8_lossy(message);
             self.zend_error_cb(level, Bail::DontBail, string, &text, file, line);
             self.release(Value::string(string));
