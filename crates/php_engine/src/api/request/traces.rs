@@ -1373,7 +1373,7 @@ impl Request {
                 .map_or(0, |decl| decl.parameters.len());
             for (at, argument) in arguments.iter_mut().enumerate().take(declared) {
                 if let Some(name) = names.get(at)
-                    && let Some(value) = self.symbol_view(table, &name.0)
+                    && let Some(value) = self.symbol_value(table, &name.0)
                 {
                     *argument = value;
                 }

@@ -12,9 +12,9 @@ use php_compile::SourceKind;
 use php_heap::{Fatal, FrameRef};
 use php_unit::PublishedUnit;
 
-use super::{Request, Symbol};
+use super::Request;
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{PhpObject, Value};
 use crate::exec::TableId;
 use crate::tier::{Called, Compiled, Evaluated, Under};
 
@@ -360,43 +360,16 @@ impl Request {
 
     /// Every name of the global table that stands in a frame's CV, its
     /// value moved into the table where the CV holds one and the name
-    /// deleted where it holds none, `zend_detach_symbol_table`'s rule;
-    /// the frames they stood in, the lowest first.
+    /// deleted where it holds none, `zend_detach_symbol_table`'s rule
+    /// ([`Request::detach_named`]); the frames they stood in, the lowest
+    /// first.
     fn unbind_globals(&mut self) -> Vec<FrameRef> {
-        let bound: Vec<(PhpString, FrameRef, u32)> = self
-            .tables
-            .get(TableId::GLOBAL.0 as usize)
-            .map(|table| {
-                table
-                    .entries
-                    .iter()
-                    .filter_map(|(name, symbol)| match symbol {
-                        Symbol::Indirect(frame, slot) => Some((*name, *frame, *slot)),
-                        Symbol::Value(_) | Symbol::Held(_) => None,
-                    })
-                    .collect()
+        (0..self.vm.stack.len())
+            .filter_map(|at| {
+                let frame = FrameRef(u32::try_from(at).ok()?);
+                self.detach_named(frame, TableId::GLOBAL).then_some(frame)
             })
-            .unwrap_or_default();
-        // Each name held across the walk: a release it serves can delete
-        // another name, and the table's owner of it with it.
-        for (name, _, _) in &bound {
-            self.addref(&Value::string(*name));
-        }
-        let mut frames: Vec<FrameRef> = Vec::new();
-        for (name, frame, slot) in bound {
-            let value = self.take_slot(frame, slot);
-            if value.tag() == TypeTag::Undef {
-                self.symbol_del(TableId::GLOBAL, name.as_bytes());
-            } else {
-                self.symbol_update(TableId::GLOBAL, name, value);
-            }
-            self.release(Value::string(name));
-            if !frames.contains(&frame) {
-                frames.push(frame);
-            }
-        }
-        frames.sort_by_key(|frame| frame.0);
-        frames
+            .collect()
     }
 
     /// What stands pending after an evaluation, rendered uncaught with

@@ -111,10 +111,10 @@ impl ZvalRef {
         // SAFETY: the pointer was taken from a live slot by the one
         // place that lays it down: a frame slot (`Frame::slot_ptr`), an
         // object slot (`Obj::slot_ref`), an array's bucket
-        // (`Arr::value_ref`), a reference's value (`Ref::val_ref`) or a
-        // room of `Places`, which stands until the collection is
-        // dropped; a name kept past the slot's life is the same mistake
-        // in php.
+        // (`Arr::value_ref`, `Arr::str_value_ref`) or a reference's value
+        // (`Ref::val_ref`); a name kept past the slot's life, or past a
+        // resize of the table whose bucket it is, is the same mistake in
+        // php.
         unsafe { self.0.as_ptr().read() }
     }
 

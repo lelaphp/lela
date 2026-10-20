@@ -412,49 +412,6 @@ pub(crate) fn take_chain(
     Some((execution, below))
 }
 
-/// Where the request's own VM stack stands, which
-/// [`Fibers::request_stack`] reads and writes.
-#[derive(Clone, Copy)]
-enum Own {
-    /// The stack the request runs on.
-    Running,
-    /// Below the first running coroutine.
-    BelowRunning,
-    /// Below the first coroutine the serve at this place in
-    /// [`Fibers::aside`] set aside.
-    BelowAside(usize),
-    /// The execution the serve at this place displaced.
-    Displaced(usize),
-}
-
-/// The stack below the first of `running`, the one that resumed it.
-fn first_below(running: &[Running]) -> Option<&crate::exec::Stack> {
-    running.first().map(|first| &first.below.vm.stack)
-}
-
-/// [`first_below`], to write.
-fn first_below_mut(running: &mut [Running]) -> Option<&mut crate::exec::Stack> {
-    running.first_mut().map(|first| &mut first.below.vm.stack)
-}
-
-/// [`Own`] where no coroutine runs and `aside` stands: the stack the
-/// request runs on unless the innermost serve is on a suspended
-/// coroutine's stack, where it is wherever it stood when that serve
-/// began.
-fn own_in(aside: &[Aside]) -> Own {
-    let Some((last, before)) = aside.split_last() else {
-        return Own::Running;
-    };
-    match last {
-        Aside::Resumer { .. } => Own::Running,
-        Aside::Suspended { running, .. } if !running.is_empty() => Own::BelowAside(before.len()),
-        Aside::Suspended { .. } => match own_in(before) {
-            Own::Running => Own::Displaced(before.len()),
-            own => own,
-        },
-    }
-}
-
 /// `GC_G(dtor_fiber)` and the walk it serves (`Z/Zend/zend_gc.c:1859-1990`,
 /// `:2321-2354`): the collector's fiber for destructors, one owner while
 /// it is the collector's; whether it is serving the walk, which a
@@ -600,49 +557,6 @@ impl Fibers {
                 Some((coroutine, displaced, below))
             }
             Aside::Resumer { .. } => None,
-        }
-    }
-
-    /// Where the request's own stack stands.
-    fn own(&self) -> Own {
-        if self.running.is_empty() {
-            own_in(&self.aside)
-        } else {
-            Own::BelowRunning
-        }
-    }
-
-    /// The request's own VM stack, below every fiber running, which is
-    /// the one `EG(symbol_table)`'s attached CVs stand on; none while the
-    /// request runs on it.
-    pub(crate) fn request_stack(&self) -> Option<&crate::exec::Stack> {
-        let below = first_below;
-        match self.own() {
-            Own::Running => None,
-            Own::BelowRunning => below(&self.running),
-            Own::BelowAside(at) => match self.aside.get(at)? {
-                Aside::Suspended { running, .. } | Aside::Resumer { running } => below(running),
-            },
-            Own::Displaced(at) => match self.aside.get(at)? {
-                Aside::Suspended { displaced, .. } => Some(&displaced.vm.stack),
-                Aside::Resumer { .. } => None,
-            },
-        }
-    }
-
-    /// [`Fibers::request_stack`], to write.
-    pub(crate) fn request_stack_mut(&mut self) -> Option<&mut crate::exec::Stack> {
-        let below = first_below_mut;
-        match self.own() {
-            Own::Running => None,
-            Own::BelowRunning => below(&mut self.running),
-            Own::BelowAside(at) => match self.aside.get_mut(at)? {
-                Aside::Suspended { running, .. } | Aside::Resumer { running } => below(running),
-            },
-            Own::Displaced(at) => match self.aside.get_mut(at)? {
-                Aside::Suspended { displaced, .. } => Some(&mut displaced.vm.stack),
-                Aside::Resumer { .. } => None,
-            },
         }
     }
 
@@ -832,12 +746,6 @@ impl ObjectHandlers for FiberHandlers {
         let Some(execution) = &fiber.coroutine.execution else {
             return GcTable::Properties;
         };
-        let stack = &execution.vm.stack;
-        let cv = |frame, at| {
-            stack.frame(frame).map_or(php_heap::Zval::UNDEF, |frame| {
-                frame.slot(php_heap::Slot(at))
-            })
-        };
         let mut last = None;
         let mut calls = Vec::new();
         for at in (0..execution.vm.depth()).rev() {
@@ -862,7 +770,7 @@ impl ObjectHandlers for FiberHandlers {
             calls.clear();
             if let Some(table) = table {
                 if let Some(inner) = last.filter(|&inner| inner != table) {
-                    req.gc_symbol_rows(inner, &cv, visit);
+                    req.gc_symbol_rows(inner, visit);
                 }
                 last = Some(table);
             }
@@ -871,7 +779,7 @@ impl ObjectHandlers for FiberHandlers {
             return GcTable::Properties;
         };
         let mut rows = Vec::new();
-        req.gc_symbol_rows(table, &cv, &mut |value| rows.push(value));
+        req.gc_symbol_rows(table, &mut |value| rows.push(value));
         GcTable::Rows(rows)
     }
 }

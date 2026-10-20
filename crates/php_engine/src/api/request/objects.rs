@@ -23,7 +23,7 @@ use crate::api::values::{
 use methods::visibility_string;
 use pending::Saved;
 
-use super::{Hooks, Placed, PropertyInfo, Request, Symbol, methods, pending};
+use super::{Hooks, Placed, PropertyInfo, Request, methods, pending};
 
 /// Where the destructors' walk was cut short, whose field no file but
 /// this one reads.
@@ -718,24 +718,23 @@ impl Request {
     /// d3
     /// ```
     pub(crate) fn shutdown_destructors(&mut self) {
+        let Some(arr) = self.symbol_arr(crate::exec::TableId::GLOBAL) else {
+            return;
+        };
         loop {
-            let symbols = self.globals().len();
-            let mut at = symbols;
+            let symbols = arr.len();
+            let mut at = arr.num_used();
             while at > 0 && !self.objects.shutdown_walk_ended {
                 at -= 1;
-                let alone = self.globals().get(at).is_some_and(|(_, symbol)| {
-                    let value = match symbol {
-                        Symbol::Value(value) => *value,
-                        Symbol::Held(place) => Value::of_zval(place.read()),
-                        Symbol::Indirect(..) => return false,
-                    };
+                let alone = arr.entry_at(at).is_some_and(|(_, z)| {
+                    let value = Value::of_zval(z);
                     value.as_object().is_some() && value.refcount() == 1
                 });
-                if alone && let Some(symbol) = self.table_remove(crate::exec::TableId::GLOBAL, at) {
-                    self.release_symbol(symbol);
+                if alone && let Some(z) = self.heap.array_take_at(arr, at) {
+                    self.release_row(z);
                 }
             }
-            if symbols == self.globals().len() || self.objects.shutdown_walk_ended {
+            if symbols == arr.len() || self.objects.shutdown_walk_ended {
                 break;
             }
         }

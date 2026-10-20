@@ -269,6 +269,59 @@ pub(crate) fn free_table_data(mm: &mut Mm, a: Arr) {
     }
 }
 
+/// A table php lays down inside a struct of its own rather than
+/// `emalloc`ing it, `EG(symbol_table)` in `EG`
+/// (`zend_hash_init(&EG(symbol_table), 64, ...)` in `init_executor`):
+/// the header is the struct's and off the request's heap, which
+/// `memory_get_usage()` does not read, and the data is laid down out of
+/// `mm` at the first write, as any table's is. Dropping it gives the
+/// header back; the data is the heap's, given back by
+/// [`EmbeddedArr::free_data`] or with the heap's chunks.
+#[derive(Debug)]
+pub struct EmbeddedArr(Arr);
+
+impl EmbeddedArr {
+    /// `zend_hash_init(ht, size, ...)` over the struct's own header:
+    /// uninitialised, `nTableSize` from `size` through
+    /// `zend_hash_check_size`.
+    #[must_use]
+    pub fn new(size: u32) -> EmbeddedArr {
+        let at = NonNull::from(Box::leak(Box::new(
+            std::mem::MaybeUninit::<ArrHeader>::uninit(),
+        )));
+        // SAFETY: the allocation is a header's size and alignment and
+        // nothing else holds it.
+        EmbeddedArr(unsafe { Arr::init(at.cast(), check_size(size).unwrap_or(MAX_SIZE)) })
+    }
+
+    /// The table, php's `&EG(symbol_table)`.
+    #[must_use]
+    pub fn arr(&self) -> Arr {
+        self.0
+    }
+
+    /// The end of `zend_hash_destroy` once the caller has given up every
+    /// row: the data back to `heap`, and the table uninitialised again,
+    /// so a write after lays down data of its own.
+    pub fn free_data(&self, heap: &mut Heap) {
+        if let Some(data) = self.0.data_addr() {
+            // SAFETY: the data was laid down out of `mm` and its rows
+            // are given up, so nothing names it.
+            unsafe { heap.mm.free(data) };
+        }
+        self.0.emptied();
+    }
+}
+
+impl Drop for EmbeddedArr {
+    fn drop(&mut self) {
+        let header = self.0.0.cast::<std::mem::MaybeUninit<ArrHeader>>();
+        // SAFETY: the header is the box `new` leaked, and this is the one
+        // name of it left.
+        drop(unsafe { Box::from_raw(header.as_ptr()) });
+    }
+}
+
 /// `zend_hash_index_add_new(ht, index, &zv)` over a request's `mm` for a
 /// key the caller knows is not there, which is what `zend_list_insert`
 /// (`Z/Zend/zend_list.c:32-44`) knows of the id `nNextFreeElement` gave
@@ -634,13 +687,20 @@ impl Arr {
             }
             self.hash_reset();
         }
+        self.rows_reset();
+        left
+    }
+
+    /// The counts, the internal pointer and `nNextFreeElement` back to
+    /// an empty table's, the end of `zend_hash_clean` and
+    /// `zend_symtable_clean`.
+    fn rows_reset(self) {
         let header = self.header();
         header.num_used.set(0);
         header.num_elements.set(0);
         header.internal_pointer.set(0);
         header.next_free.set(i64::MIN);
         header.lead.set(0);
-        left
     }
 
     /// `ZVAL_EMPTY_ARRAY`: the process's one immutable empty array,
@@ -1047,8 +1107,17 @@ impl Arr {
     /// integer is read out of them, as `zend_symtable_str_find` would.
     #[must_use]
     pub fn str_find(&self, bytes: &[u8]) -> Option<Zval> {
+        self.str_value_ref(bytes).map(ZvalRef::read)
+    }
+
+    /// [`Arr::str_find`] in place: the bucket's `zval *`, which a fetch
+    /// by name for writing hands the opline after it
+    /// (`zend_fetch_var_address_helper`), under the rule
+    /// [`Arr::value_ref`] states.
+    #[must_use]
+    pub fn str_value_ref(&self, bytes: &[u8]) -> Option<ZvalRef> {
         let idx = self.find_bucket_bytes(crate::string::hash_func(bytes), bytes)?;
-        Some(self.read_bucket(idx).val)
+        Some(ZvalRef::new(self.bucket(idx).cast::<Zval>()))
     }
 
     /// `zend_hash_index_find_bucket`: the bucket of an integer key. The
@@ -2183,6 +2252,29 @@ impl crate::Heap {
         true
     }
 
+    /// `zend_hash_str_del` with the destructor the caller's: the element
+    /// under the string key of these bytes gone, its key given up, and
+    /// its value handed back to release; `None` for a key that is not
+    /// there.
+    pub fn array_str_take(&mut self, a: Arr, bytes: &[u8]) -> Option<Zval> {
+        let idx = a.find_bucket_bytes(crate::string::hash_func(bytes), bytes)?;
+        self.array_take_at(a, idx)
+    }
+
+    /// [`Heap::array_str_take`] of the element at position `pos` of a
+    /// hash table, `_zend_hash_del_el` as `zend_hash_reverse_apply`
+    /// deletes one; `None` where no element stands there.
+    pub fn array_take_at(&mut self, a: Arr, pos: u32) -> Option<Zval> {
+        if a.is_packed() || a.entry_at(pos).is_none() {
+            return None;
+        }
+        a.unlink(pos);
+        if let Some(k) = a.read_bucket(pos).key {
+            self.release_string(k);
+        }
+        Some(a.del_at(pos, Some(&mut self.iterators)))
+    }
+
     /// `zend_hash_clean` (`Z/Zend/zend_hash.c:1875`) over `a`, which has
     /// one owner: every row's value destroyed in place, in order, its
     /// destructor served as it goes, with every key standing until the
@@ -2221,6 +2313,32 @@ impl crate::Heap {
                 Heap::release(hooks, left);
             }
         }
+    }
+
+    /// `zend_symtable_clean` (`Z/Zend/zend_hash.c:1952`) over `a`, a
+    /// symbol table nothing reaches but the caller: each row in order,
+    /// its value destroyed through `hooks`, where a destructor is
+    /// served, and then its key given up, an `IS_INDIRECT` row's value
+    /// owning nothing; then the table emptied where it stands, its data
+    /// kept for the next one laid in it.
+    pub fn symtable_clean(hooks: &mut dyn HeapHooks, a: Arr) {
+        if a.is_uninitialized() {
+            return;
+        }
+        for idx in 0..a.num_used() {
+            let b = a.read_bucket(idx);
+            if b.val.is_undef() {
+                continue;
+            }
+            if b.val.is_refcounted() {
+                Heap::release(hooks, b.val);
+            }
+            if let Some(k) = b.key {
+                hooks.heap().release_string(k);
+            }
+        }
+        a.hash_reset();
+        a.rows_reset();
     }
 
     /// `zend_array_dup`: a new array of one owner holding what `a`
@@ -3580,5 +3698,56 @@ mod tests {
         assert_eq!(again, walk, "the freed slot is the next one given");
         nothing.heap.iterator_del(again);
         Heap::release(&mut nothing, Zval::array(b));
+    }
+
+    /// `EG(symbol_table)` as `init_executor` lays it down: the header
+    /// `EG`'s own and off the heap, the data laid down at the first
+    /// name, sixty-four buckets of forty bytes; a bucket written through
+    /// its `zval *`, a name deleted with its value handed back, a
+    /// compiled variable's row an `IS_INDIRECT` the clean leaves the
+    /// variable of, and the data given back.
+    #[test]
+    fn a_symbol_table_s_header_is_its_own_and_its_rows_are_buckets() {
+        let _alone = alone();
+        let mut nothing = Nothing::new();
+        let start = nothing.heap.memory_usage(false);
+        let table = EmbeddedArr::new(64);
+        let a = table.arr();
+        let (Ok(x), Ok(y)) = (nothing.heap.string(b"xx"), nothing.heap.string(b"yy")) else {
+            return;
+        };
+        let strings = nothing.heap.memory_usage(false);
+        assert!(
+            nothing
+                .heap
+                .array_add_new(a, Key::Str(x), Zval::long(1))
+                .is_ok()
+        );
+        let cv = Cell::new(Zval::long(7));
+        let at = ZvalRef::new(NonNull::from(&cv).cast());
+        assert!(
+            nothing
+                .heap
+                .array_add_new(a, Key::Str(y), Zval::indirect(at))
+                .is_ok()
+        );
+        assert_eq!(nothing.heap.memory_usage(false), strings + 64 * 40);
+        let Some(place) = a.str_value_ref(b"xx") else {
+            return;
+        };
+        place.write(Zval::long(2));
+        assert_eq!(a.str_find(b"xx").and_then(Zval::as_long), Some(2));
+        assert_eq!(a.str_find(b"yy").and_then(Zval::as_indirect), Some(at));
+        let taken = nothing.heap.array_str_take(a, b"xx");
+        assert_eq!(taken.and_then(Zval::as_long), Some(2));
+        assert_eq!((a.str_find(b"xx"), a.len()), (None, 1));
+        assert_eq!(nothing.heap.array_take_at(a, 0), None);
+        Heap::symtable_clean(&mut nothing, a);
+        assert!(a.is_empty() && a.str_find(b"yy").is_none());
+        assert_eq!(cv.get().as_long(), Some(7));
+        table.free_data(&mut nothing.heap);
+        nothing.heap.release_string(x);
+        nothing.heap.release_string(y);
+        assert_eq!(nothing.heap.memory_usage(false), start);
     }
 }

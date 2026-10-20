@@ -6803,7 +6803,7 @@ pub(crate) fn isset_isempty_var<T: Tier>(
         }
     };
     let table = if op.extended_value & FETCH_GLOBAL != 0 {
-        req.global_table()
+        exec::TableId::GLOBAL
     } else {
         req.rebuild_symbol_table(frame)
     };
@@ -6886,7 +6886,7 @@ pub(crate) fn unset_var<T: Tier>(
         }
     };
     let table = if op.extended_value & FETCH_GLOBAL != 0 {
-        req.global_table()
+        exec::TableId::GLOBAL
     } else {
         req.rebuild_symbol_table(frame)
     };
@@ -6968,7 +6968,7 @@ fn fetch_named(
     let global = op.extended_value & (FETCH_GLOBAL | FETCH_GLOBAL_LOCK) != 0;
     let out = exec::temporary_slot(code, op.out);
     let table = if global {
-        req.global_table()
+        exec::TableId::GLOBAL
     } else {
         req.rebuild_symbol_table(frame)
     };

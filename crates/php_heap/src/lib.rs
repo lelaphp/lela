@@ -52,7 +52,6 @@ mod observe;
 #[cfg(debug_assertions)]
 pub mod owners;
 mod payload;
-mod places;
 mod property_table;
 mod reference;
 mod resource;
@@ -67,7 +66,7 @@ mod zend_arena;
 mod zval;
 
 pub use array::DeclaredRows;
-pub use array::{Arr, ArrIter, Key, SortEntry, canonical_int};
+pub use array::{Arr, ArrIter, EmbeddedArr, Key, SortEntry, canonical_int};
 pub use block::Block;
 pub use call_stack::{CallStack, call_stack_bounds, call_stack_default_size};
 pub use collector::GcStatus;
@@ -82,7 +81,6 @@ pub use numeric::{
 };
 pub use object::{Laziness, Obj, ObjectId};
 pub use observe::{Allocation, AllocationObserverId, ObserveAllocations};
-pub use places::Places;
 pub use property_table::{Direction, PropertyTable, TableRow};
 pub use reference::Ref;
 pub use resource::{Res, ResourceType};

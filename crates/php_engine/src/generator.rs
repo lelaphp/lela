@@ -304,11 +304,7 @@ impl ObjectHandlers for GeneratorHandlers {
                         // The frame is the table's only one: a generator
                         // suspends at its own `yield`, never inside a
                         // file it included.
-                        req.gc_symbol_rows(
-                            table,
-                            &|_, at| state.frame.slot(php_heap::Slot(at)),
-                            &mut |value| rows.push(value),
-                        );
+                        req.gc_symbol_rows(table, &mut |value| rows.push(value));
                         GcTable::Rows(rows)
                     }
                     None => GcTable::Properties,

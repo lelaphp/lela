@@ -6086,7 +6086,7 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit, entry: Loop) -
         }
     };
     if req.hold_op_array(frame, copy).is_err() {
-        req.pop_frame();
+        req.leave_frame(frame);
         return false;
     }
     if let Err(fatal) = entry(req, frame) {
