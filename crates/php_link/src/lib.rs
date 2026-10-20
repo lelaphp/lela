@@ -58,8 +58,8 @@ mod rows;
 mod traits;
 
 pub use rows::{
-    Case, Exact, Folded, Indexed, LinkedClass, NameHash, NameHasher, NameMap, Named, Names, Row,
-    Rows,
+    Case, ClassHooks, Exact, Folded, Indexed, LinkedClass, NameHash, NameHasher, NameMap, Named,
+    Names, Row, Rows,
 };
 
 pub use hooks::{
@@ -2038,17 +2038,7 @@ impl<'a, H: Copy> Linker<'a, H> {
         };
         let (constructor, destructor) = (magic(b"__construct"), magic(b"__destruct"));
         let properties = self.member_rows::<PropertyDecl>(child, usize::MAX)?;
-        // A parent's private hooked property is counted though no row of
-        // `child`'s names it, as `do_inherit_property` counts it.
-        let hooked = properties.rows().iter().any(|row| {
-            self.row_member::<PropertyDecl>(child, row)
-                .is_some_and(|(_, property)| property.hooks.is_some())
-        }) || child
-            .parent
-            .as_ref()
-            .and_then(|parent| (self.lookup)(&parent.0))
-            .and_then(|held| held.record)
-            .is_some_and(|(_, record)| record.hooked);
+        let hooks = self.class_hooks(child, &properties);
         Some(LinkedClass {
             prototypes: self.prototypes(child, &methods)?,
             constructor,
@@ -2056,9 +2046,59 @@ impl<'a, H: Copy> Linker<'a, H> {
             methods,
             constants: self.member_rows::<ClassConstDecl>(child, usize::MAX)?,
             properties,
-            hooked,
+            hooks,
             interfaces: self.interface_list(child)?,
         })
+    }
+
+    /// Where `child`'s property hooks are once its `properties` stand:
+    /// [`ClassHooks::Rows`] where a row's `prop_info` has hooks, its own
+    /// or ones `inherit_property_hook` left on it, as the compile and
+    /// `do_inherit_property` count `ce->num_hooked_props`; a parent's
+    /// private hooked property the class redeclares is no row and
+    /// counts nothing, but its hooks are still read under that
+    /// parent's scope ([`ClassHooks::ParentPrivate`]).
+    ///
+    /// ```php
+    /// class P { private $p = 1 { get => $this->p + 1; } function f() { return $this->p; } }
+    /// class Q extends P { private $p = 6; public $r = 2; }
+    /// $q = new Q;
+    /// var_dump($q->f(), get_object_vars($q));
+    /// foreach ($q as $k => $v) echo "$k=$v\n";
+    /// echo json_encode($q), "\n";
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// array(1) {
+    ///   ["r"]=>
+    ///   int(2)
+    /// }
+    /// r=2
+    /// {"r":2}
+    /// ```
+    fn class_hooks(&self, child: &'a ClassDecl, properties: &Rows<Row<H>, Exact>) -> ClassHooks {
+        let lookup = |name: &[u8]| (self.lookup)(name).map(Held::plain);
+        let rows = properties.rows().iter().any(|row| {
+            self.row_member::<PropertyDecl>(child, row)
+                .is_some_and(|(by, property)| {
+                    property.hooks.is_some()
+                        || resolve_property(by, &property.name.0, &lookup)
+                            .is_some_and(|resolved| resolved.is_hooked())
+                })
+        });
+        if rows {
+            return ClassHooks::Rows;
+        }
+        let parent = child
+            .parent
+            .as_ref()
+            .and_then(|parent| (self.lookup)(&parent.0))
+            .and_then(|held| held.record)
+            .map_or(ClassHooks::Absent, |(_, record)| record.hooks);
+        match parent {
+            ClassHooks::Absent => ClassHooks::Absent,
+            ClassHooks::ParentPrivate | ClassHooks::Rows => ClassHooks::ParentPrivate,
+        }
     }
 
     /// `common.prototype`'s scope for each row of `child`'s function

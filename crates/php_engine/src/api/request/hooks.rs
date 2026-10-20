@@ -9,7 +9,7 @@
 //! written directly (`zend_should_call_hook`), and a virtual property,
 //! which has none, is refused.
 
-use php_link::{Held, Resolved, ResolvedHook, resolve_property};
+use php_link::{ClassHooks, Held, Resolved, ResolvedHook, resolve_property};
 use php_unit::decl::{Bare, ClassDecl, FunctionDecl, HookKind, MethodDecl, Visibility};
 
 use super::{Link, Member, MemberAt, Request};
@@ -106,7 +106,7 @@ impl Request {
     /// with no hooks, one declared `static`, and a name no class of the
     /// chain declares.
     pub(crate) fn hooked(&self, class: ClassId, name: &[u8]) -> Option<Hooked> {
-        if !self.class_has_hooks(class) {
+        if self.class_hooks(class) == ClassHooks::Absent {
             return None;
         }
         let (class, resolved) = self.scoped_property(class, name)?;
@@ -1115,27 +1115,51 @@ impl Request {
         Ok(None)
     }
 
-    /// Whether any class of `class`'s chain declares a hooked property,
-    /// php's `ce->num_hooked_props`. A linked class answers from its
-    /// record, where a parent's private hooked property is counted though
-    /// the child's rows leave it out:
+    /// php's `ce->num_hooked_props != 0`: whether a row of `class`'s
+    /// properties table has hooks, which `get_object_vars`, the encoders
+    /// and `foreach` read the object through the hooks' table and
+    /// iterator for. A parent's private hooked property the class
+    /// redeclares is no row, though the parent's scope still reads it
+    /// through its hooks ([`ClassHooks::ParentPrivate`]):
     ///
     /// ```php
-    /// class P { private $x { get => 5; } function f() { return $this->x; } }
+    /// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); $p = memory_get_peak_usage(); $u = memory_get_usage(); echo $p - $s, ' ', $u - $s, "\n"; }
+    /// class P { private $x { get => 5; } protected $q = 3; public $r = 4; function f() { return $this->x; } }
     /// class C extends P {}
-    /// var_dump((new C)->f());
+    /// class R extends P { public $q = 5; private $x = 6; public $s1=1; public $s2=1; public $s3=1; public $s4=1; public $s5=1; public $s6=1; }
+    /// var_dump((new C)->f(), (new R)->f());
+    /// $r = new R;
+    /// pk(fn () => get_object_vars($r));
     /// ```
     /// ```expect
     /// int(5)
+    /// int(5)
+    /// 728 696
     /// ```
     pub(crate) fn class_has_hooks(&self, class: ClassId) -> bool {
+        self.class_hooks(class) == ClassHooks::Rows
+    }
+
+    /// Where `class`'s property hooks are, its linked record's
+    /// [`php_link::LinkedClass::hooks`], or for a class with no record
+    /// read off its chain's declarations by the same rule.
+    fn class_hooks(&self, class: ClassId) -> ClassHooks {
         if let Some(record) = self.linked_class(class) {
-            return record.hooked;
+            return record.hooks;
         }
-        self.lineage(class).any(|here| {
-            self.class_decl(here)
-                .is_some_and(|decl| decl.properties.iter().any(|p| p.hooks.is_some()))
-        })
+        let mut hooks = ClassHooks::Absent;
+        for here in self.lineage(class) {
+            let Some(decl) = self.class_decl(here) else {
+                continue;
+            };
+            for property in decl.properties.iter().filter(|p| p.hooks.is_some()) {
+                if self.row_hooked(class, &property.name.0).is_some() {
+                    return ClassHooks::Rows;
+                }
+                hooks = ClassHooks::ParentPrivate;
+            }
+        }
+        hooks
     }
 
     /// `zend_hooked_object_build_properties`, the table
