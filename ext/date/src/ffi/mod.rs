@@ -24,7 +24,7 @@
 //! under a lend gives its memory back ([`crate::lent`]).
 //!
 //! Beside timelib is the one call into the platform's C library,
-//! [`strftime`], which reads the calling thread's `LC_TIME`, the
+//! [`Strftime`], which reads the calling thread's `LC_TIME`, the
 //! request's own once ext/standard's `setlocale()` has installed one
 //! (design §5.14, revision 40).
 //!
@@ -1458,47 +1458,57 @@ pub(crate) struct BrokenDown<'a> {
     pub zone: &'a [u8],
 }
 
-/// `strftime(3)` under the thread's `LC_TIME`, as `php_strftime`
-/// (`Z/ext/date/php_date.c:1335`) calls it: into 256 bytes, then twice
-/// as many each time it answers nothing, up to 4096, so `None` both
-/// where the text is longer than 4095 bytes and where it is empty.
-/// The format and the zone are read to their first NUL.
-pub(crate) fn strftime(format: &[u8], tm: &BrokenDown<'_>) -> Option<Vec<u8>> {
-    let format = c_string(format);
-    let zone = c_string(tm.zone);
-    let int = |n: i64| c_int::try_from(n).unwrap_or(c_int::MAX);
-    let fields = libc::tm {
-        tm_sec: int(tm.sec),
-        tm_min: int(tm.min),
-        tm_hour: int(tm.hour),
-        tm_mday: int(tm.mday),
-        tm_mon: int(tm.mon),
-        tm_year: int(tm.year),
-        tm_wday: int(tm.wday),
-        tm_yday: int(tm.yday),
-        tm_isdst: c_int::from(tm.isdst),
-        tm_gmtoff: libc::c_long::try_from(tm.gmtoff).unwrap_or(0),
-        tm_zone: zone.as_ptr().cast_mut(),
-    };
-    let mut len = 256;
-    for _ in 0..5 {
-        let mut buf = vec![0u8; len];
-        // SAFETY: `buf` has `len` writable bytes, `strftime` writes at
-        // most that many, and the format and the `tm` it reads, whose
-        // zone points at `zone`, outlive the call.
-        let written = unsafe {
+/// `strftime(3)` under the thread's `LC_TIME` over one `struct tm` and
+/// one format, as `php_strftime` (`Z/ext/date/php_date.c:1335`) calls it
+/// into the request's string it grows: the format and the zone read to
+/// their first NUL, terminated once here, and the fields laid out as C's.
+pub(crate) struct Strftime {
+    format: CString,
+    zone: CString,
+    tm: libc::tm,
+}
+
+impl Strftime {
+    /// The format and the `struct tm` of `tm`, ready to write.
+    pub(crate) fn new(format: &[u8], tm: &BrokenDown<'_>) -> Strftime {
+        let int = |n: i64| c_int::try_from(n).unwrap_or(c_int::MAX);
+        Strftime {
+            format: c_string(format),
+            zone: c_string(tm.zone),
+            tm: libc::tm {
+                tm_sec: int(tm.sec),
+                tm_min: int(tm.min),
+                tm_hour: int(tm.hour),
+                tm_mday: int(tm.mday),
+                tm_mon: int(tm.mon),
+                tm_year: int(tm.year),
+                tm_wday: int(tm.wday),
+                tm_yday: int(tm.yday),
+                tm_isdst: c_int::from(tm.isdst),
+                tm_gmtoff: libc::c_long::try_from(tm.gmtoff).unwrap_or(0),
+                tm_zone: ptr::null_mut(),
+            },
+        }
+    }
+
+    /// `strftime(buf, sizeof buf, format, &tm)`: the bytes written into
+    /// `buf` before its NUL, or 0 where the text and its NUL do not fit
+    /// or the text is empty.
+    pub(crate) fn write(&self, buf: &mut [u8]) -> usize {
+        let fields = libc::tm {
+            tm_zone: self.zone.as_ptr().cast_mut(),
+            ..self.tm
+        };
+        // SAFETY: `buf` has `buf.len()` writable bytes, `strftime` writes
+        // at most that many, and the format and the `tm` it reads, whose
+        // zone points at `self.zone`, outlive the call.
+        unsafe {
             libc::strftime(
                 buf.as_mut_ptr().cast::<c_char>(),
-                len,
-                format.as_ptr(),
+                buf.len(),
+                self.format.as_ptr(),
                 &raw const fields,
             )
-        };
-        if written != 0 && written != len {
-            buf.truncate(written);
-            return Some(buf);
         }
-        len *= 2;
     }
-    None
 }
