@@ -6,9 +6,6 @@ use super::{Time, Zone, parse_zone};
 use crate::State;
 use crate::lent::Lent;
 
-#[path = "storage_proof.rs"]
-mod storage_proof;
-
 /// Whether `zone` is the very zone `cached` holds, not a second parse.
 fn same(zone: Option<&Arc<Zone>>, cached: &Arc<Zone>) -> bool {
     zone.is_some_and(|zone| Arc::ptr_eq(zone, cached))
