@@ -570,8 +570,8 @@ pub enum Where {
 /// `unless_pattern` qualify `deny_pattern`; `with` qualifies `deny_argv` and
 /// `require_argv`, one phrase or a list of them, a word or a command and
 /// its subcommand (`"git add"`); `unless_argv` qualifies `deny_argv`;
-/// `deny_macros` qualifies `deny_types`; each is refused beside any other
-/// predicate.
+/// `deny_macros` qualifies `deny_types`; `allow_in_tests` qualifies
+/// `deny_lints`; each is refused beside any other predicate.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -609,6 +609,13 @@ pub struct Predicates {
     pub on: Option<String>,
     pub deny: Option<bool>,
     pub deny_lints: Option<Vec<String>>,
+    /// The `deny_lints` lints a test may still trip, each rendered as
+    /// clippy's own `allow-*-in-tests` key ([`IN_TESTS`]) into the
+    /// `clippy.toml` the scope reaches, so a `#[test]` fn and a
+    /// `#[cfg(test)]` module may trip them while the deny holds every
+    /// other line (#3078). A lint clippy has no such key for, or one the
+    /// rule does not deny, is refused.
+    pub allow_in_tests: Option<Vec<String>>,
     pub check: Option<String>,
     pub avoid_from: Option<AvoidFrom>,
     pub generated: Option<Generated>,
@@ -679,6 +686,25 @@ impl AvoidFrom {
     }
 }
 
+/// Each lint `lints.no-panic` denies that clippy exempts a test from by a
+/// key of its own configuration, with that key: what `allow_in_tests` may
+/// list and [`crate::generated`] renders (#3078). `unreachable`, `todo`
+/// and `unimplemented` have none. Another of clippy's in-tests keys joins
+/// with the rule that first denies its lint.
+pub(crate) const IN_TESTS: [(&str, &str); 3] = [
+    ("clippy::unwrap_used", "allow-unwrap-in-tests"),
+    ("clippy::expect_used", "allow-expect-in-tests"),
+    ("clippy::panic", "allow-panic-in-tests"),
+];
+
+/// The clippy key that exempts tests from `lint`, where it has one.
+pub(crate) fn in_tests_key(lint: &str) -> Option<&'static str> {
+    IN_TESTS
+        .iter()
+        .find(|(l, _)| *l == lint)
+        .map(|(_, key)| *key)
+}
+
 impl Predicates {
     /// The predicate names, in the design's order, `require_argv` after
     /// the `deny_argv` it stands beside.
@@ -738,7 +764,7 @@ impl Predicates {
     /// A qualifier that has no predicate to qualify: `unless` without
     /// `deny_pattern`, `with` without `deny_argv` or `require_argv`,
     /// `unless_argv` without `deny_argv`, `deny_macros` without
-    /// `deny_types`.
+    /// `deny_types`, `allow_in_tests` without `deny_lints`.
     pub fn orphaned_qualifier(&self) -> Option<&'static str> {
         if self.unless.is_some() && self.deny_pattern.is_none() {
             Some("unless")
@@ -750,6 +776,8 @@ impl Predicates {
             Some("unless_argv")
         } else if self.deny_macros.is_some() && self.deny_types.is_none() {
             Some("deny_macros")
+        } else if self.allow_in_tests.is_some() && self.deny_lints.is_none() {
+            Some("allow_in_tests")
         } else {
             None
         }
@@ -1011,12 +1039,21 @@ impl Manifest {
             }
             if let Some(qualifier) = rule.predicate.orphaned_qualifier() {
                 bail!(
-                    "rule \"{}\" has `{qualifier}` beside `{}`; `unless` and `unless_pattern` qualify deny_pattern, `with` qualifies deny_argv or require_argv, `unless_argv` qualifies deny_argv and `deny_macros` qualifies deny_types",
+                    "rule \"{}\" has `{qualifier}` beside `{}`; `unless` and `unless_pattern` qualify deny_pattern, `with` qualifies deny_argv or require_argv, `unless_argv` qualifies deny_argv, `deny_macros` qualifies deny_types and `allow_in_tests` qualifies deny_lints",
                     rule.id,
                     named[0]
                 );
             }
             let p = &rule.predicate;
+            if let Some(lint) = p.allow_in_tests.iter().flatten().find(|lint| {
+                in_tests_key(lint).is_none() || !p.deny_lints.iter().flatten().any(|d| d == *lint)
+            }) {
+                bail!(
+                    "rule \"{}\" allows {lint} in tests; `allow_in_tests` lists lints the rule denies, each one clippy has an allow-*-in-tests key for: {}",
+                    rule.id,
+                    IN_TESTS.map(|(lint, _)| lint).join(", ")
+                );
+            }
             if let Some((element, excuse)) =
                 p.unless_argv.iter().flatten().find(|(element, excuse)| {
                     !p.deny_argv.iter().flatten().any(|d| d == *element)

@@ -550,6 +550,7 @@ id = "lints.no-panic"
 scope = ["crates/*", "ext/*", "sapi/*"]  # every crate a request runs through; php_syntax because the parser runs inside every request (#236), the rest measured clean (#1917)
 exempt = ["tests", "xtask", "crates/php_macros"]
 deny_lints = ["clippy::unwrap_used", "clippy::expect_used", "clippy::panic", "clippy::unreachable", "clippy::todo", "clippy::unimplemented"]
+allow_in_tests = ["clippy::unwrap_used", "clippy::expect_used", "clippy::panic"]  # rendered as clippy's allow-*-in-tests keys (#3078)
 text = "Internal invariant failures are InternalError fatals with a message, not panics (design §10)."
 
 [[rule]]

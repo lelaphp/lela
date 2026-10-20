@@ -557,9 +557,4 @@ impl Outgoing {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a failed test panics; seams.toml rule lints.no-panic holds no test module"
-)]
 mod tests;
