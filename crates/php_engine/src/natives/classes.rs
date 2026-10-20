@@ -499,6 +499,7 @@ fn add_hooked_vars(
     for (key, value) in rows {
         let (key, value) = match (key, declared.next()) {
             (Key::Str(name), Some(row)) => {
+                access_name_copy(req, &row.name, row.visibility)?;
                 if !visible(req, row.declaring, row.visibility, scope) {
                     continue;
                 }
@@ -566,6 +567,32 @@ fn declared_var_key(
         Unmangled::Plain | Unmangled::Illegal(_) => bytes,
     };
     Ok(Owner::adopt(req.string_init(bytes)?).into_key())
+}
+
+/// `zend_check_property_access` over a declared row php's table keys
+/// by its mangled name, a protected or a private one: the copy of the
+/// unmangled name it looks the property up by (`zend_string_init`),
+/// released before it answers, so `memory_get_peak_usage()` counts it
+/// above the array `get_object_vars()` is filling:
+///
+/// ```php
+/// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); $p = memory_get_peak_usage(); $u = memory_get_usage(); echo $p - $s, ' ', $u - $s, "\n"; }
+/// class Q { public $q = 5; private $p = 6; public $s1=1; public $s2=1; public $s3=1; public $s4=1; public $s5=1; public $s6=1; public $r = 4; }
+/// class H { private $p = 6; public $s1=1; public $s2=1; public $s3=1; public $s4=1; public $s5=1; public $s6=1; public $r { get => 4; } }
+/// $q = new Q; $h = new H;
+/// pk(fn () => get_object_vars($q));
+/// pk(fn () => get_object_vars($h));
+/// ```
+/// ```expect
+/// 728 696
+/// 784 376
+/// ```
+fn access_name_copy(req: &mut Request, name: &[u8], visibility: Visibility) -> Result<(), Thrown> {
+    if visibility != Visibility::Public {
+        let copy = Owner::adopt(req.string_init(name)?);
+        copy.give_up(req);
+    }
+    Ok(())
 }
 
 /// A hooked row of `get_object_vars()`' table read through its hook,
@@ -766,6 +793,9 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
             }
             Key::Str(name) => name,
         };
+        if let Some((_, visibility)) = declared {
+            access_name_copy(req, name.as_bytes(), visibility)?;
+        }
         let seen = req.property_row_visible(
             class,
             name.as_bytes(),
