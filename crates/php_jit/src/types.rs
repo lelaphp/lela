@@ -47,13 +47,6 @@
 //! so it carries a guard php's does not; and what a loop variable written
 //! before its loop holds is guarded once at entry where php's static
 //! inference over the whole function already knew it.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the pipeline builds what it records with #2958, and lower compiles it with #2955"
-    )
-)]
 
 mod build;
 pub(crate) mod lattice;

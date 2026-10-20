@@ -36,13 +36,6 @@
 //!
 //! **php's `PERF` and `PERF_DUMP` writers** ([`Perf`]) are the table's,
 //! written under the mutex by the publish that places the code.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the pipeline publishes a Compiled with #2958, and dispatch enters a trace with #2959"
-    )
-)]
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -69,9 +62,8 @@ pub(crate) use perf::{Outputs, Perf};
 
 /// The `Pages` adapter a trace's code is mapped through on this target
 /// (`jit-design.md` §4.4): `MAP_JIT` on macOS aarch64; under Miri the
-/// heap adapter, the only one it runs; elsewhere none yet, so a table
-/// maps no arena and publishes no code, numbering as the interim
-/// pipeline does.
+/// heap adapter, the only one it runs; elsewhere none yet (#2943), so a
+/// table maps no arena and numbers each trace it publishes with no code.
 #[cfg(miri)]
 pub(crate) type Native = code::HeapPages;
 #[cfg(all(not(miri), target_os = "macos", target_arch = "aarch64"))]
@@ -154,6 +146,13 @@ pub(crate) enum Kind {
 
 /// One published trace (`jit-design.md` §4.5): its code, final, and what
 /// the crossing and the dispatch read of it, none of it written again.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "what dispatch::run and enter read of a trace they enter (#2959) and the disassembly reads"
+    )
+)]
 pub(crate) struct Trace<P: Pages = Native> {
     pub(crate) code: Code<P>,
     entry_offset: usize,
@@ -194,6 +193,10 @@ impl<P: Pages> std::fmt::Debug for Trace<P> {
 /// links to, and its own word, zero at publication, which grows a side
 /// trace by the machine that grew the root.
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "dispatch::run follows a link (#2959)")
+)]
 pub(crate) struct Exit {
     pub(crate) opline: Option<OplineIdx>,
     pub(crate) landing: Landing,
@@ -364,8 +367,8 @@ impl<P: Pages> TraceTable<P> {
     /// `opcache.jit_buffer_size` asks, in whole chunks and at least one,
     /// its `PERF` lines and `PERF_DUMP` records written as
     /// the engine's `outputs` started them. An arena that cannot be
-    /// mapped is none: the table numbers, and every publish finds no room,
-    /// [`Full::Code`].
+    /// mapped is none: each publish numbers its trace and keeps no code
+    /// (revision 27).
     pub(crate) fn new(policy: &Policy, outputs: &Outputs) -> TraceTable<P> {
         TraceTable::with_perf(policy, Perf::of(outputs))
     }
@@ -447,6 +450,9 @@ impl<P: Pages> TraceTable<P> {
     /// its slot, then the next id's. Transactional: the counts, the slot
     /// and the next id are written last, after everything that can fail
     /// or panic, so a publish that does either leaves them as they were.
+    /// Where the table has no arena, the trace is numbered and counted
+    /// and its slot left empty, so its word reads compiled and every
+    /// reader takes it as not compiled (`jit-design.md` §3.2).
     pub(crate) fn publish(&self, compiled: Compiled, start: Start) -> Result<TraceId, Unpublished> {
         let mut writer = self.writer();
         let exits = u32::try_from(compiled.exits.len())
@@ -477,11 +483,16 @@ impl<P: Pages> TraceTable<P> {
                 word: Word::default(),
             })
             .collect();
-        let placed =
-            (writer.arena.as_mut()).map(|arena| arena.publish(&compiled.bytes, compiled.align));
-        let Some(Ok(code)) = placed else {
-            return Err(Full::Code.into());
+        let Some(arena) = writer.arena.as_mut() else {
+            // An arena this target cannot map yet (revision 27): the trace
+            // numbered and counted as published, its slot left empty, so
+            // its word reads compiled and every reader takes it as not.
+            writer.counts.count(admitted, exits);
+            self.next
+                .store(admitted.id.get().saturating_add(1), Ordering::Release);
+            return Ok(admitted.id);
         };
+        let code = (arena.publish(&compiled.bytes, compiled.align)).map_err(|_| Full::Code)?;
         let (id, entry) = (admitted.id, code.entry());
         if !self.vacant(id) {
             return Err(Unpublished::Malformed("a slot written twice"));
@@ -506,21 +517,6 @@ impl<P: Pages> TraceTable<P> {
         self.next
             .store(id.get().saturating_add(1), Ordering::Release);
         Ok(id)
-    }
-
-    /// One more trace numbered as published with no code, the interim
-    /// pipeline's until a `Backend` lowers a trace (#2955, #2958): held to
-    /// the same bounds and counted the same, its slot left empty, so its
-    /// word reads compiled and every reader takes it as not compiled
-    /// (`jit-design.md` §3.2, revision 25).
-    pub(crate) fn number(&self, start: Start) -> Result<TraceId, Unpublished> {
-        let mut writer = self.writer();
-        let next = self.next.load(Ordering::Relaxed);
-        let admitted = writer.counts.admit(self.bounds, next, start, 0)?;
-        writer.counts.count(admitted, 0);
-        self.next
-            .store(admitted.id.get().saturating_add(1), Ordering::Release);
-        Ok(admitted.id)
     }
 
     /// Whether the slot `id` names stands unwritten, so [`TraceTable::fill`]

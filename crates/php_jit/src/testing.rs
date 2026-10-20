@@ -73,6 +73,10 @@ impl Drop for Scratch {
     }
 }
 
+/// Whether this target maps a code arena, so a published trace keeps
+/// its code; elsewhere a table numbers what it publishes (#2943).
+pub(crate) const MAPS_CODE: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+
 /// An engine bound to `T` under `ini`, the request's cache holding every
 /// file the moment it is written.
 pub(crate) fn engine<T: Tier>(ini: &[(&str, &str)]) -> Engine {

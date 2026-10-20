@@ -16,15 +16,17 @@ use crate::testing::{self, function_of};
 
 /// Where the recording tier starts, as the engine's ini says: the
 /// activation of the function `record.function` names (empty for the
-/// included file's own code), then, for `record.start=loop`, the first
+/// included file's own code), or with `record.every` set, of every
+/// function once, then, for `record.start=loop`, the first
 /// loop header it reaches past the `record.headers` it passes and, for
 /// `return`, the first return, stepping
 /// only within that frame. `record.compiled` and `record.blacklisted`
 /// name functions met before whose entry words are settled so first;
 /// `record.compiled_inner` names one whose loop headers after its first
 /// are settled compiled.
-pub(crate) const PLAN: [&str; 6] = [
+pub(crate) const PLAN: [&str; 7] = [
     "record.function",
+    "record.every",
     "record.start",
     "record.headers",
     "record.compiled",
@@ -33,12 +35,14 @@ pub(crate) const PLAN: [&str; 6] = [
 ];
 
 /// What the recording tier keeps, the request's: the op arrays of the
-/// functions it met, the records it took, and whether the request
-/// recorded when each site was asked.
+/// functions it met, the records it took, the holder of the word each
+/// grew from, in an epoch whose trace table it made, and whether the
+/// request recorded when each site was asked.
 #[derive(Debug, Default)]
 pub(crate) struct Kept {
     pub(crate) funcs: Vec<(Vec<u8>, FuncRef)>,
     pub(crate) taken: Vec<Recorded>,
+    pub(crate) roots: Vec<Holder>,
     pub(crate) asked: Vec<bool>,
     pub(crate) done: bool,
 }
@@ -65,9 +69,11 @@ impl Tier for Records {
                 kept.funcs.push((name.clone(), func));
             }
         }
-        let wanted =
-            plan(req, "record.function").as_deref() == Some(name.as_deref().unwrap_or_default());
-        if !wanted || held.is_none() || req.state::<Kept>().done {
+        let every = plan(req, "record.every").is_some_and(|set| !set.is_empty()) && name.is_some();
+        let wanted = every
+            || plan(req, "record.function").as_deref() == Some(name.as_deref().unwrap_or_default());
+        let again = every && held.is_some_and(|func| !recorded_from(req, func));
+        if !wanted || held.is_none() || (req.state::<Kept>().done && !again) {
             return Flow::Continue;
         }
         req.state::<Kept>().done = true;
@@ -87,9 +93,17 @@ impl Tier for Records {
         let Some(policy) = req.engine::<Recorder>().map(|recorder| recorder.0.clone()) else {
             return Flow::Continue;
         };
+        let root = Holder::Root {
+            epoch: tier::epoch(req),
+            func: held.unwrap_or(REQUEST),
+            at,
+        };
+        crate::table::of(req, &policy, &crate::table::Outputs::none());
         match run(req, frame, start, at, &policy) {
             Ok((recorded, ended)) => {
-                req.state::<Kept>().taken.push(recorded);
+                let kept = req.state::<Kept>();
+                kept.taken.push(recorded);
+                kept.roots.push(root);
                 if ended.stepped {
                     Flow::Resume(ended.at)
                 } else {
@@ -180,6 +194,15 @@ pub(crate) fn settle_words(req: &mut Request) {
         }
     }
 }
+
+/// Whether the recording tier recorded from `func`'s entry already.
+fn recorded_from(req: &mut Request, func: FuncRef) -> bool {
+    (req.state::<Kept>().roots.iter())
+        .any(|root| matches!(root, Holder::Root { func: f, .. } if *f == func))
+}
+
+/// The name of an op array no epoch holds.
+const REQUEST: FuncRef = FuncRef::at(MapPtrOffset::Request(0));
 
 /// The op array of the function `name` the tier met.
 pub(crate) fn met(req: &mut Request, name: &[u8]) -> Option<FuncRef> {
