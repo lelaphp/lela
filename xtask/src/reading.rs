@@ -1012,8 +1012,7 @@ impl Store {
     }
 
     fn read_file(path: &Path) -> Result<Reading> {
-        let text = crate::read(path)?;
-        toml::from_str(&text).with_context(|| format!("{}", path.display()))
+        crate::read_toml(path)
     }
 }
 

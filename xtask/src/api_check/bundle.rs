@@ -238,10 +238,7 @@ fn and<S: AsRef<str>>(names: &[S]) -> String {
 /// features it switches on directly. `dep:` entries and `<dep>/<feature>`
 /// entries name no feature of the bundle and are left out.
 fn features(krate: &Present) -> Result<BTreeMap<String, Vec<String>>> {
-    let path = krate.dir.join("Cargo.toml");
-    let text = crate::read(&path)?;
-    let table: toml::Table =
-        toml::from_str(&text).with_context(|| format!("{}", path.display()))?;
+    let table: toml::Table = crate::read_toml(&krate.dir.join("Cargo.toml"))?;
     let Some(features) = table.get("features").and_then(Value::as_table) else {
         return Ok(BTreeMap::new());
     };

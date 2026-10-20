@@ -30,9 +30,7 @@ pub struct Package {
 
 impl CargoLock {
     pub fn load(root: &Path) -> Result<CargoLock> {
-        let path = root.join(FILE);
-        let text = crate::read(&path)?;
-        toml::from_str(&text).with_context(|| format!("{}", path.display()))
+        crate::read_toml(&root.join(FILE))
     }
 
     /// The number of third-party packages, those with a `source`:
