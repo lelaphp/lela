@@ -25,7 +25,7 @@ use php_unit::{PublishedUnit, Unit};
 use crate::api::abi::GcTable;
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, PhpObject, PhpRef, PhpString, Resource, Value};
+use crate::api::values::{ClassId, PhpObject, Resource, Value};
 pub use crate::engine::Standard;
 use crate::engine::{OutputSink, RequestDescription, Shared};
 use crate::exec::{self, Vm};
@@ -295,8 +295,8 @@ pub struct Request {
     /// included a file, `zend_rebuild_symbol_table`'s, which goes with
     /// its frame. A table's names stand in the order they were attached
     /// or written, each once; while a frame is attached to a name the
-    /// bucket points at the frame's CV ([`Symbol::Indirect`]) and the
-    /// frame owns the value, and `zend_detach_symbol_table` moves the
+    /// bucket is an `IS_INDIRECT` to the frame's CV ([`SymbolTable`]) and
+    /// the frame owns the value, and `zend_detach_symbol_table` moves the
     /// value into the bucket when the frame leaves. The first table
     /// outlives the main frame, so a variable the program wrote at the
     /// top level is still an owner while the shutdown functions are
@@ -305,14 +305,16 @@ pub struct Request {
     /// after the extensions' `rshutdown`. `$GLOBALS`, `compact`,
     /// `extract` and `get_defined_vars` read these tables (design §5.6).
     tables: Vec<SymbolTable>,
+    /// `EG(symtable_cache)`: the rebuilt tables a frame's end cleaned and
+    /// kept for the next rebuild, at most `SYMTABLE_CACHE_SIZE`
+    /// ([`Request::rebuild_symbol_table`]).
+    symtable_cache: Vec<php_heap::Arr>,
     /// `EG(included_files)`: the resolved path of every file compiled by
     /// the request, the primary one first (`php_execute_script_ex`),
     /// then each an `INCLUDE_OR_EVAL` opened, which the once forms read
     /// before they open one (`zend_include_or_eval`), on the request's
     /// heap ([`hash_bytes::IncludedFiles`]).
     included_files: hash_bytes::IncludedFiles,
-    /// The rebuilt symbol tables' bytes kept for the next rebuild ([`hash_bytes::HashTables`]).
-    hash_bytes: hash_bytes::HashTables,
     /// The request's constants and `PHP_SAPI` ([`constants::Constants`]).
     constants: constants::Constants,
     /// The class constants' state ([`class_constants::ClassConstants`]).
@@ -534,41 +536,30 @@ pub(crate) const DEBUG_BACKTRACE_PROVIDE_OBJECT: i64 = 1;
 /// `DEBUG_BACKTRACE_IGNORE_ARGS`: no row carries its arguments.
 pub(crate) const DEBUG_BACKTRACE_IGNORE_ARGS: i64 = 2;
 
-/// One bucket of a symbol table, php's zval in `EG(symbol_table)` or a
-/// rebuilt one: the value the table owns, or `IS_INDIRECT`, the CV of the
-/// frame the name is attached to (`zend_attach_symbol_table`), which
-/// owns the value while the frame stands.
-///
-/// `Held` is the value the table owns kept in a place of its own: php
-/// hands a fetch by name for writing the bucket's own `zval *`, and a
-/// bucket here moves as the list of names grows, so the first such fetch
-/// moves the value into a cell that does not ([`Request::symbol_place`]).
-/// The cell is the table's alone and never a PHP reference: what it holds
-/// is the bucket's value, a reference among them.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum Symbol {
-    Value(Value),
-    Held(PhpRef),
-    Indirect(FrameRef, u32),
-}
-
-/// One symbol table: its names in order, and the function frame it was
-/// rebuilt for, which frees it when it pops; `EG(symbol_table)` has no
-/// owner and lives as long as the request.
-#[derive(Debug, Default)]
+/// One symbol table, php's `zend_array` of variables (design §5.6), and
+/// the function frame it was rebuilt for, which frees it when it pops;
+/// `EG(symbol_table)` has no owner and lives as long as the request. A
+/// bucket holds the value the table owns, or an `IS_INDIRECT` to the CV
+/// of the frame attached to the name (`zend_attach_symbol_table`), which
+/// owns the value while the frame stands, so a fetch by name for writing
+/// hands on the bucket's own `zval *` ([`Request::symbol_place`]).
 pub(crate) struct SymbolTable {
     owner: Option<FrameRef>,
-    /// Each name with what it holds, the name one owner the table holds:
-    /// a CV's interned name, or the string the program wrote it with.
-    entries: Vec<(PhpString, Symbol)>,
-    /// What the table holds on the request's heap: a rebuilt table's
-    /// ([`Request::rebuilt_table_bytes`]), and `EG(symbol_table)`'s data,
-    /// its `zend_array` being `EG`'s own ([`SymbolTable::global`]).
-    bytes: Option<hash_bytes::HashBytes>,
+    rows: Rows,
     /// How many times its buckets were reached to be written, so a frame
     /// that attached to it knows whether they stand as it left them
     /// ([`exec::Annex::attached`]).
     changes: u32,
+}
+
+/// Where a symbol table's buckets stand: `EG(symbol_table)`'s header is
+/// `EG`'s own, off the request's heap; a rebuilt table is
+/// `zend_new_array`'s, on it; and a table freed below one that stands is
+/// left in its place with none.
+enum Rows {
+    Embedded(php_heap::EmbeddedArr),
+    Own(php_heap::Arr),
+    Gone,
 }
 
 /// What `zend_include_or_eval` handed the handler: `ZEND_FAKE_OP_ARRAY`,
@@ -1047,8 +1038,8 @@ impl Request {
             post: post::Post::default(),
             variables: variables::Variables::default(),
             tables: vec![SymbolTable::global()],
+            symtable_cache: Vec::new(),
             included_files: hash_bytes::IncludedFiles::default(),
-            hash_bytes: hash_bytes::HashTables::default(),
             constants: constants::Constants::default(),
             class_constants: class_constants::ClassConstants::default(),
             class_natives: Vec::new(),

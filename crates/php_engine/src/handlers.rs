@@ -6803,7 +6803,7 @@ pub(crate) fn isset_isempty_var<T: Tier>(
         }
     };
     let table = if op.extended_value & FETCH_GLOBAL != 0 {
-        req.global_table()
+        exec::TableId::GLOBAL
     } else {
         req.rebuild_symbol_table(frame)
     };
@@ -6886,7 +6886,7 @@ pub(crate) fn unset_var<T: Tier>(
         }
     };
     let table = if op.extended_value & FETCH_GLOBAL != 0 {
-        req.global_table()
+        exec::TableId::GLOBAL
     } else {
         req.rebuild_symbol_table(frame)
     };
@@ -6968,7 +6968,7 @@ fn fetch_named(
     let global = op.extended_value & (FETCH_GLOBAL | FETCH_GLOBAL_LOCK) != 0;
     let out = exec::temporary_slot(code, op.out);
     let table = if global {
-        req.global_table()
+        exec::TableId::GLOBAL
     } else {
         req.rebuild_symbol_table(frame)
     };
@@ -7011,11 +7011,12 @@ fn fetch_named(
             if req.is_pending() {
                 None
             } else {
-                let place = match req.symbol_place(table, name, mode != ByName::Unset) {
-                    Ok(place) => place,
-                    Err(thrown) => return threw(req, frame, &thrown),
-                };
-                let Some(place) = place else {
+                // What the `VAR` held is given up before the fetch: a
+                // destructor it serves can grow the table, which moves
+                // the bucket the place names.
+                let previous = req.take_slot(frame, out);
+                req.release(previous);
+                let Some(place) = req.symbol_place(table, name, mode != ByName::Unset) else {
                     return Err(Fatal::error(format!(
                         "InternalError: a fetch by name laid ${shown} down and the table does not hold it"
                     )));
@@ -7023,8 +7024,6 @@ fn fetch_named(
                 if exec::value_of(place.read()).tag() == TypeTag::Undef {
                     place.write(php_heap::Zval::null());
                 }
-                let previous = req.take_slot(frame, out);
-                req.release(previous);
                 if let Some(var) = req.slot_ptr(frame, out) {
                     var.write(php_heap::Zval::indirect(place));
                 }

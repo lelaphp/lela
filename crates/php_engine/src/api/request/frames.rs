@@ -464,9 +464,9 @@ impl Request {
     /// below it while a suspend that passed through leaves each waiting
     /// on the one under it, to the bottom frame of the last, where
     /// `zend_fiber_suspend` cut `prev_execute_data`
-    /// ([`crate::fiber::take_chain`]). The request's own stack is kept
-    /// where [`crate::fiber::Fibers::request_stack`] finds it, so
-    /// `EG(symbol_table)`'s CVs are read where they stand, and the serve
+    /// ([`crate::fiber::take_chain`]). The request's own stack stays
+    /// where it stands, so `EG(symbol_table)`'s buckets still name its
+    /// CVs, and the serve
     /// holds one owner of each coroutine's object on the chain, so nothing
     /// `f` does destroys one meanwhile. As in [`Request::on_stack`], the
     /// error-reporting level, the trace number and the machine stack's
