@@ -204,6 +204,7 @@ impl StackLimit {
             thrown: false,
             stage: crate::Stage::Compiling,
             declared: None,
+            keys_made: 0,
         })
     }
 }

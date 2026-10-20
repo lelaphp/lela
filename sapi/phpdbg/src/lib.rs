@@ -34,7 +34,6 @@ mod shown;
 mod watch;
 
 use std::ffi::OsString;
-use std::io::Write as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::process::ExitCode;
 
@@ -153,11 +152,10 @@ fn read_line(argv: &[Vec<u8>]) -> Line {
 
 /// `php_sapi_phpdbg_log_message` before phpdbg is booted, as it stands
 /// while php starts (`Z/sapi/phpdbg/phpdbg.c:767-768`): the entry and a
-/// newline on stdout.
+/// newline to C's `stdout`, an `fprintf`, which holds them past the
+/// program's output where stdout is not a terminal.
 fn log_message(entry: &[u8]) {
-    let mut stdout = std::io::stdout().lock();
-    stdout.write_all(entry).ok();
-    stdout.write_all(b"\n").ok();
+    php_sapi::stdio::write(&[entry, b"\n"].concat());
 }
 
 /// The host's `main`.

@@ -30,8 +30,13 @@ ffi::C14nOut
 ffi::C14nSelect
 ffi::C14nTarget
 ffi::Called
+ffi::ClassRows
 ffi::ClassType
 ffi::DocProps
+ffi::DocProps::class_rows
+ffi::DocProps::copy_classmap
+ffi::DocProps::mapped
+ffi::DocProps::set_class
 ffi::DocString
 ffi::DtdTable
 ffi::Dump
@@ -53,9 +58,9 @@ ffi::Expanded
 ffi::Exported
 ffi::Exported::class_type
 ffi::Exported::document
+ffi::Exported::mapped
 ffi::Exported::node
 ffi::Exported::of
-ffi::Exported::props
 ffi::Exported::set_class_type
 ffi::Fragment
 ffi::Function
@@ -230,6 +235,7 @@ ffi::NodeObject::class_type
 ffi::NodeObject::decrement_doc_ref
 ffi::NodeObject::decrement_node_ptr
 ffi::NodeObject::decrement_resource
+ffi::NodeObject::doc_props
 ffi::NodeObject::doc_refcount
 ffi::NodeObject::document_handlers
 ffi::NodeObject::document_node
@@ -237,6 +243,7 @@ ffi::NodeObject::has_document
 ffi::NodeObject::hold_node
 ffi::NodeObject::invalidate
 ffi::NodeObject::is_bound
+ffi::NodeObject::mapped
 ffi::NodeObject::modification
 ffi::NodeObject::private_data
 ffi::NodeObject::private_data_mut
@@ -327,6 +334,7 @@ ffi::SharedDoc
 ffi::SharedDoc::invalidate
 ffi::SharedDoc::props
 ffi::Source
+ffi::Switches
 ffi::TextReader
 ffi::TextReader::attribute_no
 ffi::TextReader::close
@@ -395,3 +403,16 @@ node_object
 register_export
 sniff_charset_from_stream
 switch_stream_ctx
+table::Table
+table::Table::add
+table::Table::allocated
+table::Table::free
+table::Table::is_empty
+table::Table::len
+table::Table::make_room
+table::Table::push
+table::Table::real_init
+table::Table::remove
+table::Table::rows
+table::Table::rows_mut
+table::Table::take_rows

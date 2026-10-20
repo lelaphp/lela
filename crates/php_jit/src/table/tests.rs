@@ -696,7 +696,7 @@ mod epoch {
             ("opcache.jit_debug", "258048"),
             ("opcache.jit_buffer_size", "64K"),
         ]);
-        let functions = 400;
+        let functions = 800;
         let mut program = String::new();
         for k in 0..functions {
             writeln!(program, "function f{k}($a) {{ return $a * {k} + 1; }}").unwrap_or_default();

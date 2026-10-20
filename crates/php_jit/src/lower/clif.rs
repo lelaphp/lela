@@ -207,10 +207,8 @@ struct Emit<'a> {
     calls: Vec<Variable>,
     /// Per kernel, its signature once imported.
     sigs: [Option<SigRef>; Kernel::ALL.len()],
-    /// Per exit, its block once a site branches to it, and a slot its
-    /// site wrote itself before it branched.
+    /// Per exit, its block once a site branches to it.
     exits: Vec<Option<Block>>,
-    written: Vec<Option<Slot>>,
     /// The block a kernel's refusal with no exit to take answers from.
     abandon: Option<Block>,
     /// The frame the trace runs in now.
@@ -243,7 +241,6 @@ impl<'a> Emit<'a> {
             calls: Vec::new(),
             sigs: [None; Kernel::ALL.len()],
             exits: vec![None; ir.exits.len()],
-            written: vec![None; ir.exits.len()],
             abandon: None,
             running: Frame::ROOT,
         }
@@ -596,9 +593,6 @@ impl<'a> Emit<'a> {
                 .get(at)
                 .ok_or_else(|| mismatch("an exit past the trace's"))?;
             for store in &spec.stores {
-                if self.written[at] == Some(store.slot) {
-                    continue;
-                }
                 match store.from {
                     Stored::Value(value) => {
                         if self.value(value)?.home == Home::Register {
@@ -610,6 +604,8 @@ impl<'a> Emit<'a> {
                         let held = Scalar::Bool(self.b.ins().iconst(I8, i64::from(b)));
                         self.store(store.slot, held)?;
                     }
+                    // Its site wrote the slot before it branched here.
+                    Stored::Copied(_) => {}
                 }
             }
             let number = u32::try_from(at).map_err(|_| mismatch("too many exits"))?;
@@ -1017,7 +1013,7 @@ impl<'a> Emit<'a> {
                     .is_some_and(|spec| {
                         spec.stores
                             .iter()
-                            .any(|store| store.from == Stored::Value(out))
+                            .any(|store| store.from == Stored::Copied(out))
                     });
                 let to = self.exit_block(guard.exit)?;
                 let failed = self.b.create_block();
@@ -1030,7 +1026,6 @@ impl<'a> Emit<'a> {
                     // The exit goes on past the fetch: the element is the
                     // slot's, copied as the fetch copies it.
                     self.copy(line, element, info, out_slot)?;
-                    self.written[usize::from(guard.exit.0)] = Some(out_slot);
                 }
                 self.b.ins().jump(to, &[]);
                 self.b.switch_to_block(on);

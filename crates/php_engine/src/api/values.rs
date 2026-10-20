@@ -191,10 +191,10 @@ impl PhpString {
     /// among them, which costs the request nothing, else a request-only
     /// unit's while it holds one, else a string of the request's made on
     /// the first ask and the same at every ask after. What a native
-    /// keeps a name as for the rest of the request where php's object
-    /// owns its copy, mysqlnd's column names; a name a declaration holds
-    /// that the caller copies is [`PhpString::declared`]. The `Err` is
-    /// the memory limit.
+    /// reads a name php hands on as `ZSTR_KNOWN` or `ZSTR_EMPTY_ALLOC()`
+    /// as; a name a declaration holds that the caller copies is
+    /// [`PhpString::declared`], and php's `zend_string_init_interned` is
+    /// [`PhpString::existing_interned`]. The `Err` is the memory limit.
     pub fn interned(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
         req.kept_string(bytes)
     }

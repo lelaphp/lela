@@ -20,9 +20,9 @@ use crate::node::DOMNode;
 use crate::object::Code;
 use crate::props::Prop;
 use crate::{
-    Read, adopt, check_qname, dom_error, dom_mut, fetch, file_path, get_ns, get_ns_unchecked,
-    instance_of, invalidate, nullable_object, object_for, or_false, passed, props_of, returned,
-    strict, string, validate_and_extract,
+    Read, adopt, check_qname, dom_error, fetch, file_path, get_ns, get_ns_unchecked, instance_of,
+    invalidate, nullable_object, object_for, or_false, passed, props_of, returned, strict, string,
+    validate_and_extract,
 };
 
 /// `XML_XML_NAMESPACE`.
@@ -248,7 +248,6 @@ fn read_switch(req: &mut Request, object: PhpObject, which: Switch) -> Read {
     })))
 }
 
-#[allow(clippy::unnecessary_wraps)] // the writer shape every row of a property table has
 fn write_switch(
     req: &mut Request,
     object: PhpObject,
@@ -256,7 +255,11 @@ fn write_switch(
     which: Switch,
 ) -> Result<(), Thrown> {
     let on = value.as_bool().unwrap_or(false);
-    if let Some(p) = dom_mut(req, object).and_then(|d| d.obj.props_mut()) {
+    let Some(mut obj) = crate::libxml_half(req, object) else {
+        return Ok(());
+    };
+    if let Some(p) = obj.props_mut(req)? {
+        let p = &mut p.switches;
         match which {
             Switch::Strict => p.strict_error = on,
             Switch::Format => p.format = on,
@@ -366,7 +369,7 @@ fn finish_loading(req: &mut Request, this: PhpObject, doc: Option<Node>) -> bool
             obj.decrement_doc_ref(req);
         }
         obj.adopt_document(req, doc);
-        obj.put_props(props);
+        obj.put_props(req, props);
         obj.set_class_type(class_type);
         obj.take_node(req, doc);
         if modification != 0 {
@@ -781,13 +784,13 @@ fn register_node_class_as(
             return Err(arg_value_error(req, 2, "not be an abstract class"));
         }
     }
-    if let Some(p) = dom_mut(req, this).and_then(|d| d.obj.props_mut()) {
-        p.classmap.retain(|(b, _)| *b != base);
-        if let Some(ext) = extended {
-            p.classmap.push((base, ext));
-        }
+    let Some(mut obj) = crate::libxml_half(req, this) else {
+        return Ok(());
+    };
+    match obj.props_mut(req)? {
+        Some(p) => p.set_class(req, base, extended),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Whether the node object is of a legacy document class.

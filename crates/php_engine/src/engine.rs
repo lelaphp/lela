@@ -1713,12 +1713,12 @@ impl Shared {
         match self.compiled_for(req, source, filename, kind) {
             Ok(unit) => Ok(Self::held_for(req, unit)),
             // What the refused compile had declared stands in the
-            // request after it ([`Request::declare_refused`]), a unit of
+            // request after it, and the keys it made are counted, as the
+            // refusal is raised ([`Request::declare_refused`]): a unit of
             // the request's holding the strings the compile made, which a
             // refusal that declared nothing gives up.
             Err(error) => {
                 let refused = CompileRefused::published(error, |unit| {
-                    req.count_keys_made(unit.runtime_keys.len());
                     let unit = req.take_unit(unit);
                     req.hold_compiled(&unit);
                     // An `eval`'s names, made as php's compile made them;
@@ -1739,7 +1739,7 @@ impl Shared {
     /// A unit compiled for `req` taken into it, the strings its compile
     /// made held by it.
     fn held_for(req: &mut Request, unit: Unit) -> PublishedUnit {
-        req.count_keys_made(unit.runtime_keys.len());
+        req.count_keys_made(u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX));
         req.note_loop_vars(unit.loop_vars);
         let unit = req.take_unit(unit);
         req.hold_compiled(&unit);

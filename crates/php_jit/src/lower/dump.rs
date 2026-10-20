@@ -221,6 +221,7 @@ impl<'a> Dump<'a> {
             let from = match store.from {
                 Stored::Value(value) => format!("#{}", value.0),
                 Stored::Bool(on) => on.to_string(),
+                Stored::Copied(value) => format!("copied #{}", value.0),
             };
             write!(text, " {}={from}", self.slot(store.slot))?;
         }
