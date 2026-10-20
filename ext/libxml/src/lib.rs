@@ -28,6 +28,7 @@ pub mod ffi;
 mod image_svg;
 mod load;
 mod mime_sniff;
+pub mod table;
 
 use php_ext::abi::{
     Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, Instance, OrFalse, Raw,

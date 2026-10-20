@@ -1193,7 +1193,10 @@ fn clone_node_of(
             };
             let copy =
                 crate::modern::document_object(req, modern_document_class(n), node, private)?;
-            copy_document_ref(req, this, *copy);
+            if let Err(thrown) = copy_document_ref(req, this, *copy) {
+                copy.give_up(req);
+                return Err(thrown);
+            }
             return Ok(copy.into_value());
         }
         let cloned = match crate::libxml_half(req, this) {
@@ -1215,8 +1218,11 @@ fn clone_node_of(
     };
     if is_document {
         let value = object_for(req, node, None)?;
-        if let Some(copy) = value.as_object().copied() {
-            copy_document_ref(req, this, copy);
+        if let Some(copy) = value.as_object().copied()
+            && let Err(thrown) = copy_document_ref(req, this, copy)
+        {
+            value.give_up(req);
+            return Err(thrown);
         }
         return Ok(value);
     }

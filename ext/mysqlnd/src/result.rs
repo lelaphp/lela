@@ -44,12 +44,14 @@ const ROW_BUFFER: usize = 16;
 const PACKET_ROW: usize = 680;
 
 /// `MYSQLND_FIELD`: one column as the server described it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Field {
-    /// `sname`: the name `zend_string_init_interned` interned, one of the
-    /// request's interned strings, which every row's key and every copy of
-    /// the column share.
-    pub name: PhpString,
+    /// `sname`: one owner of the name `zend_string_init_interned` made,
+    /// as opcache installs it ([`PhpString::existing_interned`]), the
+    /// empty name `ZSTR_EMPTY_ALLOC()`; every copy of the column
+    /// definitions takes one more ([`Field::copy`]) and each is given up with it
+    /// ([`Field::free`]).
+    pub name: Owner<PhpString>,
     pub org_name: Vec<u8>,
     pub table: Vec<u8>,
     pub org_table: Vec<u8>,
@@ -69,6 +71,33 @@ pub struct Field {
 }
 
 impl Field {
+    /// `clone_metadata`'s copy of one field: the names' bytes copied and
+    /// one more owner of `sname`, `zend_string_copy`
+    /// (`mysqlnd_result_meta.c:157`).
+    pub(crate) fn copy(&self, req: &Request) -> Field {
+        Field {
+            name: Owner::take(req, *self.name),
+            org_name: self.org_name.clone(),
+            table: self.table.clone(),
+            org_table: self.org_table.clone(),
+            db: self.db.clone(),
+            catalog: self.catalog.clone(),
+            def: self.def.clone(),
+            length: self.length,
+            flags: self.flags,
+            decimals: self.decimals,
+            charsetnr: self.charsetnr,
+            type_byte: self.type_byte,
+            num_key: self.num_key,
+        }
+    }
+
+    /// `php_mysqlnd_free_field_metadata`: `sname` released,
+    /// `zend_string_release_ex`.
+    pub(crate) fn free(self, req: &mut Request) {
+        self.name.give_up(req);
+    }
+
     /// The column's type.
     #[must_use]
     pub fn field_type(&self) -> FieldType {
@@ -241,15 +270,10 @@ impl Res {
     pub(crate) fn with_fields(
         req: &mut Request,
         field_count: u32,
-        fields: Vec<Field>,
+        fields: &[Field],
     ) -> Result<Res, Thrown> {
         let mut res = Res::new(req, field_count)?;
-        res.pool.get_chunk(req, RES_METADATA)?;
-        res.pool.get_chunk(req, (fields.len() + 1) * FIELD)?;
-        for field in &fields {
-            res.pool.get_chunk(req, field.root_len())?;
-        }
-        res.fields = fields;
+        res.clone_metadata(req, fields)?;
         Ok(res)
     }
 
@@ -259,7 +283,7 @@ impl Res {
     pub(crate) fn metadata_only(
         req: &mut Request,
         field_count: u32,
-        fields: Vec<Field>,
+        fields: &[Field],
     ) -> Result<Res, Thrown> {
         let mut res = Res::new(req, field_count)?;
         res.unbuffered_init(req, true)?;
@@ -269,13 +293,29 @@ impl Res {
             packet: None,
         };
         res.binary = true;
-        res.pool.get_chunk(req, RES_METADATA)?;
-        res.pool.get_chunk(req, (fields.len() + 1) * FIELD)?;
-        for field in &fields {
-            res.pool.get_chunk(req, field.root_len())?;
-        }
-        res.fields = fields;
+        res.clone_metadata(req, fields)?;
         Ok(res)
+    }
+
+    /// `mysqlnd_res_meta::clone_metadata`: the column definitions'
+    /// structures carved from the pool, each field's root beside them,
+    /// and each field copied with one more owner of its name.
+    fn clone_metadata(&mut self, req: &mut Request, fields: &[Field]) -> Result<(), Thrown> {
+        self.pool.get_chunk(req, RES_METADATA)?;
+        self.pool.get_chunk(req, (fields.len() + 1) * FIELD)?;
+        for field in fields {
+            self.pool.get_chunk(req, field.root_len())?;
+        }
+        self.fields = fields.iter().map(|field| field.copy(req)).collect();
+        Ok(())
+    }
+
+    /// `mysqlnd_res_meta::free_metadata`: every field given up with its
+    /// name's owner.
+    fn free_fields(&mut self, req: &mut Request) {
+        for field in self.fields.drain(..) {
+            field.free(req);
+        }
     }
 
     /// `mysqlnd_result_unbuffered_init`'s carving: the structure, and the
@@ -301,7 +341,7 @@ impl Res {
             } => packet.free(req),
             _ => {}
         }
-        self.fields.clear();
+        self.free_fields(req);
         self.current_field = 0;
         self.cursor = None;
         self.pool.restore(req);
@@ -421,40 +461,42 @@ impl Res {
         req: &mut Request,
         conn: &mut ConnData,
     ) -> Result<bool, Thrown> {
-        self.fields.clear();
+        self.free_fields(req);
         self.current_field = 0;
         self.pool.get_chunk(req, RES_METADATA + PLUGIN_ROOM)?;
         self.pool
             .get_chunk(req, (self.field_count as usize + 1) * FIELD)?;
         for _ in 0..self.field_count {
             let Some(body) = conn.read_packet(req, Prot::RsetField)? else {
-                self.fields.clear();
+                self.free_fields(req);
                 return Ok(false);
             };
             match read_field(req, &body)? {
                 FieldPacket::Field(field) => {
-                    self.pool.get_chunk(req, field.root_len())?;
-                    if field.field_type().fetch().is_none() {
+                    // The field is the metadata's before anything can
+                    // fail, so a failure frees it with the rest.
+                    let (root, type_byte) = (field.root_len(), field.type_byte);
+                    self.fields.push(field);
+                    self.pool.get_chunk(req, root)?;
+                    if FieldType::of(type_byte).fetch().is_none() {
                         docref(
                             req,
                             Level::Warning,
                             &format!(
-                                "Unknown type {} sent by the server. Please send a report to the developers",
-                                field.type_byte
+                                "Unknown type {type_byte} sent by the server. Please send a report to the developers"
                             ),
                         );
-                        self.fields.clear();
+                        self.free_fields(req);
                         return Ok(false);
                     }
-                    self.fields.push(field);
                 }
                 FieldPacket::Error(e) => {
+                    self.free_fields(req);
                     e.set_on(req, &mut conn.error)?;
-                    self.fields.clear();
                     return Ok(false);
                 }
                 FieldPacket::Fail => {
-                    self.fields.clear();
+                    self.free_fields(req);
                     return Ok(false);
                 }
             }
@@ -899,10 +941,11 @@ enum FieldPacket {
     Fail,
 }
 
-/// `php_mysqlnd_rset_field_read`'s parse, the column's name interned in
-/// the request's table as `zend_string_init_interned` interns it: each
-/// name the request has not seen stays on its heap to the request's end,
-/// a name seen before and a name of one byte cost nothing:
+/// `php_mysqlnd_rset_field_read`'s parse, the column's name made as
+/// opcache's `zend_string_init_interned` makes it
+/// (`accel_init_interned_string_for_php`): the engine's string where its
+/// table holds the name, else a string the column definitions own,
+/// given back with the set of rows; the row's key holds one more owner of it:
 ///
 /// ```php
 /// mysqli_report(MYSQLI_REPORT_OFF);
@@ -913,69 +956,73 @@ enum FieldPacket {
 ///     mysqli_free_result($r);
 ///     echo memory_get_usage() - $m, "\n";
 /// }
-/// $r = mysqli_query($l, "SELECT 1 AS " . chr(122));
+/// $r = mysqli_query($l, "SELECT 1 AS zzqqxxyyww");
+/// echo memory_get_usage() - $m, "\n";
+/// $row = mysqli_fetch_assoc($r);
 /// mysqli_free_result($r);
 /// echo memory_get_usage() - $m, "\n";
+/// unset($row);
+/// echo memory_get_usage() - $m, "\n";
 /// ```
-/// ```expect mysql
-/// 208
-/// 288
-/// 336
-/// 336
-/// 336
+/// ```expect mysql regime=jit-off
+/// 160
+/// 192
+/// 192
+/// 192
+/// 16656
+/// 608
+/// 192
 /// ```
 ///
-/// A name php interned at startup costs nothing either: the lowercased
+/// A name the engine's startup interned costs nothing, the lowercased
 /// name a method or a class is keyed by, a constant's name, an ini
-/// entry's name and an extension's lowercased name, where a name nobody
-/// declared stays:
+/// entry's name, an extension's lowercased name and a name of one byte,
+/// where a name nobody declared is the set's, and the empty name is
+/// `ZSTR_EMPTY_ALLOC()`:
 ///
 /// ```php
 /// mysqli_report(MYSQLI_REPORT_OFF);
 /// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
 /// mysqli_free_result(mysqli_query($l, "SELECT 1 AS a"));
-/// foreach (["SELECT 2 AS columnname", "SELECT 2 AS arrayobject", "SELECT 2 AS getiterator", "SELECT 2 AS PHP_VERSION", "SELECT 2 AS `date.timezone`", "SELECT 2 AS pcre", "SELECT 2 AS zzqqxxyyww"] as $q) {
+/// foreach (["columnname", "arrayobject", "getiterator", "PHP_VERSION", "`date.timezone`", "pcre", "z, 3 AS ``", "c" . bin2hex(random_bytes(4))] as $name) {
+///     $r = mysqli_query($l, "SELECT 2 AS $name");
 ///     $m = memory_get_usage();
-///     mysqli_free_result(mysqli_query($l, $q));
-///     echo memory_get_usage() - $m, "\n";
+///     mysqli_free_result($r);
+///     echo $m - memory_get_usage(), "\n";
 /// }
 /// ```
-/// ```expect mysql
-/// 0
-/// 0
-/// 0
-/// 0
-/// 0
-/// 0
-/// 40
+/// ```expect mysql regime=jit-off
+/// 16424
+/// 16424
+/// 16424
+/// 16424
+/// 16424
+/// 16424
+/// 16424
+/// 16464
 /// ```
 ///
 /// A name a published unit interned costs nothing, as a string opcache
 /// shares does: the strings a constant array holds as well as the
-/// unit's own constant strings, where php -n interns only the latter
-/// (`trace:immutable-literal-arrays`):
+/// unit's own constant strings:
 ///
 /// ```php
 /// mysqli_report(MYSQLI_REPORT_OFF);
 /// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+/// $names = ['zzqqxxyyww'];
+/// $name = 'qqzzyyxxww';
+/// $r = mysqli_query($l, "SELECT 2 AS zzqqxxyyww, 3 AS qqzzyyxxww");
 /// $m = memory_get_usage();
-/// foreach (["REPEAT('x', 100)", "REPEAT('x', 1000)", "REPEAT('x', 10000)", "REPEAT('x', 100)", "1 AS z"] as $column) {
-///     $r = mysqli_query($l, "SELECT $column");
-///     mysqli_free_result($r);
-///     echo memory_get_usage() - $m, "\n";
-/// }
-/// $name = 'zzqqxxyyww';
+/// mysqli_free_result($r);
+/// echo $m - memory_get_usage(), "\n";
+/// $r = mysqli_query($l, "SELECT 2 AS c" . bin2hex(random_bytes(4)) . ", 3 AS qqzzyyxxww");
 /// $m = memory_get_usage();
-/// mysqli_free_result(mysqli_query($l, "SELECT 2 AS zzqqxxyyww"));
-/// echo memory_get_usage() - $m, "\n";
+/// mysqli_free_result($r);
+/// echo $m - memory_get_usage(), "\n";
 /// ```
-/// ```expect mysql regime=immutable-literals
-/// 160
-/// 192
-/// 192
-/// 192
-/// 192
-/// 0
+/// ```expect mysql regime=jit-off
+/// 16424
+/// 16464
 /// ```
 fn read_field(req: &mut Request, body: &[u8]) -> Result<FieldPacket, Thrown> {
     let mut p = Body::new(body);
@@ -1054,7 +1101,11 @@ fn read_field(req: &mut Request, body: &[u8]) -> Result<FieldPacket, Thrown> {
     let num_key = numeric_key(&name);
     // `meta->sname = zend_string_init_interned(meta->name, ...)`, the
     // empty name `ZSTR_EMPTY_ALLOC()`.
-    let name = PhpString::interned(req, &name)?;
+    let name = if name.is_empty() {
+        PhpString::new(req, b"")?
+    } else {
+        PhpString::existing_interned(req, &name)?
+    };
     Ok(FieldPacket::Field(Field {
         name,
         org_name,
