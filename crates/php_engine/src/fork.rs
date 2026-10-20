@@ -13,7 +13,9 @@
 //! knows how many things stand inside the engine, and [`Alone`] is the one
 //! type that forks, which the engine can hold only while that number is
 //! the caller's own. A host's thread that serves requests starts here too,
-//! through [`host_thread`]. A thread started any other way than [`spawn`] is
+//! through [`host_thread`], and so does the thread a host moves its
+//! `main` onto, through [`main_thread`], which is the process's main
+//! thread to a fork and so never beside one it asks. A thread started any other way than [`spawn`] is
 //! one no fork waits for, and a thread started through it that a fork
 //! does not join first leaves the fork refused rather than a child that
 //! hangs. What the engine cannot see is a host's own thread that holds
@@ -41,10 +43,11 @@
 //! heap's shadow pointers, which this engine's heap does not have and no
 //! program can observe.
 
+use std::convert::Infallible;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError, Weak};
-use std::thread::{self, JoinHandle};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError, Weak};
+use std::thread::{self, JoinHandle, ThreadId};
 
 pub use php_process::{Forked, Pid};
 
@@ -204,6 +207,64 @@ pub fn host_thread(
         .name(name.to_owned())
         .stack_size(stack_size);
     start(builder, body).map(HostThread)
+}
+
+/// The thread [`main_thread`] moved the process's work onto, once it
+/// stands: the process's main thread as a fork sees it.
+static MAIN: OnceLock<ThreadId> = OnceLock::new();
+
+/// Whether the calling thread is the one [`main_thread`] started, which a
+/// fork it asks copies alone, so it is never beside its own fork.
+fn on_main_thread() -> bool {
+    MAIN.get() == Some(&thread::current().id())
+}
+
+/// `body`, the whole of a host's `main`, as the process's main thread on
+/// a stack of `stack_size` bytes, which `body` ends the process from
+/// (design §5.6, #3043): the stack a request served on it has, whose
+/// bounds the engine reads for php's "Maximum call stack size", so a host
+/// whose process serves on its main thread, as php's CLI does, sizes the
+/// stack its recursion through a native's callback needs, where the
+/// platform's main thread is sized by the shell.
+///
+/// The thread starts through the engine's one home, so it stands inside
+/// the engine until the process ends, and is the process's main thread to
+/// a fork: a fork it asks, the host's or its request's, is not refused
+/// for it, and the child holds it alone, as php's child holds its one
+/// thread. It starts under the caller's signal mask, and the caller then
+/// stands out of every signal's way ([`php_process::stand_aside`]), so a
+/// signal reaches `body`'s thread as it reached the main thread, and one
+/// it blocks waits for it. A panic in `body` ends the process with the
+/// status a `main` that panicked ends it with, 101, once the panic hook
+/// has written it. Where the system refuses the thread, `body` runs here,
+/// on the stack this thread has, and the limit is what that stack
+/// allows, as a host thread's is (§5.6).
+pub fn main_thread<F>(stack_size: usize, body: F) -> !
+where
+    F: FnOnce() -> Infallible + Send + 'static,
+{
+    // A rendezvous: the send returns once the thread holds `body`, and
+    // hands it back where the thread ended without taking it.
+    let (hand, handed) = std::sync::mpsc::sync_channel::<F>(0);
+    let builder = thread::Builder::new()
+        .name("main".to_owned())
+        .stack_size(stack_size);
+    let serve = move || {
+        if let Ok(body) = handed.recv() {
+            let Err(_panicked) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+            std::process::exit(101);
+        }
+    };
+    let Ok(main) = start(builder, serve) else {
+        match body() {}
+    };
+    MAIN.set(main.handle.thread().id()).ok();
+    if let Err(std::sync::mpsc::SendError(body)) = hand.send(body) {
+        match body() {}
+    }
+    // `main` is never dropped: the thread stands inside the engine until
+    // the process ends, and nothing joins it.
+    php_process::stand_aside()
 }
 
 /// What runs on a [`Worker`]'s thread (ADR-0010, Threads): the compiled
@@ -418,14 +479,17 @@ impl Alone {
         Alone(())
     }
 
-    /// How many things stand inside the engine beside `asker`. With the
-    /// fork held the number can only fall.
+    /// How many things stand inside the engine beside `asker`, and beside
+    /// the thread it asks on where that is the process's main thread
+    /// [`main_thread`] started. With the fork held the number can only
+    /// fall.
     #[expect(
         clippy::unused_self,
         reason = "the hold is what makes the number one that only falls"
     )]
     fn beside(&self, asker: Asker) -> usize {
-        (INSIDE.load(Ordering::Acquire) & !FORKING).saturating_sub(asker as usize)
+        let own = asker as usize + usize::from(on_main_thread());
+        (INSIDE.load(Ordering::Acquire) & !FORKING).saturating_sub(own)
     }
 
     /// `php_process::fork`, where nothing stands inside the engine beside
@@ -519,7 +583,7 @@ pub(crate) fn fork_request() -> io::Result<Forked> {
 /// # Errors
 ///
 /// `EBUSY` where a request is in flight or a thread the engine started
-/// other than its timer's stands, as on a host that serves on threads,
+/// other than its timer's and the caller's own [`main_thread`] stands, as on a host that serves on threads,
 /// which no host that forks does; otherwise the OS error `fork(2)` failed
 /// with, and no process was made.
 pub fn fork() -> io::Result<Forked> {

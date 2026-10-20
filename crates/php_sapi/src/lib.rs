@@ -15,7 +15,9 @@
 //! php.ini files; [`stdio`], C's `stdout`, which php writes through while
 //! it starts and ends; and [`start`], `php_module_startup` over them, with
 //! what a host prints before it serves anything; and [`strerror`], an I/O
-//! error's sentence as a host's `%s` of `strerror(errno)` prints it.
+//! error's sentence as a host's `%s` of `strerror(errno)` prints it;
+//! and [`REQUEST_STACK`], the stack the CLI and makala serve a request
+//! on (design §5.6).
 //! [`tier`] is
 //! the tier face beside the host face, for the debugging host (#1308).
 #![forbid(unsafe_code)]
@@ -47,7 +49,7 @@ pub use php_engine::{
     IniOrigin, IniValue, Method, NotAlone, Observables, OutputSink, PHP_CONFIG_FILE_PATH,
     PHP_CONFIG_FILE_SCAN_DIR, PHP_LOCALSTATEDIR, PHP_PREFIX, PHP_SYSCONFDIR, PHP_VERSION, Pid,
     Primary, ProcessTitle, ProgramFile, ProgramServed, RequestDescription, ResponseHead, Routed,
-    Uncaught, WebRequest, fork, host_thread,
+    Uncaught, WebRequest, fork, host_thread, main_thread,
 };
 
 /// C's `strtol(s, NULL, 10)` and `atoi` as php's hosts call them on what
@@ -303,6 +305,62 @@ pub fn exit(status: i32) -> ! {
     stdio::flush();
     std::process::exit(status)
 }
+
+/// The stack a request is served on, by the CLI on the thread it moves
+/// its `main` onto ([`main_thread`]) and by makala on each request thread
+/// ([`host_thread`]), so that recursion through a native's callback
+/// reaches the depth php reaches on its 8 MiB main thread (design §5.6,
+/// #3043's ruling). About 8 MiB × 4,208 ÷ 672: a level of that recursion
+/// costs 4,208 bytes of native stack here, the loop's frame among them,
+/// against php's about 672 (#3022). The stack is reserved, not
+/// committed: the system maps a thread's stack and commits its pages as
+/// they are touched, so a request that does not recurse holds what it
+/// would on 8 MiB. When the tail-call dispatch of §5.8 (revision 147)
+/// gives the loop a dispatcher's frame, the size comes down with what a
+/// level costs. The number in php's stack-limit `Error` is this size less
+/// `zend.reserved_stack_size`, as php's is its main thread's, which the
+/// shell's `ulimit -s` sets.
+///
+/// The witness recurses through `array_map` 6,000 levels deep, #3022's
+/// bar, which php takes whole on its main thread and the lanes' build
+/// takes here, then without end until the limit throws, with the number
+/// masked; the CLI serves it first, then makala beside the pinned
+/// php-fpm.
+///
+/// ```php
+/// function m($n) { return $n == 0 ? 0 : 1 + array_map(fn($x) => m($x), [$n - 1])[0]; }
+/// echo m(6000), "\n";
+/// function down($n) { return array_map('down', [$n + 1]); }
+/// try { down(0); } catch (Error $e) {
+///     echo preg_replace('/\d+ bytes/', 'N bytes', $e->getMessage()), "\n";
+/// }
+/// ```
+/// ```expect process
+/// 6000
+/// Maximum call stack size of N bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
+/// ```
+///
+/// ```php
+/// function m($n) { return $n == 0 ? 0 : 1 + array_map(fn($x) => m($x), [$n - 1])[0]; }
+/// echo m(6000), "\n";
+/// function down($n) { return array_map('down', [$n + 1]); }
+/// try { down(0); } catch (Error $e) {
+///     echo preg_replace('/\d+ bytes/', 'N bytes', $e->getMessage()), "\n";
+/// }
+/// ```
+/// ```request makala
+/// --GET--
+/// q=1
+/// ```
+/// ```expect
+/// 200
+/// x-powered-by: PHP/8.5.9
+/// content-type: text/html; charset=UTF-8
+///
+/// 6000
+/// Maximum call stack size of N bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
+/// ```
+pub const REQUEST_STACK: usize = 52 << 20;
 
 #[cfg(test)]
 mod system {

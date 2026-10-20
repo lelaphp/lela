@@ -118,11 +118,25 @@ pub fn version(engine: &Engine) -> String {
 /// `main` runs `php_module_startup` once: where `do_cli` reads the line,
 /// [`Options::parse`] starts it and asks it whether it has a shell, and
 /// the line is then served on it.
+///
+/// The process's title is saved here, before any thread starts; the rest
+/// is served on the thread the process's work moves onto, of
+/// [`php_sapi::REQUEST_STACK`] bytes, so recursion through a native's
+/// callback reaches the depth php reaches on its main thread (design
+/// §5.6, #3043), and the process ends there, in the child of a fork as
+/// in the process that started it.
 pub fn main() -> ExitCode {
-    let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
     // `save_ps_args`, which php's `main` calls before anything else reads
-    // `argv` (`php_cli.c:1224-1228`); the arguments were copied above.
+    // `argv` (`php_cli.c:1224-1228`).
     TITLE.set(ffi::save_ps_args().map(ProcessTitle::new)).ok();
+    php_sapi::main_thread(php_sapi::REQUEST_STACK, || php_sapi::exit(served()))
+}
+
+/// What [`main`] serves, the command line read and served, and the
+/// status it ends the process with, C's `stdout` flushed before the
+/// engine ends, as `php_sapi::exit_code` flushed it when `main` returned.
+fn served() -> i32 {
+    let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
     let started = OnceCell::new();
     let cli = |startup: &Startup| started.get_or_init(|| engine(startup));
     let options = match Options::parse(&argv, &|startup| cli(startup).has_shell()) {
@@ -136,7 +150,8 @@ pub fn main() -> ExitCode {
                 .lock()
                 .write_all(refused.stdout.as_bytes())
                 .ok();
-            return php_sapi::exit_code(refused.exit_code);
+            php_sapi::stdio::flush();
+            return refused.exit_code;
         }
     };
     let startup = &options.startup;
@@ -157,7 +172,8 @@ pub fn main() -> ExitCode {
             repeated(cli(startup), ask, options.repeat)
         }
     };
-    php_sapi::exit_code(status)
+    php_sapi::stdio::flush();
+    status
 }
 
 /// `do_repeat` (`php_cli.c:854`, `:1170-1182`): `ask` served `repeat`
