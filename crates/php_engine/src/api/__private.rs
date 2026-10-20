@@ -263,5 +263,7 @@ pub fn entered(
     owner: Option<&'static str>,
     name: &'static str,
 ) {
-    req.entered(crate::trace::Entered { krate, owner, name });
+    if req.tracing_natives() {
+        req.entered(crate::trace::Entered { krate, owner, name });
+    }
 }

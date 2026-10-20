@@ -596,7 +596,8 @@ impl<H> VmStack<H> {
     /// 20000: 12
     /// 0
     /// ```
-    #[inline]
+    #[inline(always)] // laid in its two callers, the engine's push and a native's `INIT_FCALL`
+    #[allow(clippy::inline_always)]
     pub fn push_frame(
         &mut self,
         heap: &mut Heap,

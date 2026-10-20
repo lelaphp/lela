@@ -1843,7 +1843,7 @@ impl Vm {
     /// `IS_UNDEF` until an opline or a placed argument writes it
     /// (`i_init_func_execute_data`), which is what a read of a CV warns
     /// of. A page the memory limit refuses is the fatal php raises there.
-    #[inline]
+    #[inline(never)] // the loop's call, its body out of the loop's
     pub(crate) fn push(
         &mut self,
         heap: &mut php_heap::Heap,

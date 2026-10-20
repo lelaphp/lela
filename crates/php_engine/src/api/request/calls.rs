@@ -858,6 +858,17 @@ impl Request {
         }
     }
 
+    /// The entry of a native function, `fbc->internal_function.handler`:
+    /// one read of the engine's table, and none for any other function,
+    /// a native method, a class's native or a trampoline among them,
+    /// which [`Request::serve_native`] finds.
+    #[inline]
+    pub(crate) fn native_entry(&self, function: Function) -> Option<crate::api::abi::Entry> {
+        // One row per native function, so a number past them is none.
+        let at = usize::try_from(function.0).ok()?;
+        self.shared.entries.get(at).copied()
+    }
+
     /// Whether `function` is a native, php's `ZEND_INTERNAL_FUNCTION`:
     /// numbered below the user functions and methods.
     pub(crate) fn is_native_function(&self, function: Function) -> bool {
@@ -1212,13 +1223,21 @@ impl Request {
     /// once per request, in the order the request first entered it: what
     /// the trace is read for is which natives a request entered, so a
     /// program that calls one in a loop records it once.
-    #[inline]
+    #[cold]
+    #[inline(never)]
     pub(crate) fn entered(&mut self, native: crate::trace::Entered) {
         if let Some(trace) = &mut self.calls.trace
             && !trace.contains(&native)
         {
             trace.push(native);
         }
+    }
+
+    /// Whether the natives this request enters are recorded
+    /// ([`Request::trace_natives`]).
+    #[inline]
+    pub(crate) fn tracing_natives(&self) -> bool {
+        self.calls.trace.is_some()
     }
 
     /// The natives recorded, given up at the request's end; none where

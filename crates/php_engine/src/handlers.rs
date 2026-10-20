@@ -1768,9 +1768,9 @@ pub(crate) fn init_fcall<T: Tier, A: Operand + Default>(
 /// its parameters take (`_zend_vm_stack_push_call_frame_ex` over the
 /// `used_stack` php's compiler wrote into `op1`). Nothing here raises
 /// but the memory limit on a page the push takes, which is reported at
-/// this opline. `None`, with nothing touched, for a slot not primed yet
-/// and a callee that is a native, a trampoline or anything else
-/// [`Request::call_room`] sizes. `INIT_FCALL_BY_NAME` and
+/// this opline. A native is pushed by [`init_native`]. `None`, with
+/// nothing touched, for a slot not primed yet and a callee
+/// [`Request::call_room`] sizes otherwise. `INIT_FCALL_BY_NAME` and
 /// `INIT_NS_FCALL_BY_NAME` read their callee off the same slot once a
 /// first pass primed it, and take it too.
 #[inline(always)] // as `inline_send`
@@ -1779,12 +1779,40 @@ fn inline_init_fcall(req: &mut Request, frame: FrameRef, op: &Opline, at: u32) -
     let Cached::Function(function) = req.cached(frame, CacheSlot(op.out)) else {
         return None;
     };
-    let user = req.user_function(function)?;
+    let Some(user) = req.user_function(function) else {
+        return init_native(req, frame, function, op, at);
+    };
     let room = user.shape.room(op.extended_value);
     let mut header = exec::Header::call(function, op.extended_value);
     header.callee = user.callee_at();
     header.info.join(user.shape.sent);
     Some(match req.push_room(room as usize, header) {
+        Ok(_) => Ok(advanced()),
+        Err(fatal) => {
+            req.vm_mut().stand(frame, at);
+            Err(fatal)
+        }
+    })
+}
+
+/// [`inline_init_fcall`] over a native, out of the loop's body: the
+/// call pushed with its arguments' room and the observer's
+/// ([`Request::native_room`]) and the record the engine's table holds
+/// for it, no table but that one asked, as `INIT_FCALL` pushes `fbc`
+/// off `CACHED_PTR`; `None` for a callee that is no native of the
+/// table, a trampoline's.
+#[inline(never)]
+fn init_native(
+    req: &mut Request,
+    frame: FrameRef,
+    function: Function,
+    op: &Opline,
+    at: u32,
+) -> Option<Edge> {
+    let mut header = exec::Header::call(function, op.extended_value);
+    header.callee = req.shared.native_callee(function)?;
+    let room = req.native_room(op.extended_value) as usize;
+    Some(match req.push_native(room, header) {
         Ok(_) => Ok(advanced()),
         Err(fatal) => {
             req.vm_mut().stand(frame, at);
@@ -11746,24 +11774,29 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
             "InternalError: {opcode} with no call frame under it"
         )));
     };
-    // A user function is never a trampoline, so the call it names is
-    // entered before the trampolines are asked about it.
-    if let Some(user) = req.user_function(function) {
+    // A native function is served through the entry the engine's table
+    // holds, as `DO_ICALL` calls `fbc->internal_function.handler`; a
+    // user function is entered, and a trampoline is handed to its magic
+    // method first.
+    let served = if let Some(entry) = req.native_entry(function) {
+        req.serve_entry(function, entry, OnThrow::Nothing)
+    } else if let Some(user) = req.user_function(function) {
         let shape = user.shape;
         return enter(req, frame, code, op, call, shape);
-    }
-    let function = match crate::trampoline::hand_to_magic(req, function) {
-        Ok(function) => function,
-        Err(thrown) => {
-            req.pop_call();
-            return threw(req, frame, &thrown);
+    } else {
+        let function = match crate::trampoline::hand_to_magic(req, function) {
+            Ok(function) => function,
+            Err(thrown) => {
+                req.pop_call();
+                return threw(req, frame, &thrown);
+            }
+        };
+        if let Some(user) = req.user_function(function) {
+            let shape = user.shape;
+            return enter(req, frame, code, op, call, shape);
         }
+        req.serve_native(function, OnThrow::Nothing)
     };
-    if let Some(user) = req.user_function(function) {
-        let shape = user.shape;
-        return enter(req, frame, code, op, call, shape);
-    }
-    let served = req.serve_native(function, OnThrow::Nothing);
     // `ZEND_VM_FCALL_INTERRUPT_CHECK(call)`: the check php makes after a
     // native returns, with the call still on the stack, which is where
     // a signal the native delivered to its own process is dispatched
@@ -22937,6 +22970,8 @@ fn returned_to_caller(req: &mut Request, frame: FrameRef, returned: Value) -> Ed
 /// native: dtor
 /// after
 /// ```
+#[inline(always)] // the return home of every native a call opcode served
+#[allow(clippy::inline_always)]
 fn handed_back(req: &mut Request, into: Option<(FrameRef, u32)>, value: Value) -> bool {
     match into {
         Some((at, slot)) => {

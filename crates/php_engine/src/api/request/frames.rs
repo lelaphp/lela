@@ -1220,7 +1220,7 @@ impl Request {
     /// A native's room for `count` arguments, `count + fbc->common.T`:
     /// one slot more while an observer is registered, the observer's
     /// temporary php adds every native at startup (`++zif->T`).
-    fn native_room(&self, count: u32) -> u32 {
+    pub(crate) fn native_room(&self, count: u32) -> u32 {
         count.saturating_add(u32::from(crate::observer::observing(self)))
     }
 
@@ -1319,6 +1319,18 @@ impl Request {
             }
         }
         self.vm.stack.pop_frame(&mut self.heap);
+    }
+
+    /// A native's call pushed with `room` slots past its header, its
+    /// record named, laid in its `INIT_FCALL` ([`Request::push_room`]).
+    #[inline(always)] // as `php_heap::VmStack::push_frame`
+    #[allow(clippy::inline_always)]
+    pub(crate) fn push_native(
+        &mut self,
+        room: usize,
+        header: exec::Header,
+    ) -> Result<FrameRef, Fatal> {
+        self.vm.stack.push_frame(&mut self.heap, room, 0, header)
     }
 
     /// A call pushed with `room` slots past its header, which the caller
@@ -2029,6 +2041,8 @@ impl Request {
     /// int(0)
     /// int(1)
     /// ```
+    #[inline(always)] // every native call's pop, the carrying case out of line
+    #[allow(clippy::inline_always)]
     pub(crate) fn pop_call(&mut self) {
         let call = self.vm.stack.current();
         // `EG(current_execute_data) = execute_data` before the arguments
@@ -2037,25 +2051,36 @@ impl Request {
             return;
         };
         header.info.set_leaving(true);
+        if header.annex.is_some() || header.closure.is_some() || header.receiver().is_some() {
+            return self.pop_carrying(call);
+        }
+        self.release_arguments(call);
+        self.vm.stack.pop_frame(&mut self.heap);
+    }
+
+    /// [`Request::pop_call`] of a call that carries a receiver, a
+    /// closure or an annex, each given up after the arguments.
+    #[inline(never)]
+    fn pop_carrying(&mut self, call: FrameRef) {
+        let Some(header) = self.vm.at_mut(call) else {
+            return;
+        };
         let receiver = header.receiver();
         header.set_receiver(None);
         let closure = header.closure.take();
-        let annex = header.annex.take();
-        let annex = annex
-            .and_then(|id| self.annexes.take(id))
-            .unwrap_or_default();
+        let mut annex = header.annex.take().and_then(|id| self.annexes.take(id));
         // `zend_vm_stack_free_args`, whose `zval_ptr_dtor_nogc` makes no
         // argument a possible root; the receiver and the closure after
         // them are `OBJ_RELEASE`, which does.
-        for value in annex.coerced {
+        for value in annex
+            .as_mut()
+            .map(|annex| std::mem::take(&mut annex.coerced))
+            .unwrap_or_default()
+        {
             self.release_nogc(value);
         }
-        let mut from = 0;
-        while let Some((at, value)) = self.take_next_owner(call, from, usize::MAX) {
-            self.release_nogc(value);
-            from = at.saturating_add(1);
-        }
-        if let Some(name) = annex.name {
+        self.release_arguments(call);
+        if let Some(name) = annex.as_mut().and_then(|annex| annex.name.take()) {
             self.release(Value::string(name));
         }
         if let Some(receiver) = receiver {
@@ -2064,8 +2089,22 @@ impl Request {
         if let Some(closure) = closure {
             self.release(closure.as_value());
         }
-        self.release_named(annex.extra_named);
+        if let Some(annex) = annex {
+            self.release_named(annex.extra_named);
+        }
         self.vm.stack.pop_frame(&mut self.heap);
+    }
+
+    /// `zend_vm_stack_free_args` over the call `call`: each argument
+    /// that counts owners given up, `zval_ptr_dtor_nogc`.
+    #[inline(always)] // as `pop_call`
+    #[allow(clippy::inline_always)]
+    fn release_arguments(&mut self, call: FrameRef) {
+        let mut from = 0;
+        while let Some((at, value)) = self.take_next_owner(call, from, usize::MAX) {
+            self.release_nogc(value);
+            from = at.saturating_add(1);
+        }
     }
 
     /// `zend_free_extra_named_params`: each name and value of a call's
