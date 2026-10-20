@@ -50,12 +50,43 @@ impl ScannerFile {
     /// and Zend streams"; `None` for the open that failed, which warned.
     /// The `Err` is what the open threw, or the memory limit's fatal.
     pub fn open(req: &mut Request, path: &[u8]) -> Result<Option<ScannerFile>, Thrown> {
-        let options = OpenOptions {
-            use_path: true,
-            for_include: true,
-            for_zend_stream: true,
-            ..OpenOptions::REPORT
-        };
+        ScannerFile::open_with(
+            req,
+            path,
+            OpenOptions {
+                use_path: true,
+                for_include: true,
+                for_zend_stream: true,
+                ..OpenOptions::REPORT
+            },
+        )
+    }
+
+    /// `php_fopen_primary_script`'s `zend_stream_open` of the host's
+    /// program (`Z/main/fopen_wrappers.c:468-473`): [`ScannerFile::open`]
+    /// under `display_errors=0`, its fd inherited by a process the
+    /// request execs while the program runs, since the host's
+    /// `zend_file_handle` holds it open until the program has been
+    /// served or the request ends.
+    pub(crate) fn open_held(req: &mut Request, path: &[u8]) -> Result<Option<ScannerFile>, Thrown> {
+        ScannerFile::open_with(
+            req,
+            path,
+            OpenOptions {
+                use_path: true,
+                for_include: true,
+                for_zend_stream: true,
+                held: true,
+                ..OpenOptions::default()
+            },
+        )
+    }
+
+    fn open_with(
+        req: &mut Request,
+        path: &[u8],
+        options: OpenOptions,
+    ) -> Result<Option<ScannerFile>, Thrown> {
         let Some((stream, opened_path)) = req.open_wrapper_named(path, b"rb", options)? else {
             return Ok(None);
         };

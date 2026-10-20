@@ -262,6 +262,8 @@ fn serve(engine: &Engine, root: &[u8], started_in: &Path, job: Job) {
         // so the entry is the one php-fpm's `SCRIPT_NAME` and `PATH_INFO`
         // give it, where php-fpm's `request_uri` is `SCRIPT_NAME` alone.
         request_uri: env.get(b"DOCUMENT_URI").map(<[u8]>::to_vec),
+        // php-fpm's `path_translated` and its loop's `primary_script`.
+        path_copies: 2 * usize::from(info.path_translated.is_some()),
         ..php_sapi::cgi::web(&env, &info)
     };
     let description = RequestDescription {

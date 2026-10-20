@@ -999,6 +999,9 @@ impl Worker {
             body,
             response_code: info.response_code,
             headers,
+            // `SG(request_info).path_translated` and the loop's
+            // `primary_script` (`Z/sapi/fpm/fpm/fpm_main.c:1351, 1876`).
+            path_copies: 2 * usize::from(info.path_translated.is_some()),
             ..php_sapi::cgi::web(env, info)
         };
         RequestDescription {

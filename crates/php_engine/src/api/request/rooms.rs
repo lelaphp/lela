@@ -42,6 +42,10 @@ pub(crate) struct Rooms {
     /// `EG(main_fiber_context)`, `zend_fiber_init`'s
     /// (`Z/Zend/zend_fibers.c:1126`).
     main_fiber: Option<Emalloc>,
+    /// The host's copies of the program's path
+    /// ([`WebRequest::path_copies`](crate::engine::WebRequest::path_copies)),
+    /// from the request's start until the program has been served.
+    path_copies: Vec<Emalloc>,
     /// `ZCG(cwd)`: `accel_getcwd`'s string of the working directory,
     /// laid down the first time opcache keys a relative path
     /// (`Z/ext/opcache/ZendAccelerator.c:235`) and kept until the
@@ -69,22 +73,43 @@ struct PrimaryHandle {
 }
 
 impl Request {
-    /// What `zend_activate` and the process's startup leave on a
-    /// request's heap of state the engine keeps elsewhere, laid down as
-    /// the request starts: `EG(main_fiber_context)`, and, for a request
-    /// that is its process's one, as the CLI's and phpdbg's is, the copy
-    /// of the working directory `virtual_cwd_activate` made once
-    /// `php_module_startup` was done. A non-ZTS php frees that copy at the first
-    /// request's end and never makes it again, so a web host's later
-    /// requests stand without it, which a request of the engine's
-    /// threads is taken to be. A refusal is the memory limit's fatal,
-    /// which the first allocation after it meets again.
+    /// What `zend_activate`, the process's startup and the host leave on
+    /// a request's heap of state the engine keeps elsewhere, laid down as
+    /// the request starts: `EG(main_fiber_context)`; the copy of the
+    /// working directory `virtual_cwd_activate` made once
+    /// `php_module_startup` was done, which a non-ZTS php frees at the
+    /// process's first request's end and never makes again, so a web
+    /// host's first request holds it and its later ones stand without it,
+    /// where the CLI's and phpdbg's request is its process's one; and the
+    /// host's copies of the program's path. A refusal is the memory
+    /// limit's fatal, which the first allocation after it meets again.
+    /// `sapi/fpm`'s line `a-program-s-first-line-reads-what-opcache-laid-for-it`
+    /// holds a child's first request to the copy and its later ones to
+    /// none.
     pub(crate) fn lay_start_rooms(&mut self) {
-        if self.description.web.is_none() {
+        if self.description.web.is_none() || self.shared.take_startup_cwd() {
             let len = self.cwd.as_os_str().len() + 1;
             self.rooms.cwd_state = Emalloc::new(self, len).ok();
         }
         self.rooms.main_fiber = Emalloc::new(self, FIBER_CONTEXT).ok();
+        let len = self.description.script_name.as_ref().map_or(0, Vec::len) + 1;
+        for _ in 0..self
+            .description
+            .web
+            .as_ref()
+            .map_or(0, |web| web.path_copies)
+        {
+            let copy = Emalloc::new(self, len).ok();
+            self.rooms.path_copies.extend(copy);
+        }
+    }
+
+    /// The host's copies of the program's path freed, once the program
+    /// has been served and before the request shuts down.
+    pub(crate) fn free_path_copies(&mut self) {
+        for copy in std::mem::take(&mut self.rooms.path_copies) {
+            copy.free(self);
+        }
     }
 
     /// `accel_getcwd` as `accel_make_persistent_key` asks it for a
@@ -166,6 +191,7 @@ impl Request {
     #[cfg(debug_assertions)]
     pub(super) fn free_rooms(&mut self) {
         self.close_primary_handle();
+        self.free_path_copies();
         let rooms = std::mem::take(&mut self.rooms);
         if let Some(cwd) = rooms.accel_cwd {
             self.release(Value::string(cwd));
