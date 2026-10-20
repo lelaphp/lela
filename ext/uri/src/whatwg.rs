@@ -725,8 +725,8 @@ impl Url {
     /// ```
     ///
     /// Each validation error's type, whether it fails the parse, and its
-    /// `context`, the text where it was met, transformed or holding a NUL,
-    /// which outlives the parse that made it.
+    /// `context`, the text where it was met, transformed or holding a
+    /// NUL, which outlives the parse that made it.
     ///
     /// ```php
     /// use Uri\WhatWg\Url as W;
@@ -917,9 +917,9 @@ impl Url {
     /// 1
     /// ```
     ///
-    /// A special scheme's default dropped from `getPort()`, an opaque path kept, an
-    /// IPv4 host in hexadecimal and an IPv6 host compressed, and a
-    /// reference resolved.
+    /// A special scheme's default dropped from `getPort()`, an opaque
+    /// path kept, an IPv4 host in hexadecimal and an IPv6 host
+    /// compressed, and a reference resolved.
     ///
     /// ```php
     /// use Uri\WhatWg\Url as W;
@@ -1218,9 +1218,11 @@ impl Url {
     /// The specified host is malformed (DomainInvalidCodePoint)
     /// ```
     ///
-    /// A refused update changes nothing: the URL a `with*()` threw on reads
-    /// as it did, its errors on the `InvalidUrlException`; an opaque path is replaced,
-    /// and an opaque URL takes no username.
+    /// A refused update changes nothing: the URL a `with*()` threw on
+    /// reads as it did, the errors on its `InvalidUrlException`. A special
+    /// scheme set to `file`, a path or a username set on an opaque URL are
+    /// no-ops the standard's setters make, and an empty query reads as no
+    /// query.
     ///
     /// ```php
     /// use Uri\WhatWg\Url as W;
@@ -1234,7 +1236,7 @@ impl Url {
     /// }
     /// $opaque = new W('mailto:user@example.com');
     /// var_dump($opaque->withPath('replacement')->toAsciiString());
-    /// try { $opaque->withUsername('x'); } catch (Throwable $e) { var_dump($e->getMessage(), $e->errors); }
+    /// var_dump($opaque->withUsername('x')->toAsciiString());
     /// var_dump((new W('https://h/a'))->withScheme('http')->withPort(80)->toAsciiString());
     /// var_dump($w->withQuery('')->getQuery(), $w->withQuery(null)->getQuery());
     /// ```
@@ -1251,6 +1253,7 @@ impl Url {
     /// bool(true)
     /// string(0) ""
     /// string(25) "https://user:pass@h:444/a"
+    /// string(23) "mailto:user@example.com"
     /// string(23) "mailto:user@example.com"
     /// string(10) "http://h/a"
     /// NULL

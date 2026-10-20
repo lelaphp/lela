@@ -534,9 +534,9 @@ impl DateInterval {
     /// 768 208
     /// ```
     ///
-    /// What the request's heap counts for an interval and its clone, all of
-    /// it given back at their release, and a period of such intervals
-    /// iterated from its start.
+    /// What the request's heap counts for an interval and for its clone,
+    /// and what their release gives back; and a daily period iterated
+    /// from its start.
     ///
     /// ```php
     /// $before = memory_get_usage();

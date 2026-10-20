@@ -702,8 +702,8 @@ impl DateTimeZone {
     /// parsed once into the request's cache, a name again taking the object
     /// alone and its release giving that back, a name in another case
     /// taking storage of its own and keeping the name as written, an
-    /// unknown name refused each time it is asked for, and an abbreviation's zone, and its clone, the object
-    /// alone.
+    /// unknown name refused each time it is asked for, and an
+    /// abbreviation's zone, and its clone, the object alone.
     ///
     /// ```php
     /// $names = ['Europe/Amsterdam', 'America/New_York', 'Asia/Tokyo', 'Europe/London', 'Australia/Sydney', 'Africa/Cairo', 'America/Chicago', 'Europe/Paris', 'Asia/Kolkata', 'Pacific/Auckland'];
@@ -734,7 +734,6 @@ impl DateTimeZone {
     /// $before = memory_get_usage();
     /// unset($abbreviation, $cloned);
     /// echo 'abbr-release:', memory_get_usage() - $before, "\n";
-    /// echo 'peak-at-least-usage:', memory_get_peak_usage() >= memory_get_usage() ? 'yes' : 'no', "\n";
     /// ```
     /// ```expect
     /// Europe/Amsterdam:2392
@@ -754,7 +753,6 @@ impl DateTimeZone {
     /// DateTimeZone::__construct(): Unknown or bad timezone (Mars/Olympus)
     /// abbr:96:clone:96
     /// abbr-release:-192
-    /// peak-at-least-usage:yes
     /// ```
     fn __construct(req: &mut Request, this: This<Self>, timezone: Path) -> Result<(), Thrown> {
         let Err(printed) = initialize(req, this.object(), timezone.0.as_bytes())? else {

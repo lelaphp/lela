@@ -541,8 +541,8 @@ impl Uri {
     ///
     /// What the request's heap counts (design §5.13): the parse on
     /// construction, the normalized copy on the first normalized read and
-    /// not on the second, a clone without that copy, and all of it back when
-    /// the last URI goes.
+    /// not on the second, a clone without that copy, an update, and what
+    /// the three URIs' release gives back, 32 bytes short of their sum.
     ///
     /// ```php
     /// use Uri\Rfc3986\Uri as R;

@@ -1684,8 +1684,8 @@ impl DateTime {
     /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 135168 bytes) in %SCRATCH%/witness.php on line 6
     /// ```
     ///
-    /// An `@` timestamp at either end of the 64-bit range, and either side
-    /// of the epoch, reads back as written.
+    /// An `@` timestamp one above `PHP_INT_MIN`, at `PHP_INT_MAX`, and
+    /// either side of the epoch reads back as written.
     ///
     /// ```php
     /// foreach ([-9223372036854775807, -1, 0, 9223372036854775807] as $timestamp) {
@@ -1991,9 +1991,9 @@ impl DateTime {
     /// DateTime::modify(): Failed to parse time string (foo) at position 0 (f): The timezone could not be found in the database
     /// ```
     ///
-    /// A modification across a daylight-saving change takes the offset the new time
-    /// stands in, and leaves a clone made before it as it was; an immutable
-    /// one leaves its original as it was.
+    /// A modification across a daylight-saving change takes the offset
+    /// the new time stands in, and leaves a clone made before it as it
+    /// was; an immutable one leaves its original as it was.
     ///
     /// ```php
     /// $date = new DateTime('2024-03-30 12:00 Europe/Amsterdam');
