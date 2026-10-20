@@ -23,6 +23,7 @@
 //! a diagnostic that copies a name does (`ZVAL_STR_COPY`), so nothing a
 //! unit made is held to the request's end for being made.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use php_heap::{Str, Zval};
@@ -216,28 +217,13 @@ fn main_constants(
     }
 }
 
-/// The names `unit`'s declarations are read by beside their op arrays'
-/// ([`php_compile::op_array_names`]), as [`php_compile::intern_declared`]
-/// makes them: each declared function's, closure's, method's and hook's
-/// variables' (`op_array->vars`) and each declared property's, under the
-/// key `prop_info->name` is too, mangled for a protected or a private
-/// one. The main op array's variables are not among them.
+/// The names `unit`'s declarations are read by
+/// ([`php_compile::declared_names`]), as a set; the main op array's
+/// variables are not among them.
 fn declared_names(unit: &Unit) -> HashSet<Vec<u8>, NameHasher> {
-    let bodies = (unit.functions.iter().chain(&unit.dynamic))
-        .map(|(_, body)| body)
-        .chain(unit.methods.iter().map(|method| &method.body))
-        .chain(unit.hooks.iter().map(|hook| &hook.body));
-    let mut names: HashSet<Vec<u8>, NameHasher> = HashSet::with_hasher(NameHasher);
-    names.extend(bodies.flat_map(|body| body.vars.iter().map(|var| var.0.to_vec())));
-    for class in &unit.classes {
-        for property in &class.properties {
-            names.insert(property.name.0.to_vec());
-            if let Some(prefix) = php_compile::mangling(property.visibility, &class.name.0) {
-                names.insert([prefix.as_slice(), &property.name.0].concat());
-            }
-        }
-    }
-    names
+    php_compile::declared_names(unit)
+        .map(Cow::into_owned)
+        .collect()
 }
 
 /// `by_bytes`'s entry for `bytes` pointed at `s`.
@@ -543,12 +529,7 @@ impl Request {
                 continue;
             }
             let made = self.string(name)?;
-            match self.unit_strings.by_bytes.get_mut(name) {
-                Some(held) => *held = Some(made),
-                None => {
-                    self.unit_strings.by_bytes.insert(name.into(), Some(made));
-                }
-            }
+            point(&mut self.unit_strings.by_bytes, made);
             if let Some(held) = self.unit_strings.units.get_mut(at) {
                 held.names.push(made);
             }

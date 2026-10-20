@@ -192,7 +192,13 @@ impl RuntimeCaches {
         }) else {
             return;
         };
-        let (_, mut numbers) = self.held.swap_remove(at);
+        let (_, numbers) = self.held.swap_remove(at);
+        self.hand_back(numbers);
+    }
+
+    /// The numbers of a unit that is gone handed out again, their caches
+    /// emptied, as php frees a heap cache with its op array.
+    fn hand_back(&mut self, mut numbers: Vec<u32>) {
         for &number in &numbers {
             *self.request.map(MapPtr::new(number)) = RuntimeCache::default();
         }
@@ -210,21 +216,15 @@ impl RuntimeCaches {
     /// declared dropped with it, and empties their caches as php frees a
     /// heap cache with its op array.
     pub(crate) fn number(&mut self, unit: &mut Unit) {
-        let (free, request, spare) = (&mut self.free, &mut self.request, &mut self.spare);
-        // Asked first, as the scan finds nothing where every unit gone
-        // was given back by its last holder, which is the rule.
-        if self.held.iter().any(|(unit, _)| unit.strong_count() == 0) {
-            self.held.retain_mut(|(unit, numbers)| {
-                if unit.strong_count() > 0 {
-                    return true;
-                }
-                for &number in numbers.iter() {
-                    *request.map(MapPtr::new(number)) = RuntimeCache::default();
-                }
-                free.append(numbers);
-                spare.push(std::mem::take(numbers));
-                false
-            });
+        // The scan finds nothing where every unit gone was given back by
+        // its last holder, which is the rule.
+        while let Some(at) = self
+            .held
+            .iter()
+            .position(|(unit, _)| unit.strong_count() == 0)
+        {
+            let (_, numbers) = self.held.swap_remove(at);
+            self.hand_back(numbers);
         }
         let mut numbers = self.spare.pop().unwrap_or_default();
         for code in op_arrays_mut(unit) {

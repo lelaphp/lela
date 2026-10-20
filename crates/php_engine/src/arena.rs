@@ -207,6 +207,19 @@ pub(crate) struct Interned {
     pub(crate) strings: Arc<Mutex<php_heap::Strings>>,
 }
 
+impl Interned {
+    /// The table a published unit's constant strings enter, this thread's
+    /// alone while the guard stands. It is append-only and every string
+    /// in it was finished before it was published, so what a thread that
+    /// ended holding it left is consistent, and a poisoned mutex is read
+    /// as it stands.
+    pub(crate) fn table(&self) -> std::sync::MutexGuard<'_, php_heap::Strings> {
+        self.strings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 impl Arena {
     /// An empty arena over an engine of `classes` classes and
     /// `functions` natives and native methods, holding `files`, for a

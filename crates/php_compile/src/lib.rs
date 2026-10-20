@@ -761,27 +761,27 @@ impl<'u> Parts<'u> {
         for var in self.main_vars {
             strings.intern(&var.0)?;
         }
-        let bodies = self
-            .functions
-            .iter()
-            .map(|(_, body)| body)
-            .chain(self.dynamic.iter().map(|(_, body)| body))
-            .chain(self.methods.iter().map(|method| &method.body))
-            .chain(self.hooks.iter().map(|hook| &hook.body));
-        for body in bodies {
-            for var in &body.vars {
-                strings.intern(&var.0)?;
-            }
-        }
-        for class in self.classes {
-            for property in &class.properties {
-                strings.intern(&property.name.0)?;
-                if let Some(prefix) = mangling(property.visibility, &class.name.0) {
-                    strings.intern(&[prefix.as_slice(), &property.name.0].concat())?;
-                }
-            }
+        for name in self.declared_names() {
+            strings.intern(&name)?;
         }
         Ok(())
+    }
+
+    /// [`declared_names`].
+    fn declared_names(self) -> impl Iterator<Item = Cow<'u, [u8]>> {
+        let bodies = (self.functions.iter().chain(self.dynamic))
+            .map(|(_, body)| body)
+            .chain(self.methods.iter().map(|method| &method.body))
+            .chain(self.hooks.iter().map(|hook| &hook.body));
+        let vars = bodies.flat_map(|body| body.vars.iter().map(|var| Cow::Borrowed(&*var.0)));
+        let properties = self.classes.iter().flat_map(|class| {
+            class.properties.iter().flat_map(move |property| {
+                let mangled = mangling(property.visibility, &class.name.0)
+                    .map(|prefix| Cow::Owned([prefix.as_slice(), &property.name.0].concat()));
+                std::iter::once(Cow::Borrowed(&*property.name.0)).chain(mangled)
+            })
+        });
+        vars.chain(properties)
     }
 }
 
@@ -858,6 +858,16 @@ pub fn mangling(visibility: Visibility, class: &[u8]) -> Option<Vec<u8>> {
 /// A name two op arrays share stands once for each.
 pub fn op_array_names(unit: &Unit) -> impl Iterator<Item = &[u8]> {
     Parts::of(unit).names()
+}
+
+/// The names `unit`'s declarations are read by beside their op arrays'
+/// ([`op_array_names`]), as [`intern_declared`] interns them after the
+/// main op array's variables: each declared function's, closure's,
+/// method's and hook's variables (`op_array->vars`), and each declared
+/// property's, with the key `prop_info->name` is under too, mangled for
+/// a protected or a private one ([`mangling`]).
+pub fn declared_names(unit: &Unit) -> impl Iterator<Item = Cow<'_, [u8]>> {
+    Parts::of(unit).declared_names()
 }
 
 /// php's level for what the scanner or the parser raised: the same

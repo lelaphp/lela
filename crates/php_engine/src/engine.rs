@@ -1631,13 +1631,7 @@ impl Shared {
         origin: Origin<'_>,
         stack: StackLimit,
     ) -> Result<Unit, CompileError> {
-        let mut strings = match self.interned.strings.lock() {
-            Ok(strings) => strings,
-            // The table is append-only and every string in it was
-            // finished before it was published, so what a thread that
-            // ended holding the lock left is consistent.
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut strings = self.interned.table();
         compile(
             source,
             origin,
@@ -1699,13 +1693,29 @@ impl Shared {
         filename: &[u8],
         kind: SourceKind,
     ) -> Result<PublishedUnit, CompileRefused> {
+        // The unit is readied through a borrow of what the compile handed
+        // back and published out of it, so it is moved on its way into
+        // the room only by the call that publishes it, where moving it to
+        // and from a function of its own cost a copy of its 600 bytes
+        // each way.
         let mut made = self.compiled_for(req, source, filename, kind);
         let room = match &mut made {
-            Ok(unit) => Self::ready_for(req, unit),
+            Ok(unit) => {
+                req.count_keys_made(u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX));
+                req.note_loop_vars(unit.loop_vars);
+                req.ready_unit(unit)
+            }
             Err(_) => None,
         };
         match made {
-            Ok(unit) => Ok(Self::held_for(req, unit.published(room))),
+            Ok(unit) => {
+                // Taken into the request, the strings its compile made
+                // held by it.
+                let unit = unit.published(room);
+                req.hold_published(&unit);
+                req.hold_compiled(&unit);
+                Ok(unit)
+            }
             // What the refused compile had declared stands in the
             // request after it, and the keys it made are counted, as the
             // refusal is raised ([`Request::declare_refused`]): a unit of
@@ -1728,26 +1738,6 @@ impl Shared {
                 Err(refused)
             }
         }
-    }
-
-    /// A unit compiled for `req` readied to be taken into it
-    /// ([`Request::ready_unit`]), and the room its caller publishes it in:
-    /// readied through a borrow of what the compile handed back and
-    /// published out of it, so the unit is moved on its way into the room
-    /// only by the call that publishes it, where moving it to and from a
-    /// function of its own cost a copy of its 600 bytes each way.
-    fn ready_for(req: &mut Request, unit: &mut Unit) -> Option<php_unit::SpareUnit> {
-        req.count_keys_made(u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX));
-        req.note_loop_vars(unit.loop_vars);
-        req.ready_unit(unit)
-    }
-
-    /// The unit [`Shared::ready_for`] readied, published, taken into
-    /// `req`, the strings its compile made held by it.
-    fn held_for(req: &mut Request, unit: PublishedUnit) -> PublishedUnit {
-        req.hold_published(&unit);
-        req.hold_compiled(&unit);
-        unit
     }
 
     /// The compile [`Shared::compile_for`] makes, before its unit is the
@@ -1887,11 +1877,7 @@ impl Shared {
     /// ([`Shared::publish_compiled`]); none where the bytes are no whole
     /// unit.
     pub(crate) fn decode_kept(&self, body: &[u8]) -> Option<Unit> {
-        let mut strings = match self.interned.strings.lock() {
-            Ok(strings) => strings,
-            // As in `publish`: the table is append-only and consistent.
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut strings = self.interned.table();
         crate::unit_cache::decode(
             body,
             &mut PermanentStrings {
@@ -1971,20 +1957,13 @@ impl Shared {
         if let Some(name) = self.permanent(bytes) {
             return Some(name);
         }
-        let strings = match self.interned.strings.lock() {
-            Ok(strings) => strings,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        strings.find(bytes)
+        self.interned.table().find(bytes)
     }
 
     /// How many strings the engine's table holds, opcache's
     /// `interned_strings_usage.number_of_strings`.
     pub(crate) fn interned_strings(&self) -> usize {
-        match self.interned.strings.lock() {
-            Ok(strings) => strings.count(),
-            Err(poisoned) => poisoned.into_inner().count(),
-        }
+        self.interned.table().count()
     }
 
     /// The value the entry `name` starts every request with as
@@ -2074,11 +2053,7 @@ impl Shared {
         if let Some((_, z)) = self.sapi_names.iter().find(|(n, _)| n.as_ref() == sapi) {
             return Some(exec::value_of(*z));
         }
-        let mut strings = match self.interned.strings.lock() {
-            Ok(strings) => strings,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let interned = strings.intern(sapi).ok()?;
+        let interned = self.interned.table().intern(sapi).ok()?;
         Some(exec::value_of(Zval::string(interned)))
     }
 
