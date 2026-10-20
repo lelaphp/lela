@@ -9,15 +9,19 @@
 //! written directly (`zend_should_call_hook`), and a virtual property,
 //! which has none, is refused.
 
-use php_link::{Held, Resolved, ResolvedHook, resolve_property};
+use php_link::{ClassHooks, Held, Resolved, ResolvedHook, resolve_property};
 use php_unit::decl::{Bare, ClassDecl, FunctionDecl, HookKind, MethodDecl, Visibility};
 
 use super::{Link, Member, MemberAt, Request};
 use crate::api::__private::{native_function, parameter};
-use crate::api::abi::{Entry, PropertyPlace, PropertyRead, PropertyTest};
+use crate::api::abi::{
+    Entry, PropertiesFor, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest,
+};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{
+    ClassId, Key, Layout, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value,
+};
 use crate::engine::MethodAt;
 use crate::trampoline::public_method;
 
@@ -104,7 +108,7 @@ impl Request {
     /// with no hooks, one declared `static`, and a name no class of the
     /// chain declares.
     pub(crate) fn hooked(&self, class: ClassId, name: &[u8]) -> Option<Hooked> {
-        if !self.class_has_hooks(class) {
+        if self.class_hooks(class) == ClassHooks::Absent {
             return None;
         }
         let (class, resolved) = self.scoped_property(class, name)?;
@@ -940,29 +944,76 @@ fn parent_hook_set(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     Ok(returned)
 }
 
-/// One row of [`Request::hooked_object_rows`]: the name as declared and
-/// the value, each the caller's owner, and for a declared row the class
-/// that declared it and its visibility, none for a dynamic one.
-pub(crate) struct HookedRow {
-    pub(crate) key: Owner<Key>,
-    pub(crate) value: Owner<Value>,
-    pub(crate) declared: Option<(ClassId, Visibility)>,
+/// The table [`Request::hooked_object_table`] builds, php's
+/// `zend_hooked_object_build_properties`, for the one reader that asks:
+/// php's table, its declared rows first and the dynamic ones after
+/// them, each under the key php's table holds it by, a hooked row a
+/// `null` its reader reads the hook in place of, as php reads an
+/// `IS_PTR` row, the caller's to give up once it has read it
+/// (`zend_release_properties`); what the reader reads those rows by
+/// ([`HookedRows`]); and `zend_hash_num_elements` of php's table, which
+/// also counts a row for each virtual property with no `get` hook and
+/// each slot nothing wrote, rows every reader steps over and this table
+/// leaves out. What [`crate::api::abi::PropertiesFor::Hooked`] hands a
+/// reader of an object whose class has a hooked property.
+#[derive(Debug)]
+pub struct HookedTable {
+    pub(crate) table: Owner<PhpArray>,
+    pub(crate) rows: HookedRows,
+    pub(crate) elements: u32,
 }
 
-impl HookedRow {
-    /// The row's owners given up, `zval_ptr_dtor` over each.
-    pub(crate) fn give_up(self, req: &mut Request) {
-        self.value.give_up(req);
-        self.key.give_up(req);
-    }
+/// What a reader of a [`HookedTable`] reads its `IS_PTR` rows by: the
+/// object whose rows they are, a lazy object's instance; what php's
+/// `IS_INDIRECT` and `IS_PTR` rows carry of each declared row, in the
+/// table's order; and the build, which says what name a hook is read
+/// under.
+#[derive(Debug, Clone)]
+pub(crate) struct HookedRows {
+    pub(crate) object: PhpObject,
+    pub(crate) declared: Vec<HookedDeclared>,
+    pub(crate) build: HookedBuild,
+}
 
-    /// Every row's owners given up, what a reader that stops part way
-    /// leaves.
-    pub(crate) fn give_up_all(req: &mut Request, rows: impl IntoIterator<Item = HookedRow>) {
-        for row in rows {
-            row.give_up(req);
-        }
-    }
+/// One declared row of a [`HookedTable`], its `prop_info`: the name as
+/// declared, the class that declared it and its visibility, and the
+/// hooked property it is, none for a slot's row.
+#[derive(Debug, Clone)]
+pub(crate) struct HookedDeclared {
+    pub(crate) name: Box<[u8]>,
+    pub(crate) declaring: ClassId,
+    pub(crate) visibility: Visibility,
+    pub(crate) hooked: Option<Hooked>,
+}
+
+/// Which reader a [`HookedTable`] is built for, which decides its rows
+/// and the name its hooks are read under: `get_object_vars` and
+/// `var_export` read each under a `zend_string_init` copy of the
+/// unmangled name, and `json_encode`, which reads none but a public
+/// row's, under `prop_info->name` itself; `foreach`'s iterator
+/// (`zho_build_properties_ex(zobj, true, true, false)`) lays only the
+/// declared rows the scope may reach, every one an `IS_PTR`, and reads
+/// a hook under a copy of the name where the name is mangled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HookedBuild {
+    Properties,
+    Json,
+    Iterator,
+}
+
+/// `sizeof(zend_hooked_object_iterator)`, what
+/// `zend_hooked_object_get_iterator` `emalloc`s for a `foreach`.
+const HOOKED_ITERATOR: usize = 160;
+
+/// A `foreach` over an object whose class has a hooked property, for the
+/// length of the loop: the iterator `zend_hooked_object_get_iterator`
+/// allocates and the table of declared rows it walks
+/// ([`HookedBuild::Iterator`]), named by the loop's hash iterator.
+pub(crate) struct HookedWalk {
+    at: u32,
+    iterator: php_heap::Block,
+    table: PhpArray,
+    rows: HookedRows,
 }
 
 /// Whose a key of `zho_build_properties_ex`'s table is: php keys the
@@ -1017,14 +1068,67 @@ impl Request {
             .collect()
     }
 
-    /// `zend_hooked_object_get_iterator`'s walk over the declared rows,
+    /// `zend_hooked_object_get_iterator` for a `foreach` over `object`,
+    /// whose class has a hooked property, registered at the loop's hash
+    /// iterator `at`: the iterator allocated, then its table of the
+    /// declared rows the scope may reach, both held until the loop ends
+    /// ([`Request::hooked_walk_end`]), so `memory_get_peak_usage()`
+    /// counts them while it runs:
+    ///
+    /// ```php
+    /// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); $p = memory_get_peak_usage(); $u = memory_get_usage(); echo $p - $s, ' ', $u - $s, "\n"; }
+    /// class H { public $a=1; public $b=1; public $c=1; public $d=1; public $e=1; public $f=1; public $g=1; public $h=1; public $i { get => 5; } public $j = 2 { get => $this->j; } }
+    /// $h = new H;
+    /// pk(function () use ($h) { $n = 0; foreach ($h as $v) $n++; return $n; });
+    /// class P { public $a = 1; private $pp = 3; protected $qq = 4; public $i { get => 5; } function z() { foreach ($this as $k => $v) {} return 1; } }
+    /// $p = new P;
+    /// pk(fn () => $p->z());
+    /// ```
+    /// ```expect
+    /// 872 0
+    /// 600 0
+    /// ```
+    pub(crate) fn hooked_walk_start(&mut self, object: PhpObject, at: u32) -> Result<(), Thrown> {
+        let iterator = self.heap.block(HOOKED_ITERATOR);
+        let iterator = self.fatal_of(iterator)?;
+        let built = match self.hooked_object_table(object, HookedBuild::Iterator) {
+            Ok(Some(built)) => built,
+            built => {
+                self.heap.free_block(iterator);
+                return built.map(|_| ());
+            }
+        };
+        let (table, rows) = (built.table.hand_on(), built.rows);
+        let walk = HookedWalk {
+            at,
+            iterator,
+            table,
+            rows,
+        };
+        self.properties.hooked_walks.push(walk);
+        Ok(())
+    }
+
+    /// The end of the loop [`Request::hooked_walk_start`] began at hash
+    /// iterator `at`: its table and its iterator given back
+    /// (`zho_it_dtor`, then the iterator's `efree`).
+    pub(crate) fn hooked_walk_end(&mut self, at: u32) {
+        let walks = &mut self.properties.hooked_walks;
+        if let Some(i) = walks.iter().position(|walk| walk.at == at) {
+            let walk = walks.swap_remove(i);
+            Owner::adopt(walk.table).give_up(self);
+            self.heap.free_block(walk.iterator);
+        }
+    }
+
+    /// `zho_declared_it_fetch_current`'s walk over the iterator's table,
     /// what a `foreach` over an object whose class has a hooked property
-    /// reads: from the row `lead` stands at, the next the scope may
-    /// reach whose value there is, a hooked one's read through its `get`
-    /// hook under its class's scope, one owner the caller's
-    /// ([`super::Walked::Hooked`]), and a virtual one with no `get` hook
-    /// stepped over; none past the last, where the dynamic table's walk
-    /// takes over. `lead` is left one past the row answered.
+    /// reads: from the row `lead` stands at, the next whose value there
+    /// is, a hooked one's read through its `get` hook under its class's
+    /// scope, one owner the caller's ([`super::Walked::Hooked`]), and a
+    /// virtual one with no `get` hook stepped over; none past the last,
+    /// where the dynamic table's walk takes over. `lead` is left one past
+    /// the row answered.
     ///
     /// ```php
     /// #[AllowDynamicProperties]
@@ -1040,19 +1144,22 @@ impl Request {
     /// ```
     pub(crate) fn hooked_object_walk(
         &mut self,
-        object: PhpObject,
+        at: u32,
         lead: &mut usize,
         by_ref: bool,
     ) -> Result<Option<(Owner<PhpString>, super::Walked)>, Thrown> {
-        let class = object.class();
-        let keys = self.hooked_object_keys(class);
-        while let Some((name, declaring, _)) = keys.get(*lead).cloned() {
+        loop {
+            let walks = &self.properties.hooked_walks;
+            let Some(walk) = walks.iter().find(|walk| walk.at == at) else {
+                return Ok(None);
+            };
+            let Some(row) = walk.rows.declared.get(*lead).cloned() else {
+                return Ok(None);
+            };
+            let (object, class) = (walk.rows.object, walk.rows.object.class());
             *lead += 1;
-            if !self.property_row_visible(class, &name, Some(declaring)) {
-                continue;
-            }
-            if let Some(hooked) = self.row_hooked(declaring, &name) {
-                if !self.hooked_accessible(&hooked) || (hooked.is_virtual && hooked.get.is_none()) {
+            if let Some(hooked) = row.hooked {
+                if hooked.is_virtual && hooked.get.is_none() {
                     continue;
                 }
                 // A loop by reference binds only what a `get` hook
@@ -1065,7 +1172,7 @@ impl Request {
                 {
                     return Err(self.hooked_error(
                         object,
-                        &name,
+                        &row.name,
                         "Cannot create reference to property {class}::${name}",
                     ));
                 }
@@ -1073,67 +1180,97 @@ impl Request {
                 // with no `get` hook whose slot nothing wrote is no row.
                 if hooked.get.is_none()
                     && self
-                        .declared_slot(class, &name)
+                        .declared_slot(class, &row.name)
                         .is_none_or(|placed| object.heap().slot(placed.slot).is_undef())
                 {
                     continue;
                 }
-                let value = self.read_hooked(object, &name, hooked, PropertyRead::Silent)?;
-                let key = match self.declared_string(&name) {
-                    Ok(key) => key,
-                    Err(thrown) => {
-                        self.release(value);
-                        return Err(thrown);
-                    }
-                };
-                return Ok(Some((key, super::Walked::Hooked(value))));
+                let value = self.read_deferred(object, &row, HookedBuild::Iterator)?;
+                let walked = super::Walked::Hooked(value.hand_on());
+                return self.iterator_key(&row).map(|key| Some((key, walked)));
             }
-            let Some(slot) = self.slot_declared_by(class, declaring, &name) else {
+            let Some(slot) = self.slot_declared_by(class, row.declaring, &row.name) else {
                 continue;
             };
             if object.heap().slot(slot).is_undef() {
                 continue;
             }
-            let key = self.declared_string(&name)?;
-            return Ok(Some((key, super::Walked::Slot(slot))));
+            let walked = super::Walked::Slot(slot);
+            return self.iterator_key(&row).map(|key| Some((key, walked)));
         }
-        Ok(None)
     }
 
-    /// Whether any class of `class`'s chain declares a hooked property,
-    /// php's `ce->num_hooked_props`. A linked class answers from its
-    /// record, where a parent's private hooked property is counted though
-    /// the child's rows leave it out:
+    /// `zho_declared_it_fetch_current`'s `current_key`: the declared
+    /// name, or a string of its own for a protected or a private row,
+    /// whose name the table holds mangled (`zend_string_init` of the
+    /// unmangled part).
+    fn iterator_key(&mut self, row: &HookedDeclared) -> Result<Owner<PhpString>, Thrown> {
+        match row.visibility {
+            Visibility::Public => self.declared_string(&row.name),
+            _ => self.string_init(&row.name).map(Owner::adopt),
+        }
+    }
+
+    /// php's `ce->num_hooked_props != 0`: whether a row of `class`'s
+    /// properties table has hooks, which `get_object_vars`, the encoders
+    /// and `foreach` read the object through the hooks' table and
+    /// iterator for. A parent's private hooked property the class
+    /// redeclares is no row, though the parent's scope still reads it
+    /// through its hooks ([`ClassHooks::ParentPrivate`]):
     ///
     /// ```php
-    /// class P { private $x { get => 5; } function f() { return $this->x; } }
+    /// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); $p = memory_get_peak_usage(); $u = memory_get_usage(); echo $p - $s, ' ', $u - $s, "\n"; }
+    /// class P { private $x { get => 5; } protected $q = 3; public $r = 4; function f() { return $this->x; } }
     /// class C extends P {}
-    /// var_dump((new C)->f());
+    /// class R extends P { public $q = 5; private $x = 6; public $s1=1; public $s2=1; public $s3=1; public $s4=1; public $s5=1; public $s6=1; }
+    /// var_dump((new C)->f(), (new R)->f());
+    /// $r = new R;
+    /// pk(fn () => get_object_vars($r));
     /// ```
     /// ```expect
     /// int(5)
+    /// int(5)
+    /// 728 696
     /// ```
     pub(crate) fn class_has_hooks(&self, class: ClassId) -> bool {
+        self.class_hooks(class) == ClassHooks::Rows
+    }
+
+    /// Where `class`'s property hooks are, its linked record's
+    /// [`php_link::LinkedClass::hooks`], or for a class with no record
+    /// read off its chain's declarations by the same rule.
+    fn class_hooks(&self, class: ClassId) -> ClassHooks {
         if let Some(record) = self.linked_class(class) {
-            return record.hooked;
+            return record.hooks;
         }
-        self.lineage(class).any(|here| {
-            self.class_decl(here)
-                .is_some_and(|decl| decl.properties.iter().any(|p| p.hooks.is_some()))
-        })
+        let mut hooks = ClassHooks::Absent;
+        for here in self.lineage(class) {
+            let Some(decl) = self.class_decl(here) else {
+                continue;
+            };
+            for property in decl.properties.iter().filter(|p| p.hooks.is_some()) {
+                if self.row_hooked(class, &property.name.0).is_some() {
+                    return ClassHooks::Rows;
+                }
+                hooks = ClassHooks::ParentPrivate;
+            }
+        }
+        hooks
     }
 
     /// `zend_hooked_object_build_properties`, the table
     /// `get_object_vars`, `json_encode` and `var_export` read an object
-    /// whose class has a hooked property through, with each hooked row
-    /// read as those readers read it: the chain walked from its root,
-    /// each class's own properties updating the row of their key in
-    /// place or adding one, a hooked property's value its `get` hook's
-    /// under the scope of the class that declared it
-    /// (`zend_read_property_ex(prop_info->ce, ...)`, silently), a
-    /// virtual one with no `get` hook no row, a slot nothing wrote no
-    /// row, then the dynamic table. None for a class with no hooked
-    /// property, whose readers read the object's own table.
+    /// whose class has a hooked property through, for the reader `build`
+    /// names: the chain walked from its root, each class's own
+    /// properties updating the row of their key in place or adding one,
+    /// a hooked property's row one its reader reads through the `get`
+    /// hook as it reaches it ([`Request::read_deferred`]), a virtual one
+    /// with no `get` hook no row, a slot nothing wrote no row, then the
+    /// dynamic table. The table is a request's array laid
+    /// down at the size php's has once it holds its rows, so the
+    /// readers' `memory_get_peak_usage()` counts it beside what they lay
+    /// down while they read it ([`HookedTable`]). None for a class with
+    /// no hooked property, whose readers read the object's own table.
     ///
     /// ```php
     /// #[AllowDynamicProperties]
@@ -1208,98 +1345,179 @@ impl Request {
     /// h => 5
     /// a => 2
     /// ```
-    pub(crate) fn hooked_object_rows(
+    pub(crate) fn hooked_object_table(
         &mut self,
         object: PhpObject,
-    ) -> Result<Option<Vec<HookedRow>>, Thrown> {
+        build: HookedBuild,
+    ) -> Result<Option<HookedTable>, Thrown> {
         let class = object.class();
         if !self.class_has_hooks(class) {
             return Ok(None);
         }
         let object = self.lazy_init(object)?;
         let keys = self.hooked_object_keys(class);
-        let mut rows: Vec<HookedRow> = Vec::with_capacity(keys.len());
-        for (name, declaring, visibility) in keys {
-            let declared = Some((declaring, visibility));
-            if let Some(hooked) = self.row_hooked(declaring, &name) {
-                if hooked.is_virtual && hooked.get.is_none() {
-                    continue;
-                }
-                let value = match self.read_hooked(object, &name, hooked, PropertyRead::Silent) {
-                    Ok(value) => Owner::adopt(value),
-                    Err(thrown) => {
-                        HookedRow::give_up_all(self, rows);
-                        return Err(thrown);
+        let o = object.heap();
+        // `zend_new_array` of the object's table's elements where it has
+        // one, else of `default_properties_count`, then
+        // `zend_hash_real_init_mixed`; laid here at the size php's ends
+        // at once it holds its rows, the rows this table leaves out
+        // counted.
+        let (initial, held) = match o.properties() {
+            Some(table) => (o.slot_table().len(), table.len()),
+            None => (o.slots(), 0),
+        };
+        let elements = u32::try_from(keys.len().saturating_add(held)).unwrap_or(u32::MAX);
+        let mut table = PhpArray::sized(self, initial.max(elements), Layout::Hash)?;
+        let mut declared = Vec::with_capacity(keys.len());
+        let iterator = build == HookedBuild::Iterator;
+        // `parents`, the chain walked from its root, an `emalloc` freed
+        // once the declared rows are laid.
+        let parents = self.heap.block(8 * self.lineage(class).count());
+        let parents = self.fatal_of(parents)?;
+        let laid = 'laid: {
+            for (name, declaring, visibility) in keys {
+                let hooked = self.row_hooked(declaring, &name);
+                // `check_access`: `zend_check_property_access` under the scope.
+                if iterator {
+                    if let Err(thrown) = self.access_name_copy(&name, visibility) {
+                        break 'laid Err(thrown);
                     }
-                };
-                let key = match self.declared_string(&name) {
-                    Ok(key) => key.into_key(),
-                    Err(thrown) => {
-                        value.give_up(self);
-                        HookedRow::give_up_all(self, rows);
-                        return Err(thrown);
+                    if !self.property_row_visible(class, &name, Some(declaring))
+                        || hooked.is_some_and(|hooked| !self.hooked_accessible(&hooked))
+                    {
+                        continue;
                     }
-                };
-                rows.push(HookedRow {
-                    key,
-                    value,
-                    declared,
-                });
-                continue;
-            }
-            let Some(slot) = self.slot_declared_by(class, declaring, &name) else {
-                continue;
-            };
-            let z = object.heap().slot(slot);
-            if z.is_undef() {
-                continue;
-            }
-            let key = match self.declared_string(&name) {
-                Ok(key) => key.into_key(),
-                Err(thrown) => {
-                    HookedRow::give_up_all(self, rows);
-                    return Err(thrown);
                 }
-            };
-            let value = Owner::take(self, Value::of_zval(z));
-            rows.push(HookedRow {
-                key,
-                value,
-                declared,
-            });
+                let row = HookedDeclared {
+                    name,
+                    declaring,
+                    visibility,
+                    hooked,
+                };
+                match self.hooked_declared_row(object, &mut table, &row, iterator) {
+                    Ok(true) => declared.push(row),
+                    Ok(false) => {}
+                    Err(thrown) => break 'laid Err(thrown),
+                }
+            }
+            Ok(())
+        };
+        self.heap.free_block(parents);
+        if let Err(thrown) = laid {
+            table.give_up(self);
+            return Err(thrown);
         }
-        if let Some(table) = object.heap().properties() {
-            let dynamic: Vec<(Key, Value)> = table
+        let dynamic = object.heap().properties().filter(|_| !iterator);
+        let rows: Vec<(Key, Value)> = dynamic.map_or_else(Vec::new, |dynamic| {
+            dynamic
                 .iter()
                 .map(|(key, z)| (Key::of(key), Value::of_zval(z)))
-                .collect();
-            for (key, value) in dynamic {
-                let key = Owner::take(self, key);
-                let value = Owner::take(self, value);
-                rows.push(HookedRow {
-                    key,
-                    value,
-                    declared: None,
-                });
+                .collect()
+        });
+        for (key, value) in rows {
+            let key = Owner::take(self, key);
+            let value = Owner::take(self, value);
+            if let Err(thrown) = table.add_new(self, key, value) {
+                table.give_up(self);
+                return Err(thrown);
             }
         }
-        Ok(Some(rows))
+        let rows = HookedRows {
+            object,
+            declared,
+            build,
+        };
+        Ok(Some(HookedTable {
+            table,
+            rows,
+            elements,
+        }))
+    }
+
+    /// One declared row of [`Request::hooked_object_table`] laid into
+    /// `table` under php's key, the name mangled for a protected or a
+    /// private property: for a hooked property, and for every row of
+    /// `foreach`'s iterator (`force_ptr`), a `null` its reader reads in
+    /// place of, and for a slot the
+    /// value its `IS_INDIRECT` reads through to, a reference only the
+    /// slot holds read as its value (the `Z_REFCOUNT_P(value) == 1` of
+    /// `get_object_vars`, the `ZVAL_DEREF` of the encoders). False where
+    /// php's row is one every reader steps over: a virtual property with
+    /// no `get` hook, a slot nothing wrote.
+    fn hooked_declared_row(
+        &mut self,
+        object: PhpObject,
+        table: &mut Owner<PhpArray>,
+        row: &HookedDeclared,
+        force_ptr: bool,
+    ) -> Result<bool, Thrown> {
+        let value = match row.hooked {
+            _ if force_ptr => Value::null(),
+            Some(hooked) if hooked.is_virtual && hooked.get.is_none() => return Ok(false),
+            Some(_) => Value::null(),
+            None => {
+                let class = object.class();
+                let Some(slot) = self.slot_declared_by(class, row.declaring, &row.name) else {
+                    return Ok(false);
+                };
+                let z = object.heap().slot(slot);
+                if z.is_undef() {
+                    return Ok(false);
+                }
+                self.dup_value(Value::of_zval(z), None)
+            }
+        };
+        let value = Owner::adopt(value);
+        let key = match self.property_prefix(row.declaring, row.visibility) {
+            Some(prefix) => self.declared_string(&[prefix.as_slice(), &row.name].concat()),
+            None => self.declared_string(&row.name),
+        };
+        let key = match key {
+            Ok(key) => key.into_key(),
+            Err(thrown) => {
+                value.give_up(self);
+                return Err(thrown);
+            }
+        };
+        table.add_new(self, key, value)?;
+        Ok(true)
     }
 }
 
 impl Request {
-    /// [`Request::hooked_object_rows`] as `zend_get_properties_for` hands
-    /// its table to `json_encode`, `var_export` and `get_object_vars`
-    /// (`zend_hooked_object_build_properties`): a table built for the
+    /// [`Request::hooked_object_table`] as `zend_get_properties_for`
+    /// hands it to `json_encode` and `var_export`
+    /// (`zend_hooked_object_build_properties`), a table built for the
     /// reader, php's `*is_temp`, each declared name mangled as php keys
     /// it, `\0*\0p` for a protected property and `\0C\0p` for a private
     /// one, each row laid down without the lookup, so a name the hooks
-    /// answer and the table holds as a copy is two rows. None for a
-    /// class with no hooked property. A lazy object whose initializer
-    /// throws answers the empty table and leaves the throwable pending
-    /// for the reader to hand on once it has written what it read, as
-    /// `zend_hooked_object_build_properties` answers `zend_empty_array`
-    /// under `EG(exception)` (`Z/Zend/zend_property_hooks.c:137`).
+    /// answer and the table holds as a copy is two rows; each hooked row
+    /// read by the reader as it reaches it ([`crate::api::values::walk::Row::read`]),
+    /// so a hook of a row the reader steps over is never called, as
+    /// `json_encode` steps over a protected or private one:
+    ///
+    /// ```php
+    /// class S { private $p { get { echo "p read\n"; return 1; } } public $q { get { echo "q read\n"; return 2; } } }
+    /// echo json_encode(new S), "\n";
+    /// var_export(new S); echo "\n";
+    /// ```
+    /// ```expect
+    /// q read
+    /// {"q":2}
+    /// p read
+    /// q read
+    /// \S::__set_state(array(
+    ///    'p' => 1,
+    ///    'q' => 2,
+    /// ))
+    /// ```
+    ///
+    /// None for a class with no hooked property. A lazy object whose
+    /// initializer throws answers the empty table and leaves the
+    /// throwable pending for the reader to hand on once it has written
+    /// what it read, as `zend_hooked_object_build_properties` answers
+    /// `zend_empty_array` under `EG(exception)`
+    /// (`Z/Zend/zend_property_hooks.c:137`).
     ///
     /// ```php
     /// class H { public $a { get => 1; } public $b = 2; }
@@ -1317,10 +1535,11 @@ impl Request {
     /// lazy ghost object(H)#3 (0) {
     /// }
     /// ```
-    pub(crate) fn hooked_properties_table(
+    pub(crate) fn hooked_properties_for(
         &mut self,
         object: PhpObject,
-    ) -> Result<Option<Owner<PhpArray>>, Thrown> {
+        purpose: PropertyPurpose,
+    ) -> Result<Option<PropertiesFor>, Thrown> {
         if !self.class_has_hooks(object.class()) {
             return Ok(None);
         }
@@ -1329,49 +1548,73 @@ impl Request {
                 return Err(thrown);
             }
             self.leave_pending(&thrown);
-            return Ok(Some(Owner::take(self, PhpArray::empty())));
+            let empty = Owner::take(self, PhpArray::empty());
+            return Ok(Some(PropertiesFor::Temporary(empty)));
         }
-        let Some(rows) = self.hooked_object_rows(object)? else {
-            return Ok(None);
+        let build = match purpose {
+            PropertyPurpose::Json => HookedBuild::Json,
+            _ => HookedBuild::Properties,
         };
-        let mut rows = rows.into_iter();
-        let mut table = match PhpArray::new(self) {
-            Ok(table) => table,
-            Err(thrown) => {
-                HookedRow::give_up_all(self, rows);
-                return Err(thrown);
-            }
-        };
-        while let Some(HookedRow {
-            key,
-            value,
-            declared,
-        }) = rows.next()
-        {
-            let prefix = declared.and_then(|(declaring, v)| self.property_prefix(declaring, v));
-            let key = match (&*key, prefix) {
-                (Key::Str(name), Some(prefix)) => {
-                    let mangled =
-                        self.declared_string(&[prefix.as_slice(), name.as_bytes()].concat());
-                    key.give_up(self);
-                    mangled.map(Owner::into_key)
-                }
-                _ => Ok(key),
-            };
-            let laid = match key {
-                Ok(key) => table.add_new(self, key, value),
-                Err(thrown) => {
-                    value.give_up(self);
-                    Err(thrown)
-                }
-            };
-            if let Err(thrown) = laid {
-                HookedRow::give_up_all(self, rows);
-                table.give_up(self);
-                return Err(thrown);
-            }
+        Ok(self
+            .hooked_object_table(object, build)?
+            .map(PropertiesFor::Hooked))
+    }
+
+    /// `zend_check_property_access` over a declared row php's table keys
+    /// by its mangled name, a protected or a private one: the copy of the
+    /// unmangled name it looks the property up by (`zend_string_init`),
+    /// released before it answers, so `memory_get_peak_usage()` counts it
+    /// above the table being filled.
+    ///
+    /// ```php
+    /// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); $p = memory_get_peak_usage(); $u = memory_get_usage(); echo $p - $s, ' ', $u - $s, "\n"; }
+    /// class Q { public $q = 5; private $p = 6; public $s1=1; public $s2=1; public $s3=1; public $s4=1; public $s5=1; public $s6=1; public $r = 4; }
+    /// class H { private $p = 6; public $s1=1; public $s2=1; public $s3=1; public $s4=1; public $s5=1; public $s6=1; public $r { get => 4; } }
+    /// $q = new Q; $h = new H;
+    /// pk(fn () => get_object_vars($q));
+    /// pk(fn () => get_object_vars($h));
+    /// ```
+    /// ```expect
+    /// 728 696
+    /// 784 376
+    /// ```
+    pub(crate) fn access_name_copy(
+        &mut self,
+        name: &[u8],
+        visibility: Visibility,
+    ) -> Result<(), Thrown> {
+        if visibility != Visibility::Public {
+            let copy = Owner::adopt(self.string_init(name)?);
+            copy.give_up(self);
         }
-        Ok(Some(table))
+        Ok(())
+    }
+
+    /// An `IS_PTR` row of a [`HookedTable`] read through its `get` hook,
+    /// `zend_read_property_ex(prop_info->ce, zobj, name, silent)`, under
+    /// the name its reader passes ([`HookedBuild`]): a copy of the
+    /// unmangled name (`zend_string_init`, one byte or not) held while
+    /// the hook is called, or `prop_info->name` itself.
+    pub(crate) fn read_deferred(
+        &mut self,
+        object: PhpObject,
+        row: &HookedDeclared,
+        build: HookedBuild,
+    ) -> Result<Owner<Value>, Thrown> {
+        let Some(hooked) = row.hooked else {
+            return Ok(Owner::null());
+        };
+        let copied = match build {
+            HookedBuild::Properties => true,
+            HookedBuild::Json => false,
+            HookedBuild::Iterator => row.visibility != Visibility::Public,
+        };
+        let copy = copied.then(|| self.string_init(&row.name)).transpose()?;
+        let read = self.read_hooked(object, &row.name, hooked, PropertyRead::Silent);
+        if let Some(copy) = copy {
+            Owner::adopt(copy).give_up(self);
+        }
+        read.map(Owner::adopt)
     }
 }
 

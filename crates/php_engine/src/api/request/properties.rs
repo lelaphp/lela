@@ -141,6 +141,9 @@ pub(super) struct Properties {
     /// reused, so a cell freed and a cell laid down at its address are
     /// never one row.
     next_ref_source: usize,
+    /// The `foreach` loops over objects whose class has a hooked
+    /// property, each while it runs ([`Request::hooked_walk_start`]).
+    pub(super) hooked_walks: Vec<super::hooks::HookedWalk>,
 }
 
 impl Default for Properties {
@@ -151,6 +154,7 @@ impl Default for Properties {
             recursion_guards: Vec::new(),
             ref_sources: Vec::new(),
             next_ref_source: 1,
+            hooked_walks: Vec::new(),
         }
     }
 }
@@ -201,13 +205,16 @@ impl Request {
     }
 
     /// `zend_get_property_offset`'s answer a fetch may cache
-    /// (`Z/Zend/zend_object_handlers.c:450-461`): the declared slot of
-    /// `name` on objects of `object`'s class, and whether it is typed,
-    /// where the class is served by the standard handlers, the
-    /// property has no hooks and the scope a property is placed from
-    /// reaches it. None for every other name, which is placed on every
-    /// pass: a dynamic property, one the scope may not reach, one a
-    /// class's own handlers serve.
+    /// (`Z/Zend/zend_object_handlers.c:384-389`, `:450-461`), for objects
+    /// of `object`'s class served by the standard handlers: the declared
+    /// slot of `name` and whether it is typed, where the property has no
+    /// hooks and the scope a property is placed from reaches it, and
+    /// `ZEND_DYNAMIC_PROPERTY_OFFSET` for a name no class of the chain
+    /// declares, an instance or a `static` property, private or not, and
+    /// that leads with no NUL byte. None for every other name, which is
+    /// placed on every pass: one the scope may not reach, a `static`
+    /// one, whose notice each read raises, one a class's own handlers
+    /// serve.
     ///
     /// ```php
     /// class P { private $p = "P"; function viaP($o) { return $o->p; } }
@@ -227,13 +234,112 @@ impl Request {
     /// Warning: Undefined property: C::$p in %s on line 3
     /// |
     /// ```
-    pub(crate) fn cacheable_slot(&self, object: PhpObject, name: &[u8]) -> Option<(u32, bool)> {
+    ///
+    /// A dynamic property is read and written through the one lookup the
+    /// cache leaves, and every pass sees the table as it stands: a name
+    /// unset and laid down again goes to the end, a reference is read
+    /// through and written through, a table an `(array)` cast shares is
+    /// separated before a write, and a name the table no longer holds is
+    /// the `__get`'s or the warning's again.
+    ///
+    /// ```php
+    /// class M { public function __get($n) { return "get $n"; } }
+    /// function f($o) { $r = []; for ($i = 0; $i < 3; $i++) { $r[] = $o->p; $o->p = $i; $o->p++; $o->p += 10; } return $r; }
+    /// $o = new stdClass; $o->a = 0; $o->p = 'x';
+    /// var_dump(f($o), $o);
+    /// $a = (array) $o; $o->p = 'y'; unset($o->a); $o->a = 1;
+    /// var_dump($a['p'], get_object_vars($o));
+    /// $x = 5; $o->p = &$x; f($o); var_dump($x);
+    /// $m = new M; $m->p = 1; var_dump(f($m)); unset($m->p); var_dump($m->p);
+    /// $s = new stdClass; foreach ([1, 2] as $k) { $s->{"k$k"} = $k; foreach ($s as $n => $v) echo "$n=$v "; echo $s->k1, "\n"; }
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   [0]=>
+    ///   string(1) "x"
+    ///   [1]=>
+    ///   int(11)
+    ///   [2]=>
+    ///   int(12)
+    /// }
+    /// object(stdClass)#1 (2) {
+    ///   ["a"]=>
+    ///   int(0)
+    ///   ["p"]=>
+    ///   int(13)
+    /// }
+    /// int(13)
+    /// array(2) {
+    ///   ["p"]=>
+    ///   string(1) "y"
+    ///   ["a"]=>
+    ///   int(1)
+    /// }
+    /// int(13)
+    ///
+    /// Deprecated: Creation of dynamic property M::$p is deprecated in %s on line 9
+    /// array(3) {
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(11)
+    ///   [2]=>
+    ///   int(12)
+    /// }
+    /// string(5) "get p"
+    /// k1=1 1
+    /// k1=1 k2=2 1
+    /// ```
+    ///
+    /// A name a class declares `static` is no dynamic property, so every
+    /// read and write raises its notice, and a name a class without
+    /// `#[AllowDynamicProperties]` has not got is deprecated where it is
+    /// laid down, once:
+    ///
+    /// ```php
+    /// class S { public static $s = 1; }
+    /// class D {}
+    /// function g($o) { for ($i = 0; $i < 2; $i++) { $o->s = $i; echo $o->s, "\n"; } }
+    /// g(new S); g(new D);
+    /// ```
+    /// ```expect
+    ///
+    /// Notice: Accessing static property S::$s as non static in %s on line 4
+    ///
+    /// Deprecated: Creation of dynamic property S::$s is deprecated in %s on line 4
+    ///
+    /// Notice: Accessing static property S::$s as non static in %s on line 4
+    /// 0
+    ///
+    /// Notice: Accessing static property S::$s as non static in %s on line 4
+    ///
+    /// Notice: Accessing static property S::$s as non static in %s on line 4
+    /// 1
+    ///
+    /// Deprecated: Creation of dynamic property D::$s is deprecated in %s on line 4
+    /// 0
+    /// 1
+    /// ```
+    pub(crate) fn cacheable_offset(
+        &self,
+        object: PhpObject,
+        name: &[u8],
+    ) -> Option<crate::exec::PropertyOffset> {
         let class = object.class();
-        if self.own_handlers(class).is_some() || self.hooked(class, name).is_some() {
+        if self.own_handlers(class).is_some() {
             return None;
         }
-        let placed = self.declared_slot(class, name)?;
-        self.reaches(&placed).then_some((placed.slot, placed.typed))
+        if let Some(placed) = self.declared_slot(class, name) {
+            let reached = self.hooked(class, name).is_none() && self.reaches(&placed);
+            return reached.then_some(crate::exec::PropertyOffset::Declared {
+                slot: placed.slot,
+                typed: placed.typed,
+            });
+        }
+        let declared = self.placed_named(class, name).is_some()
+            || self.chain_declaration(class, name).is_some();
+        (!declared && !Self::bad_property_name(name))
+            .then_some(crate::exec::PropertyOffset::Dynamic)
     }
 
     /// `zend_update_property_ex(prop_info->ce, ...)`, what an engine or a
@@ -291,9 +397,7 @@ impl Request {
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let declaring = self
-            .placed(class)
-            .rev()
-            .find(|(_, _, p)| &*p.name.0 == name)
+            .placed_named(class, name)
             .map(|(_, declaring, _)| declaring);
         let scope = declaring.or(self.properties.fake_scope);
         self.in_fake_scope(scope, f)
@@ -351,19 +455,28 @@ impl Request {
     /// since a class's own declaration is appended after a parent's
     /// private one of the same name and hides it.
     pub(super) fn prop_slot(&self, class: ClassId, name: &[u8]) -> Option<u32> {
-        self.placed(class)
-            .rev()
-            .find(|(_, _, p)| &*p.name.0 == name)
+        self.placed_named(class, name)
             .and_then(|(slot, _, _)| u32::try_from(slot).ok())
     }
 
-    /// The dynamic table's entry for `name`, a view; none where the
-    /// object has no table or the table no such key.
+    /// The placed row `ce->properties_info` holds for `name`, whatever
+    /// the scope: the last of the name, a class's own declaration being
+    /// appended after a parent's private one it hides.
+    pub(super) fn placed_named(
+        &self,
+        class: ClassId,
+        name: &[u8],
+    ) -> Option<(usize, ClassId, &PropertyDecl)> {
+        self.placed(class)
+            .rev()
+            .find(|(_, _, p)| &*p.name.0 == name)
+    }
+
+    /// The dynamic table's entry for `name`, a view, found by the name's
+    /// hash as `zend_hash_find` finds it; none where the object has no
+    /// table or the table no such key.
     pub(crate) fn dynamic_prop(o: Obj, name: &[u8]) -> Option<Value> {
-        o.properties()?
-            .iter()
-            .find(|(k, _)| matches!(k, php_heap::Key::Str(s) if s.bytes() == name))
-            .map(|(_, z)| Value::of_zval(z))
+        o.properties()?.str_find(name).map(Value::of_zval)
     }
 
     /// A property read, `zend_std_read_property` without the handler
@@ -514,11 +627,8 @@ impl Request {
         name: &[u8],
         silent: bool,
     ) -> Option<Result<(), Visibility>> {
-        let (declaring, is_instance, visibility) = self.lineage(class).find_map(|here| {
-            let decl = self.class_decl(here)?;
-            let p = decl.properties.iter().find(|p| &*p.name.0 == name)?;
-            Some((here, p.is_instance, p.visibility))
-        })?;
+        let (declaring, p) = self.chain_declaration(class, name)?;
+        let (is_instance, visibility) = (p.is_instance, p.visibility);
         let scope = self.property_scope();
         if scope != Some(declaring) {
             // `ZEND_ACC_CHANGED`: the scope's own private `static` wins
@@ -556,6 +666,21 @@ impl Request {
             );
         }
         Some(Ok(()))
+    }
+
+    /// The declaration of `name`, an instance or a `static` property, of
+    /// the nearest class of `class`'s chain that declares one, beside
+    /// that class: what `ce->properties_info` finds where no placed row
+    /// does.
+    fn chain_declaration(&self, class: ClassId, name: &[u8]) -> Option<(ClassId, &PropertyDecl)> {
+        self.lineage(class).find_map(|here| {
+            let p = self
+                .class_decl(here)?
+                .properties
+                .iter()
+                .find(|p| &*p.name.0 == name)?;
+            Some((here, p))
+        })
     }
 
     /// `ZEND_WRONG_PROPERTY_OFFSET` for a name no instance row placed:
@@ -623,14 +748,13 @@ impl Request {
     }
 
     fn placed_row(&self, class: ClassId, name: &[u8]) -> Option<(usize, ClassId, &PropertyDecl)> {
-        let named = |(_, _, p): &(usize, ClassId, &PropertyDecl)| &*p.name.0 == name;
-        let found = self.placed(class).rev().find(named)?;
+        let found = self.placed_named(class, name)?;
         let (_, declaring, p) = found;
         if self.property_scope() != Some(declaring) {
             if let Some(own) = self.parent_private(class, name) {
                 return Some(
                     self.placed(class)
-                        .find(|row| row.1 == own && named(row))
+                        .find(|row| row.1 == own && &*row.2.name.0 == name)
                         .unwrap_or(found),
                 );
             } else if p.visibility == Visibility::Private && declaring != class {
@@ -1864,7 +1988,6 @@ impl Request {
         let quiet = matches!(read, PropertyRead::Silent | PropertyRead::Unset);
         let o = object.heap();
         let class = object.class();
-        let shown = String::from_utf8_lossy(name).into_owned();
         if let Some(read) = self.read_hooked_arm(object, name, read) {
             return adopted(read);
         }
@@ -1973,6 +2096,7 @@ impl Request {
         }
         if !quiet {
             let class = self.class_name(class);
+            let shown = String::from_utf8_lossy(name);
             crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
         }
         Ok(Owner::null())
@@ -3197,10 +3321,18 @@ impl Request {
             php_heap::DeclaredRows::Slots => self.class_slots(object.class()),
             php_heap::DeclaredRows::Copied => 0,
         };
-        if slots == 0 && table.is_empty() {
+        // `zend_hooked_object_get_iterator` lays its iterator whatever
+        // the object holds.
+        let hooked = self.class_has_hooks(object.class());
+        if !hooked && slots == 0 && table.is_empty() {
             return Ok(None);
         }
-        Ok(Some(self.heap.iterator_add(table, 0)))
+        let at = self.heap.iterator_add(table, 0);
+        if hooked && let Err(thrown) = self.hooked_walk_start(object, at) {
+            self.heap.iterator_del(at);
+            return Err(thrown);
+        }
+        Ok(Some(at))
     }
 
     /// `zend_fe_fetch_object_helper` (`Z/Zend/zend_vm_def.h:7058`) over
@@ -3245,7 +3377,7 @@ impl Request {
         // hooked one read through its hook, and then the dynamic rows.
         let stepped = if self.class_has_hooks(class) {
             let mut lead = self.heap.iterator_lead(idx) as usize;
-            let found = self.hooked_object_walk(object, &mut lead, by_ref);
+            let found = self.hooked_object_walk(idx, &mut lead, by_ref);
             self.heap
                 .iterator_set_lead(idx, u32::try_from(lead).unwrap_or(u32::MAX));
             if let Some((key, walked)) = found? {

@@ -11,9 +11,10 @@
 //! and an engine bound to `Jit` runs as one bound to `Nop` does;
 //! otherwise a hot safepoint records (`dispatch`, `record`) and the
 //! pipeline compiles what it recorded through the engine's `Backend`
-//! and publishes it in the epoch's trace table (`compiler`). What enters
-//! a published trace is #2959's, so nothing is entered yet. A host with
-//! no `Backend` runs the tier `Off`.
+//! and publishes it in the epoch's trace table (`compiler`); the next
+//! visit to a compiled word enters its trace and follows it from trace to
+//! trace (`dispatch::run`, `enter`). A host with no `Backend` runs the
+//! tier `Off`.
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(

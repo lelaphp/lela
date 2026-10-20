@@ -599,6 +599,17 @@ fn serve<T: Tier, D: Telling>(req: &mut Request, entry: FrameRef) -> Result<(), 
 /// ```expect regime=small-stack
 /// Maximum call stack size of %d bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
 /// ```
+///
+/// An unbounded recursion through a callback, on the CLI's own stack, is
+/// refused the same way at whatever depth that stack allows (#3022):
+///
+/// ```php
+/// function f($n) { return array_map('f', [$n + 1]); }
+/// try { f(0); } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Error: Maximum call stack size of %d bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
+/// ```
 fn refused_at_entry(req: &mut Request) -> bool {
     match crate::api::raising::call_stack_limit(req) {
         Ok(()) => false,

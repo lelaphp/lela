@@ -130,7 +130,8 @@ impl Request {
         // `auto_globals_jit`, `$_ENV` and `$_REQUEST` are made when named,
         // and `$_SERVER` too while `register_argc_argv` is off, since it
         // is read at module startup, before any host has handed an
-        // `argc`; every other one is made now, in the order registered.
+        // `argc`; every other one is made now, in the order registered,
+        // but `$_SESSION`, whose registration names no callback.
         let jit = self.ini_flag(b"auto_globals_jit");
         let server_jit = jit && !self.ini_flag(b"register_argc_argv");
         self.variables.armed = [
@@ -141,16 +142,8 @@ impl Request {
         .into_iter()
         .filter_map(|(global, armed)| armed.then_some(global))
         .collect();
-        for global in [
-            AutoGlobal::Get,
-            AutoGlobal::Post,
-            AutoGlobal::Cookie,
-            AutoGlobal::Server,
-            AutoGlobal::Env,
-            AutoGlobal::Request,
-            AutoGlobal::Files,
-        ] {
-            if !self.variables.armed.contains(&global) {
+        for global in crate::engine::AUTO_GLOBALS {
+            if global != AutoGlobal::Session && !self.variables.armed.contains(&global) {
                 self.make(global)?;
             }
         }

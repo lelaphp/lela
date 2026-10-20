@@ -607,6 +607,7 @@ request::HandlerStatus
 request::Handshake
 request::Held
 request::Held::get
+request::HookedTable
 request::HostPath
 request::HttpStatus
 request::InfoRow
@@ -1416,6 +1417,7 @@ values::SmartStr::extract
 values::SmartStr::finish
 values::SmartStr::free
 values::SmartStr::remove
+values::SmartStr::reserve
 values::TypeTag
 values::Value
 values::Value::array
@@ -1452,6 +1454,7 @@ values::walk::ObjectTable
 values::walk::Row
 values::walk::Row::key
 values::walk::Row::make_ref
+values::walk::Row::read
 values::walk::Row::uninitialized
 values::walk::Row::value
 values::walk::Rows

@@ -13,9 +13,10 @@ use crate::api::abi::{
     OrFalse, Passed, PropertiesFor, PropertyPurpose, PropertyTest, Raw, Union, Untyped,
 };
 use crate::api::raising::{Thrown, arg_type_error, deprecated, none_pending, throw_error, warning};
-use crate::api::request::{HookedRow, PropertyInfo, Request};
+use crate::api::request::{HookedTable, PropertyInfo, Request};
 use crate::api::values::walk::{self, Table};
 use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use crate::natives::{Unmangled, unmangle_property_name};
 
 /// `zend_lookup_class_ex`: one leading `\` dropped, the table under
 /// the name whatever its case, and the autoloaders where the table has
@@ -433,45 +434,138 @@ fn get_class_vars(req: &mut Request, class: PhpString) -> Result<Owner<PhpArray>
     Ok(array)
 }
 
-/// One row of a hooked object's table into `get_object_vars`' answer:
-/// an integer key php's table holds already is skipped, a declared row
-/// the scope cannot see is left out, and a dynamic row's name is keyed
-/// as php's `zend_symtable_add_new` keys it. The row's owners are the
-/// array's or given up here.
-fn add_hooked_var(
+/// `get_object_vars()` over the table
+/// [`Request::hooked_object_table`] built for it, php's slow path: the
+/// array laid down at `array_init_size` of php's table's elements, then
+/// each row in the table's order, a declared row the scope cannot see
+/// left out, one it can see keyed by its name unmangled and, where it is
+/// hooked, read through its hook only then, under a copy of its name
+/// php makes for the read; a dynamic row keyed as `zend_symtable_add_new`
+/// keys it, and an integer key the array holds already skipped
+/// (`zend_hash_index_add`). So `memory_get_peak_usage()` reads php's
+/// table beside the array and the name a hook is read under, a hook of
+/// a row the scope cannot see is never called, and a reference only its
+/// slot holds is handed out as its value:
+///
+/// ```php
+/// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+/// class H { public $a=1; public $b=1; public $c=1; public $d=1; public $e=1; public $f=1; public $g=1; public $h=1; public $i { get => 5; } public $j = 2 { get => $this->j; } }
+/// $h = new H;
+/// pk(fn () => get_object_vars($h));
+/// pk(fn () => (array) $h);
+/// #[AllowDynamicProperties]
+/// class D { public $a = 1; private $p { get { echo "read p\n"; return 1; } } public $q { get { echo "read q\n"; return 2; } } }
+/// $d = new D; $x = 5; $d->a = &$x; unset($x); $d->e = 3;
+/// debug_zval_dump(get_object_vars($d));
+/// ```
+/// ```expect
+/// 1424 728
+/// 696 696
+/// read q
+/// array(3) refcount(1){
+///   ["a"]=>
+///   int(5)
+///   ["q"]=>
+///   int(2)
+///   ["e"]=>
+///   int(3)
+/// }
+/// ```
+fn hooked_vars(
+    req: &mut Request,
+    hooked: &HookedTable,
+    scope: Option<ClassId>,
+) -> Result<Owner<PhpArray>, Thrown> {
+    let mut array = PhpArray::init_size(req, hooked.elements)?;
+    match add_hooked_vars(req, &mut array, hooked, scope) {
+        Ok(()) => Ok(array),
+        Err(thrown) => {
+            array.give_up(req);
+            Err(thrown)
+        }
+    }
+}
+
+/// [`hooked_vars`]' walk, each row it keeps laid into `array`.
+fn add_hooked_vars(
     req: &mut Request,
     array: &mut Owner<PhpArray>,
-    row: HookedRow,
+    hooked: &HookedTable,
     scope: Option<ClassId>,
 ) -> Result<(), Thrown> {
-    let HookedRow {
-        key,
-        value,
-        declared,
-    } = row;
-    let name = match &*key {
-        Key::Int(_) if array.contains(&key) => {
-            value.give_up(req);
-            key.give_up(req);
-            return Ok(());
-        }
-        Key::Int(_) => return array.add_new(req, key, value),
-        Key::Str(name) => *name,
+    let rows: Vec<(Key, Value)> = walk::rows(req, *hooked.table).collect();
+    let mut declared = hooked.rows.declared.iter();
+    for (key, value) in rows {
+        let (key, value) = match (key, declared.next()) {
+            (Key::Str(name), Some(row)) => {
+                req.access_name_copy(&row.name, row.visibility)?;
+                if !visible(req, row.declaring, row.visibility, scope) {
+                    continue;
+                }
+                let value = match row.hooked {
+                    Some(_) => req.read_deferred(hooked.rows.object, row, hooked.rows.build)?,
+                    None => Owner::take(req, value),
+                };
+                match declared_var_key(req, name, row.visibility) {
+                    Ok(key) => (key, value),
+                    Err(thrown) => {
+                        value.give_up(req);
+                        return Err(thrown);
+                    }
+                }
+            }
+            (Key::Int(n), _) if array.contains(&Key::Int(n)) => continue,
+            (Key::Int(n), _) => (Owner::index(n), Owner::take(req, value)),
+            (Key::Str(name), None) => {
+                (Owner::take(req, Key::lookup(name)), Owner::take(req, value))
+            }
+        };
+        array.add_new(req, key, value)?;
+    }
+    Ok(())
+}
+
+/// The key `get_object_vars()` lays a declared row under, its name
+/// unmangled: the name itself for a public property, as
+/// `zend_symtable_add_new` keys it, and a string of its own for a
+/// protected or a private one, whose name php's table holds mangled and
+/// `zend_hash_str_add_new` copies the unmangled part of, so the array
+/// costs what php's does:
+///
+/// ```php
+/// class A { private $xx = 1; protected $yy = 2; public $zz = 3; function f() { return get_object_vars($this); } }
+/// class B { private $xx = 1; protected $yy = 2; public $zz { get => 3; } function f() { return get_object_vars($this); } }
+/// $a = new A; $b = new B;
+/// $m = memory_get_usage(); $x = $a->f(); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $y = $b->f(); echo memory_get_usage() - $m, "\n";
+/// var_dump($y);
+/// ```
+/// ```expect
+/// 816
+/// 440
+/// array(3) {
+///   ["xx"]=>
+///   int(1)
+///   ["yy"]=>
+///   int(2)
+///   ["zz"]=>
+///   int(3)
+/// }
+/// ```
+fn declared_var_key(
+    req: &mut Request,
+    name: PhpString,
+    visibility: Visibility,
+) -> Result<Owner<Key>, Thrown> {
+    if visibility == Visibility::Public {
+        return Ok(Owner::take(req, Key::Str(name)));
+    }
+    let bytes = name.as_bytes();
+    let bytes = match unmangle_property_name(bytes) {
+        Unmangled::Mangled { prop, .. } => prop,
+        Unmangled::Plain | Unmangled::Illegal(_) => bytes,
     };
-    let seen =
-        declared.is_none_or(|(declaring, visibility)| visible(req, declaring, visibility, scope));
-    if !seen {
-        value.give_up(req);
-        key.give_up(req);
-        return Ok(());
-    }
-    if declared.is_some() {
-        return array.add_new(req, key, value);
-    }
-    let name = Owner::take(req, name);
-    key.give_up(req);
-    let key = Key::from_string(req, name);
-    array.add_new(req, key, value)
+    Ok(Owner::adopt(req.string_init(bytes)?).into_key())
 }
 
 /// `get_object_vars(object $object): array`, php's
@@ -599,32 +693,17 @@ fn add_hooked_var(
 fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let class = object.class();
     let scope = req.scope();
-    // Over a class with a hooked property whose handlers are php's own,
-    // `zend_std_get_properties_for` answers the table its hooks answer,
-    // each row one owner of its own, read here with the slot each hooked
-    // row stands for, php's `IS_PTR`.
-    let overloaded = req.object_handlers(object.heap()).properties_overloaded();
-    if !overloaded && let Some(rows) = req.hooked_object_rows(object)? {
-        let mut rows = rows.into_iter();
-        let mut array = match PhpArray::new(req) {
-            Ok(array) => array,
-            Err(thrown) => {
-                HookedRow::give_up_all(req, rows);
-                return Err(thrown);
-            }
-        };
-        while let Some(row) = rows.next() {
-            if let Err(thrown) = add_hooked_var(req, &mut array, row, scope) {
-                HookedRow::give_up_all(req, rows);
-                array.give_up(req);
-                return Err(thrown);
-            }
-        }
-        return Ok(array);
-    }
     // `zend_get_properties_for(ZEND_PROP_PURPOSE_GET_OBJECT_VARS)`: a
-    // class that answers the purpose itself hands back its table.
+    // class that answers the purpose itself hands back its table, and
+    // over a class with a hooked property `zend_std_get_properties_for`
+    // the table `zend_hooked_object_build_properties` builds for the
+    // call, released once read.
     let table = match req.properties_answered(object, PropertyPurpose::GetObjectVars)? {
+        PropertiesFor::Hooked(hooked) => {
+            let made = hooked_vars(req, &hooked, scope);
+            hooked.table.give_up(req);
+            return made;
+        }
         PropertiesFor::Table(Table::Object(table)) => table,
         PropertiesFor::Table(Table::Array(array)) => return answered_vars(req, object, array),
         PropertiesFor::Temporary(table) => {
@@ -668,6 +747,9 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
             }
             Key::Str(name) => name,
         };
+        if let Some((_, visibility)) = declared {
+            req.access_name_copy(name.as_bytes(), visibility)?;
+        }
         let seen = req.property_row_visible(
             class,
             name.as_bytes(),
@@ -676,12 +758,10 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
         if !seen {
             continue;
         }
-        let key = if declared.is_some() {
-            Key::Str(name)
-        } else {
-            Key::lookup(name)
+        let key = match declared {
+            Some((_, visibility)) => declared_var_key(req, name, visibility)?,
+            None => Owner::take(req, Key::lookup(name)),
         };
-        let key = Owner::take(req, key);
         let value = req.dup_value(value, None);
         array.add_new(req, key, Owner::adopt(value))?;
     }

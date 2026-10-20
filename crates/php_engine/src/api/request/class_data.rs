@@ -776,10 +776,7 @@ impl Request {
             .rows
             .get(class)
             .filter(|data| data.updated)?;
-        let (at, _, _) = self
-            .placed(class)
-            .rev()
-            .find(|(_, _, p)| &*p.name.0 == name)?;
+        let (at, _, _) = self.placed_named(class, name)?;
         data.defaults.get(at).copied().flatten()
     }
 

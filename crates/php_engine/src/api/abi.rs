@@ -9,7 +9,7 @@ use std::any::{Any, TypeId};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use php_heap::{Fatal, Heap, Obj};
 use php_unit::decl::{
@@ -20,7 +20,7 @@ use php_unit::decl::{
 use crate::api::call::{Function, Target};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::{Level, Thrown};
-use crate::api::request::Request;
+use crate::api::request::{HookedTable, Request};
 use crate::api::values::{
     ClassId, ClosureInfo, Owner, PhpArray, PhpObject, PhpRef, PhpString, Place, TypeTag, Value,
     walk,
@@ -223,10 +223,7 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
 
     /// The value for `key`, built by `build` once and shared afterwards.
     pub fn get_or_build(&self, key: K, build: impl FnOnce(&K) -> V) -> Arc<V> {
-        let mut entries = match self.entries.lock() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut entries = self.entries();
         if let Some(found) = entries.get(&key) {
             return Arc::clone(found);
         }
@@ -248,10 +245,7 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
     }
 
     fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<K, Arc<V>>> {
-        match self.entries.lock() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        self.entries.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// How many keys are held.
@@ -357,10 +351,7 @@ impl<K: Hash + Eq, V> Pool<K, V> {
     }
 
     fn idle(&self) -> std::sync::MutexGuard<'_, Idle<K, V>> {
-        match self.idle.lock() {
-            Ok(idle) => idle,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        self.idle.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// An idle entry under `key`, lent to the caller alone: the one given
@@ -2324,6 +2315,12 @@ pub enum PropertiesFor {
     /// serializer read as no properties
     /// (`attributes_sensitive_parameter_value_get_properties_for`).
     Null,
+    /// `zend_hooked_object_build_properties`' table, built for the
+    /// reader of an object whose class has a hooked property, whose
+    /// hooked rows the reader reads as it reaches them
+    /// ([`crate::api::values::walk::Row::read`]). Only the engine's
+    /// `Std` answers it.
+    Hooked(HookedTable),
 }
 
 /// What the `get_debug_info` slot answers: php's `HashTable *` with its
