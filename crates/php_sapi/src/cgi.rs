@@ -94,8 +94,9 @@ pub fn settings(engine: &Engine) -> Settings {
 
 /// The request of the web `env` describes, as `init_request_info` read it
 /// into `info`: the method, the path asked for, the query string, the
-/// cookie header, the content type and its length, the request headers
-/// and the response code the request starts with. The body is the host's
+/// cookie header, the content type and its length, the request headers,
+/// the response code the request starts with and the copy of the
+/// program's path `init_request_info` `estrdup`s. The body is the host's
 /// to read and lay in, and the head written unless the host says not.
 #[must_use]
 pub fn web(env: &Environment, info: &RequestInfo) -> WebRequest {
@@ -111,6 +112,7 @@ pub fn web(env: &Environment, info: &RequestInfo) -> WebRequest {
         no_headers: false,
         response_code: info.response_code,
         head_ini: &HEAD_INI,
+        path_copies: usize::from(info.path_translated.is_some()),
     }
 }
 

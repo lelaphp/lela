@@ -281,6 +281,14 @@ pub struct WebRequest {
     /// php's CGI hosts read `cgi.nph` and `cgi.rfc2616_headers`: each
     /// one's value then rides in [`ResponseHead::ini`].
     pub head_ini: &'static [&'static [u8]],
+    /// The copies of the program's path,
+    /// [`RequestDescription::script_name`] as the host gave it, that the
+    /// host `estrdup`s onto the request's heap and frees once the program
+    /// has been served, before the request shuts down: php-cgi's
+    /// `SG(request_info).path_translated` (`Z/sapi/cgi/cgi_main.c:1438`),
+    /// and php-fpm's with its loop's `primary_script` beside it
+    /// (`Z/sapi/fpm/fpm/fpm_main.c:1351, 1876`).
+    pub path_copies: usize,
 }
 
 /// What a host's `sapi_module.read_post` hands out over one request
@@ -858,6 +866,10 @@ pub(crate) struct Shared {
     startup_raised: Vec<(Level, Vec<u8>)>,
     /// Whether a request has raised [`Shared::startup_raised`].
     startup_shown: AtomicBool,
+    /// Whether a request has taken `CWDG(cwd)`, the copy of the working
+    /// directory `php_module_startup` left on the heap, which the
+    /// process's first request frees ([`Request::lay_start_rooms`]).
+    startup_cwd_taken: AtomicBool,
     /// Where an extension's engine start refused: the [`Refusal`] with
     /// `Unable to start %s module` raised after what the extension
     /// raised ([`Engine::refused`]).
@@ -1550,6 +1562,12 @@ pub(crate) struct Declared<'a> {
 }
 
 impl Shared {
+    /// Whether this is the first request to ask, which takes
+    /// [`Shared::startup_cwd_taken`].
+    pub(crate) fn take_startup_cwd(&self) -> bool {
+        !self.startup_cwd_taken.swap(true, Ordering::Relaxed)
+    }
+
     /// `module_registry` as a program reads it, each entry at its place
     /// in [`Shared::extensions`]: every entry but the tier's
     /// ([`ExtensionEntry::listed`]).
@@ -3665,6 +3683,7 @@ impl EngineBuilder {
                 startup_errors: configuration.stderr,
                 startup_raised: Vec::new(),
                 startup_shown: AtomicBool::new(false),
+                startup_cwd_taken: AtomicBool::new(false),
                 refused: None,
                 host: self.sapi_name,
                 configuration: configuration.table,
@@ -4978,6 +4997,7 @@ impl Engine {
             }
             HostServes::Nothing => {}
         }
+        req.free_path_copies();
         req.program_ended();
     }
 
@@ -5588,8 +5608,11 @@ impl Engine {
         req.free_shutdown_functions();
         req.destroy_http_globals();
         req.destroy_uploaded_files();
-        // `zend_deactivate` reaches `shutdown_executor`: each extension's
-        // `deactivate`, in reverse, before the resources are closed.
+        // `zend_deactivate` reaches `shutdown_executor`, whose
+        // `zend_stream_shutdown` closes the files the scanner listed
+        // first; then each extension's `deactivate`, in reverse, before
+        // the resources are closed.
+        req.close_listed_files();
         end_phase(&self.shared.extensions, req, |e| e.deactivate);
         req.close_resources();
         req.free_user_handlers();
@@ -6060,6 +6083,26 @@ pub(crate) fn auto_file(req: &mut Request, name: &[u8], entry: Loop) -> bool {
 /// ```expect exit=255 wall=1s
 /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 4
 /// #0 [internal function]: {closure:%s:3}()
+/// ```
+///
+/// Under opcache's regime the program's size moves its first line's
+/// `memory_get_usage()` by nothing but `zend_stream_fixup`'s buffer on a
+/// miss, its bytes and `ZEND_MMAP_AHEAD` past them, since the compile is
+/// the cache's (design §5.13):
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/first' . getmypid() . '.php';
+/// $first = function ($code) use ($f) {
+///     file_put_contents($f, "<?php echo memory_get_usage(); $code");
+///     $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', 'opcache.file_update_protection=0', $f], [1 => ['pipe', 'w']], $pipes);
+///     $out = stream_get_contents($pipes[1]); proc_close($p); return (int) $out;
+/// };
+/// $none = $first('');
+/// echo $first(str_repeat('$a = strlen("x"); ', 3)) - $none, ' ', $first(str_repeat('echo PHP_EOL; ', 300)) - $none, "\n";
+/// unlink($f);
+/// ```
+/// ```expect regime=jit-off process
+/// 64 8128
 /// ```
 ///
 /// Whether the program ran to its end: not a fatal, a refused
