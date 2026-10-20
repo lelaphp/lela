@@ -72,7 +72,8 @@ pub(crate) struct Inside(());
 
 impl Inside {
     /// Entered, once no fork is under way: a fork holds the bit from its
-    /// reading to its return, which takes no longer than `fork(2)`.
+    /// reading to its return, which takes the joins of the parked threads,
+    /// a [`Worker`]'s once the job under way is done, and `fork(2)`.
     pub(crate) fn enter() -> Inside {
         while INSIDE
             .fetch_update(Ordering::Acquire, Ordering::Relaxed, |inside| {
@@ -333,24 +334,27 @@ impl Workers {
 
     /// Each one's thread asked to end and joined: what is stopped is the
     /// workers that had one.
-    fn stop(self) -> Woken {
-        Woken(self.0.into_iter().filter(|worker| worker.stop()).collect())
+    fn stop(self) -> Joined {
+        let joined = self.0.iter().filter(|worker| worker.stop());
+        Joined(joined.map(Arc::downgrade).collect())
     }
 }
 
-/// The workers whose threads a fork joined, for the length of the fork:
-/// the process that asked gives each its thread again; a child forked
-/// meanwhile drops them, and wakes each when it next has a job.
+/// The workers whose threads a fork joined, for the length of the fork,
+/// by a reference that does not keep them: the process that asked gives
+/// each that still stands its thread again, so a worker whose engine
+/// ended meanwhile is not started for nothing; a child forked meanwhile
+/// drops them, and wakes each when it next has a job.
 #[derive(Debug)]
 #[must_use]
-struct Woken(Vec<Arc<Worker>>);
+struct Joined(Vec<Weak<Worker>>);
 
-impl Woken {
+impl Joined {
     /// Each one's thread started again. The restart stands inside the
     /// engine, as a timer's does ([`crate::interrupt::Stopped::resume`]).
     fn resume(self) {
         let _inside = Inside::enter();
-        for worker in &self.0 {
+        for worker in self.0.iter().filter_map(Weak::upgrade) {
             worker.wake();
         }
     }
@@ -480,16 +484,16 @@ fn fork_as(asker: Asker) -> io::Result<Forked> {
     let beside = alone.beside(asker);
     let timers = Timers::live();
     let workers = Workers::live();
-    let parked = (timers.threads()).and_then(|t| workers.threads().map(|w| t + w));
-    if parked.is_none_or(|parked| beside > parked) {
+    let standing = (timers.threads()).and_then(|t| workers.threads().map(|w| t + w));
+    if standing.is_none_or(|standing| beside > standing) {
         return Err(busy());
     }
     let stopped = timers.stop();
-    let woken = workers.stop();
+    let joined = workers.stop();
     let forked = alone.fork(asker);
     if !matches!(forked, Ok(Forked::Child)) {
         stopped.resume();
-        woken.resume();
+        joined.resume();
     }
     forked
 }
@@ -652,7 +656,7 @@ mod tests {
             Workers::live().0.iter().any(|w| Arc::ptr_eq(w, &worker)),
             "the fork finds the worker"
         );
-        let woken = Workers(vec![Arc::clone(&worker)]).stop();
+        let joined = Workers(vec![Arc::clone(&worker)]).stop();
         assert_eq!(
             waits.returned.load(Ordering::SeqCst),
             1,
@@ -663,7 +667,7 @@ mod tests {
             Some(0),
             "no thread at the fork"
         );
-        woken.resume();
+        joined.resume();
         assert_eq!(
             Workers(vec![Arc::clone(&worker)]).threads(),
             Some(1),
