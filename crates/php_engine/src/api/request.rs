@@ -25,7 +25,7 @@ use php_unit::{PublishedUnit, Unit};
 use crate::api::abi::GcTable;
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, PhpObject, PhpRef, PhpString, Resource, Value};
+use crate::api::values::{ClassId, PhpObject, PhpString, Resource, Value};
 pub use crate::engine::Standard;
 use crate::engine::{OutputSink, RequestDescription, Shared};
 use crate::exec::{self, Vm};
@@ -304,6 +304,9 @@ pub struct Request {
     /// after the extensions' `rshutdown`. `$GLOBALS`, `compact`,
     /// `extract` and `get_defined_vars` read these tables (design §5.6).
     tables: Vec<SymbolTable>,
+    /// The rooms a bucket of these tables keeps its value in once a
+    /// fetch by name for writing has handed its place on ([`Symbol::Held`]).
+    places: php_heap::Places,
     /// `EG(included_files)`: the resolved path of every file compiled by
     /// the request, the primary one first (`php_execute_script_ex`),
     /// then each an `INCLUDE_OR_EVAL` opened, which the once forms read
@@ -541,13 +544,15 @@ pub(crate) const DEBUG_BACKTRACE_IGNORE_ARGS: i64 = 2;
 /// `Held` is the value the table owns kept in a place of its own: php
 /// hands a fetch by name for writing the bucket's own `zval *`, and a
 /// bucket here moves as the list of names grows, so the first such fetch
-/// moves the value into a cell that does not ([`Request::symbol_place`]).
-/// The cell is the table's alone and never a PHP reference: what it holds
-/// is the bucket's value, a reference among them.
+/// moves the value into a room of the request's [`php_heap::Places`],
+/// which does not move ([`Request::symbol_place`]). The room is the
+/// bucket's zval, whose bytes the table's data holds at php's size, so
+/// it costs the request's heap nothing; what it holds is the bucket's
+/// value, a reference among them.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Symbol {
     Value(Value),
-    Held(PhpRef),
+    Held(ZvalRef),
     Indirect(FrameRef, u32),
 }
 
@@ -1046,6 +1051,7 @@ impl Request {
             post: post::Post::default(),
             variables: variables::Variables::default(),
             tables: vec![SymbolTable::global()],
+            places: php_heap::Places::default(),
             included_files: hash_bytes::IncludedFiles::default(),
             hash_bytes: hash_bytes::HashTables::default(),
             constants: constants::Constants::default(),

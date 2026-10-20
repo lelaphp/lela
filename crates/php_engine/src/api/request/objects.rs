@@ -726,7 +726,7 @@ impl Request {
                 let alone = self.globals().get(at).is_some_and(|(_, symbol)| {
                     let value = match symbol {
                         Symbol::Value(value) => *value,
-                        Symbol::Held(cell) => cell.get(),
+                        Symbol::Held(place) => Value::of_zval(place.read()),
                         Symbol::Indirect(..) => return false,
                     };
                     value.as_object().is_some() && value.refcount() == 1

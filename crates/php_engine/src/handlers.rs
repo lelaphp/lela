@@ -7011,11 +7011,7 @@ fn fetch_named(
             if req.is_pending() {
                 None
             } else {
-                let place = match req.symbol_place(table, name, mode != ByName::Unset) {
-                    Ok(place) => place,
-                    Err(thrown) => return threw(req, frame, &thrown),
-                };
-                let Some(place) = place else {
+                let Some(place) = req.symbol_place(table, name, mode != ByName::Unset) else {
                     return Err(Fatal::error(format!(
                         "InternalError: a fetch by name laid ${shown} down and the table does not hold it"
                     )));

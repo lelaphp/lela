@@ -52,6 +52,7 @@ mod observe;
 #[cfg(debug_assertions)]
 pub mod owners;
 mod payload;
+mod places;
 mod property_table;
 mod reference;
 mod resource;
@@ -81,6 +82,7 @@ pub use numeric::{
 };
 pub use object::{Laziness, Obj, ObjectId};
 pub use observe::{Allocation, AllocationObserverId, ObserveAllocations};
+pub use places::Places;
 pub use property_table::{Direction, PropertyTable, TableRow};
 pub use reference::Ref;
 pub use resource::{Res, ResourceType};

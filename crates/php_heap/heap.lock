@@ -280,6 +280,9 @@ ObserveAllocations::observe
 Origin
 Origin::new
 Origin::number
+Places
+Places::give_back
+Places::lay
 PropBit
 PropertyTable
 PropertyTable::backward
