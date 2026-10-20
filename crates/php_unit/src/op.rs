@@ -706,7 +706,7 @@ mod tests {
                 .all(|op| op.handler == Handler::Unresolved),
             "the compiler leaves every opline unresolved"
         );
-        let unit = unit.published();
+        let unit = unit.published(None);
         unit.main.oplines.iter().map(|op| op.handler).collect()
     }
 

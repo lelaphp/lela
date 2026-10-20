@@ -1073,7 +1073,7 @@ fn emit_resolver(
                  line: u32,\n        \
                  {children_param}: &[Element],\n        \
                  {doc_param}: Option<TokenId>,\n        \
-                 {pools_param}: &mut Pools<'_>,\n    \
+                 {pools_param}: &mut Pools,\n    \
              ) -> {ret} {{\n"
     )
     .ok();
@@ -1230,31 +1230,41 @@ fn emit_lists(buf: &mut String, bases: &BTreeSet<String>) {
     }
     buf.push_str(
         "};\n\n\
-         /// The pools while the builder fills them.\n\
-         pub(crate) struct Pools<'a> {\n",
+         /// The pools while the builder fills them: kept between builds\n\
+         /// beside the builder's stacks, so their room is reused, and each\n\
+         /// emptied as it is copied into the arena.\n\
+         #[derive(Default)]\n\
+         pub(crate) struct Pools {\n",
     );
     for base in bases {
-        writeln!(buf, "    {}: BumpVec<'a, {base}>,", field(base)).ok();
+        writeln!(buf, "    {}: Vec<{base}>,", field(base)).ok();
     }
     buf.push_str(
         "}\n\n\
-         impl<'a> Pools<'a> {\n    \
-             /// Every pool empty, in `bump`.\n    \
-             pub(crate) fn new(bump: &'a bumpalo::Bump) -> Pools<'a> {\n        \
-                 Pools {\n",
+         impl Pools {\n    \
+             /// Whether every pool's room is within `bytes`.\n    \
+             pub(crate) fn within(&self, bytes: usize) -> bool {\n        ",
     );
-    for base in bases {
-        writeln!(buf, "            {}: BumpVec::new_in(bump),", field(base)).ok();
-    }
+    let within: Vec<String> = bases
+        .iter()
+        .map(|base| {
+            format!(
+                "self.{}.capacity() * size_of::<{base}>() <= bytes",
+                field(base)
+            )
+        })
+        .collect();
+    buf.push_str(&within.join("\n            && "));
     buf.push_str(
-        "        }\n    }\n\n    \
-             /// The pools as the tree keeps them.\n    \
-             pub(crate) fn freeze(self) -> Lists<'a> {\n        \
+        "\n    }\n\n    \
+             /// The pools as the tree keeps them, copied into `bump`, a pool\n    \
+             /// that holds nothing copied as no slice, and every pool emptied.\n    \
+             pub(crate) fn freeze<'a>(&mut self, bump: &'a bumpalo::Bump) -> Lists<'a> {\n        \
                  Lists {\n",
     );
     for base in bases {
         let name = field(base);
-        writeln!(buf, "            {name}: self.{name}.into_bump_slice(),").ok();
+        writeln!(buf, "            {name}: frozen(bump, &mut self.{name}),").ok();
     }
     buf.push_str("        }\n    }\n}\n\n");
     for base in bases {
@@ -1267,7 +1277,7 @@ fn emit_lists(buf: &mut String, bases: &BTreeSet<String>) {
                  }}\n\
              }}\n\
              impl Pooled for {base} {{\n    \
-                 fn pool_mut<'a, 'p>(pools: &'p mut Pools<'a>) -> &'p mut BumpVec<'a, Self> {{\n        \
+                 fn pool_mut(pools: &mut Pools) -> &mut Vec<Self> {{\n        \
                      &mut pools.{name}\n    \
                  }}\n\
              }}\n"
@@ -1289,7 +1299,7 @@ fn emit_resolve(buf: &mut String, model: &Model<'_>) {
          #[allow(clippy::too_many_lines)]\n\
          pub(crate) fn resolve(\n    \
              nodes: &mut Building<'_>,\n    \
-             pools: &mut Pools<'_>,\n    \
+             pools: &mut Pools,\n    \
              kind: SyntaxKind,\n    \
              range: TextRange,\n    \
              line: u32,\n    \

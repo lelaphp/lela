@@ -187,7 +187,7 @@ mod tests {
         };
         let numbers = std::sync::atomic::AtomicU32::new(first);
         crate::engine::assign_map_ptrs(&mut unit, &numbers);
-        unit.published()
+        unit.published(None)
     }
 
     /// Each op array of a held unit has a row at its offset with a zero

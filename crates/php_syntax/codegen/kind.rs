@@ -549,9 +549,10 @@ fn emit_from_keyword(buf: &mut String, kinds: &Kinds) {
         "    /// The keyword kind of an identifier, if it is one. PHP keywords\n    \
          /// match case-insensitively (`php.ungram`'s header: \"the lexer is\n    \
          /// case-insensitive\"). The lowercase copy is on the stack, as\n    \
-         /// long as the longest keyword: the lexer asks once per name.\n",
+         /// long as the longest keyword: the lexer asks once per name, and\n    \
+         /// its bytes, since a label with a byte past ASCII is never one.\n",
     );
-    buf.push_str("    pub fn from_keyword(ident: &str) -> Option<Self> {\n");
+    buf.push_str("    pub fn from_keyword(ident: &[u8]) -> Option<Self> {\n");
     if kinds.keywords.is_empty() {
         buf.push_str("        let _ = ident;\n        None\n    }\n");
         return;
@@ -565,7 +566,7 @@ fn emit_from_keyword(buf: &mut String, kinds: &Kinds) {
     writeln!(buf, "        let mut lower = [0_u8; {longest}];").ok();
     buf.push_str(
         "        let lower = lower.get_mut(..ident.len())?;\n        \
-         lower.copy_from_slice(ident.as_bytes());\n        \
+         lower.copy_from_slice(ident);\n        \
          lower.make_ascii_lowercase();\n",
     );
     buf.push_str("        let kind = match &*lower {\n");

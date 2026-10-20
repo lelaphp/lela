@@ -865,7 +865,7 @@ __halt_compiler(); data"#;
         // The file keeps no handler: the unit read back resolves, where
         // it is published, the handlers the unit compiled resolves.
         let handlers = |unit: Unit| {
-            let unit = unit.published();
+            let unit = unit.published(None);
             unit.main
                 .oplines
                 .iter()

@@ -619,6 +619,9 @@ pub(crate) struct Emit<'a> {
     /// The file's name, [`Options::filename`], what a declaration
     /// records as its site.
     filename: &'a [u8],
+    /// The file's name of a unit the caller gave up ([`crate::Room`]),
+    /// written over for the first op array finished where it is as long.
+    room_filename: Option<Name>,
     /// The request's working directory, [`Options::cwd`], what `__DIR__`
     /// is where the file's name has no directory.
     cwd: &'a [u8],
@@ -1328,7 +1331,13 @@ impl<'a> Emit<'a> {
         options: &'a Options<'a>,
         strings: &'a mut dyn Intern,
         halt: Option<i64>,
+        room: crate::Room,
     ) -> Emit<'a> {
+        let crate::Room {
+            oplines,
+            literals,
+            filename,
+        } = room;
         Emit {
             parsed,
             arena,
@@ -1360,13 +1369,13 @@ impl<'a> Emit<'a> {
             typing: Typing::of(options.strict_types),
             ticks: None,
             stack: options.stack,
-            oplines: Vec::new(),
+            oplines,
             short_circuits: Vec::new(),
             chain_inner: None,
             memo: memo::Memo::default(),
             const_evaluation: Evaluation::Once,
             substitution: Substitution::Persistent,
-            constants: Vec::new(),
+            constants: literals,
             const_exprs: Vec::new(),
             vars: Vec::new(),
             http_response_header: ResponseHeader::Predefined,
@@ -1396,6 +1405,7 @@ impl<'a> Emit<'a> {
             methods: Vec::new(),
             hooks: Vec::new(),
             filename: options.filename,
+            room_filename: filename,
             cwd: options.cwd,
             loops: Vec::new(),
             current_loop: None,
@@ -1424,7 +1434,14 @@ pub(crate) fn export(
     options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Vec<u8>, CompileError> {
-    let mut emit = Emit::new(arena, parsed, options, strings, None);
+    let mut emit = Emit::new(
+        arena,
+        parsed,
+        options,
+        strings,
+        None,
+        crate::Room::default(),
+    );
     let mut out = Vec::new();
     let file = parsed
         .tree
@@ -1445,6 +1462,7 @@ pub(crate) fn unit(
     options: &Options<'_>,
     strings: &mut dyn Intern,
     halt: Option<i64>,
+    room: crate::Room,
 ) -> Result<Unit, CompileError> {
     // The scanner stops at `__halt_compiler();` (the byte `halt_end`
     // names), so a halted file's last line is that statement's, and the
@@ -1457,7 +1475,7 @@ pub(crate) fn unit(
             .line_number(u32::try_from(end).unwrap_or(u32::MAX)),
         None => parsed.lines.line_count(),
     };
-    let mut emit = Emit::new(arena, parsed, options, strings, halt);
+    let mut emit = Emit::new(arena, parsed, options, strings, halt, room);
     // A fatal leaves the file with what `zend_error` had raised before
     // it already rendered, so those travel with it.
     if let Err(mut refused) = emit.source_file() {
@@ -5106,6 +5124,19 @@ impl<'a> Emit<'a> {
         self.active_hook = saved.active_hook;
     }
 
+    /// The file's name an op array carries, `op_array->filename`: the
+    /// room's ([`crate::Room`]) written over where it is as long, which
+    /// an `eval` of one line in a loop always is, else made.
+    fn file_name(&mut self) -> Name {
+        match self.room_filename.take() {
+            Some(mut name) if name.0.len() == self.filename.len() => {
+                name.0.copy_from_slice(self.filename);
+                name
+            }
+            _ => Name(self.filename.into()),
+        }
+    }
+
     /// The op array the emitter holds, finished as `zend_compile` and
     /// `zend_compile_func_decl` finish one: php's implicit final return
     /// (`zend_emit_final_return`, `1` for the main op array and `null`
@@ -5150,7 +5181,7 @@ impl<'a> Emit<'a> {
             try_catch: std::mem::take(&mut self.try_catch),
             live_ranges,
             safepoints: std::mem::take(&mut self.safepoints),
-            filename: Name(self.filename.into()),
+            filename: self.file_name(),
             line_start,
             line_end,
             cache_size: self.cache_slots,
@@ -19770,6 +19801,7 @@ mod tests {
             methods: Vec::new(),
             hooks: Vec::new(),
             filename: options.filename,
+            room_filename: None,
             cwd: options.cwd,
             loops: Vec::new(),
             current_loop: None,
