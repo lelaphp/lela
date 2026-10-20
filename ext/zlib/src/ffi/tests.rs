@@ -22,49 +22,58 @@ fn the_init_calls_are_handed_the_header_s_version() {
 }
 
 /// What zlib asked of a stream's allocator: the blocks it holds, by
-/// address, and the call that is refused, counting from one; zero
-/// refuses none.
+/// address, how many it asked for, the ask that is refused, counting
+/// from one (zero refuses none), and whether it handed back a block it
+/// was never given. The callbacks record rather than panic, since a
+/// panic cannot unwind out of an `extern "C"` function.
 #[derive(Default)]
-struct Storage {
+struct Allocations {
     live: BTreeMap<usize, Layout>,
     attempts: usize,
     refuse: usize,
+    stray_free: bool,
 }
 
 extern "C" fn allocate(opaque: *mut c_void, items: z::uInt, size: z::uInt) -> *mut c_void {
-    // SAFETY: each test hands its own live Storage as the opaque word and
-    // zlib calls this synchronously, on the test's thread, during a call
-    // the test makes.
-    let storage = unsafe { &mut *opaque.cast::<Storage>() };
-    storage.attempts += 1;
-    if storage.attempts == storage.refuse {
+    // SAFETY: each test hands its own live Allocations as the opaque word
+    // and zlib calls this synchronously, on the test's thread, during a
+    // call the test makes.
+    let allocations = unsafe { &mut *opaque.cast::<Allocations>() };
+    allocations.attempts += 1;
+    let bytes = items as usize * size as usize;
+    let Ok(layout) = Layout::from_size_align(bytes, 16) else {
+        return std::ptr::null_mut();
+    };
+    if allocations.attempts == allocations.refuse || bytes == 0 {
         return std::ptr::null_mut();
     }
-    let layout = Layout::from_size_align(items as usize * size as usize, 16).unwrap();
-    // SAFETY: zlib asks for a nonzero size, and the layout is aligned.
+    // SAFETY: the layout is nonzero in size and aligned.
     let address = unsafe { alloc(layout) };
     if !address.is_null() {
-        storage.live.insert(address as usize, layout);
+        allocations.live.insert(address as usize, layout);
     }
     address.cast()
 }
 
 extern "C" fn release(opaque: *mut c_void, address: *mut c_void) {
-    // SAFETY: the Storage `allocate` was handed, as there.
-    let storage = unsafe { &mut *opaque.cast::<Storage>() };
-    let layout = storage.live.remove(&(address as usize)).unwrap();
+    // SAFETY: the Allocations `allocate` was handed, as there.
+    let allocations = unsafe { &mut *opaque.cast::<Allocations>() };
+    let Some(layout) = allocations.live.remove(&(address as usize)) else {
+        allocations.stray_free = true;
+        return;
+    };
     // SAFETY: `allocate` made this block with this layout, and its entry
     // is removed, so it is freed once.
     unsafe { dealloc(address.cast(), layout) };
 }
 
-/// A fresh stream whose allocator is `storage`'s.
+/// A fresh stream whose allocator records into `allocations`.
 #[allow(clippy::unnecessary_box_returns)]
-fn stream(storage: &mut Storage) -> Box<z::z_stream> {
+fn stream(allocations: &mut Allocations) -> Box<z::z_stream> {
     let mut stream = super::fresh(false);
     stream.zalloc = allocate;
     stream.zfree = release;
-    stream.opaque = std::ptr::from_mut(storage).cast();
+    stream.opaque = std::ptr::from_mut(allocations).cast();
     stream
 }
 
@@ -83,10 +92,10 @@ fn inflate_allocates_its_window_on_first_use_and_keeps_it_on_reset() {
         0x00,
     ];
     for window in [8, 15] {
-        let mut storage = Storage::default();
-        let mut stream = stream(&mut storage);
+        let mut allocations = Allocations::default();
+        let mut stream = stream(&mut allocations);
         // SAFETY: the stream is boxed, so its address is fixed, and its
-        // allocator's Storage lives to the end of the iteration.
+        // allocator's Allocations lives to the end of the iteration.
         let code = unsafe {
             z::inflateInit2_(
                 &raw mut *stream,
@@ -96,7 +105,7 @@ fn inflate_allocates_its_window_on_first_use_and_keeps_it_on_reset() {
             )
         };
         assert_eq!(code, z::Z_OK);
-        assert_eq!(storage.live.len(), 1);
+        assert_eq!(allocations.live.len(), 1);
         let mut output = [0; 7];
         stream.next_in = input.as_ptr().cast_mut();
         stream.avail_in = super::avail(input.len());
@@ -106,21 +115,22 @@ fn inflate_allocates_its_window_on_first_use_and_keeps_it_on_reset() {
         let code = unsafe { z::inflate(&raw mut *stream, z::Z_SYNC_FLUSH) };
         assert_eq!(code, z::Z_OK);
         assert_eq!(&output, b"the qui");
-        assert_eq!(storage.live.len(), 2);
+        assert_eq!(allocations.live.len(), 2);
         assert!(
-            storage
+            allocations
                 .live
                 .values()
                 .any(|layout| layout.size() == 1 << window)
         );
-        let attempts = storage.attempts;
+        let attempts = allocations.attempts;
         // SAFETY: an initialised stream, with no call outstanding.
         assert_eq!(unsafe { z::inflateReset(&raw mut *stream) }, z::Z_OK);
-        assert_eq!(storage.attempts, attempts);
-        assert_eq!(storage.live.len(), 2);
-        // SAFETY: an initialised stream, ended once, its Storage live.
+        assert_eq!(allocations.attempts, attempts);
+        assert_eq!(allocations.live.len(), 2);
+        // SAFETY: an initialised stream, ended once, its Allocations live.
         assert_eq!(unsafe { z::inflateEnd(&raw mut *stream) }, z::Z_OK);
-        assert!(storage.live.is_empty());
+        assert!(allocations.live.is_empty());
+        assert!(!allocations.stray_free);
     }
 }
 
@@ -131,12 +141,12 @@ fn inflate_allocates_its_window_on_first_use_and_keeps_it_on_reset() {
 #[test]
 fn a_refused_deflate_init_gives_back_what_it_allocated() {
     for refuse in 0..=5 {
-        let mut storage = Storage {
+        let mut allocations = Allocations {
             refuse,
-            ..Storage::default()
+            ..Allocations::default()
         };
-        let mut stream = stream(&mut storage);
-        // SAFETY: a fixed stream address, its allocator's Storage live, the
+        let mut stream = stream(&mut allocations);
+        // SAFETY: a fixed stream address, its allocator's Allocations live, the
         // header's version and size; a refused allocation answers null.
         let code = unsafe {
             z::deflateInit2_(
@@ -152,20 +162,21 @@ fn a_refused_deflate_init_gives_back_what_it_allocated() {
         };
         if refuse == 0 {
             assert_eq!(code, z::Z_OK);
-            assert_eq!(storage.live.len(), 5);
-            // SAFETY: an initialised stream, ended once, its Storage live.
+            assert_eq!(allocations.live.len(), 5);
+            // SAFETY: an initialised stream, ended once, its Allocations live.
             assert_eq!(unsafe { z::deflateEnd(&raw mut *stream) }, z::Z_OK);
         } else {
             assert_eq!(code, z::Z_MEM_ERROR);
         }
-        assert!(storage.live.is_empty());
+        assert!(allocations.live.is_empty());
+        assert!(!allocations.stray_free);
     }
 }
 
 /// `compress` into a buffer as long as its input, as
-/// `mysqlnd_deflate` bounds a packet's: text fits and answers `Z_OK`,
-/// bytes that do not compress answer `Z_BUF_ERROR`, and the packet goes
-/// uncompressed, rather than the buffer growing.
+/// `mysqlnd_deflate` bounds a packet's: text fits, answers `Z_OK` and
+/// says it wrote fewer bytes than it read, and bytes that do not
+/// compress answer `Z_BUF_ERROR` rather than write past the bound.
 #[test]
 fn compress_into_the_input_s_length_refuses_what_does_not_shrink() {
     let text = b"the quick brown fox jumps over the lazy dog\n".repeat(32);
@@ -177,6 +188,8 @@ fn compress_into_the_input_s_length_refuses_what_does_not_shrink() {
         })
         .collect();
     for (payload, expected) in [(text, z::Z_OK), (noise, z::Z_BUF_ERROR)] {
+        // The four bytes of the packet's own header, which mysqlnd
+        // compresses with its payload.
         let mut input = vec![0; 4];
         input.extend_from_slice(&payload);
         let mut output = vec![0; input.len()];
@@ -193,5 +206,8 @@ fn compress_into_the_input_s_length_refuses_what_does_not_shrink() {
             )
         };
         assert_eq!(code, expected);
+        if code == z::Z_OK {
+            assert!(usize::try_from(length).unwrap() < input.len());
+        }
     }
 }
