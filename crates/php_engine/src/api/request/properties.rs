@@ -3396,8 +3396,7 @@ impl Request {
         let o = object.heap();
         let class = object.class();
         if self.object_handlers(o).properties_overloaded() {
-            let found = self.answered_walk(object, idx)?;
-            return Ok(found.map(|(key, walked)| (WalkKey::Held(key), walked)));
+            return self.answered_walk(object, idx);
         }
         // `zend_hash_iterator_pos(.., Z_OBJPROP_P(array))`: the table laid
         // down as php's `rebuild_object_properties` lays it, and the
@@ -3504,11 +3503,29 @@ impl Request {
     /// string(3) "own"
     /// int(2)
     /// ```
+    ///
+    /// A declared row the table holds mangled is asked about through a
+    /// copy of its name ([`Request::access_name_copy`]) and keyed by a
+    /// string of its own ([`WalkKey::Declared`]), as the std walk is:
+    ///
+    /// ```php
+    /// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); $p = memory_get_peak_usage(); $u = memory_get_usage(); echo $p - $s, ' ', $u - $s, "\n"; }
+    /// class D extends DateTime { public $own = 1; protected $hidden = 2; private $pv = 3;
+    ///   function z() { foreach ($this as $k => $v) {} return 1; } function n() { foreach ($this as $v) {} return 1; } }
+    /// $d = new D('2020-01-01');
+    /// pk(fn () => $d->z()); pk(fn () => $d->n());
+    /// pk(function () use ($d) { foreach ($d as $k => $v) {} return 1; });
+    /// ```
+    /// ```expect
+    /// 64 0
+    /// 32 0
+    /// 32 0
+    /// ```
     fn answered_walk(
         &mut self,
         object: PhpObject,
         idx: u32,
-    ) -> Result<Option<(Owner<Key>, Walked)>, Thrown> {
+    ) -> Result<Option<(WalkKey, Walked)>, Thrown> {
         let class = object.class();
         let handlers = self.object_handlers(object.heap());
         let mut at = self.heap.iterator_lead(idx);
@@ -3526,22 +3543,31 @@ impl Request {
                 let Some(((name, _, declared), row)) = self.table_row_named(&table, pos)? else {
                     continue;
                 };
-                // An integer key is no name `zend_check_property_access`
-                // is asked about.
-                if let Key::Str(name) = name
-                    && !self.property_row_visible(
-                        class,
-                        name.as_bytes(),
-                        declared.map(|(declaring, _)| declaring),
-                    )
-                {
-                    continue;
-                }
                 let walked = match row {
                     TableRow::Slot(slot) => Walked::Slot(slot),
                     TableRow::Entry(key) => Walked::Dynamic(key),
                 };
-                break Some((Owner::take(self, name), walked));
+                // A declared row is asked about through a copy of its
+                // name, and an integer key is no name
+                // `zend_check_property_access` is asked about.
+                let key = match (&name, declared) {
+                    (Key::Str(text), Some((declaring, visibility))) => {
+                        let visible =
+                            self.property_row_visible(class, text.as_bytes(), Some(declaring));
+                        self.access_name_copy(text.as_bytes().len(), visibility)?;
+                        if !visible {
+                            continue;
+                        }
+                        WalkKey::Declared(text.as_bytes().into(), visibility)
+                    }
+                    (Key::Str(text), None)
+                        if !self.property_row_visible(class, text.as_bytes(), None) =>
+                    {
+                        continue;
+                    }
+                    _ => WalkKey::Held(Owner::take(self, name)),
+                };
+                break Some((key, walked));
             },
             // A table the class keeps in place of the object's: each row
             // the value it answered.
@@ -3556,7 +3582,8 @@ impl Request {
                 row.map(|(i, (key, value))| {
                     at = u32::try_from(i).unwrap_or(u32::MAX).saturating_add(1);
                     self.addref(&value);
-                    (Owner::take(self, key), Walked::Answered(value))
+                    let key = WalkKey::Held(Owner::take(self, key));
+                    (key, Walked::Answered(value))
                 })
             }
         };
