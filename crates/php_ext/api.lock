@@ -1416,6 +1416,7 @@ values::SmartStr::extract
 values::SmartStr::finish
 values::SmartStr::free
 values::SmartStr::remove
+values::SmartStr::reserve
 values::TypeTag
 values::Value
 values::Value::array
