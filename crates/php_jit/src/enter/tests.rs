@@ -115,6 +115,10 @@ fn the_symbols_name_one_wrapper_per_kernel() {
 fn the_bench_arms_leave_one_tally() {
     use super::bench::{Through, calls};
     assert_eq!(calls(Through::Wrapper, 1000), calls(Through::Direct, 1000));
+    assert_eq!(
+        calls(Through::WrapperBare, 1000),
+        calls(Through::Direct, 1000)
+    );
     assert!(calls(Through::Direct, 1000).is_ok_and(|t| t != 0));
 }
 

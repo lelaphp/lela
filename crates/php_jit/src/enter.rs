@@ -227,22 +227,43 @@ pub(crate) unsafe fn crossed<R: Crossed, T: Out>(
     // wrappers, one at a time on its stack.
     let req = unsafe { &mut *cx.req };
     match catch_unwind(AssertUnwindSafe(|| kernel(req))) {
-        Ok(Ok(value)) => {
+        // SAFETY: the caller hands an out slot as `put` asks.
+        Ok(answer) => unsafe { answered(cx, out, answer) },
+        Err(payload) => {
+            cx.pending = Some(Pending::Panic(payload));
+            Status::Panic
+        }
+    }
+}
+
+/// What a kernel that returned answered, mapped to a [`Status`]: its
+/// value written to `out`, or its fatal kept in `cx` for `enter`.
+///
+/// # Safety
+///
+/// `out` is as [`Out::put`] asks.
+#[inline(always)] // part of `crossed`, the one frame around the kernel
+#[allow(clippy::inline_always)]
+unsafe fn answered<R: Crossed, T: Out>(
+    cx: &mut ExitCtx<'_, R>,
+    out: *mut T,
+    answer: Result<T, Fatal>,
+) -> Status {
+    match answer {
+        Ok(value) => {
             // SAFETY: the caller hands an out slot as `put` asks.
             unsafe { value.put(out) };
-            if req.thrown() {
+            // SAFETY: as in `crossed`, `req` is the request the `ExitCtx`
+            // borrows, and the kernel's borrow of it has ended.
+            if unsafe { &*cx.req }.thrown() {
                 Status::Exception
             } else {
                 Status::Continue
             }
         }
-        Ok(Err(fatal)) => {
+        Err(fatal) => {
             cx.pending = Some(Pending::Bailout(fatal));
             Status::Bailout
-        }
-        Err(payload) => {
-            cx.pending = Some(Pending::Panic(payload));
-            Status::Panic
         }
     }
 }
@@ -609,23 +630,28 @@ pub mod bench {
 
     use php_unit::OplineIdx;
 
-    use super::{ExitCtx, Fatal, Pending, Room, Status, Tally, tallied};
+    use super::{ExitCtx, Fatal, Pending, Room, Status, Tally, answered, tallied};
 
     /// Which way the loop's calls go.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Through {
         /// Each call through the kernel's `extern "C"` wrapper.
         Wrapper,
+        /// Each call through [`tally_without_unwind_guard`]: the wrapper
+        /// with no `catch_unwind`, which no production wrapper is (#2879).
+        WrapperBare,
         /// Each call to the kernel itself.
         Direct,
     }
 
     impl Through {
-        /// The way an arm's argument names: `wrapper` or `direct`.
+        /// The way an arm's argument names: `wrapper`, `wrapper-bare` or
+        /// `direct`.
         #[must_use]
         pub fn named(name: &str) -> Option<Through> {
             match name {
                 "wrapper" => Some(Through::Wrapper),
+                "wrapper-bare" => Some(Through::WrapperBare),
                 "direct" => Some(Through::Direct),
                 _ => None,
             }
@@ -636,6 +662,37 @@ pub mod bench {
     type Wrapper =
         unsafe extern "C" fn(*mut ExitCtx<'_, Tally>, *mut u8, u32, u64, *mut u64) -> Status;
 
+    /// The bench's arm `wrapper-bare` and nothing else: `tallied::tally`'s
+    /// shape, the request rebuilt from `cx`, the kernel's value written
+    /// through `out` and mapped to a `Status`, with no `catch_unwind`
+    /// around the kernel, so `wrapper` against it is what the guard costs
+    /// on the path that does not unwind, and it against `direct` what the
+    /// frame costs (#2879). A kernel's panic here aborts the process, as
+    /// one through an `extern "C"` function does, so a wrapper compiled
+    /// code calls is never this (`jit-design.md` §4.6); the test kernel
+    /// raises none.
+    ///
+    /// # Safety
+    ///
+    /// As [`crossed`](super::crossed): `cx` is live and unborrowed, and
+    /// `out` is valid for one write.
+    unsafe extern "C" fn tally_without_unwind_guard(
+        cx: *mut ExitCtx<'_, Tally>,
+        frame: *mut u8,
+        opline: u32,
+        n: u64,
+        out: *mut u64,
+    ) -> Status {
+        // SAFETY: the caller hands the live context, borrowed by nothing
+        // else for the length of this call.
+        let cx = unsafe { &mut *cx };
+        // SAFETY: `req` came from the `&mut Tally` the `ExitCtx` borrows.
+        let req = unsafe { &mut *cx.req };
+        let answer = super::tally(req, Room(frame), OplineIdx(opline), n);
+        // SAFETY: the caller hands an out slot valid for one write.
+        unsafe { answered(cx, out, answer) }
+    }
+
     /// `n` calls of the test kernel `through` one way, and the tally they
     /// leave, which is the same whichever way they went. A fatal is
     /// returned and a panic resumed, as `enter` answers them, though the
@@ -644,8 +701,12 @@ pub mod bench {
         let mut tally = Tally::default();
         let mut last = 0;
         match through {
-            Through::Wrapper => {
-                let wrapper: Wrapper = black_box(tallied::tally);
+            Through::Wrapper | Through::WrapperBare => {
+                let wrapper: Wrapper = black_box(if through == Through::Wrapper {
+                    tallied::tally
+                } else {
+                    tally_without_unwind_guard
+                });
                 let mut cx = ExitCtx::new(&mut tally);
                 for i in 0..n {
                     // SAFETY: `cx` is this frame's live context, borrowed by
