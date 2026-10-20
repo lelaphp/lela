@@ -890,7 +890,17 @@ pub struct ErrorNotice<'a> {
     file: &'a [u8],
     line: u32,
     message: &'a [u8],
-    uncaught: bool,
+    told: Told,
+}
+
+/// Which of php's two error notices a diagnostic is told as
+/// (`zend_observer_error_notify`'s callers): one `zend_error` raised,
+/// or an uncaught throwable `zend_exception_error` renders, told with
+/// `E_DONT_BAIL` ([`ErrorNotice::uncaught`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Told {
+    Raised,
+    Uncaught,
 }
 
 impl<'a> ErrorNotice<'a> {
@@ -928,7 +938,7 @@ impl<'a> ErrorNotice<'a> {
     /// (`Z/Zend/zend.c:1514`).
     #[must_use]
     pub fn uncaught(&self) -> bool {
-        self.uncaught
+        self.told == Told::Uncaught
     }
 }
 
@@ -955,9 +965,7 @@ pub(crate) type ClassLinked = fn(&mut Request, ClassId, &[u8]);
 /// nothing of how the diagnostic is served; a link of `zend_error_cb`
 /// serves the diagnostics the user's handler leaves, and may serve one
 /// in place of php's own `php_error_cb`. Nothing more than one check of
-/// the list while none is declared. `uncaught` is an uncaught
-/// throwable `zend_exception_error` renders, told with php's
-/// `E_DONT_BAIL` ([`ErrorNotice::uncaught`]).
+/// the list while none is declared; `told` says which notice it is.
 #[inline]
 pub(crate) fn error(
     req: &mut Request,
@@ -965,7 +973,7 @@ pub(crate) fn error(
     file: &[u8],
     line: u32,
     message: &[u8],
-    uncaught: bool,
+    told: Told,
 ) {
     if req.shared.supplied.error_observers.is_empty() {
         return;
@@ -977,7 +985,7 @@ pub(crate) fn error(
             file,
             line,
             message,
-            uncaught,
+            told,
         },
     );
 }
