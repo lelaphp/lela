@@ -459,3 +459,31 @@ fn a_guarded_boolean_keeps_what_its_op_computed() -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Whether any opline of `program`'s loop in `f` is stepped, its trace
+/// rendered.
+fn steps(program: &str) -> Result<(bool, String), String> {
+    let ir = built(&IN_F, program)?;
+    let stepped = ir
+        .ops
+        .iter()
+        .any(|op| matches!(op, Op::Line(line) if line.form == Form::Step));
+    Ok((stepped, dump::render(&ir)))
+}
+
+/// A product of one variable by itself: the guard on its second operand
+/// narrows the value both read, so the opline sees both as the guard
+/// holds them and is inline, where it saw its first as the loop's phi
+/// stood before the guard and was stepped on every turn (#3073).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_operand_read_twice_is_seen_as_its_one_guard_holds_it() -> Result<(), String> {
+    for body in ["$s = $i * $i;", "$s = ($s + $i * $i) % 1000003;"] {
+        let (stepped, ir) = steps(&format!(
+            "function f($n) {{ $s = 0; for ($i = 1; $i < $n; $i++) {{ {body} }} return $s; }}
+            echo f(100), \"\\n\";"
+        ))?;
+        assert!(!stepped, "{body}\n{ir}");
+    }
+    Ok(())
+}
