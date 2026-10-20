@@ -7,7 +7,7 @@ use std::mem::offset_of;
 
 use php_unit::OplineIdx;
 
-use crate::lower::{Compiled, Stood};
+use crate::lower::{Compiled, Fuzzed, Stood};
 use crate::table::TraceName;
 use crate::types::{ExitSpec, Frame, Landing};
 
@@ -124,6 +124,7 @@ pub(crate) fn compiled(words: &[u32], exits: Vec<ExitSpec>) -> Compiled {
         align: 4,
         exits: exits.into(),
         leaves: None,
+        fuzzed: Fuzzed::default(),
         map_ptrs: Box::new([]),
         marks: Box::new([]),
         name: TraceName {

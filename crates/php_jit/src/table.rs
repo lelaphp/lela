@@ -43,7 +43,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use php_engine::tier::{self, Epoch, MapPtrRaw, Request, Word};
 use php_unit::OplineIdx;
 
-use crate::lower::{Compiled, Mark};
+use crate::lower::{Compiled, Fuzzed, Mark};
 use crate::policy::{Place, Policy};
 use crate::record::{Start, Stop};
 use crate::types::{ExitId, Landing};
@@ -177,6 +177,10 @@ pub(crate) struct Trace<P: Pages = Native> {
         )
     )]
     pub(crate) marks: Box<[Mark]>,
+    /// The bytes its code fails each guard once by, under exit-fuzz:
+    /// held for as long as the code that names them.
+    #[expect(dead_code, reason = "read and written by the trace's code alone")]
+    pub(crate) fuzzed: Fuzzed,
     /// Every trace an exit links to, each once, ascending.
     #[cfg_attr(
         not(test),
@@ -530,6 +534,7 @@ impl<P: Pages> TraceTable<P> {
             leaves: compiled.leaves,
             map_ptrs: compiled.map_ptrs,
             marks: compiled.marks,
+            fuzzed: compiled.fuzzed,
             links: links.into_boxed_slice(),
         });
         self.fill(id, trace)?;

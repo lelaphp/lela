@@ -475,6 +475,39 @@ fn a_main_loop_no_call_activates_is_a_root_at_its_header() {
     );
 }
 
+/// Under `jit.mode=exit-fuzz` every guard a compiled trace holds fails
+/// once, the loop's interrupt test among them, and the interpreter goes
+/// on at each landing to print what it prints under `force`: `a`'s two
+/// entry guards leave through the exit they share, the interrupt test and
+/// the guard on `$s` at the header through the one they share, the
+/// increment's overflow guard through its own, then the loop runs
+/// compiled to its end; the second call's trace links to it, its guards
+/// failed already, and leaves where the loop ends. A jump's direction is
+/// never failed: its exit lands where the jump it did not expect went.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn under_exit_fuzz_every_guard_fails_once_and_the_output_is_forces() {
+    let program = "function a($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $i; } return $s; }
+        echo a(10), a(20), \"\\n\";";
+    let exits = |served: &php_engine::test::Served| -> Vec<String> {
+        lines(served)
+            .into_iter()
+            .filter(|line| line.starts_with("     TRACE"))
+            .collect()
+    };
+    let force = testing::serve::<Lane>(&DUMPED, program);
+    assert_eq!(testing::stdout(&force), "45190\n");
+    assert_eq!(exits(&force), ["     TRACE 1 exit 3 a() body.php:2"; 2]);
+    let mut fuzzed = DUMPED.to_vec();
+    fuzzed[0] = ("jit.mode", "exit-fuzz");
+    let fuzz = testing::serve::<Lane>(&fuzzed, program);
+    assert_eq!(testing::stdout(&fuzz), "45190\n");
+    assert_eq!(
+        exits(&fuzz),
+        [0, 0, 1, 1, 2, 3, 3].map(|exit| format!("     TRACE 1 exit {exit} a() body.php:2"))
+    );
+}
+
 /// `run` from trace to trace (`jit-design.md` §4.9 *Tested*), on the one
 /// target whose arena maps code today: two traces assembled by hand, each
 /// serving one opline through a kernel that keeps the number of the

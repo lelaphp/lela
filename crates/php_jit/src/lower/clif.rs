@@ -42,7 +42,7 @@ use php_engine::tier::FuncRef;
 use php_heap::{Arr, ROOM_BYTES, Ref, Zval, ZvalType};
 use php_unit::{MapPtrOffset, Opcode};
 
-use super::{ABANDONED, INTERRUPT_AT, Kernel, Stood, Symbols, located};
+use super::{ABANDONED, Fuzzed, INTERRUPT_AT, Kernel, Stood, Symbols, located};
 use crate::record::Stop;
 use crate::types::{
     Abort, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home, Imm,
@@ -96,11 +96,13 @@ fn mismatch(why: &'static str) -> Abort {
 }
 
 /// The function `ir` lowers to on the target `config` describes, calling
-/// the kernels at `symbols`.
+/// the kernels at `symbols`, and, where `fuzzed` holds any bytes, failing
+/// each guard once by them.
 pub(super) fn lower(
     ir: &TraceIr,
     config: TargetFrontendConfig,
     symbols: &Symbols,
+    fuzzed: &Fuzzed,
 ) -> Result<Function, Abort> {
     let call_conv = config.default_call_conv;
     let mut sig = Signature::new(call_conv);
@@ -110,9 +112,35 @@ pub(super) fn lower(
     let mut context = FunctionBuilderContext::new();
     let builder = FunctionBuilder::new(&mut func, &mut context);
     let mut emit = Emit::new(ir, builder, call_conv, symbols);
+    let (base, len) = fuzzed.span();
+    if len > 0 {
+        let base = i64::try_from(base).map_err(|_| mismatch("an address past the host's"))?;
+        emit.fuzz = Some(Fuzz { base, len, next: 0 });
+    }
     emit.trace()?;
     emit.b.finalize(config);
     Ok(func)
+}
+
+/// How many guards of `ir` exit-fuzz can fail at once without a wrong
+/// answer, the interrupt test among them: each whose exit is right
+/// whatever the value it holds, which a jump's direction is not, since
+/// its exit lands where the jump the guard did not expect went.
+pub(super) fn fuzz_sites(ir: &TraceIr) -> usize {
+    let guards = ir.guards.iter();
+    guards
+        .filter(|guard| !matches!(guard.check, Check::Direction { .. }))
+        .count()
+        + 1
+}
+
+/// Exit-fuzz's bytes as the lowering hands them out (`jit.mode=exit-fuzz`):
+/// where they start, how many there are, and the next not handed out.
+#[derive(Debug, Clone, Copy)]
+struct Fuzz {
+    base: i64,
+    len: usize,
+    next: usize,
 }
 
 /// The kinds a value of the scalar core is, in a register or in its slot.
@@ -213,6 +241,8 @@ struct Emit<'a> {
     abandon: Option<Block>,
     /// The frame the trace runs in now.
     running: Frame,
+    /// Under `jit.mode=exit-fuzz`, the bytes each guard fails once by.
+    fuzz: Option<Fuzz>,
 }
 
 impl<'a> Emit<'a> {
@@ -243,6 +273,7 @@ impl<'a> Emit<'a> {
             exits: vec![None; ir.exits.len()],
             abandon: None,
             running: Frame::ROOT,
+            fuzz: None,
         }
     }
 
@@ -291,6 +322,7 @@ impl<'a> Emit<'a> {
                 self.b.switch_to_block(head);
                 self.b.set_srcloc(located(header.at.index()));
                 let flag = self.b.ins().load(I8, trusted(), interrupt, 0);
+                let flag = self.fuzzed(flag)?;
                 self.leave_if(flag, header.interrupt)?;
                 for at in split..self.ir.ops.len() {
                     self.op(at)?;
@@ -409,6 +441,7 @@ impl<'a> Emit<'a> {
                             .ins()
                             .icmp_imm_u(IntCC::NotEqual, at, i64::from(opline.0));
                     let other = self.b.ins().bor(other_func, other_opline);
+                    let other = self.fuzzed(other)?;
                     self.leave_if(other, guard.exit)?;
                 }
                 Ok(())
@@ -444,6 +477,7 @@ impl<'a> Emit<'a> {
                 let (room, at) = self.place(held.slot)?;
                 let byte = self.b.ins().load(I8, trusted(), room, at + TYPE_AT);
                 let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, byte, tag(t));
+                let other = self.fuzzed(other)?;
                 self.leave_if(other, guard.exit)?;
             }
             Check::Deref { value, tag: t } => {
@@ -454,6 +488,7 @@ impl<'a> Emit<'a> {
                     self.b
                         .ins()
                         .icmp_imm_s(IntCC::NotEqual, byte, tag(ZvalType::Reference));
+                let other = self.fuzzed(other)?;
                 self.leave_if(other, guard.exit)?;
                 let reference = self.b.ins().load(I64, trusted(), room, at);
                 let inner =
@@ -474,6 +509,7 @@ impl<'a> Emit<'a> {
                     Layout::Hash => IntCC::NotEqual,
                 };
                 let other = self.b.ins().icmp_imm_s(cc, packed, 0);
+                let other = self.fuzzed(other)?;
                 self.leave_if(other, guard.exit)?;
             }
             Check::Direction { .. } | Check::Caller { .. } => {
@@ -518,6 +554,7 @@ impl<'a> Emit<'a> {
                     },
                     Some(Kind::Long),
                 ) => {
+                    let overflowed = self.fuzzed(overflowed)?;
                     self.leave_if(overflowed, guard.exit)?;
                     Num::Long(long)
                 }
@@ -528,6 +565,7 @@ impl<'a> Emit<'a> {
                     Some(Kind::Double),
                 ) => {
                     let exact = self.b.ins().icmp_imm_s(IntCC::Equal, overflowed, 0);
+                    let exact = self.fuzzed(exact)?;
                     self.leave_if(exact, guard.exit)?;
                     Num::Double(double)
                 }
@@ -536,6 +574,29 @@ impl<'a> Emit<'a> {
             };
         }
         Ok(num)
+    }
+
+    /// `cond`, a guard's failure, or under exit-fuzz that or the guard's
+    /// first pass: the guard's byte read and set, so it fails once
+    /// whatever it holds (`jit-design.md` §4.6, §7).
+    fn fuzzed(&mut self, cond: Value) -> Result<Value, Abort> {
+        let Some(fuzz) = self.fuzz.as_mut() else {
+            return Ok(cond);
+        };
+        let at = fuzz.next;
+        if at >= fuzz.len {
+            return Err(mismatch("more guards fuzzed than the trace counted"));
+        }
+        fuzz.next += 1;
+        let address = fuzz
+            .base
+            .saturating_add(i64::try_from(at).unwrap_or(i64::MAX));
+        let byte = self.b.ins().iconst(I64, address);
+        let failed = self.b.ins().load(I8, trusted(), byte, 0);
+        let one = self.b.ins().iconst(I8, 1);
+        self.b.ins().store(trusted(), one, byte, 0);
+        let first = self.b.ins().icmp_imm_s(IntCC::Equal, failed, 0);
+        Ok(self.b.ins().bor(cond, first))
     }
 
     /// Leave through `exit` where `cond` is not zero, and go on otherwise.
@@ -1006,6 +1067,7 @@ impl<'a> Emit<'a> {
                     return Err(mismatch("a fetch guards a value it does not write"));
                 }
                 let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, kind, tag(t));
+                let other = self.fuzzed(other)?;
                 let goes_on = self
                     .ir
                     .exits
