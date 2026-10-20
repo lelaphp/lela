@@ -55,7 +55,6 @@ const PERCENT: &str = "percent";
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct SessionUsage {
     pub context: ContextUsage,
-    #[serde(default)]
     pub cost: Option<Cost>,
 }
 
@@ -65,10 +64,8 @@ pub struct SessionUsage {
 /// response came back.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ContextUsage {
-    #[serde(default)]
     pub tokens: Option<u64>,
     pub window: u64,
-    #[serde(default)]
     pub percent: Option<f64>,
 }
 

@@ -235,7 +235,6 @@ impl Session {
 struct Starter {
     session: Session,
     base: String,
-    #[serde(default)]
     identity: Option<String>,
     /// Another session's start was admitted beside this one before
     /// either's marker: the operation is no one's until the call that

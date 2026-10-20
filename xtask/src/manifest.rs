@@ -36,7 +36,6 @@ pub const SCRIPTS: &str = "scripts";
 pub struct Manifest {
     pub oracle: PinRow,
     pub budget: Budget,
-    #[serde(default)]
     pub telemetry: Option<Telemetry>,
     #[serde(rename = "crate", default)]
     pub crates: Vec<Crate>,
@@ -58,7 +57,6 @@ pub struct Manifest {
     pub(crate) parity: Parity,
     /// `[divergence]`: the day-30 target the registry's debt rows are held
     /// to; `None` where the file has no table, which `status` says.
-    #[serde(default)]
     pub divergence: Option<DivergenceTable>,
     /// `[[bench]]`: each perf bar's tolerance and the nights it was
     /// derived over (#2659); a bar without a row is a series held to none.
@@ -205,13 +203,11 @@ pub struct Budget {
     /// names, held apart from `api_items` (design §4.4, revision 34);
     /// absent while a person has not written the row, and the whole lock
     /// is then held to `api_items`.
-    #[serde(default)]
     pub api_private_items: Option<u64>,
     pub bindings: u64,
     /// `scripts/**` against its ceiling, with what under it is a generator
     /// and not counted; absent while a person has not written the row,
     /// and `budget` then counts the tree and holds it to nothing.
-    #[serde(default)]
     pub scripts: Option<Scripts>,
 }
 
@@ -305,7 +301,6 @@ pub struct Crate {
     /// the platform they run on, verified by its md5, and every crate
     /// without the key under the main oracle. A name the pin does not
     /// carry fails the crate's readings in those lanes, naming it.
-    #[serde(default)]
     pub oracle: Option<String>,
 }
 
