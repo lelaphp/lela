@@ -49,6 +49,7 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
         zend_terminate_string::declared(),
         zend_leak_variable::declared(),
         internals::zend_leak_bytes::declared(),
+        internals::zend_delref::declared(),
         zend_string_or_object::declared(),
         zend_string_or_object_or_null::declared(),
         zend_string_or_stdclass::declared(),
