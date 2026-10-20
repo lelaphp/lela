@@ -79,6 +79,16 @@ pub(crate) enum Walked {
     Answered(Value),
 }
 
+/// The key of a row [`Request::object_walk`] found, as php's walk holds
+/// it until `FE_FETCH` reads it where the loop keeps one
+/// ([`Request::walked_key`]): one the walk holds an owner of, a hooked
+/// iterator's `current_key` or a bucket's key, or a declared property's
+/// name, which the table holds mangled where it is not public.
+pub(crate) enum WalkKey {
+    Held(Owner<Key>),
+    Declared(Box<[u8]>, Visibility),
+}
+
 impl Walked {
     /// Whether the walk holds an owner of the value it found.
     pub(crate) fn owned(self) -> bool {
@@ -3347,19 +3357,42 @@ impl Request {
     /// behind an `IS_INDIRECT`, and one the executing scope may not
     /// reach is stepped over as php steps over a mangled key
     /// `zend_check_property_access` refuses. `None` is nothing left,
-    /// which is the fetch's jump past the loop. The `Err` is the memory
-    /// limit refusing the intern of a declared name; php's key is
-    /// interned already and takes no allocation.
+    /// which is the fetch's jump past the loop. The key is handed on
+    /// unmade ([`WalkKey`]) and made by [`Request::walked_key`] only
+    /// where the loop keeps one, as `RETURN_VALUE_USED` guards php's: a
+    /// public property's the interned name, a protected or a private
+    /// one's a string of its own ([`Request::walk_key`]), so a loop that
+    /// holds the last key while the next is made peaks at both.
+    ///
+    /// ```php
+    /// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); $p = memory_get_peak_usage(); $u = memory_get_usage(); echo $p - $s, ' ', $u - $s, "\n"; }
+    /// class P3 { public $a = 1; private $pp = 3; protected $qq = 4; function w() { $o = []; foreach ($this as $k => $v) $o[] = $k; return 1; } function z() { foreach ($this as $k => $v) {} return 1; } function r() { foreach ($this as $k => &$v) {} return 1; } }
+    /// $p = new P3;
+    /// pk(fn () => $p->w());
+    /// pk(fn () => $p->z());
+    /// pk(fn () => $p->r());
+    /// $o = (object)["\0A\0b" => 42, "\0*\0c" => 24, "d" => 1];
+    /// pk(function () use ($o) { foreach ($o as $k => $v) {} return 1; });
+    /// pk(function () use ($o) { foreach ($o as $v) {} return 1; });
+    /// ```
+    /// ```expect
+    /// 280 0
+    /// 64 0
+    /// 96 0
+    /// 64 0
+    /// 0 0
+    /// ```
     pub(crate) fn object_walk(
         &mut self,
         object: PhpObject,
         idx: u32,
         by_ref: bool,
-    ) -> Result<Option<(Owner<Key>, Walked)>, Thrown> {
+    ) -> Result<Option<(WalkKey, Walked)>, Thrown> {
         let o = object.heap();
         let class = object.class();
         if self.object_handlers(o).properties_overloaded() {
-            return self.answered_walk(object, idx);
+            let found = self.answered_walk(object, idx)?;
+            return Ok(found.map(|(key, walked)| (WalkKey::Held(key), walked)));
         }
         // `zend_hash_iterator_pos(.., Z_OBJPROP_P(array))`: the table laid
         // down as php's `rebuild_object_properties` lays it, and the
@@ -3377,7 +3410,7 @@ impl Request {
             self.heap
                 .iterator_set_lead(idx, u32::try_from(lead).unwrap_or(u32::MAX));
             if let Some((key, walked)) = found? {
-                return Ok(Some((key.into_key(), walked)));
+                return Ok(Some((WalkKey::Held(key.into_key()), walked)));
             }
             walk::Stepped::Dynamic
         } else {
@@ -3408,20 +3441,17 @@ impl Request {
         match found {
             None => Ok(None),
             Some((_, TableRow::Slot(slot), _)) => {
-                let Some(name) = self
-                    .placed_property(class, slot)
-                    .map(|(_, p)| p.name.0.clone())
-                else {
+                let Some((_, p)) = self.placed_property(class, slot) else {
                     return Err(crate::api::raising::fatal(
                         self,
                         "InternalError: an object walk's slot with no declaration",
                     ));
                 };
-                let key = self.declared_string(&name)?.into_key();
+                let key = WalkKey::Declared(p.name.0.clone(), p.visibility);
                 Ok(Some((key, Walked::Slot(slot))))
             }
             Some((_, TableRow::Entry(key), _)) => Ok(Some((
-                Owner::take(self, Key::of(key)),
+                WalkKey::Held(Owner::take(self, Key::of(key))),
                 Walked::Dynamic(key),
             ))),
         }
@@ -3560,9 +3590,12 @@ impl Request {
     }
 
     /// The key `FE_FETCH` hands a loop over an object's table for the row
-    /// [`Request::object_walk`] found: a name as it is, and a mangled
-    /// one, which a cast of an array can leave in the dynamic table,
-    /// with its class part dropped (`zend_unmangle_property_name_ex`).
+    /// [`Request::object_walk`] found, where the loop keeps one (`keyed`),
+    /// and none otherwise, a key the walk held given up: a declared
+    /// property's as [`Request::walk_key`] makes it, a held name as it
+    /// is, and a mangled one, which a cast of an array can leave in the
+    /// dynamic table, a string of its own with its class part dropped
+    /// (`zend_unmangle_property_name_ex`).
     ///
     /// ```php
     /// $obj = (object)["\0A\0b" => 42, "\0*\0c" => 24, "d" => 1];
@@ -3576,18 +3609,33 @@ impl Request {
     /// string(1) "d"
     /// int(1)
     /// ```
-    pub(crate) fn walked_key(&mut self, key: Owner<Key>) -> Result<Owner<Key>, Thrown> {
+    pub(crate) fn walked_key(
+        &mut self,
+        key: WalkKey,
+        keyed: bool,
+    ) -> Result<Option<Owner<Key>>, Thrown> {
+        let key = match key {
+            WalkKey::Held(key) if keyed => key,
+            WalkKey::Declared(name, visibility) if keyed => {
+                return Ok(Some(self.walk_key(&name, visibility)?.into_key()));
+            }
+            WalkKey::Held(key) => {
+                key.give_up(self);
+                return Ok(None);
+            }
+            WalkKey::Declared(..) => return Ok(None),
+        };
         let Key::Str(name) = *key else {
-            return Ok(key);
+            return Ok(Some(key));
         };
         let crate::natives::Unmangled::Mangled { prop, .. } =
             crate::natives::unmangle_property_name(name.as_bytes())
         else {
-            return Ok(key);
+            return Ok(Some(key));
         };
         let made = self.string_init(prop);
         key.give_up(self);
-        Ok(Owner::adopt(made?).into_key())
+        Ok(Some(Owner::adopt(made?).into_key()))
     }
 
     /// What [`Request::object_walk`] found at a place: the value, a view

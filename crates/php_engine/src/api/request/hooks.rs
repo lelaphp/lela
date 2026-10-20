@@ -1187,7 +1187,7 @@ impl Request {
                 }
                 let value = self.read_deferred(object, &row, HookedBuild::Iterator)?;
                 let walked = super::Walked::Hooked(value.hand_on());
-                return self.iterator_key(&row).map(|key| Some((key, walked)));
+                return Ok(Some((self.walk_key(&row.name, row.visibility)?, walked)));
             }
             let Some(slot) = self.slot_declared_by(class, row.declaring, &row.name) else {
                 continue;
@@ -1196,18 +1196,25 @@ impl Request {
                 continue;
             }
             let walked = super::Walked::Slot(slot);
-            return self.iterator_key(&row).map(|key| Some((key, walked)));
+            return Ok(Some((self.walk_key(&row.name, row.visibility)?, walked)));
         }
     }
 
-    /// `zho_declared_it_fetch_current`'s `current_key`: the declared
-    /// name, or a string of its own for a protected or a private row,
-    /// whose name the table holds mangled (`zend_string_init` of the
-    /// unmangled part).
-    fn iterator_key(&mut self, row: &HookedDeclared) -> Result<Owner<PhpString>, Thrown> {
-        match row.visibility {
-            Visibility::Public => self.declared_string(&row.name),
-            _ => self.string_init(&row.name).map(Owner::adopt),
+    /// The key a walk over an object's properties hands out for the
+    /// declared property `name`: the declared name, or a string of its
+    /// own for a protected or a private one, whose name the table holds
+    /// mangled, `zend_string_init` of the unmangled part. The hooked
+    /// iterator's `current_key` (`zho_declared_it_fetch_current`) and
+    /// `FE_FETCH`'s key (`zend_fe_fetch_object_helper`'s `ZVAL_STRINGL`)
+    /// are both this.
+    pub(super) fn walk_key(
+        &mut self,
+        name: &[u8],
+        visibility: Visibility,
+    ) -> Result<Owner<PhpString>, Thrown> {
+        match visibility {
+            Visibility::Public => self.declared_string(name),
+            _ => self.string_init(name).map(Owner::adopt),
         }
     }
 
