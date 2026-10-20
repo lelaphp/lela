@@ -62,7 +62,8 @@ pub(crate) trait Crossed {
     /// delivery raise (design §5.8).
     fn interrupt(&self) -> &AtomicBool;
 
-    /// Whether a throwable or an exit stands pending.
+    /// Whether a throwable or an exit stands pending, or a fatal is
+    /// unwinding the request, which leaves every frame as an exit does.
     fn thrown(&self) -> bool;
 }
 
@@ -72,7 +73,7 @@ impl Crossed for Request {
     }
 
     fn thrown(&self) -> bool {
-        self.diagnostics().raised().is_some()
+        self.diagnostics().raised().is_some() || self.diagnostics().bailing_out()
     }
 }
 

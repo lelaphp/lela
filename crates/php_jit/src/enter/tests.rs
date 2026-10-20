@@ -93,6 +93,37 @@ fn a_throwable_left_pending_is_answered_as_an_exception() {
     assert_eq!(out, 5);
 }
 
+/// A fatal a kernel raised and the engine is bailing out from, the memory
+/// limit an append past it reaches inside `step`, is answered as a
+/// throwable is, so the compiled loop leaves and the loop unwinds, where
+/// the wrapper had answered `Continue` and the loop appended again until
+/// `max_execution_time` stopped it, silently (`Zend/tests/bug70258.phpt`,
+/// which ran past the lane's 60 seconds). The request ends in the
+/// fatal well inside the ten seconds the limit is set to.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_bailout_a_step_began_leaves_the_compiled_loop() {
+    let program = "class A { public $arr; function core() { $this->arr['no_pack'] = 1; while (1) { $this->arr[] = 1; } } }
+        $a = new A; $a->core();";
+    for mode in ["force", "exit-fuzz"] {
+        let ini = [
+            ("jit.mode", mode),
+            ("jit.compile", "inline"),
+            ("memory_limit", "2M"),
+            ("max_execution_time", "10"),
+        ];
+        let began = std::time::Instant::now();
+        let served = crate::testing::serve::<crate::testing::Lane>(&ini, program);
+        let took = began.elapsed();
+        let fatal = served.fatal.unwrap_or_default();
+        assert!(
+            fatal.contains("Allowed memory size of 2097152 bytes exhausted"),
+            "{mode}: {fatal}"
+        );
+        assert!(took.as_secs() < 5, "{mode}: the request took {took:?}");
+    }
+}
+
 /// The engine's list gives `lower` one wrapper address per kernel, each
 /// its own.
 #[test]
