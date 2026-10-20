@@ -2157,7 +2157,6 @@ fn two_runs_over_one_directory_at_once_never_meet_in_it() {
 #[test]
 fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
     use std::io::{BufRead, BufReader};
-    const PATIENCE: Duration = Duration::from_mins(2);
     if oracle().is_none() {
         return;
     }
@@ -2190,21 +2189,16 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
             break PathBuf::from(copy);
         }
     };
-    let since = std::time::Instant::now();
-    while !held.exists() {
-        assert!(
-            since.elapsed() < PATIENCE,
-            "the killed run's test never started"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    // Read while the run lives and holds its copy's lock, which no sweep
+    // passes: once it is killed, any process's run may stop its php (#2942).
+    // The file stands empty between php's open and its write, which a read
+    // under load met (#3007), so the pid is what is waited for.
+    let pid = printed(&held);
+    assert!(!pid.is_empty(), "the killed run's test never started");
     assert!(
         copy.join("Zend/tests/beside").exists(),
         "the test ran in {copy:?}"
     );
-    // Read while the run lives and holds its copy's lock, which no sweep
-    // passes: once it is killed, any process's run may stop its php (#2942).
-    let pid = fs::read_to_string(&held).unwrap();
     let pid = pid.trim();
     let php = started_at(pid);
     assert!(!php.is_empty(), "the run's php runs");
