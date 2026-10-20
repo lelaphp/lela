@@ -275,11 +275,12 @@ impl Request {
 
     /// `shutdown_executor`'s `zend_stream_shutdown`, first in it
     /// (`Z/Zend/zend_execute_API.c:410`): `CG(open_files)` destroyed, so
-    /// a program's file php-fpm left listed is closed
-    /// ([`ProgramFile::Listed`]), after the shutdown functions and the
-    /// destructors.
+    /// a program's file php-fpm left listed is closed and its
+    /// `zend_file_handle`'s buffer, element and name freed ([`ProgramFile::Listed`]), after
+    /// the shutdown functions and the destructors.
     pub(crate) fn close_listed_files(&mut self) {
         self.close_held(Until::Ended);
+        self.destroy_primary_handle();
     }
 
     /// Every held file that closes by `until`, a stream through the
