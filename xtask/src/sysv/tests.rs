@@ -217,10 +217,11 @@ fn the_sweep_says_how_many_it_removed_of_each_kind_and_what_it_kept() {
         removed: BTreeMap::from([(Kind::Memory, vec![7, 9]), (Kind::Queue, vec![8])]),
         unnamed_removed: 1,
         unnamed: 1,
+        claim_stands: true,
     };
     assert_eq!(
         swept.to_string(),
-        "removed 3 System V objects (shared memory segments 7 9, message queue 8), 1 of them naming no process, the runner's, private and made while one of the run's programs ran; 1 new one names no process and stands, since nothing tells the run's from another program's"
+        "removed 3 System V objects (shared memory segments 7 9, message queue 8), 1 of them naming no process, the runner's, private and made while one of the run's programs ran; 1 new one names no process and stands, since nothing tells the run's from another program's; the run's claim stands for a later reclaim, another run holding one"
     );
     assert_eq!(Swept::default().to_string(), "removed 0 System V objects");
 }

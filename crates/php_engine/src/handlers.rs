@@ -8004,12 +8004,13 @@ fn fetched_obj(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
 
 /// The inline path of `ZEND_FETCH_OBJ_R` over a constant name
 /// (`ZEND_FETCH_OBJ_R_SPEC_CV_CONST`, `_UNUSED_CONST`,
-/// `Z/Zend/zend_vm_def.h:2102-2119`): the receiver a CV holds, or
+/// `Z/Zend/zend_vm_def.h:2102-2160`): the receiver a CV holds, or
 /// `$this`, whose class is the one the cache slot was primed with, and
-/// the declared slot the slot names read in place, `ZVAL_COPY_DEREF`
-/// into the temporary. `None`, with nothing touched, for a name that is
-/// no constant, a container that is a temporary, which the fetch would
-/// free, or no object, a lazy object, a slot the cache does not name
+/// the place the slot names, a declared slot or a dynamic property's
+/// bucket ([`cached_place`]), read in place, `ZVAL_COPY_DEREF` into the
+/// temporary. `None`, with nothing touched, for a name that is no
+/// constant, a container that is a temporary, which the fetch would
+/// free, or no object, a lazy object, a place the cache does not name
 /// for this class and frame ([`Request::cached_property`]), one nothing
 /// holds, whose read is `__get`'s or the warning's, and a temporary
 /// holding an owner.
@@ -8023,12 +8024,14 @@ fn inline_fetch_obj_r(
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
     let object = inline_receiver(req, frame, code, op, a, b)?;
-    let (slot, _) = req.cached_property(
-        frame,
+    let (place, _) = cached_place(
+        req,
+        (frame, code, op),
         property_cache_slot(op),
-        crate::api::values::ClassId(object.class()),
+        object,
+        false,
     )?;
-    let z = crate::operand::deref(object.slot(slot));
+    let z = crate::operand::deref(place.read());
     if z.is_undef() {
         return None;
     }
@@ -8041,6 +8044,56 @@ fn inline_fetch_obj_r(
     z.addref();
     *out = z;
     Some(Ok(advanced()))
+}
+
+/// The place cache slot `slot` of a property opcode over a constant name
+/// names on `object` ([`Request::cached_property`]), and whether its
+/// property is typed: the declared slot in place, or the bucket of the
+/// object's dynamic table the name is in, found by the name's known hash
+/// (`zend_hash_find_known_hash(zobj->properties, name)`,
+/// `Z/Zend/zend_vm_def.h:2154`), for a `write` only in a table nothing
+/// else shares, whose separation is the kernel's. None where the cache
+/// names no place for this class and frame, and where the table holds
+/// no such name, which is `__get`'s, the warning's or a write that lays
+/// it down.
+#[inline(always)] // as `inline_fetch_obj_r`
+#[allow(clippy::inline_always)]
+fn cached_place(
+    req: &Request,
+    (frame, code, op): (FrameRef, &OpArray, &Opline),
+    slot: CacheSlot,
+    object: php_heap::Obj,
+    write: bool,
+) -> Option<(php_heap::ZvalRef, bool)> {
+    let class = crate::api::values::ClassId(object.class());
+    match req.cached_property(frame, slot, class)? {
+        exec::PropertyOffset::Declared { slot, typed } => Some((object.slot_ref(slot)?, typed)),
+        exec::PropertyOffset::Dynamic => {
+            let table = object
+                .properties()
+                .filter(|table| !write || (table.refcount() == 1 && !table.is_immutable()))?;
+            let name = code.literals.get(op.op2 as usize)?.as_str()?;
+            Some((table.value_ref(php_heap::Key::Str(name))?, false))
+        }
+    }
+}
+
+/// [`Request::prime_property`] for a property opcode whose name is a
+/// constant, at cache slot `slot`: `zend_get_property_offset` given the
+/// opline's `cache_slot`, which a computed name's site passes as `NULL`.
+fn prime_constant(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    slot: CacheSlot,
+    object: PhpObject,
+    name: &Value,
+) {
+    if op.op2_type == OperandKind::Const
+        && let Some(bytes) = name.as_str_bytes()
+    {
+        req.prime_property(frame, slot, object, bytes);
+    }
 }
 
 /// `CACHE_ADDR(opline->extended_value & ~ZEND_FETCH_OBJ_FLAGS)`: the
@@ -8164,22 +8217,22 @@ fn fetch_obj(
     }
     .deref();
     let read = if let Some(object) = container.as_object() {
-        name.bytes(req, frame, code, op).and_then(|name| {
-            if op.op2_type == OperandKind::Const {
-                req.prime_property(frame, property_cache_slot(op), object, &name);
-            }
+        name.name(req, frame, code, op).and_then(|name| {
+            prime_constant(req, frame, op, property_cache_slot(op), object, &name);
+            let name = name.as_str_bytes().unwrap_or_default();
             let table = req.object_handlers(object.heap());
             table
-                .read_property(req, object, &name, fetch)
+                .read_property(req, object, name, fetch)
                 .map(Owner::hand_on)
         })
     } else if fetch == PropertyRead::Warning {
-        name.bytes(req, frame, code, op).map(|name| {
+        name.name(req, frame, code, op).map(|name| {
+            let name = name.as_str_bytes().unwrap_or_default();
             crate::api::raising::warning(
                 req,
                 &format!(
                     "Attempt to read property \"{}\" on {}",
-                    String::from_utf8_lossy(&name),
+                    String::from_utf8_lossy(name),
                     crate::ops::value_name(req, &container)
                 ),
             );
@@ -8344,10 +8397,10 @@ fn fetched_obj_place(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Op
 
 /// The inline path of `ZEND_FETCH_OBJ_W` over a constant name
 /// (`zend_fetch_property_address`'s cached arm,
-/// `Z/Zend/zend_execute.c:3540-3560`): the declared slot the cache slot
-/// names on a receiver of the class it was primed with, where it holds
-/// a value, left in the `VAR` as an `IS_INDIRECT` for the write after
-/// it. `None` as [`inline_fetch_obj_r`]'s, and for a typed slot, whose
+/// `Z/Zend/zend_execute.c:3540-3560`): the place the cache slot names
+/// on a receiver of the class it was primed with ([`cached_place`]),
+/// where it holds a value, left in the `VAR` as an `IS_INDIRECT` for the
+/// write after it. `None` as [`inline_fetch_obj_r`]'s, and for a typed slot, whose
 /// fetch flags are [`fetch_flags`]', and a `VAR` holding an owner.
 #[inline(always)] // as `inline_fetch_obj_r`
 #[allow(clippy::inline_always)]
@@ -8359,14 +8412,16 @@ fn inline_fetch_obj_w(
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
     let object = inline_receiver(req, frame, code, op, a, b)?;
-    let (slot, typed) = req.cached_property(
-        frame,
+    let (place, typed) = cached_place(
+        req,
+        (frame, code, op),
         property_cache_slot(op),
-        crate::api::values::ClassId(object.class()),
+        object,
+        true,
     )?;
-    let place = object
-        .slot_ref(slot)
-        .filter(|place| !typed && !place.read().is_undef())?;
+    if typed || place.read().is_undef() {
+        return None;
+    }
     let out = req
         .slots_mut(frame)
         .get_mut(exec::temporary_slot(code, op.out) as usize)
@@ -8932,9 +8987,7 @@ fn property_place(
         let thrown = non_object_place(req, (frame, code, op), read, &container, &name);
         return Ok(PropertyFound::Threw(thrown));
     };
-    if op.op2_type == OperandKind::Const {
-        req.prime_property(frame, property_cache_slot(op), object, &name);
-    }
+    prime_constant(req, frame, op, property_cache_slot(op), object, &name_value);
     let (object, lent) = match req.lazy_place(object, &name) {
         Ok(placed) => placed,
         Err(thrown) => {
@@ -13110,9 +13163,10 @@ pub(crate) fn assign_obj<
 
 /// The inline path of `ZEND_ASSIGN_OBJ` over a constant name
 /// (`ZEND_ASSIGN_OBJ_SPEC_CV_CONST_OP_DATA_*`, `_UNUSED_CONST_*`,
-/// `Z/Zend/zend_vm_def.h:2489-2520`): the declared slot the cache slot
-/// names on a receiver of the class it was primed with, holding a value
-/// that owns nothing, takes the `OP_DATA` value as
+/// `Z/Zend/zend_vm_def.h:2489-2537`): the place the cache slot names on
+/// a receiver of the class it was primed with ([`cached_place`]), a
+/// declared slot or a dynamic property's bucket, holding a value that
+/// owns nothing, takes the `OP_DATA` value as
 /// `zend_assign_to_variable` takes it, a constant copied, a temporary
 /// moved and a CV copied with one more owner, and the temporary takes it
 /// too under `RETURN_VALUE_USED`; nothing is given up, so nothing runs.
@@ -13152,15 +13206,17 @@ fn inline_assign_obj(
     (a, b, data): (impl Operand, impl Operand, impl Operand),
 ) -> Option<Edge> {
     let object = inline_receiver(req, frame, code, op, a, b)?;
-    let (slot, typed) = req.cached_property(
-        frame,
+    let (place, typed) = cached_place(
+        req,
+        (frame, code, op),
         property_cache_slot(op),
-        crate::api::values::ClassId(object.class()),
+        object,
+        true,
     )?;
-    let place = object.slot_ref(slot).filter(|place| {
-        let held = place.read();
-        !typed && !held.is_undef() && !held.is_refcounted()
-    })?;
+    let held = place.read();
+    if typed || held.is_undef() || held.is_refcounted() {
+        return None;
+    }
     let z = data_value(req, frame, code, op, at, data)?;
     place.write(z);
     Some(Ok(Next::jump(at.saturating_add(2))))
@@ -13316,11 +13372,7 @@ fn assigned_obj(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
     let mut member = exec::Member::default();
     let written = match (member.name(req, frame, code, op), container.as_object()) {
         (Ok(name), Some(object)) => {
-            if op.op2_type == OperandKind::Const
-                && let Some(bytes) = name.as_str_bytes()
-            {
-                req.prime_property(frame, property_cache_slot(op), object, bytes);
-            }
+            prime_constant(req, frame, op, property_cache_slot(op), object, &name);
             match assign_property(req, frame, code, op, object, &name, value) {
                 Ok(written) => written,
                 Err(fatal) => {
@@ -13386,7 +13438,6 @@ fn assign_property(
     value: Value,
 ) -> Result<Result<(), Thrown>, Fatal> {
     let bytes = name.as_str_bytes().unwrap_or_default();
-    let shown_name = String::from_utf8_lossy(bytes).into_owned();
     // A lazy object takes the write through `write_property`, which is
     // where php's slot nothing has written and name nothing holds reach
     // `forward_write_to_lazy_object`.
@@ -13439,7 +13490,8 @@ fn assign_property(
             let Some(typed) = req.declared_typed_property(object.class(), bytes) else {
                 req.release(value);
                 return Err(Fatal::error(format!(
-                    "InternalError: ZEND_ASSIGN_OBJ placed the typed property ${shown_name}, whose declared type the class does not carry"
+                    "InternalError: ZEND_ASSIGN_OBJ placed the typed property ${}, whose declared type the class does not carry",
+                    String::from_utf8_lossy(bytes)
                 )));
             };
             // The `ZEND_ACC_READONLY` arm, which stands before the
@@ -15904,6 +15956,9 @@ pub(crate) fn assign_obj_op<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if let Some(edge) = inline_assign_obj_op(req, frame, code, op) {
+        return edge;
+    }
     let Some(kernel) = binary_op_of(op.extended_value) else {
         return Err(Fatal::error(format!(
             "InternalError: ZEND_ASSIGN_OBJ_OP over the operator {}, which is no binary operation",
@@ -15930,7 +15985,17 @@ pub(crate) fn assign_obj_op<T: Tier>(
     let container =
         exec::container(req, frame, code, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?.deref();
     let written = match (name, container.as_object()) {
-        (Ok(name), Some(object)) => step_property(req, frame, code, step, object, &name)?,
+        (Ok(name), Some(object)) => {
+            prime_constant(
+                req,
+                frame,
+                op,
+                CacheSlot(data.extended_value),
+                object,
+                &name,
+            );
+            step_property(req, frame, code, step, object, &name)?
+        }
         (Ok(name), None) => {
             // `GET_OP_DATA_ZVAL_PTR(BP_VAR_R)` and `ZVAL_UNDEFINED_OP1`,
             // in php's order, before `zend_throw_non_object_error`.
@@ -15960,6 +16025,64 @@ pub(crate) fn assign_obj_op<T: Tier>(
         return threw(req, frame, &thrown);
     }
     Ok(advance_over_data(req, frame, at))
+}
+
+/// The inline path of `ZEND_ASSIGN_OBJ_OP` over a constant name
+/// (`zend_binary_assign_op_obj_dim`'s cached place,
+/// `Z/Zend/zend_vm_def.h:1046-1068`): the place the cache slot names
+/// ([`cached_place`]) holding a number, and an `OP_DATA` value that is
+/// one, under the ten operators [`inline::compound`] names, computed by
+/// [`inline::binary`] and written in place and, under
+/// `RETURN_VALUE_USED`, into the temporary. `None`, with nothing
+/// touched, as [`inline_fetch_obj_r`]'s, for a typed slot, and for every
+/// pair the rule leaves to the kernel.
+///
+/// ```php
+/// class C { public $p = 1; }
+/// function f($o, $d) { for ($i = 0; $i < 2; $i++) { $o->p += 2; $o->p -= $d; $o->p *= 3; $x = $o->p /= 2; $o->p %= 7; $o->p <<= 1; $o->p |= 8; } return $x; }
+/// $c = new C; $s = new stdClass; $s->p = 1.5;
+/// var_dump(f($c, 1), $c->p, f($s, 0.5), $s->p);
+/// $s->p = PHP_INT_MAX; $s->p += 1; var_dump($s->p);
+/// ```
+/// ```expect
+///
+/// Deprecated: Implicit conversion from float 22.5 to int loses precision in %s on line 3
+///
+/// Deprecated: Implicit conversion from float 4.5 to int loses precision in %s on line 3
+///
+/// Deprecated: Implicit conversion from float 14.25 to int loses precision in %s on line 3
+/// float(22.5)
+/// int(10)
+/// float(14.25)
+/// int(8)
+/// float(9.223372036854776E+18)
+/// ```
+fn inline_assign_obj_op(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Option<Edge> {
+    let rule = inline::compound(op.extended_value)?;
+    let (a, b) = (ByKind(op.op1_type), ByKind(op.op2_type));
+    let object = inline_receiver(req, frame, code, op, a, b)?;
+    let (at, data) = data_after(req, frame, code, op).ok()?;
+    // `CACHE_ADDR((opline+1)->extended_value)`: the operator is in the
+    // opline's own field, so the slot is in the `OP_DATA`'s.
+    let slot = CacheSlot(data.extended_value);
+    let (place, typed) = cached_place(req, (frame, code, op), slot, object, true)?;
+    if typed {
+        return None;
+    }
+    let slots = req.slots_mut(frame);
+    // `get_op_data_zval_ptr_r`: php specialises no `OP_DATA` kind here.
+    let value = ByKind(data.op1_type).read(slots, code, data.op1);
+    let z = inline::binary(rule, place.read(), value)?;
+    if op.out_type != OperandKind::Unused {
+        write_owning_nothing(slots, code, op, z)?;
+    }
+    place.write(z);
+    Some(Ok(Next::jump(at.saturating_add(2))))
 }
 
 /// The operation of a compound assignment over a declared property
@@ -16728,6 +16851,9 @@ fn incdec_obj(
     op: &Opline,
     step: IncDec,
 ) -> Edge {
+    if let Some(edge) = inline_incdec_obj(req, frame, code, op, step) {
+        return edge;
+    }
     let container = match op.op1_type {
         OperandKind::Cv => exec::operand(req, frame, code, op.op1_type, op.op1),
         _ => exec::container(req, frame, code, op.op1_type, op.op1, "ZEND_PRE_INC_OBJ")?,
@@ -16735,7 +16861,10 @@ fn incdec_obj(
     .deref();
     let mut member = exec::Member::default();
     let stepped = match (member.name(req, frame, code, op), container.as_object()) {
-        (Ok(name), Some(object)) => incdec_property(req, frame, code, op, step, object, &name)?,
+        (Ok(name), Some(object)) => {
+            prime_constant(req, frame, op, property_cache_slot(op), object, &name);
+            incdec_property(req, frame, code, op, step, object, &name)?
+        }
         (Ok(name), None) => {
             let name = name.as_str_bytes().unwrap_or_default();
             let thrown =
@@ -16754,6 +16883,77 @@ fn incdec_obj(
         Ok(()) => Ok(advance(req, frame)),
         Err(thrown) => threw(req, frame, &thrown),
     }
+}
+
+/// The inline path of the four `*_INC_OBJ`/`*_DEC_OBJ` over a constant
+/// name (`zend_pre_incdec_property_zval` and its `POST_` twin over the
+/// cached place, `Z/Zend/zend_execute.c:2283`): the place the cache slot
+/// names ([`cached_place`]) holding a number, stepped by
+/// [`inline::step`] in place, the value before or after it in the
+/// temporary. `None`, with nothing touched, as [`inline_fetch_obj_r`]'s,
+/// for a typed slot, and for anything that is no number.
+///
+/// ```php
+/// class C { public $p = 1; }
+/// function f($o) { for ($i = 0; $i < 2; $i++) { $o->p++; ++$o->p; $o->p--; $a = $o->p++; $b = --$o->p; } return [$a, $b]; }
+/// $c = new C; $s = new stdClass; $s->p = 0.5; $m = new stdClass; $m->p = PHP_INT_MAX - 2;
+/// var_dump(f($c), $c->p, f($s), $s->p, f($m), $m->p);
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   int(3)
+///   [1]=>
+///   int(3)
+/// }
+/// int(3)
+/// array(2) {
+///   [0]=>
+///   float(2.5)
+///   [1]=>
+///   float(2.5)
+/// }
+/// float(2.5)
+/// array(2) {
+///   [0]=>
+///   float(9.223372036854776E+18)
+///   [1]=>
+///   float(9.223372036854776E+18)
+/// }
+/// float(9.223372036854776E+18)
+/// ```
+fn inline_incdec_obj(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    step: IncDec,
+) -> Option<Edge> {
+    let (a, b) = (ByKind(op.op1_type), ByKind(op.op2_type));
+    let object = inline_receiver(req, frame, code, op, a, b)?;
+    let (place, typed) = cached_place(
+        req,
+        (frame, code, op),
+        property_cache_slot(op),
+        object,
+        true,
+    )?;
+    if typed {
+        return None;
+    }
+    let held = place.read();
+    let arith = if step.increment {
+        Arith::Add
+    } else {
+        Arith::Sub
+    };
+    let stepped = inline::step(arith, held)?;
+    if op.out_type != OperandKind::Unused {
+        let out = if step.post { held } else { stepped };
+        write_owning_nothing(req.slots_mut(frame), code, op, out)?;
+    }
+    place.write(stepped);
+    Some(Ok(advanced()))
 }
 
 /// The step over an object's property, `get_property_ptr_ptr` under
@@ -16808,7 +17008,7 @@ fn incdec_property(
     object: PhpObject,
     name: &Value,
 ) -> Result<Result<(), Thrown>, Fatal> {
-    let bytes = name.as_str_bytes().unwrap_or_default().to_vec();
+    let bytes = name.as_str_bytes().unwrap_or_default();
     let Some(key) = name.as_php_string() else {
         return Err(Fatal::error(
             "InternalError: an increment of a property whose name is no string",
@@ -16816,13 +17016,13 @@ fn incdec_property(
     };
     // The guard a proxy's `__get` lent the instance is held while the
     // place is resolved there, and given back before the step over it.
-    let placed = req.lazy_place(object, &bytes).and_then(|(object, lent)| {
-        let ptr = property_ptr(req, object, &bytes, key).map(|ptr| match ptr {
+    let placed = req.lazy_place(object, bytes).and_then(|(object, lent)| {
+        let ptr = property_ptr(req, object, bytes, key).map(|ptr| match ptr {
             // [`Request::read_before_write`] raised what an unwritten
             // slot raises before the placement; one it let by is a
             // `__get`'s to answer.
             PropertyPtr::Slot(slot, _)
-                if object.heap().slot(slot).is_undef() && req.overloaded_place(object, &bytes) =>
+                if object.heap().slot(slot).is_undef() && req.overloaded_place(object, bytes) =>
             {
                 PropertyPtr::Served(WriteBack::Property)
             }
@@ -16867,7 +17067,7 @@ fn incdec_property(
         ));
     }
     let landed = if typed {
-        match typed_step(req, frame, object, slot, &bytes, step, (held, stepped))? {
+        match typed_step(req, frame, object, slot, bytes, step, (held, stepped))? {
             Ok(landed) => landed,
             Err(thrown) => {
                 req.release(held);
@@ -17613,9 +17813,9 @@ pub(crate) fn unset_obj<T: Tier>(
         exec::container(req, frame, code, op.op1_type, op.op1, "ZEND_UNSET_OBJ")?.deref();
     let mut member = exec::Member::default();
     let unset = if let Some(object) = container.as_object() {
-        member.bytes(req, frame, code, op).and_then(|bytes| {
+        member.name(req, frame, code, op).and_then(|name| {
             let table = req.object_handlers(object.heap());
-            table.unset_property(req, object, &bytes)
+            table.unset_property(req, object, name.as_str_bytes().unwrap_or_default())
         })
     } else {
         exec::Member::touch(req, frame, code, op);
@@ -21387,7 +21587,8 @@ pub(crate) fn isset_isempty_prop_obj<T: Tier>(
     let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
     let mut member = exec::Member::default();
     let answer = if let Some(object) = container.as_object() {
-        member.bytes(req, frame, code, op).and_then(|name| {
+        member.name(req, frame, code, op).and_then(|name| {
+            let name = name.as_str_bytes().unwrap_or_default();
             let test = if empty {
                 PropertyTest::NotEmpty
             } else {
@@ -21395,7 +21596,7 @@ pub(crate) fn isset_isempty_prop_obj<T: Tier>(
             };
             let table = req.object_handlers(object.heap());
             table
-                .has_property(req, object, &name, test)
+                .has_property(req, object, name, test)
                 .map(|held| held != empty)
         })
     } else {

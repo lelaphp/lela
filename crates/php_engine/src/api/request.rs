@@ -50,7 +50,7 @@ pub(crate) use build_defs::build_date;
 mod callable;
 mod caller;
 pub(crate) use caller::NativeCaller;
-pub(crate) use hooks::HookedRow;
+pub(crate) use hooks::{HookRows, Hooked, HookedDeclared, HookedTable};
 pub(crate) use objects::placed_of;
 mod calls;
 pub use calls::Supplier;

@@ -1091,25 +1091,23 @@ impl Request {
     }
 
     /// `zobj->ce == CACHED_PTR_EX(cache_slot)` and the offset beside it
-    /// (`ZEND_FETCH_OBJ_R`, `ZEND_ASSIGN_OBJ`): the declared slot of
-    /// objects of `class` the property fetch at `slot` placed on an
-    /// earlier pass, and whether it is typed, where `frame` is one the
-    /// placement holds for ([`exec::Cached::Property`]) and no write
-    /// names its own scope; none otherwise, and the fetch places the
-    /// name.
+    /// (`ZEND_FETCH_OBJ_R`, `ZEND_ASSIGN_OBJ`): where objects of `class`
+    /// hold the property the fetch at `slot` placed on an earlier pass,
+    /// where `frame` is one the placement holds for
+    /// ([`exec::Cached::Property`]) and no write names its own scope;
+    /// none otherwise, and the fetch places the name.
     pub(crate) fn cached_property(
         &self,
         frame: FrameRef,
         slot: CacheSlot,
         class: crate::api::values::ClassId,
-    ) -> Option<(u32, bool)> {
+    ) -> Option<exec::PropertyOffset> {
         let header = self.vm.at(frame)?;
         let exec::Cached::Property {
             class: held,
             function,
             scope,
-            slot,
-            typed,
+            offset,
         } = self.map.get(header.runtime_cache())?.get(slot)
         else {
             return None;
@@ -1119,16 +1117,15 @@ impl Request {
             && header.function == function
             && !self.fakes_scope()
             && (function.is_some() || self.frame_scope(frame) == scope);
-        same.then_some((slot, typed))
+        same.then_some(offset)
     }
 
     /// `zend_get_property_offset`'s `CACHE_POLYMORPHIC_PTR_EX` for the
-    /// fetch at `slot` in `frame`: the slot `name` is placed in on
-    /// objects of `object`'s class written into the runtime cache,
-    /// where [`Request::cacheable_slot`] answers one and the scope it
-    /// was placed from is the frame's own. A closure's frame is never
-    /// written for, since one op array serves closures bound to many
-    /// scopes.
+    /// fetch at `slot` in `frame`: where `name` is placed on objects of
+    /// `object`'s class written into the runtime cache, where
+    /// [`Request::cacheable_offset`] answers and the scope it was placed
+    /// from is the frame's own. A closure's frame is never written for,
+    /// since one op array serves closures bound to many scopes.
     pub(crate) fn prime_property(
         &mut self,
         frame: FrameRef,
@@ -1144,15 +1141,14 @@ impl Request {
         if self.property_scope() != scope {
             return;
         }
-        let Some((at, typed)) = self.cacheable_slot(object, name) else {
+        let Some(offset) = self.cacheable_offset(object, name) else {
             return;
         };
         let cached = exec::Cached::Property {
             class: object.class(),
             function,
             scope,
-            slot: at,
-            typed,
+            offset,
         };
         self.prime(frame, slot, cached);
     }

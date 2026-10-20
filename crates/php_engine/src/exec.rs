@@ -1576,16 +1576,18 @@ pub(crate) enum Cached {
         function: Function,
         instance: bool,
     },
-    /// The declared slot a property fetch or assignment over a constant
-    /// name placed on its first pass, `CACHE_POLYMORPHIC_PTR_EX(cache_slot,
-    /// ce, offset)` and the `prop_info` beside it
-    /// (`zend_get_property_offset`, `Z/Zend/zend_object_handlers.c:456`):
-    /// php writes the class into the slot the opline names, the offset
-    /// into the next and the property's info, there only where it is
-    /// typed, into the third, and its handler reads the slot in place
-    /// where the object's class is the one written. Written only for a
-    /// class served by the standard handlers, a property with no hooks
-    /// and a scope that reaches it ([`crate::api::request::Request::cacheable_slot`]).
+    /// The place a property fetch or assignment over a constant name
+    /// found on its first pass, `CACHE_POLYMORPHIC_PTR_EX(cache_slot, ce,
+    /// offset)` and the `prop_info` beside it (`zend_get_property_offset`,
+    /// `Z/Zend/zend_object_handlers.c:386`, `:456`): php writes the class
+    /// into the slot the opline names, the offset into the next and the
+    /// property's info, there only where it is typed, into the third, and
+    /// its handler reads the place where the object's class is the one
+    /// written, a declared slot in place and a dynamic property by one
+    /// lookup of the name's known hash. Written only for a class served
+    /// by the standard handlers, a declared property with no hooks and a
+    /// scope that reaches it, and a name no class of the chain declares
+    /// ([`crate::api::request::Request::cacheable_offset`]).
     ///
     /// `function` and `scope` are the frame's that placed it: php's
     /// cache is one per scope, and this engine's one per op array, so the
@@ -1596,8 +1598,7 @@ pub(crate) enum Cached {
         class: ClassId,
         function: Option<Function>,
         scope: Option<ClassId>,
-        slot: u32,
-        typed: bool,
+        offset: PropertyOffset,
     },
     /// `ZEND_JMP_FL_MISS`: the table has the name in the namespace, so
     /// the jump is not taken and the call by name after it runs.
@@ -1605,6 +1606,20 @@ pub(crate) enum Cached {
     /// `ZEND_JMP_FL_HIT`: the table has not the name in the namespace,
     /// so the jump lands on the frameless call over the global one.
     Hit,
+}
+
+/// What [`Cached::Property`] holds beside the class, php's `prop_offset`
+/// in `CACHE_ADDR(cache_slot + 1)`: a declared slot, or
+/// `ZEND_DYNAMIC_PROPERTY_OFFSET`, a name the object's dynamic table holds
+/// if anything does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PropertyOffset {
+    /// `OBJ_PROP(zobj, prop_offset)`: the declared slot, and whether its
+    /// property is typed, php's `prop_info` in the third slot.
+    Declared { slot: u32, typed: bool },
+    /// `IS_DYNAMIC_PROPERTY_OFFSET`: `zend_hash_find_known_hash` on
+    /// `zobj->properties`.
+    Dynamic,
 }
 
 /// `sizeof(void *)`: what `zend_alloc_cache_slot` grows `cache_size` by
@@ -2516,18 +2531,6 @@ impl Member {
         };
         self.read = Some(name);
         Ok(name)
-    }
-
-    /// The name's bytes, as [`Member::name`] reads them.
-    pub(crate) fn bytes(
-        &mut self,
-        req: &mut Request,
-        frame: FrameRef,
-        code: &OpArray,
-        op: &Opline,
-    ) -> Result<Vec<u8>, Thrown> {
-        let name = self.name(req, frame, code, op)?;
-        Ok(name.as_str_bytes().unwrap_or_default().to_vec())
     }
 
     /// `if (OP2_TYPE == IS_CV && Z_TYPE_P(EX_VAR(opline->op2.var)) ==
