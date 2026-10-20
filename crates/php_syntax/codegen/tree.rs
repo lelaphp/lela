@@ -1215,15 +1215,17 @@ fn emit_lists(buf: &mut String, bases: &BTreeSet<String>) {
          pub struct Lists<'a> {\n",
     );
     for base in bases {
-        writeln!(buf, "    {}: &'a [{base}],", field(base)).ok();
+        writeln!(buf, "    {}: Option<&'a [{base}]>,", field(base)).ok();
     }
     buf.push_str(
         "}\n\n\
-         /// The lists of a tree with none.\n\
+         /// The lists of a tree with none: every pool none, which is a word\n\
+         /// of zeroes, so a tree's lists are laid down zeroed and a written\n\
+         /// pool set over it.\n\
          const NO_LISTS: Lists<'static> = Lists {\n",
     );
     for base in bases {
-        writeln!(buf, "    {}: &[],", field(base)).ok();
+        writeln!(buf, "    {}: None,", field(base)).ok();
     }
     buf.push_str(
         "};\n\n\
@@ -1272,7 +1274,7 @@ fn emit_lists(buf: &mut String, bases: &BTreeSet<String>) {
         let name = field(base);
         writeln!(
             buf,
-            "                {bit} => lists.{name} = frozen(bump, &mut self.{name}),"
+            "                {bit} => lists.{name} = Some(frozen(bump, &mut self.{name})),"
         )
         .ok();
     }
@@ -1283,7 +1285,7 @@ fn emit_lists(buf: &mut String, bases: &BTreeSet<String>) {
             buf,
             "impl Listed for {base} {{\n    \
                  fn pool<'a>(lists: &Lists<'a>) -> &'a [Self] {{\n        \
-                     lists.{name}\n    \
+                     lists.{name}.unwrap_or_default()\n    \
                  }}\n\
              }}\n\
              impl Pooled for {base} {{\n    \
@@ -1961,7 +1963,7 @@ mod tests {
             "enum Store<'a> {\n    Root(BumpVec<'a, Root>),\n    Decl(BumpVec<'a, Decl>),",
             "const SLOTS: usize = 6;",
             "        SyntaxKind::DECL => Some(1),",
-            "pub struct Lists<'a> {\n    item: &'a [Item],\n}",
+            "pub struct Lists<'a> {\n    item: Option<&'a [Item]>,\n}",
             "impl Listed for Item {",
             "    slots: [Option<StoreAt>; SLOTS],",
             "fn all<'t>(nodes: &Nodes<'t>) -> &'t [Self] {\n        match nodes.store(1) {\n            Some(Store::Decl(nodes)) => nodes.as_slice(),\n            _ => &[],\n        }\n    }",
