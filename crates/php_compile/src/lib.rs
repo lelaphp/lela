@@ -404,9 +404,19 @@ pub fn compile_source_into(
     strings: &mut dyn Intern,
     room: Room,
 ) -> Result<Unit, CompileError> {
-    let made = compile_in(arena, source, options, strings, room);
-    arena.reset();
-    made
+    let reset = Reset(arena);
+    compile_in(reset.0, source, options, strings, room)
+}
+
+/// The arena of a compile, reset as the compile hands its unit back, so
+/// the unit is made where the caller takes it rather than moved past
+/// the reset.
+struct Reset<'a>(&'a mut Arena);
+
+impl Drop for Reset<'_> {
+    fn drop(&mut self) {
+        self.0.reset();
+    }
 }
 
 /// The room a unit's main op array is laid down in, taken from a unit
@@ -614,9 +624,23 @@ fn compile_scanned<'p>(
         return Err(refused.error(raised));
     }
     let halt = emit::walk::halt_offset(parsed).map(|offset| scanned.original_offset(offset));
-    // The unit is finished where `unit` made it, and handed back as it
-    // stands rather than moved out and into a result again.
+    unit_raised(arena, parsed, options, strings, halt, room, raised)
+}
+
+/// The unit of `parsed`, what was raised before its compile, `raised`,
+/// standing first among its diagnostics: made where `emit::unit` makes
+/// it and handed back by one way out, so it is not moved on the way.
+fn unit_raised<'p>(
+    arena: &'p Arena,
+    parsed: &'p Parsed<'p>,
+    options: &Options<'p>,
+    strings: &mut dyn Intern,
+    halt: Option<i64>,
+    room: Room,
+    mut raised: Vec<Diagnostic>,
+) -> Result<Unit, CompileError> {
     let mut made = emit::unit(arena, parsed, options, strings, halt, room);
+    let mut fatal = None;
     match &mut made {
         Ok(unit) => {
             if !raised.is_empty() {
@@ -629,10 +653,10 @@ fn compile_scanned<'p>(
             };
             // `zend_mm`'s limit, raised as `E_ERROR` where the compile
             // asked for the memory.
-            if let Err(fatal) = interned {
-                return Err(CompileError {
+            if let Err(limit) = interned {
+                fatal = Some(CompileError {
                     level: Level::Error,
-                    message: fatal_message(fatal).into(),
+                    message: fatal_message(limit).into(),
                     line: unit.main.line_end,
                     raised: std::mem::take(&mut unit.diagnostics),
                     thrown: false,
@@ -644,6 +668,10 @@ fn compile_scanned<'p>(
             raised.append(&mut refused.raised);
             refused.raised = raised;
         }
+    }
+    // One way out, so the unit stays where `unit` made it.
+    if let Some(fatal) = fatal {
+        made = Err(fatal);
     }
     made
 }
