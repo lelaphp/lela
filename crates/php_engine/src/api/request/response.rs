@@ -349,7 +349,7 @@ impl Request {
         let head = ResponseHead {
             code: self.response.output.response_code(),
             status_line: self.response.output.status_line().map(<[u8]>::to_vec),
-            lines: self.response.output.headers().to_vec(),
+            lines: self.response.output.headers().map(<[u8]>::to_vec).collect(),
             ini,
         };
         self.response.sink.send_headers(&head);
@@ -639,7 +639,7 @@ impl Request {
     /// `headers_list()`: `SG(sapi_headers).headers`, in order.
     #[must_use]
     pub fn headers_list(&self) -> Vec<Vec<u8>> {
-        self.response.output.headers().to_vec()
+        self.response.output.headers().map(<[u8]>::to_vec).collect()
     }
 
     /// `SG(sapi_headers).http_status_line`: the `HTTP/...` line a
@@ -717,7 +717,7 @@ impl Request {
 
     /// What [`response_headers`](Self::response_headers) makes, its one owner not yet named.
     pub(crate) fn response_headers_made(&mut self) -> Result<PhpArray, Thrown> {
-        let lines = self.response.output.headers().to_vec();
+        let lines: Vec<Vec<u8>> = self.response.output.headers().map(<[u8]>::to_vec).collect();
         let mut array = self.array()?;
         for line in lines {
             let Some(colon) = line.iter().position(|&b| b == b':') else {

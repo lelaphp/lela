@@ -141,6 +141,9 @@ pub(super) struct Properties {
     /// reused, so a cell freed and a cell laid down at its address are
     /// never one row.
     next_ref_source: usize,
+    /// The `foreach` loops over objects whose class has a hooked
+    /// property, each while it runs ([`Request::hooked_walk_start`]).
+    pub(super) hooked_walks: Vec<super::hooks::HookedWalk>,
 }
 
 impl Default for Properties {
@@ -151,6 +154,7 @@ impl Default for Properties {
             recursion_guards: Vec::new(),
             ref_sources: Vec::new(),
             next_ref_source: 1,
+            hooked_walks: Vec::new(),
         }
     }
 }
@@ -3317,10 +3321,18 @@ impl Request {
             php_heap::DeclaredRows::Slots => self.class_slots(object.class()),
             php_heap::DeclaredRows::Copied => 0,
         };
-        if slots == 0 && table.is_empty() {
+        // `zend_hooked_object_get_iterator` lays its iterator whatever
+        // the object holds.
+        let hooked = self.class_has_hooks(object.class());
+        if !hooked && slots == 0 && table.is_empty() {
             return Ok(None);
         }
-        Ok(Some(self.heap.iterator_add(table, 0)))
+        let at = self.heap.iterator_add(table, 0);
+        if hooked && let Err(thrown) = self.hooked_walk_start(object, at) {
+            self.heap.iterator_del(at);
+            return Err(thrown);
+        }
+        Ok(Some(at))
     }
 
     /// `zend_fe_fetch_object_helper` (`Z/Zend/zend_vm_def.h:7058`) over
@@ -3365,7 +3377,7 @@ impl Request {
         // hooked one read through its hook, and then the dynamic rows.
         let stepped = if self.class_has_hooks(class) {
             let mut lead = self.heap.iterator_lead(idx) as usize;
-            let found = self.hooked_object_walk(object, &mut lead, by_ref);
+            let found = self.hooked_object_walk(idx, &mut lead, by_ref);
             self.heap
                 .iterator_set_lead(idx, u32::try_from(lead).unwrap_or(u32::MAX));
             if let Some((key, walked)) = found? {

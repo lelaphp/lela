@@ -1170,6 +1170,8 @@ pub struct HeldProperties {
     /// the table.
     thrown: Option<Thrown>,
     count: usize,
+    /// What a walk reads the `IS_PTR` rows of a hooked table by.
+    pub(crate) hooked: Option<crate::api::request::HookedRows>,
 }
 
 impl HeldProperties {
@@ -1553,18 +1555,25 @@ impl PhpObject {
         req: &mut Request,
         purpose: PropertyPurpose,
     ) -> Result<HeldProperties, Thrown> {
-        let (table, owner, thrown) = match req.properties_answered(*self, purpose)? {
+        let (table, owner, thrown, hooked) = match req.properties_answered(*self, purpose)? {
             PropertiesFor::Table(table) => {
                 let owner = Owner::take(req, table.array());
-                (table, owner, None)
+                (table, owner, None, None)
             }
-            PropertiesFor::Temporary(owner) => (walk::Table::Array(*owner), owner, None),
-            PropertiesFor::Debug(info) => {
-                (walk::Table::Array(*info.table), info.table, info.thrown)
+            PropertiesFor::Temporary(owner) => (walk::Table::Array(*owner), owner, None, None),
+            PropertiesFor::Hooked(hooked) => {
+                let table = walk::Table::Array(*hooked.table);
+                (table, hooked.table, None, Some(hooked.rows))
             }
+            PropertiesFor::Debug(info) => (
+                walk::Table::Array(*info.table),
+                info.table,
+                info.thrown,
+                None,
+            ),
             PropertiesFor::Null => {
                 let empty = Owner::take(req, PhpArray::empty());
-                (walk::Table::Array(*empty), empty, None)
+                (walk::Table::Array(*empty), empty, None, None)
             }
         };
         let count = match &table {
@@ -1579,6 +1588,7 @@ impl PhpObject {
             owner,
             thrown,
             count: 0,
+            hooked,
         };
         match count {
             Ok(count) => Ok(HeldProperties { count, ..held }),

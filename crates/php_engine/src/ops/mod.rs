@@ -25,7 +25,7 @@ use crate::api::raising::{
     Level, Thrown, cannot_add_element, deprecated, illegal_container_offset, none_pending, throw,
     throw_error, warning,
 };
-use crate::api::request::Request;
+use crate::api::request::{HookedTable, Request};
 use crate::api::values::walk::{self, Table};
 use crate::api::values::{
     Key, Layout, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef,
@@ -834,7 +834,8 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
                     Some(array) => Ok(array),
                     None => mangled_array(req, o, table),
                 },
-                PropertiesFor::Temporary(table) => {
+                PropertiesFor::Temporary(table)
+                | PropertiesFor::Hooked(HookedTable { table, .. }) => {
                     let made = mangled_array(req, o, Table::Array(*table));
                     table.give_up_nogc(req);
                     made

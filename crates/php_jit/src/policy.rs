@@ -87,6 +87,7 @@ impl JitDebug {
     pub(crate) const TRACE_START: u32 = 1 << 12;
     pub(crate) const TRACE_STOP: u32 = 1 << 13;
     pub(crate) const TRACE_COMPILED: u32 = 1 << 14;
+    pub(crate) const TRACE_EXIT: u32 = 1 << 15;
     pub(crate) const TRACE_ABORT: u32 = 1 << 16;
     pub(crate) const TRACE_BLACKLIST: u32 = 1 << 17;
 
@@ -559,14 +560,11 @@ impl Policy {
                     ),
                     _ => write!(sink, "---- TRACE {n} start ({}) ", start.describe()),
                 }?;
-                if let Some(scope) = at.scope {
-                    sink.write_all(scope)?;
-                    sink.write_all(b"::")?;
-                }
-                sink.write_all(at.function.unwrap_or(b"$main"))?;
-                sink.write_all(b"() ")?;
-                sink.write_all(at.file)?;
-                writeln!(sink, ":{}", at.line)
+                write_place(sink, at)
+            }
+            TraceEvent::Exit { trace, exit, at } if debug.any(JitDebug::TRACE_EXIT) => {
+                write!(sink, "     TRACE {} exit {} ", trace.get(), exit.0)?;
+                write_place(sink, at)
             }
             TraceEvent::Stop { trace, stop } if debug.any(JitDebug::TRACE_STOP) => match stop {
                 Stop::Link(to) => writeln!(
@@ -611,6 +609,19 @@ impl Policy {
     }
 }
 
+/// `at` as a `TRACE` line ends with it: `Class::function() file:line`,
+/// `$main` for a file's own code.
+fn write_place(sink: &mut dyn Write, at: Place<'_>) -> io::Result<()> {
+    if let Some(scope) = at.scope {
+        sink.write_all(scope)?;
+        sink.write_all(b"::")?;
+    }
+    sink.write_all(at.function.unwrap_or(b"$main"))?;
+    sink.write_all(b"() ")?;
+    sink.write_all(at.file)?;
+    writeln!(sink, ":{}", at.line)
+}
+
 /// Where a root starts, as its `TRACE start` line names it: the class,
 /// the function (`$main` for a file's code), the file and the line.
 #[derive(Debug, Clone, Copy)]
@@ -643,6 +654,13 @@ pub(crate) enum TraceEvent<'a> {
     },
     Blacklisted {
         trace: TraceId,
+    },
+    /// A trace left through `exit` for the interpreter, at the place it
+    /// landed: php's `zend_jit_trace_exit` line.
+    Exit {
+        trace: TraceId,
+        exit: ExitId,
+        at: Place<'a>,
     },
     /// The blank line that ends a root's lines.
     Done,

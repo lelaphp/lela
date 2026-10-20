@@ -1351,6 +1351,8 @@ fn export_object(
         Ok(None)
     } else {
         walk::properties(req, &held, Unwritten::Skipped, |req, row| {
+            // A hooked row is read through its hook before it is written.
+            row.read(req)?;
             spaces(req, out, level + 2)?;
             // `php_object_element_export`: a name quoted, unmangled; an
             // integer key as it stands.

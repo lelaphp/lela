@@ -93,6 +93,10 @@ pub(crate) struct State {
     /// entry: the pool the entries still held go back to as the request
     /// is dropped.
     pub(crate) engine: Option<Arc<EngineState>>,
+    /// The host's `zend_file_handle` of the program, where
+    /// `php_fopen_primary_script` opened it ([`crate::zend`]'s
+    /// `open_primary`), until the engine destroys it.
+    pub(crate) primary: Option<crate::api::request::ScannerFile>,
 }
 
 /// The idle entries the persistent pool keeps (design §4.10). php's list
@@ -166,6 +170,7 @@ impl Default for State {
             stat_cache: StatCache::default(),
             persistent: Vec::new(),
             engine: None,
+            primary: None,
         }
     }
 }

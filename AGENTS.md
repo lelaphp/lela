@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=3d1cbfba0ab9d38bfffb8aad1311d2aebde8e1c7d5647d265810fc7d7df9d21f out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
+<!-- /computed in=18eaafcf82f0281b6bf30a07bfdf60f5a1caab467603a5df11b0a2f48cbbbcd7 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
 
 ## What makes the third engine special?
 
@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=c04490d54606e3fee10a823aaf3a7b4737c585b46839c0c8bed55b18e871bd75 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=5e69c881f081c627c148d27d4b3a5ee34408ca5dcd1c81d702ade4e6e49d7289 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -124,15 +124,15 @@ third-engine-design.md
 | heap | heap.lock | 439 |  |
 | process | process.lock | 39 |  |
 | unit | unit.lock | 122 |  |
-| link | link.lock | 57 |  |
+| link | link.lock | 58 |  |
 | ops | ops.lock | 209 |  |
-| api | api.lock | 1456 | 1500 |
+| api | api.lock | 1459 | 1500 |
 | sapi | sapi.lock | 57 |  |
 | tier | tier.lock | 100 |  |
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 409 |  |
 
-<!-- /computed in=f8a0eff8da1087d2519767c17fa8d59f03135e6bfe9ecab34903ad4eb3207b11 out=1481322f15dc1a4a80232d2f344475096b8db107657cd417f095279e1c131020 -->
+<!-- /computed in=211fde535f60b2889de702939d92d45ef6a67b22109704e050112e60132efbfa out=e2311916d1021c77ff1cb1dae76884db014822bd16da6169464ae16448b4045a -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

@@ -3121,6 +3121,11 @@ pub(crate) struct OpenOptions {
     /// makes for the engine's scanner, whose caller holds the
     /// `*opened_path` the opener sets ([`Request::open_wrapper_named`]).
     pub(crate) for_zend_stream: bool,
+    /// The file stands open while PHP runs, as the host's
+    /// `zend_file_handle` holds the program's: its fd inherited as php's
+    /// `open(2)` leaves it, where an include's, closed once compiled,
+    /// keeps `O_CLOEXEC` ([`plain_open`]).
+    pub(crate) held: bool,
 }
 
 impl OpenOptions {
@@ -3135,6 +3140,7 @@ impl OpenOptions {
         disable_open_basedir: false,
         only_get_headers: false,
         for_zend_stream: false,
+        held: false,
     };
 
     /// The options a wrapper's opener is handed, with `USE_PATH` as
@@ -3194,6 +3200,7 @@ impl From<crate::api::request::Opening> for OpenOptions {
             disable_open_basedir: opening.disable_open_basedir,
             only_get_headers: opening.only_get_headers,
             for_zend_stream: opening.for_zend_stream,
+            held: false,
         }
     }
 }
@@ -4065,7 +4072,7 @@ impl StreamLayer for Request {
             self.check_open_basedir(path, true)
         };
         match guarded {
-            Ok(host) => plain_open(self, &host, mode, options.for_include),
+            Ok(host) => plain_open(self, &host, mode, options.for_include && !options.held),
             Err(refused) => Err(strerror(&refused.into())),
         }
     }
