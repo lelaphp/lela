@@ -386,6 +386,22 @@ impl<P: Pages> TraceTable<P> {
     /// the engine's `outputs` started them. An arena that cannot be
     /// mapped is none: each publish numbers its trace and keeps no code
     /// (revision 27).
+    ///
+    /// A buffer smaller than a chunk is one chunk, where php rounds it up
+    /// to the page; a trace that fits both is compiled by both:
+    ///
+    /// ```php
+    /// function twice($n) { return $n * 2; }
+    /// echo twice(21), "\n";
+    /// ```
+    /// ```expect exit=0 regime=jit-small-buffer process capture
+    /// 42
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:3
+    /// ---- TRACE 1 stop (return)
+    /// ---- TRACE 1 compiled
+    /// ```
     pub(crate) fn new(policy: &Policy, outputs: &Outputs) -> TraceTable<P> {
         TraceTable::with_perf(policy, Perf::of(outputs))
     }
