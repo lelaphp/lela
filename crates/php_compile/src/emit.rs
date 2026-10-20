@@ -1454,7 +1454,10 @@ pub(crate) fn export(
 
 /// The unit of one source file: its main op array, the statements and
 /// then php's implicit final `RETURN 1` (`zend_emit_final_return`, with
-/// `extended_value` at -1), and the diagnostics raised on the way.
+/// `extended_value` at -1), and the diagnostics raised on the way, after
+/// `raised`, what was raised before the compile began. Its names are
+/// interned before it is made ([`crate::intern_names`]), so the unit is
+/// made once, where the caller takes it, and not moved on the way out.
 pub(crate) fn unit(
     arena: &Arena,
     parsed: &Parsed<'_>,
@@ -1462,6 +1465,7 @@ pub(crate) fn unit(
     strings: &mut dyn Intern,
     halt: Option<i64>,
     room: crate::Room,
+    mut raised: Vec<Diagnostic>,
 ) -> Result<Unit, CompileError> {
     // The scanner stops at `__halt_compiler();` (the byte `halt_end`
     // names), so a halted file's last line is that statement's, and the
@@ -1494,41 +1498,76 @@ pub(crate) fn unit(
                 raised_before: emit.raised_before,
             }));
         }
-        return Err(refused);
+        return Err(crate::refused_after(refused, raised, options, emit.strings));
     }
     // `CG(zend_lineno) = last_lineno` before `zend_emit_final_return`
     // (`Z/Zend/zend_language_scanner.l:622`): the implicit return stands
     // on the file's last line, where the scanner stopped, and not on
     // the last statement's.
     emit.line = lines.max(1);
-    let main = emit.finish(options.kind == SourceKind::File, 1, lines.max(1))?;
+    if let Err(refused) = emit.close(options.kind == SourceKind::File) {
+        return Err(crate::refused_after(refused, raised, options, emit.strings));
+    }
     let line = emit.line;
     let mut dynamic = Vec::with_capacity(emit.dynamic.len());
-    for def in emit.dynamic {
+    for def in std::mem::take(&mut emit.dynamic) {
         let Some(def) = def else {
-            return Err(CompileError {
+            let refused = CompileError {
                 level: Level::Error,
                 message: String::from(
                     "InternalError: a dynamic function definition whose body never landed",
                 )
                 .into(),
                 line,
-                raised: emit.diagnostics,
+                raised: std::mem::take(&mut emit.diagnostics),
                 thrown: false,
                 stage: crate::Stage::Compiling,
                 declared: None,
-            });
+            };
+            return Err(crate::refused_after(refused, raised, options, emit.strings));
         };
         dynamic.push(def);
     }
+    // The scanner's diagnostics stand before the compiler's.
+    let diagnostics = if raised.is_empty() {
+        std::mem::take(&mut emit.diagnostics)
+    } else {
+        raised.append(&mut emit.diagnostics);
+        raised
+    };
+    let filename = emit.file_name();
+    let parts = crate::Parts {
+        file: &filename,
+        main_vars: &emit.vars,
+        functions: &emit.functions_declared,
+        dynamic: &dynamic,
+        methods: &emit.methods,
+        hooks: &emit.hooks,
+        classes: &emit.classes,
+    };
+    // `zend_mm`'s limit, raised as `E_ERROR` where the compile asked for
+    // the memory.
+    if let Err(limit) = parts.intern(options.kind, emit.strings) {
+        return Err(CompileError {
+            level: Level::Error,
+            message: crate::fatal_message(limit).into(),
+            line: lines.max(1),
+            raised: diagnostics,
+            thrown: false,
+            stage: crate::Stage::Compiling,
+            declared: None,
+        });
+    }
+    // Made where the caller takes it: the main op array is laid in the
+    // unit as the unit is.
     Ok(Unit {
-        main,
+        main: emit.op_array(filename, 1, lines.max(1)),
         functions: emit.functions_declared,
         dynamic,
         methods: emit.methods,
         hooks: emit.hooks,
         completed: emit.completed,
-        diagnostics: emit.diagnostics,
+        diagnostics,
         classes: emit.classes,
         arms: emit.arms,
         runtime_keys: emit.runtime_keys,
@@ -5137,6 +5176,14 @@ impl<'a> Emit<'a> {
         line_start: u32,
         line_end: u32,
     ) -> Result<OpArray, CompileError> {
+        self.close(return_one)?;
+        let filename = self.file_name();
+        Ok(self.op_array(filename, line_start, line_end))
+    }
+
+    /// [`Self::finish`]'s passes over the op array the emitter holds,
+    /// before its tables are taken.
+    fn close(&mut self, return_one: bool) -> Result<(), CompileError> {
         self.final_return(return_one)?;
         if self.extended_info {
             extended::update_extended_stmts(&mut self.oplines);
@@ -5154,11 +5201,20 @@ impl<'a> Emit<'a> {
         unused_assert_checks(&mut self.oplines);
         headers_numbered(&self.oplines, &self.safepoints)?;
         swap_commutative(&mut self.oplines);
+        Ok(())
+    }
+
+    /// The op array the emitter holds, its tables taken, under `filename`:
+    /// inlined, so the main op array's fields are written where the unit
+    /// lays them ([`unit`]) rather than copied there.
+    #[allow(clippy::inline_always)] // measured: one copy of the op array fewer per compile
+    #[inline(always)]
+    fn op_array(&mut self, filename: Name, line_start: u32, line_end: u32) -> OpArray {
         let mut oplines = std::mem::take(&mut self.oplines);
         let live_ranges = crate::live::live_ranges(&mut oplines, self.temporaries);
         let vars = std::mem::take(&mut self.vars);
         let num_cvs = u32::try_from(vars.len()).unwrap_or(u32::MAX);
-        Ok(OpArray {
+        OpArray {
             oplines,
             literals: std::mem::take(&mut self.constants),
             const_exprs: std::mem::take(&mut self.const_exprs),
@@ -5168,7 +5224,7 @@ impl<'a> Emit<'a> {
             try_catch: std::mem::take(&mut self.try_catch),
             live_ranges,
             safepoints: std::mem::take(&mut self.safepoints),
-            filename: self.file_name(),
+            filename,
             line_start,
             line_end,
             cache_size: self.cache_slots,
@@ -5179,7 +5235,7 @@ impl<'a> Emit<'a> {
             strict_types: self.typing == Typing::Strict,
             return_mask: self.return_type.as_ref().map_or(0, Type::mask),
             numeric_dims: std::mem::take(&mut self.numeric_dims),
-        })
+        }
     }
 
     /// `zend_compile_class_decl`: the declaration goes into the unit's
