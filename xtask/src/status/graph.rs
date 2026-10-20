@@ -6,13 +6,12 @@
 //! only the crates' every-row rendering also reads whether a crate's
 //! directory holds a `Cargo.toml`.
 
-use std::fmt::Write;
 use std::path::Path;
 
 use anyhow::Result;
 use serde::Serialize;
 
-use super::{Table, cell};
+use super::{Table, cell, grid};
 use crate::layout::{CRATE_DIRS, HARNESS};
 use crate::manifest::{Edge, Manifest};
 use crate::sources;
@@ -40,21 +39,20 @@ pub(super) fn crates(
     uncut: bool,
 ) -> Result<String> {
     if format == Table::Md && !uncut {
-        let mut out = String::from("| directory | crates | behind a feature |\n|---|---|---|\n");
         let homes = CRATE_DIRS
             .iter()
             .map(|d| (format!("{}/", d.dir), Path::new(d.dir)))
             .chain(std::iter::once((HARNESS.to_owned(), Path::new(HARNESS))));
-        for (label, dir) in homes {
+        let lines = homes.map(|(label, dir)| {
             let rows: Vec<_> = manifest
                 .crates
                 .iter()
                 .filter(|c| c.path().starts_with(dir))
                 .collect();
             let featured = rows.iter().filter(|c| c.optional()).count();
-            writeln!(out, "| {label} | {} | {featured} |", rows.len()).ok();
-        }
-        return Ok(out);
+            [label, rows.len().to_string(), featured.to_string()]
+        });
+        return Ok(grid(&["directory", "crates", "behind a feature"], lines));
     }
     let rows: Vec<CrateRow> = manifest
         .crates
@@ -68,22 +66,19 @@ pub(super) fn crates(
         .collect();
     Ok(match format {
         Table::Json => serde_json::to_string_pretty(&rows)?,
-        Table::Md => {
-            let mut out =
-                String::from("| crate | directory | feature | created |\n|---|---|---|---|\n");
-            for row in &rows {
-                writeln!(
-                    out,
-                    "| {} | {} | {} | {} |",
+        Table::Md => grid(
+            &["crate", "directory", "feature", "created"],
+            rows.iter().map(|row| {
+                let created = if row.created { "yes" } else { "no" };
+                let feature = cell(row.feature.unwrap_or_default());
+                [
                     cell(row.name),
                     cell(&row.directory),
-                    cell(row.feature.unwrap_or_default()),
-                    if row.created { "yes" } else { "no" },
-                )
-                .ok();
-            }
-            out
-        }
+                    feature,
+                    created.to_owned(),
+                ]
+            }),
+        ),
     })
 }
 
@@ -93,22 +88,19 @@ pub(super) fn crates(
 pub(super) fn edges(manifest: &Manifest, format: Table) -> Result<String> {
     Ok(match format {
         Table::Json => serde_json::to_string_pretty(&manifest.edges)?,
-        Table::Md => {
-            let mut out = String::from("| from | to | as | adr |\n|---|---|---|---|\n");
-            for edge in &manifest.edges {
+        Table::Md => grid(
+            &["from", "to", "as", "adr"],
+            manifest.edges.iter().map(|edge| {
                 let adr: Vec<String> = edge.adr.iter().map(|n| format!("ADR-{n}")).collect();
-                writeln!(
-                    out,
-                    "| {} | {} | {} | {} |",
+                let to = cell(&edge.to.iter().collect::<Vec<_>>().join(", "));
+                [
                     cell(&edge.from),
-                    cell(&edge.to.iter().collect::<Vec<_>>().join(", ")),
+                    to,
                     cell(&qualified(edge).join("; ")),
                     adr.join(", "),
-                )
-                .ok();
-            }
-            out
-        }
+                ]
+            }),
+        ),
     })
 }
 

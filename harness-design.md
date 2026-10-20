@@ -550,7 +550,7 @@ session = ""                               # the hook's session_id on a permit r
 | `cwd` | `Option<&Path>` | no section gives it | The working directory: the program's own where `None`, which is a witness's; php-src's root for a phpt test and the sections run beside it, as run-tests.php runs them (#952). |
 | `raw` | `bool` | no section gives it | Whether what the program wrote is handed back as it wrote it and not normalised: a CGI run's, whose headers run-tests.php parts from the body before it trims (run-tests.php:2530-2533). |
 
-<!-- /computed in=4ea57b76d5b2ffaf45faf4e499c9e8fb995125554bfa7ae47df1488202c36148 out=0f403af025fb1822890e1582d53a55da45f59c26199a988cd5503283858ffbf5 -->
+<!-- /computed in=009a3cf6304d633df93428fa659b9c9f40e6b3753a45fb7ce48e66c06eb85129 out=0f403af025fb1822890e1582d53a55da45f59c26199a988cd5503283858ffbf5 -->
 
 **The tally.** The phpt and witness lanes, and the compile-identity lane when it comes, share one tally (`tally::Tally<J>`): it owns the runner ladder (a control is a skip and not a reading of the engine, an absent binary is a skip, the engine is pass or fail), the rule that nothing run is not a green reading, the print loop over every non-pass item and the reading it writes; a lane contributes its judgement variants and how to judge one item, and nothing else (revision 16). A `lane` is a scheduled run of a corpus (§7), never the tally.
 
