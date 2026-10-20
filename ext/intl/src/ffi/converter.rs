@@ -419,7 +419,7 @@ owner!(
     ucnv_close
 );
 
-/// One `UConverter` the request keeps ([`Request::adopt`], ADR-0013):
+/// One `UConverter` the request keeps ([`Memory::adopt`], ADR-0013):
 /// what an object's payload stores, given up by [`Converter::close`]. A
 /// call that lends the converter's callbacks to PHP code holds it for
 /// its span ([`ConverterId::held`]), so code that replaces or frees the
@@ -496,7 +496,10 @@ impl Converter {
         // SAFETY: name is NUL-terminated.
         let raw = unsafe { sys::ucnv_open(name.as_ptr(), &mut status) };
         let open = status.built(NonNull::new(raw).map(Open));
-        (open.map(|open| Converter(req.adopt(open))), status)
+        (
+            open.map(|open| Converter(req.memory_mut().adopt(open))),
+            status,
+        )
     }
 
     /// Its name.
@@ -506,7 +509,7 @@ impl Converter {
 
     /// Given up: closed now, or as the last call that holds it ends.
     pub(crate) fn close(self, req: &mut Request) {
-        drop(req.disown(self.0));
+        drop(req.memory_mut().disown(self.0));
     }
 }
 
@@ -514,10 +517,10 @@ impl ConverterId {
     /// The converter while its owner keeps it; what a call that runs no
     /// PHP code reads it through, for the span of its borrow.
     pub(crate) fn get(self, req: &mut Request) -> Option<&mut Open> {
-        req.foreign(self.0)
+        req.memory_mut().foreign(self.0)
     }
 
-    /// `body` served with the converter held ([`Request::holding`]), for
+    /// `body` served with the converter held ([`Memory::holding`]), for
     /// a call whose callbacks serve PHP code; `None` where its owner gave
     /// it up before.
     pub(crate) fn held<R>(
@@ -525,11 +528,12 @@ impl ConverterId {
         req: &mut Request,
         body: impl for<'h> FnOnce(&mut Request, &Live<'h>) -> R,
     ) -> Option<R> {
-        req.holding(self.0, |req, held| {
-            let live = Live::of(req, &held)?;
-            Some(body(req, &live))
-        })
-        .flatten()
+        req.memory_mut()
+            .holding(self.0, |req, held| {
+                let live = Live::of(req, &held)?;
+                Some(body(req, &live))
+            })
+            .flatten()
     }
 
     /// `ucnv_clone`, the clone kept by the request. ICU tells the
@@ -538,7 +542,7 @@ impl ConverterId {
     pub(crate) fn try_clone(self, req: &mut Request) -> Result<Converter, Code> {
         let open = self.get(req).ok_or(Code::INVALID_STATE)?;
         let copy = open.try_clone()?;
-        Ok(Converter(req.adopt(copy)))
+        Ok(Converter(req.memory_mut().adopt(copy)))
     }
 }
 

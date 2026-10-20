@@ -509,7 +509,7 @@ impl Request {
         // left, as a walk that served it leaves it. A collection the
         // destructor ran may have found it reachable and taken it out of
         // the buffer, and the shutdown collection finds it here.
-        self.gc_possible_root(&object.as_value());
+        self.memory_mut().gc_possible_root(&object.as_value());
     }
 
     /// php's `dtor_obj != zend_objects_destroy_object || ce->destructor`:

@@ -35,6 +35,7 @@ fn dir_type(req: &mut Request) -> ResourceType {
         return kind;
     }
     let kind = req
+        .memory_mut()
         .resources()
         .register_type(b"Zip Directory", Some(free_dir));
     req.state::<State>().dir = Some(kind);
@@ -46,7 +47,10 @@ fn entry_type(req: &mut Request) -> ResourceType {
     if let Some(kind) = req.state::<State>().entry {
         return kind;
     }
-    let kind = req.resources().register_type(b"Zip Entry", None);
+    let kind = req
+        .memory_mut()
+        .resources()
+        .register_type(b"Zip Entry", None);
     req.state::<State>().entry = Some(kind);
     kind
 }
@@ -297,7 +301,8 @@ fn zip_entry_read(
 /// The data of the archive directory resource `dir` holds, whose `FILE`
 /// its entries are read through.
 fn dir_data(req: &mut Request, dir: i64) -> Option<&mut crate::archive::Data> {
-    req.resource(dir)?
+    req.memory()
+        .resource(dir)?
         .native_mut::<Dir>(req)?
         .za
         .as_deref_mut()?
@@ -313,7 +318,7 @@ fn info(req: &mut Request, zip_entry: Resource, native: &str) -> Result<Option<S
     let Some(e) = entry.native::<Entry>(req) else {
         return Ok(None);
     };
-    if e.data.is_none() || req.resource(e.dir).is_none() {
+    if e.data.is_none() || req.memory().resource(e.dir).is_none() {
         return Ok(None);
     }
     Ok(Some(e.sb.clone()))

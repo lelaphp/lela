@@ -220,7 +220,7 @@ impl StreamCtx {
     /// ```
     pub fn default_ctx(req: &mut Request) -> Result<StreamCtx, Thrown> {
         if let Some(id) = req.streams().default_context
-            && let Some(resource) = req.resource(id)
+            && let Some(resource) = req.memory().resource(id)
         {
             return Ok(StreamCtx(resource));
         }

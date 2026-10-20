@@ -1008,6 +1008,7 @@ fn throwing_resource(req: &mut Request) -> ResourceType {
         return kind;
     }
     let kind = req
+        .memory_mut()
         .resources()
         .register_type(b"throwing resource", Some(throw_from_dtor));
     req.state::<crate::State>().throwing_resource = Some(kind);

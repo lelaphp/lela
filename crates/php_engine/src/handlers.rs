@@ -26126,7 +26126,7 @@ mod tests {
         let Ok(cell) = req.reference(Value::string(text)) else {
             return;
         };
-        let start = req.memory_usage(false);
+        let start = req.memory().usage(false);
         // Two CVs would share the cell; this frame has one, and the test
         // is the second holder.
         req.addref(&cell.as_value());
@@ -26143,7 +26143,7 @@ mod tests {
         );
         assert_eq!(cell.get().as_int(), Some(1), "and the cell holds the value");
         assert_eq!(
-            req.memory_usage(false),
+            req.memory().usage(false),
             start - 40,
             "what the cell held went back to the heap"
         );
@@ -26159,7 +26159,7 @@ mod tests {
             "the second holder keeps the cell"
         );
         req.release(cell.as_value());
-        assert_eq!(req.memory_usage(false), start - 40 - 32);
+        assert_eq!(req.memory().usage(false), start - 40 - 32);
     }
 
     /// #367, the first acceptance: a `foreach` by value over a plain

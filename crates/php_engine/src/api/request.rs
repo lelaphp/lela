@@ -97,7 +97,7 @@ pub use limits::{Interrupt, TimeLimitSuspended};
 mod linking;
 mod load_file;
 mod memory;
-pub use memory::{Allocation, AllocationObserverId, ObserveAllocations};
+pub use memory::{Allocation, AllocationObserverId, Memory, ObserveAllocations};
 pub use memory::{StandaloneHeap, ecalloc, efree, emalloc, erealloc};
 mod methods;
 use methods::visibility_string;

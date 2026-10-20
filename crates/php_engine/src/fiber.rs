@@ -2207,7 +2207,7 @@ fn gc_destructor_fiber(req: &mut Request) -> Result<Owner<Value>, Thrown> {
             if let Some(object) = served
                 && req.fibers().gc.fiber.map(|gc| gc.index()) != Some(fiber.index())
             {
-                req.gc_possible_root(&object.as_value());
+                req.memory_mut().gc_possible_root(&object.as_value());
                 // What the destructor left, the graceful exit of a destroy
                 // among it, is what the fiber ends in.
                 crate::api::raising::pending(req)?;

@@ -192,7 +192,7 @@ pub trait Face: sealed::Sealed {
     /// (`zend_close_rsrc_list`) and its destruction frees it, what php
     /// does with a resource it names by pointer alone,
     /// `FG(default_context)` (#2246). The id answered names the resource
-    /// with no owner, read back with [`Request::resource`].
+    /// with no owner, read back with [`Memory::resource`].
     fn keep_in_list(&self, resource: Owner<Resource>) -> i64;
 }
 

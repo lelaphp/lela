@@ -383,7 +383,7 @@ pub(crate) fn children(req: &mut Request, object: PhpObject) -> Read {
     if object.as_value().refcount() == 2
         && let Some(collection) = list.as_object()
     {
-        req.gc_possible_root(&collection.as_value());
+        req.memory_mut().gc_possible_root(&collection.as_value());
     }
     some(list)
 }

@@ -260,11 +260,15 @@ impl Layer for Request {
 
 /// The layer's resource types, registered as its state is built.
 fn register_types(req: &mut Request) -> Types {
-    let (stream, pstream) = crate::streams::register(req.resources());
+    let (stream, pstream) = crate::streams::register(req.memory_mut().resources());
     let context = req
+        .memory_mut()
         .resources()
         .register_type(b"stream-context", Some(context_dtor));
-    let filter = req.resources().register_type(b"stream filter", None);
+    let filter = req
+        .memory_mut()
+        .resources()
+        .register_type(b"stream filter", None);
     Types {
         stream,
         pstream,

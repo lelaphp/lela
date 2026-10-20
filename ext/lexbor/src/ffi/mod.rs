@@ -95,7 +95,8 @@ pub struct Lent {
 ///
 /// The limit's fatal, for the caller to end the request in.
 pub fn lent<R>(req: &mut Request, call: impl FnOnce(&Lent) -> R) -> Result<R, Thrown> {
-    req.lend_heap(|| call(&Lent { _made_by_lent: () }))
+    req.memory_mut()
+        .lend_heap(|| call(&Lent { _made_by_lent: () }))
 }
 
 /// A value that holds lexbor's memory past the call that made it, with no

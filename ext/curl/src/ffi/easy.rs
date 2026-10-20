@@ -276,7 +276,10 @@ impl Easy {
     pub(crate) fn init(req: &mut Request, session: Session, object: PhpObject) -> Option<Easy> {
         // SAFETY: no argument.
         let raw = NonNull::new(unsafe { sys::curl_easy_init() })?;
-        Some(Easy(req.adopt(Handle::make(raw, session, object, true))))
+        Some(Easy(
+            req.memory_mut()
+                .adopt(Handle::make(raw, session, object, true)),
+        ))
     }
 
     /// A pushed `CURL *` the library made, served for `object`, kept by
@@ -289,7 +292,10 @@ impl Easy {
         object: PhpObject,
     ) -> Option<Easy> {
         let raw = NonNull::new(raw)?;
-        Some(Easy(req.adopt(Handle::make(raw, session, object, false))))
+        Some(Easy(
+            req.memory_mut()
+                .adopt(Handle::make(raw, session, object, false)),
+        ))
     }
 
     /// Its name.
@@ -307,7 +313,7 @@ impl Easy {
             tag.object = None;
             Some(tag.session.clone())
         })?;
-        let handle = req.disown(self.0)?;
+        let handle = req.memory_mut().disown(self.0)?;
         let ((), thrown) = session.enter(req, || drop(handle));
         thrown
     }
@@ -316,7 +322,7 @@ impl Easy {
 impl EasyId {
     /// `f` over the `CURL *` while its owner keeps it, `gone` otherwise.
     fn with<R>(self, req: &mut Request, gone: R, f: impl FnOnce(&mut Handle) -> R) -> R {
-        req.foreign(self.0).map_or(gone, f)
+        req.memory_mut().foreign(self.0).map_or(gone, f)
     }
 
     /// Which `CURL *` this is.
@@ -337,8 +343,10 @@ impl EasyId {
     ) -> (Vec<ForeignId<Handle>>, Vec<ForeignId<ShareHandle>>) {
         let mut shares = Vec::new();
         for easy in easies {
-            if let Some(Some(ShareRef::Request(id))) =
-                req.foreign(easy.0).map(|handle| handle.tag().share.clone())
+            if let Some(Some(ShareRef::Request(id))) = req
+                .memory_mut()
+                .foreign(easy.0)
+                .map(|handle| handle.tag().share.clone())
             {
                 shares.push(id.0);
             }
@@ -366,7 +374,7 @@ impl EasyId {
         if let Some(stderr) = stderr {
             copy.set_stderr(stderr);
         }
-        Some(Easy(req.adopt(copy)))
+        Some(Easy(req.memory_mut().adopt(copy)))
     }
 
     /// The pushed `CURL *` accepted: the multi owns it from here, as any.
@@ -543,7 +551,7 @@ impl EasyId {
     }
 
     /// `f`, a call into the library that serves the callbacks, over the
-    /// `CURL *` held with the share it points at ([`Request::holding`]),
+    /// `CURL *` held with the share it points at ([`Memory::holding`]),
     /// so a callback that frees either's object leaves the cleanup to the
     /// call's end, with no request lent ([`Session::holding`]); the
     /// request reachable by the callbacks meanwhile.
@@ -692,7 +700,7 @@ impl EasyId {
             // copy whose parts call back.
             code(unsafe { sys::curl_easy_setopt(raw, sys::CURLOPT_MIMEPOST, tree) })
         });
-        let old = match req.foreign(self.0) {
+        let old = match req.memory_mut().foreign(self.0) {
             Some(handle) => {
                 let tag = handle.tag_mut();
                 let old = std::mem::take(&mut tag.mimes);

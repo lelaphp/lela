@@ -4,11 +4,11 @@
 //! library the oracle links.
 //!
 //! **Owners.** The request keeps each `CURL *`, `CURLM *` and
-//! request-scoped `CURLSH *` ([`Request::adopt`], ADR-0013): the
+//! request-scoped `CURLSH *` ([`Memory::adopt`], ADR-0013): the
 //! object's payload stores the one owner, an [`Easy`], a [`Multi`] or a
 //! [`Share`], a native reaches the library's pointer through its copied name, and a
 //! call that serves PHP code (a transfer, a pause, a MIME tree's free)
-//! holds what it calls in with ([`Request::holding`]), so a callback
+//! holds what it calls in with ([`Memory::holding`]), so a callback
 //! that frees the object of a `CURL *` leaves the cleanup to the call's end.
 //! What the library keeps a pointer to past the call that set it (the
 //! error buffer, the `CURLOPT_STDERR` file, a header list, a MIME tree)
@@ -229,7 +229,7 @@ impl Session {
     }
 
     /// `body` served with the object `id` names held
-    /// ([`Request::holding`]) and no request where a callback finds it,
+    /// ([`Memory::holding`]) and no request where a callback finds it,
     /// whatever call into the library this one is made inside, that
     /// call's request put back after. The only way the binding holds the
     /// library's objects: one given up during the hold is dropped as the
@@ -248,7 +248,7 @@ impl Session {
         let slot = self.0.0.as_ptr();
         // SAFETY: an owner's allocation; the write is the only access.
         let outer = unsafe { std::mem::replace(&mut (*slot).req, ptr::null_mut()) };
-        let answered = req.holding(id, body);
+        let answered = req.memory_mut().holding(id, body);
         // SAFETY: as above; every `enter` inside `body` restored what it
         // found before this write.
         unsafe { (*slot).req = outer };
@@ -285,7 +285,7 @@ impl Lent {
         // SAFETY: set by `enter` from the `&mut Request` it was given,
         // which that call does not touch until the library returns, so
         // this is the one live mutable borrow of it. Nothing reaches the
-        // request through the link while a `Request::holding` that ends a
+        // request through the link while a `Memory::holding` that ends a
         // hold is on the stack: the binding holds the library's objects
         // through `Session::holding` alone, so between the `enter`s a hold
         // serves, where the hold's end drops what was given up, the link
@@ -365,7 +365,7 @@ impl Cx<'_> {
     }
 }
 
-/// `body` served with each object `ids` names held ([`Request::holding`]),
+/// `body` served with each object `ids` names held ([`Memory::holding`]),
 /// the ones no owner keeps any more passed over: what a call into the
 /// library holds of the handles it may reach, inside the
 /// [`Session::holding`] of the `CURL *` or `CURLM *` it calls with.
@@ -377,7 +377,10 @@ fn holding_all<T: Send + 'static, R>(
     let Some((first, rest)) = ids.split_first() else {
         return body.take().map(|body| body(req));
     };
-    match req.holding(*first, |req, _| holding_all(req, rest, body)) {
+    match req
+        .memory_mut()
+        .holding(*first, |req, _| holding_all(req, rest, body))
+    {
         Some(answer) => answer,
         None => holding_all(req, rest, body),
     }

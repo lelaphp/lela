@@ -959,14 +959,14 @@ mahout = "RequestCtx::resources_mut"
 sites = 63
 crates = 1
 status = "renamed"
-api = "request::Request::resources"
+api = "request::Memory::resources"
 
 [[item]]
 mahout = "RequestCtx::resources"
 sites = 56
 crates = 1
 status = "same"
-api = "request::Request::resources"
+api = "request::Memory::resources"
 
 [[item]]
 mahout = "RequestCtx::current_line"
@@ -1533,14 +1533,14 @@ mahout = "RequestCtx::memory_peak_usage_bytes"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::memory_peak"
+api = "request::Memory::peak"
 
 [[item]]
 mahout = "RequestCtx::memory_usage_bytes"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::memory_usage"
+api = "request::Memory::usage"
 
 [[item]]
 mahout = "RequestCtx::note_props_materialized"

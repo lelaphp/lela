@@ -11,24 +11,24 @@ use php_ext::values::{FreshString, Owner, PhpString};
 
 #[php_function]
 fn storage_profile(req: &mut Request, shrink: bool) -> Result<Owner<PhpString>, Thrown> {
-    let baseline = req.memory_usage(false);
+    let baseline = req.memory().usage(false);
     let mut bytes = FreshString::new(req, 2050)?;
     bytes.bytes_mut()[..7].copy_from_slice(b"payload");
-    let initial = req.memory_usage(false) - baseline;
+    let initial = req.memory().usage(false) - baseline;
     // libmbfl: old_capacity + max(old_capacity / 2, needed).
     bytes = bytes.extend(req, 2050 + 1500)?;
-    let grown = req.memory_usage(false) - baseline;
+    let grown = req.memory().usage(false) - baseline;
     let content = bytes.bytes()[..7] == *b"payload";
     if shrink {
         bytes = bytes.truncate(req, 7)?;
     } else {
         bytes.set_len(7);
     }
-    let retained = req.memory_usage(false) - baseline;
+    let retained = req.memory().usage(false) - baseline;
     let finished = bytes.finish();
     let correct = content && finished.as_bytes() == b"payload";
     finished.give_up(req);
-    let released = req.memory_usage(false) - baseline;
+    let released = req.memory().usage(false) - baseline;
     PhpString::new(
         req,
         format!("{initial},{grown},{retained},{released},{correct}").as_bytes(),
@@ -37,26 +37,26 @@ fn storage_profile(req: &mut Request, shrink: bool) -> Result<Owner<PhpString>, 
 
 #[php_function]
 fn storage_free(req: &mut Request) -> Result<i64, Thrown> {
-    let baseline = req.memory_usage(false);
+    let baseline = req.memory().usage(false);
     let bytes = FreshString::new(req, 2050)?;
     bytes.free(req);
-    Ok(i64::try_from(req.memory_usage(false) - baseline).unwrap_or(-1))
+    Ok(i64::try_from(req.memory().usage(false) - baseline).unwrap_or(-1))
 }
 
 #[php_function]
 fn storage_growth_schedule(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
-    let baseline = req.memory_usage(false);
+    let baseline = req.memory().usage(false);
     let mut bytes = FreshString::new(req, 2050)?;
-    let initial = req.memory_usage(false) - baseline;
+    let initial = req.memory().usage(false) - baseline;
     bytes = bytes.extend(req, 3075)?;
-    let first_growth = req.memory_usage(false) - baseline;
+    let first_growth = req.memory().usage(false) - baseline;
     bytes = bytes.extend(req, 4612)?;
-    let second_growth = req.memory_usage(false) - baseline;
+    let second_growth = req.memory().usage(false) - baseline;
     bytes.bytes_mut()[..4100].fill(b'a');
     bytes.set_len(4100);
-    let retained = req.memory_usage(false) - baseline;
+    let retained = req.memory().usage(false) - baseline;
     bytes.finish().give_up(req);
-    let released = req.memory_usage(false) - baseline;
+    let released = req.memory().usage(false) - baseline;
     PhpString::new(
         req,
         format!("{initial},{first_growth},{second_growth},{retained},{released}").as_bytes(),
@@ -65,21 +65,21 @@ fn storage_growth_schedule(req: &mut Request) -> Result<Owner<PhpString>, Thrown
 
 #[php_function]
 fn storage_identity(req: &mut Request, input: PhpString) -> Result<Owner<PhpString>, Thrown> {
-    let baseline = req.memory_usage(false);
+    let baseline = req.memory().usage(false);
     let empty = FreshString::new(req, 0)?.finish();
-    let fresh_empty = req.memory_usage(false) - baseline;
+    let fresh_empty = req.memory().usage(false) - baseline;
     empty.give_up(req);
     let one = FreshString::new(req, 1)?.finish();
-    let fresh_one = req.memory_usage(false) - baseline;
+    let fresh_one = req.memory().usage(false) - baseline;
     one.give_up(req);
     let empty = PhpString::existing_interned(req, b"")?;
-    let interned_empty = req.memory_usage(false) - baseline;
+    let interned_empty = req.memory().usage(false) - baseline;
     empty.give_up(req);
     let one = PhpString::existing_interned(req, b"a")?;
-    let interned_one = req.memory_usage(false) - baseline;
+    let interned_one = req.memory().usage(false) - baseline;
     one.give_up(req);
     let reused = Owner::take(req, input);
-    let taken = req.memory_usage(false) - baseline;
+    let taken = req.memory().usage(false) - baseline;
     reused.give_up(req);
     PhpString::new(
         req,

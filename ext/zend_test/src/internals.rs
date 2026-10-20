@@ -241,7 +241,7 @@ pub(crate) fn zend_test_is_pcre_bundled() -> bool {
 #[php_function]
 pub(crate) fn zend_test_is_zend_ptr(req: &mut Request, addr: i64) -> bool {
     usize::try_from(u64::from_ne_bytes(addr.to_ne_bytes()))
-        .is_ok_and(|address| req.heap_holds(address))
+        .is_ok_and(|address| req.memory().heap_holds(address))
 }
 
 /// `zend_test_log_err_debug(string $str): void`:

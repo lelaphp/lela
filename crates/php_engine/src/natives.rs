@@ -2003,7 +2003,7 @@ pub(crate) fn unmangle_property_name(name: &[u8]) -> Unmangled<'_> {
 /// ```
 #[php_function]
 fn memory_get_usage(req: &mut Request, #[php(default = false)] real_usage: bool) -> i64 {
-    as_long(req.memory_usage(real_usage))
+    as_long(req.memory().usage(real_usage))
 }
 
 /// `memory_get_peak_usage(bool $real_usage = false): int`, php's
@@ -2058,7 +2058,7 @@ fn memory_get_usage(req: &mut Request, #[php(default = false)] real_usage: bool)
 /// ```
 #[php_function]
 fn memory_get_peak_usage(req: &mut Request, #[php(default = false)] real_usage: bool) -> i64 {
-    as_long(req.memory_peak(real_usage))
+    as_long(req.memory().peak(real_usage))
 }
 
 /// `memory_reset_peak_usage(): void`, php's

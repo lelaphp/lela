@@ -340,7 +340,7 @@ impl Stream {
         if self.persistent {
             return Ok(call(stream));
         }
-        req.lend_heap(|| call(stream))
+        req.memory_mut().lend_heap(|| call(stream))
     }
 
     /// One step over `input` into `output` for their length alone.

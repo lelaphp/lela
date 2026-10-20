@@ -5237,7 +5237,7 @@ impl Engine {
             exit_code: req.exit_status(),
             headers_sent: req.output().headers_sent(),
             fatal,
-            memory_peak: req.memory_peak(true),
+            memory_peak: req.memory().peak(true),
             uncaught: None,
             start_failed: true,
         };
@@ -5674,7 +5674,7 @@ impl Engine {
                 exit_code,
                 headers_sent: true,
                 fatal,
-                memory_peak: req.memory_peak(true),
+                memory_peak: req.memory().peak(true),
                 uncaught: req.take_kept_uncaught(),
                 start_failed: false,
             },
@@ -8088,8 +8088,8 @@ mod tests {
         let mut started_at = Vec::new();
         for _ in 0..2 {
             let mut req = Request::new(Arc::clone(&engine.shared), description(""));
-            started_at.push(req.memory_usage(false));
-            let before = req.memory_usage(false);
+            started_at.push(req.memory().usage(false));
+            let before = req.memory().usage(false);
             let compiled = req.compiling(|strings, _, _, _| {
                 compile(
                     source,
@@ -8119,7 +8119,7 @@ mod tests {
             });
             assert!(compiled.is_ok(), "the source compiles");
             assert!(
-                req.memory_usage(false) > before,
+                req.memory().usage(false) > before,
                 "what the request made of its constants is the request's own memory"
             );
             req.release_compiled();

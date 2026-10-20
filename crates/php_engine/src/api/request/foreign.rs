@@ -10,11 +10,11 @@
 use std::any::{Any, TypeId};
 use std::marker::PhantomData;
 
-use super::Request;
+use super::{Memory, Request};
 
-/// The one owner of an object the request keeps ([`Request::adopt`]):
+/// The one owner of an object the request keeps ([`Memory::adopt`]):
 /// what a payload stores. Neither `Copy` nor `Clone`, so the object is
-/// given up in one place, [`Request::disown`], which hands it back to be
+/// given up in one place, [`Memory::disown`], which hands it back to be
 /// closed; one dropped without that leaves the object to the request's
 /// end.
 #[must_use = "an adopted object is given up with Request::disown, or stays until the request ends"]
@@ -62,7 +62,7 @@ impl<T> std::fmt::Debug for ForeignId<T> {
     }
 }
 
-/// The span of one [`Request::holding`]: while it lasts, the object it
+/// The span of one [`Memory::holding`]: while it lasts, the object it
 /// names is not dropped, whatever the PHP code it serves gives up. The
 /// lifetime is the span's own, so nothing made from a hold outlives it:
 ///
@@ -70,7 +70,7 @@ impl<T> std::fmt::Debug for ForeignId<T> {
 /// use php_engine::api::request::{ForeignId, Held, Request};
 /// fn escape(req: &mut Request, id: ForeignId<u8>) {
 ///     let mut kept = None;
-///     req.holding(id, |_, held| kept = Some(held));
+///     req.memory_mut().holding(id, |_, held| kept = Some(held));
 /// }
 /// ```
 pub struct Held<'h, T> {
@@ -196,41 +196,41 @@ impl Table {
     }
 }
 
-impl Request {
+impl<'r> Memory<&'r mut Request> {
     /// `value` kept by the request until its owner, the answer, gives it
     /// up and no call holds it, or until the request ends. What an
     /// object's payload stores in place of a C library's pointer, when a
     /// call into the library can serve PHP code that frees the payload's.
-    pub fn adopt<T: Send + 'static>(&mut self, value: T) -> Foreign<T> {
+    pub fn adopt<T: Send + 'static>(self, value: T) -> Foreign<T> {
         Foreign {
-            id: self.foreign.adopt(value),
+            id: self.0.foreign.adopt(value),
         }
     }
 
     /// The object `id` names, while its owner has not given it up.
-    pub fn foreign<T: Send + 'static>(&mut self, id: ForeignId<T>) -> Option<&mut T> {
-        self.foreign.reach(id, false)
+    pub fn foreign<T: Send + 'static>(self, id: ForeignId<T>) -> Option<&'r mut T> {
+        self.0.foreign.reach(id, false)
     }
 
     /// `body` served with the object `id` names held: an owner that gives
-    /// it up meanwhile ([`Request::disown`]) leaves its drop to the end
+    /// it up meanwhile ([`Memory::disown`]) leaves its drop to the end
     /// of `body`, as php's `GC_ADDREF` keeps an object across a call.
     /// `None`, with `body` not served, where `id` names nothing its owner
     /// still keeps.
     pub fn holding<T: Send + 'static, R>(
-        &mut self,
+        self,
         id: ForeignId<T>,
         body: impl for<'h> FnOnce(&mut Request, Held<'h, T>) -> R,
     ) -> Option<R> {
-        if !self.foreign.hold(id) {
+        if !self.0.foreign.hold(id) {
             return None;
         }
         let held = Held {
             id,
             span: PhantomData,
         };
-        let answer = body(self, held);
-        self.foreign.end_hold(id);
+        let answer = body(self.0, held);
+        self.0.foreign.end_hold(id);
         Some(answer)
     }
 
@@ -241,8 +241,8 @@ impl Request {
     /// `sqlite3_close` answering `SQLITE_BUSY`); `None` where a call holds
     /// it, which drops it as the last such call ends.
     #[allow(clippy::needless_pass_by_value)] // the owner is taken, so the object is given up once
-    pub fn disown<T: Send + 'static>(&mut self, foreign: Foreign<T>) -> Option<T> {
-        self.foreign.disown(foreign.id)
+    pub fn disown<T: Send + 'static>(self, foreign: Foreign<T>) -> Option<T> {
+        self.0.foreign.disown(foreign.id)
     }
 }
 

@@ -344,7 +344,7 @@ impl Lent {
         call: impl FnOnce(*mut bz::bz_stream) -> c_int,
     ) -> Result<c_int, Thrown> {
         let stream = &raw mut *self.0;
-        req.lend_heap(|| call(stream))
+        req.memory_mut().lend_heap(|| call(stream))
     }
 
     /// One step over `input` into `output` for their length alone.
@@ -355,7 +355,9 @@ impl Lent {
         output: &mut [u8],
         call: impl FnOnce(*mut bz::bz_stream) -> c_int,
     ) -> Result<Step, Thrown> {
-        step(&mut self.0, input, output, |s| req.lend_heap(|| call(s)))
+        step(&mut self.0, input, output, |s| {
+            req.memory_mut().lend_heap(|| call(s))
+        })
     }
 }
 

@@ -542,9 +542,12 @@ impl<const N: u8> TestExt<N> {
         let on = Request::ini_parse_bool(value);
         let standing = req.state::<AllocationSlot<N>>().0.take();
         let standing = match (on, standing) {
-            (true, None) => Some(req.observe_allocations(Box::new(AllocationRecorder::<N>))),
+            (true, None) => Some(
+                req.memory_mut()
+                    .observe_allocations(Box::new(AllocationRecorder::<N>)),
+            ),
             (false, Some(at)) => {
-                req.unobserve_allocations(at);
+                req.memory_mut().unobserve_allocations(at);
                 None
             }
             (_, standing) => standing,
@@ -676,6 +679,7 @@ impl<const N: u8> TestExt<N> {
         let engine = req.engine::<EngineSlot<N>>().map(|state| state.engine);
         record(N, Phase::Rinit(engine));
         let kind = req
+            .memory_mut()
             .resources()
             .register_type(b"test_ext", Some(Self::resource_closed));
         // The owner stands with the request until `post_deactivate`, after

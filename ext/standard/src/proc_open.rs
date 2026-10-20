@@ -312,6 +312,7 @@ fn process_type(req: &mut Request) -> ResourceType {
         return kind;
     }
     let kind = req
+        .memory_mut()
         .resources()
         .register_type(b"process", Some(process_dtor));
     req.state::<State>().proc_open.kind = Some(kind);

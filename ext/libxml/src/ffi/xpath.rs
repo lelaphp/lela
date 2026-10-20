@@ -312,8 +312,8 @@ impl XPath {
     }
 
     /// [`XPath::eval_scoped`] on the evaluator `id` names, which the
-    /// request keeps ([`Request::adopt`]) for an object PHP code reaches
-    /// during the evaluation, held for its span ([`Request::holding`],
+    /// request keeps ([`Memory::adopt`]) for an object PHP code reaches
+    /// during the evaluation, held for its span ([`Memory::holding`],
     /// ADR-0013): a function the expression calls may evaluate again,
     /// register a namespace or a function on it, or replace it, as
     /// `DOMXPath::__construct` does, and the evaluation runs to its end
@@ -326,12 +326,13 @@ impl XPath {
         scope: Scope<'_>,
         handler: &mut Handler<'_>,
     ) -> Option<(Option<Answer>, Vec<Raised>, Option<Thrown>)> {
-        req.holding(id, |req, held| {
-            let ctx = held.get(req)?.0;
-            let (object, raised, thrown) = evaluate(ctx, req, expr, node, scope, handler);
-            Some((object.map(|o| o.answer()), raised, thrown))
-        })
-        .flatten()
+        req.memory_mut()
+            .holding(id, |req, held| {
+                let ctx = held.get(req)?.0;
+                let (object, raised, thrown) = evaluate(ctx, req, expr, node, scope, handler);
+                Some((object.map(|o| o.answer()), raised, thrown))
+            })
+            .flatten()
     }
 }
 

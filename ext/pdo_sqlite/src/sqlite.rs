@@ -252,7 +252,7 @@ fn open_db(req: &mut Request, source: &Source<'_>) -> Result<Foreign<Conn>, Fail
             Some(options) => match option_long(req, Some(options), ATTR_TIMEOUT, 60) {
                 Ok(timeout) => timeout,
                 Err(failure) => {
-                    drop(req.disown(owner));
+                    drop(req.memory_mut().disown(owner));
                     return Err(Failure::from(failure));
                 }
             },
@@ -362,7 +362,7 @@ impl Handle {
     /// A connection given back to the pool kept by this request again.
     fn take_up(&mut self, req: &mut Request) {
         self.place = match std::mem::replace(&mut self.place, Place::Gone) {
-            Place::Idle(conn) => Place::Request(req.adopt(conn)),
+            Place::Idle(conn) => Place::Request(req.memory_mut().adopt(conn)),
             other => other,
         };
     }
@@ -699,7 +699,10 @@ impl Connection for Handle {
     /// pool for the next request to take up.
     fn give_back(&mut self, req: &mut Request) {
         self.place = match std::mem::replace(&mut self.place, Place::Gone) {
-            Place::Request(owner) => req.disown(owner).map_or(Place::Gone, Place::Idle),
+            Place::Request(owner) => req
+                .memory_mut()
+                .disown(owner)
+                .map_or(Place::Gone, Place::Idle),
             other => other,
         };
     }

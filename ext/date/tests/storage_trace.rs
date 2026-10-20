@@ -36,10 +36,15 @@ fn toggle(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
         return Ok(true);
     }
     if value.is_some_and(Request::ini_parse_bool) {
-        let observer = req.observe_allocations(Box::new(Recorder::default()));
+        let observer = req
+            .memory_mut()
+            .observe_allocations(Box::new(Recorder::default()));
         req.state::<Trace>().active = Some(observer);
     } else if let Some(observer) = req.state::<Trace>().active.take() {
-        let back: Option<Box<dyn Any>> = req.unobserve_allocations(observer).map(|o| o as _);
+        let back: Option<Box<dyn Any>> = req
+            .memory_mut()
+            .unobserve_allocations(observer)
+            .map(|o| o as _);
         let recorder = back.and_then(|any| any.downcast::<Recorder>().ok());
         assert!(recorder.is_some());
         if let Some(recorder) = recorder {

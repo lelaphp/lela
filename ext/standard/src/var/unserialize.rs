@@ -852,7 +852,7 @@ pub fn php_unserialize_with_options(
         // the collector's to find (#2444).
         (Ok(true), None) => {
             let root = state.take_root();
-            req.gc_possible_root(&root);
+            req.memory_mut().gc_possible_root(&root);
             Some(root)
         }
         _ => {
