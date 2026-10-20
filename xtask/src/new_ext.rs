@@ -462,10 +462,11 @@ fn table_end(text: &str, table: &str) -> Option<usize> {
 
 /// The features of the bundle a new extension is listed in: `default`, the
 /// build a person prunes a non-default extension from when porting it
-/// (design §4.10), and `linked`, the engine the harness links (harness §7,
-/// revision 43), so a branch that adds an extension links it in the same
-/// commit and its merge breaks no harness test (#1252).
-const LISTS: [&str; 2] = ["default", "linked"];
+/// (design §4.10), and `host`, the set every host links and `linked` is
+/// built of (#3081), so a branch that adds an extension links it into the
+/// hosts and `php-linked` in the same commit, its merge breaks no harness
+/// test (#1252), and the pruning leaves it linked.
+const LISTS: [&str; 2] = ["default", "host"];
 
 /// The bundle's manifest gains `php_ext_<name>` as an optional path
 /// dependency and the feature `<name> = ["dep:php_ext_<name>"]`, listed in

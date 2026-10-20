@@ -31,40 +31,15 @@ path = "src/linked.rs"
 required-features = ["linked"]
 
 [features]
-# `php-linked`: the bundle's `linked` set, every extension but pcntl, on top
-# of this host's own, which carries pcntl (harness §8, revision 84).
+# `php-linked`: the bundle's `linked` set, this host's own and the two
+# extensions no host links, so every extension feature (harness §8,
+# revision 84; #3081).
 linked = ["php_bundle/linked", "php_bundle/test"]
 
 [dependencies]
-# The bundle's default set and twenty it turns on: `pcntl` and `posix`,
-# which php builds for the CLI and which no server host carries (design
-# §7.2, revision 35), `sockets`, php's `--enable-sockets` (revision 36),
-# `bz2`, php's `--with-bz2` (revision 39), `openssl`, php's
-# `--with-openssl`, which the oracle is built with and ext/phar's
-# OpenSSL signatures call into (revision 97, #1108), `bcmath`, php's
-# `--enable-bcmath`, which the oracle is built with (#1163, #1166),
-# `calendar`, php's `--enable-calendar`, which the oracle is built with
-# (#1163, #1206), `mbstring`, php's `--enable-mbstring`, which the
-# oracle is built with (#1173, #1260), `curl`, php's `--with-curl`,
-# which the oracle is built with (#1238, #1324), `exif`, php's
-# `--enable-exif` (#1323, #1330), and `ftp`, `shmop`, `sysvsem`,
-# `sysvmsg` and `sysvshm`, php's `--enable-ftp`, `--enable-shmop`,
-# `--enable-sysvsem`, `--enable-sysvmsg` and `--enable-sysvshm`, which
-# the oracle is built with (#1323), `pdo_mysql`, php's
-# `--with-pdo-mysql`, over the `mysqlnd` it turns on (#1345, #1366), and
-# `mysqli`, php's `--with-mysqli`, over the same `mysqlnd` (#1367),
-# `dba`, php's `--enable-dba`, which the oracle is built with (#1451),
-# `zip`, php's `--with-zip`, which the oracle is built with (#1515),
-# `tidy`, php's `--with-tidy`, which the oracle is built with (#1540),
-# `soap`, php's `--enable-soap`, which the oracle is built with (#1562),
-# `gd`, php's `--enable-gd --with-external-gd`, which the oracle is built
-# with (#1575), and
-# `sodium`, php's `--with-sodium`, which the oracle is built with (#1566),
-# `gettext`, php's `--with-gettext`, which the oracle is built with (#1568),
-# `readline`, php's `--with-libedit`, which the oracle is built with (#1567),
-# `ffi`, php's `--with-ffi`, which the oracle is built with (#1576), and
-# `intl`, php's `--enable-intl`, which the oracle is built with (#1574).
-php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli", "dba", "zip", "gmp", "tidy", "soap", "gd", "sodium", "gettext", "readline", "ffi", "intl"] }
+# The bundle's default set and `host`, the set every host links, whose
+# comment says why each (#1477, #3081).
+php_bundle = { path = "../../crates/php_bundle", features = ["host"] }
 php_sapi = { path = "../../crates/php_sapi" }
 # The face its `additional_functions` and the built-in server's module are
 # declared with, as an extension declares its own (ADR-0008, #1348).

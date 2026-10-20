@@ -4,19 +4,11 @@
 # set at the tag `oracle.toml` pins, which is the sixteen below: `mbstring`,
 # `pdo_mysql`, `openssl` and `curl` are each an `--enable` or `--with` whose
 # `config.m4` gives no default, are four of the rows `seams.toml` marks
-# `feature =`, and are named on the command line to turn on. `pcntl` and
-# `posix` are two more, which the `php` binary turns on and no server
-# host does, as php builds pcntl for the CLI and a `fork()` in a process
-# that serves requests on threads keeps one thread (design §7.2, revision
-# 35); `sockets` is an `--enable` the `php` binary turns on and a
-# server host may, since sockets are sound on threads (revision 36),
-# `bz2`, php's `--with-bz2`, which the `php` binary turns on (revision
-# 39), `bcmath`, php's `--enable-bcmath`, which the `php` binary turns
-# on as the oracle is built with it (#1163), and `calendar` the last,
-# php's `--enable-calendar`, which the `php` binary turns on for the same
-# reason (#1163). So this file and the manifest name one default build and neither is
+# `feature =`, and are named on the command line to turn on; they and the
+# rest the oracle is built with are `host`'s, below. So this file and the
+# manifest name one default build and neither is
 # read over the other (harness §7). `xtask new-ext <name>` appends the
-# dependency and the feature and lists the crate in `default`; a person
+# dependency and the feature and lists the crate in `default` and `host`; a person
 # removes a non-default extension from `default` when porting it.
 # `enabled()` lists php's registration order, which a witness holds to the
 # oracle (#1778). Each extension's feature switches on the features of
@@ -50,44 +42,47 @@ jit = ["dep:php_jit"]
 # engine of `enabled()`, which an extension's own tests and the harness's
 # witness lane serve a snippet through. Off by default.
 test = ["php_ext/test"]
-# The engine the harness links, which serves the witness and crosscheck lanes
-# (harness §7, revision 43): every extension feature but pcntl, whose fences
-# the `php` binary serves so that nothing forks the harness (revision 61).
-# xtask enables it; `new-ext` lists each crate it lays down here as it does in
-# `default`, so an extension added is linked in the same commit (#1252).
-linked = [
-    "standard", "spl", "date", "reflection", "pcre", "mbstring", "session",
-    "pdo", "dom", "random", "pdo_mysql", "filter", "tokenizer", "json",
-    "openssl", "curl", "iconv", "pdo_sqlite", "ctype", "hash", "libxml",
-    "lexbor", "zlib", "posix", "sockets", "phar", "bz2", "uri", "opcache", "bcmath", "simplexml",
-    "calendar",
-    "exif",
-    "shmop",
-    "sysvsem",
-    "sysvmsg",
-    "sysvshm",
-    "ftp",
-    "xml",
-    "xmlreader",
-    "xmlwriter",
-    "mysqlnd",
-    "mysqli",
-    "sqlite3",
-    "fileinfo",
-    "dba",
-    "zip",
-    "gmp",
-    "xsl",
-    "tidy",
-    "soap",
-    "gd",
-    "sodium",
-    "gettext",
-    "readline",
-    "ffi",
-    "intl",
-    "zend_test",
+# The set every host links (#1477, #3081): `default` and the twenty-eight
+# php's configure builds for the oracle beyond it. php builds an extension
+# of the `cli` class for the CLI, CGI, embed and phpdbg alike
+# (`EXT_CLI_STATIC`, `Z/build/php.m4`), links phpdbg from the CLI's objects
+# (`PHP_BINARY_OBJS`, `Z/sapi/phpdbg/config.m4`; #1450) and every other
+# extension into every host, so the oracle's `php-cgi -m`, `php-fpm -m`
+# and phpdbg list every module its `php -m` does. `pcntl` and `posix` are
+# php's for the CLI (design §7.2, revision 35) and in every host whose
+# serving process is single-threaded, as php-fpm's children are (revision
+# 66); a host that serves on threads links them and leaves them out of its
+# engine (`Serving::Threads`), as one build of the workspace turns them on
+# for every host. `sockets` is php's `--enable-sockets` (revision 36),
+# `bz2` its `--with-bz2` (revision 39), `openssl` its `--with-openssl`,
+# which ext/phar's OpenSSL signatures call into (revision 97, #1108),
+# `bcmath` and `calendar` its `--enable-bcmath` and `--enable-calendar`
+# (#1163, #1206), `mbstring` its `--enable-mbstring` (#1260), `curl` its
+# `--with-curl` (#1324), `exif`, `shmop`, `sysvsem`, `sysvmsg`, `sysvshm`
+# and `ftp` its `--enable-*` of each (#1323, #1330), `pdo_mysql` and
+# `mysqli` its `--with-pdo-mysql` and `--with-mysqli` over the `mysqlnd`
+# they turn on (#1366, #1367), `dba` its `--enable-dba` (#1451), `zip` its
+# `--with-zip` (#1515), `gmp` its `--with-gmp` (#1540), `tidy` its
+# `--with-tidy` (#1540), `soap` its `--enable-soap` (#1562), `gd` its
+# `--enable-gd --with-external-gd` (#1575), `sodium` its `--with-sodium`
+# (#1566), `gettext` its `--with-gettext` (#1568), `readline` its
+# `--with-libedit` (#1567), `ffi` its `--with-ffi` (#1576) and `intl` its
+# `--enable-intl` (#1574). `new-ext` lists each crate it lays down here as
+# it does in `default`, so a person pruning one from `default` leaves it
+# where every host still links it (#1252).
+host = [
+    "pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar",
+    "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm",
+    "ftp", "pdo_mysql", "mysqli", "dba", "zip", "gmp", "tidy", "soap", "gd",
+    "sodium", "gettext", "readline", "ffi", "intl",
 ]
+# The engine the witness and crosscheck lanes serve a snippet through,
+# `php-linked`, `sapi/cli` built with this on top (harness §7, revision 43;
+# §8, revision 84): every extension feature, `pcntl` among them since the
+# CLI carries it, so the set every host links and the two no host does,
+# `mysqlnd`, which `pdo_mysql` and `mysqli` turn on and which the harness
+# reads by its name, and `zend_test`, php's `--enable-zend-test`.
+linked = ["default", "host", "mysqlnd", "zend_test"]
 standard = ["dep:php_ext_standard", "random", "date", "uri"] # basic_functions.c: ZEND_MOD_REQUIRED("uri"); random, whose request state shuffle, str_shuffle and array_rand draw from (RANDOM_G), and date, whose default zone gettimeofday reads (#2356)
 spl = ["dep:php_ext_spl", "json", "pcre", "standard"] # php_spl.c: ZEND_MOD_REQUIRED("json"), which the extension declares (#1914); pcre, whose pattern cache and ini entries RegexIterator compiles through, and standard, whose serializer state and unserialize_max_depth the serialize() and unserialize() methods of ArrayObject, SplDoublyLinkedList and SplObjectStorage read (#2356)
 date = ["dep:php_ext_date"]

@@ -4,10 +4,11 @@
 //! A row's `feature` says its extension is behind a feature of
 //! `php_bundle`, outside php's default `./configure`; it does not say which
 //! builds turn that feature on. Each building crate says so itself, in the
-//! `features` of its `php_bundle` dependency, and this module reads the
-//! declaration there and nowhere else, so no list in the harness is a
-//! second copy of it. A row with no `feature` is the bundle's default set,
-//! which every build carries.
+//! `features` of its `php_bundle` dependency, most often by naming a set
+//! the bundle defines, `host` (#3081), and this module reads the
+//! declaration there and the set's members in the bundle and nowhere else,
+//! so no list in the harness is a second copy of either. A row with no
+//! `feature` is the bundle's default set, which every build carries.
 //!
 //! Two builds are read. The binary under test, [`BINARY`]'s crate, is the
 //! one the per-commit phpt lane runs: the lane runs the subsets of every
@@ -47,43 +48,40 @@ pub struct Carried {
 
 impl Carried {
     /// What the binary under test carries, read from [`BINARY`]'s
-    /// `Cargo.toml` under `root`. A workspace that has not created the
+    /// `Cargo.toml` under `root`, each set it names read as its members
+    /// ([`Carried::through`]). A workspace that has not created the
     /// crate yet builds no binary to carry a feature, so it carries the
     /// default set alone; a `Cargo.toml` that declares no `php_bundle`
     /// dependency is refused, since that is a binary this module no longer
     /// knows how to read.
     pub fn binary(root: &Path) -> Result<Carried> {
         let path = root.join(BINARY).join("Cargo.toml");
-        match crate::read_if(&path)? {
-            Some(text) => Carried::declared(&text).with_context(|| format!("{}", path.display())),
-            None => Ok(Carried::default()),
-        }
+        let Some(text) = crate::read_if(&path)? else {
+            return Ok(Carried::default());
+        };
+        let declared = Carried::declared(&text).with_context(|| format!("{}", path.display()))?;
+        Ok(declared.through(&bundle_features(root)?))
     }
 
     /// What `php-linked` carries, the engine the witness and crosscheck
     /// lanes serve a snippet through (harness §8, revision 84): it is
     /// [`BINARY`]'s crate built with the bundle's `linked` set, so what
-    /// that crate declares and every feature the set turns on, read from
+    /// that crate declares and every member of the set, read from
     /// `php_bundle`'s own `Cargo.toml` under `root`.
     pub(crate) fn linked(root: &Path) -> Result<Carried> {
+        let features = bundle_features(root)?;
         let mut carried = Carried::binary(root)?;
-        let path = root.join("crates").join(BUNDLE).join("Cargo.toml");
-        let Some(text) = crate::read_if(&path)? else {
-            return Ok(carried);
-        };
-        let table: toml::Table =
-            toml::from_str(&text).with_context(|| format!("{}", path.display()))?;
-        let set = table
-            .get("features")
-            .and_then(|features| features.get(LINKED))
-            .and_then(Value::as_array);
-        carried.features.extend(
-            set.into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_owned),
-        );
+        members(&features, LINKED, &mut carried.features);
         Ok(carried)
+    }
+
+    /// This build with each set among its features read as its members.
+    fn through(self, features: &toml::Table) -> Carried {
+        let mut carried = Carried::default();
+        for name in &self.features {
+            members(features, name, &mut carried.features);
+        }
+        carried
     }
 
     /// The features a crate's `Cargo.toml` turns on in its `php_bundle`
@@ -125,6 +123,43 @@ impl Carried {
     }
 }
 
+/// The bundle's `[features]` under `root`, empty where the crate is not
+/// created yet.
+fn bundle_features(root: &Path) -> Result<toml::Table> {
+    let path = root.join("crates").join(BUNDLE).join("Cargo.toml");
+    let Some(text) = crate::read_if(&path)? else {
+        return Ok(toml::Table::new());
+    };
+    let mut table: toml::Table =
+        toml::from_str(&text).with_context(|| format!("{}", path.display()))?;
+    Ok(match table.remove("features") {
+        Some(Value::Table(features)) => features,
+        _ => toml::Table::new(),
+    })
+}
+
+/// The features a build turning `name` on carries, into `into`: a feature
+/// whose every entry is another of the bundle's names a set, as `host`,
+/// `linked` and `default` do, and stands for its members, each read the
+/// same way; any other feature is itself. An extension's feature switches
+/// on a dependency of its own, so what it requires beside it is not read
+/// here, as a row's `feature` names the extension alone.
+fn members(features: &toml::Table, name: &str, into: &mut BTreeSet<String>) {
+    let set: Option<Vec<&str>> = features
+        .get(name)
+        .and_then(Value::as_array)
+        .map(|on| on.iter().filter_map(Value::as_str).collect())
+        .filter(|on: &Vec<&str>| on.iter().all(|entry| features.contains_key(*entry)));
+    match set {
+        Some(on) => on
+            .into_iter()
+            .for_each(|member| members(features, member, into)),
+        None => {
+            into.insert(name.to_owned());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BINARY, Carried};
@@ -155,6 +190,38 @@ mod tests {
         assert_eq!(bare, Carried::default());
         let root = crate::scratch::Tree::new("carried-absent").unwrap();
         assert_eq!(Carried::binary(&root).unwrap(), Carried::default());
+    }
+
+    /// A set the binary names is read as its members, a set inside it the
+    /// same way, and an extension's feature as itself whatever it requires:
+    /// the binary turning `host` on carries `pdo_mysql` and not `mysqlnd`,
+    /// and `php-linked` what `linked` adds to it.
+    #[test]
+    fn a_set_the_build_names_is_read_as_its_members() {
+        let root = crate::scratch::Tree::new("carried-sets").unwrap();
+        for dir in [BINARY, "crates/php_bundle"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        root.write(
+            "crates/php_bundle/Cargo.toml",
+            "[features]\nhost = [\"core\", \"bz2\"]\ncore = [\"pdo_mysql\"]\n\
+             linked = [\"host\", \"zend_test\"]\npdo_mysql = [\"dep:p\", \"mysqlnd\"]\n\
+             mysqlnd = [\"dep:m\"]\nbz2 = [\"dep:b\"]\nzend_test = [\"dep:z\"]\n",
+        )
+        .unwrap();
+        root.write(
+            format!("{BINARY}/Cargo.toml"),
+            "[dependencies]\nphp_bundle = { path = \"x\", features = [\"host\"] }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            Carried::binary(&root).unwrap(),
+            Carried::turning_on(&["pdo_mysql", "bz2"])
+        );
+        assert_eq!(
+            Carried::linked(&root).unwrap(),
+            Carried::turning_on(&["pdo_mysql", "bz2", "zend_test"])
+        );
     }
 
     /// The binary's crate is where [`BINARY`] says, and every feature its

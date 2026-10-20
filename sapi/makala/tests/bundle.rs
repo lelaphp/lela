@@ -46,8 +46,8 @@ fn the_bundle_is_the_clis_without_pcntl_and_posix() {
 }
 
 /// The engine makala starts carries neither `pcntl` nor `posix`, though
-/// the build this test runs under turns both features on, as a build of
-/// the workspace beside the CLI does (`[dev-dependencies]`): the host
+/// the build turns both features on, as the bundle's `host` does for every
+/// host (#3081): the host
 /// leaves them out as a host that serves on threads
 /// (`php_bundle::Serving::Threads`, design §7.2), and its configure line
 /// says so.
