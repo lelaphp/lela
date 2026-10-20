@@ -421,6 +421,33 @@ params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 
+# A program's first line reads what opcache's regime laid down for it
+# (#3008): the request's path copies, `X-Powered-By` on the header list, on
+# a miss the program's file opened as a stream with the stream's
+# `opened_path` as its `included_files` key, and on the child's first
+# request the master's `CWDG(cwd)`, which the first request frees; so each
+# program reads its miss and then its hit, and the first request 96 above
+# the next miss. The files are laid down just before the requests, inside
+# `opcache.file_update_protection`, under which php compiles every request
+# into its heap, the recorded approximation of design §5.13; the entry is
+# pinned to 0 as the witness recipe pins it.
+[[line]]
+name = "a-program-s-first-line-reads-what-opcache-laid-for-it"
+args = ["-R", "-n", "-F", "-d", "opcache.file_update_protection=0", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\n", "one.php" = '<?php echo memory_get_usage(), "\n";', "two.php" = '<?php echo memory_get_usage(), " ", memory_get_usage(true), "\n";' }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/one.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/one.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/two.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/two.php"], ["REQUEST_METHOD", "GET"]]
+
 # The realpath cache is the child's, `CWDG(realpath_cache)` a process
 # global (#2941): the second request lists what the first entered, each
 # entry's time to live counting from the first request, a second earlier,

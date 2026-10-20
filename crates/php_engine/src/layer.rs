@@ -62,6 +62,19 @@ pub struct StreamHooks {
     /// The stream opcache's `zend_stream_open` of a file it holds makes
     /// and frees: its resource's number spent.
     pub spend: fn(&mut Request),
+    /// `php_fopen_primary_script`'s `zend_stream_open` of the host's
+    /// program where opcache does not hold it
+    /// (`Z/main/fopen_wrappers.c:468-473`): the file opened as
+    /// `php_stream_open_for_zend_ex` opens it, a stream among the
+    /// request's resources, held as the host's `zend_file_handle` until
+    /// [`StreamHooks::close_primary`], its fd inherited by a process the
+    /// request execs meanwhile; the `*opened_path` its opener set, which
+    /// `EG(included_files)` holds the program under, or `None` where the
+    /// file did not open. The `Err` is what the open threw.
+    pub open_primary: fn(&mut Request, &[u8]) -> Result<Option<PhpString>, Thrown>,
+    /// `zend_destroy_file_handle` over what
+    /// [`StreamHooks::open_primary`] opened.
+    pub close_primary: fn(&mut Request),
     /// `cli_register_file_handles`: the streams over the host's three
     /// standard handles, `STDIN`, `STDOUT` and `STDERR` in that order, or
     /// `None` where one of them could not be opened; with `true` once the

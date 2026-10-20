@@ -146,6 +146,50 @@ fn a_lane_names_the_engine_only_directive() {
     assert_eq!(Lane::ExitFuzz.ini(), "jit.mode=exit-fuzz");
 }
 
+/// Under a tier's lane with no binary named, the binary under test is
+/// `php` built with `php_bundle/jit` into `target/featured/jit`, where the
+/// witness lane builds it (#2721), and the reading's `run by` names that
+/// binary as it names any engine. Before #3053 `--jit force` resolved the
+/// default build, which binds no tier, so its reading was the plain
+/// lane's under another name. A variant's row is built with its feature
+/// and the tier's; a named binary, the control and a run with no lane
+/// build nothing.
+#[test]
+fn a_tier_lane_without_engine_resolves_the_build_with_the_tier() {
+    let root = Path::new("/workspace");
+    let lane = |engine| Ask {
+        lane: Some(Lane::Force),
+        engine,
+        ..Ask::default()
+    };
+    let tier = Build::under_test(&lane(Engine::Built)).expect("--jit force builds its engine");
+    assert_eq!(tier.features(), "php_bundle/jit");
+    assert_eq!(tier.target_dir(root), root.join("target/featured/jit"));
+    assert_eq!(tier.target_dir(root), profile::featured(root, "jit"));
+    let row = Build::row("zend_test", Some(&tier));
+    assert_eq!(row.features(), "php_bundle/zend_test,php_bundle/jit");
+    assert_eq!(
+        row.target_dir(root),
+        root.join("target/featured/zend_test+jit")
+    );
+    let plain = Build::row("zend_test", None);
+    assert_eq!(
+        plain.target_dir(root),
+        root.join("target/featured/zend_test")
+    );
+    for ask in [
+        lane(Engine::Named(PathBuf::from("/usr/bin/php"))),
+        lane(Engine::Control),
+        Ask {
+            unkept: true,
+            ..lane(Engine::Built)
+        },
+        Ask::default(),
+    ] {
+        assert_eq!(Build::under_test(&ask), None, "{ask:?}");
+    }
+}
+
 #[test]
 fn a_test_that_meets_its_expect_section_passes() {
     if oracle().is_none() {

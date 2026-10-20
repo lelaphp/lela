@@ -426,6 +426,9 @@ fn describe(site: &Site, client: &Client, is_static: bool) -> RequestDescription
             no_headers: false,
             response_code: 200,
             head_ini: &[],
+            // The server's `path_translated` is the request's own,
+            // `pestrndup`'d off the request's heap.
+            path_copies: 0,
         }),
         script_name: if is_static {
             None

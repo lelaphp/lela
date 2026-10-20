@@ -466,10 +466,9 @@ impl Epochs {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Arc<Arena>> {
-        match self.current.lock() {
-            Ok(current) => current,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        self.current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The arena of the epoch a request starting now would enter, for

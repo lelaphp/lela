@@ -8,7 +8,7 @@ use crate::api::layer::{Face as _, IncludeSource, StreamHooks, scheme_length};
 
 use crate::api::raising::Thrown;
 use crate::api::request::{Request, ScannerFile, Streams, Unresolved, UrlStat};
-use crate::api::values::{Resource, Value};
+use crate::api::values::{PhpString, Resource, Value};
 use crate::state::Layer;
 use crate::streams::{Located, OpenOptions, StreamLayer};
 
@@ -19,6 +19,8 @@ pub const STREAM_HOOKS: StreamHooks = StreamHooks {
     open,
     resolve_path,
     spend,
+    open_primary,
+    close_primary,
     standard_handles: crate::streams::standard_handles,
     get_line,
     state: crate::state::engine_state,
@@ -50,6 +52,46 @@ fn open(req: &mut Request, path: &[u8]) -> Result<Option<IncludeSource>, Thrown>
             opened_path,
         })
     })
+}
+
+/// [`StreamHooks::open_primary`]: the program opened as
+/// `php_fopen_primary_script` opens it ([`ScannerFile::open_held`]) and
+/// held as the host's `zend_file_handle`, its `*opened_path` handed back;
+/// `None` where it did not open. The `Err` is what the open threw.
+///
+/// ```php
+/// var_dump(get_resources(), fopen('php://memory', 'r'));
+/// ```
+/// ```request fpm
+/// --GET--
+/// q=1
+/// ```
+/// ```expect
+/// X-Powered-By: PHP/8.5.9
+/// Content-type: text/html; charset=UTF-8
+///
+/// array(1) {
+///   [1]=>
+///   resource(1) of type (stream)
+/// }
+/// resource(3) of type (stream)
+/// ```
+fn open_primary(req: &mut Request, path: &[u8]) -> Result<Option<PhpString>, Thrown> {
+    let Some(fh) = ScannerFile::open_held(req, path)? else {
+        return Ok(None);
+    };
+    let opened_path = fh.opened_path();
+    req.streams().primary = Some(fh);
+    Ok(opened_path)
+}
+
+/// [`StreamHooks::close_primary`]: `zend_destroy_file_handle` over the
+/// program's `zend_file_handle`, its stream closed and its
+/// `*opened_path` given up.
+fn close_primary(req: &mut Request) {
+    if let Some(fh) = req.streams().primary.take() {
+        fh.destroy(req);
+    }
 }
 
 /// The stream opcache's `zend_stream_open` of a file it holds opens and

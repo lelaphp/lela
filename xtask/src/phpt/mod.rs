@@ -233,6 +233,11 @@ impl Lane {
     fn ini(self) -> String {
         format!("jit.mode={}", self.as_str())
     }
+
+    /// The bundle's feature the lane's engine is built with: `jit.mode`
+    /// reaches the compiled tier only in a `php` built with
+    /// `php_bundle/jit`, the build that binds `php_bundle::Tier` (#3053).
+    const FEATURE: &str = "jit";
 }
 
 /// One directory of the corpus: where it stands in the pinned tree, and
@@ -1038,7 +1043,8 @@ pub struct Ask {
 pub enum Engine {
     /// The engine's own: the build cargo puts where `Runner::resolve`
     /// looks, or for a subset whose row names an oracle variant the build
-    /// with the row's feature (#2029).
+    /// with the row's feature (#2029); under a tier's lane, the build with
+    /// the tier's feature, and the row's beside it (#3053).
     #[default]
     Built,
     /// The binary at this path: a pinned php's is the runner's control of
@@ -1350,7 +1356,9 @@ impl Side<'_, '_> {
 /// so each variant resolves it under its own pin (#1782). Where none is
 /// named, a subset whose row names a variant and a feature the binary
 /// under test does not turn on runs on the engine built with that feature
-/// (#2029), the build's failure refusing it.
+/// (#2029), the build's failure refusing it. Under a tier's lane the
+/// binary under test is the engine built with the tier (#3053), and its
+/// build's failure refuses the run.
 struct Runners<'v> {
     main: Runner,
     variants: BTreeMap<&'v str, Runner>,
@@ -1365,10 +1373,18 @@ impl<'v> Runners<'v> {
         ask: &Ask,
         subsets: &[Subset],
     ) -> Result<Runners<'v>> {
+        let tier = Build::under_test(ask);
+        let tiered = tier
+            .as_ref()
+            .map(|build| build.run(root, "the binary under test"))
+            .transpose()
+            .map_err(|why| anyhow::anyhow!("{why}"))?;
         // The control is each oracle's own php, standing for the engine
         // under its own pin (#1970).
         let resolve = |pin: &Pin| match &ask.engine {
-            Engine::Built => Runner::resolve(root, pin, None),
+            Engine::Built => tiered
+                .clone()
+                .map_or_else(|| Runner::resolve(root, pin, None), Ok),
             Engine::Named(path) => Runner::resolve(root, pin, Some(path)),
             Engine::Control => Ok(Runner::Control(pin.oracle.path.clone())),
         };
@@ -1379,7 +1395,9 @@ impl<'v> Runners<'v> {
         // `--unkept` is the control's, refused on the engine's own build
         // before anything is built for it.
         let featured = match ask.engine {
-            Engine::Built if !ask.unkept => featured(root, manifest, variants, subsets)?,
+            Engine::Built if !ask.unkept => {
+                featured(root, manifest, variants, subsets, tier.as_ref())?
+            }
             Engine::Built | Engine::Named(_) | Engine::Control => BTreeMap::new(),
         };
         // The served subset's host, built now in the lanes' profile, where
@@ -1435,7 +1453,8 @@ impl<'v> Runners<'v> {
 /// row with a feature and no variant is the nightly lane's, and a variant
 /// whose php is not here runs nothing, so nothing is built for it. Built
 /// by cargo now, the engine is the tree's, and it is not held to the
-/// tree by when it was written as a binary found standing is.
+/// tree by when it was written as a binary found standing is. Under a
+/// tier's lane each is built with the tier's feature too.
 ///
 /// [`profile::featured`]: crate::oracle::profile::featured
 fn featured(
@@ -1443,6 +1462,7 @@ fn featured(
     manifest: &Manifest,
     variants: &BTreeMap<String, Pin>,
     subsets: &[Subset],
+    tier: Option<&Build<'_>>,
 ) -> Result<BTreeMap<String, Result<Runner, String>>> {
     let carried = Carried::binary(root)?;
     let mut built = BTreeMap::new();
@@ -1459,11 +1479,60 @@ fn featured(
         if carried.carries(krate) || !here || built.contains_key(feature) {
             continue;
         }
-        let into = profile::featured(root, feature);
-        let features = format!("{BUNDLE}/{feature}");
+        let engine = Build::row(feature, tier).run(root, &krate.name);
+        built.insert(feature.clone(), engine);
+    }
+    Ok(built)
+}
+
+/// An engine the run builds for itself: `php` with these features of the
+/// bundle on, in the lanes' profile, into a target directory of its own
+/// ([`profile::featured`]) so the default build stands (#2029). A row's
+/// feature beside its oracle variant, the tier's under a tier's lane
+/// (#3053), or both; the tier's alone is where the witness lane builds
+/// it (#2721).
+///
+/// [`profile::featured`]: crate::oracle::profile::featured
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Build<'f>(Vec<&'f str>);
+
+impl<'f> Build<'f> {
+    /// The binary under test `ask` has the run build: the engine with the
+    /// tier's feature under a tier's lane, unless a binary is named or the
+    /// run is the control's; `--unkept` is the control's, and refused
+    /// under a lane before anything is built.
+    fn under_test(ask: &Ask) -> Option<Build<'f>> {
+        let built = ask.engine == Engine::Built && !ask.unkept;
+        ask.lane
+            .filter(|_| built)
+            .map(|_| Build(vec![Lane::FEATURE]))
+    }
+
+    /// The engine a row's subset runs on: its feature on, and the tier's
+    /// beside it where the binary under test is built with one.
+    fn row(feature: &'f str, tier: Option<&Build<'f>>) -> Build<'f> {
+        let mut features = vec![feature];
+        features.extend(tier.map_or(&[][..], |tier| &tier.0));
+        Build(features)
+    }
+
+    /// The features as cargo's `--features` takes them.
+    fn features(&self) -> String {
+        let named: Vec<String> = self.0.iter().map(|f| format!("{BUNDLE}/{f}")).collect();
+        named.join(",")
+    }
+
+    /// The target directory the engine is built into.
+    fn target_dir(&self, root: &Path) -> PathBuf {
+        profile::featured(root, &self.0.join("+"))
+    }
+
+    /// The engine built now, saying for whom and what it took; a build
+    /// that fails is the reason that refuses what runs on it.
+    fn run(&self, root: &Path, runs: &str) -> Result<Runner, String> {
+        let (features, into) = (self.features(), self.target_dir(root));
         println!(
-            "phpt: {} runs on the engine built with {features}, in {}",
-            krate.name,
+            "phpt: {runs} runs on the engine built with {features}, in {}",
             into.display()
         );
         let started = std::time::Instant::now();
@@ -1472,12 +1541,10 @@ fn featured(
             "phpt: the engine with {features} took {:.1}s to build",
             started.elapsed().as_secs_f64()
         );
-        let engine = engine
+        engine
             .map(Runner::Engine)
-            .map_err(|why| format!("the engine with {features} is not built: {why:#}"));
-        built.insert(feature.clone(), engine);
+            .map_err(|why| format!("the engine with {features} is not built: {why:#}"))
     }
-    Ok(built)
 }
 
 /// The subsets `ask` names: one crate's or directory's, the whole corpus,

@@ -244,6 +244,17 @@ impl Request {
             return Ok(());
         }
         let held = self.string(path)?;
+        self.note_included_held(held)
+    }
+
+    /// [`Request::note_included`] over `held`, a string whose one owner
+    /// the table takes: one another place holds already, so no string is
+    /// made; given up where the table has its path.
+    pub(crate) fn note_included_held(&mut self, held: PhpString) -> Result<(), Thrown> {
+        if self.included_files.contains(held.as_bytes()) {
+            self.release(crate::api::values::Value::string(held));
+            return Ok(());
+        }
         let mut table = std::mem::take(&mut self.included_files.table);
         let added = table.add(self);
         self.included_files.table = table;
