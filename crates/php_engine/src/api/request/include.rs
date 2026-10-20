@@ -1136,6 +1136,27 @@ impl Request {
     /// Deprecated: Non-canonical cast (integer) is deprecated, use the (int) cast instead in %s on line 1
     /// ParseError
     /// ```
+    ///
+    /// A file's compile error bails out of `compile_file` past its emit,
+    /// so its record stands for the rest of the request; an `eval`'s
+    /// leaves `compile_string`, which began none, so what a shutdown
+    /// function raises after it is shown, and `error_get_last()` answers
+    /// that rather than the fatal.
+    ///
+    /// ```php
+    /// register_shutdown_function(function () {
+    ///     echo $undefined, "after\n";
+    ///     echo error_get_last()["message"], "\n";
+    /// });
+    /// eval('class A { public int $a = null; }');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Default value for property of type int may not be null. Use the nullable type ?int to allow null default value in %s : eval()'d code on line 1
+    ///
+    /// Warning: Undefined variable $undefined in %s on line %d
+    /// after
+    /// Undefined variable $undefined
+    /// ```
     pub(super) fn refused_include(
         &mut self,
         refused: &CompileError,
@@ -1173,14 +1194,18 @@ impl Request {
             }
             return thrown;
         }
-        let recording = self.begin_recording();
-        if kind == SourceKind::File {
+        // `compile_file` records what the file's compile raises, its
+        // fatal last; `compile_string` begins no record.
+        let recording = (kind == SourceKind::File).then(|| self.begin_recording());
+        if recording.is_some() {
             for raised in raised {
                 self.note_error_in(raised.level, &raised.message, path, raised.line);
             }
         }
         self.end_in_compile_time(refused.level, &refused.message, path, refused.line);
-        self.emit_recorded(recording);
+        if let Some(recording) = recording {
+            self.emit_recorded(recording);
+        }
         Thrown::of(None)
     }
 }
