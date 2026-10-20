@@ -160,13 +160,7 @@ impl JitEngine {
         let mut policy = policy::Policy::from_ini(ini, &mut started);
         let backend = (policy.mode() != policy::Mode::Off)
             .then(|| backend(&policy, enter::wrapped::symbols()))
-            .and_then(|made| {
-                made.map_err(|lower::Unsupported(why)| {
-                    policy.off();
-                    started.push(policy::Note::Off(policy::OffBecause::NoBackend(why)));
-                })
-                .ok()
-            });
+            .and_then(|made| made.map_err(|_| policy.off()).ok());
         let perf = if policy.mode() == policy::Mode::Off {
             table::Outputs::none()
         } else {
@@ -230,22 +224,19 @@ mod tests {
         assert_eq!(lane.shared.policy.mode(), Mode::Force);
     }
 
-    /// A host with no `Backend` runs the tier `Off`, and its start says
-    /// why (`jit-design.md` §4.3).
+    /// A host with no `Backend` runs the tier `Off` (`jit-design.md`
+    /// §4.3) and reads no `opcache.jit_debug` bit, as a php built with no
+    /// compiled tier has none: its start says nothing.
     #[test]
     fn a_host_with_no_backend_runs_off() {
-        let none = JitEngine::over(&ini(&[("opcache.jit", "tracing")]), |_, _| {
+        let asked = [("opcache.jit", "tracing"), ("opcache.jit_debug", "0xfffff")];
+        let none = JitEngine::over(&ini(&asked), |_, _| {
             Err(crate::lower::Unsupported("a test's host"))
         });
         assert_eq!(none.shared.policy.mode(), Mode::Off);
         assert!(none.shared.backend.is_none());
-        let said: Vec<String> = none
-            .shared
-            .started
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        assert_eq!(said, ["JIT: off: no backend: a test's host"]);
+        assert!(!none.shared.policy.debugs());
+        assert!(none.shared.started.is_empty());
     }
 
     /// The start's lines are written once, by the first request, and only
@@ -264,5 +255,26 @@ mod tests {
         );
         let second = scratch.serve(&engine, "echo 1;");
         assert_eq!(String::from_utf8_lossy(&second.stderr), "");
+    }
+
+    /// With its compiled tier disabled php writes no `opcache.jit_debug` line
+    /// whatever the bits ask (`gh13232.phpt`), and neither does a tier
+    /// that runs `Off` for any reason.
+    #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+    #[test]
+    fn a_tier_that_runs_off_writes_no_line_whatever_jit_debug_asks() {
+        for asked in [
+            &[("opcache.jit", "disable")][..],
+            &[("opcache.jit", "off")],
+            &[("opcache.jit", "1245")],
+            &[("opcache.jit", "tracing"), ("opcache.jit_buffer_size", "0")],
+            &[("opcache.jit", "disable"), ("jit.compile", "sideways")],
+        ] {
+            let mut ini = asked.to_vec();
+            ini.push(("opcache.jit_debug", "0xfffff"));
+            let served = testing::serve::<Lane>(&ini, "echo \"Done\\n\";");
+            assert_eq!(testing::stdout(&served), "Done\n");
+            assert_eq!(String::from_utf8_lossy(&served.stderr), "", "{asked:?}");
+        }
     }
 }

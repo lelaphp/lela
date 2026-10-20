@@ -9,8 +9,8 @@ use php_engine::tier::{Epoch, FuncRef, SafepointIdx, StartupIni, Word};
 use php_unit::{OpArray, OplineIdx, Unit};
 
 use super::{
-    Claim, Compile, Holder, JitDebug, Mode, Note, OffBecause, Outcome, Place, Policy, Setting,
-    State, TraceEvent, bad_stop, bump, claim, read, settle,
+    Claim, Compile, Holder, JitDebug, Mode, Note, Outcome, Place, Policy, Setting, State,
+    TraceEvent, bad_stop, bump, claim, read, settle,
 };
 use crate::record::{Start, Stop};
 use crate::table::TraceId;
@@ -104,7 +104,8 @@ fn opcache_jit_is_read_as_php_reads_it() {
 
 /// `function` and any trigger but `HOT_TRACE` trace as tracing does and say so
 /// once; `HOT_TRACE` says nothing; `disable`, `off`, a refused setting and
-/// a zero buffer are `Off` with one line each.
+/// a zero buffer are `Off`, say nothing and read no `opcache.jit_debug`
+/// bit, as php's compiled tier that never started reads none (`gh13232.phpt`).
 #[test]
 fn a_setting_maps_to_its_mode_with_one_line_where_it_is_not_tracing_as_asked() {
     assert_eq!(read_ini(&[("opcache.jit", "tracing")]), {
@@ -117,23 +118,24 @@ fn a_setting_maps_to_its_mode_with_one_line_where_it_is_not_tracing_as_asked() {
     let (policy, notes) = read_ini(&[("opcache.jit", "1235")]);
     assert_eq!(policy.mode(), Mode::Tracing);
     assert_eq!(notes, [Note::AsTracing { crto: 1235 }]);
-    for (setting, why) in [
-        ("disable", OffBecause::Disabled),
-        ("off", OffBecause::NotOn),
-        ("1245", OffBecause::Invalid),
+    for asked in [
+        [
+            ("opcache.jit", "disable"),
+            ("opcache.jit_buffer_size", "64M"),
+        ],
+        [("opcache.jit", "off"), ("opcache.jit_buffer_size", "64M")],
+        [("opcache.jit", "1245"), ("opcache.jit_buffer_size", "64M")],
+        [("opcache.jit", "on"), ("opcache.jit_buffer_size", "0")],
     ] {
-        let (policy, notes) = read_ini(&[("opcache.jit", setting)]);
+        let mut ini = asked.to_vec();
+        ini.push(("opcache.jit_debug", "0xfffff"));
+        let (policy, notes) = read_ini(&ini);
         assert_eq!(
-            (policy.mode(), notes),
-            (Mode::Off, vec![Note::Off(why)]),
-            "{setting}"
+            (policy.mode(), notes, policy.debugs()),
+            (Mode::Off, vec![], false),
+            "{asked:?}"
         );
     }
-    let (policy, notes) = read_ini(&[("opcache.jit", "on"), ("opcache.jit_buffer_size", "0")]);
-    assert_eq!(
-        (policy.mode(), notes),
-        (Mode::Off, vec![Note::Off(OffBecause::NoBuffer)])
-    );
 }
 
 /// php's defaults with nothing set; its bounds keep the default for a
@@ -169,6 +171,7 @@ fn the_directives_take_phps_defaults_and_bounds_and_jit_mode_names_the_lane() {
         ("opcache.jit_max_recursive_returns", "4"),
         ("opcache.jit_max_trace_length", "3"),
         ("opcache.jit_debug", "0x3F000"),
+        ("opcache.jit", "tracing"),
     ]);
     assert_eq!(
         policy.threshold(Start::Loop),
@@ -344,7 +347,7 @@ fn the_sealed_word_reads_blacklisted_and_is_never_claimed() {
 /// after a root's lines under any of the four that end them.
 #[test]
 fn the_dump_writes_phps_trace_lines_under_their_bits() {
-    let (all, _) = read_ini(&[("opcache.jit_debug", "258048")]);
+    let (all, _) = read_ini(&[("opcache.jit", "tracing"), ("opcache.jit_debug", "258048")]);
     let (none, _) = read_ini(&[]);
     let at = Place {
         scope: Some(b"Foo"),

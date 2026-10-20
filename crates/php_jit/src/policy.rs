@@ -151,22 +151,12 @@ impl Setting {
     }
 }
 
-/// Why the tier runs with [`Mode::Off`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OffBecause {
-    /// `opcache.jit=disable`, php's default.
-    Disabled,
-    /// `opcache.jit` set up and not on.
-    NotOn,
-    /// An `opcache.jit` php refuses.
-    Invalid,
-    /// `opcache.jit_buffer_size` is zero.
-    NoBuffer,
-    /// The host has no `Backend` (`lower::Unsupported`): why.
-    NoBackend(&'static str),
-}
-
-/// A line the tier's start logs (`jit-design.md` §4, §4.7).
+/// A line the start of a tier that runs logs (`jit-design.md` §4,
+/// §4.7). A tier that runs [`Mode::Off`] logs none: php's compiled tier that never
+/// started reads no `opcache.jit_debug` bit, so with `opcache.jit=disable`
+/// php writes nothing whatever the bits ask (`gh13232.phpt`), and none
+/// for a tier set up and not on, a zero buffer or a refused setting, whose
+/// warning is the opcache extension's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Note {
     /// `function`, or a number whose trigger is not `HOT_TRACE`, runs as
@@ -180,8 +170,6 @@ pub(crate) enum Note {
         directive: &'static str,
         value: String,
     },
-    /// The tier runs off.
-    Off(OffBecause),
 }
 
 impl std::fmt::Display for Note {
@@ -195,13 +183,6 @@ impl std::fmt::Display for Note {
             Note::Unknown { directive, value } => {
                 write!(f, "JIT: {directive}={value} is not known; read as unset")
             }
-            Note::Off(why) => f.write_str(match why {
-                OffBecause::Disabled => "JIT: off: opcache.jit=disable",
-                OffBecause::NotOn => "JIT: off: opcache.jit is not on",
-                OffBecause::Invalid => "JIT: off: opcache.jit is invalid",
-                OffBecause::NoBuffer => "JIT: off: opcache.jit_buffer_size is 0",
-                OffBecause::NoBackend(why) => return write!(f, "JIT: off: no backend: {why}"),
-            }),
         }
     }
 }
@@ -306,7 +287,8 @@ impl Policy {
     /// `notes`. A value outside php's bounds reads as the default, as
     /// php's handlers keep it; `jit.mode`, where set, names the `Mode`
     /// whatever `opcache.jit` says, which is how the tier's lanes serve a
-    /// corpus.
+    /// corpus. A tier that runs `Off` reads no `opcache.jit_debug` bit,
+    /// as php's tier that never started reads none, so it writes no line.
     ///
     /// The directives as the oracle and the engine hold them under the
     /// recipe, which sets the hot counters to one and the trace bounds to
@@ -361,36 +343,24 @@ impl Policy {
             }
         };
         let asked = match (lane, setting) {
-            (Some(mode), _) => Ok(mode),
+            (Some(mode), _) => mode,
             (None, Setting::On { crto }) => {
                 if (crto / 10) % 10 != HOT_TRACE {
                     notes.push(Note::AsTracing { crto });
                 }
-                Ok(Mode::Tracing)
+                Mode::Tracing
             }
-            (None, Setting::Disable) => Err(OffBecause::Disabled),
-            (None, Setting::Off) => Err(OffBecause::NotOn),
-            (None, Setting::Invalid) => Err(OffBecause::Invalid),
+            (None, Setting::Disable | Setting::Off | Setting::Invalid) => Mode::Off,
         };
-        let mode = match asked.and_then(|mode| {
-            if buffer_size > 0 {
-                Ok(mode)
-            } else {
-                Err(OffBecause::NoBuffer)
-            }
-        }) {
-            Ok(mode) => {
-                if matches!(mode, Mode::Force | Mode::ExitFuzz) {
-                    notes.push(Note::Lane(mode));
-                }
-                mode
-            }
-            Err(why) => {
-                notes.push(Note::Off(why));
-                Mode::Off
-            }
+        let mode = if buffer_size > 0 { asked } else { Mode::Off };
+        if matches!(mode, Mode::Force | Mode::ExitFuzz) {
+            notes.push(Note::Lane(mode));
+        }
+        let debug = if mode == Mode::Off {
+            JitDebug::default()
+        } else {
+            JitDebug(u32::try_from(long(ini, "opcache.jit_debug", 0)).unwrap_or(0))
         };
-        let debug = JitDebug(u32::try_from(long(ini, "opcache.jit_debug", 0)).unwrap_or(0));
         // A root's lines after its start are php's in the order its
         // request writes them, which a worker could not keep.
         let ends = debug.any(
@@ -440,9 +410,11 @@ impl Policy {
     }
 
     /// The tier off, as a host with no `Backend` runs it
-    /// (`jit-design.md` §4.3).
+    /// (`jit-design.md` §4.3), reading no `opcache.jit_debug` bit, as a
+    /// php built with no compiled tier has none to read.
     pub(crate) fn off(&mut self) {
         self.mode = Mode::Off;
+        self.debug = JitDebug::default();
     }
 
     /// How the tier runs.

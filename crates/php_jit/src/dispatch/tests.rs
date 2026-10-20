@@ -621,7 +621,10 @@ mod ran {
     /// the interpreter goes on.
     #[test]
     fn run_follows_a_link_and_resumes_the_frame_a_cold_exit_landed() {
-        let engine = testing::engine::<Running>(&[("opcache.jit_debug", "32768")]);
+        let engine = testing::engine::<Running>(&[
+            ("opcache.jit", "tracing"),
+            ("opcache.jit_debug", "32768"),
+        ]);
         let program = r#"function f() { echo "a"; echo "b"; echo "c"; echo "d"; } f();"#;
         let scratch = Scratch::new();
         let (served, ran) = scratch.serve_kept::<Ran>(&engine, program);
