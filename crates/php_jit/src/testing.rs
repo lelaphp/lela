@@ -14,6 +14,8 @@ use php_unit::decl::{IniDecl, Name};
 
 use crate::policy::Policy;
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64", not(miri)))]
+pub(crate) mod bodies;
 pub(crate) mod goldens;
 pub(crate) mod records;
 

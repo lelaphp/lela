@@ -190,8 +190,9 @@ fn lines(served: &php_engine::test::Served) -> Vec<String> {
 
 /// A destructor that runs a hot loop inside a recording: the loop is
 /// bumped and not recorded, so one `TRACE start` is written, the root's;
-/// the next request records a root of its own, the function the first
-/// recorded inside its root.
+/// the next request enters that root, which leaves where its call's
+/// cache slot, the request's, holds no callee yet, and records a root
+/// of its own, the function the first recorded inside its root.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_destructors_hot_loop_inside_a_recording_starts_no_second_trace() {
@@ -217,6 +218,7 @@ fn a_destructors_hot_loop_inside_a_recording_starts_no_second_trace() {
     assert_eq!(
         lines(&second),
         [
+            "     TRACE 1 exit 0 $main() body.php:4",
             "---- TRACE 2 start (enter) f() body.php:3",
             "---- TRACE 2 stop (return)",
             "---- TRACE 2 compiled",
@@ -232,8 +234,8 @@ fn a_destructors_hot_loop_inside_a_recording_starts_no_second_trace() {
 /// `zend_jit_stop_counter_handlers` stops the rest. php under the
 /// recipe's hot counters with `opcache.jit_max_root_traces=3` writes the
 /// same for this program's `b`, its third trace, a side trace of `a`'s
-/// loop taking the second, which nothing here grows until a trace is
-/// entered (#2959):
+/// loop taking the second, which nothing here grows yet (#2964): `a`'s
+/// compiled loop leaves where it ends, and the exit's line is written:
 /// `---- TRACE 3 start (enter) b() …:3`, `---- TRACE 3 abort (too many
 /// traces)`, `---- TRACE 3 blacklisted`, and nothing for `c` or `d`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -259,6 +261,7 @@ fn a_full_table_refuses_one_root_and_stops_the_counters() {
             "---- TRACE 1 stop (loop)",
             "---- TRACE 1 compiled",
             "",
+            "     TRACE 1 exit 3 a() body.php:2",
             "---- TRACE 2 start (enter) b() body.php:3",
             "---- TRACE 2 abort (too many traces)",
             "---- TRACE 2 blacklisted",
@@ -345,7 +348,9 @@ fn the_exclusion_is_clear_after_a_recording_a_panic_unwound() {
 /// unwinds the recording and clears the exclusion, so the next hot
 /// `work()` is recorded (revision 30). The first request records
 /// `$main`, inside which nothing else roots; the second finds `$main`
-/// numbered and roots in the fiber.
+/// numbered and roots in the fiber, and its last `work()` enters the
+/// trace the one before compiled, whose end writes no exit line, as php's
+/// return to the interpreter at a trace's end writes none.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_fiber_suspended_inside_a_recording_keeps_its_resumer_from_recording_until_destroyed() {
@@ -444,7 +449,8 @@ fn under_off_no_word_is_written() {
 /// the same `TRACE 2 start (loop) $main() …:4` line, after a return root
 /// at `$main`'s landing past the `eval` that aborts at the inner loop
 /// (`zend_jit_trace_setup_ret_counter`), which this tier does not root
-/// yet, and before the side trace its compiled loop exits into.
+/// yet, and before the side trace its compiled loop exits into, where
+/// this tier, which grows none yet (#2964), writes the exit's line.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_main_loop_no_call_activates_is_a_root_at_its_header() {
@@ -464,6 +470,172 @@ fn a_main_loop_no_call_activates_is_a_root_at_its_header() {
             "---- TRACE 2 stop (loop)",
             "---- TRACE 2 compiled",
             "",
+            "     TRACE 2 exit 3 $main() body.php:4",
         ]
     );
+}
+
+/// Under `jit.mode=exit-fuzz` every guard a compiled trace holds fails
+/// once, the loop's interrupt test among them, and the interpreter goes
+/// on at each landing to print what it prints under `force`: `a`'s two
+/// entry guards leave through the exit they share, the interrupt test and
+/// the guard on `$s` at the header through the one they share, the
+/// increment's overflow guard through its own, then the loop runs
+/// compiled to its end; the second call's trace links to it, its guards
+/// failed already, and leaves where the loop ends. A jump's direction is
+/// never failed: its exit lands where the jump it did not expect went.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn under_exit_fuzz_every_guard_fails_once_and_the_output_is_forces() {
+    let program = "function a($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $i; } return $s; }
+        echo a(10), a(20), \"\\n\";";
+    let exits = |served: &php_engine::test::Served| -> Vec<String> {
+        lines(served)
+            .into_iter()
+            .filter(|line| line.starts_with("     TRACE"))
+            .collect()
+    };
+    let force = testing::serve::<Lane>(&DUMPED, program);
+    assert_eq!(testing::stdout(&force), "45190\n");
+    assert_eq!(exits(&force), ["     TRACE 1 exit 3 a() body.php:2"; 2]);
+    let mut fuzzed = DUMPED.to_vec();
+    fuzzed[0] = ("jit.mode", "exit-fuzz");
+    let fuzz = testing::serve::<Lane>(&fuzzed, program);
+    assert_eq!(testing::stdout(&fuzz), "45190\n");
+    assert_eq!(
+        exits(&fuzz),
+        [0, 0, 1, 1, 2, 3, 3].map(|exit| format!("     TRACE 1 exit {exit} a() body.php:2"))
+    );
+}
+
+/// `run` from trace to trace (`jit-design.md` §4.9 *Tested*), on the one
+/// target whose arena maps code today: two traces assembled by hand, each
+/// serving one opline through a kernel that keeps the number of the
+/// trace that called it.
+#[cfg(all(target_os = "macos", target_arch = "aarch64", not(miri)))]
+mod ran {
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    use php_engine::tier::{
+        self, Extension, ExtensionBuilder, Fatal, Flow, FrameRef, Request, Site, Tier,
+    };
+
+    use super::super::run;
+    use crate::enter::tests::entered::numbered;
+    use crate::policy::{self, State};
+    use crate::record::Start;
+    use crate::table;
+    use crate::testing::bodies::{Numbered, answering, calling, compiled, landing};
+    use crate::testing::{self, Scratch, function_of, stdout};
+    use crate::types::Landing;
+
+    /// What `run` answered at `f`'s activation, and what became of the
+    /// cold exit's word.
+    #[derive(Debug, Default)]
+    struct Ran {
+        /// The two traces, by number: the first entered, the one it links to.
+        traces: Option<(u32, u32)>,
+        /// The numbers of the traces the kernel was called by, in order.
+        entered: Vec<u32>,
+        /// Where the flow `run` answered resumes: the frame was `f`'s, and
+        /// the opline it stands at.
+        resumed: Option<(bool, u32)>,
+        /// The cold exit word's state and heat after it was visited.
+        cold: Option<(State, u32)>,
+    }
+
+    /// The tier that, at `f`'s activation, publishes two traces and runs
+    /// the first: `linking` serves `f`'s opline 0 and leaves through an
+    /// exit landing at opline 1 that links to `cold`, which serves opline
+    /// 1 and leaves through an exit landing at opline 2 whose word is
+    /// cold.
+    struct Running;
+
+    impl Tier for Running {
+        fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+            if site != Site::Entry || function_of(req, frame).as_deref() != Some(b"f") {
+                return Flow::Continue;
+            }
+            let Some(shared) = req
+                .engine::<crate::JitEngine>()
+                .map(|engine| Arc::clone(&engine.shared))
+            else {
+                return Flow::Bail(Fatal::error("no engine state"));
+            };
+            let epoch = table::holding(req, &shared.policy, &shared.perf);
+            let Some(table) = table::of_epoch(&epoch) else {
+                return Flow::Bail(Fatal::error("no table"));
+            };
+            let number = (numbered::number as *const ()).addr();
+            let body = |at: u32| answering(calling(number, at, &[], true), 0);
+            let cold = compiled(&body(1), vec![landing(2, Landing::Plain)]);
+            let Ok(cold) = table.publish(cold, Start::Enter) else {
+                return Flow::Bail(Fatal::error("the cold trace was not published"));
+            };
+            let mut linked = landing(1, Landing::Plain);
+            linked.link = Some(cold);
+            let Ok(linking) = table.publish(compiled(&body(0), vec![linked]), Start::Enter) else {
+                return Flow::Bail(Fatal::error("the linking trace was not published"));
+            };
+            let flow = run(req, frame, linking, &shared);
+            let resumed = match flow {
+                Flow::Resume(at) => tier::frame(req, at).map(|view| (at == frame, view.opline().0)),
+                _ => None,
+            };
+            let word = table
+                .get(cold)
+                .and_then(|trace| trace.exits.first())
+                .map(|exit| {
+                    let heat = exit.word.halves()[0].load(Ordering::Relaxed);
+                    (policy::read(&exit.word), heat)
+                });
+            let entered = std::mem::take(&mut req.state::<Numbered>().0);
+            let ran = req.state::<Ran>();
+            ran.entered = entered;
+            ran.traces = Some((linking.get(), cold.get()));
+            ran.resumed = resumed;
+            ran.cold = word;
+            flow
+        }
+
+        fn extension() -> Option<Extension> {
+            let mut ini = crate::policy::ini();
+            ini.extend(testing::declared(&testing::OPCACHE_JIT));
+            Some(
+                ExtensionBuilder::default()
+                    .ini(ini)
+                    .engine_state(crate::JitEngine::new)
+                    .request_state::<Ran>()
+                    .request_state::<Numbered>()
+                    .build("jit"),
+            )
+        }
+    }
+
+    /// The linking trace is entered, then the one it links to on the
+    /// frame its exit landed, with no word read between; that one's exit
+    /// lands at a word nothing compiled, which is bumped and claimed by
+    /// nothing, php's `TRACE n exit m` line written for it, and `run`
+    /// answers `Resume` of the frame it landed, `f`'s at opline 2, where
+    /// the interpreter goes on.
+    #[test]
+    fn run_follows_a_link_and_resumes_the_frame_a_cold_exit_landed() {
+        let engine = testing::engine::<Running>(&[("opcache.jit_debug", "32768")]);
+        let program = r#"function f() { echo "a"; echo "b"; echo "c"; echo "d"; } f();"#;
+        let scratch = Scratch::new();
+        let (served, ran) = scratch.serve_kept::<Ran>(&engine, program);
+        assert_eq!(stdout(&served), "abcd");
+        let ran = ran.unwrap_or_default();
+        assert_eq!(ran.traces, Some((2, 1)));
+        assert_eq!(ran.entered, [2, 1]);
+        assert_eq!(ran.resumed, Some((true, 2)));
+        assert_eq!(ran.cold, Some((State::Cold, 1)));
+        let stderr = String::from_utf8_lossy(&served.stderr);
+        let line = stderr.lines().next().unwrap_or_default();
+        assert!(
+            line.starts_with("     TRACE 1 exit 0 f() ") && line.ends_with("body.php:2"),
+            "{stderr}"
+        );
+    }
 }
