@@ -42,8 +42,10 @@ jit = ["dep:php_jit"]
 # engine of `enabled()`, which an extension's own tests and the harness's
 # witness lane serve a snippet through. Off by default.
 test = ["php_ext/test"]
-# The set every host links (#1477, #3081): `default` and the twenty-eight
-# php's configure builds for the oracle beyond it. php builds an extension
+# The set every host links beside `default`, which a host's dependency
+# keeps on (#1477, #3081): the twenty-eight php's configure builds for the
+# oracle beyond it, and each crate `new-ext` has laid down since, which is
+# in both until a person prunes it from `default`. php builds an extension
 # of the `cli` class for the CLI, CGI, embed and phpdbg alike
 # (`EXT_CLI_STATIC`, `Z/build/php.m4`), links phpdbg from the CLI's objects
 # (`PHP_BINARY_OBJS`, `Z/sapi/phpdbg/config.m4`; #1450) and every other
@@ -68,8 +70,8 @@ test = ["php_ext/test"]
 # (#1566), `gettext` its `--with-gettext` (#1568), `readline` its
 # `--with-libedit` (#1567), `ffi` its `--with-ffi` (#1576) and `intl` its
 # `--enable-intl` (#1574). `new-ext` lists each crate it lays down here as
-# it does in `default`, so a person pruning one from `default` leaves it
-# where every host still links it (#1252).
+# it does in `default`, so the pruning leaves it where every host still
+# links it (#1252).
 host = [
     "pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar",
     "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm",
@@ -106,8 +108,8 @@ hash = ["dep:php_ext_hash"] # its link to standard is the md5, sha1 and crc32 co
 libxml = ["dep:php_ext_libxml", "standard"]
 lexbor = ["dep:php_ext_lexbor"]
 zlib = ["dep:php_ext_zlib"] # its link to standard is the stream natives the gz* aliases call, over the engine's streams (#2356)
-pcntl = ["dep:php_ext_pcntl"] # the `php` binary and the phpt lane alone (design §7.2, revision 35)
-posix = ["dep:php_ext_posix"] # the `php` binary and the phpt lane alone (design §7.2, revision 35)
+pcntl = ["dep:php_ext_pcntl"] # in `host`, and left out of the engine of a host that serves on threads (design §7.2, revisions 35 and 66)
+posix = ["dep:php_ext_posix"] # in `host`, and left out of the engine of a host that serves on threads (design §7.2, revisions 35 and 66)
 sockets = ["dep:php_ext_sockets"] # the `php` binary and the phpt lane, as php builds it with --enable-sockets (design §7.2, revision 36)
 phar = ["dep:php_ext_phar", "hash", "spl", "standard"] # phar.c: ZEND_MOD_REQUIRED("hash") and ("spl"); standard, its ZEND_MOD_OPTIONAL, whose serializer state and unserialize_max_depth the metadata reads (#2356)
 bz2 = ["dep:php_ext_bz2"] # the `php` binary and the phpt lane, as php builds it with --with-bz2 (design §7.2, revision 39); its link to standard is the stream natives bzwrite and bzclose call (#2356)

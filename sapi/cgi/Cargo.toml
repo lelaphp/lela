@@ -21,11 +21,8 @@ name = "php-cgi"
 path = "src/main.rs"
 
 [dependencies]
-# The bundle's `host`, the set every host links: php's configure builds
-# an extension of the `cli` class for the CLI, CGI, embed and phpdbg alike
-# (`EXT_CLI_STATIC`, `Z/build/php.m4`) and every other one for every host,
-# so the oracle's `php-cgi -m` lists every module its `php -m` does
-# (#1477, #3081).
+# The bundle's default set and `host`, the set every host links, whose
+# comment says why each (#1477, #3081).
 php_bundle = { path = "../../crates/php_bundle", features = ["host"] }
 php_proto = { path = "../../crates/php_proto" }
 php_sapi = { path = "../../crates/php_sapi" }

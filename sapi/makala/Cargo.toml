@@ -24,13 +24,9 @@ name = "makala"
 path = "src/main.rs"
 
 [dependencies]
-# The bundle's `host`, the set every host links (#3081). Its `pcntl` and
-# `posix` are linked and never carried: no host that serves requests on
-# threads carries them (design §7.2), since a fork of this process would
-# copy its other request threads' state in the middle of their work, so
-# the engine it builds leaves them out (`php_bundle::Serving::Threads`),
-# as it must where one build of the workspace turns them on beside the
-# CLI.
+# The bundle's default set and `host`, the set every host links, whose
+# comment says why each (#3081); this host's engine leaves out its `pcntl`
+# and `posix` (`php_bundle::Serving::Threads`).
 php_bundle = { path = "../../crates/php_bundle", features = ["host"] }
 php_proto = { path = "../../crates/php_proto" }
 php_sapi = { path = "../../crates/php_sapi" }
