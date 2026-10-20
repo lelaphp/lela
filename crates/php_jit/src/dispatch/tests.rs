@@ -522,11 +522,11 @@ mod ran {
     };
 
     use super::super::run;
-    use crate::enter::tests::entered::{Numbered, numbered};
+    use crate::enter::tests::entered::numbered;
     use crate::policy::{self, State};
     use crate::record::Start;
     use crate::table;
-    use crate::testing::bodies::{answering, calling, compiled, landing};
+    use crate::testing::bodies::{Numbered, answering, calling, compiled, landing};
     use crate::testing::{self, Scratch, function_of, stdout};
     use crate::types::Landing;
 

@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use php_engine::tier::Flow;
-use php_engine::tier::{self, FrameRef, Request, SafepointIdx, Site, Word};
+use php_engine::tier::{self, Fatal, FrameRef, Request, SafepointIdx, Site, Word};
 
 use crate::compiler::{self, Job};
 use crate::enter::{self, Crossed as _, Exited};
@@ -199,7 +199,9 @@ pub(crate) fn run(req: &mut Request, frame: FrameRef, id: TraceId, shared: &Shar
         };
         frame = exited.frame;
         let Some(exit) = trace.exits.get(usize::from(exited.exit.0)) else {
-            return Flow::Resume(frame);
+            return Flow::Bail(Fatal::error(
+                "InternalError: a trace landed an exit it does not have",
+            ));
         };
         if req.thrown() {
             return Flow::Resume(frame);
@@ -208,7 +210,7 @@ pub(crate) fn run(req: &mut Request, frame: FrameRef, id: TraceId, shared: &Shar
             Some(link) => Some(link),
             // A trace's end is no side exit: php returns to the interpreter.
             None if trace.leaves == Some(exited.exit) => None,
-            None => sided(req, shared, (trace.id, exited), &exit.word),
+            None => sided(req, shared, trace.id, exited, &exit.word),
         };
         match next.and_then(|next| table.get(next)) {
             Some(next) => trace = next,
@@ -219,27 +221,25 @@ pub(crate) fn run(req: &mut Request, frame: FrameRef, id: TraceId, shared: &Shar
 
 /// What an exit with no link goes on to (`jit-design.md` §4.9): the side
 /// trace its word names, entered with no line written, as php's exit is
-/// patched to jump to it; otherwise none, the word bumped toward
-/// `opcache.jit_hot_side_exit` and claimed by nothing (#2964), and php's
+/// patched to jump to it; otherwise none, a cold word bumped toward
+/// `opcache.jit_hot_side_exit` and claimed by nothing, recording a side
+/// trace being #2964's, and php's
 /// `TRACE n exit m` line written for the place it landed, as
 /// `zend_jit_trace_exit` writes it unless the interrupt is raised or the
 /// request records (`Z/ext/opcache/jit/zend_jit_trace.c:8806-8824`).
 fn sided(
     req: &mut Request,
     shared: &Shared,
-    (trace, exited): (TraceId, Exited),
+    trace: TraceId,
+    exited: Exited,
     word: &Word,
 ) -> Option<TraceId> {
-    let side = Start::Side {
-        parent: trace,
-        exit: exited.exit,
-    };
-    match visit(word, &shared.policy, side, false, || None) {
-        Visited::Enter(side) => return Some(side),
-        Visited::Continue => {}
-        Visited::Hot(claim) => {
-            policy::settle(claim, &Outcome::Released);
+    match policy::read(word) {
+        State::Compiled(side) => return Some(side),
+        State::Cold => {
+            policy::bump(word);
         }
+        State::Recording | State::Blacklisted => {}
     }
     let quiet = req.interrupt().raised().load(Ordering::Relaxed) || record::recording(req);
     if !quiet && shared.policy.debug().any(JitDebug::TRACE_EXIT) {

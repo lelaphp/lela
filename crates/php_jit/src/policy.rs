@@ -560,11 +560,11 @@ impl Policy {
                     ),
                     _ => write!(sink, "---- TRACE {n} start ({}) ", start.describe()),
                 }?;
-                placed(sink, at)
+                write_place(sink, at)
             }
             TraceEvent::Exit { trace, exit, at } if debug.any(JitDebug::TRACE_EXIT) => {
                 write!(sink, "     TRACE {} exit {} ", trace.get(), exit.0)?;
-                placed(sink, at)
+                write_place(sink, at)
             }
             TraceEvent::Stop { trace, stop } if debug.any(JitDebug::TRACE_STOP) => match stop {
                 Stop::Link(to) => writeln!(
@@ -611,7 +611,7 @@ impl Policy {
 
 /// `at` as a `TRACE` line ends with it: `Class::function() file:line`,
 /// `$main` for a file's own code.
-fn placed(sink: &mut dyn Write, at: Place<'_>) -> io::Result<()> {
+fn write_place(sink: &mut dyn Write, at: Place<'_>) -> io::Result<()> {
     if let Some(scope) = at.scope {
         sink.write_all(scope)?;
         sink.write_all(b"::")?;

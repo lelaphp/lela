@@ -144,3 +144,8 @@ pub(crate) fn landing(opline: u32, landing: Landing) -> ExitSpec {
         link: None,
     }
 }
+
+/// The numbers of the traces that called `enter`'s test kernel `number`,
+/// in the order they called it: the request's, for `dispatch`'s tests.
+#[derive(Debug, Default)]
+pub(crate) struct Numbered(pub(crate) Vec<u32>);

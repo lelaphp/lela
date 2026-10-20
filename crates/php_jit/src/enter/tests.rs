@@ -142,7 +142,7 @@ pub(crate) mod entered {
     use crate::record::Start;
     use crate::table::{self, Outputs};
     use crate::testing::bodies::{
-        STOOD_CALL, STOOD_OPLINE, a64, answering, calling, compiled, landing,
+        Numbered, STOOD_CALL, STOOD_OPLINE, a64, answering, calling, compiled, landing,
     };
     use crate::testing::{self, Scratch, function_of, stdout};
     use crate::types::Landing;
@@ -271,11 +271,6 @@ pub(crate) mod entered {
     }
 
     kernels! { Request => mod over_request { explode() -> u64; reenter() -> u64; } }
-
-    /// The numbers of the traces that called [`numbered::number`], in the
-    /// order they called it: the request's, for `dispatch`'s tests.
-    #[derive(Debug, Default)]
-    pub(crate) struct Numbered(pub(crate) Vec<u32>);
 
     /// The kernel `jit-design.md` §4.9 *Tested* asks for: the
     /// number of the trace that calls it kept, then the opline served
