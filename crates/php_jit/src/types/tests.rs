@@ -15,10 +15,12 @@
 
 use std::fmt::Write as _;
 
+use php_heap::ZvalType;
 use php_unit::Opcode;
 
 use super::{
-    Check, Def, End, Form, Frame, Landing, Op, OpId, Operand, Repeat, Slot, TraceIr, ValueId,
+    Check, Def, End, Form, Frame, Home, Landing, Op, OpId, Operand, Repeat, Slot, TraceIr, Types,
+    ValueId,
 };
 use crate::lower::dump;
 use crate::record::Stop;
@@ -404,6 +406,55 @@ fn a_long_loop_shares_its_exits_as_php_reuses_them() -> Result<(), String> {
         assert!(
             !ir.exits[..at].contains(exit),
             "exit {at} is an earlier one's"
+        );
+    }
+    Ok(())
+}
+
+/// A boolean the trace keeps in a register holds what its op computed:
+/// a guard on the type the recording saw, `true` here, is tested on it
+/// and narrows only what the opline after it sees. The boolean a
+/// comparison writes, read by a `JMPZ_EX` in the first loop and
+/// assigned to `$b` in the second, stays a boolean in its register
+/// beside its guard:
+/// narrowed to the one seen, the register would hold a constant, its
+/// guard would test nothing and the trace would go the recorded way past
+/// the iteration where the comparison turns (#3076).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_guarded_boolean_keeps_what_its_op_computed() -> Result<(), String> {
+    for program in [
+        "function f(int $n) { $h = 0; for ($i = 0; $i < $n; $i++) { if ($i < 100 && $i >= 0) { $h++; } } return $h; }
+        echo f(3), \"\\n\";",
+        "function f(int $n) { $h = 0; $b = true; for ($i = 0; $i < $n; $i++) { if ($b) { $h++; } $b = $i < 99; } return $h; }
+        echo f(3), \"\\n\";",
+    ] {
+        let ir = built(&IN_F, program)?;
+        let compared = ir
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Line(line) if line.opcode == Opcode::IsSmaller && line.fused.is_none() => {
+                    line.out
+                }
+                _ => None,
+            })
+            .ok_or_else(|| format!("no comparison writes a boolean:\n{}", dump::render(&ir)))?;
+        let held = ir.values[compared.0 as usize];
+        assert_eq!(
+            (held.home, held.types),
+            (Home::Register, Types::BOOL),
+            "{}",
+            dump::render(&ir)
+        );
+        assert!(
+            ir.guards.iter().any(|guard| guard.check
+                == Check::Type {
+                    value: compared,
+                    tag: ZvalType::True
+                }),
+            "{}",
+            dump::render(&ir)
         );
     }
     Ok(())

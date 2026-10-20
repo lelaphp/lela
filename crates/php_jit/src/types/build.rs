@@ -1040,11 +1040,27 @@ impl<'a> Builder<'a> {
 
     /// php's `ADD_OP_GUARD` on one operand, `zend_jit_trace_add_op_guard`:
     /// a type guard where the recorded type is narrower than the value's,
-    /// narrowing the value unless a symbol table reaches it; a
-    /// reference's inner type at every read, which php's code generator
-    /// holds where its TSSA adds nothing. What the opline sees of the
-    /// operand after it, where a guard is held, and whether it sees it
-    /// through a reference, which a write to the slot writes through.
+    /// narrowing the value unless a symbol table reaches it or a register
+    /// holds it; a reference's inner type at every read, which php's code
+    /// generator holds where its TSSA adds nothing. What the opline sees
+    /// of the operand after it, where a guard is held, and whether it sees
+    /// it through a reference, which a write to the slot writes through.
+    ///
+    /// A register holds what its op computed, a boolean either way where
+    /// the recording saw `true` or `false`, so the guard is tested on the
+    /// register before the opline, as php's `zend_jit_type_guard` tests
+    /// the type of the value an op wrote (#3076): narrowed to the one
+    /// seen, the register would hold a constant, the guard would test
+    /// nothing, and the trace would go the recorded way past the
+    /// iteration where the comparison turns.
+    ///
+    /// ```php
+    /// function f() { $h = 0; for ($i = 0; $i < 1000000; $i++) { if ($i < 500000 && $i >= 0) { $h++; } } return $h; }
+    /// echo f(), "\n";
+    /// ```
+    /// ```expect regime=jit-tracing process
+    /// 500000
+    /// ```
     fn guard_use(
         &mut self,
         idx: OpId,
@@ -1075,11 +1091,12 @@ impl<'a> Builder<'a> {
             });
             return Some((Types::of_tag(tag), true));
         }
-        let types = self.val(value).types;
+        let held = *self.val(value);
+        let types = held.types;
         if types.tag() == Some(tag) {
             return None;
         }
-        if self.aliased(slot) {
+        if self.aliased(slot) || held.home == Home::Register {
             self.guards.push(before);
             return Some((types.narrowed(tag), false));
         }
