@@ -951,12 +951,7 @@ impl Claims {
                     continue;
                 };
                 drop(group);
-                for _ in 0..100 {
-                    if !alive(pid) {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
+                gone(pid);
                 if let Some(journal) = journal.as_mut() {
                     writeln!(journal, "{ENDED} {number}").ok();
                 }
@@ -1381,6 +1376,16 @@ impl fmt::Display for Namespace {
             "each program runs in a private IPC namespace (unshare {})",
             flags.join(" ")
         )
+    }
+}
+
+/// Wait, as long as a second, for the process `pid` to be gone.
+pub(crate) fn gone(pid: u32) {
+    for _ in 0..100 {
+        if !alive(pid) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
