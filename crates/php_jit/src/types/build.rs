@@ -1299,7 +1299,10 @@ impl<'a> Builder<'a> {
                 let declared = Types::of_mask(self.meta(frame).code.return_mask)
                     .without(Types::OBJECT)
                     .without(Types::REF);
+                // Seen through a reference, the slot keeps the reference,
+                // which the inline form would write over with its value.
                 op.op1_type != OperandKind::Unused
+                    && !seen.referenced[0]
                     && t1.kinds() != Types::NONE
                     && t1.within(declared)
             }

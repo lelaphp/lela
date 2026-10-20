@@ -486,3 +486,30 @@ fn a_new_that_skips_its_constructor_leaves_where_it_does() {
         assert_eq!(testing::stdout(&served), "aaa\n", "{mode}\n{lines}");
     }
 }
+
+/// A `VERIFY_RETURN_TYPE` over a variable that holds a reference, a
+/// function's or a property hook's `&get` returning by reference, is
+/// stepped: inline, its value was the scalar the reference held, and an
+/// exit stored that scalar over the reference, so the return lost it and
+/// the reference cell was never freed
+/// (`Zend/tests/lazy_objects/init_trigger_foreach_hooks.phpt`).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_return_type_checked_through_a_reference_keeps_the_reference() {
+    // The throw aborts `$main`'s recording, so `g` is a root of its own.
+    let program = "function &g($o): int { $ref = &$o->x; return $ref; }
+        try { throw new Exception; } catch (Exception $e) {}
+        $o = new stdClass; $o->x = 1; echo g($o); $r = &g($o); $r = 5; echo $o->x, \"\\n\";";
+    for mode in ["force", "exit-fuzz"] {
+        let ini = [
+            ("jit.mode", mode),
+            ("jit.compile", "inline"),
+            ("opcache.jit_debug", "258048"),
+        ];
+        let served = testing::serve::<Lane>(&ini, program);
+        let lines = String::from_utf8_lossy(&served.stderr).into_owned();
+        assert_eq!(served.fatal, None, "{mode}\n{lines}");
+        assert_eq!(testing::stdout(&served), "15\n", "{mode}\n{lines}");
+        assert!(lines.contains("---- TRACE 1 start (enter) g()"), "{lines}");
+    }
+}
