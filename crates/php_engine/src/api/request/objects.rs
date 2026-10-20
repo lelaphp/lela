@@ -726,8 +726,10 @@ impl Request {
             let mut at = arr.num_used();
             while at > 0 && !self.objects.shutdown_walk_ended {
                 at -= 1;
+                // `zval_call_destructor`: an `IS_INDIRECT` row followed
+                // to its CV first.
                 let alone = arr.entry_at(at).is_some_and(|(_, z)| {
-                    let value = Value::of_zval(z);
+                    let value = Value::of_zval(z.as_indirect().map_or(z, php_heap::ZvalRef::read));
                     value.as_object().is_some() && value.refcount() == 1
                 });
                 if alone && let Some(z) = self.heap.array_take_at(arr, at) {
