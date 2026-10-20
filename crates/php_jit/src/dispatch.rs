@@ -203,7 +203,7 @@ pub(crate) fn run(req: &mut Request, frame: FrameRef, id: TraceId, shared: &Shar
                 "InternalError: a trace landed an exit it does not have",
             ));
         };
-        if req.thrown() {
+        if req.unwinding() {
             return Flow::Resume(frame);
         }
         let next = match exit.link {

@@ -508,6 +508,24 @@ pub(super) fn constant_types(constant: Constant, code: &OpArray) -> Types {
     }
 }
 
+/// php's `zend_jit_trace_may_exit` past the jumps whose direction the
+/// record keeps (`Z/ext/opcache/jit/zend_jit_trace.c:261-320`): the
+/// oplines whose handler may go on elsewhere than the opline the record
+/// went to. A table's jump (`SWITCH_LONG`, `SWITCH_STRING`, `MATCH`),
+/// whose target the record does not say; a `NEW` with no arguments
+/// before a `DO_FCALL`, which skips the call where the class has no
+/// constructor; and a `DO_FCALL`, php's potentially polymorphic call,
+/// whose callee may be another function than the one recorded.
+pub(super) fn may_exit(op: &Opline, after: Option<&Opline>) -> bool {
+    match op.opcode {
+        Opcode::SwitchLong | Opcode::SwitchString | Opcode::Match | Opcode::DoFcall => true,
+        Opcode::New => {
+            op.extended_value == 0 && after.is_some_and(|after| after.opcode == Opcode::DoFcall)
+        }
+        _ => false,
+    }
+}
+
 /// The oplines whose handler leaves a temporary it reads alive: a
 /// `switch`'s or a `match`'s subject, a `foreach`'s iterator, a `list()`'s
 /// array, a copied temporary, a coalescing jump's value.

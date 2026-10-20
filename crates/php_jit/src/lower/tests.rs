@@ -360,3 +360,200 @@ fn a_guarded_boolean_is_tested_where_the_trace_runs() {
         assert!(!testing::MAPS_CODE || lines.contains(" exit "), "{lines}");
     }
 }
+
+/// A table's jump, `SWITCH_STRING`, `SWITCH_LONG` or `MATCH`, served
+/// through `step`, is held to the opline the trace serves next, as php's
+/// `zend_jit_switch` leaves for any target the trace did not follow: each
+/// loop, compiled at its first iteration under `jit.mode=force` where the
+/// table went to its default, leaves where it goes to a case, so each
+/// prints what php prints rather than the recorded way to the end; under
+/// `exit-fuzz` the guard is failed once too, its exit landing where the
+/// step left the frame (Zend/tests/match/001.phpt, match/008.phpt,
+/// switch/bug26696.phpt).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_tables_jump_leaves_where_it_goes_another_way() {
+    for (program, printed) in [
+        (
+            "function f($a) { for ($i = 0; $i < 4; $i++) { switch ($a[$i]) { case 'b': echo 'T'; break; case 'c': echo 'C'; break; default: echo 'd'; } } }
+            f(['a', 'a', 'b', 'c']); echo \"\\n\";",
+            "ddTC\n",
+        ),
+        (
+            "function f() { for ($i = 0; $i < 7; $i++) { switch ($i) { case 2: echo 'b'; break; case 3: echo 'c'; break; case 4: echo 'd'; break; case 5: echo 'e'; break; case 6: echo 'f'; break; default: echo '-'; } } }
+            f(); echo \"\\n\";",
+            "--bcdef\n",
+        ),
+        (
+            "function f() { for ($i = 0; $i < 4; $i++) { echo match ($i) { 1 => 'one', 2 => 'two', 3 => 'three', default => 'none' }, ' '; } }
+            f(); echo \"\\n\";",
+            "none one two three \n",
+        ),
+    ] {
+        for mode in ["force", "exit-fuzz"] {
+            let ini = [
+                ("jit.mode", mode),
+                ("jit.compile", "inline"),
+                ("opcache.jit_debug", "258048"),
+            ];
+            let served = testing::serve::<Lane>(&ini, program);
+            let lines = String::from_utf8_lossy(&served.stderr).into_owned();
+            assert_eq!(testing::stdout(&served), printed, "{mode} {program}\n{lines}");
+            assert!(lines.contains("---- TRACE 1 compiled"), "{lines}");
+        }
+    }
+}
+
+/// A packed fetch from a temporary array takes the array out of its slot
+/// as the interpreter's `FREE_OP1` does, so the slot owns nothing once the
+/// array is released and the return that follows finds every temporary
+/// empty, where the slot had kept the freed array's counted type word
+/// (`Zend/tests/numeric_strings/invalid_numeric_string_must_generate_warning_assign.phpt`).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_fetch_from_a_temporary_array_leaves_its_slot_empty() {
+    // The throw aborts `$main`'s recording, so `f` is a root of its own,
+    // entered on its second call.
+    let program = "function f($v) { return [$v][0]; }
+        try { throw new Exception; } catch (Exception $e) { echo 'e '; }
+        $x = 'a'; $x .= 'a';
+        echo f($x), f($x . 'b'), f(1), \"\\n\";";
+    for mode in ["force", "exit-fuzz"] {
+        let ini = [
+            ("jit.mode", mode),
+            ("jit.compile", "inline"),
+            ("opcache.jit_debug", "258048"),
+        ];
+        let served = testing::serve::<Lane>(&ini, program);
+        let lines = String::from_utf8_lossy(&served.stderr).into_owned();
+        assert_eq!(served.fatal, None, "{mode}\n{lines}");
+        assert_eq!(testing::stdout(&served), "e aaaab1\n", "{mode}\n{lines}");
+        assert!(lines.contains("---- TRACE 1 start (enter) f()"), "{lines}");
+    }
+}
+
+/// A `DO_FCALL`, whose callee a closure's or a method's call may vary, is
+/// held to the opline the trace serves next, php's IP guard after it: each
+/// loop, recorded where `$g` was the `int` closure, leaves where it is
+/// the `float` one, whose parameter php coerced, rather than step the
+/// `int` closure's code over it
+/// (`Zend/tests/type_declarations/scalar_basic.phpt`,
+/// `scalar_return_basic_64bit.phpt`, `scalar_strict_64bit.phpt`).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_call_another_function_answers_leaves_where_it_enters() {
+    let program = "function f($gs) {
+            foreach ($gs as $g) { foreach ([1, 9223372036854775807] as $v) { $r = $g($v); echo $r + 0, ' '; } }
+        }
+        f([function (int $i) { return $i; }, function (float $f) { return $f; }]);
+        echo \"\\n\";";
+    for mode in ["force", "exit-fuzz"] {
+        let ini = [
+            ("jit.mode", mode),
+            ("jit.compile", "inline"),
+            ("opcache.jit_debug", "258048"),
+        ];
+        let served = testing::serve::<Lane>(&ini, program);
+        let lines = String::from_utf8_lossy(&served.stderr).into_owned();
+        assert_eq!(
+            testing::stdout(&served),
+            "1 9223372036854775807 1 9.2233720368548E+18 \n",
+            "{mode}\n{lines}"
+        );
+    }
+}
+
+/// A `NEW` whose class has no constructor skips the `DO_FCALL` after it,
+/// so it is held to the opline the trace serves next, as php holds a
+/// `NEW` that may skip its constructor: the loop, recorded where the class
+/// had one, leaves where it has none rather than call a frame nothing
+/// pushed (`Zend/tests/instantiate_all_classes.phpt`).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_new_that_skips_its_constructor_leaves_where_it_does() {
+    let program = "class A { function __construct() { echo 'a'; } } class B {}
+        function f() { foreach (['A', 'A', 'B', 'A'] as $c) { new $c; } }
+        f(); echo \"\\n\";";
+    for mode in ["force", "exit-fuzz"] {
+        let ini = [
+            ("jit.mode", mode),
+            ("jit.compile", "inline"),
+            ("opcache.jit_debug", "258048"),
+        ];
+        let served = testing::serve::<Lane>(&ini, program);
+        let lines = String::from_utf8_lossy(&served.stderr).into_owned();
+        assert_eq!(served.fatal, None, "{mode}\n{lines}");
+        assert_eq!(testing::stdout(&served), "aaa\n", "{mode}\n{lines}");
+    }
+}
+
+/// A `VERIFY_RETURN_TYPE` over a variable that holds a reference, a
+/// function's or a property hook's `&get` returning by reference, is
+/// stepped: inline, its value was the scalar the reference held, and an
+/// exit stored that scalar over the reference, so the return lost it and
+/// the reference cell was never freed
+/// (`Zend/tests/lazy_objects/init_trigger_foreach_hooks.phpt`).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_return_type_checked_through_a_reference_keeps_the_reference() {
+    // The throw aborts `$main`'s recording, so `g` is a root of its own.
+    let program = "function &g($o): int { $ref = &$o->x; return $ref; }
+        try { throw new Exception; } catch (Exception $e) {}
+        $o = new stdClass; $o->x = 1; echo g($o); $r = &g($o); $r = 5; echo $o->x, \"\\n\";";
+    for mode in ["force", "exit-fuzz"] {
+        let ini = [
+            ("jit.mode", mode),
+            ("jit.compile", "inline"),
+            ("opcache.jit_debug", "258048"),
+        ];
+        let served = testing::serve::<Lane>(&ini, program);
+        let lines = String::from_utf8_lossy(&served.stderr).into_owned();
+        assert_eq!(served.fatal, None, "{mode}\n{lines}");
+        assert_eq!(testing::stdout(&served), "15\n", "{mode}\n{lines}");
+        assert!(lines.contains("---- TRACE 1 start (enter) g()"), "{lines}");
+    }
+}
+
+/// A guarded step the trace ends at is held to the opline the trace goes
+/// on at, as php holds the trace's next opline at every end but a return
+/// and the interpreter's: a table whose recorded case is a `RETURN` the
+/// trace stops before, and the last call of a recursion through a
+/// variable, after which the trace goes back to its header, each leave
+/// where the step went another way rather than go on where the record
+/// went.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_step_the_trace_ends_at_is_held_to_where_it_goes_on() {
+    for (program, printed) in [
+        (
+            "function f($x) { switch ($x) { case 'a': return 1; case 'b': return 2; } return 3; }
+            try { throw new Exception; } catch (Exception $e) {}
+            echo f('a'), f('b'), f('c'), \"\\n\";",
+            "123\n",
+        ),
+        (
+            "function s($a, $n) { return 100; }
+            function r($a, $n) { if ($n == 0) { return 0; } $g = $a[$n]; return $g($a, $n - 1) + 1; }
+            try { throw new Exception; } catch (Exception $e) {}
+            echo r(['-', 'r', 'r', 'r'], 3), ' ', r(['-', 'r', 's', 'r'], 3), \"\\n\";",
+            "3 102\n",
+        ),
+    ] {
+        for mode in ["force", "exit-fuzz"] {
+            let ini = [
+                ("jit.mode", mode),
+                ("jit.compile", "inline"),
+                ("opcache.jit_debug", "258048"),
+            ];
+            let served = testing::serve::<Lane>(&ini, program);
+            let lines = String::from_utf8_lossy(&served.stderr).into_owned();
+            assert_eq!(served.fatal, None, "{mode} {program}\n{lines}");
+            assert_eq!(
+                testing::stdout(&served),
+                printed,
+                "{mode} {program}\n{lines}"
+            );
+            assert!(lines.contains("compiled"), "{lines}");
+        }
+    }
+}

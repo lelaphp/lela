@@ -297,7 +297,7 @@ fn a_return_trace_guards_the_caller_it_lands_in() -> Result<(), String> {
     assert!(
         ir.guards
             .iter()
-            .any(|guard| matches!(guard.check, Check::Caller { .. }))
+            .any(|guard| matches!(guard.check, Check::Stands { .. }))
     );
     Ok(())
 }

@@ -55,15 +55,17 @@ use crate::table::{Exit, Trace};
 use crate::types::{ExitId, Landing};
 
 /// What a request is to the crossing: the interrupt compiled code tests at a
-/// loop header, and whether a kernel that returned left a throwable
-/// pending.
+/// loop header, and whether a kernel that returned left the request
+/// unwinding.
 pub(crate) trait Crossed {
     /// The request's interrupt, which the engine's timer and signal
     /// delivery raise (design §5.8).
     fn interrupt(&self) -> &AtomicBool;
 
-    /// Whether a throwable or an exit stands pending.
-    fn thrown(&self) -> bool;
+    /// Whether the request unwinds: a throwable or an exit stands
+    /// pending, or a fatal is under way, which leaves every frame as an
+    /// exit does.
+    fn unwinding(&self) -> bool;
 }
 
 impl Crossed for Request {
@@ -71,8 +73,8 @@ impl Crossed for Request {
         self.limits().interrupt().raised()
     }
 
-    fn thrown(&self) -> bool {
-        self.diagnostics().raised().is_some()
+    fn unwinding(&self) -> bool {
+        self.diagnostics().raised().is_some() || self.diagnostics().bailing_out()
     }
 }
 
@@ -252,7 +254,7 @@ unsafe fn answered<R: Crossed, T: Out>(
             unsafe { value.put(out) };
             // SAFETY: as in `crossed`, `req` is the request the `ExitCtx`
             // borrows, and the kernel's borrow of it has ended.
-            if unsafe { &*cx.req }.thrown() {
+            if unsafe { &*cx.req }.unwinding() {
                 Status::Exception
             } else {
                 Status::Continue
@@ -564,7 +566,7 @@ pub(crate) fn enter(req: &mut Request, frame: FrameRef, trace: &Trace) -> Result
 /// stood at, which is where the loop unwinds from, so nothing is landed.
 fn land(req: &mut Request, exit: &Exit) -> Result<FrameRef, Fatal> {
     let frame = tier::current(req).ok_or_else(|| internal("a trace left no frame standing"))?;
-    if req.thrown() {
+    if req.unwinding() {
         return Ok(frame);
     }
     if let Some(at) = exit.opline {
@@ -605,7 +607,7 @@ impl Crossed for Tally {
         &NEVER
     }
 
-    fn thrown(&self) -> bool {
+    fn unwinding(&self) -> bool {
         self.thrown
     }
 }

@@ -40,7 +40,7 @@ use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use php_engine::tier::FuncRef;
 use php_heap::{Arr, ROOM_BYTES, Ref, Zval, ZvalType};
-use php_unit::{MapPtrOffset, Opcode};
+use php_unit::{MapPtrOffset, Opcode, OplineIdx};
 
 use super::{ABANDONED, INTERRUPT_AT, Kernel, Stood, Symbols, located};
 use crate::record::Stop;
@@ -422,22 +422,10 @@ impl<'a> Emit<'a> {
                 self.b.def_var(self.room_var(*frame)?, room);
                 self.running = *frame;
                 for guard in self.within(id) {
-                    let Check::Caller { func, opline } = guard.check else {
+                    let Check::Stands { func, opline } = guard.check else {
                         return Err(mismatch("a return holds a guard of another kind"));
                     };
-                    let landed = self.stood_word(I32, STOOD_FUNC);
-                    let at = self.stood_word(I32, STOOD_OPLINE);
-                    let other_func = self.b.ins().icmp_imm_u(
-                        IntCC::NotEqual,
-                        landed,
-                        i64::from(engine_offset(func)?),
-                    );
-                    let other_opline =
-                        self.b
-                            .ins()
-                            .icmp_imm_u(IntCC::NotEqual, at, i64::from(opline.0));
-                    let other = self.b.ins().bor(other_func, other_opline);
-                    self.leave_if(other, guard.exit)?;
+                    self.stands(func, opline, guard.exit)?;
                 }
                 Ok(())
             }
@@ -516,7 +504,7 @@ impl<'a> Emit<'a> {
                 let other = self.b.ins().icmp_imm_s(cc, packed, 0);
                 self.leave_if(other, guard.exit)?;
             }
-            Check::Direction { .. } | Check::Caller { .. } => {
+            Check::Direction { .. } | Check::Stands { .. } => {
                 return Err(mismatch("an op's own guard held before it"));
             }
         }
@@ -788,28 +776,51 @@ impl<'a> Emit<'a> {
             self.calls.pop();
         }
         for guard in self.within(at) {
-            let Check::Direction { .. } = guard.check else {
-                return Err(mismatch("a stepped opline holds a guard of another kind"));
-            };
-            let went = self.stood_word(I32, STOOD_OPLINE);
-            let other = if let Some(next) = self.successor(at, line.frame) {
-                self.b
-                    .ins()
-                    .icmp_imm_u(IntCC::NotEqual, went, i64::from(next))
-            } else {
-                let landing = self
-                    .ir
-                    .exits
-                    .get(usize::from(guard.exit.0))
-                    .and_then(|exit| exit.opline)
-                    .ok_or_else(|| mismatch("a stepped jump with nowhere to hold"))?;
-                self.b
-                    .ins()
-                    .icmp_imm_u(IntCC::Equal, went, i64::from(landing.0))
-            };
-            self.leave_where(other, guard.exit)?;
+            match guard.check {
+                Check::Direction { .. } => {
+                    let went = self.stood_word(I32, STOOD_OPLINE);
+                    let other = if let Some(next) = self.successor(at, line.frame) {
+                        self.b
+                            .ins()
+                            .icmp_imm_u(IntCC::NotEqual, went, i64::from(next))
+                    } else {
+                        let landing = self
+                            .ir
+                            .exits
+                            .get(usize::from(guard.exit.0))
+                            .and_then(|exit| exit.opline)
+                            .ok_or_else(|| mismatch("a stepped jump with nowhere to hold"))?;
+                        self.b
+                            .ins()
+                            .icmp_imm_u(IntCC::Equal, went, i64::from(landing.0))
+                    };
+                    self.leave_where(other, guard.exit)?;
+                }
+                Check::Stands { func, opline } => self.stands(func, opline, guard.exit)?,
+                Check::Type { .. } | Check::Deref { .. } | Check::Layout { .. } => {
+                    return Err(mismatch("a stepped opline holds a guard of another kind"));
+                }
+            }
         }
         Ok(())
+    }
+
+    /// php's IP guard: leave through `exit` unless the last kernel left
+    /// the interpreter at `opline` of `func`. The exit names no opline, so
+    /// exit-fuzz fails it too.
+    fn stands(&mut self, func: FuncRef, opline: OplineIdx, exit: ExitId) -> Result<(), Abort> {
+        let landed = self.stood_word(I32, STOOD_FUNC);
+        let at = self.stood_word(I32, STOOD_OPLINE);
+        let other_func =
+            self.b
+                .ins()
+                .icmp_imm_u(IntCC::NotEqual, landed, i64::from(engine_offset(func)?));
+        let other_opline = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, at, i64::from(opline.0));
+        let other = self.b.ins().bor(other_func, other_opline);
+        self.leave_if(other, exit)
     }
 
     /// The opline the trace serves next in `frame` after the op at `at`,
@@ -1118,7 +1129,13 @@ impl<'a> Emit<'a> {
             _ => return Err(mismatch("a fetch holds more than one guard")),
         }
         if array_slot.var >= self.frame_cvs(array_slot.frame)? {
+            // `FREE_OP1`, as the interpreter takes it: the array out of its
+            // slot, which is left `UNDEF`, then its owner given up.
             let info = self.b.ins().load(I32, trusted(), room, array_at + TYPE_AT);
+            let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+            self.b
+                .ins()
+                .store(trusted(), undef, room, array_at + TYPE_AT);
             let counted = self.b.ins().band_imm_u(info, COUNTED);
             self.when(counted, |emit| {
                 emit.call(Kernel::Release, &[room_arg, opline, arr, info], line.freed)

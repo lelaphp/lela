@@ -14,8 +14,8 @@ use php_unit::{CacheSlot, Effects, OpArray, Opcode, OperandKind, Opline, OplineI
 use super::lattice::{self, Types};
 use super::opcodes::{
     Declared, Within, arith, assigned, constant, constant_types, guard_sites, inline_may_leave,
-    is_call, keeps_temporaries, op1_types, out_types, packed_guard, param_types, params, reads,
-    reads_by_name, referenced, slot_of, within, writes, written, written_after_entry,
+    is_call, keeps_temporaries, may_exit, op1_types, out_types, packed_guard, param_types, params,
+    reads, reads_by_name, referenced, slot_of, within, writes, written, written_after_entry,
 };
 use super::{
     Abort, Check, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo, Fused, Guard, GuardAt,
@@ -292,7 +292,8 @@ impl<'a> Builder<'a> {
             Some(Repeat::Return) | None => {}
         }
         for (at, event) in body.iter().enumerate() {
-            let next = events.get(at + 1);
+            let ahead = events.get(at + 1..).unwrap_or_default();
+            let next = ahead.first();
             match event {
                 Event::Op {
                     func,
@@ -308,7 +309,7 @@ impl<'a> Builder<'a> {
                         *opline,
                         [*op1, *op2, *data],
                         *branch,
-                        next,
+                        ahead,
                         root_return,
                     )?;
                     if root_return {
@@ -410,9 +411,10 @@ impl<'a> Builder<'a> {
         at: OplineIdx,
         samples: [Option<Sample>; 3],
         branch: Option<bool>,
-        next: Option<&Event>,
+        ahead: &[Event],
         root_return: bool,
     ) -> Result<(), Abort> {
+        let next = ahead.first();
         let frame = self.running()?;
         if self.frames[usize::from(frame.0)].func != func {
             return Err(mismatch("an opline of another op array than its frame's"));
@@ -493,6 +495,7 @@ impl<'a> Builder<'a> {
         let target = jump.and_then(|jump| jump.jump_target());
         self.successor = went(at, &op, target, len, branch);
         self.own_exit(idx, frame, &op, form, t1);
+        self.stands(idx, frame, &op, after.as_ref(), ahead);
         if let Some(taken) = branch {
             let jump = if fused { after } else { None };
             self.direction(
@@ -581,6 +584,64 @@ impl<'a> Builder<'a> {
             out,
             op1,
             op2,
+        }
+    }
+
+    /// php's IP guard after an opline whose handler may go elsewhere than
+    /// the record says ([`may_exit`]), held by `zend_jit_trace_handler`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:17129-17236`) to the opline the
+    /// trace serves next.
+    fn stands(
+        &mut self,
+        idx: OpId,
+        frame: Frame,
+        op: &Opline,
+        after: Option<&Opline>,
+        ahead: &[Event],
+    ) {
+        if !may_exit(op, after) {
+            return;
+        }
+        if let Some((func, opline)) = self.following(ahead) {
+            self.stands_at(idx, frame, func, opline);
+        }
+    }
+
+    /// `Check::Stands` within the op at `idx`, leaving where the step or
+    /// the return left the interpreter, in `frame`.
+    fn stands_at(&mut self, idx: OpId, frame: Frame, func: FuncRef, opline: OplineIdx) {
+        self.guards.push(Placed {
+            at: GuardAt::Within(idx),
+            check: Check::Stands { func, opline },
+            exit: draft(Point::After(idx), frame, At::Stands),
+        });
+    }
+
+    /// The opline the trace serves next, where the record says it: the
+    /// next one it recorded before a return, or, past the last, the
+    /// header a loop, a recursive call or a recursive return goes back to,
+    /// as php holds the trace's next opline at every end but `RETURN` and
+    /// `INTERPRETER` (`zend_jit_ir.c:17152-17156`).
+    fn following(&self, ahead: &[Event]) -> Option<(FuncRef, OplineIdx)> {
+        let mut until_back = ahead
+            .iter()
+            .take_while(|event| !matches!(event, Event::Back));
+        let next = until_back.find_map(|event| match event {
+            Event::Op { func, opline, .. } => Some((*func, *opline)),
+            _ => None,
+        });
+        // Nothing served before the end: what follows is a call begun or
+        // entered, and the trace goes back to its header.
+        let ends = next.is_none() && !ahead.iter().any(|event| matches!(event, Event::Back));
+        match (next, ends, self.repeat) {
+            (Some(next), ..) => Some(next),
+            (None, true, Some(_)) => match self.ops.get(self.header.index()) {
+                Some(Op::Line(line)) => {
+                    Some((self.frames[usize::from(line.frame.0)].func, line.opline))
+                }
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -767,8 +828,7 @@ impl<'a> Builder<'a> {
             let call_at = next_op
                 .and_then(|(_, at)| at.0.checked_sub(1))
                 .map(OplineIdx);
-            let guard = next_op.map(|(func, opline)| Check::Caller { func, opline });
-            (caller, call_at, guard)
+            (caller, call_at, next_op)
         };
         let code = self.meta(caller).code;
         let out = call_at
@@ -781,13 +841,8 @@ impl<'a> Builder<'a> {
             });
         self.returned = Types::NULL;
         self.ops.push(Op::Back { frame: caller, out });
-        if let Some(check) = guard {
-            let exit = draft(Point::After(idx), caller, At::Stands);
-            self.guards.push(Placed {
-                at: GuardAt::Within(idx),
-                check,
-                exit,
-            });
+        if let Some((func, opline)) = guard {
+            self.stands_at(idx, caller, func, opline);
         }
         Ok(())
     }
@@ -1245,7 +1300,10 @@ impl<'a> Builder<'a> {
                 let declared = Types::of_mask(self.meta(frame).code.return_mask)
                     .without(Types::OBJECT)
                     .without(Types::REF);
+                // Seen through a reference, the slot keeps the reference,
+                // which the inline form would write over with its value.
                 op.op1_type != OperandKind::Unused
+                    && !seen.referenced[0]
                     && t1.kinds() != Types::NONE
                     && t1.within(declared)
             }
