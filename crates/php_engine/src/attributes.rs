@@ -215,6 +215,7 @@ fn callee_named(req: &Request, function: Function, method: &str, function_word: 
 /// 472 0
 /// 448 0
 /// ```
+#[cold] // a flagged callee alone; out of the call path's frames (#3022)
 pub(crate) fn deprecated_function(req: &mut Request, function: Function) -> Result<(), Thrown> {
     let attributes = req
         .function_decl(function)
@@ -261,6 +262,7 @@ pub(crate) fn deprecated_function(req: &mut Request, function: Function) -> Resu
 ///
 /// Warning: The return value of function test() should either be used or intentionally ignored by casting it as (void) in %s on line 12
 /// ```
+#[cold] // a flagged callee alone; out of the call path's frames (#3022)
 pub(crate) fn no_discard_function(req: &mut Request, function: Function) -> Result<(), Thrown> {
     let attributes = req
         .function_decl(function)
