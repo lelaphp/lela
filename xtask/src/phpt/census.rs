@@ -177,7 +177,7 @@ impl Census {
     /// An empty one says so rather than printing a heading over nothing:
     /// a subset with no such test is the answer, not the absence of one.
     pub(crate) fn print(&self, scope: &str) {
-        let groups = |rows: &[Row], count: usize, what: &str, of: &str| {
+        let heading = |rows: &[Row], count: usize, what: &str, of: &str| {
             let plural = if rows.len() == 1 { "" } else { "s" };
             println!(
                 "phpt census {scope}: {count} {what} over {} {of}{plural}",
@@ -188,7 +188,7 @@ impl Census {
         if unread.is_empty() {
             println!("phpt census {scope}: no test was refused by the compiler");
         } else {
-            groups(&unread, self.unread(), "unread", "construct");
+            heading(&unread, self.unread(), "unread", "construct");
         }
         for row in &unread {
             println!(
@@ -203,7 +203,7 @@ impl Census {
             println!("phpt census {scope}: no test missed");
             return;
         }
-        groups(&rows, self.missed(), "missed", "signature");
+        heading(&rows, self.missed(), "missed", "signature");
         for row in &rows {
             let tests = row.tests.join(", ");
             println!("  {:>5}  {}: {tests}", row.tests.len(), row.signature);

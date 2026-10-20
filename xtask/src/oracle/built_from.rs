@@ -14,16 +14,16 @@
 //!
 //! A binary with no dep-info of its own, none beside it or one naming
 //! another binary (a target directory copied from another checkout), is
-//! held to every source under the crate directories, as every binary was
-//! before #3109.
+//! keyed over every crate directory, as every binary was before #3109,
+//! and held to every file under them.
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use super::hosts::HOSTS;
-use crate::layout::CRATE_DIRS;
+use super::hosts::{HOSTS, MAKALA};
+use crate::layout::{CRATE_DIRS, normalize};
 
 /// The workspace's own files every build of a package reads.
 const WORKSPACE: [&str; 4] = [
@@ -74,6 +74,8 @@ impl BuiltFrom {
     /// [`BuiltFrom::Unlisted`] is.
     pub(crate) fn keyed(&self, root: &Path) -> Vec<PathBuf> {
         let (packages, hosts) = (self.packages(root), HOSTS.map(|h| h.krate));
+        // The served subset's host serves it beside them (`phpt::http`).
+        let hosts = hosts.into_iter().chain([MAKALA.krate]).collect::<Vec<_>>();
         let every = UNLISTED.iter().chain(CRATE_DIRS.iter().map(|d| &d.dir));
         if packages.is_empty() {
             return every.map(PathBuf::from).collect();
@@ -95,7 +97,7 @@ impl BuiltFrom {
             let path = path
                 .strip_prefix(root)
                 .or_else(|_| path.strip_prefix(&canonical));
-            Some(crate::layout::normalize(path.ok()?))
+            Some(normalize(path.ok()?))
         };
         let package = |path: PathBuf| match path.components().next() {
             Some(first) if is_package(first.as_ref()) => {
@@ -113,10 +115,12 @@ impl BuiltFrom {
     /// The newest path the binary of the host `host` is built from under
     /// `root`, and when it was written: each path the dep-info names, a
     /// directory by every file under it, as cargo reads a `build.rs`'s
-    /// `rerun-if-changed`, and each linked package's `Cargo.toml`; with no
-    /// dep-info, every file under the crate directories but another
-    /// host's, since writing `sapi/fpm` relinks no `php`. `None` where none
-    /// is there, and then the binary is behind nothing.
+    /// `rerun-if-changed`, each linked package's `Cargo.toml` and the
+    /// toolchain, whose change cargo rebuilds every crate for; with no
+    /// dep-info, every `.rs` and `.toml` under the crate directories that
+    /// is no test, bench, example or fixture, and no `clippy.toml`, but
+    /// another host's, since writing `sapi/fpm` relinks no `php`. `None`
+    /// where none is there, and then the binary is behind nothing.
     pub(crate) fn newest(&self, root: &Path, host: &Path) -> Option<(PathBuf, SystemTime)> {
         let listed = match self {
             BuiltFrom::Listed(paths) => paths.clone(),
@@ -132,6 +136,10 @@ impl BuiltFrom {
         }
         let packages = self.packages(root).into_iter().filter(|p| is_package(p));
         found.extend(packages.map(|package| root.join(package).join("Cargo.toml")));
+        found.push(root.join("rust-toolchain.toml"));
+        if *self == BuiltFrom::Unlisted {
+            found.retain(|path| is_engine_source(path.strip_prefix(root).unwrap_or(path)));
+        }
         let other_host = |path: &Path| {
             let relative = path.strip_prefix(root).unwrap_or(path);
             relative.starts_with("sapi") && !relative.starts_with(host)
@@ -140,6 +148,18 @@ impl BuiltFrom {
             .filter_map(|path| Some((path.clone(), path.metadata().ok()?.modified().ok()?)))
             .max_by_key(|(_, written)| *written)
     }
+}
+
+/// Whether one file, named relative to the root, is code a binary with no
+/// dep-info may be built from: a `.rs` or a `.toml` a `build.rs` reads,
+/// and no test, bench, example or fixture, which no binary links, nor the
+/// generated `clippy.toml`, which no build reads.
+fn is_engine_source(relative: &Path) -> bool {
+    let kind = relative.extension().and_then(|kind| kind.to_str());
+    let skipped = ["tests", "tests.rs", "benches", "examples", "fixtures"];
+    matches!(kind, Some("rs" | "toml"))
+        && !relative.ends_with("clippy.toml")
+        && !(relative.components()).any(|part| skipped.iter().any(|s| part.as_os_str() == *s))
 }
 
 /// Whether `path`, relative to the root, is under a crate directory: a

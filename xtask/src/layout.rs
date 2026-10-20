@@ -120,8 +120,11 @@ pub(crate) fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
+            // A `..` past the start is kept, as `../x` names no `x` here.
             std::path::Component::ParentDir => {
-                out.pop();
+                if !out.pop() && !out.has_root() {
+                    out.push(component);
+                }
             }
             std::path::Component::CurDir => {}
             other => out.push(other),

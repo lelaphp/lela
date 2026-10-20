@@ -95,6 +95,7 @@ fn a_run_is_kept_under_the_packages_the_binary_links_and_nothing_else() {
             "sapi/cgi",
             "sapi/cli",
             "sapi/fpm",
+            "sapi/makala",
             "sapi/phpdbg",
         ]
     );
@@ -155,4 +156,28 @@ fn the_binary_is_behind_only_a_path_its_build_read() {
         let (newest, _) = built.newest(&tree, cli).unwrap();
         assert_eq!(newest, tree.join(moved));
     }
+}
+
+/// With no dep-info, the binary is held to the engine's sources alone, as
+/// before #3109: a generated `clippy.toml`, a guide or a test written after
+/// it does not put it behind the tree, and a source does.
+#[test]
+fn a_binary_with_no_dep_info_is_behind_only_an_engine_source() {
+    let (tree, binary) = built("unlisted", None, &LISTED);
+    fs::remove_file(format!("{}.d", binary.display())).unwrap();
+    let made = binary.metadata().unwrap().modified().unwrap();
+    let later = Some(made + Duration::from_mins(1));
+    for beside in [
+        "ext/clippy.toml",
+        "ext/AGENTS.md",
+        "crates/php_engine/tests/kernels.rs",
+    ] {
+        written(&tree.join(beside), later);
+    }
+    let cli = Path::new("sapi/cli");
+    let (_, when) = BuiltFrom::Unlisted.newest(&tree, cli).unwrap();
+    assert!(when < made);
+    written(&tree.join("crates/php_jit/src/lib.rs"), later);
+    let (newest, _) = BuiltFrom::Unlisted.newest(&tree, cli).unwrap();
+    assert_eq!(newest, tree.join("crates/php_jit/src/lib.rs"));
 }

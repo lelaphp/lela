@@ -430,6 +430,21 @@ fn a_commit_that_leaves_the_binary_keeps_its_runs_and_one_that_moves_it_does_not
     );
     assert!(kept_at(root, pin, "HEAD", scope).unwrap().is_ok());
     assert_eq!(regressed(&now, "HEAD", pin, scope).unwrap(), Against::Held);
+    // Carried into another checkout of the repository, as `worktree retire`
+    // carries a branch's runs into main's, the run and the set it was kept
+    // under are found there by the commit alone.
+    let main = Tree::new("against-built-from-main").unwrap();
+    let at = main.join("checkout");
+    committing(
+        root,
+        &["clone", "-q", root.to_str().unwrap(), at.to_str().unwrap()],
+    );
+    assert!(
+        kept_at(&at, pin, "HEAD", scope).unwrap().is_err(),
+        "nothing kept there yet"
+    );
+    carry(root, &at).unwrap();
+    assert!(kept_at(&at, pin, "HEAD", scope).unwrap().is_ok());
 
     commit_writing(root, &["crates/php_engine/src/lib.rs"]);
     let now = Snapshot::disk(root).unwrap();
