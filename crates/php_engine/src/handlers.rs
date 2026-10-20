@@ -22388,10 +22388,7 @@ pub(crate) fn in_array<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let table = exec::constant(code, ConstIdx(op.op2));
-    let Some(table) = table.as_array().copied() else {
-        return Err(no_table("IN_ARRAY"));
-    };
+    let table = jump_table(code, op, "IN_ARRAY")?;
     let strict = op.extended_value != 0;
     let computed = unary_kernel(req, frame, code, op, |req, needle| {
         crate::ops::in_array(req, needle, table, strict).map(Value::bool)
@@ -23477,20 +23474,16 @@ fn switched(req: &Request, frame: FrameRef, switched: Switched, op: &Opline) -> 
     }
 }
 
-/// The jump table a `SWITCH_LONG`, `SWITCH_STRING` or `MATCH` carries
-/// as the constant `op2` names, or [`no_table`]'s fatal.
+/// The table a `SWITCH_LONG`, `SWITCH_STRING`, `MATCH` or `IN_ARRAY`
+/// carries as the constant `op2` names, or the fatal for an `op2` that
+/// is no array, which no unit the compiler wrote has (design §10).
 fn jump_table(code: &OpArray, op: &Opline, opcode: &str) -> Result<PhpArray, Fatal> {
     let table = exec::constant(code, ConstIdx(op.op2)).as_array().copied();
-    table.ok_or_else(|| no_table(opcode))
-}
-
-/// The fatal for an opcode over a constant table, a jump table or
-/// `IN_ARRAY`'s, whose `op2` is no array, which no unit the compiler
-/// wrote has (design §10).
-fn no_table(opcode: &str) -> Fatal {
-    Fatal::error(format!(
-        "InternalError: {opcode} names a constant that is no table"
-    ))
+    table.ok_or_else(|| {
+        Fatal::error(format!(
+            "InternalError: {opcode} names a constant that is no table"
+        ))
+    })
 }
 
 /// `ZEND_VM_NEXT_OPCODE`: the same frame, at the opline after this one,
