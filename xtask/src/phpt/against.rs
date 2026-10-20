@@ -68,8 +68,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use super::miss::Miss;
-use super::target::Target;
-use super::{CORPUS, INSTRUMENT, Judgement, Lane, Scope, Tally};
+use super::target::{Target, named};
+use super::{INSTRUMENT, Judgement, Lane, Scope, Tally};
 use crate::git;
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
@@ -566,12 +566,7 @@ pub(crate) fn regressed(
             )));
         }
     };
-    let prefix = format!("phpt:{CORPUS}/");
-    let names: Vec<&str> = diff
-        .regressed
-        .iter()
-        .map(|(id, _)| id.strip_prefix(&prefix).unwrap_or(id))
-        .collect();
+    let names: Vec<&str> = diff.regressed.iter().map(|(id, _)| named(id)).collect();
     Ok(Against::Unmet(format!(
         "{scope}: {} of {} tests met at {} are not met here: {}",
         names.len(),
@@ -721,13 +716,12 @@ pub(crate) fn compared(
             return Ok(reading);
         }
     };
-    let prefix = format!("phpt:{CORPUS}/");
     let names: Vec<&str> = diff
         .regressed
         .iter()
         .map(|(id, now)| {
             println!("regressed {id}: met at {commit}, {} here", now.as_str());
-            id.strip_prefix(&prefix).unwrap_or(id)
+            named(id)
         })
         .collect();
     reading.count("held", diff.held)?;

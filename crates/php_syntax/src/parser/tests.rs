@@ -39,7 +39,7 @@ fn marker_precede_chains() {
     rhs.complete(&mut p, SyntaxKind::LITERAL_EXPR);
     wrapper.complete(&mut p, SyntaxKind::BINARY_EXPR);
 
-    let (events, _, _) = p.finish();
+    let events = p.finish().events;
     // The first event carries the forward link to its wrapper.
     assert!(
         matches!(
@@ -259,7 +259,8 @@ fn parse_nested(src: &[u8]) -> (tree::Built<'static>, Vec<crate::Diagnostic>) {
     let lines = LineIndex::new(arena, src);
     let mut p = Parser::new(&input, FileId(0), &lines);
     crate::grammar::source_file(&mut p);
-    let (events, _, raised) = p.finish();
+    let ended = p.finish();
+    let (events, raised) = (ended.events, ended.diagnostics);
     (tree::build(arena, &lexed.tokens, &lines, events), raised)
 }
 

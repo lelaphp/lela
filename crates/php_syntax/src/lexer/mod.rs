@@ -106,13 +106,17 @@ pub fn lex(file: FileId, text: &[u8], options: &LexOptions) -> Lexed {
         &LineIndex::new(&arena, text),
         Vec::new(),
         &mut Vec::new(),
+        &mut Vec::new(),
     )
 }
 
 /// [`lex`] over a line table already built for `text`, which `parse`
 /// keeps for the parser and hands back on `Parsed`, into `tokens`, with
 /// `states` the room of the state stack: both a parse lends and takes
-/// back, the stack's handed back empty in `states`.
+/// back, the stack's handed back empty in `states`. `significant` is
+/// filled with the index of every token that is no whitespace, comment
+/// or heredoc indentation, as each is emitted, which is the parser's
+/// cursor ([`crate::parser::Input`]).
 #[must_use]
 pub(crate) fn lex_with_lines(
     file: FileId,
@@ -121,11 +125,15 @@ pub(crate) fn lex_with_lines(
     lines: &LineIndex<'_>,
     tokens: Vec<Token>,
     states: &mut Vec<StateFrame>,
+    significant: &mut Vec<u32>,
 ) -> Lexed {
-    let (lexed, mut above) = Lexer::new(file, text, options, lines, tokens, std::mem::take(states))
-        .lex(options.position);
+    let mut scan = Lexer::new(file, text, options, lines, tokens, std::mem::take(states));
+    scan.significant = std::mem::take(significant);
+    scan.significant.clear();
+    let (lexed, mut above, indexed) = scan.lex(options.position);
     above.clear();
     *states = above;
+    *significant = indexed;
     lexed
 }
 
@@ -284,6 +292,8 @@ pub(crate) struct Lexer<'a> {
     halt: HaltStage,
     /// End offset of the last emitted token (the coverage invariant).
     emitted: usize,
+    /// The index of every significant token emitted ([`lex_with_lines`]).
+    significant: Vec<u32>,
 }
 
 impl<'a> Lexer<'a> {
@@ -336,12 +346,13 @@ impl<'a> Lexer<'a> {
             diags: Vec::new(),
             halt: HaltStage::Off,
             emitted: 0,
+            significant: Vec::new(),
         }
     }
 
-    /// The stream and the diagnostics, and the room of the state stack
-    /// above its base.
-    pub(crate) fn lex(mut self, position: Position) -> (Lexed, Vec<StateFrame>) {
+    /// The stream and the diagnostics, the room of the state stack
+    /// above its base, and the index of the significant tokens.
+    pub(crate) fn lex(mut self, position: Position) -> (Lexed, Vec<StateFrame>, Vec<u32>) {
         if position == Position::AtShebang {
             self.lex_shebang();
         }
@@ -377,6 +388,7 @@ impl<'a> Lexer<'a> {
                 diagnostics: self.diags,
             },
             self.frames.above,
+            self.significant,
         )
     }
 
@@ -421,13 +433,19 @@ impl<'a> Lexer<'a> {
 
     fn emit_upto(&mut self, kind: SyntaxKind, start: usize) {
         debug_assert_eq!(start, self.emitted, "token not contiguous");
+        let index = narrow(self.tokens.len());
         self.tokens.push(Token {
             kind,
             offset: narrow(start),
             len: narrow(self.pos - start),
         });
         self.emitted = self.pos;
-        self.note_halt_progress(kind);
+        if !kind.is_trivia() {
+            self.significant.push(index);
+            if self.halt != HaltStage::Off || kind == SyntaxKind::HALT_COMPILER_KW {
+                self.note_halt_progress(kind);
+            }
+        }
     }
 
     pub(crate) fn diag(&mut self, d: Diagnostic) {
@@ -513,10 +531,11 @@ impl<'a> Lexer<'a> {
 
     // ----- the __halt_compiler recognizer ------------------------------------
 
+    /// The recognizer's next stage after a significant token `kind`:
+    /// whitespace and comments between the pieces are fine, and are not
+    /// handed here ([`Lexer::emit_upto`]), nor is any token while the
+    /// recognizer is off and the token does not arm it.
     fn note_halt_progress(&mut self, kind: SyntaxKind) {
-        if kind.is_trivia() {
-            return; // whitespace and comments between the pieces are fine
-        }
         self.halt = match (self.halt, kind) {
             (_, SyntaxKind::HALT_COMPILER_KW) => {
                 // Arm only for the statement form in the outermost scripting

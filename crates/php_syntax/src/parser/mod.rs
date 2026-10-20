@@ -36,7 +36,7 @@ mod input;
 use crate::SyntaxKind;
 use crate::line_index::LineIndex;
 use crate::source::{Diagnostic, FileId, Span};
-use crate::tree::{Event, TOMBSTONE};
+use crate::tree::{Census, Event, TOMBSTONE};
 
 pub use input::Input;
 
@@ -50,6 +50,16 @@ pub struct Lead {
     open: Option<(SyntaxKind, Span)>,
 }
 
+/// What a parse ended with: the event stream and its census, for the
+/// builder, the room of the delimiter stack, for a parse that lends it
+/// to the next, and the diagnostics raised, in stream order.
+pub struct Ended {
+    pub(crate) events: Vec<Event>,
+    pub(crate) census: Census,
+    pub(crate) delims: Vec<(SyntaxKind, Span)>,
+    pub(crate) diagnostics: Vec<Diagnostic>,
+}
+
 /// The grammar's view of the parse.
 pub struct Parser<'t> {
     input: &'t Input<'t>,
@@ -59,6 +69,9 @@ pub struct Parser<'t> {
     /// line N` inside the bracket-balance text.
     lines: &'t LineIndex<'t>,
     events: Vec<Event>,
+    /// What the stream holds, counted as it is written, for the builder
+    /// to lay its arena down at.
+    census: Census,
     /// Forward-progress fuel: spent on every lookahead, refilled on every
     /// consumed token. Exhaustion trips [`Parser::is_stuck`]. A legitimate
     /// lookahead burst (an attribute scan) exceeds any small constant, so
@@ -183,15 +196,24 @@ impl<'t> Parser<'t> {
     /// same source.
     #[cfg(test)]
     pub fn new(input: &'t Input<'t>, file: FileId, lines: &'t LineIndex<'t>) -> Parser<'t> {
-        Parser::new_in(input, file, lines, Vec::new(), Vec::new())
+        Parser::new_in(
+            input,
+            file,
+            lines,
+            Vec::new(),
+            Census::default(),
+            Vec::new(),
+        )
     }
 
-    /// [`Parser::new`] writing its events into the room `events` lends.
+    /// [`Parser::new`] writing its events into the room `events` lends,
+    /// and counting them into `census`.
     pub(crate) fn new_in(
         input: &'t Input<'t>,
         file: FileId,
         lines: &'t LineIndex<'t>,
         mut events: Vec<Event>,
+        census: Census,
         mut delims: Vec<(SyntaxKind, Span)>,
     ) -> Parser<'t> {
         let burst_cap = u32::try_from(input.len())
@@ -211,6 +233,7 @@ impl<'t> Parser<'t> {
                 events.reserve(input.len().saturating_mul(3).saturating_add(4));
                 events
             },
+            census,
             fuel: FUEL,
             burst: 0,
             burst_cap,
@@ -324,6 +347,7 @@ impl<'t> Parser<'t> {
         debug_assert_eq!(self.input.kind(self.pos), kind, "bump kind mismatch");
         debug_assert!(!self.at_eof(), "bump at EOF");
         self.events.push(Event::Token { remap: kind });
+        self.census.token();
         self.pos += 1;
         self.fuel = FUEL;
         self.burst = 0;
@@ -353,6 +377,7 @@ impl<'t> Parser<'t> {
             }
         }
         self.events.push(Event::Token { remap });
+        self.census.token();
         self.pos += 1;
         self.fuel = FUEL;
         self.burst = 0;
@@ -804,11 +829,14 @@ impl<'t> Parser<'t> {
         );
     }
 
-    /// Ends the parse: the event stream, for the builder, the room of
-    /// the delimiter stack beside it, for a parse that lends it to the
-    /// next, and the diagnostics raised, in stream order.
-    pub fn finish(self) -> (Vec<Event>, Vec<(SyntaxKind, Span)>, Vec<Diagnostic>) {
-        (self.events, self.delims, self.diagnostics)
+    /// Ends the parse.
+    pub fn finish(self) -> Ended {
+        Ended {
+            events: self.events,
+            census: self.census,
+            delims: self.delims,
+            diagnostics: self.diagnostics,
+        }
     }
 }
 
@@ -820,6 +848,7 @@ impl Marker {
             Some(Event::Start { kind: slot, .. }) => *slot = kind,
             _ => debug_assert!(false, "a marker points at a Start event"),
         }
+        p.census.node(kind);
         p.events.push(Event::Finish);
         CompletedMarker {
             start_event: self.event_index,

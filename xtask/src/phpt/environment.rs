@@ -178,8 +178,8 @@ pub(crate) fn env_of(phpt: &Phpt, test: &Path) -> Vec<(String, OsString)> {
         .filter_map(|line| {
             let eq = line.iter().position(|b| *b == b'=')?;
             let name = String::from_utf8_lossy(&line[..eq]).trim().to_owned();
-            let value = replaced(line[eq + 1..].trim_ascii(), b"{PWD}", &beside);
-            let value = replaced(
+            let value = oracle::replace(line[eq + 1..].trim_ascii(), b"{PWD}", &beside);
+            let value = oracle::replace(
                 &value,
                 b"{TMP}",
                 std::env::temp_dir().as_os_str().as_encoded_bytes(),
@@ -187,22 +187,6 @@ pub(crate) fn env_of(phpt: &Phpt, test: &Path) -> Vec<(String, OsString)> {
             (!name.is_empty()).then(|| (name, OsString::from_vec(value)))
         })
         .collect()
-}
-
-/// `bytes` with every `from` replaced by `to`.
-fn replaced(bytes: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut at = 0;
-    while at < bytes.len() {
-        if bytes[at..].starts_with(from) {
-            out.extend_from_slice(to);
-            at += from.len();
-        } else {
-            out.push(bytes[at]);
-            at += 1;
-        }
-    }
-    out
 }
 
 /// php's `escapeshellarg` on a POSIX host: the word in single quotes,

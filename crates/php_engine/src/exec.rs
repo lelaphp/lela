@@ -3488,7 +3488,14 @@ mod tests {
             ..Unit::default()
         };
         let mut caches = RuntimeCaches::default();
-        let first = caches.take(one_function(), None);
+        let taken = |caches: &mut RuntimeCaches| {
+            let mut unit = one_function();
+            caches.number(&mut unit);
+            let unit = unit.published(None);
+            caches.hold(&unit);
+            unit
+        };
+        let first = taken(&mut caches);
         let numbers = |unit: &Unit| {
             std::iter::once(&unit.main)
                 .chain(unit.functions.iter().map(|(_, code)| code))
@@ -3505,14 +3512,14 @@ mod tests {
         );
         let at = CacheAt::of(first.main.runtime_cache);
         caches.map(at).set(CacheSlot(0), Cached::Hit);
-        let second = caches.take(one_function(), None);
+        let second = taken(&mut caches);
         assert_eq!(
             numbers(&second),
             [MapPtrOffset::Request(2), MapPtrOffset::Request(3)],
             "a unit still held keeps its numbers"
         );
         drop(first);
-        let third = caches.take(one_function(), None);
+        let third = taken(&mut caches);
         let mut taken = numbers(&third);
         taken.sort_by_key(|at| match at {
             MapPtrOffset::Engine(n) | MapPtrOffset::Request(n) => *n,

@@ -663,70 +663,136 @@ fn compile_scanned<'p>(
         return Err(refused.error(raised));
     }
     let halt = emit::walk::halt_offset(parsed).map(|offset| scanned.original_offset(offset));
-    unit_raised(arena, parsed, options, strings, halt, room, raised)
+    emit::unit(arena, parsed, options, strings, halt, room, raised)
 }
 
-/// The unit of `parsed`, what was raised before its compile, `raised`,
-/// standing first among its diagnostics: made where `emit::unit` makes
-/// it and handed back by one way out, so it is not moved on the way.
-fn unit_raised<'p>(
-    arena: &'p Arena,
-    parsed: &'p Parsed<'p>,
-    options: &Options<'p>,
-    strings: &mut dyn Intern,
-    halt: Option<i64>,
-    room: Room,
+/// A compile's refusal with `raised`, what was raised before the compile
+/// began, standing before every diagnostic the compiler raised, and the
+/// names of the functions it declared made as a file's are
+/// ([`intern_names`]); a declared unit whose names the heap refused is
+/// not handed back.
+pub(crate) fn refused_after(
+    mut refused: CompileError,
     mut raised: Vec<Diagnostic>,
-) -> Result<Unit, CompileError> {
-    let mut made = emit::unit(arena, parsed, options, strings, halt, room);
-    let mut fatal = None;
-    match &mut made {
-        Ok(unit) => {
-            if !raised.is_empty() {
-                raised.append(&mut unit.diagnostics);
-                unit.diagnostics = raised;
-            }
-            let interned = match options.kind {
-                SourceKind::File => intern_names(unit, strings),
-                SourceKind::Eval(_) => intern_declared(unit, strings),
-            };
-            // `zend_mm`'s limit, raised as `E_ERROR` where the compile
-            // asked for the memory.
-            if let Err(limit) = interned {
-                fatal = Some(CompileError {
-                    level: Level::Error,
-                    message: fatal_message(limit).into(),
-                    line: unit.main.line_end,
-                    raised: std::mem::take(&mut unit.diagnostics),
-                    thrown: false,
-                    stage: Stage::Compiling,
-                    declared: None,
-                    keys_made: u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX),
-                });
-            }
+    options: &Options<'_>,
+    strings: &mut dyn Intern,
+) -> CompileError {
+    if let Some(declared) = &mut refused.declared {
+        for before in &mut declared.raised_before {
+            *before += raised.len();
         }
-        Err(refused) => {
-            // The scanner's stand before every one the compiler raised.
-            if let Some(declared) = &mut refused.declared {
-                for before in &mut declared.raised_before {
-                    *before += raised.len();
-                }
-                // The names php's compile made for them, as a file's.
-                if options.kind == SourceKind::File
-                    && intern_names(&declared.unit, strings).is_err()
-                {
-                    refused.declared = None;
-                }
-            }
-            raised.append(&mut refused.raised);
-            refused.raised = raised;
+        if options.kind == SourceKind::File && intern_names(&declared.unit, strings).is_err() {
+            refused.declared = None;
         }
     }
-    // One way out, so the unit stays where `unit` made it.
-    if let Some(fatal) = fatal {
-        made = Err(fatal);
+    raised.append(&mut refused.raised);
+    refused.raised = raised;
+    refused
+}
+
+/// The op arrays and declarations of a unit, borrowed where they stand:
+/// a [`Unit`]'s, or a compile's before it lays them in one, so what is
+/// interned of them is interned before the unit is made, where it is
+/// made once and not moved.
+#[derive(Clone, Copy)]
+pub(crate) struct Parts<'u> {
+    /// The main op array's file's name.
+    pub(crate) file: &'u php_unit::decl::Name,
+    /// The main op array's variables.
+    pub(crate) main_vars: &'u [php_unit::decl::Name],
+    pub(crate) functions: &'u [(FunctionDecl, php_unit::OpArray)],
+    pub(crate) dynamic: &'u [(FunctionDecl, php_unit::OpArray)],
+    pub(crate) methods: &'u [php_unit::MethodBody],
+    pub(crate) hooks: &'u [php_unit::HookBody],
+    pub(crate) classes: &'u [ClassDecl],
+}
+
+impl<'u> Parts<'u> {
+    fn of(unit: &'u Unit) -> Parts<'u> {
+        Parts {
+            file: &unit.main.filename,
+            main_vars: &unit.main.vars,
+            functions: &unit.functions,
+            dynamic: &unit.dynamic,
+            methods: &unit.methods,
+            hooks: &unit.hooks,
+            classes: &unit.classes,
+        }
     }
-    made
+
+    /// What [`intern_names`] interns, or [`intern_declared`] where `kind`
+    /// is an `eval`'s.
+    pub(crate) fn intern(self, kind: SourceKind, strings: &mut dyn Intern) -> Result<(), Fatal> {
+        if kind == SourceKind::File {
+            for name in self.names() {
+                strings.intern(name)?;
+            }
+        }
+        self.intern_declared(strings)
+    }
+
+    /// [`op_array_names`].
+    fn names(self) -> impl Iterator<Item = &'u [u8]> {
+        let functions = self
+            .functions
+            .iter()
+            .chain(self.dynamic)
+            .map(|(decl, _)| decl);
+        let methods = self.classes.iter().flat_map(|class| {
+            let hooks = class
+                .properties
+                .iter()
+                .filter_map(|property| property.hooks.as_deref())
+                .flat_map(|hooks| hooks.get.iter().chain(&hooks.set));
+            class
+                .methods
+                .iter()
+                .chain(hooks)
+                .map(|method| &method.function)
+        });
+        std::iter::once(self.file)
+            .chain(functions.chain(methods).map(|decl| &decl.name))
+            .chain(self.classes.iter().map(|class| &class.name))
+            .map(|name| &*name.0)
+    }
+
+    /// [`intern_declared`].
+    fn intern_declared(self, strings: &mut dyn Intern) -> Result<(), Fatal> {
+        for var in self.main_vars {
+            strings.intern(&var.0)?;
+        }
+        // An `eval` that declares nothing, the most of them, walks no
+        // declaration.
+        if self.functions.is_empty()
+            && self.dynamic.is_empty()
+            && self.methods.is_empty()
+            && self.hooks.is_empty()
+            && self.classes.is_empty()
+        {
+            return Ok(());
+        }
+        for name in self.declared_names() {
+            strings.intern(&name)?;
+        }
+        Ok(())
+    }
+
+    /// [`declared_names`].
+    fn declared_names(self) -> impl Iterator<Item = Cow<'u, [u8]>> {
+        let bodies = (self.functions.iter().chain(self.dynamic))
+            .map(|(_, body)| body)
+            .chain(self.methods.iter().map(|method| &method.body))
+            .chain(self.hooks.iter().map(|hook| &hook.body));
+        let vars = bodies.flat_map(|body| body.vars.iter().map(|var| Cow::Borrowed(&*var.0)));
+        let properties = self.classes.iter().flat_map(|class| {
+            class.properties.iter().flat_map(move |property| {
+                let mangled = mangling(property.visibility, &class.name.0)
+                    .map(|prefix| Cow::Owned([prefix.as_slice(), &property.name.0].concat()));
+                std::iter::once(Cow::Borrowed(&*property.name.0)).chain(mangled)
+            })
+        });
+        vars.chain(properties)
+    }
 }
 
 /// The names a file's op arrays carry interned into `strings`, the home
@@ -757,10 +823,7 @@ fn unit_raised<'p>(
 /// cache's unit is read back with its names interned again, as its
 /// constants are.
 pub fn intern_names(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> {
-    for name in op_array_names(unit) {
-        strings.intern(name)?;
-    }
-    intern_declared(unit, strings)
+    Parts::of(unit).intern(SourceKind::File, strings)
 }
 
 /// The names php's compile interns into whichever home it compiles
@@ -782,30 +845,7 @@ pub fn intern_names(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> 
 /// 0
 /// ```
 pub fn intern_declared(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> {
-    for var in &unit.main.vars {
-        strings.intern(&var.0)?;
-    }
-    let bodies = unit
-        .functions
-        .iter()
-        .map(|(_, body)| body)
-        .chain(unit.dynamic.iter().map(|(_, body)| body))
-        .chain(unit.methods.iter().map(|method| &method.body))
-        .chain(unit.hooks.iter().map(|hook| &hook.body));
-    for body in bodies {
-        for var in &body.vars {
-            strings.intern(&var.0)?;
-        }
-    }
-    for class in &unit.classes {
-        for property in &class.properties {
-            strings.intern(&property.name.0)?;
-            if let Some(prefix) = mangling(property.visibility, &class.name.0) {
-                strings.intern(&[prefix.as_slice(), &property.name.0].concat())?;
-            }
-        }
-    }
-    Ok(())
+    Parts::of(unit).intern_declared(strings)
 }
 
 /// `zend_mangle_property_name`'s prefix (`Z/Zend/zend_compile.c`) for a
@@ -827,27 +867,17 @@ pub fn mangling(visibility: Visibility, class: &[u8]) -> Option<Vec<u8>> {
 /// hook's and closure's, `function_name`, and each class's, `ce->name`.
 /// A name two op arrays share stands once for each.
 pub fn op_array_names(unit: &Unit) -> impl Iterator<Item = &[u8]> {
-    let functions = unit
-        .functions
-        .iter()
-        .chain(&unit.dynamic)
-        .map(|(decl, _)| decl);
-    let methods = unit.classes.iter().flat_map(|class| {
-        let hooks = class
-            .properties
-            .iter()
-            .filter_map(|property| property.hooks.as_deref())
-            .flat_map(|hooks| hooks.get.iter().chain(&hooks.set));
-        class
-            .methods
-            .iter()
-            .chain(hooks)
-            .map(|method| &method.function)
-    });
-    std::iter::once(&unit.main.filename)
-        .chain(functions.chain(methods).map(|decl| &decl.name))
-        .chain(unit.classes.iter().map(|class| &class.name))
-        .map(|name| &*name.0)
+    Parts::of(unit).names()
+}
+
+/// The names `unit`'s declarations are read by beside their op arrays'
+/// ([`op_array_names`]), as [`intern_declared`] interns them after the
+/// main op array's variables: each declared function's, closure's,
+/// method's and hook's variables (`op_array->vars`), and each declared
+/// property's, with the key `prop_info->name` is under too, mangled for
+/// a protected or a private one ([`mangling`]).
+pub fn declared_names(unit: &Unit) -> impl Iterator<Item = Cow<'_, [u8]>> {
+    Parts::of(unit).declared_names()
 }
 
 /// php's level for what the scanner or the parser raised: the same

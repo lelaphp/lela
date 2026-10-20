@@ -38,8 +38,8 @@ const KEPT: usize = 16;
 
 /// The units the loop holds a share of while it serves, each kept from
 /// the first frame that entered it until the loop lets them all go:
-/// added to and never changed, so what is borrowed from one stands as
-/// long as the loop holds it. A block is laid down where the one before
+/// added to and never changed while a serving borrows them, so what is
+/// borrowed from one stands as long as the loop holds it. A block is laid down where the one before
 /// it is full. At most one is a file's unit the request compiled for
 /// itself ([`Request::took_unit`]): a frame of a second lets them all go
 /// ([`Entered::Full`]), and each is given back to the request
@@ -136,20 +136,27 @@ impl Units {
         Some(held)
     }
 
-    /// Every share given back to the request, the last taken first
+    /// Every share given back to the request, the first taken first
     /// ([`Request::give_back`]), which keeps the room of a unit nothing
     /// else holds for its next compile, as php frees an `eval`'s op array
-    /// to the request's heap.
-    pub(super) fn give_back(self, req: &mut Request) {
-        let Units { blocks, len, .. } = self;
-        let shares = blocks
-            .into_iter()
-            .filter_map(OnceCell::into_inner)
-            .flat_map(|block| block.into_iter().filter_map(OnceCell::into_inner))
-            .take(len.get());
-        for share in shares {
-            req.give_back(share);
+    /// to the request's heap. The places stay laid down for the next
+    /// serving, which an `eval` in a loop starts once per `eval`, so it
+    /// lays down no block of its own. It takes `&mut self`: the serving
+    /// that held the units borrowed them shared for `'u`, and its
+    /// [`Kept`] is a `Kept<'u>`, so no op array the loop kept outlives
+    /// the share it was borrowed from, and the next serving starts with
+    /// a `Kept` of its own.
+    pub(super) fn give_back(&mut self, req: &mut Request) {
+        for at in 0..self.len.replace(0) {
+            let share = (self.blocks.get_mut(at / BLOCK))
+                .and_then(OnceCell::get_mut)
+                .and_then(|block| block.get_mut(at % BLOCK))
+                .and_then(OnceCell::take);
+            if let Some(share) = share {
+                req.give_back(share);
+            }
         }
+        self.took.set(false);
     }
 
     /// The unit held at `at`.

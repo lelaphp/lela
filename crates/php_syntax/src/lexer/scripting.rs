@@ -31,7 +31,10 @@ const CASTS: &[&[u8]] = &[
 const CASTS_REMOVED: &[&[u8]] = &[b"real", b"unset"];
 
 impl Lexer<'_> {
-    /// One dispatch step in `ST_IN_SCRIPTING`.
+    /// One dispatch step in `ST_IN_SCRIPTING`. Every token passes it, so
+    /// each rule longer than a byte or two is a function of its own kept
+    /// out of line (`#[inline(never)]`), and the dispatch saves none of
+    /// their registers.
     // A flat first-byte dispatch reads best as one match; splitting it into
     // per-byte-class functions would only scatter the operator table.
     #[allow(clippy::too_many_lines)]
@@ -179,6 +182,7 @@ impl Lexer<'_> {
         self.emit(kind, start);
     }
 
+    #[inline(never)]
     pub(crate) fn lex_whitespace(&mut self) {
         let start = self.pos;
         while matches!(self.byte(self.pos), b' ' | b'\t' | b'\r' | b'\n')
@@ -191,6 +195,7 @@ impl Lexer<'_> {
 
     // ----- ?  ?>  ?->  ??  ??= -----------------------------------------------
 
+    #[inline(never)]
     fn lex_question(&mut self) {
         let start = self.pos;
         match (self.byte(start + 1), self.byte(start + 2)) {
@@ -225,6 +230,7 @@ impl Lexer<'_> {
 
     // ----- <  <=  <>  <<  <<=  <=>  <<<heredoc --------------------------------
 
+    #[inline(never)]
     fn lex_lt(&mut self) {
         let start = self.pos;
         if self.starts_with_ci(start, b"<<<") && self.try_heredoc_start(start) {
@@ -242,6 +248,7 @@ impl Lexer<'_> {
 
     // ----- .  .=  ...  .5 ------------------------------------------------------
 
+    #[inline(never)]
     fn lex_dot(&mut self) {
         let start = self.pos;
         if self.byte(start + 1) == b'.' && self.byte(start + 2) == b'.' {
@@ -257,6 +264,7 @@ impl Lexer<'_> {
 
     // ----- $var ----------------------------------------------------------------
 
+    #[inline(never)]
     fn lex_dollar(&mut self) {
         let start = self.pos;
         if is_label_start(self.byte(start + 1)) {
@@ -273,6 +281,7 @@ impl Lexer<'_> {
 
     /// `//` and `#` comments, ending before the newline (php 8 puts the
     /// newline in `T_WHITESPACE`) and before `?>` without consuming it.
+    #[inline(never)]
     fn lex_line_comment(&mut self) {
         let start = self.pos;
         self.pos += if self.byte(start) == b'/' { 2 } else { 1 };
@@ -298,6 +307,7 @@ impl Lexer<'_> {
     /// ```expect exit=255
     /// Parse error: Unterminated comment starting line 2 in %s on line 2
     /// ```
+    #[inline(never)]
     fn lex_block_comment(&mut self) {
         let start = self.pos;
         let is_doc = self.byte(start + 2) == b'*'
@@ -344,6 +354,7 @@ impl Lexer<'_> {
     /// ```expect exit=255
     /// Parse error: The (real) cast has been removed, use (float) instead in %s on line 2
     /// ```
+    #[inline(never)]
     fn lex_paren_or_cast(&mut self) {
         let start = self.pos;
         let mut i = start + 1;
@@ -409,6 +420,7 @@ impl Lexer<'_> {
 
     // ----- \  \A\B ------------------------------------------------------------------
 
+    #[inline(never)]
     fn lex_backslash(&mut self) {
         let start = self.pos;
         if is_label_start(self.byte(start + 1)) {
@@ -439,6 +451,7 @@ impl Lexer<'_> {
         }
     }
 
+    #[inline(never)]
     fn lex_ident_like(&mut self) {
         let start = self.pos;
         // b'…', b"…" and b<<<… prefixes (Zend: b?['] and kin).
@@ -506,6 +519,7 @@ impl Lexer<'_> {
     /// hands each back as `T_BAD_CHARACTER` and its parser says
     /// `unexpected character 0x%02X` for the first it meets, so the span
     /// is one ERROR token, named by the parser where it reaches it.
+    #[inline(never)]
     fn lex_bad_bytes(&mut self) {
         let start = self.pos;
         while self.pos < self.text.len() && is_bad_scripting_byte(self.byte(self.pos)) {

@@ -3,7 +3,6 @@
 //! workspace dependencies are read from that file. Nothing is built and
 //! cargo is not run; the instrument reads manifests and sources.
 
-use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -102,10 +101,7 @@ impl Crates {
             if !cargo.is_file() {
                 continue;
             }
-            let text = fs::read_to_string(&cargo)
-                .with_context(|| format!("reading {}", cargo.display()))?;
-            let table: toml::Table =
-                toml::from_str(&text).with_context(|| format!("{}", cargo.display()))?;
+            let table: toml::Table = crate::read_toml(&cargo)?;
             let package = table
                 .get("package")
                 .and_then(|p| p.get("name"))
