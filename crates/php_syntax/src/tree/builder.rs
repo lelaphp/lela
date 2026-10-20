@@ -77,7 +77,7 @@ use crate::lexer::Token;
 use crate::line_index::LineIndex;
 use crate::source::TextRange;
 
-use super::{Building, Element, Pools, Resolved, TokenId, Tree, line, resolve};
+use super::{Building, Census, Element, Pools, Resolved, TokenId, Tree, line, resolve};
 
 /// One parser event. The parser emits a flat stream; the builder assembles
 /// the tree, so the parser is tested without trees and the builder without
@@ -196,16 +196,18 @@ pub fn build<'a>(
     lines: &LineIndex<'_>,
     events: Vec<Event>,
 ) -> Built<'a> {
-    build_in(arena, tokens, lines, events, &mut Stacks::default())
+    let census = Census::of(&events, Vec::new());
+    build_in(arena, tokens, lines, events, census, &mut Stacks::default())
 }
 
 /// The builder's stacks that die with the build: the open frames, their
 /// pending children, a forward-parent chain, the event stream once
-/// read, the count of each node kind's `Start`s and the lists' pools
-/// before they are copied into the arena. A parse lends them
-/// ([`crate::parse`]) and takes them back empty, so a thread that
-/// parses again reuses their room and a small parse allocates none of
-/// them, and lays down only the counts and the pools its tree has.
+/// read, the room of the [`Census`] the parser counts each node kind's
+/// nodes into, and the lists' pools before they are copied into the
+/// arena. A parse lends them ([`crate::parse`]) and takes them back
+/// empty, so a thread that parses again reuses their room and a small
+/// parse allocates none of them, and lays down only the counts and the
+/// pools its tree has.
 #[derive(Default)]
 pub(crate) struct Stacks {
     pub(crate) events: Vec<Event>,
@@ -217,6 +219,12 @@ pub(crate) struct Stacks {
 }
 
 impl Stacks {
+    /// A census at zero over the counts' room, for the parser to count
+    /// into.
+    pub(crate) fn census(&mut self) -> Census {
+        Census::new(std::mem::take(&mut self.counts))
+    }
+
     /// Whether every stack's room is within `bytes`, the most a thread
     /// keeps between parses.
     pub(crate) fn within(&self, bytes: usize) -> bool {
@@ -235,21 +243,23 @@ fn lent<T>(stack: &mut Vec<T>, at_least: usize) -> Vec<T> {
     stack
 }
 
-/// [`build`] over the stacks `stacks` lends, handed back empty with
-/// `events`' room among them.
+/// [`build`] of `events`, which `census` counted, over the stacks
+/// `stacks` lends, handed back empty with `events`' room among them.
 pub(crate) fn build_in<'a>(
     arena: &'a Arena,
     tokens: &[Token],
     lines: &LineIndex<'_>,
     mut events: Vec<Event>,
+    census: Census,
     stacks: &mut Stacks,
 ) -> Built<'a> {
     // The shape holds an element per `Start` and per `Token`, so it is
     // laid down once at that length, and grows only where the root takes
     // tokens the parser left unconsumed; each kind's nodes are laid down
-    // at the count of its `Start`s. One pass counts both.
+    // at the count of its `Start`s.
     let bump = arena.bump();
-    let (nodes, shaped) = Building::new(bump, &events, std::mem::take(&mut stacks.counts));
+    let shaped = census.shaped();
+    let nodes = Building::new(bump, census);
     let mut builder = Builder {
         tokens,
         lines,

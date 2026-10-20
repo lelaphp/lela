@@ -1234,7 +1234,9 @@ fn emit_lists(buf: &mut String, bases: &BTreeSet<String>) {
          /// beside the builder's stacks, so their room is reused, and each\n\
          /// emptied as it is copied into the arena.\n\
          #[derive(Default)]\n\
-         pub(crate) struct Pools {\n",
+         pub(crate) struct Pools {\n    \
+             /// A bit per pool written since the last freeze (`Pooled::BIT`).\n    \
+             used: u32,\n",
     );
     for base in bases {
         writeln!(buf, "    {}: Vec<{base}>,", field(base)).ok();
@@ -1257,17 +1259,28 @@ fn emit_lists(buf: &mut String, bases: &BTreeSet<String>) {
     buf.push_str(&within.join("\n            && "));
     buf.push_str(
         "\n    }\n\n    \
-             /// The pools as the tree keeps them, copied into `bump`, a pool\n    \
-             /// that holds nothing copied as no slice, and every pool emptied.\n    \
+             /// The pools as the tree keeps them: each pool written since the\n    \
+             /// last freeze copied into `bump` and emptied, and every other\n    \
+             /// list no slice, so a tree pays for the pools it wrote.\n    \
+             #[allow(clippy::too_many_lines)]\n    \
              pub(crate) fn freeze<'a>(&mut self, bump: &'a bumpalo::Bump) -> Lists<'a> {\n        \
-                 Lists {\n",
+                 let mut lists = NO_LISTS;\n        \
+                 let mut used = std::mem::take(&mut self.used);\n        \
+                 while used != 0 {\n            \
+                     let pool = used.trailing_zeros();\n            \
+                     used &= used - 1;\n            \
+                     match pool {\n",
     );
-    for base in bases {
+    for (bit, base) in bases.iter().enumerate() {
         let name = field(base);
-        writeln!(buf, "            {name}: frozen(bump, &mut self.{name}),").ok();
+        writeln!(
+            buf,
+            "                {bit} => lists.{name} = frozen(bump, &mut self.{name}),"
+        )
+        .ok();
     }
-    buf.push_str("        }\n    }\n}\n\n");
-    for base in bases {
+    buf.push_str("                _ => {}\n            }\n        }\n        lists\n    }\n}\n\n");
+    for (bit, base) in bases.iter().enumerate() {
         let name = field(base);
         write!(
             buf,
@@ -1277,6 +1290,7 @@ fn emit_lists(buf: &mut String, bases: &BTreeSet<String>) {
                  }}\n\
              }}\n\
              impl Pooled for {base} {{\n    \
+                 const BIT: u32 = 1 << {bit};\n    \
                  fn pool_mut(pools: &mut Pools) -> &mut Vec<Self> {{\n        \
                      &mut pools.{name}\n    \
                  }}\n\
@@ -1642,6 +1656,11 @@ pub fn generate(grammar: &Grammar) -> Result<String, Vec<Error>> {
     if model.structs().count() >= usize::from(u8::MAX) {
         errors.push(Error::global(
             "more struct node kinds than a `Nodes` slot (a u8) counts",
+        ));
+    }
+    if list_bases.len() > 32 {
+        errors.push(Error::global(
+            "more list pools than `Pools::used` (a u32) has a bit for",
         ));
     }
     emit_nodes(&mut buf, &model);
