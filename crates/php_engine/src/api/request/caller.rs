@@ -230,6 +230,7 @@ impl Request {
     /// and the first `N` of them as [`Request::argument`] reads each,
     /// `UNDEF` past the count; none given and all `UNDEF` outside a
     /// native's body.
+    #[inline]
     pub(crate) fn arguments_given<const N: usize>(&self) -> (usize, [Value; N]) {
         let Some(call) = self.serving_call() else {
             return (0, [Value::undef(); N]);
