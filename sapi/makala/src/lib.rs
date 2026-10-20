@@ -199,7 +199,11 @@ fn engine(options: &Options) -> Engine {
         .extensions(&extensions)
         .configure(php_bundle::configure_for(php_bundle::Serving::Threads))
         .tier::<php_bundle::Tier>();
-    php_sapi::start(natives::declare(builder), &options.ini, log::error)
+    let engine = php_sapi::start(natives::declare(builder), &options.ini, log::error);
+    // What the startup displayed written before makala serves anything,
+    // rather than held to its exit as php-fpm's buffered stdout holds it.
+    php_sapi::stdio::flush();
+    engine
 }
 
 /// The listening sockets the line asks for, bound: the clear one first,

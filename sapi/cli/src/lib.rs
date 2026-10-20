@@ -283,9 +283,14 @@ fn engine(startup: &Startup) -> Engine {
     let builder = php_sapi::ini::CLI_HARDCODED
         .iter()
         .fold(builder, |builder, (name, value)| builder.ini(name, value));
-    php_sapi::start(natives::cli(builder), &startup.ini, |entry| {
+    let engine = php_sapi::start(natives::cli(builder), &startup.ini, |entry| {
         request::Process.log(entry);
-    })
+    });
+    // `sapi_cli_deactivate`, which `sapi_deactivate` calls as
+    // `php_module_startup` ends, flushes stdout: what php wrote while it
+    // started is written before anything the CLI does.
+    php_sapi::stdio::flush();
+    engine
 }
 
 /// `sapi_cli_ini_defaults`, which the CLI and its built-in server both set.
@@ -305,7 +310,9 @@ fn cli_defaults(builder: EngineBuilder) -> EngineBuilder {
 ///
 /// [`php_sapi::start`] finishes its startup as `main` runs
 /// `php_module_startup` before `-S` (`php_cli.c:1341`): what the startup
-/// raised displayed on the process's `stdout` under the server's name, no
+/// raised displayed to C's `stdout` under the server's name
+/// ([`php_sapi::stdio`]), held there to the process's exit, since the
+/// server's module has no `deactivate` to flush it as the CLI's does; no
 /// extension's `rinit` run, and a startup that failed leaves no server.
 /// The server's responses carry none of it, since php wrote it before any
 /// client connected.

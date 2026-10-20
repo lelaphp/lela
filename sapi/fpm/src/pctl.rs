@@ -111,7 +111,7 @@ impl Fpm {
         // `fpm_php_cleanup`, the last of the cleanups to run, as the
         // first registered: the engine ended.
         drop(self.engine.take());
-        std::process::exit(0);
+        php_sapi::exit(0);
     }
 
     /// `fpm_pctl_exec`: the master's own command line exec'd, its
@@ -165,7 +165,7 @@ impl Fpm {
         {
             zlog_sys!(Error @ fpm_pctl_exec:107, e, "failed to reload: execvp() failed");
         }
-        std::process::exit(i32::from(crate::master::EXIT_SOFTWARE));
+        php_sapi::exit(i32::from(crate::master::EXIT_SOFTWARE));
     }
 
     /// `fpm_pctl_kill_all`: `signal` to every child.

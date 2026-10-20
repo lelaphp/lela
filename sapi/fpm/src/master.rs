@@ -557,7 +557,7 @@ impl Fpm {
                     Ok(ready) => ready,
                     Err(e) => {
                         zlog_sys!(Error @ fpm_unix_init_main:646, e, "failed to select");
-                        std::process::exit(i32::from(EXIT_SOFTWARE));
+                        php_sapi::exit(i32::from(EXIT_SOFTWARE));
                     }
                 };
                 if ready == 0 {
@@ -565,14 +565,14 @@ impl Fpm {
                         Error @ fpm_unix_init_main:671,
                         "the master process didn't send back its status (via the pipe to the calling process)"
                     );
-                    std::process::exit(i32::from(EXIT_SOFTWARE));
+                    php_sapi::exit(i32::from(EXIT_SOFTWARE));
                 }
                 let mut file = std::fs::File::from(read);
                 let mut value = [0u8; 4];
                 match file.read(&mut value) {
                     Ok(0) => {
                         zlog!(Error @ fpm_unix_init_main:658, "no data have been read from pipe");
-                        std::process::exit(i32::from(EXIT_SOFTWARE));
+                        php_sapi::exit(i32::from(EXIT_SOFTWARE));
                     }
                     Ok(_) if i32::from_ne_bytes(value) == 1 => {
                         zlog!(
@@ -586,11 +586,11 @@ impl Fpm {
                     }
                     Ok(_) => {
                         zlog!(Debug @ fpm_unix_init_main:666, "The master process returned an error !");
-                        std::process::exit(i32::from(EXIT_SOFTWARE))
+                        php_sapi::exit(i32::from(EXIT_SOFTWARE))
                     }
                     Err(e) => {
                         zlog_sys!(Error @ fpm_unix_init_main:653, conf::errno(&e), "failed to read from pipe");
-                        std::process::exit(i32::from(EXIT_SOFTWARE))
+                        php_sapi::exit(i32::from(EXIT_SOFTWARE))
                     }
                 }
             }
