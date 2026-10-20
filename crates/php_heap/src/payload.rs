@@ -14,14 +14,14 @@ use std::ptr::NonNull;
 /// `free_obj` for the slot alone: its layout, its type and its drop.
 pub(crate) struct Payload {
     pub(crate) layout: Layout,
-    pub(crate) type_id: fn() -> TypeId,
+    pub(crate) type_id: TypeId,
     pub(crate) drop: unsafe fn(NonNull<u8>),
 }
 
 impl Payload {
     /// Whether the table is `T`'s.
     pub(crate) fn is<T: Any>(&self) -> bool {
-        (self.type_id)() == TypeId::of::<T>()
+        self.type_id == TypeId::of::<T>()
     }
 }
 
@@ -40,7 +40,7 @@ pub(crate) fn payload_of<T: Any + Send>() -> &'static Payload {
     const {
         &Payload {
             layout: Layout::new::<T>(),
-            type_id: TypeId::of::<T>,
+            type_id: TypeId::of::<T>(),
             drop: drop_payload::<T>,
         }
     }

@@ -12,8 +12,9 @@
 //! `FastCGI` process manager both do; [`fcgi`], the connection both serve
 //! `FastCGI` over; [`ini`], the line's `-d` entries as
 //! `php_ini_builder` reads them, and `php_init_config`'s search for the
-//! php.ini files; and [`start`], `php_module_startup` over them, with what a
-//! host prints before it serves anything; and [`strerror`], an I/O
+//! php.ini files; [`stdio`], C's `stdout`, which php writes through while
+//! it starts and ends; and [`start`], `php_module_startup` over them, with
+//! what a host prints before it serves anything; and [`strerror`], an I/O
 //! error's sentence as a host's `%s` of `strerror(errno)` prints it.
 //! [`tier`] is
 //! the tier face beside the host face, for the debugging host (#1308).
@@ -32,6 +33,7 @@ pub mod cgi;
 pub mod fcgi;
 pub mod getopt;
 pub mod ini;
+pub mod stdio;
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -140,29 +142,32 @@ pub fn start(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)], log_message: fn
     let cwd = std::env::current_dir().unwrap_or_default();
     let (refused, starting) = engine.refused(Box::new(Starting(log_message)));
     if let Some(status) = refused.or_else(|| engine.start_up(env, cwd, starting).0) {
-        std::io::stdout().lock().flush().ok();
-        std::process::exit(status);
+        exit(status);
     }
     engine
 }
 
 /// Where php writes while it starts, before any request, and while it
-/// ends, after the last: the body
-/// straight to the process's stdout (`php_output_direct`, which
-/// `php_output_startup` points at `php_output_stdout`), the error stream
-/// to its stderr, no head, and the log through the host's function, each
-/// as it is written, so a diagnostic's log line and its display stand in
-/// the order `php_error_cb` writes them.
+/// ends, after the last: the body to C's `stdout` ([`stdio`]), held there
+/// as `php_output_direct` holds it, which `php_output_startup` points at
+/// `php_output_stdout`, an `fwrite`; and so opcache's preload, whose
+/// `preload_ub_write` is one too, and whose `preload_flush` is the flush
+/// its request ends with. Where the host's `sapi_deactivate` flushes
+/// stdout as `php_module_startup` ends, the CLI's, the host flushes
+/// [`stdio`] once this returns. The error stream to stderr, no head, and
+/// the log through the host's function, each as it is written, so a
+/// diagnostic's log line and its display stand in the order
+/// `php_error_cb` writes them.
 struct Starting(fn(&[u8]));
 
 impl OutputSink for Starting {
     fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
-        std::io::stdout().lock().write_all(bytes).ok();
+        stdio::write(bytes);
         Ok(())
     }
 
     fn flush(&mut self) {
-        std::io::stdout().lock().flush().ok();
+        stdio::flush();
     }
 
     fn send_headers(&mut self, _head: &ResponseHead) {}
@@ -283,10 +288,20 @@ pub fn version(name: &str, engine: &Engine) -> String {
     )
 }
 
-/// php's exit status as the process's: `exit()` takes the low byte.
+/// php's exit status as the process's, for a host's `main` to return:
+/// C's `stdout` flushed, as `exit()` flushes it ([`stdio`]), and the
+/// status's low byte, which `exit()` takes.
 #[must_use]
 pub fn exit_code(status: i32) -> ExitCode {
+    stdio::flush();
     ExitCode::from(u8::try_from(status & 0xff).unwrap_or(255))
+}
+
+/// C's `exit(status)` where a host's process ends before its `main`
+/// returns: C's `stdout` flushed ([`stdio`]), then the process ended.
+pub fn exit(status: i32) -> ! {
+    stdio::flush();
+    std::process::exit(status)
 }
 
 #[cfg(test)]

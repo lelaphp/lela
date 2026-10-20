@@ -169,6 +169,15 @@ impl RuntimeCaches {
         })
     }
 
+    /// Whether `unit` is one the request compiled for itself and took
+    /// ([`RuntimeCaches::take`]): an `eval`'s, a host's source or a file
+    /// no cache keeps.
+    pub(crate) fn took(&self, unit: &PublishedUnit) -> bool {
+        self.held
+            .iter()
+            .any(|(held, _)| std::ptr::eq(held.as_ptr(), PublishedUnit::as_ptr(unit)))
+    }
+
     /// `unit`, whose last share its holder is giving up: the numbers
     /// its op arrays held handed out again, their caches emptied, as php
     /// frees a heap cache with its op array, so the next unit takes them

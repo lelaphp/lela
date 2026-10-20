@@ -79,7 +79,7 @@ use crate::observer::OnThrow;
 use crate::operand::{ByKind, Operand};
 use crate::ops::inline::{self, Arith, Binary, Bitwise, Shift};
 use crate::ops::{DimRead, Offset, Switched, array_entry, string_dim_offset, string_offset};
-use crate::tier::{Next, SafepointIdx, Site, Stepped, Tier, continued};
+use crate::tier::{Flow, Next, SafepointIdx, Site, Stepped, Tier};
 use branch::Branch;
 use php_unit::Opcode;
 
@@ -1352,7 +1352,12 @@ pub(crate) fn init_dynamic_call<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_init_closure(req, frame, code, op, at) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
     let callee = exec::operand(req, frame, code, op.op2_type, op.op2).deref();
     let resolved = if let Some(object) = callee.as_object().copied() {
         dynamic_call_object(req, object)
@@ -1370,15 +1375,68 @@ pub(crate) fn init_dynamic_call<T: Tier>(
     push_dynamic(req, frame, code, op, resolved)
 }
 
+/// The inline path of `INIT_DYNAMIC_CALL` (`Z/Zend/zend_vm_def.h:3938`)
+/// over a CV that holds a `Closure`, `$f(...)`:
+/// `zend_init_dynamic_call_object`'s first arm, the payload read once
+/// ([`closure_target`]) and the call pushed with the closure and its
+/// receiver held, as php reads `get_closure` and `fbc` directly. Nothing
+/// here raises but the memory limit on a page the push takes, reported
+/// at this opline; `None`, with nothing touched, for every other
+/// callee, which the handler resolves. A closure bound to a receiver
+/// reads it and its called scope, one bound into another scope reads
+/// that scope's members, and each call gives back the owners it took:
+///
+/// ```php
+/// class P { public $n = 'p'; function get() { return function ($s) { return $this->n . $s . static::class; }; } }
+/// class Q extends P { public $n = 'q'; }
+/// $f = (new Q)->get();
+/// $g = Closure::bind(function () { return $this->n; }, new P, P::class);
+/// $r = $f("-") . " " . $g();
+/// $m = memory_get_usage();
+/// for ($i = 0; $i < 3; $i++) { $r = $f('-') . ' ' . $g(); }
+/// echo $r, ' ', memory_get_usage() - $m, "\n";
+/// unset($f);
+/// var_dump($g());
+/// ```
+/// ```expect
+/// q-Q p 32
+/// string(1) "p"
+/// ```
+#[inline(always)] // as `inline_init_fcall`
+#[allow(clippy::inline_always)]
+fn inline_init_closure(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    at: u32,
+) -> Option<Edge> {
+    if op.op2_type != OperandKind::Cv {
+        return None;
+    }
+    let held = ByKind(op.op2_type).read(req.slots_mut(frame), code, op.op2);
+    let target = closure_target(req, PhpObject::of(held.as_obj()?))?;
+    Some(
+        match req.push_call(dynamic_header(&target, op.extended_value)) {
+            Ok(_) => Ok(advanced()),
+            Err(fatal) => {
+                req.vm_mut().stand(frame, at);
+                Err(fatal)
+            }
+        },
+    )
+}
+
 /// What a dynamic call resolved to: the callee, the name the call frame
 /// carries for a method, the receiver it holds one owner of, the called
-/// scope, and the closure the frame holds one owner of.
+/// scope, and the closure the frame holds one owner of, with whether it
+/// reads a runtime cache of its own ([`crate::classes::ClosureCache`]).
 struct DynamicTarget {
     function: Function,
     name: Option<PhpString>,
     this: Option<PhpObject>,
     called_scope: Option<crate::api::values::ClassId>,
-    closure: Option<PhpObject>,
+    closure: Option<(PhpObject, bool)>,
 }
 
 /// `zend_init_dynamic_call_object` (`Z/Zend/zend_execute.c:5152`): the
@@ -1387,18 +1445,8 @@ struct DynamicTarget {
 /// object where its class declares one, and php's `Error` naming the
 /// class otherwise.
 fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTarget, Thrown> {
-    if let Some(closure) = object.closure(req).cloned() {
-        req.addref(&object.as_value());
-        if let Some(this) = closure.this {
-            req.addref(&this.as_value());
-        }
-        return Ok(DynamicTarget {
-            function: closure.function,
-            name: None,
-            this: closure.this,
-            called_scope: closure.called_scope,
-            closure: Some(object),
-        });
+    if let Some(target) = closure_target(req, object) {
+        return Ok(target);
     }
     let class = object.class();
     if let Some(made) = req.handler_closure(object) {
@@ -1434,6 +1482,33 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
         this,
         called_scope: Some(class),
         closure: None,
+    })
+}
+
+/// `zend_closure_get_closure` with `GC_ADDREF` of the closure and its
+/// receiver: what a call through `object`, a `Closure`, takes, the
+/// payload read once for the function, the receiver, the called scope
+/// and whether it reads a runtime cache of its own, as php's
+/// `get_closure` hands `fbc` and the object over in one call. None for
+/// an object that is no closure, with nothing touched.
+fn closure_target(req: &Request, object: PhpObject) -> Option<DynamicTarget> {
+    let closure = object.native::<crate::classes::ClosureObject>(req)?;
+    let (function, this, called_scope) = (
+        closure.info.function,
+        closure.info.this,
+        closure.info.called_scope,
+    );
+    let own_cache = matches!(closure.cache, crate::classes::ClosureCache::Own(_));
+    req.addref(&object.as_value());
+    if let Some(this) = this {
+        req.addref(&this.as_value());
+    }
+    Some(DynamicTarget {
+        function,
+        name: None,
+        this,
+        called_scope,
+        closure: Some((object, own_cache)),
     })
 }
 
@@ -1708,6 +1783,7 @@ fn inline_init_fcall(req: &mut Request, frame: FrameRef, op: &Opline, at: u32) -
     let room = user.shape.room(op.extended_value);
     let mut header = exec::Header::call(function, op.extended_value);
     header.callee = user.callee_at();
+    header.info.join(user.shape.sent);
     Some(match req.push_room(room as usize, header) {
         Ok(_) => Ok(advanced()),
         Err(fatal) => {
@@ -1762,10 +1838,12 @@ pub(crate) fn init_fcall_by_name<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_init_fcall(req, frame, op, req.vm().opline(frame)) {
+    if let Some(edge) = inline_init_fcall(req, frame, op, at) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     let written = ConstIdx(op.op2);
     let lowered = ConstIdx(op.op2.saturating_add(1));
     init_call(req, frame, code, op, &[lowered], written)
@@ -1866,7 +1944,7 @@ pub(crate) fn send_val<T: Tier, A: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_send(req, frame, code, op, A::default(), false) {
+    if let Some(edge) = inline_send(req, frame, code, op, A::default(), Sending::Value) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -1896,7 +1974,7 @@ pub(crate) fn send_var<T: Tier, A: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_send(req, frame, code, op, A::default(), false) {
+    if let Some(edge) = inline_send(req, frame, code, op, A::default(), Sending::Value) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -1932,7 +2010,7 @@ fn sent(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge
 /// where the callee's parameter at the number takes its argument by
 /// value, as php's `_EX` handlers go to the same arm once
 /// `ARG_SHOULD_BE_SENT_BY_REF` is clear, which `ex` asks of the callee
-/// ([`Request::arg_send_mode`]).
+/// ([`exec::CallInfo::sends_by_value`], then [`Request::arg_send_mode`]).
 ///
 /// ```php
 /// function f($a, $b, $c) { return "$a|$b|$c"; }
@@ -1959,7 +2037,7 @@ fn inline_send(
     code: &OpArray,
     op: &Opline,
     a: impl Operand,
-    ex: bool,
+    sending: Sending,
 ) -> Option<Edge> {
     if op.op2_type == OperandKind::Const {
         return None;
@@ -1970,7 +2048,13 @@ fn inline_send(
     if !header.info.building()
         || to >= header.num_args as usize
         || !callee.slots().get(to)?.is_undef()
-        || ex && req.arg_send_mode(header.function?, op.op2).0
+        || match sending {
+            Sending::Value => false,
+            Sending::Declared => {
+                !header.info.sends_by_value(op.op2) && req.arg_send_mode(header.function?, op.op2).0
+            }
+            Sending::Checked => header.info.send_by_ref(),
+        }
     {
         return None;
     }
@@ -1996,6 +2080,19 @@ fn inline_send(
         None => req.release(Value::of_zval(z)),
     }
     Some(Ok(advanced()))
+}
+
+/// Who says an argument [`inline_send`] places goes by value: the
+/// compiler, which emitted `SEND_VAL` or `SEND_VAR`; the callee's
+/// parameter, which a `SEND_*_EX` reads
+/// (`ARG_SHOULD_BE_SENT_BY_REF`); or the `CHECK_FUNC_ARG` before a
+/// `SEND_FUNC_ARG`, which read it for the call
+/// (`ZEND_CALL_SEND_ARG_BY_REF`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sending {
+    Value,
+    Declared,
+    Checked,
 }
 
 /// `ZEND_SEND_REF` (`Z/Zend/zend_vm_def.h:5087`), the argument a call
@@ -2092,12 +2189,54 @@ fn bound_at(req: &mut Request, at: php_heap::ZvalRef) -> Result<Value, Thrown> {
 /// the `INIT` resolved: whether the parameter numbered `number` takes
 /// its argument by reference, and whether only where it can
 /// (`ZEND_SEND_PREFER_REF`), the variadic's for every argument past the
-/// declared ones.
+/// declared ones. The bit the `INIT` wrote answers the first twelve
+/// arguments of a user callee with no lookup, as
+/// `QUICK_ARG_SHOULD_BE_SENT_BY_REF` reads `quick_arg_flags`
+/// ([`exec::CallInfo::sends_by_value`]); the declaration answers the
+/// rest. Below, the twelfth argument is the last the bits answer, the
+/// thirteenth goes by value and the fourteenth by reference as the
+/// declaration says, a variadic's take every argument past the declared
+/// ones, a name takes its parameter's, and a constant where a reference
+/// is taken is php's `Error`:
+///
+/// ```php
+/// if (PHP_VERSION_ID > 0) {
+///     function r1(&$a) { $a = 'r1'; }
+///     function r12($a1, $a2, $a3, $a4, $a5, $a6, $a7, $a8, $a9, $a10, $a11, &$a12, $a13, &$a14) { $a12 = 'r12'; $a14 = 'r14'; }
+///     function rv($a, &...$v) { foreach ($v as &$x) { $x = 'v'; } }
+///     function rn($a, &$b = null) { $b = 'n'; }
+/// }
+/// r1($x);
+/// r12(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, $y, $w, $z);
+/// rv(0, $p, $q);
+/// rn(1, b: $n);
+/// var_dump($x, $y, $w, $z, $p, $q, $n);
+/// try { r1(1); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { r12(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Warning: Undefined variable $w in %s on line 9
+///
+/// Warning: Undefined variable $w in %s on line 12
+/// string(2) "r1"
+/// string(3) "r12"
+/// NULL
+/// string(3) "r14"
+/// string(1) "v"
+/// string(1) "v"
+/// string(1) "n"
+/// r1(): Argument #1 ($a) could not be passed by reference
+/// r12(): Argument #12 ($a12) could not be passed by reference
+/// ```
 fn send_mode(req: &Request, number: u32) -> (bool, bool) {
-    req.building_call_function()
-        .map_or((false, false), |function| {
-            req.arg_send_mode(function, number)
-        })
+    match req.vm().building() {
+        Some(call) if !call.info.sends_by_value(number) => {
+            call.function.map_or((false, false), |function| {
+                req.arg_send_mode(function, number)
+            })
+        }
+        _ => (false, false),
+    }
 }
 
 /// `ARG_SHOULD_BE_SENT_BY_REF`: by reference, or by reference where it
@@ -2202,10 +2341,12 @@ pub(crate) fn send_val_ex<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type), true) {
+    if let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type), Sending::Declared) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     let reserved = match reserve_arg(req, frame, code, op) {
         Ok(reserved) => reserved,
         Err(edge) => return edge,
@@ -2272,10 +2413,12 @@ pub(crate) fn send_var_ex<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type), true) {
+    if let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type), Sending::Declared) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     let reserved = match reserve_arg(req, frame, code, op) {
         Ok(reserved) => reserved,
         Err(edge) => return edge,
@@ -2430,7 +2573,18 @@ pub(crate) fn check_func_arg<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    // By number, where the `INIT` wrote the parameter's by-value bit, the
+    // call being built read once and written once.
+    if let ArgAt::Number(number) = ArgAt::of(op)
+        && let Some(call) = req.vm_mut().building_mut()
+        && call.info.sends_by_value(number)
+    {
+        call.info.set_send_by_ref(false);
+        return Ok(advanced());
+    }
+    req.vm_mut().stand(frame, at);
     let number = match ArgAt::of(op) {
         ArgAt::Number(number) => Some(number),
         ArgAt::Name(at) => {
@@ -2487,12 +2641,58 @@ pub(crate) fn check_func_arg<T: Tier>(
 ///   }
 /// }
 /// ```
+///
+/// By value it is `SEND_VAR`'s inline path over what the read left,
+/// for a container that is a CV, a constant or what a call returned and
+/// a key that is a CV, a constant or a temporary, a string's offset
+/// among them; a key the array has not got and an offset past the string
+/// warn as the read does, by reference the element is laid down, and
+/// `[]` read is php's `Error`:
+///
+/// ```php
+/// if (PHP_VERSION_ID > 0) { function v($x) { return $x; } function r(&$x) { $x = 'w'; } }
+/// $a = [1, 2]; $s = 'str'; $j = 1;
+/// echo v($a[$j]), v($a[1]), v($a[$j + 0]), v([5, 6][$j]), v([5, 6][1]), v((fn () => [7, 8])()[$j]), v($s[1]), v($s[$j + 1]), v(($a + [])[$j]), "\n";
+/// var_dump(v($a[7]), v($s[5]));
+/// r($b['k']);
+/// r($a[]);
+/// var_dump($b, $a);
+/// try { v($a[]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// 222668tr2
+///
+/// Warning: Undefined array key 7 in %s on line 5
+///
+/// Warning: Uninitialized string offset 5 in %s on line 5
+/// NULL
+/// string(0) ""
+/// array(1) {
+///   ["k"]=>
+///   string(1) "w"
+/// }
+/// array(3) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+///   [2]=>
+///   string(1) "w"
+/// }
+/// Cannot use [] for reading
+/// ```
 pub(crate) fn send_func_arg<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    // By value, `SEND_VAR`'s body (`ZEND_VM_C_GOTO(send_var)`).
+    if let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type), Sending::Checked) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
     let reserved = match reserve_arg(req, frame, code, op) {
         Ok(reserved) => reserved,
         Err(edge) => return edge,
@@ -2506,8 +2706,8 @@ pub(crate) fn send_func_arg<T: Tier>(
 /// `ZEND_CALL_INFO(EX(call)) & ZEND_CALL_SEND_ARG_BY_REF`: what the last
 /// `CHECK_FUNC_ARG` read for the call being built.
 fn sends_arg_by_ref(req: &Request) -> bool {
-    req.building_call()
-        .and_then(|call| req.vm().at(call))
+    req.vm()
+        .building()
         .is_some_and(|call| call.info.send_by_ref())
 }
 
@@ -2653,24 +2853,34 @@ fn push_dynamic(
     op: &Opline,
     resolved: Result<DynamicTarget, Thrown>,
 ) -> Edge {
-    let target = match resolved {
+    let mut target = match resolved {
         Ok(target) => target,
         Err(thrown) => {
             exec::free_operand(req, frame, code, op.op2_type, op.op2);
             return threw(req, frame, &thrown);
         }
     };
-    let mut header = exec::Header::call(target.function, op.extended_value);
-    header.set_receiver(target.this.map(exec::Receiver::Owned));
-    header.set_called_scope(target.called_scope);
-    header.closure = target.closure;
-    header.info.set_dynamic(true);
-    if let Some(name) = target.name {
+    if let Some(name) = target.name.take() {
         req.release(Value::string(name));
     }
-    req.push_call(header)?;
+    req.push_call(dynamic_header(&target, op.extended_value))?;
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     Ok(advance(req, frame))
+}
+
+/// The header of the call a dynamic call resolved to, `ZEND_CALL_DYNAMIC`
+/// with `count` arguments: its receiver and closure held, its called
+/// scope, and whether the closure reads a cache of its own.
+fn dynamic_header(target: &DynamicTarget, count: u32) -> exec::Header {
+    let mut header = exec::Header::call(target.function, count);
+    header.set_receiver(target.this.map(exec::Receiver::Owned));
+    header.set_called_scope(target.called_scope);
+    header.closure = target.closure.map(|(closure, _)| closure);
+    header.info.set_dynamic(true);
+    header
+        .info
+        .set_own_cache(target.closure.is_some_and(|(_, own)| own));
+    header
 }
 
 /// The call frame a resolved callback takes, `zend_fcall_info_cache` as
@@ -5897,9 +6107,10 @@ fn inline_init_method_call(
     if !instance {
         return None;
     }
-    let (room, callee) = req.call_room(function, op.extended_value);
+    let (room, callee, sent) = req.call_room(function, op.extended_value);
     let mut header = exec::Header::call(function, op.extended_value);
     header.callee = callee;
+    header.info.join(sent);
     header.set_called_scope(Some(class));
     header.set_receiver(Some(match at {
         None => exec::Receiver::lent(object),
@@ -11588,10 +11799,12 @@ pub(crate) fn init_ns_fcall_by_name<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_init_fcall(req, frame, op, req.vm().opline(frame)) {
+    if let Some(edge) = inline_init_fcall(req, frame, op, at) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     let written = ConstIdx(op.op2);
     let lowered = ConstIdx(op.op2.saturating_add(1));
     let unqualified = ConstIdx(op.op2.saturating_add(2));
@@ -21744,7 +21957,11 @@ fn jumped<T: Tier>(req: &mut Request, frame: FrameRef, at: u32, target: u32, num
         if crate::interrupt::check(req)? {
             return Ok(Stepped::Threw(frame).into());
         }
-        continued(T::safepoint(req, frame, Site::Loop(SafepointIdx(number))))?;
+        match T::safepoint(req, frame, Site::Loop(SafepointIdx(number))) {
+            Flow::Continue => {}
+            // The tier ran the jump and on past it (`jit-design.md` §2.2).
+            flow => return crate::tier::resumed(req, flow, frame),
+        }
     }
     Ok(Next::jump(target))
 }
@@ -22346,8 +22563,30 @@ pub(crate) fn r#return<T: Tier, A: Operand + Default>(
 /// before it keeps to the registers it needs.
 #[inline(never)]
 fn returned<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
+    if let Some(edge) = return_site::<T>(req, frame, op) {
+        return edge;
+    }
     let returned = exec::take_operand(req, frame, code, op.op1_type, op.op1);
-    returned_to_caller::<T>(req, frame, op, returned)
+    returned_to_caller(req, frame, returned)
+}
+
+/// The return safepoint of a `RETURN*` (design §5.8, `jit-design.md`
+/// §2.2), raised for every frame but the entry frame of this serving
+/// with the number the compiler wrote in `result`, before the handler
+/// takes its operand: `None` where the tier answered `Continue`, and
+/// otherwise the edge it resumed at, since a tier that recorded ran the
+/// return and the caller's landing already and nothing of the return is
+/// left to do here.
+#[inline(always)] // once per return, in the RETURN arms
+#[allow(clippy::inline_always)]
+fn return_site<T: Tier>(req: &mut Request, frame: FrameRef, op: &Opline) -> Option<Edge> {
+    if req.stack_mut().entry() == frame {
+        return None;
+    }
+    match T::safepoint(req, frame, Site::Return(SafepointIdx(op.out))) {
+        Flow::Continue => None,
+        flow => Some(crate::tier::resumed(req, flow, frame)),
+    }
 }
 
 /// The inline path of `ZEND_RETURN` (`ZEND_RETURN_SPEC_CONST`, `_TMP`,
@@ -22410,30 +22649,41 @@ fn inline_return<T: Tier>(
         }
         _ => return None,
     };
-    let leave = req.leaves_plainly(frame, moved, z)?;
-    if let Err(fatal) = continued(T::safepoint(req, frame, Site::Return(SafepointIdx(op.out)))) {
-        return Some(Err(fatal));
+    return_plainly::<T>(req, frame, (code.num_cvs, moved), z, SafepointIdx(op.out))
+}
+
+/// [`inline_return`] once its operand is read: the frame left by
+/// [`Request::leave_plainly`] where [`Request::leaves_plainly`] finds it
+/// can be, after the return safepoint.
+#[inline(always)] // as `inline_return`
+#[allow(clippy::inline_always)]
+fn return_plainly<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    (cvs, moved): (u32, Option<usize>),
+    z: Zval,
+    site: SafepointIdx,
+) -> Option<Edge> {
+    let leave = req.leaves_plainly(frame, cvs, moved, z)?;
+    match T::safepoint(req, frame, Site::Return(site)) {
+        Flow::Continue => {}
+        // The tier ran the return and the caller's landing
+        // (`jit-design.md` §2.2); the frame it left is not this one.
+        flow => return Some(crate::tier::resumed(req, flow, frame)),
     }
-    req.leave_plainly(leave, z);
-    Some(Ok(Stepped::Popped(leave.caller).into()))
+    Some(Ok(req.leave_plainly(leave, z).into()))
 }
 
 /// The half of `RETURN` that leaves the frame, which `RETURN_BY_REF`
-/// shares: the return safepoint, the frame popped, and `returned` into
-/// the `VAR` the call opline named, or released where the caller reads
-/// nothing.
-fn returned_to_caller<T: Tier>(
-    req: &mut Request,
-    frame: FrameRef,
-    op: &Opline,
-    returned: Value,
-) -> Edge {
+/// shares, once its return safepoint ([`return_site`]) is behind it:
+/// the frame popped, and `returned` into the `VAR` the call opline
+/// named, or released where the caller reads nothing.
+fn returned_to_caller(req: &mut Request, frame: FrameRef, returned: Value) -> Edge {
     crate::observer::returned(req, frame, Some(&returned));
     if req.stack_mut().entry() == frame {
         req.set_returned(returned);
         return Ok(Stepped::Done.into());
     }
-    continued(T::safepoint(req, frame, Site::Return(SafepointIdx(op.out))))?;
     let (caller, returns_to) = req.returning(frame);
     req.leave_frame(frame);
     if handed_back(req, returns_to, returned) {
@@ -23944,6 +24194,9 @@ pub(crate) fn return_by_ref<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if let Some(edge) = return_site::<T>(req, frame, op) {
+        return edge;
+    }
     let by_value = match op.op1_type {
         OperandKind::Const | OperandKind::Tmp => true,
         OperandKind::Var => op.extended_value == RETURNS_VALUE,
@@ -24000,7 +24253,7 @@ pub(crate) fn return_by_ref<T: Tier>(
             "InternalError: RETURN_BY_REF over an operand that is no place",
         ));
     };
-    returned_to_caller::<T>(req, frame, op, returned)
+    returned_to_caller(req, frame, returned)
 }
 
 /// `ZEND_GENERATOR_CREATE` (`Z/Zend/zend_vm_def.h:4652`): the frame
@@ -24703,12 +24956,12 @@ mod tests {
         let call = code.oplines.get(2).copied().unwrap_or_default();
 
         assert_eq!(
-            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
+            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init, at)),
             Ok(Stepped::Same(frame))
         );
         assert!(!req.is_pending(), "the lowered constant is the table's key");
         assert_eq!(
-            served!(req, frame, at => send_val_ex::<Nop>(&mut req, frame, code, &send)),
+            served!(req, frame, at => send_val_ex::<Nop>(&mut req, frame, code, &send, at)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(
@@ -24736,7 +24989,7 @@ mod tests {
         assert_eq!(req.cached(frame, CacheSlot(init.out)), Cached::Unprimed);
 
         assert_eq!(
-            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
+            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init, at)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.vm().lookups, 1, "the first pass looks the table up");
@@ -24749,7 +25002,7 @@ mod tests {
         );
 
         assert_eq!(
-            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
+            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init, at)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.vm().lookups, 1, "the second pass reads the slot");
@@ -24857,7 +25110,7 @@ mod tests {
                 })
                 .map_or(main, |activated| activated.frame);
             assert_eq!(
-                served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, &code, &init)),
+                served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, &code, &init, at)),
                 Ok(Stepped::Same(frame)),
                 "call {call}"
             );
@@ -24926,7 +25179,7 @@ mod tests {
         let strlen = req.function_named(Bare::resolved(b"strlen"));
 
         assert_eq!(
-            served!(req, frame, at => init_ns_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
+            served!(req, frame, at => init_ns_fcall_by_name::<Nop>(&mut req, frame, code, &init, at)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.vm().lookups, 2, "foo\\strlen misses, strlen hits");
@@ -24937,7 +25190,7 @@ mod tests {
         assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
 
         assert_eq!(
-            served!(req, frame, at => init_ns_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
+            served!(req, frame, at => init_ns_fcall_by_name::<Nop>(&mut req, frame, code, &init, at)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.vm().lookups, 2, "the second pass looks nothing up");
@@ -24977,7 +25230,7 @@ mod tests {
         let init = code.oplines.first().copied().unwrap_or_default();
         for pass in 1..=2 {
             assert_eq!(
-                served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
+                served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init, at)),
                 Ok(Stepped::Threw(frame))
             );
             assert_eq!(req.vm().lookups, pass);
@@ -25643,7 +25896,7 @@ mod tests {
         let init = code.oplines.first().copied().unwrap_or_default();
 
         assert_eq!(
-            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
+            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init, at)),
             Ok(Stepped::Threw(frame))
         );
         assert_eq!(pending_message(&req), "Call to undefined function NoPe()");

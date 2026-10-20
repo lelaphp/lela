@@ -1349,8 +1349,11 @@ impl Arguments {
                     arguments.positional.push(value);
                     return Ok(());
                 };
-                let name = req.string(&name.0).inspect_err(|_| req.release(value))?;
-                arguments.named.push((name, value));
+                // The name the program or the stub wrote, interned.
+                let name = req
+                    .declared_string(&name.0)
+                    .inspect_err(|_| req.release(value))?;
+                arguments.named.push((name.hand_on(), value));
                 Ok(())
             });
             if let Err(thrown) = pushed {
@@ -1359,6 +1362,25 @@ impl Arguments {
             }
         }
         Ok(arguments)
+    }
+
+    /// `named_params` as `zend_get_attribute_object` lays it down,
+    /// `zend_new_array(0)` with each named argument added by its name,
+    /// each one more owner; none where no argument is named.
+    fn named_table(&self, req: &mut Request) -> Result<Option<Owner<PhpArray>>, Thrown> {
+        if self.named.is_empty() {
+            return Ok(None);
+        }
+        let mut table = PhpArray::new(req)?;
+        for (name, value) in &self.named {
+            let key = Owner::take(req, Key::Str(*name));
+            let value = Owner::take(req, *value);
+            if let Err(thrown) = table.add_new(req, key, value) {
+                table.give_up(req);
+                return Err(thrown);
+            }
+        }
+        Ok(Some(table))
     }
 
     /// Every argument's owner given up, its name's with it.
@@ -1441,22 +1463,85 @@ pub(crate) fn attribute_object_made(
     made
 }
 
-/// [`attribute_object`]'s body, under whatever site stands.
+/// [`attribute_object`]'s body, under whatever site stands, with what
+/// php lays down for the constructor's call standing for its length:
+/// the argument array, `emalloc(argc * sizeof(zval))`, and the named
+/// arguments' table, `zend_new_array(0)` filled as each is evaluated,
+/// given back after the call, the positional arguments first, then the
+/// array, then the table with the named ones. A native's argument is
+/// `ZVAL_COPY_OR_DUP`'d out of the string its stub made persistent at
+/// startup, so the request holds a copy of each but a known string
+/// (`ZSTR_KNOWN`), which is interned; a program's are its unit's,
+/// interned by opcache's persist.
+///
+/// ```php
+/// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+/// #[Attribute] class A { function __construct(public $x = null, public $y = null) {} }
+/// #[A(1, 2)] function f1() {}
+/// #[A(y: 2)] function f2() {}
+/// $r1 = (new ReflectionFunction('f1'))->getAttributes()[0];
+/// $r2 = (new ReflectionFunction('f2'))->getAttributes()[0];
+/// $r3 = (new ReflectionFunction('strftime'))->getAttributes()[0];
+/// pk(fn () => $r1->newInstance());
+/// pk(fn () => $r2->newInstance());
+/// pk(fn () => $r3->newInstance());
+/// ```
+/// ```expect
+/// 112 112
+/// 472 80
+/// 552 144
+/// ```
 fn attribute_object_at(
     req: &mut Request,
     class: ClassId,
     attribute: &php_unit::decl::Attribute,
     scope: Option<ClassId>,
 ) -> Result<PhpObject, Thrown> {
+    // `sizeof(zval)`.
+    const ZVAL: usize = 16;
+    let argc = attribute.arguments.len();
+    let array = if argc == 0 {
+        None
+    } else {
+        let laid = req.heap_mut().block(argc * ZVAL);
+        Some(req.fatal_of(laid)?)
+    };
+    // A native's attribute is the one with no line (`php_unit::decl::Attribute`).
+    let native = attribute.line == 0;
     let written = attribute
         .arguments
         .iter()
         .map(|argument| (argument.name.as_ref(), &argument.value));
-    let arguments = Arguments::evaluated(req, written, |req, expr| {
-        eval_declared_made(req, expr, scope)
-    })?;
+    let evaluated = Arguments::evaluated(req, written, |req, expr| match expr {
+        ConstExpr::Str(s) if native && !crate::engine::is_known(s) => {
+            req.string(s).map(Value::string)
+        }
+        _ => eval_declared_made(req, expr, scope),
+    })
+    .and_then(|arguments| match arguments.named_table(req) {
+        Ok(table) => Ok((arguments, table)),
+        Err(thrown) => {
+            arguments.give_up(req);
+            Err(thrown)
+        }
+    });
+    let (arguments, table) = match evaluated {
+        Ok(evaluated) => evaluated,
+        Err(thrown) => {
+            if let Some(array) = array {
+                req.heap_mut().free_block(array);
+            }
+            return Err(thrown);
+        }
+    };
     let made = instantiate_named_made(req, class, &arguments.positional, &arguments.named);
     arguments.give_up(req);
+    if let Some(array) = array {
+        req.heap_mut().free_block(array);
+    }
+    if let Some(table) = table {
+        table.give_up(req);
+    }
     made
 }
 
