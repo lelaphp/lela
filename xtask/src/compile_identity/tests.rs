@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use super::dump::{Dumped, Folded, Held, engine_side, held, verdict};
 use super::*;
-use crate::divergence::Registry;
+use crate::common::registry::registry;
 use crate::oracle::Runner;
 use crate::reading::Status;
 use crate::scratch::Tree;
@@ -20,10 +20,6 @@ use crate::tally::Judged as OneJudged;
 
 fn fixtures() -> PathBuf {
     crate::package_dir().join("fixtures/compile-identity")
-}
-
-fn registry(text: &str) -> Registry {
-    Registry::parse(text).unwrap()
 }
 
 /// A corpus of this test's own, the files written into a scratch tree

@@ -18,6 +18,7 @@ use super::judge::{Run, held};
 use super::process::Binary;
 use super::{Accept, Ask, Judgement, Tally, capture, judge};
 use crate::cfg::Target;
+use crate::common::registry::registry;
 use crate::divergence::Registry;
 use crate::manifest::Manifest;
 use crate::oracle::{Observation, Program, Promise};
@@ -55,10 +56,6 @@ fn source(name: &str, text: &str) -> (Tree, PathBuf) {
 /// that serves one.
 fn binary() -> Binary {
     Binary::of(&workspace())
-}
-
-fn registry(text: &str) -> Registry {
-    Registry::parse(text).unwrap()
 }
 
 /// The witnesses of one text, judged as the lane judges them.

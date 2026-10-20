@@ -768,7 +768,117 @@ impl Counts {
 
 #[cfg(test)]
 mod tests {
-    use super::{Counts, Pin};
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use super::{Beside, Counts, Executable, Pin};
+    use crate::batch::Package;
+
+    /// The files a module tree loads, from the root `file` down, as
+    /// rustc resolves `mod` and `#[path]`: a file module's path against
+    /// the directory the module would own, which is the file's own for a
+    /// crate root or a `mod.rs` and `<dir>/<stem>` for any other file,
+    /// and a top-level `#[path]` against the file's directory.
+    fn loaded(file: &Path, root: bool, out: &mut BTreeSet<PathBuf>) {
+        let Ok(file) = fs::canonicalize(file) else {
+            return;
+        };
+        if !out.insert(file.clone()) {
+            return;
+        }
+        let parsed = syn::parse_file(&fs::read_to_string(&file).unwrap()).unwrap();
+        let at = file.parent().unwrap().to_path_buf();
+        let owned = if root || file.ends_with("mod.rs") {
+            at.clone()
+        } else {
+            at.join(file.file_stem().unwrap())
+        };
+        modules(&parsed.items, &at, &owned, out);
+    }
+
+    fn modules(items: &[syn::Item], at: &Path, owned: &Path, out: &mut BTreeSet<PathBuf>) {
+        for item in items {
+            let syn::Item::Mod(declared) = item else {
+                continue;
+            };
+            let path = declared.attrs.iter().find_map(|a| match &a.meta {
+                syn::Meta::NameValue(nv) if nv.path.is_ident("path") => match &nv.value {
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(s),
+                        ..
+                    }) => Some(s.value()),
+                    _ => None,
+                },
+                _ => None,
+            });
+            let ident = declared.ident.to_string();
+            match (&declared.content, path) {
+                (Some((_, inner)), path) => {
+                    let dir = owned.join(path.unwrap_or(ident));
+                    modules(inner, &dir, &dir, out);
+                }
+                (None, Some(path)) => loaded(&at.join(path), false, out),
+                (None, None) => {
+                    let flat = owned.join(format!("{ident}.rs"));
+                    let nested = owned.join(&ident).join("mod.rs");
+                    loaded(if flat.is_file() { &flat } else { &nested }, false, out);
+                }
+            }
+        }
+    }
+
+    /// A staged topic of `tests/common` runs every test binary whose module
+    /// tree loads it, the library's unit tests among them, under the
+    /// `[package.metadata.xtask.test]` this crate declares: a binary its
+    /// `own` names lists `tests/common` among its paths (#3087).
+    #[test]
+    fn a_staged_topic_runs_every_binary_that_includes_it() {
+        let dir = crate::package_dir();
+        let cargo: toml::Table =
+            toml::from_str(&fs::read_to_string(dir.join("Cargo.toml")).unwrap()).unwrap();
+        let mut package = Package::default();
+        package.metadata = Some(serde_json::to_value(&cargo["package"]["metadata"]).unwrap());
+        let beside = Beside::of(&package).unwrap();
+        let mut roots = vec![
+            ("xtask".to_owned(), "lib", dir.join("src/lib.rs")),
+            ("xtask".to_owned(), "bin", dir.join("src/main.rs")),
+        ];
+        for file in crate::entries(&dir.join("tests")).unwrap() {
+            if file.extension().is_some_and(|e| e == "rs") {
+                let name = file.file_stem().unwrap().to_string_lossy().into_owned();
+                roots.push((name, "test", file));
+            }
+        }
+        let binaries: Vec<_> = roots
+            .into_iter()
+            .map(|(name, kind, file)| {
+                let mut tree = BTreeSet::new();
+                loaded(&file, true, &mut tree);
+                (name, kind, tree)
+            })
+            .collect();
+        let package_dir = fs::canonicalize(dir).unwrap();
+        for topic in crate::entries(&dir.join("tests/common")).unwrap() {
+            let topic = fs::canonicalize(topic).unwrap();
+            let staged = [topic.display().to_string()];
+            let mut includers = 0;
+            for (name, kind, _) in binaries.iter().filter(|(.., tree)| tree.contains(&topic)) {
+                let executable = Executable {
+                    path: PathBuf::new(),
+                    name: name.clone(),
+                    kind: (*kind).to_owned(),
+                };
+                assert!(
+                    beside.runs(&executable, &package_dir, Some(&staged)),
+                    "{kind} {name} loads {} and does not run where it is staged",
+                    topic.display()
+                );
+                includers += 1;
+            }
+            assert!(includers > 0, "no binary loads {}", topic.display());
+        }
+    }
 
     #[test]
     fn the_counts_are_summed_over_every_test_binary() {

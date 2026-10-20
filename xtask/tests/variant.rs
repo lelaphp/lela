@@ -25,8 +25,10 @@ use xtask::reading::{Number, Reading, Status, Store};
 use xtask::scratch::Tree;
 use xtask::witness;
 
-mod common;
-use common::scratch_workspace;
+mod common {
+    pub mod repo;
+}
+use common::repo::scratch_workspace;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()

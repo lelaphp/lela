@@ -24,8 +24,14 @@ use xtask::phpt::{self, Ask};
 use xtask::reading::{Number, Reading, Status};
 use xtask::scratch::Tree;
 
-mod common;
-use common::scratch_workspace;
+mod common {
+    pub mod phpt_tree;
+    pub mod registry;
+    pub mod repo;
+}
+use common::phpt_tree::fixture_tree;
+use common::registry::registry;
+use common::repo::scratch_workspace;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -46,16 +52,6 @@ fn manifest_of(rows: impl IntoIterator<Item = Crate>, tree: &Path) -> Manifest {
     manifest
 }
 
-/// A tree standing where the pinned php-src would, with the directories
-/// the per-commit lane's rows name and no test in them.
-fn fixture_tree() -> Tree {
-    let tree = Tree::new("phpt-tree").unwrap();
-    for under in ["Zend/tests", "tests", "sapi/cli/tests", "ext/pcre/tests"] {
-        fs::create_dir_all(tree.join(under)).unwrap();
-    }
-    tree
-}
-
 /// The tracked pin's binary, when it is on this machine; a failure where
 /// this machine promised the binary (#38).
 fn oracle() -> Option<PathBuf> {
@@ -73,10 +69,6 @@ fn oracle() -> Option<PathBuf> {
 /// tried (#38).
 fn source() -> Option<PathBuf> {
     Promise::Tree.or_skip(manifest().pin.source.tree()).unwrap()
-}
-
-fn registry(text: &str) -> Registry {
-    Registry::parse(text).unwrap()
 }
 
 /// A workspace of this test's own: a git repository holding the tracked

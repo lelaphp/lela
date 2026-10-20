@@ -25,8 +25,12 @@ use xtask::reading::{Number, Reading, Status, Store};
 use xtask::scratch::Tree;
 use xtask::witness::{self, Accept, Ask, Scope};
 
-mod common;
-use common::scratch_workspace;
+mod common {
+    pub mod registry;
+    pub mod repo;
+}
+use common::registry::registry;
+use common::repo::scratch_workspace;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -56,10 +60,6 @@ fn oracle() -> Option<PathBuf> {
     Promise::Oracle
         .or_skip(pin.oracle.file().map(Path::to_path_buf))
         .unwrap()
-}
-
-fn registry(text: &str) -> Registry {
-    Registry::parse(text).unwrap()
 }
 
 /// What php writes on the first stream for an uncaught error at line 2,

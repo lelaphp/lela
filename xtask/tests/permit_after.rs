@@ -18,8 +18,10 @@ use xtask::manifest::Manifest;
 use xtask::reading::{Status, Store};
 use xtask::scratch::Tree;
 
-mod common;
-use common::scratch_workspace;
+mod common {
+    pub mod repo;
+}
+use common::repo::scratch_workspace;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
