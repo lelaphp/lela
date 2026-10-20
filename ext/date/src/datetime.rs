@@ -1231,6 +1231,40 @@ fn date_format(
 /// bool(false)
 /// string(32) "2009-02-13T23:31:30+00:00 +00:00"
 /// ```
+///
+/// The warning a refused modifier raises may call a handler that reads
+/// and modifies the date and parses again before it throws: the
+/// throw ends the call, the date keeps the handler's modification, the
+/// last errors are the handler's parse's, and a constructor called again
+/// on the object that fails leaves it uninitialized.
+///
+/// ```php
+/// $date = new DateTime('2000-01-01');
+/// set_error_handler(function ($level, $message) use ($date) {
+///     echo 'handler:', $date->format('Y-m-d'), "\n";
+///     $date->modify('+2 days');
+///     date_create_from_format('Y-m-d', 'bad');
+///     throw new Exception('diagnostic');
+/// });
+/// try { date_modify($date, 'not-a-date'); }
+/// catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// restore_error_handler();
+/// echo 'after:', $date->format('Y-m-d'), "\n";
+/// $errors = DateTime::getLastErrors();
+/// echo 'last-errors:', $errors['error_count'], "\n";
+/// try { $date->__construct('not-a-date'); }
+/// catch (Exception $e) { echo 'constructor:', $e->getMessage(), "\n"; }
+/// try { echo $date->format('Y-m-d'); }
+/// catch (Error $e) { echo 'cleared:', $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// handler:2000-01-01
+/// diagnostic
+/// after:2000-01-03
+/// last-errors:3
+/// constructor:Failed to parse time string (not-a-date) at position 0 (n): The timezone could not be found in the database
+/// cleared:Object of type DateTime has not been correctly initialized by calling parent::__construct() in its constructor
+/// ```
 #[php_function]
 fn date_modify(
     req: &mut Request,
@@ -1649,6 +1683,21 @@ impl DateTime {
     /// ```expect regime=jit-off exit=255
     /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 135168 bytes) in %SCRATCH%/witness.php on line 6
     /// ```
+    ///
+    /// An `@` timestamp one above `PHP_INT_MIN`, at `PHP_INT_MAX`, and
+    /// either side of the epoch reads back as written.
+    ///
+    /// ```php
+    /// foreach ([-9223372036854775807, -1, 0, 9223372036854775807] as $timestamp) {
+    ///     echo (new DateTime('@' . $timestamp))->format('U Y-m-d'), "\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// -9223372036854775807 -292277022657-01-27
+    /// -1 1969-12-31
+    /// 0 1970-01-01
+    /// 9223372036854775807 292277026596-12-04
+    /// ```
     fn __construct(
         req: &mut Request,
         this: This<Self>,
@@ -1884,6 +1933,24 @@ impl DateTime {
 
     /// `DateTime::getLastErrors(): array|false`, `date_get_last_errors`'
     /// body.
+    ///
+    /// The last parse's warnings and errors are counted until a parse that
+    /// has neither, after which there are none to read.
+    ///
+    /// ```php
+    /// var_dump(date_parse_from_format('!Y-m-d', '2024-02-31')['warning_count']);
+    /// var_dump(DateTime::createFromFormat('Y-m-d', 'bad'));
+    /// $errors = DateTime::getLastErrors();
+    /// echo 'errors:', $errors['warning_count'], ':', $errors['error_count'], "\n";
+    /// new DateTime('2024-01-01');
+    /// var_dump(DateTime::getLastErrors());
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// bool(false)
+    /// errors:0:3
+    /// bool(false)
+    /// ```
     #[php(tentative)]
     fn getLastErrors(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
         last_errors(req)
@@ -1922,6 +1989,27 @@ impl DateTime {
     /// string(25) "2022-01-03T00:00:00+00:00"
     /// string(25) "2022-01-03T01:30:15+00:00"
     /// DateTime::modify(): Failed to parse time string (foo) at position 0 (f): The timezone could not be found in the database
+    /// ```
+    ///
+    /// A modification across a daylight-saving change takes the offset
+    /// the new time stands in, and leaves a clone made before it as it
+    /// was; an immutable one leaves its original as it was.
+    ///
+    /// ```php
+    /// $date = new DateTime('2024-03-30 12:00 Europe/Amsterdam');
+    /// $clone = clone $date;
+    /// $date->modify('+1 day');
+    /// echo $date->format('Y-m-d H:i:s P e'), "\n", $clone->format('Y-m-d H:i:s P e'), "\n";
+    /// echo $date->add(new DateInterval('P1DT2H'))->format('c'), "\n";
+    /// $immutable = new DateTimeImmutable('2024-10-27 01:30 Europe/Amsterdam');
+    /// echo $immutable->modify('+2 hours')->format('c T'), "\n", $immutable->format('c T'), "\n";
+    /// ```
+    /// ```expect
+    /// 2024-03-31 12:00:00 +02:00 Europe/Amsterdam
+    /// 2024-03-30 12:00:00 +01:00 Europe/Amsterdam
+    /// 2024-04-01T14:00:00+02:00
+    /// 2024-10-27T03:30:00+01:00 CET
+    /// 2024-10-27T01:30:00+02:00 CEST
     /// ```
     #[php(tentative)]
     fn modify(

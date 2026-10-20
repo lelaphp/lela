@@ -207,15 +207,17 @@ Actual source sites (pinned `libmagic/apprentice.c`):
   EBCDIC scratch and real release. `funcs.c:523-645`: retained output reset,
   printable allocation `4*strlen+1`, continuation growth `20+level`.
 
-`ext/fileinfo/tests/storage.rs` proves an already permitted safe byte-storage
-route: actual record fields and `GIF89a` bytes, decoded continuation offsets,
-grown/zeroed storage, 121 output bytes plus NUL, eight-byte alignment, explicit
-reclamation after each partial stage, real memory-limit refusal after populated
-initialisation, and three successive request-end releases. No system-owned
-duplicate content/shadow charges or raw typed casts exist. The negative control
-intentionally drops the holder without freeing: the leak sensor reports three
-blocks/736 bytes. The successful holder instead retains blocks in request state
-and explicitly frees them in rshutdown after ending the state borrow.
+`ext/fileinfo/tests/storage.rs` proved an already permitted safe byte-storage
+route (#3099 removed it; `crates/php_engine/src/tests/storage.rs` holds the
+request heap's storage now): actual record fields and `GIF89a` bytes, decoded
+continuation offsets, grown/zeroed storage, 121 output bytes plus NUL,
+eight-byte alignment, explicit reclamation after each partial stage, real
+memory-limit refusal after populated initialisation, and three successive
+request-end releases. No system-owned duplicate content/shadow charges or raw
+typed casts exist. The negative control intentionally drops the holder without
+freeing: the leak sensor reports three blocks/736 bytes. The successful holder
+instead retains blocks in request state and explicitly frees them in rshutdown
+after ending the state borrow.
 
 This proves **byte storage**, not a complete typed live-session representation,
 GC integration, a stable layout on four targets or instruction-level allocation

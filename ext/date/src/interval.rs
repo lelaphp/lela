@@ -533,6 +533,29 @@ impl DateInterval {
     /// ```expect
     /// 768 208
     /// ```
+    ///
+    /// What the request's heap counts for an interval and for its clone,
+    /// and what their release gives back; and a daily period iterated
+    /// from its start.
+    ///
+    /// ```php
+    /// $before = memory_get_usage();
+    /// $allocated = new DateInterval('P2DT3H');
+    /// $after = memory_get_usage();
+    /// $copy = clone $allocated;
+    /// echo 'interval:', $after - $before, ':clone:', memory_get_usage() - $after, "\n";
+    /// $before = memory_get_usage();
+    /// unset($allocated, $copy);
+    /// echo 'interval-release:', memory_get_usage() - $before, "\n";
+    /// foreach (new DatePeriod(new DateTime('2024-01-01'), new DateInterval('P1D'), 2) as $point) echo $point->format('Y-m-d'), "\n";
+    /// ```
+    /// ```expect
+    /// interval:176:clone:208
+    /// interval-release:-352
+    /// 2024-01-01
+    /// 2024-01-02
+    /// 2024-01-03
+    /// ```
     fn __construct(req: &mut Request, this: This<Self>, duration: PhpString) -> Result<(), Thrown> {
         let diff = initialize(req, duration.as_bytes())?;
         if let Some(payload) = this.object().native_mut::<IntervalObj>(req) {

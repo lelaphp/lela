@@ -353,6 +353,37 @@ fn mb_http_input(
 /// Warning: Cannot modify header information - headers already sent by (output started at %s:2) in %s on line 2
 /// string(1) "x"
 /// ```
+///
+/// The decoder keeps what the `START` chunk set, its byte-order mark, for
+/// the `FINAL` one, and each chunk is encoded afresh under the settings
+/// standing when it comes, the substitute among them: a stateful
+/// target's shift is opened again in the `FINAL` chunk and closed there,
+/// and the shift a `START` chunk left open stays open where the `FINAL`
+/// chunk is empty.
+///
+/// ```php
+/// $rows = [];
+/// mb_internal_encoding('UTF-16');
+/// mb_http_output('JIS');
+/// $rows[] = mb_output_handler("\xfe\xff\x30\x42", PHP_OUTPUT_HANDLER_START);
+/// $rows[] = mb_output_handler("\x30\x44", PHP_OUTPUT_HANDLER_FINAL);
+/// mb_internal_encoding('UTF-16');
+/// mb_output_handler("\xfe\xff\x30\x42", PHP_OUTPUT_HANDLER_START);
+/// mb_http_output('ASCII');
+/// mb_internal_encoding('UTF-16BE');
+/// mb_substitute_character(0x21);
+/// $rows[] = mb_output_handler("\x30\x44", PHP_OUTPUT_HANDLER_FINAL);
+/// mb_internal_encoding('UTF-8');
+/// mb_http_output('JIS');
+/// $rows[] = mb_output_handler('あ', PHP_OUTPUT_HANDLER_START) . mb_output_handler('', PHP_OUTPUT_HANDLER_FINAL);
+/// foreach ($rows as $row) echo bin2hex($row), "\n";
+/// ```
+/// ```expect
+/// 1b24422422
+/// 1b244224241b2842
+/// 21
+/// 1b24422422
+/// ```
 #[php_function]
 fn mb_output_handler(
     req: &mut Request,

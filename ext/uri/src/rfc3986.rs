@@ -459,6 +459,113 @@ impl Uri {
     /// The port is out of range
     /// The specified base URI must be absolute
     /// ```
+    ///
+    /// The raw and the normalized components read side by side, the
+    /// references of RFC 3986 §5.4.1 resolved against its base, and an
+    /// absent component apart from an empty one, as uriparser reads them.
+    ///
+    /// ```php
+    /// use Uri\Rfc3986\Uri as R;
+    /// $r = new R('HTTP://Us%65r:p%61ss@EXAMPLE.COM:00080/a/./b/../%7e?q=%41#%62');
+    /// var_dump($r->toRawString(), $r->getRawHost(), $r->getRawPath());
+    /// var_dump($r->getHost(), $r->getPath(), $r->getQuery(), $r->getUserInfo());
+    /// var_dump($r->toRawString(), $r->toString(), (clone $r)->toString());
+    /// $base = new R('http://a/b/c/d;p?q');
+    /// foreach (['g', '../g', '?y', '#s', '//g', '', '../../../g', '/./g', 'http:g'] as $text) {
+    ///     var_dump($base->resolve($text)->toRawString());
+    /// }
+    /// var_dump(R::parse('x', new R('relative/base')));
+    /// foreach (['x:', 'x://', 'http://@h:?#', 'http://h', 'http://h/?#', 'http://[v1.a]/'] as $text) {
+    ///     $u = new R($text);
+    ///     var_dump($u->getRawHost(), $u->getRawUsername(), $u->getRawPassword(), $u->getPort(), $u->getRawQuery(), $u->getRawFragment());
+    /// }
+    /// ```
+    /// ```expect
+    /// string(61) "HTTP://Us%65r:p%61ss@EXAMPLE.COM:00080/a/./b/../%7e?q=%41#%62"
+    /// string(11) "EXAMPLE.COM"
+    /// string(13) "/a/./b/../%7e"
+    /// string(11) "example.com"
+    /// string(4) "/a/~"
+    /// string(3) "q=A"
+    /// string(9) "User:pass"
+    /// string(61) "HTTP://Us%65r:p%61ss@EXAMPLE.COM:00080/a/./b/../%7e?q=%41#%62"
+    /// string(41) "http://User:pass@example.com:80/a/~?q=A#b"
+    /// string(41) "http://User:pass@example.com:80/a/~?q=A#b"
+    /// string(14) "http://a/b/c/g"
+    /// string(12) "http://a/b/g"
+    /// string(18) "http://a/b/c/d;p?y"
+    /// string(20) "http://a/b/c/d;p?q#s"
+    /// string(8) "http://g"
+    /// string(18) "http://a/b/c/d;p?q"
+    /// string(10) "http://a/g"
+    /// string(10) "http://a/g"
+    /// string(6) "http:g"
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// string(0) ""
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// string(1) "h"
+    /// string(0) ""
+    /// string(0) ""
+    /// NULL
+    /// string(0) ""
+    /// string(0) ""
+    /// string(1) "h"
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// string(1) "h"
+    /// NULL
+    /// NULL
+    /// NULL
+    /// string(0) ""
+    /// string(0) ""
+    /// string(6) "[v1.a]"
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// ```
+    ///
+    /// What the request's heap counts (design §5.13): the parse on
+    /// construction, the normalized copy on the first normalized read and
+    /// not on the second, a clone without that copy, an update, and what
+    /// the three URIs' release gives back, 32 bytes short of their sum.
+    ///
+    /// ```php
+    /// use Uri\Rfc3986\Uri as R;
+    /// $warm = new R('https://example.com/a?b#c'); $warm->getHost();
+    /// $m = memory_get_usage(); $u = new R('https://example.com/a?b#c'); echo 'raw ', memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $u->getRawHost(); echo 'raw-read ', memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $u->getHost(); echo 'normalize ', memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $u->getHost(); echo 'again ', memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $copy = clone $u; echo 'clone ', memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $copy->getHost(); echo 'clone-normalize ', memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $v = $u->withPath('/x/y'); echo 'update ', memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); unset($u, $copy, $v); echo 'free ', memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// raw 608
+    /// raw-read 0
+    /// normalize 112
+    /// again 0
+    /// clone 576
+    /// clone-normalize 112
+    /// update 624
+    /// free -2000
+    /// ```
     fn __construct(
         req: &mut Request,
         this: This<Self>,
@@ -705,6 +812,34 @@ impl Uri {
     /// The specified host is malformed
     /// Cannot remove the host from a URI that has a port
     /// Cannot remove the host from a URI that has a userinfo
+    /// ```
+    ///
+    /// A refused update changes nothing: the URI a `with*()` threw on
+    /// reads as it did, and an empty query is not an absent one.
+    ///
+    /// ```php
+    /// use Uri\Rfc3986\Uri as R;
+    /// $r = new R('HTTP://EXAMPLE.com/a/./b');
+    /// var_dump($r->toString());
+    /// foreach (['withHost' => 'bad host', 'withScheme' => '1bad', 'withPath' => '/%zz'] as $method => $text) {
+    ///     try { $r->$method($text); } catch (Throwable $e) { var_dump($e->getMessage()); }
+    ///     var_dump($r->toRawString(), $r->toString());
+    /// }
+    /// var_dump($r->withQuery('')->getRawQuery(), $r->withQuery(null)->getRawQuery());
+    /// ```
+    /// ```expect
+    /// string(22) "http://example.com/a/b"
+    /// string(31) "The specified host is malformed"
+    /// string(24) "HTTP://EXAMPLE.com/a/./b"
+    /// string(22) "http://example.com/a/b"
+    /// string(33) "The specified scheme is malformed"
+    /// string(24) "HTTP://EXAMPLE.com/a/./b"
+    /// string(22) "http://example.com/a/b"
+    /// string(31) "The specified path is malformed"
+    /// string(24) "HTTP://EXAMPLE.com/a/./b"
+    /// string(22) "http://example.com/a/b"
+    /// string(0) ""
+    /// NULL
     /// ```
     fn withHost(
         req: &mut Request,

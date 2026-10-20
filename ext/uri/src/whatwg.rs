@@ -700,6 +700,196 @@ impl Url {
     /// enum(Uri\WhatWg\UrlValidationErrorType::PortOutOfRange)
     /// string(23) "https://example.com/a/c"
     /// ```
+    ///
+    /// A host's IDNA processing as pinned lexbor makes it: mapped,
+    /// NFC-normalized, `ß` kept rather than mapped to `ss`, a joiner and a
+    /// right-to-left letter let through with no error, and a host that is
+    /// not UTF-8 refused.
+    ///
+    /// ```php
+    /// use Uri\WhatWg\Url as W;
+    /// foreach (["https://bücher.example/", "https://e\u{0301}.example/", "https://é.example/", "https://faß.de/", "https://a\u{200D}b.example/", "https://אa.example/", "https://\xFF.example/"] as $text) {
+    ///     $u = W::parse($text, null, $errors);
+    ///     echo json_encode([$u?->toAsciiString(), $u?->getUnicodeHost()]), "\n";
+    ///     foreach ($errors as $e) echo $e->type->name, ' ', var_export($e->failure, true), ' ', json_encode($e->context), "\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// ["https:\/\/xn--bcher-kva.example\/","b\u00fccher.example"]
+    /// ["https:\/\/xn--9ca.example\/","\u00e9.example"]
+    /// ["https:\/\/xn--9ca.example\/","\u00e9.example"]
+    /// ["https:\/\/xn--fa-hia.de\/","fa\u00df.de"]
+    /// ["https:\/\/xn--ab-m1t.example\/","a\u200db.example"]
+    /// ["https:\/\/xn--a-zhc.example\/","\u05d0a.example"]
+    /// [null,null]
+    /// ```
+    ///
+    /// Each validation error's type, whether it fails the parse, and its
+    /// `context`, the text where it was met, transformed or holding a
+    /// NUL, which outlives the parse that made it.
+    ///
+    /// ```php
+    /// use Uri\WhatWg\Url as W;
+    /// // Contexts can be transformed-domain allocations, not original input ranges.
+    /// foreach (['https://EXA%23MPLE.org/path', "http://u%zz@h\\a%qq#f", "https://exa\0mple.org/x", "x://h/a\0b?x", 'http://1.2.3.4.5/', 'http://[::1', 'http://h:65536/', 'file://C:/a'] as $text) {
+    ///     $u = W::parse($text, null, $errors);
+    ///     var_dump($u?->toAsciiString());
+    ///     foreach ($errors as $e) var_dump($e->type->name, $e->failure, $e->context);
+    /// }
+    /// // A later parse must not invalidate previously returned contexts.
+    /// $u = W::parse('https://EXA%23MPLE.org/path', null, $saved);
+    /// W::parse('https://elsewhere.example/');
+    /// var_dump($saved[0]->context);
+    /// var_dump(Uri\WhatWg\UrlValidationErrorType::cases());
+    /// ```
+    /// ```expect
+    /// NULL
+    /// string(22) "DomainInvalidCodePoint"
+    /// bool(true)
+    /// string(9) "#MPLE.org"
+    /// string(20) "http://u%zz@h/a%qq#f"
+    /// string(14) "InvalidUrlUnit"
+    /// bool(false)
+    /// string(5) "%qq#f"
+    /// string(21) "InvalidReverseSoldius"
+    /// bool(false)
+    /// string(7) "\a%qq#f"
+    /// string(18) "InvalidCredentials"
+    /// bool(false)
+    /// string(9) "@h\a%qq#f"
+    /// NULL
+    /// string(22) "DomainInvalidCodePoint"
+    /// bool(true)
+    /// string(0) ""
+    /// string(13) "x://h/a%r%%r00b?x"
+    /// string(14) "InvalidUrlUnit"
+    /// bool(false)
+    /// string(0) ""
+    /// NULL
+    /// string(16) "Ipv4TooManyParts"
+    /// bool(true)
+    /// string(1) "5"
+    /// NULL
+    /// string(12) "Ipv6Unclosed"
+    /// bool(true)
+    /// string(1) "1"
+    /// NULL
+    /// string(14) "PortOutOfRange"
+    /// bool(true)
+    /// string(1) "/"
+    /// string(12) "file:///C:/a"
+    /// string(33) "FileInvalidWindowsDriveLetterHost"
+    /// bool(false)
+    /// string(4) "C:/a"
+    /// string(9) "#MPLE.org"
+    /// array(29) {
+    ///   [0]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::DomainToAscii)
+    ///   [1]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::DomainToUnicode)
+    ///   [2]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::DomainInvalidCodePoint)
+    ///   [3]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::HostInvalidCodePoint)
+    ///   [4]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::Ipv4EmptyPart)
+    ///   [5]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::Ipv4TooManyParts)
+    ///   [6]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::Ipv4NonNumericPart)
+    ///   [7]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::Ipv4NonDecimalPart)
+    ///   [8]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::Ipv4OutOfRangePart)
+    ///   [9]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::Ipv6Unclosed)
+    ///   [10]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::Ipv6InvalidCompression)
+    ///   [11]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::Ipv6TooManyPieces)
+    ///   [12]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::Ipv6MultipleCompression)
+    ///   [13]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::Ipv6InvalidCodePoint)
+    ///   [14]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::Ipv6TooFewPieces)
+    ///   [15]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::Ipv4InIpv6TooManyPieces)
+    ///   [16]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::Ipv4InIpv6InvalidCodePoint)
+    ///   [17]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::Ipv4InIpv6OutOfRangePart)
+    ///   [18]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::Ipv4InIpv6TooFewParts)
+    ///   [19]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::InvalidUrlUnit)
+    ///   [20]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::SpecialSchemeMissingFollowingSolidus)
+    ///   [21]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::MissingSchemeNonRelativeUrl)
+    ///   [22]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::InvalidReverseSoldius)
+    ///   [23]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::InvalidCredentials)
+    ///   [24]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::HostMissing)
+    ///   [25]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::PortOutOfRange)
+    ///   [26]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::PortInvalid)
+    ///   [27]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::FileInvalidWindowsDriveLetter)
+    ///   [28]=>
+    ///   enum(Uri\WhatWg\UrlValidationErrorType::FileInvalidWindowsDriveLetterHost)
+    /// }
+    /// ```
+    ///
+    /// `$errors` is written once the parse is done: a destructor the write
+    /// runs may parse again, a constructor's failure leaves the caller's
+    /// variable as it was, and a typed property refuses the array.
+    ///
+    /// ```php
+    /// use Uri\WhatWg\Url as W;
+    /// class OnErrorsRelease {
+    ///     public function __destruct() {
+    ///         echo "destructor\n";
+    ///         var_dump((new W('https://nested.example/'))->getAsciiHost());
+    ///     }
+    /// }
+    /// $errors = new OnErrorsRelease;
+    /// $u = W::parse('https://h/a', null, $errors);
+    /// var_dump($u->toAsciiString(), $errors);
+    /// $errors = new OnErrorsRelease;
+    /// $u = W::parse('http://h:65536/', null, $errors);
+    /// var_dump($u, $errors[0]->type->name);
+    /// // Constructor failure leaves the caller's reference untouched.
+    /// $errors = 'sentinel';
+    /// try { new W('http://h:65536/', null, $errors); } catch (Throwable $e) {
+    ///     var_dump($errors, $e->errors[0]->type->name);
+    /// }
+    /// class TypedErrors { public int $errors = 7; }
+    /// $typed = new TypedErrors;
+    /// try { W::parse('https://h/', null, $typed->errors); } catch (Throwable $e) {
+    ///     var_dump($e->getMessage(), $typed->errors);
+    /// }
+    /// var_dump((new W('https://after.example/'))->getAsciiHost());
+    /// ```
+    /// ```expect
+    /// destructor
+    /// string(14) "nested.example"
+    /// string(11) "https://h/a"
+    /// array(0) {
+    /// }
+    /// destructor
+    /// string(14) "nested.example"
+    /// NULL
+    /// string(14) "PortOutOfRange"
+    /// string(8) "sentinel"
+    /// string(14) "PortOutOfRange"
+    /// string(82) "Cannot assign array to reference held by property TypedErrors::$errors of type int"
+    /// int(7)
+    /// string(13) "after.example"
+    /// ```
     fn parse(
         req: &mut Request,
         uri: PhpString,
@@ -725,6 +915,115 @@ impl Url {
     /// enum(Uri\WhatWg\UrlValidationErrorType::InvalidReverseSoldius)
     /// The specified URI is malformed (DomainInvalidCodePoint)
     /// 1
+    /// ```
+    ///
+    /// A special scheme's default dropped from `getPort()`, an opaque
+    /// path kept, an IPv4 host in hexadecimal and an IPv6 host
+    /// compressed, and a reference resolved.
+    ///
+    /// ```php
+    /// use Uri\WhatWg\Url as W;
+    /// foreach (['https://EXAMPLE.com:443/a/../b', 'ftp://h:21', 'ws://h:80', 'wss://h:443', 'file://localhost/C|/a', 'x://Host/a', 'mailto:user@example.com', 'https://0x7f.1/', 'https://[2001:db8:0:0:1:0:0:1]/', 'http://h/?#'] as $text) {
+    ///     $u = new W($text);
+    ///     var_dump($u->toAsciiString(), $u->getAsciiHost(), $u->getUsername(), $u->getPassword(), $u->getPort(), $u->getQuery(), $u->getFragment());
+    /// }
+    /// var_dump((new W('https://h/a/b'))->resolve('../c?x#y')->toAsciiString());
+    /// ```
+    /// ```expect
+    /// string(21) "https://example.com/b"
+    /// string(11) "example.com"
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// string(8) "ftp://h/"
+    /// string(1) "h"
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// string(7) "ws://h/"
+    /// string(1) "h"
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// string(8) "wss://h/"
+    /// string(1) "h"
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// string(12) "file:///C:/a"
+    /// string(0) ""
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// string(10) "x://Host/a"
+    /// string(4) "Host"
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// string(23) "mailto:user@example.com"
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// string(18) "https://127.0.0.1/"
+    /// string(9) "127.0.0.1"
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// string(28) "https://[2001:db8::1:0:0:1]/"
+    /// string(19) "[2001:db8::1:0:0:1]"
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// NULL
+    /// string(11) "http://h/?#"
+    /// string(1) "h"
+    /// NULL
+    /// NULL
+    /// NULL
+    /// string(0) ""
+    /// string(0) ""
+    /// string(15) "https://h/c?x#y"
+    /// ```
+    ///
+    /// What the request's heap counts: lexbor's pool on it holds the parse
+    /// (#2925), a path past the pool's first block grows it, a freed URL
+    /// gives back its object and leaves the pool as it grew, and the next
+    /// parse of that length takes nothing more than its object.
+    ///
+    /// ```php
+    /// use Uri\WhatWg\Url as W;
+    /// $warm = new W('https://example.com/a?b#c');
+    /// $m = memory_get_usage(); $u = new W('https://example.com/a?b#c'); echo 'parsed ', memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); unset($u); echo 'freed ', memory_get_usage() - $m, "\n";
+    /// $path = str_repeat('x', 12000);
+    /// $m = memory_get_usage(); $u = new W('https://example.com/' . $path); echo 'pool-grow ', memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); unset($u); echo 'pool-retain ', memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $u = new W('https://example.com/' . $path); echo 'pool-reuse ', memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// parsed 112
+    /// freed -80
+    /// pool-grow 20600
+    /// pool-retain -80
+    /// pool-reuse 80
     /// ```
     fn __construct(
         req: &mut Request,
@@ -917,6 +1216,48 @@ impl Url {
     /// ```expect
     /// string(20) "https://example.org/"
     /// The specified host is malformed (DomainInvalidCodePoint)
+    /// ```
+    ///
+    /// A refused update changes nothing: the URL a `with*()` threw on
+    /// reads as it did, the errors on its `InvalidUrlException`. A special
+    /// scheme set to `file`, a path or a username set on an opaque URL are
+    /// no-ops the standard's setters make, and an empty query reads as no
+    /// query.
+    ///
+    /// ```php
+    /// use Uri\WhatWg\Url as W;
+    /// $w = new W('https://user:pass@h:444/a');
+    /// foreach (['withScheme' => 'file', 'withHost' => 'bad host', 'withPort' => 65536] as $method => $text) {
+    ///     try { var_dump($w->$method($text)->toAsciiString()); } catch (Throwable $e) {
+    ///         var_dump($e->getMessage());
+    ///         foreach ($e->errors as $error) var_dump($error->type->name, $error->failure, $error->context);
+    ///     }
+    ///     var_dump($w->toAsciiString());
+    /// }
+    /// $opaque = new W('mailto:user@example.com');
+    /// var_dump($opaque->withPath('replacement')->toAsciiString());
+    /// var_dump($opaque->withUsername('x')->toAsciiString());
+    /// var_dump((new W('https://h/a'))->withScheme('http')->withPort(80)->toAsciiString());
+    /// var_dump($w->withQuery('')->getQuery(), $w->withQuery(null)->getQuery());
+    /// ```
+    /// ```expect
+    /// string(25) "https://user:pass@h:444/a"
+    /// string(25) "https://user:pass@h:444/a"
+    /// string(56) "The specified host is malformed (DomainInvalidCodePoint)"
+    /// string(22) "DomainInvalidCodePoint"
+    /// bool(true)
+    /// string(5) " host"
+    /// string(25) "https://user:pass@h:444/a"
+    /// string(48) "The specified port is malformed (PortOutOfRange)"
+    /// string(14) "PortOutOfRange"
+    /// bool(true)
+    /// string(0) ""
+    /// string(25) "https://user:pass@h:444/a"
+    /// string(23) "mailto:user@example.com"
+    /// string(23) "mailto:user@example.com"
+    /// string(10) "http://h/a"
+    /// NULL
+    /// NULL
     /// ```
     fn withHost(
         req: &mut Request,
