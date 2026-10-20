@@ -23,7 +23,7 @@ use crate::api::values::{
 use methods::visibility_string;
 use pending::Saved;
 
-use super::{Hooks, Placed, PropertyInfo, Request, Symbol, methods, pending};
+use super::{Hooks, Placed, PropertyInfo, Request, methods, pending};
 
 /// Where the destructors' walk was cut short, whose field no file but
 /// this one reads.
@@ -723,14 +723,9 @@ impl Request {
             let mut at = symbols;
             while at > 0 && !self.objects.shutdown_walk_ended {
                 at -= 1;
-                let alone = self.globals().get(at).is_some_and(|(_, symbol)| {
-                    let value = match symbol {
-                        Symbol::Value(value) => *value,
-                        Symbol::Held(cell) => cell.get(),
-                        Symbol::Indirect(..) => return false,
-                    };
-                    value.as_object().is_some() && value.refcount() == 1
-                });
+                let alone = (self.globals().get(at))
+                    .and_then(|(_, symbol)| symbol.view(|_, _| None))
+                    .is_some_and(|value| value.as_object().is_some() && value.refcount() == 1);
                 if alone && let Some(symbol) = self.table_remove(crate::exec::TableId::GLOBAL, at) {
                     self.release_symbol(symbol);
                 }

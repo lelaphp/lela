@@ -551,6 +551,19 @@ pub(crate) enum Symbol {
     Indirect(FrameRef, u32),
 }
 
+impl Symbol {
+    /// What the bucket holds, a view: its value, the value its cell
+    /// keeps, or for an `IS_INDIRECT` bucket what `cv` reads of the CV
+    /// it stands for, `zend_hash_find_ex_ind`'s read.
+    fn view(self, cv: impl FnOnce(FrameRef, u32) -> Option<Value>) -> Option<Value> {
+        match self {
+            Symbol::Value(value) => Some(value),
+            Symbol::Held(cell) => Some(cell.get()),
+            Symbol::Indirect(frame, at) => cv(frame, at),
+        }
+    }
+}
+
 /// One symbol table: its names in order, and the function frame it was
 /// rebuilt for, which frees it when it pops; `EG(symbol_table)` has no
 /// owner and lives as long as the request.

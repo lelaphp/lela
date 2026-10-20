@@ -30,10 +30,10 @@ impl Request {
             return;
         };
         for (_, symbol) in &table.entries {
+            let slot = |frame, at| Some(Value::of_slot(cv(frame, at)));
             visit(match *symbol {
-                Symbol::Value(value) => value,
                 Symbol::Held(cell) => cell.as_value(),
-                Symbol::Indirect(frame, at) => Value::of_slot(cv(frame, at)),
+                symbol => symbol.view(slot).unwrap_or_default(),
             });
         }
     }
@@ -748,16 +748,12 @@ impl Request {
     pub(super) fn symbol_view(&self, table: TableId, name: &[u8]) -> Option<Value> {
         let entries = &self.tables.get(table.0 as usize)?.entries;
         let symbol = entries.get(position(entries, name)?)?.1;
-        Some(match symbol {
-            Symbol::Value(value) => value,
-            Symbol::Held(cell) => cell.get(),
-            Symbol::Indirect(frame, at) => {
-                let stack = match self.fibers.request_stack() {
-                    Some(own) if table == TableId::GLOBAL => own,
-                    _ => &self.vm.stack,
-                };
-                Value::of_slot(stack.frame(frame)?.slot(php_heap::Slot(at)))
-            }
+        symbol.view(|frame, at| {
+            let stack = match self.fibers.request_stack() {
+                Some(own) if table == TableId::GLOBAL => own,
+                _ => &self.vm.stack,
+            };
+            Some(Value::of_slot(stack.frame(frame)?.slot(php_heap::Slot(at))))
         })
     }
 
@@ -774,11 +770,9 @@ impl Request {
     /// What one bucket of `table` holds, an `IS_INDIRECT` bucket followed
     /// to the CV of the frame attached to it. A view: no owner taken.
     pub(super) fn symbol_read(&mut self, table: TableId, symbol: Symbol) -> Value {
-        match symbol {
-            Symbol::Value(value) => value,
-            Symbol::Held(cell) => cell.get(),
-            Symbol::Indirect(frame, at) => self.attached(table, frame, at),
-        }
+        symbol
+            .view(|frame, at| Some(self.attached(table, frame, at)))
+            .unwrap_or_default()
     }
 
     /// php's `IS_INDIRECT` bucket of `table`, the CV slot an attached name
@@ -1064,11 +1058,7 @@ impl Request {
         };
         for (name, symbol) in entries {
             copied.numeric |= php_heap::canonical_int(name.as_bytes()).is_some();
-            let value = match symbol {
-                Symbol::Value(value) => value,
-                Symbol::Held(cell) => cell.get(),
-                Symbol::Indirect(frame, slot) => self.attached(table, frame, slot),
-            };
+            let value = self.symbol_read(table, symbol);
             if value.tag() != TypeTag::Undef {
                 copied.rows.push((name, value));
             }
