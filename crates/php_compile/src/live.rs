@@ -337,6 +337,31 @@ pub(crate) fn live_ranges(oplines: &mut [Opline], num_tmps: u32) -> Vec<LiveRang
     ranges.table
 }
 
+/// `pass_two`'s fold of every temporary to its frame slot
+/// (`Z/Zend/zend_opcode.c:1236-1246`, `EX_NUM_TO_VAR(last_var + n)`, and
+/// `emit_live_range_raw` at `:740` for a range's `var`), emission's last
+/// step: each `TMP` or `VAR` `op1`, `op2` and `out`, and each live
+/// range's `var`, becomes `num_cvs` past the temporary's own number, so
+/// the engine reads a slot off the field as it reads a CV's. A slot
+/// index, not php's byte offset (design §5.7). A published unit is
+/// never written (§3.4), so the fold is the compiler's and never
+/// publication's.
+pub(crate) fn fold_slots(oplines: &mut [Opline], ranges: &mut [LiveRange], num_cvs: u32) {
+    let fold = |kind: OperandKind, field: &mut u32| {
+        if is_temporary(kind) {
+            *field = num_cvs.saturating_add(*field);
+        }
+    };
+    for op in oplines {
+        fold(op.op1_type, &mut op.op1);
+        fold(op.op2_type, &mut op.op2);
+        fold(op.out_type, &mut op.out);
+    }
+    for range in ranges {
+        range.var = num_cvs.saturating_add(range.var);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

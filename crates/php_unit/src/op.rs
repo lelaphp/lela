@@ -166,12 +166,16 @@ impl Opcode {
 
 /// One instruction, php's `zend_op` field for field (design §5.7);
 /// `out` is php's `result` and `out_type` its `result_type`, spelled so
-/// because the glossary keeps that word for `Result`. The four bytes
-/// before the fields of four are what php's are: the opcode and the kind
-/// of each operand, `result`'s last. A site opcode's `out` is its
-/// safepoint number and its `out_type` stays `Unused`, as php leaves it;
-/// on every other opcode `out_type` is `RETURN_VALUE_USED`, what the
-/// compiler wrote where `zend_do_free` found nothing reading the value.
+/// because the glossary keeps that word for `Result`. An operand of
+/// kind `TMP` or `VAR` holds its frame slot, past the CVs, which the
+/// compiler folds as `pass_two`'s `EX_NUM_TO_VAR(last_var + n)` does,
+/// a slot where php's is a byte offset; a `CV`'s is its slot as well.
+/// The four bytes before the fields of four are what php's are: the
+/// opcode and the kind of each operand, `result`'s last. A site
+/// opcode's `out` is its safepoint number and its `out_type` stays
+/// `Unused`, as php leaves it; on every other opcode `out_type` is
+/// `RETURN_VALUE_USED`, what the compiler wrote where `zend_do_free`
+/// found nothing reading the value.
 /// `handler` is php's `zend_op.handler`, the handler the opline is
 /// served by, which the compiler leaves `Unresolved` and publication
 /// resolves from the fields before it ([`Handler`]); php's is a pointer
@@ -306,11 +310,12 @@ pub enum LiveKind {
 }
 
 /// The oplines over which a temporary is live (`zend_live_range`), for
-/// the unwinder to free it. `var` is the temporary's own number, as an
-/// opline's operand holds it, and `kind` is what php packs into the low
-/// bits of its `var` (`ZEND_LIVE_MASK`); php stores
+/// the unwinder to free it. `var` is the temporary's frame slot, past
+/// the CVs, as an opline's operand holds it, and `kind` is what php
+/// packs into the low bits of its `var` (`ZEND_LIVE_MASK`); php stores
 /// `EX_NUM_TO_VAR(last_var + var_num) | kind` and reads both back, so
-/// two fields hold what one field held.
+/// two fields hold what one field held, a slot where php's is a byte
+/// offset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LiveRange {
     pub var: u32,

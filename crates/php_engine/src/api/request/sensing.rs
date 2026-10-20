@@ -31,7 +31,8 @@ pub(super) enum Sensing {
 }
 
 /// A write a debug build stopped: the opline whose `TMP` it was, the
-/// opcode serving it, the temporary's number and what the slot held.
+/// opcode serving it, the temporary's slot, as the dump numbers it,
+/// and what the slot held.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct DirtyTemporary {
     opline: u32,
@@ -70,14 +71,14 @@ impl Request {
         let Some(serving) = self.serving(frame) else {
             return;
         };
-        let Some((code, op)) = serving
+        let Some(op) = serving
             .code()
-            .and_then(|code| exec::opline_at(code, opline).map(|op| (code, *op)))
+            .and_then(|code| exec::opline_at(code, opline).copied())
         else {
             return;
         };
         let its_own = match op.out_type {
-            php_unit::OperandKind::Tmp => exec::temporary_slot(code, op.out) == at,
+            php_unit::OperandKind::Tmp => op.out == at,
             php_unit::OperandKind::Var
             | php_unit::OperandKind::Cv
             | php_unit::OperandKind::Const

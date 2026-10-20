@@ -31,18 +31,19 @@ pub struct Sample {
 
 /// The value the operand of kind `kind` and field `field` names in
 /// `frame`, sampled: none for an operand that names no slot of the frame
-/// (`IS_CONST`, `IS_UNUSED`) and for a frame that does not stand.
+/// (`IS_CONST`, `IS_UNUSED`), for a frame that does not stand and for
+/// one that serves no op array.
 ///
 /// php samples the zval in place, `EX_VAR(opline->op1.var)`; a `CV`'s
-/// field is its number and a temporary's is numbered past the CVs.
+/// field is its slot, and so is a temporary's, which the compiler folded
+/// past the CVs.
 #[must_use]
 pub fn sample(req: &Request, frame: FrameRef, kind: OperandKind, field: u32) -> Option<Sample> {
-    let code = req.served_op_array(frame)?;
     let at = match kind {
-        OperandKind::Cv => field,
-        OperandKind::Tmp | OperandKind::Var => crate::exec::temporary_slot(code, field),
+        OperandKind::Cv | OperandKind::Tmp | OperandKind::Var => field,
         OperandKind::Const | OperandKind::Unused => return None,
     };
+    req.served_op_array(frame)?;
     let held = req.vm().stack.frame(frame)?;
     if usize::try_from(at).ok()? >= held.len() {
         return None;

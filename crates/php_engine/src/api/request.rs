@@ -1388,7 +1388,7 @@ impl HeapHooks for Hooks<'_> {
                     range.kind,
                     php_unit::LiveKind::TmpVar | php_unit::LiveKind::Loop
                 ) {
-                    let slot = crate::exec::temporary_slot(code, range.var);
+                    let slot = range.var;
                     visit(req.slot(frame, slot).to_zval());
                 }
             }

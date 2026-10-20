@@ -6,8 +6,9 @@
 //! `zend_add_literal` adds them, each in a slot of its own;
 //! CVs are numbered as `lookup_cv` numbers them, one per name in the
 //! order the names are met; temporaries are numbered as
-//! `get_temporary_variable` numbers them, and a temporary's slot on the
-//! frame is its number past the last CV.
+//! `get_temporary_variable` numbers them, and a temporary's operand is
+//! folded to its slot on the frame, its number past the last CV, as the
+//! op array is finished (`live::fold_slots`).
 //!
 //! An operator over values known here is folded as php folds it
 //! (`zend_try_ct_eval_binary_op`), so `1/3` and `'a' . 'b'` are each one
@@ -5233,9 +5234,10 @@ impl<'a> Emit<'a> {
     #[inline(always)]
     fn op_array(&mut self, filename: Name, line_start: u32, line_end: u32) -> OpArray {
         let mut oplines = std::mem::take(&mut self.oplines);
-        let live_ranges = crate::live::live_ranges(&mut oplines, self.temporaries);
+        let mut live_ranges = crate::live::live_ranges(&mut oplines, self.temporaries);
         let vars = std::mem::take(&mut self.vars);
         let num_cvs = u32::try_from(vars.len()).unwrap_or(u32::MAX);
+        crate::live::fold_slots(&mut oplines, &mut live_ranges, num_cvs);
         OpArray {
             oplines,
             literals: std::mem::take(&mut self.constants),

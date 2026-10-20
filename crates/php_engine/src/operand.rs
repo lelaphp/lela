@@ -14,19 +14,18 @@
 use php_heap::{Zval, ZvalType};
 use php_unit::{OpArray, OperandKind};
 
-use crate::exec;
-
 /// One way of addressing an operand: where it stands, read without an
 /// owner taken.
 pub(crate) trait Operand: Copy {
     /// The kind, as the opline's `op1_type` or `op2_type` byte says it.
     fn kind(self) -> OperandKind;
 
-    /// The index among the frame's slots of the operand `field` names:
-    /// the CV itself, a temporary past the last CV, and none for a
+    /// The index among the frame's slots of the operand `field` names,
+    /// the field itself for a CV and for a temporary, which the compiler
+    /// folded past the last CV as `pass_two` folds it, and none for a
     /// constant, which stands in the op array's table, or an unused
     /// operand.
-    fn slot(self, code: &OpArray, field: u32) -> Option<usize>;
+    fn slot(self, field: u32) -> Option<usize>;
 
     /// `GET_OPn_ZVAL_PTR_UNDEF(BP_VAR_R)` for an inline path: the zval
     /// `field` names, a copy with no owner taken, and `UNDEF` for a
@@ -39,7 +38,7 @@ pub(crate) trait Operand: Copy {
         let found = if self.kind() == OperandKind::Const {
             code.literals.get(field as usize)
         } else {
-            self.slot(code, field).and_then(|at| slots.get(at))
+            self.slot(field).and_then(|at| slots.get(at))
         };
         // The zval copied out of the reference itself, never through an
         // `Option<Zval>`: inlined into every arm, such a temporary is a
@@ -55,7 +54,8 @@ pub(crate) trait Operand: Copy {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Const;
 
-/// `IS_TMP_VAR`: a temporary, past the last CV (`EX_NUM_TO_VAR`).
+/// `IS_TMP_VAR`: a temporary, past the last CV (`EX_NUM_TO_VAR`), at
+/// the slot the compiler folded into the field.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Tmp;
 
@@ -85,7 +85,7 @@ impl Operand for Const {
         OperandKind::Const
     }
 
-    fn slot(self, _: &OpArray, _: u32) -> Option<usize> {
+    fn slot(self, _: u32) -> Option<usize> {
         None
     }
 }
@@ -97,8 +97,8 @@ impl Operand for Tmp {
 
     #[inline(always)] // as `read`
     #[allow(clippy::inline_always)]
-    fn slot(self, code: &OpArray, field: u32) -> Option<usize> {
-        Some(exec::temporary_slot(code, field) as usize)
+    fn slot(self, field: u32) -> Option<usize> {
+        Some(field as usize)
     }
 }
 
@@ -109,8 +109,8 @@ impl Operand for Var {
 
     #[inline(always)] // as `read`
     #[allow(clippy::inline_always)]
-    fn slot(self, code: &OpArray, field: u32) -> Option<usize> {
-        Some(exec::temporary_slot(code, field) as usize)
+    fn slot(self, field: u32) -> Option<usize> {
+        Some(field as usize)
     }
 }
 
@@ -121,7 +121,7 @@ impl Operand for Cv {
 
     #[inline(always)] // as `read`
     #[allow(clippy::inline_always)]
-    fn slot(self, _: &OpArray, field: u32) -> Option<usize> {
+    fn slot(self, field: u32) -> Option<usize> {
         Some(field as usize)
     }
 }
@@ -131,7 +131,7 @@ impl Operand for Unused {
         OperandKind::Unused
     }
 
-    fn slot(self, _: &OpArray, _: u32) -> Option<usize> {
+    fn slot(self, _: u32) -> Option<usize> {
         None
     }
 }
@@ -145,10 +145,9 @@ impl Operand for ByKind {
 
     #[inline(always)] // as `read`
     #[allow(clippy::inline_always)]
-    fn slot(self, code: &OpArray, field: u32) -> Option<usize> {
+    fn slot(self, field: u32) -> Option<usize> {
         match self.0 {
-            OperandKind::Cv => Cv.slot(code, field),
-            OperandKind::Tmp | OperandKind::Var => Tmp.slot(code, field),
+            OperandKind::Cv | OperandKind::Tmp | OperandKind::Var => Some(field as usize),
             OperandKind::Const | OperandKind::Unused => None,
         }
     }

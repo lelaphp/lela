@@ -451,7 +451,7 @@ fn suspended_out(req: &Request, object: PhpObject) -> Option<u32> {
             let state = req.kept_frame(&suspended.frame);
             let code = state.code()?;
             let op = exec::opline_at(code, state.opline())?;
-            Some(exec::temporary_slot(code, op.out))
+            Some(op.out)
         }
         _ => None,
     })
@@ -1497,6 +1497,29 @@ fn finish_on_stack(req: &mut Request, generator: PhpObject, finished: bool) {
 /// gone a
 /// gone a
 /// ```
+///
+/// A generator destroyed while it is suspended inside a `foreach` over
+/// a temporary array gives the CV up first and then the array the
+/// loop's live range holds, which the walk finds at the slot the
+/// compiler folded into the range's `var`, so the object the CV no
+/// longer holds is destroyed with the array, after the CV's:
+///
+/// ```php
+/// class D { function __construct(public $n) {} function __destruct() { echo "~D{$this->n}\n"; } }
+/// function g() { foreach ([new D(1), new D(2)] as $d) { yield $d->n; } }
+/// $g = g();
+/// echo $g->current(), "\n";
+/// echo "destroying\n";
+/// unset($g);
+/// echo "done\n";
+/// ```
+/// ```expect
+/// 1
+/// destroying
+/// ~D1
+/// ~D2
+/// done
+/// ```
 fn release_frame(req: &mut Request, suspended: Suspended, finished: bool) {
     let Suspended {
         frame: mut slots,
@@ -1548,7 +1571,7 @@ fn release_frame(req: &mut Request, suspended: Suspended, finished: bool) {
                 if opline >= range.end.0 {
                     continue;
                 }
-                let slot = exec::temporary_slot(code, range.var);
+                let slot = range.var;
                 if range.kind == php_unit::LiveKind::Loop {
                     crate::handlers::ForeachVar::iterator_del(
                         req,
