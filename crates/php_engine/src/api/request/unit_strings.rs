@@ -48,7 +48,7 @@ const SCANNED_NAMES: usize = 16;
 pub(crate) struct UnitStrings {
     units: Vec<Held>,
     by_bytes: HashMap<Box<[u8]>, Option<PhpString>, NameHasher>,
-    spare: Spare,
+    spare: Vec<Spare>,
     dead: Vec<PhpString>,
     dead_constants: Vec<Zval>,
     dead_found: Vec<PhpString>,
@@ -62,12 +62,16 @@ pub(crate) struct UnitStrings {
     compiling: Compiling,
 }
 
-/// The vectors a unit's strings and arrays stood in, kept for the next
-/// unit's.
+/// The vectors one unit's strings and arrays stood in, emptied, kept
+/// together for the next unit's: an `eval` in a loop takes them back
+/// with one pop.
 #[derive(Default)]
 struct Spare {
-    names: Vec<Vec<PhpString>>,
-    constants: Vec<Vec<Zval>>,
+    main: Vec<Zval>,
+    constants: Vec<Zval>,
+    names: Vec<PhpString>,
+    found_main: Vec<PhpString>,
+    found: Vec<PhpString>,
 }
 
 /// One request-only unit and the strings it owns.
@@ -305,11 +309,13 @@ impl UnitStrings {
             files.extend(held.file.take());
             constants.append(&mut held.constants);
             found.append(&mut held.found);
-            spare.names.push(std::mem::take(&mut held.names));
-            spare.names.push(std::mem::take(&mut held.found));
-            spare.names.push(std::mem::take(&mut held.found_main));
-            spare.constants.push(std::mem::take(&mut held.constants));
-            spare.constants.push(std::mem::take(&mut held.main));
+            spare.push(Spare {
+                main: std::mem::take(&mut held.main),
+                constants: std::mem::take(&mut held.constants),
+                names: std::mem::take(&mut held.names),
+                found_main: std::mem::take(&mut held.found_main),
+                found: std::mem::take(&mut held.found),
+            });
             false
         });
         for name in dead.iter().chain(&found) {
@@ -346,6 +352,7 @@ impl UnitStrings {
         {
             return at;
         }
+        let spare = self.spare.pop().unwrap_or_default();
         self.units.push(Held {
             unit: PublishedUnit::downgrade(unit),
             declares: !(unit.functions.is_empty()
@@ -357,13 +364,13 @@ impl UnitStrings {
                 Past::Tables
             },
             over: false,
-            main: self.spare.constants.pop().unwrap_or_default(),
-            constants: self.spare.constants.pop().unwrap_or_default(),
-            names: self.spare.names.pop().unwrap_or_default(),
+            main: spare.main,
+            constants: spare.constants,
+            names: spare.names,
             named: false,
             file: None,
-            found_main: self.spare.names.pop().unwrap_or_default(),
-            found: self.spare.names.pop().unwrap_or_default(),
+            found_main: spare.found_main,
+            found: spare.found,
         });
         self.units.len() - 1
     }
