@@ -241,7 +241,8 @@ pub(crate) unsafe fn crossed<R: Crossed, T: Out>(
 ///
 /// # Safety
 ///
-/// `out` is as [`Out::put`] asks.
+/// `out` is as [`Out::put`] asks, and the kernel's borrow of the request
+/// `cx` carries has ended, so it is read here as no one else holds it.
 #[inline(always)] // part of `crossed`, the one frame around the kernel
 #[allow(clippy::inline_always)]
 unsafe fn answered<R: Crossed, T: Out>(
