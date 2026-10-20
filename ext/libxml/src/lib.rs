@@ -370,6 +370,14 @@ impl Errors {
         docref(req, Level::Warning, &message);
     }
 
+    /// `php_libxml_ctx_error(NULL, ...)` from a dependent extension's own
+    /// code, as `html_document.c` reports a failed bridge: `Errors::ctx`
+    /// with no parser, so a message that ends in no newline waits in the
+    /// buffer for the next error.
+    pub fn ctx_error(req: &mut Request, message: &[u8]) {
+        Errors::ctx(req, None, message, false);
+    }
+
     /// The errors [`ffi::capture`] copied out of one call, routed as php's
     /// handlers would have met them: onto the list with internal errors on,
     /// `php_list_set_error_structure`; otherwise joined in the buffer until a

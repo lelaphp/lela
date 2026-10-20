@@ -342,7 +342,7 @@ fn the_exclusion_is_clear_after_a_recording_a_panic_unwound() {
 /// `JIT_G(tracing)` stays set while the fiber's recorder is suspended, so
 /// the resumer's hot `work()` records no root; destroying the fiber
 /// unwinds the recording and clears the exclusion, so the next hot
-/// `work()` is recorded (revision NEXT). The first request records
+/// `work()` is recorded (revision 30). The first request records
 /// `$main`, inside which nothing else roots; the second finds `$main`
 /// numbered and roots in the fiber.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]

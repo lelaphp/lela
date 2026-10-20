@@ -658,6 +658,41 @@ const _: () = assert!(size_of::<Work<'static>>() == 32, "sizeof(work_list_item)"
 /// `WORK_LIST_INIT_SIZE`.
 const WORK_LIST_INIT_SIZE: usize = 128;
 
+/// `lexbor_libxml2_bridge_status` where the bridge failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Failed {
+    /// `LEXBOR_LIBXML2_BRIDGE_STATUS_OOM`: lexbor or libxml2 refused an
+    /// allocation.
+    Oom,
+    /// `LEXBOR_LIBXML2_BRIDGE_STATUS_OVERFLOW`: a text, or an attribute's
+    /// local name or value, of `INT_MAX` bytes or more.
+    Overflow,
+}
+
+impl Failed {
+    /// `dom_lexbor_libxml2_bridge_status_code_to_string`.
+    fn as_str(self) -> &'static str {
+        match self {
+            Failed::Oom => "out of memory",
+            Failed::Overflow => "string length overflow",
+        }
+    }
+
+    /// php's `>= INT_MAX` test of a length libxml2's `int` is to hold:
+    /// `Overflow` where it cannot.
+    fn length(len: usize) -> Result<(), Failed> {
+        if i32::try_from(len).is_ok_and(|len| len < i32::MAX) {
+            Ok(())
+        } else {
+            Err(Failed::Overflow)
+        }
+    }
+}
+
+/// What a step of the bridge answers: the bridge's status, or the memory
+/// limit's fatal.
+type Bridged<T> = Result<Result<T, Failed>, Thrown>;
+
 /// The declarations the bridge makes once for the attributes of a whole
 /// conversion: `xlink_ns`, `xml_ns` and `prefixed_xmlns_ns`.
 #[derive(Default)]
@@ -669,9 +704,9 @@ struct AttrNs {
 
 /// The bridge's attribute loop: each of `node`'s attributes made on
 /// `element` in order, a local name without its prefix, its value one
-/// text child, its namespace the mapper's, and an HTML `id` an ID. `None`
-/// where libxml refused a node; the `Err` is the memory limit, met where
-/// the mapper makes a declaration.
+/// text child, its namespace the mapper's, and an HTML `id` an ID; the
+/// bridge's status where a length overflows or libxml refused a node, and
+/// the `Err` is the memory limit, met where the mapper makes a declaration.
 fn convert_attributes(
     req: &mut Request,
     mapper: &mut Mapper,
@@ -679,7 +714,7 @@ fn convert_attributes(
     node: HtmlNode<'_>,
     element: Node,
     attr_ns: &mut AttrNs,
-) -> Result<Option<()>, Thrown> {
+) -> Bridged<()> {
     let mut last: Option<Node> = None;
     for attr in node.attributes() {
         let mut local = attr.qualified_name();
@@ -689,12 +724,15 @@ fn convert_attributes(
             local = local.get(colon + 1..).unwrap_or_default();
         }
         let value = attr.value();
+        if let Err(failed) = Failed::length(local.len()).and(Failed::length(value.len())) {
+            return Ok(Err(failed));
+        }
         let Some(lattr) = Node::new_attr(Some(doc), local, None) else {
-            return Ok(None);
+            return Ok(Err(Failed::Oom));
         };
         let Some(text) = Node::new_text_len(Some(doc), value) else {
             lattr.free();
-            return Ok(None);
+            return Ok(Err(Failed::Oom));
         };
         lattr.add_child(text);
         lattr.set_parent(Some(element));
@@ -744,7 +782,7 @@ fn convert_attributes(
             lattr.set_atype(php_ext_libxml::ffi::XML_ATTRIBUTE_ID);
         }
     }
-    Ok(Some(()))
+    Ok(Ok(()))
 }
 
 /// `lexbor_libxml2_bridge_convert`: `start` and the siblings before it,
@@ -756,8 +794,8 @@ fn convert_attributes(
 /// (ADR-0014), so the mapper reaches the request between them. Answers
 /// the template elements whose namespaces `dom_add_element_ns_hook` tags,
 /// which the caller tags through the document's object
-/// ([`tag_templates`]); `None` where the bridge failed, and the `Err` is
-/// the memory limit's fatal.
+/// ([`tag_templates`]); the status where the bridge failed, and the
+/// `Err` is the memory limit's fatal.
 fn bridge(
     req: &mut Request,
     private: &mut Private,
@@ -765,10 +803,10 @@ fn bridge(
     doc: Node,
     root: Node,
     create_default_ns: bool,
-) -> Result<Option<Vec<Node>>, Thrown> {
+) -> Bridged<Vec<Node>> {
     let html_ns = private.mapper.html(req, Some(doc))?;
     let Some(work) = lexbor::lent(req, |lent| ArrayObj::new(lent, WORK_LIST_INIT_SIZE))? else {
-        return Ok(None);
+        return Ok(Err(Failed::Oom));
     };
     let to = Into {
         doc,
@@ -792,13 +830,10 @@ struct Into {
 }
 
 /// `lexbor_libxml2_bridge_work_list_item_push`, under a lend of its own;
-/// `None` where lexbor could not grow the list.
-fn push<'doc>(
-    req: &mut Request,
-    work: &mut ArrayObj<Work<'doc>>,
-    item: Work<'doc>,
-) -> Result<Option<()>, Thrown> {
-    Ok(lexbor::lent(req, |lent| work.push(lent, item))?.then_some(()))
+/// `Oom` where lexbor could not grow the list, which php's writes through.
+fn push<'doc>(req: &mut Request, work: &mut ArrayObj<Work<'doc>>, item: Work<'doc>) -> Bridged<()> {
+    let pushed = lexbor::lent(req, |lent| work.push(lent, item))?;
+    Ok(if pushed { Ok(()) } else { Err(Failed::Oom) })
 }
 
 /// What the walk has made for the whole conversion: the attributes'
@@ -816,7 +851,7 @@ fn convert<'doc>(
     work: &mut ArrayObj<Work<'doc>>,
     start: Option<HtmlNode<'doc>>,
     to: &Into,
-) -> Result<Option<Vec<Node>>, Thrown> {
+) -> Bridged<Vec<Node>> {
     let doc = to.doc;
     let mut made = Made::default();
     let mut at = start;
@@ -827,8 +862,8 @@ fn convert<'doc>(
             parent: to.root,
             ns: None,
         };
-        if push(req, work, item)?.is_none() {
-            return Ok(None);
+        if let Err(failed) = push(req, work, item)? {
+            return Ok(Err(failed));
         }
         at = node.prev();
     }
@@ -836,9 +871,11 @@ fn convert<'doc>(
         let node = item.node;
         let converted = match node.kind() {
             NodeKind::Element => convert_element(req, private, work, item, to, &mut made)?,
-            NodeKind::Text => Node::new_text_len(Some(doc), node.data()).map(|text| {
+            NodeKind::Text => Failed::length(node.data().len()).and_then(|()| {
+                let text = Node::new_text_len(Some(doc), node.data()).ok_or(Failed::Oom)?;
                 item.parent.add_child(text);
                 text.set_line(node.line());
+                Ok(())
             }),
             NodeKind::DocumentType => {
                 let public = node.doctype_public_id();
@@ -850,21 +887,24 @@ fn convert<'doc>(
                     (!system.is_empty()).then_some(system),
                 )
                 .map(drop)
+                .ok_or(Failed::Oom)
             }
             NodeKind::Comment => {
                 let data = php_ext::coerce::c_str(node.data());
-                Node::new_comment(Some(doc), data).map(|comment| {
-                    item.parent.add_child(comment);
-                    comment.set_line(node.line());
-                })
+                Node::new_comment(Some(doc), data)
+                    .map(|comment| {
+                        item.parent.add_child(comment);
+                        comment.set_line(node.line());
+                    })
+                    .ok_or(Failed::Oom)
             }
-            _ => Some(()),
+            _ => Ok(()),
         };
-        if converted.is_none() {
-            return Ok(None);
+        if let Err(failed) = converted {
+            return Ok(Err(failed));
         }
     }
-    Ok(Some(made.templates))
+    Ok(Ok(made.templates))
 }
 
 /// One element of the walk: made under its parent in the namespace it
@@ -877,10 +917,10 @@ fn convert_element<'doc>(
     item: Work<'doc>,
     to: &Into,
     made: &mut Made,
-) -> Result<Option<()>, Thrown> {
+) -> Bridged<()> {
     let (doc, node) = (to.doc, item.node);
     let Some(element) = Node::new_element(Some(doc), None, node.qualified_name(), None) else {
-        return Ok(None);
+        return Ok(Err(Failed::Oom));
     };
     item.parent.add_child(element);
     element.set_line(node.line());
@@ -906,11 +946,14 @@ fn convert_element<'doc>(
     if node.is_template() {
         if to.create_default_ns {
             let Some(fragment) = Node::new_fragment(Some(doc)) else {
-                return Ok(None);
+                return Ok(Err(Failed::Oom));
             };
             fragment.set_parent(Some(element));
             made.templates.push(element);
-            private.add_template(element, fragment);
+            if let Err(thrown) = private.add_template(req, element, fragment) {
+                fragment.free();
+                return Err(thrown);
+            }
             child_parent = fragment;
         }
         if let Some(content) = node.template_content() {
@@ -924,8 +967,8 @@ fn convert_element<'doc>(
             parent: child_parent,
             ns: current,
         };
-        if push(req, work, item)?.is_none() {
-            return Ok(None);
+        if let Err(failed) = push(req, work, item)? {
+            return Ok(Err(failed));
         }
         child = c.prev();
     }
@@ -1021,38 +1064,48 @@ struct Converted {
 /// `lexbor_libxml2_bridge_convert_document` with the private data
 /// `html_document.c` makes just before it: the parsed tree converted into
 /// a fresh HTML document, and the parser's observations copied, while
-/// lexbor's document still stands.
+/// lexbor's document still stands. Where the bridge fails, what it made
+/// is given back and the status is `php_libxml_ctx_error`'s `"%s in %s"`
+/// with the input's `name`, which ends in no newline and so waits in the
+/// error buffer for the next error, as php's does; `None` then, which
+/// php's caller answers as `false`. The `Err` is the memory limit.
 fn convert_document(
     req: &mut Request,
     parsed: &HtmlDocument,
     options: i64,
-) -> Result<Converted, Thrown> {
+    name: &[u8],
+) -> Result<Option<Converted>, Thrown> {
     let mut private = Private::new(req)?;
-    let doc = match new_html_doc(req) {
-        Ok(doc) => doc,
-        Err(thrown) => {
-            private.free(req);
-            return Err(thrown);
-        }
-    };
     let create_default_ns = options & crate::modern_constants::HTML_NO_DEFAULT_NS == 0;
-    let start = parsed.node().last_child();
-    let bridged = bridge(req, &mut private, start, doc, doc, create_default_ns);
-    let failed = match bridged {
-        Ok(Some(templates)) => {
-            return Ok(Converted {
-                doc,
-                private,
-                templates,
-                seen: parsed.observations(),
-            });
+    let failed = match Node::new_html_doc() {
+        Some(doc) => {
+            let start = parsed.node().last_child();
+            match bridge(req, &mut private, start, doc, doc, create_default_ns) {
+                Ok(Ok(templates)) => {
+                    return Ok(Some(Converted {
+                        doc,
+                        private,
+                        templates,
+                        seen: parsed.observations(),
+                    }));
+                }
+                Ok(Err(failed)) => {
+                    doc.free_document();
+                    failed
+                }
+                Err(thrown) => {
+                    doc.free_document();
+                    private.free(req);
+                    return Err(thrown);
+                }
+            }
         }
-        Ok(None) => None,
-        Err(thrown) => Some(thrown),
+        None => Failed::Oom,
     };
-    doc.free_document();
     private.free(req);
-    Err(failed.unwrap_or_else(|| dom_throw(req, Code::InvalidState)))
+    let message = [failed.as_str().as_bytes(), b" in ", name].concat();
+    php_ext_libxml::Errors::ctx_error(req, &message);
+    Ok(None)
 }
 
 /// The document object for a converted tree, made once lexbor's document
@@ -1178,16 +1231,16 @@ pub(crate) fn parse_fragment(
         let mut obj = crate::libxml_half(req, object);
         let bridged = match obj.as_deref_mut().and_then(crate::private::of) {
             Some(private) => bridge(req, private, start, doc, root, true),
-            None => Ok(None),
+            None => Ok(Err(Failed::Oom)),
         };
         match bridged {
-            Ok(Some(templates)) => {
+            Ok(Ok(templates)) => {
                 if let Some(obj) = obj.as_deref_mut() {
                     tag_templates(obj, templates);
                 }
                 Ok(root)
             }
-            Ok(None) => {
+            Ok(Err(_)) => {
                 root.free();
                 Err(dom_throw(req, Code::InvalidState))
             }
@@ -1260,9 +1313,12 @@ pub(crate) fn create_from_string(
             options,
             encoding,
         )?;
-        Ok((convert_document(req, doc, options)?, found))
+        Ok((convert_document(req, doc, options, b"Entity")?, found))
     })?;
-    finish(req, converted, found, options, None)
+    match converted {
+        Some(converted) => finish(req, converted, found, options, None),
+        None => Ok(Owner::bool(false)),
+    }
 }
 
 /// `Dom\HTMLDocument::createFromFile`'s body. A file that does not
@@ -1333,8 +1389,11 @@ pub(crate) fn create_from_file(
     let (converted, found) = with_document(req, |req, doc| {
         let input = Input::File(&source, chunks);
         let found = parse(req, doc, &path, &input, options, encoding)?;
-        Ok((convert_document(req, doc, options)?, found))
+        Ok((convert_document(req, doc, options, &path)?, found))
     })?;
+    let Some(converted) = converted else {
+        return Ok(Owner::bool(false));
+    };
     let url = file_url(req, &path);
     finish(req, converted, found, options, Some(url))
 }

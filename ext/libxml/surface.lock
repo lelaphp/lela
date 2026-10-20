@@ -6,6 +6,7 @@ DocumentHandlers::dump_doc_to_str
 DocumentHandlers::dump_node_to_file
 DocumentHandlers::dump_node_to_str
 Errors
+Errors::ctx_error
 Errors::issue
 Errors::pretend
 Errors::route

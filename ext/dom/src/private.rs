@@ -6,13 +6,14 @@
 //! (`nsDef`): an element's or an attribute's namespace is one shared
 //! declaration per prefix and URI, handed out by the [`Mapper`], and an
 //! `xmlns` attribute is an attribute like any other. The mapper's tables,
-//! the strings it keys them by and the declarations it makes are on the
-//! request's heap at php's sizes, made and freed where php's are (design
-//! §5.13). Where php's declaration is its `emalloc`, whose strings are the
-//! tables' keys, a declaration here is libxml's, charged its `emalloc`
-//! and put on the document's old list, which `xmlFreeDoc` frees after the
-//! private data is gone; nothing reads the list but libxml's lookup of
-//! the `xml` prefix, which finds the same declaration either way.
+//! the tables its walks keep, the template table, the strings they key
+//! by and the declarations the mapper makes are on the request's heap at
+//! php's sizes, made and freed where php's are (design §5.13, [`Table`]).
+//! Where php's declaration is its `emalloc`, whose strings are the tables'
+//! keys, a declaration here is libxml's, charged its `emalloc` and put on
+//! the document's old list, which `xmlFreeDoc` frees after the private
+//! data is gone; nothing reads the list but libxml's lookup of the `xml`
+//! prefix, which finds the same declaration either way.
 //!
 //! A `template` element's contents are a fragment no tree holds, found
 //! through the element ([`Private::template`]); the element's namespace
@@ -44,10 +45,148 @@ const PRIVATE_DATA: usize = 96;
 /// at.
 const HT_MIN_SIZE: usize = 8;
 
+/// `sizeof(HashTable)`, what `ALLOC_HASHTABLE` `emalloc`s.
+const HASH_TABLE: usize = 56;
+
 /// `HT_SIZE_EX(size, HT_SIZE_TO_MASK(size))`: a bucket a slot and two
 /// hash words a slot.
 const fn hash_size(size: usize) -> usize {
     size * 40
+}
+
+/// `sizeof(xmlNsPtr)`, a slot of the in-scope list.
+const NS_PTR: usize = 8;
+
+/// A `HashTable` with no destructor as the request's heap sees it: its
+/// rows in their order, each at the bucket it was added at, its data
+/// laid down at `HT_MIN_SIZE` by `zend_hash_real_init_mixed`, and the
+/// 56-byte struct where php `ALLOC_HASHTABLE`s it rather than embedding
+/// it. A full table is compacted in place where deletions left more than
+/// a thirty-second of its buckets empty, and doubled otherwise, the new
+/// data allocated before the old is freed (`zend_hash_do_resize`); a row
+/// deleted from the end gives back the empty buckets before it
+/// (`_zend_hash_del_el_ex`). So what a table costs is php's, the lookup
+/// a walk of the rows.
+struct Table<R> {
+    /// The rows in order, each with its bucket.
+    rows: Vec<(usize, R)>,
+    /// `nNumUsed`: one past the last bucket a row stands in.
+    used: usize,
+    data: Option<Emalloc>,
+    /// `ALLOC_HASHTABLE`'s struct, `None` for a table php embeds.
+    header: Option<Emalloc>,
+}
+
+impl<R> Default for Table<R> {
+    /// `zend_hash_init`: an embedded table, nothing laid down.
+    fn default() -> Table<R> {
+        Table {
+            rows: Vec::new(),
+            used: 0,
+            data: None,
+            header: None,
+        }
+    }
+}
+
+impl<R> Table<R> {
+    /// `ALLOC_HASHTABLE`, `zend_hash_init` and
+    /// `zend_hash_real_init_mixed`; the `Err` is the memory limit.
+    fn allocated(req: &mut Request) -> Result<Table<R>, Thrown> {
+        let mut table = Table {
+            header: Some(Emalloc::new(req, HASH_TABLE)?),
+            ..Table::default()
+        };
+        if let Err(thrown) = table.real_init(req) {
+            table.free(req);
+            return Err(thrown);
+        }
+        Ok(table)
+    }
+
+    /// `zend_hash_real_init_mixed`; the `Err` is the memory limit.
+    fn real_init(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        if self.data.is_none() {
+            self.data = Some(Emalloc::new(req, hash_size(HT_MIN_SIZE))?);
+        }
+        Ok(())
+    }
+
+    /// `ZEND_HASH_IF_FULL_DO_RESIZE`, before a row is added: the data laid
+    /// down at the first, and a full table compacted or doubled; the `Err`
+    /// is the memory limit.
+    fn make_room(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        let size = match &self.data {
+            None => return self.real_init(req),
+            Some(data) => data.len() / hash_size(1),
+        };
+        if self.used < size {
+            return Ok(());
+        }
+        let len = self.rows.len();
+        if self.used > len + (len >> 5) {
+            for (bucket, row) in self.rows.iter_mut().enumerate() {
+                row.0 = bucket;
+            }
+            self.used = len;
+            return Ok(());
+        }
+        let grown = Emalloc::new(req, hash_size(size * 2))?;
+        if let Some(old) = self.data.replace(grown) {
+            old.free(req);
+        }
+        Ok(())
+    }
+
+    /// A row added in the room [`Table::make_room`] made.
+    fn push(&mut self, row: R) {
+        self.rows.push((self.used, row));
+        self.used += 1;
+    }
+
+    /// `zend_hash_add_new`: room made, then the row; the `Err` is the
+    /// memory limit, the row not added.
+    fn add(&mut self, req: &mut Request, row: R) -> Result<(), Thrown> {
+        self.make_room(req)?;
+        self.push(row);
+        Ok(())
+    }
+
+    /// The rows, in order.
+    fn rows(&self) -> impl Iterator<Item = &R> {
+        self.rows.iter().map(|(_, row)| row)
+    }
+
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// `zend_hash_del_bucket` of the row at `at` in order: nothing is
+    /// freed.
+    fn remove(&mut self, at: usize) -> R {
+        let (bucket, row) = self.rows.remove(at);
+        if bucket + 1 == self.used {
+            self.used = self.rows.last().map_or(0, |(b, _)| b + 1);
+        }
+        row
+    }
+
+    /// The rows taken out in order, for `zend_hash_destroy`'s walk.
+    fn take_rows(&mut self) -> Vec<R> {
+        self.used = 0;
+        self.rows.drain(..).map(|(_, row)| row).collect()
+    }
+
+    /// `zend_hash_destroy`'s `efree` of the data, then `FREE_HASHTABLE`'s
+    /// of the struct; the rows are the caller's, taken first.
+    fn free(&mut self, req: &mut Request) {
+        if let Some(data) = self.data.take() {
+            data.free(req);
+        }
+        if let Some(header) = self.header.take() {
+            header.free(req);
+        }
+    }
 }
 
 /// `sizeof(xmlNs)` on the pinned 64-bit build, what `dom_create_owned_ns`
@@ -57,36 +196,49 @@ const XML_NS: usize = 48;
 /// `php_dom_private_data`.
 pub(crate) struct Private {
     pub(crate) mapper: Mapper,
-    /// `template_fragments`: a template element and its contents, in the
-    /// order they were made.
-    templates: Vec<(Node, Node)>,
+    /// `template_fragments`: each template element's contents, in the
+    /// order they were made, the table made at the first.
+    templates: Option<Table<Template>>,
     /// The struct's `emalloc` on the request's heap, given back by the
     /// header's `dtor` ([`PrivateData::destroy`]).
     charge: Option<Emalloc>,
 }
 
+/// One row of `template_fragments`: the fragment the element's mangled
+/// pointer keys.
+struct Template {
+    element: Node,
+    fragment: Node,
+}
+
 impl PrivateData for Private {
-    /// `php_dom_libxml_private_data_ns_hook`.
+    /// `php_dom_libxml_private_data_ns_hook`: the row deleted, which frees
+    /// nothing of the request's heap, so the hook needs no request.
     fn element_freed(&mut self, element: Node) {
         self.remove_template(element);
     }
 
     /// `php_dom_private_data_destroy`: the mapper's table destroyed,
-    /// then `efree(data)`; the templates' contents go with the drop.
+    /// every template's contents freed and the table with them, then
+    /// `efree(data)`.
     fn destroy(&mut self, req: &mut Request) {
         self.mapper.destroy(req);
+        self.free_templates();
+        if let Some(mut table) = self.templates.take() {
+            table.free(req);
+        }
         if let Some(charge) = self.charge.take() {
             charge.free(req);
         }
     }
 }
 
-/// `php_dom_private_data_destroy`: every template's contents freed.
+/// `php_dom_private_data_destroy` with no request at hand: every
+/// template's contents freed, what the tables hold of the request's heap
+/// the request's end's.
 impl Drop for Private {
     fn drop(&mut self) {
-        for (_, fragment) in self.templates.drain(..) {
-            fragment.free();
-        }
+        self.free_templates();
     }
 }
 
@@ -96,46 +248,91 @@ impl Private {
     pub(crate) fn new(req: &mut Request) -> Result<Private, Thrown> {
         Ok(Private {
             mapper: Mapper::default(),
-            templates: Vec::new(),
+            templates: None,
             charge: Some(Emalloc::new(req, PRIVATE_DATA)?),
         })
     }
 
     /// `php_dom_private_data_destroy` with the request at hand, for data
-    /// no document took: the struct's `efree`, the templates' contents
-    /// with the drop.
+    /// no document took.
     pub(crate) fn free(mut self, req: &mut Request) {
         self.destroy(req);
+    }
+
+    /// `ZEND_HASH_MAP_FOREACH_PTR(template_fragments)`'s `xmlFreeNode`.
+    fn free_templates(&mut self) {
+        if let Some(table) = self.templates.as_mut() {
+            for row in table.take_rows() {
+                row.fragment.free();
+            }
+        }
     }
 
     /// `php_dom_retrieve_templated_content`.
     pub(crate) fn template(&self, element: Node) -> Option<Node> {
         self.templates
-            .iter()
-            .find(|(e, _)| *e == element)
-            .map(|(_, f)| *f)
+            .as_ref()?
+            .rows()
+            .find(|row| row.element == element)
+            .map(|row| row.fragment)
     }
 
-    /// `php_dom_add_templated_content`.
-    pub(crate) fn add_template(&mut self, element: Node, fragment: Node) {
-        self.templates.push((element, fragment));
+    /// `php_dom_add_templated_content`: the table `ALLOC_HASHTABLE`d and
+    /// laid down at the first, then the row; the `Err` is the memory
+    /// limit, the fragment left to the caller.
+    ///
+    /// So a document with a template costs the request what php's does,
+    /// and nothing of it is given back before the document is:
+    ///
+    /// ```php
+    /// $f = fn () => Dom\HTMLDocument::createFromString('<template><p>x</p></template>', LIBXML_NOERROR);
+    /// $d = $f(); unset($d);
+    /// $m = memory_get_usage();
+    /// $d = $f();
+    /// echo memory_get_usage() - $m, "\n";
+    /// $t = $d->getElementsByTagName('template')->item(0);
+    /// $t->innerHTML = '<i>y</i>';
+    /// $t->remove(); unset($t);
+    /// echo memory_get_usage() - $m, "\n";
+    /// unset($d);
+    /// echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 1440
+    /// 1472
+    /// 32
+    /// ```
+    pub(crate) fn add_template(
+        &mut self,
+        req: &mut Request,
+        element: Node,
+        fragment: Node,
+    ) -> Result<(), Thrown> {
+        let table = match &mut self.templates {
+            Some(table) => table,
+            None => self.templates.insert(Table::allocated(req)?),
+        };
+        table.add(req, Template { element, fragment })
     }
 
-    /// `php_dom_remove_templated_content`: the entry taken out first, so
-    /// the nested contents it frees find the table whole.
+    /// `php_dom_remove_templated_content`: the row deleted first, so the
+    /// nested contents it frees find the table whole.
     pub(crate) fn remove_template(&mut self, element: Node) {
-        let Some(at) = self.templates.iter().position(|(e, _)| *e == element) else {
+        let Some(table) = self.templates.as_mut() else {
             return;
         };
-        let (_, fragment) = self.templates.remove(at);
-        self.free_templated_content(fragment);
+        let Some(at) = table.rows().position(|row| row.element == element) else {
+            return;
+        };
+        let row = table.remove(at);
+        self.free_templated_content(row.fragment);
     }
 
     /// `php_dom_free_templated_content`: no object can stand for a node of
     /// a template's contents, so the fragment is freed whole after the
     /// contents nested in it.
     fn free_templated_content(&mut self, base: Node) {
-        if !self.templates.is_empty() {
+        if self.template_count() > 0 {
             let mut at = base.children();
             while let Some(node) = at {
                 if node.kind() == Kind::Element {
@@ -149,7 +346,7 @@ impl Private {
 
     /// `php_dom_get_template_count`.
     pub(crate) fn template_count(&self) -> usize {
-        self.templates.len()
+        self.templates.as_ref().map_or(0, Table::len)
     }
 }
 
@@ -233,67 +430,37 @@ struct UriRow {
     prefixes: Owner<PhpArray>,
 }
 
-/// `uri_to_prefix_map`, the `HashTable` php embeds in the private data, so
-/// only its data is an allocation of its own: laid down at the first row
-/// by `zend_hash_real_init_mixed` and doubled when full by
-/// `zend_hash_do_resize`, the new data allocated before the old is freed,
-/// as `zend_hash` grows a table no row leaves. The rows are in their order.
-#[derive(Default)]
-struct UriTable {
-    rows: Vec<UriRow>,
-    data: Option<Emalloc>,
-}
-
-impl UriTable {
+/// `uri_to_prefix_map`, the [`Table`] php embeds in the private data, so
+/// only its data is an allocation of its own.
+impl Table<UriRow> {
     /// `zend_hash_find`: the prefix table `uri` keys.
     fn find(&self, uri: &[u8]) -> Option<PhpArray> {
-        self.rows
-            .iter()
+        self.rows()
             .find(|row| row.key.as_bytes() == uri)
             .map(|row| *row.prefixes)
     }
 
     /// `zend_hash_add_new`: room made for the row, then the row; the
     /// `Err` is the memory limit, the row given up.
-    fn add(&mut self, req: &mut Request, row: UriRow) -> Result<PhpArray, Thrown> {
+    fn add_uri(&mut self, req: &mut Request, row: UriRow) -> Result<PhpArray, Thrown> {
         if let Err(thrown) = self.make_room(req) {
             row.key.give_up(req);
             row.prefixes.give_up(req);
             return Err(thrown);
         }
         let prefixes = *row.prefixes;
-        self.rows.push(row);
+        self.push(row);
         Ok(prefixes)
-    }
-
-    fn make_room(&mut self, req: &mut Request) -> Result<(), Thrown> {
-        let size = match &self.data {
-            None => {
-                self.data = Some(Emalloc::new(req, hash_size(HT_MIN_SIZE))?);
-                return Ok(());
-            }
-            Some(data) => data.len() / hash_size(1),
-        };
-        if self.rows.len() < size {
-            return Ok(());
-        }
-        let grown = Emalloc::new(req, hash_size(size * 2))?;
-        if let Some(old) = self.data.replace(grown) {
-            old.free(req);
-        }
-        Ok(())
     }
 
     /// `zend_hash_destroy`: each prefix table destroyed and each key
     /// released, in order, then the data freed.
     fn destroy(&mut self, req: &mut Request) {
-        for row in self.rows.drain(..) {
+        for row in self.take_rows() {
             row.prefixes.give_up(req);
             row.key.give_up(req);
         }
-        if let Some(data) = self.data.take() {
-            data.free(req);
-        }
+        self.free(req);
     }
 }
 
@@ -306,7 +473,7 @@ pub(crate) struct Mapper {
     prefixless_xmlns: Option<Ns>,
     /// `uri_to_prefix_map`: each URI's table, whose prefixes key the
     /// places of their declarations in `decls`.
-    table: UriTable,
+    table: Table<UriRow>,
     /// The declarations the prefix tables name.
     decls: Vec<Decl>,
 }
@@ -334,7 +501,7 @@ impl Mapper {
         }
         let prefixes = PhpArray::new(req)?;
         let key = Owner::take(req, uri);
-        self.table.add(req, UriRow { key, prefixes })
+        self.table.add_uri(req, UriRow { key, prefixes })
     }
 
     /// The declaration a prefix table names under `prefix`.
@@ -568,20 +735,64 @@ impl Mapper {
 
     /// `php_dom_get_in_scope_ns`: the declarations in scope at `node`, the
     /// nearest of each prefix, from an element's own namespace unless
-    /// `ignore_elements`, and from its prefixed `xmlns` attributes.
+    /// `ignore_elements`, and from its prefixed `xmlns` attributes. They
+    /// are gathered in a table laid down at once and keyed by a copy of
+    /// each prefix, which a prefix already in it is not, and listed in an
+    /// `emalloc`'d array before the table is destroyed; the `Err` is the
+    /// memory limit.
+    ///
+    /// So a query that registers the namespaces in scope at its node, and an
+    /// XML fragment parsed in place, peak where php's do:
+    ///
+    /// ```php
+    /// $x = '<r';
+    /// foreach (range(1, 10) as $i) $x .= " xmlns:p$i=\"urn:$i\"";
+    /// $d = Dom\XMLDocument::createFromString($x . '><p3:a xmlns:longer="urn:z"><p5:b/></p3:a></r>');
+    /// $xp = new Dom\XPath($d);
+    /// $b = $d->getElementsByTagNameNS('urn:5', 'b')->item(0);
+    /// $xp->query('//p1:a', $b, true);
+    /// memory_reset_peak_usage(); $m = memory_get_usage();
+    /// $n = $xp->evaluate('count(//p3:a)', $b, true);
+    /// echo $n, ' ', memory_get_usage() - $m, ' ', memory_get_peak_usage() - $m, "\n";
+    /// memory_reset_peak_usage(); $m = memory_get_usage();
+    /// $b->innerHTML = '<p7:c/><longer:q/>';
+    /// echo memory_get_usage() - $m, ' ', memory_get_peak_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 1 32 1216
+    /// 0 1216
+    /// ```
     pub(crate) fn in_scope(
         &mut self,
         req: &mut Request,
         node: Node,
         ignore_elements: bool,
-    ) -> Result<Vec<Ns>, Thrown> {
+    ) -> Result<InScope, Thrown> {
+        let mut table = Table::default();
+        let gathered = table
+            .real_init(req)
+            .and_then(|()| self.gather_in_scope(req, &mut table, node, ignore_elements));
+        let listed = gathered.and_then(|()| Emalloc::new(req, table.len() * NS_PTR));
+        let mut list = Vec::with_capacity(table.len());
+        for (key, ns) in table.take_rows() {
+            key.give_up(req);
+            list.push(ns);
+        }
+        table.free(req);
+        Ok(InScope {
+            list,
+            charge: listed?,
+        })
+    }
+
+    fn gather_in_scope(
+        &mut self,
+        req: &mut Request,
+        table: &mut Table<(Owner<PhpString>, Ns)>,
+        node: Node,
+        ignore_elements: bool,
+    ) -> Result<(), Thrown> {
         let doc = node.doc();
-        let mut found: Vec<(Vec<u8>, Ns)> = Vec::new();
-        let add = |found: &mut Vec<(Vec<u8>, Ns)>, prefix: Vec<u8>, ns: Ns| {
-            if !found.iter().any(|(p, _)| *p == prefix) {
-                found.push((prefix, ns));
-            }
-        };
         let mut at = Some(node);
         while let Some(cur) = at {
             if cur.kind() == Kind::Element {
@@ -589,7 +800,7 @@ impl Mapper {
                     && let Some(ns) = cur.ns()
                     && let Some(prefix) = ns.prefix()
                 {
-                    add(&mut found, prefix, ns);
+                    add_in_scope(req, table, &prefix, ns)?;
                 }
                 let mut attr = cur.properties();
                 while let Some(a) = attr {
@@ -600,7 +811,7 @@ impl Mapper {
                     {
                         let prefix = a.name();
                         if let Some(ns) = self.get_raw(req, doc, Some(&prefix), Some(&value))? {
-                            add(&mut found, prefix, ns);
+                            add_in_scope(req, table, &prefix, ns)?;
                         }
                     }
                     attr = a.next();
@@ -608,11 +819,38 @@ impl Mapper {
             }
             at = cur.parent();
         }
-        Ok(found.into_iter().map(|(_, ns)| ns).collect())
+        Ok(())
     }
 
     /// `php_dom_libxml_reconcile_modern`: a subtree that came from another
-    /// document pointed at this mapper's declarations.
+    /// document pointed at this mapper's declarations, each old one mapped
+    /// to its new one in a table on the stack whose data is laid down at
+    /// the first mapping and freed at the end; the `Err` is the memory
+    /// limit.
+    ///
+    /// So an import peaks where php's does, the mapper's own tables and
+    /// the walk's alike:
+    ///
+    /// ```php
+    /// $src = Dom\XMLDocument::createFromString('<r xmlns="urn:a" xmlns:b="urn:b"><b:x b:y="1"><c xmlns="urn:c"/></b:x></r>');
+    /// $dst = Dom\XMLDocument::createEmpty();
+    /// foreach ([1, 2] as $i) {
+    ///     memory_reset_peak_usage();
+    ///     $m = memory_get_usage();
+    ///     $n[] = $dst->importNode($src->documentElement, true);
+    ///     echo memory_get_usage() - $m, ' ', memory_get_peak_usage() - $m, "\n";
+    /// }
+    /// $h = Dom\HTMLDocument::createEmpty();
+    /// memory_reset_peak_usage();
+    /// $m = memory_get_usage();
+    /// $h->adoptNode($n[1]);
+    /// echo memory_get_usage() - $m, ' ', memory_get_peak_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 2712 2816
+    /// 120 528
+    /// 2376 2696
+    /// ```
     pub(crate) fn reconcile(
         &mut self,
         req: &mut Request,
@@ -633,12 +871,24 @@ impl Mapper {
         {
             return Ok(());
         }
-        let mut seen: Vec<(Ns, Option<Ns>)> = Vec::new();
-        self.reconcile_element(req, doc, node, &mut seen)?;
+        let mut seen = Table::default();
+        let walked = self.reconcile_walk(req, doc, node, &mut seen);
+        seen.free(req);
+        walked
+    }
+
+    fn reconcile_walk(
+        &mut self,
+        req: &mut Request,
+        doc: Option<Node>,
+        node: Node,
+        seen: &mut Table<(Ns, Option<Ns>)>,
+    ) -> Result<(), Thrown> {
+        self.reconcile_element(req, doc, node, seen)?;
         let mut at = node.children();
         while let Some(n) = at {
             if n.kind() == Kind::Element {
-                self.reconcile_element(req, doc, n, &mut seen)?;
+                self.reconcile_element(req, doc, n, seen)?;
             }
             at = crate::next_in_tree_order(n, node);
         }
@@ -650,7 +900,7 @@ impl Mapper {
         req: &mut Request,
         doc: Option<Node>,
         element: Node,
-        seen: &mut Vec<(Ns, Option<Ns>)>,
+        seen: &mut Table<(Ns, Option<Ns>)>,
     ) -> Result<(), Thrown> {
         self.reconcile_single(req, doc, element, seen)?;
         let mut attr = element.properties();
@@ -661,25 +911,59 @@ impl Mapper {
         Ok(())
     }
 
-    /// `php_dom_libxml_reconcile_modern_single_node`.
+    /// `php_dom_libxml_reconcile_modern_single_node`: the mapping looked
+    /// up, else the mapper asked and the mapping added after.
     fn reconcile_single(
         &mut self,
         req: &mut Request,
         doc: Option<Node>,
         node: Node,
-        seen: &mut Vec<(Ns, Option<Ns>)>,
+        seen: &mut Table<(Ns, Option<Ns>)>,
     ) -> Result<(), Thrown> {
         let Some(ns) = node.ns() else {
             return Ok(());
         };
-        if let Some((_, fresh)) = seen.iter().find(|(old, _)| *old == ns) {
+        if let Some((_, fresh)) = seen.rows().find(|(old, _)| *old == ns) {
             node.set_ns(*fresh);
             return Ok(());
         }
         let fresh = self.get_raw(req, doc, ns.prefix().as_deref(), ns.href().as_deref())?;
-        seen.push((ns, fresh));
+        seen.add(req, (ns, fresh))?;
         node.set_ns(fresh);
         Ok(())
+    }
+}
+
+/// `zend_hash_str_add_ptr` into the in-scope table: nothing where the
+/// prefix is in it, else room made and the key's `zend_string_init`; the
+/// `Err` is the memory limit.
+fn add_in_scope(
+    req: &mut Request,
+    table: &mut Table<(Owner<PhpString>, Ns)>,
+    prefix: &[u8],
+    ns: Ns,
+) -> Result<(), Thrown> {
+    if table.rows().any(|(key, _)| key.as_bytes() == prefix) {
+        return Ok(());
+    }
+    table.make_room(req)?;
+    let key = Handed::Made(prefix).hold(req)?;
+    table.push((key, ns));
+    Ok(())
+}
+
+/// `php_dom_in_scope_ns` from `php_dom_get_in_scope_ns`: the declarations
+/// and the `safe_emalloc`'d array php lists them in, given back by
+/// [`InScope::free`], `php_dom_in_scope_ns_destroy`.
+pub(crate) struct InScope {
+    pub(crate) list: Vec<Ns>,
+    charge: Emalloc,
+}
+
+impl InScope {
+    /// `php_dom_in_scope_ns_destroy`: the array's `efree`.
+    pub(crate) fn free(self, req: &mut Request) {
+        self.charge.free(req);
     }
 }
 
@@ -735,18 +1019,37 @@ pub(crate) fn with_mapper<R>(
 /// string(8) "<b>x</b>"
 /// string(36) "<template id="t"><b>x</b></template>"
 /// ```
-pub(crate) fn ensure_template(obj: &mut NodeObject, element: Node) -> Option<Node> {
+pub(crate) fn ensure_template(
+    req: &mut Request,
+    object: PhpObject,
+    element: Node,
+) -> Result<Option<Node>, Thrown> {
+    let Some(mut obj) = crate::dom_mut(req, object).map(|d| d.obj.borrow()) else {
+        return Ok(None);
+    };
     if let Some(found) = obj
         .private_data::<Private>()
         .and_then(|p| p.template(element))
     {
-        return Some(found);
+        return Ok(Some(found));
     }
-    let fragment = Node::new_fragment(element.doc())?;
+    let Some(fragment) = Node::new_fragment(element.doc()) else {
+        return Ok(None);
+    };
     fragment.set_parent(Some(element));
     obj.add_ns_tag(element);
-    of(obj)?.add_template(element, fragment);
-    Some(fragment)
+    let added = of(&mut obj).map(|private| private.add_template(req, element, fragment));
+    match added {
+        Some(Ok(())) => Ok(Some(fragment)),
+        Some(Err(thrown)) => {
+            fragment.free();
+            Err(thrown)
+        }
+        None => {
+            fragment.free();
+            Ok(None)
+        }
+    }
 }
 
 /// `php_dom_ns_is_fast(node, token)`: whether the node's namespace is

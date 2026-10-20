@@ -10,10 +10,10 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpString, SmartStr};
+use php_ext::values::{FreshString, Layout, Owner, PhpArray, PhpString, SmartStr};
 
-use crate::ffi::{self, Time, TimeOffset, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
-use crate::lent::{Lent, kept, lent};
+use crate::ffi::{self, Offset, Time, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
+use crate::lent::{Lent, kept, lent, release};
 use crate::obj::{set_str, set_string};
 use crate::zone::default_zone;
 
@@ -108,16 +108,16 @@ pub(super) fn c_int(n: i64) -> i64 {
 /// The offset `date_format` makes for a local time, timelib's own and
 /// held until the string is made: the abbreviation's, the fixed
 /// offset's under `GMT±hhmm`, or the zone's at the time.
-fn local_offset(lent: &Lent<'_>, t: &Time) -> TimeOffset {
+fn local_offset(lent: &Lent<'_>, t: &Time) -> Offset {
     match t.zone_type {
-        ZONETYPE_ABBR => TimeOffset::of_abbr(lent, t.z + t.dst * 3600, t.dst != 0, t.tz_abbr()),
-        ZONETYPE_OFFSET => TimeOffset::of_fixed(lent, t.z),
+        ZONETYPE_ABBR => Offset::of_abbr(lent, t.z + t.dst * 3600, t.dst != 0, t.tz_abbr()),
+        ZONETYPE_OFFSET => Offset::of_fixed(lent, t.z),
         ZONETYPE_ID => match t.zone() {
             Some(zone) => zone.offset_in(lent, t.sse),
-            None => TimeOffset::new(lent),
+            None => Offset::new(lent),
         },
         // "Shouldn't happen, but code defensively."
-        _ => TimeOffset::new(lent),
+        _ => Offset::new(lent),
     }
 }
 
@@ -154,7 +154,7 @@ fn format_built(
     req: &mut Request,
     format: &[u8],
     t: &Time,
-    offset: Option<&TimeOffset>,
+    offset: Option<&Offset>,
 ) -> Result<Owner<PhpString>, Thrown> {
     let mut out = SmartStr::default();
     match format_into(req, &mut out, format, t, offset) {
@@ -175,10 +175,10 @@ fn format_into(
     out: &mut SmartStr,
     format: &[u8],
     t: &Time,
-    offset: Option<&TimeOffset>,
+    offset: Option<&Offset>,
 ) -> Result<(), Thrown> {
     let localtime = offset.is_some();
-    let off = offset.map_or(0, TimeOffset::offset);
+    let off = offset.map_or(0, Offset::offset);
     let sign = if localtime && off < 0 { '-' } else { '+' };
     let oh = (off / 3600).abs();
     let om = ((off % 3600) / 60).abs();
@@ -242,9 +242,9 @@ fn format_into(
             b's' => format!("{:02}", c_int(t.s)),
             b'u' => format!("{:06}", c_int(t.us)),
             b'v' => format!("{:03}", c_int(t.us / 1000)),
-            b'I' => i32::from(offset.is_some_and(TimeOffset::is_dst)).to_string(),
+            b'I' => i32::from(offset.is_some_and(Offset::is_dst)).to_string(),
             b'p' | b'P' | b'O' => {
-                let abbr = offset.map_or(&[][..], TimeOffset::abbr);
+                let abbr = offset.map_or(&[][..], Offset::abbr);
                 if c == b'p' && (!localtime || matches!(abbr, b"UTC" | b"Z" | b"GMT+0000")) {
                     "Z".to_owned()
                 } else {
@@ -743,6 +743,20 @@ fn local_time(req: &mut Request, ts: i64) -> Result<Time, Thrown> {
 ///     [tm_isdst] => 0
 /// )
 /// ```
+///
+/// Its peak is php's: the list's table is laid down for nine rows at
+/// once and the fields' at the first row, `array_init_size(9)`, so
+/// neither doubles while the timelib time stands.
+///
+/// ```php
+/// date_default_timezone_set('Europe/Amsterdam');
+/// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+/// pk(fn () => localtime(0)); pk(fn () => localtime(0, true));
+/// ```
+/// ```expect capture
+/// 648 408
+/// 1264 992
+/// ```
 #[php_function]
 fn localtime(
     req: &mut Request,
@@ -771,7 +785,14 @@ fn localtime_rows(
         (b"tm_yday", ffi::day_of_year(t.y, t.m, t.d)),
         (b"tm_isdst", i64::from(t.dst)),
     ];
-    let mut array = PhpArray::new(req)?;
+    // `array_init_size(return_value, 9)`, the list's table laid down at
+    // once by `zend_hash_real_init_packed`, the fields' at the first
+    // `add_assoc_long`.
+    let mut array = if associative {
+        PhpArray::init_size(req, 9)?
+    } else {
+        PhpArray::sized(req, 9, Layout::Packed)?
+    };
     for (name, value) in rows {
         if associative {
             set_str(req, &mut array, name, Owner::int(value))?;
@@ -804,6 +825,18 @@ fn localtime_rows(
 ///     [0] => 1700000000
 /// )
 /// ```
+///
+/// Its peak is php's, the table sized for its eleven rows,
+/// `array_init_size(11)`, while the timelib time stands.
+///
+/// ```php
+/// date_default_timezone_set('Europe/Amsterdam');
+/// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+/// pk(fn () => getdate(0));
+/// ```
+/// ```expect capture
+/// 1360 1120
+/// ```
 #[php_function]
 fn getdate(
     req: &mut Request,
@@ -816,7 +849,8 @@ fn getdate(
 
 /// The rows of `getdate()` over the local time `t` of `ts`.
 fn getdate_rows(req: &mut Request, t: &Time, ts: i64) -> Result<Owner<PhpArray>, Thrown> {
-    let mut array = PhpArray::new(req)?;
+    // `array_init_size(return_value, 11)`.
+    let mut array = PhpArray::init_size(req, 11)?;
     let rows: [(&[u8], i64); 8] = [
         (b"seconds", t.s),
         (b"minutes", t.i),
@@ -842,10 +876,12 @@ fn getdate_rows(req: &mut Request, t: &Time, ts: i64) -> Result<Owner<PhpArray>,
 }
 
 /// `php_strftime(INTERNAL_FUNCTION_PARAM_PASSTHRU, gmt)`
-/// (`Z/ext/date/php_date.c:1262`): the `struct tm` php fills from the
+/// (`Z/ext/date/php_date.c:1264`): the `struct tm` php fills from the
 /// time in the default zone, or in UTC for `gmstrftime`, rendered by
-/// the C library's `strftime(3)` under the request's `LC_TIME`; `false`
-/// for an empty format and for text the C library answered none of.
+/// the C library's `strftime(3)` under the request's `LC_TIME` into a
+/// string on the request's heap, with the time and the zone's offset
+/// standing; `false` for an empty format and for text the C library
+/// answered none of.
 fn php_strftime(
     req: &mut Request,
     format: PhpString,
@@ -858,7 +894,7 @@ fn php_strftime(
     }
     let ts = timestamp.unwrap_or_else(now);
     let zone = if gmt { None } else { Some(default_zone(req)?) };
-    let text = lent(req, |l| {
+    let (t, offset) = lent(req, |l| {
         let mut t = Time::new(l);
         let offset = match zone {
             None => {
@@ -871,17 +907,45 @@ fn php_strftime(
                 Some(zone.offset_in(l, ts))
             }
         };
-        strftime_of(format, &t, offset.as_ref())
+        (t, offset)
     })?;
-    match text {
-        Some(text) => PhpString::new(req, &text).map(OrFalse::Value),
-        None => Ok(OrFalse::False),
+    let tm = strftime_of(format, &t, offset.as_ref());
+    let written = strftime_into(req, &tm);
+    // `timelib_time_dtor(ts)`, then `timelib_time_offset_dtor(offset)`.
+    release(req, t)?;
+    release(req, offset)?;
+    let (buf, len) = written?;
+    if len != 0 && len != buf.len() {
+        return Ok(OrFalse::Value(buf.truncate(req, len)?.finish()));
     }
+    buf.free(req);
+    Ok(OrFalse::False)
 }
 
-/// `strftime(3)` over the `struct tm` `php_strftime` fills from `t` and
-/// its offset, `GMT` with none where the time is UTC.
-fn strftime_of(format: &[u8], t: &Time, offset: Option<&TimeOffset>) -> Option<Vec<u8>> {
+/// `php_strftime`'s loop: `zend_string_alloc(256)`, written by
+/// `strftime(3)` and doubled by `zend_string_extend` while it answers
+/// nothing or fills the string, five times at most, so the string is
+/// 8192 bytes where the text is longer than 4095 bytes or empty. The
+/// string and the length last written; the `Err` is the memory limit's
+/// fatal.
+fn strftime_into(req: &mut Request, tm: &ffi::Strftime) -> Result<(FreshString, usize), Thrown> {
+    let mut buf = FreshString::new(req, 256)?;
+    let mut len = 0;
+    for _ in 0..5 {
+        len = tm.write(buf.bytes_mut());
+        if len != 0 && len != buf.len() {
+            break;
+        }
+        let grown = buf.len() * 2;
+        buf = buf.extend(req, grown)?;
+    }
+    Ok((buf, len))
+}
+
+/// The `struct tm` `php_strftime` fills from `t` and its offset, `GMT`
+/// with none where the time is UTC, and the format, ready for
+/// `strftime(3)`.
+fn strftime_of(format: &[u8], t: &Time, offset: Option<&Offset>) -> ffi::Strftime {
     let tm = ffi::BrokenDown {
         sec: t.s,
         min: t.i,
@@ -891,11 +955,11 @@ fn strftime_of(format: &[u8], t: &Time, offset: Option<&TimeOffset>) -> Option<V
         year: t.y - 1900,
         wday: ffi::day_of_week(t.y, t.m, t.d),
         yday: ffi::day_of_year(t.y, t.m, t.d),
-        isdst: offset.is_some_and(TimeOffset::is_dst),
-        gmtoff: i64::from(offset.map_or(0, TimeOffset::offset)),
-        zone: offset.map_or(b"GMT", TimeOffset::abbr),
+        isdst: offset.is_some_and(Offset::is_dst),
+        gmtoff: i64::from(offset.map_or(0, Offset::offset)),
+        zone: offset.map_or(b"GMT", Offset::abbr),
     };
-    ffi::strftime(format, &tm)
+    ffi::Strftime::new(format, &tm)
 }
 
 /// `strftime(string $format, ?int $timestamp = null): string|false`,
@@ -925,6 +989,22 @@ fn strftime_of(format: &[u8], t: &Time, offset: Option<&TimeOffset>) -> Option<V
 /// string(59) "Mardi Mar novembre nov|Mar 14 nov 22:13:20 2023|14.11.2023|"
 /// string(62) "Dienstag Di November Nov|Di 14 Nov 22:13:20 2023|14.11.2023|pm"
 /// string(61) "Tuesday Tue November Nov|Tue Nov 14 22:13:20 2023|11/14/23|PM"
+/// ```
+///
+/// Its peak is php's: the text is written into a string of 256 bytes on
+/// the request's heap, doubled while it does not fit, up to 8192 for a
+/// text the C library answers none of, with the time and its offset
+/// standing.
+///
+/// ```php
+/// date_default_timezone_set('Europe/Amsterdam');
+/// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+/// pk(fn () => @strftime('%Z %z', 0)); pk(fn () => @strftime(str_repeat('x', 300), 0)); pk(fn () => @strftime(str_repeat('x', 5000), 0));
+/// ```
+/// ```expect capture
+/// 640 72
+/// 1408 384
+/// 20800 0
 /// ```
 #[php_function(deprecated(since = "8.1", message = "use IntlDateFormatter::format() instead"))]
 fn strftime(
@@ -960,6 +1040,18 @@ fn strftime(
 /// string(34) "Mardi novembre 14.11.2023 22:13:20"
 /// string(37) "Dienstag November 14.11.2023 22:13:20"
 /// string(34) "Tuesday November 11/14/23 22:13:20"
+/// ```
+///
+/// Its peak is php's, the time standing beside the string it grows.
+///
+/// ```php
+/// date_default_timezone_set('Europe/Amsterdam');
+/// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+/// pk(fn () => @gmstrftime('%Z %z', 0)); pk(fn () => @gmstrftime(str_repeat('%Y', 200), 0));
+/// ```
+/// ```expect capture
+/// 576 72
+/// 2624 896
 /// ```
 #[php_function(deprecated(since = "8.1", message = "use IntlDateFormatter::format() instead"))]
 fn gmstrftime(

@@ -6,7 +6,7 @@
 //! Under `Mode::Off` no word is read or written. Otherwise a visit reads
 //! the word: a compiled one is entered, a cold one is bumped and, at its
 //! threshold, claimed, unless the request records already
-//! ([`record::recording`], revision NEXT), when it is bumped and left,
+//! ([`record::recording`], revision 30), when it is bumped and left,
 //! as php's `zend_jit_trace_hot_root` returns at once while
 //! `JIT_G(tracing)`. A claimed word is recorded from at once, the recording handed to the
 //! pipeline with its claim, and the interpreter resumed where the
