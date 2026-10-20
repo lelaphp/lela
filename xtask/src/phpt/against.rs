@@ -88,15 +88,14 @@ use crate::tally::Judgement as _;
 use crate::track;
 
 /// The engine's sources as the run found them, by each file's stat data:
-/// every file under the crate directories the index tracks, the paths a
-/// binary with no dep-info is keyed over and a superset of every other
-/// binary's ([`BuiltFrom::Unlisted`]), and the index. What
+/// every file the index tracks, a superset of what any binary's run is
+/// kept under ([`BuiltFrom::keyed`]), and the index. What
 /// [`Runs::after`] asks after each subset before it asks git anything, as
 /// git's index takes a file whose stat data is the one it recorded as
 /// unchanged, so a run of many subsets over sources nobody writes asks
 /// git nothing after any of them (#2972).
 struct Stood {
-    /// Each tracked file under the crate directories, then the index.
+    /// Each tracked file, then the index.
     files: Vec<PathBuf>,
     /// Each file's stat data, `None` for one gone, as of the last time the
     /// sources were found where the run began.
@@ -122,11 +121,7 @@ impl Stood {
     fn of(root: &Path) -> Result<Stood> {
         let index = root.join(git::rev_parse(root, &["--git-path", "index"])?);
         let indexed = Stood::stat(std::slice::from_ref(&index));
-        let paths = BuiltFrom::Unlisted.keyed(root);
-        let mut args = vec!["ls-files", "-z", "--cached", "--"];
-        for path in &paths {
-            args.push(path.to_str().context("a source path is not UTF-8")?);
-        }
+        let args = ["ls-files", "-z", "--cached"];
         let mut files: Vec<PathBuf> = (git::listed(root, &args)?.into_iter())
             .map(|path| root.join(path))
             .collect();
@@ -536,8 +531,11 @@ fn keys(snapshot: &Snapshot, roots: &[PathBuf]) -> Result<Vec<String>> {
         let Ok(files) = crate::entries(&root.join(RUNS).join(KEYED)) else {
             continue;
         };
-        for file in files {
-            let set: Vec<PathBuf> = serde_json::from_str(&crate::read(&file)?)
+        for file in files
+            .iter()
+            .filter(|file| file.extension().is_some_and(|e| e == "json"))
+        {
+            let set: Vec<PathBuf> = serde_json::from_str(&crate::read(file)?)
                 .with_context(|| format!("{} is not a set of paths", file.display()))?;
             sets.insert(set);
         }
