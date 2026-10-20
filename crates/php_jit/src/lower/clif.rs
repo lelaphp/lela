@@ -1137,7 +1137,13 @@ impl<'a> Emit<'a> {
             _ => return Err(mismatch("a fetch holds more than one guard")),
         }
         if array_slot.var >= self.frame_cvs(array_slot.frame)? {
+            // `FREE_OP1`, as the interpreter takes it: the array out of its
+            // slot, which is left `UNDEF`, then its owner given up.
             let info = self.b.ins().load(I32, trusted(), room, array_at + TYPE_AT);
+            let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+            self.b
+                .ins()
+                .store(trusted(), undef, room, array_at + TYPE_AT);
             let counted = self.b.ins().band_imm_u(info, COUNTED);
             self.when(counted, |emit| {
                 emit.call(Kernel::Release, &[room_arg, opline, arr, info], line.freed)

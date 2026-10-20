@@ -403,3 +403,31 @@ fn a_tables_jump_leaves_where_it_goes_another_way() {
         }
     }
 }
+
+/// A packed fetch from a temporary array takes the array out of its slot
+/// as the interpreter's `FREE_OP1` does, so the slot owns nothing once the
+/// array is released and the return that follows finds every temporary
+/// empty, where the slot had kept the freed array's counted type word
+/// (`Zend/tests/numeric_strings/invalid_numeric_string_must_generate_warning_assign.phpt`).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_fetch_from_a_temporary_array_leaves_its_slot_empty() {
+    // The throw aborts `$main`'s recording, so `f` is a root of its own,
+    // entered on its second call.
+    let program = "function f($v) { return [$v][0]; }
+        try { throw new Exception; } catch (Exception $e) { echo 'e '; }
+        $x = 'a'; $x .= 'a';
+        echo f($x), f($x . 'b'), f(1), \"\\n\";";
+    for mode in ["force", "exit-fuzz"] {
+        let ini = [
+            ("jit.mode", mode),
+            ("jit.compile", "inline"),
+            ("opcache.jit_debug", "258048"),
+        ];
+        let served = testing::serve::<Lane>(&ini, program);
+        let lines = String::from_utf8_lossy(&served.stderr).into_owned();
+        assert_eq!(served.fatal, None, "{mode}\n{lines}");
+        assert_eq!(testing::stdout(&served), "e aaaab1\n", "{mode}\n{lines}");
+        assert!(lines.contains("---- TRACE 1 start (enter) f()"), "{lines}");
+    }
+}
