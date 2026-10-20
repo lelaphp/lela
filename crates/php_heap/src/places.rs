@@ -1,12 +1,16 @@
-//! Zvals kept each in a room of its own off the request's heap, where a
-//! structure the engine keeps in a shape of its own holds a value php
-//! keeps in a bucket of a hash table it already counts: the symbol
-//! table's bucket a fetch by name for writing hands the opline after it
-//! (`zend_fetch_var_address_helper`), whose bytes the table's data
-//! already holds at php's size. A room's address stands from the moment
-//! it is laid until the collection is dropped, whatever is laid or given
-//! back meanwhile, so a [`ZvalRef`] to it outlives php's own bucket
-//! pointer, which a resize moves.
+//! The symbol table's buckets a fetch by name for writing has handed on,
+//! each in a room of its own: php hands the opline after the fetch the
+//! bucket's own `zval *` (`zend_fetch_var_address_helper`), and the
+//! engine keeps a symbol table in a shape of its own whose rows move as
+//! names are added, with the bytes php's table takes on the request's
+//! heap held beside it (design §5.13, the engine's `hash_bytes`). A room
+//! is that shape's bucket, as the table's own rows are, so its bytes are
+//! the ones the table's data already counts at php's size, a 32-byte
+//! `Bucket` per element, and it costs `mm` nothing more, as php's bucket
+//! costs nothing more. A room's address stands from the moment it is
+//! laid until the collection is dropped, whatever is laid or given back
+//! meanwhile, so a [`ZvalRef`] to it outlives php's own bucket pointer,
+//! which a resize moves.
 
 use std::cell::Cell;
 use std::ptr::NonNull;
