@@ -490,7 +490,7 @@ pub(crate) fn fetch_column(req: &mut Request, on: On, column: i64) -> Result<Col
 fn field_object(req: &mut Request, field: &Field) -> Result<Owner<PhpObject>, Thrown> {
     let object = crate::std_object(req)?;
     let facts = [
-        ("name", crate::Fact::Str(field.name)),
+        ("name", crate::Fact::Str(*field.name)),
         ("orgname", crate::Fact::Text(&field.org_name)),
         ("table", crate::Fact::Text(&field.table)),
         ("orgtable", crate::Fact::Text(&field.org_table)),
@@ -519,22 +519,22 @@ fn field_object(req: &mut Request, field: &Field) -> Result<Owner<PhpObject>, Th
 
 /// `mysqli_fetch_field`.
 pub(crate) fn fetch_field(req: &mut Request, on: On) -> Result<OrFalse<Owner<PhpObject>>, Thrown> {
-    let field = with_rows(req, on.object, |_, set| Ok(set.fetch_field().cloned()))?;
-    match field {
-        Some(field) => field_object(req, &field).map(OrFalse::Value),
+    with_rows(req, on.object, |req, set| match set.fetch_field() {
+        Some(field) => field_object(req, field).map(OrFalse::Value),
         None => Ok(OrFalse::False),
-    }
+    })
 }
 
 /// `mysqli_fetch_fields`.
 pub(crate) fn fetch_fields(req: &mut Request, on: On) -> Result<Owner<PhpArray>, Thrown> {
-    let fields = with_rows(req, on.object, |_, set| Ok(set.fields().to_vec()))?;
-    let mut out = PhpArray::new(req)?;
-    for field in &fields {
-        let object = field_object(req, field)?;
-        out.append(req, object.into_value())?;
-    }
-    Ok(out)
+    with_rows(req, on.object, |req, set| {
+        let mut out = PhpArray::new(req)?;
+        for field in set.fields() {
+            let object = field_object(req, field)?;
+            out.append(req, object.into_value())?;
+        }
+        Ok(out)
+    })
 }
 
 /// `mysqli_fetch_field_direct`.
@@ -550,15 +550,19 @@ pub(crate) fn fetch_field_direct(
             "be greater than or equal to 0",
         ));
     }
-    let fields = with_rows(req, on.object, |_, set| Ok(set.fields().to_vec()))?;
-    let Some(field) = usize::try_from(index).ok().and_then(|i| fields.get(i)) else {
-        return Err(arg_value_error(
-            req,
-            on.at(2),
-            "be less than the number of fields for this result set",
-        ));
-    };
-    field_object(req, field).map(OrFalse::Value)
+    with_rows(req, on.object, |req, set| {
+        let Some(field) = usize::try_from(index)
+            .ok()
+            .and_then(|i| set.fields().get(i))
+        else {
+            return Err(arg_value_error(
+                req,
+                on.at(2),
+                "be less than the number of fields for this result set",
+            ));
+        };
+        field_object(req, field).map(OrFalse::Value)
+    })
 }
 
 /// `mysqli_fetch_lengths`.

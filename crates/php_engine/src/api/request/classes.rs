@@ -1826,6 +1826,40 @@ impl Request {
     /// How many of `refused`'s raised it noted, or none where a
     /// redeclaration ended the request.
     ///
+    /// The runtime definition keys the compile made stand counted in
+    /// `CG(rtd_key_counter)` whatever it declared
+    /// ([`php_compile::CompileError::keys_made`]), and are counted here
+    /// for every refusal raised, the cache's among them, which php
+    /// compiles again where opcache keeps no failed compile: an
+    /// anonymous class the request compiles next is named on from them.
+    ///
+    /// ```php
+    /// register_shutdown_function(function () {
+    ///     eval('var_dump(strstr(get_class(new class {}), "$"));');
+    /// });
+    /// eval('$o = new class {}; break 2;');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: 'break' not in the 'loop' or 'switch' context in %s(5) : eval()'d code on line 1
+    /// string(2) "$1"
+    /// ```
+    ///
+    /// An `include`'s as an `eval`'s:
+    ///
+    /// ```php
+    /// $f = __DIR__ . '/keyed.inc';
+    /// file_put_contents($f, "<?php\n\$o = new class {};\n\$p = new class {};\nbreak 2;\n");
+    /// register_shutdown_function(function () use ($f) {
+    ///     unlink($f);
+    ///     eval('var_dump(strstr(get_class(new class {}), "$"));');
+    /// });
+    /// include $f;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: 'break' not in the 'loop' or 'switch' context in %s on line 4
+    /// string(2) "$2"
+    /// ```
+    ///
     /// So a shutdown function finds them after an `include` the compiler
     /// refused, and calls them:
     ///
@@ -1878,6 +1912,7 @@ impl Request {
         refused: &crate::unit_cache::CompileRefused,
         file: &[u8],
     ) -> Option<usize> {
+        self.count_keys_made(refused.error.keys_made);
         let Some(declared) = &refused.declared else {
             return Some(0);
         };

@@ -371,8 +371,8 @@ impl Statement for Stmt {
             name.extend_from_slice(field.name.as_bytes());
             PhpString::filled(req, name.len(), |to| to.copy_from_slice(&name))?
         } else {
-            // `zend_string_copy(S->fields[i].sname)`, the interned name.
-            Owner::take(req, field.name)
+            // `zend_string_copy(S->fields[i].sname)`.
+            Owner::take(req, *field.name)
         };
         Ok(Column {
             name,
@@ -491,7 +491,7 @@ impl Statement for Stmt {
         if !self.has_result() {
             return Err(Failure::silent());
         }
-        let Some(field) = self.fields().get(column).cloned() else {
+        let Some(field) = self.fields().get(column) else {
             return Err(Failure::silent());
         };
         let mut meta = PhpArray::new(req)?;

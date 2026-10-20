@@ -480,12 +480,12 @@ impl Stmt {
         Ok(true)
     }
 
-    /// `mysqlnd_stmt_result_metadata`: a copy of the columns' descriptions,
+    /// The columns' descriptions `mysqlnd_stmt_result_metadata` copies,
     /// `None` where the statement has no rows.
     #[must_use]
-    pub fn fields(&self) -> Option<Vec<Field>> {
+    pub fn fields(&self) -> Option<&[Field]> {
         let result = self.data.result.as_ref()?;
-        (self.data.field_count > 0 && !result.fields.is_empty()).then(|| result.fields.clone())
+        (self.data.field_count > 0 && !result.fields.is_empty()).then_some(&result.fields[..])
     }
 
     /// `mysqlnd_stmt_store_result`: every row read and held; a statement
@@ -1205,10 +1205,7 @@ fn get_result(
     stmt: &mut StmtData,
     conn: &mut ConnData,
 ) -> Result<Option<Box<Res>>, Thrown> {
-    let Some(fields) = stmt.result.as_ref().map(|r| r.fields.clone()) else {
-        return Ok(None);
-    };
-    if stmt.field_count == 0 {
+    if stmt.result.is_none() || stmt.field_count == 0 {
         return Ok(None);
     }
     if !check_state(stmt, conn) {
@@ -1221,6 +1218,7 @@ fn get_result(
     if stmt.cursor_exists && !cursor_fetch(req, stmt, conn, u32::MAX)? {
         return Ok(None);
     }
+    let fields = stmt.result.as_ref().map_or(&[][..], |r| &r.fields[..]);
     let mut result = Box::new(Res::with_fields(req, stmt.field_count, fields)?);
     let stored = result.store(req, conn, true)?;
     stmt.state = StmtState::Prepared;
