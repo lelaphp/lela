@@ -376,20 +376,18 @@ impl Worked {
                 ticket,
                 branch,
                 commit,
-                ready: true,
-            } => format!(
-                "{ticket} ready at {}; {branch} is left for /specs to merge, its worktree retired, and the merge closes it",
-                short(commit)
-            ),
-            Worked::Closed {
-                ticket,
-                branch,
-                commit,
-                ready: false,
-            } => format!(
-                "{ticket} closed at {}; {branch} is left for /specs to merge, its worktree retired",
-                short(commit)
-            ),
+                ready,
+            } => {
+                let (at, closes) = if *ready {
+                    ("ready", ", and the merge closes it")
+                } else {
+                    ("closed", "")
+                };
+                format!(
+                    "{ticket} {at} at {}; {branch} is left for /specs to merge, its worktree retired{closes}",
+                    short(commit)
+                )
+            }
             Worked::Standing {
                 ticket,
                 commit,
@@ -524,8 +522,7 @@ fn hold(
     };
     // After the session landed what it landed: the stamp is over the tree
     // it left.
-    let now = Snapshot::disk(root)?;
-    let mut reading = Reading::stamped_over(INSTRUMENT, &judged.id, &now, Path::new(STAMPED_OVER))?;
+    let mut reading = stamped(root, &judged.id)?;
     reading.status = match judged.judgement {
         Landed::Closed => Status::Pass,
         Landed::Standing => Status::Fail,
@@ -543,6 +540,17 @@ fn hold(
     tally.found += 1;
     tally.judged.push(judged);
     Ok(())
+}
+
+/// A reading of the instrument over `scope`, stamped over the tree at
+/// `root` as it stands now.
+fn stamped(root: &Path, scope: &str) -> Result<Reading> {
+    Reading::stamped_over(
+        INSTRUMENT,
+        scope,
+        &Snapshot::disk(root)?,
+        Path::new(STAMPED_OVER),
+    )
 }
 
 /// The run's own reading, scoped to [`RUN`]: how many tickets it worked,
@@ -565,16 +573,7 @@ fn record_run(
         (0, _) => Outcome::Passed,
         _ => Outcome::Failed,
     };
-    let mut reading = tally.reading(
-        Reading::stamped_over(
-            INSTRUMENT,
-            RUN,
-            &Snapshot::disk(root)?,
-            Path::new(STAMPED_OVER),
-        )?,
-        &outcome,
-        outcomes(tally, how),
-    )?;
+    let mut reading = tally.reading(stamped(root, RUN)?, &outcome, outcomes(tally, how))?;
     reading.count("landed", tally.met())?;
     reading.count("standing", standing)?;
     total.carry(&mut reading);

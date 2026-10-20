@@ -70,7 +70,6 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
@@ -196,15 +195,7 @@ pub(super) fn before(root: &Path, call: &Call) -> Result<()> {
 /// The exit is 0 whatever it found; a call it cannot pair with a record
 /// is left as it stands, said on stderr.
 pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
-    let text = if let Some(json) = json {
-        json.to_owned()
-    } else {
-        let mut bytes = Vec::new();
-        std::io::stdin()
-            .read_to_end(&mut bytes)
-            .context("reading the tool call from stdin")?;
-        String::from_utf8_lossy(&bytes).into_owned()
-    };
+    let text = Call::text(json)?;
     let call = match Call::parse(&text) {
         Ok(call) => call,
         Err(err) => {

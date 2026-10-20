@@ -70,7 +70,7 @@ use crate::manifest::{Edge, LockCeiling, Manifest, Seam, Section};
 use crate::reading::{Reading, Status, Store};
 use crate::sources::Standing;
 
-use inventory::{Inventory, Leaf, kernels_named, uses};
+use inventory::{Inventory, Leaf, Written, kernels_named, uses};
 use lock::{Block, Diff, Lock, list};
 use surfaces::Surfaces;
 use workspace::{Crates, Present};
@@ -297,7 +297,7 @@ fn seam_reading(
             LockKind::Items => {
                 lines_counted_by_module(inventory, krate, seam.module.as_deref(), &mut reading)?
             }
-            LockKind::Imports => imports(manifest, crates, seam)?
+            LockKind::Imports => imports(manifest, crates, inventory, seam)?
                 .into_values()
                 .flatten()
                 .collect(),
@@ -305,7 +305,8 @@ fn seam_reading(
         };
         (vec![Block::of(None, lines)], Vec::new())
     } else {
-        sections(manifest, crates, seam, &shown, committed.as_ref())?
+        let found = imports(manifest, crates, inventory, seam)?;
+        sections(crates, seam, &shown, committed.as_ref(), found)?
     };
     let generated: BTreeSet<String> = blocks.iter().flat_map(|b| b.lines.clone()).collect();
     reading.count(numbers::ITEMS, u64::try_from(generated.len())?)?;
@@ -452,21 +453,33 @@ fn hold_lock<'s>(
     Ok(problems)
 }
 
-/// The paths each of the seam's consumers `use` from its producer, as lock
-/// lines, less what the lock of another seam it consumes from the producer
-/// holds (#1369): `php_sapi`'s `tier::*` imports are `tier.lock`'s face, and
-/// so not `sapi.lock`'s. An import neither lists is missing from both.
+/// The paths each of the seam's consumers imports from its producer, as
+/// lock lines, less what the lock of another seam it consumes from the
+/// producer holds (#1369): `php_sapi`'s `tier::*` imports are `tier.lock`'s
+/// face, and so not `sapi.lock`'s. An import neither lists is missing from
+/// both.
+///
+/// A `use` is its path; a path the code writes through a module of the
+/// producer, `tier::room(..)` beside `use php_engine::tier` or
+/// `php_engine::tier::room` written in place, is the item it reaches, cut
+/// to the longest of its prefixes that names a public item of the
+/// producer, so `tier::Flow::Exit` is `tier::Flow` and an associated
+/// function its own line, and kept whole where none does (#3033). A path
+/// written through a type or a function the consumer imports, and a
+/// method call, add nothing past the `use` of the type.
 fn imports(
     manifest: &Manifest,
     crates: &Crates,
+    inventory: &mut Inventory<'_>,
     seam: &Seam,
 ) -> Result<BTreeMap<String, BTreeSet<String>>> {
     let mut out = BTreeMap::new();
     let Some(producer) = crates.named(&seam.producer) else {
         return Ok(out);
     };
+    let items = inventory.public_items(producer)?;
     for consumer in crates.iter() {
-        if !seam.consumers.iter().any(|c| matches(c, &consumer.name)) {
+        if !any_matches(&seam.consumers, &consumer.name) {
             continue;
         }
         let Some(dep) = consumer.deps.iter().find(|d| d.name == producer.name) else {
@@ -476,7 +489,7 @@ fn imports(
         for other in manifest.seams.iter().filter(|o| {
             o.name != seam.name
                 && o.producer == seam.producer
-                && o.consumers.iter().any(|c| matches(c, &consumer.name))
+                && any_matches(&o.consumers, &consumer.name)
         }) {
             let home = manifest.lock_home(&other.lock);
             if let Some(krate) = home.and_then(|h| crates.named(&h)) {
@@ -489,13 +502,27 @@ fn imports(
         let lines: &mut BTreeSet<String> = out.entry(consumer.name.clone()).or_default();
         for file in consumer.sources()? {
             for path in uses(&file)? {
-                if path.segs.first() != Some(&dep.alias) || path.segs.len() < 2 {
+                let Some((_, segs)) = path
+                    .segs
+                    .split_first()
+                    .filter(|(first, rest)| **first == dep.alias && !rest.is_empty())
+                else {
                     continue;
-                }
-                let mut line = path.segs[1..].join("::");
-                if path.leaf == Leaf::Glob {
-                    line.push_str("::*");
-                }
+                };
+                let line = match path.written {
+                    Written::Use(Leaf::Name(_)) => segs.join("::"),
+                    Written::Use(Leaf::Glob) => format!("{}::*", segs.join("::")),
+                    Written::Path { import } => {
+                        if !inventory.names_module(producer, &segs[..import - 1])? {
+                            continue;
+                        }
+                        (1..=segs.len())
+                            .rev()
+                            .map(|n| segs[..n].join("::"))
+                            .find(|line| items.contains(line))
+                            .unwrap_or_else(|| segs.join("::"))
+                    }
+                };
                 if !held.contains(&line) {
                     lines.insert(line);
                 }
@@ -508,30 +535,35 @@ fn imports(
 /// The `use` paths into a seam's `module` of its producer written by a
 /// crate outside the seam's consumers (#1959): `php_ext` re-exporting
 /// `php_engine::layer`, or an extension reaching past its facade for it,
-/// each a face the seam keeps for its consumers alone. None for a seam
-/// that is no module.
+/// each a face the seam keeps for its consumers alone, and the paths into
+/// it written in place, each once per file; a path written through a
+/// `use` says nothing past the `use` (#3033). None for a seam that is no
+/// module.
 fn strangers(crates: &Crates, seam: &Seam) -> Result<Vec<String>> {
     let mut out = Vec::new();
     let (Some(module), Some(producer)) = (&seam.module, crates.named(&seam.producer)) else {
         return Ok(out);
     };
     for krate in crates.iter() {
-        if krate.name == producer.name || seam.consumers.iter().any(|c| matches(c, &krate.name)) {
+        if krate.name == producer.name || any_matches(&seam.consumers, &krate.name) {
             continue;
         }
         let Some(dep) = krate.deps.iter().find(|d| d.name == producer.name) else {
             continue;
         };
         for file in krate.sources()? {
-            for path in uses(&file)? {
+            for path in uses(&file)?.iter().filter(|p| !p.through_use()) {
                 if path.segs.first() == Some(&dep.alias) && path.segs.get(1) == Some(module) {
-                    out.push(format!(
-                        "{} uses {}; {}::{module} is {}'s alone",
-                        crates.relative(&file).display(),
-                        path.segs.join("::"),
-                        producer.ident(),
-                        seam.consumers.join(", "),
-                    ));
+                    push_new(
+                        &mut out,
+                        format!(
+                            "{} uses {}; {}::{module} is {}'s alone",
+                            crates.relative(&file).display(),
+                            path.segs.join("::"),
+                            producer.ident(),
+                            seam.consumers.join(", "),
+                        ),
+                    );
                 }
             }
         }
@@ -547,13 +579,13 @@ fn strangers(crates: &Crates, seam: &Seam) -> Result<Vec<String>> {
 /// missing; one listed only under a section the consumer does not read is
 /// a failure, `kernels` being `php_jit`'s alone. An allowlist keeps every
 /// line it lists in a section the manifest names, but [`KERNELS`], which
-/// is generated.
+/// is generated. `found` is each consumer's [`imports`].
 fn sections(
-    manifest: &Manifest,
     crates: &Crates,
     seam: &Seam,
     shown: &str,
     committed: Option<&Lock>,
+    found: BTreeMap<String, BTreeSet<String>>,
 ) -> Result<(Vec<Block>, Vec<String>)> {
     let lines = |section: &Section| {
         let listed = committed.and_then(|l| l.section(section.name()));
@@ -580,8 +612,8 @@ fn sections(
         })
         .collect();
     let mut problems = Vec::new();
-    for (consumer, imports) in imports(manifest, crates, seam)? {
-        let reads = |section: &Section| section.readers(seam).iter().any(|r| matches(r, &consumer));
+    for (consumer, imports) in found {
+        let reads = |section: &Section| any_matches(section.readers(seam), &consumer);
         let Some(first) = seam.sections.iter().position(reads) else {
             continue;
         };
@@ -617,15 +649,12 @@ fn kernel_lines(crates: &Crates, seam: &Seam) -> Result<BTreeSet<String>> {
     let Some(section) = seam.sections.iter().find(|s| s.name() == KERNELS) else {
         return Ok(out);
     };
-    for krate in crates.iter() {
-        if section
-            .readers(seam)
-            .iter()
-            .any(|r| matches(r, &krate.name))
-        {
-            for file in krate.sources()? {
-                out.extend(kernels_named(&file)?);
-            }
+    for krate in crates
+        .iter()
+        .filter(|k| any_matches(section.readers(seam), &k.name))
+    {
+        for file in krate.sources()? {
+            out.extend(kernels_named(&file)?);
         }
     }
     Ok(out)
@@ -749,7 +778,9 @@ fn crate_reading(
 }
 
 /// The `use` paths of `krate` that cross a `deny = true` module edge such
-/// as `php_engine::{executor,kernels}` to `php_engine::{serve,...}`.
+/// as `php_engine::{executor,kernels}` to `php_engine::{serve,...}`, and
+/// the `crate::`, `self::` and `super::` paths written in place that do,
+/// each once per file (#3033).
 fn denied_uses(manifest: &Manifest, krate: &Present) -> Result<Vec<String>> {
     let rows: Vec<(Vec<String>, Vec<String>)> = manifest
         .edges
@@ -782,22 +813,25 @@ fn denied_uses(manifest: &Manifest, krate: &Present) -> Result<Vec<String>> {
             if !from_mods.contains(top) {
                 continue;
             }
-            for path in uses(&file)? {
+            for path in uses(&file)?.iter().filter(|p| !p.through_use()) {
                 let Some(resolved) = path.in_crate(&at) else {
                     continue;
                 };
                 if let Some(target) = resolved.first()
                     && to_mods.contains(target)
                 {
-                    out.push(format!(
-                        "{} uses crate::{}; {}::{{{}}} may not use {}::{{{}}} (design §4.2)",
-                        krate.relative(&file).display(),
-                        resolved.join("::"),
-                        krate.ident(),
-                        from_mods.join(","),
-                        krate.ident(),
-                        to_mods.join(","),
-                    ));
+                    push_new(
+                        &mut out,
+                        format!(
+                            "{} uses crate::{}; {}::{{{}}} may not use {}::{{{}}} (design §4.2)",
+                            krate.relative(&file).display(),
+                            resolved.join("::"),
+                            krate.ident(),
+                            from_mods.join(","),
+                            krate.ident(),
+                            to_mods.join(","),
+                        ),
+                    );
                 }
             }
         }
@@ -843,6 +877,19 @@ fn matches(pattern: &str, name: &str) -> bool {
         Some(prefix) => name.starts_with(prefix) && name[prefix.len()..].starts_with('/'),
         None => pattern == name,
     }
+}
+
+/// `said` after what `out` says already, unless it says it: a path written
+/// twice in a file is one finding.
+fn push_new(out: &mut Vec<String>, said: String) {
+    if !out.contains(&said) {
+        out.push(said);
+    }
+}
+
+/// Whether any of the manifest patterns matches a crate name.
+fn any_matches(patterns: &[String], name: &str) -> bool {
+    patterns.iter().any(|p| matches(p, name))
 }
 
 /// The module the lines `api_private_items` holds stand under: the helpers
@@ -926,4 +973,30 @@ fn adr_cite(manifest: &Manifest, adr: &[&str]) -> String {
         })
         .collect();
     format!(" ({})", cites.join("; "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `tier-module` fixture (#3033): `tier.lock`'s `[face]` lists the
+    /// module `tier`, `tier::Flow` and `tier::listed`, and `php_jit` reaches
+    /// four more items through the module, by its name, a rename, a path
+    /// written in place and a `use` inside a function, each of which fails
+    /// the `tier` reading; `tier::Flow::Exit` is the listed `tier::Flow`,
+    /// and the inline `mod tier` `php_jit` defines reaches nothing.
+    #[test]
+    fn an_item_reached_through_an_imported_module_needs_its_own_line() {
+        let workspace = crate::package_dir().parent().unwrap().to_owned();
+        let manifest = Manifest::load(&workspace).unwrap();
+        let fixture = crate::package_dir().join("fixtures/api-check/tier-module");
+        let readings = hold(&manifest, &fixture, false).unwrap();
+        let tier = readings.iter().find(|r| r.scope == "tier").unwrap();
+        assert_eq!(tier.status, Status::Fail, "{}", tier.message);
+        assert_eq!(
+            tier.message,
+            "4 imports from php_engine have no line in crates/php_engine/tier.lock [face]: \
+             tier::in_place, tier::renamed, tier::scoped, tier::unlisted"
+        );
+    }
 }

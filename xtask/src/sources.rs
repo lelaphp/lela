@@ -252,11 +252,9 @@ impl Standing {
             }
         }
         let index = key::Snapshot::index(root, &git::Index::read(root)?)?;
-        let mut trees = BTreeMap::new();
-        for (scope, path) in scopes {
-            let key = index.key(path)?;
-            trees.insert(scope.clone(), key);
-        }
+        let trees = (scopes.iter())
+            .map(|(scope, path)| Ok((scope.clone(), index.key(path)?)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
         let mut standing = store.latest_over(instrument, &trees, manifest.pin.digest())?;
         standing.retain(|_, reading| reading.status == Status::Pass);
         if let Some(path) = harness

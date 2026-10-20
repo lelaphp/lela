@@ -699,12 +699,7 @@ impl Stray {
         } else {
             kill(pid, Signal::SIGKILL).ok();
         }
-        for _ in 0..100 {
-            if !crate::sysv::alive(self.pid) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        crate::sysv::wait_gone(self.pid);
     }
 }
 

@@ -38,15 +38,18 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 
 use super::anchor::Entry;
+use super::fence::Served;
 use crate::carried::BUNDLE;
-use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, PHPDBG};
+use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, MAKALA, PHPDBG};
 use crate::oracle::profile;
-use crate::oracle::{Invocation, Observation, Oracle, Program, Stdin};
+use crate::oracle::{Ended, Invocation, Observation, Oracle, Program, Recipe, Stdin, normalise_in};
 use crate::phpt::environment::Environment;
 use crate::phpt::{cgi, file::Phpt};
 use crate::scratch::Tree;
@@ -180,47 +183,62 @@ pub(super) fn traced(
 }
 
 impl Binary {
-    /// `snippet` served as the request `request` describes by the CGI's
-    /// binary run under the name php-cgi, under `regime` where the fence
-    /// names one, as [`Binary::serve`] serves a `process` fence; with the
-    /// natives it entered.
-    pub(crate) fn serve_cgi(
+    /// `snippet` served as the request `request` describes by the engine's
+    /// host `served` names, the CGI's binary run under the name php-cgi,
+    /// as [`served_as`] serves it; with the natives it, or its child,
+    /// entered.
+    pub(crate) fn serve_request(
         &self,
         oracle: &Oracle<'_>,
+        served: Served,
         snippet: &str,
         request: &str,
         regime: Option<&str>,
     ) -> Result<(Observation, Vec<Entry>)> {
-        let binary = self.host(CGI)?;
-        let hosts = Tree::new("witness-cgi")?;
-        let host = cgi::linked(&binary, hosts.path())?;
-        traced(|env| served_as_cgi(oracle, &host, snippet, request, regime, env))
+        let host = self.host(host_of(served))?;
+        let hosts = (host_of(served) == CGI)
+            .then(|| Tree::new("witness-cgi"))
+            .transpose()?;
+        let host = match &hosts {
+            Some(hosts) => cgi::linked(&host, hosts.path())?,
+            None => host,
+        };
+        traced(|env| served_as(oracle, served, &host, snippet, request, regime, env))
     }
+}
 
-    /// `snippet` served as the request `request` describes by `sapi/fpm`'s
-    /// binary, as [`Binary::serve_cgi`] serves one by php-cgi; with the
-    /// natives its child entered.
-    pub(crate) fn serve_fpm(
-        &self,
-        oracle: &Oracle<'_>,
-        snippet: &str,
-        request: &str,
-    ) -> Result<(Observation, Vec<Entry>)> {
-        let binary = self.host(FPM)?;
-        traced(|env| super::fpm::served_as_fpm(oracle, &binary, snippet, request, env))
+/// The host that serves a fence's request: the CGI for a fence that names
+/// no other.
+pub(crate) fn host_of(served: Served) -> EngineHost {
+    match served {
+        Served::Fpm => FPM,
+        Served::Phpdbg => PHPDBG,
+        Served::Makala => MAKALA,
+        Served::Linked | Served::Binary | Served::Cgi => CGI,
     }
+}
 
-    /// `snippet` handed to `sapi/phpdbg`'s binary with `commands` on its
-    /// prompt, as [`Binary::serve_cgi`] serves one by php-cgi; with the
-    /// natives it entered.
-    pub(super) fn serve_phpdbg(
-        &self,
-        oracle: &Oracle<'_>,
-        snippet: &str,
-        commands: &str,
-    ) -> Result<(Observation, Vec<Entry>)> {
-        let binary = self.host(PHPDBG)?;
-        traced(|env| served_as_phpdbg(oracle, &binary, snippet, commands, env))
+/// `snippet` served as the request `request` describes by the binary at
+/// `host` of the host `served` names: php-cgi under `regime` where the
+/// fence names one, php-fpm, phpdbg with `request` the commands on its
+/// prompt, or makala over HTTP. What the oracle and the engine are each
+/// held to for a fence with a request.
+pub(crate) fn served_as(
+    oracle: &Oracle<'_>,
+    served: Served,
+    host: &Path,
+    snippet: &str,
+    request: &str,
+    regime: Option<&str>,
+    env: &[(String, std::ffi::OsString)],
+) -> Result<Observation> {
+    match served {
+        Served::Fpm => super::fpm::served_as_fpm(oracle, host, snippet, request, env),
+        Served::Phpdbg => served_as_phpdbg(oracle, host, snippet, request, env),
+        Served::Makala => super::makala::served(oracle, host, snippet, request, env),
+        Served::Linked | Served::Binary | Served::Cgi => {
+            served_as_cgi(oracle, host, snippet, request, regime, env)
+        }
     }
 }
 
@@ -262,9 +280,7 @@ pub(crate) fn served_as_cgi(
     regime: Option<&str>,
     env: &[(String, std::ffi::OsString)],
 ) -> Result<Observation> {
-    let recipe = &oracle.pin().recipe;
-    let own = oracle.tree("witness-request")?;
-    let program = own.write(&recipe.script_name, format!("{}{snippet}", recipe.preamble))?;
+    let (own, program) = program(oracle, "witness-request", snippet)?;
     let program = crate::oracle::run_by(&program)?;
     let described = described(&own, &program, request, env)?;
     let flags = [String::from("-C"), String::from("-f")];
@@ -276,6 +292,52 @@ pub(crate) fn served_as_cgi(
         stdin: described.stdin.as_deref().map_or(Stdin::Null, Stdin::File),
         ..Invocation::new(host, Program::File(&program))
     })
+}
+
+/// `command` under the recipe: the recipe's ini and `ini` after it as
+/// `-d`, its arguments going on after them, the recipe's environment with
+/// `env` over it, and nothing on stdin or stdout.
+pub(crate) fn under_recipe<'c>(
+    recipe: &Recipe,
+    command: &'c mut Command,
+    ini: &[String],
+    env: &[(String, std::ffi::OsString)],
+) -> Result<&'c mut Command> {
+    for ini in recipe.ini.iter().chain(ini) {
+        command.arg("-d").arg(ini);
+    }
+    let command = recipe
+        .environ(command)?
+        .envs(env.iter().map(|(name, value)| (name, value)));
+    Ok(command.stdin(Stdio::null()).stdout(Stdio::null()))
+}
+
+/// A tree of its own named `name` with `snippet` written in it as the
+/// recipe's `script_name`, the recipe's preamble first; the tree and the
+/// program's path.
+pub(super) fn program(oracle: &Oracle<'_>, name: &str, snippet: &str) -> Result<(Tree, PathBuf)> {
+    let recipe = &oracle.pin().recipe;
+    let own = oracle.tree(name)?;
+    let program = own.write(&recipe.script_name, format!("{}{snippet}", recipe.preamble))?;
+    Ok((own, program))
+}
+
+/// What a host answering over a socket was seen to do since `started`:
+/// the `stdout` and `stderr` it gave, normalised under the recipe within
+/// the program's tree `own`, its exit the 0 a host that answered ends in.
+pub(super) fn answered(
+    oracle: &Oracle<'_>,
+    own: &Tree,
+    (stdout, stderr): (Vec<u8>, Vec<u8>),
+    started: Instant,
+) -> Observation {
+    let rules = &oracle.pin().recipe.normalise;
+    Observation {
+        stdout: normalise_in(rules, own.path(), stdout),
+        stderr: normalise_in(rules, own.path(), stderr),
+        exit: Ended::Status(0),
+        wall: started.elapsed(),
+    }
 }
 
 /// The request a fence's `request` sections describe, translated in

@@ -408,11 +408,8 @@ fn push_array(text: &str, start: usize, item: &str) -> Result<(usize, String)> {
 /// The offset of the `key =` line inside the `[table]` of a TOML text,
 /// found textually so the word in a comment is not the line.
 fn key_line(text: &str, table: &str, key: &str) -> Option<usize> {
-    let mut at = 0;
     let mut inside = false;
-    for line in text.lines() {
-        let here = at;
-        at += line.len() + 1;
+    for (here, line) in offsets(text) {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
             inside = header(trimmed) == format!("[{table}]");
@@ -429,6 +426,16 @@ fn key_line(text: &str, table: &str, key: &str) -> Option<usize> {
     None
 }
 
+/// Each line of `text` with the offset it starts at, a line ending
+/// taken for one byte.
+fn offsets(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    text.lines().scan(0, |at, line| {
+        let here = *at;
+        *at += line.len() + 1;
+        Some((here, line))
+    })
+}
+
 /// A TOML header line without the comment after it.
 fn header(line: &str) -> &str {
     line.split('#').next().unwrap_or(line).trim()
@@ -438,11 +445,8 @@ fn header(line: &str) -> &str {
 /// where one more line goes; blank lines and the comment above the next
 /// header stay with the next header.
 fn table_end(text: &str, table: &str) -> Option<usize> {
-    let mut at = 0;
     let mut end = None;
-    for line in text.lines() {
-        let here = at;
-        at += line.len() + 1;
+    for (here, line) in offsets(text) {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
             if end.is_some() {
@@ -542,14 +546,8 @@ fn bundle_line(root: &Path, name: &str) -> Result<Edit> {
     let text = crate::read(&path)?;
     let package = format!("php_ext_{name}");
     let entry = format!("{package}::extension");
-    let mut at = 0;
-    let head = text
-        .lines()
-        .map(|line| {
-            let here = at;
-            at += line.len() + 1;
-            (here, line.trim_start())
-        })
+    let head = offsets(&text)
+        .map(|(here, line)| (here, line.trim_start()))
         .find(|(_, line)| line.starts_with("pub fn enabled(") || line.starts_with("fn enabled("))
         .map(|(here, _)| here)
         .with_context(|| format!("{} has no `fn enabled(`", path.display()))?;
