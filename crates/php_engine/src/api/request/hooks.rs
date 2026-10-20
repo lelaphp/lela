@@ -633,16 +633,7 @@ impl Request {
             }
             return self.write_backing(object, name, value, hooked);
         }
-        if let Some(set_visibility) = hooked.set_visibility
-            && !self.has_set_access(hooked.declaring, hooked.root, set_visibility)
-        {
-            let thrown = self.set_inaccessible_property(
-                object.class(),
-                set_visibility,
-                false,
-                &bytes,
-                "modify",
-            );
+        if let Some(thrown) = self.hooked_set_refused(object.class(), hooked, &bytes) {
             value.give_up(self);
             name.give_up(self);
             return Err(thrown);
@@ -653,6 +644,23 @@ impl Request {
         let answered = served?;
         self.release(answered);
         Ok(())
+    }
+
+    /// The `Error` a write to the hooked property `name` is refused with
+    /// where it is `private(set)` or `protected(set)` beyond the executing
+    /// scope (`zend_std_write_property`'s `zend_asymmetric_property_has_set_access`
+    /// check), the hook's write and the backing value's alike.
+    fn hooked_set_refused(
+        &mut self,
+        class: ClassId,
+        hooked: Hooked,
+        name: &[u8],
+    ) -> Option<Thrown> {
+        let set_visibility = hooked.set_visibility?;
+        if self.has_set_access(hooked.declaring, hooked.root, set_visibility) {
+            return None;
+        }
+        Some(self.set_inaccessible_property(class, set_visibility, false, name, "modify"))
     }
 
     /// The backing value written, as `zend_std_write_property`'s
@@ -666,16 +674,7 @@ impl Request {
         value: Owner<Value>,
         hooked: Hooked,
     ) -> Result<(), Thrown> {
-        if let Some(set_visibility) = hooked.set_visibility
-            && !self.has_set_access(hooked.declaring, hooked.root, set_visibility)
-        {
-            let thrown = self.set_inaccessible_property(
-                object.class(),
-                set_visibility,
-                false,
-                name.as_bytes(),
-                "modify",
-            );
+        if let Some(thrown) = self.hooked_set_refused(object.class(), hooked, name.as_bytes()) {
             value.give_up(self);
             name.give_up(self);
             return Err(thrown);
