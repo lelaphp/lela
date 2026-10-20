@@ -207,6 +207,18 @@ pub(crate) struct Interned {
     pub(crate) strings: Arc<Mutex<php_heap::Strings>>,
 }
 
+impl Interned {
+    /// The growing table, this thread's alone until the guard drops. It
+    /// is append-only and every string in it was finished before it was
+    /// published, so what a thread that ended holding it left is
+    /// consistent.
+    pub(crate) fn table(&self) -> std::sync::MutexGuard<'_, php_heap::Strings> {
+        self.strings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 impl Arena {
     /// An empty arena over an engine of `classes` classes and
     /// `functions` natives and native methods, holding `files`, for a
@@ -455,10 +467,9 @@ impl Epochs {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Arc<Arena>> {
-        match self.current.lock() {
-            Ok(current) => current,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        self.current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The arena of the epoch a request starting now would enter, for

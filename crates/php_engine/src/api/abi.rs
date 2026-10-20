@@ -223,10 +223,10 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
 
     /// The value for `key`, built by `build` once and shared afterwards.
     pub fn get_or_build(&self, key: K, build: impl FnOnce(&K) -> V) -> Arc<V> {
-        let mut entries = match self.entries.lock() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(found) = entries.get(&key) {
             return Arc::clone(found);
         }
