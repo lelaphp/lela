@@ -472,7 +472,7 @@ fn intl_info(req: &mut Request) {
     }
     rows.push(["ICU Unicode version", ffi::unicode_version()]);
     let rows: Vec<&[&str]> = rows.iter().map(<[&str; 2]>::as_slice).collect();
-    req.info_table(&rows);
+    req.extensions_mut().info_table(&rows);
     // `DISPLAY_INI_ENTRIES()`: each entry's request value beside its
     // master, `intl.use_exceptions` through the boolean displayer.
     let rows: Vec<[String; 3]> = req

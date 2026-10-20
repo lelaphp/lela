@@ -224,7 +224,7 @@ fn spl_info(req: &mut Request) {
                 .is_some_and(|decl| decl.kind == ClassKind::Interface)
         });
     let (interfaces, classes) = (interfaces.join(", "), classes.join(", "));
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["SPL support", "enabled"],
         &["Interfaces", &interfaces],
         &["Classes", &classes],

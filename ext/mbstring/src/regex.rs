@@ -273,7 +273,7 @@ pub(crate) struct Initialized;
 
 /// `PHP_MINFO_FUNCTION(mb_regex)`.
 pub(crate) fn info(req: &mut Request) {
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["Multibyte (japanese) regex support", "enabled"],
         &["Multibyte regex (oniguruma) version", env!("ONIG_VERSION")],
     ]);

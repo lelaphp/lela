@@ -103,7 +103,8 @@ impl PDOException {
 fn pdo_info(req: &mut Request) {
     let drivers: Vec<&str> = drivers(req).map(connector::Connector::name).collect();
     let drivers = drivers.join(", ");
-    req.info_table(&[&["PDO support", "enabled"], &["PDO drivers", &drivers]]);
+    req.extensions_mut()
+        .info_table(&[&["PDO support", "enabled"], &["PDO drivers", &drivers]]);
 }
 
 /// `pdo_driver_hash`: the connectors the bundle's extensions registered,

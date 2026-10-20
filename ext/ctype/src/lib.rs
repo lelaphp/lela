@@ -83,7 +83,8 @@ pub fn extension() -> Extension {
 /// ctype functions => enabled
 /// ```
 fn ctype_info(req: &mut Request) {
-    req.info_table(&[&["ctype functions", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["ctype functions", "enabled"]]);
 }
 
 /// One of `<ctype.h>`'s classes, which the host's C library answers

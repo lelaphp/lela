@@ -131,7 +131,8 @@ pub fn extension() -> Extension {
 /// Calendar support => enabled
 /// ```
 fn calendar_info(req: &mut Request) {
-    req.info_table(&[&["Calendar support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["Calendar support", "enabled"]]);
 }
 
 /// A calendar `calendar.c`'s conversion table has a row for, decoded

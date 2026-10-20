@@ -1078,7 +1078,7 @@ mahout = "RequestCtx::loaded_extensions"
 sites = 3
 crates = 2
 status = "same"
-api = "request::Request::loaded_extensions"
+api = "request::Extensions::loaded_extensions"
 
 [[item]]
 mahout = "RequestCtx::native_call_by_name"
@@ -1155,7 +1155,7 @@ mahout = "RequestCtx::extension_is_loaded"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::loaded_extensions"
+api = "request::Extensions::loaded_extensions"
 
 [[item]]
 mahout = "RequestCtx::header_remove"

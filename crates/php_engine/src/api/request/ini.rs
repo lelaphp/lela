@@ -1882,7 +1882,7 @@ impl Request {
         self.ini
             .order
             .arrange(&mut rows, |(name, ..)| name.as_bytes());
-        let text = self.phpinfo_as_text();
+        let text = self.extensions().phpinfo_as_text();
         let mut out = Vec::new();
         let value = |out: &mut Vec<u8>, cell: &IniCell| match cell {
             IniCell::Displayed(shown) => out.extend_from_slice(shown.as_bytes()),
@@ -1911,7 +1911,7 @@ impl Request {
                 out.extend_from_slice(b"</td></tr>\n");
             }
         }
-        self.info_rows(&[
+        self.extensions_mut().info_rows(&[
             InfoRow::Header(&["Directive", "Local Value", "Master Value"]),
             InfoRow::Written(&out),
         ]);

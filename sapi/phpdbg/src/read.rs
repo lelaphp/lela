@@ -380,7 +380,7 @@ fn class_of_id(req: &mut Request, id: ClassId) -> Option<Class> {
     let unlinked_parent = parent.filter(|parent| class_id(req, parent).is_none());
     Some(Class {
         name: req.class_name(id).into_bytes(),
-        user: req.class_extension(id).is_none(),
+        user: req.extensions().class_extension(id).is_none(),
         shape,
         file,
         lines,
@@ -411,7 +411,7 @@ pub fn user_functions(req: &Request) -> Vec<Code> {
 pub fn user_classes(req: &mut Request) -> Vec<Class> {
     req.declared_classes()
         .into_iter()
-        .filter(|class| req.class_extension(*class).is_none())
+        .filter(|class| req.extensions().class_extension(*class).is_none())
         .collect::<Vec<_>>()
         .into_iter()
         .filter_map(|class| class_of_id(req, class))

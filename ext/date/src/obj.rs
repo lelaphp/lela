@@ -228,7 +228,7 @@ pub(super) fn class_name(req: &Request, class: ClassId) -> String {
 
 /// Whether the class is an internal one, php's `ZEND_INTERNAL_CLASS`.
 fn is_internal(req: &Request, class: ClassId) -> bool {
-    req.class_extension(class).is_some()
+    req.extensions().class_extension(class).is_some()
 }
 
 /// `date_throw_uninitialized_error(ce)`: the `DateObjectError` for an

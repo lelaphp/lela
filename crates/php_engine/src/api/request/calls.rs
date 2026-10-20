@@ -1183,7 +1183,7 @@ impl Request {
 
     /// The extension whose code a native is, for a debug build's heap to
     /// tag what it allocates while the native runs: php's
-    /// `internal_function.module` ([`Request::function_extension`]);
+    /// `internal_function.module` ([`Extensions::function_extension`]);
     /// none for a closure's or a trampoline's entry that no extension
     /// declares, which allocates as its caller.
     #[cfg(debug_assertions)]
@@ -1191,7 +1191,7 @@ impl Request {
         let intercepted = usize::try_from(function.0)
             .ok()
             .and_then(|at| self.shared.intercepted_by.get(at).copied().flatten());
-        intercepted.or_else(|| self.function_extension(function))
+        intercepted.or_else(|| self.extensions().function_extension(function))
     }
 
     /// Record the natives this request enters from here on, for the

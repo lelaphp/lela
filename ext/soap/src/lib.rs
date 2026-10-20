@@ -326,8 +326,9 @@ fn on_update_cache_dir(req: &mut Request, value: Option<&[u8]>) -> Result<bool, 
 /// soap.wsdl_cache_limit => 5 => 5
 /// ```
 fn soap_info(req: &mut Request) {
-    req.info_table(&[&["Soap Client", "enabled"], &["Soap Server", "enabled"]]);
-    let Some(me) = req.extension_named(b"soap") else {
+    req.extensions_mut()
+        .info_table(&[&["Soap Client", "enabled"], &["Soap Server", "enabled"]]);
+    let Some(me) = req.extensions().named(b"soap") else {
         return;
     };
     let rows: Vec<[String; 3]> = req

@@ -283,11 +283,11 @@ fn getenv(
 pub(crate) fn minfo(req: &mut Request) {
     let sendmail =
         String::from_utf8_lossy(req.ini_get(b"sendmail_path").unwrap_or_default()).into_owned();
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["Dynamic Library Support", "unavailable"],
         &["Path to sendmail", &sendmail],
     ]);
-    let Some(me) = req.extension_named(b"standard") else {
+    let Some(me) = req.extensions().named(b"standard") else {
         return;
     };
     let booleans: [&[u8]; 5] = [
@@ -1473,7 +1473,7 @@ fn ini_get_all(
     if let Some(name) = extension {
         let name = name.as_bytes();
         let registered = name.iter().all(|c| !c.is_ascii_uppercase());
-        let module = registered.then(|| req.extension_named(name)).flatten();
+        let module = registered.then(|| req.extensions().named(name)).flatten();
         if name == b"core" {
         } else if let Some(module) = module {
             entries.retain(|entry| entry.extension == module);

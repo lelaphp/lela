@@ -110,7 +110,7 @@ impl Row {
 /// </table>
 /// ```
 fn info(req: &mut Request) {
-    req.info_table(&[&["php-fpm", "active"]]);
+    req.extensions_mut().info_table(&[&["php-fpm", "active"]]);
     let entries = req.ini_entries();
     let shown = |row: &Row, value: Option<&[u8]>| -> String {
         let value = value.unwrap_or_default();

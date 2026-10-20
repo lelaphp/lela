@@ -194,7 +194,7 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
 /// iconv.internal_encoding => no value => no value
 /// ```
 fn info(req: &mut Request) {
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["iconv support", "enabled"],
         &["iconv implementation", "libiconv"],
         &["iconv library version", "1.11"],

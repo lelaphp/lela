@@ -111,7 +111,7 @@ fn xml_info(req: &mut Request) {
         _ => None,
     }
     .unwrap_or_default();
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["XML Support", "active"],
         &["XML Namespace Support", "active"],
         &["libxml2 Version", &version],

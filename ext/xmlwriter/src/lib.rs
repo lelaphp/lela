@@ -108,7 +108,10 @@ pub fn extension() -> Extension {
             version: None,
         }])
         .class::<XMLWriter>()
-        .info(|req| req.info_table(&[&["XMLWriter", "enabled"]]))
+        .info(|req| {
+            req.extensions_mut()
+                .info_table(&[&["XMLWriter", "enabled"]]);
+        })
         .build("xmlwriter")
 }
 

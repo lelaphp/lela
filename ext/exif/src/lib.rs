@@ -156,7 +156,7 @@ fn exif_info(req: &mut Request) {
     } else {
         "disabled"
     };
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["EXIF Support", "enabled"],
         &["Supported EXIF Version", "0220"],
         &["Supported filetypes", "JPEG, TIFF"],

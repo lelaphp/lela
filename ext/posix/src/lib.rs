@@ -239,7 +239,8 @@ pub fn extension() -> Extension {
 /// POSIX support => enabled
 /// ```
 fn posix_info(req: &mut Request) {
-    req.info_table(&[&["POSIX support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["POSIX support", "enabled"]]);
 }
 
 /// `POSIX_G(last_error) = errno` and the `false` every failed call

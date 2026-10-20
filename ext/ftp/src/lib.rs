@@ -147,7 +147,8 @@ pub fn extension() -> Extension {
 /// FTPS support => enabled
 /// ```
 fn ftp_info(req: &mut Request) {
-    req.info_table(&[&["FTP support", "enabled"], &["FTPS support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["FTP support", "enabled"], &["FTPS support", "enabled"]]);
 }
 
 /// Where a connection's session is: open, lent to the native serving it

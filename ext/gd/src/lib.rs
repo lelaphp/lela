@@ -366,7 +366,7 @@ fn info(req: &mut Request) {
             .map(|(n, _)| [*n, "enabled"]),
     );
     let cells: Vec<&[&str]> = rows.iter().map(<[&str; 2]>::as_slice).collect();
-    req.info_table(&cells);
+    req.extensions_mut().info_table(&cells);
     let entry = req
         .ini_entries()
         .into_iter()

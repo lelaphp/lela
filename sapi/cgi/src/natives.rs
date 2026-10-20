@@ -267,7 +267,7 @@ fn apache_response_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown>
 
 /// `dl(string $extension_filename): bool`, `ext/standard`'s, which php-cgi
 /// started from a shell names in its `additional_functions`
-/// ([`Request::dl`]); under a server php-cgi declares none, so the fence,
+/// ([`Extensions::dl`]); under a server php-cgi declares none, so the fence,
 /// which a server serves, finds no `dl()`. The shell's is
 /// `tests/shell.rs`'s `dl_is_declared_from_a_shell`.
 ///
@@ -286,5 +286,5 @@ fn apache_response_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown>
 /// ```
 #[php_function]
 fn dl(req: &mut Request, extension_filename: PhpString) -> bool {
-    req.dl(extension_filename.as_bytes())
+    req.extensions_mut().dl(extension_filename.as_bytes())
 }

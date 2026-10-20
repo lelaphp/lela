@@ -132,7 +132,7 @@ pub fn extension() -> Extension {
 /// ```
 fn sqlite3_info(req: &mut Request) {
     let version = ffi::version();
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["SQLite3 support", "enabled"],
         &["SQLite Library", &version],
     ]);

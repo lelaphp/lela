@@ -326,7 +326,7 @@ fn ini() -> Vec<IniDecl> {
 fn date_info(req: &mut Request) {
     let version = String::from_utf8_lossy(Tzdb::builtin().version()).into_owned();
     let default = String::from_utf8_lossy(&zone::guess_timezone(req)).into_owned();
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["date/time support", "enabled"],
         &["timelib version", "2022.17"],
         &["\"Olson\" Timezone Database Version", &version],

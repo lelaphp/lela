@@ -617,7 +617,7 @@ fn pcre_info(req: &mut Request) {
         rows.push(["PCRE JIT Target", target]);
     }
     let rows: Vec<&[&str]> = rows.iter().map(<[&str; 2]>::as_slice).collect();
-    req.info_table(&rows);
+    req.extensions_mut().info_table(&rows);
     let master = req
         .engine::<pattern::Patterns>()
         .map(|patterns| patterns.master.clone());

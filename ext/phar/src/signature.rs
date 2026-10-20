@@ -73,7 +73,7 @@ pub(crate) fn verify(
     ) {
         return Ok(Err("broken or unsupported signature".into()));
     }
-    if req.extension_named(b"openssl").is_none() {
+    if req.extensions().named(b"openssl").is_none() {
         return Ok(Err("openssl not loaded".into()));
     }
     let mut pfile = fname.to_vec();

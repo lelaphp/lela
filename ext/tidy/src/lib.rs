@@ -424,7 +424,7 @@ pub fn extension() -> Extension {
 /// ```
 fn info(req: &mut Request) {
     let (version, date) = (ffi::version(), ffi::release_date());
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["Tidy support", "enabled"],
         &["libTidy Version", &version],
         &["libTidy Release", &date],

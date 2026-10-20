@@ -604,12 +604,13 @@ fn get_loaded_extensions(
     #[php(default = false)] zend_extensions: bool,
 ) -> Result<Owner<PhpArray>, Thrown> {
     let names = if zend_extensions {
-        req.zend_extensions()
+        req.extensions()
+            .zend_extensions()
             .into_iter()
             .map(|row| row.name)
             .collect()
     } else {
-        req.loaded_extensions()
+        req.extensions().loaded_extensions()
     };
     let mut array = PhpArray::new(req)?;
     for name in names {
@@ -740,10 +741,11 @@ fn get_extension_funcs(
                 .filter(|name| req.function_named(Bare::resolved(name)).is_some())
                 .collect()
         } else {
-            let Some(extension) = req.extension_named(&name) else {
+            let Some(extension) = req.extensions().named(&name) else {
                 return Ok(OrFalse::False);
             };
-            req.extension_functions(extension)
+            req.extensions()
+                .functions(extension)
                 .into_iter()
                 .filter_map(|function| req.function_decl(function))
                 .map(|decl| decl.name.0.to_vec())

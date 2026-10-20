@@ -183,7 +183,8 @@ pub fn extension() -> Extension {
 /// ```
 fn gmp_info(req: &mut Request) {
     let version = ffi::version();
-    req.info_table(&[&["gmp support", "enabled"], &["GMP version", &version]]);
+    req.extensions_mut()
+        .info_table(&[&["gmp support", "enabled"], &["GMP version", &version]]);
 }
 
 /// A `GMP|string|int` parameter, read by hand as

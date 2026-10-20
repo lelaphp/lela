@@ -41,7 +41,7 @@
 //! lane renders it as a second [`Column`] beside `--re`, the oracle's
 //! bytes kept as `<digest>.ri` beside the `.re`, the engine's side `(new
 //! ReflectionExtension('<name>'))->info();`, which is the same
-//! `php_info_print_module` call (`Request::extension_info`), one reading
+//! `php_info_print_module` call (`Extensions::info`), one reading
 //! per extension per column, the `--ri` one scoped `ext/<name>/ri`. An
 //! extension without a `MINFO` hook prints php's `Version` row and its
 //! ini entries on both sides, so the column grows with the ini system

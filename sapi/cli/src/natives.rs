@@ -220,7 +220,7 @@ fn cli_get_process_title(req: &mut Request) -> Result<Option<Owner<PhpString>>, 
 }
 
 /// `dl(string $extension_filename): bool`, `ext/standard`'s, which the CLI
-/// names first in its `additional_functions` ([`Request::dl`]): with
+/// names first in its `additional_functions` ([`Extensions::dl`]): with
 /// `enable_dl` on, a name with a `/` or of `MAXPATHLEN` bytes refused in
 /// php's words, and `false`.
 ///
@@ -279,7 +279,7 @@ fn cli_get_process_title(req: &mut Request) -> Result<Option<Owner<PhpString>>, 
 /// ```
 #[php_function]
 fn dl(req: &mut Request, extension_filename: PhpString) -> bool {
-    req.dl(extension_filename.as_bytes())
+    req.extensions_mut().dl(extension_filename.as_bytes())
 }
 
 /// `apache_request_headers(): array`, also `getallheaders()`

@@ -86,7 +86,8 @@ pub fn extension() -> Extension {
 /// GetText Support => enabled
 /// ```
 fn info(req: &mut Request) {
-    req.info_table(&[&["GetText Support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["GetText Support", "enabled"]]);
 }
 
 /// `PHP_GETTEXT_DOMAIN_LENGTH_CHECK`: a domain longer than libintl's

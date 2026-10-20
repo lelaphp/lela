@@ -141,7 +141,7 @@ fn initialize() -> Initialized {
 /// ```
 fn libxml_info(req: &mut Request) {
     let loaded = String::from_utf8_lossy(&ffi::Library::loaded_version()).into_owned();
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["libXML support", "active"],
         &["libXML Compiled Version", DOTTED_VERSION],
         &["libXML Loaded Version", &loaded],

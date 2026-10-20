@@ -4460,7 +4460,8 @@ pub fn extension() -> Extension {
 /// `PHP_MINFO_FUNCTION(reflection)`: the one-row table `Reflection =>
 /// enabled`. The witness is `ReflectionExtension::info`'s.
 fn reflection_info(req: &mut Request) {
-    req.info_table(&[&["Reflection", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["Reflection", "enabled"]]);
 }
 
 /// php's `reflection_object` beside the `name` and `class` properties
@@ -5033,7 +5034,7 @@ fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown>
 /// `ReflectionException`.
 fn this_extension(req: &mut Request, this: PhpObject) -> Result<ExtensionId, Thrown> {
     let name = this_name(req, this, "ReflectionExtension")?;
-    match req.extension_named(&name) {
+    match req.extensions().named(&name) {
         Some(extension) => Ok(extension),
         None => Err(throw(
             req,
@@ -5051,7 +5052,7 @@ fn this_extension(req: &mut Request, this: PhpObject) -> Result<ExtensionId, Thr
 fn extension_classes(req: &Request, extension: ExtensionId) -> Vec<(ClassId, Vec<u8>)> {
     req.declared_classes()
         .into_iter()
-        .filter(|&class| req.class_extension(class) == Some(extension))
+        .filter(|&class| req.extensions().class_extension(class) == Some(extension))
         .map(|class| (class, class_name_of(req, class)))
         // A name that starts with `\0` is a class php keeps out of
         // `EG(class_table)`, the iterator wrapper, as
@@ -5217,8 +5218,8 @@ fn user_line(req: &Request, class: ClassId, line: fn(&ClassDecl) -> u32) -> OrFa
 }
 
 fn class_extension_name(req: &Request, class: ClassId) -> Option<String> {
-    let extension = req.class_extension(class)?;
-    req.extension_name(extension).map(str::to_owned)
+    let extension = req.extensions().class_extension(class)?;
+    req.extensions().name(extension).map(str::to_owned)
 }
 
 /// The constant `name` names in `ce->constants_table`: the class's own,
@@ -5422,17 +5423,18 @@ fn extension_string(
 ) -> Result<String, Thrown> {
     let mut out = String::new();
     let name = req
-        .extension_name(extension)
+        .extensions()
+        .name(extension)
         .map(str::to_owned)
         .unwrap_or_default();
-    let version = req.extension_version(extension).unwrap_or_default();
+    let version = req.extensions().version(extension).unwrap_or_default();
     writeln!(
         out,
         "{indent}Extension [ <persistent> extension #{} {name} version {version} ] {{",
-        req.extension_number(extension)
+        req.extensions().number(extension)
     )
     .ok();
-    let dependencies = req.extension_dependencies(extension);
+    let dependencies = req.extensions().extension_dependencies(extension);
     if !dependencies.is_empty() {
         out.push_str("\n  - Dependencies {\n");
         for dependency in dependencies {
@@ -5461,7 +5463,7 @@ fn extension_string(
         out.push_str(&ini);
         writeln!(out, "{indent}  }}").ok();
     }
-    let constants = req.extension_constants(extension);
+    let constants = req.extensions().constants(extension);
     if !constants.is_empty() {
         write!(out, "\n  - Constants [{}] {{\n", constants.len()).ok();
         for constant in &constants {
@@ -5469,7 +5471,7 @@ fn extension_string(
         }
         writeln!(out, "{indent}  }}").ok();
     }
-    let functions = req.extension_functions(extension);
+    let functions = req.extensions().functions(extension);
     if !functions.is_empty() {
         out.push_str("\n  - Functions {\n");
         for function in functions {
@@ -5881,7 +5883,7 @@ fn class_header(
     write!(out, "{indent}{kind} [ ").ok();
     let internal = decl.file.0.is_empty();
     out.push_str(if internal { "<internal" } else { "<user" });
-    if internal && let Some(extension) = req.class_extension_name(class) {
+    if internal && let Some(extension) = req.extensions().class_extension_name(class) {
         write!(out, ":{extension}").ok();
     }
     out.push_str("> ");
@@ -6942,8 +6944,9 @@ fn function_string(req: &mut Request, function: Function, indent: &str) -> Strin
         return String::new();
     };
     let module = req
+        .extensions()
         .function_extension(function)
-        .and_then(|e| req.extension_name(e))
+        .and_then(|e| req.extensions().name(e))
         .map(str::to_owned);
     let mut out = String::new();
     function_header(&mut out, &decl, module.as_deref(), Header::Function, indent);
@@ -7012,8 +7015,8 @@ fn closure_string(req: &mut Request, closure: PhpObject, indent: &str) -> Result
     }
     let module = closure
         .closure(req)
-        .and_then(|info| req.function_extension(info.function))
-        .and_then(|e| req.extension_name(e))
+        .and_then(|info| req.extensions().function_extension(info.function))
+        .and_then(|e| req.extensions().name(e))
         .map(str::to_owned);
     let mut out = String::new();
     function_header(&mut out, &decl, module.as_deref(), Header::Closure, indent);
@@ -7067,8 +7070,8 @@ fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: 
     let module = method
         .row()
         .and_then(|row| req.row_function(row))
-        .and_then(|function| req.function_extension(function))
-        .and_then(|extension| req.extension_name(extension))
+        .and_then(|function| req.extensions().function_extension(function))
+        .and_then(|extension| req.extensions().name(extension))
         .map(str::to_owned);
     let mut words: Vec<String> = Vec::new();
     if method.scope != ce {
@@ -7585,7 +7588,7 @@ impl ReflectionExtension {
     /// ```
     fn __construct(req: &mut Request, this: This<Self>, name: PhpString) -> Result<(), Thrown> {
         let name = name.as_bytes().to_vec();
-        let Some(extension) = req.extension_named(&name) else {
+        let Some(extension) = req.extensions().named(&name) else {
             return Err(throw(
                 req,
                 "ReflectionException",
@@ -7596,7 +7599,8 @@ impl ReflectionExtension {
             ));
         };
         let declared = req
-            .extension_name(extension)
+            .extensions()
+            .name(extension)
             .map(str::to_owned)
             .unwrap_or_default();
         let this = this.object();
@@ -7972,7 +7976,8 @@ impl ReflectionExtension {
     fn getName(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let extension = this_extension(req, this.object())?;
         let name = req
-            .extension_name(extension)
+            .extensions()
+            .name(extension)
             .map(str::to_owned)
             .unwrap_or_default();
         PhpString::new(req, name.as_bytes())
@@ -7996,7 +8001,7 @@ impl ReflectionExtension {
     #[php(tentative)]
     fn getVersion(req: &mut Request, this: This<Self>) -> Result<Option<Owner<PhpString>>, Thrown> {
         let extension = this_extension(req, this.object())?;
-        let version = req.extension_version(extension).unwrap_or_default();
+        let version = req.extensions().version(extension).unwrap_or_default();
         PhpString::new(req, version.as_bytes()).map(Some)
     }
 
@@ -8042,7 +8047,7 @@ impl ReflectionExtension {
         let extension = this_extension(req, this.object())?;
         let reflector = class_named(req, b"ReflectionFunction")?;
         let mut functions = PhpArray::new(req)?;
-        for function in req.extension_functions(extension) {
+        for function in req.extensions().functions(extension) {
             let Some(name) = req.function_decl(function).map(|decl| decl.name.0.to_vec()) else {
                 continue;
             };
@@ -8096,7 +8101,7 @@ impl ReflectionExtension {
     fn getConstants(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let extension = this_extension(req, this.object())?;
         let mut constants = PhpArray::new(req)?;
-        for declared in req.extension_constants(extension) {
+        for declared in req.extensions().constants(extension) {
             let name = declared.0.to_vec();
             let value = constant(req, &name)?.unwrap_or_default();
             // The lookup is a view and the row is the array's:
@@ -8231,7 +8236,7 @@ impl ReflectionExtension {
     #[php(tentative)]
     fn getDependencies(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let extension = this_extension(req, this.object())?;
-        let listed = req.extension_dependencies(extension);
+        let listed = req.extensions().extension_dependencies(extension);
         if listed.is_empty() {
             return Ok(Owner::take(req, PhpArray::empty()));
         }
@@ -8267,7 +8272,7 @@ impl ReflectionExtension {
     #[php(tentative)]
     fn info(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let extension = this_extension(req, this.object())?;
-        req.extension_info(extension);
+        req.extensions_mut().info(extension);
         Ok(())
     }
 
@@ -8473,7 +8478,8 @@ impl ReflectionZendExtension {
 /// `zend_get_extension`: the Zend extension named `name`, compared as
 /// `strcmp` compares, case and all.
 fn zend_extension_named(req: &Request, name: &[u8]) -> Option<ZendExtension> {
-    req.zend_extensions()
+    req.extensions()
+        .zend_extensions()
         .into_iter()
         .find(|row| row.name.as_bytes() == name)
 }

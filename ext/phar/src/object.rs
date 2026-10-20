@@ -1350,7 +1350,7 @@ impl Phar {
     fn getSupportedSignatures(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         let mut out = PhpArray::new(req)?;
         let mut names: Vec<&[u8]> = vec![b"MD5", b"SHA-1", b"SHA-256", b"SHA-512"];
-        if req.extension_named(b"openssl").is_some() {
+        if req.extensions().named(b"openssl").is_some() {
             names.extend([&b"OpenSSL"[..], b"OpenSSL_SHA256", b"OpenSSL_SHA512"]);
         }
         for name in names {

@@ -528,7 +528,7 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
 fn info(req: &mut Request) {
     let version = String::from_utf8_lossy(&ffi::version_text()).into_owned();
     let conf = String::from_utf8_lossy(&config::default_file()).into_owned();
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["OpenSSL support", "enabled"],
         &["OpenSSL Library Version", &version],
         &["OpenSSL Header Version", header::OPENSSL_VERSION_TEXT],

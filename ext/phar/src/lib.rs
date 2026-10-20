@@ -146,7 +146,7 @@ pub fn extension() -> Extension {
 /// The entry's startup value, php's `readonly_orig` and
 /// `require_hash_orig`.
 fn master(req: &Request, name: &str) -> bool {
-    let Some(id) = req.extension_named(b"phar") else {
+    let Some(id) = req.extensions().named(b"phar") else {
         return true;
     };
     req.extension_ini(id)
@@ -255,12 +255,12 @@ fn info(req: &mut Request) {
     // phar's OpenSSL as native, and one without it may load the
     // extension later. The bundle is linked at build and loads nothing
     // after, so an openssl in it is the native one and none is none.
-    let openssl = if req.extension_named(b"openssl").is_some() {
+    let openssl = if req.extensions().named(b"openssl").is_some() {
         ["Native OpenSSL support", "enabled"]
     } else {
         ["OpenSSL support", "disabled (install ext/openssl)"]
     };
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["Phar: PHP Archive support", "enabled"],
         &["Phar API version", archive::API_VERSION],
         &["Phar-based phar archives", "enabled"],
@@ -276,12 +276,13 @@ fn info(req: &mut Request) {
         "Phar fully realized by Gregory Beaver and Marcus Boerger.",
         "Portions of tar implementation Copyright (c) 2003-2009 Tim Kientzle.",
     ];
-    let boxed = if req.phpinfo_as_text() {
+    let boxed = if req.extensions().phpinfo_as_text() {
         format!("\n{}", lines.join("\n"))
     } else {
         format!("<tr class=\"v\"><td>\n{}</td></tr>\n", lines.join("<br />"))
     };
-    req.info_rows(&[InfoRow::Written(boxed.as_bytes())]);
+    req.extensions_mut()
+        .info_rows(&[InfoRow::Written(boxed.as_bytes())]);
     let entries = req.ini_entries();
     let shown = |name: &str, value: &[u8]| -> String {
         if name != CACHE_LIST {

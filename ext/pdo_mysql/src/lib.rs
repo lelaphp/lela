@@ -112,7 +112,7 @@ pub fn extension() -> Extension {
 ///
 /// ```
 fn pdo_mysql_info(req: &mut Request) {
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["PDO Driver for MySQL", "enabled"],
         &["Client API version", php_ext_mysqlnd::client::CLIENT_INFO],
     ]);

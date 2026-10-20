@@ -757,7 +757,7 @@ mod tests {
         let req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let supplier = engine.shared.supplied.treat_data.supplier();
         assert_eq!(
-            supplier.and_then(|id| req.extension_name(id)),
+            supplier.and_then(|id| req.extensions().name(id)),
             Some("later")
         );
     }

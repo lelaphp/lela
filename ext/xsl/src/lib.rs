@@ -126,7 +126,7 @@ fn xsl_info(req: &mut Request) {
     let dotted = |v: i32| format!("{}.{}.{}", v / 10000, v % 10000 / 100, v % 100);
     let (xslt, xml) = ffi::versions();
     let (xslt, xml) = (dotted(xslt), dotted(xml));
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["XSL", "enabled"],
         &["libxslt Version", &xslt],
         &["libxslt compiled against libxml Version", &xml],

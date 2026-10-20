@@ -142,14 +142,14 @@ fn function_extension_name(req: &mut Request, this: PhpObject) -> Result<Option<
         FunctionRef::Method(class, name) => Ok(req
             .method_row(class, &name)
             .and_then(|row| req.row_function(row))
-            .and_then(|found| req.function_extension(found))
-            .and_then(|e| req.extension_name(e))
+            .and_then(|found| req.extensions().function_extension(found))
+            .and_then(|e| req.extensions().name(e))
             .map(str::to_owned)),
         FunctionRef::Global(name) => {
             let found = super::lookup_function(req, &name);
             Ok(found
-                .and_then(|found| req.function_extension(found))
-                .and_then(|e| req.extension_name(e))
+                .and_then(|found| req.extensions().function_extension(found))
+                .and_then(|e| req.extensions().name(e))
                 .map(str::to_owned))
         }
     }
@@ -831,7 +831,7 @@ impl ReflectionFunctionAbstract {
         let Some(name) = function_extension_name(req, this.object())? else {
             return Ok(None);
         };
-        if req.extension_named(name.as_bytes()).is_none() {
+        if req.extensions().named(name.as_bytes()).is_none() {
             return Ok(None);
         }
         let class = class_named(req, b"ReflectionExtension")?;

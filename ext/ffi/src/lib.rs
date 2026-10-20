@@ -264,7 +264,8 @@ pub fn extension() -> Extension {
 /// ffi.preload => no value => no value
 /// ```
 fn info(req: &mut Request) {
-    req.info_table(&[&["FFI support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["FFI support", "enabled"]]);
     let entries = req.ini_entries();
     let shown = |name: &str, value: Option<&[u8]>| -> String {
         let value = value.unwrap_or_default();

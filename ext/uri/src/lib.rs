@@ -870,7 +870,7 @@ pub fn extension() -> Extension {
 /// uriparser bundled version => 1.0.2
 /// ```
 fn uri_info(req: &mut Request) {
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["URI support", "active"],
         &["uriparser bundled version", "1.0.2"],
     ]);

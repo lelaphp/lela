@@ -168,7 +168,7 @@ impl Request {
     /// for an alias's row, the lowered name it is keyed by: the engine's
     /// classes, each native alias after its class, then the request's
     /// rows in their buckets. A class is a user class where it has no
-    /// [`Request::class_extension`]; `get_declared_classes()` lists these
+    /// [`Extensions::class_extension`]; `get_declared_classes()` lists these
     /// rows, and phpdbg's `clean` counts them.
     #[must_use]
     pub fn class_keys(&self) -> Vec<(ClassId, Option<Vec<u8>>)> {

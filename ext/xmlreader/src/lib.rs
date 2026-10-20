@@ -66,7 +66,10 @@ pub fn extension() -> Extension {
         .dependencies(vec![dependency("dom"), dependency("libxml")])
         .class::<XMLReader>()
         .class::<trampoline::XMLReader>()
-        .info(|req| req.info_table(&[&["XMLReader", "enabled"]]))
+        .info(|req| {
+            req.extensions_mut()
+                .info_table(&[&["XMLReader", "enabled"]]);
+        })
         .build("xmlreader")
 }
 

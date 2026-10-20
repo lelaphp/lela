@@ -2113,7 +2113,8 @@ fn as_long(bytes: usize) -> i64 {
 #[php_function]
 fn extension_loaded(req: &mut Request, extension: PhpString) -> bool {
     let lowered = extension.as_bytes().to_ascii_lowercase();
-    req.loaded_extensions()
+    req.extensions()
+        .loaded_extensions()
         .iter()
         .any(|name| name.as_bytes().to_ascii_lowercase() == lowered)
 }

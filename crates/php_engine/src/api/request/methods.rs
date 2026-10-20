@@ -330,7 +330,7 @@ impl Request {
     /// The function a row of a function table is, the `zend_function *`
     /// the bucket holds: the declaring class's method at the row's place,
     /// a native trait's method copied into a class among them, which is
-    /// the class's own function ([`Request::function_extension`] reads
+    /// the class's own function ([`Extensions::function_extension`] reads
     /// the trait's extension off it).
     ///
     /// ```php

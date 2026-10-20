@@ -212,7 +212,7 @@ fn mysqlnd_info(req: &mut Request) {
         .map(|api| api.extension)
         .collect();
     let apis = apis.join(",");
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["mysqlnd", "enabled"],
         &["Version", VERSION],
         &["Compression", "supported"],

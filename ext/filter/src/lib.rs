@@ -513,7 +513,8 @@ fn update_default_filter(req: &mut Request, value: Option<&[u8]>) -> Result<bool
 /// filter.default_flags => no value => no value
 /// ```
 fn filter_info(req: &mut Request) {
-    req.info_table(&[&["Input Validation and Filtering", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["Input Validation and Filtering", "enabled"]]);
     let shown = |req: &Request, name: &[u8]| {
         String::from_utf8_lossy(req.ini_get(name).unwrap_or_default()).into_owned()
     };

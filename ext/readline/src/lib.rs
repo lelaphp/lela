@@ -174,7 +174,7 @@ fn readline_info_table(req: &mut Request) {
     } else {
         String::from_utf8_lossy(&version).into_owned()
     };
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["Readline Support", "enabled"],
         &["Readline library", &version],
     ]);

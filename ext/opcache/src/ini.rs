@@ -542,7 +542,7 @@ fn jit_setting(value: &[u8]) -> Jit {
 /// kept it, which a zero `opcache.jit_buffer_size` or the file cache
 /// alone does not.
 fn jit_configured(req: &mut Request) -> bool {
-    let Some(me) = req.extension_named(crate::PRODUCT.as_bytes()) else {
+    let Some(me) = req.extensions().named(crate::PRODUCT.as_bytes()) else {
         return false;
     };
     let master = |name: &str| {

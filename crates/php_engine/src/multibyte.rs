@@ -105,7 +105,8 @@ pub(crate) fn script_encoding(req: &mut Request, value: &[u8]) -> Option<Vec<Enc
     if provider(&req.shared).is_none() || value.is_empty() {
         return Some(Vec::new());
     }
-    req.parse_encoding_list(value)
+    req.extensions_mut()
+        .parse_encoding_list(value)
         .filter(|list| !list.is_empty())
 }
 

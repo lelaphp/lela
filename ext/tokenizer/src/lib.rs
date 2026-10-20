@@ -88,7 +88,8 @@ pub fn extension() -> Extension {
 /// Tokenizer Support => enabled
 /// ```
 fn tokenizer_info(req: &mut Request) {
-    req.info_table(&[&["Tokenizer Support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["Tokenizer Support", "enabled"]]);
 }
 
 /// Core's `Stringable`, named for `implements`.

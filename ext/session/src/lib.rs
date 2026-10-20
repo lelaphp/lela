@@ -302,7 +302,7 @@ pub fn extension() -> Extension {
 /// session.upload_progress.min_freq => 1 => 1
 /// ```
 fn session_info(req: &mut Request) {
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["Session Support", "enabled"],
         &["Registered save handlers", "files user "],
         &[

@@ -884,7 +884,7 @@ pub enum IniStage {
     Deactivate,
 }
 /// The `MINFO` function: writes the extension's `phpinfo()` table
-/// through [`Request::info_table`].
+/// through [`Extensions::info_table`].
 pub(crate) type Info = fn(&mut Request);
 /// A native class as an extension declares it (design §7.1): the
 /// declaration, beside it each method's declaration with its entry,
@@ -1267,7 +1267,7 @@ impl ExtensionBuilder {
 
     /// The `MINFO` function, what `phpinfo()`, `php --ri` and
     /// `ReflectionExtension::info` print for the extension, written
-    /// through [`Request::info_table`]; an extension without one gets
+    /// through [`Extensions::info_table`]; an extension without one gets
     /// php's `Version` row and its ini entries.
     #[must_use]
     pub fn info(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {

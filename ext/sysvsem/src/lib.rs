@@ -80,7 +80,8 @@ pub fn extension() -> Extension {
 /// sysvsem support => enabled
 /// ```
 fn sysvsem_info(req: &mut Request) {
-    req.info_table(&[&["sysvsem support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["sysvsem support", "enabled"]]);
 }
 
 /// What an object holds of its set: the count it acquired and whether it

@@ -246,7 +246,7 @@ impl Request {
     #[must_use]
     pub fn constant_table(&self) -> Vec<(Option<&str>, &[u8], Value)> {
         let decls = self.shared.declared().constants.rows();
-        let modules = (self.shared.constant_modules.iter()).map(|&at| self.extension_name(at));
+        let modules = (self.shared.constant_modules.iter()).map(|&at| self.extensions().name(at));
         let mut rows: Vec<(Option<&str>, &[u8], Value)> =
             Vec::with_capacity(decls.len() + self.constants.rows.len() + 1);
         for ((at, decl), module) in decls.iter().enumerate().zip(modules) {
@@ -262,7 +262,7 @@ impl Request {
         rows.extend(self.constants.rows.iter().map(|row| {
             let module = match &row.owner {
                 ConstantOwner::Core => Some("Core"),
-                ConstantOwner::Extension(extension) => self.extension_name(*extension),
+                ConstantOwner::Extension(extension) => self.extensions().name(*extension),
                 ConstantOwner::User(_) => None,
             };
             (module, row.given.as_slice(), row.value)

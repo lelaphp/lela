@@ -81,7 +81,7 @@ pub fn extension() -> Extension {
 /// `PHP_MINFO_FUNCTION(pdo_sqlite)`.
 fn pdo_sqlite_info(req: &mut Request) {
     let version = ffi::version();
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["PDO Driver for SQLite 3.x", "enabled"],
         &["SQLite Library", &version],
     ]);

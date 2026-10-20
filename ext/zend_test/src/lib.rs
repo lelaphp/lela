@@ -360,8 +360,9 @@ fn mshutdown(req: &mut Request) {
 /// zend_test.zend_mm_custom_handlers.enabled => Off => Off
 /// ```
 fn info(req: &mut Request) {
-    req.info_table(&[&["zend_test extension", "enabled"]]);
-    let Some(me) = req.extension_named(b"zend_test") else {
+    req.extensions_mut()
+        .info_table(&[&["zend_test extension", "enabled"]]);
+    let Some(me) = req.extensions().named(b"zend_test") else {
         return;
     };
     let tables = ENTRIES

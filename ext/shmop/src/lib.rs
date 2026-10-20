@@ -68,7 +68,8 @@ pub fn extension() -> Extension {
 /// shmop support => enabled
 /// ```
 fn shmop_info(req: &mut Request) {
-    req.info_table(&[&["shmop support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["shmop support", "enabled"]]);
 }
 
 /// `final class Shmop`, `@strict-properties`, `@not-serializable`: the

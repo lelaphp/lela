@@ -96,7 +96,8 @@ pub fn extension() -> Extension {
 /// sysvmsg support => enabled
 /// ```
 fn sysvmsg_info(req: &mut Request) {
-    req.info_table(&[&["sysvmsg support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["sysvmsg support", "enabled"]]);
 }
 
 /// `sysvmsg_queue_t` less its `zend_object` and its key, which nothing

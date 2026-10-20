@@ -116,7 +116,8 @@ pub fn extension() -> Extension {
 /// sysvshm support => enabled
 /// ```
 fn sysvshm_info(req: &mut Request) {
-    req.info_table(&[&["sysvshm support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["sysvshm support", "enabled"]]);
 }
 
 /// `sysvshm_shm` less its `zend_object`: the key, the segment's id and

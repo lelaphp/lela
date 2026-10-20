@@ -72,6 +72,7 @@ pub(crate) use ending::{Ending, Phase};
 mod environment;
 mod execution;
 mod extensions;
+pub use extensions::Extensions;
 pub use extensions::InfoRow;
 mod foreign;
 pub use foreign::{Foreign, ForeignId, Held};

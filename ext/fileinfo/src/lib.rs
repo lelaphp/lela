@@ -114,7 +114,8 @@ pub(crate) mod constants {
 fn fileinfo_info(req: &mut Request) {
     let version = ffi::version();
     let text = format!("{}.{}", version / 100, version % 100);
-    req.info_table(&[&["fileinfo support", "enabled"], &["libmagic", &text]]);
+    req.extensions_mut()
+        .info_table(&[&["fileinfo support", "enabled"], &["libmagic", &text]]);
 }
 
 /// The C `int` php hands libmagic a `zend_long` as.

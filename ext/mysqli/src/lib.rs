@@ -380,7 +380,7 @@ fn mysqli_info(req: &mut Request) {
         state.num_active_persistent.to_string(),
         state.num_links.to_string(),
     );
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["MysqlI Support", "enabled"],
         &["Client API library version", CLIENT_INFO],
         &["Active Persistent Links", &active],

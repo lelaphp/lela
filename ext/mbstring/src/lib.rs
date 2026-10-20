@@ -232,13 +232,13 @@ fn info(req: &mut Request) {
         "disabled"
     };
     let version = format!("{MBFL_VERSION_MAJOR}.{MBFL_VERSION_MINOR}.{MBFL_VERSION_TEENY}");
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["Multibyte Support", "enabled"],
         &["Multibyte string engine", "libmbfl"],
         &["HTTP input encoding translation", translation],
         &["libmbfl version", &version],
     ]);
-    req.info_rows(&[InfoRow::Header(&[
+    req.extensions_mut().info_rows(&[InfoRow::Header(&[
         "mbstring extension makes use of \"streamable kanji code filter and converter\", which is distributed under the GNU Lesser General Public License version 2.1.",
     ])]);
     regex::info(req);
@@ -286,7 +286,7 @@ fn info(req: &mut Request) {
 /// </table>
 /// ```
 fn display_ini_entries(req: &mut Request) {
-    let Some(me) = req.extension_named(b"mbstring") else {
+    let Some(me) = req.extensions().named(b"mbstring") else {
         return;
     };
     let shown = |name: &[u8], value: &[u8]| -> String {

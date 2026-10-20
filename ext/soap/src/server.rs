@@ -782,7 +782,7 @@ impl SoapServer {
         let kind = service_ref(req, object).map(|s| s.kind);
         if kind == Some(ServiceKind::Class) {
             if mode == PERSISTENCE_SESSION || mode == PERSISTENCE_REQUEST {
-                if mode == PERSISTENCE_SESSION && req.extension_named(b"session").is_none() {
+                if mode == PERSISTENCE_SESSION && req.extensions().named(b"session").is_none() {
                     return Err(throw_error(
                         req,
                         "Error",

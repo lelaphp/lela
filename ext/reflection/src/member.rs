@@ -242,7 +242,7 @@ fn constant_extension_name(req: &mut Request, this: PhpObject) -> Result<Option<
     let name = this_global_constant(req, this)?;
     let extension = req.constant_extension(&name);
     Ok(extension
-        .and_then(|at| req.extension_name(at))
+        .and_then(|at| req.extensions().name(at))
         .map(str::to_owned))
 }
 

@@ -120,7 +120,7 @@ fn dba_info(req: &mut Request) {
         all.push(' ');
         all
     });
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["DBA support", "enabled"],
         &["Supported handlers", &handlers],
     ]);

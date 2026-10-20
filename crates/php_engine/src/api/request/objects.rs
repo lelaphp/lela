@@ -833,7 +833,7 @@ impl Request {
             let row = self
                 .lineage(class)
                 .find(|at| self.handler_row(*at).is_some());
-            let extension = row.and_then(|row| self.class_extension(row));
+            let extension = row.and_then(|row| self.extensions().class_extension(row));
             if let Some(extension) = extension.filter(|by| *by != super::ExtensionId::CORE) {
                 return self.serve_for(extension, serve);
             }

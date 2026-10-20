@@ -339,7 +339,7 @@ pub(crate) mod modern_constants {
 /// RelaxNG Support => enabled
 /// ```
 fn dom_info(req: &mut Request) {
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["DOM/XML", "enabled"],
         &["DOM/XML API Version", "20031129"],
         &["libxml Version", "2.9.13"],

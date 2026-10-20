@@ -80,5 +80,6 @@ impl Heap {
 /// Lexbor version => 2.7.0
 /// ```
 fn lexbor_info(req: &mut Request) {
-    req.info_table(&[&["Lexbor support", "active"], &["Lexbor version", "2.7.0"]]);
+    req.extensions_mut()
+        .info_table(&[&["Lexbor support", "active"], &["Lexbor version", "2.7.0"]]);
 }

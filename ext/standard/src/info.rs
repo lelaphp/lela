@@ -86,7 +86,7 @@ fn print(req: &mut Request, text: &str) {
 /// `!sapi_module.phpinfo_as_text`: whether the page is `info.c`'s HTML,
 /// which a host serving the web prints, or its text, the CLI's.
 fn html(req: &Request) -> bool {
-    !req.phpinfo_as_text()
+    !req.extensions().phpinfo_as_text()
 }
 
 /// `php_info_print_html_esc`: `php_escape_html_entities(str, len, 0,
@@ -101,7 +101,7 @@ fn section(req: &mut Request, name: &str) {
     if html(req) {
         print(req, &format!("<h2>{name}</h2>\n"));
     } else {
-        req.info_rows(&[InfoRow::Header(&[name])]);
+        req.extensions_mut().info_rows(&[InfoRow::Header(&[name])]);
     }
 }
 
@@ -129,7 +129,7 @@ fn plain_box(req: &mut Request, contents: &[u8]) {
         boxed.push(b'\n');
         boxed.extend_from_slice(contents);
     }
-    req.info_rows(&[InfoRow::Written(&boxed)]);
+    req.extensions_mut().info_rows(&[InfoRow::Written(&boxed)]);
 }
 
 /// `php_get_uname(mode)` (`Z/ext/standard/info.c:655`): one field of
@@ -211,7 +211,7 @@ fn zend_version(req: &Request) -> String {
         "Zend Engine v4.{}, Copyright (c) Zend Technologies\n",
         &PHP_VERSION[2..]
     );
-    for zend in req.zend_extensions() {
+    for zend in req.extensions().zend_extensions() {
         writeln!(
             text,
             "    with {} v{}, {}, by {}",
@@ -250,7 +250,8 @@ fn general(req: &mut Request) {
         let boxed = format!(
             "<tr class=\"h\"><td>\n<a href=\"https://www.php.net/\"><img src=\"{logo}\" alt=\"PHP logo\" /></a><h1 class=\"p\">PHP Version {PHP_VERSION}</h1>\n</td></tr>\n"
         );
-        req.info_rows(&[InfoRow::Written(boxed.as_bytes())]);
+        req.extensions_mut()
+            .info_rows(&[InfoRow::Written(boxed.as_bytes())]);
     } else {
         print(req, &format!("PHP Version => {PHP_VERSION}\n"));
     }
@@ -270,8 +271,9 @@ fn general(req: &mut Request) {
         .collect();
     let filters = req.stream_filters();
     let multibyte = req
+        .extensions()
         .multibyte_provider()
-        .and_then(|provider| req.extension_name(provider))
+        .and_then(|provider| req.extensions().name(provider))
         .map_or_else(
             || String::from("disabled"),
             |name| format!("provided by {name}"),
@@ -314,7 +316,7 @@ fn general(req: &mut Request) {
     ]);
     let mut rows: Vec<InfoRow<'_>> = cells.iter().map(|cells| InfoRow::Row(cells)).collect();
     rows.extend(streams.iter().map(|written| InfoRow::Written(written)));
-    req.info_rows(&rows);
+    req.extensions_mut().info_rows(&rows);
     let zend = zend_version(req);
     let mut contents = Vec::new();
     if html(req) {
@@ -338,15 +340,16 @@ fn general(req: &mut Request) {
 /// `php_info_print_module` prints it, then `Additional Modules`, which
 /// lists none since every bundled extension has a version.
 fn modules(req: &mut Request) {
-    let mut names = req.loaded_extensions();
+    let mut names = req.extensions().loaded_extensions();
     names.sort_by_key(|n| n.to_ascii_lowercase());
     for name in names {
-        if let Some(id) = req.extension_named(name.as_bytes()) {
-            req.extension_info(id);
+        if let Some(id) = req.extensions().named(name.as_bytes()) {
+            req.extensions_mut().info(id);
         }
     }
     section(req, "Additional Modules");
-    req.info_rows(&[InfoRow::Header(&["Module Name"])]);
+    req.extensions_mut()
+        .info_rows(&[InfoRow::Header(&["Module Name"])]);
 }
 
 /// `php_print_gpcse_array`'s rows (`Z/ext/standard/info.c:170`):
@@ -529,7 +532,7 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
             .collect();
         let mut rows = vec![InfoRow::Header(&["Variable", "Value"])];
         rows.extend(cells.iter().map(|cells| InfoRow::Row(cells)));
-        req.info_rows(&rows);
+        req.extensions_mut().info_rows(&rows);
     }
     if flag & INFO_VARIABLES != 0 {
         section(req, "PHP Variables");
@@ -551,7 +554,7 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
         let mut rows = vec![InfoRow::Header(&["Variable", "Value"])];
         rows.extend(cells.iter().map(|cells| InfoRow::Row(cells)));
         rows.push(InfoRow::Written(&written));
-        req.info_rows(&rows);
+        req.extensions_mut().info_rows(&rows);
     }
     if flag & INFO_CREDITS != 0 {
         hr(req);
@@ -786,10 +789,10 @@ fn phpversion(
     let Some(name) = extension else {
         return PhpString::new(req, PHP_VERSION.as_bytes()).map(OrFalse::Value);
     };
-    let Some(extension) = req.extension_named(name.as_bytes()) else {
+    let Some(extension) = req.extensions().named(name.as_bytes()) else {
         return Ok(OrFalse::False);
     };
-    let version = req.extension_version(extension).unwrap_or_default();
+    let version = req.extensions().version(extension).unwrap_or_default();
     PhpString::new(req, version.as_bytes()).map(OrFalse::Value)
 }
 
@@ -820,10 +823,11 @@ fn print_credits(req: &mut Request, flag: i64) {
                 rows.push(InfoRow::Header(header));
             }
             rows.extend(body.iter().map(|cells| InfoRow::Row(cells)));
-            req.info_rows(&rows);
+            req.extensions_mut().info_rows(&rows);
         };
     if flag & CREDITS_GROUP != 0 {
-        req.info_rows(&[InfoRow::Header(&["PHP Group"]), InfoRow::Row(&[GROUP])]);
+        req.extensions_mut()
+            .info_rows(&[InfoRow::Header(&["PHP Group"]), InfoRow::Row(&[GROUP])]);
     }
     if flag & CREDITS_GENERAL != 0 {
         let design = if html {
@@ -831,7 +835,8 @@ fn print_credits(req: &mut Request, flag: i64) {
         } else {
             "Language Design & Concept"
         };
-        req.info_rows(&[InfoRow::Header(&[design]), InfoRow::Row(&[DESIGN])]);
+        req.extensions_mut()
+            .info_rows(&[InfoRow::Header(&[design]), InfoRow::Row(&[DESIGN])]);
         credit_table(
             req,
             "PHP Authors",
@@ -859,7 +864,7 @@ fn print_credits(req: &mut Request, flag: i64) {
         credit_table(req, "PHP Documentation", None, &lines(&DOCS));
     }
     if flag & CREDITS_QA != 0 {
-        req.info_rows(&[
+        req.extensions_mut().info_rows(&[
             InfoRow::Header(&["PHP Quality Assurance Team"]),
             InfoRow::Row(&[QA]),
         ]);

@@ -215,5 +215,5 @@ fn info(req: &mut Request) {
         .chain(&methods)
         .map(|row| &row[..])
         .collect();
-    req.info_table(&rows);
+    req.extensions_mut().info_table(&rows);
 }

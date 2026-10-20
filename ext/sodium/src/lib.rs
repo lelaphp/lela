@@ -462,7 +462,7 @@ pub fn extension() -> Extension {
 /// ```
 fn sodium_info(req: &mut Request) {
     let library = ffi::version();
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["sodium support", "enabled"],
         &["libsodium headers version", env!("SODIUM_HEADERS_VERSION")],
         &["libsodium library version", &library],

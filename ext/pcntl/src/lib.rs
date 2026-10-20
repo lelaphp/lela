@@ -164,7 +164,8 @@ pub fn extension() -> Extension {
 /// pcntl support => enabled
 /// ```
 fn pcntl_info(req: &mut Request) {
-    req.info_table(&[&["pcntl support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["pcntl support", "enabled"]]);
 }
 
 /// `PCNTL_G(last_error) = errno`.

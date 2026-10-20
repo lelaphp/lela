@@ -102,7 +102,8 @@ pub fn extension() -> Extension {
 /// bcmath.scale => 0 => 0
 /// ```
 fn bcmath_info(req: &mut Request) {
-    req.info_table(&[&["BCMath support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["BCMath support", "enabled"]]);
     req.info_ini_entries(&[SCALE]);
 }
 

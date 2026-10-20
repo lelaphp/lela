@@ -1336,7 +1336,7 @@ fn info_rows(req: &mut Request) -> Result<(), Thrown> {
         .map(|(name, shown)| [name.as_str(), shown.as_str()])
         .collect();
     let table: Vec<&[&str]> = table.iter().map(<[&str; 2]>::as_slice).collect();
-    req.info_table(&table);
+    req.extensions_mut().info_table(&table);
     Ok(())
 }
 
@@ -1344,7 +1344,7 @@ fn info_rows(req: &mut Request) -> Result<(), Thrown> {
 /// `Directive => Local Value => Master Value`, the master being the
 /// value the engine started with.
 fn display_ini_entries(req: &mut Request) {
-    let Some(me) = req.extension_named(PRODUCT.as_bytes()) else {
+    let Some(me) = req.extensions().named(PRODUCT.as_bytes()) else {
         return;
     };
     let rows: Vec<[String; 3]> = req

@@ -46,11 +46,11 @@ pub(crate) fn require_hash(req: &Request) -> bool {
 
 /// `PHAR_G(has_zlib)` and `has_bz2`: whether the extension is loaded.
 pub(crate) fn has_zlib(req: &Request) -> bool {
-    req.extension_named(b"zlib").is_some()
+    req.extensions().named(b"zlib").is_some()
 }
 
 pub(crate) fn has_bz2(req: &Request) -> bool {
-    req.extension_named(b"bz2").is_some()
+    req.extensions().named(b"bz2").is_some()
 }
 
 /// `phar_open_parsed_phar`: an archive already in the name table, under

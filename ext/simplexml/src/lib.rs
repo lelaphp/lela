@@ -116,7 +116,7 @@ fn dependency(name: &str, kind: DependencyKind) -> Dependency {
 /// Schema support => enabled
 /// ```
 fn simplexml_info(req: &mut Request) {
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["SimpleXML support", "enabled"],
         &["Schema support", "enabled"],
     ]);
