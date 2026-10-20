@@ -153,22 +153,31 @@ pub fn parse<'a>(arena: &'a Arena, source: &'a [u8], options: &Options) -> Parse
         &lines,
         std::mem::take(&mut scratch.tokens),
         &mut scratch.states,
+        &mut scratch.significant,
     );
-    let input = parser::Input::new_in(
+    let input = parser::Input::indexed(
         source,
         &lexed.tokens,
         std::mem::take(&mut scratch.significant),
     );
     let events = std::mem::take(&mut scratch.stacks.events);
+    let census = scratch.stacks.census();
     let delims = std::mem::take(&mut scratch.delims);
-    let mut p = parser::Parser::new_in(&input, file, &lines, events, delims);
+    let mut p = parser::Parser::new_in(&input, file, &lines, events, census, delims);
     grammar::source_file(&mut p);
-    let (events, delims, raised) = p.finish();
-    scratch.delims = delims;
+    let ended = p.finish();
+    scratch.delims = ended.delims;
     scratch.significant = input.into_significant();
-    let built = tree::build_in(arena, &lexed.tokens, &lines, events, &mut scratch.stacks);
+    let built = tree::build_in(
+        arena,
+        &lexed.tokens,
+        &lines,
+        ended.events,
+        ended.census,
+        &mut scratch.stacks,
+    );
     let tokens = arena.copy(&lexed.tokens);
-    let diagnostics = in_php_order(tokens, lexed.diagnostics, raised);
+    let diagnostics = in_php_order(tokens, lexed.diagnostics, ended.diagnostics);
     scratch.tokens = lexed.tokens;
     if source.len() > arena::Scratch::GROWN {
         scratch.trim();
