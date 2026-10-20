@@ -1166,8 +1166,8 @@ mod tests {
             names: ["a", "b"],
         };
         let shown = super::rendered(&bar, &measured, 12, super::Label::Smoke, None);
-        let said = "n 12); per request: absent: this build reads no process's proc_pid_rusage";
-        assert!(shown.contains(said), "{shown}");
+        let said = format!("n 12); per request: absent: {}", super::spent::ABSENT);
+        assert!(shown.contains(&said), "{shown}");
     }
 
     /// A GitHub-hosted runner is refused, and a machine of ours or one

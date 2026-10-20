@@ -8,9 +8,18 @@
 //! Each is read from `proc_pid_rusage` summed over the server's processes,
 //! makala's one and php-fpm's master and children, before and after a rep;
 //! their difference divided by the requests answered in the rep is the
-//! rep's, and an arm's figure is the median over its reps.
+//! rep's, and an arm's figure is the median over its reps. The call is
+//! macOS's, read in `read`, xtask's one `unsafe` home (#3062's ruling);
+//! elsewhere every server arm says its figures are absent.
 
 use super::stats;
+
+#[cfg(target_os = "macos")]
+#[allow(
+    unsafe_code,
+    reason = "seams.toml rule unsafe.homes: xtask::bench::spent::read"
+)]
+mod read;
 
 /// The four figures, in the order [`Retired`] and [`Spent::PerRequest`]
 /// keep them: each one's key under an arm's prefix in a reading, and what
@@ -23,11 +32,13 @@ const FIGURES: [(&str, f64); 4] = [
     ("runnable_ms", 1e6),
 ];
 
-/// Why a server arm states none of its figures in this build: xtask reads
-/// no process's until it has a home for `proc_pid_rusage`, which a person
-/// rules on (#3062), and on a platform without the call it reads none at
-/// all.
-const ABSENT: &str = "this build reads no process's proc_pid_rusage (#3062)";
+/// Why a server arm states none of its figures: on macOS, a read of its
+/// server's process that failed, the process gone or not the reader's to
+/// read; elsewhere, a platform without the call.
+#[cfg(target_os = "macos")]
+pub(super) const ABSENT: &str = "proc_pid_rusage could not read the server's process";
+#[cfg(not(target_os = "macos"))]
+pub(super) const ABSENT: &str = "this platform has no proc_pid_rusage";
 
 /// What a server's processes had retired when read, summed over them:
 /// instructions, cycles, CPU and runnable nanoseconds, in [`FIGURES`]'
@@ -37,7 +48,14 @@ pub(crate) struct Retired([u64; 4]);
 
 impl Retired {
     /// The process `pid` and its children as they stand, or none where
-    /// this build reads none, which is every build until #3062 is ruled.
+    /// they cannot be read.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn of(pid: u32) -> Option<Retired> {
+        read::totals(pid).map(Retired)
+    }
+
+    /// None: this platform has no `proc_pid_rusage`.
+    #[cfg(not(target_os = "macos"))]
     pub(crate) fn of(_pid: u32) -> Option<Retired> {
         None
     }
@@ -164,7 +182,7 @@ mod tests {
         let arm = Spent::median(&absent);
         assert_eq!(arm, Spent::Absent(ABSENT));
         let text = arm.text().unwrap();
-        assert!(text.starts_with("absent: this build reads no"), "{text}");
+        assert_eq!(text, format!("absent: {ABSENT}"));
         assert!(arm.numbers("b").is_empty());
         assert_eq!(Spent::median(&[Spent::Unasked]), Spent::Unasked);
         assert_eq!(Spent::Unasked.text(), None);
