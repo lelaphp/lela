@@ -24,6 +24,7 @@ use super::Column;
 use crate::oracle::hosts::{CGI, CLI, FPM};
 use crate::oracle::{self, Ended, Observation, Oracle, normalise_in};
 use crate::scratch::Tree;
+use crate::witness::fence::Served;
 
 /// What serves a module's rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,13 +113,12 @@ pub(crate) fn oracle_side(
     let program = column.program(module);
     let served = match host {
         Host::Cli => bail!("the CLI renders {module} by its flags, not as a request"),
-        Host::Cgi => {
-            let path = oracle.pinned_host(CGI)?;
-            crate::witness::served_as_cgi(oracle, &path, &program, REQUEST, None, &[])?
-        }
-        Host::Fpm => {
-            let path = oracle.pinned_host(FPM)?;
-            crate::witness::served_as_fpm(oracle, &path, &program, REQUEST, &[])?
+        Host::Cgi | Host::Fpm => {
+            let (served, path) = match host {
+                Host::Fpm => (Served::Fpm, oracle.pinned_host(FPM)?),
+                _ => (Served::Cgi, oracle.pinned_host(CGI)?),
+            };
+            crate::witness::served_as(oracle, served, &path, &program, REQUEST, None, &[])?
         }
         Host::Server => served_by_server(oracle, &oracle.pin().oracle.path, &program)?,
     };
@@ -137,8 +137,16 @@ pub(crate) fn engine_side(
     let program = column.program(module);
     let served = match host {
         Host::Cli => bail!("the CLI renders {module} by its flags, not as a request"),
-        Host::Cgi => binary.serve_cgi(oracle, &program, REQUEST, None)?.0,
-        Host::Fpm => binary.serve_fpm(oracle, &program, REQUEST)?.0,
+        Host::Cgi => {
+            binary
+                .serve_request(oracle, Served::Cgi, &program, REQUEST, None)?
+                .0
+        }
+        Host::Fpm => {
+            binary
+                .serve_request(oracle, Served::Fpm, &program, REQUEST, None)?
+                .0
+        }
         Host::Server => served_by_server(oracle, &binary.host(CLI)?, &program)?,
     };
     Ok(body(oracle, served))
@@ -206,19 +214,12 @@ pub(crate) fn served_by_server(
             .port();
         let mut server = Command::new(php);
         server.args(&recipe.args);
-        for ini in &recipe.ini {
-            server.arg("-d").arg(ini);
-        }
+        crate::witness::under_recipe(recipe, &mut server, &[], &[])?.stderr(Stdio::piped());
         server
             .arg("-S")
             .arg(format!("127.0.0.1:{port}"))
             .arg("-t")
             .arg(own.path());
-        recipe
-            .environ(&mut server)?
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
         let mut server = Server(
             server
                 .spawn()

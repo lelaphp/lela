@@ -137,7 +137,7 @@ mod watch;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -154,8 +154,7 @@ use crate::sources;
 use crate::tally::{self, Outcome};
 use anchor::Record;
 use fence::Extracted;
-pub(crate) use fpm::served_as_fpm;
-pub(crate) use process::{Binary, served_as_cgi};
+pub(crate) use process::{Binary, served_as, under_recipe};
 use watch::{Journal, Watch};
 
 /// The instrument's name, the reading's `instrument` field.
@@ -417,34 +416,6 @@ pub(crate) fn reading(
 /// did on each fence a `trace:` row holds to the engine alone.
 fn tail(tally: &Tally) -> String {
     let run = &tally.witnesses;
-    // What did not run for want of the oracle, and what the engine did
-    // not serve for its trace there, as a message's tail.
-    let unrun = match (&tally.oracle_absent, run.not_run()) {
-        (Some(why), n) if n > 0 => {
-            let s = if n == 1 { "" } else { "es" };
-            format!("; {n} witness{s} did not run, {why}")
-        }
-        _ => String::new(),
-    };
-    let unrun = match tally.unserved.len() {
-        0 => unrun,
-        n => {
-            let s = if n == 1 { "" } else { "s" };
-            format!(
-                "{unrun}; {n} fence{s} the engine did not serve: {}",
-                tally.unserved.join("; ")
-            )
-        }
-    };
-    // What a `locale=<name>` the host lacks kept from running, as a
-    // message's tail (#1678).
-    let unrun = match run.count(Judgement::Skipped) {
-        0 => unrun,
-        n => {
-            let s = if n == 1 { "" } else { "es" };
-            format!("{unrun}; {n} witness{s} skipped for a locale this host lacks")
-        }
-    };
     // What the oracle did on each fence a `trace:` row holds to the engine
     // alone, recorded and not judged (harness §4.3, §8; #1650).
     let covered: Vec<String> = run
@@ -453,16 +424,49 @@ fn tail(tally: &Tally) -> String {
         .filter(|j| j.judgement == Judgement::Covered)
         .map(|j| format!("{}: {}", j.id, j.note))
         .collect();
-    match covered.len() {
-        0 => unrun,
-        n => {
-            let s = if n == 1 { "" } else { "s" };
-            format!(
-                "{unrun}; {n} fence{s} held to the engine alone: {}",
-                covered.join("; ")
-            )
-        }
-    }
+    let why = tally.oracle_absent.as_deref();
+    // Each clause with its count, said where the count is not zero: what
+    // did not run for want of the oracle, what the engine did not serve for
+    // its trace there, what a `locale=<name>` the host lacks kept from
+    // running (#1678), and the fences held to the engine alone.
+    let clauses = [
+        (
+            why.map_or(0, |_| run.not_run()),
+            "witness",
+            "es",
+            format!("did not run, {}", why.unwrap_or_default()),
+        ),
+        (
+            tally.unserved.len() as u64,
+            "fence",
+            "s",
+            format!("the engine did not serve: {}", tally.unserved.join("; ")),
+        ),
+        (
+            run.count(Judgement::Skipped),
+            "witness",
+            "es",
+            "skipped for a locale this host lacks".to_owned(),
+        ),
+        (
+            covered.len() as u64,
+            "fence",
+            "s",
+            format!("held to the engine alone: {}", covered.join("; ")),
+        ),
+    ];
+    let said = clauses.into_iter().filter(|(n, ..)| *n > 0);
+    let said = said.map(|(n, what, es, clause)| {
+        let es = if n == 1 { "" } else { es };
+        format!("; {n} {what}{es} {clause}")
+    });
+    said.collect::<Vec<_>>().concat()
+}
+
+/// The value under `lock`, a poisoned one included: a fence whose run
+/// panicked leaves what it gathered as it was.
+fn held<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
+    lock.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The reading under the coverage rule, when the manifest has one: the
@@ -1112,16 +1116,8 @@ fn serve(
     }
     let mut kept = judge::Kept::default();
     let judged = judge::one(oracle, registry, ask, witness, regime, binary, &mut kept)?;
-    gathered
-        .captured
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .extend(kept.captured);
-    gathered
-        .entered
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(witness.id(), kept.entered);
+    held(&gathered.captured).extend(kept.captured);
+    held(&gathered.entered).insert(witness.id(), kept.entered);
     if let Some(watch) = watch {
         watch.served(witness)?;
     }
@@ -1152,11 +1148,7 @@ fn serve_absent(
                 Record::Unserved
             }
         };
-        gathered
-            .entered
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(witness.id(), record);
+        held(&gathered.entered).insert(witness.id(), record);
     }
     unserved
 }
