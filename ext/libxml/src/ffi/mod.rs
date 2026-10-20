@@ -880,14 +880,11 @@ pub enum ClassType {
     Modern,
 }
 
-/// `libxml_doc_props`: `DOMDocument`'s parse and save switches, and the
-/// classes `registerNodeClass` put in place of dom's own.
-#[derive(Debug, Clone, PartialEq)]
+/// `libxml_doc_props`' seven switches, `DOMDocument`'s parse and save
+/// options: what `dom_get_doc_props_read_only` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)] // php's seven switches, each one property of the document
-pub struct DocProps {
-    /// Base class to the class a program registered for it, in
-    /// registration order, `zend_hash_update_ptr` over the base's name.
-    pub classmap: Vec<(ClassId, ClassId)>,
+pub struct Switches {
     pub format: bool,
     pub validate_on_parse: bool,
     pub resolve_externals: bool,
@@ -898,10 +895,9 @@ pub struct DocProps {
 }
 
 /// `default_doc_props`.
-impl Default for DocProps {
-    fn default() -> DocProps {
-        DocProps {
-            classmap: Vec::new(),
+impl Default for Switches {
+    fn default() -> Switches {
+        Switches {
             format: false,
             validate_on_parse: false,
             resolve_externals: false,
@@ -909,6 +905,138 @@ impl Default for DocProps {
             substitute_entities: false,
             strict_error: true,
             recover: false,
+        }
+    }
+}
+
+/// `sizeof(libxml_doc_props)` on the pinned 64-bit build: the class
+/// map's pointer and the seven switches (`Z/ext/libxml/php_libxml.h`).
+const DOC_PROPS: usize = 16;
+
+/// The rows of a class map: each base class with the class a program
+/// registered for it, in the table's order.
+pub type ClassRows = Vec<(ClassId, ClassId)>;
+
+/// `libxml_doc_props`, `emalloc`'d by `dom_get_doc_props` the first time
+/// a switch or the class map is written and freed with the document by
+/// `php_libxml_decrement_doc_ref_directly`: the switches, and the classes
+/// `registerNodeClass` put in place of dom's own, a table on the
+/// request's heap `ALLOC_HASHTABLE`d at the first registration.
+///
+/// ```php
+/// $doc = Dom\XMLDocument::createFromString('<r/>');
+/// $c = $doc->cloneNode(true); unset($c);
+/// $m = memory_get_usage();
+/// $c = $doc->cloneNode(true);
+/// echo memory_get_usage() - $m, "\n";
+/// $d = new DOMDocument();
+/// $m = memory_get_usage();
+/// $d->formatOutput = true;
+/// echo memory_get_usage() - $m, "\n";
+/// class E extends DOMElement {}
+/// $d->registerNodeClass('DOMElement', 'E');
+/// echo memory_get_usage() - $m, "\n";
+/// $d->registerNodeClass('DOMElement', null);
+/// echo memory_get_usage() - $m, "\n";
+/// $d->loadXML('<r/>');
+/// echo memory_get_usage() - $m, "\n";
+/// $c = $d->cloneNode();
+/// echo memory_get_usage() - $m, "\n";
+/// unset($c, $d);
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 280
+/// 16
+/// 392
+/// 392
+/// 392
+/// 320
+/// -416
+/// ```
+#[derive(Debug, Default)]
+pub struct DocProps {
+    pub switches: Switches,
+    /// `classmap`: base class to the class a program registered for it,
+    /// `zend_hash_update_ptr` over the base's name.
+    classmap: Option<crate::table::Table<(ClassId, ClassId)>>,
+    /// The struct's `emalloc` on the request's heap.
+    charge: Option<Emalloc>,
+}
+
+impl DocProps {
+    /// `dom_get_doc_classmap`: the class registered in place of `base`,
+    /// `base` where none is.
+    #[must_use]
+    pub fn mapped(&self, base: ClassId) -> ClassId {
+        self.classmap
+            .as_ref()
+            .and_then(|map| map.rows().find(|(b, _)| *b == base))
+            .map_or(base, |(_, class)| *class)
+    }
+
+    /// The class map's rows, `None` where none was made.
+    #[must_use]
+    pub fn class_rows(&self) -> Option<ClassRows> {
+        self.classmap
+            .as_ref()
+            .map(|map| map.rows().copied().collect())
+    }
+
+    /// `dom_set_doc_classmap`: the table made at the first registration,
+    /// then `class` written over `base`'s row in place, or the row
+    /// deleted where `class` is `None`; the `Err` is the memory limit.
+    pub fn set_class(
+        &mut self,
+        req: &mut Request,
+        base: ClassId,
+        class: Option<ClassId>,
+    ) -> Result<(), Thrown> {
+        let map = match (&mut self.classmap, class) {
+            (Some(map), _) => map,
+            (None, None) => return Ok(()),
+            (None, Some(_)) => self.classmap.insert(crate::table::Table::header(req)?),
+        };
+        let at = map.rows().position(|(b, _)| *b == base);
+        match (at, class) {
+            (Some(at), Some(class)) => {
+                if let Some(row) = map.rows_mut().nth(at) {
+                    row.1 = class;
+                }
+            }
+            (Some(at), None) => {
+                map.remove(at);
+            }
+            (None, Some(class)) => map.add(req, (base, class))?,
+            (None, None) => {}
+        }
+        Ok(())
+    }
+
+    /// `dom_copy_document_ref`'s copy of a class map: a table
+    /// `ALLOC_HASHTABLE`d and each row added in order, as `zend_hash_copy`
+    /// adds them; the `Err` is the memory limit.
+    pub fn copy_classmap(&mut self, req: &mut Request, rows: ClassRows) -> Result<(), Thrown> {
+        let map = crate::table::Table::header(req)?;
+        if let Some(mut old) = self.classmap.replace(map) {
+            old.free(req);
+        }
+        if let Some(map) = self.classmap.as_mut() {
+            for row in rows {
+                map.add(req, row)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `zend_hash_destroy` and `FREE_HASHTABLE` of the class map, then
+    /// `efree(document->doc_props)`.
+    pub(crate) fn free(mut self, req: &mut Request) {
+        if let Some(mut map) = self.classmap.take() {
+            map.free(req);
+        }
+        if let Some(charge) = self.charge.take() {
+            charge.free(req);
         }
     }
 }
@@ -1363,30 +1491,57 @@ impl NodeObject {
     /// `dom_get_doc_props_read_only`: the switches, php's defaults where
     /// the document has none yet or there is no document.
     #[must_use]
-    pub fn props(&self) -> DocProps {
-        self.doc_ref()
-            .and_then(|d| d.props.clone())
-            .unwrap_or_default()
+    pub fn props(&self) -> Switches {
+        self.doc_props().map(|p| p.switches).unwrap_or_default()
     }
 
-    /// `dom_get_doc_props`: the switches to write, laid down from the
+    /// The document's `libxml_doc_props`, none where it has none yet or
+    /// there is no document.
+    #[must_use]
+    pub fn doc_props(&self) -> Option<&DocProps> {
+        self.doc_ref()?.props.as_ref()
+    }
+
+    /// `dom_get_doc_classmap`: the class registered in place of `base`
+    /// for the document, `base` where none is.
+    #[must_use]
+    pub fn mapped(&self, base: ClassId) -> ClassId {
+        self.doc_props().map_or(base, |p| p.mapped(base))
+    }
+
+    /// `dom_get_doc_props`: the props to write, `emalloc`'d from the
     /// defaults the first time; `None` where there is no document, whose
-    /// write php makes on a copy nothing keeps.
-    pub fn props_mut(&mut self) -> Option<&mut DocProps> {
-        let d = self.doc_ref_mut()?;
-        Some(d.props.get_or_insert_with(DocProps::default))
+    /// write php makes on a copy nothing keeps. The `Err` is the memory
+    /// limit.
+    pub fn props_mut(&mut self, req: &mut Request) -> Result<Option<&mut DocProps>, Thrown> {
+        let Some(d) = self.doc_ref_mut() else {
+            return Ok(None);
+        };
+        if d.props.is_none() {
+            let charge = Emalloc::new(req, DOC_PROPS)?;
+            d.props = Some(DocProps {
+                charge: Some(charge),
+                ..DocProps::default()
+            });
+        }
+        Ok(d.props.as_mut())
     }
 
-    /// The switches taken off the document, `document->doc_props = NULL`
+    /// The props taken off the document, `document->doc_props = NULL`
     /// after reading them, as a reload keeps them across the new tree.
     pub fn take_props(&mut self) -> Option<DocProps> {
         self.doc_ref_mut().and_then(|d| d.props.take())
     }
 
-    /// `document->doc_props = props`.
-    pub fn put_props(&mut self, props: Option<DocProps>) {
-        if let Some(d) = self.doc_ref_mut() {
-            d.props = props;
+    /// `document->doc_props = props`, any the document had freed; props
+    /// with no document to take them freed with them.
+    pub fn put_props(&mut self, req: &mut Request, props: Option<DocProps>) {
+        let props = match self.doc_ref_mut() {
+            Some(d) => std::mem::replace(&mut d.props, props),
+            None => props,
+        };
+        if let Some(props) = props {
+            props.free(req);
         }
     }
 
@@ -1526,9 +1681,11 @@ impl SharedDoc {
     /// # Safety
     /// Some live object counts the document.
     #[must_use]
-    pub unsafe fn props(self) -> DocProps {
+    pub unsafe fn props(self) -> Switches {
         // SAFETY: the caller's contract.
-        unsafe { (*self.0.as_ptr()).props.clone() }.unwrap_or_default()
+        unsafe { (*self.0.as_ptr()).props.as_ref() }
+            .map(|p| p.switches)
+            .unwrap_or_default()
     }
 
     /// `php_libxml_invalidate_node_list_cache`.
@@ -1592,13 +1749,13 @@ impl Exported {
         }
     }
 
-    /// `dom_get_doc_props_read_only(nodeobj->document)`.
+    /// `dom_get_doc_classmap(nodeobj->document, base)`.
     #[must_use]
-    pub fn props(&self) -> DocProps {
+    pub fn mapped(&self, base: ClassId) -> ClassId {
         // SAFETY: as in `class_type`.
         self.document
-            .and_then(|d| unsafe { (*d.as_ptr()).props.clone() })
-            .unwrap_or_default()
+            .and_then(|d| unsafe { (*d.as_ptr()).props.as_ref() }.map(|p| p.mapped(base)))
+            .unwrap_or(base)
     }
 }
 
@@ -1951,6 +2108,9 @@ unsafe fn decrement_doc_ref_directly(d: *mut DocRef, req: Option<&mut Request>) 
         if !r.doc.is_null() {
             // SAFETY: the document this reference owned, freed once.
             unsafe { sys::xmlFreeDoc(r.doc) };
+        }
+        if let (Some(props), Some(req)) = (r.props.take(), req.as_deref_mut()) {
+            props.free(req);
         }
         give_back(req, r.charge.take());
         // SAFETY: the allocation `increment_doc_ref` leaked, its last count.
