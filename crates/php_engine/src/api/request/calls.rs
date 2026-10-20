@@ -18,6 +18,7 @@ use crate::api::values::{
 use crate::engine::{MethodAt, NativeMethod};
 use crate::exec;
 use crate::observer::OnThrow;
+use crate::trampoline::CallTrampoline;
 use php_heap::FrameRef;
 
 use super::{ExtensionId, Link, Request, UserFunction};
@@ -985,23 +986,13 @@ impl Request {
                 b"__call"
             },
         )?;
-        let held = self
-            .calls
-            .trampolines
-            .iter()
-            .position(|trampoline| trampoline.is(magic, name));
-        let at = if let Some(at) = held {
-            at
-        } else {
-            let of = self.method_decl(magic)?.clone();
-            self.calls
-                .trampolines
-                .push(crate::trampoline::CallTrampoline::new(
-                    magic, name, is_static, &of,
-                ));
-            self.calls.trampolines.len().checked_sub(1)?
-        };
-        crate::trampoline::number(at, crate::trampoline::Served::Trampoline)
+        self.trampoline_made(
+            |made| made.is(magic, name),
+            |req| {
+                let of = req.method_decl(magic)?;
+                Some(CallTrampoline::new(magic, name, is_static, of))
+            },
+        )
     }
 
     /// `zend_get_closure_invoke_method` (`Z/Zend/zend_closures.c:484`):
@@ -1012,18 +1003,30 @@ impl Request {
     pub(crate) fn invoke_trampoline(&mut self, closure: PhpObject) -> Option<Function> {
         let function = closure.closure(self)?.function;
         let via = crate::trampoline::Via::Invoke(function);
-        let at = if let Some(at) = self
-            .calls
-            .trampolines
-            .iter()
-            .position(|made| made.via == via)
-        {
+        self.trampoline_made(
+            |made| made.via == via,
+            |req| {
+                Some(CallTrampoline::invoke(
+                    function,
+                    req.function_decl(function)?,
+                ))
+            },
+        )
+    }
+
+    /// The number of the trampoline the request made that `held` picks,
+    /// or of the one `make` makes, kept for the request so a number
+    /// names one trampoline for its life; none where `make` makes none.
+    fn trampoline_made(
+        &mut self,
+        held: impl Fn(&CallTrampoline) -> bool,
+        make: impl FnOnce(&Request) -> Option<CallTrampoline>,
+    ) -> Option<Function> {
+        let at = if let Some(at) = self.calls.trampolines.iter().position(held) {
             at
         } else {
-            let decl = self.function_decl(function)?.clone();
-            self.calls
-                .trampolines
-                .push(crate::trampoline::CallTrampoline::invoke(function, &decl));
+            let trampoline = make(self)?;
+            self.calls.trampolines.push(trampoline);
             self.calls.trampolines.len().checked_sub(1)?
         };
         crate::trampoline::number(at, crate::trampoline::Served::Trampoline)
@@ -1295,25 +1298,15 @@ impl Request {
         entry: crate::api::abi::Entry,
         is_instance: bool,
     ) -> Option<Function> {
-        let held = self.calls.trampolines.iter().position(|made| {
-            matches!(made.via, crate::trampoline::Via::Native(made_entry)
+        self.trampoline_made(
+            |made| {
+                matches!(made.via, crate::trampoline::Via::Native(made_entry)
                 if std::ptr::fn_addr_eq(made_entry, entry))
-                && *made.decl.function.name.0 == *name
-                && made.decl.is_instance == is_instance
-        });
-        let at = if let Some(at) = held {
-            at
-        } else {
-            self.calls
-                .trampolines
-                .push(crate::trampoline::CallTrampoline::native(
-                    entry,
-                    name,
-                    is_instance,
-                ));
-            self.calls.trampolines.len().checked_sub(1)?
-        };
-        crate::trampoline::number(at, crate::trampoline::Served::Trampoline)
+                    && *made.decl.function.name.0 == *name
+                    && made.decl.is_instance == is_instance
+            },
+            |_| Some(CallTrampoline::native(entry, name, is_instance)),
+        )
     }
 
     /// `ce->get_iterator` on a class that is no `Traversable`
