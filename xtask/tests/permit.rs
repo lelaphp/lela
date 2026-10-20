@@ -2070,7 +2070,8 @@ fn with_no_candidate_judging_a_write_is_denied_and_a_bash_call_is_handed_on() {
 
 /// The two halves of the nightly lane the phpt runner asked for (#15):
 /// the flag is denied wherever it stands in the call, not only beside the
-/// subcommand, by `lanes.nightly-flags` (#1860), and upstream's runner is
+/// subcommand, by `lanes.nightly-flags` (#1860), save the tier's `--jit`
+/// lane on one subset `--subset` names (#3052), and upstream's runner is
 /// denied where it is run and not where it is cited, by `lanes.nightly`.
 /// The rule denied `--subset x --full` on neither count before, and denied
 /// reading the file on the second.
@@ -2103,12 +2104,9 @@ fn the_nightly_lane_is_denied_by_the_flag_and_not_by_a_citation() {
             "cargo run -p xtask -- phpt --subset Zend/tests --full",
             "lanes.nightly-flags",
         ),
+        ("xtask phpt --jit force", "lanes.nightly-flags"),
         (
-            "xtask phpt --subset Zend/tests --jit force",
-            "lanes.nightly-flags",
-        ),
-        (
-            "cargo run -q -p xtask -- phpt --jit exit-fuzz --subset tests",
+            "cargo run -q -p xtask -- phpt --jit exit-fuzz --full",
             "lanes.nightly-flags",
         ),
         ("php run-tests.php -p target/release/php", "lanes.nightly"),
@@ -2123,6 +2121,8 @@ fn the_nightly_lane_is_denied_by_the_flag_and_not_by_a_citation() {
 
     for command in [
         "cargo run -q -p xtask -- phpt --subset pcre",
+        "xtask phpt --subset Zend/tests --jit force",
+        "cargo run -q -p xtask -- phpt --jit exit-fuzz --subset tests",
         "cargo test -p xtask --test phpt",
         "grep -n 'EXPECTF' /Users/x/php-src-8.5.9/run-tests.php",
         "echo 'upstream (run-tests.php:1885-1889) merges the streams'",
