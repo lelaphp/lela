@@ -24,95 +24,116 @@ use syn::visit::{self, Visit};
 /// engine-end function, as #1960's ruling and #1961 left them.
 const POOLED_ENDS: &[&str] = &["dba", "mysqli", "pdo"];
 
-/// The face's pool, as a path names it.
+/// The face's pool, as a path from the crate root names it.
 const POOL: [&str; 3] = ["php_ext", "abi", "Pool"];
 
 /// One `ext/*` crate as its sources say it.
 struct Crate {
     name: String,
-    /// What its `src/` names, read from the syntax.
-    named: Named,
+    /// Whether its `src/` calls `.engine_end(..)` on its builder.
+    engine_end: bool,
+    /// Whether its `src/` names the face's `abi::Pool`, by its whole path
+    /// or through what a `use` binds; a `Pool` of the crate's own
+    /// (mysqlnd's arena for a fetched row set) is not one.
+    pool: bool,
     /// Its `[dependencies]`, by package name.
     dependencies: toml::Table,
 }
 
 impl Crate {
-    fn ends(&self) -> bool {
-        self.named.ends
-    }
-
-    /// Whether it names the face's `abi::Pool`, imported or by its path; a
-    /// `Pool` of its own (mysqlnd's arena for a fetched row set) is not one.
-    fn pools(&self) -> bool {
-        self.named.pools
-    }
-
     /// Whether its library links `ext/<name>`'s crate.
     fn requires(&self, name: &str) -> bool {
         self.dependencies.contains_key(&format!("php_ext_{name}"))
     }
 }
 
-/// What one crate's sources name: a `.engine_end(..)` call on its builder,
-/// and the face's `Pool`.
+/// What one file's syntax holds: the names its `use` items bind, the
+/// paths they glob, and every path written outside them. A path inside
+/// a macro's arguments is tokens to syn and is not read.
 #[derive(Default)]
-struct Named {
-    ends: bool,
-    pools: bool,
+struct File {
+    engine_end: bool,
+    /// Each name a `use` binds, with the path it stands for.
+    bound: Vec<(String, Vec<String>)>,
+    /// Each path a `use` globs, `a::b` of `use a::b::*`.
+    globbed: Vec<Vec<String>>,
+    paths: Vec<Vec<String>>,
 }
 
-impl Named {
-    /// Whether `use` tree `tree`, under the segments `prefix`, imports the
-    /// face's `Pool`.
-    fn imports_pool(prefix: &mut Vec<String>, tree: &syn::UseTree) -> bool {
-        let names_pool = |prefix: &[String], ident: &syn::Ident| {
-            ident == POOL[2]
-                && prefix
-                    .iter()
-                    .map(String::as_str)
-                    .eq(POOL[..2].iter().copied())
+impl File {
+    /// What `use` tree `tree` binds under the segments `prefix`.
+    fn bind(&mut self, prefix: &mut Vec<String>, tree: &syn::UseTree) {
+        let mut bound = |prefix: &[String], ident: &syn::Ident, local: &syn::Ident| {
+            let mut full = prefix.to_vec();
+            if ident != "self" {
+                full.push(ident.to_string());
+            }
+            let local = if local == "self" {
+                full.last().cloned().unwrap_or_default()
+            } else {
+                local.to_string()
+            };
+            self.bound.push((local, full));
         };
         match tree {
             syn::UseTree::Path(path) => {
                 prefix.push(path.ident.to_string());
-                let found = Named::imports_pool(prefix, &path.tree);
+                self.bind(prefix, &path.tree);
                 prefix.pop();
-                found
             }
-            syn::UseTree::Name(name) => names_pool(prefix, &name.ident),
-            syn::UseTree::Rename(rename) => names_pool(prefix, &rename.ident),
-            syn::UseTree::Group(group) => group
-                .items
-                .iter()
-                .any(|tree| Named::imports_pool(prefix, tree)),
-            syn::UseTree::Glob(_) => false,
+            syn::UseTree::Name(name) => bound(prefix, &name.ident, &name.ident),
+            syn::UseTree::Rename(rename) => bound(prefix, &rename.ident, &rename.rename),
+            syn::UseTree::Glob(_) => self.globbed.push(prefix.clone()),
+            syn::UseTree::Group(group) => {
+                for tree in &group.items {
+                    self.bind(prefix, tree);
+                }
+            }
         }
+    }
+
+    /// Whether a path written here is the face's pool: as written from the
+    /// crate root, with its first segment read through what a `use` binds,
+    /// or under a path a `use` globs.
+    fn names_pool(&self) -> bool {
+        let pool = |path: &[String]| path.iter().map(String::as_str).take(POOL.len()).eq(POOL);
+        self.paths.iter().any(|path| {
+            let Some((first, rest)) = path.split_first() else {
+                return false;
+            };
+            pool(path)
+                || self
+                    .bound
+                    .iter()
+                    .filter(|(local, _)| local == first)
+                    .any(|(_, full)| pool(&[full.as_slice(), rest].concat()))
+                || self
+                    .globbed
+                    .iter()
+                    .any(|prefix| pool(&[prefix.as_slice(), path].concat()))
+        })
     }
 }
 
-impl<'ast> Visit<'ast> for Named {
+impl<'ast> Visit<'ast> for File {
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        self.ends |= call.method == "engine_end";
+        self.engine_end |= call.method == "engine_end";
         visit::visit_expr_method_call(self, call);
     }
 
     fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
-        self.pools |= Named::imports_pool(&mut Vec::new(), &item.tree);
+        self.bind(&mut Vec::new(), &item.tree);
     }
 
     fn visit_path(&mut self, path: &'ast syn::Path) {
-        self.pools |= path
-            .segments
-            .iter()
-            .map(|segment| segment.ident.to_string())
-            .take(POOL.len())
-            .eq(POOL);
+        self.paths
+            .push(path.segments.iter().map(|s| s.ident.to_string()).collect());
         visit::visit_path(self, path);
     }
 }
 
-/// Every `.rs` file under `dir`, parsed and visited into `named`.
-fn sources(dir: &Path, named: &mut Named) {
+/// Every `.rs` file under `dir`, parsed and visited, into `krate`.
+fn visit_sources(dir: &Path, krate: &mut Crate) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -120,13 +141,16 @@ fn sources(dir: &Path, named: &mut Named) {
     paths.sort();
     for path in paths {
         if path.is_dir() {
-            sources(&path, named);
+            visit_sources(&path, krate);
         } else if path.extension().is_some_and(|e| e == "rs") {
             let text = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("{} is read: {e}", path.display()));
-            let file =
+            let syntax =
                 syn::parse_file(&text).unwrap_or_else(|e| panic!("{} parses: {e}", path.display()));
-            named.visit_file(&file);
+            let mut file = File::default();
+            file.visit_file(&syntax);
+            krate.engine_end |= file.engine_end;
+            krate.pool |= file.names_pool();
         }
     }
 }
@@ -151,8 +175,6 @@ fn crates() -> Vec<Crate> {
     dirs.sort();
     dirs.into_iter()
         .map(|dir| {
-            let mut named = Named::default();
-            sources(&dir.join("src"), &mut named);
             let manifest = dir.join("Cargo.toml");
             let mut table: toml::Table = std::fs::read_to_string(&manifest)
                 .map_err(|e| e.to_string())
@@ -162,11 +184,14 @@ fn crates() -> Vec<Crate> {
                 Some(toml::Value::Table(dependencies)) => dependencies,
                 _ => toml::Table::new(),
             };
-            Crate {
+            let mut krate = Crate {
                 name: dir.file_name().unwrap().to_string_lossy().into_owned(),
-                named,
+                engine_end: false,
+                pool: false,
                 dependencies,
-            }
+            };
+            visit_sources(&dir.join("src"), &mut krate);
+            krate
         })
         .collect()
 }
@@ -181,14 +206,14 @@ fn dba_mysqli_and_pdo_alone_close_a_pool_in_an_engine_end_as_1960_ruled() {
             .find(|c| c.name == *name)
             .unwrap_or_else(|| panic!("ext/{name} is read"));
         assert!(
-            c.pools() && c.ends(),
+            c.pool && c.engine_end,
             "{name} no longer holds an abi::Pool closed in its own engine end, as #1961 left it \
              (ADR-0010): this list is to shorten"
         );
     }
     if let Some(c) = crates
         .iter()
-        .find(|c| c.pools() && c.ends() && !POOLED_ENDS.contains(&c.name.as_str()))
+        .find(|c| c.pool && c.engine_end && !POOLED_ENDS.contains(&c.name.as_str()))
     {
         panic!(
             "{} holds an abi::Pool and declares an engine end beside dba, mysqli and pdo: its \
@@ -199,7 +224,7 @@ fn dba_mysqli_and_pdo_alone_close_a_pool_in_an_engine_end_as_1960_ruled() {
             c.name
         );
     }
-    for c in crates.iter().filter(|c| c.ends()) {
+    for c in crates.iter().filter(|c| c.engine_end) {
         if let Some(pool) = POOLED_ENDS.iter().find(|&&p| p != c.name && c.requires(p)) {
             panic!(
                 "{0} requires {pool} and declares an engine end, which end_phase serves before \
