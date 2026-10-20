@@ -207,8 +207,9 @@ Actual source sites (pinned `libmagic/apprentice.c`):
   EBCDIC scratch and real release. `funcs.c:523-645`: retained output reset,
   printable allocation `4*strlen+1`, continuation growth `20+level`.
 
-`ext/fileinfo/tests/storage.rs` proves an already permitted safe byte-storage
-route: actual record fields and `GIF89a` bytes, decoded continuation offsets,
+`ext/fileinfo/tests/storage.rs` proved an already permitted safe byte-storage
+route (#3099 removed it; `crates/php_engine/src/tests/storage.rs` holds the
+request heap's storage now): actual record fields and `GIF89a` bytes, decoded continuation offsets,
 grown/zeroed storage, 121 output bytes plus NUL, eight-byte alignment, explicit
 reclamation after each partial stage, real memory-limit refusal after populated
 initialisation, and three successive request-end releases. No system-owned
