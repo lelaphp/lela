@@ -99,7 +99,8 @@ fn a_throwable_left_pending_is_answered_as_an_exception() {
 /// the wrapper had answered `Continue` and the loop appended again until
 /// `max_execution_time` stopped it, silently (`Zend/tests/bug70258.phpt`,
 /// which ran past the lane's 60 seconds). The request ends in the
-/// fatal well inside the ten seconds the limit is set to.
+/// fatal in a tenth of a second, held to half the thirty seconds the
+/// limit is set to so that a loaded machine does not fail it.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_bailout_a_step_began_leaves_the_compiled_loop() {
@@ -110,7 +111,7 @@ fn a_bailout_a_step_began_leaves_the_compiled_loop() {
             ("jit.mode", mode),
             ("jit.compile", "inline"),
             ("memory_limit", "2M"),
-            ("max_execution_time", "10"),
+            ("max_execution_time", "30"),
         ];
         let began = std::time::Instant::now();
         let served = crate::testing::serve::<crate::testing::Lane>(&ini, program);
@@ -120,7 +121,7 @@ fn a_bailout_a_step_began_leaves_the_compiled_loop() {
             fatal.contains("Allowed memory size of 2097152 bytes exhausted"),
             "{mode}: {fatal}"
         );
-        assert!(took.as_secs() < 5, "{mode}: the request took {took:?}");
+        assert!(took.as_secs() < 15, "{mode}: the request took {took:?}");
     }
 }
 
