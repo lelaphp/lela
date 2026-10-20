@@ -624,6 +624,16 @@ fn named(op: &Opline, code: &OpArray) -> bool {
 /// The operands php's switch in `zend_jit_trace_build_tssa` adds a guard
 /// for (`ADD_OP1_TRACE_GUARD`, `ADD_OP2_TRACE_GUARD`,
 /// `ADD_OP1_DATA_TRACE_GUARD`), in its order.
+///
+/// One case is not php's: a division, `DIV` and `ASSIGN_OP`'s, is guarded
+/// as a product is, where php's switch leaves it out (`// case ZEND_DIV:
+/// // TODO: check for division by zero ???`). php types a division's
+/// operands from its inference over the whole function, so a loop's
+/// variable `$i` read by `3.0 / $i` is a long there with no guard; this tier
+/// keeps no such inference, so with no guard the division sees the
+/// loop's phi as anything and is stepped on every turn (#3073, #3111). Its
+/// inline division leaves through its exit at a zero divisor, so the
+/// guard narrows nothing php's TODO is about.
 #[allow(
     clippy::too_many_lines,
     clippy::match_same_arms,
@@ -643,10 +653,7 @@ pub(super) fn guard_sites(
         || cv1 && data.is_some_and(|d| d.op1_type == OperandKind::Cv && d.op1 == op.op1);
     match op.opcode {
         Opcode::AssignOp => {
-            let unguarded = matches!(
-                lattice::binary_of(op.extended_value),
-                Some(Opcode::Pow | Opcode::Div)
-            );
+            let unguarded = lattice::binary_of(op.extended_value) == Some(Opcode::Pow);
             if unguarded || !cv1 || op.out_type != OperandKind::Unused {
                 vec![]
             } else {
@@ -681,7 +688,7 @@ pub(super) fn guard_sites(
                 vec![]
             }
         }
-        Opcode::Add | Opcode::Sub | Opcode::Mul
+        Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div
             if k1 == Some(ZvalType::Undef) || k2 == Some(ZvalType::Undef) =>
         {
             vec![]
@@ -689,6 +696,7 @@ pub(super) fn guard_sites(
         Opcode::Add
         | Opcode::Sub
         | Opcode::Mul
+        | Opcode::Div
         | Opcode::IsEqual
         | Opcode::IsNotEqual
         | Opcode::IsSmaller

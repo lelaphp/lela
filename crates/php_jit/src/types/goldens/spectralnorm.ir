@@ -32,46 +32,50 @@ loop at 0, loop, interrupt exit 1
   -> #10 f1.T2 [long] reg
   checks #10 long -> exit 4
 0005 f1 MUL #9, #10 inline
-  -> #11 f1.T3 [long, double]
-0006 f1 DIV #11, int(2) step leaves -> exit 5
-  -> #12 f1.T4 [long]
-  guard #12 long -> exit 6
+  -> #11 f1.T3 [long] reg
+  checks #11 long -> exit 5
+0006 f1 DIV #11, int(2) inline leaves -> exit 6
+  -> #12 f1.T4 [long] reg
+  checks #12 long -> exit 6
 0007 f1 ADD #12, #5 inline
   -> #13 f1.T5 [long] reg
-  checks #13 long -> exit 6
+  checks #13 long -> exit 7
 0008 f1 ADD #13, int(1) inline
-  -> #14 f1.T6 [long, double]
-0009 f1 DIV float(1), #14 step leaves -> exit 7
-  -> #15 f1.T7 [double]
+  -> #14 f1.T6 [long] reg
+  checks #14 long -> exit 8
+0009 f1 DIV float(1), #14 inline leaves -> exit 9
+  -> #15 f1.T7 [double] reg
 0010 f1 VERIFY_RETURN_TYPE #15 inline
   -> #16 f1.T7 [double] reg
 0011 f1 RETURN #16 inline
      f0 back to #17
   -> #17 f0.T4 [double]
-0012 f0 FETCH_DIM_R #18, #3 inline leaves -> exit 9
+0012 f0 FETCH_DIM_R #18, #3 inline leaves -> exit 11
   -> #19 f0.T5 [double] reg
-  checks #19 double -> exit 8
+  checks #19 double -> exit 10
 0013 f0 MUL #17, #19 inline
   -> #20 f0.T6 [double] reg
-0014 f0 ASSIGN_OP #1, #20 inline leaves -> exit 10
+0014 f0 ASSIGN_OP #1, #20 inline leaves -> exit 12
   -> #21 f0.CV4 [double] reg
 0015 f0 PRE_INC #3 inline
   -> #22 f0.CV5 [long] reg
-  checks #22 long -> exit 11
+  checks #22 long -> exit 13
 0016 f0 IS_SMALLER #22, #23 fused inline
-  checks direction taken -> exit 12
+  checks direction taken -> exit 14
 end: back to 0
 exit 0: f0 0008 plain
 exit 1: f0 0008 plain f0.CV4=#1 f0.CV5=#3
 exit 2: f0 0011 restore call f0.CV4=#1 f0.CV5=#3
 exit 3: f1 0002 plain f0.CV4=#1 f0.CV5=#3
 exit 4: f1 0004 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#9
-exit 5: f1 0006 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#9
-exit 6: f1 0007 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#9
-exit 7: f1 0009 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#9
-exit 8: f0 0013 plain f0.CV4=#1 f0.CV5=#3 f0.T5=copied #19
-exit 9: f0 0012 plain f0.CV4=#1 f0.CV5=#3
-exit 10: f0 0014 plain f0.CV4=#1 f0.CV5=#3 f0.T6=#20
-exit 11: f0 0015 plain f0.CV4=#21 f0.CV5=#3
-exit 12: f0 0017 plain f0.CV4=#21 f0.CV5=#22 f0.T9=false
+exit 5: f1 0005 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#9 f1.T2=#10
+exit 6: f1 0006 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#9 f1.T3=#11
+exit 7: f1 0007 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#9 f1.T4=#12
+exit 8: f1 0008 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#9 f1.T5=#13
+exit 9: f1 0009 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#9 f1.T6=#14
+exit 10: f0 0013 plain f0.CV4=#1 f0.CV5=#3 f0.T5=copied #19
+exit 11: f0 0012 plain f0.CV4=#1 f0.CV5=#3
+exit 12: f0 0014 plain f0.CV4=#1 f0.CV5=#3 f0.T6=#20
+exit 13: f0 0015 plain f0.CV4=#21 f0.CV5=#3
+exit 14: f0 0017 plain f0.CV4=#21 f0.CV5=#22 f0.T9=false
 map 0: offset 2 slot 0

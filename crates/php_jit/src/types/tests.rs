@@ -459,3 +459,54 @@ fn a_guarded_boolean_keeps_what_its_op_computed() -> Result<(), String> {
     }
     Ok(())
 }
+
+/// The trace of `program`'s loop in `f`, rendered, where any of its
+/// oplines is stepped; none where every one is inline.
+fn stepped_trace(program: &str) -> Result<Option<String>, String> {
+    let ir = built(&IN_F, program)?;
+    let stepped = ir
+        .ops
+        .iter()
+        .any(|op| matches!(op, Op::Line(line) if line.form == Form::Step));
+    Ok(stepped.then(|| dump::render(&ir)))
+}
+
+/// A product of one variable by itself: the guard on its second operand
+/// narrows the value both read, so the opline sees both as the guard
+/// holds them and is inline, where it saw its first as the loop's phi
+/// stood before the guard and was stepped on every turn (#3073).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_operand_read_twice_is_seen_as_its_one_guard_holds_it() -> Result<(), String> {
+    for body in ["$s = $i * $i;", "$s = ($s + $i * $i) % 1000003;"] {
+        let stepped = stepped_trace(&format!(
+            "function f($n) {{ $s = 0; for ($i = 1; $i < $n; $i++) {{ {body} }} return $s; }}
+            echo f(100), \"\\n\";"
+        ))?;
+        assert_eq!(stepped, None, "{body}");
+    }
+    Ok(())
+}
+
+/// A division at a loop's header, whose operands php's guard switch
+/// leaves out: guarded as a product's here, it sees the loop's variable `$i`
+/// as the guard holds it and is inline, where it saw the loop's phi as
+/// anything and was stepped on every turn (#3073, #3111).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_division_at_a_loops_header_is_inline() -> Result<(), String> {
+    for (start, body) in [
+        ("0.0", "$s = 3.0 / $i;"),
+        ("0.0", "$s = $i / 3.0;"),
+        ("1.0", "$s = $s / 1.0000001;"),
+        ("0", "$s = $i / 1;"),
+        ("1000.0", "$s /= $i;"),
+    ] {
+        let stepped = stepped_trace(&format!(
+            "function f($n) {{ $s = {start}; for ($i = 1; $i < $n; $i++) {{ {body} }} return $s; }}
+            echo f(100), \"\\n\";"
+        ))?;
+        assert_eq!(stepped, None, "{body}");
+    }
+    Ok(())
+}

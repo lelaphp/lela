@@ -769,13 +769,11 @@ fn serve_held<'u, T: Tier, D: Telling>(
                     frame = callee;
                     body = callee_body;
                     oplines = &*body.oplines;
-                    // A prologue served moved the callee on; with none, it
-                    // stands where its activation put it.
-                    at = if start < entry {
-                        req.vm().opline(frame)
-                    } else {
-                        start
-                    };
+                    // Where the callee stands: a prologue served moved it
+                    // on, and so did a tier whose `Site::Entry` answered a
+                    // `Resume` of it, a trace entered there or a recording
+                    // (#3077); the push's `start` is neither's.
+                    at = req.vm().opline(frame);
                 }
                 Way::Left(stepped) => break stepped,
             }

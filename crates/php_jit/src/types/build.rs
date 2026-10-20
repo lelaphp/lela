@@ -999,6 +999,9 @@ impl<'a> Builder<'a> {
     /// its guards held, which for a value a symbol table reaches or a
     /// reference is the guarded type at this opline alone, as php's
     /// `CHECK_OP_TRACE_TYPE` narrows `op1_info` for the opline it guards.
+    /// An operand no guard of its own narrowed is seen as its value
+    /// stands once the others held, so `$i * $i` sees both operands as
+    /// the one guard on its second narrowed them.
     #[allow(
         clippy::too_many_arguments,
         reason = "the one place the opline's parts meet"
@@ -1013,17 +1016,21 @@ impl<'a> Builder<'a> {
         operands: [Operand; 3],
         samples: [Option<Sample>; 3],
     ) -> Seen {
+        let t1 = self.types_of(frame, operands[0]);
+        let mut held: [Option<(Types, bool)>; 3] = [None; 3];
+        for site in guard_sites(op, data_line, samples, t1, self.meta(frame).code) {
+            let at = site as usize;
+            if let Some(guarded) = self.guard_use(idx, here, operands[at], samples[at]) {
+                held[at] = Some(guarded);
+            }
+        }
         let mut seen = Seen {
-            types: operands.map(|operand| self.types_of(frame, operand)),
+            types: [Types::NONE; 3],
             referenced: [false; 3],
         };
-        for site in guard_sites(op, data_line, samples, seen.types[0], self.meta(frame).code) {
-            let at = site as usize;
-            if let Some((types, referenced)) = self.guard_use(idx, here, operands[at], samples[at])
-            {
-                seen.types[at] = types;
-                seen.referenced[at] = referenced;
-            }
+        for (at, operand) in operands.into_iter().enumerate() {
+            (seen.types[at], seen.referenced[at]) =
+                held[at].unwrap_or_else(|| (self.types_of(frame, operand), false));
         }
         if let Some(layout) = packed_guard(op, samples, self.meta(frame).code)
             && let Operand::Value(value) = operands[0]

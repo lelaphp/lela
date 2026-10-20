@@ -621,7 +621,10 @@ mod ran {
     /// the interpreter goes on.
     #[test]
     fn run_follows_a_link_and_resumes_the_frame_a_cold_exit_landed() {
-        let engine = testing::engine::<Running>(&[("opcache.jit_debug", "32768")]);
+        let engine = testing::engine::<Running>(&[
+            ("opcache.jit", "tracing"),
+            ("opcache.jit_debug", "32768"),
+        ]);
         let program = r#"function f() { echo "a"; echo "b"; echo "c"; echo "d"; } f();"#;
         let scratch = Scratch::new();
         let (served, ran) = scratch.serve_kept::<Ran>(&engine, program);
@@ -636,6 +639,41 @@ mod ran {
         assert!(
             line.starts_with("     TRACE 1 exit 0 f() ") && line.ends_with("body.php:2"),
             "{stderr}"
+        );
+    }
+}
+
+/// A frame the tier moved at its activation goes on where the tier left
+/// it, on a call the loop made before as on its first. The closure's
+/// trace, which stops at the call php's
+/// `opcache.jit_max_polymorphic_calls=0` leaves to the interpreter, is
+/// entered at the closure's activation and leaves its frame standing at
+/// that call. A closure's push stands its frame at its entry safepoint,
+/// so the loop took the frame up again where the push had put it, served
+/// `echo "a"` and the call's `INIT_DYNAMIC_CALL` a second time, and left
+/// a call being built on the stack; `gh22443.phpt` died past the end of
+/// an op array (#3077).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_call_the_tier_moved_at_its_activation_goes_on_where_the_tier_left_it() {
+    let program = "function g() { return 1; }
+        $f = function ($c) { echo \"a\"; return $c(); };
+        for ($i = 0; $i < 3; $i++) { echo $f('g'), \"\\n\"; }";
+    for mode in ["force", "tracing"] {
+        let served = testing::serve::<Lane>(
+            &[
+                ("jit.mode", mode),
+                ("jit.compile", "inline"),
+                ("opcache.jit_hot_func", "1"),
+                ("opcache.jit_hot_loop", "1"),
+                ("opcache.jit_max_polymorphic_calls", "0"),
+            ],
+            program,
+        );
+        assert_eq!(
+            (testing::stdout(&served), served.fatal),
+            ("a1\na1\na1\n".to_owned(), None),
+            "{mode}"
         );
     }
 }
