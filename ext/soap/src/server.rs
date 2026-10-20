@@ -1352,7 +1352,7 @@ fn handle(req: &mut Request, this: PhpObject, arg: Option<PhpString>) -> Res<()>
         return Err(server_fault_en(req, "Server", "Input string is too long"));
     }
     let query = server_var(req, b"QUERY_STRING");
-    if req.request_method() == Some(b"GET")
+    if req.variables().request_method() == Some(b"GET")
         && query
             .as_deref()
             .is_some_and(|q| q.eq_ignore_ascii_case(b"wsdl"))
@@ -1394,7 +1394,7 @@ fn handle(req: &mut Request, this: PhpObject, arg: Option<PhpString>) -> Res<()>
     let mut soap_action: Option<Vec<u8>> = None;
     let doc_request = match &arg {
         None => {
-            if req.request_method().is_none() {
+            if req.variables().request_method().is_none() {
                 return Ok(());
             }
             let mut compressed = false;
@@ -1544,7 +1544,7 @@ fn restore_globals(req: &mut Request, g: Globals) {
 
 /// A `$_SERVER` entry that is a string.
 fn server_var(req: &mut Request, name: &[u8]) -> Option<Vec<u8>> {
-    let server = req.superglobal(b"_SERVER")?;
+    let server = req.variables_mut().superglobal(b"_SERVER")?;
     server
         .find(name)?
         .deref()
@@ -1911,7 +1911,7 @@ fn call_named_function(req: &mut Request, name: &[u8]) -> Res<Owner<Value>> {
 
 /// The session's `$_SESSION` array, through its reference.
 fn session_array(req: &mut Request) -> Option<Value> {
-    req.global(b"_SESSION")
+    req.variables_mut().global(b"_SESSION")
 }
 
 /// The session-persistent object, the session started first as

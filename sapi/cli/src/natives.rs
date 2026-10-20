@@ -297,7 +297,7 @@ fn dl(req: &mut Request, extension_filename: PhpString) -> bool {
 /// ```
 #[php_function(aliases(getallheaders))]
 fn apache_request_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
-    req.request_headers()
+    req.variables_mut().request_headers()
 }
 
 /// `apache_response_headers(): array` (`Z/sapi/cli/php_cli_server.c:425`):

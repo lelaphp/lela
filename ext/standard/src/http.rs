@@ -121,7 +121,7 @@ fn request_parse_body(
             *slot = Some(quantity);
         }
     }
-    let (post, files) = req.parse_body(&limits)?;
+    let (post, files) = req.variables_mut().parse_body(&limits)?;
     let mut pair = PhpArray::new(req)?;
     pair.append(req, post.into_value())?;
     pair.append(req, files.into_value())?;

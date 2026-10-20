@@ -4,7 +4,7 @@
 //! compiled (`zend_is_auto_global`). The bucket of each
 //! name is where the program's `$_SERVER` lives; the same array is kept
 //! a second time in `PG(http_globals)` ([`HttpGlobals`]), which is what
-//! an extension reads ([`Request::superglobal`]).
+//! an extension reads ([`Variables::superglobal`]).
 //!
 //! php's variable registration is here and nowhere else: the query
 //! string, the cookie header and `parse_str()`'s string split by
@@ -23,6 +23,27 @@ use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, walk};
 use crate::c_number::is_space;
 use crate::engine::Known;
 use crate::exec::TableId;
+
+/// The request's variables facet (design §4.4): the superglobals and the
+/// global symbol table, and the input they are made from: the query, the
+/// body and its uploads, and the request's method, URI and headers.
+/// [`Request::variables`] reads it and [`Request::variables_mut`] changes
+/// it; either is the whole request, since nearly every operation can
+/// serve PHP code.
+pub struct Variables<R>(pub(crate) R);
+
+impl Request {
+    /// The variables facet, to read.
+    #[must_use]
+    pub fn variables(&self) -> Variables<&Request> {
+        Variables(self)
+    }
+
+    /// The variables facet, to change.
+    pub fn variables_mut(&mut self) -> Variables<&mut Request> {
+        Variables(self)
+    }
+}
 
 /// Where a variable php registers came from, php's `PARSE_*` as
 /// `sapi_module.input_filter` is handed it (`Z/main/php_variables.h:25`):
@@ -64,7 +85,7 @@ pub struct BodyLimits {
 /// Each auto-global not made yet, whose field no file but this one
 /// reads.
 #[derive(Default)]
-pub(super) struct Variables {
+pub(super) struct VariablesState {
     /// Each auto-global made just in time and not made yet, php's
     /// `armed` on each of `CG(auto_globals)`: the first
     /// `zend_is_auto_global` of one lays it into `EG(symbol_table)`
@@ -150,58 +171,6 @@ impl Request {
         Ok(())
     }
 
-    /// A variable of `EG(symbol_table)` read, `zend_hash_find` there
-    /// with an attached name followed to its frame's variable: what the
-    /// program's `$GLOBALS[$name]` is now, a view, no owner taken.
-    /// `phpinfo()` and the URL rewriter read `$_SERVER` so, and see the
-    /// program's writes to it, where [`Request::superglobal`] does not.
-    pub fn global(&mut self, name: &[u8]) -> Option<Value> {
-        let table = self.global_table();
-        self.symbol_value(table, name)
-    }
-
-    /// The names `EG(symbol_table)` holds, in its order, what the
-    /// shell's completion of a `$` walks
-    /// (`cli_completion_generator_var`).
-    pub fn global_names(&mut self) -> Vec<Vec<u8>> {
-        let table = self.global_table();
-        self.table_mut(table)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .map(|(name, _)| name.as_bytes().to_vec())
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// A variable of `EG(symbol_table)` written or deleted, what an
-    /// extension that binds a global does: `Some` is
-    /// `zend_hash_update_ind`, a sink whose owner the table takes, into
-    /// the CV a frame attached to the name where one is, and into the
-    /// bucket otherwise, a name the table has not added to it; `None` is
-    /// `zend_delete_global_variable`, `zend_hash_del_ind`. What stood
-    /// there is released after the write, where a destructor is served.
-    /// The session binds `$_SESSION` so (`php_session_track_init`), and
-    /// the CLI's `-R` binds `$argn` and `$argi`. The name is keyed as
-    /// `ZSTR_INIT_LITERAL` and `zend_hash_str_update` key it,
-    /// `zend_string_init`, a string of the request's that the table keeps
-    /// where it adds the name and that goes where the name stood already.
-    pub fn set_global(&mut self, name: &[u8], value: Option<Owner<Value>>) {
-        let table = self.global_table();
-        match value {
-            Some(value) => match self.string_init(name) {
-                Ok(key) => {
-                    let key = Owner::adopt(key);
-                    self.symbol_update_ind(table, *key, value.hand_on(), Overwrite::InPlace);
-                    key.give_up(self);
-                }
-                Err(_) => value.give_up(self),
-            },
-            None => self.symbol_unset(table, name),
-        }
-    }
-
     /// `php_build_argv(NULL, PG(http_globals)[TRACK_VARS_SERVER])` over
     /// `argv`, `SG(request_info).argv` from here, as phpdbg's `run` with
     /// arguments rebuilds them in the request standing
@@ -236,9 +205,9 @@ impl Request {
         }
         if server {
             let held = Owner::take(self, words);
-            self.update_server(b"argv", held)?;
+            self.variables_mut().update_server(b"argv", held)?;
             let held = Owner::take(self, count);
-            self.update_server(b"argc", held)?;
+            self.variables_mut().update_server(b"argc", held)?;
         }
         self.release(words);
         Ok(())
@@ -258,95 +227,6 @@ impl Request {
         };
         self.variables.armed.remove(at);
         self.make(global)
-    }
-
-    /// php's reader of an auto-global, `zend_is_auto_global` and then
-    /// `PG(http_globals)[TRACK_VARS_*]`, as `php_zlib_output_encoding`
-    /// and `get_browser` read `$_SERVER`: one armed to be made just in
-    /// time is made first, and the answer is the array the host made,
-    /// the one the program sees as `$_SERVER` until the program writes
-    /// to its own. `None` for a name that is no auto-global and for
-    /// `$_REQUEST` and `$_SESSION`, which php keeps no track of, and
-    /// for one whose making met the memory limit, which the program
-    /// meets again at its next allocation.
-    ///
-    /// `filter_input_array(INPUT_ENV)` reads `$_ENV` so, which a
-    /// program that never names it has not made: the read makes it.
-    ///
-    /// ```php
-    /// var_dump(is_array(filter_input_array(INPUT_ENV)));
-    /// ```
-    /// ```expect
-    /// bool(true)
-    /// ```
-    ///
-    /// The program's write separates its array from the track, and the
-    /// extension reads what the host described, `$_SERVER` as
-    /// `zlib_get_coding_type()` reads it and `$_ENV` alike:
-    ///
-    /// ```php
-    /// $_SERVER['HTTP_ACCEPT_ENCODING'] = 'gzip';
-    /// ini_set('zlib.output_compression', 'On');
-    /// $coding = zlib_get_coding_type();
-    /// ini_set('zlib.output_compression', 'Off');
-    /// $_ENV['WITNESS'] = 'written';
-    /// var_dump($coding, filter_has_var(INPUT_ENV, 'WITNESS'), $_ENV['WITNESS']);
-    /// ```
-    /// ```expect
-    /// bool(false)
-    /// bool(false)
-    /// string(7) "written"
-    /// ```
-    pub fn superglobal(&mut self, name: &[u8]) -> Option<PhpArray> {
-        let global = AutoGlobal::of(name)?;
-        self.arm(global).ok();
-        self.http_globals.track(global).and_then(|track| *track)
-    }
-
-    /// `PG(http_globals)` for an auto-global as it stands, made or not,
-    /// and never made by the asking: what `Phar::webPhar` reads `$_SERVER`
-    /// through, whose `Z_TYPE(...) != IS_UNDEF` asks whether the program
-    /// has named it. A view: no owner taken.
-    #[must_use]
-    pub fn made_superglobal(&mut self, name: &[u8]) -> Option<PhpArray> {
-        let global = AutoGlobal::of(name)?;
-        self.http_globals.track(global).and_then(|track| *track)
-    }
-
-    /// `zend_hash_str_update` on `PG(http_globals)[TRACK_VARS_SERVER]` in
-    /// place, which php allows `$_SERVER` alone (`HT_ALLOW_COW_VIOLATION`,
-    /// `Z/main/php_variables.c:902`): the program's `$_SERVER`, the same
-    /// array while it has not written to its own, sees the row, as
-    /// `phar_mung_server_vars` has it. `value` is the array's from here;
-    /// nothing is written where `$_SERVER` was never made.
-    pub fn update_server(&mut self, name: &[u8], value: Owner<Value>) -> Result<(), Thrown> {
-        let Some(server) = self.http_globals.server else {
-            value.give_up(self);
-            return Ok(());
-        };
-        let name = match PhpString::new(self, name) {
-            Ok(name) => name,
-            Err(thrown) => {
-                value.give_up(self);
-                return Err(thrown);
-            }
-        };
-        let written = self.array_update(server.heap(), Key::Str(*name).heap(), value.hand_on());
-        name.give_up(self);
-        written
-    }
-
-    /// `SG(request_info).request_method`, where the host was given one.
-    #[must_use]
-    pub fn request_method(&self) -> Option<&[u8]> {
-        self.web()?.method.as_ref().map(crate::engine::Method::name)
-    }
-
-    /// `SG(request_info).request_uri`, where the host was given one: php's
-    /// CGI takes it from `SCRIPT_NAME` (`init_request_info`).
-    #[must_use]
-    pub fn request_uri(&self) -> Option<&[u8]> {
-        self.web()?.request_uri.as_deref()
     }
 
     /// Step 8 of `php_request_shutdown` (`Z/main/main.c:2011`): each
@@ -724,7 +604,158 @@ impl Request {
     }
 }
 
-impl Request {
+impl<'r> Variables<&'r Request> {
+    /// `SG(request_info).request_method`, where the host was given one.
+    #[must_use]
+    pub fn request_method(self) -> Option<&'r [u8]> {
+        self.0
+            .web()?
+            .method
+            .as_ref()
+            .map(crate::engine::Method::name)
+    }
+
+    /// `SG(request_info).request_uri`, where the host was given one: php's
+    /// CGI takes it from `SCRIPT_NAME` (`init_request_info`).
+    #[must_use]
+    pub fn request_uri(self) -> Option<&'r [u8]> {
+        self.0.web()?.request_uri.as_deref()
+    }
+}
+
+impl Variables<&mut Request> {
+    /// A variable of `EG(symbol_table)` read, `zend_hash_find` there
+    /// with an attached name followed to its frame's variable: what the
+    /// program's `$GLOBALS[$name]` is now, a view, no owner taken.
+    /// `phpinfo()` and the URL rewriter read `$_SERVER` so, and see the
+    /// program's writes to it, where [`Variables::superglobal`] does not.
+    pub fn global(self, name: &[u8]) -> Option<Value> {
+        let table = self.0.global_table();
+        self.0.symbol_value(table, name)
+    }
+
+    /// The names `EG(symbol_table)` holds, in its order, what the
+    /// shell's completion of a `$` walks
+    /// (`cli_completion_generator_var`).
+    pub fn global_names(self) -> Vec<Vec<u8>> {
+        let table = self.0.global_table();
+        self.0
+            .table_mut(table)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|(name, _)| name.as_bytes().to_vec())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A variable of `EG(symbol_table)` written or deleted, what an
+    /// extension that binds a global does: `Some` is
+    /// `zend_hash_update_ind`, a sink whose owner the table takes, into
+    /// the CV a frame attached to the name where one is, and into the
+    /// bucket otherwise, a name the table has not added to it; `None` is
+    /// `zend_delete_global_variable`, `zend_hash_del_ind`. What stood
+    /// there is released after the write, where a destructor is served.
+    /// The session binds `$_SESSION` so (`php_session_track_init`), and
+    /// the CLI's `-R` binds `$argn` and `$argi`. The name is keyed as
+    /// `ZSTR_INIT_LITERAL` and `zend_hash_str_update` key it,
+    /// `zend_string_init`, a string of the request's that the table keeps
+    /// where it adds the name and that goes where the name stood already.
+    pub fn set_global(self, name: &[u8], value: Option<Owner<Value>>) {
+        let table = self.0.global_table();
+        match value {
+            Some(value) => match self.0.string_init(name) {
+                Ok(key) => {
+                    let key = Owner::adopt(key);
+                    self.0
+                        .symbol_update_ind(table, *key, value.hand_on(), Overwrite::InPlace);
+                    key.give_up(self.0);
+                }
+                Err(_) => value.give_up(self.0),
+            },
+            None => self.0.symbol_unset(table, name),
+        }
+    }
+
+    /// php's reader of an auto-global, `zend_is_auto_global` and then
+    /// `PG(http_globals)[TRACK_VARS_*]`, as `php_zlib_output_encoding`
+    /// and `get_browser` read `$_SERVER`: one armed to be made just in
+    /// time is made first, and the answer is the array the host made,
+    /// the one the program sees as `$_SERVER` until the program writes
+    /// to its own. `None` for a name that is no auto-global and for
+    /// `$_REQUEST` and `$_SESSION`, which php keeps no track of, and
+    /// for one whose making met the memory limit, which the program
+    /// meets again at its next allocation.
+    ///
+    /// `filter_input_array(INPUT_ENV)` reads `$_ENV` so, which a
+    /// program that never names it has not made: the read makes it.
+    ///
+    /// ```php
+    /// var_dump(is_array(filter_input_array(INPUT_ENV)));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// ```
+    ///
+    /// The program's write separates its array from the track, and the
+    /// extension reads what the host described, `$_SERVER` as
+    /// `zlib_get_coding_type()` reads it and `$_ENV` alike:
+    ///
+    /// ```php
+    /// $_SERVER['HTTP_ACCEPT_ENCODING'] = 'gzip';
+    /// ini_set('zlib.output_compression', 'On');
+    /// $coding = zlib_get_coding_type();
+    /// ini_set('zlib.output_compression', 'Off');
+    /// $_ENV['WITNESS'] = 'written';
+    /// var_dump($coding, filter_has_var(INPUT_ENV, 'WITNESS'), $_ENV['WITNESS']);
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// string(7) "written"
+    /// ```
+    pub fn superglobal(self, name: &[u8]) -> Option<PhpArray> {
+        let global = AutoGlobal::of(name)?;
+        self.0.arm(global).ok();
+        self.0.http_globals.track(global).and_then(|track| *track)
+    }
+
+    /// `PG(http_globals)` for an auto-global as it stands, made or not,
+    /// and never made by the asking: what `Phar::webPhar` reads `$_SERVER`
+    /// through, whose `Z_TYPE(...) != IS_UNDEF` asks whether the program
+    /// has named it. A view: no owner taken.
+    #[must_use]
+    pub fn made_superglobal(self, name: &[u8]) -> Option<PhpArray> {
+        let global = AutoGlobal::of(name)?;
+        self.0.http_globals.track(global).and_then(|track| *track)
+    }
+
+    /// `zend_hash_str_update` on `PG(http_globals)[TRACK_VARS_SERVER]` in
+    /// place, which php allows `$_SERVER` alone (`HT_ALLOW_COW_VIOLATION`,
+    /// `Z/main/php_variables.c:902`): the program's `$_SERVER`, the same
+    /// array while it has not written to its own, sees the row, as
+    /// `phar_mung_server_vars` has it. `value` is the array's from here;
+    /// nothing is written where `$_SERVER` was never made.
+    pub fn update_server(self, name: &[u8], value: Owner<Value>) -> Result<(), Thrown> {
+        let Some(server) = self.0.http_globals.server else {
+            value.give_up(self.0);
+            return Ok(());
+        };
+        let name = match PhpString::new(self.0, name) {
+            Ok(name) => name,
+            Err(thrown) => {
+                value.give_up(self.0);
+                return Err(thrown);
+            }
+        };
+        let written = self
+            .0
+            .array_update(server.heap(), Key::Str(*name).heap(), value.hand_on());
+        name.give_up(self.0);
+        written
+    }
+
     /// `parse_str()`'s half that is php's variable registration,
     /// `php_default_treat_data(PARSE_STRING, string, array)`, into a fresh
     /// array: the string up to its first NUL split on `arg_separator.input` as `php_strtok_r`
@@ -750,9 +781,10 @@ impl Request {
     ///   string(1) "4"
     /// }
     /// ```
-    pub fn parse_query(&mut self, string: &[u8]) -> Result<Owner<PhpArray>, Thrown> {
-        let array = PhpArray::new(self)?;
-        self.treat_into(Input::String, Some(string), *array, &BodyLimits::default())?;
+    pub fn parse_query(self, string: &[u8]) -> Result<Owner<PhpArray>, Thrown> {
+        let array = PhpArray::new(self.0)?;
+        self.0
+            .treat_into(Input::String, Some(string), *array, &BodyLimits::default())?;
         Ok(array)
     }
 
@@ -764,14 +796,41 @@ impl Request {
     /// is registered so, as `php_sapi_filter` keeps its own. `value` is the
     /// array's from here.
     pub fn register_variable(
-        &mut self,
+        self,
         into: PhpArray,
         name: &[u8],
         value: Owner<Value>,
     ) -> Result<(), Thrown> {
-        self.register_in(into, name, value, false)
+        self.0.register_in(into, name, value, false)
     }
 
+    /// The request headers the host received, `getallheaders()`, as
+    /// strings of the request's.
+    pub fn request_headers(self) -> Result<Owner<PhpArray>, Thrown> {
+        let mut array = PhpArray::new(self.0)?;
+        let headers = self
+            .0
+            .description
+            .web
+            .as_ref()
+            .map(|web| web.headers.clone())
+            .unwrap_or_default();
+        for (name, value) in &headers {
+            let key = PhpString::new(self.0, name)?.into_key();
+            let value = match PhpString::new(self.0, value) {
+                Ok(value) => value.into_value(),
+                Err(thrown) => {
+                    key.give_up(self.0);
+                    return Err(thrown);
+                }
+            };
+            array.set(self.0, key, value)?;
+        }
+        Ok(array)
+    }
+}
+
+impl Request {
     /// `php_default_treat_data` (`Z/main/php_variables.c:455`) for the
     /// query string and the cookie header: a fresh array, and each
     /// variable of `source` registered into it.
@@ -1225,30 +1284,6 @@ impl Request {
             }
         };
         container.set(self, key, value)
-    }
-
-    /// The request headers the host received, `getallheaders()`, as
-    /// strings of the request's.
-    pub fn request_headers(&mut self) -> Result<Owner<PhpArray>, Thrown> {
-        let mut array = PhpArray::new(self)?;
-        let headers = self
-            .description
-            .web
-            .as_ref()
-            .map(|web| web.headers.clone())
-            .unwrap_or_default();
-        for (name, value) in &headers {
-            let key = PhpString::new(self, name)?.into_key();
-            let value = match PhpString::new(self, value) {
-                Ok(value) => value.into_value(),
-                Err(thrown) => {
-                    key.give_up(self);
-                    return Err(thrown);
-                }
-            };
-            array.set(self, key, value)?;
-        }
-        Ok(array)
     }
 }
 

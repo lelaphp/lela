@@ -1029,7 +1029,7 @@ mahout = "RequestCtx::superglobal"
 sites = 8
 crates = 2
 status = "same"
-api = "request::Request::superglobal"
+api = "request::Variables::superglobal"
 
 [[item]]
 mahout = "RequestCtx::stream_wrappers"
@@ -1057,7 +1057,7 @@ mahout = "RequestCtx::set_superglobal"
 sites = 5
 crates = 1
 status = "renamed"
-api = "request::Request::set_global"
+api = "request::Variables::set_global"
 
 [[item]]
 mahout = "RequestCtx::frame_vars_for_native_mut"
@@ -1176,7 +1176,7 @@ mahout = "RequestCtx::is_uploaded_file"
 sites = 2
 crates = 1
 status = "same"
-api = "request::Request::is_uploaded_file"
+api = "request::Variables::is_uploaded_file"
 
 [[item]]
 mahout = "RequestCtx::lsb_for_native"
@@ -1575,7 +1575,7 @@ mahout = "RequestCtx::request_headers"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::request_headers"
+api = "request::Variables::request_headers"
 
 [[item]]
 mahout = "RequestCtx::reset_memory_peak"
@@ -1701,7 +1701,7 @@ mahout = "RequestCtx::take_uploaded_file"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::take_uploaded_file"
+api = "request::Variables::take_uploaded_file"
 
 [[item]]
 mahout = "RequestCtx::tick_due"
@@ -4404,28 +4404,28 @@ mahout = "mahout_runtime::gpc::GpcOptions"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::parse_query"
+api = "request::Variables::parse_query"
 
 [[item]]
 mahout = "mahout_runtime::gpc::build_tree"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::parse_query"
+api = "request::Variables::parse_query"
 
 [[item]]
 mahout = "mahout_runtime::gpc::materialize"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::parse_query"
+api = "request::Variables::parse_query"
 
 [[item]]
 mahout = "mahout_runtime::gpc::parse_urlencoded"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::parse_query"
+api = "request::Variables::parse_query"
 
 [[item]]
 mahout = "mahout_runtime::native_marshal::MarshalCtx"

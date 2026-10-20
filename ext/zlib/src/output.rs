@@ -142,6 +142,7 @@ fn encoding(req: &mut Request) -> Result<Coding, Thrown> {
         return Ok(globals(req).coding);
     }
     let found = req
+        .variables_mut()
         .superglobal(b"_SERVER")
         .and_then(|server| server.find(b"HTTP_ACCEPT_ENCODING"));
     if let Some(value) = found {

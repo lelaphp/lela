@@ -152,6 +152,7 @@ mod unit_cache;
 mod unit_strings;
 pub(crate) use unit_cache::HandlePath;
 mod variables;
+pub use variables::Variables;
 mod zone;
 pub use post::Upload;
 pub use variables::url_decode;
@@ -289,8 +290,8 @@ pub struct Request {
     /// php's post state: the body's reader, what the host has handed
     /// out of it, and the files an upload wrote ([`post::Post`]).
     post: post::Post,
-    /// Each auto-global not made yet ([`variables::Variables`]).
-    variables: variables::Variables,
+    /// Each auto-global not made yet ([`variables::VariablesState`]).
+    variables: variables::VariablesState,
     /// The symbol tables, [`TableId`] naming one: php's
     /// `EG(symbol_table)` first, the main op array's variables (design
     /// §5.6, §5.10), and after it one table per function frame that
@@ -1047,7 +1048,7 @@ impl Request {
             resources,
             http_globals: variables::HttpGlobals::default(),
             post: post::Post::default(),
-            variables: variables::Variables::default(),
+            variables: variables::VariablesState::default(),
             tables: vec![SymbolTable::global()],
             included_files: hash_bytes::IncludedFiles::default(),
             hash_bytes: hash_bytes::HashTables::default(),

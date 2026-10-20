@@ -358,8 +358,9 @@ fn modules(req: &mut Request) {
 fn gpcse(req: &mut Request, name: &str) -> Result<Vec<u8>, Thrown> {
     let html = html(req);
     let mut out = Vec::new();
-    let _ = req.superglobal(name.as_bytes());
+    let _ = req.variables_mut().superglobal(name.as_bytes());
     let Some(array) = req
+        .variables_mut()
         .global(name.as_bytes())
         .and_then(|value| value.deref().as_array().copied())
     else {
@@ -534,7 +535,7 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
         section(req, "PHP Variables");
         let mut own: Vec<[String; 2]> = Vec::new();
         for name in ["PHP_SELF", "PHP_AUTH_TYPE", "PHP_AUTH_USER", "PHP_AUTH_PW"] {
-            if let Some(value) = req.global(name.as_bytes())
+            if let Some(value) = req.variables_mut().global(name.as_bytes())
                 && let Some(value) = value.as_str_bytes()
             {
                 own.push([name.to_owned(), String::from_utf8_lossy(value).into_owned()]);

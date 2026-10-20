@@ -227,14 +227,15 @@ pub fn variables(req: &mut Request, frame: FrameRef) -> Vec<Variable> {
 /// first and read in the global table's order, one level deep.
 pub fn superglobals(req: &mut Request) -> Vec<Variable> {
     for name in &AUTO_GLOBALS[..7] {
-        req.superglobal(name);
+        req.variables_mut().superglobal(name);
     }
     let read = req
+        .variables_mut()
         .global_names()
         .into_iter()
         .filter(|name| AUTO_GLOBALS.contains(&name.as_slice()))
         .filter_map(|name| {
-            let value = req.global(&name)?;
+            let value = req.variables_mut().global(&name)?;
             Some((name, value))
         })
         .collect();

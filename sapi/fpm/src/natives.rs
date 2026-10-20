@@ -274,5 +274,5 @@ fn fpm_get_status(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown>
 /// ```
 #[php_function(aliases(getallheaders))]
 fn apache_request_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
-    req.request_headers()
+    req.variables_mut().request_headers()
 }

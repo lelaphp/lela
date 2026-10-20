@@ -249,7 +249,8 @@ fn mb_parse_str(
     for (name, value) in variables {
         // `php_register_variable_safe`'s `ZVAL_STRINGL_FAST`.
         let value = crate::text::cut_string(req, &value)?;
-        req.register_variable(into, &name, value.into_value())?;
+        req.variables_mut()
+            .register_variable(into, &name, value.into_value())?;
     }
     req.state::<State>().identified = detected;
     Ok(detected.is_some())

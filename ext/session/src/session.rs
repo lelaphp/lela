@@ -218,7 +218,7 @@ pub(super) fn create_id(req: &mut Request) -> Option<Vec<u8>> {
 /// }
 /// ```
 pub(super) fn track_init(req: &mut Request) -> Result<(), Thrown> {
-    req.set_global(b"_SESSION", None);
+    req.variables_mut().set_global(b"_SESSION", None);
     let array = PhpArray::new(req)?;
     bind_vars(req, array.into_value())
 }
@@ -491,7 +491,7 @@ fn prime(req: &mut Request) {
 fn find_id(req: &mut Request) {
     let name = ini(req, b"session.name");
     let lookup = |req: &mut Request, global: &[u8]| -> Option<Option<Vec<u8>>> {
-        let array = req.superglobal(global)?;
+        let array = req.variables_mut().superglobal(global)?;
         let found = array.find(&name)?.deref();
         Some(found.as_str_bytes().map(<[u8]>::to_vec))
     };
@@ -854,6 +854,7 @@ pub(super) fn reset_id(req: &mut Request) -> Result<bool, Thrown> {
         let name = ini(req, b"session.name");
         let cookie_carries_it = ini_bool(req, b"session.use_cookies")
             && req
+                .variables_mut()
                 .superglobal(b"_COOKIE")
                 .is_some_and(|cookies| cookies.find(&name).is_some());
         if !cookie_carries_it {

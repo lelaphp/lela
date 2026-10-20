@@ -252,7 +252,8 @@ fn bailout(req: &mut Request) -> Thrown {
 
 /// A string row of `$_SERVER` as it stands, made or not.
 fn server_row(req: &mut Request, name: &[u8]) -> Option<Vec<u8>> {
-    req.made_superglobal(b"_SERVER")?
+    req.variables_mut()
+        .made_superglobal(b"_SERVER")?
         .find(name)
         .and_then(|value| value.as_str_bytes().map(<[u8]>::to_vec))
 }
@@ -266,9 +267,9 @@ fn swap_server(
     new: &[u8],
 ) -> Result<(), Thrown> {
     let value = PhpString::new(req, new)?.into_value();
-    req.update_server(name, value)?;
+    req.variables_mut().update_server(name, value)?;
     let value = PhpString::new(req, old)?.into_value();
-    req.update_server(kept, value)
+    req.variables_mut().update_server(kept, value)
 }
 
 /// `phar_mung_server_vars` (`Z/ext/phar/phar_object.c:57`): `PATH_INFO`
@@ -282,7 +283,7 @@ fn mung_server_vars(
     basename: &[u8],
     ru_len: usize,
 ) -> Result<(), Thrown> {
-    if req.made_superglobal(b"_SERVER").is_none() {
+    if req.variables_mut().made_superglobal(b"_SERVER").is_none() {
         return Ok(());
     }
     let mut url = b"phar://".to_vec();
@@ -478,8 +479,11 @@ pub(crate) fn web_phar(
         Err(None) => return Ok(()),
         Err(Some(error)) => return Err(throw(req, "PharException", &error)),
     }
-    let served = req.request_method().is_some_and(|m| METHODS.contains(&m));
-    if !served || req.request_uri().is_none() {
+    let served = req
+        .variables()
+        .request_method()
+        .is_some_and(|m| METHODS.contains(&m));
+    if !served || req.variables().request_uri().is_none() {
         return Ok(());
     }
     let Some(fname) = req.current_file().map(<[u8]>::to_vec) else {
@@ -634,7 +638,7 @@ fn locate(req: &mut Request, basename: &[u8]) -> Option<Located> {
         "cgi-fcgi" | "fpm-fcgi" | "cgi" | "litespeed"
     );
     if !cgi {
-        let path_info = req.request_uri().unwrap_or_default().to_vec();
+        let path_info = req.variables().request_uri().unwrap_or_default().to_vec();
         let at = crate::path::find(&path_info, basename)?;
         let end = at + basename.len();
         return Some(Located {
@@ -644,7 +648,7 @@ fn locate(req: &mut Request, basename: &[u8]) -> Option<Located> {
             not_cgi: true,
         });
     }
-    if req.made_superglobal(b"_SERVER").is_some() {
+    if req.variables_mut().made_superglobal(b"_SERVER").is_some() {
         let script_name = server_row(req, b"SCRIPT_NAME")?;
         crate::path::find(&script_name, basename)?;
         let entry = server_row(req, b"PATH_INFO").unwrap_or_default();

@@ -230,7 +230,7 @@ fn apache_child_terminate(req: &mut Request) {
 /// ```
 #[php_function(aliases(getallheaders))]
 fn apache_request_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
-    req.request_headers()
+    req.variables_mut().request_headers()
 }
 
 /// `apache_response_headers(): array` (`Z/sapi/cgi/cgi_main.c:1689`):

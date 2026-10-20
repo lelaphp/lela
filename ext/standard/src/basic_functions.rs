@@ -1716,7 +1716,7 @@ fn unregister_tick_function(req: &mut Request, callback: Callable) -> Result<(),
 /// ```
 #[php_function]
 fn is_uploaded_file(req: &mut Request, filename: Path) -> bool {
-    req.is_uploaded_file(filename.0.as_bytes())
+    req.variables().is_uploaded_file(filename.0.as_bytes())
 }
 
 /// `move_uploaded_file(string $from, string $to): bool`: an upload the
@@ -1736,13 +1736,13 @@ fn is_uploaded_file(req: &mut Request, filename: Path) -> bool {
 #[php_function]
 fn move_uploaded_file(req: &mut Request, from: Path, to: Path) -> bool {
     let (Path(from), Path(to)) = (from, to);
-    if !req.is_uploaded_file(from.as_bytes()) {
+    if !req.variables().is_uploaded_file(from.as_bytes()) {
         return false;
     }
     let Ok(target) = req.check_open_basedir(to.as_bytes(), true) else {
         return false;
     };
-    let Some(source) = req.take_uploaded_file(from.as_bytes()) else {
+    let Some(source) = req.variables_mut().take_uploaded_file(from.as_bytes()) else {
         return false;
     };
     let moved = std::fs::rename(&source, &target).is_ok()

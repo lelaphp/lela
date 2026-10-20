@@ -398,6 +398,7 @@ fn get_browser(
     } else {
         {
             let found = req
+                .variables_mut()
                 .superglobal(b"_SERVER")
                 .and_then(|server| server.find(b"HTTP_USER_AGENT"))
                 .and_then(|value| value.deref().as_str_bytes().map(<[u8]>::to_vec));

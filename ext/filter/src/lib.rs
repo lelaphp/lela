@@ -167,7 +167,7 @@ fn sapi_filter(
     // value handed on where it has a byte, `ZVAL_EMPTY_STRING` where not.
     if let Some(array) = kept {
         let raw = string_init(req, value)?;
-        req.register_variable(array, name, raw)?;
+        req.variables_mut().register_variable(array, name, raw)?;
     }
     let raw = if value.is_empty() {
         string_value(req, value)?
@@ -1026,10 +1026,10 @@ fn storage(req: &mut Request, input: i64) -> Result<Option<Owner<PhpArray>>, Thr
         INPUT_GET => req.state::<State>().get.as_deref().copied(),
         INPUT_COOKIE => req.state::<State>().cookie.as_deref().copied(),
         INPUT_SERVER => {
-            let _ = req.superglobal(b"_SERVER");
+            let _ = req.variables_mut().superglobal(b"_SERVER");
             req.state::<State>().server.as_deref().copied()
         }
-        INPUT_ENV => req.superglobal(b"_ENV"),
+        INPUT_ENV => req.variables_mut().superglobal(b"_ENV"),
         _ => return Err(arg_value_error(req, 1, "be an INPUT_* constant")),
     };
     Ok(kept.map(|array| Owner::take(req, array)))

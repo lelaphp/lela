@@ -84,6 +84,6 @@ pub(super) fn parse_str(
     string: PhpString,
     result: Ref<Untyped<Value>>,
 ) -> Result<(), Thrown> {
-    let array = req.parse_query(string.as_bytes())?;
+    let array = req.variables_mut().parse_query(string.as_bytes())?;
     result.set(req, Untyped(array.into_value()))
 }

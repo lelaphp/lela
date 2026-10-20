@@ -131,8 +131,10 @@ impl Engine {
                 return;
             };
             index += 1;
-            req.set_global(b"argn", Some(line.into_value()));
-            req.set_global(b"argi", Some(Owner::int(index)));
+            req.variables_mut()
+                .set_global(b"argn", Some(line.into_value()));
+            req.variables_mut()
+                .set_global(b"argi", Some(Owner::int(index)));
             let goes_on = match each {
                 Some(EachLine::Code(code)) => eval_string(req, code, b"Command line run code"),
                 Some(EachLine::File) => {

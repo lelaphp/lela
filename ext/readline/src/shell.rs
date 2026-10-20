@@ -351,7 +351,7 @@ pub(crate) fn completion(req: &mut Request, text: &[u8]) -> Matches {
     let mut found: Vec<Vec<u8>> = Vec::new();
     let mut append = None;
     if let Some(name) = text.strip_prefix(b"$") {
-        for var in req.global_names() {
+        for var in req.variables_mut().global_names() {
             if var.starts_with(name) {
                 found.push([b"$".as_slice(), &var].concat());
                 append = Some(0);
