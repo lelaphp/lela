@@ -40,7 +40,7 @@ use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use php_engine::tier::FuncRef;
 use php_heap::{Arr, ROOM_BYTES, Ref, Zval, ZvalType};
-use php_unit::{MapPtrOffset, Opcode};
+use php_unit::{MapPtrOffset, Opcode, OplineIdx};
 
 use super::{ABANDONED, INTERRUPT_AT, Kernel, Stood, Symbols, located};
 use crate::record::Stop;
@@ -422,22 +422,10 @@ impl<'a> Emit<'a> {
                 self.b.def_var(self.room_var(*frame)?, room);
                 self.running = *frame;
                 for guard in self.within(id) {
-                    let Check::Caller { func, opline } = guard.check else {
+                    let Check::Stands { func, opline } = guard.check else {
                         return Err(mismatch("a return holds a guard of another kind"));
                     };
-                    let landed = self.stood_word(I32, STOOD_FUNC);
-                    let at = self.stood_word(I32, STOOD_OPLINE);
-                    let other_func = self.b.ins().icmp_imm_u(
-                        IntCC::NotEqual,
-                        landed,
-                        i64::from(engine_offset(func)?),
-                    );
-                    let other_opline =
-                        self.b
-                            .ins()
-                            .icmp_imm_u(IntCC::NotEqual, at, i64::from(opline.0));
-                    let other = self.b.ins().bor(other_func, other_opline);
-                    self.leave_if(other, guard.exit)?;
+                    self.stands(func, opline, guard.exit)?;
                 }
                 Ok(())
             }
@@ -516,7 +504,7 @@ impl<'a> Emit<'a> {
                 let other = self.b.ins().icmp_imm_s(cc, packed, 0);
                 self.leave_if(other, guard.exit)?;
             }
-            Check::Direction { .. } | Check::Table | Check::Caller { .. } => {
+            Check::Direction { .. } | Check::Stands { .. } => {
                 return Err(mismatch("an op's own guard held before it"));
             }
         }
@@ -788,11 +776,10 @@ impl<'a> Emit<'a> {
             self.calls.pop();
         }
         for guard in self.within(at) {
-            let went = self.stood_word(I32, STOOD_OPLINE);
-            let next = self.successor(at, line.frame);
             match guard.check {
                 Check::Direction { .. } => {
-                    let other = if let Some(next) = next {
+                    let went = self.stood_word(I32, STOOD_OPLINE);
+                    let other = if let Some(next) = self.successor(at, line.frame) {
                         self.b
                             .ins()
                             .icmp_imm_u(IntCC::NotEqual, went, i64::from(next))
@@ -809,26 +796,31 @@ impl<'a> Emit<'a> {
                     };
                     self.leave_where(other, guard.exit)?;
                 }
-                // A trace that ends at the table goes on where the jump
-                // went, so there is nothing to hold.
-                Check::Table => {
-                    if let Some(next) = next {
-                        let other = self
-                            .b
-                            .ins()
-                            .icmp_imm_u(IntCC::NotEqual, went, i64::from(next));
-                        self.leave_if(other, guard.exit)?;
-                    }
-                }
-                Check::Type { .. }
-                | Check::Deref { .. }
-                | Check::Layout { .. }
-                | Check::Caller { .. } => {
+                Check::Stands { func, opline } => self.stands(func, opline, guard.exit)?,
+                Check::Type { .. } | Check::Deref { .. } | Check::Layout { .. } => {
                     return Err(mismatch("a stepped opline holds a guard of another kind"));
                 }
             }
         }
         Ok(())
+    }
+
+    /// php's IP guard: leave through `exit` unless the last kernel left
+    /// the interpreter at `opline` of `func`. The exit names no opline, so
+    /// exit-fuzz fails it too.
+    fn stands(&mut self, func: FuncRef, opline: OplineIdx, exit: ExitId) -> Result<(), Abort> {
+        let landed = self.stood_word(I32, STOOD_FUNC);
+        let at = self.stood_word(I32, STOOD_OPLINE);
+        let other_func =
+            self.b
+                .ins()
+                .icmp_imm_u(IntCC::NotEqual, landed, i64::from(engine_offset(func)?));
+        let other_opline = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, at, i64::from(opline.0));
+        let other = self.b.ins().bor(other_func, other_opline);
+        self.leave_if(other, exit)
     }
 
     /// The opline the trace serves next in `frame` after the op at `at`,

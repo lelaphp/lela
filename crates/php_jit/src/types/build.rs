@@ -292,7 +292,8 @@ impl<'a> Builder<'a> {
             Some(Repeat::Return) | None => {}
         }
         for (at, event) in body.iter().enumerate() {
-            let next = events.get(at + 1);
+            let ahead = events.get(at + 1..).unwrap_or_default();
+            let next = ahead.first();
             match event {
                 Event::Op {
                     func,
@@ -308,7 +309,7 @@ impl<'a> Builder<'a> {
                         *opline,
                         [*op1, *op2, *data],
                         *branch,
-                        next,
+                        ahead,
                         root_return,
                     )?;
                     if root_return {
@@ -410,9 +411,10 @@ impl<'a> Builder<'a> {
         at: OplineIdx,
         samples: [Option<Sample>; 3],
         branch: Option<bool>,
-        next: Option<&Event>,
+        ahead: &[Event],
         root_return: bool,
     ) -> Result<(), Abort> {
+        let next = ahead.first();
         let frame = self.running()?;
         if self.frames[usize::from(frame.0)].func != func {
             return Err(mismatch("an opline of another op array than its frame's"));
@@ -493,7 +495,7 @@ impl<'a> Builder<'a> {
         let target = jump.and_then(|jump| jump.jump_target());
         self.successor = went(at, &op, target, len, branch);
         self.own_exit(idx, frame, &op, form, t1);
-        self.table(idx, frame, op.opcode);
+        self.stands(idx, frame, &op, ahead);
         if let Some(taken) = branch {
             let jump = if fused { after } else { None };
             self.direction(
@@ -585,20 +587,42 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The guard of a table's jump, served through `step`: it goes to the
-    /// opline the trace serves next, and where it does not the interpreter
-    /// goes on where the step left the frame, as php's `zend_jit_switch`
-    /// leaves through an exit for each target the trace does not follow.
-    fn table(&mut self, idx: OpId, frame: Frame, opcode: Opcode) {
-        if matches!(
-            opcode,
+    /// php's IP guard after a handler that may leave
+    /// (`zend_jit_trace_handler`, `Z/ext/opcache/jit/zend_jit_ir.c:17129-17236`)
+    /// for a stepped opline whose next opline the record does not say, a
+    /// table's jump (`SWITCH_LONG`, `SWITCH_STRING`, `MATCH`): it is held
+    /// to the opline the trace serves next, as `zend_jit_switch` leaves
+    /// through an exit for each target the trace does not follow.
+    fn stands(&mut self, idx: OpId, frame: Frame, op: &Opline, ahead: &[Event]) {
+        let table = matches!(
+            op.opcode,
             Opcode::SwitchLong | Opcode::SwitchString | Opcode::Match
-        ) {
+        );
+        if let Some((func, opline)) = self.following(ahead).filter(|_| table) {
             self.guards.push(Placed {
                 at: GuardAt::Within(idx),
-                check: Check::Table,
+                check: Check::Stands { func, opline },
                 exit: draft(Point::After(idx), frame, At::Stands),
             });
+        }
+    }
+
+    /// The opline the trace serves next, where the record says it: the
+    /// next one it recorded before a return, or, past the last, a loop's
+    /// header.
+    fn following(&self, ahead: &[Event]) -> Option<(FuncRef, OplineIdx)> {
+        let served = |event: &Event| match event {
+            Event::Op { func, opline, .. } => Some((*func, *opline)),
+            _ => None,
+        };
+        let next = ahead
+            .iter()
+            .take_while(|event| !matches!(event, Event::Back))
+            .find_map(served);
+        match (next, ahead.is_empty(), self.repeat) {
+            (Some(next), ..) => Some(next),
+            (None, true, Some(Repeat::Loop)) => self.rec.events.first().and_then(served),
+            _ => None,
         }
     }
 
@@ -785,7 +809,7 @@ impl<'a> Builder<'a> {
             let call_at = next_op
                 .and_then(|(_, at)| at.0.checked_sub(1))
                 .map(OplineIdx);
-            let guard = next_op.map(|(func, opline)| Check::Caller { func, opline });
+            let guard = next_op.map(|(func, opline)| Check::Stands { func, opline });
             (caller, call_at, guard)
         };
         let code = self.meta(caller).code;

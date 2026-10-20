@@ -301,7 +301,7 @@ pub(crate) enum GuardAt {
     Before(OpId),
     /// By the op, on what it computes, before it writes
     /// it: an arithmetic's overflow, a fetched element's type, a jump's
-    /// direction, a table's target, a return's caller.
+    /// direction, where a step or a return left the interpreter.
     Within(OpId),
 }
 
@@ -316,14 +316,13 @@ pub(crate) enum Check {
     Layout { value: ValueId, layout: Layout },
     /// The jump goes the way it went.
     Direction { taken: bool },
-    /// A table's jump, `SWITCH_LONG`, `SWITCH_STRING` or `MATCH`, goes to
-    /// the opline the trace serves next, as php's `zend_jit_switch` leaves
-    /// through an exit for each target the trace does not follow. Its exit
-    /// lands where the jump left the frame, so it is right whichever way
-    /// the jump went.
-    Table,
-    /// The return lands in this op array at this opline, php's IP guard.
-    Caller { func: FuncRef, opline: OplineIdx },
+    /// The interpreter stands at this opline of this op array once the op
+    /// is done, php's IP guard (`jit_CMP_IP`): where a return past the
+    /// trace's lowest frame lands, and where a stepped opline whose next
+    /// opline the record does not say went, a table's jump. Its exit names
+    /// no opline, so the interpreter goes on where it stands and the exit
+    /// is right whatever the guard held.
+    Stands { func: FuncRef, opline: OplineIdx },
 }
 
 /// How an array is laid out, php's `HASH_FLAG_PACKED` set or clear.
