@@ -10,11 +10,10 @@ use php_macros::php_function;
 use php_unit::decl::{Bare, ClassKind, Visibility};
 
 use crate::api::abi::{
-    OrFalse, Passed, PropertiesFor, PropertyPurpose, PropertyRead, PropertyTest, Raw, Union,
-    Untyped,
+    OrFalse, Passed, PropertiesFor, PropertyPurpose, PropertyTest, Raw, Union, Untyped,
 };
 use crate::api::raising::{Thrown, arg_type_error, deprecated, none_pending, throw_error, warning};
-use crate::api::request::{HookRows, Hooked, HookedDeclared, HookedTable, PropertyInfo, Request};
+use crate::api::request::{HookedTable, PropertyInfo, Request};
 use crate::api::values::walk::{self, Table};
 use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use crate::natives::{Unmangled, unmangle_property_name};
@@ -495,7 +494,7 @@ fn add_hooked_vars(
     scope: Option<ClassId>,
 ) -> Result<(), Thrown> {
     let rows: Vec<(Key, Value)> = walk::rows(req, *hooked.table).collect();
-    let mut declared = hooked.declared.iter();
+    let mut declared = hooked.rows.declared.iter();
     for (key, value) in rows {
         let (key, value) = match (key, declared.next()) {
             (Key::Str(name), Some(row)) => {
@@ -504,7 +503,7 @@ fn add_hooked_vars(
                     continue;
                 }
                 let value = match row.hooked {
-                    Some(property) => hooked_var(req, hooked.object, row, property)?,
+                    Some(_) => req.read_deferred(hooked.rows.object, row, hooked.rows.build)?,
                     None => Owner::take(req, value),
                 };
                 match declared_var_key(req, name, row.visibility) {
@@ -593,22 +592,6 @@ fn access_name_copy(req: &mut Request, name: &[u8], visibility: Visibility) -> R
         copy.give_up(req);
     }
     Ok(())
-}
-
-/// A hooked row of `get_object_vars()`' table read through its hook,
-/// `zend_read_property_ex(prop_info->ce, zobj, unmangled_name, silent)`,
-/// with the copy of the name php makes for the read (`zend_string_init`,
-/// one byte or not) held while the hook is called.
-fn hooked_var(
-    req: &mut Request,
-    object: PhpObject,
-    row: &HookedDeclared,
-    property: Hooked,
-) -> Result<Owner<Value>, Thrown> {
-    let name = Owner::adopt(req.string_init(&row.name)?);
-    let read = req.read_hooked(object, &row.name, property, PropertyRead::Silent);
-    name.give_up(req);
-    read.map(Owner::adopt)
 }
 
 /// `get_object_vars(object $object): array`, php's
@@ -736,20 +719,17 @@ fn hooked_var(
 fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let class = object.class();
     let scope = req.scope();
-    // Over a class with a hooked property whose handlers are php's own,
-    // `zend_std_get_properties_for` answers the table
-    // `zend_hooked_object_build_properties` builds for the call, read
-    // here with the declaration each of its declared rows stands for,
-    // php's `IS_INDIRECT` and `IS_PTR`, and released once read.
-    let overloaded = req.object_handlers(object.heap()).properties_overloaded();
-    if !overloaded && let Some(hooked) = req.hooked_object_table(object, HookRows::Deferred)? {
-        let made = hooked_vars(req, &hooked, scope);
-        hooked.table.give_up(req);
-        return made;
-    }
     // `zend_get_properties_for(ZEND_PROP_PURPOSE_GET_OBJECT_VARS)`: a
-    // class that answers the purpose itself hands back its table.
+    // class that answers the purpose itself hands back its table, and
+    // over a class with a hooked property `zend_std_get_properties_for`
+    // the table `zend_hooked_object_build_properties` builds for the
+    // call, released once read.
     let table = match req.properties_answered(object, PropertyPurpose::GetObjectVars)? {
+        PropertiesFor::Hooked(hooked) => {
+            let made = hooked_vars(req, &hooked, scope);
+            hooked.table.give_up(req);
+            return made;
+        }
         PropertiesFor::Table(Table::Object(table)) => table,
         PropertiesFor::Table(Table::Array(array)) => return answered_vars(req, object, array),
         PropertiesFor::Temporary(table) => {

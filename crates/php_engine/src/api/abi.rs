@@ -20,7 +20,7 @@ use php_unit::decl::{
 use crate::api::call::{Function, Target};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::{Level, Thrown};
-use crate::api::request::Request;
+use crate::api::request::{HookedTable, Request};
 use crate::api::values::{
     ClassId, ClosureInfo, Owner, PhpArray, PhpObject, PhpRef, PhpString, Place, TypeTag, Value,
     walk,
@@ -2315,6 +2315,12 @@ pub enum PropertiesFor {
     /// serializer read as no properties
     /// (`attributes_sensitive_parameter_value_get_properties_for`).
     Null,
+    /// `zend_hooked_object_build_properties`' table, built for the
+    /// reader of an object whose class has a hooked property, whose
+    /// hooked rows the reader reads as it reaches them
+    /// ([`crate::api::values::walk::Row::read`]). Only the engine's
+    /// `Std` answers it.
+    Hooked(HookedTable),
 }
 
 /// What the `get_debug_info` slot answers: php's `HashTable *` with its

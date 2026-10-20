@@ -559,6 +559,26 @@ impl Guard {
 /// {"a":1,"v":"v"}{"y":2}
 /// {"date":"2000-01-01 00:00:00.000000","timezone_type":3,"timezone":"UTC"}
 /// ```
+///
+/// A hooked row is read through its hook only once the walk reaches
+/// it and the row is not stepped over (`Z/ext/json/json_encoder.c:259`),
+/// so a protected or private property's hook is never called, and a
+/// public one's is called after the rows before it are written:
+///
+/// ```php
+/// class S { private $p { get { echo "p read\n"; return 1; } } public $q { get { echo "q read\n"; return 2; } } }
+/// echo json_encode(new S), "\n";
+/// class J implements JsonSerializable { function jsonSerialize(): mixed { echo "js\n"; return 1; } }
+/// class O { public $a; public $b { get { echo "b\n"; return 2; } } function __construct() { $this->a = new J; } }
+/// echo json_encode(new O), "\n";
+/// ```
+/// ```expect
+/// q read
+/// {"q":2}
+/// js
+/// b
+/// {"a":1,"b":2}
+/// ```
 fn encode_object(
     req: &mut Request,
     buf: &mut SmartStr,
@@ -667,7 +687,7 @@ fn write_rows(
         if object && matches!(row.key(), Key::Str(name) if name.as_bytes().first() == Some(&0)) {
             return Ok(ControlFlow::Continue(()));
         }
-        let element = row.value().deref();
+        let element = row.read(req)?.deref();
         let row = (row.key(), &element);
         if write_row(req, buf, row, options, enc, as_object, &mut comma)? {
             Ok(ControlFlow::Continue(()))

@@ -438,8 +438,8 @@ impl Request {
                     .map(PropertiesFor::Table),
             },
             PropertyPurpose::Json | PropertyPurpose::GetObjectVars | PropertyPurpose::VarExport => {
-                if let Some(table) = self.hooked_properties_table(object)? {
-                    return Ok(PropertiesFor::Temporary(table));
+                if let Some(hooked) = self.hooked_properties_for(object, purpose)? {
+                    return Ok(hooked);
                 }
                 handlers
                     .get_properties(self, object)
