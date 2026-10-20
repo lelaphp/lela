@@ -4722,7 +4722,7 @@ impl StreamLayer for Request {
         let text = if taken {
             format!("Protocol {shown}:// is already defined.")
         } else {
-            let name = self.class_name(class);
+            let name = self.symbols().class_name(class);
             format!(
                 "Invalid protocol scheme specified. Unable to register wrapper class {name} to {shown}://"
             )

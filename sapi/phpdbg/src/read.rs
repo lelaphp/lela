@@ -188,7 +188,8 @@ pub fn parameter_names(req: &Request, frame: FrameRef) -> Vec<Vec<u8>> {
 
 /// The name a function was declared under.
 fn declared_name(req: &Request, function: Function) -> Vec<u8> {
-    req.function_decl(function)
+    req.symbols()
+        .function_decl(function)
         .map_or_else(|| b"native".to_vec(), |decl| decl.name.0.to_vec())
 }
 
@@ -201,7 +202,7 @@ fn serves_view(req: &Request, view: &FrameView<'_>) -> Serves {
         name: declared_name(req, function),
         class: view
             .function_scope()
-            .map(|class| req.class_name(class).into_bytes()),
+            .map(|class| req.symbols().class_name(class).into_bytes()),
     }
 }
 
@@ -225,11 +226,11 @@ pub fn entered_from(req: &Request, after: FrameRef, before: FrameRef) -> bool {
 /// `function` as its table holds it, under the class `class` names
 /// where it is a method.
 fn code_of(req: &Request, function: Function, class: Option<ClassId>) -> Option<Code> {
-    let decl = req.function_decl(function)?;
+    let decl = req.symbols().function_decl(function)?;
     let name = decl.name.0.to_vec();
     let params = u32::try_from(decl.parameters.len()).unwrap_or(u32::MAX);
     let args = decl.parameters.iter().filter(|p| !p.variadic).count();
-    let class = class.map(|class| req.class_name(class).into_bytes());
+    let class = class.map(|class| req.symbols().class_name(class).into_bytes());
     let Some(code) = req.frames().op_array(function) else {
         return Some(Code {
             name,
@@ -308,8 +309,8 @@ fn class_id(req: &mut Request, name: &[u8]) -> Option<ClassId> {
 /// The method `name` of `class`, under the class that declared it.
 fn method_code(req: &Request, class: ClassId, name: &[u8]) -> Option<Code> {
     let name = name.to_ascii_lowercase();
-    let function = req.method_named(class, &name)?;
-    let scope = req.method_row(class, &name).map(MethodRow::scope);
+    let function = req.symbols().method_named(class, &name)?;
+    let scope = req.symbols().method_row(class, &name).map(MethodRow::scope);
     code_of(req, function, scope)
 }
 
@@ -335,11 +336,12 @@ pub fn function_named(req: &Request, name: &[u8]) -> Named {
 pub fn declared_parameters(req: &mut Request, class: Option<&[u8]>, name: &[u8]) -> Vec<Vec<u8>> {
     let decl = match class {
         Some(class) => class_id(req, class)
-            .and_then(|class| req.method_row(class, name))
-            .and_then(|row| req.row_method(row))
+            .and_then(|class| req.symbols().method_row(class, name))
+            .and_then(|row| req.symbols().row_method(row))
             .map(|method| &method.function),
-        None => req.functions().into_iter().find_map(|function| {
-            req.function_decl(function)
+        None => req.symbols().functions().into_iter().find_map(|function| {
+            req.symbols()
+                .function_decl(function)
                 .filter(|decl| decl.name.0.eq_ignore_ascii_case(name))
         }),
     };
@@ -364,7 +366,7 @@ pub fn method_named(req: &mut Request, class: &[u8], name: &[u8]) -> Named {
 
 /// A class as its table holds it.
 fn class_of_id(req: &mut Request, id: ClassId) -> Option<Class> {
-    let decl = req.class_decl(id)?;
+    let decl = req.symbols().class_decl(id)?;
     let shape = match decl.kind {
         ClassKind::Interface => Shape::Interface,
         _ if decl.flags.is_abstract => Shape::AbstractClass,
@@ -382,7 +384,7 @@ fn class_of_id(req: &mut Request, id: ClassId) -> Option<Class> {
         .collect();
     let unlinked_parent = parent.filter(|parent| class_id(req, parent).is_none());
     Some(Class {
-        name: req.class_name(id).into_bytes(),
+        name: req.symbols().class_name(id).into_bytes(),
         user: req.extensions().class_extension(id).is_none(),
         shape,
         file,
@@ -402,7 +404,8 @@ pub fn class_named(req: &mut Request, name: &[u8]) -> Option<Class> {
 /// no closure among them.
 #[must_use]
 pub fn user_functions(req: &Request) -> Vec<Code> {
-    req.functions()
+    req.symbols()
+        .functions()
         .into_iter()
         .filter(|function| req.frames().op_array(*function).is_some())
         .filter_map(|function| code_of(req, function, None))
@@ -412,7 +415,8 @@ pub fn user_functions(req: &Request) -> Vec<Code> {
 /// The user classes the request has declared, in the order it declared
 /// them.
 pub fn user_classes(req: &mut Request) -> Vec<Class> {
-    req.declared_classes()
+    req.symbols()
+        .declared_classes()
         .into_iter()
         .filter(|class| req.extensions().class_extension(*class).is_none())
         .collect::<Vec<_>>()
@@ -428,12 +432,14 @@ pub fn user_classes(req: &mut Request) -> Vec<Class> {
 #[must_use]
 pub fn table_sizes(req: &Request) -> [usize; 4] {
     let classes = req
+        .symbols()
         .class_keys()
         .into_iter()
         .filter(|(class, alias)| {
             let key = match alias {
                 Some(alias) => alias.first().copied(),
                 None => req
+                    .symbols()
                     .class_decl(*class)
                     .and_then(|d| d.name.0.first().copied()),
             };
@@ -442,8 +448,8 @@ pub fn table_sizes(req: &Request) -> [usize; 4] {
         .count();
     [
         classes,
-        req.functions().len(),
-        req.constant_table().len(),
+        req.symbols().functions().len(),
+        req.symbols().constant_table().len(),
         req.included_files().len(),
     ]
 }
@@ -488,7 +494,7 @@ pub fn exiting(req: &Request) -> bool {
 pub fn class_of(req: &Request, value: Value) -> Option<Vec<u8>> {
     value
         .as_object()
-        .map(|object| req.class_name(object.class()).into_bytes())
+        .map(|object| req.symbols().class_name(object.class()).into_bytes())
 }
 
 /// `PG(last_error_message)`, `last_error_file` and `last_error_lineno`,

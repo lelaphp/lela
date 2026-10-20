@@ -626,7 +626,8 @@ pub(crate) fn report_index(req: &mut Request, query: &[u8], status: u32) -> Resu
 
 /// The class's name, `ZSTR_VAL(ce->name)`.
 pub(crate) fn class_name(req: &Request, class: ClassId) -> String {
-    req.class_decl(class)
+    req.symbols()
+        .class_decl(class)
         .map(|d| String::from_utf8_lossy(&d.name.0).into_owned())
         .unwrap_or_default()
 }

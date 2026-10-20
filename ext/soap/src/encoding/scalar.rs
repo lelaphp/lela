@@ -211,7 +211,7 @@ pub(super) fn to_zval_bool(data: Node) -> Res<Value> {
 /// The enum case's class kind and backing, where `v` is a case.
 fn enum_backing(req: &Request, v: &Value) -> Option<EnumBacking> {
     let o = v.as_object()?;
-    let decl = req.class_decl(o.class())?;
+    let decl = req.symbols().class_decl(o.class())?;
     if decl.kind != ClassKind::Enum {
         return None;
     }

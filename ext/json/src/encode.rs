@@ -102,7 +102,10 @@ pub(super) fn encode(
             {
                 return serializable(req, buf, object, options, enc);
             }
-            if let Some(kind) = req.class_decl(object.class()).map(|decl| decl.kind)
+            if let Some(kind) = req
+                .symbols()
+                .class_decl(object.class())
+                .map(|decl| decl.kind)
                 && kind == ClassKind::Enum
             {
                 return enum_case(req, buf, object, options, enc);
@@ -441,6 +444,7 @@ fn enum_case(
     enc: &mut Encoder,
 ) -> Wrote {
     let backed = req
+        .symbols()
         .class_decl(object.class())
         .is_some_and(|decl| decl.backing != EnumBacking::Pure);
     if !backed {

@@ -254,7 +254,7 @@ impl Request {
         let std_class = self.class_named(Bare::resolved(b"stdClass"));
         let internal =
             |req: &Request, at: ClassId| req.class_is_internal(at) && Some(at) != std_class;
-        let name = self.class_name(class);
+        let name = self.symbols().class_name(class);
         if internal(self, class) {
             return Some(throw_error(
                 self,
@@ -265,7 +265,7 @@ impl Request {
         let parent = self
             .ancestors(class)
             .find(|&parent| internal(self, parent))?;
-        let parent = self.class_name(parent);
+        let parent = self.symbols().class_name(parent);
         Some(throw_error(
             self,
             "Error",
@@ -407,6 +407,7 @@ impl Request {
         let placed = self.placed_properties(object.class()).to_vec();
         let reset = self.class_slots(class) as usize;
         let final_class = self
+            .symbols()
             .class_decl(object.class())
             .is_some_and(|decl| decl.flags.is_final);
         let mut lazy = vec![false; o.slots() as usize];
@@ -727,7 +728,7 @@ impl Request {
         returned: Value,
     ) -> Result<PhpObject, Thrown> {
         let o = object.heap();
-        let class = self.class_name(object.class());
+        let class = self.symbols().class_name(object.class());
         let Some(instance) = returned.as_object() else {
             o.set_laziness(Laziness::Proxy);
             let shown = crate::ops::value_name(self, &returned);
@@ -742,7 +743,7 @@ impl Request {
         };
         if !self.lazy_compatible(instance.class(), object.class()) {
             o.set_laziness(Laziness::Proxy);
-            let shown = self.class_name(instance.class());
+            let shown = self.symbols().class_name(instance.class());
             self.release(returned);
             return Err(throw_error(
                 self,
@@ -790,12 +791,16 @@ impl Request {
         if real == proxy {
             return true;
         }
-        if !self.instance_of(proxy, real) {
+        if !self.symbols().instance_of(proxy, real) {
             return false;
         }
         let names = |class: ClassId| {
             let mut names: Vec<Box<[u8]>> = Vec::new();
-            for decl in self.lineage(class).filter_map(|here| self.class_decl(here)) {
+            for decl in self
+                .symbols()
+                .lineage(class)
+                .filter_map(|here| self.symbols().class_decl(here))
+            {
                 for p in &decl.properties {
                     if !names.contains(&p.name.0) {
                         names.push(p.name.0.clone());
@@ -806,7 +811,8 @@ impl Request {
         };
         names(real) == names(proxy)
             && self.destructor(real) == self.destructor(proxy)
-            && self.method_named(real, b"__clone") == self.method_named(proxy, b"__clone")
+            && self.symbols().method_named(real, b"__clone")
+                == self.symbols().method_named(proxy, b"__clone")
     }
 
     /// The `exit:` both arms of `zend_lazy_object_init` share: the owner

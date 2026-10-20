@@ -15,6 +15,7 @@ use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, Owner, PhpObject, PhpString, TypeTag, Value};
 
 use super::Request;
+use super::Symbols;
 
 /// The enum cases, the backed enums checked and the constants being
 /// worded, whose fields no file but this one reads.
@@ -60,50 +61,6 @@ impl Request {
         }
     }
 
-    /// `zend_hash_find_ptr(CE_CONSTANTS_TABLE(ce), name)`: the constant
-    /// under the name, byte for byte, in the class's linked record,
-    /// which holds the class's own constants, then what it inherited
-    /// from its parent, a parent's private one left out
-    /// (`do_inherit_class_constant`), and from its interfaces. The
-    /// answer is the class that declared it, which is the scope the
-    /// expression is evaluated in and the scope its visibility is
-    /// checked against, and the declaration itself. One lookup, the
-    /// name compared through the row, so nothing is allocated or cloned.
-    ///
-    /// A constant read through three levels and through an interface's
-    /// parent, and a parent's private one shadowed by the child's own:
-    ///
-    /// ```php
-    /// interface I { const IC = "I::IC"; }
-    /// interface J extends I { const JC = "J::JC"; }
-    /// class G { const A = "G::A"; private const P = "G::P"; const OV = "G::OV"; function gp() { return static::P; } }
-    /// class P extends G implements J { const OV = "P::OV"; }
-    /// class C extends P { private const P = "C::P"; function cp() { return self::P; } }
-    /// echo C::A, " ", C::OV, " ", C::IC, " ", C::JC, " ", (new C)->cp(), " ", (new G)->gp(), "\n";
-    /// var_dump(defined('C::IC'), defined('C::P'), defined('P::P'));
-    /// try { echo P::P; } catch (Error $e) { echo $e->getMessage(), "\n"; }
-    /// try { echo (new C)->gp(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-    /// ```
-    /// ```expect
-    /// G::A P::OV I::IC J::JC C::P G::P
-    /// bool(true)
-    /// bool(false)
-    /// bool(false)
-    /// Undefined constant P::P
-    /// Cannot access private constant C::P
-    /// ```
-    pub fn class_constant_of(
-        &self,
-        class: ClassId,
-        name: &[u8],
-    ) -> Option<(ClassId, &ClassConstDecl)> {
-        let row = self.linked_class(class)?.constants.find(name, |row| {
-            self.row_constant(class, *row)
-                .map_or(&[][..], |(_, constant)| &constant.name.0)
-        })?;
-        self.row_constant(class, *row)
-    }
-
     /// The constant a row of `class`'s constants table is, beside the
     /// class that declared it.
     fn row_constant(
@@ -112,22 +69,8 @@ impl Request {
         row: Row<ClassId>,
     ) -> Option<(ClassId, &ClassConstDecl)> {
         let holder = row.holder_in(class);
-        let decl = self.class_decl(holder)?;
+        let decl = self.symbols().class_decl(holder)?;
         Some((holder, decl.constants.get(usize::try_from(row.at).ok()?)?))
-    }
-
-    /// `CE_CONSTANTS_TABLE(ce)` of a linked class in php's order, each
-    /// constant beside the class that declared it.
-    pub fn constants_in_order(&self, class: ClassId) -> Vec<(ClassId, &ClassConstDecl)> {
-        let Some(record) = self.linked_class(class) else {
-            return Vec::new();
-        };
-        record
-            .constants
-            .rows()
-            .iter()
-            .filter_map(|row| self.row_constant(class, *row))
-            .collect()
     }
 
     /// `zend_fetch_class_constant`'s lookup (`Z/Zend/zend_constants.c:355`):
@@ -139,7 +82,7 @@ impl Request {
     /// (`zval_update_constant_ex`), one owner the caller's. The class
     /// is named in the error as the opline names it, `ce->name`.
     pub(crate) fn class_constant(&mut self, class: ClassId, name: &[u8]) -> Result<Value, Thrown> {
-        let class_name = self.class_name(class);
+        let class_name = self.symbols().class_name(class);
         let scope = self.executed_scope();
         self.class_constant_from(class, name, &class_name, scope, ConstantFetch::Opline)
     }
@@ -185,7 +128,7 @@ impl Request {
         fetch: ConstantFetch,
     ) -> Result<Value, Thrown> {
         let shown = String::from_utf8_lossy(name).into_owned();
-        let Some((declaring, constant)) = self.class_constant_of(class, name) else {
+        let Some((declaring, constant)) = self.symbols().class_constant_of(class, name) else {
             return Err(crate::api::raising::throw_error(
                 self,
                 "Error",
@@ -213,6 +156,7 @@ impl Request {
         // A constant a trait declares is the composing class's to hand
         // out, never the trait's own.
         if self
+            .symbols()
             .class_decl(asked)
             .is_some_and(|decl| decl.kind == ClassKind::Trait)
         {
@@ -246,9 +190,11 @@ impl Request {
     /// raised and nothing evaluated.
     pub(crate) fn class_constant_defined(&self, class: ClassId, name: &[u8]) -> bool {
         let trait_asked = self
+            .symbols()
             .class_decl(class)
             .is_some_and(|decl| decl.kind == ClassKind::Trait);
-        self.class_constant_of(class, name)
+        self.symbols()
+            .class_constant_of(class, name)
             .is_some_and(|(declaring, constant)| {
                 !trait_asked && self.may_access(declaring, constant.visibility)
             })
@@ -351,7 +297,7 @@ impl Request {
         {
             return Ok(());
         }
-        let Some(decl) = self.class_decl(class) else {
+        let Some(decl) = self.symbols().class_decl(class) else {
             return Ok(());
         };
         if decl.kind != ClassKind::Enum || decl.backing == php_unit::decl::EnumBacking::Pure {
@@ -447,7 +393,7 @@ impl Request {
             // is an equal value.
             let earlier = values.get(..at).unwrap_or_default();
             if let Some((earlier, _, _)) = earlier.iter().find(|(_, _, held)| held == value) {
-                let enum_name = self.class_name(class);
+                let enum_name = self.symbols().class_name(class);
                 return Err(crate::api::raising::throw_error(
                     self,
                     "Error",
@@ -508,10 +454,11 @@ impl Request {
             return Ok(case);
         }
         let backing = self
+            .symbols()
             .class_decl(class)
             .map_or(php_unit::decl::EnumBacking::Pure, |decl| decl.backing);
         let value = if backing == php_unit::decl::EnumBacking::Pure {
-            if self.class_constant_of(class, name).is_none() {
+            if self.symbols().class_constant_of(class, name).is_none() {
                 return Err(self.undefined_case(class, name));
             }
             None
@@ -538,6 +485,7 @@ impl Request {
     /// where opcache's persist interns a cached file's.
     fn case_value(&mut self, class: ClassId, name: &[u8]) -> Result<Value, Thrown> {
         let Some(expr) = self
+            .symbols()
             .class_constant_of(class, name)
             .map(|(_, constant)| constant.value.clone())
         else {
@@ -586,7 +534,7 @@ impl Request {
 
     /// php's `Error` for a case `class` does not declare.
     fn undefined_case(&mut self, class: ClassId, name: &[u8]) -> Thrown {
-        let class = self.class_name(class);
+        let class = self.symbols().class_name(class);
         crate::api::raising::throw_error(
             self,
             "Error",
@@ -595,6 +543,67 @@ impl Request {
                 String::from_utf8_lossy(name)
             ),
         )
+    }
+}
+
+impl<'r> Symbols<&'r Request> {
+    /// `zend_hash_find_ptr(CE_CONSTANTS_TABLE(ce), name)`: the constant
+    /// under the name, byte for byte, in the class's linked record,
+    /// which holds the class's own constants, then what it inherited
+    /// from its parent, a parent's private one left out
+    /// (`do_inherit_class_constant`), and from its interfaces. The
+    /// answer is the class that declared it, which is the scope the
+    /// expression is evaluated in and the scope its visibility is
+    /// checked against, and the declaration itself. One lookup, the
+    /// name compared through the row, so nothing is allocated or cloned.
+    ///
+    /// A constant read through three levels and through an interface's
+    /// parent, and a parent's private one shadowed by the child's own:
+    ///
+    /// ```php
+    /// interface I { const IC = "I::IC"; }
+    /// interface J extends I { const JC = "J::JC"; }
+    /// class G { const A = "G::A"; private const P = "G::P"; const OV = "G::OV"; function gp() { return static::P; } }
+    /// class P extends G implements J { const OV = "P::OV"; }
+    /// class C extends P { private const P = "C::P"; function cp() { return self::P; } }
+    /// echo C::A, " ", C::OV, " ", C::IC, " ", C::JC, " ", (new C)->cp(), " ", (new G)->gp(), "\n";
+    /// var_dump(defined('C::IC'), defined('C::P'), defined('P::P'));
+    /// try { echo P::P; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { echo (new C)->gp(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// G::A P::OV I::IC J::JC C::P G::P
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// Undefined constant P::P
+    /// Cannot access private constant C::P
+    /// ```
+    pub fn class_constant_of(
+        self,
+        class: ClassId,
+        name: &[u8],
+    ) -> Option<(ClassId, &'r ClassConstDecl)> {
+        let row = self.0.linked_class(class)?.constants.find(name, |row| {
+            self.0
+                .row_constant(class, *row)
+                .map_or(&[][..], |(_, constant)| &constant.name.0)
+        })?;
+        self.0.row_constant(class, *row)
+    }
+
+    /// `CE_CONSTANTS_TABLE(ce)` of a linked class in php's order, each
+    /// constant beside the class that declared it.
+    pub fn constants_in_order(self, class: ClassId) -> Vec<(ClassId, &'r ClassConstDecl)> {
+        let Some(record) = self.0.linked_class(class) else {
+            return Vec::new();
+        };
+        record
+            .constants
+            .rows()
+            .iter()
+            .filter_map(|row| self.0.row_constant(class, *row))
+            .collect()
     }
 }
 

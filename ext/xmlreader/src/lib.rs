@@ -246,18 +246,19 @@ impl ObjectHandlers for Handlers {
     ) -> Result<Option<Function>, Thrown> {
         let found = Std.get_method(req, object, lowered)?;
         let native = found
-            .and_then(|f| req.function_decl(f))
+            .and_then(|f| req.symbols().function_decl(f))
             .is_some_and(|decl| decl.file.0.is_empty());
         if native && (lowered == b"open" || lowered == b"xml") {
             let class = reader_class(req)?;
-            return Ok(req.trampoline(class, lowered).or(found));
+            return Ok(req.symbols().trampoline(class, lowered).or(found));
         }
         Ok(found)
     }
 }
 
 fn class_name(req: &Request, class: ClassId) -> String {
-    req.class_decl(class)
+    req.symbols()
+        .class_decl(class)
         .map(|d| String::from_utf8_lossy(&d.name.0).into_owned())
         .unwrap_or_default()
 }

@@ -85,7 +85,8 @@ fn called_enum(req: &mut Request) -> Result<ClassId, Thrown> {
     req.frames()
         .called_scope()
         .filter(|class| {
-            req.class_decl(*class)
+            req.symbols()
+                .class_decl(*class)
                 .is_some_and(|decl| decl.kind == ClassKind::Enum)
         })
         .ok_or_else(|| {
@@ -100,13 +101,15 @@ fn called_enum(req: &mut Request) -> Result<ClassId, Thrown> {
 /// The names of an enum's cases in declaration order, the constants
 /// `ZEND_CLASS_CONST_IS_CASE` marks.
 pub(crate) fn case_names(req: &Request, class: ClassId) -> Vec<Vec<u8>> {
-    req.class_decl(class).map_or_else(Vec::new, |decl| {
-        decl.constants
-            .iter()
-            .filter(|constant| constant.is_case)
-            .map(|constant| constant.name.0.to_vec())
-            .collect()
-    })
+    req.symbols()
+        .class_decl(class)
+        .map_or_else(Vec::new, |decl| {
+            decl.constants
+                .iter()
+                .filter(|constant| constant.is_case)
+                .map(|constant| constant.name.0.to_vec())
+                .collect()
+        })
 }
 
 /// `UnitEnum::cases()`, `zend_enum_cases_func`: every case in
@@ -230,10 +233,11 @@ fn by_value(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
     arity(req, 1, Some(1))?; // `ZEND_PARSE_PARAMETERS_START(1, 1)`
     let class = called_enum(req)?;
     let backing = req
+        .symbols()
         .class_decl(class)
         .map_or(EnumBacking::Pure, |decl| decl.backing);
     if backing == EnumBacking::Pure {
-        let name = req.class_name(class);
+        let name = req.symbols().class_name(class);
         return Err(throw_error(
             req,
             "Error",
@@ -268,7 +272,7 @@ fn by_value(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
         req.release(wanted);
         return Ok(Value::null());
     }
-    let class_name = req.class_name(class);
+    let class_name = req.symbols().class_name(class);
     let shown = match wanted.as_int() {
         Some(n) => n.to_string(),
         None => format!(

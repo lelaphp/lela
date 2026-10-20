@@ -157,7 +157,7 @@ mod tests {
                 d.is_some_and(|d| !d.is_published()),
                 "D is the request's own"
             );
-            let inherited = c.and_then(|c| req.method_named(c, b"p"));
+            let inherited = c.and_then(|c| req.symbols().method_named(c, b"p"));
             assert!(inherited.is_some_and(|m| req.user_function(m).is_some()));
             assert_eq!(req.own_classes.len(), 1, "D's row alone");
             let own_methods = req

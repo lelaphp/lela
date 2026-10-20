@@ -159,7 +159,8 @@ pub(crate) const MAGIC_MEMBER: &[u8] = b"__PHP_Incomplete_Class_Name";
 
 /// The object's class name as the linked table spells it.
 fn class_name(req: &Request, object: php_ext::values::PhpObject) -> Vec<u8> {
-    req.class_decl(object.class())
+    req.symbols()
+        .class_decl(object.class())
         .map(|decl| decl.name.0.to_vec())
         .unwrap_or_default()
 }
@@ -167,8 +168,9 @@ fn class_name(req: &Request, object: php_ext::values::PhpObject) -> Vec<u8> {
 /// Whether the class, or a class it extends, declares `method`, compared
 /// without case as php's function table is keyed.
 fn has_method(req: &mut Request, class: php_ext::values::ClassId, method: &[u8]) -> bool {
-    req.method_row(class, method)
-        .and_then(|row| req.row_method(row))
+    req.symbols()
+        .method_row(class, method)
+        .and_then(|row| req.symbols().row_method(row))
         .is_some_and(|method| !method.is_abstract)
 }
 
@@ -197,14 +199,14 @@ fn is_serializable(req: &mut Request, class: php_ext::values::ClassId) -> bool {
     php_ext::call::lookup_class(req, b"Serializable")
         .ok()
         .flatten()
-        .is_some_and(|serializable| req.instance_of(class, serializable))
+        .is_some_and(|serializable| req.symbols().instance_of(class, serializable))
 }
 
 /// `ce->ce_flags & ZEND_ACC_NOT_SERIALIZABLE`, the refusal
 /// `php_var_serialize_intern` and `object_common` raise before anything
 /// else of an object: the class, or a class it extends, declares
 /// `not_serializable`, which `zend_do_inheritance_ex` passes down and
-/// `Request::class_flags` answers.
+/// `Symbols::class_flags` answers.
 /// `Some` of the class's name as php's `%s` prints `ce->name`, up to
 /// its first NUL, so an anonymous class is `class@anonymous`.
 ///
@@ -223,10 +225,10 @@ fn is_serializable(req: &mut Request, class: php_ext::values::ClassId) -> bool {
 /// O:11:"ArrayObject":4:{i:0;i:0;i:1;a:1:{i:0;i:1;}i:2;a:0:{}i:3;N;}
 /// ```
 fn not_serializable(req: &mut Request, class: php_ext::values::ClassId) -> Option<String> {
-    if !req.class_flags(class)?.not_serializable {
+    if !req.symbols().class_flags(class)?.not_serializable {
         return None;
     }
-    let name = &req.class_decl(class)?.name.0;
+    let name = &req.symbols().class_decl(class)?.name.0;
     Some(String::from_utf8_lossy(php_ext::coerce::c_str(name)).into_owned())
 }
 
@@ -236,7 +238,8 @@ fn is_enum(req: &Request, object: php_ext::values::PhpObject) -> bool {
 }
 
 fn is_enum_class(req: &Request, class: php_ext::values::ClassId) -> bool {
-    req.class_decl(class)
+    req.symbols()
+        .class_decl(class)
         .is_some_and(|decl| matches!(decl.kind, ClassKind::Enum))
 }
 
@@ -841,7 +844,7 @@ pub(super) fn render(
         return printed.close(out);
     }
     if let Some(object) = value.as_object() {
-        let Some(decl) = req.class_decl(object.class()) else {
+        let Some(decl) = req.symbols().class_decl(object.class()) else {
             return Ok(());
         };
         let (kind, backing) = (decl.kind, decl.backing);
@@ -1319,7 +1322,7 @@ fn export_object(
             return Err(thrown);
         }
     };
-    let Some(decl) = req.class_decl(object.class()) else {
+    let Some(decl) = req.symbols().class_decl(object.class()) else {
         object.unprotect_in(req, RecursionGuard::Export);
         return held.release(req);
     };

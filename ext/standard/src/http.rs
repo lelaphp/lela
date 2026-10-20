@@ -189,7 +189,8 @@ fn body_limits(req: &mut Request, options: PhpArray) -> Result<Vec<(Limit, i64)>
 
 /// Whether a value is an enum case, and its class's backing.
 fn enum_backing(req: &Request, object: PhpObject) -> Option<EnumBacking> {
-    req.class_decl(object.class())
+    req.symbols()
+        .class_decl(object.class())
         .filter(|decl| decl.kind == ClassKind::Enum)
         .map(|decl| decl.backing)
 }
@@ -219,6 +220,7 @@ impl Query<'_> {
         {
             if backing == EnumBacking::Pure {
                 let name = req
+                    .symbols()
                     .class_decl(object.class())
                     .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
                     .unwrap_or_default();
@@ -432,6 +434,7 @@ fn visible_name(
         None => false,
         Some(scope) if class == b"*" => object.instance_of(req, scope),
         Some(scope) => req
+            .symbols()
             .class_decl(scope)
             .is_some_and(|decl| decl.name.0.eq_ignore_ascii_case(class)),
     };

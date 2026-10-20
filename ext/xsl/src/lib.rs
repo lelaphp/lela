@@ -136,7 +136,8 @@ fn xsl_info(req: &mut Request) {
 }
 
 fn class_name(req: &Request, class: ClassId) -> String {
-    req.class_decl(class)
+    req.symbols()
+        .class_decl(class)
         .map(|d| String::from_utf8_lossy(&d.name.0).into_owned())
         .unwrap_or_default()
 }
@@ -558,8 +559,8 @@ fn set_param(req: &mut Request, this: PhpObject, key: Vec<u8>, value: Vec<u8>) {
 /// Whether `class` descends from the root of `of`'s hierarchy,
 /// `instanceof_function(ret_class, curce)`.
 fn compatible(req: &Request, class: ClassId, of: ClassId) -> bool {
-    let root = req.lineage(of).last().unwrap_or(of);
-    req.lineage(class).any(|c| c == root)
+    let root = req.symbols().lineage(of).last().unwrap_or(of);
+    req.symbols().lineage(class).any(|c| c == root)
 }
 
 /// Where `this` keeps its callbacks, which a transformation reaches at

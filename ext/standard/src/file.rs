@@ -1783,7 +1783,10 @@ fn has_to_string(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
     }
     // `ce->__tostring`: the function table's row, a trait's method and
     // an inherited one among them.
-    Ok(req.method_row(object.class(), b"__tostring").is_some())
+    Ok(req
+        .symbols()
+        .method_row(object.class(), b"__tostring")
+        .is_some())
 }
 
 /// `stream_get_meta_data($stream): array`,

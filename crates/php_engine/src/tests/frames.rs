@@ -26,6 +26,7 @@ struct Kept(Option<FrameId>);
 fn name(req: &Request, view: &FrameView<'_>) -> String {
     if let Some(function) = view.function() {
         return req
+            .symbols()
             .function_decl(function)
             .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
             .unwrap_or_default();
@@ -203,7 +204,7 @@ fn a_native_call_has_no_frame_and_its_caller_is_the_user_frame_it_stands_on() {
         let named = observed.frame().is_none()
             && observed
                 .function()
-                .and_then(|function| observed.function_decl(function))
+                .and_then(|function| observed.symbols().function_decl(function))
                 .is_some_and(|decl| decl.name.0.as_ref() == b"strcmp");
         ObserverHandlers {
             begin: named.then_some(native as fn(&mut Observed<'_>)),
@@ -379,11 +380,12 @@ fn named(req: &Request, frame: &ChainFrame<'_>) -> String {
         return format!("{{main}} {file}");
     };
     let name = req
+        .symbols()
         .function_decl(function)
         .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
         .unwrap_or_default();
     match frame.function_scope() {
-        Some(class) => format!("{}::{name}", req.class_name(class)),
+        Some(class) => format!("{}::{name}", req.symbols().class_name(class)),
         None => name,
     }
 }
@@ -403,7 +405,7 @@ fn walks(source: &str) -> String {
     fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
         let walks = observed
             .function()
-            .and_then(|function| observed.function_decl(function))
+            .and_then(|function| observed.symbols().function_decl(function))
             .is_some_and(|decl| matches!(decl.name.0.as_ref(), b"walk" | b"strcmp"));
         ObserverHandlers {
             begin: walks.then_some(begin as fn(&mut Observed<'_>)),

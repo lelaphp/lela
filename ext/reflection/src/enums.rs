@@ -24,7 +24,7 @@ use super::{
 /// `ce->enum_backing_type`: the type of a backed enum's `value`, and
 /// `None` for a pure one.
 fn backing_of(req: &Request, class: ClassId) -> Option<Type> {
-    match req.class_decl(class).map(|decl| decl.backing) {
+    match req.symbols().class_decl(class).map(|decl| decl.backing) {
         Some(EnumBacking::Int) => Some(Type::Int),
         Some(EnumBacking::String) => Some(Type::String),
         _ => None,
@@ -44,6 +44,7 @@ fn this_enum(req: &mut Request, this: PhpObject) -> Result<ClassId, Thrown> {
 /// `reflection_class_object_ctor` has done its half.
 fn held_to_enum(req: &mut Request, class: ClassId) -> Result<(), Thrown> {
     if req
+        .symbols()
         .class_decl(class)
         .is_some_and(|decl| decl.kind == ClassKind::Enum)
     {
@@ -63,13 +64,15 @@ fn held_to_enum(req: &mut Request, class: ClassId) -> Result<(), Thrown> {
 /// The case names of an enum, in declaration order: the class's own
 /// constants, which a `ClassDecl` of kind `Enum` carries as its cases.
 fn case_names(req: &Request, class: ClassId) -> Vec<Vec<u8>> {
-    req.class_decl(class).map_or_else(Vec::new, |decl| {
-        decl.constants
-            .iter()
-            .filter(|constant| constant.is_case)
-            .map(|constant| constant.name.0.to_vec())
-            .collect()
-    })
+    req.symbols()
+        .class_decl(class)
+        .map_or_else(Vec::new, |decl| {
+            decl.constants
+                .iter()
+                .filter(|constant| constant.is_case)
+                .map(|constant| constant.name.0.to_vec())
+                .collect()
+        })
 }
 
 /// php's `reflection_enum_case_factory`: a `ReflectionEnumBackedCase`

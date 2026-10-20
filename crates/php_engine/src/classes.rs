@@ -283,7 +283,7 @@ impl ObjectHandlers for ClosureHandlers {
         if lowered.eq_ignore_ascii_case(INVOKE) {
             return Ok(req.invoke_trampoline(object));
         }
-        Ok(req.method_named(object.class(), lowered))
+        Ok(req.symbols().method_named(object.class(), lowered))
     }
 
     /// `zend_closure_get_debug_info` (`Z/Zend/zend_closures.c:602`): the
@@ -394,7 +394,7 @@ impl ObjectHandlers for ClosureHandlers {
         let Some(closure) = object.closure(req).cloned() else {
             return Ok(None);
         };
-        let Some(decl) = req.function_decl(closure.function).cloned() else {
+        let Some(decl) = req.symbols().function_decl(closure.function).cloned() else {
             return PhpArray::new(req).map(|table| Some(table.into()));
         };
         let out = PhpArray::filled(req, |req, out| {
@@ -483,7 +483,7 @@ fn closure_rows(
     let written = String::from_utf8_lossy(&decl.name.0).into_owned();
     if closure.fake {
         let named = match closure.scope {
-            Some(scope) => format!("{}::{written}", req.class_name(scope)),
+            Some(scope) => format!("{}::{written}", req.symbols().class_name(scope)),
             None => written,
         };
         let named = PhpString::new(req, named.as_bytes())?.into_value();
@@ -1055,6 +1055,7 @@ impl Closure {
         // closure's function.
         let placed = crate::api::call::placed(req, info.function, &args.positional, args.named())?;
         let generator = req
+            .symbols()
             .function_decl(info.function)
             .is_some_and(|decl| decl.is_generator);
         let returned = if generator {
@@ -2387,7 +2388,7 @@ fn valid_closure_binding(
     this: Option<PhpObject>,
     scope: Option<ClassId>,
 ) -> bool {
-    let is_static = req.closure_refuses_receiver(info);
+    let is_static = req.symbols().closure_refuses_receiver(info);
     if let Some(this) = this {
         if is_static {
             warning(
@@ -2398,13 +2399,13 @@ fn valid_closure_binding(
         }
         if info.fake
             && let Some(own) = info.scope
-            && !req.instance_of(this.class(), own)
+            && !req.symbols().instance_of(this.class(), own)
         {
             let method = req.function_name(info.function);
             let message = format!(
                 "Cannot bind method {}::{method}() to object of class {}, this will be an error in PHP 9",
-                req.class_name(own),
-                req.class_name(this.class())
+                req.symbols().class_name(own),
+                req.symbols().class_name(this.class())
             );
             warning(req, &message);
             return false;
@@ -2428,7 +2429,7 @@ fn valid_closure_binding(
     {
         let message = format!(
             "Cannot bind closure to scope of internal class {}, this will be an error in PHP 9",
-            req.class_name(scope)
+            req.symbols().class_name(scope)
         );
         warning(req, &message);
         return false;

@@ -356,7 +356,7 @@ impl _ZendTestClass {
         }
         let text = format!(
             "be of type stdclass|Iterator, {} given",
-            req.class_name(object.class())
+            req.symbols().class_name(object.class())
         );
         Err(arg_type_error(req, 1, &text))
     }
@@ -392,7 +392,7 @@ impl ObjectHandlers for TestClassHandlers {
         written: &[u8],
     ) -> Result<Option<php_ext::call::Function>, Thrown> {
         if lowered == b"test" {
-            return Ok(req.native_trampoline(written, zend_test_func));
+            return Ok(req.symbols_mut().native_trampoline(written, zend_test_func));
         }
         self.get_method(req, object, lowered)
     }
@@ -406,7 +406,9 @@ impl ObjectHandlers for TestClassHandlers {
         written: &[u8],
     ) -> Result<Option<php_ext::call::Function>, Thrown> {
         if lowered == b"test" {
-            return Ok(req.native_static_trampoline(written, zend_test_func));
+            return Ok(req
+                .symbols_mut()
+                .native_static_trampoline(written, zend_test_func));
         }
         Ok(None)
     }

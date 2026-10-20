@@ -14,11 +14,12 @@ use crate::api::raising::{Thrown, none_pending};
 use crate::api::values::{ClassId, Owner, PhpObject, PhpString};
 use crate::engine::{MethodAt, NativeMethod};
 
+use super::Symbols;
 use super::{Member, MemberAt, Request};
 
 /// One row of a linked class's function table, `ce->function_table`,
 /// named by value: the class whose table it is and the row the linked
-/// record holds there, read by [`Request::row_method`]. It names the
+/// record holds there, read by [`Symbols::row_method`]. It names the
 /// row, not a reference into the request's tables, so it is `Copy`, is
 /// kept across calls into the engine, and stands as long as the
 /// record, which the link wrote once and nothing writes after. What php
@@ -50,7 +51,7 @@ impl MethodRow {
 /// One row of a linked class's property table, `ce->properties_info`,
 /// named by value as a [`MethodRow`] is: the class whose table it is and
 /// the row the linked record holds there, read by
-/// [`Request::row_property_info`]. What php holds as a `zend_property_info *`
+/// [`Symbols::row_property_info`]. What php holds as a `zend_property_info *`
 /// out of the table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PropertyInfoRow {
@@ -72,63 +73,6 @@ impl PropertyInfoRow {
 }
 
 impl Request {
-    /// `ZEND_HASH_FOREACH_PTR(&ce->properties_info, prop_info)`: every
-    /// row of `class`'s property table in php's order, the class's own
-    /// declarations, instance and `static`, then each inherited one it
-    /// does not declare again, an internal class's redeclaration at the
-    /// end; each a [`PropertyInfoRow`] [`Request::row_property_info`] reads, read
-    /// off the linked record in place; nothing for a class with no
-    /// linked record.
-    ///
-    /// ```php
-    /// class A { public $a = 1; static $s = 1; protected $p; } class B extends A { public $b; public $a = 2; }
-    /// foreach ((new ReflectionClass('B'))->getProperties() as $p) echo $p->class, '::', $p->name, "\n";
-    /// var_dump(get_class_vars('B'));
-    /// ```
-    /// ```expect
-    /// B::b
-    /// B::a
-    /// A::s
-    /// A::p
-    /// array(3) {
-    ///   ["b"]=>
-    ///   NULL
-    ///   ["a"]=>
-    ///   int(2)
-    ///   ["s"]=>
-    ///   int(1)
-    /// }
-    /// ```
-    pub fn property_info_rows(
-        &self,
-        class: ClassId,
-    ) -> impl ExactSizeIterator<Item = PropertyInfoRow> + '_ {
-        self.linked_class(class)
-            .map_or(&[][..], |record| record.properties.rows())
-            .iter()
-            .map(move |&row| PropertyInfoRow { class, row })
-    }
-
-    /// `zend_hash_find_ptr(&ce->properties_info, name)` as a
-    /// [`PropertyInfoRow`]: the row of `class`'s property table under the
-    /// name, byte for byte; none where the table has no entry of that
-    /// name. One lookup in the class's linked record.
-    pub fn property_info_row(&self, class: ClassId, name: &[u8]) -> Option<PropertyInfoRow> {
-        let record = self.linked_class(class)?;
-        let (_, &row) = record.properties.find_at(name, |row| {
-            self.row_property_info(PropertyInfoRow { class, row: *row })
-                .map_or(&[][..], |property| &property.name.0)
-        })?;
-        Some(PropertyInfoRow { class, row })
-    }
-
-    /// The declaration of the property a row of a property table is,
-    /// which [`PropertyInfoRow::declaring`] declared.
-    pub fn row_property_info(&self, row: PropertyInfoRow) -> Option<&PropertyDecl> {
-        let decl = self.class_decl(row.declaring())?;
-        decl.properties.get(usize::try_from(row.row.at).ok()?)
-    }
-
     /// `obj->handlers->get_method(&obj, name, key)` as a call and
     /// `zend_is_callable_ex` ask it: the class's `get_method`, then its
     /// `__call`, then the same on the object its class hands the call
@@ -190,62 +134,6 @@ impl Request {
             .map(|member| member.class)
     }
 
-    /// `zend_hash_find_ptr(&ce->function_table, lcname)`: the method
-    /// under the name, whatever its case, in the class's linked record,
-    /// which holds what the class declares and what it inherited from
-    /// its parents and its interfaces, as `zend_do_inheritance` and
-    /// `do_interface_implementation` copy them in; none where the table
-    /// has no entry of that name. One lookup, the name compared through
-    /// the row, so nothing is lowered or allocated.
-    ///
-    /// ```php
-    /// interface I1 { function m(); }
-    /// interface I2 extends I1 { function n(); }
-    /// abstract class A implements I2 { function n() {} }
-    /// abstract class B extends A {}
-    /// var_dump(method_exists('I2', 'm'), method_exists('I2', 'N'), method_exists('A', 'm'), method_exists('B', 'M'), method_exists('B', 'x'));
-    /// var_dump(get_class_methods('B'));
-    /// ```
-    /// ```expect
-    /// bool(true)
-    /// bool(true)
-    /// bool(true)
-    /// bool(true)
-    /// bool(false)
-    /// array(2) {
-    ///   [0]=>
-    ///   string(1) "n"
-    ///   [1]=>
-    ///   string(1) "m"
-    /// }
-    /// ```
-    ///
-    /// A method inherited through three levels, one overridden in the
-    /// middle, and a parent's private one, which the child's table holds
-    /// and only the parent's scope may call, beside the child's own of
-    /// that name:
-    ///
-    /// ```php
-    /// class G { function inherited() { return "G::inherited"; } function over() { return "G::over"; } private function hidden() { return "G::hidden"; } function callHidden() { return $this->hidden(); } }
-    /// class P extends G { function over() { return "P::over"; } }
-    /// class C extends P { private function hidden() { return "C::hidden"; } function mine() { return $this->hidden(); } }
-    /// $c = new C;
-    /// echo $c->inherited(), " ", $c->over(), " ", $c->callHidden(), " ", $c->mine(), "\n";
-    /// var_dump(method_exists('P', 'hidden'), method_exists(new P, 'hidden'));
-    /// class D extends P { function probe() { return $this->hidden(); } }
-    /// try { (new D)->probe(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-    /// ```
-    /// ```expect
-    /// G::inherited P::over G::hidden C::hidden
-    /// bool(false)
-    /// bool(true)
-    /// Call to private method G::hidden() from scope D
-    /// ```
-    pub fn method_named(&self, class: ClassId, name: &[u8]) -> Option<Function> {
-        let MethodRow { class, row, .. } = self.method_row(class, name)?;
-        self.method_function(row.holder_in(class), row.at)
-    }
-
     /// `ce->constructor`: `__construct` as `class`'s linked record
     /// resolved it once ([`LinkedClass::constructor`]), its row read by
     /// position; none for a class with none.
@@ -275,78 +163,6 @@ impl Request {
         self.method_function(row.holder_in(class), row.at)
     }
 
-    /// `zend_hash_find_ptr(&ce->function_table, lcname)` as a
-    /// [`MethodRow`]: the row of `class`'s function table under the
-    /// name, whatever its case, which [`Request::row_method`] reads;
-    /// none where the table has no entry of that name. One lookup in the class's linked
-    /// record, the name compared through the row, so nothing is lowered
-    /// or allocated.
-    pub fn method_row(&self, class: ClassId, name: &[u8]) -> Option<MethodRow> {
-        let record = self.linked_class(class)?;
-        let (at, &row) = record
-            .methods
-            .find_at(name, |row| self.row_method_name(class, *row))?;
-        let at = u32::try_from(at).ok()?;
-        Some(MethodRow { class, row, at })
-    }
-
-    /// `ZEND_HASH_FOREACH_PTR(&ce->function_table, mptr)`: every row of
-    /// `class`'s function table in php's order, each a [`MethodRow`]
-    /// [`Request::row_method`] reads; nothing for a class with no linked
-    /// record. The rows are read off the record in place, so the walk
-    /// allocates nothing.
-    pub fn method_rows(&self, class: ClassId) -> impl ExactSizeIterator<Item = MethodRow> + '_ {
-        self.linked_class(class)
-            .map_or(&[][..], |record| record.methods.rows())
-            .iter()
-            .enumerate()
-            .map(move |(at, &row)| MethodRow {
-                class,
-                row,
-                at: u32::try_from(at).unwrap_or(u32::MAX),
-            })
-    }
-
-    /// `common.prototype`'s scope for the method a row of a function
-    /// table is, which the link set once
-    /// ([`php_link::LinkedClass::prototypes`]): the class whose method the
-    /// row's prototype is, none where it has none.
-    pub fn row_prototype(&self, row: MethodRow) -> Option<ClassId> {
-        let record = self.linked_class(row.class)?;
-        record
-            .prototypes
-            .get(usize::try_from(row.at).ok()?)
-            .copied()
-            .flatten()
-    }
-
-    /// The declaration of the method a row of a function table is, which
-    /// [`MethodRow::scope`] declared.
-    pub fn row_method(&self, row: MethodRow) -> Option<&MethodDecl> {
-        self.row_method_at(row.class, row.row)
-            .map(|(_, method)| method)
-    }
-
-    /// The function a row of a function table is, the `zend_function *`
-    /// the bucket holds: the declaring class's method at the row's place,
-    /// a native trait's method copied into a class among them, which is
-    /// the class's own function ([`Extensions::function_extension`] reads
-    /// the trait's extension off it).
-    ///
-    /// ```php
-    /// class E extends Exception { function own() {} }
-    /// foreach (['getMessage', 'own'] as $m) {
-    ///     var_dump((new ReflectionMethod('E', $m))->getExtensionName());
-    /// }
-    /// ```
-    /// ```expect
-    /// string(4) "Core"
-    /// bool(false)
-    /// ```
-    pub fn row_function(&self, row: MethodRow) -> Option<Function> {
-        self.method_function(row.scope(), row.row.at)
-    }
-
     /// The name of the method a row of `class`'s function table is.
     fn row_method_name(&self, class: ClassId, row: Row<ClassId>) -> &[u8] {
         self.row_method_at(class, row)
@@ -357,7 +173,7 @@ impl Request {
     /// that declared it.
     fn row_method_at(&self, class: ClassId, row: Row<ClassId>) -> Option<(ClassId, &MethodDecl)> {
         let holder = row.holder_in(class);
-        let decl = self.class_decl(holder)?;
+        let decl = self.symbols().class_decl(holder)?;
         Some((holder, decl.methods.get(usize::try_from(row.at).ok()?)?))
     }
 
@@ -477,12 +293,14 @@ impl Request {
         // using class's row, under the alias's name and visibility.
         if let Some((class, ClassNative::Trait { at, .. })) = self.class_native_of(function) {
             return self
+                .symbols()
                 .class_decl(class)?
                 .methods
                 .get(usize::try_from(at).ok()?);
         }
         if let Some((class, ClassNative::Enum(method))) = self.class_native_of(function) {
             return self
+                .symbols()
                 .class_decl(class)?
                 .methods
                 .iter()
@@ -494,6 +312,7 @@ impl Request {
         if let Some(method) = self.native_method(function) {
             return match method.at {
                 MethodAt::Declared { class, at } => self
+                    .symbols()
                     .class_decl(class)?
                     .methods
                     .get(usize::try_from(at).ok()?),
@@ -505,7 +324,7 @@ impl Request {
             };
         }
         let member = self.user_function(function)?.member?;
-        let decl = self.class_decl(member.class)?;
+        let decl = self.symbols().class_decl(member.class)?;
         match member.at {
             MemberAt::Method(at) => decl.methods.get(usize::try_from(at).ok()?),
             MemberAt::Hook { property, kind } => decl
@@ -528,120 +347,20 @@ impl Request {
         })
     }
 
-    /// `ZSTR_VAL(ce->name)` as a message's `%s` prints it: the name a
-    /// class was declared under up to its NUL, so an anonymous class is
-    /// `class@anonymous` ([`php_unit::decl::shown`]), and `object` for
-    /// one the tables have no declaration for. A value holding the name,
-    /// `get_class()`'s, is [`Request::class_name_bytes`].
-    pub fn class_name(&self, class: ClassId) -> String {
-        self.class_decl(class).map_or_else(
-            || String::from("object"),
-            |decl| php_unit::decl::shown(&decl.name.0).into_owned(),
-        )
-    }
-
     /// `ce->name` whole, the NUL and what follows it included.
     pub(crate) fn class_name_bytes(&self, class: ClassId) -> Vec<u8> {
-        self.class_decl(class)
+        self.symbols()
+            .class_decl(class)
             .map_or_else(|| b"object".to_vec(), |decl| decl.name.0.to_vec())
     }
 
-    /// `instanceof_function`: whether `class` is `of`, extends it, or
-    /// implements it. An interface is one scan of the class's linked
-    /// `ce->interfaces`, which holds every interface it implements
-    /// directly, through its parents and through their parents; a class
-    /// is a walk up the linked parents. Nothing is looked up by name. A
-    /// chain longer than any declaration can make is cut.
-    ///
-    /// ```php
-    /// interface I0 {} interface I1 extends I0 {} interface J {} interface K extends J {}
-    /// class G implements I1 {} class P extends G {} class C extends P implements K {}
-    /// $c = new C;
-    /// var_dump($c instanceof I0, $c instanceof I1, $c instanceof J, $c instanceof G, $c instanceof Countable, new P instanceof K);
-    /// echo implode(",", class_implements($c)), "\n";
-    /// ```
-    /// ```expect
-    /// bool(true)
-    /// bool(true)
-    /// bool(true)
-    /// bool(true)
-    /// bool(false)
-    /// bool(false)
-    /// I0,I1,K,J
-    /// ```
-    pub fn instance_of(&self, class: ClassId, of: ClassId) -> bool {
-        if class == of {
-            return true;
-        }
-        if self
-            .class_decl(of)
-            .is_some_and(|decl| decl.kind == ClassKind::Interface)
-        {
-            return self.interfaces(class).contains(&of);
-        }
-        self.ancestors(class).any(|parent| parent == of)
-    }
-
-    /// `ce->interfaces` of a linked class: every interface it implements,
-    /// each once, in php's order, which `class_implements` lists;
-    /// nothing for a class with no linked record.
-    pub fn interfaces(&self, class: ClassId) -> &[ClassId] {
-        self.linked_class(class)
-            .map_or(&[][..], |record| &record.interfaces)
-    }
-
-    /// The class and its parents up from it, `ce` then `ce->parent` and
-    /// on, as php's walks up a chain go, held to 64 classes so a chain
-    /// that loops cannot hold the request. Each step is
-    /// [`Request::class_parent`], read by number and never by name, so a
-    /// parent an `extends` spelled in another case is the class as it
-    /// was declared:
-    ///
-    /// ```php
-    /// class A {} class B extends a {} class C extends b {}
-    /// var_dump(class_parents('C'), get_parent_class('C'));
-    /// ```
-    /// ```expect
-    /// array(2) {
-    ///   ["B"]=>
-    ///   string(1) "B"
-    ///   ["A"]=>
-    ///   string(1) "A"
-    /// }
-    /// string(1) "B"
-    /// ```
-    pub fn lineage(&self, class: ClassId) -> impl Iterator<Item = ClassId> + '_ {
-        std::iter::successors(Some(class), move |&at| self.class_parent(at)).take(64)
-    }
-
     /// The parents of a class up from its own, `ce->parent` and on, held
-    /// to 64 as [`Request::lineage`] is.
+    /// to 64 as [`Symbols::lineage`] is.
     pub(crate) fn ancestors(&self, class: ClassId) -> impl Iterator<Item = ClassId> + '_ {
-        std::iter::successors(self.class_parent(class), move |&at| self.class_parent(at)).take(64)
-    }
-
-    /// `ce->parent`: the linked parent of a class, none at a root, read
-    /// by number and never by name: an engine's class's as startup
-    /// linked it, a declared or a published class's as it bound
-    /// ([`super::Bound`]).
-    ///
-    /// ```php
-    /// class P {} class C extends P {} class E extends RuntimeException {}
-    /// var_dump(get_parent_class(new C), get_parent_class("E"), get_parent_class("RuntimeException"), get_parent_class("P"), new E instanceof Exception);
-    /// ```
-    /// ```expect
-    /// string(1) "P"
-    /// string(16) "RuntimeException"
-    /// string(9) "Exception"
-    /// bool(false)
-    /// bool(true)
-    /// ```
-    #[must_use]
-    pub fn class_parent(&self, class: ClassId) -> Option<ClassId> {
-        match self.native_class_at(class) {
-            Some(at) => self.shared.parents.get(at).copied().flatten(),
-            None => self.declared_row(class)?.bound.parent,
-        }
+        std::iter::successors(self.symbols().class_parent(class), move |&at| {
+            self.symbols().class_parent(at)
+        })
+        .take(64)
     }
 
     /// `zend_check_protected`: whether `scope` is `class` or one of its
@@ -651,7 +370,7 @@ impl Request {
         let Some(scope) = scope else {
             return false;
         };
-        let up = |from: ClassId, to: ClassId| self.lineage(from).any(|here| here == to);
+        let up = |from: ClassId, to: ClassId| self.symbols().lineage(from).any(|here| here == to);
         up(class, scope) || up(scope, class)
     }
 
@@ -693,11 +412,12 @@ impl Request {
             return Ok(());
         }
         let shown = visibility_string(self.method_visibility(function));
-        let class = self
-            .method_class(function)
-            .map_or_else(|| String::from("object"), |class| self.class_name(class));
+        let class = self.method_class(function).map_or_else(
+            || String::from("object"),
+            |class| self.symbols().class_name(class),
+        );
         let from = match scope {
-            Some(scope) => format!("scope {}", self.class_name(scope)),
+            Some(scope) => format!("scope {}", self.symbols().class_name(scope)),
             None => String::from("global scope"),
         };
         Err(crate::api::raising::throw_error(
@@ -738,6 +458,7 @@ impl Request {
             return Ok(plain);
         };
         let is_trait = self
+            .symbols()
             .class_decl(class)
             .is_some_and(|decl| decl.kind == ClassKind::Trait);
         // The name is spelled only for the `Error` or the deprecation:
@@ -751,7 +472,7 @@ impl Request {
             .unwrap_or_default();
         let shown = format!(
             "{}::{}",
-            self.class_name(class),
+            self.symbols().class_name(class),
             String::from_utf8_lossy(&name.0)
         );
         if is_abstract {
@@ -791,7 +512,7 @@ impl Request {
     /// `common.prototype` where it has one, the method's own class
     /// otherwise, which is what a protected method is reached through.
     /// The prototype is the one the link set on the row of the
-    /// declaring class's function table ([`Request::row_prototype`]): a
+    /// declaring class's function table ([`Symbols::row_prototype`]): a
     /// parent's method's, an abstract constructor's, or an interface's
     /// the class names.
     ///
@@ -811,9 +532,10 @@ impl Request {
     fn function_root_class(&self, function: Function) -> Option<ClassId> {
         let class = self.method_class(function)?;
         let prototype = self
+            .symbols()
             .function_decl(function)
-            .and_then(|decl| self.method_row(class, &decl.name.0))
-            .and_then(|row| self.row_prototype(row));
+            .and_then(|decl| self.symbols().method_row(class, &decl.name.0))
+            .and_then(|row| self.symbols().row_prototype(row));
         Some(prototype.unwrap_or(class))
     }
 
@@ -828,7 +550,7 @@ impl Request {
     /// it, the tail php's bad-call texts end in.
     pub(super) fn scope_phrase(&self) -> String {
         match self.executed_scope() {
-            Some(scope) => format!("scope {}", self.class_name(scope)),
+            Some(scope) => format!("scope {}", self.symbols().class_name(scope)),
             None => String::from("global scope"),
         }
     }
@@ -854,7 +576,7 @@ impl Request {
     ///   thrown in %s on line 6
     /// ```
     pub(crate) fn instantiable(&mut self, class: ClassId) -> Result<(), Thrown> {
-        let Some(decl) = self.class_decl(class) else {
+        let Some(decl) = self.symbols().class_decl(class) else {
             return Ok(());
         };
         let what = match decl.kind {
@@ -864,7 +586,7 @@ impl Request {
             ClassKind::Class if decl.flags.is_abstract => "abstract class",
             ClassKind::Class => return Ok(()),
         };
-        let name = self.class_name(class);
+        let name = self.symbols().class_name(class);
         Err(crate::api::raising::throw_error(
             self,
             "Error",
@@ -926,17 +648,17 @@ impl Request {
     /// MP
     /// ```
     pub(crate) fn std_method(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
-        let found = self.method_named(class, lowered)?;
+        let found = self.symbols().method_named(class, lowered)?;
         let Some(scope) = self.executed_scope() else {
             return Some(found);
         };
         if self.method_class(found) == Some(scope)
             || scope == class
-            || !self.instance_of(class, scope)
+            || !self.symbols().instance_of(class, scope)
         {
             return Some(found);
         }
-        match self.method_named(scope, lowered) {
+        match self.symbols().method_named(scope, lowered) {
             Some(own)
                 if self.method_class(own) == Some(scope)
                     && self.method_visibility(own) == Visibility::Private =>
@@ -966,6 +688,305 @@ impl Request {
             Visibility::Protected => {
                 self.check_protected(self.function_root_class(function).unwrap_or(class), scope)
             }
+        }
+    }
+}
+
+impl<'r> Symbols<&'r Request> {
+    /// `ZEND_HASH_FOREACH_PTR(&ce->properties_info, prop_info)`: every
+    /// row of `class`'s property table in php's order, the class's own
+    /// declarations, instance and `static`, then each inherited one it
+    /// does not declare again, an internal class's redeclaration at the
+    /// end; each a [`PropertyInfoRow`] [`Symbols::row_property_info`] reads, read
+    /// off the linked record in place; nothing for a class with no
+    /// linked record.
+    ///
+    /// ```php
+    /// class A { public $a = 1; static $s = 1; protected $p; } class B extends A { public $b; public $a = 2; }
+    /// foreach ((new ReflectionClass('B'))->getProperties() as $p) echo $p->class, '::', $p->name, "\n";
+    /// var_dump(get_class_vars('B'));
+    /// ```
+    /// ```expect
+    /// B::b
+    /// B::a
+    /// A::s
+    /// A::p
+    /// array(3) {
+    ///   ["b"]=>
+    ///   NULL
+    ///   ["a"]=>
+    ///   int(2)
+    ///   ["s"]=>
+    ///   int(1)
+    /// }
+    /// ```
+    pub fn property_info_rows(
+        self,
+        class: ClassId,
+    ) -> impl ExactSizeIterator<Item = PropertyInfoRow> + 'r {
+        self.0
+            .linked_class(class)
+            .map_or(&[][..], |record| record.properties.rows())
+            .iter()
+            .map(move |&row| PropertyInfoRow { class, row })
+    }
+
+    /// `zend_hash_find_ptr(&ce->properties_info, name)` as a
+    /// [`PropertyInfoRow`]: the row of `class`'s property table under the
+    /// name, byte for byte; none where the table has no entry of that
+    /// name. One lookup in the class's linked record.
+    pub fn property_info_row(self, class: ClassId, name: &[u8]) -> Option<PropertyInfoRow> {
+        let record = self.0.linked_class(class)?;
+        let (_, &row) = record.properties.find_at(name, |row| {
+            self.0
+                .symbols()
+                .row_property_info(PropertyInfoRow { class, row: *row })
+                .map_or(&[][..], |property| &property.name.0)
+        })?;
+        Some(PropertyInfoRow { class, row })
+    }
+
+    /// The declaration of the property a row of a property table is,
+    /// which [`PropertyInfoRow::declaring`] declared.
+    pub fn row_property_info(self, row: PropertyInfoRow) -> Option<&'r PropertyDecl> {
+        let decl = self.0.symbols().class_decl(row.declaring())?;
+        decl.properties.get(usize::try_from(row.row.at).ok()?)
+    }
+
+    /// `zend_hash_find_ptr(&ce->function_table, lcname)`: the method
+    /// under the name, whatever its case, in the class's linked record,
+    /// which holds what the class declares and what it inherited from
+    /// its parents and its interfaces, as `zend_do_inheritance` and
+    /// `do_interface_implementation` copy them in; none where the table
+    /// has no entry of that name. One lookup, the name compared through
+    /// the row, so nothing is lowered or allocated.
+    ///
+    /// ```php
+    /// interface I1 { function m(); }
+    /// interface I2 extends I1 { function n(); }
+    /// abstract class A implements I2 { function n() {} }
+    /// abstract class B extends A {}
+    /// var_dump(method_exists('I2', 'm'), method_exists('I2', 'N'), method_exists('A', 'm'), method_exists('B', 'M'), method_exists('B', 'x'));
+    /// var_dump(get_class_methods('B'));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// array(2) {
+    ///   [0]=>
+    ///   string(1) "n"
+    ///   [1]=>
+    ///   string(1) "m"
+    /// }
+    /// ```
+    ///
+    /// A method inherited through three levels, one overridden in the
+    /// middle, and a parent's private one, which the child's table holds
+    /// and only the parent's scope may call, beside the child's own of
+    /// that name:
+    ///
+    /// ```php
+    /// class G { function inherited() { return "G::inherited"; } function over() { return "G::over"; } private function hidden() { return "G::hidden"; } function callHidden() { return $this->hidden(); } }
+    /// class P extends G { function over() { return "P::over"; } }
+    /// class C extends P { private function hidden() { return "C::hidden"; } function mine() { return $this->hidden(); } }
+    /// $c = new C;
+    /// echo $c->inherited(), " ", $c->over(), " ", $c->callHidden(), " ", $c->mine(), "\n";
+    /// var_dump(method_exists('P', 'hidden'), method_exists(new P, 'hidden'));
+    /// class D extends P { function probe() { return $this->hidden(); } }
+    /// try { (new D)->probe(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// G::inherited P::over G::hidden C::hidden
+    /// bool(false)
+    /// bool(true)
+    /// Call to private method G::hidden() from scope D
+    /// ```
+    pub fn method_named(self, class: ClassId, name: &[u8]) -> Option<Function> {
+        let MethodRow { class, row, .. } = self.0.symbols().method_row(class, name)?;
+        self.0.method_function(row.holder_in(class), row.at)
+    }
+
+    /// `zend_hash_find_ptr(&ce->function_table, lcname)` as a
+    /// [`MethodRow`]: the row of `class`'s function table under the
+    /// name, whatever its case, which [`Symbols::row_method`] reads;
+    /// none where the table has no entry of that name. One lookup in the class's linked
+    /// record, the name compared through the row, so nothing is lowered
+    /// or allocated.
+    pub fn method_row(self, class: ClassId, name: &[u8]) -> Option<MethodRow> {
+        let record = self.0.linked_class(class)?;
+        let (at, &row) = record
+            .methods
+            .find_at(name, |row| self.0.row_method_name(class, *row))?;
+        let at = u32::try_from(at).ok()?;
+        Some(MethodRow { class, row, at })
+    }
+
+    /// `ZEND_HASH_FOREACH_PTR(&ce->function_table, mptr)`: every row of
+    /// `class`'s function table in php's order, each a [`MethodRow`]
+    /// [`Symbols::row_method`] reads; nothing for a class with no linked
+    /// record. The rows are read off the record in place, so the walk
+    /// allocates nothing.
+    pub fn method_rows(self, class: ClassId) -> impl ExactSizeIterator<Item = MethodRow> + 'r {
+        self.0
+            .linked_class(class)
+            .map_or(&[][..], |record| record.methods.rows())
+            .iter()
+            .enumerate()
+            .map(move |(at, &row)| MethodRow {
+                class,
+                row,
+                at: u32::try_from(at).unwrap_or(u32::MAX),
+            })
+    }
+
+    /// `common.prototype`'s scope for the method a row of a function
+    /// table is, which the link set once
+    /// ([`php_link::LinkedClass::prototypes`]): the class whose method the
+    /// row's prototype is, none where it has none.
+    pub fn row_prototype(self, row: MethodRow) -> Option<ClassId> {
+        let record = self.0.linked_class(row.class)?;
+        record
+            .prototypes
+            .get(usize::try_from(row.at).ok()?)
+            .copied()
+            .flatten()
+    }
+
+    /// The declaration of the method a row of a function table is, which
+    /// [`MethodRow::scope`] declared.
+    pub fn row_method(self, row: MethodRow) -> Option<&'r MethodDecl> {
+        self.0
+            .row_method_at(row.class, row.row)
+            .map(|(_, method)| method)
+    }
+
+    /// The function a row of a function table is, the `zend_function *`
+    /// the bucket holds: the declaring class's method at the row's place,
+    /// a native trait's method copied into a class among them, which is
+    /// the class's own function ([`Extensions::function_extension`] reads
+    /// the trait's extension off it).
+    ///
+    /// ```php
+    /// class E extends Exception { function own() {} }
+    /// foreach (['getMessage', 'own'] as $m) {
+    ///     var_dump((new ReflectionMethod('E', $m))->getExtensionName());
+    /// }
+    /// ```
+    /// ```expect
+    /// string(4) "Core"
+    /// bool(false)
+    /// ```
+    pub fn row_function(self, row: MethodRow) -> Option<Function> {
+        self.0.method_function(row.scope(), row.row.at)
+    }
+
+    /// `ZSTR_VAL(ce->name)` as a message's `%s` prints it: the name a
+    /// class was declared under up to its NUL, so an anonymous class is
+    /// `class@anonymous` ([`php_unit::decl::shown`]), and `object` for
+    /// one the tables have no declaration for. A value holding the name,
+    /// `get_class()`'s, is [`Request::class_name_bytes`].
+    pub fn class_name(self, class: ClassId) -> String {
+        self.0.symbols().class_decl(class).map_or_else(
+            || String::from("object"),
+            |decl| php_unit::decl::shown(&decl.name.0).into_owned(),
+        )
+    }
+
+    /// `instanceof_function`: whether `class` is `of`, extends it, or
+    /// implements it. An interface is one scan of the class's linked
+    /// `ce->interfaces`, which holds every interface it implements
+    /// directly, through its parents and through their parents; a class
+    /// is a walk up the linked parents. Nothing is looked up by name. A
+    /// chain longer than any declaration can make is cut.
+    ///
+    /// ```php
+    /// interface I0 {} interface I1 extends I0 {} interface J {} interface K extends J {}
+    /// class G implements I1 {} class P extends G {} class C extends P implements K {}
+    /// $c = new C;
+    /// var_dump($c instanceof I0, $c instanceof I1, $c instanceof J, $c instanceof G, $c instanceof Countable, new P instanceof K);
+    /// echo implode(",", class_implements($c)), "\n";
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// I0,I1,K,J
+    /// ```
+    pub fn instance_of(self, class: ClassId, of: ClassId) -> bool {
+        if class == of {
+            return true;
+        }
+        if self
+            .0
+            .symbols()
+            .class_decl(of)
+            .is_some_and(|decl| decl.kind == ClassKind::Interface)
+        {
+            return self.0.symbols().interfaces(class).contains(&of);
+        }
+        self.0.ancestors(class).any(|parent| parent == of)
+    }
+
+    /// `ce->interfaces` of a linked class: every interface it implements,
+    /// each once, in php's order, which `class_implements` lists;
+    /// nothing for a class with no linked record.
+    pub fn interfaces(self, class: ClassId) -> &'r [ClassId] {
+        self.0
+            .linked_class(class)
+            .map_or(&[][..], |record| &record.interfaces)
+    }
+
+    /// The class and its parents up from it, `ce` then `ce->parent` and
+    /// on, as php's walks up a chain go, held to 64 classes so a chain
+    /// that loops cannot hold the request. Each step is
+    /// [`Symbols::class_parent`], read by number and never by name, so a
+    /// parent an `extends` spelled in another case is the class as it
+    /// was declared:
+    ///
+    /// ```php
+    /// class A {} class B extends a {} class C extends b {}
+    /// var_dump(class_parents('C'), get_parent_class('C'));
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   ["B"]=>
+    ///   string(1) "B"
+    ///   ["A"]=>
+    ///   string(1) "A"
+    /// }
+    /// string(1) "B"
+    /// ```
+    pub fn lineage(self, class: ClassId) -> impl Iterator<Item = ClassId> + 'r {
+        std::iter::successors(Some(class), move |&at| self.0.symbols().class_parent(at)).take(64)
+    }
+
+    /// `ce->parent`: the linked parent of a class, none at a root, read
+    /// by number and never by name: an engine's class's as startup
+    /// linked it, a declared or a published class's as it bound
+    /// ([`super::Bound`]).
+    ///
+    /// ```php
+    /// class P {} class C extends P {} class E extends RuntimeException {}
+    /// var_dump(get_parent_class(new C), get_parent_class("E"), get_parent_class("RuntimeException"), get_parent_class("P"), new E instanceof Exception);
+    /// ```
+    /// ```expect
+    /// string(1) "P"
+    /// string(16) "RuntimeException"
+    /// string(9) "Exception"
+    /// bool(false)
+    /// bool(true)
+    /// ```
+    #[must_use]
+    pub fn class_parent(self, class: ClassId) -> Option<ClassId> {
+        match self.0.native_class_at(class) {
+            Some(at) => self.0.shared.parents.get(at).copied().flatten(),
+            None => self.0.declared_row(class)?.bound.parent,
         }
     }
 }

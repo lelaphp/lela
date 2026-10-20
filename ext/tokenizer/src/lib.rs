@@ -598,7 +598,7 @@ fn token_text(req: &mut Request, this: PhpObject) -> Result<PhpString, Thrown> {
 /// class for an object and `true` or `false` for a bool.
 fn value_name(req: &Request, value: &Value) -> String {
     match value.as_ref() {
-        ValueRef::Object(o) => req.class_decl(o.class()).map_or_else(
+        ValueRef::Object(o) => req.symbols().class_decl(o.class()).map_or_else(
             || String::from("object"),
             |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
         ),

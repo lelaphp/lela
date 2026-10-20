@@ -374,7 +374,8 @@ fn draw<R>(
 
 /// `ce->name` of the object's class.
 fn class_name(req: &Request, object: PhpObject) -> String {
-    req.class_decl(object.class())
+    req.symbols()
+        .class_decl(object.class())
         .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
         .unwrap_or_default()
 }
@@ -411,6 +412,7 @@ fn fields(req: &mut Request, fields: &[Field]) -> Result<Owner<PhpArray>, Thrown
 fn properties_load(req: &mut Request, object: PhpObject, members: PhpArray) -> Result<(), Thrown> {
     let class = class_name(req, object);
     let declared: Vec<(Vec<u8>, bool)> = req
+        .symbols()
         .class_decl(object.class())
         .map(|decl| {
             decl.properties

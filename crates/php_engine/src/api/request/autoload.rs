@@ -11,6 +11,7 @@ use crate::api::raising::Thrown;
 use crate::api::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use super::Request;
+use super::Symbols;
 
 /// The autoloaders and `EG(in_autoload)`, whose fields no file but
 /// this one reads.
@@ -31,67 +32,6 @@ impl Request {
         for loader in std::mem::take(&mut self.autoload.autoloaders) {
             loader.give_up(self);
         }
-    }
-
-    /// `spl_autoload_register()`: the callable onto the stack, at its
-    /// head under `prepend`, and nothing where one of the same target
-    /// is there already (`spl_find_registered_function`). The stack
-    /// takes an [`Owner`] of the callable, as
-    /// `autoload_func_info_from_fci` takes one of its object and closure,
-    /// and gives them up when the callable leaves the stack or the
-    /// request ends.
-    /// A `Class::method` string registered with `$this` in scope is
-    /// served on that object after the expression that made it is gone:
-    ///
-    /// ```php
-    /// class Test {
-    ///     function register() { spl_autoload_register('Test::load'); }
-    ///     function load($name) { echo "load $name\n"; var_dump($this); }
-    ///     function __destruct() { echo "destructed\n"; }
-    /// }
-    /// (new Test)->register();
-    /// $a = [1, 2, 3];
-    /// var_dump(class_exists('Missing'));
-    /// echo "end\n";
-    /// ```
-    /// ```expect
-    /// load Missing
-    /// object(Test)#1 (0) {
-    /// }
-    /// bool(false)
-    /// end
-    /// destructed
-    /// ```
-    pub fn autoload_register(&mut self, loader: Callable, prepend: bool) -> Result<(), Thrown> {
-        if self
-            .autoload
-            .autoloaders
-            .iter()
-            .any(|held| held.target() == loader.target())
-        {
-            return Ok(());
-        }
-        let loader = Owner::take(self, loader);
-        if prepend {
-            self.autoload.autoloaders.insert(0, loader);
-        } else {
-            self.autoload.autoloaders.push(loader);
-        }
-        Ok(())
-    }
-
-    /// `spl_autoload_unregister()`.
-    pub fn autoload_unregister(&mut self, loader: &Callable) -> bool {
-        let Some(at) = self
-            .autoload
-            .autoloaders
-            .iter()
-            .position(|l| l.target() == loader.target())
-        else {
-            return false;
-        };
-        self.autoload.autoloaders.remove(at).give_up(self);
-        true
     }
 
     /// The autoloader at `at` on the stack, what `spl_perform_autoload`
@@ -162,6 +102,133 @@ impl Request {
         }
     }
 
+    /// What [`autoload_functions`](Self::autoload_functions) makes, its one owner not yet named.
+    pub(crate) fn autoload_functions_made(&mut self) -> Result<Vec<Value>, Thrown> {
+        let loaders: Vec<(Target, Value)> = self
+            .autoload
+            .autoloaders
+            .iter()
+            .map(|loader| (loader.target(), loader.value()))
+            .collect();
+        let mut out = Vec::with_capacity(loaders.len());
+        for (target, value) in loaders {
+            match self.autoload_listed(target, &value) {
+                Ok(listed) => out.push(listed),
+                Err(thrown) => {
+                    for listed in out {
+                        self.release(listed);
+                    }
+                    return Err(thrown);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// One loader as [`Symbols::autoload_functions`] lists it: one
+    /// registered as an object, a closure or an invokable one, is that
+    /// object (`alfi->closure`).
+    fn autoload_listed(&mut self, target: Target, value: &Value) -> Result<Value, Thrown> {
+        if let Some(object) = value.deref().as_object() {
+            self.addref(&object.as_value());
+            return Ok(object.as_value());
+        }
+        match target {
+            Target::Closure(object) => {
+                self.addref(&object.as_value());
+                Ok(object.as_value())
+            }
+            Target::Function(function) => {
+                let name = self.function_name(function);
+                Ok(Value::string(self.string(name.as_bytes())?))
+            }
+            Target::Method {
+                function,
+                scope,
+                this,
+            } => {
+                let first = if let Some(object) = this {
+                    Owner::take(self, object.as_value())
+                } else {
+                    let class = self.symbols().class_name(scope);
+                    let class = Value::string(self.string(class.as_bytes())?);
+                    Owner::adopt(class)
+                };
+                let name = self.function_name(function);
+                let mut pair = self.array()?;
+                pair.append(self, first)?;
+                let name = Value::string(self.string(name.as_bytes())?);
+                pair.append(self, Owner::adopt(name))?;
+                Ok(Value::array(pair))
+            }
+        }
+    }
+}
+
+impl Symbols<&mut Request> {
+    /// `spl_autoload_register()`: the callable onto the stack, at its
+    /// head under `prepend`, and nothing where one of the same target
+    /// is there already (`spl_find_registered_function`). The stack
+    /// takes an [`Owner`] of the callable, as
+    /// `autoload_func_info_from_fci` takes one of its object and closure,
+    /// and gives them up when the callable leaves the stack or the
+    /// request ends.
+    /// A `Class::method` string registered with `$this` in scope is
+    /// served on that object after the expression that made it is gone:
+    ///
+    /// ```php
+    /// class Test {
+    ///     function register() { spl_autoload_register('Test::load'); }
+    ///     function load($name) { echo "load $name\n"; var_dump($this); }
+    ///     function __destruct() { echo "destructed\n"; }
+    /// }
+    /// (new Test)->register();
+    /// $a = [1, 2, 3];
+    /// var_dump(class_exists('Missing'));
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// load Missing
+    /// object(Test)#1 (0) {
+    /// }
+    /// bool(false)
+    /// end
+    /// destructed
+    /// ```
+    pub fn autoload_register(self, loader: Callable, prepend: bool) -> Result<(), Thrown> {
+        if self
+            .0
+            .autoload
+            .autoloaders
+            .iter()
+            .any(|held| held.target() == loader.target())
+        {
+            return Ok(());
+        }
+        let loader = Owner::take(self.0, loader);
+        if prepend {
+            self.0.autoload.autoloaders.insert(0, loader);
+        } else {
+            self.0.autoload.autoloaders.push(loader);
+        }
+        Ok(())
+    }
+
+    /// `spl_autoload_unregister()`.
+    pub fn autoload_unregister(self, loader: &Callable) -> bool {
+        let Some(at) = self
+            .0
+            .autoload
+            .autoloaders
+            .iter()
+            .position(|l| l.target() == loader.target())
+        else {
+            return false;
+        };
+        self.0.autoload.autoloaders.remove(at).give_up(self.0);
+        true
+    }
+
     /// `spl_autoload_functions()`: each loader as its
     /// `autoload_func_info` lists it, one owner each, the caller's: a
     /// closure or an invokable object itself; a method as the pair of its receiver, or of the
@@ -187,74 +254,12 @@ impl Request {
     /// Inv
     /// ```
     #[cfg_attr(debug_assertions, track_caller)]
-    pub fn autoload_functions(&mut self) -> Result<Vec<Owner<Value>>, Thrown> {
-        let made = self.autoload_functions_made()?;
+    pub fn autoload_functions(self) -> Result<Vec<Owner<Value>>, Thrown> {
+        let made = self.0.autoload_functions_made()?;
         let mut owners = Vec::with_capacity(made.len());
         for value in made {
             owners.push(Owner::adopt(value));
         }
         Ok(owners)
-    }
-
-    /// What [`autoload_functions`](Self::autoload_functions) makes, its one owner not yet named.
-    pub(crate) fn autoload_functions_made(&mut self) -> Result<Vec<Value>, Thrown> {
-        let loaders: Vec<(Target, Value)> = self
-            .autoload
-            .autoloaders
-            .iter()
-            .map(|loader| (loader.target(), loader.value()))
-            .collect();
-        let mut out = Vec::with_capacity(loaders.len());
-        for (target, value) in loaders {
-            match self.autoload_listed(target, &value) {
-                Ok(listed) => out.push(listed),
-                Err(thrown) => {
-                    for listed in out {
-                        self.release(listed);
-                    }
-                    return Err(thrown);
-                }
-            }
-        }
-        Ok(out)
-    }
-
-    /// One loader as [`Request::autoload_functions`] lists it: one
-    /// registered as an object, a closure or an invokable one, is that
-    /// object (`alfi->closure`).
-    fn autoload_listed(&mut self, target: Target, value: &Value) -> Result<Value, Thrown> {
-        if let Some(object) = value.deref().as_object() {
-            self.addref(&object.as_value());
-            return Ok(object.as_value());
-        }
-        match target {
-            Target::Closure(object) => {
-                self.addref(&object.as_value());
-                Ok(object.as_value())
-            }
-            Target::Function(function) => {
-                let name = self.function_name(function);
-                Ok(Value::string(self.string(name.as_bytes())?))
-            }
-            Target::Method {
-                function,
-                scope,
-                this,
-            } => {
-                let first = if let Some(object) = this {
-                    Owner::take(self, object.as_value())
-                } else {
-                    let class = self.class_name(scope);
-                    let class = Value::string(self.string(class.as_bytes())?);
-                    Owner::adopt(class)
-                };
-                let name = self.function_name(function);
-                let mut pair = self.array()?;
-                pair.append(self, first)?;
-                let name = Value::string(self.string(name.as_bytes())?);
-                pair.append(self, Owner::adopt(name))?;
-                Ok(Value::array(pair))
-            }
-        }
     }
 }

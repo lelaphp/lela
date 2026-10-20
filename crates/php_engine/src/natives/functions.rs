@@ -425,7 +425,7 @@ fn get_defined_functions(
             "get_defined_functions(): The $exclude_disabled parameter has no effect since PHP 8.0",
         );
     }
-    req.defined_functions()
+    req.symbols_mut().defined_functions()
 }
 
 /// `get_defined_vars(): array`, php's `ZEND_FUNCTION(get_defined_vars)`
@@ -665,7 +665,7 @@ fn get_defined_constants(
         let mut module_at: std::collections::HashMap<&str, usize> =
             std::collections::HashMap::new();
         let mut bytes = Vec::new();
-        for (module, name, value) in req.constant_table() {
+        for (module, name, value) in req.symbols().constant_table() {
             let group = module.map(|module| {
                 *module_at.entry(module).or_insert_with(|| {
                     modules.push(module.to_owned());
@@ -747,7 +747,7 @@ fn get_extension_funcs(
             req.extensions()
                 .functions(extension)
                 .into_iter()
-                .filter_map(|function| req.function_decl(function))
+                .filter_map(|function| req.symbols().function_decl(function))
                 .map(|decl| decl.name.0.to_vec())
                 .collect()
         };

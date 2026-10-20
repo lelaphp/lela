@@ -251,12 +251,12 @@ fn function_name(req: &mut Request, callable: &Callable, loader: &Value, member:
     let mut name = Vec::new();
     if member
         && !is_closure
-        && let Some(class) = scope.and_then(|c| req.class_decl(c))
+        && let Some(class) = scope.and_then(|c| req.symbols().class_decl(c))
     {
         name.extend_from_slice(&class.name.0);
         name.extend_from_slice(b"::");
     }
-    if let Some(decl) = req.function_decl(function) {
+    if let Some(decl) = req.symbols().function_decl(function) {
         name.extend_from_slice(&decl.name.0);
     }
     closure.give_up(req);

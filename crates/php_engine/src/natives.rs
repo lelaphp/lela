@@ -1737,10 +1737,11 @@ fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize)
     // guard as php has it: a case is its class and its case name,
     // `zend_enum_fetch_case_name`, and none of its properties.
     if req
+        .symbols()
         .class_decl(object.class())
         .is_some_and(|decl| decl.kind == ClassKind::Enum)
     {
-        let class = req.class_name(object.class());
+        let class = req.symbols().class_name(object.class());
         let case = object
             .prop(req, b"name")
             .and_then(|name| name.as_str_bytes().map(<[u8]>::to_vec))

@@ -86,9 +86,9 @@ fn call(req: &mut Request, object: PhpObject, name: &[u8], args: &[Value]) -> Ca
     }
     let class = object.class();
     let lowered = name.to_ascii_lowercase();
-    let served = if let Some(function) = req.method_named(class, &lowered) {
+    let served = if let Some(function) = req.symbols().method_named(class, &lowered) {
         req.serve_method(function, Some(object), class, args, &[])
-    } else if let Some(function) = req.method_named(class, b"__call") {
+    } else if let Some(function) = req.symbols().method_named(class, b"__call") {
         let Ok(called) = PhpString::new(req, name) else {
             return Called::Threw;
         };
@@ -191,6 +191,7 @@ fn create_object(
     user: &UserWrapper,
 ) -> Result<Option<Owner<PhpObject>>, Thrown> {
     let refused = req
+        .symbols()
         .class_decl(user.class)
         .is_some_and(|decl| match decl.kind {
             ClassKind::Interface | ClassKind::Trait => true,
@@ -211,7 +212,7 @@ fn create_object(
         object.give_up(req);
         return Err(thrown);
     }
-    if let Some(constructor) = req.method_named(user.class, b"__construct") {
+    if let Some(constructor) = req.symbols().method_named(user.class, b"__construct") {
         match req.serve_method(constructor, Some(*object), user.class, &[], &[]) {
             Ok(value) => value.give_up(req),
             Err(thrown) => defer(req, thrown),
@@ -222,7 +223,7 @@ fn create_object(
 
 /// The class's name, as the warnings print it.
 fn class_name(req: &Request, object: PhpObject) -> String {
-    req.class_name(object.class())
+    req.symbols().class_name(object.class())
 }
 
 /// A method's `is not implemented!` warning.
@@ -832,8 +833,11 @@ impl Ops for UserStream {
     /// types are php's warning.
     fn truncate(&mut self, req: &mut Request, size: usize) -> Option<bool> {
         let class = self.object.class();
-        let has = req.method_named(class, b"stream_truncate").is_some()
-            || req.method_named(class, b"__call").is_some();
+        let has = req
+            .symbols()
+            .method_named(class, b"stream_truncate")
+            .is_some()
+            || req.symbols().method_named(class, b"__call").is_some();
         if !has {
             return None;
         }

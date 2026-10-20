@@ -627,7 +627,7 @@ fn begin(req: &mut Request, at: Observable) {
     if let Observable::Code(frame) = at {
         let generator = req
             .frame_function(frame)
-            .and_then(|function| req.function_decl(function))
+            .and_then(|function| req.symbols().function_decl(function))
             .is_some_and(|decl| decl.is_generator);
         if generator {
             return;

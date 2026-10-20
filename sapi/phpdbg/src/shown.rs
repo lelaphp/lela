@@ -246,6 +246,7 @@ pub fn superglobals(req: &mut Request) -> Vec<Variable> {
 /// `info constants` lists them in the table's order.
 pub fn user_constants(req: &mut Request) -> Vec<Variable> {
     let read = req
+        .symbols()
         .constant_table()
         .into_iter()
         .filter(|(extension, _, _)| extension.is_none())

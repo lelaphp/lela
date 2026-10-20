@@ -61,6 +61,7 @@ pub(crate) use class_constants::ConstantFetch;
 mod class_data;
 mod classes;
 use classes::AccelServed;
+pub use classes::Symbols;
 mod constants;
 pub(crate) use constants::{ConstantAt, halt_offset_key};
 mod diagnostics;

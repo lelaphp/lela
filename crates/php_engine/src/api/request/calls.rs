@@ -21,6 +21,7 @@ use crate::observer::OnThrow;
 use crate::trampoline::CallTrampoline;
 use php_heap::FrameRef;
 
+use super::Symbols;
 use super::{ExtensionId, Link, Request, UserFunction};
 
 /// The trampolines, the natives' defaults, the functions `name(...)`
@@ -198,29 +199,6 @@ impl Request {
             self.give_back_cache(at);
         }
         served
-    }
-
-    /// Whether a closure's function is `ZEND_ACC_STATIC`: a closure
-    /// written `static function`, or one made of a `static` method.
-    ///
-    /// ```php
-    /// class F { static function s() {} function q() { return static function () {}; } }
-    /// $r = fn ($c) => (new ReflectionFunction($c))->isStatic();
-    /// var_dump($r(function () {}), $r(static function () {}), $r((new F)->q()), $r(Closure::fromCallable(['F', 's'])));
-    /// ```
-    /// ```expect
-    /// bool(false)
-    /// bool(true)
-    /// bool(true)
-    /// bool(true)
-    /// ```
-    #[must_use]
-    pub fn closure_refuses_receiver(&self, closure: &ClosureInfo) -> bool {
-        if let Some(decl) = self.method_decl(closure.function) {
-            return !decl.is_instance;
-        }
-        self.closure_code(closure.function)
-            .is_some_and(|code| code.no_receiver)
     }
 
     /// `ZEND_ACC_USES_THIS`, which `zend_compile` sets on an op array
@@ -567,7 +545,7 @@ impl Request {
         function: Function,
         arguments: &[Value],
     ) -> Result<Vec<usize>, Thrown> {
-        let Some(decl) = self.function_decl(function) else {
+        let Some(decl) = self.symbols().function_decl(function) else {
             return Ok(Vec::new());
         };
         let variadic = decl.parameters.last().filter(|last| last.variadic);
@@ -615,7 +593,7 @@ impl Request {
     /// [`Request::arg_send_mode`] read off the declaration.
     #[inline(never)]
     fn declared_send_mode(&self, function: Function, number: u32) -> (bool, bool) {
-        let Some(decl) = self.function_decl(function) else {
+        let Some(decl) = self.symbols().function_decl(function) else {
             return (false, false);
         };
         super::sent_parameter(decl, number).map_or((false, false), |parameter| {
@@ -989,7 +967,7 @@ impl Request {
         name: &[u8],
         is_static: bool,
     ) -> Option<Function> {
-        let magic = self.method_named(
+        let magic = self.symbols().method_named(
             class,
             if is_static {
                 b"__callstatic"
@@ -1019,7 +997,7 @@ impl Request {
             |req| {
                 Some(CallTrampoline::invoke(
                     function,
-                    req.function_decl(function)?,
+                    req.symbols().function_decl(function)?,
                 ))
             },
         )
@@ -1054,8 +1032,8 @@ impl Request {
         name: &[u8],
         this: Option<PhpObject>,
     ) -> Option<Function> {
-        if self.method_named(class, b"__call").is_some()
-            && let Some(this) = this.filter(|this| self.instance_of(this.class(), class))
+        if self.symbols().method_named(class, b"__call").is_some()
+            && let Some(this) = this.filter(|this| self.symbols().instance_of(this.class(), class))
         {
             return self.call_trampoline(this.class(), name, false);
         }
@@ -1065,7 +1043,7 @@ impl Request {
     /// The trampoline `class` answers under `name`, any case, php's
     /// `ZEND_ACC_CALL_VIA_HANDLER` function: a method the class's
     /// `get_method` synthesises, which `ce->function_table` has no row
-    /// for, so [`Request::method_named`] never finds it and no
+    /// for, so [`Symbols::method_named`] never finds it and no
     /// rendering lists it. `zend_get_closure_invoke_method` is the one
     /// the engine makes, `Closure::__invoke`.
     pub(crate) fn trampoline_named(&self, class: ClassId, name: &[u8]) -> Option<Function> {
@@ -1271,50 +1249,6 @@ impl Request {
         }
     }
 
-    /// The trampoline `class` answers under the lowered name, a method
-    /// its `get_method` synthesises and its table has no row for: one
-    /// an extension laid down with [`ExtensionBuilder::trampolines`],
-    /// which is what a class's own `get_method` hands back for it.
-    ///
-    /// [`ExtensionBuilder::trampolines`]: crate::api::abi::ExtensionBuilder::trampolines
-    #[must_use]
-    pub fn trampoline(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
-        self.trampoline_named(class, lowered)
-    }
-
-    /// `zend_ffi_get_func`'s trampoline (`Z/ext/ffi/ffi.c:2951-2975`): a
-    /// native named `name` whose body is `entry`, with no scope, every
-    /// argument by value, made on a lookup by a class's
-    /// [`ObjectHandlers::get_method`] or [`ObjectHandlers::get_closure`]
-    /// for a name it learns only when a call names it; the one the
-    /// request already made for that entry and name where it made one.
-    /// The body reads its name off [`Frames::active_function_name`] and
-    /// its arguments off [`Frames::argument`].
-    ///
-    /// [`ObjectHandlers::get_method`]: crate::api::abi::ObjectHandlers::get_method
-    /// [`ObjectHandlers::get_closure`]: crate::api::abi::ObjectHandlers::get_closure
-    pub fn native_trampoline(
-        &mut self,
-        name: &[u8],
-        entry: crate::api::abi::Entry,
-    ) -> Option<Function> {
-        self.native_trampoline_as(name, entry, true)
-    }
-
-    /// [`Request::native_trampoline`] for a call named on the class,
-    /// `ZEND_ACC_STATIC` beside `ZEND_ACC_CALL_VIA_HANDLER`: what a
-    /// class's [`ObjectHandlers::get_static_method`] answers for a name
-    /// its table has no row for.
-    ///
-    /// [`ObjectHandlers::get_static_method`]: crate::api::abi::ObjectHandlers::get_static_method
-    pub fn native_static_trampoline(
-        &mut self,
-        name: &[u8],
-        entry: crate::api::abi::Entry,
-    ) -> Option<Function> {
-        self.native_trampoline_as(name, entry, false)
-    }
-
     fn native_trampoline_as(
         &mut self,
         name: &[u8],
@@ -1332,17 +1266,7 @@ impl Request {
         )
     }
 
-    /// `ce->get_iterator` on a class that is no `Traversable`
-    /// ([`ObjectHandlers::own_iterator`]): what Reflection calls
-    /// iterable beside a `Traversable` class.
-    ///
-    /// [`ObjectHandlers::own_iterator`]: crate::api::abi::ObjectHandlers::own_iterator
-    #[must_use]
-    pub fn class_own_iterator(&self, class: ClassId) -> bool {
-        self.handlers_of(class).own_iterator()
-    }
-
-    /// Whether `function` is a native [`Request::native_trampoline`]
+    /// Whether `function` is a native [`Symbols::native_trampoline`]
     /// made, php's `ZEND_ACC_CALL_VIA_TRAMPOLINE` on a function no
     /// magic method serves.
     pub(crate) fn via_native_trampoline(&self, function: Function) -> bool {
@@ -1372,7 +1296,7 @@ impl Request {
     /// its receiver and the class as its scope, and none for a class
     /// with no `__invoke`.
     pub(crate) fn invoke_closure(&mut self, object: PhpObject) -> Option<ClosureInfo> {
-        let function = self.method_named(object.class(), b"__invoke")?;
+        let function = self.symbols().method_named(object.class(), b"__invoke")?;
         Some(ClosureInfo {
             function,
             this: Some(object),
@@ -1400,6 +1324,84 @@ impl Request {
         let out = f(self);
         self.fibers.unblock_switch();
         out
+    }
+}
+
+impl Symbols<&Request> {
+    /// Whether a closure's function is `ZEND_ACC_STATIC`: a closure
+    /// written `static function`, or one made of a `static` method.
+    ///
+    /// ```php
+    /// class F { static function s() {} function q() { return static function () {}; } }
+    /// $r = fn ($c) => (new ReflectionFunction($c))->isStatic();
+    /// var_dump($r(function () {}), $r(static function () {}), $r((new F)->q()), $r(Closure::fromCallable(['F', 's'])));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    #[must_use]
+    pub fn closure_refuses_receiver(self, closure: &ClosureInfo) -> bool {
+        if let Some(decl) = self.0.method_decl(closure.function) {
+            return !decl.is_instance;
+        }
+        self.0
+            .closure_code(closure.function)
+            .is_some_and(|code| code.no_receiver)
+    }
+
+    /// The trampoline `class` answers under the lowered name, a method
+    /// its `get_method` synthesises and its table has no row for: one
+    /// an extension laid down with [`ExtensionBuilder::trampolines`],
+    /// which is what a class's own `get_method` hands back for it.
+    ///
+    /// [`ExtensionBuilder::trampolines`]: crate::api::abi::ExtensionBuilder::trampolines
+    #[must_use]
+    pub fn trampoline(self, class: ClassId, lowered: &[u8]) -> Option<Function> {
+        self.0.trampoline_named(class, lowered)
+    }
+
+    /// `ce->get_iterator` on a class that is no `Traversable`
+    /// ([`ObjectHandlers::own_iterator`]): what Reflection calls
+    /// iterable beside a `Traversable` class.
+    ///
+    /// [`ObjectHandlers::own_iterator`]: crate::api::abi::ObjectHandlers::own_iterator
+    #[must_use]
+    pub fn class_own_iterator(self, class: ClassId) -> bool {
+        self.0.handlers_of(class).own_iterator()
+    }
+}
+
+impl Symbols<&mut Request> {
+    /// `zend_ffi_get_func`'s trampoline (`Z/ext/ffi/ffi.c:2951-2975`): a
+    /// native named `name` whose body is `entry`, with no scope, every
+    /// argument by value, made on a lookup by a class's
+    /// [`ObjectHandlers::get_method`] or [`ObjectHandlers::get_closure`]
+    /// for a name it learns only when a call names it; the one the
+    /// request already made for that entry and name where it made one.
+    /// The body reads its name off [`Frames::active_function_name`] and
+    /// its arguments off [`Frames::argument`].
+    ///
+    /// [`ObjectHandlers::get_method`]: crate::api::abi::ObjectHandlers::get_method
+    /// [`ObjectHandlers::get_closure`]: crate::api::abi::ObjectHandlers::get_closure
+    pub fn native_trampoline(self, name: &[u8], entry: crate::api::abi::Entry) -> Option<Function> {
+        self.0.native_trampoline_as(name, entry, true)
+    }
+
+    /// [`Symbols::native_trampoline`] for a call named on the class,
+    /// `ZEND_ACC_STATIC` beside `ZEND_ACC_CALL_VIA_HANDLER`: what a
+    /// class's [`ObjectHandlers::get_static_method`] answers for a name
+    /// its table has no row for.
+    ///
+    /// [`ObjectHandlers::get_static_method`]: crate::api::abi::ObjectHandlers::get_static_method
+    pub fn native_static_trampoline(
+        self,
+        name: &[u8],
+        entry: crate::api::abi::Entry,
+    ) -> Option<Function> {
+        self.0.native_trampoline_as(name, entry, false)
     }
 }
 

@@ -1712,7 +1712,7 @@ pub(crate) fn get_iterator(
     }
     let yields_by_ref = read(req, generator, |g| g.function)
         .flatten()
-        .and_then(|function| req.function_decl(function))
+        .and_then(|function| req.symbols().function_decl(function))
         .is_some_and(|decl| decl.returns_by_ref);
     if by_ref && !yields_by_ref {
         return Err(throw(
@@ -2112,6 +2112,7 @@ impl Generator {
         let function = read(req, this, |g| g.function).flatten();
         let name = function.map(|function| {
             let name = req
+                .symbols()
                 .function_decl(function)
                 .map(|decl| decl.name.0.to_vec())
                 .unwrap_or_default();
@@ -2150,6 +2151,6 @@ pub(crate) fn yields_by_ref(req: &Request, frame: FrameRef) -> bool {
     req.vm()
         .at(frame)
         .and_then(|state| state.function)
-        .and_then(|function| req.function_decl(function))
+        .and_then(|function| req.symbols().function_decl(function))
         .is_some_and(|decl| decl.returns_by_ref)
 }

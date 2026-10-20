@@ -31,11 +31,11 @@
 //! one class entry after `zend_do_inheritance` and
 //! `zend_do_implement_interfaces` ran is the engine's where the engine
 //! keeps it: the function table is the class's linked record, its rows
-//! read through `api` (`Request::method_rows`, `Request::method_row`)
+//! read through `api` (`Symbols::method_rows`, `Symbols::method_row`)
 //! and held as a `MethodRow`, and the interface list and the constants
 //! table in their order and each method's prototype are the record's
-//! (`Request::interfaces`, `Request::constants_in_order`,
-//! `Request::row_prototype`). The properties with their shadows are
+//! (`Symbols::interfaces`, `Symbols::constants_in_order`,
+//! `Symbols::row_prototype`). The properties with their shadows are
 //! computed here by the same rules over the declarations
 //! (`linked_properties`), so the words `inherits`, `overwrites`,
 //! `prototype` and `ctor` are php's.
@@ -5050,7 +5050,8 @@ fn this_extension(req: &mut Request, this: PhpObject) -> Result<ExtensionId, Thr
 /// `add_extension_class`'s test over the linked table: each class the
 /// extension declared, with its name, in table order.
 fn extension_classes(req: &Request, extension: ExtensionId) -> Vec<(ClassId, Vec<u8>)> {
-    req.declared_classes()
+    req.symbols()
+        .declared_classes()
         .into_iter()
         .filter(|&class| req.extensions().class_extension(class) == Some(extension))
         .map(|class| (class, class_name_of(req, class)))
@@ -5066,6 +5067,7 @@ fn extension_classes(req: &Request, extension: ExtensionId) -> Vec<(ClassId, Vec
 /// constructor served.
 fn reflection_class_factory(req: &mut Request, class: ClassId) -> Result<Owner<PhpObject>, Thrown> {
     let is_enum = req
+        .symbols()
         .class_decl(class)
         .is_some_and(|decl| decl.kind == ClassKind::Enum);
     let reflector = if is_enum {
@@ -5175,7 +5177,8 @@ fn this_class(req: &mut Request, this: PhpObject) -> Result<ClassId, Thrown> {
 /// `ce->name` as bytes, empty for an identity the tables have no
 /// declaration for.
 fn class_name_of(req: &Request, class: ClassId) -> Vec<u8> {
-    req.class_decl(class)
+    req.symbols()
+        .class_decl(class)
         .map(|decl| decl.name.0.to_vec())
         .unwrap_or_default()
 }
@@ -5184,7 +5187,7 @@ fn class_name_of(req: &Request, class: ClassId) -> Vec<u8> {
 /// class entry after `zend_do_inheritance` copied the parent's tables
 /// into the child's, and what every walk below reads instead.
 fn class_chain(req: &mut Request, class: ClassId) -> Vec<ClassId> {
-    req.lineage(class).collect()
+    req.symbols().lineage(class).collect()
 }
 
 /// `zend_memrchr(name, '\\')`: where the namespace ends, if the name
@@ -5207,12 +5210,14 @@ fn constant_key(name: &[u8]) -> Vec<u8> {
 }
 
 fn is_internal(req: &Request, class: ClassId) -> bool {
-    req.class_decl(class)
+    req.symbols()
+        .class_decl(class)
         .is_none_or(|decl| decl.file.0.is_empty())
 }
 
 fn user_line(req: &Request, class: ClassId, line: fn(&ClassDecl) -> u32) -> OrFalse<i64> {
-    req.class_decl(class)
+    req.symbols()
+        .class_decl(class)
         .filter(|decl| !decl.file.0.is_empty())
         .map_or(OrFalse::False, |decl| OrFalse::Value(i64::from(line(decl))))
 }
@@ -5239,7 +5244,8 @@ fn class_constant_named(
     class: ClassId,
     name: &[u8],
 ) -> Option<(ClassId, ClassConstDecl)> {
-    req.class_constant_of(class, name)
+    req.symbols()
+        .class_constant_of(class, name)
         .map(|(declaring, constant)| (declaring, constant.clone()))
 }
 
@@ -5280,7 +5286,7 @@ fn property_named(
 ) -> Option<(ClassId, PropertyDecl)> {
     for (depth, at) in class_chain(req, class).into_iter().enumerate() {
         let found =
-            req.class_decl(at)?.properties.iter().find(|p| {
+            req.symbols().class_decl(at)?.properties.iter().find(|p| {
                 &*p.name.0 == name && (depth == 0 || p.visibility != Visibility::Private)
             });
         if let Some(property) = found {
@@ -5374,7 +5380,7 @@ fn effective_prop(
         return reflected;
     }
     class_chain(req, object.class()).into_iter().find_map(|at| {
-        let decl = req.class_decl(at)?;
+        let decl = req.symbols().class_decl(at)?;
         let found = decl.properties.iter().find(|p| &*p.name.0 == name)?;
         Some((at, found.clone()))
     })
@@ -5529,7 +5535,7 @@ fn const_string(req: &mut Request, name: &[u8], indent: &str) -> String {
 /// at startup carries and one a running program defined does not,
 /// which is `get_defined_constants()`'s own list here.
 fn constant_is_persistent(req: &mut Request, name: &[u8]) -> bool {
-    let Ok(table) = req.constants() else {
+    let Ok(table) = req.symbols_mut().constants() else {
         return true;
     };
     let defined = table.find(name).is_some();
@@ -5542,7 +5548,8 @@ fn constant_is_persistent(req: &mut Request, name: &[u8]) -> bool {
 /// program wrote, so the attribute on the declaration is the whole of
 /// it (`php_unit::decl::ConstDecl`).
 fn constant_is_deprecated(req: &Request, name: &[u8]) -> bool {
-    req.constant_attributes(&constant_key(name))
+    req.symbols()
+        .constant_attributes(&constant_key(name))
         .iter()
         .any(|one| one.name.0.eq_ignore_ascii_case(b"Deprecated"))
 }
@@ -5631,7 +5638,7 @@ fn class_string(
     indent: &str,
 ) -> Result<String, Thrown> {
     let mut out = String::new();
-    let Some(decl) = req.class_decl(class).cloned() else {
+    let Some(decl) = req.symbols().class_decl(class).cloned() else {
         return Ok(out);
     };
     let sub_indent = format!("{indent}    ");
@@ -5768,7 +5775,7 @@ fn class_string(
 fn dynamic_properties(req: &mut Request, class: ClassId, object: PhpObject) -> Vec<Vec<u8>> {
     let mut public: Vec<Vec<u8>> = Vec::new();
     for at in class_chain(req, class) {
-        let Some(decl) = req.class_decl(at) else {
+        let Some(decl) = req.symbols().class_decl(at) else {
             continue;
         };
         let names = decl.properties.iter().filter(|p| p.is_instance);
@@ -5816,7 +5823,7 @@ fn dynamic_properties(req: &mut Request, class: ClassId, object: PhpObject) -> V
 fn undeclared_properties(req: &mut Request, class: ClassId, object: PhpObject) -> Vec<Vec<u8>> {
     let declared: Vec<Vec<u8>> = class_chain(req, class)
         .into_iter()
-        .filter_map(|at| req.class_decl(at))
+        .filter_map(|at| req.symbols().class_decl(at))
         .flat_map(|decl| decl.properties.iter().map(|p| p.name.0.to_vec()))
         .collect();
     // `zend_get_properties_no_lazy_init`: a lazy object's rows as they
@@ -5897,9 +5904,9 @@ fn class_header(
         && lookup_class(req, b"Traversable")
             .ok()
             .flatten()
-            .is_some_and(|traversable| req.instance_of(class, traversable));
+            .is_some_and(|traversable| req.symbols().instance_of(class, traversable));
     let iterable = traversable
-        || req.class_own_iterator(class)
+        || req.symbols().class_own_iterator(class)
         || linked_properties(req, class)
             .iter()
             .any(|(property, _)| property.hooks.is_some());
@@ -5928,7 +5935,7 @@ fn class_header(
     out.push_str(&String::from_utf8_lossy(&decl.name.0));
     // `ce->parent->name`: the parent as it was declared, not as the
     // child's `extends` spelled it.
-    if let Some(parent) = req.class_parent(class) {
+    if let Some(parent) = req.symbols().class_parent(class) {
         let name = class_name_of(req, parent);
         write!(out, " extends {}", String::from_utf8_lossy(&name)).ok();
     }
@@ -5939,7 +5946,7 @@ fn class_header(
             EnumBacking::Pure => {}
         }
     }
-    let interfaces = req.interfaces(class).to_vec();
+    let interfaces = req.symbols().interfaces(class).to_vec();
     for (i, interface) in interfaces.iter().enumerate() {
         let name = class_name_of(req, *interface);
         let name = String::from_utf8_lossy(&name);
@@ -6132,7 +6139,7 @@ fn property_string(
     }
     write!(out, "${}", String::from_utf8_lossy(name)).ok();
     let evaluated = (property.is_instance)
-        .then(|| req.evaluated_default(declaring, name))
+        .then(|| req.symbols().evaluated_default(declaring, name))
         .flatten();
     match (&property.default, &property.ty) {
         _ if is_virtual => {}
@@ -6176,7 +6183,7 @@ fn property_string(
 }
 
 /// `format_default_value` over a default already evaluated
-/// ([`Request::evaluated_default`]): a scalar as `smart_str_append_scalar`
+/// ([`Symbols::evaluated_default`]): a scalar as `smart_str_append_scalar`
 /// writes it, an enum case `Class::Case`, an array by its keys where it
 /// is no list, and any other object `object(Class)`, as GH-15902 has it.
 fn value_default_string(req: &mut Request, value: &Value) -> String {
@@ -6224,6 +6231,7 @@ fn value_default_string(req: &mut Request, value: &Value) -> String {
             let class = class_name_of(req, object.class());
             let class = String::from_utf8_lossy(&class).into_owned();
             let is_enum = req
+                .symbols()
                 .class_decl(object.class())
                 .is_some_and(|decl| decl.kind == ClassKind::Enum);
             match object.prop(req, b"name").filter(|_| is_enum) {
@@ -6675,7 +6683,7 @@ fn escaped(bytes: &[u8]) -> String {
 /// `zend_do_inheritance` left it: the declaration, `common.scope`, the
 /// class that declared it, and the row of the engine's table it was
 /// found at, which `common.prototype` is read off
-/// ([`Request::row_prototype`]), or the `__invoke` php makes for a
+/// ([`Symbols::row_prototype`]), or the `__invoke` php makes for a
 /// `Closure`, which no table holds; nothing held for a property's hook.
 #[derive(Clone)]
 struct LinkedMethod {
@@ -6689,7 +6697,7 @@ impl LinkedMethod {
     /// out of the engine's.
     fn of_row(req: &Request, row: MethodRow) -> Option<LinkedMethod> {
         Some(LinkedMethod {
-            decl: req.row_method(row)?.clone(),
+            decl: req.symbols().row_method(row)?.clone(),
             scope: row.scope(),
             held: Some(HeldMethod::Row(row)),
         })
@@ -6784,14 +6792,15 @@ fn method_or_invoke(
 /// bool(true)
 /// ```
 fn table_method(req: &Request, class: ClassId, name: &[u8]) -> Option<LinkedMethod> {
-    LinkedMethod::of_row(req, req.method_row(class, name)?)
+    LinkedMethod::of_row(req, req.symbols().method_row(class, name)?)
 }
 
 /// Every method of the engine's linked table of `class` in its order
 /// ([`table_method`]), each declaration copied out, which a rendering
 /// walks while it writes.
 fn table_methods(req: &Request, class: ClassId) -> Vec<LinkedMethod> {
-    req.method_rows(class)
+    req.symbols()
+        .method_rows(class)
         .filter_map(|row| LinkedMethod::of_row(req, row))
         .collect()
 }
@@ -6847,7 +6856,7 @@ fn closure_invoke(req: &mut Request, closure: Option<Function>) -> Option<Linked
         frameless: Vec::new(),
     };
     let mut function = closure
-        .and_then(|closure| req.function_decl(closure).cloned())
+        .and_then(|closure| req.symbols().function_decl(closure).cloned())
         .unwrap_or_else(empty);
     function.name = Name(b"__invoke".as_slice().into());
     function.file = Name::default();
@@ -6882,7 +6891,7 @@ fn is_constructor(method: &MethodDecl) -> bool {
 }
 
 /// `CE_CONSTANTS_TABLE(ce)`: the rows of the engine's linked record in
-/// php's order ([`Request::constants_in_order`]), the class's own first
+/// php's order ([`Symbols::constants_in_order`]), the class's own first
 /// for a user class and last for an internal one, each declaration
 /// copied out beside the class that declared it, for a walk that
 /// evaluates as it goes.
@@ -6897,7 +6906,8 @@ fn is_constructor(method: &MethodDecl) -> bool {
 /// ATOM, COOKIE, ISO8601, ISO8601_EXPANDED, RFC822, RFC850, RFC1036, RFC1123, RFC7231, RFC2822, RFC3339, RFC3339_EXTENDED, RSS, W3C
 /// ```
 fn constant_rows(req: &Request, class: ClassId) -> Vec<(ClassConstDecl, ClassId)> {
-    req.constants_in_order(class)
+    req.symbols()
+        .constants_in_order(class)
         .into_iter()
         .map(|(declaring, constant)| (constant.clone(), declaring))
         .collect()
@@ -6929,8 +6939,14 @@ fn constant_rows(req: &Request, class: ClassId) -> Vec<(ClassConstDecl, ClassId)
 /// )
 /// ```
 fn linked_properties(req: &mut Request, class: ClassId) -> Vec<(PropertyDecl, ClassId)> {
-    req.property_info_rows(class)
-        .filter_map(|row| Some((req.row_property_info(row)?.clone(), row.declaring())))
+    req.symbols()
+        .property_info_rows(class)
+        .filter_map(|row| {
+            Some((
+                req.symbols().row_property_info(row)?.clone(),
+                row.declaring(),
+            ))
+        })
         .collect()
 }
 
@@ -6939,7 +6955,7 @@ fn linked_properties(req: &mut Request, class: ClassId) -> Vec<(PropertyDecl, Cl
 /// under `indent`. A function with the `Deprecated` attribute carries
 /// `, deprecated` after `<internal`, as `ZEND_ACC_DEPRECATED` does.
 fn function_string(req: &mut Request, function: Function, indent: &str) -> String {
-    let Some(decl) = req.function_decl(function).cloned() else {
+    let Some(decl) = req.symbols().function_decl(function).cloned() else {
         return String::new();
     };
     let module = req
@@ -7068,7 +7084,7 @@ fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: 
     // the trait's extension; a function made on the lookup has none.
     let module = method
         .row()
-        .and_then(|row| req.row_function(row))
+        .and_then(|row| req.symbols().row_function(row))
         .and_then(|function| req.extensions().function_extension(function))
         .and_then(|extension| req.extensions().name(extension))
         .map(str::to_owned);
@@ -7078,10 +7094,12 @@ fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: 
         words.push(format!("inherits {}", String::from_utf8_lossy(&scope)));
     } else if let Some(parent) = class_chain(req, ce).get(1).copied() {
         let overwrites = req
+            .symbols()
             .method_row(parent, &method.decl.function.name.0)
             .filter(|row| row.scope() != method.scope)
             .filter(|row| {
-                req.row_method(*row)
+                req.symbols()
+                    .row_method(*row)
                     .is_some_and(|m| m.visibility != Visibility::Private)
             })
             .map(MethodRow::scope);
@@ -7090,7 +7108,10 @@ fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: 
             words.push(format!("overwrites {}", String::from_utf8_lossy(&scope)));
         }
     }
-    if let Some(prototype) = method.row().and_then(|row| req.row_prototype(row)) {
+    if let Some(prototype) = method
+        .row()
+        .and_then(|row| req.symbols().row_prototype(row))
+    {
         let scope = class_name_of(req, prototype);
         words.push(format!("prototype {}", String::from_utf8_lossy(&scope)));
     }
@@ -8047,7 +8068,11 @@ impl ReflectionExtension {
         let reflector = class_named(req, b"ReflectionFunction")?;
         let mut functions = PhpArray::new(req)?;
         for function in req.extensions().functions(extension) {
-            let Some(name) = req.function_decl(function).map(|decl| decl.name.0.to_vec()) else {
+            let Some(name) = req
+                .symbols()
+                .function_decl(function)
+                .map(|decl| decl.name.0.to_vec())
+            else {
                 continue;
             };
             let object = new_object(req, reflector)?;

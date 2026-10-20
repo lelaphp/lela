@@ -247,7 +247,7 @@ impl Request {
                 let Some(function) = made else {
                     return Err(Refusal::Said(format!(
                         "class {} does not have a method \"{}\"",
-                        self.class_name(scope),
+                        self.symbols().class_name(scope),
                         shown(name.as_bytes()),
                     )));
                 };
@@ -385,7 +385,7 @@ impl Request {
     pub(crate) fn handler_closure(&mut self, object: PhpObject) -> Option<ClosureInfo> {
         let class = object.class();
         let made = self.own_handlers(class)?.get_closure(self, object)?;
-        (self.method_named(class, b"__invoke") != Some(made.function)).then_some(made)
+        (self.symbols().method_named(class, b"__invoke") != Some(made.function)).then_some(made)
     }
 
     /// `zend_is_callable_at_frame`'s `case IS_OBJECT`.
@@ -412,7 +412,7 @@ impl Request {
             };
             return Ok(Resolved::Made(Callable::of(held, name.as_bytes(), target)));
         }
-        let Some(function) = self.method_named(class, b"__invoke") else {
+        let Some(function) = self.symbols().method_named(class, b"__invoke") else {
             return Err("no array or string given".into());
         };
         let this =
@@ -649,6 +649,7 @@ impl Request {
                 match scope {
                     None => Err("cannot access \"parent\" when no class scope is active".into()),
                     Some(scope) => self
+                        .symbols()
                         .class_parent(scope)
                         .map(|parent| (parent, parent, true))
                         .ok_or_else(|| {
@@ -680,7 +681,7 @@ impl Request {
         } else {
             frame
                 .called
-                .filter(|called| self.instance_of(*called, bound))
+                .filter(|called| self.symbols().instance_of(*called, bound))
                 .or(Some(bound))
         };
         fcc.calling = Some(calling);
@@ -718,7 +719,8 @@ impl Request {
         {
             match frame.this {
                 Some(this)
-                    if self.instance_of(this.class(), scope) && self.instance_of(scope, class) =>
+                    if self.symbols().instance_of(this.class(), scope)
+                        && self.symbols().instance_of(scope, class) =>
                 {
                     fcc.object = Some(this);
                     fcc.called = Some(this.class());
@@ -800,17 +802,17 @@ impl Request {
                 strict = checked?;
                 if let Some(org) = ce_org {
                     let calling = fcc.calling.unwrap_or(org);
-                    if !self.instance_of(org, calling) {
+                    if !self.symbols().instance_of(org, calling) {
                         return Err(Refusal::Said(format!(
                             "class {} is not a subclass of {}",
-                            self.class_name(org),
-                            self.class_name(calling)
+                            self.symbols().class_name(org),
+                            self.symbols().class_name(calling)
                         )));
                     }
                     if deprecations == Deprecations::Raised {
                         let form = format!(
                             "Callables of the form [\"{}\", \"{}\"] are deprecated",
-                            self.class_name(org),
+                            self.symbols().class_name(org),
                             shown(callable)
                         );
                         crate::api::raising::deprecated(self, &form);
@@ -849,7 +851,7 @@ impl Request {
         let Some((callee, via_handler)) = found else {
             return Err(Refusal::Said(format!(
                 "class {} does not have a method \"{}\"",
-                self.class_name(calling),
+                self.symbols().class_name(calling),
                 shown(&method)
             )));
         };
@@ -872,13 +874,13 @@ impl Request {
         frame: &CallFrame,
         fcc: &Fcc,
     ) -> Option<Function> {
-        let mut function = self.method_named(calling, lowered)?;
+        let mut function = self.symbols().method_named(calling, lowered)?;
         if !strict
             && let Some(scope) = frame.scope
             && self
                 .method_class(function)
-                .is_some_and(|class| class != scope && self.instance_of(class, scope))
-            && let Some(own) = self.method_named(scope, lowered)
+                .is_some_and(|class| class != scope && self.symbols().instance_of(class, scope))
+            && let Some(own) = self.symbols().method_named(scope, lowered)
             && self.method_class(own) == Some(scope)
             && self.method_visibility(own) == Visibility::Private
         {
@@ -890,7 +892,7 @@ impl Request {
             b"__callstatic"
         };
         let withheld = self.method_visibility(function) != Visibility::Public
-            && self.method_named(calling, magic).is_some()
+            && self.symbols().method_named(calling, magic).is_some()
             && !self.method_accessible_from(function, frame.scope);
         (!withheld).then_some(function)
     }
@@ -925,7 +927,7 @@ impl Request {
         if let Some(org) = ce_org
             && let Some(object) = fcc.object.filter(|_| calling == org)
         {
-            if strict && self.method_named(org, b"__call").is_some() {
+            if strict && self.symbols().method_named(org, b"__call").is_some() {
                 return Some((trampoline(org, false), true));
             }
             let class = object.class();
@@ -936,6 +938,7 @@ impl Request {
                     self.class_named(Bare::resolved(b"Closure")),
                 )
             } else if let Some(function) = self
+                .symbols()
                 .method_named(class, lowered)
                 .filter(|function| self.method_accessible_from(*function, frame.scope))
                 .or_else(|| self.trampoline_named(class, lowered))
@@ -945,11 +948,11 @@ impl Request {
                     self.trampoline_of(function).is_some(),
                     self.method_class(function),
                 )
-            } else if self.method_named(class, b"__call").is_some() {
+            } else if self.symbols().method_named(class, b"__call").is_some() {
                 (
                     trampoline(class, false),
                     true,
-                    self.method_class(self.method_named(class, b"__call")?),
+                    self.method_class(self.symbols().method_named(class, b"__call")?),
                 )
             } else {
                 // `get_method(&fcc->object, …)` may answer on the object
@@ -964,18 +967,22 @@ impl Request {
             };
             // `zend_release_fcall_info_cache`: under a strict class half
             // the method must be one `ce_org` has.
-            if strict && !scope.is_some_and(|scope| self.instance_of(org, scope)) {
+            if strict && !scope.is_some_and(|scope| self.symbols().instance_of(org, scope)) {
                 return None;
             }
             return Some((callee, via));
         }
-        let callee = if self.method_named(calling, b"__call").is_some()
+        let callee = if self.symbols().method_named(calling, b"__call").is_some()
             && let Some(this) = frame
                 .current_this
-                .filter(|this| self.instance_of(this.class(), calling))
+                .filter(|this| self.symbols().instance_of(this.class(), calling))
         {
             trampoline(this.class(), false)
-        } else if self.method_named(calling, b"__callstatic").is_some() {
+        } else if self
+            .symbols()
+            .method_named(calling, b"__callstatic")
+            .is_some()
+        {
             trampoline(calling, true)
         } else {
             return None;
@@ -983,7 +990,7 @@ impl Request {
         if fcc.object.is_none() {
             fcc.object = frame
                 .this
-                .filter(|this| self.instance_of(this.class(), calling));
+                .filter(|this| self.symbols().instance_of(this.class(), calling));
         }
         Some((callee, true))
     }
@@ -1041,7 +1048,7 @@ impl Request {
             let method_shown = || {
                 format!(
                     "{}::{}",
-                    self.class_name(calling),
+                    self.symbols().class_name(calling),
                     decl.map_or_else(String::new, |decl| {
                         shown(&decl.function.name.0).into_owned()
                     })

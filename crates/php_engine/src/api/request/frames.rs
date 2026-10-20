@@ -1407,6 +1407,7 @@ impl Request {
             return named.at();
         }
         let name = self
+            .symbols()
             .function_decl(function)
             .map(|decl| decl.name.0.to_vec())
             .unwrap_or_default();

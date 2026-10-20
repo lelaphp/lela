@@ -542,7 +542,7 @@ impl Request {
     fn property_root(&self, declaring: ClassId, name: &[u8]) -> ClassId {
         let mut root = declaring;
         for here in self.ancestors(declaring) {
-            let own = self.class_decl(here).and_then(|decl| {
+            let own = self.symbols().class_decl(here).and_then(|decl| {
                 decl.properties
                     .iter()
                     .find(|p| &*p.name.0 == name)
@@ -634,8 +634,8 @@ impl Request {
             // where the row is a `static` too.
             let own = scope.is_some_and(|scope| {
                 scope != class
-                    && self.instance_of(class, scope)
-                    && self.class_decl(scope).is_some_and(|decl| {
+                    && self.symbols().instance_of(class, scope)
+                    && self.symbols().class_decl(scope).is_some_and(|decl| {
                         decl.properties.iter().any(|p| {
                             !p.is_instance
                                 && p.visibility == Visibility::Private
@@ -655,7 +655,7 @@ impl Request {
             return None;
         }
         if !silent {
-            let shown = self.class_name(class);
+            let shown = self.symbols().class_name(class);
             crate::api::raising::notice(
                 self,
                 &format!(
@@ -672,8 +672,9 @@ impl Request {
     /// that class: what `ce->properties_info` finds where no placed row
     /// does.
     fn chain_declaration(&self, class: ClassId, name: &[u8]) -> Option<(ClassId, &PropertyDecl)> {
-        self.lineage(class).find_map(|here| {
+        self.symbols().lineage(class).find_map(|here| {
             let p = self
+                .symbols()
                 .class_decl(here)?
                 .properties
                 .iter()
@@ -737,8 +738,8 @@ impl Request {
     pub(crate) fn parent_private(&self, class: ClassId, name: &[u8]) -> Option<ClassId> {
         self.property_scope().filter(|&scope| {
             scope != class
-                && self.instance_of(class, scope)
-                && self.class_decl(scope).is_some_and(|decl| {
+                && self.symbols().instance_of(class, scope)
+                && self.symbols().class_decl(scope).is_some_and(|decl| {
                     decl.properties.iter().any(|p| {
                         p.is_instance && p.visibility == Visibility::Private && &*p.name.0 == name
                     })
@@ -915,10 +916,10 @@ impl Request {
             _ => "protected(set)",
         };
         let from = match self.executed_scope() {
-            Some(scope) => format!("scope {}", self.class_name(scope)),
+            Some(scope) => format!("scope {}", self.symbols().class_name(scope)),
             None => String::from("global scope"),
         };
-        let class = self.class_name(class);
+        let class = self.symbols().class_name(class);
         let shown = String::from_utf8_lossy(name).into_owned();
         crate::api::raising::throw_error(
             self,
@@ -1160,7 +1161,7 @@ impl Request {
         {
             return Ok(());
         }
-        let class = self.class_name(typed.declaring);
+        let class = self.symbols().class_name(typed.declaring);
         let shown = String::from_utf8_lossy(name);
         Err(crate::api::raising::throw_error(
             self,
@@ -1289,7 +1290,7 @@ impl Request {
             && got.as_php_ref().is_none()
             && got.as_object().is_none()
         {
-            let class = self.class_name(class);
+            let class = self.symbols().class_name(class);
             let shown = String::from_utf8_lossy(name).into_owned();
             crate::api::raising::notice(
                 self,
@@ -1537,7 +1538,7 @@ impl Request {
         held: &Value,
     ) -> Thrown {
         let given = crate::ops::type_name(self, held);
-        let class = self.class_name(declaring);
+        let class = self.symbols().class_name(declaring);
         let ty = php_unit::type_to_string(ty);
         let shown = String::from_utf8_lossy(name).into_owned();
         crate::api::raising::throw_error(
@@ -1587,7 +1588,7 @@ impl Request {
         name: &[u8],
         operation: &str,
     ) -> Thrown {
-        let class = self.class_name(declaring);
+        let class = self.symbols().class_name(declaring);
         let shown = String::from_utf8_lossy(name).into_owned();
         crate::api::raising::throw_error(
             self,
@@ -1600,7 +1601,7 @@ impl Request {
     /// (`zend_throw_error` under `uninit_error`), naming the class that
     /// declared it, `prop_info->ce`.
     pub(crate) fn uninitialized_property(&mut self, declaring: ClassId, name: &[u8]) -> Thrown {
-        let class = self.class_name(declaring);
+        let class = self.symbols().class_name(declaring);
         let shown = String::from_utf8_lossy(name).into_owned();
         crate::api::raising::throw_error(
             self,
@@ -1685,7 +1686,7 @@ impl Request {
             Visibility::Protected => "protected",
             Visibility::Private => "private",
         };
-        let class = self.class_name(class);
+        let class = self.symbols().class_name(class);
         let shown = String::from_utf8_lossy(name).into_owned();
         crate::api::raising::throw_error(
             self,
@@ -1702,7 +1703,7 @@ impl Request {
     /// declares otherwise, so the scope that reached the property never
     /// bars the call.
     fn magic_accessor(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
-        self.method_named(class, lowered)
+        self.symbols().method_named(class, lowered)
     }
 
     /// `zobj->ce->__set != NULL`, the test a handler makes before it
@@ -1723,15 +1724,15 @@ impl Request {
         const MAGIC: [&[u8]; 5] = [b"__get", b"__set", b"__isset", b"__unset", b"__debuginfo"];
         MAGIC
             .iter()
-            .any(|name| self.method_named(class, name).is_some())
+            .any(|name| self.symbols().method_named(class, name).is_some())
             || self.guards_handed_on(class, 0)
     }
 
     /// Whether `class`, a parent of it or an interface of either carries
     /// [`php_unit::decl::ClassFlags::use_guards`]; a chain longer than any
-    /// declaration can make is cut, as [`Request::instance_of`] cuts it.
+    /// declaration can make is cut, as [`Symbols::instance_of`] cuts it.
     fn guards_handed_on(&self, class: ClassId, depth: u32) -> bool {
-        let Some(decl) = self.class_decl(class) else {
+        let Some(decl) = self.symbols().class_decl(class) else {
             return false;
         };
         if decl.flags.use_guards {
@@ -2090,7 +2091,7 @@ impl Request {
             return self.read_property(instance, name, read);
         }
         if !quiet {
-            let class = self.class_name(class);
+            let class = self.symbols().class_name(class);
             let shown = String::from_utf8_lossy(name);
             crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
         }
@@ -2326,7 +2327,7 @@ impl Request {
         // `ZVAL_NULL(retval)` before the warning, so what an error handler
         // writes into the slot is what the fetch then reads.
         self.write_declared_slot(o, placed.slot, Value::null())?;
-        let class = self.class_name(class);
+        let class = self.symbols().class_name(class);
         let shown = String::from_utf8_lossy(name).into_owned();
         crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
         Ok(())
@@ -2464,7 +2465,7 @@ impl Request {
             held.let_go(self);
             return Ok(landing);
         }
-        let class = self.class_name(typed.declaring);
+        let class = self.symbols().class_name(typed.declaring);
         let shown = String::from_utf8_lossy(name).into_owned();
         let error = crate::api::raising::throw_error(
             self,
@@ -2560,7 +2561,7 @@ impl Request {
     ) -> Result<(), Thrown> {
         if i >= o.slots() {
             self.release(value);
-            let class = self.class_name(ClassId(o.class()));
+            let class = self.symbols().class_name(ClassId(o.class()));
             let slots = o.slots();
             return self.fatal_of(Err(Fatal::error(format!(
                 "InternalError: slot {i} written on an object of class {class}, which declares {slots}"
@@ -3004,7 +3005,7 @@ impl Request {
             && let Some(hooked) = self.hooked(class, &name)
             && hooked.is_virtual
         {
-            let declaring = self.class_name(hooked.declaring);
+            let declaring = self.symbols().class_name(hooked.declaring);
             crate::api::raising::docref(
                 self,
                 Level::Warning,
@@ -3234,7 +3235,7 @@ impl Request {
     ) -> Result<(), Thrown> {
         use php_unit::decl::DynamicProperties;
         let class = object.class();
-        let Some(flags) = self.class_flags(class) else {
+        let Some(flags) = self.symbols().class_flags(class) else {
             return Ok(());
         };
         let carries = flags.dynamic_properties;
@@ -3242,7 +3243,7 @@ impl Request {
             return Ok(());
         }
         let shown = String::from_utf8_lossy(name).into_owned();
-        let class_name = self.class_name(class);
+        let class_name = self.symbols().class_name(class);
         if carries == DynamicProperties::Forbidden {
             return Err(crate::api::raising::throw_error(
                 self,
@@ -3827,7 +3828,7 @@ impl Request {
             return Err(thrown);
         }
         if !held && read == PropertyRead::Warning {
-            let class = self.class_name(object.class());
+            let class = self.symbols().class_name(object.class());
             let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
             crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
         }

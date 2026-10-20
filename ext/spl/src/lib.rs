@@ -220,7 +220,7 @@ fn spl_info(req: &mut Request) {
             lookup_class(req, name.as_bytes())
                 .ok()
                 .flatten()
-                .and_then(|class| req.class_decl(class))
+                .and_then(|class| req.symbols().class_decl(class))
                 .is_some_and(|decl| decl.kind == ClassKind::Interface)
         });
     let (interfaces, classes) = (interfaces.join(", "), classes.join(", "));
@@ -233,19 +233,20 @@ fn spl_info(req: &mut Request) {
 
 /// `ce->name`.
 fn class_name(req: &Request, class: ClassId) -> Vec<u8> {
-    req.class_decl(class)
+    req.symbols()
+        .class_decl(class)
         .map(|decl| decl.name.0.to_vec())
         .unwrap_or_default()
 }
 
 /// Whether `class` is, extends or implements the class `name`,
 /// `instanceof_function` over the linked record
-/// ([`Request::instance_of`]).
+/// ([`Symbols::instance_of`]).
 fn is_a(req: &mut Request, class: ClassId, name: &[u8]) -> bool {
     lookup_class(req, name)
         .ok()
         .flatten()
-        .is_some_and(|of| req.instance_of(class, of))
+        .is_some_and(|of| req.symbols().instance_of(class, of))
 }
 
 /// A string value made of `bytes`, one owner, the caller's.
@@ -483,7 +484,7 @@ fn overridden(req: &mut Request, object: PhpObject, lowered: &[u8]) -> bool {
     Std.get_method(req, object, lowered)
         .ok()
         .flatten()
-        .and_then(|method| req.function_decl(method))
+        .and_then(|method| req.symbols().function_decl(method))
         .is_some_and(|decl| !decl.file.0.is_empty())
 }
 
@@ -703,7 +704,7 @@ pub(crate) fn record_end(
 /// properties throws, one that does not allow them deprecates.
 fn integer_member(req: &mut Request, object: PhpObject, h: i64) -> Result<(), Thrown> {
     use php_ext::decl::DynamicProperties;
-    let Some(flags) = req.class_flags(object.class()) else {
+    let Some(flags) = req.symbols().class_flags(object.class()) else {
         return Ok(());
     };
     let class = String::from_utf8_lossy(&class_name(req, object.class())).into_owned();

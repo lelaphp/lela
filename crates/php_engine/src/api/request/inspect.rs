@@ -523,7 +523,7 @@ impl Request {
             self.raised = None;
             return;
         };
-        let class = self.class_name(throwable.class()).into_bytes();
+        let class = self.symbols().class_name(throwable.class()).into_bytes();
         let text = match crate::api::call::call_method_made(self, &throwable, b"__tostring", &[]) {
             Ok(returned) => {
                 let text = returned

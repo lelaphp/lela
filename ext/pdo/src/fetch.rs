@@ -1353,7 +1353,7 @@ fn class_target(
 
 /// Whether `class` declares or inherits a constructor.
 fn has_constructor(req: &mut Request, class: ClassId) -> bool {
-    req.method_row(class, b"__construct").is_some()
+    req.symbols().method_row(class, b"__construct").is_some()
 }
 
 // ---- the methods

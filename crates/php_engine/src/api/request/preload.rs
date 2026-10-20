@@ -649,7 +649,7 @@ impl Request {
         for row in rows {
             match row {
                 Row::Class(local) => {
-                    let Some(decl) = self.class_decl(*local) else {
+                    let Some(decl) = self.symbols().class_decl(*local) else {
                         continue;
                     };
                     let key = decl.name.0.clone();
@@ -730,7 +730,7 @@ impl Request {
                     continue;
                 }
                 stack.push((class, true));
-                let Some(decl) = self.class_decl(class) else {
+                let Some(decl) = self.symbols().class_decl(class) else {
                     continue;
                 };
                 let depends = (decl.parent.iter())
@@ -753,7 +753,7 @@ impl Request {
         local: ClassId,
         renumbered: &HashMap<ClassId, ClassId>,
     ) -> Result<ClassId, String> {
-        let name = self.class_name(local);
+        let name = self.symbols().class_name(local);
         let shared = |class: ClassId| match renumbered.get(&class) {
             Some(published) => Some(*published),
             None => class.is_published().then_some(class),
@@ -801,6 +801,7 @@ impl Request {
             guard -= 1;
             let depends: Vec<ClassId> = match rows.get(at) {
                 Some(Row::Class(class) | Row::Alias(_, class)) => self
+                    .symbols()
                     .class_decl(*class)
                     .map(|decl| {
                         decl.parent
@@ -844,6 +845,7 @@ impl Request {
             .iter()
             .map(|row| match row {
                 Row::Class(class) => self
+                    .symbols()
                     .class_decl(*class)
                     .map(|decl| decl.name.0.to_vec())
                     .unwrap_or_default(),
@@ -1020,7 +1022,7 @@ mod tests {
                         return Err(format!("round {round} published nothing"));
                     };
                     for named in preloaded.classes.rows.iter() {
-                        let name = req.class_name(named.class);
+                        let name = req.symbols().class_name(named.class);
                         assert!(named.class.is_published(), "{name} is published");
                         published.push((named.class, name.clone()));
                         if handed.send((named.class, name)).is_err() {
@@ -1030,7 +1032,7 @@ mod tests {
                     // Every number published so far still names its
                     // class, however many the request declared meanwhile.
                     for (class, name) in &published {
-                        assert_eq!(req.class_name(*class), *name, "{class:?} moved");
+                        assert_eq!(req.symbols().class_name(*class), *name, "{class:?} moved");
                     }
                 }
                 Ok(published)
@@ -1066,18 +1068,18 @@ mod tests {
                         seen.push(handed);
                     }
                     for (class, name) in own.iter().chain(&seen) {
-                        assert_eq!(req.class_name(*class), *name, "{class:?} moved");
+                        assert_eq!(req.symbols().class_name(*class), *name, "{class:?} moved");
                     }
                 }
                 seen.extend(taken.iter());
                 for (class, name) in own.iter().chain(&seen) {
-                    assert_eq!(req.class_name(*class), *name, "{class:?} moved");
+                    assert_eq!(req.symbols().class_name(*class), *name, "{class:?} moved");
                 }
                 let child = seen
                     .iter()
                     .find(|(_, name)| name == "Q0")
                     .map(|(class, _)| *class);
-                let inherited = child.and_then(|child| req.method_named(child, b"m"));
+                let inherited = child.and_then(|child| req.symbols().method_named(child, b"m"));
                 // Shared by every request: not one of this request's own rows.
                 let shared = |function: crate::api::call::Function| {
                     function.0 & crate::api::call::Function::LOCAL == 0
@@ -1095,7 +1097,7 @@ mod tests {
             let reader = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
             assert_eq!(numbers.as_ref().map(Vec::len), Ok(2 * ROUNDS));
             for (class, name) in numbers.unwrap_or_default() {
-                assert_eq!(reader.class_name(class), name, "{class:?} moved");
+                assert_eq!(reader.symbols().class_name(class), name, "{class:?} moved");
             }
         });
     }
@@ -1128,7 +1130,7 @@ mod tests {
         let names: Vec<(ClassId, String)> = published
             .iter()
             .flat_map(|published| published.classes.rows.iter())
-            .map(|named| (named.class, req.class_name(named.class)))
+            .map(|named| (named.class, req.symbols().class_name(named.class)))
             .collect();
         let order: Vec<&str> = names.iter().map(|(_, name)| name.as_str()).collect();
         assert_eq!(order, ["C", "T", "P"]);
@@ -1156,7 +1158,7 @@ mod tests {
             assert_eq!(placed(child), expect(&own));
         }
         for method in [&b"t"[..], b"p"] {
-            let found = child.and_then(|child| req.method_named(child, method));
+            let found = child.and_then(|child| req.symbols().method_named(child, method));
             assert!(found.is_some_and(|found| req.user_function(found).is_some()));
         }
         let alias = published

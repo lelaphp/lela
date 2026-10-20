@@ -527,6 +527,7 @@ fn method_on(
         None if position == 0 => Err(None),
         None => {
             let class_name = req
+                .symbols()
                 .class_decl(class)
                 .map(|d| String::from_utf8_lossy(&d.name.0).into_owned())
                 .unwrap_or_default();
@@ -676,6 +677,7 @@ fn set_object(req: &mut Request, parser: PhpObject, new: PhpObject) -> Result<()
             }
             let Ok(handler) = method_on(req, Some(new), &name, 0) else {
                 let class_name = req
+                    .symbols()
                     .class_decl(new.class())
                     .map(|d| String::from_utf8_lossy(&d.name.0).into_owned())
                     .unwrap_or_default();

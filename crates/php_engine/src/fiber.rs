@@ -1448,7 +1448,7 @@ impl FiberError {
     /// ```
     #[php(arity = manual)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
-        let name = req.class_name(this.object().class());
+        let name = req.symbols().class_name(this.object().class());
         Err(throw_error(
             req,
             "Error",

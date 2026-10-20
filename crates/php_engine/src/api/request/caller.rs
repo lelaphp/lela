@@ -468,7 +468,7 @@ impl Request {
     /// method's is its own name alone, what `get_active_function_name`
     /// answers; the class before it is [`Request::qualified_name`]'s.
     pub(crate) fn declared_name(&self, function: Function) -> String {
-        self.function_decl(function).map_or_else(
+        self.symbols().function_decl(function).map_or_else(
             || String::from("native"),
             |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
         )
@@ -499,7 +499,7 @@ impl Request {
         }
         let name = self.declared_name(function);
         match self.frame_scope(frame) {
-            Some(scope) => format!("{}::{name}", self.class_name(scope)),
+            Some(scope) => format!("{}::{name}", self.symbols().class_name(scope)),
             None => name,
         }
     }
@@ -513,7 +513,7 @@ impl Request {
         let name = self.declared_name(function);
         match self.method_class(function) {
             Some(class) => {
-                let class = self.class_name(class);
+                let class = self.symbols().class_name(class);
                 let join = if this.is_some() { "->" } else { "::" };
                 format!("{class}{join}{name}")
             }
@@ -528,7 +528,9 @@ impl Request {
     /// stops at `num_args` there; none where the native declares no
     /// type there.
     pub(crate) fn active_parameter_type(&self, position: u32) -> Option<php_unit::decl::Type> {
-        let decl = self.function_decl(self.active_native_function()?)?;
+        let decl = self
+            .symbols()
+            .function_decl(self.active_native_function()?)?;
         let at = usize::try_from(position.checked_sub(1)?).ok()?;
         let parameter = match decl.parameters.get(at) {
             Some(parameter) => parameter,

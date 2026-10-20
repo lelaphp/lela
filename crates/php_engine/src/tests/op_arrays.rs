@@ -19,9 +19,13 @@ use crate::test::Capture;
 /// method's as `class::name` with the class lowercased.
 fn keyed(observed: &Observed<'_>) -> Option<String> {
     let function = observed.function()?;
-    let name = String::from_utf8_lossy(&observed.function_decl(function)?.name.0).into_owned();
+    let name =
+        String::from_utf8_lossy(&observed.symbols().function_decl(function)?.name.0).into_owned();
     Some(match observed.function_scope() {
-        Some(class) => format!("{}::{name}", observed.class_name(class).to_lowercase()),
+        Some(class) => format!(
+            "{}::{name}",
+            observed.symbols().class_name(class).to_lowercase()
+        ),
         None => name,
     })
 }

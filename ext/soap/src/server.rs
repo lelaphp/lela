@@ -1152,13 +1152,13 @@ impl SoapServer {
 /// `f->common.function_name` of the function named, case-insensitively.
 fn declared_function(req: &Request, name: &[u8]) -> Option<Vec<u8>> {
     let f = lookup_function(req, &name.to_ascii_lowercase())?;
-    req.function_decl(f).map(|d| d.name.0.to_vec())
+    req.symbols().function_decl(f).map(|d| d.name.0.to_vec())
 }
 
 /// Every function of `EG(function_table)`, as `get_defined_functions()`
 /// lists them, internal then user.
 fn all_functions(req: &mut Request) -> R<Vec<Vec<u8>>> {
-    let all = req.defined_functions()?;
+    let all = req.symbols_mut().defined_functions()?;
     let mut out = Vec::new();
     for (_, group) in walk::rows(req, *all) {
         if let ValueRef::Array(list) = group.deref().as_ref() {
@@ -1178,8 +1178,9 @@ fn all_functions(req: &mut Request) -> R<Vec<Vec<u8>>> {
 fn public_methods(req: &mut Request, class: ClassId) -> Vec<Vec<u8>> {
     // `ZEND_HASH_FOREACH_PTR(&ce->function_table, f)` with
     // `ZEND_ACC_PUBLIC`, in the table's order.
-    req.method_rows(class)
-        .filter_map(|row| req.row_method(row))
+    req.symbols()
+        .method_rows(class)
+        .filter_map(|row| req.symbols().row_method(row))
         .filter(|m| m.visibility == php_ext::decl::Visibility::Public)
         .map(|m| m.function.name.0.to_vec())
         .collect()

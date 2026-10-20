@@ -620,7 +620,7 @@ impl Request {
         if let Some(Raised::Throwable(pending)) = self.raised {
             let throwable = self
                 .class_named(Bare::resolved(b"Throwable"))
-                .is_some_and(|throwable| self.instance_of(pending.class(), throwable));
+                .is_some_and(|throwable| self.symbols().instance_of(pending.class(), throwable));
             if throwable && fatal_errors(level) {
                 self.exception_error(Level::Warning).ok();
             }

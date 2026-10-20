@@ -1253,7 +1253,7 @@ mahout = "RequestCtx::static_side_cell_peek"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::function_decl"
+api = "request::Symbols::function_decl"
 
 [[item]]
 mahout = "RequestCtx::stream_wrappers_mut"
@@ -1309,21 +1309,21 @@ mahout = "RequestCtx::autoload_functions"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::autoload_functions"
+api = "request::Symbols::autoload_functions"
 
 [[item]]
 mahout = "RequestCtx::autoload_register"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::autoload_register"
+api = "request::Symbols::autoload_register"
 
 [[item]]
 mahout = "RequestCtx::autoload_unregister"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::autoload_unregister"
+api = "request::Symbols::autoload_unregister"
 
 [[item]]
 mahout = "RequestCtx::called_class_for_native"
@@ -1463,7 +1463,7 @@ mahout = "RequestCtx::gen_func_name"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::function_decl"
+api = "request::Symbols::function_decl"
 
 [[item]]
 mahout = "RequestCtx::globals_view_with"
@@ -1512,7 +1512,7 @@ mahout = "RequestCtx::iter_funcs"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::defined_functions"
+api = "request::Symbols::defined_functions"
 
 [[item]]
 mahout = "RequestCtx::last_error"
@@ -1722,7 +1722,7 @@ mahout = "RequestCtx::unit_file"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::function_decl"
+api = "request::Symbols::function_decl"
 
 [[item]]
 mahout = "RequestCtx::unregister_tick_function"
@@ -1758,7 +1758,7 @@ mahout = "RequestCtx::classes.descriptor"
 sites = 119
 crates = 6
 status = "renamed"
-api = "request::Request::class_decl"
+api = "request::Symbols::class_decl"
 
 [[item]]
 mahout = "RequestCtx::classes.instance_of"
@@ -1779,7 +1779,7 @@ mahout = "RequestCtx::classes.descriptor_arc"
 sites = 23
 crates = 3
 status = "renamed"
-api = "request::Request::class_decl"
+api = "request::Symbols::class_decl"
 
 [[item]]
 mahout = "RequestCtx::ini.get"
@@ -1996,14 +1996,14 @@ mahout = "RequestCtx::classes.decl_site_of"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::class_decl"
+api = "request::Symbols::class_decl"
 
 [[item]]
 mahout = "RequestCtx::classes.names_of_kinds"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::declared_classes"
+api = "request::Symbols::declared_classes"
 
 [[item]]
 mahout = "RequestCtx::consts.contains"
@@ -2017,14 +2017,14 @@ mahout = "RequestCtx::consts.iter"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::constants"
+api = "request::Symbols::constants"
 
 [[item]]
 mahout = "RequestCtx::consts.lookup_attributes"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::constants"
+api = "request::Symbols::constants"
 
 [[item]]
 mahout = "RequestCtx::errors.pending_is_exception"
@@ -2564,7 +2564,7 @@ mahout = "semantics::class_has_hooked_props"
 sites = 3
 crates = 2
 status = "renamed"
-api = "request::Request::class_decl"
+api = "request::Symbols::class_decl"
 
 [[item]]
 mahout = "semantics::default_value"
@@ -2851,7 +2851,7 @@ mahout = "semantics::class_method_names"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::class_decl"
+api = "request::Symbols::class_decl"
 
 [[item]]
 mahout = "semantics::class_to_string"
@@ -2865,7 +2865,7 @@ mahout = "semantics::class_var_defaults"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::class_decl"
+api = "request::Symbols::class_decl"
 
 [[item]]
 mahout = "semantics::clone_call"

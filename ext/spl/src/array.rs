@@ -1291,7 +1291,7 @@ impl RecursiveArrayIterator {
             if flags & Self::CHILD_ARRAYS_ONLY != 0 {
                 return Ok(None);
             }
-            if req.instance_of(object.class(), this.class()) {
+            if req.symbols().instance_of(object.class(), this.class()) {
                 return Ok(Some(Owner::take(req, object).into_instance()));
             }
         }
@@ -1694,7 +1694,7 @@ fn hash_key(req: &mut Request, offset: &Value) -> Result<Option<Key>, Thrown> {
 
 /// `zend_illegal_container_offset(object->ce->name, offset, read)`.
 fn illegal(req: &mut Request, object: PhpObject, offset: &Value, read: DimensionRead) -> Thrown {
-    let class = req.class_name(object.class());
+    let class = req.symbols().class_name(object.class());
     illegal_container_offset(req, &class, offset, read)
 }
 
@@ -1848,7 +1848,7 @@ fn refuse_readonly(req: &mut Request, backing: PhpObject, key: &Key) -> Result<(
         let Some(class) = at else {
             return Ok(());
         };
-        let declared = req.class_decl(class).and_then(|decl| {
+        let declared = req.symbols().class_decl(class).and_then(|decl| {
             decl.properties
                 .iter()
                 .find(|p| p.is_instance && *p.name.0 == *name)
@@ -1865,7 +1865,7 @@ fn refuse_readonly(req: &mut Request, backing: PhpObject, key: &Key) -> Result<(
             );
             return Err(throw_error(req, "Error", &message));
         }
-        at = req.class_parent(class);
+        at = req.symbols().class_parent(class);
     }
     Ok(())
 }

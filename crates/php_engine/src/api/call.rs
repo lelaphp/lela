@@ -640,7 +640,7 @@ impl ArgOffset {
 /// pass function a `NEW` without a constructor serves among them, takes
 /// no name.
 pub(crate) fn arg_offset_by_name(req: &Request, function: Function, name: &[u8]) -> ArgOffset {
-    let Some(decl) = req.function_decl(function) else {
+    let Some(decl) = req.symbols().function_decl(function) else {
         return ArgOffset::Unknown;
     };
     let declared = decl.parameters.iter().filter(|p| !p.variadic);
@@ -834,7 +834,7 @@ fn user_default(req: &mut Request, unit: &Unit, body: Body, at: usize) -> Result
 /// to the default (`ZVAL_NEW_REF`).
 fn native_default(req: &mut Request, function: Function, at: usize) -> Result<Value, Thrown> {
     let position = u32::try_from(at + 1).unwrap_or(u32::MAX);
-    let Some(decl) = req.function_decl(function) else {
+    let Some(decl) = req.symbols().function_decl(function) else {
         return Ok(Value::null());
     };
     let required = decl
@@ -1027,7 +1027,7 @@ pub(crate) fn call_method_made(
     arguments: &[Value],
 ) -> Result<Value, Thrown> {
     let class = object.class();
-    let Some(function) = req.method_named(class, method) else {
+    let Some(function) = req.symbols().method_named(class, method) else {
         return Err(undefined_method(req, class, method));
     };
     let served = req.serve_method_made(function, Some(*object), class, arguments, &[]);
@@ -1057,11 +1057,11 @@ pub fn known_method(
     // `reflection_method_factory` holds its `zend_function`.
     let function = match hook_name(&name.0) {
         Some((property, kind)) => req.property_hook_function(class, property, kind)?,
-        None => req.method_named(class, &name.0)?,
+        None => req.symbols().method_named(class, &name.0)?,
     };
     let spelled = format!(
         "{}::{}",
-        req.class_name(class),
+        req.symbols().class_name(class),
         String::from_utf8_lossy(&name.0)
     );
     Some(Callable::of(
@@ -1596,7 +1596,7 @@ pub fn class_unserialize(
     }
     let serializable = req
         .class_named(Bare::resolved(b"serializable"))
-        .is_some_and(|interface| req.instance_of(object.class(), interface));
+        .is_some_and(|interface| req.symbols().instance_of(object.class(), interface));
     if !serializable {
         return Ok(false);
     }
@@ -2193,7 +2193,7 @@ pub(crate) fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thr
                 "Cannot access \"parent\" when no class scope is active",
             ));
         };
-        return req.class_parent(scope).ok_or_else(|| {
+        return req.symbols().class_parent(scope).ok_or_else(|| {
             throw_error(
                 req,
                 "Error",
@@ -2685,7 +2685,7 @@ fn class_name_node(
             ));
         };
         let named = if parent {
-            req.class_parent(scope).ok_or_else(|| {
+            req.symbols().class_parent(scope).ok_or_else(|| {
                 throw_error(
                     req,
                     "Error",
@@ -2935,6 +2935,7 @@ fn prop_read(req: &mut Request, object: &Value, name: &[u8]) -> Result<Chained, 
         });
     };
     let is_enum = req
+        .symbols()
         .class_decl(instance.class())
         .is_some_and(|decl| decl.kind == php_unit::decl::ClassKind::Enum);
     if !is_enum {
@@ -3199,7 +3200,7 @@ fn method_callable(
     scope: Option<ClassId>,
 ) -> Result<Value, Thrown> {
     let ce = const_class(req, &class.0, scope)?;
-    let magic = req.method_named(ce, b"__callstatic").is_some();
+    let magic = req.symbols().method_named(ce, b"__callstatic").is_some();
     let magic_refused = |req: &mut Request| {
         throw_error(
             req,
@@ -3207,7 +3208,7 @@ fn method_callable(
             "Creating a callable for the magic __callStatic() method is not supported in constant expressions",
         )
     };
-    let found = req.method_named(ce, &method.0);
+    let found = req.symbols().method_named(ce, &method.0);
     let reached = found.is_some_and(|function| req.method_accessible_from(function, scope));
     if magic && !reached {
         return Err(magic_refused(req));
@@ -3252,7 +3253,7 @@ fn const_class(req: &mut Request, class: &[u8], scope: Option<ClassId>) -> Resul
     if !parent {
         return Ok(scope);
     }
-    req.class_parent(scope).ok_or_else(|| {
+    req.symbols().class_parent(scope).ok_or_else(|| {
         throw_error(
             req,
             "Error",

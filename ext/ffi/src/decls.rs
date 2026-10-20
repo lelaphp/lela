@@ -1485,7 +1485,7 @@ impl ObjectHandlers for Handlers {
     ) -> Result<Option<Function>, Thrown> {
         if matches!(lowered, b"new" | b"cast" | b"type") {
             let class = classes(req)?.ffi;
-            return Ok(req.trampoline(class, lowered));
+            return Ok(req.symbols().trampoline(class, lowered));
         }
         if function_symbol(req, object, written).is_none() {
             let shown = String::from_utf8_lossy(written).into_owned();
@@ -1494,7 +1494,9 @@ impl ObjectHandlers for Handlers {
                 &format!("Attempt to call undefined C function '{shown}'"),
             ));
         }
-        Ok(req.native_trampoline(written, crate::call::trampoline))
+        Ok(req
+            .symbols_mut()
+            .native_trampoline(written, crate::call::trampoline))
     }
 
     /// `zend_fake_compare_objects`.

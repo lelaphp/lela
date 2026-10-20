@@ -726,7 +726,7 @@ fn overridden_compare(req: &mut Request, object: PhpObject) -> bool {
     Std.get_method(req, object, b"compare")
         .ok()
         .flatten()
-        .and_then(|method| req.function_decl(method))
+        .and_then(|method| req.symbols().function_decl(method))
         .is_some_and(|decl| !decl.file.0.is_empty())
 }
 

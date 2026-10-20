@@ -221,7 +221,8 @@ pub(super) fn class_id(req: &mut Request, name: &str) -> Result<ClassId, Thrown>
 
 /// `ce->name`.
 pub(super) fn class_name(req: &Request, class: ClassId) -> String {
-    req.class_decl(class)
+    req.symbols()
+        .class_decl(class)
         .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
         .unwrap_or_default()
 }
@@ -240,7 +241,10 @@ pub(super) fn uninitialized(req: &mut Request, class: ClassId) -> Thrown {
     let message = if is_internal(req, class) {
         format!("Object of type {name} has not been {tail}")
     } else {
-        let base = req.lineage(class).find(|&at| is_internal(req, at));
+        let base = req
+            .symbols()
+            .lineage(class)
+            .find(|&at| is_internal(req, at));
         if let Some(at) = base {
             let base = class_name(req, at);
             format!("Object of type {name} (inheriting {base}) has not been {tail}")

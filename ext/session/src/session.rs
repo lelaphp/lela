@@ -843,7 +843,8 @@ pub(super) fn reset_id(req: &mut Request) -> Result<bool, Thrown> {
     let sid = crate::string_value(req, &sid)?;
     match req.extensions().named(b"session") {
         Some(session) => {
-            req.register_constant(session, b"SID", sid, sid_attributes());
+            req.symbols_mut()
+                .register_constant(session, b"SID", sid, sid_attributes());
         }
         None => sid.give_up(req),
     }

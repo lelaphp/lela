@@ -1850,5 +1850,5 @@ fn zpp_name_and_value(
 /// `instanceof_function` for two classes, over the parents alone, which
 /// is all a class extending `PharFileInfo` can reach it by.
 fn extends(req: &mut Request, class: ClassId, of: ClassId) -> bool {
-    req.lineage(class).any(|class| class == of)
+    req.symbols().lineage(class).any(|class| class == of)
 }

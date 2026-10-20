@@ -363,7 +363,7 @@ impl Request {
     /// The declared name of a throwable's class, `Error` for one the
     /// tables do not know.
     fn class_name_of(&self, throwable: PhpObject) -> String {
-        self.class_decl(throwable.class()).map_or_else(
+        self.symbols().class_decl(throwable.class()).map_or_else(
             || String::from("Error"),
             |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
         )
@@ -403,7 +403,7 @@ impl Request {
             let Some(throwable) = self.class_named(Bare::resolved(b"Throwable")) else {
                 break;
             };
-            if !self.instance_of(exception.class(), throwable) {
+            if !self.symbols().instance_of(exception.class(), throwable) {
                 break;
             }
             let mut read = |req: &mut Request, name: &[u8]| -> Vec<u8> {
@@ -480,12 +480,15 @@ impl Request {
     /// called in.
     fn trace_as_string_of(&self, this: PhpObject) -> Option<(Function, ClassId)> {
         let exception = self.class_named(Bare::resolved(b"Exception"))?;
-        let base = if self.instance_of(this.class(), exception) {
+        let base = if self.symbols().instance_of(this.class(), exception) {
             exception
         } else {
             self.class_named(Bare::resolved(b"Error"))?
         };
-        Some((self.method_named(base, b"gettraceasstring")?, base))
+        Some((
+            self.symbols().method_named(base, b"gettraceasstring")?,
+            base,
+        ))
     }
 
     /// One throwable's trace as `Exception::__toString` reads it: its

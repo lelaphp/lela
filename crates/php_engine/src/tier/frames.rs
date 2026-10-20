@@ -83,7 +83,7 @@ pub fn catches(req: &mut Request, frame: FrameRef) -> bool {
             let slot = Some(CacheSlot(op.extended_value & !exec::LAST_CATCH));
             if let Some(pending) = pending
                 && exec::cached_class(req, frame, code, op.op1, slot)
-                    .is_some_and(|of| req.instance_of(pending.class(), of))
+                    .is_some_and(|of| req.symbols().instance_of(pending.class(), of))
             {
                 return true;
             }
@@ -305,7 +305,7 @@ mod tests {
             .unwrap_or_default();
         let line = prop(b"line").and_then(|v| v.as_int()).unwrap_or(0);
         Some((
-            req.class_name(object.class()),
+            req.symbols().class_name(object.class()),
             String::from_utf8_lossy(&file).into_owned(),
             line,
         ))

@@ -2034,7 +2034,8 @@ impl State<'_> {
         // `__unserialize()` for is not what its serializer wrote.
         if !has_unserialize && is_serializable(req, class) {
             let shown = String::from_utf8_lossy(
-                &req.class_decl(class)
+                &req.symbols()
+                    .class_decl(class)
                     .map(|d| d.name.0.to_vec())
                     .unwrap_or_default(),
             )
@@ -2235,7 +2236,8 @@ impl State<'_> {
             return Ok(true);
         }
         let shown = String::from_utf8_lossy(
-            &req.class_decl(class)
+            &req.symbols()
+                .class_decl(class)
                 .map(|d| d.name.0.to_vec())
                 .unwrap_or_default(),
         )
@@ -2446,7 +2448,7 @@ impl State<'_> {
             return Ok(false);
         }
         self.p = after + 2;
-        let found = req.class_decl(class).and_then(|decl| {
+        let found = req.symbols().class_decl(class).and_then(|decl| {
             decl.constants
                 .iter()
                 .find(|c| *c.name.0 == *case)

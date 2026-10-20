@@ -237,6 +237,7 @@ pub(crate) fn fetch_object(
         ));
     };
     let refused = req
+        .symbols()
         .class_decl(target)
         .is_some_and(|d| d.kind != php_ext::decl::ClassKind::Class || d.flags.is_abstract);
     if refused {
@@ -409,8 +410,9 @@ fn declares_nothing(req: &mut Request, class: ClassId) -> bool {
     if known_method(req, class, &setter, None).is_some() {
         return false;
     }
-    !req.property_info_rows(class)
-        .filter_map(|row| req.row_property_info(row))
+    !req.symbols()
+        .property_info_rows(class)
+        .filter_map(|row| req.symbols().row_property_info(row))
         .any(|p| p.is_instance && !p.is_virtual)
 }
 

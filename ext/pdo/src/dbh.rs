@@ -389,7 +389,7 @@ impl ObjectHandlers for Handlers {
             return Ok(None);
         }
         let pdo = lookup_class(req, b"PDO").ok().flatten();
-        Ok(pdo.and_then(|pdo| req.trampoline(pdo, lowered)))
+        Ok(pdo.and_then(|pdo| req.symbols().trampoline(pdo, lowered)))
     }
 }
 
@@ -906,6 +906,7 @@ fn specific_object(
             ));
         };
         let own_name = req
+            .symbols()
             .class_decl(own)
             .map(|d| d.name.0.to_vec())
             .unwrap_or_default();
@@ -1188,8 +1189,10 @@ fn public_constructor(req: &mut Request, class: ClassId) -> bool {
 
 /// The visibility of the constructor `class` declares or inherits.
 fn constructor_visibility(req: &mut Request, class: ClassId) -> Option<php_ext::decl::Visibility> {
-    let row = req.method_row(class, b"__construct")?;
-    req.row_method(row).map(|method| method.visibility)
+    let row = req.symbols().method_row(class, b"__construct")?;
+    req.symbols()
+        .row_method(row)
+        .map(|method| method.visibility)
 }
 
 // ---- statements

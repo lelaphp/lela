@@ -508,7 +508,11 @@ fn stdclass_or_string(
         }
         ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => !strict,
         ValueRef::Object(object) => {
-            !strict && req.method_named(object.class(), b"__tostring").is_some()
+            !strict
+                && req
+                    .symbols()
+                    .method_named(object.class(), b"__tostring")
+                    .is_some()
         }
         _ => false,
     };
@@ -764,7 +768,7 @@ fn zend_call_method(
     let Some(callable) = known_method(req, class, &name, object) else {
         let text = format!(
             "Couldn't find implementation for method {}::{}",
-            req.class_name(class),
+            req.symbols().class_name(class),
             String::from_utf8_lossy(method.as_bytes())
         );
         return Err(fatal(req, &text));
@@ -1222,7 +1226,7 @@ fn zend_test_internal_dnf_arguments(
     }
     let text = format!(
         "be of type Iterator|(Traversable&Countable), {} given",
-        req.class_name(arg.class())
+        req.symbols().class_name(arg.class())
     );
     Err(arg_type_error(req, 1, &text))
 }

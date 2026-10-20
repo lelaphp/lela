@@ -1290,7 +1290,7 @@ fn user_ini(req: &mut Request) -> Result<(), Thrown> {
 /// Whether the object's class declares or inherits `method`, and whether
 /// it is an instance of the interface named.
 fn class_has(req: &mut Request, object: php_ext::values::PhpObject, method: &[u8]) -> bool {
-    req.method_row(object.class(), method).is_some()
+    req.symbols().method_row(object.class(), method).is_some()
 }
 
 fn implements(
@@ -1410,7 +1410,10 @@ fn session_set_save_handler(
         if !handler_changeable(req) {
             return Ok(false);
         }
-        let class_name = req.class_decl(object.class()).map(|d| d.name.0.to_vec());
+        let class_name = req
+            .symbols()
+            .class_decl(object.class())
+            .map(|d| d.name.0.to_vec());
         req.state::<State>().class_name = class_name;
         for (slot, name) in [
             (Slot::Open, b"open".as_slice()),

@@ -73,7 +73,7 @@ fn eval_below_caller(observed: &mut Observed<'_>) {
 fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
     let named = observed
         .function()
-        .and_then(|function| observed.function_decl(function))
+        .and_then(|function| observed.symbols().function_decl(function))
         .is_some_and(|decl| decl.name.0.as_ref() == b"pause");
     ObserverHandlers {
         begin: named.then_some(eval_below_caller as fn(&mut Observed<'_>)),

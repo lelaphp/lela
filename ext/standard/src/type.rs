@@ -192,6 +192,7 @@ fn get_debug_type(req: &mut Request, value: Value) -> Result<Owner<PhpString>, T
         ValueRef::Array(_) => b"array".to_vec(),
         ValueRef::Object(object) => {
             let name = req
+                .symbols()
                 .class_decl(object.class())
                 .map(|decl| decl.name.0.to_vec())
                 .unwrap_or_default();

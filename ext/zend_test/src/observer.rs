@@ -392,8 +392,9 @@ impl Serves {
 
     fn function_of(req: &Request, function: Function, scope: Option<ClassId>) -> Serves {
         Serves::Function {
-            scope: scope.map(|class| req.class_name(class)),
+            scope: scope.map(|class| req.symbols().class_name(class)),
             name: req
+                .symbols()
                 .function_decl(function)
                 .map(|decl| decl.name.0.to_vec())
                 .unwrap_or_default(),
@@ -572,7 +573,7 @@ fn end(observed: &mut Observed<'_>, returned: Option<&Value>) {
     let depth = observed.state::<crate::State>().observer.depth;
     if let Some(raised) = observed.diagnostics().raised() {
         let class = match raised {
-            Raised::Throwable(throwable) => observed.class_name(throwable.class()),
+            Raised::Throwable(throwable) => observed.symbols().class_name(throwable.class()),
             Raised::UnwindExit => String::from("UnwindExit"),
             Raised::GracefulExit => String::from("GracefulExit"),
         };
@@ -624,7 +625,7 @@ fn retval_info(
             if let Some(object) = value.as_object() {
                 let named = format!(
                     "object({})#{}",
-                    req.class_name(object.class()),
+                    req.symbols().class_name(object.class()),
                     object.index()
                 );
                 info.extend_from_slice(named.as_bytes());

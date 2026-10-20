@@ -550,6 +550,7 @@ impl Request {
     /// function with no declaration.
     fn function_name_string(&mut self, function: Function) -> Result<PhpString, Thrown> {
         let held = self
+            .symbols()
             .function_decl(function)
             .map(|decl| self.shared.existing_interned(&decl.name.0));
         match held {
@@ -566,6 +567,7 @@ impl Request {
     /// [`Request::function_name_string`] reads a function's.
     fn class_name_string(&mut self, class: ClassId) -> Result<PhpString, Thrown> {
         let held = self
+            .symbols()
             .class_decl(class)
             .and_then(|decl| self.shared.existing_interned(&decl.name.0));
         if let Some(held) = held {
@@ -701,7 +703,7 @@ impl Request {
                 .iter()
                 .any(|attribute| attribute.name.0.eq_ignore_ascii_case(b"SensitiveParameter"))
         };
-        let Some(decl) = self.function_decl(function) else {
+        let Some(decl) = self.symbols().function_decl(function) else {
             return Sensitive::default();
         };
         Sensitive {
@@ -1307,6 +1309,7 @@ impl Request {
             }
             ValueRef::Object(object) => {
                 let decl = self
+                    .symbols()
                     .class_decl(object.class())
                     .filter(|decl| decl.kind == ClassKind::Enum)?;
                 // `zend_enum_fetch_case_name`: the case's `name`.
@@ -1369,6 +1372,7 @@ impl Request {
                 .map(|code| code.vars.clone())
                 .unwrap_or_default();
             let declared = self
+                .symbols()
                 .function_decl(function)
                 .map_or(0, |decl| decl.parameters.len());
             for (at, argument) in arguments.iter_mut().enumerate().take(declared) {

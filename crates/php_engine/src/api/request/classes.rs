@@ -22,6 +22,26 @@ use super::{
     UserFunction, preload, user_function_decl,
 };
 
+/// The request's symbols facet (design §4.4): the symbol tables:
+/// functions, classes with their methods, properties and constants,
+/// global constants, and the autoloaders. [`Request::symbols`] reads it
+/// and [`Request::symbols_mut`] changes it; either is the whole request,
+/// since nearly every operation can serve PHP code.
+pub struct Symbols<R>(pub(crate) R);
+
+impl Request {
+    /// The symbols facet, to read.
+    #[must_use]
+    pub fn symbols(&self) -> Symbols<&Request> {
+        Symbols(self)
+    }
+
+    /// The symbols facet, to change.
+    pub fn symbols_mut(&mut self) -> Symbols<&mut Request> {
+        Symbols(self)
+    }
+}
+
 /// A class's members before they are numbered ([`Request::members_of`]):
 /// for each of its methods whether it is a native the class lays under
 /// its own scope, an enum's own or a native trait's copied in, and the
@@ -164,38 +184,6 @@ impl ClassLoad {
 }
 
 impl Request {
-    /// `EG(class_table)`'s keys in their order, each row the class and,
-    /// for an alias's row, the lowered name it is keyed by: the engine's
-    /// classes, each native alias after its class, then the request's
-    /// rows in their buckets. A class is a user class where it has no
-    /// [`Extensions::class_extension`]; `get_declared_classes()` lists these
-    /// rows, and phpdbg's `clean` counts them.
-    #[must_use]
-    pub fn class_keys(&self) -> Vec<(ClassId, Option<Vec<u8>>)> {
-        let mut rows: Vec<(ClassId, Option<Vec<u8>>)> = (0u32..)
-            .zip(&self.shared.classes)
-            .flat_map(|(at, decl)| {
-                let aliases = decl.aliases.iter();
-                std::iter::once(None)
-                    .chain(aliases.map(|alias| Some(alias.0.to_ascii_lowercase())))
-                    .map(move |alias| (ClassId(at), alias))
-            })
-            .collect();
-        let mut own: Vec<(preload::Bucket, ClassId, Option<Vec<u8>>)> = self
-            .declared
-            .iter()
-            .map(|named| (named.place, named.class, None))
-            .chain(
-                self.aliases
-                    .iter()
-                    .map(|(place, alias, class)| (*place, *class, Some(alias.clone()))),
-            )
-            .collect();
-        own.sort_by_key(|(place, _, _)| *place);
-        rows.extend(own.into_iter().map(|(_, class, alias)| (class, alias)));
-        rows
-    }
-
     /// The load of a unit's classes, `do_bind_class` for every class the
     /// unit declares that php bound while the file compiled, before its
     /// main op array runs: a
@@ -600,7 +588,7 @@ impl Request {
     /// Fatal error: Cannot redeclare class stdClass in %s on line 2
     /// ```
     fn redeclaration(&self, existing: ClassId) -> String {
-        match self.class_decl(existing) {
+        match self.symbols().class_decl(existing) {
             Some(earlier) => redeclaration(earlier, &earlier.name.0),
             None => String::from("InternalError: a class redeclared over none"),
         }
@@ -610,7 +598,7 @@ impl Request {
     /// `class_alias()` could not give `class`: the wordings
     /// [`Request::redeclaration`] has, over `class`'s declaration.
     pub(crate) fn alias_redeclaration(&self, class: ClassId, alias: &[u8]) -> String {
-        match self.class_decl(class) {
+        match self.symbols().class_decl(class) {
             Some(decl) => redeclaration(decl, alias),
             None => format!("Cannot redeclare class {}", String::from_utf8_lossy(alias)),
         }
@@ -707,7 +695,7 @@ impl Request {
     /// an enum's own `cases`, `from` and `tryFrom`, each method, and
     /// each hook of the class's own properties; and the class's record,
     /// the one its link made or else made here, which every lookup by
-    /// name after reads ([`Request::method_named`]), an enum's three as
+    /// name after reads ([`Symbols::method_named`]), an enum's three as
     /// the functions that serve them:
     ///
     /// ```php
@@ -737,6 +725,7 @@ impl Request {
     /// ```
     pub(super) fn bind_members(&mut self, class: ClassId, record: Option<LinkedClass<ClassId>>) {
         let parent = self
+            .symbols()
             .class_decl(class)
             .and_then(|decl| self.class_named(decl.parent.as_ref()?.into()));
         let Some(members) = self
@@ -750,6 +739,7 @@ impl Request {
         };
         let record = record.or_else(|| self.record_at_bind(class));
         let placed = self
+            .symbols()
             .class_decl(class)
             .map_or_else(super::Placed::default, |decl| {
                 self.placed_over(class, decl, record.as_ref(), parent)
@@ -1341,7 +1331,7 @@ impl Request {
         // before: `E_COMPILE_ERROR` at the site that runs it either way.
         let existing = self
             .class_named((&decl.name).into())
-            .and_then(|existing| self.class_decl(existing))
+            .and_then(|existing| self.symbols().class_decl(existing))
             .or_else(|| self.unlinked_decl(&decl.name.0));
         if let Some(existing) = existing {
             let message = redeclaration(existing, &existing.name.0);
@@ -1373,11 +1363,11 @@ impl Request {
                 Ok(found) => found,
                 Err(thrown) => return Err(self.link_abandoned(name, thrown, false)),
             };
-            if self.class_decl(found).map(|t| t.kind) != Some(ClassKind::Trait) {
+            if self.symbols().class_decl(found).map(|t| t.kind) != Some(ClassKind::Trait) {
                 let message = format!(
                     "{} cannot use {} - it is not a trait",
                     String::from_utf8_lossy(name),
-                    self.class_name(found)
+                    self.symbols().class_name(found)
                 );
                 let thrown = crate::api::raising::throw_error(self, "Error", &message);
                 return Err(self.link_abandoned(name, thrown, false));
@@ -1499,7 +1489,7 @@ impl Request {
     /// done
     /// ```
     fn deprecated_trait(&mut self, found: ClassId, used_by: &[u8]) -> Result<(), Thrown> {
-        let attributes = match self.class_decl(found) {
+        let attributes = match self.symbols().class_decl(found) {
             Some(decl) if crate::attributes::Flags::of(&decl.attributes).deprecated => {
                 decl.attributes.clone()
             }
@@ -1513,7 +1503,7 @@ impl Request {
         };
         let message = format!(
             "Trait {} used by {} is deprecated{suffix}",
-            self.class_name(found),
+            self.symbols().class_name(found),
             String::from_utf8_lossy(used_by)
         );
         crate::api::raising::raise(self, level, &message);
@@ -1530,7 +1520,7 @@ impl Request {
 
     /// [`Request::held_class`] of the class `class` names.
     fn held_as(&self, class: ClassId) -> Option<php_link::Held<'_, ClassId>> {
-        let decl = self.class_decl(class)?;
+        let decl = self.symbols().class_decl(class)?;
         let bodies = self
             .declared_row(class)
             .and_then(|declared| declared.composed.as_ref())
@@ -1566,7 +1556,7 @@ impl Request {
             .as_ref()
             .map_or(0, |composed| composed.abstracts);
         let lookup = |name: &[u8]| self.held_as(named(name)?);
-        let holder = |holder: ClassId| self.class_decl(holder);
+        let holder = |holder: ClassId| self.symbols().class_decl(holder);
         php_link::linked_class(
             decl,
             usize::try_from(abstracts).unwrap_or(usize::MAX),
@@ -1603,23 +1593,6 @@ impl Request {
             return u32::try_from(i).ok().map(Function);
         }
         self.functions.find(name.bytes()).copied()
-    }
-
-    /// `EG(function_table)` in its order: every native function the
-    /// table holds, so none `disable_functions` took out, then
-    /// each user function the request can find, in the order the table
-    /// took them, as `get_defined_functions()` lists them; a method is
-    /// none, being its class's, and a closure is none, since php never
-    /// adds one to the table. A function is a user function where it
-    /// has an op array ([`Frames::op_array`]).
-    #[must_use]
-    pub fn functions(&self) -> Vec<Function> {
-        let natives = u32::try_from(self.shared.functions.len()).unwrap_or(u32::MAX);
-        (0..natives)
-            .filter(|&at| self.shared.in_function_table(at as usize))
-            .map(Function)
-            .chain(self.functions.iter().copied())
-            .collect()
     }
 
     /// `zend_hash_add_ptr(CG(function_table), …)` for every function the
@@ -2116,99 +2089,12 @@ impl Request {
         String::from_utf8_lossy(&self.class_name_bytes(class)).into_owned()
     }
 
-    /// The declaration of a linked class.
-    #[must_use]
-    pub fn class_decl(&self, class: ClassId) -> Option<&ClassDecl> {
-        if let Some(native) = self.native_class_at(class) {
-            return self.shared.classes.get(native);
-        }
-        self.declared_row(class)?.decl()
-    }
-
     /// Where an engine's class stands among the engine's; none for any
     /// other class.
     pub(crate) fn native_class_at(&self, class: ClassId) -> Option<usize> {
         usize::try_from(class.published_number()?)
             .ok()
             .filter(|at| *at < self.shared.classes.len())
-    }
-
-    /// `ce->ce_flags` of a linked class: its declaration's flags with
-    /// what `zend_do_inheritance_ex` ORs in from its parent
-    /// (`Z/Zend/zend_inheritance.c:2055`), `ZEND_ACC_NOT_SERIALIZABLE`
-    /// and `ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES`, the two of that mask a
-    /// program can observe. A parent's flags already hold its own
-    /// parent's, so the walk takes each class up the chain; a class
-    /// that forbids dynamic properties keeps forbidding them, since
-    /// `zend_std_write_property` reads `ZEND_ACC_NO_DYNAMIC_PROPERTIES`
-    /// first. The one reader of the bits inheritance moves: what a
-    /// dynamic property's creation and `serialize` ask of a class.
-    /// The walk is cut at a depth no declaration can make.
-    ///
-    /// ```php
-    /// class S extends stdClass {}
-    /// $s = new S; $s->x = 1;
-    /// #[AllowDynamicProperties] class P {}
-    /// class C extends P {}
-    /// class D extends C {}
-    /// $d = new D; $d->y = 2;
-    /// class R extends ReflectionClass {}
-    /// class RR extends R {}
-    /// try { serialize(new RR('stdClass')); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
-    /// class N {}
-    /// class M extends N {}
-    /// $m = new M; $m->z = 3;
-    /// var_dump($s->x, $d->y);
-    /// ```
-    /// ```expect
-    /// Serialization of 'RR' is not allowed
-    ///
-    /// Deprecated: Creation of dynamic property M::$z is deprecated in %s on line 13
-    /// int(1)
-    /// int(2)
-    /// ```
-    #[must_use]
-    pub fn class_flags(&self, class: ClassId) -> Option<ClassFlags> {
-        use php_unit::decl::DynamicProperties;
-        let mut flags = self.class_decl(class)?.flags;
-        let passed = self
-            .ancestors(class)
-            .map_while(|parent| self.class_decl(parent).map(|decl| decl.flags));
-        for passed in passed {
-            flags.not_serializable |= passed.not_serializable;
-            if passed.dynamic_properties == DynamicProperties::Allowed
-                && flags.dynamic_properties == DynamicProperties::Deprecated
-            {
-                flags.dynamic_properties = DynamicProperties::Allowed;
-            }
-        }
-        Some(flags)
-    }
-
-    /// `ce->create_object != NULL`: whether objects of a linked class are
-    /// laid down by a `create_object` of its own or of the parent it
-    /// inherits one from, a native payload (design §5.4), a throwable's
-    /// `zend_default_exception_new` or `Closure`'s `zend_closure_new`,
-    /// rather than by `zend_objects_new`.
-    /// What `ReflectionClass::newInstanceWithoutConstructor` refuses an
-    /// internal final class for.
-    ///
-    /// ```php
-    /// foreach (['Closure', 'DOMException', 'ArithmeticError', 'stdClass'] as $c) {
-    ///     try { (new ReflectionClass($c))->newInstanceWithoutConstructor(); echo "$c\n"; } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
-    /// }
-    /// ```
-    /// ```expect
-    /// Class Closure is an internal class marked as final that cannot be instantiated without invoking its constructor
-    /// Class DOMException is an internal class marked as final that cannot be instantiated without invoking its constructor
-    /// ArithmeticError
-    /// stdClass
-    /// ```
-    #[must_use]
-    pub fn class_has_create_object(&self, class: ClassId) -> bool {
-        self.native_new_of(class).is_some()
-            || self.records_throw_site(class)
-            || crate::classes::core_create_object(self.handlers_of(class))
     }
 
     /// `ZEND_FLF_FUNC(opline)` and `ZEND_FLF_HANDLER(opline)`: the native
@@ -2229,50 +2115,16 @@ impl Request {
         self.shared.frameless.len()
     }
 
-    /// The declaration of a linked function.
-    #[must_use]
-    pub fn function_decl(&self, function: Function) -> Option<&FunctionDecl> {
-        let at = usize::try_from(function.0).ok()?;
-        if at < self.shared.functions.len() {
-            return self.shared.functions.get(at);
-        }
-        if let Some(decl) = self.user_function(function).and_then(user_function_decl) {
-            return Some(decl);
-        }
-        self.method_decl(function).map(|method| &method.function)
-    }
-
-    /// `get_declared_classes()`, in declaration order.
-    #[must_use]
-    pub fn declared_classes(&self) -> Vec<ClassId> {
-        let natives = u32::try_from(self.shared.classes.len()).unwrap_or(u32::MAX);
-        (0..natives)
-            .map(ClassId)
-            .chain(self.declared.iter().map(|named| named.class))
-            .collect()
-    }
-
-    /// `get_defined_functions()` over `EG(function_table)`: `internal`,
-    /// every native's key, and `user`, every user function's, each the
-    /// lowered name the table is keyed by and in the order the table
-    /// took them. A closure is no row, since php never adds one to the
-    /// table; a method is none either, being its class's.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub fn defined_functions(&mut self) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.defined_functions_made();
-        adopted(made)
-    }
-
     /// What [`defined_functions`](Self::defined_functions) makes, its one owner not yet named.
     pub(crate) fn defined_functions_made(&mut self) -> Result<PhpArray, Thrown> {
         let (mut internal, mut user) = (Vec::new(), Vec::new());
-        for function in self.functions() {
+        for function in self.symbols().functions() {
             let list = if self.user_function(function).is_some() {
                 &mut user
             } else {
                 &mut internal
             };
-            if let Some(decl) = self.function_decl(function) {
+            if let Some(decl) = self.symbols().function_decl(function) {
                 list.push(decl.name.0.to_ascii_lowercase());
             }
         }
@@ -2310,6 +2162,183 @@ impl Request {
             crate::observer::class_linked(self, class, &lowered);
         }
         true
+    }
+}
+
+impl<'r> Symbols<&'r Request> {
+    /// `EG(class_table)`'s keys in their order, each row the class and,
+    /// for an alias's row, the lowered name it is keyed by: the engine's
+    /// classes, each native alias after its class, then the request's
+    /// rows in their buckets. A class is a user class where it has no
+    /// [`Extensions::class_extension`]; `get_declared_classes()` lists these
+    /// rows, and phpdbg's `clean` counts them.
+    #[must_use]
+    pub fn class_keys(self) -> Vec<(ClassId, Option<Vec<u8>>)> {
+        let mut rows: Vec<(ClassId, Option<Vec<u8>>)> = (0u32..)
+            .zip(&self.0.shared.classes)
+            .flat_map(|(at, decl)| {
+                let aliases = decl.aliases.iter();
+                std::iter::once(None)
+                    .chain(aliases.map(|alias| Some(alias.0.to_ascii_lowercase())))
+                    .map(move |alias| (ClassId(at), alias))
+            })
+            .collect();
+        let mut own: Vec<(preload::Bucket, ClassId, Option<Vec<u8>>)> = self
+            .0
+            .declared
+            .iter()
+            .map(|named| (named.place, named.class, None))
+            .chain(
+                self.0
+                    .aliases
+                    .iter()
+                    .map(|(place, alias, class)| (*place, *class, Some(alias.clone()))),
+            )
+            .collect();
+        own.sort_by_key(|(place, _, _)| *place);
+        rows.extend(own.into_iter().map(|(_, class, alias)| (class, alias)));
+        rows
+    }
+
+    /// `EG(function_table)` in its order: every native function the
+    /// table holds, so none `disable_functions` took out, then
+    /// each user function the request can find, in the order the table
+    /// took them, as `get_defined_functions()` lists them; a method is
+    /// none, being its class's, and a closure is none, since php never
+    /// adds one to the table. A function is a user function where it
+    /// has an op array ([`Frames::op_array`]).
+    #[must_use]
+    pub fn functions(self) -> Vec<Function> {
+        let natives = u32::try_from(self.0.shared.functions.len()).unwrap_or(u32::MAX);
+        (0..natives)
+            .filter(|&at| self.0.shared.in_function_table(at as usize))
+            .map(Function)
+            .chain(self.0.functions.iter().copied())
+            .collect()
+    }
+
+    /// The declaration of a linked class.
+    #[must_use]
+    pub fn class_decl(self, class: ClassId) -> Option<&'r ClassDecl> {
+        if let Some(native) = self.0.native_class_at(class) {
+            return self.0.shared.classes.get(native);
+        }
+        self.0.declared_row(class)?.decl()
+    }
+
+    /// `ce->ce_flags` of a linked class: its declaration's flags with
+    /// what `zend_do_inheritance_ex` ORs in from its parent
+    /// (`Z/Zend/zend_inheritance.c:2055`), `ZEND_ACC_NOT_SERIALIZABLE`
+    /// and `ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES`, the two of that mask a
+    /// program can observe. A parent's flags already hold its own
+    /// parent's, so the walk takes each class up the chain; a class
+    /// that forbids dynamic properties keeps forbidding them, since
+    /// `zend_std_write_property` reads `ZEND_ACC_NO_DYNAMIC_PROPERTIES`
+    /// first. The one reader of the bits inheritance moves: what a
+    /// dynamic property's creation and `serialize` ask of a class.
+    /// The walk is cut at a depth no declaration can make.
+    ///
+    /// ```php
+    /// class S extends stdClass {}
+    /// $s = new S; $s->x = 1;
+    /// #[AllowDynamicProperties] class P {}
+    /// class C extends P {}
+    /// class D extends C {}
+    /// $d = new D; $d->y = 2;
+    /// class R extends ReflectionClass {}
+    /// class RR extends R {}
+    /// try { serialize(new RR('stdClass')); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// class N {}
+    /// class M extends N {}
+    /// $m = new M; $m->z = 3;
+    /// var_dump($s->x, $d->y);
+    /// ```
+    /// ```expect
+    /// Serialization of 'RR' is not allowed
+    ///
+    /// Deprecated: Creation of dynamic property M::$z is deprecated in %s on line 13
+    /// int(1)
+    /// int(2)
+    /// ```
+    #[must_use]
+    pub fn class_flags(self, class: ClassId) -> Option<ClassFlags> {
+        use php_unit::decl::DynamicProperties;
+        let mut flags = self.0.symbols().class_decl(class)?.flags;
+        let passed = self
+            .0
+            .ancestors(class)
+            .map_while(|parent| self.0.symbols().class_decl(parent).map(|decl| decl.flags));
+        for passed in passed {
+            flags.not_serializable |= passed.not_serializable;
+            if passed.dynamic_properties == DynamicProperties::Allowed
+                && flags.dynamic_properties == DynamicProperties::Deprecated
+            {
+                flags.dynamic_properties = DynamicProperties::Allowed;
+            }
+        }
+        Some(flags)
+    }
+
+    /// `ce->create_object != NULL`: whether objects of a linked class are
+    /// laid down by a `create_object` of its own or of the parent it
+    /// inherits one from, a native payload (design §5.4), a throwable's
+    /// `zend_default_exception_new` or `Closure`'s `zend_closure_new`,
+    /// rather than by `zend_objects_new`.
+    /// What `ReflectionClass::newInstanceWithoutConstructor` refuses an
+    /// internal final class for.
+    ///
+    /// ```php
+    /// foreach (['Closure', 'DOMException', 'ArithmeticError', 'stdClass'] as $c) {
+    ///     try { (new ReflectionClass($c))->newInstanceWithoutConstructor(); echo "$c\n"; } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// Class Closure is an internal class marked as final that cannot be instantiated without invoking its constructor
+    /// Class DOMException is an internal class marked as final that cannot be instantiated without invoking its constructor
+    /// ArithmeticError
+    /// stdClass
+    /// ```
+    #[must_use]
+    pub fn class_has_create_object(self, class: ClassId) -> bool {
+        self.0.native_new_of(class).is_some()
+            || self.0.records_throw_site(class)
+            || crate::classes::core_create_object(self.0.handlers_of(class))
+    }
+
+    /// The declaration of a linked function.
+    #[must_use]
+    pub fn function_decl(self, function: Function) -> Option<&'r FunctionDecl> {
+        let at = usize::try_from(function.0).ok()?;
+        if at < self.0.shared.functions.len() {
+            return self.0.shared.functions.get(at);
+        }
+        if let Some(decl) = self.0.user_function(function).and_then(user_function_decl) {
+            return Some(decl);
+        }
+        self.0.method_decl(function).map(|method| &method.function)
+    }
+
+    /// `get_declared_classes()`, in declaration order.
+    #[must_use]
+    pub fn declared_classes(self) -> Vec<ClassId> {
+        let natives = u32::try_from(self.0.shared.classes.len()).unwrap_or(u32::MAX);
+        (0..natives)
+            .map(ClassId)
+            .chain(self.0.declared.iter().map(|named| named.class))
+            .collect()
+    }
+}
+
+impl Symbols<&mut Request> {
+    /// `get_defined_functions()` over `EG(function_table)`: `internal`,
+    /// every native's key, and `user`, every user function's, each the
+    /// lowered name the table is keyed by and in the order the table
+    /// took them. A closure is no row, since php never adds one to the
+    /// table; a method is none either, being its class's.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn defined_functions(self) -> Result<Owner<PhpArray>, Thrown> {
+        let made = self.0.defined_functions_made();
+        adopted(made)
     }
 }
 

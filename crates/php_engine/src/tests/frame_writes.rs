@@ -71,7 +71,7 @@ fn shown(
         Some(Err(thrown)) => match thrown.cause(req) {
             Cause::Throwable(throwable) => {
                 let throwable = *throwable;
-                let class = req.class_name(throwable.class());
+                let class = req.symbols().class_name(throwable.class());
                 let message = throwable
                     .prop(req, b"message")
                     .and_then(|message| message.as_str_bytes().map(<[u8]>::to_vec))
@@ -125,7 +125,7 @@ fn stopped<P: Stop>(observed: &mut Observed<'_>) {
 fn init<P: Stop>(observed: &mut Observed<'_>) -> ObserverHandlers {
     let named = observed
         .function()
-        .and_then(|function| observed.function_decl(function))
+        .and_then(|function| observed.symbols().function_decl(function))
         .is_some_and(|decl| decl.name.0.as_ref() == b"pause");
     ObserverHandlers {
         begin: named.then_some(stopped::<P> as fn(&mut Observed<'_>)),

@@ -1461,8 +1461,8 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
             closure: None,
         });
     }
-    let Some(function) = req.method_named(class, b"__invoke") else {
-        let shown = req.class_name(class);
+    let Some(function) = req.symbols().method_named(class, b"__invoke") else {
+        let shown = req.symbols().class_name(class);
         return Err(crate::api::raising::throw_error(
             req,
             "Error",
@@ -4222,7 +4222,7 @@ fn verified_arg(
     let argument = &raw.deref();
     let function = req.vm().at(frame).and_then(|state| state.function);
     let Some(ty) = function
-        .and_then(|function| req.function_decl(function))
+        .and_then(|function| req.symbols().function_decl(function))
         .and_then(|decl| decl.parameters.get(at))
         .and_then(|parameter| parameter.ty.clone())
     else {
@@ -4350,7 +4350,7 @@ pub(crate) fn recv_variadic<T: Tier>(
         .vm()
         .at(frame)
         .and_then(|state| state.function)
-        .and_then(|function| req.function_decl(function))
+        .and_then(|function| req.symbols().function_decl(function))
         .and_then(|decl| decl.parameters.get(at))
         .is_none_or(|parameter| parameter.ty.is_none());
     if count == 0 && untyped {
@@ -4770,7 +4770,7 @@ fn return_mask_missed(req: &mut Request, frame: FrameRef, code: &OpArray, op: &O
 /// it, and whether the function returns by reference.
 fn declared_return(req: &Request, frame: FrameRef) -> Option<(&php_unit::decl::Type, bool)> {
     let function = req.vm().at(frame)?.function?;
-    let decl = req.function_decl(function)?;
+    let decl = req.symbols().function_decl(function)?;
     Some((decl.return_type.as_ref()?, decl.returns_by_ref))
 }
 
@@ -5057,7 +5057,7 @@ fn arg_type_error(
     // `get_active_function_or_method_name`, which `%s` prints up to the
     // NUL an anonymous class's name holds: its class alone.
     let name = function.map_or_else(String::new, |function| match req.method_class(function) {
-        Some(class) if req.class_name_bytes(class).contains(&0) => req.class_name(class),
+        Some(class) if req.class_name_bytes(class).contains(&0) => req.symbols().class_name(class),
         _ => req.frame_function_name(frame),
     });
     // The error over an argument a variadic collected is `Argument #2`
@@ -5125,7 +5125,7 @@ fn missing_argument(req: &mut Request, frame: FrameRef, passed: u32) -> Thrown {
     let function = req.vm().at(frame).and_then(|state| state.function);
     let name = req.frame_function_name(frame);
     let parameters: Vec<bool> = function
-        .and_then(|function| req.function_decl(function))
+        .and_then(|function| req.symbols().function_decl(function))
         .map(|decl| {
             decl.parameters
                 .iter()
@@ -5604,7 +5604,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
                 .this(frame)
                 .is_some_and(|this| Some(this.class()) != req.method_class(constructor));
             if private && foreign {
-                let name = req.class_name(class);
+                let name = req.symbols().class_name(class);
                 let thrown = crate::api::raising::throw_error(
                     req,
                     "Error",
@@ -5677,7 +5677,7 @@ fn static_method(
             takes_this: req.takes_this(function),
         });
     }
-    let function = match req.method_named(class, lowered) {
+    let function = match req.symbols().method_named(class, lowered) {
         Some(function) if req.method_accessible(function) => function,
         Some(function) => {
             if let Some(trampoline) = req.static_trampoline(class, name, this) {
@@ -5766,7 +5766,8 @@ fn static_call_frame(
     // scope, `Z_OBJCE(EX(This))` or `Z_CE(EX(This))`.
     let receiver = req.vm().this(frame);
     let (this, called) = if instance {
-        let Some(this) = receiver.filter(|this| req.instance_of(this.class(), class)) else {
+        let Some(this) = receiver.filter(|this| req.symbols().instance_of(this.class(), class))
+        else {
             let thrown = non_static_method_call(req, function);
             return threw(req, frame, &thrown);
         };
@@ -5829,7 +5830,7 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
         .at(frame)
         .and_then(|state| state.function)
         .and_then(|function| req.method_class(function));
-    let Some(parent) = scope.and_then(|scope| req.class_parent(scope)) else {
+    let Some(parent) = scope.and_then(|scope| req.symbols().class_parent(scope)) else {
         let thrown = crate::api::raising::throw_error(
             req,
             "Error",
@@ -5840,7 +5841,7 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
     let name = exec::constant(code, ConstIdx(op.op1));
     let name = name.as_str_bytes().unwrap_or_default().to_vec();
     let shown = String::from_utf8_lossy(&name).into_owned();
-    let parent_name = req.class_name(parent);
+    let parent_name = req.symbols().class_name(parent);
     let Some((declaring, property)) = req.property_info_of(parent, &name) else {
         let thrown = crate::api::raising::throw_error(
             req,
@@ -8866,7 +8867,7 @@ fn verify_ref_array_assignable(req: &mut Request, cell: PhpRef) -> Result<(), Th
     let Some((declaring, ty, shown)) = refused else {
         return Ok(());
     };
-    let class = req.class_name(declaring);
+    let class = req.symbols().class_name(declaring);
     Err(crate::api::raising::throw_error(
         req,
         "TypeError",
@@ -8895,7 +8896,7 @@ fn refuse_fetch(
                 ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false)
             );
             if promotes && typed.ty.mask() & MAY_BE_ARRAY == 0 {
-                let class = req.class_name(typed.declaring);
+                let class = req.symbols().class_name(typed.declaring);
                 let ty = php_unit::type_to_string(&typed.ty);
                 return Err(crate::api::raising::throw_error(
                     req,
@@ -11262,7 +11263,7 @@ fn object_place(
             }
             Ok(value) => {
                 if value.as_object().is_none() {
-                    let class = req.class_name(object.class());
+                    let class = req.symbols().class_name(object.class());
                     crate::api::raising::notice(
                         req,
                         &format!(
@@ -11420,7 +11421,7 @@ pub(crate) fn instanceof<T: Tier>(
         (Some(object), OperandKind::Const) => {
             let slot = Some(CacheSlot(op.extended_value));
             cached_class(req, frame, code, op.op2, slot)
-                .is_some_and(|class| req.instance_of(object.class(), class))
+                .is_some_and(|class| req.symbols().instance_of(object.class(), class))
         }
         // `ce && instanceof_function(...)`: a silent `FETCH_CLASS` found
         // nothing.
@@ -11430,7 +11431,7 @@ pub(crate) fn instanceof<T: Tier>(
             false
         }
         (Some(object), _) => match class_operand(req, frame, code, op.op2_type, op.op2, None) {
-            Ok(class) => req.instance_of(object.class(), class),
+            Ok(class) => req.symbols().instance_of(object.class(), class),
             Err(thrown) => {
                 exec::free_operand(req, frame, code, op.op1_type, op.op1);
                 return threw(req, frame, &thrown);
@@ -11600,7 +11601,7 @@ pub(crate) fn fetch_class_name<T: Tier>(
         match fetch {
             FETCH_CLASS_SELF => scope,
             FETCH_CLASS_PARENT => {
-                let Some(parent) = req.class_parent(scope) else {
+                let Some(parent) = req.symbols().class_parent(scope) else {
                     let thrown = crate::api::raising::throw_error(
                         req,
                         "Error",
@@ -11634,6 +11635,7 @@ pub(crate) fn fetch_class_name<T: Tier>(
         class
     };
     let name = req
+        .symbols()
         .class_decl(class)
         .map(|decl| decl.name.0.to_vec())
         .unwrap_or_default();
@@ -15811,7 +15813,7 @@ fn binary_assign_op_obj_dim(
         Err(thrown) if thrown.exception().is_some() && req.std_dimensions(object.class()) => {
             req.leave_pending(&thrown);
             let ran_on = req.pending();
-            let class = req.class_name(object.class());
+            let class = req.symbols().class_name(object.class());
             let error = crate::api::raising::throw_error(
                 req,
                 "Error",
@@ -16307,7 +16309,7 @@ fn unwritten_step_slot(
     if req.overloaded_place(object, bytes) {
         return Ok(PropertyPtr::Served(WriteBack::Property));
     }
-    let class = req.class_name(object.class());
+    let class = req.symbols().class_name(object.class());
     crate::api::raising::warning(req, &format!("Undefined property: {class}::${shown}"));
     Ok(PropertyPtr::Slot(slot, typed))
 }
@@ -17646,7 +17648,7 @@ pub(crate) fn unset_static_prop<T: Tier>(
         Ok(member) => member,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let class = req.class_name(class);
+    let class = req.symbols().class_name(class);
     let thrown = crate::api::raising::throw_error(
         req,
         "Error",
@@ -23850,7 +23852,7 @@ fn thrown_value(req: &mut Request, value: &Value) -> Thrown {
         return crate::api::raising::throw_error(req, "Error", "Can only throw objects");
     };
     let throwable = req.class_named(Bare::resolved(b"throwable"));
-    if !throwable.is_some_and(|of| req.instance_of(object.class(), of)) {
+    if !throwable.is_some_and(|of| req.symbols().instance_of(object.class(), of)) {
         return crate::api::raising::throw_error(
             req,
             "Error",
@@ -23948,7 +23950,7 @@ pub(crate) fn catch<T: Tier>(
     let slot = Some(CacheSlot(op.extended_value & !LAST_CATCH));
     let matched = pending.is_some_and(|pending| {
         cached_class(req, frame, code, op.op1, slot)
-            .is_some_and(|of| req.instance_of(pending.class(), of))
+            .is_some_and(|of| req.symbols().instance_of(pending.class(), of))
     });
     if !matched {
         if op.extended_value & LAST_CATCH != 0 {
@@ -25582,7 +25584,7 @@ mod tests {
         let op = code.oplines.first().copied().unwrap_or_default();
         let closure = req.class_named(Bare::resolved(b"closure"));
         assert!(closure.is_some(), "the engine declares Closure");
-        let callee = closure.and_then(|class| req.method_named(class, b"fromcallable"));
+        let callee = closure.and_then(|class| req.symbols().method_named(class, b"fromcallable"));
         assert!(callee.is_some(), "Closure::fromCallable is a static method");
         assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
 
@@ -25694,7 +25696,7 @@ mod tests {
             "the engine declares both"
         );
         let callee = |req: &Request, class: Option<ClassId>| {
-            class.and_then(|class| req.method_named(class, b"getmessage"))
+            class.and_then(|class| req.symbols().method_named(class, b"getmessage"))
         };
         let (on_exception, on_error) = (callee(&req, exception), callee(&req, error));
         assert!(

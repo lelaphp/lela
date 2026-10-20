@@ -277,7 +277,9 @@ fn matches(
 ) -> Result<bool, Thrown> {
     let written = bare_name(&attribute.name.0);
     if let Some(base) = base {
-        return Ok(autoload(req, written)?.is_some_and(|class| req.instance_of(class, base)));
+        return Ok(
+            autoload(req, written)?.is_some_and(|class| req.symbols().instance_of(class, base))
+        );
     }
     Ok(match wanted {
         Some(asked) => written.eq_ignore_ascii_case(bare_name(asked)),
@@ -307,7 +309,7 @@ fn attribute_factory(req: &mut Request, kept: &AttributeRef) -> Result<Owner<Php
 /// class's own `#[Attribute]` marker, `TARGET_ALL` where the marker
 /// takes none, and php's `Error` for a class carrying no marker.
 fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64, Thrown> {
-    let marker = req.class_decl(class).and_then(|decl| {
+    let marker = req.symbols().class_decl(class).and_then(|decl| {
         decl.attributes
             .iter()
             .find(|one| one.name.0.eq_ignore_ascii_case(b"Attribute"))
@@ -704,7 +706,7 @@ impl ReflectionAttribute {
         // thrown where the object would be made.
         if kept.target == TARGET_CLASS
             && let Some(subject) = kept.scope
-            && let Some(decl) = req.class_decl(subject)
+            && let Some(decl) = req.symbols().class_decl(subject)
             && let Some(refused) = class_attribute_refusal(
                 &looked_up,
                 decl.kind,
@@ -725,6 +727,7 @@ impl ReflectionAttribute {
         // native's subject was never compiled, so never validated.
         if kept.file.is_some()
             && let Some(validator) = req
+                .symbols()
                 .class_decl(class)
                 .and_then(|decl| decl.attribute_validator)
             && let Some(target) = u32::try_from(kept.target)

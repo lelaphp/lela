@@ -244,8 +244,9 @@ fn base_date_class(req: &mut Request, class: ClassId) -> Result<ClassId, Thrown>
     let mutable = class_id(req, "DateTime")?;
     let immutable = class_id(req, "DateTimeImmutable")?;
     let found = req
+        .symbols()
         .lineage(class)
-        .find(|&at| at == mutable || at == immutable || req.class_parent(at).is_none());
+        .find(|&at| at == mutable || at == immutable || req.symbols().class_parent(at).is_none());
     Ok(found.unwrap_or(class))
 }
 

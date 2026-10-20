@@ -614,7 +614,7 @@ fn throw_failed(req: &mut Request, message: &str) -> Thrown {
 /// Whether the class, or a class it extends, has `__toString`, php's
 /// `ce->__tostring`.
 fn has_to_string(req: &mut Request, class: ClassId) -> bool {
-    req.method_row(class, b"__tostring").is_some()
+    req.symbols().method_row(class, b"__tostring").is_some()
 }
 
 // ------------------------------------------------------------ dispatch
@@ -637,6 +637,7 @@ fn zval_filter(
         value.give_up(req);
         if flags & FILTER_THROW_ON_FAILURE != 0 {
             let class = req
+                .symbols()
                 .class_decl(object.class())
                 .map(|decl| c_string(&decl.name.0))
                 .unwrap_or_default();

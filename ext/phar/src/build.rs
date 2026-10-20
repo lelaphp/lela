@@ -723,7 +723,8 @@ fn walk(
 
 /// A class's name, as the messages print it.
 fn class_name(req: &mut Request, object: PhpObject) -> String {
-    req.class_decl(object.class())
+    req.symbols()
+        .class_decl(object.class())
         .map(|decl| lossy(&decl.name.0).into_owned())
         .unwrap_or_default()
 }

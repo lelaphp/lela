@@ -374,7 +374,7 @@ pub(crate) fn completion(req: &mut Request, text: &[u8]) -> Matches {
             }
         };
         let member = text[split + 2..].to_ascii_lowercase();
-        let Some(decl) = req.class_decl(class) else {
+        let Some(decl) = req.symbols().class_decl(class) else {
             return Matches::None;
         };
         let class_name = decl.name.0.to_vec();
@@ -402,7 +402,7 @@ pub(crate) fn completion(req: &mut Request, text: &[u8]) -> Matches {
         }
     } else {
         let lowered = text.to_ascii_lowercase();
-        if let Ok(functions) = req.defined_functions() {
+        if let Ok(functions) = req.symbols_mut().defined_functions() {
             for (_, group) in walk::rows(req, *functions) {
                 let group = group.deref();
                 let Some(group) = group.as_array() else {
@@ -412,7 +412,7 @@ pub(crate) fn completion(req: &mut Request, text: &[u8]) -> Matches {
                     if name.starts_with(&lowered) {
                         // `func->common.function_name`, as declared.
                         let declared = lookup_function(req, &name)
-                            .and_then(|f| req.function_decl(f))
+                            .and_then(|f| req.symbols().function_decl(f))
                             .map_or(name, |decl| decl.name.0.to_vec());
                         found.push(declared);
                         append = Some(b'(');
@@ -427,8 +427,8 @@ pub(crate) fn completion(req: &mut Request, text: &[u8]) -> Matches {
                 append = Some(0);
             }
         }
-        for class in req.declared_classes() {
-            if let Some(decl) = req.class_decl(class)
+        for class in req.symbols().declared_classes() {
+            if let Some(decl) = req.symbols().class_decl(class)
                 && decl.name.0.to_ascii_lowercase().starts_with(&lowered)
             {
                 found.push(decl.name.0.to_vec());

@@ -259,6 +259,7 @@ impl<'r> Extensions<&'r Request> {
             return Vec::new();
         };
         self.0
+            .symbols()
             .constant_table()
             .into_iter()
             .filter(|(owner, _, _)| *owner == Some(module))

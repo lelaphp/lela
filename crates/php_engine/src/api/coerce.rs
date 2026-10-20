@@ -795,7 +795,7 @@ pub(crate) fn argument(req: &mut Request, given: Value, position: u32) -> Result
         let value = given.deref();
         if value
             .as_object()
-            .is_some_and(|object| req.instance_of(object.class(), class))
+            .is_some_and(|object| req.symbols().instance_of(object.class(), class))
         {
             return Ok(value);
         }
@@ -1039,7 +1039,7 @@ pub(crate) fn holding(req: &Request, value: &Value, ty: &Type, scopes: Scopes) -
         Holding::of(
             object
                 .zip(class)
-                .is_some_and(|(object, class)| req.instance_of(object, class)),
+                .is_some_and(|(object, class)| req.symbols().instance_of(object, class)),
         )
     };
     match ty {
@@ -1073,7 +1073,7 @@ pub(crate) fn holding(req: &Request, value: &Value, ty: &Type, scopes: Scopes) -
         Type::CalledClass => is(scopes.called),
         Type::ParentClass => is(scopes
             .own
-            .and_then(|class| req.class_decl(class)?.parent.as_ref())
+            .and_then(|class| req.symbols().class_decl(class)?.parent.as_ref())
             .and_then(|parent| req.class_named(parent.into()))),
         _ => Holding::of(ty.contains_code(value.type_code())),
     }
@@ -1326,8 +1326,11 @@ pub(crate) fn resolved_type_name(req: &Request, scopes: Scopes, ty: &Type) -> St
     let Some(own) = scopes.own else {
         return php_unit::type_to_string(ty);
     };
-    let own_name = req.class_name(own);
-    let parent_name = req.class_parent(own).map(|parent| req.class_name(parent));
+    let own_name = req.symbols().class_name(own);
+    let parent_name = req
+        .symbols()
+        .class_parent(own)
+        .map(|parent| req.symbols().class_name(parent));
     let resolved = resolve_named(ty, &own_name, parent_name.as_deref());
     let called = scopes.called.map_or_else(
         || String::from("static"),

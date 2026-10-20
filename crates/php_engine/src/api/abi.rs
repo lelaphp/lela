@@ -1937,7 +1937,7 @@ impl ExtensionBuilder {
     /// `get_method` answers and its table carries none of, `pdo`'s
     /// methods (`pdo_dbh_methods.get_driver_methods`, which
     /// `pdo_hash_methods` lays down with `func.scope = pdo_dbh_ce`): each
-    /// is a trampoline of `class` ([`Request::trampoline`]), so no lookup
+    /// is a trampoline of `class` ([`Symbols::trampoline`]), so no lookup
     /// by name and no rendering finds it, and its diagnostics name the
     /// class it is laid down on.
     #[must_use]
@@ -2105,6 +2105,7 @@ impl Callable {
             } => (function, Some(this.ok_or(scope))),
         };
         let name = req
+            .symbols()
             .function_decl(function)
             .map(|decl| decl.name.0.clone())
             .unwrap_or_default();
@@ -2116,6 +2117,7 @@ impl Callable {
             Ok(this) => Owner::take(req, this.as_value()),
             Err(scope) => {
                 let class = req
+                    .symbols()
                     .class_decl(scope)
                     .map(|decl| decl.name.0.clone())
                     .unwrap_or_default();
@@ -2181,7 +2183,7 @@ impl Callable {
     pub fn with_called_scope(&self, req: &Request, called: ClassId) -> Callable {
         let mut forwarded = self.clone();
         if let Target::Method { scope, .. } = &mut forwarded.target
-            && req.instance_of(called, *scope)
+            && req.symbols().instance_of(called, *scope)
         {
             *scope = called;
         }
@@ -2209,7 +2211,7 @@ impl Callable {
                 None => return 0,
             },
         };
-        req.function_decl(function).map_or(0, |decl| {
+        req.symbols().function_decl(function).map_or(0, |decl| {
             decl.parameters
                 .iter()
                 .rposition(php_unit::decl::Parameter::is_required)
@@ -2858,7 +2860,7 @@ pub trait ObjectHandlers: Send + Sync {
     /// for a method a call names on the class: `None`, `Std`'s answer,
     /// leaves the name to the standard lookup. A class that answers a
     /// name its table has no row for answers a trampoline
-    /// ([`Request::native_static_trampoline`]), as php's test
+    /// ([`Symbols::native_static_trampoline`]), as php's test
     /// extension's `_ZendTestClass` answers `test`; `written` is the name
     /// as the call wrote it.
     fn get_static_method(
@@ -3332,7 +3334,7 @@ impl Refusals {
     /// The `Error` a refused `get_constructor` throws, `zend_throw_error`
     /// in the template.
     fn refuse_construction(req: &mut Request, object: PhpObject, instead: Option<&str>) -> Thrown {
-        let class = req.class_name(object.class());
+        let class = req.symbols().class_name(object.class());
         let message = match instead {
             Some(instead) => {
                 format!("Cannot directly construct {class}, use {instead} instead")

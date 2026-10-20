@@ -240,7 +240,7 @@ fn this_global_constant(req: &mut Request, this: PhpObject) -> Result<Vec<u8>, T
 /// number that says which extension declared it.
 fn constant_extension_name(req: &mut Request, this: PhpObject) -> Result<Option<String>, Thrown> {
     let name = this_global_constant(req, this)?;
-    let extension = req.constant_extension(&name);
+    let extension = req.symbols().constant_extension(&name);
     Ok(extension
         .and_then(|at| req.extensions().name(at))
         .map(str::to_owned))
@@ -1643,6 +1643,7 @@ impl ReflectionProperty {
             return Ok(Owner::take(req, PhpArray::empty()));
         };
         let file = req
+            .symbols()
             .class_decl(scope)
             .and_then(|decl| super::attr::declared_in(&decl.file.0));
         super::attr::reflect_attributes(
@@ -1918,6 +1919,7 @@ impl ReflectionClassConstant {
         let (_, scope, decl) = this_constant(req, this.object())?;
         let held = class_name_of(req, scope);
         let enum_of = req
+            .symbols()
             .class_decl(scope)
             .is_some_and(|decl| decl.kind == ClassKind::Enum)
             .then_some(held.as_slice());
@@ -2114,6 +2116,7 @@ impl ReflectionClassConstant {
         let (_, scope, decl) = this_constant(req, this.object())?;
         let attributes = decl.attributes.clone();
         let file = req
+            .symbols()
             .class_decl(scope)
             .and_then(|decl| super::attr::declared_in(&decl.file.0));
         super::attr::reflect_attributes(
@@ -2365,7 +2368,7 @@ impl ReflectionConstant {
         this: This<Self>,
     ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let name = this_global_constant(req, this.object())?;
-        match req.constant_file(&name).map(<[u8]>::to_vec) {
+        match req.symbols().constant_file(&name).map(<[u8]>::to_vec) {
             Some(file) => PhpString::new(req, &file).map(OrFalse::Value),
             None => Ok(OrFalse::False),
         }
@@ -2487,10 +2490,13 @@ impl ReflectionConstant {
         #[php(default = 0)] flags: i64,
     ) -> Result<Owner<PhpArray>, Thrown> {
         let constant = this_name(req, this.object(), "ReflectionConstant")?;
-        let attributes = req.constant_attributes(&constant_key(&constant)).to_vec();
+        let attributes = req
+            .symbols()
+            .constant_attributes(&constant_key(&constant))
+            .to_vec();
         let file = this_global_constant(req, this.object())
             .ok()
-            .and_then(|name| req.constant_file(&name).map(<[u8]>::to_vec));
+            .and_then(|name| req.symbols().constant_file(&name).map(<[u8]>::to_vec));
         attr::reflect_attributes(
             req,
             &attributes,

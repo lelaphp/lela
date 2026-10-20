@@ -299,7 +299,7 @@ pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) -> Result<(), T
     if !req.protect_recursion(None, key) {
         return Ok(());
     }
-    let attributes = req.constant_attributes(key).to_vec();
+    let attributes = req.symbols().constant_attributes(key).to_vec();
     let suffix = crate::attributes::deprecation_suffix(req, &attributes, None);
     req.unprotect_recursion();
     let suffix = suffix?;
@@ -748,7 +748,7 @@ pub fn catch_fatal(req: &mut Request, thrown: Thrown, class: &str) -> Result<Thr
     let held = thrown.exception().copied();
     let caught = held.or_else(|| req.pending()).filter(|throwable| {
         req.class_named(Bare::resolved(class.as_bytes()))
-            .is_some_and(|class| req.instance_of(throwable.class(), class))
+            .is_some_and(|class| req.symbols().instance_of(throwable.class(), class))
     });
     let Some(throwable) = caught else {
         return Err(thrown);
@@ -926,7 +926,7 @@ pub(crate) fn undefined_method(
     class: crate::api::values::ClassId,
     method: &[u8],
 ) -> Thrown {
-    let class = req.class_name(class);
+    let class = req.symbols().class_name(class);
     let message = format!(
         "Call to undefined method {class}::{}()",
         String::from_utf8_lossy(method)
@@ -963,7 +963,7 @@ pub(crate) fn arg_name_suffix(
 ) -> String {
     let named = || {
         let at = usize::try_from(number.checked_sub(1)?).ok()?;
-        let parameter = req.function_decl(function?)?.parameters.get(at)?;
+        let parameter = req.symbols().function_decl(function?)?.parameters.get(at)?;
         let name = String::from_utf8_lossy(&parameter.name.0);
         (!parameter.variadic).then(|| format!(" (${name})"))
     };

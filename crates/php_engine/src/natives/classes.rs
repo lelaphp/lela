@@ -152,7 +152,7 @@ fn get_parent_class(
         none_pending(req)?;
         req.frames().scope()
     };
-    match class.and_then(|class| req.class_parent(class)) {
+    match class.and_then(|class| req.symbols().class_parent(class)) {
         Some(parent) => class_name(req, parent).map(OrFalse::Value),
         None => Ok(OrFalse::False),
     }
@@ -187,7 +187,7 @@ fn is_a_impl(
     let answer = match lookup_class(req, &wanted, false)? {
         None => false,
         Some(class) if only_subclass && class == instance => false,
-        Some(class) => req.instance_of(instance, class),
+        Some(class) => req.symbols().instance_of(instance, class),
     };
     Ok(answer)
 }
@@ -1039,7 +1039,7 @@ fn method_exists(
         return Ok(false);
     };
     let lowered = crate::exec::Lowered::of(method.as_bytes());
-    if let Some(function) = req.method_named(class, &lowered) {
+    if let Some(function) = req.symbols().method_named(class, &lowered) {
         // An object's table answers whatever the method's visibility, so
         // the declaration is read only for a class named by string.
         if is_object {
@@ -1151,7 +1151,7 @@ pub(super) fn exists(
 ) -> Result<bool, Thrown> {
     let found = lookup_class(req, name.as_bytes(), autoload)?;
     let answer = found
-        .and_then(|class| req.class_decl(class))
+        .and_then(|class| req.symbols().class_decl(class))
         .is_some_and(|decl| kinds.contains(&decl.kind));
     Ok(answer)
 }
@@ -1364,10 +1364,11 @@ fn class_alias(
 /// is keyed by.
 fn declared(req: &mut Request, kinds: &[ClassKind]) -> Result<Owner<PhpArray>, Thrown> {
     let names: Vec<Vec<u8>> = req
+        .symbols()
         .class_keys()
         .into_iter()
         .filter_map(|(class, alias)| {
-            let decl = req.class_decl(class)?;
+            let decl = req.symbols().class_decl(class)?;
             kinds
                 .contains(&decl.kind)
                 .then(|| alias.unwrap_or_else(|| decl.name.0.to_vec()))

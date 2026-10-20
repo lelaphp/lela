@@ -287,11 +287,12 @@ pub(crate) fn message_of(req: &Request, throwable: PhpObject) -> String {
 pub(crate) fn observed_name(observed: &Observed<'_>) -> String {
     if let Some(function) = observed.function() {
         let name = observed
+            .symbols()
             .function_decl(function)
             .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
             .unwrap_or_default();
         return match observed.function_scope() {
-            Some(class) => format!("{}::{name}", observed.class_name(class)),
+            Some(class) => format!("{}::{name}", observed.symbols().class_name(class)),
             None => name,
         };
     }

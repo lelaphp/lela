@@ -256,7 +256,8 @@ pub(super) fn class(req: &mut Request, name: &str) -> Res<ClassId> {
 
 /// The name of an object's class.
 pub(super) fn class_name(req: &Request, o: PhpObject) -> Vec<u8> {
-    req.class_decl(o.class())
+    req.symbols()
+        .class_decl(o.class())
         .map(|d| d.name.0.to_vec())
         .unwrap_or_default()
 }

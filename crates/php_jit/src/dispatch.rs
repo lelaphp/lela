@@ -463,11 +463,11 @@ fn placed<T>(
 ) -> Option<T> {
     let view = tier::frame(req, frame)?;
     let function = view.function();
-    let decl = function.and_then(|function| req.function_decl(function));
+    let decl = function.and_then(|function| req.symbols().function_decl(function));
     let name = decl.map(|decl| decl.name.0.to_vec());
     let scope = function
         .and(view.function_scope())
-        .map(|class| req.class_name(class).into_bytes());
+        .map(|class| req.symbols().class_name(class).into_bytes());
     let typed = entry && decl.is_some_and(|decl| decl.parameters.iter().any(|p| p.ty.is_some()));
     let line = if typed {
         view.op_array()

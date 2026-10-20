@@ -2445,6 +2445,7 @@ fn create_info(req: &mut Request, path: &[u8], class: ClassId) -> Result<Owner<P
 fn declares_constructor(req: &mut Request, class: ClassId) -> Result<bool, Thrown> {
     let base = linked(req, b"SplFileInfo")?;
     Ok(req
+        .symbols()
         .method_row(class, b"__construct")
         .is_some_and(|row| row.scope() != base))
 }

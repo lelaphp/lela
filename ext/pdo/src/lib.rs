@@ -184,7 +184,8 @@ fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
 
 /// `ce->name`.
 fn class_name(req: &Request, class: ClassId) -> String {
-    req.class_decl(class)
+    req.symbols()
+        .class_decl(class)
         .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
         .unwrap_or_default()
 }
@@ -192,7 +193,8 @@ fn class_name(req: &Request, class: ClassId) -> String {
 /// `instanceof_function` over the parents alone, which is all PDO asks
 /// of a class: whether `class` is or extends the class named `of`.
 fn extends(req: &mut Request, class: ClassId, of: &[u8]) -> bool {
-    req.lineage(class)
-        .map_while(|class| req.class_decl(class))
+    req.symbols()
+        .lineage(class)
+        .map_while(|class| req.symbols().class_decl(class))
         .any(|decl| decl.name.0.eq_ignore_ascii_case(of))
 }

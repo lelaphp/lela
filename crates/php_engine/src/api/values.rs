@@ -1424,7 +1424,7 @@ impl PhpObject {
     /// over the linked table the request reads.
     #[must_use]
     pub fn instance_of(&self, req: &Request, class: ClassId) -> bool {
-        req.instance_of(self.class(), class)
+        req.symbols().instance_of(self.class(), class)
     }
 
     /// `zend_objects_clone_obj` for a class whose objects carry a
