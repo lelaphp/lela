@@ -158,9 +158,15 @@ impl JitEngine {
     ) -> JitEngine {
         let mut started = Vec::new();
         let mut policy = policy::Policy::from_ini(ini, &mut started);
-        let backend = (policy.mode() != policy::Mode::Off)
-            .then(|| backend(&policy, enter::wrapped::symbols()))
-            .and_then(|made| made.map_err(|_| policy.off()).ok());
+        let backend = if policy.mode() == policy::Mode::Off {
+            None
+        } else {
+            let made = backend(&policy, enter::wrapped::symbols()).ok();
+            if made.is_none() {
+                policy.off();
+            }
+            made
+        };
         let perf = if policy.mode() == policy::Mode::Off {
             table::Outputs::none()
         } else {
