@@ -7011,6 +7011,11 @@ fn fetch_named(
             if req.is_pending() {
                 None
             } else {
+                // What the `VAR` held is given up before the fetch: a
+                // destructor it serves can grow the table, which moves
+                // the bucket the place names.
+                let previous = req.take_slot(frame, out);
+                req.release(previous);
                 let Some(place) = req.symbol_place(table, name, mode != ByName::Unset) else {
                     return Err(Fatal::error(format!(
                         "InternalError: a fetch by name laid ${shown} down and the table does not hold it"
@@ -7019,8 +7024,6 @@ fn fetch_named(
                 if exec::value_of(place.read()).tag() == TypeTag::Undef {
                     place.write(php_heap::Zval::null());
                 }
-                let previous = req.take_slot(frame, out);
-                req.release(previous);
                 if let Some(var) = req.slot_ptr(frame, out) {
                     var.write(php_heap::Zval::indirect(place));
                 }
