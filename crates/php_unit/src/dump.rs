@@ -481,8 +481,8 @@ fn constant(out: &mut Out, value: Option<Zval>) {
 }
 
 /// `zend_dump_var`: a CV by its number and name, a `VAR` or `TMP` by
-/// its slot, which is past the CVs, and `X` for a CV number the op array has no
-/// name for.
+/// its slot, which is past the CVs, and `X` for a CV number the op
+/// array has no name for.
 fn var(out: &mut Out, body: &OpArray, kind: OperandKind, number: u32) {
     match kind {
         OperandKind::Cv if number < body.num_cvs => {

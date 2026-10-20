@@ -169,12 +169,13 @@ impl Opcode {
 /// because the glossary keeps that word for `Result`. An operand of
 /// kind `TMP` or `VAR` holds its frame slot, past the CVs, which the
 /// compiler folds as `pass_two`'s `EX_NUM_TO_VAR(last_var + n)` does,
-/// a slot where php's is a byte offset; a `CV`'s is its slot as well. The four bytes
-/// before the fields of four are what php's are: the opcode and the kind
-/// of each operand, `result`'s last. A site opcode's `out` is its
-/// safepoint number and its `out_type` stays `Unused`, as php leaves it;
-/// on every other opcode `out_type` is `RETURN_VALUE_USED`, what the
-/// compiler wrote where `zend_do_free` found nothing reading the value.
+/// a slot where php's is a byte offset; a `CV`'s is its slot as well.
+/// The four bytes before the fields of four are what php's are: the
+/// opcode and the kind of each operand, `result`'s last. A site
+/// opcode's `out` is its safepoint number and its `out_type` stays
+/// `Unused`, as php leaves it; on every other opcode `out_type` is
+/// `RETURN_VALUE_USED`, what the compiler wrote where `zend_do_free`
+/// found nothing reading the value.
 /// `handler` is php's `zend_op.handler`, the handler the opline is
 /// served by, which the compiler leaves `Unresolved` and publication
 /// resolves from the fields before it ([`Handler`]); php's is a pointer
