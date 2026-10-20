@@ -684,12 +684,12 @@ impl ResultSet {
             return Err(thrown);
         }
         // `zend_hash_update(row_ht, meta->fields[i].sname, data)`: the
-        // interned name itself, which costs the row nothing.
+        // field's name, one more owner of it for the row's key.
         let key = match field {
             Some(Field {
                 num_key: Some(n), ..
             }) => php_ext::values::Key::Int(*n),
-            Some(f) => php_ext::values::Key::Str(f.name),
+            Some(f) => php_ext::values::Key::Str(*f.name),
             None => {
                 value.give_up(req);
                 return Ok(());

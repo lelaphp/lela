@@ -271,13 +271,15 @@ pub(crate) struct Sample {
 }
 
 /// What a rep of an arm measures (§3): the milliseconds one run took, a
-/// cost, or the requests a second its clients were answered at, a rate
-/// (#2660). The paired delta is taken in it, `a - b`, so a rate's loss is
-/// a negative delta; [`Unit::worse`] turns either into a cost.
+/// cost, the nanoseconds per call of a run making a known count of calls,
+/// a cost (#2879), or the requests a second its clients were answered at,
+/// a rate (#2660). The paired delta is taken in it, `a - b`, so a rate's
+/// loss is a negative delta; [`Unit::worse`] turns each into a cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Unit {
     Ms,
+    Ns,
     Rps,
 }
 
@@ -286,6 +288,7 @@ impl Unit {
     pub(crate) fn suffix(self) -> &'static str {
         match self {
             Unit::Ms => "ms",
+            Unit::Ns => "ns",
             Unit::Rps => "rps",
         }
     }
@@ -300,16 +303,19 @@ impl Unit {
     /// a time, and less of a rate.
     pub(crate) fn worse(self) -> f64 {
         match self {
-            Unit::Ms => 1.0,
+            Unit::Ms | Unit::Ns => 1.0,
             Unit::Rps => -1.0,
         }
     }
 
-    /// The unit a reading's numbers were recorded in: a rate where any
-    /// figure is kept under the rate's suffix.
+    /// The unit a reading's numbers were recorded in: the one whose
+    /// suffix a figure is kept under, milliseconds where none is another's.
     pub(crate) fn of(reading: &Reading) -> Unit {
-        let rate = reading.numbers.keys().any(|key| key.ends_with("_rps"));
-        if rate { Unit::Rps } else { Unit::Ms }
+        let kept = |unit: Unit| (reading.numbers.keys()).any(|k| k.ends_with(&unit.key("")));
+        [Unit::Rps, Unit::Ns]
+            .into_iter()
+            .find(|unit| kept(*unit))
+            .unwrap_or(Unit::Ms)
     }
 }
 
@@ -597,6 +603,9 @@ const CALL: &str = r#"{"tool_name":"Edit","tool_input":{"file_path":"seams.toml"
 /// `makala::bench`). The other perf bars of harness-design.md §3 join them
 /// as the engine reaches what they measure.
 fn declared(root: &Path) -> Result<Vec<Declared>> {
+    const WRAPPER: &str = "wrapper";
+    const BARE: &str = "wrapper-bare";
+    const DIRECT: &str = "direct";
     let exe = std::env::current_exe().context("locating this binary")?;
     let scratch = root.join("target").join("harness-bench-aa");
     crate::permit::scratch_workspace(root, &scratch)?;
@@ -621,44 +630,79 @@ fn declared(root: &Path) -> Result<Vec<Declared>> {
     bars.extend(crate::makala::bench::declared(root)?);
     bars.extend(
         [
-            ("jit-wrapper", ("direct", "direct"), Held::Series),
-            ("jit-wrapper-aa", ("wrapper-b", "wrapper"), Held::Control),
+            ("jit-wrapper", [WRAPPER, DIRECT], Held::Series),
+            ("jit-wrapper-aa", [WRAPPER, WRAPPER], Held::Control),
+            ("jit-wrapper-unwind", [WRAPPER, BARE], Held::Series),
+            ("jit-wrapper-frame", [BARE, DIRECT], Held::Series),
+            ("jit-wrapper-bare-aa", [BARE, BARE], Held::Control),
         ]
-        .map(|(id, b, held)| wrapper(root, id, b, held)),
+        .map(|(id, ways, held)| wrapper(root, id, ways, held)),
     );
     Ok(bars)
 }
 
-/// `php_jit`'s bars (#2742): `CALLS` calls of its test kernel through the
-/// kernel's `extern "C"` wrapper, `catch_unwind` and its `Status`, against
-/// the same calls made to the kernel directly, each through a function
-/// pointer, a series; and the wrapper against itself, its A/A control.
-fn wrapper(root: &Path, id: &str, (b, way): (&'static str, &'static str), held: Held) -> Declared {
-    const CALLS: &str = "200000000";
+/// `php_jit`'s bars (#2742, #2879): `CALLS` calls of its test kernel, each
+/// arm's way and each through a function pointer: `wrapper`, the kernel's
+/// `extern "C"` wrapper with its `catch_unwind` and `Status`;
+/// `wrapper-bare`, the bench's same frame with no `catch_unwind`; or
+/// `direct`, the kernel itself. `wrapper` against `direct` is the whole
+/// wrapper, against `wrapper-bare` what `catch_unwind` costs, and
+/// `wrapper-bare` against `direct` what the frame costs, each a series;
+/// an arm against itself is an A/A control. A run is read in nanoseconds
+/// per call, its time over `CALLS`.
+fn wrapper(root: &Path, id: &str, [a, b]: [&'static str; 2], held: Held) -> Declared {
+    const CALLS: u32 = 200_000_000;
     let root = root.to_path_buf();
     Declared {
         id: id.to_owned(),
-        about: format!("{CALLS} calls of php_jit's test kernel through its wrapper, against {b}"),
+        about: format!("{CALLS} calls of php_jit's test kernel through {a}, against {b}"),
         held,
         start: Box::new(move || {
             let program =
                 crate::oracle::profile::released(&root, "php_jit", "php_jit_bench", Some("bench"))?;
-            let arm = |name: &str, way: &str| -> Box<dyn Side> {
-                let args = vec![way.to_owned(), CALLS.to_owned()];
-                let (name, stdin) = (name.to_owned(), String::new());
+            let arm = |name: String, way: &str| -> Box<dyn Side> {
+                let args = vec![way.to_owned(), CALLS.to_string()];
+                let (program, stdin) = (program.clone(), String::new());
                 let arm = Arm {
                     name,
                     program: program.clone(),
                     args,
                     stdin,
                 };
-                Box::new(Spawned {
-                    arm,
-                    program: program.clone(),
-                })
+                let side = Spawned { arm, program };
+                Box::new(PerCall { side, calls: CALLS })
             };
-            Ok(Ok([arm("wrapper", "wrapper"), arm(b, way)]))
+            // An A/A control's second arm is named apart from its first.
+            let second = format!("{b}{}", if a == b { "-b" } else { "" });
+            Ok(Ok([arm(a.to_owned(), a), arm(second, b)]))
         }),
+    }
+}
+
+/// A process arm that makes a known count of calls, each run, which
+/// [`Spawned`] reads in milliseconds, read in nanoseconds per call.
+struct PerCall {
+    side: Spawned,
+    calls: u32,
+}
+
+impl Side for PerCall {
+    fn name(&self) -> &str {
+        self.side.name()
+    }
+
+    fn program(&self) -> &Path {
+        self.side.program()
+    }
+
+    fn once(&mut self) -> Result<Sample> {
+        let ran = self.side.once()?;
+        let value = ran.value * 1e6 / f64::from(self.calls);
+        Ok(Sample { value, ..ran })
+    }
+
+    fn unit(&self) -> Unit {
+        Unit::Ns
     }
 }
 

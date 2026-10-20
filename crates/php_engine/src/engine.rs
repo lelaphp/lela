@@ -25,8 +25,8 @@ use php_compile::{CompileError, RequestClasses, SourceKind, StackLimit};
 use php_heap::{Intern, Strings, Zval};
 use php_link::{Exact, Folded, Indexed, LinkedClass, NameMap, Names};
 use php_unit::decl::{
-    ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name, ParameterDefault,
-    Type,
+    ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, IniDecl, MethodDecl, Name,
+    ParameterDefault, Type,
 };
 use php_unit::{FramelessEntry, PublishedUnit, Unit, frameless_table};
 
@@ -1586,6 +1586,23 @@ impl Shared {
         self.callees.get(at).map(crate::readable::Record::at)
     }
 
+    /// The extensions' own ini declarations, what `EG(ini_directives)`
+    /// holds past the core table: each extension's in its
+    /// `PHP_INI_BEGIN()` order, the extensions in startup order.
+    pub(crate) fn extension_inis(&self) -> impl Iterator<Item = &IniDecl> {
+        self.extensions
+            .iter()
+            .flat_map(|extension| extension.ini.iter())
+    }
+
+    /// The declaration of the entry `name` among the extensions' own,
+    /// `zend_hash_find_ptr(EG(ini_directives))` over what each extension
+    /// registered; none for an entry of the core table or none at all.
+    pub(crate) fn extension_ini(&self, name: &[u8]) -> Option<&IniDecl> {
+        self.extension_inis()
+            .find(|decl| decl.name.0.as_ref() == name)
+    }
+
     /// `zend_flf_functions` by name, in the frameless table's order
     /// ([`Engine::frameless`]).
     pub(crate) fn frameless_names(&self) -> Vec<Name> {
@@ -1649,7 +1666,7 @@ impl Shared {
         origin: Origin<'_>,
         stack: StackLimit,
     ) -> Result<Unit, CompileError> {
-        let mut strings = self.interned.table();
+        let mut strings = self.interned.strings();
         compile(
             source,
             origin,
@@ -1714,12 +1731,12 @@ impl Shared {
         match self.compiled_for(req, source, filename, kind) {
             Ok(unit) => Ok(Self::held_for(req, unit)),
             // What the refused compile had declared stands in the
-            // request after it ([`Request::declare_refused`]), a unit of
+            // request after it, and the keys it made are counted, as the
+            // refusal is raised ([`Request::declare_refused`]): a unit of
             // the request's holding the strings the compile made, which a
             // refusal that declared nothing gives up.
             Err(error) => {
                 let refused = CompileRefused::published(error, |unit| {
-                    req.count_keys_made(unit.runtime_keys.len());
                     let unit = req.take_unit(unit);
                     req.hold_compiled(&unit);
                     // An `eval`'s names, made as php's compile made them;
@@ -1740,7 +1757,7 @@ impl Shared {
     /// A unit compiled for `req` taken into it, the strings its compile
     /// made held by it.
     fn held_for(req: &mut Request, unit: Unit) -> PublishedUnit {
-        req.count_keys_made(unit.runtime_keys.len());
+        req.count_keys_made(u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX));
         req.note_loop_vars(unit.loop_vars);
         let unit = req.take_unit(unit);
         req.hold_compiled(&unit);
@@ -1884,7 +1901,7 @@ impl Shared {
     /// ([`Shared::publish_compiled`]); none where the bytes are no whole
     /// unit.
     pub(crate) fn decode_kept(&self, body: &[u8]) -> Option<Unit> {
-        let mut strings = self.interned.table();
+        let mut strings = self.interned.strings();
         crate::unit_cache::decode(
             body,
             &mut PermanentStrings {
@@ -1964,13 +1981,14 @@ impl Shared {
         if let Some(name) = self.permanent(bytes) {
             return Some(name);
         }
-        self.interned.table().find(bytes)
+        let strings = self.interned.strings();
+        strings.find(bytes)
     }
 
     /// How many strings the engine's table holds, opcache's
     /// `interned_strings_usage.number_of_strings`.
     pub(crate) fn interned_strings(&self) -> usize {
-        self.interned.table().count()
+        self.interned.strings().count()
     }
 
     /// The value the entry `name` starts every request with as
@@ -2060,7 +2078,8 @@ impl Shared {
         if let Some((_, z)) = self.sapi_names.iter().find(|(n, _)| n.as_ref() == sapi) {
             return Some(exec::value_of(*z));
         }
-        let interned = self.interned.table().intern(sapi).ok()?;
+        let mut strings = self.interned.strings();
+        let interned = strings.intern(sapi).ok()?;
         Some(exec::value_of(Zval::string(interned)))
     }
 
@@ -3887,6 +3906,14 @@ impl Intern for PermanentStrings<'_> {
     }
 }
 
+/// `CG(auto_globals)` in the order php registers them:
+/// `php_startup_auto_globals`'s seven (`Z/main/php_variables.c:973`),
+/// then the session's `MINIT`'s `$_SESSION`, which makes no variable.
+pub(crate) const AUTO_GLOBALS: [php_unit::AutoGlobal; 8] = {
+    use php_unit::AutoGlobal::{Cookie, Env, Files, Get, Post, Request, Server, Session};
+    [Get, Post, Cookie, Server, Env, Request, Files, Session]
+};
+
 /// `interned_strings_permanent` as `MINIT` leaves it: what php interns
 /// permanently as the engine and the bundle register their declarations.
 /// `zend_register_module_ex` interns each extension's lowercased name;
@@ -3939,13 +3966,9 @@ fn permanent_names(
             }
         }
     }
-    // `php_startup_auto_globals` and the session's `MINIT` register each
-    // auto-global under `zend_string_init_interned`.
-    {
-        use php_unit::AutoGlobal::{Cookie, Env, Files, Get, Post, Request, Server, Session};
-        for global in [Get, Post, Cookie, Server, Env, Request, Files, Session] {
-            names.intern(global.name()).ok();
-        }
+    // Each auto-global is registered under `zend_string_init_interned`.
+    for global in AUTO_GLOBALS {
+        names.intern(global.name()).ok();
     }
     let keyed = functions
         .iter()
@@ -4387,10 +4410,7 @@ impl Engine {
         // finds the host's value for each: the handlers meet the values
         // in declaration order, whatever order the host set them in.
         let declared_at = |name: &[u8]| {
-            self.shared
-                .extensions
-                .iter()
-                .flat_map(|e| e.ini.iter())
+            (self.shared.extension_inis())
                 .position(|entry| entry.name.0.as_ref() == name)
                 .unwrap_or(usize::MAX)
         };
@@ -4555,9 +4575,7 @@ impl Engine {
         let (mut taken, mut locked) = (Vec::new(), Vec::new());
         for (name, value, mode) in entries {
             let per_dir = || {
-                (shared.extensions.iter())
-                    .flat_map(|e| e.ini.iter())
-                    .find(|d| *d.name.0 == *name)
+                (shared.extension_ini(&name))
                     .map_or(Request::ini_modifiable(&name).1, |d| d.per_dir)
             };
             if shared.ini.iter().all(|(n, _)| *n != name)
@@ -7563,10 +7581,7 @@ mod tests {
 
     /// How many strings the engine's table holds.
     fn strings_of(engine: &Engine) -> usize {
-        match engine.shared.interned.strings.lock() {
-            Ok(strings) => strings.count(),
-            Err(poisoned) => poisoned.into_inner().count(),
-        }
+        engine.shared.interned.strings().count()
     }
 
     /// `Engine::cli_builder().build()` interns a string constant's name and

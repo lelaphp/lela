@@ -50,7 +50,7 @@ pub(crate) use build_defs::build_date;
 mod callable;
 mod caller;
 pub(crate) use caller::NativeCaller;
-pub(crate) use hooks::HookedRow;
+pub(crate) use hooks::{HookRows, Hooked, HookedDeclared, HookedTable};
 pub(crate) use objects::placed_of;
 mod calls;
 pub use calls::Supplier;
@@ -429,9 +429,10 @@ pub struct Request {
     /// for a compile or a link to emit ([`recording::Record`]).
     record: recording::Record,
     /// `CG(rtd_key_counter)` over the units this request compiled for
-    /// itself: the runtime definition keys and anonymous class names
-    /// they made, which the next one counts on from
-    /// ([`crate::engine::Shared::compile_for`]).
+    /// itself and every refused compile it raised: the runtime definition
+    /// keys and anonymous class names they made, which the next one
+    /// counts on from ([`crate::engine::Shared::compile_for`],
+    /// [`Request::declare_refused`]).
     keys_made: u32,
     /// The arena every compile this request makes parses into and keeps
     /// its temporaries in, reset after each (#2810): what php's
@@ -1161,10 +1162,9 @@ impl Request {
         self.keys_made
     }
 
-    /// The `made` runtime definition keys of a unit this request just
-    /// compiled for itself, counted on, saturating at `u32::MAX`.
-    pub(crate) fn count_keys_made(&mut self, made: usize) {
-        let made = u32::try_from(made).unwrap_or(u32::MAX);
+    /// The `made` runtime definition keys of a compile this request just
+    /// made for itself, counted on, saturating at `u32::MAX`.
+    pub(crate) fn count_keys_made(&mut self, made: u32) {
         self.keys_made = self.keys_made.saturating_add(made);
     }
 }

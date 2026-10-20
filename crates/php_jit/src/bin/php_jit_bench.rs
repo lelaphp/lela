@@ -1,5 +1,5 @@
-//! The program of `xtask bench`'s `jit-wrapper` bars (#2742):
-//! `php_jit_bench <wrapper|direct> <calls>` makes that many calls of the
+//! The program of `xtask bench`'s `jit-wrapper` bars (#2742, #2879):
+//! `php_jit_bench <wrapper|wrapper-bare|direct> <calls>` makes that many calls of the
 //! test kernel one way and prints the tally they leave, which is the same
 //! whichever way they went, so the two arms' bytes compare (measurement
 //! protocol §5).
@@ -24,7 +24,7 @@ fn main() -> ExitCode {
         args.first().and_then(|name| Through::named(name)),
         args.get(1).and_then(|n| n.parse::<u64>().ok()),
     ) else {
-        eprintln!("usage: php_jit_bench <wrapper|direct> <calls>");
+        eprintln!("usage: php_jit_bench <wrapper|wrapper-bare|direct> <calls>");
         return ExitCode::FAILURE;
     };
     match calls(through, n) {

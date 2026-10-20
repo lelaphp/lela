@@ -1481,12 +1481,16 @@ pub(crate) fn unit(
     if let Err(mut refused) = emit.source_file() {
         refused.raised = emit.diagnostics;
         // What php's compile had added to `CG(function_table)` and
-        // `CG(class_table)` before it bailed out, which nothing takes
-        // back: every body those reach, and the closures they declare, a
+        // `CG(class_table)` before it bailed out, and the keys it had
+        // counted in `CG(rtd_key_counter)`, which nothing takes back:
+        // every body the tables reach, and the closures they declare, a
         // slot the refused statement took and never filled ending them.
         // A refusal php throws is the parser's, made before `zend_compile`
-        // declared anything, as is a parse error.
+        // declared or counted anything, as is a parse error.
         let bailed = !refused.thrown && refused.level != Level::Parse;
+        if bailed {
+            refused.keys_made = u32::try_from(emit.runtime_keys.len()).unwrap_or(u32::MAX);
+        }
         if bailed && !emit.landed.is_empty() {
             let (top_level, raised_before) = emit.landed.into_iter().unzip();
             let dynamic = emit.dynamic.into_iter().map_while(|def| def).collect();
@@ -1529,6 +1533,7 @@ pub(crate) fn unit(
                 thrown: false,
                 stage: crate::Stage::Compiling,
                 declared: None,
+                keys_made: 0,
             });
         };
         dynamic.push(def);
@@ -1667,6 +1672,7 @@ fn headers_numbered(oplines: &[Opline], safepoints: &[OplineIdx]) -> Result<(), 
             thrown: false,
             stage: crate::Stage::Compiling,
             declared: None,
+            keys_made: 0,
         };
         if !op.opcode.is_safepoint_site() {
             return Err(refused("with no safepoint column for its number"));
@@ -1819,6 +1825,7 @@ impl<'a> Emit<'a> {
             thrown: false,
             stage: crate::Stage::Compiling,
             declared: None,
+            keys_made: 0,
         }
     }
 
@@ -6616,6 +6623,7 @@ impl<'a> Emit<'a> {
             thrown: false,
             stage: crate::Stage::Compiling,
             declared: None,
+            keys_made: 0,
         };
         if !on_target && !delayed {
             return Err(refused(format!(
@@ -7385,6 +7393,7 @@ impl<'a> Emit<'a> {
                 thrown: false,
                 stage: crate::Stage::Compiling,
                 declared: None,
+                keys_made: 0,
             }),
         }
     }
@@ -10020,6 +10029,7 @@ impl<'a> Emit<'a> {
             thrown: false,
             stage: crate::Stage::Compiling,
             declared: None,
+            keys_made: 0,
         };
         let name = self
             .constants
@@ -10133,6 +10143,7 @@ impl<'a> Emit<'a> {
                 thrown: false,
                 stage: crate::Stage::Compiling,
                 declared: None,
+                keys_made: 0,
             });
         }
         Ok(())
@@ -10751,6 +10762,7 @@ impl<'a> Emit<'a> {
             thrown: false,
             stage: crate::Stage::Compiling,
             declared: None,
+            keys_made: 0,
         }
     }
 

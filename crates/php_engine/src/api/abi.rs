@@ -9,7 +9,7 @@ use std::any::{Any, TypeId};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use php_heap::{Fatal, Heap, Obj};
 use php_unit::decl::{
@@ -223,10 +223,7 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
 
     /// The value for `key`, built by `build` once and shared afterwards.
     pub fn get_or_build(&self, key: K, build: impl FnOnce(&K) -> V) -> Arc<V> {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut entries = self.entries();
         if let Some(found) = entries.get(&key) {
             return Arc::clone(found);
         }
@@ -248,10 +245,7 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
     }
 
     fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<K, Arc<V>>> {
-        match self.entries.lock() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        self.entries.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// How many keys are held.
@@ -357,10 +351,7 @@ impl<K: Hash + Eq, V> Pool<K, V> {
     }
 
     fn idle(&self) -> std::sync::MutexGuard<'_, Idle<K, V>> {
-        match self.idle.lock() {
-            Ok(idle) => idle,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        self.idle.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// An idle entry under `key`, lent to the caller alone: the one given

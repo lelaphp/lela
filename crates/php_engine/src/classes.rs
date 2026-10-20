@@ -155,6 +155,13 @@ impl ObjectHandlers for ClosureHandlers {
         {
             req.give_back_cache(at);
         }
+        // `destroy_op_array(&closure->func)`: the op array's count.
+        if let Some(function) = object
+            .native::<ClosureObject>(req)
+            .map(|closure| closure.info.function)
+        {
+            req.uncount_closure(function);
+        }
     }
 
     /// `zend_closure_clone`: `zend_create_closure` over the same
@@ -651,6 +658,9 @@ pub(crate) fn closure_cache(
     };
     let (cache, size) = (user.shape.cache, user.shape.cache_size);
     let real = matches!(user.body, crate::exec::Body::Dynamic(_));
+    // Every closure over a user function is made after its cache is
+    // chosen here, and counts its op array.
+    req.count_closure(function);
     if let ClosureCache::Own(_) = from {
         return req.own_cache(size).map(ClosureCache::Own);
     }
