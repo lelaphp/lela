@@ -1631,13 +1631,7 @@ impl Shared {
         origin: Origin<'_>,
         stack: StackLimit,
     ) -> Result<Unit, CompileError> {
-        let mut strings = match self.interned.strings.lock() {
-            Ok(strings) => strings,
-            // The table is append-only and every string in it was
-            // finished before it was published, so what a thread that
-            // ended holding the lock left is consistent.
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut strings = self.interned.strings();
         compile(
             source,
             origin,
@@ -1882,11 +1876,7 @@ impl Shared {
     /// ([`Shared::publish_compiled`]); none where the bytes are no whole
     /// unit.
     pub(crate) fn decode_kept(&self, body: &[u8]) -> Option<Unit> {
-        let mut strings = match self.interned.strings.lock() {
-            Ok(strings) => strings,
-            // As in `publish`: the table is append-only and consistent.
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut strings = self.interned.strings();
         crate::unit_cache::decode(
             body,
             &mut PermanentStrings {
@@ -1966,20 +1956,14 @@ impl Shared {
         if let Some(name) = self.permanent(bytes) {
             return Some(name);
         }
-        let strings = match self.interned.strings.lock() {
-            Ok(strings) => strings,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let strings = self.interned.strings();
         strings.find(bytes)
     }
 
     /// How many strings the engine's table holds, opcache's
     /// `interned_strings_usage.number_of_strings`.
     pub(crate) fn interned_strings(&self) -> usize {
-        match self.interned.strings.lock() {
-            Ok(strings) => strings.count(),
-            Err(poisoned) => poisoned.into_inner().count(),
-        }
+        self.interned.strings().count()
     }
 
     /// The value the entry `name` starts every request with as
@@ -2069,10 +2053,7 @@ impl Shared {
         if let Some((_, z)) = self.sapi_names.iter().find(|(n, _)| n.as_ref() == sapi) {
             return Some(exec::value_of(*z));
         }
-        let mut strings = match self.interned.strings.lock() {
-            Ok(strings) => strings,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut strings = self.interned.strings();
         let interned = strings.intern(sapi).ok()?;
         Some(exec::value_of(Zval::string(interned)))
     }
@@ -7518,10 +7499,7 @@ mod tests {
 
     /// How many strings the engine's table holds.
     fn strings_of(engine: &Engine) -> usize {
-        match engine.shared.interned.strings.lock() {
-            Ok(strings) => strings.count(),
-            Err(poisoned) => poisoned.into_inner().count(),
-        }
+        engine.shared.interned.strings().count()
     }
 
     /// `Engine::cli_builder().build()` interns a string constant's name and
