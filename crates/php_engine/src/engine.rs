@@ -3887,6 +3887,14 @@ impl Intern for PermanentStrings<'_> {
     }
 }
 
+/// `CG(auto_globals)` in the order php registers them:
+/// `php_startup_auto_globals`'s seven (`Z/main/php_variables.c:973`),
+/// then the session's `MINIT`'s `$_SESSION`, which makes no variable.
+pub(crate) const AUTO_GLOBALS: [php_unit::AutoGlobal; 8] = {
+    use php_unit::AutoGlobal::{Cookie, Env, Files, Get, Post, Request, Server, Session};
+    [Get, Post, Cookie, Server, Env, Request, Files, Session]
+};
+
 /// `interned_strings_permanent` as `MINIT` leaves it: what php interns
 /// permanently as the engine and the bundle register their declarations.
 /// `zend_register_module_ex` interns each extension's lowercased name;
@@ -3939,13 +3947,9 @@ fn permanent_names(
             }
         }
     }
-    // `php_startup_auto_globals` and the session's `MINIT` register each
-    // auto-global under `zend_string_init_interned`.
-    {
-        use php_unit::AutoGlobal::{Cookie, Env, Files, Get, Post, Request, Server, Session};
-        for global in [Get, Post, Cookie, Server, Env, Request, Files, Session] {
-            names.intern(global.name()).ok();
-        }
+    // Each auto-global is registered under `zend_string_init_interned`.
+    for global in AUTO_GLOBALS {
+        names.intern(global.name()).ok();
     }
     let keyed = functions
         .iter()
