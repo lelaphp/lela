@@ -173,13 +173,12 @@ pub(crate) fn hot(
         let start = claim.start();
         let epoch = table::holding(req, &shared.policy, &shared.perf);
         let table = table::of_epoch(&epoch);
-        let name = started(
-            req,
-            shared,
-            frame,
-            table.and_then(table::TraceTable::next),
-            start,
-        );
+        let next = table.and_then(table::TraceTable::next);
+        // A frame that shows no op array has no place to record from.
+        let Some(name) = started(req, shared, frame, next, start) else {
+            policy::settle(claim, &Outcome::Released);
+            break resumed(frame, stepped);
+        };
         if table.is_none_or(table::TraceTable::full) {
             if let Some(table) = table {
                 table.stop();
@@ -287,7 +286,10 @@ fn rerooted(
     };
     let claimed = policy::claim(root, &shared.policy, Start::Loop)?;
     let next = table::of(req, &shared.policy, &shared.perf).and_then(table::TraceTable::next);
-    let name = started(req, shared, ended.at, next, Start::Loop);
+    let Some(name) = started(req, shared, ended.at, next, Start::Loop) else {
+        policy::settle(claimed, &Outcome::Released);
+        return None;
+    };
     Some((claimed, name))
 }
 
@@ -307,14 +309,14 @@ fn resumed(at: FrameRef, stepped: bool) -> Flow {
 /// the file, and the line of the opline php's root's heat stands on, the
 /// first `RECV` of a function with a typed parameter, whose prologue php
 /// counts. The name a trace that starts there is published under, the
-/// same place.
+/// same place; none where the frame shows no op array.
 fn started(
     req: &mut Request,
     shared: &Shared,
     frame: FrameRef,
     trace: Option<TraceId>,
     start: Start,
-) -> TraceName {
+) -> Option<TraceName> {
     let mut lines = Vec::new();
     let name = placed(req, frame, start, |at| {
         if let Some(trace) = trace {
@@ -323,14 +325,7 @@ fn started(
         TraceName::of(&at)
     });
     req.write_stderr(&lines);
-    name.unwrap_or_else(|| {
-        TraceName::of(&Place {
-            scope: None,
-            function: None,
-            file: b"",
-            line: 0,
-        })
-    })
+    name
 }
 
 /// What `with` makes of the [`Place`] a root at `frame` starts at; none

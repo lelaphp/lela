@@ -53,13 +53,13 @@ pub(crate) struct Job {
 /// the engine's worker.
 #[derive(Debug)]
 pub(crate) struct Compiler {
-    worker: Option<Worker>,
+    worker: Option<Threaded>,
 }
 
 /// The engine's worker and the queue its body serves.
 #[derive(Debug)]
-struct Worker {
-    thread: Arc<tier::Worker>,
+struct Threaded {
+    worker: Arc<tier::Worker>,
     queue: Arc<Queue>,
 }
 
@@ -98,8 +98,8 @@ impl Compiler {
                 held: Mutex::default(),
                 changed: Condvar::new(),
             });
-            let thread = tier::Worker::new("php-jit", Arc::clone(&queue) as Arc<dyn Parked>);
-            Worker { thread, queue }
+            let worker = tier::Worker::new("php-jit", Arc::clone(&queue) as Arc<dyn Parked>);
+            Threaded { worker, queue }
         });
         Compiler { worker }
     }
@@ -110,13 +110,13 @@ impl Compiler {
     /// asked), and none. Where the system refuses the worker a thread,
     /// the queue is served here.
     pub(crate) fn submit(&self, shared: &Shared, job: Job, lines: &mut Vec<u8>) -> Option<Outcome> {
-        let Some(worker) = &self.worker else {
+        let Some(threaded) = &self.worker else {
             return Some(pipeline(shared, job, lines));
         };
-        worker.queue.held().jobs.push_back(job);
-        worker.queue.changed.notify_all();
-        if !worker.thread.wake() {
-            worker.queue.drain();
+        threaded.queue.held().jobs.push_back(job);
+        threaded.queue.changed.notify_all();
+        if !threaded.worker.wake() {
+            threaded.queue.drain();
         }
         None
     }
@@ -199,7 +199,9 @@ impl Drop for Served<'_> {
 
 impl Parked for Queue {
     /// The worker's body: each job as it is queued, and between two of
-    /// them, where it is asked to end, a return.
+    /// them, where it is asked to end, a return. A job that panics past
+    /// the pipeline's own catch, whose claim its drop settled, ends no
+    /// body: the queue behind it is served still.
     fn run(&self) {
         loop {
             let job = {
@@ -219,7 +221,7 @@ impl Parked for Queue {
                         .unwrap_or_else(PoisonError::into_inner);
                 }
             };
-            self.serve(job);
+            catch_unwind(AssertUnwindSafe(|| self.serve(job))).ok();
         }
     }
 

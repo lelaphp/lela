@@ -111,8 +111,12 @@ fn body(len: usize) -> Compiled {
 /// How a stage's fixture compiles.
 #[derive(Clone, Copy)]
 enum Backend {
-    /// The engine's own.
+    /// The engine's own, over Cranelift.
     Host,
+    /// No `Backend` but `lower::dump`: the trace rendered as its text, and
+    /// a body of `ret`s carrying its exits and the job's name, which the
+    /// table places as it places code and nothing enters.
+    Dump,
     /// Refuses with the stop.
     Refuses(Stop),
     /// A body whose entry is past its bytes, which the table refuses.
@@ -132,8 +136,18 @@ fn piped(
 ) -> (Outcome, State, String) {
     let shared = &engine.shared;
     let mut lines = Vec::new();
-    let compile = |_: &TraceIr, _: TraceName| -> Result<Compiled, Abort> {
+    let compile = |ir: &TraceIr, name: TraceName| -> Result<Compiled, Abort> {
         match backend {
+            Backend::Dump => {
+                let text = crate::lower::dump::render(ir);
+                assert!(!text.is_empty(), "the trace renders");
+                Ok(Compiled {
+                    exits: ir.exits.clone().into_boxed_slice(),
+                    map_ptrs: ir.map_ptrs.clone().into_boxed_slice(),
+                    name,
+                    ..body(16)
+                })
+            }
             Backend::Host => Err(Abort {
                 stop: Stop::CompilerError,
                 why: "the host's backend is not this closure",
@@ -162,13 +176,22 @@ fn stopped(n: u32, end: &str) -> String {
     format!("---- TRACE {n} stop (return)\n---- TRACE {n} {end}\n")
 }
 
-/// A recording compiled by the host's `Backend` is published, its word
-/// compiled with the trace's number and the trace in the epoch's table.
+/// A recording built and compiled is published, its word compiled with
+/// the trace's number and the trace in the epoch's table under the job's
+/// name: through no `Backend` but `dump`, and through the host's own.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_trace_is_built_lowered_and_published() -> Result<(), String> {
+    for backend in [Backend::Dump, Backend::Host] {
+        published(backend)?;
+    }
+    Ok(())
+}
+
+/// [`a_trace_is_built_lowered_and_published`] through `backend`.
+fn published(backend: Backend) -> Result<(), String> {
     let (job, holder) = job(&[])?;
-    let (outcome, state, lines) = piped(&engine(&[]), Backend::Host, job, &holder);
+    let (outcome, state, lines) = piped(&engine(&[]), backend, job, &holder);
     assert_eq!(outcome, Outcome::Published(trace(1)));
     assert_eq!(state, State::Compiled(trace(1)));
     assert_eq!(lines, stopped(1, "compiled"));
@@ -260,7 +283,7 @@ fn spent_arena() -> Result<(), String> {
     let table = table::of_epoch(holder.epoch());
     let whole = table.map(|table| table.publish(body(1 << 16), Start::Loop));
     assert_eq!(whole, Some(Ok(trace(1))), "the arena spent");
-    let (outcome, state, lines) = piped(&engine(&[]), Backend::Host, spent, &holder);
+    let (outcome, state, lines) = piped(&engine(&[]), Backend::Dump, spent, &holder);
     assert_eq!(outcome, Outcome::Abort(Stop::CompilerError));
     assert_eq!(state, State::Cold);
     assert_eq!(lines, stopped(2, "abort (JIT compilation error)"));
@@ -277,7 +300,7 @@ fn the_tables_bounds_settle_as_php_settles_them() -> Result<(), String> {
     }
     let bound = [("opcache.jit_max_root_traces", "1")];
     let (full, holder) = job(&bound)?;
-    let (outcome, state, _) = piped(&engine(&bound), Backend::Host, full, &holder);
+    let (outcome, state, _) = piped(&engine(&bound), Backend::Dump, full, &holder);
     assert_eq!(outcome, Outcome::Blacklist(Stop::TooManyTraces));
     assert_eq!(state, State::Blacklisted);
     Ok(())
