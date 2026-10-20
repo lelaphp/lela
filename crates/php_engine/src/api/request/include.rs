@@ -15,7 +15,7 @@ use php_unit::PublishedUnit;
 use crate::ProgramFile;
 use crate::api::abi::{Beneath, chain};
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::PhpString;
+use crate::api::values::{Owner, PhpString, Value};
 use crate::exec::IncludeKind;
 use crate::supplied::chain::{FileArgs, StringArgs};
 use crate::unit_cache::CompileRefused;
@@ -44,10 +44,21 @@ pub(super) struct Include {
 /// ([`ProgramFile`]), and `auto_prepend_file`'s, `auto_append_file`'s and
 /// the built-in server's router's as `php_execute_script_ex` and
 /// `php_cli_server_dispatch_router` keep theirs ([`HandlePath::Kept`]).
-/// What holds it open is the [`std::fs::File`] alone, which nothing reads.
 struct Held {
-    _file: std::fs::File,
+    holder: Holder,
     until: Until,
+}
+
+/// What holds a [`Held`] file open.
+enum Holder {
+    /// A [`std::fs::File`] alone, which nothing reads.
+    File { _file: std::fs::File },
+    /// The stream layer's stream over the program, as
+    /// `php_fopen_primary_script` opened it where opcache did not hold the
+    /// file, with the `*opened_path` its opener set, which
+    /// `EG(included_files)` holds the program under
+    /// ([`StreamHooks::open_primary`](crate::layer::StreamHooks::open_primary)).
+    Stream(PhpString),
 }
 
 /// When the request closes a file it holds ([`Held`]).
@@ -184,13 +195,32 @@ impl Request {
         };
         let program_file = self.description.program_file;
         let until = match program_file {
-            ProgramFile::Opened => Until::Served,
+            ProgramFile::Opened => return self.hold_file(&script, Until::Served),
             ProgramFile::Unopened => return,
             _ if self.accelerator_holds(&script) => return,
             ProgramFile::Named => Until::Served,
             ProgramFile::Listed => Until::Ended,
         };
-        self.hold_file(&script, until);
+        let Some(hooks) = self.stream_hooks() else {
+            return self.hold_file(&script, until);
+        };
+        match (hooks.open_primary)(self, &script) {
+            Ok(Some(path)) => self.include.held.push(Held {
+                holder: Holder::Stream(path),
+                until,
+            }),
+            Ok(None) => {}
+            Err(thrown) => self.leave_pending(&thrown),
+        }
+    }
+
+    /// The `*opened_path` of the program's stream, where
+    /// [`Request::open_primary_file`] opened one.
+    pub(super) fn primary_opened_path(&self) -> Option<PhpString> {
+        self.include.held.iter().find_map(|held| match held.holder {
+            Holder::Stream(opened_path) => Some(opened_path),
+            Holder::File { .. } => None,
+        })
     }
 
     /// [`Beneath::read`](crate::api::abi::Beneath::read) over the file
@@ -227,7 +257,10 @@ impl Request {
         if let Ok(file) = std::fs::File::open(path)
             && php_process::inherit_fd(std::os::fd::AsFd::as_fd(&file)).is_ok()
         {
-            self.include.held.push(Held { _file: file, until });
+            self.include.held.push(Held {
+                holder: Holder::File { _file: file },
+                until,
+            });
         }
     }
 
@@ -237,7 +270,31 @@ impl Request {
     /// `auto_append_file` and the router; a program's file php-fpm leaves
     /// listed is closed with the request ([`ProgramFile::Listed`]).
     pub(crate) fn close_served_files(&mut self) {
-        self.include.held.retain(|held| held.until == Until::Ended);
+        self.close_held(Until::Served);
+    }
+
+    /// `shutdown_executor`'s `zend_stream_shutdown`, first in it
+    /// (`Z/Zend/zend_execute_API.c:410`): `CG(open_files)` destroyed, so
+    /// a program's file php-fpm left listed is closed
+    /// ([`ProgramFile::Listed`]), after the shutdown functions and the
+    /// destructors.
+    pub(crate) fn close_listed_files(&mut self) {
+        self.close_held(Until::Ended);
+    }
+
+    /// Every held file that closes by `until`, a stream through the
+    /// layer.
+    fn close_held(&mut self, until: Until) {
+        let held = std::mem::take(&mut self.include.held);
+        for held in held {
+            if until == Until::Served && held.until == Until::Ended {
+                self.include.held.push(held);
+            } else if let Holder::Stream(_) = held.holder
+                && let Some(hooks) = self.stream_hooks()
+            {
+                (hooks.close_primary)(self);
+            }
+        }
     }
 
     /// `php_execute_script`'s `expand_filepath` of the primary file
@@ -314,12 +371,31 @@ impl Request {
     /// pre.php pre.php
     /// t.php pre.php,t.php
     /// ```
+    ///
+    /// php-cgi's and php-fpm's `opened_path` is a string another place
+    /// holds already, opcache's `script->filename` where opcache served
+    /// the file and the stream's where `php_fopen_primary_script` opened
+    /// it, so the table's key costs nothing more; the built-in server's
+    /// is its compile's own.
     pub(crate) fn note_compiled_program(&mut self) {
-        if self.description.program_file.noted_before_prepend() {
+        let program_file = self.description.program_file;
+        if program_file.noted_before_prepend() {
             return;
         }
-        if let Some(script) = self.description.script_name.clone() {
-            // The memory limit's fatal is recorded and ends the request.
+        let Some(script) = self.description.script_name.clone() else {
+            return;
+        };
+        // The memory limit's fatal is recorded and ends the request.
+        if matches!(program_file, ProgramFile::Named | ProgramFile::Listed) {
+            let held = match self.primary_opened_path() {
+                Some(opened_path) => {
+                    self.addref(&Value::string(opened_path));
+                    Ok(opened_path)
+                }
+                None => self.interned(&script).map(Owner::hand_on),
+            };
+            held.and_then(|held| self.note_included_held(held)).ok();
+        } else {
             self.note_included(&script).ok();
         }
     }
