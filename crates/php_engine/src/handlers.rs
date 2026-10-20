@@ -13442,7 +13442,6 @@ fn assign_property(
     value: Value,
 ) -> Result<Result<(), Thrown>, Fatal> {
     let bytes = name.as_str_bytes().unwrap_or_default();
-    let shown_name = String::from_utf8_lossy(bytes).into_owned();
     // A lazy object takes the write through `write_property`, which is
     // where php's slot nothing has written and name nothing holds reach
     // `forward_write_to_lazy_object`.
@@ -13495,7 +13494,8 @@ fn assign_property(
             let Some(typed) = req.declared_typed_property(object.class(), bytes) else {
                 req.release(value);
                 return Err(Fatal::error(format!(
-                    "InternalError: ZEND_ASSIGN_OBJ placed the typed property ${shown_name}, whose declared type the class does not carry"
+                    "InternalError: ZEND_ASSIGN_OBJ placed the typed property ${}, whose declared type the class does not carry",
+                    String::from_utf8_lossy(bytes)
                 )));
             };
             // The `ZEND_ACC_READONLY` arm, which stands before the
@@ -17011,7 +17011,7 @@ fn incdec_property(
     object: PhpObject,
     name: &Value,
 ) -> Result<Result<(), Thrown>, Fatal> {
-    let bytes = name.as_str_bytes().unwrap_or_default().to_vec();
+    let bytes = name.as_str_bytes().unwrap_or_default();
     let Some(key) = name.as_php_string().copied() else {
         return Err(Fatal::error(
             "InternalError: an increment of a property whose name is no string",
@@ -17019,13 +17019,13 @@ fn incdec_property(
     };
     // The guard a proxy's `__get` lent the instance is held while the
     // place is resolved there, and given back before the step over it.
-    let placed = req.lazy_place(object, &bytes).and_then(|(object, lent)| {
-        let ptr = property_ptr(req, object, &bytes, key).map(|ptr| match ptr {
+    let placed = req.lazy_place(object, bytes).and_then(|(object, lent)| {
+        let ptr = property_ptr(req, object, bytes, key).map(|ptr| match ptr {
             // [`Request::read_before_write`] raised what an unwritten
             // slot raises before the placement; one it let by is a
             // `__get`'s to answer.
             PropertyPtr::Slot(slot, _)
-                if object.heap().slot(slot).is_undef() && req.overloaded_place(object, &bytes) =>
+                if object.heap().slot(slot).is_undef() && req.overloaded_place(object, bytes) =>
             {
                 PropertyPtr::Served(WriteBack::Property)
             }
@@ -17074,7 +17074,7 @@ fn incdec_property(
         ));
     }
     let landed = if typed {
-        match typed_step(req, frame, object, slot, &bytes, step, (held, stepped))? {
+        match typed_step(req, frame, object, slot, bytes, step, (held, stepped))? {
             Ok(landed) => landed,
             Err(thrown) => {
                 req.release(held);
