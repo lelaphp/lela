@@ -123,10 +123,8 @@ pub(crate) struct Row {
     pub(crate) ext: Vec<String>,
     pub(crate) status: Status,
     /// The `api` item that replaces it; `same` and `renamed` carry one.
-    #[serde(default)]
     pub(crate) api: Option<String>,
     /// The rule that replaces the need; a `gone` row carries one.
-    #[serde(default)]
     pub(crate) rule: Option<String>,
     /// The census table the row sits under, from the `# ----` heading
     /// above it; the parse fills it, the file does not carry it.

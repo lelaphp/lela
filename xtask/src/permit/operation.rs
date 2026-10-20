@@ -153,7 +153,7 @@ impl Operation {
 /// own words.
 fn starts(git: &Argv, subcommand: &str) -> bool {
     let flags = STEPPING.map(str::to_owned);
-    git.runs(subcommand) && !git.denies(&flags, &OneOrMany::One(subcommand.to_owned()))
+    git.runs(subcommand) && !git.denies(&flags, &OneOrMany::One(subcommand.to_owned()), None)
 }
 
 impl fmt::Display for Operation {
@@ -235,7 +235,6 @@ impl Session {
 struct Starter {
     session: Session,
     base: String,
-    #[serde(default)]
     identity: Option<String>,
     /// Another session's start was admitted beside this one before
     /// either's marker: the operation is no one's until the call that

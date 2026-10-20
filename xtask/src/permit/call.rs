@@ -22,7 +22,6 @@ pub struct Call {
     pub tool_name: String,
     #[serde(default)]
     pub tool_input: Arguments,
-    #[serde(default)]
     pub cwd: Option<String>,
     #[serde(default)]
     pub session_id: String,
@@ -40,23 +39,18 @@ pub struct Call {
     /// The session's transcript, where Claude Code writes the person's
     /// answers ([`super::approval`]); the hook's, which in a subagent is
     /// the main session's.
-    #[serde(default)]
     pub transcript_path: Option<String>,
     /// The subagent the call runs in, absent on the main loop.
-    #[serde(default)]
     pub agent_id: Option<String>,
     /// How long the call ran, which the `PostToolUse` hook carries: what
     /// began during it began no earlier than this before the hook.
-    #[serde(default)]
     pub(super) duration_ms: Option<u64>,
     /// The hook event the call came in on, which the hook's answer names
     /// again: `PostToolUse`, or `PostToolUseFailure` for a `Bash` call that
     /// exited non-zero, which gets no `PostToolUse` (#2762).
-    #[serde(default)]
     pub(super) hook_event_name: Option<String>,
     /// The answered `AskUserQuestion` calls the function hook read from
     /// the engine, read only by that adapter ([`Evidence`]).
-    #[serde(default)]
     pub(super) asked: Option<Vec<Asked>>,
     /// Which of the two the adapter judging the call reads.
     #[serde(skip)]

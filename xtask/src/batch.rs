@@ -155,22 +155,14 @@ pub(crate) struct Package {
     pub(crate) manifest_path: PathBuf,
     #[serde(default)]
     pub(crate) authors: Vec<String>,
-    #[serde(default)]
     pub(crate) description: Option<String>,
-    #[serde(default)]
     pub(crate) homepage: Option<String>,
-    #[serde(default)]
     pub(crate) repository: Option<String>,
-    #[serde(default)]
     pub(crate) license: Option<String>,
-    #[serde(default)]
     pub(crate) license_file: Option<String>,
-    #[serde(default)]
     pub(crate) rust_version: Option<String>,
-    #[serde(default)]
     pub(crate) readme: Option<String>,
     /// The manifest's `[package.metadata]`, as cargo hands it on unread.
-    #[serde(default)]
     pub(crate) metadata: Option<serde_json::Value>,
     #[serde(default)]
     targets: Vec<Target>,
@@ -420,15 +412,10 @@ struct Line {
     reason: String,
     #[serde(default)]
     package_id: String,
-    #[serde(default)]
     message: Option<Diagnostic>,
-    #[serde(default)]
     target: Option<ArtifactTarget>,
-    #[serde(default)]
     profile: Option<Profile>,
-    #[serde(default)]
     executable: Option<PathBuf>,
-    #[serde(default)]
     out_dir: Option<PathBuf>,
     #[serde(default)]
     linked_paths: Vec<String>,
@@ -441,7 +428,6 @@ struct Diagnostic {
     message: String,
     #[serde(default)]
     spans: Vec<serde_json::Value>,
-    #[serde(default)]
     rendered: Option<String>,
 }
 

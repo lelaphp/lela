@@ -81,11 +81,8 @@ struct File {
     source: String,
     md5: String,
     script_filename: String,
-    #[serde(default)]
     split_path_info: Option<String>,
-    #[serde(default)]
     path_info: Option<String>,
-    #[serde(default)]
     path_translated: Option<String>,
     params: String,
 }

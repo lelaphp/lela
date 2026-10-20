@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cargo run -q -p xtask -- phpt --subset Zend/tests --jit force","description":"Run the tier's lane on one subset through cargo run on the package (#3052)"}}
