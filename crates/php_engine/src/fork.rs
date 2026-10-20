@@ -43,6 +43,7 @@
 
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError, Weak};
 use std::thread::{self, JoinHandle};
 
 pub use php_process::{Forked, Pid};
@@ -204,6 +205,157 @@ pub fn host_thread(
     start(builder, body).map(HostThread)
 }
 
+/// What runs on a [`Worker`]'s thread (ADR-0010, Threads): the compiled
+/// tier's compile queue (`jit-design.md` §4.8). The engine owns the
+/// thread; the tier owns the body and the word that ends it.
+pub trait Parked: Send + Sync + 'static {
+    /// The thread's body: it serves until [`Parked::end`] asks it to
+    /// return, which it does between two of its jobs, keeping the ones
+    /// not yet served for the next body.
+    fn run(&self);
+
+    /// Asks the body that runs, or the next to start, to return. Called
+    /// once before each join, so each ask ends exactly one body.
+    fn end(&self);
+}
+
+/// The one thread a [`Parked`] body runs on, an engine's thread as
+/// ADR-0010's Threads has them: started on demand through the engine's
+/// one home ([`spawn`]'s), so a fork counts it, parked in its body
+/// between jobs, joined before every fork, a host's and a request's
+/// alike, and started again after it in the process that asked, as the
+/// engine's timer thread is (#2541), and joined when the worker drops.
+/// A child forked meanwhile has no thread for it until it wakes one.
+pub struct Worker {
+    name: String,
+    parked: Arc<dyn Parked>,
+    thread: Mutex<Option<Thread>>,
+}
+
+impl std::fmt::Debug for Worker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Worker")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Every worker in the process, by a reference that does not keep it:
+/// what a fork joins first, whoever asks for it.
+static WORKERS: Mutex<Vec<Weak<Worker>>> = Mutex::new(Vec::new());
+
+/// [`WORKERS`], held, with the workers that have dropped let go.
+fn workers() -> MutexGuard<'static, Vec<Weak<Worker>>> {
+    let mut workers = WORKERS.lock().unwrap_or_else(PoisonError::into_inner);
+    workers.retain(|worker| worker.strong_count() > 0);
+    workers
+}
+
+impl Worker {
+    /// A worker for `parked`, its thread to be named `name`, with no
+    /// thread yet, entered among the process's workers so a fork finds
+    /// it. The entry stands inside the engine, so no fork copies the list
+    /// held.
+    #[must_use]
+    pub fn new(name: &str, parked: Arc<dyn Parked>) -> Arc<Worker> {
+        let worker = Arc::new(Worker {
+            name: name.to_owned(),
+            parked,
+            thread: Mutex::new(None),
+        });
+        let _inside = Inside::enter();
+        workers().push(Arc::downgrade(&worker));
+        worker
+    }
+
+    /// Its thread started where none stands; whether one stands after.
+    /// `false` only where the system refused a thread.
+    pub fn wake(&self) -> bool {
+        let mut thread = self.thread();
+        if thread.is_none() {
+            let parked = Arc::clone(&self.parked);
+            *thread = spawn(&self.name, move || parked.run());
+        }
+        thread.is_some()
+    }
+
+    /// Its thread, if one stands, asked to end and joined: what was
+    /// joined.
+    fn stop(&self) -> bool {
+        let mut thread = self.thread();
+        let Some(running) = thread.take() else {
+            return false;
+        };
+        self.parked.end();
+        running.join();
+        true
+    }
+
+    /// The thread's slot, held as a thread that panicked holding it left it.
+    fn thread(&self) -> MutexGuard<'_, Option<Thread>> {
+        self.thread.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Drop for Worker {
+    /// Its thread asked to end and joined: the body returns between jobs,
+    /// so a job under way finishes first.
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Every worker in the process, as a fork finds them: each one's thread
+/// joined before the fork and started again after it.
+#[derive(Debug)]
+struct Workers(Vec<Arc<Worker>>);
+
+impl Workers {
+    /// The workers that stand in the process.
+    fn live() -> Workers {
+        Workers(workers().iter().filter_map(Weak::upgrade).collect())
+    }
+
+    /// How many of them have a thread: what stands inside the engine for
+    /// them, which a fork joins rather than refuses. `None` where one's
+    /// slot is held, by a request waking it, which a fork does not wait
+    /// for: the request may itself be waiting for the fork to end.
+    fn threads(&self) -> Option<usize> {
+        self.0.iter().try_fold(0, |threads, worker| {
+            let thread = match worker.thread.try_lock() {
+                Ok(thread) => thread,
+                Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                Err(TryLockError::WouldBlock) => return None,
+            };
+            Some(threads + usize::from(thread.is_some()))
+        })
+    }
+
+    /// Each one's thread asked to end and joined: what is stopped is the
+    /// workers that had one.
+    fn stop(self) -> Woken {
+        Woken(self.0.into_iter().filter(|worker| worker.stop()).collect())
+    }
+}
+
+/// The workers whose threads a fork joined, for the length of the fork:
+/// the process that asked gives each its thread again; a child forked
+/// meanwhile drops them, and wakes each when it next has a job.
+#[derive(Debug)]
+#[must_use]
+struct Woken(Vec<Arc<Worker>>);
+
+impl Woken {
+    /// Each one's thread started again. The restart stands inside the
+    /// engine, as a timer's does ([`crate::interrupt::Stopped::resume`]).
+    fn resume(self) {
+        let _inside = Inside::enter();
+        for worker in &self.0 {
+            worker.wake();
+        }
+    }
+}
+
 impl Thread {
     /// Joined, once its owner has told it to end.
     pub(crate) fn join(self) {
@@ -306,30 +458,38 @@ fn busy() -> io::Error {
 /// held, so nothing enters the engine from here; refused with `EBUSY`,
 /// touching no timer, where anything stands inside beside `asker` other
 /// than the timer threads of the process's engines, each parked between
-/// requests while its engine lives (#2541); those threads joined; then
+/// requests while its engine lives (#2541), and the threads of the
+/// process's [`Worker`]s, each parked between its jobs; those threads
+/// joined, a worker's once the job under way is done; then
 /// [`Alone::fork`], which reads the number again; and, the hold let go,
 /// each timer that had a thread given one again in the process that
-/// asked, over the deadlines it had, or where the fork was refused or
-/// failed. A child drops its copies unstarted, and forgets each schedule
-/// as it reaches it (see [`Timer`](crate::interrupt::Timer)).
+/// asked, over the deadlines it had, and each worker that had one, or
+/// where the fork was refused or failed. A child drops its copies
+/// unstarted, forgets each schedule as it reaches it (see
+/// [`Timer`](crate::interrupt::Timer)), and wakes a worker as it next
+/// has a job for it.
 ///
 /// What stands inside is read before the threads are counted, and only
 /// falls while the fork is held: a count that covers the reading means
-/// nothing but timer threads stood inside, so nothing holds a timer's
-/// mutex as its thread is joined, nor as the process is copied. Counting
-/// takes no timer's mutex that is held: one held is a request at work on
-/// it, and the fork is refused.
+/// nothing but those threads stood inside, so nothing holds a timer's
+/// mutex or a worker's slot as its thread is joined, nor as the process
+/// is copied. Counting takes no timer's mutex nor worker's slot that is
+/// held: one held is a request at work on it, and the fork is refused.
 fn fork_as(asker: Asker) -> io::Result<Forked> {
     let alone = Alone::take();
     let beside = alone.beside(asker);
     let timers = Timers::live();
-    if timers.threads().is_none_or(|threads| beside > threads) {
+    let workers = Workers::live();
+    let parked = (timers.threads()).and_then(|t| workers.threads().map(|w| t + w));
+    if parked.is_none_or(|parked| beside > parked) {
         return Err(busy());
     }
     let stopped = timers.stop();
+    let woken = workers.stop();
     let forked = alone.fork(asker);
     if !matches!(forked, Ok(Forked::Child)) {
         stopped.resume();
+        woken.resume();
     }
     forked
 }
@@ -363,10 +523,11 @@ pub fn fork() -> io::Result<Forked> {
 }
 
 /// The tests' one rule for forks (#2715). A fork takes every engine's
-/// timer in the process and holds the inside count's [`FORKING`] bit,
-/// both for the length of the fork. Every test in the binary shares the
-/// process, so a test that forks, that takes the process's timers, or
-/// that reads what a fork holds while it runs holds this guard. Reading
+/// timer and every [`Worker`] in the process and holds the inside
+/// count's [`FORKING`] bit, all for the length of the fork. Every test in
+/// the binary shares the process, so a test that forks, that takes the
+/// process's timers or workers, or that reads what a fork holds while
+/// it runs holds this guard. Reading
 /// what a fork holds means a timer's end at its last drop, which a
 /// fork's clone delays, or the [`FORKING`] bit. No sibling's fork is
 /// then under way while the test reads.
@@ -380,8 +541,12 @@ pub(crate) fn forks_held() -> std::sync::MutexGuard<'static, ()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EBUSY, FORKING, INSIDE, Inside, fork, forks_held, host_thread, run_apart, spawn};
+    use super::{
+        EBUSY, FORKING, INSIDE, Inside, Parked, Worker, Workers, fork, forks_held, host_thread,
+        run_apart, spawn,
+    };
     use std::sync::atomic::Ordering;
+    use std::sync::{Arc, PoisonError};
 
     /// A thread started through the home is inside the engine while it
     /// waits; the harness's other tests move the number too, so what is
@@ -440,5 +605,93 @@ mod tests {
     fn a_thread_apart_answers_its_body_joined() {
         let ran = run_apart("php-test-apart", 1 << 20, 20, |input: u32| input + 1);
         assert!(matches!(ran, Ok(Ok(21))));
+    }
+
+    /// A body that waits until it is asked to end, counting how often it
+    /// ran and returned.
+    #[derive(Default)]
+    struct Waits {
+        ending: std::sync::Mutex<bool>,
+        asked: std::sync::Condvar,
+        ran: std::sync::atomic::AtomicUsize,
+        returned: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Parked for Waits {
+        fn run(&self) {
+            self.ran.fetch_add(1, Ordering::SeqCst);
+            let mut ending = self.ending.lock().unwrap_or_else(PoisonError::into_inner);
+            while !*ending {
+                ending = self
+                    .asked
+                    .wait(ending)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+            *ending = false;
+            self.returned.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn end(&self) {
+            *self.ending.lock().unwrap_or_else(PoisonError::into_inner) = true;
+            self.asked.notify_all();
+        }
+    }
+
+    /// A worker has no thread until it is woken, one thread however
+    /// often, which a fork counts, joins once its body returned and
+    /// starts again after; a dropped worker's thread is joined.
+    #[test]
+    fn a_worker_is_joined_before_a_fork_and_woken_after() {
+        let _forks = forks_held();
+        let waits = Arc::new(Waits::default());
+        let worker = Worker::new("php-test-worker", Arc::clone(&waits) as Arc<dyn Parked>);
+        assert_eq!(Workers(vec![Arc::clone(&worker)]).threads(), Some(0));
+        assert!(worker.wake() && worker.wake());
+        assert_eq!(Workers(vec![Arc::clone(&worker)]).threads(), Some(1));
+        assert!(
+            Workers::live().0.iter().any(|w| Arc::ptr_eq(w, &worker)),
+            "the fork finds the worker"
+        );
+        let woken = Workers(vec![Arc::clone(&worker)]).stop();
+        assert_eq!(
+            waits.returned.load(Ordering::SeqCst),
+            1,
+            "joined after its body returned"
+        );
+        assert_eq!(
+            Workers(vec![Arc::clone(&worker)]).threads(),
+            Some(0),
+            "no thread at the fork"
+        );
+        woken.resume();
+        assert_eq!(
+            Workers(vec![Arc::clone(&worker)]).threads(),
+            Some(1),
+            "woken after it"
+        );
+        let gone = Arc::downgrade(&worker);
+        drop(worker);
+        assert!(gone.upgrade().is_none());
+        assert_eq!(waits.ran.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            waits.returned.load(Ordering::SeqCst),
+            2,
+            "the drop joined it"
+        );
+    }
+
+    /// A worker a request is waking is not counted, so the fork is
+    /// refused rather than waiting on a request that may wait on it.
+    #[test]
+    fn a_worker_being_woken_is_not_counted() {
+        let _forks = forks_held();
+        let worker = Worker::new(
+            "php-test-worker",
+            Arc::new(Waits::default()) as Arc<dyn Parked>,
+        );
+        let held = worker.thread();
+        assert_eq!(Workers(vec![Arc::clone(&worker)]).threads(), None);
+        drop(held);
+        assert_eq!(Workers(vec![worker]).threads(), Some(0));
     }
 }

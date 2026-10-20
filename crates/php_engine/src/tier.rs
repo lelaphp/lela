@@ -39,6 +39,10 @@ use crate::{exec, interrupt};
 use php_unit::OpArray;
 
 pub use crate::api::request::Request;
+/// The compiled tier's compile thread (`jit-design.md` §4.8), an engine's
+/// thread as ADR-0010's Threads has them: started through the engine's
+/// one home and joined before every fork.
+pub use crate::fork::{Parked, Worker};
 pub use php_compile::Hooked;
 pub use php_heap::{Fatal, FrameRef};
 
