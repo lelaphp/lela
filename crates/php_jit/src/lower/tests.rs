@@ -431,3 +431,34 @@ fn a_fetch_from_a_temporary_array_leaves_its_slot_empty() {
         assert!(lines.contains("---- TRACE 1 start (enter) f()"), "{lines}");
     }
 }
+
+/// A `DO_FCALL`, whose callee a closure's or a method's call may vary, is
+/// held to the opline the trace serves next, php's IP guard after it: each
+/// loop, recorded where `$g` was the `int` closure, leaves where it is
+/// the `float` one, whose parameter php coerced, rather than step the
+/// `int` closure's code over it
+/// (`Zend/tests/type_declarations/scalar_basic.phpt`,
+/// `scalar_return_basic_64bit.phpt`, `scalar_strict_64bit.phpt`).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_call_another_function_answers_leaves_where_it_enters() {
+    let program = "function f($gs) {
+            foreach ($gs as $g) { foreach ([1, 9223372036854775807] as $v) { $r = $g($v); echo $r + 0, ' '; } }
+        }
+        f([function (int $i) { return $i; }, function (float $f) { return $f; }]);
+        echo \"\\n\";";
+    for mode in ["force", "exit-fuzz"] {
+        let ini = [
+            ("jit.mode", mode),
+            ("jit.compile", "inline"),
+            ("opcache.jit_debug", "258048"),
+        ];
+        let served = testing::serve::<Lane>(&ini, program);
+        let lines = String::from_utf8_lossy(&served.stderr).into_owned();
+        assert_eq!(
+            testing::stdout(&served),
+            "1 9223372036854775807 1 9.2233720368548E+18 \n",
+            "{mode}\n{lines}"
+        );
+    }
+}

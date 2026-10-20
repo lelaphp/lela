@@ -588,17 +588,17 @@ impl<'a> Builder<'a> {
     }
 
     /// php's IP guard after a handler that may leave
-    /// (`zend_jit_trace_handler`, `Z/ext/opcache/jit/zend_jit_ir.c:17129-17236`)
-    /// for a stepped opline whose next opline the record does not say, a
-    /// table's jump (`SWITCH_LONG`, `SWITCH_STRING`, `MATCH`): it is held
-    /// to the opline the trace serves next, as `zend_jit_switch` leaves
-    /// through an exit for each target the trace does not follow.
+    /// (`zend_jit_trace_may_exit`, `Z/ext/opcache/jit/zend_jit_trace.c:261-320`,
+    /// held by `zend_jit_trace_handler`, `zend_jit_ir.c:17129-17236`) where
+    /// the record does not say where the opline goes: a table's jump
+    /// (`SWITCH_LONG`, `SWITCH_STRING`, `MATCH`) and a `DO_FCALL`, whose
+    /// callee a method's, a closure's or a dynamic call may vary. It is held to the opline the trace serves next.
     fn stands(&mut self, idx: OpId, frame: Frame, op: &Opline, ahead: &[Event]) {
-        let table = matches!(
+        let may_leave = matches!(
             op.opcode,
-            Opcode::SwitchLong | Opcode::SwitchString | Opcode::Match
+            Opcode::SwitchLong | Opcode::SwitchString | Opcode::Match | Opcode::DoFcall
         );
-        if let Some((func, opline)) = self.following(ahead).filter(|_| table) {
+        if let Some((func, opline)) = self.following(ahead).filter(|_| may_leave) {
             self.guards.push(Placed {
                 at: GuardAt::Within(idx),
                 check: Check::Stands { func, opline },
