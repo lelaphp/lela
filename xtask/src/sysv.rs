@@ -649,14 +649,17 @@ pub(crate) fn abandoned<'a>(
 }
 
 /// What one sweep did: the objects it removed, each kind's ids in the
-/// order removed, how many of those named no process, and the new ones it
+/// order removed, how many of those named no process, the new ones it
 /// left because the kernel names no process on them and the rule for
-/// those does not take them.
+/// those does not take them, and whether the claim it settled stands for a
+/// later reclaim, another run holding one (#2563), which the run then says,
+/// so a reader of its lines, a test among them, knows why it stands (#3007).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Swept {
     pub removed: BTreeMap<Kind, Vec<u64>>,
     pub unnamed_removed: usize,
     pub unnamed: usize,
+    pub claim_stands: bool,
 }
 
 impl Swept {
@@ -700,6 +703,12 @@ impl fmt::Display for Swept {
                 crate::reading::plural(self.unnamed),
                 if self.unnamed == 1 { "s" } else { "" },
                 if self.unnamed == 1 { "s" } else { "" },
+            )?;
+        }
+        if self.claim_stands {
+            write!(
+                f,
+                "; the run's claim stands for a later reclaim, another run holding one"
             )?;
         }
         Ok(())
@@ -1183,7 +1192,10 @@ impl Claim {
         if alone {
             fs::remove_file(&self.path).ok();
         }
-        Ok(swept)
+        Ok(Swept {
+            claim_stands: !alone,
+            ..swept
+        })
     }
 }
 
@@ -1219,7 +1231,7 @@ impl Removed {
         let line = &self.line;
         match swept {
             Ok(swept) => {
-                if swept.removed() > 0 || swept.unnamed > 0 {
+                if swept.removed() > 0 || swept.unnamed > 0 || swept.claim_stands {
                     println!("{line}: {when}, {swept}");
                 }
                 if swept.removed() > 0 {
