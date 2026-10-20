@@ -1446,23 +1446,30 @@ pub(crate) fn typed_ref_holds(
 /// `zend_throw_incdec_prop_error` (`Z/Zend/zend_execute.c:2211`): the
 /// `TypeError` a step raises where an `int` slot would have to hold the
 /// float it stepped into, and the value the slot takes instead, which
-/// is php's own `ZEND_LONG_MAX` or `ZEND_LONG_MIN`.
+/// is php's own `ZEND_LONG_MAX` or `ZEND_LONG_MIN`; over a reference
+/// the property holds, `zend_throw_incdec_ref_error`, whose text names
+/// the reference ([`Holder`]).
 ///
 /// ```php
-/// class C { public static int $n = PHP_INT_MIN; }
+/// class C { public static int $n = PHP_INT_MIN; public int $p = PHP_INT_MAX; }
 /// try { --C::$n; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// var_dump(C::$n);
+/// $o = new C; $r = &$o->p;
+/// try { $r++; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($o->p);
 /// ```
 /// ```expect
 /// Cannot decrement property C::$n of type int past its minimal value
 /// int(-9223372036854775808)
+/// Cannot increment a reference held by property C::$p of type int past its maximal value
+/// int(9223372036854775807)
 /// ```
 pub(crate) fn incdec_prop_error(
     req: &mut Request,
     ty: &php_unit::decl::Type,
     declaring: crate::api::values::ClassId,
     name: &[u8],
-    increment: bool,
+    (increment, holder): (bool, Holder),
 ) -> (Thrown, Value) {
     let class = req.class_name(declaring);
     let declared = php_unit::type_to_string(ty);
@@ -1471,15 +1478,27 @@ pub(crate) fn incdec_prop_error(
     } else {
         ("decrement", "minimal", i64::MIN)
     };
+    let what = match holder {
+        Holder::Property => "",
+        Holder::Reference => "a reference held by ",
+    };
     let thrown = throw_error(
         req,
         "TypeError",
         &format!(
-            "Cannot {word} property {class}::${} of type {declared} past its {edge} value",
+            "Cannot {word} {what}property {class}::${} of type {declared} past its {edge} value",
             String::from_utf8_lossy(name)
         ),
     );
     (thrown, Value::int(limit))
+}
+
+/// What holds the value a step [`incdec_prop_error`] refuses changed:
+/// the property's own slot, or a reference the property's slot holds.
+#[derive(Clone, Copy)]
+pub(crate) enum Holder {
+    Property,
+    Reference,
 }
 
 /// Whether a step into a float is the one php refuses: the slot held an

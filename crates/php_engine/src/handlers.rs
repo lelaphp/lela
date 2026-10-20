@@ -8867,8 +8867,7 @@ impl FetchFlag {
 /// (`Z/Zend/zend_compile.h:1089-1096`).
 const FETCH_REF: u32 = 1;
 const FETCH_DIM_WRITE: u32 = 2;
-/// `MAY_BE_DOUBLE` and `MAY_BE_ARRAY` (`Z/Zend/zend_type_info.h`).
-const MAY_BE_DOUBLE: u32 = 1 << 5;
+/// `MAY_BE_ARRAY` (`Z/Zend/zend_type_info.h`).
 const MAY_BE_ARRAY: u32 = 1 << 7;
 
 /// What [`property_place`] found: the property's place, the object and
@@ -14096,8 +14095,13 @@ fn static_prop_step(
     let stepped = match ty {
         None => stepped,
         Some(ty) if crate::ops::steps_past_int(&held, &stepped, &ty) => {
-            let (thrown, limit) =
-                crate::ops::incdec_prop_error(req, &ty, info.declaring, &name, increment);
+            let (thrown, limit) = crate::ops::incdec_prop_error(
+                req,
+                &ty,
+                info.declaring,
+                &name,
+                (increment, crate::ops::Holder::Property),
+            );
             req.release(held);
             req.release(stepped);
             // php writes the limit into the slot and raises beside it,
@@ -16968,7 +16972,7 @@ fn typed_step(
             &declared.ty,
             declared.declaring,
             bytes,
-            step.increment,
+            (step.increment, crate::ops::Holder::Property),
         );
         req.release(stepped);
         // The slot holds no cell another property types, which the
@@ -23346,36 +23350,16 @@ fn step_through_typed_ref(
     increment: bool,
     strict: bool,
 ) -> RefStep {
-    if stepped.as_float().is_some() && held.as_int().is_some() {
-        let refusing = req
-            .ref_type_sources(cell.heap())
-            .iter()
-            .find(|source| source.ty.mask() & MAY_BE_DOUBLE == 0)
-            .map(|source| {
-                (
-                    source.declaring,
-                    php_unit::type_to_string(&source.ty),
-                    String::from_utf8_lossy(&source.name).into_owned(),
-                )
-            });
-        let Some((declaring, ty, name)) = refusing else {
-            return RefStep::Landed(stepped);
-        };
+    let refusing = req
+        .ref_type_sources(cell.heap())
+        .iter()
+        .find(|source| crate::ops::steps_past_int(held, &stepped, &source.ty))
+        .map(|source| (source.declaring, source.ty.clone(), source.name.clone()));
+    if let Some((declaring, ty, name)) = refusing {
         req.release(stepped);
-        let class = req.class_name(declaring);
-        let (word, end, bound) = if increment {
-            ("increment", "maximal", i64::MAX)
-        } else {
-            ("decrement", "minimal", i64::MIN)
-        };
-        let thrown = crate::api::raising::throw_error(
-            req,
-            "TypeError",
-            &format!(
-                "Cannot {word} a reference held by property {class}::${name} of type {ty} past its {end} value"
-            ),
-        );
-        return RefStep::Clamped(Value::int(bound), thrown);
+        let step = (increment, crate::ops::Holder::Reference);
+        let (thrown, limit) = crate::ops::incdec_prop_error(req, &ty, declaring, &name, step);
+        return RefStep::Clamped(limit, thrown);
     }
     let verdict = crate::ops::verify_ref_assignable(req, cell.heap(), &stepped, strict);
     match crate::ops::landed(req, stepped, verdict) {
