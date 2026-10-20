@@ -111,6 +111,29 @@ fn a_yield_that_creates_a_generator_stops_at_the_moved_frame() -> Result<(), Str
     Ok(())
 }
 
+/// A generator function a native calls, as `yield from` calls an
+/// `IteratorAggregate`'s `getIterator`: its frame is the entry frame of
+/// the native's `execute`, and `GENERATOR_CREATE` leaves it, so the
+/// entry-frame rule stops the trace with `return` before the step that
+/// would pop the entry, as php's trace stops with `RETURN` where the
+/// handler of a top frame halts (`zend_jit_vm_helpers.c:1080-1087`;
+/// `Zend/tests/generators/yield_from_iterator_agregate.phpt`,
+/// `Zend/tests/gh19326.phpt`, `Zend/tests/fibers/gh15108-005.phpt`).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_generator_a_native_creates_stops_before_it_leaves_the_entry_frame() -> Result<(), String> {
+    let (record, out) = recorded(
+        &at("getIterator", "enter"),
+        "class It implements IteratorAggregate { function getIterator(): Generator { echo 'in '; yield 1; } }
+        function f() { yield from new It(); }
+        foreach (f() as $v) { echo $v; } echo \"\\n\";",
+    )?;
+    assert_eq!(out, "in 1\n");
+    assert_eq!(record.stop, Stop::Return);
+    assert_eq!(events(&record), ["op0"]);
+    Ok(())
+}
+
 /// A throw: the step leaves a throwable pending and the recorder stops
 /// with `exception`, the program going on to catch it.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
