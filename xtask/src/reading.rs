@@ -1087,26 +1087,15 @@ impl Files {
     /// rest counted; none when every file read. The files' counterpart of
     /// [`Log::unreadable_note`].
     pub fn unreadable_note(&self, root: &Path) -> Option<String> {
-        if self.unreadable.is_empty() {
-            return None;
-        }
-        let paths: Vec<String> = self
-            .unreadable
-            .iter()
-            .map(|path| {
-                path.strip_prefix(root)
-                    .unwrap_or(path)
-                    .display()
-                    .to_string()
-            })
-            .collect();
-        let names: Vec<&str> = paths.iter().map(String::as_str).collect();
-        Some(format!(
-            "{DIR}: {} reading{} unreadable at {}; the next run of its instrument writes it again.",
-            self.unreadable.len(),
-            plural(self.unreadable.len()),
-            listed(&names)
-        ))
+        let at = self.unreadable.iter();
+        let at = at.map(|path| {
+            path.strip_prefix(root)
+                .unwrap_or(path)
+                .display()
+                .to_string()
+        });
+        let again = "; the next run of its instrument writes it again.";
+        unreadable(DIR, "reading", &at.collect::<Vec<_>>(), again)
     }
 }
 
@@ -1189,22 +1178,23 @@ impl Log {
 
     /// The same note for the log `name` names, a log handed in by its path.
     pub(crate) fn unreadable_note_of(&self, name: &str) -> Option<String> {
-        if self.unreadable.is_empty() {
-            return None;
-        }
         let lines: Vec<String> = self.unreadable.iter().map(usize::to_string).collect();
-        let names: Vec<&str> = lines.iter().map(String::as_str).collect();
-        let noun = if self.unreadable.len() == 1 {
-            "line"
-        } else {
-            "lines"
-        };
-        Some(format!(
-            "{name}: {} {noun} unreadable at {}.",
-            self.unreadable.len(),
-            listed(&names)
-        ))
+        unreadable(name, "line", &lines, ".")
     }
+}
+
+/// What a rendering says of what it could not read from the store or log
+/// `name`: how many of `noun` and where, at most five named and the rest
+/// counted, then `after`; none when it read everything.
+fn unreadable(name: &str, noun: &str, at: &[String], after: &str) -> Option<String> {
+    let names: Vec<&str> = at.iter().map(String::as_str).collect();
+    let (n, listed) = (at.len(), listed(&names));
+    (n > 0).then(|| {
+        format!(
+            "{name}: {n} {noun}{} unreadable at {listed}{after}",
+            plural(n)
+        )
+    })
 }
 
 /// The commits a checkout stands on: the first-parent chain of `HEAD`,
