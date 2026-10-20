@@ -165,7 +165,7 @@ fn visited(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
 /// ```php
 /// set_time_limit(1); for (;;) {}
 /// ```
-/// ```expect exit=255 regime=jit-tracing process wall=1s
+/// ```expect exit=255 regime=jit-force process wall=1s
 /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 2
 /// ```
 ///
@@ -178,7 +178,7 @@ fn visited(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
 /// pcntl_signal(SIGALRM, function () use (&$done) { $done = true; echo "alarm\n"; });
 /// pcntl_alarm(1); $n = 0; while (!$done) { $n++; } echo $n > 1000 ? "spun\n" : "short\n";
 /// ```
-/// ```expect exit=0 regime=jit-tracing process wall=1s
+/// ```expect exit=0 regime=jit-force process wall=1s
 /// alarm
 /// spun
 /// ```

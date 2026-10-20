@@ -760,9 +760,8 @@ impl Proc {
 
 #[cfg(test)]
 #[allow(
-    clippy::expect_used,
     clippy::disallowed_methods,
-    reason = "a test holds the board it mapped and its slots to exist, and waits for a lock on a thread of its own so one waited for without end fails the test rather than hanging it (seams.toml rule fork.threads)"
+    reason = "a test waits for a lock on a thread of its own, so one waited for without end fails the test rather than hanging it (seams.toml rule fork.threads)"
 )]
 mod tests {
     use std::sync::atomic::Ordering;

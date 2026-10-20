@@ -92,6 +92,19 @@ pub(crate) struct Compiled {
 /// (`jit-design.md` §4.6, §7): one per guard, zero until the guard has
 /// failed once, at an address the code holds as a constant, so a clone
 /// shares them as it shares the bytes that name them.
+///
+/// A loop whose guards each fail once, the interrupt test's among them
+/// and its jump's direction not (#3055's ruling), lands in the
+/// interpreter at each and prints what php prints:
+///
+/// ```php
+/// $a = [3, 1, 4, 1, 5]; $s = 0;
+/// for ($i = 0; $i < 100; $i++) { $s += $a[$i % 5] * $i; }
+/// echo $s, "\n";
+/// ```
+/// ```expect exit=0 regime=jit-exit-fuzz process
+/// 13940
+/// ```
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Fuzzed(Arc<[AtomicU8]>);
 

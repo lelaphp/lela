@@ -750,9 +750,8 @@ impl OutputSink for Sink {
 
 #[cfg(test)]
 #[allow(
-    clippy::panic,
     clippy::disallowed_methods,
-    reason = "a test serves requests that panic on cue, and starts the connection side on a thread of its own (seams.toml rule fork.threads)"
+    reason = "a test starts the connection side on a thread of its own (seams.toml rule fork.threads)"
 )]
 mod tests {
     //! The containment at the request's edge, held over a real socket: the

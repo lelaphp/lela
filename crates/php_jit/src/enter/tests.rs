@@ -13,7 +13,6 @@ fn refuse(_: &mut Tally, _: Room, _: OplineIdx, why: u64) -> Result<u64, Fatal> 
 }
 
 /// A kernel that panics.
-#[allow(clippy::panic, reason = "the panic is what the test crosses")]
 fn explode(_: &mut Tally, _: Room, _: OplineIdx, _: u64) -> Result<u64, Fatal> {
     panic!("the kernel panicked")
 }
@@ -258,7 +257,6 @@ pub(crate) mod entered {
     }
 
     /// A kernel that panics.
-    #[allow(clippy::panic, reason = "the panic is what the test crosses")]
     fn explode(_: &mut Request, _: Room, _: OplineIdx) -> Result<u64, Fatal> {
         panic!("the kernel panicked")
     }

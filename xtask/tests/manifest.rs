@@ -477,3 +477,33 @@ fn generated_decodes_as_a_list_of_files_and_any_other_shape_is_refused() {
         );
     }
 }
+
+/// `allow_in_tests` lists lints its rule denies that clippy exempts tests
+/// from by a key (#3078). The fixture lists `clippy::todo`, which has no
+/// such key, and is refused naming the lint; so is a lint the rule does
+/// not deny, and the key on a rule with no `deny_lints` to qualify.
+#[test]
+fn allow_in_tests_takes_only_denied_lints_clippy_has_an_in_tests_key_for() {
+    let fixture = xtask::package_dir().join("fixtures/rules/lints.no-panic/allow-in-tests.toml");
+    let text = std::fs::read_to_string(fixture).unwrap();
+    let err = format!("{:#}", Manifest::parse(&text).unwrap_err());
+    assert!(
+        err.contains("rule \"lints.no-panic\" allows clippy::todo in tests")
+            && err.contains("clippy::unwrap_used, clippy::expect_used, clippy::panic"),
+        "{err}"
+    );
+    let row = |predicate: &str| {
+        format!(
+            "{MINIMAL}[[rule]]\nid = \"x.lints\"\nscope = \"crates/*\"\n{predicate}\ntext = \"t\"\n"
+        )
+    };
+    let undenied =
+        row("deny_lints = [\"clippy::unwrap_used\"]\nallow_in_tests = [\"clippy::expect_used\"]");
+    let err = format!("{:#}", Manifest::parse(&undenied).unwrap_err());
+    assert!(err.contains("allows clippy::expect_used in tests"), "{err}");
+    let orphan = row("check = \"c\"\nallow_in_tests = [\"clippy::panic\"]");
+    let err = format!("{:#}", Manifest::parse(&orphan).unwrap_err());
+    assert!(err.contains("`allow_in_tests` beside `check`"), "{err}");
+    let held = row("deny_lints = [\"clippy::panic\"]\nallow_in_tests = [\"clippy::panic\"]");
+    assert!(Manifest::parse(&held).is_ok());
+}
