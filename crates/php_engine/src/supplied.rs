@@ -460,6 +460,21 @@ impl<H: Copy> Listed<H> {
     }
 }
 
+/// Each hook of the [`Listed`] `$list` of what the extensions supplied
+/// served as the extension that supplied it ([`Request::serve_for`]),
+/// in supplier order, `$hook` naming it and `$req` the request for the
+/// body: the walk every notice and hook list makes, over the engine's
+/// lists held for the walk so the hook has the request whole.
+macro_rules! tell {
+    ($on:expr, $list:ident, |$req:ident, $hook:ident| $body:expr) => {{
+        let shared = ::std::sync::Arc::clone(&$on.shared);
+        for (by, $hook) in shared.supplied.$list.iter() {
+            $on.serve_for(by, |$req| $body);
+        }
+    }};
+}
+pub(crate) use tell;
+
 /// A slot each supplier overwrites: the last one's, with the extension
 /// that wrote it.
 pub(crate) struct Last<H>(Option<(ExtensionId, H)>);

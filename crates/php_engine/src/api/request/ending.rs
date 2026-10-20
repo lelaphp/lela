@@ -14,6 +14,7 @@ use crate::api::raising::Level;
 use crate::api::values::Value;
 use crate::supplied::Bail;
 use crate::supplied::chain::ErrorArgs;
+use crate::supplied::tell;
 
 use diagnostics::{Display, Message};
 
@@ -481,10 +482,7 @@ impl Request {
     ///
     /// [`ExtensionBuilder::program_ended`]: crate::api::abi::ExtensionBuilder::program_ended
     pub(crate) fn program_ended(&mut self) {
-        let shared = Arc::clone(&self.shared);
-        for (by, hook) in shared.supplied.program_ended.iter() {
-            self.serve_for(by, hook);
-        }
+        tell!(self, program_ended, |req, hook| hook(req));
     }
 
     /// The host's log for a fatal it took, `sapi_module.log_message`,

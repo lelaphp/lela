@@ -20,6 +20,7 @@ use crate::api::raising::Thrown;
 use crate::api::values::{Emalloc, PhpString};
 use crate::exec::IncludeKind;
 use crate::supplied::chain::FileArgs;
+use crate::supplied::tell;
 use crate::unit_cache::{
     Asked, Cached, CompileRefused, Disk, Filed, Held, Levels, UnitKey, full_path,
 };
@@ -713,19 +714,13 @@ impl Request {
     /// `zend_optimizer_call_registered_passes` at the end of
     /// `zend_optimize_script`.
     pub(crate) fn run_optimizer_passes(&mut self, full: &[u8]) {
-        let shared = Arc::clone(&self.shared);
-        for (by, pass) in shared.supplied.optimizer_passes.iter() {
-            self.serve_for(by, |req| pass(req, full));
-        }
+        tell!(self, optimizer_passes, |req, pass| pass(req, full));
     }
 
     /// Every extension told of a file the unit cache holds by its full
     /// path, in bundle order ([`crate::api::abi::ExtensionBuilder::cached`]).
     pub(crate) fn tell_cached(&mut self, full: &[u8]) {
-        let shared = Arc::clone(&self.shared);
-        for (by, hook) in shared.supplied.cached.iter() {
-            self.serve_for(by, |req| hook(req, full));
-        }
+        tell!(self, cached, |req, hook| hook(req, full));
     }
 }
 

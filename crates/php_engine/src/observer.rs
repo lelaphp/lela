@@ -124,6 +124,7 @@ use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{ChainFrame, FrameId, FrameView, OpenCall, Request, TimeLimitSuspended};
 use crate::api::values::{ClassId, Owner, PhpObject, Value};
+use crate::supplied::tell;
 
 pub(crate) use opcodes::{
     Declared, ObservedOpcodes, OpcodeObserver, Telling, Untold, tell_before, told,
@@ -715,14 +716,13 @@ fn begin_native(req: &mut Request, function: Function) -> Option<NativeCall> {
 /// `zend_observer_fcall_install` (`Z/Zend/zend_observer.c:116-156`): every observer asked of the frame in
 /// declaration order, and what they answered written into its slot.
 fn resolve(req: &mut Request, at: Observable) -> Slot {
-    let shared = Arc::clone(&req.shared);
     let mut begin = Vec::new();
     let mut end = Vec::new();
-    for (by, init) in shared.supplied.observers.iter() {
-        let handlers = req.serve_for(by, |req| init(&mut Observed::standing(req, at)));
+    tell!(req, observers, |req, init| {
+        let handlers = init(&mut Observed::standing(req, at));
         begin.extend(handlers.begin);
         end.extend(handlers.end);
-    }
+    });
     end.reverse();
     let slot = if begin.is_empty() && end.is_empty() {
         Slot::Declined
@@ -989,10 +989,7 @@ pub(crate) fn uncaught(req: &mut Request, level: Level, file: &[u8], line: u32, 
 #[cold]
 #[inline(never)]
 fn notify_error(req: &mut Request, notice: ErrorNotice<'_>) {
-    let shared = Arc::clone(&req.shared);
-    for (by, observer) in shared.supplied.error_observers.iter() {
-        req.serve_for(by, |req| observer(req, &notice));
-    }
+    tell!(req, error_observers, |req, observer| observer(req, &notice));
 }
 
 /// `zend_observer_function_declared_notify`
@@ -1006,10 +1003,9 @@ pub(crate) fn function_declared(req: &mut Request, function: Function, lowered: 
     if !functions_declared_observed(req) {
         return;
     }
-    let shared = Arc::clone(&req.shared);
-    for (by, observer) in shared.supplied.functions_declared.iter() {
-        req.serve_for(by, |req| observer(req, function, lowered));
-    }
+    tell!(req, functions_declared, |req, observer| observer(
+        req, function, lowered
+    ));
 }
 
 /// `zend_observer_class_linked_notify` (`Z/Zend/zend_observer.h:146-150`):
@@ -1024,10 +1020,9 @@ pub(crate) fn class_linked(req: &mut Request, class: ClassId, lowered: &[u8]) {
     if !classes_linked_observed(req) {
         return;
     }
-    let shared = Arc::clone(&req.shared);
-    for (by, observer) in shared.supplied.classes_linked.iter() {
-        req.serve_for(by, |req| observer(req, class, lowered));
-    }
+    tell!(req, classes_linked, |req, observer| observer(
+        req, class, lowered
+    ));
 }
 
 /// `zend_observer_function_declared_observed`: whether an observer of
@@ -1243,10 +1238,7 @@ pub(crate) fn fiber_initialized(req: &mut Request, fiber: ObservedFiber) {
     if req.shared.supplied.fiber_init.is_empty() {
         return;
     }
-    let shared = Arc::clone(&req.shared);
-    for (by, handler) in shared.supplied.fiber_init.iter() {
-        req.serve_for(by, |req| handler(req, fiber));
-    }
+    tell!(req, fiber_init, |req, handler| handler(req, fiber));
 }
 
 /// `zend_observer_fiber_switch_notify` (`Z/Zend/zend_observer.c:409-425`)
@@ -1263,10 +1255,7 @@ pub(crate) fn fiber_switched(req: &mut Request, from: ObservedFiber, to: Observe
     if req.shared.supplied.fiber_switch.is_empty() {
         return;
     }
-    let shared = Arc::clone(&req.shared);
-    for (by, handler) in shared.supplied.fiber_switch.iter() {
-        req.serve_for(by, |req| handler(req, from, to));
-    }
+    tell!(req, fiber_switch, |req, handler| handler(req, from, to));
 }
 
 /// `zend_observer_fiber_destroy_notify` (`Z/Zend/zend_observer.c:427-436`):
@@ -1277,8 +1266,5 @@ pub(crate) fn fiber_destroyed(req: &mut Request, fiber: ObservedFiber) {
     if req.shared.supplied.fiber_destroy.is_empty() {
         return;
     }
-    let shared = Arc::clone(&req.shared);
-    for (by, handler) in shared.supplied.fiber_destroy.iter() {
-        req.serve_for(by, |req| handler(req, fiber));
-    }
+    tell!(req, fiber_destroy, |req, handler| handler(req, fiber));
 }
