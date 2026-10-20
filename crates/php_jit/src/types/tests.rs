@@ -460,15 +460,15 @@ fn a_guarded_boolean_keeps_what_its_op_computed() -> Result<(), String> {
     Ok(())
 }
 
-/// Whether any opline of `program`'s loop in `f` is stepped, its trace
-/// rendered.
-fn steps(program: &str) -> Result<(bool, String), String> {
+/// The trace of `program`'s loop in `f`, rendered, where any of its
+/// oplines is stepped; none where every one is inline.
+fn stepped_trace(program: &str) -> Result<Option<String>, String> {
     let ir = built(&IN_F, program)?;
     let stepped = ir
         .ops
         .iter()
         .any(|op| matches!(op, Op::Line(line) if line.form == Form::Step));
-    Ok((stepped, dump::render(&ir)))
+    Ok(stepped.then(|| dump::render(&ir)))
 }
 
 /// A product of one variable by itself: the guard on its second operand
@@ -479,11 +479,11 @@ fn steps(program: &str) -> Result<(bool, String), String> {
 #[test]
 fn an_operand_read_twice_is_seen_as_its_one_guard_holds_it() -> Result<(), String> {
     for body in ["$s = $i * $i;", "$s = ($s + $i * $i) % 1000003;"] {
-        let (stepped, ir) = steps(&format!(
+        let stepped = stepped_trace(&format!(
             "function f($n) {{ $s = 0; for ($i = 1; $i < $n; $i++) {{ {body} }} return $s; }}
             echo f(100), \"\\n\";"
         ))?;
-        assert!(!stepped, "{body}\n{ir}");
+        assert_eq!(stepped, None, "{body}");
     }
     Ok(())
 }
@@ -502,11 +502,11 @@ fn a_division_at_a_loops_header_is_inline() -> Result<(), String> {
         ("0", "$s = $i / 1;"),
         ("1000.0", "$s /= $i;"),
     ] {
-        let (stepped, ir) = steps(&format!(
+        let stepped = stepped_trace(&format!(
             "function f($n) {{ $s = {start}; for ($i = 1; $i < $n; $i++) {{ {body} }} return $s; }}
             echo f(100), \"\\n\";"
         ))?;
-        assert!(!stepped, "{body}\n{ir}");
+        assert_eq!(stepped, None, "{body}");
     }
     Ok(())
 }
