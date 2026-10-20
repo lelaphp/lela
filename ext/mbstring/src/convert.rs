@@ -206,6 +206,72 @@ fn convert_array(
 /// string(1) "y" interned
 /// string(1) "A" interned
 /// ```
+///
+/// Each malformed byte, and a sequence cut short, is one substitute,
+/// counted in `mb_get_info('illegal_chars')`, as is a character the
+/// target lacks, which a `long` substitute spells as its codepoint; a
+/// stateful target ends in its initial shift state, and a stateful
+/// source cut off inside a character ends in one substitute.
+///
+/// ```php
+/// mb_internal_encoding('UTF-8');
+/// mb_substitute_character(0x3f);
+/// foreach (["\xf0\x9f", "\xc0\xaf", "\xed\xa0\x80", "\xe2\x28\xa1"] as $bytes) {
+///     echo bin2hex(mb_convert_encoding($bytes, 'UTF-8', 'UTF-8')), ' ', mb_get_info('illegal_chars'), "\n";
+/// }
+/// echo bin2hex(mb_convert_encoding('あ', 'JIS', 'UTF-8')), "\n";
+/// echo bin2hex(mb_convert_encoding("\x1b\x24\x42\x30", 'UTF-8', 'JIS')), ' ', mb_get_info('illegal_chars'), "\n";
+/// echo bin2hex(mb_convert_encoding("\x81\x30\x81", 'UTF-8', 'GB18030-2022')), ' ', mb_get_info('illegal_chars'), "\n";
+/// mb_substitute_character('long');
+/// echo mb_convert_encoding('€', 'ASCII', 'UTF-8'), ' ', mb_get_info('illegal_chars'), "\n";
+/// ```
+/// ```expect
+/// 3f 1
+/// 3f3f 3
+/// 3f3f3f 6
+/// 3f283f 8
+/// 1b244224221b2842
+/// 3f 9
+/// 3f 10
+/// U+20AC 11
+/// ```
+///
+/// An array's element the conversion refuses warns, and the handler the
+/// warning calls may convert again and change the substitute, which the
+/// elements after it then use.
+///
+/// ```php
+/// mb_substitute_character(0x3f);
+/// set_error_handler(function ($severity, $message) {
+///     echo $message, "\n";
+///     mb_substitute_character(0x23);
+///     echo bin2hex(mb_convert_encoding("\xff", 'UTF-8', 'UTF-8')), "\n";
+///     return true;
+/// });
+/// $out = mb_convert_encoding([new stdClass(), "\xff"], 'UTF-8', 'UTF-8');
+/// restore_error_handler();
+/// echo bin2hex($out[1]), ' ', mb_get_info('illegal_chars'), "\n";
+/// ```
+/// ```expect
+/// mb_convert_encoding(): Object is not supported
+/// 23
+/// 23 2
+/// ```
+///
+/// A handler that throws ends the array's conversion and gives up what
+/// was converted before it, leaving the input as it was.
+///
+/// ```php
+/// set_error_handler(function () { throw new Exception('reentered'); });
+/// $input = ["\xe9" => "\xe9", new stdClass()];
+/// try { mb_convert_encoding($input, 'UTF-8', 'ISO-8859-1'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// restore_error_handler();
+/// echo count($input), "\n";
+/// ```
+/// ```expect
+/// reentered
+/// 2
+/// ```
 #[php_function]
 // The declared `array|string|false`, each fresh value an owner.
 #[allow(clippy::type_complexity)]
