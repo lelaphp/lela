@@ -23,7 +23,7 @@
 //! word does ([`policy::bad_stop`]).
 //!
 //! While [`run`] runs, the request records ([`JitRequest`], php's
-//! `JIT_G(tracing)`; `jit-design.md` §4.9, revision NEXT), so a nested
+//! `JIT_G(tracing)`; `jit-design.md` §4.9, revision 30), so a nested
 //! `execute` a native, a destructor or a fiber serves does not record:
 //! its safepoints bump and do not claim (`dispatch`). A guard clears it
 //! on every way out, a fatal, a panic and the unwind that destroys a

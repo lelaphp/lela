@@ -956,8 +956,9 @@ fn a_tier_face_item_the_lock_does_not_list_fails_the_tier_reading() {
 
 /// The positive control and the section a consumer does not read: with
 /// `tier::Site` under `[face]` both readings pass; under `[kernels]`, when
-/// the manifest gives that section to `php_jit` alone, `php_sapi`'s import of
-/// it fails the `tier` reading.
+/// the manifest gives that section to `php_jit` alone and a `kernels!` list
+/// of `php_jit`'s names it (#2957), `php_sapi`'s import of it fails the
+/// `tier` reading.
 #[test]
 fn each_section_is_held_against_the_consumers_that_read_it() {
     let root = Tree::new("api-check-tier-face").unwrap();
@@ -996,6 +997,16 @@ fn each_section_is_held_against_the_consumers_that_read_it() {
             consumers: vec!["php_jit".to_owned()],
         },
     ];
+    let jit = root.join("crates/php_jit");
+    fs::create_dir_all(jit.join("src")).unwrap();
+    let manifest_of_jit = fs::read_to_string(from.join("crates/php_sapi/Cargo.toml")).unwrap();
+    fs::write(
+        jit.join("Cargo.toml"),
+        manifest_of_jit.replace("php_sapi", "php_jit"),
+    )
+    .unwrap();
+    let list = "kernels! { Request => mod wrapped { Site => site() -> u64 = tier::Site; } }\n";
+    fs::write(jit.join("src/lib.rs"), list).unwrap();
     fs::write(&lock, "[face]\ntier::Tier\n[kernels]\ntier::Site\n").unwrap();
     let readings = api_check::hold(&manifest, &root, false).unwrap();
     let tier = of(&readings, "tier");
@@ -1007,6 +1018,27 @@ fn each_section_is_held_against_the_consumers_that_read_it() {
         "{}",
         tier.message
     );
+}
+
+/// `tier.lock`'s kernels section is generated from `php_jit`'s `kernels!`
+/// lists (jit-design.md §5.3, #2957), never kept: the `tier-kernels`
+/// fixture's list names `ops::sub_slow`, which its `[kernels]` lists, so
+/// that import holds; `ops::add_slow`, which `php_jit` imports and
+/// `[kernels]` lists by hand, is named by no list, so the reading fails
+/// naming it twice, as an import no `[face]` line holds and as a
+/// `[kernels]` line no list names.
+#[test]
+fn a_kernel_no_kernels_list_names_fails_the_tier_reading() {
+    let readings = readings("tier-kernels");
+    let tier = of(&readings, "tier");
+    assert_eq!(tier.status, Status::Fail, "{}", tier.message);
+    for said in [
+        "1 imports from php_engine have no line in crates/php_engine/tier.lock [face]: ops::add_slow",
+        "1 lines of crates/php_engine/tier.lock [kernels] name no kernel a kernels! list names: ops::add_slow",
+    ] {
+        assert!(tier.message.contains(said), "{}", tier.message);
+    }
+    assert!(!tier.message.contains("sub_slow"), "{}", tier.message);
 }
 
 /// The tracked manifest with a seam that is one module of `php_engine`,
