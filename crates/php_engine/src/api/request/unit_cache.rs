@@ -20,7 +20,9 @@ use crate::api::raising::Thrown;
 use crate::api::values::{Emalloc, PhpString};
 use crate::exec::IncludeKind;
 use crate::supplied::chain::FileArgs;
-use crate::unit_cache::{Asked, Cached, Disk, Filed, Held, Levels, UnitKey, full_path};
+use crate::unit_cache::{
+    Asked, Cached, CompileRefused, Disk, Filed, Held, Levels, UnitKey, full_path,
+};
 
 /// What the `zend_file_handle` a file is compiled through holds when
 /// `persistent_compile_file` finds it held, which decides what a due
@@ -284,6 +286,18 @@ impl Request {
             self.note_held(unit);
         }
         Some(held)
+    }
+
+    /// What `held` answers this request, as [`crate::unit_cache::served`]
+    /// serves a hit: the unit, or the refusal with what it had declared
+    /// made the request's own.
+    pub(crate) fn held_answer(&mut self, held: &Held) -> Result<PublishedUnit, CompileRefused> {
+        match &held.unit {
+            Ok(unit) => Ok(PublishedUnit::clone(unit)),
+            Err(error) => Err(CompileRefused::published(error.clone(), |unit| {
+                self.take_unit(unit)
+            })),
+        }
     }
 
     /// `persistent_zend_resolve_path` under `include_once` and
@@ -834,7 +848,7 @@ impl UnitCache<'_> {
             (Err(Unresolved::Missing(missing)), None)
         } else {
             match req.held_as_written(written) {
-                Some(held) => (Ok(held.path.clone()), Some(held.unit.clone())),
+                Some(held) => (Ok(held.path.clone()), Some(req.held_answer(&held))),
                 None => (req.resolve_path(written), None),
             }
         };
