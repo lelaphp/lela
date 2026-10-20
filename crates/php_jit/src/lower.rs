@@ -93,8 +93,9 @@ pub(crate) struct Compiled {
 /// failed once, at an address the code holds as a constant, so a clone
 /// shares them as it shares the bytes that name them.
 ///
-/// A loop whose guards each fail once, the interrupt test's among them,
-/// lands in the interpreter at each and prints what php prints:
+/// A loop whose guards each fail once, the interrupt test's among them
+/// and its jump's direction not (#3055's ruling), lands in the
+/// interpreter at each and prints what php prints:
 ///
 /// ```php
 /// $a = [3, 1, 4, 1, 5]; $s = 0;
