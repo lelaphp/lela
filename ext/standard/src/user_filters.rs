@@ -719,7 +719,6 @@ fn bucket_attach(
     let Some(res) = bucket
         .as_ref()
         .and_then(Value::as_resource)
-        .copied()
         .filter(|res| res.kind() == Some(kind))
     else {
         let what = if bucket.as_ref().and_then(Value::as_resource).is_some() {

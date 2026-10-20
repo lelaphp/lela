@@ -291,7 +291,7 @@ fn exec(
         let held = output.get().map_or_else(Value::null, |held| held.0);
         let mut array = match held.as_ref() {
             ValueRef::Array(array) => {
-                let mut array = Owner::take(req, *array);
+                let mut array = Owner::take(req, array);
                 array.separate(req)?;
                 array
             }

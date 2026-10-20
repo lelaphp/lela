@@ -1815,7 +1815,7 @@ impl Request {
             .enumerate()
             .skip(from)
             .find(|(_, cell)| cell.is_refcounted())?;
-        Some((at, Value::of_zval(std::mem::replace(cell, Zval::UNDEF))))
+        Some((at, Value::of_slot(std::mem::replace(cell, Zval::UNDEF))))
     }
 
     /// The value in a slot of `frame`, a view of it: `ZVAL_COPY_VALUE`,
@@ -1825,7 +1825,7 @@ impl Request {
         self.vm
             .stack
             .frame(frame)
-            .map_or(Value::undef(), |f| Value::of_zval(f.slot(Slot(at))))
+            .map_or(Value::undef(), |f| Value::of_slot(f.slot(Slot(at))))
     }
 
     /// Every slot of `frame` in place ([`crate::exec::HeapFrame::slots_mut`]),
@@ -1857,7 +1857,7 @@ impl Request {
         };
         let z = f.slot(Slot(at));
         f.set(Slot(at), Zval::UNDEF);
-        Value::of_zval(z)
+        Value::of_slot(z)
     }
 
     /// `value` into a slot, the slot owning it from here, and what the
@@ -1890,7 +1890,7 @@ impl Request {
         if old.is_refcounted() {
             self.sense_dirty_temporary(frame, at, old.kind());
         }
-        Value::of_zval(old)
+        Value::of_slot(old)
     }
 
     /// `value` into a slot of `frame` and what it held handed back, with
@@ -1904,7 +1904,7 @@ impl Request {
             .frame_mut(frame)
             .and_then(|f| f.slots_mut().get_mut(at as usize))
         {
-            Some(slot) => Value::of_zval(std::mem::replace(slot, value.to_zval())),
+            Some(slot) => Value::of_slot(std::mem::replace(slot, value.to_zval())),
             None => value,
         }
     }
@@ -2086,7 +2086,7 @@ impl Request {
 /// [`Request::leaves_plainly`] asks of the frame's receiver, its closure
 /// and each CV that owns anything but a string.
 fn kept_by_another(z: Zval) -> bool {
-    Value::of_zval(z).refcount() > 1
+    Value::of_slot(z).refcount() > 1
 }
 
 /// Whether a leaving frame's receiver and closure, where it has them, are

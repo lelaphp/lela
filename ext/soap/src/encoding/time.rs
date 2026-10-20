@@ -151,7 +151,6 @@ fn to_xml_datetime_ex(
         }
         ValueRef::Str(s) => ret.set_content_len(s.as_bytes()),
         ValueRef::Object(o) => {
-            let o = *o;
             if let Some(iface) = lookup_class(req, b"DateTimeInterface")?
                 && o.instance_of(req, iface)
             {

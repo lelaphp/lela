@@ -401,9 +401,9 @@ impl Request {
     /// which gives the cell the owner the place had of the value. No
     /// owner more is taken; a caller that keeps the cell adds its own.
     pub(crate) fn make_ref(&mut self, place: php_heap::ZvalRef) -> Result<PhpRef, Thrown> {
-        let held = Value::of_zval(place.read());
+        let held = Value::of_slot(place.read());
         if let Some(cell) = held.as_php_ref() {
-            return Ok(*cell);
+            return Ok(cell);
         }
         let cell = self.reference(held.undef_as_null())?;
         place.write(cell.as_value().to_zval());

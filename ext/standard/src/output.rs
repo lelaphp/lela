@@ -25,7 +25,7 @@ fn op_bool(req: &mut Request, op: &OutputOp) -> Result<bool, Thrown> {
 fn op_string(req: &mut Request, op: &OutputOp) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let answer = req.output_buffer_op(op)?;
     let string = match answer.as_ref() {
-        ValueRef::Str(string) => OrFalse::Value(Owner::take(req, *string)),
+        ValueRef::Str(string) => OrFalse::Value(Owner::take(req, string)),
         _ => OrFalse::False,
     };
     answer.give_up(req);
@@ -36,7 +36,7 @@ fn op_string(req: &mut Request, op: &OutputOp) -> Result<OrFalse<Owner<PhpString
 fn op_array(req: &mut Request, op: &OutputOp) -> Result<Owner<PhpArray>, Thrown> {
     let answer = req.output_buffer_op(op)?;
     let array = match answer.as_array() {
-        Some(array) => Ok(Owner::take(req, *array)),
+        Some(array) => Ok(Owner::take(req, array)),
         None => PhpArray::new(req),
     };
     answer.give_up(req);

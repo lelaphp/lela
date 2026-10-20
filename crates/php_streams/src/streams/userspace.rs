@@ -816,7 +816,7 @@ impl Ops for UserStream {
             Called::Value(value) => value,
         };
         let sb = match value.as_array() {
-            Some(array) => statbuf_from_array(req, *array).ok(),
+            Some(array) => statbuf_from_array(req, array).ok(),
             None => None,
         };
         value.give_up(req);
@@ -1089,9 +1089,7 @@ pub(crate) fn url_stat(
     give_up_all(req, args);
     let sb = match called? {
         Some(Called::Value(value)) => {
-            let sb = value
-                .as_array()
-                .map(|array| statbuf_from_array(req, *array));
+            let sb = value.as_array().map(|array| statbuf_from_array(req, array));
             value.give_up(req);
             sb.transpose()?
         }

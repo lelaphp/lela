@@ -215,7 +215,7 @@ impl Query<'_> {
         let mut value = *value;
         // An enum case: its backing value, or php's `ValueError`.
         if let ValueRef::Object(object) = value.as_ref()
-            && let Some(backing) = enum_backing(req, *object)
+            && let Some(backing) = enum_backing(req, object)
         {
             if backing == EnumBacking::Pure {
                 let name = req
@@ -361,10 +361,10 @@ impl Query<'_> {
     ) -> Result<(), Thrown> {
         let value = value.deref();
         let nested = match value.as_ref() {
-            ValueRef::Array(array) => Some((walk::Table::Array(*array), None)),
-            ValueRef::Object(object) if enum_backing(req, *object).is_none() => {
+            ValueRef::Array(array) => Some((walk::Table::Array(array), None)),
+            ValueRef::Object(object) if enum_backing(req, object).is_none() => {
                 // `HASH_OF(zdata)`, the object's `Z_OBJPROP`.
-                Some((object.property_table(req)?, Some(*object)))
+                Some((object.property_table(req)?, Some(object)))
             }
             _ => None,
         };
@@ -474,9 +474,9 @@ fn http_build_query(
 ) -> Result<Owner<PhpString>, Thrown> {
     let data = data.value();
     let (table, object) = match data.as_ref() {
-        ValueRef::Array(array) => (walk::Table::Array(*array), None),
+        ValueRef::Array(array) => (walk::Table::Array(array), None),
         ValueRef::Object(object) => {
-            if enum_backing(req, *object).is_some() {
+            if enum_backing(req, object).is_some() {
                 let name = value_name(req, &data);
                 return Err(arg_type_error(
                     req,
@@ -484,7 +484,7 @@ fn http_build_query(
                     &format!("not be an enum, {name} given"),
                 ));
             }
-            (object.property_table(req)?, Some(*object))
+            (object.property_table(req)?, Some(object))
         }
         _ => {
             let name = value_name(req, &data);

@@ -525,8 +525,8 @@ impl Request {
             .map(|(key, value)| (key, value.deref()))
             .collect();
         for (key, value) in rows {
-            let into = dest.get(&key).and_then(|had| had.as_array().copied());
-            if let (Some(nested), Some(into)) = (value.as_array().copied(), into) {
+            let into = dest.get(&key).and_then(|had| had.as_array());
+            if let (Some(nested), Some(into)) = (value.as_array(), into) {
                 let into = into.copy(self)?;
                 let merged = self.merge(into, nested)?;
                 let key = Owner::take(self, key);
@@ -1279,7 +1279,7 @@ struct Place<'a> {
 fn descend(track: PhpArray, path: &[Owner<Key>]) -> PhpArray {
     let mut current = track;
     for key in path {
-        match current.get(key).and_then(|v| v.as_array().copied()) {
+        match current.get(key).and_then(|v| v.as_array()) {
             Some(next) => current = next,
             None => break,
         }

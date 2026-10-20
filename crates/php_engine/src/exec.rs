@@ -1240,7 +1240,7 @@ impl<'a> FrameAt<'a> {
             .unwrap_or_default()
             .iter()
             .take(count)
-            .map(|z| Value::of_zval(*z))
+            .map(|z| Value::of_slot(*z))
             .collect()
     }
 
@@ -2271,7 +2271,9 @@ pub(crate) fn container(
                 return Ok(Value::undef());
             };
             let z = at.read();
-            Ok(value_of(z.as_indirect().map_or(z, php_heap::ZvalRef::read)))
+            Ok(Value::of_slot(
+                z.as_indirect().map_or(z, php_heap::ZvalRef::read),
+            ))
         }
         OperandKind::Unused => req.vm().this(frame).map_or_else(
             || {
@@ -2323,7 +2325,7 @@ pub(crate) fn take_operand(
 /// `ZVAL_DEREF` over a value one owner of which the caller holds: what
 /// the reference held, with the owner moved onto it.
 pub(crate) fn owned_deref(req: &mut Request, value: Value) -> Value {
-    let Some(cell) = value.as_php_ref().copied() else {
+    let Some(cell) = value.as_php_ref() else {
         return value;
     };
     let held = cell.get();
@@ -2745,7 +2747,7 @@ pub(crate) fn free_container_var(req: &mut Request, frame: FrameRef, code: &OpAr
         if let Some(var) = req.slot_ptr(frame, out)
             && let Some(place) = var.read().as_indirect()
         {
-            let held = value_of(place.read());
+            let held = Value::of_slot(place.read());
             req.addref(&held);
             var.write(held.to_zval());
         }
@@ -2781,7 +2783,7 @@ pub(crate) fn starting_statics(
         let value = if var.lexical {
             Value::null()
         } else {
-            value_of(var.value)
+            Value::of_slot(var.value)
         };
         let set = req.declared_string(&var.name.0).and_then(|name| {
             let name = name.into_key();
@@ -2817,7 +2819,7 @@ pub(crate) fn statics_values(
                 if var.lexical {
                     Value::undef()
                 } else {
-                    value_of(var.value)
+                    Value::of_slot(var.value)
                 }
             })
             .collect(),
@@ -2829,7 +2831,7 @@ pub(crate) fn constant(code: &OpArray, at: ConstIdx) -> Value {
     code.literals
         .get(at.0 as usize)
         .copied()
-        .map_or_else(Value::null, value_of)
+        .map_or_else(Value::null, Value::of_slot)
 }
 
 /// `RT_CONSTANT(opline, opline->op2)` as `ZEND_RECV_INIT` reads it: the
@@ -2865,13 +2867,6 @@ pub(crate) fn default_value(
     let value = constant(code, at);
     req.addref(&value);
     Ok((value, false))
-}
-
-/// A zval as the value vocabulary holds it, no owner taken: the string
-/// or the array is named and not copied, as php's `ZVAL_COPY_VALUE`
-/// names it.
-pub(crate) fn value_of(zval: Zval) -> Value {
-    Value::of_zval(zval)
 }
 
 /// The opline at `at` of `code`, if there is one.
@@ -3240,7 +3235,7 @@ pub(crate) fn unfinished_execution_gc(
         visit(closure.as_value());
     }
     let code = state.code()?;
-    let slot = |at: u32| Value::of_zval(state.frame.slot(php_heap::Slot(at)));
+    let slot = |at: u32| Value::of_slot(state.frame.slot(php_heap::Slot(at)));
     let table = state.symbol_table();
     if table.is_none() {
         for cv in 0..code.num_cvs {

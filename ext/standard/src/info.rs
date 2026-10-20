@@ -361,7 +361,7 @@ fn gpcse(req: &mut Request, name: &str) -> Result<Vec<u8>, Thrown> {
     let _ = req.superglobal(name.as_bytes());
     let Some(array) = req
         .global(name.as_bytes())
-        .and_then(|value| value.deref().as_array().copied())
+        .and_then(|value| value.deref().as_array())
     else {
         return Ok(out);
     };

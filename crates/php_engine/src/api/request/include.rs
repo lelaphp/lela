@@ -904,7 +904,7 @@ impl Request {
             self.leave_frame(top);
         }
         self.fatal_of(served)?;
-        let returned = std::mem::replace(&mut self.returned, crate::api::values::Value::null());
+        let returned = std::mem::take(&mut self.returned);
         self.release(returned);
         if self.is_pending() {
             return Err(Thrown::of(self.take_pending_view()));

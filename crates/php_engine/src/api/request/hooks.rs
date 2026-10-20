@@ -559,7 +559,7 @@ impl Request {
         let o = object.heap();
         let z = o.slot(placed.slot);
         if !z.is_undef() {
-            let value = Value::of_zval(z).deref();
+            let value = Value::of_slot(z).deref();
             self.addref(&value);
             return Ok(value);
         }
@@ -763,7 +763,7 @@ impl Request {
             }
             return Ok(false);
         }
-        let value = Value::of_zval(z).deref();
+        let value = Value::of_slot(z).deref();
         Ok(match test {
             PropertyTest::Exists => true,
             PropertyTest::Isset => value.tag() != TypeTag::Null,
@@ -1261,7 +1261,7 @@ impl Request {
                     return Err(thrown);
                 }
             };
-            let value = Owner::take(self, Value::of_zval(z));
+            let value = Owner::take(self, Value::of_slot(z));
             rows.push(HookedRow {
                 key,
                 value,
@@ -1271,7 +1271,7 @@ impl Request {
         if let Some(table) = object.heap().properties() {
             let dynamic: Vec<(Key, Value)> = table
                 .iter()
-                .map(|(key, z)| (Key::of(key), Value::of_zval(z)))
+                .map(|(key, z)| (Key::of(key), Value::of_slot(z)))
                 .collect();
             for (key, value) in dynamic {
                 let key = Owner::take(self, key);

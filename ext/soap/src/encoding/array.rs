@@ -285,7 +285,7 @@ fn add_xml_array_elements(
             add_xml_array_elements(req, cx, x_param, type_, e, ns, &dims[1..], None, style)
         }
     };
-    let Some(arr) = data.and_then(|d| d.as_array().copied()) else {
+    let Some(arr) = data.and_then(|d| d.as_array()) else {
         for _ in 0..first {
             empty(req, cx)?;
         }
@@ -414,7 +414,7 @@ pub(super) fn to_xml_array(
         && let Some(trav) = lookup_class(req, b"Traversable")?
         && o.instance_of(req, trav)
     {
-        array_copy = Some(traversable_copy(req, *o)?);
+        array_copy = Some(traversable_copy(req, o)?);
     }
     let data = array_copy.as_ref().map_or(data, |c| Value::array(**c));
     let out = array_body(req, cx, e, data, style, x_param, soap_version);
@@ -439,7 +439,7 @@ fn array_body(
     x_param: Node,
     soap_version: i64,
 ) -> Res<()> {
-    let Some(arr) = data.as_array().copied() else {
+    let Some(arr) = data.as_array() else {
         return Ok(());
     };
     let sdl = sdl(req);
@@ -468,12 +468,12 @@ fn array_body(
         d[0] = i;
         let mut el = Some(data);
         for slot in d.iter_mut().skip(1) {
-            if let Some(a) = el.and_then(|v| v.as_array().copied())
+            if let Some(a) = el.and_then(|v| v.as_array())
                 && !a.is_empty()
             {
                 let first = walk::rows(req, a).next().map(|(_, v)| v.deref());
                 el = first;
-                *slot = first.and_then(|v| v.as_array().copied()).map_or(0, count);
+                *slot = first.and_then(|v| v.as_array()).map_or(0, count);
             }
         }
         array_size = dims_text(&d, b',');
@@ -611,7 +611,7 @@ fn get_array_type(
         out.extend_from_slice(b"xsd:anyType");
         Ok(Some(get_conversion(ty::XSD_ANYTYPE)?))
     };
-    let Some(arr) = array.as_array().copied() else {
+    let Some(arr) = array.as_array() else {
         return any_type(out);
     };
     let soap_var = lookup_class(req, b"SoapVar")?;
@@ -624,7 +624,7 @@ fn get_array_type(
         let tmp = tmp.deref();
         match tmp.as_ref() {
             ValueRef::Object(o) if Some(o.class()) == soap_var => {
-                let slot = |n| crate::shared::slot(*o, n);
+                let slot = |n| crate::shared::slot(o, n);
                 let Some(t) = slot(VAR_ENC_TYPE).as_int() else {
                     return Err(soap_error("Encoding: SoapVar has no 'enc_type' property"));
                 };
@@ -856,7 +856,7 @@ fn fill_array(
         let mut ar = ret;
         for p in &pos[..dimension - 1] {
             let k = Key::Int(i64::from(*p));
-            match ar.get(&k).and_then(|v| v.as_array().copied()) {
+            match ar.get(&k).and_then(|v| v.as_array()) {
                 Some(a2) => ar = a2,
                 None => {
                     let fresh = PhpArray::new(req)?;
@@ -901,7 +901,7 @@ pub(super) fn to_xml_map(
     if find_zval_null(req, &data, x_param, style) {
         return Ok(Some(x_param));
     }
-    if let Some(arr) = data.as_array().copied() {
+    if let Some(arr) = data.as_array() {
         if arr.is_recursive() {
             return Err(value_error(req, "Recursive array cannot be encoded"));
         }
@@ -984,7 +984,7 @@ fn fill_map(req: &mut Request, cx: &mut Cx, mut ret: PhpArray, data: Node) -> Re
         };
         let k = match key.as_ref() {
             // `zend_symtable_update` under the string the key decoded to.
-            ValueRef::Str(s) => Some(Owner::take(req, Key::lookup(*s))),
+            ValueRef::Str(s) => Some(Owner::take(req, Key::lookup(s))),
             ValueRef::Int(n) => Some(Owner::index(n)),
             _ => None,
         };

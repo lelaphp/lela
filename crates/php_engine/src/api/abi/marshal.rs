@@ -320,7 +320,7 @@ impl FromArgument for Resource {
     }
     fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown> {
         match value.as_ref() {
-            ValueRef::Resource(held) => Ok(*held),
+            ValueRef::Resource(held) => Ok(held),
             _ => mismatch(req, "resource"),
         }
     }
@@ -330,7 +330,7 @@ impl FromArgument for Resource {
         };
         let given = given.deref();
         if let ValueRef::Resource(held) = given.as_ref() {
-            return Ok(Some(*held));
+            return Ok(Some(held));
         }
         let name = coerce::value_name(req, &given);
         Err(arg_type_error(
@@ -507,7 +507,7 @@ impl<C: Class> FromArgument for Instance<C> {
     }
     fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown> {
         match value.as_ref() {
-            ValueRef::Object(object) => Ok(Instance::of(*object)),
+            ValueRef::Object(object) => Ok(Instance::of(object)),
             _ => mismatch(req, "object"),
         }
     }
@@ -615,8 +615,8 @@ impl FromArgument for Iterable {
     }
     fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown> {
         match value.as_ref() {
-            ValueRef::Array(array) => Ok(Iterable::Array(*array)),
-            ValueRef::Object(object) => Ok(Iterable::Traversable(*object)),
+            ValueRef::Array(array) => Ok(Iterable::Array(array)),
+            ValueRef::Object(object) => Ok(Iterable::Traversable(object)),
             _ => mismatch(req, "iterable"),
         }
     }
@@ -826,7 +826,7 @@ impl<T: FromArgument> FromArgument for Ref<T> {
         true
     }
     fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown> {
-        let cell = value.as_php_ref().copied();
+        let cell = value.as_php_ref();
         let held = held_as::<T>(req, value, 0)?;
         Ok(Ref {
             cell,
@@ -837,7 +837,7 @@ impl<T: FromArgument> FromArgument for Ref<T> {
         let Some(given) = self::given(given) else {
             return Ok(None);
         };
-        let cell = given.as_php_ref().copied();
+        let cell = given.as_php_ref();
         let held = held_as::<T>(req, given, position)?;
         Ok(Some(Ref {
             cell,

@@ -40,7 +40,6 @@ pub(super) fn get_zval_property(req: &mut Request, object: &Value, name: &[u8]) 
             // `zend_read_property(.., silent)`: the class's handler, so a
             // `__get` answers; the value it made is held until the
             // serialisation ends (`encode_finish`), as php's `rv` is.
-            let o = *o;
             let answered = o
                 .handlers(req)
                 .read_property(req, o, name, php_ext::abi::PropertyRead::Silent)
@@ -63,7 +62,7 @@ pub(super) fn get_zval_property(req: &mut Request, object: &Value, name: &[u8]) 
 
 /// `set_zval_property`: `val` is the property's from here.
 fn set_zval_property(req: &mut Request, object: &Value, name: &[u8], val: Owner<Value>) -> Res<()> {
-    let Some(o) = object.as_object().copied() else {
+    let Some(o) = object.as_object() else {
         val.give_up(req);
         return Ok(());
     };
@@ -81,14 +80,13 @@ fn set_zval_property(req: &mut Request, object: &Value, name: &[u8], val: Owner<
 fn unset_zval_property(req: &mut Request, object: &Value, name: &[u8]) -> Res<()> {
     match object.as_ref() {
         ValueRef::Object(o) => {
-            let o = *o;
             let s = PhpString::new(req, name)?;
             let r = o.unset_row(req, &Key::Str(*s));
             s.give_up(req);
             r?;
         }
         ValueRef::Array(a) => {
-            let mut a = *a;
+            let mut a = a;
             let s = PhpString::new(req, name)?;
             let r = a.unset(req, &Key::Str(*s));
             s.give_up(req);
@@ -240,11 +238,11 @@ fn any_step(
             }
         }
         Some(a) => {
-            let mut arr = a.as_array().copied().unwrap_or_else(PhpArray::empty);
+            let mut arr = a.as_array().unwrap_or_else(PhpArray::empty);
             if let Some(nm) = name.as_deref() {
                 match arr.find(nm) {
                     Some(el) if el.as_array().is_some() => {
-                        let mut inner = el.as_array().copied().unwrap_or_else(PhpArray::empty);
+                        let mut inner = el.as_array().unwrap_or_else(PhpArray::empty);
                         inner.append(req, val)?;
                     }
                     // php puts the old element and this one in an
@@ -437,7 +435,7 @@ fn object_class(req: &mut Request, e: &Enc, pce: Option<ClassId>) -> Res<ClassId
     let Some(map) = req
         .state::<State>()
         .class_map
-        .and_then(|m| m.deref().as_array().copied())
+        .and_then(|m| m.deref().as_array())
     else {
         return Ok(std);
     };
@@ -715,7 +713,7 @@ fn plain_fill(req: &mut Request, cx: &mut Cx, ret: &Value, data: Node) -> Res<()
                     set_zval_property(req, ret, &name, tmp)?;
                 }
             }
-            Some(prop) => match prop.as_array().copied() {
+            Some(prop) => match prop.as_array() {
                 Some(arr) => append_to_prop(req, ret, &name, arr, tmp)?,
                 None => {
                     let prop = Owner::take(req, prop);
@@ -816,7 +814,7 @@ fn model_to_xml_object(
             }
             if let Some(data) = data {
                 if (model.max_occurs == -1 || model.max_occurs > 1)
-                    && let Some(arr) = data.as_array().copied()
+                    && let Some(arr) = data.as_array()
                     && arr.is_list()
                 {
                     let read = rows(req, arr);
@@ -875,7 +873,7 @@ fn model_to_xml_object(
             };
             let anyxml = get_conversion(ty::XSD_ANYXML)?;
             if (model.max_occurs == -1 || model.max_occurs > 1)
-                && let Some(arr) = data.as_array().copied()
+                && let Some(arr) = data.as_array()
                 && arr.is_list()
             {
                 let read = rows(req, arr);
@@ -964,7 +962,7 @@ fn model_array_element(model: &ContentModel, sdl: &Sdl) -> Option<TypeId> {
 /// names unmangled (`zend_unmangle_property_name`).
 fn prop_rows(req: &mut Request, data: &Value) -> Res<Vec<(K, Value)>> {
     match data.as_ref() {
-        ValueRef::Array(a) => Ok(rows(req, *a)),
+        ValueRef::Array(a) => Ok(rows(req, a)),
         ValueRef::Object(o) => {
             let table = o.property_table(req)?;
             Ok(walk::rows(req, table)
@@ -1059,7 +1057,7 @@ pub(super) fn to_xml_object(
         };
         if let Some(el_id) = array_el
             && let Some(el) = sdl_arc.ty(el_id)
-            && let Some(arr) = data.as_array().copied()
+            && let Some(arr) = data.as_array()
         {
             let read = rows(req, arr);
             with_rows(req, &read, |req, rows| {

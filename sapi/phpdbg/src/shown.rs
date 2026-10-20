@@ -117,7 +117,7 @@ fn shown(req: &Request, value: Value, depth: u32) -> Shown {
             counted: value.is_refcounted(),
         },
         TypeTag::Array => {
-            let Some(array) = value.as_array().copied() else {
+            let Some(array) = value.as_array() else {
                 return Shown::Null;
             };
             let entries = if depth == 0 || array.is_recursive() {
@@ -309,7 +309,7 @@ pub fn backtrace(req: &mut Request, limit: i64) -> Vec<TraceRow> {
         let req: &Request = req;
         let mut read = Vec::new();
         for (_, row) in rows(req, trace) {
-            let Some(row) = row.as_array().copied() else {
+            let Some(row) = row.as_array() else {
                 continue;
             };
             let field = |name: &[u8]| {
@@ -321,7 +321,7 @@ pub fn backtrace(req: &mut Request, limit: i64) -> Vec<TraceRow> {
             let bytes =
                 |value: Option<Value>| value.and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
             let args = field(b"args")
-                .and_then(|v| v.as_array().copied())
+                .and_then(|v| v.as_array())
                 .map(|args| {
                     rows(req, args)
                         .map(|(_, v)| shown(req, v.deref(), 1))

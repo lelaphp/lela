@@ -670,7 +670,7 @@ pub(super) fn strtr(
         let string = string.hold(req)?;
         // `Z_PARAM_ARRAY_HT`, where the stub declares `string|array $from`.
         let from = coerce_param(req, &from.value(), &Type::Array, 2)?;
-        let Some(from) = from.as_array().copied() else {
+        let Some(from) = from.as_array() else {
             return PhpString::new(req, b"");
         };
         if string.is_empty() {
@@ -685,8 +685,7 @@ pub(super) fn strtr(
     // `Z_PARAM_STRING`: a `null` is the deprecation, which names the
     // declared `?string`, and the empty string.
     let to = coerce_param(req, &to.value(), &Type::String, 3)?;
-    let (Some(from), Some(to)) = (from.as_php_string().copied(), to.as_php_string().copied())
-    else {
+    let (Some(from), Some(to)) = (from.as_php_string(), to.as_php_string()) else {
         return PhpString::new(req, b"");
     };
     if string.is_empty() {

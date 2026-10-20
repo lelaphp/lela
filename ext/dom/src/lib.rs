@@ -589,7 +589,7 @@ fn dom_error_message(
 ) -> Result<(), Thrown> {
     if strict {
         let exception = new_throwable(req, "DOMException", message)?;
-        if let Some(object) = exception.as_object().copied() {
+        if let Some(object) = exception.as_object() {
             let code = Owner::int(code as i64);
             let set = php_ext::call::write_prop(req, &object, b"code", code);
             if let Err(thrown) = set {
@@ -2077,7 +2077,7 @@ fn coerce_property(
             ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => {
                 Ok(to_string(req, &v)?.into_value())
             }
-            ValueRef::Object(o) if has_to_string(req, *o) => Ok(to_string(req, &v)?.into_value()),
+            ValueRef::Object(o) if has_to_string(req, o) => Ok(to_string(req, &v)?.into_value()),
             _ => Err(fail(req, if nullable { "?string" } else { "string" })),
         },
         Declared::Object { class, nullable } => {

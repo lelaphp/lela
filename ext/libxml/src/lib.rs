@@ -722,7 +722,7 @@ fn libxml_set_streams_context(req: &mut Request, context: Untyped<Value>) -> Res
         ));
     };
     // `zend_fetch_resource_ex(arg, "Stream-Context", le_stream_context)`.
-    StreamCtx::fetch(req, *resource)?;
+    StreamCtx::fetch(req, resource)?;
     let given = Owner::take(req, given);
     if let Some(old) = req.state::<State>().stream_context.replace(given) {
         old.give_up(req);

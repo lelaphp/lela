@@ -703,7 +703,7 @@ pub(crate) fn dba_fetch(
     let ValueRef::Object(object) = object.as_ref() else {
         return Ok(OrFalse::False);
     };
-    let dba = Instance::<Connection>::of(*object);
+    let dba = Instance::<Connection>::of(object);
     let value = with_link(req, dba, |req, link| {
         let key = key_bytes(req, key)?;
         let mut skip = skip;

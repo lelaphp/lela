@@ -427,7 +427,7 @@ fn array_count_values(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArr
         let element = element.deref();
         let key = match element.as_ref() {
             ValueRef::Int(n) => Key::Int(n),
-            ValueRef::Str(s) => Key::lookup(*s),
+            ValueRef::Str(s) => Key::lookup(s),
             _ => {
                 docref(
                     req,
@@ -453,7 +453,7 @@ fn symtable_key(req: &mut Request, value: &Value) -> Result<Owner<Key>, Thrown> 
         return Ok(Owner::index(n));
     }
     if let Some(s) = value.as_php_string() {
-        return Ok(Owner::take(req, Key::lookup(*s)));
+        return Ok(Owner::take(req, Key::lookup(s)));
     }
     let text = to_string(req, value)?;
     Ok(Key::from_string(req, text))
@@ -1071,7 +1071,7 @@ fn key_exists(req: &mut Request, key: Untyped<Value>, array: PhpArray) -> Result
 fn key_exists_as(req: &mut Request, key: Value, array: PhpArray) -> Result<bool, Thrown> {
     let mut made = None;
     let key = match key.as_ref() {
-        ValueRef::Str(s) => Key::lookup(*s),
+        ValueRef::Str(s) => Key::lookup(s),
         ValueRef::Int(n) => Key::Int(n),
         ValueRef::Null | ValueRef::Undef => {
             deprecated(
@@ -1282,7 +1282,7 @@ fn fetch(req: &mut Request, row: &Value, name: &Key) -> Result<Option<Owner<Valu
         };
         return Ok(array.get(&key).map(|value| Owner::take(req, value.deref())));
     }
-    if let Some(object) = row.as_object().copied() {
+    if let Some(object) = row.as_object() {
         let text: &[u8] = &KeyBytes::of(name);
         let handlers = object.handlers(req);
         if handlers.has_property(req, object, text, PropertyTest::Exists)?
@@ -1393,7 +1393,7 @@ fn binop(
             ValueRef::Array(_) | ValueRef::Object(_) => {
                 // "For objects we try to cast them to a numeric type":
                 // the class's `cast_object` slot asked for `_IS_NUMBER`.
-                if let Some(object) = element.as_object().copied() {
+                if let Some(object) = element.as_object() {
                     let handlers = object.handlers(req);
                     let number = match handlers.cast_object(req, object, TypeTag::Number) {
                         Ok(number) => number,

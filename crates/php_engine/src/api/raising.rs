@@ -1006,7 +1006,7 @@ pub fn throw_chained(req: &mut Request, previous: Thrown, class: &str, message: 
     };
     match new_throwable_made(req, class, message) {
         Ok(throwable) => {
-            let Some(object) = throwable.as_object().copied() else {
+            let Some(object) = throwable.as_object() else {
                 req.release(throwable);
                 return Thrown::of(Some(earlier));
             };
@@ -1074,7 +1074,7 @@ pub(crate) fn throw_over_pending(req: &mut Request, class: &str, message: &str) 
 pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
     if let Some(object) = throwable.as_object() {
         req.addref(throwable);
-        return throw_object(req, *object);
+        return throw_object(req, object);
     }
     throw_error(
         req,

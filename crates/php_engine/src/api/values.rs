@@ -648,7 +648,7 @@ impl PhpArray {
     /// The value at `key`, a view of it.
     #[must_use]
     pub fn get(&self, key: &Key) -> Option<Value> {
-        self.0.get(key.heap()).map(Value::of_zval)
+        self.0.get(key.heap()).map(Value::of_slot)
     }
 
     /// The value under the string key of these bytes, a view of it:
@@ -670,7 +670,7 @@ impl PhpArray {
     /// ```
     #[must_use]
     pub fn find(&self, name: &[u8]) -> Option<Value> {
-        self.0.str_find(name).map(Value::of_zval)
+        self.0.str_find(name).map(Value::of_slot)
     }
 
     /// The value under the key these bytes name, a view of it: php's
@@ -695,7 +695,7 @@ impl PhpArray {
             Some(n) => self.0.get(php_heap::Key::Long(n)),
             None => self.0.str_find(name),
         }
-        .map(Value::of_zval)
+        .map(Value::of_slot)
     }
 
     /// Whether `key` is present, `array_key_exists`.
@@ -944,7 +944,7 @@ impl PhpArray {
     /// reaches a slot of a `static` table.
     pub(crate) fn at_position(self, position: u32) -> Option<(Value, Place)> {
         let at = self.0.value_ref_at(position)?;
-        Some((Value::of_zval(at.read()), Place(at)))
+        Some((Value::of_slot(at.read()), Place(at)))
     }
 
     /// A copy with one owner, `zend_array_dup`: the same elements, each
@@ -965,7 +965,7 @@ impl PhpArray {
     pub fn live_from(&self, position: u32) -> Option<(u32, Key, Value)> {
         self.0
             .live_from(position)
-            .map(|(at, key, z)| (at, Key::of(key), Value::of_zval(z)))
+            .map(|(at, key, z)| (at, Key::of(key), Value::of_slot(z)))
     }
 
     /// Where the value at `key` stands, `zend_hash_find` answering the
@@ -1041,8 +1041,8 @@ impl PhpArray {
             let ordering = if pending.is_some() {
                 Ordering::Equal
             } else {
-                let (xk, xv) = (Key::of(x.key), Value::of_zval(x.val));
-                let (yk, yv) = (Key::of(y.key), Value::of_zval(y.val));
+                let (xk, xv) = (Key::of(x.key), Value::of_slot(x.val));
+                let (yk, yv) = (Key::of(y.key), Value::of_slot(y.val));
                 match compare(req, (&xk, &xv), (&yk, &yv)) {
                     Ok(ordering) => ordering,
                     Err(thrown) => {
@@ -1097,7 +1097,7 @@ impl PhpArray {
     pub fn cursor_current(&self) -> Option<Value> {
         self.0
             .entry_at(self.0.position())
-            .map(|(_, z)| Value::of_zval(z))
+            .map(|(_, z)| Value::of_slot(z))
     }
 
     /// `key()`: the key at the internal pointer.
@@ -1141,7 +1141,7 @@ impl PartialEq for PhpArray {
 /// arrays and the debug rendering read, none of which runs code of the
 /// program.
 fn view((key, value): (php_heap::Key, php_heap::Zval)) -> (Key, Value) {
-    (Key::of(key), Value::of_zval(value))
+    (Key::of(key), Value::of_slot(value))
 }
 
 impl std::fmt::Debug for PhpArray {
@@ -2233,7 +2233,7 @@ impl PhpObject {
             return None;
         }
         let z = self.0.slot(index);
-        (!z.is_undef()).then(|| Value::of_zval(z))
+        (!z.is_undef()).then(|| Value::of_slot(z))
     }
 
     /// Write one declared property by slot, `OBJ_PROP_NUM(obj, index)`
@@ -2544,7 +2544,7 @@ impl PhpRef {
     /// The reference as a value, `ZVAL_REF`: named, no owner taken.
     #[must_use]
     pub const fn as_value(&self) -> Value {
-        Value::of(Inner::Reference(*self))
+        Value::reference(*self)
     }
 
     /// `Z_PARAM_ARRAY_EX` with `separate` on a by-reference parameter,
@@ -2714,7 +2714,7 @@ impl Resource {
     /// The resource as a value, `ZVAL_RES`: named, no owner taken.
     #[must_use]
     pub const fn as_value(&self) -> Value {
-        Value::of(Inner::Resource(*self))
+        Value::resource(*self)
     }
 
     /// `get_resource_id()`: the list's index, `Z_RES_HANDLE`.
@@ -2802,26 +2802,11 @@ pub enum RecursionGuard {
     Json,
 }
 
-/// A borrowed view of a value by type, for matching.
-#[derive(Debug, Clone, Copy)]
-pub enum ValueRef<'a> {
+/// A value by type, for matching: each view the value names, named
+/// again and not copied, as [`Value::as_ref`] reads it off the zval.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ValueRef {
     Undef,
-    Null,
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    Str(&'a PhpString),
-    Array(&'a PhpArray),
-    Object(&'a PhpObject),
-    Resource(&'a Resource),
-    Reference(&'a PhpRef),
-}
-
-/// The states a value has, the zval's own set.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-enum Inner {
-    Undef,
-    #[default]
     Null,
     Bool(bool),
     Int(i64),
@@ -2833,26 +2818,55 @@ enum Inner {
     Reference(PhpRef),
 }
 
-/// One PHP value. It is `Copy`, as design §5.1 decides a zval is, and
-/// the copy is php's `ZVAL_COPY_VALUE`: sixteen bytes copied whatever
-/// the kind, no refcount touched, so the copy names what the original
-/// names and owns nothing the original did not give up; the engine's
-/// `addref` beside it is `ZVAL_COPY`, and the engine takes and releases
-/// owners where php's handlers do.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+/// One PHP value: the zval itself, sixteen bytes, as design §5.1 lays
+/// it out and the frame's slots hold it. It is `Copy`, as design §5.1
+/// decides a zval is, and the copy is php's `ZVAL_COPY_VALUE`: sixteen
+/// bytes copied whatever the kind, no refcount touched, so the copy
+/// names what the original names and owns nothing the original did not
+/// give up; the engine's `addref` beside it is `ZVAL_COPY`, and the
+/// engine takes and releases owners where php's handlers do. Taking a
+/// value off a slot and putting it back is a move of the sixteen
+/// bytes ([`Value::of_zval`], [`Value::to_zval`]); the views
+/// ([`Value::as_ref`] and the `as_*` readers) are read off the type
+/// byte.
+#[derive(Clone, Copy)]
 pub struct Value {
-    inner: Inner,
+    zval: Zval,
+}
+
+/// Two values are equal when they are the same kind and their views
+/// are equal: what the enum the value was before the zval compared,
+/// and what the engine's own tests read.
+impl PartialEq for Value {
+    fn eq(&self, other: &Value) -> bool {
+        self.as_ref() == other.as_ref()
+    }
+}
+
+/// The value as its kind and view, `Value { inner: Int(3) }`.
+impl std::fmt::Debug for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Value")
+            .field("inner", &self.as_ref())
+            .finish()
+    }
+}
+
+impl Default for Value {
+    fn default() -> Value {
+        Value::null()
+    }
 }
 
 impl Value {
-    const fn of(inner: Inner) -> Value {
-        Value { inner }
+    const fn of(zval: Zval) -> Value {
+        Value { zval }
     }
 
     /// `null`.
     #[must_use]
     pub const fn null() -> Value {
-        Value::of(Inner::Null)
+        Value::of(Zval::null())
     }
 
     /// `IS_UNDEF`: a frame slot nothing has written yet, which a CV read
@@ -2860,7 +2874,7 @@ impl Value {
     /// alone; a native is never handed one.
     #[must_use]
     pub(crate) const fn undef() -> Value {
-        Value::of(Inner::Undef)
+        Value::of(Zval::UNDEF)
     }
 
     /// An argument left unpassed, the `IS_UNDEF` slot `zend_call_function`
@@ -2871,71 +2885,73 @@ impl Value {
     /// `$o[]`.
     #[must_use]
     pub const fn unpassed() -> Value {
-        Value::of(Inner::Undef)
+        Value::of(Zval::UNDEF)
     }
 
     /// `true` or `false`.
     #[must_use]
     pub const fn bool(b: bool) -> Value {
-        Value::of(Inner::Bool(b))
+        Value::of(Zval::bool(b))
     }
 
     /// An `int`.
     #[must_use]
     pub const fn int(n: i64) -> Value {
-        Value::of(Inner::Int(n))
+        Value::of(Zval::long(n))
     }
 
     /// A `float`.
     #[must_use]
     pub const fn float(f: f64) -> Value {
-        Value::of(Inner::Float(f))
+        Value::of(Zval::double(f))
     }
 
     /// A `string`.
     #[must_use]
     pub const fn string(s: PhpString) -> Value {
-        Value::of(Inner::Str(s))
+        Value::of(Zval::string(s.heap()))
     }
 
     /// An `array`.
     #[must_use]
     pub const fn array(a: PhpArray) -> Value {
-        Value::of(Inner::Array(a))
+        Value::of(Zval::array(a.heap()))
     }
 
     /// An `object`.
     #[must_use]
     pub const fn object(o: PhpObject) -> Value {
-        Value::of(Inner::Object(o))
+        Value::of(Zval::object(o.heap()))
     }
 
     /// A `resource`.
     #[must_use]
     pub const fn resource(r: Resource) -> Value {
-        Value::of(Inner::Resource(r))
+        Value::of(Zval::resource(r.heap()))
     }
 
     /// A reference, not followed.
     #[must_use]
     pub const fn reference(r: PhpRef) -> Value {
-        Value::of(Inner::Reference(r))
+        Value::of(Zval::reference(r.heap()))
     }
 
     /// The type.
     #[must_use]
     pub const fn tag(&self) -> TypeTag {
-        match &self.inner {
-            Inner::Undef => TypeTag::Undef,
-            Inner::Null => TypeTag::Null,
-            Inner::Bool(_) => TypeTag::Bool,
-            Inner::Int(_) => TypeTag::Int,
-            Inner::Float(_) => TypeTag::Float,
-            Inner::Str(_) => TypeTag::String,
-            Inner::Array(_) => TypeTag::Array,
-            Inner::Object(_) => TypeTag::Object,
-            Inner::Resource(_) => TypeTag::Resource,
-            Inner::Reference(_) => TypeTag::Reference,
+        match self.zval.kind() {
+            ZvalType::Undef => TypeTag::Undef,
+            ZvalType::False | ZvalType::True => TypeTag::Bool,
+            ZvalType::Long => TypeTag::Int,
+            ZvalType::Double => TypeTag::Float,
+            ZvalType::String => TypeTag::String,
+            ZvalType::Array => TypeTag::Array,
+            ZvalType::Object => TypeTag::Object,
+            ZvalType::Resource => TypeTag::Resource,
+            ZvalType::Reference => TypeTag::Reference,
+            ZvalType::Null | ZvalType::ConstExpr | ZvalType::Indirect | ZvalType::Ptr => {
+                TypeTag::Null
+            }
         }
     }
 
@@ -2946,9 +2962,9 @@ impl Value {
     /// `zend_check_type` reads it through `Z_REFVAL_P`.
     #[inline]
     pub(crate) fn type_code(&self) -> u8 {
-        match &self.inner {
-            Inner::Reference(r) => r.get().own_type_code(),
-            _ => self.own_type_code(),
+        match self.as_php_ref() {
+            Some(r) => r.get().own_type_code(),
+            None => self.own_type_code(),
         }
     }
 
@@ -2956,18 +2972,9 @@ impl Value {
     /// followed: `IS_REFERENCE`'s own code there.
     #[inline]
     const fn own_type_code(&self) -> u8 {
-        match &self.inner {
-            Inner::Undef => 0,
-            Inner::Null => 1,
-            Inner::Bool(false) => 2,
-            Inner::Bool(true) => 3,
-            Inner::Int(_) => 4,
-            Inner::Float(_) => 5,
-            Inner::Str(_) => 6,
-            Inner::Array(_) => 7,
-            Inner::Object(_) => 8,
-            Inner::Resource(_) => 9,
-            Inner::Reference(_) => 10,
+        match self.zval.kind() {
+            ZvalType::ConstExpr | ZvalType::Indirect | ZvalType::Ptr => ZvalType::Null as u8,
+            kind => kind as u8,
         }
     }
 
@@ -2975,35 +2982,38 @@ impl Value {
     /// error text (`int`, `float`, `string`, `array`, `null`, `bool`).
     #[must_use]
     pub fn type_name(&self) -> &'static str {
-        match &self.inner {
-            Inner::Undef | Inner::Null => "null",
-            Inner::Bool(_) => "bool",
-            Inner::Int(_) => "int",
-            Inner::Float(_) => "float",
-            Inner::Str(_) => "string",
-            Inner::Array(_) => "array",
-            Inner::Object(_) => "object",
-            Inner::Resource(r) if r.is_closed() => "resource (closed)",
-            Inner::Resource(_) => "resource",
-            Inner::Reference(r) => r.get().type_name(),
+        match self.as_ref() {
+            ValueRef::Undef | ValueRef::Null => "null",
+            ValueRef::Bool(_) => "bool",
+            ValueRef::Int(_) => "int",
+            ValueRef::Float(_) => "float",
+            ValueRef::Str(_) => "string",
+            ValueRef::Array(_) => "array",
+            ValueRef::Object(_) => "object",
+            ValueRef::Resource(r) if r.is_closed() => "resource (closed)",
+            ValueRef::Resource(_) => "resource",
+            ValueRef::Reference(r) => r.get().type_name(),
         }
     }
 
-    /// The value by type, borrowed.
+    /// The value by type, each view named again.
     #[must_use]
-    pub fn as_ref(&self) -> ValueRef<'_> {
-        match &self.inner {
-            Inner::Undef => ValueRef::Undef,
-            Inner::Null => ValueRef::Null,
-            Inner::Bool(b) => ValueRef::Bool(*b),
-            Inner::Int(n) => ValueRef::Int(*n),
-            Inner::Float(f) => ValueRef::Float(*f),
-            Inner::Str(s) => ValueRef::Str(s),
-            Inner::Array(a) => ValueRef::Array(a),
-            Inner::Object(o) => ValueRef::Object(o),
-            Inner::Resource(r) => ValueRef::Resource(r),
-            Inner::Reference(r) => ValueRef::Reference(r),
-        }
+    pub fn as_ref(&self) -> ValueRef {
+        let z = self.zval;
+        let named = match z.kind() {
+            ZvalType::Undef => Some(ValueRef::Undef),
+            ZvalType::False => Some(ValueRef::Bool(false)),
+            ZvalType::True => Some(ValueRef::Bool(true)),
+            ZvalType::Long => z.as_long().map(ValueRef::Int),
+            ZvalType::Double => z.as_double().map(ValueRef::Float),
+            ZvalType::String => z.as_str().map(|s| ValueRef::Str(PhpString::of(s))),
+            ZvalType::Array => z.as_arr().map(|a| ValueRef::Array(PhpArray::of(a))),
+            ZvalType::Object => z.as_obj().map(|o| ValueRef::Object(PhpObject::of(o))),
+            ZvalType::Resource => z.as_resource().map(|r| ValueRef::Resource(Resource::of(r))),
+            ZvalType::Reference => z.as_reference().map(|r| ValueRef::Reference(PhpRef::of(r))),
+            ZvalType::Null | ZvalType::ConstExpr | ZvalType::Indirect | ZvalType::Ptr => None,
+        };
+        named.unwrap_or(ValueRef::Null)
     }
 
     /// The value a reference holds, or the value itself, `ZVAL_DEREF`:
@@ -3014,18 +3024,19 @@ impl Value {
     #[inline]
     #[allow(clippy::should_implement_trait)]
     pub fn deref(&self) -> Value {
-        match &self.inner {
-            Inner::Reference(r) => r.get(),
-            _ => *self,
+        match self.as_php_ref() {
+            Some(r) => r.get(),
+            None => *self,
         }
     }
 
     /// The value with `UNDEF` read as `null`, which is how
     /// `zend_zval_value_name` names a slot nothing wrote.
     pub(crate) fn undef_as_null(&self) -> Value {
-        match self.inner {
-            Inner::Undef => Value::null(),
-            _ => *self,
+        if self.zval.is_undef() {
+            Value::null()
+        } else {
+            *self
         }
     }
 
@@ -3033,67 +3044,79 @@ impl Value {
     /// which a scalar, an interned string and an immutable array do not.
     #[must_use]
     pub fn is_refcounted(&self) -> bool {
-        self.to_zval().is_refcounted()
+        self.zval.is_refcounted()
     }
 
     /// The refcount of a refcounted value, `Z_REFCOUNT`; one for a
     /// scalar, an interned string or an immutable array.
     #[must_use]
     pub fn refcount(&self) -> u32 {
-        match &self.inner {
-            Inner::Str(s) => s.heap().refcount(),
-            Inner::Array(a) => a.heap().refcount(),
-            Inner::Object(o) => o.heap().refcount(),
-            Inner::Resource(r) => r.heap().refcount(),
-            Inner::Reference(r) => r.heap().refcount(),
+        match self.as_ref() {
+            ValueRef::Str(s) => s.heap().refcount(),
+            ValueRef::Array(a) => a.heap().refcount(),
+            ValueRef::Object(o) => o.heap().refcount(),
+            ValueRef::Resource(r) => r.heap().refcount(),
+            ValueRef::Reference(r) => r.heap().refcount(),
             _ => 1,
         }
     }
 
-    /// A zval as the face names it, no owner taken: what it names is
-    /// named and not copied, as php's `ZVAL_COPY_VALUE` names it.
+    /// A zval as the face names it, no owner taken: the sixteen bytes
+    /// moved, what they name named and not copied, as php's
+    /// `ZVAL_COPY_VALUE` names it. A slot that holds no value, a
+    /// constant expression, an `IS_INDIRECT` or an `IS_PTR`, is
+    /// normalised by its reader first ([`Value::of_slot`]): none of the
+    /// three is ever a value.
     #[inline]
     pub(crate) fn of_zval(zval: Zval) -> Value {
-        let named = match zval.kind() {
-            ZvalType::Undef => Some(Value::undef()),
-            ZvalType::False => Some(Value::bool(false)),
-            ZvalType::True => Some(Value::bool(true)),
-            ZvalType::Long => zval.as_long().map(Value::int),
-            ZvalType::Double => zval.as_double().map(Value::float),
-            ZvalType::String => zval.as_str().map(|s| Value::string(PhpString::of(s))),
-            ZvalType::Array => zval.as_arr().map(|a| Value::array(PhpArray::of(a))),
-            ZvalType::Object => zval.as_obj().map(|o| Value::object(PhpObject::of(o))),
-            ZvalType::Resource => zval.as_resource().map(|r| Value::resource(Resource::of(r))),
-            ZvalType::Reference => zval.as_reference().map(|r| Value::reference(PhpRef::of(r))),
-            ZvalType::Null | ZvalType::ConstExpr | ZvalType::Indirect | ZvalType::Ptr => None,
-        };
-        named.unwrap_or_else(Value::null)
+        debug_assert!(
+            !matches!(
+                zval.kind(),
+                ZvalType::ConstExpr | ZvalType::Indirect | ZvalType::Ptr
+            ),
+            "a {:?} slot read as a value",
+            zval.kind()
+        );
+        Value::of(zval)
     }
 
-    /// The zval this value is: the sixteen bytes it names, no owner
-    /// taken, `UNDEF` for a slot nothing wrote.
-    pub(crate) fn to_zval(self) -> Zval {
-        match self.inner {
-            Inner::Undef => Zval::UNDEF,
-            Inner::Null => Zval::null(),
-            Inner::Bool(b) => Zval::bool(b),
-            Inner::Int(n) => Zval::long(n),
-            Inner::Float(f) => Zval::double(f),
-            Inner::Str(s) => Zval::string(s.heap()),
-            Inner::Array(a) => Zval::array(a.heap()),
-            Inner::Object(o) => Zval::object(o.heap()),
-            Inner::Resource(r) => Zval::resource(r.heap()),
-            Inner::Reference(r) => Zval::reference(r.heap()),
+    /// A slot that may hold a constant expression, an `IS_INDIRECT` or
+    /// an `IS_PTR` read as a value: each of the three as `null`, which is
+    /// what a reader that does not follow it reads, and any other zval
+    /// moved as [`Value::of_zval`] moves it.
+    #[inline]
+    pub(crate) fn of_slot(zval: Zval) -> Value {
+        const {
+            assert!(
+                ZvalType::ConstExpr as u8 > ZvalType::Reference as u8
+                    && ZvalType::Indirect as u8 > ZvalType::Reference as u8
+                    && ZvalType::Ptr as u8 > ZvalType::Reference as u8
+            );
         }
+        // The three follow `IS_REFERENCE` in the type byte's numbering,
+        // so one compare tells them from every value.
+        if zval.kind() as u8 > ZvalType::Reference as u8 {
+            Value::null()
+        } else {
+            Value::of(zval)
+        }
+    }
+
+    /// The zval this value is: the sixteen bytes it is, no owner
+    /// taken, `UNDEF` for a slot nothing wrote.
+    #[inline]
+    pub(crate) const fn to_zval(self) -> Zval {
+        self.zval
     }
 
     /// The zval this value is inside an array's bucket or a property
     /// slot, where `UNDEF` is a tombstone and never an element: a value
     /// nothing wrote is `null` there, as php reads one.
     pub(crate) fn into_zval(self) -> Zval {
-        match self.inner {
-            Inner::Undef => Zval::null(),
-            _ => self.to_zval(),
+        if self.zval.is_undef() {
+            Zval::null()
+        } else {
+            self.zval
         }
     }
 
@@ -3102,79 +3125,55 @@ impl Value {
     /// [`Value::deref`] is the `ZVAL_DEREF` before it.
     #[must_use]
     pub fn as_bool(&self) -> Option<bool> {
-        match self.inner {
-            Inner::Bool(b) => Some(b),
-            _ => None,
-        }
+        self.zval.as_bool()
     }
 
     /// `Some` for an `int`.
     #[must_use]
     pub fn as_int(&self) -> Option<i64> {
-        match self.inner {
-            Inner::Int(n) => Some(n),
-            _ => None,
-        }
+        self.zval.as_long()
     }
 
     /// `Some` for a `float`.
     #[must_use]
     pub fn as_float(&self) -> Option<f64> {
-        match self.inner {
-            Inner::Float(f) => Some(f),
-            _ => None,
-        }
+        self.zval.as_double()
     }
 
     /// `Some` for a `string`.
     #[must_use]
-    pub fn as_php_string(&self) -> Option<&PhpString> {
-        match &self.inner {
-            Inner::Str(s) => Some(s),
-            _ => None,
-        }
+    pub fn as_php_string(&self) -> Option<PhpString> {
+        self.zval.as_str().map(PhpString::of)
     }
 
-    /// The bytes of a `string`.
+    /// The bytes of a `string`, borrowed for as long as the value is.
     #[must_use]
     pub fn as_str_bytes(&self) -> Option<&[u8]> {
-        self.as_php_string().map(PhpString::as_bytes)
+        self.zval.str_bytes()
     }
 
     /// `Some` for an `array`.
     #[must_use]
-    pub fn as_array(&self) -> Option<&PhpArray> {
-        match &self.inner {
-            Inner::Array(a) => Some(a),
-            _ => None,
-        }
+    pub fn as_array(&self) -> Option<PhpArray> {
+        self.zval.as_arr().map(PhpArray::of)
     }
 
     /// `Some` for an `object`.
     #[must_use]
-    pub fn as_object(&self) -> Option<&PhpObject> {
-        match &self.inner {
-            Inner::Object(o) => Some(o),
-            _ => None,
-        }
+    pub fn as_object(&self) -> Option<PhpObject> {
+        self.zval.as_obj().map(PhpObject::of)
     }
 
     /// `Some` for a `resource`.
     #[must_use]
-    pub fn as_resource(&self) -> Option<&Resource> {
-        match &self.inner {
-            Inner::Resource(r) => Some(r),
-            _ => None,
-        }
+    pub fn as_resource(&self) -> Option<Resource> {
+        self.zval.as_resource().map(Resource::of)
     }
 
     /// `Some` for a reference, not followed.
     #[must_use]
-    pub fn as_php_ref(&self) -> Option<&PhpRef> {
-        match &self.inner {
-            Inner::Reference(r) => Some(r),
-            _ => None,
-        }
+    pub fn as_php_ref(&self) -> Option<PhpRef> {
+        self.zval.as_reference().map(PhpRef::of)
     }
 }
 
@@ -3227,14 +3226,14 @@ mod tests {
         assert_eq!(first.refcount(), 1, "a copy touches no refcount");
         req.addref(&second);
         assert_eq!(first.refcount(), 2);
-        let Some(mut b) = second.as_array().copied() else {
+        let Some(mut b) = second.as_array() else {
             return;
         };
         assert!(b.append(&mut req, Owner::int(2)).is_ok());
         assert_eq!(first.refcount(), 1, "the write took the second owner away");
         assert_eq!(b.len(), 2);
-        assert_eq!(first.as_array().map(PhpArray::len), Some(1));
-        assert_ne!(&b, first.as_array().unwrap_or(&b));
+        assert_eq!(first.as_array().map(|v| v.len()), Some(1));
+        assert_ne!(b, first.as_array().unwrap_or(b));
         req.release(Value::array(b));
         req.release(first);
         assert_eq!(req.memory_usage(false), start);
@@ -3261,7 +3260,7 @@ mod tests {
         assert_eq!(first.refcount(), 1, "a copy touches no refcount");
         let second = Owner::take(&req, second);
         assert_eq!(first.refcount(), 2);
-        assert_eq!(second.as_object(), Some(&object));
+        assert_eq!(second.as_object(), Some(object));
         let Ok(mut a) = PhpArray::new(&mut req) else {
             second.give_up(&mut req);
             return;
@@ -3269,7 +3268,7 @@ mod tests {
         assert!(a.append(&mut req, second).is_ok());
         assert_eq!(
             a.get(&Key::Int(0))
-                .and_then(|v| v.as_object().map(PhpObject::index)),
+                .and_then(|v| v.as_object().map(|v| v.index())),
             Some(1)
         );
         a.give_up(&mut req);
@@ -3410,5 +3409,47 @@ mod tests {
             return;
         };
         assert_eq!(next.id(), 2, "an id is never given twice");
+    }
+
+    /// A slot that holds no value, a constant expression, an
+    /// `IS_INDIRECT` or an `IS_PTR`, reads as `null` where its reader
+    /// normalises it ([`Value::of_slot`]), as each read when the value
+    /// was an enum the three had no arm in, and keeps its kind of slot
+    /// no further; every value is the zval it was moved from.
+    #[test]
+    fn a_slot_that_holds_no_value_reads_as_null() {
+        let mut req = crate::test::request();
+        let Ok(mut a) = PhpArray::new(&mut req) else {
+            return;
+        };
+        assert!(a.append(&mut req, Owner::int(7)).is_ok());
+        let Some(at) = a.heap().value_ref_at(0) else {
+            return;
+        };
+        for slot in [Zval::const_expr(3), Zval::ptr(1), Zval::indirect(at)] {
+            assert_eq!(Value::of_slot(slot), Value::null());
+            assert_eq!(Value::of_slot(slot).to_zval().kind(), ZvalType::Null);
+            assert_eq!(Value::of_slot(slot).tag(), TypeTag::Null);
+        }
+        for value in [
+            Value::int(4),
+            Value::float(-0.5),
+            Value::bool(true),
+            Value::array(*a),
+        ] {
+            assert_eq!(Value::of_zval(value.to_zval()), value);
+            assert_eq!(Value::of_slot(value.to_zval()).to_zval(), value.to_zval());
+        }
+        a.give_up(&mut req);
+    }
+
+    /// [`Value::of_zval`] is handed no slot of the three: a debug build
+    /// stops the move of one, so a reader that forgot to normalise is
+    /// found by the first test that reaches it.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "slot read as a value")]
+    fn a_slot_that_holds_no_value_is_never_moved_as_one() {
+        let _ = Value::of_zval(Zval::const_expr(3));
     }
 }

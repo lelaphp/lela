@@ -142,7 +142,7 @@ fn subject_from_dn(req: &mut Request, csr: &Csr, dn: PhpArray) -> Result<bool, T
             return Ok(ControlFlow::Continue(()));
         }
         let item = row.value().deref();
-        let Some(list) = item.as_array().copied() else {
+        let Some(list) = item.as_array() else {
             let added = add_subject_entry(req, csr, nid, &item)?;
             return Ok(if added {
                 ControlFlow::Continue(())

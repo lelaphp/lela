@@ -192,7 +192,7 @@ impl Options {
                 let mut out = Vec::new();
                 // `ZEND_HASH_FOREACH_VAL`, holding nothing: a conversion
                 // may serve `__toString`.
-                let refused = walk::foreach(req, *array, walk::Hold::None, |req, row| {
+                let refused = walk::foreach(req, array, walk::Hold::None, |req, row| {
                     let refused = with_string(req, row.value(), |bytes| {
                         if bytes.is_empty() {
                             Some("not contain empty strings")

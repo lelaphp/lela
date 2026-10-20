@@ -409,6 +409,7 @@ Zval::ptr
 Zval::reference
 Zval::resource
 Zval::set_fe_pos
+Zval::str_bytes
 Zval::string
 ZvalRef
 ZvalRef::read

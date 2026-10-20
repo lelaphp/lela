@@ -818,7 +818,7 @@ pub(super) fn render(
     // php asks no stack limit here and runs to the thread's end; this
     // walk is held to the floor short of it.
     call_stack_end(req)?;
-    if let Some(array) = value.as_array().copied() {
+    if let Some(array) = value.as_array() {
         out.extend_from_slice(b"Array\n");
         // `GC_IS_RECURSIVE` and `GC_PROTECT_RECURSION`
         // (`Z/Zend/zend.c:554`), which php takes only where the array is
@@ -846,7 +846,7 @@ pub(super) fn render(
         };
         let (kind, backing) = (decl.kind, decl.backing);
         // `Z_OBJ_HANDLER_P(expr, get_class_name)`.
-        let name = object.handlers(req).get_class_name(req, *object);
+        let name = object.handlers(req).get_class_name(req, object);
         // `smart_str_appends(buf, ZSTR_VAL(class_name))`: up to the NUL
         // of an anonymous class's name.
         out.extend_from_slice(php_ext::coerce::c_str(&name));
@@ -1226,7 +1226,7 @@ pub fn export(
         let put = quoted(req, out, s.as_bytes());
         temps.free(req);
         put?;
-    } else if let Some(array) = value.as_array().copied() {
+    } else if let Some(array) = value.as_array() {
         // `GC_IS_RECURSIVE`, then `GC_ADDREF(myht)` beside
         // `GC_PROTECT_RECURSION(myht)` and `ZEND_HASH_FOREACH_KEY_VAL`
         // (`Z/ext/standard/var.c:560`): a foreach walk holding the array and
@@ -1275,7 +1275,7 @@ pub fn export(
         }
         out.put(req, b")")?;
     } else if let Some(object) = value.as_object() {
-        return export_object(req, out, *object, level);
+        return export_object(req, out, object, level);
     } else {
         out.put(req, b"NULL")?;
     }

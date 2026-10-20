@@ -410,7 +410,7 @@ pub(crate) fn completion(req: &mut Request, text: &[u8]) -> Matches {
                 let Some(group) = group.as_array() else {
                     continue;
                 };
-                for name in names(req, *group) {
+                for name in names(req, group) {
                     if name.starts_with(&lowered) {
                         // `func->common.function_name`, as declared.
                         let declared = lookup_function(req, &name)
@@ -461,7 +461,7 @@ fn constant_names(req: &mut Request) -> Vec<Vec<u8>> {
     };
     let held = all.deref();
     let names = held.as_array().map_or_else(Vec::new, |constants| {
-        walk::rows(req, *constants)
+        walk::rows(req, constants)
             .filter_map(|(key, _)| match key {
                 Key::Str(name) => Some(name.as_bytes().to_vec()),
                 Key::Int(_) => None,

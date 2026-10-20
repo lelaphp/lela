@@ -54,7 +54,7 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
     match value.as_ref() {
         ValueRef::Str(s) => {
             req.addref(value);
-            Ok(*s)
+            Ok(s)
         }
         // `zend_long_to_str` and `zend_double_to_str` mark what they
         // make valid UTF-8, the digits being ASCII.
@@ -78,7 +78,7 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
             req.string(b"Array")
         }
         ValueRef::Resource(r) => req.string(format!("Resource id #{}", r.id()).as_bytes()),
-        ValueRef::Object(o) => object_to_string(req, *o),
+        ValueRef::Object(o) => object_to_string(req, o),
         // `false` and `null` are both the empty string; a reference was
         // followed above.
         ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) | ValueRef::Reference(_) => {
@@ -144,7 +144,7 @@ pub(crate) fn object_to_string(
     let class = object.class();
     let table = req.object_handlers(object.heap());
     if let Some(returned) = table.cast_object(req, object, TypeTag::String)? {
-        if let Some(text) = returned.as_php_string().copied() {
+        if let Some(text) = returned.as_php_string() {
             returned.hand_on();
             return Ok(text);
         }
@@ -233,7 +233,7 @@ pub(crate) fn switch_long(subject: &Value, table: PhpArray) -> Switched {
 /// ```
 pub(crate) fn switch_string(subject: &Value, table: PhpArray) -> Switched {
     match subject.deref().as_ref() {
-        ValueRef::Str(s) => found(table.get(&Key::Str(*s))),
+        ValueRef::Str(s) => found(table.get(&Key::Str(s))),
         _ => Switched::Chain,
     }
 }
@@ -267,7 +267,7 @@ pub(crate) fn switch_string(subject: &Value, table: PhpArray) -> Switched {
 pub(crate) fn match_target(subject: &Value, table: PhpArray) -> Switched {
     match subject.deref().as_ref() {
         ValueRef::Int(n) => found(table.get(&Key::Int(n))),
-        ValueRef::Str(s) => found(table.get(&Key::Str(*s))),
+        ValueRef::Str(s) => found(table.get(&Key::Str(s))),
         _ => Switched::Default,
     }
 }
@@ -315,7 +315,7 @@ pub(crate) fn in_array(
 ) -> Result<bool, Thrown> {
     let needle = needle.deref();
     match needle.as_ref() {
-        ValueRef::Str(s) => return Ok(table.contains(&Key::Str(*s))),
+        ValueRef::Str(s) => return Ok(table.contains(&Key::Str(s))),
         ValueRef::Int(n) if strict => return Ok(table.contains(&Key::Int(n))),
         _ if strict => return Ok(false),
         ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => {
@@ -527,7 +527,7 @@ pub(crate) fn is_true(req: &mut Request, value: &Value) -> Result<bool, Thrown> 
     Ok(match value.deref().as_ref() {
         ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => false,
         ValueRef::Bool(true) => true,
-        ValueRef::Object(o) => return object_is_true(req, *o),
+        ValueRef::Object(o) => return object_is_true(req, o),
         ValueRef::Int(n) => n != 0,
         ValueRef::Float(f) => {
             if f.is_nan() {
@@ -818,9 +818,9 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
         ValueRef::Undef | ValueRef::Null => Ok(PhpArray::empty()),
         ValueRef::Array(a) => {
             req.addref(&value);
-            Ok(*a)
+            Ok(a)
         }
-        ValueRef::Object(&o) if req.class_named(Bare::resolved(b"Closure")) != Some(o.class()) => {
+        ValueRef::Object(o) if req.class_named(Bare::resolved(b"Closure")) != Some(o.class()) => {
             // `zend_std_build_object_properties_array`, the cast's walk
             // that rebuilds no table (`Z/Zend/zend_execute.h:267`).
             if let Some(slots) = o.slots_without_table(req)? {
@@ -1828,14 +1828,14 @@ fn property_type_error(
 /// ```
 pub(crate) fn to_object(req: &mut Request, value: &Value) -> Result<PhpObject, Thrown> {
     let value = value.deref();
-    if let ValueRef::Object(&o) = value.as_ref() {
+    if let ValueRef::Object(o) = value.as_ref() {
         req.addref(&value);
         return Ok(o);
     }
     let object = req.new_object_of("stdClass")?;
     match value.as_ref() {
         ValueRef::Undef | ValueRef::Null => {}
-        ValueRef::Array(a) => req.properties_from_array(object, *a)?,
+        ValueRef::Array(a) => req.properties_from_array(object, a)?,
         _ => {
             if value.as_float().is_some_and(f64::is_nan) {
                 warning(req, "unexpected NAN value was coerced to object");
@@ -1885,7 +1885,7 @@ pub(crate) fn get_long(req: &mut Request, value: &Value) -> i64 {
             None => 0,
         },
         ValueRef::Array(a) => i64::from(!a.is_empty()),
-        ValueRef::Object(&o) => match object_converted(req, o, TypeTag::Int, "int") {
+        ValueRef::Object(o) => match object_converted(req, o, TypeTag::Int, "int") {
             Some(converted) => converted.as_int().unwrap_or(1),
             None => 1,
         },
@@ -1941,7 +1941,7 @@ pub(crate) fn get_double(req: &mut Request, value: &Value) -> f64 {
             None => 0.0,
         },
         ValueRef::Array(a) => f64::from(u8::from(!a.is_empty())),
-        ValueRef::Object(&o) => match object_converted(req, o, TypeTag::Float, "float") {
+        ValueRef::Object(o) => match object_converted(req, o, TypeTag::Float, "float") {
             Some(converted) => converted.as_float().unwrap_or(1.0),
             None => 1.0,
         },
@@ -2001,7 +2001,7 @@ pub(crate) fn add(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
         return Ok(value);
     }
     if let (Some(a), Some(b)) = (left.deref().as_array(), right.deref().as_array()) {
-        return Ok(merged(req, *a, *b)?.into_value().hand_on());
+        return Ok(merged(req, a, b)?.into_value().hand_on());
     }
     if let Some(value) = object_operation(req, BinaryOp::Add, left, right)? {
         return Ok(value);
@@ -2904,7 +2904,7 @@ pub(crate) fn concat_assign(
     let a = concat_operand(req, left)?;
     let right = right.deref();
     let (b, owned) = match right.as_php_string() {
-        Some(b) if quiet => (*b, false),
+        Some(b) if quiet => (b, false),
         _ => match concat_operand(req, &right) {
             Ok(b) => (b, true),
             Err(thrown) => {
@@ -3092,7 +3092,7 @@ pub(crate) fn concat_assign(
 pub(crate) fn compare(req: &mut Request, left: &Value, right: &Value) -> Result<Ordering, Thrown> {
     let (left, right) = (left.deref(), right.deref());
     if let (Some(a), Some(b)) = (left.as_array(), right.as_array()) {
-        return compare_arrays(req, *a, *b);
+        return compare_arrays(req, a, b);
     }
     compare_values(req, &left, &right)
 }
@@ -3329,7 +3329,7 @@ pub(crate) fn spaceship(req: &mut Request, left: &Value, right: &Value) -> Resul
 pub(crate) fn identical(req: &mut Request, left: &Value, right: &Value) -> Result<bool, Thrown> {
     let (left, right) = (left.deref(), right.deref());
     if let (Some(a), Some(b)) = (left.as_array(), right.as_array()) {
-        return identical_arrays(req, *a, *b);
+        return identical_arrays(req, a, b);
     }
     Ok(identical_values(&left, &right))
 }
@@ -3445,7 +3445,7 @@ fn scalar(value: &Value) -> Option<Scalar<'_>> {
         ValueRef::Bool(b) => Scalar::Bool(b),
         ValueRef::Int(n) => Scalar::Long(n),
         ValueRef::Float(f) => Scalar::Double(f),
-        ValueRef::Str(s) => Scalar::Str(s.as_bytes()),
+        ValueRef::Str(_) => Scalar::Str(value.as_str_bytes()?),
         ValueRef::Array(_)
         | ValueRef::Object(_)
         | ValueRef::Resource(_)
@@ -3459,7 +3459,7 @@ fn scalar(value: &Value) -> Option<Scalar<'_>> {
 /// default arm has left: a resource is its id, and a string the number
 /// it opens with or zero, read with `allow_errors` and no warning. A
 /// number is itself; nothing else reaches here.
-fn silent_number(value: ValueRef<'_>) -> Scalar<'static> {
+fn silent_number(value: ValueRef) -> Scalar<'static> {
     match value {
         ValueRef::Int(n) => Scalar::Long(n),
         ValueRef::Float(f) => Scalar::Double(f),
@@ -3826,7 +3826,7 @@ fn stepped_other(
     verb: &str,
     step: fn(&mut Request, &Value) -> Result<Value, Thrown>,
 ) -> Result<Value, Thrown> {
-    if let ValueRef::Object(&o) = value.as_ref() {
+    if let ValueRef::Object(o) = value.as_ref() {
         let table = req.object_handlers(o.heap());
         if let Some(stepped) = table.do_operation(req, op, value, Some(&Value::int(1)))? {
             return Ok(stepped.hand_on());
@@ -4176,7 +4176,7 @@ pub(crate) fn count(req: &mut Request, value: &Value, sizeof: bool) -> Result<i6
     if let Some(array) = value.as_array() {
         return Ok(i64::try_from(array.len()).unwrap_or(i64::MAX));
     }
-    if let Some(object) = value.as_object().copied() {
+    if let Some(object) = value.as_object() {
         let table = req.object_handlers(object.heap());
         if let Some(count) = table.count_elements(req, object)? {
             return Ok(count);
@@ -4348,11 +4348,11 @@ pub(crate) fn dimension_const(
     mode: DimRead,
 ) -> Result<Value, Thrown> {
     let container = container.deref();
-    if let Some(array) = container.as_array().copied() {
+    if let Some(array) = container.as_array() {
         let key = array_offset(req, dim, false)?;
         return Ok(array_entry(req, array, key, mode));
     }
-    if let Some(text) = container.as_php_string().copied() {
+    if let Some(text) = container.as_php_string() {
         return string_offset(req, text, dim, mode);
     }
     if mode == DimRead::Silent {
@@ -4391,7 +4391,7 @@ pub(crate) fn array_entry(
     mode: DimRead,
 ) -> Value {
     if let Some(found) = array.heap().get(key) {
-        let value = Value::of_zval(found).deref();
+        let value = Value::of_slot(found).deref();
         req.addref(&value);
         return value;
     }
@@ -4610,7 +4610,7 @@ pub(crate) fn array_offset(
     let empty = |req: &mut Request| Ok(php_heap::Key::Str(req.string(b"")?.heap()));
     match offset.as_ref() {
         ValueRef::Str(s) if constant => Ok(php_heap::Key::Str(s.heap())),
-        ValueRef::Str(s) => Ok(Key::lookup(*s).heap()),
+        ValueRef::Str(s) => Ok(Key::lookup(s).heap()),
         ValueRef::Int(n) => Ok(php_heap::Key::Long(n)),
         ValueRef::Reference(r) => array_offset(req, &r.get(), false),
         ValueRef::Null => {
@@ -4702,7 +4702,7 @@ pub(crate) fn array_key_exists(
 ) -> Result<bool, Thrown> {
     let key = key.deref();
     match key.as_ref() {
-        ValueRef::Str(s) => return Ok(array.heap().contains(Key::lookup(*s).heap())),
+        ValueRef::Str(s) => return Ok(array.heap().contains(Key::lookup(s).heap())),
         ValueRef::Int(n) => return Ok(array.heap().contains(php_heap::Key::Long(n))),
         _ => {}
     }
@@ -4824,7 +4824,7 @@ pub(crate) fn isset_dim(
     } else {
         isset_offset(req, offset, constant)?
     };
-    let found = array.heap().get(key).map(crate::exec::value_of);
+    let found = array.heap().get(key).map(Value::of_slot);
     if empty {
         return Ok(match found {
             Some(value) => !is_true(req, &value.deref())?,
@@ -4942,7 +4942,7 @@ pub(crate) fn unset_dim(
     let a = array.heap();
     let key = match offset.deref().as_ref() {
         ValueRef::Str(s) if constant => php_heap::Key::Str(s.heap()),
-        ValueRef::Str(s) => Key::lookup(*s).heap(),
+        ValueRef::Str(s) => Key::lookup(s).heap(),
         ValueRef::Int(n) => php_heap::Key::Long(n),
         ValueRef::Bool(b) => php_heap::Key::Long(i64::from(b)),
         ValueRef::Float(f) => {
@@ -5228,7 +5228,7 @@ pub(crate) fn to_long(req: &mut Request, value: &Value) -> Result<Option<i64>, T
     if let Some(d) = value.as_float() {
         return Ok(Some(double_to_long(req, d)));
     }
-    if let Some(s) = value.as_php_string().copied() {
+    if let Some(s) = value.as_php_string() {
         let Some((number, trailing)) = numeric_prefix(s.as_bytes()) else {
             return Ok(None);
         };
@@ -5264,7 +5264,7 @@ pub(crate) fn to_long(req: &mut Request, value: &Value) -> Result<Option<i64>, T
     if let Some(b) = value.as_bool() {
         return Ok(Some(i64::from(b)));
     }
-    if let Some(o) = value.as_object().copied() {
+    if let Some(o) = value.as_object() {
         // `cast_object(zobj, &dst, IS_LONG)`, failing where the class
         // converts to nothing or threw.
         let table = req.object_handlers(o.heap());
@@ -5617,7 +5617,7 @@ fn to_number(req: &mut Request, value: &Value) -> Result<Option<Number>, Thrown>
     if let Some(b) = value.as_bool() {
         return Ok(Some(Number::Long(i64::from(b))));
     }
-    if let Some(o) = value.as_object().copied() {
+    if let Some(o) = value.as_object() {
         return Ok(object_number(req, o)?.and_then(|c| match c.as_ref() {
             ValueRef::Int(n) => Some(Number::Long(n)),
             ValueRef::Float(d) => Some(Number::Double(d)),

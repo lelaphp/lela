@@ -33,7 +33,7 @@ impl Request {
             visit(match *symbol {
                 Symbol::Value(value) => value,
                 Symbol::Held(cell) => cell.as_value(),
-                Symbol::Indirect(frame, at) => Value::of_zval(cv(frame, at)),
+                Symbol::Indirect(frame, at) => Value::of_slot(cv(frame, at)),
             });
         }
     }
@@ -469,7 +469,7 @@ impl Request {
             }
             Symbol::Value(held) => {
                 if let Some(cell) = held.as_php_ref() {
-                    *cell
+                    cell
                 } else {
                     let cell = self.reference(held.undef_as_null())?;
                     self.globals()[at].1 = Symbol::Value(cell.as_value());
@@ -617,7 +617,7 @@ impl Request {
             self.release(value);
             return;
         };
-        let held = Value::of_zval(at.read());
+        let held = Value::of_slot(at.read());
         let released = match order {
             Overwrite::After => {
                 at.write(value.to_zval());
@@ -638,7 +638,7 @@ impl Request {
             self.release(value);
             return;
         };
-        let left = Value::of_zval(at.read());
+        let left = Value::of_slot(at.read());
         at.write(value.to_zval());
         let by_program = match released {
             Some(released) => released.wrote_over(self, left),
@@ -730,7 +730,7 @@ impl Request {
     /// the cell had the caller's, and the cell given up.
     fn unhold(&mut self, cell: PhpRef) -> Value {
         let place = cell.heap().val_ref();
-        let value = Value::of_zval(place.read());
+        let value = Value::of_slot(place.read());
         place.write(Value::undef().to_zval());
         self.release(cell.as_value());
         value
@@ -756,7 +756,7 @@ impl Request {
                     Some(own) if table == TableId::GLOBAL => own,
                     _ => &self.vm.stack,
                 };
-                Value::of_zval(stack.frame(frame)?.slot(php_heap::Slot(at)))
+                Value::of_slot(stack.frame(frame)?.slot(php_heap::Slot(at)))
             }
         })
     }
@@ -808,7 +808,7 @@ impl Request {
     /// What an attached name's CV holds, a view ([`Request::attached_ptr`]).
     pub(super) fn attached(&mut self, table: TableId, frame: FrameRef, at: u32) -> Value {
         self.attached_ptr(table, frame, at)
-            .map_or(Value::undef(), |place| Value::of_zval(place.read()))
+            .map_or(Value::undef(), |place| Value::of_slot(place.read()))
     }
 
     /// What an attached name's CV holds, taken, the CV left `UNDEF`.
@@ -816,7 +816,7 @@ impl Request {
         let Some(place) = self.attached_ptr(table, frame, at) else {
             return Value::undef();
         };
-        let held = Value::of_zval(place.read());
+        let held = Value::of_slot(place.read());
         place.write(Zval::UNDEF);
         held
     }

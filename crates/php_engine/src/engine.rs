@@ -2058,11 +2058,11 @@ impl Shared {
     /// request finds it.
     pub(crate) fn sapi_constant(&self, sapi: &[u8]) -> Option<Value> {
         if let Some((_, z)) = self.sapi_names.iter().find(|(n, _)| n.as_ref() == sapi) {
-            return Some(exec::value_of(*z));
+            return Some(Value::of_slot(*z));
         }
         let mut strings = self.interned.strings();
         let interned = strings.intern(sapi).ok()?;
-        Some(exec::value_of(Zval::string(interned)))
+        Some(Value::of_slot(Zval::string(interned)))
     }
 
     pub(crate) fn constant(&self, name: &[u8]) -> Option<Value> {
@@ -2081,7 +2081,7 @@ impl Shared {
     /// [`Shared::constant`] reads it.
     pub(crate) fn constant_at(&self, at: usize) -> Option<Value> {
         let (z, _) = self.constant_values.get(at)?.as_ref()?;
-        Some(exec::value_of(*z))
+        Some(Value::of_slot(*z))
     }
 
     /// `ZEND_CONSTANT_MODULE_NUMBER` of the constant `name` an extension

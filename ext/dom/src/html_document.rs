@@ -104,7 +104,7 @@ fn set_body(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), T
     let doc = prop_node(req, object)?;
     let fresh = value
         .as_object()
-        .and_then(|o| crate::node_of(req, *o))
+        .and_then(|o| crate::node_of(req, o))
         .filter(|n| is_body(&n.name()));
     let Some(fresh) = fresh else {
         return dom_error_message(

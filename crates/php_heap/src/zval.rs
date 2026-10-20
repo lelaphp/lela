@@ -449,7 +449,7 @@ impl Zval {
     /// process's interned strings, which is the one test php makes here
     /// (`Z/Zend/zend_types.h:1093-1100`).
     #[must_use]
-    pub fn string(s: Str) -> Zval {
+    pub const fn string(s: Str) -> Zval {
         let flags = if s.is_interned() {
             0
         } else {
@@ -461,7 +461,7 @@ impl Zval {
     /// `ZVAL_ARR`: the array, refcounted unless it is immutable, which is
     /// what a compiled program's constant array is (design §5.3).
     #[must_use]
-    pub fn array(a: Arr) -> Zval {
+    pub const fn array(a: Arr) -> Zval {
         let flags = if a.is_immutable() {
             0
         } else {
@@ -473,7 +473,7 @@ impl Zval {
     /// `ZVAL_OBJ`: the object, refcounted and collectable, as every
     /// object is (design §5.4).
     #[must_use]
-    pub fn object(o: Obj) -> Zval {
+    pub const fn object(o: Obj) -> Zval {
         Zval::typed(
             ZvalType::Object,
             Zval::TYPE_REFCOUNTED | Zval::TYPE_COLLECTABLE,
@@ -484,7 +484,7 @@ impl Zval {
     /// `ZVAL_RES`: the resource, refcounted and never collectable
     /// (`IS_RESOURCE_EX`, design §5.5).
     #[must_use]
-    pub fn resource(r: Res) -> Zval {
+    pub const fn resource(r: Res) -> Zval {
         Zval::typed(ZvalType::Resource, Zval::TYPE_REFCOUNTED, r.payload())
     }
 
@@ -492,7 +492,7 @@ impl Zval {
     /// (`IS_REFERENCE_EX`, `Z/Zend/zend_types.h:843`), since what it
     /// holds may close a cycle.
     #[must_use]
-    pub fn reference(r: Ref) -> Zval {
+    pub const fn reference(r: Ref) -> Zval {
         Zval::typed(
             ZvalType::Reference,
             Zval::TYPE_REFCOUNTED | Zval::TYPE_COLLECTABLE,
@@ -650,6 +650,20 @@ impl Zval {
             ZvalType::String => unsafe { Str::from_payload(self.value) },
             _ => None,
         }
+    }
+
+    /// The bytes of a `String`, else `None`, `Z_STRVAL` over
+    /// `Z_STRLEN`: borrowed for as long as this zval is, where
+    /// [`Str::bytes`] is borrowed for as long as the name it is called
+    /// on.
+    #[must_use]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn str_bytes(&self) -> Option<&[u8]> {
+        let s = self.as_str()?;
+        // SAFETY: the string a zval names is live while the zval names
+        // it, the contract `Zval::as_str` states, so it is for the
+        // borrow of the zval.
+        Some(unsafe { s.bytes_held() })
     }
 
     /// The array of an `Array`, else `None`. Naming it does not take an

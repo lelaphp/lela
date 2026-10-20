@@ -903,7 +903,7 @@ impl ReflectionProperty {
         };
         let key = PhpString::new(req, &name)?;
         let value = Owner::take(req, value);
-        let (object, handlers) = (*object, object.handlers(req));
+        let (object, handlers) = (object, object.handlers(req));
         let asked = asked_class(req, this.object(), class);
         req.with_fake_scope(asked, |req| {
             handlers.write_property(req, object, key, value)

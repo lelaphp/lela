@@ -112,7 +112,7 @@ fn throw_invalid(
         Ok(throwable) => throwable,
         Err(thrown) => return thrown,
     };
-    if let Some(object) = throwable.as_object().copied() {
+    if let Some(object) = throwable.as_object() {
         let errors = Owner::take(req, Value::array(errors));
         let written = write_prop(req, &object, b"errors", errors);
         if let Err(thrown) = written {

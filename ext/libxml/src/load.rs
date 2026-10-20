@@ -376,7 +376,7 @@ fn open(
         .state::<State>()
         .stream_context
         .as_ref()
-        .and_then(|v| v.as_resource().copied());
+        .and_then(|v| v.as_resource());
     let context = match kept {
         Some(context) => StreamCtx::fetch(req, context)?,
         None => StreamCtx::default_ctx(req)?,

@@ -2069,7 +2069,7 @@ impl Request {
         if let Some(name) = held.as_str_bytes() {
             return String::from_utf8_lossy(name).into_owned();
         }
-        if let Some(array) = held.as_array().copied() {
+        if let Some(array) = held.as_array() {
             let pair =
                 (array.len() == 2).then(|| (array.get(&Key::Int(0)), array.get(&Key::Int(1))));
             if let Some((Some(first), Some(second))) = pair
@@ -2086,7 +2086,7 @@ impl Request {
             }
             return String::from("Array");
         }
-        if let Some(object) = held.as_object().copied() {
+        if let Some(object) = held.as_object() {
             if let Some(closure) = object.closure(self) {
                 let name = self.declared_name(closure.function);
                 return match closure.scope.filter(|_| closure.fake) {

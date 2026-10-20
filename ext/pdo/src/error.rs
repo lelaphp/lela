@@ -195,7 +195,7 @@ fn throw_pdo(
             return thrown;
         }
     };
-    let Some(object) = value.as_object().copied() else {
+    let Some(object) = value.as_object() else {
         code.give_up(req);
         if let Some(info) = info {
             info.give_up(req);

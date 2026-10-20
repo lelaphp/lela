@@ -111,8 +111,8 @@ fn namespace_node(
         return Err(dom_throw(req, Code::InvalidState));
     };
     let value = object_for(req, fake, Some(this))?;
-    if let Some(object) = value.as_object().copied() {
-        let parent = Owner::take(req, this.as_value());
+    if let Some(object) = value.as_object() {
+        let parent = Owner::take(req, this);
         match dom_mut(req, object) {
             Some(d) => d.extra = Extra::NamespaceParent(parent),
             None => parent.give_up(req),

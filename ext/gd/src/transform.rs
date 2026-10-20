@@ -322,7 +322,7 @@ fn scatter(req: &mut Request, im: Im, args: &[Untyped<Value>]) -> Result<bool, T
     let plus = long_arg(req, args, 1, 0)?;
     let colors = if args.len() > 2 {
         let value = arg(req, args, 2, &Type::Array)?;
-        value.as_array().copied()
+        value.as_array()
     } else {
         None
     };

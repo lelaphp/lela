@@ -4598,7 +4598,7 @@ impl StreamLayer for Request {
         // so the payload says what `le_stream` and `le_pstream` would.
         let r = value.as_resource()?;
         r.kind()?;
-        r.native::<Option<PhpStream>>(self).map(|_| Stream::of(*r))
+        r.native::<Option<PhpStream>>(self).map(|_| Stream::of(r))
     }
 
     /// `php_stream_read_to_str` (`Z/main/streams/streams.c:822`): a

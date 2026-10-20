@@ -905,7 +905,7 @@ fn proc_open(
             let nindex = descriptors.len();
             let made = match item.as_ref() {
                 ValueRef::Resource(_) => resource_descriptor(req, &item, index, nindex)?,
-                ValueRef::Array(ht) => array_descriptor(req, *ht, index, &descriptors, &mut pty)?,
+                ValueRef::Array(ht) => array_descriptor(req, ht, index, &descriptors, &mut pty)?,
                 _ => {
                     return Err(arg_value_error(req, 2, "only contain arrays and streams"));
                 }

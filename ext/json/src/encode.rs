@@ -94,7 +94,7 @@ pub(super) fn encode(
         }
         ValueRef::Str(s) => return Ok(escape_string(buf, s.as_bytes(), options, enc)),
         ValueRef::Object(o) => {
-            let object = *o;
+            let object = o;
             if enc
                 .serializable
                 .is_some_and(|ce| object.instance_of(req, ce))
@@ -398,7 +398,7 @@ fn serializable(
             return Err(thrown);
         }
     };
-    let itself = answer.as_object().is_some_and(|o| *o == object);
+    let itself = answer.as_object().is_some_and(|o| o == object);
     if itself {
         object.unprotect_in(req, RecursionGuard::Json);
     }
@@ -476,10 +476,10 @@ fn encode_array(
         }
         return Ok(false);
     }
-    if let Some(object) = value.as_object().copied() {
+    if let Some(object) = value.as_object() {
         return encode_object(req, buf, object, options, enc);
     }
-    let Some(array) = value.as_array().copied() else {
+    let Some(array) = value.as_array() else {
         return Ok(true);
     };
     let as_object = options & JSON_FORCE_OBJECT != 0 || !array.is_list();

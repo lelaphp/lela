@@ -1392,10 +1392,10 @@ fn session_set_save_handler(
         arity(req, 1, Some(2))?;
         let first = open.value();
         let is_handler = match first.as_object() {
-            Some(object) => implements(req, *object, b"SessionHandlerInterface")?,
+            Some(object) => implements(req, object, b"SessionHandlerInterface")?,
             None => false,
         };
-        let Some(object) = first.as_object().copied().filter(|_| is_handler) else {
+        let Some(object) = first.as_object().filter(|_| is_handler) else {
             let name = value_name(req, &first);
             return Err(arg_type_error(
                 req,

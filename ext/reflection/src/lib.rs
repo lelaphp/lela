@@ -6185,7 +6185,6 @@ fn value_default_string(req: &mut Request, value: &Value) -> String {
         ValueRef::Float(f) => default_value_string(req, &ConstExpr::Double(f)),
         ValueRef::Str(s) => format!("'{}'", escaped(s.as_bytes())),
         ValueRef::Array(array) => {
-            let array = *array;
             let is_list = (0..)
                 .zip(walk::rows(req, array))
                 .all(|(i, (key, _))| key == Key::Int(i));
@@ -6302,7 +6301,7 @@ fn exported_value(req: &mut Request, value: &Value) -> String {
     let mut out = String::from("[");
     let mut first = true;
     // As [`value_default_string`] walks one.
-    let walked = walk::foreach(req, *array, Hold::None, |req, row| -> walk::Step {
+    let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
         if !first {
             out.push_str(", ");
         }
@@ -8538,7 +8537,7 @@ impl ReflectionReference {
         let Some(item) = array.get(&key) else {
             return Err(throw(req, "ReflectionException", "Array key not found"));
         };
-        let Some(reference) = item.as_php_ref().copied() else {
+        let Some(reference) = item.as_php_ref() else {
             return Ok(None);
         };
         // `is_ignorable_reference`: one owner, the array's, and no directly
@@ -8548,7 +8547,7 @@ impl ReflectionReference {
             .get()
             .as_array()
             .and_then(|held| held.get(&key))
-            .and_then(|element| element.as_php_ref().copied())
+            .and_then(|element| element.as_php_ref())
             == Some(reference);
         if item.refcount() == 1 && !self_referential {
             return Ok(None);

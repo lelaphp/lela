@@ -396,7 +396,6 @@ impl Request {
         for (name, made, value) in values {
             let key = value
                 .as_php_string()
-                .copied()
                 .filter(|key| !key.heap().is_interned());
             if made {
                 // The owner taken above is the table's, or given up.

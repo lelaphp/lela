@@ -277,8 +277,8 @@ fn dump(req: &mut Request, value: &Value, level: usize) -> Result<(), Thrown> {
                 req.write(b"\" interned\n");
             }
         }
-        ValueRef::Array(array) => dump_array(req, value, *array, level)?,
-        ValueRef::Object(object) => dump_object(req, value, *object, level)?,
+        ValueRef::Array(array) => dump_array(req, value, array, level)?,
+        ValueRef::Object(object) => dump_object(req, value, object, level)?,
         ValueRef::Resource(resource) => {
             let kind = resource.type_name(req).map_or_else(
                 || String::from("Unknown"),

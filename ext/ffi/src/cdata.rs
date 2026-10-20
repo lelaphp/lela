@@ -342,7 +342,6 @@ pub(crate) fn as_cdata(req: &mut Request, value: &Value) -> Result<Option<PhpObj
     Ok(value
         .deref()
         .as_object()
-        .copied()
         .filter(|object| object.class() == class))
 }
 

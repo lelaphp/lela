@@ -158,7 +158,7 @@ impl Conv {
     /// php's `expected an array here`.
     fn table(&mut self, container: &Value) -> Option<PhpArray> {
         if let ValueRef::Array(array) = container.as_ref() {
-            return Some(*array);
+            return Some(array);
         }
         self.fail("expected an array here");
         None

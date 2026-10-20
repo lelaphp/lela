@@ -215,7 +215,7 @@ fn throw_json(req: &mut Request, code: i64) -> Thrown {
         Ok(value) => value,
         Err(thrown) => return thrown,
     };
-    if let Some(object) = value.as_object().copied() {
+    if let Some(object) = value.as_object() {
         let code = Owner::int(code);
         let written = php_ext::call::write_prop(req, &object, b"code", code);
         if let Err(thrown) = written {

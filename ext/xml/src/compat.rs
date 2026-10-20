@@ -353,7 +353,7 @@ impl Compat {
         // The last element, where it is a `cdata` entry with a value, takes
         // the text.
         if let Some((key, last)) = last(data)
-            && let Some(entry) = last.deref().as_array().copied()
+            && let Some(entry) = last.deref().as_array()
             && string_at(req, entry, b"type")?.as_deref() == Some(b"cdata")
             && let Some(held) = string_at(req, entry, b"value")?
         {
@@ -458,7 +458,7 @@ impl Compat {
         let Some(mut index) = info.separate_array(req)? else {
             return Ok(());
         };
-        let mut list = match index.find(name).and_then(|v| v.deref().as_array().copied()) {
+        let mut list = match index.find(name).and_then(|v| v.deref().as_array()) {
             Some(list) => separate_owned(req, list)?,
             None => PhpArray::new(req)?,
         };
@@ -491,7 +491,7 @@ impl Compat {
         };
         let index = self.parser(req).map_or(0, |p| p.ctag_index);
         let key = Key::Int(index);
-        let Some(entry) = data.get(&key).and_then(|v| v.deref().as_array().copied()) else {
+        let Some(entry) = data.get(&key).and_then(|v| v.deref().as_array()) else {
             return Ok(());
         };
         let mut entry = separate_owned(req, entry)?;

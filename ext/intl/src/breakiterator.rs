@@ -555,7 +555,7 @@ impl IntlPartsIterator {
         this: This<Self>,
     ) -> Answer<Instance<IntlBreakIterator>> {
         let data = iterator::data(req, this.object())?;
-        match data.and_then(|v| v.as_object().copied()) {
+        match data.and_then(|v| v.as_object()) {
             Some(object) => Ok(Instance::of(object)),
             None => Err(fatal(
                 req,
@@ -567,7 +567,7 @@ impl IntlPartsIterator {
     #[php(tentative, before_args = error::reset)]
     fn getRuleStatus(req: &mut Request, this: This<Self>) -> Answer<i64> {
         let data = iterator::data(req, this.object())?;
-        let Some(object) = data.and_then(|v| v.as_object().copied()) else {
+        let Some(object) = data.and_then(|v| v.as_object()) else {
             return Err(fatal(
                 req,
                 "InternalError: IntlPartsIterator holds no break iterator",
@@ -840,7 +840,7 @@ impl ObjectHandlers for Handlers {
     /// `BreakIterator_compare_objects`: equal where ICU's iterators are,
     /// or both unconstructed.
     fn compare(&self, req: &mut Request, left: &Value, right: &Value) -> Answer<Option<Ordering>> {
-        let (Some(one), Some(two)) = (left.as_object().copied(), right.as_object().copied()) else {
+        let (Some(one), Some(two)) = (left.as_object(), right.as_object()) else {
             return Std.compare(req, left, right);
         };
         let (Some(one), Some(two)) = (

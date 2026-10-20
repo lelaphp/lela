@@ -1057,8 +1057,8 @@ fn unserialize(req: &mut Request, this: PhpObject, data: PhpArray) -> Result<(),
     let props = data.get(&Key::Int(0)).map(|v| v.deref());
     let state = data.get(&Key::Int(1)).map(|v| v.deref());
     let (Some(props), Some(state)) = (
-        props.and_then(|p| p.as_array().copied()),
-        state.and_then(|s| s.as_array().copied()),
+        props.and_then(|p| p.as_array()),
+        state.and_then(|s| s.as_array()),
     ) else {
         return Err(invalid(req));
     };
@@ -1069,7 +1069,7 @@ fn unserialize(req: &mut Request, this: PhpObject, data: PhpArray) -> Result<(),
     let flags = state.find(b"flags").and_then(|f| f.deref().as_int());
     let elements = state
         .find(b"heap_elements")
-        .and_then(|e| e.deref().as_array().copied());
+        .and_then(|e| e.deref().as_array());
     let (Some(mut flags), Some(elements)) = (flags, elements) else {
         return Err(invalid(req));
     };
@@ -1088,7 +1088,7 @@ fn unserialize(req: &mut Request, this: PhpObject, data: PhpArray) -> Result<(),
     walk::foreach(req, elements, Hold::None, |req, row| -> walk::Step {
         let value = row.value().deref();
         let elem = if queue {
-            let Some(pair) = value.as_array().copied().filter(|p| p.len() == 2) else {
+            let Some(pair) = value.as_array().filter(|p| p.len() == 2) else {
                 return Err(invalid(req));
             };
             let (Some(d), Some(p)) = (pair.find(b"data"), pair.find(b"priority")) else {

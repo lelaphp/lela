@@ -393,7 +393,7 @@ fn use_soap_error_handler(req: &mut Request, #[php(default = true)] enable: bool
 #[php_function]
 fn is_soap_fault(req: &mut Request, object: Value) -> bool {
     match object.as_ref() {
-        ValueRef::Object(o) => classes::is_fault(req, *o),
+        ValueRef::Object(o) => classes::is_fault(req, o),
         _ => false,
     }
 }

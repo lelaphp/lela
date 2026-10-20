@@ -1751,7 +1751,7 @@ impl HashContext {
         let at = |n: i64| data.get(&Key::Int(n)).map(|v| v.deref());
         let name = at(0).and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
         let (flags, fields, magic) = (int_of(at(1)).map(Flags), at(2), int_of(at(3)));
-        let members = at(4).and_then(|v| v.as_array().copied());
+        let members = at(4).and_then(|v| v.as_array());
         let (Some(name), Some(flags), Some(fields), Some(magic), Some(members)) =
             (name, flags, fields, magic, members)
         else {

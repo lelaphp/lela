@@ -98,12 +98,12 @@ impl Request {
         Ok(match self.table_row_of(object, key) {
             Row::Slot(i) => {
                 let z = o.slot(i);
-                (!z.is_undef()).then(|| Value::of_zval(z))
+                (!z.is_undef()).then(|| Value::of_slot(z))
             }
             Row::Dynamic(k) => o
                 .properties()
                 .and_then(|table| table.get(k))
-                .map(Value::of_zval),
+                .map(Value::of_slot),
         })
     }
 
@@ -553,7 +553,7 @@ impl Request {
                 Key::Str(PhpString::of(*name))
             }
         };
-        Ok(Some((key, Value::of_zval(z))))
+        Ok(Some((key, Value::of_slot(z))))
     }
 
     /// [`PhpObject::replace_table`]: `*ht_ptr = Z_ARRVAL_P(ht_zv)` over

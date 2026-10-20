@@ -990,9 +990,7 @@ impl SplObjectStorage {
     #[php(tentative)]
     fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
         let this = this.object();
-        let storage = data
-            .get(&Key::Int(0))
-            .and_then(|v| v.deref().as_array().copied());
+        let storage = data.get(&Key::Int(0)).and_then(|v| v.deref().as_array());
         let members = data.get(&Key::Int(1)).map(|v| v.deref());
         let (Some(storage), Some(members)) = (storage, members.filter(|m| m.as_array().is_some()))
         else {
@@ -1020,7 +1018,7 @@ impl SplObjectStorage {
                 key = Some(Owner::take(req, *row.value()));
                 return Ok(ControlFlow::Continue(()));
             };
-            let target = object.as_object().copied();
+            let target = object.as_object();
             object.give_up(req);
             let Some(target) = target else {
                 return Err(throw(req, "UnexpectedValueException", "Non-object key"));
@@ -1613,7 +1611,7 @@ impl ObjectHandlers for Handlers {
         offset: Option<&Value>,
         read: DimensionRead,
     ) -> Result<Owner<Value>, Thrown> {
-        let target = offset.and_then(|o| o.deref().as_object().copied());
+        let target = offset.and_then(|o| o.deref().as_object());
         match target {
             Some(target) if overridden_bits(req, object)? & SOS_OVERRIDDEN_READ == 0 => {
                 let found = with(req, object, |s| {
@@ -1638,7 +1636,7 @@ impl ObjectHandlers for Handlers {
         offset: Option<&Value>,
         value: Owner<Value>,
     ) -> Result<(), Thrown> {
-        let target = offset.and_then(|o| o.deref().as_object().copied());
+        let target = offset.and_then(|o| o.deref().as_object());
         // The bits are read only for an object offset, as the guard
         // read them; the value's owner is given up where they fail.
         let bits = match target.map(|_| overridden_bits(req, object)) {
@@ -1676,7 +1674,7 @@ impl ObjectHandlers for Handlers {
         offset: &Value,
         not_empty: bool,
     ) -> Result<bool, Thrown> {
-        let Some(target) = offset.deref().as_object().copied() else {
+        let Some(target) = offset.deref().as_object() else {
             return Std.has_dimension(req, object, offset, not_empty);
         };
         if overridden_bits(req, object)? & SOS_OVERRIDDEN_READ != 0 {
@@ -1700,7 +1698,7 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         offset: &Value,
     ) -> Result<(), Thrown> {
-        match offset.deref().as_object().copied() {
+        match offset.deref().as_object() {
             Some(target) if overridden_bits(req, object)? & SOS_OVERRIDDEN_UNSET == 0 => {
                 detach_key(req, object, &RowKey::Id(target.index()))?;
                 Ok(())
@@ -1746,7 +1744,7 @@ impl ObjectHandlers for Handlers {
         left: &Value,
         right: &Value,
     ) -> Result<Option<std::cmp::Ordering>, Thrown> {
-        let (Some(l), Some(r)) = (left.as_object().copied(), right.as_object().copied()) else {
+        let (Some(l), Some(r)) = (left.as_object(), right.as_object()) else {
             return Std.compare(req, left, right);
         };
         if l == r {
@@ -1981,7 +1979,7 @@ fn read_storage(
         } else {
             Owner::null()
         };
-        let Some(target) = entry.as_object().copied() else {
+        let Some(target) = entry.as_object() else {
             entry.give_up(req);
             inf.give_up(req);
             return Ok(Record::Broke(reader.offset()));
@@ -2149,7 +2147,7 @@ fn get_one(
     }
     let key = match inf.as_ref() {
         ValueRef::Int(n) => Owner::index(n),
-        ValueRef::Str(s) => Owner::take(req, Key::lookup(*s)),
+        ValueRef::Str(s) => Owner::take(req, Key::lookup(s)),
         _ => {
             value.give_up(req);
             return Err(throw(

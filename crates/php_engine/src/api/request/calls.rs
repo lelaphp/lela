@@ -786,7 +786,7 @@ impl Request {
             // unwinder to go on from the call opline; a fatal leaves the
             // native as it left the callback.
             None if self.is_pending() => Err(Thrown::of(None)),
-            None => Ok(std::mem::replace(&mut self.returned, Value::null())),
+            None => Ok(std::mem::take(&mut self.returned)),
         }
     }
 

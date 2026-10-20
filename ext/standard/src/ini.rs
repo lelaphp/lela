@@ -93,7 +93,7 @@ impl Callback {
 /// decimal integer, the string otherwise, with the owner the table takes.
 fn key_of(req: &mut Request, label: &Value) -> Result<Owner<Key>, Thrown> {
     match label.as_php_string() {
-        Some(s) => Ok(Owner::take(req, Key::lookup(*s))),
+        Some(s) => Ok(Owner::take(req, Key::lookup(s))),
         None => Ok(PhpString::new(req, b"")?.into_key()),
     }
 }
@@ -114,10 +114,10 @@ fn simple(req: &mut Request, mut arr: PhpArray, event: &Event<Value>) -> Result<
             };
             let key = match (index, label.as_php_string()) {
                 (Some(n), _) => Owner::index(n),
-                (None, Some(s)) => Owner::take(req, Key::Str(*s)),
+                (None, Some(s)) => Owner::take(req, Key::Str(s)),
                 (None, None) => PhpString::new(req, b"")?.into_key(),
             };
-            let found = arr.get(&key).and_then(|v| v.as_array().copied());
+            let found = arr.get(&key).and_then(|v| v.as_array());
             let mut inner = if let Some(inner) = found {
                 key.give_up(req);
                 inner
@@ -136,7 +136,7 @@ fn simple(req: &mut Request, mut arr: PhpArray, event: &Event<Value>) -> Result<
             let value = Owner::take(req, *value);
             match offset.as_php_string() {
                 Some(o) if !o.as_bytes().is_empty() => {
-                    let key = Owner::take(req, Key::lookup(*o));
+                    let key = Owner::take(req, Key::lookup(o));
                     inner.set(req, key, value)
                 }
                 _ => {

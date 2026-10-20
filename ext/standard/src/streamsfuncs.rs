@@ -217,7 +217,7 @@ fn parse_options(req: &mut Request, res: StreamCtx, options: PhpArray) -> Result
         let wval = row.value().deref();
         match (row.key(), wval.as_array()) {
             (Key::Str(wrapper), Some(inner)) => {
-                walk::foreach(req, *inner, Hold::None, |req, row| -> walk::Step {
+                walk::foreach(req, inner, Hold::None, |req, row| -> walk::Step {
                     if let Key::Str(option) = row.key() {
                         let value = row.value().deref();
                         res.set_option(req, wrapper.as_bytes(), option.as_bytes(), &value)?;
@@ -266,7 +266,7 @@ fn parse_params(req: &mut Request, res: StreamCtx, params: PhpArray) -> Result<(
                 "Invalid stream/context parameter",
             ));
         };
-        return parse_options(req, res, *options);
+        return parse_options(req, res, options);
     }
     Ok(())
 }

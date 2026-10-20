@@ -322,7 +322,7 @@ pub(super) fn setlocale(
                 // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL(args[i]), elem)`
                 // (`Z/ext/standard/string.c:4969`), no owner of the table
                 // taken: the argument holds it while `__toString` runs.
-                walk::foreach(req, *array, Hold::None, |req, row| -> walk::Step {
+                walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
                     names.push(with_string(req, row.value(), <[u8]>::to_vec)?);
                     Ok(ControlFlow::Continue(()))
                 })?;
