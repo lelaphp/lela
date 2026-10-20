@@ -61,14 +61,18 @@ impl Units {
     /// the frame's annex ([`Request::unit_of`]), and kept for the return
     /// to the frame and for the next call to its function. None for a
     /// frame that stands nowhere or serves nothing.
+    /// The share a place held is given back to the request
+    /// ([`Request::give_back`]), which keeps the tables of a unit nothing
+    /// else holds for its next compile.
     #[inline(never)]
     pub(super) fn enter(
         &mut self,
-        req: &Request,
+        req: &mut Request,
         kept: &mut Kept,
         frame: FrameRef,
     ) -> Option<Code> {
         let header = req.vm().at(frame)?;
+        let function = header.function;
         let (unit, body) = req.unit_of(header)?;
         let found = self.units.iter().position(|held| {
             held.as_ref()
@@ -79,13 +83,19 @@ impl Units {
         } else {
             let place = self.oldest;
             self.oldest = (self.oldest + 1) % HELD;
-            *self.units.get_mut(place)? = Some(PublishedUnit::clone(unit));
+            let given_up = self
+                .units
+                .get_mut(place)?
+                .replace(PublishedUnit::clone(unit));
             kept.lost(place);
+            if let Some(given_up) = given_up {
+                req.give_back(given_up);
+            }
             place
         };
         let code = Code { place, body };
         kept.keep(frame, code);
-        if let Some(function) = header.function {
+        if let Some(function) = function {
             kept.keep_called(function, code);
         }
         Some(code)

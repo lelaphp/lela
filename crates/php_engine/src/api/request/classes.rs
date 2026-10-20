@@ -1816,30 +1816,89 @@ impl Request {
         }
     }
 
-    /// What a file's compile had added to `CG(function_table)` when it
-    /// refused, none of which its `zend_bailout` takes back
-    /// ([`php_compile::Declared`]): each function declared in its turn,
-    /// what was raised before it noted first, so one the request holds
-    /// already is `Cannot redeclare` after what php had raised by then
-    /// and before the rest. How many of `refused`'s raised it noted, or
-    /// none where a redeclaration ended the request. The unit is the
-    /// request's own, compiled for it alone.
+    /// What a compile had added to `CG(function_table)` and
+    /// `CG(class_table)` when it refused, none of which its `zend_bailout`
+    /// takes back ([`php_compile::Declared`]): each top-level function and
+    /// each class bound early declared in its turn, what was raised before
+    /// it noted first, so one the request holds already is `Cannot
+    /// redeclare` after what php had raised by then and before the rest.
+    /// How many of `refused`'s raised it noted, or none where a
+    /// redeclaration ended the request.
+    ///
+    /// So a shutdown function finds them after an `include` the compiler
+    /// refused, and calls them:
+    ///
+    /// ```php
+    /// $f = __DIR__ . '/refused.inc';
+    /// file_put_contents($f, "<?php\nfunction f(int \$a = null) { return fn() => 'f'; }\nclass A { function m() { return 'm'; } }\ninterface I {}\nclass C implements I {}\nfunction g() { return 'g'; }\nbreak 2;\n");
+    /// register_shutdown_function(function () use ($f) {
+    ///     var_dump(function_exists('f'), function_exists('g'), class_exists('A', false), interface_exists('I', false), class_exists('C', false));
+    ///     echo f()(), g(), (new A)->m(), "\n";
+    ///     unlink($f);
+    /// });
+    /// include $f;
+    /// ```
+    /// ```expect exit=255
+    /// Deprecated: f(): Implicitly marking parameter $a as nullable is deprecated, the explicit nullable type must be used instead in %s on line 2
+    ///
+    /// Fatal error: 'break' not in the 'loop' or 'switch' context in %s on line 7
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// fgm
+    /// ```
+    ///
+    /// An `eval`'s compile declares them as a file's does, though
+    /// `compile_string` begins no record, so a warning after it is shown
+    /// and a second compile of the function is `Cannot redeclare`:
+    ///
+    /// ```php
+    /// register_shutdown_function(function () {
+    ///     var_dump(function_exists('e'), class_exists('E', false));
+    ///     echo $undefined, "after\n";
+    ///     eval('function e() {}');
+    /// });
+    /// eval('function e() {} class E {} break 2;');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: 'break' not in the 'loop' or 'switch' context in %s(7) : eval()'d code on line 1
+    /// bool(true)
+    /// bool(true)
+    ///
+    /// Warning: Undefined variable $undefined in %s on line 4
+    /// after
+    ///
+    /// Fatal error: Cannot redeclare function e() (previously declared in %s(7) : eval()'d code:1) in %s(5) : eval()'d code on line 1
+    /// ```
     pub(crate) fn declare_refused(
         &mut self,
-        refused: &php_compile::CompileError,
-        unit: Option<&PublishedUnit>,
+        refused: &crate::unit_cache::CompileRefused,
         file: &[u8],
     ) -> Option<usize> {
-        let (Some(declared), Some(unit)) = (&refused.declared, unit) else {
+        let Some(declared) = &refused.declared else {
             return Some(0);
         };
+        let unit = &declared.unit;
+        let mut load = self.class_load(unit);
+        let raised = &refused.error.raised;
         let mut noted = 0;
-        for (at, before) in declared.raised_before.iter().copied().enumerate() {
-            for raised in refused.raised.get(noted..before).unwrap_or_default() {
+        for (landed, before) in unit.top_level.iter().zip(&declared.raised_before) {
+            for raised in raised.get(noted..*before).unwrap_or_default() {
                 self.note_error_in(raised.level, &raised.message, file, raised.line);
             }
-            noted = noted.max(before);
-            if !self.declare_function_told(unit, at) {
+            noted = noted.max(*before);
+            let standing = match *landed {
+                TopLevel::Function(at) => {
+                    self.declare_function_told(unit, usize::try_from(at).unwrap_or(usize::MAX))
+                }
+                TopLevel::Class(at) => {
+                    let at = usize::try_from(at).unwrap_or(usize::MAX);
+                    self.declare_classes_through(unit, &mut load, Some(at))
+                }
+            };
+            if !standing {
                 return None;
             }
         }
@@ -1922,14 +1981,16 @@ impl Request {
     /// The home the units it compiles for itself make their constant
     /// strings in ([`super::memory::RequestStrings`]), which the unit
     /// keeps, beside its classes as the compiler asks after one
-    /// ([`php_compile::RequestClasses`]), and the arena its compiles
-    /// parse into, borrowed apart so all three are handed to one compile.
+    /// ([`php_compile::RequestClasses`]), the arena its compiles parse
+    /// into and its working directory, which `__DIR__` folds to, borrowed
+    /// apart so all four are handed to one compile.
     pub(crate) fn compiling<R>(
         &mut self,
         compile: impl FnOnce(
             &mut dyn Intern,
             php_compile::RequestClasses<'_>,
             &mut php_compile::syntax::Arena,
+            &std::path::Path,
         ) -> R,
     ) -> R {
         let (shared, declared, aliases) = (&self.shared, &self.declared, &self.aliases);
@@ -1944,6 +2005,7 @@ impl Request {
             &mut strings,
             php_compile::RequestClasses::new(&holds),
             &mut self.compile_arena,
+            &self.cwd,
         )
     }
 

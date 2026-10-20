@@ -197,7 +197,7 @@ fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) ->
             Ok(Ok(unit)) => unit,
             Ok(Err(refused)) => {
                 crate::engine::refused_program(req, &refused, name);
-                return refused.level == Level::Parse && dont_bail(req);
+                return refused.error.level == Level::Parse && dont_bail(req);
             }
             Err(thrown) => {
                 req.leave_pending(&thrown);

@@ -174,6 +174,18 @@ fn microtime(
 ///   - Return [ array|float ]
 /// }
 /// ```
+///
+/// Its peak is php's: timelib's offset, and its abbreviation, stand
+/// while the array is built.
+///
+/// ```php
+/// date_default_timezone_set('Europe/Amsterdam');
+/// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+/// pk(fn () => gettimeofday());
+/// ```
+/// ```expect capture
+/// 560 544
+/// ```
 #[php_function]
 fn gettimeofday(
     req: &mut Request,
@@ -184,16 +196,22 @@ fn gettimeofday(
         return Ok(Union::B(self::as_float(sec, usec)));
     }
     let sec = i64::try_from(sec).unwrap_or(i64::MAX);
-    let offset = php_ext_date::get_timezone_info(req)?.offset_at(req, sec)?;
-    let mut array = PhpArray::new(req)?;
-    let rows: [(&[u8], i64); 4] = [
-        (b"sec", sec),
-        (b"usec", i64::from(usec)),
-        (b"minuteswest", i64::from(-offset.offset / 60)),
-        (b"dsttime", i64::from(offset.is_dst)),
-    ];
-    for (name, value) in rows {
-        array.set_str(req, name, Owner::int(value))?;
-    }
+    // timelib's offset stands while the array is built, as php frees it
+    // after the last `add_assoc_long`.
+    let zone = php_ext_date::get_timezone_info(req)?;
+    let array = zone.offset_at(req, sec, |req, offset| {
+        PhpArray::filled(req, |req, array| {
+            let rows: [(&[u8], i64); 4] = [
+                (b"sec", sec),
+                (b"usec", i64::from(usec)),
+                (b"minuteswest", i64::from(-offset.offset() / 60)),
+                (b"dsttime", i64::from(offset.is_dst())),
+            ];
+            for (name, value) in rows {
+                array.set_str(req, name, Owner::int(value))?;
+            }
+            Ok(())
+        })
+    })?;
     Ok(Union::A(array))
 }

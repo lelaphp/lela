@@ -43,11 +43,14 @@ OplineIdx
 PublishedUnit
 PublishedUnit::as_ptr
 PublishedUnit::downgrade
+PublishedUnit::into_spare
 PublishedUnit::ptr_eq
 Safepoints
 Safepoints::INLINE
 Safepoints::new
 Safepoints::push
+SpareUnit
+SpareUnit::main_mut
 TopLevel
 TryCatch
 Unit

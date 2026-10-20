@@ -586,10 +586,11 @@ pub(crate) struct Emit<'a> {
     /// entry landing once its body has compiled, which is when php's
     /// `ZEND_ACC_DONE_PASS_TWO` lets a call site know it.
     functions_declared: Vec<(FunctionDecl, OpArray)>,
-    /// How many diagnostics had been raised when each of
-    /// `functions_declared` landed, which a refusal after it carries
-    /// ([`crate::Declared::raised_before`]).
-    raised_before: Vec<usize>,
+    /// What `CG(function_table)` and `CG(class_table)` took of the file
+    /// so far: each top-level function and each class bound early, as it
+    /// landed, beside how many diagnostics had been raised by then, which
+    /// a refusal after it carries ([`crate::Declared`]).
+    landed: Vec<(TopLevel, usize)>,
     /// The functions the file declares that no name binds while it
     /// compiles, [`Unit::dynamic`]: php's `dynamic_func_defs` over every
     /// op array of the file, in the order `zend_add_dynamic_func_def`
@@ -618,6 +619,9 @@ pub(crate) struct Emit<'a> {
     /// The file's name, [`Options::filename`], what a declaration
     /// records as its site.
     filename: &'a [u8],
+    /// The file's name of a unit the caller gave up ([`crate::Room`]),
+    /// written over for the first op array finished where it is as long.
+    room_filename: Option<Name>,
     /// The request's working directory, [`Options::cwd`], what `__DIR__`
     /// is where the file's name has no directory.
     cwd: &'a [u8],
@@ -1327,7 +1331,13 @@ impl<'a> Emit<'a> {
         options: &'a Options<'a>,
         strings: &'a mut dyn Intern,
         halt: Option<i64>,
+        room: crate::Room,
     ) -> Emit<'a> {
+        let crate::Room {
+            oplines,
+            literals,
+            filename,
+        } = room;
         Emit {
             parsed,
             arena,
@@ -1359,13 +1369,13 @@ impl<'a> Emit<'a> {
             typing: Typing::of(options.strict_types),
             ticks: None,
             stack: options.stack,
-            oplines: Vec::new(),
+            oplines,
             short_circuits: Vec::new(),
             chain_inner: None,
             memo: memo::Memo::default(),
             const_evaluation: Evaluation::Once,
             substitution: Substitution::Persistent,
-            constants: Vec::new(),
+            constants: literals,
             const_exprs: Vec::new(),
             vars: Vec::new(),
             http_response_header: ResponseHeader::Predefined,
@@ -1382,7 +1392,7 @@ impl<'a> Emit<'a> {
             attributed_constants: Vec::new(),
             keys_before: options.keys_before,
             functions_declared: Vec::new(),
-            raised_before: Vec::new(),
+            landed: Vec::new(),
             dynamic: Vec::new(),
             cell: php_unit::UnitCell::default(),
             function_callables: 0,
@@ -1395,6 +1405,7 @@ impl<'a> Emit<'a> {
             methods: Vec::new(),
             hooks: Vec::new(),
             filename: options.filename,
+            room_filename: filename,
             cwd: options.cwd,
             loops: Vec::new(),
             current_loop: None,
@@ -1423,7 +1434,14 @@ pub(crate) fn export(
     options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Vec<u8>, CompileError> {
-    let mut emit = Emit::new(arena, parsed, options, strings, None);
+    let mut emit = Emit::new(
+        arena,
+        parsed,
+        options,
+        strings,
+        None,
+        crate::Room::default(),
+    );
     let mut out = Vec::new();
     let file = parsed
         .tree
@@ -1444,6 +1462,7 @@ pub(crate) fn unit(
     options: &Options<'_>,
     strings: &mut dyn Intern,
     halt: Option<i64>,
+    room: crate::Room,
 ) -> Result<Unit, CompileError> {
     // The scanner stops at `__halt_compiler();` (the byte `halt_end`
     // names), so a halted file's last line is that statement's, and the
@@ -1456,24 +1475,35 @@ pub(crate) fn unit(
             .line_number(u32::try_from(end).unwrap_or(u32::MAX)),
         None => parsed.lines.line_count(),
     };
-    let mut emit = Emit::new(arena, parsed, options, strings, halt);
+    let mut emit = Emit::new(arena, parsed, options, strings, halt, room);
     // A fatal leaves the file with what `zend_error` had raised before
     // it already rendered, so those travel with it.
     if let Err(mut refused) = emit.source_file() {
         refused.raised = emit.diagnostics;
-        // What php's compile had added to `CG(function_table)` before it
-        // bailed out, which nothing takes back.
-        if !emit.functions_declared.is_empty() {
-            let top_level = (0..emit.functions_declared.len())
-                .map(|at| TopLevel::Function(u32::try_from(at).unwrap_or(u32::MAX)))
-                .collect();
+        // What php's compile had added to `CG(function_table)` and
+        // `CG(class_table)` before it bailed out, which nothing takes
+        // back: every body those reach, and the closures they declare, a
+        // slot the refused statement took and never filled ending them.
+        // A refusal php throws is the parser's, made before `zend_compile`
+        // declared anything, as is a parse error.
+        let bailed = !refused.thrown && refused.level != Level::Parse;
+        if bailed && !emit.landed.is_empty() {
+            let (top_level, raised_before) = emit.landed.into_iter().unzip();
+            let dynamic = emit.dynamic.into_iter().map_while(|def| def).collect();
             refused.declared = Some(Box::new(crate::Declared {
                 unit: Unit {
                     functions: emit.functions_declared,
+                    classes: emit.classes,
+                    runtime_keys: emit.runtime_keys,
                     top_level,
+                    methods: emit.methods,
+                    hooks: emit.hooks,
+                    completed: emit.completed,
+                    dynamic,
+                    cell: emit.cell,
                     ..Unit::default()
                 },
-                raised_before: emit.raised_before,
+                raised_before,
             }));
         }
         return Err(refused);
@@ -3478,7 +3508,8 @@ impl<'a> Emit<'a> {
         let at = u32::try_from(self.functions_declared.len()).unwrap_or(u32::MAX);
         self.top_level.push(TopLevel::Function(at));
         self.functions_declared.push(declared);
-        self.raised_before.push(self.diagnostics.len());
+        self.landed
+            .push((TopLevel::Function(at), self.diagnostics.len()));
         Ok(())
     }
 
@@ -5093,6 +5124,19 @@ impl<'a> Emit<'a> {
         self.active_hook = saved.active_hook;
     }
 
+    /// The file's name an op array carries, `op_array->filename`: the
+    /// room's ([`crate::Room`]) written over where it is as long, which
+    /// an `eval` of one line in a loop always is, else made.
+    fn file_name(&mut self) -> Name {
+        match self.room_filename.take() {
+            Some(mut name) if name.0.len() == self.filename.len() => {
+                name.0.copy_from_slice(self.filename);
+                name
+            }
+            _ => Name(self.filename.into()),
+        }
+    }
+
     /// The op array the emitter holds, finished as `zend_compile` and
     /// `zend_compile_func_decl` finish one: php's implicit final return
     /// (`zend_emit_final_return`, `1` for the main op array and `null`
@@ -5137,7 +5181,7 @@ impl<'a> Emit<'a> {
             try_catch: std::mem::take(&mut self.try_catch),
             live_ranges,
             safepoints: std::mem::take(&mut self.safepoints),
-            filename: Name(self.filename.into()),
+            filename: self.file_name(),
             line_start,
             line_end,
             cache_size: self.cache_slots,
@@ -5310,6 +5354,8 @@ impl<'a> Emit<'a> {
         // `#[\Override]` marks are held to what it overrides.
         if early && self.try_early_bind(at)? {
             self.bound.push(at);
+            let class = TopLevel::Class(u32::try_from(at).unwrap_or(u32::MAX));
+            self.landed.push((class, self.diagnostics.len()));
             return Ok(());
         }
         let delayed = toplevel && unlinked_free;
@@ -19742,7 +19788,7 @@ mod tests {
             attributed_constants: Vec::new(),
             keys_before: 0,
             functions_declared: Vec::new(),
-            raised_before: Vec::new(),
+            landed: Vec::new(),
             dynamic: Vec::new(),
             cell: php_unit::UnitCell::default(),
             function_callables: 0,
@@ -19755,6 +19801,7 @@ mod tests {
             methods: Vec::new(),
             hooks: Vec::new(),
             filename: options.filename,
+            room_filename: None,
             cwd: options.cwd,
             loops: Vec::new(),
             current_loop: None,

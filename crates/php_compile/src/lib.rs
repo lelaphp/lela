@@ -323,25 +323,30 @@ pub struct CompileError {
     /// Where php stood when it refused, which is where `zend_error`
     /// places it.
     pub stage: Stage,
-    /// The functions a file's compile had declared at its top level
-    /// before it refused, none where it declared none.
+    /// The functions and classes a source's compile had declared at its
+    /// top level before it refused, none where it declared none.
     pub declared: Option<Box<Declared>>,
 }
 
-/// What php's compile of a file had added to `CG(function_table)` when
-/// it refused: `zend_compile_func_decl` adds each function at the top
-/// level once its body has compiled (`Z/Zend/zend_compile.c:8601-8606`),
-/// and the fatal's `zend_bailout` out of `zend_compile` takes none of them back, so they
-/// stand in the request after the refusal, and a second compile of the
-/// file in the request meets the first of them as `Cannot redeclare`.
+/// What php's compile of a source had added to `CG(function_table)` and
+/// `CG(class_table)` when it refused: `zend_compile_func_decl` adds each
+/// function at the top level once its body has compiled
+/// (`Z/Zend/zend_compile.c:8601-8606`) and `zend_compile_class_decl`
+/// each class it binds early (`:9381`), and the fatal's `zend_bailout`
+/// out of `zend_compile` takes none of them back, so they stand in the
+/// request after the refusal, and a second compile of the file in the
+/// request meets the first of them as `Cannot redeclare`.
+///
+/// `U` is the unit as the compiler made it, and as the engine publishes
+/// it for the request that declares what it holds.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Declared {
-    /// The functions, each with its body, as a unit of their own: no
-    /// main op array, nothing else declared, each named in
-    /// [`Unit::top_level`].
-    pub unit: Unit,
-    /// For each of the unit's functions, how many of the refusal's
-    /// [`CompileError::raised`] php had raised when it declared it.
+pub struct Declared<U = Unit> {
+    /// The functions and the early-bound classes, each with its bodies,
+    /// as a unit of their own: no main op array, and each in
+    /// [`Unit::top_level`] in the order it landed.
+    pub unit: U,
+    /// For each of the unit's [`Unit::top_level`], how many of the
+    /// refusal's [`CompileError::raised`] php had raised when it landed.
     pub raised_before: Vec<usize>,
 }
 
@@ -412,9 +417,77 @@ pub fn compile_source(
     options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
-    let made = compile_in(arena, source, options, strings);
-    arena.reset();
-    made
+    compile_source_into(arena, source, options, strings, Room::default())
+}
+
+/// [`compile_source`] into `room`, the room of a unit the caller gave
+/// up, which the unit's main op array is laid down in ([`Room`]).
+pub fn compile_source_into(
+    arena: &mut Arena,
+    source: &[u8],
+    options: &Options<'_>,
+    strings: &mut dyn Intern,
+    room: Room,
+) -> Result<Unit, CompileError> {
+    let reset = Reset(arena);
+    compile_in(reset.0, source, options, strings, room)
+}
+
+/// The arena of a compile, reset as the compile hands its unit back, so
+/// the unit is made where the caller takes it rather than moved past
+/// the reset.
+struct Reset<'a>(&'a mut Arena);
+
+impl Drop for Reset<'_> {
+    fn drop(&mut self) {
+        self.0.reset();
+    }
+}
+
+/// The room a unit's main op array is laid down in, taken from a unit
+/// the caller gave up rather than asked of the allocator (#3028): its
+/// oplines' and its constants' vectors, emptied, and its file's name,
+/// which a unit of a name as long writes over. php `emalloc`s an
+/// `eval`'s op array and its tables from the request's heap, which the
+/// last one's `destroy_op_array` gave back, so an `eval` in a loop asks
+/// the system for nothing; a request that keeps the room of the unit it
+/// gave up last does the same.
+#[derive(Debug, Default)]
+pub struct Room {
+    oplines: Vec<php_unit::Opline>,
+    literals: Vec<php_heap::Zval>,
+    filename: Option<php_unit::decl::Name>,
+}
+
+impl Room {
+    /// The most bytes of one table a room keeps: a unit of a large file
+    /// gives its own up.
+    const KEPT: usize = 64 * 1024;
+
+    /// The room of `main`, the main op array of a unit given up: its
+    /// tables taken out emptied, each within [`Room::KEPT`], and its
+    /// file's name.
+    #[must_use]
+    pub fn of(main: &mut php_unit::OpArray) -> Room {
+        let mut oplines = std::mem::take(&mut main.oplines);
+        let mut literals = std::mem::take(&mut main.literals);
+        oplines.clear();
+        literals.clear();
+        Room {
+            oplines: kept(oplines),
+            literals: kept(literals),
+            filename: Some(std::mem::take(&mut main.filename)),
+        }
+    }
+}
+
+/// `table`, where its room is within [`Room::KEPT`].
+fn kept<T>(table: Vec<T>) -> Vec<T> {
+    if table.capacity() * size_of::<T>() <= Room::KEPT {
+        table
+    } else {
+        Vec::new()
+    }
 }
 
 /// [`compile_source`] in `arena`, where the parse and the compiler's
@@ -424,10 +497,11 @@ fn compile_in(
     source: &[u8],
     options: &Options<'_>,
     strings: &mut dyn Intern,
+    room: Room,
 ) -> Result<Unit, CompileError> {
     let Some(multibyte) = options.multibyte else {
         let parsed = php_syntax::parse(arena, source, &syntax_options(options));
-        return compile_scanned(arena, &parsed, options, strings, None);
+        return compile_scanned(arena, &parsed, options, strings, None, room);
     };
     let from = match options.kind {
         SourceKind::File => multibyte::Source::File {
@@ -451,7 +525,7 @@ fn compile_in(
         original: source.get(opened.bom..).unwrap_or_default(),
         filter: opened.filter,
     };
-    compile_scanned(arena, &parsed, options, strings, Some(scanning))
+    compile_scanned(arena, &parsed, options, strings, Some(scanning), room)
 }
 
 /// `zend_compile_string_to_ast` and `zend_ast_export("", ast, "")`
@@ -520,7 +594,7 @@ pub fn compile<'a>(
     options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
-    compile_scanned(arena, parsed, options, strings, None)
+    compile_scanned(arena, parsed, options, strings, None, Room::default())
 }
 
 /// [`compile`] over a parse of what the scanner read through
@@ -531,6 +605,7 @@ fn compile_scanned<'p>(
     options: &Options<'p>,
     strings: &mut dyn Intern,
     scanning: Option<multibyte::Scanning<'p>>,
+    room: Room,
 ) -> Result<Unit, CompileError> {
     // `Parsed::diagnostics` is in php's order (design §6.1): the
     // scanner's and the parser's by position, the compiler's one after
@@ -577,9 +652,23 @@ fn compile_scanned<'p>(
         return Err(refused.error(raised));
     }
     let halt = emit::walk::halt_offset(parsed).map(|offset| scanned.original_offset(offset));
-    // The unit is finished where `unit` made it, and handed back as it
-    // stands rather than moved out and into a result again.
-    let mut made = emit::unit(arena, parsed, options, strings, halt);
+    unit_raised(arena, parsed, options, strings, halt, room, raised)
+}
+
+/// The unit of `parsed`, what was raised before its compile, `raised`,
+/// standing first among its diagnostics: made where `emit::unit` makes
+/// it and handed back by one way out, so it is not moved on the way.
+fn unit_raised<'p>(
+    arena: &'p Arena,
+    parsed: &'p Parsed<'p>,
+    options: &Options<'p>,
+    strings: &mut dyn Intern,
+    halt: Option<i64>,
+    room: Room,
+    mut raised: Vec<Diagnostic>,
+) -> Result<Unit, CompileError> {
+    let mut made = emit::unit(arena, parsed, options, strings, halt, room);
+    let mut fatal = None;
     match &mut made {
         Ok(unit) => {
             if !raised.is_empty() {
@@ -592,10 +681,10 @@ fn compile_scanned<'p>(
             };
             // `zend_mm`'s limit, raised as `E_ERROR` where the compile
             // asked for the memory.
-            if let Err(fatal) = interned {
-                return Err(CompileError {
+            if let Err(limit) = interned {
+                fatal = Some(CompileError {
                     level: Level::Error,
-                    message: fatal_message(fatal).into(),
+                    message: fatal_message(limit).into(),
                     line: unit.main.line_end,
                     raised: std::mem::take(&mut unit.diagnostics),
                     thrown: false,
@@ -620,6 +709,10 @@ fn compile_scanned<'p>(
             raised.append(&mut refused.raised);
             refused.raised = raised;
         }
+    }
+    // One way out, so the unit stays where `unit` made it.
+    if let Some(fatal) = fatal {
+        made = Err(fatal);
     }
     made
 }
@@ -1152,6 +1245,41 @@ mod tests {
             dump_under_short_open_tag(source, true),
             dump(2, "0000 ECHO int(1)\n0001 RETURN int(1)\n"),
             "on, the tag opens code and the 1 inside it is echoed"
+        );
+    }
+
+    /// A unit laid down in the room of one given up (#3028) is the unit
+    /// laid down in none, and an `eval` of one line in a loop takes its
+    /// oplines', its constants' and its file name's room from the last.
+    #[test]
+    fn a_unit_laid_down_in_a_room_is_the_unit_laid_down_in_none() {
+        let options = Options {
+            kind: SourceKind::EVAL,
+            filename: b"/a.php(2) : eval()'d code",
+            ..Options::default()
+        };
+        let mut arena = Arena::new();
+        let mut strings = php_heap::Strings::new();
+        let mut compile = |source: &[u8], room: Room| {
+            compile_source_into(&mut arena, source, &options, &mut strings, room)
+        };
+        let fresh = compile(b"echo 'a', 'b'; return 1;", Room::default()).unwrap_or_default();
+        let mut given_up = compile(b"echo 'c'; return 2;", Room::default()).unwrap_or_default();
+        assert!(!given_up.main.oplines.is_empty() && !fresh.main.oplines.is_empty());
+        let oplines = given_up.main.oplines.as_ptr();
+        let filename = given_up.main.filename.0.as_ptr();
+        let room = Room::of(&mut given_up.main);
+        let laid = compile(b"echo 'a', 'b'; return 1;", room).unwrap_or_default();
+        assert_eq!(fresh, laid);
+        assert_eq!(
+            laid.main.oplines.as_ptr(),
+            oplines,
+            "the oplines' room is the last unit's"
+        );
+        assert_eq!(
+            laid.main.filename.0.as_ptr(),
+            filename,
+            "the file's name is written over"
         );
     }
 
@@ -4430,6 +4558,43 @@ mod tests {
     fn refused(source: &[u8]) -> Option<CompileError> {
         let mut strings = php_heap::Strings::new();
         compile_parsed(source, &bundled(), &mut strings).err()
+    }
+
+    /// #3029: a refusal carries what landed in php's tables before it,
+    /// each top-level function and each class bound early in the order
+    /// it landed, beside what was raised by then; a class its opline
+    /// binds, and a closure slot the refused statement took, are not.
+    #[test]
+    fn a_refusal_carries_the_functions_and_the_early_bound_classes_that_landed() {
+        use php_unit::TopLevel;
+        let source = b"<?php\nfunction f(int $a = null) { return fn() => 1; }\nclass A {}\ninterface I {}\nclass C implements I {}\nfunction g() {}\n$h = function () { break 2; };\n";
+        let declared = refused(source).and_then(|error| error.declared);
+        assert!(declared.is_some(), "the refusal carries what landed");
+        let Some(declared) = declared else {
+            return;
+        };
+        assert_eq!(
+            declared.unit.top_level,
+            vec![
+                TopLevel::Function(0),
+                TopLevel::Class(0),
+                TopLevel::Class(1),
+                TopLevel::Function(1),
+            ]
+        );
+        assert_eq!(declared.raised_before, vec![1, 1, 1, 1]);
+        assert_eq!(declared.unit.dynamic.len(), 1, "f's closure, not $h's");
+        assert_eq!(declared.unit.runtime_keys.len(), 1, "C, its opline's");
+    }
+
+    /// #3029: a refusal php throws is its parser's, before `zend_compile`
+    /// declared anything, so it carries nothing that landed.
+    #[test]
+    fn a_thrown_refusal_carries_nothing_declared() {
+        let source = b"<?php\nfunction f() {}\nclass A {}\nif (1) { __HALT_COMPILER(); }\n";
+        let refused = refused(source);
+        assert!(refused.as_ref().is_some_and(|error| error.thrown));
+        assert!(refused.is_some_and(|error| error.declared.is_none()));
     }
 
     /// #256's program under the oracle's `[regime.dump]`: a `switch` of

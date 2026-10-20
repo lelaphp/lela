@@ -35,7 +35,38 @@ pub(crate) use wire::decode;
 /// What the unit cache answers for one file: the published unit, the
 /// refusal the compiler gave for it, or nothing at all for a file that
 /// could not be read.
-pub(crate) type Cached = Option<Result<PublishedUnit, CompileError>>;
+pub(crate) type Cached = Option<Result<PublishedUnit, CompileRefused>>;
+
+/// A compile the compiler refused, as a request raises it: php's
+/// refusal, and what the compile had declared before it
+/// ([`php_compile::Declared`]) published for the request, which php's
+/// `zend_bailout` out of the compile leaves standing in its tables.
+#[derive(Clone)]
+pub(crate) struct CompileRefused {
+    /// The refusal, what it declared taken into `declared`.
+    pub(crate) error: CompileError,
+    pub(crate) declared: Option<Box<php_compile::Declared<PublishedUnit>>>,
+}
+
+impl CompileRefused {
+    /// `error`, what it declared published by `publish`.
+    pub(crate) fn published(
+        mut error: CompileError,
+        publish: impl FnOnce(Unit) -> PublishedUnit,
+    ) -> CompileRefused {
+        let declared = error.declared.take().map(|declared| {
+            let php_compile::Declared {
+                unit,
+                raised_before,
+            } = *declared;
+            Box::new(php_compile::Declared {
+                unit: publish(unit),
+                raised_before,
+            })
+        });
+        CompileRefused { error, declared }
+    }
+}
 
 /// The classes a held unit's compiler bound early, each published into
 /// the engine's arena as the unit was held (design §5.14, §6.3), by its
@@ -442,16 +473,16 @@ fn alone(unit: Result<Unit, CompileError>, filed: Filed) -> Answered {
 }
 
 /// What [`UnitCache::file`] answered, as its caller serves it: a unit
-/// held nowhere made `own`'s.
+/// held nowhere made `own`'s, and so what a refusal had declared, whose
+/// strings are the engine's as a held unit's are.
 pub(crate) fn served(
     answered: Option<Result<Compiled, CompileError>>,
     own: impl FnOnce(Unit) -> PublishedUnit,
 ) -> Cached {
-    answered.map(|compiled| {
-        compiled.map(|compiled| match compiled {
-            Compiled::Published(unit) => unit,
-            Compiled::Alone(unit) => own(*unit),
-        })
+    answered.map(|compiled| match compiled {
+        Ok(Compiled::Published(unit)) => Ok(unit),
+        Ok(Compiled::Alone(unit)) => Ok(own(*unit)),
+        Err(error) => Err(CompileRefused::published(error, own)),
     })
 }
 

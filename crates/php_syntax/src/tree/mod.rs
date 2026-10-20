@@ -225,9 +225,21 @@ pub trait Listed: Sized {
 }
 
 /// The builder's side of [`Listed`]: the pool being filled.
-pub(crate) trait Pooled: Listed + 'static {
+pub(crate) trait Pooled: Listed + Copy + 'static {
     /// The pool of this element type while the builder fills it.
-    fn pool_mut<'a, 'p>(pools: &'p mut Pools<'a>) -> &'p mut BumpVec<'a, Self>;
+    fn pool_mut(pools: &mut Pools) -> &mut Vec<Self>;
+}
+
+/// A pool as the tree keeps it: what it holds copied into `bump`, none
+/// for an empty one, which a tree of a few lists leaves most of, and the
+/// pool emptied for the next build.
+fn frozen<'a, T: Copy>(bump: &'a Bump, pool: &mut Vec<T>) -> &'a [T] {
+    if pool.is_empty() {
+        return &[];
+    }
+    let slice = bump.alloc_slice_copy(pool);
+    pool.clear();
+    slice
 }
 
 /// One element of the tree's shape: a node, or a significant token by the
@@ -411,31 +423,48 @@ impl<'a> Nodes<'a> {
 
 /// The arena of nodes while the builder fills it: each kind's vector,
 /// made with the kind's first node at the count of its `Start` events,
-/// so no vector grows.
+/// so no vector grows. The counts are the builder's stacks' room
+/// ([`builder::Stacks`]), a slot per kind kept at zero between builds,
+/// so a build writes the counts of the kinds it holds and no more.
 pub(crate) struct Building<'a> {
     bump: &'a Bump,
     slots: [Option<StoreAt>; SLOTS],
     stores: BumpVec<'a, Growing<'a>>,
-    counts: [u32; SLOTS],
+    counts: Vec<u32>,
 }
 
 impl<'a> Building<'a> {
     /// An empty arena in `bump`, to hold as many nodes of each kind as
-    /// `kinds` names.
-    pub(crate) fn new(bump: &'a Bump, kinds: impl Iterator<Item = SyntaxKind>) -> Building<'a> {
-        let mut counts = [0u32; SLOTS];
-        for kind in kinds {
-            if let Some(count) = slot_of(kind).and_then(|slot| counts.get_mut(slot)) {
-                *count = count.saturating_add(1);
+    /// `events` opens, counted into `counts`, which [`Building::freeze`]
+    /// hands back at zero; and how many elements the shape of `events`
+    /// holds, a node per `Start` and a token per `Token`.
+    pub(crate) fn new(
+        bump: &'a Bump,
+        events: &[Event],
+        mut counts: Vec<u32>,
+    ) -> (Building<'a>, usize) {
+        counts.resize(SLOTS, 0);
+        let (mut held, mut shaped) = (0, 0);
+        for event in events {
+            match *event {
+                Event::Start { kind, .. } if kind != TOMBSTONE => {
+                    shaped += 1;
+                    if let Some(count) = slot_of(kind).and_then(|slot| counts.get_mut(slot)) {
+                        held += usize::from(*count == 0);
+                        *count = count.saturating_add(1);
+                    }
+                }
+                Event::Token { .. } => shaped += 1,
+                _ => {}
             }
         }
-        let held = counts.iter().filter(|count| **count > 0).count();
-        Building {
+        let building = Building {
             bump,
             slots: [None; SLOTS],
             stores: BumpVec::with_capacity_in(held, bump),
             counts,
-        }
+        };
+        (building, shaped)
     }
 
     /// The vector of the struct kind at `slot`, made by `empty` with the
@@ -460,15 +489,18 @@ impl<'a> Building<'a> {
         self.stores.get_mut(at.index())
     }
 
-    /// The arena as the tree reads it, each vector frozen to its slice.
-    pub(crate) fn freeze(self) -> Nodes<'a> {
-        let stores = self
-            .bump
-            .alloc_slice_fill_iter(self.stores.into_iter().map(Growing::freeze));
-        Nodes {
-            slots: self.slots,
+    /// The arena as the tree keeps it, in the arena, each vector frozen
+    /// to its slice; and the counts back, at zero.
+    pub(crate) fn freeze(self) -> (&'a Nodes<'a>, Vec<u32>) {
+        let Building {
+            bump,
+            slots,
             stores,
-        }
+            mut counts,
+        } = self;
+        counts.fill(0);
+        let stores = bump.alloc_slice_fill_iter(stores.into_iter().map(Growing::freeze));
+        (bump.alloc_with(|| Nodes { slots, stores }), counts)
     }
 }
 
@@ -536,12 +568,12 @@ fn first_after<T: Child>(
 
 /// Every child the field admits, in order, as a stretch of its pool:
 /// counted first, so the pool grows once at most.
-fn all<T: Child + Pooled>(pools: &mut Pools<'_>, children: &[Element]) -> List<T> {
+fn all<T: Child + Pooled>(pools: &mut Pools, children: &[Element]) -> List<T> {
     listed(pools, children.iter().filter_map(T::of))
 }
 
 /// What `items` yields, appended to its pool as one stretch.
-fn listed<T: Pooled>(pools: &mut Pools<'_>, items: impl Iterator<Item = T> + Clone) -> List<T> {
+fn listed<T: Pooled>(pools: &mut Pools, items: impl Iterator<Item = T> + Clone) -> List<T> {
     let count = items.clone().count();
     if count == 0 {
         return List::default();
@@ -570,7 +602,7 @@ fn token(children: &[Element], anchors: &[SyntaxKind], kinds: &[SyntaxKind]) -> 
 }
 
 /// Every token whose kind is in `kinds`, in order.
-fn tokens(pools: &mut Pools<'_>, children: &[Element], kinds: &[SyntaxKind]) -> List<TokenId> {
+fn tokens(pools: &mut Pools, children: &[Element], kinds: &[SyntaxKind]) -> List<TokenId> {
     listed(
         pools,
         children.iter().filter_map(|element| match element {

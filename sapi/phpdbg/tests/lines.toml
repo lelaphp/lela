@@ -406,6 +406,18 @@ files = { "t.php" = "<?php\nfunction f(int $a = null) {}\nfunction g(int $b = nu
 stdin = "ev 1\nc\nr\nq\n"
 streams = "merged"
 
+# A context whose compile bound classes early before its refusal: php binds a
+# top-level class with no parent, interfaces or traits as it compiles it
+# (`zend_compile_class_decl`), and the fatal's jump takes none back, so each
+# stands beside the functions declared around it; one its opline binds does
+# not (#3029).
+[[line]]
+name = "a-refused-context-leaves-its-early-bound-classes-standing"
+args = ["-qb", "-n", "-d", "display_errors=1", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f() {}\nclass A {}\ninterface I {}\nclass C implements I {}\nfunction g() {}\nbreak 2;\n" }
+stdin = "ev var_dump(function_exists(\"f\"), class_exists(\"A\", false), interface_exists(\"I\", false), class_exists(\"C\", false), function_exists(\"g\"))\nq\n"
+streams = "merged"
+
 # The auto compile under `-r` comes after the init files whatever they left:
 # where their code bailed out, its displays come before the startup run asks
 # to restart (`n`, the session at the prompt); php is fully started after it,

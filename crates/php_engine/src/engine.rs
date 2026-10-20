@@ -47,7 +47,7 @@ use crate::natives::StubPlace;
 use crate::supplied::{Keyed, Resolved, Suppliers};
 use crate::tier::{BindLoops, Loop, Loops, Nop, Tier};
 pub(crate) use crate::unit_cache::Cached;
-use crate::unit_cache::UnitCache;
+use crate::unit_cache::{CompileRefused, UnitCache};
 
 /// Everything a host knows about one request before it starts (design
 /// §4.3 seam 4): one plain `Send` value, handed over once.
@@ -1650,7 +1650,10 @@ impl Shared {
             },
             // A unit for every request is compiled on the thread that
             // asked, no request's arena at hand, so it brings its own.
-            &mut php_compile::syntax::Arena::new(),
+            Laid {
+                arena: &mut php_compile::syntax::Arena::new(),
+                room: php_compile::Room::default(),
+            },
         )
     }
 
@@ -1662,7 +1665,7 @@ impl Shared {
     pub(crate) fn publish_compiled(&self, mut unit: Unit) -> PublishedUnit {
         assign_map_ptrs(&mut unit, &self.map_ptr_last);
         unit.compact();
-        unit.published()
+        unit.published(None)
     }
 
     /// One source compiled for one request alone, under the request's
@@ -1695,39 +1698,29 @@ impl Shared {
         source: &[u8],
         filename: &[u8],
         kind: SourceKind,
-    ) -> Result<PublishedUnit, CompileError> {
+    ) -> Result<PublishedUnit, CompileRefused> {
         match self.compiled_for(req, source, filename, kind) {
             Ok(unit) => Ok(Self::held_for(req, unit)),
-            Err(refused) => {
-                req.release_compiled();
-                Err(refused)
-            }
-        }
-    }
-
-    /// [`Shared::compile_for`] over a file whose refusal stands in the
-    /// request after it: the functions the refused compile had declared
-    /// ([`php_compile::Declared`]) handed back as a unit of the request's
-    /// beside the refusal, holding the strings the compile made, for the
-    /// caller to declare ([`Request::declare_refused`]).
-    pub(crate) fn compile_declaring(
-        &self,
-        req: &mut Request,
-        source: &[u8],
-        filename: &[u8],
-    ) -> Result<PublishedUnit, (CompileError, Option<PublishedUnit>)> {
-        match self.compiled_for(req, source, filename, SourceKind::File) {
-            Ok(unit) => Ok(Self::held_for(req, unit)),
-            Err(refused) => {
-                let declared = refused.declared.as_ref().map(|declared| {
-                    let unit = req.take_unit(declared.unit.clone());
+            // What the refused compile had declared stands in the
+            // request after it ([`Request::declare_refused`]), a unit of
+            // the request's holding the strings the compile made, which a
+            // refusal that declared nothing gives up.
+            Err(error) => {
+                let refused = CompileRefused::published(error, |unit| {
+                    req.count_keys_made(unit.runtime_keys.len());
+                    let unit = req.take_unit(unit);
                     req.hold_compiled(&unit);
+                    // An `eval`'s names, made as php's compile made them;
+                    // the memory limit refusing them ends the request.
+                    if matches!(kind, SourceKind::Eval(_)) {
+                        req.hold_unit_names(&unit).ok();
+                    }
                     unit
                 });
-                if declared.is_none() {
+                if refused.declared.is_none() {
                     req.release_compiled();
                 }
-                Err((refused, declared))
+                Err(refused)
             }
         }
     }
@@ -1759,23 +1752,31 @@ impl Shared {
             multibyte: req.typed_ini().multibyte,
         };
         let bound = crate::multibyte::bound(req, ini.multibyte);
-        let cwd = req.cwd();
         let keys_before = req.keys_made();
         let stack = req.stack_limit();
         let declared = Declared {
             extended_info: self.extended_info && !req.compiling_host_string,
             ..self.declared()
         };
-        req.compiling(|heap, request_classes, arena| {
+        let room = req.compile_room();
+        req.compiling(|heap, request_classes, arena, cwd| {
             let origin = Origin {
                 filename,
-                cwd: &cwd,
+                cwd,
                 kind,
                 keys_before,
                 request_classes,
                 multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
             };
-            compile(source, origin, ini, declared, stack, heap, arena)
+            compile(
+                source,
+                origin,
+                ini,
+                declared,
+                stack,
+                heap,
+                Laid { arena, room },
+            )
         })
     }
 
@@ -5346,7 +5347,7 @@ impl Engine {
         req: &mut Request,
         source: Option<&[u8]>,
         written: Option<&[u8]>,
-    ) -> Option<Result<PublishedUnit, CompileError>> {
+    ) -> Option<Result<PublishedUnit, CompileRefused>> {
         if let Some(source) = source {
             // A source the host read is still `zend_compile_file`'s.
             req.take_shared_hold();
@@ -5380,7 +5381,7 @@ impl Engine {
         path: &[u8],
         written: &[u8],
         handle: HandlePath,
-    ) -> Option<Result<PublishedUnit, CompileError>> {
+    ) -> Option<Result<PublishedUnit, CompileRefused>> {
         req.compile_file(path, Some(written), handle)
             .unwrap_or_else(|thrown| {
                 req.leave_pending(&thrown);
@@ -5738,7 +5739,8 @@ struct CompileIni {
 /// The unit's op arrays take their runtime caches where it is shared:
 /// offsets of the engine's as it is published ([`assign_map_ptrs`]), or
 /// numbers of the request's it was compiled for
-/// ([`exec::RuntimeCaches::take`]).
+/// ([`exec::RuntimeCaches::take`]). `laid` is where the compile lays its
+/// work down ([`Laid`]).
 fn compile(
     source: &[u8],
     origin: Origin<'_>,
@@ -5746,7 +5748,7 @@ fn compile(
     declared: Declared<'_>,
     stack: StackLimit,
     strings: &mut dyn Intern,
-    arena: &mut php_compile::syntax::Arena,
+    laid: Laid<'_>,
 ) -> Result<Unit, CompileError> {
     let options = php_compile::Options {
         filename: origin.filename,
@@ -5768,7 +5770,17 @@ fn compile(
         hooked: declared.hooked,
         extended_info: declared.extended_info,
     };
-    php_compile::compile_source(arena, source, &options, strings)
+    php_compile::compile_source_into(laid.arena, source, &options, strings, laid.room)
+}
+
+/// Where a compile lays its work down: the arena its parse and the
+/// compiler's temporaries are bumped into, a request's or one of its
+/// own, and the room of a unit given up that the unit's main op array is
+/// laid down in ([`php_compile::Room`]), none where there is no such
+/// unit.
+struct Laid<'a> {
+    arena: &'a mut php_compile::syntax::Arena,
+    room: php_compile::Room,
 }
 
 /// What compiling the unit raised, raised now, each through the
@@ -5937,11 +5949,37 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &PublishedUnit, kind: Sourc
 /// ```expect exit=255
 /// Fatal error: Encoding must be a literal in %s on line 2
 /// ```
-pub(crate) fn refused_program(req: &mut Request, refused: &CompileError, file: &[u8]) {
-    for raised in &refused.raised {
+///
+/// What its compile had declared before the refusal stands, as after an
+/// `include` ([`Request::declare_refused`]), where a file the request
+/// served before it, `auto_prepend_file`'s, looks:
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/refused' . getmypid(); @mkdir($dir);
+/// file_put_contents("$dir/pre.php", '<?php register_shutdown_function(function () { var_dump(function_exists("f"), class_exists("A", false)); });');
+/// file_put_contents("$dir/main.php", "<?php\nfunction f() {}\nclass A {}\nbreak 2;\n");
+/// echo shell_exec(escapeshellarg(PHP_BINARY) . " -n -d auto_prepend_file=$dir/pre.php $dir/main.php");
+/// exec('rm -rf ' . escapeshellarg($dir));
+/// ```
+/// ```expect exit=0 process
+///
+/// Fatal error: 'break' not in the 'loop' or 'switch' context in %s on line 4
+/// Stack trace:
+/// #0 {main}
+/// bool(true)
+/// bool(true)
+/// ```
+pub(crate) fn refused_program(req: &mut Request, refused: &CompileRefused, file: &[u8]) {
+    // What the compile had declared stands, each in its turn among what
+    // it raised ([`Request::declare_refused`]).
+    let Some(noted) = req.declare_refused(refused, file) else {
+        return;
+    };
+    let error = &refused.error;
+    for raised in error.raised.get(noted..).unwrap_or_default() {
         req.note_error_in(raised.level, &raised.message, file, raised.line);
     }
-    refusal_raised(req, refused, file);
+    refusal_raised(req, error, file);
 }
 
 /// The refusal itself, past what was raised before it
@@ -8008,7 +8046,7 @@ mod tests {
             let mut req = Request::new(Arc::clone(&engine.shared), description(""));
             started_at.push(req.memory_usage(false));
             let before = req.memory_usage(false);
-            let compiled = req.compiling(|strings, _, _| {
+            let compiled = req.compiling(|strings, _, _, _| {
                 compile(
                     source,
                     Origin {
@@ -8029,7 +8067,10 @@ mod tests {
                     Declared::default(),
                     StackLimit::UNCHECKED,
                     strings,
-                    &mut php_compile::syntax::Arena::new(),
+                    Laid {
+                        arena: &mut php_compile::syntax::Arena::new(),
+                        room: php_compile::Room::default(),
+                    },
                 )
             });
             assert!(compiled.is_ok(), "the source compiles");
@@ -8294,7 +8335,7 @@ mod tests {
             },
             ..Unit::default()
         };
-        let frame = req.pushed(unit.published());
+        let frame = req.pushed(unit.published(None));
         assert_eq!(
             crate::tier::execute::<Nop, Untold>(&mut req, frame),
             Err(Fatal::error(
@@ -8313,7 +8354,7 @@ mod tests {
         let unit = engine
             .unit(b"<?php echo 1;", b"witness.php")
             .map_or_else(Unit::default, |unit| Unit::clone(&unit));
-        let frame = req.pushed(unit.published());
+        let frame = req.pushed(unit.published(None));
         assert_eq!(
             crate::tier::execute::<Probe, Untold>(&mut req, frame),
             Ok(())
@@ -8339,7 +8380,7 @@ mod tests {
                 b"<?php function f($a, $b = 1) { return $a; } f(1); f(2, 3); f();",
                 b"witness.php",
             )
-            .unwrap_or_else(|| Unit::default().published());
+            .unwrap_or_else(|| Unit::default().published(None));
         req.declare_functions(&unit);
         let frame = req.pushed(unit);
         let outcome = crate::tier::execute::<Probe, Untold>(&mut req, frame);

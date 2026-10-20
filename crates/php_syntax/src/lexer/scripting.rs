@@ -427,15 +427,16 @@ impl Lexer<'_> {
     // ----- identifiers, keywords, names, b-prefixed strings ---------------------------
 
     pub(crate) fn label_len(&self, at: usize) -> usize {
-        let mut i = at;
-        if !is_label_start(self.byte(i)) {
-            return 0;
+        let rest = self.text.get(at..).unwrap_or_default();
+        match rest.split_first() {
+            Some((&first, tail)) if is_label_start(first) => {
+                1 + tail
+                    .iter()
+                    .position(|&b| !is_label_continue(b))
+                    .unwrap_or(tail.len())
+            }
+            _ => 0,
         }
-        i += 1;
-        while is_label_continue(self.byte(i)) {
-            i += 1;
-        }
-        i - at
     }
 
     fn lex_ident_like(&mut self) {
@@ -487,14 +488,14 @@ impl Lexer<'_> {
 
         self.pos = label_end;
         let word = &self.text[start..label_end];
-        let kind = if MAGIC_CONSTS.iter().any(|m| word.eq_ignore_ascii_case(m)) {
+        // Every magic constant opens with `__`, so a label that does not
+        // is read against the keywords alone.
+        let kind = if word.starts_with(b"__")
+            && MAGIC_CONSTS.iter().any(|m| word.eq_ignore_ascii_case(m))
+        {
             SyntaxKind::MAGIC_CONST
         } else {
-            // Keywords are ASCII; a label with high bytes is never one.
-            std::str::from_utf8(word)
-                .ok()
-                .and_then(SyntaxKind::from_keyword)
-                .unwrap_or(SyntaxKind::IDENT)
+            SyntaxKind::from_keyword(word).unwrap_or(SyntaxKind::IDENT)
         };
         self.emit(kind, start);
     }
