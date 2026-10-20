@@ -620,20 +620,29 @@ impl<'a> Builder<'a> {
     }
 
     /// The opline the trace serves next, where the record says it: the
-    /// next one it recorded before a return, or, past the last, a loop's
-    /// header.
+    /// next one it recorded before a return, or, past the last, the
+    /// header a loop, a recursive call or a recursive return goes back to,
+    /// as php holds the trace's next opline at every end but `RETURN` and
+    /// `INTERPRETER` (`zend_jit_ir.c:17152-17156`).
     fn following(&self, ahead: &[Event]) -> Option<(FuncRef, OplineIdx)> {
-        let served = |event: &Event| match event {
+        let mut until_back = ahead
+            .iter()
+            .take_while(|event| !matches!(event, Event::Back));
+        let next = until_back.find_map(|event| match event {
             Event::Op { func, opline, .. } => Some((*func, *opline)),
             _ => None,
-        };
-        let next = ahead
-            .iter()
-            .take_while(|event| !matches!(event, Event::Back))
-            .find_map(served);
-        match (next, ahead.is_empty(), self.repeat) {
+        });
+        // Nothing served before the end: what follows is a call begun or
+        // entered, and the trace goes back to its header.
+        let ends = next.is_none() && !ahead.iter().any(|event| matches!(event, Event::Back));
+        match (next, ends, self.repeat) {
             (Some(next), ..) => Some(next),
-            (None, true, Some(Repeat::Loop)) => self.rec.events.first().and_then(served),
+            (None, true, Some(_)) => match self.ops.get(self.header.index()) {
+                Some(Op::Line(line)) => {
+                    Some((self.frames[usize::from(line.frame.0)].func, line.opline))
+                }
+                _ => None,
+            },
             _ => None,
         }
     }

@@ -513,3 +513,47 @@ fn a_return_type_checked_through_a_reference_keeps_the_reference() {
         assert!(lines.contains("---- TRACE 1 start (enter) g()"), "{lines}");
     }
 }
+
+/// A guarded step the trace ends at is held to the opline the trace goes
+/// on at, as php holds the trace's next opline at every end but a return
+/// and the interpreter's: a table whose recorded case is a `RETURN` the
+/// trace stops before, and the last call of a recursion through a
+/// variable, after which the trace goes back to its header, each leave
+/// where the step went another way rather than go on where the record
+/// went.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_step_the_trace_ends_at_is_held_to_where_it_goes_on() {
+    for (program, printed) in [
+        (
+            "function f($x) { switch ($x) { case 'a': return 1; case 'b': return 2; } return 3; }
+            try { throw new Exception; } catch (Exception $e) {}
+            echo f('a'), f('b'), f('c'), \"\\n\";",
+            "123\n",
+        ),
+        (
+            "function s($a, $n) { return 100; }
+            function r($a, $n) { if ($n == 0) { return 0; } $g = $a[$n]; return $g($a, $n - 1) + 1; }
+            try { throw new Exception; } catch (Exception $e) {}
+            echo r(['-', 'r', 'r', 'r'], 3), ' ', r(['-', 'r', 's', 'r'], 3), \"\\n\";",
+            "3 102\n",
+        ),
+    ] {
+        for mode in ["force", "exit-fuzz"] {
+            let ini = [
+                ("jit.mode", mode),
+                ("jit.compile", "inline"),
+                ("opcache.jit_debug", "258048"),
+            ];
+            let served = testing::serve::<Lane>(&ini, program);
+            let lines = String::from_utf8_lossy(&served.stderr).into_owned();
+            assert_eq!(served.fatal, None, "{mode} {program}\n{lines}");
+            assert_eq!(
+                testing::stdout(&served),
+                printed,
+                "{mode} {program}\n{lines}"
+            );
+            assert!(lines.contains("compiled"), "{lines}");
+        }
+    }
+}
