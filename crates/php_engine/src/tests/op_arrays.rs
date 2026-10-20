@@ -107,7 +107,7 @@ fn a_functions_executable_lines_are_phpdbgs() {
         if let (Some(name), Some(code)) = (keyed(observed), read) {
             let lines: Vec<String> = executable(code).iter().map(u32::to_string).collect();
             let line = format!("[{name} {}]", lines.join(" "));
-            observed.write(line.as_bytes());
+            observed.response_mut().write(line.as_bytes());
         }
         ObserverHandlers::default()
     }
@@ -239,7 +239,7 @@ fn profile(observed: &mut Observed<'_>) -> ObserverHandlers {
         let mut lines = vec![format!("{} oplines", code.len())];
         lines.extend(code.oplines().filter_map(|op| render(code, &op)));
         let text = format!("[{}]", lines.join("\n"));
-        observed.write(text.as_bytes());
+        observed.response_mut().write(text.as_bytes());
     }
     ObserverHandlers::default()
 }

@@ -74,7 +74,7 @@ impl<const N: u8> Shows<N> {
             let name = observed_name(observed);
             format!("<!-- {N}: '{opcode}' {name}:{at} -->\n")
         };
-        observed.write(line.as_bytes());
+        observed.response_mut().write(line.as_bytes());
         beneath.serve(observed);
     }
 }

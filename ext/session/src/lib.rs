@@ -373,7 +373,7 @@ fn started_error(req: &mut Request, level: Level, message: &str) {
 /// `php_session_headers_already_sent_error`: the message, then where the
 /// body started.
 fn sent_error(req: &mut Request, message: &str) {
-    let text = match req.output_started_at() {
+    let text = match req.response().started_at() {
         Some((file, line)) if !file.is_empty() => {
             format!("{message} (sent from {} on line {line})", shown(&file))
         }
@@ -384,7 +384,7 @@ fn sent_error(req: &mut Request, message: &str) {
 
 /// `SG(headers_sent)`.
 fn headers_sent(req: &Request) -> bool {
-    req.headers_sent().is_some()
+    req.response().headers_sent().is_some()
 }
 
 /// The session's array, `Z_REFVAL(PS(http_session_vars))`, where

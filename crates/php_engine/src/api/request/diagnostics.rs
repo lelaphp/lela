@@ -830,7 +830,7 @@ impl Request {
             // error stream and onto the body; and it carries neither
             // string around it.
             let text = said(format!("{name}: "), &format!("{site}\n"));
-            self.write_stderr(&text);
+            self.response_mut().write_stderr(&text);
         } else {
             let before = format!("{}\n{name}: ", self.ini_text(b"error_prepend_string"));
             let after = format!("{site}\n{}", self.ini_text(b"error_append_string"));
@@ -902,7 +902,7 @@ impl Request {
         if self.diagnostics.display_direct {
             self.ub_write(text);
         } else {
-            self.write(text);
+            self.response_mut().write(text);
         }
     }
 

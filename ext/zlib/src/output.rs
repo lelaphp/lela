@@ -264,7 +264,8 @@ fn handler(req: &mut Request, call: &mut HandlerCall<'_>) -> Result<HandlerStatu
     let coding = encoding(req)?;
     if coding == Coding::None {
         if op.start && !(op.clean && op.finish) {
-            req.header_add(b"Vary: Accept-Encoding", false, 0);
+            req.response_mut()
+                .header_add(b"Vary: Accept-Encoding", false, 0);
         }
         return Ok(HandlerStatus::Failure);
     }
@@ -276,16 +277,17 @@ fn handler(req: &mut Request, call: &mut HandlerCall<'_>) -> Result<HandlerStatu
         return Ok(HandlerStatus::Failure);
     };
     if (!op.clean || !op.finish) && op.start {
-        if req.headers_sent().is_some() || globals(req).compression == 0 {
+        if req.response().headers_sent().is_some() || globals(req).compression == 0 {
             let mut ctx = std::mem::take(&mut globals(req).handler);
             ctx.end(req);
             globals(req).handler = ctx;
             return Ok(HandlerStatus::Failure);
         }
         if let Some(header) = coding.header() {
-            req.header_add(header, true, 0);
+            req.response_mut().header_add(header, true, 0);
         }
-        req.header_add(b"Vary: Accept-Encoding", false, 0);
+        req.response_mut()
+            .header_add(b"Vary: Accept-Encoding", false, 0);
         call.immutable = true;
     }
     call.out = handed.unwrap_or_default();
@@ -330,7 +332,7 @@ fn compression_start(req: &mut Request) -> Result<(), Thrown> {
         return Ok(());
     }
     let chunk_size = globals(req).compression;
-    let begun = req.output_buffer_op(&OutputOp::Start {
+    let begun = req.response_mut().buffer_op(&OutputOp::Start {
         handler: StartHandler::Registered(COMPRESSION_HANDLER),
         chunk_size,
         flags: STDFLAGS,
@@ -344,7 +346,7 @@ fn compression_start(req: &mut Request) -> Result<(), Thrown> {
     begun.give_up(req);
     if started && !user.is_empty() {
         let mut name = None;
-        let handler = if let Some(registered) = req.buffer_handler(&user) {
+        let handler = if let Some(registered) = req.response().buffer_handler(&user) {
             StartHandler::Registered(registered)
         } else {
             let made = PhpString::new(req, &user)?;
@@ -360,7 +362,7 @@ fn compression_start(req: &mut Request) -> Result<(), Thrown> {
                 }
             }
         };
-        let done = req.output_buffer_op(&OutputOp::Start {
+        let done = req.response_mut().buffer_op(&OutputOp::Start {
             handler,
             chunk_size,
             flags: STDFLAGS,
@@ -421,7 +423,7 @@ pub(crate) fn on_compression(req: &mut Request, value: Option<&[u8]>) -> Result<
     if matches!(req.ini().stage(), IniStage::Startup | IniStage::Deactivate) {
         return Ok(true);
     }
-    if req.headers_sent().is_some() {
+    if req.response().headers_sent().is_some() {
         docref(
             req,
             Level::Warning,
@@ -430,7 +432,11 @@ pub(crate) fn on_compression(req: &mut Request, value: Option<&[u8]>) -> Result<
         return Ok(false);
     }
     globals(req).compression = compression;
-    if compression != 0 && !req.buffer_handler_started(HANDLER_NAME.as_bytes()) {
+    if compression != 0
+        && !req
+            .response()
+            .buffer_handler_started(HANDLER_NAME.as_bytes())
+    {
         compression_start(req)?;
     }
     Ok(true)
@@ -441,7 +447,7 @@ pub(crate) fn on_compression(req: &mut Request, value: Option<&[u8]>) -> Result<
 #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
 pub(crate) fn on_handler(req: &mut Request, _value: Option<&[u8]>) -> Result<bool, Thrown> {
     if matches!(req.ini().stage(), IniStage::Activate | IniStage::Runtime)
-        && req.headers_sent().is_some()
+        && req.response().headers_sent().is_some()
     {
         docref(
             req,
@@ -485,9 +491,10 @@ pub(crate) fn ob_gzhandler(
     };
     if op.start {
         if let Some(header) = coding.header() {
-            req.header_add(header, true, 0);
+            req.response_mut().header_add(header, true, 0);
         }
-        req.header_add(b"Vary: Accept-Encoding", false, 0);
+        req.response_mut()
+            .header_add(b"Vary: Accept-Encoding", false, 0);
     }
     let level = level(req);
     let mut ctx = globals(req).legacy.take().unwrap_or_default();

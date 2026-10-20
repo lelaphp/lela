@@ -1015,8 +1015,9 @@ fn send_cookie(req: &mut Request, id: &[u8]) -> bool {
     let mut prefix = b"Set-Cookie: ".to_vec();
     prefix.extend_from_slice(&name);
     prefix.push(b'=');
-    req.header_remove_prefix(&prefix, b"Set-Cookie".len());
-    req.header_add(&cookie, false, 0);
+    req.response_mut()
+        .header_remove_prefix(&prefix, b"Set-Cookie".len());
+    req.response_mut().header_add(&cookie, false, 0);
     true
 }
 
@@ -1059,7 +1060,7 @@ fn cache_limiter(req: &mut Request) -> Result<i32, Thrown> {
         _ => return Ok(-1),
     };
     for header in &headers {
-        req.header_add(header.as_bytes(), true, 0);
+        req.response_mut().header_add(header.as_bytes(), true, 0);
     }
     if limiter != b"nocache"
         && let Some(script) = req.script_name().map(<[u8]>::to_vec)
@@ -1068,7 +1069,7 @@ fn cache_limiter(req: &mut Request) -> Result<i32, Thrown> {
         && let Ok(stat) = std::fs::metadata(req.absolutize(&script))
     {
         use std::os::unix::fs::MetadataExt;
-        req.header_add(
+        req.response_mut().header_add(
             format!("Last-Modified: {} GMT", gmt(stat.mtime())).as_bytes(),
             true,
             0,

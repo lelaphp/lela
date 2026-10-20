@@ -324,7 +324,7 @@ fn sprintf(
 #[php_function]
 fn printf(req: &mut Request, format: PhpString, values: Variadic<Value>) -> Result<i64, Thrown> {
     let formatted = formatted(req, format.as_bytes(), &values.0, Some(1))?;
-    req.write(formatted.as_bytes());
+    req.response_mut().write(formatted.as_bytes());
     Ok(efree(req, formatted))
 }
 
@@ -404,7 +404,7 @@ fn vprintf(req: &mut Request, format: PhpString, values: PhpArray) -> Result<i64
     let formatted = formatted(req, format.as_bytes(), &arguments, None);
     args.free(req);
     let formatted = formatted?;
-    req.write(formatted.as_bytes());
+    req.response_mut().write(formatted.as_bytes());
     Ok(efree(req, formatted))
 }
 

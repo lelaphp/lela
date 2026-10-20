@@ -316,7 +316,7 @@ fn pass2(req: &mut Request, _: &[u8]) {
 /// What each pass prints, `php_printf`, where `MINIT` registered it.
 fn registered_pass(req: &mut Request, line: &[u8]) {
     if req.ini().get(REGISTER_PASSES).is_some_and(Ini::parse_bool) {
-        req.write(line);
+        req.response_mut().write(line);
     }
 }
 

@@ -233,7 +233,7 @@ fn show_opcode_in_user_handler(observed: &mut Observed<'_>, beneath: Beneath<'_,
     line.extend_from_slice(b"<!-- opcode: '");
     line.extend_from_slice(beneath.opcode().as_bytes());
     line.extend_from_slice(b"' in user handler -->\n");
-    observed.write(&line);
+    observed.response_mut().write(&line);
 }
 
 /// `observer_show_opcode`: under `show_opcode`, the opcode a user
@@ -250,7 +250,7 @@ fn show_opcode(observed: &mut Observed<'_>) {
     line.extend_from_slice(b"<!-- opcode: '");
     line.extend_from_slice(opcode.as_bytes());
     line.extend_from_slice(b"' -->\n");
-    observed.write(&line);
+    observed.response_mut().write(&line);
 }
 
 /// The observer's request state: `ZT_G(observer_nesting_depth)`, which
@@ -331,7 +331,7 @@ fn show_declared(req: &mut Request, what: &str, name: &[u8]) {
     line.extend_from_slice(format!("<!-- declared {what} '").as_bytes());
     line.extend_from_slice(name);
     line.extend_from_slice(b"' -->\n");
-    req.write(&line);
+    req.response_mut().write(&line);
 }
 
 /// What an observed frame serves: a function, a method or a native,
@@ -469,7 +469,7 @@ fn internal_enter(observed: &mut Observed<'_>) {
     line.extend_from_slice(b"<!-- internal enter ");
     line.extend(Serves::function(scope.as_deref(), &name));
     line.extend_from_slice(b"() -->\n");
-    observed.write(&line);
+    observed.response_mut().write(&line);
 }
 
 /// `observer_show_init`: `<!-- init f() -->`, `<!-- init C::m() -->`
@@ -490,7 +490,7 @@ fn show_init(req: &mut Request, serves: &Serves) {
         }
     }
     line.extend_from_slice(b" -->\n");
-    req.write(&line);
+    req.response_mut().write(&line);
 }
 
 /// `observer_show_init_backtrace`: the frame observed and every frame
@@ -517,7 +517,7 @@ fn show_init_backtrace(observed: &mut Observed<'_>) {
     }
     out.extend(indent(depth));
     out.extend_from_slice(b"-->\n");
-    observed.write(&out);
+    observed.response_mut().write(&out);
 }
 
 /// `observer_begin`: the interrupt raised under
@@ -545,7 +545,7 @@ fn begin(observed: &mut Observed<'_>) {
         }
     }
     line.extend_from_slice(b">\n");
-    observed.write(&line);
+    observed.response_mut().write(&line);
     show_opcode(observed);
 }
 
@@ -569,7 +569,7 @@ fn end(observed: &mut Observed<'_>, returned: Option<&Value>) {
         line.extend_from_slice(b"<!-- Exception: ");
         line.extend_from_slice(class.as_bytes());
         line.extend_from_slice(b" -->\n");
-        observed.write(&line);
+        observed.response_mut().write(&line);
     }
     show_opcode(observed);
     let depth = depth.saturating_sub(1);
@@ -588,7 +588,7 @@ fn end(observed: &mut Observed<'_>, returned: Option<&Value>) {
         }
     }
     line.extend_from_slice(b">\n");
-    observed.write(&line);
+    observed.response_mut().write(&line);
 }
 
 /// `get_retval_info`: nothing unless `show_return_type` or
@@ -640,7 +640,8 @@ fn address(fiber: ObservedFiber) -> String {
 fn fiber_init(req: &mut Request, fiber: ObservedFiber) {
     let switches = Switches::of(req);
     if switches.enabled && switches.fiber_init {
-        req.write(format!("<!-- alloc: {} -->\n", address(fiber)).as_bytes());
+        req.response_mut()
+            .write(format!("<!-- alloc: {} -->\n", address(fiber)).as_bytes());
     }
 }
 
@@ -649,7 +650,8 @@ fn fiber_init(req: &mut Request, fiber: ObservedFiber) {
 fn fiber_destroy(req: &mut Request, fiber: ObservedFiber) {
     let switches = Switches::of(req);
     if switches.enabled && switches.fiber_destroy {
-        req.write(format!("<!-- destroy: {} -->\n", address(fiber)).as_bytes());
+        req.response_mut()
+            .write(format!("<!-- destroy: {} -->\n", address(fiber)).as_bytes());
     }
 }
 
@@ -694,5 +696,5 @@ fn fiber_switch(req: &mut Request, from: ObservedFiber, to: ObservedFiber) {
             writeln!(out, "<{tag} '{}'>", address(fiber)).ok();
         }
     }
-    req.write(out.as_bytes());
+    req.response_mut().write(out.as_bytes());
 }

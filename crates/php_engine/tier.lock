@@ -11,8 +11,10 @@ api::request::Limits::interrupt
 api::request::Request::diagnostics
 api::request::Request::engine
 api::request::Request::limits
+api::request::Request::response_mut
 api::request::Request::state
-api::request::Request::write_stderr
+api::request::Response
+api::request::Response::write_stderr
 test::Capture
 test::Engine
 test::Served

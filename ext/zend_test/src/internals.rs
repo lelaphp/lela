@@ -289,9 +289,9 @@ pub(crate) fn zend_test_crash(
     #[php(default = null)] message: Option<PhpString>,
 ) {
     if let Some(message) = message {
-        req.write(message.as_bytes());
+        req.response_mut().write(message.as_bytes());
     }
-    req.flush();
+    req.response_mut().flush();
     crate::ffi::segfault()
 }
 

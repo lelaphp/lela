@@ -376,14 +376,15 @@ fn file_action(
         Mime::Other => {
             let mut line = b"Content-type: ".to_vec();
             line.extend_from_slice(mime);
-            req.header_add(&line, true, 0);
+            req.response_mut().header_add(&line, true, 0);
             let size = archives(req)
                 .get(id)
                 .and_then(|a| a.manifest.at(slot))
                 .map_or(0, |e| e.uncompressed_filesize);
-            req.header_add(format!("Content-length: {size}").as_bytes(), true, 0);
+            req.response_mut()
+                .header_add(format!("Content-length: {size}").as_bytes(), true, 0);
             let bytes = entry::contents(req, id, slot)?;
-            req.write(&bytes);
+            req.response_mut().write(&bytes);
             Err(bailout(req))
         }
         Mime::Php => {
@@ -412,8 +413,9 @@ fn file_action(
 
 /// `phar_do_403`: the status line and php's page.
 fn do_403(req: &mut Request) -> Thrown {
-    req.header_add(b"HTTP/1.0 403 Access Denied", true, 403);
-    req.write(b"<html>\n <head>\n  <title>Access Denied</title>\n </head>\n <body>\n  <h1>403 - File Access Denied</h1>\n </body>\n</html>");
+    req.response_mut()
+        .header_add(b"HTTP/1.0 403 Access Denied", true, 403);
+    req.response_mut().write(b"<html>\n <head>\n  <title>Access Denied</title>\n </head>\n <body>\n  <h1>403 - File Access Denied</h1>\n </body>\n</html>");
     bailout(req)
 }
 
@@ -431,8 +433,9 @@ fn do_404(
         file_action(req, id, slot, (b"text/html", Mime::Php), f404, fname, None)?;
         return Err(bailout(req));
     }
-    req.header_add(b"HTTP/1.0 404 Not Found", true, 404);
-    req.write(b"<html>\n <head>\n  <title>File Not Found</title>\n </head>\n <body>\n  <h1>404 - File Not Found</h1>\n </body>\n</html>");
+    req.response_mut()
+        .header_add(b"HTTP/1.0 404 Not Found", true, 404);
+    req.response_mut().write(b"<html>\n <head>\n  <title>File Not Found</title>\n </head>\n <body>\n  <h1>404 - File Not Found</h1>\n </body>\n</html>");
     Err(bailout(req))
 }
 
@@ -602,7 +605,8 @@ fn rewritten(req: &mut Request, rewrite: &Callable, entry: &[u8]) -> Result<Vec<
 /// path with the index after it, the path cut after the archive's name
 /// outside CGI, and the request ended.
 fn moved(req: &mut Request, index: &[u8], path_info: &[u8], cut_after: Option<&[u8]>) -> Thrown {
-    req.header_add(b"HTTP/1.1 301 Moved Permanently", true, 301);
+    req.response_mut()
+        .header_add(b"HTTP/1.1 301 Moved Permanently", true, 301);
     let mut base = path_info.to_vec();
     if let Some(basename) = cut_after
         && let Some(at) = crate::path::find(&base, basename)
@@ -616,7 +620,7 @@ fn moved(req: &mut Request, index: &[u8], path_info: &[u8], cut_after: Option<&[
     } else {
         location.extend_from_slice(index);
     }
-    req.header_add(&location, true, 0);
+    req.response_mut().header_add(&location, true, 0);
     bailout(req)
 }
 

@@ -737,14 +737,14 @@ fn print_r(
     // `EG(exception)`; a fatal or an exit prints nothing.
     if let Err(thrown) = render(req, &mut out, &value, 0) {
         if thrown.exception().is_some() && !returned {
-            req.write(&out);
+            req.response_mut().write(&out);
         }
         return Err(thrown);
     }
     if returned {
         return returned_string(req, &value, &out).map(Union::A);
     }
-    req.write(&out);
+    req.response_mut().write(&out);
     Ok(Union::B(True))
 }
 
@@ -1154,7 +1154,7 @@ fn var_export(
         }
         return Ok(Some(string));
     }
-    req.write(out.as_bytes());
+    req.response_mut().write(out.as_bytes());
     out.free(req);
     pending(req)?;
     Ok(None)

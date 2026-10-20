@@ -14,7 +14,7 @@ use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 /// What an op that answers `true` or `false` answered.
 fn op_bool(req: &mut Request, op: &OutputOp) -> Result<bool, Thrown> {
-    let answer = req.output_buffer_op(op)?;
+    let answer = req.response_mut().buffer_op(op)?;
     let done = answer.as_bool().unwrap_or(false);
     answer.give_up(req);
     Ok(done)
@@ -23,7 +23,7 @@ fn op_bool(req: &mut Request, op: &OutputOp) -> Result<bool, Thrown> {
 /// What an op that answers the buffer or `false` answered, the string's
 /// owner handed on.
 fn op_string(req: &mut Request, op: &OutputOp) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    let answer = req.output_buffer_op(op)?;
+    let answer = req.response_mut().buffer_op(op)?;
     let string = match answer.as_ref() {
         ValueRef::Str(string) => OrFalse::Value(Owner::take(req, *string)),
         _ => OrFalse::False,
@@ -34,7 +34,7 @@ fn op_string(req: &mut Request, op: &OutputOp) -> Result<OrFalse<Owner<PhpString
 
 /// What an op that answers an array answered, its owner handed on.
 fn op_array(req: &mut Request, op: &OutputOp) -> Result<Owner<PhpArray>, Thrown> {
-    let answer = req.output_buffer_op(op)?;
+    let answer = req.response_mut().buffer_op(op)?;
     let array = match answer.as_array() {
         Some(array) => Ok(Owner::take(req, *array)),
         None => PhpArray::new(req),
@@ -165,7 +165,7 @@ fn ob_start(
 ) -> Result<bool, Thrown> {
     let callback = callback.0;
     let registered = match callback.deref().as_ref() {
-        ValueRef::Str(name) if !name.is_empty() => req.buffer_handler(name.as_bytes()),
+        ValueRef::Str(name) if !name.is_empty() => req.response().buffer_handler(name.as_bytes()),
         _ => None,
     };
     let handler = match (callback.deref().as_ref(), registered) {
@@ -317,7 +317,7 @@ fn ob_get_contents(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Throw
 /// ```
 #[php_function]
 fn ob_get_level(req: &mut Request) -> Result<i64, Thrown> {
-    let level = req.output_buffer_op(&OutputOp::GetLevel)?;
+    let level = req.response_mut().buffer_op(&OutputOp::GetLevel)?;
     let n = level.as_int().unwrap_or(0);
     level.give_up(req);
     Ok(n)
@@ -334,7 +334,7 @@ fn ob_get_level(req: &mut Request) -> Result<i64, Thrown> {
 /// ```
 #[php_function]
 fn ob_get_length(req: &mut Request) -> Result<OrFalse<i64>, Thrown> {
-    let length = req.output_buffer_op(&OutputOp::GetLength)?;
+    let length = req.response_mut().buffer_op(&OutputOp::GetLength)?;
     let n = length.as_int();
     length.give_up(req);
     Ok(match n {
@@ -432,7 +432,9 @@ fn ob_get_status(
 /// ```
 #[php_function]
 fn ob_implicit_flush(req: &mut Request, #[php(default = true)] enable: bool) -> Result<(), Thrown> {
-    let done = req.output_buffer_op(&OutputOp::ImplicitFlush(enable))?;
+    let done = req
+        .response_mut()
+        .buffer_op(&OutputOp::ImplicitFlush(enable))?;
     done.give_up(req);
     Ok(())
 }

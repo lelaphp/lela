@@ -234,7 +234,7 @@ fn apache_request_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> 
 }
 
 /// `apache_response_headers(): array` (`Z/sapi/cgi/cgi_main.c:1689`):
-/// the header list as name and value ([`Request::response_headers`]),
+/// the header list as name and value ([`Response::response_headers`]),
 /// and the head php-cgi writes carries each line as given.
 ///
 /// ```php
@@ -262,7 +262,7 @@ fn apache_request_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> 
 /// ```
 #[php_function]
 fn apache_response_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
-    req.response_headers()
+    req.response_mut().response_headers()
 }
 
 /// `dl(string $extension_filename): bool`, `ext/standard`'s, which php-cgi

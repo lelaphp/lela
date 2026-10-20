@@ -668,7 +668,7 @@ pub(crate) fn accel_log(req: &mut Request, level: Log, message: &str) {
             return;
         }
     }
-    req.write_stderr(line.as_bytes());
+    req.response_mut().write_stderr(line.as_bytes());
 }
 
 /// `asctime(localtime(&at))` less its line ending: `at` in `zone`, the

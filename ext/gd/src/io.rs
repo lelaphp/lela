@@ -540,7 +540,7 @@ impl Sink {
     fn put(&self, req: &mut Request, bytes: &[u8]) -> i32 {
         let took = match &self.to {
             To::Output => {
-                req.write(bytes);
+                req.response_mut().write(bytes);
                 Some(bytes.len())
             }
             To::Stream(stream) => stream.write(req, bytes),
@@ -975,7 +975,7 @@ fn output_gd(
             }
             stream.free(req);
         }
-        None => req.write(&bytes),
+        None => req.response_mut().write(&bytes),
     }
     Ok(true)
 }

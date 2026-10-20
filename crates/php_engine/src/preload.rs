@@ -334,7 +334,7 @@ mod tests {
                         PreloadThread::new(
                             |req| {
                                 seen(req, "take");
-                                req.write_stderr(b"taken\n");
+                                req.response_mut().write_stderr(b"taken\n");
                                 req.ini().get(b"t.take") == Some(&b"1"[..])
                             },
                             |_| -2,

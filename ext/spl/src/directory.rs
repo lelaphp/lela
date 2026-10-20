@@ -1671,7 +1671,7 @@ impl SplFileObject {
         let (_, stream) = file_checked(req, this.object())?;
         let rest = stream.copy_to_mem(req, None)?;
         let n = rest.len();
-        req.write(rest.as_bytes());
+        req.response_mut().write(rest.as_bytes());
         rest.give_up(req);
         Ok(i64::try_from(n).unwrap_or(i64::MAX))
     }

@@ -1491,7 +1491,7 @@ pub fn arg_null_deprecated(req: &mut Request, position: u32, type_name: &str) {
 pub fn exit(req: &mut Request, status: &Value) -> Thrown {
     if let Some(text) = status.as_str_bytes() {
         if !text.is_empty() {
-            req.write(text);
+            req.response_mut().write(text);
             if req.is_pending() {
                 return Thrown::of(None);
             }

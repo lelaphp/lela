@@ -119,12 +119,13 @@ fn repair(req: &mut Request, doc: &mut ffi::Doc, input: &[u8]) -> Result<Option<
 /// `TG(clean_output)` asks for it.
 fn clean_output_start(req: &mut Request) -> Result<(), Thrown> {
     if req.state::<State>().clean_output {
-        req.output_buffer_op(&OutputOp::Start {
-            handler: StartHandler::Registered(OB_TIDYHANDLER),
-            chunk_size: 0,
-            flags: STDFLAGS,
-        })?
-        .give_up(req);
+        req.response_mut()
+            .buffer_op(&OutputOp::Start {
+                handler: StartHandler::Registered(OB_TIDYHANDLER),
+                chunk_size: 0,
+                flags: STDFLAGS,
+            })?
+            .give_up(req);
     }
     Ok(())
 }
@@ -161,7 +162,7 @@ pub(crate) fn on_clean_output(req: &mut Request, value: Option<&[u8]>) -> Result
     let on = Ini::parse_bool(value.unwrap_or_default());
     let runtime = req.ini().stage() == IniStage::Runtime;
     if runtime {
-        let status = req.buffer_status();
+        let status = req.response().buffer_status();
         if on && status & WRITTEN != 0 {
             let text = "Cannot enable tidy.clean_output - there has already been output";
             docref(req, Level::Warning, text);
@@ -176,7 +177,7 @@ pub(crate) fn on_clean_output(req: &mut Request, value: Option<&[u8]>) -> Result
     if req.ini().stage() != IniStage::Startup {
         req.state::<State>().clean_output = on;
     }
-    if runtime && on && !req.buffer_handler_started(NAME.as_bytes()) {
+    if runtime && on && !req.response().buffer_handler_started(NAME.as_bytes()) {
         clean_output_start(req)?;
     }
     Ok(true)

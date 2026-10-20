@@ -205,7 +205,7 @@ impl JitEngine {
             // Writing to a `String` does not fail.
             writeln!(lines, "{note}").unwrap_or_default();
         }
-        req.write_stderr(lines.as_bytes());
+        req.response_mut().write_stderr(lines.as_bytes());
         Ok(())
     }
 }

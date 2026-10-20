@@ -5006,10 +5006,10 @@ impl Engine {
             // and the loop's refusals write them.
             HostServes::Page(page) => {
                 for line in &page.headers {
-                    req.header_add(line, true, 0);
+                    req.response_mut().header_add(line, true, 0);
                 }
-                req.set_response_code(page.code);
-                req.write(&page.body);
+                req.response_mut().set_response_code(page.code);
+                req.response_mut().write(&page.body);
             }
             HostServes::Nothing => {}
         }
@@ -5104,7 +5104,7 @@ impl Engine {
                 };
                 // A source the filter refused ended the request.
                 if let Ok(written) = written {
-                    req.write(&written);
+                    req.response_mut().write(&written);
                 }
             }
             return self.shutdown_untraced(&mut req);
@@ -5193,9 +5193,9 @@ impl Engine {
         req.apply_host_ini();
         req.realpath_cache_startup();
         req.read_post_at_startup();
-        if web && req.ini_flag(b"expose_php") && req.headers_sent().is_none() {
+        if web && req.ini_flag(b"expose_php") && req.response().headers_sent().is_none() {
             let line = format!("X-Powered-By: PHP/{}", crate::api::request::PHP_VERSION);
-            let _ = req.header_add(line.as_bytes(), true, 0);
+            let _ = req.response_mut().header_add(line.as_bytes(), true, 0);
         }
         crate::output::start_at_request(&mut req).ok();
         req.hash_environment().ok();
@@ -5486,10 +5486,10 @@ impl Engine {
                 Named::Program => {
                     self.execute_script(&mut req, None);
                     dispatched.program = Some(ProgramServed::Ran {
-                        code: req.response_code(),
+                        code: req.response().response_code(),
                         fatal: req.last_fatal(),
                     });
-                    if req.response_code() == 304 {
+                    if req.response().response_code() == 304 {
                         req.output_mut().no_default_content_type();
                     }
                 }
@@ -6573,7 +6573,7 @@ mod tests {
             line.extend_from_slice(b" then ");
             line.extend_from_slice(value.unwrap_or_default());
             line.push(b'\n');
-            req.write_stderr(&line);
+            req.response_mut().write_stderr(&line);
             Ok(true)
         };
         let first: OnModify = |_, _| Ok(true);
@@ -6604,11 +6604,11 @@ mod tests {
     #[test]
     fn interceptions_of_one_native_stack_in_bundle_order() {
         let earlier: Entry = |req| {
-            req.write(b"earlier ");
+            req.response_mut().write(b"earlier ");
             crate::api::call::passthrough(req, None)
         };
         let later: Entry = |req| {
-            req.write(b"later ");
+            req.response_mut().write(b"later ");
             crate::api::call::passthrough(req, None)
         };
         let extensions = [
@@ -6826,7 +6826,7 @@ mod tests {
     fn a_refused_startup_serves_nothing() {
         let refusing = crate::api::abi::ExtensionBuilder::default()
             .post_startup(|req, _| {
-                req.write_stderr(b"refused\n");
+                req.response_mut().write_stderr(b"refused\n");
                 crate::api::abi::PostStartup::Refuse { status: -2 }
             })
             .build("t");

@@ -105,7 +105,7 @@ pub(crate) fn write(cx: &mut Cx<'_>, object: PhpObject, data: &[u8]) -> usize {
     };
     match curl.write.to {
         WriteTo::Stdout => {
-            cx.req.write(data);
+            cx.req.response_mut().write(data);
             data.len()
         }
         WriteTo::File => {

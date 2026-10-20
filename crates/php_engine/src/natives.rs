@@ -1459,7 +1459,7 @@ fn var_dump(req: &mut Request, value: Value, values: Variadic<Value>) {
 /// test before it.
 fn blanks(req: &mut Request, width: usize) {
     if width > 0 {
-        req.write(" ".repeat(width).as_bytes());
+        req.response_mut().write(" ".repeat(width).as_bytes());
     }
 }
 
@@ -1518,9 +1518,11 @@ fn dump(req: &mut Request, value: &Value, level: usize) {
     };
     let value = &value.deref();
     if let Some(b) = value.as_bool() {
-        req.write(format!("{common}bool({b})\n").as_bytes());
+        req.response_mut()
+            .write(format!("{common}bool({b})\n").as_bytes());
     } else if let Some(n) = value.as_int() {
-        req.write(format!("{common}int({n})\n").as_bytes());
+        req.response_mut()
+            .write(format!("{common}int({n})\n").as_bytes());
     } else if let Some(f) = value.as_float() {
         // `php_var_dump` prints a float with `%.*H` at `serialize_precision`.
         let text = php_heap::double_to_string(
@@ -1528,11 +1530,13 @@ fn dump(req: &mut Request, value: &Value, level: usize) {
             req.ini().serialize_precision(),
             php_heap::Exponent::Upper,
         );
-        req.write(format!("{common}float({text})\n").as_bytes());
+        req.response_mut()
+            .write(format!("{common}float({text})\n").as_bytes());
     } else if let Some(s) = value.as_php_string() {
-        req.write(format!("{common}string({}) \"", s.len()).as_bytes());
-        req.write(s.as_bytes());
-        req.write(b"\"\n");
+        req.response_mut()
+            .write(format!("{common}string({}) \"", s.len()).as_bytes());
+        req.response_mut().write(s.as_bytes());
+        req.response_mut().write(b"\"\n");
     } else if let Some(array) = value.as_array().copied() {
         dump_array(req, common, array, level);
     } else if let Some(object) = value.as_object() {
@@ -1545,12 +1549,15 @@ fn dump(req: &mut Request, value: &Value, level: usize) {
             || String::from("Unknown"),
             |name| String::from_utf8_lossy(name).into_owned(),
         );
-        req.write(format!("{common}resource({}) of type ({name})\n", resource.id()).as_bytes());
+        req.response_mut()
+            .write(format!("{common}resource({}) of type ({name})\n", resource.id()).as_bytes());
     } else if value.tag() == crate::api::values::TypeTag::Undef {
         // `php_var_dump`'s `default:` arm.
-        req.write(format!("{common}UNKNOWN:0\n").as_bytes());
+        req.response_mut()
+            .write(format!("{common}UNKNOWN:0\n").as_bytes());
     } else {
-        req.write(format!("{common}NULL\n").as_bytes());
+        req.response_mut()
+            .write(format!("{common}NULL\n").as_bytes());
     }
 }
 
@@ -1566,10 +1573,11 @@ fn dump(req: &mut Request, value: &Value, level: usize) {
 /// written, as php asks it, so a marked array writes `*RECURSION*` alone.
 fn dump_array(req: &mut Request, common: &str, array: PhpArray, level: usize) {
     if array.is_recursive() {
-        req.write(b"*RECURSION*\n");
+        req.response_mut().write(b"*RECURSION*\n");
         return;
     }
-    req.write(format!("{common}array({}) {{\n", array.len()).as_bytes());
+    req.response_mut()
+        .write(format!("{common}array({}) {{\n", array.len()).as_bytes());
     let held = Hold::Owner(GiveUp::Dtor);
     let walked = walk::foreach_guarded(req, array, held, |req, row| -> walk::Step {
         if too_deep(req, level, req.stack_limit().exhausted()) {
@@ -1577,11 +1585,14 @@ fn dump_array(req: &mut Request, common: &str, array: PhpArray, level: usize) {
         }
         // `php_array_element_dump`.
         match row.key() {
-            Key::Int(n) => req.write(format!("{:w$}[{n}]=>\n", "", w = level + 1).as_bytes()),
+            Key::Int(n) => req
+                .response_mut()
+                .write(format!("{:w$}[{n}]=>\n", "", w = level + 1).as_bytes()),
             Key::Str(s) => {
-                req.write(format!("{:w$}[\"", "", w = level + 1).as_bytes());
-                req.write(s.as_bytes());
-                req.write(b"\"]=>\n");
+                req.response_mut()
+                    .write(format!("{:w$}[\"", "", w = level + 1).as_bytes());
+                req.response_mut().write(s.as_bytes());
+                req.response_mut().write(b"\"]=>\n");
             }
         }
         dump(req, row.value(), level + 2);
@@ -1593,7 +1604,7 @@ fn dump_array(req: &mut Request, common: &str, array: PhpArray, level: usize) {
         Ok(walk::Guarded::Recursive | walk::Guarded::Walked(_)) | Err(_) => {}
     }
     blanks(req, level - 1);
-    req.write(b"}\n");
+    req.response_mut().write(b"}\n");
 }
 
 /// `php_var_dump`'s `IS_OBJECT` arm: `object(Class)#handle (count) {`,
@@ -1733,7 +1744,7 @@ fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize)
             .prop(req, b"name")
             .and_then(|name| name.as_str_bytes().map(<[u8]>::to_vec))
             .unwrap_or_default();
-        req.write(
+        req.response_mut().write(
             format!(
                 "{common}enum({class}::{})\n",
                 String::from_utf8_lossy(&case)
@@ -1743,7 +1754,7 @@ fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize)
         return;
     }
     if object.is_recursive_in(req, RecursionGuard::Debug) {
-        req.write(b"*RECURSION*\n");
+        req.response_mut().write(b"*RECURSION*\n");
         return;
     }
     object.protect_in(req, RecursionGuard::Debug);
@@ -1768,7 +1779,7 @@ fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize)
     let mut header = format!("{common}{prefix}object(").into_bytes();
     header.extend_from_slice(php_unit::decl::shown_bytes(&name));
     header.extend_from_slice(format!(")#{} ({}) {{\n", object.index(), held.count()).as_bytes());
-    req.write(&header);
+    req.response_mut().write(&header);
     // `ZEND_HASH_FOREACH_KEY_VAL(myht, num, key, val)`
     // (`Z/ext/standard/var.c:196`) over the table held until
     // `zend_release_properties`: the walk takes no owner of its own.
@@ -1777,13 +1788,15 @@ fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize)
             return Ok(ControlFlow::Continue(()));
         }
         match row.key() {
-            Key::Int(at) => req.write(format!("{:w$}[{at}]=>\n", "", w = level + 1).as_bytes()),
+            Key::Int(at) => req
+                .response_mut()
+                .write(format!("{:w$}[{at}]=>\n", "", w = level + 1).as_bytes()),
             Key::Str(name) => dump_property_name(req, level, name.as_bytes()),
         }
         match row.uninitialized() {
             Some(ty) => {
                 let line = format!("{:w$}uninitialized({ty})\n", "", w = level + 1);
-                req.write(line.as_bytes());
+                req.response_mut().write(line.as_bytes());
             }
             None => dump(req, row.value(), level + 2),
         }
@@ -1799,7 +1812,7 @@ fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize)
     // object still marked.
     let left = held.release(req);
     blanks(req, level - 1);
-    req.write(b"}\n");
+    req.response_mut().write(b"}\n");
     object.unprotect_in(req, RecursionGuard::Debug);
     if let Err(thrown) = left {
         leave_chained(req, thrown);
@@ -1884,7 +1897,8 @@ fn too_deep(req: &mut Request, level: usize, past: bool) -> bool {
     if !past {
         return false;
     }
-    req.write(format!("{:w$}nesting level too deep", "", w = level + 1).as_bytes());
+    req.response_mut()
+        .write(format!("{:w$}nesting level too deep", "", w = level + 1).as_bytes());
     true
 }
 
@@ -1901,7 +1915,8 @@ fn dump_property_name(req: &mut Request, level: usize, name: &[u8]) {
     if let Unmangled::Illegal(notice) = unmangled {
         crate::api::raising::notice(req, notice);
     }
-    req.write(format!("{:w$}[", "", w = level + 1).as_bytes());
+    req.response_mut()
+        .write(format!("{:w$}[", "", w = level + 1).as_bytes());
     match unmangled {
         Unmangled::Mangled { class, prop } => {
             let mut shown = b"\"".to_vec();
@@ -1913,15 +1928,15 @@ fn dump_property_name(req: &mut Request, level: usize, name: &[u8]) {
                 shown.extend_from_slice(c_str(class));
                 shown.extend_from_slice(b"\":private");
             }
-            req.write(&shown);
+            req.response_mut().write(&shown);
         }
         Unmangled::Plain | Unmangled::Illegal(_) => {
-            req.write(b"\"");
-            req.write(name);
-            req.write(b"\"");
+            req.response_mut().write(b"\"");
+            req.response_mut().write(name);
+            req.response_mut().write(b"\"");
         }
     }
-    req.write(b"]=>\n");
+    req.response_mut().write(b"]=>\n");
 }
 
 /// What `zend_unmangle_property_name_ex` answers for one name.

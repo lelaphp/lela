@@ -2729,7 +2729,7 @@ fn passthru(req: &mut Request, stream: Stream) -> Result<i64, Thrown> {
     while let Some(chunk) = stream.read(req, 8192)? {
         let written = chunk.len();
         if written > 0 {
-            req.write(chunk.as_bytes());
+            req.response_mut().write(chunk.as_bytes());
         }
         chunk.give_up(req);
         if written == 0 {

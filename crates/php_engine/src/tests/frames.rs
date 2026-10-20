@@ -56,11 +56,13 @@ fn keep(observed: &mut Observed<'_>) {
         .caller()
         .map(|view| (view.id(), name(observed, &view)));
     let Some((id, named)) = caller else {
-        observed.write(b"[kept nothing]");
+        observed.response_mut().write(b"[kept nothing]");
         return;
     };
     observed.state::<Kept>().0 = Some(id);
-    observed.write(format!("[kept {named}]").as_bytes());
+    observed
+        .response_mut()
+        .write(format!("[kept {named}]").as_bytes());
 }
 
 /// `read()` begun: the kept frame read through its identity, its
@@ -72,7 +74,9 @@ fn read(observed: &mut Observed<'_>) {
         Some(format!("{}:{}", name(observed, &view), view.line()))
     });
     let read = read.unwrap_or_else(|| String::from("refused"));
-    observed.write(format!("[read {read}]").as_bytes());
+    observed
+        .response_mut()
+        .write(format!("[read {read}]").as_bytes());
 }
 
 fn keeping() -> Extension {
@@ -152,7 +156,7 @@ fn a_frame_view_walks_its_callers_into_the_resumer_of_a_fiber() {
             at = view.caller();
         }
         let line = format!("[{}]", names.join(" < "));
-        observed.write(line.as_bytes());
+        observed.response_mut().write(line.as_bytes());
     }
     fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
         let walks = observed
@@ -193,7 +197,7 @@ fn a_native_call_has_no_frame_and_its_caller_is_the_user_frame_it_stands_on() {
             "[strcmp framed={framed} from {}]",
             caller.unwrap_or_default()
         );
-        observed.write(line.as_bytes());
+        observed.response_mut().write(line.as_bytes());
     }
     fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
         let named = observed.frame().is_none()
@@ -240,7 +244,7 @@ fn a_handler_reads_the_opcode_its_frame_stands_on() {
             return;
         };
         let line = format!("<{edge} {} {}>", name(req, &view), view.opcode());
-        observed.write(line.as_bytes());
+        observed.response_mut().write(line.as_bytes());
     }
     fn begin(observed: &mut Observed<'_>) {
         show(observed, "begin");
@@ -285,7 +289,7 @@ fn an_end_handler_an_uncaught_throwable_calls_reads_the_exception_op() {
             return;
         };
         let line = format!("<end {} {}>", name(req, &view), view.opcode());
-        observed.write(line.as_bytes());
+        observed.response_mut().write(line.as_bytes());
     }
     let engine = Engine::cli_builder()
         .extensions(&[ExtensionBuilder::default().observer(init).build("showing")])
@@ -394,7 +398,7 @@ fn walks(source: &str) -> String {
             .map(|frame| walked(observed, &frame))
             .collect();
         let line = format!("[{}]", walk.join(" < "));
-        observed.write(line.as_bytes());
+        observed.response_mut().write(line.as_bytes());
     }
     fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
         let walks = observed

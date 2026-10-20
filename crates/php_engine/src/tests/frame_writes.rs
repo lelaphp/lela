@@ -95,17 +95,17 @@ impl Stop for Plan {
     /// The plan carried out where the program stands.
     fn stop(self, observed: &mut Observed<'_>) {
         let Some(frame) = paused(observed, self.depth) else {
-            observed.write(b"[no frame]");
+            observed.response_mut().write(b"[no frame]");
             return;
         };
         if let Some((name, value)) = self.write {
             let set = observed.set_frame_var(frame, name.as_bytes(), Owner::int(value));
             let line = format!("[set {}]", if set { "ok" } else { "refused" });
-            observed.write(line.as_bytes());
+            observed.response_mut().write(line.as_bytes());
         }
         let answered = observed.eval_in_frame(frame, self.code.as_bytes(), b"debugger");
         let line = format!("[eval {}]", shown(observed, answered, self.traced));
-        observed.write(line.as_bytes());
+        observed.response_mut().write(line.as_bytes());
     }
 }
 
@@ -262,10 +262,10 @@ impl Stop for Revisit {
         };
         let set = observed.set_frame_var(frame, b"x", Owner::int(5));
         let line = format!("[set {}]", if set { "ok" } else { "refused" });
-        observed.write(line.as_bytes());
+        observed.response_mut().write(line.as_bytes());
         let answered = observed.eval_in_frame(frame, self.code.as_bytes(), b"debugger");
         let line = format!("[eval {}]", shown(observed, answered, self.traced));
-        observed.write(line.as_bytes());
+        observed.response_mut().write(line.as_bytes());
     }
 }
 

@@ -10,7 +10,7 @@
 //! under `standard`, as `php -S` declares its `getallheaders`
 //! (`server_additional_functions`, `Z/sapi/cli/php_cli_server.c:503-510`).
 //! Each is one call into what the engine holds once for every host that
-//! declares it, `Request::finish_response` and `Variables::request_headers`,
+//! declares it, `Response::finish_response` and `Variables::request_headers`,
 //! which php-fpm's and `php -S`'s declarations call too: a declaration is
 //! each host's, as each SAPI's is in php-src, and no crate both hosts may
 //! depend on declares natives (ADR-0008).
@@ -56,7 +56,7 @@ pub(crate) fn declare(builder: EngineBuilder) -> EngineBuilder {
 /// ```
 #[php_function]
 fn fastcgi_finish_request(req: &mut Request) -> bool {
-    req.finish_response()
+    req.response_mut().finish_response()
 }
 
 /// `apache_request_headers(): array`, also `getallheaders()`

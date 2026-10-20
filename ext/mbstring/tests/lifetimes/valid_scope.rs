@@ -8,7 +8,7 @@ fn valid(req: &mut Request, out: FreshString) -> Result<(), Thrown> {
     let grown = out.extend(req, 4096)?;
     grown.free(req);
     let state = req.state::<ConversionState>().0;
-    req.header_add(b"X-Proof: ended borrow", true, 0);
+    req.response_mut().header_add(b"X-Proof: ended borrow", true, 0);
     std::hint::black_box(state);
     Ok(())
 }

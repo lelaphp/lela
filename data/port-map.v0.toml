@@ -994,7 +994,7 @@ mahout = "RequestCtx::write_output"
 sites = 16
 crates = 2
 status = "renamed"
-api = "request::Request::write"
+api = "request::Response::write"
 
 [[item]]
 mahout = "RequestCtx::lookup_func"
@@ -1043,7 +1043,7 @@ mahout = "RequestCtx::headers_sent"
 sites = 5
 crates = 2
 status = "same"
-api = "request::Request::headers_sent"
+api = "request::Response::headers_sent"
 
 [[item]]
 mahout = "RequestCtx::lazy_objects_is_empty"
@@ -1092,7 +1092,7 @@ mahout = "RequestCtx::output_started_at"
 sites = 3
 crates = 2
 status = "same"
-api = "request::Request::output_started_at"
+api = "request::Response::started_at"
 
 [[item]]
 mahout = "RequestCtx::set_gc_enabled"
@@ -1113,7 +1113,7 @@ mahout = "RequestCtx::set_response_code"
 sites = 3
 crates = 1
 status = "same"
-api = "request::Request::set_response_code"
+api = "request::Response::set_response_code"
 
 [[item]]
 mahout = "RequestCtx::temp_dir"
@@ -1162,14 +1162,14 @@ mahout = "RequestCtx::header_remove"
 sites = 2
 crates = 1
 status = "same"
-api = "request::Request::header_remove"
+api = "request::Response::header_remove"
 
 [[item]]
 mahout = "RequestCtx::headers_list"
 sites = 2
 crates = 1
 status = "same"
-api = "request::Request::headers_list"
+api = "request::Response::headers_list"
 
 [[item]]
 mahout = "RequestCtx::is_uploaded_file"
@@ -1302,7 +1302,7 @@ mahout = "RequestCtx::write_output_stderr"
 sites = 2
 crates = 1
 status = "same"
-api = "request::Request::write_stderr"
+api = "request::Response::write_stderr"
 
 [[item]]
 mahout = "RequestCtx::autoload_functions"
@@ -1400,7 +1400,7 @@ mahout = "RequestCtx::flush_output"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::flush"
+api = "request::Response::flush"
 
 [[item]]
 mahout = "RequestCtx::frame_args"
@@ -1491,7 +1491,7 @@ mahout = "RequestCtx::header_add"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::header_add"
+api = "request::Response::header_add"
 
 [[item]]
 mahout = "RequestCtx::in_tick_dispatch"
@@ -1589,7 +1589,7 @@ mahout = "RequestCtx::response_code"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::response_code"
+api = "request::Response::response_code"
 
 [[item]]
 mahout = "RequestCtx::sapi_name"
@@ -1631,14 +1631,14 @@ mahout = "RequestCtx::set_header_callback"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::set_header_callback"
+api = "request::Response::set_header_callback"
 
 [[item]]
 mahout = "RequestCtx::set_status_line"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::set_response_code"
+api = "request::Response::set_response_code"
 
 [[item]]
 mahout = "RequestCtx::set_umask"
@@ -1750,7 +1750,7 @@ mahout = "RequestCtx::write_output_console"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::write_stderr"
+api = "request::Response::write_stderr"
 
 # ---- RequestCtx public-field members reached from ext crates
 [[item]]
@@ -1814,7 +1814,7 @@ mahout = "RequestCtx::output.ob_peek_meta"
 sites = 6
 crates = 1
 status = "renamed"
-api = "request::Request::output_buffer_op"
+api = "request::Response::buffer_op"
 
 [[item]]
 mahout = "RequestCtx::errors.take_pending"
@@ -1828,7 +1828,7 @@ mahout = "RequestCtx::output.ob_contents"
 sites = 4
 crates = 1
 status = "renamed"
-api = "request::Request::output_buffer_op"
+api = "request::Response::buffer_op"
 
 [[item]]
 mahout = "RequestCtx::settings.enable_gc"
@@ -1884,7 +1884,7 @@ mahout = "RequestCtx::output.ob_status_snapshot"
 sites = 3
 crates = 1
 status = "renamed"
-api = "request::Request::output_buffer_op"
+api = "request::Response::buffer_op"
 
 [[item]]
 mahout = "RequestCtx::settings.apply_override"
@@ -2066,21 +2066,21 @@ mahout = "RequestCtx::output.ob_level"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::output_buffer_op"
+api = "request::Response::buffer_op"
 
 [[item]]
 mahout = "RequestCtx::output.ob_pop_take"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::output_buffer_op"
+api = "request::Response::buffer_op"
 
 [[item]]
 mahout = "RequestCtx::output.ob_start_with"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::output_buffer_op"
+api = "request::Response::buffer_op"
 
 [[item]]
 mahout = "RequestCtx::security.open_basedir"
@@ -4152,7 +4152,7 @@ mahout = "mahout_runtime::output::run_handler_op"
 sites = 5
 crates = 1
 status = "renamed"
-api = "request::Request::output_buffer_op"
+api = "request::Response::buffer_op"
 
 [[item]]
 mahout = "mahout_runtime::resources"

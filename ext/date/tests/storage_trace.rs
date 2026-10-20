@@ -84,7 +84,7 @@ fn finish(req: &mut Request) {
             }
         }
     }
-    req.write(receipt.as_bytes());
+    req.response_mut().write(receipt.as_bytes());
 }
 
 /// The receipt of `source` served under the recorder, each line one

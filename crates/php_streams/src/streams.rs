@@ -2943,11 +2943,11 @@ impl Ops for HostFd {
         match &mut self.end {
             HostEnd::Stdin(body) => body.write(req, buf),
             HostEnd::Stdout(_) => {
-                req.write_stdout(buf);
+                req.response_mut().write_stdout(buf);
                 Some(buf.len())
             }
             HostEnd::Stderr(_) => {
-                req.write_stderr(buf);
+                req.response_mut().write_stderr(buf);
                 Some(buf.len())
             }
         }

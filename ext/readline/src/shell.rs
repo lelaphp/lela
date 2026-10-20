@@ -533,7 +533,7 @@ pub(crate) fn run(req: &mut Request) -> i32 {
         code.clear();
         let shell = state(req);
         if shell.pager.is_none() && shell.last != 0 && shell.last != b'\n' {
-            req.write(b"\n");
+            req.response_mut().write(b"\n");
         }
         if let Err(thrown) = left {
             uncaught_at(req, thrown, Level::Warning).ok();

@@ -372,13 +372,13 @@ fn mb_output_handler(
         // `php_output_handler_hook(PHP_OUTPUT_HANDLER_HOOK_GET_FLAGS)`
         // answers while a handler is being served, which adds no header.
         if let Some(charset) = encoding.preferred_mime_name()
-            && req.running_handler_flags().is_none()
+            && req.response().running_handler_flags().is_none()
         {
             let mut line = b"Content-Type: ".to_vec();
             line.extend_from_slice(&mimetype);
             line.extend_from_slice(b"; charset=");
             line.extend_from_slice(charset);
-            req.header_add(&line, true, 0);
+            req.response_mut().header_add(&line, true, 0);
         }
         req.state::<State>().outconv = Some(0);
     }
@@ -406,7 +406,7 @@ fn mb_output_handler(
 /// matches, cut at its `;`, or `default_mimetype` while the default is
 /// still to be sent (`SG(default_mimetype)`, `text/html` where unset).
 fn start_mimetype(req: &mut Request) -> Option<Vec<u8>> {
-    match req.content_type() {
+    match req.response().content_type() {
         ContentType::Held(held) => {
             let pattern = req
                 .ini()

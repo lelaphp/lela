@@ -467,7 +467,7 @@ fn report_zval(req: &mut Request, name: &[u8], old: &Shown, new: &Shown) -> bool
         session::say(req, |o| o.writeln(b"Old value inaccessible or destroyed"));
     } else {
         session::say(req, |o| o.out(b"Old value: "));
-        out::interruptible(req, |req| req.write(&flat(old)));
+        out::interruptible(req, |req| req.response_mut().write(&flat(old)));
         if ended(req) {
             return false;
         }
@@ -477,7 +477,7 @@ fn report_zval(req: &mut Request, name: &[u8], old: &Shown, new: &Shown) -> bool
     session::say(req, |o| {
         o.out(format!("New value{}: ", if reference { " (reference)" } else { "" }).as_bytes());
     });
-    out::interruptible(req, |req| req.write(&flat(new)));
+    out::interruptible(req, |req| req.response_mut().write(&flat(new)));
     if ended(req) {
         return false;
     }
@@ -492,13 +492,13 @@ fn report_str(req: &mut Request, name: &[u8], old: &[u8], new: &[u8]) -> bool {
         o.notice(format!("Breaking on watchpoint {}", lossy(name)).as_bytes());
     });
     session::say(req, |o| o.out(b"Old value: "));
-    out::interruptible(req, |req| req.write(old));
+    out::interruptible(req, |req| req.response_mut().write(old));
     if ended(req) {
         return false;
     }
     session::say(req, |o| o.out(b"\n"));
     session::say(req, |o| o.out(b"New value: "));
-    out::interruptible(req, |req| req.write(new));
+    out::interruptible(req, |req| req.response_mut().write(new));
     if ended(req) {
         return false;
     }

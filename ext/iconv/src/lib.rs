@@ -731,10 +731,10 @@ fn ob_iconv_handler(
     call: &mut HandlerCall<'_>,
 ) -> Result<HandlerStatus, Thrown> {
     if call.op.start {
-        if req.output_started_at().is_some() {
+        if req.response().started_at().is_some() {
             return Ok(HandlerStatus::Failure);
         }
-        let mimetype = match req.content_type() {
+        let mimetype = match req.response().content_type() {
             ContentType::Held(held)
                 if held.len() >= 5 && held[..5].eq_ignore_ascii_case(b"text/") =>
             {
@@ -764,7 +764,7 @@ fn ob_iconv_handler(
             line.extend_from_slice(&mimetype);
             line.extend_from_slice(b"; charset=");
             line.extend_from_slice(&charset[..cut]);
-            call.immutable = req.header_add(&line, true, 0);
+            call.immutable = req.response_mut().header_add(&line, true, 0);
         }
     }
     if !call.input.is_empty() {

@@ -1811,7 +1811,7 @@ pub(crate) fn start_at_request(req: &mut Request) -> Result<(), Thrown> {
         }
         return Ok(());
     }
-    if let Some(registered) = req.buffer_handler(&name) {
+    if let Some(registered) = req.response().buffer_handler(&name) {
         start_user(
             req,
             &StartHandler::Registered(registered),
@@ -2061,17 +2061,17 @@ mod tests {
     #[test]
     fn a_web_host_s_block_ends_in_the_default_content_type_after_the_first_byte() {
         let mut req = web_request();
-        assert!(req.header_add(b"X-A: 1", true, 0));
+        assert!(req.response_mut().header_add(b"X-A: 1", true, 0));
         assert_eq!(req.header_block(), b"X-A: 1\r\n");
-        assert!(req.headers_sent().is_none());
-        assert_eq!(req.response_code(), 200);
-        req.write(b"x");
+        assert!(req.response().headers_sent().is_none());
+        assert_eq!(req.response().response_code(), 200);
+        req.response_mut().write(b"x");
         assert_eq!(
             req.header_block(),
             b"X-A: 1\r\nContent-type: text/html; charset=UTF-8\r\n"
         );
-        assert!(req.headers_sent().is_some());
-        assert!(!req.header_add(b"X-B: 2", true, 0));
+        assert!(req.response().headers_sent().is_some());
+        assert!(!req.response_mut().header_add(b"X-B: 2", true, 0));
     }
 
     /// php-cgi's `-q` once the request started: the head counts sent,
@@ -2081,12 +2081,12 @@ mod tests {
     fn a_quiet_head_counts_sent_and_takes_a_line_without_a_warning() {
         let mut req = web_request();
         req.output_mut().quiet();
-        assert!(req.headers_sent().is_some());
-        assert!(req.header_add(b"X-A: 1", true, 0));
-        req.write(b"x");
-        assert_eq!(req.headers_list(), [b"X-A: 1".to_vec()]);
-        assert!(req.header_add(b"X-B: 2", true, 0));
-        assert_eq!(req.headers_list().len(), 2);
+        assert!(req.response().headers_sent().is_some());
+        assert!(req.response_mut().header_add(b"X-A: 1", true, 0));
+        req.response_mut().write(b"x");
+        assert_eq!(req.response().headers_list(), [b"X-A: 1".to_vec()]);
+        assert!(req.response_mut().header_add(b"X-B: 2", true, 0));
+        assert_eq!(req.response().headers_list().len(), 2);
     }
 
     /// `sapi_header_op` on a `Content-Type`: the default charset applied
@@ -2097,20 +2097,26 @@ mod tests {
     #[test]
     fn a_content_type_header_takes_the_default_charset_and_stops_the_default_line() {
         let mut req = web_request();
-        assert!(req.header_add(b"Content-Type: text/plain", true, 0));
+        assert!(
+            req.response_mut()
+                .header_add(b"Content-Type: text/plain", true, 0)
+        );
         assert_eq!(
-            req.headers_list(),
+            req.response().headers_list(),
             [b"Content-type: text/plain;charset=UTF-8".to_vec()]
         );
-        assert!(req.header_add(b"content-type: application/json", true, 0));
+        assert!(
+            req.response_mut()
+                .header_add(b"content-type: application/json", true, 0)
+        );
         assert_eq!(
-            req.headers_list(),
+            req.response().headers_list(),
             [b"content-type: application/json".to_vec()]
         );
-        assert!(req.header_add(b"X-B: 3", false, 0));
-        assert!(req.header_add(b"X-B: 4", false, 0));
-        assert!(req.header_remove(Some(b"x-b")));
-        req.write(b"x");
+        assert!(req.response_mut().header_add(b"X-B: 3", false, 0));
+        assert!(req.response_mut().header_add(b"X-B: 4", false, 0));
+        assert!(req.response_mut().header_remove(Some(b"x-b")));
+        req.response_mut().write(b"x");
         assert_eq!(req.header_block(), b"content-type: application/json\r\n");
     }
 
@@ -2121,22 +2127,31 @@ mod tests {
     #[test]
     fn the_cli_s_handler_takes_no_line_and_the_status_line_moves_the_code() {
         let mut req = crate::test::request();
-        assert_eq!(req.response_code(), 0);
-        assert!(req.header_add(b"X-A: 1", true, 0));
-        assert!(req.headers_list().is_empty());
-        assert!(req.header_add(b"HTTP/1.1 404 Nope\r\n", true, 0));
-        assert_eq!(req.status_line(), Some(&b"HTTP/1.1 404 Nope"[..]));
-        assert_eq!(req.response_code(), 404);
-        assert!(req.header_add(b"Location: /x", true, 0));
-        assert_eq!(req.response_code(), 302);
-        assert!(req.status_line().is_none());
-        assert!(req.header_add(b"HTTP/1.1 302 Found", true, 0));
-        assert!(req.status_line().is_some());
-        assert!(!req.header_add(b"", true, 0));
-        assert!(!req.header_add(b"X-C: a\nb", true, 0));
-        req.write(b"x");
-        assert!(req.status_line().is_none());
-        assert!(req.headers_list().is_empty());
+        assert_eq!(req.response().response_code(), 0);
+        assert!(req.response_mut().header_add(b"X-A: 1", true, 0));
+        assert!(req.response().headers_list().is_empty());
+        assert!(
+            req.response_mut()
+                .header_add(b"HTTP/1.1 404 Nope\r\n", true, 0)
+        );
+        assert_eq!(
+            req.response().status_line(),
+            Some(&b"HTTP/1.1 404 Nope"[..])
+        );
+        assert_eq!(req.response().response_code(), 404);
+        assert!(req.response_mut().header_add(b"Location: /x", true, 0));
+        assert_eq!(req.response().response_code(), 302);
+        assert!(req.response().status_line().is_none());
+        assert!(
+            req.response_mut()
+                .header_add(b"HTTP/1.1 302 Found", true, 0)
+        );
+        assert!(req.response().status_line().is_some());
+        assert!(!req.response_mut().header_add(b"", true, 0));
+        assert!(!req.response_mut().header_add(b"X-C: a\nb", true, 0));
+        req.response_mut().write(b"x");
+        assert!(req.response().status_line().is_none());
+        assert!(req.response().headers_list().is_empty());
         assert_eq!(req.header_block(), b"");
     }
 }

@@ -252,7 +252,7 @@ fn sided(
             };
             shared.dump(&mut lines, &event);
         });
-        req.write_stderr(&lines);
+        req.response_mut().write_stderr(&lines);
     }
     None
 }
@@ -365,7 +365,7 @@ pub(crate) fn hot(
     };
     let mut lines = Vec::new();
     shared.dump(&mut lines, &TraceEvent::Done);
-    req.write_stderr(&lines);
+    req.response_mut().write_stderr(&lines);
     flow
 }
 
@@ -382,7 +382,7 @@ fn settled(req: &mut Request, shared: &Shared, job: Job) -> Option<Outcome> {
     } else {
         Some(compiler::pipeline(shared, job, &mut lines))
     };
-    req.write_stderr(&lines);
+    req.response_mut().write_stderr(&lines);
     outcome
 }
 
@@ -448,7 +448,7 @@ fn started(
         }
         TraceName::of(&at)
     });
-    req.write_stderr(&lines);
+    req.response_mut().write_stderr(&lines);
     name
 }
 

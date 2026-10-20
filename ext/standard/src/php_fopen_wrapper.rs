@@ -50,7 +50,7 @@ impl StreamOps for Output {
     }
 
     fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
-        req.write(buf);
+        req.response_mut().write(buf);
         Some(buf.len())
     }
 

@@ -4,7 +4,7 @@
 //! response code, `connection_status()` and `fastcgi_finish_request()`.
 //! The sink, the `php_output` state, the header callback, the
 //! connection's status and whether the host closed the response are
-//! [`Response`]'s, whose fields no file but this one reads.
+//! [`ResponseState`]'s, whose fields no file but this one reads.
 
 use php_heap::Heap;
 
@@ -15,6 +15,27 @@ use crate::engine::{Aborted, OutputSink, ResponseHead};
 use crate::output::{HttpStatus, Output};
 
 use super::{Phase, Request};
+
+/// The request's response facet (design §4.4): what the request writes
+/// and the response it makes: the bytes, the buffers `ob_start()` opens
+/// and their handlers, the status line and the headers, until the sink
+/// takes them. [`Request::response`] reads it and [`Request::response_mut`]
+/// changes it; either is the whole request, since nearly every operation
+/// can serve PHP code.
+pub struct Response<R>(pub(crate) R);
+
+impl Request {
+    /// The response facet, to read.
+    #[must_use]
+    pub fn response(&self) -> Response<&Request> {
+        Response(self)
+    }
+
+    /// The response facet, to change.
+    pub fn response_mut(&mut self) -> Response<&mut Request> {
+        Response(self)
+    }
+}
 
 /// One `ob_*` operation on the request's buffer stack.
 #[derive(Debug, Clone, PartialEq)]
@@ -47,7 +68,7 @@ pub enum StartHandler {
     /// `null`: the default handler, which passes its buffer on.
     Default,
     /// A name an extension registered its handler under, found by
-    /// [`Request::buffer_handler`] before the name is read as a callable.
+    /// [`Response::buffer_handler`] before the name is read as a callable.
     Registered(BufferHandler),
     /// Anything else, as the callable it resolved to.
     User(Callable),
@@ -195,7 +216,7 @@ impl OutputSink for Kept {
 /// The sink, the `php_output` layer, the header callback, the
 /// connection's status and whether the host closed the response, whose
 /// fields no file but this one reads.
-pub(super) struct Response {
+pub(super) struct ResponseState {
     /// Where what passed the `php_output` layer goes, php's
     /// `sapi_module.ub_write`, and the header block, the log and the
     /// error stream beside it, each call as the request makes it: the
@@ -216,12 +237,12 @@ pub(super) struct Response {
     closed: bool,
 }
 
-impl Response {
+impl ResponseState {
     /// The response as the request starts: its calls to `sink`, the
     /// `php_output` layer `output` as `php_output_activate` laid it, no
     /// header callback, the connection normal and the response open.
-    pub(super) fn new(sink: Box<dyn OutputSink + Send>, output: Output) -> Response {
-        Response {
+    pub(super) fn new(sink: Box<dyn OutputSink + Send>, output: Output) -> ResponseState {
+        ResponseState {
             sink,
             output,
             header_callback: None,
@@ -284,31 +305,6 @@ impl Request {
         self.kept()
             .map(|kept| std::mem::take(&mut kept.aside))
             .unwrap_or_default()
-    }
-
-    /// `fastcgi_finish_request()` (`Z/sapi/fpm/fpm/fpm_main.c:1494`):
-    /// where the response is open, every buffer flushed, the head sent
-    /// and the host told the response ends; whether it was open. What
-    /// the program writes after goes nowhere.
-    pub fn finish_response(&mut self) -> bool {
-        if self.response.closed {
-            return false;
-        }
-        crate::output::end_all(self);
-        crate::output::header(self);
-        self.response.closed = self.response.sink.finish();
-        true
-    }
-
-    /// What the host says of itself, made an array of the request's, a
-    /// map's keys strings and a list's the next index: what
-    /// `fpm_get_status()` answers from the process manager's shared table
-    /// (`Z/sapi/fpm/fpm/fpm_status.c` `fpm_status_export_to_zval`);
-    /// `None` where the host says nothing.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub fn host_status(&mut self) -> Result<Option<Owner<PhpArray>>, Thrown> {
-        let made = self.host_status_made();
-        adopted_some(made)
     }
 
     /// What [`host_status`](Self::host_status) makes, its one owner not yet named.
@@ -392,14 +388,6 @@ impl Request {
         written
     }
 
-    /// Write body bytes, `php_output_write`: through the handler stack
-    /// while one is active, and what passes it reaches the host, with
-    /// the header block committed at the first byte that does
-    /// (`crate::output`).
-    pub fn write(&mut self, bytes: &[u8]) {
-        crate::output::write(self, bytes);
-    }
-
     /// `sapi_module.ub_write`: bytes past the `php_output` layer, the
     /// host's, handed to the sink as they come; one the host could not
     /// write is [`Request::handle_aborted_connection`]. Where the host
@@ -454,13 +442,6 @@ impl Request {
         }
     }
 
-    /// `PG(connection_status)`: `CONNECTION_NORMAL`, 0, or
-    /// `CONNECTION_ABORTED`, 1, once the host's sink refused a write.
-    #[must_use]
-    pub fn connection_status(&self) -> i64 {
-        self.response.connection as i64
-    }
-
     /// The `php_output` layer, and the heap it lays its handlers down in.
     pub(crate) fn output_and_heap(&mut self) -> (&mut Output, &mut Heap) {
         (&mut self.response.output, &mut self.heap)
@@ -479,240 +460,6 @@ impl Request {
     /// call so a second send finds none.
     pub(crate) fn take_header_callback(&mut self) -> Option<Owner<Callable>> {
         self.response.header_callback.take()
-    }
-
-    /// Write to the host's error stream, bytes as given: php's
-    /// `fputs(stderr)`, which the `display_errors=stderr` form takes and
-    /// the `STDERR` stream constant will. The log is another channel,
-    /// [`Diagnostics::error_log`]'s; whether the host puts the two on one fd
-    /// is the host's, as it is php's CLI's (#216).
-    pub fn write_stderr(&mut self, bytes: &[u8]) {
-        self.response.sink.write_stderr(bytes);
-    }
-
-    /// `php://stdout`'s write: the host's own fd 1 where it has one apart
-    /// from the response, else the body past the `php_output` layer.
-    pub fn write_stdout(&mut self, bytes: &[u8]) {
-        if !self.response.sink.write_stdout(bytes) {
-            self.ub_write(bytes);
-        }
-    }
-
-    /// `flush()`, `sapi_flush`: the host may push what it has, the head
-    /// sent first where the host's flush sends it; the handler stack is
-    /// `ob_flush`'s, not this.
-    pub fn flush(&mut self) {
-        if self.response.sink.flush_sends_head() {
-            crate::output::header(self);
-        }
-        self.response.sink.flush();
-    }
-
-    /// One `ob_*` operation on the handler stack, the `PHP_FUNCTION`
-    /// bodies of `Z/main/output.c:1373-1591` over the layer in
-    /// `crate::output`; the notices are theirs, raised through the
-    /// native being served.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub fn output_buffer_op(&mut self, op: &OutputOp) -> Result<Owner<Value>, Thrown> {
-        let made = crate::output::buffer_op(self, op);
-        adopted(made)
-    }
-
-    /// `php_output_handler_started` (`Z/main/output.c:569`): whether a
-    /// handler of `name` is on the stack, read off the stack itself, as
-    /// `zlib.output_compression` and `tidy.clean_output` ask before they
-    /// start theirs; nothing is made, where `ob_list_handlers()`'s array
-    /// would be.
-    #[must_use]
-    pub fn buffer_handler_started(&self, name: &[u8]) -> bool {
-        self.output().handler_started(name)
-    }
-
-    /// `php_output_start_default`, what `body` writes through the stack,
-    /// then `php_output_get_contents` and `php_output_discard`: what the
-    /// body printed, as a string, for a native that hands back what it
-    /// would have printed. The default handler starts as `ob_start()`'s
-    /// does, so inside a running handler it is `php_output_lock_error`'s
-    /// fatal; `None` where it did not start, which such a native answers
-    /// with its `Error`.
-    ///
-    /// ```php
-    /// var_dump(highlight_string("x", true));
-    /// ob_start(function ($s) { return strlen(highlight_string("x", true)) . "\n"; }); echo "y"; ob_end_flush();
-    /// ```
-    /// ```expect exit=255
-    /// string(48) "<pre><code style="color: #000000">x</code></pre>"
-    ///
-    /// Fatal error: highlight_string(): Cannot use output buffering in output buffering display handlers in %s on line 3
-    /// ```
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub fn captured(
-        &mut self,
-        body: impl FnOnce(&mut Request),
-    ) -> Result<Option<Owner<PhpString>>, Thrown> {
-        let made = crate::output::captured(self, body);
-        adopted_some(made)
-    }
-
-    /// Where the first byte reached the host, `php_output_get_start_filename`
-    /// and `_lineno`, once one has.
-    #[must_use]
-    pub fn output_started_at(&self) -> Option<(Vec<u8>, u32)> {
-        self.response.output.started_at()
-    }
-
-    /// `php_output_get_status()`: `PHP_OUTPUT_WRITTEN` (`0x04`) once a
-    /// byte reached a handler's buffer, `PHP_OUTPUT_SENT` (`0x08`) once
-    /// one reached the host, `PHP_OUTPUT_ACTIVE` (`0x10`) while a handler
-    /// is on the stack and `PHP_OUTPUT_LOCKED` (`0x20`) while one runs,
-    /// beside `PHP_OUTPUT_IMPLICITFLUSH` and `PHP_OUTPUT_DISABLED`, which
-    /// `tidy.clean_output`'s handler reads before it starts tidy's.
-    ///
-    /// ```php
-    /// ob_start(); echo 'x'; ob_clean();
-    /// var_dump(ini_set('tidy.clean_output', '1'), ini_get('tidy.clean_output'));
-    /// ```
-    /// ```expect
-    /// Warning: ini_set(): Cannot enable tidy.clean_output - there has already been output in %s on line 3
-    /// bool(false)
-    /// string(1) "0"
-    /// ```
-    #[must_use]
-    pub fn buffer_status(&self) -> i64 {
-        i64::from(self.response.output.status())
-    }
-
-    /// `php_output_handler_alias`: the handler an extension registered
-    /// under `name`, which `ob_start()` takes before it reads the name as
-    /// a callable.
-    #[must_use]
-    pub fn buffer_handler(&self, name: &[u8]) -> Option<BufferHandler> {
-        self.registered::<BufferHandler>()
-            .find(|handler| handler.name.as_bytes() == name)
-            .copied()
-    }
-
-    /// `SG(sapi_headers).mimetype` and `send_default_content_type`.
-    #[must_use]
-    pub fn content_type(&self) -> ContentType {
-        self.response.output.content_type()
-    }
-
-    /// `php_output_handler_hook(PHP_OUTPUT_HANDLER_HOOK_GET_FLAGS)`: the
-    /// flags of the buffer handler the stack is serving, `OG(running)`'s
-    /// `PHP_OUTPUT_HANDLER_*` bits as `ob_get_status()` reports them, and
-    /// `None` while it serves none. What tells a native served as a
-    /// handler from the same native called outside one, as
-    /// `mb_output_handler` tells them apart before it adds a header.
-    #[must_use]
-    pub fn running_handler_flags(&self) -> Option<i64> {
-        self.response.output.running_flags().map(i64::from)
-    }
-
-    /// `header()`, `sapi_header_op` under `SAPI_HEADER_ADD` or
-    /// `SAPI_HEADER_REPLACE` (`crate::output`): the line taken, replacing
-    /// the lines of its name when `replace` is set, with `response_code`
-    /// set when it is not zero; once the block is sent, php's warning
-    /// naming where the body started, and `false`. Under the CLI the
-    /// host's `header_handler` takes no line, so the list stays empty
-    /// and the status line and the response code are all a `header()`
-    /// moves, as under php's.
-    pub fn header_add(&mut self, line: &[u8], replace: bool, response_code: i64) -> bool {
-        crate::output::header_add(self, line, replace, response_code)
-    }
-
-    /// `header_remove()`, `sapi_header_op` under `SAPI_HEADER_DELETE` or,
-    /// with `None`, `SAPI_HEADER_DELETE_ALL`: the lines of that name
-    /// dropped, or all of them; the warnings are `sapi_header_op`'s.
-    pub fn header_remove(&mut self, name: Option<&[u8]>) -> bool {
-        crate::output::header_remove(self, name)
-    }
-
-    /// `sapi_header_op` under `SAPI_HEADER_DELETE_PREFIX`: the lines that
-    /// open with `prefix`, a header's name of `name_len` bytes and more,
-    /// dropped, as `php_session_remove_cookie` drops the session's
-    /// earlier `Set-Cookie`.
-    pub fn header_remove_prefix(&mut self, prefix: &[u8], name_len: usize) -> bool {
-        crate::output::header_remove_prefix(self, prefix, name_len)
-    }
-
-    /// `headers_list()`: `SG(sapi_headers).headers`, in order.
-    #[must_use]
-    pub fn headers_list(&self) -> Vec<Vec<u8>> {
-        self.response.output.headers().map(<[u8]>::to_vec).collect()
-    }
-
-    /// `SG(sapi_headers).http_status_line`: the `HTTP/...` line a
-    /// `header()` set, held until the block is sent.
-    #[must_use]
-    pub fn status_line(&self) -> Option<&[u8]> {
-        self.response.output.status_line()
-    }
-
-    /// `headers_sent()`: `SG(headers_sent)`, and where the body started
-    /// when it was a body byte that sent them.
-    #[must_use]
-    pub fn headers_sent(&self) -> Option<(Vec<u8>, u32)> {
-        if self.response.output.headers_sent() {
-            Some(self.response.output.started_at().unwrap_or_default())
-        } else {
-            None
-        }
-    }
-
-    /// `header_register_callback()` (`Z/main/SAPI.c:98`): the callable
-    /// held, with the owners `zend_fcc_addref` takes, for
-    /// `sapi_send_headers` to serve once; one held before is given up.
-    pub fn set_header_callback(&mut self, callback: Callable) {
-        let held = Owner::take(self, callback);
-        if let Some(previous) = self.response.header_callback.replace(held) {
-            previous.give_up(self);
-        }
-    }
-
-    /// `SG(sapi_headers).http_response_code` as it stands: 200 under a
-    /// web host and zero under the CLI, which `http_response_code()`
-    /// answers `false` for.
-    #[must_use]
-    pub fn response_code(&self) -> i64 {
-        self.response.output.response_code()
-    }
-
-    /// `http_response_code(int)`'s write, the code alone
-    /// (`Z/ext/standard/head.c:399`); the checks before it are the
-    /// native's.
-    pub fn set_response_code(&mut self, code: i64) {
-        self.response.output.set_response_code(code);
-    }
-
-    /// `SG(sapi_headers).http_status_line` and `http_response_code` kept
-    /// as they stand, the status line taken off the response
-    /// (`SG(sapi_headers).http_status_line = NULL`) and the code left,
-    /// for [`put_back_http_status`](Self::put_back_http_status) to put
-    /// back after a step that may move them, as soap's error handler keeps
-    /// them around the handler beneath it.
-    #[must_use]
-    pub fn take_http_status(&mut self) -> HttpStatus {
-        self.response.output.take_status()
-    }
-
-    /// The status line and the response code put back as
-    /// [`take_http_status`](Self::take_http_status) kept them, the status
-    /// line standing now given up.
-    pub fn put_back_http_status(&mut self, status: HttpStatus) {
-        crate::output::put_back_status(self, status);
-    }
-
-    /// The header list as name and value, what a host's
-    /// `apache_response_headers()` answers (`Z/sapi/cgi/cgi_main.c:1689`,
-    /// `Z/sapi/cli/php_cli_server.c:425`): each line with a name before
-    /// its colon, the name with its trailing blanks off and the value with
-    /// its leading blanks off; a line with no colon or an empty name is
-    /// passed over.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub fn response_headers(&mut self) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.response_headers_made();
-        adopted(made)
     }
 
     /// What [`response_headers`](Self::response_headers) makes, its one owner not yet named.
@@ -743,8 +490,292 @@ impl Request {
     }
 }
 
+impl<'r> Response<&'r Request> {
+    /// `PG(connection_status)`: `CONNECTION_NORMAL`, 0, or
+    /// `CONNECTION_ABORTED`, 1, once the host's sink refused a write.
+    #[must_use]
+    pub fn connection_status(self) -> i64 {
+        self.0.response.connection as i64
+    }
+
+    /// `php_output_handler_started` (`Z/main/output.c:569`): whether a
+    /// handler of `name` is on the stack, read off the stack itself, as
+    /// `zlib.output_compression` and `tidy.clean_output` ask before they
+    /// start theirs; nothing is made, where `ob_list_handlers()`'s array
+    /// would be.
+    #[must_use]
+    pub fn buffer_handler_started(self, name: &[u8]) -> bool {
+        self.0.output().handler_started(name)
+    }
+
+    /// Where the first byte reached the host, `php_output_get_start_filename`
+    /// and `_lineno`, once one has.
+    #[must_use]
+    pub fn started_at(self) -> Option<(Vec<u8>, u32)> {
+        self.0.response.output.started_at()
+    }
+
+    /// `php_output_get_status()`: `PHP_OUTPUT_WRITTEN` (`0x04`) once a
+    /// byte reached a handler's buffer, `PHP_OUTPUT_SENT` (`0x08`) once
+    /// one reached the host, `PHP_OUTPUT_ACTIVE` (`0x10`) while a handler
+    /// is on the stack and `PHP_OUTPUT_LOCKED` (`0x20`) while one runs,
+    /// beside `PHP_OUTPUT_IMPLICITFLUSH` and `PHP_OUTPUT_DISABLED`, which
+    /// `tidy.clean_output`'s handler reads before it starts tidy's.
+    ///
+    /// ```php
+    /// ob_start(); echo 'x'; ob_clean();
+    /// var_dump(ini_set('tidy.clean_output', '1'), ini_get('tidy.clean_output'));
+    /// ```
+    /// ```expect
+    /// Warning: ini_set(): Cannot enable tidy.clean_output - there has already been output in %s on line 3
+    /// bool(false)
+    /// string(1) "0"
+    /// ```
+    #[must_use]
+    pub fn buffer_status(self) -> i64 {
+        i64::from(self.0.response.output.status())
+    }
+
+    /// `php_output_handler_alias`: the handler an extension registered
+    /// under `name`, which `ob_start()` takes before it reads the name as
+    /// a callable.
+    #[must_use]
+    pub fn buffer_handler(self, name: &[u8]) -> Option<BufferHandler> {
+        self.0
+            .registered::<BufferHandler>()
+            .find(|handler| handler.name.as_bytes() == name)
+            .copied()
+    }
+
+    /// `SG(sapi_headers).mimetype` and `send_default_content_type`.
+    #[must_use]
+    pub fn content_type(self) -> ContentType {
+        self.0.response.output.content_type()
+    }
+
+    /// `php_output_handler_hook(PHP_OUTPUT_HANDLER_HOOK_GET_FLAGS)`: the
+    /// flags of the buffer handler the stack is serving, `OG(running)`'s
+    /// `PHP_OUTPUT_HANDLER_*` bits as `ob_get_status()` reports them, and
+    /// `None` while it serves none. What tells a native served as a
+    /// handler from the same native called outside one, as
+    /// `mb_output_handler` tells them apart before it adds a header.
+    #[must_use]
+    pub fn running_handler_flags(self) -> Option<i64> {
+        self.0.response.output.running_flags().map(i64::from)
+    }
+
+    /// `headers_list()`: `SG(sapi_headers).headers`, in order.
+    #[must_use]
+    pub fn headers_list(self) -> Vec<Vec<u8>> {
+        self.0
+            .response
+            .output
+            .headers()
+            .map(<[u8]>::to_vec)
+            .collect()
+    }
+
+    /// `SG(sapi_headers).http_status_line`: the `HTTP/...` line a
+    /// `header()` set, held until the block is sent.
+    #[must_use]
+    pub fn status_line(self) -> Option<&'r [u8]> {
+        self.0.response.output.status_line()
+    }
+
+    /// `headers_sent()`: `SG(headers_sent)`, and where the body started
+    /// when it was a body byte that sent them.
+    #[must_use]
+    pub fn headers_sent(self) -> Option<(Vec<u8>, u32)> {
+        if self.0.response.output.headers_sent() {
+            Some(self.0.response.output.started_at().unwrap_or_default())
+        } else {
+            None
+        }
+    }
+
+    /// `SG(sapi_headers).http_response_code` as it stands: 200 under a
+    /// web host and zero under the CLI, which `http_response_code()`
+    /// answers `false` for.
+    #[must_use]
+    pub fn response_code(self) -> i64 {
+        self.0.response.output.response_code()
+    }
+}
+
+impl Response<&mut Request> {
+    /// `fastcgi_finish_request()` (`Z/sapi/fpm/fpm/fpm_main.c:1494`):
+    /// where the response is open, every buffer flushed, the head sent
+    /// and the host told the response ends; whether it was open. What
+    /// the program writes after goes nowhere.
+    pub fn finish_response(self) -> bool {
+        if self.0.response.closed {
+            return false;
+        }
+        crate::output::end_all(self.0);
+        crate::output::header(self.0);
+        self.0.response.closed = self.0.response.sink.finish();
+        true
+    }
+
+    /// What the host says of itself, made an array of the request's, a
+    /// map's keys strings and a list's the next index: what
+    /// `fpm_get_status()` answers from the process manager's shared table
+    /// (`Z/sapi/fpm/fpm/fpm_status.c` `fpm_status_export_to_zval`);
+    /// `None` where the host says nothing.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn host_status(self) -> Result<Option<Owner<PhpArray>>, Thrown> {
+        let made = self.0.host_status_made();
+        adopted_some(made)
+    }
+
+    /// Write body bytes, `php_output_write`: through the handler stack
+    /// while one is active, and what passes it reaches the host, with
+    /// the header block committed at the first byte that does
+    /// (`crate::output`).
+    pub fn write(self, bytes: &[u8]) {
+        crate::output::write(self.0, bytes);
+    }
+
+    /// Write to the host's error stream, bytes as given: php's
+    /// `fputs(stderr)`, which the `display_errors=stderr` form takes and
+    /// the `STDERR` stream constant will. The log is another channel,
+    /// [`Diagnostics::error_log`]'s; whether the host puts the two on one fd
+    /// is the host's, as it is php's CLI's (#216).
+    pub fn write_stderr(self, bytes: &[u8]) {
+        self.0.response.sink.write_stderr(bytes);
+    }
+
+    /// `php://stdout`'s write: the host's own fd 1 where it has one apart
+    /// from the response, else the body past the `php_output` layer.
+    pub fn write_stdout(self, bytes: &[u8]) {
+        if !self.0.response.sink.write_stdout(bytes) {
+            self.0.ub_write(bytes);
+        }
+    }
+
+    /// `flush()`, `sapi_flush`: the host may push what it has, the head
+    /// sent first where the host's flush sends it; the handler stack is
+    /// `ob_flush`'s, not this.
+    pub fn flush(self) {
+        if self.0.response.sink.flush_sends_head() {
+            crate::output::header(self.0);
+        }
+        self.0.response.sink.flush();
+    }
+
+    /// One `ob_*` operation on the handler stack, the `PHP_FUNCTION`
+    /// bodies of `Z/main/output.c:1373-1591` over the layer in
+    /// `crate::output`; the notices are theirs, raised through the
+    /// native being served.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn buffer_op(self, op: &OutputOp) -> Result<Owner<Value>, Thrown> {
+        let made = crate::output::buffer_op(self.0, op);
+        adopted(made)
+    }
+
+    /// `php_output_start_default`, what `body` writes through the stack,
+    /// then `php_output_get_contents` and `php_output_discard`: what the
+    /// body printed, as a string, for a native that hands back what it
+    /// would have printed. The default handler starts as `ob_start()`'s
+    /// does, so inside a running handler it is `php_output_lock_error`'s
+    /// fatal; `None` where it did not start, which such a native answers
+    /// with its `Error`.
+    ///
+    /// ```php
+    /// var_dump(highlight_string("x", true));
+    /// ob_start(function ($s) { return strlen(highlight_string("x", true)) . "\n"; }); echo "y"; ob_end_flush();
+    /// ```
+    /// ```expect exit=255
+    /// string(48) "<pre><code style="color: #000000">x</code></pre>"
+    ///
+    /// Fatal error: highlight_string(): Cannot use output buffering in output buffering display handlers in %s on line 3
+    /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn captured(
+        self,
+        body: impl FnOnce(&mut Request),
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
+        let made = crate::output::captured(self.0, body);
+        adopted_some(made)
+    }
+
+    /// `header()`, `sapi_header_op` under `SAPI_HEADER_ADD` or
+    /// `SAPI_HEADER_REPLACE` (`crate::output`): the line taken, replacing
+    /// the lines of its name when `replace` is set, with `response_code`
+    /// set when it is not zero; once the block is sent, php's warning
+    /// naming where the body started, and `false`. Under the CLI the
+    /// host's `header_handler` takes no line, so the list stays empty
+    /// and the status line and the response code are all a `header()`
+    /// moves, as under php's.
+    pub fn header_add(self, line: &[u8], replace: bool, response_code: i64) -> bool {
+        crate::output::header_add(self.0, line, replace, response_code)
+    }
+
+    /// `header_remove()`, `sapi_header_op` under `SAPI_HEADER_DELETE` or,
+    /// with `None`, `SAPI_HEADER_DELETE_ALL`: the lines of that name
+    /// dropped, or all of them; the warnings are `sapi_header_op`'s.
+    pub fn header_remove(self, name: Option<&[u8]>) -> bool {
+        crate::output::header_remove(self.0, name)
+    }
+
+    /// `sapi_header_op` under `SAPI_HEADER_DELETE_PREFIX`: the lines that
+    /// open with `prefix`, a header's name of `name_len` bytes and more,
+    /// dropped, as `php_session_remove_cookie` drops the session's
+    /// earlier `Set-Cookie`.
+    pub fn header_remove_prefix(self, prefix: &[u8], name_len: usize) -> bool {
+        crate::output::header_remove_prefix(self.0, prefix, name_len)
+    }
+
+    /// `header_register_callback()` (`Z/main/SAPI.c:98`): the callable
+    /// held, with the owners `zend_fcc_addref` takes, for
+    /// `sapi_send_headers` to serve once; one held before is given up.
+    pub fn set_header_callback(self, callback: Callable) {
+        let held = Owner::take(self.0, callback);
+        if let Some(previous) = self.0.response.header_callback.replace(held) {
+            previous.give_up(self.0);
+        }
+    }
+
+    /// `http_response_code(int)`'s write, the code alone
+    /// (`Z/ext/standard/head.c:399`); the checks before it are the
+    /// native's.
+    pub fn set_response_code(self, code: i64) {
+        self.0.response.output.set_response_code(code);
+    }
+
+    /// `SG(sapi_headers).http_status_line` and `http_response_code` kept
+    /// as they stand, the status line taken off the response
+    /// (`SG(sapi_headers).http_status_line = NULL`) and the code left,
+    /// for [`put_back_http_status`](Self::put_back_http_status) to put
+    /// back after a step that may move them, as soap's error handler keeps
+    /// them around the handler beneath it.
+    #[must_use]
+    pub fn take_http_status(self) -> HttpStatus {
+        self.0.response.output.take_status()
+    }
+
+    /// The status line and the response code put back as
+    /// [`take_http_status`](Self::take_http_status) kept them, the status
+    /// line standing now given up.
+    pub fn put_back_http_status(self, status: HttpStatus) {
+        crate::output::put_back_status(self.0, status);
+    }
+
+    /// The header list as name and value, what a host's
+    /// `apache_response_headers()` answers (`Z/sapi/cgi/cgi_main.c:1689`,
+    /// `Z/sapi/cli/php_cli_server.c:425`): each line with a name before
+    /// its colon, the name with its trailing blanks off and the value with
+    /// its leading blanks off; a line with no colon or an empty name is
+    /// passed over.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn response_headers(self) -> Result<Owner<PhpArray>, Thrown> {
+        let made = self.0.response_headers_made();
+        adopted(made)
+    }
+}
+
 /// A host's value made an array of `req`'s: a map's keys strings, a
-/// list's the next index ([`Request::host_status`]).
+/// list's the next index ([`Response::host_status`]).
 fn host_value(req: &mut Request, value: crate::engine::HostValue) -> Result<PhpArray, Thrown> {
     use crate::engine::HostValue;
     let mut array = req.array()?;

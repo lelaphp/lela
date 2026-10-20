@@ -162,7 +162,7 @@ pub(crate) fn extension() -> Extension {
 /// that ended with exit status 255 before its head went has the entry's
 /// line put in, replacing its kind, before the request shuts down.
 fn error_header(req: &mut Request) {
-    if req.diagnostics().exit_status() != 255 || req.headers_sent().is_some() {
+    if req.diagnostics().exit_status() != 255 || req.response().headers_sent().is_some() {
         return;
     }
     if let Some(line) = req
@@ -171,7 +171,7 @@ fn error_header(req: &mut Request) {
         .filter(|line| !line.is_empty())
     {
         let line = line.to_vec();
-        let _ = req.header_add(&line, true, 0);
+        let _ = req.response_mut().header_add(&line, true, 0);
     }
 }
 
@@ -197,7 +197,7 @@ fn error_header(req: &mut Request) {
 /// ```
 #[php_function]
 fn fastcgi_finish_request(req: &mut Request) -> bool {
-    req.finish_response()
+    req.response_mut().finish_response()
 }
 
 /// `fpm_get_status(): array|false` (`Z/sapi/fpm/fpm/fpm_status.c`
@@ -237,7 +237,7 @@ fn fastcgi_finish_request(req: &mut Request) -> bool {
 /// ```
 #[php_function]
 fn fpm_get_status(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-    Ok(match req.host_status()? {
+    Ok(match req.response_mut().host_status()? {
         Some(status) => OrFalse::Value(status),
         None => OrFalse::False,
     })

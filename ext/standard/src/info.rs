@@ -80,7 +80,7 @@ pub(crate) mod constants {
 
 /// `php_info_print`: the text as it is.
 fn print(req: &mut Request, text: &str) {
-    req.write(text.as_bytes());
+    req.response_mut().write(text.as_bytes());
 }
 
 /// `!sapi_module.phpinfo_as_text`: whether the page is `info.c`'s HTML,

@@ -1729,7 +1729,7 @@ pub(crate) fn echo<T: Tier>(
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     match text {
         Ok(text) => {
-            req.write(text.as_bytes());
+            req.response_mut().write(text.as_bytes());
             req.release(Value::string(text));
             Ok(advance(req, frame))
         }

@@ -348,7 +348,7 @@ impl Extensions<&mut Request> {
                 "<h2><a name=\"module_{anchor}\" href=\"#module_{anchor}\">{}</a></h2>\n",
                 module.name
             );
-            self.0.write(heading.as_bytes());
+            self.0.response_mut().write(heading.as_bytes());
         }
         if let Some(info) = module.info {
             info(self.0);
@@ -466,7 +466,7 @@ impl Extensions<&mut Request> {
         if !text {
             out.extend_from_slice(b"</table>\n");
         }
-        self.0.write(&out);
+        self.0.response_mut().write(&out);
     }
 
     /// `PHP_FUNCTION(dl)`, which php exports `PHPAPI` for each host to

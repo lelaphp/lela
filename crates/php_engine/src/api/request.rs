@@ -127,6 +127,7 @@ mod recording;
 mod resources;
 pub use resources::{ResourceDtor, Resources};
 mod response;
+pub use response::Response;
 mod rooms;
 pub(crate) mod ropes;
 #[cfg(debug_assertions)]
@@ -274,8 +275,8 @@ pub struct Request {
     /// and the stage ([`ini::IniState`]).
     ini: ini::IniState,
     /// The sink, the `php_output` layer, the header callback and the
-    /// connection's status ([`response::Response`]).
-    response: response::Response,
+    /// connection's status ([`response::ResponseState`]).
+    response: response::ResponseState,
     /// The diagnostics' state ([`diagnostics::DiagnosticsState`]).
     diagnostics: diagnostics::DiagnosticsState,
     ending: Option<Ending>,
@@ -1043,7 +1044,7 @@ impl Request {
             state: state::RequestState::default(),
             ini: ini::IniState::new(typed_ini),
             diagnostics: diagnostics::DiagnosticsState::default(),
-            response: response::Response::new(sink, output),
+            response: response::ResponseState::new(sink, output),
             ending: None,
             ropes: ropes::Ropes::default(),
             exit_status,
@@ -1612,7 +1613,7 @@ mod tests {
         req: &mut Request,
     ) -> Result<crate::api::values::Owner<crate::api::values::Value>, super::Thrown> {
         let text = req.string(b"d\n")?;
-        req.write(text.as_bytes());
+        req.response_mut().write(text.as_bytes());
         req.release(crate::api::values::Value::string(text));
         let null = crate::api::values::Value::null();
         Ok(crate::api::values::Owner::take(req, null))

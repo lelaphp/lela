@@ -184,7 +184,7 @@ fn indented(req: &mut Request, width: usize, rest: &[u8]) {
     let mut piece = vec![b' '; width];
     piece.extend_from_slice(rest);
     if !piece.is_empty() {
-        req.write(&piece);
+        req.response_mut().write(&piece);
     }
 }
 
@@ -259,22 +259,25 @@ fn dump(req: &mut Request, value: &Value, level: usize) -> Result<(), Thrown> {
     call_stack_end(req)?;
     indented(req, level - 1, b"");
     match value.as_ref() {
-        ValueRef::Bool(false) => req.write(b"bool(false)\n"),
-        ValueRef::Bool(true) => req.write(b"bool(true)\n"),
-        ValueRef::Null | ValueRef::Undef => req.write(b"NULL\n"),
-        ValueRef::Int(n) => req.write(format!("int({n})\n").as_bytes()),
+        ValueRef::Bool(false) => req.response_mut().write(b"bool(false)\n"),
+        ValueRef::Bool(true) => req.response_mut().write(b"bool(true)\n"),
+        ValueRef::Null | ValueRef::Undef => req.response_mut().write(b"NULL\n"),
+        ValueRef::Int(n) => req.response_mut().write(format!("int({n})\n").as_bytes()),
         ValueRef::Float(f) => {
             let text = float_format(f, req.ini().serialize_precision(), Exponent::Upper);
-            req.write(format!("float({text})\n").as_bytes());
+            req.response_mut()
+                .write(format!("float({text})\n").as_bytes());
         }
         ValueRef::Str(s) => {
-            req.write(format!("string({}) \"", s.len()).as_bytes());
-            req.write(s.as_bytes());
+            req.response_mut()
+                .write(format!("string({}) \"", s.len()).as_bytes());
+            req.response_mut().write(s.as_bytes());
             if value.is_refcounted() {
                 let count = value.refcount();
-                req.write(format!("\" refcount({count})\n").as_bytes());
+                req.response_mut()
+                    .write(format!("\" refcount({count})\n").as_bytes());
             } else {
-                req.write(b"\" interned\n");
+                req.response_mut().write(b"\" interned\n");
             }
         }
         ValueRef::Array(array) => dump_array(req, value, *array, level)?,
@@ -284,7 +287,7 @@ fn dump(req: &mut Request, value: &Value, level: usize) -> Result<(), Thrown> {
                 || String::from("Unknown"),
                 |k| String::from_utf8_lossy(k).into_owned(),
             );
-            req.write(
+            req.response_mut().write(
                 format!(
                     "resource({}) of type ({kind}) refcount({})\n",
                     resource.id(),
@@ -295,7 +298,8 @@ fn dump(req: &mut Request, value: &Value, level: usize) -> Result<(), Thrown> {
         }
         ValueRef::Reference(cell) => {
             let count = value.refcount();
-            req.write(format!("reference refcount({count}) {{\n").as_bytes());
+            req.response_mut()
+                .write(format!("reference refcount({count}) {{\n").as_bytes());
             dump(req, &cell.get(), level + 2)?;
             indented(req, level - 1, b"}\n");
         }
@@ -321,15 +325,17 @@ fn dump_array(
     level: usize,
 ) -> Result<(), Thrown> {
     if array.is_recursive() {
-        req.write(b"*RECURSION*\n");
+        req.response_mut().write(b"*RECURSION*\n");
         return Ok(());
     }
     let packed = if array.is_packed() { "packed " } else { "" };
     if value.is_refcounted() {
         let count = value.refcount();
-        req.write(format!("array({}) {packed}refcount({count}){{\n", array.len()).as_bytes());
+        req.response_mut()
+            .write(format!("array({}) {packed}refcount({count}){{\n", array.len()).as_bytes());
     } else {
-        req.write(format!("array({}) {packed}interned {{\n", array.len()).as_bytes());
+        req.response_mut()
+            .write(format!("array({}) {packed}interned {{\n", array.len()).as_bytes());
     }
     // `zval_array_element_dump`, under `GC_ADDREF(myht)` given up as
     // `GC_DTOR_NO_REF(myht)` (`Z/ext/standard/var.c:347`, `:363`).
@@ -339,8 +345,8 @@ fn dump_array(
             Key::Int(n) => indented(req, level + 1, format!("[{n}]=>\n").as_bytes()),
             Key::Str(s) => {
                 indented(req, level + 1, b"[\"");
-                req.write(s.as_bytes());
-                req.write(b"\"]=>\n");
+                req.response_mut().write(s.as_bytes());
+                req.response_mut().write(b"\"]=>\n");
             }
         }
         dump(req, row.value(), level + 2)?;
@@ -366,7 +372,7 @@ fn dump_object(
     level: usize,
 ) -> Result<(), Thrown> {
     if object.is_recursive_in(req, RecursionGuard::Debug) {
-        req.write(b"*RECURSION*\n");
+        req.response_mut().write(b"*RECURSION*\n");
         return Ok(());
     }
     object.protect_in(req, RecursionGuard::Debug);
@@ -401,7 +407,7 @@ fn dump_object(
         )
         .as_bytes(),
     );
-    req.write(&header);
+    req.response_mut().write(&header);
     let dumped = walk::properties(req, &held, Unwritten::Shown, |req, row| -> walk::Step {
         // An element a class shows among its properties is an integer
         // key, `[%ld]=>`.
@@ -432,8 +438,8 @@ fn dump_object(
                 shown.push(b'"');
             }
         }
-        req.write(&shown);
-        req.write(b"]=>\n");
+        req.response_mut().write(&shown);
+        req.response_mut().write(b"]=>\n");
         dump_row(req, row, level + 2)?;
         Ok(ControlFlow::Continue(()))
     })

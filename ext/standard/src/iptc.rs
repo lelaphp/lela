@@ -201,7 +201,7 @@ fn iptcembed(
     };
     let embedded = embed(&mut s, &data);
     if !s.out.is_empty() {
-        req.write(&s.out);
+        req.response_mut().write(&s.out);
     }
     if !embedded {
         return Ok(Union::B(false));

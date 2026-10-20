@@ -181,7 +181,7 @@ fn php_exec(
             if read == 0 {
                 break;
             }
-            req.write(&chunk[..read]);
+            req.response_mut().write(&chunk[..read]);
         }
         return Ok((Ran::Raw, pclose(req, child)));
     }
@@ -197,7 +197,7 @@ fn php_exec(
         }
         match mode {
             Mode::Print => {
-                req.write(&line);
+                req.response_mut().write(&line);
                 last = line;
             }
             Mode::Gather => {

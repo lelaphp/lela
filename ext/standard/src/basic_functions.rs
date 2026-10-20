@@ -1155,7 +1155,7 @@ fn getprotobynumber(req: &mut Request, protocol: i64) -> Result<OrFalse<Owner<Ph
 /// ```
 #[php_function]
 fn flush(req: &mut Request) {
-    req.flush();
+    req.response_mut().flush();
 }
 
 /// `usleep(int $microseconds): void`: the thread asleep that long; a
@@ -1395,7 +1395,7 @@ fn error_log(
         LogTo::Sapi => {
             let mut line = message.to_vec();
             line.push(b'\n');
-            req.write_stderr(&line);
+            req.response_mut().write_stderr(&line);
             true
         }
     };
@@ -1590,7 +1590,7 @@ fn ini_parse_quantity(req: &mut Request, shorthand: PhpString) -> i64 {
 /// ```
 #[php_function]
 fn connection_aborted(req: &mut Request) -> i64 {
-    req.connection_status() & CONNECTION_ABORTED
+    req.response().connection_status() & CONNECTION_ABORTED
 }
 
 /// `connection_status(): int`: `PG(connection_status)`, see
@@ -1604,7 +1604,7 @@ fn connection_aborted(req: &mut Request) -> i64 {
 /// ```
 #[php_function]
 fn connection_status(req: &mut Request) -> i64 {
-    req.connection_status()
+    req.response().connection_status()
 }
 
 /// `ignore_user_abort(?bool $enable = null): int`: `PG(ignore_user_abort)`
@@ -1899,7 +1899,7 @@ fn inet_pton(req: &mut Request, ip: Path) -> Result<OrFalse<Owner<PhpString>>, T
 /// ```
 #[php_function]
 fn header_register_callback(req: &mut Request, callback: Callable) -> bool {
-    req.set_header_callback(callback);
+    req.response_mut().set_header_callback(callback);
     true
 }
 
@@ -1987,7 +1987,7 @@ fn highlight_file(
     if returned {
         return captured(req, &html).map(Union::A);
     }
-    req.write(&html);
+    req.response_mut().write(&html);
     Ok(Union::B(true))
 }
 
@@ -2034,10 +2034,13 @@ fn php_strip_whitespace(req: &mut Request, filename: Path) -> Result<Owner<PhpSt
 
 /// What a native prints into php's default handler and hands back,
 /// `php_output_start_default`, `php_output_get_contents` and
-/// `php_output_discard` ([`Request::captured`]), and php's `Error`
+/// `php_output_discard` ([`Response::captured`]), and php's `Error`
 /// where the handler could not start.
 fn captured(req: &mut Request, printed: &[u8]) -> Result<Owner<PhpString>, Thrown> {
-    match req.captured(|req| req.write(printed))? {
+    match req
+        .response_mut()
+        .captured(|req| req.response_mut().write(printed))?
+    {
         Some(captured) => Ok(captured),
         None => Err(throw_error(req, "Error", "Unable to start output handler")),
     }
@@ -2082,7 +2085,7 @@ fn highlight_string(
     if returned {
         return captured(req, &html).map(Union::A);
     }
-    req.write(&html);
+    req.response_mut().write(&html);
     Ok(Union::B(True))
 }
 

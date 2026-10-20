@@ -767,12 +767,13 @@ fn add_var(
     ctx.form_app = form_app;
     appended?;
     if start {
-        req.output_buffer_op(&OutputOp::Start {
-            handler: StartHandler::Registered(context.handler()),
-            chunk_size: 0,
-            flags: 0x70,
-        })?
-        .give_up(req);
+        req.response_mut()
+            .buffer_op(&OutputOp::Start {
+                handler: StartHandler::Registered(context.handler()),
+                chunk_size: 0,
+                flags: 0x70,
+            })?
+            .give_up(req);
     }
     Ok(())
 }

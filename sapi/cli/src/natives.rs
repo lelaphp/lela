@@ -301,7 +301,7 @@ fn apache_request_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> 
 }
 
 /// `apache_response_headers(): array` (`Z/sapi/cli/php_cli_server.c:425`):
-/// the header list as name and value ([`Request::response_headers`]); the
+/// the header list as name and value ([`Response::response_headers`]); the
 /// server's alone, so the CLI declares none:
 ///
 /// ```php
@@ -312,5 +312,5 @@ fn apache_request_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> 
 /// ```
 #[php_function]
 fn apache_response_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
-    req.response_headers()
+    req.response_mut().response_headers()
 }

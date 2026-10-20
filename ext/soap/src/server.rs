@@ -232,7 +232,7 @@ fn fatal_fault(
         .is_none_or(|s| s.send_errors != 0);
     let mut detail: Option<Owner<Value>> = None;
     let string: &[u8] = if send_errors {
-        let level = match req.output_buffer_op(&OutputOp::GetLevel) {
+        let level = match req.response_mut().buffer_op(&OutputOp::GetLevel) {
             Ok(v) => {
                 let level = v.as_int().unwrap_or(0);
                 v.give_up(req);
@@ -241,14 +241,14 @@ fn fatal_fault(
             Err(_) => 0,
         };
         if level > 0 {
-            if let Ok(contents) = req.output_buffer_op(&OutputOp::GetContents) {
+            if let Ok(contents) = req.response_mut().buffer_op(&OutputOp::GetContents) {
                 if contents.as_str_bytes().is_some_and(|s| !s.is_empty()) {
                     detail = Some(contents);
                 } else {
                     contents.give_up(req);
                 }
             }
-            if let Ok(v) = req.output_buffer_op(&OutputOp::EndClean) {
+            if let Ok(v) = req.response_mut().buffer_op(&OutputOp::EndClean) {
                 v.give_up(req);
             }
         }
@@ -430,11 +430,11 @@ pub(crate) fn soap_error_handler(req: &mut Request, beneath: Beneath<'_, chain::
     // and the line and code that stood put back in its `zend_catch`, so
     // the `500` `php_error_cb` adds as it bails out is undone; served and
     // not bailed out of, the line stays gone.
-    let status = req.take_http_status();
+    let status = req.response_mut().take_http_status();
     let bails = beneath.bails();
     beneath.serve(req);
     if bails {
-        req.put_back_http_status(status);
+        req.response_mut().put_back_http_status(status);
     }
     req.diagnostics_mut().set_display_errors(display);
     if let Some(fault) = fault {
@@ -476,23 +476,26 @@ fn soap_server_fault_ex(
         .unwrap_or_default();
     let flash = server_var(req, b"HTTP_USER_AGENT").is_some_and(|a| a == b"Shockwave Flash");
     if !flash {
-        req.header_add(b"HTTP/1.1 500 Internal Server Error", true, 0);
+        req.response_mut()
+            .header_add(b"HTTP/1.1 500 Internal Server Error", true, 0);
     }
     if output_compression(req) {
-        req.header_add(b"Connection: close", true, 0);
+        req.response_mut().header_add(b"Connection: close", true, 0);
     } else {
-        req.header_add(format!("Content-Length: {}", buf.len()).as_bytes(), true, 0);
+        req.response_mut()
+            .header_add(format!("Content-Length: {}", buf.len()).as_bytes(), true, 0);
     }
     if version == SOAP_1_2 {
-        req.header_add(
+        req.response_mut().header_add(
             b"Content-Type: application/soap+xml; charset=utf-8",
             true,
             0,
         );
     } else {
-        req.header_add(b"Content-Type: text/xml; charset=utf-8", true, 0);
+        req.response_mut()
+            .header_add(b"Content-Type: text/xml; charset=utf-8", true, 0);
     }
-    req.write(&buf);
+    req.response_mut().write(&buf);
     Ok(())
 }
 
@@ -1359,7 +1362,8 @@ fn handle(req: &mut Request, this: PhpObject, arg: Option<PhpString>) -> Res<()>
             .is_some_and(|q| q.eq_ignore_ascii_case(b"wsdl"))
     {
         if let Some(sdl) = &sdl {
-            req.header_add(b"Content-Type: text/xml; charset=utf-8", true, 0);
+            req.response_mut()
+                .header_add(b"Content-Type: text/xml; charset=utf-8", true, 0);
             let source = sdl.source.clone().unwrap_or_default();
             match req.open_stream(&source, b"rb", false)? {
                 Some(stream) => {
@@ -1369,7 +1373,7 @@ fn handle(req: &mut Request, this: PhpObject, arg: Option<PhpString>) -> Res<()>
                         if n == 0 {
                             break;
                         }
-                        req.write(&buf[..n]);
+                        req.response_mut().write(&buf[..n]);
                     }
                     stream.free(req);
                 }
@@ -1383,7 +1387,7 @@ fn handle(req: &mut Request, this: PhpObject, arg: Option<PhpString>) -> Res<()>
             "WSDL generation is not supported yet",
         ));
     }
-    let started = req.output_buffer_op(&OutputOp::Start {
+    let started = req.response_mut().buffer_op(&OutputOp::Start {
         handler: StartHandler::Default,
         chunk_size: 0,
         flags: 0x70,
@@ -1861,28 +1865,34 @@ fn serve(
                 return Err(docref_error(req, "Dump memory failed"));
             }
             if parsed.version == SOAP_1_2 {
-                req.header_add(
+                req.response_mut().header_add(
                     b"Content-Type: application/soap+xml; charset=utf-8",
                     true,
                     0,
                 );
             } else {
-                req.header_add(b"Content-Type: text/xml; charset=utf-8", true, 0);
+                req.response_mut()
+                    .header_add(b"Content-Type: text/xml; charset=utf-8", true, 0);
             }
             if output_compression(req) {
-                req.header_add(b"Connection: close", true, 0);
+                req.response_mut().header_add(b"Connection: close", true, 0);
             } else {
-                req.header_add(format!("Content-Length: {}", buf.len()).as_bytes(), true, 0);
+                req.response_mut().header_add(
+                    format!("Content-Length: {}", buf.len()).as_bytes(),
+                    true,
+                    0,
+                );
             }
-            req.write(&buf);
+            req.response_mut().write(&buf);
             if let Some(s) = service_mut(req, this)
                 && s.trace
             {
                 s.last_response_body = Some(buf);
             }
         } else {
-            req.header_add(b"HTTP/1.1 202 Accepted", true, 0);
-            req.header_add(b"Content-Length: 0", true, 0);
+            req.response_mut()
+                .header_add(b"HTTP/1.1 202 Accepted", true, 0);
+            req.response_mut().header_add(b"Content-Length: 0", true, 0);
         }
         Ok(())
     })();
@@ -1974,7 +1984,7 @@ fn store_session_object(req: &mut Request, value: Owner<Value>) -> Res<Option<Ow
 
 /// `php_output_discard`: the top buffer dropped, where there is one.
 fn discard(req: &mut Request) {
-    let level = match req.output_buffer_op(&OutputOp::GetLevel) {
+    let level = match req.response_mut().buffer_op(&OutputOp::GetLevel) {
         Ok(v) => {
             let level = v.as_int().unwrap_or(0);
             v.give_up(req);
@@ -1983,7 +1993,7 @@ fn discard(req: &mut Request) {
         Err(_) => 0,
     };
     if level > 0
-        && let Ok(v) = req.output_buffer_op(&OutputOp::EndClean)
+        && let Ok(v) = req.response_mut().buffer_op(&OutputOp::EndClean)
     {
         v.give_up(req);
     }
