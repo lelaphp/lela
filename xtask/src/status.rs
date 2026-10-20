@@ -15,7 +15,6 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use clap::ValueEnum;
 use serde_json::{Map, Value, json};
 
 mod conditions;
@@ -132,9 +131,7 @@ fn refuse_under_tracked(section: Section, against: Against<'_>) -> Result<()> {
     if alone && matches!(against, Against::Tree) {
         bail!(
             "the {} section is this checkout's, and --tracked renders the tree alone",
-            section
-                .to_possible_value()
-                .map_or_else(String::new, |v| v.get_name().to_owned())
+            every::name(section)
         );
     }
     Ok(())
@@ -171,11 +168,7 @@ pub fn render(
         ),
         Section::Divergence => return divergence(manifest, registry, format, uncut),
         Section::Phpt => {
-            let rows = standing(against.checkout()?, root)?
-                .into_iter()
-                .filter(|row| !outlived(manifest, row))
-                .collect();
-            let rows = fold_uncreated(rows, "scope")?;
+            let rows = fold_uncreated(standing(manifest, against.checkout()?, root)?, "scope")?;
             match format {
                 Table::Md => (compared(outermost(rows)), PHPT),
                 Table::Json => (rows, INSTRUMENT),
@@ -392,8 +385,9 @@ pub fn session(
         facts.push('\n');
     }
     // A log the week cannot be read from costs the line, never the block.
-    let week = tickets::line(store, root).unwrap_or_else(|err| format!("unread: {err:#}"));
-    write!(facts, "\n## tickets\n\n{week}\n").ok();
+    let week = tickets::render(store, root, Table::Md);
+    let week = week.unwrap_or_else(|err| format!("unread: {err:#}\n"));
+    write!(facts, "\n## tickets\n\n{week}").ok();
     if let Some(id) = session_id {
         let log = store.history(permit::INSTRUMENT)?;
         let rows: Vec<Row> = permit_rows(
@@ -509,10 +503,10 @@ impl Row {
 
     fn json(&self) -> Result<Value> {
         let mut object = self.facts.clone();
-        let reading = match &self.reading {
-            Some(r) => r.to_json()?,
-            None => Value::Null,
-        };
+        let reading = self
+            .reading
+            .as_ref()
+            .map_or(Ok(Value::Null), Reading::to_json)?;
         object.insert("reading".to_owned(), reading);
         Ok(Value::Object(object))
     }
@@ -533,10 +527,8 @@ impl Row {
     }
 
     fn status(&self) -> String {
-        match &self.reading {
-            Some(r) => r.status.as_str().to_owned(),
-            None => NO_READING.to_owned(),
-        }
+        let reading = self.reading.as_ref();
+        reading.map_or(NO_READING, |r| r.status.as_str()).to_owned()
     }
 
     /// What `cell` makes of the reading, empty where there is none.
@@ -591,11 +583,12 @@ impl Row {
     }
 
     fn number(&self, key: &str) -> String {
-        self.reading
-            .as_ref()
-            .and_then(|r| r.numbers.get(key))
-            .map(ToString::to_string)
-            .unwrap_or_default()
+        self.of(|x| {
+            x.numbers
+                .get(key)
+                .map(ToString::to_string)
+                .unwrap_or_default()
+        })
     }
 }
 
@@ -670,30 +663,15 @@ fn listed(
 /// `[budget] scripts`, whose ceiling cell is empty while a person has not
 /// written the row.
 fn budget(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
-    let mut rows: Vec<Row> = manifest
-        .crates
-        .iter()
-        .map(|krate| {
-            Row::new(
-                &[
-                    ("crate", json!(krate.name)),
-                    ("ceiling", json!(krate.budget)),
-                ],
-                latest_of(readings, "budget", &krate.name),
-            )
+    let scripts = manifest.budget.scripts.as_ref().map(|s| s.ceiling);
+    (manifest.crates.iter())
+        .map(|krate| (krate.name.as_str(), Some(krate.budget)))
+        .chain([(SCRIPTS, scripts)])
+        .map(|(name, ceiling)| {
+            let facts = [("crate", json!(name)), ("ceiling", json!(ceiling))];
+            Row::new(&facts, latest_of(readings, "budget", name))
         })
-        .collect();
-    rows.push(Row::new(
-        &[
-            ("crate", json!(SCRIPTS)),
-            (
-                "ceiling",
-                json!(manifest.budget.scripts.as_ref().map(|s| s.ceiling)),
-            ),
-        ],
-        latest_of(readings, "budget", SCRIPTS),
-    ));
-    rows
+        .collect()
 }
 
 /// The rows whose reading says its crate is not yet created, folded into
@@ -767,25 +745,13 @@ fn divergence(
                     })
                 })
                 .collect();
-            let cells = |of: &dyn Fn(Status) -> u64| -> Value {
-                Value::Object(
-                    Status::ALL
-                        .into_iter()
-                        .map(|s| (s.as_str().to_owned(), json!(of(s))))
-                        .collect(),
-                )
-            };
-            let mut lines = Map::new();
-            for kind in counts.debt_kinds() {
-                lines.insert(kind.as_str().to_owned(), cells(&|s| counts.debt(kind, s)));
-            }
-            lines.insert("total".to_owned(), cells(&|s| counts.total(s)));
-            for cause in counts.apart() {
-                lines.insert(
-                    cause.as_str().to_owned(),
-                    cells(&|s| counts.of(cause, None, s)),
-                );
-            }
+            let lines: Map<String, Value> = (count_lines(&counts).into_iter())
+                .map(|(name, of)| {
+                    let by = Status::ALL.into_iter().zip(of);
+                    let cells = by.map(|(s, n)| (s.as_str().to_owned(), json!(n)));
+                    (name.to_owned(), Value::Object(cells.collect()))
+                })
+                .collect();
             Ok(serde_json::to_string_pretty(&json!({
                 "rows": rows,
                 "counts": lines,
@@ -837,26 +803,29 @@ fn divergence(
 /// total of those, which the day-30 target reads, then a line per other
 /// cause a row is of (#2220, #2462).
 fn counts_table(counts: &Counts, out: &mut String) {
-    let line = |name: &str, of: &dyn Fn(Status) -> u64| {
-        let rows: u64 = Status::ALL.into_iter().map(of).sum();
-        let [open, accepted, fixed] = [Status::Open, Status::Accepted, Status::Fixed].map(of);
-        let counted = [open, accepted, fixed, rows].map(|n| n.to_string());
-        [name.to_owned()]
-            .into_iter()
-            .chain(counted)
-            .collect::<Vec<_>>()
-    };
-    let mut lines: Vec<_> = (counts.debt_kinds().into_iter())
-        .map(|kind| line(kind.as_str(), &|s| counts.debt(kind, s)))
-        .collect();
-    lines.push(line("total", &|s| counts.total(s)));
-    for cause in counts.apart() {
-        lines.push(line(cause.as_str(), &|s| counts.of(cause, None, s)));
-    }
+    let lines = (count_lines(counts).into_iter()).map(|(name, [open, accepted, fixed])| {
+        let counted = [open, accepted, fixed, open + accepted + fixed];
+        std::iter::once(name.to_owned()).chain(counted.map(|n| n.to_string()))
+    });
     out.push_str(&grid(
         &["kind or cause", "open", "accepted", "fixed", "rows"],
         lines,
     ));
+}
+
+/// The divergence counts, a line each: per kind a debt row is of, the
+/// total of those, then per other cause a row is of, each line's counts
+/// in [`Status::ALL`]'s order.
+fn count_lines(counts: &Counts) -> Vec<(&'static str, [u64; 3])> {
+    let of = |n: &dyn Fn(Status) -> u64| Status::ALL.map(n);
+    let mut lines: Vec<_> = (counts.debt_kinds().into_iter())
+        .map(|kind| (kind.as_str(), of(&|s| counts.debt(kind, s))))
+        .collect();
+    lines.push(("total", of(&|s| counts.total(s))));
+    for cause in counts.apart() {
+        lines.push((cause.as_str(), of(&|s| counts.of(cause, None, s))));
+    }
+    lines
 }
 
 /// Every reading of one instrument, one row per scope, the numbers as
@@ -881,13 +850,15 @@ fn instrument(readings: &[Reading], name: &str) -> Vec<Row> {
 /// retired branch's appended after it (#787). This is xtask's rule; the
 /// dashboard keeps one of its own, the latest reading in time on the
 /// chain, read off the store's log itself and not off this section, as its
-/// README says (#845, #1717).
-fn standing(store: &Store, root: &Path) -> Result<Vec<Row>> {
+/// README says (#845, #1717). A reading that [`outlived`] its subset is
+/// left out.
+fn standing(manifest: &Manifest, store: &Store, root: &Path) -> Result<Vec<Row>> {
     let log = store.history("phpt")?;
     let chain = reading::Chain::of_head(root)?;
     let rows = chain.standing(&log.readings, "phpt").into_iter();
     Ok(rows
         .map(|r| Row::new(&[("scope", json!(r.scope))], Some(r.clone())))
+        .filter(|row| !outlived(manifest, row))
         .collect())
 }
 
