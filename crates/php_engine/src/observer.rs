@@ -218,6 +218,12 @@ pub(crate) enum OnThrow {
 /// neither, declines it, as php's answers `{NULL, NULL}`.
 pub type ObserverInit = fn(&mut Observed<'_>) -> ObserverHandlers;
 
+/// Whether an observer is registered for the engine that starts, asked
+/// once its extension's start is over, as php's `MINIT` calls
+/// `zend_observer_fcall_register` under a switch of its ini
+/// ([`crate::api::abi::ExtensionBuilder::observer_when`]).
+pub type ObserverRegistered = fn(&crate::api::abi::Start) -> bool;
+
 /// `zend_observer_fcall_begin_handler`: a frame begun, before its
 /// parameters are received.
 pub type BeginHandler = fn(&mut Observed<'_>);
@@ -718,7 +724,7 @@ fn begin_native(req: &mut Request, function: Function) -> Option<NativeCall> {
 fn resolve(req: &mut Request, at: Observable) -> Slot {
     let mut begin = Vec::new();
     let mut end = Vec::new();
-    tell!(req, observers, |req, init| {
+    tell!(req, observers, |req, (init, _)| {
         let handlers = init(&mut Observed::standing(req, at));
         begin.extend(handlers.begin);
         end.extend(handlers.end);

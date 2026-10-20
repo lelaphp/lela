@@ -1166,7 +1166,9 @@ impl Request {
     /// `INIT_*` says `count` arguments are passed, past the header:
     /// `zend_vm_calc_used_stack`, the user function's CVs and
     /// temporaries and the arguments past its declared parameters, a
-    /// native's arguments alone, and for `__call`'s trampoline the
+    /// native's arguments and, while an observer is registered, the
+    /// temporary `zend_observer_post_startup` gives every native
+    /// (`++zif->T`, [`Request::native_room`]), and for `__call`'s trampoline the
     /// arguments and the magic method's CVs and temporaries, at least
     /// two, as `zend_get_call_trampoline_func` sizes the frame it
     /// reuses.
@@ -1210,9 +1212,16 @@ impl Request {
         {
             count.saturating_add(magic.slots.max(2))
         } else {
-            count
+            self.native_room(count)
         };
         (usize::try_from(room).unwrap_or(usize::MAX), callee)
+    }
+
+    /// A native's room for `count` arguments, `count + fbc->common.T`:
+    /// one slot more while an observer is registered, the observer's
+    /// temporary php adds every native at startup (`++zif->T`).
+    fn native_room(&self, count: u32) -> u32 {
+        count.saturating_add(u32::from(crate::observer::observing(self)))
     }
 
     /// `zend_vm_stack_push_call_frame`: a call to `function` pushed with
@@ -1236,8 +1245,9 @@ impl Request {
     /// [`Request::push_call`] pushes it, and any other off the stack's
     /// pages ([`php_heap::VmStack::push_frameless`]), since php serves it
     /// over no frame and it takes no room php's call does not.
-    /// A frameless native's call takes one slot per operand, as
-    /// [`Request::call_room`] sizes any native's call.
+    /// An observed frameless native's call takes one slot per operand
+    /// and the observer's, as [`Request::call_room`] sizes any native's
+    /// call.
     #[inline(always)] // the one call site is the frameless handler's
     #[allow(clippy::inline_always)]
     pub(crate) fn push_frameless(
@@ -1252,13 +1262,13 @@ impl Request {
         if !crate::observer::frameless_observed(self, function) {
             return self.vm.push_frameless(operands, header);
         }
-        let call = self.push_room(operands.len(), header)?;
-        if let Some(slots) = self
+        let call = self.push_room(self.native_room(count) as usize, header)?;
+        let slots = self
             .vm
             .stack
             .frame_mut(call)
-            .map(exec::HeapFrame::slots_mut)
-        {
+            .map(exec::HeapFrame::slots_mut);
+        if let Some(slots) = slots.and_then(|slots| slots.get_mut(..operands.len())) {
             slots.copy_from_slice(operands);
         }
         Ok(call)

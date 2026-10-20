@@ -1605,6 +1605,8 @@ impl Shared {
     /// test where none is, as php resolves an opline's handler when it
     /// compiles it (design §5.8, §7.1).
     fn observe_opcodes(&mut self, start: &Start, bind_loops: BindLoops) {
+        (self.supplied.observers).retain(|(_, registered)| registered.is_none_or(|r| r(start)));
+        self.observers = self.supplied.observers.count();
         self.opcodes = crate::observer::ObservedOpcodes::start(&self.supplied.opcodes, start);
         self.loops = bind_loops(&self.opcodes);
     }
