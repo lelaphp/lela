@@ -227,7 +227,8 @@ impl Request {
     /// `*prop_info`: the declaration a property's row names, read off
     /// the class that declared it.
     pub(crate) fn property_decl(&self, info: PropertyInfo) -> Option<&PropertyDecl> {
-        self.class_decl(info.declaring)?
+        self.symbols()
+            .class_decl(info.declaring)?
             .properties
             .get(usize::try_from(info.at).ok()?)
     }
@@ -500,7 +501,7 @@ impl Request {
         }
         if let Err(thrown) = self.serve_method_made(destructor, Some(object), class, &[], &[]) {
             self.leave_pending(&thrown);
-            if !self.executing() {
+            if !self.frames().executing() {
                 self.end_the_walk();
                 return;
             }
@@ -511,7 +512,7 @@ impl Request {
         // left, as a walk that served it leaves it. A collection the
         // destructor ran may have found it reachable and taken it out of
         // the buffer, and the shutdown collection finds it here.
-        self.gc_possible_root(&object.as_value());
+        self.memory_mut().gc_possible_root(&object.as_value());
     }
 
     /// php's `dtor_obj != zend_objects_destroy_object || ce->destructor`:
@@ -639,8 +640,8 @@ impl Request {
             return true;
         }
         let shown = visibility_string(visibility);
-        let class = self.class_name(object.class());
-        if !self.executing() {
+        let class = self.symbols().class_name(object.class());
+        if !self.frames().executing() {
             crate::api::raising::warning(
                 self,
                 &format!(
@@ -798,6 +799,7 @@ impl Request {
     /// answers `&EG(uninitialized_zval)`).
     pub(crate) fn std_dimensions(&self, class: ClassId) -> bool {
         !self
+            .symbols()
             .lineage(class)
             .any(|class| self.handler_row(class).is_some())
     }
@@ -832,9 +834,10 @@ impl Request {
         #[cfg(debug_assertions)]
         {
             let row = self
+                .symbols()
                 .lineage(class)
                 .find(|at| self.handler_row(*at).is_some());
-            let extension = row.and_then(|row| self.class_extension(row));
+            let extension = row.and_then(|row| self.extensions().class_extension(row));
             if let Some(extension) = extension.filter(|by| *by != super::ExtensionId::CORE) {
                 return self.serve_for(extension, serve);
             }
@@ -854,6 +857,7 @@ impl Request {
                 && self.native_new_of(at).is_none()
         };
         let makeable = self
+            .symbols()
             .class_decl(class)
             .is_some_and(|decl| decl.kind == ClassKind::Class && !decl.flags.is_abstract);
         let o = object.heap();
@@ -868,10 +872,15 @@ impl Request {
     /// `std_object_handlers`: its own or the nearest parent's, or an
     /// enum's; `None` where its objects are served by [`Std`].
     pub(crate) fn own_handlers(&self, class: ClassId) -> Option<&'static dyn ObjectHandlers> {
-        if let Some(table) = self.lineage(class).find_map(|at| self.handler_row(at)) {
+        if let Some(table) = self
+            .symbols()
+            .lineage(class)
+            .find_map(|at| self.handler_row(at))
+        {
             return Some(table);
         }
-        self.class_decl(class)
+        self.symbols()
+            .class_decl(class)
             .is_some_and(|decl| decl.kind == ClassKind::Enum)
             .then_some(&crate::enums::ENUM as &'static dyn ObjectHandlers)
     }
@@ -881,7 +890,7 @@ impl Request {
     /// `None` for a class whose objects carry no native payload, which
     /// is `zend_objects_new`.
     pub(crate) fn native_new_of(&self, class: ClassId) -> Option<NativeNew> {
-        self.lineage(class).find_map(|class| {
+        self.symbols().lineage(class).find_map(|class| {
             let at = self.native_class_at(class)?;
             self.shared.natives.get(at).copied().flatten()
         })
@@ -893,7 +902,8 @@ impl Request {
     /// subclass, whose `create_object` wraps it as php's
     /// `ce->create_object` wraps `zend_ce_exception->create_object`.
     pub(crate) fn records_throw_site(&self, class: ClassId) -> bool {
-        self.lineage(class)
+        self.symbols()
+            .lineage(class)
             .filter_map(|class| self.handler_row(class))
             .any(crate::classes::records_throw_site)
     }
@@ -913,11 +923,11 @@ impl Request {
     fn array_access(&mut self, object: PhpObject) -> Result<(), Thrown> {
         let implements = self
             .class_named(Bare::resolved(b"ArrayAccess"))
-            .is_some_and(|interface| self.instance_of(object.class(), interface));
+            .is_some_and(|interface| self.symbols().instance_of(object.class(), interface));
         if implements {
             return Ok(());
         }
-        let class = self.class_name(object.class());
+        let class = self.symbols().class_name(object.class());
         Err(crate::api::raising::throw_error(
             self,
             "Error",
@@ -1121,11 +1131,12 @@ impl Request {
         }
         // `zend_bad_constructor_call`: the sentence names no `method`.
         let shown = visibility_string(self.method_visibility(constructor));
-        let class = self
-            .method_class(constructor)
-            .map_or_else(|| String::from("object"), |class| self.class_name(class));
+        let class = self.method_class(constructor).map_or_else(
+            || String::from("object"),
+            |class| self.symbols().class_name(class),
+        );
         let from = match scope {
-            Some(scope) => format!("scope {}", self.class_name(scope)),
+            Some(scope) => format!("scope {}", self.symbols().class_name(scope)),
             None => String::from("global scope"),
         };
         object.heap().set_destructor_called(true);
@@ -1150,7 +1161,11 @@ impl Request {
     ) -> Result<Option<Owner<Value>>, Thrown> {
         match to {
             TypeTag::String => {
-                if self.method_named(object.class(), b"__tostring").is_none() {
+                if self
+                    .symbols()
+                    .method_named(object.class(), b"__tostring")
+                    .is_none()
+                {
                     return Ok(None);
                 }
                 let value = crate::api::call::call_method_made(self, &object, b"__toString", &[])?;
@@ -1160,7 +1175,7 @@ impl Request {
                 }
                 self.release(value);
                 crate::api::raising::pending(self)?;
-                let class = self.class_name(object.class());
+                let class = self.symbols().class_name(object.class());
                 Err(crate::api::raising::throw_error(
                     self,
                     "Error",
@@ -1239,7 +1254,11 @@ impl Request {
         &mut self,
         object: PhpObject,
     ) -> Result<Option<Owner<PhpArray>>, Thrown> {
-        if self.method_named(object.class(), b"__debuginfo").is_none() {
+        if self
+            .symbols()
+            .method_named(object.class(), b"__debuginfo")
+            .is_none()
+        {
             // `zend_lazy_object_debug_info`: a proxy that forwards shows
             // its instance, and a lazy object that waits shows its
             // members as they stand, neither initialised for it.
@@ -1254,7 +1273,7 @@ impl Request {
             Some(array) => Ok(Some(Owner::adopt(array))),
             None if value.tag() == TypeTag::Null => {
                 self.release(value);
-                let class = self.class_name(object.class());
+                let class = self.symbols().class_name(object.class());
                 crate::api::raising::deprecated(
                     self,
                     &format!(
@@ -1315,7 +1334,7 @@ impl Request {
         right: &Value,
     ) -> Result<Option<std::cmp::Ordering>, Thrown> {
         use std::cmp::Ordering;
-        if self.stack_overflowed() {
+        if self.limits().stack_overflowed() {
             return Err(crate::api::raising::throw_error(
                 self,
                 "Error",
@@ -1528,7 +1547,7 @@ impl Request {
             Some(casted) => casted,
             None => match target {
                 TypeTag::Int | TypeTag::Float => {
-                    let class = self.class_name(object.class());
+                    let class = self.symbols().class_name(object.class());
                     let to = if target == TypeTag::Int {
                         "int"
                     } else {
@@ -1578,7 +1597,7 @@ impl Request {
         let custom = self.object_custom(object.class());
         let cloned = self.heap.object_clone(object.heap(), custom);
         let Some(new) = self.fatal_of(cloned)? else {
-            let class = self.class_name(object.class());
+            let class = self.symbols().class_name(object.class());
             return self.fatal_of(Err(Fatal::error(format!(
                 "InternalError: Std::clone_obj over an object of class {class}, whose native payload its own table must copy"
             ))));
@@ -1627,7 +1646,11 @@ impl Request {
     /// readonly property once more, and none after it, whatever the method
     /// threw. A class with no `__clone` is nothing to serve.
     pub(crate) fn serve_clone_method(&mut self, copy: PhpObject) -> Result<(), Thrown> {
-        if self.method_named(copy.class(), b"__clone").is_none() {
+        if self
+            .symbols()
+            .method_named(copy.class(), b"__clone")
+            .is_none()
+        {
             return Ok(());
         }
         Self::mark_reinitable(copy, true);
@@ -1843,7 +1866,7 @@ impl Request {
 
     /// php's `Error` for a class whose `clone_obj` slot is null.
     pub(super) fn uncloneable(&mut self, object: PhpObject) -> Thrown {
-        let class = self.class_name(object.class());
+        let class = self.symbols().class_name(object.class());
         crate::api::raising::throw_error(
             self,
             "Error",
@@ -1869,13 +1892,13 @@ impl Request {
         let Some(clone_obj) = table.clone_obj() else {
             return Err(self.uncloneable(object));
         };
-        if let Some(clone) = self.method_named(object.class(), b"__clone") {
+        if let Some(clone) = self.symbols().method_named(object.class(), b"__clone") {
             self.check_method_access(clone, b"__clone")?;
         }
         match with.filter(|with| !with.is_empty()) {
             Some(with) => {
                 let Some(clone_obj_with) = table.clone_obj_with() else {
-                    let class = self.class_name(object.class());
+                    let class = self.symbols().class_name(object.class());
                     return Err(crate::api::raising::throw_error(
                         self,
                         "Error",

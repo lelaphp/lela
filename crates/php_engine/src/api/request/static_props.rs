@@ -140,7 +140,7 @@ impl Request {
             if silent {
                 return Ok(None);
             }
-            let class = self.class_name(class);
+            let class = self.symbols().class_name(class);
             return Err(crate::api::raising::throw_error(
                 self,
                 "Error",
@@ -153,12 +153,13 @@ impl Request {
         self.update_class_constants(class)?;
         self.lay_down_static(info)?;
         if self
+            .symbols()
             .class_decl(class)
             .is_some_and(|decl| decl.kind == ClassKind::Trait)
         {
             let shown = format!(
                 "{}::${}",
-                self.class_name(info.declaring),
+                self.symbols().class_name(info.declaring),
                 String::from_utf8_lossy(name)
             );
             crate::api::raising::deprecated(
@@ -236,7 +237,7 @@ impl Request {
         let held = self.held_static(info);
         if held.tag() == TypeTag::Undef {
             if self.property_typed(info) && read == PropertyRead::Warning {
-                let declaring = self.class_name(info.declaring);
+                let declaring = self.symbols().class_name(info.declaring);
                 return Err(crate::api::raising::throw_error(
                     self,
                     "Error",

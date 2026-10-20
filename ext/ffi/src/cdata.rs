@@ -1295,7 +1295,9 @@ impl ObjectHandlers for Handlers {
             return None;
         }
         func_pointee(req, v.ty)?;
-        let function = req.native_trampoline(b"__invoke", crate::call::invoke)?;
+        let function = req
+            .symbols_mut()
+            .native_trampoline(b"__invoke", crate::call::invoke)?;
         Some(ClosureInfo {
             function,
             this: Some(object),

@@ -114,7 +114,7 @@ pub(crate) fn policy(entries: &[(&str, &str)]) -> Policy {
 /// The name of the function `frame` serves, none for a file's code.
 pub(crate) fn function_of(req: &Request, frame: FrameRef) -> Option<Vec<u8>> {
     let function = tier::frame(req, frame)?.function()?;
-    Some(req.function_decl(function)?.name.0.to_vec())
+    Some(req.symbols().function_decl(function)?.name.0.to_vec())
 }
 
 /// What a served program wrote to its first stream.

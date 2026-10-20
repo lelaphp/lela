@@ -397,7 +397,7 @@ fn fetch_array(
             if let Some(thrown) = thrown {
                 return Err(thrown);
             }
-            if !req.return_value_used() {
+            if !req.frames().return_value_used() {
                 return Ok(OrFalse::False);
             }
             let count = result(req, object).map_or_else(

@@ -39,7 +39,7 @@ use php_ext::abi::{Extension, ExtensionBuilder, This, Untyped};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
 use php_ext::raising::{Level, Thrown, arg_type_error, raise, raise_at, throw_at, throw_error};
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::syntax::{self, FileId, LexOptions};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -88,7 +88,8 @@ pub fn extension() -> Extension {
 /// Tokenizer Support => enabled
 /// ```
 fn tokenizer_info(req: &mut Request) {
-    req.info_table(&[&["Tokenizer Support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["Tokenizer Support", "enabled"]]);
 }
 
 /// Core's `Stringable`, named for `implements`.
@@ -229,16 +230,14 @@ impl PhpToken {
         code: PhpString,
         #[php(default = 0)] flags: i64,
     ) -> Result<Owner<PhpArray>, Thrown> {
-        let Some(token_class) = req.called_scope() else {
+        let Some(token_class) = req.frames().called_scope() else {
             return Err(throw_error(
                 req,
                 "Error",
                 "PhpToken::tokenize() called with no class",
             ));
         };
-        let short_open_tag = req
-            .ini_get(b"short_open_tag")
-            .is_none_or(Request::ini_parse_bool);
+        let short_open_tag = req.ini().get(b"short_open_tag").is_none_or(Ini::parse_bool);
         let tokens = if flags & TOKEN_PARSE == 0 {
             tokenize(req, code.as_bytes(), short_open_tag)
         } else {
@@ -599,7 +598,7 @@ fn token_text(req: &mut Request, this: PhpObject) -> Result<PhpString, Thrown> {
 /// class for an object and `true` or `false` for a bool.
 fn value_name(req: &Request, value: &Value) -> String {
     match value.as_ref() {
-        ValueRef::Object(o) => req.class_decl(o.class()).map_or_else(
+        ValueRef::Object(o) => req.symbols().class_decl(o.class()).map_or_else(
             || String::from("object"),
             |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
         ),
@@ -1010,9 +1009,7 @@ fn token_get_all(
     code: PhpString,
     #[php(default = 0)] flags: i64,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    let short_open_tag = req
-        .ini_get(b"short_open_tag")
-        .is_none_or(Request::ini_parse_bool);
+    let short_open_tag = req.ini().get(b"short_open_tag").is_none_or(Ini::parse_bool);
     let tokens = if flags & TOKEN_PARSE == 0 {
         tokenize(req, code.as_bytes(), short_open_tag)
     } else {

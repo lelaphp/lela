@@ -1418,6 +1418,7 @@ fn binop(
                 }
                 let type_name = match element.as_object() {
                     Some(object) => req
+                        .symbols()
                         .class_decl(object.class())
                         .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
                         .unwrap_or_default(),

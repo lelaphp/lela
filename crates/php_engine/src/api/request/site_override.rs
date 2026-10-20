@@ -96,7 +96,7 @@ impl Request {
     /// none where no constant expression is being evaluated.
     pub(super) fn overridden_site(&self) -> Option<(&[u8], u32)> {
         let site = self.site_override?;
-        let file = &self.class_decl(site.scope)?.file.0;
+        let file = &self.symbols().class_decl(site.scope)?.file.0;
         Some((file, site.line))
     }
 }

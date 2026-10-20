@@ -371,7 +371,7 @@ fn write(
         ValueRef::Int(n) => write_long(out, n),
         ValueRef::Float(f) => {
             out.extend_from_slice(b"d:");
-            out.extend_from_slice(gcvt(f, req.serialize_precision()).as_bytes());
+            out.extend_from_slice(gcvt(f, req.ini().serialize_precision()).as_bytes());
             out.push(b';');
         }
         ValueRef::Str(s) => write_string(out, s.as_bytes()),
@@ -735,7 +735,7 @@ fn uninitialized_typed(req: &mut Request, object: PhpObject, candidate: &[u8]) -
     let mut at = Some(object.class());
     for _ in 0..64 {
         let Some(here) = at else { return false };
-        let Some(decl) = req.class_decl(here) else {
+        let Some(decl) = req.symbols().class_decl(here) else {
             return false;
         };
         let declared = decl.properties.iter().any(|p| {
@@ -751,7 +751,7 @@ fn uninitialized_typed(req: &mut Request, object: PhpObject, candidate: &[u8]) -
         if declared {
             return true;
         }
-        at = req.class_parent(here);
+        at = req.symbols().class_parent(here);
     }
     false
 }

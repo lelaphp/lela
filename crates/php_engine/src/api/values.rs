@@ -1424,7 +1424,7 @@ impl PhpObject {
     /// over the linked table the request reads.
     #[must_use]
     pub fn instance_of(&self, req: &Request, class: ClassId) -> bool {
-        req.instance_of(self.class(), class)
+        req.symbols().instance_of(self.class(), class)
     }
 
     /// `zend_objects_clone_obj` for a class whose objects carry a
@@ -3226,7 +3226,7 @@ mod tests {
     #[test]
     fn a_copy_is_a_refcount_and_a_write_separates() {
         let mut req = crate::test::request();
-        let start = req.memory_usage(false);
+        let start = req.memory().usage(false);
         let Ok(mut a) = PhpArray::new(&mut req).map(Owner::hand_on) else {
             return;
         };
@@ -3246,7 +3246,7 @@ mod tests {
         assert_ne!(b, first.as_array().unwrap_or(b));
         req.release(Value::array(b));
         req.release(first);
-        assert_eq!(req.memory_usage(false), start);
+        assert_eq!(req.memory().usage(false), start);
     }
 
     /// An object a native builds is a store entry out of the request's
@@ -3259,11 +3259,11 @@ mod tests {
     #[test]
     fn an_object_is_a_store_entry_and_a_copy_is_a_refcount() {
         let mut req = crate::test::request();
-        let start = req.memory_usage(false);
+        let start = req.memory().usage(false);
         let Ok(object) = req.new_object_of("stdClass") else {
             return;
         };
-        assert_eq!(req.memory_usage(false) - start, 40);
+        assert_eq!(req.memory().usage(false) - start, 40);
         assert_eq!(object.index(), 1);
         let first = object.as_value();
         let second = first;
@@ -3284,7 +3284,7 @@ mod tests {
         a.give_up(&mut req);
         assert_eq!(first.refcount(), 1, "the array gave its owner back");
         req.release(first);
-        assert_eq!(req.memory_usage(false), start);
+        assert_eq!(req.memory().usage(false), start);
         let Ok(next) = req.new_object_of("stdClass") else {
             return;
         };
@@ -3297,7 +3297,7 @@ mod tests {
     #[test]
     fn a_property_is_the_object_s_and_goes_with_it() {
         let mut req = crate::test::request();
-        let start = req.memory_usage(false);
+        let start = req.memory().usage(false);
         let Ok(object) = req.new_object_of("stdClass") else {
             return;
         };
@@ -3321,7 +3321,7 @@ mod tests {
         assert_eq!(object.props(&mut req).map(|e| e.len()), Ok(1));
         req.release(object.as_value());
         assert_eq!(
-            req.memory_usage(false),
+            req.memory().usage(false),
             start,
             "the table and its string went with it"
         );
@@ -3334,11 +3334,11 @@ mod tests {
     #[test]
     fn a_reference_is_a_cell_of_the_heap_and_is_followed_by_deref() {
         let mut req = crate::test::request();
-        let start = req.memory_usage(false);
+        let start = req.memory().usage(false);
         let Ok(r) = PhpRef::new(&mut req, Owner::int(3)) else {
             return;
         };
-        assert_eq!(req.memory_usage(false) - start, 32);
+        assert_eq!(req.memory().usage(false) - start, 32);
         let v = r.as_value();
         assert_eq!(v.tag(), TypeTag::Reference);
         assert_eq!(v.as_int(), None, "not followed, as Z_LVAL_P is not");
@@ -3359,7 +3359,7 @@ mod tests {
         assert_eq!(string.heap().refcount(), 1, "the cell holds the one owner");
         req.release(v);
         assert_eq!(
-            req.memory_usage(false),
+            req.memory().usage(false),
             start,
             "the cell and its string went"
         );
@@ -3381,37 +3381,40 @@ mod tests {
             Ok(())
         }
         let mut req = crate::test::request();
-        let start = req.memory_usage(false);
-        let kind = req.resources().register_type(b"stream", Some(dtor));
+        let start = req.memory().usage(false);
+        let kind = req
+            .memory_mut()
+            .resources()
+            .register_type(b"stream", Some(dtor));
         let Ok(r) = Resource::new(&mut req, kind, 7u32).map(Owner::hand_on) else {
             return;
         };
         // The resource, its payload, and the list's own packed table,
         // 160, which the request's first resource lays down.
-        assert_eq!(req.memory_usage(false) - start, 160 + 32 + 16);
+        assert_eq!(req.memory().usage(false) - start, 160 + 32 + 16);
         assert_eq!(r.id(), 1);
         assert_eq!(r.type_name(&req), Some(&b"stream"[..]));
         assert_eq!(r.native::<u32>(&req), Some(&7));
         let v = r.as_value();
         assert_eq!(v.type_name(), "resource");
-        assert_eq!(req.resource(1), Some(r));
+        assert_eq!(req.memory().resource(1), Some(r));
         r.close(&mut req);
         r.close(&mut req);
         assert_eq!(v.type_name(), "resource (closed)");
         assert_eq!(r.type_name(&req), None);
         assert_eq!(r.native::<u32>(&req), None);
-        assert_eq!(req.resource(1), Some(r), "closed, still listed");
+        assert_eq!(req.memory().resource(1), Some(r), "closed, still listed");
         assert_eq!(
             req.constant_named(b"dtor").and_then(|v| v.as_int()),
             Some(7),
             "the destructor ran once, reading the payload"
         );
         // The destructor's `define()` took a `zend_constant`'s 40.
-        assert_eq!(req.memory_usage(false) - start, 160 + 32 + 40);
+        assert_eq!(req.memory().usage(false) - start, 160 + 32 + 40);
         req.release(v);
-        assert_eq!(req.resource(1), None);
+        assert_eq!(req.memory().resource(1), None);
         assert_eq!(
-            req.memory_usage(false),
+            req.memory().usage(false),
             start + 160 + 40,
             "the list's table stays until the request ends"
         );

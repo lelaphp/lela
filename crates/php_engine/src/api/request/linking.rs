@@ -251,7 +251,7 @@ impl Request {
                     record: None,
                 })
             };
-            let holder = |holder: ClassId| self.class_decl(holder);
+            let holder = |holder: ClassId| self.symbols().class_decl(holder);
             let evaluated = |expr: &ConstExpr| {
                 values
                     .iter()
@@ -307,7 +307,7 @@ impl Request {
         for name in &decl.traits {
             let Some(used) = self
                 .class_named(name.into())
-                .and_then(|c| self.class_decl(c))
+                .and_then(|c| self.symbols().class_decl(c))
             else {
                 continue;
             };
@@ -971,7 +971,11 @@ mod tests {
         let mut seen = Vec::new();
         for _ in 0..2 {
             let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-            assert!(req.eval_stringl(code.as_bytes(), b"loader").is_ok());
+            assert!(
+                req.code_mut()
+                    .eval_stringl(code.as_bytes(), b"loader")
+                    .is_ok()
+            );
             let c = req.class_named(php_unit::decl::Bare::resolved(b"c"));
             let q = req.class_named(php_unit::decl::Bare::resolved(b"q"));
             assert!(c.is_some_and(ClassId::is_published), "C is published");
@@ -979,7 +983,7 @@ mod tests {
                 q.is_some_and(|q| !q.is_published()),
                 "Q is the request's own"
             );
-            let inherited = c.and_then(|c| req.method_named(c, b"p"));
+            let inherited = c.and_then(|c| req.symbols().method_named(c, b"p"));
             assert!(inherited.is_some_and(|m| req.user_function(m).is_some()));
             let rows: Vec<String> = (req.own_classes.iter())
                 .filter_map(|row| Some(String::from_utf8_lossy(&row.decl()?.name.0).into_owned()))

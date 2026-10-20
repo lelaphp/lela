@@ -5,7 +5,7 @@
 //! the running execution's trace number, php's `EG(jit_trace_num)`, and
 //! `fork(2)`, which joins the timer's thread around it.
 //! The interrupt, the deadlines, the stack limit and the trace number
-//! are [`Limits`]'s, whose fields no file but this one reads.
+//! are [`LimitsState`]'s, whose fields no file but this one reads.
 
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
@@ -16,6 +16,27 @@ use php_compile::StackLimit;
 use super::{Forked, Periodic, Receiving, Reentry, Request};
 use crate::api::abi::{Beneath, chain};
 use crate::tier::TraceNum;
+
+/// The request's limits facet (design §4.4): what bounds the request: its
+/// interrupt and the periodic interrupts, the time limit, the machine
+/// stack's bounds, a callback C makes from another thread, and `fork`.
+/// [`Request::limits`] reads it and [`Request::limits_mut`] changes it;
+/// either is the whole request, since nearly every operation can serve
+/// PHP code.
+pub struct Limits<R>(pub(crate) R);
+
+impl Request {
+    /// The limits facet, to read.
+    #[must_use]
+    pub fn limits(&self) -> Limits<&Request> {
+        Limits(self)
+    }
+
+    /// The limits facet, to change.
+    pub fn limits_mut(&mut self) -> Limits<&mut Request> {
+        Limits(self)
+    }
+}
 
 /// One request's interrupt (design §5.8; `CONTEXT.md`, Interrupt), as
 /// the thread that raises it sees it: `Send` and `Sync`, and cloned so
@@ -125,7 +146,7 @@ impl AsRef<AtomicBool> for State {
 }
 
 /// The time limit suspended while this stands
-/// ([`Request::suspend_time_limit`], #1814), over the request or over
+/// ([`Limits::suspend_time_limit`], #1814), over the request or over
 /// what holds it, an observer's frame ([`Observed`]): what it derefs to,
 /// so the handler that holds it keeps everything it had. Its drop is
 /// the resume.
@@ -174,7 +195,7 @@ impl AsMut<Request> for Request {
 
 /// The interrupt, the deadlines, the stack limit and the trace number,
 /// whose fields no file but this one reads.
-pub(super) struct Limits {
+pub(super) struct LimitsState {
     /// The interrupt, shared with whatever thread sets it (design §5.8).
     interrupt: Interrupt,
     /// The request's deadlines on the engine's timer: the execution
@@ -192,12 +213,12 @@ pub(super) struct Limits {
     /// because a fiber switch swaps both ([`Request::switch_execution`]).
     trace_num: TraceNum,
     /// How a function C calls back reaches the request
-    /// ([`Request::reentry`]), made at the first ask and closed as the
+    /// ([`Limits::reentry`]), made at the first ask and closed as the
     /// request is dropped.
     reentry: Option<Arc<Reentry>>,
 }
 
-impl Drop for Limits {
+impl Drop for LimitsState {
     /// The request's end, for a thread waiting on it: what is still
     /// posted is abandoned and returns zero to C (#1640).
     fn drop(&mut self) {
@@ -207,13 +228,13 @@ impl Drop for Limits {
     }
 }
 
-impl Limits {
+impl LimitsState {
     /// The limits as a request is laid on an engine whose timer is
     /// `timer`: a fresh interrupt, no deadline yet, and no stack limit
     /// until the request starts on its thread.
-    pub(super) fn new(timer: &crate::interrupt::Timer) -> Limits {
+    pub(super) fn new(timer: &crate::interrupt::Timer) -> LimitsState {
         let interrupt = Interrupt::default();
-        Limits {
+        LimitsState {
             deadlines: crate::interrupt::Deadlines::new(timer, &interrupt),
             interrupt,
             stack_limit: StackLimit::UNCHECKED,
@@ -251,39 +272,6 @@ impl Request {
         self.limits.stack_limit
     }
 
-    /// `zend_call_stack_overflowed(EG(stack_limit))`: whether the
-    /// machine stack has come down to the limit request start worked
-    /// out, `zend.max_allowed_stack_size` less `zend.reserved_stack_size`.
-    /// A native that walks a nest by recursing asks it at each level and
-    /// raises its own refusal, as `php_url_encode_hash_ex` raises
-    /// `Maximum call stack size reached.`; the one php's engine raises is
-    /// [`crate::api::raising::call_stack_limit`].
-    #[must_use]
-    pub fn stack_overflowed(&self) -> bool {
-        self.limits.stack_limit.overflowed()
-    }
-
-    /// `EG(stack_limit)`: the address [`Request::stack_overflowed`]
-    /// compares a frame's to, the thread's or, inside a fiber, the
-    /// fiber's own, and zero under `zend.max_allowed_stack_size=-1`,
-    /// where nothing is checked. The thread's own bounds are
-    /// [`Request::call_stack_bounds`].
-    #[must_use]
-    pub fn stack_limit_address(&self) -> usize {
-        self.limits.stack_limit.limit()
-    }
-
-    /// `zend_call_stack_get`: the machine stack of the thread the request
-    /// is served on, as the platform describes it, whose base and size
-    /// request start works [`Request::stack_limit_address`] out from;
-    /// `None` on a thread the platform cannot describe. Inside a fiber it
-    /// is still the thread's, as php's is. Read in `php_heap`'s `unsafe`
-    /// home, never bound a second time in an extension.
-    #[must_use]
-    pub fn call_stack_bounds(&self) -> Option<super::CallStack> {
-        php_heap::call_stack_bounds()
-    }
-
     /// `zend_unset_timeout` then `zend_set_timeout` over
     /// `max_execution_time` as the ini table has it now: at request
     /// start, and again whenever the entry moves, which is php's
@@ -305,10 +293,124 @@ impl Request {
         self.limits.deadlines.unset();
     }
 
+    /// The trace number of the execution the request runs on, which
+    /// the tier reads through [`crate::tier::trace_num`] and the
+    /// generator's resume sets aside around a body.
+    pub(crate) fn trace_num(&self) -> TraceNum {
+        self.limits.trace_num
+    }
+
+    /// The trace number of the execution the request runs on written
+    /// ([`crate::tier::set_trace_num`]).
+    pub(crate) fn set_trace_num(&mut self, trace_num: TraceNum) {
+        self.limits.trace_num = trace_num;
+    }
+
+    /// The interrupt hooks' chain entered from the top: php's
+    /// `zend_interrupt_function`, which the last `MINIT` to set it
+    /// holds, each link handed the one it saved
+    /// ([`crate::api::abi::chain::Interrupt`]); what the interrupt check
+    /// serves when the execution timer was not what raised it. What the
+    /// chain answers is left pending where the loop stands.
+    pub(crate) fn serve_interrupt_hooks(&mut self) {
+        let shared = Arc::clone(&self.shared);
+        let top = Beneath::<chain::Interrupt>::top(shared.supplied.interrupt.links(), ());
+        if let Err(thrown) = top.serve(self) {
+            self.leave_pending(&thrown);
+        }
+    }
+
+    /// `set_time_limit()`, which is `zend_alter_ini_entry_ex` over
+    /// `max_execution_time` at runtime (`Z/main/main.c:1631`): the
+    /// entry moved through [`Self::ini_set`], so the timer is re-armed
+    /// as it is there, and `true` when the entry took the value.
+    ///
+    /// The value is `zend_long_to_str`'s, the interned string of one
+    /// digit or a new one, which the entry keeps:
+    ///
+    /// ```php
+    /// ini_set('from', 'x');
+    /// $m = memory_get_usage(); set_time_limit(100); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); set_time_limit(5); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 32
+    /// -32
+    /// ```
+    pub(crate) fn set_time_limit(&mut self, seconds: i64) -> bool {
+        let Ok(string) = crate::api::coerce::int_to_string(self, seconds) else {
+            return false;
+        };
+        let set = self.ini_mut().set_string(b"max_execution_time", *string);
+        string.give_up(self);
+        set.is_ok_and(|previous| previous.is_some())
+    }
+
+    /// `max_execution_time`, the seconds the engine's execution timer is
+    /// armed for; zero, php's CLI default, arms none.
+    pub(crate) fn max_execution_time(&self) -> i64 {
+        i64::from(self.ini_number(b"max_execution_time", 0))
+    }
+
+    /// `EG(hard_timeout)`, `OnUpdateLong` over the startup ini: the
+    /// seconds past a timeout the timer gives the loop to take it.
+    fn hard_timeout(&self) -> i64 {
+        self.ini().long(b"hard_timeout")
+    }
+}
+
+impl<'r> Limits<&'r Request> {
+    /// `zend_call_stack_overflowed(EG(stack_limit))`: whether the
+    /// machine stack has come down to the limit request start worked
+    /// out, `zend.max_allowed_stack_size` less `zend.reserved_stack_size`.
+    /// A native that walks a nest by recursing asks it at each level and
+    /// raises its own refusal, as `php_url_encode_hash_ex` raises
+    /// `Maximum call stack size reached.`; the one php's engine raises is
+    /// [`crate::api::raising::call_stack_limit`].
+    #[must_use]
+    pub fn stack_overflowed(self) -> bool {
+        self.0.limits.stack_limit.overflowed()
+    }
+
+    /// `EG(stack_limit)`: the address [`Limits::stack_overflowed`]
+    /// compares a frame's to, the thread's or, inside a fiber, the
+    /// fiber's own, and zero under `zend.max_allowed_stack_size=-1`,
+    /// where nothing is checked. The thread's own bounds are
+    /// [`Limits::call_stack_bounds`].
+    #[must_use]
+    pub fn stack_limit_address(self) -> usize {
+        self.0.limits.stack_limit.limit()
+    }
+
+    /// `zend_call_stack_get`: the machine stack of the thread the request
+    /// is served on, as the platform describes it, whose base and size
+    /// request start works [`Limits::stack_limit_address`] out from;
+    /// `None` on a thread the platform cannot describe. Inside a fiber it
+    /// is still the thread's, as php's is. Read in `php_heap`'s `unsafe`
+    /// home, never bound a second time in an extension.
+    #[must_use]
+    pub fn call_stack_bounds(self) -> Option<super::CallStack> {
+        php_heap::call_stack_bounds()
+    }
+
+    /// This request's interrupt (design §5.8): what the loop tests at a
+    /// back-edge, at a frame's activation, after every `Flow::Resume` and
+    /// after an internal call returns, and what the engine's execution
+    /// timer, signal delivery, a periodic interrupt and a deferred FFI
+    /// callback raise. A `tier.lock` item, because compiled code tests
+    /// the same atomic once per loop iteration through the tier's
+    /// `ExitCtx` (`jit-design.md` §4.3).
+    #[must_use]
+    pub fn interrupt(self) -> &'r Interrupt {
+        &self.0.limits.interrupt
+    }
+}
+
+impl<'r> Limits<&'r mut Request> {
     /// A periodic interrupt (#1806): this request's interrupt raised
     /// `first` from now and every `every` after it, once where `every`
     /// is `None` (Excimer's one-shot `ExcimerTimer`), until
-    /// [`Request::stop_periodic`] stops it or the request reaches
+    /// [`Limits::stop_periodic`] stops it or the request reaches
     /// `php_request_shutdown`'s fourth step. A period shorter than a
     /// tenth of a millisecond is counted in tenths of a millisecond. What
     /// a sampling profiler's own timer thread does under php,
@@ -316,13 +418,13 @@ impl Request {
     /// `EG(vm_interrupt)`, is the engine's here, since an extension owns
     /// no thread (ADR-0005, ADR-0010): one thread per engine serves every
     /// request's execution timer and periodic interrupts alike, parked
-    /// between requests, and is joined before a fork ([`Request::fork`])
+    /// between requests, and is joined before a fork ([`Limits::fork`])
     /// and at the engine's end.
     ///
     /// It is served through the interrupt hook the extension supplies
     /// ([`ExtensionBuilder::interrupt`]): at the loop's next check, every
     /// extension's hook is served, so a hook reads its own count with
-    /// [`Request::periods_elapsed`] and does nothing at zero, as Excimer's
+    /// [`Limits::periods_elapsed`] and does nothing at zero, as Excimer's
     /// `excimer_timer_interrupt` serves only the timers that fired. The
     /// periods are wall-clock time, Excimer's `EXCIMER_REAL`; a child
     /// forked from the request inherits none of them, as a child inherits
@@ -331,11 +433,11 @@ impl Request {
     /// [`ExtensionBuilder::interrupt`]: crate::api::abi::ExtensionBuilder::interrupt
     #[must_use]
     pub fn start_periodic(
-        &mut self,
+        self,
         first: std::time::Duration,
         every: Option<std::time::Duration>,
     ) -> Option<Periodic> {
-        self.limits.deadlines.start_periodic(first, every)
+        self.0.limits.deadlines.start_periodic(first, every)
     }
 
     /// The time limit suspended (#1814) for as long as the guard this
@@ -376,22 +478,22 @@ impl Request {
     /// handler that polls its client would spend even a CPU clock.
     ///
     /// [`Observed::suspend_time_limit`]: crate::api::abi::Observed::suspend_time_limit
-    pub fn suspend_time_limit(&mut self) -> TimeLimitSuspended<'_> {
-        TimeLimitSuspended::over(self)
+    pub fn suspend_time_limit(self) -> TimeLimitSuspended<'r> {
+        TimeLimitSuspended::over(self.0)
     }
 
     /// The periods of `periodic` elapsed since the last time this was
     /// asked, the ones the request was too busy to be interrupted for
     /// among them, as Excimer hands its callback the event count, POSIX's
     /// overruns plus one; zero for one stopped.
-    pub fn periods_elapsed(&mut self, periodic: Periodic) -> u64 {
-        self.limits.deadlines.periods_elapsed(periodic)
+    pub fn periods_elapsed(self, periodic: Periodic) -> u64 {
+        self.0.limits.deadlines.periods_elapsed(periodic)
     }
 
     /// `periodic` stopped, with the periods it had not been asked for,
     /// as Excimer's `excimer_timer_stop` deletes its timer.
-    pub fn stop_periodic(&mut self, periodic: Periodic) {
-        self.limits.deadlines.stop_periodic(periodic);
+    pub fn stop_periodic(self, periodic: Periodic) {
+        self.0.limits.deadlines.stop_periodic(periodic);
     }
 
     /// `fork(2)` from this request, the engine's one home for it (#1807, as
@@ -446,43 +548,19 @@ impl Request {
     /// host that serves on threads, whose other threads would leave the
     /// child what they held; otherwise the OS error `fork(2)` failed with,
     /// `EAGAIN` and `ENOMEM` among them, and no process was made.
-    pub fn fork(&mut self) -> std::io::Result<Forked> {
+    pub fn fork(self) -> std::io::Result<Forked> {
         crate::fork::fork_request()
-    }
-
-    /// This request's interrupt (design §5.8): what the loop tests at a
-    /// back-edge, at a frame's activation, after every `Flow::Resume` and
-    /// after an internal call returns, and what the engine's execution
-    /// timer, signal delivery, a periodic interrupt and a deferred FFI
-    /// callback raise. A `tier.lock` item, because compiled code tests
-    /// the same atomic once per loop iteration through the tier's
-    /// `ExitCtx` (`jit-design.md` §4.3).
-    #[must_use]
-    pub fn interrupt(&self) -> &Interrupt {
-        &self.limits.interrupt
-    }
-
-    /// The trace number of the execution the request runs on, which
-    /// the tier reads through [`crate::tier::trace_num`] and the
-    /// generator's resume sets aside around a body.
-    pub(crate) fn trace_num(&self) -> TraceNum {
-        self.limits.trace_num
-    }
-
-    /// The trace number of the execution the request runs on written
-    /// ([`crate::tier::set_trace_num`]).
-    pub(crate) fn set_trace_num(&mut self, trace_num: TraceNum) {
-        self.limits.trace_num = trace_num;
     }
 
     /// How a function C calls back reaches this request (#1638, #1640):
     /// one per request, made at the first ask, which ext/ffi makes at
     /// its first call into C or callback, and closed when the request
     /// ends.
-    pub fn reentry(&mut self) -> Arc<Reentry> {
-        let interrupt = &self.limits.interrupt;
+    pub fn reentry(self) -> Arc<Reentry> {
+        let interrupt = &self.0.limits.interrupt;
         Arc::clone(
-            self.limits
+            self.0
+                .limits
                 .reentry
                 .get_or_insert_with(|| Arc::new(Reentry::new(interrupt))),
         )
@@ -502,11 +580,11 @@ impl Request {
     /// without it, as php's one thread runs one libcurl call of a request
     /// at a time, and a callback made meanwhile is served at the next
     /// interrupt check after they return (#2595).
-    pub fn blocking<T>(&mut self, wait: impl FnOnce() -> T) -> T {
-        let Some(reentry) = self.limits.reentry.clone() else {
+    pub fn blocking<T>(self, wait: impl FnOnce() -> T) -> T {
+        let Some(reentry) = self.0.limits.reentry.clone() else {
             return wait();
         };
-        let Some(at) = std::num::NonZeroUsize::new(std::ptr::from_mut(self).expose_provenance())
+        let Some(at) = std::num::NonZeroUsize::new(std::ptr::from_mut(self.0).expose_provenance())
         else {
             return wait();
         };
@@ -514,57 +592,5 @@ impl Request {
         let waited = wait();
         reentry.reclaim(lending);
         waited
-    }
-
-    /// The interrupt hooks' chain entered from the top: php's
-    /// `zend_interrupt_function`, which the last `MINIT` to set it
-    /// holds, each link handed the one it saved
-    /// ([`crate::api::abi::chain::Interrupt`]); what the interrupt check
-    /// serves when the execution timer was not what raised it. What the
-    /// chain answers is left pending where the loop stands.
-    pub(crate) fn serve_interrupt_hooks(&mut self) {
-        let shared = Arc::clone(&self.shared);
-        let top = Beneath::<chain::Interrupt>::top(shared.supplied.interrupt.links(), ());
-        if let Err(thrown) = top.serve(self) {
-            self.leave_pending(&thrown);
-        }
-    }
-
-    /// `set_time_limit()`, which is `zend_alter_ini_entry_ex` over
-    /// `max_execution_time` at runtime (`Z/main/main.c:1631`): the
-    /// entry moved through [`Self::ini_set`], so the timer is re-armed
-    /// as it is there, and `true` when the entry took the value.
-    ///
-    /// The value is `zend_long_to_str`'s, the interned string of one
-    /// digit or a new one, which the entry keeps:
-    ///
-    /// ```php
-    /// ini_set('from', 'x');
-    /// $m = memory_get_usage(); set_time_limit(100); echo memory_get_usage() - $m, "\n";
-    /// $m = memory_get_usage(); set_time_limit(5); echo memory_get_usage() - $m, "\n";
-    /// ```
-    /// ```expect
-    /// 32
-    /// -32
-    /// ```
-    pub(crate) fn set_time_limit(&mut self, seconds: i64) -> bool {
-        let Ok(string) = crate::api::coerce::int_to_string(self, seconds) else {
-            return false;
-        };
-        let set = self.ini_set_string(b"max_execution_time", *string);
-        string.give_up(self);
-        set.is_ok_and(|previous| previous.is_some())
-    }
-
-    /// `max_execution_time`, the seconds the engine's execution timer is
-    /// armed for; zero, php's CLI default, arms none.
-    pub(crate) fn max_execution_time(&self) -> i64 {
-        i64::from(self.ini_number(b"max_execution_time", 0))
-    }
-
-    /// `EG(hard_timeout)`, `OnUpdateLong` over the startup ini: the
-    /// seconds past a timeout the timer gives the loop to take it.
-    fn hard_timeout(&self) -> i64 {
-        self.ini_long(b"hard_timeout")
     }
 }

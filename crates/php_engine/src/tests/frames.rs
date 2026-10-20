@@ -1,7 +1,7 @@
 //! Frame reads for extensions (#1827): an observer's handler reads the
 //! frame it is handed, and the frames below it, through a borrowed
 //! [`FrameView`], and keeps a frame past the handler as a [`FrameId`],
-//! which [`Request::frame_of`] checks against the stacks that stand before
+//! which [`Frames::of`] checks against the stacks that stand before
 //! it reads: a frame that left them is refused, and never read as the
 //! frame that stands at its old place now. A generator's frame is
 //! taken off the stack at each yield and pushed where its next resumer
@@ -26,6 +26,7 @@ struct Kept(Option<FrameId>);
 fn name(req: &Request, view: &FrameView<'_>) -> String {
     if let Some(function) = view.function() {
         return req
+            .symbols()
             .function_decl(function)
             .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
             .unwrap_or_default();
@@ -56,11 +57,13 @@ fn keep(observed: &mut Observed<'_>) {
         .caller()
         .map(|view| (view.id(), name(observed, &view)));
     let Some((id, named)) = caller else {
-        observed.write(b"[kept nothing]");
+        observed.response_mut().write(b"[kept nothing]");
         return;
     };
     observed.state::<Kept>().0 = Some(id);
-    observed.write(format!("[kept {named}]").as_bytes());
+    observed
+        .response_mut()
+        .write(format!("[kept {named}]").as_bytes());
 }
 
 /// `read()` begun: the kept frame read through its identity, its
@@ -68,11 +71,13 @@ fn keep(observed: &mut Observed<'_>) {
 fn read(observed: &mut Observed<'_>) {
     let kept = observed.state::<Kept>().0;
     let read = kept.and_then(|id| {
-        let view = observed.frame_of(id)?;
+        let view = observed.frames().of(id)?;
         Some(format!("{}:{}", name(observed, &view), view.line()))
     });
     let read = read.unwrap_or_else(|| String::from("refused"));
-    observed.write(format!("[read {read}]").as_bytes());
+    observed
+        .response_mut()
+        .write(format!("[read {read}]").as_bytes());
 }
 
 fn keeping() -> Extension {
@@ -152,7 +157,7 @@ fn a_frame_view_walks_its_callers_into_the_resumer_of_a_fiber() {
             at = view.caller();
         }
         let line = format!("[{}]", names.join(" < "));
-        observed.write(line.as_bytes());
+        observed.response_mut().write(line.as_bytes());
     }
     fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
         let walks = observed
@@ -193,13 +198,13 @@ fn a_native_call_has_no_frame_and_its_caller_is_the_user_frame_it_stands_on() {
             "[strcmp framed={framed} from {}]",
             caller.unwrap_or_default()
         );
-        observed.write(line.as_bytes());
+        observed.response_mut().write(line.as_bytes());
     }
     fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
         let named = observed.frame().is_none()
             && observed
                 .function()
-                .and_then(|function| observed.function_decl(function))
+                .and_then(|function| observed.symbols().function_decl(function))
                 .is_some_and(|decl| decl.name.0.as_ref() == b"strcmp");
         ObserverHandlers {
             begin: named.then_some(native as fn(&mut Observed<'_>)),
@@ -240,7 +245,7 @@ fn a_handler_reads_the_opcode_its_frame_stands_on() {
             return;
         };
         let line = format!("<{edge} {} {}>", name(req, &view), view.opcode());
-        observed.write(line.as_bytes());
+        observed.response_mut().write(line.as_bytes());
     }
     fn begin(observed: &mut Observed<'_>) {
         show(observed, "begin");
@@ -285,7 +290,7 @@ fn an_end_handler_an_uncaught_throwable_calls_reads_the_exception_op() {
             return;
         };
         let line = format!("<end {} {}>", name(req, &view), view.opcode());
-        observed.write(line.as_bytes());
+        observed.response_mut().write(line.as_bytes());
     }
     let engine = Engine::cli_builder()
         .extensions(&[ExtensionBuilder::default().observer(init).build("showing")])
@@ -375,11 +380,12 @@ fn named(req: &Request, frame: &ChainFrame<'_>) -> String {
         return format!("{{main}} {file}");
     };
     let name = req
+        .symbols()
         .function_decl(function)
         .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
         .unwrap_or_default();
     match frame.function_scope() {
-        Some(class) => format!("{}::{name}", req.class_name(class)),
+        Some(class) => format!("{}::{name}", req.symbols().class_name(class)),
         None => name,
     }
 }
@@ -394,12 +400,12 @@ fn walks(source: &str) -> String {
             .map(|frame| walked(observed, &frame))
             .collect();
         let line = format!("[{}]", walk.join(" < "));
-        observed.write(line.as_bytes());
+        observed.response_mut().write(line.as_bytes());
     }
     fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
         let walks = observed
             .function()
-            .and_then(|function| observed.function_decl(function))
+            .and_then(|function| observed.symbols().function_decl(function))
             .is_some_and(|decl| matches!(decl.name.0.as_ref(), b"walk" | b"strcmp"));
         ObserverHandlers {
             begin: walks.then_some(begin as fn(&mut Observed<'_>)),
@@ -492,7 +498,7 @@ struct Traced(Option<String>);
 /// develop setting prints one from `zend_throw_exception_hook`.
 fn traced_at_throw(req: &mut Request, beneath: Beneath<'_, chain::Throw>) {
     if req.state::<Traced>().0.is_none()
-        && let Ok(trace) = req.backtrace_here(0, 0)
+        && let Ok(trace) = req.frames_mut().backtrace_here(0, 0)
     {
         let rendered = req.trace_to_string(*trace, true);
         trace.give_up(req);

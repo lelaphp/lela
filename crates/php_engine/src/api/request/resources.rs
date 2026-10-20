@@ -8,7 +8,7 @@ use php_heap::{Heap, Res, ResourceType};
 use crate::api::raising::Thrown;
 use crate::api::values::Resource;
 
-use super::{Hooks, Phase, Request};
+use super::{Hooks, Memory, Phase, Request};
 
 /// A resource's per-type destructor, php's `list_dtor_ex`: served once,
 /// by [`Resource::close`] or by the release that reaches zero, with the
@@ -22,7 +22,7 @@ pub type ResourceDtor = fn(&mut Request, Resource) -> Result<(), Thrown>;
 /// (`zend_register_list_destructors_ex`): a name and a destructor per
 /// type, numbered in registration order. The list itself,
 /// `EG(regular_list)`, is the heap's, reached through
-/// [`Request::resource`].
+/// [`Memory::resource`].
 #[derive(Default)]
 pub struct Resources {
     types: Vec<(Vec<u8>, Option<ResourceDtor>)>,
@@ -61,11 +61,6 @@ impl Resources {
 }
 
 impl Request {
-    /// The request's resource types, for an extension registering one.
-    pub fn resources(&mut self) -> &mut Resources {
-        &mut self.resources
-    }
-
     /// `EG(regular_list)` in id order, every resource whose entry stands,
     /// closed or not: what `get_resources()` walks.
     pub(crate) fn resource_list(&self) -> Vec<Resource> {
@@ -73,7 +68,7 @@ impl Request {
         let mut found = Vec::with_capacity(live);
         let mut id = 1;
         while found.len() < live && id < i64::MAX {
-            if let Some(resource) = self.resource(id) {
+            if let Some(resource) = self.memory().resource(id) {
                 found.push(resource);
             }
             id += 1;
@@ -85,13 +80,6 @@ impl Request {
     /// `name`, as `get_resources()` is given it.
     pub(crate) fn resource_type_named(&self, name: &[u8]) -> Option<ResourceType> {
         self.resources.type_named(name)
-    }
-
-    /// `zend_hash_index_find(&EG(regular_list), id)`: the resource with
-    /// `id`, while its entry stands, closed or not.
-    #[must_use]
-    pub fn resource(&self, id: i64) -> Option<Resource> {
-        self.heap.resource_at(id).map(Resource::of)
     }
 
     /// `zend_register_resource`, what [`Resource::new`] is: the
@@ -165,5 +153,21 @@ impl Request {
     pub(crate) fn close_resources(&mut self) {
         self.enter_phase(Phase::ResourceShutdown);
         Heap::close_resources(&mut Hooks(self));
+    }
+}
+
+impl Memory<&Request> {
+    /// `zend_hash_index_find(&EG(regular_list), id)`: the resource with
+    /// `id`, while its entry stands, closed or not.
+    #[must_use]
+    pub fn resource(self, id: i64) -> Option<Resource> {
+        self.0.heap.resource_at(id).map(Resource::of)
+    }
+}
+
+impl<'r> Memory<&'r mut Request> {
+    /// The request's resource types, for an extension registering one.
+    pub fn resources(self) -> &'r mut Resources {
+        &mut self.0.resources
     }
 }

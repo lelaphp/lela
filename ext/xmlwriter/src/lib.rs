@@ -108,7 +108,10 @@ pub fn extension() -> Extension {
             version: None,
         }])
         .class::<XMLWriter>()
-        .info(|req| req.info_table(&[&["XMLWriter", "enabled"]]))
+        .info(|req| {
+            req.extensions_mut()
+                .info_table(&[&["XMLWriter", "enabled"]]);
+        })
         .build("xmlwriter")
 }
 
@@ -404,17 +407,22 @@ fn valid_file_path(req: &mut Request, source: &[u8]) -> Option<Vec<u8>> {
         }
         local = &source[skip..];
     }
-    let resolved = if let Some(path) = req.realpath(local) {
+    let resolved = if let Some(path) = req.environment_mut().realpath(local) {
         path.to_string_lossy().into_owned().into_bytes()
     } else {
         // `expand_filepath`.
-        let cwd = req.cwd().into_os_string().into_encoded_bytes();
-        req.virtual_file_ex(&cwd, local, Resolve::FilePath)?
+        let cwd = req
+            .environment()
+            .cwd()
+            .into_os_string()
+            .into_encoded_bytes();
+        req.environment_mut()
+            .virtual_file_ex(&cwd, local, Resolve::FilePath)?
     };
     // `zend_dirname` of the path as written, and `php_sys_stat` of it.
     if let Some(at) = local.iter().rposition(|b| *b == b'/') {
         let dir = if at == 0 { &b"/"[..] } else { &local[..at] };
-        if !req.absolutize(dir).exists() {
+        if !req.environment().absolutize(dir).exists() {
             return None;
         }
     }
@@ -478,7 +486,7 @@ pub(crate) fn new_writer(
 /// `xml_writer_create_static`: `object_init_with_constructor` of the
 /// class the call named, the emitter on it.
 pub(crate) fn create_static(req: &mut Request, writer: Emitter) -> Result<Owner<Static>, Thrown> {
-    let scope = req.called_scope();
+    let scope = req.frames().called_scope();
     let class = scope.map_or_else(|| writer_class(req), Ok)?;
     match instantiate(req, class, &[]) {
         Ok(object) => {

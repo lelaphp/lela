@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use php_ext::abi::OrFalse;
 use php_ext::call::write_prop;
 use php_ext::raising::{Level, Thrown, docref, throw, throw_chained, while_pending};
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::values::{PhpObject, PhpString};
 
 use crate::State;
@@ -60,7 +60,12 @@ fn global(req: &mut Request) -> &mut IntlError {
 
 /// `<native>(): <message>`, as `intl_error_set_custom_msg` prefixes it.
 fn prefixed(req: &Request, message: &[u8]) -> Vec<u8> {
-    [req.active_function_name().as_bytes(), b"(): ", message].concat()
+    [
+        req.frames().active_function_name().as_bytes(),
+        b"(): ",
+        message,
+    ]
+    .concat()
 }
 
 /// `intl_error_reset(NULL)`. A native whose php counterpart resets the
@@ -124,8 +129,8 @@ fn error_level(req: &mut Request) -> Option<Level> {
     if req.state::<State>().constructing {
         return None;
     }
-    req.ini_get(b"intl.error_level")?;
-    let bits = req.ini_long(b"intl.error_level");
+    req.ini().get(b"intl.error_level")?;
+    let bits = req.ini().long(b"intl.error_level");
     [
         Level::Error,
         Level::Warning,
@@ -152,8 +157,9 @@ pub(crate) fn use_exceptions(req: &mut Request) -> bool {
     if req.state::<State>().constructing {
         return true;
     }
-    req.ini_get(b"intl.use_exceptions")
-        .is_some_and(Request::ini_parse_bool)
+    req.ini()
+        .get(b"intl.use_exceptions")
+        .is_some_and(Ini::parse_bool)
 }
 
 /// A constructor's body, as php's `__construct`s wrap theirs: errors

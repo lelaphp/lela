@@ -89,7 +89,7 @@ impl Request {
         };
         self.ending = ending;
         match served {
-            Ok(evaluated) if !self.bailing_out() => evaluated,
+            Ok(evaluated) if !self.diagnostics().bailing_out() => evaluated,
             _ => {
                 self.catch_bailout();
                 self.exit_status = 0;
@@ -122,7 +122,7 @@ impl Request {
                 self.catch_bailout();
                 Evaluated::NotCompiled
             }
-            Ok(evaluated) if !self.bailing_out() && !self.unwind_exit() => evaluated,
+            Ok(evaluated) if !self.diagnostics().bailing_out() && !self.unwind_exit() => evaluated,
             _ => {
                 self.catch_bailout();
                 Evaluated::BailedOut
@@ -144,7 +144,7 @@ impl Request {
         let read;
         let source = match source {
             Some(source) => source,
-            None => match std::fs::read(self.cwd().join(OsStr::from_bytes(path))) {
+            None => match std::fs::read(self.environment().cwd().join(OsStr::from_bytes(path))) {
                 Ok(bytes) => {
                     read = bytes;
                     &read
@@ -155,7 +155,7 @@ impl Request {
         let ending = self.ending.take();
         let compiled = self.nothing_executing(|req| req.compile_context_over(path, source));
         self.ending = ending;
-        if self.bailing_out() {
+        if self.diagnostics().bailing_out() {
             self.catch_bailout();
             return Compiled::Refused;
         }
@@ -204,7 +204,9 @@ impl Request {
         let Some(unit) = self.compiled_eval(code, name) else {
             return Ok(Evaluated::NotCompiled);
         };
-        if !crate::engine::note_compiled(self, &unit, SourceKind::EVAL) || self.bailing_out() {
+        if !crate::engine::note_compiled(self, &unit, SourceKind::EVAL)
+            || self.diagnostics().bailing_out()
+        {
             return Ok(Evaluated::NotCompiled);
         }
         self.serve_eval(None, unit)?;
@@ -454,7 +456,7 @@ impl Request {
                 }
                 let rendered = req.ending.is_some();
                 req.ending = ending;
-                if !req.bailing_out() {
+                if !req.diagnostics().bailing_out() {
                     return called;
                 }
                 req.catch_bailout();
@@ -521,7 +523,7 @@ impl Request {
             self.raised = None;
             return;
         };
-        let class = self.class_name(throwable.class()).into_bytes();
+        let class = self.symbols().class_name(throwable.class()).into_bytes();
         let text = match crate::api::call::call_method_made(self, &throwable, b"__tostring", &[]) {
             Ok(returned) => {
                 let text = returned

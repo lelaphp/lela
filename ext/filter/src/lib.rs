@@ -167,7 +167,7 @@ fn sapi_filter(
     // value handed on where it has a byte, `ZVAL_EMPTY_STRING` where not.
     if let Some(array) = kept {
         let raw = string_init(req, value)?;
-        req.register_variable(array, name, raw)?;
+        req.variables_mut().register_variable(array, name, raw)?;
     }
     let raw = if value.is_empty() {
         string_value(req, value)?
@@ -175,7 +175,8 @@ fn sapi_filter(
         string_init(req, value)?
     };
     let default = req
-        .ini_get(b"filter.default")
+        .ini()
+        .get(b"filter.default")
         .and_then(|named| {
             FILTERS
                 .iter()
@@ -188,7 +189,8 @@ fn sapi_filter(
         // `OnUpdateFlags`: no value is `FILTER_FLAG_NO_ENCODE_QUOTES`, any
         // value its `atoi`, so the empty string is 0.
         let flags = req
-            .ini_value(b"filter.default_flags")
+            .ini()
+            .value(b"filter.default_flags")
             .map_or(FILTER_FLAG_NO_ENCODE_QUOTES, |value| i64::from(atoi(value)));
         let run = Run {
             flags,
@@ -513,13 +515,14 @@ fn update_default_filter(req: &mut Request, value: Option<&[u8]>) -> Result<bool
 /// filter.default_flags => no value => no value
 /// ```
 fn filter_info(req: &mut Request) {
-    req.info_table(&[&["Input Validation and Filtering", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["Input Validation and Filtering", "enabled"]]);
     let shown = |req: &Request, name: &[u8]| {
-        String::from_utf8_lossy(req.ini_get(name).unwrap_or_default()).into_owned()
+        String::from_utf8_lossy(req.ini().get(name).unwrap_or_default()).into_owned()
     };
     let default = shown(req, b"filter.default");
     let flags = shown(req, b"filter.default_flags");
-    req.info_ini_table(&[
+    req.ini_mut().info_ini_table(&[
         ["filter.default", &default, &default],
         ["filter.default_flags", &flags, &flags],
     ]);
@@ -611,7 +614,7 @@ fn throw_failed(req: &mut Request, message: &str) -> Thrown {
 /// Whether the class, or a class it extends, has `__toString`, php's
 /// `ce->__tostring`.
 fn has_to_string(req: &mut Request, class: ClassId) -> bool {
-    req.method_row(class, b"__tostring").is_some()
+    req.symbols().method_row(class, b"__tostring").is_some()
 }
 
 // ------------------------------------------------------------ dispatch
@@ -634,6 +637,7 @@ fn zval_filter(
         value.give_up(req);
         if flags & FILTER_THROW_ON_FAILURE != 0 {
             let class = req
+                .symbols()
                 .class_decl(object.class())
                 .map(|decl| c_string(&decl.name.0))
                 .unwrap_or_default();
@@ -1025,10 +1029,10 @@ fn storage(req: &mut Request, input: i64) -> Result<Option<Owner<PhpArray>>, Thr
         INPUT_GET => req.state::<State>().get.as_deref().copied(),
         INPUT_COOKIE => req.state::<State>().cookie.as_deref().copied(),
         INPUT_SERVER => {
-            let _ = req.superglobal(b"_SERVER");
+            let _ = req.variables_mut().superglobal(b"_SERVER");
             req.state::<State>().server.as_deref().copied()
         }
-        INPUT_ENV => req.superglobal(b"_ENV"),
+        INPUT_ENV => req.variables_mut().superglobal(b"_ENV"),
         _ => return Err(arg_value_error(req, 1, "be an INPUT_* constant")),
     };
     Ok(kept.map(|array| Owner::take(req, array)))

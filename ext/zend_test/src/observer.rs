@@ -39,7 +39,7 @@ use php_ext::call::{Function, lookup_function};
 use php_ext::coerce::type_name;
 use php_ext::decl::IniDecl;
 use php_ext::raising::Thrown;
-use php_ext::request::{ChainFrame, FrameView, Raised, Request};
+use php_ext::request::{ChainFrame, FrameView, Ini, Raised, Request};
 use php_ext::values::{ClassId, Value};
 use php_ext_standard::php_var_export_ex;
 
@@ -189,7 +189,7 @@ impl Switches {
 /// `ZT_G(observer_execute_internal)`, which the engine serves as an
 /// observer too.
 fn started_on(start: &Start, name: &[u8]) -> bool {
-    Request::ini_parse_bool(startup_value(start, name))
+    Ini::parse_bool(startup_value(start, name))
 }
 
 /// An entry's value in the startup ini, its default where the host set
@@ -218,7 +218,7 @@ fn startup_value<'a>(start: &'a Start, name: &[u8]) -> &'a [u8] {
 /// refuse the start.
 fn observed_opcodes(start: &Start) -> Opcodes {
     let mut opcodes = Opcodes::default();
-    if !Request::ini_parse_bool(startup_value(start, ENABLED)) {
+    if !Ini::parse_bool(startup_value(start, ENABLED)) {
         return opcodes;
     }
     let names = startup_value(start, SHOW_OPCODE_IN_USER_HANDLER);
@@ -244,7 +244,7 @@ fn show_opcode_in_user_handler(observed: &mut Observed<'_>, beneath: Beneath<'_,
     line.extend_from_slice(b"<!-- opcode: '");
     line.extend_from_slice(beneath.opcode().as_bytes());
     line.extend_from_slice(b"' in user handler -->\n");
-    observed.write(&line);
+    observed.response_mut().write(&line);
 }
 
 /// `observer_show_opcode`: under `show_opcode`, the opcode a user
@@ -261,7 +261,7 @@ fn show_opcode(observed: &mut Observed<'_>) {
     line.extend_from_slice(b"<!-- opcode: '");
     line.extend_from_slice(opcode.as_bytes());
     line.extend_from_slice(b"' -->\n");
-    observed.write(&line);
+    observed.response_mut().write(&line);
 }
 
 /// The observer's request state: `ZT_G(observer_nesting_depth)`, which
@@ -296,10 +296,10 @@ fn names_in(value: Option<&[u8]>) -> impl Iterator<Item = &[u8]> {
 fn on_update_function_names(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
     // Read from the entry and not from [`Switches`]: at the engine's
     // start the handler runs before the engine state is built.
-    if !req.ini_get(ENABLED).is_some_and(Request::ini_parse_bool) {
+    if !req.ini().get(ENABLED).is_some_and(Ini::parse_bool) {
         return Ok(false);
     }
-    if req.ini_stage() != IniStage::Runtime {
+    if req.ini().stage() != IniStage::Runtime {
         return Ok(true);
     }
     // `zend_hash_find_ptr(EG(function_table), funcname)`: the table's
@@ -310,13 +310,13 @@ fn on_update_function_names(req: &mut Request, value: Option<&[u8]>) -> Result<b
             .filter_map(|name| lookup_function(req, name))
             .collect()
     };
-    for function in named(req, req.ini_get(OBSERVE_FUNCTION_NAMES)) {
-        let _ = req.remove_begin_handler(function, begin);
-        let _ = req.remove_end_handler(function, end);
+    for function in named(req, req.ini().get(OBSERVE_FUNCTION_NAMES)) {
+        let _ = req.code_mut().remove_begin_handler(function, begin);
+        let _ = req.code_mut().remove_end_handler(function, end);
     }
     for function in named(req, value) {
-        req.add_begin_handler(function, begin);
-        req.add_end_handler(function, end);
+        req.code_mut().add_begin_handler(function, begin);
+        req.code_mut().add_end_handler(function, end);
     }
     Ok(true)
 }
@@ -342,7 +342,7 @@ fn show_declared(req: &mut Request, what: &str, name: &[u8]) {
     line.extend_from_slice(format!("<!-- declared {what} '").as_bytes());
     line.extend_from_slice(name);
     line.extend_from_slice(b"' -->\n");
-    req.write(&line);
+    req.response_mut().write(&line);
 }
 
 /// What an observed frame serves: a function, a method or a native,
@@ -392,8 +392,9 @@ impl Serves {
 
     fn function_of(req: &Request, function: Function, scope: Option<ClassId>) -> Serves {
         Serves::Function {
-            scope: scope.map(|class| req.class_name(class)),
+            scope: scope.map(|class| req.symbols().class_name(class)),
             name: req
+                .symbols()
                 .function_decl(function)
                 .map(|decl| decl.name.0.to_vec())
                 .unwrap_or_default(),
@@ -443,8 +444,9 @@ fn fcall_init(observed: &mut Observed<'_>) -> ObserverHandlers {
         begin: Some(begin),
         end: Some(end),
     };
-    let observed_by_name =
-        |name: &[u8]| names_in(observed.ini_get(OBSERVE_FUNCTION_NAMES)).any(|named| named == name);
+    let observed_by_name = |name: &[u8]| {
+        names_in(observed.ini().get(OBSERVE_FUNCTION_NAMES)).any(|named| named == name)
+    };
     match &serves {
         _ if switches.observe_all => both,
         Serves::Function { name, .. } if switches.observe_functions || observed_by_name(name) => {
@@ -479,7 +481,7 @@ fn internal_enter(observed: &mut Observed<'_>) {
     line.extend_from_slice(b"<!-- internal enter ");
     line.extend(Serves::function(scope.as_deref(), &name));
     line.extend_from_slice(b"() -->\n");
-    observed.write(&line);
+    observed.response_mut().write(&line);
 }
 
 /// `observer_show_init`: `<!-- init f() -->`, `<!-- init C::m() -->`
@@ -500,7 +502,7 @@ fn show_init(req: &mut Request, serves: &Serves) {
         }
     }
     line.extend_from_slice(b" -->\n");
-    req.write(&line);
+    req.response_mut().write(&line);
 }
 
 /// `observer_show_init_backtrace`: the frame observed and every frame
@@ -527,7 +529,7 @@ fn show_init_backtrace(observed: &mut Observed<'_>) {
     }
     out.extend(indent(depth));
     out.extend_from_slice(b"-->\n");
-    observed.write(&out);
+    observed.response_mut().write(&out);
 }
 
 /// `observer_begin`: the interrupt raised under
@@ -536,7 +538,7 @@ fn show_init_backtrace(observed: &mut Observed<'_>) {
 fn begin(observed: &mut Observed<'_>) {
     let switches = Switches::of(observed);
     if switches.set_vm_interrupt_on_begin {
-        observed.interrupt().raise();
+        observed.limits().interrupt().raise();
     }
     if !switches.show_output {
         return;
@@ -555,7 +557,7 @@ fn begin(observed: &mut Observed<'_>) {
         }
     }
     line.extend_from_slice(b">\n");
-    observed.write(&line);
+    observed.response_mut().write(&line);
     show_opcode(observed);
 }
 
@@ -569,9 +571,9 @@ fn end(observed: &mut Observed<'_>, returned: Option<&Value>) {
         return;
     }
     let depth = observed.state::<crate::State>().observer.depth;
-    if let Some(raised) = observed.raised() {
+    if let Some(raised) = observed.diagnostics().raised() {
         let class = match raised {
-            Raised::Throwable(throwable) => observed.class_name(throwable.class()),
+            Raised::Throwable(throwable) => observed.symbols().class_name(throwable.class()),
             Raised::UnwindExit => String::from("UnwindExit"),
             Raised::GracefulExit => String::from("GracefulExit"),
         };
@@ -579,7 +581,7 @@ fn end(observed: &mut Observed<'_>, returned: Option<&Value>) {
         line.extend_from_slice(b"<!-- Exception: ");
         line.extend_from_slice(class.as_bytes());
         line.extend_from_slice(b" -->\n");
-        observed.write(&line);
+        observed.response_mut().write(&line);
     }
     show_opcode(observed);
     let depth = depth.saturating_sub(1);
@@ -598,7 +600,7 @@ fn end(observed: &mut Observed<'_>, returned: Option<&Value>) {
         }
     }
     line.extend_from_slice(b">\n");
-    observed.write(&line);
+    observed.response_mut().write(&line);
 }
 
 /// `get_retval_info`: nothing unless `show_return_type` or
@@ -623,7 +625,7 @@ fn retval_info(
             if let Some(object) = value.as_object() {
                 let named = format!(
                     "object({})#{}",
-                    req.class_name(object.class()),
+                    req.symbols().class_name(object.class()),
                     object.index()
                 );
                 info.extend_from_slice(named.as_bytes());
@@ -650,7 +652,8 @@ fn address(fiber: ObservedFiber) -> String {
 fn fiber_init(req: &mut Request, fiber: ObservedFiber) {
     let switches = Switches::of(req);
     if switches.enabled && switches.fiber_init {
-        req.write(format!("<!-- alloc: {} -->\n", address(fiber)).as_bytes());
+        req.response_mut()
+            .write(format!("<!-- alloc: {} -->\n", address(fiber)).as_bytes());
     }
 }
 
@@ -659,7 +662,8 @@ fn fiber_init(req: &mut Request, fiber: ObservedFiber) {
 fn fiber_destroy(req: &mut Request, fiber: ObservedFiber) {
     let switches = Switches::of(req);
     if switches.enabled && switches.fiber_destroy {
-        req.write(format!("<!-- destroy: {} -->\n", address(fiber)).as_bytes());
+        req.response_mut()
+            .write(format!("<!-- destroy: {} -->\n", address(fiber)).as_bytes());
     }
 }
 
@@ -704,5 +708,5 @@ fn fiber_switch(req: &mut Request, from: ObservedFiber, to: ObservedFiber) {
             writeln!(out, "<{tag} '{}'>", address(fiber)).ok();
         }
     }
-    req.write(out.as_bytes());
+    req.response_mut().write(out.as_bytes());
 }

@@ -161,8 +161,9 @@ pub(crate) mod constants {
 /// ```
 pub(crate) fn info(req: &mut Request) {
     let engines: String = ALGOS.iter().flat_map(|a| [a.name, " "]).collect();
-    req.info_table(&[&["hash support", "enabled"], &["Hashing Engines", &engines]]);
-    req.info_table(&[
+    req.extensions_mut()
+        .info_table(&[&["hash support", "enabled"], &["Hashing Engines", &engines]]);
+    req.extensions_mut().info_table(&[
         &["MHASH support", "Enabled"],
         &["MHASH API Version", "Emulated Support"],
     ]);

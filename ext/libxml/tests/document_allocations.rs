@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 #[php_function]
 fn document_bytes(req: &mut Request) -> Result<bool, Thrown> {
-    let before = req.memory_usage(false);
+    let before = req.memory().usage(false);
     let mut node_claim = Emalloc::new(req, 24)?;
     assert_eq!(node_claim.bytes(), &[0; 24]);
     assert_eq!(node_claim.as_mut_ptr() as usize % 8, 0);
@@ -20,13 +20,13 @@ fn document_bytes(req: &mut Request) -> Result<bool, Thrown> {
     }
     let mut document_claim = Emalloc::new(req, 48)?;
     document_claim.bytes_mut()[..24].copy_from_slice(node_claim.bytes());
-    assert!(req.memory_usage(false) > before);
+    assert!(req.memory().usage(false) > before);
     let grown = document_claim.resize(req, 64)?;
     assert_eq!(&grown.bytes()[..24], node_claim.bytes());
     assert_eq!(&grown.bytes()[48..], &[0; 16]);
     grown.free(req);
     node_claim.free(req);
-    Ok(req.memory_usage(false) == before)
+    Ok(req.memory().usage(false) == before)
 }
 
 #[php_function]

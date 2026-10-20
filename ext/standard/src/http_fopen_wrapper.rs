@@ -73,7 +73,7 @@ pub(crate) fn ini() -> Vec<IniDecl> {
 /// `FG(from_address)` and `FG(user_agent)`: the entry's value, none where
 /// it has none (`NULL`), where one set empty is the empty string.
 pub(crate) fn file_ini(req: &Request, name: &[u8]) -> Option<Vec<u8>> {
-    req.ini_value(name).map(<[u8]>::to_vec)
+    req.ini().value(name).map(<[u8]>::to_vec)
 }
 
 /// `php_stream_http_wrapper`: `http`, a URL wrapper that opens streams
@@ -188,7 +188,8 @@ pub(crate) fn url_wrap_http(
     if let Some(headers) = chain.headers.take() {
         let value = Owner::take(req, Value::array(*headers));
         req.state::<State>().last_http_headers = Some(headers);
-        req.set_local_var(b"http_response_header", value);
+        req.frames_mut()
+            .set_local_var(b"http_response_header", value);
     }
     let thrown = match opened {
         Ok(stream) => match chain.thrown {
@@ -729,7 +730,7 @@ fn wrap_http_ex(
     let Some(parser) = chain.options.parser else {
         let text = format!(
             "{}(): Provided stream context has invalid value for the \"uri_parser_class\" option",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         return Err(throw_error(req, "ValueError", &text));
     };

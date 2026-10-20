@@ -211,7 +211,7 @@ pub(super) fn to_zval_bool(data: Node) -> Res<Value> {
 /// The enum case's class kind and backing, where `v` is a case.
 fn enum_backing(req: &Request, v: &Value) -> Option<EnumBacking> {
     let o = v.as_object()?;
-    let decl = req.class_decl(o.class())?;
+    let decl = req.symbols().class_decl(o.class())?;
     if decl.kind != ClassKind::Enum {
         return None;
     }
@@ -500,7 +500,7 @@ pub(super) fn to_xml_double(
         return Ok(ret);
     }
     let d = to_double(req, &data)?;
-    let s = float_format(d, req.precision(), Exponent::Upper);
+    let s = float_format(d, req.ini().precision(), Exponent::Upper);
     ret.set_content_len(s.as_bytes());
     if style == Use::Encoded {
         set_ns_and_type(req, ret, &e.e);

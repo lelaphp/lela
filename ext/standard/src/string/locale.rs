@@ -136,7 +136,7 @@ pub(super) struct Locale {
 /// One category's name, `C.UTF-8` for `LC_CTYPE` and `C` for the rest
 /// until `setlocale()` moves it.
 fn name(req: &Request, category: usize) -> Vec<u8> {
-    req.locale_name(category).map_or_else(
+    req.environment().locale_name(category).map_or_else(
         || {
             if category == 2 {
                 b"C.UTF-8".to_vec()
@@ -185,7 +185,12 @@ fn from_environment(req: &Request, category: usize) -> Vec<u8> {
         .map_or(&b"LC_ALL"[..], |(name, _)| name);
     [&b"LC_ALL"[..], variable, b"LANG"]
         .iter()
-        .find_map(|name| req.env(name).filter(|v| !v.is_empty()).map(<[u8]>::to_vec))
+        .find_map(|name| {
+            req.environment()
+                .env(name)
+                .filter(|v| !v.is_empty())
+                .map(<[u8]>::to_vec)
+        })
         .unwrap_or_else(|| b"C".to_vec())
 }
 
@@ -225,11 +230,12 @@ fn try_setlocale(req: &mut Request, category: i64, loc: &[u8]) -> Option<Vec<u8>
     }
     req.state::<crate::State>().string.locale.install(built);
     for (target, name) in targets.iter().zip(names) {
-        req.set_locale_name(*target, name);
+        req.environment_mut().set_locale_name(*target, name);
     }
     let retval = query(req, category);
     if category == 0 || category == 2 {
-        req.set_ctype_locale((retval != b"C").then(|| retval.clone()));
+        req.environment_mut()
+            .set_ctype_locale((retval != b"C").then(|| retval.clone()));
     }
     Some(retval)
 }

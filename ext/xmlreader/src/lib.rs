@@ -66,7 +66,10 @@ pub fn extension() -> Extension {
         .dependencies(vec![dependency("dom"), dependency("libxml")])
         .class::<XMLReader>()
         .class::<trampoline::XMLReader>()
-        .info(|req| req.info_table(&[&["XMLReader", "enabled"]]))
+        .info(|req| {
+            req.extensions_mut()
+                .info_table(&[&["XMLReader", "enabled"]]);
+        })
         .build("xmlreader")
 }
 
@@ -243,18 +246,19 @@ impl ObjectHandlers for Handlers {
     ) -> Result<Option<Function>, Thrown> {
         let found = Std.get_method(req, object, lowered)?;
         let native = found
-            .and_then(|f| req.function_decl(f))
+            .and_then(|f| req.symbols().function_decl(f))
             .is_some_and(|decl| decl.file.0.is_empty());
         if native && (lowered == b"open" || lowered == b"xml") {
             let class = reader_class(req)?;
-            return Ok(req.trampoline(class, lowered).or(found));
+            return Ok(req.symbols().trampoline(class, lowered).or(found));
         }
         Ok(found)
     }
 }
 
 fn class_name(req: &Request, class: ClassId) -> String {
-    req.class_decl(class)
+    req.symbols()
+        .class_decl(class)
         .map(|d| String::from_utf8_lossy(&d.name.0).into_owned())
         .unwrap_or_default()
 }
@@ -358,11 +362,16 @@ fn valid_file_path(req: &mut Request, source: &[u8]) -> Option<Vec<u8>> {
             return Some(source.to_vec());
         }
     }
-    if let Some(path) = req.realpath(local) {
+    if let Some(path) = req.environment_mut().realpath(local) {
         return Some(path.to_string_lossy().into_owned().into_bytes());
     }
-    let cwd = req.cwd().into_os_string().into_encoded_bytes();
-    req.virtual_file_ex(&cwd, local, Resolve::FilePath)
+    let cwd = req
+        .environment()
+        .cwd()
+        .into_os_string()
+        .into_encoded_bytes();
+    req.environment_mut()
+        .virtual_file_ex(&cwd, local, Resolve::FilePath)
 }
 
 /// Whether an object's own `open` or `XML` refuses as php's warning or a
@@ -458,7 +467,11 @@ pub(crate) fn from_string(
     valid_encoding(req, encoding)?;
     // The script's directory as the document's base, `xmlCanonicPath` of
     // the working directory with its slash.
-    let mut cwd = req.cwd().into_os_string().into_encoded_bytes();
+    let mut cwd = req
+        .environment()
+        .cwd()
+        .into_os_string()
+        .into_encoded_bytes();
     if cwd.last() != Some(&b'/') {
         cwd.push(b'/');
     }
@@ -482,7 +495,7 @@ fn flags_int(flags: i64) -> i32 {
 /// The class a static load of `XMLReader` makes: `open` and `XML` always
 /// `XMLReader`, the `from*` factories the class they were called on.
 fn called(req: &mut Request) -> Result<ClassId, Thrown> {
-    match req.called_scope() {
+    match req.frames().called_scope() {
         Some(class) => Ok(class),
         None => reader_class(req),
     }

@@ -10,7 +10,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
-    BufferHandler, HandlerCall, HandlerOp, HandlerStatus, OutputOp, Request, StartHandler,
+    BufferHandler, HandlerCall, HandlerOp, HandlerStatus, Ini, OutputOp, Request, StartHandler,
 };
 use php_ext::values::{Owner, PhpString, ValueRef};
 
@@ -142,6 +142,7 @@ fn encoding(req: &mut Request) -> Result<Coding, Thrown> {
         return Ok(globals(req).coding);
     }
     let found = req
+        .variables_mut()
         .superglobal(b"_SERVER")
         .and_then(|server| server.find(b"HTTP_ACCEPT_ENCODING"));
     if let Some(value) = found {
@@ -174,7 +175,7 @@ fn encoding(req: &mut Request) -> Result<Coding, Thrown> {
 /// string(2) "9x"
 /// ```
 fn level(req: &Request) -> i64 {
-    req.ini_long(LEVEL.as_bytes())
+    req.ini().long(LEVEL.as_bytes())
 }
 
 /// What `php_zlib_output_handler_ex` handed on: nothing, where it only
@@ -263,7 +264,8 @@ fn handler(req: &mut Request, call: &mut HandlerCall<'_>) -> Result<HandlerStatu
     let coding = encoding(req)?;
     if coding == Coding::None {
         if op.start && !(op.clean && op.finish) {
-            req.header_add(b"Vary: Accept-Encoding", false, 0);
+            req.response_mut()
+                .header_add(b"Vary: Accept-Encoding", false, 0);
         }
         return Ok(HandlerStatus::Failure);
     }
@@ -275,16 +277,17 @@ fn handler(req: &mut Request, call: &mut HandlerCall<'_>) -> Result<HandlerStatu
         return Ok(HandlerStatus::Failure);
     };
     if (!op.clean || !op.finish) && op.start {
-        if req.headers_sent().is_some() || globals(req).compression == 0 {
+        if req.response().headers_sent().is_some() || globals(req).compression == 0 {
             let mut ctx = std::mem::take(&mut globals(req).handler);
             ctx.end(req);
             globals(req).handler = ctx;
             return Ok(HandlerStatus::Failure);
         }
         if let Some(header) = coding.header() {
-            req.header_add(header, true, 0);
+            req.response_mut().header_add(header, true, 0);
         }
-        req.header_add(b"Vary: Accept-Encoding", false, 0);
+        req.response_mut()
+            .header_add(b"Vary: Accept-Encoding", false, 0);
         call.immutable = true;
     }
     call.out = handed.unwrap_or_default();
@@ -329,17 +332,21 @@ fn compression_start(req: &mut Request) -> Result<(), Thrown> {
         return Ok(());
     }
     let chunk_size = globals(req).compression;
-    let begun = req.output_buffer_op(&OutputOp::Start {
+    let begun = req.response_mut().buffer_op(&OutputOp::Start {
         handler: StartHandler::Registered(COMPRESSION_HANDLER),
         chunk_size,
         flags: STDFLAGS,
     })?;
-    let user = req.ini_get(HANDLER.as_bytes()).unwrap_or_default().to_vec();
+    let user = req
+        .ini()
+        .get(HANDLER.as_bytes())
+        .unwrap_or_default()
+        .to_vec();
     let started = matches!(begun.as_ref(), ValueRef::Bool(true));
     begun.give_up(req);
     if started && !user.is_empty() {
         let mut name = None;
-        let handler = if let Some(registered) = req.buffer_handler(&user) {
+        let handler = if let Some(registered) = req.response().buffer_handler(&user) {
             StartHandler::Registered(registered)
         } else {
             let made = PhpString::new(req, &user)?;
@@ -355,7 +362,7 @@ fn compression_start(req: &mut Request) -> Result<(), Thrown> {
                 }
             }
         };
-        let done = req.output_buffer_op(&OutputOp::Start {
+        let done = req.response_mut().buffer_op(&OutputOp::Start {
             handler,
             chunk_size,
             flags: STDFLAGS,
@@ -371,8 +378,8 @@ fn compression_start(req: &mut Request) -> Result<(), Thrown> {
 /// `PHP_RINIT_FUNCTION(zlib)`: no coding yet, the chunk size the ini
 /// holds, and the handler started where it asks for one.
 pub(crate) fn rinit(req: &mut Request) -> Result<(), Thrown> {
-    let value = req.ini_get(COMPRESSION.as_bytes()).unwrap_or(b"0");
-    let compression = parse(value, Request::ini_parse_bytes);
+    let value = req.ini().get(COMPRESSION.as_bytes()).unwrap_or(b"0");
+    let compression = parse(value, Ini::parse_bytes);
     let globals = globals(req);
     globals.coding = Coding::None;
     globals.compression = compression;
@@ -401,9 +408,10 @@ pub(crate) fn rinit(req: &mut Request) -> Result<(), Thrown> {
 pub(crate) fn on_compression(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
     let value = value.unwrap_or_default();
     let compression = parse(value, |value| {
-        req.ini_parse_quantity_warn(COMPRESSION.as_bytes(), value)
+        req.ini_mut()
+            .parse_quantity_warn(COMPRESSION.as_bytes(), value)
     });
-    let handler = req.ini_get(b"output_handler").unwrap_or_default();
+    let handler = req.ini().get(b"output_handler").unwrap_or_default();
     if !handler.is_empty() && compression != 0 {
         docref(
             req,
@@ -412,10 +420,10 @@ pub(crate) fn on_compression(req: &mut Request, value: Option<&[u8]>) -> Result<
         );
         return Ok(false);
     }
-    if matches!(req.ini_stage(), IniStage::Startup | IniStage::Deactivate) {
+    if matches!(req.ini().stage(), IniStage::Startup | IniStage::Deactivate) {
         return Ok(true);
     }
-    if req.headers_sent().is_some() {
+    if req.response().headers_sent().is_some() {
         docref(
             req,
             Level::Warning,
@@ -424,7 +432,11 @@ pub(crate) fn on_compression(req: &mut Request, value: Option<&[u8]>) -> Result<
         return Ok(false);
     }
     globals(req).compression = compression;
-    if compression != 0 && !req.buffer_handler_started(HANDLER_NAME.as_bytes()) {
+    if compression != 0
+        && !req
+            .response()
+            .buffer_handler_started(HANDLER_NAME.as_bytes())
+    {
         compression_start(req)?;
     }
     Ok(true)
@@ -434,8 +446,8 @@ pub(crate) fn on_compression(req: &mut Request, value: Option<&[u8]>) -> Result<
 /// went out; the request's end hands it back its value past them.
 #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
 pub(crate) fn on_handler(req: &mut Request, _value: Option<&[u8]>) -> Result<bool, Thrown> {
-    if matches!(req.ini_stage(), IniStage::Activate | IniStage::Runtime)
-        && req.headers_sent().is_some()
+    if matches!(req.ini().stage(), IniStage::Activate | IniStage::Runtime)
+        && req.response().headers_sent().is_some()
     {
         docref(
             req,
@@ -479,9 +491,10 @@ pub(crate) fn ob_gzhandler(
     };
     if op.start {
         if let Some(header) = coding.header() {
-            req.header_add(header, true, 0);
+            req.response_mut().header_add(header, true, 0);
         }
-        req.header_add(b"Vary: Accept-Encoding", false, 0);
+        req.response_mut()
+            .header_add(b"Vary: Accept-Encoding", false, 0);
     }
     let level = level(req);
     let mut ctx = globals(req).legacy.take().unwrap_or_default();
@@ -516,15 +529,10 @@ pub(crate) fn zlib_get_coding_type(req: &mut Request) -> Result<OrFalse<Owner<Ph
 /// `DISPLAY_INI_ENTRIES()` for the three, `zlib.output_compression`
 /// through `php_ini_boolean_displayer_cb`, `On` or `Off`.
 pub(crate) fn info_ini(req: &mut Request) {
-    let entries = req.ini_entries();
+    let entries = req.ini().entries();
     let shown = |name: &str, value: &[u8]| -> String {
         if name == COMPRESSION {
-            return if Request::ini_parse_bool(value) {
-                "On"
-            } else {
-                "Off"
-            }
-            .into();
+            return if Ini::parse_bool(value) { "On" } else { "Off" }.into();
         }
         String::from_utf8_lossy(value).into_owned()
     };
@@ -543,5 +551,5 @@ pub(crate) fn info_ini(req: &mut Request) {
         .iter()
         .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
         .collect();
-    req.info_ini_table(&cells);
+    req.ini_mut().info_ini_table(&cells);
 }

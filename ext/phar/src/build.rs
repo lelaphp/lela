@@ -113,7 +113,7 @@ pub(crate) fn add_file(
         }
     }
     let mode = stream.and_then(|s| s.stat(req)).map(|sb| sb[2]);
-    let umask = req.umask();
+    let umask = req.environment().umask();
     if let Some(e) = slot.and_then(|slot| {
         archives(req)
             .get_mut(id)
@@ -497,7 +497,7 @@ pub(crate) fn set_stub(
         ));
     }
     no_stub_in_data(req, id)?;
-    let count = req.argument_count();
+    let count = req.frames().argument_count();
     let length = match length {
         Passed::Given(raw) => Some(raw.value()),
         Passed::Omitted => None,
@@ -506,7 +506,7 @@ pub(crate) fn set_stub(
     let stream = Stream::from_value(req, &stub.deref());
     let resource = matches!(stub.deref().as_ref(), ValueRef::Resource(_));
     if resource && (1..=2).contains(&count) && as_long.is_none_or(|l| l.is_some()) {
-        let name = req.active_function_name();
+        let name = req.frames().active_function_name();
         deprecated(
             req,
             &format!("Calling {name}(resource $stub, int $length) is deprecated"),
@@ -574,7 +574,7 @@ pub(crate) fn unlink_archive(req: &mut Request, name: &[u8]) -> Result<(), Throw
             ));
         }
     };
-    if let Some(file) = req.current_file().map(<[u8]>::to_vec)
+    if let Some(file) = req.frames().current_file().map(<[u8]>::to_vec)
         && file.len() >= 7
         && file[..7].eq_ignore_ascii_case(b"phar://")
         && let Ok(split) = path::split_fname(req, &file, path::Exec::Either, path::Create::No)?
@@ -723,7 +723,8 @@ fn walk(
 
 /// A class's name, as the messages print it.
 fn class_name(req: &mut Request, object: PhpObject) -> String {
-    req.class_decl(object.class())
+    req.symbols()
+        .class_decl(object.class())
         .map(|decl| lossy(&decl.name.0).into_owned())
         .unwrap_or_default()
 }
@@ -874,7 +875,11 @@ fn build_one(req: &mut Request, b: &mut Build, it: php_ext::call::Iter) -> Resul
         }
         key = rest.to_vec();
     }
-    if req.check_open_basedir(&fname, true).is_err() {
+    if req
+        .environment_mut()
+        .check_open_basedir(&fname, true)
+        .is_err()
+    {
         return bad(
             req,
             "UnexpectedValueException",
@@ -951,7 +956,7 @@ fn add_built(
     };
     b.buffer.extend_from_slice(&bytes);
     let mode = source.stat(req).map(|sb| sb[2]);
-    let umask = req.umask();
+    let umask = req.environment().umask();
     let mut replaced = None;
     if let Target::Slot(slot) = data.target
         && let Some(e) = archives(req)

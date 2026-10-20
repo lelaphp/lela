@@ -34,7 +34,7 @@ impl Tier for Probe {
         asked.sites.push((site, frame));
         let resume = asked.resume.take();
         if let Some(seconds) = asked.elapsed.take() {
-            req.interrupt().elapsed(seconds);
+            req.limits().interrupt().elapsed(seconds);
         }
         match resume {
             Some(at) => Flow::Resume(at),

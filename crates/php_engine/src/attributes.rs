@@ -128,7 +128,7 @@ fn attribute_suffix(
 fn callee_named(req: &Request, function: Function, method: &str, function_word: &str) -> String {
     let name = req.declared_name(function);
     match req.method_class(function) {
-        Some(class) => format!("{method} {}::{name}()", req.class_name(class)),
+        Some(class) => format!("{method} {}::{name}()", req.symbols().class_name(class)),
         None => format!("{function_word} {name}()"),
     }
 }
@@ -218,6 +218,7 @@ fn callee_named(req: &Request, function: Function, method: &str, function_word: 
 #[cold] // a flagged callee alone; out of the call path's frames (#3022)
 pub(crate) fn deprecated_function(req: &mut Request, function: Function) -> Result<(), Thrown> {
     let attributes = req
+        .symbols()
         .function_decl(function)
         .map(|decl| decl.attributes.clone())
         .unwrap_or_default();
@@ -265,6 +266,7 @@ pub(crate) fn deprecated_function(req: &mut Request, function: Function) -> Resu
 #[cold] // a flagged callee alone; out of the call path's frames (#3022)
 pub(crate) fn no_discard_function(req: &mut Request, function: Function) -> Result<(), Thrown> {
     let attributes = req
+        .symbols()
         .function_decl(function)
         .map(|decl| decl.attributes.clone())
         .unwrap_or_default();
@@ -343,7 +345,7 @@ pub(crate) fn deprecated_class_constant(
     };
     let message = format!(
         "{what} {}::{} is deprecated{suffix}",
-        req.class_name(declaring),
+        req.symbols().class_name(declaring),
         String::from_utf8_lossy(name)
     );
     raise(req, level, &message);

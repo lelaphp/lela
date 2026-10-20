@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use php_ext::coerce::atoi;
-use php_ext::request::{MAXPATHLEN, Request, StreamCtx};
+use php_ext::request::{Ini, MAXPATHLEN, Request, StreamCtx};
 use php_ext::values::{Owner, PhpObject, Value, ValueRef};
 use php_ext_standard::md5::Md5;
 use php_ext_standard::php_get_current_user;
@@ -1229,12 +1229,13 @@ fn temp_name(attempt: u32) -> String {
 /// `soap.wsdl_cache_enabled` is on, else none.
 pub(crate) fn default_cache_wsdl(req: &Request) -> i64 {
     let enabled = req
-        .ini_get(ini::CACHE_ENABLED)
-        .is_some_and(Request::ini_parse_bool);
+        .ini()
+        .get(ini::CACHE_ENABLED)
+        .is_some_and(Ini::parse_bool);
     if !enabled {
         return 0;
     }
-    let mode = req.ini_get(ini::CACHE).map_or(0, atoi);
+    let mode = req.ini().get(ini::CACHE).map_or(0, atoi);
     i64::from(i8::from_le_bytes([mode.to_le_bytes()[0]]))
 }
 
@@ -1281,7 +1282,7 @@ pub(crate) fn get_sdl(
     if uri.contains(&b':') || uri.first() == Some(&b'/') {
         uri_len = uri.len();
     } else {
-        match req.realpath(&uri) {
+        match req.environment_mut().realpath(&uri) {
             None => cache_wsdl = 0,
             Some(path) => {
                 uri = path.as_os_str().as_encoded_bytes().to_vec();
@@ -1290,7 +1291,7 @@ pub(crate) fn get_sdl(
         }
     }
     let key_uri = uri[..uri_len].to_vec();
-    let ttl = req.ini_long(ini::CACHE_TTL);
+    let ttl = req.ini().long(ini::CACHE_TTL);
 
     if cache_wsdl & WSDL_CACHE_MEMORY != 0
         && let Some((sdl, time)) = req.state::<State>().mem_cache.get_str(&key_uri)
@@ -1302,15 +1303,15 @@ pub(crate) fn get_sdl(
 
     let mut key = None;
     if cache_wsdl & WSDL_CACHE_DISK != 0 && uri_len < MAXPATHLEN {
-        let dir = req.ini_get(ini::CACHE_DIR).unwrap_or_default().to_vec();
+        let dir = req.ini().get(ini::CACHE_DIR).unwrap_or_default().to_vec();
         let name = cache_key(req, &dir, &key_uri);
-        let path = req.absolutize(&name);
+        let path = req.environment().absolutize(&name);
         if let Some((sdl, cached)) = get_sdl_from_cache(&path, &key_uri, now().saturating_sub(ttl))
         {
             t = cached;
             return Ok(cache_in_memory(req, cache_wsdl, &key_uri, t, sdl));
         }
-        key = Some((req.absolutize(&dir), path));
+        key = Some((req.environment().absolutize(&dir), path));
     }
 
     let sdl = fetch(req, this, &uri, uri_len)?;
@@ -1468,7 +1469,7 @@ fn cache_in_memory(req: &mut Request, cache_wsdl: i64, uri: &[u8], t: i64, sdl: 
     if cache_wsdl & WSDL_CACHE_MEMORY == 0 {
         return sdl;
     }
-    let limit = req.ini_long(ini::CACHE_LIMIT);
+    let limit = req.ini().long(ini::CACHE_LIMIT);
     let cache = &mut req.state::<State>().mem_cache;
     let full = i64::try_from(cache.len()).unwrap_or(i64::MAX);
     if limit > 0 && limit <= full {

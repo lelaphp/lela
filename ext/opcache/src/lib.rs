@@ -9,7 +9,7 @@
 //! Zend extension of the same name, and 8.5 builds it in always. The
 //! cache it fronts is the engine's (design §6.3): no shared memory
 //! segment, no persist and no file cache live here, and the eight
-//! natives answer from [`Request::unit_cache`]. What this crate keeps is
+//! natives answer from [`Code::unit_cache`]. What this crate keeps is
 //! php's configuration of it: the ini entries and their handlers, the
 //! startup verdict `accel_startup_ok` with the reason it failed, the
 //! request's `accelerator_enabled`, and the blacklist. The compiled tier
@@ -184,7 +184,7 @@ pub(crate) fn verdict(req: &Request) -> Startup {
 
 /// `accel_sapi_is_cli`: the command line, or phpdbg.
 pub(crate) fn cli(req: &Request) -> bool {
-    matches!(req.sapi_name(), "cli" | "phpdbg")
+    matches!(req.environment().sapi_name(), "cli" | "phpdbg")
 }
 
 /// What the unit cache does with the file at the full path `path`, as
@@ -330,6 +330,7 @@ fn api_allowed(req: &mut Request) -> bool {
     let restrict = value(req, "opcache.restrict_api").to_vec();
     if restrict.is_empty()
         || req
+            .environment()
             .script_name()
             .is_some_and(|script| script.starts_with(&restrict))
     {
@@ -432,7 +433,7 @@ fn opcache_reset(req: &mut Request) -> bool {
     if !flag(req, "opcache.enable") || startup != Startup::Ok {
         return false;
     }
-    let scheduled = req.unit_cache().reset() == Restart::Scheduled;
+    let scheduled = req.code_mut().unit_cache().reset() == Restart::Scheduled;
     if scheduled {
         accel_log(req, Log::Debug, "Restart Scheduled! Reason: user");
     }
@@ -558,7 +559,7 @@ fn opcache_get_status(
     if startup != Startup::Ok {
         return Ok(OrFalse::False);
     }
-    let status = req.unit_cache().status();
+    let status = req.code_mut().unit_cache().status();
     let mut out = PhpArray::new(req)?;
     put(req, &mut out, "opcache_enabled", Owner::bool(enabled))?;
     let file_cache = value(req, "opcache.file_cache").to_vec();
@@ -822,7 +823,7 @@ fn opcache_compile_file(req: &mut Request, filename: PhpString) -> Result<bool, 
         return Ok(false);
     }
     let written = filename.as_bytes().to_vec();
-    req.unit_cache().compile(&written)
+    req.code_mut().unit_cache().compile(&written)
 }
 
 /// `opcache_invalidate(string $filename, bool $force = false): bool`:
@@ -885,7 +886,7 @@ fn opcache_invalidate(
         Invalidation::Stale
     };
     let written = filename.as_bytes().to_vec();
-    req.unit_cache().invalidate(&written, how)
+    req.code_mut().unit_cache().invalidate(&written, how)
 }
 
 /// `opcache_jit_blacklist(Closure $closure): void`: keeps the compiled tier from
@@ -1102,7 +1103,7 @@ fn opcache_is_script_cached(req: &mut Request, filename: PhpString) -> Result<bo
         return Ok(false);
     }
     let written = filename.as_bytes().to_vec();
-    req.unit_cache().holds(&written, None)
+    req.code_mut().unit_cache().holds(&written, None)
 }
 
 /// `opcache_is_script_cached_in_file_cache(string $filename): bool`:
@@ -1164,7 +1165,9 @@ fn opcache_is_script_cached_in_file_cache(
         return Ok(false);
     };
     let written = filename.as_bytes().to_vec();
-    req.unit_cache().holds(&written, Some(&file_cache))
+    req.code_mut()
+        .unit_cache()
+        .holds(&written, Some(&file_cache))
 }
 
 /// `zend_accel_info`, opcache's `MINFO`: what runs and what does not,
@@ -1290,7 +1293,7 @@ fn info_rows(req: &mut Request) -> Result<(), Thrown> {
         ));
     }
     if started && !file_cache_only {
-        let status = req.unit_cache().status();
+        let status = req.code_mut().unit_cache().status();
         let consumption = consumption(req);
         let used = i64::try_from(status.used).unwrap_or(i64::MAX);
         let buffer = long(req, "opcache.interned_strings_buffer").saturating_mul(1 << 20);
@@ -1336,7 +1339,7 @@ fn info_rows(req: &mut Request) -> Result<(), Thrown> {
         .map(|(name, shown)| [name.as_str(), shown.as_str()])
         .collect();
     let table: Vec<&[&str]> = table.iter().map(<[&str; 2]>::as_slice).collect();
-    req.info_table(&table);
+    req.extensions_mut().info_table(&table);
     Ok(())
 }
 
@@ -1344,10 +1347,11 @@ fn info_rows(req: &mut Request) -> Result<(), Thrown> {
 /// `Directive => Local Value => Master Value`, the master being the
 /// value the engine started with.
 fn display_ini_entries(req: &mut Request) {
-    let Some(me) = req.extension_named(PRODUCT.as_bytes()) else {
+    let Some(me) = req.extensions().named(PRODUCT.as_bytes()) else {
         return;
     };
     let rows: Vec<[String; 3]> = req
+        .ini()
         .extension_ini(me)
         .into_iter()
         .filter_map(|held| {
@@ -1362,5 +1366,5 @@ fn display_ini_entries(req: &mut Request) {
         .iter()
         .map(|[n, l, m]| [n.as_str(), l.as_str(), m.as_str()])
         .collect();
-    req.info_ini_table(&rows);
+    req.ini_mut().info_ini_table(&rows);
 }

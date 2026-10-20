@@ -428,7 +428,7 @@ fn parse_static<P: UriParser>(
     base: Option<PhpObject>,
     errors: Option<&Ref<Untyped<Value>>>,
 ) -> Result<Option<Owner<Static>>, Thrown> {
-    let class = match req.called_scope() {
+    let class = match req.frames().called_scope() {
         Some(class) => class,
         None => match lookup_class(req, P::CLASS.as_bytes())? {
             Some(class) => class,
@@ -870,7 +870,7 @@ pub fn extension() -> Extension {
 /// uriparser bundled version => 1.0.2
 /// ```
 fn uri_info(req: &mut Request) {
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["URI support", "active"],
         &["uriparser bundled version", "1.0.2"],
     ]);

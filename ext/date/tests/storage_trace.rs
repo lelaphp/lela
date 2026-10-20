@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use php_ext::abi::{ExtensionBuilder, IniStage};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
-use php_ext::request::{Allocation, AllocationObserverId, ObserveAllocations, Request};
+use php_ext::request::{Allocation, AllocationObserverId, Ini, ObserveAllocations, Request};
 use php_ext::test::{Capture, Engine, LeakSensor};
 
 const SWITCH: &[u8] = b"zend_test.zend_mm_custom_handlers.enabled";
@@ -32,14 +32,19 @@ impl ObserveAllocations for Recorder {
 
 #[expect(clippy::unnecessary_wraps, reason = "the ini handler's throwing shape")]
 fn toggle(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
-    if req.ini_stage() == IniStage::Startup {
+    if req.ini().stage() == IniStage::Startup {
         return Ok(true);
     }
-    if value.is_some_and(Request::ini_parse_bool) {
-        let observer = req.observe_allocations(Box::new(Recorder::default()));
+    if value.is_some_and(Ini::parse_bool) {
+        let observer = req
+            .memory_mut()
+            .observe_allocations(Box::new(Recorder::default()));
         req.state::<Trace>().active = Some(observer);
     } else if let Some(observer) = req.state::<Trace>().active.take() {
-        let back: Option<Box<dyn Any>> = req.unobserve_allocations(observer).map(|o| o as _);
+        let back: Option<Box<dyn Any>> = req
+            .memory_mut()
+            .unobserve_allocations(observer)
+            .map(|o| o as _);
         let recorder = back.and_then(|any| any.downcast::<Recorder>().ok());
         assert!(recorder.is_some());
         if let Some(recorder) = recorder {
@@ -79,7 +84,7 @@ fn finish(req: &mut Request) {
             }
         }
     }
-    req.write(receipt.as_bytes());
+    req.response_mut().write(receipt.as_bytes());
 }
 
 /// The receipt of `source` served under the recorder, each line one

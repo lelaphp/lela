@@ -91,7 +91,10 @@ fn extract_file(
             Err(_) => return Ok(false),
         },
     };
-    let Some(cleaned) = req.virtual_file_ex(b"", file, Resolve::Expand) else {
+    let Some(cleaned) = req
+        .environment_mut()
+        .virtual_file_ex(b"", file, Resolve::Expand)
+    else {
         return Ok(false);
     };
     let Some(path) = make_relative(&cleaned).map(<[u8]>::to_vec) else {

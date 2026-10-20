@@ -769,7 +769,10 @@ impl IteratorIterator {
             && let Some(name) = class.hold(req)?
         {
             match autoload(req, name.as_bytes())? {
-                Some(to) if req.instance_of(cast, to) && crate::is_a(req, to, b"Traversable") => {
+                Some(to)
+                    if req.symbols().instance_of(cast, to)
+                        && crate::is_a(req, to, b"Traversable") =>
+                {
                     cast = to;
                 }
                 _ => {

@@ -6,7 +6,7 @@
 //! up again, through [`super::signature::this_function`].
 //!
 //! `ReflectionGenerator` and `ReflectionFiber` read the execution the
-//! object they keep stands at ([`Request::execution`]), one view for
+//! object they keep stands at ([`Frames::execution`]), one view for
 //! both.
 
 use php_ext::abi::{Callable, Instance, NamedVariadic, OrFalse, Raw, Static, This, Union};
@@ -71,6 +71,7 @@ fn this_method(
     }
     let name = this_name(req, this, "ReflectionMethod")?;
     let Some(class) = req
+        .frames()
         .this()
         .and_then(|this| this.prop(req, b"class"))
         .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
@@ -111,8 +112,8 @@ pub(super) fn is_internal(decl: &FunctionDecl) -> bool {
 /// One method of a linked class by its name, `zend_hash_find_ptr` over
 /// the function table.
 fn method_decl(req: &mut Request, class: ClassId, name: &[u8]) -> Option<MethodDecl> {
-    let row = req.method_row(class, name)?;
-    req.row_method(row).cloned()
+    let row = req.symbols().method_row(class, name)?;
+    req.symbols().row_method(row).cloned()
 }
 
 /// Whether the declared return type is the tentative one a native
@@ -140,16 +141,17 @@ fn function_extension_name(req: &mut Request, this: PhpObject) -> Result<Option<
         // A closure's `__invoke` is made with a null `module`.
         FunctionRef::Closure(_) | FunctionRef::Invoke(_) => Ok(None),
         FunctionRef::Method(class, name) => Ok(req
+            .symbols()
             .method_row(class, &name)
-            .and_then(|row| req.row_function(row))
-            .and_then(|found| req.function_extension(found))
-            .and_then(|e| req.extension_name(e))
+            .and_then(|row| req.symbols().row_function(row))
+            .and_then(|found| req.extensions().function_extension(found))
+            .and_then(|e| req.extensions().name(e))
             .map(str::to_owned)),
         FunctionRef::Global(name) => {
             let found = super::lookup_function(req, &name);
             Ok(found
-                .and_then(|found| req.function_extension(found))
-                .and_then(|e| req.extension_name(e))
+                .and_then(|found| req.extensions().function_extension(found))
+                .and_then(|e| req.extensions().name(e))
                 .map(str::to_owned))
         }
     }
@@ -184,7 +186,7 @@ fn prototype_of(
     name: &[u8],
 ) -> Result<Option<ClassId>, Thrown> {
     match kept_method(req, this) {
-        Some(HeldMethod::Row(held)) => return Ok(req.row_prototype(held)),
+        Some(HeldMethod::Row(held)) => return Ok(req.symbols().row_prototype(held)),
         // The trampoline php makes for a closure's `__invoke` has none.
         Some(HeldMethod::Invoke(_)) => return Ok(None),
         None => {}
@@ -196,14 +198,15 @@ fn prototype_of(
         (None, None) => return Ok(None),
     };
     Ok(req
+        .symbols()
         .method_row(class, name)
-        .and_then(|row| req.row_prototype(row)))
+        .and_then(|row| req.symbols().row_prototype(row)))
 }
 
 /// `ZEND_PARSE_PARAMETERS_START(n, -1)`'s count check: php's
 /// `ArgumentCountError`, `expects at least N argument(s), M given`.
 fn at_least_arguments(req: &mut Request, least: usize) -> Result<(), Thrown> {
-    let count = req.argument_count();
+    let count = req.frames().argument_count();
     if count >= least {
         return Ok(());
     }
@@ -602,7 +605,7 @@ impl ReflectionFunctionAbstract {
         if let FunctionRef::Closure(closure) = &function {
             let is_static = closure
                 .closure(req)
-                .is_some_and(|info| req.closure_refuses_receiver(info));
+                .is_some_and(|info| req.symbols().closure_refuses_receiver(info));
             return Ok(is_static);
         }
         let FunctionRef::Method(class, name) = &function else {
@@ -831,7 +834,7 @@ impl ReflectionFunctionAbstract {
         let Some(name) = function_extension_name(req, this.object())? else {
             return Ok(None);
         };
-        if req.extension_named(name.as_bytes()).is_none() {
+        if req.extensions().named(name.as_bytes()).is_none() {
             return Ok(None);
         }
         let class = class_named(req, b"ReflectionExtension")?;
@@ -1456,6 +1459,7 @@ impl ReflectionFunction {
             ));
         };
         let declared = req
+            .symbols()
             .function_decl(function)
             .map(|decl| decl.name.0.to_vec())
             .unwrap_or_default();
@@ -1651,7 +1655,8 @@ fn fake_closure(
 /// The object a `ReflectionGenerator` or a `ReflectionFiber` keeps,
 /// `intern->obj`, and its execution where it stands.
 fn kept_execution(req: &mut Request, this: PhpObject) -> Result<(PhpObject, Execution), Thrown> {
-    let execution = kept_object(req, this).and_then(|kept| Some((kept, req.execution(kept)?)));
+    let execution =
+        kept_object(req, this).and_then(|kept| Some((kept, req.frames_mut().execution(kept)?)));
     execution.ok_or_else(|| {
         throw_error(
             req,
@@ -1695,7 +1700,7 @@ fn standing_fiber(req: &mut Request, this: PhpObject) -> Result<(PhpObject, Exec
 /// `zend_fetch_debug_backtrace` over the execution of `kept`, which
 /// stands, alone.
 fn trace_of(req: &mut Request, kept: PhpObject, options: i64) -> Result<Owner<PhpArray>, Thrown> {
-    match req.execution_trace(kept, options)? {
+    match req.frames_mut().execution_trace(kept, options)? {
         Some(trace) => Ok(trace),
         None => Err(fatal(
             req,
@@ -1884,6 +1889,7 @@ impl ReflectionGenerator {
             return Err(fatal(req, "InternalError: a generator with no function"));
         };
         let name = req
+            .symbols()
             .function_decl(function)
             .map(|decl| decl.name.0.to_vec())
             .unwrap_or_default();
@@ -1896,7 +1902,7 @@ impl ReflectionGenerator {
                 object
             }
             (None, Some(scope)) => {
-                let held = req.method_row(scope, &name).map(HeldMethod::Row);
+                let held = req.symbols().method_row(scope, &name).map(HeldMethod::Row);
                 crate::class::method_factory(req, &name, scope, scope, held)?
             }
             (None, None) => {
@@ -2088,7 +2094,7 @@ impl ReflectionMethod {
         objectOrMethod: Raw<Union<PhpObject, PhpString>>,
         #[php(default = null)] method: Raw<Option<PhpString>>,
     ) -> Result<(), Thrown> {
-        let count = req.argument_count();
+        let count = req.frames().argument_count();
         if count == 0 {
             return Err(arg_count_error(req, "at least 1 argument, 0 given"));
         }
@@ -2134,7 +2140,7 @@ impl ReflectionMethod {
             Union::A(object) => Some(object).filter(|o| o.closure(req).is_some()),
             Union::B(_) => None,
         };
-        let found = match (closure, req.method_row(class, &method_name)) {
+        let found = match (closure, req.symbols().method_row(class, &method_name)) {
             (_, Some(held)) => super::LinkedMethod::of_row(req, held),
             (Some(closure), None) => method_or_invoke(req, class, &method_name, Some(closure)),
             (None, None) => None,
@@ -2203,7 +2209,7 @@ impl ReflectionMethod {
         };
         let class = class_named(req, &given[..at])?;
         let name = given[at + 2..].to_vec();
-        let held = req.method_row(class, &name).map(HeldMethod::Row);
+        let held = req.symbols().method_row(class, &name).map(HeldMethod::Row);
         let Some(found) = held.and_then(|held| super::LinkedMethod::of_held(req, held)) else {
             let named = class_name_of(req, class);
             return Err(throw(
@@ -2219,7 +2225,7 @@ impl ReflectionMethod {
         // `object_init_ex(return_value, execute_data->This.value.ce)`: an
         // object of the class the static call named, so a subclass of
         // `ReflectionMethod` gets its own class back.
-        let reflector = match req.called_scope() {
+        let reflector = match req.frames().called_scope() {
             Some(called) => called,
             None => class_named(req, b"ReflectionMethod")?,
         };

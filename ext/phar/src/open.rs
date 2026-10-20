@@ -8,7 +8,7 @@
 
 use php_ext::abi::{Beneath, Compiled, chain};
 use php_ext::raising::Thrown;
-use php_ext::request::{OwnedStream as _, Request, Streams as _};
+use php_ext::request::{Ini, OwnedStream as _, Request, Streams as _};
 use php_ext::values::{Owner, Value};
 
 use crate::archive::{
@@ -34,23 +34,23 @@ type Verified = Result<(u32, Option<Vec<u8>>), String>;
 
 /// `PHAR_G(readonly)`, the `phar.readonly` entry as it stands.
 pub(crate) fn readonly(req: &Request) -> bool {
-    req.ini_get(b"phar.readonly")
-        .is_none_or(Request::ini_parse_bool)
+    req.ini().get(b"phar.readonly").is_none_or(Ini::parse_bool)
 }
 
 /// `PHAR_G(require_hash)`.
 pub(crate) fn require_hash(req: &Request) -> bool {
-    req.ini_get(b"phar.require_hash")
-        .is_none_or(Request::ini_parse_bool)
+    req.ini()
+        .get(b"phar.require_hash")
+        .is_none_or(Ini::parse_bool)
 }
 
 /// `PHAR_G(has_zlib)` and `has_bz2`: whether the extension is loaded.
 pub(crate) fn has_zlib(req: &Request) -> bool {
-    req.extension_named(b"zlib").is_some()
+    req.extensions().named(b"zlib").is_some()
 }
 
 pub(crate) fn has_bz2(req: &Request) -> bool {
-    req.extension_named(b"bz2").is_some()
+    req.extensions().named(b"bz2").is_some()
 }
 
 /// `phar_open_parsed_phar`: an archive already in the name table, under
@@ -98,7 +98,11 @@ pub(crate) fn open_from_filename(
         Err(Some(error)) => return Ok(Err(Some(error))),
         Err(None) => {}
     }
-    if req.check_open_basedir(fname, true).is_err() {
+    if req
+        .environment_mut()
+        .check_open_basedir(fname, true)
+        .is_err()
+    {
         return Ok(Err(None));
     }
     let Some((actual, bytes)) = open_file(req, fname)? else {
@@ -525,7 +529,11 @@ pub(crate) fn create_or_parse(
     is_data: bool,
     report: bool,
 ) -> Result<Opened, Thrown> {
-    if req.check_open_basedir(fname, true).is_err() {
+    if req
+        .environment_mut()
+        .check_open_basedir(fname, true)
+        .is_err()
+    {
         return Ok(Err(None));
     }
     if let Some((actual, bytes)) = open_file(req, fname)? {
@@ -675,7 +683,7 @@ pub(crate) fn open_executed(
     req: &mut Request,
     alias: Option<&[u8]>,
 ) -> Result<Result<(), Failed>, Thrown> {
-    let Some(fname) = req.current_file().map(<[u8]>::to_vec) else {
+    let Some(fname) = req.frames().current_file().map(<[u8]>::to_vec) else {
         return Ok(Err(Some(
             "cannot initialize a phar outside of PHP execution".into(),
         )));
@@ -691,7 +699,11 @@ pub(crate) fn open_executed(
             )));
         }
     }
-    if req.check_open_basedir(&fname, true).is_err() {
+    if req
+        .environment_mut()
+        .check_open_basedir(&fname, true)
+        .is_err()
+    {
         return Ok(Err(None));
     }
     let Some(bytes) = archive::read_file(req, &fname, true)? else {

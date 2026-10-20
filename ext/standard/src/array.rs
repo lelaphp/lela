@@ -651,7 +651,7 @@ fn compared(req: &mut Request, flags: i64, a: &Value, b: &Value) -> Result<Order
 fn enum_case(req: &Request, value: &Value) -> Option<u32> {
     let value = value.deref();
     let object = value.as_object()?;
-    let decl = req.class_decl(object.class())?;
+    let decl = req.symbols().class_decl(object.class())?;
     matches!(decl.kind, php_ext::decl::ClassKind::Enum).then(|| object.index())
 }
 

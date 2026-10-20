@@ -366,7 +366,7 @@ fn from_format<C: Class>(
 /// The class a factory called on a class makes: the called one, else
 /// `fallback`.
 fn called_or(req: &mut Request, fallback: &str) -> Result<ClassId, Thrown> {
-    match req.called_scope() {
+    match req.frames().called_scope() {
         Some(class) => Ok(class),
         None => class_id(req, fallback),
     }

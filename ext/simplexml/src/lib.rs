@@ -116,7 +116,7 @@ fn dependency(name: &str, kind: DependencyKind) -> Dependency {
 /// Schema support => enabled
 /// ```
 fn simplexml_info(req: &mut Request) {
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["SimpleXML support", "enabled"],
         &["Schema support", "enabled"],
     ]);
@@ -181,7 +181,7 @@ fn element_class(req: &mut Request) -> Result<ClassId, Thrown> {
 
 /// Whether `class` is `base` or extends it.
 fn derives(req: &mut Request, class: ClassId, base: ClassId) -> bool {
-    req.lineage(class).any(|at| at == base)
+    req.symbols().lineage(class).any(|at| at == base)
 }
 
 /// `php_libxml_increment_doc_ref(sxe, docp)` and the root element taken.

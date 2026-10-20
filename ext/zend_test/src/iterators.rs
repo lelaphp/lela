@@ -117,33 +117,33 @@ struct Steps(i64);
 
 impl ClassIterator for Steps {
     fn rewind(&mut self, req: &mut Request, _: PhpObject) -> Result<(), Thrown> {
-        req.write(b"TraversableTest::rewind\n");
+        req.response_mut().write(b"TraversableTest::rewind\n");
         self.0 = 0;
         Ok(())
     }
 
     fn valid(&mut self, req: &mut Request, _: PhpObject) -> Result<bool, Thrown> {
-        req.write(b"TraversableTest::valid\n");
+        req.response_mut().write(b"TraversableTest::valid\n");
         Ok(self.0 < 4)
     }
 
     fn current(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
-        req.write(b"TraversableTest::current\n");
+        req.response_mut().write(b"TraversableTest::current\n");
         Ok(Owner::int(self.0))
     }
 
     fn key(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
-        req.write(b"TraversableTest::key\n");
+        req.response_mut().write(b"TraversableTest::key\n");
         Ok(Owner::int(self.0))
     }
 
     fn move_forward(&mut self, req: &mut Request, _: PhpObject) -> Result<(), Thrown> {
-        req.write(b"TraversableTest::next\n");
+        req.response_mut().write(b"TraversableTest::next\n");
         self.0 += 1;
         Ok(())
     }
 
     fn release(&mut self, req: &mut Request, _: PhpObject) {
-        req.write(b"TraversableTest::drop\n");
+        req.response_mut().write(b"TraversableTest::drop\n");
     }
 }

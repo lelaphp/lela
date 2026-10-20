@@ -13,7 +13,7 @@ use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_function;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::values::{Owner, PhpArray, PhpString};
 use php_sapi::EngineBuilder;
 
@@ -112,11 +112,11 @@ impl Row {
 /// </table>
 /// ```
 fn info(req: &mut Request) {
-    let entries = req.ini_entries();
+    let entries = req.ini().entries();
     let shown = |row: &Row, value: Option<&[u8]>| -> String {
         let value = value.unwrap_or_default();
         match row.boolean {
-            true if Request::ini_parse_bool(value) => String::from("On"),
+            true if Ini::parse_bool(value) => String::from("On"),
             true => String::from("Off"),
             false => String::from_utf8_lossy(value).into_owned(),
         }
@@ -138,7 +138,7 @@ fn info(req: &mut Request) {
         .iter()
         .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
         .collect();
-    req.info_ini_table(&cells);
+    req.ini_mut().info_ini_table(&cells);
 }
 
 /// `builder` with what php-cgi declares itself: `cgi_module_entry` as its
@@ -230,11 +230,11 @@ fn apache_child_terminate(req: &mut Request) {
 /// ```
 #[php_function(aliases(getallheaders))]
 fn apache_request_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
-    req.request_headers()
+    req.variables_mut().request_headers()
 }
 
 /// `apache_response_headers(): array` (`Z/sapi/cgi/cgi_main.c:1689`):
-/// the header list as name and value ([`Request::response_headers`]),
+/// the header list as name and value ([`Response::response_headers`]),
 /// and the head php-cgi writes carries each line as given.
 ///
 /// ```php
@@ -262,12 +262,12 @@ fn apache_request_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> 
 /// ```
 #[php_function]
 fn apache_response_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
-    req.response_headers()
+    req.response_mut().response_headers()
 }
 
 /// `dl(string $extension_filename): bool`, `ext/standard`'s, which php-cgi
 /// started from a shell names in its `additional_functions`
-/// ([`Request::dl`]); under a server php-cgi declares none, so the fence,
+/// ([`Extensions::dl`]); under a server php-cgi declares none, so the fence,
 /// which a server serves, finds no `dl()`. The shell's is
 /// `tests/shell.rs`'s `dl_is_declared_from_a_shell`.
 ///
@@ -286,5 +286,5 @@ fn apache_response_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown>
 /// ```
 #[php_function]
 fn dl(req: &mut Request, extension_filename: PhpString) -> bool {
-    req.dl(extension_filename.as_bytes())
+    req.extensions_mut().dl(extension_filename.as_bytes())
 }

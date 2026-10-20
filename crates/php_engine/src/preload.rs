@@ -208,7 +208,7 @@ impl Engine {
         // `zend_compile_file(ZEND_REQUIRE)`: the script opened as a
         // `require` opens it, so it is filed under the path it resolves
         // to, as every include of it after finds it.
-        let compiled = match req.resolve_path(script) {
+        let compiled = match req.code_mut().resolve_path(script) {
             Ok(resolved) => {
                 req.note_primary_file(&resolved);
                 req.cached_file(&resolved, None, crate::api::request::HandlePath::Opened)
@@ -290,15 +290,15 @@ mod tests {
     static SEEN: Mutex<Vec<(String, ThreadId, bool, bool)>> = Mutex::new(Vec::new());
 
     fn seen(req: &crate::api::request::Request, what: &str) {
-        let script = String::from_utf8_lossy(req.ini_get(b"t.preload").unwrap_or_default());
+        let script = String::from_utf8_lossy(req.ini().get(b"t.preload").unwrap_or_default());
         let mut seen = SEEN
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         seen.push((
             format!("{what} {script}"),
             std::thread::current().id(),
-            req.preloading(),
-            req.preloading_in_child(),
+            req.code().preloading(),
+            req.code().preloading_in_child(),
         ));
     }
 
@@ -326,7 +326,7 @@ mod tests {
                 beneath.serve(req);
             })
             .post_startup(|req, _| {
-                let script = req.ini_get(b"t.preload").unwrap_or_default().to_vec();
+                let script = req.ini().get(b"t.preload").unwrap_or_default().to_vec();
                 let joined = format!("joined {}", String::from_utf8_lossy(&script));
                 PostStartup::Preload {
                     script,
@@ -334,8 +334,8 @@ mod tests {
                         PreloadThread::new(
                             |req| {
                                 seen(req, "take");
-                                req.write_stderr(b"taken\n");
-                                req.ini_get(b"t.take") == Some(&b"1"[..])
+                                req.response_mut().write_stderr(b"taken\n");
+                                req.ini().get(b"t.take") == Some(&b"1"[..])
                             },
                             |_| -2,
                         )

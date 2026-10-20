@@ -65,7 +65,7 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
             // `zend_double_to_str`: the text, then the warning php raises
             // when the value it converted was NAN.
             let text =
-                req.string(double_to_string(f, req.precision(), Exponent::Upper).as_bytes())?;
+                req.string(double_to_string(f, req.ini().precision(), Exponent::Upper).as_bytes())?;
             text.mark_valid_utf8();
             if f.is_nan() {
                 warning(req, "unexpected NAN value was coerced to string");
@@ -150,7 +150,7 @@ pub(crate) fn object_to_string(
         }
         returned.give_up(req);
     }
-    let name = req.class_name(class);
+    let name = req.symbols().class_name(class);
     Err(throw_error(
         req,
         "Error",
@@ -481,7 +481,7 @@ pub(crate) fn match_unhandled_error(req: &mut Request, subject: &Value) -> Throw
 pub(crate) fn type_name(req: &Request, value: &Value) -> String {
     let value = value.deref();
     match value.as_ref() {
-        ValueRef::Object(o) => req.class_decl(o.class()).map_or_else(
+        ValueRef::Object(o) => req.symbols().class_decl(o.class()).map_or_else(
             || String::from("object"),
             |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
         ),
@@ -550,7 +550,7 @@ pub(crate) fn is_true(req: &mut Request, value: &Value) -> Result<bool, Thrown> 
 /// throwable. A throwable a handler raised stays pending, php's
 /// `EG(exception)`, and the asker goes on as php's does.
 fn left_by_fatal(req: &Request) -> Result<(), Thrown> {
-    if req.bailing_out() {
+    if req.diagnostics().bailing_out() {
         return Err(Thrown::of(None));
     }
     Ok(())
@@ -599,7 +599,7 @@ fn object_is_true(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> 
             Ok(truth)
         }
         Ok(None) => {
-            let class = req.class_name(object.class());
+            let class = req.symbols().class_name(object.class());
             let message = format!("Object of class {class} could not be converted to bool");
             if req.note_error(Level::RecoverableError, &message) {
                 req.bail_out();
@@ -1524,8 +1524,8 @@ pub(crate) fn typed_ref_holds(
             if let Some(made) = crate::api::coerce::scalar_type_hint(req, &held, ty.mask(), strict)?
             {
                 req.release(made);
-                let class = req.class_name(first_at);
-                let two = req.class_name(declaring);
+                let class = req.symbols().class_name(first_at);
+                let two = req.symbols().class_name(declaring);
                 let one_declared = php_unit::type_to_string(&first_ty);
                 let two_declared = php_unit::type_to_string(ty);
                 let given = type_name(req, &held.undef_as_null());
@@ -1573,7 +1573,7 @@ pub(crate) fn incdec_prop_error(
     name: &[u8],
     (increment, holder): (bool, Holder),
 ) -> (Thrown, Value) {
-    let class = req.class_name(declaring);
+    let class = req.symbols().class_name(declaring);
     let declared = php_unit::type_to_string(ty);
     let (word, edge, limit) = if increment {
         ("increment", "maximal", i64::MAX)
@@ -1633,7 +1633,7 @@ fn ref_type_error(
     declaring: crate::api::values::ClassId,
     name: &[u8],
 ) -> Thrown {
-    let class = req.class_name(declaring);
+    let class = req.symbols().class_name(declaring);
     let declared = php_unit::type_to_string(ty);
     let given = value_name(req, &value.undef_as_null());
     throw_error(
@@ -1663,8 +1663,8 @@ fn conflicting_coercion(
     let Some((two_at, two_name, two_ty)) = listed.get(second) else {
         return throw_error(req, "TypeError", "Cannot assign to reference");
     };
-    let one_class = req.class_name(*one_at);
-    let two_class = req.class_name(*two_at);
+    let one_class = req.symbols().class_name(*one_at);
+    let two_class = req.symbols().class_name(*two_at);
     let one_declared = php_unit::type_to_string(one_ty);
     let two_declared = php_unit::type_to_string(two_ty);
     let given = value_name(req, &value.undef_as_null());
@@ -1730,10 +1730,10 @@ pub(crate) fn verify_class_constant_type(
     if let Some(coerced) = coerced {
         return Ok(coerced);
     }
-    let class = req.class_name(declaring);
+    let class = req.symbols().class_name(declaring);
     let declared = php_unit::type_to_string(ty);
     let given = match held.as_object() {
-        Some(object) => req.class_name(object.class()),
+        Some(object) => req.symbols().class_name(object.class()),
         None => held.type_name().to_string(),
     };
     Err(throw_error(
@@ -1763,7 +1763,7 @@ fn property_type_error(
         }
         return Thrown::of(Some(standing));
     }
-    let class = req.class_name(declaring);
+    let class = req.symbols().class_name(declaring);
     let declared = php_unit::type_to_string(ty);
     let given = value_name(req, &value.undef_as_null());
     throw_error(
@@ -3104,7 +3104,7 @@ pub(crate) fn compare(req: &mut Request, left: &Value, right: &Value) -> Result<
 #[inline(never)]
 fn compare_values(req: &mut Request, left: &Value, right: &Value) -> Result<Ordering, Thrown> {
     if let (Some(a), Some(b)) = (scalar(left), scalar(right)) {
-        return Ok(php_heap::compare(a, b, req.precision()));
+        return Ok(php_heap::compare(a, b, req.ini().precision()));
     }
     Ok(match (left.as_ref(), right.as_ref()) {
         (ValueRef::Object(a), ValueRef::Object(b)) if a == b => Ordering::Equal,
@@ -3153,7 +3153,7 @@ fn compare_values(req: &mut Request, left: &Value, right: &Value) -> Result<Orde
             .unwrap_or(Ordering::Greater),
         (ValueRef::Array(_), _) => Ordering::Greater,
         (_, ValueRef::Array(_)) => Ordering::Less,
-        (a, b) => php_heap::compare(silent_number(a), silent_number(b), req.precision()),
+        (a, b) => php_heap::compare(silent_number(a), silent_number(b), req.ini().precision()),
     })
 }
 
@@ -4184,8 +4184,8 @@ pub(crate) fn count(req: &mut Request, value: &Value, sizeof: bool) -> Result<i6
         }
         let class = object.class();
         if let Some(countable) = req.class_named(Bare::resolved(b"Countable"))
-            && req.instance_of(class, countable)
-            && let Some(method) = req.method_named(class, b"count")
+            && req.symbols().instance_of(class, countable)
+            && let Some(method) = req.symbols().method_named(class, b"count")
         {
             // `GC_ADDREF(zobj)` before the call and `OBJ_RELEASE` after
             // (GH-21605): a method that frees the variable holding the
@@ -5029,7 +5029,7 @@ fn php_type(value: &Value) -> ZvalType {
 /// ```
 pub(crate) fn value_name(req: &Request, value: &Value) -> String {
     match value.as_ref() {
-        ValueRef::Object(o) => req.class_decl(o.class()).map_or_else(
+        ValueRef::Object(o) => req.symbols().class_decl(o.class()).map_or_else(
             || String::from("object"),
             |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
         ),
@@ -5053,7 +5053,7 @@ pub(crate) fn value_name(req: &Request, value: &Value) -> String {
 /// ```
 pub(crate) fn zval_type_name(req: &Request, value: &Value) -> String {
     match value.as_ref() {
-        ValueRef::Object(o) => req.class_name(o.class()),
+        ValueRef::Object(o) => req.symbols().class_name(o.class()),
         _ => String::from(value.type_name()),
     }
 }
@@ -5728,7 +5728,7 @@ mod tests {
     #[test]
     fn two_arrays_are_identical_by_count_then_by_each_key_and_value_in_order() {
         let mut req = crate::test::request();
-        let start = req.memory_usage(false);
+        let start = req.memory().usage(false);
         let list = || vec![(Key::Int(0), Value::int(1)), (Key::Int(1), Value::int(2))];
         let (a, b) = (array(&mut req, list()), array(&mut req, list()));
         assert_eq!(identical(&mut req, &a, &b), Ok(true));
@@ -5757,6 +5757,6 @@ mod tests {
         for value in [a, b, one, swapped, floated, nested.0, nested.1] {
             req.release(value);
         }
-        assert_eq!(req.memory_usage(false), start, "every array went back");
+        assert_eq!(req.memory().usage(false), start, "every array went back");
     }
 }

@@ -140,7 +140,7 @@ pub struct Deferred {
 /// How a function C calls back reaches its request, which is
 /// `zend_ffi_callback_trampoline`'s `EG()` made sound (#1638, #1640):
 /// while the request waits in a call into C or blocks in an engine
-/// native ([`crate::api::request::Request::blocking`]) it is lent here,
+/// native ([`crate::api::request::Limits::blocking`]) it is lent here,
 /// as an address one callback at a time takes and gives back; at any
 /// other time a callback's call is deferred to the request's interrupt
 /// check, which serves it as it dispatches pcntl's signals. A call C

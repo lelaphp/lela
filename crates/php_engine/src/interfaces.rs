@@ -155,7 +155,7 @@ impl Countable {
 /// its properties.
 pub(crate) fn is_traversable(req: &Request, class: ClassId) -> bool {
     req.class_named(Bare::resolved(b"traversable"))
-        .is_some_and(|traversable| req.instance_of(class, traversable))
+        .is_some_and(|traversable| req.symbols().instance_of(class, traversable))
         || req.handlers_of(class).own_iterator()
 }
 
@@ -694,7 +694,7 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
     }
     if req
         .class_named(Bare::resolved(b"iterator"))
-        .is_some_and(|iterator| req.instance_of(object.class(), iterator))
+        .is_some_and(|iterator| req.symbols().instance_of(object.class(), iterator))
     {
         if iterator_methods_native(req, object) {
             let table = req.object_handlers(object.heap());
@@ -722,6 +722,7 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
     // that method is `zend_create_internal_iterator_zval` over the
     // object, so its answer names the iterator the class walks with.
     let native = req
+        .symbols()
         .method_named(object.class(), b"getiterator")
         .is_some_and(|function| req.user_function(function).is_none());
     if native
@@ -753,7 +754,7 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
         }
         _ => {
             answered.give_up(req);
-            let name = req.class_name(object.class());
+            let name = req.symbols().class_name(object.class());
             Err(throw(
                 req,
                 "Exception",
@@ -783,7 +784,8 @@ fn iterator_methods_native(req: &Request, object: PhpObject) -> bool {
     [b"rewind".as_slice(), b"valid", b"key", b"current", b"next"]
         .iter()
         .all(|name| {
-            req.method_named(object.class(), name)
+            req.symbols()
+                .method_named(object.class(), name)
                 .is_some_and(|function| req.is_native_function(function))
         })
 }

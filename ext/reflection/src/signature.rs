@@ -233,15 +233,15 @@ fn function_decl_of(req: &mut Request, function: &FunctionRef) -> Option<Functio
         }
         FunctionRef::Global(name) => {
             let found = lookup_function(req, name)?;
-            req.function_decl(found).cloned()
+            req.symbols().function_decl(found).cloned()
         }
         FunctionRef::Method(class, name) => {
             if let Some((property, kind)) = super::member::hook_name(name) {
                 return php_ext::call::property_hook(req, *class, property, kind)
                     .map(|(_, decl)| decl.function);
             }
-            let row = req.method_row(*class, name)?;
-            req.row_method(row).map(|m| m.function.clone())
+            let row = req.symbols().method_row(*class, name)?;
+            req.symbols().row_method(row).map(|m| m.function.clone())
         }
     }
 }
@@ -303,7 +303,7 @@ fn has_iterable(ty: &Type) -> bool {
 /// named; none for an object that is no closure.
 pub(super) fn closure_decl(req: &mut Request, object: PhpObject) -> Option<FunctionDecl> {
     let function = object.closure(req)?.function;
-    req.function_decl(function).cloned()
+    req.symbols().function_decl(function).cloned()
 }
 
 /// One `ReflectionParameter` over `offset` of `function`, php's
@@ -568,6 +568,7 @@ fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Th
                 ));
             };
             let declared = req
+                .symbols()
                 .function_decl(found)
                 .map(|decl| decl.name.0.to_vec())
                 .unwrap_or_default();
@@ -718,7 +719,7 @@ pub(super) fn this_function(
     // factory found, read as php reads it: no lookup by name again.
     match super::kept_method(req, this) {
         Some(super::HeldMethod::Row(row)) => {
-            if let Some(method) = req.row_method(row) {
+            if let Some(method) = req.symbols().row_method(row) {
                 let decl = method.function.clone();
                 return Ok((FunctionRef::Method(row.scope(), decl.name.0.to_vec()), decl));
             }

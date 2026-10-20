@@ -14,6 +14,7 @@ use crate::api::values::{PhpObject, Value};
 use crate::exec::{self, TableId, Vm};
 use crate::tier::Stepped;
 
+use super::Frames;
 use super::Request;
 
 /// The links of one stack, innermost first: the records `records`
@@ -447,7 +448,7 @@ impl Request {
         }
         let mut other = std::mem::take(self.fibers.set_aside_above(stack)?);
         self.switch_stack(&mut other);
-        let served = self.with_fiber_switch_blocked(f);
+        let served = self.code_mut().with_fiber_switch_blocked(f);
         self.switch_stack(&mut other);
         if let Some(slot) = self.fibers.set_aside_execution() {
             *slot = other;
@@ -487,7 +488,7 @@ impl Request {
         }
         self.switch_stack(&mut execution);
         self.fibers.set_aside_for(coroutine, execution, below);
-        let served = self.with_fiber_switch_blocked(f);
+        let served = self.code_mut().with_fiber_switch_blocked(f);
         if let Some((coroutine, mut execution, below)) = self.fibers.take_back() {
             self.switch_stack(&mut execution);
             let held = std::iter::once(crate::fiber::HeldStack {
@@ -773,7 +774,7 @@ impl Request {
     /// the includer's CV when the loop goes on there. The includer is the
     /// frame below for an include; for code evaluated in a frame further
     /// down, as a debugger evaluates in a paused frame
-    /// ([`Request::eval_in_frame`]), it is that frame, and the frames
+    /// ([`Frames::eval_in_frame`]), it is that frame, and the frames
     /// above it are not attached. A function frame is popped alone, as
     /// `zend_leave_helper`'s other arms pop one.
     pub(crate) fn leave_frame(&mut self, frame: FrameRef) {
@@ -1406,6 +1407,7 @@ impl Request {
             return named.at();
         }
         let name = self
+            .symbols()
             .function_decl(function)
             .map(|decl| decl.name.0.to_vec())
             .unwrap_or_default();
@@ -2148,7 +2150,9 @@ impl Request {
             self.release(value);
         }
     }
+}
 
+impl Frames<&Request> {
     /// `EG(current_execute_data)`: whether a frame or a native's call
     /// stands, or the bottom frame of a coroutine's stack, a
     /// `Fiber`'s or an extension's, which is every release inside a
@@ -2178,10 +2182,10 @@ impl Request {
     /// #1 {main}
     ///   thrown in %s on line 6
     /// ```
-    pub fn executing(&self) -> bool {
-        self.fibers.on_context_stack()
-            || (0..self.vm.depth()).any(|at| {
-                self.frame_on(&self.vm, at).is_some_and(|frame| {
+    pub fn executing(self) -> bool {
+        self.0.fibers.on_context_stack()
+            || (0..self.0.vm.depth()).any(|at| {
+                self.0.frame_on(&self.0.vm, at).is_some_and(|frame| {
                     let info = frame.info();
                     !info.leaving() && !info.building()
                 })

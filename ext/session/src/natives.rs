@@ -493,7 +493,7 @@ fn session_cache_expire(
     #[php(default = null)] value: Option<i64>,
 ) -> Result<OrFalse<i64>, Thrown> {
     let expires = value;
-    let current = req.ini_long(b"session.cache_expire");
+    let current = req.ini().long(b"session.cache_expire");
     if expires.is_some() && req.state::<State>().status == Status::Active {
         started_error(
             req,
@@ -862,7 +862,7 @@ fn session_get_cookie_params(req: &mut Request) -> Result<Owner<PhpArray>, Throw
     ];
     for (key, entry, kind) in rows {
         let value = match kind {
-            0 => Owner::int(req.ini_long(entry)),
+            0 => Owner::int(req.ini().long(entry)),
             1 => {
                 let text = ini(req, entry);
                 string_value(req, &text)?
@@ -1244,7 +1244,9 @@ fn session_status(req: &mut Request) -> i64 {
 #[php_function]
 fn session_register_shutdown(req: &mut Request) -> Result<(), Thrown> {
     let callable = named(req, b"session_write_close")?;
-    req.register_shutdown_function(Owner::take(req, callable), Vec::new())
+    let callable = Owner::take(req, callable);
+    req.code_mut()
+        .register_shutdown_function(callable, Vec::new())
 }
 
 /// The callable a native's name is: the name the bundle declared,
@@ -1290,7 +1292,7 @@ fn user_ini(req: &mut Request) -> Result<(), Thrown> {
 /// Whether the object's class declares or inherits `method`, and whether
 /// it is an instance of the interface named.
 fn class_has(req: &mut Request, object: php_ext::values::PhpObject, method: &[u8]) -> bool {
-    req.method_row(object.class(), method).is_some()
+    req.symbols().method_row(object.class(), method).is_some()
 }
 
 fn implements(
@@ -1387,7 +1389,7 @@ fn session_set_save_handler(
     #[php(default = null)] validate_sid: Raw<Option<Callable>>,
     #[php(default = null)] update_timestamp: Raw<Option<Callable>>,
 ) -> Result<bool, Thrown> {
-    let count = req.argument_count();
+    let count = req.frames().argument_count();
     if count <= 2 {
         arity(req, 1, Some(2))?;
         let first = open.value();
@@ -1410,7 +1412,10 @@ fn session_set_save_handler(
         if !handler_changeable(req) {
             return Ok(false);
         }
-        let class_name = req.class_decl(object.class()).map(|d| d.name.0.to_vec());
+        let class_name = req
+            .symbols()
+            .class_decl(object.class())
+            .map(|d| d.name.0.to_vec());
         req.state::<State>().class_name = class_name;
         for (slot, name) in [
             (Slot::Open, b"open".as_slice()),
@@ -1450,9 +1455,11 @@ fn session_set_save_handler(
         if register {
             let callable = named(req, b"session_register_shutdown")?;
             let callable = Owner::take(req, callable);
-            req.set_shutdown_function(b"session_shutdown", Some((callable, Vec::new())))?;
+            req.code_mut()
+                .set_shutdown_function(b"session_shutdown", Some((callable, Vec::new())))?;
         } else {
-            req.set_shutdown_function(b"session_shutdown", None)?;
+            req.code_mut()
+                .set_shutdown_function(b"session_shutdown", None)?;
         }
         let state = req.state::<State>();
         if state.status != Status::Active && state.module != Some(Module::User) {
@@ -1500,7 +1507,8 @@ fn session_set_save_handler(
         return Ok(false);
     }
     req.state::<State>().class_name = None;
-    req.set_shutdown_function(b"session_shutdown", None)?;
+    req.code_mut()
+        .set_shutdown_function(b"session_shutdown", None)?;
     if req.state::<State>().module != Some(Module::User) {
         user_ini(req)?;
     }

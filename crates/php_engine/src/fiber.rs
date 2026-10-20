@@ -427,7 +427,7 @@ struct GcFiber {
 
 impl Fibers {
     /// `zend_fiber_switch_block()`, as
-    /// [`Request::with_fiber_switch_blocked`] takes it.
+    /// [`Code::with_fiber_switch_blocked`] takes it.
     pub(crate) fn block_switch(&mut self) {
         self.switch_blocking = self.switch_blocking.saturating_add(1);
     }
@@ -1448,7 +1448,7 @@ impl FiberError {
     /// ```
     #[php(arity = manual)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
-        let name = req.class_name(this.object().class());
+        let name = req.symbols().class_name(this.object().class());
         Err(throw_error(
             req,
             "Error",
@@ -1468,8 +1468,10 @@ fn stack_size(req: &Request) -> usize {
     if let Some(size) = req.fibers().stack_size {
         return size;
     }
-    match req.ini_value(b"fiber.stack_size") {
-        Some(value) => usize::try_from(Request::ini_parse_bytes(value)).unwrap_or(DEFAULT_STACK),
+    match req.ini().value(b"fiber.stack_size") {
+        Some(value) => {
+            usize::try_from(crate::api::request::Ini::parse_bytes(value)).unwrap_or(DEFAULT_STACK)
+        }
         None => DEFAULT_STACK,
     }
 }
@@ -1497,7 +1499,7 @@ pub(crate) fn stack_size_updated(req: &mut Request, value: Option<&[u8]>) -> boo
         req.fibers_mut().stack_size = Some(DEFAULT_STACK);
         return true;
     };
-    let size = Request::ini_parse_bytes(value);
+    let size = crate::api::request::Ini::parse_bytes(value);
     let Ok(size) = usize::try_from(size) else {
         crate::api::raising::warning(req, "fiber.stack_size must be a positive number");
         return false;
@@ -1576,7 +1578,7 @@ fn execute<P: HoldsCoroutine>(
         Err(thrown) => thrown,
     };
     let exited = matches!(
-        req.raised(),
+        req.diagnostics().raised(),
         Some(Raised::UnwindExit | Raised::GracefulExit)
     );
     let Ok(coroutine) = coroutine_of::<P>(req, object) else {
@@ -2115,7 +2117,7 @@ fn gc_destructor_fiber(req: &mut Request) -> Result<Owner<Value>, Thrown> {
             if let Some(object) = served
                 && req.fibers().gc.fiber.map(|gc| gc.index()) != Some(fiber.index())
             {
-                req.gc_possible_root(&object.as_value());
+                req.memory_mut().gc_possible_root(&object.as_value());
                 // What the destructor left, the graceful exit of a destroy
                 // among it, is what the fiber ends in.
                 crate::api::raising::pending(req)?;
@@ -2211,8 +2213,8 @@ fn lay_down<P: HoldsCoroutine>(
     body: impl FnOnce(&mut Request) -> Result<CoroutineEnd, Thrown> + 'static,
 ) -> Result<(), Thrown> {
     let size = stack_size(req);
-    let reserved = u64::try_from(Request::ini_parse_bytes(
-        req.ini_get(b"zend.reserved_stack_size").unwrap_or(b"0"),
+    let reserved = u64::try_from(crate::api::request::Ini::parse_bytes(
+        req.ini().get(b"zend.reserved_stack_size").unwrap_or(b"0"),
     ))
     .unwrap_or(0);
     let stack = FiberStack::new(size, move |req: &mut Request, _first: Transfer| {
@@ -2269,7 +2271,7 @@ fn lay_down<P: HoldsCoroutine>(
 /// a switch would break stands, which `start`, `resume`, `throw` and
 /// `suspend` each refuse to go past. The callers that block the switch
 /// are a `ZEND_TICKS` round and `ext/pcntl`'s dispatch, each through
-/// [`Request::with_fiber_switch_blocked`].
+/// [`Code::with_fiber_switch_blocked`].
 fn switch_refused(req: &mut Request) -> Result<(), Thrown> {
     if !req.fibers().switch_blocked() {
         return Ok(());
@@ -2377,7 +2379,7 @@ impl Coroutine {
                 "InternalError: a fiber coroutine laid down twice",
             ));
         }
-        let error_reporting = req.error_reporting();
+        let error_reporting = req.diagnostics().error_reporting();
         lay_down::<P>(req, object, Kind::Extension, error_reporting, body)
     }
 
@@ -2471,7 +2473,7 @@ impl Coroutine {
                 if let Some(before) = before {
                     req.raise_under(before);
                 }
-                if !req.executing() {
+                if !req.frames().executing() {
                     req.exception_error(crate::api::raising::Level::Error).ok();
                 }
             }

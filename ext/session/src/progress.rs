@@ -200,7 +200,7 @@ fn early_find_sid(req: &mut Request, session_name: &[u8]) -> Result<(), Thrown> 
 /// `early_find_sid_in`: the string the input's variables hold under the
 /// session's name.
 fn find_in(req: &mut Request, input: Input, name: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
-    let array = req.input_variables(input)?;
+    let array = req.variables_mut().input_variables(input)?;
     let found = array
         .find(name)
         .and_then(|value| value.deref().as_str_bytes().map(<[u8]>::to_vec));
@@ -222,7 +222,7 @@ fn file_start(req: &mut Request, read: i64, name: &[u8], filename: &[u8]) -> Res
         .is_some_and(|progress| progress.data.is_none());
     if first {
         let freq = freq(req);
-        let start_time = req.request_time();
+        let start_time = req.environment().request_time();
         with(req, |progress| {
             progress.update_step = if freq >= 0 {
                 freq

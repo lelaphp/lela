@@ -3,9 +3,9 @@
 //! and traits, the function, property and constant tables, and the
 //! three ways php makes an instance. Each reads the linked tables the
 //! reflector's `$name` looks up again, the same `_class_string`
-//! renders: the engine's function table (`Request::method_rows`,
-//! `Request::method_row`), interface list (`Request::interfaces`) and
-//! constants table (`Request::constants_in_order`), and
+//! renders: the engine's function table (`Symbols::method_rows`,
+//! `Symbols::method_row`), interface list (`Symbols::interfaces`) and
+//! constants table (`Symbols::constants_in_order`), and
 //! `linked_properties`.
 
 use php_ext::abi::{Callable, Instance, NamedVariadic, OrFalse, Passed, Raw, This, Union};
@@ -37,7 +37,7 @@ fn trait_with(req: &mut Request, traits: &[Name], method: &[u8]) -> Result<Vec<u
         let Some(at) = lookup_class(req, &used.0)? else {
             continue;
         };
-        if req.method_row(at, method).is_some() {
+        if req.symbols().method_row(at, method).is_some() {
             return Ok(class_name_of(req, at));
         }
     }
@@ -46,7 +46,9 @@ fn trait_with(req: &mut Request, traits: &[Name], method: &[u8]) -> Result<Vec<u
 
 /// `ZEND_ACC_INTERFACE`, `ZEND_ACC_TRAIT` and `ZEND_ACC_ENUM`.
 fn kind_of(req: &mut Request, class: ClassId) -> ClassKind {
-    req.class_decl(class).map_or(ClassKind::Class, |d| d.kind)
+    req.symbols()
+        .class_decl(class)
+        .map_or(ClassKind::Class, |d| d.kind)
 }
 
 /// `ZEND_ACC_EXPLICIT_ABSTRACT_CLASS | ZEND_ACC_IMPLICIT_ABSTRACT_CLASS`:
@@ -54,12 +56,14 @@ fn kind_of(req: &mut Request, class: ClassId) -> ClassKind {
 /// marks implicitly abstract at link time.
 pub(super) fn class_is_abstract(req: &mut Request, class: ClassId) -> bool {
     let explicit = req
+        .symbols()
         .class_decl(class)
         .is_some_and(|decl| decl.flags.is_abstract);
     explicit
         || req
+            .symbols()
             .method_rows(class)
-            .any(|row| req.row_method(row).is_some_and(|m| m.is_abstract))
+            .any(|row| req.symbols().row_method(row).is_some_and(|m| m.is_abstract))
 }
 
 /// php's `ce_flags & (INTERFACE | TRAIT | ABSTRACT | ENUM)` test, which
@@ -71,8 +75,8 @@ fn cannot_instantiate(req: &mut Request, class: ClassId) -> bool {
 /// `ce->constructor`: the linked `__construct`, with the row of the
 /// function table it is.
 fn constructor_of(req: &mut Request, class: ClassId) -> Option<(MethodDecl, MethodRow)> {
-    let row = req.method_row(class, b"__construct")?;
-    Some((req.row_method(row)?.clone(), row))
+    let row = req.symbols().method_row(class, b"__construct")?;
+    Some((req.symbols().row_method(row)?.clone(), row))
 }
 
 /// `reflection_method_factory(ce, mptr, ...)`: a `ReflectionMethod`
@@ -254,7 +258,7 @@ fn new_instance(
     arguments: ConstructorArguments<'_>,
 ) -> Result<Owner<PhpObject>, Thrown> {
     let object = new_object(req, class)?;
-    let asked = req.with_fake_scope(class, |req| {
+    let asked = req.frames_mut().with_fake_scope(class, |req| {
         object.handlers(req).get_constructor(req, *object)
     });
     let constructor = match asked {
@@ -816,6 +820,7 @@ impl ReflectionClass {
     fn isAnonymous(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let class = this_class(req, this.object())?;
         let anonymous = req
+            .symbols()
             .class_decl(class)
             .is_some_and(|decl| decl.flags.is_anonymous);
         Ok(anonymous)
@@ -875,8 +880,9 @@ impl ReflectionClass {
             return Ok(false);
         }
         let clone = req
+            .symbols()
             .method_row(class, b"__clone")
-            .and_then(|row| req.row_method(row))
+            .and_then(|row| req.symbols().row_method(row))
             .map(|clone| clone.visibility);
         if let Some(visibility) = clone {
             return Ok(visibility == Visibility::Public);
@@ -919,6 +925,7 @@ impl ReflectionClass {
     ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let class = this_class(req, this.object())?;
         let file = req
+            .symbols()
             .class_decl(class)
             .filter(|decl| !decl.file.0.is_empty())
             .map(|decl| decl.file.0.to_vec());
@@ -983,7 +990,11 @@ impl ReflectionClass {
         this: This<Self>,
     ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let class = this_class(req, this.object())?;
-        let Some(doc) = req.class_decl(class).and_then(|d| d.doc_comment.clone()) else {
+        let Some(doc) = req
+            .symbols()
+            .class_decl(class)
+            .and_then(|d| d.doc_comment.clone())
+        else {
             return Ok(OrFalse::False);
         };
         PhpString::new(req, &doc).map(OrFalse::Value)
@@ -1035,7 +1046,7 @@ impl ReflectionClass {
     fn hasMethod(req: &mut Request, this: This<Self>, name: PhpString) -> Result<bool, Thrown> {
         let name = name.as_bytes().to_vec();
         let class = this_class(req, this.object())?;
-        if req.method_row(class, &name).is_some() {
+        if req.symbols().method_row(class, &name).is_some() {
             return Ok(true);
         }
         Ok(is_closure_invoke(req, class, &name.to_ascii_lowercase()))
@@ -1115,9 +1126,10 @@ impl ReflectionClass {
         let mut methods = PhpArray::new(req)?;
         // The rows the filter keeps, read before any object is made.
         let rows: Vec<(MethodRow, Name)> = req
+            .symbols()
             .method_rows(class)
             .filter_map(|row| {
-                let decl = req.row_method(row)?;
+                let decl = req.symbols().row_method(row)?;
                 let kept = (decl.visibility != Visibility::Private || row.scope() == class)
                     && method_bits(decl) & filter != 0;
                 kept.then(|| (row, decl.function.name.clone()))
@@ -1251,7 +1263,7 @@ impl ReflectionClass {
         if let Some(at) = name.windows(2).position(|pair| pair == b"::") {
             short = name[at + 2..].to_vec();
             let base = class_named(req, &name[..at])?;
-            if !req.instance_of(class, base) {
+            if !req.symbols().instance_of(class, base) {
                 let (base, named) = (class_name_of(req, base), class_name_of(req, class));
                 return Err(throw(
                     req,
@@ -1509,7 +1521,7 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getInterfaces(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let class = this_class(req, this.object())?;
-        let linked = req.interfaces(class).to_vec();
+        let linked = req.symbols().interfaces(class).to_vec();
         if linked.is_empty() {
             return Ok(Owner::take(req, PhpArray::empty()));
         }
@@ -1537,7 +1549,7 @@ impl ReflectionClass {
     /// }
     /// ```
     ///
-    /// The list is the linked record's (`Request::interfaces`), in php's
+    /// The list is the linked record's (`Symbols::interfaces`), in php's
     /// order for a user class (the parent's, its own, then their
     /// parents) and for an internal one (the parent's, then each of its
     /// own followed by that one's parents).
@@ -1560,7 +1572,7 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getInterfaceNames(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let class = this_class(req, this.object())?;
-        let linked = req.interfaces(class).to_vec();
+        let linked = req.symbols().interfaces(class).to_vec();
         if linked.is_empty() {
             return Ok(Owner::take(req, PhpArray::empty()));
         }
@@ -1603,6 +1615,7 @@ impl ReflectionClass {
     fn getTraits(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let class = this_class(req, this.object())?;
         let traits = req
+            .symbols()
             .class_decl(class)
             .map(|decl| decl.traits.clone())
             .unwrap_or_default();
@@ -1635,6 +1648,7 @@ impl ReflectionClass {
     fn getTraitNames(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let class = this_class(req, this.object())?;
         let traits = req
+            .symbols()
             .class_decl(class)
             .map(|decl| decl.traits.clone())
             .unwrap_or_default();
@@ -1681,6 +1695,7 @@ impl ReflectionClass {
     fn getTraitAliases(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let class = this_class(req, this.object())?;
         let (traits, adaptations) = req
+            .symbols()
             .class_decl(class)
             .map(|decl| (decl.traits.clone(), decl.adaptations.clone()))
             .unwrap_or_default();
@@ -1776,6 +1791,7 @@ impl ReflectionClass {
     fn isFinal(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let class = this_class(req, this.object())?;
         let final_ = req
+            .symbols()
             .class_decl(class)
             .is_some_and(|decl| decl.flags.is_final);
         Ok(final_)
@@ -1792,6 +1808,7 @@ impl ReflectionClass {
     fn isReadOnly(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let class = this_class(req, this.object())?;
         let readonly = req
+            .symbols()
             .class_decl(class)
             .is_some_and(|decl| decl.flags.is_readonly);
         Ok(readonly)
@@ -1812,7 +1829,7 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getModifiers(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
         let class = this_class(req, this.object())?;
-        let Some(flags) = req.class_decl(class).map(|decl| decl.flags) else {
+        let Some(flags) = req.symbols().class_decl(class).map(|decl| decl.flags) else {
             return Ok(0);
         };
         let mut bits = 0;
@@ -1843,7 +1860,7 @@ impl ReflectionClass {
     fn isInstance(req: &mut Request, this: This<Self>, object: PhpObject) -> Result<bool, Thrown> {
         let of = object.class();
         let class = this_class(req, this.object())?;
-        Ok(req.instance_of(of, class))
+        Ok(req.symbols().instance_of(of, class))
     }
 
     /// `ReflectionClass::newInstance(mixed ...$args)`: `object_init_ex`
@@ -1916,12 +1933,13 @@ impl ReflectionClass {
     ) -> Result<Owner<PhpObject>, Thrown> {
         let class = this_class(req, this.object())?;
         let final_name = req
+            .symbols()
             .class_decl(class)
             .filter(|decl| decl.flags.is_final)
             .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned());
         if let Some(name) = final_name
             && is_internal(req, class)
-            && req.class_has_create_object(class)
+            && req.symbols().class_has_create_object(class)
         {
             return Err(throw(
                 req,
@@ -2332,7 +2350,7 @@ impl ReflectionClass {
     ) -> Result<bool, Thrown> {
         let this = this_class(req, this.object())?;
         let of = reflector_class(req, class, "Class")?;
-        Ok(this != of && req.instance_of(this, of))
+        Ok(this != of && req.symbols().instance_of(this, of))
     }
 
     /// `ReflectionClass::getStaticProperties()`: `CE_STATIC_MEMBERS(ce)` as
@@ -2720,13 +2738,13 @@ impl ReflectionClass {
         }
         // `ce->get_iterator`, which a class that is no `Traversable`
         // may set itself, as `FFI\CData` does.
-        if req.class_own_iterator(class) {
+        if req.symbols().class_own_iterator(class) {
             return Ok(true);
         }
         let Some(traversable) = lookup_class(req, b"Traversable")? else {
             return Ok(false);
         };
-        Ok(req.instance_of(class, traversable))
+        Ok(req.symbols().instance_of(class, traversable))
     }
 
     #[php(tentative, implementation = ReflectionClass::isIterable)]
@@ -2769,7 +2787,7 @@ impl ReflectionClass {
             ));
         }
         let class = this_class(req, this.object())?;
-        Ok(req.instance_of(class, interface))
+        Ok(req.symbols().instance_of(class, interface))
     }
 
     /// `ReflectionClass::getExtension()`: `ce->info.internal.module` as a
@@ -2923,7 +2941,7 @@ impl ReflectionClass {
         #[php(default = 0)] flags: i64,
     ) -> Result<Owner<PhpArray>, Thrown> {
         let class = this_class(req, this.object())?;
-        let (attributes, file) = req.class_decl(class).map_or_else(
+        let (attributes, file) = req.symbols().class_decl(class).map_or_else(
             || (Vec::new(), None),
             |decl| (decl.attributes.clone(), attr::declared_in(&decl.file.0)),
         );

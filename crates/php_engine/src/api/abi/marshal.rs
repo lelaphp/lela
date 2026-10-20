@@ -554,7 +554,7 @@ impl<C: Class> This<C> {
     /// The receiver of the method being served, what the entry reads
     /// before its arguments.
     pub fn read(req: &mut Request) -> Result<This<C>, Thrown> {
-        match req.this() {
+        match req.frames().this() {
             Some(object) => Ok(This {
                 object,
                 class: PhantomData,
@@ -727,7 +727,10 @@ impl<T: FromArgument> Raw<T> {
     /// (`zend_parse_arg_str_weak`) rather than what it replaced; the
     /// value as passed where the slot holds none.
     pub fn hold(&self, req: &mut Request) -> Result<T, Thrown> {
-        let given = req.argument(self.position).unwrap_or(Value::undef());
+        let given = req
+            .frames()
+            .argument(self.position)
+            .unwrap_or(Value::undef());
         match T::hold(req, given, self.position)? {
             Some(held) => Ok(held),
             None => held_as(req, self.value, self.position),
@@ -883,10 +886,10 @@ impl<T: FromArgument> FromArgument for Ref<T> {
 pub struct Variadic<T>(pub Vec<T>);
 
 fn tail<T: FromArgument>(req: &mut Request, position: u32) -> Result<Vec<T>, Thrown> {
-    let count = u32::try_from(req.argument_count()).unwrap_or(u32::MAX);
+    let count = u32::try_from(req.frames().argument_count()).unwrap_or(u32::MAX);
     let mut out = Vec::new();
     for at in position..=count {
-        let given = req.argument(at).unwrap_or(Value::undef());
+        let given = req.frames().argument(at).unwrap_or(Value::undef());
         if let Some(held) = T::hold(req, given, at)? {
             out.push(held);
         }
@@ -957,7 +960,7 @@ impl<T: FromArgument> FromArgument for NamedVariadic<T> {
     /// `given` standing first in it, and the named arguments after it.
     fn hold(req: &mut Request, _: Value, position: u32) -> Result<Option<Self>, Thrown> {
         let positional = tail(req, position)?;
-        let past = u32::try_from(req.argument_count())
+        let past = u32::try_from(req.frames().argument_count())
             .unwrap_or(u32::MAX)
             .saturating_add(1);
         let mut named = Vec::new();

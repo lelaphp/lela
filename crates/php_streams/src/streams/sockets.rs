@@ -31,7 +31,7 @@ use crate::api::values::{Emalloc, Owner};
 use super::{CastTarget, MetaData, Ops, PhpStream, Ret, StatBuf, stat_buf, strerror};
 use crate::api::raising::{Level, Thrown, raise, warning};
 use crate::api::request::{
-    BindTo, Cast, Crypto, CryptoSocket, Handshake, OptionAnswer, OwnedStream, Request,
+    BindTo, Cast, Crypto, CryptoSocket, Handshake, Ini, OptionAnswer, OwnedStream, Request,
     SocketOptions, Stream, StreamCtx, StreamOption, Xport, XportFactory, XportFailure, XportStep,
 };
 use crate::api::values::PhpString;
@@ -366,7 +366,7 @@ pub(crate) fn seconds(timeout: i64) -> Option<Duration> {
 /// `FG(default_socket_timeout)`, the ini entry's seconds, the quantity
 /// its `OnUpdateLong` read; sixty where the bundle declares none.
 fn default_timeout(req: &Request) -> Option<Duration> {
-    let secs = (req.ini_get(b"default_socket_timeout")).map_or(60, Request::ini_parse_bytes);
+    let secs = (req.ini().get(b"default_socket_timeout")).map_or(60, Ini::parse_bytes);
     seconds(secs)
 }
 
@@ -427,7 +427,7 @@ impl Ops for Socket {
                 let (code, text) = socket_error(&error);
                 let text = format!(
                     "{}(): Send of {} bytes failed with errno={code} {text}",
-                    req.active_function_name(),
+                    req.frames().active_function_name(),
                     buf.len()
                 );
                 raise(req, Level::Notice, &text);
@@ -475,7 +475,7 @@ impl Ops for Socket {
                 self.timeout_event = false;
                 let timeout = self.timeout;
                 loop {
-                    let polled = req.blocking(|| {
+                    let polled = req.limits_mut().blocking(|| {
                         crate::api::layer::poll_fd(sock.fd(), Readiness::Readable, timeout)
                     });
                     match polled {
@@ -492,7 +492,7 @@ impl Ops for Socket {
         let read = if dont_wait {
             Socket::read_now(sock, buf)
         } else {
-            req.blocking(|| sock.read(buf))
+            req.limits_mut().blocking(|| sock.read(buf))
         };
         match read {
             Ok(0) => {
@@ -648,8 +648,10 @@ impl Ops for Socket {
     fn xport(&mut self, req: &mut Request, op: XportOp<'_>) -> Option<Xported> {
         if let XportOp::Accept { timeout, want_peer } = op {
             // `stream_socket_accept`'s wait for a client lends the
-            // request ([`Request::blocking`], #2401).
-            let accepted = req.blocking(|| self.accept(timeout, want_peer));
+            // request ([`Limits::blocking`], #2401).
+            let accepted = req
+                .limits_mut()
+                .blocking(|| self.accept(timeout, want_peer));
             return Some(Xported::Accepted(accepted));
         }
         let sock = self.sock.as_mut()?;
@@ -664,8 +666,11 @@ impl Ops for Socket {
                 Xported::Sent(match sent {
                     Ok(n) => Some(n),
                     Err(error) => {
-                        let text =
-                            format!("{}(): {}\n", req.active_function_name(), strerror(&error));
+                        let text = format!(
+                            "{}(): {}\n",
+                            req.frames().active_function_name(),
+                            strerror(&error)
+                        );
                         warning(req, &text);
                         None
                     }
@@ -928,7 +933,7 @@ fn addresses(req: &mut Request, host: &str, port: u16) -> Result<Vec<SocketAddr>
                 .strip_prefix("failed to lookup address information: ")
                 .unwrap_or(&text);
             let message = format!("php_network_getaddresses: getaddrinfo for {host} failed: {gai}");
-            let shown = format!("{}(): {message}", req.active_function_name());
+            let shown = format!("{}(): {message}", req.frames().active_function_name());
             warning(req, &shown);
             Err(message)
         }
@@ -947,7 +952,7 @@ fn unix_path(req: &mut Request, name: &[u8]) -> std::path::PathBuf {
         path = &path[..UNIX_PATH_MAX];
         let text = format!(
             "{}(): socket path exceeded the maximum allowed length of {UNIX_PATH_MAX} bytes and was truncated",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         raise(req, Level::Notice, &text);
     }
@@ -1075,7 +1080,7 @@ fn bind_local(req: &mut Request, fd: BorrowedFd<'_>, to: &SocketAddr, local: &st
     let Some(ip) = ip else {
         let text = format!(
             "{}(): Invalid IP Address: {local}",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         warning(req, &text);
         return;
@@ -1083,7 +1088,7 @@ fn bind_local(req: &mut Request, fd: BorrowedFd<'_>, to: &SocketAddr, local: &st
     if let Err(error) = crate::api::layer::bind_fd(fd, &SocketAddr::new(ip, port)) {
         let text = format!(
             "{}(): Failed to bind to '{local}:{port}', system said: {}",
-            req.active_function_name(),
+            req.frames().active_function_name(),
             socket_error(&error).1
         );
         warning(req, &text);
@@ -1588,7 +1593,7 @@ impl Stream {
                 let Some(addr) = parse_network_address(text) else {
                     let shown = format!(
                         "{}(): Failed to parse `{}' into a valid network address",
-                        req.active_function_name(),
+                        req.frames().active_function_name(),
                         String::from_utf8_lossy(text)
                     );
                     warning(req, &shown);
@@ -1734,7 +1739,7 @@ impl Stream {
 fn no_crypto(req: &mut Request) {
     let text = format!(
         "{}(): This stream does not support SSL/crypto",
-        req.active_function_name()
+        req.frames().active_function_name()
     );
     warning(req, &text);
 }

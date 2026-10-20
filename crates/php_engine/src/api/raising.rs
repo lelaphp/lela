@@ -299,7 +299,7 @@ pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) -> Result<(), T
     if !req.protect_recursion(None, key) {
         return Ok(());
     }
-    let attributes = req.constant_attributes(key).to_vec();
+    let attributes = req.symbols().constant_attributes(key).to_vec();
     let suffix = crate::attributes::deprecation_suffix(req, &attributes, None);
     req.unprotect_recursion();
     let suffix = suffix?;
@@ -358,10 +358,10 @@ pub fn docref(req: &mut Request, level: Level, message: &(impl AsRef<[u8]> + ?Si
     // A fatal in flight is no native served: `_zend_bailout` empties
     // `EG(current_execute_data)` before it jumps (`Z/Zend/zend.c:1267`),
     // so what a `zend_catch` raises names no function.
-    if req.ini_stage() == crate::api::abi::IniStage::Startup {
+    if req.ini().stage() == crate::api::abi::IniStage::Startup {
         return verror(req, level, Origin::Phase("PHP Startup"), b"", message);
     }
-    if (req.vm_serving_native() || req.serving_include()) && !req.bailing_out() {
+    if (req.vm_serving_native() || req.serving_include()) && !req.diagnostics().bailing_out() {
         let function = req.active_native();
         return verror(req, level, Origin::Function(&function), b"", message);
     }
@@ -369,7 +369,7 @@ pub fn docref(req: &mut Request, level: Level, message: &(impl AsRef<[u8]> + ?Si
         crate::api::request::Phase::Startup => "PHP Request Startup",
         // The code being served names it, as
         // `get_active_function_name` does when a handler raises it.
-        crate::api::request::Phase::Running if !req.bailing_out() => {
+        crate::api::request::Phase::Running if !req.diagnostics().bailing_out() => {
             if let Some(name) = req.active_user_function() {
                 return verror(req, level, Origin::Function(&name), b"", message);
             }
@@ -607,7 +607,7 @@ fn docref_link(req: &Request, function: &str) -> Option<String> {
     if !req.ini_flag(b"html_errors") {
         return None;
     }
-    let root = String::from_utf8_lossy(req.ini_get(b"docref_root")?).into_owned();
+    let root = String::from_utf8_lossy(req.ini().get(b"docref_root")?).into_owned();
     if root.is_empty() {
         return None;
     }
@@ -620,7 +620,7 @@ fn docref_link(req: &Request, function: &str) -> Option<String> {
         .rfind('#')
         .map(|at| page.split_off(at))
         .unwrap_or_default();
-    if let Some(ext) = req.ini_get(b"docref_ext").filter(|ext| !ext.is_empty()) {
+    if let Some(ext) = req.ini().get(b"docref_ext").filter(|ext| !ext.is_empty()) {
         page.push_str(&String::from_utf8_lossy(ext));
     }
     Some(format!("[<a href='{root}{page}{target}'>{page}</a>]"))
@@ -742,13 +742,13 @@ pub fn leave_pending(req: &mut Request, thrown: Thrown) {
 /// out, as the `zend_catch` bails out again. A client's fault thrown
 /// over the engine's fatal is the witness, in `ext/soap`.
 pub fn catch_fatal(req: &mut Request, thrown: Thrown, class: &str) -> Result<Thrown, Thrown> {
-    if !req.bailing_out() || req.unwind_exit() {
+    if !req.diagnostics().bailing_out() || req.unwind_exit() {
         return Err(thrown);
     }
     let held = thrown.exception().copied();
     let caught = held.or_else(|| req.pending()).filter(|throwable| {
         req.class_named(Bare::resolved(class.as_bytes()))
-            .is_some_and(|class| req.instance_of(throwable.class(), class))
+            .is_some_and(|class| req.symbols().instance_of(throwable.class(), class))
     });
     let Some(throwable) = caught else {
         return Err(thrown);
@@ -926,7 +926,7 @@ pub(crate) fn undefined_method(
     class: crate::api::values::ClassId,
     method: &[u8],
 ) -> Thrown {
-    let class = req.class_name(class);
+    let class = req.symbols().class_name(class);
     let message = format!(
         "Call to undefined method {class}::{}()",
         String::from_utf8_lossy(method)
@@ -963,7 +963,7 @@ pub(crate) fn arg_name_suffix(
 ) -> String {
     let named = || {
         let at = usize::try_from(number.checked_sub(1)?).ok()?;
-        let parameter = req.function_decl(function?)?.parameters.get(at)?;
+        let parameter = req.symbols().function_decl(function?)?.parameters.get(at)?;
         let name = String::from_utf8_lossy(&parameter.name.0);
         (!parameter.variadic).then(|| format!(" (${name})"))
     };
@@ -1103,7 +1103,10 @@ pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
 pub(crate) fn throw_object(req: &mut Request, object: PhpObject) -> Thrown {
     let thrown = Thrown::of(Some(object));
     // A bundle that set no hook pays nothing more for a throw.
-    if req.shared.supplied.thrown.links().is_empty() || req.is_pending() || !req.executing() {
+    if req.shared.supplied.thrown.links().is_empty()
+        || req.is_pending()
+        || !req.frames().executing()
+    {
         return thrown;
     }
     let shared = std::sync::Arc::clone(&req.shared);
@@ -1431,7 +1434,7 @@ pub fn arg_count_error(req: &mut Request, tail: &str) -> Thrown {
 /// session_set_save_handler() expects at least 6 arguments, 3 given
 /// ```
 pub fn arity(req: &mut Request, min: usize, max: Option<usize>) -> Result<(), Thrown> {
-    let given = req.argument_count();
+    let given = req.frames().argument_count();
     arity_of(req, given, min, max)
 }
 
@@ -1491,7 +1494,7 @@ pub fn arg_null_deprecated(req: &mut Request, position: u32, type_name: &str) {
 pub fn exit(req: &mut Request, status: &Value) -> Thrown {
     if let Some(text) = status.as_str_bytes() {
         if !text.is_empty() {
-            req.write(text);
+            req.response_mut().write(text);
             if req.is_pending() {
                 return Thrown::of(None);
             }

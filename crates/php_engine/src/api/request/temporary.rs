@@ -26,10 +26,15 @@ impl Request {
         check: TemporaryGuard,
     ) -> Option<(File, PathBuf)> {
         if let Some(dir) = dir.filter(|dir| !dir.is_empty()) {
-            if check == TemporaryGuard::Always && self.check_open_basedir(dir, true).is_err() {
+            if check == TemporaryGuard::Always
+                && self
+                    .environment_mut()
+                    .check_open_basedir(dir, true)
+                    .is_err()
+            {
                 return None;
             }
-            let dir = self.absolutize(dir);
+            let dir = self.environment().absolutize(dir);
             if let Some(made) = open_temporary_in(&dir, prefix) {
                 return Some(made);
             }
@@ -39,9 +44,10 @@ impl Request {
                 "file created in the system's temporary directory",
             );
         }
-        let temp_dir = self.temp_dir();
+        let temp_dir = self.environment().temp_dir();
         if check != TemporaryGuard::Never
             && self
+                .environment_mut()
                 .check_open_basedir(temp_dir.as_os_str().as_bytes(), true)
                 .is_err()
         {

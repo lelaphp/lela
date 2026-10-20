@@ -28,7 +28,7 @@ use php_ext::raising::{
     Level, Thrown, arg_value_error, arity, docref, new_throwable, throw_chained, throw_value,
     uncaught_at, while_pending,
 };
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
 
 use constants::{ASSERT_ACTIVE, ASSERT_BAIL, ASSERT_CALLBACK, ASSERT_EXCEPTION, ASSERT_WARNING};
@@ -110,11 +110,11 @@ type Deprecates = fn(&[u8]) -> bool;
 /// `OnChangeCallback` and `OnUpdateExceptionBool`
 /// (`Z/ext/standard/assert.c:79-118`), in `PHP_INI_BEGIN()`'s order.
 const DEPRECATED: [(&[u8], Deprecates); 5] = [
-    (b"assert.active", |v| !Request::ini_parse_bool(v)),
-    (b"assert.bail", Request::ini_parse_bool),
-    (b"assert.warning", |v| !Request::ini_parse_bool(v)),
+    (b"assert.active", |v| !Ini::parse_bool(v)),
+    (b"assert.bail", Ini::parse_bool),
+    (b"assert.warning", |v| !Ini::parse_bool(v)),
     (b"assert.callback", |v| !v.is_empty()),
-    (b"assert.exception", |v| !Request::ini_parse_bool(v)),
+    (b"assert.exception", |v| !Ini::parse_bool(v)),
 ];
 
 /// The request's assertion state: whether the entry being set is
@@ -158,7 +158,7 @@ fn drop_callback(req: &mut Request) {
 /// string(1) "1"
 /// ```
 fn on_modify(req: &mut Request, name: &[u8], value: &[u8]) {
-    if req.ini_stage() == IniStage::Deactivate {
+    if req.ini().stage() == IniStage::Deactivate {
         return;
     }
     if name == b"assert.callback" {
@@ -228,7 +228,7 @@ pub(crate) struct Throwable;
 
 /// An `assert.*` entry as `zend_ini_parse_bool` reads it.
 fn flag(req: &Request, name: &[u8]) -> bool {
-    req.ini_get(name).is_some_and(Request::ini_parse_bool)
+    req.ini().get(name).is_some_and(Ini::parse_bool)
 }
 
 /// `assert(mixed $assertion, Throwable|string|null $description = null): bool`,
@@ -369,7 +369,7 @@ fn assert(
     assertion: Raw<Value>,
     #[php(default = null)] description: Raw<Option<Union<Instance<Throwable>, PhpString>>>,
 ) -> Result<bool, Thrown> {
-    let assertions = req.ini_get(b"zend.assertions").map_or(1, |value| {
+    let assertions = req.ini().get(b"zend.assertions").map_or(1, |value| {
         String::from_utf8_lossy(value)
             .trim()
             .parse::<i64>()
@@ -455,7 +455,10 @@ fn callback(req: &mut Request, described: Option<PhpString>) -> Result<Option<Th
     // `ZVAL_STRING(&ASSERTG(callback), ASSERTG(cb))`: the entry's string
     // made once and kept as the callback until the entry changes.
     if req.state::<crate::State>().assert.callback.is_none()
-        && let Some(cb) = req.ini_get(b"assert.callback").filter(|cb| !cb.is_empty())
+        && let Some(cb) = req
+            .ini()
+            .get(b"assert.callback")
+            .filter(|cb| !cb.is_empty())
     {
         let cb = cb.to_vec();
         let cb = PhpString::new(req, &cb)?.into_value();
@@ -476,8 +479,8 @@ fn callback(req: &mut Request, described: Option<PhpString>) -> Result<Option<Th
     // `ZVAL_STR(&args[0], filename)`, the op array's file name, held
     // here for the call, and `ZVAL_STR(&args[3], description_str)`, the
     // argument itself.
-    let file = req.current_file().unwrap_or(b"Unknown").to_vec();
-    let line = i64::from(req.current_line());
+    let file = req.frames().current_file().unwrap_or(b"Unknown").to_vec();
+    let line = i64::from(req.frames().current_line());
     let file = PhpString::declared(req, &file)?;
     let mut arguments = vec![Value::string(*file), Value::int(line), Value::null()];
     let described = described.map(|text| Owner::take(req, text));
@@ -568,7 +571,7 @@ fn assert_options(
                 .copied()
             {
                 Some(callback) => Owner::take(req, callback),
-                None => match req.ini_get(b"assert.callback").map(<[u8]>::to_vec) {
+                None => match req.ini().get(b"assert.callback").map(<[u8]>::to_vec) {
                     Some(cb) if !cb.is_empty() => PhpString::new(req, &cb)?.into_value(),
                     _ => Owner::null(),
                 },
@@ -588,7 +591,7 @@ fn assert_options(
     if let Some(value) = value {
         let text = to_string(req, &value)?;
         req.state::<crate::State>().assert.assert_options = true;
-        let set = req.ini_set_string(entry, *text);
+        let set = req.ini_mut().set_string(entry, *text);
         req.state::<crate::State>().assert.assert_options = false;
         text.give_up(req);
         set?;

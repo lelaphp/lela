@@ -141,7 +141,7 @@ fn initialize() -> Initialized {
 /// ```
 fn libxml_info(req: &mut Request) {
     let loaded = String::from_utf8_lossy(&ffi::Library::loaded_version()).into_owned();
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["libXML support", "active"],
         &["libXML Compiled Version", DOTTED_VERSION],
         &["libXML Loaded Version", &loaded],
@@ -655,11 +655,11 @@ pub fn register_export(class: &'static [u8], export: ExportNode) -> Export {
 /// The row of the export table that answers for the root of `object`'s
 /// class.
 fn export_row(req: &mut Request, object: PhpObject) -> Option<(ExportNode, Option<NodeObjectOf>)> {
-    let class = req.lineage(object.class()).last()?;
-    if req.class_parent(class).is_some() {
+    let class = req.symbols().lineage(object.class()).last()?;
+    if req.symbols().class_parent(class).is_some() {
         return None;
     }
-    let root = req.class_decl(class)?.name.0.clone();
+    let root = req.symbols().class_decl(class)?.name.0.clone();
     req.registered::<Export>()
         .find(|row| row.class == &root[..])
         .map(|row| (row.answer, row.half))

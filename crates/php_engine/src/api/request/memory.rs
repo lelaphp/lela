@@ -18,7 +18,27 @@ use crate::api::abi::{Beneath, chain};
 use crate::api::raising::Thrown;
 use crate::api::values::{Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, adopted};
 
-use super::{Hooks, Request};
+use super::{Hooks, Ini, Request};
+
+/// The request's memory facet (design §4.4): what its heap has served
+/// and lends to C, the collector's roots, the objects it keeps for a C
+/// library (ADR-0013) and its resources. [`Request::memory`] reads it
+/// and [`Request::memory_mut`] changes it; either is the whole request,
+/// since nearly every operation can serve PHP code.
+pub struct Memory<R>(pub(crate) R);
+
+impl Request {
+    /// The memory facet, to read.
+    #[must_use]
+    pub fn memory(&self) -> Memory<&Request> {
+        Memory(self)
+    }
+
+    /// The memory facet, to change.
+    pub fn memory_mut(&mut self) -> Memory<&mut Request> {
+        Memory(self)
+    }
+}
 
 /// The home a unit this request alone serves makes its constant strings
 /// in, its compile's `zend_new_interned_string` as opcache installs it,
@@ -610,12 +630,12 @@ impl Request {
 
     /// An entry `zend_ini_parse_uquantity` reads, `-1` the largest size.
     fn limit_bytes(&self, name: &[u8]) -> usize {
-        Request::limit_of(self.ini_get(name).unwrap_or_default())
+        Request::limit_of(self.ini().get(name).unwrap_or_default())
     }
 
     /// `value` as `zend_ini_parse_uquantity` reads a limit, as `size_t`.
     fn limit_of(value: &[u8]) -> usize {
-        let (bytes, _) = Request::ini_parse_uquantity(value);
+        let (bytes, _) = Ini::parse_uquantity(value);
         usize::try_from(bytes).unwrap_or(usize::MAX)
     }
 
@@ -648,7 +668,7 @@ impl Request {
                     ),
                 );
             }
-            return self.ini_get(b"max_memory_limit").map(<[u8]>::to_vec);
+            return self.ini().get(b"max_memory_limit").map(<[u8]>::to_vec);
         }
         if !self.heap.set_memory_limit(wanted.min(usize::MAX >> 1)) {
             let usage = self.heap.memory_usage(true);
@@ -663,105 +683,9 @@ impl Request {
         Some(value.to_vec())
     }
 
-    /// `memory_get_usage()`.
-    #[must_use]
-    pub fn memory_usage(&self, real: bool) -> usize {
-        self.heap.memory_usage(real)
-    }
-
-    /// `is_zend_ptr`: whether `address` lies inside the request heap's
-    /// chunks or huge blocks, which reads no memory, so any number is
-    /// a question it answers.
-    #[must_use]
-    pub fn heap_holds(&self, address: usize) -> bool {
-        self.heap.holds(address)
-    }
-
-    /// `memory_get_peak_usage()`: the chunks' high-water mark for
-    /// `real == true`, the bin accounting's for `real == false`, the two
-    /// the heap keeps apart (design §5.13).
-    #[must_use]
-    pub fn memory_peak(&self, real: bool) -> usize {
-        if real {
-            self.heap.memory_real_peak()
-        } else {
-            self.heap.memory_peak()
-        }
-    }
-
     /// `memory_reset_peak_usage()`.
     pub(crate) fn reset_memory_peak(&mut self) {
         self.heap.reset_peak();
-    }
-
-    /// `call` served with the request's heap lent to C for its length
-    /// (ADR-0014, design §5.14): a C library compiled against
-    /// `php_heap`'s `emalloc`, `ecalloc`, `erealloc`, `estrdup`,
-    /// `estrndup` and `efree` (timelib, through its `timelib_config.h`)
-    /// allocates on this request's heap while `call` runs, as php's
-    /// library does, and a block of the heap it frees goes back to it.
-    /// A library whose allocator callbacks take an argument of their own
-    /// (zlib's `zalloc`, uriparser's memory manager) is pointed at
-    /// [`emalloc`], [`ecalloc`], [`erealloc`] and [`efree`] as php points
-    /// it at its own, and each call into it is made inside `call`.
-    /// `call` reaches nothing of the request, which is borrowed for its
-    /// length, and the lend ends when it returns. Every free of a block
-    /// a lend made is made under a lend of the same request; outside one
-    /// `efree` frees nothing, and the block is the request's end's. The
-    /// `Err` is the memory limit's fatal, recorded where `zend_mm` leaves
-    /// the request: the library ran to its return on the system
-    /// allocator's memory, and what `call` answered is dropped.
-    ///
-    /// # Errors
-    ///
-    /// The thrown that carries the limit's fatal.
-    pub fn lend_heap<R>(&mut self, call: impl FnOnce() -> R) -> Result<R, Thrown> {
-        let lent = self.heap.lend(call);
-        self.fatal_of(lent)
-    }
-
-    /// `observer` told of every allocation, reallocation and free the
-    /// request's heap serves from here on, and of what
-    /// `gc_mem_caches()` gives back (design §7.1): what stands in the
-    /// place of php's `zend_mm_set_custom_handlers`, which no extension
-    /// is given. The heap serves each one still, so `memory_get_usage()`
-    /// reads what it reads with no observer, and with none put in an
-    /// allocation pays one test of an empty list, as php's pays its
-    /// `use_custom_heap` test. An observer is told mid-allocation and is
-    /// handed nothing of the request; what it keeps is its own, and it is
-    /// dropped with the request's heap where it is not taken out before.
-    ///
-    /// With none put in, what the heap reads across small and large
-    /// allocations, grown and freed, is php's:
-    ///
-    /// ```php
-    /// $m = memory_get_usage(); memory_reset_peak_usage();
-    /// $a = []; for ($i = 0; $i < 1000; $i++) { $a[] = "x$i"; }
-    /// $c = 'y'; for ($i = 0; $i < 12; $i++) { $c .= $c; }
-    /// $s = ''; for ($i = 0; $i < 100; $i++) { $s .= $c; }
-    /// unset($a);
-    /// var_dump(memory_get_usage() - $m, memory_get_peak_usage() - $m, memory_get_usage(true));
-    /// ```
-    /// ```expect
-    /// int(421888)
-    /// int(474424)
-    /// int(2097152)
-    /// ```
-    pub fn observe_allocations(
-        &mut self,
-        observer: Box<dyn ObserveAllocations>,
-    ) -> AllocationObserverId {
-        self.heap.observe_allocations(observer)
-    }
-
-    /// The observer put in at `at` taken out and handed back, so the
-    /// extension that put it in reads what it kept; `None` where it was
-    /// taken out already.
-    pub fn unobserve_allocations(
-        &mut self,
-        at: AllocationObserverId,
-    ) -> Option<Box<dyn ObserveAllocations>> {
-        self.heap.unobserve_allocations(at)
     }
 
     /// `gc_collect_cycles()` through php's pointer: the chain the
@@ -787,18 +711,6 @@ impl Request {
     /// in: the object whose destructor was served.
     pub(crate) fn gc_call_destructor(&mut self, idx: u32) -> Option<PhpObject> {
         Heap::gc_call_destructor(&mut Hooks(self), idx).map(PhpObject::of)
-    }
-
-    /// `gc_check_possible_root`: an array or an object, or the one a
-    /// reference holds, offered to the collector as a possible root where
-    /// it is not one already, as a release that leaves it owners does;
-    /// any other value is never a root and is left as it is. An
-    /// extension calls it where php's does, on a cycle a temporary's
-    /// release would otherwise leave unseen, since php's
-    /// `zval_ptr_dtor_nogc` offers nothing (ext/dom's `children`,
-    /// `unserialize`'s answer).
-    pub fn gc_possible_root(&mut self, value: &Value) {
-        Heap::gc_check_possible_root(&mut Hooks(self), value.to_zval());
     }
 
     /// `gc_enable()` and `gc_disable()`: `zend.enable_gc` altered, whose
@@ -1042,6 +954,118 @@ impl Request {
     /// `zend_set_memory_limit` set it.
     pub(crate) fn heap_memory_limit(&self) -> usize {
         self.heap.memory_limit()
+    }
+}
+
+impl Memory<&Request> {
+    /// `memory_get_usage()`.
+    #[must_use]
+    pub fn usage(self, real: bool) -> usize {
+        self.0.heap.memory_usage(real)
+    }
+
+    /// `is_zend_ptr`: whether `address` lies inside the request heap's
+    /// chunks or huge blocks, which reads no memory, so any number is
+    /// a question it answers.
+    #[must_use]
+    pub fn heap_holds(self, address: usize) -> bool {
+        self.0.heap.holds(address)
+    }
+
+    /// `memory_get_peak_usage()`: the chunks' high-water mark for
+    /// `real == true`, the bin accounting's for `real == false`, the two
+    /// the heap keeps apart (design §5.13).
+    #[must_use]
+    pub fn peak(self, real: bool) -> usize {
+        if real {
+            self.0.heap.memory_real_peak()
+        } else {
+            self.0.heap.memory_peak()
+        }
+    }
+}
+
+impl Memory<&mut Request> {
+    /// `call` served with the request's heap lent to C for its length
+    /// (ADR-0014, design §5.14): a C library compiled against
+    /// `php_heap`'s `emalloc`, `ecalloc`, `erealloc`, `estrdup`,
+    /// `estrndup` and `efree` (timelib, through its `timelib_config.h`)
+    /// allocates on this request's heap while `call` runs, as php's
+    /// library does, and a block of the heap it frees goes back to it.
+    /// A library whose allocator callbacks take an argument of their own
+    /// (zlib's `zalloc`, uriparser's memory manager) is pointed at
+    /// [`emalloc`], [`ecalloc`], [`erealloc`] and [`efree`] as php points
+    /// it at its own, and each call into it is made inside `call`.
+    /// `call` reaches nothing of the request, which is borrowed for its
+    /// length, and the lend ends when it returns. Every free of a block
+    /// a lend made is made under a lend of the same request; outside one
+    /// `efree` frees nothing, and the block is the request's end's. The
+    /// `Err` is the memory limit's fatal, recorded where `zend_mm` leaves
+    /// the request: the library ran to its return on the system
+    /// allocator's memory, and what `call` answered is dropped.
+    ///
+    /// # Errors
+    ///
+    /// The thrown that carries the limit's fatal.
+    pub fn lend_heap<R>(self, call: impl FnOnce() -> R) -> Result<R, Thrown> {
+        let lent = self.0.heap.lend(call);
+        self.0.fatal_of(lent)
+    }
+
+    /// `observer` told of every allocation, reallocation and free the
+    /// request's heap serves from here on, and of what
+    /// `gc_mem_caches()` gives back (design §7.1): what stands in the
+    /// place of php's `zend_mm_set_custom_handlers`, which no extension
+    /// is given. The heap serves each one still, so `memory_get_usage()`
+    /// reads what it reads with no observer, and with none put in an
+    /// allocation pays one test of an empty list, as php's pays its
+    /// `use_custom_heap` test. An observer is told mid-allocation and is
+    /// handed nothing of the request; what it keeps is its own, and it is
+    /// dropped with the request's heap where it is not taken out before.
+    ///
+    /// With none put in, what the heap reads across small and large
+    /// allocations, grown and freed, is php's:
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); memory_reset_peak_usage();
+    /// $a = []; for ($i = 0; $i < 1000; $i++) { $a[] = "x$i"; }
+    /// $c = 'y'; for ($i = 0; $i < 12; $i++) { $c .= $c; }
+    /// $s = ''; for ($i = 0; $i < 100; $i++) { $s .= $c; }
+    /// unset($a);
+    /// var_dump(memory_get_usage() - $m, memory_get_peak_usage() - $m, memory_get_usage(true));
+    /// ```
+    /// ```expect
+    /// int(421888)
+    /// int(474424)
+    /// int(2097152)
+    /// ```
+    pub fn observe_allocations(
+        self,
+        observer: Box<dyn ObserveAllocations>,
+    ) -> AllocationObserverId {
+        self.0.heap.observe_allocations(observer)
+    }
+
+    /// The observer put in at `at` taken out and handed back, so the
+    /// extension that put it in reads what it kept; `None` where it was
+    /// taken out already.
+    pub fn unobserve_allocations(
+        self,
+        at: AllocationObserverId,
+    ) -> Option<Box<dyn ObserveAllocations>> {
+        self.0.heap.unobserve_allocations(at)
+    }
+
+    /// `gc_check_possible_root`: an array or an object, or the one a
+    /// reference holds, offered to the collector as a possible root where
+    /// it is not one already, as a release that leaves it owners does;
+    /// any other value is never a root and is left as it is. An
+    /// extension calls it where php's does, on a cycle a temporary's
+    /// release would otherwise leave unseen, since php's
+    /// `zval_ptr_dtor_nogc` offers nothing (ext/dom's `children`,
+    /// `unserialize`'s answer).
+    pub fn gc_possible_root(self, value: &Value) {
+        Heap::gc_check_possible_root(&mut Hooks(self.0), value.to_zval());
     }
 }
 

@@ -13,13 +13,14 @@ use crate::api::values::{ClassId, Owner, PhpObject, PhpString, Value};
 use crate::engine::Known;
 use php_unit::decl::Bare;
 
+use super::Diagnostics;
 use super::Request;
 
 /// Where an uncaught throwable ended the request: rendered as the fatal
 /// it is (`zend_exception_error` at `E_ERROR`), or, where the handler
 /// `set_exception_handler()` set or the throwable's `__toString` raised
 /// in its place, what that raised rendered or its `exit` taken, and in each
-/// case the request leaving by `zend_bailout` ([`Request::bailing_out`]).
+/// case the request leaving by `zend_bailout` ([`Diagnostics::bailing_out`]).
 /// The ending is written and nothing is left to render: what the caller
 /// does next is unwind to the `zend_try` that catches it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,7 +243,7 @@ impl Request {
                 self.leave_pending(thrown);
                 self.raise_under(before);
             }
-            None if !self.bailout && !self.executing() => {
+            None if !self.bailout && !self.frames().executing() => {
                 if let Ok(undef) = self.thrown_without_frame(thrown) {
                     self.release(undef);
                 }
@@ -362,7 +363,7 @@ impl Request {
     /// The declared name of a throwable's class, `Error` for one the
     /// tables do not know.
     fn class_name_of(&self, throwable: PhpObject) -> String {
-        self.class_decl(throwable.class()).map_or_else(
+        self.symbols().class_decl(throwable.class()).map_or_else(
             || String::from("Error"),
             |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
         )
@@ -402,7 +403,7 @@ impl Request {
             let Some(throwable) = self.class_named(Bare::resolved(b"Throwable")) else {
                 break;
             };
-            if !self.instance_of(exception.class(), throwable) {
+            if !self.symbols().instance_of(exception.class(), throwable) {
                 break;
             }
             let mut read = |req: &mut Request, name: &[u8]| -> Vec<u8> {
@@ -479,12 +480,15 @@ impl Request {
     /// called in.
     fn trace_as_string_of(&self, this: PhpObject) -> Option<(Function, ClassId)> {
         let exception = self.class_named(Bare::resolved(b"Exception"))?;
-        let base = if self.instance_of(this.class(), exception) {
+        let base = if self.symbols().instance_of(this.class(), exception) {
             exception
         } else {
             self.class_named(Bare::resolved(b"Error"))?
         };
-        Some((self.method_named(base, b"gettraceasstring")?, base))
+        Some((
+            self.symbols().method_named(base, b"gettraceasstring")?,
+            base,
+        ))
     }
 
     /// One throwable's trace as `Exception::__toString` reads it: its
@@ -561,7 +565,7 @@ impl Request {
             trace.give_up(self);
             return Err(thrown);
         }
-        let line = Owner::int(i64::from(self.current_line()));
+        let line = Owner::int(i64::from(self.frames().current_line()));
         if let Err(thrown) = self.write_known(throwable, Known::Line, line) {
             trace.give_up(self);
             return Err(thrown);
@@ -777,15 +781,6 @@ impl Request {
         self.raised.is_some() || self.bailout
     }
 
-    /// What stands in php's slot, `EG(exception)`, a view, no owner
-    /// taken: what an observer's end handler reads where the frame it is
-    /// handed is left by a throwable or an exit, as `observer.c`'s
-    /// `observer_end` names its class.
-    #[must_use]
-    pub fn raised(&self) -> Option<Raised> {
-        self.raised
-    }
-
     /// The pending throwable as a view, no owner taken: what `CATCH`
     /// tests its class against and what the unwinder chains onto. None
     /// while an exit stands.
@@ -796,22 +791,35 @@ impl Request {
         }
     }
 
-    /// The pending throwable out, the slot left empty and its one owner
-    /// the caller's: php's `EG(exception) = NULL` beside the object it
-    /// took, which is what a matching `CATCH` does with it. An exit
-    /// standing is left where it stands.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub fn take_pending(&mut self) -> Option<Owner<PhpObject>> {
-        let object = self.take_pending_view()?;
-        Some(Owner::adopt(object))
-    }
-
     /// What [`take_pending`](Self::take_pending) takes, its one owner not
     /// yet named.
     pub(crate) fn take_pending_view(&mut self) -> Option<PhpObject> {
         let object = self.pending()?;
         self.raised = None;
         Some(object)
+    }
+}
+
+impl Diagnostics<&Request> {
+    /// What stands in php's slot, `EG(exception)`, a view, no owner
+    /// taken: what an observer's end handler reads where the frame it is
+    /// handed is left by a throwable or an exit, as `observer.c`'s
+    /// `observer_end` names its class.
+    #[must_use]
+    pub fn raised(self) -> Option<Raised> {
+        self.0.raised
+    }
+}
+
+impl Diagnostics<&mut Request> {
+    /// The pending throwable out, the slot left empty and its one owner
+    /// the caller's: php's `EG(exception) = NULL` beside the object it
+    /// took, which is what a matching `CATCH` does with it. An exit
+    /// standing is left where it stands.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn take_pending(self) -> Option<Owner<PhpObject>> {
+        let object = self.0.take_pending_view()?;
+        Some(Owner::adopt(object))
     }
 }
 

@@ -241,7 +241,7 @@ fn sided(
         }
         State::Recording | State::Blacklisted => {}
     }
-    let quiet = req.interrupt().raised().load(Ordering::Relaxed) || record::recording(req);
+    let quiet = req.limits().interrupt().raised().load(Ordering::Relaxed) || record::recording(req);
     if !quiet && shared.policy.debug().any(JitDebug::TRACE_EXIT) {
         let mut lines = Vec::new();
         placed(req, exited.frame, false, |at| {
@@ -252,7 +252,7 @@ fn sided(
             };
             shared.dump(&mut lines, &event);
         });
-        req.write_stderr(&lines);
+        req.response_mut().write_stderr(&lines);
     }
     None
 }
@@ -365,7 +365,7 @@ pub(crate) fn hot(
     };
     let mut lines = Vec::new();
     shared.dump(&mut lines, &TraceEvent::Done);
-    req.write_stderr(&lines);
+    req.response_mut().write_stderr(&lines);
     flow
 }
 
@@ -382,7 +382,7 @@ fn settled(req: &mut Request, shared: &Shared, job: Job) -> Option<Outcome> {
     } else {
         Some(compiler::pipeline(shared, job, &mut lines))
     };
-    req.write_stderr(&lines);
+    req.response_mut().write_stderr(&lines);
     outcome
 }
 
@@ -448,7 +448,7 @@ fn started(
         }
         TraceName::of(&at)
     });
-    req.write_stderr(&lines);
+    req.response_mut().write_stderr(&lines);
     name
 }
 
@@ -463,11 +463,11 @@ fn placed<T>(
 ) -> Option<T> {
     let view = tier::frame(req, frame)?;
     let function = view.function();
-    let decl = function.and_then(|function| req.function_decl(function));
+    let decl = function.and_then(|function| req.symbols().function_decl(function));
     let name = decl.map(|decl| decl.name.0.to_vec());
     let scope = function
         .and(view.function_scope())
-        .map(|class| req.class_name(class).into_bytes());
+        .map(|class| req.symbols().class_name(class).into_bytes());
     let typed = entry && decl.is_some_and(|decl| decl.parameters.iter().any(|p| p.ty.is_some()));
     let line = if typed {
         view.op_array()

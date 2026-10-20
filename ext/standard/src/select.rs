@@ -349,7 +349,8 @@ fn select_over(
     // callback's `fclose` of one closes no fd the wait stands on until it
     // returns (#2664).
     let waited = req.holding_streams(&streams, |req| {
-        req.blocking(|| crate::ffi::select([read_set, write_set, except_set], timeout))
+        req.limits_mut()
+            .blocking(|| crate::ffi::select([read_set, write_set, except_set], timeout))
     });
     let (retval, ready) = match waited {
         Ok(answered) => answered,
@@ -357,7 +358,8 @@ fn select_over(
             let text = format!(
                 "Unable to select [{}]: {} (max_fd={max_fd})",
                 error.raw_os_error().unwrap_or(0),
-                req.os_error_text(error.raw_os_error().unwrap_or(0))
+                req.environment()
+                    .os_error_text(error.raw_os_error().unwrap_or(0))
             );
             docref(req, Level::Warning, &text);
             return Ok(OrFalse::False);

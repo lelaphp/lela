@@ -499,7 +499,7 @@ fn illegal_offset(
     value: &Value,
     read: DimensionRead,
 ) -> Thrown {
-    let class = req.class_name(object.class());
+    let class = req.symbols().class_name(object.class());
     php_ext::raising::illegal_container_offset(req, &class, value, read)
 }
 

@@ -574,7 +574,7 @@ fn chunked_body(req: &mut Request, stream: Stream) -> R<Option<Vec<u8>>> {
 /// the connect's timeout where none is given: none, no deadline, for
 /// one below zero.
 fn default_timeout(req: &Request) -> Option<Duration> {
-    let secs = req.ini_long(b"default_socket_timeout");
+    let secs = req.ini().long(b"default_socket_timeout");
     u64::try_from(secs).ok().map(Duration::from_secs)
 }
 
@@ -647,7 +647,7 @@ fn http_connect(
         Level::UserWarning,
         Level::UserNotice,
     ];
-    req.reporting_without(&MASKED, |req| {
+    req.diagnostics_mut().reporting_without(&MASKED, |req| {
         connect(req, this, uri, use_ssl, context, use_proxy)
     })
 }
@@ -1362,7 +1362,7 @@ fn user_agent(req: &Request, this: PhpObject, context: Option<StreamCtx>, h: &mu
         }
         return;
     }
-    match req.ini_value(b"user_agent") {
+    match req.ini().value(b"user_agent") {
         Some(agent) => line(h, c_str(agent)),
         None => line(h, format!("PHP-SOAP/{PHP_VERSION}").as_bytes()),
     }

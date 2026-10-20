@@ -201,7 +201,7 @@ struct Settings {
 impl Settings {
     fn read(req: &mut Request, context: Context) -> Settings {
         let (tags_entry, hosts_entry) = context.entries();
-        let ini = |name: &[u8]| req.ini_get(name).unwrap_or_default().to_vec();
+        let ini = |name: &[u8]| req.ini().get(name).unwrap_or_default().to_vec();
         // `php_strtok_r(tmp, ",")`, whose empty pieces are skipped.
         let pieces = |value: &[u8]| -> Vec<Vec<u8>> {
             value
@@ -228,7 +228,7 @@ impl Settings {
         let separator = separator(req);
         // `check_http_host`: `EG(symbol_table)`'s `$_SERVER`, the
         // program's, not armed where the program has not made it.
-        let http_host = req.global(b"_SERVER").and_then(|server| {
+        let http_host = req.variables_mut().global(b"_SERVER").and_then(|server| {
             let host = server.as_array()?.find(b"HTTP_HOST")?;
             let host = host.deref().as_php_string()?.as_bytes().to_vec();
             let end = host.iter().position(|c| *c == b':').unwrap_or(host.len());
@@ -245,7 +245,7 @@ impl Settings {
 
 /// `PG(arg_separator).output`, `&` where it is empty.
 fn separator(req: &Request) -> Vec<u8> {
-    match req.ini_get(b"arg_separator.output") {
+    match req.ini().get(b"arg_separator.output") {
         Some(separator) if !separator.is_empty() => separator.to_vec(),
         _ => b"&".to_vec(),
     }
@@ -767,12 +767,13 @@ fn add_var(
     ctx.form_app = form_app;
     appended?;
     if start {
-        req.output_buffer_op(&OutputOp::Start {
-            handler: StartHandler::Registered(context.handler()),
-            chunk_size: 0,
-            flags: 0x70,
-        })?
-        .give_up(req);
+        req.response_mut()
+            .buffer_op(&OutputOp::Start {
+                handler: StartHandler::Registered(context.handler()),
+                chunk_size: 0,
+                flags: 0x70,
+            })?
+            .give_up(req);
     }
     Ok(())
 }
@@ -790,7 +791,7 @@ fn reset_var(req: &mut Request, context: Context, name: &[u8], encode: bool) -> 
     let (sname, hname) = if encode {
         let mut sname = Vec::new();
         crate::url::url_encode(name, true, &mut sname);
-        let charset = req.ini_get(b"default_charset").map(<[u8]>::to_vec);
+        let charset = req.ini().get(b"default_charset").map(<[u8]>::to_vec);
         let hname = crate::html::escape(
             req,
             name,

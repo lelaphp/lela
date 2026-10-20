@@ -37,7 +37,7 @@ use crate::api::values::{Emalloc, Owner, ResourceType};
 use crate::api::layer::{Face as _, TemporaryGuard};
 use crate::api::raising::{Level, Thrown, raise, throw_error, warning};
 use crate::api::request::{
-    Cast, Closer, DirListing, EngineWrapper, FdStream, FilterFlags, HostPath, Notification,
+    Cast, Closer, DirListing, EngineWrapper, FdStream, FilterFlags, HostPath, Ini, Notification,
     OptionAnswer, OwnedStream, Request, Standard, Stream, StreamCtx, StreamOption, Whence,
 };
 use crate::api::values::{ClassId, FreshString, PhpArray, PhpString, Resource, Value};
@@ -927,7 +927,10 @@ impl PhpStream {
             return Some(0);
         }
         if !self.ops.writable() {
-            let text = format!("{}(): Stream is not writable", req.active_function_name());
+            let text = format!(
+                "{}(): Stream is not writable",
+                req.frames().active_function_name()
+            );
             raise(req, Level::Notice, &text);
             return None;
         }
@@ -1062,7 +1065,7 @@ impl PhpStream {
         }
         let text = format!(
             "{}(): Stream does not support seeking",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         warning(req, &text);
         false
@@ -1515,7 +1518,7 @@ impl PhpStream {
             if warn {
                 let text = format!(
                     "{}(): Cannot cast a filtered stream on this system",
-                    req.active_function_name()
+                    req.frames().active_function_name()
                 );
                 warning(req, &text);
             }
@@ -1542,7 +1545,7 @@ impl PhpStream {
                 };
                 let text = format!(
                     "{}(): Cannot represent a stream of type {} as a {target}",
-                    req.active_function_name(),
+                    req.frames().active_function_name(),
                     self.ops.label()
                 );
                 warning(req, &text);
@@ -1553,7 +1556,7 @@ impl PhpStream {
         if ret == Ret::Given && held > 0 && matches!(cast, Cast::Fd | Cast::Socket) {
             let text = format!(
                 "{}(): {held} bytes of buffered data lost during stream conversion!",
-                req.active_function_name()
+                req.frames().active_function_name()
             );
             warning(req, &text);
         }
@@ -1847,8 +1850,8 @@ impl Ops for Memory {
         if self.fpos + buf.len() > self.data.len()
             && let Err(thrown) = self.data.resize(req, self.fpos + buf.len())
         {
-            if req.stream_thrown().is_none() {
-                *req.stream_thrown() = Some(thrown);
+            if req.diagnostics_mut().stream_thrown().is_none() {
+                *req.diagnostics_mut().stream_thrown() = Some(thrown);
             }
             return None;
         }
@@ -1947,8 +1950,8 @@ impl Ops for Memory {
             return Some(false);
         }
         if let Err(thrown) = self.data.resize(req, size) {
-            if req.stream_thrown().is_none() {
-                *req.stream_thrown() = Some(thrown);
+            if req.diagnostics_mut().stream_thrown().is_none() {
+                *req.diagnostics_mut().stream_thrown() = Some(thrown);
             }
             return Some(false);
         }
@@ -2115,7 +2118,7 @@ impl Temp {
         let Some(file) = temporary_file(req, None, b"php")? else {
             let text = format!(
                 "{}(): Unable to create temporary file, Check permissions in temporary files directory.",
-                req.active_function_name()
+                req.frames().active_function_name()
             );
             warning(req, &text);
             return Ok(false);
@@ -2461,7 +2464,7 @@ impl Ops for Stdio {
             Err(error) => {
                 let text = format!(
                     "{}(): Write of {} bytes failed with {}",
-                    req.active_function_name(),
+                    req.frames().active_function_name(),
                     buf.len(),
                     errno(&error)
                 );
@@ -2479,7 +2482,7 @@ impl Ops for Stdio {
     /// stat cache cleared after it, since the file's atime moved.
     fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
         let file = self.file.as_mut()?;
-        let read = req.blocking(|| file.read(buf));
+        let read = req.limits_mut().blocking(|| file.read(buf));
         req.forget_stats();
         match read {
             Ok(0) => {
@@ -2493,7 +2496,7 @@ impl Ops for Stdio {
                 if !self.suppress_errors {
                     let text = format!(
                         "{}(): Read of {} bytes failed with {}",
-                        req.active_function_name(),
+                        req.frames().active_function_name(),
                         buf.len(),
                         errno(&error)
                     );
@@ -2528,9 +2531,9 @@ impl Ops for Stdio {
         }
         if let Some(mut child) = self.process.take() {
             use std::os::unix::process::ExitStatusExt;
-            // The wait lends the request ([`Request::blocking`]), as
+            // The wait lends the request ([`Limits::blocking`]), as
             // every wait on a child is (#2401).
-            return match req.blocking(|| child.wait()) {
+            return match req.limits_mut().blocking(|| child.wait()) {
                 Ok(status) => status.code().unwrap_or_else(|| status.into_raw()),
                 Err(_) => -1,
             };
@@ -2573,7 +2576,7 @@ impl Ops for Stdio {
         if !self.is_seekable {
             let text = format!(
                 "{}(): Cannot seek on this stream",
-                req.active_function_name()
+                req.frames().active_function_name()
             );
             warning(req, &text);
             return Some(false);
@@ -2625,15 +2628,15 @@ impl Ops for Stdio {
     /// (`Z/main/streams/plain_wrapper.c:774`): `flock(2)`, `LOCK_SH`,
     /// `LOCK_EX` or `LOCK_UN`, without blocking under `LOCK_NB`; a
     /// `flock(2)` that waits for another holder lends the request while
-    /// it waits ([`Request::blocking`], #2401).
+    /// it waits ([`Limits::blocking`], #2401).
     fn flock(&mut self, req: &mut Request, operation: i64) -> Option<bool> {
         let nonblocking = operation & LOCK_NB != 0;
         let file = self.file.as_ref()?;
         let taken = match operation & !LOCK_NB {
             LOCK_SH if nonblocking => file.try_lock_shared().is_ok(),
-            LOCK_SH => req.blocking(|| file.lock_shared()).is_ok(),
+            LOCK_SH => req.limits_mut().blocking(|| file.lock_shared()).is_ok(),
             LOCK_EX if nonblocking => file.try_lock().is_ok(),
-            LOCK_EX => req.blocking(|| file.lock()).is_ok(),
+            LOCK_EX => req.limits_mut().blocking(|| file.lock()).is_ok(),
             LOCK_UN => file.unlock().is_ok(),
             _ => false,
         };
@@ -2799,9 +2802,17 @@ fn plain_open(
     // `_php_stream_fopen`'s `expand_filepath`, under `CWD_FILEPATH`, which
     // enters the path in the realpath cache; where it refuses, the host
     // is handed the path as written and answers for it.
-    let cwd = req.cwd().into_os_string().into_encoded_bytes();
+    let cwd = req
+        .environment()
+        .cwd()
+        .into_os_string()
+        .into_encoded_bytes();
     let written = path.as_os_str().as_encoded_bytes();
-    let host = match req.virtual_file_ex(&cwd, written, crate::api::request::Resolve::FilePath) {
+    let host = match req.environment_mut().virtual_file_ex(
+        &cwd,
+        written,
+        crate::api::request::Resolve::FilePath,
+    ) {
         Some(expanded) => std::path::PathBuf::from(
             <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(&expanded),
         ),
@@ -2943,11 +2954,11 @@ impl Ops for HostFd {
         match &mut self.end {
             HostEnd::Stdin(body) => body.write(req, buf),
             HostEnd::Stdout(_) => {
-                req.write_stdout(buf);
+                req.response_mut().write_stdout(buf);
                 Some(buf.len())
             }
             HostEnd::Stderr(_) => {
-                req.write_stderr(buf);
+                req.response_mut().write_stderr(buf);
                 Some(buf.len())
             }
         }
@@ -2959,7 +2970,7 @@ impl Ops for HostFd {
         }
         let text = format!(
             "{}(): Read of {} bytes failed with errno={EBADF} Bad file descriptor",
-            req.active_function_name(),
+            req.frames().active_function_name(),
             buf.len()
         );
         raise(req, Level::Notice, &text);
@@ -3709,7 +3720,7 @@ impl StreamLayer for Request {
             if wrapper.is_none() {
                 let text = format!(
                     "{}(): Unable to find the wrapper \"{}\" - did you forget to enable it when you configured PHP?",
-                    self.active_function_name(),
+                    self.frames().active_function_name(),
                     String::from_utf8_lossy(&scheme[..scheme.len().min(31)])
                 );
                 if options.report {
@@ -3730,7 +3741,7 @@ impl StreamLayer for Request {
                     if options.report {
                         let text = format!(
                             "{}(): Remote host file access not supported, {}",
-                            self.active_function_name(),
+                            self.frames().active_function_name(),
                             String::from_utf8_lossy(path)
                         );
                         warning(self, &text);
@@ -3753,7 +3764,7 @@ impl StreamLayer for Request {
                 if options.report {
                     let text = format!(
                         "{}(): file:// wrapper is disabled in the server configuration",
-                        self.active_function_name()
+                        self.frames().active_function_name()
                     );
                     warning(self, &text);
                 }
@@ -3764,8 +3775,7 @@ impl StreamLayer for Request {
         let Some(found) = wrapper else {
             return (Located::Plain, path.to_vec());
         };
-        let allowed =
-            |req: &Request, name: &[u8]| req.ini_get(name).is_none_or(Request::ini_parse_bool);
+        let allowed = |req: &Request, name: &[u8]| req.ini().get(name).is_none_or(Ini::parse_bool);
         if found.is_url(self) {
             let refused = if !allowed(self, b"allow_url_fopen") {
                 Some("allow_url_fopen")
@@ -3780,7 +3790,7 @@ impl StreamLayer for Request {
                 if options.report {
                     let text = format!(
                         "{}(): {}:// wrapper is disabled in the server configuration by {entry}=0",
-                        self.active_function_name(),
+                        self.frames().active_function_name(),
                         String::from_utf8_lossy(&path[..n])
                     );
                     warning(self, &text);
@@ -3915,7 +3925,7 @@ impl StreamLayer for Request {
         }
         let mut resolved = None;
         if options.use_path {
-            match self.resolve_path(path) {
+            match self.code_mut().resolve_path(path) {
                 Ok(found) => {
                     resolved = Some(PhpString::filled(self, found.len(), |b| {
                         b.copy_from_slice(&found);
@@ -3957,7 +3967,7 @@ impl StreamLayer for Request {
         if options.use_url && !wrapper.is_url(self) {
             let text = format!(
                 "{}(): This function may only be used against URLs",
-                self.active_function_name()
+                self.frames().active_function_name()
             );
             warning(self, &text);
             return Ok(None);
@@ -3978,7 +3988,7 @@ impl StreamLayer for Request {
                             let real = if resolved {
                                 Some(path_to_open.clone())
                             } else {
-                                self.expand_filepath(&path_to_open)
+                                self.environment_mut().expand_filepath(&path_to_open)
                             };
                             self.streams().opened_path = real;
                         }
@@ -4069,7 +4079,7 @@ impl StreamLayer for Request {
         let guarded = if options.disable_open_basedir {
             Ok(self.unguarded_host_path(path))
         } else {
-            self.check_open_basedir(path, true)
+            self.environment_mut().check_open_basedir(path, true)
         };
         match guarded {
             Ok(host) => plain_open(self, &host, mode, options.for_include && !options.held),
@@ -4190,7 +4200,7 @@ impl StreamLayer for Request {
         if options.report {
             let text = format!(
                 "{}({}): could not make seekable - {}",
-                self.active_function_name(),
+                self.frames().active_function_name(),
                 String::from_utf8_lossy(path),
                 String::from_utf8_lossy(path)
             );
@@ -4242,7 +4252,10 @@ impl StreamLayer for Request {
             // the guard, which warns, then `opendir(3)`.
             Located::Plain => (
                 PLAIN_FILES,
-                match self.check_open_basedir(&path_to_open, true) {
+                match self
+                    .environment_mut()
+                    .check_open_basedir(&path_to_open, true)
+                {
                     Err(refused) => Err(strerror(&refused.into())),
                     Ok(dir) => match std::fs::read_dir(&dir) {
                         Ok(entries) => {
@@ -4460,9 +4473,7 @@ impl StreamLayer for Request {
         if logged.is_empty() {
             return String::from("operation failed");
         }
-        let html = self
-            .ini_get(b"html_errors")
-            .is_some_and(Request::ini_parse_bool);
+        let html = self.ini().get(b"html_errors").is_some_and(Ini::parse_bool);
         logged.join(if html { "<br />\n" } else { "\n" })
     }
 
@@ -4484,7 +4495,7 @@ impl StreamLayer for Request {
         if self.is_pending() {
             return;
         }
-        let function = self.active_function_name();
+        let function = self.frames().active_function_name();
         self.wrapper_warning(&function, path, &format!("{caption}: {message}"));
     }
 
@@ -4507,8 +4518,9 @@ impl StreamLayer for Request {
         // `_php_stream_alloc`'s `FG(auto_detect_line_endings)`
         // (`Z/main/streams/streams.c:326`).
         if self
-            .ini_get(b"auto_detect_line_endings")
-            .is_some_and(Request::ini_parse_bool)
+            .ini()
+            .get(b"auto_detect_line_endings")
+            .is_some_and(Ini::parse_bool)
         {
             stream.flags.eol = Eol::Detect;
         }
@@ -4710,7 +4722,7 @@ impl StreamLayer for Request {
         let text = if taken {
             format!("Protocol {shown}:// is already defined.")
         } else {
-            let name = self.class_name(class);
+            let name = self.symbols().class_name(class);
             format!(
                 "Invalid protocol scheme specified. Unable to register wrapper class {name} to {shown}://"
             )

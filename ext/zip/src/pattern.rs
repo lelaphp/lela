@@ -141,7 +141,11 @@ fn glob(req: &mut Request, pattern: &[u8], flags: i64) -> Found {
     let (work, skip) = if pattern.first() == Some(&b'/') {
         (pattern.to_vec(), 0)
     } else {
-        let mut cwd = req.cwd().into_os_string().into_encoded_bytes();
+        let mut cwd = req
+            .environment()
+            .cwd()
+            .into_os_string()
+            .into_encoded_bytes();
         let skip = cwd.len() + 1;
         cwd.push(b'/');
         cwd.extend_from_slice(pattern);
@@ -178,7 +182,11 @@ fn pcre(req: &mut Request, regexp: &[u8], path: &[u8]) -> Result<Found, Thrown> 
     let work = if path.first() == Some(&b'/') {
         path.to_vec()
     } else {
-        let mut cwd = req.cwd().into_os_string().into_encoded_bytes();
+        let mut cwd = req
+            .environment()
+            .cwd()
+            .into_os_string()
+            .into_encoded_bytes();
         cwd.push(b'/');
         cwd.extend_from_slice(path);
         cwd

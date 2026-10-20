@@ -35,7 +35,7 @@ pub use crate::virtual_cwd::{MAXPATHLEN, Resolve};
 pub(crate) use callable::{Deprecations, Refusal, compound_split};
 pub use execution::Execution;
 /// `zend_call_stack`: a thread's machine stack as the platform describes
-/// it, its `base` and `max_size` ([`Request::call_stack_bounds`]).
+/// it, its `base` and `max_size` ([`Limits::call_stack_bounds`]).
 pub use php_heap::CallStack;
 pub use unit_cache::{
     CacheBudget, CacheStatus, CachedFile, Invalidation, PreloadStatistics, Restart, UnitCache,
@@ -49,6 +49,7 @@ pub(crate) use build_defs::PROVIDER as BUILD_PROVIDER;
 pub(crate) use build_defs::build_date;
 mod callable;
 mod caller;
+pub use caller::Frames;
 pub(crate) use caller::NativeCaller;
 pub use hooks::HookedTable;
 pub(crate) use hooks::{HookedBuild, HookedDeclared, HookedRows};
@@ -60,17 +61,21 @@ pub(crate) use class_constants::ConstantFetch;
 mod class_data;
 mod classes;
 use classes::AccelServed;
+pub use classes::Symbols;
 mod constants;
 pub(crate) use constants::{ConstantAt, halt_offset_key};
 mod diagnostics;
+pub use diagnostics::Diagnostics;
 use diagnostics::{DISPLAY_ERRORS_STDERR, display_errors_mode_of, fatal_errors};
 pub use diagnostics::{FormatDate, Syslog};
 pub(crate) use diagnostics::{append_escaped, escape_html};
 mod ending;
 pub(crate) use ending::{Ending, Phase};
 mod environment;
+pub use environment::Environment;
 mod execution;
 mod extensions;
+pub use extensions::Extensions;
 pub use extensions::InfoRow;
 mod foreign;
 pub use foreign::{Foreign, ForeignId, Held};
@@ -83,7 +88,9 @@ pub(crate) use frames::CodeFrom;
 use frames::{Expand, Link, Slots, links_of};
 mod hash_bytes;
 mod include;
+pub use include::Code;
 mod ini;
+pub use ini::Ini;
 pub(crate) mod ini_files;
 pub use ini::IniEntry;
 pub(crate) use ini::{CoreQuantity, TypedIni};
@@ -93,11 +100,12 @@ mod hooks;
 mod inspect;
 mod lazy;
 mod limits;
+pub use limits::Limits;
 pub use limits::{Interrupt, TimeLimitSuspended};
 mod linking;
 mod load_file;
 mod memory;
-pub use memory::{Allocation, AllocationObserverId, ObserveAllocations};
+pub use memory::{Allocation, AllocationObserverId, Memory, ObserveAllocations};
 pub use memory::{StandaloneHeap, ecalloc, efree, emalloc, erealloc};
 mod methods;
 use methods::visibility_string;
@@ -123,6 +131,7 @@ mod recording;
 mod resources;
 pub use resources::{ResourceDtor, Resources};
 mod response;
+pub use response::Response;
 mod rooms;
 pub(crate) mod ropes;
 #[cfg(debug_assertions)]
@@ -150,6 +159,7 @@ mod unit_cache;
 mod unit_strings;
 pub(crate) use unit_cache::HandlePath;
 mod variables;
+pub use variables::Variables;
 mod zone;
 pub use post::Upload;
 pub use variables::url_decode;
@@ -203,15 +213,15 @@ pub use crate::interrupt::Periodic;
 /// asynchronous delivery raises this request's interrupt. The record is
 /// the engine's, since signal dispositions are the process's and an
 /// extension holds no atomic (ADR-0005). Beside it, [`Reentry`] is how a
-/// function C calls back reaches its request ([`Request::reentry`]):
+/// function C calls back reaches its request ([`Limits::reentry`]):
 /// [`Lent`] while the request waits in a call into C or blocks
-/// ([`Request::blocking`]), and otherwise a [`Deferred`] call or one a
+/// ([`Limits::blocking`]), and otherwise a [`Deferred`] call or one a
 /// thread waits on ([`Waited`]) that the interrupt check serves.
 pub use crate::signal::{
     DEFERRED_WORDS, Deferred, Lent, Receiving, Reentry, SIGNAL_POST, Siginfo, Waited, take_signals,
 };
 
-/// Which side of [`Request::fork`] the caller stands on, and the child's
+/// Which side of [`Limits::fork`] the caller stands on, and the child's
 /// id the parent is handed: `php_process`'s, which the engine's one home
 /// for fork calls (#1807).
 pub use crate::fork::{Forked, Pid};
@@ -230,7 +240,7 @@ pub fn select(
     php_process::select_fds(sets, timeout)
 }
 
-/// Why [`Request::resolve_path`] found no file: the last attempt's
+/// Why [`Code::resolve_path`] found no file: the last attempt's
 /// reason, or the throwable a wrapper's `url_stat` raised.
 #[derive(Debug)]
 pub enum Unresolved {
@@ -266,13 +276,13 @@ pub struct Request {
     /// The extensions' request states ([`state::RequestState`]).
     state: state::RequestState,
     /// The entries the request changed, their bytes, the host's locks
-    /// and the stage ([`ini::Ini`]).
-    ini: ini::Ini,
+    /// and the stage ([`ini::IniState`]).
+    ini: ini::IniState,
     /// The sink, the `php_output` layer, the header callback and the
-    /// connection's status ([`response::Response`]).
-    response: response::Response,
-    /// The diagnostics' state ([`diagnostics::Diagnostics`]).
-    diagnostics: diagnostics::Diagnostics,
+    /// connection's status ([`response::ResponseState`]).
+    response: response::ResponseState,
+    /// The diagnostics' state ([`diagnostics::DiagnosticsState`]).
+    diagnostics: diagnostics::DiagnosticsState,
     ending: Option<Ending>,
     /// The pieces of the ropes the frames are building ([`ropes::Ropes`]).
     ropes: ropes::Ropes,
@@ -287,8 +297,8 @@ pub struct Request {
     /// php's post state: the body's reader, what the host has handed
     /// out of it, and the files an upload wrote ([`post::Post`]).
     post: post::Post,
-    /// Each auto-global not made yet ([`variables::Variables`]).
-    variables: variables::Variables,
+    /// Each auto-global not made yet ([`variables::VariablesState`]).
+    variables: variables::VariablesState,
     /// The symbol tables, [`TableId`] naming one: php's
     /// `EG(symbol_table)` first, the main op array's variables (design
     /// §5.6, §5.10), and after it one table per function frame that
@@ -359,8 +369,8 @@ pub struct Request {
     /// The autoloaders and `EG(in_autoload)` ([`autoload::Autoload`]).
     autoload: autoload::Autoload,
     /// The umask, the locale names and the start time
-    /// ([`environment::Environment`]).
-    environment: environment::Environment,
+    /// ([`environment::EnvironmentState`]).
+    environment: environment::EnvironmentState,
     cwd: PathBuf,
     /// The fibers running on this request, innermost last, each with the
     /// execution state of the stack that resumed it, and where each
@@ -392,8 +402,8 @@ pub struct Request {
     objects: objects::Objects,
     /// What the entry frame of the innermost serving returned.
     returned: Value,
-    /// The interrupt, the timer and the stack limit ([`limits::Limits`]).
-    limits: limits::Limits,
+    /// The interrupt, the timer and the stack limit ([`limits::LimitsState`]).
+    limits: limits::LimitsState,
     /// What a debug build's sensors have made of the request
     /// ([`sensing::Sensing`]).
     #[cfg(debug_assertions)]
@@ -517,7 +527,7 @@ pub struct Request {
     /// opcache's `ZCG(counted)` ([`memory::SharedHold`]).
     shared_hold: memory::SharedHold,
     /// The request in flight, which no fork but its own happens beside
-    /// (#1807, [`Request::fork`]): entered before its deadlines are laid
+    /// (#1807, [`Limits::fork`]): entered before its deadlines are laid
     /// on the engine's timer and left after they are taken out, so no
     /// fork copies the timer's mutex as the request holds it.
     _inside: crate::fork::Inside,
@@ -1027,7 +1037,7 @@ impl Request {
             // Fields are made in the order written: the request stands
             // inside the engine before its deadlines are laid.
             _inside: crate::fork::Inside::enter(),
-            limits: limits::Limits::new(&shared.timer),
+            limits: limits::LimitsState::new(&shared.timer),
             shared,
             description,
             inspect: inspect::Inspected::default(),
@@ -1037,16 +1047,16 @@ impl Request {
             annexes: crate::exec::Annexes::default(),
             map: crate::exec::RuntimeCaches::default(),
             state: state::RequestState::default(),
-            ini: ini::Ini::new(typed_ini),
-            diagnostics: diagnostics::Diagnostics::default(),
-            response: response::Response::new(sink, output),
+            ini: ini::IniState::new(typed_ini),
+            diagnostics: diagnostics::DiagnosticsState::default(),
+            response: response::ResponseState::new(sink, output),
             ending: None,
             ropes: ropes::Ropes::default(),
             exit_status,
             resources,
             http_globals: variables::HttpGlobals::default(),
             post: post::Post::default(),
-            variables: variables::Variables::default(),
+            variables: variables::VariablesState::default(),
             tables: vec![SymbolTable::global()],
             symtable_cache: Vec::new(),
             included_files: hash_bytes::IncludedFiles::default(),
@@ -1065,7 +1075,7 @@ impl Request {
             shutdown_functions: shutdown::ShutdownFunctions::default(),
             ticks: ticks::Ticks::default(),
             autoload: autoload::Autoload::default(),
-            environment: environment::Environment::new(),
+            environment: environment::EnvironmentState::new(),
             cwd,
             fibers: crate::fiber::Fibers::default(),
             raised: None,
@@ -1137,15 +1147,6 @@ impl Request {
         Heap::object_std_dtor(&mut Hooks(self), object.heap());
     }
 
-    /// The slot for a throwable PHP code served by a stream's kind, a
-    /// filter or a user-space wrapper raised inside an operation whose
-    /// answer has no room for it: php's `EG(exception)` standing until
-    /// the native that asked for the operation returns, which raises it,
-    /// and before which no more such code is served.
-    pub fn stream_thrown(&mut self) -> &mut Option<Thrown> {
-        &mut self.stream_thrown
-    }
-
     /// php's `EG(weakrefs)`, whose rows only `crate::weakrefs` reads,
     /// the table's methods being private to it.
     pub(crate) fn weakrefs(&self) -> &crate::weakrefs::Table {
@@ -1171,6 +1172,17 @@ impl Request {
     }
 }
 
+impl<'r> Diagnostics<&'r mut Request> {
+    /// The slot for a throwable PHP code served by a stream's kind, a
+    /// filter or a user-space wrapper raised inside an operation whose
+    /// answer has no room for it: php's `EG(exception)` standing until
+    /// the native that asked for the operation returns, which raises it,
+    /// and before which no more such code is served.
+    pub fn stream_thrown(self) -> &'r mut Option<Thrown> {
+        &mut self.0.stream_thrown
+    }
+}
+
 /// The request's side of the heap's upward seam (design §4.3, seam 1):
 /// the request itself, whole, so that `__destruct` is served by the
 /// request that owns the frames, and the heap the operation is on is
@@ -1187,7 +1199,7 @@ impl Hooks<'_> {
     /// raises it ([`Request::throw_internal`]). A stream the step closed
     /// whose user-space wrapper or filter threw parks the throwable for
     /// the native that asked to raise once it returns
-    /// ([`Request::stream_thrown`]); a release is no native, so the step
+    /// ([`Diagnostics::stream_thrown`]); a release is no native, so the step
     /// raises it here, where nothing was parked before the step began.
     /// What the step answered as its `Err` is raised after that, so it
     /// chains over the parked one, as php's `EG(exception)` takes both
@@ -1606,7 +1618,7 @@ mod tests {
         req: &mut Request,
     ) -> Result<crate::api::values::Owner<crate::api::values::Value>, super::Thrown> {
         let text = req.string(b"d\n")?;
-        req.write(text.as_bytes());
+        req.response_mut().write(text.as_bytes());
         req.release(crate::api::values::Value::string(text));
         let null = crate::api::values::Value::null();
         Ok(crate::api::values::Owner::take(req, null))

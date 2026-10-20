@@ -58,7 +58,7 @@ struct Kept {
 impl Kept {
     /// The callable argument at `position` of the running call.
     fn of(req: &mut Request, callable: Callable, position: u32) -> Kept {
-        let value = req.argument(position).unwrap_or_default().deref();
+        let value = req.frames().argument(position).unwrap_or_default().deref();
         Kept {
             callable,
             value: Owner::take(req, value),
@@ -174,11 +174,12 @@ fn readline_info_table(req: &mut Request) {
     } else {
         String::from_utf8_lossy(&version).into_owned()
     };
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["Readline Support", "enabled"],
         &["Readline library", &version],
     ]);
-    req.info_ini_entries(&[shell::PAGER.as_bytes(), shell::PROMPT.as_bytes()]);
+    req.ini_mut()
+        .info_ini_entries(&[shell::PAGER.as_bytes(), shell::PROMPT.as_bytes()]);
 }
 
 /// A string of the request's heap.
@@ -351,7 +352,10 @@ fn readline_clear_history() -> True {
 fn readline_read_history(req: &mut Request, #[php(default = null)] filename: Option<Path>) -> bool {
     let file = filename.map(|f| f.0.as_bytes().to_vec());
     if let Some(file) = &file
-        && req.check_open_basedir(file, true).is_err()
+        && req
+            .environment_mut()
+            .check_open_basedir(file, true)
+            .is_err()
     {
         return false;
     }
@@ -376,7 +380,10 @@ fn readline_write_history(
 ) -> bool {
     let file = filename.map(|f| f.0.as_bytes().to_vec());
     if let Some(file) = &file
-        && req.check_open_basedir(file, true).is_err()
+        && req
+            .environment_mut()
+            .check_open_basedir(file, true)
+            .is_err()
     {
         return false;
     }

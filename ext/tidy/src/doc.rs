@@ -245,7 +245,11 @@ fn apply_config(req: &mut Request, id: DocId, config: Config, arg: u32) -> Resul
     match config {
         None => Ok(true),
         Some(Union::B(path)) => {
-            if req.check_open_basedir(path.as_bytes(), true).is_err() {
+            if req
+                .environment_mut()
+                .check_open_basedir(path.as_bytes(), true)
+                .is_err()
+            {
                 return Ok(false);
             }
             with_doc(req, id, |req, doc| load_config(req, doc, path.as_bytes()))?;
@@ -331,7 +335,7 @@ fn too_long(bytes: &[u8]) -> bool {
 /// The `Deprecated` a `?string $encoding` passed `null` meets, where php
 /// parses it with `Z_PARAM_STRING`.
 fn null_encoding(req: &mut Request, encoding: Option<&PhpString>) {
-    if encoding.is_none() && req.argument_count() >= 3 {
+    if encoding.is_none() && req.frames().argument_count() >= 3 {
         arg_null_deprecated(req, 3, "?string");
     }
 }

@@ -17,7 +17,7 @@ use php_ext::decl::{Attribute, FunctionDecl, Name, Type};
 use php_ext::raising::{
     Thrown, arg_type_error, arg_value_error, fatal, throw, throw_error, warning,
 };
-use php_ext::request::{Request, Stream};
+use php_ext::request::{Ini, Request, Stream};
 use php_ext::syntax::Position;
 use php_ext::values::{
     Owner, PhpArray, PhpObject, PhpString, Resource, ResourceType, Value, ValueRef,
@@ -263,7 +263,8 @@ fn zend_test_compile_string(
         2 => Position::AfterOpenTag,
         _ => Position::AtOpenTag,
     };
-    req.serve_string(source_string.as_bytes(), filename.0.as_bytes(), position)
+    req.code_mut()
+        .serve_string(source_string.as_bytes(), filename.0.as_bytes(), position)
 }
 
 /// `zend_test_deprecated(mixed $arg = null): void`, `@deprecated`.
@@ -508,7 +509,11 @@ fn stdclass_or_string(
         }
         ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => !strict,
         ValueRef::Object(object) => {
-            !strict && req.method_named(object.class(), b"__tostring").is_some()
+            !strict
+                && req
+                    .symbols()
+                    .method_named(object.class(), b"__tostring")
+                    .is_some()
         }
         _ => false,
     };
@@ -714,7 +719,7 @@ fn zend_test_attribute_with_named_argument() {}
 /// ```
 #[php_function]
 fn zend_get_current_func_name(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
-    let name = req.caller_function_name();
+    let name = req.frames().caller_function_name();
     PhpString::new(req, name.as_bytes())
 }
 
@@ -764,7 +769,7 @@ fn zend_call_method(
     let Some(callable) = known_method(req, class, &name, object) else {
         let text = format!(
             "Couldn't find implementation for method {}::{}",
-            req.class_name(class),
+            req.symbols().class_name(class),
             String::from_utf8_lossy(method.as_bytes())
         );
         return Err(fatal(req, &text));
@@ -857,7 +862,7 @@ fn zend_call_method_if_exists(
 /// ```
 #[php_function]
 fn zend_test_zend_ini_parse_quantity(req: &mut Request, str: PhpString) -> i64 {
-    let (value, refused) = Request::ini_parse_quantity(str.as_bytes());
+    let (value, refused) = Ini::parse_quantity(str.as_bytes());
     if let Some(sentence) = refused {
         warning(req, &sentence);
     }
@@ -879,7 +884,7 @@ fn zend_test_zend_ini_parse_quantity(req: &mut Request, str: PhpString) -> i64 {
 /// ```
 #[php_function]
 fn zend_test_zend_ini_parse_uquantity(req: &mut Request, str: PhpString) -> i64 {
-    let (value, refused) = Request::ini_parse_uquantity(str.as_bytes());
+    let (value, refused) = Ini::parse_uquantity(str.as_bytes());
     if let Some(sentence) = refused {
         warning(req, &sentence);
     }
@@ -900,7 +905,7 @@ fn zend_test_zend_ini_parse_uquantity(req: &mut Request, str: PhpString) -> i64 
 /// ```
 #[php_function]
 fn zend_test_zend_ini_str(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
-    let value = req.ini_get(crate::STR_TEST).unwrap_or_default().to_vec();
+    let value = req.ini().get(crate::STR_TEST).unwrap_or_default().to_vec();
     PhpString::new(req, &value)
 }
 
@@ -1008,6 +1013,7 @@ fn throwing_resource(req: &mut Request) -> ResourceType {
         return kind;
     }
     let kind = req
+        .memory_mut()
         .resources()
         .register_type(b"throwing resource", Some(throw_from_dtor));
     req.state::<crate::State>().throwing_resource = Some(kind);
@@ -1119,7 +1125,7 @@ fn throw_from_dtor(req: &mut Request, _resource: Resource) -> Result<(), Thrown>
 /// ```
 #[php_function]
 fn get_open_basedir(req: &mut Request) -> Result<Option<Owner<PhpString>>, Thrown> {
-    match req.open_basedir() {
+    match req.environment().open_basedir() {
         Some(dir) => {
             let dir = dir.to_vec();
             PhpString::new(req, &dir).map(Some)
@@ -1176,7 +1182,7 @@ fn zend_test_cast_fread(req: &mut Request, stream: Resource) -> Result<(), Throw
 /// ```
 #[php_function]
 fn zend_test_compile_to_ast(req: &mut Request, str: PhpString) -> Result<Owner<PhpString>, Thrown> {
-    let exported = req.export_tree(str.as_bytes())?;
+    let exported = req.code_mut().export_tree(str.as_bytes())?;
     PhpString::new(req, &exported)
 }
 
@@ -1221,7 +1227,7 @@ fn zend_test_internal_dnf_arguments(
     }
     let text = format!(
         "be of type Iterator|(Traversable&Countable), {} given",
-        req.class_name(arg.class())
+        req.symbols().class_name(arg.class())
     );
     Err(arg_type_error(req, 1, &text))
 }

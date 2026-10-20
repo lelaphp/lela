@@ -436,7 +436,7 @@ impl VarHash {
 /// string(2) "60"
 /// ```
 fn default_depth(req: &Request) -> i64 {
-    req.ini_long(b"unserialize_max_depth")
+    req.ini().long(b"unserialize_max_depth")
 }
 
 /// One reader over one string, php's `p` and `max` beside the var hash
@@ -852,7 +852,7 @@ pub fn php_unserialize_with_options(
         // the collector's to find (#2444).
         (Ok(true), None) => {
             let root = state.take_root();
-            req.gc_possible_root(&root);
+            req.memory_mut().gc_possible_root(&root);
             Some(root)
         }
         _ => {
@@ -2034,7 +2034,8 @@ impl State<'_> {
         // `__unserialize()` for is not what its serializer wrote.
         if !has_unserialize && is_serializable(req, class) {
             let shown = String::from_utf8_lossy(
-                &req.class_decl(class)
+                &req.symbols()
+                    .class_decl(class)
                     .map(|d| d.name.0.to_vec())
                     .unwrap_or_default(),
             )
@@ -2143,7 +2144,8 @@ impl State<'_> {
     /// ```
     fn callback(req: &mut Request, name: &[u8]) -> Result<bool, Thrown> {
         let Some(function) = req
-            .ini_get(b"unserialize_callback_func")
+            .ini()
+            .get(b"unserialize_callback_func")
             .map(<[u8]>::to_vec)
             .filter(|f| !f.is_empty())
         else {
@@ -2234,7 +2236,8 @@ impl State<'_> {
             return Ok(true);
         }
         let shown = String::from_utf8_lossy(
-            &req.class_decl(class)
+            &req.symbols()
+                .class_decl(class)
                 .map(|d| d.name.0.to_vec())
                 .unwrap_or_default(),
         )
@@ -2445,7 +2448,7 @@ impl State<'_> {
             return Ok(false);
         }
         self.p = after + 2;
-        let found = req.class_decl(class).and_then(|decl| {
+        let found = req.symbols().class_decl(class).and_then(|decl| {
             decl.constants
                 .iter()
                 .find(|c| *c.name.0 == *case)

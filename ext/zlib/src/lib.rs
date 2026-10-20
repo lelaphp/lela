@@ -231,7 +231,7 @@ fn rshutdown(req: &mut Request) {
 /// ```
 fn info(req: &mut Request) {
     let linked = ffi::version();
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["ZLib Support", "enabled"],
         &["Stream Wrapper", "compress.zlib://"],
         &["Stream Filter", "zlib.inflate, zlib.deflate"],

@@ -394,7 +394,12 @@ fn finish_loading(req: &mut Request, this: PhpObject, doc: Option<Node>) -> bool
 /// bool(true)
 /// ```
 pub(crate) fn base_directory(req: &Request) -> Vec<u8> {
-    let mut dir = req.cwd().to_string_lossy().into_owned().into_bytes();
+    let mut dir = req
+        .environment()
+        .cwd()
+        .to_string_lossy()
+        .into_owned()
+        .into_bytes();
     if !dir.ends_with(b"/") {
         dir.push(b'/');
     }
@@ -730,7 +735,12 @@ fn register_node_class_as(
     let node_name = if modern { "Dom\\Node" } else { "DOMNode" };
     let node_class = crate::class(req, node_name)?;
     let base = match php_ext::call::autoload(req, base_name)? {
-        Some(c) if req.class_decl(c).is_some() && crate::class_extends(req, c, node_class) => c,
+        Some(c)
+            if req.symbols().class_decl(c).is_some()
+                && crate::class_extends(req, c, node_class) =>
+        {
+            c
+        }
         Some(c) => {
             let shown = crate::class_name(req, c);
             return Err(arg_type_error(
@@ -763,7 +773,11 @@ fn register_node_class_as(
             }
         }
     };
-    let abstract_class = |req: &Request, c| req.class_decl(c).is_some_and(|d| d.flags.is_abstract);
+    let abstract_class = |req: &Request, c| {
+        req.symbols()
+            .class_decl(c)
+            .is_some_and(|d| d.flags.is_abstract)
+    };
     if abstract_class(req, base) {
         return Err(arg_value_error(req, 1, "not be an abstract class"));
     }

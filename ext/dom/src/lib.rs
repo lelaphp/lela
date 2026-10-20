@@ -339,7 +339,7 @@ pub(crate) mod modern_constants {
 /// RelaxNG Support => enabled
 /// ```
 fn dom_info(req: &mut Request) {
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["DOM/XML", "enabled"],
         &["DOM/XML API Version", "20031129"],
         &["libxml Version", "2.9.13"],
@@ -548,7 +548,8 @@ fn mark_ids_modified(req: &mut Request, object: PhpObject) {
 
 /// `ce->name` of a class.
 fn class_name(req: &Request, class: ClassId) -> String {
-    req.class_decl(class)
+    req.symbols()
+        .class_decl(class)
         .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
         .unwrap_or_default()
 }
@@ -1629,7 +1630,10 @@ fn file_path(req: &mut Request, source: &[u8]) -> Option<Vec<u8>> {
     } else {
         source
     };
-    let resolved = req.realpath(local).unwrap_or_else(|| req.absolutize(local));
+    let resolved = req
+        .environment_mut()
+        .realpath(local)
+        .unwrap_or_else(|| req.environment().absolutize(local));
     let bytes = resolved.to_string_lossy().into_owned().into_bytes();
     (bytes.len() < MAXPATHLEN).then_some(bytes)
 }
@@ -2104,8 +2108,9 @@ fn coerce_property(
 /// The dom class a class is or extends: the one whose property handlers
 /// an object of it reads, `dom_objects_set_class_ex`'s walk.
 fn base_name(req: &mut Request, class: ClassId) -> Option<Vec<u8>> {
-    req.lineage(class)
-        .map_while(|c| req.class_decl(c))
+    req.symbols()
+        .lineage(class)
+        .map_while(|c| req.symbols().class_decl(c))
         .map(|decl| &decl.name.0)
         .find(|name| table(name).is_some())
         .map(|name| name.to_vec())
@@ -2238,9 +2243,9 @@ fn declared_type(req: &mut Request, object: PhpObject, name: &[u8]) -> (Vec<u8>,
     use php_ext::decl::Type;
     // `zend_hash_find_ptr(&ce->properties_info, name)` and its
     // `prop_info->ce`.
-    let row = req.property_info_row(object.class(), name);
+    let row = req.symbols().property_info_row(object.class(), name);
     if let Some(row) = row
-        && let Some(p) = req.row_property_info(row)
+        && let Some(p) = req.symbols().row_property_info(row)
     {
         let declared = match &p.ty {
             Some(Type::Bool) => Declared::Bool,
@@ -2268,7 +2273,7 @@ fn declared_type(req: &mut Request, object: PhpObject, name: &[u8]) -> (Vec<u8>,
 /// `instanceof_function` over two classes: whether `class` is `of` or
 /// extends it.
 fn class_extends(req: &mut Request, class: ClassId, of: ClassId) -> bool {
-    req.lineage(class).any(|c| c == of)
+    req.symbols().lineage(class).any(|c| c == of)
 }
 
 /// `PHP_DOM_DEPRECATED_PROPERTY`: the deprecation, unless a dumper is

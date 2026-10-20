@@ -201,7 +201,7 @@ impl Stylesheet {
 }
 
 /// One compiled stylesheet the request keeps for an `XSLTProcessor`
-/// ([`Request::adopt`], ADR-0013): what its payload stores, given up by
+/// ([`Memory::adopt`], ADR-0013): what its payload stores, given up by
 /// [`Sheet::close`]. A transformation holds it for its span
 /// ([`SheetId::held`]), so a callback's `importStylesheet()` that
 /// replaces it leaves its free to the transformation's end, where php's
@@ -224,7 +224,7 @@ pub(crate) struct Compiled<'h> {
 impl Sheet {
     /// `stylesheet` kept by the request.
     pub(crate) fn adopt(req: &mut Request, stylesheet: Stylesheet) -> Sheet {
-        Sheet(req.adopt(stylesheet))
+        Sheet(req.memory_mut().adopt(stylesheet))
     }
 
     pub(crate) fn id(&self) -> SheetId {
@@ -234,27 +234,28 @@ impl Sheet {
     /// Given up: freed now, or as the last transformation that holds it
     /// ends.
     pub(crate) fn close(self, req: &mut Request) {
-        drop(req.disown(self.0));
+        drop(req.memory_mut().disown(self.0));
     }
 }
 
 impl SheetId {
-    /// `body` served with the stylesheet held ([`Request::holding`]);
+    /// `body` served with the stylesheet held ([`Memory::holding`]);
     /// `None` where its owner gave it up before.
     pub(crate) fn held<R>(
         self,
         req: &mut Request,
         body: impl for<'h> FnOnce(&mut Request, Compiled<'h>) -> R,
     ) -> Option<R> {
-        req.holding(self.0, |req, held| {
-            let raw = held.get(req)?.0;
-            let sheet = Compiled {
-                raw,
-                span: PhantomData,
-            };
-            Some(body(req, sheet))
-        })
-        .flatten()
+        req.memory_mut()
+            .holding(self.0, |req, held| {
+                let raw = held.get(req)?.0;
+                let sheet = Compiled {
+                    raw,
+                    span: PhantomData,
+                };
+                Some(body(req, sheet))
+            })
+            .flatten()
     }
 }
 

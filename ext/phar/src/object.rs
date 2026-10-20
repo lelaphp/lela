@@ -447,7 +447,12 @@ impl Phar {
     ) -> Result<(), Thrown> {
         let id = held(req, this.object())?;
         let file = filename.0.as_bytes().to_vec();
-        if !file.windows(3).any(|w| w == b"://") && req.check_open_basedir(&file, true).is_err() {
+        if !file.windows(3).any(|w| w == b"://")
+            && req
+                .environment_mut()
+                .check_open_basedir(&file, true)
+                .is_err()
+        {
             return Err(throw(
                 req,
                 "RuntimeException",
@@ -1350,7 +1355,7 @@ impl Phar {
     fn getSupportedSignatures(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         let mut out = PhpArray::new(req)?;
         let mut names: Vec<&[u8]> = vec![b"MD5", b"SHA-1", b"SHA-256", b"SHA-512"];
-        if req.extension_named(b"openssl").is_some() {
+        if req.extensions().named(b"openssl").is_some() {
             names.extend([&b"OpenSSL"[..], b"OpenSSL_SHA256", b"OpenSSL_SHA512"]);
         }
         for name in names {
@@ -1845,5 +1850,5 @@ fn zpp_name_and_value(
 /// `instanceof_function` for two classes, over the parents alone, which
 /// is all a class extending `PharFileInfo` can reach it by.
 fn extends(req: &mut Request, class: ClassId, of: ClassId) -> bool {
-    req.lineage(class).any(|class| class == of)
+    req.symbols().lineage(class).any(|class| class == of)
 }

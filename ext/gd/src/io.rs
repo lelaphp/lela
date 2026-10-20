@@ -8,7 +8,7 @@ use php_ext::abi::{Instance, OrFalse, Path, True, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref};
-use php_ext::request::{Opening, OwnedStream as _, Request, Stream, Streams as _};
+use php_ext::request::{Ini, Opening, OwnedStream as _, Request, Stream, Streams as _};
 use php_ext::values::{Emalloc, Owner, PhpString, Value, ValueRef};
 
 use crate::ffi::{self, Encode, Format, GdFormat, Image, Rect, Reported};
@@ -187,8 +187,9 @@ fn create_from(
     let format = match format {
         Format::Jpeg(_) if plain => {
             let on = req
-                .ini_get(crate::JPEG_IGNORE_WARNING.as_bytes())
-                .map_or(0, Request::ini_parse_bytes);
+                .ini()
+                .get(crate::JPEG_IGNORE_WARNING.as_bytes())
+                .map_or(0, Ini::parse_bytes);
             Format::Jpeg(on != 0)
         }
         other => other,
@@ -539,7 +540,7 @@ impl Sink {
     fn put(&self, req: &mut Request, bytes: &[u8]) -> i32 {
         let took = match &self.to {
             To::Output => {
-                req.write(bytes);
+                req.response_mut().write(bytes);
                 Some(bytes.len())
             }
             To::Stream(stream) => stream.write(req, bytes),
@@ -944,7 +945,11 @@ fn output_gd(
         .filter(|p| !p.is_empty());
     let stream = match &file {
         Some(path) => {
-            if req.check_open_basedir(path, true).is_err() {
+            if req
+                .environment_mut()
+                .check_open_basedir(path, true)
+                .is_err()
+            {
                 docref(req, Level::Warning, "Invalid filename");
                 return Ok(false);
             }
@@ -974,7 +979,7 @@ fn output_gd(
             }
             stream.free(req);
         }
-        None => req.write(&bytes),
+        None => req.response_mut().write(&bytes),
     }
     Ok(true)
 }

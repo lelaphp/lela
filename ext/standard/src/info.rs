@@ -80,13 +80,13 @@ pub(crate) mod constants {
 
 /// `php_info_print`: the text as it is.
 fn print(req: &mut Request, text: &str) {
-    req.write(text.as_bytes());
+    req.response_mut().write(text.as_bytes());
 }
 
 /// `!sapi_module.phpinfo_as_text`: whether the page is `info.c`'s HTML,
 /// which a host serving the web prints, or its text, the CLI's.
 fn html(req: &Request) -> bool {
-    !req.phpinfo_as_text()
+    !req.extensions().phpinfo_as_text()
 }
 
 /// `php_info_print_html_esc`: `php_escape_html_entities(str, len, 0,
@@ -101,7 +101,7 @@ fn section(req: &mut Request, name: &str) {
     if html(req) {
         print(req, &format!("<h2>{name}</h2>\n"));
     } else {
-        req.info_rows(&[InfoRow::Header(&[name])]);
+        req.extensions_mut().info_rows(&[InfoRow::Header(&[name])]);
     }
 }
 
@@ -129,7 +129,7 @@ fn plain_box(req: &mut Request, contents: &[u8]) {
         boxed.push(b'\n');
         boxed.extend_from_slice(contents);
     }
-    req.info_rows(&[InfoRow::Written(&boxed)]);
+    req.extensions_mut().info_rows(&[InfoRow::Written(&boxed)]);
 }
 
 /// `php_get_uname(mode)` (`Z/ext/standard/info.c:655`): one field of
@@ -211,7 +211,7 @@ fn zend_version(req: &Request) -> String {
         "Zend Engine v4.{}, Copyright (c) Zend Technologies\n",
         &PHP_VERSION[2..]
     );
-    for zend in req.zend_extensions() {
+    for zend in req.extensions().zend_extensions() {
         writeln!(
             text,
             "    with {} v{}, {}, by {}",
@@ -250,13 +250,14 @@ fn general(req: &mut Request) {
         let boxed = format!(
             "<tr class=\"h\"><td>\n<a href=\"https://www.php.net/\"><img src=\"{logo}\" alt=\"PHP logo\" /></a><h1 class=\"p\">PHP Version {PHP_VERSION}</h1>\n</td></tr>\n"
         );
-        req.info_rows(&[InfoRow::Written(boxed.as_bytes())]);
+        req.extensions_mut()
+            .info_rows(&[InfoRow::Written(boxed.as_bytes())]);
     } else {
         print(req, &format!("PHP Version => {PHP_VERSION}\n"));
     }
     let uname = String::from_utf8_lossy(&get_uname(b'a')).into_owned();
-    let api = pretty_name(req.sapi_name()).to_owned();
-    let defs = req.build_defs().clone();
+    let api = pretty_name(req.environment().sapi_name()).to_owned();
+    let defs = req.environment().build_defs().clone();
     let [ini_path, loaded, scan_dir, scanned] = ini_cells(req);
     let wrappers: Vec<Vec<u8>> = req
         .stream_wrappers()
@@ -270,8 +271,9 @@ fn general(req: &mut Request) {
         .collect();
     let filters = req.stream_filters();
     let multibyte = req
+        .extensions()
         .multibyte_provider()
-        .and_then(|provider| req.extension_name(provider))
+        .and_then(|provider| req.extensions().name(provider))
         .map_or_else(
             || String::from("disabled"),
             |name| format!("provided by {name}"),
@@ -314,7 +316,7 @@ fn general(req: &mut Request) {
     ]);
     let mut rows: Vec<InfoRow<'_>> = cells.iter().map(|cells| InfoRow::Row(cells)).collect();
     rows.extend(streams.iter().map(|written| InfoRow::Written(written)));
-    req.info_rows(&rows);
+    req.extensions_mut().info_rows(&rows);
     let zend = zend_version(req);
     let mut contents = Vec::new();
     if html(req) {
@@ -338,15 +340,16 @@ fn general(req: &mut Request) {
 /// `php_info_print_module` prints it, then `Additional Modules`, which
 /// lists none since every bundled extension has a version.
 fn modules(req: &mut Request) {
-    let mut names = req.loaded_extensions();
+    let mut names = req.extensions().loaded_extensions();
     names.sort_by_key(|n| n.to_ascii_lowercase());
     for name in names {
-        if let Some(id) = req.extension_named(name.as_bytes()) {
-            req.extension_info(id);
+        if let Some(id) = req.extensions().named(name.as_bytes()) {
+            req.extensions_mut().info(id);
         }
     }
     section(req, "Additional Modules");
-    req.info_rows(&[InfoRow::Header(&["Module Name"])]);
+    req.extensions_mut()
+        .info_rows(&[InfoRow::Header(&["Module Name"])]);
 }
 
 /// `php_print_gpcse_array`'s rows (`Z/ext/standard/info.c:170`):
@@ -358,8 +361,9 @@ fn modules(req: &mut Request) {
 fn gpcse(req: &mut Request, name: &str) -> Result<Vec<u8>, Thrown> {
     let html = html(req);
     let mut out = Vec::new();
-    let _ = req.superglobal(name.as_bytes());
+    let _ = req.variables_mut().superglobal(name.as_bytes());
     let Some(array) = req
+        .variables_mut()
         .global(name.as_bytes())
         .and_then(|value| value.deref().as_array())
     else {
@@ -494,7 +498,7 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
     if flag & INFO_GENERAL != 0 {
         general(req);
     }
-    req.ini_sort_entries();
+    req.ini_mut().sort_entries();
     if flag & INFO_CONFIGURATION != 0 {
         hr(req);
         if html(req) {
@@ -504,7 +508,7 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
         }
         if flag & INFO_MODULES == 0 {
             section(req, "PHP Core");
-            req.core_ini_info();
+            req.ini_mut().core_ini_info();
         }
     }
     if flag & INFO_MODULES != 0 {
@@ -513,6 +517,7 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
     if flag & INFO_ENVIRONMENT != 0 {
         section(req, "Environment");
         let pairs: Vec<(String, String)> = req
+            .environment()
             .env_pairs()
             .iter()
             .map(|(name, value)| {
@@ -528,13 +533,13 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
             .collect();
         let mut rows = vec![InfoRow::Header(&["Variable", "Value"])];
         rows.extend(cells.iter().map(|cells| InfoRow::Row(cells)));
-        req.info_rows(&rows);
+        req.extensions_mut().info_rows(&rows);
     }
     if flag & INFO_VARIABLES != 0 {
         section(req, "PHP Variables");
         let mut own: Vec<[String; 2]> = Vec::new();
         for name in ["PHP_SELF", "PHP_AUTH_TYPE", "PHP_AUTH_USER", "PHP_AUTH_PW"] {
-            if let Some(value) = req.global(name.as_bytes())
+            if let Some(value) = req.variables_mut().global(name.as_bytes())
                 && let Some(value) = value.as_str_bytes()
             {
                 own.push([name.to_owned(), String::from_utf8_lossy(value).into_owned()]);
@@ -550,7 +555,7 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
         let mut rows = vec![InfoRow::Header(&["Variable", "Value"])];
         rows.extend(cells.iter().map(|cells| InfoRow::Row(cells)));
         rows.push(InfoRow::Written(&written));
-        req.info_rows(&rows);
+        req.extensions_mut().info_rows(&rows);
     }
     if flag & INFO_CREDITS != 0 {
         hr(req);
@@ -604,7 +609,7 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
 /// Whatever the flags, the ini table is sorted by name before anything
 /// past the general block is printed, so each extension's directives are
 /// listed sorted, and so is every walk of the table after the call
-/// ([`Request::ini_sort_entries`]):
+/// ([`Ini::sort_entries`]):
 ///
 /// ```php
 /// ob_start(); phpinfo(INFO_MODULES); preg_match_all('/^session\.\w+/m', ob_get_clean(), $m);
@@ -785,10 +790,10 @@ fn phpversion(
     let Some(name) = extension else {
         return PhpString::new(req, PHP_VERSION.as_bytes()).map(OrFalse::Value);
     };
-    let Some(extension) = req.extension_named(name.as_bytes()) else {
+    let Some(extension) = req.extensions().named(name.as_bytes()) else {
         return Ok(OrFalse::False);
     };
-    let version = req.extension_version(extension).unwrap_or_default();
+    let version = req.extensions().version(extension).unwrap_or_default();
     PhpString::new(req, version.as_bytes()).map(OrFalse::Value)
 }
 
@@ -819,10 +824,11 @@ fn print_credits(req: &mut Request, flag: i64) {
                 rows.push(InfoRow::Header(header));
             }
             rows.extend(body.iter().map(|cells| InfoRow::Row(cells)));
-            req.info_rows(&rows);
+            req.extensions_mut().info_rows(&rows);
         };
     if flag & CREDITS_GROUP != 0 {
-        req.info_rows(&[InfoRow::Header(&["PHP Group"]), InfoRow::Row(&[GROUP])]);
+        req.extensions_mut()
+            .info_rows(&[InfoRow::Header(&["PHP Group"]), InfoRow::Row(&[GROUP])]);
     }
     if flag & CREDITS_GENERAL != 0 {
         let design = if html {
@@ -830,7 +836,8 @@ fn print_credits(req: &mut Request, flag: i64) {
         } else {
             "Language Design & Concept"
         };
-        req.info_rows(&[InfoRow::Header(&[design]), InfoRow::Row(&[DESIGN])]);
+        req.extensions_mut()
+            .info_rows(&[InfoRow::Header(&[design]), InfoRow::Row(&[DESIGN])]);
         credit_table(
             req,
             "PHP Authors",
@@ -858,7 +865,7 @@ fn print_credits(req: &mut Request, flag: i64) {
         credit_table(req, "PHP Documentation", None, &lines(&DOCS));
     }
     if flag & CREDITS_QA != 0 {
-        req.info_rows(&[
+        req.extensions_mut().info_rows(&[
             InfoRow::Header(&["PHP Quality Assurance Team"]),
             InfoRow::Row(&[QA]),
         ]);
@@ -939,7 +946,7 @@ fn phpcredits(req: &mut Request, #[php(default = CREDITS_ALL)] flags: i64) -> Tr
 /// ```
 #[php_function]
 fn php_sapi_name(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    let name = req.sapi_name().to_owned();
+    let name = req.environment().sapi_name().to_owned();
     PhpString::new(req, name.as_bytes()).map(OrFalse::Value)
 }
 
@@ -982,7 +989,7 @@ fn php_uname(
 /// scanned file that parsed, `,\n` between and `\n` after the last;
 /// none where none was.
 fn scanned_list(req: &Request) -> Option<Vec<u8>> {
-    let files: Vec<&[u8]> = req.ini_files().scanned().collect();
+    let files: Vec<&[u8]> = req.ini().files().scanned().collect();
     (!files.is_empty()).then(|| [files.join(b",\n".as_slice()), b"\n".to_vec()].concat())
 }
 
@@ -990,7 +997,7 @@ fn scanned_list(req: &Request) -> Option<Vec<u8>> {
 /// the file read, the scan path and the files scanned, `(none)` for each
 /// there was none of.
 fn ini_cells(req: &Request) -> [String; 4] {
-    let files = req.ini_files();
+    let files = req.ini().files();
     let scanned = scanned_list(req);
     [
         Some(files.ini_path()),
@@ -1055,7 +1062,7 @@ fn php_ini_scanned_files(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>,
 /// ```
 #[php_function]
 fn php_ini_loaded_file(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    match req.ini_files().loaded().map(<[u8]>::to_vec) {
+    match req.ini().files().loaded().map(<[u8]>::to_vec) {
         Some(path) => PhpString::new(req, &path).map(OrFalse::Value),
         None => Ok(OrFalse::False),
     }

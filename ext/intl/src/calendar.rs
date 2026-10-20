@@ -800,7 +800,7 @@ impl IntlCalendar {
         minute: Passed<Raw<i64>>,
         second: Passed<Raw<i64>>,
     ) -> Result<True, Thrown> {
-        if req.argument_count() > 2 {
+        if req.frames().argument_count() > 2 {
             let message = "Calling IntlCalendar::set() with more than 2 arguments is deprecated, use either IntlCalendar::setDate() or IntlCalendar::setDateTime() instead";
             php_ext::raising::deprecated(req, message);
             pending(req)?;
@@ -1621,7 +1621,7 @@ impl IntlGregorianCalendar {
 /// six date and time fields in the default zone; `false` where it made
 /// none, with the error set.
 fn gregorian_body(req: &mut Request, object: PhpObject, constructor: bool) -> Result<bool, Thrown> {
-    let count = req.argument_count();
+    let count = req.frames().argument_count();
     if constructor && count > 2 {
         let message = "Calling IntlGregorianCalendar::__construct() with more than 2 arguments is deprecated, use either IntlGregorianCalendar::createFromDate() or IntlGregorianCalendar::createFromDateTime() instead";
         php_ext::raising::deprecated(req, message);
@@ -1631,7 +1631,11 @@ fn gregorian_body(req: &mut Request, object: PhpObject, constructor: bool) -> Re
         return Err(throw_error(req, "ArgumentCountError", "Too many arguments"));
     }
     let given: Vec<Value> = (1..=u32::try_from(count).unwrap_or(6))
-        .map(|p| req.argument(p).map_or_else(Value::null, |v| v.deref()))
+        .map(|p| {
+            req.frames()
+                .argument(p)
+                .map_or_else(Value::null, |v| v.deref())
+        })
         .collect();
     let variant = given
         .iter()

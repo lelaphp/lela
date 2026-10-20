@@ -880,7 +880,7 @@ pub(crate) struct Shared {
     pub(crate) host: &'static str,
     /// `configuration_hash`: what the host's ini text set, before any
     /// entry read it, which `get_cfg_var()` answers from
-    /// ([`Request::cfg_entry`]).
+    /// ([`Ini::cfg_entry`]).
     configuration: Vec<(Vec<u8>, Configured)>,
     /// Whether it holds a `[PATH=]` table and a `[HOST=]` table.
     sections: [bool; 2],
@@ -1787,7 +1787,7 @@ impl Shared {
         kind: SourceKind,
     ) -> Result<Unit, CompileError> {
         let ini = CompileIni {
-            precision: req.precision(),
+            precision: req.ini().precision(),
             short_open_tag: req.short_open_tag(),
             assertions: req.assertions() >= 0,
             shebang: self.shebang,
@@ -1829,7 +1829,10 @@ impl Shared {
     /// reads at its start, and what a unit compiled outside one is held
     /// to on the thread that asked for it.
     pub(crate) fn stack_limit(&self) -> StackLimit {
-        let bytes = |name: &[u8]| self.ini_default(name).map_or(0, Request::ini_parse_bytes);
+        let bytes = |name: &[u8]| {
+            self.ini_default(name)
+                .map_or(0, crate::api::request::Ini::parse_bytes)
+        };
         StackLimit::init(
             bytes(b"zend.max_allowed_stack_size"),
             u64::try_from(bytes(b"zend.reserved_stack_size")).unwrap_or(0),
@@ -2264,7 +2267,7 @@ const CORE_INI: &[(&str, Option<&str>)] = &[
     ("max_execution_time", Some("30")),
     // `open_basedir`, `PHP_INI_ALL` and `NULL` in php's table
     // (`Z/main/main.c:841`): the base directories the guard holds a path
-    // to ([`Request::check_open_basedir`]), any list at startup and only
+    // to ([`Environment::check_open_basedir`]), any list at startup and only
     // a tighter one after (`OnUpdateBaseDir`).
     ("open_basedir", None),
     // The body of a request of the web, its limits, and the uploads.
@@ -2882,14 +2885,15 @@ fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
             // `main.c` declares `report_memleaks` after `max_input_time`.
             b"max_input_time"
                 if req
-                    .ini_get(b"report_memleaks")
-                    .is_some_and(|v| !Request::ini_parse_bool(v)) =>
+                    .ini()
+                    .get(b"report_memleaks")
+                    .is_some_and(|v| !crate::api::request::Ini::parse_bool(v)) =>
             {
                 let message = "Directive 'report_memleaks' is deprecated";
                 crate::api::raising::docref(req, Level::Deprecated, message);
             }
             b"memory_limit" => {
-                let limit = req.ini_get(name).map(<[u8]>::to_vec).unwrap_or_default();
+                let limit = req.ini().get(name).map(<[u8]>::to_vec).unwrap_or_default();
                 let held = match req.memory_limit_verdict(&limit) {
                     Some(held) if held == limit => continue,
                     Some(held) => held,
@@ -2949,7 +2953,7 @@ fn register_extensions(req: &mut Request, loads: &Loads) -> Vec<u8> {
     const NO_LOADER: &str = "dynamic modules are not supported";
     // php's messages are bytes throughout: a directory or a name that is
     // not UTF-8 is written as it was set.
-    let dir = req.ini_get(b"extension_dir").unwrap_or_default().to_vec();
+    let dir = req.ini().get(b"extension_dir").unwrap_or_default().to_vec();
     let sep: &[u8] = if dir.ends_with(b"/") { b"" } else { b"/" };
     let so = crate::constants::SHLIB_SUFFIX.as_bytes();
     let no = NO_LOADER.as_bytes();
@@ -3016,7 +3020,8 @@ fn register_extensions(req: &mut Request, loads: &Loads) -> Vec<u8> {
 /// startup warning for each the list names, which keeps it.
 fn disable_warnings(req: &mut Request) {
     let list = req
-        .ini_get(b"disable_functions")
+        .ini()
+        .get(b"disable_functions")
         .map(<[u8]>::to_vec)
         .unwrap_or_default();
     let names = list.split(|byte| matches!(byte, b' ' | b','));
@@ -3572,7 +3577,7 @@ impl EngineBuilder {
             ini.iter()
                 .find(|(n, _)| n.as_slice() == name.as_bytes())
                 .and_then(|(_, value)| value.as_deref())
-                .is_some_and(Request::ini_parse_bool)
+                .is_some_and(crate::api::request::Ini::parse_bool)
         };
         let shebang = match self.shebang_while {
             Some(name) if on(name) => php_compile::Shebang::Skipped,
@@ -5003,10 +5008,10 @@ impl Engine {
             // and the loop's refusals write them.
             HostServes::Page(page) => {
                 for line in &page.headers {
-                    req.header_add(line, true, 0);
+                    req.response_mut().header_add(line, true, 0);
                 }
-                req.set_response_code(page.code);
-                req.write(&page.body);
+                req.response_mut().set_response_code(page.code);
+                req.response_mut().write(&page.body);
             }
             HostServes::Nothing => {}
         }
@@ -5089,6 +5094,7 @@ impl Engine {
             // `open_file_for_scanning` over the program: the source the
             // host handed over, or the file read whole.
             let script = req
+                .environment()
                 .script_name()
                 .map_or_else(|| b"Standard input code".to_vec(), <[u8]>::to_vec);
             let text = source.or_else(|| std::fs::read(cwd.join(OsStr::from_bytes(&script))).ok());
@@ -5101,7 +5107,7 @@ impl Engine {
                 };
                 // A source the filter refused ended the request.
                 if let Ok(written) = written {
-                    req.write(&written);
+                    req.response_mut().write(&written);
                 }
             }
             return self.shutdown_untraced(&mut req);
@@ -5113,7 +5119,11 @@ impl Engine {
                 note_compiled(&mut req, &unit, SourceKind::File);
             }
             Some(Err(refused)) => {
-                let file = req.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+                let file = req
+                    .frames()
+                    .current_file()
+                    .map(<[u8]>::to_vec)
+                    .unwrap_or_default();
                 refused_program(&mut req, &refused, &file);
             }
             None => {}
@@ -5190,9 +5200,9 @@ impl Engine {
         req.apply_host_ini();
         req.realpath_cache_startup();
         req.read_post_at_startup();
-        if web && req.ini_flag(b"expose_php") && req.headers_sent().is_none() {
+        if web && req.ini_flag(b"expose_php") && req.response().headers_sent().is_none() {
             let line = format!("X-Powered-By: PHP/{}", crate::api::request::PHP_VERSION);
-            let _ = req.header_add(line.as_bytes(), true, 0);
+            let _ = req.response_mut().header_add(line.as_bytes(), true, 0);
         }
         crate::output::start_at_request(&mut req).ok();
         req.hash_environment().ok();
@@ -5247,10 +5257,10 @@ impl Engine {
             _ => None,
         };
         let observed = Observables {
-            exit_code: req.exit_status(),
+            exit_code: req.diagnostics().exit_status(),
             headers_sent: req.output().headers_sent(),
             fatal,
-            memory_peak: req.memory_peak(true),
+            memory_peak: req.memory().peak(true),
             uncaught: None,
             start_failed: true,
         };
@@ -5268,7 +5278,7 @@ impl Engine {
         // The name the host wrote, `primary_file->filename`, which
         // `php_execute_script_ex` leaves as it is beside the expanded
         // `opened_path`, and which opcache makes the file's key of.
-        let written = req.script_name().map(<[u8]>::to_vec);
+        let written = req.environment().script_name().map(<[u8]>::to_vec);
         let old_cwd = req.old_cwd();
         if script
             && source.is_none()
@@ -5327,7 +5337,11 @@ impl Engine {
             // diagnostic, at the level the compiler refused at, and the
             // request ends before a frame is pushed.
             Some(Err(refused)) => {
-                let file = req.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+                let file = req
+                    .frames()
+                    .current_file()
+                    .map(<[u8]>::to_vec)
+                    .unwrap_or_default();
                 refused_program(req, &refused, &file);
                 false
             }
@@ -5389,6 +5403,7 @@ impl Engine {
             // A source the host read is still `zend_compile_file`'s.
             req.take_shared_hold();
             let script = req
+                .environment()
                 .script_name()
                 .map_or_else(|| b"Standard input code".to_vec(), <[u8]>::to_vec);
             return Some(
@@ -5396,7 +5411,11 @@ impl Engine {
                     .compile_for(req, source, &script, SourceKind::File),
             );
         }
-        let script = req.script_name().map(<[u8]>::to_vec).unwrap_or_default();
+        let script = req
+            .environment()
+            .script_name()
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default();
         // A bare program is opened as phpdbg's `phpdbg_compile` opens it,
         // a stream through `php_stream_open_for_zend_ex`, and spends a
         // resource id where the CLI's `FILE *` spends none; the built-in
@@ -5483,10 +5502,10 @@ impl Engine {
                 Named::Program => {
                     self.execute_script(&mut req, None);
                     dispatched.program = Some(ProgramServed::Ran {
-                        code: req.response_code(),
+                        code: req.response().response_code(),
                         fatal: req.last_fatal(),
                     });
-                    if req.response_code() == 304 {
+                    if req.response().response_code() == 304 {
                         req.output_mut().no_default_content_type();
                     }
                 }
@@ -5526,6 +5545,7 @@ impl Engine {
             return Routed::Taken;
         }
         let path = req
+            .environment_mut()
             .expand_filepath(router)
             .unwrap_or_else(|| router.to_vec());
         let ran = match Engine::compile_program(req, &path, router, HandlePath::Kept) {
@@ -5668,7 +5688,7 @@ impl Engine {
             Some(Ending::Fatal(logged)) => Some(logged.clone()),
             _ => None,
         };
-        let exit_code = req.exit_status();
+        let exit_code = req.diagnostics().exit_status();
         // The block reached the sink at the commit, which the output
         // layer's deactivation makes if nothing had; one it refused, for
         // the memory limit, is handed over now.
@@ -5687,7 +5707,7 @@ impl Engine {
                 exit_code,
                 headers_sent: true,
                 fatal,
-                memory_peak: req.memory_peak(true),
+                memory_peak: req.memory().peak(true),
                 uncaught: req.take_kept_uncaught(),
                 start_failed: false,
             },
@@ -6052,7 +6072,7 @@ pub(crate) fn refusal_raised(req: &mut Request, refused: &CompileError, file: &[
 /// ([`Request::require_kept`]), and served where the program is, and
 /// whether it ran to its end; an entry left empty is nothing to serve.
 pub(crate) fn auto_file(req: &mut Request, name: &[u8], entry: Loop) -> bool {
-    let Some(file) = req.ini_get(name).filter(|file| !file.is_empty()) else {
+    let Some(file) = req.ini().get(name).filter(|file| !file.is_empty()) else {
         return true;
     };
     let file = file.to_vec();
@@ -6160,7 +6180,7 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit, entry: Loop) -
             Primary::Bare => req.keep_uncaught(),
         }
     }
-    !exited && !req.bailing_out() && req.ending().is_none()
+    !exited && !req.diagnostics().bailing_out() && req.ending().is_none()
 }
 
 /// Each extension's `rinit` in startup order, `zend_activate_modules`,
@@ -6566,11 +6586,11 @@ mod tests {
     #[test]
     fn a_startup_handler_sees_the_entries_before_it_and_its_stderr_is_kept() {
         let second: OnModify = |req, value| {
-            let mut line = req.ini_get(b"t.first").unwrap_or_default().to_vec();
+            let mut line = req.ini().get(b"t.first").unwrap_or_default().to_vec();
             line.extend_from_slice(b" then ");
             line.extend_from_slice(value.unwrap_or_default());
             line.push(b'\n');
-            req.write_stderr(&line);
+            req.response_mut().write_stderr(&line);
             Ok(true)
         };
         let first: OnModify = |_, _| Ok(true);
@@ -6601,11 +6621,11 @@ mod tests {
     #[test]
     fn interceptions_of_one_native_stack_in_bundle_order() {
         let earlier: Entry = |req| {
-            req.write(b"earlier ");
+            req.response_mut().write(b"earlier ");
             crate::api::call::passthrough(req, None)
         };
         let later: Entry = |req| {
-            req.write(b"later ");
+            req.response_mut().write(b"later ");
             crate::api::call::passthrough(req, None)
         };
         let extensions = [
@@ -6650,7 +6670,7 @@ mod tests {
                 file_cache: None,
             })
             .post_startup(|req, _| {
-                let script = req.ini_get(b"t.preload").unwrap_or_default().to_vec();
+                let script = req.ini().get(b"t.preload").unwrap_or_default().to_vec();
                 if script.is_empty() {
                     crate::api::abi::PostStartup::Serve
                 } else {
@@ -6759,7 +6779,7 @@ mod tests {
         crate::api::abi::ExtensionBuilder::default()
             .ini(vec![entry])
             .admission(|req, _| {
-                let dir = req.ini_get(b"t.file_cache").unwrap_or_default();
+                let dir = req.ini().get(b"t.file_cache").unwrap_or_default();
                 crate::api::abi::Admission::Held {
                     validation: Validation::Never,
                     lookup: crate::api::abi::Lookup::Resolved,
@@ -6823,7 +6843,7 @@ mod tests {
     fn a_refused_startup_serves_nothing() {
         let refusing = crate::api::abi::ExtensionBuilder::default()
             .post_startup(|req, _| {
-                req.write_stderr(b"refused\n");
+                req.response_mut().write_stderr(b"refused\n");
                 crate::api::abi::PostStartup::Refuse { status: -2 }
             })
             .build("t");
@@ -8101,8 +8121,8 @@ mod tests {
         let mut started_at = Vec::new();
         for _ in 0..2 {
             let mut req = Request::new(Arc::clone(&engine.shared), description(""));
-            started_at.push(req.memory_usage(false));
-            let before = req.memory_usage(false);
+            started_at.push(req.memory().usage(false));
+            let before = req.memory().usage(false);
             let compiled = req.compiling(|strings, _, _, _| {
                 compile(
                     source,
@@ -8132,7 +8152,7 @@ mod tests {
             });
             assert!(compiled.is_ok(), "the source compiles");
             assert!(
-                req.memory_usage(false) > before,
+                req.memory().usage(false) > before,
                 "what the request made of its constants is the request's own memory"
             );
             req.release_compiled();

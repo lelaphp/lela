@@ -470,7 +470,7 @@ fn stream_context_set_option(
     value: Passed<Value>,
 ) -> Result<True, Thrown> {
     // The 8.4 deprecation comes before `ZEND_PARSE_PARAMETERS_START(2, 4)`.
-    let given = req.argument_count();
+    let given = req.frames().argument_count();
     if given == 2 {
         deprecated(
             req,
@@ -1115,14 +1115,15 @@ fn stream_resolve_include_path(
     filename: Path,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let filename = filename.0.as_bytes().to_vec();
-    let cwd = req.cwd().as_os_str().as_bytes().to_vec();
+    let cwd = req.environment().cwd().as_os_str().as_bytes().to_vec();
     let realpath = |req: &mut Request, path: &[u8]| {
         let base: &[u8] = if path.first() == Some(&b'/') {
             b""
         } else {
             &cwd
         };
-        req.virtual_file_ex(base, path, Resolve::RealPath)
+        req.environment_mut()
+            .virtual_file_ex(base, path, Resolve::RealPath)
     };
     let scheme = filename
         .iter()
@@ -1135,7 +1136,7 @@ fn stream_resolve_include_path(
             None
         }
     } else {
-        let include_path = req.ini_get(b"include_path").map(<[u8]>::to_vec);
+        let include_path = req.ini().get(b"include_path").map(<[u8]>::to_vec);
         let relative = filename.starts_with(b"./") || filename.starts_with(b"../");
         match include_path.filter(|p| !p.is_empty()) {
             Some(path) if !relative && filename.first() != Some(&b'/') => {
@@ -1149,7 +1150,7 @@ fn stream_resolve_include_path(
                         realpath(req, &trypath)
                     });
                 found.or_else(|| {
-                    let executed = req.current_file()?.to_vec();
+                    let executed = req.frames().current_file()?.to_vec();
                     let dir = executed.iter().rposition(|c| *c == b'/')?;
                     let mut trypath = executed.get(..=dir)?.to_vec();
                     trypath.extend_from_slice(&filename);

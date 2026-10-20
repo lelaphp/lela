@@ -152,7 +152,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, raise, throw_error,
 };
 use php_ext::request::{
-    MAXPATHLEN, OptionAnswer, OwnedStream as _, Request, Resolve, Stream, StreamOption,
+    Ini, MAXPATHLEN, OptionAnswer, OwnedStream as _, Request, Resolve, Stream, StreamOption,
     Streams as _, Whence, WrapperOp,
 };
 use php_ext::values::walk::{self, Hold};
@@ -190,7 +190,7 @@ pub(crate) fn on_auto_detect_line_endings(
     value: Option<&[u8]>,
 ) -> Result<bool, Thrown> {
     let value = value.unwrap_or_default();
-    if Request::ini_parse_bool(value) {
+    if Ini::parse_bool(value) {
         raise(
             req,
             Level::Deprecated,
@@ -1783,7 +1783,10 @@ fn has_to_string(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
     }
     // `ce->__tostring`: the function table's row, a trait's method and
     // an inherited one among them.
-    Ok(req.method_row(object.class(), b"__tostring").is_some())
+    Ok(req
+        .symbols()
+        .method_row(object.class(), b"__tostring")
+        .is_some())
 }
 
 /// `stream_get_meta_data($stream): array`,
@@ -1954,9 +1957,10 @@ fn rmdir(
 /// ```
 #[php_function]
 fn umask(req: &mut Request, #[php(default = null)] mask: Option<i64>) -> i64 {
-    let old = req.umask();
+    let old = req.environment().umask();
     if let Some(mask) = mask {
-        req.set_umask(u32::try_from(mask & UMASK_BITS).unwrap_or(0));
+        req.environment_mut()
+            .set_umask(u32::try_from(mask & UMASK_BITS).unwrap_or(0));
     }
     i64::from(old)
 }
@@ -2084,7 +2088,7 @@ fn copy_file(req: &mut Request, source: &[u8], target: &[u8]) -> Result<bool, Th
                 return Ok(false);
             }
             if src[1] == 0 || dest[1] == 0 {
-                if req.absolutize(source) == req.absolutize(target) {
+                if req.environment().absolutize(source) == req.environment().absolutize(target) {
                     return Ok(false);
                 }
             } else if src[1] == dest[1] && src[0] == dest[0] {
@@ -2148,7 +2152,10 @@ fn copy(
 ) -> Result<bool, Thrown> {
     let (Path(source), Path(target)) = (from, to);
     if let Some(local) = req.plain_path(source.as_bytes())
-        && req.check_open_basedir(&local, true).is_err()
+        && req
+            .environment_mut()
+            .check_open_basedir(&local, true)
+            .is_err()
     {
         return Ok(false);
     }
@@ -2726,7 +2733,7 @@ fn passthru(req: &mut Request, stream: Stream) -> Result<i64, Thrown> {
     while let Some(chunk) = stream.read(req, 8192)? {
         let written = chunk.len();
         if written > 0 {
-            req.write(chunk.as_bytes());
+            req.response_mut().write(chunk.as_bytes());
         }
         chunk.give_up(req);
         if written == 0 {
@@ -3231,7 +3238,7 @@ fn fgetcsv(
 #[php_function]
 fn realpath(req: &mut Request, path: Path) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Path(path) = path;
-    let cwd = req.cwd().as_os_str().as_bytes().to_vec();
+    let cwd = req.environment().cwd().as_os_str().as_bytes().to_vec();
     let written = if path.as_bytes().is_empty() {
         cwd.clone()
     } else {
@@ -3242,9 +3249,17 @@ fn realpath(req: &mut Request, path: Path) -> Result<OrFalse<Owner<PhpString>>, 
     } else {
         &cwd
     };
-    match req.virtual_file_ex(cwd, &written, Resolve::RealPath) {
+    match req
+        .environment_mut()
+        .virtual_file_ex(cwd, &written, Resolve::RealPath)
+    {
         // The guard is asked of the resolved path, and warns.
-        Some(resolved) if req.check_open_basedir(&resolved, true).is_ok() => {
+        Some(resolved)
+            if req
+                .environment_mut()
+                .check_open_basedir(&resolved, true)
+                .is_ok() =>
+        {
             Ok(OrFalse::Value(PhpString::new(req, &resolved)?))
         }
         Some(_) | None => Ok(OrFalse::False),
@@ -3305,7 +3320,7 @@ fn fnmatch(
 /// `sys_get_temp_dir(): string`, `PHP_FUNCTION(sys_get_temp_dir)`
 /// (`Z/ext/standard/file.c:2269`) over `php_get_temporary_directory`
 /// (`Z/main/php_open_temporary_file.c:236`), the one directory
-/// [`Request::temp_dir`] names.
+/// [`Environment::temp_dir`] names.
 ///
 /// ```php
 /// $t = sys_get_temp_dir(); var_dump($t[0], is_dir($t));
@@ -3316,6 +3331,6 @@ fn fnmatch(
 /// ```
 #[php_function]
 fn sys_get_temp_dir(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
-    let dir = req.temp_dir();
+    let dir = req.environment().temp_dir();
     PhpString::new(req, dir.as_os_str().as_encoded_bytes())
 }

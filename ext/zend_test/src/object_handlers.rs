@@ -344,7 +344,7 @@ impl ObjectHandlers for VmInterrupt {
         let (Some(a), Some(b)) = (of_class(left), of_class(right)) else {
             return Std.compare(req, left, right);
         };
-        req.interrupt().raise();
+        req.limits().interrupt().raise();
         Ok(Some(a.as_int().cmp(&b.as_int())))
     }
 }

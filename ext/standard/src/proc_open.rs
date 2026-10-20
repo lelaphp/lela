@@ -226,7 +226,7 @@ fn popen(
 /// `strerror(errno)`: the host's text for an `errno`, without the
 /// ` (os error N)` Rust puts after it.
 fn strerror(req: &Request, code: i32) -> String {
-    let text = req.os_error_text(code);
+    let text = req.environment().os_error_text(code);
     text.split_once(" (os error")
         .map_or(text.clone(), |(text, _)| text.to_owned())
 }
@@ -260,11 +260,11 @@ pub(crate) fn shell(req: &Request, command: &[u8]) -> Command {
 /// name the process's directory, `getcwd(3)` failing, was given none and
 /// stands in it (#2917).
 fn in_request(req: &Request, command: &mut Command) {
-    let cwd = req.cwd();
+    let cwd = req.environment().cwd();
     if !cwd.as_os_str().is_empty() && crate::ffi::process_dir().as_ref() != Some(&cwd) {
         command.current_dir(cwd);
     }
-    crate::ffi::environment(command, req.env_pairs());
+    crate::ffi::environment(command, req.environment().env_pairs());
 }
 
 /// `pclose($handle): int`, `PHP_FUNCTION(pclose)`
@@ -312,6 +312,7 @@ fn process_type(req: &mut Request) -> ResourceType {
         return kind;
     }
     let kind = req
+        .memory_mut()
         .resources()
         .register_type(b"process", Some(process_dtor));
     req.state::<State>().proc_open.kind = Some(kind);
@@ -321,7 +322,7 @@ fn process_type(req: &mut Request) -> ResourceType {
 /// `waitpid_cached` (`Z/ext/standard/proc_open.c:235`): the status the
 /// resource cached once the child exited, else `waitpid(2)`, whose answer
 /// is cached where it says the child exited. A wait that blocks lends
-/// the request ([`Request::blocking`]), `proc_close`'s (#2401); the
+/// the request ([`Limits::blocking`]), `proc_close`'s (#2401); the
 /// resource is read before it and written after it, never during.
 fn waitpid_cached(req: &mut Request, res: Resource, options: i32) -> std::io::Result<(i32, i32)> {
     let Some(process) = res.native::<Process>(req) else {
@@ -338,7 +339,7 @@ fn waitpid_cached(req: &mut Request, res: Resource, options: i32) -> std::io::Re
         }
     };
     let answered = if options & crate::ffi::WNOHANG == 0 {
-        req.blocking(wait)
+        req.limits_mut().blocking(wait)
     } else {
         wait()
     };

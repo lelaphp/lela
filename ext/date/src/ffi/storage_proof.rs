@@ -168,8 +168,10 @@ fn existing_owned_states_and_safe_block_payloads_do_not_fit_php_objects() {
 }
 
 fn real_records(req: &mut Request) -> Result<(), Thrown> {
-    let before = req.memory_usage(false);
-    let observer = req.observe_allocations(Box::new(Recorder::default()));
+    let before = req.memory().usage(false);
+    let observer = req
+        .memory_mut()
+        .observe_allocations(Box::new(Recorder::default()));
     let value = RelFields {
         y: -2,
         d: 3,
@@ -212,7 +214,10 @@ fn real_records(req: &mut Request) -> Result<(), Thrown> {
     container.free(req);
     message.free(req);
     text.free(req);
-    let back: Option<Box<dyn Any>> = req.unobserve_allocations(observer).map(|o| o as _);
+    let back: Option<Box<dyn Any>> = req
+        .memory_mut()
+        .unobserve_allocations(observer)
+        .map(|o| o as _);
     let events = back.and_then(|any| any.downcast::<Recorder>().ok());
     assert!(events.is_some());
     if let Some(events) = events {
@@ -235,7 +240,7 @@ fn real_records(req: &mut Request) -> Result<(), Thrown> {
         );
         println!("actual record allocations: {sizes:?}; usage returned to baseline");
     }
-    assert_eq!(req.memory_usage(false), before);
+    assert_eq!(req.memory().usage(false), before);
     Ok(())
 }
 
@@ -247,7 +252,7 @@ fn actual_relative_abbreviation_and_diagnostic_records_clone_and_release() {
 }
 
 fn real_date(req: &mut Request) -> Result<(), Thrown> {
-    let before = req.memory_usage(false);
+    let before = req.memory().usage(false);
     let mut block = record(req, size_of::<TimeFields>())?;
     {
         // Native parsing is only the independent source of values for this
@@ -296,7 +301,7 @@ fn real_date(req: &mut Request) -> Result<(), Thrown> {
     block.free(req);
     assert_eq!(read_i64(&cloned, offset_of!(TimeFields, d)), 29);
     cloned.free(req);
-    assert_eq!(req.memory_usage(false), before);
+    assert_eq!(req.memory().usage(false), before);
     Ok(())
 }
 
@@ -307,7 +312,7 @@ fn date_bytes_remain_the_storage_after_the_source_time_is_destroyed() {
 }
 
 fn cache(req: &mut Request) -> Result<(), Thrown> {
-    let before = req.memory_usage(false);
+    let before = req.memory().usage(false);
     let mut table = PhpArray::new(req)?;
     for (index, name) in [
         "Europe/Amsterdam",
@@ -355,7 +360,7 @@ fn cache(req: &mut Request) -> Result<(), Thrown> {
     indexes.free(req);
     payload.free(req);
     table.give_up(req);
-    assert_eq!(req.memory_usage(false), before);
+    assert_eq!(req.memory().usage(false), before);
     Ok(())
 }
 
@@ -394,7 +399,7 @@ fn real_memory_limit_refusal_releases_the_initialized_prefix() {
 }
 
 fn prefixes(req: &mut Request) -> Result<(), Thrown> {
-    let before = req.memory_usage(false);
+    let before = req.memory().usage(false);
     for fail_after in 0..=6 {
         let mut initialized = Vec::new();
         for size in [176, 17, 24, 3, 60, 8].into_iter().take(fail_after) {
@@ -405,7 +410,7 @@ fn prefixes(req: &mut Request) -> Result<(), Thrown> {
         for block in initialized {
             block.free(req);
         }
-        assert_eq!(req.memory_usage(false), before);
+        assert_eq!(req.memory().usage(false), before);
     }
     Ok(())
 }

@@ -156,7 +156,7 @@ fn exif_info(req: &mut Request) {
     } else {
         "disabled"
     };
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["EXIF Support", "enabled"],
         &["Supported EXIF Version", "0220"],
         &["Supported filetypes", "JPEG, TIFF"],
@@ -167,7 +167,7 @@ fn exif_info(req: &mut Request) {
         ],
     ]);
     let names: Vec<&[u8]> = INI.iter().map(|(name, _)| *name).collect();
-    req.info_ini_entries(&names);
+    req.ini_mut().info_ini_entries(&names);
 }
 
 /// `OnUpdateEncode`: a non-empty value must parse as an encoding list.
@@ -200,7 +200,8 @@ fn parses(req: &mut Request, value: &[u8]) -> bool {
 /// The `exif.*` entries as the request holds them.
 fn encodings(req: &Request) -> EncodingNames {
     let get = |at: usize| {
-        req.ini_get(INI[at].0)
+        req.ini()
+            .get(INI[at].0)
             .map(<[u8]>::to_vec)
             .unwrap_or_default()
     };
@@ -657,7 +658,7 @@ fn read<'r>(
     let mut img = Image::new(read_thumbnail, encodings(req));
     let (stream, owned) = if let ValueRef::Resource(_) = file.as_ref() {
         let Some(stream) = Stream::from_value(req, file) else {
-            let function = req.active_function_name();
+            let function = req.frames().active_function_name();
             let message = format!("{function}(): supplied resource is not a valid stream resource");
             return Err(throw_error(req, "TypeError", &message));
         };

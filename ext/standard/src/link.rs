@@ -76,13 +76,17 @@ fn plain(req: &Request, path: &[u8]) -> Vec<u8> {
     if path.is_empty() {
         return Vec::new();
     }
-    req.absolutize(path).as_os_str().as_bytes().to_vec()
+    req.environment()
+        .absolutize(path)
+        .as_os_str()
+        .as_bytes()
+        .to_vec()
 }
 
 /// The request's working directory as bytes, what `VCWD_GETCWD` gives
 /// `expand_filepath`.
 fn cwd(req: &Request) -> Vec<u8> {
-    req.cwd().as_os_str().as_bytes().to_vec()
+    req.environment().cwd().as_os_str().as_bytes().to_vec()
 }
 
 /// `php_error_docref(NULL, E_WARNING, "%s", strerror(errno))`, and the
@@ -119,7 +123,10 @@ fn failed(req: &mut Request, error: &std::io::Error) -> bool {
 /// ```
 #[php_function]
 fn readlink(req: &mut Request, path: Path) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    let Ok(path) = req.check_open_basedir(path.0.as_bytes(), true) else {
+    let Ok(path) = req
+        .environment_mut()
+        .check_open_basedir(path.0.as_bytes(), true)
+    else {
         return Ok(OrFalse::False);
     };
     match std::fs::read_link(&path) {
@@ -159,7 +166,11 @@ fn readlink(req: &mut Request, path: Path) -> Result<OrFalse<Owner<PhpString>>, 
 fn linkinfo(req: &mut Request, path: Path) -> OrFalse<i64> {
     // The guard is asked of the directory the link stands in.
     let dirname = zend_dirname(path.0.as_bytes());
-    if req.check_open_basedir(&dirname, true).is_err() {
+    if req
+        .environment_mut()
+        .check_open_basedir(&dirname, true)
+        .is_err()
+    {
         return OrFalse::False;
     }
     let path = plain(req, path.0.as_bytes());
@@ -218,10 +229,14 @@ fn symlink(req: &mut Request, target: Path, link: Path) -> bool {
     let Some(dest) = expand_filepath(req, target.as_bytes(), &dirname) else {
         return no_such_file(req);
     };
-    if req.check_open_basedir(&dest, true).is_err() {
+    if req
+        .environment_mut()
+        .check_open_basedir(&dest, true)
+        .is_err()
+    {
         return false;
     }
-    let Ok(source) = req.check_open_basedir(&source, true) else {
+    let Ok(source) = req.environment_mut().check_open_basedir(&source, true) else {
         return false;
     };
     // The target is written into the link as given, relative to the
@@ -270,10 +285,10 @@ fn link(req: &mut Request, target: Path, link: Path) -> bool {
     ) else {
         return no_such_file(req);
     };
-    let Ok(dest) = req.check_open_basedir(&dest, true) else {
+    let Ok(dest) = req.environment_mut().check_open_basedir(&dest, true) else {
         return false;
     };
-    let Ok(source) = req.check_open_basedir(&source, true) else {
+    let Ok(source) = req.environment_mut().check_open_basedir(&source, true) else {
         return false;
     };
     match std::fs::hard_link(&dest, &source) {

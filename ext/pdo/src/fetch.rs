@@ -1353,7 +1353,7 @@ fn class_target(
 
 /// Whether `class` declares or inherits a constructor.
 fn has_constructor(req: &mut Request, class: ClassId) -> bool {
-    req.method_row(class, b"__construct").is_some()
+    req.symbols().method_row(class, b"__construct").is_some()
 }
 
 // ---- the methods
@@ -1646,7 +1646,7 @@ pub(super) fn fetch_all(
     mode: Raw<i64>,
     args: &[Value],
 ) -> Result<Owner<PhpArray>, Thrown> {
-    let given = req.argument_count();
+    let given = req.frames().argument_count();
     if given > 3 {
         return Err(arg_count_error(
             req,

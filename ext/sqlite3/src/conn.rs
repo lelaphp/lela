@@ -13,7 +13,7 @@ use php_ext::raising::{
     Level, Thrown, argument_error, docref, fatal, throw, throw_error, throw_error_chained,
     while_pending,
 };
-use php_ext::request::{Foreign, Request, Resolve, Streams as _};
+use php_ext::request::{Foreign, Ini, Request, Resolve, Streams as _};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_pdo_sqlite::BlobStream;
 use php_ext_pdo_sqlite::ffi::{
@@ -448,11 +448,22 @@ fn open(req: &mut Request, object: PhpObject, filename: &[u8], flags: i64) -> Re
     let path = if filename.is_empty() || filename == b":memory:" {
         filename.to_vec()
     } else {
-        let cwd = req.cwd().into_os_string().into_encoded_bytes();
-        let Some(full) = req.virtual_file_ex(&cwd, filename, Resolve::FilePath) else {
+        let cwd = req
+            .environment()
+            .cwd()
+            .into_os_string()
+            .into_encoded_bytes();
+        let Some(full) = req
+            .environment_mut()
+            .virtual_file_ex(&cwd, filename, Resolve::FilePath)
+        else {
             return Err(throw(req, "Exception", "Unable to expand filepath"));
         };
-        if req.check_open_basedir(&full, true).is_err() {
+        if req
+            .environment_mut()
+            .check_open_basedir(&full, true)
+            .is_err()
+        {
             let shown = text(&full);
             return Err(throw(
                 req,
@@ -475,8 +486,9 @@ fn open(req: &mut Request, object: PhpObject, filename: &[u8], flags: i64) -> Re
         }
     };
     if req
-        .ini_get(b"sqlite3.defensive")
-        .is_some_and(Request::ini_parse_bool)
+        .ini()
+        .get(b"sqlite3.defensive")
+        .is_some_and(Ini::parse_bool)
     {
         Db::of(&owner).defensive(req);
     }
@@ -675,7 +687,8 @@ fn load_extension(
     name: &[u8],
 ) -> Result<bool, Thrown> {
     let dir = req
-        .ini_get(b"sqlite3.extension_dir")
+        .ini()
+        .get(b"sqlite3.extension_dir")
         .unwrap_or_default()
         .to_vec();
     if dir.is_empty() {
@@ -690,7 +703,7 @@ fn load_extension(
         lib.push(b'/');
     }
     lib.extend_from_slice(name);
-    let Some(full) = req.realpath(&lib) else {
+    let Some(full) = req.environment_mut().realpath(&lib) else {
         let message = format!("Unable to load extension at '{}'", text(&lib));
         fail(req, exceptions, None, 0, &message)?;
         return Ok(false);
@@ -1227,7 +1240,7 @@ impl SQLite3 {
         if sql.is_empty() {
             return Ok(OrFalse::False);
         }
-        if !req.return_value_used() {
+        if !req.frames().return_value_used() {
             let (rc, thrown) = db.exec(req, &sql);
             if rc != SQLITE_OK {
                 {
@@ -1276,7 +1289,7 @@ impl SQLite3 {
         if sql.is_empty() {
             return Ok(Owner::bool(false));
         }
-        if !req.return_value_used() {
+        if !req.frames().return_value_used() {
             let (rc, thrown) = db.exec(req, &sql);
             if rc != SQLITE_OK {
                 {

@@ -51,10 +51,11 @@ fn eval_below_caller(observed: &mut Observed<'_>) {
         .and_then(|at| at.caller())
         .map(|at| at.id())
     else {
-        observed.write(b"[no frame]\n");
+        observed.response_mut().write(b"[no frame]\n");
         return;
     };
     let read = observed
+        .frames_mut()
         .eval_in_frame(frame, b"trace_num()", b"debugger")
         .and_then(Result::ok)
         .and_then(|value| {
@@ -66,13 +67,13 @@ fn eval_below_caller(observed: &mut Observed<'_>) {
         "debugger {}\n",
         read.map_or_else(|| String::from("refused"), |n| n.to_string())
     );
-    observed.write(line.as_bytes());
+    observed.response_mut().write(line.as_bytes());
 }
 
 fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
     let named = observed
         .function()
-        .and_then(|function| observed.function_decl(function))
+        .and_then(|function| observed.symbols().function_decl(function))
         .is_some_and(|decl| decl.name.0.as_ref() == b"pause");
     ObserverHandlers {
         begin: named.then_some(eval_below_caller as fn(&mut Observed<'_>)),

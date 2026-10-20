@@ -46,7 +46,7 @@ use std::io::Write as _;
 use php_ext::abi::{Extension, ExtensionBuilder, LongHandler};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::values::{Emalloc, Owner, PhpObject, ResourceType, Value};
 
 /// `zend_test.str_test`, `OnUpdateStr`.
@@ -163,7 +163,7 @@ impl Entry {
     /// A value of the entry as its displayer shows it.
     fn shown(&self, value: &[u8]) -> String {
         match self.displayer {
-            Displayer::Boolean if Request::ini_parse_bool(value) => String::from("On"),
+            Displayer::Boolean if Ini::parse_bool(value) => String::from("On"),
             Displayer::Boolean => String::from("Off"),
             Displayer::Plain => String::from_utf8_lossy(value).into_owned(),
         }
@@ -315,11 +315,8 @@ fn pass2(req: &mut Request, _: &[u8]) {
 
 /// What each pass prints, `php_printf`, where `MINIT` registered it.
 fn registered_pass(req: &mut Request, line: &[u8]) {
-    if req
-        .ini_get(REGISTER_PASSES)
-        .is_some_and(Request::ini_parse_bool)
-    {
-        req.write(line);
+    if req.ini().get(REGISTER_PASSES).is_some_and(Ini::parse_bool) {
+        req.response_mut().write(line);
     }
 }
 
@@ -328,8 +325,9 @@ fn registered_pass(req: &mut Request, line: &[u8]) {
 /// writes it past the request.
 fn mshutdown(req: &mut Request) {
     if req
-        .ini_get(PRINT_STDERR_MSHUTDOWN)
-        .is_some_and(Request::ini_parse_bool)
+        .ini()
+        .get(PRINT_STDERR_MSHUTDOWN)
+        .is_some_and(Ini::parse_bool)
     {
         std::io::stderr().write_all(b"[zend_test] MSHUTDOWN\n").ok();
     }
@@ -360,8 +358,9 @@ fn mshutdown(req: &mut Request) {
 /// zend_test.zend_mm_custom_handlers.enabled => Off => Off
 /// ```
 fn info(req: &mut Request) {
-    req.info_table(&[&["zend_test extension", "enabled"]]);
-    let Some(me) = req.extension_named(b"zend_test") else {
+    req.extensions_mut()
+        .info_table(&[&["zend_test extension", "enabled"]]);
+    let Some(me) = req.extensions().named(b"zend_test") else {
         return;
     };
     let tables = ENTRIES
@@ -369,6 +368,7 @@ fn info(req: &mut Request) {
         .chain(&observer::ENTRIES)
         .chain([&mm_custom_handlers::ENTRY]);
     let rows: Vec<[String; 3]> = req
+        .ini()
         .extension_ini(me)
         .into_iter()
         .filter_map(|held| {
@@ -385,5 +385,5 @@ fn info(req: &mut Request) {
         .iter()
         .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
         .collect();
-    req.info_ini_table(&rows);
+    req.ini_mut().info_ini_table(&rows);
 }

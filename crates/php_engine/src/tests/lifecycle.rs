@@ -510,7 +510,7 @@ fn an_error_from_rinit_fails_the_request_start_with_no_request_end_phase() {
 #[allow(clippy::unnecessary_wraps)] // a `rinit`'s signature
 fn sets_header<const N: u8>(req: &mut Request) -> Result<(), Thrown> {
     record(N, Rinit(Some(0)));
-    req.header_add(b"X-Rinit: 1", true, 0);
+    req.response_mut().header_add(b"X-Rinit: 1", true, 0);
     Ok(())
 }
 

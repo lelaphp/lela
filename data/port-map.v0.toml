@@ -959,21 +959,21 @@ mahout = "RequestCtx::resources_mut"
 sites = 63
 crates = 1
 status = "renamed"
-api = "request::Request::resources"
+api = "request::Memory::resources"
 
 [[item]]
 mahout = "RequestCtx::resources"
 sites = 56
 crates = 1
 status = "same"
-api = "request::Request::resources"
+api = "request::Memory::resources"
 
 [[item]]
 mahout = "RequestCtx::current_line"
 sites = 20
 crates = 7
 status = "same"
-api = "request::Request::current_line"
+api = "request::Frames::current_line"
 
 [[item]]
 mahout = "RequestCtx::type_mode"
@@ -987,14 +987,14 @@ mahout = "RequestCtx::cwd"
 sites = 16
 crates = 2
 status = "same"
-api = "request::Request::cwd"
+api = "request::Environment::cwd"
 
 [[item]]
 mahout = "RequestCtx::write_output"
 sites = 16
 crates = 2
 status = "renamed"
-api = "request::Request::write"
+api = "request::Response::write"
 
 [[item]]
 mahout = "RequestCtx::lookup_func"
@@ -1008,7 +1008,7 @@ mahout = "RequestCtx::scope_for_native"
 sites = 9
 crates = 1
 status = "renamed"
-api = "request::Request::scope"
+api = "request::Frames::scope"
 
 [[item]]
 mahout = "RequestCtx::closure_info"
@@ -1022,14 +1022,14 @@ mahout = "RequestCtx::create_mode"
 sites = 8
 crates = 1
 status = "renamed"
-api = "request::Request::umask"
+api = "request::Environment::umask"
 
 [[item]]
 mahout = "RequestCtx::superglobal"
 sites = 8
 crates = 2
 status = "same"
-api = "request::Request::superglobal"
+api = "request::Variables::superglobal"
 
 [[item]]
 mahout = "RequestCtx::stream_wrappers"
@@ -1043,7 +1043,7 @@ mahout = "RequestCtx::headers_sent"
 sites = 5
 crates = 2
 status = "same"
-api = "request::Request::headers_sent"
+api = "request::Response::headers_sent"
 
 [[item]]
 mahout = "RequestCtx::lazy_objects_is_empty"
@@ -1057,28 +1057,28 @@ mahout = "RequestCtx::set_superglobal"
 sites = 5
 crates = 1
 status = "renamed"
-api = "request::Request::set_global"
+api = "request::Variables::set_global"
 
 [[item]]
 mahout = "RequestCtx::frame_vars_for_native_mut"
 sites = 4
 crates = 1
 status = "renamed"
-api = "request::Request::frame_vars"
+api = "request::Frames::vars"
 
 [[item]]
 mahout = "RequestCtx::umask"
 sites = 4
 crates = 1
 status = "same"
-api = "request::Request::umask"
+api = "request::Environment::umask"
 
 [[item]]
 mahout = "RequestCtx::loaded_extensions"
 sites = 3
 crates = 2
 status = "same"
-api = "request::Request::loaded_extensions"
+api = "request::Extensions::loaded_extensions"
 
 [[item]]
 mahout = "RequestCtx::native_call_by_name"
@@ -1092,7 +1092,7 @@ mahout = "RequestCtx::output_started_at"
 sites = 3
 crates = 2
 status = "same"
-api = "request::Request::output_started_at"
+api = "request::Response::started_at"
 
 [[item]]
 mahout = "RequestCtx::set_gc_enabled"
@@ -1113,14 +1113,14 @@ mahout = "RequestCtx::set_response_code"
 sites = 3
 crates = 1
 status = "same"
-api = "request::Request::set_response_code"
+api = "request::Response::set_response_code"
 
 [[item]]
 mahout = "RequestCtx::temp_dir"
 sites = 3
 crates = 1
 status = "same"
-api = "request::Request::temp_dir"
+api = "request::Environment::temp_dir"
 
 [[item]]
 mahout = "RequestCtx::arm_time_limit"
@@ -1141,7 +1141,7 @@ mahout = "RequestCtx::current_file"
 sites = 2
 crates = 2
 status = "same"
-api = "request::Request::current_file"
+api = "request::Frames::current_file"
 
 [[item]]
 mahout = "RequestCtx::engine_handle"
@@ -1155,35 +1155,35 @@ mahout = "RequestCtx::extension_is_loaded"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::loaded_extensions"
+api = "request::Extensions::loaded_extensions"
 
 [[item]]
 mahout = "RequestCtx::header_remove"
 sites = 2
 crates = 1
 status = "same"
-api = "request::Request::header_remove"
+api = "request::Response::header_remove"
 
 [[item]]
 mahout = "RequestCtx::headers_list"
 sites = 2
 crates = 1
 status = "same"
-api = "request::Request::headers_list"
+api = "request::Response::headers_list"
 
 [[item]]
 mahout = "RequestCtx::is_uploaded_file"
 sites = 2
 crates = 1
 status = "same"
-api = "request::Request::is_uploaded_file"
+api = "request::Variables::is_uploaded_file"
 
 [[item]]
 mahout = "RequestCtx::lsb_for_native"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::called_scope"
+api = "request::Frames::called_scope"
 
 [[item]]
 mahout = "RequestCtx::native_discard"
@@ -1232,7 +1232,7 @@ mahout = "RequestCtx::script_name"
 sites = 2
 crates = 1
 status = "same"
-api = "request::Request::script_name"
+api = "request::Environment::script_name"
 
 [[item]]
 mahout = "RequestCtx::set_assert_callback"
@@ -1246,14 +1246,14 @@ mahout = "RequestCtx::set_error_handler"
 sites = 2
 crates = 1
 status = "same"
-api = "request::Request::set_error_handler"
+api = "request::Diagnostics::set_error_handler"
 
 [[item]]
 mahout = "RequestCtx::static_side_cell_peek"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::function_decl"
+api = "request::Symbols::function_decl"
 
 [[item]]
 mahout = "RequestCtx::stream_wrappers_mut"
@@ -1281,7 +1281,7 @@ mahout = "RequestCtx::take_frame_vars_for_native"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::frame_vars"
+api = "request::Frames::vars"
 
 [[item]]
 mahout = "RequestCtx::take_native_named_args"
@@ -1302,35 +1302,35 @@ mahout = "RequestCtx::write_output_stderr"
 sites = 2
 crates = 1
 status = "same"
-api = "request::Request::write_stderr"
+api = "request::Response::write_stderr"
 
 [[item]]
 mahout = "RequestCtx::autoload_functions"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::autoload_functions"
+api = "request::Symbols::autoload_functions"
 
 [[item]]
 mahout = "RequestCtx::autoload_register"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::autoload_register"
+api = "request::Symbols::autoload_register"
 
 [[item]]
 mahout = "RequestCtx::autoload_unregister"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::autoload_unregister"
+api = "request::Symbols::autoload_unregister"
 
 [[item]]
 mahout = "RequestCtx::called_class_for_native"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::called_scope"
+api = "request::Frames::called_scope"
 
 [[item]]
 mahout = "RequestCtx::class_alias_bind"
@@ -1344,7 +1344,7 @@ mahout = "RequestCtx::clear_last_error"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::clear_last_error"
+api = "request::Diagnostics::clear_last_error"
 
 [[item]]
 mahout = "RequestCtx::closure_static_key_prefix"
@@ -1365,14 +1365,14 @@ mahout = "RequestCtx::debug_backtrace"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::backtrace"
+api = "request::Frames::backtrace"
 
 [[item]]
 mahout = "RequestCtx::debug_print_backtrace"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::backtrace"
+api = "request::Frames::backtrace"
 
 [[item]]
 mahout = "RequestCtx::define_runtime_const"
@@ -1386,21 +1386,21 @@ mahout = "RequestCtx::env_lookup"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::env"
+api = "request::Environment::env"
 
 [[item]]
 mahout = "RequestCtx::env_pairs"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::env_pairs"
+api = "request::Environment::env_pairs"
 
 [[item]]
 mahout = "RequestCtx::flush_output"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::flush"
+api = "request::Response::flush"
 
 [[item]]
 mahout = "RequestCtx::frame_args"
@@ -1463,7 +1463,7 @@ mahout = "RequestCtx::gen_func_name"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::function_decl"
+api = "request::Symbols::function_decl"
 
 [[item]]
 mahout = "RequestCtx::globals_view_with"
@@ -1491,7 +1491,7 @@ mahout = "RequestCtx::header_add"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::header_add"
+api = "request::Response::header_add"
 
 [[item]]
 mahout = "RequestCtx::in_tick_dispatch"
@@ -1505,21 +1505,21 @@ mahout = "RequestCtx::included_files"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::included_files"
+api = "request::Code::included_files"
 
 [[item]]
 mahout = "RequestCtx::iter_funcs"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::defined_functions"
+api = "request::Symbols::defined_functions"
 
 [[item]]
 mahout = "RequestCtx::last_error"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::last_error"
+api = "request::Diagnostics::last_error"
 
 [[item]]
 mahout = "RequestCtx::lazy_pinned"
@@ -1533,14 +1533,14 @@ mahout = "RequestCtx::memory_peak_usage_bytes"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::memory_peak"
+api = "request::Memory::peak"
 
 [[item]]
 mahout = "RequestCtx::memory_usage_bytes"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::memory_usage"
+api = "request::Memory::usage"
 
 [[item]]
 mahout = "RequestCtx::note_props_materialized"
@@ -1561,21 +1561,21 @@ mahout = "RequestCtx::register_shutdown_function"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::register_shutdown_function"
+api = "request::Code::register_shutdown_function"
 
 [[item]]
 mahout = "RequestCtx::register_tick_function"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::register_tick_function"
+api = "request::Code::register_tick_function"
 
 [[item]]
 mahout = "RequestCtx::request_headers"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::request_headers"
+api = "request::Variables::request_headers"
 
 [[item]]
 mahout = "RequestCtx::reset_memory_peak"
@@ -1589,14 +1589,14 @@ mahout = "RequestCtx::response_code"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::response_code"
+api = "request::Response::response_code"
 
 [[item]]
 mahout = "RequestCtx::sapi_name"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::sapi_name"
+api = "request::Environment::sapi_name"
 
 [[item]]
 mahout = "RequestCtx::set_callable_dep_pre_emitted"
@@ -1617,35 +1617,35 @@ mahout = "RequestCtx::set_cwd"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::set_cwd"
+api = "request::Environment::set_cwd"
 
 [[item]]
 mahout = "RequestCtx::set_env_override"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::set_env"
+api = "request::Environment::set_env"
 
 [[item]]
 mahout = "RequestCtx::set_header_callback"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::set_header_callback"
+api = "request::Response::set_header_callback"
 
 [[item]]
 mahout = "RequestCtx::set_status_line"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::set_response_code"
+api = "request::Response::set_response_code"
 
 [[item]]
 mahout = "RequestCtx::set_umask"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::set_umask"
+api = "request::Environment::set_umask"
 
 [[item]]
 mahout = "RequestCtx::silence_cancel"
@@ -1701,7 +1701,7 @@ mahout = "RequestCtx::take_uploaded_file"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::take_uploaded_file"
+api = "request::Variables::take_uploaded_file"
 
 [[item]]
 mahout = "RequestCtx::tick_due"
@@ -1722,14 +1722,14 @@ mahout = "RequestCtx::unit_file"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::function_decl"
+api = "request::Symbols::function_decl"
 
 [[item]]
 mahout = "RequestCtx::unregister_tick_function"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::unregister_tick_function"
+api = "request::Code::unregister_tick_function"
 
 [[item]]
 mahout = "RequestCtx::unset_dying_count"
@@ -1750,7 +1750,7 @@ mahout = "RequestCtx::write_output_console"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::write_stderr"
+api = "request::Response::write_stderr"
 
 # ---- RequestCtx public-field members reached from ext crates
 [[item]]
@@ -1758,7 +1758,7 @@ mahout = "RequestCtx::classes.descriptor"
 sites = 119
 crates = 6
 status = "renamed"
-api = "request::Request::class_decl"
+api = "request::Symbols::class_decl"
 
 [[item]]
 mahout = "RequestCtx::classes.instance_of"
@@ -1779,21 +1779,21 @@ mahout = "RequestCtx::classes.descriptor_arc"
 sites = 23
 crates = 3
 status = "renamed"
-api = "request::Request::class_decl"
+api = "request::Symbols::class_decl"
 
 [[item]]
 mahout = "RequestCtx::ini.get"
 sites = 20
 crates = 4
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "RequestCtx::ini.set_string"
 sites = 11
 crates = 2
 status = "renamed"
-api = "request::Request::ini_set"
+api = "request::Ini::set"
 
 [[item]]
 mahout = "RequestCtx::classes.unit_of"
@@ -1814,7 +1814,7 @@ mahout = "RequestCtx::output.ob_peek_meta"
 sites = 6
 crates = 1
 status = "renamed"
-api = "request::Request::output_buffer_op"
+api = "request::Response::buffer_op"
 
 [[item]]
 mahout = "RequestCtx::errors.take_pending"
@@ -1828,7 +1828,7 @@ mahout = "RequestCtx::output.ob_contents"
 sites = 4
 crates = 1
 status = "renamed"
-api = "request::Request::output_buffer_op"
+api = "request::Response::buffer_op"
 
 [[item]]
 mahout = "RequestCtx::settings.enable_gc"
@@ -1842,14 +1842,14 @@ mahout = "RequestCtx::settings.error_reporting"
 sites = 4
 crates = 1
 status = "renamed"
-api = "request::Request::error_reporting"
+api = "request::Diagnostics::error_reporting"
 
 [[item]]
 mahout = "RequestCtx::settings.include_path"
 sites = 4
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "RequestCtx::classes.enum_case"
@@ -1884,14 +1884,14 @@ mahout = "RequestCtx::output.ob_status_snapshot"
 sites = 3
 crates = 1
 status = "renamed"
-api = "request::Request::output_buffer_op"
+api = "request::Response::buffer_op"
 
 [[item]]
 mahout = "RequestCtx::settings.apply_override"
 sites = 3
 crates = 1
 status = "renamed"
-api = "request::Request::ini_set"
+api = "request::Ini::set"
 
 [[item]]
 mahout = "RequestCtx::settings.serialize_ndigit"
@@ -1940,35 +1940,35 @@ mahout = "RequestCtx::settings.display_errors"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "RequestCtx::settings.fiber_stack_size"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "RequestCtx::settings.html_errors"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "RequestCtx::settings.max_execution_time"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "RequestCtx::settings.memory_limit"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "RequestCtx::settings.serialize_ndigit_h"
@@ -1982,28 +1982,28 @@ mahout = "RequestCtx::settings.sys_temp_dir"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::temp_dir"
+api = "request::Environment::temp_dir"
 
 [[item]]
 mahout = "RequestCtx::settings.zend_assertions"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "RequestCtx::classes.decl_site_of"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::class_decl"
+api = "request::Symbols::class_decl"
 
 [[item]]
 mahout = "RequestCtx::classes.names_of_kinds"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::declared_classes"
+api = "request::Symbols::declared_classes"
 
 [[item]]
 mahout = "RequestCtx::consts.contains"
@@ -2017,14 +2017,14 @@ mahout = "RequestCtx::consts.iter"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::constants"
+api = "request::Symbols::constants"
 
 [[item]]
 mahout = "RequestCtx::consts.lookup_attributes"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::constants"
+api = "request::Symbols::constants"
 
 [[item]]
 mahout = "RequestCtx::errors.pending_is_exception"
@@ -2045,7 +2045,7 @@ mahout = "RequestCtx::ini.iter_detailed"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::ini_entries"
+api = "request::Ini::entries"
 
 [[item]]
 mahout = "RequestCtx::output.deactivate"
@@ -2066,105 +2066,105 @@ mahout = "RequestCtx::output.ob_level"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::output_buffer_op"
+api = "request::Response::buffer_op"
 
 [[item]]
 mahout = "RequestCtx::output.ob_pop_take"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::output_buffer_op"
+api = "request::Response::buffer_op"
 
 [[item]]
 mahout = "RequestCtx::output.ob_start_with"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::output_buffer_op"
+api = "request::Response::buffer_op"
 
 [[item]]
 mahout = "RequestCtx::security.open_basedir"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "RequestCtx::security.tighten_open_basedir"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::ini_set"
+api = "request::Ini::set"
 
 [[item]]
 mahout = "RequestCtx::settings.display_errors_ini"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "RequestCtx::settings.exception_ignore_args"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "RequestCtx::settings.exception_string_param_max_len"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "RequestCtx::settings.fatal_error_backtraces"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "RequestCtx::settings.ignore_repeated_errors"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "RequestCtx::settings.ignore_repeated_source"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "RequestCtx::settings.max_input_nesting_level"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "RequestCtx::settings.max_memory_limit"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "RequestCtx::settings.precision"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "RequestCtx::settings.serialize_precision"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 # ---- semantics:: items used from ext crates
 [[item]]
@@ -2228,7 +2228,7 @@ mahout = "semantics::check_fs_access"
 sites = 27
 crates = 3
 status = "renamed"
-api = "request::Request::check_open_basedir"
+api = "request::Environment::check_open_basedir"
 
 [[item]]
 mahout = "semantics::ArrayOrString"
@@ -2291,7 +2291,7 @@ mahout = "semantics::absolutize"
 sites = 12
 crates = 2
 status = "same"
-api = "request::Request::absolutize"
+api = "request::Environment::absolutize"
 
 [[item]]
 mahout = "semantics::cast_float"
@@ -2389,7 +2389,7 @@ mahout = "semantics::resolve_path_realpath"
 sites = 6
 crates = 1
 status = "renamed"
-api = "request::Request::realpath"
+api = "request::Environment::realpath"
 
 [[item]]
 mahout = "semantics::ConstScope"
@@ -2417,7 +2417,7 @@ mahout = "semantics::check_fs_access_display"
 sites = 5
 crates = 1
 status = "renamed"
-api = "request::Request::check_open_basedir"
+api = "request::Environment::check_open_basedir"
 
 [[item]]
 mahout = "semantics::class_lookup"
@@ -2564,7 +2564,7 @@ mahout = "semantics::class_has_hooked_props"
 sites = 3
 crates = 2
 status = "renamed"
-api = "request::Request::class_decl"
+api = "request::Symbols::class_decl"
 
 [[item]]
 mahout = "semantics::default_value"
@@ -2795,7 +2795,7 @@ mahout = "semantics::assert_gate"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "semantics::attribute_to_string"
@@ -2851,7 +2851,7 @@ mahout = "semantics::class_method_names"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::class_decl"
+api = "request::Symbols::class_decl"
 
 [[item]]
 mahout = "semantics::class_to_string"
@@ -2865,7 +2865,7 @@ mahout = "semantics::class_var_defaults"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::class_decl"
+api = "request::Symbols::class_decl"
 
 [[item]]
 mahout = "semantics::clone_call"
@@ -2942,7 +2942,7 @@ mahout = "semantics::effective_error_reporting"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::error_reporting"
+api = "request::Diagnostics::error_reporting"
 
 [[item]]
 mahout = "semantics::find_double_colon"
@@ -2963,7 +2963,7 @@ mahout = "semantics::fs_path_allowed"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::check_open_basedir"
+api = "request::Environment::check_open_basedir"
 
 [[item]]
 mahout = "semantics::function_to_string"
@@ -3355,7 +3355,7 @@ mahout = "semantics::write_error_log"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::error_log"
+api = "request::Diagnostics::error_log"
 
 [[item]]
 mahout = "semantics::zend_sort_in_place"
@@ -4117,7 +4117,7 @@ mahout = "mahout_runtime::resources::io_error_text"
 sites = 10
 crates = 3
 status = "renamed"
-api = "request::Request::os_error_text"
+api = "request::Environment::os_error_text"
 
 [[item]]
 mahout = "mahout_runtime::Reentrant::call_value_named"
@@ -4152,7 +4152,7 @@ mahout = "mahout_runtime::output::run_handler_op"
 sites = 5
 crates = 1
 status = "renamed"
-api = "request::Request::output_buffer_op"
+api = "request::Response::buffer_op"
 
 [[item]]
 mahout = "mahout_runtime::resources"
@@ -4173,7 +4173,7 @@ mahout = "mahout_runtime::settings::ini_access"
 sites = 4
 crates = 2
 status = "renamed"
-api = "request::Request::ini_entries"
+api = "request::Ini::entries"
 
 [[item]]
 mahout = "mahout_runtime::symbols::FuncBinding"
@@ -4229,7 +4229,7 @@ mahout = "mahout_runtime::settings::ini_parse_bool"
 sites = 3
 crates = 2
 status = "same"
-api = "request::Request::ini_parse_bool"
+api = "request::Ini::parse_bool"
 
 [[item]]
 mahout = "mahout_runtime::ExtState::ext_teardown"
@@ -4313,21 +4313,21 @@ mahout = "mahout_runtime::settings::IniStore"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::ini_entries"
+api = "request::Ini::entries"
 
 [[item]]
 mahout = "mahout_runtime::settings::Settings"
 sites = 2
 crates = 2
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "mahout_runtime::settings::parse_byte_shorthand"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::ini_parse_bytes"
+api = "request::Ini::parse_bytes"
 
 [[item]]
 mahout = "mahout_runtime::ClosureParam"
@@ -4341,7 +4341,7 @@ mahout = "mahout_runtime::FrameVarsForNative"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::frame_vars"
+api = "request::Frames::vars"
 
 [[item]]
 mahout = "mahout_runtime::Reentrant::drain_dtors_inline"
@@ -4404,28 +4404,28 @@ mahout = "mahout_runtime::gpc::GpcOptions"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::parse_query"
+api = "request::Variables::parse_query"
 
 [[item]]
 mahout = "mahout_runtime::gpc::build_tree"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::parse_query"
+api = "request::Variables::parse_query"
 
 [[item]]
 mahout = "mahout_runtime::gpc::materialize"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::parse_query"
+api = "request::Variables::parse_query"
 
 [[item]]
 mahout = "mahout_runtime::gpc::parse_urlencoded"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::parse_query"
+api = "request::Variables::parse_query"
 
 [[item]]
 mahout = "mahout_runtime::native_marshal::MarshalCtx"
@@ -4544,21 +4544,21 @@ mahout = "mahout_runtime::settings"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "mahout_runtime::settings::DisplayErrors"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::ini_get"
+api = "request::Ini::get"
 
 [[item]]
 mahout = "mahout_runtime::settings::INI_ACCESS_TABLE"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::ini_entries"
+api = "request::Ini::entries"
 
 [[item]]
 mahout = "mahout_runtime::settings::memory_limit_clamp_body"

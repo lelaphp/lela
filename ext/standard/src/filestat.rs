@@ -156,7 +156,7 @@ impl Fs {
 #[php_function]
 fn realpath_cache_get(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut all = PhpArray::new(req)?;
-    for entry in req.realpath_cache() {
+    for entry in req.environment().realpath_cache() {
         let key = match i64::try_from(entry.key) {
             Ok(key) => Value::int(key),
             #[allow(clippy::cast_precision_loss)] // php's `(double)bucket->key`
@@ -193,7 +193,11 @@ fn realpath_cache_get(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
 /// ```
 #[php_function]
 fn realpath_cache_size(req: &mut Request) -> i64 {
-    req.realpath_cache().iter().map(|entry| entry.size).sum()
+    req.environment()
+        .realpath_cache()
+        .iter()
+        .map(|entry| entry.size)
+        .sum()
 }
 
 /// `disk_total_space(string $directory): float|false`: the size of the
@@ -242,11 +246,15 @@ fn disk_free_space(req: &mut Request, directory: Path) -> OrFalse<f64> {
 /// answers `false` for the empty path, the `open_basedir` guard of the
 /// expanded path, which warns, and `statvfs`, the answer read off it.
 fn disk_space(req: &mut Request, directory: Path, read: fn(&ffi::Space) -> f64) -> OrFalse<f64> {
-    let cwd = req.cwd().into_os_string().into_encoded_bytes();
+    let cwd = req
+        .environment()
+        .cwd()
+        .into_os_string()
+        .into_encoded_bytes();
     let Some(full) = crate::virtual_cwd::expand_filepath(req, directory.0.as_bytes(), &cwd) else {
         return OrFalse::False;
     };
-    let Ok(full) = req.check_open_basedir(&full, true) else {
+    let Ok(full) = req.environment_mut().check_open_basedir(&full, true) else {
         return OrFalse::False;
     };
     match ffi::statvfs(full.as_os_str().as_bytes()) {
@@ -289,14 +297,19 @@ fn access_path(req: &mut Request, local: &[u8]) -> Option<Vec<u8>> {
     if !is_stream_path(local) {
         return None;
     }
-    let cwd = req.cwd().as_os_str().as_encoded_bytes().to_vec();
+    let cwd = req
+        .environment()
+        .cwd()
+        .as_os_str()
+        .as_encoded_bytes()
+        .to_vec();
     crate::virtual_cwd::expand_filepath(req, local, &cwd)
 }
 
 /// The permission bits of a file `fopen(3)` made, `0666 & ~umask` as the
 /// request's `umask()` has it, whatever the process's own mask left.
 fn apply_umask(req: &Request, path: &std::path::Path) {
-    let want = 0o666 & !req.umask();
+    let want = 0o666 & !req.environment().umask();
     if let Ok(meta) = std::fs::metadata(path) {
         let have = meta.permissions().mode();
         if have & 0o777 != want {
@@ -327,7 +340,7 @@ fn has_file_scheme(filename: &[u8]) -> bool {
 /// [`access_path`] has it; `None` for a path another wrapper serves.
 fn plain_access(req: &mut Request, filename: &[u8], ty: Fs) -> Option<bool> {
     let local = req.plain_path(filename)?;
-    let Ok(guarded) = req.check_open_basedir(&local, true) else {
+    let Ok(guarded) = req.environment_mut().check_open_basedir(&local, true) else {
         return Some(false);
     };
     let mode = match ty {
@@ -337,7 +350,7 @@ fn plain_access(req: &mut Request, filename: &[u8], ty: Fs) -> Option<bool> {
         _ => ffi::F_OK,
     };
     let asked = match access_path(req, &local) {
-        Some(expanded) => req.absolutize(&expanded),
+        Some(expanded) => req.environment().absolutize(&expanded),
         None => guarded.into(),
     };
     Some(ffi::access(&asked, mode))
@@ -930,7 +943,7 @@ fn owner_change(
     } else {
         (Some(id), None)
     };
-    let Ok(path) = req.check_open_basedir(filename, true) else {
+    let Ok(path) = req.environment_mut().check_open_basedir(filename, true) else {
         return Ok(false);
     };
     let done = if link {
@@ -1083,7 +1096,7 @@ fn chmod(req: &mut Request, filename: Path, permissions: i64) -> Result<bool, Th
     if !is_plain_direct(req, filename) {
         return req.wrapper_op(filename, WrapperOp::Chmod(mode));
     }
-    let Ok(path) = req.check_open_basedir(filename, true) else {
+    let Ok(path) = req.environment_mut().check_open_basedir(filename, true) else {
         return Ok(false);
     };
     let bits = u32::try_from(mode & 0o7777).unwrap_or(0);
@@ -1159,7 +1172,7 @@ fn touch(
     if !is_plain_direct(req, filename) {
         return req.wrapper_op(filename, WrapperOp::Touch(times));
     }
-    let Ok(path) = req.check_open_basedir(filename, true) else {
+    let Ok(path) = req.environment_mut().check_open_basedir(filename, true) else {
         return Ok(false);
     };
     if !ffi::access(&path, ffi::F_OK) {
@@ -1217,6 +1230,7 @@ fn clearstatcache(
     };
     req.clear_stat_cache();
     if clear_realpath_cache {
-        req.realpath_cache_clear(filename.as_ref().map(PhpString::as_bytes));
+        req.environment_mut()
+            .realpath_cache_clear(filename.as_ref().map(PhpString::as_bytes));
     }
 }

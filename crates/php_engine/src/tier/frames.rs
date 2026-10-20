@@ -55,7 +55,7 @@ pub fn below(req: &Request, frame: FrameRef) -> Option<FrameRef> {
 pub fn catches(req: &mut Request, frame: FrameRef) -> bool {
     // The graceful exit is no class a `catch` names; a `finally` block
     // takes it still.
-    let pending = match req.raised() {
+    let pending = match req.diagnostics().raised() {
         Some(Raised::Throwable(object)) => Some(object),
         Some(Raised::GracefulExit) => None,
         _ => return false,
@@ -83,7 +83,7 @@ pub fn catches(req: &mut Request, frame: FrameRef) -> bool {
             let slot = Some(CacheSlot(op.extended_value & !exec::LAST_CATCH));
             if let Some(pending) = pending
                 && exec::cached_class(req, frame, code, op.op1, slot)
-                    .is_some_and(|of| req.instance_of(pending.class(), of))
+                    .is_some_and(|of| req.symbols().instance_of(pending.class(), of))
             {
                 return true;
             }
@@ -296,7 +296,7 @@ mod tests {
     /// The class of the throwable pending, and the `file` and `line` it
     /// carries, read through the native face as phpdbg reads them off it.
     fn described(req: &Request) -> Option<(String, String, i64)> {
-        let Some(Raised::Throwable(object)) = req.raised() else {
+        let Some(Raised::Throwable(object)) = req.diagnostics().raised() else {
             return None;
         };
         let prop = |name: &[u8]| object.prop(req, name);
@@ -305,7 +305,7 @@ mod tests {
             .unwrap_or_default();
         let line = prop(b"line").and_then(|v| v.as_int()).unwrap_or(0);
         Some((
-            req.class_name(object.class()),
+            req.symbols().class_name(object.class()),
             String::from_utf8_lossy(&file).into_owned(),
             line,
         ))

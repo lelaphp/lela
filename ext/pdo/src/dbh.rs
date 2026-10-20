@@ -389,7 +389,7 @@ impl ObjectHandlers for Handlers {
             return Ok(None);
         }
         let pdo = lookup_class(req, b"PDO").ok().flatten();
-        Ok(pdo.and_then(|pdo| req.trampoline(pdo, lowered)))
+        Ok(pdo.and_then(|pdo| req.symbols().trampoline(pdo, lowered)))
     }
 }
 
@@ -593,7 +593,7 @@ fn construct_driver(
 fn resolve_dsn(req: &mut Request, mut source: Vec<u8>) -> Result<Vec<u8>, Thrown> {
     if !source.contains(&b':') {
         let alias = [b"pdo.dsn.".as_slice(), &source].concat();
-        let Some(found) = req.ini_get(&alias).map(<[u8]>::to_vec) else {
+        let Some(found) = req.ini().get(&alias).map(<[u8]>::to_vec) else {
             return Err(argument_error(
                 req,
                 "PDOException",
@@ -906,6 +906,7 @@ fn specific_object(
             ));
         };
         let own_name = req
+            .symbols()
             .class_decl(own)
             .map(|d| d.name.0.to_vec())
             .unwrap_or_default();
@@ -1188,8 +1189,10 @@ fn public_constructor(req: &mut Request, class: ClassId) -> bool {
 
 /// The visibility of the constructor `class` declares or inherits.
 fn constructor_visibility(req: &mut Request, class: ClassId) -> Option<php_ext::decl::Visibility> {
-    let row = req.method_row(class, b"__construct")?;
-    req.row_method(row).map(|method| method.visibility)
+    let row = req.symbols().method_row(class, b"__construct")?;
+    req.symbols()
+        .row_method(row)
+        .map(|method| method.visibility)
 }
 
 // ---- statements
@@ -1529,7 +1532,7 @@ impl PDO {
         #[php(sensitive, default = null)] password: Option<PhpString>,
         #[php(default = null)] options: Option<PhpArray>,
     ) -> Result<Owner<Static>, Thrown> {
-        let Some(called) = req.called_scope() else {
+        let Some(called) = req.frames().called_scope() else {
             return Err(php_ext::raising::fatal(
                 req,
                 "InternalError: PDO::connect() served without a called scope",

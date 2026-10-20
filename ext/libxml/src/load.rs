@@ -217,7 +217,7 @@ fn read_answer(req: &mut Request, retval: &Value, callable: &Callable, loader: &
             let name = function_name(req, callable, loader, true);
             let text = format!(
                 "{}(): The user entity loader callback \"{name}\" has returned a resource, but it is not a stream",
-                req.active_function_name()
+                req.frames().active_function_name()
             );
             Resolved::Thrown(throw_error(req, "TypeError", &text))
         }
@@ -251,12 +251,12 @@ fn function_name(req: &mut Request, callable: &Callable, loader: &Value, member:
     let mut name = Vec::new();
     if member
         && !is_closure
-        && let Some(class) = scope.and_then(|c| req.class_decl(c))
+        && let Some(class) = scope.and_then(|c| req.symbols().class_decl(c))
     {
         name.extend_from_slice(&class.name.0);
         name.extend_from_slice(b"::");
     }
-    if let Some(decl) = req.function_decl(function) {
+    if let Some(decl) = req.symbols().function_decl(function) {
         name.extend_from_slice(&decl.name.0);
     }
     closure.give_up(req);

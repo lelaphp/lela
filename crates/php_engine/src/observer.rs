@@ -66,7 +66,7 @@
 //!
 //! The slot is the request's, never the unit's: a handler added to or
 //! removed from one function while a request is served
-//! ([`Request::add_begin_handler`] and its kin, php's
+//! ([`Code::add_begin_handler`] and its kin, php's
 //! `zend_observer_add_begin_handler`) writes the slot in that request's
 //! runtime cache, or its table of natives' slots for a native, so the
 //! unit every request shares stays as published
@@ -355,7 +355,7 @@ impl Observed<'_> {
         }
     }
 
-    /// [`Request::suspend_time_limit`] over the observed frame: the
+    /// [`Limits::suspend_time_limit`] over the observed frame: the
     /// guard derefs to this, so the frame's reads stay the handler's while
     /// it blocks, a debugger's answers to its client among them.
     pub fn suspend_time_limit(&mut self) -> TimeLimitSuspended<'_, Self> {
@@ -392,7 +392,7 @@ pub(crate) enum Slot {
 /// The handlers a slot resolved to: begin in declaration order, end in
 /// reverse, as `zend_observer_fcall_install` lays them out, and as
 /// handlers added and removed while the request is served leave them
-/// ([`Request::add_begin_handler`] and its kin). php's slot holds one
+/// ([`Code::add_begin_handler`] and its kin). php's slot holds one
 /// begin and one end handler per observer declared, so neither list
 /// grows past that count.
 #[derive(Debug, Clone)]
@@ -527,7 +527,7 @@ impl Slot {
 }
 
 /// What removing a handler from a function hands back
-/// ([`Request::remove_begin_handler`], [`Request::remove_end_handler`]),
+/// ([`Code::remove_begin_handler`], [`Code::remove_end_handler`]),
 /// php's `next` out-parameter: the handler that moved into the removed
 /// one's place, if any. A handler that removes itself while the slot is
 /// being walked moves that one into its own place, which the walk then
@@ -627,7 +627,7 @@ fn begin(req: &mut Request, at: Observable) {
     if let Observable::Code(frame) = at {
         let generator = req
             .frame_function(frame)
-            .and_then(|function| req.function_decl(function))
+            .and_then(|function| req.symbols().function_decl(function))
             .is_some_and(|decl| decl.is_generator);
         if generator {
             return;
@@ -752,7 +752,7 @@ fn resolve(req: &mut Request, at: Observable) -> Slot {
 #[cold]
 #[inline(never)]
 fn end(req: &mut Request, at: Observable, value: Option<&Value>) {
-    if !req.bailing_out() && req.close_observed(at) {
+    if !req.diagnostics().bailing_out() && req.close_observed(at) {
         call_end_handlers(req, Handed::Standing(at), value);
     }
 }

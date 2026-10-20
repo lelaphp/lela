@@ -60,7 +60,7 @@ use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::decl::{ConstDecl, ConstExpr, IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::values::{Owner, PhpString};
 
 use error::IntlError;
@@ -429,7 +429,9 @@ fn on_update_default_locale(_req: &mut Request, value: Option<&[u8]>) -> Result<
     reason = "the `on_modify` slot's shape, which a handler that throws needs"
 )]
 fn on_update_error_level(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
-    let level = req.ini_parse_quantity_warn(b"intl.error_level", value.unwrap_or_default());
+    let level = req
+        .ini_mut()
+        .parse_quantity_warn(b"intl.error_level", value.unwrap_or_default());
     if level != 0 {
         docref(
             req,
@@ -472,11 +474,12 @@ fn intl_info(req: &mut Request) {
     }
     rows.push(["ICU Unicode version", ffi::unicode_version()]);
     let rows: Vec<&[&str]> = rows.iter().map(<[&str; 2]>::as_slice).collect();
-    req.info_table(&rows);
+    req.extensions_mut().info_table(&rows);
     // `DISPLAY_INI_ENTRIES()`: each entry's request value beside its
     // master, `intl.use_exceptions` through the boolean displayer.
     let rows: Vec<[String; 3]> = req
-        .ini_entries()
+        .ini()
+        .entries()
         .iter()
         .filter(|entry| {
             [DEFAULT_LOCALE, ERROR_LEVEL, USE_EXCEPTIONS].contains(&entry.decl.name.0.as_ref())
@@ -485,7 +488,7 @@ fn intl_info(req: &mut Request) {
             let boolean = entry.decl.name.0.as_ref() == USE_EXCEPTIONS;
             let shown = |value: Option<&[u8]>| {
                 let value = value.unwrap_or_default();
-                match (boolean, Request::ini_parse_bool(value)) {
+                match (boolean, Ini::parse_bool(value)) {
                     (true, true) => "On".to_owned(),
                     (true, false) => "Off".to_owned(),
                     (false, _) => String::from_utf8_lossy(value).into_owned(),
@@ -502,13 +505,13 @@ fn intl_info(req: &mut Request) {
         .iter()
         .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
         .collect();
-    req.info_ini_table(&cells);
+    req.ini_mut().info_ini_table(&cells);
 }
 
 /// `intl_locale_get_default`: `intl.default_locale` where it is set,
 /// ICU's default otherwise.
 pub(crate) fn default_locale(req: &Request) -> Vec<u8> {
-    match req.ini_get(DEFAULT_LOCALE) {
+    match req.ini().get(DEFAULT_LOCALE) {
         Some(locale) if !locale.is_empty() => locale.to_vec(),
         _ => ffi::default_locale().as_bytes().to_vec(),
     }

@@ -43,7 +43,7 @@ fn made(req: &mut Request, kind: &[u8]) -> Option<Zval> {
             .ok()
             .map(Zval::reference),
         b"resource" => {
-            let kind = req.resources().register_type(b"freed", None);
+            let kind = req.memory_mut().resources().register_type(b"freed", None);
             req.heap_mut().resource(kind).ok().map(Zval::resource)
         }
         _ => None,

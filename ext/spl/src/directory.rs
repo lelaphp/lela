@@ -515,7 +515,7 @@ impl SplFileInfo {
         this: This<Self>,
     ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let name = file_name(req, this.object())?;
-        let host = req.absolutize(&name);
+        let host = req.environment().absolutize(&name);
         match std::fs::read_link(&host) {
             Ok(target) => Ok(OrFalse::Value(PhpString::new(
                 req,
@@ -587,7 +587,7 @@ impl SplFileInfo {
             None => fs(req, this, |it| it.file_name.clone())?,
         };
         let name = name.map(|n| if n.is_empty() { b".".to_vec() } else { n });
-        match name.and_then(|n| req.realpath(&n)) {
+        match name.and_then(|n| req.environment_mut().realpath(&n)) {
             Some(real) => Ok(OrFalse::Value(PhpString::new(
                 req,
                 real.as_os_str().as_encoded_bytes(),
@@ -1671,7 +1671,7 @@ impl SplFileObject {
         let (_, stream) = file_checked(req, this.object())?;
         let rest = stream.copy_to_mem(req, None)?;
         let n = rest.len();
-        req.write(rest.as_bytes());
+        req.response_mut().write(rest.as_bytes());
         rest.give_up(req);
         Ok(i64::try_from(n).unwrap_or(i64::MAX))
     }
@@ -1959,7 +1959,7 @@ impl SplTempFileObject {
         }
         let name: Vec<u8> = if maxMemory < 0 {
             b"php://memory".to_vec()
-        } else if req.argument_count() > 0 {
+        } else if req.frames().argument_count() > 0 {
             format!("php://temp/maxmemory:{maxMemory}").into_bytes()
         } else {
             b"php://temp".to_vec()
@@ -2445,6 +2445,7 @@ fn create_info(req: &mut Request, path: &[u8], class: ClassId) -> Result<Owner<P
 fn declares_constructor(req: &mut Request, class: ClassId) -> Result<bool, Thrown> {
     let base = linked(req, b"SplFileInfo")?;
     Ok(req
+        .symbols()
         .method_row(class, b"__construct")
         .is_some_and(|row| row.scope() != base))
 }

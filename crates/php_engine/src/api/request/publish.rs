@@ -145,7 +145,11 @@ mod tests {
         let mut seen = Vec::new();
         for _ in 0..2 {
             let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-            assert!(req.eval_stringl(code.as_bytes(), b"loader").is_ok());
+            assert!(
+                req.code_mut()
+                    .eval_stringl(code.as_bytes(), b"loader")
+                    .is_ok()
+            );
             let (p, c, d) = (
                 req.class_named(php_unit::decl::Bare::resolved(b"p")),
                 req.class_named(php_unit::decl::Bare::resolved(b"c")),
@@ -157,7 +161,7 @@ mod tests {
                 d.is_some_and(|d| !d.is_published()),
                 "D is the request's own"
             );
-            let inherited = c.and_then(|c| req.method_named(c, b"p"));
+            let inherited = c.and_then(|c| req.symbols().method_named(c, b"p"));
             assert!(inherited.is_some_and(|m| req.user_function(m).is_some()));
             assert_eq!(req.own_classes.len(), 1, "D's row alone");
             let own_methods = req

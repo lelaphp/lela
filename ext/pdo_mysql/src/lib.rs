@@ -112,11 +112,12 @@ pub fn extension() -> Extension {
 ///
 /// ```
 fn pdo_mysql_info(req: &mut Request) {
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["PDO Driver for MySQL", "enabled"],
         &["Client API version", php_ext_mysqlnd::client::CLIENT_INFO],
     ]);
-    req.info_ini_entries(&[b"pdo_mysql.default_socket"]);
+    req.ini_mut()
+        .info_ini_entries(&[b"pdo_mysql.default_socket"]);
 }
 
 /// `class Pdo\Mysql extends PDO`, `@strict-properties`, with its

@@ -104,7 +104,8 @@ fn determine_charset(req: &mut Request, hint: Option<&[u8]>, quiet: bool) -> Cha
         _ => ["internal_encoding", "default_charset"]
             .iter()
             .find_map(|name| {
-                req.ini_get(name.as_bytes())
+                req.ini()
+                    .get(name.as_bytes())
                     .filter(|v| !v.is_empty())
                     .map(<[u8]>::to_vec)
             })

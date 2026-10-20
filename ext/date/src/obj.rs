@@ -221,14 +221,15 @@ pub(super) fn class_id(req: &mut Request, name: &str) -> Result<ClassId, Thrown>
 
 /// `ce->name`.
 pub(super) fn class_name(req: &Request, class: ClassId) -> String {
-    req.class_decl(class)
+    req.symbols()
+        .class_decl(class)
         .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
         .unwrap_or_default()
 }
 
 /// Whether the class is an internal one, php's `ZEND_INTERNAL_CLASS`.
 fn is_internal(req: &Request, class: ClassId) -> bool {
-    req.class_extension(class).is_some()
+    req.extensions().class_extension(class).is_some()
 }
 
 /// `date_throw_uninitialized_error(ce)`: the `DateObjectError` for an
@@ -240,7 +241,10 @@ pub(super) fn uninitialized(req: &mut Request, class: ClassId) -> Thrown {
     let message = if is_internal(req, class) {
         format!("Object of type {name} has not been {tail}")
     } else {
-        let base = req.lineage(class).find(|&at| is_internal(req, at));
+        let base = req
+            .symbols()
+            .lineage(class)
+            .find(|&at| is_internal(req, at));
         if let Some(at) = base {
             let base = class_name(req, at);
             format!("Object of type {name} (inheriting {base}) has not been {tail}")

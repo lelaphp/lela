@@ -421,7 +421,7 @@ fn channel<M: Copy + Default>(
 pub(crate) fn set_defaults(req: &mut Request, easy: EasyId) {
     let cainfo = [b"openssl.cafile".as_slice(), crate::CAINFO]
         .into_iter()
-        .find_map(|name| req.ini_get(name).filter(|value| !value.is_empty()))
+        .find_map(|name| req.ini().get(name).filter(|value| !value.is_empty()))
         .map(<[u8]>::to_vec);
     easy.defaults(req, cainfo.as_deref());
 }

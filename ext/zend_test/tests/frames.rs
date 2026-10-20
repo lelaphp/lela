@@ -37,7 +37,7 @@ fn shown(req: &mut Request, answered: Option<Result<Owner<Value>, Thrown>>) -> S
             let text = match thrown.cause(req) {
                 Cause::Throwable(throwable) => {
                     let throwable = *throwable;
-                    let class = req.class_name(throwable.class());
+                    let class = req.symbols().class_name(throwable.class());
                     let message = throwable
                         .prop(req, b"message")
                         .and_then(|message| message.as_str_bytes().map(<[u8]>::to_vec))
@@ -74,20 +74,22 @@ fn stop(observed: &mut Observed<'_>) {
         observed.state::<Kept>().frame = kept;
         return;
     };
-    let set = observed.set_frame_var(frame, b"x", Owner::int(5));
+    let set = observed.frames_mut().set_var(frame, b"x", Owner::int(5));
     let line = format!("[set {}]", if set { "ok" } else { "refused" });
-    observed.write(line.as_bytes());
+    observed.response_mut().write(line.as_bytes());
     for code in ["$x * 2", "throw new Exception('no')"] {
-        let answered = observed.eval_in_frame(frame, code.as_bytes(), b"debugger");
+        let answered = observed
+            .frames_mut()
+            .eval_in_frame(frame, code.as_bytes(), b"debugger");
         let line = format!("[eval {}]", shown(observed, answered));
-        observed.write(line.as_bytes());
+        observed.response_mut().write(line.as_bytes());
     }
 }
 
 fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
     let named = observed
         .function()
-        .and_then(|function| observed.function_decl(function))
+        .and_then(|function| observed.symbols().function_decl(function))
         .is_some_and(|decl| decl.name.0.as_ref() == b"pause");
     ObserverHandlers {
         begin: named.then_some(stop as fn(&mut Observed<'_>)),

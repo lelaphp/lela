@@ -48,7 +48,7 @@ impl Request {
     /// The linked class a declaration names, the one `class` is where
     /// the declaration is its own.
     fn class_of_decl(&self, class: ClassId, decl: &ClassDecl) -> Option<ClassId> {
-        match self.class_decl(class) {
+        match self.symbols().class_decl(class) {
             Some(own) if std::ptr::eq(own, decl) => Some(class),
             _ => self.class_named((&decl.name).into()),
         }
@@ -91,7 +91,7 @@ impl Request {
     fn resolved_property(&self, class: ClassId, name: &[u8]) -> Option<Resolved<'_>> {
         let lookup = |wanted: &[u8]| {
             self.class_named(Bare::resolved(wanted))
-                .and_then(|id| self.class_decl(id))
+                .and_then(|id| self.symbols().class_decl(id))
                 .map(|decl| Held {
                     decl,
                     bodies: None,
@@ -99,7 +99,7 @@ impl Request {
                     record: None,
                 })
         };
-        resolve_property(self.class_decl(class)?, name, &lookup)
+        resolve_property(self.symbols().class_decl(class)?, name, &lookup)
     }
 
     /// `zend_get_property_offset`'s `property_info->hooks` arm: the
@@ -334,7 +334,7 @@ impl Request {
         else {
             return false;
         };
-        let Some(decl) = self.class_decl(class) else {
+        let Some(decl) = self.symbols().class_decl(class) else {
             return false;
         };
         let Some(own) = decl.properties.get(property as usize) else {
@@ -380,7 +380,7 @@ impl Request {
     /// php's `Error` over a hooked property, naming the object's class
     /// as `zobj->ce->name` names it.
     fn hooked_error(&mut self, object: PhpObject, name: &[u8], sentence: &str) -> Thrown {
-        let class = self.class_name(object.class());
+        let class = self.symbols().class_name(object.class());
         let shown = String::from_utf8_lossy(name).into_owned();
         let message = sentence
             .replace("{class}", &class)
@@ -577,7 +577,7 @@ impl Request {
         if placed.typed {
             return Err(self.uninitialized_property(object.class(), name));
         }
-        let class = self.class_name(object.class());
+        let class = self.symbols().class_name(object.class());
         let shown = String::from_utf8_lossy(name).into_owned();
         crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
         Ok(Value::null())
@@ -891,9 +891,11 @@ fn trampoline_call(
             "InternalError: a parent hook trampoline served with no property",
         ));
     };
-    let given = req.argument_count();
+    let given = req.frames().argument_count();
     if given != wanted {
-        let class = scope.map(|scope| req.class_name(scope)).unwrap_or_default();
+        let class = scope
+            .map(|scope| req.symbols().class_name(scope))
+            .unwrap_or_default();
         let shown = String::from_utf8_lossy(&name).into_owned();
         // The member string `get_active_function_or_method_name` makes
         // stands across the printed throw.
@@ -906,7 +908,7 @@ fn trampoline_call(
             crate::api::raising::throw_error(req, "ArgumentCountError", &message)
         }));
     }
-    let Some(this) = req.this() else {
+    let Some(this) = req.frames().this() else {
         return Err(crate::api::raising::throw_error(
             req,
             "Error",
@@ -929,7 +931,7 @@ fn parent_hook_get(req: &mut Request) -> Result<Owner<Value>, Thrown> {
 /// object's `write_property`, and returned.
 fn parent_hook_set(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let (this, name) = trampoline_call(req, HookKind::Set, 1)?;
-    let value = req.argument(1).unwrap_or_else(Value::null).deref();
+    let value = req.frames().argument(1).unwrap_or_else(Value::null).deref();
     let key = req.string(&name)?;
     let key = Owner::adopt(key);
     // The return's owner, and the write's.
@@ -1033,10 +1035,10 @@ impl Request {
     /// each row the name, the class whose declaration it is and its
     /// visibility.
     fn hooked_object_keys(&self, class: ClassId) -> Vec<(Box<[u8]>, ClassId, Visibility)> {
-        let chain: Vec<ClassId> = self.lineage(class).collect();
+        let chain: Vec<ClassId> = self.symbols().lineage(class).collect();
         let mut keys: Vec<(Box<[u8]>, KeyOwner, ClassId, Visibility)> = Vec::new();
         for here in chain.into_iter().rev() {
-            let Some(decl) = self.class_decl(here) else {
+            let Some(decl) = self.symbols().class_decl(here) else {
                 continue;
             };
             for property in decl.properties.iter().filter(|p| p.is_instance) {
@@ -1166,7 +1168,7 @@ impl Request {
                 if by_ref
                     && !hooked
                         .get
-                        .and_then(|get| self.function_decl(get))
+                        .and_then(|get| self.symbols().function_decl(get))
                         .is_some_and(|decl| decl.returns_by_ref)
                 {
                     return Err(self.hooked_error(
@@ -1250,8 +1252,8 @@ impl Request {
             return record.hooks;
         }
         let mut hooks = ClassHooks::Absent;
-        for here in self.lineage(class) {
-            let Some(decl) = self.class_decl(here) else {
+        for here in self.symbols().lineage(class) {
+            let Some(decl) = self.symbols().class_decl(here) else {
                 continue;
             };
             for property in decl.properties.iter().filter(|p| p.hooks.is_some()) {
@@ -1378,7 +1380,7 @@ impl Request {
         let iterator = build == HookedBuild::Iterator;
         // `parents`, the chain walked from its root, an `emalloc` freed
         // once the declared rows are laid.
-        let parents = self.heap.block(8 * self.lineage(class).count());
+        let parents = self.heap.block(8 * self.symbols().lineage(class).count());
         let parents = self.fatal_of(parents)?;
         let laid = 'laid: {
             for (name, declaring, visibility) in keys {

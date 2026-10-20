@@ -103,7 +103,8 @@ impl PDOException {
 fn pdo_info(req: &mut Request) {
     let drivers: Vec<&str> = drivers(req).map(connector::Connector::name).collect();
     let drivers = drivers.join(", ");
-    req.info_table(&[&["PDO support", "enabled"], &["PDO drivers", &drivers]]);
+    req.extensions_mut()
+        .info_table(&[&["PDO support", "enabled"], &["PDO drivers", &drivers]]);
 }
 
 /// `pdo_driver_hash`: the connectors the bundle's extensions registered,
@@ -128,7 +129,7 @@ pub(crate) fn as_driver<R>(
     f: impl FnOnce(&mut Request) -> R,
 ) -> R {
     match driver.and_then(|driver| supplier_of(req, driver)) {
-        Some(supplier) => req.serve_supplied(supplier, f),
+        Some(supplier) => req.code_mut().serve_supplied(supplier, f),
         None => f(req),
     }
 }
@@ -183,7 +184,8 @@ fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
 
 /// `ce->name`.
 fn class_name(req: &Request, class: ClassId) -> String {
-    req.class_decl(class)
+    req.symbols()
+        .class_decl(class)
         .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
         .unwrap_or_default()
 }
@@ -191,7 +193,8 @@ fn class_name(req: &Request, class: ClassId) -> String {
 /// `instanceof_function` over the parents alone, which is all PDO asks
 /// of a class: whether `class` is or extends the class named `of`.
 fn extends(req: &mut Request, class: ClassId, of: &[u8]) -> bool {
-    req.lineage(class)
-        .map_while(|class| req.class_decl(class))
+    req.symbols()
+        .lineage(class)
+        .map_while(|class| req.symbols().class_decl(class))
         .any(|decl| decl.name.0.eq_ignore_ascii_case(of))
 }

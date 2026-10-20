@@ -2,7 +2,7 @@
 //! `spl_iterators.c`, in `php_spl.stub.php`'s order: the class
 //! introspection of `class_implements`, `class_parents` and
 //! `class_uses`, the autoload stack over the engine's
-//! (`Request::autoload_register` and `call::autoload`), `spl_classes`,
+//! (`Symbols::autoload_register` and `call::autoload`), `spl_classes`,
 //! the two object identities, and the walks of a `Traversable`
 //! `spl_iterator_apply` makes.
 
@@ -105,7 +105,7 @@ fn class_implements(
     let Some(class) = subject(req, object_or_class.0, autoload)? else {
         return Ok(OrFalse::False);
     };
-    let interfaces = req.interfaces(class).to_vec();
+    let interfaces = req.symbols().interfaces(class).to_vec();
     class_names(req, &interfaces)
 }
 
@@ -139,7 +139,7 @@ fn class_parents(
     let Some(class) = subject(req, object_or_class.0, autoload)? else {
         return Ok(OrFalse::False);
     };
-    let parents: Vec<ClassId> = req.lineage(class).skip(1).collect();
+    let parents: Vec<ClassId> = req.symbols().lineage(class).skip(1).collect();
     class_names(req, &parents)
 }
 
@@ -191,6 +191,7 @@ fn class_uses(
         return Ok(OrFalse::False);
     };
     let names: Vec<Vec<u8>> = req
+        .symbols()
         .class_decl(class)
         .map(|decl| decl.traits.iter().map(|t| t.0.to_vec()).collect())
         .unwrap_or_default();
@@ -336,7 +337,7 @@ fn spl_autoload_extensions(
 /// ```
 #[php_function]
 fn spl_autoload_functions(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
-    let loaders = req.autoload_functions()?;
+    let loaders = req.symbols_mut().autoload_functions()?;
     let mut out = PhpArray::new(req)?;
     for loader in loaders {
         out.append(req, loader)?;
@@ -408,7 +409,7 @@ fn spl_autoload_register(
         ));
     }
     if let Some(loader) = loader {
-        req.autoload_register(loader, prepend)?;
+        req.symbols_mut().autoload_register(loader, prepend)?;
         return Ok(true);
     }
     // The name is lent to the callable, which the stack takes its own of.
@@ -417,7 +418,7 @@ fn spl_autoload_register(
         name.give_up(req);
         return Ok(false);
     };
-    let registered = req.autoload_register(loader, prepend);
+    let registered = req.symbols_mut().autoload_register(loader, prepend);
     name.give_up(req);
     registered?;
     Ok(true)
@@ -474,15 +475,15 @@ fn spl_autoload_unregister(req: &mut Request, callback: Raw<Callable>) -> Result
             Level::Deprecated,
             "Using spl_autoload_call() as a callback for spl_autoload_unregister() is deprecated, to remove all registered autoloaders, call spl_autoload_unregister() for all values returned from spl_autoload_functions()",
         );
-        for listed in req.autoload_functions()? {
+        for listed in req.symbols_mut().autoload_functions()? {
             if let Ok(held) = callable_checked(req, &listed) {
-                req.autoload_unregister(&held);
+                req.symbols_mut().autoload_unregister(&held);
             }
             listed.give_up(req);
         }
         return Ok(true);
     }
-    Ok(req.autoload_unregister(&loader))
+    Ok(req.symbols_mut().autoload_unregister(&loader))
 }
 
 /// `SPL_LIST_CLASSES`, in its order: alphabetical but for `SplMinHeap`

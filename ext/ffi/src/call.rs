@@ -49,8 +49,8 @@ pub(crate) struct Callback {
 /// Attempt to call undefined C function 'nope'
 /// ```
 pub(crate) fn trampoline(req: &mut Request) -> Result<Owner<Value>, Thrown> {
-    let name = req.active_function_name();
-    let Some(this) = req.this() else {
+    let name = req.frames().active_function_name();
+    let Some(this) = req.frames().this() else {
         return Ok(Owner::null());
     };
     let Some((ty, addr)) = function_symbol(req, this, name.as_bytes()) else {
@@ -72,7 +72,7 @@ pub(crate) fn trampoline(req: &mut Request) -> Result<Owner<Value>, Thrown> {
 /// int(3)
 /// ```
 pub(crate) fn invoke(req: &mut Request) -> Result<Owner<Value>, Thrown> {
-    let Some(this) = req.this() else {
+    let Some(this) = req.frames().this() else {
         return Ok(Owner::null());
     };
     let v = view(req, this);
@@ -140,7 +140,7 @@ fn call(req: &mut Request, name: &str, func: TypeId, addr: usize) -> Result<Owne
             "InternalError: a C function of no function type",
         ));
     };
-    let given = req.argument_count();
+    let given = req.frames().argument_count();
     let count = shape.args.len();
     let plural = if count == 1 { "" } else { "s" };
     if shape.variadic && count > given {
@@ -166,7 +166,11 @@ fn call(req: &mut Request, name: &str, func: TypeId, addr: usize) -> Result<Owne
         let slot = frame.slot(n);
         frame.addrs.push(slot);
         let position = u32::try_from(n + 1).unwrap_or(u32::MAX);
-        let arg = req.argument(position).unwrap_or(Value::null()).deref();
+        let arg = req
+            .frames()
+            .argument(position)
+            .unwrap_or(Value::null())
+            .deref();
         match shape.args.get(n) {
             Some(ty) => pass_arg(req, name, n, &arg, *ty, &mut frame)?,
             None => pass_var_arg(req, name, n, &arg, &mut frame)?,
@@ -509,7 +513,7 @@ pub(crate) fn create_callback(
     let Some(sig) = Signature::prepare(shape.abi, &ret, &layouts, None) else {
         return Err(ffi_error(req, "Cannot prepare callback CIF"));
     };
-    let reentry = req.reentry();
+    let reentry = req.limits_mut().reentry();
     let index = req.state::<State>().callbacks.len();
     let closure = match Closure::new(sig, reentry, callback, index) {
         Ok(closure) => closure,
@@ -685,7 +689,7 @@ pub(crate) fn serve_deferred(
     if req.state::<State>().callbacks.is_empty() {
         return beneath.serve(req);
     }
-    let reentry = req.reentry();
+    let reentry = req.limits_mut().reentry();
     reentry.serve_waiting(|call| ffi::serve_waiting(req, call));
     for mut deferred in reentry.take_deferred() {
         let Some(addrs) = req

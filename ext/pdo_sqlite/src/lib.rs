@@ -81,7 +81,7 @@ pub fn extension() -> Extension {
 /// `PHP_MINFO_FUNCTION(pdo_sqlite)`.
 fn pdo_sqlite_info(req: &mut Request) {
     let version = ffi::version();
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["PDO Driver for SQLite 3.x", "enabled"],
         &["SQLite Library", &version],
     ]);
@@ -246,7 +246,7 @@ impl Sqlite {
         let this = this.object();
         php_ext_pdo::connector::with_connection(req, this, |req, conn| {
             let shown = String::from_utf8_lossy(&name).into_owned();
-            let Some(full) = req.realpath(&name) else {
+            let Some(full) = req.environment_mut().realpath(&name) else {
                 return Err(throw(
                     req,
                     "PDOException",

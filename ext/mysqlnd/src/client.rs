@@ -529,7 +529,8 @@ impl Mysqlnd {
                 let text = format!(
                     "Unable to select [{}]: {} (max_fd={max})",
                     failed.raw_os_error().unwrap_or(0),
-                    req.os_error_text(failed.raw_os_error().unwrap_or(0))
+                    req.environment()
+                        .os_error_text(failed.raw_os_error().unwrap_or(0))
                 );
                 docref(req, Level::Warning, &text);
                 return (None, dont_poll);

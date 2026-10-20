@@ -383,7 +383,8 @@ type Set = Result<bool, Thrown>;
 
 /// Whether `open_basedir` is set, `PG(open_basedir) && *PG(open_basedir)`.
 fn basedir(req: &Request) -> bool {
-    req.ini_get(b"open_basedir")
+    req.ini()
+        .get(b"open_basedir")
         .is_some_and(|value| !value.is_empty())
 }
 
@@ -404,7 +405,7 @@ fn option_str(req: &mut Request, object: PhpObject, option: i64, value: &[u8]) -
     if value.contains(&0) {
         let text = format!(
             "{}(): cURL option must not contain any null bytes",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         return Err(throw_error(req, "ValueError", &text));
     }
@@ -532,14 +533,14 @@ fn stream_of(req: &mut Request, value: &Value) -> Result<Option<(Stream, i32)>, 
     let Some(resource) = value.as_resource() else {
         let text = format!(
             "{}(): supplied argument is not a valid File-Handle resource",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         return Err(throw_error(req, "TypeError", &text));
     };
     let Some(stream) = Stream::from_value(req, &resource.as_value()) else {
         let text = format!(
             "{}(): supplied resource is not a valid File-Handle resource",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         return Err(throw_error(req, "TypeError", &text));
     };
@@ -583,7 +584,7 @@ fn set_stream(req: &mut Request, object: PhpObject, which: StreamOpt, value: &Va
     {
         let text = format!(
             "{}(): The provided file handle must be writable",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         return Err(throw_error(req, "ValueError", &text));
     }
@@ -634,7 +635,7 @@ fn set_list(req: &mut Request, object: PhpObject, option: i64, value: &Value) ->
     let Some(array) = value.deref().as_array() else {
         let text = format!(
             "{}(): The {} option must have an array value",
-            req.active_function_name(),
+            req.frames().active_function_name(),
             list_name(option)
         );
         return Err(throw_error(req, "TypeError", &text));
@@ -752,7 +753,7 @@ pub(crate) fn setopt(
             if !truthy(req, &value.deref())? {
                 let text = format!(
                     "{}(): Disabling safe uploads is no longer supported",
-                    req.active_function_name()
+                    req.frames().active_function_name()
                 );
                 return Err(throw_error(req, "ValueError", &text));
             }
@@ -821,7 +822,12 @@ pub(crate) fn setopt(
         }
         Opt::Path => {
             let path = with_string(req, value, <[u8]>::to_vec)?;
-            if !path.is_empty() && req.check_open_basedir(&path, true).is_err() {
+            if !path.is_empty()
+                && req
+                    .environment_mut()
+                    .check_open_basedir(&path, true)
+                    .is_err()
+            {
                 return Ok(false);
             }
             option_str(req, object, option, &path)

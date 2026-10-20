@@ -808,7 +808,7 @@ fn get_class(req: &mut Request, object: Passed<PhpObject>) -> Result<Owner<PhpSt
     let class = if let Passed::Given(object) = object {
         object.class()
     } else {
-        match req.scope() {
+        match req.frames().scope() {
             Some(scope) => {
                 deprecated(req, "Calling get_class() without arguments is deprecated");
                 scope
@@ -1447,6 +1447,7 @@ fn defined(req: &mut Request, constant_name: PhpString) -> Result<bool, Thrown> 
 fn var_dump(req: &mut Request, value: Value, values: Variadic<Value>) {
     for (at, coerced) in (1u32..).zip(std::iter::once(value).chain(values.0)) {
         let value = req
+            .frames()
             .argument(at)
             .filter(|passed| passed.tag() == crate::api::values::TypeTag::Undef)
             .unwrap_or(coerced);
@@ -1459,7 +1460,7 @@ fn var_dump(req: &mut Request, value: Value, values: Variadic<Value>) {
 /// test before it.
 fn blanks(req: &mut Request, width: usize) {
     if width > 0 {
-        req.write(" ".repeat(width).as_bytes());
+        req.response_mut().write(" ".repeat(width).as_bytes());
     }
 }
 
@@ -1518,18 +1519,25 @@ fn dump(req: &mut Request, value: &Value, level: usize) {
     };
     let value = &value.deref();
     if let Some(b) = value.as_bool() {
-        req.write(format!("{common}bool({b})\n").as_bytes());
+        req.response_mut()
+            .write(format!("{common}bool({b})\n").as_bytes());
     } else if let Some(n) = value.as_int() {
-        req.write(format!("{common}int({n})\n").as_bytes());
+        req.response_mut()
+            .write(format!("{common}int({n})\n").as_bytes());
     } else if let Some(f) = value.as_float() {
         // `php_var_dump` prints a float with `%.*H` at `serialize_precision`.
-        let text =
-            php_heap::double_to_string(f, req.serialize_precision(), php_heap::Exponent::Upper);
-        req.write(format!("{common}float({text})\n").as_bytes());
+        let text = php_heap::double_to_string(
+            f,
+            req.ini().serialize_precision(),
+            php_heap::Exponent::Upper,
+        );
+        req.response_mut()
+            .write(format!("{common}float({text})\n").as_bytes());
     } else if let Some(s) = value.as_php_string() {
-        req.write(format!("{common}string({}) \"", s.len()).as_bytes());
-        req.write(s.as_bytes());
-        req.write(b"\"\n");
+        req.response_mut()
+            .write(format!("{common}string({}) \"", s.len()).as_bytes());
+        req.response_mut().write(s.as_bytes());
+        req.response_mut().write(b"\"\n");
     } else if let Some(array) = value.as_array() {
         dump_array(req, common, array, level);
     } else if let Some(object) = value.as_object() {
@@ -1542,12 +1550,15 @@ fn dump(req: &mut Request, value: &Value, level: usize) {
             || String::from("Unknown"),
             |name| String::from_utf8_lossy(name).into_owned(),
         );
-        req.write(format!("{common}resource({}) of type ({name})\n", resource.id()).as_bytes());
+        req.response_mut()
+            .write(format!("{common}resource({}) of type ({name})\n", resource.id()).as_bytes());
     } else if value.tag() == crate::api::values::TypeTag::Undef {
         // `php_var_dump`'s `default:` arm.
-        req.write(format!("{common}UNKNOWN:0\n").as_bytes());
+        req.response_mut()
+            .write(format!("{common}UNKNOWN:0\n").as_bytes());
     } else {
-        req.write(format!("{common}NULL\n").as_bytes());
+        req.response_mut()
+            .write(format!("{common}NULL\n").as_bytes());
     }
 }
 
@@ -1563,10 +1574,11 @@ fn dump(req: &mut Request, value: &Value, level: usize) {
 /// written, as php asks it, so a marked array writes `*RECURSION*` alone.
 fn dump_array(req: &mut Request, common: &str, array: PhpArray, level: usize) {
     if array.is_recursive() {
-        req.write(b"*RECURSION*\n");
+        req.response_mut().write(b"*RECURSION*\n");
         return;
     }
-    req.write(format!("{common}array({}) {{\n", array.len()).as_bytes());
+    req.response_mut()
+        .write(format!("{common}array({}) {{\n", array.len()).as_bytes());
     let held = Hold::Owner(GiveUp::Dtor);
     let walked = walk::foreach_guarded(req, array, held, |req, row| -> walk::Step {
         if too_deep(req, level, req.stack_limit().exhausted()) {
@@ -1574,11 +1586,14 @@ fn dump_array(req: &mut Request, common: &str, array: PhpArray, level: usize) {
         }
         // `php_array_element_dump`.
         match row.key() {
-            Key::Int(n) => req.write(format!("{:w$}[{n}]=>\n", "", w = level + 1).as_bytes()),
+            Key::Int(n) => req
+                .response_mut()
+                .write(format!("{:w$}[{n}]=>\n", "", w = level + 1).as_bytes()),
             Key::Str(s) => {
-                req.write(format!("{:w$}[\"", "", w = level + 1).as_bytes());
-                req.write(s.as_bytes());
-                req.write(b"\"]=>\n");
+                req.response_mut()
+                    .write(format!("{:w$}[\"", "", w = level + 1).as_bytes());
+                req.response_mut().write(s.as_bytes());
+                req.response_mut().write(b"\"]=>\n");
             }
         }
         dump(req, row.value(), level + 2);
@@ -1590,7 +1605,7 @@ fn dump_array(req: &mut Request, common: &str, array: PhpArray, level: usize) {
         Ok(walk::Guarded::Recursive | walk::Guarded::Walked(_)) | Err(_) => {}
     }
     blanks(req, level - 1);
-    req.write(b"}\n");
+    req.response_mut().write(b"}\n");
 }
 
 /// `php_var_dump`'s `IS_OBJECT` arm: `object(Class)#handle (count) {`,
@@ -1722,15 +1737,16 @@ fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize)
     // guard as php has it: a case is its class and its case name,
     // `zend_enum_fetch_case_name`, and none of its properties.
     if req
+        .symbols()
         .class_decl(object.class())
         .is_some_and(|decl| decl.kind == ClassKind::Enum)
     {
-        let class = req.class_name(object.class());
+        let class = req.symbols().class_name(object.class());
         let case = object
             .prop(req, b"name")
             .and_then(|name| name.as_str_bytes().map(<[u8]>::to_vec))
             .unwrap_or_default();
-        req.write(
+        req.response_mut().write(
             format!(
                 "{common}enum({class}::{})\n",
                 String::from_utf8_lossy(&case)
@@ -1740,7 +1756,7 @@ fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize)
         return;
     }
     if object.is_recursive_in(req, RecursionGuard::Debug) {
-        req.write(b"*RECURSION*\n");
+        req.response_mut().write(b"*RECURSION*\n");
         return;
     }
     object.protect_in(req, RecursionGuard::Debug);
@@ -1765,7 +1781,7 @@ fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize)
     let mut header = format!("{common}{prefix}object(").into_bytes();
     header.extend_from_slice(php_unit::decl::shown_bytes(&name));
     header.extend_from_slice(format!(")#{} ({}) {{\n", object.index(), held.count()).as_bytes());
-    req.write(&header);
+    req.response_mut().write(&header);
     // `ZEND_HASH_FOREACH_KEY_VAL(myht, num, key, val)`
     // (`Z/ext/standard/var.c:196`) over the table held until
     // `zend_release_properties`: the walk takes no owner of its own.
@@ -1774,13 +1790,15 @@ fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize)
             return Ok(ControlFlow::Continue(()));
         }
         match row.key() {
-            Key::Int(at) => req.write(format!("{:w$}[{at}]=>\n", "", w = level + 1).as_bytes()),
+            Key::Int(at) => req
+                .response_mut()
+                .write(format!("{:w$}[{at}]=>\n", "", w = level + 1).as_bytes()),
             Key::Str(name) => dump_property_name(req, level, name.as_bytes()),
         }
         match row.uninitialized() {
             Some(ty) => {
                 let line = format!("{:w$}uninitialized({ty})\n", "", w = level + 1);
-                req.write(line.as_bytes());
+                req.response_mut().write(line.as_bytes());
             }
             None => dump(req, row.value(), level + 2),
         }
@@ -1796,7 +1814,7 @@ fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize)
     // object still marked.
     let left = held.release(req);
     blanks(req, level - 1);
-    req.write(b"}\n");
+    req.response_mut().write(b"}\n");
     object.unprotect_in(req, RecursionGuard::Debug);
     if let Err(thrown) = left {
         leave_chained(req, thrown);
@@ -1881,7 +1899,8 @@ fn too_deep(req: &mut Request, level: usize, past: bool) -> bool {
     if !past {
         return false;
     }
-    req.write(format!("{:w$}nesting level too deep", "", w = level + 1).as_bytes());
+    req.response_mut()
+        .write(format!("{:w$}nesting level too deep", "", w = level + 1).as_bytes());
     true
 }
 
@@ -1898,7 +1917,8 @@ fn dump_property_name(req: &mut Request, level: usize, name: &[u8]) {
     if let Unmangled::Illegal(notice) = unmangled {
         crate::api::raising::notice(req, notice);
     }
-    req.write(format!("{:w$}[", "", w = level + 1).as_bytes());
+    req.response_mut()
+        .write(format!("{:w$}[", "", w = level + 1).as_bytes());
     match unmangled {
         Unmangled::Mangled { class, prop } => {
             let mut shown = b"\"".to_vec();
@@ -1910,15 +1930,15 @@ fn dump_property_name(req: &mut Request, level: usize, name: &[u8]) {
                 shown.extend_from_slice(c_str(class));
                 shown.extend_from_slice(b"\":private");
             }
-            req.write(&shown);
+            req.response_mut().write(&shown);
         }
         Unmangled::Plain | Unmangled::Illegal(_) => {
-            req.write(b"\"");
-            req.write(name);
-            req.write(b"\"");
+            req.response_mut().write(b"\"");
+            req.response_mut().write(name);
+            req.response_mut().write(b"\"");
         }
     }
-    req.write(b"]=>\n");
+    req.response_mut().write(b"]=>\n");
 }
 
 /// What `zend_unmangle_property_name_ex` answers for one name.
@@ -2003,7 +2023,7 @@ pub(crate) fn unmangle_property_name(name: &[u8]) -> Unmangled<'_> {
 /// ```
 #[php_function]
 fn memory_get_usage(req: &mut Request, #[php(default = false)] real_usage: bool) -> i64 {
-    as_long(req.memory_usage(real_usage))
+    as_long(req.memory().usage(real_usage))
 }
 
 /// `memory_get_peak_usage(bool $real_usage = false): int`, php's
@@ -2058,7 +2078,7 @@ fn memory_get_usage(req: &mut Request, #[php(default = false)] real_usage: bool)
 /// ```
 #[php_function]
 fn memory_get_peak_usage(req: &mut Request, #[php(default = false)] real_usage: bool) -> i64 {
-    as_long(req.memory_peak(real_usage))
+    as_long(req.memory().peak(real_usage))
 }
 
 /// `memory_reset_peak_usage(): void`, php's
@@ -2113,7 +2133,8 @@ fn as_long(bytes: usize) -> i64 {
 #[php_function]
 fn extension_loaded(req: &mut Request, extension: PhpString) -> bool {
     let lowered = extension.as_bytes().to_ascii_lowercase();
-    req.loaded_extensions()
+    req.extensions()
+        .loaded_extensions()
         .iter()
         .any(|name| name.as_bytes().to_ascii_lowercase() == lowered)
 }
@@ -2138,7 +2159,7 @@ fn extension_loaded(req: &mut Request, extension: PhpString) -> bool {
 /// ```
 #[php_function]
 fn ini_get(req: &mut Request, option: PhpString) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    let value = req.ini_get(option.as_bytes()).map(<[u8]>::to_vec);
+    let value = req.ini().get(option.as_bytes()).map(<[u8]>::to_vec);
     Ok(match value {
         Some(value) => OrFalse::Value(PhpString::new(req, &value)?),
         None => OrFalse::False,
@@ -2216,12 +2237,15 @@ fn ini_set(
     if matches!(
         option.as_bytes(),
         b"java.class.path" | b"java.home" | b"java.library.path" | b"vpopmail.directory"
-    ) && req.check_open_basedir(value.as_bytes(), true).is_err()
+    ) && req
+        .environment_mut()
+        .check_open_basedir(value.as_bytes(), true)
+        .is_err()
     {
         value.give_up(req);
         return Ok(OrFalse::False);
     }
-    let set = req.ini_set_string(option.as_bytes(), *value);
+    let set = req.ini_mut().set_string(option.as_bytes(), *value);
     value.give_up(req);
     Ok(match set? {
         Some(previous) => OrFalse::Value(PhpString::new(req, &previous)?),
@@ -2293,7 +2317,7 @@ fn set_time_limit(req: &mut Request, seconds: i64) -> bool {
 /// ```
 #[php_function]
 fn error_reporting(req: &mut Request, #[php(default = null)] error_level: Option<i64>) -> i64 {
-    let old = req.error_reporting();
+    let old = req.diagnostics().error_reporting();
     if let Some(level) = error_level
         && level != old
     {
@@ -2404,7 +2428,7 @@ fn register_shutdown_function(
     for value in &args.0 {
         req.addref(value);
     }
-    req.register_shutdown_function(callback, args.0)
+    req.code_mut().register_shutdown_function(callback, args.0)
 }
 
 /// `php_call_shutdown_functions` (`Z/ext/standard/basic_functions.c:1650`),

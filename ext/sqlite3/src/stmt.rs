@@ -457,7 +457,7 @@ impl SQLite3Stmt {
             Some(cell) => Value::reference(cell),
             None => var.get().copied().unwrap_or_default(),
         };
-        let kind = if req.argument_count() < 3 {
+        let kind = if req.frames().argument_count() < 3 {
             Kind::guess(&value)
         } else {
             Kind::of(r#type)
@@ -494,7 +494,7 @@ impl SQLite3Stmt {
         value: Value,
         #[php(default = SQLITE3_TEXT)] r#type: i64,
     ) -> Answer<bool> {
-        let kind = if req.argument_count() < 3 {
+        let kind = if req.frames().argument_count() < 3 {
             Kind::guess(&value)
         } else {
             Kind::of(r#type)

@@ -19,7 +19,7 @@
 //! authorizer are called by the library from inside `sqlite3_step`,
 //! `sqlite3_exec`, `sqlite3_prepare_v2` or `sqlite3_reset`. Each of
 //! those calls is made through `Db::call`, which holds the connection
-//! for the call (`Request::holding`), so PHP code a callback runs that
+//! for the call (`Memory::holding`), so PHP code a callback runs that
 //! gives the connection's owner up leaves its close to the call's end;
 //! leaves the request where a trampoline finds it, in the connection's
 //! lend, for the length of the call; and hands back what a callback
@@ -484,12 +484,12 @@ impl Db {
         flags: i32,
         callbacks: &'static dyn Callbacks,
     ) -> Result<Foreign<Conn>, (i32, Vec<u8>)> {
-        Conn::open(filename, flags, callbacks).map(|conn| req.adopt(conn))
+        Conn::open(filename, flags, callbacks).map(|conn| req.memory_mut().adopt(conn))
     }
 
     /// The connection, where its owner keeps it.
     fn conn(self, req: &mut Request) -> Option<&mut Conn> {
-        req.foreign(self.0)
+        req.memory_mut().foreign(self.0)
     }
 
     /// `sqlite3 *`, where the connection stands.
@@ -498,7 +498,7 @@ impl Db {
     }
 
     /// `f` served on the connection, held for the call
-    /// ([`Request::holding`]) and its request lent to the library's
+    /// ([`Memory::holding`]) and its request lent to the library's
     /// callbacks, and what a callback threw meanwhile handed back beside
     /// `f`'s answer; `None` where the connection is gone. PHP code a
     /// callback runs may give the connection's owner up: the hold keeps
@@ -509,7 +509,7 @@ impl Db {
         req: &mut Request,
         f: impl FnOnce(*mut sys::sqlite3) -> R,
     ) -> Option<(R, Option<Thrown>)> {
-        let held = req.holding(self.0, |req, held| {
+        let held = req.memory_mut().holding(self.0, |req, held| {
             let conn = held.get(req)?;
             let (raw, lend) = (conn.raw.get(), conn.lend.get());
             // SAFETY: the lend of a connection the hold keeps open; the
@@ -551,7 +551,7 @@ impl Db {
         let registrations = registrations
             .into_iter()
             .filter(move |registration| registration.db == db);
-        let Some(conn) = req.disown(owner) else {
+        let Some(conn) = req.memory_mut().disown(owner) else {
             // No call holds it, or `serving` would have answered; were one
             // to, it closes as the call ends and may call back with what
             // is registered on it until then, so the data is left to it.
@@ -566,7 +566,7 @@ impl Db {
             Err((conn, code, message)) => {
                 // The request keeps it again under a new name, which the
                 // registrations on it follow.
-                let owner = req.adopt(conn);
+                let owner = req.memory_mut().adopt(conn);
                 let kept = Db::of(&owner);
                 registrations.for_each(|registration| registration.db = kept);
                 Err(Box::new(Unclosed {
@@ -584,7 +584,7 @@ impl Db {
     /// close it once each function and collation is taken off it
     /// ([`Registration::unregister`]).
     pub fn release(req: &mut Request, owner: Foreign<Conn>) {
-        drop(req.disown(owner));
+        drop(req.memory_mut().disown(owner));
     }
 
     /// `sqlite3_errcode`.

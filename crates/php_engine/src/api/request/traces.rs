@@ -22,6 +22,7 @@ use crate::api::values::{
 use crate::engine::Known;
 use crate::exec::{self, IncludeKind};
 
+use super::Frames;
 use super::{
     DEBUG_BACKTRACE_IGNORE_ARGS, DEBUG_BACKTRACE_PROVIDE_OBJECT, Expand, Link, Request, Slots,
     append_escaped, links_of,
@@ -549,6 +550,7 @@ impl Request {
     /// function with no declaration.
     fn function_name_string(&mut self, function: Function) -> Result<PhpString, Thrown> {
         let held = self
+            .symbols()
             .function_decl(function)
             .map(|decl| self.shared.existing_interned(&decl.name.0));
         match held {
@@ -565,6 +567,7 @@ impl Request {
     /// [`Request::function_name_string`] reads a function's.
     fn class_name_string(&mut self, class: ClassId) -> Result<PhpString, Thrown> {
         let held = self
+            .symbols()
             .class_decl(class)
             .and_then(|decl| self.shared.existing_interned(&decl.name.0));
         if let Some(held) = held {
@@ -700,7 +703,7 @@ impl Request {
                 .iter()
                 .any(|attribute| attribute.name.0.eq_ignore_ascii_case(b"SensitiveParameter"))
         };
-        let Some(decl) = self.function_decl(function) else {
+        let Some(decl) = self.symbols().function_decl(function) else {
             return Sensitive::default();
         };
         Sensitive {
@@ -1286,7 +1289,7 @@ impl Request {
             ValueRef::Bool(b) => out.push_str(if b { "true" } else { "false" }),
             ValueRef::Int(n) => out.push_str(&n.to_string()),
             ValueRef::Float(f) => {
-                let precision = match self.precision() {
+                let precision = match self.ini().precision() {
                     0 => 1,
                     precision => precision,
                 };
@@ -1306,6 +1309,7 @@ impl Request {
             }
             ValueRef::Object(object) => {
                 let decl = self
+                    .symbols()
                     .class_decl(object.class())
                     .filter(|decl| decl.kind == ClassKind::Enum)?;
                 // `zend_enum_fetch_case_name`: the case's `name`.
@@ -1368,6 +1372,7 @@ impl Request {
                 .map(|code| code.vars.clone())
                 .unwrap_or_default();
             let declared = self
+                .symbols()
                 .function_decl(function)
                 .map_or(0, |decl| decl.parameters.len());
             for (at, argument) in arguments.iter_mut().enumerate().take(declared) {
@@ -1380,26 +1385,6 @@ impl Request {
         }
         arguments.extend(extra.iter().copied());
         arguments
-    }
-
-    /// `zend_fetch_debug_backtrace(return_value, 1, options, limit)`,
-    /// what `debug_backtrace()` answers from inside the native being
-    /// served: the rows below it, under php's options and limit.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub fn backtrace(&mut self, options: i64, limit: i64) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.fetch_debug_backtrace(true, options, limit);
-        adopted(made)
-    }
-
-    /// `zend_fetch_debug_backtrace(return_value, 0, options, limit)`,
-    /// what a debugger stopped between two oplines builds, as phpdbg's
-    /// `back` and `frame` build it: every row of the chain from the
-    /// innermost frame down, none skipped, under php's options and
-    /// limit.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub fn backtrace_here(&mut self, options: i64, limit: i64) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.fetch_debug_backtrace(false, options, limit);
-        adopted(made)
     }
 
     /// `zend_hash_str_update` on a row: `value` at the string key `name`,
@@ -1419,5 +1404,27 @@ impl Request {
             }
         };
         row.set(self, key, value)
+    }
+}
+
+impl Frames<&mut Request> {
+    /// `zend_fetch_debug_backtrace(return_value, 1, options, limit)`,
+    /// what `debug_backtrace()` answers from inside the native being
+    /// served: the rows below it, under php's options and limit.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn backtrace(self, options: i64, limit: i64) -> Result<Owner<PhpArray>, Thrown> {
+        let made = self.0.fetch_debug_backtrace(true, options, limit);
+        adopted(made)
+    }
+
+    /// `zend_fetch_debug_backtrace(return_value, 0, options, limit)`,
+    /// what a debugger stopped between two oplines builds, as phpdbg's
+    /// `back` and `frame` build it: every row of the chain from the
+    /// innermost frame down, none skipped, under php's options and
+    /// limit.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn backtrace_here(self, options: i64, limit: i64) -> Result<Owner<PhpArray>, Thrown> {
+        let made = self.0.fetch_debug_backtrace(false, options, limit);
+        adopted(made)
     }
 }

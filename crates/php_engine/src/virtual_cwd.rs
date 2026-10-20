@@ -145,7 +145,7 @@ impl RealpathCache {
     /// the child's first request starts, and that request's
     /// `init_request_info` enters its program's path.
     pub(crate) fn update(&mut self, name: &[u8], value: Option<&[u8]>) {
-        let parsed = || value.map_or(0, crate::api::request::Request::ini_parse_bytes);
+        let parsed = || value.map_or(0, crate::api::request::Ini::parse_bytes);
         match name {
             b"realpath_cache_size" => *self.limit.get_mut() = parsed(),
             b"realpath_cache_ttl" => self.ttl = parsed(),

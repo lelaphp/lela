@@ -7,6 +7,7 @@
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
+use super::Environment;
 use super::{Request, Resolve};
 
 /// One bucket of the realpath cache, `realpath_cache_bucket` as
@@ -23,23 +24,61 @@ pub struct RealpathEntry {
 }
 
 impl Request {
+    /// `php_request_startup`'s `Disable realpath cache if an open_basedir
+    /// is set` (`Z/main/main.c:1918`), once the host's ini
+    /// is applied: an `open_basedir` the request starts under turns the
+    /// engine's cache off, for this request and every one after it, as
+    /// php's process global stays off.
+    pub(crate) fn realpath_cache_startup(&mut self) {
+        if self
+            .ini()
+            .get(b"open_basedir")
+            .is_some_and(|list| !list.is_empty())
+        {
+            self.shared.realpath_cache.turn_off();
+        }
+    }
+}
+
+impl Environment<&Request> {
     /// A path made absolute against the request's `cwd`.
     #[must_use]
-    pub fn absolutize(&self, path: &[u8]) -> PathBuf {
+    pub fn absolutize(self, path: &[u8]) -> PathBuf {
         let given = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
         if given.is_absolute() {
             given.to_path_buf()
         } else {
-            self.cwd.join(given)
+            self.0.cwd.join(given)
         }
     }
 
+    /// `CWDG(realpath_cache)` as `realpath_cache_get()` walks it, slot by
+    /// slot and each chain newest first: each bucket's path as it was
+    /// written, what it resolved to, its key, whether it is a directory,
+    /// when it expires, and the bytes `realpath_cache_size()` counts it as.
+    #[must_use]
+    pub fn realpath_cache(self) -> Vec<RealpathEntry> {
+        self.0.shared.realpath_cache.listed(|bucket| RealpathEntry {
+            path: bucket.path.clone(),
+            realpath: bucket.realpath.clone(),
+            key: bucket.key,
+            is_dir: bucket.is_dir,
+            expires: bucket.expires,
+            size: bucket.size(),
+        })
+    }
+}
+
+impl Environment<&mut Request> {
     /// `VCWD_REALPATH`, `tsrm_realpath`: the path against the request's
     /// working directory with every link resolved, through the realpath
     /// cache; `None` where the path does not exist.
-    pub fn realpath(&mut self, path: &[u8]) -> Option<PathBuf> {
-        let cwd = self.cwd.as_os_str().as_encoded_bytes().to_vec();
-        let real = self.virtual_file_ex(&cwd, path, Resolve::RealPath)?;
+    pub fn realpath(self, path: &[u8]) -> Option<PathBuf> {
+        let cwd = self.0.cwd.as_os_str().as_encoded_bytes().to_vec();
+        let real = self
+            .0
+            .environment_mut()
+            .virtual_file_ex(&cwd, path, Resolve::RealPath)?;
         Some(PathBuf::from(std::ffi::OsStr::from_bytes(&real)))
     }
 
@@ -68,46 +107,16 @@ impl Request {
     /// array(0) {
     /// }
     /// ```
-    pub fn virtual_file_ex(&mut self, cwd: &[u8], path: &[u8], how: Resolve) -> Option<Vec<u8>> {
-        crate::virtual_cwd::virtual_file_ex(&self.shared.realpath_cache, cwd, path, how)
-    }
-
-    /// `php_request_startup`'s `Disable realpath cache if an open_basedir
-    /// is set` (`Z/main/main.c:1918`), once the host's ini
-    /// is applied: an `open_basedir` the request starts under turns the
-    /// engine's cache off, for this request and every one after it, as
-    /// php's process global stays off.
-    pub(crate) fn realpath_cache_startup(&mut self) {
-        if self
-            .ini_get(b"open_basedir")
-            .is_some_and(|list| !list.is_empty())
-        {
-            self.shared.realpath_cache.turn_off();
-        }
-    }
-
-    /// `CWDG(realpath_cache)` as `realpath_cache_get()` walks it, slot by
-    /// slot and each chain newest first: each bucket's path as it was
-    /// written, what it resolved to, its key, whether it is a directory,
-    /// when it expires, and the bytes `realpath_cache_size()` counts it as.
-    #[must_use]
-    pub fn realpath_cache(&self) -> Vec<RealpathEntry> {
-        self.shared.realpath_cache.listed(|bucket| RealpathEntry {
-            path: bucket.path.clone(),
-            realpath: bucket.realpath.clone(),
-            key: bucket.key,
-            is_dir: bucket.is_dir,
-            expires: bucket.expires,
-            size: bucket.size(),
-        })
+    pub fn virtual_file_ex(self, cwd: &[u8], path: &[u8], how: Resolve) -> Option<Vec<u8>> {
+        crate::virtual_cwd::virtual_file_ex(&self.0.shared.realpath_cache, cwd, path, how)
     }
 
     /// `clearstatcache(true, ...)`'s half: `realpath_cache_del` of one
     /// path, or with none `realpath_cache_clean`.
-    pub fn realpath_cache_clear(&mut self, path: Option<&[u8]>) {
+    pub fn realpath_cache_clear(self, path: Option<&[u8]>) {
         match path {
-            Some(path) => self.shared.realpath_cache.delete(path),
-            None => self.shared.realpath_cache.clean(),
+            Some(path) => self.0.shared.realpath_cache.delete(path),
+            None => self.0.shared.realpath_cache.clean(),
         }
     }
 }

@@ -29,7 +29,7 @@ use php_ext::abi::IniStage;
 use php_ext::coerce::is_space;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Emalloc, Owner, PhpArray, PhpString};
 
@@ -403,7 +403,7 @@ fn numbered(list: &[i32]) -> Vec<Encoding> {
 
 /// An entry's value, empty where none is set.
 fn ini<'a>(req: &'a Request, name: &str) -> &'a [u8] {
-    req.ini_get(name.as_bytes()).unwrap_or_default()
+    req.ini().get(name.as_bytes()).unwrap_or_default()
 }
 
 /// An encoding's name from mbstring's own entry where it is set, else
@@ -460,7 +460,7 @@ impl Settings {
             "internal_encoding",
         );
         let internal = Encoding::named(&internal).unwrap_or_else(Encoding::utf8);
-        let substitute = match req.ini_get(b"mbstring.substitute_character") {
+        let substitute = match req.ini().get(b"mbstring.substitute_character") {
             Some(value) if !value.is_empty() => Substitute::DEFAULT.updated(value),
             _ => Substitute::DEFAULT,
         };
@@ -473,11 +473,8 @@ impl Settings {
             current_internal: internal,
             http_output,
             substitute,
-            strict_detection: Request::ini_parse_bool(ini(req, "mbstring.strict_detection")),
-            encoding_translation: Request::ini_parse_bool(ini(
-                req,
-                "mbstring.encoding_translation",
-            )),
+            strict_detection: Ini::parse_bool(ini(req, "mbstring.strict_detection")),
+            encoding_translation: Ini::parse_bool(ini(req, "mbstring.encoding_translation")),
             internal_origin,
             http_output_origin,
             http_input_origin,
@@ -929,7 +926,7 @@ fn on_conv_mimetypes(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Th
 #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
 fn on_strict_detection(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
     let value = value.unwrap_or_default();
-    settings(req).strict_detection = Request::ini_parse_bool(value);
+    settings(req).strict_detection = Ini::parse_bool(value);
     Ok(true)
 }
 
@@ -946,7 +943,7 @@ fn changed(req: &mut Request, name: &str, value: Option<&[u8]>) -> Result<bool, 
         (s.internal_origin, s.http_output_origin, s.http_input_origin)
     };
     let change = Some((name, value));
-    if req.ini_stage() == IniStage::Startup {
+    if req.ini().stage() == IniStage::Startup {
         if http_input == Origin::Php {
             let encoding = php_encoding(req, "input_encoding", change);
             set_http_input(req, &encoding)?;

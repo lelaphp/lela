@@ -717,7 +717,7 @@ impl Request {
     ) -> Option<Vec<u8>> {
         match visibility {
             Visibility::Private => {
-                php_compile::mangling(visibility, &self.class_decl(declaring)?.name.0)
+                php_compile::mangling(visibility, &self.symbols().class_decl(declaring)?.name.0)
             }
             Visibility::Public | Visibility::Protected => php_compile::mangling(visibility, &[]),
         }

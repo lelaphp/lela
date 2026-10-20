@@ -300,7 +300,7 @@ impl Zone {
     /// The zone of `req`'s environment, as `tzset` reads `TZ`.
     #[must_use]
     pub fn of(req: &Request) -> Zone {
-        let Some(tz) = req.env(b"TZ") else {
+        let Some(tz) = req.environment().env(b"TZ") else {
             return Zone::file(b"/etc/localtime").unwrap_or(UTC);
         };
         let name = tz.strip_prefix(b":").unwrap_or(tz);

@@ -33,17 +33,17 @@ fn named(path: &[u8]) -> &[u8] {
 
 fn first(req: &mut Request, path: &[u8]) {
     let line = [b"first ", named(path), b"\n"].concat();
-    req.write(&line);
+    req.response_mut().write(&line);
 }
 
 fn second(req: &mut Request, path: &[u8]) {
     let line = [b"second ", named(path), b"\n"].concat();
-    req.write(&line);
+    req.response_mut().write(&line);
 }
 
 fn third(req: &mut Request, path: &[u8]) {
     let line = [b"third ", named(path), b"\n"].concat();
-    req.write(&line);
+    req.response_mut().write(&line);
 }
 
 /// What an accelerator answers for every file: held, never revalidated.

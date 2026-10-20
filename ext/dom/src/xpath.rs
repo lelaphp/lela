@@ -153,7 +153,7 @@ impl Validation {
 
 /// `dom_xpath_object`'s own fields. The evaluator stays here for the
 /// span of an evaluation: the request keeps libxml's evaluator
-/// ([`Request::adopt`], ADR-0013) and the evaluation holds it, so PHP
+/// ([`Memory::adopt`], ADR-0013) and the evaluation holds it, so PHP
 /// code a function serves reaches the object as php's does, evaluating
 /// again, registering on it or constructing it anew (#2318).
 pub(crate) struct XPathState {
@@ -356,7 +356,7 @@ fn discard(req: &mut Request, this: PhpObject) {
         return;
     };
     let XPathState { ctx, callbacks, .. } = *state;
-    drop(req.disown(ctx));
+    drop(req.memory_mut().disown(ctx));
     callbacks.release(req);
 }
 
@@ -380,7 +380,9 @@ fn registering<R>(
 /// `dom_xpath_document_read`.
 fn document_read(req: &mut Request, object: PhpObject) -> Read {
     let id = state(req, object).map(|state| state.ctx.id());
-    let doc = id.and_then(|id| req.foreign(id)).and_then(|ctx| ctx.doc());
+    let doc = id
+        .and_then(|id| req.memory_mut().foreign(id))
+        .and_then(|ctx| ctx.doc());
     match doc {
         Some(doc) => Ok(Some(object_for(req, doc, Some(object))?)),
         None => Err(crate::dom_throw(req, Code::InvalidState)),
@@ -716,7 +718,7 @@ fn eval(
     let Some(id) = state(req, this).map(|state| state.ctx.id()) else {
         return Err(throw_error(req, "Error", "Invalid XPath Context"));
     };
-    let Some(doc) = req.foreign(id).and_then(|ctx| ctx.doc()) else {
+    let Some(doc) = req.memory_mut().foreign(id).and_then(|ctx| ctx.doc()) else {
         if modern {
             return Err(throw_error(req, "Error", "Invalid XPath Document Pointer"));
         }
@@ -911,13 +913,13 @@ impl DOMXPath {
             obj.share(req, shared, doc);
         }
         let state = XPathState {
-            ctx: req.adopt(ctx),
+            ctx: req.memory_mut().adopt(ctx),
             register_node_ns: registerNodeNS,
             callbacks: XPathCallbacks::default(),
         };
         match dom_mut(req, this) {
             Some(d) => d.extra = Extra::XPath(Box::new(state)),
-            None => drop(req.disown(state.ctx)),
+            None => drop(req.memory_mut().disown(state.ctx)),
         }
         Ok(())
     }
@@ -1056,7 +1058,7 @@ impl DOMXPath {
     ) -> Result<bool, Thrown> {
         let id = state(req, this.object()).map(|state| state.ctx.id());
         let took = id
-            .and_then(|id| req.foreign(id))
+            .and_then(|id| req.memory_mut().foreign(id))
             .map(|ctx| ctx.register_ns(prefix.as_bytes(), namespace.as_bytes()));
         match took {
             Some(ok) => Ok(ok),
@@ -1217,7 +1219,7 @@ impl DOMXPath {
         };
         if registered.is_ok() {
             let id = state(req, this).map(|state| state.ctx.id());
-            if let Some(ctx) = id.and_then(|id| req.foreign(id)) {
+            if let Some(ctx) = id.and_then(|id| req.memory_mut().foreign(id)) {
                 ctx.register_custom(&ns, &name);
             }
         }

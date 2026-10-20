@@ -19,6 +19,8 @@ use php_link::{Folded, Linked, NameMap, Obligation};
 use php_unit::decl::{Bare, ClassDecl, Name, shown};
 use php_unit::{AutoGlobal, Level, PublishedUnit};
 
+use super::Code;
+use super::Frames;
 use super::{PreloadStatistics, Request, UserFunction, user_function_decl};
 use crate::api::call::Function;
 use crate::api::values::ClassId;
@@ -275,7 +277,7 @@ fn address(unit: &PublishedUnit) -> usize {
 pub(crate) struct Preloading {
     scripts: Vec<(Vec<u8>, PublishedUnit, u64)>,
     aliases_before: usize,
-    /// `ZEND_COMPILE_PRELOAD_IN_CHILD` ([`Request::preloading_in_child`]).
+    /// `ZEND_COMPILE_PRELOAD_IN_CHILD` ([`Code::preloading_in_child`]).
     in_child: bool,
 }
 
@@ -301,57 +303,6 @@ enum Row {
 }
 
 impl Request {
-    /// `CG(compiler_options) & ZEND_COMPILE_PRELOAD`: whether this is the
-    /// request `opcache.preload`'s file is served in, whose declarations
-    /// every request after starts from, as `FFI::load` registers the
-    /// scope a header names for `FFI::scope` in it (`zend_ffi_load`).
-    #[must_use]
-    pub fn preloading(&self) -> bool {
-        self.preloading.is_some()
-    }
-
-    /// `CG(compiler_options) & ZEND_COMPILE_PRELOAD_IN_CHILD`: whether
-    /// this is the preload's request served on a thread of its own
-    /// ([`crate::api::abi::PreloadThread`]), php's preload child, as
-    /// opcache serves it under `opcache.preload_user`, where `FFI::load`
-    /// refuses to load a header (`Z/ext/ffi/ffi.c:3628`).
-    #[must_use]
-    pub fn preloading_in_child(&self) -> bool {
-        self.preloading
-            .as_ref()
-            .is_some_and(|preloading| preloading.in_child)
-    }
-
-    /// `EX(prev_execute_data)->func->common.fn_flags &
-    /// ZEND_ACC_PRELOADED`: whether the native being served was called
-    /// from a function, a method or a closure the preload compiled, as
-    /// `zend_compile_func_decl` flags each one under
-    /// `ZEND_COMPILE_PRELOAD`; a file's main code is no function and is
-    /// never one. What `FFI`'s API restriction under
-    /// `ffi.enable=preload` admits in any host (`zend_ffi_validate_api_restriction`).
-    #[must_use]
-    pub fn caller_preloaded(&self) -> bool {
-        let Some(preloaded) = self.shared.units.preloaded() else {
-            return false;
-        };
-        let mut chain = self.chain();
-        if !matches!(chain.next(), Some(super::Link::Call(_))) {
-            return false;
-        }
-        let Some(super::Link::Frame(_, state)) = chain.next() else {
-            return false;
-        };
-        let Some((unit, body)) = state.unit() else {
-            return false;
-        };
-        body != Body::Main
-            && preloaded.scripts.iter().any(|held| {
-                held.unit
-                    .as_ref()
-                    .is_ok_and(|held| PublishedUnit::ptr_eq(held, unit))
-            })
-    }
-
     /// The request, started, is the preload's from here: every file it
     /// compiles is compiled into the preload. `in_child` where it is
     /// served on the thread that took `opcache.preload_user`'s
@@ -678,7 +629,7 @@ impl Request {
         for row in rows {
             match row {
                 Row::Class(local) => {
-                    let Some(decl) = self.class_decl(*local) else {
+                    let Some(decl) = self.symbols().class_decl(*local) else {
                         continue;
                     };
                     let key = decl.name.0.clone();
@@ -759,7 +710,7 @@ impl Request {
                     continue;
                 }
                 stack.push((class, true));
-                let Some(decl) = self.class_decl(class) else {
+                let Some(decl) = self.symbols().class_decl(class) else {
                     continue;
                 };
                 let depends = (decl.parent.iter())
@@ -782,7 +733,7 @@ impl Request {
         local: ClassId,
         renumbered: &HashMap<ClassId, ClassId>,
     ) -> Result<ClassId, String> {
-        let name = self.class_name(local);
+        let name = self.symbols().class_name(local);
         let shared = |class: ClassId| match renumbered.get(&class) {
             Some(published) => Some(*published),
             None => class.is_published().then_some(class),
@@ -830,6 +781,7 @@ impl Request {
             guard -= 1;
             let depends: Vec<ClassId> = match rows.get(at) {
                 Some(Row::Class(class) | Row::Alias(_, class)) => self
+                    .symbols()
                     .class_decl(*class)
                     .map(|decl| {
                         decl.parent
@@ -873,6 +825,7 @@ impl Request {
             .iter()
             .map(|row| match row {
                 Row::Class(class) => self
+                    .symbols()
                     .class_decl(*class)
                     .map(|decl| decl.name.0.to_vec())
                     .unwrap_or_default(),
@@ -894,6 +847,62 @@ impl Request {
                 .map(|(path, _, _)| path.clone())
                 .collect(),
         }
+    }
+}
+
+impl Code<&Request> {
+    /// `CG(compiler_options) & ZEND_COMPILE_PRELOAD`: whether this is the
+    /// request `opcache.preload`'s file is served in, whose declarations
+    /// every request after starts from, as `FFI::load` registers the
+    /// scope a header names for `FFI::scope` in it (`zend_ffi_load`).
+    #[must_use]
+    pub fn preloading(self) -> bool {
+        self.0.preloading.is_some()
+    }
+
+    /// `CG(compiler_options) & ZEND_COMPILE_PRELOAD_IN_CHILD`: whether
+    /// this is the preload's request served on a thread of its own
+    /// ([`crate::api::abi::PreloadThread`]), php's preload child, as
+    /// opcache serves it under `opcache.preload_user`, where `FFI::load`
+    /// refuses to load a header (`Z/ext/ffi/ffi.c:3628`).
+    #[must_use]
+    pub fn preloading_in_child(self) -> bool {
+        self.0
+            .preloading
+            .as_ref()
+            .is_some_and(|preloading| preloading.in_child)
+    }
+}
+
+impl Frames<&Request> {
+    /// `EX(prev_execute_data)->func->common.fn_flags &
+    /// ZEND_ACC_PRELOADED`: whether the native being served was called
+    /// from a function, a method or a closure the preload compiled, as
+    /// `zend_compile_func_decl` flags each one under
+    /// `ZEND_COMPILE_PRELOAD`; a file's main code is no function and is
+    /// never one. What `FFI`'s API restriction under
+    /// `ffi.enable=preload` admits in any host (`zend_ffi_validate_api_restriction`).
+    #[must_use]
+    pub fn caller_preloaded(self) -> bool {
+        let Some(preloaded) = self.0.shared.units.preloaded() else {
+            return false;
+        };
+        let mut chain = self.0.chain();
+        if !matches!(chain.next(), Some(super::Link::Call(_))) {
+            return false;
+        }
+        let Some(super::Link::Frame(_, state)) = chain.next() else {
+            return false;
+        };
+        let Some((unit, body)) = state.unit() else {
+            return false;
+        };
+        body != Body::Main
+            && preloaded.scripts.iter().any(|held| {
+                held.unit
+                    .as_ref()
+                    .is_ok_and(|held| PublishedUnit::ptr_eq(held, unit))
+            })
     }
 }
 
@@ -942,8 +951,10 @@ impl Request {
     /// at no file and no line, as php's startup raises them.
     pub(crate) fn preload_unopened(&mut self, script: &[u8]) {
         let include_path =
-            String::from_utf8_lossy(self.ini_get(b"include_path").unwrap_or_default()).into_owned();
+            String::from_utf8_lossy(self.ini().get(b"include_path").unwrap_or_default())
+                .into_owned();
         let path = self
+            .environment()
             .cwd()
             .join(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(script));
         let reason = std::fs::File::open(path)
@@ -951,7 +962,7 @@ impl Request {
             .and_then(|error| error.raw_os_error())
             .map_or_else(
                 || String::from("No such file or directory"),
-                |code| self.os_error_text(code),
+                |code| self.environment().os_error_text(code),
             );
         crate::api::raising::raise_at(
             self,
@@ -1010,12 +1021,12 @@ mod tests {
                     let code = format!(
                         "class P{round} {{ function m() {{ return {round}; }} }} class Q{round} extends P{round} {{}}"
                     );
-                    assert!(req.eval_stringl(code.as_bytes(), b"publisher").is_ok());
+                    assert!(req.code_mut().eval_stringl(code.as_bytes(), b"publisher").is_ok());
                     let Some(preloaded) = req.publish_preload() else {
                         return Err(format!("round {round} published nothing"));
                     };
                     for named in preloaded.classes.rows.iter() {
-                        let name = req.class_name(named.class);
+                        let name = req.symbols().class_name(named.class);
                         assert!(named.class.is_published(), "{name} is published");
                         published.push((named.class, name.clone()));
                         if handed.send((named.class, name)).is_err() {
@@ -1025,7 +1036,7 @@ mod tests {
                     // Every number published so far still names its
                     // class, however many the request declared meanwhile.
                     for (class, name) in &published {
-                        assert_eq!(req.class_name(*class), *name, "{class:?} moved");
+                        assert_eq!(req.symbols().class_name(*class), *name, "{class:?} moved");
                     }
                 }
                 Ok(published)
@@ -1038,7 +1049,11 @@ mod tests {
                 for round in 0..ROUNDS {
                     let name = format!("R{round}");
                     let code = format!("class {name} {{ function m() {{ return {round}; }} }}");
-                    assert!(req.eval_stringl(code.as_bytes(), b"request").is_ok());
+                    assert!(
+                        req.code_mut()
+                            .eval_stringl(code.as_bytes(), b"request")
+                            .is_ok()
+                    );
                     let Some(class) =
                         req.class_named(php_unit::decl::Bare::resolved(name.as_bytes()))
                     else {
@@ -1061,18 +1076,18 @@ mod tests {
                         seen.push(handed);
                     }
                     for (class, name) in own.iter().chain(&seen) {
-                        assert_eq!(req.class_name(*class), *name, "{class:?} moved");
+                        assert_eq!(req.symbols().class_name(*class), *name, "{class:?} moved");
                     }
                 }
                 seen.extend(taken.iter());
                 for (class, name) in own.iter().chain(&seen) {
-                    assert_eq!(req.class_name(*class), *name, "{class:?} moved");
+                    assert_eq!(req.symbols().class_name(*class), *name, "{class:?} moved");
                 }
                 let child = seen
                     .iter()
                     .find(|(_, name)| name == "Q0")
                     .map(|(class, _)| *class);
-                let inherited = child.and_then(|child| req.method_named(child, b"m"));
+                let inherited = child.and_then(|child| req.symbols().method_named(child, b"m"));
                 // Shared by every request: not one of this request's own rows.
                 let shared = |function: crate::api::call::Function| {
                     function.0 & crate::api::call::Function::LOCAL == 0
@@ -1090,7 +1105,7 @@ mod tests {
             let reader = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
             assert_eq!(numbers.as_ref().map(Vec::len), Ok(2 * ROUNDS));
             for (class, name) in numbers.unwrap_or_default() {
-                assert_eq!(reader.class_name(class), name, "{class:?} moved");
+                assert_eq!(reader.symbols().class_name(class), name, "{class:?} moved");
             }
         });
     }
@@ -1110,7 +1125,11 @@ mod tests {
         let code = "trait T { public $t; function t() {} } \
                     class P { public $p; private $q; function p() {} } \
                     class_alias('P', 'PA'); class C extends PA { use T; public $c; public $p; }";
-        assert!(req.eval_stringl(code.as_bytes(), b"preload").is_ok());
+        assert!(
+            req.code_mut()
+                .eval_stringl(code.as_bytes(), b"preload")
+                .is_ok()
+        );
         let mut rows = req.class_rows(Vec::new(), 0);
         let child = req.class_named(php_unit::decl::Bare::resolved(b"c"));
         let at = rows
@@ -1123,7 +1142,7 @@ mod tests {
         let names: Vec<(ClassId, String)> = published
             .iter()
             .flat_map(|published| published.classes.rows.iter())
-            .map(|named| (named.class, req.class_name(named.class)))
+            .map(|named| (named.class, req.symbols().class_name(named.class)))
             .collect();
         let order: Vec<&str> = names.iter().map(|(_, name)| name.as_str()).collect();
         assert_eq!(order, ["C", "T", "P"]);
@@ -1151,7 +1170,7 @@ mod tests {
             assert_eq!(placed(child), expect(&own));
         }
         for method in [&b"t"[..], b"p"] {
-            let found = child.and_then(|child| req.method_named(child, method));
+            let found = child.and_then(|child| req.symbols().method_named(child, method));
             assert!(found.is_some_and(|found| req.user_function(found).is_some()));
         }
         let alias = published

@@ -506,7 +506,7 @@ fn phpdbg_get_executable(
         // reaches a file's code, and the included files beside them, one
         // of which may hold no code the loop stops at.
         let mut files: Vec<Vec<u8>> = sources.iter().map(|source| source.file.clone()).collect();
-        for file in req.included_files() {
+        for file in req.code().included_files() {
             if !files.contains(&file) {
                 files.push(file);
             }

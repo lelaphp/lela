@@ -15,7 +15,7 @@ use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, clear, docref, exit, leave_pending,
     throw_error, throw_value,
 };
-use php_ext::request::{OutputOp, OwnedStream as _, Request, StartHandler, Streams as _};
+use php_ext::request::{Ini, OutputOp, OwnedStream as _, Request, StartHandler, Streams as _};
 use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
 use php_ext_libxml::ffi::{Kind, Node, Save};
 
@@ -200,7 +200,7 @@ fn begin(req: &mut Request, this: PhpObject) -> Saved {
 /// bool(true)
 /// ```
 fn end(req: &mut Request, saved: &Saved) {
-    if req.bailing_out() {
+    if req.diagnostics().bailing_out() {
         return;
     }
     let state = req.state::<State>();
@@ -213,7 +213,10 @@ fn end(req: &mut Request, saved: &Saved) {
 /// `php_error_docref(NULL, E_ERROR, ...)` under the soap handler: the
 /// message as php words it, the running native before `(): `.
 pub(crate) fn docref_error(req: &Request, message: &str) -> Error {
-    Error::fatal(format!("{}(): {message}", req.active_function_name()))
+    Error::fatal(format!(
+        "{}(): {message}",
+        req.frames().active_function_name()
+    ))
 }
 
 /// The fault `soap_real_error_handler` makes of a server's fatal: its
@@ -232,7 +235,7 @@ fn fatal_fault(
         .is_none_or(|s| s.send_errors != 0);
     let mut detail: Option<Owner<Value>> = None;
     let string: &[u8] = if send_errors {
-        let level = match req.output_buffer_op(&OutputOp::GetLevel) {
+        let level = match req.response_mut().buffer_op(&OutputOp::GetLevel) {
             Ok(v) => {
                 let level = v.as_int().unwrap_or(0);
                 v.give_up(req);
@@ -241,14 +244,14 @@ fn fatal_fault(
             Err(_) => 0,
         };
         if level > 0 {
-            if let Ok(contents) = req.output_buffer_op(&OutputOp::GetContents) {
+            if let Ok(contents) = req.response_mut().buffer_op(&OutputOp::GetContents) {
                 if contents.as_str_bytes().is_some_and(|s| !s.is_empty()) {
                     detail = Some(contents);
                 } else {
                     contents.give_up(req);
                 }
             }
-            if let Ok(v) = req.output_buffer_op(&OutputOp::EndClean) {
+            if let Ok(v) = req.response_mut().buffer_op(&OutputOp::EndClean) {
                 v.give_up(req);
             }
         }
@@ -425,18 +428,18 @@ pub(crate) fn soap_error_handler(req: &mut Request, beneath: Beneath<'_, chain::
     } else {
         None
     };
-    let display = req.set_display_errors(0);
+    let display = req.diagnostics_mut().set_display_errors(0);
     // `SG(sapi_headers).http_status_line = NULL` before the `zend_try`,
     // and the line and code that stood put back in its `zend_catch`, so
     // the `500` `php_error_cb` adds as it bails out is undone; served and
     // not bailed out of, the line stays gone.
-    let status = req.take_http_status();
+    let status = req.response_mut().take_http_status();
     let bails = beneath.bails();
     beneath.serve(req);
     if bails {
-        req.put_back_http_status(status);
+        req.response_mut().put_back_http_status(status);
     }
-    req.set_display_errors(display);
+    req.diagnostics_mut().set_display_errors(display);
     if let Some(fault) = fault {
         // What the writing threw stays in `EG(exception)` as the
         // request bails out.
@@ -476,30 +479,34 @@ fn soap_server_fault_ex(
         .unwrap_or_default();
     let flash = server_var(req, b"HTTP_USER_AGENT").is_some_and(|a| a == b"Shockwave Flash");
     if !flash {
-        req.header_add(b"HTTP/1.1 500 Internal Server Error", true, 0);
+        req.response_mut()
+            .header_add(b"HTTP/1.1 500 Internal Server Error", true, 0);
     }
     if output_compression(req) {
-        req.header_add(b"Connection: close", true, 0);
+        req.response_mut().header_add(b"Connection: close", true, 0);
     } else {
-        req.header_add(format!("Content-Length: {}", buf.len()).as_bytes(), true, 0);
+        req.response_mut()
+            .header_add(format!("Content-Length: {}", buf.len()).as_bytes(), true, 0);
     }
     if version == SOAP_1_2 {
-        req.header_add(
+        req.response_mut().header_add(
             b"Content-Type: application/soap+xml; charset=utf-8",
             true,
             0,
         );
     } else {
-        req.header_add(b"Content-Type: text/xml; charset=utf-8", true, 0);
+        req.response_mut()
+            .header_add(b"Content-Type: text/xml; charset=utf-8", true, 0);
     }
-    req.write(&buf);
+    req.response_mut().write(&buf);
     Ok(())
 }
 
 /// `INI_INT("zlib.output_compression")`.
 fn output_compression(req: &Request) -> bool {
-    req.ini_get(b"zlib.output_compression")
-        .is_some_and(Request::ini_parse_bool)
+    req.ini()
+        .get(b"zlib.output_compression")
+        .is_some_and(Ini::parse_bool)
 }
 
 /// `soap_server_fault`: a fault made of the arguments, written, and the
@@ -782,7 +789,7 @@ impl SoapServer {
         let kind = service_ref(req, object).map(|s| s.kind);
         if kind == Some(ServiceKind::Class) {
             if mode == PERSISTENCE_SESSION || mode == PERSISTENCE_REQUEST {
-                if mode == PERSISTENCE_SESSION && req.extension_named(b"session").is_none() {
+                if mode == PERSISTENCE_SESSION && req.extensions().named(b"session").is_none() {
                     return Err(throw_error(
                         req,
                         "Error",
@@ -1145,13 +1152,13 @@ impl SoapServer {
 /// `f->common.function_name` of the function named, case-insensitively.
 fn declared_function(req: &Request, name: &[u8]) -> Option<Vec<u8>> {
     let f = lookup_function(req, &name.to_ascii_lowercase())?;
-    req.function_decl(f).map(|d| d.name.0.to_vec())
+    req.symbols().function_decl(f).map(|d| d.name.0.to_vec())
 }
 
 /// Every function of `EG(function_table)`, as `get_defined_functions()`
 /// lists them, internal then user.
 fn all_functions(req: &mut Request) -> R<Vec<Vec<u8>>> {
-    let all = req.defined_functions()?;
+    let all = req.symbols_mut().defined_functions()?;
     let mut out = Vec::new();
     for (_, group) in walk::rows(req, *all) {
         if let ValueRef::Array(list) = group.deref().as_ref() {
@@ -1171,8 +1178,9 @@ fn all_functions(req: &mut Request) -> R<Vec<Vec<u8>>> {
 fn public_methods(req: &mut Request, class: ClassId) -> Vec<Vec<u8>> {
     // `ZEND_HASH_FOREACH_PTR(&ce->function_table, f)` with
     // `ZEND_ACC_PUBLIC`, in the table's order.
-    req.method_rows(class)
-        .filter_map(|row| req.row_method(row))
+    req.symbols()
+        .method_rows(class)
+        .filter_map(|row| req.symbols().row_method(row))
         .filter(|m| m.visibility == php_ext::decl::Visibility::Public)
         .map(|m| m.function.name.0.to_vec())
         .collect()
@@ -1352,13 +1360,14 @@ fn handle(req: &mut Request, this: PhpObject, arg: Option<PhpString>) -> Res<()>
         return Err(server_fault_en(req, "Server", "Input string is too long"));
     }
     let query = server_var(req, b"QUERY_STRING");
-    if req.request_method() == Some(b"GET")
+    if req.variables().request_method() == Some(b"GET")
         && query
             .as_deref()
             .is_some_and(|q| q.eq_ignore_ascii_case(b"wsdl"))
     {
         if let Some(sdl) = &sdl {
-            req.header_add(b"Content-Type: text/xml; charset=utf-8", true, 0);
+            req.response_mut()
+                .header_add(b"Content-Type: text/xml; charset=utf-8", true, 0);
             let source = sdl.source.clone().unwrap_or_default();
             match req.open_stream(&source, b"rb", false)? {
                 Some(stream) => {
@@ -1368,7 +1377,7 @@ fn handle(req: &mut Request, this: PhpObject, arg: Option<PhpString>) -> Res<()>
                         if n == 0 {
                             break;
                         }
-                        req.write(&buf[..n]);
+                        req.response_mut().write(&buf[..n]);
                     }
                     stream.free(req);
                 }
@@ -1382,7 +1391,7 @@ fn handle(req: &mut Request, this: PhpObject, arg: Option<PhpString>) -> Res<()>
             "WSDL generation is not supported yet",
         ));
     }
-    let started = req.output_buffer_op(&OutputOp::Start {
+    let started = req.response_mut().buffer_op(&OutputOp::Start {
         handler: StartHandler::Default,
         chunk_size: 0,
         flags: 0x70,
@@ -1394,7 +1403,7 @@ fn handle(req: &mut Request, this: PhpObject, arg: Option<PhpString>) -> Res<()>
     let mut soap_action: Option<Vec<u8>> = None;
     let doc_request = match &arg {
         None => {
-            if req.request_method().is_none() {
+            if req.variables().request_method().is_none() {
                 return Ok(());
             }
             let mut compressed = false;
@@ -1544,7 +1553,7 @@ fn restore_globals(req: &mut Request, g: Globals) {
 
 /// A `$_SERVER` entry that is a string.
 fn server_var(req: &mut Request, name: &[u8]) -> Option<Vec<u8>> {
-    let server = req.superglobal(b"_SERVER")?;
+    let server = req.variables_mut().superglobal(b"_SERVER")?;
     server
         .find(name)?
         .deref()
@@ -1857,28 +1866,34 @@ fn serve(
                 return Err(docref_error(req, "Dump memory failed"));
             }
             if parsed.version == SOAP_1_2 {
-                req.header_add(
+                req.response_mut().header_add(
                     b"Content-Type: application/soap+xml; charset=utf-8",
                     true,
                     0,
                 );
             } else {
-                req.header_add(b"Content-Type: text/xml; charset=utf-8", true, 0);
+                req.response_mut()
+                    .header_add(b"Content-Type: text/xml; charset=utf-8", true, 0);
             }
             if output_compression(req) {
-                req.header_add(b"Connection: close", true, 0);
+                req.response_mut().header_add(b"Connection: close", true, 0);
             } else {
-                req.header_add(format!("Content-Length: {}", buf.len()).as_bytes(), true, 0);
+                req.response_mut().header_add(
+                    format!("Content-Length: {}", buf.len()).as_bytes(),
+                    true,
+                    0,
+                );
             }
-            req.write(&buf);
+            req.response_mut().write(&buf);
             if let Some(s) = service_mut(req, this)
                 && s.trace
             {
                 s.last_response_body = Some(buf);
             }
         } else {
-            req.header_add(b"HTTP/1.1 202 Accepted", true, 0);
-            req.header_add(b"Content-Length: 0", true, 0);
+            req.response_mut()
+                .header_add(b"HTTP/1.1 202 Accepted", true, 0);
+            req.response_mut().header_add(b"Content-Length: 0", true, 0);
         }
         Ok(())
     })();
@@ -1908,7 +1923,7 @@ fn call_named_function(req: &mut Request, name: &[u8]) -> Res<Owner<Value>> {
 
 /// The session's `$_SESSION` array, through its reference.
 fn session_array(req: &mut Request) -> Option<Value> {
-    req.global(b"_SESSION")
+    req.variables_mut().global(b"_SESSION")
 }
 
 /// The session-persistent object, the session started first as
@@ -1970,7 +1985,7 @@ fn store_session_object(req: &mut Request, value: Owner<Value>) -> Res<Option<Ow
 
 /// `php_output_discard`: the top buffer dropped, where there is one.
 fn discard(req: &mut Request) {
-    let level = match req.output_buffer_op(&OutputOp::GetLevel) {
+    let level = match req.response_mut().buffer_op(&OutputOp::GetLevel) {
         Ok(v) => {
             let level = v.as_int().unwrap_or(0);
             v.give_up(req);
@@ -1979,7 +1994,7 @@ fn discard(req: &mut Request) {
         Err(_) => 0,
     };
     if level > 0
-        && let Ok(v) = req.output_buffer_op(&OutputOp::EndClean)
+        && let Ok(v) = req.response_mut().buffer_op(&OutputOp::EndClean)
     {
         v.give_up(req);
     }

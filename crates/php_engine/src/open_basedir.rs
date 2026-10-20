@@ -13,6 +13,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::api::raising::{Level, docref};
+use crate::api::request::Environment;
 use crate::api::request::Request;
 use crate::virtual_cwd::{MAXPATHLEN, Resolve};
 
@@ -22,7 +23,7 @@ const SEPARATOR: u8 = b':';
 /// A path on the host's filesystem, absolute, after the request's `cwd`
 /// and `open_basedir` have been applied: the path as the program wrote
 /// it, made absolute against the working directory, which
-/// [`Request::check_open_basedir`] answers for a path it lets through and
+/// [`Environment::check_open_basedir`] answers for a path it lets through and
 /// nothing else makes. The empty path stays empty, which every call on
 /// the host answers `ENOENT` to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -74,62 +75,6 @@ fn host(bytes: &[u8]) -> &Path {
 }
 
 impl Request {
-    /// `php_check_open_basedir_ex(path, warn)`
-    /// (`Z/main/fopen_wrappers.c:291`): with `open_basedir` set, a path of
-    /// `MAXPATHLEN` bytes or more is php's warning that it is too long and
-    /// [`Refused::TooLong`], and one within none of the base directories
-    /// is, under `warn`, php's `open_basedir restriction in effect`
-    /// warning, and [`Refused::Outside`]; a refusal never throws, and the
-    /// caller turns it into its own failure. Any other path is let
-    /// through as the [`HostPath`] the host is handed.
-    ///
-    /// ```php
-    /// ini_set('open_basedir', __DIR__);
-    /// var_dump(fopen('/', 'r'), glob('/*'), is_file(__FILE__));
-    /// var_dump(ini_set('open_basedir', '/'), ini_get('open_basedir') === __DIR__);
-    /// ```
-    /// ```expect
-    /// Warning: fopen(): open_basedir restriction in effect. File(/) is not within the allowed path(s): (%s) in %s on line 3
-    ///
-    /// Warning: fopen(/): Failed to open stream: Operation not permitted in %s on line 3
-    /// bool(false)
-    /// bool(false)
-    /// bool(true)
-    /// bool(false)
-    /// bool(true)
-    /// ```
-    pub fn check_open_basedir(&mut self, path: &[u8], warn: bool) -> Result<HostPath, Refused> {
-        // `PG(open_basedir) && *PG(open_basedir)`: an empty list guards
-        // nothing.
-        let list = self
-            .open_basedir()
-            .filter(|list| !list.is_empty())
-            .map(<[u8]>::to_vec);
-        if let Some(list) = list {
-            if path.len() > MAXPATHLEN - 1 {
-                let text = format!(
-                    "File name is longer than the maximum allowed path length on this platform ({MAXPATHLEN}): {}",
-                    String::from_utf8_lossy(path)
-                );
-                docref(self, Level::Warning, &text);
-                return Err(Refused::TooLong);
-            }
-            let within = base_dirs(&list).any(|dir| self.within(dir, path));
-            if !within {
-                if warn {
-                    let text = format!(
-                        "open_basedir restriction in effect. File({}) is not within the allowed path(s): ({})",
-                        String::from_utf8_lossy(path),
-                        String::from_utf8_lossy(&list)
-                    );
-                    docref(self, Level::Warning, &text);
-                }
-                return Err(Refused::Outside);
-            }
-        }
-        Ok(self.host_path(path))
-    }
-
     /// The path under `STREAM_DISABLE_OPEN_BASEDIR`, what `mail.log` is
     /// opened by: the one open php makes past the guard, let through here
     /// so that it stands beside it.
@@ -143,26 +88,9 @@ impl Request {
         let path = if path.is_empty() {
             PathBuf::new()
         } else {
-            self.absolutize(path)
+            self.environment().absolutize(path)
         };
         HostPath(path)
-    }
-
-    /// `expand_filepath(path, buf)`: the path against the working
-    /// directory under `CWD_FILEPATH`, links resolved where the file is
-    /// there; `None` for the empty path and one too long.
-    pub fn expand_filepath(&mut self, path: &[u8]) -> Option<Vec<u8>> {
-        let cwd = self.cwd().into_os_string().into_encoded_bytes();
-        self.virtual_file_ex(&cwd, path, Resolve::FilePath)
-    }
-
-    /// `php_check_specific_open_basedir(basedir, path) == 0`: whether
-    /// `path`, expanded and resolved to its deepest part that exists,
-    /// lies under `basedir` (`.` the working directory), which warns of
-    /// nothing. What mysqlnd's `LOAD DATA LOCAL INFILE` holds a file to
-    /// its local infile directory with (`mysqlnd_loaddata.c`).
-    pub fn within_basedir(&mut self, basedir: &[u8], path: &[u8]) -> bool {
-        self.within(basedir, path)
     }
 
     /// `php_check_specific_open_basedir(basedir, path)`
@@ -172,21 +100,24 @@ impl Request {
     /// directory, with a `/` after it, so `/a` holds `/a/b` and not `/ab`.
     fn within(&mut self, basedir: &[u8], path: &[u8]) -> bool {
         let local = if basedir == b"." {
-            self.cwd().into_os_string().into_encoded_bytes()
+            self.environment()
+                .cwd()
+                .into_os_string()
+                .into_encoded_bytes()
         } else {
             basedir.to_vec()
         };
         if path.len() > MAXPATHLEN - 1 {
             return false;
         }
-        let Some(mut resolved_name) = self.expand_filepath(path) else {
+        let Some(mut resolved_name) = self.environment_mut().expand_filepath(path) else {
             return false;
         };
         let mut path_len = resolved_name.len();
         let mut path_tmp = resolved_name.clone();
         let mut nesting = 0;
         loop {
-            if let Some(real) = self.realpath(&path_tmp) {
+            if let Some(real) = self.environment_mut().realpath(&path_tmp) {
                 resolved_name = real.into_os_string().into_encoded_bytes();
                 break;
             }
@@ -211,7 +142,7 @@ impl Request {
             }
             nesting += 1;
         }
-        let Some(mut resolved_basedir) = self.expand_filepath(&local) else {
+        let Some(mut resolved_basedir) = self.environment_mut().expand_filepath(&local) else {
             return false;
         };
         if basedir.last() == Some(&b'/') {
@@ -238,7 +169,7 @@ impl Request {
     /// new list is taken only where it is no wider than the one in force,
     /// each of its directories expanded and let through by the guard
     /// without a word; the expanded list is what `PG(open_basedir)` keeps
-    /// ([`Request::open_basedir`]), and the entry the value as set. `None`
+    /// ([`Environment::open_basedir`]), and the entry the value as set. `None`
     /// refuses it, the empty list among them, which `ini_set()` answers
     /// `false` to. At startup any value is taken as it is written.
     pub(crate) fn tighter_open_basedir(&mut self, value: &[u8]) -> Option<Vec<u8>> {
@@ -252,8 +183,10 @@ impl Request {
                 Some(at) => (&rest[..at], &rest[at + 1..]),
                 None => (rest, &rest[rest.len()..]),
             };
-            let resolved = self.expand_filepath(dir)?;
-            self.check_open_basedir(&resolved, false).ok()?;
+            let resolved = self.environment_mut().expand_filepath(dir)?;
+            self.environment_mut()
+                .check_open_basedir(&resolved, false)
+                .ok()?;
             if !kept.is_empty() {
                 kept.push(SEPARATOR);
             }
@@ -261,6 +194,90 @@ impl Request {
             rest = after;
         }
         Some(kept)
+    }
+}
+
+impl Environment<&mut Request> {
+    /// `php_check_open_basedir_ex(path, warn)`
+    /// (`Z/main/fopen_wrappers.c:291`): with `open_basedir` set, a path of
+    /// `MAXPATHLEN` bytes or more is php's warning that it is too long and
+    /// [`Refused::TooLong`], and one within none of the base directories
+    /// is, under `warn`, php's `open_basedir restriction in effect`
+    /// warning, and [`Refused::Outside`]; a refusal never throws, and the
+    /// caller turns it into its own failure. Any other path is let
+    /// through as the [`HostPath`] the host is handed.
+    ///
+    /// ```php
+    /// ini_set('open_basedir', __DIR__);
+    /// var_dump(fopen('/', 'r'), glob('/*'), is_file(__FILE__));
+    /// var_dump(ini_set('open_basedir', '/'), ini_get('open_basedir') === __DIR__);
+    /// ```
+    /// ```expect
+    /// Warning: fopen(): open_basedir restriction in effect. File(/) is not within the allowed path(s): (%s) in %s on line 3
+    ///
+    /// Warning: fopen(/): Failed to open stream: Operation not permitted in %s on line 3
+    /// bool(false)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// ```
+    pub fn check_open_basedir(self, path: &[u8], warn: bool) -> Result<HostPath, Refused> {
+        // `PG(open_basedir) && *PG(open_basedir)`: an empty list guards
+        // nothing.
+        let list = self
+            .0
+            .environment()
+            .open_basedir()
+            .filter(|list| !list.is_empty())
+            .map(<[u8]>::to_vec);
+        if let Some(list) = list {
+            if path.len() > MAXPATHLEN - 1 {
+                let text = format!(
+                    "File name is longer than the maximum allowed path length on this platform ({MAXPATHLEN}): {}",
+                    String::from_utf8_lossy(path)
+                );
+                docref(self.0, Level::Warning, &text);
+                return Err(Refused::TooLong);
+            }
+            let within = base_dirs(&list).any(|dir| self.0.within(dir, path));
+            if !within {
+                if warn {
+                    let text = format!(
+                        "open_basedir restriction in effect. File({}) is not within the allowed path(s): ({})",
+                        String::from_utf8_lossy(path),
+                        String::from_utf8_lossy(&list)
+                    );
+                    docref(self.0, Level::Warning, &text);
+                }
+                return Err(Refused::Outside);
+            }
+        }
+        Ok(self.0.host_path(path))
+    }
+
+    /// `expand_filepath(path, buf)`: the path against the working
+    /// directory under `CWD_FILEPATH`, links resolved where the file is
+    /// there; `None` for the empty path and one too long.
+    pub fn expand_filepath(self, path: &[u8]) -> Option<Vec<u8>> {
+        let cwd = self
+            .0
+            .environment()
+            .cwd()
+            .into_os_string()
+            .into_encoded_bytes();
+        self.0
+            .environment_mut()
+            .virtual_file_ex(&cwd, path, Resolve::FilePath)
+    }
+
+    /// `php_check_specific_open_basedir(basedir, path) == 0`: whether
+    /// `path`, expanded and resolved to its deepest part that exists,
+    /// lies under `basedir` (`.` the working directory), which warns of
+    /// nothing. What mysqlnd's `LOAD DATA LOCAL INFILE` holds a file to
+    /// its local infile directory with (`mysqlnd_loaddata.c`).
+    pub fn within_basedir(self, basedir: &[u8], path: &[u8]) -> bool {
+        self.0.within(basedir, path)
     }
 }
 

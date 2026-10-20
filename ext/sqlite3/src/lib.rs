@@ -45,7 +45,7 @@ mod stmt;
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::{php_class, php_const};
 use php_ext::decl::{IniDecl, Name};
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext_pdo_sqlite::ffi;
 
 /// The two `sqlite3.*` entries, `PHP_INI_BEGIN` in php's order: the name,
@@ -132,14 +132,14 @@ pub fn extension() -> Extension {
 /// ```
 fn sqlite3_info(req: &mut Request) {
     let version = ffi::version();
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["SQLite3 support", "enabled"],
         &["SQLite Library", &version],
     ]);
-    let entries = req.ini_entries();
+    let entries = req.ini().entries();
     let shown = |name: &str, value: &[u8]| -> String {
         if name == "sqlite3.defensive" {
-            let on = Request::ini_parse_bool(value);
+            let on = Ini::parse_bool(value);
             String::from(if on { "On" } else { "Off" })
         } else {
             String::from_utf8_lossy(value).into_owned()
@@ -162,7 +162,7 @@ fn sqlite3_info(req: &mut Request) {
         .iter()
         .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
         .collect();
-    req.info_ini_table(&cells);
+    req.ini_mut().info_ini_table(&cells);
 }
 
 /// `class Exception`, Core's.

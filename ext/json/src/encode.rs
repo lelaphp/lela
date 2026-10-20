@@ -59,7 +59,7 @@ impl Encoder {
             depth: 0,
             max_depth,
             error_code: JSON_ERROR_NONE,
-            precision: req.serialize_precision(),
+            precision: req.ini().serialize_precision(),
             serializable: call::lookup_class(req, b"JsonSerializable")?,
         })
     }
@@ -102,7 +102,10 @@ pub(super) fn encode(
             {
                 return serializable(req, buf, object, options, enc);
             }
-            if let Some(kind) = req.class_decl(object.class()).map(|decl| decl.kind)
+            if let Some(kind) = req
+                .symbols()
+                .class_decl(object.class())
+                .map(|decl| decl.kind)
                 && kind == ClassKind::Enum
             {
                 return enum_case(req, buf, object, options, enc);
@@ -441,6 +444,7 @@ fn enum_case(
     enc: &mut Encoder,
 ) -> Wrote {
     let backed = req
+        .symbols()
         .class_decl(object.class())
         .is_some_and(|decl| decl.backing != EnumBacking::Pure);
     if !backed {
@@ -487,7 +491,7 @@ fn encode_array(
     options: i64,
     enc: &mut Encoder,
 ) -> Wrote {
-    if req.stack_overflowed() {
+    if req.limits().stack_overflowed() {
         enc.error_code = JSON_ERROR_DEPTH;
         partial_null(req, buf, options)?;
         return Ok(false);

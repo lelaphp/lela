@@ -3,7 +3,7 @@
 //! `EG(user_exception_handler)` with the stacks under them, and the two
 //! that raise a diagnostic of the program's own, `trigger_error` and
 //! its second name `user_error`. The stacks are the request's
-//! ([`Request::set_error_handler`]); what hands a diagnostic to the
+//! ([`Diagnostics::set_error_handler`]); what hands a diagnostic to the
 //! handler is `zend_error_impl`'s branch in [`Request::note_error_in`],
 //! and what hands it an uncaught throwable is [`Request::uncaught`].
 
@@ -176,7 +176,9 @@ fn set_error_handler(
     callback: Option<Callable>,
     #[php(default = E_ALL)] error_levels: i64,
 ) -> Untyped<Value> {
-    let previous = req.set_error_handler(callback, error_levels);
+    let previous = req
+        .diagnostics_mut()
+        .set_error_handler(callback, error_levels);
     Untyped(previous.unwrap_or_default())
 }
 

@@ -24,7 +24,9 @@ use crate::api::decl::ClassKind;
 use crate::api::layer::Face as _;
 use crate::api::raising::{Level, Thrown, docref};
 use crate::api::request::Streams;
-use crate::api::request::{Cast, OptionAnswer, Request, Stream, StreamOption, Whence, WrapperOp};
+use crate::api::request::{
+    Cast, Ini, OptionAnswer, Request, Stream, StreamOption, Whence, WrapperOp,
+};
 use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 use crate::state::Layer;
 use crate::streams::StreamLayer;
@@ -65,8 +67,8 @@ enum Called {
 
 /// A throwable a method raised, kept for the native that asked.
 fn defer(req: &mut Request, thrown: Thrown) {
-    if req.stream_thrown().is_none() {
-        *req.stream_thrown() = Some(thrown);
+    if req.diagnostics_mut().stream_thrown().is_none() {
+        *req.diagnostics_mut().stream_thrown() = Some(thrown);
     } else {
         // A second throwable is given up; a fatal or an exit holds none.
         match crate::api::raising::clear(req, thrown) {
@@ -79,14 +81,14 @@ fn defer(req: &mut Request, thrown: Thrown) {
 /// the object, or the object's `__call` with the name and the arguments
 /// as an array where the class has no such method.
 fn call(req: &mut Request, object: PhpObject, name: &[u8], args: &[Value]) -> Called {
-    if req.stream_thrown().is_some() || req.is_pending() {
+    if req.diagnostics_mut().stream_thrown().is_some() || req.is_pending() {
         return Called::Threw;
     }
     let class = object.class();
     let lowered = name.to_ascii_lowercase();
-    let served = if let Some(function) = req.method_named(class, &lowered) {
+    let served = if let Some(function) = req.symbols().method_named(class, &lowered) {
         req.serve_method(function, Some(object), class, args, &[])
-    } else if let Some(function) = req.method_named(class, b"__call") {
+    } else if let Some(function) = req.symbols().method_named(class, b"__call") {
         let Ok(called) = PhpString::new(req, name) else {
             return Called::Threw;
         };
@@ -118,7 +120,7 @@ fn call(req: &mut Request, object: PhpObject, name: &[u8], args: &[Value]) -> Ca
         // `zend_call_function`'s tail with no frame standing, as at
         // shutdown: the throwable rendered uncaught, or handed to the
         // exception handler, and not kept for a native that is not there.
-        Err(thrown) if !req.executing() => match req.thrown_without_frame(&thrown) {
+        Err(thrown) if !req.frames().executing() => match req.thrown_without_frame(&thrown) {
             Ok(undef) => Called::Value(Owner::take(req, undef)),
             Err(_) => Called::Threw,
         },
@@ -189,6 +191,7 @@ fn create_object(
     user: &UserWrapper,
 ) -> Result<Option<Owner<PhpObject>>, Thrown> {
     let refused = req
+        .symbols()
         .class_decl(user.class)
         .is_some_and(|decl| match decl.kind {
             ClassKind::Interface | ClassKind::Trait => true,
@@ -209,7 +212,7 @@ fn create_object(
         object.give_up(req);
         return Err(thrown);
     }
-    if let Some(constructor) = req.method_named(user.class, b"__construct") {
+    if let Some(constructor) = req.symbols().method_named(user.class, b"__construct") {
         match req.serve_method(constructor, Some(*object), user.class, &[], &[]) {
             Ok(value) => value.give_up(req),
             Err(thrown) => defer(req, thrown),
@@ -220,7 +223,7 @@ fn create_object(
 
 /// The class's name, as the warnings print it.
 fn class_name(req: &Request, object: PhpObject) -> String {
-    req.class_name(object.class())
+    req.symbols().class_name(object.class())
 }
 
 /// A method's `is not implemented!` warning.
@@ -284,8 +287,9 @@ pub(crate) fn open(
     if !user.is_url
         && options & STREAM_OPEN_FOR_INCLUDE != 0
         && !req
-            .ini_get(b"allow_url_include")
-            .is_none_or(Request::ini_parse_bool)
+            .ini()
+            .get(b"allow_url_include")
+            .is_none_or(Ini::parse_bool)
     {
         req.streams().in_user_include = true;
     }
@@ -347,7 +351,7 @@ fn open_with(
     };
     if let Err(message) = answer {
         held.give_up(req);
-        if let Some(thrown) = req.stream_thrown().take() {
+        if let Some(thrown) = req.diagnostics_mut().stream_thrown().take() {
             return Err(thrown);
         }
         return Ok(Err(message));
@@ -417,7 +421,7 @@ fn open_dir_with(
     };
     if let Err(message) = answer {
         held.give_up(req);
-        if let Some(thrown) = req.stream_thrown().take() {
+        if let Some(thrown) = req.diagnostics_mut().stream_thrown().take() {
             return Err(thrown);
         }
         return Ok(Err(message));
@@ -829,8 +833,11 @@ impl Ops for UserStream {
     /// types are php's warning.
     fn truncate(&mut self, req: &mut Request, size: usize) -> Option<bool> {
         let class = self.object.class();
-        let has = req.method_named(class, b"stream_truncate").is_some()
-            || req.method_named(class, b"__call").is_some();
+        let has = req
+            .symbols()
+            .method_named(class, b"stream_truncate")
+            .is_some()
+            || req.symbols().method_named(class, b"__call").is_some();
         if !has {
             return None;
         }
@@ -1067,7 +1074,7 @@ fn bool_answer(req: &mut Request, called: Option<Called>) -> Result<bool, Thrown
         }
         _ => false,
     };
-    match req.stream_thrown().take() {
+    match req.diagnostics_mut().stream_thrown().take() {
         Some(thrown) => Err(thrown),
         None => Ok(answer),
     }
@@ -1095,7 +1102,7 @@ pub(crate) fn url_stat(
         }
         _ => None,
     };
-    match req.stream_thrown().take() {
+    match req.diagnostics_mut().stream_thrown().take() {
         Some(thrown) => Err(thrown),
         None => Ok(sb),
     }

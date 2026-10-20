@@ -282,7 +282,7 @@ pub(crate) fn zone_sorted<R>(
 /// `timezone_throw_exception_with_call_location`: an `IntlException`
 /// thrown as an error, its message prefixed with the native.
 fn throw_located(req: &mut Request, message: &str) -> Thrown {
-    let text = format!("{}(): {message}", req.active_function_name());
+    let text = format!("{}(): {message}", req.frames().active_function_name());
     throw_error(req, "IntlException", &text)
 }
 

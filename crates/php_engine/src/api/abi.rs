@@ -802,7 +802,7 @@ pub enum Lookup {
 /// value the host set (`ZEND_INI_STAGE_STARTUP`), by a host laying its
 /// own entry over php once it has started (`ZEND_INI_STAGE_ACTIVATE`),
 /// and as the request ends with the value an entry the request changed
-/// started with (`ZEND_INI_STAGE_DEACTIVATE`); [`Request::ini_stage`]
+/// started with (`ZEND_INI_STAGE_DEACTIVATE`); [`Ini::stage`]
 /// says which. The value is php's `new_value`, `None` where it has none
 /// (`NULL`), which an entry registered with no value is handed back as
 /// the request ends or `ini_restore()` restores it, and which a rule may
@@ -817,9 +817,9 @@ pub type OnModify = fn(&mut Request, Option<&[u8]>) -> Result<bool, Thrown>;
 /// serves for an entry declared with it
 /// ([`ExtensionBuilder::on_update_long`]) as it serves core's: the value
 /// read by `zend_ini_parse_quantity_warn`
-/// ([`Request::ini_parse_quantity_warn`]), warning where the rule
+/// ([`Ini::parse_quantity_warn`]), warning where the rule
 /// interprets it, at startup, at `ini_set()` and as the request ends,
-/// and read back with [`Request::ini_long`].
+/// and read back with [`Ini::long`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LongHandler {
     /// `OnUpdateLong`: any value is taken.
@@ -857,7 +857,9 @@ impl IniHandler {
         match self {
             IniHandler::Written(handler) => handler(req, value),
             IniHandler::Long(handler) => {
-                let quantity = req.ini_parse_quantity_warn(name, value.unwrap_or_default());
+                let quantity = req
+                    .ini_mut()
+                    .parse_quantity_warn(name, value.unwrap_or_default());
                 Ok(handler.takes(quantity))
             }
         }
@@ -884,7 +886,7 @@ pub enum IniStage {
     Deactivate,
 }
 /// The `MINFO` function: writes the extension's `phpinfo()` table
-/// through [`Request::info_table`].
+/// through [`Extensions::info_table`].
 pub(crate) type Info = fn(&mut Request);
 /// A native class as an extension declares it (design §7.1): the
 /// declaration, beside it each method's declaration with its entry,
@@ -894,7 +896,7 @@ pub(crate) type Info = fn(&mut Request);
 /// given here are the class's; the engine places them on the
 /// declaration as it links it, so the declaration's own `methods` is
 /// left empty by an extension. A method's entry is served as a
-/// function's is, with the receiver on the frame as `Request::this`
+/// function's is, with the receiver on the frame as `Frames::this`
 /// (ADR-0002). The fourth is the class's `create_object` where its
 /// objects carry a native payload, [`NativeNew`].
 pub(crate) type NativeClassDecl = (
@@ -1130,7 +1132,7 @@ impl ExtensionBuilder {
     /// [`ExtensionBuilder::functions`] has. The engine links each into
     /// the linked table beside the classes Zend declares (design §6.2,
     /// §7.1); a method's entry reads its arguments as a function's does
-    /// and its receiver as `Request::this`.
+    /// and its receiver as `Frames::this`.
     #[must_use]
     pub fn classes(
         mut self,
@@ -1248,7 +1250,7 @@ impl ExtensionBuilder {
     /// php's `OnUpdateLong` or `OnUpdateLongGEZero` ([`LongHandler`]),
     /// which the engine serves where [`ExtensionBuilder::on_modify`]'s
     /// handler would be. The extension reads the value with
-    /// [`Request::ini_long`].
+    /// [`Ini::long`].
     #[must_use]
     pub fn on_update_long(mut self, name: &[u8], handler: LongHandler) -> ExtensionBuilder {
         self.on_modify
@@ -1267,7 +1269,7 @@ impl ExtensionBuilder {
 
     /// The `MINFO` function, what `phpinfo()`, `php --ri` and
     /// `ReflectionExtension::info` print for the extension, written
-    /// through [`Request::info_table`]; an extension without one gets
+    /// through [`Extensions::info_table`]; an extension without one gets
     /// php's `Version` row and its ini entries.
     #[must_use]
     pub fn info(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
@@ -1404,8 +1406,8 @@ impl ExtensionBuilder {
     /// request's [`Interrupt`](crate::api::request::Interrupt) was raised
     /// by something other than the execution timer (design §5.8): signal
     /// delivery, or a periodic interrupt an extension started with
-    /// [`Request::start_periodic`], whose periods the hook reads with
-    /// [`Request::periods_elapsed`]. What
+    /// [`Limits::start_periodic`], whose periods the hook reads with
+    /// [`Limits::periods_elapsed`]. What
     /// it answers is left pending where the loop stands, as
     /// `zend_interrupt_helper` leaves `EG(exception)`. Two extensions'
     /// hooks chain as php's saved pointer does: the later is served
@@ -1935,7 +1937,7 @@ impl ExtensionBuilder {
     /// `get_method` answers and its table carries none of, `pdo`'s
     /// methods (`pdo_dbh_methods.get_driver_methods`, which
     /// `pdo_hash_methods` lays down with `func.scope = pdo_dbh_ce`): each
-    /// is a trampoline of `class` ([`Request::trampoline`]), so no lookup
+    /// is a trampoline of `class` ([`Symbols::trampoline`]), so no lookup
     /// by name and no rendering finds it, and its diagnostics name the
     /// class it is laid down on.
     #[must_use]
@@ -2103,6 +2105,7 @@ impl Callable {
             } => (function, Some(this.ok_or(scope))),
         };
         let name = req
+            .symbols()
             .function_decl(function)
             .map(|decl| decl.name.0.clone())
             .unwrap_or_default();
@@ -2114,6 +2117,7 @@ impl Callable {
             Ok(this) => Owner::take(req, this.as_value()),
             Err(scope) => {
                 let class = req
+                    .symbols()
                     .class_decl(scope)
                     .map(|decl| decl.name.0.clone())
                     .unwrap_or_default();
@@ -2179,7 +2183,7 @@ impl Callable {
     pub fn with_called_scope(&self, req: &Request, called: ClassId) -> Callable {
         let mut forwarded = self.clone();
         if let Target::Method { scope, .. } = &mut forwarded.target
-            && req.instance_of(called, *scope)
+            && req.symbols().instance_of(called, *scope)
         {
             *scope = called;
         }
@@ -2207,7 +2211,7 @@ impl Callable {
                 None => return 0,
             },
         };
-        req.function_decl(function).map_or(0, |decl| {
+        req.symbols().function_decl(function).map_or(0, |decl| {
             decl.parameters
                 .iter()
                 .rposition(php_unit::decl::Parameter::is_required)
@@ -2856,7 +2860,7 @@ pub trait ObjectHandlers: Send + Sync {
     /// for a method a call names on the class: `None`, `Std`'s answer,
     /// leaves the name to the standard lookup. A class that answers a
     /// name its table has no row for answers a trampoline
-    /// ([`Request::native_static_trampoline`]), as php's test
+    /// ([`Symbols::native_static_trampoline`]), as php's test
     /// extension's `_ZendTestClass` answers `test`; `written` is the name
     /// as the call wrote it.
     fn get_static_method(
@@ -3330,7 +3334,7 @@ impl Refusals {
     /// The `Error` a refused `get_constructor` throws, `zend_throw_error`
     /// in the template.
     fn refuse_construction(req: &mut Request, object: PhpObject, instead: Option<&str>) -> Thrown {
-        let class = req.class_name(object.class());
+        let class = req.symbols().class_name(object.class());
         let message = match instead {
             Some(instead) => {
                 format!("Cannot directly construct {class}, use {instead} instead")

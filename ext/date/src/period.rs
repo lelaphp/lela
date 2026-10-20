@@ -244,8 +244,9 @@ fn base_date_class(req: &mut Request, class: ClassId) -> Result<ClassId, Thrown>
     let mutable = class_id(req, "DateTime")?;
     let immutable = class_id(req, "DateTimeImmutable")?;
     let found = req
+        .symbols()
         .lineage(class)
-        .find(|&at| at == mutable || at == immutable || req.class_parent(at).is_none());
+        .find(|&at| at == mutable || at == immutable || req.symbols().class_parent(at).is_none());
     Ok(found.unwrap_or(class))
 }
 
@@ -517,7 +518,7 @@ impl DatePeriod {
         specification: PhpString,
         #[php(default = 0)] options: i64,
     ) -> Result<Owner<Static>, Thrown> {
-        let class = match req.called_scope() {
+        let class = match req.frames().called_scope() {
             Some(class) => class,
             None => class_id(req, "DatePeriod")?,
         };
@@ -616,7 +617,7 @@ impl DatePeriod {
         options: Passed<Raw<Untyped<i64>>>,
     ) -> Result<(), Thrown> {
         let func = "DatePeriod::__construct";
-        let count = req.argument_count();
+        let count = req.frames().argument_count();
         let value = |given: Passed<Raw<Untyped<i64>>>| match given {
             Passed::Given(raw) => raw.value(),
             Passed::Omitted => Value::null(),

@@ -68,7 +68,8 @@ pub fn extension() -> Extension {
 /// shmop support => enabled
 /// ```
 fn shmop_info(req: &mut Request) {
-    req.info_table(&[&["shmop support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["shmop support", "enabled"]]);
 }
 
 /// `final class Shmop`, `@strict-properties`, `@not-serializable`: the
@@ -191,7 +192,7 @@ impl Step {
             Step::Stat => "get shared memory segment information",
             Step::Attach => "attach to shared memory segment",
         };
-        let text = req.os_error_text(errno);
+        let text = req.environment().os_error_text(errno);
         docref(req, Level::Warning, &format!("Unable to {what} \"{text}\""));
         None
     }

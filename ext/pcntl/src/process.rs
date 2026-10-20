@@ -42,7 +42,7 @@ use crate::{State, failed, ffi};
 /// int(3)
 /// ```
 ///
-/// The fork is the engine's ([`Request::fork`], #1807): its timer thread
+/// The fork is the engine's ([`Limits::fork`], #1807): its timer thread
 /// is joined before the fork and started again after it in the parent,
 /// over the deadlines it had, so the parent's limit, counted from before
 /// the fork, still stops it, and the child inherits none.
@@ -58,7 +58,7 @@ use crate::{State, failed, ffi};
 /// ```
 #[php_function]
 pub(crate) fn pcntl_fork(req: &mut Request) -> i64 {
-    match req.fork() {
+    match req.limits_mut().fork() {
         Ok(Forked::Parent { child }) => child.as_raw().into(),
         Ok(Forked::Child) => 0,
         Err(error) => {
@@ -155,9 +155,11 @@ fn waited(
     let mut word = i32::try_from(to_long(req, &given)?).unwrap_or_default();
     let options = i32::try_from(flags).unwrap_or_default();
     let mut usage = resource_usage.is_given().then(ffi::zeroed_usage);
-    // The wait lends the request ([`Request::blocking`]), so a callback C
+    // The wait lends the request ([`Limits::blocking`]), so a callback C
     // makes from another thread meanwhile is served in it (#2401).
-    let waited = req.blocking(|| ffi::wait(pid, &mut word, options, usage.as_mut()));
+    let waited = req
+        .limits_mut()
+        .blocking(|| ffi::wait(pid, &mut word, options, usage.as_mut()));
     let child = match waited {
         Ok(child) => child,
         Err(errno) => {
@@ -260,7 +262,10 @@ pub(crate) fn pcntl_waitid(
     let _ = resource_usage;
     let options = i32::try_from(flags).unwrap_or_default();
     let id = id.unwrap_or(0);
-    let posted = match req.blocking(|| ffi::waitid(idtype, id, options)) {
+    let posted = match req
+        .limits_mut()
+        .blocking(|| ffi::waitid(idtype, id, options))
+    {
         Ok(posted) => posted,
         Err(errno) => {
             failed(req, errno);

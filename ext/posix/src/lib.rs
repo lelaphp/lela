@@ -239,7 +239,8 @@ pub fn extension() -> Extension {
 /// POSIX support => enabled
 /// ```
 fn posix_info(req: &mut Request) {
-    req.info_table(&[&["POSIX support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["POSIX support", "enabled"]]);
 }
 
 /// `POSIX_G(last_error) = errno` and the `false` every failed call
@@ -760,7 +761,7 @@ fn fd_of(req: &mut Request, given: &Value, reader: FdReader) -> Result<Option<i3
     let given = given.deref();
     let fd = if let ValueRef::Resource(_) = given.as_ref() {
         let Some(stream) = Stream::from_value(req, &given) else {
-            let name = req.active_function_name();
+            let name = req.frames().active_function_name();
             return Err(throw_error(
                 req,
                 "TypeError",
@@ -914,7 +915,7 @@ fn posix_isatty(req: &mut Request, file_descriptor: Untyped<Value>) -> Result<bo
 /// ```
 #[php_function]
 fn posix_getcwd(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    let cwd = req.cwd();
+    let cwd = req.environment().cwd();
     Ok(OrFalse::Value(PhpString::new(
         req,
         cwd.as_os_str().as_bytes(),
@@ -927,13 +928,14 @@ fn expanded(req: &mut Request, path: &[u8]) -> Option<Vec<u8>> {
     if path.is_empty() {
         return None;
     }
-    let cwd = req.cwd();
+    let cwd = req.environment().cwd();
     let relative_to: &[u8] = if path.first() == Some(&b'/') {
         b""
     } else {
         cwd.as_os_str().as_bytes()
     };
-    req.virtual_file_ex(relative_to, path, Resolve::FilePath)
+    req.environment_mut()
+        .virtual_file_ex(relative_to, path, Resolve::FilePath)
 }
 
 /// `posix_mkfifo(string $filename, int $permissions): bool`:
@@ -954,7 +956,11 @@ fn expanded(req: &mut Request, path: &[u8]) -> Option<Vec<u8>> {
 #[php_function]
 fn posix_mkfifo(req: &mut Request, filename: PhpString, permissions: i64) -> bool {
     // The guard refuses without a word, and leaves the last error as it was.
-    if req.check_open_basedir(filename.as_bytes(), false).is_err() {
+    if req
+        .environment_mut()
+        .check_open_basedir(filename.as_bytes(), false)
+        .is_err()
+    {
         return false;
     }
     let Some(path) = expanded(req, filename.as_bytes()) else {
@@ -992,7 +998,11 @@ fn posix_mknod(
     #[php(default = 0)] major: i64,
     #[php(default = 0)] minor: i64,
 ) -> Result<bool, Thrown> {
-    if req.check_open_basedir(filename.as_bytes(), false).is_err() {
+    if req
+        .environment_mut()
+        .check_open_basedir(filename.as_bytes(), false)
+        .is_err()
+    {
         return Ok(false);
     }
     let Some(path) = expanded(req, filename.as_bytes()) else {
@@ -1039,7 +1049,11 @@ fn posix_access(req: &mut Request, filename: PhpString, #[php(default = 0)] flag
     let Some(path) = expanded(req, filename.as_bytes()) else {
         return failed(req, Errno::EIO);
     };
-    if req.check_open_basedir(&path, false).is_err() {
+    if req
+        .environment_mut()
+        .check_open_basedir(&path, false)
+        .is_err()
+    {
         return failed(req, Errno::EPERM);
     }
     let mode = AccessFlags::from_bits_retain(as_c_int(flags));
@@ -1083,7 +1097,11 @@ fn posix_eaccess(
     let Some(path) = expanded(req, filename.as_bytes()) else {
         return Err(arg_value_error(req, 1, "not be empty"));
     };
-    if req.check_open_basedir(&path, false).is_err() {
+    if req
+        .environment_mut()
+        .check_open_basedir(&path, false)
+        .is_err()
+    {
         return Ok(failed(req, Errno::EPERM));
     }
     let Ok(path) = CString::new(path) else {
@@ -1481,7 +1499,11 @@ fn posix_pathconf(req: &mut Request, path: PhpString, name: i64) -> Result<OrFal
     if path.as_bytes().is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
     }
-    if req.check_open_basedir(path.as_bytes(), true).is_err() {
+    if req
+        .environment_mut()
+        .check_open_basedir(path.as_bytes(), true)
+        .is_err()
+    {
         let text = format!(
             "Invalid path supplied: {}",
             String::from_utf8_lossy(path.as_bytes())

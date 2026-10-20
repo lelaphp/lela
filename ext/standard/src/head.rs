@@ -83,7 +83,8 @@ fn header(
     #[php(default = true)] replace: bool,
     #[php(default = 0)] response_code: i64,
 ) {
-    req.header_add(header.as_bytes(), replace, response_code);
+    req.response_mut()
+        .header_add(header.as_bytes(), replace, response_code);
 }
 
 /// `header_remove(?string $name = null): void` (`Z/ext/standard/head.c:53`):
@@ -104,7 +105,8 @@ fn header(
 /// ```
 #[php_function]
 fn header_remove(req: &mut Request, #[php(default = null)] name: Option<PhpString>) {
-    req.header_remove(name.as_ref().map(PhpString::as_bytes));
+    req.response_mut()
+        .header_remove(name.as_ref().map(PhpString::as_bytes));
 }
 
 /// `http_response_code(int $response_code = 0): int|bool`
@@ -139,8 +141,8 @@ fn http_response_code(
 ) -> Union<i64, bool> {
     let code = response_code;
     if code != 0 {
-        if req.headers_sent().is_some() {
-            let message = match req.output_started_at() {
+        if req.response().headers_sent().is_some() {
+            let message = match req.response().started_at() {
                 Some((file, line)) => format!(
                     "Cannot set response code - headers already sent (output started at {}:{line})",
                     String::from_utf8_lossy(&file)
@@ -150,22 +152,22 @@ fn http_response_code(
             docref(req, Level::Warning, &message);
             return Union::B(false);
         }
-        if req.status_line().is_some() {
+        if req.response().status_line().is_some() {
             docref(
                 req,
                 Level::Warning,
                 "Calling http_response_code() after header('HTTP/...') has no effect",
             );
         }
-        let before = req.response_code();
-        req.set_response_code(code);
+        let before = req.response().response_code();
+        req.response_mut().set_response_code(code);
         return if before != 0 {
             Union::A(before)
         } else {
             Union::B(true)
         };
     }
-    let current = req.response_code();
+    let current = req.response().response_code();
     if current == 0 {
         Union::B(false)
     } else {
@@ -220,7 +222,7 @@ fn headers_sent(
     #[php(default = null)] filename: Ref<Untyped<Value>>,
     #[php(default = null)] line: Ref<Untyped<Value>>,
 ) -> Result<bool, Thrown> {
-    let sent = req.headers_sent();
+    let sent = req.response().headers_sent();
     let (file, at) = sent.clone().unwrap_or_default();
     line.set(req, Untyped(Value::int(i64::from(at))))?;
     if filename.is_given() {
@@ -246,7 +248,7 @@ fn headers_sent(
 #[php_function]
 fn headers_list(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
-    for line in req.headers_list() {
+    for line in req.response().headers_list() {
         let value = PhpString::new(req, &line)?.into_value();
         array.append(req, value)?;
     }
@@ -404,7 +406,7 @@ fn php_setcookie(
     if cookie.partitioned {
         line.extend_from_slice(b"; Partitioned");
     }
-    Ok(req.header_add(&line, false, 0))
+    Ok(req.response_mut().header_add(&line, false, 0))
 }
 
 /// `php_head_parse_cookie_options_array` (`Z/ext/standard/head.c:205`).
@@ -480,7 +482,7 @@ fn setcookie_common(
     };
     match arguments.expires_or_options {
         Union::A(options) => {
-            if req.argument_count() > 3 {
+            if req.frames().argument_count() > 3 {
                 let text = format!(
                     "{function}(): Expects exactly 3 arguments when argument #3 ($expires_or_options) is an array"
                 );

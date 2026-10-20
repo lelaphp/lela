@@ -322,7 +322,7 @@ fn entry_of(req: &Request, map: PhpObject, key: PhpObject) -> Option<Value> {
 /// `zend_weakmap_read_dimension`'s `Error` for a key the map holds
 /// nothing under.
 fn not_contained(req: &mut Request, key: PhpObject) -> Thrown {
-    let class = req.class_name(key.class());
+    let class = req.symbols().class_name(key.class());
     let message = format!("Object {class}#{} not contained in WeakMap", key.index());
     throw_error(req, "Error", &message)
 }

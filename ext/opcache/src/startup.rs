@@ -47,7 +47,7 @@ pub(crate) fn post_startup(
         max_wasted: u32::try_from(atoi(value(req, "opcache.max_wasted_percentage"))).unwrap_or(5),
         keys: u64::try_from(max_cached_keys(req)).unwrap_or(u64::MAX),
     };
-    req.unit_cache().bound(budget);
+    req.code_mut().unit_cache().bound(budget);
     let file_cache_only = flag(req, "opcache.file_cache_only");
     if file_cache_only && flag(req, "opcache.enable_file_override") {
         accel_log(

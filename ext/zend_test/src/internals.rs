@@ -102,14 +102,14 @@ pub(crate) fn zend_leak_bytes(
 pub(crate) fn zend_test_zend_call_stack_get(
     req: &mut Request,
 ) -> Result<Option<Owner<PhpArray>>, Thrown> {
-    let Some(stack) = req.call_stack_bounds() else {
+    let Some(stack) = req.limits().call_stack_bounds() else {
         return Ok(None);
     };
     let rows = [
         (&b"base"[..], stack.base),
         (b"max_size", stack.max_size),
         (b"position", position()),
-        (b"EG(stack_limit)", req.stack_limit_address()),
+        (b"EG(stack_limit)", req.limits().stack_limit_address()),
     ];
     let mut array = PhpArray::new(req)?;
     for (name, address) in rows {
@@ -136,11 +136,14 @@ pub(crate) fn zend_test_zend_call_stack_get(
 /// ```
 #[php_function]
 pub(crate) fn zend_test_zend_call_stack_use_all(req: &mut Request) -> Result<Raw<i64>, Thrown> {
-    let counted = req.call_stack_bounds().map_or(Value::null(), |stack| {
-        // `zend_call_stack_limit(base, max_size, 4096)`.
-        let limit = (stack.base.saturating_sub(stack.max_size)).saturating_add(4096);
-        Value::int(use_all(limit))
-    });
+    let counted = req
+        .limits()
+        .call_stack_bounds()
+        .map_or(Value::null(), |stack| {
+            // `zend_call_stack_limit(base, max_size, 4096)`.
+            let limit = (stack.base.saturating_sub(stack.max_size)).saturating_add(4096);
+            Value::int(use_all(limit))
+        });
     Raw::from_value(req, counted)
 }
 
@@ -181,7 +184,7 @@ fn position() -> usize {
 /// ```
 #[php_function]
 pub(crate) fn zend_get_map_ptr_last(req: &mut Request) -> i64 {
-    i64::from(req.unit_cache().map_ptr_last())
+    i64::from(req.code_mut().unit_cache().map_ptr_last())
 }
 
 /// `zend_test_override_libxml_global_state(): void`: libxml's deprecated
@@ -241,7 +244,7 @@ pub(crate) fn zend_test_is_pcre_bundled() -> bool {
 #[php_function]
 pub(crate) fn zend_test_is_zend_ptr(req: &mut Request, addr: i64) -> bool {
     usize::try_from(u64::from_ne_bytes(addr.to_ne_bytes()))
-        .is_ok_and(|address| req.heap_holds(address))
+        .is_ok_and(|address| req.memory().heap_holds(address))
 }
 
 /// `zend_test_log_err_debug(string $str): void`:
@@ -260,7 +263,8 @@ pub(crate) fn zend_test_is_zend_ptr(req: &mut Request, addr: i64) -> bool {
 /// ```
 #[php_function]
 pub(crate) fn zend_test_log_err_debug(req: &mut Request, str: PhpString) {
-    req.log_err_with_severity(str.as_bytes(), LOG_DEBUG);
+    req.diagnostics_mut()
+        .log_err_with_severity(str.as_bytes(), LOG_DEBUG);
 }
 
 /// `zend_test_crash(?string $message = null): void`: `$message` printed
@@ -285,9 +289,9 @@ pub(crate) fn zend_test_crash(
     #[php(default = null)] message: Option<PhpString>,
 ) {
     if let Some(message) = message {
-        req.write(message.as_bytes());
+        req.response_mut().write(message.as_bytes());
     }
-    req.flush();
+    req.response_mut().flush();
     crate::ffi::segfault()
 }
 
@@ -324,7 +328,7 @@ pub(crate) fn zend_test_gh18756() {
 /// ```
 #[php_function]
 pub(crate) fn zend_test_opcache_preloading(req: &mut Request) -> bool {
-    req.preloading()
+    req.code().preloading()
 }
 
 /// `zend_test_uri_parser(string $uri, string $parser): array`: `$uri`

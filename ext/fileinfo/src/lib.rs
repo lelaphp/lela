@@ -114,7 +114,8 @@ pub(crate) mod constants {
 fn fileinfo_info(req: &mut Request) {
     let version = ffi::version();
     let text = format!("{}.{}", version / 100, version % 100);
-    req.info_table(&[&["fileinfo support", "enabled"], &["libmagic", &text]]);
+    req.extensions_mut()
+        .info_table(&[&["fileinfo support", "enabled"], &["libmagic", &text]]);
 }
 
 /// The C `int` php hands libmagic a `zend_long` as.
@@ -237,7 +238,7 @@ mod class {
             #[php(default = null)] context: Option<Resource>,
         ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
             let _ = context;
-            let deprecated = req.argument_count() == 3;
+            let deprecated = req.frames().argument_count() == 3;
             buffer(req, this.object(), string, flags, deprecated)
         }
 
@@ -290,11 +291,22 @@ fn open(
 ) -> Result<Option<Magic>, Thrown> {
     let file = match magic_database.map(|path| path.0.as_bytes().to_vec()) {
         Some(file) if !file.is_empty() => {
-            if req.check_open_basedir(&file, true).is_err() {
+            if req
+                .environment_mut()
+                .check_open_basedir(&file, true)
+                .is_err()
+            {
                 return Ok(None);
             }
-            let cwd = req.cwd().into_os_string().into_encoded_bytes();
-            let Some(resolved) = req.virtual_file_ex(&cwd, &file, Resolve::Expand) else {
+            let cwd = req
+                .environment()
+                .cwd()
+                .into_os_string()
+                .into_encoded_bytes();
+            let Some(resolved) =
+                req.environment_mut()
+                    .virtual_file_ex(&cwd, &file, Resolve::Expand)
+            else {
                 return Ok(None);
             };
             Some(resolved)
@@ -587,7 +599,7 @@ fn finfo_buffer(
     #[php(default = null)] context: Option<Resource>,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let _ = context;
-    let deprecated = req.argument_count() == 4;
+    let deprecated = req.frames().argument_count() == 4;
     buffer(req, finfo.object(), string, flags, deprecated)
 }
 

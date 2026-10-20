@@ -14,7 +14,7 @@ use std::process::{ChildStdin, Command, Stdio};
 use php_ext::call::{autoload, call, lookup_function};
 use php_ext::coerce::to_callable;
 use php_ext::raising::{Level, clear, leave_pending, uncaught_at, warning};
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::values::{Key, PhpArray, PhpString, Value, walk};
 
 use crate::ffi::{self, Completion, Matches};
@@ -46,7 +46,7 @@ fn state(req: &mut Request) -> &mut State {
 /// pager, started on the first write that finds `cli.pager` set, at most
 /// 16 KiB of them as php's `fwrite` takes.
 pub(crate) fn write(req: &mut Request, bytes: &[u8]) {
-    let pager = req.ini_get(PAGER.as_bytes()).unwrap_or_default().to_vec();
+    let pager = req.ini().get(PAGER.as_bytes()).unwrap_or_default().to_vec();
     let state = state(req);
     if let Some(&last) = bytes.last() {
         state.last = last;
@@ -84,7 +84,7 @@ pub(crate) fn close_pager(req: &mut Request) {
 /// and `\\`, and code between backticks served for what it prints; a byte
 /// above 0x7F is `?`, with php's warning once.
 fn prompt(req: &mut Request, block: &[u8], prompt: u8) -> Vec<u8> {
-    let spec = match req.ini_get(PROMPT.as_bytes()) {
+    let spec = match req.ini().get(PROMPT.as_bytes()) {
         Some(spec) => spec.to_vec(),
         None => DEFAULT_PROMPT.to_vec(),
     };
@@ -117,7 +117,7 @@ fn prompt(req: &mut Request, block: &[u8], prompt: u8) -> Vec<u8> {
                 let code = spec[at + 1..at + 1 + len].to_vec();
                 state(req).capture = Some(Vec::new());
                 // php leaves what the code threw pending; it is given up.
-                if let Err(thrown) = req.eval_stringl(&code, b"php prompt code") {
+                if let Err(thrown) = req.code_mut().eval_stringl(&code, b"php prompt code") {
                     clear(req, thrown).ok();
                 }
                 if let Some(captured) = state(req).capture.take() {
@@ -312,9 +312,7 @@ impl Scan<'_> {
 fn is_valid_code(req: &mut Request, code: &[u8]) -> (bool, Vec<u8>) {
     let mut scan = Scan {
         code,
-        short_tags: req
-            .ini_get(b"short_open_tag")
-            .is_none_or(Request::ini_parse_bool),
+        short_tags: req.ini().get(b"short_open_tag").is_none_or(Ini::parse_bool),
         valid_end: true,
         last_valid_end: true,
         brackets: 0,
@@ -351,14 +349,14 @@ pub(crate) fn completion(req: &mut Request, text: &[u8]) -> Matches {
     let mut found: Vec<Vec<u8>> = Vec::new();
     let mut append = None;
     if let Some(name) = text.strip_prefix(b"$") {
-        for var in req.global_names() {
+        for var in req.variables_mut().global_names() {
             if var.starts_with(name) {
                 found.push([b"$".as_slice(), &var].concat());
                 append = Some(0);
             }
         }
     } else if let Some(name) = text.strip_prefix(b"#").filter(|n| n.first() != Some(&b'[')) {
-        for entry in req.ini_entries() {
+        for entry in req.ini().entries() {
             if entry.decl.name.0.starts_with(name) {
                 found.push([b"#".as_slice(), &entry.decl.name.0].concat());
                 append = Some(b'=');
@@ -376,7 +374,7 @@ pub(crate) fn completion(req: &mut Request, text: &[u8]) -> Matches {
             }
         };
         let member = text[split + 2..].to_ascii_lowercase();
-        let Some(decl) = req.class_decl(class) else {
+        let Some(decl) = req.symbols().class_decl(class) else {
             return Matches::None;
         };
         let class_name = decl.name.0.to_vec();
@@ -404,7 +402,7 @@ pub(crate) fn completion(req: &mut Request, text: &[u8]) -> Matches {
         }
     } else {
         let lowered = text.to_ascii_lowercase();
-        if let Ok(functions) = req.defined_functions() {
+        if let Ok(functions) = req.symbols_mut().defined_functions() {
             for (_, group) in walk::rows(req, *functions) {
                 let group = group.deref();
                 let Some(group) = group.as_array() else {
@@ -414,7 +412,7 @@ pub(crate) fn completion(req: &mut Request, text: &[u8]) -> Matches {
                     if name.starts_with(&lowered) {
                         // `func->common.function_name`, as declared.
                         let declared = lookup_function(req, &name)
-                            .and_then(|f| req.function_decl(f))
+                            .and_then(|f| req.symbols().function_decl(f))
                             .map_or(name, |decl| decl.name.0.to_vec());
                         found.push(declared);
                         append = Some(b'(');
@@ -429,8 +427,8 @@ pub(crate) fn completion(req: &mut Request, text: &[u8]) -> Matches {
                 append = Some(0);
             }
         }
-        for class in req.declared_classes() {
-            if let Some(decl) = req.class_decl(class)
+        for class in req.symbols().declared_classes() {
+            if let Some(decl) = req.symbols().class_decl(class)
                 && decl.name.0.to_ascii_lowercase().starts_with(&lowered)
             {
                 found.push(decl.name.0.to_vec());
@@ -485,9 +483,9 @@ fn names(req: &Request, list: PhpArray) -> Vec<Vec<u8>> {
 /// code at a time, `exit` or `quit` alone on a line, or the end of input,
 /// leaving; the status the request's.
 pub(crate) fn run(req: &mut Request) -> i32 {
-    let history = req.env(b"PHP_HISTFILE").map_or_else(
+    let history = req.environment().env(b"PHP_HISTFILE").map_or_else(
         || {
-            let home = req.env(b"HOME").unwrap_or(b"(null)");
+            let home = req.environment().env(b"HOME").unwrap_or(b"(null)");
             [home, b"/.php_history"].concat()
         },
         <[u8]>::to_vec,
@@ -511,7 +509,7 @@ pub(crate) fn run(req: &mut Request) -> i32 {
             && line.get(1) != Some(&b'[')
             && let Some(eq) = line.iter().position(|&b| b == b'=')
         {
-            req.ini_set(&line[1..eq], &line[eq + 1..]).ok();
+            req.ini_mut().set(&line[1..eq], &line[eq + 1..]).ok();
             ffi::add_history(&line);
             next = prompt(req, b"php", b'>');
             continue;
@@ -531,11 +529,11 @@ pub(crate) fn run(req: &mut Request) -> i32 {
             ffi::write_history(Some(&history));
             unwritten = 0;
         }
-        let left = req.eval_stringl(&code, b"php shell code");
+        let left = req.code_mut().eval_stringl(&code, b"php shell code");
         code.clear();
         let shell = state(req);
         if shell.pager.is_none() && shell.last != 0 && shell.last != b'\n' {
-            req.write(b"\n");
+            req.response_mut().write(b"\n");
         }
         if let Err(thrown) = left {
             uncaught_at(req, thrown, Level::Warning).ok();
@@ -543,5 +541,5 @@ pub(crate) fn run(req: &mut Request) -> i32 {
         close_pager(req);
         state(req).last = 0;
     }
-    req.exit_status()
+    req.diagnostics().exit_status()
 }

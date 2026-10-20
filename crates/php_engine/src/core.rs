@@ -85,9 +85,9 @@ pub(crate) fn extension() -> Extension {
 /// `PHP_MINFO_FUNCTION(php_core)` (`Z/main/main.c:2113-2118`), which
 /// `php_module_startup` makes Core's `info_func` (`Z/main/main.c:2374`):
 /// the `PHP Version` row, then `DISPLAY_INI_ENTRIES()`, the engine's own
-/// entries ([`Request::core_ini_info`]). What `phpinfo()`,
+/// entries ([`Ini::core_ini_info`]). What `phpinfo()`,
 /// `ReflectionExtension('Core')->info()` and `php --ri Core` print under
-/// Core's heading ([`Request::extension_info`]), in the table's order:
+/// Core's heading ([`Extensions::info`]), in the table's order:
 /// registration order before `phpinfo()` sorts it, the same block as
 /// `phpinfo()`'s after.
 ///
@@ -117,6 +117,7 @@ pub(crate) fn extension() -> Extension {
 /// bool(false)
 /// ```
 fn info(req: &mut Request) {
-    req.info_table(&[&["PHP Version", crate::api::request::PHP_VERSION]]);
-    req.core_ini_info();
+    req.extensions_mut()
+        .info_table(&[&["PHP Version", crate::api::request::PHP_VERSION]]);
+    req.ini_mut().core_ini_info();
 }

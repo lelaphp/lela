@@ -185,7 +185,7 @@ fn timeout_or_default(req: &Request, timeout: Option<f64>) -> f64 {
 /// of `null` is: the quantity the entry's `OnUpdateLong` read.
 pub(crate) fn default_timeout(req: &Request) -> f64 {
     #[allow(clippy::cast_precision_loss)] // php's `(double)FG(default_socket_timeout)`
-    let secs = req.ini_long(b"default_socket_timeout") as f64;
+    let secs = req.ini().long(b"default_socket_timeout") as f64;
     secs
 }
 
@@ -1037,7 +1037,7 @@ fn stream_socket_pair(
             Ok(pair) => pair,
             Err(error) => {
                 let code = error.raw_os_error().unwrap_or(0);
-                let text = req.os_error_text(code);
+                let text = req.environment().os_error_text(code);
                 let text = text
                     .split_once(" (os error")
                     .map_or(text.as_str(), |(t, _)| t);

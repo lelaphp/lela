@@ -186,7 +186,7 @@ fn connect(
     let Some(parser) = UriParser::of_ctx(req, ctx, b"ftp")? else {
         let text = format!(
             "{}(): Provided stream context has invalid value for the \"uri_parser_class\" option",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         return Err(throw_error(req, "ValueError", &text));
     };
@@ -1133,7 +1133,7 @@ fn rename(req: &mut Request, from: &[u8], to: &[u8]) -> Result<bool, Thrown> {
     let Some(parser) = UriParser::of_ctx(req, ctx, b"ftp")? else {
         let text = format!(
             "{}(): Provided stream context has invalid value for the \"uri_parser_class\" option",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         return Err(throw_error(req, "ValueError", &text));
     };

@@ -104,7 +104,7 @@ impl FFI {
         validate_api_restriction(req)?;
         let lib = match lib {
             Some(path) => match Library::open(&crate::preload::library_path(
-                Some(&req.cwd()),
+                Some(&req.environment().cwd()),
                 path.as_bytes(),
             )) {
                 Ok(lib) => Some(lib),
@@ -164,13 +164,13 @@ impl FFI {
         validate_api_restriction(req)?;
         // `ZEND_COMPILE_PRELOAD_IN_CHILD`: the preload's request served
         // as `opcache.preload_user`, php's child, publishes no scope.
-        if req.preloading_in_child() {
+        if req.code().preloading_in_child() {
             return Err(ffi_error(
                 req,
                 "FFI::load() doesn't work in conjunction with \"opcache.preload_user\". Use \"ffi.preload\" instead.",
             ));
         }
-        if req.preloading() {
+        if req.code().preloading() {
             let Some(scope) = crate::preload::register(req, filename.as_bytes()) else {
                 return Ok(None);
             };
@@ -894,7 +894,7 @@ fn load_read(
     shown: &str,
 ) -> Result<Owner<Instance<FFI>>, Thrown> {
     let from = types(req).len();
-    let cwd = req.cwd();
+    let cwd = req.environment().cwd();
     let loaded = match crate::preload::load_header(file, Some(&cwd), types(req), attr::STORED, None)
     {
         Ok(loaded) => loaded,
@@ -1176,7 +1176,7 @@ fn ffi_type(
 /// `position` is the value's one owner, a temporary php may take the
 /// ownership of.
 fn temporary(req: &mut Request, position: u32, object: PhpObject) -> bool {
-    let Some(arg) = req.argument(position) else {
+    let Some(arg) = req.frames().argument(position) else {
         return false;
     };
     arg.refcount() == 1 && object.as_value().refcount() == 1
@@ -1485,7 +1485,7 @@ impl ObjectHandlers for Handlers {
     ) -> Result<Option<Function>, Thrown> {
         if matches!(lowered, b"new" | b"cast" | b"type") {
             let class = classes(req)?.ffi;
-            return Ok(req.trampoline(class, lowered));
+            return Ok(req.symbols().trampoline(class, lowered));
         }
         if function_symbol(req, object, written).is_none() {
             let shown = String::from_utf8_lossy(written).into_owned();
@@ -1494,7 +1494,9 @@ impl ObjectHandlers for Handlers {
                 &format!("Attempt to call undefined C function '{shown}'"),
             ));
         }
-        Ok(req.native_trampoline(written, crate::call::trampoline))
+        Ok(req
+            .symbols_mut()
+            .native_trampoline(written, crate::call::trampoline))
     }
 
     /// `zend_fake_compare_objects`.

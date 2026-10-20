@@ -24,7 +24,7 @@
 //!
 //! Two ways in, as the ruling has them, and one way through. pcntl asks
 //! through the request,
-//! [`Request::fork`](crate::api::request::Request::fork), and in the child
+//! [`Limits::fork`](crate::api::request::Limits::fork), and in the child
 //! what php's `php_child_init` restores is restored. A host asks through
 //! the host face, [`fork`], with no request in flight, as php-fpm's master
 //! makes a child or daemonizes. Both fork through `fork_as`, which joins
@@ -498,7 +498,7 @@ fn fork_as(asker: Asker) -> io::Result<Forked> {
     forked
 }
 
-/// The fork `Request::fork` asks for, with that request alone inside
+/// The fork `Limits::fork` asks for, with that request alone inside
 /// the engine beside the timers' threads it joins.
 pub(crate) fn fork_request() -> io::Result<Forked> {
     fork_as(Asker::Request)

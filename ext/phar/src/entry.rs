@@ -199,7 +199,12 @@ pub(crate) fn mount(
         archive::expand_filepath(req, filename).unwrap_or_else(|| filename.to_vec())
     };
     // "only check openbasedir for files, not for phar streams"
-    if !is_phar && req.check_open_basedir(&tmp, true).is_err() {
+    if !is_phar
+        && req
+            .environment_mut()
+            .check_open_basedir(&tmp, true)
+            .is_err()
+    {
         return Ok(false);
     }
     let Some(sb) = req.url_stat(&tmp, false, false)?.found() else {
@@ -288,7 +293,11 @@ pub(crate) fn open_archive_fp(req: &mut Request, id: ArchiveId) -> Result<bool, 
         return Ok(true);
     }
     let fname = archive.fname.clone();
-    if req.check_open_basedir(&fname, true).is_err() {
+    if req
+        .environment_mut()
+        .check_open_basedir(&fname, true)
+        .is_err()
+    {
         return Ok(false);
     }
     let bytes = archive::read_file(req, &fname, false)?;

@@ -443,7 +443,7 @@ fn open(
     if mode.is_empty() || (mode[0] != b'w' && mode[0] != b'r' && mode.len() > 1) {
         return Ok(None);
     }
-    let Ok(host) = req.check_open_basedir(path, true) else {
+    let Ok(host) = req.environment_mut().check_open_basedir(path, true) else {
         return Ok(None);
     };
     let parsed = Mode::parse(mode);

@@ -96,7 +96,8 @@ pub fn extension() -> Extension {
 /// sysvmsg support => enabled
 /// ```
 fn sysvmsg_info(req: &mut Request) {
-    req.info_table(&[&["sysvmsg support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["sysvmsg support", "enabled"]]);
 }
 
 /// `sysvmsg_queue_t` less its `zend_object` and its key, which nothing
@@ -187,7 +188,7 @@ fn msg_get_queue(
     let id = match ffi::get(c_int(key), 0).or_else(|_| ffi::get(c_int(key), flags)) {
         Ok(id) => id,
         Err(errno) => {
-            let text = req.os_error_text(errno);
+            let text = req.environment().os_error_text(errno);
             let hex = key.cast_unsigned();
             docref(
                 req,
@@ -266,7 +267,7 @@ fn msg_send(
         }
     };
     if let Err(errno) = ffi::send(id, message_type, &text, !blocking) {
-        let text = req.os_error_text(errno);
+        let text = req.environment().os_error_text(errno);
         docref(req, Level::Warning, &format!("msgsnd failed: {text}"));
         error_code.set(req, Untyped(Value::int(i64::from(errno))))?;
         return Ok(false);

@@ -126,7 +126,7 @@ fn xsl_info(req: &mut Request) {
     let dotted = |v: i32| format!("{}.{}.{}", v / 10000, v % 10000 / 100, v % 100);
     let (xslt, xml) = ffi::versions();
     let (xslt, xml) = (dotted(xslt), dotted(xml));
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["XSL", "enabled"],
         &["libxslt Version", &xslt],
         &["libxslt compiled against libxml Version", &xml],
@@ -136,7 +136,8 @@ fn xsl_info(req: &mut Request) {
 }
 
 fn class_name(req: &Request, class: ClassId) -> String {
-    req.class_decl(class)
+    req.symbols()
+        .class_decl(class)
         .map(|d| String::from_utf8_lossy(&d.name.0).into_owned())
         .unwrap_or_default()
 }
@@ -419,7 +420,7 @@ fn apply<R>(
         );
         return Err(throw_error(req, "Error", &message));
     };
-    let profile = profiling.filter(|p| req.check_open_basedir(p, true).is_ok());
+    let profile = profiling.filter(|p| req.environment_mut().check_open_basedir(p, true).is_ok());
     let answer = id.held(req, |req, sheet| {
         let mut holder = NodeObject::default();
         let doc = if has_keys {
@@ -558,8 +559,8 @@ fn set_param(req: &mut Request, this: PhpObject, key: Vec<u8>, value: Vec<u8>) {
 /// Whether `class` descends from the root of `of`'s hierarchy,
 /// `instanceof_function(ret_class, curce)`.
 fn compatible(req: &Request, class: ClassId, of: ClassId) -> bool {
-    let root = req.lineage(of).last().unwrap_or(of);
-    req.lineage(class).any(|c| c == root)
+    let root = req.symbols().lineage(of).last().unwrap_or(of);
+    req.symbols().lineage(class).any(|c| c == root)
 }
 
 /// Where `this` keeps its callbacks, which a transformation reaches at

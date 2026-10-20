@@ -23,7 +23,7 @@ fn os(req: &Request, path: &[u8]) -> std::path::PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
     } else {
-        req.cwd().join(path)
+        req.environment().cwd().join(path)
     }
 }
 
@@ -61,6 +61,7 @@ fn extract_file(
     );
     let shown = lossy(&name).into_owned();
     let expanded = req
+        .environment_mut()
         .virtual_file_ex(b"/", &name, Resolve::Expand)
         .filter(|p| p.len() > 1);
     let Some(expanded) = expanded else {
@@ -89,7 +90,11 @@ fn extract_file(
         }));
     }
     let full = lossy(&fullpath).into_owned();
-    if req.check_open_basedir(&fullpath, true).is_err() {
+    if req
+        .environment_mut()
+        .check_open_basedir(&fullpath, true)
+        .is_err()
+    {
         return Ok(Err(format!(
             "Cannot extract \"{shown}\" to \"{full}\", openbasedir/safe mode restrictions in effect"
         )));

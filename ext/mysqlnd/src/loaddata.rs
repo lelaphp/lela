@@ -81,7 +81,7 @@ pub(crate) fn handle(
     if ok
         && !enabled
         && let Some(dir) = &directory
-        && !req.within_basedir(dir, filename)
+        && !req.environment_mut().within_basedir(dir, filename)
     {
         conn.error.client(
             req,
@@ -109,13 +109,21 @@ fn send_file(
     filename: &[u8],
 ) -> Result<(bool, bool), Thrown> {
     // `mysqlnd_local_infile_init`.
-    let open_basedir = req.ini_get(b"open_basedir").is_some_and(|v| !v.is_empty());
+    let open_basedir = req
+        .ini()
+        .get(b"open_basedir")
+        .is_some_and(|v| !v.is_empty());
     let refused = |conn: &mut ConnData, req: &mut Request, errno: u32, text: &str| {
         conn.error.client(req, errno, text)?;
         conn.net.send(req, &[], &mut conn.stats, &mut conn.error)?;
         Ok::<_, Thrown>((false, true))
     };
-    if open_basedir && req.check_open_basedir(filename, false).is_err() {
+    if open_basedir
+        && req
+            .environment_mut()
+            .check_open_basedir(filename, false)
+            .is_err()
+    {
         return refused(
             conn,
             req,

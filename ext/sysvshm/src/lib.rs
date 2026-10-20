@@ -116,7 +116,8 @@ pub fn extension() -> Extension {
 /// sysvshm support => enabled
 /// ```
 fn sysvshm_info(req: &mut Request) {
-    req.info_table(&[&["sysvshm support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["sysvshm support", "enabled"]]);
 }
 
 /// `sysvshm_shm` less its `zend_object`: the key, the segment's id and
@@ -314,7 +315,7 @@ fn shm_attach(
             match ffi::get(key as i32, len, flags) {
                 Ok(id) => id,
                 Err(errno) => {
-                    let text = req.os_error_text(errno);
+                    let text = req.environment().os_error_text(errno);
                     return Ok(failed(req, &text));
                 }
             }
@@ -323,7 +324,7 @@ fn shm_attach(
     let segment = match Segment::attach(id) {
         Ok(segment) => segment,
         Err(errno) => {
-            let text = req.os_error_text(errno);
+            let text = req.environment().os_error_text(errno);
             return Ok(failed(req, &text));
         }
     };
@@ -442,7 +443,7 @@ fn shm_remove(req: &mut Request, shm: Instance<SysvSharedMemory>) -> Result<bool
         (shm.key, shm.id)
     };
     if let Err(errno) = ffi::remove(id) {
-        let text = req.os_error_text(errno);
+        let text = req.environment().os_error_text(errno);
         let hex = key.cast_unsigned();
         let text = format!("Failed for key 0x{hex:x}, id {id}: {text}");
         docref(req, Level::Warning, &text);

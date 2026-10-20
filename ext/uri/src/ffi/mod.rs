@@ -158,7 +158,7 @@ impl Uri {
         };
         let uri = &raw mut *self.uri;
         let manager = (&raw mut manager).cast();
-        req.lend_heap(|| call(uri, manager))
+        req.memory_mut().lend_heap(|| call(uri, manager))
     }
 
     /// `uriFreeUriMembersMmA`: the members given back to the request's

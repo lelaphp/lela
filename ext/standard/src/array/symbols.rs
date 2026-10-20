@@ -2,7 +2,7 @@
 //! `extract`, which writes an array's elements into them, and
 //! `compact`, which reads them into an array, each over the calling
 //! frame's symbol table as `zend_rebuild_symbol_table` lays it down,
-//! through the face's `Request::caller_var` and `set_caller_var`. A
+//! through the face's `Frames::caller_var` and `set_caller_var`. A
 //! variable declared and not yet written reads as one the frame has not.
 
 use std::borrow::Cow;
@@ -58,12 +58,14 @@ fn prefixed(prefix: &[u8], name: &[u8]) -> Vec<u8> {
 fn assign(req: &mut Request, name: PhpString, value: Value) -> Result<(), Thrown> {
     let value = Owner::take(req, value.deref());
     if let Some(cell) = req
+        .frames_mut()
         .caller_var(name.as_bytes())
         .and_then(|held| held.as_php_ref())
     {
         return cell.set(req, value);
     }
-    req.set_caller_var(name, value, Overwrite::Nulled);
+    req.frames_mut()
+        .set_caller_var(name, value, Overwrite::Nulled);
     Ok(())
 }
 
@@ -360,7 +362,7 @@ fn extracted_refs(
                     return Err(thrown);
                 }
             };
-            req.set_caller_var(*target, cell, order);
+            req.frames_mut().set_caller_var(*target, cell, order);
             target.give_up(req);
             count += 1;
         }
@@ -396,7 +398,7 @@ fn checked(
     {
         return Err(arg_value_error(req, 3, "be a valid identifier"));
     }
-    req.forbid_dynamic_call()?;
+    req.frames_mut().forbid_dynamic_call()?;
     Ok(prefix.unwrap_or_default())
 }
 
@@ -468,21 +470,29 @@ fn target(
             None
         }
         EXTR_OVERWRITE => {
-            if !valid_var_name(text) || (text == b"GLOBALS" && req.caller_var(text).is_some()) {
+            if !valid_var_name(text)
+                || (text == b"GLOBALS" && req.frames_mut().caller_var(text).is_some())
+            {
                 None
             } else {
                 Some(Cow::Borrowed(text))
             }
         }
         EXTR_IF_EXISTS => {
-            if req.caller_var(text).is_none() || !valid_var_name(text) || text == b"GLOBALS" {
+            if req.frames_mut().caller_var(text).is_none()
+                || !valid_var_name(text)
+                || text == b"GLOBALS"
+            {
                 None
             } else {
                 Some(Cow::Borrowed(text))
             }
         }
         EXTR_SKIP => {
-            if !valid_var_name(text) || text == b"this" || req.caller_var(text).is_some() {
+            if !valid_var_name(text)
+                || text == b"this"
+                || req.frames_mut().caller_var(text).is_some()
+            {
                 None
             } else {
                 Some(Cow::Borrowed(text))
@@ -492,7 +502,7 @@ fn target(
             if text.is_empty() {
                 None
             } else {
-                let exists = req.caller_var(text).is_some();
+                let exists = req.frames_mut().caller_var(text).is_some();
                 if exists || text == b"this" {
                     if !exists && !valid_var_name(text) {
                         None
@@ -505,7 +515,7 @@ fn target(
             }
         }
         EXTR_PREFIX_IF_EXISTS => {
-            if req.caller_var(text).is_none() {
+            if req.frames_mut().caller_var(text).is_none() {
                 None
             } else {
                 Some(Cow::Owned(prefixed(prefix, text))).filter(|name| valid_var_name(name))
@@ -592,7 +602,7 @@ fn compact(
     var_name: Untyped<Value>,
     var_names: Variadic<Untyped<Value>>,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    req.forbid_dynamic_call()?;
+    req.frames_mut().forbid_dynamic_call()?;
     let arguments: Vec<Value> = std::iter::once(var_name.0)
         .chain(var_names.0.into_iter().map(|name| name.0))
         .collect();
@@ -618,7 +628,7 @@ fn compact_var(
     match entry.as_ref() {
         ValueRef::Str(name) => {
             let bytes = name.as_bytes().to_vec();
-            if let Some(value) = req.caller_var(&bytes) {
+            if let Some(value) = req.frames_mut().caller_var(&bytes) {
                 let value = value.deref();
                 let value = Owner::take(req, value);
                 // `zend_hash_update` under the name the argument holds.
@@ -627,7 +637,7 @@ fn compact_var(
             } else if bytes == b"this" {
                 // `zend_get_this_object`: the object the caller runs on,
                 // which no symbol table holds.
-                if let Some(object) = req.this_object() {
+                if let Some(object) = req.frames().this_object() {
                     let value = object.as_value();
                     let value = Owner::take(req, value);
                     let key = Owner::take(req, Key::Str(name));

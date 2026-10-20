@@ -44,7 +44,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::{value_name, with_string};
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::{Thrown, arg_type_error, throw_error, warning};
-use php_ext::request::{BodyLimits, Request};
+use php_ext::request::{BodyLimits, Ini, Request};
 use php_ext::values::walk;
 use php_ext::values::walk::Hold;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -121,7 +121,7 @@ fn request_parse_body(
             *slot = Some(quantity);
         }
     }
-    let (post, files) = req.parse_body(&limits)?;
+    let (post, files) = req.variables_mut().parse_body(&limits)?;
     let mut pair = PhpArray::new(req)?;
     pair.append(req, post.into_value())?;
     pair.append(req, files.into_value())?;
@@ -166,7 +166,7 @@ fn body_limits(req: &mut Request, options: PhpArray) -> Result<Vec<(Limit, i64)>
         let value = value.deref();
         let quantity = match value.as_ref() {
             ValueRef::Str(text) => {
-                let (quantity, said) = Request::ini_parse_quantity(text.as_bytes());
+                let (quantity, said) = Ini::parse_quantity(text.as_bytes());
                 if let Some(said) = said {
                     warning(req, &said);
                 }
@@ -189,7 +189,8 @@ fn body_limits(req: &mut Request, options: PhpArray) -> Result<Vec<(Limit, i64)>
 
 /// Whether a value is an enum case, and its class's backing.
 fn enum_backing(req: &Request, object: PhpObject) -> Option<EnumBacking> {
-    req.class_decl(object.class())
+    req.symbols()
+        .class_decl(object.class())
         .filter(|decl| decl.kind == ClassKind::Enum)
         .map(|decl| decl.backing)
 }
@@ -219,6 +220,7 @@ impl Query<'_> {
         {
             if backing == EnumBacking::Pure {
                 let name = req
+                    .symbols()
                     .class_decl(object.class())
                     .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
                     .unwrap_or_default();
@@ -311,14 +313,14 @@ impl Query<'_> {
         if table.array().is_recursive() {
             return Ok(());
         }
-        if req.stack_overflowed() {
+        if req.limits().stack_overflowed() {
             return Err(throw_error(
                 req,
                 "Error",
                 "Maximum call stack size reached.",
             ));
         }
-        let scope = req.scope();
+        let scope = req.frames().scope();
         // The table is walked with no owner of it taken: what holds it
         // keeps it while code of the program runs under the walk, and
         // where that code frees it, the walk ends there. A declared slot
@@ -432,6 +434,7 @@ fn visible_name(
         None => false,
         Some(scope) if class == b"*" => object.instance_of(req, scope),
         Some(scope) => req
+            .symbols()
             .class_decl(scope)
             .is_some_and(|decl| decl.name.0.eq_ignore_ascii_case(class)),
     };
@@ -499,7 +502,8 @@ fn http_build_query(
     let separator: Vec<u8> = match arg_separator {
         Some(s) => s.as_bytes().to_vec(),
         None => req
-            .ini_get(b"arg_separator.output")
+            .ini()
+            .get(b"arg_separator.output")
             .filter(|v| !v.is_empty())
             .map_or_else(|| b"&".to_vec(), <[u8]>::to_vec),
     };

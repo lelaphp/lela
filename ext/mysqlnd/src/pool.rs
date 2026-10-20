@@ -104,7 +104,8 @@ impl Pool {
     pub(crate) fn create(req: &mut Request) -> Result<Pool, Thrown> {
         // `OnUpdateLong`'s `zend_long`, read as `size_t`.
         let size = usize::try_from(
-            req.ini_long(b"mysqlnd.mempool_default_size")
+            req.ini()
+                .long(b"mysqlnd.mempool_default_size")
                 .cast_unsigned(),
         )
         .unwrap_or(usize::MAX);

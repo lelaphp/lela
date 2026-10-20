@@ -218,7 +218,7 @@ pub(super) fn create_id(req: &mut Request) -> Option<Vec<u8>> {
 /// }
 /// ```
 pub(super) fn track_init(req: &mut Request) -> Result<(), Thrown> {
-    req.set_global(b"_SESSION", None);
+    req.variables_mut().set_global(b"_SESSION", None);
     let array = PhpArray::new(req)?;
     bind_vars(req, array.into_value())
 }
@@ -491,7 +491,7 @@ fn prime(req: &mut Request) {
 fn find_id(req: &mut Request) {
     let name = ini(req, b"session.name");
     let lookup = |req: &mut Request, global: &[u8]| -> Option<Option<Vec<u8>>> {
-        let array = req.superglobal(global)?;
+        let array = req.variables_mut().superglobal(global)?;
         let found = array.find(&name)?.deref();
         Some(found.as_str_bytes().map(<[u8]>::to_vec))
     };
@@ -609,8 +609,8 @@ pub(super) fn initialize(req: &mut Request) -> Result<bool, Thrown> {
     gc(req, false)?;
     req.state::<State>().session_vars = ini_bool(req, b"session.lazy_write").then(|| val.clone());
     decode(req, &val)?;
-    let file = req.current_file().map(<[u8]>::to_vec);
-    let line = req.current_line();
+    let file = req.frames().current_file().map(<[u8]>::to_vec);
+    let line = req.frames().current_line();
     req.state::<State>().started_at = file.map(|f| (f, line));
     Ok(true)
 }
@@ -625,8 +625,8 @@ pub(super) fn gc(req: &mut Request, immediate: bool) -> Result<i64, Thrown> {
     let Some(module) = state.module else {
         return Ok(-1);
     };
-    let probability = req.ini_long(b"session.gc_probability");
-    let divisor = req.ini_long(b"session.gc_divisor").max(1);
+    let probability = req.ini().long(b"session.gc_probability");
+    let divisor = req.ini().long(b"session.gc_divisor").max(1);
     let mut collect = immediate;
     if !collect && probability > 0 {
         let mut draw = [0u8; 8];
@@ -639,7 +639,7 @@ pub(super) fn gc(req: &mut Request, immediate: bool) -> Result<i64, Thrown> {
     if !collect {
         return Ok(-1);
     }
-    let maxlifetime = req.ini_long(b"session.gc_maxlifetime");
+    let maxlifetime = req.ini().long(b"session.gc_maxlifetime");
     let collected = module_gc(req, module, maxlifetime);
     Ok(absorb(req, collected)?.unwrap_or(-1))
 }
@@ -841,9 +841,10 @@ pub(super) fn reset_id(req: &mut Request) -> Result<bool, Thrown> {
         Vec::new()
     };
     let sid = crate::string_value(req, &sid)?;
-    match req.extension_named(b"session") {
+    match req.extensions().named(b"session") {
         Some(session) => {
-            req.register_constant(session, b"SID", sid, sid_attributes());
+            req.symbols_mut()
+                .register_constant(session, b"SID", sid, sid_attributes());
         }
         None => sid.give_up(req),
     }
@@ -854,6 +855,7 @@ pub(super) fn reset_id(req: &mut Request) -> Result<bool, Thrown> {
         let name = ini(req, b"session.name");
         let cookie_carries_it = ini_bool(req, b"session.use_cookies")
             && req
+                .variables_mut()
                 .superglobal(b"_COOKIE")
                 .is_some_and(|cookies| cookies.find(&name).is_some());
         if !cookie_carries_it {
@@ -977,7 +979,7 @@ fn send_cookie(req: &mut Request, id: &[u8]) -> bool {
     cookie.extend_from_slice(&ini(req, b"session.name"));
     cookie.push(b'=');
     cookie.extend_from_slice(&url_encode(id));
-    let lifetime = req.ini_long(b"session.cookie_lifetime");
+    let lifetime = req.ini().long(b"session.cookie_lifetime");
     if lifetime > 0 {
         let t = now().saturating_add(lifetime);
         if t > 0 {
@@ -1014,8 +1016,9 @@ fn send_cookie(req: &mut Request, id: &[u8]) -> bool {
     let mut prefix = b"Set-Cookie: ".to_vec();
     prefix.extend_from_slice(&name);
     prefix.push(b'=');
-    req.header_remove_prefix(&prefix, b"Set-Cookie".len());
-    req.header_add(&cookie, false, 0);
+    req.response_mut()
+        .header_remove_prefix(&prefix, b"Set-Cookie".len());
+    req.response_mut().header_add(&cookie, false, 0);
     true
 }
 
@@ -1039,7 +1042,7 @@ fn cache_limiter(req: &mut Request) -> Result<i32, Thrown> {
         );
         return Ok(-2);
     }
-    let expire = req.ini_long(b"session.cache_expire").saturating_mul(60);
+    let expire = req.ini().long(b"session.cache_expire").saturating_mul(60);
     let limiter = c_str(&limiter).to_ascii_lowercase();
     let past = "Expires: Thu, 19 Nov 1981 08:52:00 GMT".to_owned();
     let private = format!("Cache-Control: private, max-age={expire}");
@@ -1058,16 +1061,16 @@ fn cache_limiter(req: &mut Request) -> Result<i32, Thrown> {
         _ => return Ok(-1),
     };
     for header in &headers {
-        req.header_add(header.as_bytes(), true, 0);
+        req.response_mut().header_add(header.as_bytes(), true, 0);
     }
     if limiter != b"nocache"
-        && let Some(script) = req.script_name().map(<[u8]>::to_vec)
+        && let Some(script) = req.environment().script_name().map(<[u8]>::to_vec)
         // `VCWD_STAT(path_translated)`, the host's own stat, which no
         // wrapper and no `open_basedir` guard stands before.
-        && let Ok(stat) = std::fs::metadata(req.absolutize(&script))
+        && let Ok(stat) = std::fs::metadata(req.environment().absolutize(&script))
     {
         use std::os::unix::fs::MetadataExt;
-        req.header_add(
+        req.response_mut().header_add(
             format!("Last-Modified: {} GMT", gmt(stat.mtime())).as_bytes(),
             true,
             0,

@@ -1,8 +1,8 @@
 //! Frame writes and evaluation in a paused frame (#1828): a debugger
 //! written as an extension stops where the program calls `pause()`, its
 //! observer's begin handler standing in that call, writes a variable of
-//! a frame it holds a [`FrameId`] of ([`Request::set_frame_var`]) and
-//! evaluates code in that frame's scope ([`Request::eval_in_frame`]), as
+//! a frame it holds a [`FrameId`] of ([`Frames::set_var`]) and
+//! evaluates code in that frame's scope ([`Frames::eval_in_frame`]), as
 //! xdebug's `property_set` and `eval` do in php through
 //! `zend_eval_stringl` with `EG(current_execute_data)` at the frame.
 //!
@@ -71,7 +71,7 @@ fn shown(
         Some(Err(thrown)) => match thrown.cause(req) {
             Cause::Throwable(throwable) => {
                 let throwable = *throwable;
-                let class = req.class_name(throwable.class());
+                let class = req.symbols().class_name(throwable.class());
                 let message = throwable
                     .prop(req, b"message")
                     .and_then(|message| message.as_str_bytes().map(<[u8]>::to_vec))
@@ -95,17 +95,22 @@ impl Stop for Plan {
     /// The plan carried out where the program stands.
     fn stop(self, observed: &mut Observed<'_>) {
         let Some(frame) = paused(observed, self.depth) else {
-            observed.write(b"[no frame]");
+            observed.response_mut().write(b"[no frame]");
             return;
         };
         if let Some((name, value)) = self.write {
-            let set = observed.set_frame_var(frame, name.as_bytes(), Owner::int(value));
+            let set = observed
+                .frames_mut()
+                .set_var(frame, name.as_bytes(), Owner::int(value));
             let line = format!("[set {}]", if set { "ok" } else { "refused" });
-            observed.write(line.as_bytes());
+            observed.response_mut().write(line.as_bytes());
         }
-        let answered = observed.eval_in_frame(frame, self.code.as_bytes(), b"debugger");
+        let answered =
+            observed
+                .frames_mut()
+                .eval_in_frame(frame, self.code.as_bytes(), b"debugger");
         let line = format!("[eval {}]", shown(observed, answered, self.traced));
-        observed.write(line.as_bytes());
+        observed.response_mut().write(line.as_bytes());
     }
 }
 
@@ -120,7 +125,7 @@ fn stopped<P: Stop>(observed: &mut Observed<'_>) {
 fn init<P: Stop>(observed: &mut Observed<'_>) -> ObserverHandlers {
     let named = observed
         .function()
-        .and_then(|function| observed.function_decl(function))
+        .and_then(|function| observed.symbols().function_decl(function))
         .is_some_and(|decl| decl.name.0.as_ref() == b"pause");
     ObserverHandlers {
         begin: named.then_some(stopped::<P> as fn(&mut Observed<'_>)),
@@ -260,12 +265,15 @@ impl Stop for Revisit {
             observed.state::<Kept>().0 = caller;
             return;
         };
-        let set = observed.set_frame_var(frame, b"x", Owner::int(5));
+        let set = observed.frames_mut().set_var(frame, b"x", Owner::int(5));
         let line = format!("[set {}]", if set { "ok" } else { "refused" });
-        observed.write(line.as_bytes());
-        let answered = observed.eval_in_frame(frame, self.code.as_bytes(), b"debugger");
+        observed.response_mut().write(line.as_bytes());
+        let answered =
+            observed
+                .frames_mut()
+                .eval_in_frame(frame, self.code.as_bytes(), b"debugger");
         let line = format!("[eval {}]", shown(observed, answered, self.traced));
-        observed.write(line.as_bytes());
+        observed.response_mut().write(line.as_bytes());
     }
 }
 

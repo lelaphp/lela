@@ -227,7 +227,7 @@ impl Target {
             port: args
                 .port
                 .filter(|p| *p != 0)
-                .unwrap_or_else(|| req.ini_long(b"mysqli.default_port")),
+                .unwrap_or_else(|| req.ini().long(b"mysqli.default_port")),
             socket: unempty(args.socket).or_else(|| ini_string(req, b"mysqli.default_socket")),
             persistent,
         }
@@ -406,8 +406,8 @@ fn end_psession(req: &mut Request, handle: Mysqlnd) -> Result<bool, Thrown> {
 /// 0
 /// ```
 fn over_limit(req: &mut Request, persistent: bool) -> Option<String> {
-    let max_links = req.ini_long(b"mysqli.max_links");
-    let max_persistent = req.ini_long(b"mysqli.max_persistent");
+    let max_links = req.ini().long(b"mysqli.max_links");
+    let max_persistent = req.ini().long(b"mysqli.max_persistent");
     let state = req.state::<State>();
     let persistent_links = state.num_active_persistent;
     let persistent_links = persistent_links + crate::num_inactive_persistent(req);
@@ -575,7 +575,10 @@ fn connected(req: &mut Request, handle: Mysqlnd) -> Result<(), Thrown> {
     let allow = ini_bool(req, b"mysqli.allow_local_infile");
     handle.option(req, ClientOption::LocalInfile(allow))?;
     if let Some(dir) = ini_string(req, b"mysqli.local_infile_directory")
-        && req.check_open_basedir(&dir, false).is_ok()
+        && req
+            .environment_mut()
+            .check_open_basedir(&dir, false)
+            .is_ok()
     {
         handle.option(req, ClientOption::LoadDataLocalDir(Some(&dir)))?;
     }
@@ -1381,7 +1384,7 @@ impl mysqli {
         #[php(default = null)] socket: Option<PhpString>,
     ) -> Answer<()> {
         let object = this.object();
-        if req.argument_count() == 0 {
+        if req.frames().argument_count() == 0 {
             if !matches!(
                 crate::payload_ref::<Link>(req, object),
                 Some(Link::Closed) | None
@@ -1752,7 +1755,7 @@ impl mysqli {
         #[php(default = 0)] mode: i64,
     ) -> Answer<OrFalse<Owner<Instance<mysqli_result>>>> {
         let _ = mode;
-        let given = req.argument_count() == 1;
+        let given = req.frames().argument_count() == 1;
         store_result(req, On::method(this.object()), given)
     }
 

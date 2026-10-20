@@ -16,7 +16,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::call::{call, call_array, call_named, fetch_constant};
 use php_ext::coerce::{c_str, numeric_string, with_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error, warning};
-use php_ext::request::{OwnedStream as _, Request, ScannerFile, Streams as _};
+use php_ext::request::{Ini, OwnedStream as _, Request, ScannerFile, Streams as _};
 use php_ext::syntax::Scanning;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpString, Value, ValueRef};
@@ -214,7 +214,7 @@ fn getenv(
     #[php(default = false)] local_only: bool,
 ) -> Result<Union<Owner<PhpArray>, OrFalse<Owner<PhpString>>>, Thrown> {
     let Some(name) = name else {
-        let pairs = req.loaded_env();
+        let pairs = req.environment().loaded_env();
         let mut array = PhpArray::new(req)?;
         for (name, value) in pairs {
             if name.is_empty() || name.iter().any(|c| matches!(c, b' ' | b'.' | b'[')) {
@@ -229,11 +229,11 @@ fn getenv(
     };
     let name = c_str(name.as_bytes());
     let value = if local_only {
-        (req.env_pairs().iter())
+        (req.environment().env_pairs().iter())
             .find(|(n, _)| n.as_slice() == name)
             .map(|(_, value)| value.clone())
     } else {
-        req.env(name).map(<[u8]>::to_vec)
+        req.environment().env(name).map(<[u8]>::to_vec)
     };
     match value {
         // `RETVAL_STRING` and `php_getenv`'s `zend_string_init`: an
@@ -282,12 +282,12 @@ fn getenv(
 /// ```
 pub(crate) fn minfo(req: &mut Request) {
     let sendmail =
-        String::from_utf8_lossy(req.ini_get(b"sendmail_path").unwrap_or_default()).into_owned();
-    req.info_table(&[
+        String::from_utf8_lossy(req.ini().get(b"sendmail_path").unwrap_or_default()).into_owned();
+    req.extensions_mut().info_table(&[
         &["Dynamic Library Support", "unavailable"],
         &["Path to sendmail", &sendmail],
     ]);
-    let Some(me) = req.extension_named(b"standard") else {
+    let Some(me) = req.extensions().named(b"standard") else {
         return;
     };
     let booleans: [&[u8]; 5] = [
@@ -298,13 +298,14 @@ pub(crate) fn minfo(req: &mut Request) {
         b"assert.exception",
     ];
     let rows: Vec<[String; 3]> = req
+        .ini()
         .extension_ini(me)
         .into_iter()
         .map(|entry| {
             let name: &[u8] = &entry.decl.name.0;
             let boolean = booleans.contains(&name);
             let shown = |value: &[u8]| match boolean {
-                true if Request::ini_parse_bool(value) => String::from("On"),
+                true if Ini::parse_bool(value) => String::from("On"),
                 true => String::from("Off"),
                 false => String::from_utf8_lossy(value).into_owned(),
             };
@@ -319,7 +320,7 @@ pub(crate) fn minfo(req: &mut Request) {
         .iter()
         .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
         .collect();
-    req.info_ini_table(&rows);
+    req.ini_mut().info_ini_table(&rows);
 }
 
 /// `putenv(string $assignment): bool`: `NAME=value` sets the variable
@@ -351,8 +352,10 @@ fn putenv(req: &mut Request, assignment: PhpString) -> Result<bool, Thrown> {
     }
     let text = c_str(bytes).to_vec();
     match text.iter().position(|c| *c == b'=') {
-        Some(at) => req.set_env(&text[..at], Some(&text[at + 1..])),
-        None => req.set_env(&text, None),
+        Some(at) => req
+            .environment_mut()
+            .set_env(&text[..at], Some(&text[at + 1..])),
+        None => req.environment_mut().set_env(&text, None),
     };
     Ok(true)
 }
@@ -404,7 +407,12 @@ fn getopt(
     rest_index.set(req, Untyped(Value::int(1)))?;
     // `$_SERVER['argv']` as `php_build_argv` wrote it, each argument a C
     // string; the one place `getopt` reads the host's `argv`.
-    let argv: Vec<Vec<u8>> = req.argv().iter().map(|a| c_str(a).to_vec()).collect();
+    let argv: Vec<Vec<u8>> = req
+        .environment()
+        .argv()
+        .iter()
+        .map(|a| c_str(a).to_vec())
+        .collect();
     if argv.is_empty() {
         return Ok(OrFalse::False);
     }
@@ -585,7 +593,8 @@ fn time_nanosleep(
             "Nanoseconds was not in the range 0 to 999 999 999 or seconds was negative",
         ));
     }
-    req.blocking(|| std::thread::sleep(std::time::Duration::new(seconds, nanoseconds)));
+    req.limits_mut()
+        .blocking(|| std::thread::sleep(std::time::Duration::new(seconds, nanoseconds)));
     Ok(Union::B(true))
 }
 
@@ -625,10 +634,10 @@ fn set_include_path(
     include_path: Path,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Path(path) = include_path;
-    let Some(old) = req.ini_get(b"include_path").map(<[u8]>::to_vec) else {
+    let Some(old) = req.ini().get(b"include_path").map(<[u8]>::to_vec) else {
         return Ok(OrFalse::False);
     };
-    if path.is_empty() || req.ini_set_string(b"include_path", path)?.is_none() {
+    if path.is_empty() || req.ini_mut().set_string(b"include_path", path)?.is_none() {
         return Ok(OrFalse::False);
     }
     PhpString::new(req, &old).map(OrFalse::Value)
@@ -647,7 +656,7 @@ fn set_include_path(
 /// ```
 #[php_function]
 fn get_include_path(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    match req.ini_get(b"include_path").map(<[u8]>::to_vec) {
+    match req.ini().get(b"include_path").map(<[u8]>::to_vec) {
         Some(path) => PhpString::new(req, &path).map(OrFalse::Value),
         None => Ok(OrFalse::False),
     }
@@ -729,7 +738,7 @@ fn get_include_path(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thro
 /// ```
 #[php_function]
 fn error_get_last(req: &mut Request) -> Result<Option<Owner<PhpArray>>, Thrown> {
-    req.last_error()
+    req.diagnostics_mut().last_error()
 }
 
 /// `error_clear_last(): void`, php's `PHP_FUNCTION(error_clear_last)`
@@ -750,7 +759,7 @@ fn error_get_last(req: &mut Request) -> Result<Option<Owner<PhpArray>>, Thrown> 
 /// ```
 #[php_function]
 fn error_clear_last(req: &mut Request) {
-    req.clear_last_error();
+    req.diagnostics_mut().clear_last_error();
 }
 
 /// `zend_parse_ini_string`/`zend_parse_ini_file` and the callback's
@@ -1153,7 +1162,7 @@ fn getprotobynumber(req: &mut Request, protocol: i64) -> Result<OrFalse<Owner<Ph
 /// ```
 #[php_function]
 fn flush(req: &mut Request) {
-    req.flush();
+    req.response_mut().flush();
 }
 
 /// `usleep(int $microseconds): void`: the thread asleep that long; a
@@ -1175,7 +1184,8 @@ fn usleep(req: &mut Request, microseconds: i64) -> Result<(), Thrown> {
     };
     // `usleep((unsigned int)num)`: the count as C's cast leaves it.
     let micros = micros & u64::from(u32::MAX);
-    req.blocking(|| std::thread::sleep(std::time::Duration::from_micros(micros)));
+    req.limits_mut()
+        .blocking(|| std::thread::sleep(std::time::Duration::from_micros(micros)));
     Ok(())
 }
 
@@ -1221,7 +1231,8 @@ fn time_sleep_until(req: &mut Request, timestamp: f64) -> Result<bool, Thrown> {
         );
         return Ok(false);
     }
-    req.blocking(|| std::thread::sleep(std::time::Duration::from_nanos(target_ns - current_ns)));
+    req.limits_mut()
+        .blocking(|| std::thread::sleep(std::time::Duration::from_nanos(target_ns - current_ns)));
     Ok(true)
 }
 
@@ -1250,9 +1261,10 @@ fn get_current_user(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
 /// which `php_sdl.c` names its cache files by.
 pub fn php_get_current_user(req: &mut Request) -> Vec<u8> {
     use std::os::unix::fs::MetadataExt;
-    req.script_name()
+    req.environment()
+        .script_name()
         .map(<[u8]>::to_vec)
-        .and_then(|script| req.realpath(&script))
+        .and_then(|script| req.environment_mut().realpath(&script))
         .and_then(|path| std::fs::metadata(path).ok())
         .and_then(|meta| crate::ffi::user_name(meta.uid()))
         .unwrap_or_default()
@@ -1260,7 +1272,7 @@ pub fn php_get_current_user(req: &mut Request) -> Vec<u8> {
 
 /// `get_cfg_var(string $option): string|array|false`: the row of
 /// `configuration_hash` under the name, what the host's ini text set,
-/// with the array `name[]=` lines build ([`Request::cfg_entry`]); `false`
+/// with the array `name[]=` lines build ([`Ini::cfg_entry`]); `false`
 /// where the text set nothing, a default included.
 ///
 /// ```php
@@ -1277,7 +1289,7 @@ fn get_cfg_var(
     req: &mut Request,
     option: PhpString,
 ) -> Result<Union<Owner<PhpString>, OrFalse<Owner<PhpArray>>>, Thrown> {
-    let Some(entry) = req.cfg_entry(option.as_bytes())? else {
+    let Some(entry) = req.ini_mut().cfg_entry(option.as_bytes())? else {
         return Ok(Union::B(OrFalse::False));
     };
     let answer = match entry.as_ref() {
@@ -1367,7 +1379,7 @@ fn error_log(
     let message = message.as_bytes();
     let sent = match to {
         LogTo::Log => {
-            req.error_log(message);
+            req.diagnostics_mut().error_log(message);
             true
         }
         LogTo::Mail(to, headers) => {
@@ -1391,7 +1403,7 @@ fn error_log(
         LogTo::Sapi => {
             let mut line = message.to_vec();
             line.push(b'\n');
-            req.write_stderr(&line);
+            req.response_mut().write_stderr(&line);
             true
         }
     };
@@ -1401,7 +1413,7 @@ fn error_log(
 /// `ini_get_all(?string $extension = null, bool $details = true):
 /// array|false`, php's `PHP_FUNCTION(ini_get_all)`: `EG(ini_directives)`
 /// sorted by `zend_ini_sort_entries`, a case-blind comparison of the
-/// names, for the rest of the request ([`Request::ini_sort_entries`]),
+/// names, for the rest of the request ([`Ini::sort_entries`]),
 /// before the extension is looked up, each entry as its current value
 /// or, with `$details`, as its `global_value`, `local_value` and
 /// `access`; with an extension named
@@ -1465,12 +1477,12 @@ fn ini_get_all(
     #[php(default = null)] extension: Option<PhpString>,
     #[php(default = true)] details: bool,
 ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-    req.ini_sort_entries();
-    let mut entries = req.ini_entries();
+    req.ini_mut().sort_entries();
+    let mut entries = req.ini().entries();
     if let Some(name) = extension {
         let name = name.as_bytes();
         let registered = name.iter().all(|c| !c.is_ascii_uppercase());
-        let module = registered.then(|| req.extension_named(name)).flatten();
+        let module = registered.then(|| req.extensions().named(name)).flatten();
         if name == b"core" {
         } else if let Some(module) = module {
             entries.retain(|entry| entry.extension == module);
@@ -1519,7 +1531,7 @@ fn ini_value(req: &mut Request, value: Option<&[u8]>) -> Result<Owner<Value>, Th
 }
 
 /// `ini_restore(string $option): void`, `zend_restore_ini_entry` at
-/// runtime ([`Request::ini_restore`]): an entry the request changed set
+/// runtime ([`Ini::restore`]): an entry the request changed set
 /// back to the value it started with, through the entry's own
 /// `on_modify`, and no longer changed; an entry it did not change, or
 /// one `PHP_INI_USER` may not touch, is left as it is.
@@ -1539,12 +1551,12 @@ fn ini_value(req: &mut Request, value: Option<&[u8]>) -> Result<Owner<Value>, Th
 /// ```
 #[php_function]
 fn ini_restore(req: &mut Request, option: PhpString) -> Result<(), Thrown> {
-    req.ini_restore(option.as_bytes())
+    req.ini_mut().restore(option.as_bytes())
 }
 
 /// `ini_parse_quantity(string $shorthand): int`: the quantity as an ini
 /// entry reads one, `zend_ini_parse_quantity`
-/// ([`Request::ini_parse_quantity`]), with the sentence it says of a
+/// ([`Ini::parse_quantity`]), with the sentence it says of a
 /// shape it interprets raised as a warning.
 ///
 /// ```php
@@ -1559,7 +1571,7 @@ fn ini_restore(req: &mut Request, option: PhpString) -> Result<(), Thrown> {
 /// ```
 #[php_function]
 fn ini_parse_quantity(req: &mut Request, shorthand: PhpString) -> i64 {
-    let (value, said) = Request::ini_parse_quantity(shorthand.as_bytes());
+    let (value, said) = Ini::parse_quantity(shorthand.as_bytes());
     if let Some(said) = said {
         warning(req, &said);
     }
@@ -1586,7 +1598,7 @@ fn ini_parse_quantity(req: &mut Request, shorthand: PhpString) -> i64 {
 /// ```
 #[php_function]
 fn connection_aborted(req: &mut Request) -> i64 {
-    req.connection_status() & CONNECTION_ABORTED
+    req.response().connection_status() & CONNECTION_ABORTED
 }
 
 /// `connection_status(): int`: `PG(connection_status)`, see
@@ -1600,7 +1612,7 @@ fn connection_aborted(req: &mut Request) -> i64 {
 /// ```
 #[php_function]
 fn connection_status(req: &mut Request) -> i64 {
-    req.connection_status()
+    req.response().connection_status()
 }
 
 /// `ignore_user_abort(?bool $enable = null): int`: `PG(ignore_user_abort)`
@@ -1623,10 +1635,12 @@ fn ignore_user_abort(
     #[php(default = null)] enable: Option<bool>,
 ) -> Result<i64, Thrown> {
     let old = req
-        .ini_get(b"ignore_user_abort")
-        .is_some_and(Request::ini_parse_bool);
+        .ini()
+        .get(b"ignore_user_abort")
+        .is_some_and(Ini::parse_bool);
     if let Some(enable) = enable {
-        req.ini_set(b"ignore_user_abort", if enable { b"1" } else { b"0" })?;
+        req.ini_mut()
+            .set(b"ignore_user_abort", if enable { b"1" } else { b"0" })?;
     }
     Ok(i64::from(old))
 }
@@ -1661,7 +1675,7 @@ fn ignore_user_abort(
 /// ```
 #[php_function]
 fn register_tick_function(req: &mut Request, callback: Callable, args: Variadic<Value>) -> bool {
-    req.register_tick_function(callback, args.0)
+    req.code_mut().register_tick_function(callback, args.0)
 }
 
 /// `unregister_tick_function(callable $callback): void`: the first
@@ -1696,7 +1710,7 @@ fn register_tick_function(req: &mut Request, callback: Callable, args: Variadic<
 /// ```
 #[php_function]
 fn unregister_tick_function(req: &mut Request, callback: Callable) -> Result<(), Thrown> {
-    req.unregister_tick_function(&callback).map(drop)
+    req.code_mut().unregister_tick_function(&callback).map(drop)
 }
 
 /// `is_uploaded_file(string $filename): bool`: whether the request's
@@ -1713,7 +1727,7 @@ fn unregister_tick_function(req: &mut Request, callback: Callable) -> Result<(),
 /// ```
 #[php_function]
 fn is_uploaded_file(req: &mut Request, filename: Path) -> bool {
-    req.is_uploaded_file(filename.0.as_bytes())
+    req.variables().is_uploaded_file(filename.0.as_bytes())
 }
 
 /// `move_uploaded_file(string $from, string $to): bool`: an upload the
@@ -1733,13 +1747,16 @@ fn is_uploaded_file(req: &mut Request, filename: Path) -> bool {
 #[php_function]
 fn move_uploaded_file(req: &mut Request, from: Path, to: Path) -> bool {
     let (Path(from), Path(to)) = (from, to);
-    if !req.is_uploaded_file(from.as_bytes()) {
+    if !req.variables().is_uploaded_file(from.as_bytes()) {
         return false;
     }
-    let Ok(target) = req.check_open_basedir(to.as_bytes(), true) else {
+    let Ok(target) = req
+        .environment_mut()
+        .check_open_basedir(to.as_bytes(), true)
+    else {
         return false;
     };
-    let Some(source) = req.take_uploaded_file(from.as_bytes()) else {
+    let Some(source) = req.variables_mut().take_uploaded_file(from.as_bytes()) else {
         return false;
     };
     let moved = std::fs::rename(&source, &target).is_ok()
@@ -1811,7 +1828,10 @@ fn ftok(req: &mut Request, filename: Path, project_id: PhpString) -> Result<i64,
     let &[project] = project.as_bytes() else {
         return Err(arg_value_error(req, 2, "be a single character"));
     };
-    let Ok(full) = req.check_open_basedir(path.as_bytes(), true) else {
+    let Ok(full) = req
+        .environment_mut()
+        .check_open_basedir(path.as_bytes(), true)
+    else {
         return Ok(-1);
     };
     match crate::ffi::ftok(full.as_os_str().as_bytes(), project) {
@@ -1893,7 +1913,7 @@ fn inet_pton(req: &mut Request, ip: Path) -> Result<OrFalse<Owner<PhpString>>, T
 /// ```
 #[php_function]
 fn header_register_callback(req: &mut Request, callback: Callable) -> bool {
-    req.set_header_callback(callback);
+    req.response_mut().set_header_callback(callback);
     true
 }
 
@@ -1966,7 +1986,11 @@ fn highlight_file(
     #[php(default = false)] r#return: bool,
 ) -> Result<Union<Owner<PhpString>, bool>, Thrown> {
     let (Path(filename), returned) = (filename, r#return);
-    if req.check_open_basedir(filename.as_bytes(), true).is_err() {
+    if req
+        .environment_mut()
+        .check_open_basedir(filename.as_bytes(), true)
+        .is_err()
+    {
         return Ok(Union::B(false));
     }
     let Some(source) = scanned_file(req, filename.as_bytes())? else {
@@ -1981,7 +2005,7 @@ fn highlight_file(
     if returned {
         return captured(req, &html).map(Union::A);
     }
-    req.write(&html);
+    req.response_mut().write(&html);
     Ok(Union::B(true))
 }
 
@@ -2028,10 +2052,13 @@ fn php_strip_whitespace(req: &mut Request, filename: Path) -> Result<Owner<PhpSt
 
 /// What a native prints into php's default handler and hands back,
 /// `php_output_start_default`, `php_output_get_contents` and
-/// `php_output_discard` ([`Request::captured`]), and php's `Error`
+/// `php_output_discard` ([`Response::captured`]), and php's `Error`
 /// where the handler could not start.
 fn captured(req: &mut Request, printed: &[u8]) -> Result<Owner<PhpString>, Thrown> {
-    match req.captured(|req| req.write(printed))? {
+    match req
+        .response_mut()
+        .captured(|req| req.response_mut().write(printed))?
+    {
         Some(captured) => Ok(captured),
         None => Err(throw_error(req, "Error", "Unable to start output handler")),
     }
@@ -2076,7 +2103,7 @@ fn highlight_string(
     if returned {
         return captured(req, &html).map(Union::A);
     }
-    req.write(&html);
+    req.response_mut().write(&html);
     Ok(Union::B(True))
 }
 
@@ -2403,7 +2430,7 @@ fn forward_static_call(
     args: Variadic<Value>,
 ) -> Result<Owner<Value>, Thrown> {
     let arguments = args.0;
-    if req.scope().is_none() {
+    if req.frames().scope().is_none() {
         return Err(php_ext::raising::throw_error(
             req,
             "Error",
@@ -2446,7 +2473,7 @@ fn forward_static_call_array(
 /// The callable with the called scope of the native being served
 /// forwarded to it, `zend_get_called_scope(execute_data)`.
 fn forwarded(req: &Request, callback: &Callable) -> Callable {
-    match req.called_scope() {
+    match req.frames().called_scope() {
         Some(called) => callback.with_called_scope(req, called),
         None => callback.clone(),
     }
@@ -2605,6 +2632,7 @@ fn sleep(req: &mut Request, seconds: i64) -> Result<i64, Thrown> {
     let Ok(seconds) = u64::try_from(seconds) else {
         return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
     };
-    req.blocking(|| std::thread::sleep(std::time::Duration::from_secs(seconds)));
+    req.limits_mut()
+        .blocking(|| std::thread::sleep(std::time::Duration::from_secs(seconds)));
     Ok(0)
 }

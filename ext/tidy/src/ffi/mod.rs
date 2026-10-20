@@ -380,7 +380,7 @@ impl Doc {
     /// it left to raise.
     fn lend<R>(&mut self, req: &mut Request, call: impl FnOnce(Opaque) -> R) -> Result<R, Failed> {
         let raw = self.raw;
-        let answer = req.lend_heap(|| call(raw));
+        let answer = req.memory_mut().lend_heap(|| call(raw));
         // SAFETY: the box is this document's, alive until it drops, and
         // libtidy, which wrote the panic, has returned.
         let panicked = unsafe { (*self.heap.as_ptr()).panicked.take() };

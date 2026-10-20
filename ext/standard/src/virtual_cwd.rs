@@ -1,6 +1,6 @@
 //! `Z/Zend/zend_virtual_cwd.c`'s path resolution as the natives reach
 //! it: `virtual_file_ex` over `tsrm_realpath_r` and the realpath cache,
-//! which the engine holds ([`Request::virtual_file_ex`]), and
+//! which the engine holds ([`Environment::virtual_file_ex`]), and
 //! `expand_filepath` (`Z/main/fopen_wrappers.c:787`) over it.
 
 use php_ext::request::{Request, Resolve};
@@ -23,5 +23,6 @@ pub(super) fn expand_filepath(
     } else {
         relative_to
     };
-    req.virtual_file_ex(cwd, path, Resolve::FilePath)
+    req.environment_mut()
+        .virtual_file_ex(cwd, path, Resolve::FilePath)
 }

@@ -196,7 +196,8 @@ fn foreach_takes(req: &mut Request, array: Ref<PhpArray>, f: Callable) -> Result
             Some(_) => "object".to_owned(),
             None => String::from_utf8_lossy(value.as_str_bytes().unwrap_or_default()).into_owned(),
         };
-        req.write(format!("read {shown} ").as_bytes());
+        req.response_mut()
+            .write(format!("read {shown} ").as_bytes());
         value.give_up(req);
         Ok(ControlFlow::Continue(()))
     })?;

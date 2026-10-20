@@ -95,7 +95,7 @@ impl Multi {
         }));
         // SAFETY: `into_raw` never answers null.
         let tag = unsafe { NonNull::new_unchecked(tag) };
-        Some(Multi(req.adopt(MultiHandle { raw, tag })))
+        Some(Multi(req.memory_mut().adopt(MultiHandle { raw, tag })))
     }
 
     pub(crate) fn id(&self) -> MultiId {
@@ -105,12 +105,12 @@ impl Multi {
     /// The `CURLM *` given up, its object no longer served, as
     /// [`Easy::close`](super::Easy::close).
     pub(crate) fn close(self, req: &mut Request) -> Option<Thrown> {
-        let session = req.foreign(self.0.id()).map(|handle| {
+        let session = req.memory_mut().foreign(self.0.id()).map(|handle| {
             let tag = handle.tag_mut();
             tag.object = None;
             tag.session.clone()
         })?;
-        let handle = req.disown(self.0)?;
+        let handle = req.memory_mut().disown(self.0)?;
         let ((), thrown) = session.enter(req, || drop(handle));
         thrown
     }
@@ -118,7 +118,7 @@ impl Multi {
 
 impl MultiId {
     fn with<R>(self, req: &mut Request, gone: R, f: impl FnOnce(&mut MultiHandle) -> R) -> R {
-        req.foreign(self.0).map_or(gone, f)
+        req.memory_mut().foreign(self.0).map_or(gone, f)
     }
 
     /// `curl_multi_add_handle`.
@@ -326,18 +326,20 @@ pub(crate) struct ShareId(pub(super) ForeignId<ShareHandle>);
 impl Share {
     /// `curl_share_init()`, kept by the request.
     pub(crate) fn init(req: &mut Request) -> Option<Share> {
-        Some(Share(req.adopt(ShareHandle::init()?)))
+        Some(Share(req.memory_mut().adopt(ShareHandle::init()?)))
     }
 
     /// Given up: cleaned up now, or as the transfer that holds it ends.
     pub(crate) fn close(self, req: &mut Request) {
-        drop(req.disown(self.0));
+        drop(req.memory_mut().disown(self.0));
     }
 }
 
 impl ShareId {
     pub(super) fn raw(self, req: &mut Request) -> Option<*mut sys::CURLSH> {
-        req.foreign(self.0).map(|share| share.raw.as_ptr())
+        req.memory_mut()
+            .foreign(self.0)
+            .map(|share| share.raw.as_ptr())
     }
 }
 
@@ -398,6 +400,7 @@ impl ShareRef {
     pub(crate) fn set_long(&self, req: &mut Request, option: i64, value: i64) -> i64 {
         match self {
             ShareRef::Request(id) => req
+                .memory_mut()
                 .foreign(id.0)
                 .map_or(1, |share| share.set_long(option, value)),
             ShareRef::Persistent(persistent) => persistent.set_long(option, value),

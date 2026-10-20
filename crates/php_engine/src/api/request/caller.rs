@@ -15,6 +15,27 @@ use crate::exec;
 
 use super::{Deprecations, Link, Overwrite, Request, Slots};
 
+/// The request's frames facet (design §4.4): the call stack: the native
+/// being served, its arguments, `$this`, scope and caller, the frames
+/// below it with their variables and op arrays, backtraces, and a
+/// generator's or a fiber's execution. [`Request::frames`] reads it and
+/// [`Request::frames_mut`] changes it; either is the whole request, since
+/// nearly every operation can serve PHP code.
+pub struct Frames<R>(pub(crate) R);
+
+impl Request {
+    /// The frames facet, to read.
+    #[must_use]
+    pub fn frames(&self) -> Frames<&Request> {
+        Frames(self)
+    }
+
+    /// The frames facet, to change.
+    pub fn frames_mut(&mut self) -> Frames<&mut Request> {
+        Frames(self)
+    }
+}
+
 /// What called the native being served ([`Request::native_caller`]):
 /// a user function's frame and its arguments, a code frame, or another
 /// native.
@@ -25,123 +46,11 @@ pub(crate) enum NativeCaller {
 }
 
 impl Request {
-    /// The file of the frame that called the native,
-    /// `zend_get_executed_filename`: the scope's file while a constant
-    /// expression is evaluated ([`site_override`]), and an attribute's
-    /// while its object is made and nothing stands above its site
-    /// ([`exec::Site`]).
-    #[must_use]
-    pub fn current_file(&self) -> Option<&[u8]> {
-        if let Some((file, _)) = self.overridden_site() {
-            return Some(file);
-        }
-        if let Some(site) = self.vm.innermost_site() {
-            return Some(&site.file);
-        }
-        self.innermost_frame()
-            .and_then(exec::FrameAt::file)
-            .or(self.description.script_name.as_deref())
-    }
-
-    /// `zend_get_executed_lineno`: the line the innermost frame stands
-    /// on, which is the line a diagnostic and a backtrace name.
-    #[must_use]
-    ///
-    /// The line of the opline the innermost frame stands at, zero while
-    /// no frame is being served; inside a fiber whose callable is a
-    /// native, the resumer's frame's; and the node's own while a
-    /// constant expression is evaluated ([`site_override`]).
-    pub fn current_line(&self) -> u32 {
-        if let Some((_, line)) = self.overridden_site() {
-            return line;
-        }
-        if let Some(site) = self.vm.innermost_site() {
-            return site.line;
-        }
-        self.innermost_frame().map_or(0, exec::FrameAt::line)
-    }
-
-    /// Whether the call being served is a frameless one, a
-    /// `FRAMELESS_ICALL_*` the compiler emitted for a declared arity: php
-    /// serves such a call with the native's `ZEND_FRAMELESS_FUNCTION`
-    /// body, which for `min` and `max` answers a tie differently from
-    /// the framed body, so the native reads which one it is.
-    #[must_use]
-    pub fn frameless(&self) -> bool {
-        self.serving_call()
-            .is_some_and(|call| call.info().frameless())
-    }
-
-    /// `USED_RET()` (`Z/Zend/zend_API.h`): whether the caller reads what
-    /// the native returns, false only for a call written as a statement,
-    /// whose `DO_*CALL` writes its return to an `UNUSED` operand; a call
-    /// made by a native, `call_user_func`'s, reads it. `array_splice`
-    /// builds the array of what it removed only where it is read, which
-    /// decides when the removed elements' destructors are served.
-    #[must_use]
-    pub fn return_value_used(&self) -> bool {
-        self.serving_call()
-            .is_none_or(|call| call.info().return_used())
-    }
-
-    /// `zend_hash_find_ind(zend_rebuild_symbol_table(), name)`: the
-    /// variable `name` of the innermost user frame, the one that called
-    /// the native, as it stands, a reference not followed; none where the
-    /// frame has no such variable or it holds nothing. The frame's symbol
-    /// table is rebuilt over its CVs first where it has none
-    /// ([`Request::rebuild_symbol_table`]), as `extract` and `compact`
-    /// rebuild it in php. A view: no owner taken.
-    #[must_use]
-    pub fn caller_var(&mut self, name: &[u8]) -> Option<Value> {
-        let frame = self.caller_frame()?;
-        let table = self.rebuild_symbol_table(frame);
-        let value = self.symbol_value(table, name)?;
-        (value.tag() != TypeTag::Undef).then_some(value)
-    }
-
-    /// The variable `name` of the innermost user frame written with
-    /// `value`: a CV's slot where the table points the name at one, the
-    /// bucket otherwise, a name the table has not added to it; what stood
-    /// there before is given up in `order`, the order of the php function
-    /// the native copies: `extract` writes a value as
-    /// `ZEND_TRY_ASSIGN_COPY_EX` does, [`Overwrite::Nulled`], and a
-    /// reference as `php_extract_ref_overwrite` does,
-    /// [`Overwrite::After`]. A write through a reference the variable
-    /// holds is the native's to make. A sink: the variable takes the
-    /// value's owner, given up where no user frame is running. `name` is
-    /// the caller's string, `extract`'s the array's key or the prefixed
-    /// name it made, of which a table that adds the name takes an owner,
-    /// as php's `zend_hash_update_ind` takes one of its key.
-    pub fn set_caller_var(&mut self, name: PhpString, value: Owner<Value>, order: Overwrite) {
-        let Some(frame) = self.caller_frame() else {
-            value.give_up(self);
-            return;
-        };
-        self.set_table_var(frame, name, value.hand_on(), order);
-    }
-
-    /// [`Request::set_caller_var`]'s write into `frame`'s table, rebuilt
+    /// [`Frames::set_caller_var`]'s write into `frame`'s table, rebuilt
     /// first where the frame has none.
     fn set_table_var(&mut self, frame: FrameRef, name: PhpString, value: Value, order: Overwrite) {
         let table = self.rebuild_symbol_table(frame);
         self.symbol_update_ind(table, name, value, order);
-    }
-
-    /// `zend_set_local_var_str(name, value, 0)`
-    /// (`Z/Zend/zend_execute_API.c:1960`), what the http wrapper leaves
-    /// `$http_response_header` with: the variable `name` of the innermost
-    /// user frame written with `value` where the frame has a symbol table,
-    /// as the main op array's frame always has, or where `name` is one of
-    /// its CVs, what it held released; `false`, and the value given up,
-    /// where neither is so or no user frame is running, since without
-    /// `force` php adds no table to a frame that has none. A sink: the
-    /// variable takes the value's owner.
-    pub fn set_local_var(&mut self, name: &[u8], value: Owner<Value>) -> bool {
-        let Some(frame) = self.caller_frame() else {
-            value.give_up(self);
-            return false;
-        };
-        self.set_local_var_in(frame, name, value, false)
     }
 
     /// `zend_set_local_var(name, value, force)`
@@ -205,29 +114,8 @@ impl Request {
         self.innermost_user_frame()
     }
 
-    /// `ZEND_NUM_ARGS()`: how many arguments the call being served was
-    /// given, and zero outside a native's body.
-    #[must_use]
-    pub fn argument_count(&self) -> usize {
-        self.serving_call()
-            .map_or(0, |call| call.num_args() as usize)
-    }
-
-    /// `ZEND_CALL_ARG(execute_data, position)`: the argument at
-    /// `position`, one-based as php counts them and as `Argument #N`
-    /// names them, read off the call frame the native is being served
-    /// from; none past what the call was given. What is read is the
-    /// value as passed, a reference not followed, as `Z_PARAM_*` reads
-    /// its slot before coercing it.
-    #[must_use]
-    pub fn argument(&self, position: u32) -> Option<Value> {
-        let call = self.serving_call()?;
-        let index = position.checked_sub(1)?;
-        (index < call.num_args()).then(|| Value::of_zval(call.frame.slot(Slot(index))))
-    }
-
     /// The call being served read once: how many arguments it was given
-    /// and the first `N` of them as [`Request::argument`] reads each,
+    /// and the first `N` of them as [`Frames::argument`] reads each,
     /// `UNDEF` past the count; none given and all `UNDEF` outside a
     /// native's body.
     #[inline]
@@ -489,133 +377,15 @@ impl Request {
         arguments
     }
 
-    /// `zend_forbid_dynamic_call()` (`Z/Zend/zend_API.h:901`): php's
-    /// `Error` "Cannot call `name()` dynamically" where the native being
-    /// served was called dynamically, `ZEND_CALL_DYNAMIC`, which is where
-    /// [`Request::native_caller`] answers another native: a callee the
-    /// program named as it served (`$f()`), or one `zend_call_function`
-    /// served, a user buffer handler's among them. What reads or writes the
-    /// caller's variables, `compact` and `extract`, refuses such a call.
-    ///
-    /// ```php
-    /// function f() { $a = 1; $g = 'compact'; try { $g('a'); } catch (Error $e) { echo $e->getMessage(), "\n"; } var_dump(call_user_func('compact', 'a')); }
-    /// f();
-    /// ob_start('compact'); try { ob_end_clean(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-    /// ```
-    /// ```expect
-    /// Cannot call compact() dynamically
-    /// array(1) {
-    ///   ["a"]=>
-    ///   int(1)
-    /// }
-    /// Cannot call compact() dynamically
-    /// ```
-    pub fn forbid_dynamic_call(&mut self) -> Result<(), Thrown> {
-        match self.native_caller() {
-            NativeCaller::Native => Err(self.dynamic_call()),
-            NativeCaller::Function(..) | NativeCaller::Code(_) => Ok(()),
-        }
-    }
-
-    /// The `Error` [`Request::forbid_dynamic_call`] throws, named for the
+    /// The `Error` [`Frames::forbid_dynamic_call`] throws, named for the
     /// native being served.
     pub(crate) fn dynamic_call(&mut self) -> Thrown {
-        let name = self.active_function_name();
+        let name = self.frames().active_function_name();
         crate::api::raising::throw_error(
             self,
             "Error",
             &format!("Cannot call {name}() dynamically"),
         )
-    }
-
-    /// `zend_get_executed_scope`, the class scope where the native being
-    /// served was called: a native method's own class
-    /// (`func->common.scope`), and for a native function the scope of
-    /// the user code that called it, a method's class or a closure's
-    /// bound scope; none under a plain function or the main op array.
-    #[must_use]
-    pub fn scope(&self) -> Option<ClassId> {
-        self.executed_scope()
-    }
-
-    /// `zend_get_called_scope` (`Z/Zend/zend_execute_API.c:727`), the
-    /// called scope of the native being served, `static`: the chain
-    /// walked from `EG(current_execute_data)` to the first link with a
-    /// receiver, whose class it is, or a called scope of its own; a
-    /// user link or a native method without one ends the walk with
-    /// none, and a native function without one, this native's own
-    /// call, is walked past. So `static` inside a native is the
-    /// calling method's, as `constant("static::X")` reads it.
-    #[must_use]
-    pub fn called_scope(&self) -> Option<ClassId> {
-        for link in self.chain() {
-            let (function, this, called) = match link {
-                Link::Frame(_, state) => (state.function(), state.this(), state.called_scope()),
-                Link::Call(call) => (call.function(), call.this(), call.called_scope()),
-                Link::Fake(_) => continue,
-                Link::Site(_) => return None,
-            };
-            if let Some(this) = this {
-                return Some(this.class());
-            }
-            if called.is_some() {
-                return called;
-            }
-            let function = function?;
-            if self.user_function(function).is_some() || self.method_class(function).is_some() {
-                return None;
-            }
-        }
-        None
-    }
-
-    /// `ZEND_THIS`, `getThis()`: the receiver of the method being
-    /// served, a name the frame holds an owner of while the call
-    /// stands; none for a call on the class, a function, or outside a
-    /// native's body.
-    #[must_use]
-    pub fn this(&self) -> Option<PhpObject> {
-        if let Some(call) = self.serving_call() {
-            return call.this();
-        }
-        self.vm.innermost()?.this()
-    }
-
-    /// `zend_get_this_object(EG(current_execute_data))`
-    /// (`Z/Zend/zend_execute_API.c:1317`): the receiver of the first link
-    /// of the chain that has one, walked past the natives that have no
-    /// class, and none where a user frame or a native method without one
-    /// comes first. So `compact('this')` inside a method, or a closure
-    /// bound to an object, finds the object its caller runs on.
-    ///
-    /// ```php
-    /// class A { function m() { return compact('this'); } function c() { return (fn() => compact('this'))(); } }
-    /// $a = new A; var_dump($a->m()['this'] === $a, $a->c()['this'] === $a, compact('this'));
-    /// ```
-    /// ```expect
-    /// bool(true)
-    /// bool(true)
-    /// array(0) {
-    /// }
-    /// ```
-    #[must_use]
-    pub fn this_object(&self) -> Option<PhpObject> {
-        for link in self.chain() {
-            let (function, this) = match link {
-                Link::Frame(_, state) => (state.function(), state.this()),
-                Link::Call(call) => (call.function(), call.this()),
-                Link::Fake(_) => continue,
-                Link::Site(_) => return None,
-            };
-            if this.is_some() {
-                return this;
-            }
-            let function = function?;
-            if self.user_function(function).is_some() || self.method_class(function).is_some() {
-                return None;
-            }
-        }
-        None
     }
 
     /// `zend_active_function()`: the native being served, which is the
@@ -693,50 +463,12 @@ impl Request {
         ))
     }
 
-    /// `get_function_or_method_name(EX(prev_execute_data)->func)`: the
-    /// function the native being served was called from, as a message
-    /// names it, `Class::method` for a method and a native's name for a
-    /// native's call, and `main` for a file's own code. What the test
-    /// extension's `zend_get_current_func_name` answers, the witness
-    /// there.
-    #[must_use]
-    pub fn caller_function_name(&self) -> String {
-        let mut chain = self.chain();
-        let _served = chain.next();
-        let function = match chain.next() {
-            Some(Link::Frame(_, state)) => state.function(),
-            Some(Link::Call(call)) => call.function(),
-            Some(Link::Site(_) | Link::Fake(_)) | None => None,
-        };
-        function.map_or_else(
-            || String::from("main"),
-            |function| self.qualified_name(function, None),
-        )
-    }
-
-    /// `get_active_function_or_method_name`: the native being served as
-    /// a message names it, `Class::method` for a method, which is what
-    /// a native writes before `(): ` in a sentence of its own that no
-    /// raiser here words, as `pdo_sqlite`'s callback refusals do. Where
-    /// no native is served, as when a handler runs for an opcode, it is
-    /// the innermost user frame's function, `main` for a file's own code,
-    /// as `EG(current_execute_data)->func` is: ext/intl's
-    /// `ResourceBundle` words a missing element read as `$b['x']` so.
-    #[must_use]
-    pub fn active_function_name(&self) -> String {
-        if self.vm_serving_native() || self.include_being_opened().is_some() {
-            return self.active_native();
-        }
-        self.active_user_function()
-            .unwrap_or_else(|| self.active_native())
-    }
-
     /// `func->common.function_name`: the name a function was declared
     /// under, and `native` for one the table has no declaration for. A
     /// method's is its own name alone, what `get_active_function_name`
     /// answers; the class before it is [`Request::qualified_name`]'s.
     pub(crate) fn declared_name(&self, function: Function) -> String {
-        self.function_decl(function).map_or_else(
+        self.symbols().function_decl(function).map_or_else(
             || String::from("native"),
             |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
         )
@@ -767,7 +499,7 @@ impl Request {
         }
         let name = self.declared_name(function);
         match self.frame_scope(frame) {
-            Some(scope) => format!("{}::{name}", self.class_name(scope)),
+            Some(scope) => format!("{}::{name}", self.symbols().class_name(scope)),
             None => name,
         }
     }
@@ -781,7 +513,7 @@ impl Request {
         let name = self.declared_name(function);
         match self.method_class(function) {
             Some(class) => {
-                let class = self.class_name(class);
+                let class = self.symbols().class_name(class);
                 let join = if this.is_some() { "->" } else { "::" };
                 format!("{class}{join}{name}")
             }
@@ -796,7 +528,9 @@ impl Request {
     /// stops at `num_args` there; none where the native declares no
     /// type there.
     pub(crate) fn active_parameter_type(&self, position: u32) -> Option<php_unit::decl::Type> {
-        let decl = self.function_decl(self.active_native_function()?)?;
+        let decl = self
+            .symbols()
+            .function_decl(self.active_native_function()?)?;
         let at = usize::try_from(position.checked_sub(1)?).ok()?;
         let parameter = match decl.parameters.get(at) {
             Some(parameter) => parameter,
@@ -998,5 +732,303 @@ impl Request {
         self.user_function(function).is_some_and(|user| {
             crate::exec::body_of(&user.unit, user.body).is_some_and(|code| code.strict_types)
         })
+    }
+}
+
+impl<'r> Frames<&'r Request> {
+    /// The file of the frame that called the native,
+    /// `zend_get_executed_filename`: the scope's file while a constant
+    /// expression is evaluated ([`site_override`]), and an attribute's
+    /// while its object is made and nothing stands above its site
+    /// ([`exec::Site`]).
+    #[must_use]
+    pub fn current_file(self) -> Option<&'r [u8]> {
+        if let Some((file, _)) = self.0.overridden_site() {
+            return Some(file);
+        }
+        if let Some(site) = self.0.vm.innermost_site() {
+            return Some(&site.file);
+        }
+        self.0
+            .innermost_frame()
+            .and_then(exec::FrameAt::file)
+            .or(self.0.description.script_name.as_deref())
+    }
+
+    /// `zend_get_executed_lineno`: the line the innermost frame stands
+    /// on, which is the line a diagnostic and a backtrace name.
+    #[must_use]
+    ///
+    /// The line of the opline the innermost frame stands at, zero while
+    /// no frame is being served; inside a fiber whose callable is a
+    /// native, the resumer's frame's; and the node's own while a
+    /// constant expression is evaluated ([`site_override`]).
+    pub fn current_line(self) -> u32 {
+        if let Some((_, line)) = self.0.overridden_site() {
+            return line;
+        }
+        if let Some(site) = self.0.vm.innermost_site() {
+            return site.line;
+        }
+        self.0.innermost_frame().map_or(0, exec::FrameAt::line)
+    }
+
+    /// Whether the call being served is a frameless one, a
+    /// `FRAMELESS_ICALL_*` the compiler emitted for a declared arity: php
+    /// serves such a call with the native's `ZEND_FRAMELESS_FUNCTION`
+    /// body, which for `min` and `max` answers a tie differently from
+    /// the framed body, so the native reads which one it is.
+    #[must_use]
+    pub fn frameless(self) -> bool {
+        self.0
+            .serving_call()
+            .is_some_and(|call| call.info().frameless())
+    }
+
+    /// `USED_RET()` (`Z/Zend/zend_API.h`): whether the caller reads what
+    /// the native returns, false only for a call written as a statement,
+    /// whose `DO_*CALL` writes its return to an `UNUSED` operand; a call
+    /// made by a native, `call_user_func`'s, reads it. `array_splice`
+    /// builds the array of what it removed only where it is read, which
+    /// decides when the removed elements' destructors are served.
+    #[must_use]
+    pub fn return_value_used(self) -> bool {
+        self.0
+            .serving_call()
+            .is_none_or(|call| call.info().return_used())
+    }
+
+    /// `ZEND_NUM_ARGS()`: how many arguments the call being served was
+    /// given, and zero outside a native's body.
+    #[must_use]
+    pub fn argument_count(self) -> usize {
+        self.0
+            .serving_call()
+            .map_or(0, |call| call.num_args() as usize)
+    }
+
+    /// `ZEND_CALL_ARG(execute_data, position)`: the argument at
+    /// `position`, one-based as php counts them and as `Argument #N`
+    /// names them, read off the call frame the native is being served
+    /// from; none past what the call was given. What is read is the
+    /// value as passed, a reference not followed, as `Z_PARAM_*` reads
+    /// its slot before coercing it.
+    #[must_use]
+    pub fn argument(self, position: u32) -> Option<Value> {
+        let call = self.0.serving_call()?;
+        let index = position.checked_sub(1)?;
+        (index < call.num_args()).then(|| Value::of_zval(call.frame.slot(Slot(index))))
+    }
+
+    /// `zend_get_executed_scope`, the class scope where the native being
+    /// served was called: a native method's own class
+    /// (`func->common.scope`), and for a native function the scope of
+    /// the user code that called it, a method's class or a closure's
+    /// bound scope; none under a plain function or the main op array.
+    #[must_use]
+    pub fn scope(self) -> Option<ClassId> {
+        self.0.executed_scope()
+    }
+
+    /// `zend_get_called_scope` (`Z/Zend/zend_execute_API.c:727`), the
+    /// called scope of the native being served, `static`: the chain
+    /// walked from `EG(current_execute_data)` to the first link with a
+    /// receiver, whose class it is, or a called scope of its own; a
+    /// user link or a native method without one ends the walk with
+    /// none, and a native function without one, this native's own
+    /// call, is walked past. So `static` inside a native is the
+    /// calling method's, as `constant("static::X")` reads it.
+    #[must_use]
+    pub fn called_scope(self) -> Option<ClassId> {
+        for link in self.0.chain() {
+            let (function, this, called) = match link {
+                Link::Frame(_, state) => (state.function(), state.this(), state.called_scope()),
+                Link::Call(call) => (call.function(), call.this(), call.called_scope()),
+                Link::Fake(_) => continue,
+                Link::Site(_) => return None,
+            };
+            if let Some(this) = this {
+                return Some(this.class());
+            }
+            if called.is_some() {
+                return called;
+            }
+            let function = function?;
+            if self.0.user_function(function).is_some() || self.0.method_class(function).is_some() {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// `ZEND_THIS`, `getThis()`: the receiver of the method being
+    /// served, a name the frame holds an owner of while the call
+    /// stands; none for a call on the class, a function, or outside a
+    /// native's body.
+    #[must_use]
+    pub fn this(self) -> Option<PhpObject> {
+        if let Some(call) = self.0.serving_call() {
+            return call.this();
+        }
+        self.0.vm.innermost()?.this()
+    }
+
+    /// `zend_get_this_object(EG(current_execute_data))`
+    /// (`Z/Zend/zend_execute_API.c:1317`): the receiver of the first link
+    /// of the chain that has one, walked past the natives that have no
+    /// class, and none where a user frame or a native method without one
+    /// comes first. So `compact('this')` inside a method, or a closure
+    /// bound to an object, finds the object its caller runs on.
+    ///
+    /// ```php
+    /// class A { function m() { return compact('this'); } function c() { return (fn() => compact('this'))(); } }
+    /// $a = new A; var_dump($a->m()['this'] === $a, $a->c()['this'] === $a, compact('this'));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// array(0) {
+    /// }
+    /// ```
+    #[must_use]
+    pub fn this_object(self) -> Option<PhpObject> {
+        for link in self.0.chain() {
+            let (function, this) = match link {
+                Link::Frame(_, state) => (state.function(), state.this()),
+                Link::Call(call) => (call.function(), call.this()),
+                Link::Fake(_) => continue,
+                Link::Site(_) => return None,
+            };
+            if this.is_some() {
+                return this;
+            }
+            let function = function?;
+            if self.0.user_function(function).is_some() || self.0.method_class(function).is_some() {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// `get_function_or_method_name(EX(prev_execute_data)->func)`: the
+    /// function the native being served was called from, as a message
+    /// names it, `Class::method` for a method and a native's name for a
+    /// native's call, and `main` for a file's own code. What the test
+    /// extension's `zend_get_current_func_name` answers, the witness
+    /// there.
+    #[must_use]
+    pub fn caller_function_name(self) -> String {
+        let mut chain = self.0.chain();
+        let _served = chain.next();
+        let function = match chain.next() {
+            Some(Link::Frame(_, state)) => state.function(),
+            Some(Link::Call(call)) => call.function(),
+            Some(Link::Site(_) | Link::Fake(_)) | None => None,
+        };
+        function.map_or_else(
+            || String::from("main"),
+            |function| self.0.qualified_name(function, None),
+        )
+    }
+
+    /// `get_active_function_or_method_name`: the native being served as
+    /// a message names it, `Class::method` for a method, which is what
+    /// a native writes before `(): ` in a sentence of its own that no
+    /// raiser here words, as `pdo_sqlite`'s callback refusals do. Where
+    /// no native is served, as when a handler runs for an opcode, it is
+    /// the innermost user frame's function, `main` for a file's own code,
+    /// as `EG(current_execute_data)->func` is: ext/intl's
+    /// `ResourceBundle` words a missing element read as `$b['x']` so.
+    #[must_use]
+    pub fn active_function_name(self) -> String {
+        if self.0.vm_serving_native() || self.0.include_being_opened().is_some() {
+            return self.0.active_native();
+        }
+        self.0
+            .active_user_function()
+            .unwrap_or_else(|| self.0.active_native())
+    }
+}
+
+impl Frames<&mut Request> {
+    /// `zend_hash_find_ind(zend_rebuild_symbol_table(), name)`: the
+    /// variable `name` of the innermost user frame, the one that called
+    /// the native, as it stands, a reference not followed; none where the
+    /// frame has no such variable or it holds nothing. The frame's symbol
+    /// table is rebuilt over its CVs first where it has none
+    /// ([`Request::rebuild_symbol_table`]), as `extract` and `compact`
+    /// rebuild it in php. A view: no owner taken.
+    #[must_use]
+    pub fn caller_var(self, name: &[u8]) -> Option<Value> {
+        let frame = self.0.caller_frame()?;
+        let table = self.0.rebuild_symbol_table(frame);
+        let value = self.0.symbol_value(table, name)?;
+        (value.tag() != TypeTag::Undef).then_some(value)
+    }
+
+    /// The variable `name` of the innermost user frame written with
+    /// `value`: a CV's slot where the table points the name at one, the
+    /// bucket otherwise, a name the table has not added to it; what stood
+    /// there before is given up in `order`, the order of the php function
+    /// the native copies: `extract` writes a value as
+    /// `ZEND_TRY_ASSIGN_COPY_EX` does, [`Overwrite::Nulled`], and a
+    /// reference as `php_extract_ref_overwrite` does,
+    /// [`Overwrite::After`]. A write through a reference the variable
+    /// holds is the native's to make. A sink: the variable takes the
+    /// value's owner, given up where no user frame is running. `name` is
+    /// the caller's string, `extract`'s the array's key or the prefixed
+    /// name it made, of which a table that adds the name takes an owner,
+    /// as php's `zend_hash_update_ind` takes one of its key.
+    pub fn set_caller_var(self, name: PhpString, value: Owner<Value>, order: Overwrite) {
+        let Some(frame) = self.0.caller_frame() else {
+            value.give_up(self.0);
+            return;
+        };
+        self.0.set_table_var(frame, name, value.hand_on(), order);
+    }
+
+    /// `zend_set_local_var_str(name, value, 0)`
+    /// (`Z/Zend/zend_execute_API.c:1960`), what the http wrapper leaves
+    /// `$http_response_header` with: the variable `name` of the innermost
+    /// user frame written with `value` where the frame has a symbol table,
+    /// as the main op array's frame always has, or where `name` is one of
+    /// its CVs, what it held released; `false`, and the value given up,
+    /// where neither is so or no user frame is running, since without
+    /// `force` php adds no table to a frame that has none. A sink: the
+    /// variable takes the value's owner.
+    pub fn set_local_var(self, name: &[u8], value: Owner<Value>) -> bool {
+        let Some(frame) = self.0.caller_frame() else {
+            value.give_up(self.0);
+            return false;
+        };
+        self.0.set_local_var_in(frame, name, value, false)
+    }
+
+    /// `zend_forbid_dynamic_call()` (`Z/Zend/zend_API.h:901`): php's
+    /// `Error` "Cannot call `name()` dynamically" where the native being
+    /// served was called dynamically, `ZEND_CALL_DYNAMIC`, which is where
+    /// [`Request::native_caller`] answers another native: a callee the
+    /// program named as it served (`$f()`), or one `zend_call_function`
+    /// served, a user buffer handler's among them. What reads or writes the
+    /// caller's variables, `compact` and `extract`, refuses such a call.
+    ///
+    /// ```php
+    /// function f() { $a = 1; $g = 'compact'; try { $g('a'); } catch (Error $e) { echo $e->getMessage(), "\n"; } var_dump(call_user_func('compact', 'a')); }
+    /// f();
+    /// ob_start('compact'); try { ob_end_clean(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Cannot call compact() dynamically
+    /// array(1) {
+    ///   ["a"]=>
+    ///   int(1)
+    /// }
+    /// Cannot call compact() dynamically
+    /// ```
+    pub fn forbid_dynamic_call(self) -> Result<(), Thrown> {
+        match self.0.native_caller() {
+            NativeCaller::Native => Err(self.0.dynamic_call()),
+            NativeCaller::Function(..) | NativeCaller::Code(_) => Ok(()),
+        }
     }
 }

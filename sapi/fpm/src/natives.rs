@@ -12,7 +12,7 @@ use php_ext::abi::{Extension, ExtensionBuilder, OrFalse};
 use php_ext::attr::php_function;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::values::{Owner, PhpArray};
 
 /// One `PHP_INI_BEGIN` row: its name, its default, `None` for php's
@@ -110,12 +110,12 @@ impl Row {
 /// </table>
 /// ```
 fn info(req: &mut Request) {
-    req.info_table(&[&["php-fpm", "active"]]);
-    let entries = req.ini_entries();
+    req.extensions_mut().info_table(&[&["php-fpm", "active"]]);
+    let entries = req.ini().entries();
     let shown = |row: &Row, value: Option<&[u8]>| -> String {
         let value = value.unwrap_or_default();
         match row.boolean {
-            true if Request::ini_parse_bool(value) => String::from("On"),
+            true if Ini::parse_bool(value) => String::from("On"),
             true => String::from("Off"),
             false => String::from_utf8_lossy(value).into_owned(),
         }
@@ -137,7 +137,7 @@ fn info(req: &mut Request) {
         .iter()
         .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
         .collect();
-    req.info_ini_table(&cells);
+    req.ini_mut().info_ini_table(&cells);
 }
 
 /// php-fpm's `cgi_module_entry`: its natives in the stub's order, its
@@ -162,15 +162,16 @@ pub(crate) fn extension() -> Extension {
 /// that ended with exit status 255 before its head went has the entry's
 /// line put in, replacing its kind, before the request shuts down.
 fn error_header(req: &mut Request) {
-    if req.exit_status() != 255 || req.headers_sent().is_some() {
+    if req.diagnostics().exit_status() != 255 || req.response().headers_sent().is_some() {
         return;
     }
     if let Some(line) = req
-        .ini_get(b"fastcgi.error_header")
+        .ini()
+        .get(b"fastcgi.error_header")
         .filter(|line| !line.is_empty())
     {
         let line = line.to_vec();
-        let _ = req.header_add(&line, true, 0);
+        let _ = req.response_mut().header_add(&line, true, 0);
     }
 }
 
@@ -196,7 +197,7 @@ fn error_header(req: &mut Request) {
 /// ```
 #[php_function]
 fn fastcgi_finish_request(req: &mut Request) -> bool {
-    req.finish_response()
+    req.response_mut().finish_response()
 }
 
 /// `fpm_get_status(): array|false` (`Z/sapi/fpm/fpm/fpm_status.c`
@@ -236,7 +237,7 @@ fn fastcgi_finish_request(req: &mut Request) -> bool {
 /// ```
 #[php_function]
 fn fpm_get_status(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-    Ok(match req.host_status()? {
+    Ok(match req.response_mut().host_status()? {
         Some(status) => OrFalse::Value(status),
         None => OrFalse::False,
     })
@@ -274,5 +275,5 @@ fn fpm_get_status(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown>
 /// ```
 #[php_function(aliases(getallheaders))]
 fn apache_request_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
-    req.request_headers()
+    req.variables_mut().request_headers()
 }

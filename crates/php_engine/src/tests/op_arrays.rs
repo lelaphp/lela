@@ -1,6 +1,6 @@
 //! Op-array reads for extensions (#1829): an observer reads the op
 //! array of a frame it is handed ([`FrameView::op_array`]) or of a
-//! function ([`Request::op_array`]), its oplines' opcodes, lines,
+//! function ([`Frames::op_array`]), its oplines' opcodes, lines,
 //! operands and jump targets, and the constants they name, as php's
 //! coverage tools and profilers read `op_array->opcodes`.
 //!
@@ -19,9 +19,13 @@ use crate::test::Capture;
 /// method's as `class::name` with the class lowercased.
 fn keyed(observed: &Observed<'_>) -> Option<String> {
     let function = observed.function()?;
-    let name = String::from_utf8_lossy(&observed.function_decl(function)?.name.0).into_owned();
+    let name =
+        String::from_utf8_lossy(&observed.symbols().function_decl(function)?.name.0).into_owned();
     Some(match observed.function_scope() {
-        Some(class) => format!("{}::{name}", observed.class_name(class).to_lowercase()),
+        Some(class) => format!(
+            "{}::{name}",
+            observed.symbols().class_name(class).to_lowercase()
+        ),
         None => name,
     })
 }
@@ -107,7 +111,7 @@ fn a_functions_executable_lines_are_phpdbgs() {
         if let (Some(name), Some(code)) = (keyed(observed), read) {
             let lines: Vec<String> = executable(code).iter().map(u32::to_string).collect();
             let line = format!("[{name} {}]", lines.join(" "));
-            observed.write(line.as_bytes());
+            observed.response_mut().write(line.as_bytes());
         }
         ObserverHandlers::default()
     }
@@ -234,17 +238,17 @@ fn profile(observed: &mut Observed<'_>) -> ObserverHandlers {
     let req: &Request = observed;
     let read = observed
         .function()
-        .and_then(|function| req.op_array(function));
+        .and_then(|function| req.frames().op_array(function));
     if let Some(code) = read {
         let mut lines = vec![format!("{} oplines", code.len())];
         lines.extend(code.oplines().filter_map(|op| render(code, &op)));
         let text = format!("[{}]", lines.join("\n"));
-        observed.write(text.as_bytes());
+        observed.response_mut().write(text.as_bytes());
     }
     ObserverHandlers::default()
 }
 /// A profiler's question, asked of one function through
-/// [`Request::op_array`]: how many oplines it holds, where each jump may
+/// [`Frames::op_array`]: how many oplines it holds, where each jump may
 /// land, a switch's and a match's tables, a `foreach`'s exits and a
 /// `finally`'s call among them, a `CATCH` that is its try's last landing
 /// nowhere, and what each call opline names, its function, its class and

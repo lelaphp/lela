@@ -241,7 +241,7 @@ fn seconds(n: i64) -> Duration {
 /// `strerror(ETIMEDOUT)`, the warning a read that ran out of time
 /// raises.
 fn timed_out(req: &mut Request) {
-    let text = req.os_error_text(libc::ETIMEDOUT);
+    let text = req.environment().os_error_text(libc::ETIMEDOUT);
     docref(req, Level::Warning, &text);
 }
 

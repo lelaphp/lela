@@ -510,7 +510,7 @@ impl Stream {
         let answer = req
             .stream_op(self, |req, stream| stream.truncate(req, size))
             .flatten();
-        match req.stream_thrown().take() {
+        match req.diagnostics_mut().stream_thrown().take() {
             Some(thrown) => Err(thrown),
             None => Ok(answer),
         }
@@ -1146,7 +1146,7 @@ pub trait StreamFilter: Send {
 
     /// `fops->dtor`, served once when the filter leaves its chain, a
     /// throwable pending or not: it gives up what the filter holds, and
-    /// serves no PHP code while [`Request::stream_thrown`] holds one, as
+    /// serves no PHP code while [`Diagnostics::stream_thrown`] holds one, as
     /// `zend_call_function` serves none under `EG(exception)`.
     fn close(&mut self, _req: &mut Request) -> Result<(), Thrown> {
         Ok(())
@@ -1207,7 +1207,7 @@ pub trait Streams {
     /// `wait` with each of `streams` taken out of its resource for its
     /// length, as one operation on a stream takes it, an owner of the
     /// resource held, and put back after. A callback a lent wait serves
-    /// ([`Request::blocking`]) that `fclose`s one of them closes its
+    /// ([`Limits::blocking`]) that `fclose`s one of them closes its
     /// resource, and the stream, its fd with it, is freed as the wait
     /// returns, so the fds a wait stands on stay open until it does, as
     /// php's, during whose wait nothing runs (#2664). A stream that is
@@ -1870,7 +1870,7 @@ impl Streams for Request {
         if !self.add_url_wrapper(row) {
             return false;
         }
-        let by = self.supplier();
+        let by = self.code().supplier();
         self.streams().wrappers.push(Supplied { row: wrapper, by });
         true
     }
@@ -1890,7 +1890,7 @@ impl Streams for Request {
     }
 
     fn register_filter(&mut self, name: &[u8], factory: FilterFactory) -> bool {
-        let by = self.supplier();
+        let by = self.code().supplier();
         let rows = &mut self.streams().filters;
         if rows.iter().any(|(n, _)| n.as_slice() == name) {
             return false;

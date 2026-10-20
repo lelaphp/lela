@@ -142,7 +142,7 @@ pub(crate) fn recorder(start: &EngineStart) -> Result<Recorder, Refusal> {
 
 /// The plan's entry `name`, set.
 pub(crate) fn plan(req: &Request, name: &str) -> Option<Vec<u8>> {
-    req.ini_get(name.as_bytes()).map(<[u8]>::to_vec)
+    req.ini().get(name.as_bytes()).map(<[u8]>::to_vec)
 }
 
 /// The entry words the plan names settled, through claims of their own.

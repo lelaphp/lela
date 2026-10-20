@@ -5,7 +5,7 @@
 //! on php's request heap, where `memory_get_usage()` and its peak count
 //! it. Here `timelib_sys` is compiled against the same header and
 //! `php_heap`'s `emalloc`, which reach the request's heap while the
-//! request lends it ([`Request::lend_heap`]).
+//! request lends it ([`Memory::lend_heap`]).
 //!
 //! [`Lent`] is the proof a lend is in force: every call into timelib that
 //! can allocate or free takes one, and only [`lent`] makes one, so no
@@ -47,7 +47,9 @@ pub(crate) fn lent<R>(
     call: impl FnOnce(&mut Lent<'_>) -> R,
 ) -> Result<R, Thrown> {
     let mut state = std::mem::take(req.state::<State>());
-    let answered = req.lend_heap(|| call(&mut Lent { state: &mut state }));
+    let answered = req
+        .memory_mut()
+        .lend_heap(|| call(&mut Lent { state: &mut state }));
     *req.state::<State>() = state;
     answered
 }
@@ -58,7 +60,7 @@ pub(crate) fn lent<R>(
 /// calls them. A drop reads nothing of the date state, so the state
 /// stays where it is.
 pub(crate) fn release<T>(req: &mut Request, value: T) -> Result<(), Thrown> {
-    req.lend_heap(|| drop(value))
+    req.memory_mut().lend_heap(|| drop(value))
 }
 
 /// `call` served with `value` standing, then `value` released whatever

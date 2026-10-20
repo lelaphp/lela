@@ -15,6 +15,7 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use super::Request;
+use super::Variables;
 use super::variables::BodyLimits;
 use crate::api::abi::{Beneath, chain};
 use crate::api::raising::{Level, Thrown, docref, throw_error};
@@ -160,7 +161,7 @@ impl Request {
     pub(crate) fn post_max_size(&self, limits: &BodyLimits) -> i64 {
         limits
             .post_max_size
-            .unwrap_or_else(|| self.ini_long(b"post_max_size"))
+            .unwrap_or_else(|| self.ini().long(b"post_max_size"))
     }
 
     /// `SG(request_info).content_length`.
@@ -194,7 +195,7 @@ impl Request {
             // reach it moves it to a temporary file in `upload_tmp_dir`;
             // one that cannot be made loses the whole body.
             if !spilled && !block.is_empty() && body.len() + block.len() >= POST_BLOCK_SIZE {
-                let dir = self.ini_get(b"upload_tmp_dir").map(<[u8]>::to_vec);
+                let dir = self.ini().get(b"upload_tmp_dir").map(<[u8]>::to_vec);
                 let Some((_, path)) =
                     self.open_temporary_fd(dir.as_deref(), b"php", TemporaryGuard::Never)
                 else {
@@ -329,21 +330,6 @@ impl Request {
         out
     }
 
-    /// `request_parse_body()`'s body (`Z/ext/standard/http.c:345`): the
-    /// content type's reader over the body, under `limits` where the
-    /// caller named them, and its handler into two fresh arrays, the
-    /// `$_POST` and `$_FILES` it would have made, which the request's own
-    /// are not; a request with no content type, or one no handler reads,
-    /// is php's `RequestParseBodyException`.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub fn parse_body(
-        &mut self,
-        limits: &BodyLimits,
-    ) -> Result<(Owner<PhpArray>, Owner<PhpArray>), Thrown> {
-        let (post, files) = self.parse_body_made(limits)?;
-        Ok((Owner::adopt(post), Owner::adopt(files)))
-    }
-
     /// What [`parse_body`](Self::parse_body) makes, the two owners not
     /// yet named.
     fn parse_body_made(&mut self, limits: &BodyLimits) -> Result<(PhpArray, PhpArray), Thrown> {
@@ -382,27 +368,6 @@ impl Request {
                 Err(thrown)
             }
         }
-    }
-
-    /// Whether `path` is a file an upload of this request wrote and no
-    /// `move_uploaded_file()` has moved, `SG(rfc1867_uploaded_files)`.
-    #[must_use]
-    pub fn is_uploaded_file(&self, path: &[u8]) -> bool {
-        self.post
-            .uploaded
-            .iter()
-            .any(|file| file.as_os_str().as_encoded_bytes() == path)
-    }
-
-    /// `move_uploaded_file()`'s first half: take the upload's temporary
-    /// path out of the request, once.
-    pub fn take_uploaded_file(&mut self, path: &[u8]) -> Option<PathBuf> {
-        let at = self
-            .post
-            .uploaded
-            .iter()
-            .position(|file| file.as_os_str().as_encoded_bytes() == path)?;
-        Some(self.post.uploaded.remove(at))
     }
 
     /// `destroy_uploaded_files_hash` (`Z/main/rfc1867.c:170`), at
@@ -448,16 +413,6 @@ impl Request {
         i64::try_from(self.post.read).unwrap_or(i64::MAX)
     }
 
-    /// The variables of the query string or the cookie header, parsed
-    /// afresh by `php_default_treat_data` into an array of their own, as
-    /// `session.upload_progress` asks `sapi_module.treat_data` for them
-    /// before `$_GET` and `$_COOKIE` are made; empty for any other input.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub fn input_variables(&mut self, input: super::Input) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.input_variables_made(input);
-        adopted(made)
-    }
-
     /// What [`input_variables`](Self::input_variables) makes, its one owner not yet named.
     pub(crate) fn input_variables_made(&mut self, input: super::Input) -> Result<PhpArray, Thrown> {
         let source = match input {
@@ -467,5 +422,57 @@ impl Request {
         };
         self.treat_data(input, source.as_deref())
             .map(Owner::hand_on)
+    }
+}
+
+impl Variables<&Request> {
+    /// Whether `path` is a file an upload of this request wrote and no
+    /// `move_uploaded_file()` has moved, `SG(rfc1867_uploaded_files)`.
+    #[must_use]
+    pub fn is_uploaded_file(self, path: &[u8]) -> bool {
+        self.0
+            .post
+            .uploaded
+            .iter()
+            .any(|file| file.as_os_str().as_encoded_bytes() == path)
+    }
+}
+
+impl Variables<&mut Request> {
+    /// `request_parse_body()`'s body (`Z/ext/standard/http.c:345`): the
+    /// content type's reader over the body, under `limits` where the
+    /// caller named them, and its handler into two fresh arrays, the
+    /// `$_POST` and `$_FILES` it would have made, which the request's own
+    /// are not; a request with no content type, or one no handler reads,
+    /// is php's `RequestParseBodyException`.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn parse_body(
+        self,
+        limits: &BodyLimits,
+    ) -> Result<(Owner<PhpArray>, Owner<PhpArray>), Thrown> {
+        let (post, files) = self.0.parse_body_made(limits)?;
+        Ok((Owner::adopt(post), Owner::adopt(files)))
+    }
+
+    /// `move_uploaded_file()`'s first half: take the upload's temporary
+    /// path out of the request, once.
+    pub fn take_uploaded_file(self, path: &[u8]) -> Option<PathBuf> {
+        let at = self
+            .0
+            .post
+            .uploaded
+            .iter()
+            .position(|file| file.as_os_str().as_encoded_bytes() == path)?;
+        Some(self.0.post.uploaded.remove(at))
+    }
+
+    /// The variables of the query string or the cookie header, parsed
+    /// afresh by `php_default_treat_data` into an array of their own, as
+    /// `session.upload_progress` asks `sapi_module.treat_data` for them
+    /// before `$_GET` and `$_COOKIE` are made; empty for any other input.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn input_variables(self, input: super::Input) -> Result<Owner<PhpArray>, Thrown> {
+        let made = self.0.input_variables_made(input);
+        adopted(made)
     }
 }

@@ -31,7 +31,7 @@ fn zend_version(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
 
 /// The calling function's arguments, or php's `Error` for a caller that
 /// is none: a code frame is `what` said of it, and another native is
-/// `zend_forbid_dynamic_call`'s ([`Request::forbid_dynamic_call`]). The
+/// `zend_forbid_dynamic_call`'s ([`Frames::forbid_dynamic_call`]). The
 /// name is the native's own.
 fn caller_arguments(req: &mut Request, name: &str, what: &str) -> Result<Vec<Value>, Thrown> {
     match req.native_caller() {
@@ -387,7 +387,7 @@ fn function_exists(req: &mut Request, function: PhpString) -> bool {
 #[php_function(aliases(get_required_files))]
 fn get_included_files(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
-    for path in req.included_files() {
+    for path in req.code().included_files() {
         let path = PhpString::new(req, &path)?.into_value();
         array.append(req, path)?;
     }
@@ -425,7 +425,7 @@ fn get_defined_functions(
             "get_defined_functions(): The $exclude_disabled parameter has no effect since PHP 8.0",
         );
     }
-    req.defined_functions()
+    req.symbols_mut().defined_functions()
 }
 
 /// `get_defined_vars(): array`, php's `ZEND_FUNCTION(get_defined_vars)`
@@ -604,12 +604,13 @@ fn get_loaded_extensions(
     #[php(default = false)] zend_extensions: bool,
 ) -> Result<Owner<PhpArray>, Thrown> {
     let names = if zend_extensions {
-        req.zend_extensions()
+        req.extensions()
+            .zend_extensions()
             .into_iter()
             .map(|row| row.name)
             .collect()
     } else {
-        req.loaded_extensions()
+        req.extensions().loaded_extensions()
     };
     let mut array = PhpArray::new(req)?;
     for name in names {
@@ -664,7 +665,7 @@ fn get_defined_constants(
         let mut module_at: std::collections::HashMap<&str, usize> =
             std::collections::HashMap::new();
         let mut bytes = Vec::new();
-        for (module, name, value) in req.constant_table() {
+        for (module, name, value) in req.symbols().constant_table() {
             let group = module.map(|module| {
                 *module_at.entry(module).or_insert_with(|| {
                     modules.push(module.to_owned());
@@ -740,12 +741,13 @@ fn get_extension_funcs(
                 .filter(|name| req.function_named(Bare::resolved(name)).is_some())
                 .collect()
         } else {
-            let Some(extension) = req.extension_named(&name) else {
+            let Some(extension) = req.extensions().named(&name) else {
                 return Ok(OrFalse::False);
             };
-            req.extension_functions(extension)
+            req.extensions()
+                .functions(extension)
                 .into_iter()
-                .filter_map(|function| req.function_decl(function))
+                .filter_map(|function| req.symbols().function_decl(function))
                 .map(|decl| decl.name.0.to_vec())
                 .collect()
         };

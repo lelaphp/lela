@@ -35,7 +35,7 @@ use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::{php_const, php_function};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 /// `gd.jpeg_ignore_warning`, `PHP_INI_ALL`, on by default.
@@ -366,13 +366,14 @@ fn info(req: &mut Request) {
             .map(|(n, _)| [*n, "enabled"]),
     );
     let cells: Vec<&[&str]> = rows.iter().map(<[&str; 2]>::as_slice).collect();
-    req.info_table(&cells);
+    req.extensions_mut().info_table(&cells);
     let entry = req
-        .ini_entries()
+        .ini()
+        .entries()
         .into_iter()
         .find(|e| e.decl.name.0.as_ref() == JPEG_IGNORE_WARNING.as_bytes());
     let shown = |v: Option<&[u8]>| {
-        if v.is_some_and(Request::ini_parse_bool) {
+        if v.is_some_and(Ini::parse_bool) {
             "On"
         } else {
             "Off"
@@ -380,7 +381,8 @@ fn info(req: &mut Request) {
     };
     let local = shown(entry.as_ref().and_then(|e| e.value.as_deref()));
     let master = shown(entry.as_ref().and_then(|e| e.master.as_deref()));
-    req.info_ini_table(&[[JPEG_IGNORE_WARNING, local, master]]);
+    req.ini_mut()
+        .info_ini_table(&[[JPEG_IGNORE_WARNING, local, master]]);
 }
 
 /// `gd_info(): array`: the version the headers name and what the build

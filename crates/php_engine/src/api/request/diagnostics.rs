@@ -5,7 +5,7 @@
 //! `set_exception_handler()` and their stacks; what is raised while the
 //! engine starts; `display_errors`, `html_errors`, `log_errors` and the
 //! XML-RPC fault form; and the assertion callback. Their state is
-//! [`Diagnostics`]'s, whose fields no file but this one reads.
+//! [`DiagnosticsState`]'s, whose fields no file but this one reads.
 
 use php_unit::decl::Bare;
 use std::ops::ControlFlow;
@@ -19,8 +19,30 @@ use crate::api::values::{Charset, Owner, PhpArray, PhpString, Value, ValueRef, a
 use crate::supplied::Bail;
 use crate::supplied::chain::ErrorArgs;
 
-use super::{Phase, Raised, Request, zone};
+use super::{Ini, Phase, Raised, Request, zone};
 use crate::c_number::strtol;
+
+/// The request's diagnostics facet (design §4.4): what the request
+/// reports and how it is ending: `error_reporting`, the last error and
+/// the error log, how errors are displayed and the user's error handler,
+/// the throwable php keeps in `EG(exception)`, and the exit status.
+/// [`Request::diagnostics`] reads it and [`Request::diagnostics_mut`]
+/// changes it; either is the whole request, since nearly every operation
+/// can serve PHP code.
+pub struct Diagnostics<R>(pub(crate) R);
+
+impl Request {
+    /// The diagnostics facet, to read.
+    #[must_use]
+    pub fn diagnostics(&self) -> Diagnostics<&Request> {
+        Diagnostics(self)
+    }
+
+    /// The diagnostics facet, to change.
+    pub fn diagnostics_mut(&mut self) -> Diagnostics<&mut Request> {
+        Diagnostics(self)
+    }
+}
 
 /// A diagnostic's message as `php_error_cb` is handed it.
 #[derive(Clone, Copy)]
@@ -89,7 +111,7 @@ struct LastError {
 /// guards and the assertion callback, whose fields no file but this one
 /// reads.
 #[derive(Default)]
-pub(super) struct Diagnostics {
+pub(super) struct DiagnosticsState {
     /// `EG(error_reporting)`, the mask a diagnostic is held to
     /// ([`Request::php_error_cb`]): what `OnUpdateErrorReporting`
     /// (`Z/Zend/zend.c:111`) reads out of the `error_reporting` entry at
@@ -150,7 +172,7 @@ pub(super) struct Diagnostics {
     /// engine starts ([`crate::api::raising::startup`]).
     display_direct: bool,
     /// `PG(display_errors)` where a native wrote it past the ini table
-    /// ([`Request::set_display_errors`]), `None` while it is what the
+    /// ([`Diagnostics::set_display_errors`]), `None` while it is what the
     /// entry's value reads as; the entry's next change sets it again, as
     /// `OnUpdateDisplayErrors` writes the word.
     display_errors_word: Option<u8>,
@@ -251,7 +273,7 @@ impl Request {
         use std::io::Write as _;
         use std::os::unix::fs::OpenOptionsExt as _;
         let syslog = self.registered::<Syslog>().next().copied();
-        let named = self.ini_get(b"error_log").unwrap_or_default();
+        let named = self.ini().get(b"error_log").unwrap_or_default();
         if let (b"syslog", Some(Syslog(syslog))) = (named, syslog) {
             syslog(self, priority, entry);
             return false;
@@ -260,8 +282,11 @@ impl Request {
             self.log_to_host(entry);
             return true;
         }
-        let path = self.cwd().join(std::ffi::OsStr::from_bytes(named));
-        let mode = self.ini_long(b"error_log_mode");
+        let path = self
+            .environment()
+            .cwd()
+            .join(std::ffi::OsStr::from_bytes(named));
+        let mode = self.ini().long(b"error_log_mode");
         let mode = u32::try_from(mode)
             .ok()
             .filter(|mode| (1..=0o777).contains(mode))
@@ -338,11 +363,15 @@ impl Request {
     /// first. php's arm for a file being compiled is not taken: the
     /// engine compiles with no site of its own.
     pub(super) fn executed_site(&self) -> (Vec<u8>, u32) {
-        if !self.executing() || self.bailout {
+        if !self.frames().executing() || self.bailout {
             return (b"Unknown".to_vec(), 0);
         }
-        let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-        (file, self.current_line())
+        let file = self
+            .frames()
+            .current_file()
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default();
+        (file, self.frames().current_line())
     }
 
     /// The same diagnostic at a file and line of its own, which is what
@@ -591,7 +620,7 @@ impl Request {
         if let Some(Raised::Throwable(pending)) = self.raised {
             let throwable = self
                 .class_named(Bare::resolved(b"Throwable"))
-                .is_some_and(|throwable| self.instance_of(pending.class(), throwable));
+                .is_some_and(|throwable| self.symbols().instance_of(pending.class(), throwable));
             if throwable && fatal_errors(level) {
                 self.exception_error(Level::Warning).ok();
             }
@@ -735,7 +764,7 @@ impl Request {
         // `(EG(error_reporting) & type) || (type & E_CORE)`: a core
         // level is rendered whatever `error_reporting` says.
         let core = matches!(level, Level::CoreError | Level::CoreWarning);
-        if self.error_reporting() & level.bit() == 0 && !core {
+        if self.diagnostics().error_reporting() & level.bit() == 0 && !core {
             return;
         }
         let name = level_name(level);
@@ -822,7 +851,7 @@ impl Request {
             // error stream and onto the body; and it carries neither
             // string around it.
             let text = said(format!("{name}: "), &format!("{site}\n"));
-            self.write_stderr(&text);
+            self.response_mut().write_stderr(&text);
         } else {
             let before = format!("{}\n{name}: ", self.ini_text(b"error_prepend_string"));
             let after = format!("{site}\n{}", self.ini_text(b"error_append_string"));
@@ -894,7 +923,7 @@ impl Request {
         if self.diagnostics.display_direct {
             self.ub_write(text);
         } else {
-            self.write(text);
+            self.response_mut().write(text);
         }
     }
 
@@ -990,14 +1019,11 @@ impl Request {
     /// "
     /// ```
     fn log_errors(&self) -> bool {
-        let off = |name: &[u8]| {
-            self.ini_get(name)
-                .is_some_and(|v| !Request::ini_parse_bool(v))
-        };
+        let off = |name: &[u8]| self.ini().get(name).is_some_and(|v| !Ini::parse_bool(v));
         self.ini_flag(b"log_errors")
             || (self.diagnostics.display_direct
                 && (off(b"display_startup_errors")
-                    || display_errors_mode_of(self.ini_get(b"display_errors")) == 0))
+                    || display_errors_mode_of(self.ini().get(b"display_errors")) == 0))
     }
 
     /// `html_errors`, which of php's two display forms a diagnostic
@@ -1016,7 +1042,7 @@ impl Request {
         [b"internal_encoding".as_slice(), b"default_charset"]
             .iter()
             .find_map(|name| {
-                let value = self.ini_get(name)?;
+                let value = self.ini().get(name)?;
                 let named = value.split(|&byte| byte == 0).next().unwrap_or_default();
                 (!named.is_empty()).then_some(named)
             })
@@ -1032,7 +1058,7 @@ impl Request {
 
     /// `xmlrpc_error_number`, the fault's code, `OnUpdateLong`.
     fn xmlrpc_error_number(&self) -> i64 {
-        self.ini_long(b"xmlrpc_error_number")
+        self.ini().long(b"xmlrpc_error_number")
     }
 
     /// `display_errors`, php's three values: off, the body, and the
@@ -1057,36 +1083,21 @@ impl Request {
         let starting = self.diagnostics.display_direct || self.phase() == Phase::Startup;
         if starting
             && self
-                .ini_get(b"display_startup_errors")
-                .is_some_and(|value| !Request::ini_parse_bool(value))
+                .ini()
+                .get(b"display_startup_errors")
+                .is_some_and(|value| !Ini::parse_bool(value))
         {
             return Display::Off;
         }
         let mode = self
             .diagnostics
             .display_errors_word
-            .unwrap_or_else(|| display_errors_mode_of(self.ini_get(b"display_errors")));
+            .unwrap_or_else(|| display_errors_mode_of(self.ini().get(b"display_errors")));
         match mode {
             0 => Display::Off,
             DISPLAY_ERRORS_STDERR if self.host_writes_stderr() => Display::Stderr,
             _ => Display::Body,
         }
-    }
-
-    /// `PG(display_errors) = word`, the word written past the ini
-    /// table, as `SOAP_SERVER_BEGIN_CODE` turns diagnostics off around a
-    /// call (`Z/ext/soap/soap.c:1909-1959`): no entry is altered, so
-    /// nothing joins `EG(modified_ini_directives)`, no string is held and
-    /// `ini_get('display_errors')` reads as before. The word in force
-    /// before, read as `php_get_display_errors_mode` reads the entry, is
-    /// returned for the caller to write back.
-    pub fn set_display_errors(&mut self, word: u8) -> u8 {
-        let before = self
-            .diagnostics
-            .display_errors_word
-            .unwrap_or_else(|| display_errors_mode_of(self.ini_get(b"display_errors")));
-        self.diagnostics.display_errors_word = Some(word);
-        before
     }
 
     /// Whether the host is one php writes `display_errors=stderr` to
@@ -1132,14 +1143,6 @@ impl Request {
         self.diagnostics.error_handling_thrown.take()
     }
 
-    /// `error_get_last()`: the last diagnostic as php's four-key array,
-    /// its strings the request's.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub fn last_error(&mut self) -> Result<Option<Owner<PhpArray>>, Thrown> {
-        let made = self.last_error_made();
-        adopted_some(made)
-    }
-
     /// What [`last_error`](Self::last_error) makes, its one owner not yet named.
     pub(crate) fn last_error_made(&mut self) -> Result<Option<PhpArray>, Thrown> {
         let Some(last) = self.diagnostics.last_error else {
@@ -1178,12 +1181,6 @@ impl Request {
         fatal_errors(level).then_some((message, file, line))
     }
 
-    /// `error_clear_last()`.
-    pub fn clear_last_error(&mut self) {
-        self.clear_last_error_strings();
-        self.clear_fatal_error_backtrace();
-    }
-
     /// `clear_last_error` (`Z/main/main.c:1307`): the message and the
     /// file given back. php's request end calls it from
     /// `php_free_request_globals`.
@@ -1194,52 +1191,11 @@ impl Request {
         }
     }
 
-    /// `error_log()` to the host's log: `php_log_err` with the message
-    /// as given, one entry.
-    pub fn error_log(&mut self, message: &[u8]) {
-        self.log_err_with_severity(message, 5);
-    }
-
-    /// `php_log_err_with_severity`: `message` logged as one entry, as
-    /// [`Request::error_log`] logs it, at `priority`, the `syslog(3)`
-    /// level `LOG_EMERG` (0) to `LOG_DEBUG` (7) a [`Syslog`] is handed
-    /// where `error_log` is `syslog`; `php_log_err` is this at
-    /// `LOG_NOTICE` (5). An entry asked for while one is being logged
-    /// is dropped, `PG(in_error_log)`'s guard.
-    pub fn log_err_with_severity(&mut self, message: &[u8], priority: i32) {
-        let _ = self.log_err(message, priority);
-    }
-
-    /// `EG(error_reporting)` as it stands: what `error_reporting()`
-    /// answers and what every diagnostic is masked by.
-    #[must_use]
-    pub fn error_reporting(&self) -> i64 {
-        self.diagnostics.error_reporting
-    }
-
     /// `EG(error_reporting) = level`, the store `BEGIN_SILENCE` and
     /// `END_SILENCE` make and the unwinder makes for a `ZEND_LIVE_SILENCE`
     /// range: the word alone, the ini entry left where it stands.
     pub(crate) fn set_error_reporting(&mut self, level: i64) {
         self.diagnostics.error_reporting = level;
-    }
-
-    /// `body` called with `EG(error_reporting)` lowered by `levels`, and the
-    /// word as it stood put back after, whatever `body` set it to: what
-    /// `php_http.c`'s `http_connect` does around a connect, so a masked
-    /// diagnostic is not shown and still reaches `error_get_last()` and a
-    /// user's handler.
-    pub fn reporting_without<T>(
-        &mut self,
-        levels: &[Level],
-        body: impl FnOnce(&mut Request) -> T,
-    ) -> T {
-        let standing = self.error_reporting();
-        let masked = levels.iter().fold(0, |m, level| m | level.bit());
-        self.set_error_reporting(standing & !masked);
-        let answer = body(self);
-        self.set_error_reporting(standing);
-        answer
     }
 
     /// The write `error_reporting(int $error_level)` makes
@@ -1283,28 +1239,7 @@ impl Request {
     /// its body at (`zend_fiber_execute`), whatever an `@` around the
     /// `start` masked.
     pub(crate) fn ini_error_reporting(&self) -> i64 {
-        self.ini_value(b"error_reporting").map_or(E_ALL, strtol)
-    }
-
-    /// `ZEND_FUNCTION(set_error_handler)`
-    /// (`Z/Zend/zend_builtin_functions.c:1306`): the handler standing is
-    /// pushed with its mask, `zend_stack_push` of both, and `handler`
-    /// stands with `levels` as its mask; none leaves no handler and the
-    /// mask where it was. The answer is the handler that stood, a view
-    /// the stack keeps the owner of, which the native copies. The
-    /// handler given is one more owner from here.
-    pub fn set_error_handler(&mut self, handler: Option<Callable>, levels: i64) -> Option<Value> {
-        let previous = self.diagnostics.error_handler.take();
-        let answer = previous.as_ref().map(Callable::value);
-        self.diagnostics
-            .error_handlers
-            .push((previous, self.diagnostics.error_handler_levels));
-        if let Some(handler) = handler {
-            self.addref(&handler.value());
-            self.diagnostics.error_handler = Some(handler);
-            self.diagnostics.error_handler_levels = levels;
-        }
-        answer
+        self.ini().value(b"error_reporting").map_or(E_ALL, strtol)
     }
 
     /// `ZEND_FUNCTION(restore_error_handler)`
@@ -1466,7 +1401,7 @@ impl Request {
                 let answer = crate::api::call::call_made(self, &handler, &arguments);
                 // A handler that bailed out jumped past the line that puts
                 // the record back, which stays off and empty.
-                if !self.bailing_out() {
+                if !self.diagnostics().bailing_out() {
                     self.record_restored(record);
                 }
                 for argument in arguments {
@@ -1557,6 +1492,100 @@ impl Request {
             self.diagnostics.exception_handler = top;
         }
         ControlFlow::Continue(())
+    }
+}
+
+impl Diagnostics<&Request> {
+    /// `EG(error_reporting)` as it stands: what `error_reporting()`
+    /// answers and what every diagnostic is masked by.
+    #[must_use]
+    pub fn error_reporting(self) -> i64 {
+        self.0.diagnostics.error_reporting
+    }
+}
+
+impl Diagnostics<&mut Request> {
+    /// `PG(display_errors) = word`, the word written past the ini
+    /// table, as `SOAP_SERVER_BEGIN_CODE` turns diagnostics off around a
+    /// call (`Z/ext/soap/soap.c:1909-1959`): no entry is altered, so
+    /// nothing joins `EG(modified_ini_directives)`, no string is held and
+    /// `ini_get('display_errors')` reads as before. The word in force
+    /// before, read as `php_get_display_errors_mode` reads the entry, is
+    /// returned for the caller to write back.
+    pub fn set_display_errors(self, word: u8) -> u8 {
+        let before = self
+            .0
+            .diagnostics
+            .display_errors_word
+            .unwrap_or_else(|| display_errors_mode_of(self.0.ini().get(b"display_errors")));
+        self.0.diagnostics.display_errors_word = Some(word);
+        before
+    }
+
+    /// `error_get_last()`: the last diagnostic as php's four-key array,
+    /// its strings the request's.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn last_error(self) -> Result<Option<Owner<PhpArray>>, Thrown> {
+        let made = self.0.last_error_made();
+        adopted_some(made)
+    }
+
+    /// `error_clear_last()`.
+    pub fn clear_last_error(self) {
+        self.0.clear_last_error_strings();
+        self.0.clear_fatal_error_backtrace();
+    }
+
+    /// `error_log()` to the host's log: `php_log_err` with the message
+    /// as given, one entry.
+    pub fn error_log(self, message: &[u8]) {
+        self.0.diagnostics_mut().log_err_with_severity(message, 5);
+    }
+
+    /// `php_log_err_with_severity`: `message` logged as one entry, as
+    /// [`Diagnostics::error_log`] logs it, at `priority`, the `syslog(3)`
+    /// level `LOG_EMERG` (0) to `LOG_DEBUG` (7) a [`Syslog`] is handed
+    /// where `error_log` is `syslog`; `php_log_err` is this at
+    /// `LOG_NOTICE` (5). An entry asked for while one is being logged
+    /// is dropped, `PG(in_error_log)`'s guard.
+    pub fn log_err_with_severity(self, message: &[u8], priority: i32) {
+        let _ = self.0.log_err(message, priority);
+    }
+
+    /// `body` called with `EG(error_reporting)` lowered by `levels`, and the
+    /// word as it stood put back after, whatever `body` set it to: what
+    /// `php_http.c`'s `http_connect` does around a connect, so a masked
+    /// diagnostic is not shown and still reaches `error_get_last()` and a
+    /// user's handler.
+    pub fn reporting_without<T>(self, levels: &[Level], body: impl FnOnce(&mut Request) -> T) -> T {
+        let standing = self.0.diagnostics().error_reporting();
+        let masked = levels.iter().fold(0, |m, level| m | level.bit());
+        self.0.set_error_reporting(standing & !masked);
+        let answer = body(self.0);
+        self.0.set_error_reporting(standing);
+        answer
+    }
+
+    /// `ZEND_FUNCTION(set_error_handler)`
+    /// (`Z/Zend/zend_builtin_functions.c:1306`): the handler standing is
+    /// pushed with its mask, `zend_stack_push` of both, and `handler`
+    /// stands with `levels` as its mask; none leaves no handler and the
+    /// mask where it was. The answer is the handler that stood, a view
+    /// the stack keeps the owner of, which the native copies. The
+    /// handler given is one more owner from here.
+    pub fn set_error_handler(self, handler: Option<Callable>, levels: i64) -> Option<Value> {
+        let previous = self.0.diagnostics.error_handler.take();
+        let answer = previous.as_ref().map(Callable::value);
+        self.0
+            .diagnostics
+            .error_handlers
+            .push((previous, self.0.diagnostics.error_handler_levels));
+        if let Some(handler) = handler {
+            self.0.addref(&handler.value());
+            self.0.diagnostics.error_handler = Some(handler);
+            self.0.diagnostics.error_handler_levels = levels;
+        }
+        answer
     }
 }
 

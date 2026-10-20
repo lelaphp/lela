@@ -520,5 +520,6 @@ pub fn extension() -> Extension {
 /// Sockets Support => enabled
 /// ```
 fn sockets_info(req: &mut Request) {
-    req.info_table(&[&["Sockets Support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["Sockets Support", "enabled"]]);
 }

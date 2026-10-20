@@ -792,7 +792,7 @@ fn handler_op(req: &mut Request, at: usize, context: &mut Context) -> Status {
                 // A handler that bailed out, a fatal or a throwable no
                 // frame took at shutdown, leaves the operation there:
                 // nothing settles and nothing it held is passed on.
-                if req.bailing_out() {
+                if req.diagnostics().bailing_out() {
                     req.output_mut().running = None;
                     return Status::Failure;
                 }
@@ -1053,8 +1053,12 @@ pub(crate) fn header(req: &mut Request) {
         return;
     }
     if req.output().started.is_none() {
-        let file = req.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-        let line = req.current_line();
+        let file = req
+            .frames()
+            .current_file()
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default();
+        let line = req.frames().current_line();
         req.output_mut().started = Some((file, line));
     }
     // `php_header`: a `HEAD` request's body goes nowhere once its head
@@ -1194,7 +1198,8 @@ fn extract_response_code(line: &[u8]) -> i64 {
 /// whether it changed.
 fn apply_default_charset(req: &Request, mimetype: &[u8]) -> (Vec<u8>, bool) {
     let charset = req
-        .ini_get(b"default_charset")
+        .ini()
+        .get(b"default_charset")
         .map_or_else(|| b"UTF-8".to_vec(), <[u8]>::to_vec);
     let has_charset = mimetype
         .windows("charset=".len())
@@ -1376,7 +1381,7 @@ pub(crate) fn header_add(
         } else if name.eq_ignore_ascii_case(b"Content-Length") {
             // Req #44164: a script that sets the length cannot know the
             // size after compression, so compression is switched off.
-            req.ini_set(b"zlib.output_compression", b"0").ok();
+            req.ini_mut().set(b"zlib.output_compression", b"0").ok();
         }
     }
     if response_code != 0 {
@@ -1432,10 +1437,12 @@ pub(crate) fn header_remove_prefix(req: &mut Request, prefix: &[u8], name_len: u
 /// is set and the type is `text/`.
 fn default_content_type(req: &Request) -> Vec<u8> {
     let mimetype = req
-        .ini_get(b"default_mimetype")
+        .ini()
+        .get(b"default_mimetype")
         .map_or_else(|| b"text/html".to_vec(), <[u8]>::to_vec);
     let charset = req
-        .ini_get(b"default_charset")
+        .ini()
+        .get(b"default_charset")
         .map_or_else(|| b"UTF-8".to_vec(), <[u8]>::to_vec);
     if !charset.is_empty() && mimetype.len() >= 5 && mimetype[..5].eq_ignore_ascii_case(b"text/") {
         let mut content_type = mimetype;
@@ -1584,7 +1591,9 @@ fn clean(req: &mut Request) -> bool {
 /// start
 /// ```
 pub(crate) fn end_all(req: &mut Request) {
-    while req.output().level() > 0 && !req.bailing_out() && stack_pop(req, POP_FORCE) {}
+    while req.output().level() > 0 && !req.diagnostics().bailing_out() && stack_pop(req, POP_FORCE)
+    {
+    }
 }
 
 /// `php_output_discard_all` (`Z/main/output.c:345`): every handler
@@ -1789,9 +1798,13 @@ fn contents(req: &mut Request) -> Result<Option<Value>, Thrown> {
 /// for one, a size above one its chunk size. A name that is no callable
 /// is `php_output_handler_create_user`'s warning and no buffer.
 pub(crate) fn start_at_request(req: &mut Request) -> Result<(), Thrown> {
-    let name = req.ini_get(b"output_handler").unwrap_or_default().to_vec();
+    let name = req
+        .ini()
+        .get(b"output_handler")
+        .unwrap_or_default()
+        .to_vec();
     if name.is_empty() {
-        let size = req.ini_long(b"output_buffering");
+        let size = req.ini().long(b"output_buffering");
         if size != 0 {
             let chunk = if size > 1 {
                 usize::try_from(size).unwrap_or(0)
@@ -1802,7 +1815,7 @@ pub(crate) fn start_at_request(req: &mut Request) -> Result<(), Thrown> {
         }
         return Ok(());
     }
-    if let Some(registered) = req.buffer_handler(&name) {
+    if let Some(registered) = req.response().buffer_handler(&name) {
         start_user(
             req,
             &StartHandler::Registered(registered),
@@ -1890,7 +1903,7 @@ pub(crate) fn buffer_op(req: &mut Request, op: &OutputOp) -> Result<Value, Throw
             let flags = u32::try_from(*flags).unwrap_or(HANDLER_STDFLAGS);
             if start_user(req, handler, chunk_size, flags)? {
                 Value::bool(true)
-            } else if req.bailing_out() {
+            } else if req.diagnostics().bailing_out() {
                 // `php_output_lock_error`'s fatal leaves by
                 // `zend_bailout`, before `ob_start()` could say more.
                 return Err(Thrown::of(None));
@@ -2052,17 +2065,17 @@ mod tests {
     #[test]
     fn a_web_host_s_block_ends_in_the_default_content_type_after_the_first_byte() {
         let mut req = web_request();
-        assert!(req.header_add(b"X-A: 1", true, 0));
+        assert!(req.response_mut().header_add(b"X-A: 1", true, 0));
         assert_eq!(req.header_block(), b"X-A: 1\r\n");
-        assert!(req.headers_sent().is_none());
-        assert_eq!(req.response_code(), 200);
-        req.write(b"x");
+        assert!(req.response().headers_sent().is_none());
+        assert_eq!(req.response().response_code(), 200);
+        req.response_mut().write(b"x");
         assert_eq!(
             req.header_block(),
             b"X-A: 1\r\nContent-type: text/html; charset=UTF-8\r\n"
         );
-        assert!(req.headers_sent().is_some());
-        assert!(!req.header_add(b"X-B: 2", true, 0));
+        assert!(req.response().headers_sent().is_some());
+        assert!(!req.response_mut().header_add(b"X-B: 2", true, 0));
     }
 
     /// php-cgi's `-q` once the request started: the head counts sent,
@@ -2072,12 +2085,12 @@ mod tests {
     fn a_quiet_head_counts_sent_and_takes_a_line_without_a_warning() {
         let mut req = web_request();
         req.output_mut().quiet();
-        assert!(req.headers_sent().is_some());
-        assert!(req.header_add(b"X-A: 1", true, 0));
-        req.write(b"x");
-        assert_eq!(req.headers_list(), [b"X-A: 1".to_vec()]);
-        assert!(req.header_add(b"X-B: 2", true, 0));
-        assert_eq!(req.headers_list().len(), 2);
+        assert!(req.response().headers_sent().is_some());
+        assert!(req.response_mut().header_add(b"X-A: 1", true, 0));
+        req.response_mut().write(b"x");
+        assert_eq!(req.response().headers_list(), [b"X-A: 1".to_vec()]);
+        assert!(req.response_mut().header_add(b"X-B: 2", true, 0));
+        assert_eq!(req.response().headers_list().len(), 2);
     }
 
     /// `sapi_header_op` on a `Content-Type`: the default charset applied
@@ -2088,20 +2101,26 @@ mod tests {
     #[test]
     fn a_content_type_header_takes_the_default_charset_and_stops_the_default_line() {
         let mut req = web_request();
-        assert!(req.header_add(b"Content-Type: text/plain", true, 0));
+        assert!(
+            req.response_mut()
+                .header_add(b"Content-Type: text/plain", true, 0)
+        );
         assert_eq!(
-            req.headers_list(),
+            req.response().headers_list(),
             [b"Content-type: text/plain;charset=UTF-8".to_vec()]
         );
-        assert!(req.header_add(b"content-type: application/json", true, 0));
+        assert!(
+            req.response_mut()
+                .header_add(b"content-type: application/json", true, 0)
+        );
         assert_eq!(
-            req.headers_list(),
+            req.response().headers_list(),
             [b"content-type: application/json".to_vec()]
         );
-        assert!(req.header_add(b"X-B: 3", false, 0));
-        assert!(req.header_add(b"X-B: 4", false, 0));
-        assert!(req.header_remove(Some(b"x-b")));
-        req.write(b"x");
+        assert!(req.response_mut().header_add(b"X-B: 3", false, 0));
+        assert!(req.response_mut().header_add(b"X-B: 4", false, 0));
+        assert!(req.response_mut().header_remove(Some(b"x-b")));
+        req.response_mut().write(b"x");
         assert_eq!(req.header_block(), b"content-type: application/json\r\n");
     }
 
@@ -2112,22 +2131,31 @@ mod tests {
     #[test]
     fn the_cli_s_handler_takes_no_line_and_the_status_line_moves_the_code() {
         let mut req = crate::test::request();
-        assert_eq!(req.response_code(), 0);
-        assert!(req.header_add(b"X-A: 1", true, 0));
-        assert!(req.headers_list().is_empty());
-        assert!(req.header_add(b"HTTP/1.1 404 Nope\r\n", true, 0));
-        assert_eq!(req.status_line(), Some(&b"HTTP/1.1 404 Nope"[..]));
-        assert_eq!(req.response_code(), 404);
-        assert!(req.header_add(b"Location: /x", true, 0));
-        assert_eq!(req.response_code(), 302);
-        assert!(req.status_line().is_none());
-        assert!(req.header_add(b"HTTP/1.1 302 Found", true, 0));
-        assert!(req.status_line().is_some());
-        assert!(!req.header_add(b"", true, 0));
-        assert!(!req.header_add(b"X-C: a\nb", true, 0));
-        req.write(b"x");
-        assert!(req.status_line().is_none());
-        assert!(req.headers_list().is_empty());
+        assert_eq!(req.response().response_code(), 0);
+        assert!(req.response_mut().header_add(b"X-A: 1", true, 0));
+        assert!(req.response().headers_list().is_empty());
+        assert!(
+            req.response_mut()
+                .header_add(b"HTTP/1.1 404 Nope\r\n", true, 0)
+        );
+        assert_eq!(
+            req.response().status_line(),
+            Some(&b"HTTP/1.1 404 Nope"[..])
+        );
+        assert_eq!(req.response().response_code(), 404);
+        assert!(req.response_mut().header_add(b"Location: /x", true, 0));
+        assert_eq!(req.response().response_code(), 302);
+        assert!(req.response().status_line().is_none());
+        assert!(
+            req.response_mut()
+                .header_add(b"HTTP/1.1 302 Found", true, 0)
+        );
+        assert!(req.response().status_line().is_some());
+        assert!(!req.response_mut().header_add(b"", true, 0));
+        assert!(!req.response_mut().header_add(b"X-C: a\nb", true, 0));
+        req.response_mut().write(b"x");
+        assert!(req.response().status_line().is_none());
+        assert!(req.response().headers_list().is_empty());
         assert_eq!(req.header_block(), b"");
     }
 }

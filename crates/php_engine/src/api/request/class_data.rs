@@ -14,6 +14,7 @@
 
 use php_unit::decl::ClassKind;
 
+use super::Symbols;
 use super::{PropertyInfo, Request};
 use crate::api::abi::{NativeNew, ObjectHandlers};
 use crate::api::raising::Thrown;
@@ -212,8 +213,13 @@ impl Request {
     fn resolve_made(&mut self, class: ClassId) -> Made {
         const ZEND_OBJECT: usize = 56;
         let (size, declared_by) = self
+            .symbols()
             .lineage(class)
-            .map_while(|at| self.class_decl(at).map(|decl| (at, decl.object_size)))
+            .map_while(|at| {
+                self.symbols()
+                    .class_decl(at)
+                    .map(|decl| (at, decl.object_size))
+            })
             .find(|&(_, size)| size != 0)
             .map_or((0, None), |(at, size)| (size as usize, Some(at)));
         let guards = if self.uses_guards(class) { 16 } else { 0 };
@@ -241,11 +247,13 @@ impl Request {
             return Ok(());
         };
         let count = self
+            .symbols()
             .class_decl(declared_by)
             .map_or(0, |decl| decl.object_beside.len());
         let mut blocks = Vec::with_capacity(count);
         for at in 0..count {
             let size = self
+                .symbols()
                 .class_decl(declared_by)
                 .and_then(|decl| decl.object_beside.get(at).copied())
                 .unwrap_or(0);
@@ -411,7 +419,7 @@ impl Request {
         {
             return Ok(());
         }
-        let Some(decl) = self.class_decl(class) else {
+        let Some(decl) = self.symbols().class_decl(class) else {
             return Ok(());
         };
         if decl.kind == ClassKind::Enum {
@@ -419,11 +427,12 @@ impl Request {
         }
         let native = self.native_class(class);
         let updated_as_declared = !native && self.holds_no_expression(class);
-        if !updated_as_declared && let Some(parent) = self.class_parent(class) {
+        if !updated_as_declared && let Some(parent) = self.symbols().class_parent(class) {
             self.update_class_constants(parent)?;
         }
         if !native && !updated_as_declared {
             let constants: Vec<(ClassId, Box<[u8]>)> = self
+                .symbols()
                 .constants_in_order(class)
                 .into_iter()
                 .map(|(declaring, constant)| (declaring, constant.name.0.clone()))
@@ -433,16 +442,19 @@ impl Request {
                 self.release(value);
             }
         }
-        let statics: Vec<PropertyInfo> = self.class_decl(class).map_or_else(Vec::new, |decl| {
-            (0u32..)
-                .zip(&decl.properties)
-                .filter(|(_, property)| !property.is_instance)
-                .map(|(at, _)| PropertyInfo {
-                    declaring: class,
-                    at,
-                })
-                .collect()
-        });
+        let statics: Vec<PropertyInfo> =
+            self.symbols()
+                .class_decl(class)
+                .map_or_else(Vec::new, |decl| {
+                    (0u32..)
+                        .zip(&decl.properties)
+                        .filter(|(_, property)| !property.is_instance)
+                        .map(|(at, _)| PropertyInfo {
+                            declaring: class,
+                            at,
+                        })
+                        .collect()
+                });
         for info in statics {
             self.lay_down_static(info)?;
         }
@@ -460,14 +472,15 @@ impl Request {
     fn holds_no_expression(&self, class: ClassId) -> bool {
         let written = super::linking::is_literal;
         let constants = self
+            .symbols()
             .constants_in_order(class)
             .iter()
             .all(|(_, constant)| written(&constant.value));
         let defaults = self
             .placed(class)
             .all(|(_, _, property)| property.default.as_ref().is_none_or(written));
-        let statics = self.lineage(class).all(|here| {
-            self.class_decl(here).is_none_or(|decl| {
+        let statics = self.symbols().lineage(class).all(|here| {
+            self.symbols().class_decl(here).is_none_or(|decl| {
                 decl.properties
                     .iter()
                     .filter(|property| !property.is_instance)
@@ -500,6 +513,7 @@ impl Request {
             return Ok(value);
         }
         let Some((expr, ty)) = self
+            .symbols()
             .class_constant_of(declaring, name)
             .map(|(_, constant)| (constant.value.clone(), constant.ty.clone()))
         else {
@@ -549,10 +563,11 @@ impl Request {
         name: &[u8],
     ) -> Result<Value, Thrown> {
         let Some((declaring, is_case)) = self
+            .symbols()
             .class_constant_of(class, name)
             .map(|(declaring, constant)| (declaring, constant.is_case))
         else {
-            let class_name = self.class_name(class);
+            let class_name = self.symbols().class_name(class);
             return Err(crate::api::raising::throw_error(
                 self,
                 "Error",
@@ -744,42 +759,6 @@ impl Request {
         }
     }
 
-    /// The loop of `zend_update_class_constants` over
-    /// `default_properties_table`: each slot not yet evaluated, in slot
-    /// order, its expression evaluated in the scope of the class that
-    /// declared it and, where the property is typed, held to the type
-    /// under the strict rule (`update_property`), php's
-    /// `property initializers must always be evaluated with strict
-    /// types`.
-    /// `default_properties_table[OBJ_PROP_TO_NUM(prop->offset)]` of
-    /// `class` for its instance property `name`, what `_property_string`
-    /// prints: the default `zend_update_class_constants` evaluated, a
-    /// view, once the class stands updated in this request; `None`
-    /// before, where php's table still holds the expression, and for a
-    /// typed slot with no default.
-    ///
-    /// ```php
-    /// class C { public stdClass $a = FOO; public $i = N; }
-    /// $r = new ReflectionProperty('C', 'i');
-    /// define('FOO', new stdClass); define('N', 5);
-    /// echo $r; new C; echo $r, new ReflectionProperty('C', 'a');
-    /// ```
-    /// ```expect
-    /// Property [ public $i = N ]
-    /// Property [ public $i = 5 ]
-    /// Property [ public stdClass $a = object(stdClass) ]
-    /// ```
-    #[must_use]
-    pub fn evaluated_default(&self, class: ClassId, name: &[u8]) -> Option<Value> {
-        let data = self
-            .class_data
-            .rows
-            .get(class)
-            .filter(|data| data.updated)?;
-        let (at, _, _) = self.placed_named(class, name)?;
-        data.defaults.get(at).copied().flatten()
-    }
-
     fn evaluate_defaults(&mut self, class: ClassId) -> Result<(), Thrown> {
         let done = self
             .class_data
@@ -832,5 +811,44 @@ impl Request {
         let verdict =
             crate::ops::verify_property_type(self, &value, &ty, info.declaring, &name, true);
         crate::ops::landed(self, value, verdict)
+    }
+}
+
+impl Symbols<&Request> {
+    /// The loop of `zend_update_class_constants` over
+    /// `default_properties_table`: each slot not yet evaluated, in slot
+    /// order, its expression evaluated in the scope of the class that
+    /// declared it and, where the property is typed, held to the type
+    /// under the strict rule (`update_property`), php's
+    /// `property initializers must always be evaluated with strict
+    /// types`.
+    /// `default_properties_table[OBJ_PROP_TO_NUM(prop->offset)]` of
+    /// `class` for its instance property `name`, what `_property_string`
+    /// prints: the default `zend_update_class_constants` evaluated, a
+    /// view, once the class stands updated in this request; `None`
+    /// before, where php's table still holds the expression, and for a
+    /// typed slot with no default.
+    ///
+    /// ```php
+    /// class C { public stdClass $a = FOO; public $i = N; }
+    /// $r = new ReflectionProperty('C', 'i');
+    /// define('FOO', new stdClass); define('N', 5);
+    /// echo $r; new C; echo $r, new ReflectionProperty('C', 'a');
+    /// ```
+    /// ```expect
+    /// Property [ public $i = N ]
+    /// Property [ public $i = 5 ]
+    /// Property [ public stdClass $a = object(stdClass) ]
+    /// ```
+    #[must_use]
+    pub fn evaluated_default(self, class: ClassId, name: &[u8]) -> Option<Value> {
+        let data = self
+            .0
+            .class_data
+            .rows
+            .get(class)
+            .filter(|data| data.updated)?;
+        let (at, _, _) = self.0.placed_named(class, name)?;
+        data.defaults.get(at).copied().flatten()
     }
 }

@@ -206,7 +206,7 @@ fn frame_id(req: &Request, frame: FrameRef) -> Option<php_ext::request::FrameId>
 /// where it has no table, so no table is built for the read.
 pub fn variable(req: &mut Request, frame: FrameRef, name: &[u8], depth: u32) -> Option<Shown> {
     let id = frame_id(req, frame)?;
-    let value = req.frame_var(id, name)?;
+    let value = req.frames_mut().var(id, name)?;
     Some(shown(req, value, depth))
 }
 
@@ -215,7 +215,7 @@ pub fn variable(req: &mut Request, frame: FrameRef, name: &[u8], depth: u32) -> 
 /// level deep.
 pub fn variables(req: &mut Request, frame: FrameRef) -> Vec<Variable> {
     let read = frame_id(req, frame)
-        .and_then(|id| req.frame_vars(id))
+        .and_then(|id| req.frames_mut().vars(id))
         .unwrap_or_default()
         .into_iter()
         .filter(|(name, _)| !AUTO_GLOBALS.contains(&name.as_slice()))
@@ -227,14 +227,15 @@ pub fn variables(req: &mut Request, frame: FrameRef) -> Vec<Variable> {
 /// first and read in the global table's order, one level deep.
 pub fn superglobals(req: &mut Request) -> Vec<Variable> {
     for name in &AUTO_GLOBALS[..7] {
-        req.superglobal(name);
+        req.variables_mut().superglobal(name);
     }
     let read = req
+        .variables_mut()
         .global_names()
         .into_iter()
         .filter(|name| AUTO_GLOBALS.contains(&name.as_slice()))
         .filter_map(|name| {
-            let value = req.global(&name)?;
+            let value = req.variables_mut().global(&name)?;
             Some((name, value))
         })
         .collect();
@@ -245,6 +246,7 @@ pub fn superglobals(req: &mut Request) -> Vec<Variable> {
 /// `info constants` lists them in the table's order.
 pub fn user_constants(req: &mut Request) -> Vec<Variable> {
     let read = req
+        .symbols()
         .constant_table()
         .into_iter()
         .filter(|(extension, _, _)| extension.is_none())
@@ -301,7 +303,7 @@ pub fn literals(req: &mut Request, frame: FrameRef) -> Vec<Shown> {
 /// and the array given up after, as phpdbg's `back` builds and destroys
 /// it; none where building it met the memory limit.
 pub fn backtrace(req: &mut Request, limit: i64) -> Vec<TraceRow> {
-    let Ok(trace) = req.backtrace_here(0, limit) else {
+    let Ok(trace) = req.frames_mut().backtrace_here(0, limit) else {
         return Vec::new();
     };
     let read = {

@@ -252,7 +252,7 @@ fn open_db(req: &mut Request, source: &Source<'_>) -> Result<Foreign<Conn>, Fail
             Some(options) => match option_long(req, Some(options), ATTR_TIMEOUT, 60) {
                 Ok(timeout) => timeout,
                 Err(failure) => {
-                    drop(req.disown(owner));
+                    drop(req.memory_mut().disown(owner));
                     return Err(Failure::from(failure));
                 }
             },
@@ -265,7 +265,9 @@ fn open_db(req: &mut Request, source: &Source<'_>) -> Result<Foreign<Conn>, Fail
 
 /// Whether `open_basedir` is set, `PG(open_basedir) && *PG(open_basedir)`.
 pub(super) fn open_basedir(req: &Request) -> bool {
-    req.ini_get(b"open_basedir").is_some_and(|v| !v.is_empty())
+    req.ini()
+        .get(b"open_basedir")
+        .is_some_and(|v| !v.is_empty())
 }
 
 /// `make_filename_safe`: a `file:` URI as given, refused under
@@ -295,9 +297,15 @@ pub(super) fn safe_filename(req: &mut Request, name: Option<&[u8]>) -> Option<Ve
     if name.is_empty() || name == b":memory:" {
         return Some(name.to_vec());
     }
-    let cwd = req.cwd().into_os_string().into_encoded_bytes();
-    let full = req.virtual_file_ex(&cwd, name, php_ext::request::Resolve::FilePath)?;
-    let full = req.check_open_basedir(&full, true).ok()?;
+    let cwd = req
+        .environment()
+        .cwd()
+        .into_os_string()
+        .into_encoded_bytes();
+    let full =
+        req.environment_mut()
+            .virtual_file_ex(&cwd, name, php_ext::request::Resolve::FilePath)?;
+    let full = req.environment_mut().check_open_basedir(&full, true).ok()?;
     Some(full.as_os_str().as_encoded_bytes().to_vec())
 }
 
@@ -362,7 +370,7 @@ impl Handle {
     /// A connection given back to the pool kept by this request again.
     fn take_up(&mut self, req: &mut Request) {
         self.place = match std::mem::replace(&mut self.place, Place::Gone) {
-            Place::Idle(conn) => Place::Request(req.adopt(conn)),
+            Place::Idle(conn) => Place::Request(req.memory_mut().adopt(conn)),
             other => other,
         };
     }
@@ -699,7 +707,10 @@ impl Connection for Handle {
     /// pool for the next request to take up.
     fn give_back(&mut self, req: &mut Request) {
         self.place = match std::mem::replace(&mut self.place, Place::Gone) {
-            Place::Request(owner) => req.disown(owner).map_or(Place::Gone, Place::Idle),
+            Place::Request(owner) => req
+                .memory_mut()
+                .disown(owner)
+                .map_or(Place::Gone, Place::Idle),
             other => other,
         };
     }

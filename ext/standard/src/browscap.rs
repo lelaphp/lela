@@ -280,13 +280,13 @@ fn loaded(req: &mut Request) -> Result<(), Thrown> {
         return Ok(());
     }
     req.state::<State>().browscap.loaded = true;
-    let Some(file) = req.ini_get(b"browscap").map(<[u8]>::to_vec) else {
+    let Some(file) = req.ini().get(b"browscap").map(<[u8]>::to_vec) else {
         return Ok(());
     };
     if file.is_empty() {
         return Ok(());
     }
-    let path = req.absolutize(&file);
+    let path = req.environment().absolutize(&file);
     let Ok(bytes) = std::fs::read(path) else {
         return Ok(());
     };
@@ -398,6 +398,7 @@ fn get_browser(
     } else {
         {
             let found = req
+                .variables_mut()
                 .superglobal(b"_SERVER")
                 .and_then(|server| server.find(b"HTTP_USER_AGENT"))
                 .and_then(|value| value.deref().as_str_bytes().map(<[u8]>::to_vec));

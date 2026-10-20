@@ -341,7 +341,8 @@ impl Connector for Driver {
     /// ```
     fn open(&self, req: &mut Request, source: &Source<'_>) -> Result<Box<dyn Connection>, Failure> {
         let socket = req
-            .ini_get(b"pdo_mysql.default_socket")
+            .ini()
+            .get(b"pdo_mysql.default_socket")
             .map(<[u8]>::to_vec)
             .filter(|s| !s.is_empty());
         let vars = parse_data_source(
@@ -534,7 +535,7 @@ fn driver_options(
         h.local_infile = true;
     }
     if let Some(dir) = option_string(req, options, Mysql::ATTR_LOCAL_INFILE_DIRECTORY)?
-        && req.check_open_basedir(&dir, true).is_ok()
+        && req.environment_mut().check_open_basedir(&dir, true).is_ok()
         && !server.option(req, ClientOption::LoadDataLocalDir(Some(&dir)))?
     {
         return Ok(false);

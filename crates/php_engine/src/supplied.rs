@@ -599,7 +599,7 @@ mod tests {
         ];
         let engine = Engine::cli_builder().extensions(&extensions).build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-        req.interrupt().raise();
+        req.limits().interrupt().raise();
         assert_eq!(crate::interrupt::check(&mut req), Ok(false));
         assert_eq!(served(&LOG), ["later", "earlier"]);
     }
@@ -668,8 +668,14 @@ mod tests {
         ];
         let engine = Engine::cli_builder().extensions(&extensions).build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-        assert_eq!(req.resolve_path(b"a").ok(), Some(b"/above".to_vec()));
-        assert_eq!(req.resolve_path(b"z").ok(), Some(b"/beneath".to_vec()));
+        assert_eq!(
+            req.code_mut().resolve_path(b"a").ok(),
+            Some(b"/above".to_vec())
+        );
+        assert_eq!(
+            req.code_mut().resolve_path(b"z").ok(),
+            Some(b"/beneath".to_vec())
+        );
     }
 
     /// A listed kind, `PG(tick_functions)` as `php_add_tick_function`
@@ -681,13 +687,13 @@ mod tests {
         let extensions = [
             ExtensionBuilder::default()
                 .ticks(|req| {
-                    req.write(b"earlier ");
+                    req.response_mut().write(b"earlier ");
                     Ok(())
                 })
                 .build("earlier"),
             ExtensionBuilder::default()
                 .ticks(|req| {
-                    req.write(b"later ");
+                    req.response_mut().write(b"later ");
                     Ok(())
                 })
                 .build("later"),
@@ -777,7 +783,7 @@ mod tests {
         let req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let supplier = engine.shared.supplied.treat_data.supplier();
         assert_eq!(
-            supplier.and_then(|id| req.extension_name(id)),
+            supplier.and_then(|id| req.extensions().name(id)),
             Some("later")
         );
     }
@@ -842,11 +848,11 @@ mod tests {
     #[test]
     fn a_zend_extension_s_interception_stands_over_a_minit_s_in_either_order() {
         let opcache: crate::api::abi::Entry = |req| {
-            req.write(b"opcache ");
+            req.response_mut().write(b"opcache ");
             crate::api::call::passthrough(req, None)
         };
         let phar: crate::api::abi::Entry = |req| {
-            req.write(b"phar ");
+            req.response_mut().write(b"phar ");
             crate::api::call::passthrough(req, None)
         };
         let serve = |extensions: &[crate::api::abi::Extension]| {
@@ -905,7 +911,7 @@ mod tests {
             zend(
                 ExtensionBuilder::default().post_startup(|req, beneath| match beneath.serve(req) {
                     crate::api::abi::PostStartup::Serve => {
-                        req.write_stderr(b"preloading\n");
+                        req.response_mut().write_stderr(b"preloading\n");
                         crate::api::abi::PostStartup::Preload {
                             script: b"/nowhere".to_vec(),
                             thread: None,
@@ -917,7 +923,7 @@ mod tests {
             ),
             ExtensionBuilder::default()
                 .post_startup(|req, _| {
-                    req.write_stderr(b"refused\n");
+                    req.response_mut().write_stderr(b"refused\n");
                     crate::api::abi::PostStartup::Refuse { status: -2 }
                 })
                 .build("ffi"),
@@ -1100,7 +1106,7 @@ mod tests {
         const TYPE: &str = "strlen(): Argument #1 ($string) must be of type string, array given";
         fn shown(req: &mut Request, beneath: Beneath<'_, chain::Throw>) {
             let message = message_of(req, beneath.throwable());
-            req.write(format!("[{message}]").as_bytes());
+            req.response_mut().write(format!("[{message}]").as_bytes());
             record(8, Phase::Thrown(message));
             beneath.serve(req);
         }

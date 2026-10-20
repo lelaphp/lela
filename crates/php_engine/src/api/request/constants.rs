@@ -15,6 +15,7 @@ use php_unit::decl::Attribute;
 use crate::api::raising::Thrown;
 use crate::api::values::{Emalloc, Owner, PhpArray, PhpString, Value, adopted};
 
+use super::Symbols;
 use super::{ExtensionId, Request, Standard};
 
 /// The name `__halt_compiler()` registers its file's offset under.
@@ -235,49 +236,6 @@ impl Request {
         }
     }
 
-    /// `EG(zend_constants)` in its order, each row the extension it was
-    /// registered under, `ZEND_CONSTANT_MODULE_NUMBER`, by name, none for
-    /// one the program defined, `PHP_USER_CONSTANT`: the engine's own
-    /// under `Core`, then each extension's in bundle order, then what
-    /// `define()` and `const` wrote. A value is a view, no owner taken;
-    /// a declared constant whose value the engine did not publish is no
-    /// row. What `get_defined_constants(true)` groups and phpdbg's `info
-    /// constants` walks for the program's own.
-    #[must_use]
-    pub fn constant_table(&self) -> Vec<(Option<&str>, &[u8], Value)> {
-        let decls = self.shared.declared().constants.rows();
-        let modules = (self.shared.constant_modules.iter()).map(|&at| self.extension_name(at));
-        let mut rows: Vec<(Option<&str>, &[u8], Value)> =
-            Vec::with_capacity(decls.len() + self.constants.rows.len() + 1);
-        for ((at, decl), module) in decls.iter().enumerate().zip(modules) {
-            // `PHP_SAPI` stands where php registers it, before
-            // `PHP_BINARY`, and is the request's.
-            if decl.name.0.as_ref() == b"PHP_BINARY" {
-                rows.push((Some("Core"), b"PHP_SAPI", self.constants.sapi_constant));
-            }
-            if let Some(value) = self.shared.constant_at(at) {
-                rows.push((module, &decl.name.0, value));
-            }
-        }
-        rows.extend(self.constants.rows.iter().map(|row| {
-            let module = match &row.owner {
-                ConstantOwner::Core => Some("Core"),
-                ConstantOwner::Extension(extension) => self.extension_name(*extension),
-                ConstantOwner::User(_) => None,
-            };
-            (module, row.given.as_slice(), row.value)
-        }));
-        rows
-    }
-
-    /// `get_defined_constants()`: what `define()` declared in this
-    /// request, each name a string of the request's.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub fn constants(&mut self) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.constants_made();
-        adopted(made)
-    }
-
     /// What [`constants`](Self::constants) makes, its one owner not yet named.
     pub(crate) fn constants_made(&mut self) -> Result<PhpArray, Thrown> {
         let mut array = self.array()?;
@@ -394,29 +352,6 @@ impl Request {
         value.give_up(self);
     }
 
-    /// `zend_constant.filename`: the file a constant the program
-    /// defined was defined in, and none for one an extension or the
-    /// engine registered, php's `NULL` for a persistent constant.
-    ///
-    /// ```php
-    /// define('D', 1); const C = 2;
-    /// var_dump((new ReflectionConstant('D'))->getFileName() === __FILE__, (new ReflectionConstant('C'))->getFileName() === __FILE__, (new ReflectionConstant('PHP_VERSION'))->getFileName());
-    /// ```
-    /// ```expect
-    /// bool(true)
-    /// bool(true)
-    /// bool(false)
-    /// ```
-    #[must_use]
-    pub fn constant_file(&self, name: &[u8]) -> Option<&[u8]> {
-        self.constants
-            .find(name)
-            .and_then(|(_, row)| match &row.owner {
-                ConstantOwner::User(file) => file.as_deref(),
-                ConstantOwner::Core | ConstantOwner::Extension(_) => None,
-            })
-    }
-
     /// `zend_register_constant` at request start for a constant the
     /// host registers under `Core`, as `do_cli` registers
     /// `PHP_CLI_PROCESS_TITLE` and `cli_register_file_handles` the three
@@ -433,51 +368,6 @@ impl Request {
             name.to_vec(),
             value.hand_on(),
         ));
-    }
-
-    /// `REGISTER_STRINGL_CONSTANT` and its kin while a request runs:
-    /// `name` registered under `extension`, php's `module_number`,
-    /// carrying `attributes` as `zend_add_attribute` puts them on the
-    /// constant, a `#[\Deprecated]` among them php's `CONST_DEPRECATED`,
-    /// which a read raises. Where the request has registered the name
-    /// already, by an extension or by `define()`, the row keeps its
-    /// owner and attributes and takes `value`, the old value released,
-    /// which is what an extension writes through the `zval` that
-    /// `zend_get_constant_str` finds. A sink: the row takes the value's
-    /// owner; `false`, php's warning raised and the owner given up after
-    /// it, as `zend_register_constant` refuses a name, for one the engine
-    /// or an extension declared as it started, which no request writes. The
-    /// session's `SID` is the witness, in `ext/session`.
-    pub fn register_constant(
-        &mut self,
-        extension: ExtensionId,
-        name: &[u8],
-        value: Owner<Value>,
-        attributes: Vec<Attribute>,
-    ) -> bool {
-        if let Some(row) = self.constants.rows.iter_mut().find(|row| row.name == name) {
-            let old = std::mem::replace(&mut row.value, value.hand_on());
-            self.release(old);
-            return true;
-        }
-        if name == b"PHP_SAPI" || self.shared.constant(name).is_some() {
-            self.refuse_constant(name, value);
-            return false;
-        }
-        let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
-        let named = self.constant_name(name);
-        let room = self.constant_room();
-        self.constants.push(ConstantRow {
-            room,
-            named,
-            owner: ConstantOwner::Extension(extension),
-            name: name.to_vec(),
-            given: name.to_vec(),
-            value: value.hand_on(),
-            attributes,
-            deprecated,
-        });
-        true
     }
 
     /// `PHP_CLI_PROCESS_TITLE`, which `do_cli` registers after
@@ -567,87 +457,6 @@ impl Request {
         self.register_file_handles(true)
     }
 
-    /// `zend_constant::attributes`: the attributes the declaration of
-    /// the global constant `name` carries, what an extension declared or
-    /// a program's `DECLARE_ATTRIBUTED_CONST` hung on it, or an extension
-    /// registered it with while the request runs
-    /// ([`Request::register_constant`]), and the empty list for a name no
-    /// table has. The key is the one
-    /// `zend_register_constant` writes, the namespace lowered. What
-    /// `ReflectionConstant::getAttributes()` reads, and what the
-    /// deprecation a read raises is worded from
-    /// ([`crate::api::raising::deprecated_constant`]).
-    ///
-    /// ```php
-    /// #[MyAttribute(1)]
-    /// const C = 1;
-    /// define('D', 2);
-    /// var_dump(count((new ReflectionConstant('C'))->getAttributes()),
-    ///     count((new ReflectionConstant('D'))->getAttributes()),
-    ///     count((new ReflectionConstant('E_STRICT'))->getAttributes()));
-    /// ```
-    /// ```expect
-    /// int(1)
-    /// int(0)
-    /// int(1)
-    /// ```
-    #[must_use]
-    pub fn constant_attributes(&self, name: &[u8]) -> &[Attribute] {
-        if let Some((_, row)) = self.constants.find(name) {
-            return &row.attributes;
-        }
-        self.shared
-            .declared()
-            .constants
-            .find(name)
-            .map_or(&[], |(_, decl)| decl.attributes.as_slice())
-    }
-
-    /// `ZEND_CONSTANT_MODULE_NUMBER(c)` of the constant the table holds
-    /// under `name`: the extension that registered it, `Core` for the
-    /// engine's own and a host's, and none for one a program defined
-    /// (`PHP_USER_CONSTANT`) or a name no table has. One lookup, as
-    /// `ReflectionConstant::getExtension` reads the number off the
-    /// constant:
-    ///
-    /// ```php
-    /// define('MINE', 1);
-    /// foreach (['E_ALL', 'PHP_SAPI', 'PHP_VERSION', 'PREG_SPLIT_NO_EMPTY', 'JSON_ERROR_NONE', 'STDIN', 'MINE'] as $name) {
-    ///     $c = new ReflectionConstant($name);
-    ///     var_dump($c->getExtensionName(), $c->getExtension()?->getName());
-    /// }
-    /// ```
-    /// ```expect capture
-    /// string(4) "Core"
-    /// string(4) "Core"
-    /// string(4) "Core"
-    /// string(4) "Core"
-    /// string(4) "Core"
-    /// string(4) "Core"
-    /// string(4) "pcre"
-    /// string(4) "pcre"
-    /// string(4) "json"
-    /// string(4) "json"
-    /// string(4) "Core"
-    /// string(4) "Core"
-    /// bool(false)
-    /// NULL
-    /// ```
-    #[must_use]
-    pub fn constant_extension(&self, name: &[u8]) -> Option<ExtensionId> {
-        if name == b"PHP_SAPI" {
-            return Some(ExtensionId::CORE);
-        }
-        if let Some((_, row)) = self.constants.find(name) {
-            return match row.owner {
-                ConstantOwner::Core => Some(ExtensionId::CORE),
-                ConstantOwner::Extension(extension) => Some(extension),
-                ConstantOwner::User(_) => None,
-            };
-        }
-        self.shared.constant_module(name)
-    }
-
     /// `ZEND_CONSTANT_FLAGS(c) & CONST_DEPRECATED` of the constant the
     /// table holds under `name`, and whether a program defined it,
     /// `PHP_USER_CONSTANT`: what a fetch reads before it words a
@@ -669,7 +478,10 @@ impl Request {
     /// `FETCH_CONSTANT` handler never looks for.
     pub(crate) fn constant_str(&self, name: &[u8]) -> Option<Value> {
         self.constant_named(name).or_else(|| {
-            let file = self.current_file().filter(|_| name == HALT_OFFSET)?;
+            let file = self
+                .frames()
+                .current_file()
+                .filter(|_| name == HALT_OFFSET)?;
             self.constant_named(&halt_offset_key(file))
         })
     }
@@ -760,5 +572,210 @@ impl Request {
         if let Some(handles) = &mut self.description.file_handles {
             handles.close(standard as usize);
         }
+    }
+}
+
+impl<'r> Symbols<&'r Request> {
+    /// `EG(zend_constants)` in its order, each row the extension it was
+    /// registered under, `ZEND_CONSTANT_MODULE_NUMBER`, by name, none for
+    /// one the program defined, `PHP_USER_CONSTANT`: the engine's own
+    /// under `Core`, then each extension's in bundle order, then what
+    /// `define()` and `const` wrote. A value is a view, no owner taken;
+    /// a declared constant whose value the engine did not publish is no
+    /// row. What `get_defined_constants(true)` groups and phpdbg's `info
+    /// constants` walks for the program's own.
+    #[must_use]
+    pub fn constant_table(self) -> Vec<(Option<&'r str>, &'r [u8], Value)> {
+        let decls = self.0.shared.declared().constants.rows();
+        let modules =
+            (self.0.shared.constant_modules.iter()).map(|&at| self.0.extensions().name(at));
+        let mut rows: Vec<(Option<&str>, &[u8], Value)> =
+            Vec::with_capacity(decls.len() + self.0.constants.rows.len() + 1);
+        for ((at, decl), module) in decls.iter().enumerate().zip(modules) {
+            // `PHP_SAPI` stands where php registers it, before
+            // `PHP_BINARY`, and is the request's.
+            if decl.name.0.as_ref() == b"PHP_BINARY" {
+                rows.push((Some("Core"), b"PHP_SAPI", self.0.constants.sapi_constant));
+            }
+            if let Some(value) = self.0.shared.constant_at(at) {
+                rows.push((module, &decl.name.0, value));
+            }
+        }
+        rows.extend(self.0.constants.rows.iter().map(|row| {
+            let module = match &row.owner {
+                ConstantOwner::Core => Some("Core"),
+                ConstantOwner::Extension(extension) => self.0.extensions().name(*extension),
+                ConstantOwner::User(_) => None,
+            };
+            (module, row.given.as_slice(), row.value)
+        }));
+        rows
+    }
+
+    /// `zend_constant.filename`: the file a constant the program
+    /// defined was defined in, and none for one an extension or the
+    /// engine registered, php's `NULL` for a persistent constant.
+    ///
+    /// ```php
+    /// define('D', 1); const C = 2;
+    /// var_dump((new ReflectionConstant('D'))->getFileName() === __FILE__, (new ReflectionConstant('C'))->getFileName() === __FILE__, (new ReflectionConstant('PHP_VERSION'))->getFileName());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    #[must_use]
+    pub fn constant_file(self, name: &[u8]) -> Option<&'r [u8]> {
+        self.0
+            .constants
+            .find(name)
+            .and_then(|(_, row)| match &row.owner {
+                ConstantOwner::User(file) => file.as_deref(),
+                ConstantOwner::Core | ConstantOwner::Extension(_) => None,
+            })
+    }
+
+    /// `zend_constant::attributes`: the attributes the declaration of
+    /// the global constant `name` carries, what an extension declared or
+    /// a program's `DECLARE_ATTRIBUTED_CONST` hung on it, or an extension
+    /// registered it with while the request runs
+    /// ([`Symbols::register_constant`]), and the empty list for a name no
+    /// table has. The key is the one
+    /// `zend_register_constant` writes, the namespace lowered. What
+    /// `ReflectionConstant::getAttributes()` reads, and what the
+    /// deprecation a read raises is worded from
+    /// ([`crate::api::raising::deprecated_constant`]).
+    ///
+    /// ```php
+    /// #[MyAttribute(1)]
+    /// const C = 1;
+    /// define('D', 2);
+    /// var_dump(count((new ReflectionConstant('C'))->getAttributes()),
+    ///     count((new ReflectionConstant('D'))->getAttributes()),
+    ///     count((new ReflectionConstant('E_STRICT'))->getAttributes()));
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(0)
+    /// int(1)
+    /// ```
+    #[must_use]
+    pub fn constant_attributes(self, name: &[u8]) -> &'r [Attribute] {
+        if let Some((_, row)) = self.0.constants.find(name) {
+            return &row.attributes;
+        }
+        self.0
+            .shared
+            .declared()
+            .constants
+            .find(name)
+            .map_or(&[], |(_, decl)| decl.attributes.as_slice())
+    }
+
+    /// `ZEND_CONSTANT_MODULE_NUMBER(c)` of the constant the table holds
+    /// under `name`: the extension that registered it, `Core` for the
+    /// engine's own and a host's, and none for one a program defined
+    /// (`PHP_USER_CONSTANT`) or a name no table has. One lookup, as
+    /// `ReflectionConstant::getExtension` reads the number off the
+    /// constant:
+    ///
+    /// ```php
+    /// define('MINE', 1);
+    /// foreach (['E_ALL', 'PHP_SAPI', 'PHP_VERSION', 'PREG_SPLIT_NO_EMPTY', 'JSON_ERROR_NONE', 'STDIN', 'MINE'] as $name) {
+    ///     $c = new ReflectionConstant($name);
+    ///     var_dump($c->getExtensionName(), $c->getExtension()?->getName());
+    /// }
+    /// ```
+    /// ```expect capture
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// string(4) "pcre"
+    /// string(4) "pcre"
+    /// string(4) "json"
+    /// string(4) "json"
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// bool(false)
+    /// NULL
+    /// ```
+    #[must_use]
+    pub fn constant_extension(self, name: &[u8]) -> Option<ExtensionId> {
+        if name == b"PHP_SAPI" {
+            return Some(ExtensionId::CORE);
+        }
+        if let Some((_, row)) = self.0.constants.find(name) {
+            return match row.owner {
+                ConstantOwner::Core => Some(ExtensionId::CORE),
+                ConstantOwner::Extension(extension) => Some(extension),
+                ConstantOwner::User(_) => None,
+            };
+        }
+        self.0.shared.constant_module(name)
+    }
+}
+
+impl Symbols<&mut Request> {
+    /// `get_defined_constants()`: what `define()` declared in this
+    /// request, each name a string of the request's.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn constants(self) -> Result<Owner<PhpArray>, Thrown> {
+        let made = self.0.constants_made();
+        adopted(made)
+    }
+
+    /// `REGISTER_STRINGL_CONSTANT` and its kin while a request runs:
+    /// `name` registered under `extension`, php's `module_number`,
+    /// carrying `attributes` as `zend_add_attribute` puts them on the
+    /// constant, a `#[\Deprecated]` among them php's `CONST_DEPRECATED`,
+    /// which a read raises. Where the request has registered the name
+    /// already, by an extension or by `define()`, the row keeps its
+    /// owner and attributes and takes `value`, the old value released,
+    /// which is what an extension writes through the `zval` that
+    /// `zend_get_constant_str` finds. A sink: the row takes the value's
+    /// owner; `false`, php's warning raised and the owner given up after
+    /// it, as `zend_register_constant` refuses a name, for one the engine
+    /// or an extension declared as it started, which no request writes. The
+    /// session's `SID` is the witness, in `ext/session`.
+    pub fn register_constant(
+        self,
+        extension: ExtensionId,
+        name: &[u8],
+        value: Owner<Value>,
+        attributes: Vec<Attribute>,
+    ) -> bool {
+        if let Some(row) = self
+            .0
+            .constants
+            .rows
+            .iter_mut()
+            .find(|row| row.name == name)
+        {
+            let old = std::mem::replace(&mut row.value, value.hand_on());
+            self.0.release(old);
+            return true;
+        }
+        if name == b"PHP_SAPI" || self.0.shared.constant(name).is_some() {
+            self.0.refuse_constant(name, value);
+            return false;
+        }
+        let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
+        let named = self.0.constant_name(name);
+        let room = self.0.constant_room();
+        self.0.constants.push(ConstantRow {
+            room,
+            named,
+            owner: ConstantOwner::Extension(extension),
+            name: name.to_vec(),
+            given: name.to_vec(),
+            value: value.hand_on(),
+            attributes,
+            deprecated,
+        });
+        true
     }
 }

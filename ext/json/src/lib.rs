@@ -654,5 +654,6 @@ fn json_last_error_msg(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
 /// json support => enabled
 /// ```
 fn json_info(req: &mut Request) {
-    req.info_table(&[&["json support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["json support", "enabled"]]);
 }

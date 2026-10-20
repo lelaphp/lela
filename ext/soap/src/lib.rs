@@ -45,7 +45,7 @@ use php_ext::abi::{
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::values::{Value, ValueRef};
 
 pub(crate) use globals::{Error, Res, TypemapEntry, raised, soap_error};
@@ -286,7 +286,7 @@ fn dependency(name: &str, kind: DependencyKind) -> Dependency {
 /// ```
 #[allow(clippy::unnecessary_wraps)] // the ABI's `on_modify`
 fn on_update_cache_dir(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
-    if !matches!(req.ini_stage(), IniStage::Runtime) {
+    if !matches!(req.ini().stage(), IniStage::Runtime) {
         return Ok(true);
     }
     let value = value.unwrap_or_default();
@@ -303,7 +303,7 @@ fn on_update_cache_dir(req: &mut Request, value: Option<&[u8]>) -> Result<bool, 
         }
         None => value,
     };
-    Ok(dir.is_empty() || req.check_open_basedir(dir, true).is_ok())
+    Ok(dir.is_empty() || req.environment_mut().check_open_basedir(dir, true).is_ok())
 }
 
 /// `PHP_MINFO_FUNCTION(soap)`: the two rows, then the ini entries.
@@ -326,11 +326,13 @@ fn on_update_cache_dir(req: &mut Request, value: Option<&[u8]>) -> Result<bool, 
 /// soap.wsdl_cache_limit => 5 => 5
 /// ```
 fn soap_info(req: &mut Request) {
-    req.info_table(&[&["Soap Client", "enabled"], &["Soap Server", "enabled"]]);
-    let Some(me) = req.extension_named(b"soap") else {
+    req.extensions_mut()
+        .info_table(&[&["Soap Client", "enabled"], &["Soap Server", "enabled"]]);
+    let Some(me) = req.extensions().named(b"soap") else {
         return;
     };
     let rows: Vec<[String; 3]> = req
+        .ini()
         .extension_ini(me)
         .into_iter()
         .map(|held| {
@@ -339,11 +341,7 @@ fn soap_info(req: &mut Request) {
                 let value = value.unwrap_or_default();
                 if name.as_slice() == ini::CACHE_ENABLED {
                     // `STD_PHP_INI_BOOLEAN`'s displayer.
-                    String::from(if Request::ini_parse_bool(value) {
-                        "On"
-                    } else {
-                        "Off"
-                    })
+                    String::from(if Ini::parse_bool(value) { "On" } else { "Off" })
                 } else {
                     String::from_utf8_lossy(value).into_owned()
                 }
@@ -359,7 +357,7 @@ fn soap_info(req: &mut Request) {
         .iter()
         .map(|[n, l, m]| [n.as_str(), l.as_str(), m.as_str()])
         .collect();
-    req.info_ini_table(&rows);
+    req.ini_mut().info_ini_table(&rows);
 }
 
 /// `use_soap_error_handler(bool $enable = true): bool`: the switch set,

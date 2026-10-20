@@ -129,7 +129,7 @@ pub(crate) enum Waited<R> {
 
 /// `wait` on the fds of `sockets`, in their order, with the request lent
 /// to a callback C makes from another thread meanwhile
-/// ([`Request::blocking`], #2401), and each socket's [`Handle`] out of
+/// ([`Limits::blocking`], #2401), and each socket's [`Handle`] out of
 /// the socket for the wait's length, as the streams layer takes a stream
 /// out of its resource for an op (#2601). A callback served in the wait
 /// that closes one of them closes it to the program at once, and the fd
@@ -187,7 +187,7 @@ pub(crate) fn wait_on<R>(
             _ => None,
         })
         .collect();
-    let answered = req.holding_streams(&streams, |req| req.blocking(|| wait(&fds)));
+    let answered = req.holding_streams(&streams, |req| req.limits_mut().blocking(|| wait(&fds)));
     let closed = sockets
         .iter()
         .position(|object| object.native::<Sock>(req).and_then(Sock::fd).is_none());
@@ -407,7 +407,7 @@ pub(crate) fn strerror(req: &Request, error: i32) -> String {
         };
         return String::from_utf8_lossy(&crate::ffi::hstrerror(h)).into_owned();
     }
-    req.os_error_text(error)
+    req.environment().os_error_text(error)
 }
 
 /// `EAGAIN`, `EWOULDBLOCK` and `EINPROGRESS`: what a socket that does

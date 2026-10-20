@@ -22,7 +22,7 @@ pub(crate) const MUNG_SCRIPT_FILENAME: u8 = 8;
 /// The file being served as `phar_split_fname` reads a `phar://` URL,
 /// where it is one.
 fn running_split(req: &mut Request) -> Result<Option<(Vec<u8>, path::Split)>, Thrown> {
-    let Some(file) = req.current_file().map(<[u8]>::to_vec) else {
+    let Some(file) = req.frames().current_file().map(<[u8]>::to_vec) else {
         return Ok(None);
     };
     if file.len() < 7 || !file[..7].eq_ignore_ascii_case(b"phar://") {
@@ -46,7 +46,11 @@ pub(crate) fn running(req: &mut Request, as_url: bool) -> Result<Vec<u8>, Thrown
 /// `Phar::mount()`: an outside path mounted in the archive the file being
 /// served is, or is in.
 pub(crate) fn mount(req: &mut Request, inner: &[u8], outer: &[u8]) -> Result<(), Thrown> {
-    let file = req.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+    let file = req
+        .frames()
+        .current_file()
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default();
     let (arch, path): (Option<Vec<u8>>, Vec<u8>) = if file.len() > 7 && file.starts_with(b"phar://")
     {
         match path::split_fname(req, &file, Exec::Either, Create::No)? {
@@ -252,7 +256,8 @@ fn bailout(req: &mut Request) -> Thrown {
 
 /// A string row of `$_SERVER` as it stands, made or not.
 fn server_row(req: &mut Request, name: &[u8]) -> Option<Vec<u8>> {
-    req.made_superglobal(b"_SERVER")?
+    req.variables_mut()
+        .made_superglobal(b"_SERVER")?
         .find(name)
         .and_then(|value| value.as_str_bytes().map(<[u8]>::to_vec))
 }
@@ -266,9 +271,9 @@ fn swap_server(
     new: &[u8],
 ) -> Result<(), Thrown> {
     let value = PhpString::new(req, new)?.into_value();
-    req.update_server(name, value)?;
+    req.variables_mut().update_server(name, value)?;
     let value = PhpString::new(req, old)?.into_value();
-    req.update_server(kept, value)
+    req.variables_mut().update_server(kept, value)
 }
 
 /// `phar_mung_server_vars` (`Z/ext/phar/phar_object.c:57`): `PATH_INFO`
@@ -282,7 +287,7 @@ fn mung_server_vars(
     basename: &[u8],
     ru_len: usize,
 ) -> Result<(), Thrown> {
-    if req.made_superglobal(b"_SERVER").is_none() {
+    if req.variables_mut().made_superglobal(b"_SERVER").is_none() {
         return Ok(());
     }
     let mut url = b"phar://".to_vec();
@@ -375,14 +380,15 @@ fn file_action(
         Mime::Other => {
             let mut line = b"Content-type: ".to_vec();
             line.extend_from_slice(mime);
-            req.header_add(&line, true, 0);
+            req.response_mut().header_add(&line, true, 0);
             let size = archives(req)
                 .get(id)
                 .and_then(|a| a.manifest.at(slot))
                 .map_or(0, |e| e.uncompressed_filesize);
-            req.header_add(format!("Content-length: {size}").as_bytes(), true, 0);
+            req.response_mut()
+                .header_add(format!("Content-length: {size}").as_bytes(), true, 0);
             let bytes = entry::contents(req, id, slot)?;
-            req.write(&bytes);
+            req.response_mut().write(&bytes);
             Err(bailout(req))
         }
         Mime::Php => {
@@ -411,8 +417,9 @@ fn file_action(
 
 /// `phar_do_403`: the status line and php's page.
 fn do_403(req: &mut Request) -> Thrown {
-    req.header_add(b"HTTP/1.0 403 Access Denied", true, 403);
-    req.write(b"<html>\n <head>\n  <title>Access Denied</title>\n </head>\n <body>\n  <h1>403 - File Access Denied</h1>\n </body>\n</html>");
+    req.response_mut()
+        .header_add(b"HTTP/1.0 403 Access Denied", true, 403);
+    req.response_mut().write(b"<html>\n <head>\n  <title>Access Denied</title>\n </head>\n <body>\n  <h1>403 - File Access Denied</h1>\n </body>\n</html>");
     bailout(req)
 }
 
@@ -430,8 +437,9 @@ fn do_404(
         file_action(req, id, slot, (b"text/html", Mime::Php), f404, fname, None)?;
         return Err(bailout(req));
     }
-    req.header_add(b"HTTP/1.0 404 Not Found", true, 404);
-    req.write(b"<html>\n <head>\n  <title>File Not Found</title>\n </head>\n <body>\n  <h1>404 - File Not Found</h1>\n </body>\n</html>");
+    req.response_mut()
+        .header_add(b"HTTP/1.0 404 Not Found", true, 404);
+    req.response_mut().write(b"<html>\n <head>\n  <title>File Not Found</title>\n </head>\n <body>\n  <h1>404 - File Not Found</h1>\n </body>\n</html>");
     Err(bailout(req))
 }
 
@@ -478,11 +486,14 @@ pub(crate) fn web_phar(
         Err(None) => return Ok(()),
         Err(Some(error)) => return Err(throw(req, "PharException", &error)),
     }
-    let served = req.request_method().is_some_and(|m| METHODS.contains(&m));
-    if !served || req.request_uri().is_none() {
+    let served = req
+        .variables()
+        .request_method()
+        .is_some_and(|m| METHODS.contains(&m));
+    if !served || req.variables().request_uri().is_none() {
         return Ok(());
     }
-    let Some(fname) = req.current_file().map(<[u8]>::to_vec) else {
+    let Some(fname) = req.frames().current_file().map(<[u8]>::to_vec) else {
         return Ok(());
     };
     let basename = fname
@@ -598,7 +609,8 @@ fn rewritten(req: &mut Request, rewrite: &Callable, entry: &[u8]) -> Result<Vec<
 /// path with the index after it, the path cut after the archive's name
 /// outside CGI, and the request ended.
 fn moved(req: &mut Request, index: &[u8], path_info: &[u8], cut_after: Option<&[u8]>) -> Thrown {
-    req.header_add(b"HTTP/1.1 301 Moved Permanently", true, 301);
+    req.response_mut()
+        .header_add(b"HTTP/1.1 301 Moved Permanently", true, 301);
     let mut base = path_info.to_vec();
     if let Some(basename) = cut_after
         && let Some(at) = crate::path::find(&base, basename)
@@ -612,7 +624,7 @@ fn moved(req: &mut Request, index: &[u8], path_info: &[u8], cut_after: Option<&[
     } else {
         location.extend_from_slice(index);
     }
-    req.header_add(&location, true, 0);
+    req.response_mut().header_add(&location, true, 0);
     bailout(req)
 }
 
@@ -630,11 +642,11 @@ struct Located {
 /// under any other; `None` where the path does not name the archive.
 fn locate(req: &mut Request, basename: &[u8]) -> Option<Located> {
     let cgi = matches!(
-        req.sapi_name(),
+        req.environment().sapi_name(),
         "cgi-fcgi" | "fpm-fcgi" | "cgi" | "litespeed"
     );
     if !cgi {
-        let path_info = req.request_uri().unwrap_or_default().to_vec();
+        let path_info = req.variables().request_uri().unwrap_or_default().to_vec();
         let at = crate::path::find(&path_info, basename)?;
         let end = at + basename.len();
         return Some(Located {
@@ -644,7 +656,7 @@ fn locate(req: &mut Request, basename: &[u8]) -> Option<Located> {
             not_cgi: true,
         });
     }
-    if req.made_superglobal(b"_SERVER").is_some() {
+    if req.variables_mut().made_superglobal(b"_SERVER").is_some() {
         let script_name = server_row(req, b"SCRIPT_NAME")?;
         crate::path::find(&script_name, basename)?;
         let entry = server_row(req, b"PATH_INFO").unwrap_or_default();
@@ -658,7 +670,8 @@ fn locate(req: &mut Request, basename: &[u8]) -> Option<Located> {
         });
     }
     let env = |req: &Request, name: &[u8]| {
-        req.env_pairs()
+        req.environment()
+            .env_pairs()
             .iter()
             .find(|(had, _)| had == name)
             .map(|(_, value)| value.clone())

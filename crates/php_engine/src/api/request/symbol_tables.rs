@@ -530,7 +530,7 @@ impl Request {
     /// frame and empty, and taken off with the last one above it: tables
     /// are built in the order frames are pushed, except where a frame
     /// below the innermost is given one, as an evaluation in a paused
-    /// frame gives it ([`Request::eval_in_frame`]).
+    /// frame gives it ([`Frames::eval_in_frame`]).
     pub(super) fn free_rebuilt_table(&mut self, frame: FrameRef, table: TableId) {
         let at = table.0 as usize;
         if self

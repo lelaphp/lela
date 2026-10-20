@@ -10,6 +10,7 @@ use crate::api::abi::Callable;
 use crate::api::raising::Thrown;
 use crate::api::values::{Owner, Value};
 
+use super::Code;
 use super::Request;
 
 /// One entry of `BG(user_tick_functions)`, php's
@@ -52,54 +53,6 @@ impl Request {
         }
     }
 
-    /// `register_tick_function()`: the callable and its arguments held,
-    /// with the owners `zend_fcc_addref` and `ZVAL_COPY` take, in
-    /// `BG(user_tick_functions)`.
-    pub fn register_tick_function(&mut self, callback: Callable, arguments: Vec<Value>) -> bool {
-        let callback = Owner::take(self, callback);
-        for value in &arguments {
-            self.addref(value);
-        }
-        self.ticks.tick_functions.push(TickFunction {
-            callback,
-            arguments,
-            calling: false,
-        });
-        true
-    }
-
-    /// `unregister_tick_function()`: `zend_llist_del_element`, the first
-    /// entry for the same callee, scope and object dropped and its
-    /// owners given up; php's `Error` where that entry is the one being
-    /// served (`user_tick_function_compare`).
-    pub fn unregister_tick_function(&mut self, callback: &Callable) -> Result<bool, Thrown> {
-        let Some(at) = self
-            .ticks
-            .tick_functions
-            .iter()
-            .position(|entry| *entry.callback == *callback)
-        else {
-            return Ok(false);
-        };
-        if self.ticks.tick_functions[at].calling {
-            return Err(crate::api::raising::throw_error(
-                self,
-                "Error",
-                "Registered tick function cannot be unregistered while it is being executed",
-            ));
-        }
-        let TickFunction {
-            callback: held,
-            arguments,
-            ..
-        } = self.ticks.tick_functions.remove(at);
-        held.give_up(self);
-        for value in arguments {
-            self.release(value);
-        }
-        Ok(true)
-    }
-
     /// `ZEND_TICKS`' count (`Z/Zend/zend_vm_def.h:8024`): `EG(ticks_count)`
     /// stepped, and where it reaches `every` it starts again and the
     /// round is served, `zend_ticks_function` as `php_run_ticks`
@@ -115,7 +68,8 @@ impl Request {
             return Ok(());
         }
         self.ticks.ticks_count = 0;
-        self.with_fiber_switch_blocked(Request::serve_ticks)
+        self.code_mut()
+            .with_fiber_switch_blocked(Request::serve_ticks)
     }
 
     /// [`Request::tick`]'s round, while fiber switching is blocked.
@@ -144,5 +98,56 @@ impl Request {
             self.release(called?);
         }
         Ok(())
+    }
+}
+
+impl Code<&mut Request> {
+    /// `register_tick_function()`: the callable and its arguments held,
+    /// with the owners `zend_fcc_addref` and `ZVAL_COPY` take, in
+    /// `BG(user_tick_functions)`.
+    pub fn register_tick_function(self, callback: Callable, arguments: Vec<Value>) -> bool {
+        let callback = Owner::take(self.0, callback);
+        for value in &arguments {
+            self.0.addref(value);
+        }
+        self.0.ticks.tick_functions.push(TickFunction {
+            callback,
+            arguments,
+            calling: false,
+        });
+        true
+    }
+
+    /// `unregister_tick_function()`: `zend_llist_del_element`, the first
+    /// entry for the same callee, scope and object dropped and its
+    /// owners given up; php's `Error` where that entry is the one being
+    /// served (`user_tick_function_compare`).
+    pub fn unregister_tick_function(self, callback: &Callable) -> Result<bool, Thrown> {
+        let Some(at) = self
+            .0
+            .ticks
+            .tick_functions
+            .iter()
+            .position(|entry| *entry.callback == *callback)
+        else {
+            return Ok(false);
+        };
+        if self.0.ticks.tick_functions[at].calling {
+            return Err(crate::api::raising::throw_error(
+                self.0,
+                "Error",
+                "Registered tick function cannot be unregistered while it is being executed",
+            ));
+        }
+        let TickFunction {
+            callback: held,
+            arguments,
+            ..
+        } = self.0.ticks.tick_functions.remove(at);
+        held.give_up(self.0);
+        for value in arguments {
+            self.0.release(value);
+        }
+        Ok(true)
     }
 }

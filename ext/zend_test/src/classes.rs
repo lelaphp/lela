@@ -356,7 +356,7 @@ impl _ZendTestClass {
         }
         let text = format!(
             "be of type stdclass|Iterator, {} given",
-            req.class_name(object.class())
+            req.symbols().class_name(object.class())
         );
         Err(arg_type_error(req, 1, &text))
     }
@@ -364,7 +364,7 @@ impl _ZendTestClass {
 
 /// `object_init_ex(return_value, zend_get_called_scope(execute_data))`.
 fn called(req: &mut Request) -> Result<Owner<Static>, Thrown> {
-    let Some(class) = req.called_scope() else {
+    let Some(class) = req.frames().called_scope() else {
         return Err(throw_error(
             req,
             "Error",
@@ -392,7 +392,7 @@ impl ObjectHandlers for TestClassHandlers {
         written: &[u8],
     ) -> Result<Option<php_ext::call::Function>, Thrown> {
         if lowered == b"test" {
-            return Ok(req.native_trampoline(written, zend_test_func));
+            return Ok(req.symbols_mut().native_trampoline(written, zend_test_func));
         }
         self.get_method(req, object, lowered)
     }
@@ -406,7 +406,9 @@ impl ObjectHandlers for TestClassHandlers {
         written: &[u8],
     ) -> Result<Option<php_ext::call::Function>, Thrown> {
         if lowered == b"test" {
-            return Ok(req.native_static_trampoline(written, zend_test_func));
+            return Ok(req
+                .symbols_mut()
+                .native_static_trampoline(written, zend_test_func));
         }
         Ok(None)
     }
@@ -415,7 +417,7 @@ impl ObjectHandlers for TestClassHandlers {
 /// `ZEND_FUNCTION(zend_test_func)`: the name the trampoline was made
 /// under.
 fn zend_test_func(req: &mut Request) -> Result<Owner<Value>, Thrown> {
-    let name = req.active_function_name();
+    let name = req.frames().active_function_name();
     Ok(PhpString::new(req, name.as_bytes())?.into_value())
 }
 
@@ -880,12 +882,12 @@ impl ZendTestForbidDynamicCall {
     /// `call(): void`.
     fn call(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let _ = this;
-        req.forbid_dynamic_call()
+        req.frames_mut().forbid_dynamic_call()
     }
 
     /// `static callStatic(): void`.
     fn callStatic(req: &mut Request) -> Result<(), Thrown> {
-        req.forbid_dynamic_call()
+        req.frames_mut().forbid_dynamic_call()
     }
 }
 

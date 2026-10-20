@@ -355,7 +355,8 @@ pub(crate) fn load_config(
 /// names one.
 pub(crate) fn default_config(req: &mut Request, doc: &mut ffi::Doc) -> Result<(), Thrown> {
     let path = req
-        .ini_get(DEFAULT_CONFIG.as_bytes())
+        .ini()
+        .get(DEFAULT_CONFIG.as_bytes())
         .unwrap_or_default()
         .to_vec();
     if path.first().is_some_and(|b| *b != 0) {
@@ -424,7 +425,7 @@ pub fn extension() -> Extension {
 /// ```
 fn info(req: &mut Request) {
     let (version, date) = (ffi::version(), ffi::release_date());
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["Tidy support", "enabled"],
         &["libTidy Version", &version],
         &["libTidy Release", &date],

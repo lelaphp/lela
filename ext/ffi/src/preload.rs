@@ -50,7 +50,7 @@ pub(crate) enum Fail {
 /// (#2618). At startup no request stands, and the path is the process's
 /// to resolve.
 pub(crate) fn header_file(req: &Request, path: &[u8]) -> PathBuf {
-    req.cwd().join(OsStr::from_bytes(path))
+    req.environment().cwd().join(OsStr::from_bytes(path))
 }
 
 /// The library a declaration set names, as `dlopen` is to open it while
@@ -533,7 +533,7 @@ fn moved_scope(mut scope: Scope, moved: &impl Fn(TypeId) -> TypeId) -> Scope {
 pub(crate) fn register(req: &mut Request, path: &[u8]) -> Option<Scope> {
     let preload = attr::STORED | attr::PERSISTENT;
     let file = header_file(req, path);
-    let cwd = req.cwd();
+    let cwd = req.environment().cwd();
     let loaded = match load_header(&file, Some(&cwd), crate::types(req), preload, None) {
         Ok(loaded) => loaded,
         Err(fail) => {

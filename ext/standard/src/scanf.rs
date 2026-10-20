@@ -857,7 +857,7 @@ fn put(
 /// typed by, and given up where it is not one. The positions are the
 /// caller's, `sscanf`'s, `fscanf`'s or `SplFileObject::fscanf`'s.
 fn assign_at(req: &mut Request, position: u32, value: Owner<Value>) -> Result<(), Thrown> {
-    let given = req.argument(position).unwrap_or_default();
+    let given = req.frames().argument(position).unwrap_or_default();
     if let ValueRef::Reference(reference) = given.as_ref() {
         return reference.set(req, value);
     }

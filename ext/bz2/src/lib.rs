@@ -116,7 +116,7 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
 /// BZip2 Version => 1.0.8, 13-Jul-2019
 /// ```
 fn info(req: &mut Request) {
-    req.info_table(&[
+    req.extensions_mut().info_table(&[
         &["BZip2 Support", "Enabled"],
         &["Stream Wrapper support", "compress.bzip2://"],
         &["Stream Filter support", "bzip2.decompress, bzip2.compress"],

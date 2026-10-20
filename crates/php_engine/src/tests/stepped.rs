@@ -54,7 +54,7 @@ fn stepping() -> Extension {
 /// raised once a request, at the first entry that takes it.
 fn fire(req: &mut Request) {
     if !std::mem::replace(&mut req.state::<Stepping>().fired, true) {
-        req.interrupt().elapsed(1);
+        req.limits().interrupt().elapsed(1);
     }
 }
 
@@ -74,15 +74,15 @@ fn stepped(req: &mut Request, frame: FrameRef, steps_leaving: bool) -> Flow {
             return Flow::Resume(at);
         };
         // The unwind exit, or a fatal leaving: nothing a debugger stops at.
-        if matches!(req.raised(), Some(Raised::UnwindExit))
-            || (req.raised().is_none() && req.bailing_out())
+        if matches!(req.diagnostics().raised(), Some(Raised::UnwindExit))
+            || (req.diagnostics().raised().is_none() && req.diagnostics().bailing_out())
         {
             return Flow::Resume(at);
         }
         let entry = tier::entry(req);
         let stepped = if unwinding {
             let pending = matches!(
-                req.raised(),
+                req.diagnostics().raised(),
                 Some(Raised::Throwable(_) | Raised::GracefulExit)
             );
             if at != entry || tier::catches(req, at) || !pending {

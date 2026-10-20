@@ -15,7 +15,7 @@
 //! extension keeps it, which names one frame however its stack moves:
 //! a number the request gives a frame the first time one is asked of it
 //! and never gives again, held in the frame's state, so it moves with
-//! a generator's frame as php's pointer does. [`Request::frame_of`]
+//! a generator's frame as php's pointer does. [`Frames::of`]
 //! reads it where it stands on the chain of stacks php's
 //! `prev_execute_data` walks, the running one and each resumer's below
 //! it, and refuses it where it stands on none: a frame popped, a
@@ -47,16 +47,17 @@ use crate::api::call::Function;
 use crate::api::values::{ClassId, Value};
 use crate::exec::{self, FrameAt, Site, Vm};
 
+use super::Frames;
 use super::{Expand, Link, OpArrayView, OplineIdx, Request, Slots, links_of};
 
 /// A frame kept past the borrow it was read in, php's `execute_data`
-/// as an extension stores it: read again through [`Request::frame_of`],
+/// as an extension stores it: read again through [`Frames::of`],
 /// which answers the frame it names or nothing, never another frame.
 /// Two are equal where they name one frame.
 #[derive(Debug, Clone, Copy)]
 pub struct FrameId {
     /// Where the frame stood when the identity was read: where
-    /// [`Request::frame_of`] looks first.
+    /// [`Frames::of`] looks first.
     at: FrameRef,
     /// The frame's identity, which [`exec::Header`] holds.
     id: Identity,
@@ -439,75 +440,10 @@ impl FrameId {
 }
 
 impl Request {
-    /// The frame `id` names, where it stands on the running stack or a
-    /// resumer's below it; `None` where it stands on none, so a frame
-    /// that has left them is refused and never read as the frame at its
-    /// old place. The position it was kept at is looked at first, on
-    /// each stack; past that every frame of every stack is, so a
-    /// generator's frame pushed back elsewhere is found and a refusal
-    /// walks the whole chain.
-    #[must_use]
-    pub fn frame_of(&self, id: FrameId) -> Option<FrameView<'_>> {
-        let found = self
-            .executions()
-            .enumerate()
-            .find_map(|(stack, vm)| id.kept_at(vm).then_some((stack, vm, id.at)))
-            .or_else(|| {
-                // A generator's frame pushed back where another resumer
-                // stands.
-                self.executions()
-                    .enumerate()
-                    .find_map(|(stack, vm)| Some((stack, vm, id.moved_on(vm)?)))
-            });
-        let (stack, vm, at) = found?;
-        Some(FrameView {
-            req: self,
-            stack,
-            vm,
-            at,
-        })
-    }
-
-    /// The variable `name` of the frame `id` names, a view, as php's
-    /// debuggers read one between two oplines: what the frame's symbol
-    /// table holds under the name where it has one, else the compiled
-    /// variable of that name, so no table is built for the read; `UNDEF`
-    /// where the name is one and holds nothing. `None` where the frame
-    /// knows no such name, or is not one this reaches
-    /// ([`Request::in_frame`]).
-    pub fn frame_var(&mut self, frame: FrameId, name: &[u8]) -> Option<Value> {
-        self.in_frame(frame, |req, at| {
-            if let Some(table) = req.frame_at(at).and_then(FrameAt::symbol_table) {
-                return req.symbol_value(table, name);
-            }
-            let cv = req.frame_var_at(at, name)?;
-            Some(req.slot(at, cv))
-        })
-        .flatten()
-    }
-
-    /// `zend_rebuild_symbol_table()` over the frame `id` names, and each
-    /// name it holds with its value, a view, in the table's order: the
-    /// rows `get_defined_vars()` copies, `$_SERVER` and the other
-    /// auto-global variables among them in the main frame's, as phpdbg's
-    /// `info vars` walks them. `None`
-    /// where the frame is not one this reaches.
-    pub fn frame_vars(&mut self, frame: FrameId) -> Option<Vec<(Vec<u8>, Value)>> {
-        self.in_frame(frame, |req, at| {
-            let table = req.rebuild_symbol_table(at);
-            let vars = req.symbol_vars(table).into_iter();
-            Some(
-                vars.map(|(name, value)| (name.as_bytes().to_vec(), value))
-                    .collect(),
-            )
-        })
-        .flatten()
-    }
-
     /// `f` served at the frame `id` names, with the request running on
     /// the stack it stands on, where it stands at its place: the frames
     /// a read, a write or an evaluation reaches
-    /// ([`Request::set_frame_var`], [`Request::eval_in_frame`]). That
+    /// ([`Frames::set_var`], [`Frames::eval_in_frame`]). That
     /// is a frame on the running stack; one below a fiber, on the stack
     /// that resumed it, which the request runs on for `f`
     /// ([`Request::on_stack`]); and a suspended generator's, kept as a
@@ -524,7 +460,7 @@ impl Request {
         id: FrameId,
         f: impl FnOnce(&mut Request, FrameRef) -> R,
     ) -> Option<R> {
-        if let Some((stack, at)) = self.frame_of(id).map(|view| (view.stack, view.at)) {
+        if let Some((stack, at)) = self.frames().of(id).map(|view| (view.stack, view.at)) {
             return self.on_stack(stack, |req| f(req, at));
         }
         if let Some(coroutine) = id.coroutine
@@ -611,5 +547,78 @@ impl Request {
             });
             walk.extend(self.stack_walk(stack, vm, 0..vm.depth()));
         }
+    }
+}
+
+impl<'r> Frames<&'r Request> {
+    /// The frame `id` names, where it stands on the running stack or a
+    /// resumer's below it; `None` where it stands on none, so a frame
+    /// that has left them is refused and never read as the frame at its
+    /// old place. The position it was kept at is looked at first, on
+    /// each stack; past that every frame of every stack is, so a
+    /// generator's frame pushed back elsewhere is found and a refusal
+    /// walks the whole chain.
+    #[must_use]
+    pub fn of(self, id: FrameId) -> Option<FrameView<'r>> {
+        let found = self
+            .0
+            .executions()
+            .enumerate()
+            .find_map(|(stack, vm)| id.kept_at(vm).then_some((stack, vm, id.at)))
+            .or_else(|| {
+                // A generator's frame pushed back where another resumer
+                // stands.
+                self.0
+                    .executions()
+                    .enumerate()
+                    .find_map(|(stack, vm)| Some((stack, vm, id.moved_on(vm)?)))
+            });
+        let (stack, vm, at) = found?;
+        Some(FrameView {
+            req: self.0,
+            stack,
+            vm,
+            at,
+        })
+    }
+}
+
+impl Frames<&mut Request> {
+    /// The variable `name` of the frame `id` names, a view, as php's
+    /// debuggers read one between two oplines: what the frame's symbol
+    /// table holds under the name where it has one, else the compiled
+    /// variable of that name, so no table is built for the read; `UNDEF`
+    /// where the name is one and holds nothing. `None` where the frame
+    /// knows no such name, or is not one this reaches
+    /// ([`Request::in_frame`]).
+    pub fn var(self, frame: FrameId, name: &[u8]) -> Option<Value> {
+        self.0
+            .in_frame(frame, |req, at| {
+                if let Some(table) = req.frame_at(at).and_then(FrameAt::symbol_table) {
+                    return req.symbol_value(table, name);
+                }
+                let cv = req.frame_var_at(at, name)?;
+                Some(req.slot(at, cv))
+            })
+            .flatten()
+    }
+
+    /// `zend_rebuild_symbol_table()` over the frame `id` names, and each
+    /// name it holds with its value, a view, in the table's order: the
+    /// rows `get_defined_vars()` copies, `$_SERVER` and the other
+    /// auto-global variables among them in the main frame's, as phpdbg's
+    /// `info vars` walks them. `None`
+    /// where the frame is not one this reaches.
+    pub fn vars(self, frame: FrameId) -> Option<Vec<(Vec<u8>, Value)>> {
+        self.0
+            .in_frame(frame, |req, at| {
+                let table = req.rebuild_symbol_table(at);
+                let vars = req.symbol_vars(table).into_iter();
+                Some(
+                    vars.map(|(name, value)| (name.as_bytes().to_vec(), value))
+                        .collect(),
+                )
+            })
+            .flatten()
     }
 }

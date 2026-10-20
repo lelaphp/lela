@@ -3,7 +3,7 @@
 //! §7.1, as #1780 ruled): where php's `zend_test` installs a heap of its
 //! own whose custom handlers serve each allocation from the heap beneath
 //! and print it, this one puts an observer in the request's heap
-//! ([`Request::observe_allocations`]), which is told of each allocation
+//! ([`Memory::observe_allocations`]), which is told of each allocation
 //! the heap still serves, and prints what php's handlers print. So what
 //! `memory_get_usage()` reads while the switch is on is the request
 //! heap's, where php's reads the heap it installed.
@@ -29,7 +29,7 @@ use std::io::Write as _;
 
 use php_ext::abi::{ExtensionBuilder, IniStage};
 use php_ext::raising::Thrown;
-use php_ext::request::{Allocation, AllocationObserverId, ObserveAllocations, Request};
+use php_ext::request::{Allocation, AllocationObserverId, Ini, ObserveAllocations, Request};
 
 use crate::{Entry, Modifiable};
 
@@ -72,7 +72,7 @@ pub(crate) struct ObservedHeap(Option<AllocationObserverId>);
     reason = "the `rinit` slot's shape, which a request start that throws needs"
 )]
 pub(crate) fn rinit(req: &mut Request) -> Result<(), Thrown> {
-    if req.ini_get(ENABLED).is_some_and(Request::ini_parse_bool) {
+    if req.ini().get(ENABLED).is_some_and(Ini::parse_bool) {
         install(req);
     }
     Ok(())
@@ -95,10 +95,10 @@ fn on_update_enabled(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Th
     let Some(value) = value else {
         return Ok(false);
     };
-    if req.ini_stage() == IniStage::Startup {
+    if req.ini().stage() == IniStage::Startup {
         return Ok(true);
     }
-    if Request::ini_parse_bool(value) {
+    if Ini::parse_bool(value) {
         install(req);
     } else {
         remove(req);
@@ -114,7 +114,7 @@ fn install(req: &mut Request) {
         return;
     }
     print(format_args!("Prev handlers at 0x0, 0x0, 0x0, 0x0, 0x0\n"));
-    let at = req.observe_allocations(Box::new(Printer));
+    let at = req.memory_mut().observe_allocations(Box::new(Printer));
     req.state::<crate::State>().allocations.0 = Some(at);
 }
 
@@ -122,7 +122,7 @@ fn install(req: &mut Request) {
 /// where it stands.
 fn remove(req: &mut Request) {
     if let Some(at) = req.state::<crate::State>().allocations.0.take() {
-        req.unobserve_allocations(at);
+        req.memory_mut().unobserve_allocations(at);
     }
 }
 

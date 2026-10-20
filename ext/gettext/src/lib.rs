@@ -86,7 +86,8 @@ pub fn extension() -> Extension {
 /// GetText Support => enabled
 /// ```
 fn info(req: &mut Request) {
-    req.info_table(&[&["GetText Support", "enabled"]]);
+    req.extensions_mut()
+        .info_table(&[&["GetText Support", "enabled"]]);
 }
 
 /// `PHP_GETTEXT_DOMAIN_LENGTH_CHECK`: a domain longer than libintl's
@@ -135,7 +136,8 @@ fn category_check(req: &mut Request, position: u32, category: i64) -> Result<c_i
 /// over the value Terminal sets; none where it names none.
 fn locale(req: &Request, category: c_int) -> Option<CString> {
     let env = |name: &[u8]| {
-        req.env_pairs()
+        req.environment()
+            .env_pairs()
             .iter()
             .find(|(n, v)| n.as_slice() == name && !v.is_empty())
             .map(|(_, v)| v.as_slice())
@@ -346,12 +348,12 @@ fn bindtextdomain(
     let dir = match directory {
         None => None,
         Some(Path(dir)) if !dir.as_bytes().is_empty() && dir.as_bytes() != b"0" => {
-            let Some(real) = req.realpath(dir.as_bytes()) else {
+            let Some(real) = req.environment_mut().realpath(dir.as_bytes()) else {
                 return Ok(OrFalse::False);
             };
             Some(real)
         }
-        Some(_) => Some(req.cwd()),
+        Some(_) => Some(req.environment().cwd()),
     };
     let dir = dir.map(|dir| ffi::c_string(dir.as_os_str().as_encoded_bytes()));
     match ffi::bind(&name, dir.as_deref()) {

@@ -9,7 +9,7 @@ use php_ext::abi::{ExtensionBuilder, IniStage, LongHandler};
 use php_ext::coerce::atoi;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Thrown, warning};
-use php_ext::request::{Request, Zone};
+use php_ext::request::{Ini, Request, Zone};
 
 use crate::State;
 
@@ -238,7 +238,7 @@ impl Entry {
     /// What the handler stored for `value`, the entry's text.
     pub(crate) fn stored(&self, value: &[u8]) -> Stored {
         match self.kind {
-            Kind::Bool | Kind::Enable => Stored::Bool(Request::ini_parse_bool(value)),
+            Kind::Bool | Kind::Enable => Stored::Bool(Ini::parse_bool(value)),
             Kind::Memory => Stored::Long(i64::from(atoi(value)).saturating_mul(1024 * 1024)),
             Kind::MaxFiles => Stored::Long(i64::from(atoi(value))),
             Kind::MaxWasted => Stored::Double(f64::from(atoi(value)) / 100.0),
@@ -253,7 +253,7 @@ impl Entry {
             | Kind::UnrollLoops
             | Kind::UnrollCalls
             | Kind::UnrollReturns
-            | Kind::TraceLength => Stored::Long(Request::ini_parse_quantity(value).0),
+            | Kind::TraceLength => Stored::Long(Ini::parse_quantity(value).0),
         }
     }
 
@@ -262,7 +262,7 @@ impl Entry {
     /// `no value` where it is empty.
     pub(crate) fn shown(&self, value: &[u8]) -> String {
         match self.kind {
-            Kind::Bool | Kind::Enable if Request::ini_parse_bool(value) => String::from("On"),
+            Kind::Bool | Kind::Enable if Ini::parse_bool(value) => String::from("On"),
             Kind::Bool | Kind::Enable => String::from("Off"),
             _ => String::from_utf8_lossy(value).into_owned(),
         }
@@ -274,23 +274,25 @@ pub(crate) fn value<'r>(req: &'r Request, name: &str) -> &'r [u8] {
     let fallback = named(name)
         .and_then(|entry| entry.default)
         .unwrap_or_default();
-    req.ini_get(name.as_bytes()).unwrap_or(fallback.as_bytes())
+    req.ini()
+        .get(name.as_bytes())
+        .unwrap_or(fallback.as_bytes())
 }
 
 /// The entry read as a boolean.
 pub(crate) fn flag(req: &Request, name: &str) -> bool {
-    Request::ini_parse_bool(value(req, name))
+    Ini::parse_bool(value(req, name))
 }
 
 /// The entry read as `OnUpdateLong` stores it.
 pub(crate) fn long(req: &Request, name: &str) -> i64 {
-    Request::ini_parse_quantity(value(req, name)).0
+    Ini::parse_quantity(value(req, name)).0
 }
 
 /// `zend_ini_parse_quantity_warn`: the value, and php's warning naming
 /// the entry for a shape it reads for backwards compatibility.
 fn quantity(req: &mut Request, name: &str, value: &[u8]) -> i64 {
-    req.ini_parse_quantity_warn(name.as_bytes(), value)
+    req.ini_mut().parse_quantity_warn(name.as_bytes(), value)
 }
 
 /// The `ZEND_INI_MH` of entry number `AT`, which the engine serves with
@@ -426,9 +428,8 @@ const MAX_INTERNED_STRINGS_BUFFER: i64 = 32767;
 /// string(1) "0"
 /// ```
 fn on_enable(req: &mut Request, value: &[u8]) -> bool {
-    let stage = req.ini_stage();
-    if matches!(stage, IniStage::Startup | IniStage::Deactivate) || !Request::ini_parse_bool(value)
-    {
+    let stage = req.ini().stage();
+    if matches!(stage, IniStage::Startup | IniStage::Deactivate) || !Ini::parse_bool(value) {
         if stage == IniStage::Runtime {
             req.state::<State>().accelerator_enabled = false;
         }
@@ -440,7 +441,7 @@ fn on_enable(req: &mut Request, value: &[u8]) -> bool {
     if stage == IniStage::Activate {
         // `ZEND_INI_STAGE_ACTIVATE`: a host's own value, which php-fpm's
         // pools set, logged rather than raised.
-        let message = if req.sapi_name() == "fpm-fcgi" {
+        let message = if req.environment().sapi_name() == "fpm-fcgi" {
             "Zend OPcache can't be temporarily enabled. Are you using php_admin_value[opcache.enable]=1 in an individual pool's configuration?"
         } else {
             "Zend OPcache can't be temporarily enabled (it may be only disabled until the end of request)"
@@ -480,7 +481,7 @@ fn on_enable(req: &mut Request, value: &[u8]) -> bool {
 /// string(7) "tracing"
 /// ```
 fn on_jit(req: &mut Request, value: &[u8]) -> bool {
-    let stage = req.ini_stage();
+    let stage = req.ini().stage();
     if stage != IniStage::Startup && !jit_configured(req) {
         if stage == IniStage::Runtime {
             warning(
@@ -542,11 +543,12 @@ fn jit_setting(value: &[u8]) -> Jit {
 /// kept it, which a zero `opcache.jit_buffer_size` or the file cache
 /// alone does not.
 fn jit_configured(req: &mut Request) -> bool {
-    let Some(me) = req.extension_named(crate::PRODUCT.as_bytes()) else {
+    let Some(me) = req.extensions().named(crate::PRODUCT.as_bytes()) else {
         return false;
     };
     let master = |name: &str| {
-        req.extension_ini(me)
+        req.ini()
+            .extension_ini(me)
             .into_iter()
             .find(|held| held.decl.name.0.as_ref() == name.as_bytes())
             .and_then(|held| held.master)
@@ -556,7 +558,7 @@ fn jit_configured(req: &mut Request) -> bool {
     if jit_setting(&master("opcache.jit")) != Jit::Enabled {
         return false;
     }
-    let buffer = Request::ini_parse_quantity(&master("opcache.jit_buffer_size")).0;
+    let buffer = Ini::parse_quantity(&master("opcache.jit_buffer_size")).0;
     let started = req.state::<State>().startup == crate::Startup::Ok;
     !started || buffer > 0 && !flag(req, "opcache.file_cache_only")
 }
@@ -666,7 +668,7 @@ pub(crate) fn accel_log(req: &mut Request, level: Log, message: &str) {
             return;
         }
     }
-    req.write_stderr(line.as_bytes());
+    req.response_mut().write_stderr(line.as_bytes());
 }
 
 /// `asctime(localtime(&at))` less its line ending: `at` in `zone`, the

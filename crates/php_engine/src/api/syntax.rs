@@ -167,7 +167,7 @@ where
     }
 
     fn env(&mut self, name: &[u8]) -> Option<Vec<u8>> {
-        self.req.env(name).map(<[u8]>::to_vec)
+        self.req.environment().env(name).map(<[u8]>::to_vec)
     }
 
     fn double(&mut self, d: f64) -> Result<Vec<u8>, Thrown> {
@@ -237,8 +237,9 @@ where
 /// dropped, as `zend_highlight` and `zend_strip` clear it.
 fn scanned_file(req: &Request, source: &[u8]) -> Vec<ScannedToken> {
     let short_open_tag = req
-        .ini_get(b"short_open_tag")
-        .is_none_or(Request::ini_parse_bool);
+        .ini()
+        .get(b"short_open_tag")
+        .is_none_or(crate::api::request::Ini::parse_bool);
     let options = LexOptions {
         short_open_tag,
         ..LexOptions::default()
@@ -283,7 +284,7 @@ pub enum Scanning {
 /// The `E_COMPILE_ERROR` that ends the request where the source filter
 /// cannot convert the source.
 pub fn highlight(req: &mut Request, source: &[u8], scanning: Scanning) -> Result<Vec<u8>, Thrown> {
-    let read = |name: &[u8]| req.ini_get(name).unwrap_or_default().to_vec();
+    let read = |name: &[u8]| req.ini().get(name).unwrap_or_default().to_vec();
     let colours = Colours {
         comment: read(b"highlight.comment"),
         default: read(b"highlight.default"),
@@ -393,9 +394,10 @@ fn read(req: &mut Request, source: &[u8], scanning: Scanning) -> Result<Read, Th
         }
         Err(refused) => {
             let file = req
+                .frames()
                 .current_file()
                 .map_or_else(|| b"Unknown".to_vec(), <[u8]>::to_vec);
-            let line = req.current_line();
+            let line = req.frames().current_line();
             req.end_in_compile_time(
                 crate::api::raising::Level::CompileError,
                 &refused.message(),

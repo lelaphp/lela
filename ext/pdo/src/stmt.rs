@@ -1392,7 +1392,7 @@ impl PDOStatement {
         let Some(out) = read(req, stmt, dump_params) else {
             return Ok(None);
         };
-        req.write(&out);
+        req.response_mut().write(&out);
         Ok(None)
     }
 

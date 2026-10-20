@@ -324,6 +324,7 @@ fn brigade_type(req: &mut Request) -> ResourceType {
         return kind;
     }
     let kind = req
+        .memory_mut()
         .resources()
         .register_type(b"userfilter.bucket brigade", None);
     req.state::<State>().user_filters.brigade_type = Some(kind);
@@ -334,7 +335,10 @@ fn bucket_type(req: &mut Request) -> ResourceType {
     if let Some(kind) = req.state::<State>().user_filters.bucket_type {
         return kind;
     }
-    let kind = req.resources().register_type(b"userfilter.bucket", None);
+    let kind = req
+        .memory_mut()
+        .resources()
+        .register_type(b"userfilter.bucket", None);
     req.state::<State>().user_filters.bucket_type = Some(kind);
     kind
 }
@@ -490,7 +494,7 @@ impl StreamFilter for UserFilter {
         let Some(object) = self.object.take() else {
             return Ok(());
         };
-        let closed = if req.stream_thrown().is_some() {
+        let closed = if req.diagnostics_mut().stream_thrown().is_some() {
             Ok(None)
         } else {
             call_if_exists(req, *object, b"onclose")

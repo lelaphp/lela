@@ -43,7 +43,7 @@ fn open(req: &mut Request, path: &[u8]) -> Result<Option<IncludeSource>, Thrown>
         Err(thrown) => Err(thrown),
     };
     let opened_path = fh.opened_path().map(|p| p.as_bytes().to_vec());
-    if !req.bailing_out() {
+    if !req.diagnostics().bailing_out() {
         fh.destroy(req);
     }
     read.map(|source| {
@@ -123,7 +123,7 @@ fn get_line(req: &mut Request, value: &Value) -> Option<Vec<u8>> {
 /// (`zend_get_executed_filename`), which is how a file beside the
 /// primary file is found from another working directory.
 /// `tsrm_realpath` is the kernel's canonical path against the
-/// request's working directory ([`Request::realpath`]), and here a
+/// request's working directory ([`Environment::realpath`]), and here a
 /// regular file alone, which is the `S_ISREG` the plain-files wrapper
 /// holds an include to when it opens; php reports a directory with
 /// whatever `errno` the failed open left, and this engine as a file
@@ -154,14 +154,14 @@ fn resolve_path(req: &mut Request, written: &[u8]) -> Result<Vec<u8>, Unresolved
             _ => Err(not_found()),
         };
     }
-    let include_path = req.ini_get(b"include_path").unwrap_or_default().to_vec();
+    let include_path = req.ini().get(b"include_path").unwrap_or_default().to_vec();
     let dot_relative = written.starts_with(b"./") || written.starts_with(b"../");
     if dot_relative || written.starts_with(b"/") || include_path.is_empty() {
         return req.realpath_file(written).map_err(Unresolved::Missing);
     }
     let mut last = not_found();
     let mut entries: Vec<Vec<u8>> = include_path_entries(&include_path);
-    if let Some(file) = req.current_file()
+    if let Some(file) = req.frames().current_file()
         && let Some(slash) = file.iter().rposition(|b| *b == b'/')
         && slash > 0
     {
