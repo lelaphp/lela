@@ -613,7 +613,7 @@ impl<H> VmStack<H> {
             let from = page.top;
             page.top += used;
             let at = page.slot(from + FRAME_HEADER_SLOTS);
-            return Ok(self.lay(at, slots, Placed::On { from }, header));
+            return Ok(self.lay(at, slots, Placed::On { from }, header, undefine));
         }
         self.push_opening(heap, slots, used, header)
     }
@@ -660,16 +660,24 @@ impl<H> VmStack<H> {
         let from = page.top;
         page.top += used;
         let at = page.slot(from + FRAME_HEADER_SLOTS);
-        Ok(self.lay(at, slots, placed, header))
+        Ok(self.lay(at, slots, placed, header, undefine))
     }
 
     /// A frame of `len` slots from `at` laid on top of the stack where
     /// `placed` says it stands, its header written in the room before
-    /// `at` and every slot `UNDEF`, as `i_init_func_execute_data` finds
-    /// them; the room is the push's, `FRAME_HEADER_SLOTS` and `len` slots
-    /// long, which nothing else names.
+    /// `at` and its slots by `cells`, every one `UNDEF` as
+    /// `i_init_func_execute_data` finds them where the push has nothing
+    /// to place ([`undefine`]); the room is the push's,
+    /// `FRAME_HEADER_SLOTS` and `len` slots long, which nothing else names.
     #[inline]
-    fn lay(&mut self, at: NonNull<Zval>, len: usize, placed: Placed, header: H) -> FrameRef {
+    fn lay(
+        &mut self,
+        at: NonNull<Zval>,
+        len: usize,
+        placed: Placed,
+        header: H,
+        cells: impl FnOnce(&mut [Zval]),
+    ) -> FrameRef {
         let () = Frame::<H>::FITS;
         let mut frame = Frame {
             at,
@@ -681,7 +689,7 @@ impl<H> VmStack<H> {
         // push gave the frame before its first CV, which `FITS` holds an
         // `H` to fit, aligned, and nothing else names.
         unsafe { frame.header_at().write(header) };
-        undefine(frame.cells_mut());
+        cells(frame.cells_mut());
         self.stand(frame)
     }
 
@@ -780,8 +788,8 @@ impl<H> VmStack<H> {
     }
 
     /// Push the frame of a call php lays down nowhere, an unobserved
-    /// frameless call's, of `slots` slots and the header's room before
-    /// them: in a room off the pages and off `heap` ([`Loose`]), the
+    /// frameless call's, its slots the `operands` and the header's room
+    /// before them: in a room off the pages and off `heap` ([`Loose`]), the
     /// one the last such frame gave back where it stands spare. php's
     /// `ZEND_FRAMELESS_ICALL_*` pushes no frame unless an observer
     /// watches the function (`Z/Zend/zend_vm_def.h:9775`), so this one
@@ -790,7 +798,10 @@ impl<H> VmStack<H> {
     /// as they stood for what the native pushes while it is served.
     /// More than three slots, past what a frameless call passes, is the
     /// engine's error.
-    pub fn push_frameless(&mut self, slots: usize, header: H) -> Result<FrameRef, Fatal> {
+    #[inline(always)] // the engine's frameless handler is its one caller
+    #[allow(clippy::inline_always)]
+    pub fn push_frameless(&mut self, operands: &[Zval], header: H) -> Result<FrameRef, Fatal> {
+        let slots = operands.len();
         if slots > LOOSE_OPERANDS {
             return Err(Fatal::error(format!(
                 "InternalError: a frameless call's frame of {slots} slots, past the {LOOSE_OPERANDS} operands its room holds"
@@ -800,7 +811,17 @@ impl<H> VmStack<H> {
         // SAFETY: the room holds `LOOSE_SLOTS` slots, so the first CV's
         // place, `FRAME_HEADER_SLOTS` slots in, is inside it.
         let at = unsafe { room.at().add(FRAME_HEADER_SLOTS) };
-        Ok(self.lay(at, slots, Placed::Loose(room), header))
+        // Written slot by slot, as the handler lays its operands, where a
+        // copy of a length the compiler does not know is a call.
+        let laid = |cells: &mut [Zval]| match (cells, operands) {
+            ([first], [one]) => *first = *one,
+            ([first, second], [one, two]) => (*first, *second) = (*one, *two),
+            ([first, second, third], [one, two, three]) => {
+                (*first, *second, *third) = (*one, *two, *three);
+            }
+            (cells, _) => undefine(cells),
+        };
+        Ok(self.lay(at, slots, Placed::Loose(room), header, laid))
     }
 
     /// Pop the frame the loop is executing,
@@ -822,6 +843,12 @@ impl<H> VmStack<H> {
             self.innermost
                 .store(frame.linked_below(), Ordering::Relaxed);
             page.top = from;
+            return;
+        }
+        // An unobserved frameless call's room, which links nothing: kept
+        // for the next where none is spare, every frameless call's pop.
+        if let Placed::Loose(room) = frame.placed {
+            self.spare.get_or_insert(room);
             return;
         }
         self.unlink(&frame);
@@ -1347,7 +1374,7 @@ mod tests {
             ..Head::default()
         };
         heap.reset_peak();
-        let call = stack.push_frameless(3, called.clone());
+        let call = stack.push_frameless(&[Zval::UNDEF; 3], called.clone());
         assert!(call.is_ok());
         let Ok(call) = call else {
             return;
@@ -1368,8 +1395,12 @@ mod tests {
         // frameless call it makes takes a room of its own.
         assert!(stack.push_frame(&mut heap, 10, 0, Head::default()).is_ok());
         assert_eq!(heap.memory_usage(false) - start, 2 * PAGE_SIZE);
-        let inner = stack.push_frameless(1, Head::default());
-        assert!(stack.push_frameless(4, Head::default()).is_err());
+        let inner = stack.push_frameless(&[Zval::UNDEF], Head::default());
+        assert!(
+            stack
+                .push_frameless(&[Zval::UNDEF; 4], Head::default())
+                .is_err()
+        );
         let room = |stack: &VmStack<Head>, f: Option<FrameRef>| {
             f.and_then(|f| stack.frames.get(f.0 as usize)).map(|f| f.at)
         };
@@ -1385,11 +1416,14 @@ mod tests {
         // kept spare, and the page's top stands where it stood; the
         // outer call's room, given back with one kept, is freed.
         stack.pop_frame(&mut heap);
-        let again = stack.push_frameless(2, Head::default()).ok();
+        let again = stack
+            .push_frameless(&[Zval::long(5), Zval::UNDEF], Head::default())
+            .ok();
         assert_eq!(room(&stack, again), inner_room);
         assert_eq!(
             again.and_then(|f| stack.frame(f)).map(|f| f.slot(Slot(0))),
-            Some(Zval::UNDEF)
+            Some(Zval::long(5)),
+            "the operands are laid in the room's slots"
         );
         assert!(stack.spare.is_none());
         stack.pop_frame(&mut heap);
@@ -1641,7 +1675,11 @@ mod tests {
         }
         assert_eq!(chain(&stack), rooms(&stack));
         assert_eq!(chain(&stack).len(), 3);
-        assert!(stack.push_frameless(2, Head::default()).is_ok());
+        assert!(
+            stack
+                .push_frameless(&[Zval::UNDEF; 2], Head::default())
+                .is_ok()
+        );
         assert_eq!(chain(&stack).len(), 3, "a frameless call is on no chain");
         assert!(stack.push_frame(&mut heap, 1, 0, Head::default()).is_ok());
         assert_eq!(chain(&stack), rooms(&stack));

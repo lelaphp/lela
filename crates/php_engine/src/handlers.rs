@@ -11943,8 +11943,9 @@ pub(crate) fn frameless_icall_0<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    frameless_call(req, frame, code, op, &[])
+    frameless_call(req, frame, code, (op, at), [])
 }
 
 /// `ZEND_FRAMELESS_ICALL_1` (`Z/Zend/zend_vm_def.h:9786`): the native
@@ -11990,8 +11991,9 @@ pub(crate) fn frameless_icall_1<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    frameless_call(req, frame, code, op, &[(op.op1_type, op.op1)])
+    frameless_call(req, frame, code, (op, at), [(op.op1_type, op.op1)])
 }
 
 /// `ZEND_FRAMELESS_ICALL_2` (`Z/Zend/zend_vm_def.h:9812`): the native
@@ -12038,14 +12040,10 @@ pub(crate) fn frameless_icall_2<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    frameless_call(
-        req,
-        frame,
-        code,
-        op,
-        &[(op.op1_type, op.op1), (op.op2_type, op.op2)],
-    )
+    let arguments = [(op.op1_type, op.op1), (op.op2_type, op.op2)];
+    frameless_call(req, frame, code, (op, at), arguments)
 }
 
 /// `ZEND_FRAMELESS_ICALL_3` (`Z/Zend/zend_vm_def.h:9846`): the native
@@ -12084,19 +12082,16 @@ pub(crate) fn frameless_icall_3<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    req.vm_mut().stand(frame, at);
     let (_, data) = data_after(req, frame, code, op)?;
-    frameless_call(
-        req,
-        frame,
-        code,
-        op,
-        &[
-            (op.op1_type, op.op1),
-            (op.op2_type, op.op2),
-            (data.op1_type, data.op1),
-        ],
-    )
+    let arguments = [
+        (op.op1_type, op.op1),
+        (op.op2_type, op.op2),
+        (data.op1_type, data.op1),
+    ];
+    frameless_call(req, frame, code, (op, at), arguments)
 }
 
 /// The body the four `FRAMELESS_ICALL_*` handlers share: the native the
@@ -12142,6 +12137,24 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// 909
 /// ```
 ///
+/// The operands are read before the call is laid down, as php's
+/// handler reads them before it calls, so a warning an operand raises
+/// is served where no call of the native stands:
+///
+/// ```php
+/// set_error_handler(function ($n, $s) { echo $s, "\n"; debug_print_backtrace(); return true; }, E_WARNING);
+/// function f($s) { return str_contains($s, $u); }
+/// var_dump(f("abc"));
+/// ```
+/// ```expect
+/// Undefined variable $u
+/// #0 %s(3): {closure:%s:2}(2, 'Undefined varia...', '%s', 3)
+/// #1 %s(4): f('abc')
+///
+/// Deprecated: str_contains(): Passing null to parameter #2 ($needle) of type string is deprecated in %s on line 3
+/// bool(true)
+/// ```
+///
 /// The operands are given up as the call ends, `FREE_OP*`, so a
 /// temporary the native read is destroyed before the statement that
 /// reads what the call returned goes on, and a string an argument's
@@ -12161,13 +12174,24 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// int(32)
 /// after
 /// ```
-fn frameless_call(
+#[inline(never)] // out of the loop's body, whose held state #3022 found at its optimum
+fn frameless_call<const N: usize>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
-    op: &Opline,
-    arguments: &[(OperandKind, u32)],
+    (op, at): (&Opline, u32),
+    arguments: [(OperandKind, u32); N],
 ) -> Edge {
+    // The frame stands at the call, and a `CV` is borrowed where no name
+    // reaches its variables, where it carries no annex
+    // ([`exec::frameless_operand`]).
+    let named = match req.vm_mut().at_mut(frame) {
+        Some(header) => {
+            header.opline = at;
+            header.annex.is_some()
+        }
+        None => true,
+    };
     let Some((function, entry)) = req.frameless_entry(op.extended_value) else {
         return Err(Fatal::error(format!(
             "InternalError: {} indexes frameless entry {} and the engine's table has {} entries",
@@ -12176,30 +12200,27 @@ fn frameless_call(
             req.frameless_count()
         )));
     };
-    let mut header =
-        exec::Header::call(function, u32::try_from(arguments.len()).unwrap_or(u32::MAX));
-    header.info.set_serving();
-    header.info.set_frameless(true);
-    let call = req.push_frameless(header)?;
-    for (at, &(kind, field)) in arguments.iter().enumerate() {
-        let operand = exec::frameless_operand(req, frame, code, kind, field);
-        let placed = req
-            .vm_mut()
-            .stack
-            .frame_mut(call)
-            .and_then(|record| record.slots_mut().get_mut(at));
-        match placed {
-            Some(slot) => *slot = operand,
-            None => req.release_zval_nogc(operand),
+    let mut operands = [Zval::UNDEF; N];
+    let mut owned = 0u8;
+    for (at, (operand, read)) in arguments.into_iter().zip(&mut operands).enumerate() {
+        let own;
+        (*read, own) = exec::frameless_operand(req, frame, code, operand, named);
+        owned |= u8::from(own) << at;
+    }
+    if let Err(fatal) = req.push_frameless(function, &operands) {
+        for (at, &operand) in operands.iter().enumerate() {
+            if owned >> at & 1 != 0 {
+                req.release_zval_nogc(operand);
+            }
         }
+        return Err(fatal);
     }
     // The call ends with the result whether the native threw or not, as
     // php's frameless handler and its full call for an observed one do
     // (`Z/Zend/zend_execute.c:1597`).
     let served = req.serve_entry(function, entry, OnThrow::ReturnValue);
-    req.pop_frameless();
-    let at = req.vm().opline(frame);
-    let width = if arguments.len() == 3 { 2 } else { 1 };
+    req.pop_frameless(owned);
+    let width = if N == 3 { 2 } else { 1 };
     match served {
         Ok(value) => {
             set_out(req, frame, code, op, value);
@@ -17294,6 +17315,7 @@ fn place_of(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<Propert
 
 /// `ZVAL_COPY_VALUE(EX_VAR(opline->result.var), value)`: the temporary
 /// `out` names takes `value`'s owner, and what it held is released.
+#[inline]
 fn set_out(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, value: Value) {
     req.replace_slot(frame, exec::temporary_slot(code, op.out), value);
 }
@@ -25969,7 +25991,7 @@ mod tests {
         let code = crate::exec::code_of(&unit);
         let call = code.oplines.first().copied().unwrap_or_default();
         assert_eq!(
-            served!(req, frame, at => frameless_icall_0::<Nop>(&mut req, frame, code, &call)),
+            served!(req, frame, at => frameless_icall_0::<Nop>(&mut req, frame, code, &call, at)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.slot(frame, 0).as_int(), Some(7));
@@ -26005,7 +26027,7 @@ mod tests {
         let code = crate::exec::code_of(&unit);
         let call = code.oplines.first().copied().unwrap_or_default();
         assert!(matches!(
-            served!(req, frame, at => frameless_icall_0::<Nop>(&mut req, frame, code, &call)),
+            served!(req, frame, at => frameless_icall_0::<Nop>(&mut req, frame, code, &call, at)),
             Err(fatal) if matches!(fatal.reason(), php_heap::FatalReason::Error(message) if message.starts_with("InternalError: ZEND_FRAMELESS_ICALL_0 indexes frameless entry 1000000"))
         ));
     }

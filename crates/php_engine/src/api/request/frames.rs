@@ -1229,52 +1229,84 @@ impl Request {
         self.push_room(room, header)
     }
 
-    /// The call of a frameless native, `FRAMELESS_ICALL_*`'s: php's full
-    /// call where the native is observed
+    /// The call of the frameless native `function` over `operands`,
+    /// `FRAMELESS_ICALL_*`'s, laid down being served: php's
+    /// full call where the native is observed
     /// ([`crate::observer::frameless_observed`]), on the VM stack as
     /// [`Request::push_call`] pushes it, and any other off the stack's
     /// pages ([`php_heap::VmStack::push_frameless`]), since php serves it
     /// over no frame and it takes no room php's call does not.
     /// A frameless native's call takes one slot per operand, as
     /// [`Request::call_room`] sizes any native's call.
-    pub(crate) fn push_frameless(&mut self, header: exec::Header) -> Result<FrameRef, Fatal> {
-        let Some(function) = header.function else {
-            return Err(Fatal::error("InternalError: a call pushed with no callee"));
-        };
-        let room = header.num_args as usize;
-        if crate::observer::frameless_observed(self, function) {
-            return self.push_room(room, header);
+    #[inline(always)] // the one call site is the frameless handler's
+    #[allow(clippy::inline_always)]
+    pub(crate) fn push_frameless(
+        &mut self,
+        function: Function,
+        operands: &[php_heap::Zval],
+    ) -> Result<FrameRef, Fatal> {
+        let count = u32::try_from(operands.len()).unwrap_or(u32::MAX);
+        let mut header = exec::Header::call(function, count);
+        header.info.set_serving();
+        header.info.set_frameless(true);
+        if !crate::observer::frameless_observed(self, function) {
+            return self.vm.push_frameless(operands, header);
         }
-        self.vm.push_frameless(room, header)
+        let call = self.push_room(operands.len(), header)?;
+        if let Some(slots) = self
+            .vm
+            .stack
+            .frame_mut(call)
+            .map(exec::HeapFrame::slots_mut)
+        {
+            slots.copy_from_slice(operands);
+        }
+        Ok(call)
     }
 
     /// The frameless call on top popped ([`Request::push_frameless`]),
-    /// its operands given up as php's `FREE_OP*` after the frameless
-    /// handler frees them, `zval_ptr_dtor_nogc`, once the call is on no
-    /// chain. A frameless call is pushed with no receiver and no
-    /// closure, and an annex only where an argument's coercion kept a
-    /// value there; a record carrying any of them is popped as any call
-    /// is ([`Request::pop_call`]).
-    pub(crate) fn pop_frameless(&mut self) {
+    /// the operands it owns, the bits of `owned`, given up as php's
+    /// `FREE_OP*` after the frameless handler frees them,
+    /// `zval_ptr_dtor_nogc`, once the call is on no chain; an operand
+    /// it borrowed is the caller's ([`exec::frameless_operand`]). A
+    /// frameless call is pushed with no receiver and no closure, and an
+    /// annex only where an argument's coercion kept a value there; a
+    /// record carrying one is popped as any call is
+    /// ([`Request::pop_call`]), its borrowed operands left out.
+    #[inline(always)] // the one call site is the frameless handler's
+    #[allow(clippy::inline_always)]
+    pub(crate) fn pop_frameless(&mut self, owned: u8) {
         /// `ZEND_FRAMELESS_ICALL_3`'s, the most operands a frameless
         /// call passes.
         const OPERANDS: usize = 3;
         let call = self.vm.stack.current();
-        let Some(header) = self.vm.at_mut(call) else {
+        let Some(frame) = self.vm.stack.frame_mut(call) else {
             return;
         };
-        if header.annex.is_some() || header.closure.is_some() || header.receiver().is_some() {
+        let header = frame.header_mut();
+        debug_assert!(header.closure.is_none() && header.receiver().is_none());
+        header.info.set_leaving(true);
+        let carries = header.annex.is_some();
+        let slots = frame.slots_mut();
+        if carries {
+            for (at, slot) in slots.iter_mut().enumerate() {
+                if owned >> at & 1 == 0 {
+                    *slot = php_heap::Zval::UNDEF;
+                }
+            }
             return self.pop_call();
         }
-        header.info.set_leaving(true);
-        let mut operands = [php_heap::Zval::UNDEF; OPERANDS];
-        if let Some(frame) = self.vm.stack.frame_mut(call) {
-            for (operand, slot) in operands.iter_mut().zip(frame.slots_mut()) {
-                *operand = std::mem::replace(slot, php_heap::Zval::UNDEF);
+        if owned != 0 {
+            let mut operands = [php_heap::Zval::UNDEF; OPERANDS];
+            let count = slots.len().min(OPERANDS);
+            for (at, (operand, slot)) in operands.iter_mut().zip(slots).enumerate() {
+                if owned >> at & 1 != 0 {
+                    *operand = *slot;
+                }
             }
-        }
-        for operand in operands {
-            self.release_zval_nogc(operand);
+            for &operand in operands.get(..count).unwrap_or_default() {
+                self.release_zval_nogc(operand);
+            }
         }
         self.vm.stack.pop_frame(&mut self.heap);
     }
@@ -1907,6 +1939,7 @@ impl Request {
 
     /// [`Request::set_slot`] and what the slot held released after the
     /// write, the `zval_ptr_dtor` php's assignment over a slot ends with.
+    #[inline]
     pub(crate) fn replace_slot(&mut self, frame: FrameRef, at: u32, value: Value) {
         let Some(slot) = self
             .vm
@@ -1918,10 +1951,18 @@ impl Request {
         };
         let old = std::mem::replace(slot, value.to_zval());
         if old.is_refcounted() {
-            #[cfg(debug_assertions)]
-            self.sense_dirty_temporary(frame, at, old.kind());
-            php_heap::Heap::release(&mut super::Hooks(self), old);
+            self.release_replaced(frame, at, old);
         }
+    }
+
+    /// What [`Request::replace_slot`] wrote over, where it counts owners.
+    #[inline(never)]
+    fn release_replaced(&mut self, frame: FrameRef, at: u32, old: php_heap::Zval) {
+        #[cfg(debug_assertions)]
+        self.sense_dirty_temporary(frame, at, old.kind());
+        #[cfg(not(debug_assertions))]
+        let _ = (frame, at);
+        php_heap::Heap::release(&mut super::Hooks(self), old);
     }
 
     /// The zval in a slot of `frame` in place, php's `EX_VAR(var)`

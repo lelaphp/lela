@@ -1098,6 +1098,8 @@ impl Request {
     /// [`Request::serve_native`] past the entry's lookup, for a caller
     /// that holds `function`'s entry already, as a frameless call's
     /// handler reads it off the frameless table (`ZEND_FLF_HANDLER`).
+    #[inline(always)] // design §5.8: every native call's, frameless or not
+    #[allow(clippy::inline_always)]
     pub(crate) fn serve_entry(
         &mut self,
         function: Function,
@@ -1116,20 +1118,22 @@ impl Request {
         if let Some(outer) = outer {
             self.heap.set_origin(outer);
         }
-        let deferred = self.stream_thrown.take();
-        crate::observer::native_returned(self, begun, &served, deferred.as_ref(), on_throw);
-        match (served, deferred) {
-            (Ok(value), Some(thrown)) => {
+        let Some(deferred) = self.stream_thrown.take() else {
+            crate::observer::native_returned(self, begun, &served, None, on_throw);
+            return served;
+        };
+        crate::observer::native_returned(self, begun, &served, Some(&deferred), on_throw);
+        match served {
+            Ok(value) => {
                 self.release(value);
-                Err(thrown)
+                Err(deferred)
             }
-            (Err(thrown), Some(deferred)) => {
+            Err(thrown) => {
                 if let Some(object) = deferred.exception() {
                     self.release(object.as_value());
                 }
                 Err(thrown)
             }
-            (served, None) => served,
         }
     }
 
