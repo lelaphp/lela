@@ -610,7 +610,11 @@ impl Request {
         from: CodeFrom,
     ) -> Result<FrameRef, Fatal> {
         let code = exec::code_of(&unit);
-        let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
+        // The CVs, the temporaries and, under a registered observer, the
+        // temporary `pass_two` reserves for it.
+        let observed = u32::from(crate::observer::observing(self));
+        let slots = code.num_cvs.saturating_add(code.num_tmps);
+        let slots = usize::try_from(slots.saturating_add(observed)).unwrap_or(0);
         let cvs = !code.vars.is_empty();
         let mut header = exec::Header::of(None, code);
         let (caller, scope, table) = match from {
@@ -1210,7 +1214,7 @@ impl Request {
             .and_then(|(trampoline, _)| trampoline.magic())
             && let Some(magic) = shape(magic)
         {
-            count.saturating_add(magic.slots.max(2))
+            count.saturating_add(magic.room(0).max(2))
         } else {
             self.native_room(count)
         };
