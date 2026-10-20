@@ -25,8 +25,8 @@ use php_compile::{CompileError, RequestClasses, SourceKind, StackLimit};
 use php_heap::{Intern, Strings, Zval};
 use php_link::{Exact, Folded, Indexed, LinkedClass, NameMap, Names};
 use php_unit::decl::{
-    ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name, ParameterDefault,
-    Type,
+    ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, IniDecl, MethodDecl, Name,
+    ParameterDefault, Type,
 };
 use php_unit::{FramelessEntry, PublishedUnit, Unit, frameless_table};
 
@@ -1566,6 +1566,23 @@ impl Shared {
     ) -> Option<crate::readable::CalleeAt> {
         let at = usize::try_from(function.0).ok()?;
         self.callees.get(at).map(crate::readable::Record::at)
+    }
+
+    /// The extensions' own ini declarations, what `EG(ini_directives)`
+    /// holds past the core table: each extension's in its
+    /// `PHP_INI_BEGIN()` order, the extensions in startup order.
+    pub(crate) fn extension_inis(&self) -> impl Iterator<Item = &IniDecl> {
+        self.extensions
+            .iter()
+            .flat_map(|extension| extension.ini.iter())
+    }
+
+    /// The declaration of the entry `name` among the extensions' own,
+    /// `zend_hash_find_ptr(EG(ini_directives))` over what each extension
+    /// registered; none for an entry of the core table or none at all.
+    pub(crate) fn extension_ini(&self, name: &[u8]) -> Option<&IniDecl> {
+        self.extension_inis()
+            .find(|decl| decl.name.0.as_ref() == name)
     }
 
     /// `zend_flf_functions` by name, in the frameless table's order
@@ -4373,10 +4390,7 @@ impl Engine {
         // finds the host's value for each: the handlers meet the values
         // in declaration order, whatever order the host set them in.
         let declared_at = |name: &[u8]| {
-            self.shared
-                .extensions
-                .iter()
-                .flat_map(|e| e.ini.iter())
+            (self.shared.extension_inis())
                 .position(|entry| entry.name.0.as_ref() == name)
                 .unwrap_or(usize::MAX)
         };
@@ -4541,9 +4555,7 @@ impl Engine {
         let (mut taken, mut locked) = (Vec::new(), Vec::new());
         for (name, value, mode) in entries {
             let per_dir = || {
-                (shared.extensions.iter())
-                    .flat_map(|e| e.ini.iter())
-                    .find(|d| *d.name.0 == *name)
+                (shared.extension_ini(&name))
                     .map_or(Request::ini_modifiable(&name).1, |d| d.per_dir)
             };
             if shared.ini.iter().all(|(n, _)| *n != name)
