@@ -12,6 +12,7 @@ use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::values::{PhpObject, Value};
 use crate::exec::{self, TableId, Vm};
+use crate::tier::Stepped;
 
 use super::Request;
 
@@ -720,26 +721,68 @@ impl Request {
         }
     }
 
-    /// How `frame`, the top of the stack, returns `returned` with no PHP
-    /// code served, `zend_leave_helper`'s first arm with
-    /// `i_free_compiled_variables` giving up only strings: a user
-    /// function's frame its caller pushed, with no annex, no closure and
-    /// no argument past its parameters, whose receiver, where it has
-    /// one, is lent or owned with another owner standing and nothing for
-    /// the collector to take ([`php_heap::Heap::releases_quietly`]), none of whose
-    /// slots but `moved`, which the caller has taken the value out of,
-    /// owns anything but a string, returning into a caller's slot that
-    /// owns nothing, or, where the call reads no value, returning a
-    /// value that owns nothing. A string given up serves no destructor
-    /// and is offered to no collector, so such a frame is left by
-    /// [`Request::leave_plainly`] and [`Request::pop_frame`] alike, and
-    /// nothing is pending after it. The frame and its caller are each
-    /// read once. None for every other frame.
+    /// How `frame`, the top of the stack, returns `returned`,
+    /// `zend_leave_helper`'s first arm: a user function's frame its caller
+    /// pushed, with no annex and no argument past its parameters,
+    /// returning into a caller's slot that owns nothing, or, where the
+    /// call reads no value, returning a value that owns nothing; whose
+    /// first `cvs` slots, `i_free_compiled_variables`' range, own nothing
+    /// but strings and values another owner of stands, and whose receiver
+    /// and closure, where it has them, are lent or have another owner
+    /// standing. So no destructor is due from its leave, which
+    /// [`Request::leave_plainly`] serves; a root buffer at its threshold is
+    /// the one release of it that can serve PHP code, a collection, and
+    /// that release is served there as [`Request::pop_frame`] serves it.
+    /// The frame and its caller are each read once. None for every other
+    /// frame. No temporary but `moved`, the one the caller has taken the
+    /// value out of, owns anything at a return, since the compiler frees
+    /// each before it (`FREE`, `FE_FREE`), which a debug build holds.
+    ///
+    /// Objects whose last owner a CV is are destructed in slot order,
+    /// then the receiver; an array a CV shares is a possible root, under
+    /// the threshold and at it, where the collection runs; and a return
+    /// from inside a `foreach` leaves the heap where it stood:
+    ///
+    /// ```php
+    /// class D {
+    ///     function __construct(public $n) {}
+    ///     function __destruct() { echo "[{$this->n}]"; }
+    ///     function m($a) { $x = new D("{$a}x"); $y = new D("{$a}y"); return 1; }
+    /// }
+    /// function f() { $p = new D('p'); $q = new D('q'); return 0; }
+    /// f(); echo "\n";
+    /// (new D('this'))->m('m'); echo "\n";
+    /// function g($a) { return 1; }
+    /// $keep = [];
+    /// for ($i = 0; $i < 10005; $i++) { $keep[] = [$i]; }
+    /// gc_collect_cycles();
+    /// $s = gc_status();
+    /// for ($i = 0; $i < 3; $i++) { g($keep[$i]); }
+    /// $t = gc_status();
+    /// echo $t['roots'] - $s['roots'], ' ', $t['runs'] - $s['runs'], "\n";
+    /// foreach ($keep as $k) { g($k); }
+    /// $u = gc_status();
+    /// echo $u['roots'], ' ', $u['runs'] - $s['runs'], ' ', $u['threshold'], "\n";
+    /// function h($a) { foreach ($a as $v) { if ($v === 2) { return $v; } } return 0; }
+    /// $a = [1, 2, 3]; $a[] = 4;
+    /// h($a);
+    /// $m = memory_get_usage();
+    /// for ($i = 0; $i < 1000; $i++) { h($a); }
+    /// var_dump(memory_get_usage() - $m);
+    /// ```
+    /// ```expect
+    /// [p][q]
+    /// [mx][my][this]
+    /// 3 0
+    /// 6 1 20001
+    /// int(0)
+    /// ```
     #[inline(always)] // once per return, in the loop's RETURN arms
     #[allow(clippy::inline_always)]
     pub(crate) fn leaves_plainly(
         &self,
         frame: FrameRef,
+        cvs: u32,
         moved: Option<usize>,
         returned: Zval,
     ) -> Option<PlainLeave> {
@@ -749,23 +792,33 @@ impl Request {
         }
         let header = laid.header();
         let receiver = header.receiver();
+        let held = receiver.is_some() || header.closure.is_some();
         let plain = header.function.is_some()
             && header.annex.is_none()
-            && (receiver.is_none() || quiet_receiver(receiver))
-            && header.closure.is_none()
             && !header.info.call()
-            && !header.info.extra_args();
+            && !header.info.extra_args()
+            && (!held || held_kept(receiver, header.closure));
         let caller = header.caller().frame().filter(|_| plain)?;
         let returns_to = header.returns_to();
-        // Every slot's refcounted bit tested in turn, as php's
-        // `i_free_compiled_variables` tests each CV: a frame none of whose
-        // slots owns anything, nearly every one, is answered there, and
-        // only one that owns something is walked for what. A walk that
-        // stops at the first owner, since a fold over the slots' type
-        // words is vectorised, which costs a frame of a few slots more
-        // than it saves.
-        let owners = laid.slots().iter().any(|z| z.is_refcounted());
-        let strings = owners && owns_strings_alone(laid.slots(), moved)?;
+        let slots = laid.slots();
+        debug_assert!(
+            slots
+                .iter()
+                .enumerate()
+                .skip(cvs as usize)
+                .all(|(at, z)| !z.is_refcounted() || Some(at) == moved),
+            "a temporary owns a value at a return"
+        );
+        // Every CV's refcounted bit tested in turn, as php's
+        // `i_free_compiled_variables` tests each: a frame none of whose
+        // CVs owns anything, nearly every one, is answered there, and only
+        // one that owns something is walked for what. A fold over the
+        // slots' type words is vectorised.
+        let owned = slots.get(..cvs as usize)?;
+        let owners = owned.iter().any(|z| z.is_refcounted());
+        if owners && !owners_kept(owned) {
+            return None;
+        }
         let taken = match returns_to {
             Some(slot) => self
                 .vm
@@ -782,34 +835,34 @@ impl Request {
         Some(PlainLeave {
             caller,
             returns_to,
-            moved,
-            strings,
-            receiver,
+            cvs: if owners { cvs } else { 0 },
+            held,
         })
     }
 
-    /// The top frame left, as [`Request::leaves_plainly`] found it: each
-    /// string its slots but the moved one own given up, in slot order as
-    /// `i_free_compiled_variables` gives them up, the receiver after
-    /// them (`OBJ_RELEASE` under `ZEND_CALL_RELEASE_THIS`, a lent one's
-    /// pin let go), then `zend_vm_stack_free_call_frame`; `returned` written into the
-    /// caller's slot where the call reads it, and the caller on past its
-    /// call opline, `LOAD_NEXT_OPLINE()`, the caller read once for both.
+    /// The top frame left, as [`Request::leaves_plainly`] found it: what
+    /// its CVs own given up in slot order as `i_free_compiled_variables`
+    /// gives it up, then the receiver (`OBJ_RELEASE` under
+    /// `ZEND_CALL_RELEASE_THIS`, a lent one's pin let go) and the closure
+    /// (`OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)))` under
+    /// `ZEND_CALL_CLOSURE`), each with no PHP code served
+    /// ([`php_heap::Heap::release_kept`]) or, where it would be, served
+    /// as [`Request::pop_frame`] serves it, the frame off the chain a
+    /// backtrace reads from then on; then `zend_vm_stack_free_call_frame`.
+    /// `returned` written into the caller's slot where the call reads it,
+    /// and the caller on past its call opline, `LOAD_NEXT_OPLINE()`, the
+    /// caller read once for both: [`Stepped::Popped`] of the caller; or,
+    /// where a release that served PHP code left a throwable pending, the
+    /// caller standing at its call opline, which raises it there
+    /// (`zend_rethrow_exception`): [`Stepped::Threw`] of the caller.
     #[inline(always)] // as `leaves_plainly`
     #[allow(clippy::inline_always)]
-    pub(crate) fn leave_plainly(&mut self, leave: PlainLeave, returned: Zval) {
-        if leave.strings {
-            self.give_up_strings(leave.moved);
-        }
-        match leave.receiver {
-            // `OBJ_RELEASE` of an object another owner of stands and the
-            // collector has no use for: the decrement alone.
-            Some(exec::Receiver::Owned(object))
-                if php_heap::Heap::release_quietly(object.as_value().to_zval()) => {}
-            Some(receiver) => self.give_up_receiver(receiver),
-            None => {}
-        }
+    pub(crate) fn leave_plainly(&mut self, leave: PlainLeave, returned: Zval) -> Stepped {
+        let served = (leave.cvs > 0 || leave.held) && self.give_up_owned(leave.cvs, leave.held);
         self.vm.stack.pop_frame(&mut self.heap);
+        if served && self.is_pending() {
+            return self.returned_raising(leave, returned);
+        }
         if let Some(caller) = self.vm.stack.frame_mut(leave.caller) {
             if let Some(slot) = leave.returns_to
                 && let Some(into) = caller.slots_mut().get_mut(slot as usize)
@@ -819,19 +872,87 @@ impl Request {
             let header = caller.header_mut();
             header.opline = header.opline.saturating_add(1);
         }
+        Stepped::Popped(leave.caller)
     }
 
-    /// The strings the top frame's slots own, but the one `moved` out
-    /// of, given up in slot order ([`Request::leave_plainly`]).
+    /// [`Request::leave_plainly`]'s end where a release served PHP code
+    /// that left a throwable pending: `returned` into the caller's slot,
+    /// the caller left at its call opline.
+    #[cold]
+    fn returned_raising(&mut self, leave: PlainLeave, returned: Zval) -> Stepped {
+        if let Some(slot) = leave.returns_to
+            && let Some(into) = self
+                .vm
+                .stack
+                .frame_mut(leave.caller)
+                .and_then(|caller| caller.slots_mut().get_mut(slot as usize))
+        {
+            *into = returned;
+        }
+        Stepped::Threw(leave.caller)
+    }
+
+    /// What the top frame owns given up ([`Request::leave_plainly`]):
+    /// what its first `cvs` slots own in slot order, a string with
+    /// `zval_ptr_dtor_nogc`, which serves no PHP code, and anything else
+    /// with [`php_heap::Heap::release_kept`], or with [`Request::release`]
+    /// where that would serve PHP code; then, where it `held` them, its
+    /// receiver and its closure the same way. Whether any release served
+    /// PHP code.
     #[inline(never)]
-    fn give_up_strings(&mut self, moved: Option<usize>) {
+    fn give_up_owned(&mut self, cvs: u32, held: bool) -> bool {
         let frame = self.vm.stack.current();
+        let mut served = false;
         let mut from = 0;
-        while let Some((at, value)) = self.take_next_owner(frame, from, usize::MAX) {
-            if Some(at) != moved {
+        while let Some((at, value)) = self.take_next_owner(frame, from, cvs as usize) {
+            let z = value.to_zval();
+            if z.kind() == ZvalType::String {
                 self.release_nogc(value);
+            } else if !self.heap.release_kept(z) {
+                self.leaving_served();
+                self.release(value);
+                served = true;
             }
             from = at.saturating_add(1);
+        }
+        if !held {
+            return served;
+        }
+        let Some(header) = self.vm.at_mut(frame) else {
+            return served;
+        };
+        let receiver = header.receiver();
+        header.set_receiver(None);
+        let closure = header.closure.take();
+        match receiver {
+            Some(exec::Receiver::Owned(object))
+                if self.heap.release_kept(object.as_value().to_zval()) => {}
+            Some(receiver @ exec::Receiver::Lent(_)) => self.give_up_receiver(receiver),
+            Some(receiver) => {
+                self.leaving_served();
+                self.give_up_receiver(receiver);
+                served = true;
+            }
+            None => {}
+        }
+        if let Some(closure) = closure
+            && !self.heap.release_kept(closure.as_value().to_zval())
+        {
+            self.leaving_served();
+            self.release(closure.as_value());
+            served = true;
+        }
+        served
+    }
+
+    /// The top frame off the chain a backtrace reads, as [`Request::pop_frame`]
+    /// takes it off before a release it makes may serve PHP code:
+    /// `EG(current_execute_data) = EX(prev_execute_data)`.
+    #[cold]
+    fn leaving_served(&mut self) {
+        let frame = self.vm.stack.current();
+        if let Some(header) = self.vm.at_mut(frame) {
+            header.info.set_leaving(true);
         }
     }
 
@@ -1909,50 +2030,46 @@ impl Request {
     }
 }
 
-/// Whether a frame's receiver is given up with no PHP code served: lent,
-/// or owned with another owner standing and nothing for the collector
-/// to take ([`php_heap::Heap::releases_quietly`]).
+/// Whether `z`, which a leaving frame owns, has another owner standing,
+/// so giving it up destroys nothing and serves no destructor: what
+/// [`Request::leaves_plainly`] asks of the frame's receiver, its closure
+/// and each CV that owns anything but a string.
+fn kept_by_another(z: Zval) -> bool {
+    Value::of_zval(z).refcount() > 1
+}
+
+/// Whether a leaving frame's receiver and closure, where it has them, are
+/// given up with no destructor due: lent, or with another owner standing
+/// ([`kept_by_another`]).
 #[inline(never)]
-fn quiet_receiver(receiver: Option<exec::Receiver>) -> bool {
-    match receiver {
+fn held_kept(receiver: Option<exec::Receiver>, closure: Option<PhpObject>) -> bool {
+    let receiver = match receiver {
         None | Some(exec::Receiver::Lent(_)) => true,
-        Some(exec::Receiver::Owned(object)) => {
-            php_heap::Heap::releases_quietly(object.as_value().to_zval())
-        }
-    }
+        Some(exec::Receiver::Owned(object)) => kept_by_another(object.as_value().to_zval()),
+    };
+    receiver && closure.is_none_or(|closure| kept_by_another(closure.as_value().to_zval()))
 }
 
-/// What the slots of a frame that owns something own, but the one
-/// `moved` out of: whether any owns a string, where nothing but
-/// strings is owned; none where any owns anything else, which
-/// [`Request::leaves_plainly`] refuses.
+/// Whether every owner among `cvs` is given up with no destructor due: a
+/// string, which serves none, or a value another owner of stands
+/// ([`kept_by_another`]).
 #[inline(never)]
-fn owns_strings_alone(slots: &[Zval], moved: Option<usize>) -> Option<bool> {
-    let mut strings = false;
-    for (at, z) in slots.iter().enumerate() {
-        if !z.is_refcounted() || Some(at) == moved {
-            continue;
-        }
-        if z.kind() != ZvalType::String {
-            return None;
-        }
-        strings = true;
-    }
-    Some(strings)
+fn owners_kept(cvs: &[Zval]) -> bool {
+    cvs.iter()
+        .all(|z| !z.is_refcounted() || z.kind() == ZvalType::String || kept_by_another(*z))
 }
 
-/// A frame [`Request::leaves_plainly`] found returns with no PHP code
-/// served: the frame it returns into and the slot of it that takes the
-/// value, where the call reads one, the slot the returned value was
-/// moved out of, whether any other slot owns a string to give up, and
-/// the receiver the frame gives up, where it has one.
+/// A frame [`Request::leaves_plainly`] found leaves with no destructor
+/// due: the frame it returns into and the slot of it that takes the
+/// value, where the call reads one, how many CVs to walk for owners, none
+/// where none owns anything, and whether the frame holds a receiver or a
+/// closure to give up.
 #[derive(Clone, Copy)]
 pub(crate) struct PlainLeave {
     pub(crate) caller: FrameRef,
     pub(crate) returns_to: Option<u32>,
-    moved: Option<usize>,
-    strings: bool,
-    receiver: Option<exec::Receiver>,
+    cvs: u32,
+    held: bool,
 }
 
 /// The runtime caches a closure reads, as `zend_create_closure_ex`

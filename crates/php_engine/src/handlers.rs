@@ -22623,12 +22623,26 @@ fn inline_return<T: Tier>(
         }
         _ => return None,
     };
-    let leave = req.leaves_plainly(frame, moved, z)?;
-    if let Err(fatal) = continued(T::safepoint(req, frame, Site::Return(SafepointIdx(op.out)))) {
+    return_plainly::<T>(req, frame, (code.num_cvs, moved), z, SafepointIdx(op.out))
+}
+
+/// [`inline_return`] once its operand is read: the frame left by
+/// [`Request::leave_plainly`] where [`Request::leaves_plainly`] finds it
+/// can be, after the return safepoint.
+#[inline(always)] // as `inline_return`
+#[allow(clippy::inline_always)]
+fn return_plainly<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    (cvs, moved): (u32, Option<usize>),
+    z: Zval,
+    site: SafepointIdx,
+) -> Option<Edge> {
+    let leave = req.leaves_plainly(frame, cvs, moved, z)?;
+    if let Err(fatal) = continued(T::safepoint(req, frame, Site::Return(site))) {
         return Some(Err(fatal));
     }
-    req.leave_plainly(leave, z);
-    Some(Ok(Stepped::Popped(leave.caller).into()))
+    Some(Ok(req.leave_plainly(leave, z).into()))
 }
 
 /// The half of `RETURN` that leaves the frame, which `RETURN_BY_REF`

@@ -731,6 +731,21 @@ fn weakmap_entries(hooks: &mut dyn HeapHooks, o: Obj) -> Option<Vec<(Obj, ZvalRe
         .then_some(entries)
 }
 
+/// The value `gc_check_possible_root` offers the buffer for `z`: an
+/// array or an object, or the one a reference holds, not in the buffer
+/// yet and not marked uncollectable (`GC_MAY_LEAK`); none for anything
+/// else.
+fn possible_root(z: Zval) -> Option<Node> {
+    let node = match Node::of(z)? {
+        Node::Ref(r) => match Node::of(r.val())? {
+            Node::Ref(_) => return None,
+            held => held,
+        },
+        node => node,
+    };
+    node.gc().may_leak().then_some(node)
+}
+
 /// Whether the walk may read the object's members: not once `free_obj`
 /// ran over them (`IS_OBJ_FREE_CALLED`).
 fn walkable(o: Obj) -> bool {
@@ -757,17 +772,42 @@ impl Heap {
     /// through to the value it holds; an array or an object not in the
     /// buffer yet and not marked uncollectable is a possible root.
     pub fn gc_check_possible_root(hooks: &mut dyn HeapHooks, z: Zval) {
-        let node = match Node::of(z) {
-            Some(Node::Ref(r)) => match Node::of(r.val()) {
-                Some(Node::Ref(_)) | None => return,
-                Some(held) => held,
-            },
-            Some(node) => node,
-            None => return,
-        };
-        if node.gc().may_leak() {
+        if let Some(node) = possible_root(z) {
             Heap::gc_possible_root(hooks, node);
         }
+    }
+
+    /// One owner of `z` given up where that serves no PHP code:
+    /// `GC_DELREF` with another owner standing, and
+    /// `gc_check_possible_root` taking nothing or placing the value in the
+    /// root buffer under its threshold ([`Heap::gc_check_possible_root`]).
+    /// Whether it was given up. Where it was not, the last owner, which
+    /// `rc_dtor_func` destroys, or a possible root with the buffer at its
+    /// threshold, where `gc_possible_root_when_full` collects, nothing is
+    /// touched and the owner is the caller's to give up through
+    /// [`Heap::release`]. What a frame's leave gives up an array or an
+    /// object its variables own with, as `i_free_compiled_variables`
+    /// gives them up with no destructor served and nothing collected.
+    #[must_use]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn release_kept(&mut self, z: Zval) -> bool {
+        let Some(header) = z.counted().filter(|header| header.refcount() > 1) else {
+            return false;
+        };
+        let gc = &mut self.gc;
+        match possible_root(z) {
+            Some(node) if !gc.protected && gc.buf.is_some() => {
+                let Some(idx) = gc.fetch_under_threshold() else {
+                    return false;
+                };
+                let _owners_left = Heap::give_up(header);
+                gc.place(idx, node, Colour::Purple);
+            }
+            _ => {
+                let _owners_left = Heap::give_up(header);
+            }
+        }
+        true
     }
 
     /// `gc_possible_root` (`Z/Zend/zend_gc.c:738`): the value in the

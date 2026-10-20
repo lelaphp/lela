@@ -175,11 +175,10 @@ Heap::reference_separate
 Heap::reference_set
 Heap::release
 Heap::release_held
+Heap::release_kept
 Heap::release_nogc
 Heap::release_nogc_kept
-Heap::release_quietly
 Heap::release_string
-Heap::releases_quietly
 Heap::reset_peak
 Heap::resource
 Heap::resource_at
