@@ -208,9 +208,12 @@ ratcheted baseline replaces; and the ancestor's request-shaped
 kind, whose per-arm latency percentiles are descriptive and never signed.
 Each returns here when the engine has the thing it measures, as the
 request-shaped arm has, paired under §2 to §5 rather than as percentiles
-(§3, #2351), and a geomean over
-workloads, which inherits the floor — one `NOISE-SWAMPED` constituent and
-the aggregate is published unsigned — returns with the corpus.
+(§3, #2351), and as a geomean over workloads has (#2948): a bar over a
+set of programs pairs each program under §2 to §5, states each one's
+ratio as `1 + paired_pct / 100`, and their geometric mean, which inherits
+the floor — one `NOISE-SWAMPED` constituent and the aggregate is
+published unsigned. Its A/A control holds every program's row to §2's
+verdict, so one resolved row fails it.
 
 ## 11. Where a workload lives
 

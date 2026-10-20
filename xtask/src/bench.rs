@@ -26,6 +26,12 @@
 //! established regression warns, two in a row fail the reading and the
 //! run (#2659); one without a tolerance passes whatever it measured.
 //!
+//! **One pair, or a pair per program.** A bar's [`Arms`] are one pair, or
+//! one pair per program of a set, each measured as a pair is and the
+//! reading carrying each program's ratio and their geomean, whose sign
+//! stands only where every program's does (§10's floor): the seven
+//! kernels and `Zend/bench.php`, which the G-bars measure ([`kernels`]).
+//!
 //! **Why the A/A verdict is a reading and not a refusal.** §4.3 is a
 //! quartile rule with no confidence level, so it resolves some unmeasured
 //! fraction of the time on a null effect; the second engine measured one
@@ -40,10 +46,12 @@
 //! instrument states about the same call is the other thing — that the
 //! paired rig is honest about it.
 
+mod kernels;
 pub(crate) mod row;
 mod series;
 pub(crate) mod spent;
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -63,6 +71,11 @@ pub(crate) const INSTRUMENT: &str = "bench";
 
 /// The protocol every number here is taken under.
 pub(crate) const PROTOCOL: &str = "docs/perf/measurement-protocol.md";
+
+/// The ini entries a measured php runs under after the recipe's: the two
+/// the recipe sets for correctness at a cost to every request, at
+/// php.ini-production's values (`makala::bench`, [`kernels`]).
+pub(crate) const PRODUCTION: [&str; 2] = ["zend.assertions=-1", "opcache.protect_memory=0"];
 
 /// §3: measured reps per arm. What `--reps` defaults to.
 pub const REPS: usize = 12;
@@ -109,9 +122,10 @@ impl Label {
     }
 }
 
-/// One arm of a bar: the program a rep runs once, its arguments, and what
-/// it reads on stdin.
-#[derive(Debug, Clone, Deserialize)]
+/// One arm of a bar: the program a rep runs once, its arguments, what it
+/// reads on stdin, and the environment it runs in, which a bar's file
+/// leaves the harness's own.
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Arm {
     name: String,
@@ -120,6 +134,8 @@ struct Arm {
     args: Vec<String>,
     #[serde(default)]
     stdin: String,
+    #[serde(skip)]
+    env: Environment,
 }
 
 /// One bar: what is measured, and the two arms a rep times against each
@@ -166,7 +182,7 @@ impl Bar {
                     let program = resolve(&arm.program)?;
                     Ok(Box::new(Spawned { arm, program }))
                 };
-                Ok(Ok([spawned(a)?, spawned(b)?]))
+                Ok(Ok(Arms::Pair([spawned(a)?, spawned(b)?])))
             }),
         }
     }
@@ -366,15 +382,25 @@ pub(crate) trait Side {
     }
 }
 
-/// A bar's two arms as a rep runs them, or why this machine cannot run
-/// them, which is the bar's skip.
-pub(crate) type Sides = Result<[Box<dyn Side>; 2], String>;
+/// Two arms as a rep runs them.
+pub(crate) type Pair = [Box<dyn Side>; 2];
+
+/// What a bar measures: one pair, or a pair per program of a set, each
+/// row named by its program ([`kernels`]).
+pub(crate) enum Arms {
+    Pair(Pair),
+    Set(Vec<(String, Pair)>),
+}
+
+/// A bar's arms, or why this machine cannot run them, which is the bar's
+/// skip.
+pub(crate) type Sides = Result<Arms, String>;
 
 /// How a bar's reading is held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Held {
-    /// An A/A control: a pass while the paired delta's sign is swamped
-    /// (§2, §4.3).
+    /// An A/A control: a pass while every row's paired delta has its sign
+    /// swamped (§2, §4.3).
     Control,
     /// A series: two arms that differ, its reading stating the measurement
     /// and the distance to go to the second arm, and held by [`series`]'s
@@ -383,12 +409,11 @@ pub(crate) enum Held {
 }
 
 impl Held {
-    /// The reading's status for a paired delta whose sign is `verdict`: a
-    /// control fails where the sign resolved, and a series is held to no
-    /// bound.
-    fn status(self, verdict: &str) -> Status {
+    /// The reading's status for what a bar `took`: a control fails where a
+    /// row's sign resolved, and a series is held to no bound.
+    fn status(self, took: &Took) -> Status {
         match self {
-            Held::Control if verdict == RESOLVED => Status::Fail,
+            Held::Control if took.resolved() > 0 => Status::Fail,
             Held::Control | Held::Series => Status::Pass,
         }
     }
@@ -410,6 +435,23 @@ struct Spawned {
     program: PathBuf,
 }
 
+impl From<Arm> for Spawned {
+    /// An arm whose program is a path already.
+    fn from(arm: Arm) -> Spawned {
+        let program = arm.program.clone();
+        Spawned { arm, program }
+    }
+}
+
+/// What an arm's process runs in: the harness's environment, cleared
+/// first where `clear` says, and `set` over it. The default is the
+/// harness's own; a php arm's is the recipe's (`kernels`).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Environment {
+    clear: bool,
+    set: BTreeMap<String, String>,
+}
+
 impl Side for Spawned {
     fn name(&self) -> &str {
         &self.arm.name
@@ -424,7 +466,47 @@ impl Side for Spawned {
     }
 }
 
-/// What one bar measured, in its unit: the two arms, their paired delta,
+/// What one bar measured: each row, its program's name where the bar is
+/// a set, and what it measured.
+struct Took {
+    rows: Vec<(Option<String>, Measured)>,
+}
+
+/// A ratio of the first arm to the second, a row's or the geomean of a
+/// set's, and whether its sign stands.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Ratio {
+    value: f64,
+    verdict: &'static str,
+}
+
+impl Took {
+    /// What the bar's rows measured in, the first row's unit: every arm
+    /// of a bar measures in one.
+    fn unit(&self) -> Unit {
+        self.rows.first().map_or(Unit::Ms, |(_, row)| row.unit)
+    }
+
+    /// How many rows' paired deltas have their sign established.
+    fn resolved(&self) -> usize {
+        let resolved = |(_, row): &&(_, Measured)| sign_of(&row.delta) == RESOLVED;
+        self.rows.iter().filter(resolved).count()
+    }
+
+    /// The bar's ratio: the geometric mean of its rows' ratios, one row's
+    /// its own, its sign established only where every row's is, the floor
+    /// protocol §10 holds a geomean over workloads to.
+    fn ratio(&self) -> Ratio {
+        let logs: f64 = self.rows.iter().map(|(_, row)| row.ratio().ln()).sum();
+        #[allow(clippy::cast_precision_loss)]
+        let value = (logs / self.rows.len() as f64).exp();
+        let all = self.resolved() == self.rows.len() && !self.rows.is_empty();
+        let verdict = if all { RESOLVED } else { SWAMPED };
+        Ratio { value, verdict }
+    }
+}
+
+/// What one pair measured, in its unit: the two arms, their paired delta,
 /// the delta as a percentage of the candidate arm's median, how the bytes
 /// compared, and what each arm spent per request.
 struct Measured {
@@ -435,6 +517,15 @@ struct Measured {
     paired_pct: f64,
     correctness: Correctness,
     spent: [Spent; 2],
+}
+
+impl Measured {
+    /// The first arm over the second, as the paired delta states it:
+    /// one plus [`Measured::paired_pct`] as a fraction, not the ratio of
+    /// the medians, which carries no verdict (§2, §4.2).
+    fn ratio(&self) -> f64 {
+        1.0 + self.paired_pct / 100.0
+    }
 }
 
 /// §6: one program as one read of it, digested with the byte count that
@@ -502,8 +593,13 @@ fn load_average() -> Option<[f64; 3]> {
 /// spawn, the stdin it reads and the wait. A nonzero exit refuses the run,
 /// naming the arm, since an arm that failed timed nothing.
 fn once(arm: &Arm, program: &Path) -> Result<Sample> {
+    let mut command = Command::new(program);
+    if arm.env.clear {
+        command.env_clear();
+    }
     let start = Instant::now();
-    let mut child = Command::new(program)
+    let mut child = command
+        .envs(&arm.env.set)
         .args(&arm.args)
         .stdin(if arm.stdin.is_empty() {
             Stdio::null()
@@ -590,6 +686,28 @@ fn measure(id: &str, [a, b]: &mut [Box<dyn Side>; 2], reps: usize) -> Result<Mea
     })
 }
 
+/// A bar's arms measured, pair by pair: what they took, the two arms'
+/// names, and the load where the reps start, after the arms were built
+/// and started (§7).
+fn measure_each(
+    id: &str,
+    arms: Arms,
+    reps: usize,
+) -> Result<(Took, [String; 2], Option<[f64; 3]>)> {
+    let load = load_average();
+    let mut pairs = match arms {
+        Arms::Pair(pair) => vec![(None, pair)],
+        Arms::Set(set) => set.into_iter().map(|(p, pair)| (Some(p), pair)).collect(),
+    };
+    let mut rows = Vec::new();
+    for (program, pair) in &mut pairs {
+        let row = (program.as_ref()).map_or_else(|| id.to_owned(), |p| format!("{id}/{p}"));
+        rows.push((program.clone(), measure(&row, pair, reps)?));
+    }
+    let names = (pairs.first()).map(|(_, [a, b])| [a.name(), b.name()].map(str::to_owned));
+    Ok((Took { rows }, names.unwrap_or_default(), load))
+}
+
 /// §6's second end: each program as it is now against the pin taken at the
 /// start, and a refusal naming the one that moved.
 fn holds(programs: &[PathBuf; 2], before: &[Pin; 2]) -> Result<()> {
@@ -636,6 +754,7 @@ fn declared(root: &Path) -> Result<Vec<Declared>> {
             "permit".to_owned(),
         ],
         stdin: CALL.to_owned(),
+        env: Environment::default(),
     };
     let permit = Bar {
         id: "permit".to_owned(),
@@ -646,6 +765,7 @@ fn declared(root: &Path) -> Result<Vec<Declared>> {
     };
     let mut bars = vec![permit.declared()];
     bars.extend(crate::makala::bench::declared(root)?);
+    bars.extend(kernels::oracle(root));
     bars.extend(
         [
             ("jit-wrapper", [WRAPPER, DIRECT], Held::Series),
@@ -680,21 +800,24 @@ fn wrapper(root: &Path, id: &str, [a, b]: [&'static str; 2], held: Held) -> Decl
                 crate::oracle::profile::released(&root, "php_jit", "php_jit_bench", Some("bench"))?;
             let arm = |name: String, way: &str| -> Box<dyn Side> {
                 let args = vec![way.to_owned(), CALLS.to_string()];
-                let (program, stdin) = (program.clone(), String::new());
                 let arm = Arm {
                     name,
                     program: program.clone(),
                     args,
-                    stdin,
+                    ..Arm::default()
                 };
-                let side = Spawned { arm, program };
+                let side = Spawned::from(arm);
                 Box::new(PerCall { side, calls: CALLS })
             };
-            // An A/A control's second arm is named apart from its first.
-            let second = format!("{b}{}", if a == b { "-b" } else { "" });
-            Ok(Ok([arm(a.to_owned(), a), arm(second, b)]))
+            Ok(Ok(Arms::Pair([arm(a.to_owned(), a), arm(second(a, b), b)])))
         }),
     }
+}
+
+/// The name of a bar's second arm, `b`: apart from the first's where the
+/// bar is an A/A control, whose two arms are one.
+pub(crate) fn second(a: &str, b: &str) -> String {
+    format!("{b}{}", if a == b { "-b" } else { "" })
 }
 
 /// A process arm that makes a known count of calls, each run, which
@@ -813,14 +936,9 @@ pub fn run(
         // have run, so a refused run never reads as a measurement.
         let measured = start().and_then(|sides| match sides {
             Err(why) => Ok(Err(why)),
-            Ok(mut sides) => {
-                // The load where the bar's reps start, after its arms were
-                // built and started (§7).
-                let load = load_average();
-                Ok(Ok((measure(&id, &mut sides, reps)?, sides, load)))
-            }
+            Ok(arms) => measure_each(&id, arms, reps).map(Ok),
         });
-        let (measured, sides, load) = match measured {
+        let (measured, names, load) = match measured {
             Ok(Ok(measured)) => measured,
             Ok(Err(why)) => {
                 readings.push(unmeasured(&id, Status::Skip, &why, &snapshot)?);
@@ -837,7 +955,7 @@ pub fn run(
             id: &id,
             about: &about,
             held,
-            names: [sides[0].name(), sides[1].name()],
+            names: [&names[0], &names[1]],
         };
         print!("{}", rendered(&bar, &measured, reps, label, load));
         let mut reading = recorded(&bar, &measured, (reps, label, note), load, &snapshot)?;
@@ -895,65 +1013,94 @@ fn unmeasured(id: &str, status: Status, why: &str, snapshot: &Snapshot) -> Resul
     Ok(reading)
 }
 
-/// What one measured bar prints: the standing and the knobs, a line per
-/// arm, the paired delta with its verdict, and the load beside them all.
+/// What one measured bar prints: the standing and the knobs, for each row
+/// a line per arm and the paired delta with its verdict, a set's geomean,
+/// and the load beside them all.
 fn rendered(
     bar: &Shown<'_>,
-    measured: &Measured,
+    took: &Took,
     reps: usize,
     label: Label,
     load: Option<[f64; 3]>,
 ) -> String {
-    let unit = measured.unit.suffix();
-    let stat = |name: &str, s: &Stats, spent: &str| {
+    let rows: Vec<String> = (took.rows.iter()).map(|(program, row)| {
+        let unit = row.unit.suffix();
+        let stat = |name: &str, s: &Stats, spent: &Spent| {
+            let spent = (spent.text()).map_or_else(String::new, |t| format!("; per request: {t}"));
+            format!(
+                "  {name}: median {:.3} {unit}, IQR {:.3} (q1 {:.3}, q3 {:.3}, min {:.3}, max {:.3}, n {}){spent}\n",
+                s.median, s.iqr, s.q1, s.q3, s.min, s.max, s.n
+            )
+        };
+        let program = (program.as_ref()).map_or_else(String::new, |p| format!("  {p}: ratio {:.4}\n", row.ratio()));
         format!(
-            "  {name}: median {:.3} {unit}, IQR {:.3} (q1 {:.3}, q3 {:.3}, min {:.3}, max {:.3}, n {}){spent}\n",
-            s.median, s.iqr, s.q1, s.q3, s.min, s.max, s.n
+            "{program}{}{}  paired delta: median {:.3} {unit} ({:+.2}%), IQR {:.3} (q1 {:.3}, q3 {:.3}); {}; correctness {}\n",
+            stat(bar.names[0], &row.a, &row.spent[0]),
+            stat(bar.names[1], &row.b, &row.spent[1]),
+            row.delta.median,
+            row.paired_pct,
+            row.delta.iqr,
+            row.delta.q1,
+            row.delta.q3,
+            sign_of(&row.delta),
+            row.correctness.as_str(),
         )
-    };
-    let [a, b] = (measured.spent)
-        .map(|spent| (spent.text()).map_or_else(String::new, |t| format!("; per request: {t}")));
+    }).collect();
     format!(
-        "bench {}: {}; {reps} reps (+{WARMUP} warm-up) per arm, order alternated; load {}\n{}{}  paired delta: median {:.3} {unit} ({:+.2}%), IQR {:.3} (q1 {:.3}, q3 {:.3}); {}\n  correctness {}; {}\n",
+        "bench {}: {}; {reps} reps (+{WARMUP} warm-up) per arm, order alternated; load {}\n{}  {}{}\n",
         bar.id,
         label.as_str(),
         load_text(load),
-        stat(bar.names[0], &measured.a, &a),
-        stat(bar.names[1], &measured.b, &b),
-        measured.delta.median,
-        measured.paired_pct,
-        measured.delta.iqr,
-        measured.delta.q1,
-        measured.delta.q3,
-        sign_of(&measured.delta),
-        measured.correctness.as_str(),
-        held_by(bar, measured),
+        rows.concat(),
+        geomean(took),
+        held_by(bar, took),
+    )
+}
+
+/// What a set's rendering and reading say of its rows taken together: the
+/// geomean, its verdict and how many rows resolved; nothing for a pair.
+fn geomean(took: &Took) -> String {
+    if took.rows.len() < 2 {
+        return String::new();
+    }
+    let ratio = took.ratio();
+    let each: Vec<String> = (took.rows.iter())
+        .filter_map(|(program, row)| Some(format!("{} {:.4}", program.as_ref()?, row.ratio())))
+        .collect();
+    format!(
+        "geomean ratio {:.4} over {} programs ({}), {}, {} of them resolved ({PROTOCOL} §10); ",
+        ratio.value,
+        took.rows.len(),
+        each.join(", "),
+        ratio.verdict,
+        took.resolved(),
     )
 }
 
 /// What the bar is held to, as its rendering and its reading say it.
-fn held_by(bar: &Shown<'_>, measured: &Measured) -> String {
+fn held_by(bar: &Shown<'_>, took: &Took) -> String {
     let series = "a series, held to its tolerance where `[[bench]]` gives one (#2659)";
-    match (bar.held, to_go(measured)) {
-        (Held::Control, _) => format!("the bar is the A/A control of {PROTOCOL} §2"),
-        (Held::Series, Some(to_go)) => format!(
-            "{series}; {} is {to_go:.2}% to go to {}",
-            bar.names[0], bar.names[1]
-        ),
-        (Held::Series, None) => format!(
-            "{series}; the sign is not established, so no distance to go is stated ({PROTOCOL} §1.2)"
-        ),
+    let to_go = match to_go(took) {
+        Some(to_go) => format!("{} is {to_go:.2}% to go to {}", bar.names[0], bar.names[1]),
+        None => {
+            format!("the sign is not established, so no distance to go is stated ({PROTOCOL} §1.2)")
+        }
+    };
+    match bar.held {
+        Held::Control => format!("the bar is the A/A control of {PROTOCOL} §2"),
+        Held::Series => format!("{series}; {to_go}"),
     }
 }
 
-/// How far the first arm's median stands behind the second's, as a
-/// percentage of the second's: the paired delta where its sign is
-/// established and it is the first arm's loss, a time more or a rate
-/// less, nothing where the first arm is ahead, and none where the sign is
-/// not established (§1.2) or the second arm measured nothing.
-fn to_go(measured: &Measured) -> Option<f64> {
-    (sign_of(&measured.delta) == RESOLVED && measured.paired_pct.is_finite())
-        .then(|| (measured.paired_pct * measured.unit.worse()).max(0.0))
+/// How far the first arm stands behind the second, as a percentage of
+/// the second: the bar's ratio where its sign is established and it is
+/// the first arm's loss, a time more or a rate less, nothing where the
+/// first arm is ahead, and none where the sign is not established (§1.2)
+/// or the second arm measured nothing.
+fn to_go(took: &Took) -> Option<f64> {
+    let ratio = took.ratio();
+    (ratio.verdict == RESOLVED && ratio.value.is_finite())
+        .then(|| ((ratio.value - 1.0) * 100.0 * took.unit().worse()).max(0.0))
 }
 
 /// A measured number as the store keeps it: to the microsecond, which is
@@ -971,48 +1118,69 @@ fn load_text(load: Option<[f64; 3]>) -> String {
     )
 }
 
+/// One row's numbers, each key after `prefix`: its two arms, the paired
+/// delta under the unit's keys, what each arm spent, the delta as a share,
+/// and a set's row its ratio.
+fn row_numbers(prefix: &str, row: &Measured) -> Vec<(String, f64)> {
+    let numbers = [
+        ("a_median", row.a.median),
+        ("a_iqr", row.a.iqr),
+        ("b_median", row.b.median),
+        ("b_iqr", row.b.iqr),
+        ("delta_median", row.delta.median),
+        ("delta_q1", row.delta.q1),
+        ("delta_q3", row.delta.q3),
+        ("delta_iqr", row.delta.iqr),
+    ];
+    let numbers = (numbers.into_iter()).map(|(key, value)| (row.unit.key(key), value));
+    let [a, b] = row.spent;
+    let spent = (a.numbers("a").into_iter()).chain(b.numbers("b"));
+    let ratio = (!prefix.is_empty()).then(|| ("ratio".to_owned(), row.ratio()));
+    (numbers.chain(spent))
+        .chain([("paired_pct".to_owned(), row.paired_pct)])
+        .chain(ratio)
+        .map(|(key, value)| (format!("{prefix}{key}"), value))
+        .collect()
+}
+
 /// One measured bar as one reading: `pass` while the A/A control holds,
-/// `fail` when the sign resolved, the measurement in `numbers` with the
+/// `fail` when a row's sign resolved, the measurement in `numbers` with the
 /// load the protocol requires beside it, and the standing in the message.
-/// Stamped over the workspace, a bar having no sources of its own; `done`
-/// asks no instrument for a bench reading, which is the other half of the
-/// exit rule.
+/// A set's rows are kept under their programs' names, `fib_ratio`, beside
+/// `geomean_ratio`. Stamped over the workspace, a bar having no sources of
+/// its own; `done` asks no instrument for a bench reading, which is the
+/// other half of the exit rule.
 fn recorded(
     bar: &Shown<'_>,
-    measured: &Measured,
+    took: &Took,
     (reps, label, note): (usize, Label, &str),
     load: Option<[f64; 3]>,
     snapshot: &Snapshot,
 ) -> Result<Reading> {
-    let verdict = sign_of(&measured.delta);
     let mut reading = Reading::stamped_over(INSTRUMENT, bar.id, snapshot, Path::new("."))?;
-    reading.status = bar.held.status(verdict);
-    if bar.held == Held::Series
-        && let Some(to_go) = to_go(measured)
+    reading.status = bar.held.status(took);
+    if bar.held != Held::Control
+        && let Some(to_go) = to_go(took)
     {
         reading
             .numbers
             .insert("to_go_pct".to_owned(), rounded(to_go).into());
     }
-    reading.count("reps", u64::try_from(measured.delta.n)?)?;
+    let n = took.rows.first().map_or(0, |(_, row)| row.delta.n);
+    reading.count("reps", u64::try_from(n)?)?;
     reading.count("warmup_discarded", u64::try_from(WARMUP)?)?;
-    let unit = measured.unit.suffix();
-    let numbers = [
-        ("a_median", measured.a.median),
-        ("a_iqr", measured.a.iqr),
-        ("b_median", measured.b.median),
-        ("b_iqr", measured.b.iqr),
-        ("delta_median", measured.delta.median),
-        ("delta_q1", measured.delta.q1),
-        ("delta_q3", measured.delta.q3),
-        ("delta_iqr", measured.delta.iqr),
-    ];
-    let numbers = (numbers.into_iter()).map(|(key, value)| (measured.unit.key(key), value));
-    let [a, b] = measured.spent;
-    let spent = (a.numbers("a").into_iter()).chain(b.numbers("b"));
-    for (key, value) in
-        (numbers.chain(spent)).chain([("paired_pct".to_owned(), measured.paired_pct)])
-    {
+    let mut numbers = Vec::new();
+    for (program, row) in &took.rows {
+        let prefix = program
+            .as_ref()
+            .map_or_else(String::new, |p| format!("{p}_"));
+        numbers.extend(row_numbers(&prefix, row));
+    }
+    if took.rows.len() > 1 {
+        numbers.push(("geomean_ratio".to_owned(), took.ratio().value));
+        reading.count("resolved", u64::try_from(took.resolved())?)?;
+    }
+    for (key, value) in numbers {
         if value.is_finite() {
             reading.numbers.insert(key, rounded(value).into());
         }
@@ -1027,16 +1195,32 @@ fn recorded(
     } else {
         format!(" ({})", note.trim())
     };
-    let spent: String = (bar.names.iter().zip(measured.spent))
-        .filter_map(|(name, spent)| Some(format!("; {name} per request: {}", spent.text()?)))
-        .collect();
+    let measured = match took.rows.as_slice() {
+        [(None, row)] => {
+            let spent: String = (bar.names.iter().zip(row.spent))
+                .filter_map(|(name, spent)| {
+                    Some(format!("; {name} per request: {}", spent.text()?))
+                })
+                .collect();
+            format!(
+                "paired delta {:.3} {} ({:+.2}%) over {reps} reps, {}; correctness {}; {}{spent}",
+                row.delta.median,
+                row.unit.suffix(),
+                row.paired_pct,
+                sign_of(&row.delta),
+                row.correctness.as_str(),
+                held_by(bar, took),
+            )
+        }
+        _ => format!(
+            "{}{reps} reps a program; {}",
+            geomean(took),
+            held_by(bar, took)
+        ),
+    };
     reading.message = format!(
-        "{}: paired delta {:.3} {unit} ({:+.2}%) over {reps} reps, {verdict}; correctness {}; {}{spent}; {}{reservation}; load {} ({PROTOCOL} §4.3, §7)",
+        "{}: {measured}; {}{reservation}; load {} ({PROTOCOL} §4.3, §7)",
         bar.about,
-        measured.delta.median,
-        measured.paired_pct,
-        measured.correctness.as_str(),
-        held_by(bar, measured),
         label.as_str(),
         load_text(load),
     );
@@ -1045,8 +1229,9 @@ fn recorded(
 
 #[cfg(test)]
 mod tests {
+    use super::Unit::{Ms, Rps};
     use super::{
-        Correctness, Held, Measured, RESOLVED, SWAMPED, Stats, Status, Stream,
+        Correctness, Held, Measured, RESOLVED, SWAMPED, Stats, Status, Stream, Took, Unit,
         refuse_a_hosted_runner, sign_of, stats, to_go,
     };
 
@@ -1080,41 +1265,96 @@ mod tests {
         assert_eq!(sign_of(&stats(&[-4.0, -3.0, -2.0, -1.0])), RESOLVED);
     }
 
-    /// A control fails on a resolved sign and passes on a swamped one; a
-    /// series passes either way, and states how far its first arm stands
-    /// behind its second only where the sign is established, nothing where
-    /// it is ahead (#2351, §1.2).
-    #[test]
-    fn a_control_fails_on_a_resolved_sign_and_a_series_states_the_distance_to_go() {
-        assert_eq!(Held::Control.status(RESOLVED), Status::Fail);
-        assert_eq!(Held::Control.status(SWAMPED), Status::Pass);
-        assert_eq!(Held::Series.status(RESOLVED), Status::Pass);
-        let measured = |deltas: &[f64], paired_pct| Measured {
-            unit: super::Unit::Ms,
+    /// One pair's row, its delta over `deltas` and its share `paired_pct`.
+    fn row(unit: Unit, deltas: &[f64], paired_pct: f64) -> Measured {
+        Measured {
+            unit,
             a: Stats::default(),
             b: Stats::default(),
             delta: stats(deltas),
             paired_pct,
             correctness: Correctness::Bytes(Stream::Body),
             spent: [super::Spent::Unasked; 2],
-        };
-        let behind = [4.0, 5.0, 6.0, 7.0];
-        assert!(close(to_go(&measured(&behind, 250.0)).unwrap(), 250.0));
-        let ahead = [-7.0, -6.0, -5.0, -4.0];
-        assert!(close(to_go(&measured(&ahead, -12.5)).unwrap(), 0.0));
-        let straddles = [-1.0, -1.0, 1.0, 1.0];
-        assert_eq!(to_go(&measured(&straddles, 3.0)), None, "swamped");
-        assert_eq!(to_go(&measured(&behind, f64::NAN)), None);
-        let rate = |deltas: &[f64], paired_pct| Measured {
-            unit: super::Unit::Rps,
-            ..measured(deltas, paired_pct)
-        };
+        }
+    }
+
+    /// A bar of one pair, or of a set where `programs` names each row.
+    fn took(rows: Vec<Measured>, set: bool) -> Took {
+        let named = |i: usize| set.then(|| format!("p{i}"));
+        Took {
+            rows: rows
+                .into_iter()
+                .enumerate()
+                .map(|(i, r)| (named(i), r))
+                .collect(),
+        }
+    }
+
+    const BEHIND: [f64; 4] = [4.0, 5.0, 6.0, 7.0];
+    const AHEAD: [f64; 4] = [-7.0, -6.0, -5.0, -4.0];
+    const STRADDLES: [f64; 4] = [-1.0, -1.0, 1.0, 1.0];
+
+    /// A control fails on a resolved sign and passes on a swamped one; a
+    /// series passes either way, and states how far its first arm stands
+    /// behind its second only where the sign is established, nothing where
+    /// it is ahead (#2351, §1.2).
+    #[test]
+    fn a_control_fails_on_a_resolved_sign_and_a_series_states_the_distance_to_go() {
+        let one = |unit, deltas: &[f64], pct| took(vec![row(unit, deltas, pct)], false);
+        assert_eq!(Held::Control.status(&one(Ms, &BEHIND, 1.0)), Status::Fail);
+        assert_eq!(
+            Held::Control.status(&one(Ms, &STRADDLES, 1.0)),
+            Status::Pass
+        );
+        assert_eq!(Held::Series.status(&one(Ms, &BEHIND, 1.0)), Status::Pass);
+        assert!(close(to_go(&one(Ms, &BEHIND, 250.0)).unwrap(), 250.0));
+        assert!(close(to_go(&one(Ms, &AHEAD, -12.5)).unwrap(), 0.0));
+        assert_eq!(to_go(&one(Ms, &STRADDLES, 3.0)), None, "swamped");
+        assert_eq!(to_go(&one(Ms, &BEHIND, f64::NAN)), None);
         assert!(
-            close(to_go(&rate(&ahead, -50.0)).unwrap(), 50.0),
+            close(to_go(&one(Rps, &AHEAD, -50.0)).unwrap(), 50.0),
             "fewer requests a second is behind"
         );
-        assert!(close(to_go(&rate(&behind, 12.5)).unwrap(), 0.0));
+        assert!(close(to_go(&one(Rps, &BEHIND, 12.5)).unwrap(), 0.0));
         assert_eq!(Correctness::Bytes(Stream::Body).as_str(), "body-bytes");
+    }
+
+    /// A set's ratio is the geomean of its rows', 0.5 and 2.0 making 1.0,
+    /// its sign established only where every row's is (protocol §10); a
+    /// control over a set fails on any one resolved row.
+    #[test]
+    fn a_set_is_held_by_its_geomean_and_a_control_by_each_row() {
+        let set = took(vec![row(Ms, &AHEAD, -50.0), row(Ms, &BEHIND, 100.0)], true);
+        assert!(close(set.ratio().value, 1.0), "{:?}", set.ratio());
+        assert_eq!((set.ratio().verdict, set.resolved()), (RESOLVED, 2));
+        let swamped = took(
+            vec![row(Ms, &BEHIND, 10.0), row(Ms, &STRADDLES, 10.0)],
+            true,
+        );
+        assert!(close(swamped.ratio().value, 1.1));
+        assert_eq!((swamped.ratio().verdict, swamped.resolved()), (SWAMPED, 1));
+        assert_eq!(
+            to_go(&swamped),
+            None,
+            "one swamped row leaves the geomean unsigned"
+        );
+        assert_eq!(Held::Control.status(&swamped), Status::Fail);
+        let quiet = took(vec![row(Ms, &STRADDLES, 3.0), row(Ms, &AHEAD, 3.0)], true);
+        assert_eq!(Held::Control.status(&quiet), Status::Fail);
+        let quiet = took(
+            vec![row(Ms, &STRADDLES, 3.0), row(Ms, &STRADDLES, 3.0)],
+            true,
+        );
+        assert_eq!(Held::Control.status(&quiet), Status::Pass);
+        let shown = super::geomean(&set);
+        assert!(
+            shown.contains("geomean ratio 1.0000 over 2 programs (p0 0.5000, p1 2.0000)"),
+            "{shown}"
+        );
+        assert_eq!(
+            super::geomean(&took(vec![row(Ms, &BEHIND, 1.0)], false)),
+            ""
+        );
     }
 
     /// A rate arm's reps are paired as a time's are, the delta in requests
@@ -1152,7 +1392,11 @@ mod tests {
         assert_eq!(measured.unit, super::Unit::Rps);
         assert!((measured.a.median - 50.0).abs() < 0.1 && (measured.b.median - 100.0).abs() < 0.1);
         assert!(close(measured.delta.median, -50.0) && close(measured.paired_pct.round(), -50.0));
-        assert!(close(to_go(&measured).unwrap().round(), 50.0));
+        let took = Took {
+            rows: vec![(None, measured)],
+        };
+        assert!(close(to_go(&took).unwrap().round(), 50.0));
+        let measured = &took.rows[0].1;
         assert_eq!(measured.correctness, Correctness::Bytes(Stream::Stdout));
         // Each rep's server read nothing, as on a platform without
         // proc_pid_rusage: the rate stands, and each arm says why its
@@ -1165,7 +1409,7 @@ mod tests {
             held: Held::Series,
             names: ["a", "b"],
         };
-        let shown = super::rendered(&bar, &measured, 12, super::Label::Smoke, None);
+        let shown = super::rendered(&bar, &took, 12, super::Label::Smoke, None);
         let said = format!("n 12); per request: absent: {}", super::spent::ABSENT);
         assert!(shown.contains(&said), "{shown}");
     }
