@@ -67,7 +67,7 @@ impl DbLink {
 ///
 /// ```php
 /// $q = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
-/// $sql = 'SELECT ' . str_repeat('1', 3);
+/// $sql = 'SELECT ' . str_repeat('1', count($argv) + 2);
 /// $s = $q->query($sql);
 /// debug_zval_dump($sql);
 /// $s = $q->prepare($sql);
