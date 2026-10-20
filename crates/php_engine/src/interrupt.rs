@@ -1042,7 +1042,7 @@ mod tests {
             },
             ..Unit::default()
         }
-        .published()
+        .published(None)
     }
 
     fn description() -> RequestDescription {

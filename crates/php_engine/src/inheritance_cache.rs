@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn a_link_is_found_by_its_declaration_and_added_once() {
         let cache = InheritanceCache::default();
-        let unit = Unit::default().published();
+        let unit = Unit::default().published(None);
         assert!(cache.find(&unit, 0).is_none());
         let first = cache.add(&unit, 0, entry(1, 10));
         let again = cache.add(&unit, 0, entry(1, 11));
@@ -196,7 +196,7 @@ mod tests {
     fn a_restart_empties_the_map() {
         let files = crate::unit_cache::Files::new(16);
         let epochs = crate::arena::Epochs::of(crate::arena::Arena::past(0, 0, files));
-        let unit = Unit::default().published();
+        let unit = Unit::default().published(None);
         let arena = epochs.enter(|_| false);
         arena.inheritance.add(&unit, 0, entry(1, 10));
         let restarted = epochs.enter(|_| true);
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn readers_and_a_writer_share_the_map() {
         let cache = InheritanceCache::default();
-        let unit = Unit::default().published();
+        let unit = Unit::default().published(None);
         std::thread::scope(|scope| {
             for _ in 0..4 {
                 scope.spawn(|| {

@@ -13,8 +13,9 @@
 //! what opcache persists. Here the request hands such an op array a
 //! number of its own when it takes the unit, holds its cache in a
 //! second table beside the map table, and hands the number out again
-//! once nothing holds the unit, so an `eval` in a loop grows neither
-//! the engine's count nor the request's table.
+//! once nothing holds the unit, as its last holder gives it up, so an
+//! `eval` in a loop grows neither the engine's count nor the request's
+//! table.
 
 use php_heap::{MapPtr, MapTable};
 use php_unit::{MapPtrOffset, OpArray, PublishedUnit, Unit, WeakUnit};
@@ -168,12 +169,38 @@ impl RuntimeCaches {
         })
     }
 
-    /// A unit compiled for this request alone, shared from here on: each
-    /// of its op arrays given a number of the request's, a number of a
-    /// unit nothing holds any longer first, whose cache was emptied as
-    /// the unit was found over, as php frees a heap cache with its op
-    /// array.
-    pub(crate) fn take(&mut self, mut unit: Unit) -> PublishedUnit {
+    /// `unit`, whose last share its holder is giving up: the numbers
+    /// its op arrays held handed out again, their caches emptied, as php
+    /// frees a heap cache with its op array, so the next unit takes them
+    /// with no scan. A unit another share holds, or one the request did
+    /// not take, keeps what it holds.
+    pub(crate) fn release(&mut self, unit: &PublishedUnit) {
+        let Some(at) = self.held.iter().rposition(|(held, _)| {
+            std::ptr::eq(held.as_ptr(), PublishedUnit::as_ptr(unit)) && held.strong_count() == 1
+        }) else {
+            return;
+        };
+        let (_, mut numbers) = self.held.swap_remove(at);
+        for &number in &numbers {
+            *self.request.map(MapPtr::new(number)) = RuntimeCache::default();
+        }
+        self.free.append(&mut numbers);
+        self.spare.push(numbers);
+    }
+
+    /// A unit compiled for this request alone, shared from here on, and
+    /// published in `room`, a unit the request gave up, where there is
+    /// one: each of its op arrays given a number of the request's, one
+    /// handed back first. A unit's last holder hands its numbers back as
+    /// it gives the unit up ([`RuntimeCaches::release`]); the scan here
+    /// finds those of a unit whose last share went another way, a
+    /// function or a closure it declared dropped with it, and empties
+    /// their caches as php frees a heap cache with its op array.
+    pub(crate) fn take(
+        &mut self,
+        mut unit: Unit,
+        room: Option<php_unit::SpareUnit>,
+    ) -> PublishedUnit {
         let (free, request, spare) = (&mut self.free, &mut self.request, &mut self.spare);
         self.held.retain_mut(|(unit, numbers)| {
             if unit.strong_count() > 0 {
@@ -192,7 +219,7 @@ impl RuntimeCaches {
             code.runtime_cache = MapPtrOffset::Request(number);
             numbers.push(number);
         }
-        let unit = unit.published();
+        let unit = unit.published(room);
         self.held.push((PublishedUnit::downgrade(&unit), numbers));
         unit
     }
