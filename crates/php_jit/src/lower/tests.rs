@@ -462,3 +462,27 @@ fn a_call_another_function_answers_leaves_where_it_enters() {
         );
     }
 }
+
+/// A `NEW` whose class has no constructor skips the `DO_FCALL` after it,
+/// so it is held to the opline the trace serves next, as php holds a
+/// `NEW` that may skip its constructor: the loop, recorded where the class
+/// had one, leaves where it has none rather than call a frame nothing
+/// pushed (`Zend/tests/instantiate_all_classes.phpt`).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_new_that_skips_its_constructor_leaves_where_it_does() {
+    let program = "class A { function __construct() { echo 'a'; } } class B {}
+        function f() { foreach (['A', 'A', 'B', 'A'] as $c) { new $c; } }
+        f(); echo \"\\n\";";
+    for mode in ["force", "exit-fuzz"] {
+        let ini = [
+            ("jit.mode", mode),
+            ("jit.compile", "inline"),
+            ("opcache.jit_debug", "258048"),
+        ];
+        let served = testing::serve::<Lane>(&ini, program);
+        let lines = String::from_utf8_lossy(&served.stderr).into_owned();
+        assert_eq!(served.fatal, None, "{mode}\n{lines}");
+        assert_eq!(testing::stdout(&served), "aaa\n", "{mode}\n{lines}");
+    }
+}

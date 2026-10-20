@@ -495,7 +495,7 @@ impl<'a> Builder<'a> {
         let target = jump.and_then(|jump| jump.jump_target());
         self.successor = went(at, &op, target, len, branch);
         self.own_exit(idx, frame, &op, form, t1);
-        self.stands(idx, frame, &op, ahead);
+        self.stands(idx, frame, &op, after.as_ref(), ahead);
         if let Some(taken) = branch {
             let jump = if fused { after } else { None };
             self.direction(
@@ -591,13 +591,25 @@ impl<'a> Builder<'a> {
     /// (`zend_jit_trace_may_exit`, `Z/ext/opcache/jit/zend_jit_trace.c:261-320`,
     /// held by `zend_jit_trace_handler`, `zend_jit_ir.c:17129-17236`) where
     /// the record does not say where the opline goes: a table's jump
-    /// (`SWITCH_LONG`, `SWITCH_STRING`, `MATCH`) and a `DO_FCALL`, whose
-    /// callee a method's, a closure's or a dynamic call may vary. It is held to the opline the trace serves next.
-    fn stands(&mut self, idx: OpId, frame: Frame, op: &Opline, ahead: &[Event]) {
-        let may_leave = matches!(
-            op.opcode,
-            Opcode::SwitchLong | Opcode::SwitchString | Opcode::Match | Opcode::DoFcall
-        );
+    /// (`SWITCH_LONG`, `SWITCH_STRING`, `MATCH`), a `NEW` that skips the
+    /// `DO_FCALL` after it where the class has no constructor, and a
+    /// `DO_FCALL`, whose callee a method's, a closure's or a dynamic call
+    /// may vary. It is held to the opline the trace serves next.
+    fn stands(
+        &mut self,
+        idx: OpId,
+        frame: Frame,
+        op: &Opline,
+        after: Option<&Opline>,
+        ahead: &[Event],
+    ) {
+        let may_leave = match op.opcode {
+            Opcode::SwitchLong | Opcode::SwitchString | Opcode::Match | Opcode::DoFcall => true,
+            Opcode::New => {
+                op.extended_value == 0 && after.is_some_and(|after| after.opcode == Opcode::DoFcall)
+            }
+            _ => false,
+        };
         if let Some((func, opline)) = self.following(ahead).filter(|_| may_leave) {
             self.guards.push(Placed {
                 at: GuardAt::Within(idx),
