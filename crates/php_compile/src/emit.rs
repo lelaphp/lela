@@ -586,10 +586,11 @@ pub(crate) struct Emit<'a> {
     /// entry landing once its body has compiled, which is when php's
     /// `ZEND_ACC_DONE_PASS_TWO` lets a call site know it.
     functions_declared: Vec<(FunctionDecl, OpArray)>,
-    /// How many diagnostics had been raised when each of
-    /// `functions_declared` landed, which a refusal after it carries
-    /// ([`crate::Declared::raised_before`]).
-    raised_before: Vec<usize>,
+    /// What `CG(function_table)` and `CG(class_table)` took of the file
+    /// so far: each top-level function and each class bound early, as it
+    /// landed, beside how many diagnostics had been raised by then, which
+    /// a refusal after it carries ([`crate::Declared`]).
+    landed: Vec<(TopLevel, usize)>,
     /// The functions the file declares that no name binds while it
     /// compiles, [`Unit::dynamic`]: php's `dynamic_func_defs` over every
     /// op array of the file, in the order `zend_add_dynamic_func_def`
@@ -1382,7 +1383,7 @@ impl<'a> Emit<'a> {
             attributed_constants: Vec::new(),
             keys_before: options.keys_before,
             functions_declared: Vec::new(),
-            raised_before: Vec::new(),
+            landed: Vec::new(),
             dynamic: Vec::new(),
             cell: php_unit::UnitCell::default(),
             function_callables: 0,
@@ -1461,19 +1462,30 @@ pub(crate) fn unit(
     // it already rendered, so those travel with it.
     if let Err(mut refused) = emit.source_file() {
         refused.raised = emit.diagnostics;
-        // What php's compile had added to `CG(function_table)` before it
-        // bailed out, which nothing takes back.
-        if !emit.functions_declared.is_empty() {
-            let top_level = (0..emit.functions_declared.len())
-                .map(|at| TopLevel::Function(u32::try_from(at).unwrap_or(u32::MAX)))
-                .collect();
+        // What php's compile had added to `CG(function_table)` and
+        // `CG(class_table)` before it bailed out, which nothing takes
+        // back: every body those reach, and the closures they declare, a
+        // slot the refused statement took and never filled ending them.
+        // A refusal php throws is the parser's, made before `zend_compile`
+        // declared anything, as is a parse error.
+        let bailed = !refused.thrown && refused.level != Level::Parse;
+        if bailed && !emit.landed.is_empty() {
+            let (top_level, raised_before) = emit.landed.into_iter().unzip();
+            let dynamic = emit.dynamic.into_iter().map_while(|def| def).collect();
             refused.declared = Some(Box::new(crate::Declared {
                 unit: Unit {
                     functions: emit.functions_declared,
+                    classes: emit.classes,
+                    runtime_keys: emit.runtime_keys,
                     top_level,
+                    methods: emit.methods,
+                    hooks: emit.hooks,
+                    completed: emit.completed,
+                    dynamic,
+                    cell: emit.cell,
                     ..Unit::default()
                 },
-                raised_before: emit.raised_before,
+                raised_before,
             }));
         }
         return Err(refused);
@@ -3478,7 +3490,8 @@ impl<'a> Emit<'a> {
         let at = u32::try_from(self.functions_declared.len()).unwrap_or(u32::MAX);
         self.top_level.push(TopLevel::Function(at));
         self.functions_declared.push(declared);
-        self.raised_before.push(self.diagnostics.len());
+        self.landed
+            .push((TopLevel::Function(at), self.diagnostics.len()));
         Ok(())
     }
 
@@ -5310,6 +5323,8 @@ impl<'a> Emit<'a> {
         // `#[\Override]` marks are held to what it overrides.
         if early && self.try_early_bind(at)? {
             self.bound.push(at);
+            let class = TopLevel::Class(u32::try_from(at).unwrap_or(u32::MAX));
+            self.landed.push((class, self.diagnostics.len()));
             return Ok(());
         }
         let delayed = toplevel && unlinked_free;
@@ -19742,7 +19757,7 @@ mod tests {
             attributed_constants: Vec::new(),
             keys_before: 0,
             functions_declared: Vec::new(),
-            raised_before: Vec::new(),
+            landed: Vec::new(),
             dynamic: Vec::new(),
             cell: php_unit::UnitCell::default(),
             function_callables: 0,

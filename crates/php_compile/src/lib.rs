@@ -323,25 +323,30 @@ pub struct CompileError {
     /// Where php stood when it refused, which is where `zend_error`
     /// places it.
     pub stage: Stage,
-    /// The functions a file's compile had declared at its top level
-    /// before it refused, none where it declared none.
+    /// The functions and classes a source's compile had declared at its
+    /// top level before it refused, none where it declared none.
     pub declared: Option<Box<Declared>>,
 }
 
-/// What php's compile of a file had added to `CG(function_table)` when
-/// it refused: `zend_compile_func_decl` adds each function at the top
-/// level once its body has compiled (`Z/Zend/zend_compile.c:8601-8606`),
-/// and the fatal's `zend_bailout` out of `zend_compile` takes none of them back, so they
-/// stand in the request after the refusal, and a second compile of the
-/// file in the request meets the first of them as `Cannot redeclare`.
+/// What php's compile of a source had added to `CG(function_table)` and
+/// `CG(class_table)` when it refused: `zend_compile_func_decl` adds each
+/// function at the top level once its body has compiled
+/// (`Z/Zend/zend_compile.c:8601-8606`) and `zend_compile_class_decl`
+/// each class it binds early (`:9381`), and the fatal's `zend_bailout`
+/// out of `zend_compile` takes none of them back, so they stand in the
+/// request after the refusal, and a second compile of the file in the
+/// request meets the first of them as `Cannot redeclare`.
+///
+/// `U` is the unit as the compiler made it, and as the engine publishes
+/// it for the request that declares what it holds.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Declared {
-    /// The functions, each with its body, as a unit of their own: no
-    /// main op array, nothing else declared, each named in
-    /// [`Unit::top_level`].
-    pub unit: Unit,
-    /// For each of the unit's functions, how many of the refusal's
-    /// [`CompileError::raised`] php had raised when it declared it.
+pub struct Declared<U = Unit> {
+    /// The functions and the early-bound classes, each with its bodies,
+    /// as a unit of their own: no main op array, and each in
+    /// [`Unit::top_level`] in the order it landed.
+    pub unit: U,
+    /// For each of the unit's [`Unit::top_level`], how many of the
+    /// refusal's [`CompileError::raised`] php had raised when it landed.
     pub raised_before: Vec<usize>,
 }
 
@@ -4430,6 +4435,43 @@ mod tests {
     fn refused(source: &[u8]) -> Option<CompileError> {
         let mut strings = php_heap::Strings::new();
         compile_parsed(source, &bundled(), &mut strings).err()
+    }
+
+    /// #3029: a refusal carries what landed in php's tables before it,
+    /// each top-level function and each class bound early in the order
+    /// it landed, beside what was raised by then; a class its opline
+    /// binds, and a closure slot the refused statement took, are not.
+    #[test]
+    fn a_refusal_carries_the_functions_and_the_early_bound_classes_that_landed() {
+        use php_unit::TopLevel;
+        let source = b"<?php\nfunction f(int $a = null) { return fn() => 1; }\nclass A {}\ninterface I {}\nclass C implements I {}\nfunction g() {}\n$h = function () { break 2; };\n";
+        let declared = refused(source).and_then(|error| error.declared);
+        assert!(declared.is_some(), "the refusal carries what landed");
+        let Some(declared) = declared else {
+            return;
+        };
+        assert_eq!(
+            declared.unit.top_level,
+            vec![
+                TopLevel::Function(0),
+                TopLevel::Class(0),
+                TopLevel::Class(1),
+                TopLevel::Function(1),
+            ]
+        );
+        assert_eq!(declared.raised_before, vec![1, 1, 1, 1]);
+        assert_eq!(declared.unit.dynamic.len(), 1, "f's closure, not $h's");
+        assert_eq!(declared.unit.runtime_keys.len(), 1, "C, its opline's");
+    }
+
+    /// #3029: a refusal php throws is its parser's, before `zend_compile`
+    /// declared anything, so it carries nothing that landed.
+    #[test]
+    fn a_thrown_refusal_carries_nothing_declared() {
+        let source = b"<?php\nfunction f() {}\nclass A {}\nif (1) { __HALT_COMPILER(); }\n";
+        let refused = refused(source);
+        assert!(refused.as_ref().is_some_and(|error| error.thrown));
+        assert!(refused.is_some_and(|error| error.declared.is_none()));
     }
 
     /// #256's program under the oracle's `[regime.dump]`: a `switch` of

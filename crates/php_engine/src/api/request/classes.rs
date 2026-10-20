@@ -1816,14 +1816,15 @@ impl Request {
         }
     }
 
-    /// What a file's compile had added to `CG(function_table)` when it
-    /// refused, none of which its `zend_bailout` takes back
-    /// ([`php_compile::Declared`]): each function declared in its turn,
-    /// what was raised before it noted first, so one the request holds
-    /// already is `Cannot redeclare` after what php had raised by then
-    /// and before the rest. How many of `refused`'s raised it noted, or
-    /// none where a redeclaration ended the request. The unit is the
-    /// request's own, compiled for it alone.
+    /// What a file's compile had added to `CG(function_table)` and
+    /// `CG(class_table)` when it refused, none of which its `zend_bailout`
+    /// takes back ([`php_compile::Declared`]): each top-level function and
+    /// each class bound early declared in its turn, what was raised before
+    /// it noted first, so one the request holds already is `Cannot
+    /// redeclare` after what php had raised by then and before the rest.
+    /// How many of `refused`'s raised it noted, or none where a
+    /// redeclaration ended the request. The unit is the request's own,
+    /// compiled for it alone.
     pub(crate) fn declare_refused(
         &mut self,
         refused: &php_compile::CompileError,
@@ -1833,13 +1834,23 @@ impl Request {
         let (Some(declared), Some(unit)) = (&refused.declared, unit) else {
             return Some(0);
         };
+        let mut load = self.class_load(unit);
         let mut noted = 0;
-        for (at, before) in declared.raised_before.iter().copied().enumerate() {
-            for raised in refused.raised.get(noted..before).unwrap_or_default() {
+        for (landed, before) in unit.top_level.iter().zip(&declared.raised_before) {
+            for raised in refused.raised.get(noted..*before).unwrap_or_default() {
                 self.note_error_in(raised.level, &raised.message, file, raised.line);
             }
-            noted = noted.max(before);
-            if !self.declare_function_told(unit, at) {
+            noted = noted.max(*before);
+            let standing = match *landed {
+                TopLevel::Function(at) => {
+                    self.declare_function_told(unit, usize::try_from(at).unwrap_or(usize::MAX))
+                }
+                TopLevel::Class(at) => {
+                    let at = usize::try_from(at).unwrap_or(usize::MAX);
+                    self.declare_classes_through(unit, &mut load, Some(at))
+                }
+            };
+            if !standing {
                 return None;
             }
         }
