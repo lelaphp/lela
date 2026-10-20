@@ -487,3 +487,26 @@ fn an_operand_read_twice_is_seen_as_its_one_guard_holds_it() -> Result<(), Strin
     }
     Ok(())
 }
+
+/// A division at a loop's header, whose operands php's guard switch
+/// leaves out: guarded as a product's here, it sees the loop's variable `$i`
+/// as the guard holds it and is inline, where it saw the loop's phi as
+/// anything and was stepped on every turn (#3073, #3111).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_division_at_a_loops_header_is_inline() -> Result<(), String> {
+    for (start, body) in [
+        ("0.0", "$s = 3.0 / $i;"),
+        ("0.0", "$s = $i / 3.0;"),
+        ("1.0", "$s = $s / 1.0000001;"),
+        ("0", "$s = $i / 1;"),
+        ("1000.0", "$s /= $i;"),
+    ] {
+        let (stepped, ir) = steps(&format!(
+            "function f($n) {{ $s = {start}; for ($i = 1; $i < $n; $i++) {{ {body} }} return $s; }}
+            echo f(100), \"\\n\";"
+        ))?;
+        assert!(!stepped, "{body}\n{ir}");
+    }
+    Ok(())
+}
