@@ -48,7 +48,7 @@ fn main() -> ExitCode {
     // threads leaked into it, which it must not hold while idle (#2550).
     php_sapi_cli::close_inherited_fds();
     // Served on the stack the CLI serves on, as `php` serves them.
-    php_sapi::main_thread(php_sapi::REQUEST_STACK, || php_sapi::exit(served()))
+    php_sapi::main_on_request_stack(served)
 }
 
 /// Each line's request served, until the input ends: 0, or 1 where a line

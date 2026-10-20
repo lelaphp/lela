@@ -15,8 +15,9 @@
 //! the caller's own. A host's thread that serves requests starts here too,
 //! through [`host_thread`], and so does the thread a host moves its
 //! `main` onto, through [`main_thread`], which is the process's main
-//! thread to a fork and so never beside one it asks. A thread started any other way than [`spawn`] is
-//! one no fork waits for, and a thread started through it that a fork
+//! thread to a fork and so never beside one it asks. A thread started
+//! any other way than [`spawn`] is one no fork waits for, and a thread
+//! started through it that a fork
 //! does not join first leaves the fork refused rather than a child that
 //! hangs. What the engine cannot see is a host's own thread that holds
 //! no request, such as the accept loop `php -S` kept beside its
@@ -106,12 +107,6 @@ pub(crate) struct Thread<T = ()> {
     _inside: Inside,
 }
 
-/// `body` on a thread of its own named `name`, counted inside the engine
-/// until it is joined; `None` where the system refuses a thread.
-pub(crate) fn spawn(name: &str, body: impl FnOnce() + Send + 'static) -> Option<Thread> {
-    start(thread::Builder::new().name(name.to_owned()), body).ok()
-}
-
 /// `body` over `input` on a thread apart named `name`, with a stack of
 /// `stack_size` bytes, counted inside the engine while it stands, and
 /// joined before this returns: what `body` answered, or the panic it
@@ -135,7 +130,7 @@ pub(crate) fn run_apart<I: Send + 'static, T: Send + 'static>(
     let builder = thread::Builder::new()
         .name(name.to_owned())
         .stack_size(stack_size);
-    let thread = match start(builder, move || handed.recv().ok().map(body)) {
+    let thread = match spawn(builder, move || handed.recv().ok().map(body)) {
         Ok(thread) => thread,
         Err(refused) => return Err((refused, input)),
     };
@@ -157,8 +152,11 @@ pub(crate) fn run_apart<I: Send + 'static, T: Send + 'static>(
 }
 
 /// `body` on the thread `builder` describes, counted inside the engine
-/// from before it exists to after it is joined.
-fn start<T: Send + 'static>(
+/// from before it exists to after it is joined: the one home every thread
+/// of the engine's process starts through, the engine's own (its timer,
+/// a [`Worker`]'s, a thread apart) and a host's ([`host_thread`],
+/// [`main_thread`]) alike.
+pub(crate) fn spawn<T: Send + 'static>(
     builder: thread::Builder,
     body: impl FnOnce() -> T + Send + 'static,
 ) -> io::Result<Thread<T>> {
@@ -206,7 +204,7 @@ pub fn host_thread(
     let builder = thread::Builder::new()
         .name(name.to_owned())
         .stack_size(stack_size);
-    start(builder, body).map(HostThread)
+    spawn(builder, body).map(HostThread)
 }
 
 /// The thread [`main_thread`] moved the process's work onto, once it
@@ -255,7 +253,7 @@ where
             std::process::exit(101);
         }
     };
-    let Ok(main) = start(builder, serve) else {
+    let Ok(main) = spawn(builder, serve) else {
         match body() {}
     };
     MAIN.set(main.handle.thread().id()).ok();
@@ -283,7 +281,7 @@ pub trait Parked: Send + Sync + 'static {
 
 /// The one thread a [`Parked`] body runs on, an engine's thread as
 /// ADR-0010's Threads has them: started on demand through the engine's
-/// one home ([`spawn`]'s), so a fork counts it, parked in its body
+/// one home ([`spawn`]), so a fork counts it, parked in its body
 /// between jobs, joined before every fork, a host's and a request's
 /// alike, and started again after it in the process that asked, as the
 /// engine's timer thread is (#2541), and joined when the worker drops.
@@ -336,7 +334,8 @@ impl Worker {
         let mut thread = self.thread();
         if thread.is_none() {
             let parked = Arc::clone(&self.parked);
-            *thread = spawn(&self.name, move || parked.run());
+            let builder = thread::Builder::new().name(self.name.clone());
+            *thread = spawn(builder, move || parked.run()).ok();
         }
         thread.is_some()
     }
@@ -583,9 +582,10 @@ pub(crate) fn fork_request() -> io::Result<Forked> {
 /// # Errors
 ///
 /// `EBUSY` where a request is in flight or a thread the engine started
-/// other than its timer's and the caller's own [`main_thread`] stands, as on a host that serves on threads,
-/// which no host that forks does; otherwise the OS error `fork(2)` failed
-/// with, and no process was made.
+/// other than its timer's and the caller's own [`main_thread`] stands, as
+/// on a host that serves on threads, which no host that forks does;
+/// otherwise the OS error `fork(2)` failed with, and no process was
+/// made.
 pub fn fork() -> io::Result<Forked> {
     fork_as(Asker::Host)
 }
@@ -622,7 +622,8 @@ mod tests {
     #[test]
     fn a_thread_is_inside_while_it_stands() {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
-        let Some(thread) = spawn("php-test", move || {
+        let builder = std::thread::Builder::new().name("php-test".to_owned());
+        let Ok(thread) = spawn(builder, move || {
             rx.recv().ok();
         }) else {
             return;

@@ -60,7 +60,6 @@ pub mod server;
 
 use std::ffi::OsString;
 use std::io::Write;
-use std::process::ExitCode;
 
 use std::cell::OnceCell;
 use std::sync::OnceLock;
@@ -125,11 +124,11 @@ pub fn version(engine: &Engine) -> String {
 /// callback reaches the depth php reaches on its main thread (design
 /// §5.6, #3043), and the process ends there, in the child of a fork as
 /// in the process that started it.
-pub fn main() -> ExitCode {
+pub fn main() -> ! {
     // `save_ps_args`, which php's `main` calls before anything else reads
     // `argv` (`php_cli.c:1224-1228`).
     TITLE.set(ffi::save_ps_args().map(ProcessTitle::new)).ok();
-    php_sapi::main_thread(php_sapi::REQUEST_STACK, || php_sapi::exit(served()))
+    php_sapi::main_on_request_stack(served)
 }
 
 /// What [`main`] serves, the command line read and served, and the

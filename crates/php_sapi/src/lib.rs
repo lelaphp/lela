@@ -310,9 +310,10 @@ pub fn exit(status: i32) -> ! {
 /// its `main` onto ([`main_thread`]) and by makala on each request thread
 /// ([`host_thread`]), so that recursion through a native's callback
 /// reaches the depth php reaches on its 8 MiB main thread (design §5.6,
-/// #3043's ruling). About 8 MiB × 4,208 ÷ 672: a level of that recursion
-/// costs 4,208 bytes of native stack here, the loop's frame among them,
-/// against php's about 672 (#3022). The stack is reserved, not
+/// #3043's ruling). About 8 MiB × 4,208 ÷ 672, 50 MiB, rounded up to the
+/// ruling's 52: a level of that recursion costs 4,208 bytes of native
+/// stack here, the loop's frame among them, against php's about 672
+/// (#3022). The stack is reserved, not
 /// committed: the system maps a thread's stack and commits its pages as
 /// they are touched, so a request that does not recurse holds what it
 /// would on 8 MiB. When the tail-call dispatch of §5.8 (revision 147)
@@ -361,6 +362,14 @@ pub fn exit(status: i32) -> ! {
 /// Maximum call stack size of N bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
 /// ```
 pub const REQUEST_STACK: usize = 52 << 20;
+
+/// A host's `main`, `served`, on the process's main thread moved onto
+/// [`REQUEST_STACK`] ([`main_thread`]), and the process ended with the
+/// status it answers, as [`exit`] ends it: how the CLI, and the witness
+/// lane's engine that serves as it does, serve.
+pub fn main_on_request_stack(served: impl FnOnce() -> i32 + Send + 'static) -> ! {
+    main_thread(REQUEST_STACK, move || exit(served()))
+}
 
 #[cfg(test)]
 mod system {

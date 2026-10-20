@@ -55,16 +55,19 @@ fn block_every_signal() {
     // written.
     let all = unsafe { all.assume_init() };
     // SAFETY: `pthread_sigmask(2)` reads the set it is handed, live for
-    // the call, and is handed no old set to write.
-    unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &raw const all, std::ptr::null_mut()) };
+    // the call, and is handed no old set to write. It fails only on a
+    // `how` it does not know, and SIG_SETMASK is one it knows.
+    let _ =
+        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &raw const all, std::ptr::null_mut()) };
 }
 
 /// XNU lands a signal every thread blocks on the oldest thread that has
 /// not ended, so this one ends: `pthread_exit(3)`, which on Apple's
 /// systems unwinds nothing, so no frame below is resumed or dropped and
-/// what they hold stays as it is, and the main thread's stack, which the
-/// system mapped and not the thread library, stays mapped with the
-/// process's arguments and environment on it.
+/// what they hold is never freed; only the destructors of the thread's
+/// own per-thread keys are called. The main thread's stack, which the system mapped and
+/// not the thread library, stays mapped with the process's arguments and
+/// environment on it.
 #[cfg(target_vendor = "apple")]
 fn leave() -> ! {
     // SAFETY: `pthread_exit(3)` ends the calling thread, unwinding none
