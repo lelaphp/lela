@@ -326,6 +326,14 @@ pub struct CompileError {
     /// The functions and classes a source's compile had declared at its
     /// top level before it refused, none where it declared none.
     pub declared: Option<Box<Declared>>,
+    /// How many runtime definition keys and anonymous class names the
+    /// compile had made when it refused, whatever it declared: php's
+    /// `zend_bailout` out of `zend_compile` leaves them counted in
+    /// `CG(rtd_key_counter)`, so the request's next compile counts its
+    /// own on from them ([`Options::keys_before`]). None for a refusal
+    /// php makes before `zend_compile` runs, the parser's and one it
+    /// throws.
+    pub keys_made: u32,
 }
 
 /// What php's compile of a source had added to `CG(function_table)` and
@@ -519,6 +527,7 @@ fn compile_in(
             thrown: false,
             stage: Stage::Opening,
             declared: None,
+            keys_made: 0,
         })?;
     let parsed = php_syntax::parse(arena, &opened.text, &syntax_options(options));
     let scanning = multibyte::Scanning {
@@ -562,6 +571,7 @@ fn export_in(
             thrown: false,
             stage: Stage::Compiling,
             declared: None,
+            keys_made: 0,
         });
     }
     emit::export(arena, &parsed, options, strings)
@@ -636,6 +646,7 @@ fn compile_scanned<'p>(
                 thrown: false,
                 stage: crate::Stage::Compiling,
                 declared: None,
+                keys_made: 0,
             });
         }
         raised.push(Diagnostic {
@@ -690,6 +701,7 @@ fn unit_raised<'p>(
                     thrown: false,
                     stage: Stage::Compiling,
                     declared: None,
+                    keys_made: u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX),
                 });
             }
         }
@@ -2121,6 +2133,7 @@ mod tests {
                 thrown: false,
                 stage: crate::Stage::Compiling,
                 declared: None,
+                keys_made: 0,
             })
         );
         assert_eq!(
@@ -2133,6 +2146,7 @@ mod tests {
                 thrown: false,
                 stage: crate::Stage::Compiling,
                 declared: None,
+                keys_made: 0,
             })
         );
     }
@@ -4154,6 +4168,7 @@ mod tests {
                 thrown: false,
                 stage: crate::Stage::Compiling,
                 declared: None,
+                keys_made: 0,
             })
         );
     }
@@ -4184,6 +4199,7 @@ mod tests {
                 thrown: false,
                 stage: crate::Stage::Compiling,
                 declared: None,
+                keys_made: 0,
             })
         );
     }
@@ -4286,6 +4302,7 @@ mod tests {
                 thrown: false,
                 stage: crate::Stage::Compiling,
                 declared: None,
+                keys_made: 0,
             }),
             "`zend_is_allowed_in_const_expr` has no `ZEND_AST_SILENCE`"
         );
@@ -4390,6 +4407,7 @@ mod tests {
                 thrown: false,
                 stage: crate::Stage::Compiling,
                 declared: None,
+                keys_made: 0,
             }),
             "`zend_is_allowed_in_const_expr` has no `ZEND_AST_ENCAPS_LIST`"
         );
@@ -4585,6 +4603,8 @@ mod tests {
         assert_eq!(declared.raised_before, vec![1, 1, 1, 1]);
         assert_eq!(declared.unit.dynamic.len(), 1, "f's closure, not $h's");
         assert_eq!(declared.unit.runtime_keys.len(), 1, "C, its opline's");
+        let keys = refused(source).map(|error| error.keys_made);
+        assert_eq!(keys, Some(1), "the key counted with what landed");
     }
 
     /// #3029: a refusal php throws is its parser's, before `zend_compile`
@@ -4595,6 +4615,19 @@ mod tests {
         let refused = refused(source);
         assert!(refused.as_ref().is_some_and(|error| error.thrown));
         assert!(refused.is_some_and(|error| error.declared.is_none()));
+    }
+
+    /// #3041: a refusal carries the keys its compile had made whatever it
+    /// declared, an anonymous class's among them and one whose body the
+    /// compile refused in; a parse error made none.
+    #[test]
+    fn a_refusal_carries_the_keys_it_made_declared_or_not() {
+        let source = b"<?php\n$o = new class {};\n$p = new class { function f() { break 2; } };\n";
+        let error = refused(source);
+        assert!(error.as_ref().is_some_and(|error| error.declared.is_none()));
+        assert_eq!(error.map(|error| error.keys_made), Some(2));
+        let parse = refused(b"<?php\n$o = new class {};\n$p = ;\n").map(|error| error.keys_made);
+        assert_eq!(parse, Some(0), "a parse error compiled nothing");
     }
 
     /// #256's program under the oracle's `[regime.dump]`: a `switch` of
@@ -4742,6 +4775,7 @@ mod tests {
             thrown: false,
             stage: crate::Stage::Compiling,
             declared: None,
+            keys_made: 0,
         };
         let error = refused(b"<?php\n$a = (function () { declare(ticks=0): enddeclare; });\n")
             .unwrap_or_else(compiled);
@@ -5310,6 +5344,7 @@ mod tests {
                 thrown: false,
                 stage: crate::Stage::Compiling,
                 declared: None,
+                keys_made: 0,
             });
             assert_eq!(error.level, Level::CompileError, "{message}");
             assert_eq!(error.message, message);
@@ -8939,6 +8974,7 @@ $f = fn (): float => 1.5;
                 thrown: false,
                 stage: crate::Stage::Compiling,
                 declared: None,
+                keys_made: 0,
             });
             assert_eq!(error.level, Level::CompileError, "{message}");
             assert_eq!(error.message, message);

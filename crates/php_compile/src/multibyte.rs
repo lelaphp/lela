@@ -441,6 +441,7 @@ impl Refusal {
             thrown: self.thrown,
             stage: crate::Stage::Compiling,
             declared: None,
+            keys_made: 0,
         }
     }
 }
