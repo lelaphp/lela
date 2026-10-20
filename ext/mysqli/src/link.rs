@@ -1384,7 +1384,7 @@ impl mysqli {
         #[php(default = null)] socket: Option<PhpString>,
     ) -> Answer<()> {
         let object = this.object();
-        if req.argument_count() == 0 {
+        if req.frames().argument_count() == 0 {
             if !matches!(
                 crate::payload_ref::<Link>(req, object),
                 Some(Link::Closed) | None
@@ -1755,7 +1755,7 @@ impl mysqli {
         #[php(default = 0)] mode: i64,
     ) -> Answer<OrFalse<Owner<Instance<mysqli_result>>>> {
         let _ = mode;
-        let given = req.argument_count() == 1;
+        let given = req.frames().argument_count() == 1;
         store_result(req, On::method(this.object()), given)
     }
 

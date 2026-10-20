@@ -243,7 +243,7 @@ impl Request {
                 self.leave_pending(thrown);
                 self.raise_under(before);
             }
-            None if !self.bailout && !self.executing() => {
+            None if !self.bailout && !self.frames().executing() => {
                 if let Ok(undef) = self.thrown_without_frame(thrown) {
                     self.release(undef);
                 }
@@ -562,7 +562,7 @@ impl Request {
             trace.give_up(self);
             return Err(thrown);
         }
-        let line = Owner::int(i64::from(self.current_line()));
+        let line = Owner::int(i64::from(self.frames().current_line()));
         if let Err(thrown) = self.write_known(throwable, Known::Line, line) {
             trace.give_up(self);
             return Err(thrown);

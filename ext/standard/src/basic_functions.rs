@@ -2430,7 +2430,7 @@ fn forward_static_call(
     args: Variadic<Value>,
 ) -> Result<Owner<Value>, Thrown> {
     let arguments = args.0;
-    if req.scope().is_none() {
+    if req.frames().scope().is_none() {
         return Err(php_ext::raising::throw_error(
             req,
             "Error",
@@ -2473,7 +2473,7 @@ fn forward_static_call_array(
 /// The callable with the called scope of the native being served
 /// forwarded to it, `zend_get_called_scope(execute_data)`.
 fn forwarded(req: &Request, callback: &Callable) -> Callable {
-    match req.called_scope() {
+    match req.frames().called_scope() {
         Some(called) => callback.with_called_scope(req, called),
         None => callback.clone(),
     }

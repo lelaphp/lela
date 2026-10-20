@@ -4,6 +4,7 @@
 //! `generator->execute_data` and `fiber->execute_data`, and the trace
 //! `zend_fetch_debug_backtrace` makes over that execution alone.
 
+use super::Frames;
 use super::traces::Rows;
 use super::{Expand, Link, Request, Slots, links_of};
 use crate::api::abi::Callable;
@@ -60,137 +61,6 @@ impl Execution {
 }
 
 impl Request {
-    /// The execution of `object` where it stands, for a `Generator` or a
-    /// `Fiber`; none for any other object.
-    ///
-    /// ```php
-    /// function g() { yield 1; yield 2; }
-    /// $g = g();
-    /// $r = new ReflectionGenerator($g);
-    /// var_dump($r->getExecutingLine(), $r->isClosed());
-    /// $g->next();
-    /// var_dump($r->getExecutingLine(), $r->getFunction()->name);
-    /// $g->next(); $g->next();
-    /// var_dump($r->isClosed(), $r->getFunction()->name);
-    /// $f = new Fiber(function () { Fiber::suspend(); });
-    /// $rf = new ReflectionFiber($f);
-    /// $f->start();
-    /// var_dump($rf->getExecutingLine());
-    /// ```
-    /// ```expect
-    /// int(2)
-    /// bool(false)
-    /// int(2)
-    /// string(1) "g"
-    /// bool(true)
-    /// string(1) "g"
-    /// int(10)
-    /// ```
-    pub fn execution(&mut self, object: PhpObject) -> Option<Execution> {
-        if generator::is_generator(self, object) {
-            return Some(self.generator_execution(object));
-        }
-        let (callable, standing) = crate::fiber::view(self, object)?;
-        let mut execution = Execution {
-            function: None,
-            scope: None,
-            closure: None,
-            callable,
-            executing: standing.is_some().then_some(object),
-            site: None,
-            this: None,
-        };
-        // Where php's `fiber->execute_data` reads: the innermost frame of
-        // user code on the fiber's stack, or, from its bottom frame, the
-        // resumer's below it.
-        let resumer = match standing {
-            None => return Some(execution),
-            Some(Standing::Bottom { resumer, .. }) => resumer,
-            Some(standing) => {
-                execution.stand_on(self, standing.stack(self));
-                return Some(execution);
-            }
-        };
-        if let Some(resumer) = resumer {
-            crate::fiber::with_held(self, resumer, |req, held| execution.stand_on(req, &held.vm));
-        }
-        Some(execution)
-    }
-
-    /// `zend_fetch_debug_backtrace` over the execution of `object` alone
-    /// (`ReflectionGenerator::getTrace`, `ReflectionFiber::getTrace`):
-    /// for a generator, the frame of the generator its delegation runs
-    /// on top, down to its own, and for a fiber every link on the
-    /// fiber's stack, `options` as `debug_backtrace()` reads them. None
-    /// where there is no frame, and for an object that is neither.
-    ///
-    /// ```php
-    /// function inner() { yield 1; }
-    /// function outer() { yield from inner(); }
-    /// $g = outer(); $g->current();
-    /// var_dump(count((new ReflectionGenerator($g))->getTrace()));
-    /// $f = new Fiber(function ($x) { Fiber::suspend(); });
-    /// $f->start(1);
-    /// var_dump((new ReflectionFiber($f))->getTrace(DEBUG_BACKTRACE_IGNORE_ARGS));
-    /// ```
-    /// ```expect
-    /// int(2)
-    /// array(2) {
-    ///   [0]=>
-    ///   array(5) {
-    ///     ["file"]=>
-    ///     string(%d) "%s"
-    ///     ["line"]=>
-    ///     int(6)
-    ///     ["function"]=>
-    ///     string(7) "suspend"
-    ///     ["class"]=>
-    ///     string(5) "Fiber"
-    ///     ["type"]=>
-    ///     string(2) "::"
-    ///   }
-    ///   [1]=>
-    ///   array(1) {
-    ///     ["function"]=>
-    ///     string(%d) "{closure:%s:6}"
-    ///   }
-    /// }
-    /// ```
-    ///
-    /// A generator running on the stack of a fiber that is suspended is
-    /// read where it stands there:
-    ///
-    /// ```php
-    /// function g() { Fiber::suspend(); yield 1; }
-    /// $g = g();
-    /// $f = new Fiber(function () use ($g) { $g->current(); });
-    /// $f->start();
-    /// $r = new ReflectionGenerator($g);
-    /// var_dump($r->getExecutingLine(), $r->getTrace());
-    /// ```
-    /// ```expect
-    /// int(2)
-    /// array(1) {
-    ///   [0]=>
-    ///   array(2) {
-    ///     ["function"]=>
-    ///     string(1) "g"
-    ///     ["args"]=>
-    ///     array(0) {
-    ///     }
-    ///   }
-    /// }
-    /// ```
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub fn execution_trace(
-        &mut self,
-        object: PhpObject,
-        options: i64,
-    ) -> Result<Option<Owner<PhpArray>>, Thrown> {
-        let made = self.execution_trace_made(object, options);
-        adopted_some(made)
-    }
-
     /// What [`execution_trace`](Self::execution_trace) makes, its one owner not yet named.
     pub(crate) fn execution_trace_made(
         &mut self,
@@ -325,6 +195,141 @@ impl Request {
             _ => return None,
         };
         place(vm).map(|at| (vm, at))
+    }
+}
+
+impl Frames<&mut Request> {
+    /// The execution of `object` where it stands, for a `Generator` or a
+    /// `Fiber`; none for any other object.
+    ///
+    /// ```php
+    /// function g() { yield 1; yield 2; }
+    /// $g = g();
+    /// $r = new ReflectionGenerator($g);
+    /// var_dump($r->getExecutingLine(), $r->isClosed());
+    /// $g->next();
+    /// var_dump($r->getExecutingLine(), $r->getFunction()->name);
+    /// $g->next(); $g->next();
+    /// var_dump($r->isClosed(), $r->getFunction()->name);
+    /// $f = new Fiber(function () { Fiber::suspend(); });
+    /// $rf = new ReflectionFiber($f);
+    /// $f->start();
+    /// var_dump($rf->getExecutingLine());
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// bool(false)
+    /// int(2)
+    /// string(1) "g"
+    /// bool(true)
+    /// string(1) "g"
+    /// int(10)
+    /// ```
+    pub fn execution(self, object: PhpObject) -> Option<Execution> {
+        if generator::is_generator(self.0, object) {
+            return Some(self.0.generator_execution(object));
+        }
+        let (callable, standing) = crate::fiber::view(self.0, object)?;
+        let mut execution = Execution {
+            function: None,
+            scope: None,
+            closure: None,
+            callable,
+            executing: standing.is_some().then_some(object),
+            site: None,
+            this: None,
+        };
+        // Where php's `fiber->execute_data` reads: the innermost frame of
+        // user code on the fiber's stack, or, from its bottom frame, the
+        // resumer's below it.
+        let resumer = match standing {
+            None => return Some(execution),
+            Some(Standing::Bottom { resumer, .. }) => resumer,
+            Some(standing) => {
+                execution.stand_on(self.0, standing.stack(self.0));
+                return Some(execution);
+            }
+        };
+        if let Some(resumer) = resumer {
+            crate::fiber::with_held(self.0, resumer, |req, held| {
+                execution.stand_on(req, &held.vm);
+            });
+        }
+        Some(execution)
+    }
+
+    /// `zend_fetch_debug_backtrace` over the execution of `object` alone
+    /// (`ReflectionGenerator::getTrace`, `ReflectionFiber::getTrace`):
+    /// for a generator, the frame of the generator its delegation runs
+    /// on top, down to its own, and for a fiber every link on the
+    /// fiber's stack, `options` as `debug_backtrace()` reads them. None
+    /// where there is no frame, and for an object that is neither.
+    ///
+    /// ```php
+    /// function inner() { yield 1; }
+    /// function outer() { yield from inner(); }
+    /// $g = outer(); $g->current();
+    /// var_dump(count((new ReflectionGenerator($g))->getTrace()));
+    /// $f = new Fiber(function ($x) { Fiber::suspend(); });
+    /// $f->start(1);
+    /// var_dump((new ReflectionFiber($f))->getTrace(DEBUG_BACKTRACE_IGNORE_ARGS));
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// array(2) {
+    ///   [0]=>
+    ///   array(5) {
+    ///     ["file"]=>
+    ///     string(%d) "%s"
+    ///     ["line"]=>
+    ///     int(6)
+    ///     ["function"]=>
+    ///     string(7) "suspend"
+    ///     ["class"]=>
+    ///     string(5) "Fiber"
+    ///     ["type"]=>
+    ///     string(2) "::"
+    ///   }
+    ///   [1]=>
+    ///   array(1) {
+    ///     ["function"]=>
+    ///     string(%d) "{closure:%s:6}"
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// A generator running on the stack of a fiber that is suspended is
+    /// read where it stands there:
+    ///
+    /// ```php
+    /// function g() { Fiber::suspend(); yield 1; }
+    /// $g = g();
+    /// $f = new Fiber(function () use ($g) { $g->current(); });
+    /// $f->start();
+    /// $r = new ReflectionGenerator($g);
+    /// var_dump($r->getExecutingLine(), $r->getTrace());
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// array(1) {
+    ///   [0]=>
+    ///   array(2) {
+    ///     ["function"]=>
+    ///     string(1) "g"
+    ///     ["args"]=>
+    ///     array(0) {
+    ///     }
+    ///   }
+    /// }
+    /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn execution_trace(
+        self,
+        object: PhpObject,
+        options: i64,
+    ) -> Result<Option<Owner<PhpArray>>, Thrown> {
+        let made = self.0.execution_trace_made(object, options);
+        adopted_some(made)
     }
 }
 

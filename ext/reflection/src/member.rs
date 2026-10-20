@@ -283,7 +283,7 @@ fn set_raw_value(
         return php_ext::call::write_raw_property(req, &object, key, value);
     }
     let handlers = object.handlers(req);
-    req.with_fake_scope(asked, |req| {
+    req.frames_mut().with_fake_scope(asked, |req| {
         handlers.write_property(req, object, key, value)
     })
 }
@@ -733,7 +733,7 @@ impl ReflectionProperty {
         let holder = if declared.is_some() { class } else { asked };
         held_to(req, object, holder)?;
         let handlers = object.handlers(req);
-        req.with_fake_scope(asked, |req| {
+        req.frames_mut().with_fake_scope(asked, |req| {
             handlers.read_property(req, object, &name, PropertyRead::Warning)
         })
     }
@@ -884,6 +884,7 @@ impl ReflectionProperty {
                 }
             };
             let asked = req
+                .frames()
                 .this()
                 .and_then(|this| kept_class(req, this))
                 .unwrap_or(class);
@@ -905,7 +906,7 @@ impl ReflectionProperty {
         let value = Owner::take(req, value);
         let (object, handlers) = (*object, object.handlers(req));
         let asked = asked_class(req, this.object(), class);
-        req.with_fake_scope(asked, |req| {
+        req.frames_mut().with_fake_scope(asked, |req| {
             handlers.write_property(req, object, key, value)
         })
     }
@@ -957,7 +958,7 @@ impl ReflectionProperty {
         // `read_property` under `EG(fake_scope)`, the class the reflector
         // was asked about.
         let handlers = object.handlers(req);
-        req.with_fake_scope(asked, |req| {
+        req.frames_mut().with_fake_scope(asked, |req| {
             handlers.read_property(req, object, &name, PropertyRead::Warning)
         })
     }
@@ -1195,7 +1196,7 @@ impl ReflectionProperty {
         let holder = if declared.is_some() { class } else { asked };
         held_to(req, object, holder)?;
         let handlers = object.handlers(req);
-        req.with_fake_scope(asked, |req| {
+        req.frames_mut().with_fake_scope(asked, |req| {
             handlers.has_property(req, object, &name, PropertyTest::Exists)
         })
     }

@@ -671,7 +671,7 @@ pub(crate) fn dba_fetch(
     dba: Raw<Untyped<Value>>,
     #[php(default = 0)] skip: Raw<Untyped<Value>>,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    let three = req.argument_count() == 3;
+    let three = req.frames().argument_count() == 3;
     // The legacy `($key, $skip, $dba)`, tried quietly first as php's
     // `ZEND_PARSE_PARAMS_QUIET` tries it.
     let legacy = three && is_connection(req, &skip.value()) && longish(&dba.value());
@@ -753,7 +753,7 @@ pub(crate) fn dba_fetch(
 
 /// The third argument, the connection of the legacy order.
 fn skip_arg(req: &Request) -> Value {
-    req.argument(3).unwrap_or_default()
+    req.frames().argument(3).unwrap_or_default()
 }
 
 /// The value a reference holds.

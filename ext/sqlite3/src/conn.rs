@@ -1240,7 +1240,7 @@ impl SQLite3 {
         if sql.is_empty() {
             return Ok(OrFalse::False);
         }
-        if !req.return_value_used() {
+        if !req.frames().return_value_used() {
             let (rc, thrown) = db.exec(req, &sql);
             if rc != SQLITE_OK {
                 {
@@ -1289,7 +1289,7 @@ impl SQLite3 {
         if sql.is_empty() {
             return Ok(Owner::bool(false));
         }
-        if !req.return_value_used() {
+        if !req.frames().return_value_used() {
             let (rc, thrown) = db.exec(req, &sql);
             if rc != SQLITE_OK {
                 {

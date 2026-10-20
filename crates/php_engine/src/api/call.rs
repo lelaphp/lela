@@ -289,7 +289,7 @@ fn serve(
 /// to [`Request::thrown_without_frame`].
 fn without_frame(req: &mut Request, served: Result<Value, Thrown>) -> Result<Value, Thrown> {
     match served {
-        Err(thrown) if !req.executing() => req.thrown_without_frame(&thrown),
+        Err(thrown) if !req.frames().executing() => req.thrown_without_frame(&thrown),
         served => served,
     }
 }
@@ -2177,7 +2177,7 @@ fn special_constant(name: &[u8]) -> Option<Value> {
 /// `Class "X" not found` where neither has it.
 pub(crate) fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thrown> {
     if name.eq_ignore_ascii_case(b"self") {
-        return req.scope().ok_or_else(|| {
+        return req.frames().scope().ok_or_else(|| {
             throw_error(
                 req,
                 "Error",
@@ -2186,7 +2186,7 @@ pub(crate) fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thr
         });
     }
     if name.eq_ignore_ascii_case(b"parent") {
-        let Some(scope) = req.scope() else {
+        let Some(scope) = req.frames().scope() else {
             return Err(throw_error(
                 req,
                 "Error",
@@ -2202,7 +2202,7 @@ pub(crate) fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thr
         });
     }
     if name.eq_ignore_ascii_case(b"static") {
-        return req.called_scope().ok_or_else(|| {
+        return req.frames().called_scope().ok_or_else(|| {
             throw_error(
                 req,
                 "Error",

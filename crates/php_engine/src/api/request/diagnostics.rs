@@ -363,11 +363,15 @@ impl Request {
     /// first. php's arm for a file being compiled is not taken: the
     /// engine compiles with no site of its own.
     pub(super) fn executed_site(&self) -> (Vec<u8>, u32) {
-        if !self.executing() || self.bailout {
+        if !self.frames().executing() || self.bailout {
             return (b"Unknown".to_vec(), 0);
         }
-        let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-        (file, self.current_line())
+        let file = self
+            .frames()
+            .current_file()
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default();
+        (file, self.frames().current_line())
     }
 
     /// The same diagnostic at a file and line of its own, which is what

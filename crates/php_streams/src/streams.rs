@@ -927,7 +927,10 @@ impl PhpStream {
             return Some(0);
         }
         if !self.ops.writable() {
-            let text = format!("{}(): Stream is not writable", req.active_function_name());
+            let text = format!(
+                "{}(): Stream is not writable",
+                req.frames().active_function_name()
+            );
             raise(req, Level::Notice, &text);
             return None;
         }
@@ -1062,7 +1065,7 @@ impl PhpStream {
         }
         let text = format!(
             "{}(): Stream does not support seeking",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         warning(req, &text);
         false
@@ -1515,7 +1518,7 @@ impl PhpStream {
             if warn {
                 let text = format!(
                     "{}(): Cannot cast a filtered stream on this system",
-                    req.active_function_name()
+                    req.frames().active_function_name()
                 );
                 warning(req, &text);
             }
@@ -1542,7 +1545,7 @@ impl PhpStream {
                 };
                 let text = format!(
                     "{}(): Cannot represent a stream of type {} as a {target}",
-                    req.active_function_name(),
+                    req.frames().active_function_name(),
                     self.ops.label()
                 );
                 warning(req, &text);
@@ -1553,7 +1556,7 @@ impl PhpStream {
         if ret == Ret::Given && held > 0 && matches!(cast, Cast::Fd | Cast::Socket) {
             let text = format!(
                 "{}(): {held} bytes of buffered data lost during stream conversion!",
-                req.active_function_name()
+                req.frames().active_function_name()
             );
             warning(req, &text);
         }
@@ -2115,7 +2118,7 @@ impl Temp {
         let Some(file) = temporary_file(req, None, b"php")? else {
             let text = format!(
                 "{}(): Unable to create temporary file, Check permissions in temporary files directory.",
-                req.active_function_name()
+                req.frames().active_function_name()
             );
             warning(req, &text);
             return Ok(false);
@@ -2461,7 +2464,7 @@ impl Ops for Stdio {
             Err(error) => {
                 let text = format!(
                     "{}(): Write of {} bytes failed with {}",
-                    req.active_function_name(),
+                    req.frames().active_function_name(),
                     buf.len(),
                     errno(&error)
                 );
@@ -2493,7 +2496,7 @@ impl Ops for Stdio {
                 if !self.suppress_errors {
                     let text = format!(
                         "{}(): Read of {} bytes failed with {}",
-                        req.active_function_name(),
+                        req.frames().active_function_name(),
                         buf.len(),
                         errno(&error)
                     );
@@ -2573,7 +2576,7 @@ impl Ops for Stdio {
         if !self.is_seekable {
             let text = format!(
                 "{}(): Cannot seek on this stream",
-                req.active_function_name()
+                req.frames().active_function_name()
             );
             warning(req, &text);
             return Some(false);
@@ -2967,7 +2970,7 @@ impl Ops for HostFd {
         }
         let text = format!(
             "{}(): Read of {} bytes failed with errno={EBADF} Bad file descriptor",
-            req.active_function_name(),
+            req.frames().active_function_name(),
             buf.len()
         );
         raise(req, Level::Notice, &text);
@@ -3717,7 +3720,7 @@ impl StreamLayer for Request {
             if wrapper.is_none() {
                 let text = format!(
                     "{}(): Unable to find the wrapper \"{}\" - did you forget to enable it when you configured PHP?",
-                    self.active_function_name(),
+                    self.frames().active_function_name(),
                     String::from_utf8_lossy(&scheme[..scheme.len().min(31)])
                 );
                 if options.report {
@@ -3738,7 +3741,7 @@ impl StreamLayer for Request {
                     if options.report {
                         let text = format!(
                             "{}(): Remote host file access not supported, {}",
-                            self.active_function_name(),
+                            self.frames().active_function_name(),
                             String::from_utf8_lossy(path)
                         );
                         warning(self, &text);
@@ -3761,7 +3764,7 @@ impl StreamLayer for Request {
                 if options.report {
                     let text = format!(
                         "{}(): file:// wrapper is disabled in the server configuration",
-                        self.active_function_name()
+                        self.frames().active_function_name()
                     );
                     warning(self, &text);
                 }
@@ -3787,7 +3790,7 @@ impl StreamLayer for Request {
                 if options.report {
                     let text = format!(
                         "{}(): {}:// wrapper is disabled in the server configuration by {entry}=0",
-                        self.active_function_name(),
+                        self.frames().active_function_name(),
                         String::from_utf8_lossy(&path[..n])
                     );
                     warning(self, &text);
@@ -3964,7 +3967,7 @@ impl StreamLayer for Request {
         if options.use_url && !wrapper.is_url(self) {
             let text = format!(
                 "{}(): This function may only be used against URLs",
-                self.active_function_name()
+                self.frames().active_function_name()
             );
             warning(self, &text);
             return Ok(None);
@@ -4197,7 +4200,7 @@ impl StreamLayer for Request {
         if options.report {
             let text = format!(
                 "{}({}): could not make seekable - {}",
-                self.active_function_name(),
+                self.frames().active_function_name(),
                 String::from_utf8_lossy(path),
                 String::from_utf8_lossy(path)
             );
@@ -4492,7 +4495,7 @@ impl StreamLayer for Request {
         if self.is_pending() {
             return;
         }
-        let function = self.active_function_name();
+        let function = self.frames().active_function_name();
         self.wrapper_warning(&function, path, &format!("{caption}: {message}"));
     }
 

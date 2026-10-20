@@ -664,7 +664,7 @@ pub(super) fn strtr(
 ) -> Result<Owner<PhpString>, Thrown> {
     // php's own parse, chosen by the count: `(string, array)` for two
     // arguments, `(string, string, string)` for three.
-    let given = req.argument_count();
+    let given = req.frames().argument_count();
     if given <= 2 {
         arity(req, 2, Some(2))?;
         let string = string.hold(req)?;

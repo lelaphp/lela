@@ -605,7 +605,7 @@ fn url_name(
     let Some(parser) = UriParser::of_ctx(req, context, b"ssl")? else {
         let text = format!(
             "{}(): Provided stream context has invalid value for the \"uri_parser_class\" option",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         return Err(throw_error(req, "ValueError", &text));
     };

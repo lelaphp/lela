@@ -60,7 +60,12 @@ fn global(req: &mut Request) -> &mut IntlError {
 
 /// `<native>(): <message>`, as `intl_error_set_custom_msg` prefixes it.
 fn prefixed(req: &Request, message: &[u8]) -> Vec<u8> {
-    [req.active_function_name().as_bytes(), b"(): ", message].concat()
+    [
+        req.frames().active_function_name().as_bytes(),
+        b"(): ",
+        message,
+    ]
+    .concat()
 }
 
 /// `intl_error_reset(NULL)`. A native whose php counterpart resets the

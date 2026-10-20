@@ -250,7 +250,7 @@ impl StreamCtx {
         }
         let text = format!(
             "{}(): supplied resource is not a valid Stream-Context resource",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         Err(throw_error(req, "TypeError", &text))
     }

@@ -71,7 +71,7 @@ pub(crate) enum Via {
     /// makes one per C function a declaration names
     /// (`Z/ext/ffi/ffi.c:2911`): its body is the entry, which reads its
     /// arguments off the call and its name off
-    /// [`Request::active_function_name`].
+    /// [`Frames::active_function_name`].
     Native(crate::api::abi::Entry),
 }
 
@@ -373,9 +373,9 @@ pub(crate) fn closure_call_magic(req: &mut Request) -> Result<Owner<Value>, Thro
     }) else {
         return Ok(Owner::null());
     };
-    let count = u32::try_from(req.argument_count()).unwrap_or(u32::MAX);
+    let count = u32::try_from(req.frames().argument_count()).unwrap_or(u32::MAX);
     let passed: Vec<Value> = (1..=count)
-        .filter_map(|position| req.argument(position))
+        .filter_map(|position| req.frames().argument(position))
         .collect();
     let named = req.named_arguments();
     let name = req.string(&name.0)?;

@@ -71,7 +71,7 @@ struct Parsed {
 /// and the trailing callbacks resolved where they stand.
 fn parse(req: &mut Request, values: &[Value], callbacks: usize) -> Result<Parsed, Thrown> {
     arity(req, callbacks + 1, None)?;
-    let split = req.argument_count() - callbacks;
+    let split = req.frames().argument_count() - callbacks;
     let mut found = Vec::with_capacity(callbacks);
     for offset in 0..values.len() - split {
         let position = u32::try_from(split + offset + 1).unwrap_or(u32::MAX);

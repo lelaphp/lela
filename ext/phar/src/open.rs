@@ -683,7 +683,7 @@ pub(crate) fn open_executed(
     req: &mut Request,
     alias: Option<&[u8]>,
 ) -> Result<Result<(), Failed>, Thrown> {
-    let Some(fname) = req.current_file().map(<[u8]>::to_vec) else {
+    let Some(fname) = req.frames().current_file().map(<[u8]>::to_vec) else {
         return Ok(Err(Some(
             "cannot initialize a phar outside of PHP execution".into(),
         )));

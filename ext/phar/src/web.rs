@@ -22,7 +22,7 @@ pub(crate) const MUNG_SCRIPT_FILENAME: u8 = 8;
 /// The file being served as `phar_split_fname` reads a `phar://` URL,
 /// where it is one.
 fn running_split(req: &mut Request) -> Result<Option<(Vec<u8>, path::Split)>, Thrown> {
-    let Some(file) = req.current_file().map(<[u8]>::to_vec) else {
+    let Some(file) = req.frames().current_file().map(<[u8]>::to_vec) else {
         return Ok(None);
     };
     if file.len() < 7 || !file[..7].eq_ignore_ascii_case(b"phar://") {
@@ -46,7 +46,11 @@ pub(crate) fn running(req: &mut Request, as_url: bool) -> Result<Vec<u8>, Thrown
 /// `Phar::mount()`: an outside path mounted in the archive the file being
 /// served is, or is in.
 pub(crate) fn mount(req: &mut Request, inner: &[u8], outer: &[u8]) -> Result<(), Thrown> {
-    let file = req.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+    let file = req
+        .frames()
+        .current_file()
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default();
     let (arch, path): (Option<Vec<u8>>, Vec<u8>) = if file.len() > 7 && file.starts_with(b"phar://")
     {
         match path::split_fname(req, &file, Exec::Either, Create::No)? {
@@ -489,7 +493,7 @@ pub(crate) fn web_phar(
     if !served || req.variables().request_uri().is_none() {
         return Ok(());
     }
-    let Some(fname) = req.current_file().map(<[u8]>::to_vec) else {
+    let Some(fname) = req.frames().current_file().map(<[u8]>::to_vec) else {
         return Ok(());
     };
     let basename = fname

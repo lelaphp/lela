@@ -205,7 +205,7 @@ impl PlainFiles for Request {
     fn docref1(&mut self, param: &[u8], message: &str) {
         let text = format!(
             "{}({}): {message}",
-            self.active_function_name(),
+            self.frames().active_function_name(),
             shown(param)
         );
         warning(self, &text);
@@ -528,7 +528,7 @@ impl PlainFiles for Request {
         let docref2 = |req: &mut Request, error: &std::io::Error| {
             let text = format!(
                 "{}({},{}): {}",
-                req.active_function_name(),
+                req.frames().active_function_name(),
                 shown(from),
                 shown(to),
                 strerror(error)

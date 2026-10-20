@@ -808,7 +808,7 @@ fn get_class(req: &mut Request, object: Passed<PhpObject>) -> Result<Owner<PhpSt
     let class = if let Passed::Given(object) = object {
         object.class()
     } else {
-        match req.scope() {
+        match req.frames().scope() {
             Some(scope) => {
                 deprecated(req, "Calling get_class() without arguments is deprecated");
                 scope
@@ -1447,6 +1447,7 @@ fn defined(req: &mut Request, constant_name: PhpString) -> Result<bool, Thrown> 
 fn var_dump(req: &mut Request, value: Value, values: Variadic<Value>) {
     for (at, coerced) in (1u32..).zip(std::iter::once(value).chain(values.0)) {
         let value = req
+            .frames()
             .argument(at)
             .filter(|passed| passed.tag() == crate::api::values::TypeTag::Undef)
             .unwrap_or(coerced);

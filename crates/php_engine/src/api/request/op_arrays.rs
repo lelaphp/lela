@@ -16,11 +16,11 @@
 //!
 //! The view is reached from a frame, [`FrameView::op_array`], which
 //! serves a function's op array or an included, evaluated or main
-//! file's, and from a function, [`Request::op_array`], which answers
+//! file's, and from a function, [`Frames::op_array`], which answers
 //! none for a native, as php's `ZEND_USER_CODE(func->type)` does.
 //!
 //! The debugging host reads the same op arrays here, as an extension
-//! does (#1911): its `print` writes one as [`Request::dump_op_array`]
+//! does (#1911): its `print` writes one as [`Frames::dump_op_array`]
 //! dumps it, then each function its body declares
 //! ([`OpArrayView::dynamic_functions`]), as phpdbg's
 //! `phpdbg_print_function_helper` does.
@@ -36,6 +36,7 @@ use crate::api::call::Function;
 use crate::api::values::Value;
 use crate::exec;
 
+use super::Frames;
 use super::Request;
 
 /// One op array, read: php's `zend_op_array` as a user function, a
@@ -308,12 +309,12 @@ impl<'a> OplineView<'a> {
     }
 }
 
-impl Request {
+impl<'r> Frames<&'r Request> {
     /// The op array a user function, a method or a closure serves,
     /// `func->op_array`; none for a native, which has none.
     #[must_use]
-    pub fn op_array(&self, function: Function) -> Option<OpArrayView<'_>> {
-        let user = self.user_function(function)?;
+    pub fn op_array(self, function: Function) -> Option<OpArrayView<'r>> {
+        let user = self.0.user_function(function)?;
         exec::body_of(&user.unit, user.body).map(|code| OpArrayView::of(&user.unit, code))
     }
 
@@ -326,8 +327,8 @@ impl Request {
     /// `extended_value` indexes in `zend_flf_functions`, which is the
     /// engine's, so the dump is the request's to write.
     #[must_use]
-    pub fn dump_op_array(&self, code: OpArrayView<'_>, name: &[u8], parameters: usize) -> Vec<u8> {
-        let frameless = self.shared.frameless_names();
+    pub fn dump_op_array(self, code: OpArrayView<'_>, name: &[u8], parameters: usize) -> Vec<u8> {
+        let frameless = self.0.shared.frameless_names();
         code.code.dump_lines(name, parameters, &frameless)
     }
 }

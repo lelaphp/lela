@@ -22,6 +22,7 @@ use crate::api::values::{
 use crate::engine::Known;
 use crate::exec::{self, IncludeKind};
 
+use super::Frames;
 use super::{
     DEBUG_BACKTRACE_IGNORE_ARGS, DEBUG_BACKTRACE_PROVIDE_OBJECT, Expand, Link, Request, Slots,
     append_escaped, links_of,
@@ -1383,26 +1384,6 @@ impl Request {
         arguments
     }
 
-    /// `zend_fetch_debug_backtrace(return_value, 1, options, limit)`,
-    /// what `debug_backtrace()` answers from inside the native being
-    /// served: the rows below it, under php's options and limit.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub fn backtrace(&mut self, options: i64, limit: i64) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.fetch_debug_backtrace(true, options, limit);
-        adopted(made)
-    }
-
-    /// `zend_fetch_debug_backtrace(return_value, 0, options, limit)`,
-    /// what a debugger stopped between two oplines builds, as phpdbg's
-    /// `back` and `frame` build it: every row of the chain from the
-    /// innermost frame down, none skipped, under php's options and
-    /// limit.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub fn backtrace_here(&mut self, options: i64, limit: i64) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.fetch_debug_backtrace(false, options, limit);
-        adopted(made)
-    }
-
     /// `zend_hash_str_update` on a row: `value` at the string key `name`,
     /// the key a string of the request's that the array takes.
     fn set_string_key(
@@ -1420,5 +1401,27 @@ impl Request {
             }
         };
         row.set(self, key, value)
+    }
+}
+
+impl Frames<&mut Request> {
+    /// `zend_fetch_debug_backtrace(return_value, 1, options, limit)`,
+    /// what `debug_backtrace()` answers from inside the native being
+    /// served: the rows below it, under php's options and limit.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn backtrace(self, options: i64, limit: i64) -> Result<Owner<PhpArray>, Thrown> {
+        let made = self.0.fetch_debug_backtrace(true, options, limit);
+        adopted(made)
+    }
+
+    /// `zend_fetch_debug_backtrace(return_value, 0, options, limit)`,
+    /// what a debugger stopped between two oplines builds, as phpdbg's
+    /// `back` and `frame` build it: every row of the chain from the
+    /// innermost frame down, none skipped, under php's options and
+    /// limit.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn backtrace_here(self, options: i64, limit: i64) -> Result<Owner<PhpArray>, Thrown> {
+        let made = self.0.fetch_debug_backtrace(false, options, limit);
+        adopted(made)
     }
 }

@@ -1,8 +1,8 @@
 //! Frame writes and evaluation in a paused frame (#1828): a debugger
 //! written as an extension stops where the program calls `pause()`, its
 //! observer's begin handler standing in that call, writes a variable of
-//! a frame it holds a [`FrameId`] of ([`Request::set_frame_var`]) and
-//! evaluates code in that frame's scope ([`Request::eval_in_frame`]), as
+//! a frame it holds a [`FrameId`] of ([`Frames::set_var`]) and
+//! evaluates code in that frame's scope ([`Frames::eval_in_frame`]), as
 //! xdebug's `property_set` and `eval` do in php through
 //! `zend_eval_stringl` with `EG(current_execute_data)` at the frame.
 //!
@@ -99,11 +99,16 @@ impl Stop for Plan {
             return;
         };
         if let Some((name, value)) = self.write {
-            let set = observed.set_frame_var(frame, name.as_bytes(), Owner::int(value));
+            let set = observed
+                .frames_mut()
+                .set_var(frame, name.as_bytes(), Owner::int(value));
             let line = format!("[set {}]", if set { "ok" } else { "refused" });
             observed.response_mut().write(line.as_bytes());
         }
-        let answered = observed.eval_in_frame(frame, self.code.as_bytes(), b"debugger");
+        let answered =
+            observed
+                .frames_mut()
+                .eval_in_frame(frame, self.code.as_bytes(), b"debugger");
         let line = format!("[eval {}]", shown(observed, answered, self.traced));
         observed.response_mut().write(line.as_bytes());
     }
@@ -260,10 +265,13 @@ impl Stop for Revisit {
             observed.state::<Kept>().0 = caller;
             return;
         };
-        let set = observed.set_frame_var(frame, b"x", Owner::int(5));
+        let set = observed.frames_mut().set_var(frame, b"x", Owner::int(5));
         let line = format!("[set {}]", if set { "ok" } else { "refused" });
         observed.response_mut().write(line.as_bytes());
-        let answered = observed.eval_in_frame(frame, self.code.as_bytes(), b"debugger");
+        let answered =
+            observed
+                .frames_mut()
+                .eval_in_frame(frame, self.code.as_bytes(), b"debugger");
         let line = format!("[eval {}]", shown(observed, answered, self.traced));
         observed.response_mut().write(line.as_bytes());
     }

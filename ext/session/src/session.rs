@@ -609,8 +609,8 @@ pub(super) fn initialize(req: &mut Request) -> Result<bool, Thrown> {
     gc(req, false)?;
     req.state::<State>().session_vars = ini_bool(req, b"session.lazy_write").then(|| val.clone());
     decode(req, &val)?;
-    let file = req.current_file().map(<[u8]>::to_vec);
-    let line = req.current_line();
+    let file = req.frames().current_file().map(<[u8]>::to_vec);
+    let line = req.frames().current_line();
     req.state::<State>().started_at = file.map(|f| (f, line));
     Ok(true)
 }

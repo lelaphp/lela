@@ -645,7 +645,7 @@ fn array_splice(
         let (start, taken) = clamp_splice(num_in, offset, length);
         // `USED_RET()`: the removed elements are gathered only where the
         // caller reads them; otherwise each is released as it is deleted.
-        let mut removed = if req.return_value_used() {
+        let mut removed = if req.frames().return_value_used() {
             Some(PhpArray::new(req)?)
         } else {
             None

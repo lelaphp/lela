@@ -318,7 +318,7 @@ impl Query<'_> {
                 "Maximum call stack size reached.",
             ));
         }
-        let scope = req.scope();
+        let scope = req.frames().scope();
         // The table is walked with no owner of it taken: what holds it
         // keeps it while code of the program runs under the walk, and
         // where that code frees it, the walk ends there. A declared slot

@@ -14,6 +14,7 @@ use crate::api::values::{PhpObject, Value};
 use crate::exec::{self, TableId, Vm};
 use crate::tier::Stepped;
 
+use super::Frames;
 use super::Request;
 
 /// The links of one stack, innermost first: the records `records`
@@ -769,7 +770,7 @@ impl Request {
     /// the includer's CV when the loop goes on there. The includer is the
     /// frame below for an include; for code evaluated in a frame further
     /// down, as a debugger evaluates in a paused frame
-    /// ([`Request::eval_in_frame`]), it is that frame, and the frames
+    /// ([`Frames::eval_in_frame`]), it is that frame, and the frames
     /// above it are not attached. A function frame is popped alone, as
     /// `zend_leave_helper`'s other arms pop one.
     pub(crate) fn leave_frame(&mut self, frame: FrameRef) {
@@ -2054,7 +2055,9 @@ impl Request {
             self.release(value);
         }
     }
+}
 
+impl Frames<&Request> {
     /// `EG(current_execute_data)`: whether a frame or a native's call
     /// stands, or the bottom frame of a coroutine's stack, a
     /// `Fiber`'s or an extension's, which is every release inside a
@@ -2084,10 +2087,10 @@ impl Request {
     /// #1 {main}
     ///   thrown in %s on line 6
     /// ```
-    pub fn executing(&self) -> bool {
-        self.fibers.on_context_stack()
-            || (0..self.vm.depth()).any(|at| {
-                self.frame_on(&self.vm, at).is_some_and(|frame| {
+    pub fn executing(self) -> bool {
+        self.0.fibers.on_context_stack()
+            || (0..self.0.vm.depth()).any(|at| {
+                self.0.frame_on(&self.0.vm, at).is_some_and(|frame| {
                     let info = frame.info();
                     !info.leaving() && !info.building()
                 })

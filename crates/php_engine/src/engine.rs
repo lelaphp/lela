@@ -5117,7 +5117,11 @@ impl Engine {
                 note_compiled(&mut req, &unit, SourceKind::File);
             }
             Some(Err(refused)) => {
-                let file = req.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+                let file = req
+                    .frames()
+                    .current_file()
+                    .map(<[u8]>::to_vec)
+                    .unwrap_or_default();
                 refused_program(&mut req, &refused, &file);
             }
             None => {}
@@ -5331,7 +5335,11 @@ impl Engine {
             // diagnostic, at the level the compiler refused at, and the
             // request ends before a frame is pushed.
             Some(Err(refused)) => {
-                let file = req.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+                let file = req
+                    .frames()
+                    .current_file()
+                    .map(<[u8]>::to_vec)
+                    .unwrap_or_default();
                 refused_program(req, &refused, &file);
                 false
             }

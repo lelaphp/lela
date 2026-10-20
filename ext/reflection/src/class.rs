@@ -254,7 +254,7 @@ fn new_instance(
     arguments: ConstructorArguments<'_>,
 ) -> Result<Owner<PhpObject>, Thrown> {
     let object = new_object(req, class)?;
-    let asked = req.with_fake_scope(class, |req| {
+    let asked = req.frames_mut().with_fake_scope(class, |req| {
         object.handlers(req).get_constructor(req, *object)
     });
     let constructor = match asked {

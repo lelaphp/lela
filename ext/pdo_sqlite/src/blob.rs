@@ -151,7 +151,7 @@ pub(super) fn open_blob(
     flags: Raw<i64>,
 ) -> Result<Owner<Value>, Thrown> {
     php_ext_pdo::connector::with_connection(req, this, |req, conn| {
-        let given = req.argument_count();
+        let given = req.frames().argument_count();
         if !(3..=5).contains(&given) {
             let bound = if given < 3 { "at least 3" } else { "at most 5" };
             return Err(arg_count_error(

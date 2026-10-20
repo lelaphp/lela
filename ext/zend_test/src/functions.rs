@@ -714,7 +714,7 @@ fn zend_test_attribute_with_named_argument() {}
 /// ```
 #[php_function]
 fn zend_get_current_func_name(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
-    let name = req.caller_function_name();
+    let name = req.frames().caller_function_name();
     PhpString::new(req, name.as_bytes())
 }
 

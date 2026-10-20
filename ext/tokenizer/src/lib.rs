@@ -230,7 +230,7 @@ impl PhpToken {
         code: PhpString,
         #[php(default = 0)] flags: i64,
     ) -> Result<Owner<PhpArray>, Thrown> {
-        let Some(token_class) = req.called_scope() else {
+        let Some(token_class) = req.frames().called_scope() else {
             return Err(throw_error(
                 req,
                 "Error",

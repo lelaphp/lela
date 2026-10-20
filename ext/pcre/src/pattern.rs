@@ -118,7 +118,7 @@ pub(super) fn compiled_under(
     let warn = |req: &mut Request, message: &str| match pending {
         None => docref(req, Level::Warning, message),
         Some(pending) => {
-            let text = format!("{}(): {message}", req.active_function_name());
+            let text = format!("{}(): {message}", req.frames().active_function_name());
             raise_while_pending(req, pending, Level::Warning, &text);
         }
     };

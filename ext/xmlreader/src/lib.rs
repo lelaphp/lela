@@ -494,7 +494,7 @@ fn flags_int(flags: i64) -> i32 {
 /// The class a static load of `XMLReader` makes: `open` and `XML` always
 /// `XMLReader`, the `from*` factories the class they were called on.
 fn called(req: &mut Request) -> Result<ClassId, Thrown> {
-    match req.called_scope() {
+    match req.frames().called_scope() {
         Some(class) => Ok(class),
         None => reader_class(req),
     }

@@ -658,7 +658,7 @@ fn read<'r>(
     let mut img = Image::new(read_thumbnail, encodings(req));
     let (stream, owned) = if let ValueRef::Resource(_) = file.as_ref() {
         let Some(stream) = Stream::from_value(req, file) else {
-            let function = req.active_function_name();
+            let function = req.frames().active_function_name();
             let message = format!("{function}(): supplied resource is not a valid stream resource");
             return Err(throw_error(req, "TypeError", &message));
         };

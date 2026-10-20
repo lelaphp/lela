@@ -761,7 +761,7 @@ fn fd_of(req: &mut Request, given: &Value, reader: FdReader) -> Result<Option<i3
     let given = given.deref();
     let fd = if let ValueRef::Resource(_) = given.as_ref() {
         let Some(stream) = Stream::from_value(req, &given) else {
-            let name = req.active_function_name();
+            let name = req.frames().active_function_name();
             return Err(throw_error(
                 req,
                 "TypeError",

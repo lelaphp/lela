@@ -973,7 +973,7 @@ mahout = "RequestCtx::current_line"
 sites = 20
 crates = 7
 status = "same"
-api = "request::Request::current_line"
+api = "request::Frames::current_line"
 
 [[item]]
 mahout = "RequestCtx::type_mode"
@@ -1008,7 +1008,7 @@ mahout = "RequestCtx::scope_for_native"
 sites = 9
 crates = 1
 status = "renamed"
-api = "request::Request::scope"
+api = "request::Frames::scope"
 
 [[item]]
 mahout = "RequestCtx::closure_info"
@@ -1064,7 +1064,7 @@ mahout = "RequestCtx::frame_vars_for_native_mut"
 sites = 4
 crates = 1
 status = "renamed"
-api = "request::Request::frame_vars"
+api = "request::Frames::vars"
 
 [[item]]
 mahout = "RequestCtx::umask"
@@ -1141,7 +1141,7 @@ mahout = "RequestCtx::current_file"
 sites = 2
 crates = 2
 status = "same"
-api = "request::Request::current_file"
+api = "request::Frames::current_file"
 
 [[item]]
 mahout = "RequestCtx::engine_handle"
@@ -1183,7 +1183,7 @@ mahout = "RequestCtx::lsb_for_native"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::called_scope"
+api = "request::Frames::called_scope"
 
 [[item]]
 mahout = "RequestCtx::native_discard"
@@ -1281,7 +1281,7 @@ mahout = "RequestCtx::take_frame_vars_for_native"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::frame_vars"
+api = "request::Frames::vars"
 
 [[item]]
 mahout = "RequestCtx::take_native_named_args"
@@ -1330,7 +1330,7 @@ mahout = "RequestCtx::called_class_for_native"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::called_scope"
+api = "request::Frames::called_scope"
 
 [[item]]
 mahout = "RequestCtx::class_alias_bind"
@@ -1365,14 +1365,14 @@ mahout = "RequestCtx::debug_backtrace"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::backtrace"
+api = "request::Frames::backtrace"
 
 [[item]]
 mahout = "RequestCtx::debug_print_backtrace"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::backtrace"
+api = "request::Frames::backtrace"
 
 [[item]]
 mahout = "RequestCtx::define_runtime_const"
@@ -4341,7 +4341,7 @@ mahout = "mahout_runtime::FrameVarsForNative"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::frame_vars"
+api = "request::Frames::vars"
 
 [[item]]
 mahout = "mahout_runtime::Reentrant::drain_dtors_inline"

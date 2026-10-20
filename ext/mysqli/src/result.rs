@@ -875,7 +875,7 @@ impl mysqli_result {
         #[php(default = "stdClass")] class: Raw<PhpString>,
         #[php(default = [])] constructor_args: Raw<PhpArray>,
     ) -> Answer<FetchedObject> {
-        let given = req.argument_count() > 1;
+        let given = req.frames().argument_count() > 1;
         fetch_object(
             req,
             On::method(this.object()),

@@ -470,7 +470,7 @@ fn stream_context_set_option(
     value: Passed<Value>,
 ) -> Result<True, Thrown> {
     // The 8.4 deprecation comes before `ZEND_PARSE_PARAMETERS_START(2, 4)`.
-    let given = req.argument_count();
+    let given = req.frames().argument_count();
     if given == 2 {
         deprecated(
             req,
@@ -1150,7 +1150,7 @@ fn stream_resolve_include_path(
                         realpath(req, &trypath)
                     });
                 found.or_else(|| {
-                    let executed = req.current_file()?.to_vec();
+                    let executed = req.frames().current_file()?.to_vec();
                     let dir = executed.iter().rposition(|c| *c == b'/')?;
                     let mut trypath = executed.get(..=dir)?.to_vec();
                     trypath.extend_from_slice(&filename);

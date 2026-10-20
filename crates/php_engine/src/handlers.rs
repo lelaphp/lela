@@ -3563,7 +3563,7 @@ pub(crate) fn do_fcall_by_name<T: Tier>(
 /// the pass function of a class with no constructor, so this is the
 /// handler's `ZEND_INTERNAL_FUNCTION` arm, `DO_ICALL`'s body: the
 /// frame stays on the stack while the entry runs, with its receiver
-/// for `Request::this` to answer, is popped whether it returned or
+/// for `Frames::this` to answer, is popped whether it returned or
 /// threw, the receiver's owner given up with it
 /// (`ZEND_CALL_RELEASE_THIS`), and what it returned is the temporary's
 /// under `RETURN_VALUE_USED` and given up otherwise, which is every

@@ -74,11 +74,13 @@ fn stop(observed: &mut Observed<'_>) {
         observed.state::<Kept>().frame = kept;
         return;
     };
-    let set = observed.set_frame_var(frame, b"x", Owner::int(5));
+    let set = observed.frames_mut().set_var(frame, b"x", Owner::int(5));
     let line = format!("[set {}]", if set { "ok" } else { "refused" });
     observed.response_mut().write(line.as_bytes());
     for code in ["$x * 2", "throw new Exception('no')"] {
-        let answered = observed.eval_in_frame(frame, code.as_bytes(), b"debugger");
+        let answered = observed
+            .frames_mut()
+            .eval_in_frame(frame, code.as_bytes(), b"debugger");
         let line = format!("[eval {}]", shown(observed, answered));
         observed.response_mut().write(line.as_bytes());
     }

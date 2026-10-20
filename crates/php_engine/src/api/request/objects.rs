@@ -500,7 +500,7 @@ impl Request {
         }
         if let Err(thrown) = self.serve_method_made(destructor, Some(object), class, &[], &[]) {
             self.leave_pending(&thrown);
-            if !self.executing() {
+            if !self.frames().executing() {
                 self.end_the_walk();
                 return;
             }
@@ -640,7 +640,7 @@ impl Request {
         }
         let shown = visibility_string(visibility);
         let class = self.class_name(object.class());
-        if !self.executing() {
+        if !self.frames().executing() {
             crate::api::raising::warning(
                 self,
                 &format!(

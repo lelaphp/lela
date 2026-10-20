@@ -146,7 +146,7 @@ fn imageftbbox(
     string: PhpString,
     #[php(default = [])] options: PhpArray,
 ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-    let options = (req.argument_count() > 4).then_some(options);
+    let options = (req.frames().argument_count() > 4).then_some(options);
     ttf(
         req,
         None,
@@ -190,7 +190,7 @@ fn imagefttext(
     #[php(default = [])] options: PhpArray,
 ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let im = im(req, image)?;
-    let options = (req.argument_count() > 8).then_some(options);
+    let options = (req.frames().argument_count() > 8).then_some(options);
     ttf(
         req,
         Some(im),
@@ -262,7 +262,7 @@ fn imagefilter(
     filter: Raw<i64>,
     args: Variadic<Untyped<Value>>,
 ) -> Result<bool, Thrown> {
-    let count = req.argument_count();
+    let count = req.frames().argument_count();
     if !(2..=6).contains(&count) {
         return Err(throw_error(
             req,

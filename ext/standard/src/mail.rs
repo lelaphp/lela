@@ -282,12 +282,12 @@ pub fn php_mail(
 ) -> Result<bool, Thrown> {
     let ini = |req: &Request, name: &[u8]| req.ini().get(name).map(<[u8]>::to_vec);
     let mail_log = ini(req, b"mail.log").filter(|log| !log.is_empty());
-    let file = req.current_file().unwrap_or(b"").to_vec();
+    let file = req.frames().current_file().unwrap_or(b"").to_vec();
     if let Some(log) = mail_log {
         let mut line = format!(
             "mail() on [{}:{}]: To: {} -- Headers: {} -- Subject: {}",
             String::from_utf8_lossy(&file),
-            req.current_line(),
+            req.frames().current_line(),
             String::from_utf8_lossy(to),
             String::from_utf8_lossy(headers.unwrap_or_default()),
             String::from_utf8_lossy(subject)

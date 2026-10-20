@@ -82,7 +82,8 @@ pub(crate) static ENUM: Refusals = Refusals::NONE.cloning().comparison();
 /// The enum a call was made on, which is the scope of the three
 /// methods: an enum is final, so the called scope is the enum itself.
 fn called_enum(req: &mut Request) -> Result<ClassId, Thrown> {
-    req.called_scope()
+    req.frames()
+        .called_scope()
         .filter(|class| {
             req.class_decl(*class)
                 .is_some_and(|decl| decl.kind == ClassKind::Enum)
@@ -239,7 +240,7 @@ fn by_value(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
             &format!("Enum {name} is not backed"),
         ));
     }
-    let given = req.argument(1).unwrap_or_default().deref();
+    let given = req.frames().argument(1).unwrap_or_default().deref();
     let wanted = backing_key(req, &given, backing)?;
     if let Err(thrown) = req.update_enum_constants(class) {
         req.release(wanted);

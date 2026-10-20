@@ -186,7 +186,7 @@ pub(crate) fn raise(req: &mut Request, reported: Reported) -> Result<(), Thrown>
     for (gd, text) in reported {
         match level(gd) {
             Level::Error => {
-                let function = req.active_function_name();
+                let function = req.frames().active_function_name();
                 let message = [function.as_bytes(), b"(): ", &text].concat();
                 return Err(fatal(req, &message));
             }

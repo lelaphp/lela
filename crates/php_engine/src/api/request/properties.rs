@@ -22,6 +22,7 @@ use crate::api::values::{
 
 use frames::Link;
 
+use super::Frames;
 use super::{DeclaredSlot, Hooks, PropertyInfo, Request, frames};
 
 /// `IN_GET`, `IN_SET`, `IN_UNSET` and `IN_ISSET`
@@ -437,18 +438,6 @@ impl Request {
             }
         }
         None
-    }
-
-    /// `EG(fake_scope) = class` for the length of `f`, and the scope
-    /// that stood put back after it, so it cannot leak past the call:
-    /// the scope a native asks the engine to measure visibility from as
-    /// though `class` were executing, as `ReflectionClass::newInstance`
-    /// asks the object's `get_constructor` (`Z/ext/reflection/php_reflection.c:5086-5088`)
-    /// and `zend_update_property_ex` writes. `ReflectionClass::newInstance`
-    /// on a class with a private constructor is the witness, in
-    /// `ext/reflection`.
-    pub fn with_fake_scope<R>(&mut self, class: ClassId, f: impl FnOnce(&mut Request) -> R) -> R {
-        self.in_fake_scope(Some(class), f)
     }
 
     /// `ce->default_properties_count`: the declared instance properties
@@ -4430,5 +4419,19 @@ impl Request {
             return self.unset_property(instance, name);
         }
         Ok(())
+    }
+}
+
+impl Frames<&mut Request> {
+    /// `EG(fake_scope) = class` for the length of `f`, and the scope
+    /// that stood put back after it, so it cannot leak past the call:
+    /// the scope a native asks the engine to measure visibility from as
+    /// though `class` were executing, as `ReflectionClass::newInstance`
+    /// asks the object's `get_constructor` (`Z/ext/reflection/php_reflection.c:5086-5088`)
+    /// and `zend_update_property_ex` writes. `ReflectionClass::newInstance`
+    /// on a class with a private constructor is the witness, in
+    /// `ext/reflection`.
+    pub fn with_fake_scope<R>(self, class: ClassId, f: impl FnOnce(&mut Request) -> R) -> R {
+        self.0.in_fake_scope(Some(class), f)
     }
 }

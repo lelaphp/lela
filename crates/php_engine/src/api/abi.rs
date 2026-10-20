@@ -896,7 +896,7 @@ pub(crate) type Info = fn(&mut Request);
 /// given here are the class's; the engine places them on the
 /// declaration as it links it, so the declaration's own `methods` is
 /// left empty by an extension. A method's entry is served as a
-/// function's is, with the receiver on the frame as `Request::this`
+/// function's is, with the receiver on the frame as `Frames::this`
 /// (ADR-0002). The fourth is the class's `create_object` where its
 /// objects carry a native payload, [`NativeNew`].
 pub(crate) type NativeClassDecl = (
@@ -1132,7 +1132,7 @@ impl ExtensionBuilder {
     /// [`ExtensionBuilder::functions`] has. The engine links each into
     /// the linked table beside the classes Zend declares (design §6.2,
     /// §7.1); a method's entry reads its arguments as a function's does
-    /// and its receiver as `Request::this`.
+    /// and its receiver as `Frames::this`.
     #[must_use]
     pub fn classes(
         mut self,

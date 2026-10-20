@@ -1431,15 +1431,16 @@ pub(crate) fn const_expr_closure(
 /// receiver where the closure is bound and as a function where it is
 /// not (`zend_call_known_fcc`); what it returns is the call's.
 pub(crate) fn closure_invoke(req: &mut Request) -> Result<Owner<Value>, Thrown> {
-    let Some(this) = req.this() else {
+    let Some(this) = req.frames().this() else {
         return Err(throw_error(
             req,
             "Error",
             "Closure::__invoke called with no receiver",
         ));
     };
-    let arguments: Vec<Value> = (1..=u32::try_from(req.argument_count()).unwrap_or(u32::MAX))
-        .filter_map(|position| req.argument(position))
+    let arguments: Vec<Value> = (1..=u32::try_from(req.frames().argument_count())
+        .unwrap_or(u32::MAX))
+        .filter_map(|position| req.frames().argument(position))
         .collect();
     let named = req.named_arguments();
     let served = req.serve_closure(this, &arguments, &named);

@@ -55,6 +55,7 @@ fn eval_below_caller(observed: &mut Observed<'_>) {
         return;
     };
     let read = observed
+        .frames_mut()
         .eval_in_frame(frame, b"trace_num()", b"debugger")
         .and_then(Result::ok)
         .and_then(|value| {

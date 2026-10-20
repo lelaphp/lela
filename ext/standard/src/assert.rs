@@ -479,8 +479,8 @@ fn callback(req: &mut Request, described: Option<PhpString>) -> Result<Option<Th
     // `ZVAL_STR(&args[0], filename)`, the op array's file name, held
     // here for the call, and `ZVAL_STR(&args[3], description_str)`, the
     // argument itself.
-    let file = req.current_file().unwrap_or(b"Unknown").to_vec();
-    let line = i64::from(req.current_line());
+    let file = req.frames().current_file().unwrap_or(b"Unknown").to_vec();
+    let line = i64::from(req.frames().current_line());
     let file = PhpString::declared(req, &file)?;
     let mut arguments = vec![Value::string(*file), Value::int(line), Value::null()];
     let described = described.map(|text| Owner::take(req, text));

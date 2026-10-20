@@ -167,7 +167,7 @@ pub(crate) fn validate_api_restriction(req: &mut Request) -> Result<(), Thrown> 
         Restriction::Enabled => Ok(()),
         Restriction::Preload
             if req.environment().sapi_name() == "cli"
-                || req.caller_preloaded()
+                || req.frames().caller_preloaded()
                 || req.preloading() =>
         {
             Ok(())

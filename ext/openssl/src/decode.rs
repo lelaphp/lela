@@ -194,7 +194,11 @@ pub(crate) fn check_path(
     }
     // `php_verror(NULL, arg_name, E_WARNING, ...)`: the parameter's name
     // between the parentheses.
-    let message = format!("{}({}): {tail}", req.active_function_name(), arg.name);
+    let message = format!(
+        "{}({}): {tail}",
+        req.frames().active_function_name(),
+        arg.name
+    );
     raise(req, Level::Warning, &message);
     None
 }

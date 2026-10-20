@@ -206,7 +206,7 @@ fn frame_id(req: &Request, frame: FrameRef) -> Option<php_ext::request::FrameId>
 /// where it has no table, so no table is built for the read.
 pub fn variable(req: &mut Request, frame: FrameRef, name: &[u8], depth: u32) -> Option<Shown> {
     let id = frame_id(req, frame)?;
-    let value = req.frame_var(id, name)?;
+    let value = req.frames_mut().var(id, name)?;
     Some(shown(req, value, depth))
 }
 
@@ -215,7 +215,7 @@ pub fn variable(req: &mut Request, frame: FrameRef, name: &[u8], depth: u32) -> 
 /// level deep.
 pub fn variables(req: &mut Request, frame: FrameRef) -> Vec<Variable> {
     let read = frame_id(req, frame)
-        .and_then(|id| req.frame_vars(id))
+        .and_then(|id| req.frames_mut().vars(id))
         .unwrap_or_default()
         .into_iter()
         .filter(|(name, _)| !AUTO_GLOBALS.contains(&name.as_slice()))
@@ -302,7 +302,7 @@ pub fn literals(req: &mut Request, frame: FrameRef) -> Vec<Shown> {
 /// and the array given up after, as phpdbg's `back` builds and destroys
 /// it; none where building it met the memory limit.
 pub fn backtrace(req: &mut Request, limit: i64) -> Vec<TraceRow> {
-    let Ok(trace) = req.backtrace_here(0, limit) else {
+    let Ok(trace) = req.frames_mut().backtrace_here(0, limit) else {
         return Vec::new();
     };
     let read = {

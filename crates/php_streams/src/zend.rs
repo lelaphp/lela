@@ -161,7 +161,7 @@ fn resolve_path(req: &mut Request, written: &[u8]) -> Result<Vec<u8>, Unresolved
     }
     let mut last = not_found();
     let mut entries: Vec<Vec<u8>> = include_path_entries(&include_path);
-    if let Some(file) = req.current_file()
+    if let Some(file) = req.frames().current_file()
         && let Some(slash) = file.iter().rposition(|b| *b == b'/')
         && slash > 0
     {

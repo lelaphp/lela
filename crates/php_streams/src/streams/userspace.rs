@@ -120,7 +120,7 @@ fn call(req: &mut Request, object: PhpObject, name: &[u8], args: &[Value]) -> Ca
         // `zend_call_function`'s tail with no frame standing, as at
         // shutdown: the throwable rendered uncaught, or handed to the
         // exception handler, and not kept for a native that is not there.
-        Err(thrown) if !req.executing() => match req.thrown_without_frame(&thrown) {
+        Err(thrown) if !req.frames().executing() => match req.thrown_without_frame(&thrown) {
             Ok(undef) => Called::Value(Owner::take(req, undef)),
             Err(_) => Called::Threw,
         },

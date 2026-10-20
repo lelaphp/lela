@@ -303,7 +303,7 @@ impl SoapClient {
     ) -> R<()> {
         let object = this.object();
         let saved = begin(req, object);
-        let given = req.argument_count() > 1;
+        let given = req.frames().argument_count() > 1;
         let r = construct(req, object, wsdl, given.then_some(options));
         let r = end_code(req, r);
         end(req, &saved);

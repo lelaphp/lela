@@ -364,7 +364,7 @@ impl _ZendTestClass {
 
 /// `object_init_ex(return_value, zend_get_called_scope(execute_data))`.
 fn called(req: &mut Request) -> Result<Owner<Static>, Thrown> {
-    let Some(class) = req.called_scope() else {
+    let Some(class) = req.frames().called_scope() else {
         return Err(throw_error(
             req,
             "Error",
@@ -415,7 +415,7 @@ impl ObjectHandlers for TestClassHandlers {
 /// `ZEND_FUNCTION(zend_test_func)`: the name the trampoline was made
 /// under.
 fn zend_test_func(req: &mut Request) -> Result<Owner<Value>, Thrown> {
-    let name = req.active_function_name();
+    let name = req.frames().active_function_name();
     Ok(PhpString::new(req, name.as_bytes())?.into_value())
 }
 
@@ -880,12 +880,12 @@ impl ZendTestForbidDynamicCall {
     /// `call(): void`.
     fn call(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let _ = this;
-        req.forbid_dynamic_call()
+        req.frames_mut().forbid_dynamic_call()
     }
 
     /// `static callStatic(): void`.
     fn callStatic(req: &mut Request) -> Result<(), Thrown> {
-        req.forbid_dynamic_call()
+        req.frames_mut().forbid_dynamic_call()
     }
 }
 

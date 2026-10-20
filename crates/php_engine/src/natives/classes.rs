@@ -4,7 +4,7 @@
 //! the methods and properties a class has, the `*_exists` family, the
 //! aliases `class_alias` adds, and the declared lists. Visibility is
 //! measured against `zend_get_executed_scope`, which is the scope the
-//! native was called from ([`Request::scope`]).
+//! native was called from ([`Frames::scope`]).
 
 use php_macros::php_function;
 use php_unit::decl::{Bare, ClassKind, Visibility};
@@ -102,7 +102,7 @@ fn class_name(req: &mut Request, class: ClassId) -> Result<Owner<PhpString>, Thr
 /// ```
 #[php_function]
 fn get_called_class(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
-    match req.called_scope() {
+    match req.frames().called_scope() {
         Some(class) => class_name(req, class),
         None => Err(throw_error(
             req,
@@ -150,7 +150,7 @@ fn get_parent_class(
             "Calling get_parent_class() without arguments is deprecated",
         );
         none_pending(req)?;
-        req.scope()
+        req.frames().scope()
     };
     match class.and_then(|class| req.class_parent(class)) {
         Some(parent) => class_name(req, parent).map(OrFalse::Value),
@@ -399,7 +399,7 @@ fn get_class_vars(req: &mut Request, class: PhpString) -> Result<Owner<PhpArray>
         );
         return Err(arg_type_error(req, 1, &tail));
     };
-    let scope = req.scope();
+    let scope = req.frames().scope();
     // A virtual property has no default to list, having no slot.
     let rows: Vec<(PropertyInfo, bool)> = properties_info(req, class)
         .into_iter()
@@ -692,7 +692,7 @@ fn declared_var_key(
 #[php_function]
 fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let class = object.class();
-    let scope = req.scope();
+    let scope = req.frames().scope();
     // `zend_get_properties_for(ZEND_PROP_PURPOSE_GET_OBJECT_VARS)`: a
     // class that answers the purpose itself hands back its table, and
     // over a class with a hooked property `zend_std_get_properties_for`
@@ -948,7 +948,7 @@ fn get_class_methods(
     object_or_class: Raw<Union<PhpObject, PhpString>>,
 ) -> Result<Owner<PhpArray>, Thrown> {
     let class = object_or_class_name(req, object_or_class.value(), 1)?;
-    let scope = req.scope();
+    let scope = req.frames().scope();
     let names: Vec<Box<[u8]>> = req
         .methods_in_order(class)
         .into_iter()

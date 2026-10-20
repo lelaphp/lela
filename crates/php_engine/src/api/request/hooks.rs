@@ -891,7 +891,7 @@ fn trampoline_call(
             "InternalError: a parent hook trampoline served with no property",
         ));
     };
-    let given = req.argument_count();
+    let given = req.frames().argument_count();
     if given != wanted {
         let class = scope.map(|scope| req.class_name(scope)).unwrap_or_default();
         let shown = String::from_utf8_lossy(&name).into_owned();
@@ -906,7 +906,7 @@ fn trampoline_call(
             crate::api::raising::throw_error(req, "ArgumentCountError", &message)
         }));
     }
-    let Some(this) = req.this() else {
+    let Some(this) = req.frames().this() else {
         return Err(crate::api::raising::throw_error(
             req,
             "Error",
@@ -929,7 +929,7 @@ fn parent_hook_get(req: &mut Request) -> Result<Owner<Value>, Thrown> {
 /// object's `write_property`, and returned.
 fn parent_hook_set(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let (this, name) = trampoline_call(req, HookKind::Set, 1)?;
-    let value = req.argument(1).unwrap_or_else(Value::null).deref();
+    let value = req.frames().argument(1).unwrap_or_else(Value::null).deref();
     let key = req.string(&name)?;
     let key = Owner::adopt(key);
     // The return's owner, and the write's.

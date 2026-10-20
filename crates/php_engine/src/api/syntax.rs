@@ -394,9 +394,10 @@ fn read(req: &mut Request, source: &[u8], scanning: Scanning) -> Result<Read, Th
         }
         Err(refused) => {
             let file = req
+                .frames()
                 .current_file()
                 .map_or_else(|| b"Unknown".to_vec(), <[u8]>::to_vec);
-            let line = req.current_line();
+            let line = req.frames().current_line();
             req.end_in_compile_time(
                 crate::api::raising::Level::CompileError,
                 &refused.message(),

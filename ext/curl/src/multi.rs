@@ -510,7 +510,7 @@ fn curl_multi_close(
     if mh(req, multi_handle)?.running {
         let text = format!(
             "{}(): Attempt to close cURL handle from a callback",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         return Err(throw_error(req, "Error", &text));
     }

@@ -217,7 +217,7 @@ fn read_answer(req: &mut Request, retval: &Value, callable: &Callable, loader: &
             let name = function_name(req, callable, loader, true);
             let text = format!(
                 "{}(): The user entity loader callback \"{name}\" has returned a resource, but it is not a stream",
-                req.active_function_name()
+                req.frames().active_function_name()
             );
             Resolved::Thrown(throw_error(req, "TypeError", &text))
         }

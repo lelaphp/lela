@@ -247,7 +247,7 @@ fn collate(
         returned.give_up(req);
         return (order, None);
     }
-    let name = req.active_function_name();
+    let name = req.frames().active_function_name();
     let given = value_name(req, &returned);
     returned.give_up(req);
     let thrown = throw_error(
@@ -292,7 +292,7 @@ fn authorize(
     let returned = call(req, handler, &views(&values));
     release_all(req, values);
     let returned = returned?;
-    let name = req.active_function_name();
+    let name = req.frames().active_function_name();
     let answer = returned.deref().as_int();
     let given = value_name(req, &returned);
     returned.give_up(req);

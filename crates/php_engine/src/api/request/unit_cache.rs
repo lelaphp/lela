@@ -217,7 +217,7 @@ impl Request {
             written,
             self.cwd.as_os_str().as_encoded_bytes(),
             self.ini().get(b"include_path").unwrap_or_default(),
-            self.current_file(),
+            self.frames().current_file(),
         ))
     }
 

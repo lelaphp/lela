@@ -1262,8 +1262,8 @@ impl Request {
     /// [`ObjectHandlers::get_method`] or [`ObjectHandlers::get_closure`]
     /// for a name it learns only when a call names it; the one the
     /// request already made for that entry and name where it made one.
-    /// The body reads its name off [`Request::active_function_name`] and
-    /// its arguments off [`Request::argument`].
+    /// The body reads its name off [`Frames::active_function_name`] and
+    /// its arguments off [`Frames::argument`].
     ///
     /// [`ObjectHandlers::get_method`]: crate::api::abi::ObjectHandlers::get_method
     /// [`ObjectHandlers::get_closure`]: crate::api::abi::ObjectHandlers::get_closure

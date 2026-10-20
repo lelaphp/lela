@@ -49,6 +49,7 @@ pub(crate) use build_defs::PROVIDER as BUILD_PROVIDER;
 pub(crate) use build_defs::build_date;
 mod callable;
 mod caller;
+pub use caller::Frames;
 pub(crate) use caller::NativeCaller;
 pub use hooks::HookedTable;
 pub(crate) use hooks::{HookedBuild, HookedDeclared, HookedRows};

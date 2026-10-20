@@ -1,7 +1,7 @@
 //! Frame reads for extensions (#1827): an observer's handler reads the
 //! frame it is handed, and the frames below it, through a borrowed
 //! [`FrameView`], and keeps a frame past the handler as a [`FrameId`],
-//! which [`Request::frame_of`] checks against the stacks that stand before
+//! which [`Frames::of`] checks against the stacks that stand before
 //! it reads: a frame that left them is refused, and never read as the
 //! frame that stands at its old place now. A generator's frame is
 //! taken off the stack at each yield and pushed where its next resumer
@@ -70,7 +70,7 @@ fn keep(observed: &mut Observed<'_>) {
 fn read(observed: &mut Observed<'_>) {
     let kept = observed.state::<Kept>().0;
     let read = kept.and_then(|id| {
-        let view = observed.frame_of(id)?;
+        let view = observed.frames().of(id)?;
         Some(format!("{}:{}", name(observed, &view), view.line()))
     });
     let read = read.unwrap_or_else(|| String::from("refused"));
@@ -496,7 +496,7 @@ struct Traced(Option<String>);
 /// develop setting prints one from `zend_throw_exception_hook`.
 fn traced_at_throw(req: &mut Request, beneath: Beneath<'_, chain::Throw>) {
     if req.state::<Traced>().0.is_none()
-        && let Ok(trace) = req.backtrace_here(0, 0)
+        && let Ok(trace) = req.frames_mut().backtrace_here(0, 0)
     {
         let rendered = req.trace_to_string(*trace, true);
         trace.give_up(req);

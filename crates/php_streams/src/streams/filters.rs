@@ -406,7 +406,7 @@ impl PhpStream {
             FilterStatus::ErrFatal => {
                 let text = format!(
                     "{}(): Filter failed to process pre-buffered data",
-                    req.active_function_name()
+                    req.frames().active_function_name()
                 );
                 warning(req, &text);
                 return false;
@@ -673,7 +673,7 @@ impl FilterLayer for Request {
             };
             let text = format!(
                 "{}(): {what} \"{}\"",
-                self.active_function_name(),
+                self.frames().active_function_name(),
                 String::from_utf8_lossy(name)
             );
             warning(self, &text);
@@ -716,7 +716,7 @@ impl FilterLayer for Request {
         if flushed == Some(false) {
             let text = format!(
                 "{}(): Unable to flush filter, not removing",
-                self.active_function_name()
+                self.frames().active_function_name()
             );
             warning(self, &text);
             return Ok(Some(false));

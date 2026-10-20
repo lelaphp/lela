@@ -1,6 +1,6 @@
 //! Op-array reads for extensions (#1829): an observer reads the op
 //! array of a frame it is handed ([`FrameView::op_array`]) or of a
-//! function ([`Request::op_array`]), its oplines' opcodes, lines,
+//! function ([`Frames::op_array`]), its oplines' opcodes, lines,
 //! operands and jump targets, and the constants they name, as php's
 //! coverage tools and profilers read `op_array->opcodes`.
 //!
@@ -234,7 +234,7 @@ fn profile(observed: &mut Observed<'_>) -> ObserverHandlers {
     let req: &Request = observed;
     let read = observed
         .function()
-        .and_then(|function| req.op_array(function));
+        .and_then(|function| req.frames().op_array(function));
     if let Some(code) = read {
         let mut lines = vec![format!("{} oplines", code.len())];
         lines.extend(code.oplines().filter_map(|op| render(code, &op)));
@@ -244,7 +244,7 @@ fn profile(observed: &mut Observed<'_>) -> ObserverHandlers {
     ObserverHandlers::default()
 }
 /// A profiler's question, asked of one function through
-/// [`Request::op_array`]: how many oplines it holds, where each jump may
+/// [`Frames::op_array`]: how many oplines it holds, where each jump may
 /// land, a switch's and a match's tables, a `foreach`'s exits and a
 /// `finally`'s call among them, a `CATCH` that is its try's last landing
 /// nowhere, and what each call opline names, its function, its class and

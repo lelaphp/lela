@@ -92,7 +92,7 @@ fn active(req: &mut Request) -> bool {
 
 /// An argument read as a path, `p` quietly: a string without a NUL.
 fn path_arg(req: &Request, position: u32) -> Option<Vec<u8>> {
-    let value = req.argument(position)?.deref();
+    let value = req.frames().argument(position)?.deref();
     match value.as_ref() {
         ValueRef::Str(s) if !s.as_bytes().contains(&0) => Some(s.as_bytes().to_vec()),
         _ => None,
@@ -101,7 +101,7 @@ fn path_arg(req: &Request, position: u32) -> Option<Vec<u8>> {
 
 /// An optional `b` argument read quietly: `false` where not given.
 fn bool_arg(req: &Request, position: u32) -> Option<bool> {
-    match req.argument(position).map(|v| v.deref()) {
+    match req.frames().argument(position).map(|v| v.deref()) {
         None => Some(false),
         Some(value) => match value.as_ref() {
             ValueRef::Bool(b) => Some(b),
@@ -119,7 +119,7 @@ fn relative(filename: &[u8]) -> bool {
 /// The archive the file being served stands in, by the name
 /// `phar_split_fname` finds in its `phar://` URL.
 fn serving_archive(req: &mut Request) -> Result<Option<Vec<u8>>, Thrown> {
-    let Some(file) = req.current_file().map(<[u8]>::to_vec) else {
+    let Some(file) = req.frames().current_file().map(<[u8]>::to_vec) else {
         return Ok(None);
     };
     if file.len() < 7 || !file[..7].eq_ignore_ascii_case(b"phar://") {
@@ -254,7 +254,9 @@ fn fopen(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     }
     let (Some(filename), Some(true), Some(use_path)) = (
         path_arg(req, 1),
-        req.argument(2).map(|m| m.deref().as_str_bytes().is_some()),
+        req.frames()
+            .argument(2)
+            .map(|m| m.deref().as_str_bytes().is_some()),
         bool_arg(req, 3),
     ) else {
         return passthrough(req, None);
@@ -353,7 +355,7 @@ fn file_function(req: &mut Request, kind: Fs) -> Result<Owner<Value>, Thrown> {
     if !req.state::<crate::State>().intercepted {
         return passthrough(req, None);
     }
-    let Some(filename) = path_arg(req, 1).filter(|_| req.argument_count() == 1) else {
+    let Some(filename) = path_arg(req, 1).filter(|_| req.frames().argument_count() == 1) else {
         return passthrough(req, None);
     };
     file_stat(req, &filename, kind)
@@ -606,7 +608,7 @@ fn is_entry(req: &mut Request, link: bool) -> Result<Owner<Value>, Thrown> {
     if !active(req) {
         return passthrough(req, None);
     }
-    let Some(filename) = path_arg(req, 1).filter(|_| req.argument_count() == 1) else {
+    let Some(filename) = path_arg(req, 1).filter(|_| req.frames().argument_count() == 1) else {
         return passthrough(req, None);
     };
     if !relative(&filename) {

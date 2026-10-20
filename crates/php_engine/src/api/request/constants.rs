@@ -669,7 +669,10 @@ impl Request {
     /// `FETCH_CONSTANT` handler never looks for.
     pub(crate) fn constant_str(&self, name: &[u8]) -> Option<Value> {
         self.constant_named(name).or_else(|| {
-            let file = self.current_file().filter(|_| name == HALT_OFFSET)?;
+            let file = self
+                .frames()
+                .current_file()
+                .filter(|_| name == HALT_OFFSET)?;
             self.constant_named(&halt_offset_key(file))
         })
     }

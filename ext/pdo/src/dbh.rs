@@ -1529,7 +1529,7 @@ impl PDO {
         #[php(sensitive, default = null)] password: Option<PhpString>,
         #[php(default = null)] options: Option<PhpArray>,
     ) -> Result<Owner<Static>, Thrown> {
-        let Some(called) = req.called_scope() else {
+        let Some(called) = req.frames().called_scope() else {
             return Err(php_ext::raising::fatal(
                 req,
                 "InternalError: PDO::connect() served without a called scope",

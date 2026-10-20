@@ -27,8 +27,8 @@ pub(crate) fn install(builder: ExtensionBuilder) -> ExtensionBuilder {
 /// of one non-empty string names a file `filename_is_in_cache` finds,
 /// and is `true`; anything else is the replaced entry's to answer.
 fn in_cache(req: &mut Request) -> Result<Owner<Value>, Thrown> {
-    let named = match req.argument(1).map(|value| value.deref()) {
-        Some(value) if req.argument_count() == 1 => match value.as_ref() {
+    let named = match req.frames().argument(1).map(|value| value.deref()) {
+        Some(value) if req.frames().argument_count() == 1 => match value.as_ref() {
             ValueRef::Str(name) if !name.as_bytes().is_empty() => Some(name.as_bytes().to_vec()),
             _ => None,
         },

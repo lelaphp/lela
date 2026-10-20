@@ -497,7 +497,7 @@ pub(crate) fn set_stub(
         ));
     }
     no_stub_in_data(req, id)?;
-    let count = req.argument_count();
+    let count = req.frames().argument_count();
     let length = match length {
         Passed::Given(raw) => Some(raw.value()),
         Passed::Omitted => None,
@@ -506,7 +506,7 @@ pub(crate) fn set_stub(
     let stream = Stream::from_value(req, &stub.deref());
     let resource = matches!(stub.deref().as_ref(), ValueRef::Resource(_));
     if resource && (1..=2).contains(&count) && as_long.is_none_or(|l| l.is_some()) {
-        let name = req.active_function_name();
+        let name = req.frames().active_function_name();
         deprecated(
             req,
             &format!("Calling {name}(resource $stub, int $length) is deprecated"),
@@ -574,7 +574,7 @@ pub(crate) fn unlink_archive(req: &mut Request, name: &[u8]) -> Result<(), Throw
             ));
         }
     };
-    if let Some(file) = req.current_file().map(<[u8]>::to_vec)
+    if let Some(file) = req.frames().current_file().map(<[u8]>::to_vec)
         && file.len() >= 7
         && file[..7].eq_ignore_ascii_case(b"phar://")
         && let Ok(split) = path::split_fname(req, &file, path::Exec::Either, path::Create::No)?

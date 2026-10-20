@@ -213,7 +213,10 @@ fn end(req: &mut Request, saved: &Saved) {
 /// `php_error_docref(NULL, E_ERROR, ...)` under the soap handler: the
 /// message as php words it, the running native before `(): `.
 pub(crate) fn docref_error(req: &Request, message: &str) -> Error {
-    Error::fatal(format!("{}(): {message}", req.active_function_name()))
+    Error::fatal(format!(
+        "{}(): {message}",
+        req.frames().active_function_name()
+    ))
 }
 
 /// The fault `soap_real_error_handler` makes of a server's fatal: its

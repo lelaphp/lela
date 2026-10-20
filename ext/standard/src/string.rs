@@ -1716,7 +1716,7 @@ fn implode(
     separator: Raw<Union<PhpArray, PhpString>>,
     #[php(default = null)] array: Raw<Option<PhpArray>>,
 ) -> Result<Owner<PhpString>, Thrown> {
-    if req.frameless() {
+    if req.frames().frameless() {
         return implode_frameless(req, separator, array);
     }
     let (separator, array) = (separator.hold(req)?, array.hold(req)?);
@@ -1763,7 +1763,7 @@ fn implode_frameless(
     separator: Raw<Union<PhpArray, PhpString>>,
     array: Raw<Option<PhpArray>>,
 ) -> Result<Owner<PhpString>, Thrown> {
-    if req.argument_count() < 2 {
+    if req.frames().argument_count() < 2 {
         // `zend_parse_arg_array(arg1, &pieces, false, false)`.
         let Some(pieces) = separator.value().as_array().copied() else {
             return Err(not_an_array(req));
@@ -1786,7 +1786,7 @@ fn implode_frameless(
 /// php's `TypeError` for a separator with no array, under the name the
 /// call was made by, which `get_active_function_name()` puts in it.
 fn not_an_array(req: &mut Request) -> Thrown {
-    let name = req.active_function_name();
+    let name = req.frames().active_function_name();
     throw_error(
         req,
         "TypeError",

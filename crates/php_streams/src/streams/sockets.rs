@@ -427,7 +427,7 @@ impl Ops for Socket {
                 let (code, text) = socket_error(&error);
                 let text = format!(
                     "{}(): Send of {} bytes failed with errno={code} {text}",
-                    req.active_function_name(),
+                    req.frames().active_function_name(),
                     buf.len()
                 );
                 raise(req, Level::Notice, &text);
@@ -666,8 +666,11 @@ impl Ops for Socket {
                 Xported::Sent(match sent {
                     Ok(n) => Some(n),
                     Err(error) => {
-                        let text =
-                            format!("{}(): {}\n", req.active_function_name(), strerror(&error));
+                        let text = format!(
+                            "{}(): {}\n",
+                            req.frames().active_function_name(),
+                            strerror(&error)
+                        );
                         warning(req, &text);
                         None
                     }
@@ -930,7 +933,7 @@ fn addresses(req: &mut Request, host: &str, port: u16) -> Result<Vec<SocketAddr>
                 .strip_prefix("failed to lookup address information: ")
                 .unwrap_or(&text);
             let message = format!("php_network_getaddresses: getaddrinfo for {host} failed: {gai}");
-            let shown = format!("{}(): {message}", req.active_function_name());
+            let shown = format!("{}(): {message}", req.frames().active_function_name());
             warning(req, &shown);
             Err(message)
         }
@@ -949,7 +952,7 @@ fn unix_path(req: &mut Request, name: &[u8]) -> std::path::PathBuf {
         path = &path[..UNIX_PATH_MAX];
         let text = format!(
             "{}(): socket path exceeded the maximum allowed length of {UNIX_PATH_MAX} bytes and was truncated",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         raise(req, Level::Notice, &text);
     }
@@ -1077,7 +1080,7 @@ fn bind_local(req: &mut Request, fd: BorrowedFd<'_>, to: &SocketAddr, local: &st
     let Some(ip) = ip else {
         let text = format!(
             "{}(): Invalid IP Address: {local}",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         warning(req, &text);
         return;
@@ -1085,7 +1088,7 @@ fn bind_local(req: &mut Request, fd: BorrowedFd<'_>, to: &SocketAddr, local: &st
     if let Err(error) = crate::api::layer::bind_fd(fd, &SocketAddr::new(ip, port)) {
         let text = format!(
             "{}(): Failed to bind to '{local}:{port}', system said: {}",
-            req.active_function_name(),
+            req.frames().active_function_name(),
             socket_error(&error).1
         );
         warning(req, &text);
@@ -1590,7 +1593,7 @@ impl Stream {
                 let Some(addr) = parse_network_address(text) else {
                     let shown = format!(
                         "{}(): Failed to parse `{}' into a valid network address",
-                        req.active_function_name(),
+                        req.frames().active_function_name(),
                         String::from_utf8_lossy(text)
                     );
                     warning(req, &shown);
@@ -1736,7 +1739,7 @@ impl Stream {
 fn no_crypto(req: &mut Request) {
     let text = format!(
         "{}(): This stream does not support SSL/crypto",
-        req.active_function_name()
+        req.frames().active_function_name()
     );
     warning(req, &text);
 }

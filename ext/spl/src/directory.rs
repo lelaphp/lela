@@ -1959,7 +1959,7 @@ impl SplTempFileObject {
         }
         let name: Vec<u8> = if maxMemory < 0 {
             b"php://memory".to_vec()
-        } else if req.argument_count() > 0 {
+        } else if req.frames().argument_count() > 0 {
             format!("php://temp/maxmemory:{maxMemory}").into_bytes()
         } else {
             b"php://temp".to_vec()

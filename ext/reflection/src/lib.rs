@@ -4903,7 +4903,7 @@ fn answer<T: FromArgument>(
 /// `ZEND_PARSE_PARAMETERS_START(n, n)`'s count check: php's
 /// `ArgumentCountError`, `expects exactly N argument(s), M given`.
 fn exactly_arguments(req: &mut Request, expected: usize) -> Result<(), Thrown> {
-    let count = req.argument_count();
+    let count = req.frames().argument_count();
     if count == expected {
         return Ok(());
     }
@@ -4926,7 +4926,7 @@ fn exactly_arguments(req: &mut Request, expected: usize) -> Result<(), Thrown> {
 /// ReflectionProperty::getValue() expects at most 1 argument, 2 given
 /// ```
 fn at_most_arguments(req: &mut Request, most: usize) -> Result<(), Thrown> {
-    let count = req.argument_count();
+    let count = req.frames().argument_count();
     if count <= most {
         return Ok(());
     }

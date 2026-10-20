@@ -405,7 +405,7 @@ fn option_str(req: &mut Request, object: PhpObject, option: i64, value: &[u8]) -
     if value.contains(&0) {
         let text = format!(
             "{}(): cURL option must not contain any null bytes",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         return Err(throw_error(req, "ValueError", &text));
     }
@@ -533,14 +533,14 @@ fn stream_of(req: &mut Request, value: &Value) -> Result<Option<(Stream, i32)>, 
     let Some(resource) = value.as_resource().copied() else {
         let text = format!(
             "{}(): supplied argument is not a valid File-Handle resource",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         return Err(throw_error(req, "TypeError", &text));
     };
     let Some(stream) = Stream::from_value(req, &resource.as_value()) else {
         let text = format!(
             "{}(): supplied resource is not a valid File-Handle resource",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         return Err(throw_error(req, "TypeError", &text));
     };
@@ -584,7 +584,7 @@ fn set_stream(req: &mut Request, object: PhpObject, which: StreamOpt, value: &Va
     {
         let text = format!(
             "{}(): The provided file handle must be writable",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         return Err(throw_error(req, "ValueError", &text));
     }
@@ -635,7 +635,7 @@ fn set_list(req: &mut Request, object: PhpObject, option: i64, value: &Value) ->
     let Some(array) = value.deref().as_array().copied() else {
         let text = format!(
             "{}(): The {} option must have an array value",
-            req.active_function_name(),
+            req.frames().active_function_name(),
             list_name(option)
         );
         return Err(throw_error(req, "TypeError", &text));
@@ -753,7 +753,7 @@ pub(crate) fn setopt(
             if !truthy(req, &value.deref())? {
                 let text = format!(
                     "{}(): Disabling safe uploads is no longer supported",
-                    req.active_function_name()
+                    req.frames().active_function_name()
                 );
                 return Err(throw_error(req, "ValueError", &text));
             }

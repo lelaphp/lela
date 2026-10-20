@@ -2565,7 +2565,7 @@ impl Coroutine {
                 if let Some(before) = before {
                     req.raise_under(before);
                 }
-                if !req.executing() {
+                if !req.frames().executing() {
                     req.exception_error(crate::api::raising::Level::Error).ok();
                 }
             }

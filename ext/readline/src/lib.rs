@@ -58,7 +58,7 @@ struct Kept {
 impl Kept {
     /// The callable argument at `position` of the running call.
     fn of(req: &mut Request, callable: Callable, position: u32) -> Kept {
-        let value = req.argument(position).unwrap_or_default().deref();
+        let value = req.frames().argument(position).unwrap_or_default().deref();
         Kept {
             callable,
             value: Owner::take(req, value),

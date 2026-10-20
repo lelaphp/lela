@@ -1176,7 +1176,7 @@ fn ffi_type(
 /// `position` is the value's one owner, a temporary php may take the
 /// ownership of.
 fn temporary(req: &mut Request, position: u32, object: PhpObject) -> bool {
-    let Some(arg) = req.argument(position) else {
+    let Some(arg) = req.frames().argument(position) else {
         return false;
     };
     arg.refcount() == 1 && object.as_value().refcount() == 1

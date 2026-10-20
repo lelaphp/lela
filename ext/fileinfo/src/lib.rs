@@ -238,7 +238,7 @@ mod class {
             #[php(default = null)] context: Option<Resource>,
         ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
             let _ = context;
-            let deprecated = req.argument_count() == 3;
+            let deprecated = req.frames().argument_count() == 3;
             buffer(req, this.object(), string, flags, deprecated)
         }
 
@@ -599,7 +599,7 @@ fn finfo_buffer(
     #[php(default = null)] context: Option<Resource>,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let _ = context;
-    let deprecated = req.argument_count() == 4;
+    let deprecated = req.frames().argument_count() == 4;
     buffer(req, finfo.object(), string, flags, deprecated)
 }
 

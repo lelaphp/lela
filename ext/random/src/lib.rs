@@ -735,7 +735,7 @@ fn min_max(
     min: Passed<Raw<i64>>,
     max: Passed<Raw<i64>>,
 ) -> Result<Option<(i64, i64)>, Thrown> {
-    let given = req.argument_count();
+    let given = req.frames().argument_count();
     if given == 0 {
         return Ok(None);
     }

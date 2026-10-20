@@ -232,7 +232,7 @@ fn reset(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Owner<Value>, T
 /// ```
 #[php_function(aliases(pos))]
 fn current(req: &mut Request, array: ArrayOrObject) -> Result<Owner<Value>, Thrown> {
-    let name = req.active_function_name();
+    let name = req.frames().active_function_name();
     read_current(req, array.value(), &name)
 }
 
@@ -380,7 +380,7 @@ fn moved(
             if !object.pointer_move(req, how)? {
                 return Ok(Owner::bool(false));
             }
-            if !req.return_value_used() {
+            if !req.frames().return_value_used() {
                 return Ok(Owner::null());
             }
             let current = object.pointer_row(req, Some(how))?.map(|(_, value)| value);
@@ -591,7 +591,7 @@ fn extreme(
         return Ok(best);
     }
     let values: Vec<Value> = std::iter::once(value).chain(values.0).collect();
-    if values.len() == 2 && req.frameless() {
+    if values.len() == 2 && req.frames().frameless() {
         return frameless_extreme(req, values[0], values[1], wanted);
     }
     let mut best = values[0];

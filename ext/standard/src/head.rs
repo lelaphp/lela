@@ -482,7 +482,7 @@ fn setcookie_common(
     };
     match arguments.expires_or_options {
         Union::A(options) => {
-            if req.argument_count() > 3 {
+            if req.frames().argument_count() > 3 {
                 let text = format!(
                     "{function}(): Expects exactly 3 arguments when argument #3 ($expires_or_options) is an array"
                 );

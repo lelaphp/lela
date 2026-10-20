@@ -1103,7 +1103,10 @@ pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
 pub(crate) fn throw_object(req: &mut Request, object: PhpObject) -> Thrown {
     let thrown = Thrown::of(Some(object));
     // A bundle that set no hook pays nothing more for a throw.
-    if req.shared.supplied.thrown.links().is_empty() || req.is_pending() || !req.executing() {
+    if req.shared.supplied.thrown.links().is_empty()
+        || req.is_pending()
+        || !req.frames().executing()
+    {
         return thrown;
     }
     let shared = std::sync::Arc::clone(&req.shared);
@@ -1431,7 +1434,7 @@ pub fn arg_count_error(req: &mut Request, tail: &str) -> Thrown {
 /// session_set_save_handler() expects at least 6 arguments, 3 given
 /// ```
 pub fn arity(req: &mut Request, min: usize, max: Option<usize>) -> Result<(), Thrown> {
-    let given = req.argument_count();
+    let given = req.frames().argument_count();
     arity_of(req, given, min, max)
 }
 

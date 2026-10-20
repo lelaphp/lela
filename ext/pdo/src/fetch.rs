@@ -1646,7 +1646,7 @@ pub(super) fn fetch_all(
     mode: Raw<i64>,
     args: &[Value],
 ) -> Result<Owner<PhpArray>, Thrown> {
-    let given = req.argument_count();
+    let given = req.frames().argument_count();
     if given > 3 {
         return Err(arg_count_error(
             req,

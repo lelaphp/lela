@@ -298,7 +298,7 @@ fn openssl_x509_fingerprint(
             store_errors(req);
             let text = format!(
                 "{}(): Could not generate signature",
-                req.active_function_name()
+                req.frames().active_function_name()
             );
             return Err(fatal(req, &text));
         };
@@ -739,7 +739,7 @@ pub(crate) fn check_cert(
             store_errors(req);
             let text = format!(
                 "{}(): Memory allocation failure",
-                req.active_function_name()
+                req.frames().active_function_name()
             );
             Err(fatal(req, &text))
         }

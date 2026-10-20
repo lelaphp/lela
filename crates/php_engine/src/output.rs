@@ -1053,8 +1053,12 @@ pub(crate) fn header(req: &mut Request) {
         return;
     }
     if req.output().started.is_none() {
-        let file = req.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-        let line = req.current_line();
+        let file = req
+            .frames()
+            .current_file()
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default();
+        let line = req.frames().current_line();
         req.output_mut().started = Some((file, line));
     }
     // `php_header`: a `HEAD` request's body goes nowhere once its head

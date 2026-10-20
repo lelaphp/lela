@@ -1387,7 +1387,7 @@ fn session_set_save_handler(
     #[php(default = null)] validate_sid: Raw<Option<Callable>>,
     #[php(default = null)] update_timestamp: Raw<Option<Callable>>,
 ) -> Result<bool, Thrown> {
-    let count = req.argument_count();
+    let count = req.frames().argument_count();
     if count <= 2 {
         arity(req, 1, Some(2))?;
         let first = open.value();

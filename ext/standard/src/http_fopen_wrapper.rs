@@ -188,7 +188,8 @@ pub(crate) fn url_wrap_http(
     if let Some(headers) = chain.headers.take() {
         let value = Owner::take(req, Value::array(*headers));
         req.state::<State>().last_http_headers = Some(headers);
-        req.set_local_var(b"http_response_header", value);
+        req.frames_mut()
+            .set_local_var(b"http_response_header", value);
     }
     let thrown = match opened {
         Ok(stream) => match chain.thrown {
@@ -729,7 +730,7 @@ fn wrap_http_ex(
     let Some(parser) = chain.options.parser else {
         let text = format!(
             "{}(): Provided stream context has invalid value for the \"uri_parser_class\" option",
-            req.active_function_name()
+            req.frames().active_function_name()
         );
         return Err(throw_error(req, "ValueError", &text));
     };

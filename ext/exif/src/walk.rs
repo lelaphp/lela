@@ -197,7 +197,7 @@ impl<'r> Reader<'r> {
             return;
         }
         self.img.num_errors += 1;
-        let function = self.req.active_function_name();
+        let function = self.req.frames().active_function_name();
         if self.img.num_errors > MAX_ERRORS {
             if self.img.num_errors == MAX_ERRORS + 1 {
                 let text =

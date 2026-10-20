@@ -803,7 +803,7 @@ fn mysqli_fetch_object(
     #[php(default = "stdClass")] class: php_ext::abi::Raw<PhpString>,
     #[php(default = [])] constructor_args: php_ext::abi::Raw<PhpArray>,
 ) -> Answer<FetchedObject> {
-    let given = req.argument_count() > 2;
+    let given = req.frames().argument_count() > 2;
     result::fetch_object(req, on_result(result), class, constructor_args, given)
 }
 
@@ -997,7 +997,7 @@ fn mysqli_get_client_info(
     #[php(default = null)] mysql: Option<Link>,
 ) -> Answer<Owner<PhpString>> {
     let _ = mysql;
-    if req.argument_count() > 0 {
+    if req.frames().argument_count() > 0 {
         docref(
             req,
             Level::Deprecated,
@@ -2243,7 +2243,7 @@ fn mysqli_store_result(
     #[php(default = 0)] mode: i64,
 ) -> Answer<OrFalse<Owner<Res>>> {
     let _ = mode;
-    let given = req.argument_count() == 2;
+    let given = req.frames().argument_count() == 2;
     link::store_result(req, on(mysql), given)
 }
 

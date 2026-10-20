@@ -282,7 +282,7 @@ impl ArrayObject {
         #[php(default = ArrayIterator::class)] iteratorClass: Raw<PhpString>,
     ) -> Result<(), Thrown> {
         let this = this.object();
-        if req.argument_count() == 0 {
+        if req.frames().argument_count() == 0 {
             return Ok(());
         }
         let given = array_or_object(req, array.value(), 1)?;
@@ -290,7 +290,7 @@ impl ArrayObject {
         let name = iteratorClass.hold(req)?;
         let class = iterator_class_argument(req, name, 3)?;
         with(req, this, |p| p.iterator_class = Some(class))?;
-        let just_array = req.argument_count() == 1;
+        let just_array = req.frames().argument_count() == 1;
         set_array(req, this, &given, flags & !INT_MASK, just_array)
     }
 
@@ -1056,12 +1056,12 @@ impl ArrayIterator {
         #[php(default = 0)] flags: Raw<i64>,
     ) -> Result<(), Thrown> {
         let this = this.object();
-        if req.argument_count() == 0 {
+        if req.frames().argument_count() == 0 {
             return Ok(());
         }
         let given = array_or_object(req, array.value(), 1)?;
         let flags = flags.hold(req)?;
-        let just_array = req.argument_count() == 1;
+        let just_array = req.frames().argument_count() == 1;
         set_array(req, this, &given, flags & !INT_MASK, just_array)
     }
 

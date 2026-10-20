@@ -1344,8 +1344,12 @@ impl Request {
             .or_else(|| self.unlinked_decl(&decl.name.0));
         if let Some(existing) = existing {
             let message = redeclaration(existing, &existing.name.0);
-            let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-            let line = self.current_line();
+            let file = self
+                .frames()
+                .current_file()
+                .map(<[u8]>::to_vec)
+                .unwrap_or_default();
+            let line = self.frames().current_line();
             self.end_in_compile_time(Level::CompileError, &message, &file, line);
             return Err(Thrown::of(None));
         }
@@ -1606,7 +1610,7 @@ impl Request {
     /// took them, as `get_defined_functions()` lists them; a method is
     /// none, being its class's, and a closure is none, since php never
     /// adds one to the table. A function is a user function where it
-    /// has an op array ([`Request::op_array`]).
+    /// has an op array ([`Frames::op_array`]).
     #[must_use]
     pub fn functions(&self) -> Vec<Function> {
         let natives = u32::try_from(self.shared.functions.len()).unwrap_or(u32::MAX);

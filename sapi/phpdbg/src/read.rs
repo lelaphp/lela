@@ -230,7 +230,7 @@ fn code_of(req: &Request, function: Function, class: Option<ClassId>) -> Option<
     let params = u32::try_from(decl.parameters.len()).unwrap_or(u32::MAX);
     let args = decl.parameters.iter().filter(|p| !p.variadic).count();
     let class = class.map(|class| req.class_name(class).into_bytes());
-    let Some(code) = req.op_array(function) else {
+    let Some(code) = req.frames().op_array(function) else {
         return Some(Code {
             name,
             class,
@@ -263,13 +263,16 @@ fn code_of(req: &Request, function: Function, class: Option<ClassId>) -> Option<
 /// `phpdbg_print_function_helper`: the op array, then each function its
 /// body declares, under `dynamic def: n, function name: name`.
 fn dump_with_dynamic(req: &Request, code: OpArrayView<'_>, name: &[u8], args: usize) -> Vec<u8> {
-    let mut dump = req.dump_op_array(code, name, args);
+    let mut dump = req.frames().dump_op_array(code, name, args);
     for (at, (decl, nested)) in code.dynamic_functions().enumerate() {
         dump.extend_from_slice(format!("\ndynamic def: {at}, function name: ").as_bytes());
         dump.extend_from_slice(&decl.name.0);
         dump.push(b'\n');
         let nested_args = decl.parameters.iter().filter(|p| !p.variadic).count();
-        dump.extend(req.dump_op_array(nested, &decl.name.0, nested_args));
+        dump.extend(
+            req.frames()
+                .dump_op_array(nested, &decl.name.0, nested_args),
+        );
     }
     dump
 }
@@ -401,7 +404,7 @@ pub fn class_named(req: &mut Request, name: &[u8]) -> Option<Class> {
 pub fn user_functions(req: &Request) -> Vec<Code> {
     req.functions()
         .into_iter()
-        .filter(|function| req.op_array(*function).is_some())
+        .filter(|function| req.frames().op_array(*function).is_some())
         .filter_map(|function| code_of(req, function, None))
         .collect()
 }

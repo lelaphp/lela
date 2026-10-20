@@ -1256,8 +1256,12 @@ impl Request {
         if error.stage == php_compile::Stage::Opening {
             // `open_file_for_scanning` refused before anything compiled:
             // `zend_error` places it where the request is executing.
-            let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-            let line = self.current_line();
+            let file = self
+                .frames()
+                .current_file()
+                .map(<[u8]>::to_vec)
+                .unwrap_or_default();
+            let line = self.frames().current_line();
             self.end_in_compile_time(error.level, &error.message, &file, line);
             return Thrown::of(None);
         }

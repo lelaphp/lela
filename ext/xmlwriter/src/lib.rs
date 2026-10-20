@@ -486,7 +486,7 @@ pub(crate) fn new_writer(
 /// `xml_writer_create_static`: `object_init_with_constructor` of the
 /// class the call named, the emitter on it.
 pub(crate) fn create_static(req: &mut Request, writer: Emitter) -> Result<Owner<Static>, Thrown> {
-    let scope = req.called_scope();
+    let scope = req.frames().called_scope();
     let class = scope.map_or_else(|| writer_class(req), Ok)?;
     match instantiate(req, class, &[]) {
         Ok(object) => {
