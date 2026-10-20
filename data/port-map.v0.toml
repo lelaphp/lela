@@ -1246,7 +1246,7 @@ mahout = "RequestCtx::set_error_handler"
 sites = 2
 crates = 1
 status = "same"
-api = "request::Request::set_error_handler"
+api = "request::Diagnostics::set_error_handler"
 
 [[item]]
 mahout = "RequestCtx::static_side_cell_peek"
@@ -1344,7 +1344,7 @@ mahout = "RequestCtx::clear_last_error"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::clear_last_error"
+api = "request::Diagnostics::clear_last_error"
 
 [[item]]
 mahout = "RequestCtx::closure_static_key_prefix"
@@ -1519,7 +1519,7 @@ mahout = "RequestCtx::last_error"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::last_error"
+api = "request::Diagnostics::last_error"
 
 [[item]]
 mahout = "RequestCtx::lazy_pinned"
@@ -1842,7 +1842,7 @@ mahout = "RequestCtx::settings.error_reporting"
 sites = 4
 crates = 1
 status = "renamed"
-api = "request::Request::error_reporting"
+api = "request::Diagnostics::error_reporting"
 
 [[item]]
 mahout = "RequestCtx::settings.include_path"
@@ -2942,7 +2942,7 @@ mahout = "semantics::effective_error_reporting"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::error_reporting"
+api = "request::Diagnostics::error_reporting"
 
 [[item]]
 mahout = "semantics::find_double_colon"
@@ -3355,7 +3355,7 @@ mahout = "semantics::write_error_log"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::error_log"
+api = "request::Diagnostics::error_log"
 
 [[item]]
 mahout = "semantics::zend_sort_in_place"

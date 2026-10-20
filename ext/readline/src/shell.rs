@@ -543,5 +543,5 @@ pub(crate) fn run(req: &mut Request) -> i32 {
         close_pager(req);
         state(req).last = 0;
     }
-    req.exit_status()
+    req.diagnostics().exit_status()
 }

@@ -63,6 +63,7 @@ use classes::AccelServed;
 mod constants;
 pub(crate) use constants::{ConstantAt, halt_offset_key};
 mod diagnostics;
+pub use diagnostics::Diagnostics;
 use diagnostics::{DISPLAY_ERRORS_STDERR, display_errors_mode_of, fatal_errors};
 pub use diagnostics::{FormatDate, Syslog};
 pub(crate) use diagnostics::{append_escaped, escape_html};
@@ -271,8 +272,8 @@ pub struct Request {
     /// The sink, the `php_output` layer, the header callback and the
     /// connection's status ([`response::Response`]).
     response: response::Response,
-    /// The diagnostics' state ([`diagnostics::Diagnostics`]).
-    diagnostics: diagnostics::Diagnostics,
+    /// The diagnostics' state ([`diagnostics::DiagnosticsState`]).
+    diagnostics: diagnostics::DiagnosticsState,
     ending: Option<Ending>,
     /// The pieces of the ropes the frames are building ([`ropes::Ropes`]).
     ropes: ropes::Ropes,
@@ -1037,7 +1038,7 @@ impl Request {
             map: crate::exec::RuntimeCaches::default(),
             state: state::RequestState::default(),
             ini: ini::Ini::new(typed_ini),
-            diagnostics: diagnostics::Diagnostics::default(),
+            diagnostics: diagnostics::DiagnosticsState::default(),
             response: response::Response::new(sink, output),
             ending: None,
             ropes: ropes::Ropes::default(),
@@ -1136,15 +1137,6 @@ impl Request {
         Heap::object_std_dtor(&mut Hooks(self), object.heap());
     }
 
-    /// The slot for a throwable PHP code served by a stream's kind, a
-    /// filter or a user-space wrapper raised inside an operation whose
-    /// answer has no room for it: php's `EG(exception)` standing until
-    /// the native that asked for the operation returns, which raises it,
-    /// and before which no more such code is served.
-    pub fn stream_thrown(&mut self) -> &mut Option<Thrown> {
-        &mut self.stream_thrown
-    }
-
     /// php's `EG(weakrefs)`, whose rows only `crate::weakrefs` reads,
     /// the table's methods being private to it.
     pub(crate) fn weakrefs(&self) -> &crate::weakrefs::Table {
@@ -1170,6 +1162,17 @@ impl Request {
     }
 }
 
+impl<'r> Diagnostics<&'r mut Request> {
+    /// The slot for a throwable PHP code served by a stream's kind, a
+    /// filter or a user-space wrapper raised inside an operation whose
+    /// answer has no room for it: php's `EG(exception)` standing until
+    /// the native that asked for the operation returns, which raises it,
+    /// and before which no more such code is served.
+    pub fn stream_thrown(self) -> &'r mut Option<Thrown> {
+        &mut self.0.stream_thrown
+    }
+}
+
 /// The request's side of the heap's upward seam (design §4.3, seam 1):
 /// the request itself, whole, so that `__destruct` is served by the
 /// request that owns the frames, and the heap the operation is on is
@@ -1186,7 +1189,7 @@ impl Hooks<'_> {
     /// raises it ([`Request::throw_internal`]). A stream the step closed
     /// whose user-space wrapper or filter threw parks the throwable for
     /// the native that asked to raise once it returns
-    /// ([`Request::stream_thrown`]); a release is no native, so the step
+    /// ([`Diagnostics::stream_thrown`]); a release is no native, so the step
     /// raises it here, where nothing was parked before the step began.
     /// What the step answered as its `Err` is raised after that, so it
     /// chains over the parked one, as php's `EG(exception)` takes both

@@ -62,7 +62,7 @@ impl Request {
     /// stood before `recording` was asked for, what is held kept for the
     /// emit.
     pub(crate) fn pause_recording(&mut self, recording: Recording) {
-        if self.bailing_out() {
+        if self.diagnostics().bailing_out() {
             return;
         }
         self.record.on = recording == Recording::Joined;
@@ -94,7 +94,7 @@ impl Request {
     /// 'break' not in the 'loop' or 'switch' context
     /// ```
     pub(crate) fn emit_recorded(&mut self, recording: Recording) {
-        if recording == Recording::Joined || self.bailing_out() {
+        if recording == Recording::Joined || self.diagnostics().bailing_out() {
             return;
         }
         self.record.on = false;
@@ -142,10 +142,10 @@ impl Request {
             let levels = self.replace_error_handler_levels(0);
             for each in &held {
                 self.note_error_in(each.level, &each.message, &each.file, each.line);
-                if super::fatal_errors(each.level) && !self.bailing_out() {
+                if super::fatal_errors(each.level) && !self.diagnostics().bailing_out() {
                     self.bail_out();
                 }
-                if self.bailing_out() {
+                if self.diagnostics().bailing_out() {
                     return true;
                 }
             }

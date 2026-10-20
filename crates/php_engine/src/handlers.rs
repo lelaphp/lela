@@ -7206,7 +7206,7 @@ pub(crate) fn begin_silence<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let standing = req.error_reporting();
+    let standing = req.diagnostics().error_reporting();
     set_out(req, frame, code, op, Value::int(standing));
     if !has_only_fatal_errors(standing) {
         req.set_error_reporting(standing & E_FATAL_ERRORS);
@@ -24216,11 +24216,13 @@ fn unwind_from<T: Tier>(
                 .fast_call(frame, var)
                 .and_then(|cell| cell.delayed.take());
             if let Some(delayed) = delayed {
-                match (req.raised(), delayed) {
+                match (req.diagnostics().raised(), delayed) {
                     (Some(Raised::Throwable(pending)), Raised::Throwable(delayed)) => {
                         req.set_previous(pending, delayed);
                     }
-                    (None, delayed) if !req.bailing_out() => req.set_raised(Some(delayed)),
+                    (None, delayed) if !req.diagnostics().bailing_out() => {
+                        req.set_raised(Some(delayed));
+                    }
                     // Either exit, or a fatal, gives up what the block
                     // delayed; a throwable gives up a delayed exit.
                     (_, delayed) => req.release_raised(delayed),

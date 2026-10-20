@@ -5234,7 +5234,7 @@ impl Engine {
             _ => None,
         };
         let observed = Observables {
-            exit_code: req.exit_status(),
+            exit_code: req.diagnostics().exit_status(),
             headers_sent: req.output().headers_sent(),
             fatal,
             memory_peak: req.memory().peak(true),
@@ -5655,7 +5655,7 @@ impl Engine {
             Some(Ending::Fatal(logged)) => Some(logged.clone()),
             _ => None,
         };
-        let exit_code = req.exit_status();
+        let exit_code = req.diagnostics().exit_status();
         // The block reached the sink at the commit, which the output
         // layer's deactivation makes if nothing had; one it refused, for
         // the memory limit, is handed over now.
@@ -6147,7 +6147,7 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit, entry: Loop) -
             Primary::Bare => req.keep_uncaught(),
         }
     }
-    !exited && !req.bailing_out() && req.ending().is_none()
+    !exited && !req.diagnostics().bailing_out() && req.ending().is_none()
 }
 
 /// Each extension's `rinit` in startup order, `zend_activate_modules`,

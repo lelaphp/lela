@@ -159,8 +159,8 @@ impl FilterCall {
 /// A throwable a filter raised, kept for the native that asked, unless
 /// one is kept already.
 pub(super) fn defer(req: &mut Request, thrown: Thrown) {
-    if req.stream_thrown().is_none() {
-        *req.stream_thrown() = Some(thrown);
+    if req.diagnostics_mut().stream_thrown().is_none() {
+        *req.diagnostics_mut().stream_thrown() = Some(thrown);
     } else {
         // A second throwable is given up; a fatal or an exit holds none.
         match crate::api::raising::clear(req, thrown) {
@@ -189,7 +189,7 @@ impl PhpStream {
         consumed: Option<&mut usize>,
         flags: FilterFlags,
     ) -> FilterStatus {
-        if req.stream_thrown().is_some() {
+        if req.diagnostics_mut().stream_thrown().is_some() {
             return FilterStatus::ErrFatal;
         }
         let Some(stream) = self.res.map(Stream::of) else {
@@ -735,7 +735,7 @@ impl FilterLayer for Request {
         } else {
             res.close(self);
         }
-        match self.stream_thrown().take() {
+        match self.diagnostics_mut().stream_thrown().take() {
             Some(thrown) => Err(thrown),
             None => Ok(Some(true)),
         }
@@ -762,7 +762,7 @@ impl Stream {
             return Ok(false);
         };
         req.stream_op(self, |req, s| s.attach(req, chain, filter, true));
-        match req.stream_thrown().take() {
+        match req.diagnostics_mut().stream_thrown().take() {
             Some(thrown) => Err(thrown),
             None => Ok(true),
         }
@@ -806,7 +806,7 @@ impl Stream {
                 continue;
             }
             let Some(filter) = req.filter_create(name, params, persistent) else {
-                return match req.stream_thrown().take() {
+                return match req.diagnostics_mut().stream_thrown().take() {
                     Some(thrown) => Err(thrown),
                     None => Ok(None),
                 };
@@ -823,7 +823,7 @@ impl Stream {
                 if let Some(filter) = taken {
                     release_filter(req, filter);
                 }
-                return match req.stream_thrown().take() {
+                return match req.diagnostics_mut().stream_thrown().take() {
                     Some(thrown) => Err(thrown),
                     None => Ok(None),
                 };
@@ -863,7 +863,7 @@ impl Stream {
         if let Some(unheld) = held {
             unheld.give_up(req);
         }
-        match req.stream_thrown().take() {
+        match req.diagnostics_mut().stream_thrown().take() {
             Some(thrown) => Err(thrown),
             None => Ok(Some(res)),
         }

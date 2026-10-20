@@ -729,7 +729,7 @@ fn get_include_path(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thro
 /// ```
 #[php_function]
 fn error_get_last(req: &mut Request) -> Result<Option<Owner<PhpArray>>, Thrown> {
-    req.last_error()
+    req.diagnostics_mut().last_error()
 }
 
 /// `error_clear_last(): void`, php's `PHP_FUNCTION(error_clear_last)`
@@ -750,7 +750,7 @@ fn error_get_last(req: &mut Request) -> Result<Option<Owner<PhpArray>>, Thrown> 
 /// ```
 #[php_function]
 fn error_clear_last(req: &mut Request) {
-    req.clear_last_error();
+    req.diagnostics_mut().clear_last_error();
 }
 
 /// `zend_parse_ini_string`/`zend_parse_ini_file` and the callback's
@@ -1367,7 +1367,7 @@ fn error_log(
     let message = message.as_bytes();
     let sent = match to {
         LogTo::Log => {
-            req.error_log(message);
+            req.diagnostics_mut().error_log(message);
             true
         }
         LogTo::Mail(to, headers) => {

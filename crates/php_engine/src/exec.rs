@@ -3063,7 +3063,7 @@ pub(crate) fn has_only_fatal_errors(mask: i64) -> bool {
 /// fatal levels and the saved one held more.
 pub(crate) fn restore_silenced(req: &mut Request, saved: &Value) {
     let saved = saved.as_int().unwrap_or(0);
-    if has_only_fatal_errors(req.error_reporting()) && !has_only_fatal_errors(saved) {
+    if has_only_fatal_errors(req.diagnostics().error_reporting()) && !has_only_fatal_errors(saved) {
         req.set_error_reporting(saved);
     }
 }

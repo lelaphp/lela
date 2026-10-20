@@ -17,6 +17,7 @@ use crate::supplied::chain::ErrorArgs;
 
 use diagnostics::{Display, Message};
 
+use super::Diagnostics;
 use super::{Raised, Request, diagnostics};
 
 /// Where a request stands, as `php_verror` reads it to name the origin
@@ -84,12 +85,6 @@ impl Default for Progress {
 impl Request {
     pub(crate) fn ending(&self) -> Option<&Ending> {
         self.ending.as_ref()
-    }
-
-    /// Whether a `zend_bailout` is under way, which leaves every step
-    /// it passes through at once.
-    pub fn bailing_out(&self) -> bool {
-        self.bailout
     }
 
     /// `zend_error_noreturn(E_ERROR, ...)`: `php_error_cb` renders the
@@ -354,13 +349,6 @@ impl Request {
         self.exit_status = code;
     }
 
-    /// php's `EG(exit_status)`, what `serve` reports the request ended
-    /// with: what `exit` last wrote, or 255 after a fatal.
-    #[must_use]
-    pub fn exit_status(&self) -> i32 {
-        self.exit_status
-    }
-
     /// `zend_throw_unwind_exit` (`Z/Zend/zend_exceptions.c:1061`): the
     /// unwind exit is standing where a throwable would be, for the
     /// unwinder to read; php asserts nothing else is pending, and a
@@ -499,5 +487,20 @@ impl Request {
             .fatal_logged
             .entry()
             .map_or(AfterLog::Returned, |(by, hook)| self.serve_for(by, hook))
+    }
+}
+
+impl Diagnostics<&Request> {
+    /// Whether a `zend_bailout` is under way, which leaves every step
+    /// it passes through at once.
+    pub fn bailing_out(self) -> bool {
+        self.0.bailout
+    }
+
+    /// php's `EG(exit_status)`, what `serve` reports the request ended
+    /// with: what `exit` last wrote, or 255 after a fatal.
+    #[must_use]
+    pub fn exit_status(self) -> i32 {
+        self.0.exit_status
     }
 }

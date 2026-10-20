@@ -494,7 +494,7 @@ impl StreamFilter for UserFilter {
         let Some(object) = self.object.take() else {
             return Ok(());
         };
-        let closed = if req.stream_thrown().is_some() {
+        let closed = if req.diagnostics_mut().stream_thrown().is_some() {
             Ok(None)
         } else {
             call_if_exists(req, *object, b"onclose")

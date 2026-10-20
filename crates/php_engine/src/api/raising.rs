@@ -361,7 +361,7 @@ pub fn docref(req: &mut Request, level: Level, message: &(impl AsRef<[u8]> + ?Si
     if req.ini_stage() == crate::api::abi::IniStage::Startup {
         return verror(req, level, Origin::Phase("PHP Startup"), b"", message);
     }
-    if (req.vm_serving_native() || req.serving_include()) && !req.bailing_out() {
+    if (req.vm_serving_native() || req.serving_include()) && !req.diagnostics().bailing_out() {
         let function = req.active_native();
         return verror(req, level, Origin::Function(&function), b"", message);
     }
@@ -369,7 +369,7 @@ pub fn docref(req: &mut Request, level: Level, message: &(impl AsRef<[u8]> + ?Si
         crate::api::request::Phase::Startup => "PHP Request Startup",
         // The code being served names it, as
         // `get_active_function_name` does when a handler raises it.
-        crate::api::request::Phase::Running if !req.bailing_out() => {
+        crate::api::request::Phase::Running if !req.diagnostics().bailing_out() => {
             if let Some(name) = req.active_user_function() {
                 return verror(req, level, Origin::Function(&name), b"", message);
             }
@@ -742,7 +742,7 @@ pub fn leave_pending(req: &mut Request, thrown: Thrown) {
 /// out, as the `zend_catch` bails out again. A client's fault thrown
 /// over the engine's fatal is the witness, in `ext/soap`.
 pub fn catch_fatal(req: &mut Request, thrown: Thrown, class: &str) -> Result<Thrown, Thrown> {
-    if !req.bailing_out() || req.unwind_exit() {
+    if !req.diagnostics().bailing_out() || req.unwind_exit() {
         return Err(thrown);
     }
     let held = thrown.exception().copied();

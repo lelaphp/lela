@@ -55,7 +55,7 @@ pub fn below(req: &Request, frame: FrameRef) -> Option<FrameRef> {
 pub fn catches(req: &mut Request, frame: FrameRef) -> bool {
     // The graceful exit is no class a `catch` names; a `finally` block
     // takes it still.
-    let pending = match req.raised() {
+    let pending = match req.diagnostics().raised() {
         Some(Raised::Throwable(object)) => Some(object),
         Some(Raised::GracefulExit) => None,
         _ => return false,
@@ -296,7 +296,7 @@ mod tests {
     /// The class of the throwable pending, and the `file` and `line` it
     /// carries, read through the native face as phpdbg reads them off it.
     fn described(req: &Request) -> Option<(String, String, i64)> {
-        let Some(Raised::Throwable(object)) = req.raised() else {
+        let Some(Raised::Throwable(object)) = req.diagnostics().raised() else {
             return None;
         };
         let prop = |name: &[u8]| object.prop(req, name);

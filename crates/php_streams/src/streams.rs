@@ -1847,8 +1847,8 @@ impl Ops for Memory {
         if self.fpos + buf.len() > self.data.len()
             && let Err(thrown) = self.data.resize(req, self.fpos + buf.len())
         {
-            if req.stream_thrown().is_none() {
-                *req.stream_thrown() = Some(thrown);
+            if req.diagnostics_mut().stream_thrown().is_none() {
+                *req.diagnostics_mut().stream_thrown() = Some(thrown);
             }
             return None;
         }
@@ -1947,8 +1947,8 @@ impl Ops for Memory {
             return Some(false);
         }
         if let Err(thrown) = self.data.resize(req, size) {
-            if req.stream_thrown().is_none() {
-                *req.stream_thrown() = Some(thrown);
+            if req.diagnostics_mut().stream_thrown().is_none() {
+                *req.diagnostics_mut().stream_thrown() = Some(thrown);
             }
             return Some(false);
         }

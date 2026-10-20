@@ -786,7 +786,7 @@ impl Request {
         else {
             // A read a fatal ended is no file php reports: the bailout
             // jumps past `compile_file`'s message.
-            if self.bailing_out() {
+            if self.diagnostics().bailing_out() {
                 return Ok(Opened::Failed);
             }
             return self.failed_opening(kind, written);
@@ -963,7 +963,7 @@ impl Request {
             Ok(unit) => unit,
             Err(refused) => return Err(self.refused_include(&refused, name, kind)),
         };
-        if !crate::engine::note_compiled(self, &unit, kind) || self.bailing_out() {
+        if !crate::engine::note_compiled(self, &unit, kind) || self.diagnostics().bailing_out() {
             return Err(Thrown::of(self.take_pending_view()));
         }
         let standing = self.vm.depth();
@@ -1041,7 +1041,7 @@ impl Request {
     ) -> Result<T, Fatal> {
         self.no_extensions = true;
         let served = served(self);
-        if served.is_ok() && !self.bailing_out() {
+        if served.is_ok() && !self.diagnostics().bailing_out() {
             self.no_extensions = false;
         }
         served

@@ -484,7 +484,7 @@ impl Request {
     /// Write to the host's error stream, bytes as given: php's
     /// `fputs(stderr)`, which the `display_errors=stderr` form takes and
     /// the `STDERR` stream constant will. The log is another channel,
-    /// [`Request::error_log`]'s; whether the host puts the two on one fd
+    /// [`Diagnostics::error_log`]'s; whether the host puts the two on one fd
     /// is the host's, as it is php's CLI's (#216).
     pub fn write_stderr(&mut self, bytes: &[u8]) {
         self.response.sink.write_stderr(bytes);

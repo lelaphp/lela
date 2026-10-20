@@ -260,7 +260,8 @@ pub(crate) fn zend_test_is_zend_ptr(req: &mut Request, addr: i64) -> bool {
 /// ```
 #[php_function]
 pub(crate) fn zend_test_log_err_debug(req: &mut Request, str: PhpString) {
-    req.log_err_with_severity(str.as_bytes(), LOG_DEBUG);
+    req.diagnostics_mut()
+        .log_err_with_severity(str.as_bytes(), LOG_DEBUG);
 }
 
 /// `zend_test_crash(?string $message = null): void`: `$message` printed

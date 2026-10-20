@@ -65,8 +65,8 @@ enum Called {
 
 /// A throwable a method raised, kept for the native that asked.
 fn defer(req: &mut Request, thrown: Thrown) {
-    if req.stream_thrown().is_none() {
-        *req.stream_thrown() = Some(thrown);
+    if req.diagnostics_mut().stream_thrown().is_none() {
+        *req.diagnostics_mut().stream_thrown() = Some(thrown);
     } else {
         // A second throwable is given up; a fatal or an exit holds none.
         match crate::api::raising::clear(req, thrown) {
@@ -79,7 +79,7 @@ fn defer(req: &mut Request, thrown: Thrown) {
 /// the object, or the object's `__call` with the name and the arguments
 /// as an array where the class has no such method.
 fn call(req: &mut Request, object: PhpObject, name: &[u8], args: &[Value]) -> Called {
-    if req.stream_thrown().is_some() || req.is_pending() {
+    if req.diagnostics_mut().stream_thrown().is_some() || req.is_pending() {
         return Called::Threw;
     }
     let class = object.class();
@@ -347,7 +347,7 @@ fn open_with(
     };
     if let Err(message) = answer {
         held.give_up(req);
-        if let Some(thrown) = req.stream_thrown().take() {
+        if let Some(thrown) = req.diagnostics_mut().stream_thrown().take() {
             return Err(thrown);
         }
         return Ok(Err(message));
@@ -417,7 +417,7 @@ fn open_dir_with(
     };
     if let Err(message) = answer {
         held.give_up(req);
-        if let Some(thrown) = req.stream_thrown().take() {
+        if let Some(thrown) = req.diagnostics_mut().stream_thrown().take() {
             return Err(thrown);
         }
         return Ok(Err(message));
@@ -1067,7 +1067,7 @@ fn bool_answer(req: &mut Request, called: Option<Called>) -> Result<bool, Thrown
         }
         _ => false,
     };
-    match req.stream_thrown().take() {
+    match req.diagnostics_mut().stream_thrown().take() {
         Some(thrown) => Err(thrown),
         None => Ok(answer),
     }
@@ -1097,7 +1097,7 @@ pub(crate) fn url_stat(
         }
         _ => None,
     };
-    match req.stream_thrown().take() {
+    match req.diagnostics_mut().stream_thrown().take() {
         Some(thrown) => Err(thrown),
         None => Ok(sb),
     }

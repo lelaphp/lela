@@ -66,7 +66,7 @@ impl Request {
     /// pending already nothing is served and the value is `null`, as
     /// `zend_execute` serves nothing while `EG(exception)` stands; a
     /// debugger that evaluates there sets what is pending aside first
-    /// ([`Request::take_pending`]), as xdebug's `xdebug_do_eval` does. A
+    /// ([`Diagnostics::take_pending`]), as xdebug's `xdebug_do_eval` does. A
     /// backtrace taken in the compile or the evaluated code starts at the
     /// frame evaluated in and passes the frames above it, as php's
     /// `prev_execute_data` chain from the evaluated code does. `None`
@@ -93,7 +93,7 @@ impl Request {
     ) -> Option<Result<Value, Thrown>> {
         self.in_frame(frame, |req, at| {
             if req.is_pending() {
-                return if req.bailing_out() {
+                return if req.diagnostics().bailing_out() {
                     Err(Thrown::of(None))
                 } else {
                     Ok(Value::null())

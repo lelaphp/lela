@@ -72,7 +72,7 @@ impl Crossed for Request {
     }
 
     fn thrown(&self) -> bool {
-        self.raised().is_some()
+        self.diagnostics().raised().is_some()
     }
 }
 

@@ -461,7 +461,7 @@ pub enum Thrown {
 /// exit is what stands.
 #[must_use]
 pub fn pending(req: &Request) -> Option<Thrown> {
-    match req.raised()? {
+    match req.diagnostics().raised()? {
         Raised::Throwable(object) => Some(Thrown::Object(object.as_value())),
         Raised::GracefulExit => Some(Thrown::GracefulExit),
         Raised::UnwindExit => None,
@@ -472,10 +472,10 @@ pub fn pending(req: &Request) -> Option<Thrown> {
 /// fatal is leaving: nothing a tier stops at.
 #[must_use]
 pub fn exiting(req: &Request) -> bool {
-    match req.raised() {
+    match req.diagnostics().raised() {
         Some(Raised::UnwindExit) => true,
         Some(Raised::Throwable(_) | Raised::GracefulExit) => false,
-        None => req.bailing_out(),
+        None => req.diagnostics().bailing_out(),
     }
 }
 
@@ -491,7 +491,7 @@ pub fn class_of(req: &Request, value: Value) -> Option<Vec<u8>> {
 /// `PG(last_error_message)`, `last_error_file` and `last_error_lineno`,
 /// read off the row `error_get_last()` builds, and the row given up.
 pub fn last_error(req: &mut Request) -> Option<(Vec<u8>, Vec<u8>, u32)> {
-    let row = req.last_error().ok()??;
+    let row = req.diagnostics_mut().last_error().ok()??;
     let array = *row;
     let bytes = |name: &[u8]| {
         array

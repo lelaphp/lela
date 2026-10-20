@@ -631,7 +631,9 @@ impl<'p> Recorder<'p> {
                     frame = caller;
                     Went::Stopped(Stop::MovedFrame)
                 }
-                Stepped::Threw(at) if req.bailing_out() => return Err(Bailed::Unwinding(at)),
+                Stepped::Threw(at) if req.diagnostics().bailing_out() => {
+                    return Err(Bailed::Unwinding(at));
+                }
                 Stepped::Threw(at) => {
                     frame = at;
                     Went::Stopped(Stop::Exception)

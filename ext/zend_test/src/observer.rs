@@ -558,7 +558,7 @@ fn end(observed: &mut Observed<'_>, returned: Option<&Value>) {
         return;
     }
     let depth = observed.state::<crate::State>().observer.depth;
-    if let Some(raised) = observed.raised() {
+    if let Some(raised) = observed.diagnostics().raised() {
         let class = match raised {
             Raised::Throwable(throwable) => observed.class_name(throwable.class()),
             Raised::UnwindExit => String::from("UnwindExit"),

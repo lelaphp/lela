@@ -200,7 +200,7 @@ fn begin(req: &mut Request, this: PhpObject) -> Saved {
 /// bool(true)
 /// ```
 fn end(req: &mut Request, saved: &Saved) {
-    if req.bailing_out() {
+    if req.diagnostics().bailing_out() {
         return;
     }
     let state = req.state::<State>();
@@ -425,7 +425,7 @@ pub(crate) fn soap_error_handler(req: &mut Request, beneath: Beneath<'_, chain::
     } else {
         None
     };
-    let display = req.set_display_errors(0);
+    let display = req.diagnostics_mut().set_display_errors(0);
     // `SG(sapi_headers).http_status_line = NULL` before the `zend_try`,
     // and the line and code that stood put back in its `zend_catch`, so
     // the `500` `php_error_cb` adds as it bails out is undone; served and
@@ -436,7 +436,7 @@ pub(crate) fn soap_error_handler(req: &mut Request, beneath: Beneath<'_, chain::
     if bails {
         req.put_back_http_status(status);
     }
-    req.set_display_errors(display);
+    req.diagnostics_mut().set_display_errors(display);
     if let Some(fault) = fault {
         // What the writing threw stays in `EG(exception)` as the
         // request bails out.

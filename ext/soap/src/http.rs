@@ -647,7 +647,7 @@ fn http_connect(
         Level::UserWarning,
         Level::UserNotice,
     ];
-    req.reporting_without(&MASKED, |req| {
+    req.diagnostics_mut().reporting_without(&MASKED, |req| {
         connect(req, this, uri, use_ssl, context, use_proxy)
     })
 }

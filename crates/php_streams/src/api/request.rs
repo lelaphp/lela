@@ -510,7 +510,7 @@ impl Stream {
         let answer = req
             .stream_op(self, |req, stream| stream.truncate(req, size))
             .flatten();
-        match req.stream_thrown().take() {
+        match req.diagnostics_mut().stream_thrown().take() {
             Some(thrown) => Err(thrown),
             None => Ok(answer),
         }
@@ -1146,7 +1146,7 @@ pub trait StreamFilter: Send {
 
     /// `fops->dtor`, served once when the filter leaves its chain, a
     /// throwable pending or not: it gives up what the filter holds, and
-    /// serves no PHP code while [`Request::stream_thrown`] holds one, as
+    /// serves no PHP code while [`Diagnostics::stream_thrown`] holds one, as
     /// `zend_call_function` serves none under `EG(exception)`.
     fn close(&mut self, _req: &mut Request) -> Result<(), Thrown> {
         Ok(())

@@ -2293,7 +2293,7 @@ fn set_time_limit(req: &mut Request, seconds: i64) -> bool {
 /// ```
 #[php_function]
 fn error_reporting(req: &mut Request, #[php(default = null)] error_level: Option<i64>) -> i64 {
-    let old = req.error_reporting();
+    let old = req.diagnostics().error_reporting();
     if let Some(level) = error_level
         && level != old
     {

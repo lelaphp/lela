@@ -550,7 +550,7 @@ pub(crate) fn is_true(req: &mut Request, value: &Value) -> Result<bool, Thrown> 
 /// throwable. A throwable a handler raised stays pending, php's
 /// `EG(exception)`, and the asker goes on as php's does.
 fn left_by_fatal(req: &Request) -> Result<(), Thrown> {
-    if req.bailing_out() {
+    if req.diagnostics().bailing_out() {
         return Err(Thrown::of(None));
     }
     Ok(())

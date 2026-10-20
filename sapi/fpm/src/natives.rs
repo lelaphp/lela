@@ -162,7 +162,7 @@ pub(crate) fn extension() -> Extension {
 /// that ended with exit status 255 before its head went has the entry's
 /// line put in, replacing its kind, before the request shuts down.
 fn error_header(req: &mut Request) {
-    if req.exit_status() != 255 || req.headers_sent().is_some() {
+    if req.diagnostics().exit_status() != 255 || req.headers_sent().is_some() {
         return;
     }
     if let Some(line) = req

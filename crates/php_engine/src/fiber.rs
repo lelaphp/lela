@@ -1668,7 +1668,7 @@ fn execute<P: HoldsCoroutine>(
         Err(thrown) => thrown,
     };
     let exited = matches!(
-        req.raised(),
+        req.diagnostics().raised(),
         Some(Raised::UnwindExit | Raised::GracefulExit)
     );
     let Ok(coroutine) = coroutine_of::<P>(req, object) else {
@@ -2469,7 +2469,7 @@ impl Coroutine {
                 "InternalError: a fiber coroutine laid down twice",
             ));
         }
-        let error_reporting = req.error_reporting();
+        let error_reporting = req.diagnostics().error_reporting();
         lay_down::<P>(req, object, Kind::Extension, error_reporting, body)
     }
 

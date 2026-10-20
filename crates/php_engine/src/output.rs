@@ -792,7 +792,7 @@ fn handler_op(req: &mut Request, at: usize, context: &mut Context) -> Status {
                 // A handler that bailed out, a fatal or a throwable no
                 // frame took at shutdown, leaves the operation there:
                 // nothing settles and nothing it held is passed on.
-                if req.bailing_out() {
+                if req.diagnostics().bailing_out() {
                     req.output_mut().running = None;
                     return Status::Failure;
                 }
@@ -1584,7 +1584,9 @@ fn clean(req: &mut Request) -> bool {
 /// start
 /// ```
 pub(crate) fn end_all(req: &mut Request) {
-    while req.output().level() > 0 && !req.bailing_out() && stack_pop(req, POP_FORCE) {}
+    while req.output().level() > 0 && !req.diagnostics().bailing_out() && stack_pop(req, POP_FORCE)
+    {
+    }
 }
 
 /// `php_output_discard_all` (`Z/main/output.c:345`): every handler
@@ -1890,7 +1892,7 @@ pub(crate) fn buffer_op(req: &mut Request, op: &OutputOp) -> Result<Value, Throw
             let flags = u32::try_from(*flags).unwrap_or(HANDLER_STDFLAGS);
             if start_user(req, handler, chunk_size, flags)? {
                 Value::bool(true)
-            } else if req.bailing_out() {
+            } else if req.diagnostics().bailing_out() {
                 // `php_output_lock_error`'s fatal leaves by
                 // `zend_bailout`, before `ob_start()` could say more.
                 return Err(Thrown::of(None));

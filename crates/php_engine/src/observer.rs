@@ -746,7 +746,7 @@ fn resolve(req: &mut Request, at: Observable) -> Slot {
 #[cold]
 #[inline(never)]
 fn end(req: &mut Request, at: Observable, value: Option<&Value>) {
-    if !req.bailing_out() && req.close_observed(at) {
+    if !req.diagnostics().bailing_out() && req.close_observed(at) {
         call_end_handlers(req, Handed::Standing(at), value);
     }
 }

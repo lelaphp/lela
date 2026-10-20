@@ -88,7 +88,7 @@ impl Engine {
                     // `zend_file_handle` once it has run, before the
                     // shell reads a line.
                     req.close_served_files();
-                    if !req.bailing_out() {
+                    if !req.diagnostics().bailing_out() {
                         req.end_in_exit(0);
                         let status = req.serve_for(by, shell.serve);
                         req.end_in_exit(status);
@@ -118,7 +118,7 @@ impl Engine {
         let stdin = req.constant_named(b"STDIN");
         let get_line = req.stream_hooks().map(|hooks| hooks.get_line);
         let mut index = 0;
-        while req.exit_status() == 0 {
+        while req.diagnostics().exit_status() == 0 {
             let Some(line) = stdin
                 .as_ref()
                 .zip(get_line)
@@ -137,7 +137,7 @@ impl Engine {
                 Some(EachLine::Code(code)) => eval_string(req, code, b"Command line run code"),
                 Some(EachLine::File) => {
                     self.execute_script(req, None);
-                    !req.bailing_out()
+                    !req.diagnostics().bailing_out()
                 }
                 None => true,
             };
@@ -201,11 +201,15 @@ fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) ->
             }
             Err(thrown) => {
                 req.leave_pending(&thrown);
-                return uncaught.map_or(!req.bailing_out(), |level| take_uncaught(req, level));
+                return uncaught.map_or(!req.diagnostics().bailing_out(), |level| {
+                    take_uncaught(req, level)
+                });
             }
         };
         if !crate::engine::note_compiled(req, &unit, SourceKind::EVAL) {
-            return uncaught.map_or(!req.bailing_out(), |level| take_uncaught(req, level));
+            return uncaught.map_or(!req.diagnostics().bailing_out(), |level| {
+                take_uncaught(req, level)
+            });
         }
         let standing = req.vm().depth();
         let program = crate::api::request::CodeFrom::Top(None);
@@ -224,7 +228,9 @@ fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) ->
             req.end_in(&fatal);
             return false;
         }
-        uncaught.map_or(!req.bailing_out(), |level| take_uncaught(req, level))
+        uncaught.map_or(!req.diagnostics().bailing_out(), |level| {
+            take_uncaught(req, level)
+        })
     }
 }
 
@@ -233,7 +239,7 @@ fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) ->
 /// `E_DONT_BAIL`; whether the request goes on, which a fatal raised on
 /// the way ends.
 fn take_uncaught(req: &mut Request, severity: Level) -> bool {
-    if req.bailing_out() {
+    if req.diagnostics().bailing_out() {
         return false;
     }
     if !req.is_pending() {

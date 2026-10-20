@@ -43,7 +43,7 @@ fn open(req: &mut Request, path: &[u8]) -> Result<Option<IncludeSource>, Thrown>
         Err(thrown) => Err(thrown),
     };
     let opened_path = fh.opened_path().map(|p| p.as_bytes().to_vec());
-    if !req.bailing_out() {
+    if !req.diagnostics().bailing_out() {
         fh.destroy(req);
     }
     read.map(|source| {
