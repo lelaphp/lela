@@ -24630,7 +24630,7 @@ mod tests {
             },
             ..Unit::default()
         }
-        .published()
+        .published(None)
     }
 
     /// Design §5.7, §5.8: a `JMP` to an earlier opline is a back-edge and
@@ -24713,7 +24713,7 @@ mod tests {
             },
             ..Unit::default()
         }
-        .published()
+        .published(None)
     }
 
     /// Design §5.7, §5.8: a `JMPNZ` taken to an earlier opline is the
@@ -24789,7 +24789,7 @@ mod tests {
             },
             ..Unit::default()
         }
-        .published()
+        .published(None)
     }
 
     /// Design §5.8: a comparison with a `JMPNZ` over its temporary after
@@ -24844,7 +24844,7 @@ mod tests {
             },
             ..Unit::default()
         }
-        .published()
+        .published(None)
     }
 
     /// Design §4.3 seam 8: `RETURN` raises the return safepoint, with the
@@ -24926,7 +24926,7 @@ mod tests {
             },
             ..Unit::default()
         }
-        .published()
+        .published(None)
     }
 
     /// Interned `bytes` as a constant, `UNDEF` where the table is full.
@@ -25059,7 +25059,7 @@ mod tests {
         let mut strings = php_heap::Strings::new();
         let mut unit = declaring_f(&mut strings);
         crate::engine::assign_map_ptrs(&mut unit, &engine.shared.map_ptr_last);
-        called_twice(req, &unit.published());
+        called_twice(req, &unit.published(None));
     }
 
     /// The same over a unit compiled for the request alone, whose op
@@ -25172,7 +25172,7 @@ mod tests {
             },
             ..Unit::default()
         }
-        .published();
+        .published(None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
@@ -25224,7 +25224,7 @@ mod tests {
             },
             ..Unit::default()
         }
-        .published();
+        .published(None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
@@ -25267,7 +25267,7 @@ mod tests {
             },
             ..Unit::default()
         }
-        .published()
+        .published(None)
     }
 
     /// `ZEND_CATCH` over two passes of one opline, which is what a
@@ -25347,7 +25347,7 @@ mod tests {
             },
             ..Unit::default()
         }
-        .published()
+        .published(None)
     }
 
     /// `ZEND_INIT_STATIC_METHOD_CALL` over two constants, twice, which
@@ -25456,7 +25456,7 @@ mod tests {
             },
             ..Unit::default()
         }
-        .published()
+        .published(None)
     }
 
     /// `ZEND_INIT_METHOD_CALL` over a constant name, twice on an
@@ -25615,7 +25615,7 @@ mod tests {
             },
             ..Unit::default()
         }
-        .published();
+        .published(None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let named = req.class_named(Bare::resolved(b"stdclass"));
@@ -25683,7 +25683,7 @@ mod tests {
             },
             ..Unit::default()
         }
-        .published()
+        .published(None)
     }
 
     /// `ZEND_JMP_FRAMELESS` over two passes of one opline: the first
@@ -25809,7 +25809,7 @@ mod tests {
             },
             ..Unit::default()
         }
-        .published();
+        .published(None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let call = code.oplines.first().copied().unwrap_or_default();
@@ -25845,7 +25845,7 @@ mod tests {
             },
             ..Unit::default()
         }
-        .published();
+        .published(None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let call = code.oplines.first().copied().unwrap_or_default();
@@ -25890,7 +25890,7 @@ mod tests {
             },
             ..Unit::default()
         }
-        .published();
+        .published(None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
@@ -25933,7 +25933,7 @@ mod tests {
             },
             ..Unit::default()
         }
-        .published()
+        .published(None)
     }
 
     /// `zend_assign_to_variable`'s first test (`Z/Zend/zend_execute.h:171`):
@@ -26095,7 +26095,7 @@ mod tests {
             },
             ..Unit::default()
         }
-        .published();
+        .published(None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let Ok(left) = req.string(b"an owner left behind") else {
             return;

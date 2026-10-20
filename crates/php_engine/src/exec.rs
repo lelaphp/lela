@@ -3363,7 +3363,7 @@ mod tests {
             },
             ..Unit::default()
         }
-        .published()
+        .published(None)
     }
 
     /// The main op array's activation lays its cache down with
@@ -3485,7 +3485,7 @@ mod tests {
             ..Unit::default()
         };
         let mut caches = RuntimeCaches::default();
-        let first = caches.take(one_function());
+        let first = caches.take(one_function(), None);
         let numbers = |unit: &Unit| {
             std::iter::once(&unit.main)
                 .chain(unit.functions.iter().map(|(_, code)| code))
@@ -3502,14 +3502,14 @@ mod tests {
         );
         let at = CacheAt::of(first.main.runtime_cache);
         caches.map(at).set(CacheSlot(0), Cached::Hit);
-        let second = caches.take(one_function());
+        let second = caches.take(one_function(), None);
         assert_eq!(
             numbers(&second),
             [MapPtrOffset::Request(2), MapPtrOffset::Request(3)],
             "a unit still held keeps its numbers"
         );
         drop(first);
-        let third = caches.take(one_function());
+        let third = caches.take(one_function(), None);
         let mut taken = numbers(&third);
         taken.sort_by_key(|at| match at {
             MapPtrOffset::Engine(n) | MapPtrOffset::Request(n) => *n,

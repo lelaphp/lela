@@ -39,7 +39,7 @@ fn marker_precede_chains() {
     rhs.complete(&mut p, SyntaxKind::LITERAL_EXPR);
     wrapper.complete(&mut p, SyntaxKind::BINARY_EXPR);
 
-    let (events, _) = p.finish();
+    let (events, _, _) = p.finish();
     // The first event carries the forward link to its wrapper.
     assert!(
         matches!(
@@ -251,7 +251,7 @@ fn parenthesised(depth: usize) -> Vec<u8> {
 
 /// The source through the grammar's parenthesised path, one level of
 /// recursion per `(`.
-fn parse_nested(src: &[u8]) -> tree::Built<'static> {
+fn parse_nested(src: &[u8]) -> (tree::Built<'static>, Vec<crate::Diagnostic>) {
     let lexed = lex(FileId(0), src, &LexOptions::default());
     assert!(lexed.diagnostics.is_empty(), "the lexer has no depth");
     let input = Input::new(src, &lexed.tokens);
@@ -259,7 +259,8 @@ fn parse_nested(src: &[u8]) -> tree::Built<'static> {
     let lines = LineIndex::new(arena, src);
     let mut p = Parser::new(&input, FileId(0), &lines);
     crate::grammar::source_file(&mut p);
-    tree::build(arena, &lexed.tokens, &lines, p.finish().0)
+    let (events, _, raised) = p.finish();
+    (tree::build(arena, &lexed.tokens, &lines, events), raised)
 }
 
 /// The nesting cap: past [`MAX_DEPTH`] the construct is consumed flat, no
@@ -274,12 +275,8 @@ fn nesting_depth_cap() {
         .spawn(|| {
             for depth in [600_usize, 10_000] {
                 let src = parenthesised(depth);
-                let built = parse_nested(&src);
-                let messages: Vec<&str> = built
-                    .diagnostics
-                    .iter()
-                    .map(|d| d.message.as_str())
-                    .collect();
+                let (built, raised) = parse_nested(&src);
+                let messages: Vec<&str> = raised.iter().map(|d| d.message.as_str()).collect();
                 assert_eq!(
                     messages,
                     ["memory exhausted"],
@@ -295,8 +292,8 @@ fn nesting_depth_cap() {
                 assert_eq!(tokens, 2 * depth + 5, "every token once at depth {depth}");
             }
             // Under the cap: silent.
-            let built = parse_nested(&parenthesised(100));
-            assert!(built.diagnostics.is_empty(), "depth 100 parses clean");
+            let (_, raised) = parse_nested(&parenthesised(100));
+            assert!(raised.is_empty(), "depth 100 parses clean");
         });
     let joined = handle.map(std::thread::JoinHandle::join);
     assert!(

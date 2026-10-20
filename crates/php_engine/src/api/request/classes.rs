@@ -1922,14 +1922,16 @@ impl Request {
     /// The home the units it compiles for itself make their constant
     /// strings in ([`super::memory::RequestStrings`]), which the unit
     /// keeps, beside its classes as the compiler asks after one
-    /// ([`php_compile::RequestClasses`]), and the arena its compiles
-    /// parse into, borrowed apart so all three are handed to one compile.
+    /// ([`php_compile::RequestClasses`]), the arena its compiles parse
+    /// into and its working directory, which `__DIR__` folds to, borrowed
+    /// apart so all four are handed to one compile.
     pub(crate) fn compiling<R>(
         &mut self,
         compile: impl FnOnce(
             &mut dyn Intern,
             php_compile::RequestClasses<'_>,
             &mut php_compile::syntax::Arena,
+            &std::path::Path,
         ) -> R,
     ) -> R {
         let (shared, declared, aliases) = (&self.shared, &self.declared, &self.aliases);
@@ -1944,6 +1946,7 @@ impl Request {
             &mut strings,
             php_compile::RequestClasses::new(&holds),
             &mut self.compile_arena,
+            &self.cwd,
         )
     }
 

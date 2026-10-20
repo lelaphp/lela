@@ -195,7 +195,7 @@ pub struct Unit {
 /// put back to `Unresolved`:
 ///
 /// ```compile_fail
-/// let mut published = php_unit::Unit::default().published();
+/// let mut published = php_unit::Unit::default().published(None);
 /// published.main.oplines[0].handler = php_unit::Handler::Unresolved;
 /// ```
 ///
@@ -208,7 +208,7 @@ pub struct Unit {
 ///     ..Unit::default()
 /// };
 /// assert_eq!(unit.main.oplines[0].handler, Handler::Unresolved);
-/// let published = unit.published();
+/// let published = unit.published(None);
 /// assert_eq!(published.main.oplines[0].handler, Handler::Nop);
 /// ```
 #[derive(Debug, Clone)]
@@ -236,6 +236,38 @@ impl PublishedUnit {
         Arc::as_ptr(&this.0)
     }
 
+    /// The room of the unit given back where this is its last share and
+    /// nothing keeps its identity, for the next unit to be published in
+    /// (#3028): what a request does with a unit compiled for it alone, as
+    /// php's `destroy_op_array` gives an `eval`'s op array back to the
+    /// request's heap. Where another share or a [`WeakUnit`] stands, the
+    /// share back:
+    ///
+    /// ```
+    /// use php_unit::{PublishedUnit, Unit};
+    /// let published = Unit::default().published(None);
+    /// let other = published.clone();
+    /// let Err(published) = PublishedUnit::into_spare(published) else {
+    ///     unreachable!("another share stands");
+    /// };
+    /// drop(other);
+    /// let spare = PublishedUnit::into_spare(published).ok();
+    /// let republished = Unit::default().published(spare);
+    /// assert_eq!(republished.main.oplines.len(), 0);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The share, where it is not the only one.
+    pub fn into_spare(this: PublishedUnit) -> Result<SpareUnit, PublishedUnit> {
+        let mut shared = this.0;
+        if Arc::get_mut(&mut shared).is_some() {
+            Ok(SpareUnit(shared))
+        } else {
+            Err(PublishedUnit(shared))
+        }
+    }
+
     /// A share that keeps the unit's identity and not the unit, as
     /// [`Arc::downgrade`] makes: what a holder keeps that must not keep
     /// the unit alive, to learn when the last share is gone.
@@ -252,7 +284,7 @@ impl PublishedUnit {
 /// only share and written through:
 ///
 /// ```compile_fail
-/// let published = php_unit::Unit::default().published();
+/// let published = php_unit::Unit::default().published(None);
 /// let weak = php_unit::PublishedUnit::downgrade(&published);
 /// drop(published);
 /// let shared = weak.upgrade();
@@ -276,6 +308,22 @@ impl WeakUnit {
     }
 }
 
+/// A unit no one shares any longer, given back by its last share
+/// ([`PublishedUnit::into_spare`]): the room the next unit is published
+/// in ([`Unit::published`]), its main op array's tables taken for the
+/// next compile first ([`SpareUnit::main_mut`]). Nothing reads it as a
+/// unit.
+#[derive(Debug)]
+pub struct SpareUnit(Arc<Unit>);
+
+impl SpareUnit {
+    /// The main op array of the unit given back, whose tables a compile
+    /// lays the next unit's main op array down in.
+    pub fn main_mut(&mut self) -> Option<&mut OpArray> {
+        Arc::get_mut(&mut self.0).map(|unit| &mut unit.main)
+    }
+}
+
 /// One of [`Unit::top_level`]: a function of [`Unit::functions`] or a
 /// class of [`Unit::classes`], by its index there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,13 +337,24 @@ impl Unit {
     /// with every opline's handler resolved ([`crate::Handler`]) and its
     /// [`UnitCell`] bound to the shared copy, so a closure its constant
     /// expressions hold can be made where they are evaluated: the one
-    /// constructor of a [`PublishedUnit`].
+    /// constructor of a [`PublishedUnit`]. It stands in `room`, a unit
+    /// given back ([`SpareUnit`]), where there is one, and is shared
+    /// afresh where there is none.
     #[must_use]
-    pub fn published(mut self) -> PublishedUnit {
+    pub fn published(mut self, room: Option<SpareUnit>) -> PublishedUnit {
         for code in self.op_arrays_mut() {
             code.resolve();
         }
-        let shared = Arc::new(self);
+        let shared = match room {
+            Some(SpareUnit(mut shared)) => match Arc::get_mut(&mut shared) {
+                Some(slot) => {
+                    *slot = self;
+                    shared
+                }
+                None => Arc::new(self),
+            },
+            None => Arc::new(self),
+        };
         // A unit is published once; a clone published again keeps the
         // first binding, the cell being the clone's too.
         if let Some(cell) = &shared.cell.0 {
