@@ -446,25 +446,27 @@ impl Slot {
     /// and holds the caller to that (`ZEND_UNREACHABLE`), where this
     /// answers false.
     pub(crate) fn add_begin(&mut self, begin: BeginHandler, room: usize) -> bool {
-        match self.handlers_for_adding() {
-            Some(handlers) if handlers.begin.len() < room => {
-                handlers.begin.push(begin);
-                true
-            }
-            _ => {
-                self.settle();
-                false
-            }
-        }
+        self.add(room, |held| &mut held.begin, |list| list.push(begin))
     }
 
     /// `zend_observer_add_end_handler` (`Z/Zend/zend_observer.c:216-230`):
     /// `end` before the end handlers the slot holds, so they stay the
     /// reverse of the begin handlers, where fewer than `room` stand.
     pub(crate) fn add_end(&mut self, end: EndHandler, room: usize) -> bool {
-        match self.handlers_for_adding() {
-            Some(handlers) if handlers.end.len() < room => {
-                handlers.end.insert(0, end);
+        self.add(room, |held| &mut held.end, |list| list.insert(0, end))
+    }
+
+    /// The addition both make: `put` over the list `side` names where
+    /// fewer than `room` stand in it.
+    fn add<H>(
+        &mut self,
+        room: usize,
+        side: fn(&mut Installed) -> &mut Vec<H>,
+        put: impl FnOnce(&mut Vec<H>),
+    ) -> bool {
+        match self.handlers_for_adding().map(side) {
+            Some(list) if list.len() < room => {
+                put(list);
                 true
             }
             _ => {
@@ -478,33 +480,31 @@ impl Slot {
     /// `begin` taken out where the slot holds it, the handlers after it
     /// moved up, and the one now in its place handed back.
     pub(crate) fn remove_begin(&mut self, begin: BeginHandler) -> Option<Removed<BeginHandler>> {
-        let Slot::Installed(handlers) = self else {
-            return None;
-        };
-        let at = handlers
-            .begin
-            .iter()
-            .position(|held| std::ptr::fn_addr_eq(*held, begin))?;
-        let handlers = Arc::make_mut(handlers);
-        handlers.begin.remove(at);
-        let next = handlers.begin.get(at).copied();
-        self.settle();
-        Some(Removed { next })
+        self.remove(
+            |held| &mut held.begin,
+            |held| std::ptr::fn_addr_eq(held, begin),
+        )
     }
 
     /// `zend_observer_remove_end_handler` (`Z/Zend/zend_observer.c:232-244`):
     /// as [`Slot::remove_begin`], over the end handlers.
     pub(crate) fn remove_end(&mut self, end: EndHandler) -> Option<Removed<EndHandler>> {
+        self.remove(|held| &mut held.end, |held| std::ptr::fn_addr_eq(held, end))
+    }
+
+    /// The removal both make, over the list `side` names.
+    fn remove<H: Copy>(
+        &mut self,
+        side: fn(&mut Installed) -> &mut Vec<H>,
+        is: impl Fn(H) -> bool,
+    ) -> Option<Removed<H>> {
         let Slot::Installed(handlers) = self else {
             return None;
         };
-        let at = handlers
-            .end
-            .iter()
-            .position(|held| std::ptr::fn_addr_eq(*held, end))?;
-        let handlers = Arc::make_mut(handlers);
-        handlers.end.remove(at);
-        let next = handlers.end.get(at).copied();
+        let list = side(Arc::make_mut(handlers));
+        let at = list.iter().position(|&held| is(held))?;
+        list.remove(at);
+        let next = list.get(at).copied();
         self.settle();
         Some(Removed { next })
     }
