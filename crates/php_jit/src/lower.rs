@@ -163,7 +163,7 @@ impl Symbols {
     }
 
     /// The address of `kernel`'s wrapper.
-    fn address(&self, kernel: Kernel) -> usize {
+    pub(crate) fn address(&self, kernel: Kernel) -> usize {
         self.0[kernel.index()]
     }
 }

@@ -42,9 +42,6 @@ mod table;
 mod testing;
 mod types;
 
-// The crossing has no caller until a trace calls a kernel, so it is built
-// for its tests and the bench bar alone (#2742).
-#[cfg(any(test, feature = "bench"))]
 #[allow(unsafe_code, reason = "seams.toml rule unsafe.homes: php_jit::enter")]
 mod enter;
 
