@@ -1096,10 +1096,8 @@ fn send_headers(req: &mut Request) -> bool {
         // the request heap: the list's where the host takes it.
         let mut line = b"Content-type: ".to_vec();
         line.extend_from_slice(&mimetype);
-        let Some(bytes) = header_bytes(req, &line, line.len()) else {
-            return false;
-        };
-        if !header_add_op(req, false, bytes, line.len()) {
+        let bytes = header_bytes(req.heap_mut(), &line, line.len());
+        if !bytes.is_some_and(|bytes| header_add_op(req, false, bytes, line.len())) {
             return false;
         }
         req.output_mut().send_default_content_type = false;
@@ -1227,36 +1225,25 @@ fn trimmed_end(line: &[u8]) -> &[u8] {
 /// freed as `zend_llist_del_element` frees it.
 fn remove_header(req: &mut Request, name: &[u8], prefix_len: usize) {
     let (output, heap) = req.output_and_heap();
-    let mut kept = Vec::with_capacity(output.headers.len());
-    for line in output.headers.drain(..) {
+    let named = |line: &mut HeaderLine| {
         let header = line.line();
-        if header.len() > name.len()
+        header.len() > name.len()
             && (header[name.len()] == b':' || (prefix_len != 0 && name.len() > prefix_len))
             && header[..name.len()].eq_ignore_ascii_case(name)
-        {
-            line.free(heap);
-        } else {
-            kept.push(line);
-        }
+    };
+    for line in output.headers.extract_if(.., named) {
+        line.free(heap);
     }
-    output.headers = kept;
 }
 
 /// `sapi_header_op`'s `estrndup(p->line, p->line_len)` over a line
 /// written `written` bytes long, holding `line`, what the cut of its
 /// trailing whitespace leaves of it; `None` where the heap refused, the
-/// memory limit's fatal having ended the request.
-fn header_bytes(req: &mut Request, line: &[u8], written: usize) -> Option<Block> {
-    match req.heap_mut().block(written + 1) {
-        Ok(mut bytes) => {
-            bytes.bytes_mut()[..line.len()].copy_from_slice(line);
-            Some(bytes)
-        }
-        Err(fatal) => {
-            req.end_in(&fatal);
-            None
-        }
-    }
+/// memory limit's fatal, which the first allocation after it meets again.
+fn header_bytes(heap: &mut Heap, line: &[u8], written: usize) -> Option<Block> {
+    let mut bytes = heap.block(written + 1).ok()?;
+    bytes.bytes_mut()[..line.len()].copy_from_slice(line);
+    Some(bytes)
 }
 
 /// `sapi_header_add_op` (`Z/main/SAPI.c:656`): the line, `len` bytes of
@@ -1264,27 +1251,18 @@ fn header_bytes(req: &mut Request, line: &[u8], written: usize) -> Option<Block>
 /// zero and frees it; where the host takes it, a replace drops the
 /// lines of the same name first, and the line goes on the end in the
 /// cell `zend_llist_add_element` lays down. Whether the heap took the
-/// cell, which a refusal answers by ending the request.
+/// cell.
 fn header_add_op(req: &mut Request, replace: bool, bytes: Block, len: usize) -> bool {
-    if !req.output().takes_headers {
-        req.heap_mut().free_block(bytes);
-        return true;
-    }
     if replace && let Some(colon) = bytes.bytes()[..len].iter().position(|b| *b == b':') {
-        let name = bytes.bytes()[..colon].to_vec();
-        remove_header(req, &name, 0);
+        remove_header(req, &bytes.bytes()[..colon], 0);
     }
-    let cell = match req.heap_mut().block(HEADER_CELL) {
-        Ok(cell) => cell,
-        Err(fatal) => {
-            req.heap_mut().free_block(bytes);
-            req.end_in(&fatal);
-            return false;
-        }
+    let (output, heap) = req.output_and_heap();
+    let taken = output.takes_headers;
+    let Some(cell) = taken.then(|| heap.block(HEADER_CELL).ok()).flatten() else {
+        heap.free_block(bytes);
+        return !taken;
     };
-    req.output_mut()
-        .headers
-        .push(HeaderLine { bytes, len, cell });
+    output.headers.push(HeaderLine { bytes, len, cell });
     true
 }
 
@@ -1349,7 +1327,7 @@ pub(crate) fn header_add(
         }
         return true;
     }
-    let Some(mut held) = header_bytes(req, line, written) else {
+    let Some(mut held) = header_bytes(req.heap_mut(), line, written) else {
         return false;
     };
     let mut len = line.len();
@@ -1372,12 +1350,12 @@ pub(crate) fn header_add(
                 // `newheader = emalloc(newlen)`, then `efree(header_line)`.
                 let mut rewritten = b"Content-type: ".to_vec();
                 rewritten.extend_from_slice(&mimetype);
-                let Some(bytes) = header_bytes(req, &rewritten, rewritten.len()) else {
-                    req.heap_mut().free_block(held);
+                let heap = req.heap_mut();
+                let Some(bytes) = header_bytes(heap, &rewritten, rewritten.len()) else {
+                    heap.free_block(held);
                     return false;
                 };
-                req.heap_mut()
-                    .free_block(std::mem::replace(&mut held, bytes));
+                heap.free_block(std::mem::replace(&mut held, bytes));
                 len = rewritten.len();
             }
             req.output_mut().send_default_content_type = false;
