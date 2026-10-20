@@ -5117,7 +5117,7 @@ fn reflection_class_factory(req: &mut Request, class: ClassId) -> Result<Owner<P
 /// ```
 fn extension_ini_string(req: &Request, extension: ExtensionId, indent: &str) -> String {
     let mut out = String::new();
-    for entry in req.extension_ini(extension) {
+    for entry in req.ini().extension_ini(extension) {
         let decl = &entry.decl;
         let modifiable = if decl.user && decl.per_dir && decl.system {
             String::from("ALL")
@@ -5573,7 +5573,7 @@ fn value_string(req: &mut Request, value: &Value) -> String {
     match value.deref().as_ref() {
         ValueRef::Array(_) => String::from("Array"),
         ValueRef::Object(_) => String::from("Object"),
-        ValueRef::Float(number) => float_format(number, req.precision(), Exponent::Upper),
+        ValueRef::Float(number) => float_format(number, req.ini().precision(), Exponent::Upper),
         _ => php_ext::coerce::with_string(req, value, |s| String::from_utf8_lossy(s).into_owned())
             .unwrap_or_default(),
     }
@@ -8144,7 +8144,7 @@ impl ReflectionExtension {
     fn getINIEntries(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let extension = this_extension(req, this.object())?;
         let mut entries = PhpArray::new(req)?;
-        for entry in req.extension_ini(extension) {
+        for entry in req.ini().extension_ini(extension) {
             let value = match entry.value {
                 Some(value) => PhpString::new(req, &value)?.into_value(),
                 None => Owner::null(),

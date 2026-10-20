@@ -358,7 +358,7 @@ pub fn docref(req: &mut Request, level: Level, message: &(impl AsRef<[u8]> + ?Si
     // A fatal in flight is no native served: `_zend_bailout` empties
     // `EG(current_execute_data)` before it jumps (`Z/Zend/zend.c:1267`),
     // so what a `zend_catch` raises names no function.
-    if req.ini_stage() == crate::api::abi::IniStage::Startup {
+    if req.ini().stage() == crate::api::abi::IniStage::Startup {
         return verror(req, level, Origin::Phase("PHP Startup"), b"", message);
     }
     if (req.vm_serving_native() || req.serving_include()) && !req.diagnostics().bailing_out() {
@@ -607,7 +607,7 @@ fn docref_link(req: &Request, function: &str) -> Option<String> {
     if !req.ini_flag(b"html_errors") {
         return None;
     }
-    let root = String::from_utf8_lossy(req.ini_get(b"docref_root")?).into_owned();
+    let root = String::from_utf8_lossy(req.ini().get(b"docref_root")?).into_owned();
     if root.is_empty() {
         return None;
     }
@@ -620,7 +620,7 @@ fn docref_link(req: &Request, function: &str) -> Option<String> {
         .rfind('#')
         .map(|at| page.split_off(at))
         .unwrap_or_default();
-    if let Some(ext) = req.ini_get(b"docref_ext").filter(|ext| !ext.is_empty()) {
+    if let Some(ext) = req.ini().get(b"docref_ext").filter(|ext| !ext.is_empty()) {
         page.push_str(&String::from_utf8_lossy(ext));
     }
     Some(format!("[<a href='{root}{page}{target}'>{page}</a>]"))

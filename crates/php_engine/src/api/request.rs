@@ -86,6 +86,7 @@ use frames::{Expand, Link, Slots, links_of};
 mod hash_bytes;
 mod include;
 mod ini;
+pub use ini::Ini;
 pub(crate) mod ini_files;
 pub use ini::IniEntry;
 pub(crate) use ini::{CoreQuantity, TypedIni};
@@ -270,8 +271,8 @@ pub struct Request {
     /// The extensions' request states ([`state::RequestState`]).
     state: state::RequestState,
     /// The entries the request changed, their bytes, the host's locks
-    /// and the stage ([`ini::Ini`]).
-    ini: ini::Ini,
+    /// and the stage ([`ini::IniState`]).
+    ini: ini::IniState,
     /// The sink, the `php_output` layer, the header callback and the
     /// connection's status ([`response::Response`]).
     response: response::Response,
@@ -1040,7 +1041,7 @@ impl Request {
             annexes: crate::exec::Annexes::default(),
             map: crate::exec::RuntimeCaches::default(),
             state: state::RequestState::default(),
-            ini: ini::Ini::new(typed_ini),
+            ini: ini::IniState::new(typed_ini),
             diagnostics: diagnostics::DiagnosticsState::default(),
             response: response::Response::new(sink, output),
             ending: None,

@@ -383,7 +383,8 @@ type Set = Result<bool, Thrown>;
 
 /// Whether `open_basedir` is set, `PG(open_basedir) && *PG(open_basedir)`.
 fn basedir(req: &Request) -> bool {
-    req.ini_get(b"open_basedir")
+    req.ini()
+        .get(b"open_basedir")
         .is_some_and(|value| !value.is_empty())
 }
 

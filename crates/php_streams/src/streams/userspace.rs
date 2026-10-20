@@ -24,7 +24,9 @@ use crate::api::decl::ClassKind;
 use crate::api::layer::Face as _;
 use crate::api::raising::{Level, Thrown, docref};
 use crate::api::request::Streams;
-use crate::api::request::{Cast, OptionAnswer, Request, Stream, StreamOption, Whence, WrapperOp};
+use crate::api::request::{
+    Cast, Ini, OptionAnswer, Request, Stream, StreamOption, Whence, WrapperOp,
+};
 use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 use crate::state::Layer;
 use crate::streams::StreamLayer;
@@ -284,8 +286,9 @@ pub(crate) fn open(
     if !user.is_url
         && options & STREAM_OPEN_FOR_INCLUDE != 0
         && !req
-            .ini_get(b"allow_url_include")
-            .is_none_or(Request::ini_parse_bool)
+            .ini()
+            .get(b"allow_url_include")
+            .is_none_or(Ini::parse_bool)
     {
         req.streams().in_user_include = true;
     }

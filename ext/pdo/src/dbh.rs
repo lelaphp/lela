@@ -593,7 +593,7 @@ fn construct_driver(
 fn resolve_dsn(req: &mut Request, mut source: Vec<u8>) -> Result<Vec<u8>, Thrown> {
     if !source.contains(&b':') {
         let alias = [b"pdo.dsn.".as_slice(), &source].concat();
-        let Some(found) = req.ini_get(&alias).map(<[u8]>::to_vec) else {
+        let Some(found) = req.ini().get(&alias).map(<[u8]>::to_vec) else {
             return Err(argument_error(
                 req,
                 "PDOException",

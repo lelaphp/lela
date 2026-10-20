@@ -483,10 +483,10 @@ pub(crate) fn post_handler(
     let post_max_size = req.post_max_size(limits);
     let max_input_vars = limits
         .max_input_vars
-        .unwrap_or_else(|| req.ini_long(b"max_input_vars"));
+        .unwrap_or_else(|| req.ini().long(b"max_input_vars"));
     let upload_max_filesize = limits
         .upload_max_filesize
-        .unwrap_or_else(|| req.ini_long(b"upload_max_filesize"));
+        .unwrap_or_else(|| req.ini().long(b"upload_max_filesize"));
     let throwing = req.post_throwing();
     let content_length = req.content_length();
     let files = if let Some(files) = req.files_track() {
@@ -762,7 +762,7 @@ fn parts(
         let mut blen = Vec::new();
         if cancel_upload == 0 {
             blen = mbuff.read(req, FILLUNIT, &mut end);
-            let dir = req.ini_get(b"upload_tmp_dir").map(<[u8]>::to_vec);
+            let dir = req.ini().get(b"upload_tmp_dir").map(<[u8]>::to_vec);
             temp = req.open_temporary_fd(dir.as_deref(), b"php", TemporaryGuard::OnFallback);
             upload_cnt -= 1;
             if temp.is_none() {

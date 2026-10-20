@@ -169,7 +169,7 @@ fn closelog(req: &mut Request) -> True {
 /// `syslog.facility` as `OnSetFacility` (`Z/main/main.c:590`) reads its
 /// name.
 fn facility(req: &Request) -> i32 {
-    let name = req.ini_get(b"syslog.facility").unwrap_or(b"LOG_USER");
+    let name = req.ini().get(b"syslog.facility").unwrap_or(b"LOG_USER");
     match name {
         b"LOG_AUTH" => 32,
         b"LOG_AUTHPRIV" => 80,
@@ -219,7 +219,7 @@ fn facility(req: &Request) -> i32 {
 /// ```
 pub(super) fn php_syslog(req: &mut Request, priority: i32, message: &[u8]) {
     if !req.state::<State>().syslog.opened {
-        let ident = req.ini_get(b"syslog.ident").unwrap_or(b"php").to_vec();
+        let ident = req.ini().get(b"syslog.ident").unwrap_or(b"php").to_vec();
         let ident = CString::new(ident).unwrap_or_default();
         let facility = facility(req);
         php_openlog(req, ident, 0, facility);
@@ -233,7 +233,7 @@ pub(super) fn php_syslog(req: &mut Request, priority: i32, message: &[u8]) {
 /// where it is `all`, a newline ends one message and begins the next,
 /// and every other byte is `\xNN`.
 fn syslog_str(req: &Request, priority: i32, message: &[u8]) {
-    let filter = req.ini_get(b"syslog.filter").unwrap_or(b"no-ctrl");
+    let filter = req.ini().get(b"syslog.filter").unwrap_or(b"no-ctrl");
     if filter == b"raw" {
         send(priority, message);
         return;

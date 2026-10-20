@@ -44,7 +44,7 @@ mod wire;
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, LongHandler};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 
 use crate::conn::ConnData;
 
@@ -188,7 +188,8 @@ pub fn extension() -> Extension {
 /// ```
 fn mysqlnd_info(req: &mut Request) {
     let long = |req: &Request, name: &[u8]| -> String {
-        req.ini_get(name)
+        req.ini()
+            .get(name)
             .and_then(|v| std::str::from_utf8(v).ok())
             .and_then(|v| v.trim().parse::<i64>().ok())
             .unwrap_or(0)
@@ -199,11 +200,11 @@ fn mysqlnd_info(req: &mut Request) {
     };
     let cmd = long(req, b"mysqlnd.net_cmd_buffer_size");
     // The two `OnUpdateLong` entries, as their quantities.
-    let read = req.ini_long(b"mysqlnd.net_read_buffer_size").to_string();
-    let timeout = req.ini_long(b"mysqlnd.net_read_timeout").to_string();
+    let read = req.ini().long(b"mysqlnd.net_read_buffer_size").to_string();
+    let timeout = req.ini().long(b"mysqlnd.net_read_timeout").to_string();
     let stats = yes(req, b"mysqlnd.collect_statistics");
     let memory = yes(req, b"mysqlnd.collect_memory_statistics");
-    let tracing = req.ini_value(b"mysqlnd.debug").map_or_else(
+    let tracing = req.ini().value(b"mysqlnd.debug").map_or_else(
         || "n/a".to_owned(),
         |v| String::from_utf8_lossy(v).into_owned(),
     );
@@ -378,7 +379,7 @@ impl State {
 
 /// A boolean entry as `OnUpdateBool` reads it.
 fn ini_bool(req: &Request, name: &[u8]) -> bool {
-    req.ini_get(name).is_some_and(Request::ini_parse_bool)
+    req.ini().get(name).is_some_and(Ini::parse_bool)
 }
 
 #[cfg(test)]

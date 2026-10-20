@@ -29,7 +29,7 @@ use std::io::Write as _;
 
 use php_ext::abi::{ExtensionBuilder, IniStage};
 use php_ext::raising::Thrown;
-use php_ext::request::{Allocation, AllocationObserverId, ObserveAllocations, Request};
+use php_ext::request::{Allocation, AllocationObserverId, Ini, ObserveAllocations, Request};
 
 use crate::{Entry, Modifiable};
 
@@ -72,7 +72,7 @@ pub(crate) struct ObservedHeap(Option<AllocationObserverId>);
     reason = "the `rinit` slot's shape, which a request start that throws needs"
 )]
 pub(crate) fn rinit(req: &mut Request) -> Result<(), Thrown> {
-    if req.ini_get(ENABLED).is_some_and(Request::ini_parse_bool) {
+    if req.ini().get(ENABLED).is_some_and(Ini::parse_bool) {
         install(req);
     }
     Ok(())
@@ -95,10 +95,10 @@ fn on_update_enabled(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Th
     let Some(value) = value else {
         return Ok(false);
     };
-    if req.ini_stage() == IniStage::Startup {
+    if req.ini().stage() == IniStage::Startup {
         return Ok(true);
     }
-    if Request::ini_parse_bool(value) {
+    if Ini::parse_bool(value) {
         install(req);
     } else {
         remove(req);

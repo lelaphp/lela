@@ -898,7 +898,8 @@ impl Layer {
     /// `SSL_VERIFY_PEER`.
     fn enable_peer_verification(&self, req: &mut Request, ctx: &Ctx) -> bool {
         let ini = |req: &Request, name: &[u8]| {
-            req.ini_get(name)
+            req.ini()
+                .get(name)
                 .filter(|v| !v.is_empty())
                 .map(<[u8]>::to_vec)
         };

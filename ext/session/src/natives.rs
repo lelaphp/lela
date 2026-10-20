@@ -493,7 +493,7 @@ fn session_cache_expire(
     #[php(default = null)] value: Option<i64>,
 ) -> Result<OrFalse<i64>, Thrown> {
     let expires = value;
-    let current = req.ini_long(b"session.cache_expire");
+    let current = req.ini().long(b"session.cache_expire");
     if expires.is_some() && req.state::<State>().status == Status::Active {
         started_error(
             req,
@@ -862,7 +862,7 @@ fn session_get_cookie_params(req: &mut Request) -> Result<Owner<PhpArray>, Throw
     ];
     for (key, entry, kind) in rows {
         let value = match kind {
-            0 => Owner::int(req.ini_long(entry)),
+            0 => Owner::int(req.ini().long(entry)),
             1 => {
                 let text = ini(req, entry);
                 string_value(req, &text)?

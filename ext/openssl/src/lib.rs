@@ -447,7 +447,7 @@ fn on_update_libctx(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thr
     if value == b"default" || value == b"custom" {
         return Ok(true);
     }
-    let level = if req.ini_stage() == IniStage::Startup {
+    let level = if req.ini().stage() == IniStage::Startup {
         php_ext::raising::Level::Error
     } else {
         php_ext::raising::Level::Warning
@@ -534,5 +534,6 @@ fn info(req: &mut Request) {
         &["OpenSSL Header Version", header::OPENSSL_VERSION_TEXT],
         &["Openssl default config", &conf],
     ]);
-    req.info_ini_entries(&[b"openssl.cafile", b"openssl.capath", b"openssl.libctx"]);
+    req.ini_mut()
+        .info_ini_entries(&[b"openssl.cafile", b"openssl.capath", b"openssl.libctx"]);
 }

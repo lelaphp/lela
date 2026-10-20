@@ -47,7 +47,7 @@ use php_ext::attr::php_class;
 use php_ext::call::lookup_class;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Thrown, fatal, throw, throw_error};
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::values::{ClassId, Emalloc};
 
 use crate::types::Types;
@@ -127,10 +127,10 @@ enum Restriction {
 
 /// `OnUpdateFFIEnable`: `preload` by any case, else the boolean.
 fn restriction(req: &Request) -> Restriction {
-    let value = req.ini_get(ENABLE.as_bytes()).unwrap_or(b"preload");
+    let value = req.ini().get(ENABLE.as_bytes()).unwrap_or(b"preload");
     if value.eq_ignore_ascii_case(b"preload") {
         Restriction::Preload
-    } else if Request::ini_parse_bool(value) {
+    } else if Ini::parse_bool(value) {
         Restriction::Enabled
     } else {
         Restriction::Disabled
@@ -266,13 +266,13 @@ pub fn extension() -> Extension {
 fn info(req: &mut Request) {
     req.extensions_mut()
         .info_table(&[&["FFI support", "enabled"]]);
-    let entries = req.ini_entries();
+    let entries = req.ini().entries();
     let shown = |name: &str, value: Option<&[u8]>| -> String {
         let value = value.unwrap_or_default();
         if name == ENABLE {
             String::from(if value.eq_ignore_ascii_case(b"preload") {
                 "preload"
-            } else if Request::ini_parse_bool(value) {
+            } else if Ini::parse_bool(value) {
                 "On"
             } else {
                 "Off"
@@ -296,5 +296,5 @@ fn info(req: &mut Request) {
         .iter()
         .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
         .collect();
-    req.info_ini_table(&cells);
+    req.ini_mut().info_ini_table(&cells);
 }

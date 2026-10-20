@@ -27,7 +27,8 @@
 use std::io::{self, Write};
 use std::sync::atomic::Ordering;
 
-use php_engine::tier::{Epoch, FuncRef, Request, SafepointIdx, StartupIni, Word};
+use php_engine::api::request::Ini;
+use php_engine::tier::{Epoch, FuncRef, SafepointIdx, StartupIni, Word};
 
 use crate::types::ExitId;
 use php_unit::decl::{IniDecl, Name};
@@ -268,7 +269,7 @@ fn value<'a>(ini: &'a StartupIni, name: &str) -> Option<&'a [u8]> {
 
 /// `name` read as php's quantity, `default` where unset.
 fn long(ini: &StartupIni, name: &str, default: i64) -> i64 {
-    value(ini, name).map_or(default, |text| Request::ini_parse_quantity(text).0)
+    value(ini, name).map_or(default, |text| Ini::parse_quantity(text).0)
 }
 
 /// `name` held to php's bounds for it, `default` outside them, as php's

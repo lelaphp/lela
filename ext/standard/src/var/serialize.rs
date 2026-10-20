@@ -372,7 +372,7 @@ fn write(
         ValueRef::Int(n) => write_long(out, n),
         ValueRef::Float(f) => {
             out.extend_from_slice(b"d:");
-            out.extend_from_slice(gcvt(f, req.serialize_precision()).as_bytes());
+            out.extend_from_slice(gcvt(f, req.ini().serialize_precision()).as_bytes());
             out.push(b';');
         }
         ValueRef::Str(s) => write_string(out, s.as_bytes()),

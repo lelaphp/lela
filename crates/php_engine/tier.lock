@@ -3,6 +3,7 @@
 api::request::Diagnostics
 api::request::Diagnostics::bailing_out
 api::request::Diagnostics::raised
+api::request::Ini
 api::request::Interrupt
 api::request::Interrupt::raised
 api::request::Limits

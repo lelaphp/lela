@@ -39,7 +39,7 @@ use php_ext::call::{Function, lookup_function};
 use php_ext::coerce::type_name;
 use php_ext::decl::IniDecl;
 use php_ext::raising::Thrown;
-use php_ext::request::{ChainFrame, FrameView, Raised, Request};
+use php_ext::request::{ChainFrame, FrameView, Ini, Raised, Request};
 use php_ext::values::{ClassId, Value};
 use php_ext_standard::php_var_export_ex;
 
@@ -154,7 +154,7 @@ impl Switches {
         reason = "the engine start's shape, which a start that refuses needs"
     )]
     fn start(start: &Start) -> Result<Switches, Refusal> {
-        let on = |name: &[u8]| Request::ini_parse_bool(startup_value(start, name));
+        let on = |name: &[u8]| Ini::parse_bool(startup_value(start, name));
         let switch = |suffix: &str| on(format!("zend_test.observer.{suffix}").as_bytes());
         Ok(Switches {
             enabled: on(ENABLED),
@@ -207,7 +207,7 @@ fn startup_value<'a>(start: &'a Start, name: &[u8]) -> &'a [u8] {
 /// refuse the start.
 fn observed_opcodes(start: &Start) -> Opcodes {
     let mut opcodes = Opcodes::default();
-    if !Request::ini_parse_bool(startup_value(start, ENABLED)) {
+    if !Ini::parse_bool(startup_value(start, ENABLED)) {
         return opcodes;
     }
     let names = startup_value(start, SHOW_OPCODE_IN_USER_HANDLER);
@@ -285,10 +285,10 @@ fn names_in(value: Option<&[u8]>) -> impl Iterator<Item = &[u8]> {
 fn on_update_function_names(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
     // Read from the entry and not from [`Switches`]: at the engine's
     // start the handler runs before the engine state is built.
-    if !req.ini_get(ENABLED).is_some_and(Request::ini_parse_bool) {
+    if !req.ini().get(ENABLED).is_some_and(Ini::parse_bool) {
         return Ok(false);
     }
-    if req.ini_stage() != IniStage::Runtime {
+    if req.ini().stage() != IniStage::Runtime {
         return Ok(true);
     }
     // `zend_hash_find_ptr(EG(function_table), funcname)`: the table's
@@ -299,7 +299,7 @@ fn on_update_function_names(req: &mut Request, value: Option<&[u8]>) -> Result<b
             .filter_map(|name| lookup_function(req, name))
             .collect()
     };
-    for function in named(req, req.ini_get(OBSERVE_FUNCTION_NAMES)) {
+    for function in named(req, req.ini().get(OBSERVE_FUNCTION_NAMES)) {
         let _ = req.remove_begin_handler(function, begin);
         let _ = req.remove_end_handler(function, end);
     }
@@ -432,8 +432,9 @@ fn fcall_init(observed: &mut Observed<'_>) -> ObserverHandlers {
         begin: Some(begin),
         end: Some(end),
     };
-    let observed_by_name =
-        |name: &[u8]| names_in(observed.ini_get(OBSERVE_FUNCTION_NAMES)).any(|named| named == name);
+    let observed_by_name = |name: &[u8]| {
+        names_in(observed.ini().get(OBSERVE_FUNCTION_NAMES)).any(|named| named == name)
+    };
     match &serves {
         _ if switches.observe_all => both,
         Serves::Function { name, .. } if switches.observe_functions || observed_by_name(name) => {

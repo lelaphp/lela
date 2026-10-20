@@ -594,7 +594,8 @@ impl ConnData {
             .map(|f| f.bytes().to_vec())
             .filter(|f| !f.is_empty())
             .or_else(|| {
-                req.ini_get(b"mysqlnd.sha256_server_public_key")
+                req.ini()
+                    .get(b"mysqlnd.sha256_server_public_key")
                     .filter(|f| !f.is_empty())
                     .map(<[u8]>::to_vec)
             });

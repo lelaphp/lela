@@ -4,7 +4,7 @@
 //! `modifiable` bits and `on_modify` verdicts, `main/php_ini.c`'s
 //! `display_ini_entries` and `cfg_get_entry`, and the listings
 //! `ini_get_all()` and `ReflectionExtension::getINIEntries` read. The
-//! request's ini state is [`Ini`], whose fields no other file under
+//! request's ini state is [`IniState`], whose fields no other file under
 //! `api/request` reads; they go through the methods here.
 
 use std::sync::Arc;
@@ -20,6 +20,27 @@ use crate::api::raising::{Level, Thrown};
 use crate::api::values::{Owner, PhpString, Value, adopted_some};
 use crate::c_number::{atoi, strtol, strtol_prefixed};
 use crate::engine::{Configured, ConfiguredKey};
+
+/// The request's ini facet (design §4.4): the ini directives: their
+/// values, as set and restored for the request, as parsed, and as
+/// `ini_get_all()` and `phpinfo()` render them, and the files they were
+/// read from. [`Request::ini`] reads it and [`Request::ini_mut`] changes
+/// it; either is the whole request, since nearly every operation can
+/// serve PHP code.
+pub struct Ini<R>(pub(crate) R);
+
+impl Request {
+    /// The ini facet, to read.
+    #[must_use]
+    pub fn ini(&self) -> Ini<&Request> {
+        Ini(self)
+    }
+
+    /// The ini facet, to change.
+    pub fn ini_mut(&mut self) -> Ini<&mut Request> {
+        Ini(self)
+    }
+}
 
 /// One ini entry as this request sees it, php's `zend_ini_entry` read
 /// by `_extension_ini_string`, `ReflectionExtension::getINIEntries` and
@@ -44,7 +65,7 @@ pub struct IniEntry {
 type IniChanged = (Vec<u8>, Option<Vec<u8>>, Option<PhpString>);
 
 /// The request's ini state, whose fields no file but this one reads.
-pub(super) struct Ini {
+pub(super) struct IniState {
     /// `EG(modified_ini_directives)`: each entry the request changed,
     /// in the order it first changed, with the value it holds now, `None`
     /// where it has none (php's `NULL`), and the request string that value
@@ -78,7 +99,7 @@ pub(super) struct Ini {
 /// `ini_get_all()` and `ReflectionExtension`'s `getINIEntries()` and
 /// `__toString()`. Registration order until the first `phpinfo()` or
 /// `ini_get_all()` sorts the table in place
-/// ([`Request::ini_sort_entries`]), and sorted by name from then on.
+/// ([`Ini::sort_entries`]), and sorted by name from then on.
 ///
 /// php's table is the process's, or under ZTS the thread's, so a sort
 /// outlives the request in php; here it is the request's, which is all
@@ -112,11 +133,11 @@ fn ini_key_compare(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
         .cmp(b.iter().map(u8::to_ascii_lowercase))
 }
 
-impl Ini {
+impl IniState {
     /// The ini state a request starts with: nothing changed, and the
     /// typed entries the engine's master values give.
-    pub(super) fn new(typed: TypedIni) -> Ini {
-        Ini {
+    pub(super) fn new(typed: TypedIni) -> IniState {
+        IniState {
             changed: Vec::new(),
             bytes: None,
             locked: Vec::new(),
@@ -216,14 +237,14 @@ impl TypedIni {
             b"precision" => self.precision = atoi(text),
             b"serialize_precision" => self.serialize_precision = atoi(text),
             b"zend.exception_ignore_args" => {
-                self.exception_ignore_args = Request::ini_parse_bool(text);
+                self.exception_ignore_args = Ini::parse_bool(text);
             }
             b"zend.exception_string_param_max_len" => {
                 self.exception_string_param_max_len = usize::try_from(strtol(text)).unwrap_or(0);
             }
-            b"short_open_tag" => self.short_open_tag = Request::ini_parse_bool(text),
-            b"zend.assertions" => self.assertions = Request::ini_parse_bytes(text),
-            b"zend.multibyte" => self.multibyte = Request::ini_parse_bool(text),
+            b"short_open_tag" => self.short_open_tag = Ini::parse_bool(text),
+            b"zend.assertions" => self.assertions = Ini::parse_bytes(text),
+            b"zend.multibyte" => self.multibyte = Ini::parse_bool(text),
             _ => {}
         }
     }
@@ -236,7 +257,7 @@ impl TypedIni {
 /// first, or by `zend_ini_parse_uquantity_warn`, as
 /// `OnChangeMaxMemoryLimit`, `OnChangeMemoryLimit` and
 /// `OnUpdateReservedStackSize` read first. The warning is
-/// [`Request::ini_parse_quantity_warn`]'s, raised at startup, at
+/// [`Ini::parse_quantity_warn`]'s, raised at startup, at
 /// `ini_set()` and as the request ends; an extension's entry declared
 /// with [`LongHandler`] is served the same rule through its handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,7 +328,7 @@ impl CoreQuantity {
     /// negative quantity.
     pub(crate) fn refuses(self, value: &[u8]) -> bool {
         match self {
-            CoreQuantity::Signed(handler) => !handler.takes(Request::ini_parse_bytes(value)),
+            CoreQuantity::Signed(handler) => !handler.takes(Ini::parse_bytes(value)),
             CoreQuantity::Unsigned => false,
         }
     }
@@ -322,41 +343,6 @@ impl CoreQuantity {
 }
 
 impl Request {
-    /// `ini_get()`, `zend_ini_get_value`: the request's override, else
-    /// the engine's default, the empty string where the entry has no
-    /// value (php's `NULL`); `None` where php has no such entry.
-    #[must_use]
-    pub fn ini_get(&self, name: &[u8]) -> Option<&[u8]> {
-        match self.ini.changed.iter().find(|(n, ..)| n.as_slice() == name) {
-            Some((_, value, _)) => Some(value.as_deref().unwrap_or_default()),
-            None => self.shared.ini_default(name),
-        }
-    }
-
-    /// `INI_STR`, `zend_ini_string_ex`: the entry's value in force as php
-    /// holds it, `None` where it has none (`NULL`), as for a name php has
-    /// no entry for. What a rule that tells `NULL` from the empty string
-    /// reads, as `-d error_reporting=` sets the level to 0 where the
-    /// entry's `NULL` is `E_ALL`:
-    ///
-    /// ```php
-    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'error_reporting=', '-r', 'var_dump(error_reporting(), ini_get("error_reporting")); echo $undefined;'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
-    /// echo stream_get_contents($pipes[1]); proc_close($p);
-    /// ini_set('error_reporting', ''); var_dump(error_reporting());
-    /// ```
-    /// ```expect process
-    /// int(0)
-    /// string(0) ""
-    /// int(0)
-    /// ```
-    #[must_use]
-    pub fn ini_value(&self, name: &[u8]) -> Option<&[u8]> {
-        match self.ini.changed.iter().find(|(n, ..)| n.as_slice() == name) {
-            Some((_, value, _)) => value.as_deref(),
-            None => self.shared.ini_default_value(name),
-        }
-    }
-
     /// `PG(open_basedir)`, the list the `open_basedir` guard reads
     /// ([`Request::check_open_basedir`]): the entry's value as it was set
     /// at startup, and, once `ini_set()` or a `.user.ini` tightened it, the
@@ -382,96 +368,8 @@ impl Request {
     pub fn open_basedir(&self) -> Option<&[u8]> {
         match &self.ini.open_basedir {
             Some(expanded) => Some(expanded),
-            None => self.ini_value(b"open_basedir"),
+            None => self.ini().value(b"open_basedir"),
         }
-    }
-
-    /// `ini_set()`: the previous value, or `None` for an entry that does
-    /// not exist, may not change at runtime, or whose `on_modify` refuses
-    /// the value ([`Request::ini_verdict`]). An entry with an on-modify
-    /// handler runs it here: `max_execution_time` re-arms the execution
-    /// timer (`OnUpdateTimeout`, `Z/main/main.c:467`).
-    ///
-    /// The entries of the table without `PHP_INI_USER`, `xmlrpc_errors`,
-    /// `short_open_tag`, `sys_temp_dir`, the `mail.*` ones but `SMTP` and
-    /// `smtp_port`, `sendmail_path`, two of the three `syslog.*` and
-    /// `disable_functions`, are
-    /// `PHP_INI_SYSTEM` or `PHP_INI_SYSTEM|PHP_INI_PERDIR`, which
-    /// `zend_alter_ini_entry_ex` refuses at `PHP_INI_STAGE_RUNTIME` as it
-    /// refuses every entry whose `modifiable` lacks the stage; the rest of
-    /// the table is `PHP_INI_ALL`. An extension's entry is refused where
-    /// its declaration lacks `PHP_INI_USER`, as `browscap` does.
-    ///
-    /// ```php
-    /// var_dump(ini_set('xmlrpc_errors', '1'), ini_set('short_open_tag', '1'), ini_set('sendmail_path', 'x'), ini_set('mail.log', 'x'), ini_set('SMTP', 'mx'), ini_get('sendmail_path'), ini_get('mail.cr_lf_mode'), ini_set('browscap', 'x'), ini_set('assert.warning', '1'));
-    /// echo NAN;
-    /// ```
-    /// ```expect
-    /// bool(false)
-    /// bool(false)
-    /// bool(false)
-    /// bool(false)
-    /// string(9) "localhost"
-    /// string(24) "/usr/sbin/sendmail -t -i"
-    /// string(4) "crlf"
-    /// bool(false)
-    /// string(1) "1"
-    ///
-    /// Warning: unexpected NAN value was coerced to string in %s on line 3
-    /// NAN
-    /// ```
-    ///
-    /// The bytes are `zend_alter_ini_entry_chars`'s: a new request
-    /// string, `zend_string_init` and never an interned one, which the
-    /// entry that takes it keeps and which is released where it does not
-    /// (`Z/Zend/zend_ini.c:339-349`), so `ignore_user_abort(true)` costs
-    /// the entry's string of one byte:
-    ///
-    /// ```php
-    /// ini_set('from', 'x');
-    /// $m = memory_get_usage(); ignore_user_abort(true); echo memory_get_usage() - $m, "\n";
-    /// $m = memory_get_usage(); ignore_user_abort(false); echo memory_get_usage() - $m, "\n";
-    /// ```
-    /// ```expect
-    /// 32
-    /// 0
-    /// ```
-    pub fn ini_set(&mut self, name: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
-        let string = self.string_with(value.len(), |bytes| bytes.copy_from_slice(value))?;
-        let set = self.ini_set_string(name, string);
-        self.release(Value::string(string));
-        set
-    }
-
-    /// [`Request::ini_set`] over a request string, `ini_set()`'s: the entry
-    /// that takes it is one more owner of it, `zend_string_copy`, until
-    /// its next change, `ini_restore()` or the request's end releases it
-    /// (`Z/Zend/zend_ini.c:398-411`), so a string made for it stays and
-    /// one a variable held outlives the variable:
-    ///
-    /// ```php
-    /// ini_set('from', 'x');
-    /// $m = memory_get_usage(); ini_set('precision', str_repeat('1', 2)); echo memory_get_usage() - $m, "\n";
-    /// $v = str_repeat('a', 40); $m = memory_get_usage(); ini_set('user_agent', $v); unset($v); echo memory_get_usage() - $m, "\n";
-    /// $m = memory_get_usage(); ini_set('precision', '14'); ini_restore('user_agent'); echo memory_get_usage() - $m, "\n";
-    /// ```
-    /// ```expect
-    /// 40
-    /// 0
-    /// -120
-    /// ```
-    ///
-    /// The caller keeps its own owner: a native hands the string it was
-    /// passed, as `set_include_path()`, `mb_language()` and
-    /// `session_name()` hand theirs to `zend_alter_ini_entry`.
-    pub fn ini_set_string(
-        &mut self,
-        name: &[u8],
-        value: PhpString,
-    ) -> Result<Option<Vec<u8>>, Thrown> {
-        let allowed =
-            Request::ini_modifiable(name).0 && self.ini_user(name) && !self.ini_locked(name);
-        self.ini_alter(name, Some(value.as_bytes()), allowed, Some(value))
     }
 
     /// The host's entries for this request, each as its
@@ -521,7 +419,7 @@ impl Request {
         allowed: bool,
         string: Option<PhpString>,
     ) -> Result<Option<Vec<u8>>, Thrown> {
-        let Some(previous) = self.ini_get(name).map(<[u8]>::to_vec) else {
+        let Some(previous) = self.ini().get(name).map(<[u8]>::to_vec) else {
             return Ok(None);
         };
         if !allowed {
@@ -530,7 +428,7 @@ impl Request {
         // Changed from here, whether the rules below take the value or
         // not, as `zend_alter_ini_entry_ex` marks the entry `modified`
         // before it serves `on_modify`.
-        let held = self.ini_value(name).map(<[u8]>::to_vec);
+        let held = self.ini().value(name).map(<[u8]>::to_vec);
         self.ini_hold(name, held.as_deref());
         // The core handler reads its quantity before anything else it
         // does, and warns where the rule interprets it.
@@ -585,7 +483,7 @@ impl Request {
         } else {
             value
         };
-        if name == b"report_memleaks" && !Request::ini_parse_bool(value) {
+        if name == b"report_memleaks" && !Ini::parse_bool(value) {
             let message = "Directive 'report_memleaks' is deprecated";
             crate::api::raising::docref(self, Level::Deprecated, message);
         }
@@ -605,8 +503,7 @@ impl Request {
             b"max_execution_time" => self.arm_timer(),
             b"error_reporting" => self.update_error_reporting(),
             b"zend.enable_gc" => {
-                self.heap
-                    .gc_enable(value.is_some_and(Request::ini_parse_bool));
+                self.heap.gc_enable(value.is_some_and(Ini::parse_bool));
             }
             b"display_errors" => self.reset_display_errors_word(),
             _ => {}
@@ -665,7 +562,7 @@ impl Request {
             .iter()
             .any(|(n, ..)| n == b"error_reporting")
         {
-            let held = self.ini_value(b"error_reporting").map(<[u8]>::to_vec);
+            let held = self.ini().value(b"error_reporting").map(<[u8]>::to_vec);
             self.ini_hold(b"error_reporting", held.as_deref());
         }
     }
@@ -678,44 +575,6 @@ impl Request {
                 .find(|(n, _)| n.as_slice() == name)
                 .map(|(_, h)| *h)
         })
-    }
-
-    /// `ini_restore()`, `zend_restore_ini_entry` at
-    /// `ZEND_INI_STAGE_RUNTIME` (`Z/Zend/zend_ini.c:360-381`): an entry
-    /// the request changed set back to the value it started with through
-    /// its rules, as `ini_set()` serves them, and changed no longer, so
-    /// the request's end leaves it be; one its rules refuse stays changed.
-    /// An entry `PHP_INI_USER` may not touch, or a host's
-    /// `php_admin_value` holds, is left as it is.
-    ///
-    /// ```php
-    /// ini_set('session.use_only_cookies', '1');
-    /// ini_restore('session.use_only_cookies');
-    /// var_dump(ini_get('session.use_only_cookies'));
-    /// ```
-    /// ```expect regime=session-startup
-    /// Deprecated: PHP Startup: Disabling session.use_only_cookies INI setting is deprecated in Unknown on line 0
-    ///
-    /// Deprecated: PHP Startup: Enabling session.use_trans_sid INI setting is deprecated in Unknown on line 0
-    ///
-    /// Deprecated: ini_restore(): Disabling session.use_only_cookies INI setting is deprecated in %s on line 3
-    /// string(1) "0"
-    /// ```
-    pub fn ini_restore(&mut self, name: &[u8]) -> Result<(), Thrown> {
-        let user = Request::ini_modifiable(name).0 && self.ini_user(name);
-        if !user || self.ini_locked(name) || !self.ini.changed.iter().any(|(n, ..)| n == name) {
-            return Ok(());
-        }
-        let original = self.shared.ini_default_value(name).map(<[u8]>::to_vec);
-        if self
-            .ini_alter(name, original.as_deref(), true, None)?
-            .is_some()
-            && let Some(at) = self.ini.changed.iter().position(|(n, ..)| n == name)
-        {
-            self.ini.changed.remove(at);
-            self.ini_unmodified_bytes(at == self.ini.changed.len());
-        }
-        Ok(())
     }
 
     /// `zend_ini_deactivate` (`Z/Zend/zend_ini.c:190-203`), from
@@ -961,69 +820,6 @@ impl Request {
         }
     }
 
-    /// `EG(ini_directives)`, what `ini_get_all()` walks: the engine's
-    /// own entries, registered with `module_number` zero before any
-    /// `MINIT`, then each extension's in bundle order, each as
-    /// [`Request::extension_ini`] reads one. A core entry's `modifiable`
-    /// bits are the table's ([`Request::ini_modifiable`]).
-    ///
-    /// ```php
-    /// ini_set('precision', '10');
-    /// var_dump(ini_get_all(null)['precision'], ini_get_all(null)['enable_dl'], ini_get_all('pcre', false));
-    /// ```
-    /// ```expect
-    /// array(3) {
-    ///   ["global_value"]=>
-    ///   string(2) "14"
-    ///   ["local_value"]=>
-    ///   string(2) "10"
-    ///   ["access"]=>
-    ///   int(7)
-    /// }
-    /// array(3) {
-    ///   ["global_value"]=>
-    ///   string(1) "1"
-    ///   ["local_value"]=>
-    ///   string(1) "1"
-    ///   ["access"]=>
-    ///   int(4)
-    /// }
-    /// array(3) {
-    ///   ["pcre.backtrack_limit"]=>
-    ///   string(7) "1000000"
-    ///   ["pcre.jit"]=>
-    ///   string(1) "1"
-    ///   ["pcre.recursion_limit"]=>
-    ///   string(6) "100000"
-    /// }
-    /// ```
-    #[must_use]
-    pub fn ini_entries(&self) -> Vec<IniEntry> {
-        let entries = (0..self.shared.extensions.len())
-            .filter_map(|at| u32::try_from(at).ok())
-            .flat_map(|at| self.registered_ini(ExtensionId(at)))
-            .collect();
-        self.in_table_order(entries)
-    }
-
-    /// `zend_ini_sort_entries()` (`Z/Zend/zend_ini.c:195`), which
-    /// `phpinfo()` runs whatever it prints and `ini_get_all()` runs
-    /// before it looks the extension up: the table sorted by
-    /// [`ini_key_compare`], so every walk of it from here to the
-    /// request's end lists its entries sorted by name ([`IniOrder`]).
-    ///
-    /// ```php
-    /// $names = fn () => implode(' ', array_keys((new ReflectionExtension('iconv'))->getINIEntries())) . "\n";
-    /// echo $names(); @ini_get_all('nope'); echo $names();
-    /// ```
-    /// ```expect
-    /// iconv.input_encoding iconv.output_encoding iconv.internal_encoding
-    /// iconv.input_encoding iconv.internal_encoding iconv.output_encoding
-    /// ```
-    pub fn ini_sort_entries(&mut self) {
-        self.ini.order = IniOrder::Sorted;
-    }
-
     /// Entries handed over in registration order, put in the order the
     /// table holds them now ([`IniOrder`]).
     fn in_table_order(&self, mut entries: Vec<IniEntry>) -> Vec<IniEntry> {
@@ -1033,91 +829,11 @@ impl Request {
         entries
     }
 
-    /// `zend_ini_parse_bool` (`Z/Zend/zend_ini.c:563`), the one rule
-    /// every `OnUpdateBool` entry is read by: `on`, `yes` and `true` in
-    /// any case are on, and any other text is on where C's `atoi` reads
-    /// a number other than zero from it, so `abc` and `00` are off,
-    /// `-1`, ` 1` and `1abc` are on, and `4294967296`, whose `int` is
-    /// zero, is off.
-    ///
-    /// ```php
-    /// foreach (['abc', '00', '4294967296', '-1', '1abc', ' 1', 'TRUE'] as $v) { ini_set('html_errors', $v); trigger_error($v); }
-    /// ```
-    /// ```expect
-    /// Notice: abc in %s on line 2
-    ///
-    /// Notice: 00 in %s on line 2
-    ///
-    /// Notice: 4294967296 in %s on line 2
-    /// <br />
-    /// <b>Notice</b>:  -1 in <b>%s</b> on line <b>2</b><br />
-    /// <br />
-    /// <b>Notice</b>:  1abc in <b>%s</b> on line <b>2</b><br />
-    /// <br />
-    /// <b>Notice</b>:   1 in <b>%s</b> on line <b>2</b><br />
-    /// <br />
-    /// <b>Notice</b>:  TRUE in <b>%s</b> on line <b>2</b><br />
-    /// ```
-    #[must_use]
-    pub fn ini_parse_bool(value: &[u8]) -> bool {
-        value.eq_ignore_ascii_case(b"true")
-            || value.eq_ignore_ascii_case(b"yes")
-            || value.eq_ignore_ascii_case(b"on")
-            || atoi(value) != 0
-    }
-
     /// The entry `name` read as its `OnUpdateBool` reads it, by
-    /// [`Request::ini_parse_bool`]; an entry that holds php's `NULL` or
+    /// [`Ini::parse_bool`]; an entry that holds php's `NULL` or
     /// is not registered is off.
     pub(crate) fn ini_flag(&self, name: &[u8]) -> bool {
-        self.ini_get(name).is_some_and(Request::ini_parse_bool)
-    }
-
-    /// The entry `name` as its `OnUpdateLong` or `OnUpdateLongGEZero`
-    /// stored it in `PG`, `SG` or `EG`, `zend_ini_parse_quantity`'s value
-    /// ([`crate::ini_quantity`]): `1K` is 1024 and `0x10` is 16. What the
-    /// rule interprets for backwards compatibility was raised when the
-    /// value was set ([`Request::ini_parse_quantity_warn`]), and a
-    /// negative an `OnUpdateLongGEZero` entry refused never reached it.
-    /// What an extension reads an entry it declared with
-    /// [`LongHandler`] by, where php's reads the field the handler wrote.
-    ///
-    /// ```php
-    /// $run = function (string ...$ini) {
-    ///     $args = [PHP_BINARY, '-n'];
-    ///     foreach ($ini as $set) { $args[] = '-d'; $args[] = $set; }
-    ///     $args[] = '-r';
-    ///     $args[] = '$s = ob_get_status(); echo $s["chunk_size"] ?? "none", " ", ini_get("max_input_vars"), " ", ini_get("max_input_nesting_level"), "\n";';
-    ///     $p = proc_open($args, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
-    ///     echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]), proc_close($p), "\n";
-    /// };
-    /// $run('output_buffering=1K');
-    /// $run('output_buffering=0x10', 'max_input_vars=-5x', 'max_input_nesting_level=-0x1');
-    /// $run('report_memleaks=0', 'max_input_nesting_level=3q', 'output_buffering=1Kx', 'max_input_time=2x', 'hard_timeout=-');
-    /// ```
-    /// ```expect process
-    /// 1024 1000 64
-    /// 0
-    ///
-    /// Warning: Invalid "max_input_vars" setting. Invalid quantity "-5x": unknown multiplier "x", interpreting as "-5" for backwards compatibility in Unknown on line 0
-    /// 16 1000 64
-    /// 0
-    ///
-    /// Warning: Invalid "max_input_time" setting. Invalid quantity "2x": unknown multiplier "x", interpreting as "2" for backwards compatibility in Unknown on line 0
-    ///
-    /// Deprecated: PHP Startup: Directive 'report_memleaks' is deprecated in Unknown on line 0
-    ///
-    /// Warning: Invalid "output_buffering" setting. Invalid quantity "1Kx": unknown multiplier "x", interpreting as "1" for backwards compatibility in Unknown on line 0
-    ///
-    /// Warning: Invalid "max_input_nesting_level" setting. Invalid quantity "3q": unknown multiplier "q", interpreting as "3" for backwards compatibility in Unknown on line 0
-    ///
-    /// Warning: Invalid "hard_timeout" setting. Invalid quantity "-": no valid leading digits, interpreting as "0" for backwards compatibility in Unknown on line 0
-    /// 0 1000 3q
-    /// 0
-    /// ```
-    #[must_use]
-    pub fn ini_long(&self, name: &[u8]) -> i64 {
-        self.ini_get(name).map_or(0, Request::ini_parse_bytes)
+        self.ini().get(name).is_some_and(Ini::parse_bool)
     }
 
     /// `INI_INT(name)`, `zend_ini_long` (`Z/Zend/zend_ini.c:459`): an
@@ -1125,51 +841,11 @@ impl Request {
     /// `max_multipart_body_parts`, read where it is used with
     /// `ZEND_STRTOL(value, NULL, 0)`, so `0x10` is 16 and `010` is 8.
     pub(crate) fn ini_int(&self, name: &[u8]) -> i64 {
-        strtol_prefixed(self.ini_get(name).unwrap_or_default())
-    }
-
-    /// `zend_ini_parse_quantity_warn` (`Z/Zend/zend_ini.c:859`) for the
-    /// entry `name` taking `value`: the quantity [`Request::ini_long`]
-    /// reads, and php's `Invalid "name" setting.` warning before the
-    /// rule's sentence where the rule interprets the value for backwards
-    /// compatibility, at `Unknown` on line 0 while the engine starts and
-    /// as the request ends, and where the program stands between. What
-    /// an entry declared with [`LongHandler`] is read by, and what a
-    /// handler an extension wrote reads its whole-number entry by, as
-    /// `OnUpdateSessionGcProbability` and `OnUpdateBacktrackLimit` do.
-    ///
-    /// ```php
-    /// var_dump(ini_set('error_log_mode', '0600 '), ini_set('error_log_mode', '7x'), ini_get('error_log_mode'));
-    /// ```
-    /// ```expect
-    /// Warning: Invalid "error_log_mode" setting. Invalid quantity "7x": unknown multiplier "x", interpreting as "7" for backwards compatibility in %s on line 2
-    /// string(4) "0644"
-    /// string(5) "0600 "
-    /// string(2) "7x"
-    /// ```
-    ///
-    /// The request's end restores what it changed through the same
-    /// handler, which reads the startup value again:
-    ///
-    /// ```php
-    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'error_log_mode=7x', '-r', 'ini_set("error_log_mode", "0600"); echo "end\n";'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
-    /// echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]), proc_close($p), "\n";
-    /// ```
-    /// ```expect process
-    /// Warning: Invalid "error_log_mode" setting. Invalid quantity "7x": unknown multiplier "x", interpreting as "7" for backwards compatibility in Unknown on line 0
-    /// end
-    ///
-    /// Warning: Invalid "error_log_mode" setting. Invalid quantity "7x": unknown multiplier "x", interpreting as "7" for backwards compatibility in Unknown on line 0
-    /// 0
-    /// ```
-    pub fn ini_parse_quantity_warn(&mut self, name: &[u8], value: &[u8]) -> i64 {
-        let (quantity, sentence) = crate::ini_quantity::parse(value);
-        self.ini_setting_warn(name, sentence);
-        quantity
+        strtol_prefixed(self.ini().get(name).unwrap_or_default())
     }
 
     /// `zend_ini_parse_uquantity_warn` (`Z/Zend/zend_ini.c:873`):
-    /// [`Request::ini_parse_quantity_warn`] under the unsigned rule,
+    /// [`Ini::parse_quantity_warn`] under the unsigned rule,
     /// where `-1` alone among the negatives is taken, as the maximum, and
     /// any other is out of range. `memory_limit`'s handler reads by it
     /// before it sets the limit, at startup, at `ini_set()` and as the
@@ -1248,7 +924,7 @@ impl Request {
     pub(crate) fn core_quantity_warn(&mut self, name: &[u8], reading: CoreQuantity, value: &[u8]) {
         match reading {
             CoreQuantity::Signed(_) => {
-                self.ini_parse_quantity_warn(name, value);
+                self.ini_mut().parse_quantity_warn(name, value);
             }
             CoreQuantity::Unsigned => {
                 self.ini_parse_uquantity_warn(name, value);
@@ -1264,27 +940,6 @@ impl Request {
             let message = format!("Invalid \"{name}\" setting. {sentence}");
             crate::api::raising::warning(self, &message);
         }
-    }
-
-    /// `cfg_get_entry` as `get_cfg_var()` hands it back
-    /// (`Z/ext/standard/basic_functions.c:1306`): the row of
-    /// `configuration_hash` under `name`, what the host's ini text set
-    /// before any entry read it, a string or the array its `name[]=`
-    /// lines built, as strings of the request's; `None` where the text
-    /// set nothing under the name, a default no text named included.
-    ///
-    /// ```php
-    /// var_dump(get_cfg_var('precision'), get_cfg_var('highlight.string'), get_cfg_var('nope'));
-    /// ```
-    /// ```expect
-    /// string(2) "14"
-    /// bool(false)
-    /// bool(false)
-    /// ```
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub fn cfg_entry(&mut self, name: &[u8]) -> Result<Option<Owner<Value>>, Thrown> {
-        let made = self.cfg_entry_made(name);
-        adopted_some(made)
     }
 
     /// What [`cfg_entry`](Self::cfg_entry) makes, its one owner not yet named.
@@ -1317,80 +972,6 @@ impl Request {
         })
     }
 
-    /// `zend_ini_parse_quantity`'s value alone, what `OnUpdateLong`
-    /// stores for a whole-number entry: [`Request::ini_parse_quantity`]
-    /// with the sentence it would say left unsaid.
-    #[must_use]
-    pub fn ini_parse_bytes(value: &[u8]) -> i64 {
-        crate::ini_quantity::parse(value).0
-    }
-
-    /// `zend_ini_parse_quantity` (`Z/Zend/zend_ini.c:613-841`): leading
-    /// and trailing whitespace ignored, an optional sign, a base prefix
-    /// (`0x`, `0o`, `0b`) or `strtoull`'s own reading under base zero,
-    /// where a leading `0` is octal, whitespace, and an optional `K`,
-    /// `M` or `G` read off the last byte; with the value, the sentence
-    /// php's `errstr` holds for a shape it interprets for backwards
-    /// compatibility, which `ini_parse_quantity()` raises as a warning
-    /// and an entry's `on_modify` as its own.
-    ///
-    /// ```php
-    /// foreach (['1M', ' 2k ', '0x10', '010', '0b101', '-0x0B', '', '1.5M', 'abc', '0x', '0z1', '5 KB', ' 3 KB', '99999999999999999999'] as $q) var_dump(ini_parse_quantity($q));
-    /// ```
-    /// ```expect
-    /// int(1048576)
-    /// int(2048)
-    /// int(16)
-    /// int(8)
-    /// int(5)
-    /// int(-11)
-    /// int(0)
-    ///
-    /// Warning: Invalid quantity "1.5M", interpreting as "1M" for backwards compatibility in %s on line 2
-    /// int(1048576)
-    ///
-    /// Warning: Invalid quantity "abc": no valid leading digits, interpreting as "0" for backwards compatibility in %s on line 2
-    /// int(0)
-    ///
-    /// Warning: Invalid quantity "0x": no digits after base prefix, interpreting as "0" for backwards compatibility in %s on line 2
-    /// int(0)
-    ///
-    /// Warning: Invalid prefix "0z", interpreting as "0" for backwards compatibility in %s on line 2
-    /// int(0)
-    ///
-    /// Warning: Invalid quantity "5 KB": unknown multiplier "B", interpreting as "5 " for backwards compatibility in %s on line 2
-    /// int(5)
-    ///
-    /// Warning: Invalid quantity " 3 KB": unknown multiplier "B", interpreting as " 3 " for backwards compatibility in %s on line 2
-    /// int(3)
-    ///
-    /// Warning: Invalid quantity "99999999999999999999": value is out of range, using overflow result for backwards compatibility in %s on line 2
-    /// int(-1)
-    /// ```
-    #[must_use]
-    pub fn ini_parse_quantity(value: &[u8]) -> (i64, Option<String>) {
-        crate::ini_quantity::parse(value)
-    }
-
-    /// `zend_ini_parse_uquantity`: [`Request::ini_parse_quantity`] held
-    /// to the unsigned range, where `-1` alone among the negatives is
-    /// taken, as the maximum, and any other is out of range. What the
-    /// test extension's `zend_test_zend_ini_parse_uquantity` answers,
-    /// the witness there.
-    #[must_use]
-    pub fn ini_parse_uquantity(value: &[u8]) -> (u64, Option<String>) {
-        crate::ini_quantity::parse_unsigned(value)
-    }
-
-    /// The stage an entry's `on_modify` is served at, php's `stage`
-    /// argument to a `PHP_INI_MH`. [`IniStage::Startup`] is also
-    /// `php_during_module_startup()`, which `php_verror` names the origin
-    /// of a docref by, `PHP Startup` for a native's name.
-    #[must_use]
-    pub fn ini_stage(&self) -> IniStage {
-        self.ini.stage
-    }
-
     /// The stage the next `on_modify` is served at.
     pub(crate) fn set_ini_stage(&mut self, stage: IniStage) {
         self.ini.stage = stage;
@@ -1402,17 +983,6 @@ impl Request {
     /// decides what opcache's handlers after it log.
     pub(crate) fn take_startup_value(&mut self, name: &[u8], value: &[u8]) {
         self.ini_hold(name, Some(value));
-    }
-
-    /// The ini entries an extension declared, in the order
-    /// `EG(ini_directives)` holds them ([`IniOrder`]), which is the
-    /// order `zend_register_ini_entries` put them in until the request
-    /// sorts the table. Each carries the value in force, the request's
-    /// `ini_set` over the engine's startup value, and the startup value
-    /// again as `original` where the request changed it.
-    #[must_use]
-    pub fn extension_ini(&self, extension: ExtensionId) -> Vec<IniEntry> {
-        self.in_table_order(self.registered_ini(extension))
     }
 
     /// An extension's entries in the order it declared them.
@@ -1475,10 +1045,708 @@ impl Request {
         }
     }
 
+    /// One value of a core entry as `php_ini_displayer_cb` shows it
+    /// through the entry's displayer (`Z/main/php_ini.c:67-111`).
+    fn ini_display(&self, displayer: IniDisplayer, value: &[u8]) -> IniCell {
+        let on_off = |on: bool| IniCell::Displayed(String::from(if on { "On" } else { "Off" }));
+        match displayer {
+            IniDisplayer::Plain => IniCell::Value(String::from_utf8_lossy(value).into_owned()),
+            IniDisplayer::Boolean => on_off(Ini::parse_bool(value)),
+            IniDisplayer::GcEnabled => on_off(self.gc_enabled()),
+            // `zend_ini_color_displayer_cb` under `zend_uv.html_errors`,
+            // which `php_module_startup` sets to 1 whatever the host is
+            // (`Z/main/main.c:2326`), so a colour is marked up in text too.
+            IniDisplayer::Color => {
+                let value = String::from_utf8_lossy(value);
+                IniCell::Displayed(format!("<span style=\"color: {value}\">{value}</span>"))
+            }
+            // `display_errors_mode`: the stream named where the host is
+            // `cli`, `cgi` or `phpdbg`, `On` under any other.
+            IniDisplayer::DisplayErrors => {
+                IniCell::Displayed(String::from(match display_errors_mode_of(Some(value)) {
+                    0 => "Off",
+                    _ if !self.host_writes_stderr() => "On",
+                    DISPLAY_ERRORS_STDERR => "STDERR",
+                    _ => "STDOUT",
+                }))
+            }
+        }
+    }
+
+    /// [`Ini::info_ini_table`] over cells a displayer may have
+    /// written ([`IniCell`]), the rows in the order the table holds
+    /// them ([`IniOrder`]): `display_ini_entries` walks
+    /// `EG(ini_directives)` for the extension's entries, so the rows it
+    /// hands over in its registration order are listed sorted
+    /// once the request has sorted the table.
+    fn ini_table(&mut self, rows: &[(String, IniCell, IniCell)]) {
+        if rows.is_empty() {
+            return;
+        }
+        let mut rows: Vec<&(String, IniCell, IniCell)> = rows.iter().collect();
+        self.ini
+            .order
+            .arrange(&mut rows, |(name, ..)| name.as_bytes());
+        let text = self.extensions().phpinfo_as_text();
+        let mut out = Vec::new();
+        let value = |out: &mut Vec<u8>, cell: &IniCell| match cell {
+            IniCell::Displayed(shown) => out.extend_from_slice(shown.as_bytes()),
+            IniCell::Value(shown) => match (shown.is_empty(), text) {
+                (true, true) => out.extend_from_slice(b"no value"),
+                (true, false) => out.extend_from_slice(b"<i>no value</i>"),
+                (false, true) => out.extend_from_slice(shown.as_bytes()),
+                (false, false) => php_compile::syntax::html_puts(out, shown.as_bytes()),
+            },
+        };
+        for (name, local, master) in rows {
+            if text {
+                out.extend_from_slice(name.as_bytes());
+                out.extend_from_slice(b" => ");
+                value(&mut out, local);
+                out.extend_from_slice(b" => ");
+                value(&mut out, master);
+                out.push(b'\n');
+            } else {
+                out.extend_from_slice(b"<tr><td class=\"e\">");
+                out.extend_from_slice(name.as_bytes());
+                out.extend_from_slice(b"</td><td class=\"v\">");
+                value(&mut out, local);
+                out.extend_from_slice(b"</td><td class=\"v\">");
+                value(&mut out, master);
+                out.extend_from_slice(b"</td></tr>\n");
+            }
+        }
+        self.extensions_mut().info_rows(&[
+            InfoRow::Header(&["Directive", "Local Value", "Master Value"]),
+            InfoRow::Written(&out),
+        ]);
+    }
+
+    /// One ini entry as php's `STR_PRINT(INI_STR(name))` reads it: its
+    /// bytes, and nothing at all where php left the entry `NULL`.
+    pub(super) fn ini_text(&self, name: &[u8]) -> String {
+        self.ini()
+            .get(name)
+            .map(|value| String::from_utf8_lossy(value).into_owned())
+            .unwrap_or_default()
+    }
+
+    pub(super) fn ini_number(&self, name: &[u8], default: i32) -> i32 {
+        self.ini()
+            .get(name)
+            .and_then(|value| String::from_utf8_lossy(value).parse().ok())
+            .unwrap_or(default)
+    }
+
+    /// The typed entries as this request holds them now ([`TypedIni`]).
+    pub(crate) fn typed_ini(&self) -> &TypedIni {
+        &self.ini.typed
+    }
+
+    pub(super) fn ini_parse_bytes_of(&self, name: &str) -> i64 {
+        self.ini().get(name.as_bytes()).map_or(0, Ini::parse_bytes)
+    }
+
+    /// One entry added to `EG(modified_ini_directives)`, which the
+    /// first lays down, `ALLOC_HASHTABLE` and `zend_hash_init(8)`, and
+    /// the first write gives its data; a `@` is the first change of a
+    /// request that changes no entry, and `error_clear_last()` gives
+    /// none of it back (the warning first stores a last error, whose
+    /// message the `@`'s replaces at its size):
+    ///
+    /// ```php
+    /// echo $w;
+    /// $m = memory_get_usage(); @$x; echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); ini_set('precision', '10'); echo memory_get_usage() - $m, "\n";
+    /// error_clear_last();
+    /// $m = memory_get_usage(); for ($i = 0; $i < 7; $i++) ini_set(['user_agent', 'arg_separator.output', 'default_socket_timeout', 'from', 'serialize_precision', 'highlight.string', 'highlight.comment'][$i], '1'); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// Warning: Undefined variable $w in %s on line 2
+    /// 376
+    /// 0
+    /// 320
+    /// ```
+    fn ini_modified_bytes(&mut self) {
+        let table = match self.ini.bytes.take() {
+            Some(table) => Ok(table),
+            None => HashBytes::new_array(self, 8),
+        };
+        // The memory limit's fatal is recorded and ends the request.
+        if let Ok(mut table) = table {
+            table.add(self).ok();
+            self.ini.bytes = Some(table);
+        }
+    }
+
+    /// One entry deleted from `EG(modified_ini_directives)`, by
+    /// `ini_restore()`, the last of the table's where `last` says so.
+    fn ini_unmodified_bytes(&mut self, last: bool) {
+        if let Some(table) = self.ini.bytes.as_mut() {
+            table.del(last);
+        }
+    }
+
+    /// `zend_hash_destroy` and `FREE_HASHTABLE` of
+    /// `EG(modified_ini_directives)`, `zend_ini_deactivate`'s.
+    fn free_modified_ini_bytes(&mut self) {
+        if let Some(table) = self.ini.bytes.take() {
+            table.free(self);
+        }
+    }
+
+    /// `short_open_tag`, php's `CG(short_tags)`: whether a `<?` opens
+    /// code in the source this request compiles, which its scanner reads
+    /// at every tag it meets (`Z/Zend/zend_language_scanner.l:2331`).
+    /// php's built-in default is on (`DEFAULT_SHORT_OPEN_TAG`), which is
+    /// what an engine with no entry for it answers, and the entry is
+    /// `PHP_INI_SYSTEM|PHP_INI_PERDIR`, so no `ini_set()` of the
+    /// request's moves it. `token_get_all` reads the same entry, which
+    /// is why it is the request's and not the engine's alone.
+    pub(crate) fn short_open_tag(&self) -> bool {
+        self.ini.typed.short_open_tag
+    }
+
+    /// `EG(assertions)`, php's `zend.assertions` read as
+    /// `OnUpdateAssertions` reads it (`zend_ini_parse_quantity_warn`):
+    /// `1` compiles and runs an assertion, `0` compiles it behind an
+    /// `ASSERT_CHECK` that jumps over it, and `-1` compiles nothing of it.
+    /// What `ini_set()` and `ini_restore()` leave is what the next
+    /// compile reads:
+    ///
+    /// ```php
+    /// ini_set('zend.assertions', '0'); eval('assert(false); echo "skipped\n";');
+    /// ini_restore('zend.assertions');
+    /// try { eval('assert(false);'); } catch (AssertionError $e) { echo get_class($e), "\n"; }
+    /// ```
+    /// ```expect capture
+    /// skipped
+    /// AssertionError
+    /// ```
+    pub(crate) fn assertions(&self) -> i64 {
+        self.ini.typed.assertions
+    }
+
+    /// `OnUpdateAssertions` (`Z/Zend/zend.c:156-172`) for an
+    /// `ini_set()`: a value that moves the entry to or from a negative
+    /// one is php's warning and a refusal that keeps the entry as it
+    /// was, since what is compiled already was compiled under it; any
+    /// other value is taken.
+    ///
+    /// ```php
+    /// var_dump(ini_get('zend.assertions'), ini_set('zend.assertions', '-1'), ini_set('zend.assertions', '0'), ini_get('zend.assertions'), ini_set('zend.assertions', '1'));
+    /// ```
+    /// ```expect
+    /// Warning: zend.assertions may be completely enabled or disabled only in php.ini in %s on line 2
+    /// string(1) "1"
+    /// bool(false)
+    /// string(1) "1"
+    /// string(1) "0"
+    /// string(1) "0"
+    /// ```
+    fn assertions_updated(&mut self, value: &[u8]) -> bool {
+        let (current, next) = (self.assertions(), Ini::parse_bytes(value));
+        if current != next && (current < 0 || next < 0) {
+            crate::api::raising::warning(
+                self,
+                "zend.assertions may be completely enabled or disabled only in php.ini",
+            );
+            return false;
+        }
+        true
+    }
+}
+
+impl<'r> Ini<&'r Request> {
+    /// `ini_get()`, `zend_ini_get_value`: the request's override, else
+    /// the engine's default, the empty string where the entry has no
+    /// value (php's `NULL`); `None` where php has no such entry.
+    #[must_use]
+    pub fn get(self, name: &[u8]) -> Option<&'r [u8]> {
+        match self
+            .0
+            .ini
+            .changed
+            .iter()
+            .find(|(n, ..)| n.as_slice() == name)
+        {
+            Some((_, value, _)) => Some(value.as_deref().unwrap_or_default()),
+            None => self.0.shared.ini_default(name),
+        }
+    }
+
+    /// `INI_STR`, `zend_ini_string_ex`: the entry's value in force as php
+    /// holds it, `None` where it has none (`NULL`), as for a name php has
+    /// no entry for. What a rule that tells `NULL` from the empty string
+    /// reads, as `-d error_reporting=` sets the level to 0 where the
+    /// entry's `NULL` is `E_ALL`:
+    ///
+    /// ```php
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'error_reporting=', '-r', 'var_dump(error_reporting(), ini_get("error_reporting")); echo $undefined;'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]); proc_close($p);
+    /// ini_set('error_reporting', ''); var_dump(error_reporting());
+    /// ```
+    /// ```expect process
+    /// int(0)
+    /// string(0) ""
+    /// int(0)
+    /// ```
+    #[must_use]
+    pub fn value(self, name: &[u8]) -> Option<&'r [u8]> {
+        match self
+            .0
+            .ini
+            .changed
+            .iter()
+            .find(|(n, ..)| n.as_slice() == name)
+        {
+            Some((_, value, _)) => value.as_deref(),
+            None => self.0.shared.ini_default_value(name),
+        }
+    }
+
+    /// `EG(ini_directives)`, what `ini_get_all()` walks: the engine's
+    /// own entries, registered with `module_number` zero before any
+    /// `MINIT`, then each extension's in bundle order, each as
+    /// [`Ini::extension_ini`] reads one. A core entry's `modifiable`
+    /// bits are the table's ([`Request::ini_modifiable`]).
+    ///
+    /// ```php
+    /// ini_set('precision', '10');
+    /// var_dump(ini_get_all(null)['precision'], ini_get_all(null)['enable_dl'], ini_get_all('pcre', false));
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   ["global_value"]=>
+    ///   string(2) "14"
+    ///   ["local_value"]=>
+    ///   string(2) "10"
+    ///   ["access"]=>
+    ///   int(7)
+    /// }
+    /// array(3) {
+    ///   ["global_value"]=>
+    ///   string(1) "1"
+    ///   ["local_value"]=>
+    ///   string(1) "1"
+    ///   ["access"]=>
+    ///   int(4)
+    /// }
+    /// array(3) {
+    ///   ["pcre.backtrack_limit"]=>
+    ///   string(7) "1000000"
+    ///   ["pcre.jit"]=>
+    ///   string(1) "1"
+    ///   ["pcre.recursion_limit"]=>
+    ///   string(6) "100000"
+    /// }
+    /// ```
+    #[must_use]
+    pub fn entries(self) -> Vec<IniEntry> {
+        let entries = (0..self.0.shared.extensions.len())
+            .filter_map(|at| u32::try_from(at).ok())
+            .flat_map(|at| self.0.registered_ini(ExtensionId(at)))
+            .collect();
+        self.0.in_table_order(entries)
+    }
+
+    /// The entry `name` as its `OnUpdateLong` or `OnUpdateLongGEZero`
+    /// stored it in `PG`, `SG` or `EG`, `zend_ini_parse_quantity`'s value
+    /// ([`crate::ini_quantity`]): `1K` is 1024 and `0x10` is 16. What the
+    /// rule interprets for backwards compatibility was raised when the
+    /// value was set ([`Ini::parse_quantity_warn`]), and a
+    /// negative an `OnUpdateLongGEZero` entry refused never reached it.
+    /// What an extension reads an entry it declared with
+    /// [`LongHandler`] by, where php's reads the field the handler wrote.
+    ///
+    /// ```php
+    /// $run = function (string ...$ini) {
+    ///     $args = [PHP_BINARY, '-n'];
+    ///     foreach ($ini as $set) { $args[] = '-d'; $args[] = $set; }
+    ///     $args[] = '-r';
+    ///     $args[] = '$s = ob_get_status(); echo $s["chunk_size"] ?? "none", " ", ini_get("max_input_vars"), " ", ini_get("max_input_nesting_level"), "\n";';
+    ///     $p = proc_open($args, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    ///     echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]), proc_close($p), "\n";
+    /// };
+    /// $run('output_buffering=1K');
+    /// $run('output_buffering=0x10', 'max_input_vars=-5x', 'max_input_nesting_level=-0x1');
+    /// $run('report_memleaks=0', 'max_input_nesting_level=3q', 'output_buffering=1Kx', 'max_input_time=2x', 'hard_timeout=-');
+    /// ```
+    /// ```expect process
+    /// 1024 1000 64
+    /// 0
+    ///
+    /// Warning: Invalid "max_input_vars" setting. Invalid quantity "-5x": unknown multiplier "x", interpreting as "-5" for backwards compatibility in Unknown on line 0
+    /// 16 1000 64
+    /// 0
+    ///
+    /// Warning: Invalid "max_input_time" setting. Invalid quantity "2x": unknown multiplier "x", interpreting as "2" for backwards compatibility in Unknown on line 0
+    ///
+    /// Deprecated: PHP Startup: Directive 'report_memleaks' is deprecated in Unknown on line 0
+    ///
+    /// Warning: Invalid "output_buffering" setting. Invalid quantity "1Kx": unknown multiplier "x", interpreting as "1" for backwards compatibility in Unknown on line 0
+    ///
+    /// Warning: Invalid "max_input_nesting_level" setting. Invalid quantity "3q": unknown multiplier "q", interpreting as "3" for backwards compatibility in Unknown on line 0
+    ///
+    /// Warning: Invalid "hard_timeout" setting. Invalid quantity "-": no valid leading digits, interpreting as "0" for backwards compatibility in Unknown on line 0
+    /// 0 1000 3q
+    /// 0
+    /// ```
+    #[must_use]
+    pub fn long(self, name: &[u8]) -> i64 {
+        self.0.ini().get(name).map_or(0, Ini::parse_bytes)
+    }
+
+    /// The stage an entry's `on_modify` is served at, php's `stage`
+    /// argument to a `PHP_INI_MH`. [`IniStage::Startup`] is also
+    /// `php_during_module_startup()`, which `php_verror` names the origin
+    /// of a docref by, `PHP Startup` for a native's name.
+    #[must_use]
+    pub fn stage(self) -> IniStage {
+        self.0.ini.stage
+    }
+
+    /// The ini entries an extension declared, in the order
+    /// `EG(ini_directives)` holds them ([`IniOrder`]), which is the
+    /// order `zend_register_ini_entries` put them in until the request
+    /// sorts the table. Each carries the value in force, the request's
+    /// `ini_set` over the engine's startup value, and the startup value
+    /// again as `original` where the request changed it.
+    #[must_use]
+    pub fn extension_ini(self, extension: ExtensionId) -> Vec<IniEntry> {
+        self.0.in_table_order(self.0.registered_ini(extension))
+    }
+
+    /// The php.ini files the engine read at startup ([`IniFiles`]).
+    #[must_use]
+    pub fn files(self) -> &'r IniFiles {
+        &self.0.shared.ini_files
+    }
+
+    /// `precision`, `EG(precision)`: the digits a float converts to a
+    /// string with, and compares at, as `OnSetPrecision` read the entry.
+    #[must_use]
+    pub fn precision(self) -> i32 {
+        self.0.ini.typed.precision
+    }
+
+    /// `serialize_precision`, what `var_dump`, `var_export`, `serialize`
+    /// and `json_encode` print a float at; -1, its default, asks for the
+    /// shortest text that reads back as the same double.
+    #[must_use]
+    pub fn serialize_precision(self) -> i32 {
+        self.0.ini.typed.serialize_precision
+    }
+
+    /// `zend_ini_parse_bool` (`Z/Zend/zend_ini.c:563`), the one rule
+    /// every `OnUpdateBool` entry is read by: `on`, `yes` and `true` in
+    /// any case are on, and any other text is on where C's `atoi` reads
+    /// a number other than zero from it, so `abc` and `00` are off,
+    /// `-1`, ` 1` and `1abc` are on, and `4294967296`, whose `int` is
+    /// zero, is off.
+    ///
+    /// ```php
+    /// foreach (['abc', '00', '4294967296', '-1', '1abc', ' 1', 'TRUE'] as $v) { ini_set('html_errors', $v); trigger_error($v); }
+    /// ```
+    /// ```expect
+    /// Notice: abc in %s on line 2
+    ///
+    /// Notice: 00 in %s on line 2
+    ///
+    /// Notice: 4294967296 in %s on line 2
+    /// <br />
+    /// <b>Notice</b>:  -1 in <b>%s</b> on line <b>2</b><br />
+    /// <br />
+    /// <b>Notice</b>:  1abc in <b>%s</b> on line <b>2</b><br />
+    /// <br />
+    /// <b>Notice</b>:   1 in <b>%s</b> on line <b>2</b><br />
+    /// <br />
+    /// <b>Notice</b>:  TRUE in <b>%s</b> on line <b>2</b><br />
+    /// ```
+    #[must_use]
+    pub fn parse_bool(value: &[u8]) -> bool {
+        value.eq_ignore_ascii_case(b"true")
+            || value.eq_ignore_ascii_case(b"yes")
+            || value.eq_ignore_ascii_case(b"on")
+            || atoi(value) != 0
+    }
+
+    /// `zend_ini_parse_quantity`'s value alone, what `OnUpdateLong`
+    /// stores for a whole-number entry: [`Ini::parse_quantity`]
+    /// with the sentence it would say left unsaid.
+    #[must_use]
+    pub fn parse_bytes(value: &[u8]) -> i64 {
+        crate::ini_quantity::parse(value).0
+    }
+
+    /// `zend_ini_parse_quantity` (`Z/Zend/zend_ini.c:613-841`): leading
+    /// and trailing whitespace ignored, an optional sign, a base prefix
+    /// (`0x`, `0o`, `0b`) or `strtoull`'s own reading under base zero,
+    /// where a leading `0` is octal, whitespace, and an optional `K`,
+    /// `M` or `G` read off the last byte; with the value, the sentence
+    /// php's `errstr` holds for a shape it interprets for backwards
+    /// compatibility, which `ini_parse_quantity()` raises as a warning
+    /// and an entry's `on_modify` as its own.
+    ///
+    /// ```php
+    /// foreach (['1M', ' 2k ', '0x10', '010', '0b101', '-0x0B', '', '1.5M', 'abc', '0x', '0z1', '5 KB', ' 3 KB', '99999999999999999999'] as $q) var_dump(ini_parse_quantity($q));
+    /// ```
+    /// ```expect
+    /// int(1048576)
+    /// int(2048)
+    /// int(16)
+    /// int(8)
+    /// int(5)
+    /// int(-11)
+    /// int(0)
+    ///
+    /// Warning: Invalid quantity "1.5M", interpreting as "1M" for backwards compatibility in %s on line 2
+    /// int(1048576)
+    ///
+    /// Warning: Invalid quantity "abc": no valid leading digits, interpreting as "0" for backwards compatibility in %s on line 2
+    /// int(0)
+    ///
+    /// Warning: Invalid quantity "0x": no digits after base prefix, interpreting as "0" for backwards compatibility in %s on line 2
+    /// int(0)
+    ///
+    /// Warning: Invalid prefix "0z", interpreting as "0" for backwards compatibility in %s on line 2
+    /// int(0)
+    ///
+    /// Warning: Invalid quantity "5 KB": unknown multiplier "B", interpreting as "5 " for backwards compatibility in %s on line 2
+    /// int(5)
+    ///
+    /// Warning: Invalid quantity " 3 KB": unknown multiplier "B", interpreting as " 3 " for backwards compatibility in %s on line 2
+    /// int(3)
+    ///
+    /// Warning: Invalid quantity "99999999999999999999": value is out of range, using overflow result for backwards compatibility in %s on line 2
+    /// int(-1)
+    /// ```
+    #[must_use]
+    pub fn parse_quantity(value: &[u8]) -> (i64, Option<String>) {
+        crate::ini_quantity::parse(value)
+    }
+
+    /// `zend_ini_parse_uquantity`: [`Ini::parse_quantity`] held
+    /// to the unsigned range, where `-1` alone among the negatives is
+    /// taken, as the maximum, and any other is out of range. What the
+    /// test extension's `zend_test_zend_ini_parse_uquantity` answers,
+    /// the witness there.
+    #[must_use]
+    pub fn parse_uquantity(value: &[u8]) -> (u64, Option<String>) {
+        crate::ini_quantity::parse_unsigned(value)
+    }
+}
+
+impl Ini<&mut Request> {
+    /// `ini_set()`: the previous value, or `None` for an entry that does
+    /// not exist, may not change at runtime, or whose `on_modify` refuses
+    /// the value ([`Request::ini_verdict`]). An entry with an on-modify
+    /// handler runs it here: `max_execution_time` re-arms the execution
+    /// timer (`OnUpdateTimeout`, `Z/main/main.c:467`).
+    ///
+    /// The entries of the table without `PHP_INI_USER`, `xmlrpc_errors`,
+    /// `short_open_tag`, `sys_temp_dir`, the `mail.*` ones but `SMTP` and
+    /// `smtp_port`, `sendmail_path`, two of the three `syslog.*` and
+    /// `disable_functions`, are
+    /// `PHP_INI_SYSTEM` or `PHP_INI_SYSTEM|PHP_INI_PERDIR`, which
+    /// `zend_alter_ini_entry_ex` refuses at `PHP_INI_STAGE_RUNTIME` as it
+    /// refuses every entry whose `modifiable` lacks the stage; the rest of
+    /// the table is `PHP_INI_ALL`. An extension's entry is refused where
+    /// its declaration lacks `PHP_INI_USER`, as `browscap` does.
+    ///
+    /// ```php
+    /// var_dump(ini_set('xmlrpc_errors', '1'), ini_set('short_open_tag', '1'), ini_set('sendmail_path', 'x'), ini_set('mail.log', 'x'), ini_set('SMTP', 'mx'), ini_get('sendmail_path'), ini_get('mail.cr_lf_mode'), ini_set('browscap', 'x'), ini_set('assert.warning', '1'));
+    /// echo NAN;
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// string(9) "localhost"
+    /// string(24) "/usr/sbin/sendmail -t -i"
+    /// string(4) "crlf"
+    /// bool(false)
+    /// string(1) "1"
+    ///
+    /// Warning: unexpected NAN value was coerced to string in %s on line 3
+    /// NAN
+    /// ```
+    ///
+    /// The bytes are `zend_alter_ini_entry_chars`'s: a new request
+    /// string, `zend_string_init` and never an interned one, which the
+    /// entry that takes it keeps and which is released where it does not
+    /// (`Z/Zend/zend_ini.c:339-349`), so `ignore_user_abort(true)` costs
+    /// the entry's string of one byte:
+    ///
+    /// ```php
+    /// ini_set('from', 'x');
+    /// $m = memory_get_usage(); ignore_user_abort(true); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); ignore_user_abort(false); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 32
+    /// 0
+    /// ```
+    pub fn set(self, name: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
+        let string = self
+            .0
+            .string_with(value.len(), |bytes| bytes.copy_from_slice(value))?;
+        let set = self.0.ini_mut().set_string(name, string);
+        self.0.release(Value::string(string));
+        set
+    }
+
+    /// [`Ini::set`] over a request string, `ini_set()`'s: the entry
+    /// that takes it is one more owner of it, `zend_string_copy`, until
+    /// its next change, `ini_restore()` or the request's end releases it
+    /// (`Z/Zend/zend_ini.c:398-411`), so a string made for it stays and
+    /// one a variable held outlives the variable:
+    ///
+    /// ```php
+    /// ini_set('from', 'x');
+    /// $m = memory_get_usage(); ini_set('precision', str_repeat('1', 2)); echo memory_get_usage() - $m, "\n";
+    /// $v = str_repeat('a', 40); $m = memory_get_usage(); ini_set('user_agent', $v); unset($v); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); ini_set('precision', '14'); ini_restore('user_agent'); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 40
+    /// 0
+    /// -120
+    /// ```
+    ///
+    /// The caller keeps its own owner: a native hands the string it was
+    /// passed, as `set_include_path()`, `mb_language()` and
+    /// `session_name()` hand theirs to `zend_alter_ini_entry`.
+    pub fn set_string(self, name: &[u8], value: PhpString) -> Result<Option<Vec<u8>>, Thrown> {
+        let allowed =
+            Request::ini_modifiable(name).0 && self.0.ini_user(name) && !self.0.ini_locked(name);
+        self.0
+            .ini_alter(name, Some(value.as_bytes()), allowed, Some(value))
+    }
+
+    /// `ini_restore()`, `zend_restore_ini_entry` at
+    /// `ZEND_INI_STAGE_RUNTIME` (`Z/Zend/zend_ini.c:360-381`): an entry
+    /// the request changed set back to the value it started with through
+    /// its rules, as `ini_set()` serves them, and changed no longer, so
+    /// the request's end leaves it be; one its rules refuse stays changed.
+    /// An entry `PHP_INI_USER` may not touch, or a host's
+    /// `php_admin_value` holds, is left as it is.
+    ///
+    /// ```php
+    /// ini_set('session.use_only_cookies', '1');
+    /// ini_restore('session.use_only_cookies');
+    /// var_dump(ini_get('session.use_only_cookies'));
+    /// ```
+    /// ```expect regime=session-startup
+    /// Deprecated: PHP Startup: Disabling session.use_only_cookies INI setting is deprecated in Unknown on line 0
+    ///
+    /// Deprecated: PHP Startup: Enabling session.use_trans_sid INI setting is deprecated in Unknown on line 0
+    ///
+    /// Deprecated: ini_restore(): Disabling session.use_only_cookies INI setting is deprecated in %s on line 3
+    /// string(1) "0"
+    /// ```
+    pub fn restore(self, name: &[u8]) -> Result<(), Thrown> {
+        let user = Request::ini_modifiable(name).0 && self.0.ini_user(name);
+        if !user || self.0.ini_locked(name) || !self.0.ini.changed.iter().any(|(n, ..)| n == name) {
+            return Ok(());
+        }
+        let original = self.0.shared.ini_default_value(name).map(<[u8]>::to_vec);
+        if self
+            .0
+            .ini_alter(name, original.as_deref(), true, None)?
+            .is_some()
+            && let Some(at) = self.0.ini.changed.iter().position(|(n, ..)| n == name)
+        {
+            self.0.ini.changed.remove(at);
+            self.0.ini_unmodified_bytes(at == self.0.ini.changed.len());
+        }
+        Ok(())
+    }
+
+    /// `zend_ini_sort_entries()` (`Z/Zend/zend_ini.c:195`), which
+    /// `phpinfo()` runs whatever it prints and `ini_get_all()` runs
+    /// before it looks the extension up: the table sorted by
+    /// [`ini_key_compare`], so every walk of it from here to the
+    /// request's end lists its entries sorted by name ([`IniOrder`]).
+    ///
+    /// ```php
+    /// $names = fn () => implode(' ', array_keys((new ReflectionExtension('iconv'))->getINIEntries())) . "\n";
+    /// echo $names(); @ini_get_all('nope'); echo $names();
+    /// ```
+    /// ```expect
+    /// iconv.input_encoding iconv.output_encoding iconv.internal_encoding
+    /// iconv.input_encoding iconv.internal_encoding iconv.output_encoding
+    /// ```
+    pub fn sort_entries(self) {
+        self.0.ini.order = IniOrder::Sorted;
+    }
+
+    /// `zend_ini_parse_quantity_warn` (`Z/Zend/zend_ini.c:859`) for the
+    /// entry `name` taking `value`: the quantity [`Ini::long`]
+    /// reads, and php's `Invalid "name" setting.` warning before the
+    /// rule's sentence where the rule interprets the value for backwards
+    /// compatibility, at `Unknown` on line 0 while the engine starts and
+    /// as the request ends, and where the program stands between. What
+    /// an entry declared with [`LongHandler`] is read by, and what a
+    /// handler an extension wrote reads its whole-number entry by, as
+    /// `OnUpdateSessionGcProbability` and `OnUpdateBacktrackLimit` do.
+    ///
+    /// ```php
+    /// var_dump(ini_set('error_log_mode', '0600 '), ini_set('error_log_mode', '7x'), ini_get('error_log_mode'));
+    /// ```
+    /// ```expect
+    /// Warning: Invalid "error_log_mode" setting. Invalid quantity "7x": unknown multiplier "x", interpreting as "7" for backwards compatibility in %s on line 2
+    /// string(4) "0644"
+    /// string(5) "0600 "
+    /// string(2) "7x"
+    /// ```
+    ///
+    /// The request's end restores what it changed through the same
+    /// handler, which reads the startup value again:
+    ///
+    /// ```php
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'error_log_mode=7x', '-r', 'ini_set("error_log_mode", "0600"); echo "end\n";'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]), proc_close($p), "\n";
+    /// ```
+    /// ```expect process
+    /// Warning: Invalid "error_log_mode" setting. Invalid quantity "7x": unknown multiplier "x", interpreting as "7" for backwards compatibility in Unknown on line 0
+    /// end
+    ///
+    /// Warning: Invalid "error_log_mode" setting. Invalid quantity "7x": unknown multiplier "x", interpreting as "7" for backwards compatibility in Unknown on line 0
+    /// 0
+    /// ```
+    pub fn parse_quantity_warn(self, name: &[u8], value: &[u8]) -> i64 {
+        let (quantity, sentence) = crate::ini_quantity::parse(value);
+        self.0.ini_setting_warn(name, sentence);
+        quantity
+    }
+
+    /// `cfg_get_entry` as `get_cfg_var()` hands it back
+    /// (`Z/ext/standard/basic_functions.c:1306`): the row of
+    /// `configuration_hash` under `name`, what the host's ini text set
+    /// before any entry read it, a string or the array its `name[]=`
+    /// lines built, as strings of the request's; `None` where the text
+    /// set nothing under the name, a default no text named included.
+    ///
+    /// ```php
+    /// var_dump(get_cfg_var('precision'), get_cfg_var('highlight.string'), get_cfg_var('nope'));
+    /// ```
+    /// ```expect
+    /// string(2) "14"
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn cfg_entry(self, name: &[u8]) -> Result<Option<Owner<Value>>, Thrown> {
+        let made = self.0.cfg_entry_made(name);
+        adopted_some(made)
+    }
+
     /// `DISPLAY_INI_ENTRIES()`, `display_ini_entries`
     /// (`Z/main/php_ini.c:115`), for the entries named, as an
     /// extension's `MINFO` ends with it: each with the request's value and
-    /// the engine's default ([`Request::info_ini_table`]).
+    /// the engine's default ([`Ini::info_ini_table`]).
     ///
     /// ```php
     /// @ini_set('iconv.output_encoding', 'ISO-8859-1');
@@ -1490,7 +1758,7 @@ impl Request {
     /// iconv.output_encoding => ISO-8859-1 => no value
     /// iconv.internal_encoding => no value => no value
     /// ```
-    pub fn info_ini_entries(&mut self, names: &[&[u8]]) {
+    pub fn info_ini_entries(self, names: &[&[u8]]) {
         let rows: Vec<[String; 3]> = names
             .iter()
             .map(|name| {
@@ -1499,8 +1767,8 @@ impl Request {
                 };
                 [
                     String::from_utf8_lossy(name).into_owned(),
-                    shown(self.ini_get(name)),
-                    shown(self.shared.ini_default(name)),
+                    shown(self.0.ini().get(name)),
+                    shown(self.0.shared.ini_default(name)),
                 ]
             })
             .collect();
@@ -1508,13 +1776,13 @@ impl Request {
             .iter()
             .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
             .collect();
-        self.info_ini_table(&rows);
+        self.0.ini_mut().info_ini_table(&rows);
     }
 
     /// `display_ini_entries(NULL)` (`Z/main/php_ini.c:131`): the entries
     /// no extension declared, the engine's own, in the table's order,
     /// which `phpinfo()` has sorted by name before it prints them
-    /// ([`Request::ini_sort_entries`]), each value through the entry's
+    /// ([`Ini::sort_entries`]), each value through the entry's
     /// displayer ([`IniDisplayer`]). What `PHP_MINFO_FUNCTION(php_core)` and
     /// `phpinfo()`'s `PHP Core` print.
     ///
@@ -1742,8 +2010,8 @@ impl Request {
     /// </table>
     /// </div></body></html>
     /// ```
-    pub fn core_ini_info(&mut self) {
-        let shared = Arc::clone(&self.shared);
+    pub fn core_ini_info(self) {
+        let shared = Arc::clone(&self.0.shared);
         let names: Vec<&[u8]> = shared
             .ini_defaults()
             .iter()
@@ -1754,44 +2022,16 @@ impl Request {
             .iter()
             .map(|name| {
                 let displayer = IniDisplayer::of(name);
-                let local = self.ini_get(name).unwrap_or_default();
+                let local = self.0.ini().get(name).unwrap_or_default();
                 let master = shared.ini_default(name).unwrap_or_default();
                 (
                     String::from_utf8_lossy(name).into_owned(),
-                    self.ini_display(displayer, local),
-                    self.ini_display(displayer, master),
+                    self.0.ini_display(displayer, local),
+                    self.0.ini_display(displayer, master),
                 )
             })
             .collect();
-        self.ini_table(&rows);
-    }
-
-    /// One value of a core entry as `php_ini_displayer_cb` shows it
-    /// through the entry's displayer (`Z/main/php_ini.c:67-111`).
-    fn ini_display(&self, displayer: IniDisplayer, value: &[u8]) -> IniCell {
-        let on_off = |on: bool| IniCell::Displayed(String::from(if on { "On" } else { "Off" }));
-        match displayer {
-            IniDisplayer::Plain => IniCell::Value(String::from_utf8_lossy(value).into_owned()),
-            IniDisplayer::Boolean => on_off(Request::ini_parse_bool(value)),
-            IniDisplayer::GcEnabled => on_off(self.gc_enabled()),
-            // `zend_ini_color_displayer_cb` under `zend_uv.html_errors`,
-            // which `php_module_startup` sets to 1 whatever the host is
-            // (`Z/main/main.c:2326`), so a colour is marked up in text too.
-            IniDisplayer::Color => {
-                let value = String::from_utf8_lossy(value);
-                IniCell::Displayed(format!("<span style=\"color: {value}\">{value}</span>"))
-            }
-            // `display_errors_mode`: the stream named where the host is
-            // `cli`, `cgi` or `phpdbg`, `On` under any other.
-            IniDisplayer::DisplayErrors => {
-                IniCell::Displayed(String::from(match display_errors_mode_of(Some(value)) {
-                    0 => "Off",
-                    _ if !self.host_writes_stderr() => "On",
-                    DISPLAY_ERRORS_STDERR => "STDERR",
-                    _ => "STDOUT",
-                }))
-            }
-        }
+        self.0.ini_table(&rows);
     }
 
     /// `display_ini_entries`' table (`Z/main/php_ini.c:115-146`) over
@@ -1828,7 +2068,7 @@ impl Request {
     /// ```
     ///
     /// The rows are listed in the order the table holds them
-    /// ([`Request::ini_sort_entries`]): as the extension registered its
+    /// ([`Ini::sort_entries`]): as the extension registered its
     /// entries, until the request's first `phpinfo()` or `ini_get_all()`
     /// sorts them by name.
     ///
@@ -1854,7 +2094,7 @@ impl Request {
     /// session.cache_expire => 180 => 180
     /// session.cache_limiter => nocache => nocache
     /// ```
-    pub fn info_ini_table(&mut self, rows: &[[&str; 3]]) {
+    pub fn info_ini_table(self, rows: &[[&str; 3]]) {
         let rows: Vec<(String, IniCell, IniCell)> = rows
             .iter()
             .map(|[name, local, master]| {
@@ -1865,210 +2105,7 @@ impl Request {
                 )
             })
             .collect();
-        self.ini_table(&rows);
-    }
-
-    /// [`Request::info_ini_table`] over cells a displayer may have
-    /// written ([`IniCell`]), the rows in the order the table holds
-    /// them ([`IniOrder`]): `display_ini_entries` walks
-    /// `EG(ini_directives)` for the extension's entries, so the rows it
-    /// hands over in its registration order are listed sorted
-    /// once the request has sorted the table.
-    fn ini_table(&mut self, rows: &[(String, IniCell, IniCell)]) {
-        if rows.is_empty() {
-            return;
-        }
-        let mut rows: Vec<&(String, IniCell, IniCell)> = rows.iter().collect();
-        self.ini
-            .order
-            .arrange(&mut rows, |(name, ..)| name.as_bytes());
-        let text = self.extensions().phpinfo_as_text();
-        let mut out = Vec::new();
-        let value = |out: &mut Vec<u8>, cell: &IniCell| match cell {
-            IniCell::Displayed(shown) => out.extend_from_slice(shown.as_bytes()),
-            IniCell::Value(shown) => match (shown.is_empty(), text) {
-                (true, true) => out.extend_from_slice(b"no value"),
-                (true, false) => out.extend_from_slice(b"<i>no value</i>"),
-                (false, true) => out.extend_from_slice(shown.as_bytes()),
-                (false, false) => php_compile::syntax::html_puts(out, shown.as_bytes()),
-            },
-        };
-        for (name, local, master) in rows {
-            if text {
-                out.extend_from_slice(name.as_bytes());
-                out.extend_from_slice(b" => ");
-                value(&mut out, local);
-                out.extend_from_slice(b" => ");
-                value(&mut out, master);
-                out.push(b'\n');
-            } else {
-                out.extend_from_slice(b"<tr><td class=\"e\">");
-                out.extend_from_slice(name.as_bytes());
-                out.extend_from_slice(b"</td><td class=\"v\">");
-                value(&mut out, local);
-                out.extend_from_slice(b"</td><td class=\"v\">");
-                value(&mut out, master);
-                out.extend_from_slice(b"</td></tr>\n");
-            }
-        }
-        self.extensions_mut().info_rows(&[
-            InfoRow::Header(&["Directive", "Local Value", "Master Value"]),
-            InfoRow::Written(&out),
-        ]);
-    }
-
-    /// One ini entry as php's `STR_PRINT(INI_STR(name))` reads it: its
-    /// bytes, and nothing at all where php left the entry `NULL`.
-    pub(super) fn ini_text(&self, name: &[u8]) -> String {
-        self.ini_get(name)
-            .map(|value| String::from_utf8_lossy(value).into_owned())
-            .unwrap_or_default()
-    }
-
-    pub(super) fn ini_number(&self, name: &[u8], default: i32) -> i32 {
-        self.ini_get(name)
-            .and_then(|value| String::from_utf8_lossy(value).parse().ok())
-            .unwrap_or(default)
-    }
-
-    /// The typed entries as this request holds them now ([`TypedIni`]).
-    pub(crate) fn typed_ini(&self) -> &TypedIni {
-        &self.ini.typed
-    }
-
-    pub(super) fn ini_parse_bytes_of(&self, name: &str) -> i64 {
-        self.ini_get(name.as_bytes())
-            .map_or(0, Request::ini_parse_bytes)
-    }
-
-    /// The php.ini files the engine read at startup ([`IniFiles`]).
-    #[must_use]
-    pub fn ini_files(&self) -> &IniFiles {
-        &self.shared.ini_files
-    }
-
-    /// One entry added to `EG(modified_ini_directives)`, which the
-    /// first lays down, `ALLOC_HASHTABLE` and `zend_hash_init(8)`, and
-    /// the first write gives its data; a `@` is the first change of a
-    /// request that changes no entry, and `error_clear_last()` gives
-    /// none of it back (the warning first stores a last error, whose
-    /// message the `@`'s replaces at its size):
-    ///
-    /// ```php
-    /// echo $w;
-    /// $m = memory_get_usage(); @$x; echo memory_get_usage() - $m, "\n";
-    /// $m = memory_get_usage(); ini_set('precision', '10'); echo memory_get_usage() - $m, "\n";
-    /// error_clear_last();
-    /// $m = memory_get_usage(); for ($i = 0; $i < 7; $i++) ini_set(['user_agent', 'arg_separator.output', 'default_socket_timeout', 'from', 'serialize_precision', 'highlight.string', 'highlight.comment'][$i], '1'); echo memory_get_usage() - $m, "\n";
-    /// ```
-    /// ```expect
-    /// Warning: Undefined variable $w in %s on line 2
-    /// 376
-    /// 0
-    /// 320
-    /// ```
-    fn ini_modified_bytes(&mut self) {
-        let table = match self.ini.bytes.take() {
-            Some(table) => Ok(table),
-            None => HashBytes::new_array(self, 8),
-        };
-        // The memory limit's fatal is recorded and ends the request.
-        if let Ok(mut table) = table {
-            table.add(self).ok();
-            self.ini.bytes = Some(table);
-        }
-    }
-
-    /// One entry deleted from `EG(modified_ini_directives)`, by
-    /// `ini_restore()`, the last of the table's where `last` says so.
-    fn ini_unmodified_bytes(&mut self, last: bool) {
-        if let Some(table) = self.ini.bytes.as_mut() {
-            table.del(last);
-        }
-    }
-
-    /// `zend_hash_destroy` and `FREE_HASHTABLE` of
-    /// `EG(modified_ini_directives)`, `zend_ini_deactivate`'s.
-    fn free_modified_ini_bytes(&mut self) {
-        if let Some(table) = self.ini.bytes.take() {
-            table.free(self);
-        }
-    }
-
-    /// `precision`, `EG(precision)`: the digits a float converts to a
-    /// string with, and compares at, as `OnSetPrecision` read the entry.
-    #[must_use]
-    pub fn precision(&self) -> i32 {
-        self.ini.typed.precision
-    }
-
-    /// `short_open_tag`, php's `CG(short_tags)`: whether a `<?` opens
-    /// code in the source this request compiles, which its scanner reads
-    /// at every tag it meets (`Z/Zend/zend_language_scanner.l:2331`).
-    /// php's built-in default is on (`DEFAULT_SHORT_OPEN_TAG`), which is
-    /// what an engine with no entry for it answers, and the entry is
-    /// `PHP_INI_SYSTEM|PHP_INI_PERDIR`, so no `ini_set()` of the
-    /// request's moves it. `token_get_all` reads the same entry, which
-    /// is why it is the request's and not the engine's alone.
-    pub(crate) fn short_open_tag(&self) -> bool {
-        self.ini.typed.short_open_tag
-    }
-
-    /// `EG(assertions)`, php's `zend.assertions` read as
-    /// `OnUpdateAssertions` reads it (`zend_ini_parse_quantity_warn`):
-    /// `1` compiles and runs an assertion, `0` compiles it behind an
-    /// `ASSERT_CHECK` that jumps over it, and `-1` compiles nothing of it.
-    /// What `ini_set()` and `ini_restore()` leave is what the next
-    /// compile reads:
-    ///
-    /// ```php
-    /// ini_set('zend.assertions', '0'); eval('assert(false); echo "skipped\n";');
-    /// ini_restore('zend.assertions');
-    /// try { eval('assert(false);'); } catch (AssertionError $e) { echo get_class($e), "\n"; }
-    /// ```
-    /// ```expect capture
-    /// skipped
-    /// AssertionError
-    /// ```
-    pub(crate) fn assertions(&self) -> i64 {
-        self.ini.typed.assertions
-    }
-
-    /// `OnUpdateAssertions` (`Z/Zend/zend.c:156-172`) for an
-    /// `ini_set()`: a value that moves the entry to or from a negative
-    /// one is php's warning and a refusal that keeps the entry as it
-    /// was, since what is compiled already was compiled under it; any
-    /// other value is taken.
-    ///
-    /// ```php
-    /// var_dump(ini_get('zend.assertions'), ini_set('zend.assertions', '-1'), ini_set('zend.assertions', '0'), ini_get('zend.assertions'), ini_set('zend.assertions', '1'));
-    /// ```
-    /// ```expect
-    /// Warning: zend.assertions may be completely enabled or disabled only in php.ini in %s on line 2
-    /// string(1) "1"
-    /// bool(false)
-    /// string(1) "1"
-    /// string(1) "0"
-    /// string(1) "0"
-    /// ```
-    fn assertions_updated(&mut self, value: &[u8]) -> bool {
-        let (current, next) = (self.assertions(), Request::ini_parse_bytes(value));
-        if current != next && (current < 0 || next < 0) {
-            crate::api::raising::warning(
-                self,
-                "zend.assertions may be completely enabled or disabled only in php.ini",
-            );
-            return false;
-        }
-        true
-    }
-
-    /// `serialize_precision`, what `var_dump`, `var_export`, `serialize`
-    /// and `json_encode` print a float at; -1, its default, asks for the
-    /// shortest text that reads back as the same double.
-    #[must_use]
-    pub fn serialize_precision(&self) -> i32 {
-        self.ini.typed.serialize_precision
+        self.0.ini_table(&rows);
     }
 }
 

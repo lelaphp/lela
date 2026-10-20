@@ -880,7 +880,7 @@ pub(crate) struct Shared {
     pub(crate) host: &'static str,
     /// `configuration_hash`: what the host's ini text set, before any
     /// entry read it, which `get_cfg_var()` answers from
-    /// ([`Request::cfg_entry`]).
+    /// ([`Ini::cfg_entry`]).
     configuration: Vec<(Vec<u8>, Configured)>,
     /// Whether it holds a `[PATH=]` table and a `[HOST=]` table.
     sections: [bool; 2],
@@ -1785,7 +1785,7 @@ impl Shared {
         kind: SourceKind,
     ) -> Result<Unit, CompileError> {
         let ini = CompileIni {
-            precision: req.precision(),
+            precision: req.ini().precision(),
             short_open_tag: req.short_open_tag(),
             assertions: req.assertions() >= 0,
             shebang: self.shebang,
@@ -1827,7 +1827,10 @@ impl Shared {
     /// reads at its start, and what a unit compiled outside one is held
     /// to on the thread that asked for it.
     pub(crate) fn stack_limit(&self) -> StackLimit {
-        let bytes = |name: &[u8]| self.ini_default(name).map_or(0, Request::ini_parse_bytes);
+        let bytes = |name: &[u8]| {
+            self.ini_default(name)
+                .map_or(0, crate::api::request::Ini::parse_bytes)
+        };
         StackLimit::init(
             bytes(b"zend.max_allowed_stack_size"),
             u64::try_from(bytes(b"zend.reserved_stack_size")).unwrap_or(0),
@@ -2880,14 +2883,15 @@ fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
             // `main.c` declares `report_memleaks` after `max_input_time`.
             b"max_input_time"
                 if req
-                    .ini_get(b"report_memleaks")
-                    .is_some_and(|v| !Request::ini_parse_bool(v)) =>
+                    .ini()
+                    .get(b"report_memleaks")
+                    .is_some_and(|v| !crate::api::request::Ini::parse_bool(v)) =>
             {
                 let message = "Directive 'report_memleaks' is deprecated";
                 crate::api::raising::docref(req, Level::Deprecated, message);
             }
             b"memory_limit" => {
-                let limit = req.ini_get(name).map(<[u8]>::to_vec).unwrap_or_default();
+                let limit = req.ini().get(name).map(<[u8]>::to_vec).unwrap_or_default();
                 let held = match req.memory_limit_verdict(&limit) {
                     Some(held) if held == limit => continue,
                     Some(held) => held,
@@ -2947,7 +2951,7 @@ fn register_extensions(req: &mut Request, loads: &Loads) -> Vec<u8> {
     const NO_LOADER: &str = "dynamic modules are not supported";
     // php's messages are bytes throughout: a directory or a name that is
     // not UTF-8 is written as it was set.
-    let dir = req.ini_get(b"extension_dir").unwrap_or_default().to_vec();
+    let dir = req.ini().get(b"extension_dir").unwrap_or_default().to_vec();
     let sep: &[u8] = if dir.ends_with(b"/") { b"" } else { b"/" };
     let so = crate::constants::SHLIB_SUFFIX.as_bytes();
     let no = NO_LOADER.as_bytes();
@@ -3014,7 +3018,8 @@ fn register_extensions(req: &mut Request, loads: &Loads) -> Vec<u8> {
 /// startup warning for each the list names, which keeps it.
 fn disable_warnings(req: &mut Request) {
     let list = req
-        .ini_get(b"disable_functions")
+        .ini()
+        .get(b"disable_functions")
         .map(<[u8]>::to_vec)
         .unwrap_or_default();
     let names = list.split(|byte| matches!(byte, b' ' | b','));
@@ -3570,7 +3575,7 @@ impl EngineBuilder {
             ini.iter()
                 .find(|(n, _)| n.as_slice() == name.as_bytes())
                 .and_then(|(_, value)| value.as_deref())
-                .is_some_and(Request::ini_parse_bool)
+                .is_some_and(crate::api::request::Ini::parse_bool)
         };
         let shebang = match self.shebang_while {
             Some(name) if on(name) => php_compile::Shebang::Skipped,
@@ -6050,7 +6055,7 @@ pub(crate) fn refusal_raised(req: &mut Request, refused: &CompileError, file: &[
 /// ([`Request::require_kept`]), and served where the program is, and
 /// whether it ran to its end; an entry left empty is nothing to serve.
 pub(crate) fn auto_file(req: &mut Request, name: &[u8], entry: Loop) -> bool {
-    let Some(file) = req.ini_get(name).filter(|file| !file.is_empty()) else {
+    let Some(file) = req.ini().get(name).filter(|file| !file.is_empty()) else {
         return true;
     };
     let file = file.to_vec();
@@ -6564,7 +6569,7 @@ mod tests {
     #[test]
     fn a_startup_handler_sees_the_entries_before_it_and_its_stderr_is_kept() {
         let second: OnModify = |req, value| {
-            let mut line = req.ini_get(b"t.first").unwrap_or_default().to_vec();
+            let mut line = req.ini().get(b"t.first").unwrap_or_default().to_vec();
             line.extend_from_slice(b" then ");
             line.extend_from_slice(value.unwrap_or_default());
             line.push(b'\n');
@@ -6648,7 +6653,7 @@ mod tests {
                 file_cache: None,
             })
             .post_startup(|req, _| {
-                let script = req.ini_get(b"t.preload").unwrap_or_default().to_vec();
+                let script = req.ini().get(b"t.preload").unwrap_or_default().to_vec();
                 if script.is_empty() {
                     crate::api::abi::PostStartup::Serve
                 } else {
@@ -6757,7 +6762,7 @@ mod tests {
         crate::api::abi::ExtensionBuilder::default()
             .ini(vec![entry])
             .admission(|req, _| {
-                let dir = req.ini_get(b"t.file_cache").unwrap_or_default();
+                let dir = req.ini().get(b"t.file_cache").unwrap_or_default();
                 crate::api::abi::Admission::Held {
                     validation: Validation::Never,
                     lookup: crate::api::abi::Lookup::Resolved,

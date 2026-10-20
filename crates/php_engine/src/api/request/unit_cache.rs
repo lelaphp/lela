@@ -216,7 +216,7 @@ impl Request {
         Some(UnitKey::relative(
             written,
             self.cwd.as_os_str().as_encoded_bytes(),
-            self.ini_get(b"include_path").unwrap_or_default(),
+            self.ini().get(b"include_path").unwrap_or_default(),
             self.current_file(),
         ))
     }

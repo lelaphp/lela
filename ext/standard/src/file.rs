@@ -152,7 +152,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, raise, throw_error,
 };
 use php_ext::request::{
-    MAXPATHLEN, OptionAnswer, OwnedStream as _, Request, Resolve, Stream, StreamOption,
+    Ini, MAXPATHLEN, OptionAnswer, OwnedStream as _, Request, Resolve, Stream, StreamOption,
     Streams as _, Whence, WrapperOp,
 };
 use php_ext::values::walk::{self, Hold};
@@ -190,7 +190,7 @@ pub(crate) fn on_auto_detect_line_endings(
     value: Option<&[u8]>,
 ) -> Result<bool, Thrown> {
     let value = value.unwrap_or_default();
-    if Request::ini_parse_bool(value) {
+    if Ini::parse_bool(value) {
         raise(
             req,
             Level::Deprecated,

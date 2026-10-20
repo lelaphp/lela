@@ -57,7 +57,7 @@ use php_ext::abi::{
 use php_ext::attr::php_const;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref, new_throwable, throw_error, throw_value};
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::values::{ClassId, Emalloc, Owner, PhpObject, PhpString, Value};
 use php_ext_mysqlnd::client::{CLIENT_INFO, Idle, Mysqlnd, ReverseApi};
 
@@ -390,7 +390,7 @@ fn mysqli_info(req: &mut Request) {
     // `DISPLAY_INI_ENTRIES`, each entry through its displayer:
     // `display_link_numbers` for the two limits, the boolean one for the
     // three `STD_PHP_INI_BOOLEAN`s.
-    let entries = req.ini_entries();
+    let entries = req.ini().entries();
     let shown = |name: &str, value: &[u8]| -> String {
         match name {
             "mysqli.max_links" | "mysqli.max_persistent" => {
@@ -405,11 +405,9 @@ fn mysqli_info(req: &mut Request) {
             }
             "mysqli.allow_persistent"
             | "mysqli.rollback_on_cached_plink"
-            | "mysqli.allow_local_infile" => String::from(if Request::ini_parse_bool(value) {
-                "On"
-            } else {
-                "Off"
-            }),
+            | "mysqli.allow_local_infile" => {
+                String::from(if Ini::parse_bool(value) { "On" } else { "Off" })
+            }
             _ => String::from_utf8_lossy(value).into_owned(),
         }
     };
@@ -430,7 +428,7 @@ fn mysqli_info(req: &mut Request) {
         .iter()
         .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
         .collect();
-    req.info_ini_table(&cells);
+    req.ini_mut().info_ini_table(&cells);
 }
 
 // ---- what every class shares
@@ -707,12 +705,13 @@ pub(crate) fn add_facts(
 /// The ini entry as `OnUpdateString` keeps it: `None` for no value or an
 /// empty one.
 pub(crate) fn ini_string(req: &Request, name: &[u8]) -> Option<Vec<u8>> {
-    req.ini_get(name)
+    req.ini()
+        .get(name)
         .filter(|v| !v.is_empty())
         .map(<[u8]>::to_vec)
 }
 
 /// The ini entry as `OnUpdateBool` reads it.
 pub(crate) fn ini_bool(req: &Request, name: &[u8]) -> bool {
-    req.ini_get(name).is_some_and(Request::ini_parse_bool)
+    req.ini().get(name).is_some_and(Ini::parse_bool)
 }

@@ -280,7 +280,7 @@ fn loaded(req: &mut Request) -> Result<(), Thrown> {
         return Ok(());
     }
     req.state::<State>().browscap.loaded = true;
-    let Some(file) = req.ini_get(b"browscap").map(<[u8]>::to_vec) else {
+    let Some(file) = req.ini().get(b"browscap").map(<[u8]>::to_vec) else {
         return Ok(());
     };
     if file.is_empty() {

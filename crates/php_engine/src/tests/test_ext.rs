@@ -539,7 +539,7 @@ impl<const N: u8> TestExt<N> {
         let Some(value) = value else {
             return Ok(false);
         };
-        let on = Request::ini_parse_bool(value);
+        let on = crate::api::request::Ini::parse_bool(value);
         let standing = req.state::<AllocationSlot<N>>().0.take();
         let standing = match (on, standing) {
             (true, None) => Some(

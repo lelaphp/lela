@@ -79,7 +79,8 @@ impl Request {
     /// php's process global stays off.
     pub(crate) fn realpath_cache_startup(&mut self) {
         if self
-            .ini_get(b"open_basedir")
+            .ini()
+            .get(b"open_basedir")
             .is_some_and(|list| !list.is_empty())
         {
             self.shared.realpath_cache.turn_off();

@@ -124,7 +124,7 @@ fn dba_info(req: &mut Request) {
         &["DBA support", "enabled"],
         &["Supported handlers", &handlers],
     ]);
-    req.info_ini_entries(&[DEFAULT_HANDLER]);
+    req.ini_mut().info_ini_entries(&[DEFAULT_HANDLER]);
 }
 
 /// `OnUpdateDefaultHandler`: empty selects none; any other value must
@@ -157,7 +157,7 @@ fn on_update_default_handler(req: &mut Request, value: Option<&[u8]>) -> Result<
 
 /// `DBA_G(default_hptr)`: the handler `dba.default_handler` names.
 fn default_handler(req: &Request) -> Option<Handler> {
-    req.ini_get(DEFAULT_HANDLER).and_then(Handler::named)
+    req.ini().get(DEFAULT_HANDLER).and_then(Handler::named)
 }
 
 /// A link's slot in the request's table, `dba_info *`.

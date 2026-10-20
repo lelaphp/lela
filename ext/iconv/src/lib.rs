@@ -200,7 +200,8 @@ fn info(req: &mut Request) {
         &["iconv library version", "1.11"],
     ]);
     let names = Kind::ALL.map(Kind::entry);
-    req.info_ini_entries(&names.each_ref().map(String::as_bytes));
+    req.ini_mut()
+        .info_ini_entries(&names.each_ref().map(String::as_bytes));
 }
 
 /// `OnUpdateInputEncoding`, `OnUpdateOutputEncoding` and
@@ -230,7 +231,7 @@ fn on_modify(req: &mut Request, kind: Kind, value: &[u8]) -> bool {
     if value.len() >= MAX_NAME {
         return false;
     }
-    if matches!(req.ini_stage(), IniStage::Activate | IniStage::Runtime) {
+    if matches!(req.ini().stage(), IniStage::Activate | IniStage::Runtime) {
         let text = format!("Use of {} is deprecated", kind.entry());
         docref(req, Level::Deprecated, &text);
     }
@@ -263,7 +264,8 @@ fn encoding(req: &Request, kind: Kind) -> Vec<u8> {
     [own.as_bytes(), kind.name().as_bytes(), b"default_charset"]
         .iter()
         .find_map(|name| {
-            req.ini_get(name)
+            req.ini()
+                .get(name)
                 .filter(|v| !v.is_empty())
                 .map(<[u8]>::to_vec)
         })
@@ -745,7 +747,8 @@ fn ob_iconv_handler(
             }
             ContentType::Held(_) | ContentType::Unset => None,
             ContentType::Default => Some(
-                req.ini_get(b"default_mimetype")
+                req.ini()
+                    .get(b"default_mimetype")
                     .map_or_else(|| b"text/html".to_vec(), <[u8]>::to_vec),
             ),
         };
@@ -812,7 +815,8 @@ fn iconv_set_encoding(
     };
     // The entry's rule ([`on_modify`]) raises its deprecation.
     Ok(req
-        .ini_set_string(kind.entry().as_bytes(), encoding)?
+        .ini_mut()
+        .set_string(kind.entry().as_bytes(), encoding)?
         .is_some())
 }
 

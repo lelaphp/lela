@@ -436,7 +436,7 @@ impl VarHash {
 /// string(2) "60"
 /// ```
 fn default_depth(req: &Request) -> i64 {
-    req.ini_long(b"unserialize_max_depth")
+    req.ini().long(b"unserialize_max_depth")
 }
 
 /// One reader over one string, php's `p` and `max` beside the var hash
@@ -2143,7 +2143,8 @@ impl State<'_> {
     /// ```
     fn callback(req: &mut Request, name: &[u8]) -> Result<bool, Thrown> {
         let Some(function) = req
-            .ini_get(b"unserialize_callback_func")
+            .ini()
+            .get(b"unserialize_callback_func")
             .map(<[u8]>::to_vec)
             .filter(|f| !f.is_empty())
         else {

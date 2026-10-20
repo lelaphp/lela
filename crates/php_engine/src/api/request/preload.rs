@@ -942,7 +942,8 @@ impl Request {
     /// at no file and no line, as php's startup raises them.
     pub(crate) fn preload_unopened(&mut self, script: &[u8]) {
         let include_path =
-            String::from_utf8_lossy(self.ini_get(b"include_path").unwrap_or_default()).into_owned();
+            String::from_utf8_lossy(self.ini().get(b"include_path").unwrap_or_default())
+                .into_owned();
         let path = self
             .cwd()
             .join(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(script));

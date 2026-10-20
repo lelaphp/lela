@@ -16,7 +16,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::call::{call, call_array, call_named, fetch_constant};
 use php_ext::coerce::{c_str, numeric_string, with_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error, warning};
-use php_ext::request::{OwnedStream as _, Request, ScannerFile, Streams as _};
+use php_ext::request::{Ini, OwnedStream as _, Request, ScannerFile, Streams as _};
 use php_ext::syntax::Scanning;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpString, Value, ValueRef};
@@ -282,7 +282,7 @@ fn getenv(
 /// ```
 pub(crate) fn minfo(req: &mut Request) {
     let sendmail =
-        String::from_utf8_lossy(req.ini_get(b"sendmail_path").unwrap_or_default()).into_owned();
+        String::from_utf8_lossy(req.ini().get(b"sendmail_path").unwrap_or_default()).into_owned();
     req.extensions_mut().info_table(&[
         &["Dynamic Library Support", "unavailable"],
         &["Path to sendmail", &sendmail],
@@ -298,13 +298,14 @@ pub(crate) fn minfo(req: &mut Request) {
         b"assert.exception",
     ];
     let rows: Vec<[String; 3]> = req
+        .ini()
         .extension_ini(me)
         .into_iter()
         .map(|entry| {
             let name: &[u8] = &entry.decl.name.0;
             let boolean = booleans.contains(&name);
             let shown = |value: &[u8]| match boolean {
-                true if Request::ini_parse_bool(value) => String::from("On"),
+                true if Ini::parse_bool(value) => String::from("On"),
                 true => String::from("Off"),
                 false => String::from_utf8_lossy(value).into_owned(),
             };
@@ -319,7 +320,7 @@ pub(crate) fn minfo(req: &mut Request) {
         .iter()
         .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
         .collect();
-    req.info_ini_table(&rows);
+    req.ini_mut().info_ini_table(&rows);
 }
 
 /// `putenv(string $assignment): bool`: `NAME=value` sets the variable
@@ -626,10 +627,10 @@ fn set_include_path(
     include_path: Path,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Path(path) = include_path;
-    let Some(old) = req.ini_get(b"include_path").map(<[u8]>::to_vec) else {
+    let Some(old) = req.ini().get(b"include_path").map(<[u8]>::to_vec) else {
         return Ok(OrFalse::False);
     };
-    if path.is_empty() || req.ini_set_string(b"include_path", path)?.is_none() {
+    if path.is_empty() || req.ini_mut().set_string(b"include_path", path)?.is_none() {
         return Ok(OrFalse::False);
     }
     PhpString::new(req, &old).map(OrFalse::Value)
@@ -648,7 +649,7 @@ fn set_include_path(
 /// ```
 #[php_function]
 fn get_include_path(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    match req.ini_get(b"include_path").map(<[u8]>::to_vec) {
+    match req.ini().get(b"include_path").map(<[u8]>::to_vec) {
         Some(path) => PhpString::new(req, &path).map(OrFalse::Value),
         None => Ok(OrFalse::False),
     }
@@ -1263,7 +1264,7 @@ pub fn php_get_current_user(req: &mut Request) -> Vec<u8> {
 
 /// `get_cfg_var(string $option): string|array|false`: the row of
 /// `configuration_hash` under the name, what the host's ini text set,
-/// with the array `name[]=` lines build ([`Request::cfg_entry`]); `false`
+/// with the array `name[]=` lines build ([`Ini::cfg_entry`]); `false`
 /// where the text set nothing, a default included.
 ///
 /// ```php
@@ -1280,7 +1281,7 @@ fn get_cfg_var(
     req: &mut Request,
     option: PhpString,
 ) -> Result<Union<Owner<PhpString>, OrFalse<Owner<PhpArray>>>, Thrown> {
-    let Some(entry) = req.cfg_entry(option.as_bytes())? else {
+    let Some(entry) = req.ini_mut().cfg_entry(option.as_bytes())? else {
         return Ok(Union::B(OrFalse::False));
     };
     let answer = match entry.as_ref() {
@@ -1404,7 +1405,7 @@ fn error_log(
 /// `ini_get_all(?string $extension = null, bool $details = true):
 /// array|false`, php's `PHP_FUNCTION(ini_get_all)`: `EG(ini_directives)`
 /// sorted by `zend_ini_sort_entries`, a case-blind comparison of the
-/// names, for the rest of the request ([`Request::ini_sort_entries`]),
+/// names, for the rest of the request ([`Ini::sort_entries`]),
 /// before the extension is looked up, each entry as its current value
 /// or, with `$details`, as its `global_value`, `local_value` and
 /// `access`; with an extension named
@@ -1468,8 +1469,8 @@ fn ini_get_all(
     #[php(default = null)] extension: Option<PhpString>,
     #[php(default = true)] details: bool,
 ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-    req.ini_sort_entries();
-    let mut entries = req.ini_entries();
+    req.ini_mut().sort_entries();
+    let mut entries = req.ini().entries();
     if let Some(name) = extension {
         let name = name.as_bytes();
         let registered = name.iter().all(|c| !c.is_ascii_uppercase());
@@ -1522,7 +1523,7 @@ fn ini_value(req: &mut Request, value: Option<&[u8]>) -> Result<Owner<Value>, Th
 }
 
 /// `ini_restore(string $option): void`, `zend_restore_ini_entry` at
-/// runtime ([`Request::ini_restore`]): an entry the request changed set
+/// runtime ([`Ini::restore`]): an entry the request changed set
 /// back to the value it started with, through the entry's own
 /// `on_modify`, and no longer changed; an entry it did not change, or
 /// one `PHP_INI_USER` may not touch, is left as it is.
@@ -1542,12 +1543,12 @@ fn ini_value(req: &mut Request, value: Option<&[u8]>) -> Result<Owner<Value>, Th
 /// ```
 #[php_function]
 fn ini_restore(req: &mut Request, option: PhpString) -> Result<(), Thrown> {
-    req.ini_restore(option.as_bytes())
+    req.ini_mut().restore(option.as_bytes())
 }
 
 /// `ini_parse_quantity(string $shorthand): int`: the quantity as an ini
 /// entry reads one, `zend_ini_parse_quantity`
-/// ([`Request::ini_parse_quantity`]), with the sentence it says of a
+/// ([`Ini::parse_quantity`]), with the sentence it says of a
 /// shape it interprets raised as a warning.
 ///
 /// ```php
@@ -1562,7 +1563,7 @@ fn ini_restore(req: &mut Request, option: PhpString) -> Result<(), Thrown> {
 /// ```
 #[php_function]
 fn ini_parse_quantity(req: &mut Request, shorthand: PhpString) -> i64 {
-    let (value, said) = Request::ini_parse_quantity(shorthand.as_bytes());
+    let (value, said) = Ini::parse_quantity(shorthand.as_bytes());
     if let Some(said) = said {
         warning(req, &said);
     }
@@ -1626,10 +1627,12 @@ fn ignore_user_abort(
     #[php(default = null)] enable: Option<bool>,
 ) -> Result<i64, Thrown> {
     let old = req
-        .ini_get(b"ignore_user_abort")
-        .is_some_and(Request::ini_parse_bool);
+        .ini()
+        .get(b"ignore_user_abort")
+        .is_some_and(Ini::parse_bool);
     if let Some(enable) = enable {
-        req.ini_set(b"ignore_user_abort", if enable { b"1" } else { b"0" })?;
+        req.ini_mut()
+            .set(b"ignore_user_abort", if enable { b"1" } else { b"0" })?;
     }
     Ok(i64::from(old))
 }

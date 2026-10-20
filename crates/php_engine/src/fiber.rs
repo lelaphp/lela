@@ -1560,8 +1560,10 @@ fn stack_size(req: &Request) -> usize {
     if let Some(size) = req.fibers().stack_size {
         return size;
     }
-    match req.ini_value(b"fiber.stack_size") {
-        Some(value) => usize::try_from(Request::ini_parse_bytes(value)).unwrap_or(DEFAULT_STACK),
+    match req.ini().value(b"fiber.stack_size") {
+        Some(value) => {
+            usize::try_from(crate::api::request::Ini::parse_bytes(value)).unwrap_or(DEFAULT_STACK)
+        }
         None => DEFAULT_STACK,
     }
 }
@@ -1589,7 +1591,7 @@ pub(crate) fn stack_size_updated(req: &mut Request, value: Option<&[u8]>) -> boo
         req.fibers_mut().stack_size = Some(DEFAULT_STACK);
         return true;
     };
-    let size = Request::ini_parse_bytes(value);
+    let size = crate::api::request::Ini::parse_bytes(value);
     let Ok(size) = usize::try_from(size) else {
         crate::api::raising::warning(req, "fiber.stack_size must be a positive number");
         return false;
@@ -2303,8 +2305,8 @@ fn lay_down<P: HoldsCoroutine>(
     body: impl FnOnce(&mut Request) -> Result<CoroutineEnd, Thrown> + 'static,
 ) -> Result<(), Thrown> {
     let size = stack_size(req);
-    let reserved = u64::try_from(Request::ini_parse_bytes(
-        req.ini_get(b"zend.reserved_stack_size").unwrap_or(b"0"),
+    let reserved = u64::try_from(crate::api::request::Ini::parse_bytes(
+        req.ini().get(b"zend.reserved_stack_size").unwrap_or(b"0"),
     ))
     .unwrap_or(0);
     let stack = FiberStack::new(size, move |req: &mut Request, _first: Transfer| {

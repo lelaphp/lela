@@ -47,7 +47,7 @@ use php_ext::abi::{Extension, ExtensionBuilder, Union};
 use php_ext::attr::{php_const, php_function};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::values::{Emalloc, Owner, PhpArray, PhpString};
 
 use constants::{
@@ -137,11 +137,7 @@ impl Default for Limits {
             jit: false,
         };
         for (name, default) in INI {
-            limits.update(
-                name.as_bytes(),
-                default.as_bytes(),
-                Request::ini_parse_bytes,
-            );
+            limits.update(name.as_bytes(), default.as_bytes(), Ini::parse_bytes);
         }
         limits
     }
@@ -156,7 +152,7 @@ impl Limits {
             b"pcre.backtrack_limit" => &mut self.backtrack,
             b"pcre.recursion_limit" => &mut self.recursion,
             b"pcre.jit" => {
-                self.jit = Request::ini_parse_bool(value);
+                self.jit = Ini::parse_bool(value);
                 return;
             }
             _ => return,
@@ -177,8 +173,8 @@ fn limit(value: i64) -> u32 {
 fn rinit(req: &mut Request) -> Result<(), Thrown> {
     let mut limits = Limits::default();
     for (name, _) in INI {
-        if let Some(value) = req.ini_get(name.as_bytes()) {
-            limits.update(name.as_bytes(), value, Request::ini_parse_bytes);
+        if let Some(value) = req.ini().get(name.as_bytes()) {
+            limits.update(name.as_bytes(), value, Ini::parse_bytes);
         }
     }
     req.state::<State>().limits = limits;
@@ -207,7 +203,7 @@ fn on_update<const AT: usize>(req: &mut Request, value: Option<&[u8]>) -> Result
     let (name, _) = INI[AT];
     let mut limits = req.state::<State>().limits;
     limits.update(name.as_bytes(), value.unwrap_or_default(), |value| {
-        req.ini_parse_quantity_warn(name.as_bytes(), value)
+        req.ini_mut().parse_quantity_warn(name.as_bytes(), value)
     });
     req.state::<State>().limits = limits;
     Ok(true)
@@ -625,7 +621,7 @@ fn pcre_info(req: &mut Request) {
         .iter()
         .enumerate()
         .map(|(at, (name, default))| {
-            let local = req.ini_get(name.as_bytes()).unwrap_or(default.as_bytes());
+            let local = req.ini().get(name.as_bytes()).unwrap_or(default.as_bytes());
             let master = master
                 .as_ref()
                 .map_or(default.as_bytes(), |m| m[at].as_slice());
@@ -641,7 +637,7 @@ fn pcre_info(req: &mut Request) {
         .iter()
         .map(|[a, b, c]| [a.as_str(), b.as_str(), c.as_str()])
         .collect();
-    req.info_ini_table(&borrowed);
+    req.ini_mut().info_ini_table(&borrowed);
 }
 
 /// An ini value as its displayer shows it: `On` or `Off` through
@@ -649,12 +645,7 @@ fn pcre_info(req: &mut Request) {
 /// which `display_ini_entries` shows as `no value` where it is empty.
 fn shown(value: &[u8], boolean: bool) -> String {
     if boolean {
-        return if Request::ini_parse_bool(value) {
-            "On"
-        } else {
-            "Off"
-        }
-        .to_owned();
+        return if Ini::parse_bool(value) { "On" } else { "Off" }.to_owned();
     }
     String::from_utf8_lossy(value).into_owned()
 }

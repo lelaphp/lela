@@ -44,7 +44,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::{value_name, with_string};
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::{Thrown, arg_type_error, throw_error, warning};
-use php_ext::request::{BodyLimits, Request};
+use php_ext::request::{BodyLimits, Ini, Request};
 use php_ext::values::walk;
 use php_ext::values::walk::Hold;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -166,7 +166,7 @@ fn body_limits(req: &mut Request, options: PhpArray) -> Result<Vec<(Limit, i64)>
         let value = value.deref();
         let quantity = match value.as_ref() {
             ValueRef::Str(text) => {
-                let (quantity, said) = Request::ini_parse_quantity(text.as_bytes());
+                let (quantity, said) = Ini::parse_quantity(text.as_bytes());
                 if let Some(said) = said {
                     warning(req, &said);
                 }
@@ -499,7 +499,8 @@ fn http_build_query(
     let separator: Vec<u8> = match arg_separator {
         Some(s) => s.as_bytes().to_vec(),
         None => req
-            .ini_get(b"arg_separator.output")
+            .ini()
+            .get(b"arg_separator.output")
             .filter(|v| !v.is_empty())
             .map_or_else(|| b"&".to_vec(), <[u8]>::to_vec),
     };

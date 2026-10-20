@@ -18,7 +18,7 @@ use crate::api::abi::{Beneath, chain};
 use crate::api::raising::Thrown;
 use crate::api::values::{Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, adopted};
 
-use super::{Hooks, Request};
+use super::{Hooks, Ini, Request};
 
 /// The request's memory facet (design §4.4): what its heap has served
 /// and lends to C, the collector's roots, the objects it keeps for a C
@@ -630,12 +630,12 @@ impl Request {
 
     /// An entry `zend_ini_parse_uquantity` reads, `-1` the largest size.
     fn limit_bytes(&self, name: &[u8]) -> usize {
-        Request::limit_of(self.ini_get(name).unwrap_or_default())
+        Request::limit_of(self.ini().get(name).unwrap_or_default())
     }
 
     /// `value` as `zend_ini_parse_uquantity` reads a limit, as `size_t`.
     fn limit_of(value: &[u8]) -> usize {
-        let (bytes, _) = Request::ini_parse_uquantity(value);
+        let (bytes, _) = Ini::parse_uquantity(value);
         usize::try_from(bytes).unwrap_or(usize::MAX)
     }
 
@@ -668,7 +668,7 @@ impl Request {
                     ),
                 );
             }
-            return self.ini_get(b"max_memory_limit").map(<[u8]>::to_vec);
+            return self.ini().get(b"max_memory_limit").map(<[u8]>::to_vec);
         }
         if !self.heap.set_memory_limit(wanted.min(usize::MAX >> 1)) {
             let usage = self.heap.memory_usage(true);

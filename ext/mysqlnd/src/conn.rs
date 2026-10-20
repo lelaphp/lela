@@ -268,7 +268,8 @@ impl ConnData {
     /// is the memory limit's fatal.
     pub(crate) fn new(req: &mut Request, persistent: bool) -> Result<ConnData, Thrown> {
         let ini = |req: &Request, name: &[u8], default: u32| -> u32 {
-            req.ini_get(name)
+            req.ini()
+                .get(name)
                 .and_then(|v| std::str::from_utf8(v).ok())
                 .and_then(|v| v.trim().parse::<i64>().ok())
                 .map_or(default, |v| {
@@ -286,7 +287,7 @@ impl ConnData {
         let vio = alloc(req, VIO)?;
         // The two `OnUpdateLong` entries' quantities, cut to `unsigned int`.
         let quantity = |req: &Request, name: &[u8]| -> u32 {
-            u32::try_from(req.ini_long(name) & 0xFFFF_FFFF).unwrap_or(u32::MAX)
+            u32::try_from(req.ini().long(name) & 0xFFFF_FFFF).unwrap_or(u32::MAX)
         };
         net.options.net_read_buffer_size = quantity(req, b"mysqlnd.net_read_buffer_size");
         net.options.timeout_read = quantity(req, b"mysqlnd.net_read_timeout");

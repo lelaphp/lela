@@ -8,7 +8,7 @@
 
 use php_ext::abi::{Beneath, Compiled, chain};
 use php_ext::raising::Thrown;
-use php_ext::request::{OwnedStream as _, Request, Streams as _};
+use php_ext::request::{Ini, OwnedStream as _, Request, Streams as _};
 use php_ext::values::{Owner, Value};
 
 use crate::archive::{
@@ -34,14 +34,14 @@ type Verified = Result<(u32, Option<Vec<u8>>), String>;
 
 /// `PHAR_G(readonly)`, the `phar.readonly` entry as it stands.
 pub(crate) fn readonly(req: &Request) -> bool {
-    req.ini_get(b"phar.readonly")
-        .is_none_or(Request::ini_parse_bool)
+    req.ini().get(b"phar.readonly").is_none_or(Ini::parse_bool)
 }
 
 /// `PHAR_G(require_hash)`.
 pub(crate) fn require_hash(req: &Request) -> bool {
-    req.ini_get(b"phar.require_hash")
-        .is_none_or(Request::ini_parse_bool)
+    req.ini()
+        .get(b"phar.require_hash")
+        .is_none_or(Ini::parse_bool)
 }
 
 /// `PHAR_G(has_zlib)` and `has_bz2`: whether the extension is loaded.

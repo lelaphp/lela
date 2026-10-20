@@ -13,7 +13,7 @@ use php_ext::raising::{
     Level, Thrown, argument_error, docref, fatal, throw, throw_error, throw_error_chained,
     while_pending,
 };
-use php_ext::request::{Foreign, Request, Resolve, Streams as _};
+use php_ext::request::{Foreign, Ini, Request, Resolve, Streams as _};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_pdo_sqlite::BlobStream;
 use php_ext_pdo_sqlite::ffi::{
@@ -475,8 +475,9 @@ fn open(req: &mut Request, object: PhpObject, filename: &[u8], flags: i64) -> Re
         }
     };
     if req
-        .ini_get(b"sqlite3.defensive")
-        .is_some_and(Request::ini_parse_bool)
+        .ini()
+        .get(b"sqlite3.defensive")
+        .is_some_and(Ini::parse_bool)
     {
         Db::of(&owner).defensive(req);
     }
@@ -675,7 +676,8 @@ fn load_extension(
     name: &[u8],
 ) -> Result<bool, Thrown> {
     let dir = req
-        .ini_get(b"sqlite3.extension_dir")
+        .ini()
+        .get(b"sqlite3.extension_dir")
         .unwrap_or_default()
         .to_vec();
     if dir.is_empty() {

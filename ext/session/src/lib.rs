@@ -42,7 +42,7 @@ use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, Into
 use php_ext::attr::php_const;
 use php_ext::coerce::c_str;
 use php_ext::raising::{Cause, Level, Thrown, docref};
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::values::{Owner, PhpArray, PhpRef, PhpString, Value};
 
 use crate::natives::{
@@ -314,14 +314,15 @@ fn session_info(req: &mut Request) {
         .iter()
         .map(|(name, default, kind)| {
             let shown = |value: &[u8]| match kind {
-                ini::Kind::Bool | ini::Kind::PerDirBool if Request::ini_parse_bool(value) => {
+                ini::Kind::Bool | ini::Kind::PerDirBool if Ini::parse_bool(value) => {
                     String::from("On")
                 }
                 ini::Kind::Bool | ini::Kind::PerDirBool => String::from("Off"),
                 _ => String::from_utf8_lossy(value).into_owned(),
             };
             let local = req
-                .ini_get(name.as_bytes())
+                .ini()
+                .get(name.as_bytes())
                 .map_or_else(|| shown(default.as_bytes()), shown);
             [(*name).to_owned(), local, shown(default.as_bytes())]
         })
@@ -330,7 +331,7 @@ fn session_info(req: &mut Request) {
         .iter()
         .map(|[n, l, m]| [n.as_str(), l.as_str(), m.as_str()])
         .collect();
-    req.info_ini_table(&rows);
+    req.ini_mut().info_ini_table(&rows);
 }
 
 // ------------------------------------------------------------ helpers
@@ -347,12 +348,12 @@ fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown>
 
 /// An ini entry's text, the engine default where the request set none.
 fn ini(req: &Request, name: &[u8]) -> Vec<u8> {
-    req.ini_get(name).map(<[u8]>::to_vec).unwrap_or_default()
+    req.ini().get(name).map(<[u8]>::to_vec).unwrap_or_default()
 }
 
 /// A boolean entry as `OnUpdateBool` stores it.
 fn ini_bool(req: &Request, name: &[u8]) -> bool {
-    Request::ini_parse_bool(&ini(req, name))
+    Ini::parse_bool(&ini(req, name))
 }
 
 /// `php_session_session_already_started_error`: the message, then where

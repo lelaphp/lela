@@ -1287,7 +1287,7 @@ impl Request {
             ValueRef::Bool(b) => out.push_str(if b { "true" } else { "false" }),
             ValueRef::Int(n) => out.push_str(&n.to_string()),
             ValueRef::Float(f) => {
-                let precision = match self.precision() {
+                let precision = match self.ini().precision() {
                     0 => 1,
                     precision => precision,
                 };

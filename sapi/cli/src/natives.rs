@@ -18,7 +18,7 @@ use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_function;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::values::{Owner, PhpArray, PhpString};
 use php_sapi::EngineBuilder;
 
@@ -139,10 +139,10 @@ const COLOR: &str = "cli_server.color";
 /// ```
 fn server_info(req: &mut Request) {
     let shown = |value: Option<&[u8]>| {
-        let on = Request::ini_parse_bool(value.unwrap_or_default());
+        let on = Ini::parse_bool(value.unwrap_or_default());
         if on { "On" } else { "Off" }
     };
-    let entries = req.ini_entries();
+    let entries = req.ini().entries();
     let Some(entry) = entries
         .iter()
         .find(|entry| entry.decl.name.0.as_ref() == COLOR.as_bytes())
@@ -153,7 +153,7 @@ fn server_info(req: &mut Request) {
         shown(entry.value.as_deref()),
         shown(entry.master.as_deref()),
     );
-    req.info_ini_table(&[[COLOR, local, master]]);
+    req.ini_mut().info_ini_table(&[[COLOR, local, master]]);
 }
 
 /// `cli_set_process_title(string $title): bool`

@@ -1216,7 +1216,7 @@ pub fn export(
     } else if let Some(f) = value.as_float() {
         // `smart_str_append_double` with `zero_fraction`: the text, and
         // `.0` after a finite one that carries no point of its own.
-        let text = float_format(f, req.serialize_precision(), Exponent::Upper);
+        let text = float_format(f, req.ini().serialize_precision(), Exponent::Upper);
         out.put(req, text.as_bytes())?;
         if f.is_finite() && !text.contains('.') {
             out.put(req, b".0")?;

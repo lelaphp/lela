@@ -341,7 +341,8 @@ impl Connector for Driver {
     /// ```
     fn open(&self, req: &mut Request, source: &Source<'_>) -> Result<Box<dyn Connection>, Failure> {
         let socket = req
-            .ini_get(b"pdo_mysql.default_socket")
+            .ini()
+            .get(b"pdo_mysql.default_socket")
             .map(<[u8]>::to_vec)
             .filter(|s| !s.is_empty());
         let vars = parse_data_source(

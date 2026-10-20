@@ -277,7 +277,8 @@ impl Request {
     #[must_use]
     pub fn temp_dir(&self) -> PathBuf {
         let chosen = self
-            .ini_get(b"sys_temp_dir")
+            .ini()
+            .get(b"sys_temp_dir")
             .filter(|dir| !dir.is_empty() && *dir != b"/")
             .or_else(|| self.env(b"TMPDIR").filter(|dir| !dir.is_empty()))
             .map(|dir| dir.strip_suffix(b"/").unwrap_or(dir));

@@ -2,7 +2,7 @@
 //! reading of a whole-number ini value: what `OnUpdateLong` stores,
 //! what `ini_parse_quantity()` answers, and the sentence php's `errstr`
 //! holds for a shape it interprets for backwards compatibility.
-//! [`Request::ini_parse_quantity`](crate::api::request::Request::ini_parse_quantity)
+//! [`Ini::parse_quantity`](crate::api::request::Ini::parse_quantity)
 //! is its face, and the witnesses stand there.
 
 use crate::c_number::is_whitespace;

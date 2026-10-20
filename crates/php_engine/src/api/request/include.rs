@@ -997,7 +997,7 @@ impl Request {
     /// answers, the witness there.
     pub fn export_tree(&mut self, source: &[u8]) -> Result<Vec<u8>, Thrown> {
         let options = php_compile::Options {
-            precision: self.precision(),
+            precision: self.ini().precision(),
             short_open_tag: self.short_open_tag(),
             ..php_compile::Options::default()
         };
@@ -1162,7 +1162,8 @@ impl Request {
         written: &[u8],
     ) -> Result<Opened, Thrown> {
         let include_path =
-            String::from_utf8_lossy(self.ini_get(b"include_path").unwrap_or_default()).into_owned();
+            String::from_utf8_lossy(self.ini().get(b"include_path").unwrap_or_default())
+                .into_owned();
         let shown = String::from_utf8_lossy(written).into_owned();
         if kind.required() {
             return Err(crate::api::raising::throw_error(

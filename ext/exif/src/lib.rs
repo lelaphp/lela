@@ -167,7 +167,7 @@ fn exif_info(req: &mut Request) {
         ],
     ]);
     let names: Vec<&[u8]> = INI.iter().map(|(name, _)| *name).collect();
-    req.info_ini_entries(&names);
+    req.ini_mut().info_ini_entries(&names);
 }
 
 /// `OnUpdateEncode`: a non-empty value must parse as an encoding list.
@@ -200,7 +200,8 @@ fn parses(req: &mut Request, value: &[u8]) -> bool {
 /// The `exif.*` entries as the request holds them.
 fn encodings(req: &Request) -> EncodingNames {
     let get = |at: usize| {
-        req.ini_get(INI[at].0)
+        req.ini()
+            .get(INI[at].0)
             .map(<[u8]>::to_vec)
             .unwrap_or_default()
     };

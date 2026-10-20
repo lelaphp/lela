@@ -175,7 +175,8 @@ fn sapi_filter(
         string_init(req, value)?
     };
     let default = req
-        .ini_get(b"filter.default")
+        .ini()
+        .get(b"filter.default")
         .and_then(|named| {
             FILTERS
                 .iter()
@@ -188,7 +189,8 @@ fn sapi_filter(
         // `OnUpdateFlags`: no value is `FILTER_FLAG_NO_ENCODE_QUOTES`, any
         // value its `atoi`, so the empty string is 0.
         let flags = req
-            .ini_value(b"filter.default_flags")
+            .ini()
+            .value(b"filter.default_flags")
             .map_or(FILTER_FLAG_NO_ENCODE_QUOTES, |value| i64::from(atoi(value)));
         let run = Run {
             flags,
@@ -516,11 +518,11 @@ fn filter_info(req: &mut Request) {
     req.extensions_mut()
         .info_table(&[&["Input Validation and Filtering", "enabled"]]);
     let shown = |req: &Request, name: &[u8]| {
-        String::from_utf8_lossy(req.ini_get(name).unwrap_or_default()).into_owned()
+        String::from_utf8_lossy(req.ini().get(name).unwrap_or_default()).into_owned()
     };
     let default = shown(req, b"filter.default");
     let flags = shown(req, b"filter.default_flags");
-    req.info_ini_table(&[
+    req.ini_mut().info_ini_table(&[
         ["filter.default", &default, &default],
         ["filter.default_flags", &flags, &flags],
     ]);

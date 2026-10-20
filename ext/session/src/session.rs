@@ -625,8 +625,8 @@ pub(super) fn gc(req: &mut Request, immediate: bool) -> Result<i64, Thrown> {
     let Some(module) = state.module else {
         return Ok(-1);
     };
-    let probability = req.ini_long(b"session.gc_probability");
-    let divisor = req.ini_long(b"session.gc_divisor").max(1);
+    let probability = req.ini().long(b"session.gc_probability");
+    let divisor = req.ini().long(b"session.gc_divisor").max(1);
     let mut collect = immediate;
     if !collect && probability > 0 {
         let mut draw = [0u8; 8];
@@ -639,7 +639,7 @@ pub(super) fn gc(req: &mut Request, immediate: bool) -> Result<i64, Thrown> {
     if !collect {
         return Ok(-1);
     }
-    let maxlifetime = req.ini_long(b"session.gc_maxlifetime");
+    let maxlifetime = req.ini().long(b"session.gc_maxlifetime");
     let collected = module_gc(req, module, maxlifetime);
     Ok(absorb(req, collected)?.unwrap_or(-1))
 }
@@ -978,7 +978,7 @@ fn send_cookie(req: &mut Request, id: &[u8]) -> bool {
     cookie.extend_from_slice(&ini(req, b"session.name"));
     cookie.push(b'=');
     cookie.extend_from_slice(&url_encode(id));
-    let lifetime = req.ini_long(b"session.cookie_lifetime");
+    let lifetime = req.ini().long(b"session.cookie_lifetime");
     if lifetime > 0 {
         let t = now().saturating_add(lifetime);
         if t > 0 {
@@ -1040,7 +1040,7 @@ fn cache_limiter(req: &mut Request) -> Result<i32, Thrown> {
         );
         return Ok(-2);
     }
-    let expire = req.ini_long(b"session.cache_expire").saturating_mul(60);
+    let expire = req.ini().long(b"session.cache_expire").saturating_mul(60);
     let limiter = c_str(&limiter).to_ascii_lowercase();
     let past = "Expires: Thu, 19 Nov 1981 08:52:00 GMT".to_owned();
     let private = format!("Cache-Control: private, max-age={expire}");

@@ -15,7 +15,7 @@ use crate::api::call::Function;
 use crate::api::raising::Level;
 use crate::api::values::ClassId;
 
-use super::{ExtensionId, Request};
+use super::{ExtensionId, Ini, Request};
 
 /// The request's extensions facet (design §4.4): the bundle as the
 /// request sees it: each extension's name, version, natives, constants,
@@ -358,7 +358,7 @@ impl Extensions<&mut Request> {
             .extensions_mut()
             .info_table(&[&["Version", module.version]]);
         let names: Vec<&[u8]> = module.ini.iter().map(|entry| &*entry.name.0).collect();
-        self.0.info_ini_entries(&names);
+        self.0.ini_mut().info_ini_entries(&names);
     }
 
     /// `php_info_print_table_start`, one `php_info_print_table_row` per
@@ -480,11 +480,7 @@ impl Extensions<&mut Request> {
     /// links its extensions at build and has no loader for a C library
     /// built against php's extension API (`trace:dl-no-loader`).
     pub fn dl(self, extension_filename: &[u8]) -> bool {
-        if !self
-            .0
-            .ini_get(b"enable_dl")
-            .is_some_and(Request::ini_parse_bool)
-        {
+        if !self.0.ini().get(b"enable_dl").is_some_and(Ini::parse_bool) {
             crate::api::raising::docref(
                 self.0,
                 Level::Warning,

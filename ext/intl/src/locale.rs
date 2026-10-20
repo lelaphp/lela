@@ -772,7 +772,7 @@ fn set_default(req: &mut Request, locale: Path) -> Result<bool, Thrown> {
         b"" => ffi::default_locale().as_bytes().to_vec(),
         locale => locale.to_vec(),
     };
-    req.ini_set(crate::DEFAULT_LOCALE, &locale)?;
+    req.ini_mut().set(crate::DEFAULT_LOCALE, &locale)?;
     Ok(true)
 }
 

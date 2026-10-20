@@ -296,7 +296,7 @@ pub(crate) fn info(req: &mut Request) {
 /// string(6) "100000"
 /// ```
 fn limits(req: &Request) -> (Option<u32>, Option<u32>) {
-    let read = |name: &[u8]| -> Option<u32> { u32::try_from(req.ini_long(name)).ok() };
+    let read = |name: &[u8]| -> Option<u32> { u32::try_from(req.ini().long(name)).ok() };
     (
         read(b"mbstring.regex_stack_limit"),
         read(b"mbstring.regex_retry_limit"),

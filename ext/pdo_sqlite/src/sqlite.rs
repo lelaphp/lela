@@ -265,7 +265,9 @@ fn open_db(req: &mut Request, source: &Source<'_>) -> Result<Foreign<Conn>, Fail
 
 /// Whether `open_basedir` is set, `PG(open_basedir) && *PG(open_basedir)`.
 pub(super) fn open_basedir(req: &Request) -> bool {
-    req.ini_get(b"open_basedir").is_some_and(|v| !v.is_empty())
+    req.ini()
+        .get(b"open_basedir")
+        .is_some_and(|v| !v.is_empty())
 }
 
 /// `make_filename_safe`: a `file:` URI as given, refused under

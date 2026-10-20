@@ -17,7 +17,7 @@ use php_ext::decl::{Attribute, FunctionDecl, Name, Type};
 use php_ext::raising::{
     Thrown, arg_type_error, arg_value_error, fatal, throw, throw_error, warning,
 };
-use php_ext::request::{Request, Stream};
+use php_ext::request::{Ini, Request, Stream};
 use php_ext::syntax::Position;
 use php_ext::values::{
     Owner, PhpArray, PhpObject, PhpString, Resource, ResourceType, Value, ValueRef,
@@ -857,7 +857,7 @@ fn zend_call_method_if_exists(
 /// ```
 #[php_function]
 fn zend_test_zend_ini_parse_quantity(req: &mut Request, str: PhpString) -> i64 {
-    let (value, refused) = Request::ini_parse_quantity(str.as_bytes());
+    let (value, refused) = Ini::parse_quantity(str.as_bytes());
     if let Some(sentence) = refused {
         warning(req, &sentence);
     }
@@ -879,7 +879,7 @@ fn zend_test_zend_ini_parse_quantity(req: &mut Request, str: PhpString) -> i64 {
 /// ```
 #[php_function]
 fn zend_test_zend_ini_parse_uquantity(req: &mut Request, str: PhpString) -> i64 {
-    let (value, refused) = Request::ini_parse_uquantity(str.as_bytes());
+    let (value, refused) = Ini::parse_uquantity(str.as_bytes());
     if let Some(sentence) = refused {
         warning(req, &sentence);
     }
@@ -900,7 +900,7 @@ fn zend_test_zend_ini_parse_uquantity(req: &mut Request, str: PhpString) -> i64 
 /// ```
 #[php_function]
 fn zend_test_zend_ini_str(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
-    let value = req.ini_get(crate::STR_TEST).unwrap_or_default().to_vec();
+    let value = req.ini().get(crate::STR_TEST).unwrap_or_default().to_vec();
     PhpString::new(req, &value)
 }
 

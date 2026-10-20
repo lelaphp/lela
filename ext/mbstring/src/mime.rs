@@ -14,7 +14,7 @@ use crate::text::{new_string, same, value_error};
 use php_ext::abi::{Path, Union};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::values::{Owner, PhpArray, PhpString};
 
 /// `MBSTRING_HEADER_ENC_WCHAR_BUFSIZE`.
@@ -798,8 +798,9 @@ fn mb_send_mail(
         }
     };
     let mixed = req
-        .ini_get(b"mail.mixed_lf_and_crlf")
-        .is_some_and(Request::ini_parse_bool);
+        .ini()
+        .get(b"mail.mixed_lf_and_crlf")
+        .is_some_and(Ini::parse_bool);
     let line_sep: &[u8] = if mixed { b"\n" } else { b"\r\n" };
     let subject_bytes = subject.0.as_bytes();
     let indent = i64::try_from("Subject: [PHP-jp nnnnnnnn]".len() + line_sep.len()).unwrap_or(0);
@@ -860,7 +861,8 @@ fn mb_send_mail(
     // `zend_ini_str_ex`: a value, even the empty one, is forced over
     // the parameters, as `mail()` forces it.
     let forced = req
-        .ini_value(b"mail.force_extra_parameters")
+        .ini()
+        .value(b"mail.force_extra_parameters")
         .map(<[u8]>::to_vec);
     let extra = match forced.or_else(|| additional_params.map(|p| p.0.as_bytes().to_vec())) {
         Some(extra) => Some(php_ext_standard::php_escape_shell_cmd(req, &extra)?),

@@ -273,7 +273,8 @@ impl Request {
     /// ```
     fn make(&mut self, global: AutoGlobal) -> Result<(), Thrown> {
         let order = self
-            .ini_get(b"variables_order")
+            .ini()
+            .get(b"variables_order")
             .map(<[u8]>::to_ascii_uppercase)
             .unwrap_or_default();
         let array = match global {
@@ -342,7 +343,7 @@ impl Request {
     /// `php_auto_globals_create_request` (`Z/main/php_variables.c:920`):
     /// `$_GET`, `$_POST` and `$_COOKIE` as their tracks hold them, merged
     /// in the order `request_order` names them, or `variables_order`
-    /// where that has no value (`NULL`, [`Request::ini_value`]), each
+    /// where that has no value (`NULL`, [`Ini::value`]), each
     /// once; so a `request_order` set empty, by a pool's
     /// `php_admin_value` or a `.user.ini`, merges none of them.
     ///
@@ -362,10 +363,11 @@ impl Request {
     /// [{"a":"1"},[],""]
     /// ```
     fn form_variables(&mut self) -> Result<Owner<PhpArray>, Thrown> {
-        let order = match self.ini_value(b"request_order") {
+        let order = match self.ini().value(b"request_order") {
             Some(order) => order.to_vec(),
             None => self
-                .ini_get(b"variables_order")
+                .ini()
+                .get(b"variables_order")
                 .unwrap_or_default()
                 .to_vec(),
         };
@@ -869,13 +871,14 @@ impl Request {
         let separators = match input {
             Input::Cookie => b";".to_vec(),
             _ => self
-                .ini_get(b"arg_separator.input")
+                .ini()
+                .get(b"arg_separator.input")
                 .unwrap_or(b"&")
                 .to_vec(),
         };
         let max_input_vars = limits
             .max_input_vars
-            .unwrap_or_else(|| self.ini_long(b"max_input_vars"));
+            .unwrap_or_else(|| self.ini().long(b"max_input_vars"));
         let mut count = 0i64;
         for mut var in source
             .split(|b| separators.contains(b))
@@ -948,7 +951,7 @@ impl Request {
         }
         let max_input_vars = limits
             .max_input_vars
-            .unwrap_or_else(|| self.ini_long(b"max_input_vars"));
+            .unwrap_or_else(|| self.ini().long(b"max_input_vars"));
         let mut rest = body;
         let mut count = 0i64;
         while !rest.is_empty() {
@@ -1117,7 +1120,7 @@ impl Request {
                 // keeps off the screen.
                 value.give_up(self);
                 if let Walked::TooDeep(max_nesting) = walked
-                    && super::diagnostics::display_errors_mode_of(self.ini_get(b"display_errors"))
+                    && super::diagnostics::display_errors_mode_of(self.ini().get(b"display_errors"))
                         == 0
                 {
                     docref(
@@ -1156,7 +1159,7 @@ impl Request {
     ) -> Result<Walked, Thrown> {
         let track = place.track;
         let original = place.original;
-        let max_nesting = self.ini_long(b"max_input_nesting_level");
+        let max_nesting = self.ini().long(b"max_input_nesting_level");
         let mut nest = 0i64;
         loop {
             nest += 1;

@@ -118,7 +118,8 @@ pub(crate) fn script_encoding(req: &mut Request, value: &[u8]) -> Option<Vec<Enc
 /// list, and whether the entry was refused.
 pub(crate) fn startup(req: &mut Request) -> (Vec<Encoding>, Startup) {
     let value = req
-        .ini_get(b"zend.script_encoding")
+        .ini()
+        .get(b"zend.script_encoding")
         .map(<[u8]>::to_vec)
         .unwrap_or_default();
     if value.is_empty() {

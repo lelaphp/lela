@@ -341,7 +341,7 @@ impl Request {
         let Ok(string) = crate::api::coerce::int_to_string(self, seconds) else {
             return false;
         };
-        let set = self.ini_set_string(b"max_execution_time", *string);
+        let set = self.ini_mut().set_string(b"max_execution_time", *string);
         string.give_up(self);
         set.is_ok_and(|previous| previous.is_some())
     }
@@ -355,7 +355,7 @@ impl Request {
     /// `EG(hard_timeout)`, `OnUpdateLong` over the startup ini: the
     /// seconds past a timeout the timer gives the loop to take it.
     fn hard_timeout(&self) -> i64 {
-        self.ini_long(b"hard_timeout")
+        self.ini().long(b"hard_timeout")
     }
 }
 

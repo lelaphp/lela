@@ -11,7 +11,8 @@
 
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{
-    FilterChain, Opening, OwnedStream, Request, Standard, Stream, StreamOps, StreamWrapper, Streams,
+    FilterChain, Ini, Opening, OwnedStream, Request, Standard, Stream, StreamOps, StreamWrapper,
+    Streams,
 };
 use php_ext::values::Owner;
 
@@ -114,8 +115,9 @@ fn url_wrap_php(
 fn include_refused(req: &mut Request, opening: Opening) -> bool {
     let refused = opening.for_include
         && !req
-            .ini_get(b"allow_url_include")
-            .is_none_or(Request::ini_parse_bool);
+            .ini()
+            .get(b"allow_url_include")
+            .is_none_or(Ini::parse_bool);
     if refused && opening.warn {
         docref(
             req,

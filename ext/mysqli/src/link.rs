@@ -227,7 +227,7 @@ impl Target {
             port: args
                 .port
                 .filter(|p| *p != 0)
-                .unwrap_or_else(|| req.ini_long(b"mysqli.default_port")),
+                .unwrap_or_else(|| req.ini().long(b"mysqli.default_port")),
             socket: unempty(args.socket).or_else(|| ini_string(req, b"mysqli.default_socket")),
             persistent,
         }
@@ -406,8 +406,8 @@ fn end_psession(req: &mut Request, handle: Mysqlnd) -> Result<bool, Thrown> {
 /// 0
 /// ```
 fn over_limit(req: &mut Request, persistent: bool) -> Option<String> {
-    let max_links = req.ini_long(b"mysqli.max_links");
-    let max_persistent = req.ini_long(b"mysqli.max_persistent");
+    let max_links = req.ini().long(b"mysqli.max_links");
+    let max_persistent = req.ini().long(b"mysqli.max_persistent");
     let state = req.state::<State>();
     let persistent_links = state.num_active_persistent;
     let persistent_links = persistent_links + crate::num_inactive_persistent(req);

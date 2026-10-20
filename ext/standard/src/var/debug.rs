@@ -264,7 +264,7 @@ fn dump(req: &mut Request, value: &Value, level: usize) -> Result<(), Thrown> {
         ValueRef::Null | ValueRef::Undef => req.write(b"NULL\n"),
         ValueRef::Int(n) => req.write(format!("int({n})\n").as_bytes()),
         ValueRef::Float(f) => {
-            let text = float_format(f, req.serialize_precision(), Exponent::Upper);
+            let text = float_format(f, req.ini().serialize_precision(), Exponent::Upper);
             req.write(format!("float({text})\n").as_bytes());
         }
         ValueRef::Str(s) => {

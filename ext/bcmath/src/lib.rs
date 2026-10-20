@@ -104,7 +104,7 @@ pub fn extension() -> Extension {
 fn bcmath_info(req: &mut Request) {
     req.extensions_mut()
         .info_table(&[&["BCMath support", "enabled"]]);
-    req.info_ini_entries(&[SCALE]);
+    req.ini_mut().info_ini_entries(&[SCALE]);
 }
 
 /// `OnUpdateScale`: the value read as `zend_ini_parse_quantity_warn`
@@ -114,14 +114,16 @@ fn bcmath_info(req: &mut Request) {
     reason = "the `on_modify` slot's shape, which a handler that throws needs"
 )]
 fn on_update_scale(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
-    let scale = req.ini_parse_quantity_warn(SCALE, value.unwrap_or_default());
+    let scale = req
+        .ini_mut()
+        .parse_quantity_warn(SCALE, value.unwrap_or_default());
     Ok((0..=i64::from(i32::MAX)).contains(&scale))
 }
 
 /// `BCG(bc_precision)`: the scale `bcmath.scale` holds, which
 /// [`on_update_scale`] accepted.
 fn default_scale(req: &Request) -> usize {
-    usize::try_from(req.ini_long(SCALE))
+    usize::try_from(req.ini().long(SCALE))
         .unwrap_or(0)
         .min(INT_MAX)
 }
@@ -600,7 +602,7 @@ fn bcscale(req: &mut Request, #[php(default = null)] scale: Option<i64>) -> Resu
         let scale = check_scale(req, scale, 1)?;
         // `zend_long_to_str`'s string, which the entry keeps.
         let text = php_ext::coerce::int_to_string(req, i64::try_from(scale).unwrap_or(i64::MAX))?;
-        let set = req.ini_set_string(SCALE, *text);
+        let set = req.ini_mut().set_string(SCALE, *text);
         text.give_up(req);
         set?;
     }

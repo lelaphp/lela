@@ -65,7 +65,7 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
             // `zend_double_to_str`: the text, then the warning php raises
             // when the value it converted was NAN.
             let text =
-                req.string(double_to_string(f, req.precision(), Exponent::Upper).as_bytes())?;
+                req.string(double_to_string(f, req.ini().precision(), Exponent::Upper).as_bytes())?;
             text.mark_valid_utf8();
             if f.is_nan() {
                 warning(req, "unexpected NAN value was coerced to string");
@@ -3104,7 +3104,7 @@ pub(crate) fn compare(req: &mut Request, left: &Value, right: &Value) -> Result<
 #[inline(never)]
 fn compare_values(req: &mut Request, left: &Value, right: &Value) -> Result<Ordering, Thrown> {
     if let (Some(a), Some(b)) = (scalar(left), scalar(right)) {
-        return Ok(php_heap::compare(a, b, req.precision()));
+        return Ok(php_heap::compare(a, b, req.ini().precision()));
     }
     Ok(match (left.as_ref(), right.as_ref()) {
         (ValueRef::Object(a), ValueRef::Object(b)) if a == b => Ordering::Equal,
@@ -3153,7 +3153,7 @@ fn compare_values(req: &mut Request, left: &Value, right: &Value) -> Result<Orde
             .unwrap_or(Ordering::Greater),
         (ValueRef::Array(_), _) => Ordering::Greater,
         (_, ValueRef::Array(_)) => Ordering::Less,
-        (a, b) => php_heap::compare(silent_number(a), silent_number(b), req.precision()),
+        (a, b) => php_heap::compare(silent_number(a), silent_number(b), req.ini().precision()),
     })
 }
 

@@ -19,7 +19,7 @@ use php_ext::abi::{Passed, Path, Union};
 use php_ext::attr::php_function;
 use php_ext::coerce::{c_str, is_space, value_name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
-use php_ext::request::{FormatDate, OwnedStream as _, Request, Streams as _};
+use php_ext::request::{FormatDate, Ini, OwnedStream as _, Request, Streams as _};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
@@ -280,7 +280,7 @@ pub fn php_mail(
     headers: Option<&[u8]>,
     extra_cmd: Option<&[u8]>,
 ) -> Result<bool, Thrown> {
-    let ini = |req: &Request, name: &[u8]| req.ini_get(name).map(<[u8]>::to_vec);
+    let ini = |req: &Request, name: &[u8]| req.ini().get(name).map(<[u8]>::to_vec);
     let mail_log = ini(req, b"mail.log").filter(|log| !log.is_empty());
     let file = req.current_file().unwrap_or(b"").to_vec();
     if let Some(log) = mail_log {
@@ -328,8 +328,9 @@ pub fn php_mail(
     let line_sep: &[u8] = match mode.as_deref() {
         Some(b"lf" | b"mixed" | b"os") => b"\n",
         _ if req
-            .ini_get(b"mail.mixed_lf_and_crlf")
-            .is_some_and(Request::ini_parse_bool) =>
+            .ini()
+            .get(b"mail.mixed_lf_and_crlf")
+            .is_some_and(Ini::parse_bool) =>
         {
             b"\n"
         }
@@ -337,8 +338,9 @@ pub fn php_mail(
     };
     let mut hdr = headers.map(<[u8]>::to_vec);
     if req
-        .ini_get(b"mail.add_x_header")
-        .is_some_and(Request::ini_parse_bool)
+        .ini()
+        .get(b"mail.add_x_header")
+        .is_some_and(Ini::parse_bool)
     {
         let base = file
             .rsplit(|c| *c == b'/')
@@ -506,7 +508,7 @@ pub fn php_mail(
 /// ```
 ///
 /// `mail.force_extra_parameters` read as `zend_ini_str_ex` reads it
-/// ([`Request::ini_value`]): with no value the program's parameters are
+/// ([`Ini::value`]): with no value the program's parameters are
 /// handed on, and any value, the empty string among them, stands in
 /// their place.
 ///
@@ -556,7 +558,8 @@ fn mail(
     // `zend_ini_str_ex`: a value, even the empty one, is forced over
     // the parameters; no value leaves them.
     let forced = req
-        .ini_value(b"mail.force_extra_parameters")
+        .ini()
+        .value(b"mail.force_extra_parameters")
         .map(<[u8]>::to_vec);
     let extra = match forced.or(extra) {
         Some(extra) => Some(crate::exec::escape_shell_cmd(req, &extra)?),

@@ -500,7 +500,7 @@ pub(super) fn to_xml_double(
         return Ok(ret);
     }
     let d = to_double(req, &data)?;
-    let s = float_format(d, req.precision(), Exponent::Upper);
+    let s = float_format(d, req.ini().precision(), Exponent::Upper);
     ret.set_content_len(s.as_bytes());
     if style == Use::Encoded {
         set_ns_and_type(req, ret, &e.e);

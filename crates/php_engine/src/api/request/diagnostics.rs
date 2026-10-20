@@ -19,7 +19,7 @@ use crate::api::values::{Charset, Owner, PhpArray, PhpString, Value, ValueRef, a
 use crate::supplied::Bail;
 use crate::supplied::chain::ErrorArgs;
 
-use super::{Phase, Raised, Request, zone};
+use super::{Ini, Phase, Raised, Request, zone};
 use crate::c_number::strtol;
 
 /// The request's diagnostics facet (design §4.4): what the request
@@ -273,7 +273,7 @@ impl Request {
         use std::io::Write as _;
         use std::os::unix::fs::OpenOptionsExt as _;
         let syslog = self.registered::<Syslog>().next().copied();
-        let named = self.ini_get(b"error_log").unwrap_or_default();
+        let named = self.ini().get(b"error_log").unwrap_or_default();
         if let (b"syslog", Some(Syslog(syslog))) = (named, syslog) {
             syslog(self, priority, entry);
             return false;
@@ -283,7 +283,7 @@ impl Request {
             return true;
         }
         let path = self.cwd().join(std::ffi::OsStr::from_bytes(named));
-        let mode = self.ini_long(b"error_log_mode");
+        let mode = self.ini().long(b"error_log_mode");
         let mode = u32::try_from(mode)
             .ok()
             .filter(|mode| (1..=0o777).contains(mode))
@@ -998,14 +998,11 @@ impl Request {
     /// "
     /// ```
     fn log_errors(&self) -> bool {
-        let off = |name: &[u8]| {
-            self.ini_get(name)
-                .is_some_and(|v| !Request::ini_parse_bool(v))
-        };
+        let off = |name: &[u8]| self.ini().get(name).is_some_and(|v| !Ini::parse_bool(v));
         self.ini_flag(b"log_errors")
             || (self.diagnostics.display_direct
                 && (off(b"display_startup_errors")
-                    || display_errors_mode_of(self.ini_get(b"display_errors")) == 0))
+                    || display_errors_mode_of(self.ini().get(b"display_errors")) == 0))
     }
 
     /// `html_errors`, which of php's two display forms a diagnostic
@@ -1024,7 +1021,7 @@ impl Request {
         [b"internal_encoding".as_slice(), b"default_charset"]
             .iter()
             .find_map(|name| {
-                let value = self.ini_get(name)?;
+                let value = self.ini().get(name)?;
                 let named = value.split(|&byte| byte == 0).next().unwrap_or_default();
                 (!named.is_empty()).then_some(named)
             })
@@ -1040,7 +1037,7 @@ impl Request {
 
     /// `xmlrpc_error_number`, the fault's code, `OnUpdateLong`.
     fn xmlrpc_error_number(&self) -> i64 {
-        self.ini_long(b"xmlrpc_error_number")
+        self.ini().long(b"xmlrpc_error_number")
     }
 
     /// `display_errors`, php's three values: off, the body, and the
@@ -1065,15 +1062,16 @@ impl Request {
         let starting = self.diagnostics.display_direct || self.phase() == Phase::Startup;
         if starting
             && self
-                .ini_get(b"display_startup_errors")
-                .is_some_and(|value| !Request::ini_parse_bool(value))
+                .ini()
+                .get(b"display_startup_errors")
+                .is_some_and(|value| !Ini::parse_bool(value))
         {
             return Display::Off;
         }
         let mode = self
             .diagnostics
             .display_errors_word
-            .unwrap_or_else(|| display_errors_mode_of(self.ini_get(b"display_errors")));
+            .unwrap_or_else(|| display_errors_mode_of(self.ini().get(b"display_errors")));
         match mode {
             0 => Display::Off,
             DISPLAY_ERRORS_STDERR if self.host_writes_stderr() => Display::Stderr,
@@ -1220,7 +1218,7 @@ impl Request {
     /// its body at (`zend_fiber_execute`), whatever an `@` around the
     /// `start` masked.
     pub(crate) fn ini_error_reporting(&self) -> i64 {
-        self.ini_value(b"error_reporting").map_or(E_ALL, strtol)
+        self.ini().value(b"error_reporting").map_or(E_ALL, strtol)
     }
 
     /// `ZEND_FUNCTION(restore_error_handler)`
@@ -1498,7 +1496,7 @@ impl Diagnostics<&mut Request> {
             .0
             .diagnostics
             .display_errors_word
-            .unwrap_or_else(|| display_errors_mode_of(self.0.ini_get(b"display_errors")));
+            .unwrap_or_else(|| display_errors_mode_of(self.0.ini().get(b"display_errors")));
         self.0.diagnostics.display_errors_word = Some(word);
         before
     }

@@ -344,7 +344,7 @@ impl Request {
             .map_or(&[][..], |web| web.head_ini);
         let ini = names
             .iter()
-            .filter_map(|name| Some((*name, self.ini_get(name)?.to_vec())))
+            .filter_map(|name| Some((*name, self.ini().get(name)?.to_vec())))
             .collect();
         let head = ResponseHead {
             code: self.response.output.response_code(),

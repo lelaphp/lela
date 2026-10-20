@@ -862,7 +862,7 @@ fn openssl_get_cert_locations(req: &mut Request) -> Result<Owner<PhpArray>, Thro
         (&b"ini_cafile"[..], &b"openssl.cafile"[..]),
         (b"ini_capath", b"openssl.capath"),
     ] {
-        let value = req.ini_get(entry).map(<[u8]>::to_vec).unwrap_or_default();
+        let value = req.ini().get(entry).map(<[u8]>::to_vec).unwrap_or_default();
         put_bytes(req, &mut out, name, &value)?;
     }
     Ok(out)

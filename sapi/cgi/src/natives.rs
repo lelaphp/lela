@@ -13,7 +13,7 @@ use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_function;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::values::{Owner, PhpArray, PhpString};
 use php_sapi::EngineBuilder;
 
@@ -112,11 +112,11 @@ impl Row {
 /// </table>
 /// ```
 fn info(req: &mut Request) {
-    let entries = req.ini_entries();
+    let entries = req.ini().entries();
     let shown = |row: &Row, value: Option<&[u8]>| -> String {
         let value = value.unwrap_or_default();
         match row.boolean {
-            true if Request::ini_parse_bool(value) => String::from("On"),
+            true if Ini::parse_bool(value) => String::from("On"),
             true => String::from("Off"),
             false => String::from_utf8_lossy(value).into_owned(),
         }
@@ -138,7 +138,7 @@ fn info(req: &mut Request) {
         .iter()
         .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
         .collect();
-    req.info_ini_table(&cells);
+    req.ini_mut().info_ini_table(&cells);
 }
 
 /// `builder` with what php-cgi declares itself: `cgi_module_entry` as its

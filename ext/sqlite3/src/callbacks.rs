@@ -209,7 +209,12 @@ impl Callbacks for Sqlite3 {
         names: [Option<Vec<u8>>; 4],
         pending: bool,
     ) -> Result<i32, Thrown> {
-        if action == SQLITE_ATTACH && req.ini_get(b"open_basedir").is_some_and(|v| !v.is_empty()) {
+        if action == SQLITE_ATTACH
+            && req
+                .ini()
+                .get(b"open_basedir")
+                .is_some_and(|v| !v.is_empty())
+        {
             match names[0].as_deref() {
                 None => return Ok(SQLITE_DENY),
                 Some(b":memory:" | b"") => {}

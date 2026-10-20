@@ -154,7 +154,7 @@ fn resolve_path(req: &mut Request, written: &[u8]) -> Result<Vec<u8>, Unresolved
             _ => Err(not_found()),
         };
     }
-    let include_path = req.ini_get(b"include_path").unwrap_or_default().to_vec();
+    let include_path = req.ini().get(b"include_path").unwrap_or_default().to_vec();
     let dot_relative = written.starts_with(b"./") || written.starts_with(b"../");
     if dot_relative || written.starts_with(b"/") || include_path.is_empty() {
         return req.realpath_file(written).map_err(Unresolved::Missing);

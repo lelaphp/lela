@@ -1348,6 +1348,7 @@ fn display_ini_entries(req: &mut Request) {
         return;
     };
     let rows: Vec<[String; 3]> = req
+        .ini()
         .extension_ini(me)
         .into_iter()
         .filter_map(|held| {
@@ -1362,5 +1363,5 @@ fn display_ini_entries(req: &mut Request) {
         .iter()
         .map(|[n, l, m]| [n.as_str(), l.as_str(), m.as_str()])
         .collect();
-    req.info_ini_table(&rows);
+    req.ini_mut().info_ini_table(&rows);
 }

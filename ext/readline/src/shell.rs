@@ -14,7 +14,7 @@ use std::process::{ChildStdin, Command, Stdio};
 use php_ext::call::{autoload, call, lookup_function};
 use php_ext::coerce::to_callable;
 use php_ext::raising::{Level, clear, leave_pending, uncaught_at, warning};
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::values::{Key, PhpArray, PhpString, Value, walk};
 
 use crate::ffi::{self, Completion, Matches};
@@ -46,7 +46,7 @@ fn state(req: &mut Request) -> &mut State {
 /// pager, started on the first write that finds `cli.pager` set, at most
 /// 16 KiB of them as php's `fwrite` takes.
 pub(crate) fn write(req: &mut Request, bytes: &[u8]) {
-    let pager = req.ini_get(PAGER.as_bytes()).unwrap_or_default().to_vec();
+    let pager = req.ini().get(PAGER.as_bytes()).unwrap_or_default().to_vec();
     let state = state(req);
     if let Some(&last) = bytes.last() {
         state.last = last;
@@ -84,7 +84,7 @@ pub(crate) fn close_pager(req: &mut Request) {
 /// and `\\`, and code between backticks served for what it prints; a byte
 /// above 0x7F is `?`, with php's warning once.
 fn prompt(req: &mut Request, block: &[u8], prompt: u8) -> Vec<u8> {
-    let spec = match req.ini_get(PROMPT.as_bytes()) {
+    let spec = match req.ini().get(PROMPT.as_bytes()) {
         Some(spec) => spec.to_vec(),
         None => DEFAULT_PROMPT.to_vec(),
     };
@@ -312,9 +312,7 @@ impl Scan<'_> {
 fn is_valid_code(req: &mut Request, code: &[u8]) -> (bool, Vec<u8>) {
     let mut scan = Scan {
         code,
-        short_tags: req
-            .ini_get(b"short_open_tag")
-            .is_none_or(Request::ini_parse_bool),
+        short_tags: req.ini().get(b"short_open_tag").is_none_or(Ini::parse_bool),
         valid_end: true,
         last_valid_end: true,
         brackets: 0,
@@ -358,7 +356,7 @@ pub(crate) fn completion(req: &mut Request, text: &[u8]) -> Matches {
             }
         }
     } else if let Some(name) = text.strip_prefix(b"#").filter(|n| n.first() != Some(&b'[')) {
-        for entry in req.ini_entries() {
+        for entry in req.ini().entries() {
             if entry.decl.name.0.starts_with(name) {
                 found.push([b"#".as_slice(), &entry.decl.name.0].concat());
                 append = Some(b'=');
@@ -511,7 +509,7 @@ pub(crate) fn run(req: &mut Request) -> i32 {
             && line.get(1) != Some(&b'[')
             && let Some(eq) = line.iter().position(|&b| b == b'=')
         {
-            req.ini_set(&line[1..eq], &line[eq + 1..]).ok();
+            req.ini_mut().set(&line[1..eq], &line[eq + 1..]).ok();
             ffi::add_history(&line);
             next = prompt(req, b"php", b'>');
             continue;

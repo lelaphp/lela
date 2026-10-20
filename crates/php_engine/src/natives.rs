@@ -1523,8 +1523,11 @@ fn dump(req: &mut Request, value: &Value, level: usize) {
         req.write(format!("{common}int({n})\n").as_bytes());
     } else if let Some(f) = value.as_float() {
         // `php_var_dump` prints a float with `%.*H` at `serialize_precision`.
-        let text =
-            php_heap::double_to_string(f, req.serialize_precision(), php_heap::Exponent::Upper);
+        let text = php_heap::double_to_string(
+            f,
+            req.ini().serialize_precision(),
+            php_heap::Exponent::Upper,
+        );
         req.write(format!("{common}float({text})\n").as_bytes());
     } else if let Some(s) = value.as_php_string() {
         req.write(format!("{common}string({}) \"", s.len()).as_bytes());
@@ -2139,7 +2142,7 @@ fn extension_loaded(req: &mut Request, extension: PhpString) -> bool {
 /// ```
 #[php_function]
 fn ini_get(req: &mut Request, option: PhpString) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    let value = req.ini_get(option.as_bytes()).map(<[u8]>::to_vec);
+    let value = req.ini().get(option.as_bytes()).map(<[u8]>::to_vec);
     Ok(match value {
         Some(value) => OrFalse::Value(PhpString::new(req, &value)?),
         None => OrFalse::False,
@@ -2222,7 +2225,7 @@ fn ini_set(
         value.give_up(req);
         return Ok(OrFalse::False);
     }
-    let set = req.ini_set_string(option.as_bytes(), *value);
+    let set = req.ini_mut().set_string(option.as_bytes(), *value);
     value.give_up(req);
     Ok(match set? {
         Some(previous) => OrFalse::Value(PhpString::new(req, &previous)?),

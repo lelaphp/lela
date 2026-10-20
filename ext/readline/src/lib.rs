@@ -178,7 +178,8 @@ fn readline_info_table(req: &mut Request) {
         &["Readline Support", "enabled"],
         &["Readline library", &version],
     ]);
-    req.info_ini_entries(&[shell::PAGER.as_bytes(), shell::PROMPT.as_bytes()]);
+    req.ini_mut()
+        .info_ini_entries(&[shell::PAGER.as_bytes(), shell::PROMPT.as_bytes()]);
 }
 
 /// A string of the request's heap.

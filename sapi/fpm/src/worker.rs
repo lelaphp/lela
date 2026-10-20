@@ -936,7 +936,7 @@ impl Worker {
         };
         let dir = php_sapi::cgi::user_ini_dir(path_translated);
         let now = crate::scoreboard::epoch();
-        let ttl = php_ext::request::Request::ini_parse_bytes(
+        let ttl = php_ext::request::Ini::parse_bytes(
             &self
                 .engine
                 .ini_get(b"user_ini.cache_ttl")

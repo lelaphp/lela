@@ -336,7 +336,7 @@ fn date_info(req: &mut Request) {
     // `DISPLAY_INI_ENTRIES()`: each entry's request value beside its
     // master.
     let shown = |value: &[u8]| String::from_utf8_lossy(value).into_owned();
-    let entries = req.ini_entries();
+    let entries = req.ini().entries();
     let rows: Vec<[String; 3]> = INI
         .iter()
         .filter_map(|(name, _)| {
@@ -356,7 +356,7 @@ fn date_info(req: &mut Request) {
         .iter()
         .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
         .collect();
-    req.info_ini_table(&cells);
+    req.ini_mut().info_ini_table(&cells);
 }
 
 /// `register_php_date_symbols`: the formats, then the three deprecated

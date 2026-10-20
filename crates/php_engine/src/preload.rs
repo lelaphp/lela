@@ -290,7 +290,7 @@ mod tests {
     static SEEN: Mutex<Vec<(String, ThreadId, bool, bool)>> = Mutex::new(Vec::new());
 
     fn seen(req: &crate::api::request::Request, what: &str) {
-        let script = String::from_utf8_lossy(req.ini_get(b"t.preload").unwrap_or_default());
+        let script = String::from_utf8_lossy(req.ini().get(b"t.preload").unwrap_or_default());
         let mut seen = SEEN
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -326,7 +326,7 @@ mod tests {
                 beneath.serve(req);
             })
             .post_startup(|req, _| {
-                let script = req.ini_get(b"t.preload").unwrap_or_default().to_vec();
+                let script = req.ini().get(b"t.preload").unwrap_or_default().to_vec();
                 let joined = format!("joined {}", String::from_utf8_lossy(&script));
                 PostStartup::Preload {
                     script,
@@ -335,7 +335,7 @@ mod tests {
                             |req| {
                                 seen(req, "take");
                                 req.write_stderr(b"taken\n");
-                                req.ini_get(b"t.take") == Some(&b"1"[..])
+                                req.ini().get(b"t.take") == Some(&b"1"[..])
                             },
                             |_| -2,
                         )

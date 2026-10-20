@@ -59,7 +59,7 @@ impl Encoder {
             depth: 0,
             max_depth,
             error_code: JSON_ERROR_NONE,
-            precision: req.serialize_precision(),
+            precision: req.ini().serialize_precision(),
             serializable: call::lookup_class(req, b"JsonSerializable")?,
         })
     }

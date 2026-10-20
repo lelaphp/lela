@@ -73,7 +73,7 @@ pub(crate) fn ini() -> Vec<IniDecl> {
 /// `FG(from_address)` and `FG(user_agent)`: the entry's value, none where
 /// it has none (`NULL`), where one set empty is the empty string.
 pub(crate) fn file_ini(req: &Request, name: &[u8]) -> Option<Vec<u8>> {
-    req.ini_value(name).map(<[u8]>::to_vec)
+    req.ini().value(name).map(<[u8]>::to_vec)
 }
 
 /// `php_stream_http_wrapper`: `http`, a URL wrapper that opens streams

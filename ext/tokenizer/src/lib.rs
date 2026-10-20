@@ -39,7 +39,7 @@ use php_ext::abi::{Extension, ExtensionBuilder, This, Untyped};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
 use php_ext::raising::{Level, Thrown, arg_type_error, raise, raise_at, throw_at, throw_error};
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::syntax::{self, FileId, LexOptions};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -237,9 +237,7 @@ impl PhpToken {
                 "PhpToken::tokenize() called with no class",
             ));
         };
-        let short_open_tag = req
-            .ini_get(b"short_open_tag")
-            .is_none_or(Request::ini_parse_bool);
+        let short_open_tag = req.ini().get(b"short_open_tag").is_none_or(Ini::parse_bool);
         let tokens = if flags & TOKEN_PARSE == 0 {
             tokenize(req, code.as_bytes(), short_open_tag)
         } else {
@@ -1011,9 +1009,7 @@ fn token_get_all(
     code: PhpString,
     #[php(default = 0)] flags: i64,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    let short_open_tag = req
-        .ini_get(b"short_open_tag")
-        .is_none_or(Request::ini_parse_bool);
+    let short_open_tag = req.ini().get(b"short_open_tag").is_none_or(Ini::parse_bool);
     let tokens = if flags & TOKEN_PARSE == 0 {
         tokenize(req, code.as_bytes(), short_open_tag)
     } else {

@@ -13,7 +13,7 @@ use crate::text::value_error;
 use php_ext::abi::{OrFalse, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{ContentType, Input, Request};
+use php_ext::request::{ContentType, Ini, Input, Request};
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
 use php_ext_pcre::Regex;
 
@@ -111,9 +111,7 @@ pub(crate) fn encoding_handler(
     }
     // `PG(max_input_vars)`, what `OnUpdateLongGEZero` stored: the
     // quantity rule's reading of the entry.
-    let max_input_vars = req
-        .ini_get(b"max_input_vars")
-        .map_or(0, Request::ini_parse_bytes);
+    let max_input_vars = req.ini().get(b"max_input_vars").map_or(0, Ini::parse_bytes);
     if i64::try_from(pairs.len()).unwrap_or(i64::MAX) > max_input_vars {
         let text = format!(
             "Input variables exceeded {max_input_vars}. To increase the limit change max_input_vars in php.ini."
@@ -166,11 +164,17 @@ pub(crate) fn treat_data(
     let (slot, separators) = match input {
         Input::Get => (
             Source::Get,
-            req.ini_get(b"arg_separator.input").unwrap_or(b"&").to_vec(),
+            req.ini()
+                .get(b"arg_separator.input")
+                .unwrap_or(b"&")
+                .to_vec(),
         ),
         Input::String => (
             Source::String,
-            req.ini_get(b"arg_separator.input").unwrap_or(b"&").to_vec(),
+            req.ini()
+                .get(b"arg_separator.input")
+                .unwrap_or(b"&")
+                .to_vec(),
         ),
         Input::Cookie => (Source::Cookie, b";".to_vec()),
         Input::Post => (Source::Post, b"&".to_vec()),
@@ -239,7 +243,11 @@ fn mb_parse_str(
         Some(cell) => cell.separate_array(req)?.unwrap_or(array),
         None => array,
     };
-    let separators = req.ini_get(b"arg_separator.input").unwrap_or(b"&").to_vec();
+    let separators = req
+        .ini()
+        .get(b"arg_separator.input")
+        .unwrap_or(b"&")
+        .to_vec();
     let (to, from_list) = {
         let s = settings(req);
         (s.current_internal, s.http_input.clone())
@@ -401,7 +409,8 @@ fn start_mimetype(req: &mut Request) -> Option<Vec<u8>> {
     match req.content_type() {
         ContentType::Held(held) => {
             let pattern = req
-                .ini_get(b"mbstring.http_output_conv_mimetypes")
+                .ini()
+                .get(b"mbstring.http_output_conv_mimetypes")
                 .unwrap_or_default()
                 .to_vec();
             match conv_mimetypes(req, &pattern) {
@@ -413,7 +422,8 @@ fn start_mimetype(req: &mut Request) -> Option<Vec<u8>> {
             }
         }
         ContentType::Default => Some(
-            req.ini_get(b"default_mimetype")
+            req.ini()
+                .get(b"default_mimetype")
                 .map_or_else(|| b"text/html".to_vec(), <[u8]>::to_vec),
         ),
         ContentType::Unset => None,

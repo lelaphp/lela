@@ -10,7 +10,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
-    BufferHandler, HandlerCall, HandlerOp, HandlerStatus, OutputOp, Request, StartHandler,
+    BufferHandler, HandlerCall, HandlerOp, HandlerStatus, Ini, OutputOp, Request, StartHandler,
 };
 use php_ext::values::{Owner, PhpString, ValueRef};
 
@@ -175,7 +175,7 @@ fn encoding(req: &mut Request) -> Result<Coding, Thrown> {
 /// string(2) "9x"
 /// ```
 fn level(req: &Request) -> i64 {
-    req.ini_long(LEVEL.as_bytes())
+    req.ini().long(LEVEL.as_bytes())
 }
 
 /// What `php_zlib_output_handler_ex` handed on: nothing, where it only
@@ -335,7 +335,11 @@ fn compression_start(req: &mut Request) -> Result<(), Thrown> {
         chunk_size,
         flags: STDFLAGS,
     })?;
-    let user = req.ini_get(HANDLER.as_bytes()).unwrap_or_default().to_vec();
+    let user = req
+        .ini()
+        .get(HANDLER.as_bytes())
+        .unwrap_or_default()
+        .to_vec();
     let started = matches!(begun.as_ref(), ValueRef::Bool(true));
     begun.give_up(req);
     if started && !user.is_empty() {
@@ -372,8 +376,8 @@ fn compression_start(req: &mut Request) -> Result<(), Thrown> {
 /// `PHP_RINIT_FUNCTION(zlib)`: no coding yet, the chunk size the ini
 /// holds, and the handler started where it asks for one.
 pub(crate) fn rinit(req: &mut Request) -> Result<(), Thrown> {
-    let value = req.ini_get(COMPRESSION.as_bytes()).unwrap_or(b"0");
-    let compression = parse(value, Request::ini_parse_bytes);
+    let value = req.ini().get(COMPRESSION.as_bytes()).unwrap_or(b"0");
+    let compression = parse(value, Ini::parse_bytes);
     let globals = globals(req);
     globals.coding = Coding::None;
     globals.compression = compression;
@@ -402,9 +406,10 @@ pub(crate) fn rinit(req: &mut Request) -> Result<(), Thrown> {
 pub(crate) fn on_compression(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
     let value = value.unwrap_or_default();
     let compression = parse(value, |value| {
-        req.ini_parse_quantity_warn(COMPRESSION.as_bytes(), value)
+        req.ini_mut()
+            .parse_quantity_warn(COMPRESSION.as_bytes(), value)
     });
-    let handler = req.ini_get(b"output_handler").unwrap_or_default();
+    let handler = req.ini().get(b"output_handler").unwrap_or_default();
     if !handler.is_empty() && compression != 0 {
         docref(
             req,
@@ -413,7 +418,7 @@ pub(crate) fn on_compression(req: &mut Request, value: Option<&[u8]>) -> Result<
         );
         return Ok(false);
     }
-    if matches!(req.ini_stage(), IniStage::Startup | IniStage::Deactivate) {
+    if matches!(req.ini().stage(), IniStage::Startup | IniStage::Deactivate) {
         return Ok(true);
     }
     if req.headers_sent().is_some() {
@@ -435,7 +440,7 @@ pub(crate) fn on_compression(req: &mut Request, value: Option<&[u8]>) -> Result<
 /// went out; the request's end hands it back its value past them.
 #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
 pub(crate) fn on_handler(req: &mut Request, _value: Option<&[u8]>) -> Result<bool, Thrown> {
-    if matches!(req.ini_stage(), IniStage::Activate | IniStage::Runtime)
+    if matches!(req.ini().stage(), IniStage::Activate | IniStage::Runtime)
         && req.headers_sent().is_some()
     {
         docref(
@@ -517,15 +522,10 @@ pub(crate) fn zlib_get_coding_type(req: &mut Request) -> Result<OrFalse<Owner<Ph
 /// `DISPLAY_INI_ENTRIES()` for the three, `zlib.output_compression`
 /// through `php_ini_boolean_displayer_cb`, `On` or `Off`.
 pub(crate) fn info_ini(req: &mut Request) {
-    let entries = req.ini_entries();
+    let entries = req.ini().entries();
     let shown = |name: &str, value: &[u8]| -> String {
         if name == COMPRESSION {
-            return if Request::ini_parse_bool(value) {
-                "On"
-            } else {
-                "Off"
-            }
-            .into();
+            return if Ini::parse_bool(value) { "On" } else { "Off" }.into();
         }
         String::from_utf8_lossy(value).into_owned()
     };
@@ -544,5 +544,5 @@ pub(crate) fn info_ini(req: &mut Request) {
         .iter()
         .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
         .collect();
-    req.info_ini_table(&cells);
+    req.ini_mut().info_ini_table(&cells);
 }

@@ -203,5 +203,5 @@ pub(crate) fn curl_info(req: &mut Request) {
         .collect();
     let cells: Vec<&[&str]> = borrowed.iter().map(Vec::as_slice).collect();
     req.extensions_mut().info_table(&cells);
-    req.info_ini_entries(&[crate::CAINFO]);
+    req.ini_mut().info_ini_entries(&[crate::CAINFO]);
 }

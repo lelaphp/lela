@@ -161,7 +161,7 @@ impl Request {
     pub(crate) fn post_max_size(&self, limits: &BodyLimits) -> i64 {
         limits
             .post_max_size
-            .unwrap_or_else(|| self.ini_long(b"post_max_size"))
+            .unwrap_or_else(|| self.ini().long(b"post_max_size"))
     }
 
     /// `SG(request_info).content_length`.
@@ -195,7 +195,7 @@ impl Request {
             // reach it moves it to a temporary file in `upload_tmp_dir`;
             // one that cannot be made loses the whole body.
             if !spilled && !block.is_empty() && body.len() + block.len() >= POST_BLOCK_SIZE {
-                let dir = self.ini_get(b"upload_tmp_dir").map(<[u8]>::to_vec);
+                let dir = self.ini().get(b"upload_tmp_dir").map(<[u8]>::to_vec);
                 let Some((_, path)) =
                     self.open_temporary_fd(dir.as_deref(), b"php", TemporaryGuard::Never)
                 else {

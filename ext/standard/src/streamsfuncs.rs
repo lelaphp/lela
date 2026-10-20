@@ -1135,7 +1135,7 @@ fn stream_resolve_include_path(
             None
         }
     } else {
-        let include_path = req.ini_get(b"include_path").map(<[u8]>::to_vec);
+        let include_path = req.ini().get(b"include_path").map(<[u8]>::to_vec);
         let relative = filename.starts_with(b"./") || filename.starts_with(b"../");
         match include_path.filter(|p| !p.is_empty()) {
             Some(path) if !relative && filename.first() != Some(&b'/') => {

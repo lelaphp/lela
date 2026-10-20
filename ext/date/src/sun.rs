@@ -22,7 +22,7 @@ type SunTime = Union<Owner<PhpString>, Union<i64, OrFalse<f64>>>;
 /// `INI_FLT(name)`: `zend_strtod` of the entry, the longest prefix that
 /// reads as a number and zero where none does.
 fn ini_float(req: &Request, name: &[u8]) -> f64 {
-    let text = req.ini_get(name).unwrap_or_default();
+    let text = req.ini().get(name).unwrap_or_default();
     let text = String::from_utf8_lossy(text);
     let text = text.trim_start();
     let mut end = 0;

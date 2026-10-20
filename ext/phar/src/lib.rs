@@ -54,7 +54,7 @@ mod zip;
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, IniStage};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
-use php_ext::request::{InfoRow, Request, Streams as _};
+use php_ext::request::{InfoRow, Ini, Request, Streams as _};
 
 use crate::archive::Archives;
 
@@ -149,10 +149,11 @@ fn master(req: &Request, name: &str) -> bool {
     let Some(id) = req.extensions().named(b"phar") else {
         return true;
     };
-    req.extension_ini(id)
+    req.ini()
+        .extension_ini(id)
         .into_iter()
         .find(|e| e.decl.name.0.as_ref() == name.as_bytes())
-        .is_none_or(|e| Request::ini_parse_bool(e.master.as_deref().unwrap_or_default()))
+        .is_none_or(|e| Ini::parse_bool(e.master.as_deref().unwrap_or_default()))
 }
 
 /// `phar_ini_modify_handler` for `phar.readonly`: at runtime an entry that
@@ -161,8 +162,8 @@ fn master(req: &Request, name: &str) -> bool {
 #[allow(clippy::unnecessary_wraps)] // the ABI's `OnModify`
 fn on_readonly(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
     let value = value.unwrap_or_default();
-    let on = Request::ini_parse_bool(value);
-    if req.ini_stage() == IniStage::Startup {
+    let on = Ini::parse_bool(value);
+    if req.ini().stage() == IniStage::Startup {
         return Ok(true);
     }
     if master(req, READONLY) && !on {
@@ -180,8 +181,8 @@ fn on_readonly(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> 
 #[allow(clippy::unnecessary_wraps)] // the ABI's `OnModify`
 fn on_require_hash(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
     let value = value.unwrap_or_default();
-    let on = Request::ini_parse_bool(value);
-    Ok(req.ini_stage() == IniStage::Startup || on || !master(req, REQUIRE_HASH))
+    let on = Ini::parse_bool(value);
+    Ok(req.ini().stage() == IniStage::Startup || on || !master(req, REQUIRE_HASH))
 }
 
 /// `PHP_MINIT_FUNCTION(phar)`'s wrapper, made per request as the engine
@@ -283,15 +284,10 @@ fn info(req: &mut Request) {
     };
     req.extensions_mut()
         .info_rows(&[InfoRow::Written(boxed.as_bytes())]);
-    let entries = req.ini_entries();
+    let entries = req.ini().entries();
     let shown = |name: &str, value: &[u8]| -> String {
         if name != CACHE_LIST {
-            return if Request::ini_parse_bool(value) {
-                "On"
-            } else {
-                "Off"
-            }
-            .into();
+            return if Ini::parse_bool(value) { "On" } else { "Off" }.into();
         }
         String::from_utf8_lossy(value).into_owned()
     };
@@ -310,5 +306,5 @@ fn info(req: &mut Request) {
         .iter()
         .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
         .collect();
-    req.info_ini_table(&cells);
+    req.ini_mut().info_ini_table(&cells);
 }

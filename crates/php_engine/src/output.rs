@@ -1194,7 +1194,8 @@ fn extract_response_code(line: &[u8]) -> i64 {
 /// whether it changed.
 fn apply_default_charset(req: &Request, mimetype: &[u8]) -> (Vec<u8>, bool) {
     let charset = req
-        .ini_get(b"default_charset")
+        .ini()
+        .get(b"default_charset")
         .map_or_else(|| b"UTF-8".to_vec(), <[u8]>::to_vec);
     let has_charset = mimetype
         .windows("charset=".len())
@@ -1376,7 +1377,7 @@ pub(crate) fn header_add(
         } else if name.eq_ignore_ascii_case(b"Content-Length") {
             // Req #44164: a script that sets the length cannot know the
             // size after compression, so compression is switched off.
-            req.ini_set(b"zlib.output_compression", b"0").ok();
+            req.ini_mut().set(b"zlib.output_compression", b"0").ok();
         }
     }
     if response_code != 0 {
@@ -1432,10 +1433,12 @@ pub(crate) fn header_remove_prefix(req: &mut Request, prefix: &[u8], name_len: u
 /// is set and the type is `text/`.
 fn default_content_type(req: &Request) -> Vec<u8> {
     let mimetype = req
-        .ini_get(b"default_mimetype")
+        .ini()
+        .get(b"default_mimetype")
         .map_or_else(|| b"text/html".to_vec(), <[u8]>::to_vec);
     let charset = req
-        .ini_get(b"default_charset")
+        .ini()
+        .get(b"default_charset")
         .map_or_else(|| b"UTF-8".to_vec(), <[u8]>::to_vec);
     if !charset.is_empty() && mimetype.len() >= 5 && mimetype[..5].eq_ignore_ascii_case(b"text/") {
         let mut content_type = mimetype;
@@ -1791,9 +1794,13 @@ fn contents(req: &mut Request) -> Result<Option<Value>, Thrown> {
 /// for one, a size above one its chunk size. A name that is no callable
 /// is `php_output_handler_create_user`'s warning and no buffer.
 pub(crate) fn start_at_request(req: &mut Request) -> Result<(), Thrown> {
-    let name = req.ini_get(b"output_handler").unwrap_or_default().to_vec();
+    let name = req
+        .ini()
+        .get(b"output_handler")
+        .unwrap_or_default()
+        .to_vec();
     if name.is_empty() {
-        let size = req.ini_long(b"output_buffering");
+        let size = req.ini().long(b"output_buffering");
         if size != 0 {
             let chunk = if size > 1 {
                 usize::try_from(size).unwrap_or(0)

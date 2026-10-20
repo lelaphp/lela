@@ -37,7 +37,7 @@ use crate::api::values::{Emalloc, Owner, ResourceType};
 use crate::api::layer::{Face as _, TemporaryGuard};
 use crate::api::raising::{Level, Thrown, raise, throw_error, warning};
 use crate::api::request::{
-    Cast, Closer, DirListing, EngineWrapper, FdStream, FilterFlags, HostPath, Notification,
+    Cast, Closer, DirListing, EngineWrapper, FdStream, FilterFlags, HostPath, Ini, Notification,
     OptionAnswer, OwnedStream, Request, Standard, Stream, StreamCtx, StreamOption, Whence,
 };
 use crate::api::values::{ClassId, FreshString, PhpArray, PhpString, Resource, Value};
@@ -3764,8 +3764,7 @@ impl StreamLayer for Request {
         let Some(found) = wrapper else {
             return (Located::Plain, path.to_vec());
         };
-        let allowed =
-            |req: &Request, name: &[u8]| req.ini_get(name).is_none_or(Request::ini_parse_bool);
+        let allowed = |req: &Request, name: &[u8]| req.ini().get(name).is_none_or(Ini::parse_bool);
         if found.is_url(self) {
             let refused = if !allowed(self, b"allow_url_fopen") {
                 Some("allow_url_fopen")
@@ -4460,9 +4459,7 @@ impl StreamLayer for Request {
         if logged.is_empty() {
             return String::from("operation failed");
         }
-        let html = self
-            .ini_get(b"html_errors")
-            .is_some_and(Request::ini_parse_bool);
+        let html = self.ini().get(b"html_errors").is_some_and(Ini::parse_bool);
         logged.join(if html { "<br />\n" } else { "\n" })
     }
 
@@ -4507,8 +4504,9 @@ impl StreamLayer for Request {
         // `_php_stream_alloc`'s `FG(auto_detect_line_endings)`
         // (`Z/main/streams/streams.c:326`).
         if self
-            .ini_get(b"auto_detect_line_endings")
-            .is_some_and(Request::ini_parse_bool)
+            .ini()
+            .get(b"auto_detect_line_endings")
+            .is_some_and(Ini::parse_bool)
         {
             stream.flags.eol = Eol::Detect;
         }

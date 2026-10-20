@@ -10,7 +10,7 @@ use php_ext::abi::{ExtensionBuilder, IniStage, OnModify};
 use php_ext::coerce::{atoi, numeric_string, strtol};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{self, Level, Thrown, docref};
-use php_ext::request::Request;
+use php_ext::request::{Ini, Request};
 use php_ext::values::{Owner, PhpString};
 
 use crate::{Format, Module, State, headers_sent, sent_error, shown, started_error};
@@ -359,11 +359,11 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: IniStage) -> b
                 );
                 return false;
             }
-            req.ini_parse_quantity_warn(name, value) >= 0
+            req.ini_mut().parse_quantity_warn(name, value) >= 0
         }
         // `OnUpdateSessionLong`: `OnUpdateLong` once the checks above hold.
         b"session.gc_maxlifetime" | b"session.cache_expire" => {
-            req.ini_parse_quantity_warn(name, value);
+            req.ini_mut().parse_quantity_warn(name, value);
             true
         }
         b"session.sid_length" | b"session.sid_bits_per_character" => {
@@ -393,7 +393,7 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: IniStage) -> b
         // `OnUpdateSessionGcProbability` and `OnUpdateSessionDivisor`:
         // the quantity, then the bound.
         b"session.gc_probability" => {
-            if req.ini_parse_quantity_warn(name, value) >= 0 {
+            if req.ini_mut().parse_quantity_warn(name, value) >= 0 {
                 return true;
             }
             raise(
@@ -405,7 +405,7 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: IniStage) -> b
             false
         }
         b"session.gc_divisor" => {
-            if req.ini_parse_quantity_warn(name, value) > 0 {
+            if req.ini_mut().parse_quantity_warn(name, value) > 0 {
                 return true;
             }
             raise(
@@ -417,7 +417,7 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: IniStage) -> b
             false
         }
         b"session.use_only_cookies" => {
-            if !Request::ini_parse_bool(value) {
+            if !Ini::parse_bool(value) {
                 deprecated(
                     req,
                     "Disabling session.use_only_cookies INI setting is deprecated",
@@ -426,7 +426,7 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: IniStage) -> b
             true
         }
         b"session.use_trans_sid" => {
-            if Request::ini_parse_bool(value) {
+            if Ini::parse_bool(value) {
                 deprecated(
                     req,
                     "Enabling session.use_trans_sid INI setting is deprecated",
@@ -486,7 +486,7 @@ fn modify<const AT: usize>(req: &mut Request, value: Option<&[u8]>) -> Result<bo
     let Some((name, _, _)) = ENTRIES.get(AT) else {
         return Ok(true);
     };
-    let stage = req.ini_stage();
+    let stage = req.ini().stage();
     Ok(on_modify(req, name.as_bytes(), value, stage))
 }
 
@@ -588,7 +588,7 @@ pub(super) fn register(builder: ExtensionBuilder) -> ExtensionBuilder {
 /// bool(true)
 /// ```
 pub(super) fn alter(req: &mut Request, name: &[u8], value: &[u8]) -> Result<bool, Thrown> {
-    Ok(req.ini_set(name, value)?.is_some())
+    Ok(req.ini_mut().set(name, value)?.is_some())
 }
 
 /// [`alter`] over a request string the caller holds,
@@ -599,7 +599,7 @@ pub(super) fn alter_string(
     name: &[u8],
     value: PhpString,
 ) -> Result<bool, Thrown> {
-    Ok(req.ini_set_string(name, value)?.is_some())
+    Ok(req.ini_mut().set_string(name, value)?.is_some())
 }
 
 /// [`alter_string`] over a string made for it and released after,
@@ -609,7 +609,7 @@ pub(super) fn alter_made(
     name: &[u8],
     value: Owner<PhpString>,
 ) -> Result<bool, Thrown> {
-    let set = req.ini_set_string(name, *value);
+    let set = req.ini_mut().set_string(name, *value);
     value.give_up(req);
     Ok(set?.is_some())
 }

@@ -802,7 +802,7 @@ pub enum Lookup {
 /// value the host set (`ZEND_INI_STAGE_STARTUP`), by a host laying its
 /// own entry over php once it has started (`ZEND_INI_STAGE_ACTIVATE`),
 /// and as the request ends with the value an entry the request changed
-/// started with (`ZEND_INI_STAGE_DEACTIVATE`); [`Request::ini_stage`]
+/// started with (`ZEND_INI_STAGE_DEACTIVATE`); [`Ini::stage`]
 /// says which. The value is php's `new_value`, `None` where it has none
 /// (`NULL`), which an entry registered with no value is handed back as
 /// the request ends or `ini_restore()` restores it, and which a rule may
@@ -817,9 +817,9 @@ pub type OnModify = fn(&mut Request, Option<&[u8]>) -> Result<bool, Thrown>;
 /// serves for an entry declared with it
 /// ([`ExtensionBuilder::on_update_long`]) as it serves core's: the value
 /// read by `zend_ini_parse_quantity_warn`
-/// ([`Request::ini_parse_quantity_warn`]), warning where the rule
+/// ([`Ini::parse_quantity_warn`]), warning where the rule
 /// interprets it, at startup, at `ini_set()` and as the request ends,
-/// and read back with [`Request::ini_long`].
+/// and read back with [`Ini::long`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LongHandler {
     /// `OnUpdateLong`: any value is taken.
@@ -857,7 +857,9 @@ impl IniHandler {
         match self {
             IniHandler::Written(handler) => handler(req, value),
             IniHandler::Long(handler) => {
-                let quantity = req.ini_parse_quantity_warn(name, value.unwrap_or_default());
+                let quantity = req
+                    .ini_mut()
+                    .parse_quantity_warn(name, value.unwrap_or_default());
                 Ok(handler.takes(quantity))
             }
         }
@@ -1248,7 +1250,7 @@ impl ExtensionBuilder {
     /// php's `OnUpdateLong` or `OnUpdateLongGEZero` ([`LongHandler`]),
     /// which the engine serves where [`ExtensionBuilder::on_modify`]'s
     /// handler would be. The extension reads the value with
-    /// [`Request::ini_long`].
+    /// [`Ini::long`].
     #[must_use]
     pub fn on_update_long(mut self, name: &[u8], handler: LongHandler) -> ExtensionBuilder {
         self.on_modify

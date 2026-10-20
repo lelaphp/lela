@@ -15,7 +15,7 @@ use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, clear, docref, exit, leave_pending,
     throw_error, throw_value,
 };
-use php_ext::request::{OutputOp, OwnedStream as _, Request, StartHandler, Streams as _};
+use php_ext::request::{Ini, OutputOp, OwnedStream as _, Request, StartHandler, Streams as _};
 use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
 use php_ext_libxml::ffi::{Kind, Node, Save};
 
@@ -498,8 +498,9 @@ fn soap_server_fault_ex(
 
 /// `INI_INT("zlib.output_compression")`.
 fn output_compression(req: &Request) -> bool {
-    req.ini_get(b"zlib.output_compression")
-        .is_some_and(Request::ini_parse_bool)
+    req.ini()
+        .get(b"zlib.output_compression")
+        .is_some_and(Ini::parse_bool)
 }
 
 /// `soap_server_fault`: a fault made of the arguments, written, and the

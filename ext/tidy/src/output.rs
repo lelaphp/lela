@@ -7,7 +7,7 @@
 use php_ext::abi::IniStage;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
-    BufferHandler, HandlerCall, HandlerStatus, OutputOp, Request, StartHandler,
+    BufferHandler, HandlerCall, HandlerStatus, Ini, OutputOp, Request, StartHandler,
 };
 
 use crate::{CLEAN_OUTPUT, DEFAULT_CONFIG, State, default_config, ffi};
@@ -133,7 +133,7 @@ fn clean_output_start(req: &mut Request) -> Result<(), Thrown> {
 /// php's `RSHUTDOWN` having put it back there, and the handler started
 /// where it asks for one.
 pub(crate) fn rinit(req: &mut Request) -> Result<(), Thrown> {
-    let on = Request::ini_parse_bool(req.ini_get(CLEAN_OUTPUT.as_bytes()).unwrap_or(b"0"));
+    let on = Ini::parse_bool(req.ini().get(CLEAN_OUTPUT.as_bytes()).unwrap_or(b"0"));
     req.state::<State>().clean_output = on;
     clean_output_start(req)
 }
@@ -158,8 +158,8 @@ pub(crate) fn rinit(req: &mut Request) -> Result<(), Thrown> {
 /// </html>
 /// ```
 pub(crate) fn on_clean_output(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
-    let on = Request::ini_parse_bool(value.unwrap_or_default());
-    let runtime = req.ini_stage() == IniStage::Runtime;
+    let on = Ini::parse_bool(value.unwrap_or_default());
+    let runtime = req.ini().stage() == IniStage::Runtime;
     if runtime {
         let status = req.buffer_status();
         if on && status & WRITTEN != 0 {
@@ -173,7 +173,7 @@ pub(crate) fn on_clean_output(req: &mut Request, value: Option<&[u8]>) -> Result
             return Ok(false);
         }
     }
-    if req.ini_stage() != IniStage::Startup {
+    if req.ini().stage() != IniStage::Startup {
         req.state::<State>().clean_output = on;
     }
     if runtime && on && !req.buffer_handler_started(NAME.as_bytes()) {
@@ -185,7 +185,7 @@ pub(crate) fn on_clean_output(req: &mut Request, value: Option<&[u8]>) -> Result
 /// `DISPLAY_INI_ENTRIES()` for the two, `tidy.clean_output` through
 /// `php_ini_boolean_displayer_cb`, `On` or `Off`.
 pub(crate) fn info_ini(req: &mut Request) {
-    let entries = req.ini_entries();
+    let entries = req.ini().entries();
     let rows: Vec<[String; 3]> = [DEFAULT_CONFIG, CLEAN_OUTPUT]
         .iter()
         .map(|name| {
@@ -196,7 +196,7 @@ pub(crate) fn info_ini(req: &mut Request) {
             let master = entry.and_then(|e| e.master.as_deref()).unwrap_or_default();
             let shown = |value: &[u8]| {
                 if *name == CLEAN_OUTPUT {
-                    let on = Request::ini_parse_bool(value);
+                    let on = Ini::parse_bool(value);
                     String::from(if on { "On" } else { "Off" })
                 } else {
                     String::from_utf8_lossy(value).into_owned()
@@ -209,5 +209,5 @@ pub(crate) fn info_ini(req: &mut Request) {
         .iter()
         .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
         .collect();
-    req.info_ini_table(&cells);
+    req.ini_mut().info_ini_table(&cells);
 }

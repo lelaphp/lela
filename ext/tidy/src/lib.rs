@@ -355,7 +355,8 @@ pub(crate) fn load_config(
 /// names one.
 pub(crate) fn default_config(req: &mut Request, doc: &mut ffi::Doc) -> Result<(), Thrown> {
     let path = req
-        .ini_get(DEFAULT_CONFIG.as_bytes())
+        .ini()
+        .get(DEFAULT_CONFIG.as_bytes())
         .unwrap_or_default()
         .to_vec();
     if path.first().is_some_and(|b| *b != 0) {

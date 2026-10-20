@@ -498,7 +498,7 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
     if flag & INFO_GENERAL != 0 {
         general(req);
     }
-    req.ini_sort_entries();
+    req.ini_mut().sort_entries();
     if flag & INFO_CONFIGURATION != 0 {
         hr(req);
         if html(req) {
@@ -508,7 +508,7 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
         }
         if flag & INFO_MODULES == 0 {
             section(req, "PHP Core");
-            req.core_ini_info();
+            req.ini_mut().core_ini_info();
         }
     }
     if flag & INFO_MODULES != 0 {
@@ -608,7 +608,7 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
 /// Whatever the flags, the ini table is sorted by name before anything
 /// past the general block is printed, so each extension's directives are
 /// listed sorted, and so is every walk of the table after the call
-/// ([`Request::ini_sort_entries`]):
+/// ([`Ini::sort_entries`]):
 ///
 /// ```php
 /// ob_start(); phpinfo(INFO_MODULES); preg_match_all('/^session\.\w+/m', ob_get_clean(), $m);
@@ -988,7 +988,7 @@ fn php_uname(
 /// scanned file that parsed, `,\n` between and `\n` after the last;
 /// none where none was.
 fn scanned_list(req: &Request) -> Option<Vec<u8>> {
-    let files: Vec<&[u8]> = req.ini_files().scanned().collect();
+    let files: Vec<&[u8]> = req.ini().files().scanned().collect();
     (!files.is_empty()).then(|| [files.join(b",\n".as_slice()), b"\n".to_vec()].concat())
 }
 
@@ -996,7 +996,7 @@ fn scanned_list(req: &Request) -> Option<Vec<u8>> {
 /// the file read, the scan path and the files scanned, `(none)` for each
 /// there was none of.
 fn ini_cells(req: &Request) -> [String; 4] {
-    let files = req.ini_files();
+    let files = req.ini().files();
     let scanned = scanned_list(req);
     [
         Some(files.ini_path()),
@@ -1061,7 +1061,7 @@ fn php_ini_scanned_files(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>,
 /// ```
 #[php_function]
 fn php_ini_loaded_file(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    match req.ini_files().loaded().map(<[u8]>::to_vec) {
+    match req.ini().files().loaded().map(<[u8]>::to_vec) {
         Some(path) => PhpString::new(req, &path).map(OrFalse::Value),
         None => Ok(OrFalse::False),
     }

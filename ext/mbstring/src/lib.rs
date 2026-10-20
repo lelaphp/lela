@@ -44,7 +44,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{InfoRow, Request};
+use php_ext::request::{InfoRow, Ini, Request};
 use php_ext::values::{Owner, PhpArray, PhpString};
 use settings::{Mode, State, Substitute, named_or_pass, settings};
 use tables::{MBFL_VERSION_MAJOR, MBFL_VERSION_MINOR, MBFL_VERSION_TEENY};
@@ -291,16 +291,12 @@ fn display_ini_entries(req: &mut Request) {
     };
     let shown = |name: &[u8], value: &[u8]| -> String {
         if settings::is_boolean(name) {
-            return (if Request::ini_parse_bool(value) {
-                "On"
-            } else {
-                "Off"
-            })
-            .to_owned();
+            return (if Ini::parse_bool(value) { "On" } else { "Off" }).to_owned();
         }
         String::from_utf8_lossy(value).into_owned()
     };
     let rows: Vec<[String; 3]> = req
+        .ini()
         .extension_ini(me)
         .into_iter()
         .map(|held| {
@@ -315,7 +311,7 @@ fn display_ini_entries(req: &mut Request) {
     let rows: Vec<[&str; 3]> = (rows.iter())
         .map(|[n, l, m]| [n.as_str(), l.as_str(), m.as_str()])
         .collect();
-    req.info_ini_table(&rows);
+    req.ini_mut().info_ini_table(&rows);
 }
 
 /// `mb_language(?string $language = null): string|bool`.
@@ -351,7 +347,11 @@ fn mb_language(
         let current = settings(req).language;
         return Ok(Union::A(new_string(req, current.name())?));
     };
-    if req.ini_set_string(b"mbstring.language", name)?.is_none() {
+    if req
+        .ini_mut()
+        .set_string(b"mbstring.language", name)?
+        .is_none()
+    {
         let name = String::from_utf8_lossy(name.as_bytes()).into_owned();
         return Err(value_error(
             req,
@@ -632,7 +632,8 @@ fn info_entry(req: &mut Request, key: &str, language: Language) -> Result<Option
         "http_output" => text(req, output.name()),
         "http_output_conv_mimetypes" => {
             let value = req
-                .ini_get(b"mbstring.http_output_conv_mimetypes")
+                .ini()
+                .get(b"mbstring.http_output_conv_mimetypes")
                 .unwrap_or_default()
                 .to_vec();
             text(req, &value)

@@ -31,7 +31,7 @@ pub(super) fn guess_timezone(req: &mut Request) -> Vec<u8> {
     {
         return tz.clone();
     }
-    if let Some(ini) = req.ini_get(b"date.timezone")
+    if let Some(ini) = req.ini().get(b"date.timezone")
         && !ini.is_empty()
     {
         return ini.to_vec();
@@ -61,7 +61,8 @@ pub(super) fn on_update_timezone(req: &mut Request, value: Option<&[u8]>) -> Res
         return Ok(true);
     }
     let kept = req
-        .ini_get(b"date.timezone")
+        .ini()
+        .get(b"date.timezone")
         .map_or_else(|| b"UTC".to_vec(), <[u8]>::to_vec);
     let message = format!(
         "Invalid date.timezone value '{}', using '{}' instead",
