@@ -32,9 +32,9 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
-use super::against::{RUNS, Run};
+use super::against::{self, RUNS, Run};
 use super::miss::Signature;
 use super::{CORPUS, Judgement, Subset, redirect};
 use crate::divergence::Registry;
@@ -169,12 +169,7 @@ impl Target {
     /// under this pin.
     pub(crate) fn kept(roots: &[PathBuf], pin: &Pin, scope: &str) -> Result<Option<Target>> {
         for root in roots {
-            let file = path(root, pin, scope);
-            if file.is_file() {
-                let text = std::fs::read_to_string(&file)
-                    .with_context(|| format!("reading {}", file.display()))?;
-                let run = serde_json::from_str(&text)
-                    .with_context(|| format!("{} is not a kept target", file.display()))?;
+            if let Some(run) = against::read(&path(root, pin, scope))? {
                 return Ok(Some(Target(run)));
             }
         }
@@ -184,8 +179,7 @@ impl Target {
     /// The target kept for `scope` under the pin in the workspace at
     /// `root`, replaced whole as a reading is.
     pub(crate) fn keep(&self, root: &Path, pin: &Pin, scope: &str) -> Result<()> {
-        let text = serde_json::to_string_pretty(&self.0).context("rendering the target")?;
-        crate::reading::replace(&path(root, pin, scope), text.as_bytes())
+        against::keep(&path(root, pin, scope), &self.0)
     }
 
     /// Whether the test is in the target: the oracle passed it, warned or

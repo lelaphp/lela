@@ -802,14 +802,10 @@ fn retiring_carries_the_worktrees_kept_phpt_runs_into_mains() {
             "main",
         ],
     );
-    // No run is kept at HEAD, and the comparison's skip names the engine
-    // tree a run would be kept under.
+    // No run is kept at HEAD.
     let unkept = phpt_against_head(&root, "ext/pcre");
     assert!(unkept.contains("no run of ext/pcre is kept"), "{unkept}");
-    let tree = unkept
-        .split_once("(the engine's tree ")
-        .and_then(|(_, rest)| rest.split_once(')'))
-        .map_or_else(|| panic!("{unkept}"), |(tree, _)| tree.to_owned());
+    let tree = engine_tree(&root);
 
     let recipe = Manifest::load(&root).unwrap().pin.digest().to_owned();
     let run = |engine: &str| {
@@ -875,10 +871,7 @@ fn a_run_ci_kept_fetched_by_the_skips_line_is_the_bases_run() {
     let root = repository("ci-runs");
     let unkept = phpt_against_head(&root, "ext/pcre");
     assert!(unkept.contains("no run of ext/pcre is kept"), "{unkept}");
-    let tree = unkept
-        .split_once("(the engine's tree ")
-        .and_then(|(_, rest)| rest.split_once(')'))
-        .map_or_else(|| panic!("{unkept}"), |(tree, _)| tree.to_owned());
+    let tree = engine_tree(&root);
     let (fetch, take) = unkept
         .split_once("fetch the runs CI's dashboard keeps with `")
         .and_then(|(_, rest)| rest.split_once("`, or take one with `"))
@@ -918,6 +911,19 @@ fn a_run_ci_kept_fetched_by_the_skips_line_is_the_bases_run() {
     let found = phpt_against_head(&root, "ext/pcre");
     assert!(!found.contains("no run of ext/pcre is kept"), "{found}");
     assert!(found.contains("this run measured no engine"), "{found}");
+}
+
+/// The engine tree a run at `root`'s `HEAD` on a binary with no dep-info
+/// is kept under (`xtask::phpt::kept_run`).
+fn engine_tree(root: &Path) -> String {
+    let head = sh(root, &["git", "rev-parse", "HEAD"]);
+    let snapshot = xtask::key::Snapshot::commit(root, head.trim()).unwrap();
+    let run = xtask::phpt::kept_run(&snapshot, "ext/pcre").unwrap();
+    let tree = run
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name);
+    tree.unwrap().to_string_lossy().into_owned()
 }
 
 fn executable(path: &Path) {

@@ -16,12 +16,15 @@
 //! checkout's manifest and registry, so the two runs are over one corpus
 //! and one set of tests and differ in the engine alone; the runs carried
 //! into the main worktree ([`worktree::carry_runs`]) and the worktree
-//! removed, whatever the build or the runs came to. The readings of the
+//! removed, whatever the build or the runs came to, the call stopped by a
+//! signal among them ([`Laid`], #3110). The readings of the
 //! runs at the base are printed and not recorded: they are the base's,
 //! and what the call keeps is the runs. Its exit is 1 while a subset it
 //! was asked for has no run kept at the base afterwards, naming why.
 
-use std::path::Path;
+use std::os::unix::process::CommandExt as _;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 
@@ -77,22 +80,16 @@ pub(crate) fn take(
     }
     let main = track::main_worktree(root)?;
     let dir = worktree::homes(&main)?.join(format!("base-{commit}-{}", std::process::id()));
-    let at = dir.to_string_lossy();
-    git(
-        root,
-        &["worktree", "add", "-q", "--detach", &at, &base.commit],
-        None,
-    )
-    .with_context(|| format!("laying a worktree at {base} down at {at}"))?;
-    say(&format!("laid {at} at {base}"));
+    let laid = Laid::at(root, &dir, &base.commit, std::process::id())
+        .with_context(|| format!("laying a worktree at {base} down at {}", dir.display()))?;
+    say(&format!("laid {} at {base}", dir.display()));
     let ran = run_at(root, &dir, manifest, registry, ask, &wanted);
     let carried = worktree::carry_runs(&dir, BASE);
-    let removed = git(root, &["worktree", "remove", "--force", &at], None)
-        .with_context(|| format!("removing the worktree at {at}"));
+    let removed = laid.remove();
     ran?;
     carried?;
     removed?;
-    say(&format!("removed {at}"));
+    say(&format!("removed {}", dir.display()));
     let mut missing = Vec::new();
     for scope in &wanted {
         if against::kept_at(root, &manifest.pin, &base.commit, scope)?.is_err() {
@@ -169,6 +166,79 @@ fn run_at(
     Ok(())
 }
 
+/// A detached worktree laid down for a base's runs, which goes however the
+/// call that laid it ends (#3110): [`Laid::remove`] where it runs to the
+/// end, its drop where it returns early or panics, and, where the process
+/// that owns it is stopped by a signal, which no drop outlives, a watcher
+/// in a process group of its own, so the terminal's interrupt does not
+/// reach it, that removes the worktree once the owner is gone. Before
+/// this, a `--base` run stopped by its caller left its worktree, a
+/// checkout and a build of about 3 GB, standing.
+pub(crate) struct Laid {
+    root: PathBuf,
+    dir: PathBuf,
+    removed: bool,
+}
+
+impl Laid {
+    /// `commit` laid down at `dir`, detached, by the repository at `root`,
+    /// watched for the process `owner`.
+    pub(crate) fn at(root: &Path, dir: &Path, commit: &str, owner: u32) -> Result<Laid> {
+        let at = dir.to_str().context("the worktree's path is not UTF-8")?;
+        git(
+            root,
+            &["worktree", "add", "-q", "--detach", at, commit],
+            None,
+        )?;
+        let laid = Laid {
+            root: root.to_path_buf(),
+            dir: dir.to_path_buf(),
+            removed: false,
+        };
+        Command::new("sh")
+            .args(["-c", WATCH, "watch"])
+            .arg(owner.to_string())
+            .args([&laid.root, &laid.dir])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .context("starting the worktree's watcher")?;
+        Ok(laid)
+    }
+
+    /// The worktree removed now, or why it could not be.
+    pub(crate) fn remove(mut self) -> Result<()> {
+        self.removed = true;
+        self.unlay()
+    }
+
+    fn unlay(&self) -> Result<()> {
+        let at = self.dir.to_string_lossy();
+        let removed = git(&self.root, &["worktree", "remove", "--force", &at], None);
+        removed
+            .with_context(|| format!("removing the worktree at {at}"))
+            .map(drop)
+    }
+}
+
+impl Drop for Laid {
+    fn drop(&mut self) {
+        if !self.removed {
+            self.unlay().ok();
+        }
+    }
+}
+
+/// What the watcher runs: while the owner `$1` lives, wait; then, where
+/// the worktree `$3` still stands, have the repository at `$2` remove it.
+const WATCH: &str = "while kill -0 \"$1\" 2>/dev/null; do sleep 1; done; \
+    if [ -d \"$3\" ]; then git -C \"$2\" worktree remove --force \"$3\"; fi";
+
 fn say(line: &str) {
     println!("{BASE}: {line}");
 }
+
+#[cfg(test)]
+mod tests;
