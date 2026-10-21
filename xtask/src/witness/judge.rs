@@ -472,12 +472,6 @@ fn lacking<'w>(oracle: &Oracle<'_>, witness: &'w Witness) -> Result<Option<&'w s
     Ok(None)
 }
 
-/// The run of record, and what it entered: the engine linked into the
-/// harness, which needs no binary (design §8; #119, #401), or for a fence
-/// marked `process` the `php` binary in a process of its own (harness
-/// §8, revision 61). A panic in the linked engine is trouble the witness
-/// borks on, never the lane's end; the trouble is the sentence it borks
-/// with.
 /// The bundle features the `php` serving a `process` fence is built
 /// with: its crate's where the binary under test does not turn it on,
 /// and the tier's where its regime sets the lane's `jit.mode`, so the
@@ -493,6 +487,12 @@ fn features<'w>(witness: &'w Witness, regime: Option<&Regime>) -> Vec<&'w str> {
     features
 }
 
+/// The run of record, and what it entered: the engine linked into the
+/// harness, which needs no binary (design §8; #119, #401), or for a fence
+/// marked `process` the `php` binary in a process of its own (harness
+/// §8, revision 61). A panic in the linked engine is trouble the witness
+/// borks on, never the lane's end; the trouble is the sentence it borks
+/// with.
 pub(super) fn serve(
     oracle: &Oracle<'_>,
     binary: &Binary,

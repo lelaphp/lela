@@ -49,12 +49,11 @@ use anyhow::{Result, anyhow};
 
 use super::anchor::Entry;
 use super::fence::Served;
-use crate::carried::BUNDLE;
 use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, MAKALA, PHPDBG};
 use crate::oracle::profile;
 use crate::oracle::{Ended, Invocation, Observation, Oracle, Program, Recipe, Stdin, normalise_in};
 use crate::phpt::environment::Environment;
-use crate::phpt::{cgi, file::Phpt};
+use crate::phpt::{Build, cgi, file::Phpt};
 use crate::scratch::Tree;
 
 // The hosts a fence is served by, each its own binary: `sapi/cli`'s
@@ -72,15 +71,15 @@ const TRACE: &str = "PHP_WITNESS_TRACE";
 #[derive(Debug)]
 pub(crate) struct Binary {
     root: PathBuf,
-    built: Mutex<BTreeMap<Build, Slot>>,
+    built: Mutex<BTreeMap<Key, Slot>>,
 }
 
 /// Where one build's path, or its failure, is kept once it ran.
 type Slot = Arc<OnceLock<Result<PathBuf, String>>>;
 
-/// A binary a run builds: a host by its crate, and the bundle features
-/// `php` is built with on, none for the binary under test.
-type Build = (&'static str, Vec<String>);
+/// The key of a binary a run builds: a host by its crate, and the bundle
+/// features `php` is built with on, none for the binary under test.
+type Key = (&'static str, Vec<String>);
 
 impl Binary {
     /// The binaries of the workspace at `root`, not yet built.
@@ -139,12 +138,9 @@ impl Binary {
             Arc::clone(built.entry(key).or_default())
         };
         let path = slot.get_or_init(|| {
-            let some = !features.is_empty();
-            let on = some.then(|| {
-                let named: Vec<String> = features.iter().map(|f| format!("{BUNDLE}/{f}")).collect();
-                named.join(",")
-            });
-            let into = some.then(|| profile::featured(&self.root, &features.join("+")));
+            let build = (!features.is_empty()).then(|| Build::of(features.to_vec()));
+            let on = build.as_ref().map(Build::features);
+            let into = build.as_ref().map(|build| build.target_dir(&self.root));
             let (package, binary) = (host.package(), host.binary);
             profile::build(&self.root, &package, binary, on.as_deref(), into.as_deref())
                 .map_err(|e| format!("{e:#}"))
