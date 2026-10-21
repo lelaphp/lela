@@ -4,22 +4,14 @@
 //! `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
 
-use php_ext::test::{Capture, Engine, LeakSensor};
+mod support;
+
+use php_ext::test::Capture;
 
 /// `src` served by an armed engine with this extension and what it
 /// needs, what it wrote held to `expected`.
 fn served(src: &str, expected: &str) {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_libxml::extension(),
-            php_ext_lexbor::extension(),
-            php_ext_dom::extension(),
-            php_ext_standard::extension(),
-            php_ext_uri::extension(),
-            php_ext_xsl::extension(),
-        ])
-        .sense_leaks(LeakSensor::Armed)
-        .build();
+    let engine = support::engine();
     let served = engine.serve_capture(src, Capture::default());
     served.assert_clean(expected);
 }
