@@ -232,8 +232,11 @@ impl Request {
     /// ([`PropertiesInfo`]): what [`Request::find_property_info`] finds a
     /// name in. None for a class with no linked record. Inlined into
     /// its two callers, so the three references reach the find in
-    /// registers rather than through memory.
-    #[inline]
+    /// registers rather than through memory: out of line it handed them
+    /// back through the stack, thirteen instructions on a computed name's
+    /// placement.
+    #[inline(always)]
+    #[allow(clippy::inline_always)]
     pub(super) fn properties_info(&self, class: ClassId) -> Option<PropertiesInfo<'_>> {
         let (record, placed, decl) = if let Some(native) = self.native_class_at(class) {
             (

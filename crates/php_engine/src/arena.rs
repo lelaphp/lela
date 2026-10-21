@@ -5,15 +5,15 @@
 //! engine's below them; one whose top bit is set names a row of the
 //! request's own.
 //!
-//! Each kind of row is a [`Column`]: a directory of chunks of one
-//! length, each laid down on first use and never moved, of slots that
-//! are each written once. A publisher takes a number with
+//! Each kind of row is a [`Column`]: spans of chunks of one length,
+//! each laid down on first use and never moved, of slots that are each
+//! written once. A publisher takes a number with
 //! [`Column::reserve`] before it builds the row, so rows that name each
 //! other (a class and its methods) are built knowing each other's
 //! numbers, and fills it with [`Column::fill`]. A request reads a row
-//! with [`Column::get`]: the number's high bits held to the directory,
-//! its low bits a slot in the chunk with no bound to hold, two acquire
-//! loads and nothing taken, as php reads a `zend_class_entry *` from
+//! with [`Column::get`]: the number's high bits held to the spans, its
+//! middle bits a chunk in the span and its low bits a slot in the
+//! chunk, with no bound to hold, three acquire loads and nothing taken, as php reads a `zend_class_entry *` from
 //! shared memory. A row is found once it is filled and only then, and a
 //! publisher hands a number on only after its row is filled, so whatever
 //! carried the number to a request (the preload's tables, the unit
@@ -53,49 +53,74 @@ use crate::api::values::ClassId;
 use php_link::LinkedClass;
 
 /// The rows of one chunk, `1 << CHUNK_BITS` of them: a number's low
-/// bits are its slot in the chunk, its high bits the chunk's place in
-/// the directory.
+/// bits are its slot in the chunk.
 const CHUNK_BITS: u32 = 9;
 const CHUNK: usize = 1 << CHUNK_BITS;
 
-/// The most chunks a column's directory holds, so the most rows it
-/// holds is `CHUNKS * CHUNK`, eight million: past the classes and
-/// methods any program publishes into one epoch, and past the map
-/// pointers the engine numbers op arrays by (`tier::published::Funcs`),
-/// which every publication of an epoch advances, a unit published again
-/// after its file changed and a trait's copied method among them; a
-/// column whose numbers could name more is held to it
-/// ([`Column::below`]). The directory of such a column is laid whole
-/// where the column is made, 16 KiB a thousand chunks.
-const CHUNKS: usize = 1 << 14;
+/// The chunks of one span, `1 << SPAN_BITS` of them: a number's middle
+/// bits are its chunk's place in the span.
+const SPAN_BITS: u32 = 8;
+const SPAN: usize = 1 << SPAN_BITS;
+
+/// The spans a column holds, so the most rows it holds is
+/// `SPANS * SPAN * CHUNK`, eight million: past the classes and methods
+/// any program publishes into one epoch, and past the map pointers the
+/// engine numbers op arrays by (`tier::published::Funcs`), which every
+/// publication of an epoch advances, a unit published again after its
+/// file changed and a trait's copied method among them; a column whose
+/// numbers could name more is held to it ([`Column::below`]). A number's
+/// high bits are its span. The spans are the column's own, so a column
+/// is made with nothing laid but their sixty-four empty cells, and a
+/// span and a chunk are each laid where a row first needs them: a
+/// directory of every chunk laid whole where the column was made put a
+/// million instructions and a megabyte of written pages on every
+/// engine's start.
+const SPANS: usize = 1 << 6;
 
 /// One chunk of a column, laid down on first use and never moved: a
 /// fixed-length array, so a number's slot in it is its low bits with no
 /// bound to test.
 type Chunk<T> = Box<[OnceLock<T>; CHUNK]>;
 
+/// One span of a column's chunks, laid down on first use and never
+/// moved, a fixed-length array as a chunk is.
+type Span<T> = Box<[OnceLock<Chunk<T>>; SPAN]>;
+
 /// One kind of row of the arena, numbered from zero in the order its
 /// numbers were reserved.
 pub(crate) struct Column<T> {
-    /// The chunks, as many as the limit needs, each laid on first use.
-    chunks: Box<[OnceLock<Chunk<T>>]>,
+    /// The spans, each laid on first use.
+    spans: [OnceLock<Span<T>>; SPANS],
     /// How many numbers were reserved, which is the next one's.
     reserved: AtomicU32,
     /// The number no row reaches.
     limit: u32,
 }
 
+/// What `cell` holds, laid where it held nothing: `N` empty cells made
+/// on the heap, never built on the stack, as the fixed-length array a
+/// span or a chunk is, and made before they are offered, so a thread
+/// that laid the cell first keeps its own and these are dropped. The
+/// conversion from the `Vec` holds, its length being `N`; where it would
+/// not, the fill that asked fails rather than panics.
+fn lay<U, const N: usize>(cell: &OnceLock<Box<[OnceLock<U>; N]>>) -> Option<&[OnceLock<U>; N]> {
+    if let Some(held) = cell.get() {
+        return Some(held);
+    }
+    let cells: Vec<OnceLock<U>> = (0..N).map(|_| OnceLock::new()).collect();
+    let fresh = cells.try_into().ok()?;
+    Some(cell.get_or_init(|| fresh))
+}
+
 impl<T> Column<T> {
     /// An empty column whose numbers stay below `limit`, and below the
-    /// rows its directory holds.
+    /// rows its spans hold.
     pub(crate) fn below(limit: u32) -> Column<T> {
-        let held = u32::try_from(CHUNKS * CHUNK).unwrap_or(u32::MAX);
-        let limit = limit.min(held);
-        let chunks = usize::try_from(limit).map_or(CHUNKS, |limit| limit.div_ceil(CHUNK));
+        let held = u32::try_from(SPANS * SPAN * CHUNK).unwrap_or(u32::MAX);
         Column {
-            chunks: (0..chunks).map(|_| OnceLock::new()).collect(),
+            spans: std::array::from_fn(|_| OnceLock::new()),
             reserved: AtomicU32::new(0),
-            limit,
+            limit: limit.min(held),
         }
     }
 
@@ -116,23 +141,15 @@ impl<T> Column<T> {
         if at >= self.reserved() {
             return Err(row);
         }
-        let Some(laid) = self.chunks.get((at >> CHUNK_BITS) as usize) else {
+        let Some(span) = self
+            .spans
+            .get((at >> (CHUNK_BITS + SPAN_BITS)) as usize)
+            .and_then(lay)
+        else {
             return Err(row);
         };
-        let chunk = if let Some(chunk) = laid.get() {
-            chunk
-        } else {
-            // Made through a `Vec` so the chunk is laid on the heap and
-            // never built on the stack; its length is `CHUNK`, so the
-            // conversion holds, and the row is handed back rather than a
-            // panic where it would not. Made before it is offered: a
-            // thread that laid the chunk first keeps its own, and this
-            // one is dropped.
-            let slots: Vec<OnceLock<T>> = (0..CHUNK).map(|_| OnceLock::new()).collect();
-            let Ok(fresh) = Chunk::try_from(slots) else {
-                return Err(row);
-            };
-            laid.get_or_init(|| fresh)
+        let Some(chunk) = lay(&span[(at >> CHUNK_BITS) as usize & (SPAN - 1)]) else {
+            return Err(row);
         };
         chunk[at as usize & (CHUNK - 1)].set(row)
     }
@@ -151,7 +168,11 @@ impl<T> Column<T> {
 
     /// The row at `at`, where it was filled.
     pub(crate) fn get(&self, at: u32) -> Option<&T> {
-        let chunk = self.chunks.get((at >> CHUNK_BITS) as usize)?.get()?;
+        let span = self
+            .spans
+            .get((at >> (CHUNK_BITS + SPAN_BITS)) as usize)?
+            .get()?;
+        let chunk = span[(at >> CHUNK_BITS) as usize & (SPAN - 1)].get()?;
         chunk[at as usize & (CHUNK - 1)].get()
     }
 
@@ -524,7 +545,7 @@ impl Epochs {
 mod tests {
     use std::sync::Arc;
 
-    use super::{Arena, CHUNK, CHUNKS, Column, Epochs};
+    use super::{Arena, CHUNK, Column, Epochs, SPAN, SPANS};
     use crate::api::call::ClassNative;
     use crate::api::values::ClassId;
     use crate::enums::EnumMethod;
@@ -590,28 +611,33 @@ mod tests {
         );
     }
 
-    /// A number's low bits are its slot in a chunk and its high bits the
-    /// chunk's: rows on either side of a chunk's edge are each their own,
-    /// a column is held to the rows its directory holds, and a number
-    /// past the directory names nothing.
+    /// A number's low bits are its slot in a chunk, its middle bits the
+    /// chunk's place in a span and its high bits the span's: rows on
+    /// either side of a chunk's edge and of a span's are each their own,
+    /// a column is held to the rows its spans hold, and a number past
+    /// them names nothing.
     #[test]
-    fn each_number_has_its_own_slot_across_the_chunks() {
+    fn each_number_has_its_own_slot_across_the_chunks_and_spans() {
         let column: Column<u32> = Column::below(u32::MAX);
-        let held = u32::try_from(CHUNKS * CHUNK).unwrap_or(u32::MAX);
-        assert_eq!(column.limit, held, "held to the directory");
-        let edge = u32::try_from(CHUNK).unwrap_or(u32::MAX);
-        assert_eq!(column.reserve(edge + 1), Some(0));
-        for at in [0, edge - 1, edge] {
+        let held = u32::try_from(SPANS * SPAN * CHUNK).unwrap_or(u32::MAX);
+        assert_eq!(column.limit, held, "held to the spans");
+        let chunk = u32::try_from(CHUNK).unwrap_or(u32::MAX);
+        let span = u32::try_from(SPAN * CHUNK).unwrap_or(u32::MAX);
+        let edges = [0, chunk - 1, chunk, span - 1, span];
+        assert_eq!(column.reserve(span + 1), Some(0));
+        for at in edges {
             assert_eq!(column.fill(at, at + 7), Ok(()));
         }
-        for at in [0, edge - 1, edge] {
+        for at in edges {
             assert_eq!(column.get(at), Some(&(at + 7)));
         }
         assert_eq!(column.get(1), None, "reserved, never filled");
         assert_eq!(column.get(held), None);
         assert_eq!(column.get(u32::MAX), None);
-        let small: Column<u32> = Column::below(10);
-        assert_eq!(small.chunks.len(), 1, "as many chunks as the limit needs");
+        assert!(
+            column.spans.iter().skip(2).all(|span| span.get().is_none()),
+            "laid where a row needs it"
+        );
     }
 
     #[test]
