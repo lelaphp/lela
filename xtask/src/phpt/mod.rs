@@ -1536,6 +1536,12 @@ impl<'f> Build<'f> {
         profile::featured(root, &self.0.join("+"))
     }
 
+    /// The engine's `php` built with the features into their directory.
+    pub(crate) fn built(&self, root: &Path) -> Result<PathBuf> {
+        let (features, into) = (self.features(), self.target_dir(root));
+        profile::build(root, &CLI.package(), ENGINE, Some(&features), Some(&into))
+    }
+
     /// The engine built now, saying for whom and what it took; a build
     /// that fails is the reason that refuses what runs on it.
     fn run(&self, root: &Path, runs: &str) -> Result<Runner, String> {
@@ -1545,7 +1551,7 @@ impl<'f> Build<'f> {
             into.display()
         );
         let started = std::time::Instant::now();
-        let engine = profile::build(root, &CLI.package(), ENGINE, Some(&features), Some(&into));
+        let engine = self.built(root);
         println!(
             "phpt: the engine with {features} took {:.1}s to build",
             started.elapsed().as_secs_f64()

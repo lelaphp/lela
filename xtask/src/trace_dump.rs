@@ -36,9 +36,7 @@ use crate::crosscheck::first_difference;
 use crate::divergence::{Kind, Registry};
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
-use crate::oracle::{
-    self, Ended, Invocation, Observation, Oracle, Program, Regime, Verdict, hosts::CLI, profile,
-};
+use crate::oracle::{self, Ended, Invocation, Observation, Oracle, Program, Regime, Verdict};
 use crate::phpt::{Build, Lane};
 use crate::reading::{Reading, Status, Store};
 
@@ -197,15 +195,7 @@ fn engine(root: &Path, ask: &Ask) -> Result<PathBuf> {
         // Each side runs in its program's directory.
         return Ok(std::path::absolute(engine)?);
     }
-    let build = Build::of(vec![Lane::FEATURE]);
-    let into = build.target_dir(root);
-    profile::build(
-        root,
-        &CLI.package(),
-        CLI.binary,
-        Some(&build.features()),
-        Some(&into),
-    )
+    Build::of(vec![Lane::FEATURE]).built(root)
 }
 
 /// `xtask trace-dump`: [`run`] under the tracked registry, its readings
