@@ -15,5 +15,8 @@ workspace = true
 [dependencies]
 php_heap = { path = "../php_heap" }
 
+[dev-dependencies]
+expect-test.workspace = true
+
 [build-dependencies]
 toml.workspace = true
