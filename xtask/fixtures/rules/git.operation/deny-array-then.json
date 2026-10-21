@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cd /var/empty/wt; P=(AGENTS.md) && git commit -F m -- \"${P[@]}\"","description":"Commit by pathspec after a cd that may have failed, so where the line started as well (#2995)"}}
