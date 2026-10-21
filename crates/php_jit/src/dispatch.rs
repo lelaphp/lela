@@ -157,14 +157,7 @@ fn looped(
     id: TraceId,
     shared: &Shared,
 ) -> Flow {
-    let body = table::of(req, &shared.policy, &shared.perf)
-        .and_then(|table| table.get(id))
-        .and_then(|trace| trace.body);
-    let stands = tier::frame(req, frame).map(|view| view.opline());
-    if body.is_some()
-        && body == stands
-        && let Some(flow) = run_at(req, frame, id, shared, At::Body)
-    {
+    if let Some(flow) = run_at(req, frame, id, shared, At::Body) {
         return flow;
     }
     match record::headed(req, frame, header) {
@@ -272,8 +265,9 @@ pub(crate) fn run(req: &mut Request, frame: FrameRef, id: TraceId, shared: &Shar
 }
 
 /// [`run`], its first trace entered `at` its first op or its loop's
-/// body, and each after it at its first op; none where the first,
-/// entered at its body, declined the entry with nothing done.
+/// body, and each after it at its first op; none where the first, asked
+/// at its body, keeps no way in where the frame stands or declined the
+/// entry, with nothing done.
 fn run_at(
     req: &mut Request,
     frame: FrameRef,
@@ -288,6 +282,10 @@ fn run_at(
     let Some(trace) = table.get(id) else {
         return Some(Flow::Continue);
     };
+    let stands = tier::frame(req, frame).map(|view| view.opline());
+    if at == At::Body && (trace.body.is_none() || trace.body != stands) {
+        return None;
+    }
     let entered = enter::enter(req, frame, trace, at);
     if matches!(entered, Ok(Left::Declined)) {
         return None;
@@ -523,7 +521,7 @@ pub(crate) fn hot(
                     claim,
                     name,
                 },
-                false,
+                GoesOn::Past,
             );
             break (resumed(frame, stepped), None);
         }
@@ -553,7 +551,12 @@ pub(crate) fn hot(
         };
         // A loop's trace closed at its header leaves the interpreter at
         // that header, short of the trace.
-        let outcome = settled(req, shared, job, stop == Stop::Loop);
+        let goes_on = if stop == Stop::Loop {
+            GoesOn::Short
+        } else {
+            GoesOn::Past
+        };
+        let outcome = settled(req, shared, job, goes_on);
         let repeat = match (outcome, ended.inner) {
             (Some(Outcome::Abort(Stop::InnerLoop)), Some((func, header))) => policy::claim(
                 Holder::Root {
@@ -683,14 +686,14 @@ fn side_entered(table: Option<&table::Table>, start: Start) -> Vec<record::Enter
 /// worker; any other settled here at once as the attempt it failed, as
 /// php writes its abort before it records again. Its lines written;
 /// what it settled as, where it was settled here.
-fn settled(req: &mut Request, shared: &Shared, job: Job, short: bool) -> Option<Outcome> {
+fn settled(req: &mut Request, shared: &Shared, job: Job, goes_on: GoesOn) -> Option<Outcome> {
     let mut lines = Vec::new();
     let outcome = if job.recorded.record.stop.compiles() {
         let word = job.claim.holder().clone();
         let engine = req.engine::<JitEngine>();
         match engine.map(|engine| engine.compiler.submit(shared, job, &mut lines)) {
             Some(None) => {
-                req.state::<JitRequest>().submitted = Some(Submitted { word, short });
+                req.state::<JitRequest>().submitted = Some(Submitted { word, goes_on });
                 None
             }
             Some(settled) => settled,
@@ -722,12 +725,21 @@ pub(crate) struct Submitted {
     /// The trace's word, which reads recording while its job is queued
     /// or under way.
     word: Holder,
-    /// Whether the interpreter goes on short of the trace: at the header
-    /// a loop's trace closed at, where php's would have entered it. The
-    /// request reaches it at the next loop or return site it visits, the
-    /// loop's back edge or the return of what its body called, its loop
-    /// having ended or not.
-    short: bool,
+    /// Where the interpreter goes on.
+    goes_on: GoesOn,
+}
+
+/// Where the interpreter goes on once a recording is submitted, beside
+/// the trace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GoesOn {
+    /// Past it: the request reaches the trace once it is published.
+    Past,
+    /// Short of it, at the header a loop's trace closed at, where php's
+    /// would have entered it: the request reaches it at the next loop or
+    /// return site it visits, the loop's back edge or the return of what
+    /// its body called, its loop having ended or not.
+    Short,
 }
 
 /// Whether the request claims no word at `site`, a safepoint's or, for
@@ -747,7 +759,8 @@ fn quieted(state: &mut JitRequest, site: Option<Site>) -> bool {
         return false;
     };
     let under_way = policy::read(submitted.word.word()) == State::Recording;
-    let short = submitted.short && !matches!(site, Some(Site::Loop(_) | Site::Return(_)));
+    let short = submitted.goes_on == GoesOn::Short
+        && !matches!(site, Some(Site::Loop(_) | Site::Return(_)));
     if !under_way && !short {
         state.submitted = None;
     }

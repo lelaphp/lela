@@ -777,8 +777,9 @@ impl<'p> Recorder<'p> {
             };
             let after = code.oplines.get(at.0 as usize + 1).copied();
             // php checks a trace's first opline before it records it, and
-            // records every later one before it stops at it.
-            if !stepped && unsupported(op.opcode) {
+            // records every later one before it stops at it; behind a
+            // condition, the condition is the first.
+            if !stepped && behind.is_none() && unsupported(op.opcode) {
                 return Ok((Stop::NotSupported, ended(frame, false)));
             }
             let (op1, op2, data) = sampled(req, frame, &op, after.as_ref());

@@ -17,7 +17,7 @@ use php_engine::tier::{
 };
 use php_unit::{OpArray, OplineIdx, Unit};
 
-use super::{Submitted, Visited, quieted, visit};
+use super::{GoesOn, Submitted, Visited, quieted, visit};
 use crate::policy::{self, Holder, Outcome, State};
 use crate::record::{self, Start, Stop};
 use crate::table::TraceId;
@@ -189,7 +189,7 @@ fn a_request_claims_nothing_until_it_reaches_the_trace_it_submitted() {
     let mut state = crate::JitRequest {
         submitted: Some(Submitted {
             word: holder,
-            short: true,
+            goes_on: GoesOn::Short,
         }),
         ..crate::JitRequest::default()
     };

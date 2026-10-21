@@ -1581,8 +1581,15 @@ impl<'a> Builder<'a> {
         let rooted = header.frame == Frame::ROOT
             && snapshot.calls == 0
             && (snapshot.values.iter()).all(|(slot, _)| slot.frame == Frame::ROOT);
+        // Every value a register carries round the loop is one the entry
+        // loads, so the body reads none the entry left undefined.
+        let carried = (self.values.iter().enumerate())
+            .filter(|(_, value)| {
+                matches!(value.def, Def::Phi { .. }) && value.home == Home::Register
+            })
+            .all(|(phi, _)| (snapshot.values.iter()).any(|(_, held)| held.0 as usize == phi));
         let at = OpId(u32::try_from(at).ok()?);
-        (held && rooted).then(|| BodyEntry {
+        (held && rooted && carried).then(|| BodyEntry {
             at,
             opline: body.opline,
             holds: snapshot.values.clone(),
