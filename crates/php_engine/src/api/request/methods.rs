@@ -114,6 +114,11 @@ impl Request {
     /// method's class, or the request's `ClassId` for the class of a
     /// user method; none for a function.
     pub(crate) fn method_class(&self, function: Function) -> Option<ClassId> {
+        // A user function first, the executed scope's common ask; its
+        // number is in none of the natives' spaces below.
+        if let Some(user) = self.user_function(function) {
+            return user.member.map(|member| member.class);
+        }
         if let Some(method) = self.native_method(function) {
             // A parent hook's trampoline has the property's class as its
             // scope, which its call carries and no row of the table does.
@@ -129,9 +134,7 @@ impl Request {
                 crate::trampoline::Via::Native(_) => None,
             };
         }
-        self.user_function(function)?
-            .member
-            .map(|member| member.class)
+        None
     }
 
     /// `ce->constructor`: `__construct` as `class`'s linked record

@@ -8067,22 +8067,25 @@ fn inline_fetch_obj_r(
 /// the name is in, found by the name's known hash
 /// (`zend_hash_find_known_hash(zobj->properties, name)`,
 /// `Z/Zend/zend_vm_def.h:2154`). Over a name a `CV` holds, which no
-/// cache serves (`cache_slot == NULL`), the bucket of a name that places
-/// as a dynamic property by the rule the cache was primed by
-/// ([`Request::places_dynamic`]) on an object the standard handlers serve,
-/// which is `zend_std_read_property`'s and `zend_std_write_property`'s
-/// one find of `ce->properties_info` and one of `zobj->properties`. For a
-/// `write`, only in a table nothing else shares, whose separation is the
-/// kernel's. None where the cache names no place for this class and
-/// frame, where a computed name is a declared property's or no string,
-/// and where the table holds no such name, which is `__get`'s, the
-/// warning's or a write that lays it down.
+/// cache serves (`cache_slot == NULL`), the place
+/// `zend_get_property_offset` names with no cache slot on an object the
+/// standard handlers serve ([`Request::property_names`]): the bucket
+/// of a name no class of the chain declares, or a declared slot the
+/// scope reaches whose property has no hooks, placed by
+/// `zend_std_read_property`'s and `zend_std_write_property`'s one find
+/// of `ce->properties_info`, by the name's cached hash, and for the
+/// bucket one of `zobj->properties`. For a `write`, only in a table
+/// nothing else shares, whose separation is the kernel's. None where
+/// the cache names no place for this class and frame, where a computed
+/// name is any other declared property's or no string, and where the
+/// table holds no such name, which is `__get`'s, the warning's or a
+/// write that lays it down.
 ///
 /// A name a variable holds is read, written, stepped, compound-assigned
 /// and fetched for a reference through the bucket every pass, through a
 /// reference the bucket holds, into a table a cast shares only once it
 /// is separated, and on a class whose `__get` or `__set` serves what the
-/// table does not hold; a declared, a `static` and a NUL-led name take
+/// table does not hold; a private, a `static` and a NUL-led name take
 /// the kernel's diagnostics, and a class with handlers of its own takes
 /// the write through them:
 ///
@@ -8138,6 +8141,63 @@ fn inline_fetch_obj_r(
 /// int(1)
 /// int(6)
 /// ```
+///
+/// On a class that declares properties a public one is read, written,
+/// stepped and compound-assigned through its slot by a computed name, a
+/// typed one written through the kernel's coercion and refusal; a
+/// parent's private one the child redeclared is placed under the
+/// scope, a protected one is reached from its class's scope, a bound
+/// closure's among them, and is the kernel's error from outside, a
+/// readonly one takes the kernel's error, an emptied slot the warning,
+/// and a name the class does not declare is a dynamic property's bucket
+/// on a class that allows one and a deprecated creation on one that
+/// does not:
+///
+/// ```php
+/// class P { private $v = "P"; function viaP($o, $q) { return $o->$q; } }
+/// class C extends P { public $v = "C"; public $d = 1; public int $t = 2; protected $pr = 3; public readonly int $ro;
+///     function __construct() { $this->ro = 4; } function viaC($o, $q) { return $o->$q; } }
+/// #[AllowDynamicProperties] class E { public $d = 0; }
+/// class H { public $h { get => "hook"; } public $k = "k"; }
+/// function f($o, $q) { for ($i = 0; $i < 2; $i++) { $x = $o->$q; $o->$q = $i; $o->$q++; --$o->$q; $o->$q += 10; $r = &$o->$q; } return $x; }
+/// $c = new C; $d = str_repeat('d', 1); $t = 't'; $v = 'v'; $pr = 'pr'; $ro = 'ro'; $p = 'p';
+/// echo f($c, $d), " ", $c->$d, "\n";
+/// $c->$t = "5"; $c->$t++; $c->$t += 1; echo $c->$t, "\n";
+/// try { $c->$t = "x"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// echo $c->$v, $c->viaP($c, $v), $c->viaC($c, $v), "\n";
+/// try { echo $c->$pr; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// echo $c->viaC($c, $pr), "\n";
+/// try { $c->$ro = 5; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// echo $c->$ro, "\n";
+/// unset($c->$d); echo $c->$d ?? "unset", "\n"; echo $c->$d, "\n";
+/// $e = new E; $e->$p = 1; echo f($e, $p), " ", $e->$d, "\n";
+/// $h = 'h'; $k = 'k'; $hk = new H; $hk->$k .= "!"; echo $hk->$h, $hk->$k, "\n";
+/// $c->$p = 1; echo $c->$p, "\n";
+/// $g = function ($q) { $this->$q = 9; $this->$q++; return $this->$q; };
+/// echo Closure::bind($g, $c, C::class)($pr), Closure::bind($g, $c, P::class)($v), $c->$v, "\n";
+/// try { $c->$pr = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// 10 11
+/// 7
+/// Cannot assign string to property C::$t of type int
+/// CPC
+/// Cannot access protected property C::$pr
+/// 3
+/// Cannot modify readonly property C::$ro
+/// 4
+/// unset
+///
+/// Warning: Undefined property: C::$d in %s on line 17
+///
+/// 10 0
+/// hookk!
+///
+/// Deprecated: Creation of dynamic property C::$p is deprecated in %s on line 20
+/// 1
+/// 1010C
+/// Cannot access protected property C::$pr
+/// ```
 #[inline(always)] // as `inline_fetch_obj_r`
 #[allow(clippy::inline_always)]
 fn inline_place(
@@ -8163,7 +8223,9 @@ fn inline_place(
 }
 
 /// [`inline_place`] over a name the program computed: the bucket of a
-/// name that places as a dynamic property ([`Request::places_dynamic_on_std`]).
+/// name that places as a dynamic property, with no lookup on a class
+/// that declares no property ([`Request::property_names`]), or the
+/// place [`declared_place`] finds on one that does.
 /// A call of its own, so that the constant name's path keeps to the
 /// registers it needs: inlined, it put ten instructions on a constant
 /// name's `+=` in the release build (#3045).
@@ -8174,11 +8236,33 @@ fn computed_place(
     name: php_heap::Str,
     write: bool,
 ) -> Option<(php_heap::ZvalRef, bool)> {
+    use crate::api::request::PropertyNames;
     let class = crate::api::values::ClassId(object.class());
-    if !req.places_dynamic_on_std(class, name.bytes()) {
-        return None;
+    match req.property_names(class)? {
+        PropertyNames::Dynamic if !Request::bad_property_name(name.bytes()) => {
+            Some((dynamic_bucket(object, name, write)?, false))
+        }
+        PropertyNames::Declared => declared_place(req, object, name, write),
+        PropertyNames::Dynamic | PropertyNames::Own => None,
     }
-    Some((dynamic_bucket(object, name, write)?, false))
+}
+
+/// [`computed_place`] on a class that declares a property
+/// ([`Request::declared_offset`]): a call of its own, so that the
+/// registers its find needs are not saved where a class declares none,
+/// which inlined put seven instructions on a stdClass's computed read.
+#[inline(never)]
+fn declared_place(
+    req: &Request,
+    object: php_heap::Obj,
+    name: php_heap::Str,
+    write: bool,
+) -> Option<(php_heap::ZvalRef, bool)> {
+    let class = crate::api::values::ClassId(object.class());
+    match req.declared_offset(class, name)? {
+        exec::PropertyOffset::Declared { slot, typed } => Some((object.slot_ref(slot)?, typed)),
+        exec::PropertyOffset::Dynamic => Some((dynamic_bucket(object, name, write)?, false)),
+    }
 }
 
 /// The bucket `name` stands in in `object`'s dynamic table, found by
@@ -13605,7 +13689,7 @@ fn assign_property(
         // temporary takes under `RETURN_VALUE_USED`, is the coercion
         // where there was one, php's `tmp`.
         Some((slot, true)) => {
-            let Some(typed) = req.declared_typed_property(object.class(), bytes) else {
+            let Some(typed) = req.typed_property_at(object.class(), slot) else {
                 req.release(value);
                 return Err(Fatal::error(format!(
                     "InternalError: ZEND_ASSIGN_OBJ placed the typed property ${}, whose declared type the class does not carry",
@@ -16555,11 +16639,10 @@ fn property_ptr(
         PropertyPlace::Std => {
             let silent = req.serves_accessor(object.class(), crate::api::request::Accessor::Get);
             // `BP_VAR_RW` reads an unwritten slot before the placement.
-            req.read_before_write(object, bytes)?;
-            if req.place_withheld(object, bytes) {
-                return Ok(PropertyPtr::Withheld);
+            match req.place_for_read_write(object, bytes, silent)? {
+                crate::api::request::ReadWriteSlot::Withheld => return Ok(PropertyPtr::Withheld),
+                crate::api::request::ReadWriteSlot::Placed(placed) => placed,
             }
-            req.declared_slot_for_write(object, bytes, "modify", silent)?
         }
     };
     if let Some((slot, typed)) = placed {
@@ -16645,7 +16728,7 @@ fn land_step(
             .assign_declared_slot(object.heap(), slot, stepped, strict)
             .map(|pair| landed_out(req, frame, op, pair)));
     }
-    let Some(typed) = req.declared_typed_property(object.class(), bytes) else {
+    let Some(typed) = req.typed_property_at(object.class(), slot) else {
         req.release(stepped);
         let shown = String::from_utf8_lossy(bytes);
         return Err(Fatal::error(format!(
@@ -17376,7 +17459,7 @@ fn typed_step(
     step: IncDec,
     (held, stepped): (Value, Value),
 ) -> Result<Result<Value, Thrown>, Fatal> {
-    let Some(declared) = req.declared_typed_property(object.class(), bytes) else {
+    let Some(declared) = req.typed_property_at(object.class(), slot) else {
         req.release(stepped);
         let shown = String::from_utf8_lossy(bytes);
         return Err(Fatal::error(format!(

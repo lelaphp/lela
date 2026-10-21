@@ -59,6 +59,7 @@ pub use calls::Supplier;
 mod class_constants;
 pub(crate) use class_constants::ConstantFetch;
 mod class_data;
+pub(crate) use class_data::PropertyNames;
 mod classes;
 use classes::AccelServed;
 pub use classes::Symbols;
@@ -126,7 +127,7 @@ mod preload;
 mod properties;
 mod publish;
 use properties::IN_GET;
-pub(crate) use properties::{Accessor, RefSource, TypedProperty, Walked};
+pub(crate) use properties::{Accessor, ReadWriteSlot, RefSource, TypedProperty, Walked};
 mod recording;
 mod resources;
 pub use resources::{ResourceDtor, Resources};
@@ -905,10 +906,40 @@ pub(crate) struct Bound {
     placed: Placed,
 }
 
-/// A class's declared instance properties in slot order, each the row of
-/// the class that declared it: `ce->properties_info_table` over
-/// `ce->default_properties_table` ([`Request::placed_properties`]).
-pub(crate) type Placed = Box<[PropertyInfo]>;
+/// Where a class's declared properties are on its objects, built once
+/// where the class is linked ([`objects::placed_of`]) and read as plain
+/// data after.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Placed {
+    /// The declared instance properties in slot order, each the row of
+    /// the class that declared it: `ce->properties_info_table` over
+    /// `ce->default_properties_table` ([`Request::placed_properties`]).
+    slots: Box<[PropertyInfo]>,
+    /// What each row of the class's linked record's `properties`,
+    /// `ce->properties_info`, places its name at, by the row's position:
+    /// what `zend_get_property_offset` reads off the
+    /// `zend_property_info` its one find answers. Empty for a class with
+    /// no record.
+    rows: Box<[RowPlace]>,
+}
+
+impl Placed {
+    /// The declared instance properties in slot order.
+    pub(crate) fn slots(&self) -> &[PropertyInfo] {
+        &self.slots
+    }
+}
+
+/// What one row of `ce->properties_info` places its name at: the slot
+/// its property takes on the class's objects, `property_info->offset`,
+/// none for a `static` or a virtual one; and `ZEND_ACC_CHANGED`, whether
+/// a class above it declares a private property of the name, which is
+/// what makes a public property's placement read the scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RowPlace {
+    pub(crate) slot: Option<u32>,
+    pub(crate) changed: bool,
+}
 
 /// `zend_property_info *`: a declared property named by the class that
 /// declared it, its `ce`, and its place among that class's declared

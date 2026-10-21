@@ -23,7 +23,7 @@ use crate::api::values::{
 use frames::Link;
 
 use super::Frames;
-use super::{DeclaredSlot, Hooks, PropertyInfo, Request, frames};
+use super::{DeclaredSlot, Hooks, PropertyInfo, Request, RowPlace, frames};
 
 /// `IN_GET`, `IN_SET`, `IN_UNSET` and `IN_ISSET`
 /// (`Z/Zend/zend_object_handlers.c:43`, over
@@ -64,14 +64,82 @@ enum DynamicWrite {
 /// What [`Request::find_property_info`] found for a name in a class's
 /// `ce->properties_info`.
 #[derive(Clone, Copy)]
-enum InfoFound {
+enum InfoFound<'a> {
     /// The row of the name: the class's own declaration, or the one it
     /// inherited, a parent's private one included.
-    Row(PropertyInfo),
+    Row(Found<'a>),
     /// No class of the chain declares the name.
     Absent,
     /// The class has no linked record, so its declarations answer.
     Unrecorded,
+}
+
+/// The row of `ce->properties_info` a name places by, as
+/// `zend_get_property_offset` reads the `zend_property_info` its find
+/// answered: the property, `property_info->ce` and its place among that
+/// class's declarations; its declaration, whose flags the placement
+/// reads; and what the row places the name at, `property_info->offset`
+/// and `ZEND_ACC_CHANGED`.
+#[derive(Clone, Copy)]
+struct Found<'a> {
+    info: PropertyInfo,
+    property: &'a PropertyDecl,
+    place: RowPlace,
+}
+
+impl Found<'_> {
+    fn slot(self) -> Option<usize> {
+        self.place.slot.and_then(|slot| usize::try_from(slot).ok())
+    }
+
+    /// `flags & (ZEND_ACC_CHANGED|ZEND_ACC_PRIVATE|ZEND_ACC_PROTECTED)`:
+    /// whether placing the row reads the scope
+    /// (`Z/Zend/zend_object_handlers.c:393`); a row with none of them is
+    /// its offset whatever the scope.
+    fn reads_scope(self) -> bool {
+        self.property.visibility != Visibility::Public || self.place.changed
+    }
+}
+
+/// What `zend_get_property_offset` answered for a name on an object of
+/// a class ([`Request::place_property`]), placed once by a property
+/// access and handed to each step of it, as php's handlers place a name
+/// once and read the offset after.
+#[derive(Clone, Copy)]
+pub(super) enum Placement {
+    /// A declared slot the scope reaches.
+    Reached(DeclaredSlot),
+    /// A declared slot the scope may not reach:
+    /// `ZEND_WRONG_PROPERTY_OFFSET` after `zend_bad_property_access`,
+    /// unless a magic accessor serves the name.
+    Denied(DeclaredSlot),
+    /// A row of the chain's that places no slot the scope reads: a
+    /// `static` property, a parent's private one, a virtual one, which
+    /// [`Request::unplaced`] judges.
+    Unslotted,
+    /// No class of the chain declares the name, `static` or not: a
+    /// dynamic property's, unless a NUL byte leads it.
+    Undeclared,
+}
+
+impl Placement {
+    /// The declared slot, reached or not.
+    pub(super) fn slot(self) -> Option<DeclaredSlot> {
+        match self {
+            Placement::Reached(placed) | Placement::Denied(placed) => Some(placed),
+            Placement::Unslotted | Placement::Undeclared => None,
+        }
+    }
+}
+
+/// What [`Request::place_for_read_write`] answers: a slot whose readonly
+/// or set visibility withholds its place, so the operation is made over
+/// what `read_property` answers; or what
+/// [`Request::declared_slot_for_write`] placed, the slot and whether it
+/// is typed, none for a name no slot holds.
+pub(crate) enum ReadWriteSlot {
+    Withheld,
+    Placed(Option<(u32, bool)>),
 }
 
 /// What a write to a typed declared slot reads off its
@@ -215,14 +283,6 @@ impl Request {
         self.properties.ref_sources.retain(|(at, _)| *at != word);
     }
 
-    /// `zend_get_executed_scope` (`Z/Zend/zend_execute_API.c:712`): the
-    /// chain walked from `EG(current_execute_data)` to the first link
-    /// that is user code or a function with a scope, and that link's
-    /// `func->common.scope`: a user method's class, a closure's bound
-    /// scope, and none for a plain user function or the main op array.
-    /// A native with no scope, `constant()` or `get_class()` called
-    /// from a method, is walked past, so the scope a native reads is
-    /// its caller's; a native method's is its own class.
     /// `get_fake_or_executed_scope`: the scope a property is placed and
     /// its visibility measured from, the scope a write named for itself
     /// ([`Request::write_property_as_declared`]) or the executed one.
@@ -363,38 +423,76 @@ impl Request {
         if self.own_handlers(class).is_some() {
             return None;
         }
-        if let Some(placed) = self.declared_slot(class, name) {
-            let reached = self.hooked(class, name).is_none() && self.reaches(&placed);
-            return reached.then_some(crate::exec::PropertyOffset::Declared {
-                slot: placed.slot,
-                typed: placed.typed,
-            });
-        }
-        self.places_dynamic(class, name)
-            .then_some(crate::exec::PropertyOffset::Dynamic)
+        let found = self.find_property_info(class, name);
+        self.offset_of(class, name, found, self.class_hooks(class))
     }
 
-    /// `zend_get_property_offset`'s `ZEND_DYNAMIC_PROPERTY_OFFSET`
-    /// whatever the scope (`Z/Zend/zend_object_handlers.c:384-389`):
-    /// whether `name` is a dynamic property of objects of `class`, which
-    /// is a name no class of the chain declares, an instance or a
-    /// `static` property, private or not
-    /// ([`Request::find_property_info`]), and that leads with no NUL byte.
-    /// One rule for a name a cache slot holds ([`Request::cacheable_offset`])
-    /// and for one the program computed, which no cache serves
-    /// (`cache_slot == NULL`) and which a property opcode's inline path
-    /// places by it every pass.
-    pub(crate) fn places_dynamic(&self, class: ClassId, name: &[u8]) -> bool {
-        if Self::bad_property_name(name) {
-            return false;
-        }
-        match self.find_property_info(class, name) {
-            InfoFound::Absent => true,
-            InfoFound::Row(_) => false,
-            InfoFound::Unrecorded => {
-                self.placed_named(class, name).is_none()
-                    && self.chain_declaration(class, name).is_none()
+    /// `zend_get_property_offset`'s answer a fetch may keep, from what
+    /// the find of `ce->properties_info` answered for `name` (`found`) on
+    /// a class served by the standard handlers whose property hooks stand
+    /// where `hooks` says: one rule for a name a cache slot holds
+    /// ([`Request::cacheable_offset`]) and for one the program computed
+    /// ([`Request::declared_offset`]), which no cache serves
+    /// (`cache_slot == NULL`). `ZEND_DYNAMIC_PROPERTY_OFFSET` whatever the
+    /// scope for a name no class of the chain declares, instance or
+    /// `static`, private or not, and that leads with no NUL byte
+    /// (`Z/Zend/zend_object_handlers.c:384-389`); a row whose flags read
+    /// no scope ([`Found::reads_scope`]) its offset, on a class with no
+    /// hooked property; and the slot the placement reaches from the
+    /// scope ([`Request::place_found`]) for any other row, where its
+    /// property has no hooks. None for every other name.
+    #[inline(always)] // its callers' fast arm: out of line it cost 37 instructions on a computed read
+    #[allow(clippy::inline_always)]
+    fn offset_of(
+        &self,
+        class: ClassId,
+        name: &[u8],
+        found: InfoFound<'_>,
+        hooks: php_link::ClassHooks,
+    ) -> Option<crate::exec::PropertyOffset> {
+        let dynamic =
+            || (!Self::bad_property_name(name)).then_some(crate::exec::PropertyOffset::Dynamic);
+        match found {
+            InfoFound::Absent => return dynamic(),
+            InfoFound::Row(row) if !row.reads_scope() && hooks == php_link::ClassHooks::Absent => {
+                return Some(crate::exec::PropertyOffset::Declared {
+                    slot: row.place.slot?,
+                    typed: row.property.ty.is_some(),
+                });
             }
+            InfoFound::Unrecorded
+                if self.placed_named(class, name).is_none()
+                    && self.chain_declaration(class, name).is_none() =>
+            {
+                return dynamic();
+            }
+            InfoFound::Row(_) | InfoFound::Unrecorded => {}
+        }
+        self.offset_placed(class, name, found, hooks)
+    }
+
+    /// [`Request::offset_of`] for a row whose flags read the scope, or
+    /// on a class with a hooked property: the slot the placement reaches,
+    /// where its property has no hooks. A call of its own, so the rows
+    /// that read no scope save none of the registers it needs.
+    #[inline(never)]
+    fn offset_placed(
+        &self,
+        class: ClassId,
+        name: &[u8],
+        found: InfoFound<'_>,
+        hooks: php_link::ClassHooks,
+    ) -> Option<crate::exec::PropertyOffset> {
+        match self.place_found(class, name, found) {
+            Placement::Reached(placed)
+                if hooks == php_link::ClassHooks::Absent || self.hooked(class, name).is_none() =>
+            {
+                Some(crate::exec::PropertyOffset::Declared {
+                    slot: placed.slot,
+                    typed: placed.typed,
+                })
+            }
+            _ => None,
         }
     }
 
@@ -416,24 +514,40 @@ impl Request {
         }
     }
 
-    /// Whether a name the program computed places as a dynamic property
-    /// on an object of `class` with no lookup at all: the class served by
-    /// the standard handlers, `zobj->handlers->read_property ==
-    /// zend_std_read_property`, its `ce->properties_info` empty, which
-    /// the first test of `zend_get_property_offset` reads
-    /// (`zend_hash_num_elements(&ce->properties_info) == 0`), and the name
-    /// led by no NUL byte: [`Request::places_dynamic`] over the class's
-    /// row in the request ([`Made::dynamic_names`]), which a property
-    /// opcode's inline path reads. A class that declares a property
-    /// leaves a computed name to the kernel with no find spent on it
-    /// here, where a find costs more than the scan the kernel makes of a
-    /// small class's placed rows (#3045). False before an object of the
+    /// How the objects of `class` serve a property's name, read off the
+    /// class's row in the request ([`PropertyNames`]): what a property
+    /// opcode's inline path reads before it places a name the program
+    /// computed, with no lookup at all on a class served by the standard
+    /// handlers that declares no property, `ce->properties_info` empty,
+    /// the first test of `zend_get_property_offset`, where every name led
+    /// by no NUL byte is a dynamic property. None before an object of the
     /// class was made, which an object of it standing never is.
     ///
-    /// [`Made::dynamic_names`]: super::class_data::Made::dynamic_names
-    pub(crate) fn places_dynamic_on_std(&self, class: ClassId, name: &[u8]) -> bool {
-        self.made_ref(class).is_some_and(|made| made.dynamic_names)
-            && !Self::bad_property_name(name)
+    /// [`PropertyNames`]: super::class_data::PropertyNames
+    #[inline]
+    pub(crate) fn property_names(
+        &self,
+        class: ClassId,
+    ) -> Option<super::class_data::PropertyNames> {
+        Some(self.made_ref(class)?.names)
+    }
+
+    /// Where a name the program computed is on an object of `class`, a
+    /// class the standard handlers serve that declares a property
+    /// ([`Request::property_names`]), as `zend_get_property_offset`
+    /// places it with no cache slot, which is what php's handlers pass
+    /// for a computed name: the offset a cache slot would keep
+    /// ([`Request::offset_of`]) over the one find of `ce->properties_info`
+    /// by the name's cached hash. None for every other name, which the
+    /// kernel places and raises for.
+    pub(crate) fn declared_offset(
+        &self,
+        class: ClassId,
+        name: php_heap::Str,
+    ) -> Option<crate::exec::PropertyOffset> {
+        let table = self.properties_info(class)?;
+        let found = self.find_in(table, name.bytes(), || name.hash());
+        self.offset_of(class, name.bytes(), found, table.hooks)
     }
 
     /// `zend_update_property_ex(prop_info->ce, ...)`, what an engine or a
@@ -497,10 +611,47 @@ impl Request {
         self.in_fake_scope(scope, f)
     }
 
+    /// `zend_get_executed_scope` (`Z/Zend/zend_execute_API.c:712`): the
+    /// chain walked from `EG(current_execute_data)` to the first link
+    /// that is user code or a function with a scope, and that link's
+    /// `func->common.scope`: a user method's class, a closure's bound
+    /// scope, and none for a plain user function or the main op array.
+    /// A native with no scope, `constant()` or `get_class()` called
+    /// from a method, is walked past, so the scope a native reads is
+    /// its caller's; a native method's is its own class.
+    ///
+    /// The user frame the loop is executing is the walk's first link
+    /// wherever nothing stands above it but calls being built
+    /// ([`crate::exec::Vm::executing_top`]), and its scope is read off
+    /// it without the walk, as php's first iteration reads `EX(func)`.
+    /// A closure's frame is its bound scope's, none for one bound to
+    /// none, whatever class it was written in:
+    ///
+    /// ```php
+    /// class A { private $p = 1; protected $r = 2;
+    ///     function mk() { return function ($o, $q) { return $o->$q; }; }
+    ///     function read($o, $q) { return $o->$q; } }
+    /// class B extends A {}
+    /// $a = new A; $p = 'p'; $r = 'r';
+    /// $unbound = Closure::bind($a->mk(), null, null);
+    /// try { echo $unbound($a, $p), "\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// echo $a->mk()($a, $p), Closure::bind($a->mk(), null, B::class)($a, $r), "\n";
+    /// echo $a->read(new B, $r), array_map(fn ($q) => $a->read($a, $q), [$p])[0], "\n";
+    /// try { echo $a->$p; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Cannot access private property A::$p
+    /// 12
+    /// 21
+    /// Cannot access private property A::$p
+    /// ```
     pub(crate) fn executed_scope(&self) -> Option<ClassId> {
+        if let Some(frame) = self.vm.executing_top() {
+            return self.scope_of(crate::exec::FrameAt { req: self, frame });
+        }
         for link in self.chain() {
             let (function, closure, carried) = match link {
-                Link::Frame(_, state) => (state.function(), state.closure(), state.scope()),
+                Link::Frame(_, state) => return self.scope_of(state),
                 Link::Call(call) => (
                     call.function(),
                     call.closure(),
@@ -516,7 +667,7 @@ impl Request {
                 .or_else(|| self.method_class(function?))
                 .or(carried);
             let user = function.is_some_and(|function| self.user_function(function).is_some());
-            if scope.is_some() || user || matches!(link, Link::Frame(..)) {
+            if scope.is_some() || user {
                 return scope;
             }
         }
@@ -542,16 +693,51 @@ impl Request {
     }
 
     /// The placed row `ce->properties_info` holds for `name`, whatever
-    /// the scope: the last of the name, a class's own declaration being
-    /// appended after a parent's private one it hides.
+    /// the scope: the slot its row places the name at,
+    /// `property_info->offset`, read off the one find. A class with no
+    /// record answers by its placed rows, the last of the name, a
+    /// class's own declaration being appended after a parent's private
+    /// one it hides.
     pub(super) fn placed_named(
         &self,
         class: ClassId,
         name: &[u8],
     ) -> Option<(usize, ClassId, &PropertyDecl)> {
-        self.placed(class)
+        let found = self.placing(class, name)?;
+        Some((found.slot()?, found.info.declaring, found.property))
+    }
+
+    /// The row `ce->properties_info` holds for `name` as
+    /// `zend_get_property_offset` reads it ([`Found`]); none where no
+    /// class of the chain declares it.
+    fn placing(&self, class: ClassId, name: &[u8]) -> Option<Found<'_>> {
+        match self.find_property_info(class, name) {
+            InfoFound::Row(found) => Some(found),
+            InfoFound::Absent => None,
+            InfoFound::Unrecorded => self.placing_by_slots(class, name),
+        }
+    }
+
+    /// [`Request::placing`] for a class with no record: its placed rows,
+    /// the last of the name.
+    fn placing_by_slots(&self, class: ClassId, name: &[u8]) -> Option<Found<'_>> {
+        let (slot, declaring, property) = self
+            .placed(class)
             .rev()
-            .find(|(_, _, p)| &*p.name.0 == name)
+            .find(|(_, _, p)| &*p.name.0 == name)?;
+        let changed = super::objects::changed_over(
+            self.placed(class).map(|(_, held, p)| (held, Some(p))),
+            declaring,
+            name,
+        );
+        Some(Found {
+            info: *self.placed_properties(class).get(slot)?,
+            property,
+            place: RowPlace {
+                slot: u32::try_from(slot).ok(),
+                changed,
+            },
+        })
     }
 
     /// The dynamic table's entry for `name`, a view, found by the name's
@@ -598,7 +784,52 @@ impl Request {
     /// string(3) "foo"
     /// ```
     pub(super) fn declared_slot(&self, class: ClassId, name: &[u8]) -> Option<DeclaredSlot> {
-        let (at, declaring, p) = self.placed_row(class, name)?;
+        self.place_property(class, name).slot()
+    }
+
+    /// `zend_get_property_offset` over `name` on an object of `class`,
+    /// made once by a property access and handed to each step of it
+    /// ([`Placement`]): the one find of `ce->properties_info`, the scope
+    /// read only where the row's flags ask for it, and the visibility
+    /// measured once.
+    pub(super) fn place_property(&self, class: ClassId, name: &[u8]) -> Placement {
+        self.place_found(class, name, self.find_property_info(class, name))
+    }
+
+    /// [`Request::place_property`] from what the find answered.
+    fn place_found(&self, class: ClassId, name: &[u8], found: InfoFound<'_>) -> Placement {
+        let placing = match found {
+            InfoFound::Row(found) => found,
+            InfoFound::Absent => return Placement::Undeclared,
+            InfoFound::Unrecorded => match self.placing_by_slots(class, name) {
+                Some(found) => found,
+                None => return Placement::Unslotted,
+            },
+        };
+        // The scope read once, where the row's flags first ask for it.
+        let scope = std::cell::OnceCell::new();
+        let scope = || *scope.get_or_init(|| self.property_scope());
+        let Some(placed) = self.slot_of_row(class, name, placing, &scope) else {
+            return Placement::Unslotted;
+        };
+        if self.reaches_from(&placed, scope) {
+            Placement::Reached(placed)
+        } else {
+            Placement::Denied(placed)
+        }
+    }
+
+    /// The declared slot the row `found` places `name` at for the
+    /// executing scope ([`Request::placed_row`]), with the flags the
+    /// slot is read and written under.
+    fn slot_of_row(
+        &self,
+        class: ClassId,
+        name: &[u8],
+        found: Found<'_>,
+        scope: &impl Fn() -> Option<ClassId>,
+    ) -> Option<DeclaredSlot> {
+        let (at, declaring, p) = self.placed_from(class, name, found, scope)?;
         let root = if p.visibility == Visibility::Protected
             || p.set_visibility == Some(Visibility::Protected)
         {
@@ -657,7 +888,16 @@ impl Request {
     /// int(1)
     /// ```
     pub(super) fn reaches(&self, placed: &DeclaredSlot) -> bool {
-        let scope = self.property_scope();
+        self.reaches_from(placed, || self.property_scope())
+    }
+
+    /// [`Request::reaches`] from the scope `scope` reads, asked only for
+    /// a property that is not public.
+    fn reaches_from(&self, placed: &DeclaredSlot, scope: impl Fn() -> Option<ClassId>) -> bool {
+        if placed.visibility == Visibility::Public {
+            return true;
+        }
+        let scope = scope();
         match placed.visibility {
             Visibility::Public => true,
             _ if scope == Some(placed.declaring) => true,
@@ -757,7 +997,7 @@ impl Request {
     /// chain's declarations walked only for a class with no record.
     fn chain_declaration(&self, class: ClassId, name: &[u8]) -> Option<(ClassId, &PropertyDecl)> {
         match self.find_property_info(class, name) {
-            InfoFound::Row(info) => return Some((info.declaring, self.property_decl(info)?)),
+            InfoFound::Row(found) => return Some((found.info.declaring, found.property)),
             InfoFound::Absent => return None,
             InfoFound::Unrecorded => {}
         }
@@ -777,10 +1017,21 @@ impl Request {
     /// not reach ([`Request::static_as_instance`], whose notice for one
     /// it may reach is raised here unless `silent`). `None` is a
     /// dynamic property.
-    fn unplaced(&mut self, class: ClassId, name: &[u8], silent: bool) -> Option<Unplaced> {
+    fn unplaced(
+        &mut self,
+        placement: Placement,
+        class: ClassId,
+        name: &[u8],
+        silent: impl FnOnce(&Self) -> bool,
+    ) -> Option<Unplaced> {
         if Self::bad_property_name(name) {
             return Some(Unplaced::BadName);
         }
+        // A name no class of the chain declares is no `static`'s.
+        if !matches!(placement, Placement::Unslotted) {
+            return None;
+        }
+        let silent = silent(self);
         match self.static_as_instance(class, name, silent) {
             Some(Err(visibility)) => Some(Unplaced::Denied(visibility)),
             _ => None,
@@ -837,20 +1088,37 @@ impl Request {
     }
 
     fn placed_row(&self, class: ClassId, name: &[u8]) -> Option<(usize, ClassId, &PropertyDecl)> {
-        let found = self.placed_named(class, name)?;
-        let (_, declaring, p) = found;
-        if self.property_scope() != Some(declaring) {
-            if let Some(own) = self.parent_private(class, name) {
-                return Some(
-                    self.placed(class)
-                        .find(|row| row.1 == own && &*row.2.name.0 == name)
-                        .unwrap_or(found),
-                );
+        self.placed_from(class, name, self.placing(class, name)?, &|| {
+            self.property_scope()
+        })
+    }
+
+    /// [`Request::placed_row`] from the row the find answered.
+    fn placed_from<'a>(
+        &'a self,
+        class: ClassId,
+        name: &[u8],
+        placing: Found<'a>,
+        scope: &impl Fn() -> Option<ClassId>,
+    ) -> Option<(usize, ClassId, &'a PropertyDecl)> {
+        let (declaring, p) = (placing.info.declaring, placing.property);
+        let found = placing.slot().map(|slot| (slot, declaring, p));
+        if !placing.reads_scope() {
+            return found;
+        }
+        if scope() != Some(declaring) {
+            if placing.place.changed
+                && let Some(own) = self.parent_private(class, name)
+            {
+                return self
+                    .placed(class)
+                    .find(|row| row.1 == own && &*row.2.name.0 == name)
+                    .or(found);
             } else if p.visibility == Visibility::Private && declaring != class {
                 return None;
             }
         }
-        Some(found)
+        found
     }
 
     /// `zend_asymmetric_property_has_set_access`
@@ -1091,7 +1359,7 @@ impl Request {
     /// through again ([`Request::property_decl`]).
     pub(crate) fn property_info(&self, class: ClassId, name: &[u8]) -> Option<PropertyInfo> {
         match self.find_property_info(class, name) {
-            InfoFound::Row(info) => Some(info),
+            InfoFound::Row(found) => Some(found.info),
             InfoFound::Absent | InfoFound::Unrecorded => None,
         }
     }
@@ -1102,22 +1370,64 @@ impl Request {
     /// which class of the chain declares a name, instance or `static`,
     /// private or not, or that none does and the name is a dynamic
     /// property's, with no class's declarations walked.
-    fn find_property_info(&self, class: ClassId, name: &[u8]) -> InfoFound {
-        let Some(record) = self.linked_class(class) else {
-            return InfoFound::Unrecorded;
-        };
-        if record.properties.rows().is_empty() {
+    fn find_property_info(&self, class: ClassId, name: &[u8]) -> InfoFound<'_> {
+        self.find_property_row(class, name, || php_heap::Str::hash_of(name))
+    }
+
+    fn find_property_row(
+        &self,
+        class: ClassId,
+        name: &[u8],
+        hash: impl FnOnce() -> u64,
+    ) -> InfoFound<'_> {
+        match self.properties_info(class) {
+            Some(table) => self.find_in(table, name, hash),
+            None => InfoFound::Unrecorded,
+        }
+    }
+
+    /// The one find over the class's one row ([`PropertiesInfo`]), the
+    /// name hashed only where the table holds a row, by `hash`, which a
+    /// string hands over cached (`ZSTR_H`) as `zend_hash_find` takes it;
+    /// a row the class declares itself is named by its own declaration,
+    /// one another class declared by that class's.
+    ///
+    /// [`PropertiesInfo`]: super::objects::PropertiesInfo
+    fn find_in<'a>(
+        &'a self,
+        table: super::objects::PropertiesInfo<'a>,
+        name: &[u8],
+        hash: impl FnOnce() -> u64,
+    ) -> InfoFound<'a> {
+        if table.rows.rows().is_empty() {
             return InfoFound::Absent;
         }
-        let row = |row: &Row<ClassId>| PropertyInfo {
-            declaring: row.holder_in(class),
-            at: row.at,
+        let declared = |row: &Row<ClassId>| match row.holder {
+            None => table.decl.properties.get(usize::try_from(row.at).ok()?),
+            Some(holder) => self.property_decl(PropertyInfo {
+                declaring: holder,
+                at: row.at,
+            }),
         };
-        let found = record.properties.find(name, |at| {
-            self.property_decl(row(at))
-                .map_or(&[][..], |property| &property.name.0)
+        let found = table.rows.find_hashed(hash(), name, |row| {
+            declared(row).map_or(&[][..], |property| &property.name.0)
         });
-        found.map_or(InfoFound::Absent, |found| InfoFound::Row(row(found)))
+        let Some((at, row)) = found else {
+            return InfoFound::Absent;
+        };
+        // A record whose rows the placement does not cover is answered
+        // by the declarations, as one with no record is.
+        match (table.places.get(at).copied(), declared(row)) {
+            (Some(place), Some(property)) => InfoFound::Row(Found {
+                info: PropertyInfo {
+                    declaring: row.holder_in(table.class),
+                    at: row.at,
+                },
+                property,
+                place,
+            }),
+            _ => InfoFound::Unrecorded,
+        }
     }
 
     /// `ZEND_REF_ADD_TYPE_SOURCE` (`Z/Zend/zend_types.h:1082`): the
@@ -1572,7 +1882,7 @@ impl Request {
         else {
             return Ok(got);
         };
-        let Some(typed) = self.declared_typed_property(class, name) else {
+        let Some(typed) = self.typed_property_at(class, placed.slot) else {
             return Ok(got);
         };
         let strict = self.function_strict_types(getter);
@@ -1773,12 +2083,17 @@ impl Request {
     /// accessor cannot answer: the `Error` for a declared property the
     /// scope may not reach, or for a name that starts with a NUL byte.
     fn wrong_offset(&mut self, class: ClassId, name: &[u8]) -> Option<Thrown> {
-        if let Some(placed) = self.declared_slot(class, name) {
-            return (!self.reaches(&placed))
-                .then(|| self.inaccessible_property(class, placed.visibility, name));
+        let placement = self.place_property(class, name);
+        match placement {
+            Placement::Reached(_) => None,
+            Placement::Denied(placed) => {
+                Some(self.inaccessible_property(class, placed.visibility, name))
+            }
+            Placement::Unslotted | Placement::Undeclared => {
+                let miss = self.unplaced(placement, class, name, |_| true)?;
+                Some(self.unplaced_error(class, name, miss))
+            }
         }
-        let miss = self.unplaced(class, name, true)?;
-        Some(self.unplaced_error(class, name, miss))
     }
 
     /// `zend_bad_property_access`: php's `Error` for a property the
@@ -2129,8 +2444,9 @@ impl Request {
         // read, so a slot that holds a value is placed and returned
         // without a lookup.
         let mut wrong = false;
-        if let Some(placed) = self.declared_slot(class, name) {
-            if self.reaches(&placed) {
+        let placement = self.place_property(class, name);
+        if let Some(placed) = placement.slot() {
+            if matches!(placement, Placement::Reached(_)) {
                 let z = o.slot(placed.slot);
                 if !z.is_undef() {
                     return Ok(Owner::take(self, Value::of_slot(z).deref()));
@@ -2161,11 +2477,9 @@ impl Request {
                 }
                 wrong = true;
             }
-        } else if let Some(miss) = self.unplaced(
-            class,
-            name,
-            silent || self.serves_accessor(class, Accessor::Get),
-        ) {
+        } else if let Some(miss) = self.unplaced(placement, class, name, |req| {
+            silent || req.serves_accessor(class, Accessor::Get)
+        }) {
             if !silent && !self.serves_accessor(class, Accessor::Get) {
                 return Err(self.unplaced_error(class, name, miss));
             }
@@ -2294,8 +2608,8 @@ impl Request {
     /// Object of class stdClass could not be converted to string
     /// Cannot modify private(set) property Test::$n from global scope
     /// ```
-    pub(crate) fn place_withheld(&self, object: PhpObject, name: &[u8]) -> bool {
-        let Some(placed) = self.declared_slot(object.class(), name) else {
+    fn place_withheld(&self, placement: Placement) -> bool {
+        let Some(placed) = placement.slot() else {
             return false;
         };
         if !self.may_access(placed.declaring, placed.visibility) {
@@ -2375,21 +2689,36 @@ impl Request {
         operation: &str,
         silent: bool,
     ) -> Result<Option<(u32, bool)>, Thrown> {
+        let placement = self.place_property(object.class(), name);
+        self.slot_for_write(object, name, placement, operation, silent)
+    }
+
+    /// [`Request::declared_slot_for_write`] over the placement the
+    /// access made.
+    fn slot_for_write(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        placement: Placement,
+        operation: &str,
+        silent: bool,
+    ) -> Result<Option<(u32, bool)>, Thrown> {
         let class = object.class();
-        let Some(placed) = self.declared_slot(class, name) else {
-            if let Some(miss) = self.unplaced(class, name, silent)
-                && !silent
-            {
-                return Err(self.unplaced_error(class, name, miss));
+        let placed = match placement {
+            Placement::Reached(placed) => placed,
+            Placement::Denied(_) if silent => return Ok(None),
+            Placement::Denied(placed) => {
+                return Err(self.inaccessible_property(class, placed.visibility, name));
             }
-            return Ok(None);
-        };
-        if !self.reaches(&placed) {
-            if silent {
+            Placement::Unslotted | Placement::Undeclared => {
+                if let Some(miss) = self.unplaced(placement, class, name, |_| silent)
+                    && !silent
+                {
+                    return Err(self.unplaced_error(class, name, miss));
+                }
                 return Ok(None);
             }
-            return Err(self.inaccessible_property(class, placed.visibility, name));
-        }
+        };
         // A slot an `unset` emptied, on a class with a `__set`, is the
         // setter's: `zend_std_write_property` reaches the magic method
         // before the set visibility, which `write_std_property` holds the
@@ -2442,15 +2771,44 @@ impl Request {
         object: PhpObject,
         name: &[u8],
     ) -> Result<(), Thrown> {
+        let placement = self.place_property(object.class(), name);
+        self.read_before_write_at(object, name, placement)
+    }
+
+    /// `zend_std_get_property_ptr_ptr` under `BP_VAR_RW` over a name the
+    /// standard handlers serve, the name placed once and the placement
+    /// handed to each of its steps: the unwritten slot read first
+    /// ([`Request::read_before_write`]), then a slot whose write is
+    /// withheld ([`Request::place_withheld`]), then the slot itself
+    /// ([`Request::declared_slot_for_write`]), `silent` where the class
+    /// serves a `__get`.
+    pub(crate) fn place_for_read_write(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        silent: bool,
+    ) -> Result<ReadWriteSlot, Thrown> {
+        let placement = self.place_property(object.class(), name);
+        self.read_before_write_at(object, name, placement)?;
+        if self.place_withheld(placement) {
+            return Ok(ReadWriteSlot::Withheld);
+        }
+        self.slot_for_write(object, name, placement, "modify", silent)
+            .map(ReadWriteSlot::Placed)
+    }
+
+    fn read_before_write_at(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        placement: Placement,
+    ) -> Result<(), Thrown> {
         let class = object.class();
         let o = object.heap();
-        let Some(placed) = self.declared_slot(class, name) else {
+        let Placement::Reached(placed) = placement else {
             return Ok(());
         };
-        if !self.reaches(&placed)
-            || !o.slot(placed.slot).is_undef()
-            || self.lazy_slot(o, placed.slot)
-        {
+        if !o.slot(placed.slot).is_undef() || self.lazy_slot(o, placed.slot) {
             return Ok(());
         }
         let magic = self.serves_accessor(class, Accessor::Get)
@@ -2509,6 +2867,19 @@ impl Request {
         name: &[u8],
     ) -> Option<TypedProperty> {
         let (_, declaring, p) = self.placed_row(class, name)?;
+        p.ty.clone().map(|ty| TypedProperty {
+            declaring,
+            ty,
+            readonly: p.is_readonly,
+        })
+    }
+
+    /// [`Request::declared_typed_property`] of the property in slot
+    /// `slot` of an object of `class`, the slot a placement answered:
+    /// `zend_get_typed_property_info_for_slot`, read off the slot's row
+    /// with no find of the name.
+    pub(crate) fn typed_property_at(&self, class: ClassId, slot: u32) -> Option<TypedProperty> {
+        let (declaring, p) = self.placed_property(class, slot)?;
         p.ty.clone().map(|ty| TypedProperty {
             declaring,
             ty,
@@ -3004,8 +3375,7 @@ impl Request {
         let o = object.heap();
         if let Some(placed) = self.declared_slot(object.class(), name.as_bytes()) {
             let value = if placed.typed {
-                let Some(typed) = self.declared_typed_property(object.class(), name.as_bytes())
-                else {
+                let Some(typed) = self.typed_property_at(object.class(), placed.slot) else {
                     value.give_up(self);
                     name.give_up(self);
                     return self.fatal_of(Err(Fatal::error(
@@ -4533,8 +4903,9 @@ impl Request {
         }
         let unsetter = self.magic_accessor(class, Accessor::Unset);
         let mut wrong = false;
-        if let Some(placed) = self.declared_slot(class, name) {
-            if self.reaches(&placed) {
+        let placement = self.place_property(class, name);
+        if let Some(placed) = placement.slot() {
+            if matches!(placement, Placement::Reached(_)) {
                 let empty = o.slot(placed.slot).is_undef();
                 // `error = Z_TYPE_P(slot) != IS_UNDEF || (Z_PROP_FLAG_P(slot)
                 // & IS_PROP_UNINIT) || !zobj->ce->__unset`: a slot that
@@ -4579,7 +4950,7 @@ impl Request {
                 }
                 wrong = true;
             }
-        } else if let Some(miss) = self.unplaced(class, name, unsetter.is_some()) {
+        } else if let Some(miss) = self.unplaced(placement, class, name, |_| unsetter.is_some()) {
             if unsetter.is_none() {
                 return Err(self.unplaced_error(class, name, miss));
             }

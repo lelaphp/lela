@@ -49,6 +49,7 @@ Row::holder_in
 Rows
 Rows::find
 Rows::find_at
+Rows::find_hashed
 Rows::rows
 Site
 TentativeReturn

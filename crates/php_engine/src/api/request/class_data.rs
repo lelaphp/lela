@@ -68,16 +68,32 @@ pub(crate) struct Made {
     /// The handler table objects of the class are reached through
     /// ([`Request::handlers_of`]).
     pub(crate) handlers: &'static dyn ObjectHandlers,
-    /// Whether every name but one led by NUL is a dynamic property of the
-    /// class's objects whatever the scope: the table `std_object_handlers`,
-    /// no class of the chain declaring one of its own
-    /// ([`Request::own_handlers`]), and `ce->properties_info` empty, no
-    /// class of the chain declaring a property, instance or `static`
-    /// ([`Request::places_dynamic_on_std`]).
-    pub(crate) dynamic_names: bool,
+    /// How the class's objects serve a property's name
+    /// ([`PropertyNames`]), which a property opcode's inline path reads
+    /// before it places a name the program computed.
+    pub(crate) names: PropertyNames,
     /// Whether `create_object` is `zend_default_exception_new`'s
     /// ([`Request::records_throw_site`]).
     throw_site: bool,
+}
+
+/// How the objects of a class serve the name of a property
+/// ([`Request::property_names`]), as
+/// `zend_get_property_offset` starts: by the handler table and whether
+/// `ce->properties_info` holds a row.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PropertyNames {
+    /// `std_object_handlers` and `ce->properties_info` empty, no class of
+    /// the chain declaring a property, instance or `static`
+    /// (`zend_hash_num_elements(&ce->properties_info) == 0`): every name
+    /// but one led by NUL is a dynamic property whatever the scope.
+    Dynamic,
+    /// `std_object_handlers` over a class that declares a property: a
+    /// name is placed by one find of `ce->properties_info`.
+    Declared,
+    /// A class of the chain declares a handler table of its own
+    /// ([`Request::own_handlers`]), which serves every name.
+    Own,
 }
 
 /// Each class's row by the class's number, as php reaches a class's
@@ -236,7 +252,13 @@ impl Request {
             declared_by,
             create: self.native_new_of(class),
             handlers: self.handlers_of(class),
-            dynamic_names: self.own_handlers(class).is_none() && !self.declares_properties(class),
+            names: if self.own_handlers(class).is_some() {
+                PropertyNames::Own
+            } else if self.declares_properties(class) {
+                PropertyNames::Declared
+            } else {
+                PropertyNames::Dynamic
+            },
             throw_site: self.records_throw_site(class),
         };
         self.class_data.rows.row(class).made = Some(made);

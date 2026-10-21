@@ -212,7 +212,16 @@ impl<R, C: Case> Rows<R, C> {
 
     /// The row under `name` beside its position among the rows.
     pub fn find_at<'n>(&self, name: &[u8], named: impl Fn(&R) -> &'n [u8]) -> Option<(usize, &R)> {
-        let at = self.position(hash::<C>(name), |row| same::<C>(named(row), name))?;
+        self.found_at(hash::<C>(name), name, named)
+    }
+
+    fn found_at<'n>(
+        &self,
+        hash: u32,
+        name: &[u8],
+        named: impl Fn(&R) -> &'n [u8],
+    ) -> Option<(usize, &R)> {
+        let at = self.position(hash, |row| same::<C>(named(row), name))?;
         Some((at, self.entries.get(at)?))
     }
 
@@ -309,6 +318,23 @@ impl<R, C: Case> Rows<R, C> {
             )
         });
         true
+    }
+}
+
+impl<R> Rows<R, Exact> {
+    /// [`Rows::find_at`] by `hash`, the name's `zend_inline_hash_func`
+    /// as a string caches it ([`php_heap::Str::hash`]): `zend_hash_find`
+    /// taking `ZSTR_H(key)`, so the name is hashed once whatever the
+    /// number of tables it is looked up in. Only a table filed by exact
+    /// bytes takes a string's hash, since a folded one files the name
+    /// lowered.
+    pub fn find_hashed<'n>(
+        &self,
+        hash: u64,
+        name: &[u8],
+        named: impl Fn(&R) -> &'n [u8],
+    ) -> Option<(usize, &R)> {
+        self.found_at(filed(hash), name, named)
     }
 }
 
@@ -599,15 +625,23 @@ impl std::hash::Hasher for NameHash {
     }
 }
 
-/// A name's hash under `C`, eight bytes at a time, each word folded
-/// first where `C` folds: what the index files a row under and what the
-/// row keeps. php hashes the lowered name with DJBX33A; the choice is
-/// not observable (design §3 principle 1).
+/// The hash a table files `name` under: over a folded table's name the
+/// words mixed with each byte lowered, over an exact one php's
+/// `zend_inline_hash_func`, the hash a string caches, so
+/// [`Rows::find_hashed`] can take a string's hash in place of hashing it.
 fn hash<C: Case>(name: &[u8]) -> u32 {
-    let hash = words(name).fold(0, |hash, word| {
-        mix(hash, if C::FOLDED { folded(word) } else { word })
-    });
-    top(hash)
+    if C::FOLDED {
+        top(words(name).fold(0, |hash, word| mix(hash, folded(word))))
+    } else {
+        filed(php_heap::Str::hash_of(name))
+    }
+}
+
+/// The word of a string's hash a table keeps: its low half, which
+/// differs between short names where the high half holds little past
+/// the bit php forces.
+fn filed(hash: u64) -> u32 {
+    u32::try_from(hash & u64::from(u32::MAX)).unwrap_or_default()
 }
 
 /// `bytes` as little-endian words of eight, the last zero past its
@@ -679,6 +713,23 @@ mod tests {
         rows.add(b"k", b"k", named);
         assert_eq!(rows.rows().len(), 2);
         assert_eq!(rows.find(b"k", named), Some(&&b"k"[..]));
+    }
+
+    #[test]
+    fn an_exact_table_finds_a_name_by_the_hash_a_string_caches() {
+        let mut rows: Rows<&'static [u8], Exact> = Rows::default();
+        for name in [&b"d"[..], b"p", b"properties"] {
+            rows.add(name, name, named);
+        }
+        let hash = |name: &[u8]| php_heap::Str::hash_of(name);
+        assert_eq!(
+            rows.find_hashed(hash(b"properties"), b"properties", named),
+            Some((2, &&b"properties"[..]))
+        );
+        assert_eq!(rows.find_hashed(hash(b"q"), b"q", named), None);
+        // A hash that is not the name's finds nothing, as php's bucket
+        // compare reads the hash before the key.
+        assert_eq!(rows.find_hashed(hash(b"p"), b"d", named), None);
     }
 
     #[test]

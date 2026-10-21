@@ -1336,7 +1336,7 @@ fn native_placed(
                     .ok()
                     .and_then(|parent| placed.get(parent)?.clone()),
             };
-            let built = parent.and_then(|parent| place(at, &parent));
+            let built = parent.and_then(|parent| place(at, parent.slots()));
             if let (Some(built), Some(slot)) = (built, placed.get_mut(at)) {
                 *slot = Some(built);
                 progress = true;
