@@ -174,3 +174,18 @@ fn a_pair_running_past_the_end_is_malformed() {
     assert!(get_params(&mut params, &[1, 0, b'a']));
     assert_eq!(params.get(b"a"), Some(&b""[..]));
 }
+
+/// A name of 130 bytes and a value of 200, each past the 127 a one-byte
+/// length holds, are written with four-byte lengths, the high bit set, as
+/// `fcgi_get_params` reads them, and read back whole (#3092).
+#[test]
+fn a_name_and_a_value_past_127_bytes_take_four_byte_lengths_both_ways() {
+    let (name, value) = ([b'n'; 130], [b'v'; 200]);
+    let mut pairs = Vec::new();
+    put_pair(&mut pairs, &name, &value);
+    assert_eq!(pairs[..8], [0x80, 0, 0, 130, 0x80, 0, 0, 200]);
+    assert_eq!(pairs.len(), 8 + 130 + 200);
+    let mut params = Environment::default();
+    assert!(get_params(&mut params, &pairs));
+    assert_eq!(params.0, [(name.to_vec(), value.to_vec())]);
+}

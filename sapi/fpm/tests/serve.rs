@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use php_proto::fcgi::{self, Header, Kind};
+
 /// The binary under test, let run as root with `-R`: as root php-fpm
 /// refuses a pool with no `user` directive unless `--allow-to-run-as-root`
 /// lets it, as the oracle's does, and a container's tests run as root.
@@ -84,11 +86,19 @@ fn with_no_file_named_the_configuration_is_the_builds_sysconfdirs() {
     assert!(said.contains(&expected), "{out:?}");
 }
 
-/// One `FastCGI` record of request 1.
-fn record(kind: u8, content: &[u8]) -> Vec<u8> {
-    let len = u16::try_from(content.len()).unwrap().to_be_bytes();
-    let mut out = vec![1, kind, 0, 1, len[0], len[1], 0, 0];
+/// One `FastCGI` record of request 1, padded to a multiple of eight bytes
+/// as php's `fcgi_make_header` pads it.
+fn record(kind: Kind, content: &[u8]) -> Vec<u8> {
+    assert!(
+        content.len() <= fcgi::MAX_LENGTH,
+        "a record holds {} bytes at most, not {}",
+        fcgi::MAX_LENGTH,
+        content.len()
+    );
+    let header = Header::make(kind, 1, content.len());
+    let mut out = header.encode().to_vec();
     out.extend_from_slice(content);
+    out.resize(out.len() + usize::from(header.padding_length), 0);
     out
 }
 
@@ -122,31 +132,33 @@ fn request_within(stream: UnixStream, pairs: &[(&str, &str)], wait: Duration) ->
 fn exchange(mut stream: UnixStream, pairs: &[(&str, &str)], wait: Duration) -> (Vec<u8>, Vec<u8>) {
     let mut params = Vec::new();
     for &(name, value) in pairs {
-        params.push(u8::try_from(name.len()).unwrap());
-        params.push(u8::try_from(value.len()).unwrap());
-        params.extend_from_slice(name.as_bytes());
-        params.extend_from_slice(value.as_bytes());
+        fcgi::put_pair(&mut params, name.as_bytes(), value.as_bytes());
     }
-    let mut out = record(1, &[0, 1, 0, 0, 0, 0, 0, 0]);
-    out.extend(record(4, &params));
-    out.extend(record(4, &[]));
-    out.extend(record(5, &[]));
-    stream.write_all(&out).unwrap();
-    stream.set_read_timeout(Some(wait)).unwrap();
+    let mut out = record(Kind::BeginRequest, &[0, 1, 0, 0, 0, 0, 0, 0]);
+    out.extend(record(Kind::Params, &params));
+    out.extend(record(Kind::Params, &[]));
+    out.extend(record(Kind::Stdin, &[]));
+    stream.write_all(&out).expect("the request is written");
+    stream
+        .set_read_timeout(Some(wait))
+        .expect("the reply's reads are timed");
     let (mut body, mut stderr) = (Vec::new(), Vec::new());
     loop {
-        let mut header = [0u8; 8];
-        if stream.read_exact(&mut header).is_err() {
+        let mut bytes = [0u8; 8];
+        if stream.read_exact(&mut bytes).is_err() {
             return (body, stderr);
         }
-        let len = usize::from(u16::from_be_bytes([header[4], header[5]]));
-        let mut content = vec![0u8; len + usize::from(header[6])];
-        stream.read_exact(&mut content).unwrap();
+        let header = Header::decode(bytes);
+        let len = usize::from(header.content_length);
+        let mut content = vec![0u8; len + usize::from(header.padding_length)];
+        stream
+            .read_exact(&mut content)
+            .expect("the record's content follows its header");
         content.truncate(len);
-        match header[1] {
-            6 => body.extend_from_slice(&content),
-            7 => stderr.extend_from_slice(&content),
-            3 => return (body, stderr),
+        match header.kind {
+            Kind::Stdout => body.extend_from_slice(&content),
+            Kind::Stderr => stderr.extend_from_slice(&content),
+            Kind::EndRequest => return (body, stderr),
             _ => {}
         }
     }
