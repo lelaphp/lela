@@ -166,13 +166,16 @@ pub fn main() -> ExitCode {
     main_with(&argv, &[])
 }
 
-/// The host's `main` over the line `argv`, with `beside` loaded after
-/// the bundle's extensions, as php's phpdbg loads one a build carries
-/// beside its own (`-z`, a Zend extension): what a test binary that
-/// declares an extension of its own, an observer, runs to be phpdbg
-/// with it.
-pub fn main_with(argv: &[Vec<u8>], beside: &[Extension]) -> ExitCode {
-    let line = read_line(argv);
+/// phpdbg's engine: the bundle's enabled set, `beside` after it, the
+/// debugger as its tier and phpdbg's own natives, over the php.ini files
+/// the line found and its `-d`s, every file's shebang line passed over,
+/// with extended info where the line carried `-e`.
+///
+/// A call of its own, so the builder, two kilobytes moved through each
+/// step, stands in a frame that is gone before the first request is
+/// served, and not under every frame of it, as the CLI's is (#3209).
+#[inline(never)]
+fn engine(line: &Line, beside: &[Extension]) -> Engine {
     let mut extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     extensions.extend(beside.iter().cloned());
     let builder = Engine::builder()
@@ -183,7 +186,17 @@ pub fn main_with(argv: &[Vec<u8>], beside: &[Extension]) -> ExitCode {
         .additional_extension(natives::extension())
         .skip_shebang()
         .extended_info(line.extended_info);
-    let engine = php_sapi::start(builder, &line.ini, log_message);
+    php_sapi::start(builder, &line.ini, log_message)
+}
+
+/// The host's `main` over the line `argv`, with `beside` loaded after
+/// the bundle's extensions, as php's phpdbg loads one a build carries
+/// beside its own (`-z`, a Zend extension): what a test binary that
+/// declares an extension of its own, an observer, runs to be phpdbg
+/// with it.
+pub fn main_with(argv: &[Vec<u8>], beside: &[Extension]) -> ExitCode {
+    let line = read_line(argv);
+    let engine = engine(&line, beside);
 
     let mut session = Session::new();
     session.line_args.clone_from(&line.args);

@@ -201,6 +201,11 @@ fn parse(argv: &[Vec<u8>], search: &mut Search, extended_info: &mut bool) -> (Ve
 /// `php_module_startup` for php-fpm: the bundle's enabled set, its tier,
 /// and `cgi-fcgi` after them, over the files the line found and `-d`'s
 /// entries.
+///
+/// A call of its own, so the builder, two kilobytes moved through each
+/// step, stands in a frame that is gone before the first request is
+/// served, and not under every frame of it, as the CLI's is (#3209).
+#[inline(never)]
 fn engine(ini: &[Define], startup: &Startup) -> Engine {
     php_sapi::start(builder(startup), ini, log_message)
 }
