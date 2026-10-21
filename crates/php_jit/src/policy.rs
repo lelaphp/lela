@@ -347,6 +347,19 @@ fn value<'a>(ini: &'a StartupIni, name: &str) -> Option<&'a [u8]> {
         .and_then(|(_, value)| value.as_deref())
 }
 
+/// Whether the directives the host set say php's tier can never start,
+/// whatever starts opcache: `opcache.jit=disable`, a setting
+/// `zend_jit_config` refuses, or a zero `opcache.jit_buffer_size`, each
+/// set and not php's default, so a lane leaves the program to the
+/// interpreter (#3136's ruling). `opcache.jit=off` is not one: php may
+/// turn it on from a request.
+fn never(ini: &StartupIni) -> bool {
+    let setting = value(ini, "opcache.jit").map(Setting::of);
+    matches!(setting, Some(Setting::Disable | Setting::Invalid))
+        || value(ini, "opcache.jit_buffer_size")
+            .is_some_and(|size| Ini::parse_quantity(size).0 <= 0)
+}
+
 /// `name` read as php's quantity, `default` where unset.
 fn long(ini: &StartupIni, name: &str, default: i64) -> i64 {
     value(ini, name).map_or(default, |text| Ini::parse_quantity(text).0)
@@ -390,7 +403,10 @@ impl Policy {
     /// `opcache.enable_cli` off. `jit.mode`, where set, names the `Mode`
     /// whatever `opcache.jit`, `opcache.enable` and `opcache.enable_cli`
     /// say, which is how the tier's lanes serve a corpus that sets none
-    /// of them. A tier that runs `Off` reads no `opcache.jit_debug` bit
+    /// of them, but where the directives set say php's tier never starts
+    /// ([`never`]): a test that says so is a test about having no tier,
+    /// served by the interpreter with no lane's line (#3136's ruling). A
+    /// tier that runs `Off` reads no `opcache.jit_debug` bit
     /// ([`Policy::off`]), so it writes no line, as php writes none
     /// ([`Note`]).
     ///
@@ -448,14 +464,14 @@ impl Policy {
             }
         };
         let asked = match (lane, setting, set_up) {
-            (Some(mode), ..) => mode,
+            (Some(mode), ..) if !never(ini) => mode,
             (None, Setting::On { crto }, SetUp::Yes) => {
                 if (crto / 10) % 10 != HOT_TRACE {
                     notes.push(Note::AsTracing { crto });
                 }
                 Mode::Tracing
             }
-            (None, ..) => Mode::Off,
+            _ => Mode::Off,
         };
         let mode = if buffer_size > 0 { asked } else { Mode::Off };
         if matches!(mode, Mode::Force | Mode::ExitFuzz) {

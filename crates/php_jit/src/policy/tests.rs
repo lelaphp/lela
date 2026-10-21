@@ -9,8 +9,8 @@ use php_engine::tier::{Epoch, FuncRef, SafepointIdx, StartupIni, Word};
 use php_unit::{OpArray, Opcode, OplineIdx, Unit};
 
 use super::{
-    Claim, Compile, Holder, JitDebug, Mode, Note, Outcome, Place, Policy, Refused, Setting, Spent,
-    State, TraceEvent, bad_stop, bump, claim, read, settle, spend,
+    Bound, Claim, Compile, Holder, JitDebug, Mode, Note, Outcome, Place, Policy, Refused, Setting,
+    Spent, State, TraceEvent, bad_stop, bump, claim, read, settle, spend,
 };
 use crate::record::{Start, Stop};
 use crate::table::TraceId;
@@ -538,6 +538,35 @@ fn a_failed_attempt_keeps_its_stop_and_a_release_counts_none() {
     }
     assert_eq!(bad_stop(word, 0), None);
     assert_eq!(bad_stop(&Word::sealed(), 0), None);
+}
+
+/// A lane's `jit.mode` leaves to the interpreter a program whose
+/// directives say php's tier never starts, `opcache.jit=disable`, a
+/// refused setting or a zero buffer, with no lane's line, and still
+/// names its lane over `off`, `tracing` and nothing set (#3136's ruling).
+#[test]
+fn a_lane_leaves_a_tier_that_never_starts_to_the_interpreter() {
+    for lane in ["force", "exit-fuzz"] {
+        for (set, bound) in [
+            (&[("opcache.jit", "disable")][..], Bound::Never),
+            (&[("opcache.jit", "bogus")], Bound::Never),
+            (&[("opcache.jit_buffer_size", "0")], Bound::Never),
+            (
+                &[("opcache.jit", "tracing"), ("opcache.jit_buffer_size", "0")],
+                Bound::Never,
+            ),
+            (&[("opcache.jit", "off")], Bound::On),
+            (&[("opcache.jit", "tracing")], Bound::On),
+            (&[], Bound::On),
+        ] {
+            let mut asked = set.to_vec();
+            asked.push(("jit.mode", lane));
+            let (policy, notes) = read_on("cli", &asked);
+            assert_eq!(policy.bound(true), bound, "{asked:?}");
+            let lined = notes.iter().any(|note| matches!(note, Note::Lane(_)));
+            assert_eq!(lined, bound == Bound::On, "{asked:?}: {notes:?}");
+        }
+    }
 }
 
 /// php's `zend_jit_check_support` over the opcodes the extensions
