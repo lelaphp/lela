@@ -270,6 +270,52 @@ mod tests {
         assert_eq!(lane.shared.policy.mode(), Mode::Force);
     }
 
+    /// The engine start decides once how the engine binds the tier
+    /// (#3133): `Nop`'s loop wherever php's tier never starts or is set
+    /// up and not on, `Jit`'s only where it runs.
+    #[test]
+    fn the_engine_start_binds_jits_loop_only_where_the_tier_runs() {
+        use crate::policy::Bound;
+        let bound = |asked: &[(&str, &str)], host: &'static str| {
+            JitEngine::over(&ini(asked), host, |_| false, crate::lower::Backend::new)
+                .shared
+                .bound
+        };
+        let tracing = ("opcache.jit", "tracing");
+        for (asked, host, expected) in [
+            (&[][..], "", Bound::Never),
+            (&[("opcache.jit", "disable")][..], "", Bound::Never),
+            (&[("opcache.jit", "sideways")][..], "", Bound::Never),
+            (
+                &[tracing, ("opcache.jit_buffer_size", "0")][..],
+                "",
+                Bound::Never,
+            ),
+            (&[tracing, ("opcache.enable", "0")][..], "", Bound::Never),
+            (&[tracing][..], "cli", Bound::Never),
+            (&[("opcache.jit", "off")][..], "", Bound::Runtime),
+            (&[tracing][..], "", Bound::On),
+            (
+                &[tracing, ("opcache.enable_cli", "1")][..],
+                "cli",
+                Bound::On,
+            ),
+            (&[("jit.mode", "force")][..], "", Bound::On),
+        ] {
+            assert_eq!(bound(asked, host), expected, "{asked:?} on {host:?}");
+            assert_eq!(expected.asked(), expected == Bound::On);
+        }
+        let refused = JitEngine::over(&ini(&[tracing]), "", |_| true, crate::lower::Backend::new);
+        assert_eq!(refused.shared.bound, Bound::Never, "a refused tier");
+        let unbacked = JitEngine::over(
+            &ini(&[tracing]),
+            "",
+            |_| false,
+            |_, _| Err(crate::lower::Unsupported("a test's host")),
+        );
+        assert_eq!(unbacked.shared.bound, Bound::Never, "no backend");
+    }
+
     /// A host with no `Backend` runs the tier `Off` (`jit-design.md`
     /// §4.3) and reads no `opcache.jit_debug` bit, as a php built with no
     /// compiled tier has none: its start says nothing.

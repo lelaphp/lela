@@ -500,23 +500,31 @@ impl Tier for Counted {
 /// A tier that is `Off` is never asked (#3133): the engine binds `Nop`'s
 /// loop, so no loop's back edge reads its word or bumps its heat, and
 /// no call or return asks either, under a zero buffer, G1's setting, as
-/// under `opcache.jit=disable` and `off`. Under tracing the same program
-/// asks at every back edge and bumps the header's heat.
+/// under `opcache.jit=disable` and `off` and on the command line without
+/// `opcache.enable_cli`. Under tracing the same program asks at every
+/// back edge and bumps the header's heat.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_tier_that_is_off_is_asked_at_no_back_edge() {
     let program = "function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $i; } return $s; }
         for ($j = 0; $j < 5; $j++) { echo f($j); }";
-    for off in [
-        &[("opcache.jit", "tracing"), ("opcache.jit_buffer_size", "0")][..],
-        &[("opcache.jit", "disable")],
-        &[("opcache.jit", "off")],
+    for (host, off) in [
+        (
+            "",
+            &[("opcache.jit", "tracing"), ("opcache.jit_buffer_size", "0")][..],
+        ),
+        ("", &[("opcache.jit", "disable")]),
+        ("", &[("opcache.jit", "off")]),
+        ("cli", &[("opcache.jit", "tracing")]),
     ] {
-        let scratch = testing::Scratch::new();
-        let (served, asked) =
-            scratch.serve_kept::<Asked>(&testing::engine::<Counted>(off), program);
-        assert_eq!(testing::stdout(&served), "00136", "{off:?}");
-        assert_eq!(asked.unwrap_or_default(), Asked::default(), "{off:?}");
+        let engine = testing::engine_on::<Counted>(host, off);
+        let (served, asked) = testing::Scratch::new().serve_kept::<Asked>(&engine, program);
+        assert_eq!(testing::stdout(&served), "00136", "{off:?} on {host:?}");
+        assert_eq!(
+            asked.unwrap_or_default(),
+            Asked::default(),
+            "{off:?} on {host:?}"
+        );
     }
     let on = [("opcache.jit", "tracing"), ("opcache.jit_hot_loop", "255")];
     let scratch = testing::Scratch::new();
