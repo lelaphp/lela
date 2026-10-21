@@ -393,15 +393,15 @@ impl<P: Pages> std::fmt::Debug for TraceTable<P> {
 }
 
 impl<P: Pages> TraceTable<P> {
-    /// An empty table under `policy`'s bounds, its arena mapped as
-    /// `opcache.jit_buffer_size` asks, in whole chunks and at least one,
-    /// its `PERF` lines and `PERF_DUMP` records written as
+    /// An empty table under `policy`'s bounds, its arena as many bytes as
+    /// php's buffer, `opcache.jit_buffer_size` rounded up to the page
+    /// ([`code::capacity`], #3112's ruling), its `PERF` lines and `PERF_DUMP` records written as
     /// the engine's `outputs` started them. An arena that cannot be
     /// mapped is none: each publish numbers its trace and keeps no code
     /// (revision 27).
     ///
-    /// A buffer smaller than a chunk is one chunk, where php rounds it up
-    /// to the page; a trace that fits both is compiled by both:
+    /// A buffer smaller than a chunk holds what php's holds, so a trace
+    /// that fits php's fits this one:
     ///
     /// ```php
     /// function twice($n) { return $n * 2; }
@@ -421,11 +421,7 @@ impl<P: Pages> TraceTable<P> {
 
     /// [`TraceTable::new`] with the writers given.
     pub(crate) fn with_perf(policy: &Policy, perf: Perf) -> TraceTable<P> {
-        let chunk = u64::try_from(code::CHUNK).unwrap_or(u64::MAX);
-        let chunks = usize::try_from(policy.buffer_size() / chunk)
-            .unwrap_or(usize::MAX)
-            .max(1);
-        let arena = Arena::new(chunks.saturating_mul(code::CHUNK)).ok();
+        let arena = Arena::new(code::capacity(policy.buffer_size())).ok();
         let bounds = Bounds {
             traces: policy.max_root_traces().min(TraceId::LIMIT),
             sides: policy.max_side_traces(),
