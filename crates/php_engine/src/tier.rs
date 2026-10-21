@@ -956,7 +956,10 @@ fn serve_held<'u, T: Tier, D: Telling>(
 /// `eval` does not, so php's limit moves below each by what it takes
 /// ([`php_compile::StackLimit::nested`]), and where the thread has no
 /// room for another the frame is served in the scope it stands in, as
-/// php serves every `eval`. A recursion through `eval` is php's depth
+/// php serves every `eval`. On a fiber's stack the limit is the
+/// fiber's floor and cannot move, so there every such frame is served
+/// without a scope, its unit given back as the loop takes its edge up
+/// afresh (#3192). A recursion through `eval` is php's depth
 /// whatever the limit, and past what the thread holds of scopes:
 ///
 /// ```php
@@ -973,6 +976,23 @@ fn serve_held<'u, T: Tier, D: Telling>(
 /// ```
 /// ```expect
 /// 40000
+/// ```
+///
+/// Inside a fiber, a native's own recursion below a thousand nested
+/// `eval`s has the whole of the fiber's budget, as php's has: a chain
+/// php's `serialize()` takes is taken, and one php refuses is refused.
+///
+/// ```php
+/// function chain($d) { $o = $first = new stdClass; for ($i = 0; $i < $d; $i++) { $o->next = new stdClass; $o = $o->next; } return $first; }
+/// function unchain($o) { while ($next = $o->next ?? null) { $o->next = $next->next ?? null; } }
+/// function serialized($d) { $c = chain($d); try { serialize($c); return "served"; } catch (Error $e) { return preg_replace('/\d+ bytes/', 'N bytes', $e->getMessage()); } finally { unchain($c); } }
+/// function f($n, $d) { return $n ? eval('return f($n - 1, $d);') : serialized($d); }
+/// $fiber = new Fiber(function () { echo f(1000, 1336), "\n", f(1000, 100000), "\n"; });
+/// $fiber->start();
+/// ```
+/// ```expect
+/// served
+/// Maximum call stack size of N bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
 /// ```
 #[inline(always)] // once a scope, in the loop's body
 #[allow(clippy::inline_always)]
