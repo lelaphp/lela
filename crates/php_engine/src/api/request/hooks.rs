@@ -1247,7 +1247,7 @@ impl Request {
     /// Where `class`'s property hooks are, its linked record's
     /// [`php_link::LinkedClass::hooks`], or for a class with no record
     /// read off its chain's declarations by the same rule.
-    fn class_hooks(&self, class: ClassId) -> ClassHooks {
+    pub(super) fn class_hooks(&self, class: ClassId) -> ClassHooks {
         if let Some(record) = self.linked_class(class) {
             return record.hooks;
         }

@@ -454,14 +454,31 @@ fn row_place<'d>(
         .position(|held| *held == info)
         .and_then(|slot| u32::try_from(slot).ok());
     let changed = declared(info).is_some_and(|property| {
-        placed.iter().any(|held| {
-            held.declaring != info.declaring
-                && declared(*held).is_some_and(|other| {
-                    other.visibility == Visibility::Private && other.name.0 == property.name.0
-                })
-        })
+        changed_over(
+            placed.iter().map(|held| (held.declaring, declared(*held))),
+            info.declaring,
+            &property.name.0,
+        )
     });
     RowPlace { slot, changed }
+}
+
+/// `ZEND_ACC_CHANGED` of the property `name` that `declaring` declares,
+/// read off the slots of a class's objects, each the class that declared
+/// it beside its declaration: a slot of the name another class of the
+/// chain declared private, which is a parent's private property keeping
+/// its slot below the redeclaration `do_inherit_property` marks.
+pub(super) fn changed_over<'d>(
+    slots: impl IntoIterator<Item = (ClassId, Option<&'d PropertyDecl>)>,
+    declaring: ClassId,
+    name: &[u8],
+) -> bool {
+    slots.into_iter().any(|(held, property)| {
+        held != declaring
+            && property.is_some_and(|other| {
+                other.visibility == Visibility::Private && *other.name.0 == *name
+            })
+    })
 }
 
 impl Request {

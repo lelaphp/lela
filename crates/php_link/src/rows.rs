@@ -625,10 +625,6 @@ impl std::hash::Hasher for NameHash {
     }
 }
 
-/// A name's hash under `C`, eight bytes at a time, each word folded
-/// first where `C` folds: what the index files a row under and what the
-/// row keeps. php hashes the lowered name with DJBX33A; the choice is
-/// not observable (design §3 principle 1).
 /// The hash a table files `name` under: over a folded table's name the
 /// words mixed with each byte lowered, over an exact one php's
 /// `zend_inline_hash_func`, the hash a string caches, so

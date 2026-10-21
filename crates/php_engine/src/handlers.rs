@@ -8071,7 +8071,7 @@ fn inline_fetch_obj_r(
 /// `zend_get_property_offset` names with no cache slot on an object the
 /// standard handlers serve ([`Request::property_names`]): the bucket
 /// of a name no class of the chain declares, or a declared slot the
-/// scope reaches on a class with no hooked property, placed by
+/// scope reaches whose property has no hooks, placed by
 /// `zend_std_read_property`'s and `zend_std_write_property`'s one find
 /// of `ce->properties_info`, by the name's cached hash, and for the
 /// bucket one of `zobj->properties`. For a `write`, only in a table
@@ -8158,7 +8158,7 @@ fn inline_fetch_obj_r(
 /// class C extends P { public $v = "C"; public $d = 1; public int $t = 2; protected $pr = 3; public readonly int $ro;
 ///     function __construct() { $this->ro = 4; } function viaC($o, $q) { return $o->$q; } }
 /// #[AllowDynamicProperties] class E { public $d = 0; }
-/// class H { public $h { get => "hook"; } }
+/// class H { public $h { get => "hook"; } public $k = "k"; }
 /// function f($o, $q) { for ($i = 0; $i < 2; $i++) { $x = $o->$q; $o->$q = $i; $o->$q++; --$o->$q; $o->$q += 10; $r = &$o->$q; } return $x; }
 /// $c = new C; $d = str_repeat('d', 1); $t = 't'; $v = 'v'; $pr = 'pr'; $ro = 'ro'; $p = 'p';
 /// echo f($c, $d), " ", $c->$d, "\n";
@@ -8171,7 +8171,7 @@ fn inline_fetch_obj_r(
 /// echo $c->$ro, "\n";
 /// unset($c->$d); echo $c->$d ?? "unset", "\n"; echo $c->$d, "\n";
 /// $e = new E; $e->$p = 1; echo f($e, $p), " ", $e->$d, "\n";
-/// $h = 'h'; $hk = new H; echo $hk->$h, "\n";
+/// $h = 'h'; $k = 'k'; $hk = new H; $hk->$k .= "!"; echo $hk->$h, $hk->$k, "\n";
 /// $c->$p = 1; echo $c->$p, "\n";
 /// $g = function ($q) { $this->$q = 9; $this->$q++; return $this->$q; };
 /// echo Closure::bind($g, $c, C::class)($pr), Closure::bind($g, $c, P::class)($v), $c->$v, "\n";
@@ -8191,7 +8191,7 @@ fn inline_fetch_obj_r(
 /// Warning: Undefined property: C::$d in %s on line 17
 ///
 /// 10 0
-/// hook
+/// hookk!
 ///
 /// Deprecated: Creation of dynamic property C::$p is deprecated in %s on line 20
 /// 1
@@ -8223,7 +8223,9 @@ fn inline_place(
 }
 
 /// [`inline_place`] over a name the program computed: the bucket of a
-/// name that places as a dynamic property ([`Request::places_dynamic_on_std`]).
+/// name that places as a dynamic property, with no lookup on a class
+/// that declares no property ([`Request::property_names`]), or the
+/// place [`declared_place`] finds on one that does.
 /// A call of its own, so that the constant name's path keeps to the
 /// registers it needs: inlined, it put ten instructions on a constant
 /// name's `+=` in the release build (#3045).
