@@ -828,10 +828,9 @@ mod tests {
     /// some seconds after it is ready and the engine's at once, so a stop
     /// sent at the answer finds the two files apart, and one sent once the
     /// line is there finds them alike. The stop at the answer is held
-    /// against a host whose line comes thirty seconds late, past any stall
-    /// of a loaded machine, and not three: under the merge hook at a load
-    /// of 25 the stop at the answer once came after the third second, and
-    /// the files agreed.
+    /// against a host whose line comes thirty seconds late, when the host
+    /// would have ended on its own, so no stall of a loaded machine
+    /// between the answer and the stop lets the line land first.
     #[test]
     fn a_server_is_stopped_once_its_file_matches_what_it_settles_on() {
         let hosts = Tree::new("host-line-settled").unwrap();

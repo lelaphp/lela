@@ -750,9 +750,9 @@ fn find<'a>(
                 ask.scope.narrow(found),
                 held.map(|held| held.narrowed(&ask.scope)),
             ),
-            // A source the grammar could not read, or an oracle variant
-            // the pin does not carry: the crate's reading fails and names
-            // it, since `done` asks the crate for a witness reading and a
+            // A source the grammar could not read, an oracle variant the
+            // pin does not carry, or a host's lines that could not be read:
+            // the crate's reading fails and names it, since `done` asks the crate for a witness reading and a
             // pass over sources never seen, or never held to an oracle,
             // would say the crate was measured when it was not.
             Err(unread) => {

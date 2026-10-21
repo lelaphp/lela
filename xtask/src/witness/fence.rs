@@ -466,8 +466,6 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
     ))
 }
 
-/// The body of the fence opened at `start`, and the index after the line
-/// that closes it; nothing when no doc line of the block does.
 /// The fence that opens next after `after` where its first word is `word`:
 /// where it opens, its info, its body and the index after it; none where
 /// the next fence is another or there is none.
@@ -495,6 +493,8 @@ fn follows<'a>(
     Ok(Some((at, info, body, next)))
 }
 
+/// The body of the fence opened at `start`, and the index after the line
+/// that closes it; nothing when no doc line of the block does.
 fn body_of(lines: &[&str], start: usize) -> Option<(String, usize)> {
     let mut body: Vec<&str> = Vec::new();
     for (index, line) in lines.iter().enumerate().skip(start + 1) {
