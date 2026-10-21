@@ -311,19 +311,20 @@ fn sort_moved(record: &Record, call: &Call, held: &Path) -> Vec<Moved> {
         let cwd = shell_at(call, &guarded.checkout, &line);
         // A line that moves `HEAD` itself makes the history it would be
         // credited with, so it is credited with none.
-        let tip = if moves_head(&line) {
-            None
-        } else {
-            operation::head(&guarded.checkout)
-        };
+        let credited = !moves_head(&line);
         for (path, was) in &guarded.blobs {
-            let now = on_disk(&guarded.checkout.join(path));
-            if now == *was {
+            let file = guarded.checkout.join(path);
+            if on_disk(&file) == *was {
                 continue;
             }
             if steering && steered(&guarded.checkout, path, was.as_deref(), record.at) {
                 continue;
             }
+            let (now, tip) = settled(|| operation::head(&guarded.checkout), || on_disk(&file));
+            if now == *was {
+                continue;
+            }
+            let tip = tip.filter(|_| credited);
             let landed = landed_at(guarded, tip.as_deref(), path, now.as_deref());
             let place = OnDisk::new(&cwd, &guarded.checkout, path);
             let writes = landed.is_none() && writes::can_write(&line, &place);
@@ -623,6 +624,31 @@ fn runs_steer(command: &str) -> bool {
         .any(|argv| argv.invokes(&steer))
 }
 
+/// The file's blob, read by `blob`, and the commit `HEAD` stood at across
+/// that read, read by `head` before it and after it. Another session's
+/// merge can land between the reads (#3220), and a blob judged against a
+/// `HEAD` it was not read under puts back what the merge wrote, so the
+/// file is read again while the two reads of `HEAD` differ, at most
+/// three times; where `HEAD` never stands still, the last read and the
+/// `HEAD` after it.
+fn settled(
+    mut head: impl FnMut() -> Option<String>,
+    mut blob: impl FnMut() -> Option<String>,
+) -> (Option<String>, Option<String>) {
+    const TRIES: usize = 3;
+    let mut tip = head();
+    let mut tries = 0;
+    loop {
+        let now = blob();
+        let after = head();
+        tries += 1;
+        if after == tip || tries == TRIES {
+            return (now, after);
+        }
+        tip = after;
+    }
+}
+
 /// Whether one of the line's simple commands runs a git command that
 /// makes a commit or moves `HEAD`, `git -C <dir> commit` among them
 /// ([`argv::Argv::runs`]). Such a line's history is its own, so a write it
@@ -856,7 +882,28 @@ fn cat_blob(checkout: &Path, id: &str) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::runs_steer;
+    use super::{runs_steer, settled};
+
+    /// #3220: a merge lands between the first read of `HEAD` and the
+    /// file's, so the file is read again under the `HEAD` it stands at;
+    /// a `HEAD` that never stands still is read three times and no more.
+    #[test]
+    fn the_file_is_read_again_while_head_moves_across_the_read() {
+        let reads = |ids: &[&str]| {
+            let mut ids: Vec<Option<String>> =
+                ids.iter().rev().map(|id| Some((*id).to_owned())).collect();
+            move || ids.pop().flatten()
+        };
+        let (now, tip) = settled(reads(&["a", "b", "b"]), reads(&["old", "new"]));
+        assert_eq!((now.as_deref(), tip.as_deref()), (Some("new"), Some("b")));
+        let (now, tip) = settled(reads(&["a", "a"]), reads(&["one"]));
+        assert_eq!((now.as_deref(), tip.as_deref()), (Some("one"), Some("a")));
+        let (now, tip) = settled(
+            reads(&["a", "b", "c", "d", "e"]),
+            reads(&["1", "2", "3", "4"]),
+        );
+        assert_eq!((now.as_deref(), tip.as_deref()), (Some("3"), Some("d")));
+    }
 
     #[test]
     fn steer_is_read_from_the_argv_and_not_from_the_text() {
