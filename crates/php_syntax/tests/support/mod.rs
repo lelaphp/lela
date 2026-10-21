@@ -11,8 +11,10 @@
 //! significant tokens only; a mis-parse a snapshot pins is named beside
 //! the fixture.
 
-// Each test binary includes this module and reads the part it needs.
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "each test binary includes this module and reads the part it needs"
+)]
 
 use std::fmt::Write as _;
 
