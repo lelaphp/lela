@@ -73,6 +73,14 @@ enum Unplaced {
     Denied(Visibility),
 }
 
+/// What [`Request::write_held_dynamic`] made of a write to a dynamic
+/// property: the write made, or the name and the value handed back where
+/// the table holds no bucket of the name.
+enum DynamicWrite {
+    Written(Result<(), Thrown>),
+    Absent(Owner<PhpString>, Owner<Value>),
+}
+
 /// What [`Request::find_property_info`] found for a name in a class's
 /// `ce->properties_info`.
 #[derive(Clone, Copy)]
@@ -2844,13 +2852,14 @@ impl Request {
             name.give_up(self);
             return Err(thrown);
         }
-        let held = placed.is_none()
-            && !bad_name
-            && o.properties()
-                .is_some_and(|table| table.contains(php_heap::Key::Str(name.heap())));
-        if held {
-            return self.write_std_property(object, name, value);
-        }
+        let (name, value) = if placed.is_none() && !bad_name {
+            match self.write_held_dynamic(o, name, value) {
+                DynamicWrite::Written(written) => return written,
+                DynamicWrite::Absent(name, value) => (name, value),
+            }
+        } else {
+            (name, value)
+        };
         // GH-21478: a proxy that forwards, written from inside the
         // instance's own `__set` for this name, writes the instance.
         if let Some(instance) = self.lazy_instance(o)
@@ -3045,41 +3054,12 @@ impl Request {
                 }
             }
         } else {
+            let (name, value) = match self.write_held_dynamic(o, name, value) {
+                DynamicWrite::Written(written) => return written,
+                DynamicWrite::Absent(name, value) => (name, value),
+            };
             let key = php_heap::Key::Str(name.heap());
-            // `zend_array_dup` over a table a clone or a cast shares,
-            // before the entry is looked for, so a reference the other
-            // holder's copy owns alone is its value here and not a cell
-            // both write through.
-            if o.properties().is_some_and(|table| table.refcount() > 1) {
-                match self.separated_properties(o) {
-                    Ok(_) => {}
-                    Err(thrown) => {
-                        value.give_up(self);
-                        name.give_up(self);
-                        return Err(thrown);
-                    }
-                }
-            }
-            let held = o.properties().is_some_and(|table| table.contains(key));
-            // `zend_assign_to_variable` over the entry found: one that
-            // holds a reference, what `$o->p = &$x` bound, is written
-            // through, so every name of the cell reads the value, and
-            // held to the types of the properties that hold the cell
-            // (`zend_assign_to_typed_ref`) under the writing file's rule.
-            let bound = o
-                .properties()
-                .and_then(|table| table.get(key))
-                .and_then(|found| Value::of_slot(found).as_php_ref());
-            if let Some(cell) = bound {
-                name.give_up(self);
-                let strict = self.property_strict_types();
-                return self.assign_to_reference(
-                    cell.heap(),
-                    value.hand_on().undef_as_null(),
-                    strict,
-                );
-            }
-            if !held && let Err(thrown) = self.dynamic_property_creation(object, name.as_bytes()) {
+            if let Err(thrown) = self.dynamic_property_creation(object, name.as_bytes()) {
                 value.give_up(self);
                 name.give_up(self);
                 return Err(thrown);
@@ -3092,12 +3072,98 @@ impl Request {
                     return Err(thrown);
                 }
             };
-            if let Err(thrown) = self.array_update(table, key, value.hand_on()) {
-                name.give_up(self);
-                return Err(thrown);
-            }
+            let written = self.array_update(table, key, value.hand_on());
+            name.give_up(self);
+            return written;
         }
         name.give_up(self);
+        Ok(())
+    }
+
+    /// [`Request::dynamic_place`] and, where the bucket stands,
+    /// [`Request::assign_dynamic`] over it, the name given up: one find
+    /// and the write, or the name and the value handed back where the
+    /// table holds no such name, for the write that lays it down.
+    fn write_held_dynamic(
+        &mut self,
+        o: Obj,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
+    ) -> DynamicWrite {
+        match self.dynamic_place(o, php_heap::Key::Str(name.heap())) {
+            Ok(Some(place)) => {
+                name.give_up(self);
+                DynamicWrite::Written(self.assign_dynamic(place, value))
+            }
+            Ok(None) => DynamicWrite::Absent(name, value),
+            Err(thrown) => {
+                value.give_up(self);
+                name.give_up(self);
+                DynamicWrite::Written(Err(thrown))
+            }
+        }
+    }
+
+    /// `zend_std_write_property`'s dynamic arm up to `found`
+    /// (`Z/Zend/zend_object_handlers.c:1124-1135`): the object's dynamic
+    /// table, separated first where a clone or a cast shares it
+    /// (`zend_array_dup`), so a reference the other holder's copy owns
+    /// alone is its value here and not a cell both write through, and
+    /// the bucket `key` stands in, found once by its hash; none where the
+    /// object has no table or the table no such key, which a write lays
+    /// down. The place is good until anything writes the table.
+    fn dynamic_place(
+        &mut self,
+        o: Obj,
+        key: php_heap::Key,
+    ) -> Result<Option<php_heap::ZvalRef>, Thrown> {
+        let Some(table) = o.properties() else {
+            return Ok(None);
+        };
+        let table = if table.refcount() == 1 && !table.is_immutable() {
+            table
+        } else {
+            self.separated_properties(o)?
+        };
+        Ok(table.value_ref(key))
+    }
+
+    /// `found:`, `zend_assign_to_variable_ex` over the bucket a dynamic
+    /// property stands in ([`Request::dynamic_place`]): the value laid
+    /// over what the bucket held, which is released after, or, where the
+    /// bucket holds a reference, what `$o->p = &$x` bound, written
+    /// through, so every name of the cell reads the value, held to the
+    /// types of the properties that hold the cell
+    /// (`zend_assign_to_typed_ref`) under the writing file's rule. A name
+    /// a temporary holds is the kernel's, so it writes here:
+    ///
+    /// ```php
+    /// class T { public int $n = 1; }
+    /// function n($q) { return $q . ''; }
+    /// $o = new stdClass; $o->p = 'a'; $q = 'p';
+    /// $o->{n($q)} = 'b'; $a = (array) $o; $o->{n($q)} = 'c'; var_dump($a['p'], $o->p);
+    /// $t = new T; $o->p = &$t->n; $o->{n($q)} = '5';
+    /// try { $o->{n($q)} = 'x'; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($t->n);
+    /// ```
+    /// ```expect
+    /// string(1) "b"
+    /// string(1) "c"
+    /// Cannot assign string to reference held by property T::$n of type int
+    /// int(5)
+    /// ```
+    fn assign_dynamic(
+        &mut self,
+        place: php_heap::ZvalRef,
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
+        let held = Value::of_slot(place.read());
+        if let Some(cell) = held.as_php_ref() {
+            let strict = self.property_strict_types();
+            return self.assign_to_reference(cell.heap(), value.hand_on().undef_as_null(), strict);
+        }
+        place.write(value.hand_on().into_zval());
+        self.release(held);
         Ok(())
     }
 

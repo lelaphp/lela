@@ -16309,6 +16309,16 @@ fn step_property(
         PropertyPtr::Served(back) => Ok(served_property_step(
             req, frame, code, step, object, key, back,
         )),
+        // The entry stands, so the pair of handlers finds it.
+        PropertyPtr::Dynamic(_) => Ok(served_property_step(
+            req,
+            frame,
+            code,
+            step,
+            object,
+            key,
+            WriteBack::Property,
+        )),
         // A readonly or set-restricted property gets no place, so the
         // operation is made over what `read_property` answers, and what
         // it throws comes before what the write refuses
@@ -16383,9 +16393,14 @@ fn unwritten_step_slot(
 enum PropertyPtr {
     /// php's `NULL`: the pair of handlers takes the site, the stepped
     /// value written back as the [`WriteBack`] says. A name the class
-    /// serves or keeps apart, one no class declared whose `__get` answers
-    /// it, and a dynamic entry laid down here, which the pair then finds.
+    /// serves or keeps apart, and one no class declared whose `__get`
+    /// answers it.
     Served(WriteBack),
+    /// The bucket of the object's dynamic table a name no class declared
+    /// stands in, laid down here where the table held none: php's
+    /// `zend_hash_find` or `zend_hash_add` answer, good until anything
+    /// writes the table.
+    Dynamic(php_heap::ZvalRef),
     /// A readonly or set-restricted property, which hands out no place:
     /// `zend_assign_op_overloaded_property`, the write refused after it.
     Withheld,
@@ -16503,11 +16518,15 @@ fn property_ptr(
     // declared: a class with a `__get` the guard is not holding hands
     // out no place and the overloaded pair takes the site; every other
     // class takes the place, which is the dynamic entry laid down here.
-    if !req.overloaded_place(object, bytes) {
-        req.addref(&Value::string(key));
-        req.dynamic_property_ref(object, key, PropertyRead::Warning)?;
+    if req.overloaded_place(object, bytes) {
+        return Ok(PropertyPtr::Served(WriteBack::Property));
     }
-    Ok(PropertyPtr::Served(WriteBack::Property))
+    req.addref(&Value::string(key));
+    let place = req.dynamic_property_ref(object, key, PropertyRead::Warning)?;
+    Ok(place.map_or(
+        PropertyPtr::Served(WriteBack::Property),
+        PropertyPtr::Dynamic,
+    ))
 }
 
 /// `ASSIGN_OBJ_OP` over the declared slot it placed: the kernel over
@@ -17109,6 +17128,44 @@ fn inline_incdec_obj(
 ///   }
 /// }
 /// ```
+///
+/// A dynamic property's bucket holding a number is stepped in place, as
+/// the kernel steps it, and anything else, a string, a reference, a
+/// name laid down with its warning, through the pair of handlers; a
+/// name a temporary holds is the kernel's:
+///
+/// ```php
+/// #[AllowDynamicProperties] class D {}
+/// function n($q) { return $q . ''; }
+/// $o = new stdClass; $o->p = 1; $q = 'p';
+/// $o->{n($q)}++; ++$o->{n($q)}; $o->{n($q)}--; var_dump($o->{n($q)}++, --$o->{n($q)});
+/// $o->s = 'Az'; $o->{n('s')}++; $o->f = 1.5; $o->{n('f')}--; var_dump($o->s, $o->f);
+/// $x = 4; $o->r = &$x; $o->{n('r')}++; var_dump($x);
+/// $d = new D; $d->{n('m')}++; $d->{n('z')}--; var_dump($d);
+/// $o->{n('big')} = PHP_INT_MAX; $o->{n('big')}++; var_dump($o->big);
+/// ```
+/// ```expect
+/// int(2)
+/// int(2)
+///
+/// Deprecated: Increment on non-numeric string is deprecated, use str_increment() instead in %s on line 6
+/// string(2) "Ba"
+/// float(0.5)
+/// int(5)
+///
+/// Warning: Undefined property: D::$m in %s on line 8
+///
+/// Warning: Undefined property: D::$z in %s on line 8
+///
+/// Warning: Decrement on type null has no effect, this will change in the next major version of PHP in %s on line 8
+/// object(D)#2 (2) {
+///   ["m"]=>
+///   int(1)
+///   ["z"]=>
+///   NULL
+/// }
+/// float(9.223372036854776E+18)
+/// ```
 fn incdec_property(
     req: &mut Request,
     frame: FrameRef,
@@ -17144,6 +17201,34 @@ fn incdec_property(
         Ok((object, PropertyPtr::Slot(slot, typed))) => (object, (slot, typed)),
         Ok((object, PropertyPtr::Served(back))) => {
             return Ok(served_incdec(req, frame, op, step, object, key, back));
+        }
+        // `zend_pre_incdec_property_zval` over the bucket: a number
+        // stepped in place by the rule the kernel steps it by, and
+        // anything else, whose step may raise and run user code that
+        // writes the table, through the pair of handlers, which finds
+        // the entry laid down.
+        Ok((object, PropertyPtr::Dynamic(place))) => {
+            let held = place.read();
+            let arith = if step.increment {
+                Arith::Add
+            } else {
+                Arith::Sub
+            };
+            let Some(stepped) = inline::step(arith, held) else {
+                return Ok(served_incdec(
+                    req,
+                    frame,
+                    op,
+                    step,
+                    object,
+                    key,
+                    WriteBack::Property,
+                ));
+            };
+            place.write(stepped);
+            let out = Value::of_slot(if step.post { held } else { stepped });
+            write_out(req, frame, op, &out);
+            return Ok(Ok(()));
         }
         // A readonly or set-restricted property gets no place, so the
         // step is the overloaded one, and what the write refuses is
