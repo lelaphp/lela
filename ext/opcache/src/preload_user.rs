@@ -96,9 +96,7 @@ mod tests {
     /// thread's ids move.
     #[test]
     fn the_ids_are_taken_by_the_calling_thread_alone() {
-        let Some(nobody) = Account::named(b"nobody") else {
-            return assert!(Account::named(b"nobody").is_some());
-        };
+        let nobody = Account::named(b"nobody").expect("nobody is an account of the user database");
         let files = php_ext::test::Files::new("opcache-preload-user", &[("root-only", "root")]);
         let secret = files.path().join("root-only");
         std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600))
@@ -119,9 +117,7 @@ mod tests {
         })
         .join();
         let after = (uid(), euid(), gid(), egid());
-        let Ok((took, ids, opened, child)) = taken else {
-            return assert!(taken.is_ok(), "the thread ended in a panic");
-        };
+        let (took, ids, opened, child) = taken.expect("the thread runs to its end");
         assert_eq!(after, before, "this thread keeps its ids");
         if before.1 == 0 {
             assert_eq!(took, Ok(()));

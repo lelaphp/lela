@@ -554,12 +554,19 @@ mod tests {
     /// a native's recursion to the main thread's size and the loop's
     /// entry to the thread's own, names the main thread's number, and a
     /// re-entry moves the limit to that budget below its frame until it
-    /// is left; under a size the ini gave, a re-entry moves nothing.
+    /// is left; under a size the ini gave, a re-entry moves nothing. A
+    /// platform whose main thread's size cannot be read skips, saying so.
     #[test]
     fn detect_on_a_thread_past_the_main_threads_size_allows_the_main_threads() {
-        let Some(main) = php_heap::main_call_stack_size() else {
-            return;
-        };
+        match php_heap::main_call_stack_size() {
+            Some(main) => detect_past_the_main_thread(main),
+            None => eprintln!("skipped: this platform's main thread has no size to read"),
+        }
+    }
+
+    /// The test above, on a thread four times `main`, the main thread's
+    /// size.
+    fn detect_past_the_main_thread(main: usize) {
         let size = main.saturating_mul(4);
         let (at_init, clear, moved, left, local) = std::thread::Builder::new()
             .stack_size(size)
