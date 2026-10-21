@@ -240,12 +240,12 @@ fn the_renumbered_fixture_is_a_pass_under_the_row_and_not_without_it() {
 fn a_difference_an_accepted_row_names_is_diverged_and_a_pass() {
     let oracle = fs::read(fixtures().join("oracle.re")).unwrap();
     let engine = fs::read(fixtures().join("engine.re")).unwrap();
-    let row = |status: &str| {
+    let row = |status: crate::divergence::Status| {
         rows(&[Row::accepted("crosscheck:ctype")
             .reason("ctype_alnun is the fixture's one byte (fixture).")
             .status(status)])
     };
-    let accepted = row("accepted");
+    let accepted = row(crate::divergence::Status::Accepted);
     let judged = judge(
         &accepted,
         &Host::Cli.id("ctype", Column::Re),
@@ -282,7 +282,7 @@ fn a_difference_an_accepted_row_names_is_diverged_and_a_pass() {
     assert!(
         matches!(
             judge(
-                &row("open"),
+                &row(crate::divergence::Status::Open),
                 &Host::Cli.id("ctype", Column::Re),
                 &oracle,
                 &Rendering::Bytes(engine)

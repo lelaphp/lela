@@ -685,7 +685,7 @@ fn a_trace_row_pins_the_fences_it_covers_and_accepts_no_difference_for_them() {
     );
     assert!(registry.pinning("trace:y").is_none());
 
-    let open = rows(&[row.status("open")]);
+    let open = rows(&[row.status(crate::divergence::Status::Open)]);
     assert!(open.pinning("witness:abc").is_none());
 
     let phpt = Registry::parse(

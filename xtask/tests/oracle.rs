@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-use xtask::divergence::Registry;
+use xtask::divergence::{Registry, Status};
 use xtask::oracle::{
     self, PROMISE_VARIABLE, Pin, Program, Promise, Promised, Regime, Runner, Split, TREE_VARIABLE,
     Verdict,
@@ -1131,7 +1131,7 @@ fn compare_is_differs_with_the_diff_otherwise() {
 fn an_open_or_fixed_row_does_not_accept_a_difference() {
     let registry = rows(&[
         Row::open("witness:open"),
-        Row::accepted("witness:fixed").status("fixed"),
+        Row::accepted("witness:fixed").status(Status::Fixed),
     ]);
     for id in ["witness:open", "witness:fixed"] {
         let verdict = oracle::compare(&registry, id, b"a", b"b");

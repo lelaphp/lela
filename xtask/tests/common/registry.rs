@@ -8,7 +8,7 @@
     reason = "a binary includes the topic whole and calls part of it"
 )]
 
-use xtask::divergence::Registry;
+use xtask::divergence::{Registry, Status};
 
 /// The registry `text` states; a fixture that does not parse fails the
 /// test that wrote it.
@@ -23,7 +23,7 @@ pub fn registry(text: &str) -> Registry {
 pub struct Row {
     id: String,
     reason: String,
-    status: String,
+    status: Status,
     covers: Vec<String>,
 }
 
@@ -33,7 +33,7 @@ impl Row {
         Row {
             id: id.to_owned(),
             reason: "A person wrote why this one is allowed to differ.".to_owned(),
-            status: "accepted".to_owned(),
+            status: Status::Accepted,
             covers: Vec::new(),
         }
     }
@@ -41,15 +41,17 @@ impl Row {
     /// The row over `id` as `compare`'s caller proposes one: open, with
     /// no reason yet.
     pub fn open(id: &str) -> Row {
-        Row::accepted(id).status("open").reason("")
+        Row::accepted(id).status(Status::Open).reason("")
     }
 
+    /// The row at `status`, its reason left as it stands.
     #[must_use]
-    pub fn status(mut self, status: &str) -> Row {
-        status.clone_into(&mut self.status);
+    pub fn status(mut self, status: Status) -> Row {
+        self.status = status;
         self
     }
 
+    /// The row's reason, as a person would write it.
     #[must_use]
     pub fn reason(mut self, reason: &str) -> Row {
         reason.clone_into(&mut self.reason);
@@ -78,6 +80,7 @@ impl Row {
             let ids: Vec<String> = covers.iter().map(|id| format!("{id:?}")).collect();
             format!("covers = [{}]\n", ids.join(", "))
         };
+        let status = status.as_str();
         format!(
             "[[divergence]]\nid = {id:?}\nkind = {kind:?}\nreason = {reason:?}\nstatus = {status:?}\nsince = \"2026-09-08\"\n{covers}"
         )
