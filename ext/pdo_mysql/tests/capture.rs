@@ -6,13 +6,9 @@
 //! `file`, `line` and `trace` as dynamic properties, four deprecations
 //! before anything the request prints (#1867).
 
-#![allow(
-    clippy::disallowed_methods,
-    reason = "a test starts its own threads (seams.toml rule fork.threads)"
-)]
-
 #[path = "../../mysqlnd/tests/support/mysql.rs"]
 mod mysql;
+mod support;
 
 use mysql::{MysqlRelay, MysqlServer};
 use php_ext::abi::{Dependency, DependencyKind, ExtensionBuilder};
@@ -23,18 +19,7 @@ use php_ext_pdo::connector::{Connection, Connector, Failure, Prepared, Source};
 
 #[test]
 fn the_extension_is_loaded() {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_json::extension(),
-            php_ext_standard::extension(),
-            php_ext_spl::extension(),
-            php_ext_mysqlnd::extension(),
-            php_ext_pdo::extension(),
-            php_ext_uri::extension(),
-            php_ext_pdo_mysql::extension(),
-        ])
-        .build();
+    let engine = support::engine();
     let sink = Capture::default();
     let served = engine.serve_capture("<?php var_dump(extension_loaded('pdo_mysql'));", sink);
     assert_eq!(served.stdout_text(), "bool(true)\n");
@@ -48,18 +33,7 @@ fn the_extension_is_loaded() {
 #[test]
 fn a_persistent_connection_serves_the_next_request_and_a_dead_one_is_replaced() {
     MysqlServer::with(|_| {
-        let engine = Engine::builder()
-            .extensions(&[
-                php_ext_lexbor::extension(),
-                php_ext_json::extension(),
-                php_ext_standard::extension(),
-                php_ext_uri::extension(),
-                php_ext_spl::extension(),
-                php_ext_pdo::extension(),
-                php_ext_mysqlnd::extension(),
-                php_ext_pdo_mysql::extension(),
-            ])
-            .build();
+        let engine = support::engine();
         let open = "<?php $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_PERSISTENT => true]);";
         let first = format!(
             "{open} $db->exec('SET @kept = 7'); echo $db->query('SELECT CONNECTION_ID()')->fetchColumn();"
@@ -95,6 +69,10 @@ fn a_persistent_connection_serves_the_next_request_and_a_dead_one_is_replaced() 
 #[test]
 fn a_session_written_at_the_request_end_still_has_the_persistent_connection() {
     MysqlServer::with(|_| {
+        // Spelt whole: session starts before pdo and pdo_mysql, so its
+        // RSHUTDOWN, whose save handler writes through the connection,
+        // runs after theirs, the order the test holds the connection
+        // across.
         let engine = Engine::builder()
             .extensions(&[
                 php_ext_lexbor::extension(),
@@ -210,17 +188,8 @@ fn a_persistent_connection_past_the_pool_s_bound_is_closed() {
             .register::<&'static dyn Connector>(&FILLER)
             .build("pdo_filler");
         let engine = Engine::builder()
-            .extensions(&[
-                php_ext_lexbor::extension(),
-                php_ext_json::extension(),
-                php_ext_standard::extension(),
-                php_ext_uri::extension(),
-                php_ext_spl::extension(),
-                php_ext_pdo::extension(),
-                filler,
-                php_ext_mysqlnd::extension(),
-                php_ext_pdo_mysql::extension(),
-            ])
+            .extensions(support::extensions())
+            .extensions([filler])
             .build();
         let first = "<?php for ($i = 0; $i < 1024; $i++) {
                 new PDO('filler:', null, null, [PDO::ATTR_PERSISTENT => \"n$i\"]);
@@ -256,18 +225,7 @@ fn a_persistent_connection_past_the_pool_s_bound_is_closed() {
 #[test]
 fn a_persistent_connection_keeps_its_socket_however_full_the_stream_pool_is() {
     MysqlServer::with(|_| {
-        let engine = Engine::builder()
-            .extensions(&[
-                php_ext_lexbor::extension(),
-                php_ext_json::extension(),
-                php_ext_uri::extension(),
-                php_ext_standard::extension(),
-                php_ext_spl::extension(),
-                php_ext_pdo::extension(),
-                php_ext_mysqlnd::extension(),
-                php_ext_pdo_mysql::extension(),
-            ])
-            .build();
+        let engine = support::engine();
         let open = "$db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_PERSISTENT => true]);
             echo $db->query('SELECT CONNECTION_ID()')->fetchColumn();";
         let first = format!(
@@ -303,18 +261,7 @@ fn a_pooled_persistent_connection_is_quit_as_the_engine_ends() {
     MysqlServer::with(|server| {
         let relay = MysqlRelay::start(server);
         let port = relay.at().port();
-        let engine = Engine::builder()
-            .extensions(&[
-                php_ext_lexbor::extension(),
-                php_ext_json::extension(),
-                php_ext_standard::extension(),
-                php_ext_uri::extension(),
-                php_ext_spl::extension(),
-                php_ext_pdo::extension(),
-                php_ext_mysqlnd::extension(),
-                php_ext_pdo_mysql::extension(),
-            ])
-            .build();
+        let engine = support::engine();
         let script = format!(
             "<?php new PDO('mysql:host=127.0.0.1;port={port};dbname=test', 'root', '', [PDO::ATTR_PERSISTENT => true]); echo 'connected';"
         );

@@ -7,27 +7,16 @@
 
 #[path = "../../mysqlnd/tests/support/mysql.rs"]
 mod mysql;
+mod support;
 
 use mysql::MysqlServer;
-use php_ext::test::{Capture, Engine, LeakSensor};
+use php_ext::test::Capture;
 
 /// What one request of an armed engine with PDO, this connector and
 /// standard wrote for `body`, served after `$db` is connected under
 /// `PDO::ERRMODE_EXCEPTION`.
 fn armed(body: &str) -> String {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_json::extension(),
-            php_ext_uri::extension(),
-            php_ext_standard::extension(),
-            php_ext_spl::extension(),
-            php_ext_pdo::extension(),
-            php_ext_mysqlnd::extension(),
-            php_ext_pdo_mysql::extension(),
-        ])
-        .sense_leaks(LeakSensor::Armed)
-        .build();
+    let engine = support::engine();
     let source = format!(
         "<?php $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);\n{body}"
     );

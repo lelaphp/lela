@@ -1,31 +1,16 @@
 //! The extension through the `Capture` sink (design §4.10, ADR-0002): a
 //! fresh engine with this crate alone, never the bundle.
 
-#![allow(
-    clippy::disallowed_methods,
-    reason = "a test starts its own threads (seams.toml rule fork.threads)"
-)]
-
 #[path = "../../mysqlnd/tests/support/mysql.rs"]
 mod mysql;
+mod support;
 
 use mysql::{MysqlRelay, MysqlServer};
-use php_ext::abi::Extension;
 use php_ext::test::{Capture, Engine, Files};
 
 #[test]
 fn the_extension_is_loaded() {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_json::extension(),
-            php_ext_standard::extension(),
-            php_ext_spl::extension(),
-            php_ext_mysqlnd::extension(),
-            php_ext_uri::extension(),
-            php_ext_mysqli::extension(),
-        ])
-        .build();
+    let engine = support::engine();
     let sink = Capture::default();
     let served = engine.serve_capture("<?php var_dump(extension_loaded('mysqli'));", sink);
     assert_eq!(served.stdout_text(), "bool(true)\n");
@@ -41,17 +26,7 @@ fn the_extension_is_loaded() {
 #[test]
 fn a_persistent_link_serves_the_next_request() {
     MysqlServer::with(|_| {
-        let engine = Engine::builder()
-            .extensions(&[
-                php_ext_lexbor::extension(),
-                php_ext_json::extension(),
-                php_ext_standard::extension(),
-                php_ext_spl::extension(),
-                php_ext_uri::extension(),
-                php_ext_mysqlnd::extension(),
-                php_ext_mysqli::extension(),
-            ])
-            .build();
+        let engine = support::engine();
         let connect = "mysqli_connect('p:127.0.0.1', 'root', '', 'test')";
         let first = format!("<?php $l = {connect}; echo mysqli_thread_id($l);");
         let served = engine.serve_capture(&first, Capture::default());
@@ -83,17 +58,7 @@ fn a_persistent_link_serves_the_next_request() {
 #[test]
 fn a_persistent_link_keeps_its_socket_however_full_the_stream_pool_is() {
     MysqlServer::with(|_| {
-        let engine = Engine::builder()
-            .extensions(&[
-                php_ext_lexbor::extension(),
-                php_ext_json::extension(),
-                php_ext_spl::extension(),
-                php_ext_uri::extension(),
-                php_ext_standard::extension(),
-                php_ext_mysqlnd::extension(),
-                php_ext_mysqli::extension(),
-            ])
-            .build();
+        let engine = support::engine();
         let connect = "mysqli_connect('p:127.0.0.1', 'root', '', 'test')";
         let first = format!(
             "<?php $s = stream_socket_server('tcp://127.0.0.1:0');
@@ -123,17 +88,7 @@ fn a_persistent_link_keeps_its_socket_however_full_the_stream_pool_is() {
 #[test]
 fn a_link_from_init_connected_without_p_is_closed_as_the_request_ends() {
     MysqlServer::with(|_| {
-        let engine = Engine::builder()
-            .extensions(&[
-                php_ext_lexbor::extension(),
-                php_ext_json::extension(),
-                php_ext_standard::extension(),
-                php_ext_spl::extension(),
-                php_ext_uri::extension(),
-                php_ext_mysqlnd::extension(),
-                php_ext_mysqli::extension(),
-            ])
-            .build();
+        let engine = support::engine();
         let first = "<?php $l = mysqli_init(); $kept = $l; $l->real_connect('127.0.0.1', 'root', '', 'test'); echo $l->thread_id;";
         let served = engine.serve_capture(first, Capture::default());
         let thread = served.stdout_text();
@@ -164,6 +119,9 @@ fn a_link_from_init_connected_without_p_is_closed_as_the_request_ends() {
 #[test]
 fn a_session_written_at_the_request_end_still_has_the_link() {
     MysqlServer::with(|_| {
+        // Spelt whole: session starts before mysqli, so its RSHUTDOWN,
+        // whose save handler writes through the link, runs after mysqli's,
+        // the order the test holds the link across.
         let engine = Engine::builder()
             .extensions(&[
                 php_ext_lexbor::extension(),
@@ -231,20 +189,6 @@ fn a_session_written_at_the_request_end_still_has_the_link() {
     });
 }
 
-/// An engine of `extensions` with `ini` set and the request leak sensor
-/// armed (#1992), for a test against the server of
-/// `ci/mysql/compose.yaml`.
-#[cfg(debug_assertions)]
-fn armed(extensions: &[Extension], ini: &[(&str, &str)]) -> Engine {
-    let mut builder = Engine::builder().extensions(extensions);
-    for (name, value) in ini {
-        builder = builder.ini(name, value);
-    }
-    builder
-        .sense_leaks(php_ext::test::LeakSensor::Armed)
-        .build()
-}
-
 /// What mysqlnd reads off the wire is read into the buffer it parses, as
 /// php's `mysqlnd_vio::network_read` reads into its caller's, and the
 /// file a `LOAD DATA LOCAL INFILE` sends is read the same way
@@ -258,18 +202,10 @@ fn armed(extensions: &[Extension], ini: &[(&str, &str)]) -> Engine {
 #[test]
 fn an_armed_request_over_the_wire_leaves_none_of_its_packets_held() {
     MysqlServer::with(|_| {
-        let engine = armed(
-            &[
-                php_ext_lexbor::extension(),
-                php_ext_json::extension(),
-                php_ext_standard::extension(),
-                php_ext_spl::extension(),
-                php_ext_uri::extension(),
-                php_ext_mysqlnd::extension(),
-                php_ext_mysqli::extension(),
-            ],
-            &[("mysqli.allow_local_infile", "1")],
-        );
+        let engine = Engine::builder()
+            .extensions(support::extensions())
+            .ini("mysqli.allow_local_infile", "1")
+            .build();
         let files = Files::new("mysqli-local-infile", &[("rows.csv", "1,a\n2,b\n")]);
         let file = files.path().join("rows.csv");
         let source = format!(
@@ -312,18 +248,7 @@ fn an_armed_request_over_the_wire_leaves_none_of_its_packets_held() {
 #[test]
 fn an_armed_request_reading_its_warnings_leaves_none_held() {
     MysqlServer::with(|_| {
-        let engine = armed(
-            &[
-                php_ext_lexbor::extension(),
-                php_ext_json::extension(),
-                php_ext_standard::extension(),
-                php_ext_spl::extension(),
-                php_ext_uri::extension(),
-                php_ext_mysqlnd::extension(),
-                php_ext_mysqli::extension(),
-            ],
-            &[],
-        );
+        let engine = support::engine();
         let source = "<?php $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
             mysqli_query($l, 'SELECT 1/0');
             $w = mysqli_get_warnings($l);
@@ -348,19 +273,10 @@ fn an_armed_request_reading_its_warnings_leaves_none_held() {
 #[test]
 fn an_armed_request_refused_by_the_server_leaves_none_held() {
     MysqlServer::with(|_| {
-        let engine = armed(
-            &[
-                php_ext_lexbor::extension(),
-                php_ext_json::extension(),
-                php_ext_standard::extension(),
-                php_ext_spl::extension(),
-                php_ext_uri::extension(),
-                php_ext_openssl::extension(),
-                php_ext_mysqlnd::extension(),
-                php_ext_mysqli::extension(),
-            ],
-            &[],
-        );
+        let engine = Engine::builder()
+            .extensions(support::extensions())
+            .extensions([php_ext_openssl::extension()])
+            .build();
         let source = "<?php mysqli_report(MYSQLI_REPORT_OFF);
             var_dump(@mysqli_connect('127.0.0.1', 'nobody', 'x'), mysqli_connect_errno());";
         let served = engine.serve_capture(source, Capture::default());
@@ -377,18 +293,7 @@ fn an_armed_request_refused_by_the_server_leaves_none_held() {
 #[test]
 fn an_armed_request_reading_a_statements_errors_leaves_none_held() {
     MysqlServer::with(|_| {
-        let engine = armed(
-            &[
-                php_ext_lexbor::extension(),
-                php_ext_json::extension(),
-                php_ext_standard::extension(),
-                php_ext_spl::extension(),
-                php_ext_uri::extension(),
-                php_ext_mysqlnd::extension(),
-                php_ext_mysqli::extension(),
-            ],
-            &[],
-        );
+        let engine = support::engine();
         let source = "<?php mysqli_report(MYSQLI_REPORT_OFF);
             $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
             $s = mysqli_stmt_init($l);
@@ -409,18 +314,7 @@ fn an_armed_request_reading_a_statements_errors_leaves_none_held() {
 #[test]
 fn an_armed_request_whose_text_arguments_are_converted_leaves_none_held() {
     MysqlServer::with(|_| {
-        let engine = armed(
-            &[
-                php_ext_lexbor::extension(),
-                php_ext_json::extension(),
-                php_ext_standard::extension(),
-                php_ext_spl::extension(),
-                php_ext_uri::extension(),
-                php_ext_mysqlnd::extension(),
-                php_ext_mysqli::extension(),
-            ],
-            &[],
-        );
+        let engine = support::engine();
         let source = "<?php var_dump(mysqli_options(mysqli_init(), MYSQLI_INIT_COMMAND, 5));
             $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
             $class = 'std'; $class .= 'Class';
@@ -441,18 +335,7 @@ fn an_armed_request_whose_text_arguments_are_converted_leaves_none_held() {
 #[test]
 fn an_armed_request_reading_the_servers_key_from_a_file_leaves_none_held() {
     MysqlServer::with(|_| {
-        let engine = armed(
-            &[
-                php_ext_lexbor::extension(),
-                php_ext_json::extension(),
-                php_ext_standard::extension(),
-                php_ext_spl::extension(),
-                php_ext_uri::extension(),
-                php_ext_mysqlnd::extension(),
-                php_ext_mysqli::extension(),
-            ],
-            &[],
-        );
+        let engine = support::engine();
         let files = Files::new("mysqli-public-key", &[("key.pem", "not a key\n")]);
         let file = files.path().join("key.pem");
         let source = format!(
@@ -485,17 +368,7 @@ fn a_free_persistent_link_is_quit_as_the_engine_ends() {
     MysqlServer::with(|server| {
         let relay = MysqlRelay::start(server);
         let port = relay.at().port();
-        let engine = Engine::builder()
-            .extensions(&[
-                php_ext_lexbor::extension(),
-                php_ext_json::extension(),
-                php_ext_standard::extension(),
-                php_ext_spl::extension(),
-                php_ext_uri::extension(),
-                php_ext_mysqlnd::extension(),
-                php_ext_mysqli::extension(),
-            ])
-            .build();
+        let engine = support::engine();
         let script = format!(
             "<?php $l = mysqli_connect('p:127.0.0.1', 'root', '', 'test', {port}); echo $l ? 'connected' : 'refused';"
         );

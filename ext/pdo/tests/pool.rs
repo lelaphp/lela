@@ -5,6 +5,8 @@
 //! writes a line to a file each time PDO calls its `closer`, so the test
 //! reads what was closed without a server.
 
+mod support;
+
 use std::io::Write as _;
 use std::path::PathBuf;
 
@@ -105,12 +107,8 @@ fn a_persistent_connection_past_the_pool_s_bound_is_closed_with_the_ending_reque
     let files = Files::new("pdo-pool", &[]);
     let log = files.path().join("closed.log");
     let engine = Engine::builder()
-        .extensions(&[
-            php_ext_json::extension(),
-            php_ext_spl::extension(),
-            php_ext_pdo::extension(),
-            counted(),
-        ])
+        .extensions(support::extensions())
+        .extensions([counted()])
         .build();
     let script = format!(
         "<?php for ($i = 0; $i < 1025; $i++) {{ \
@@ -137,12 +135,8 @@ fn a_persistent_connection_found_dead_is_closed() {
     let files = Files::new("pdo-dead", &[]);
     let log = files.path().join("closed.dead");
     let engine = Engine::builder()
-        .extensions(&[
-            php_ext_json::extension(),
-            php_ext_spl::extension(),
-            php_ext_pdo::extension(),
-            counted(),
-        ])
+        .extensions(support::extensions())
+        .extensions([counted()])
         .build();
     let script = format!(
         "<?php $o = [PDO::ATTR_PERSISTENT => 'p']; $a = new PDO('counted:{0}', null, null, $o); \
@@ -170,12 +164,8 @@ fn a_pooled_persistent_connection_is_closed_as_the_engine_ends() {
     let files = Files::new("pdo-end", &[]);
     let log = files.path().join("closed.log");
     let engine = Engine::builder()
-        .extensions(&[
-            php_ext_json::extension(),
-            php_ext_spl::extension(),
-            php_ext_pdo::extension(),
-            counted(),
-        ])
+        .extensions(support::extensions())
+        .extensions([counted()])
         .build();
     let script = format!(
         "<?php new PDO('counted:{}', null, null, [PDO::ATTR_PERSISTENT => 'p']); echo 'done';",
