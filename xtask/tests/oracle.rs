@@ -12,8 +12,8 @@ use std::time::{Duration, SystemTime};
 
 use xtask::divergence::{Registry, Status};
 use xtask::oracle::{
-    self, PROMISE_VARIABLE, Pin, Program, Promise, Promised, Regime, Runner, Split, TREE_VARIABLE,
-    Verdict,
+    self, PROMISE_VARIABLE, Pin, Program, Promise, Promised, Regime, Runner, SKIPPED_VARIABLE,
+    Split, TREE_VARIABLE, Verdict,
 };
 use xtask::scratch::Tree;
 
@@ -795,13 +795,14 @@ fn a_promise_is_the_words_the_variable_lists_and_an_unknown_word_is_refused() {
 }
 
 /// The tests of `ext/mysqli` and `ext/pdo_mysql` cannot depend on xtask, so
-/// `MysqlServer::with` spells the variable and the word itself: held here
-/// to the ones [`Promised::parse`] reads (#3084).
+/// `MysqlServer::with` spells the two variables and the word itself: held
+/// here to the ones [`Promised::parse`] reads and `xtask test` sets
+/// (#3084, #3085).
 #[test]
 fn the_mysql_server_s_tests_read_the_promise_by_its_own_name_and_word() {
     let support = workspace().join("ext/mysqlnd/tests/support/mysql.rs");
     let text = std::fs::read_to_string(&support).unwrap();
-    for spelt in [PROMISE_VARIABLE, Promise::Mysql.word()] {
+    for spelt in [PROMISE_VARIABLE, Promise::Mysql.word(), SKIPPED_VARIABLE] {
         assert!(text.contains(&format!("\"{spelt}\"")), "{spelt}");
     }
 }

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use xtask::divergence::Registry;
 use xtask::done;
 use xtask::manifest::Manifest;
+use xtask::oracle::SKIPPED_VARIABLE;
 use xtask::reading::{Number, Reading, Status, Store, epoch_seconds};
 use xtask::scratch::Tree;
 use xtask::test;
@@ -173,39 +174,9 @@ fn done_is_red_for_a_crate_with_a_failing_test_and_green_once_it_passes() {
     .unwrap();
 
     let manifest = Manifest::load(&root).unwrap();
-    let registry = Registry::load(&root).unwrap();
     let store = Store::of_workspace(&root);
-    let judge = || {
-        done::judge(
-            &xtask::key::Snapshot::disk(&root).unwrap(),
-            &manifest,
-            &registry,
-            &store,
-            Some("HEAD"),
-            &[],
-        )
-        .unwrap()
-    };
-    let fresh_rest = || {
-        for instrument in done::FRESH {
-            if instrument == "test" || instrument == "phpt" || instrument == "port-map" {
-                continue;
-            }
-            let mut reading = Reading::for_scope(
-                instrument,
-                "php_heap",
-                &manifest,
-                &xtask::key::Snapshot::disk(&root).unwrap(),
-            )
-            .unwrap();
-            if xtask::reading::UNDER_RECIPE.contains(&instrument) {
-                reading = reading.under(&manifest.pin);
-            }
-            reading.status = Status::Pass;
-            reading.message = "php_heap: measured".to_owned();
-            store.record(&[reading]).unwrap();
-        }
-    };
+    let judge = || judged(&root, &manifest, &store);
+    let fresh_rest = || fresh_but_test(&root, &manifest, &store);
 
     fresh_rest();
     let readings = test::run(&root, &manifest, &[]).unwrap();
@@ -243,6 +214,98 @@ fn done_is_red_for_a_crate_with_a_failing_test_and_green_once_it_passes() {
     store.record(&readings).unwrap();
     let verdict = judge();
     assert!(verdict.met(), "{verdict:#?}");
+}
+
+/// What `done` says of `root`'s changes since `HEAD`.
+fn judged(root: &Path, manifest: &Manifest, store: &Store) -> done::Verdict {
+    let registry = Registry::load(root).unwrap();
+    let snapshot = xtask::key::Snapshot::disk(root).unwrap();
+    done::judge(&snapshot, manifest, &registry, store, Some("HEAD"), &[]).unwrap()
+}
+
+/// A fresh passing reading of `php_heap` for each instrument condition 1
+/// asks but `test`, so the test reading is the one `done` judges.
+fn fresh_but_test(root: &Path, manifest: &Manifest, store: &Store) {
+    for instrument in done::FRESH {
+        if instrument == "test" || instrument == "phpt" || instrument == "port-map" {
+            continue;
+        }
+        let snapshot = xtask::key::Snapshot::disk(root).unwrap();
+        let mut reading = Reading::for_scope(instrument, "php_heap", manifest, &snapshot).unwrap();
+        if xtask::reading::UNDER_RECIPE.contains(&instrument) {
+            reading = reading.under(&manifest.pin);
+        }
+        reading.status = Status::Pass;
+        reading.message = String::from("php_heap: measured");
+        store.record(&[reading]).unwrap();
+    }
+}
+
+/// The fixture's crate with three tests, two of which skip for a fact
+/// the machine did not promise, one of them twice, each line written to
+/// the file the variable names as `Promise::or_skip` and
+/// `MysqlServer::with` write it.
+const SKIPS: &str = r#"#[cfg(test)]
+mod tests {
+    fn skip() {
+        use std::io::Write as _;
+        let file = std::env::var_os("VARIABLE").unwrap();
+        let test = std::thread::current().name().unwrap().to_owned();
+        let mut out = std::fs::OpenOptions::new().create(true).append(true).open(file).unwrap();
+        out.write_all(format!("{test}\tmysql\n").as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn a() {
+        skip();
+        skip();
+    }
+
+    #[test]
+    fn b() {
+        skip();
+    }
+
+    #[test]
+    fn c() {}
+}
+"#;
+
+/// A reading counts the tests that skipped for a fact the machine did
+/// not promise, each once, says how many in its message, and `done`
+/// notes the number beside the passing reading (#3085).
+#[test]
+fn a_reading_counts_the_tests_that_skipped_and_done_notes_them() {
+    let root = scratch("test-skipped");
+    let lib = root.join("crates/php_heap/src/lib.rs");
+    std::fs::write(&lib, SKIPS.replace("VARIABLE", SKIPPED_VARIABLE)).unwrap();
+    let root = committed(root);
+    std::fs::write(
+        &lib,
+        format!("{SKIPS}\n/// Changed.\npub fn two() {{}}\n").replace("VARIABLE", SKIPPED_VARIABLE),
+    )
+    .unwrap();
+    let manifest = Manifest::load(&root).unwrap();
+    let store = Store::of_workspace(&root);
+    fresh_but_test(&root, &manifest, &store);
+    let readings = test::run(&root, &manifest, &[]).unwrap();
+    assert_eq!(readings[0].status, Status::Pass, "{readings:#?}");
+    assert_eq!(int(&readings[0], "passed"), 3, "{readings:#?}");
+    assert_eq!(int(&readings[0], "skipped_unpromised"), 2, "{readings:#?}");
+    assert_eq!(
+        readings[0].message,
+        "php_heap: 3 tests passed, 2 of them skipped for a fact this machine did not promise"
+    );
+    store.record(&readings).unwrap();
+    let verdict = judged(&root, &manifest, &store);
+    assert!(verdict.met(), "{verdict:#?}");
+    assert!(
+        verdict.notes.contains(
+            &"test: php_heap passed with 2 tests skipped for a fact this machine did not promise"
+                .to_owned()
+        ),
+        "{verdict:#?}"
+    );
 }
 
 /// An integration test of the fixture's crate that writes when it ran,

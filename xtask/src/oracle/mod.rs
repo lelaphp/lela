@@ -78,6 +78,14 @@ pub const TREE_VARIABLE: &str = "TEST_PHP_SRCDIR";
 /// `xtask status --section oracle` and sets it under that name (#36).
 pub const PROMISE_VARIABLE: &str = "XTASK_PROMISED";
 
+/// The environment variable `xtask test` sets for each test executable it
+/// runs, to a file of that executable's own (#3085): a test that skips
+/// for a fact this machine did not promise appends `<test>\t<word>` to
+/// it, the test named after the thread libtest runs it on, so the reading
+/// counts the tests that skipped. Unset, as under a bare `cargo test`,
+/// nothing is written. `MysqlServer::with` spells the name too.
+pub const SKIPPED_VARIABLE: &str = "XTASK_SKIPPED";
+
 /// One fact a machine can promise to have: the pin's tree or binary, or
 /// the `MySQL` server. What a guarded test asks through [`Promise::or_skip`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,10 +118,35 @@ impl Promise {
     /// otherwise `None` after saying so on stderr, as the tests skip
     /// today, unless this machine promised the fact through
     /// [`PROMISE_VARIABLE`], in which case the error names what was
-    /// looked for and the promise. Reads the variable off the process;
-    /// [`Promised::or_skip`] is the same decision over a value handed in.
+    /// looked for and the promise. Reads the variable off the process,
+    /// and a skip is written where [`SKIPPED_VARIABLE`] names a file;
+    /// [`Promised::or_skip`] is the same decision over a value handed in,
+    /// which writes none, so a test of the decision is no skip.
     pub fn or_skip<T>(self, found: Result<T>) -> Result<Option<T>> {
-        Promised::load()?.or_skip(self, found)
+        let found = Promised::load()?.or_skip(self, found)?;
+        if let (None, Some(file)) = (&found, std::env::var_os(SKIPPED_VARIABLE)) {
+            self.skipped(Path::new(&file))?;
+        }
+        Ok(found)
+    }
+
+    /// This fact's skip, appended to `file` as one line, `<test>\t<word>`:
+    /// the test is the name libtest gives the thread it runs on, and a
+    /// thread the test started has none, so its skip is named by the
+    /// thread's id and counts apart from its test's, a skip counted twice
+    /// rather than one lost.
+    fn skipped(self, file: &Path) -> Result<()> {
+        let thread = thread::current();
+        let test = thread
+            .name()
+            .map_or_else(|| format!("{:?}", thread.id()), str::to_owned);
+        let line = format!("{test}\t{}\n", self.word());
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(file)
+            .and_then(|mut out| out.write_all(line.as_bytes()))
+            .with_context(|| format!("writing the skip of {test} to {}", file.display()))
     }
 }
 
@@ -2330,6 +2363,30 @@ pub(crate) fn align(
     }
     steps.extend((0..tail).map(|n| Step::Both(expected - tail + n, actual - tail + n)));
     steps
+}
+
+#[cfg(test)]
+mod skipped_tests {
+    use super::Promise;
+    use crate::scratch::Tree;
+
+    /// A skip is the test's line, named as libtest names its thread, and a
+    /// thread the test started is named by its id.
+    #[test]
+    fn a_skip_is_a_line_naming_the_test_and_the_word() {
+        let tree = Tree::new("oracle-skipped").unwrap();
+        let file = tree.join("skipped");
+        Promise::Tree.skipped(&file).unwrap();
+        let apart = std::thread::spawn(move || Promise::Mysql.skipped(&file));
+        apart.join().unwrap().unwrap();
+        let text = std::fs::read_to_string(tree.join("skipped")).unwrap();
+        let (own, started) = text.split_once('\n').unwrap();
+        assert_eq!(
+            own,
+            "oracle::skipped_tests::a_skip_is_a_line_naming_the_test_and_the_word\ttree"
+        );
+        assert!(started.starts_with("ThreadId(") && started.ends_with(")\tmysql\n"));
+    }
 }
 
 #[cfg(test)]
