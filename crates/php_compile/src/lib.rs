@@ -7432,11 +7432,9 @@ $f = fn (): float => 1.5;
             let hook = property
                 .hooks
                 .as_ref()
-                .and_then(|hooks| hooks.of(body.kind));
-            assert!(hook.is_some(), "a hook's body has its declaration");
-            if let Some(hook) = hook {
-                take(&hook.function, &body.body);
-            }
+                .and_then(|hooks| hooks.of(body.kind))
+                .expect("a hook's body has its declaration");
+            take(&hook.function, &body.body);
         }
         for (name, declared, carried) in &held {
             assert_eq!(declared, carried, "{name}");
@@ -7978,7 +7976,9 @@ $f = fn (): float => 1.5;
         ];
         for (source, oplines) in cases {
             let dumped = dump_of(source);
-            let main = dumped.split("\n\nf:").next().expect("the main op array");
+            let (main, _) = dumped
+                .split_once("\n\nf:")
+                .expect("the main op array, then f's");
             assert!(
                 main.trim_end().ends_with(oplines.trim_end()),
                 "{}\n{dumped}",
