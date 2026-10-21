@@ -845,7 +845,16 @@ impl<'u> Parts<'u> {
                 std::iter::once(Cow::Borrowed(&*property.name.0)).chain(mangled)
             })
         });
-        vars.chain(properties)
+        // A class constant's and an enum case's, the `constants_table`
+        // key `zend_compile_class_const_decl` and `zend_compile_enum_case`
+        // intern (`zval_make_interned_string`).
+        let constants = (self.classes.iter()).flat_map(|class| {
+            class
+                .constants
+                .iter()
+                .map(|constant| Cow::Borrowed(&*constant.name.0))
+        });
+        vars.chain(properties).chain(constants)
     }
 }
 
@@ -883,9 +892,10 @@ pub fn intern_names(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> 
 /// The names php's compile interns into whichever home it compiles
 /// into, an `eval`'s among them: each op array's variables, which
 /// `zend_try_compile_cv` interns (`zval_make_interned_string`) before
-/// `lookup_cv` keeps them in `op_array->vars`, and each declared
+/// `lookup_cv` keeps them in `op_array->vars`, each declared
 /// property's name with the key `zend_declare_typed_property` interns
-/// as `prop_info->name`, mangled for a protected or a private one. A
+/// as `prop_info->name`, mangled for a protected or a private one, and
+/// each class constant's and enum case's, its `constants_table` key. A
 /// symbol table keys a variable by its CV's name and an object's table
 /// a declared row by its key, so neither costs a read anything. An
 /// `eval`'d variable's name is the request's from its compile on:
@@ -897,6 +907,20 @@ pub fn intern_names(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> 
 /// ```expect
 /// 32
 /// 0
+/// ```
+///
+/// A class constant's name is one string of the class's, which a
+/// one-byte name, php's interned character, is not:
+///
+/// ```php
+/// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+/// m('class W {} enum V { case A; }');
+/// echo m('class Z1 { const ABCD = 1; }') - m('class Z2 { const A = 1; }'), "\n";
+/// echo m('enum Z3 { case ABCD; }') - m('enum Z4 { case A; }'), "\n";
+/// ```
+/// ```expect regime=jit-off
+/// 32
+/// 32
 /// ```
 pub fn intern_declared(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> {
     Parts::of(unit).intern_declared(strings)
@@ -927,9 +951,10 @@ pub fn op_array_names(unit: &Unit) -> impl Iterator<Item = &[u8]> {
 /// The names `unit`'s declarations are read by beside their op arrays'
 /// ([`op_array_names`]), as [`intern_declared`] interns them after the
 /// main op array's variables: each declared function's, closure's,
-/// method's and hook's variables (`op_array->vars`), and each declared
+/// method's and hook's variables (`op_array->vars`), each declared
 /// property's, with the key `prop_info->name` is under too, mangled for
-/// a protected or a private one ([`mangling`]).
+/// a protected or a private one ([`mangling`]), and each class
+/// constant's and enum case's.
 pub fn declared_names(unit: &Unit) -> impl Iterator<Item = Cow<'_, [u8]>> {
     Parts::of(unit).declared_names()
 }
