@@ -5,13 +5,15 @@
 //! engine's below them; one whose top bit is set names a row of the
 //! request's own.
 //!
-//! Each kind of row is a [`Column`]: segments that each double the one
-//! before, laid down on first use and never moved, of slots that are
-//! each written once. A publisher takes a number with [`Column::reserve`]
-//! before it builds the row, so rows that name each other (a class and
-//! its methods) are built knowing each other's numbers, and fills it
-//! with [`Column::fill`]. A request reads a row with [`Column::get`]: two
-//! acquire loads and nothing taken, as php reads a `zend_class_entry *` from
+//! Each kind of row is a [`Column`]: spans of chunks of one length,
+//! each laid down on first use and never moved, of slots that are each
+//! written once. A publisher takes a number with
+//! [`Column::reserve`] before it builds the row, so rows that name each
+//! other (a class and its methods) are built knowing each other's
+//! numbers, and fills it with [`Column::fill`]. A request reads a row
+//! with [`Column::get`]: the number's high bits held to the spans, its
+//! middle bits a chunk in the span and its low bits a slot in the
+//! chunk, with no bound to hold, three acquire loads and nothing taken, as php reads a `zend_class_entry *` from
 //! shared memory. A row is found once it is filled and only then, and a
 //! publisher hands a number on only after its row is filled, so whatever
 //! carried the number to a request (the preload's tables, the unit
@@ -39,7 +41,7 @@
 //! preloading, restored to by `accel_activate`'s restart).
 //!
 //! Nothing here is `unsafe`: the slots are `OnceLock`s, so a row is
-//! `Sync` where its type is, and the segments never reallocate, so a
+//! `Sync` where its type is, and the chunks never reallocate, so a
 //! row borrowed from the arena lives as long as the arena.
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -50,44 +52,73 @@ use crate::api::request::{Declared, UserFunction};
 use crate::api::values::ClassId;
 use php_link::LinkedClass;
 
-/// How many slots a column's first segment holds; each segment after
-/// holds twice the one before.
-const FIRST: usize = 64;
+/// The rows of one chunk, `1 << CHUNK_BITS` of them: a number's low
+/// bits are its slot in the chunk.
+const CHUNK_BITS: u32 = 9;
+const CHUNK: usize = 1 << CHUNK_BITS;
 
-/// How many segments a column has room for: 24 hold
-/// `FIRST * ((1 << 24) - 1)` rows, past the `1 << 29` a function's
-/// number can name; a class's could name more, and its column is held
-/// to what the segments hold ([`Column::below`]).
-const SEGMENTS: usize = 24;
+/// The chunks of one span, `1 << SPAN_BITS` of them: a number's middle
+/// bits are its chunk's place in the span.
+const SPAN_BITS: u32 = 8;
+const SPAN: usize = 1 << SPAN_BITS;
+
+/// The spans a column holds, so the most rows it holds is
+/// `SPANS * SPAN * CHUNK`, eight million: past the classes and methods
+/// any program publishes into one epoch, and past the map pointers the
+/// engine numbers op arrays by (`tier::published::Funcs`), which every
+/// publication of an epoch advances, a unit published again after its
+/// file changed and a trait's copied method among them; a column whose
+/// numbers could name more is held to it ([`Column::below`]). A number's
+/// high bits are its span. The spans are the column's own, so a column
+/// is made with nothing laid but their sixty-four empty cells, and a
+/// span and a chunk are each laid where a row first needs them: a
+/// directory of every chunk laid whole where the column was made put a
+/// million instructions and a megabyte of written pages on every
+/// engine's start.
+const SPANS: usize = 1 << 6;
+
+/// One chunk of a column, laid down on first use and never moved: a
+/// fixed-length array, so a number's slot in it is its low bits with no
+/// bound to test.
+type Chunk<T> = Box<[OnceLock<T>; CHUNK]>;
+
+/// One span of a column's chunks, laid down on first use and never
+/// moved, a fixed-length array as a chunk is.
+type Span<T> = Box<[OnceLock<Chunk<T>>; SPAN]>;
 
 /// One kind of row of the arena, numbered from zero in the order its
 /// numbers were reserved.
 pub(crate) struct Column<T> {
-    segments: [OnceLock<Box<[OnceLock<T>]>>; SEGMENTS],
+    /// The spans, each laid on first use.
+    spans: [OnceLock<Span<T>>; SPANS],
     /// How many numbers were reserved, which is the next one's.
     reserved: AtomicU32,
     /// The number no row reaches.
     limit: u32,
 }
 
-/// The segment and the slot in it of the row at `at`: segment `k`
-/// holds the `FIRST << k` rows from `FIRST * ((1 << k) - 1)` on.
-fn locate(at: u32) -> Option<(usize, usize)> {
-    let biased = usize::try_from(at).ok()?.checked_add(FIRST)?;
-    let top = usize::try_from(usize::BITS - 1 - biased.leading_zeros()).ok()?;
-    let segment = top.checked_sub(usize::try_from(FIRST.trailing_zeros()).ok()?)?;
-    let offset = biased.checked_sub(FIRST.checked_shl(u32::try_from(segment).ok()?)?)?;
-    Some((segment, offset))
+/// What `cell` holds, laid where it held nothing: `N` empty cells made
+/// on the heap, never built on the stack, as the fixed-length array a
+/// span or a chunk is, and made before they are offered, so a thread
+/// that laid the cell first keeps its own and these are dropped. The
+/// conversion from the `Vec` holds, its length being `N`; where it would
+/// not, the fill that asked fails rather than panics.
+fn lay<U, const N: usize>(cell: &OnceLock<Box<[OnceLock<U>; N]>>) -> Option<&[OnceLock<U>; N]> {
+    if let Some(held) = cell.get() {
+        return Some(held);
+    }
+    let cells: Vec<OnceLock<U>> = (0..N).map(|_| OnceLock::new()).collect();
+    let fresh = cells.try_into().ok()?;
+    Some(cell.get_or_init(|| fresh))
 }
 
 impl<T> Column<T> {
     /// An empty column whose numbers stay below `limit`, and below the
-    /// rows its segments hold.
+    /// rows its spans hold.
     pub(crate) fn below(limit: u32) -> Column<T> {
-        let held = FIRST.saturating_mul((1 << SEGMENTS) - 1);
-        let held = u32::try_from(held).unwrap_or(u32::MAX);
+        let held = u32::try_from(SPANS * SPAN * CHUNK).unwrap_or(u32::MAX);
         Column {
-            segments: std::array::from_fn(|_| OnceLock::new()),
+            spans: std::array::from_fn(|_| OnceLock::new()),
             reserved: AtomicU32::new(0),
             limit: limit.min(held),
         }
@@ -110,21 +141,17 @@ impl<T> Column<T> {
         if at >= self.reserved() {
             return Err(row);
         }
-        let Some((segment, offset)) = locate(at) else {
+        let Some(span) = self
+            .spans
+            .get((at >> (CHUNK_BITS + SPAN_BITS)) as usize)
+            .and_then(lay)
+        else {
             return Err(row);
         };
-        let Some(segment) = self.segments.get(segment).map(|laid| {
-            laid.get_or_init(|| {
-                let slots = FIRST << segment;
-                (0..slots).map(|_| OnceLock::new()).collect()
-            })
-        }) else {
+        let Some(chunk) = lay(&span[(at >> CHUNK_BITS) as usize & (SPAN - 1)]) else {
             return Err(row);
         };
-        match segment.get(offset) {
-            Some(slot) => slot.set(row),
-            None => Err(row),
-        }
+        chunk[at as usize & (CHUNK - 1)].set(row)
     }
 
     /// The row at a number its publisher chose rather than reserved,
@@ -141,8 +168,12 @@ impl<T> Column<T> {
 
     /// The row at `at`, where it was filled.
     pub(crate) fn get(&self, at: u32) -> Option<&T> {
-        let (segment, offset) = locate(at)?;
-        self.segments.get(segment)?.get()?.get(offset)?.get()
+        let span = self
+            .spans
+            .get((at >> (CHUNK_BITS + SPAN_BITS)) as usize)?
+            .get()?;
+        let chunk = span[(at >> CHUNK_BITS) as usize & (SPAN - 1)].get()?;
+        chunk[at as usize & (CHUNK - 1)].get()
     }
 
     /// How many numbers were reserved: every row a request can have been
@@ -514,7 +545,7 @@ impl Epochs {
 mod tests {
     use std::sync::Arc;
 
-    use super::{Arena, Column, Epochs, FIRST, locate};
+    use super::{Arena, CHUNK, Column, Epochs, SPAN, SPANS};
     use crate::api::call::ClassNative;
     use crate::api::values::ClassId;
     use crate::enums::EnumMethod;
@@ -580,17 +611,33 @@ mod tests {
         );
     }
 
+    /// A number's low bits are its slot in a chunk, its middle bits the
+    /// chunk's place in a span and its high bits the span's: rows on
+    /// either side of a chunk's edge and of a span's are each their own,
+    /// a column is held to the rows its spans hold, and a number past
+    /// them names nothing.
     #[test]
-    fn each_number_has_its_own_slot_and_segments_double() {
-        assert_eq!(locate(0), Some((0, 0)));
-        assert_eq!(locate(63), Some((0, 63)));
-        assert_eq!(locate(64), Some((1, 0)));
-        assert_eq!(locate(191), Some((1, 127)));
-        assert_eq!(locate(192), Some((2, 0)));
-        let last = (1u32 << 29) - 1;
-        let (segment, offset) = locate(last).unwrap_or((usize::MAX, 0));
-        assert!(segment < super::SEGMENTS);
-        assert!(offset < FIRST << segment);
+    fn each_number_has_its_own_slot_across_the_chunks_and_spans() {
+        let column: Column<u32> = Column::below(u32::MAX);
+        let held = u32::try_from(SPANS * SPAN * CHUNK).unwrap_or(u32::MAX);
+        assert_eq!(column.limit, held, "held to the spans");
+        let chunk = u32::try_from(CHUNK).unwrap_or(u32::MAX);
+        let span = u32::try_from(SPAN * CHUNK).unwrap_or(u32::MAX);
+        let edges = [0, chunk - 1, chunk, span - 1, span];
+        assert_eq!(column.reserve(span + 1), Some(0));
+        for at in edges {
+            assert_eq!(column.fill(at, at + 7), Ok(()));
+        }
+        for at in edges {
+            assert_eq!(column.get(at), Some(&(at + 7)));
+        }
+        assert_eq!(column.get(1), None, "reserved, never filled");
+        assert_eq!(column.get(held), None);
+        assert_eq!(column.get(u32::MAX), None);
+        assert!(
+            column.spans.iter().skip(2).all(|span| span.get().is_none()),
+            "laid where a row needs it"
+        );
     }
 
     #[test]

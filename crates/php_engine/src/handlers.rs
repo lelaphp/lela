@@ -8207,17 +8207,20 @@ fn inline_place(
     slot: CacheSlot,
     object: php_heap::Obj,
     write: bool,
-) -> Option<(php_heap::ZvalRef, bool)> {
+) -> Option<(php_heap::ZvalRef, exec::SlotType)> {
     if b.kind() != OperandKind::Const {
         let name = crate::operand::deref(b.read(req.slots_mut(frame), code, op.op2)).as_str()?;
         return computed_place(req, object, name, write);
     }
     let class = crate::api::values::ClassId(object.class());
     match req.cached_property(frame, slot, class)? {
-        exec::PropertyOffset::Declared { slot, typed } => Some((object.slot_ref(slot)?, typed)),
+        exec::PropertyOffset::Declared { slot, ty } => Some((object.slot_ref(slot)?, ty)),
         exec::PropertyOffset::Dynamic => {
             let name = code.literals.get(op.op2 as usize)?.as_str()?;
-            Some((dynamic_bucket(object, name, write)?, false))
+            Some((
+                dynamic_bucket(object, name, write)?,
+                exec::SlotType::UNTYPED,
+            ))
         }
     }
 }
@@ -8235,13 +8238,14 @@ fn computed_place(
     object: php_heap::Obj,
     name: php_heap::Str,
     write: bool,
-) -> Option<(php_heap::ZvalRef, bool)> {
+) -> Option<(php_heap::ZvalRef, exec::SlotType)> {
     use crate::api::request::PropertyNames;
     let class = crate::api::values::ClassId(object.class());
     match req.property_names(class)? {
-        PropertyNames::Dynamic if !Request::bad_property_name(name.bytes()) => {
-            Some((dynamic_bucket(object, name, write)?, false))
-        }
+        PropertyNames::Dynamic if !Request::bad_property_name(name.bytes()) => Some((
+            dynamic_bucket(object, name, write)?,
+            exec::SlotType::UNTYPED,
+        )),
         PropertyNames::Declared => declared_place(req, object, name, write),
         PropertyNames::Dynamic | PropertyNames::Own => None,
     }
@@ -8257,11 +8261,14 @@ fn declared_place(
     object: php_heap::Obj,
     name: php_heap::Str,
     write: bool,
-) -> Option<(php_heap::ZvalRef, bool)> {
+) -> Option<(php_heap::ZvalRef, exec::SlotType)> {
     let class = crate::api::values::ClassId(object.class());
     match req.declared_offset(class, name)? {
-        exec::PropertyOffset::Declared { slot, typed } => Some((object.slot_ref(slot)?, typed)),
-        exec::PropertyOffset::Dynamic => Some((dynamic_bucket(object, name, write)?, false)),
+        exec::PropertyOffset::Declared { slot, ty } => Some((object.slot_ref(slot)?, ty)),
+        exec::PropertyOffset::Dynamic => Some((
+            dynamic_bucket(object, name, write)?,
+            exec::SlotType::UNTYPED,
+        )),
     }
 }
 
@@ -8603,8 +8610,35 @@ fn fetched_obj_place(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Op
 /// `zend_std_get_property_ptr_ptr`'s dynamic one,
 /// `Z/Zend/zend_execute.c:3540-3560`): the place [`inline_place`] names,
 /// where it holds a value, left in the `VAR` as an `IS_INDIRECT` for the
-/// write after it. `None` as [`inline_fetch_obj_r`]'s, and for a typed slot, whose
-/// fetch flags are [`fetch_flags`]', and a `VAR` holding an owner.
+/// write after it, a typed slot's as an untyped one's where the fetch
+/// carries neither `ZEND_FETCH_REF` nor `ZEND_FETCH_DIM_WRITE`. `None` as
+/// [`inline_fetch_obj_r`]'s, for a typed slot under either, which
+/// [`fetch_flags`] serves, for a guarded one
+/// ([`exec::SlotType::guarded`]), whose write reads the scope and the
+/// slot's flags, and for a `VAR` holding an owner.
+///
+/// ```php
+/// class D { public $x = 0; }
+/// class C { public D $d; public ?array $a = []; public int $i = 1; public readonly D $r;
+///     function __construct() { $this->d = new D; $this->r = new D; } }
+/// function f($o, $q) { for ($k = 0; $k < 2; $k++) { $o->d->x++; $o->$q->x += 2; $o->r->x = 5; $o->a[] = $k; } }
+/// $o = new C; $d = 'd'; f($o, $d);
+/// var_dump($o->d->x, $o->r->x, $o->a);
+/// $r = &$o->i; try { $r = "z"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $o->i[] = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(6)
+/// int(5)
+/// array(2) {
+///   [0]=>
+///   int(0)
+///   [1]=>
+///   int(1)
+/// }
+/// Cannot assign string to reference held by property C::$i of type int
+/// Cannot use a scalar value as an array
+/// ```
 #[inline(always)] // as `inline_fetch_obj_r`
 #[allow(clippy::inline_always)]
 fn inline_fetch_obj_w(
@@ -8615,7 +8649,7 @@ fn inline_fetch_obj_w(
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
     let object = inline_receiver(req, frame, code, op, a, b)?;
-    let (place, typed) = inline_place(
+    let (place, ty) = inline_place(
         req,
         (frame, code, op),
         b,
@@ -8623,7 +8657,12 @@ fn inline_fetch_obj_w(
         object,
         true,
     )?;
-    if typed || place.read().is_undef() {
+    // `zend_fetch_property_address`'s cached arm: a typed slot with no
+    // fetch flag is the `IS_INDIRECT` an untyped one is, and only the
+    // flags (`zend_handle_fetch_obj_flags`) and a guarded property read
+    // `prop_info` further.
+    let placed = !ty.typed() || (!ty.guarded() && FetchFlag::of(op.extended_value).is_none());
+    if !placed || place.read().is_undef() {
         return None;
     }
     let out = req
@@ -13373,11 +13412,15 @@ pub(crate) fn assign_obj<
 /// `zend_assign_to_variable` takes it, a constant copied, a temporary
 /// moved and a CV copied with one more owner, and the temporary takes it
 /// too under `RETURN_VALUE_USED`; nothing is given up, so nothing runs.
-/// `None`, with nothing touched, as [`inline_fetch_obj_r`]'s, and for a
-/// typed slot, which `zend_assign_to_typed_prop` holds to its type, its
-/// readonly and its set visibility among it, a slot holding an owner or
-/// a reference, a value that is a reference or nothing written, and a
-/// temporary holding an owner.
+/// A typed slot takes a value its type holds as it stands
+/// ([`exec::SlotType::admits`]) the same way, which is
+/// `zend_assign_to_typed_prop` where `i_zend_check_property_type`'s first
+/// test passes. `None`, with nothing touched, as [`inline_fetch_obj_r`]'s,
+/// for a value a typed slot's type does not hold as it stands, which
+/// the kernel's typed write converts or refuses, a guarded slot, whose
+/// readonly and set visibility the kernel holds the write to, a slot
+/// holding an owner or a reference, a value that is a reference or
+/// nothing written, and a temporary holding an owner.
 ///
 /// ```php
 /// class C { public $p = 1; public $q; private $r = 0;
@@ -13398,6 +13441,35 @@ pub(crate) fn assign_obj<
 /// }
 /// string(2) "ss"
 /// ```
+///
+/// Over typed slots, by a constant name and a computed one, a value the
+/// type holds lands in place and the rest is the kernel's: a coercion, a
+/// `TypeError`, a readonly property and a `private(set)` one:
+///
+/// ```php
+/// class C { public int $i = 0; public float $f = 0.5; public int|string $u = 1; public ?C $c = null; public readonly int $r; public private(set) int $p = 0;
+///     function __construct() { $this->r = 1; } function setP($v) { $this->p = $v; } }
+/// function f($o, $q) { for ($n = 0; $n < 2; $n++) { $o->i = $n; $o->$q = $n + 10; $o->f = 2.5; $x = $o->u = "s"; $o->c = $o; } return $x; }
+/// $o = new C; $i = 'i';
+/// echo f($o, $i), " ", $o->i, " ", $o->f, " ", $o->u, " ", $o->c === $o ? "self" : "other", "\n";
+/// $o->i = "7"; $o->$i = 8.0; $o->f = 3; var_dump($o->i, $o->f);
+/// try { $o->i = "x"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $o->$i = []; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $o->r = 2; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { $o->p = 2; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $o->setP(3); var_dump($o->i, $o->p);
+/// ```
+/// ```expect
+/// s 11 2.5 s self
+/// int(8)
+/// float(3)
+/// Cannot assign string to property C::$i of type int
+/// Cannot assign array to property C::$i of type int
+/// Cannot modify readonly property C::$r
+/// Cannot modify private(set) property C::$p from global scope
+/// int(8)
+/// int(3)
+/// ```
 #[inline(always)] // as `inline_fetch_obj_r`
 #[allow(clippy::inline_always)]
 fn inline_assign_obj(
@@ -13409,7 +13481,7 @@ fn inline_assign_obj(
     (a, b, data): (impl Operand, impl Operand, impl Operand),
 ) -> Option<Edge> {
     let object = inline_receiver(req, frame, code, op, a, b)?;
-    let (place, typed) = inline_place(
+    let (place, ty) = inline_place(
         req,
         (frame, code, op),
         b,
@@ -13418,20 +13490,23 @@ fn inline_assign_obj(
         true,
     )?;
     let held = place.read();
-    if typed || held.is_undef() || held.is_refcounted() {
+    if held.is_undef() || held.is_refcounted() {
         return None;
     }
-    let z = data_value(req, frame, code, op, at, data)?;
+    let z = data_value(req, frame, code, op, (at, data), ty)?;
     place.write(z);
     Some(Ok(Next::jump(at.saturating_add(2))))
 }
 
-/// The `OP_DATA` value the inline path of `ASSIGN_OBJ` takes, by
-/// [`taken_value`]'s rule: the `OP_DATA` opline after `at`,
-/// whose `op1` is of the kind `data` is, as the assignment's handler was
-/// resolved over it where its unit was published (`php_unit::Handler`),
-/// php's `_OP_DATA_CV` and the rest, so neither its opcode nor its kind
-/// is tested here.
+/// The `OP_DATA` value the inline path of `ASSIGN_OBJ` takes into a
+/// slot that holds `ty`, by [`taken_value`]'s rule: the `OP_DATA`
+/// opline after `at`, whose `op1` is of the kind `data` is, as the
+/// assignment's handler was resolved over it where its unit was
+/// published (`php_unit::Handler`), php's `_OP_DATA_CV` and the rest, so
+/// neither its opcode nor its kind is tested here. None, with nothing
+/// taken, for a value the slot's type does not hold as it stands
+/// ([`exec::SlotType::admits`]), which the kernel's typed write
+/// converts or refuses.
 #[inline(always)] // as `inline_fetch_dim_r`
 #[allow(clippy::inline_always)]
 fn data_value(
@@ -13439,11 +13514,16 @@ fn data_value(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
-    at: u32,
-    data: impl Operand,
+    (at, data): (u32, impl Operand),
+    ty: exec::SlotType,
 ) -> Option<Zval> {
     let field = exec::opline_at(code, at.saturating_add(1))?.op1;
-    taken_value(req.slots_mut(frame), code, op, data, field)
+    let slots = req.slots_mut(frame);
+    let taking = taking(slots, code, op, data, field)?;
+    if !ty.admits(taking.z) {
+        return None;
+    }
+    taking.take(slots)
 }
 
 /// What [`taken_value`] takes, found with nothing touched: the zval,
@@ -16235,8 +16315,10 @@ pub(crate) fn assign_obj_op<T: Tier>(
 /// one, under the ten operators [`inline::compound`] names, computed by
 /// [`inline::binary`] and written in place and, under
 /// `RETURN_VALUE_USED`, into the temporary. `None`, with nothing
-/// touched, as [`inline_fetch_obj_r`]'s, for a typed slot, and for every
-/// pair the rule leaves to the kernel.
+/// touched, as [`inline_fetch_obj_r`]'s, for a value a typed slot's
+/// type does not hold as it stands ([`exec::SlotType::admits`]), which
+/// `zend_binary_assign_op_typed_prop` converts or refuses in the kernel,
+/// for a guarded slot, and for every pair the rule leaves to the kernel.
 ///
 /// ```php
 /// class C { public $p = 1; }
@@ -16258,6 +16340,30 @@ pub(crate) fn assign_obj_op<T: Tier>(
 /// int(8)
 /// float(9.223372036854776E+18)
 /// ```
+///
+/// Over typed slots a value of a kind the type holds lands in place;
+/// an `int` that overflows, a division that makes a float of an `int`
+/// and a readonly property are the kernel's:
+///
+/// ```php
+/// class C { public int $i = 1; public float $f = 0.5; public int $m = PHP_INT_MAX; public readonly int $r;
+///     function __construct() { $this->r = 1; } }
+/// function f($o, $q) { for ($k = 0; $k < 2; $k++) { $o->i += 2; $o->$q *= 3; $o->f /= 2; $x = $o->$q -= 1; } return $x; }
+/// $o = new C; $i = 'i';
+/// var_dump(f($o, $i), $o->f);
+/// try { $o->m += 1; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// $o->i = 5; $o->$i /= 2; var_dump($o->i);
+/// try { $o->r += 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(29)
+/// float(0.125)
+/// Cannot assign float to property C::$m of type int
+///
+/// Deprecated: Implicit conversion from float 2.5 to int loses precision in %s on line 8
+/// int(2)
+/// Cannot modify readonly property C::$r
+/// ```
 fn inline_assign_obj_op(
     req: &mut Request,
     frame: FrameRef,
@@ -16271,14 +16377,14 @@ fn inline_assign_obj_op(
     // `CACHE_ADDR((opline+1)->extended_value)`: the operator is in the
     // opline's own field, so the slot is in the `OP_DATA`'s.
     let slot = CacheSlot(data.extended_value);
-    let (place, typed) = inline_place(req, (frame, code, op), b, slot, object, true)?;
-    if typed {
-        return None;
-    }
+    let (place, ty) = inline_place(req, (frame, code, op), b, slot, object, true)?;
     let slots = req.slots_mut(frame);
     // `get_op_data_zval_ptr_r`: php specialises no `OP_DATA` kind here.
     let value = ByKind(data.op1_type).read(slots, code, data.op1);
     let z = inline::binary(rule, place.read(), value)?;
+    if !ty.admits(z) {
+        return None;
+    }
     if op.out_type != OperandKind::Unused {
         write_owning_nothing(slots, op, z)?;
     }
@@ -17152,8 +17258,14 @@ fn incdec_obj(
 /// `POST_` twin over the place, `Z/Zend/zend_execute.c:2283`): the place
 /// [`inline_place`] names holding a number, stepped by
 /// [`inline::step`] in place, the value before or after it in the
-/// temporary. `None`, with nothing touched, as [`inline_fetch_obj_r`]'s,
-/// for a typed slot, and for anything that is no number.
+/// temporary, into a typed slot where its type holds the stepped value
+/// as it stands ([`exec::SlotType::admits`]), which is
+/// `zend_pre_incdec_property_zval`'s fast arm: a long stepped to a long,
+/// or a double to a double, is of the kind the slot held. `None`, with
+/// nothing touched, as [`inline_fetch_obj_r`]'s, for an `int` stepped
+/// past its limit into a float its type does not hold, which
+/// `zend_incdec_typed_prop` refuses in the kernel, for a guarded slot,
+/// and for anything that is no number.
 ///
 /// ```php
 /// class C { public $p = 1; }
@@ -17184,6 +17296,36 @@ fn incdec_obj(
 /// }
 /// float(9.223372036854776E+18)
 /// ```
+///
+/// Over typed slots, by a constant name and a computed one, the step
+/// lands in place while its kind is the type's; an `int` past its limit
+/// and a readonly property are the kernel's:
+///
+/// ```php
+/// class C { public int $i = 0; public float $f = 0.5; public int|float $n = PHP_INT_MAX; public int $m = PHP_INT_MAX; public readonly int $r;
+///     function __construct() { $this->r = 1; } }
+/// function f($o, $q) { for ($k = 0; $k < 2; $k++) { $o->i++; ++$o->$q; $o->f--; $a = $o->i++; $b = --$o->f; } return [$a, $b]; }
+/// $o = new C; $i = 'i'; $m = 'm';
+/// var_dump(f($o, $i), $o->n++, $o->n);
+/// try { $o->m++; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { --$o->$m; $o->$m += 2; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $o->r++; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($o->m);
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   int(5)
+///   [1]=>
+///   float(-3.5)
+/// }
+/// int(9223372036854775807)
+/// float(9.223372036854776E+18)
+/// Cannot increment property C::$m of type int past its maximal value
+/// Cannot assign float to property C::$m of type int
+/// Cannot modify readonly property C::$r
+/// int(9223372036854775806)
+/// ```
 fn inline_incdec_obj(
     req: &mut Request,
     frame: FrameRef,
@@ -17193,7 +17335,7 @@ fn inline_incdec_obj(
 ) -> Option<Edge> {
     let (a, b) = (ByKind(op.op1_type), ByKind(op.op2_type));
     let object = inline_receiver(req, frame, code, op, a, b)?;
-    let (place, typed) = inline_place(
+    let (place, ty) = inline_place(
         req,
         (frame, code, op),
         b,
@@ -17201,9 +17343,6 @@ fn inline_incdec_obj(
         object,
         true,
     )?;
-    if typed {
-        return None;
-    }
     let held = place.read();
     let arith = if step.increment {
         Arith::Add
@@ -17211,6 +17350,9 @@ fn inline_incdec_obj(
         Arith::Sub
     };
     let stepped = inline::step(arith, held)?;
+    if !ty.admits(stepped) {
+        return None;
+    }
     if op.out_type != OperandKind::Unused {
         let out = if step.post { held } else { stepped };
         write_owning_nothing(req.slots_mut(frame), op, out)?;

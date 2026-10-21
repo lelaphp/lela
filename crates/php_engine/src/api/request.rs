@@ -589,7 +589,7 @@ pub(crate) enum Opened {
 /// What `zend_get_property_offset` places a declared instance property
 /// by: the slot it sits in, the visibility a read is held to, the set
 /// visibility a write is held to where it has one of its own, and
-/// whether the property carries a type.
+/// what a write is held to of its type and flags.
 #[derive(Debug, Clone, Copy)]
 struct DeclaredSlot {
     slot: u32,
@@ -598,7 +598,8 @@ struct DeclaredSlot {
     declaring: ClassId,
     visibility: Visibility,
     set_visibility: Option<Visibility>,
-    typed: bool,
+    /// What a write to the slot is held to.
+    ty: crate::exec::SlotType,
     /// `ZEND_ACC_READONLY`, which the set visibility's refusal names.
     readonly: bool,
     /// `property_info->prototype->ce`: the class that first declared the
@@ -934,11 +935,16 @@ impl Placed {
 /// its property takes on the class's objects, `property_info->offset`,
 /// none for a `static` or a virtual one; and `ZEND_ACC_CHANGED`, whether
 /// a class above it declares a private property of the name, which is
-/// what makes a public property's placement read the scope.
+/// what makes a public property's placement read the scope; and what a
+/// write to the slot is held to, its type's mask and flags read once
+/// where the class's `properties_info` is built, as php's `prop_info`
+/// carries them (a kernel placement reads them off the declaration it
+/// placed, `DeclaredSlot`'s).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RowPlace {
     pub(crate) slot: Option<u32>,
     pub(crate) changed: bool,
+    pub(crate) ty: crate::exec::SlotType,
 }
 
 /// `zend_property_info *`: a declared property named by the class that
