@@ -26,10 +26,12 @@ use xtask::scratch::Tree;
 use xtask::witness::{self, Accept, Ask, Scope};
 
 mod common {
+    pub mod manifest;
     pub mod registry;
     pub mod repo;
     pub mod run;
 }
+use common::manifest::{Tracked, of_rows, pin};
 use common::registry::registry;
 use common::repo::{Repo, scratch_workspace};
 use common::run::xtask;
@@ -38,7 +40,8 @@ fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
 }
 
-fn manifest() -> Manifest {
+/// The tracked manifest, for the tests in [`tracked`] alone.
+fn tracked_manifest() -> Manifest {
     Manifest::load(workspace()).unwrap()
 }
 
@@ -58,7 +61,7 @@ fn fixture_at(kind: &str, name: &str) -> PathBuf {
 /// The tracked pin's binary, when it is on this machine; a failure where
 /// this machine promised the binary (#38).
 fn oracle() -> Option<PathBuf> {
-    let pin = manifest().pin;
+    let pin = pin();
     Promise::Oracle
         .or_skip(pin.oracle.file().map(Path::to_path_buf))
         .unwrap()
@@ -111,9 +114,7 @@ fn a_binary_where_the_engine_s_would_be(root: &Path) {
 /// the fixture under the tracked pin, and no rule, so nothing is counted
 /// as a kernel or native that needs a witness.
 fn fixture_manifest() -> Manifest {
-    let mut manifest = Manifest::named("ext/fixture");
-    manifest.pin = self::manifest().pin;
-    manifest
+    of_rows([Crate::named("ext/fixture")])
 }
 
 /// The one reading of `ext/fixture` over `root`.
@@ -289,7 +290,7 @@ fn file_and_item_narrow_the_run_and_accept_to_the_named_fences() {
 #[test]
 fn a_narrowed_run_writes_no_reading() {
     let root = scratch("narrow-store", &bare("one"));
-    let pin = manifest().oracle.pin;
+    let pin = "oracle.toml";
     fs::write(
         root.join("seams.toml"),
         format!(
@@ -549,70 +550,6 @@ fn a_capture_whose_two_runs_differ_writes_nothing_and_fails_the_crate() {
         before,
         "nothing is written"
     );
-}
-
-/// The negative control of the manifest's coverage rule (harness §4.1, §12
-/// item 4): the fixture named by the rule's id must fail under it, with the
-/// rule's own text at the failure. Coverage is a count over the source and
-/// needs no php, so the same reading comes with the pinned binary absent
-/// (#65), where the fixture's one witness is a snippet that did not run.
-#[test]
-fn a_kernel_or_native_without_a_witness_is_missing_and_fails_the_crate() {
-    let tracked = manifest();
-    let tracked = tracked
-        .rule_checked_by("witness-coverage")
-        .expect("the manifest carries the coverage rule");
-    let root = fixture(&tracked.id);
-    let manifest = Manifest::load(&root).unwrap();
-    let rule = manifest
-        .rule_checked_by("witness-coverage")
-        .expect("the fixture carries the rule");
-    for absent in [false, true] {
-        let mut manifest = manifest.clone();
-        if absent {
-            manifest.pin.oracle.path = root.join("no-php-here");
-        } else if oracle().is_none() {
-            continue;
-        }
-        let readings = witness::run(
-            &root,
-            &manifest,
-            &Registry::default(),
-            &Ask {
-                crates: vec!["ext/pcre".to_owned()],
-                staged: false,
-                ..Ask::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(readings.len(), 1, "{readings:#?}");
-        let reading = &readings[0];
-        assert_eq!(
-            reading.status,
-            Status::Fail,
-            "absent={absent}: {reading:#?}"
-        );
-        assert_eq!(reading.rule, tracked.id);
-        assert_eq!(count(reading, "missing"), 1);
-        assert_eq!(count(reading, "subjects"), 2);
-        let ran = i64::from(!absent);
-        assert_eq!(count(reading, "run"), ran, "{reading:#?}");
-        assert_eq!(count(reading, "not_run"), 1 - ran, "{reading:#?}");
-        assert!(
-            reading.message.contains("ctype_alpha"),
-            "{}",
-            reading.message
-        );
-        assert!(reading.message.contains(&rule.text), "{}", reading.message);
-        if absent {
-            assert!(
-                reading.message.contains("1 witness did not run")
-                    && reading.message.contains("no-php-here"),
-                "the failure says what did not run and where the pin looked: {}",
-                reading.message
-            );
-        }
-    }
 }
 
 /// The natives the attributes declare, read with the oracle away so the
@@ -1284,41 +1221,6 @@ fn a_crate_with_no_witness_under_a_drifted_oracle_refuses_the_run() {
     assert!(err.contains("the pin says"), "{err}");
 }
 
-/// A kernel without a witness fails the crate whether or not the oracle
-/// is here: the coverage half is measured without it, and nothing asserts
-/// a pin whose binary is not at the path (#60, #65).
-#[test]
-fn a_kernel_without_a_witness_fails_whether_or_not_the_oracle_is_here() {
-    let root = scratch("uncovered-absent", "pub fn native() {}\n");
-    let mut manifest = fixture_manifest();
-    manifest.rules = self::manifest().rules;
-    manifest.pin.oracle.path = root.join("no-php-here");
-    let rule = manifest
-        .rule_checked_by("witness-coverage")
-        .expect("the manifest carries the coverage rule")
-        .clone();
-    let readings = witness::run(
-        &root,
-        &manifest,
-        &registry(""),
-        &Ask {
-            crates: vec!["ext/fixture".to_owned()],
-            staged: false,
-            ..Ask::default()
-        },
-    )
-    .unwrap();
-    let reading = &readings[0];
-    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
-    assert_eq!(count(reading, "missing"), 1);
-    assert_eq!(count(reading, "run"), 0);
-    assert!(
-        reading.message.contains("native") && reading.message.contains(&rule.text),
-        "{}",
-        reading.message
-    );
-}
-
 #[test]
 fn a_block_the_grammar_cannot_read_fails_the_crate_where_it_stands() {
     let root = scratch(
@@ -1332,60 +1234,6 @@ fn a_block_the_grammar_cannot_read_fails_the_crate_where_it_stands() {
         reading.message.contains("ext/fixture/src/lib.rs:1"),
         "{}",
         reading.message
-    );
-}
-
-#[test]
-fn the_instrument_writes_one_reading_per_crate_and_names_an_unknown_one() {
-    let manifest = manifest();
-    let readings = witness::run(
-        workspace(),
-        &manifest,
-        &Registry::default(),
-        &Ask {
-            crates: vec!["php_proto".to_owned()],
-            staged: false,
-            ..Ask::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(readings.len(), 1, "{readings:#?}");
-    assert_eq!(readings[0].scope, "php_proto");
-
-    let unknown = witness::run(
-        workspace(),
-        &manifest,
-        &Registry::default(),
-        &Ask {
-            crates: vec!["php_nope".to_owned()],
-            staged: false,
-            ..Ask::default()
-        },
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(unknown.contains("php_nope"), "{unknown}");
-}
-
-#[test]
-fn the_harness_crate_carries_no_witness_of_its_own() {
-    let manifest = manifest();
-    let readings = witness::run(
-        workspace(),
-        &manifest,
-        &Registry::default(),
-        &Ask {
-            crates: vec!["xtask".to_owned()],
-            staged: false,
-            ..Ask::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(readings[0].status, Status::Skip);
-    assert!(
-        readings[0].message.contains("carries no witness"),
-        "{:#?}",
-        readings[0]
     );
 }
 
@@ -1406,9 +1254,10 @@ fn a_crate_whose_sources_cannot_be_read_fails_and_names_the_crate() {
     // grammar can read.
     fs::write(root.join("ext/pcre/src/lib.rs"), [0xff, 0xfe]).unwrap();
     Repo::init(&root).commit("scratch");
+    let manifest = of_rows([Crate::named("ext/pcre")]);
     let readings = witness::run(
         &root,
-        &manifest(),
+        &manifest,
         &Registry::default(),
         &Ask {
             crates: vec!["ext/pcre".to_owned()],
@@ -1470,11 +1319,9 @@ fn a_witness_that_kills_its_server_fails_alone_and_the_next_is_served() {
     let fixture = fixture_at("witness", "abort");
     let root = Tree::new("witness-abort").unwrap();
     scratch_workspace(workspace(), &root);
-    let pin = manifest().oracle.pin;
-    let seams = fs::read_to_string(fixture.join("seams.toml"))
-        .unwrap()
-        .replace("../../../../oracle.toml", &pin);
-    fs::write(root.join("seams.toml"), seams).unwrap();
+    Tracked::of(&fixture)
+        .with_pin(Path::new("oracle.toml"))
+        .write(&root);
     fs::create_dir_all(root.join("ext/pcre/src")).unwrap();
     for file in ["ext/pcre/Cargo.toml", "ext/pcre/src/lib.rs"] {
         fs::copy(fixture.join(file), root.join(file)).unwrap();
@@ -1501,4 +1348,167 @@ fn a_witness_that_kills_its_server_fails_alone_and_the_next_is_served() {
         1,
         "the witness after it is served and judged: {reading:#?}"
     );
+}
+
+/// The tests whose subject is the tracked workspace itself: each reads the
+/// `seams.toml`, `oracle.toml`, registry or sources standing in the
+/// workspace, so a person's edit there is what may turn one red (#3091).
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
+mod tracked {
+    use super::*;
+
+    /// The negative control of the manifest's coverage rule (harness §4.1, §12
+    /// item 4): the fixture named by the rule's id must fail under it, with the
+    /// rule's own text at the failure. Coverage is a count over the source and
+    /// needs no php, so the same reading comes with the pinned binary absent
+    /// (#65), where the fixture's one witness is a snippet that did not run.
+    #[test]
+    fn a_kernel_or_native_without_a_witness_is_missing_and_fails_the_crate() {
+        let tracked = tracked_manifest();
+        let tracked = tracked
+            .rule_checked_by("witness-coverage")
+            .expect("the manifest carries the coverage rule");
+        let root = fixture(&tracked.id);
+        let manifest = Manifest::load(&root).unwrap();
+        let rule = manifest
+            .rule_checked_by("witness-coverage")
+            .expect("the fixture carries the rule");
+        for absent in [false, true] {
+            let mut manifest = manifest.clone();
+            if absent {
+                manifest.pin.oracle.path = root.join("no-php-here");
+            } else if oracle().is_none() {
+                continue;
+            }
+            let readings = witness::run(
+                &root,
+                &manifest,
+                &Registry::default(),
+                &Ask {
+                    crates: vec!["ext/pcre".to_owned()],
+                    staged: false,
+                    ..Ask::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(readings.len(), 1, "{readings:#?}");
+            let reading = &readings[0];
+            assert_eq!(
+                reading.status,
+                Status::Fail,
+                "absent={absent}: {reading:#?}"
+            );
+            assert_eq!(reading.rule, tracked.id);
+            assert_eq!(count(reading, "missing"), 1);
+            assert_eq!(count(reading, "subjects"), 2);
+            let ran = i64::from(!absent);
+            assert_eq!(count(reading, "run"), ran, "{reading:#?}");
+            assert_eq!(count(reading, "not_run"), 1 - ran, "{reading:#?}");
+            assert!(
+                reading.message.contains("ctype_alpha"),
+                "{}",
+                reading.message
+            );
+            assert!(reading.message.contains(&rule.text), "{}", reading.message);
+            if absent {
+                assert!(
+                    reading.message.contains("1 witness did not run")
+                        && reading.message.contains("no-php-here"),
+                    "the failure says what did not run and where the pin looked: {}",
+                    reading.message
+                );
+            }
+        }
+    }
+
+    /// A kernel without a witness fails the crate whether or not the oracle
+    /// is here: the coverage half is measured without it, and nothing asserts
+    /// a pin whose binary is not at the path (#60, #65).
+    #[test]
+    fn a_kernel_without_a_witness_fails_whether_or_not_the_oracle_is_here() {
+        let root = scratch("uncovered-absent", "pub fn native() {}\n");
+        let mut manifest = fixture_manifest();
+        manifest.rules = tracked_manifest().rules;
+        manifest.pin.oracle.path = root.join("no-php-here");
+        let rule = manifest
+            .rule_checked_by("witness-coverage")
+            .expect("the manifest carries the coverage rule")
+            .clone();
+        let readings = witness::run(
+            &root,
+            &manifest,
+            &registry(""),
+            &Ask {
+                crates: vec!["ext/fixture".to_owned()],
+                staged: false,
+                ..Ask::default()
+            },
+        )
+        .unwrap();
+        let reading = &readings[0];
+        assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+        assert_eq!(count(reading, "missing"), 1);
+        assert_eq!(count(reading, "run"), 0);
+        assert!(
+            reading.message.contains("native") && reading.message.contains(&rule.text),
+            "{}",
+            reading.message
+        );
+    }
+
+    #[test]
+    fn the_instrument_writes_one_reading_per_crate_and_names_an_unknown_one() {
+        let manifest = tracked_manifest();
+        let readings = witness::run(
+            workspace(),
+            &manifest,
+            &Registry::default(),
+            &Ask {
+                crates: vec!["php_proto".to_owned()],
+                staged: false,
+                ..Ask::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(readings.len(), 1, "{readings:#?}");
+        assert_eq!(readings[0].scope, "php_proto");
+
+        let unknown = witness::run(
+            workspace(),
+            &manifest,
+            &Registry::default(),
+            &Ask {
+                crates: vec!["php_nope".to_owned()],
+                staged: false,
+                ..Ask::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(unknown.contains("php_nope"), "{unknown}");
+    }
+
+    #[test]
+    fn the_harness_crate_carries_no_witness_of_its_own() {
+        let manifest = tracked_manifest();
+        let readings = witness::run(
+            workspace(),
+            &manifest,
+            &Registry::default(),
+            &Ask {
+                crates: vec!["xtask".to_owned()],
+                staged: false,
+                ..Ask::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(readings[0].status, Status::Skip);
+        assert!(
+            readings[0].message.contains("carries no witness"),
+            "{:#?}",
+            readings[0]
+        );
+    }
 }

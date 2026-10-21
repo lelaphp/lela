@@ -12,14 +12,33 @@
 # hook, or by hand: `git config core.hooksPath scripts/hooks`. It goes
 # through cargo run, which rebuilds a stale binary rather than trusting
 # it; a person pushes once, so the build cost is nothing.
+#
+# A push of `main` is first read for a revision still cited as `NEXT` in
+# what it adds, by `next-cited <remote sha> <local sha>` beside this file,
+# and refused naming each line: a fast-forward onto `main` writes no
+# commit, so pre-commit and pre-merge-commit never read it (#3138). A
+# push of any other branch is not read, since NEXT is the rule there.
 set -eu
 cd "$(git rev-parse --show-toplevel)"
 zero=0000000000000000000000000000000000000000
 status=0
-while read -r _local local_sha _remote remote_sha; do
+while read -r _local local_sha remote_ref remote_sha; do
     if [ "$local_sha" = "$zero" ]; then
         continue
-    elif [ "$remote_sha" = "$zero" ]; then
+    fi
+    if [ "$remote_ref" = refs/heads/main ]; then
+        if ! unnumbered=$("$(dirname "$0")/next-cited" "$remote_sha" "$local_sha"); then
+            status=1
+            continue
+        fi
+        if [ -n "$unnumbered" ]; then
+            printf '%s\n' "$unnumbered" >&2
+            echo "pre-push: the revision cited above is still NEXT in what the push adds to main; number it as its ledger row is numbered, on main, and push again" >&2
+            status=1
+            continue
+        fi
+    fi
+    if [ "$remote_sha" = "$zero" ]; then
         cargo xtask done || status=1
     else
         cargo xtask done --base "$remote_sha" || status=1

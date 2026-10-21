@@ -16,8 +16,10 @@ use xtask::scratch::Tree;
 use xtask::{clippy, test};
 
 mod common {
+    pub mod manifest;
     pub mod repo;
 }
+use common::manifest::Tracked;
 use common::repo::Repo;
 
 fn workspace() -> &'static Path {
@@ -72,16 +74,13 @@ fn committed(fixture: &Path, name: &str) -> Tree {
     std::fs::create_dir_all(root.join("docs")).unwrap();
     std::fs::copy(workspace().join("oracle.toml"), root.join("oracle.toml")).unwrap();
     std::fs::copy(
-        workspace().join("docs/divergence.toml"),
+        xtask::package_dir().join("fixtures/registry/empty.toml"),
         root.join("docs/divergence.toml"),
     )
     .unwrap();
-    let manifest = std::fs::read_to_string(root.join("seams.toml")).unwrap();
-    std::fs::write(
-        root.join("seams.toml"),
-        manifest.replace("../../../../oracle.toml", "oracle.toml"),
-    )
-    .unwrap();
+    Tracked::of(&root)
+        .with_pin(Path::new("oracle.toml"))
+        .write(&root);
     std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
     Repo::init(&root).commit("scratch");
     root
@@ -258,73 +257,83 @@ fn a_crate_whose_sources_name_debug_assertions_is_linted_again_in_release() {
 /// and the crates that pass.
 type Expected<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
 
-/// The sensor of the manifest's `deny_lints` rules (#1917): every such
-/// rule has a fixture workspace under `xtask/fixtures/rules/<id>/` whose
-/// clippy readings carry the rule, fail where a source the scope covers
-/// sits under no module that denies the rule's lints, or under one that
-/// lifts a denial again (an inner `allow`, or one on the `mod` item),
-/// naming the source and the lints, and pass where the crate root, a
-/// module above the source or the crate's Cargo `[lints]` denies them.
-#[test]
-fn each_deny_lints_rule_fails_a_crate_whose_covered_source_no_module_denies_it_at() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let rules: Vec<_> = manifest
-        .rules
-        .iter()
-        .filter(|r| r.predicate.deny_lints.is_some())
-        .collect();
-    assert!(rules.len() >= 2, "lints.no-panic and unsafe.one-op");
-    let expected: [Expected; 2] = [
-        (
-            "lints.no-panic",
-            &[
-                (
-                    "php_unit",
-                    "crates/php_unit/src/lib.rs: clippy::expect_used, clippy::panic, clippy::todo, clippy::unimplemented, clippy::unreachable not denied",
-                ),
-                (
-                    "php_syntax",
-                    "crates/php_syntax/src/main.rs: clippy::expect_used",
-                ),
-                (
-                    "php_link",
-                    "crates/php_link/src/lifted.rs and 1 more: clippy::panic, clippy::unwrap_used not denied",
-                ),
-            ],
-            &["php_heap", "php_sapi"],
-        ),
-        (
-            "unsafe.one-op",
-            &[(
-                "ext/pcre",
-                "ext/pcre/src/ffi/inner.rs and 1 more: clippy::multiple_unsafe_ops_per_block, clippy::undocumented_unsafe_blocks not denied",
-            )],
-            &["ext/ctype"],
-        ),
-    ];
-    for rule in rules {
-        let (_, failing, passing) = expected
+/// The tests whose subject is the tracked workspace itself: each reads the
+/// `seams.toml`, `oracle.toml`, registry or sources standing in the
+/// workspace, so a person's edit there is what may turn one red (#3091).
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
+mod tracked {
+    use super::*;
+
+    /// The sensor of the manifest's `deny_lints` rules (#1917): every such
+    /// rule has a fixture workspace under `xtask/fixtures/rules/<id>/` whose
+    /// clippy readings carry the rule, fail where a source the scope covers
+    /// sits under no module that denies the rule's lints, or under one that
+    /// lifts a denial again (an inner `allow`, or one on the `mod` item),
+    /// naming the source and the lints, and pass where the crate root, a
+    /// module above the source or the crate's Cargo `[lints]` denies them.
+    #[test]
+    fn each_deny_lints_rule_fails_a_crate_whose_covered_source_no_module_denies_it_at() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let rules: Vec<_> = manifest
+            .rules
             .iter()
-            .find(|(id, _, _)| *id == rule.id)
-            .unwrap_or_else(|| panic!("rule {} has no fixture this test reads", rule.id));
-        let fixture = xtask::package_dir().join("fixtures/rules").join(&rule.id);
-        let root = committed(&fixture, &format!("deny-lints-{}", rule.id));
-        let manifest = Manifest::load(&root).unwrap();
-        let readings = clippy::run(&root, &manifest, &[]).unwrap();
-        for (krate, named) in *failing {
-            let reading = of(&readings, krate);
-            assert_eq!(reading.status, Status::Fail, "{reading:#?}");
-            assert_eq!(reading.rule, rule.id);
-            assert!(
-                reading.message.contains(named) && reading.message.contains("(fixture)"),
-                "{}",
-                reading.message
-            );
-        }
-        for krate in *passing {
-            let reading = of(&readings, krate);
-            assert_eq!(reading.status, Status::Pass, "{reading:#?}");
-            assert_eq!(reading.rule, rule.id);
+            .filter(|r| r.predicate.deny_lints.is_some())
+            .collect();
+        assert!(rules.len() >= 2, "lints.no-panic and unsafe.one-op");
+        let expected: [Expected; 2] = [
+            (
+                "lints.no-panic",
+                &[
+                    (
+                        "php_unit",
+                        "crates/php_unit/src/lib.rs: clippy::expect_used, clippy::panic, clippy::todo, clippy::unimplemented, clippy::unreachable not denied",
+                    ),
+                    (
+                        "php_syntax",
+                        "crates/php_syntax/src/main.rs: clippy::expect_used",
+                    ),
+                    (
+                        "php_link",
+                        "crates/php_link/src/lifted.rs and 1 more: clippy::panic, clippy::unwrap_used not denied",
+                    ),
+                ],
+                &["php_heap", "php_sapi"],
+            ),
+            (
+                "unsafe.one-op",
+                &[(
+                    "ext/pcre",
+                    "ext/pcre/src/ffi/inner.rs and 1 more: clippy::multiple_unsafe_ops_per_block, clippy::undocumented_unsafe_blocks not denied",
+                )],
+                &["ext/ctype"],
+            ),
+        ];
+        for rule in rules {
+            let (_, failing, passing) = expected
+                .iter()
+                .find(|(id, _, _)| *id == rule.id)
+                .unwrap_or_else(|| panic!("rule {} has no fixture this test reads", rule.id));
+            let fixture = xtask::package_dir().join("fixtures/rules").join(&rule.id);
+            let root = committed(&fixture, &format!("deny-lints-{}", rule.id));
+            let manifest = Manifest::load(&root).unwrap();
+            let readings = clippy::run(&root, &manifest, &[]).unwrap();
+            for (krate, named) in *failing {
+                let reading = of(&readings, krate);
+                assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+                assert_eq!(reading.rule, rule.id);
+                assert!(
+                    reading.message.contains(named) && reading.message.contains("(fixture)"),
+                    "{}",
+                    reading.message
+                );
+            }
+            for krate in *passing {
+                let reading = of(&readings, krate);
+                assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+                assert_eq!(reading.rule, rule.id);
+            }
         }
     }
 }

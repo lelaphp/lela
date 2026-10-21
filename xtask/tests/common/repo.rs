@@ -134,23 +134,26 @@ impl AsRef<Path> for Repo {
 }
 
 /// A repository at `dir`, rebuilt from scratch, holding the workspace's
-/// manifest, its pin, the divergence registry and a README as its one
-/// commit: where a test provokes denials, so the readings land in its
-/// store and not the workspace's. `permit --bench` builds the same
-/// repository for the same reason, with the recipe stated there too.
+/// manifest, its pin, a divergence registry with no row and a README as
+/// its one commit: where a test provokes denials, so the readings land in
+/// its store and not the workspace's. `permit --bench` builds the same
+/// repository for the same reason, with the recipe stated there too and
+/// the tracked registry, which no judgement of a call reads. The
+/// manifest is the tracked file byte for byte, since the binary's hook and
+/// `permit` refuse one their build was not compiled against (`built.rs`);
+/// a test that judges by rows of its own writes them over it with
+/// `common::manifest::Tracked`. The registry is not the tracked one,
+/// whose rows a person keeps (#3091).
 pub fn scratch_workspace(root: &Path, dir: &Path) -> Repo {
     fs::remove_dir_all(dir).ok();
     let manifest = Manifest::load(root).unwrap();
     let repo = Repo::init(dir);
-    for file in [
-        manifest::FILE,
-        manifest.oracle.pin.as_str(),
-        "docs/divergence.toml",
-        "README.md",
-    ] {
+    for file in [manifest::FILE, manifest.oracle.pin.as_str(), "README.md"] {
         let text = fs::read(root.join(file)).unwrap_or_else(|err| panic!("reading {file}: {err}"));
         repo.write(file, text);
     }
+    let empty = xtask::package_dir().join("fixtures/registry/empty.toml");
+    repo.write("docs/divergence.toml", fs::read(empty).unwrap());
     repo.commit("scratch");
     repo
 }

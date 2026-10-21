@@ -24,8 +24,10 @@ use xtask::scratch::Tree;
 use xtask::{api_check, budget, clippy, new_sapi, unsafe_audit};
 
 mod common {
+    pub mod manifest;
     pub mod repo;
 }
+use common::manifest::Tracked;
 use common::repo::Repo;
 
 fn workspace() -> &'static Path {
@@ -41,14 +43,9 @@ fn fixture() -> PathBuf {
 fn scratch(name: &str) -> Tree {
     let dir = Tree::new(&format!("new-sapi-{name}")).unwrap();
     copy(&fixture(), &dir);
-    // The pin is referenced by a path relative to the fixture's place in the tree.
-    let seams = std::fs::read_to_string(dir.join("seams.toml")).unwrap();
-    let pin = workspace().join("oracle.toml");
-    std::fs::write(
-        dir.join("seams.toml"),
-        seams.replace("../../../oracle.toml", pin.to_str().unwrap()),
-    )
-    .unwrap();
+    // The fixture names the pin by a path relative to its place in the
+    // tree; the copy names the workspace's.
+    Tracked::of(&dir).with_the_workspace_pin().write(&dir);
     Repo::init(&dir).commit("fixture");
     dir
 }

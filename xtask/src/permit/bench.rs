@@ -132,8 +132,9 @@ fn bench(root: &Path, runs: usize) -> Result<Bench> {
 /// workspace's manifest, its pin, the divergence registry and a README:
 /// where `--bench` provokes denials, so the readings land in its store and
 /// not the workspace's. The tests build the same repository through
-/// `tests/common`, which cannot be reached from here; the recipe is four
-/// files and one commit, stated in both. `bench`'s A/A control over the
+/// `tests/common`, which cannot be reached from here, with a registry of
+/// no row in place of the tracked one, whose rows no test of theirs is
+/// about (#3091); the recipe is four files and one commit, stated in both. `bench`'s A/A control over the
 /// judge takes its scratch workspace from here too, at a directory of its
 /// own, so the one recipe stands in one place.
 pub(crate) fn scratch_workspace(root: &Path, dir: &Path) -> Result<()> {

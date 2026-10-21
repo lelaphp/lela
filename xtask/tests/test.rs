@@ -15,9 +15,11 @@ use xtask::scratch::Tree;
 use xtask::test;
 
 mod common {
+    pub mod manifest;
     pub mod repo;
     pub mod run;
 }
+use common::manifest::Tracked;
 use common::repo::Repo;
 use common::run::{Run, xtask};
 
@@ -108,7 +110,7 @@ fn a_crate_the_manifest_does_not_name_is_refused() {
 }
 
 /// The fixture copied into a scratch tree of its own, with the tracked
-/// pin and registry beside its manifest, so two tests running at once
+/// pin and a registry with no row beside its manifest, so two tests running at once
 /// build in two `target/` directories and neither removes the other's
 /// mid-run; the tree takes itself away (#194). The instrument reads a
 /// crate's files through `git ls-files`, so a test runs it over
@@ -119,7 +121,7 @@ fn scratch(name: &str) -> Tree {
     std::fs::create_dir_all(root.join("crates/php_heap/src")).unwrap();
     std::fs::copy(workspace().join("oracle.toml"), root.join("oracle.toml")).unwrap();
     std::fs::copy(
-        workspace().join("docs/divergence.toml"),
+        xtask::package_dir().join("fixtures/registry/empty.toml"),
         root.join("docs/divergence.toml"),
     )
     .unwrap();
@@ -135,12 +137,9 @@ fn scratch(name: &str) -> Tree {
     }
     // The fixture's pin is by a path relative to the fixture; here the
     // pin stands beside the manifest.
-    let manifest = std::fs::read_to_string(root.join("seams.toml")).unwrap();
-    std::fs::write(
-        root.join("seams.toml"),
-        manifest.replace("../../../../oracle.toml", "oracle.toml"),
-    )
-    .unwrap();
+    Tracked::of(&root)
+        .with_pin(Path::new("oracle.toml"))
+        .write(&root);
     root
 }
 

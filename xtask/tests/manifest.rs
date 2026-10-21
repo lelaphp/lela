@@ -3,23 +3,10 @@
 
 use std::path::Path;
 
-use xtask::manifest::{AvoidFrom, Crate, Edge, Manifest, Rule, Scripts, Seam};
+use xtask::manifest::{AvoidFrom, Crate, Edge, Manifest, OneOrMany, Rule, Scripts, Seam};
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
-}
-
-#[test]
-fn the_tracked_manifest_loads_with_its_rules_and_the_oracle_pin() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let ids: Vec<&str> = manifest.rules.iter().map(|r| r.id.as_str()).collect();
-    assert!(ids.contains(&"ext.no-locks"), "rules: {ids:?}");
-    assert!(ids.contains(&"harness.self"), "rules: {ids:?}");
-    let no_locks = manifest.rule("ext.no-locks").unwrap();
-    assert_eq!(no_locks.adr, ["0005"]);
-    assert!(manifest.crate_named("php_engine").is_some());
-    assert!(manifest.seams.iter().any(|s| s.lock == "api.lock"));
-    assert_eq!(manifest.oracle.pin, "oracle.toml");
 }
 
 const MINIMAL: &str = r#"
@@ -260,27 +247,6 @@ fn a_wildcard_of_macros_or_methods_is_refused() {
     }
 }
 
-#[test]
-fn the_oracle_version_comes_from_the_pin_and_is_written_in_no_source_file() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let version = &manifest.pin.oracle.version;
-    assert!(!version.is_empty());
-    let src = xtask::package_dir().join("src");
-    for entry in walk(&src) {
-        let text = std::fs::read_to_string(&entry).unwrap();
-        assert!(
-            !text.contains(version.as_str()),
-            "{} states the oracle version",
-            entry.display()
-        );
-        assert!(
-            !text.contains(&manifest.pin.oracle.md5),
-            "{} states the oracle digest",
-            entry.display()
-        );
-    }
-}
-
 fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir).unwrap() {
@@ -382,20 +348,6 @@ fn a_scope_maps_to_the_path_its_reading_is_stamped_over() {
     // is known here either; that arm is phpt's test, beside the tree.
     assert_eq!(path("php_nowhere"), None);
     assert_eq!(path("ext/pcre/tests@control"), None);
-}
-
-/// The lock-line rule is one lock's, keyed by its name, `<lock>-line`:
-/// `php_engine`'s row lists three locks and only `api.lock` has the rule.
-#[test]
-fn the_lock_line_rule_is_the_locks_own_and_not_its_rows() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    assert_eq!(
-        manifest.lock_line_rule("api.lock").map(|r| r.id.as_str()),
-        Some("api.lock-line")
-    );
-    assert_eq!(manifest.lock_line_rule("sapi.lock").map(|r| &r.id), None);
-    assert_eq!(manifest.lock_line_rule("tier.lock").map(|r| &r.id), None);
-    assert_eq!(manifest.lock_line_rule("heap.lock").map(|r| &r.id), None);
 }
 
 /// `avoid_from` is the glossary file, or a table naming the file and one
@@ -506,4 +458,80 @@ fn allow_in_tests_takes_only_denied_lints_clippy_has_an_in_tests_key_for() {
     assert!(err.contains("`allow_in_tests` beside `check`"), "{err}");
     let held = row("deny_lints = [\"clippy::panic\"]\nallow_in_tests = [\"clippy::panic\"]");
     assert!(Manifest::parse(&held).is_ok());
+}
+
+/// A `[[crate]]` row serialises and parses back as itself, a row with no
+/// `lock` among them (#3091): the key is left out where it is empty, as
+/// the file writes such a row, since `OneOrMany::None` is no TOML value.
+/// So a test builds a row as a [`Crate`] and writes it into a manifest.
+#[test]
+fn a_crate_row_round_trips_through_its_serialisation() {
+    let bare = Crate::named("ext/pcre");
+    let mut locked = Crate::named("php_engine");
+    locked.lock = OneOrMany::Many(vec!["api.lock".to_owned(), "tier.lock".to_owned()]);
+    locked.phpt = vec!["Zend/tests".to_owned()];
+    locked.porting = true;
+    for row in [bare, locked] {
+        let text = toml::to_string(&row).unwrap();
+        assert_eq!(toml::from_str::<Crate>(&text).unwrap(), row, "{text}");
+        assert_eq!(text.contains("lock ="), !row.lock.is_empty(), "{text}");
+    }
+}
+
+/// The tests whose subject is the tracked workspace itself: each reads the
+/// `seams.toml`, `oracle.toml`, registry or sources standing in the
+/// workspace, so a person's edit there is what may turn one red (#3091).
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
+mod tracked {
+    use super::*;
+
+    #[test]
+    fn the_tracked_manifest_loads_with_its_rules_and_the_oracle_pin() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let ids: Vec<&str> = manifest.rules.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"ext.no-locks"), "rules: {ids:?}");
+        assert!(ids.contains(&"harness.self"), "rules: {ids:?}");
+        let no_locks = manifest.rule("ext.no-locks").unwrap();
+        assert_eq!(no_locks.adr, ["0005"]);
+        assert!(manifest.crate_named("php_engine").is_some());
+        assert!(manifest.seams.iter().any(|s| s.lock == "api.lock"));
+        assert_eq!(manifest.oracle.pin, "oracle.toml");
+    }
+
+    #[test]
+    fn the_oracle_version_comes_from_the_pin_and_is_written_in_no_source_file() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let version = &manifest.pin.oracle.version;
+        assert!(!version.is_empty());
+        let src = xtask::package_dir().join("src");
+        for entry in walk(&src) {
+            let text = std::fs::read_to_string(&entry).unwrap();
+            assert!(
+                !text.contains(version.as_str()),
+                "{} states the oracle version",
+                entry.display()
+            );
+            assert!(
+                !text.contains(&manifest.pin.oracle.md5),
+                "{} states the oracle digest",
+                entry.display()
+            );
+        }
+    }
+
+    /// The lock-line rule is one lock's, keyed by its name, `<lock>-line`:
+    /// `php_engine`'s row lists three locks and only `api.lock` has the rule.
+    #[test]
+    fn the_lock_line_rule_is_the_locks_own_and_not_its_rows() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        assert_eq!(
+            manifest.lock_line_rule("api.lock").map(|r| r.id.as_str()),
+            Some("api.lock-line")
+        );
+        assert_eq!(manifest.lock_line_rule("sapi.lock").map(|r| &r.id), None);
+        assert_eq!(manifest.lock_line_rule("tier.lock").map(|r| &r.id), None);
+        assert_eq!(manifest.lock_line_rule("heap.lock").map(|r| &r.id), None);
+    }
 }

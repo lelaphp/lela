@@ -19,6 +19,11 @@ use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::{self, Tree};
 use xtask::status;
 
+mod common {
+    pub mod manifest;
+}
+use common::manifest::{Tracked, pin};
+
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
 }
@@ -327,14 +332,14 @@ fn an_edit_in_a_laid_worktree_is_judged_by_that_worktrees_manifest() {
 
     // The worktree's manifest differs from the main checkout's in what
     // the rule says, so the denial says which manifest judged.
-    let manifest = fs::read_to_string(dir.join("seams.toml")).unwrap();
     let marker = "edited by a person, says the worktree's manifest";
-    let manifest = manifest.replacen("are edited by a person.", &format!("are {marker}."), 1);
-    assert!(
-        manifest.contains(marker),
-        "the harness.self text is rewritten"
-    );
-    fs::write(dir.join("seams.toml"), manifest).unwrap();
+    Tracked::of(&dir)
+        .with_rule("harness.self", |rule| {
+            // The marker beside the rule's own words, whatever they are.
+            let text = format!("{} Here: {marker}.", rule["text"].as_str().unwrap());
+            rule.insert("text".to_owned(), text.into());
+        })
+        .write(&dir);
 
     let call = Call::parse(
         &serde_json::json!({"tool_name": "Edit", "cwd": dir.to_str().unwrap(),
@@ -779,9 +784,8 @@ fn phpt_against_head(root: &Path, subset: &str) -> String {
 /// worktree (#1268). A run main keeps already is not overwritten.
 #[test]
 fn retiring_carries_the_worktrees_kept_phpt_runs_into_mains() {
-    let manifest = Manifest::load(workspace()).unwrap();
     if Promise::Tree
-        .or_skip(manifest.pin.source.tree())
+        .or_skip(pin().source.tree())
         .unwrap()
         .is_none()
     {
@@ -860,9 +864,8 @@ fn retiring_carries_the_worktrees_kept_phpt_runs_into_mains() {
 /// printed lays it in the checkout, and the comparison finds it there.
 #[test]
 fn a_run_ci_kept_fetched_by_the_skips_line_is_the_bases_run() {
-    let manifest = Manifest::load(workspace()).unwrap();
     if Promise::Tree
-        .or_skip(manifest.pin.source.tree())
+        .or_skip(pin().source.tree())
         .unwrap()
         .is_none()
     {
@@ -969,8 +972,7 @@ fn phpt_in(dir: &Path, args: &[&str], cargo: &Path, corpus: &Path) -> (i32, Stri
 /// call; a second call finds the run kept and builds nothing.
 #[test]
 fn one_call_takes_the_merge_bases_run_and_keeps_it_in_the_main_worktree() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let pinned = manifest.pin.oracle.file().map(Path::to_path_buf);
+    let pinned = pin().oracle.file().map(Path::to_path_buf);
     let Some(oracle) = Promise::Oracle.or_skip(pinned).unwrap() else {
         return;
     };

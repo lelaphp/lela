@@ -19,7 +19,7 @@ description = "The harness: instruments, readings and the one renderer (harness-
 executables = "side-by-side"
 apart = { compile_identity = ["target"], worktree = ["target"], permit = ["target"] }
 own.compile_identity = ["src/compile_identity", "tests/compile_identity.rs", "fixtures/compile-identity", "tests/common"]
-own.worktree = ["src/worktree.rs", "tests/worktree.rs"]
+own.worktree = ["src/worktree.rs", "tests/worktree.rs", "tests/common"]
 own.permit = ["src/permit", "tests/permit.rs", "fixtures/rules", "fixtures/approval", "tests/common"]
 own.phpt = ["src/phpt", "tests/phpt.rs", "fixtures/phpt", "tests/common"]
 own.new_sapi = ["src/new_sapi.rs", "tests/new_sapi.rs", "fixtures/new-sapi", "tests/common"]

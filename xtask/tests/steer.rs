@@ -203,8 +203,15 @@ fn every_negative_control_is_refused_at_the_path_it_moved_and_writes_nothing() {
     }
 }
 
-/// A covering row (harness-design.md §4.3, revision 62) proposed beside the
-/// tracked registry: one reason for three tests of its kind.
+/// The registry the covering row is proposed beside, in place of the
+/// tracked one, whose rows a person keeps (#3091): one row, whose id a
+/// covering row may not cover again.
+const REGISTRY: &str = "# The divergence registry (fixture).\n\n[[divergence]]\n\
+id = \"phpt:php-src/ext/opcache/tests/gh9164.phpt\"\nkind = \"phpt\"\n\
+reason = \"The fixture's one reason (fixture).\"\nstatus = \"accepted\"\nsince = \"2026-09-07\"\n";
+
+/// A covering row (harness-design.md §4.3, revision 62) proposed beside
+/// [`REGISTRY`]: one reason for three tests of its kind.
 const COVERING: &str = "\n[[divergence]]\nid = \"phpt:fixture-cause\"\nkind = \"phpt\"\n\
 reason = \"One reason (fixture).\"\nstatus = \"accepted\"\nsince = \"2026-09-28\"\n\
 covers = [\"phpt:php-src/ext/fixture/tests/a.phpt\", \"phpt:php-src/ext/fixture/tests/b.phpt\", \
@@ -212,13 +219,8 @@ covers = [\"phpt:php-src/ext/fixture/tests/a.phpt\", \"phpt:php-src/ext/fixture/
 
 #[test]
 fn a_new_row_with_covers_is_one_addition_to_the_registry() {
-    let tracked = fs::read_to_string(
-        xtask::package_dir()
-            .join("..")
-            .join(xtask::divergence::FILE),
-    )
-    .expect("the tracked registry");
-    let root = scratch_at("covers", xtask::divergence::FILE, &tracked);
+    let tracked = REGISTRY;
+    let root = scratch_at("covers", xtask::divergence::FILE, tracked);
     let proposal = root.join("proposed.toml");
     fs::write(&proposal, format!("{tracked}{COVERING}")).expect("the proposal");
 

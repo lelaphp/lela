@@ -16,9 +16,11 @@ use xtask::scratch::Tree;
 use xtask::{api_check, budget, new_ext, unsafe_audit, vocab};
 
 mod common {
+    pub mod manifest;
     pub mod repo;
     pub mod run;
 }
+use common::manifest::Tracked;
 use common::repo::Repo;
 use common::run::xtask;
 
@@ -31,14 +33,9 @@ fn workspace() -> &'static Path {
 fn scratch(name: &str) -> Tree {
     let dir = Tree::new(&format!("new-ext-{name}")).unwrap();
     copy(&xtask::package_dir().join("fixtures/new-ext"), &dir);
-    // The pin is referenced by a path relative to the fixture's place in the tree.
-    let seams = std::fs::read_to_string(dir.join("seams.toml")).unwrap();
-    let pin = workspace().join("oracle.toml");
-    std::fs::write(
-        dir.join("seams.toml"),
-        seams.replace("../../../oracle.toml", pin.to_str().unwrap()),
-    )
-    .unwrap();
+    // The fixture names the pin by a path relative to its place in the
+    // tree; the copy names the workspace's.
+    Tracked::of(&dir).with_the_workspace_pin().write(&dir);
     Repo::init(&dir).commit("fixture");
     dir
 }
@@ -73,129 +70,6 @@ fn of<'a>(readings: &'a [Reading], scope: &str) -> &'a Reading {
         .iter()
         .find(|r| r.scope == scope)
         .unwrap_or_else(|| panic!("no reading of scope {scope}"))
-}
-
-#[test]
-fn the_crate_laid_down_has_the_template_topology() {
-    let root = scratch("topology");
-    let manifest = Manifest::load(&root).unwrap();
-    let laid = new_ext::run(&root, &manifest, "demo").unwrap();
-    assert_eq!(laid.dir, root.join("ext/demo"));
-
-    // One dependency, the facade (ADR-0004).
-    let cargo: toml::Table = toml::from_str(&read(&root, "ext/demo/Cargo.toml")).unwrap();
-    assert_eq!(cargo["package"]["name"].as_str(), Some("php_ext_demo"));
-    let deps = cargo["dependencies"].as_table().unwrap();
-    assert_eq!(deps.len(), 1, "{deps:?}");
-    assert_eq!(
-        deps["php_ext"]["path"].as_str(),
-        Some("../../crates/php_ext")
-    );
-    // The test face for tests/ alone: the same crate, its `test` feature on.
-    let dev = cargo["dev-dependencies"].as_table().unwrap();
-    assert_eq!(dev.len(), 1, "{dev:?}");
-    assert_eq!(
-        dev["php_ext"]["features"].as_array().map(Vec::len),
-        Some(1),
-        "{dev:?}"
-    );
-    assert_eq!(cargo["lints"]["workspace"].as_bool(), Some(true));
-
-    // `extension()`, state on the value, no lock, the witness, the lints.
-    let lib = read(&root, "ext/demo/src/lib.rs");
-    assert!(lib.contains("pub fn extension() -> Extension"), "{lib}");
-    assert!(lib.contains(".request_state::<State>()"), "{lib}");
-    assert!(lib.contains("#[derive(Default)]\nstruct State"), "{lib}");
-    assert!(!lib.contains("Mutex") && !lib.contains("static "), "{lib}");
-    assert!(lib.contains("#![forbid(unsafe_code)]"), "{lib}");
-    assert!(
-        lib.contains("#![allow(rustdoc::invalid_codeblock_attributes)]"),
-        "the expect fence is xtask witness's: {lib}"
-    );
-    for lint in manifest
-        .rule("lints.no-panic")
-        .unwrap()
-        .predicate
-        .deny_lints
-        .as_ref()
-        .unwrap()
-    {
-        assert!(
-            lib.contains(lint),
-            "{lint} is denied from the manifest: {lib}"
-        );
-    }
-    assert!(lib.contains("/// ```php\n"), "{lib}");
-    assert!(
-        lib.contains("extension_loaded('demo')"),
-        "the witness asks the oracle whether the extension is there: {lib}"
-    );
-    assert!(
-        lib.contains("/// ```expect\n"),
-        "an expect fence with no exit asserts zero, the status the snippet has: {lib}"
-    );
-    assert!(
-        lib.lines()
-            .filter(|l| l.contains("```expect"))
-            .all(|l| !l.contains("exit")),
-        "the crate is laid down with nothing for --accept to write, so permit over \
-         the diff reads no exit= in it (witness.exit-authored): {lib}"
-    );
-    assert!(
-        lib.contains("under `php-src/ext/demo`"),
-        "the phpt subset is named: {lib}"
-    );
-
-    // The note names the subset the crate's row owns, read from the
-    // manifest rather than spelled a second time here (#18).
-    let note = laid
-        .notes
-        .iter()
-        .find(|n| n.starts_with("phpt subset:"))
-        .unwrap_or_else(|| panic!("{:#?}", laid.notes));
-    assert!(
-        note.contains("php-src/ext/demo") && !note.contains("php-src/ext/demo/tests"),
-        "the subset is the extension's directory whole (#1590): {note}"
-    );
-
-    // Tests through the capture sink (design §4.10).
-    let tests = read(&root, "ext/demo/tests/capture.rs");
-    assert!(tests.contains("Capture"), "{tests}");
-    assert!(tests.contains("php_ext_demo::extension()"), "{tests}");
-    assert!(!tests.contains("php_bundle"), "never the bundle: {tests}");
-
-    // The workspace member, and the generated config in place.
-    let members: toml::Table = toml::from_str(&read(&root, "Cargo.toml")).unwrap();
-    let members = members["workspace"]["members"].as_array().unwrap();
-    assert!(
-        members.iter().any(|m| m.as_str() == Some("ext/demo")),
-        "{members:?}"
-    );
-    // `ext/clippy.toml` is rewritten as the manifest renders it, which
-    // `budget` holds under `generated.committed`.
-    let readings = budget::run(&root, &manifest).unwrap();
-    let clippy = of(&readings, "ext/clippy.toml");
-    assert_eq!(clippy.status, Status::Pass, "{}", clippy.message);
-
-    // The row in the extensions region.
-    let agents = read(&root, "ext/AGENTS.md");
-    assert!(agents.contains("└── demo"), "{agents}");
-    assert!(
-        laid.written.iter().any(|w| w == "ext/AGENTS.md"),
-        "{:?}",
-        laid.written
-    );
-
-    // No word the glossary avoids, in prose or in a public name: `vocab`
-    // over the laid crate, under the tracked manifest's rule and glossary,
-    // with the crate's row added since the tracked manifest has none.
-    std::fs::copy(workspace().join("CONTEXT.md"), root.join("CONTEXT.md")).unwrap();
-    let mut tracked = Manifest::load(workspace()).unwrap();
-    tracked.crates.push(Crate::named("ext/demo"));
-    let readings = vocab::hold(&root, &tracked, &["ext/demo".to_owned()]).unwrap();
-    let demo = of(&readings, "ext/demo");
-    assert_eq!(demo.status, Status::Pass, "{}", demo.message);
-    assert!(laid.dir.is_dir());
 }
 
 #[test]
@@ -471,4 +345,137 @@ fn the_binary_prints_what_it_laid_down_and_exits_nonzero_on_a_refusal() {
     );
     let err = xtask(&root, &["new-ext", "demo"]).failed();
     assert!(err.contains("exists"), "{err}");
+}
+
+/// The tests whose subject is the tracked workspace itself: each reads the
+/// `seams.toml`, `oracle.toml`, registry or sources standing in the
+/// workspace, so a person's edit there is what may turn one red (#3091).
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
+mod tracked {
+    use super::*;
+
+    #[test]
+    fn the_crate_laid_down_has_the_template_topology() {
+        let root = scratch("topology");
+        let manifest = Manifest::load(&root).unwrap();
+        let laid = new_ext::run(&root, &manifest, "demo").unwrap();
+        assert_eq!(laid.dir, root.join("ext/demo"));
+
+        // One dependency, the facade (ADR-0004).
+        let cargo: toml::Table = toml::from_str(&read(&root, "ext/demo/Cargo.toml")).unwrap();
+        assert_eq!(cargo["package"]["name"].as_str(), Some("php_ext_demo"));
+        let deps = cargo["dependencies"].as_table().unwrap();
+        assert_eq!(deps.len(), 1, "{deps:?}");
+        assert_eq!(
+            deps["php_ext"]["path"].as_str(),
+            Some("../../crates/php_ext")
+        );
+        // The test face for tests/ alone: the same crate, its `test` feature on.
+        let dev = cargo["dev-dependencies"].as_table().unwrap();
+        assert_eq!(dev.len(), 1, "{dev:?}");
+        assert_eq!(
+            dev["php_ext"]["features"].as_array().map(Vec::len),
+            Some(1),
+            "{dev:?}"
+        );
+        assert_eq!(cargo["lints"]["workspace"].as_bool(), Some(true));
+
+        // `extension()`, state on the value, no lock, the witness, the lints.
+        let lib = read(&root, "ext/demo/src/lib.rs");
+        assert!(lib.contains("pub fn extension() -> Extension"), "{lib}");
+        assert!(lib.contains(".request_state::<State>()"), "{lib}");
+        assert!(lib.contains("#[derive(Default)]\nstruct State"), "{lib}");
+        assert!(!lib.contains("Mutex") && !lib.contains("static "), "{lib}");
+        assert!(lib.contains("#![forbid(unsafe_code)]"), "{lib}");
+        assert!(
+            lib.contains("#![allow(rustdoc::invalid_codeblock_attributes)]"),
+            "the expect fence is xtask witness's: {lib}"
+        );
+        for lint in manifest
+            .rule("lints.no-panic")
+            .unwrap()
+            .predicate
+            .deny_lints
+            .as_ref()
+            .unwrap()
+        {
+            assert!(
+                lib.contains(lint),
+                "{lint} is denied from the manifest: {lib}"
+            );
+        }
+        assert!(lib.contains("/// ```php\n"), "{lib}");
+        assert!(
+            lib.contains("extension_loaded('demo')"),
+            "the witness asks the oracle whether the extension is there: {lib}"
+        );
+        assert!(
+            lib.contains("/// ```expect\n"),
+            "an expect fence with no exit asserts zero, the status the snippet has: {lib}"
+        );
+        assert!(
+            lib.lines()
+                .filter(|l| l.contains("```expect"))
+                .all(|l| !l.contains("exit")),
+            "the crate is laid down with nothing for --accept to write, so permit over \
+             the diff reads no exit= in it (witness.exit-authored): {lib}"
+        );
+        assert!(
+            lib.contains("under `php-src/ext/demo`"),
+            "the phpt subset is named: {lib}"
+        );
+
+        // The note names the subset the crate's row owns, read from the
+        // manifest rather than spelled a second time here (#18).
+        let note = laid
+            .notes
+            .iter()
+            .find(|n| n.starts_with("phpt subset:"))
+            .unwrap_or_else(|| panic!("{:#?}", laid.notes));
+        assert!(
+            note.contains("php-src/ext/demo") && !note.contains("php-src/ext/demo/tests"),
+            "the subset is the extension's directory whole (#1590): {note}"
+        );
+
+        // Tests through the capture sink (design §4.10).
+        let tests = read(&root, "ext/demo/tests/capture.rs");
+        assert!(tests.contains("Capture"), "{tests}");
+        assert!(tests.contains("php_ext_demo::extension()"), "{tests}");
+        assert!(!tests.contains("php_bundle"), "never the bundle: {tests}");
+
+        // The workspace member, and the generated config in place.
+        let members: toml::Table = toml::from_str(&read(&root, "Cargo.toml")).unwrap();
+        let members = members["workspace"]["members"].as_array().unwrap();
+        assert!(
+            members.iter().any(|m| m.as_str() == Some("ext/demo")),
+            "{members:?}"
+        );
+        // `ext/clippy.toml` is rewritten as the manifest renders it, which
+        // `budget` holds under `generated.committed`.
+        let readings = budget::run(&root, &manifest).unwrap();
+        let clippy = of(&readings, "ext/clippy.toml");
+        assert_eq!(clippy.status, Status::Pass, "{}", clippy.message);
+
+        // The row in the extensions region.
+        let agents = read(&root, "ext/AGENTS.md");
+        assert!(agents.contains("└── demo"), "{agents}");
+        assert!(
+            laid.written.iter().any(|w| w == "ext/AGENTS.md"),
+            "{:?}",
+            laid.written
+        );
+
+        // No word the glossary avoids, in prose or in a public name: `vocab`
+        // over the laid crate, under the tracked manifest's rule and glossary,
+        // with the crate's row added since the tracked manifest has none.
+        std::fs::copy(workspace().join("CONTEXT.md"), root.join("CONTEXT.md")).unwrap();
+        let mut tracked = Manifest::load(workspace()).unwrap();
+        tracked.crates.push(Crate::named("ext/demo"));
+        let readings = vocab::hold(&root, &tracked, &["ext/demo".to_owned()]).unwrap();
+        let demo = of(&readings, "ext/demo");
+        assert_eq!(demo.status, Status::Pass, "{}", demo.message);
+        assert!(laid.dir.is_dir());
+    }
 }

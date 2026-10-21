@@ -19,9 +19,11 @@ use xtask::reading::{Status, Store};
 use xtask::scratch::Tree;
 
 mod common {
+    pub mod manifest;
     pub mod repo;
     pub mod run;
 }
+use common::manifest::Tracked;
 use common::repo::{Repo, scratch_workspace};
 use common::run::{Ran, Run};
 
@@ -284,13 +286,21 @@ fn assert_kept(root: &Path, out: &str, path: &str) {
     );
 }
 
+/// The scratch's manifest as a person leaves it once they have pasted a
+/// row in: a ceiling raised, written while a call runs.
+fn a_persons_rows(root: &Path) -> String {
+    Tracked::of(root)
+        .with_crate("php_heap", |row| row.budget += 1)
+        .text()
+}
+
 /// #1895: a person pastes rows into the manifest while another session's
 /// call runs. The call's line names no harness file, so the change is not
 /// the call's to answer for: it stands, and the reading says it moved.
 #[test]
 fn a_persons_edit_made_while_the_call_runs_is_kept_and_named() {
     let root = scratch("person");
-    let edited = format!("{}\n# a person's rows, pasted\n", read(&root, "seams.toml"));
+    let edited = a_persons_rows(&root);
     let (out, _) = through_the_hooks_while(&root, "toolu_person", "git status --short", || {
         std::fs::write(root.join("seams.toml"), &edited).unwrap();
     });
@@ -378,7 +388,7 @@ fn a_kept_change_back_at_head_says_done_lists_nothing() {
 #[test]
 fn a_persons_edit_outlives_a_call_that_reads_the_file_and_writes_about_it() {
     let root = scratch("mention");
-    let edited = format!("{}\n# a person's rows, pasted\n", read(&root, "seams.toml"));
+    let edited = a_persons_rows(&root);
     let command = "grep -c rule seams.toml; cat > note.txt <<'EOF'\nseams.toml gains a row\nEOF\n\
                    git add -- note.txt && git commit -q -F note.txt -- note.txt";
     let (out, _) = through_the_hooks_while(&root, "toolu_mention", command, || {
@@ -990,6 +1000,10 @@ fn a_steer_call_that_lands_a_merges_union_stands_and_the_merge_commits_it() {
         let whole = std::fs::read_to_string(rows.join(side)).unwrap();
         whole.strip_prefix(base.as_str()).unwrap().to_owned()
     };
+    // The registry both sides append to holds the fixture's base row, as
+    // a person's registry holds rows; the scratch's holds none.
+    std::fs::write(root.join(file), &base).unwrap();
+    Repo::at(&root).commit("the base's row");
     let tracked = read(&root, file);
     let main = Repo::at(&root).git(&["rev-parse", "--abbrev-ref", "HEAD"]);
     Repo::at(&root).git(&["checkout", "-q", "-b", "merged"]);

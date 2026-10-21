@@ -11,7 +11,6 @@ use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use xtask::divergence::Registry;
-use xtask::manifest::Manifest;
 use xtask::oracle::{
     self, PROMISE_VARIABLE, Pin, Program, Promise, Promised, Regime, Runner, Split, TREE_VARIABLE,
     Verdict,
@@ -19,6 +18,7 @@ use xtask::oracle::{
 use xtask::scratch::Tree;
 
 mod common {
+    pub mod manifest;
     pub mod repo;
     pub mod run;
 }
@@ -32,7 +32,7 @@ fn workspace() -> &'static Path {
 /// The tracked pin, when the binary it names is on this machine; a
 /// failure where this machine promised the binary (#38).
 fn pin() -> Option<Pin> {
-    let pin = Manifest::load(workspace()).unwrap().pin;
+    let pin = common::manifest::pin();
     // The path borrows the pin, so the question is asked of the unit and
     // the pin handed back whole.
     Promise::Oracle
@@ -518,7 +518,7 @@ fn a_tree_the_variable_names_is_at_the_pin() {
         eprintln!("{TREE_VARIABLE} is unset; nothing claims a tree, skipping");
         return;
     }
-    let pin = Manifest::load(workspace()).unwrap().pin;
+    let pin = common::manifest::pin();
     let tree = pin.source.tree().unwrap();
     assert!(tree.is_dir(), "{}", tree.display());
 }
@@ -557,7 +557,7 @@ fn a_tree_the_variable_names_holds_every_test_the_pin_counts() {
         eprintln!("{TREE_VARIABLE} is unset; nothing claims a tree, skipping");
         return;
     }
-    let source = Manifest::load(workspace()).unwrap().pin.source;
+    let source = common::manifest::pin().source;
     let tree = source.tree().unwrap();
     assert_eq!(
         phpt_files_under(&tree),
@@ -1051,7 +1051,7 @@ fn the_fastcgi_split_reads_both_keys_or_neither() {
 /// `PATH_TRANSLATED` (#2650).
 #[test]
 fn the_tracked_pin_maps_http_to_fastcgi_as_nginx_s_stock_params() {
-    let pin = Manifest::load(workspace()).unwrap().pin;
+    let pin = common::manifest::pin();
     let mapping = pin.fastcgi().unwrap();
     assert_eq!(
         mapping.split_path_info.as_ref().map(Split::as_str),

@@ -1181,6 +1181,66 @@ fn a_merge_that_brings_a_revision_still_cited_as_next_onto_main_is_refused() {
     assert_eq!(scratch.calls("computed"), Vec::<String>::new());
 }
 
+/// A fast-forward onto `main` writes no commit, so neither commit hook
+/// reads what it brings (#3138): pre-push reads it instead. The branch
+/// carrying `fixtures/hooks/next/cited.rs` is pushed as itself and not
+/// read; `main` fast-forwarded onto it is refused naming the line, the
+/// remote's `main` unmoved and `done` not asked, and so is the same
+/// `main` pushed to a remote that has no `main` yet, read whole.
+#[test]
+fn a_push_of_main_that_fast_forwards_a_revision_still_cited_as_next_is_refused() {
+    let cited = xtask::package_dir().join("fixtures/hooks/next/cited.rs");
+    let scratch = scratch("push-next", &Computed::Rendered);
+    scratch.git(&["checkout", "-q", "-B", "main"], false);
+    remote(&scratch);
+    let (code, out) = scratch.run(&["push", "-q", "origin", "main"], true);
+    assert_eq!(code, 0, "{out}");
+    let before = scratch.head();
+
+    scratch.git(&["checkout", "-q", "-b", "t9"], false);
+    let file = "crates/php_heap/src/trace.rs";
+    write(&scratch.root, file, &fs::read_to_string(cited).unwrap());
+    scratch.git(&["add", "--", file], false);
+    scratch.git(&["commit", "-q", "-m", "the work of #9"], false);
+    let (code, out) = scratch.run(&["push", "-q", "origin", "t9"], true);
+    assert_eq!(code, 0, "another branch is not read: {out}");
+    assert_eq!(scratch.calls("cargo"), ["xtask done", "xtask done"]);
+
+    scratch.git(&["checkout", "-q", "main"], false);
+    scratch.git(&["merge", "-q", "--ff-only", "t9"], false);
+    let (code, out) = scratch.run(&["push", "-q", "origin", "main"], true);
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains(&format!("{file}:2:")), "{out}");
+    assert!(
+        out.contains("pre-push: the revision cited above is still NEXT"),
+        "{out}"
+    );
+    let held = scratch.git(&["rev-parse", "origin/main"], false);
+    assert_eq!(held.trim(), before, "the push was refused");
+    assert_eq!(scratch.calls("cargo").len(), 2, "done was not asked");
+
+    let fresh = scratch.dir.join("fresh.git");
+    scratch.git(&["init", "-q", "--bare", fresh.to_str().unwrap()], false);
+    let (code, out) = scratch.run(&["push", "-q", fresh.to_str().unwrap(), "main"], true);
+    assert_ne!(code, 0, "a remote with no main yet reads main whole: {out}");
+    assert!(out.contains(&format!("{file}:2:")), "{out}");
+    assert_eq!(scratch.calls("cargo").len(), 2, "done was not asked");
+
+    // A remote sha this clone does not hold, a `main` moved there and not
+    // fetched, is a range nothing can read: refused, not read as clean.
+    let unheld = "1234567890abcdef1234567890abcdef12345678";
+    let out = Command::new(workspace().join("scripts/hooks/next-cited"))
+        .args([unheld, "HEAD"])
+        .current_dir(&scratch.root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(&format!("{unheld} is no commit")),
+        "{out:?}"
+    );
+}
+
 /// computed reads the working tree and the merge commits the index: a
 /// region file whose staged copy is unrendered and whose working copy is
 /// rendered would pass `computed check` and be committed unrendered, so
