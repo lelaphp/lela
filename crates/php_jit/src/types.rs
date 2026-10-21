@@ -22,8 +22,10 @@
 //!   array, a reference's inner type, a conditional jump's direction, the
 //!   caller a return lands in. A guard on what the trace entered with is
 //!   held once at entry, and a loop's phi guard moves to its entry value
-//!   where the back edge already has the type, as php's "propagate
-//!   guards through Phi sources" does. What an opline writes is typed by
+//!   where the back edge already has the type, or where an inline
+//!   arithmetic made what it brings and holds it long within itself,
+//!   rerun where it overflows, as php's "propagate guards through Phi
+//!   sources" does with `is_checked_guard`. What an opline writes is typed by
 //!   what php's inference knows of its operands, so where it reads a
 //!   variable a symbol table reaches, which php types as anything, the
 //!   opline that reads what it wrote holds it, as php's does.

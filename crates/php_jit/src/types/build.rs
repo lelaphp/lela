@@ -19,9 +19,9 @@ use super::opcodes::{
     written_after_entry,
 };
 use super::{
-    Abort, Check, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo, Fused, Grows, Guard,
-    GuardAt, Home, Imm, Known, Landing, Layout, Leave, Line, LoopHeader, Op, OpId, Operand, Place,
-    Read, Repeat, Slot, Store, Stored, TraceIr, Unwind, UnwindId, Value, ValueId,
+    Abort, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo, Fused,
+    Grows, Guard, GuardAt, Home, Imm, Known, Landing, Layout, Leave, Line, LoopHeader, Op, OpId,
+    Operand, Place, Read, Repeat, Slot, Store, Stored, TraceIr, Unwind, UnwindId, Value, ValueId,
 };
 use crate::record::{self, Event, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -1736,8 +1736,24 @@ impl<'a> Builder<'a> {
                 }
                 Narrowed::Layout(_) => brought.within(phi.types),
             };
-            if !carried {
+            // php's third arm: a back edge whose value an inline
+            // arithmetic made, of another type than the phi's guard holds,
+            // is held to it within that arithmetic, `is_checked_guard`.
+            let checked = match narrowed {
+                Narrowed::Tag(ZvalType::Long) if !carried => self.checked_guard(back),
+                _ => None,
+            };
+            if !carried && checked.is_none() {
                 continue;
+            }
+            if let Some(held) = checked {
+                let types = self.val(back).types.narrowed(ZvalType::Long);
+                let slot = self.val(back).slot;
+                self.val_mut(back).types = types;
+                if !self.aliased(slot) {
+                    self.val_mut(back).home = Home::Register;
+                }
+                self.guards.push(held);
             }
             self.val_mut(entry).types = match narrowed {
                 Narrowed::Tag(tag) => entered.types.narrowed(tag),
@@ -1770,6 +1786,61 @@ impl<'a> Builder<'a> {
             }
         }
         Ok(())
+    }
+
+    /// php's `is_checked_guard` (`Z/ext/opcache/jit/zend_jit_trace.c:1182-1260`)
+    /// over a loop phi guarded long and `back`, what its back edge brings:
+    /// a value no reference holds that an inline `ADD`, `SUB` or `MUL`, a
+    /// `+=`, `-=` or `*=`, or an increment or a decrement made over
+    /// numbers, which holds its overflow itself, so the guard the phi
+    /// held at the header each turn is held within it, rerunning it where
+    /// it overflows. The guard it holds, where it is one.
+    fn checked_guard(&self, back: ValueId) -> Option<Placed> {
+        let made = *self.val(back);
+        if made.types.meets(Types::REF) || !made.types.meets(Types::LONG) {
+            return None;
+        }
+        let Def::Op(def) = made.def else { return None };
+        let Some(Op::Line(line)) = self.ops.get(def.index()) else {
+            return None;
+        };
+        let numbers = |operand: Operand| match operand {
+            Operand::Constant(Constant::Long(_) | Constant::Double(_)) => true,
+            Operand::Value(value) => {
+                let types = self.val(value).types;
+                types.meets(Types::NUMBER) && !types.meets(Types::REF.or(Types::STRING))
+            }
+            Operand::Constant(_) | Operand::Unused => false,
+        };
+        let checked = match line.opcode {
+            Opcode::PreInc | Opcode::PreDec | Opcode::PostInc | Opcode::PostDec => {
+                (line.op1_def == Some(back) || line.out == Some(back)) && numbers(line.op1)
+            }
+            Opcode::AssignOp => {
+                line.op1_def == Some(back)
+                    && matches!(
+                        line.imm,
+                        Imm::Binary(Opcode::Add | Opcode::Sub | Opcode::Mul)
+                    )
+                    && numbers(line.op1)
+                    && numbers(line.op2)
+            }
+            Opcode::Add | Opcode::Sub | Opcode::Mul => {
+                line.out == Some(back) && numbers(line.op1) && numbers(line.op2)
+            }
+            _ => false,
+        };
+        let inline = line.form == Form::Inline
+            && within(line.opcode, ZvalType::Long) == Some(Within::Rerun)
+            && !self.over_aliased(line.op1, line.op2);
+        (checked && inline).then(|| Placed {
+            at: GuardAt::Within(def),
+            check: Check::Type {
+                value: back,
+                tag: ZvalType::Long,
+            },
+            exit: draft(Point::Before(def), line.frame, At::Opline(line.opline)),
+        })
     }
 
     /// One exit's spec from its draft and the state it leaves, the values

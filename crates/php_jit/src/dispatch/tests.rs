@@ -263,7 +263,7 @@ fn a_full_table_refuses_one_root_and_stops_the_counters() {
             "---- TRACE 1 stop (loop)",
             "---- TRACE 1 compiled",
             "",
-            "     TRACE 1 exit 4 a() body.php:2",
+            "     TRACE 1 exit 5 a() body.php:2",
             "---- TRACE 2 start (enter) b() body.php:3",
             "---- TRACE 2 abort (too many traces)",
             "---- TRACE 2 blacklisted",
@@ -572,17 +572,19 @@ fn a_main_loop_no_call_activates_is_a_root_at_its_header() {
 
 /// Under `jit.mode=exit-fuzz` every guard a compiled trace holds fails
 /// once, the loop's interrupt test among them, and the interpreter goes
-/// on at each landing to print what it prints under `force`: `a`'s two
-/// entry guards leave through exits of their own, the second knowing the
-/// type the first held, as php's stack map does; the interrupt test
-/// through its own, numbered last and growing no side trace, php's
-/// `ZEND_JIT_EXIT_TO_VM`; the guard on `$s` at the header and the
-/// increment's overflow guard through theirs; then the loop runs
-/// compiled to its end; the second call's trace links to it, its guards
-/// failed already, and leaves where the loop ends. A jump's direction is
-/// never failed: its exit lands where the jump it did not expect went.
-/// php numbers the end `exit 3`, as its trace starts at the loop's
-/// condition and meets the jump's direction before the body (#3134).
+/// on at each landing to print what it prints under `force`: `a`'s three
+/// entry guards, on `$n`, `$s` and `$i`, leave through exits of their
+/// own, each knowing the types those before it held, as
+/// php's stack map does; the interrupt test through its own, numbered
+/// last and growing no side trace, php's `ZEND_JIT_EXIT_TO_VM`; the
+/// `+=`'s and the increment's overflow guards through theirs, where the
+/// loop's phis are held, as php's `is_checked_guard` holds them (#3135);
+/// then the loop runs compiled to its end; the second call's trace links
+/// to it, its guards failed already, and leaves where the loop ends. A
+/// jump's direction is never failed: its exit lands where the jump it did
+/// not expect went. php numbers the end `exit 3`, as its trace starts at
+/// the loop's condition and meets the jump's direction before the body
+/// (#3134).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn under_exit_fuzz_every_guard_fails_once_and_the_output_is_forces() {
@@ -596,14 +598,14 @@ fn under_exit_fuzz_every_guard_fails_once_and_the_output_is_forces() {
     };
     let force = testing::serve::<Lane>(&DUMPED, program);
     assert_eq!(testing::stdout(&force), "45190\n");
-    assert_eq!(exits(&force), ["     TRACE 1 exit 4 a() body.php:2"; 2]);
+    assert_eq!(exits(&force), ["     TRACE 1 exit 5 a() body.php:2"; 2]);
     let mut fuzzed = DUMPED.to_vec();
     fuzzed[0] = ("jit.mode", "exit-fuzz");
     let fuzz = testing::serve::<Lane>(&fuzzed, program);
     assert_eq!(testing::stdout(&fuzz), "45190\n");
     assert_eq!(
         exits(&fuzz),
-        [0, 1, 5, 2, 3, 4, 4].map(|exit| format!("     TRACE 1 exit {exit} a() body.php:2"))
+        [0, 1, 2, 6, 3, 4, 5, 5].map(|exit| format!("     TRACE 1 exit {exit} a() body.php:2"))
     );
 }
 

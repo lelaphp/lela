@@ -19,8 +19,8 @@ use php_heap::ZvalType;
 use php_unit::Opcode;
 
 use super::{
-    Check, Def, End, Form, Frame, Home, Landing, Op, OpId, Operand, Repeat, Slot, TraceIr, Types,
-    ValueId,
+    Check, Def, End, Form, Frame, GuardAt, Home, Landing, Op, OpId, Operand, Repeat, Slot, TraceIr,
+    Types, ValueId,
 };
 use crate::lower::dump;
 use crate::record::Stop;
@@ -386,16 +386,17 @@ fn a_fetched_elements_guard_frees_the_temporary_it_read() -> Result<(), String> 
 /// places that leave with one spec share one exit, as php's
 /// `zend_jit_trace_get_exit_point` reuses them, so it builds under php's
 /// 512. Each statement leaves at two oplines, the `MUL`'s overflow and
-/// the `ASSIGN_OP`'s, but the last, whose sum the loop's phi takes, and
-/// the first `ASSIGN_OP` holds the guard on `$s` too, through an exit of
-/// its own, since its overflow guard knows the type that guard held. With
-/// the entry guard, the `$i++`, the loop's test and its interrupt test,
-/// which grows no side trace and leaves through an exit of its own, php's
-/// `ZEND_JIT_EXIT_TO_VM`, that is 504, where an exit per place was 754.
-/// php's is 502: its inference over the whole function knows `$i` long,
-/// so it holds no entry guard on it nor an overflow on `$i++`, and it
-/// moves `$s`'s guard to the entry with an overflow guard on the last
-/// `+=` (#3135).
+/// the `ASSIGN_OP`'s, the last's too: the loop's phi of `$s` is guarded
+/// long at entry, and the sum its back edge brings is held long within
+/// the last `+=`, which reruns where it overflows, as php's
+/// `is_checked_guard` moves the phi's guard (#3135), so no guard on `$s`
+/// stands at the header. With the entry guards on `$s` and `$i`, the
+/// `$i++`'s overflow, the loop's test and its interrupt test, which grows
+/// no side trace and leaves through an exit of its own, php's
+/// `ZEND_JIT_EXIT_TO_VM`, that is 505, where an exit per place was 754.
+/// php's is 502: its inference over the whole function knows `$i` long
+/// and its range, so it holds no entry guard on it and no overflow on
+/// `$i++` or on `$i * 1`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_long_loop_shares_its_exits_as_php_reuses_them() -> Result<(), String> {
@@ -410,7 +411,25 @@ fn a_long_loop_shares_its_exits_as_php_reuses_them() -> Result<(), String> {
             echo f(3), \"\\n\";"
         ),
     )?;
-    assert_eq!(ir.exits.len(), 504, "{}", dump::render(&ir));
+    assert_eq!(ir.exits.len(), 505, "{}", dump::render(&ir));
+    let s = |value: ValueId| ir.values[value.0 as usize].slot.var == 1;
+    let on_s: Vec<_> = (ir.guards.iter())
+        .filter_map(|guard| match guard.check {
+            Check::Type { value, tag } if s(value) => Some((guard.at, tag)),
+            _ => None,
+        })
+        .collect();
+    let last = ir
+        .ops
+        .iter()
+        .rposition(|op| matches!(op, Op::Line(line) if line.opcode == Opcode::AssignOp));
+    let last = OpId(u32::try_from(last.ok_or("no +=")?).map_err(|e| e.to_string())?);
+    assert!(
+        on_s.contains(&(GuardAt::Entry, ZvalType::Long))
+            && on_s.contains(&(GuardAt::Within(last), ZvalType::Long))
+            && !on_s.iter().any(|(at, _)| matches!(at, GuardAt::Before(_))),
+        "$s held at entry and within the last +=, and not at the header: {on_s:?}"
+    );
     for (at, exit) in ir.exits.iter().enumerate() {
         assert!(
             !ir.exits[..at].contains(exit),
