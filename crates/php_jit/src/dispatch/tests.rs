@@ -622,6 +622,31 @@ fn under_exit_fuzz_every_guard_fails_once_and_the_output_is_forces() {
     );
 }
 
+/// A loop's trace entered at its body from its back edge
+/// (`types::BodyEntry`) holds the frame to what it knows there: under
+/// exit-fuzz every guard fails once, and the interpreter, going on at
+/// each landing, comes to the back edge with the frame as it left it;
+/// where `$s` turned a string the entry declines, nothing ran, and the
+/// trace is entered at its condition, whose guards take the exits. What
+/// it prints is the interpreter's under force, exit-fuzz and tracing.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loop_entered_at_its_body_holds_the_frame_to_what_it_knows_there() {
+    let program = "function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) {
+            $s = $i < 4 ? $s + $i : \"s$i\"; } return $s; }
+        echo f(8), f(3), f(8), \"\\n\";";
+    for mode in ["force", "exit-fuzz", "tracing"] {
+        let mut ini = DUMPED.to_vec();
+        ini[0] = ("jit.mode", mode);
+        let served = testing::serve::<Lane>(&ini, program);
+        assert_eq!(
+            (testing::stdout(&served), served.fatal),
+            ("s73s7\n".to_owned(), None),
+            "{mode}"
+        );
+    }
+}
+
 /// `run` from trace to trace (`jit-design.md` §4.9 *Tested*), on the one
 /// target whose arena maps code today: two traces assembled by hand, each
 /// serving one opline through a kernel that keeps the number of the

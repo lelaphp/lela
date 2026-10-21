@@ -44,12 +44,15 @@ use php_engine::tier::FuncRef;
 use php_heap::{Arr, ROOM_BYTES, Ref, Zval, ZvalType};
 use php_unit::{MapPtrOffset, Opcode, OplineIdx};
 
-use super::{ABANDONED, INTERRUPT_AT, INTERRUPTED, Kernel, Stood, Symbols, UNWOUND, located};
+use super::{
+    ABANDONED, DECLINED, ENTRY_AT, INTERRUPT_AT, INTERRUPTED, Kernel, Stood, Symbols, UNWOUND,
+    located,
+};
 use crate::record::Stop;
 use crate::types::{
-    Abort, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home, Imm,
-    Interrupt, Layout, Leave, Line, Op, OpId, Operand, Repeat, Slot, Store, Stored, TraceIr, Types,
-    UnwindId, ValueId, cannot_raise,
+    Abort, BodyEntry, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home,
+    Imm, Interrupt, Layout, Leave, Line, Op, OpId, Operand, Repeat, Slot, Store, Stored, TraceIr,
+    Types, UnwindId, ValueId, cannot_raise,
 };
 
 /// A layout offset as the immediate a load or a store takes.
@@ -247,6 +250,8 @@ struct Emit<'a> {
     /// The block the interrupt test answers [`INTERRUPTED`] from, where
     /// it takes php's stub.
     stub: Option<Block>,
+    /// The block a body entry that declines answers [`DECLINED`] from.
+    declined: Option<Block>,
     /// The frame the trace runs in now.
     running: Frame,
     /// Under `jit.mode=exit-fuzz`, the bytes each guard fails once by.
@@ -284,6 +289,7 @@ impl<'a> Emit<'a> {
             unwinds: vec![None; ir.unwinds.len()],
             abandon: None,
             stub: None,
+            declined: None,
             running: Frame::ROOT,
             fuzz: None,
             fuzzed_sites: 0,
@@ -313,13 +319,24 @@ impl<'a> Emit<'a> {
         if header.is_some() {
             self.interrupt = Some(self.b.ins().load(I64, trusted(), cx, INTERRUPT_AT));
         }
+        // A trace entered at its loop's body goes there; at its first op,
+        // on.
+        let body = match &self.ir.body {
+            Some(body) => {
+                let (into, first) = (self.b.create_block(), self.b.create_block());
+                let at_body = self.b.ins().load(I32, trusted(), cx, ENTRY_AT);
+                self.b.ins().brif(at_body, into, &[], first, &[]);
+                self.b.switch_to_block(first);
+                self.b.seal_block(first);
+                Some((body, into, self.b.create_block()))
+            }
+            None => None,
+        };
         for guard in self.ir.guards.iter().filter(|g| g.at == GuardAt::Entry) {
             self.guard(*guard)?;
         }
         let split = header.map_or(self.ir.ops.len(), |header| header.at.index());
-        for at in 0..split {
-            self.op(at)?;
-        }
+        self.ops(0..split, body)?;
         match (self.ir.end, self.interrupt) {
             (End::Loop(header), Some(interrupt)) => {
                 let phis = self.register_phis();
@@ -339,9 +356,7 @@ impl<'a> Emit<'a> {
                     Interrupt::Exit(exit) => self.leave_if(flag, exit)?,
                     Interrupt::Stub(_) => self.stub_if(flag)?,
                 }
-                for at in split..self.ir.ops.len() {
-                    self.op(at)?;
-                }
+                self.ops(split..self.ir.ops.len(), body)?;
                 let brought = phis
                     .iter()
                     .map(|&(phi, _, back)| Ok((phi, self.register(back)?)))
@@ -369,7 +384,143 @@ impl<'a> Emit<'a> {
             }
             (End::Loop(_), None) => return Err(mismatch("a loop with no interrupt flag")),
         }
+        if let Some((entry, into, block)) = body {
+            self.b.set_srcloc(SourceLoc::default());
+            self.b.switch_to_block(into);
+            self.b.seal_block(into);
+            self.enter_body(entry, block)?;
+            self.b.seal_block(block);
+        }
         self.exit_blocks()
+    }
+
+    /// The ops of `range`, the way in at the body (`body`: the entry, its
+    /// block and the block the entry jumps to) opened where its op is.
+    fn ops(
+        &mut self,
+        range: std::ops::Range<usize>,
+        body: Option<(&BodyEntry, Block, Block)>,
+    ) -> Result<(), Abort> {
+        for at in range {
+            if let Some((entry, _, block)) = body
+                && entry.at.index() == at
+            {
+                self.b.ins().jump(block, &[]);
+                self.b.switch_to_block(block);
+            }
+            self.op(at)?;
+        }
+        Ok(())
+    }
+
+    /// The way in at a loop's body (`types::BodyEntry`): every guard the
+    /// trace holds at entry, and every value it holds there, read from
+    /// the frame and held to what the trace knows of it, its type byte
+    /// one of its kinds' and an array's layout the one it knows, a
+    /// register's loaded into it; anything else declines the entry,
+    /// [`DECLINED`], taking no exit. Then on at the body's first op, `to`.
+    fn enter_body(&mut self, body: &BodyEntry, to: Block) -> Result<(), Abort> {
+        let entered: Vec<Guard> = (self.ir.guards.iter())
+            .filter(|guard| guard.at == GuardAt::Entry)
+            .copied()
+            .collect();
+        for guard in entered {
+            match guard.check {
+                Check::Type { value, tag: t } => {
+                    let slot = self.value(value)?.slot;
+                    self.decline_unless(slot, &[t], None)?;
+                }
+                Check::Layout { value, layout } => {
+                    let slot = self.value(value)?.slot;
+                    self.decline_unless(slot, &[ZvalType::Array], Some(layout))?;
+                }
+                Check::Deref { value, tag: t } => {
+                    let (room, at) = self.place(self.value(value)?.slot)?;
+                    let byte = self.b.ins().load(I8, trusted(), room, at + TYPE_AT);
+                    let reference = tag(ZvalType::Reference);
+                    let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, byte, reference);
+                    self.decline_if(other);
+                    let held = self.b.ins().load(I64, trusted(), room, at);
+                    let inner = imm(Ref::VALUE_AT) + TYPE_AT;
+                    let inner = self.b.ins().load(I8, trusted(), held, inner);
+                    let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, inner, tag(t));
+                    self.decline_if(other);
+                }
+                Check::Direction { .. } | Check::Stands { .. } => {
+                    return Err(mismatch("a body entry past a guard it cannot hold"));
+                }
+            }
+        }
+        for &(slot, value) in &body.holds {
+            let held = self.value(value)?;
+            let layout = match held.types.tag() {
+                Some(ZvalType::Array) if !held.types.either_layout() => {
+                    Some(if held.types.meets(Types::PACKED) {
+                        Layout::Packed
+                    } else {
+                        Layout::Hash
+                    })
+                }
+                _ => None,
+            };
+            if let Some(tags) = held.types.tags() {
+                self.decline_unless(slot, &tags.collect::<Vec<_>>(), layout)?;
+            }
+            if held.home == Home::Register {
+                let kind =
+                    Kind::of(held.types).ok_or_else(|| mismatch("a register of no scalar kind"))?;
+                let loaded = self.load(slot, kind, false)?;
+                self.define(value, loaded)?;
+            }
+        }
+        self.b.ins().jump(to, &[]);
+        Ok(())
+    }
+
+    /// Decline a body entry where `slot` holds none of `tags`, or an
+    /// array not laid out as `layout` says.
+    fn decline_unless(
+        &mut self,
+        slot: Slot,
+        tags: &[ZvalType],
+        layout: Option<Layout>,
+    ) -> Result<(), Abort> {
+        let (room, at) = self.place(slot)?;
+        let byte = self.b.ins().load(I8, trusted(), room, at + TYPE_AT);
+        let mut other = self.b.ins().iconst(I8, 1);
+        for t in tags {
+            let not = self.b.ins().icmp_imm_s(IntCC::NotEqual, byte, tag(*t));
+            other = self.b.ins().band(other, not);
+        }
+        self.decline_if(other);
+        if let Some(layout) = layout {
+            let array = self.b.ins().load(I64, trusted(), room, at);
+            let flags = self.b.ins().load(I32, trusted(), array, imm(Arr::FLAGS_AT));
+            let packed = self.b.ins().band_imm_u(flags, i64::from(Arr::PACKED));
+            let cc = match layout {
+                Layout::Packed => IntCC::Equal,
+                Layout::Hash => IntCC::NotEqual,
+            };
+            let other = self.b.ins().icmp_imm_s(cc, packed, 0);
+            self.decline_if(other);
+        }
+        Ok(())
+    }
+
+    /// Answer [`DECLINED`] where `cond` is not zero.
+    fn decline_if(&mut self, cond: Value) {
+        let to = if let Some(block) = self.declined {
+            block
+        } else {
+            let block = self.b.create_block();
+            self.b.set_cold_block(block);
+            self.declined = Some(block);
+            block
+        };
+        let on = self.b.create_block();
+        self.b.ins().brif(cond, to, &[], on, &[]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
     }
 
     /// The phis the trace keeps in registers: each, what it enters with
@@ -741,6 +892,12 @@ impl<'a> Emit<'a> {
             self.b.switch_to_block(block);
             self.b.seal_block(block);
             let answer = self.b.ins().iconst(I32, i64::from(INTERRUPTED));
+            self.b.ins().return_(&[answer]);
+        }
+        if let Some(block) = self.declined {
+            self.b.switch_to_block(block);
+            self.b.seal_block(block);
+            let answer = self.b.ins().iconst(I32, i64::from(DECLINED));
             self.b.ins().return_(&[answer]);
         }
         Ok(())

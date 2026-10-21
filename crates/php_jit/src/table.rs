@@ -166,6 +166,9 @@ pub(crate) struct Trace<P: Pages = Native> {
     pub(crate) stub: Option<OplineIdx>,
     /// The op array and opline its first recorded opline stands at.
     pub(crate) opens: Option<(FuncRef, OplineIdx)>,
+    /// Where it is entered at a loop's body too, the opline its back edge
+    /// lands on.
+    pub(crate) body: Option<OplineIdx>,
     #[cfg_attr(
         not(test),
         expect(
@@ -580,6 +583,7 @@ impl<P: Pages> TraceTable<P> {
             leaves: compiled.leaves,
             stub: compiled.stub,
             opens: compiled.opens,
+            body: compiled.body,
             map_ptrs: compiled.map_ptrs,
             marks: compiled.marks,
             fuzzed: compiled.fuzzed,

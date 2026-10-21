@@ -103,6 +103,31 @@ pub(crate) struct TraceIr {
     pub(crate) unwinds: Vec<Unwind>,
     pub(crate) map_ptrs: Vec<MapPtrRaw>,
     pub(crate) end: End,
+    /// Where a loop's trace is entered from its back edge, where that
+    /// lands past its header ([`BodyEntry`]): none for a trace entered at
+    /// its first op alone.
+    pub(crate) body: Option<BodyEntry>,
+}
+
+/// The second way into a trace rooted at a loop's condition, php's header
+/// (`jit-design.md` §4.1, revision NEXT-7, as built until a person rules
+/// on #3178), whether it closes the loop or leaves it: at the opline the
+/// loop's back edge lands on, the body of a `for` or a `while`. The engine's
+/// back edge stands the frame there, past the condition the interpreter
+/// just served; entering at the body takes the trace's ops from `at` on
+/// with what the frame holds, each value the trace keeps there read from
+/// its slot and held to what the trace knows of it. A frame holding
+/// anything else declines the entry, taking no exit, and `dispatch`
+/// steps on to the condition and enters there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BodyEntry {
+    /// The op the entry goes on at.
+    pub(crate) at: OpId,
+    /// Its opline, in the frame the trace entered in, where the frame
+    /// stands.
+    pub(crate) opline: OplineIdx,
+    /// What each slot of that frame holds there, the trace's value of it.
+    pub(crate) holds: Vec<(Slot, ValueId)>,
 }
 
 /// Where the trace was recorded from and why the recording stopped.

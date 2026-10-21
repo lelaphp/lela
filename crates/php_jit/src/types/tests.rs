@@ -670,6 +670,43 @@ fn the_entry_guards_stand_in_their_slots_order() -> Result<(), String> {
     Ok(())
 }
 
+/// A `for` loop's trace, rooted at its condition, keeps a second way in
+/// at the opline its back edge lands on, the body's first, `+=` at 4
+/// past the condition's `IS_SMALLER` at 6: the op after the condition's,
+/// with every variable it holds there, `$n`, `$s` and `$i`, so the
+/// interpreter's back edge enters the trace there and steps nothing on
+/// to the condition. A loop whose condition makes a call keeps none: the
+/// call's frame stands between.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loops_trace_keeps_a_way_in_at_the_body_its_back_edge_lands_on() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $i; } return $s; }
+        echo f(5), \"\\n\";",
+    )?;
+    let body = ir.body.as_ref().ok_or("no way in at the body")?;
+    let at = ir.ops.get(body.at.index());
+    assert!(
+        matches!(at, Some(Op::Line(line)) if line.opline.0 == 4 && line.opcode == Opcode::AssignOp),
+        "{at:?}\n{}",
+        dump::render(&ir)
+    );
+    assert_eq!(body.opline.0, 4);
+    let mut held: Vec<u32> = body.holds.iter().map(|(slot, _)| slot.var).collect();
+    held.sort_unstable();
+    held.dedup();
+    assert_eq!(held, [0, 1, 2], "{:?}", body.holds);
+    let called = built(
+        &IN_F,
+        "function g($i) { return $i; }
+        function f($n) { $s = 0; for ($i = 0; g($i) < $n; $i++) { $s += $i; } return $s; }
+        echo f(5), \"\\n\";",
+    )?;
+    assert_eq!(called.body, None, "{}", dump::render(&called));
+    Ok(())
+}
+
 /// A loop's interrupt test takes php's exit point only where php's code
 /// does not keep the trace's initial instruction pointer or keeps values
 /// in registers at the loop's end, and php's interrupt stub otherwise,

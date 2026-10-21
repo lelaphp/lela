@@ -19,10 +19,10 @@ use super::opcodes::{
     written_after_entry,
 };
 use super::{
-    Abort, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo, Fused,
-    Grows, Guard, GuardAt, Home, Imm, Interrupt, Known, Landing, Layout, Leave, Line, LoopHeader,
-    Op, OpId, Operand, Place, Read, Repeat, Slot, Store, Stored, TraceIr, Unwind, UnwindId, Value,
-    ValueId,
+    Abort, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo,
+    Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known, Landing, Layout, Leave, Line,
+    LoopHeader, Op, OpId, Operand, Place, Read, Repeat, Slot, Store, Stored, TraceIr, Unwind,
+    UnwindId, Value, ValueId,
 };
 use crate::record::{self, Event, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -1521,6 +1521,7 @@ impl<'a> Builder<'a> {
         let end = numbered
             .end
             .ok_or_else(|| mismatch("a trace with no end"))?;
+        let body = self.body_entry(&numbered.guards);
         Ok(TraceIr {
             entry: Entry {
                 start: self.rec.start,
@@ -1535,6 +1536,56 @@ impl<'a> Builder<'a> {
             unwinds: numbered.unwinds,
             map_ptrs: self.map_ptrs,
             end,
+            body,
+        })
+    }
+
+    /// Where a loop's trace is entered from its back edge past its
+    /// header ([`BodyEntry`]): a trace rooted at the condition of a `for`
+    /// or a `while`, its first op, whether it closes the loop there or
+    /// leaves, a link to an inner loop's trace, say; whose condition's oplines,
+    /// in the frame the trace entered in, are followed by the body's
+    /// first, an opline before the header's, the jump's landing. The
+    /// interpreter served the condition before its back edge landed
+    /// there, so what the frame holds there is what the trace holds after
+    /// it. None where a call is under way there, a guard held at entry is
+    /// one the frame's type bytes and layouts do not hold (`guards`), or
+    /// the trace is a side's.
+    fn body_entry(&self, guards: &[Guard]) -> Option<BodyEntry> {
+        let rooted_at_first = match self.repeat {
+            None => true,
+            Some(Repeat::Loop) => self.header.index() == 0,
+            Some(Repeat::Call | Repeat::Return) => false,
+        };
+        if self.rec.start != Start::Loop || !rooted_at_first {
+            return None;
+        }
+        let held = (guards.iter().filter(|guard| guard.at == GuardAt::Entry)).all(|guard| {
+            matches!(
+                guard.check,
+                Check::Type { .. } | Check::Deref { .. } | Check::Layout { .. }
+            )
+        });
+        let Some(Op::Line(header)) = self.ops.first() else {
+            return None;
+        };
+        // The condition's oplines, past the header's and in its frame, up
+        // to the first before it, the body's.
+        let (at, body) = (self.ops.iter().enumerate().skip(1))
+            .map_while(|(at, op)| match op {
+                Op::Line(line) if line.frame == Frame::ROOT => Some((at, line)),
+                _ => None,
+            })
+            .find(|(_, line)| line.opline.0 < header.opline.0)?;
+        let snapshot = self.snapshots.get(at)?;
+        let rooted = header.frame == Frame::ROOT
+            && snapshot.calls == 0
+            && (snapshot.values.iter()).all(|(slot, _)| slot.frame == Frame::ROOT);
+        let at = OpId(u32::try_from(at).ok()?);
+        (held && rooted).then(|| BodyEntry {
+            at,
+            opline: body.opline,
+            holds: snapshot.values.clone(),
         })
     }
 

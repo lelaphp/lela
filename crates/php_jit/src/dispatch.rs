@@ -32,7 +32,7 @@ use php_engine::tier::Flow;
 use php_engine::tier::{self, Fatal, FrameRef, Request, SafepointIdx, Site, Word};
 
 use crate::compiler::{self, Job};
-use crate::enter::{self, Crossed as _, Exited, Left};
+use crate::enter::{self, At, Crossed as _, Exited, Left};
 use crate::policy::{
     self, Claim, Holder, JitDebug, Mode, Outcome, Place, Policy, State, TraceEvent,
 };
@@ -142,11 +142,13 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow 
 }
 
 /// A loop's trace `id` entered from its back edge, which left `frame`
-/// where it lands: on at the opline php's trace roots at, the condition
-/// of a `for` or a `while` past the body ([`record::headed`]), where
-/// php's handler is the trace; a body that went another way on the way
-/// there resumes where it went, and one that got there and entered
-/// nothing resumes there.
+/// where it lands: at that opline, the body of a `for` or a `while`,
+/// where the trace keeps a way in there (`types::BodyEntry`) and the
+/// frame holds what the trace knows there; otherwise on at the opline
+/// php's trace roots at, the condition past the body
+/// ([`record::headed`]), where php's handler is the trace. A body that
+/// went another way on the way there resumes where it went, and one that
+/// got there and entered nothing resumes there.
 fn looped(
     req: &mut Request,
     frame: FrameRef,
@@ -154,6 +156,16 @@ fn looped(
     id: TraceId,
     shared: &Shared,
 ) -> Flow {
+    let body = table::of(req, &shared.policy, &shared.perf)
+        .and_then(|table| table.get(id))
+        .and_then(|trace| trace.body);
+    let stands = tier::frame(req, frame).map(|view| view.opline());
+    if body.is_some()
+        && body == stands
+        && let Some(flow) = run_at(req, frame, id, shared, At::Body)
+    {
+        return flow;
+    }
     match record::headed(req, frame, header) {
         Ok(Headed::Stands(at)) => run(req, at, id, shared),
         Ok(Headed::Stepped(at)) => match run(req, at, id, shared) {
@@ -255,31 +267,64 @@ fn looped(
 /// ```
 #[inline(never)]
 pub(crate) fn run(req: &mut Request, frame: FrameRef, id: TraceId, shared: &Shared) -> Flow {
+    run_at(req, frame, id, shared, At::First).unwrap_or(Flow::Continue)
+}
+
+/// [`run`], its first trace entered `at` its first op or its loop's
+/// body, and each after it at its first op; none where the first,
+/// entered at its body, declined the entry with nothing done.
+fn run_at(
+    req: &mut Request,
+    frame: FrameRef,
+    id: TraceId,
+    shared: &Shared,
+    at: At,
+) -> Option<Flow> {
     let epoch = table::holding(req, &shared.policy, &shared.perf);
     let Some(table) = table::of_epoch(&epoch) else {
-        return Flow::Continue;
+        return Some(Flow::Continue);
     };
-    let Some(mut trace) = table.get(id) else {
-        return Flow::Continue;
+    let Some(trace) = table.get(id) else {
+        return Some(Flow::Continue);
     };
-    let mut frame = frame;
+    let entered = enter::enter(req, frame, trace, at);
+    if matches!(entered, Ok(Left::Declined)) {
+        return None;
+    }
+    Some(followed(req, shared, table, trace, entered))
+}
+
+/// What `trace` left through, `entered`, followed from trace to trace
+/// as [`run`] says.
+fn followed<'t>(
+    req: &mut Request,
+    shared: &Shared,
+    table: &'t table::Table,
+    mut trace: &'t table::Trace,
+    mut entered: Result<Left, Fatal>,
+) -> Flow {
     loop {
-        let exited = match enter::enter(req, frame, trace) {
+        let exited = match entered {
             Ok(Left::Exit(exited)) => exited,
             Ok(Left::Unwound(frame)) => return Flow::Resume(frame),
             // php's interrupt stub: the interrupt handled, and the trace
             // entered again at its header, its handler.
             Ok(Left::Interrupted(header)) => match tier::interrupted(req) {
                 Ok(false) => {
-                    frame = header;
+                    entered = enter::enter(req, header, trace, At::First);
                     continue;
                 }
                 Ok(true) => return Flow::Resume(header),
                 Err(fatal) => return Flow::Bail(fatal),
             },
+            Ok(Left::Declined) => {
+                return Flow::Bail(Fatal::error(
+                    "InternalError: a trace declined an entry at its first op",
+                ));
+            }
             Err(fatal) => return Flow::Bail(fatal),
         };
-        frame = exited.frame;
+        let frame = exited.frame;
         let Some(exit) = trace.exits.get(usize::from(exited.exit.0)) else {
             return Flow::Bail(Fatal::error(
                 "InternalError: a trace landed an exit it does not have",
@@ -306,7 +351,10 @@ pub(crate) fn run(req: &mut Request, frame: FrameRef, id: TraceId, shared: &Shar
             },
         };
         match next.and_then(|next| table.get(next)) {
-            Some(next) => trace = next,
+            Some(next) => {
+                trace = next;
+                entered = enter::enter(req, frame, trace, At::First);
+            }
             None => return Flow::Resume(frame),
         }
     }

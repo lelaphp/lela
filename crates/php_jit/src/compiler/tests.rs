@@ -102,6 +102,7 @@ fn body(len: usize) -> Compiled {
         leaves: None,
         stub: None,
         opens: None,
+        body: None,
         fuzzed: crate::lower::Fuzzed::default(),
         map_ptrs: Box::new([]),
         marks: Box::new([]),
