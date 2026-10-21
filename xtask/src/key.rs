@@ -128,21 +128,9 @@ impl Snapshot {
     /// it covers, and it refuses any other.
     pub(crate) fn disk_over(root: &Path, path: &Path) -> Result<Snapshot> {
         let covers = closure(root, path)?;
-        let mut args = vec![
-            "ls-files",
-            "-z",
-            "-t",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--",
-        ];
-        for path in &covers {
-            args.push(path.to_str().context("a scope path is not UTF-8")?);
-        }
         let mut files = BTreeMap::new();
         let mut tracked = BTreeMap::new();
-        for entry in git::listed(root, &args)? {
+        for entry in git::listed_under(root, &["-t"], &covers)? {
             // `<tag> <path>`: `?` for an untracked file, a letter for one
             // the index holds.
             let (tag, path) = entry
@@ -195,8 +183,7 @@ impl Snapshot {
                 differs.insert(path);
             }
         }
-        let untracked = ["ls-files", "-z", "--others", "--exclude-standard"];
-        let untracked = BTreeSet::from_iter(git::listed(root, &untracked)?);
+        let untracked = BTreeSet::from_iter(git::untracked(root)?);
         // A file's id, or `None` for one that is not a file on disk.
         let id = |path: &str| -> Option<Result<String>> {
             match staged.get(path) {
