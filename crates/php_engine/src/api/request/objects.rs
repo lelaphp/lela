@@ -230,7 +230,10 @@ impl Request {
 
     /// `ce->properties_info` as the class's one row holds it
     /// ([`PropertiesInfo`]): what [`Request::find_property_info`] finds a
-    /// name in. None for a class with no linked record.
+    /// name in. None for a class with no linked record. Inlined into
+    /// its two callers, so the three references reach the find in
+    /// registers rather than through memory.
+    #[inline]
     pub(super) fn properties_info(&self, class: ClassId) -> Option<PropertiesInfo<'_>> {
         let (record, placed, decl) = if let Some(native) = self.native_class_at(class) {
             (
