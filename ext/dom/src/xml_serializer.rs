@@ -385,8 +385,15 @@ impl Serializer<'_> {
         if self.req.limits().stack_overflowed() {
             return Err(Failed::Deep);
         }
-        let Some(frame) = self.node(node, map, namespace, indent)? else {
-            return Ok(());
+        // The frame is read where `node` left it, never moved out of its
+        // answer: a nest keeps one frame's bytes at each level, not two
+        // (#3159).
+        let made = self.node(node, map, namespace, indent);
+        let frame = match &made {
+            Ok(Some(frame)) => frame,
+            Ok(None) => return Ok(()),
+            Err(Failed::Refused) => return Err(Failed::Refused),
+            Err(Failed::Deep) => return Err(Failed::Deep),
         };
         let mut next = frame.next;
         while let Some(child) = next {
@@ -409,6 +416,10 @@ impl Serializer<'_> {
 
     /// `dom_xml_serialization_algorithm` for one node: what it writes
     /// before its children, and the frame its children are written from.
+    /// A call of its own, so what writing a node takes is off the stack
+    /// of a nest written level by level, which keeps only the frame
+    /// (#3159).
+    #[inline(never)]
     fn node(
         &mut self,
         node: Node,
