@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use super::dump::{Dumped, Folded, Held, engine_side, held, verdict};
 use super::*;
-use crate::common::registry::registry;
+use crate::common::registry::{Row, registry, rows};
 use crate::oracle::Runner;
 use crate::reading::Status;
 use crate::scratch::Tree;
@@ -187,16 +187,8 @@ fn a_dump_that_differs_from_the_oracles_by_one_line_is_not_a_pass() {
 /// everywhere (harness §4.3).
 #[test]
 fn an_accepted_row_of_kind_compile_is_what_makes_a_difference_met() {
-    let accepted = registry(
-        r#"
-[[divergence]]
-id = "compile:corpus/identity.phpt"
-kind = "compile"
-reason = "A person's sentence."
-status = "accepted"
-since = "2026-09-11"
-"#,
-    );
+    let accepted =
+        rows(&[Row::accepted("compile:corpus/identity.phpt").reason("A person's sentence.")]);
     let judged = verdict(
         &accepted,
         "compile:corpus/identity.phpt",
