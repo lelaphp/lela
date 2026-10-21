@@ -227,6 +227,10 @@ struct Command {
     /// Whether it carries a redirection, so a command of no words still
     /// runs one.
     redirected: bool,
+    /// The index in `words` of each array assignment that word text
+    /// follows straight after its `)` (#3198): zsh ends the word there,
+    /// and bash reads the word after as more of a scalar assignment.
+    joined: Vec<usize>,
 }
 
 impl Command {
@@ -446,7 +450,8 @@ impl Lexer {
     /// The elements of an array assignment, `NAME=(…)` or `NAME+=(…)`, up
     /// to the `)` that matches its `(` (#3165): they are words of the
     /// assignment and no commands, a `$(…)` among them still running, and
-    /// the word ends at the `)` as zsh ends it. A process substitution
+    /// the word ends at the `)` as zsh ends it, word text straight after
+    /// it read as bash's too ([`Lexer::end`]). A process substitution
     /// among them runs too, `<(…)`, `>(…)` or zsh's `=(…)`, and a newline
     /// ends the line a heredoc's body follows. A separator among them is
     /// one more space, as zsh reads `;` there and bash refuses the line;
@@ -492,7 +497,14 @@ impl Lexer {
             }
             word.text.push_str(&value);
         }
+        let word = command.words.len();
+        let listed = command.next == Next::Argument;
         self.end_word(command);
+        let next = self.chars.get(self.at);
+        if listed && next.is_some_and(|c| !c.is_whitespace() && !";&|()<>".contains(*c)) {
+            command.joined.push(word);
+            command.open(false);
+        }
     }
 
     /// The text of a double-quoted word up to `close`, or of a heredoc
@@ -546,6 +558,15 @@ impl Lexer {
             .is_some_and(|w| !w.quoted && w.text.bytes().all(|b| b.is_ascii_digit()))
         {
             command.word = None;
+            // A digit straight after an array's `)` is zsh's descriptor
+            // and bash's more of the assignment: neither runs it.
+            if command
+                .joined
+                .last()
+                .is_some_and(|at| at + 1 == command.words.len())
+            {
+                command.joined.pop();
+            }
         }
         self.end_word(command);
         command.redirected = true;
@@ -597,12 +618,41 @@ impl Lexer {
     /// a command and a `;`, `||` or `&` it is joined as by that separator:
     /// `cd /wt; P=x && git add` runs `git add` wherever the `cd` left the
     /// shell (#3165).
+    ///
+    /// Where word text follows an array's `)` straight after, `P=(a)x git
+    /// commit`, the command is read as zsh runs it, `x` the program, and
+    /// then as bash runs it, `P=(a)x` an assignment and `git` the program,
+    /// both joined as the command stands (#3198). What the line assigns
+    /// is zsh's reading's, as before: bash's would replace a program the
+    /// line runs by `$P` with a word no rule names, `P=(git)Q=1; $P
+    /// commit` running `gitQ=1`.
     fn end(&mut self, command: &mut Command, after: Joint) {
         self.end_word(command);
         command.next = Next::Argument;
         let words = std::mem::take(&mut command.words);
-        self.assigned.read(&words);
         let redirected = std::mem::take(&mut command.redirected);
+        let joined = std::mem::take(&mut command.joined);
+        let mut bash = words.clone();
+        for &at in joined.iter().rev() {
+            if at + 1 < bash.len() {
+                let rest = bash.remove(at + 1);
+                bash[at].push_str(&rest);
+            }
+        }
+        let before = self.before;
+        self.run(words, redirected, after);
+        if !joined.is_empty() {
+            let zsh = std::mem::replace(&mut self.before, before);
+            let assigned = self.assigned.0.clone();
+            self.run(bash, redirected, after);
+            self.assigned.0 = assigned;
+            self.before = zsh;
+        }
+    }
+
+    /// One reading of a command's words, ended by `after`.
+    fn run(&mut self, words: Vec<String>, redirected: bool, after: Joint) {
+        self.assigned.read(&words);
         let empty = words.is_empty() && !redirected;
         let Some(argv) = Argv::running(words, &self.assigned) else {
             let begins =
@@ -1704,6 +1754,48 @@ mod tests {
         for subshell in ["P= (git add)", "\"P\"=(git add)", "echo P=(git add)"] {
             assert!(read(subshell).1.contains(&vec![0]), "{subshell}");
         }
+    }
+
+    /// #3198: word text straight after an array's `)` is zsh's next word
+    /// and bash's more of the assignment, so the command is read both
+    /// ways, each joined as it stands; a space after the `)`, or nothing
+    /// after the text, reads as before.
+    #[test]
+    fn word_text_after_an_array_is_read_as_zsh_and_as_bash_run_it() {
+        use Joint::{And, Then};
+        let line = Line::read("cd /wt && P=(a)x git commit -n; y");
+        let read: Vec<_> = line.commands().iter().map(|a| a.words.clone()).collect();
+        assert_eq!(
+            read,
+            [
+                vec!["cd", "/wt"],
+                vec!["x", "git", "commit", "-n"],
+                vec!["git", "commit", "-n"],
+                vec!["y"]
+            ]
+        );
+        let joints: Vec<_> = line.joints().iter().map(|j| (j.before, j.after)).collect();
+        assert_eq!(
+            joints,
+            [(Then, And), (And, Then), (And, Then), (Then, Then)]
+        );
+        assert!(names("P=(a)x git commit", "git commit"));
+        assert!(names("P=(a)x git commit", "x"));
+        assert_eq!(
+            words("P=(a)\"x\"#y git add; P=(a)Q=(b)$(z)y git add"),
+            [
+                vec!["x#y", "git", "add"],
+                vec!["git", "add"],
+                vec!["z"],
+                vec!["y", "git", "add"],
+                vec!["git", "add"]
+            ]
+        );
+        assert_eq!(words("P=(a) git commit"), [["git", "commit"]]);
+        assert_eq!(words("P=(a)b"), [["b"]]);
+        assert_eq!(words("P=(a)>f git commit"), [["git", "commit"]]);
+        assert_eq!(words("P=(a)2>f git commit"), [["git", "commit"]]);
+        assert_eq!(words("P=(git)Q=1; $P commit"), [["git", "commit"]]);
     }
 
     /// Whether a command of the line is the one `phrase` names.

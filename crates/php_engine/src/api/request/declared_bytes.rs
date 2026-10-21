@@ -35,9 +35,8 @@ use php_unit::decl::{ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl}
 use php_unit::{OpArray, Unit};
 
 use super::Request;
-use super::hash_bytes::HashBytes;
 use crate::api::raising::Thrown;
-use crate::api::values::Emalloc;
+use crate::api::values::{Emalloc, PhpArray, Value};
 
 /// `sizeof(zend_op)`.
 const OPLINE: usize = 32;
@@ -128,34 +127,73 @@ impl Laid {
     }
 }
 
-/// `emalloc`'d blocks and hash tables, given back together.
+/// `emalloc`'d blocks and hash tables, given back together. A table is
+/// the heap's own ([`php_heap::Arr`]), sized, grown and freed as
+/// `zend_hash.c` sizes, grows and frees it; its rows are keyed by their
+/// declaration's place, the names being the unit's strings
+/// ([`super::unit_strings`]) and the values the engine's tables', so a
+/// row holds nothing beyond its bucket.
 #[derive(Default)]
 pub(super) struct Blocks {
-    blocks: Vec<Emalloc>,
-    tables: Vec<HashBytes>,
+    /// Blocks `emalloc` lays down alone.
+    emalloced: Vec<Emalloc>,
+    /// Tables `zend_new_array` lays down, the header `emalloc`'d.
+    arrays: Vec<php_heap::Arr>,
+    /// Tables `zend_hash_init` lays down inside the `zend_class_entry`,
+    /// which the compile's arena holds, so only their data is the heap's.
+    embedded: Vec<php_heap::EmbeddedArr>,
 }
 
 impl Blocks {
     /// Whether it holds no block.
     fn is_empty(&self) -> bool {
-        self.blocks.is_empty() && self.tables.is_empty()
+        self.emalloced.is_empty() && self.arrays.is_empty() && self.embedded.is_empty()
     }
 
-    /// Every block given back.
+    /// Every block given back: each table's rows, its data and, for one
+    /// `zend_new_array` laid down, its header, as `zend_array_destroy`
+    /// and `zend_hash_destroy` give them back.
     pub(super) fn free(self, req: &mut Request) {
-        for block in self.blocks {
+        for block in self.emalloced {
             block.free(req);
         }
-        for table in self.tables {
-            table.free(req);
+        for table in self.arrays {
+            req.release(Value::array(PhpArray::of(table)));
+        }
+        for table in self.embedded {
+            let rows = table.arr();
+            for at in 0..rows.num_used() {
+                req.heap.array_take_at(rows, at);
+            }
+            table.free_data(&mut req.heap);
         }
     }
 
     /// `others`' blocks added to these.
     fn take(&mut self, others: Blocks) {
-        self.blocks.extend(others.blocks);
-        self.tables.extend(others.tables);
+        self.emalloced.extend(others.emalloced);
+        self.arrays.extend(others.arrays);
+        self.embedded.extend(others.embedded);
     }
+}
+
+/// `count` rows put in `table`, a hash table php keys by name, one
+/// bucket each and the table grown as `ZEND_HASH_IF_FULL_DO_RESIZE`
+/// grows it. An uninitialised table is laid down as a hash at the first,
+/// as `zend_hash_real_init_mixed` lays a table a string key is first
+/// written to, never as the packed list an integer key would lay.
+fn add_rows(req: &mut Request, table: php_heap::Arr, count: usize) -> Result<(), Thrown> {
+    if count == 0 {
+        return Ok(());
+    }
+    let laid = req.heap.array_extend(table, table.table_size());
+    req.fatal_of(laid)?;
+    for at in 0..count {
+        let key = php_heap::Key::Long(i64::try_from(at).unwrap_or(i64::MAX));
+        let added = req.heap.array_add_new(table, key, php_heap::Zval::null());
+        req.fatal_of(added)?;
+    }
+    Ok(())
 }
 
 impl Declared {
@@ -303,7 +341,7 @@ fn op_array(
     code: &OpArray,
     args: usize,
 ) -> Result<(), Thrown> {
-    blocks.blocks.push(Emalloc::new(req, REFCOUNT)?);
+    blocks.emalloced.push(Emalloc::new(req, REFCOUNT)?);
     // `get_next_op` grows the oplines fourfold from
     // `INITIAL_OP_ARRAY_SIZE`, and `pass_two` reallocates them to the
     // oplines with the constants after them, aligned to 16
@@ -315,7 +353,7 @@ fn op_array(
     }
     let oplines = Emalloc::new(req, grown * OPLINE)?;
     let packed = (last * OPLINE).next_multiple_of(16) + code.literals.len() * ZVAL;
-    blocks.blocks.push(oplines.resize(req, packed)?);
+    blocks.emalloced.push(oplines.resize(req, packed)?);
     // `lookup_cv` grows the names sixteen at a time, and `pass_two`
     // reallocates them to their number where it is not a multiple.
     let vars = code.vars.len();
@@ -326,7 +364,7 @@ fn op_array(
         } else {
             names.resize(req, vars * POINTER)?
         };
-        blocks.blocks.push(names);
+        blocks.emalloced.push(names);
     }
     // One block each, which a reallocation one element at a time leaves
     // in the bin of its last size.
@@ -337,18 +375,17 @@ fn op_array(
         code.dynamic_func_defs.len() * POINTER,
     ] {
         if len > 0 {
-            blocks.blocks.push(Emalloc::new(req, len)?);
+            blocks.emalloced.push(Emalloc::new(req, len)?);
         }
     }
     // `zend_new_array(8)` at the first `static` or bound variable, and
     // one bucket each (`zend_compile_static_var_common`,
     // `zend_compile_closure_binding`).
     if !code.bound_vars.is_empty() {
-        let mut statics = HashBytes::new_array(req, CLASS_TABLE)?;
-        for _ in &code.bound_vars {
-            statics.add(req)?;
-        }
-        blocks.tables.push(statics);
+        let laid = req.heap.array_sized(CLASS_TABLE);
+        let statics = req.fatal_of(laid)?;
+        blocks.arrays.push(statics);
+        add_rows(req, statics, code.bound_vars.len())?;
     }
     Ok(())
 }
@@ -390,11 +427,10 @@ fn class(req: &mut Request, blocks: &mut Blocks, class: &ClassDecl) -> Result<()
         class.properties.len(),
         class.constants.len(),
     ] {
-        let mut table = HashBytes::embedded(CLASS_TABLE);
-        for _ in 0..count {
-            table.add(req)?;
-        }
-        blocks.tables.push(table);
+        let table = php_heap::EmbeddedArr::new(CLASS_TABLE);
+        let rows = table.arr();
+        blocks.embedded.push(table);
+        add_rows(req, rows, count)?;
     }
     let stored = |instance: bool| {
         class
@@ -405,7 +441,7 @@ fn class(req: &mut Request, blocks: &mut Blocks, class: &ClassDecl) -> Result<()
     };
     for count in [stored(true), stored(false)] {
         if count > 0 {
-            blocks.blocks.push(Emalloc::new(req, count * ZVAL)?);
+            blocks.emalloced.push(Emalloc::new(req, count * ZVAL)?);
         }
     }
     // Each case's `ZEND_AST_CONST_ENUM_INIT`, copied out of the compile's
@@ -414,7 +450,7 @@ fn class(req: &mut Request, blocks: &mut Blocks, class: &ClassDecl) -> Result<()
     // and the backing value's node where it has one.
     for case in class.constants.iter().filter(|constant| constant.is_case) {
         let backed = !matches!(case.value, ConstExpr::Null);
-        blocks.blocks.push(Emalloc::new(
+        blocks.emalloced.push(Emalloc::new(
             req,
             CASE_AST + usize::from(backed) * AST_ZVAL,
         )?);
@@ -442,7 +478,9 @@ fn class(req: &mut Request, blocks: &mut Blocks, class: &ClassDecl) -> Result<()
         _ => 0,
     };
     if interfaces > 0 {
-        blocks.blocks.push(Emalloc::new(req, interfaces * POINTER)?);
+        blocks
+            .emalloced
+            .push(Emalloc::new(req, interfaces * POINTER)?);
     }
     Ok(())
 }

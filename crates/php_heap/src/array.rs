@@ -1127,6 +1127,16 @@ impl Arr {
         Some(ZvalRef::new(self.bucket(idx).cast::<Zval>()))
     }
 
+    /// The key of the bucket [`Arr::str_find`] finds, `p->key` of
+    /// `zend_hash_str_find_bucket`'s answer, no owner taken: the string
+    /// the table holds for these bytes, which `EG(included_files)` hands
+    /// on as the name a file was opened under.
+    #[must_use]
+    pub fn str_key(&self, bytes: &[u8]) -> Option<Str> {
+        let idx = self.find_bucket_bytes(crate::string::hash_func(bytes), bytes)?;
+        self.read_bucket(idx).key
+    }
+
     /// `zend_hash_index_find_bucket`: the bucket of an integer key. The
     /// table is a hash table.
     fn find_long(self, h: u64) -> Option<u32> {
@@ -3706,6 +3716,51 @@ mod tests {
         table.free_data(&mut nothing.heap);
         nothing.heap.release_string(x);
         nothing.heap.release_string(y);
+        assert_eq!(nothing.heap.memory_usage(false), start);
+    }
+
+    /// `EG(included_files)` as `init_executor` lays it down, eight wide:
+    /// a path's row answers the table's own string for the path, the
+    /// ninth path doubles the data, and the rows given up and the data
+    /// freed leave the heap as it was.
+    #[test]
+    fn a_table_hands_on_the_string_it_holds_for_a_key() {
+        let _alone = alone();
+        let mut nothing = Nothing::new();
+        let start = nothing.heap.memory_usage(false);
+        let table = EmbeddedArr::new(8);
+        let a = table.arr();
+        let paths: Vec<Str> = (0..9u8)
+            .map(|i| nothing.heap.string(&[b'p', b'0' + i]).expect("a path"))
+            .collect();
+        let strings = nothing.heap.memory_usage(false);
+        for path in &paths[..8] {
+            assert!(
+                nothing
+                    .heap
+                    .array_add_new(a, Key::Str(*path), Zval::null())
+                    .is_ok()
+            );
+        }
+        assert_eq!(nothing.heap.memory_usage(false), strings + 8 * 40);
+        assert!(
+            nothing
+                .heap
+                .array_add_new(a, Key::Str(paths[8]), Zval::null())
+                .is_ok()
+        );
+        assert_eq!(nothing.heap.memory_usage(false), strings + 16 * 40);
+        let held = a.str_key(b"p3").expect("the row \"p3\"");
+        assert!(held.is_same(paths[3]) && held.refcount() == 2);
+        assert!(a.str_key(b"p9").is_none());
+        for path in paths {
+            nothing.heap.release_string(path);
+        }
+        for at in 0..a.num_used() {
+            let row = nothing.heap.array_take_at(a, at);
+            assert_eq!(row.map(Zval::kind), Some(ZvalType::Null));
+        }
+        table.free_data(&mut nothing.heap);
         assert_eq!(nothing.heap.memory_usage(false), start);
     }
 }
