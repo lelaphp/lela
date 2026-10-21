@@ -36,6 +36,7 @@ Arr::set_declared_rows
 Arr::set_has_empty_ind
 Arr::set_next_free
 Arr::str_find
+Arr::str_key
 Arr::str_value_ref
 Arr::table_size
 Arr::unprotect

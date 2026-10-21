@@ -12,13 +12,12 @@ use std::sync::Arc;
 use php_unit::decl::{IniDecl, Name};
 
 use super::Environment;
-use super::hash_bytes::HashBytes;
 use super::{
     DISPLAY_ERRORS_STDERR, ExtensionId, InfoRow, IniFiles, Request, display_errors_mode_of,
 };
 use crate::api::abi::{IniHandler, IniStage, IniVerdict, LongHandler};
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{Owner, PhpString, Value, adopted_some};
+use crate::api::values::{Owner, PhpArray, PhpString, Value, adopted_some};
 use crate::c_number::{atoi, strtol, strtol_prefixed};
 use crate::engine::{Configured, ConfiguredKey};
 
@@ -74,10 +73,11 @@ pub(super) struct IniState {
     /// `orig_value`; the value it started with is the engine's
     /// ([`Request::ini_deactivate`]).
     changed: Vec<IniChanged>,
-    /// The bytes `EG(modified_ini_directives)` takes on the request's
-    /// heap, laid down by the first entry the request changes, a `@`'s
-    /// `error_reporting` among them, and freed by the request's end.
-    bytes: Option<HashBytes>,
+    /// `EG(modified_ini_directives)` itself, the table on the request's
+    /// heap keyed by each changed entry's name, laid down by the first
+    /// entry the request changes, a `@`'s `error_reporting` among them,
+    /// and destroyed by `zend_ini_deactivate`.
+    table: Option<php_heap::Arr>,
     /// The entries this request's host locked past the engine's
     /// ([`crate::engine::IniOrigin::Admin`]).
     locked: Vec<Vec<u8>>,
@@ -140,7 +140,7 @@ impl IniState {
     pub(super) fn new(typed: TypedIni) -> IniState {
         IniState {
             changed: Vec::new(),
-            bytes: None,
+            table: None,
             locked: Vec::new(),
             stage: IniStage::Runtime,
             typed,
@@ -501,7 +501,7 @@ impl Request {
             *held = value;
         } else {
             self.ini.changed.push((name.to_vec(), value, None));
-            self.ini_modified_bytes();
+            self.ini_modified(name);
         }
     }
 
@@ -619,7 +619,7 @@ impl Request {
                 self.update_error_reporting();
             }
         }
-        self.free_modified_ini_bytes();
+        self.free_modified_ini();
     }
 
     /// Whether an extension's entry is `PHP_INI_USER`, its declaration's
@@ -1142,31 +1142,47 @@ impl Request {
     /// 0
     /// 320
     /// ```
-    fn ini_modified_bytes(&mut self) {
-        let table = match self.ini.bytes.take() {
-            Some(table) => Ok(table),
-            None => HashBytes::new_array(self, 8),
+    ///
+    /// The key is the entry's name, `ini_entry->name`, the engine's
+    /// permanent string, so the table holds no string of the request's.
+    fn ini_modified(&mut self, name: &[u8]) {
+        let table = if let Some(table) = self.ini.table {
+            table
+        } else {
+            let laid = self.heap.array_sized(8);
+            // The memory limit's fatal is recorded and ends the request.
+            let Ok(table) = self.fatal_of(laid) else {
+                return;
+            };
+            self.ini.table = Some(table);
+            table
         };
-        // The memory limit's fatal is recorded and ends the request.
-        if let Ok(mut table) = table {
-            table.add(self).ok();
-            self.ini.bytes = Some(table);
-        }
+        let key = match self.shared.permanent(name) {
+            Some(key) => key,
+            None => match self.kept_string(name) {
+                Ok(key) => key.heap(),
+                Err(_) => return,
+            },
+        };
+        let added = self
+            .heap
+            .array_add_new(table, php_heap::Key::Str(key), php_heap::Zval::null());
+        self.fatal_of(added).ok();
     }
 
-    /// One entry deleted from `EG(modified_ini_directives)`, by
-    /// `ini_restore()`, the last of the table's where `last` says so.
-    fn ini_unmodified_bytes(&mut self, last: bool) {
-        if let Some(table) = self.ini.bytes.as_mut() {
-            table.del(last);
+    /// `zend_hash_del(EG(modified_ini_directives), name)`, by
+    /// `ini_restore()`.
+    fn ini_unmodified(&mut self, name: &[u8]) {
+        if let Some(table) = self.ini.table {
+            self.heap.array_str_take(table, name);
         }
     }
 
     /// `zend_hash_destroy` and `FREE_HASHTABLE` of
     /// `EG(modified_ini_directives)`, `zend_ini_deactivate`'s.
-    fn free_modified_ini_bytes(&mut self) {
-        if let Some(table) = self.ini.bytes.take() {
-            table.free(self);
+    fn free_modified_ini(&mut self) {
+        if let Some(table) = self.ini.table.take() {
+            self.release(Value::array(PhpArray::of(table)));
         }
     }
 
@@ -1665,7 +1681,7 @@ impl Ini<&mut Request> {
             && let Some(at) = self.0.ini.changed.iter().position(|(n, ..)| n == name)
         {
             self.0.ini.changed.remove(at);
-            self.0.ini_unmodified_bytes(at == self.0.ini.changed.len());
+            self.0.ini_unmodified(name);
         }
         Ok(())
     }
