@@ -632,7 +632,7 @@ mod tests {
                 .collect();
             workers
                 .into_iter()
-                .map(|worker| worker.join().unwrap_or_default())
+                .map(|worker| worker.join().expect("a worker runs to its end"))
                 .collect()
         });
         for (thread, numbers) in (0u8..).zip(&taken) {

@@ -567,7 +567,7 @@ mod tests {
     type Served = Mutex<Vec<&'static str>>;
 
     fn served(log: &Served) -> Vec<&'static str> {
-        log.lock().map(|log| log.clone()).unwrap_or_default()
+        log.lock().expect("the log is not poisoned").clone()
     }
 
     /// A chained kind, `zend_interrupt_function`: the later extension's

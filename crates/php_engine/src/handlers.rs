@@ -24857,7 +24857,7 @@ mod tests {
         let unit = jumping(0, 1);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let back = code.oplines.get(1).copied().unwrap_or_default();
+        let back = code.oplines.get(1).copied().expect("opline 1");
         req.vm_mut().stand(frame, 1);
 
         assert_eq!(
@@ -24893,7 +24893,7 @@ mod tests {
         let unit = jumping(0, 1);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let back = code.oplines.get(1).copied().unwrap_or_default();
+        let back = code.oplines.get(1).copied().expect("opline 1");
         req.vm_mut().stand(frame, 1);
         req.limits().interrupt().elapsed(1);
 
@@ -24939,7 +24939,7 @@ mod tests {
         let taken = conditional(php_heap::Zval::bool(true));
         let frame = req.pushed(PublishedUnit::clone(&taken));
         let code = crate::exec::code_of(&taken);
-        let op = code.oplines.get(1).copied().unwrap_or_default();
+        let op = code.oplines.get(1).copied().expect("opline 1");
         req.vm_mut().stand(frame, 1);
 
         assert_eq!(
@@ -25017,7 +25017,7 @@ mod tests {
         let taken = compared_loop(0);
         let frame = req.pushed(PublishedUnit::clone(&taken));
         let code = crate::exec::code_of(&taken);
-        let op = code.oplines.get(1).copied().unwrap_or_default();
+        let op = code.oplines.get(1).copied().expect("opline 1");
         req.vm_mut().stand(frame, 1);
 
         assert_eq!(
@@ -25072,7 +25072,7 @@ mod tests {
         let guard = req.stack_mut().push_entry(outer);
         let inner = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let op = code.oplines.first().copied().unwrap_or_default();
+        let op = code.oplines.first().copied().expect("the first opline");
 
         assert_eq!(
             served!(req, inner, at => r#return::<Probe, crate::operand::Const>(&mut req, inner, code, &op, at)),
@@ -25164,9 +25164,9 @@ mod tests {
         let unit = by_name(&mut strings);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let init = code.oplines.first().copied().unwrap_or_default();
-        let send = code.oplines.get(1).copied().unwrap_or_default();
-        let call = code.oplines.get(2).copied().unwrap_or_default();
+        let init = code.oplines.first().copied().expect("the first opline");
+        let send = code.oplines.get(1).copied().expect("opline 1");
+        let call = code.oplines.get(2).copied().expect("opline 2");
 
         assert_eq!(
             served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init, at)),
@@ -25198,7 +25198,7 @@ mod tests {
         let unit = by_name(&mut strings);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let init = code.oplines.first().copied().unwrap_or_default();
+        let init = code.oplines.first().copied().expect("the first opline");
         assert_eq!(req.cached(frame, CacheSlot(init.out)), Cached::Unprimed);
 
         assert_eq!(
@@ -25305,11 +25305,11 @@ mod tests {
         req.declare_functions(unit);
         let f = req
             .function_named(Bare::resolved(b"f"))
-            .unwrap_or(Function::PASS);
+            .expect("the unit declares f");
         let code = crate::exec::body_of(unit, exec::Body::Function(0))
             .cloned()
-            .unwrap_or_default();
-        let init = code.oplines.first().copied().unwrap_or_default();
+            .expect("f's body");
+        let init = code.oplines.first().copied().expect("the first opline");
         let strlen = req.function_named(Bare::resolved(b"strlen"));
 
         for call in 1..=2 {
@@ -25318,7 +25318,7 @@ mod tests {
             let frame = req
                 .push_call(header)
                 .and_then(|call| {
-                    let shape = req.call_shape(call).unwrap_or_default();
+                    let shape = req.call_shape(call).expect("the call's shape");
                     req.activate_user(call, shape, None, crate::exec::Caller::Opline(main))
                 })
                 .map_or(main, |activated| activated.frame);
@@ -25388,7 +25388,7 @@ mod tests {
         .published(None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let init = code.oplines.first().copied().unwrap_or_default();
+        let init = code.oplines.first().copied().expect("the first opline");
         let strlen = req.function_named(Bare::resolved(b"strlen"));
 
         assert_eq!(
@@ -25440,7 +25440,7 @@ mod tests {
         .published(None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let init = code.oplines.first().copied().unwrap_or_default();
+        let init = code.oplines.first().copied().expect("the first opline");
         for pass in 1..=2 {
             assert_eq!(
                 served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init, at)),
@@ -25498,7 +25498,7 @@ mod tests {
         let unit = catching(&mut strings, b"Error", b"error");
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let clause = code.oplines.first().copied().unwrap_or_default();
+        let clause = code.oplines.first().copied().expect("the first opline");
         let error = req.class_named(Bare::resolved(b"error"));
         assert!(error.is_some(), "the engine declares Error");
         assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
@@ -25581,7 +25581,7 @@ mod tests {
         );
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let op = code.oplines.first().copied().unwrap_or_default();
+        let op = code.oplines.first().copied().expect("the first opline");
         let closure = req.class_named(Bare::resolved(b"closure"));
         assert!(closure.is_some(), "the engine declares Closure");
         let callee = closure.and_then(|class| req.symbols().method_named(class, b"fromcallable"));
@@ -25621,7 +25621,7 @@ mod tests {
         let unit = static_method_call(&mut strings, (b"Exception", b"exception"), None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let op = code.oplines.first().copied().unwrap_or_default();
+        let op = code.oplines.first().copied().expect("the first opline");
         let exception = req.class_named(Bare::resolved(b"exception"));
         assert!(exception.is_some(), "the engine declares Exception");
 
@@ -25688,7 +25688,7 @@ mod tests {
         let unit = method_call(&mut strings);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let op = code.oplines.first().copied().unwrap_or_default();
+        let op = code.oplines.first().copied().expect("the first opline");
         let exception = req.class_named(Bare::resolved(b"exception"));
         let error = req.class_named(Bare::resolved(b"error"));
         assert!(
@@ -25749,7 +25749,7 @@ mod tests {
         let unit = catching(&mut strings, b"NoPe", b"nope");
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let clause = code.oplines.first().copied().unwrap_or_default();
+        let clause = code.oplines.first().copied().expect("the first opline");
         let thrown = crate::api::raising::throw_error(&mut req, "Error", "e");
         req.leave_pending(&thrown);
 
@@ -25831,14 +25831,14 @@ mod tests {
         .published(None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let named = req.class_named(Bare::resolved(b"stdclass"));
-        assert!(named.is_some(), "the engine declares stdClass");
-        let class = named.unwrap_or(ClassId(u32::MAX));
+        let class = req
+            .class_named(Bare::resolved(b"stdclass"))
+            .expect("the engine declares stdClass");
         for slot in [0, 8, 16] {
             req.prime(frame, CacheSlot(slot), Cached::Class(class));
         }
 
-        let new_op = code.oplines.first().copied().unwrap_or_default();
+        let new_op = code.oplines.first().copied().expect("the first opline");
         assert_eq!(
             served!(req, frame, at => new::<Nop>(&mut req, frame, code, &new_op)),
             Ok(Stepped::Same(frame))
@@ -25849,7 +25849,7 @@ mod tests {
             "NEW took its class off op2's slot"
         );
 
-        let instanceof_op = code.oplines.get(2).copied().unwrap_or_default();
+        let instanceof_op = code.oplines.get(2).copied().expect("opline 2");
         assert_eq!(
             served!(req, frame, at => instanceof::<Nop>(&mut req, frame, code, &instanceof_op)),
             Ok(Stepped::Same(frame))
@@ -25860,7 +25860,7 @@ mod tests {
             "INSTANCEOF took its class off extended_value's slot"
         );
 
-        let constant_op = code.oplines.get(3).copied().unwrap_or_default();
+        let constant_op = code.oplines.get(3).copied().expect("opline 3");
         assert_eq!(
             served!(req, frame, at => fetch_class_constant::<Nop>(&mut req, frame, code, &constant_op)),
             Ok(Stepped::Threw(frame))
@@ -25912,7 +25912,7 @@ mod tests {
         let unit = jmp_frameless_over(&mut strings, b"foo\\substr");
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let jmp = code.oplines.first().copied().unwrap_or_default();
+        let jmp = code.oplines.first().copied().expect("the first opline");
         assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
 
         for pass in 1..=2 {
@@ -25941,7 +25941,7 @@ mod tests {
         let unit = jmp_frameless_over(&mut strings, b"strlen");
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let jmp = code.oplines.first().copied().unwrap_or_default();
+        let jmp = code.oplines.first().copied().expect("the first opline");
 
         for pass in 1..=2 {
             req.vm_mut().stand(frame, 0);
@@ -26002,7 +26002,7 @@ mod tests {
             .iter()
             .position(|entry| entry.arity == 0)
             .and_then(|at| u32::try_from(at).ok())
-            .unwrap_or(u32::MAX);
+            .expect("a nullary frameless row");
         assert_eq!(
             engine.frameless().get(row as usize).map(|n| n.0.as_ref()),
             Some(&b"seven"[..])
@@ -26025,7 +26025,7 @@ mod tests {
         .published(None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let call = code.oplines.first().copied().unwrap_or_default();
+        let call = code.oplines.first().copied().expect("the first opline");
         assert_eq!(
             served!(req, frame, at => frameless_icall_0::<Nop>(&mut req, frame, code, &call, at)),
             Ok(Stepped::Same(frame))
@@ -26061,7 +26061,7 @@ mod tests {
         .published(None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let call = code.oplines.first().copied().unwrap_or_default();
+        let call = code.oplines.first().copied().expect("the first opline");
         assert!(matches!(
             served!(req, frame, at => frameless_icall_0::<Nop>(&mut req, frame, code, &call, at)),
             Err(fatal) if matches!(fatal.reason(), php_heap::FatalReason::Error(message) if message.starts_with("InternalError: ZEND_FRAMELESS_ICALL_0 indexes frameless entry 1000000"))
@@ -26106,7 +26106,7 @@ mod tests {
         .published(None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let init = code.oplines.first().copied().unwrap_or_default();
+        let init = code.oplines.first().copied().expect("the first opline");
 
         assert_eq!(
             served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init, at)),
@@ -26163,15 +26163,13 @@ mod tests {
         let unit = assigning();
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let mut op = code.oplines.first().copied().unwrap_or_default();
+        let mut op = code.oplines.first().copied().expect("the first opline");
         op.out_type = OperandKind::Tmp;
         op.out = 0;
-        let Ok(text) = req.string(b"in the cell") else {
-            return;
-        };
-        let Ok(cell) = req.reference(Value::string(text)) else {
-            return;
-        };
+        let text = req
+            .string(b"in the cell")
+            .expect("the string \"in the cell\"");
+        let cell = req.reference(Value::string(text)).expect("a reference");
         let start = req.memory().usage(false);
         // Two CVs would share the cell; this frame has one, and the test
         // is the second holder.
@@ -26254,9 +26252,9 @@ mod tests {
     fn the_walk_over_an_object_of_properties_the_scope_may_not_see_finds_nothing() {
         let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-        let named = req.class_named(Bare::resolved(b"exception"));
-        assert!(named.is_some(), "the engine declares Exception");
-        let class = named.unwrap_or(ClassId(u32::MAX));
+        let class = req
+            .class_named(Bare::resolved(b"exception"))
+            .expect("the engine declares Exception");
         let made = crate::api::call::new_object_made(&mut req, class);
         assert!(made.is_ok(), "Exception is instantiable");
         if let Ok(object) = made {
@@ -26307,9 +26305,9 @@ mod tests {
         }
         .published(None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
-        let Ok(left) = req.string(b"an owner left behind") else {
-            return;
-        };
+        let left = req
+            .string(b"an owner left behind")
+            .expect("the string \"an owner left behind\"");
         let planted = req.set_slot(frame, 0, Value::string(left));
         assert!(
             planted.to_zval().is_undef(),

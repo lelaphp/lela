@@ -261,7 +261,7 @@ fn an_addref_of_a_freed_block_before_a_failed_start_is_raised_where_it_ends() {
             sapi_name: String::from("cli"),
             script_name: Some(b"Standard input code".to_vec()),
             source: Some(b"<?php echo 'ran';".to_vec()),
-            cwd: std::env::current_dir().unwrap_or_default(),
+            cwd: std::env::current_dir().expect("the working directory"),
             ..RequestDescription::default()
         },
         &mut sink,
@@ -313,7 +313,9 @@ fn a_write_into_a_freed_block_is_found_as_it_leaves_the_quarantine() {
             Capture::default(),
         );
         let stdout = served.stdout_text();
-        let (before, after) = stdout.split_once("-byte block at 0x").unwrap_or_default();
+        let (before, after) = stdout
+            .split_once("-byte block at 0x")
+            .unwrap_or_else(|| panic!("no block is named: {stdout}"));
         assert!(
             before.starts_with("went on\nFatal error: InternalError: a write into the "),
             "{evict}: {stdout}"
@@ -340,7 +342,9 @@ fn a_write_into_a_freed_block_still_held_at_the_end_is_raised_there() {
         Capture::default(),
     );
     let stdout = served.stdout_text();
-    let (before, after) = stdout.split_once("-byte block at 0x").unwrap_or_default();
+    let (before, after) = stdout
+        .split_once("-byte block at 0x")
+        .unwrap_or_else(|| panic!("no block is named: {stdout}"));
     assert!(
         before.starts_with("went on\nFatal error: InternalError: a write into the "),
         "{stdout}"

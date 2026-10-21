@@ -143,8 +143,9 @@ mod tests {
             layout
                 .iter()
                 .find(|(each, _)| *each == name)
-                .map(|(_, value)| value.clone())
-                .unwrap_or_default()
+                .unwrap_or_else(|| panic!("{name} is in the layout"))
+                .1
+                .clone()
         };
         for (prefix, root) in [("", "/usr/local"), ("/opt/x", "/opt/x")] {
             let layout = at(prefix);

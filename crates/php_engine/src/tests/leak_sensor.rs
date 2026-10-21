@@ -166,7 +166,7 @@ fn a_leak_from_a_lifecycle_hook_names_its_extension() {
 /// a thread of the 8 MiB the CLI's main thread has.
 #[test]
 fn the_backtrace_mode_names_the_leaking_line() {
-    let served = std::thread::Builder::new()
+    let (stdout, exit_code) = std::thread::Builder::new()
         .stack_size(8 << 20)
         .spawn(|| {
             let engine = Engine::cli_builder()
@@ -176,14 +176,9 @@ fn the_backtrace_mode_names_the_leaking_line() {
             let served = engine.serve_capture("<?php dropped_owner();\n", Capture::default());
             (served.stdout_text(), served.exit_code)
         })
-        .map(std::thread::JoinHandle::join);
-    assert!(
-        matches!(served, Ok(Ok(_))),
-        "the request's thread did not run to its end"
-    );
-    let Ok(Ok((stdout, exit_code))) = served else {
-        return;
-    };
+        .expect("a thread of 8 MiB for the request")
+        .join()
+        .expect("the request's thread did not run to its end");
     let source = include_str!("leak_sensor.rs");
     let line = source
         .lines()
@@ -249,7 +244,9 @@ fn a_request_ending_in_an_uncaught_throwable_reports_its_leak() {
             Capture::default(),
         );
         let stdout = served.stdout_text();
-        let (rendered, sensed) = stdout.split_once(LEAKED).unwrap_or_default();
+        let (rendered, sensed) = stdout
+            .split_once(LEAKED)
+            .unwrap_or_else(|| panic!("{uncaught}: nothing is sensed: {stdout}"));
         assert!(
             rendered.contains("Fatal error: Uncaught "),
             "{uncaught}: {stdout}"

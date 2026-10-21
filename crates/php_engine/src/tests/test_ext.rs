@@ -220,10 +220,11 @@ impl Events {
                 .iter()
                 .position(|e| matches!(e, Event::Mark(m) if *m == label))
         };
-        let cut = at(from).zip(at(to)).filter(|(start, end)| start < end);
-        assert!(cut.is_some(), "no mark `{from}` before a mark `{to}`");
-        let (start, end) = cut.unwrap_or_default();
-        Events(self.0.get(start + 1..end).unwrap_or_default().to_vec())
+        let (start, end) = at(from)
+            .zip(at(to))
+            .filter(|(start, end)| start < end)
+            .unwrap_or_else(|| panic!("no mark `{from}` before a mark `{to}`"));
+        Events(self.0[start + 1..end].to_vec())
     }
 
     /// Every event but those of `phase`'s kind: what it carries is not

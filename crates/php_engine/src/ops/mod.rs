@@ -5682,7 +5682,9 @@ mod tests {
             .build()
             .serve_capture(source, Capture::default());
         let stdout = served.stdout_text();
-        let (refused, dumped) = stdout.split_once('\n').unwrap_or_default();
+        let (refused, dumped) = stdout
+            .split_once('\n')
+            .unwrap_or_else(|| panic!("a refusal and a dump: {stdout}"));
         assert!(
             refused.starts_with("Maximum call stack size of ")
                 && refused.ends_with(" reached. Infinite recursion?"),

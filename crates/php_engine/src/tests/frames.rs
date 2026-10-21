@@ -517,7 +517,7 @@ fn a_thrown_link_at_a_generator_throw_reads_the_generators_frame_on_top() {
         .build();
     let (served, traced) = crate::tier::serve_kept::<Traced>(
         &engine,
-        &std::env::current_dir().unwrap_or_default(),
+        &std::env::current_dir().expect("the working directory"),
         b"Standard input code",
         "<?php\nfunction g() { try { yield 1; } catch (Exception $e) { echo \"caught\\n\"; } }\n\
          $g = g();\n$g->current();\n$g->throw(new Exception(\"e\"));\n",

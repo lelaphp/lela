@@ -82,7 +82,7 @@ fn frames_let_go_after_a_fatal_or_left_standing_leave_no_annex() {
         .build();
     let (served, counted) = tier::serve_kept::<Counted>(
         &engine,
-        &std::env::current_dir().unwrap_or_default(),
+        &std::env::current_dir().expect("the working directory"),
         b"Standard input code",
         "<?php\nfunction pause() {}\npause();\necho \"on\\n\";\n",
     );

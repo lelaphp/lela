@@ -3197,9 +3197,7 @@ mod tests {
     #[test]
     fn an_array_keeps_order_and_the_next_free_index() {
         let mut req = crate::test::request();
-        let Ok(mut a) = PhpArray::new(&mut req) else {
-            return;
-        };
+        let mut a = PhpArray::new(&mut req).expect("an array");
         let key = Owner::index(5);
         assert!(a.set(&mut req, key, Owner::int(1)).is_ok());
         assert!(a.append(&mut req, Owner::int(2)).is_ok());
@@ -3227,18 +3225,16 @@ mod tests {
     fn a_copy_is_a_refcount_and_a_write_separates() {
         let mut req = crate::test::request();
         let start = req.memory().usage(false);
-        let Ok(mut a) = PhpArray::new(&mut req).map(Owner::hand_on) else {
-            return;
-        };
+        let mut a = PhpArray::new(&mut req)
+            .map(Owner::hand_on)
+            .expect("an array");
         assert!(a.append(&mut req, Owner::int(1)).is_ok());
         let first = Value::array(a);
         let second = first;
         assert_eq!(first.refcount(), 1, "a copy touches no refcount");
         req.addref(&second);
         assert_eq!(first.refcount(), 2);
-        let Some(mut b) = second.as_array() else {
-            return;
-        };
+        let mut b = second.as_array().expect("the second owner is an array");
         assert!(b.append(&mut req, Owner::int(2)).is_ok());
         assert_eq!(first.refcount(), 1, "the write took the second owner away");
         assert_eq!(b.len(), 2);
@@ -3260,9 +3256,7 @@ mod tests {
     fn an_object_is_a_store_entry_and_a_copy_is_a_refcount() {
         let mut req = crate::test::request();
         let start = req.memory().usage(false);
-        let Ok(object) = req.new_object_of("stdClass") else {
-            return;
-        };
+        let object = req.new_object_of("stdClass").expect("a stdClass");
         assert_eq!(req.memory().usage(false) - start, 40);
         assert_eq!(object.index(), 1);
         let first = object.as_value();
@@ -3271,10 +3265,7 @@ mod tests {
         let second = Owner::take(&req, second);
         assert_eq!(first.refcount(), 2);
         assert_eq!(second.as_object(), Some(object));
-        let Ok(mut a) = PhpArray::new(&mut req) else {
-            second.give_up(&mut req);
-            return;
-        };
+        let mut a = PhpArray::new(&mut req).expect("an array");
         assert!(a.append(&mut req, second).is_ok());
         assert_eq!(
             a.get(&Key::Int(0))
@@ -3285,9 +3276,7 @@ mod tests {
         assert_eq!(first.refcount(), 1, "the array gave its owner back");
         req.release(first);
         assert_eq!(req.memory().usage(false), start);
-        let Ok(next) = req.new_object_of("stdClass") else {
-            return;
-        };
+        let next = req.new_object_of("stdClass").expect("a stdClass");
         assert_eq!(next.index(), 1, "the id came back off the free list");
     }
 
@@ -3298,15 +3287,10 @@ mod tests {
     fn a_property_is_the_object_s_and_goes_with_it() {
         let mut req = crate::test::request();
         let start = req.memory().usage(false);
-        let Ok(object) = req.new_object_of("stdClass") else {
-            return;
-        };
-        let (Ok(name), Ok(text)) = (
-            PhpString::new(&mut req, b"message"),
-            PhpString::new(&mut req, b"a string the object holds"),
-        ) else {
-            return;
-        };
+        let object = req.new_object_of("stdClass").expect("a stdClass");
+        let name = PhpString::new(&mut req, b"message").expect("the string \"message\"");
+        let text = PhpString::new(&mut req, b"a string the object holds")
+            .expect("the string \"a string the object holds\"");
         let text_view = *text;
         assert!(object.set_prop(&mut req, name, text.into_value()).is_ok());
         let text = text_view;
@@ -3335,9 +3319,7 @@ mod tests {
     fn a_reference_is_a_cell_of_the_heap_and_is_followed_by_deref() {
         let mut req = crate::test::request();
         let start = req.memory().usage(false);
-        let Ok(r) = PhpRef::new(&mut req, Owner::int(3)) else {
-            return;
-        };
+        let r = PhpRef::new(&mut req, Owner::int(3)).expect("a reference");
         assert_eq!(req.memory().usage(false) - start, 32);
         let v = r.as_value();
         assert_eq!(v.tag(), TypeTag::Reference);
@@ -3345,13 +3327,11 @@ mod tests {
         assert_eq!(v.deref().as_int(), Some(3));
         assert_eq!(v.type_name(), "int");
         assert_eq!(v.refcount(), 1);
-        let Ok(text) = PhpString::new(&mut req, b"held through the reference") else {
-            return;
-        };
+        let text = PhpString::new(&mut req, b"held through the reference")
+            .expect("the string \"held through the reference\"");
         let string = *text;
-        let Ok(()) = r.set(&mut req, text.into_value()) else {
-            return;
-        };
+        r.set(&mut req, text.into_value())
+            .expect("a write through the reference");
         assert_eq!(
             v.deref().as_str_bytes().map(<[u8]>::to_vec),
             Some(b"held through the reference".to_vec())
@@ -3386,9 +3366,9 @@ mod tests {
             .memory_mut()
             .resources()
             .register_type(b"stream", Some(dtor));
-        let Ok(r) = Resource::new(&mut req, kind, 7u32).map(Owner::hand_on) else {
-            return;
-        };
+        let r = Resource::new(&mut req, kind, 7u32)
+            .map(Owner::hand_on)
+            .expect("a resource");
         // The resource, its payload, and the list's own packed table,
         // 160, which the request's first resource lays down.
         assert_eq!(req.memory().usage(false) - start, 160 + 32 + 16);
@@ -3418,9 +3398,9 @@ mod tests {
             start + 160 + 40,
             "the list's table stays until the request ends"
         );
-        let Ok(next) = Resource::new(&mut req, kind, 0u8).map(Owner::hand_on) else {
-            return;
-        };
+        let next = Resource::new(&mut req, kind, 0u8)
+            .map(Owner::hand_on)
+            .expect("a resource");
         assert_eq!(next.id(), 2, "an id is never given twice");
     }
 
@@ -3432,13 +3412,9 @@ mod tests {
     #[test]
     fn a_slot_that_holds_no_value_reads_as_null() {
         let mut req = crate::test::request();
-        let Ok(mut a) = PhpArray::new(&mut req) else {
-            return;
-        };
+        let mut a = PhpArray::new(&mut req).expect("an array");
         assert!(a.append(&mut req, Owner::int(7)).is_ok());
-        let Some(at) = a.heap().value_ref_at(0) else {
-            return;
-        };
+        let at = a.heap().value_ref_at(0).expect("the slot appended");
         for slot in [Zval::const_expr(3), Zval::ptr(1), Zval::indirect(at)] {
             assert_eq!(Value::of_slot(slot), Value::null());
             assert_eq!(Value::of_slot(slot).to_zval().kind(), ZvalType::Null);

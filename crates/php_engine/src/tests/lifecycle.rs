@@ -450,7 +450,7 @@ fn piped(program: &str) -> RequestDescription {
         sapi_name: String::from("cli"),
         script_name: Some(b"Standard input code".to_vec()),
         source: Some(program.as_bytes().to_vec()),
-        cwd: std::env::current_dir().unwrap_or_default(),
+        cwd: std::env::current_dir().expect("the working directory"),
         ..RequestDescription::default()
     }
 }
@@ -552,7 +552,7 @@ fn a_host_looks_at_its_request_after_every_rinit() {
         })
     });
     rec.mark("served");
-    let sink: Capture = handed_back(sink).unwrap_or_default();
+    let sink: Capture = handed_back(sink).expect("the sink handed back");
     assert!(!observed.start_failed);
     assert_eq!(
         rec.events().between("built", "looked").0,
@@ -693,7 +693,7 @@ fn the_built_in_server_ends_a_request_whose_start_failed() {
     let sink = Box::new(Capture::default());
     let (observed, dispatched, sink) = engine.dispatch(piped("<?php echo 'ran';"), None, sink);
     rec.mark("served");
-    let sink: Capture = handed_back(sink).unwrap_or_default();
+    let sink: Capture = handed_back(sink).expect("the sink handed back");
     assert!(observed.start_failed);
     assert_eq!(dispatched.program, None);
     assert!(!String::from_utf8_lossy(&sink.stdout).contains("ran"));
@@ -1150,7 +1150,7 @@ fn a_tiers_extension_is_served_as_the_bundles_are_and_is_no_module() {
     let (bundled, as_bundled) =
         lived(Engine::cli_builder().extensions(&[TestExt::<3>::observing_allocations()]));
     let (tiered, as_tier) = lived(Engine::cli_builder().tier::<Declaring>());
-    let loaded = plain.split('|').next().unwrap_or_default();
+    let loaded = plain.split('|').next().expect("the loaded extensions");
     assert_eq!(plain, format!("{loaded}|not loaded|no entry"));
     assert_eq!(bundled, format!("{loaded}test_ext_3,|loaded|0"));
     assert_eq!(tiered, format!("{loaded}|not loaded|0"));

@@ -392,22 +392,15 @@ fn a_stepped_program_raises_the_events_the_loop_raises() {
 #[test]
 fn a_stepped_call_meets_the_interrupt_at_its_activation() {
     let (plain, _) = served(|| Engine::cli_builder().tier::<Firing>(), INTERRUPTED);
-    let fatal = plain.first().and_then(|seen| {
-        seen.events.iter().position(
+    let seen = plain.first().expect("the request was seen");
+    let fatal = seen
+        .events
+        .iter()
+        .position(
             |e| matches!(e, Event::Ext(0, Phase::Error(m)) if m.starts_with("Maximum execution time")),
         )
-    });
-    assert!(fatal.is_some(), "the loop met the interrupt: {plain:?}");
-    let ended: Vec<_> = plain
-        .first()
-        .map(|seen| {
-            seen.events
-                .iter()
-                .skip(fatal.unwrap_or_default())
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
+        .unwrap_or_else(|| panic!("the loop met the interrupt: {plain:?}"));
+    let ended: Vec<_> = seen.events.iter().skip(fatal).cloned().collect();
     assert!(
         ended.contains(&Event::Ext(0, Phase::End(String::from("f"), None))),
         "the callee begun and ended at the fatal: {plain:?}"
