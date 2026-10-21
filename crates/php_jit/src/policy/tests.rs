@@ -505,7 +505,8 @@ fn an_observed_opcode_past_the_silence_opcodes_runs_the_tier_off() {
         ),
     ] {
         let (mut policy, _) = read_ini(asked);
-        let refused = policy.check_support(echo);
+        policy.check_support(echo);
+        let refused = policy.refused();
         assert_eq!(
             refused,
             warned.then_some(Refused::ObservedOpcode),
@@ -515,7 +516,8 @@ fn an_observed_opcode_past_the_silence_opcodes_runs_the_tier_off() {
         assert!(!policy.debugs(), "{asked:?}");
     }
     let (mut policy, _) = read_ini(&[("opcache.jit", "tracing"), debug]);
-    assert_eq!(policy.check_support(silence), None);
+    policy.check_support(silence);
+    assert_eq!(policy.refused(), None);
     assert_eq!(policy.mode(), Mode::Tracing);
     assert!(policy.debugs());
     assert_eq!(

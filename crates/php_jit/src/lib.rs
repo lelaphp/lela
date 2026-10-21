@@ -118,9 +118,6 @@ pub(crate) struct JitEngine {
 pub(crate) struct Shared {
     policy: policy::Policy,
     backend: Option<lower::Backend>,
-    /// Why php would refuse the tier as it starts, which the first
-    /// request raises as php's startup warning.
-    refused: Option<policy::Refused>,
     started: Box<[policy::Note]>,
     /// Whether a request wrote the start's warning and lines yet: once
     /// per engine.
@@ -176,7 +173,7 @@ impl JitEngine {
     ) -> JitEngine {
         let mut started = Vec::new();
         let mut policy = policy::Policy::from_ini(ini, &mut started);
-        let refused = policy.check_support(observes);
+        policy.check_support(observes);
         let backend = if policy.mode() == policy::Mode::Off {
             None
         } else {
@@ -194,7 +191,6 @@ impl JitEngine {
         let shared = Arc::new(Shared {
             policy,
             backend,
-            refused,
             started: started.into_boxed_slice(),
             told: AtomicBool::new(false),
             perf,
@@ -220,7 +216,7 @@ impl JitEngine {
             return Ok(());
         };
         let shared = &engine.shared;
-        let refused = shared.refused;
+        let refused = shared.policy.refused();
         if (refused.is_none() && !shared.policy.debugs())
             || shared.told.swap(true, Ordering::Relaxed)
         {

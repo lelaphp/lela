@@ -269,6 +269,9 @@ pub(crate) struct Policy {
     /// (`Z/ext/opcache/ZendAccelerator.c:3253-3254`), so where its
     /// refusal warns ([`Policy::check_support`]).
     set_up: bool,
+    /// Why php refuses the tier as it starts, where it does: what the
+    /// engine's first request raises ([`Policy::check_support`]).
+    refused: Option<Refused>,
 }
 
 /// The value the host set for `name`, none where it set none.
@@ -436,6 +439,7 @@ impl Policy {
             buffer_size: u64::try_from(buffer_size).unwrap_or(0),
             debug,
             set_up,
+            refused: None,
         };
         if mode == Mode::Off {
             policy.off();
@@ -458,20 +462,26 @@ impl Policy {
     /// `ZEND_END_SILENCE`, by `observes`, php's
     /// `zend_get_user_opcode_handler(i) != NULL` over every opcode, the
     /// tier runs `Off` (`jit-design.md` §4.3, *Observed opcodes*), and
-    /// the refusal is answered where php sets its tier up, which is where
-    /// it warns; none where the tier runs as the directives say. At the
+    /// the refusal is kept where php sets its tier up, which is where it
+    /// warns ([`Policy::refused`]); none where the tier runs as the
+    /// directives say. At the
     /// two silence opcodes nothing is refused: compiled code serves them
     /// through the interpreter's handler, which tells their observers.
-    pub(crate) fn check_support(&mut self, observes: impl Fn(Opcode) -> bool) -> Option<Refused> {
+    pub(crate) fn check_support(&mut self, observes: impl Fn(Opcode) -> bool) {
         let beyond = (0..=u8::MAX)
             .filter_map(Opcode::from_u8)
             .filter(|opcode| !matches!(opcode, Opcode::BeginSilence | Opcode::EndSilence))
             .any(observes);
-        if !beyond {
-            return None;
+        if beyond {
+            self.off();
+            self.refused = self.set_up.then_some(Refused::ObservedOpcode);
         }
-        self.off();
-        self.set_up.then_some(Refused::ObservedOpcode)
+    }
+
+    /// Why php refuses the tier as it starts, which the engine's first
+    /// request raises as php's warning; none where it does not.
+    pub(crate) fn refused(&self) -> Option<Refused> {
+        self.refused
     }
 
     /// How the tier runs.
