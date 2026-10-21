@@ -192,7 +192,7 @@ impl Engine {
     /// `in_child` is php's `ZEND_COMPILE_PRELOAD_IN_CHILD`: the request
     /// is served on the thread that took `opcache.preload_user`'s
     /// credentials.
-    fn preload(&self, mut req: Request, script: &[u8], in_child: bool) -> (Started, Lent) {
+    fn preload(&self, mut req: Box<Request>, script: &[u8], in_child: bool) -> (Started, Lent) {
         req.hash_environment().ok();
         for extension in &self.shared.extensions {
             if let Some(rinit) = extension.rinit {

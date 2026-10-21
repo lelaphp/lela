@@ -690,10 +690,10 @@ pub struct Observables {
 /// What `php_request_startup` came to ([`Engine::begin`]).
 enum Begun {
     /// The request started, and what the host asked for is served in it.
-    Started(Request),
+    Started(Box<Request>),
     /// An extension's `rinit` raised, and its throwable was rendered as
     /// the uncaught fatal: the request, which the host's own branch ends.
-    Failed(Request),
+    Failed(Box<Request>),
     /// No request started: the engine's start refused, `opcache.preload`
     /// refused, or `php_module_startup` failed, and what the host is
     /// handed instead, with its sink.
@@ -5143,14 +5143,14 @@ impl Engine {
     /// host but the built-in server ends on ([`Engine::start_failed`]).
     #[expect(
         clippy::result_large_err,
-        reason = "the request the Ok variant carries is many times the Err's size"
+        reason = "the refusal is what the host is handed, once a request, and the request a box"
     )]
     pub(crate) fn begin(
         &self,
         description: RequestDescription,
         sink: Lent,
         traced: bool,
-    ) -> Result<Request, (Observables, Lent)> {
+    ) -> Result<Box<Request>, (Observables, Lent)> {
         match self.start_request(description, sink, traced) {
             Begun::Started(req) => Ok(req),
             Begun::Failed(req) => Err(Engine::start_failed(req)),
@@ -5254,7 +5254,7 @@ impl Engine {
     /// and each host's tests hold its ending, since a fence carries
     /// neither the ini nor the session file a failing `rinit` needs
     /// (#1634).
-    fn start_failed(mut req: Request) -> (Observables, Lent) {
+    fn start_failed(mut req: Box<Request>) -> (Observables, Lent) {
         #[cfg(debug_assertions)]
         req.end_in_sensed();
         let fatal = match req.ending() {
