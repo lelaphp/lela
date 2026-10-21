@@ -899,12 +899,8 @@ impl Store {
     /// is counted by its number and skipped rather than failing the whole
     /// log, so a torn line degrades one section and never the session.
     pub fn history(&self, instrument: &str) -> Result<Log> {
-        let path = self.shard(instrument)?;
-        if !path.exists() {
-            return Ok(Log::default());
-        }
-        let text = crate::read(&path)?;
-        Ok(Log::of(&text, Reading::from_json))
+        let text = crate::read_if(&self.shard(instrument)?)?;
+        Ok(text.map_or_else(Log::default, |text| Log::of(&text, Reading::from_json)))
     }
 
     /// Every instrument's log at once, in the order the readings were
