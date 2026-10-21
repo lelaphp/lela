@@ -413,21 +413,23 @@ pub(crate) enum Held {
     /// and the distance to go to the second arm, and held by [`series`]'s
     /// rule where the manifest gives it a tolerance (#1902, #2336, #2659).
     Series,
-    /// A series held to a bound: a pass while the bar's ratio, a set's
-    /// geomean, is at most this, whatever its sign, G1's 1.02 (design
-    /// §9.2, #2947).
+    /// A series held to a bound: a fail where the bar's ratio, a set's
+    /// geomean, is established above this, G1's 1.02 (design §9.2, #2947),
+    /// and a pass where it is at most this or its sign is not established,
+    /// as a swamped night is never a regression (protocol §1.2, §12).
     Bound(f64),
 }
 
 impl Held {
     /// The reading's status for what a bar `took`: a control fails where a
-    /// row's sign resolved, a bound where the ratio is above it or is
-    /// no number, and a series is held to no bound.
+    /// row's sign resolved, a bound where the ratio is established above
+    /// it or is no number, and a series is held to no bound.
     fn status(self, took: &Took) -> Status {
-        let ratio = took.ratio().value;
+        let Ratio { value, verdict } = took.ratio();
+        let above = |at_most| value.is_nan() || (verdict == RESOLVED && value > at_most);
         match self {
             Held::Control if took.resolved() > 0 => Status::Fail,
-            Held::Bound(at_most) if ratio.is_nan() || ratio > at_most => Status::Fail,
+            Held::Bound(at_most) if above(at_most) => Status::Fail,
             Held::Control | Held::Series | Held::Bound(_) => Status::Pass,
         }
     }
@@ -1358,7 +1360,7 @@ mod tests {
     /// A set's ratio is the geomean of its rows', 0.5 and 2.0 making 1.0,
     /// its sign established only where every row's is (protocol §10); a
     /// control over a set fails on any one resolved row, and a bound on a
-    /// geomean above it, its sign established or not (#2947).
+    /// geomean established above it and not on a swamped one (#2947).
     #[test]
     fn a_set_is_held_by_its_geomean_and_a_control_by_each_row() {
         let set = took(vec![row(Ms, &AHEAD, -50.0), row(Ms, &BEHIND, 100.0)], true);
@@ -1376,8 +1378,10 @@ mod tests {
             "one swamped row leaves the geomean unsigned"
         );
         assert_eq!(Held::Control.status(&swamped), Status::Fail);
-        assert_eq!(Held::Bound(1.02).status(&swamped), Status::Fail);
+        assert_eq!(Held::Bound(1.02).status(&swamped), Status::Pass);
         assert_eq!(Held::Bound(1.0).status(&set), Status::Pass, "at the bound");
+        let behind = took(vec![row(Ms, &BEHIND, 10.0), row(Ms, &BEHIND, 10.0)], true);
+        assert_eq!(Held::Bound(1.02).status(&behind), Status::Fail);
         let quiet = took(vec![row(Ms, &STRADDLES, 3.0), row(Ms, &AHEAD, 3.0)], true);
         assert_eq!(Held::Control.status(&quiet), Status::Fail);
         let quiet = took(
