@@ -9,9 +9,11 @@ use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::Tree;
 
 mod common {
+    pub mod manifest;
     pub mod repo;
     pub mod run;
 }
+use common::manifest::{Tracked, pin};
 use common::repo::Repo;
 use common::run::{Ran, Run};
 
@@ -19,13 +21,16 @@ fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
 }
 
-/// A scratch workspace: the tracked manifest, pin and registry, and no store.
+/// A scratch workspace: the tracked manifest and pin, a registry with no
+/// row, and no store.
 fn scratch(name: &str) -> Tree {
     let dir = Tree::new(&format!("status-{name}")).unwrap();
     std::fs::create_dir_all(dir.join("docs")).unwrap();
-    for file in ["seams.toml", "oracle.toml", "docs/divergence.toml"] {
+    for file in ["seams.toml", "oracle.toml"] {
         std::fs::copy(workspace().join(file), dir.join(file)).unwrap();
     }
+    let empty = xtask::package_dir().join("fixtures/registry/empty.toml");
+    std::fs::copy(empty, dir.join("docs/divergence.toml")).unwrap();
     dir
 }
 
@@ -707,7 +712,7 @@ fn oracle_names_both_places_when_the_tree_is_at_neither() {
 #[test]
 fn oracle_states_the_pinned_php_a_runner_pours() {
     let root = scratch("oracle-binary");
-    let pin = Manifest::load(workspace()).unwrap().pin;
+    let pin = pin();
     let oracle = pin.oracle.clone();
     let path = oracle.path.display().to_string();
     let json = oracle_json(&root, None, None);
@@ -774,7 +779,7 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
 #[test]
 fn oracle_states_the_pins_tag_and_commit() {
     let root = scratch("oracle-source");
-    let source = Manifest::load(workspace()).unwrap().pin.source;
+    let source = pin().source;
     let json = oracle_json(&root, None, None);
     assert_eq!(json["pin"]["tag"], source.tag.as_str());
     assert_eq!(json["pin"]["commit"], source.commit.as_str());
@@ -798,7 +803,7 @@ fn oracle_states_the_pins_tag_and_commit() {
 #[test]
 fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
     let root = scratch("corpus");
-    let source = Manifest::load(workspace()).unwrap().pin.source;
+    let source = pin().source;
     let json = status(&root, &["--section", "corpus", "--format", "json"]).ok();
     let corpus: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(corpus["tag"], source.tag.as_str());
@@ -821,7 +826,7 @@ fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
         digest.len() == 12 && digest.chars().all(|c| c.is_ascii_hexdigit()),
         "{key}"
     );
-    let pin = Manifest::load(workspace()).unwrap().pin;
+    let pin = pin();
     let variants = pin
         .variant
         .keys()
@@ -1815,14 +1820,22 @@ fn permits_separates_the_calls_denied_from_the_calls_handed_to_the_next_candidat
 #[test]
 fn permits_carries_a_row_for_the_proposed_git_pathspec_rule() {
     let root = scratch("permit-pathspec-row");
-    let manifest = root.join("seams.toml");
-    let mut text = std::fs::read_to_string(&manifest).unwrap();
-    if !text.contains("id = \"git.pathspec\"") {
-        text.push_str(
-            "\n[[rule]]\nid = \"git.pathspec\"\ntool = \"Bash\"\nwith = [\"git add\", \"git commit\"]\nrequire_argv = \"--\"\ntext = \"An agent stages and commits by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`: the index is shared with every session in the checkout.\"\n",
-        );
-        std::fs::write(&manifest, text).unwrap();
-    }
+    Tracked::of(&root)
+        .with_rule("git.pathspec", |rule| {
+            if !rule.contains_key("tool") {
+                rule.extend(
+                    r#"
+tool = "Bash"
+with = ["git add", "git commit"]
+require_argv = "--"
+text = "An agent stages and commits by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`: the index is shared with every session in the checkout."
+"#
+                    .parse::<toml::Table>()
+                    .unwrap(),
+                );
+            }
+        })
+        .write(&root);
     let store = Store::of_workspace(&root);
     let mut denial = Reading::new("permit", "git add -A && git commit -m x");
     denial.rule = "git.pathspec".into();
@@ -1891,17 +1904,14 @@ fn permits_renders_the_bench_reading_as_before() {
 fn permits_lists_the_instruments_and_the_candidates_for_silent() {
     let root = scratch("silent");
     let store = Store::of_workspace(&root);
-    // The tracked manifest carries the window; the first rendering is
-    // without it, so strip the table and its one key.
-    let manifest_path = root.join("seams.toml");
-    let mut manifest = String::new();
-    for line in std::fs::read_to_string(&manifest_path).unwrap().lines() {
-        if !line.starts_with("[telemetry]") && !line.starts_with("silent_days") {
-            manifest.push_str(line);
-            manifest.push('\n');
-        }
-    }
-    std::fs::write(&manifest_path, &manifest).unwrap();
+    // The first rendering is without the window, the second with it.
+    let window = |days: Option<i64>| {
+        let table = days.map(|n| toml::Table::from_iter([("silent_days".to_owned(), n.into())]));
+        Tracked::of(&root)
+            .with_table("telemetry", table)
+            .write(&root);
+    };
+    window(None);
 
     let mut budget = Reading::new("budget", "php_heap");
     budget.status = Status::Pass;
@@ -1929,11 +1939,7 @@ fn permits_lists_the_instruments_and_the_candidates_for_silent() {
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(value["instruments"][0]["silent"], serde_json::Value::Null);
 
-    std::fs::write(
-        &manifest_path,
-        format!("{manifest}\n[telemetry]\nsilent_days = 14\n"),
-    )
-    .unwrap();
+    window(Some(14));
     let md = status(&root, &["--section", "permits"]).ok();
     let row = |name: &str| {
         md.lines()
@@ -1978,10 +1984,8 @@ fn the_week_section_and_its_row_are_refused() {
     assert!(err.contains("invalid value 'week'"), "{err}");
     let err = status(&root, &["--section", "rules", "--week", "1"]).failed();
     assert!(err.contains("unexpected argument '--week'"), "{err}");
-    let text = format!(
-        "{}\n[[week]]\ndays = \"3-7\"\n",
-        std::fs::read_to_string(root.join("seams.toml")).unwrap()
-    );
+    let week = toml::Table::from_iter([("days".to_owned(), "3-7".into())]);
+    let text = Tracked::of(&root).with_table("week", Some(week)).text();
     let err = format!("{:#}", Manifest::parse(&text).unwrap_err());
     assert!(err.contains("unknown field `week`"), "{err}");
 }

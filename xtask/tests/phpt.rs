@@ -25,11 +25,13 @@ use xtask::reading::{Number, Reading, Status};
 use xtask::scratch::Tree;
 
 mod common {
+    pub mod manifest;
     pub mod phpt_tree;
     pub mod registry;
     pub mod repo;
     pub mod run;
 }
+use common::manifest::pin;
 use common::phpt_tree::fixture_tree;
 use common::registry::registry;
 use common::repo::{Repo, scratch_workspace};
@@ -39,8 +41,13 @@ fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
 }
 
+/// A manifest of `ext/pcre`'s row alone under the tracked pin: what the
+/// tests that run a subset of the pinned tree judge by, the extension
+/// being one whose tests stand there.
 fn manifest() -> Manifest {
-    Manifest::load(workspace()).unwrap()
+    let mut manifest = Manifest::named("ext/pcre");
+    manifest.pin = pin();
+    manifest
 }
 
 /// A manifest of these `[[crate]]` rows under the tracked pin with its
@@ -57,7 +64,7 @@ fn manifest_of(rows: impl IntoIterator<Item = Crate>, tree: &Path) -> Manifest {
 /// The tracked pin's binary, when it is on this machine; a failure where
 /// this machine promised the binary (#38).
 fn oracle() -> Option<PathBuf> {
-    let pin = manifest().pin;
+    let pin = pin();
     Promise::Oracle
         .or_skip(pin.oracle.file().map(Path::to_path_buf))
         .unwrap()
@@ -70,7 +77,7 @@ fn oracle() -> Option<PathBuf> {
 /// where the runner promised the tree, they fail naming both places
 /// tried (#38).
 fn source() -> Option<PathBuf> {
-    Promise::Tree.or_skip(manifest().pin.source.tree()).unwrap()
+    Promise::Tree.or_skip(pin().source.tree()).unwrap()
 }
 
 /// A workspace of this test's own: a git repository holding the tracked
@@ -154,7 +161,7 @@ impl Scratch {
 /// The tracked pin with its tree at `corpus`, as if the variable named
 /// it: the way a test points the pin at a tree of its own.
 fn pin_over(corpus: &Path) -> Pin {
-    let pin = manifest().pin.on_this_machine(Some(corpus.to_path_buf()));
+    let pin = pin().on_this_machine(Some(corpus.to_path_buf()));
     assert_eq!(
         pin.source.tree().unwrap(),
         corpus,
@@ -695,33 +702,6 @@ fn a_relative_root_reaches_the_verdicts_an_absolute_one_does() {
     );
     let (relative, said) = run(Path::new("."));
     assert_eq!(relative, absolute, "{said}");
-}
-
-#[test]
-fn the_full_corpus_is_a_flag_the_manifest_denies_at_the_tool_call() {
-    // The rule's fixture is the negative control; this asserts the flag the
-    // rule names, among the instrument's argv (#1860), is the flag the
-    // runner has.
-    let ask = Ask {
-        full: true,
-        ..Ask::default()
-    };
-    assert!(ask.full);
-    let manifest = manifest();
-    let rule = manifest
-        .rule("lanes.nightly-flags")
-        .expect("the manifest has the rule");
-    let flags = rule
-        .predicate
-        .deny_argv
-        .as_ref()
-        .expect("the rule denies an argv");
-    assert!(flags.iter().any(|f| f == "--full"), "{flags:?}");
-    assert!(
-        rule.predicate.with.iter().any(|w| w == "xtask phpt"),
-        "{:?}",
-        rule.predicate.with
-    );
 }
 
 /// A binary standing where the engine's would that prints `__FILE__` as
@@ -2486,4 +2466,39 @@ fn the_control_keeps_the_target_and_the_engines_reading_is_met_of_target() {
         "{}",
         reading.message
     );
+}
+
+/// The tests whose subject is the tracked workspace itself: each reads the
+/// `seams.toml`, `oracle.toml`, registry or sources standing in the
+/// workspace, so a person's edit there is what may turn one red (#3091).
+/// Every other test here builds the manifest it judges.
+mod tracked {
+    use super::*;
+
+    #[test]
+    fn the_full_corpus_is_a_flag_the_manifest_denies_at_the_tool_call() {
+        // The rule's fixture is the negative control; this asserts the flag the
+        // rule names, among the instrument's argv (#1860), is the flag the
+        // runner has.
+        let ask = Ask {
+            full: true,
+            ..Ask::default()
+        };
+        assert!(ask.full);
+        let manifest = Manifest::load(workspace()).unwrap();
+        let rule = manifest
+            .rule("lanes.nightly-flags")
+            .expect("the manifest has the rule");
+        let flags = rule
+            .predicate
+            .deny_argv
+            .as_ref()
+            .expect("the rule denies an argv");
+        assert!(flags.iter().any(|f| f == "--full"), "{flags:?}");
+        assert!(
+            rule.predicate.with.iter().any(|w| w == "xtask phpt"),
+            "{:?}",
+            rule.predicate.with
+        );
+    }
 }

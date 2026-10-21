@@ -36,18 +36,16 @@ use xtask::reading::{Number, Reading, Status};
 use xtask::scratch::Tree;
 
 mod common {
+    pub mod manifest;
     pub mod registry;
     pub mod repo;
 }
+use common::manifest::pin;
 use common::registry::registry;
 use common::repo::scratch_workspace;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
-}
-
-fn manifest() -> Manifest {
-    Manifest::load(workspace()).unwrap()
 }
 
 /// The engine's own binary, `sapi/cli`'s `php`, built once for these
@@ -71,7 +69,7 @@ fn php() -> &'static Path {
 /// The tracked pin's binary, when it is on this machine; a failure where
 /// this machine promised the binary (#38).
 fn oracle() -> Option<PathBuf> {
-    let pin = manifest().pin;
+    let pin = pin();
     Promise::Oracle
         .or_skip(pin.oracle.file().map(Path::to_path_buf))
         .unwrap()
@@ -80,7 +78,7 @@ fn oracle() -> Option<PathBuf> {
 /// The tracked pin's php-src tree, when it is on this machine; a failure
 /// where this machine promised the tree (#38).
 fn source() -> Option<PathBuf> {
-    Promise::Tree.or_skip(manifest().pin.source.tree()).unwrap()
+    Promise::Tree.or_skip(pin().source.tree()).unwrap()
 }
 
 fn fixtures() -> PathBuf {
@@ -140,7 +138,7 @@ impl Scratch {
             }
         }
         let mut manifest = Manifest::named("php_compile");
-        manifest.pin = self::manifest().pin;
+        manifest.pin = pin();
         manifest
             .pin
             .regime

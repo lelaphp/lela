@@ -273,7 +273,7 @@ impl Scripts {
 pub struct Crate {
     pub name: String,
     pub budget: u64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "OneOrMany::is_empty")]
     pub lock: OneOrMany,
     #[serde(default)]
     pub lock_from: BTreeMap<String, String>,

@@ -19,9 +19,11 @@ use xtask::ticket::{
 use xtask::track::Ticket;
 
 mod common {
+    pub mod manifest;
     pub mod repo;
     pub mod tracker;
 }
+use common::manifest::pin;
 use common::repo::Repo;
 use common::tracker::{Tracker, blocked_by, issue, labels, open};
 
@@ -29,9 +31,19 @@ fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
 }
 
+/// The manifest a mechanics test judges by: a row, the tracked pin and no
+/// rule, so no criterion is held to a `deny = true` rule; the tracked
+/// rules a ticket an agent may take is held to (#153) are read in
+/// [`tracked`].
+fn manifest() -> Manifest {
+    let mut manifest = Manifest::named("xtask");
+    manifest.pin = pin();
+    manifest
+}
+
 /// The manifest of this workspace, whose `deny = true` rules a ticket an
 /// agent may take is held to (#153).
-fn manifest() -> Manifest {
+fn tracked_manifest() -> Manifest {
     Manifest::load(workspace()).unwrap()
 }
 
@@ -129,156 +141,6 @@ fn gh_s_own_answers_parse_as_the_issues_the_tracker_lays() {
 fn a_call_the_test_laid_no_answer_for_fails_it_naming_the_call() {
     let tracker = Tracker::empty("unexpected");
     assert!(tracker.gh().view(workspace(), Ticket::new(99)).is_err());
-}
-
-/// The negative control of `harness.self` at the read (#153): the ticket
-/// laid down under `xtask/fixtures/rules/harness.self/`, which carries
-/// `ready-for-agent` and asks in two criteria for a write into the rule's
-/// scope, one the pin that `xtask steer` writes for an agent and one the
-/// hook settings that nothing writes for one. The manifest is this
-/// workspace's, so the scope the reading names is the one `permit` denies
-/// the write by.
-#[test]
-fn a_ready_for_agent_ticket_asking_for_a_write_the_manifest_denies_fails_naming_path_and_rule() {
-    let body =
-        fs::read_to_string(xtask::package_dir().join("fixtures/rules/harness.self/ticket.md"))
-            .unwrap();
-    let tracker = Tracker::empty("denied");
-    tracker.with_issue(&labelled(111, &body, &["ready-for-agent", "track:main"]));
-    let reading = run(
-        workspace(),
-        &manifest(),
-        &tracker.gh(),
-        Act::Read,
-        Ticket::new(111),
-        None,
-    )
-    .unwrap();
-    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
-    assert_eq!(reading.rule, "harness.self");
-    assert_eq!(reading.numbers["denied"], 1.into(), "{reading:#?}");
-    assert_eq!(reading.numbers["steerable"], 1.into(), "{reading:#?}");
-    assert!(
-        reading
-            .message
-            .contains("`.claude/settings.json` gains the hook")
-            && reading.message.contains("asks for .claude/settings.json"),
-        "the criterion and the path: {}",
-        reading.message
-    );
-    assert!(
-        reading.message.contains("harness.self denies an agent"),
-        "the rule: {}",
-        reading.message
-    );
-    assert!(
-        reading
-            .message
-            .contains("gh issue edit 111 --add-label for-a-person"),
-        "what a person does with it: {}",
-        reading.message
-    );
-    // The criterion whose object is the pin is said and not refused: the
-    // write is an agent's through the instrument sanctioned to make it
-    // (#152).
-    assert!(
-        reading
-            .message
-            .contains("`cargo xtask steer oracle.toml --from <proposal>`"),
-        "the instrument that writes it: {}",
-        reading.message
-    );
-    // The same criteria under the label that says the act is a person's
-    // are held to the boxes and to nothing else.
-    tracker.with_issue(&labelled(111, &body, &["for-a-person", "track:main"]));
-    let person = run(
-        workspace(),
-        &manifest(),
-        &tracker.gh(),
-        Act::Read,
-        Ticket::new(111),
-        None,
-    )
-    .unwrap();
-    assert_eq!(person.numbers["denied"], 0.into(), "{person:#?}");
-    assert_eq!(person.numbers["steerable"], 0.into(), "{person:#?}");
-    assert!(person.rule.is_empty(), "{person:#?}");
-    assert!(
-        person.message.contains("0 of 4 criteria ticked"),
-        "{}",
-        person.message
-    );
-}
-
-/// The narrowing #152 measured (#153): a ticket the maintainer handed to
-/// an agent, every box ticked, whose first criterion's object is the pin.
-/// `xtask steer` is the sanctioned writer of that file, so the label is
-/// not wrong; the read passes and the message still says what it matched.
-#[test]
-fn a_criterion_whose_object_is_a_file_xtask_steer_writes_is_said_and_not_refused() {
-    let body = "## Acceptance criteria\n\n- [x] `oracle.toml` carries a `[regime.dump]` with the two ini entries above, with a comment that says what the regime is\n";
-    let tracker = Tracker::empty("steerable");
-    tracker.with_issue(&labelled(
-        152,
-        body,
-        &["ready-for-agent", "track:parity-hosts"],
-    ));
-    let reading = run(
-        workspace(),
-        &manifest(),
-        &tracker.gh(),
-        Act::Read,
-        Ticket::new(152),
-        None,
-    )
-    .unwrap();
-    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
-    assert_eq!(reading.numbers["denied"], 0.into(), "{reading:#?}");
-    assert_eq!(reading.numbers["steerable"], 1.into(), "{reading:#?}");
-    assert!(reading.rule.is_empty(), "{reading:#?}");
-    assert!(
-        reading.message.contains("asks for oracle.toml")
-            && reading
-                .message
-                .contains("`cargo xtask steer oracle.toml --from <proposal>`"),
-        "what it matched, and the call that writes it: {}",
-        reading.message
-    );
-    assert!(
-        !reading.message.contains("--add-label for-a-person"),
-        "the label is not wrong: {}",
-        reading.message
-    );
-}
-
-/// A criterion whose denied subject stays as it is asks for no write
-/// (#2391): #630's third box asks that the live numbers still render, and
-/// the read passes it, while #111's "`oracle.toml` carries" beside it is
-/// still the write, said as the steer that makes it.
-#[test]
-fn a_criterion_saying_a_denied_path_still_behaves_as_before_asks_for_no_write() {
-    let body = "## Acceptance criteria\n\n- [x] `.claude/harness.local.md` still renders this machine's live numbers, and `cargo xtask status --section rules` still prints them\n- [x] `seams.toml` is unchanged\n- [x] `oracle.toml` carries a `[regime.dump]` with the ini above\n";
-    let tracker = Tracker::empty("kept");
-    tracker.with_issue(&labelled(630, body, &["ready-for-agent"]));
-    let reading = run(
-        workspace(),
-        &manifest(),
-        &tracker.gh(),
-        Act::Read,
-        Ticket::new(630),
-        None,
-    )
-    .unwrap();
-    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
-    assert_eq!(reading.numbers["denied"], 0.into(), "{reading:#?}");
-    assert_eq!(reading.numbers["steerable"], 1.into(), "{reading:#?}");
-    assert!(
-        reading.message.contains("asks for oracle.toml")
-            && !reading.message.contains("harness.local.md")
-            && !reading.message.contains("asks for seams.toml"),
-        "{}",
-        reading.message
-    );
 }
 
 const UNTICKED: &str =
@@ -1616,4 +1478,163 @@ fn a_sheet_at_the_cap_fails_before_a_ticket_is_filed_against_it_and_one_with_roo
     );
 
     assert!(tracker.calls().is_empty(), "{:?}", tracker.calls());
+}
+
+/// The tests whose subject is the tracked workspace itself: each reads the
+/// `seams.toml`, `oracle.toml`, registry or sources standing in the
+/// workspace, so a person's edit there is what may turn one red (#3091).
+/// Every other test here builds the manifest it judges.
+mod tracked {
+    use super::*;
+
+    /// The negative control of `harness.self` at the read (#153): the ticket
+    /// laid down under `xtask/fixtures/rules/harness.self/`, which carries
+    /// `ready-for-agent` and asks in two criteria for a write into the rule's
+    /// scope, one the pin that `xtask steer` writes for an agent and one the
+    /// hook settings that nothing writes for one. The manifest is this
+    /// workspace's, so the scope the reading names is the one `permit` denies
+    /// the write by.
+    #[test]
+    fn a_ready_for_agent_ticket_asking_for_a_write_the_manifest_denies_fails_naming_path_and_rule()
+    {
+        let body =
+            fs::read_to_string(xtask::package_dir().join("fixtures/rules/harness.self/ticket.md"))
+                .unwrap();
+        let tracker = Tracker::empty("denied");
+        tracker.with_issue(&labelled(111, &body, &["ready-for-agent", "track:main"]));
+        let reading = run(
+            workspace(),
+            &tracked_manifest(),
+            &tracker.gh(),
+            Act::Read,
+            Ticket::new(111),
+            None,
+        )
+        .unwrap();
+        assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+        assert_eq!(reading.rule, "harness.self");
+        assert_eq!(reading.numbers["denied"], 1.into(), "{reading:#?}");
+        assert_eq!(reading.numbers["steerable"], 1.into(), "{reading:#?}");
+        assert!(
+            reading
+                .message
+                .contains("`.claude/settings.json` gains the hook")
+                && reading.message.contains("asks for .claude/settings.json"),
+            "the criterion and the path: {}",
+            reading.message
+        );
+        assert!(
+            reading.message.contains("harness.self denies an agent"),
+            "the rule: {}",
+            reading.message
+        );
+        assert!(
+            reading
+                .message
+                .contains("gh issue edit 111 --add-label for-a-person"),
+            "what a person does with it: {}",
+            reading.message
+        );
+        // The criterion whose object is the pin is said and not refused: the
+        // write is an agent's through the instrument sanctioned to make it
+        // (#152).
+        assert!(
+            reading
+                .message
+                .contains("`cargo xtask steer oracle.toml --from <proposal>`"),
+            "the instrument that writes it: {}",
+            reading.message
+        );
+        // The same criteria under the label that says the act is a person's
+        // are held to the boxes and to nothing else.
+        tracker.with_issue(&labelled(111, &body, &["for-a-person", "track:main"]));
+        let person = run(
+            workspace(),
+            &tracked_manifest(),
+            &tracker.gh(),
+            Act::Read,
+            Ticket::new(111),
+            None,
+        )
+        .unwrap();
+        assert_eq!(person.numbers["denied"], 0.into(), "{person:#?}");
+        assert_eq!(person.numbers["steerable"], 0.into(), "{person:#?}");
+        assert!(person.rule.is_empty(), "{person:#?}");
+        assert!(
+            person.message.contains("0 of 4 criteria ticked"),
+            "{}",
+            person.message
+        );
+    }
+
+    /// The narrowing #152 measured (#153): a ticket the maintainer handed to
+    /// an agent, every box ticked, whose first criterion's object is the pin.
+    /// `xtask steer` is the sanctioned writer of that file, so the label is
+    /// not wrong; the read passes and the message still says what it matched.
+    #[test]
+    fn a_criterion_whose_object_is_a_file_xtask_steer_writes_is_said_and_not_refused() {
+        let body = "## Acceptance criteria\n\n- [x] `oracle.toml` carries a `[regime.dump]` with the two ini entries above, with a comment that says what the regime is\n";
+        let tracker = Tracker::empty("steerable");
+        tracker.with_issue(&labelled(
+            152,
+            body,
+            &["ready-for-agent", "track:parity-hosts"],
+        ));
+        let reading = run(
+            workspace(),
+            &tracked_manifest(),
+            &tracker.gh(),
+            Act::Read,
+            Ticket::new(152),
+            None,
+        )
+        .unwrap();
+        assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+        assert_eq!(reading.numbers["denied"], 0.into(), "{reading:#?}");
+        assert_eq!(reading.numbers["steerable"], 1.into(), "{reading:#?}");
+        assert!(reading.rule.is_empty(), "{reading:#?}");
+        assert!(
+            reading.message.contains("asks for oracle.toml")
+                && reading
+                    .message
+                    .contains("`cargo xtask steer oracle.toml --from <proposal>`"),
+            "what it matched, and the call that writes it: {}",
+            reading.message
+        );
+        assert!(
+            !reading.message.contains("--add-label for-a-person"),
+            "the label is not wrong: {}",
+            reading.message
+        );
+    }
+
+    /// A criterion whose denied subject stays as it is asks for no write
+    /// (#2391): #630's third box asks that the live numbers still render, and
+    /// the read passes it, while #111's "`oracle.toml` carries" beside it is
+    /// still the write, said as the steer that makes it.
+    #[test]
+    fn a_criterion_saying_a_denied_path_still_behaves_as_before_asks_for_no_write() {
+        let body = "## Acceptance criteria\n\n- [x] `.claude/harness.local.md` still renders this machine's live numbers, and `cargo xtask status --section rules` still prints them\n- [x] `seams.toml` is unchanged\n- [x] `oracle.toml` carries a `[regime.dump]` with the ini above\n";
+        let tracker = Tracker::empty("kept");
+        tracker.with_issue(&labelled(630, body, &["ready-for-agent"]));
+        let reading = run(
+            workspace(),
+            &tracked_manifest(),
+            &tracker.gh(),
+            Act::Read,
+            Ticket::new(630),
+            None,
+        )
+        .unwrap();
+        assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+        assert_eq!(reading.numbers["denied"], 0.into(), "{reading:#?}");
+        assert_eq!(reading.numbers["steerable"], 1.into(), "{reading:#?}");
+        assert!(
+            reading.message.contains("asks for oracle.toml")
+                && !reading.message.contains("harness.local.md")
+                && !reading.message.contains("asks for seams.toml"),
+            "{}",
+            reading.message
+        );
+    }
 }

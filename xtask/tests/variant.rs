@@ -26,9 +26,11 @@ use xtask::scratch::Tree;
 use xtask::witness;
 
 mod common {
+    pub mod manifest;
     pub mod repo;
     pub mod run;
 }
+use common::manifest::Tracked;
 use common::repo::scratch_workspace;
 use common::run::Run;
 
@@ -483,7 +485,7 @@ fn crosscheck_renders_an_extension_whose_row_names_a_variant_under_it() {
         renderings: Some(renderings),
         ..crosscheck::Ask::default()
     };
-    let mut manifest = Manifest::load(workspace()).unwrap();
+    let mut manifest = Manifest::named("ext/ctype");
     manifest.pin = pin;
     let run = |manifest: &Manifest| {
         crosscheck::run(&root, manifest, &Registry::default(), &store, &ask).unwrap()
@@ -800,10 +802,13 @@ fn phpt_featured(name: &str, build: &str) -> Option<(Tree, Reading)> {
         text + &variant_table("stand-in", platform.key(), &php, &md5),
     )
     .unwrap();
-    let seams = root.join("seams.toml");
-    let text = fs::read_to_string(&seams).unwrap();
-    let row = "\n[[crate]]\nname = \"ext/fixture\"\nbudget = 100\nfeature = \"fixture\"\noracle = \"stand-in\"\n";
-    fs::write(&seams, text + row).unwrap();
+    Tracked::of(&root)
+        .with_crate("ext/fixture", |row| {
+            row.budget = 100;
+            row.feature = Some("fixture".to_owned());
+            row.oracle = Some("stand-in".to_owned());
+        })
+        .write(&root);
     shell(&root.join("target/release-da/php"), "printf default");
     let cargo = root.join("bin/cargo");
     shell(&cargo, build);
@@ -879,7 +884,7 @@ fn crosscheck_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_i
     };
     let root = Tree::new("variant-crosscheck-unpinned").unwrap();
     scratch_workspace(workspace(), &root);
-    let mut manifest = Manifest::load(workspace()).unwrap();
+    let mut manifest = Manifest::named("ext/ctype");
     manifest.pin = Pin::parse(
         &(tracked_text() + &variant_table("fixture-variant", other, Path::new("/opt/php"), "0")),
     )

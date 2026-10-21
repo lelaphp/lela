@@ -17,10 +17,12 @@ use xtask::reading::{Reading, Status, Store, UNDER_RECIPE};
 use xtask::scratch::Tree;
 
 mod common {
+    pub mod manifest;
     pub mod repo;
     pub mod run;
     pub mod tracker;
 }
+use common::manifest::Tracked;
 use common::repo::Repo;
 use common::run::{Ran, Run, xtask};
 use common::tracker::{Tracker, issue};
@@ -62,12 +64,15 @@ fn write(root: &Path, path: &str, text: &str) {
     std::fs::write(&file, text).unwrap();
 }
 
-/// A scratch repository: the tracked manifest, pin and registry, and the
-/// fixture's two crates, `ext/pcre` and `crates/php_ext`, committed once.
-/// Every change the tests make after this is the diff `done` judges with
-/// `--base HEAD`.
+/// A scratch repository: the tracked manifest and pin, a registry with no
+/// row, and the fixture's two crates, `ext/pcre` and `crates/php_ext`,
+/// committed once. Every change the tests make after this is the diff
+/// `done` judges with `--base HEAD`. The manifest is the tracked file byte
+/// for byte, since `done --hook` refuses one its build was not compiled
+/// against; a test that needs a row otherwise builds it with [`Tracked`]
+/// and judges without `--hook`.
 fn scratch(name: &str) -> Tree {
-    repository(name, &workspace().join("docs/divergence.toml"))
+    repository(name, &fixtures().join("registry/empty.toml"))
 }
 
 /// The same, with the fixture's registry: one open row on ext/pcre's phpt
@@ -88,7 +93,6 @@ fn repository(name: &str, registry: &Path) -> Tree {
         std::fs::copy(workspace().join(file), root.join(file)).unwrap();
     }
     std::fs::copy(registry, root.join("docs/divergence.toml")).unwrap();
-    unmark_porting(&root, "ext/pcre");
     let fixture = fixtures().join("done");
     for file in ["Cargo.toml", "src/lib.rs"] {
         let text = std::fs::read_to_string(fixture.join("ext/pcre").join(file)).unwrap();
@@ -103,53 +107,6 @@ fn repository(name: &str, registry: &Path) -> Tree {
     write(&root, ".gitignore", "target/\n");
     Repo::init(&root).commit("scratch");
     root
-}
-
-/// Drop `porting = true` from one crate's `[[crate]]` row in the scratch
-/// repository's manifest, the other half of [`mark_porting`]. These tests
-/// hold `ext/pcre` to condition 1 as a crate whose port is whole, and the
-/// tracked manifest marks it partial since #652, so the scratch copy says
-/// what the tests need rather than what the tracked file carries.
-fn unmark_porting(root: &Path, name: &str) {
-    let text = std::fs::read_to_string(root.join("seams.toml")).unwrap();
-    let head = format!("name = \"{name}\"");
-    let mut in_row = false;
-    let kept: Vec<&str> = text
-        .lines()
-        .filter(|line| {
-            if line.starts_with("[[") {
-                in_row = false;
-            } else if *line == head {
-                in_row = true;
-            }
-            !(in_row && line.trim() == "porting = true")
-        })
-        .collect();
-    std::fs::write(root.join("seams.toml"), kept.join("\n") + "\n").unwrap();
-    let manifest = Manifest::load(root).unwrap();
-    assert!(
-        manifest.crate_named(name).is_some_and(|row| !row.porting),
-        "{name} is unmarked"
-    );
-}
-
-/// Mark one crate's `[[crate]]` row `porting = true` in the scratch
-/// repository's manifest, the key `xtask steer` writes (harness §4.5
-/// condition 1, §11). The tracked manifest is the workspace's, copied in
-/// by `repository`, and a test says what it needs rather than standing on
-/// what the tracked file happens to carry: a crate the workspace already
-/// marks is left as it stands, two `porting` lines in one row being a
-/// duplicate key and no manifest at all (#387).
-fn mark_porting(root: &Path, name: &str) {
-    let manifest = Manifest::load(root).unwrap();
-    if manifest.crate_named(name).is_some_and(|row| row.porting) {
-        return;
-    }
-    let text = std::fs::read_to_string(root.join("seams.toml")).unwrap();
-    let row = format!("name = \"{name}\"\n");
-    assert_eq!(text.matches(&row).count(), 1, "{name} names one row");
-    let marked = text.replace(&row, &format!("{row}porting = true\n"));
-    std::fs::write(root.join("seams.toml"), marked).unwrap();
 }
 
 fn judge(root: &Path) -> Verdict {
@@ -419,9 +376,14 @@ fn a_dependents_reading_is_stale_once_a_crate_in_its_closure_changes() {
     let root = Tree::new("done-closure").unwrap();
     xtask::scratch::repository(&fixtures().join("closure"), &root, &["."]).unwrap();
     std::fs::create_dir_all(root.join("docs")).unwrap();
-    for file in ["seams.toml", "oracle.toml", "docs/divergence.toml"] {
+    for file in ["seams.toml", "oracle.toml"] {
         std::fs::copy(workspace().join(file), root.join(file)).unwrap();
     }
+    std::fs::copy(
+        fixtures().join("registry/empty.toml"),
+        root.join("docs/divergence.toml"),
+    )
+    .unwrap();
     write(&root, ".gitignore", "target/\n");
     Repo::at(&root).commit("the harness's own files");
     let stale = "witness: the reading for ext/reflection is stale";
@@ -979,87 +941,6 @@ fn a_subset_is_held_to_no_regression_against_the_runs_kept_at_the_base() {
     assert!(judge(&root).met(), "{:#?}", judge(&root));
 }
 
-/// The `--ri` column is a condition of done as the `--re` one is (harness
-/// §4.5 condition 1, ledger 46; #361): a default extension with a red
-/// `ext/<name>/ri` reading is unmet naming that scope, one with both
-/// columns green is met, and a crate outside `ext/` is asked for no such
-/// scope.
-#[test]
-fn a_default_extension_with_a_red_ri_crosscheck_reading_is_unmet_and_with_both_green_is_met() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let scopes = |instrument, name| {
-        let krate = manifest.crate_named(name).unwrap();
-        done::scopes_of(workspace(), instrument, krate).unwrap()
-    };
-    assert_eq!(
-        scopes("crosscheck", "ext/pcre"),
-        ["ext/pcre", "ext/pcre/ri"]
-    );
-    assert_eq!(scopes("clippy", "ext/pcre"), ["ext/pcre"]);
-    assert_eq!(scopes("crosscheck", "php_ext"), ["php_ext"]);
-
-    let root = scratch("ri");
-    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
-    let store = Store::of_workspace(&root);
-    record_asked(&store, &root, "ext/pcre");
-    assert!(judge(&root).met(), "{:#?}", judge(&root));
-
-    let mut red = fresh(&root, "crosscheck", "ext/pcre/ri");
-    red.status = Status::Fail;
-    red.message = "ext/pcre/ri: the oracle rendered 200 bytes under `php -n --ri pcre`".into();
-    store.record(std::slice::from_ref(&red)).unwrap();
-    let verdict = judge(&root);
-    assert_eq!(
-        verdict.unmet,
-        [
-            "crosscheck: ext/pcre/ri fail: ext/pcre/ri: the oracle rendered 200 bytes under `php -n --ri pcre`"
-        ],
-        "{verdict:#?}"
-    );
-
-    std::fs::remove_file(store.path("crosscheck", "ext/pcre/ri").unwrap()).unwrap();
-    let verdict = judge(&root);
-    assert_eq!(
-        verdict.unmet,
-        ["crosscheck: no reading for ext/pcre/ri"],
-        "{verdict:#?}"
-    );
-}
-
-/// A crate whose library sources name `debug_assertions` is asked for a
-/// second `clippy` reading, the release profile's at `<name>/release`, and
-/// is unmet without it (#2392); a mention in a comment or a string asks
-/// nothing. `php_heap` and `php_engine` carry the split in the tree.
-#[test]
-fn a_crate_whose_sources_name_debug_assertions_is_asked_for_a_release_clippy_reading() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    for name in ["php_heap", "php_engine"] {
-        let krate = manifest.crate_named(name).unwrap();
-        let scopes = done::scopes_of(workspace(), "clippy", krate).unwrap();
-        assert_eq!(scopes, [name.to_owned(), format!("{name}/release")]);
-    }
-
-    let root = scratch("release");
-    let commented = "// debug_assertions\npub fn f() -> &'static str { \"debug_assertions\" }\n";
-    write(&root, "ext/pcre/src/lib.rs", commented);
-    assert!(!asked_of(&root, "ext/pcre").contains(&("clippy", "ext/pcre/release".into())));
-    write(
-        &root,
-        "ext/pcre/src/lib.rs",
-        "#[cfg(debug_assertions)]\npub fn f() {}\n",
-    );
-    let store = Store::of_workspace(&root);
-    record_asked(&store, &root, "ext/pcre");
-    assert!(judge(&root).met(), "{:#?}", judge(&root));
-    std::fs::remove_file(store.path("clippy", "ext/pcre/release").unwrap()).unwrap();
-    let verdict = judge(&root);
-    assert_eq!(
-        verdict.unmet,
-        ["clippy: no reading for ext/pcre/release"],
-        "{verdict:#?}"
-    );
-}
-
 /// A crate the manifest marks `porting = true` has its `crosscheck`
 /// readings read as the port's meter and not as a condition of done
 /// (harness §4.5 condition 1, ledger 47; #383): a touched extension with
@@ -1076,7 +957,10 @@ fn a_porting_crates_crosscheck_readings_are_the_ports_meter() {
         "[package]\nname = \"php_ext_standard\"\n",
     );
     write(&root, "ext/standard/src/lib.rs", "pub fn str_repeat() {}\n");
-    mark_porting(&root, "ext/standard");
+    // The key `xtask steer` writes (harness §4.5 condition 1, §11).
+    Tracked::of(&root)
+        .with_crate("ext/standard", |row| row.porting = true)
+        .write(&root);
     Repo::at(&root).commit("ext/standard, its port partial");
     write(
         &root,
@@ -1268,9 +1152,10 @@ fn permit_over_the_diff_denies_a_lock_in_an_extension_and_notes_the_harness_file
         "ext/pcre/src/lib.rs",
         "use std::sync::Mutex;\npub static CACHE: Mutex<u8> = Mutex::new(0);\n",
     );
-    let mut manifest = std::fs::read_to_string(root.join("seams.toml")).unwrap();
-    manifest.push_str("\n# a person's edit\n");
-    write(&root, "seams.toml", &manifest);
+    // A person's edit to a row this diff has no other business with.
+    Tracked::of(&root)
+        .with_crate("php_heap", |row| row.budget += 1)
+        .write(&root);
     let verdict = judge(&root);
     let denied = verdict
         .unmet
@@ -1620,13 +1505,9 @@ fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
 #[test]
 fn a_crate_with_a_row_and_no_reading_is_unmet_the_way_an_extension_is() {
     let root = scratch("row");
-    let seams = std::fs::read_to_string(root.join("seams.toml")).unwrap();
-    let with_a_row = seams.replace(
-        "name = \"php_heap\"\nbudget = 20000",
-        "name = \"php_heap\"\nbudget = 20000\nphpt = [\"Zend/tests\"]",
-    );
-    assert_ne!(with_a_row, seams, "the tracked manifest still has the row");
-    std::fs::write(root.join("seams.toml"), with_a_row).unwrap();
+    Tracked::of(&root)
+        .with_crate("php_heap", |row| row.phpt = vec!["Zend/tests".to_owned()])
+        .write(&root);
     Repo::at(&root).commit("the row");
 
     write(
@@ -1645,23 +1526,27 @@ fn a_crate_with_a_row_and_no_reading_is_unmet_the_way_an_extension_is() {
 /// `deny_pattern` at the Stop, read over the reply sentence by sentence.
 const STOP_RULE: &str = "ticket.reply-unfiled";
 const STOP_RULE_ROW: &str = r#"
-[[rule]]
-id = "ticket.reply-unfiled"
 tool = "Stop"
 deny_pattern = '(?i)\b(left (for|to) a person|for a person to|handed (off )?to a person|a person (decides|must|should|will|would|has to)|is a person.?s( alone)?|worth (filing|a ticket)|(needs|deserves|wants) (a|its own) ticket|should be filed|not (yet )?filed|left open|leaves? open|open question|still to (do|decide)|not (yet )?done|remains? (to be|to do|undone|open)|in a later (commit|turn|session|ticket)|next turn|future work|follow[- ]?ups?|leftovers?|out of scope|todo)\b'
 text = "A session that closed a ticket names what it found and did not do in a ticket, a divergence row or a rule proposed in a commit message, never in its reply alone (CONTEXT.md, Ticket): a reply that hands work to a person, leaves a decision open or calls a thing worth filing is held once. A heuristic beside the close's own conditions; the second Stop passes."
 "#;
 
+/// `manifest` with the proposed row, as the tracked file carries it or
+/// added.
+fn with_the_stop_row(manifest: Tracked) -> Tracked {
+    manifest.with_rule(STOP_RULE, |rule| {
+        if !rule.contains_key("tool") {
+            rule.extend(STOP_RULE_ROW.parse::<toml::Table>().unwrap());
+        }
+    })
+}
+
 /// The scratch repository with the proposed row in its manifest, as the
 /// tracked file carries it or appended and committed here, so the row is
 /// in the base and not in the diff.
 fn with_the_stop_rule(root: &Path) {
-    let manifest = Manifest::load(root).unwrap();
-    if manifest.rule(STOP_RULE).is_none() {
-        let path = root.join("seams.toml");
-        let mut text = std::fs::read_to_string(&path).unwrap();
-        text.push_str(STOP_RULE_ROW);
-        std::fs::write(&path, text).unwrap();
+    if Manifest::load(root).unwrap().rule(STOP_RULE).is_none() {
+        with_the_stop_row(Tracked::of(root)).write(root);
         Repo::at(root).commit("the row");
     }
 }
@@ -1871,15 +1756,6 @@ fn every_rule_at_the_stop_has_a_reply_that_fires_and_one_that_does_not() {
             assert_eq!(!out.is_empty(), fires, "{id}/{name}: {out}");
         }
     }
-}
-
-/// The row is not `permit`'s to judge: a rule at the Stop is left out of
-/// the rules judged at the call, so the call fixtures are not asked of it.
-#[test]
-fn a_rule_at_the_stop_is_not_judged_at_the_call() {
-    let manifest = Manifest::parse(&format!("{}{STOP_RULE_ROW}", read("seams.toml"))).unwrap();
-    let rule = manifest.rule(STOP_RULE).unwrap();
-    assert!(!xtask::permit::judged_at_the_call(rule));
 }
 
 // ---------------------------------------------------------------- 7 (#31)
@@ -2245,4 +2121,103 @@ fn the_phpt_skip_the_missing_engine_binary_causes_is_met_and_the_others_are_not(
         verdict.unmet[0].starts_with("witness: ext/pcre skip:"),
         "{verdict:#?}"
     );
+}
+
+/// The tests whose subject is the tracked workspace itself: each reads the
+/// `seams.toml`, `oracle.toml`, registry or sources standing in the
+/// workspace, so a person's edit there is what may turn one red (#3091).
+/// Every other test here builds the manifest it judges.
+mod tracked {
+    use super::*;
+
+    /// The `--ri` column is a condition of done as the `--re` one is (harness
+    /// §4.5 condition 1, ledger 46; #361): a default extension with a red
+    /// `ext/<name>/ri` reading is unmet naming that scope, one with both
+    /// columns green is met, and a crate outside `ext/` is asked for no such
+    /// scope.
+    #[test]
+    fn a_default_extension_with_a_red_ri_crosscheck_reading_is_unmet_and_with_both_green_is_met() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let scopes = |instrument, name| {
+            let krate = manifest.crate_named(name).unwrap();
+            done::scopes_of(workspace(), instrument, krate).unwrap()
+        };
+        assert_eq!(
+            scopes("crosscheck", "ext/pcre"),
+            ["ext/pcre", "ext/pcre/ri"]
+        );
+        assert_eq!(scopes("clippy", "ext/pcre"), ["ext/pcre"]);
+        assert_eq!(scopes("crosscheck", "php_ext"), ["php_ext"]);
+
+        let root = scratch("ri");
+        write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+        let store = Store::of_workspace(&root);
+        record_asked(&store, &root, "ext/pcre");
+        assert!(judge(&root).met(), "{:#?}", judge(&root));
+
+        let mut red = fresh(&root, "crosscheck", "ext/pcre/ri");
+        red.status = Status::Fail;
+        red.message = "ext/pcre/ri: the oracle rendered 200 bytes under `php -n --ri pcre`".into();
+        store.record(std::slice::from_ref(&red)).unwrap();
+        let verdict = judge(&root);
+        assert_eq!(
+            verdict.unmet,
+            [
+                "crosscheck: ext/pcre/ri fail: ext/pcre/ri: the oracle rendered 200 bytes under `php -n --ri pcre`"
+            ],
+            "{verdict:#?}"
+        );
+
+        std::fs::remove_file(store.path("crosscheck", "ext/pcre/ri").unwrap()).unwrap();
+        let verdict = judge(&root);
+        assert_eq!(
+            verdict.unmet,
+            ["crosscheck: no reading for ext/pcre/ri"],
+            "{verdict:#?}"
+        );
+    }
+
+    /// A crate whose library sources name `debug_assertions` is asked for a
+    /// second `clippy` reading, the release profile's at `<name>/release`, and
+    /// is unmet without it (#2392); a mention in a comment or a string asks
+    /// nothing. `php_heap` and `php_engine` carry the split in the tree.
+    #[test]
+    fn a_crate_whose_sources_name_debug_assertions_is_asked_for_a_release_clippy_reading() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        for name in ["php_heap", "php_engine"] {
+            let krate = manifest.crate_named(name).unwrap();
+            let scopes = done::scopes_of(workspace(), "clippy", krate).unwrap();
+            assert_eq!(scopes, [name.to_owned(), format!("{name}/release")]);
+        }
+
+        let root = scratch("release");
+        let commented =
+            "// debug_assertions\npub fn f() -> &'static str { \"debug_assertions\" }\n";
+        write(&root, "ext/pcre/src/lib.rs", commented);
+        assert!(!asked_of(&root, "ext/pcre").contains(&("clippy", "ext/pcre/release".into())));
+        write(
+            &root,
+            "ext/pcre/src/lib.rs",
+            "#[cfg(debug_assertions)]\npub fn f() {}\n",
+        );
+        let store = Store::of_workspace(&root);
+        record_asked(&store, &root, "ext/pcre");
+        assert!(judge(&root).met(), "{:#?}", judge(&root));
+        std::fs::remove_file(store.path("clippy", "ext/pcre/release").unwrap()).unwrap();
+        let verdict = judge(&root);
+        assert_eq!(
+            verdict.unmet,
+            ["clippy: no reading for ext/pcre/release"],
+            "{verdict:#?}"
+        );
+    }
+
+    /// The row is not `permit`'s to judge: a rule at the Stop is left out of
+    /// the rules judged at the call, so the call fixtures are not asked of it.
+    #[test]
+    fn a_rule_at_the_stop_is_not_judged_at_the_call() {
+        let manifest = Manifest::parse(&with_the_stop_row(Tracked::workspace()).text()).unwrap();
+        let rule = manifest.rule(STOP_RULE).unwrap();
+        assert!(!xtask::permit::judged_at_the_call(rule));
+    }
 }
