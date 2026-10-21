@@ -89,7 +89,10 @@ pub(crate) fn visit(
 /// outlined, so the loop's site is one call. An engine whose tier runs
 /// `Off` binds `Nop`'s loop and never asks (`Jit::serves`); asked under
 /// `Off` all the same, it answers `Continue` before any word is read.
-/// Here, and only here, `Continue` means nothing happened.
+/// Here, and only here, `Continue` means nothing happened. The engine
+/// state is looked up once, and its `Arc` is shared on only past a visit
+/// that entered or claimed, so the visit that bumps and goes on writes
+/// no count of the `Arc` the engine's threads share.
 #[inline(never)]
 pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
     let at = site.idx();
@@ -98,16 +101,16 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow 
         Site::Entry => Start::Enter,
         Site::Return(_) => Start::Return,
     };
-    let Some(engine) = req.engine::<JitEngine>() else {
-        return Flow::Continue;
-    };
-    if engine.shared.policy.mode() == Mode::Off {
-        return Flow::Continue;
-    }
-    let shared = Arc::clone(&engine.shared);
     let claims = start != Start::Return && !record::recording(req);
-    let decided = {
+    let (decided, shared) = {
         let req: &Request = req;
+        let Some(engine) = req.engine::<JitEngine>() else {
+            return Flow::Continue;
+        };
+        let shared = &engine.shared;
+        if shared.policy.mode() == Mode::Off {
+            return Flow::Continue;
+        }
         // A table a hot root found full stopped its counters, as php's
         // `zend_jit_stop_counter_handlers` does: no word is claimed more.
         let holder = || {
@@ -122,7 +125,10 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow 
             })
         };
         let word = tier::word(req, frame, at);
-        visit(word, &shared.policy, start, claims, holder)
+        match visit(word, &shared.policy, start, claims, holder) {
+            Visited::Continue => return Flow::Continue,
+            decided => (decided, Arc::clone(shared)),
+        }
     };
     match decided {
         Visited::Continue => Flow::Continue,
