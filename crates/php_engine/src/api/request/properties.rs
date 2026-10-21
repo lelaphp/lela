@@ -40,27 +40,7 @@ const IN_UNSET: u32 = 1 << 2;
 
 const IN_ISSET: u32 = 1 << 3;
 
-/// One of the four magic methods a property access is served by,
-/// `ce->__get`, `ce->__set`, `ce->__isset` and `ce->__unset`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Accessor {
-    Get,
-    Set,
-    Isset,
-    Unset,
-}
-
-impl Accessor {
-    /// The position of this accessor's row among a record's methods.
-    fn of(self, accessors: &php_link::Accessors) -> Option<u32> {
-        match self {
-            Accessor::Get => accessors.get,
-            Accessor::Set => accessors.set,
-            Accessor::Isset => accessors.isset,
-            Accessor::Unset => accessors.unset,
-        }
-    }
-}
+pub(crate) use php_link::Accessor;
 
 /// Why `zend_get_property_offset` answered its wrong offset for a name
 /// no declared instance property holds.
@@ -443,17 +423,16 @@ impl Request {
     /// the first test of `zend_get_property_offset` reads
     /// (`zend_hash_num_elements(&ce->properties_info) == 0`), and the name
     /// led by no NUL byte: [`Request::places_dynamic`] over the class's
-    /// row in the request ([`Made`]), which a property opcode's inline
-    /// path reads. A class that declares a property leaves a computed name
-    /// to the kernel, whose placement finds the row once, since the name
-    /// a program computes over such a class is the declared one's far
-    /// more often than not. False before an object of the class was
-    /// made, which an object of it standing never is.
+    /// row in the request ([`Made::dynamic_names`]), which a property
+    /// opcode's inline path reads. A class that declares a property
+    /// leaves a computed name to the kernel with no find spent on it
+    /// here, where a find costs more than the scan the kernel makes of a
+    /// small class's placed rows (#3045). False before an object of the
+    /// class was made, which an object of it standing never is.
     ///
-    /// [`Made`]: super::class_data::Made
+    /// [`Made::dynamic_names`]: super::class_data::Made::dynamic_names
     pub(crate) fn places_dynamic_on_std(&self, class: ClassId, name: &[u8]) -> bool {
-        self.made_ref(class)
-            .is_some_and(|made| made.standard && !made.declares)
+        self.made_ref(class).is_some_and(|made| made.dynamic_names)
             && !Self::bad_property_name(name)
     }
 
@@ -1858,7 +1837,7 @@ impl Request {
     /// Q::__unset e
     /// ```
     fn magic_accessor(&self, class: ClassId, accessor: Accessor) -> Option<Function> {
-        self.resolved_method(class, |record| accessor.of(&record.accessors))
+        self.resolved_method(class, |record| record.accessors.of(accessor))
     }
 
     /// `zobj->ce->__set != NULL`, the test a handler makes before it
@@ -1867,7 +1846,7 @@ impl Request {
     /// ([`Request::declared_slot_for_write`]).
     pub(crate) fn serves_accessor(&self, class: ClassId, accessor: Accessor) -> bool {
         self.linked_class(class)
-            .is_some_and(|record| accessor.of(&record.accessors).is_some())
+            .is_some_and(|record| record.accessors.of(accessor).is_some())
     }
 
     /// `ce->ce_flags & ZEND_ACC_USE_GUARDS`: whether `class` or a class

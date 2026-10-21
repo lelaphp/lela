@@ -70,6 +70,29 @@ pub struct Accessors {
     pub unset: Option<u32>,
 }
 
+/// One of the four magic methods a property access is served by, which
+/// names its position among [`Accessors`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Accessor {
+    Get,
+    Set,
+    Isset,
+    Unset,
+}
+
+impl Accessors {
+    /// The position of `accessor`'s row among the record's methods.
+    #[must_use]
+    pub fn of(&self, accessor: Accessor) -> Option<u32> {
+        match accessor {
+            Accessor::Get => self.get,
+            Accessor::Set => self.set,
+            Accessor::Isset => self.isset,
+            Accessor::Unset => self.unset,
+        }
+    }
+}
+
 /// Where a linked class's property hooks are, as `do_inherit_property`
 /// counts `ce->num_hooked_props` and as a property access finds a
 /// `prop_info->hooks` under its scope.

@@ -2516,9 +2516,9 @@ pub(crate) fn free_operand(req: &mut Request, frame: FrameRef, kind: OperandKind
 pub(crate) struct Member {
     read: Option<Value>,
     /// Whether the handler holds an owner of what was read: a
-    /// constant string is the op array's and a temporary's the
-    /// operand's, while a variable's string takes one more owner and
-    /// anything else is the string the conversion answered with one.
+    /// constant string is the op array's and a `TMP`'s the operand's,
+    /// while any other operand's string takes one more owner and anything
+    /// else is the string the conversion answered with one.
     owned: bool,
 }
 
@@ -2540,15 +2540,15 @@ impl Member {
         let held = operand(req, frame, code, op.op2_type, op.op2);
         let value = held.deref();
         // `zval_try_get_tmp_string`: a string is the name as it stands,
-        // never a copy. A constant is the op array's, and a temporary's
-        // string is the operand's until `FREE_OP2`; what a `CV` or a
-        // reference holds takes one more owner, which user code a
+        // never a copy. A constant is the op array's, and a `TMP`'s
+        // string is the operand's until `FREE_OP2`; what a `CV`, a `VAR`
+        // or a reference holds takes one more owner, which user code a
         // `__get` or a `__set` runs cannot take away from under it.
         let name = if value.as_str_bytes().is_some() {
             let borrowed = match op.op2_type {
                 OperandKind::Const => true,
-                OperandKind::Tmp | OperandKind::Var => held.as_php_ref().is_none(),
-                OperandKind::Cv | OperandKind::Unused => false,
+                OperandKind::Tmp => held.as_php_ref().is_none(),
+                OperandKind::Var | OperandKind::Cv | OperandKind::Unused => false,
             };
             if !borrowed {
                 req.addref(&value);

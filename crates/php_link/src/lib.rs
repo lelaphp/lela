@@ -58,8 +58,8 @@ mod rows;
 mod traits;
 
 pub use rows::{
-    Accessors, Case, ClassHooks, Exact, Folded, Indexed, LinkedClass, NameHash, NameHasher,
-    NameMap, Named, Names, Row, Rows,
+    Accessor, Accessors, Case, ClassHooks, Exact, Folded, Indexed, LinkedClass, NameHash,
+    NameHasher, NameMap, Named, Names, Row, Rows,
 };
 
 pub use hooks::{

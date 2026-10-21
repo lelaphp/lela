@@ -8165,7 +8165,8 @@ fn inline_place(
 /// [`inline_place`] over a name the program computed: the bucket of a
 /// name that places as a dynamic property ([`Request::places_dynamic_on_std`]).
 /// A call of its own, so that the constant name's path keeps to the
-/// registers it needs.
+/// registers it needs: inlined, it put ten instructions on a constant
+/// name's `+=` in the release build (#3045).
 #[inline(never)]
 fn computed_place(
     req: &Request,
@@ -9095,7 +9096,8 @@ fn property_place(
             return Ok(PropertyFound::Threw(thrown));
         }
     };
-    // A view: [`exec::Member`] holds the name until its release.
+    // The name's bytes in place, kept alive across user code by the
+    // owner [`exec::Member`] holds, or the operand, until its release.
     let name = name_value.as_str_bytes().unwrap_or_default();
     let Some(object) = container.as_object() else {
         let thrown = non_object_place(req, (frame, code, op), read, &container, name);
@@ -16277,7 +16279,8 @@ fn step_property(
     name: &Value,
 ) -> Result<Result<(), Thrown>, Fatal> {
     let Compound { op, data, .. } = step;
-    // A view: [`exec::Member`] holds the name until its release.
+    // The name's bytes in place, kept alive across user code by the
+    // owner [`exec::Member`] holds, or the operand, until its release.
     let bytes = name.as_str_bytes().unwrap_or_default();
     let Some(key) = name.as_php_string() else {
         return Err(Fatal::error(
