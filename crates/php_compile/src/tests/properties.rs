@@ -190,7 +190,7 @@ fn what_stands_beside_a_static_property_read_is_refused_as_not_yet_read() {
         let mut strings = php_heap::Strings::new();
         compile_parsed(source, &bundled(), &mut strings)
             .err()
-            .map(|e| e.message.into_owned())
+            .map(|e| e.message.to_string())
     };
     assert_eq!(
         refused(b"<?php $this += 1;").as_deref(),

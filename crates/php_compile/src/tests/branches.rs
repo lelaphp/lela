@@ -163,7 +163,7 @@ fn an_unparenthesised_nested_conditional_is_refused_in_php_s_words() {
             }
             (None, None) => {}
             (found, wanted) => assert_eq!(
-                found.map(|error| error.message.into_owned()),
+                found.map(|error| error.message.to_string()),
                 wanted.map(str::to_owned),
                 "{:?}",
                 String::from_utf8_lossy(source)
@@ -459,15 +459,18 @@ fn what_php_s_compiler_refuses_in_a_break_a_switch_and_a_match_is_refused_in_its
             "Match expressions may only contain one default arm",
         ),
     ] {
-        let error = refused(source).unwrap_or_else(|| CompileError {
-            level: Level::Parse,
-            message: String::from("compiled").into(),
-            line: 0,
-            raised: Vec::new(),
-            thrown: false,
-            stage: crate::Stage::Compiling,
-            declared: None,
-            keys_made: 0,
+        let error = refused(source).unwrap_or_else(|| {
+            Refused {
+                level: Level::Parse,
+                message: String::from("compiled").into(),
+                line: 0,
+                raised: Vec::new(),
+                thrown: false,
+                stage: crate::Stage::Compiling,
+                declared: None,
+                keys_made: 0,
+            }
+            .into()
         });
         assert_eq!(error.level, Level::CompileError, "{message}");
         assert_eq!(error.message, message);
@@ -529,12 +532,12 @@ fn a_continue_targeting_a_switch_is_a_break_with_php_s_warning() {
 fn a_goto_php_refuses_is_phps_compile_error() {
     let undefined = refused(b"<?php\ngoto missing;\n");
     assert_eq!(
-        undefined.map(|e| (e.message.into_owned(), e.line)),
+        undefined.map(|e| (e.message.to_string(), e.line)),
         Some((String::from("'goto' to undefined label 'missing'"), 2))
     );
     let into = refused(b"<?php\ngoto inside;\nwhile (true) { inside: break; }\n");
     assert_eq!(
-        into.map(|e| (e.message.into_owned(), e.line)),
+        into.map(|e| (e.message.to_string(), e.line)),
         Some((
             String::from("'goto' into loop or switch statement is disallowed"),
             2
@@ -542,17 +545,17 @@ fn a_goto_php_refuses_is_phps_compile_error() {
     );
     let twice = refused(b"<?php\na:\na:\n");
     assert_eq!(
-        twice.map(|e| (e.message.into_owned(), e.line)),
+        twice.map(|e| (e.message.to_string(), e.line)),
         Some((String::from("Label 'a' already defined"), 3))
     );
     let out = refused(b"<?php\ntry { echo 1; } finally { goto out; }\nout: echo 2;\n");
     assert_eq!(
-        out.map(|e| e.message.into_owned()),
+        out.map(|e| e.message.to_string()),
         Some(String::from("jump out of a finally block is disallowed"))
     );
     let inside = refused(b"<?php\ngoto inside;\ntry { echo 1; } finally { inside: echo 2; }\n");
     assert_eq!(
-        inside.map(|e| e.message.into_owned()),
+        inside.map(|e| e.message.to_string()),
         Some(String::from("jump into a finally block is disallowed"))
     );
 }

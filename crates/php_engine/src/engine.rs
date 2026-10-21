@@ -690,10 +690,10 @@ pub struct Observables {
 /// What `php_request_startup` came to ([`Engine::begin`]).
 enum Begun {
     /// The request started, and what the host asked for is served in it.
-    Started(Request),
+    Started(Box<Request>),
     /// An extension's `rinit` raised, and its throwable was rendered as
     /// the uncaught fatal: the request, which the host's own branch ends.
-    Failed(Request),
+    Failed(Box<Request>),
     /// No request started: the engine's start refused, `opcache.preload`
     /// refused, or `php_module_startup` failed, and what the host is
     /// handed instead, with its sink.
@@ -1531,26 +1531,46 @@ fn link_trampolines(
 /// (`VCWD_GETCWD`, the request's own under ZTS), which is the request's
 /// for a request and the process's for a unit compiled outside one
 /// ([`Engine::unit`]), and whether the source is a file or the string an
-/// `eval` handed over ([`SourceKind`]), with the runtime definition keys
-/// the request made before it where it is an `eval`'s
-/// ([`php_compile::Options::keys_before`]), and the classes the request
-/// had declared by then, which a unit compiled for no request has none of
-/// ([`php_compile::RequestClasses`]); and, where `zend.multibyte` is on,
-/// the encoding functions bound to the request and what the scanner
-/// reads beside them ([`crate::multibyte::Bound`]).
+/// `eval` handed over ([`SourceKind`]), with what the request it
+/// compiles for brings ([`ForRequest`]).
 #[derive(Clone, Copy)]
 struct Origin<'a> {
     filename: &'a [u8],
     cwd: &'a Path,
     kind: SourceKind,
-    keys_before: u32,
-    request_classes: RequestClasses<'a>,
-    multibyte: Option<Multibyte<'a>>,
+    request: ForRequest<'a>,
+}
+
+/// What the request a source compiles for brings to its compile: the
+/// classes it has declared ([`php_compile::RequestClasses`]), where
+/// `zend.multibyte` is on the encoding functions bound for it and what
+/// the scanner reads beside them ([`crate::multibyte::Bound`]), and
+/// `CG(rtd_key_counter)` as it stands
+/// ([`php_compile::Options::keys_before`]).
+#[derive(Clone, Copy)]
+pub(crate) struct ForRequest<'a> {
+    pub(crate) classes: RequestClasses<'a>,
+    pub(crate) multibyte: Option<Multibyte<'a>>,
+    pub(crate) keys_before: u32,
+}
+
+impl<'a> ForRequest<'a> {
+    /// A unit compiled for no request, under `multibyte`: it has
+    /// declared nothing and made no keys.
+    pub(crate) fn none(multibyte: Option<Multibyte<'a>>) -> ForRequest<'a> {
+        ForRequest {
+            classes: RequestClasses::default(),
+            multibyte,
+            keys_before: 0,
+        }
+    }
 }
 
 /// What the engine has declared, as the compiler reads it: php's
 /// `CG(function_table)`, `CG(class_table)` and the persistent constants,
-/// each a view of the engine's own table.
+/// each a view of the engine's own table; and what startup set beside
+/// them, the hooks, extended info and the op array extension slots
+/// ([`php_compile::Options::op_array_extensions`]).
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Declared<'a> {
     pub(crate) constants: Indexed<'a, ConstDecl, Exact>,
@@ -1559,6 +1579,7 @@ pub(crate) struct Declared<'a> {
     pub(crate) classes: Indexed<'a, ClassDecl, Folded>,
     pub(crate) hooked: php_compile::Hooked,
     pub(crate) extended_info: bool,
+    pub(crate) op_array_extensions: u32,
 }
 
 impl Shared {
@@ -1640,7 +1661,58 @@ impl Shared {
             classes: Indexed::new(&self.classes, &self.class_keys.names),
             hooked: self.hooked,
             extended_info: self.extended_info,
+            op_array_extensions: self.op_array_extensions(),
         }
+    }
+
+    /// `zend_op_array_extension_handles` once startup is over
+    /// (`Z/Zend/zend_extensions.c:290-303`), the slots at the head of
+    /// every op array's runtime cache compiled after it
+    /// ([`php_compile::Options::op_array_extensions`]): two for each
+    /// observer registered, where any is, as `zend_observer_post_startup`
+    /// takes them (`Z/Zend/zend_observer.c:64-70`), and one where opcache
+    /// set its tier up ([`UnitCache::tier_set_up`]) and
+    /// `zend_jit_check_support` let it start, `zend_jit_startup`'s for
+    /// `zend_jit_profile_counter_rid` (`Z/ext/opcache/jit/zend_jit.c:3782`).
+    /// The check refuses the tier where a hook replaced `zend_execute_ex`,
+    /// as phpdbg's does, and where an extension observes an opcode other
+    /// than the two silence opcodes (`:3728-3756`). `opcache.jit=off` sets
+    /// the tier up with nothing to compile; the default `disable` never
+    /// does.
+    ///
+    /// A program's or an included file's runtime cache is `emalloc`ed at
+    /// its size as `i_init_code_execute_data` lays it down, and freed
+    /// with its frame, the program's before the shutdown functions are served;
+    /// so the slot moves what a file reads while it is served where it moves
+    /// the cache into the next bin. Two files of one length, the first a
+    /// slot more than the second, read their caches in one 16-byte bin
+    /// under opcache without the tier, and 24 and 16 with it:
+    ///
+    /// ```php
+    /// file_put_contents(__DIR__ . '/a.inc', '<?php new stdClass;        return memory_get_usage();');
+    /// file_put_contents(__DIR__ . '/b.inc', '<?php /* no slot here */ return memory_get_usage();');
+    /// touch(__DIR__ . '/a.inc', time() - 10); touch(__DIR__ . '/b.inc', time() - 10);
+    /// $read = function ($file) { include $file; $m = memory_get_usage(); return (include $file) - $m; };
+    /// echo $read(__DIR__ . '/a.inc') - $read(__DIR__ . '/b.inc'), "\n";
+    /// ```
+    /// ```expect regime=immutable-literals
+    /// 0
+    /// ```
+    /// ```php
+    /// file_put_contents(__DIR__ . '/a.inc', '<?php new stdClass;        return memory_get_usage();');
+    /// file_put_contents(__DIR__ . '/b.inc', '<?php /* no slot here */ return memory_get_usage();');
+    /// touch(__DIR__ . '/a.inc', time() - 10); touch(__DIR__ . '/b.inc', time() - 10);
+    /// $read = function ($file) { include $file; $m = memory_get_usage(); return (include $file) - $m; };
+    /// echo $read(__DIR__ . '/a.inc') - $read(__DIR__ . '/b.inc'), "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 8
+    /// ```
+    pub(crate) fn op_array_extensions(&self) -> u32 {
+        let tier = self.units.tier_set_up() && !self.hooked.user && !self.opcodes.refuses_tier();
+        self.observers
+            .saturating_mul(2)
+            .saturating_add(u32::from(tier))
     }
 
     /// One source compiled with its constant strings interned into the
@@ -1740,7 +1812,7 @@ impl Shared {
         let mut made = self.compiled_for(req, source, filename, kind);
         let room = match &mut made {
             Ok(unit) => {
-                req.count_keys_made(u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX));
+                req.count_keys_made(crate::unit_cache::keys_of(unit));
                 req.note_loop_vars(unit.loop_vars);
                 req.ready_unit(unit)
             }
@@ -1808,9 +1880,11 @@ impl Shared {
                 filename,
                 cwd,
                 kind,
-                keys_before,
-                request_classes,
-                multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
+                request: ForRequest {
+                    classes: request_classes,
+                    multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
+                    keys_before,
+                },
             };
             compile(
                 source,
@@ -1891,17 +1965,7 @@ impl Shared {
         let (compiled, _, _) = self.units.file(
             &arena.files,
             asked,
-            |source| {
-                let multibyte = self.unbound();
-                self.compile_file(
-                    source,
-                    path,
-                    cwd,
-                    stack,
-                    RequestClasses::default(),
-                    multibyte,
-                )
-            },
+            |source| self.compile_file(source, path, cwd, stack, ForRequest::none(self.unbound())),
             |_| None,
             |unit| self.publish_compiled(unit),
             // No request to publish its early-bound classes for, so
@@ -1929,32 +1993,21 @@ impl Shared {
         )
     }
 
-    /// `source`, read from the file `path` names, compiled and published
-    /// as a file of its own, for a request that has declared
-    /// `request_classes`.
-    pub(crate) fn publish_file(
-        &self,
-        source: &[u8],
-        path: &[u8],
-        cwd: &Path,
-        stack: StackLimit,
-        request_classes: RequestClasses<'_>,
-        multibyte: Option<Multibyte<'_>>,
-    ) -> Result<PublishedUnit, CompileError> {
-        self.compile_file(source, path, cwd, stack, request_classes, multibyte)
-            .map(|unit| self.publish_compiled(unit))
-    }
-
-    /// [`Shared::publish_file`]'s compile alone, which the unit cache
-    /// publishes where it holds the unit and hands its request otherwise.
+    /// `source`, read from the file `path` names, compiled as a file of
+    /// its own, which the unit cache and the preload publish where they
+    /// hold the unit and the unit cache hands its request otherwise,
+    /// its runtime definition keys made on from the `keys_before` the
+    /// request it compiles for had made, as opcache's miss compiles under
+    /// the request's `CG(rtd_key_counter)` and persists the names it made
+    /// ([`Request::count_keys_made`]); a unit compiled for no request
+    /// starts from none.
     pub(crate) fn compile_file(
         &self,
         source: &[u8],
         path: &[u8],
         cwd: &Path,
         stack: StackLimit,
-        request_classes: RequestClasses<'_>,
-        multibyte: Option<Multibyte<'_>>,
+        request: ForRequest<'_>,
     ) -> Result<Unit, CompileError> {
         self.compile_shared(
             source,
@@ -1962,9 +2015,7 @@ impl Shared {
                 filename: path,
                 cwd,
                 kind: SourceKind::File,
-                keys_before: 0,
-                request_classes,
-                multibyte,
+                request,
             },
             stack,
         )
@@ -4839,9 +4890,7 @@ impl Engine {
             filename,
             cwd: &cwd,
             kind: SourceKind::File,
-            keys_before: 0,
-            request_classes: RequestClasses::default(),
-            multibyte: self.shared.unbound(),
+            request: ForRequest::none(self.shared.unbound()),
         };
         self.shared.publish(source, origin, stack).ok()
     }
@@ -4887,9 +4936,7 @@ impl Engine {
                     filename: &script,
                     cwd: &description.cwd,
                     kind: SourceKind::File,
-                    keys_before: 0,
-                    request_classes: RequestClasses::default(),
-                    multibyte: self.shared.unbound(),
+                    request: ForRequest::none(self.shared.unbound()),
                 };
                 self.shared.publish(source, origin, stack).ok()?
             }
@@ -5143,14 +5190,14 @@ impl Engine {
     /// host but the built-in server ends on ([`Engine::start_failed`]).
     #[expect(
         clippy::result_large_err,
-        reason = "the request the Ok variant carries is many times the Err's size"
+        reason = "the Err side, the large one, is the observables a refused start hands the host once"
     )]
     pub(crate) fn begin(
         &self,
         description: RequestDescription,
         sink: Lent,
         traced: bool,
-    ) -> Result<Request, (Observables, Lent)> {
+    ) -> Result<Box<Request>, (Observables, Lent)> {
         match self.start_request(description, sink, traced) {
             Begun::Started(req) => Ok(req),
             Begun::Failed(req) => Err(Engine::start_failed(req)),
@@ -5254,7 +5301,7 @@ impl Engine {
     /// and each host's tests hold its ending, since a fence carries
     /// neither the ini nor the session file a failing `rinit` needs
     /// (#1634).
-    fn start_failed(mut req: Request) -> (Observables, Lent) {
+    fn start_failed(mut req: Box<Request>) -> (Observables, Lent) {
         #[cfg(debug_assertions)]
         req.end_in_sensed();
         let fatal = match req.ending() {
@@ -5828,12 +5875,13 @@ fn compile(
         functions: declared.functions,
         frameless: declared.frameless,
         classes: declared.classes,
-        request_classes: origin.request_classes,
+        request_classes: origin.request.classes,
         stack,
-        keys_before: origin.keys_before,
-        multibyte: origin.multibyte,
+        keys_before: origin.request.keys_before,
+        multibyte: origin.request.multibyte,
         hooked: declared.hooked,
         extended_info: declared.extended_info,
+        op_array_extensions: declared.op_array_extensions,
     };
     php_compile::compile_source_into(laid.arena, source, &options, strings, laid.room)
 }

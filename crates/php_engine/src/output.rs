@@ -2045,7 +2045,7 @@ mod tests {
     use crate::engine::{Engine, RequestDescription};
 
     /// A request under a host whose `header_handler` takes a line.
-    fn web_request() -> Request {
+    fn web_request() -> Box<Request> {
         let engine = Engine::builder().build();
         Request::new(
             Arc::clone(&engine.shared),

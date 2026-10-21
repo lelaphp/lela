@@ -226,7 +226,7 @@ fn what_a_const_statement_refuses_is_what_php_refuses() {
         let mut strings = php_heap::Strings::new();
         compile_parsed(source, &bundled(), &mut strings)
             .err()
-            .map(|e| e.message.into_owned())
+            .map(|e| e.message.to_string())
     };
     assert_eq!(
         refused(b"<?php const true = 1;").as_deref(),

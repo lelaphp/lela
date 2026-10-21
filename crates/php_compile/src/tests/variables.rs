@@ -320,16 +320,19 @@ fn a_variable_under_a_silence_is_fetched_by_name_and_its_value_freed_past_the_en
     ));
     assert_eq!(
         refused(b"<?php class C { const X = @1; }"),
-        Some(CompileError {
-            level: Level::CompileError,
-            message: "Constant expression contains invalid operations".into(),
-            line: 1,
-            raised: Vec::new(),
-            thrown: false,
-            stage: crate::Stage::Compiling,
-            declared: None,
-            keys_made: 0,
-        }),
+        Some(
+            Refused {
+                level: Level::CompileError,
+                message: "Constant expression contains invalid operations".into(),
+                line: 1,
+                raised: Vec::new(),
+                thrown: false,
+                stage: crate::Stage::Compiling,
+                declared: None,
+                keys_made: 0,
+            }
+            .into()
+        ),
         "`zend_is_allowed_in_const_expr` has no `ZEND_AST_SILENCE`"
     );
 }
@@ -815,7 +818,7 @@ fn a_list_of_the_wrong_shape_is_phps_compile_error() {
     ];
     for (source, message) in cases {
         assert_eq!(
-            refused(source).map(|e| e.message.into_owned()),
+            refused(source).map(|e| e.message.to_string()),
             Some(String::from(*message)),
             "{}",
             String::from_utf8_lossy(source)

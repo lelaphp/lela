@@ -32,7 +32,7 @@
 use php_heap::{call_stack_bounds, call_stack_default_size, main_call_stack_size};
 use php_unit::Level;
 
-use crate::CompileError;
+use crate::{CompileError, Refused};
 
 /// `EG(stack_base)` and `EG(stack_limit)`, the two addresses
 /// `zend_call_stack_init` leaves for the thread: the limit zero where
@@ -317,7 +317,7 @@ impl StackLimit {
             return Ok(());
         }
         let max_stack_size = self.max_stack_size();
-        Err(CompileError {
+        Err(Refused {
             level: Level::CompileError,
             message: format!(
                 "Maximum call stack size of {max_stack_size} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached during compilation. Try splitting expression"
@@ -328,7 +328,7 @@ impl StackLimit {
             stage: crate::Stage::Compiling,
             declared: None,
             keys_made: 0,
-        })
+        }.into())
     }
 }
 
@@ -573,7 +573,7 @@ mod tests {
                             &mut strings,
                         )
                         .err()
-                        .map(|refused| refused.message)
+                        .map(|refused| refused.message.to_string())
                     })
                     .collect::<Vec<_>>()
             })

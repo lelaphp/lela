@@ -187,7 +187,7 @@ fn a_request_only_unit_s_function_called_twice_reads_what_its_first_call_primed(
 /// `f` of `unit` called twice from its main op array: one lookup of
 /// the table across both calls, each call's slot primed with the
 /// callee, and the main op array's own slot not what they primed.
-fn called_twice(mut req: Request, unit: &PublishedUnit) {
+fn called_twice(mut req: Box<Request>, unit: &PublishedUnit) {
     let main = req.pushed(PublishedUnit::clone(unit));
     req.declare_functions(unit);
     let f = req

@@ -905,7 +905,7 @@ impl Emit<'_> {
                 if !self.is_written_value(expr) {
                     return Ok(None);
                 }
-                Ok(Some(self.constant_expr(expr)?))
+                self.constant_value(expr).map(Some)
             }
             tree::Expr::BinaryExpr(id) => {
                 let (lhs, op, rhs) = self.binary_of(id);
