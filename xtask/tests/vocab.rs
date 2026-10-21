@@ -5,7 +5,6 @@
 //! writes; how the glossary itself is read is held beside the glossary.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use xtask::manifest::{AvoidFrom, Manifest, Rule};
 use xtask::reading::{Number, Reading, Status, Store};
@@ -14,8 +13,10 @@ use xtask::vocab;
 
 mod common {
     pub mod repo;
+    pub mod run;
 }
 use common::repo::Repo;
+use common::run::xtask;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -61,20 +62,6 @@ fn fixture_reading(name: &str) -> Reading {
 /// The findings a reading lists, one per line after the rule's text.
 fn findings(reading: &Reading) -> Vec<&str> {
     reading.message.lines().skip(1).collect()
-}
-
-fn xtask(root: &Path, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(root)
-        .args(args)
-        .output()
-        .unwrap();
-    (
-        out.status.success(),
-        String::from_utf8(out.stdout).unwrap(),
-        String::from_utf8(out.stderr).unwrap(),
-    )
 }
 
 #[test]
@@ -161,9 +148,9 @@ fn a_thing_found_and_not_done_is_a_ticket_and_the_words_that_hide_it_fail() {
 #[test]
 fn the_instrument_writes_a_reading_per_crate_with_instrument_vocab() {
     let root = scratch("reading", "crates/php_ext", &fixture("vocab.avoid"));
-    let (ok, out, err) = xtask(&root, &["vocab"]);
-    assert!(!ok, "the fixture must fail: {out}{err}");
-    assert!(out.contains("Serve"), "{out}");
+    let ran = xtask(&root, &["vocab"]);
+    assert!(ran.stdout.contains("Serve"), "{ran}");
+    ran.failed();
 
     let store = Store::of_workspace(&root);
     let reading = store.read("vocab", "php_ext").unwrap().unwrap();
@@ -178,8 +165,7 @@ fn the_instrument_writes_a_reading_per_crate_with_instrument_vocab() {
     // A lock under the crate is not read.
     let other = scratch("nolock", "crates/php_heap", &fixture("vocab.avoid"));
     std::fs::write(other.join("crates/php_heap/heap.lock"), "heap::run\n").unwrap();
-    let (ok, _, _) = xtask(&other, &["vocab", "--crate", "php_heap"]);
-    assert!(!ok);
+    xtask(&other, &["vocab", "--crate", "php_heap"]).failed();
     let reading = Store::of_workspace(&other)
         .read("vocab", "php_heap")
         .unwrap()
@@ -195,8 +181,7 @@ fn the_instrument_writes_a_reading_per_crate_with_instrument_vocab() {
 #[test]
 fn a_crate_that_does_not_exist_yet_gets_no_reading() {
     let root = scratch("absent", "crates/php_ext", &fixture("vocab.avoid"));
-    let (ok, _, err) = xtask(&root, &["vocab", "--crate", "php_heap"]);
-    assert!(ok, "{err}");
+    xtask(&root, &["vocab", "--crate", "php_heap"]).ok();
     assert!(
         Store::of_workspace(&root)
             .read("vocab", "php_heap")

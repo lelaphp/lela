@@ -13,8 +13,10 @@ use xtask::witness::{self, Accept, Ask};
 
 mod common {
     pub mod repo;
+    pub mod run;
 }
 use common::repo::{Repo, scratch_workspace};
+use common::run::xtask;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -2713,13 +2715,13 @@ fn what_accept_wrote_permit_diff_permits_over_the_same_tree() {
     );
 
     Repo::at(&root).git(&["add", "--", CRATE]);
-    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
-    assert_eq!(code, 0, "{out}{err}");
+    let out = xtask(&root, &["permit", "--diff"]).ok();
     assert!(!out.contains("deny "), "{out}");
 
     std::fs::remove_file(Store::of_workspace(&root).path("witness", CRATE).unwrap()).unwrap();
-    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
-    assert_eq!(code, 1, "{out}{err}");
+    let ran = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    let out = ran.stdout;
     assert!(
         out.contains("deny ") && out.contains(EXIT_AUTHORED) && out.contains(FILE),
         "{out}"
@@ -2750,16 +2752,16 @@ fn a_verdict_the_merged_branch_carried_is_the_branchs_and_not_the_merges() {
     repo.git(&["commit", "-q", "-am", "main moves on"]);
     repo.git(&["merge", "-q", "--no-ff", "--no-commit", "branch"]);
 
-    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
-    assert_eq!(code, 0, "{out}{err}");
+    let out = xtask(&root, &["permit", "--diff"]).ok();
     assert!(!out.contains("deny "), "{out}");
 
     let merged = std::fs::read_to_string(root.join(FILE)).unwrap();
     let authored = block("exit=4").replace("native", "another");
     write(&root, FILE, &format!("{merged}{authored}"));
     repo.git(&["add", "--", FILE]);
-    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
-    assert_eq!(code, 1, "{out}{err}");
+    let ran = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    let out = ran.stdout;
     assert!(out.contains(EXIT_AUTHORED), "{out}");
 }
 
@@ -2805,15 +2807,15 @@ fn a_capture_fence_the_merged_side_carries_is_that_sides_and_one_the_merge_edits
     repo.git(&["commit", "-q", "-am", "the branch moves on"]);
     repo.git(&["merge", "-q", "--no-ff", "--no-commit", "main-side"]);
 
-    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
-    assert_eq!(code, 0, "{out}{err}");
+    let out = xtask(&root, &["permit", "--diff"]).ok();
     assert!(!out.contains("deny "), "{out}");
 
     let merged = std::fs::read_to_string(root.join(FILE)).unwrap();
     write(&root, FILE, &merged.replace("/// 1\n", "/// 2\n"));
     repo.git(&["add", "--", FILE]);
-    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
-    assert_eq!(code, 1, "{out}{err}");
+    let ran = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    let out = ran.stdout;
     assert!(
         out.contains("witness.capture-authored") && out.contains(FILE),
         "{out}"
@@ -2846,8 +2848,7 @@ fn a_second_copy_of_a_fence_both_parents_inherit_is_the_merges() {
     );
     repo.git(&["commit", "-q", "-am", "this side"]);
     repo.git(&["merge", "-q", "--no-ff", "--no-commit", "other-side"]);
-    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
-    assert_eq!(code, 0, "{out}{err}");
+    xtask(&root, &["permit", "--diff"]).ok();
 
     let merged = std::fs::read_to_string(root.join(FILE)).unwrap();
     write(
@@ -2856,8 +2857,9 @@ fn a_second_copy_of_a_fence_both_parents_inherit_is_the_merges() {
         &format!("{merged}{}", capture.replace("captured", "again")),
     );
     repo.git(&["add", "--", FILE]);
-    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
-    assert_eq!(code, 1, "{out}{err}");
+    let ran = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    let out = ran.stdout;
     assert!(out.contains("witness.capture-authored"), "{out}");
 }
 
@@ -2876,8 +2878,8 @@ fn a_verdict_a_branch_captured_stands_on_main_after_the_merge_and_a_typed_one_do
     let repo = Repo::at(&root);
     let head = || repo.git(&["rev-parse", "HEAD"]);
     let reported = |base: &str| {
-        let (_, out, err) = xtask(&root, &["done", "--base", base]);
-        let said = format!("{out}{err}");
+        let ran = xtask(&root, &["done", "--base", base]);
+        let said = ran.stdout + &ran.stderr;
         said.lines()
             .filter(|l| l.contains(EXIT_AUTHORED))
             .map(str::to_owned)
@@ -2931,21 +2933,6 @@ fn a_verdict_a_branch_captured_stands_on_main_after_the_merge_and_a_typed_one_do
         lines.iter().any(|l| l.contains(FILE)),
         "the typed verdict is reported: {lines:?}"
     );
-}
-
-/// The binary over the scratch root, with no stdin.
-fn xtask(root: &Path, args: &[&str]) -> (i32, String, String) {
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(root)
-        .args(args)
-        .output()
-        .unwrap();
-    (
-        out.status.code().unwrap(),
-        String::from_utf8(out.stdout).unwrap(),
-        String::from_utf8(out.stderr).unwrap(),
-    )
 }
 
 // ------------------------------------------ `where` and `unless_pattern`

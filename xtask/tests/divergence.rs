@@ -5,7 +5,6 @@
 //! `docs/divergence.md` is that rendering as a computed region.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use xtask::divergence::{self, Cause, Kind, Registry, Retires, Status};
 use xtask::manifest::Manifest;
@@ -13,8 +12,10 @@ use xtask::scratch::Tree;
 
 mod common {
     pub mod repo;
+    pub mod run;
 }
 use common::repo::Repo;
+use common::run::xtask;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -44,20 +45,6 @@ fn committed(name: &str) -> Tree {
     let root = scratch(name);
     Repo::init(&root).commit("scratch");
     root
-}
-
-fn xtask(root: &Path, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(root)
-        .args(args)
-        .output()
-        .unwrap();
-    (
-        out.status.success(),
-        String::from_utf8(out.stdout).unwrap(),
-        String::from_utf8(out.stderr).unwrap(),
-    )
 }
 
 /// The counts table's line for the debt rows of one kind, or `total`,
@@ -261,8 +248,7 @@ fn every_rule_this_instrument_evaluates_has_a_fixture_that_fails() {
 #[test]
 fn the_instrument_writes_a_reading_and_exits_one_on_the_fixture() {
     let root = committed("instrument");
-    let (ok, out, err) = xtask(&root, &[divergence::INSTRUMENT]);
-    assert!(ok, "{err}");
+    let out = xtask(&root, &[divergence::INSTRUMENT]).ok();
     assert!(out.contains("every accepted row has a reason"), "{out}");
     let store = xtask::reading::Store::of_workspace(&root);
     let reading = store
@@ -273,8 +259,7 @@ fn the_instrument_writes_a_reading_and_exits_one_on_the_fixture() {
     assert!(!reading.commit.is_empty(), "stamped: {reading:?}");
 
     std::fs::copy(fixture("divergence.reason"), root.join(divergence::FILE)).unwrap();
-    let (ok, _, err) = xtask(&root, &[divergence::INSTRUMENT]);
-    assert!(!ok);
+    let err = xtask(&root, &[divergence::INSTRUMENT]).failed();
     assert!(err.contains("witness:0000000000000000"), "{err}");
     let reading = store
         .read(divergence::INSTRUMENT, "workspace")
@@ -291,10 +276,8 @@ fn the_instrument_writes_a_reading_and_exits_one_on_the_fixture() {
 fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
     let root = scratch("status");
     let registry = Registry::load(&root).unwrap();
-    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
-    assert!(ok, "{err}");
-    let (cut_ok, cut, cut_err) = xtask(&root, &["status", "--section", "divergence"]);
-    assert!(cut_ok, "{cut_err}");
+    let md = xtask(&root, &["status", "--section", "divergence", "--uncut"]).ok();
+    let cut = xtask(&root, &["status", "--section", "divergence"]).ok();
     assert!(
         registry.rows().iter().any(|r| r.status == Status::Accepted),
         "the workspace's registry has an accepted row to read"
@@ -334,11 +317,11 @@ fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
     );
     assert!(!md.contains("--uncut"), "{md}");
 
-    let (ok, json, _) = xtask(
+    let json = xtask(
         &root,
         &["status", "--section", "divergence", "--format", "json"],
-    );
-    assert!(ok);
+    )
+    .ok();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(
         value["rows"].as_array().unwrap().len(),
@@ -372,8 +355,7 @@ since = \"2026-09-29\"
         ),
     )
     .unwrap();
-    let (ok, grown, err) = xtask(&root, &["status", "--section", "divergence"]);
-    assert!(ok, "{err}");
+    let grown = xtask(&root, &["status", "--section", "divergence"]).ok();
     let beside_counts = |text: &str| -> Vec<String> {
         text.lines()
             .filter(|l| !l.starts_with("| trace |") && !l.starts_with("| total |"))
@@ -381,8 +363,7 @@ since = \"2026-09-29\"
             .collect()
     };
     assert_eq!(beside_counts(&grown), beside_counts(&cut), "{grown}");
-    let (ok, whole, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
-    assert!(ok, "{err}");
+    let whole = xtask(&root, &["status", "--section", "divergence", "--uncut"]).ok();
     assert!(
         whole.contains(
             "| trace:fixture-one-more | trace | debt | accepted | 2026-09-29 | The fixture's one more reason (fixture). |"
@@ -432,8 +413,7 @@ since = "2026-09-18"
     let root = scratch("crosscheck");
     std::fs::write(root.join(divergence::FILE), row).unwrap();
     let registry = Registry::load(&root).unwrap();
-    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
-    assert!(ok, "{err}");
+    let md = xtask(&root, &["status", "--section", "divergence", "--uncut"]).ok();
     assert!(
         md.contains("| crosscheck:ctype | crosscheck | debt | accepted |"),
         "{md}"
@@ -444,11 +424,11 @@ since = "2026-09-18"
     );
     assert!(md.contains("| crosscheck | 0 | 1 | 0 | 1 |"), "{md}");
     assert!(md.contains(&counts_line(&registry, None)), "{md}");
-    let (ok, json, _) = xtask(
+    let json = xtask(
         &root,
         &["status", "--section", "divergence", "--format", "json"],
-    );
-    assert!(ok);
+    )
+    .ok();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(value["counts"]["crosscheck"]["accepted"], 1);
 }
@@ -484,8 +464,7 @@ since = "2026-10-10"
 
     let root = scratch("wire");
     std::fs::write(root.join(divergence::FILE), row).unwrap();
-    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
-    assert!(ok, "{err}");
+    let md = xtask(&root, &["status", "--section", "divergence", "--uncut"]).ok();
     assert!(
         md.contains("| wire:h2spec/http2/6.5.3/1 | wire | debt | accepted |"),
         "{md}"
@@ -660,8 +639,7 @@ fn status_counts_debt_against_the_manifests_target_and_each_other_cause_on_its_o
     let tracked = std::fs::read_to_string(&seams).unwrap();
     let untargeted = tracked.split("\n[divergence]\n").next().unwrap().to_owned();
     std::fs::write(&seams, format!("{untargeted}\n[divergence]\ntarget = 7\n")).unwrap();
-    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
-    assert!(ok, "{err}");
+    let md = xtask(&root, &["status", "--section", "divergence", "--uncut"]).ok();
     let lines: Vec<&str> = md.lines().collect();
     let at = |prefix: &str| {
         lines
@@ -703,11 +681,11 @@ fn status_counts_debt_against_the_manifests_target_and_each_other_cause_on_its_o
         md.contains("| phpt:fixture-chosen | phpt | by-design | accepted |"),
         "{md}"
     );
-    let (ok, json, _) = xtask(
+    let json = xtask(
         &root,
         &["status", "--section", "divergence", "--format", "json"],
-    );
-    assert!(ok);
+    )
+    .ok();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(value["target"], 7);
     assert_eq!(value["counts"]["total"]["accepted"], 1);
@@ -726,8 +704,7 @@ fn status_counts_debt_against_the_manifests_target_and_each_other_cause_on_its_o
         format!("[[divergence]]{debt_only}"),
     )
     .unwrap();
-    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence"]);
-    assert!(ok, "{err}");
+    let md = xtask(&root, &["status", "--section", "divergence"]).ok();
     assert!(md.contains("no `[divergence] target`"), "{md}");
     assert!(!md.contains("counted on its own line"), "{md}");
     assert!(md.contains("| total | 0 | 1 | 0 | 1 |"), "{md}");
@@ -823,8 +800,7 @@ fn status_divergence_counts_a_proposed_row_as_open() {
     registry
         .propose("phpt:Zend/tests/x.phpt", Kind::Runner)
         .unwrap();
-    let (ok, md, _) = xtask(&root, &["status", "--section", "divergence"]);
-    assert!(ok);
+    let md = xtask(&root, &["status", "--section", "divergence"]).ok();
     assert!(
         md.contains("| phpt:Zend/tests/x.phpt | runner | debt | open | "),
         "the facts list an open row: {md}"
@@ -861,8 +837,7 @@ fn docs_divergence_md_is_the_status_section_as_a_computed_region() {
 
     let root = scratch("page");
     std::fs::write(root.join(divergence::FILE), COVERING).unwrap();
-    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
-    assert!(ok, "{err}");
+    let md = xtask(&root, &["status", "--section", "divergence", "--uncut"]).ok();
     let head: Vec<&str> = md.trim().lines().take(2).collect();
     assert_eq!(head.len(), 2, "{md}");
     assert_eq!(
@@ -1036,8 +1011,7 @@ fn status_and_the_reason_instrument_count_a_covering_row_once() {
     let text = std::fs::read_to_string(&path).unwrap();
     std::fs::write(&path, format!("{text}\n{COVERING}")).unwrap();
     let registry = Registry::load(&root).unwrap();
-    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
-    assert!(ok, "{err}");
+    let md = xtask(&root, &["status", "--section", "divergence", "--uncut"]).ok();
     assert!(
         md.contains("| phpt:fixture-optimizer (covers 2) | phpt | debt | accepted | 2026-09-28 |"),
         "the row once, with how many ids it covers:\n{md}"
@@ -1051,11 +1025,11 @@ fn status_and_the_reason_instrument_count_a_covering_row_once() {
         "{md}"
     );
     assert!(md.contains(&counts_line(&registry, None)), "{md}");
-    let (ok, json, _) = xtask(
+    let json = xtask(
         &root,
         &["status", "--section", "divergence", "--format", "json"],
-    );
-    assert!(ok);
+    )
+    .ok();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     let row = value["rows"]
         .as_array()

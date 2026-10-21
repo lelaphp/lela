@@ -5,7 +5,6 @@
 //! is read — regenerated, or skipped and said to be.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use xtask::port_map;
 use xtask::reading::{Number, Status, Store};
@@ -13,8 +12,10 @@ use xtask::scratch::Tree;
 
 mod common {
     pub mod repo;
+    pub mod run;
 }
 use common::repo::Repo;
+use common::run::xtask;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -64,20 +65,6 @@ fn census_rows() -> i64 {
     rows
 }
 
-fn xtask(root: &Path, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(root)
-        .args(args)
-        .output()
-        .unwrap();
-    (
-        out.status.success(),
-        String::from_utf8(out.stdout).unwrap(),
-        String::from_utf8(out.stderr).unwrap(),
-    )
-}
-
 fn last(root: &Path) -> xtask::reading::Reading {
     Store::of_workspace(root)
         .read(port_map::INSTRUMENT, "php_ext")
@@ -88,8 +75,7 @@ fn last(root: &Path) -> xtask::reading::Reading {
 #[test]
 fn the_run_prints_a_line_per_row_with_its_status_and_its_api_item() {
     let root = scratch("rows");
-    let (ok, out, err) = xtask(&root, ["port-map"].as_slice());
-    assert!(ok, "{err}{out}");
+    let out = xtask(&root, &["port-map"]).ok();
     let rows: Vec<&str> = out
         .lines()
         .filter(|l| l.starts_with("same ") || l.starts_with("renamed ") || l.starts_with("gone "))
@@ -119,8 +105,7 @@ fn the_run_prints_a_line_per_row_with_its_status_and_its_api_item() {
 #[test]
 fn the_reading_is_the_unresolved_rows_at_the_crate_the_lock_lives_with() {
     let root = scratch("reading");
-    let (ok, out, err) = xtask(&root, ["port-map"].as_slice());
-    assert!(ok, "{err}");
+    let out = xtask(&root, &["port-map"]).ok();
     let reading = last(&root);
     assert_eq!(reading.status, Status::Pass, "{reading:?}");
     assert_eq!(reading.instrument, port_map::INSTRUMENT);
@@ -156,8 +141,7 @@ fn the_fixture_fails_the_instrument_as_the_run_reads_it_and_the_exit_says_so() {
         root.join("crates/php_ext/api.lock"),
     )
     .unwrap();
-    let (ok, out, err) = xtask(&root, ["port-map"].as_slice());
-    assert!(!ok, "the unmatched row is a failure: {out}");
+    let err = xtask(&root, &["port-map"]).failed();
     assert!(err.contains("1 of 1 readings fail"), "{err}");
     assert_eq!(last(&root).status, Status::Fail);
 }
@@ -169,11 +153,7 @@ fn the_fixture_fails_the_instrument_as_the_run_reads_it_and_the_exit_says_so() {
 fn a_tree_that_is_no_mahout_tree_is_a_skip_and_not_a_pass() {
     let root = scratch("absent");
     let absent = root.join("no-such-tree");
-    let (ok, out, err) = xtask(
-        &root,
-        ["port-map", "--tree", absent.to_str().unwrap()].as_slice(),
-    );
-    assert!(ok, "a skip owes no failing exit: {err}");
+    let out = xtask(&root, &["port-map", "--tree", absent.to_str().unwrap()]).ok();
     let reading = last(&root);
     assert_eq!(reading.status, Status::Skip, "{reading:?}");
     assert!(
@@ -192,19 +172,11 @@ fn a_tree_the_census_refuses_is_a_skip_that_names_what_it_said() {
     let root = scratch("refused");
     let tree = root.join("tree");
     std::fs::create_dir_all(tree.join("src")).unwrap();
-    let (ok, _, err) = xtask(
-        &root,
-        ["port-map", "--tree", tree.to_str().unwrap()].as_slice(),
-    );
-    assert!(ok, "{err}");
+    xtask(&root, &["port-map", "--tree", tree.to_str().unwrap()]).ok();
     assert_eq!(last(&root).status, Status::Skip);
 
     std::fs::create_dir_all(tree.join("crates")).unwrap();
-    let (ok, _, err) = xtask(
-        &root,
-        ["port-map", "--tree", tree.to_str().unwrap()].as_slice(),
-    );
-    assert!(ok, "{err}");
+    xtask(&root, &["port-map", "--tree", tree.to_str().unwrap()]).ok();
     let reading = last(&root);
     assert_eq!(
         reading.status,
@@ -221,10 +193,8 @@ fn a_tree_the_census_refuses_is_a_skip_that_names_what_it_said() {
 #[test]
 fn status_renders_the_reading_as_one_row_of_its_own_section() {
     let root = scratch("status");
-    let (ok, _, err) = xtask(&root, ["port-map"].as_slice());
-    assert!(ok, "{err}");
-    let (ok, md, err) = xtask(&root, ["status", "--section", "port-map"].as_slice());
-    assert!(ok, "{err}");
+    xtask(&root, &["port-map"]).ok();
+    let md = xtask(&root, &["status", "--section", "port-map"]).ok();
     assert!(
         md.contains("php_ext") && md.contains(&format!("unresolved={}", census_rows())),
         "{md}"
