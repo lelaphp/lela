@@ -52,7 +52,8 @@ fn manifest() -> Manifest {
 
 /// The engine's own binary, `sapi/cli`'s `php`, built once for these
 /// tests in the workspace's target: what the lane dumps the engine's side
-/// with (#2166).
+/// with (#2166). A test runs it through [`Scratch::cli`], never from the
+/// target itself.
 fn php() -> &'static Path {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT.get_or_init(|| {
@@ -174,6 +175,25 @@ impl Scratch {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         }
         path
+    }
+
+    /// The engine's binary [`php`] built, standing alone in a directory of
+    /// the scratch's own as links to it and to its dep-info. The lane
+    /// holds a binary to the tree by that dep-info, and every other host
+    /// standing beside it to its own (#3109); these tests build `php`
+    /// alone, so in the target a `php-cgi` an earlier build left behind an
+    /// engine merge failed them for a build they never asked for. Here
+    /// `php` is held to its own sources as cargo relinks it, and to no
+    /// other host's.
+    fn cli(&self) -> PathBuf {
+        let dir = self.root.join("cli");
+        fs::create_dir_all(&dir).unwrap();
+        let php = php();
+        let mut info = php.as_os_str().to_owned();
+        info.push(".d");
+        std::os::unix::fs::symlink(php, dir.join("php")).unwrap();
+        std::os::unix::fs::symlink(info, dir.join("php.d")).unwrap();
+        dir.join("php")
     }
 
     /// The binary that dumps what php dumps: the lane's own control, since
@@ -306,7 +326,7 @@ fn the_engines_binary_dumps_the_corpus_at_its_reach() {
         return;
     }
     let scratch = Scratch::new("engine");
-    let reading = scratch.run(&registry(""), php());
+    let reading = scratch.run(&registry(""), &scratch.cli());
     assert_eq!(reading.scope, "corpus");
     // The same four files the binary of a compiler that emits nothing is
     // held to: two php dumps an op array for and two it dumps nothing
@@ -371,7 +391,7 @@ fn a_reach_under_the_floor_is_named_and_the_engines_is_not() {
         why.contains("0 of") && why.contains(&REACHED.to_string()),
         "{why}"
     );
-    let engine = scratch.run(&registry(""), php());
+    let engine = scratch.run(&registry(""), &scratch.cli());
     assert_eq!(below_the_floor(&engine), Ok(()), "{engine:#?}");
 }
 
@@ -582,12 +602,13 @@ fn a_second_regime_holds_the_engines_binary_under_extended_info() {
     }
     let scratch = Scratch::of("extended", &["identity.phpt", "plain.php"]);
     fs::write(scratch.corpus.join("extended.php"), EXTENDED).unwrap();
+    let engine = scratch.cli();
     let asked = |regime: Option<&str>| {
         scratch.ask(
             &registry(""),
             &Ask {
                 corpus: Some(scratch.corpus.clone()),
-                engine: Some(php().to_path_buf()),
+                engine: Some(engine.clone()),
                 regime: regime.map(str::to_owned),
                 ..Ask::default()
             },
