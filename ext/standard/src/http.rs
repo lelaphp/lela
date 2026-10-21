@@ -437,7 +437,8 @@ enum KeyText {
 /// lets the calling scope see it, unmangled
 /// (`zend_unmangle_property_name_ex`): a protected one from a scope the
 /// object is an instance of, a private one from its declaring class;
-/// `None` for one the scope may not see.
+/// `None` for one the scope may not see. A call of its own, so the name
+/// it builds is off the stack of a nest walked level by level (#3159).
 #[inline(never)]
 fn visible_name(
     req: &mut Request,
