@@ -197,12 +197,19 @@ impl RuntimeCaches {
     }
 
     /// The numbers of a unit that is gone handed out again, their caches
-    /// emptied, as php frees a heap cache with its op array.
+    /// emptied, as php frees a heap cache with its op array. In line in
+    /// its two callers: an `eval` in a loop hands one number back each
+    /// time (#3051).
+    #[inline(always)]
+    #[allow(clippy::inline_always)]
     fn hand_back(&mut self, mut numbers: Vec<u32>) {
+        // One push a number: an `eval`'s unit has one or a few, which a
+        // push writes in place where `append` copies through `memcpy`.
         for &number in &numbers {
             *self.request.map(MapPtr::new(number)) = RuntimeCache::default();
+            self.free.push(number);
         }
-        self.free.append(&mut numbers);
+        numbers.clear();
         self.spare.push(numbers);
     }
 

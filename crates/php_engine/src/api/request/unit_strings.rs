@@ -28,14 +28,16 @@ use std::collections::{HashMap, HashSet};
 
 use php_heap::{Str, Zval};
 use php_link::NameHasher;
+use php_unit::decl::FunctionDecl;
 use php_unit::{PublishedUnit, Unit, WeakUnit};
 
 use super::Request;
+use super::declared_bytes::{self, Blocks, Declared};
 use crate::api::raising::Thrown;
 use crate::api::values::{PhpString, Value};
 
-/// The most names a unit dedupes by comparing each with the ones it
-/// already holds, past which a set of them is made.
+/// The most names held already a unit's names are compared with one by
+/// one, past which a set of them is made.
 const SCANNED_NAMES: usize = 16;
 
 /// The strings of the request-only units the request holds: each unit's,
@@ -60,6 +62,9 @@ pub(crate) struct UnitStrings {
     /// which `by_bytes` has no entry for.
     files: usize,
     dead_files: Vec<PhpString>,
+    /// The blocks of what units declared that are over, for
+    /// [`Request::release_unit_strings`] to give back.
+    dead_blocks: Vec<Blocks>,
     compiling: Compiling,
 }
 
@@ -113,6 +118,9 @@ struct Held {
     /// function's variables' and a declared property's, pointed at while
     /// the unit lives: views, the owners being `constants`'.
     found: Vec<PhpString>,
+    /// php's blocks for the op arrays and classes it declared
+    /// ([`super::declared_bytes`]).
+    declared: Declared,
 }
 
 /// What holds a request-only unit's declarations, and so its strings,
@@ -120,7 +128,10 @@ struct Held {
 enum Past {
     /// The closures over a function it declared that stand, each one
     /// more count of the op array, `(*op_array->refcount)++` in
-    /// `zend_create_closure_ex`, given back by `zend_closure_free_storage`.
+    /// `zend_create_closure_ex`, given back by `zend_closure_free_storage`;
+    /// and each function a `DECLARE_FUNCTION` bound, one count the
+    /// function table keeps to the request's end
+    /// ([`Request::bind_dynamic`]).
     /// A closure's function is in the request's table from its first
     /// closure on, and the loop keeps a share of the unit it last
     /// entered, so neither holds the unit's strings: only a closure does.
@@ -279,17 +290,23 @@ impl UnitStrings {
         let mut found = std::mem::take(&mut self.dead_found);
         let mut files = std::mem::take(&mut self.dead_files);
         let spare = &mut self.spare;
+        let blocks = &mut self.dead_blocks;
         self.units.retain_mut(|held| {
             let alive = held.unit.strong_count() > 0;
             let ends = ended == Some(held.unit.as_ptr());
             if alive && !ends && !held.over {
                 return true;
             }
-            held.over = true;
+            if !std::mem::replace(&mut held.over, true) && held.declared.laid() {
+                held.declared.main_over(blocks);
+            }
             constants.append(&mut held.main);
             found.append(&mut held.found_main);
             if alive && !matches!(held.past, Past::Closures(0)) {
                 return true;
+            }
+            if held.declared.laid() {
+                std::mem::take(&mut held.declared).all(blocks);
             }
             dead.append(&mut held.names);
             files.extend(held.file.take());
@@ -329,6 +346,11 @@ impl UnitStrings {
         (dead, constants)
     }
 
+    /// The entry for the unit at `unit`, where the request holds one.
+    fn held_mut(&mut self, unit: *const Unit) -> Option<&mut Held> {
+        (self.units.iter_mut()).find(|held| std::ptr::eq(held.unit.as_ptr(), unit))
+    }
+
     /// The entry for `unit`, laid down where there is none.
     fn held(&mut self, unit: &PublishedUnit) -> usize {
         if let Some(at) = self
@@ -357,6 +379,7 @@ impl UnitStrings {
             file: None,
             found_main: spare.found_main,
             found: spare.found,
+            declared: Declared::default(),
         });
         self.units.len() - 1
     }
@@ -507,32 +530,70 @@ impl Request {
         if std::mem::replace(&mut held.named, true) {
             return Ok(());
         }
-        let mut seen = HashSet::with_hasher(NameHasher);
+        // The names held already: the file's, made before the compile
+        // ([`Request::name_unit`]) and shared by every op array
+        // (`zend_string_copy`), and those the compile made as constants
+        // ([`Request::hold_compiled`]), a bound function's lowered name
+        // among them, which php's compile makes one string with its name.
+        let held_before = held.names.len();
+        let file = held.file;
+        // A set of them where they are many, an `eval` of many functions.
+        let before: Option<HashSet<Vec<u8>, NameHasher>> =
+            (held_before > SCANNED_NAMES).then(|| {
+                held.names
+                    .iter()
+                    .map(|made| made.as_bytes().to_vec())
+                    .collect()
+            });
         for name in php_compile::op_array_names(unit) {
-            let names = self
-                .unit_strings
-                .units
-                .get(at)
-                .map_or(&[][..], |held| &held.names[..]);
-            let file = (self.unit_strings.units.get(at)).and_then(|held| held.file);
-            let again = if file.is_some_and(|file| file.as_bytes() == name) {
-                true
-            } else if names.len() < SCANNED_NAMES {
-                names.iter().any(|made| made.as_bytes() == name)
-            } else {
-                if seen.is_empty() {
-                    seen.extend(names.iter().map(|made| made.as_bytes().to_vec()));
-                }
-                !seen.insert(name.to_vec())
-            };
-            if again {
-                continue;
+            let made = file.is_some_and(|file| file.as_bytes() == name)
+                || before.as_ref().map_or_else(
+                    || {
+                        (self.unit_strings.units.get(at))
+                            .and_then(|held| held.names.get(..held_before))
+                            .is_some_and(|names| names.iter().any(|made| made.as_bytes() == name))
+                    },
+                    |before| before.contains(name),
+                );
+            // Every other is made once for each op array or class: two
+            // closures on one line are two `{closure:…}` strings.
+            if !made {
+                self.hold_name(at, name)?;
             }
-            let made = self.string(name)?;
-            point(&mut self.unit_strings.by_bytes, made);
-            if let Some(held) = self.unit_strings.units.get_mut(at) {
-                held.names.push(made);
+        }
+        // And the lowered key each is bound under where it is not its
+        // name (`zend_string_tolower`): a function's, one a
+        // `DECLARE_FUNCTION` binds among them, a class's, which the class
+        // table keeps however it was bound, and a method's, the class's
+        // `function_table` key. A closure has none.
+        let lowered = (unit.functions.iter().chain(&unit.dynamic))
+            .map(|(decl, _): &(FunctionDecl, php_unit::OpArray)| &decl.name)
+            .filter(|name| !name.0.starts_with(b"{"))
+            .chain(unit.classes.iter().map(|class| &class.name))
+            .chain(
+                (unit.classes.iter())
+                    .flat_map(|class| class.methods.iter().map(|method| &method.function.name)),
+            )
+            .filter(|name| name.0.iter().any(u8::is_ascii_uppercase));
+        // `zend_new_interned_string` hands back the interned string for a
+        // lowered name opcache holds, `count` or `__tostring`, and the
+        // one made goes (`accel_new_interned_string_for_php`).
+        for name in lowered {
+            let lower = name.0.to_ascii_lowercase();
+            if self.shared.permanent(&lower).is_none() {
+                self.hold_name(at, &lower)?;
             }
+        }
+        Ok(())
+    }
+
+    /// `name` made as a string of the request's, held by the unit at
+    /// `at` with its names.
+    fn hold_name(&mut self, at: usize, name: &[u8]) -> Result<(), Thrown> {
+        let made = self.string(name)?;
+        point(&mut self.unit_strings.by_bytes, made);
+        if let Some(held) = self.unit_strings.units.get_mut(at) {
+            held.names.push(made);
         }
         Ok(())
     }
@@ -550,6 +611,14 @@ impl Request {
         }
         let ended = ended.map(PublishedUnit::as_ptr);
         let (mut dead, mut constants) = self.unit_strings.take(ended);
+        // `destroy_op_array`'s and `destroy_zend_class`'s blocks.
+        if !self.unit_strings.dead_blocks.is_empty() {
+            let mut blocks = std::mem::take(&mut self.unit_strings.dead_blocks);
+            for blocks in blocks.drain(..) {
+                blocks.free(self);
+            }
+            self.unit_strings.dead_blocks = blocks;
+        }
         // `zend_string_release`: a string is no possible root, and
         // destroying one runs nothing.
         for s in dead.drain(..) {
@@ -566,11 +635,13 @@ impl Request {
     /// closure over `function`, which holds the strings of the
     /// request-only unit that declared it.
     pub(crate) fn count_closure(&mut self, function: crate::api::call::Function) {
-        if let Some(Held {
-            past: Past::Closures(count),
-            ..
-        }) = self.closure_unit(function)
-        {
+        let Some((held, dynamic)) = self.closure_unit(function) else {
+            return;
+        };
+        if let Some(at) = dynamic {
+            held.declared.count_closure(at);
+        }
+        if let Past::Closures(count) = &mut held.past {
             *count += 1;
         }
     }
@@ -596,39 +667,128 @@ impl Request {
     /// 0
     /// ```
     pub(crate) fn uncount_closure(&mut self, function: crate::api::call::Function) {
-        let Some(Held {
-            past: Past::Closures(count),
-            over,
-            ..
-        }) = self.closure_unit(function)
-        else {
+        let Some((held, dynamic)) = self.closure_unit(function) else {
             return;
         };
-        *count = count.saturating_sub(1);
-        if *count == 0 && *over {
+        let over = held.over;
+        // `destroy_op_array` at the op array's last count: its blocks.
+        let mut blocks = Vec::new();
+        if let Some(at) = dynamic {
+            held.declared.uncount_closure(at, over, &mut blocks);
+        }
+        let release = match &mut held.past {
+            Past::Closures(count) => {
+                *count = count.saturating_sub(1);
+                *count == 0 && over
+            }
+            Past::Tables => false,
+        };
+        for blocks in blocks {
+            blocks.free(self);
+        }
+        if release {
             self.release_unit_strings(None);
         }
+    }
+
+    /// `do_bind_function`'s binding of the dynamic definition at `at` of
+    /// `unit`, a function declared inside a block or a body: the
+    /// function table holds its op array from here to the request's end,
+    /// and with it the unit's strings, as it holds a closure's count that
+    /// never goes.
+    ///
+    /// ```php
+    /// eval('if (1) { function g() { return "abcdefghijklmnopqrstuvwxyz" . "0123456789"; } }');
+    /// $x = str_repeat("q", 26);
+    /// $m = memory_get_usage(); eval('if (1) { function g2() { return 1; } }'); echo memory_get_usage() - $m, "\n";
+    /// echo g(), "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 240
+    /// abcdefghijklmnopqrstuvwxyz0123456789
+    /// ```
+    pub(crate) fn bind_dynamic(&mut self, unit: &PublishedUnit, at: u32) {
+        let Some(held) = self.unit_strings.held_mut(PublishedUnit::as_ptr(unit)) else {
+            return;
+        };
+        held.declared.bind(at as usize);
+        if let Past::Closures(count) = &mut held.past {
+            *count += 1;
+        }
+    }
+
+    /// What php's compile `emalloc`s for each op array and class `unit`
+    /// declares ([`super::declared_bytes`]), laid down once for a unit
+    /// the request compiled for itself, before its main op array runs;
+    /// nothing for another. The `Err` is the memory limit.
+    ///
+    /// ```php
+    /// eval('while(0){}');
+    /// $f0 = fn () => 0; unset($f0);
+    /// $m = memory_get_usage(); $f = fn () => 1; echo memory_get_usage() - $m, "\n"; unset($f);
+    /// $m = memory_get_usage(); $f = eval('return fn () => 1;'); echo memory_get_usage() - $m, "\n"; unset($f);
+    /// $m = memory_get_usage(); eval('function fx() {}'); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); eval('class Cx {}'); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 384
+    /// 704
+    /// 192
+    /// 160
+    /// ```
+    pub(crate) fn lay_declared(&mut self, unit: &PublishedUnit) -> Result<(), Thrown> {
+        // An `eval` that declares nothing, the most of them, lays nothing.
+        if unit.functions.is_empty() && unit.dynamic.is_empty() && unit.classes.is_empty() {
+            return Ok(());
+        }
+        let unit_at = PublishedUnit::as_ptr(unit);
+        let Some(held) = self.unit_strings.held_mut(unit_at) else {
+            return Ok(());
+        };
+        if held.declared.lay() {
+            return Ok(());
+        }
+        let laid = declared_bytes::of_unit(self, unit)?;
+        match self.unit_strings.held_mut(unit_at) {
+            Some(held) => held.declared.hold(laid),
+            None => laid.free(self),
+        }
+        Ok(())
     }
 
     /// The request-only unit `function` is a function of, where it is one:
     /// none at once where the request holds no such unit, the common
     /// program's every closure, or where the function is not one of the
     /// request's own, whose unit is the engine's or the cache's.
-    fn closure_unit(&mut self, function: crate::api::call::Function) -> Option<&mut Held> {
+    fn closure_unit(
+        &mut self,
+        function: crate::api::call::Function,
+    ) -> Option<(&mut Held, Option<usize>)> {
         if self.unit_strings.units.is_empty() {
             return None;
         }
         let user = self.user_functions.get(function.local_at()?)?;
         let unit = PublishedUnit::as_ptr(&user.unit);
-        (self.unit_strings.units.iter_mut()).find(|held| std::ptr::eq(held.unit.as_ptr(), unit))
+        let dynamic = match user.body {
+            crate::exec::Body::Dynamic(at) => Some(at as usize),
+            _ => None,
+        };
+        Some((self.unit_strings.held_mut(unit)?, dynamic))
     }
 
     /// Every request-only unit's strings given up at the request's end,
     /// as `shutdown_executor` destroys the op arrays that hold them.
     pub(crate) fn release_all_unit_strings(&mut self) {
-        let held = std::mem::take(&mut self.unit_strings);
+        let mut held = std::mem::take(&mut self.unit_strings);
         for s in held.kept.into_values() {
             self.release(Value::string(s));
+        }
+        let mut blocks = held.dead_blocks;
+        for unit in &mut held.units {
+            std::mem::take(&mut unit.declared).all(&mut blocks);
+        }
+        for blocks in blocks {
+            blocks.free(self);
         }
         let mut constants = held.compiling.made;
         for held in held.units {

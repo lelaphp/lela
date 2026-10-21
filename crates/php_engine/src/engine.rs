@@ -5945,6 +5945,11 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &PublishedUnit, kind: Sourc
     if matches!(kind, SourceKind::Eval(_)) && req.hold_unit_names(unit).is_err() {
         return false;
     }
+    // And the op arrays and classes it declares, as php's compile
+    // `emalloc`s them for a unit it compiles for the request.
+    if req.lay_declared(unit).is_err() {
+        return false;
+    }
     // `zend_compile_halt_compiler`'s constant, and opcache's again on a
     // hit, under the file's mangled name, where the file has not
     // registered it already.
