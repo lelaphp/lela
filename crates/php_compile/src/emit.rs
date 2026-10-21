@@ -1341,6 +1341,7 @@ impl<'a> Emit<'a> {
         halt: Option<i64>,
         room: crate::Room,
     ) -> Emit<'a> {
+        let first_slot = options.op_array_extensions.saturating_mul(SLOT);
         let crate::Room {
             oplines,
             literals,
@@ -1389,7 +1390,7 @@ impl<'a> Emit<'a> {
             http_response_header: ResponseHeader::Predefined,
             safepoints: entry_safepoints(),
             temporaries: 0,
-            cache_slots: options.op_array_extensions.saturating_mul(SLOT),
+            cache_slots: first_slot,
             line: 1,
             diagnostics: Vec::new(),
             classes: Vec::new(),
@@ -1399,7 +1400,7 @@ impl<'a> Emit<'a> {
             runtime_keys: Vec::new(),
             attributed_constants: Vec::new(),
             keys_before: options.keys_before,
-            first_slot: options.op_array_extensions.saturating_mul(SLOT),
+            first_slot,
             functions_declared: Vec::new(),
             landed: Vec::new(),
             dynamic: Vec::new(),
