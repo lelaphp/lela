@@ -1170,8 +1170,9 @@ pub struct HeldProperties {
     /// the table.
     thrown: Option<Thrown>,
     count: usize,
-    /// What a walk reads the `IS_PTR` rows of a hooked table by.
-    pub(crate) hooked: Option<crate::api::request::HookedRows>,
+    /// What a walk reads the `IS_PTR` rows of a hooked table by, boxed
+    /// as the rare half of what a dumper keeps at every level (#3159).
+    pub(crate) hooked: Option<Box<crate::api::request::HookedRows>>,
 }
 
 impl HeldProperties {
@@ -1588,7 +1589,7 @@ impl PhpObject {
             owner,
             thrown,
             count: 0,
-            hooked,
+            hooked: hooked.map(Box::new),
         };
         match count {
             Ok(count) => Ok(HeldProperties { count, ..held }),

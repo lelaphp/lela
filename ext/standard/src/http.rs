@@ -204,7 +204,9 @@ struct Query<'a> {
 
 impl Query<'_> {
     /// `php_url_encode_scalar`: `key=value`, the separator before any
-    /// but the first.
+    /// but the first. A call of its own, so what it takes is off the
+    /// stack of a nest walked level by level (#3159).
+    #[inline(never)]
     fn scalar(
         &mut self,
         req: &mut Request,
@@ -371,34 +373,7 @@ impl Query<'_> {
             _ => None,
         };
         if let Some((table, object)) = nested {
-            let mut prefix: Vec<u8> = Vec::new();
-            match &key {
-                KeyText::Name(name) => {
-                    let mut encoded = Vec::new();
-                    url_encode(name, self.raw, &mut encoded);
-                    if let Some(outer) = key_prefix {
-                        prefix.extend_from_slice(outer);
-                        prefix.extend_from_slice(&encoded);
-                        prefix.extend_from_slice(b"%5D%5B");
-                    } else {
-                        prefix.extend_from_slice(&encoded);
-                        prefix.extend_from_slice(b"%5B");
-                    }
-                }
-                KeyText::Index(index) => {
-                    let digits = Decimal::of(*index);
-                    if let Some(outer) = key_prefix {
-                        prefix.extend_from_slice(outer);
-                        prefix.extend_from_slice(num_prefix);
-                        prefix.extend_from_slice(digits.as_bytes());
-                        prefix.extend_from_slice(b"%5D%5B");
-                    } else {
-                        prefix.extend_from_slice(num_prefix);
-                        prefix.extend_from_slice(digits.as_bytes());
-                        prefix.extend_from_slice(b"%5B");
-                    }
-                }
-            }
+            let prefix = self.nested_prefix(key, num_prefix, key_prefix);
             return self.hash(req, table, object, b"", Some(&prefix));
         }
         if matches!(value.as_ref(), ValueRef::Null | ValueRef::Resource(_)) {
@@ -406,6 +381,48 @@ impl Query<'_> {
         }
         self.scalar(req, &value, key, num_prefix, key_prefix)?;
         Ok(())
+    }
+
+    /// The key prefix a nested array or object under `key` is walked
+    /// with: `key%5B` at the top, `outer key%5D%5B` below it, an integer
+    /// key behind the numeric prefix. A call of its own, so what building
+    /// it takes is off the stack of a nest walked level by level (#3159).
+    #[inline(never)]
+    fn nested_prefix(
+        &self,
+        key: &KeyText,
+        num_prefix: &[u8],
+        key_prefix: Option<&[u8]>,
+    ) -> Vec<u8> {
+        let mut prefix: Vec<u8> = Vec::new();
+        match key {
+            KeyText::Name(name) => {
+                let mut encoded = Vec::new();
+                url_encode(name, self.raw, &mut encoded);
+                if let Some(outer) = key_prefix {
+                    prefix.extend_from_slice(outer);
+                    prefix.extend_from_slice(&encoded);
+                    prefix.extend_from_slice(b"%5D%5B");
+                } else {
+                    prefix.extend_from_slice(&encoded);
+                    prefix.extend_from_slice(b"%5B");
+                }
+            }
+            KeyText::Index(index) => {
+                let digits = Decimal::of(*index);
+                if let Some(outer) = key_prefix {
+                    prefix.extend_from_slice(outer);
+                    prefix.extend_from_slice(num_prefix);
+                    prefix.extend_from_slice(digits.as_bytes());
+                    prefix.extend_from_slice(b"%5D%5B");
+                } else {
+                    prefix.extend_from_slice(num_prefix);
+                    prefix.extend_from_slice(digits.as_bytes());
+                    prefix.extend_from_slice(b"%5B");
+                }
+            }
+        }
+        prefix
     }
 }
 
@@ -420,7 +437,9 @@ enum KeyText {
 /// lets the calling scope see it, unmangled
 /// (`zend_unmangle_property_name_ex`): a protected one from a scope the
 /// object is an instance of, a private one from its declaring class;
-/// `None` for one the scope may not see.
+/// `None` for one the scope may not see. A call of its own, so the name
+/// it builds is off the stack of a nest walked level by level (#3159).
+#[inline(never)]
 fn visible_name(
     req: &mut Request,
     object: PhpObject,

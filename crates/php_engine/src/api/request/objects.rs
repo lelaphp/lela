@@ -1480,16 +1480,42 @@ impl Request {
         {
             self.compare_slots(x, y)
         } else {
-            // `zend_std_get_properties_ex` on each side, which
-            // initialises a lazy one first, the left before the right.
-            self.lazy_init(a).and_then(|a| {
-                let b = self.lazy_init(b)?;
-                self.compare_tables(a.heap(), b.heap())
-            })
+            self.compare_properties(a, b)
         };
         self.release(*left);
         self.release(*right);
         order.map(Some)
+    }
+
+    /// [`Request::compare_objects`] where either side carries a dynamic
+    /// table or is lazy: `zend_std_get_properties_ex` on each side, which
+    /// initialises a lazy one first, the left before the right, and the
+    /// two tables compared.
+    fn compare_properties(
+        &mut self,
+        a: PhpObject,
+        b: PhpObject,
+    ) -> Result<std::cmp::Ordering, Thrown> {
+        let a = self.lazy_init(a)?;
+        let b = self.lazy_init(b)?;
+        self.compare_tables(a.heap(), b.heap())
+    }
+
+    /// The two objects' property tables as `rebuild_object_properties`
+    /// lays them down, the left one's first; the fatal where the heap
+    /// cannot. A call of its own, so a fatal's handling is off the stack
+    /// of a nest of objects compared level by level (#3159).
+    #[inline(never)]
+    fn property_tables(
+        &mut self,
+        x: Obj,
+        y: Obj,
+    ) -> Result<(php_heap::PropertyTable, php_heap::PropertyTable), Thrown> {
+        let left = self.heap.object_property_table(x);
+        let left = self.fatal_of(left)?;
+        let right = self.heap.object_property_table(y);
+        let right = self.fatal_of(right)?;
+        Ok((left, right))
     }
 
     /// The declared-slot walk of [`Request::compare_objects`], under the
@@ -1564,10 +1590,7 @@ impl Request {
     /// Nesting level too deep - recursive dependency?
     /// ```
     fn compare_tables(&mut self, x: Obj, y: Obj) -> Result<std::cmp::Ordering, Thrown> {
-        let left = self.heap.object_property_table(x);
-        let left = self.fatal_of(left)?;
-        let right = self.heap.object_property_table(y);
-        let right = self.fatal_of(right)?;
+        let (left, right) = self.property_tables(x, y)?;
         let table = left.table();
         if table.is_same(right.table()) {
             return Ok(std::cmp::Ordering::Equal);

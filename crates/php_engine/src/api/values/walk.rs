@@ -53,7 +53,7 @@ use php_heap::{Arr, PropertyTable, Str, TableRow, Zval};
 
 use crate::api::abi::Ref;
 use crate::api::raising::{Thrown, fatal, throw_error, throw_error_chained};
-use crate::api::request::{HookedBuild, HookedDeclared, Request};
+use crate::api::request::{HookedBuild, HookedDeclared, HookedRows, Request};
 use crate::api::values::{
     HeldProperties, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, View,
 };
@@ -480,23 +480,39 @@ pub fn properties<B>(
     unwritten: Unwritten,
     mut body: impl FnMut(&mut Request, &mut Row) -> Step<B>,
 ) -> Result<Option<B>, Thrown> {
-    let table = held.table.clone();
+    let table = &held.table;
     table.pin();
     let watch = Watch::over(*held.owner);
-    // A hooked table's declared rows come first, in its order.
-    let mut declared = held.hooked.iter().flat_map(|rows| {
-        let hook = |row: &HookedDeclared| (rows.object, row.clone(), rows.build);
-        rows.declared
-            .iter()
-            .map(move |row| row.hooked.map(|_| hook(row)))
-    });
+    let walked = match held.hooked.as_deref() {
+        None => foreach_steps(req, table, watch, unwritten, &mut body),
+        Some(rows) => hooked_steps(req, (table, watch, unwritten), rows, &mut body),
+    };
+    table.unpin(req);
+    walked
+}
+
+/// [`properties`]' walk over a hooked table, whose declared rows come
+/// first, in its order, each lent with its hook. A call of its own, so
+/// the iterator over the declared rows is off the stack of a walk over
+/// any other table, which a dumper's recursion through its body pays
+/// for at every level (#3159).
+#[inline(never)]
+fn hooked_steps<B>(
+    req: &mut Request,
+    (table, watch, unwritten): (&Table, Watch, Unwritten),
+    rows: &HookedRows,
+    body: &mut impl FnMut(&mut Request, &mut Row) -> Step<B>,
+) -> Result<Option<B>, Thrown> {
+    let hook = |row: &HookedDeclared| Box::new((rows.object, row.clone(), rows.build));
+    let mut declared = rows
+        .declared
+        .iter()
+        .map(|row| row.hooked.map(|_| hook(row)));
     let mut body = |req: &mut Request, row: &mut Row| {
         row.hook = declared.next().flatten();
         body(req, row)
     };
-    let walked = foreach_steps(req, &table, watch, unwritten, &mut body);
-    table.unpin(req);
-    walked
+    foreach_steps(req, table, watch, unwritten, &mut body)
 }
 
 /// What a walk reads, php's `HashTable *`: an array, or an object's
@@ -821,7 +837,7 @@ fn next_lent(
         value: Keep::lent(req, Value::of_slot(value), lent),
         at,
         watch,
-        uninitialized,
+        uninitialized: uninitialized.map(String::into_boxed_str),
         hook: None,
     })
 }
@@ -966,10 +982,12 @@ pub struct Row {
     watch: Watch,
     /// The type's text of the typed property nothing has written that
     /// the row stands for ([`Unwritten::Shown`]).
-    uninitialized: Option<String>,
+    uninitialized: Option<Box<str>>,
     /// The `IS_PTR` row of a hooked table the row stands for, unread
-    /// ([`Row::read`]).
-    hook: Option<(PhpObject, HookedDeclared, HookedBuild)>,
+    /// ([`Row::read`]). Boxed, as the type's text is, since a walk that
+    /// recurses through its body keeps its row on the stack at every
+    /// level and these two are a row's rarest (#3159).
+    hook: Option<Box<(PhpObject, HookedDeclared, HookedBuild)>>,
 }
 
 /// How a walk knows the table its rows are in still stands.
@@ -1055,7 +1073,8 @@ impl Row {
     /// asks, so a row it steps over is never read; any other row's as
     /// [`Row::value`] answers it. The `Err` is what the hook threw.
     pub fn read(&mut self, req: &mut Request) -> Result<&Value, Thrown> {
-        if let Some((object, row, build)) = self.hook.take() {
+        if let Some(hook) = self.hook.take() {
+            let (object, row, build) = *hook;
             let value = req.read_deferred(object, &row, build)?;
             self.value.let_go(req);
             self.value = Keep::Owned(value);
