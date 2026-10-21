@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # next-cited: the revisions still cited as `NEXT` in what a commit on
 # `main` would take, one `file:line:text` each, for pre-commit and
-# pre-merge-commit to refuse it on. A branch writes a ledger revision it
+# pre-merge-commit to refuse it on, and in what a push of `main` would
+# add, for pre-push. A branch writes a ledger revision it
 # adds as `NEXT` (`NEXT-2` for a second in one file) and cites it so
 # wherever it is named, since two branches that both take the next
 # number conflict at their merges, and the merge into `main` numbers row
@@ -18,9 +19,30 @@
 # is named at the line it starts on. xtask/fixtures holds the negative
 # controls and is not read. Prints nothing and exits 0 off `main`, where
 # NEXT is the rule.
+#
+# `next-cited <base> <tip>` is the range form, for pre-push: the files
+# `git diff <base> <tip>` changes, read at <tip>, whatever branch is
+# checked out, since a fast-forward onto `main` writes no commit and so
+# runs neither commit hook (#3138). A <base> of all zeros, a ref the
+# remote does not have yet, is the empty tree: every file at <tip> is
+# what the push adds.
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
-[ "$(git symbolic-ref --short -q HEAD)" = main ] || exit 0
+if [ $# -eq 2 ]; then
+    base=$1 tip=$2
+    case $base in *[!0]*) ;; *) base=$(git hash-object -t tree /dev/null) ;; esac
+    changed() { git diff --name-only -z --diff-filter=d "$base" "$tip" -- "$@"; }
+    holds() { git grep -q -I -w NEXT "$tip" -- "$1"; }
+    at() { git show "$tip:$1"; }
+elif [ $# -eq 0 ]; then
+    [ "$(git symbolic-ref --short -q HEAD)" = main ] || exit 0
+    changed() { git diff --cached --name-only -z --diff-filter=d -- "$@"; }
+    holds() { git grep --cached -q -I -w NEXT -- "$1"; }
+    at() { git show ":$1"; }
+else
+    echo "next-cited: no arguments, or a <base> and a <tip>" >&2
+    exit 2
+fi
 # Each line is read with its backticked spans taken out and a space at
 # either end, so the pattern's edges need no `^` or `$` inside a group.
 read_cited='
@@ -35,9 +57,9 @@ END {
             print file ":" i ":" raw[i]
     }
 }'
-git diff --cached --name-only -z --diff-filter=d -- '*.md' '*.rs' ':!xtask/fixtures' |
+changed '*.md' '*.rs' ':!xtask/fixtures' |
     while IFS= read -r -d '' file; do
-        git grep --cached -q -I -w NEXT -- ":(literal)$file" || continue
-        git show ":$file" | awk -v file="$file" "$read_cited"
+        holds ":(literal)$file" || continue
+        at "$file" | awk -v file="$file" "$read_cited"
     done
 exit 0
