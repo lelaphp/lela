@@ -117,7 +117,7 @@ use php_unit::{
 
 use php_syntax::magic_const_name;
 
-use crate::{CompileError, Options, SourceKind, StackLimit};
+use crate::{CompileError, Options, Refused, SourceKind, StackLimit};
 use args::{Args, Callee, Plan};
 use attributes::InternalAttribute;
 use by_name::Symbols;
@@ -1530,7 +1530,7 @@ pub(crate) fn unit(
     let mut dynamic = Vec::with_capacity(emit.dynamic.len());
     for def in std::mem::take(&mut emit.dynamic) {
         let Some(def) = def else {
-            let refused = CompileError {
+            let refused = Refused {
                 level: Level::Error,
                 message: String::from(
                     "InternalError: a dynamic function definition whose body never landed",
@@ -1542,7 +1542,8 @@ pub(crate) fn unit(
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
-            };
+            }
+            .into();
             return Err(crate::refused_after(refused, raised, options, emit.strings));
         };
         dynamic.push(def);
@@ -1567,7 +1568,7 @@ pub(crate) fn unit(
     // `zend_mm`'s limit, raised as `E_ERROR` where the compile asked for
     // the memory.
     if let Err(limit) = parts.intern(options.kind, emit.strings) {
-        return Err(CompileError {
+        return Err(Refused {
             level: Level::Error,
             message: crate::fatal_message(limit).into(),
             line: lines.max(1),
@@ -1576,7 +1577,8 @@ pub(crate) fn unit(
             stage: crate::Stage::Compiling,
             declared: None,
             keys_made: u32::try_from(emit.runtime_keys.len()).unwrap_or(u32::MAX),
-        });
+        }
+        .into());
     }
     // Made where the caller takes it: the main op array is laid in the
     // unit as the unit is.
@@ -1701,20 +1703,23 @@ fn headers_numbered(oplines: &[Opline], safepoints: &[OplineIdx]) -> Result<(), 
         if target.0 as usize > at {
             continue;
         }
-        let refused = |what: &str| CompileError {
-            level: Level::Error,
-            message: format!(
-                "InternalError: {} at opline {at} jumps back to {:04} {what}",
-                op.opcode.name().trim_start_matches("ZEND_"),
-                target.0
-            )
-            .into(),
-            line: op.lineno,
-            raised: Vec::new(),
-            thrown: false,
-            stage: crate::Stage::Compiling,
-            declared: None,
-            keys_made: 0,
+        let refused = |what: &str| {
+            Refused {
+                level: Level::Error,
+                message: format!(
+                    "InternalError: {} at opline {at} jumps back to {:04} {what}",
+                    op.opcode.name().trim_start_matches("ZEND_"),
+                    target.0
+                )
+                .into(),
+                line: op.lineno,
+                raised: Vec::new(),
+                thrown: false,
+                stage: crate::Stage::Compiling,
+                declared: None,
+                keys_made: 0,
+            }
+            .into()
         };
         if !op.opcode.is_safepoint_site() {
             return Err(refused("with no safepoint column for its number"));
@@ -1859,7 +1864,7 @@ impl<'a> Emit<'a> {
     /// this compiler's sentence for what it cannot read yet, which the
     /// engine renders as the parse error #163 framed it as.
     fn fatal(&self, message: impl Into<Cow<'static, str>>) -> CompileError {
-        CompileError {
+        Refused {
             level: Level::Parse,
             message: message.into(),
             line: self.line,
@@ -1869,6 +1874,7 @@ impl<'a> Emit<'a> {
             declared: None,
             keys_made: 0,
         }
+        .into()
     }
 
     /// `zend_check_stack_limit`, at the top of `zend_compile_expr` and
@@ -2091,12 +2097,10 @@ impl<'a> Emit<'a> {
             // `CompileError`, a top statement being walked by
             // `top_statements`.
             Stmt::HaltCompilerStmt(_) => {
-                return Err(CompileError {
-                    thrown: true,
-                    ..self.compile_error(
-                        "__HALT_COMPILER() can only be used from the outermost scope",
-                    )
-                });
+                let mut thrown = self
+                    .compile_error("__HALT_COMPILER() can only be used from the outermost scope");
+                thrown.thrown = true;
+                return Err(thrown);
             }
         }
         Ok(())
@@ -2775,10 +2779,9 @@ impl<'a> Emit<'a> {
         for id in ids {
             let element = &tree[*id];
             let Some(value) = element.value else {
-                return Err(CompileError {
-                    line: last,
-                    ..self.compile_error("Cannot use empty array elements in arrays")
-                });
+                let mut refused = self.compile_error("Cannot use empty array elements in arrays");
+                refused.line = last;
+                return Err(refused);
             };
             last = element.line();
             let key = element.key.map(|key| tree[key].key);
@@ -6687,15 +6690,18 @@ impl<'a> Emit<'a> {
         let shown = String::from_utf8_lossy(&attribute.name.0).into_owned();
         let targets = config.targets();
         let on_target = targets & target != 0;
-        let refused = |message: String| CompileError {
-            level: Level::Error,
-            message: message.into(),
-            line,
-            raised: Vec::new(),
-            thrown: false,
-            stage: crate::Stage::Compiling,
-            declared: None,
-            keys_made: 0,
+        let refused = |message: String| {
+            Refused {
+                level: Level::Error,
+                message: message.into(),
+                line,
+                raised: Vec::new(),
+                thrown: false,
+                stage: crate::Stage::Compiling,
+                declared: None,
+                keys_made: 0,
+            }
+            .into()
         };
         if !on_target && !delayed {
             return Err(refused(format!(
@@ -6726,10 +6732,9 @@ impl<'a> Emit<'a> {
                     .map(|class| class.name.as_slice()),
             )
         {
-            return Err(CompileError {
-                level: Level::CompileError,
-                ..refused(sentence)
-            });
+            let mut refused = refused(sentence);
+            refused.level = Level::CompileError;
+            return Err(refused);
         }
         Ok(on_target.then_some(config))
     }
@@ -7457,7 +7462,7 @@ impl<'a> Emit<'a> {
         }
         match linking.outcome {
             php_link::Linked::Linked => Ok(true),
-            php_link::Linked::Refused(refused) => Err(CompileError {
+            php_link::Linked::Refused(refused) => Err(Refused {
                 level: refused.refusal.level(),
                 message: refused.refusal.to_string().into(),
                 line: refused.site.line,
@@ -7466,7 +7471,8 @@ impl<'a> Emit<'a> {
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
-            }),
+            }
+            .into()),
         }
     }
 
@@ -10093,15 +10099,18 @@ impl<'a> Emit<'a> {
             .oplines
             .get(at as usize)
             .map_or(self.line, |op| op.lineno);
-        let refused = |message: String| CompileError {
-            level: Level::CompileError,
-            message: message.into(),
-            line,
-            raised: Vec::new(),
-            thrown: false,
-            stage: crate::Stage::Compiling,
-            declared: None,
-            keys_made: 0,
+        let refused = |message: String| {
+            Refused {
+                level: Level::CompileError,
+                message: message.into(),
+                line,
+                raised: Vec::new(),
+                thrown: false,
+                stage: crate::Stage::Compiling,
+                declared: None,
+                keys_made: 0,
+            }
+            .into()
         };
         let name = self
             .constants
@@ -10207,7 +10216,7 @@ impl<'a> Emit<'a> {
                 .oplines
                 .get(op_num as usize)
                 .map_or(self.line, |op| op.lineno);
-            return Err(CompileError {
+            return Err(Refused {
                 level: Level::CompileError,
                 message: String::from(refused).into(),
                 line,
@@ -10216,7 +10225,8 @@ impl<'a> Emit<'a> {
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
-            });
+            }
+            .into());
         }
         Ok(())
     }
@@ -10828,7 +10838,7 @@ impl<'a> Emit<'a> {
     #[cold]
     #[inline(never)]
     fn compile_error(&self, message: impl Into<Cow<'static, str>>) -> CompileError {
-        CompileError {
+        Refused {
             level: Level::CompileError,
             message: message.into(),
             line: self.line,
@@ -10838,6 +10848,7 @@ impl<'a> Emit<'a> {
             declared: None,
             keys_made: 0,
         }
+        .into()
     }
 
     /// `zend_compile_for_expr_list`: every expression compiled in turn,
@@ -20009,7 +20020,7 @@ mod tests {
         let refused = |oplines: &[Opline]| {
             headers_numbered(oplines, &entry)
                 .err()
-                .map(|refused| (refused.level, refused.message.into_owned()))
+                .map(|refused| (refused.level, refused.message.to_string()))
         };
         assert_eq!(
             refused(&[jump(Opcode::Nop, 0, 0), jump(Opcode::Jmp, 0, 2)]),

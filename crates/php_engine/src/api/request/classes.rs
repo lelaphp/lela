@@ -1809,7 +1809,7 @@ impl Request {
     ///
     /// The runtime definition keys the compile made stand counted in
     /// `CG(rtd_key_counter)` whatever it declared
-    /// ([`php_compile::CompileError::keys_made`]), and are counted here
+    /// ([`php_compile::Refused::keys_made`]), and are counted here
     /// for every refusal raised, the cache's among them, which php
     /// compiles again where opcache keeps no failed compile: an
     /// anonymous class the request compiles next is named on from them.

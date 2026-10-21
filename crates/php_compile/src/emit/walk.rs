@@ -34,7 +34,7 @@ mod hooks;
 pub(super) use hooks::{Hook, HookBody};
 
 use super::Emit;
-use crate::CompileError;
+use crate::{CompileError, Refused};
 
 /// A group of a member's modifiers as the tree holds them, read once:
 /// php's `member_modifier` list after `zend_modifier_list_to_flags`
@@ -340,7 +340,7 @@ impl Emit<'_> {
     /// `InternalError`: the tree is not what the grammar promised
     /// (design §10).
     fn internal(&self, what: impl AsRef<str>) -> CompileError {
-        CompileError {
+        Refused {
             level: Level::Error,
             message: format!("InternalError: {}", what.as_ref()).into(),
             line: self.line,
@@ -350,6 +350,7 @@ impl Emit<'_> {
             declared: None,
             keys_made: 0,
         }
+        .into()
     }
 
     /// The line a node's last byte stands on: a declaration's
@@ -1304,7 +1305,7 @@ impl Emit<'_> {
             // php's `hooked_property` is one `T_VARIABLE`, so a list
             // after a second declarator is the parser's.
             let at = self.parsed.tree[list].line();
-            return Err(CompileError {
+            return Err(Refused {
                 level: Level::Parse,
                 message: String::from(
                     "syntax error, unexpected token \"{\", expecting \",\" or \";\"",
@@ -1316,7 +1317,8 @@ impl Emit<'_> {
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
-            });
+            }
+            .into());
         }
         for declarator in self.list(node.property_declarators) {
             let declarator = self.parsed.tree[*declarator];
@@ -1396,7 +1398,7 @@ impl Emit<'_> {
 #[cold]
 #[inline(never)]
 pub(super) fn unread(line: u32, what: &str) -> CompileError {
-    CompileError {
+    Refused {
         level: Level::Parse,
         message: format!("{what} this compiler cannot read yet").into(),
         line,
@@ -1406,6 +1408,7 @@ pub(super) fn unread(line: u32, what: &str) -> CompileError {
         declared: None,
         keys_made: 0,
     }
+    .into()
 }
 
 /// What `zend_assert_valid_class_name` calls a declaration's name in
@@ -1421,7 +1424,7 @@ fn class_name_kind(kind: ClassKind) -> &'static str {
 
 /// php's compile error at the node's own line.
 pub(super) fn refused(line: u32, message: impl Into<Cow<'static, str>>) -> CompileError {
-    CompileError {
+    Refused {
         level: Level::CompileError,
         message: message.into(),
         line,
@@ -1431,6 +1434,7 @@ pub(super) fn refused(line: u32, message: impl Into<Cow<'static, str>>) -> Compi
         declared: None,
         keys_made: 0,
     }
+    .into()
 }
 
 /// The refusal php throws as a `CompileError`
@@ -1455,10 +1459,9 @@ pub(super) fn refused(line: u32, message: impl Into<Cow<'static, str>>) -> Compi
 /// CompileError: Encoding must be a literal
 /// ```
 pub(super) fn thrown(line: u32, message: impl Into<Cow<'static, str>>) -> CompileError {
-    CompileError {
-        thrown: true,
-        ..refused(line, message)
-    }
+    let mut thrown = refused(line, message);
+    thrown.thrown = true;
+    thrown
 }
 
 // ----- the shapes a declaration reaches the emitter in -----

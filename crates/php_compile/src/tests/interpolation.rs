@@ -94,16 +94,19 @@ fn one_and_two_piece_interpolations_are_a_cast_and_a_fast_concat_and_the_rest_a_
     );
     assert_eq!(
         refused(b"<?php class C { const X = \"$a\"; }"),
-        Some(CompileError {
-            level: Level::CompileError,
-            message: "Constant expression contains invalid operations".into(),
-            line: 1,
-            raised: Vec::new(),
-            thrown: false,
-            stage: crate::Stage::Compiling,
-            declared: None,
-            keys_made: 0,
-        }),
+        Some(
+            Refused {
+                level: Level::CompileError,
+                message: "Constant expression contains invalid operations".into(),
+                line: 1,
+                raised: Vec::new(),
+                thrown: false,
+                stage: crate::Stage::Compiling,
+                declared: None,
+                keys_made: 0,
+            }
+            .into()
+        ),
         "`zend_is_allowed_in_const_expr` has no `ZEND_AST_ENCAPS_LIST`"
     );
 }

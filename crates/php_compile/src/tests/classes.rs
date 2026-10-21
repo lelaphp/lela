@@ -154,7 +154,7 @@ fn a_class_declared_in_a_namespace_takes_the_namespace_on_its_name() {
         &mut strings,
     )
     .err()
-    .map(|e| (e.level, e.message.into_owned(), e.line));
+    .map(|e| (e.level, e.message.to_string(), e.line));
     assert_eq!(
         refused,
         Some((
@@ -283,7 +283,7 @@ fn what_php_s_compiler_refuses_in_a_class_is_refused_in_its_words() {
         let mut strings = php_heap::Strings::new();
         compile_parsed(source, &bundled(), &mut strings)
             .err()
-            .map(|e| (e.level, e.message.into_owned(), e.line))
+            .map(|e| (e.level, e.message.to_string(), e.line))
     };
     let compile_error =
         |message: &str, line| Some((Level::CompileError, message.to_string(), line));
@@ -383,7 +383,7 @@ fn what_php_s_compiler_refuses_in_a_property_group_is_refused_in_its_words() {
         let mut strings = php_heap::Strings::new();
         compile_parsed(source, &bundled(), &mut strings)
             .err()
-            .map(|e| (e.level, e.message.into_owned(), e.line))
+            .map(|e| (e.level, e.message.to_string(), e.line))
     };
     let compile_error =
         |message: &str, line| Some((Level::CompileError, message.to_string(), line));

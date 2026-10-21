@@ -207,7 +207,7 @@ fn a_by_reference_return_past_a_finally_is_a_make_ref_and_a_second_type_check() 
 fn a_jump_out_of_a_finally_block_is_phps_compile_error() {
     let out = refused(b"<?php\nforeach ([1] as $v) { try { echo 1; } finally {\nbreak; } }\n");
     assert_eq!(
-        out.map(|e| (e.message.into_owned(), e.line)),
+        out.map(|e| (e.message.to_string(), e.line)),
         Some((String::from("jump out of a finally block is disallowed"), 3))
     );
     let inside = refused(
@@ -266,7 +266,7 @@ fn a_goto_that_stays_inside_a_try_has_that_finally_call_made_a_nop() {
 fn a_try_with_neither_a_catch_nor_a_finally_is_phps_compile_error() {
     let refused = refused(b"<?php\ntry { echo 1; }\n");
     assert_eq!(
-        refused.map(|e| e.message.into_owned()),
+        refused.map(|e| e.message.to_string()),
         Some(String::from("Cannot use try without catch or finally"))
     );
 }

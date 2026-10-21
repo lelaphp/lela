@@ -65,15 +65,18 @@ fn what_php_s_compiler_refuses_in_a_foreach_and_an_array_is_refused_in_its_words
         ),
         (b"<?php\necho [[] => 2];\n", "Illegal offset type"),
     ] {
-        let error = refused(source).unwrap_or_else(|| CompileError {
-            level: Level::Parse,
-            message: String::from("compiled").into(),
-            line: 0,
-            raised: Vec::new(),
-            thrown: false,
-            stage: crate::Stage::Compiling,
-            declared: None,
-            keys_made: 0,
+        let error = refused(source).unwrap_or_else(|| {
+            Refused {
+                level: Level::Parse,
+                message: String::from("compiled").into(),
+                line: 0,
+                raised: Vec::new(),
+                thrown: false,
+                stage: crate::Stage::Compiling,
+                declared: None,
+                keys_made: 0,
+            }
+            .into()
         });
         assert_eq!(error.level, Level::CompileError, "{message}");
         assert_eq!(error.message, message);
