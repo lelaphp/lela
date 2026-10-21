@@ -1371,9 +1371,12 @@ impl<'a> Builder<'a> {
         let packed = Types::ARRAY.laid_out(Layout::Packed);
         let inline = match op.opcode {
             Opcode::Jmp => true,
-            Opcode::Jmpz | Opcode::Jmpnz | Opcode::JmpzEx | Opcode::JmpnzEx | Opcode::QmAssign => {
-                scalar(t1)
+            // A double's truth is the handler's, which warns of a NAN as
+            // php 8.5 coerces it (`ZEND_JMPZ`, `Z/Zend/zend_vm_def.h`).
+            Opcode::Jmpz | Opcode::Jmpnz | Opcode::JmpzEx | Opcode::JmpnzEx => {
+                scalar(t1) && t1 != Types::DOUBLE
             }
+            Opcode::QmAssign => scalar(t1),
             Opcode::IsSmaller | Opcode::IsSmallerOrEqual | Opcode::IsEqual | Opcode::IsNotEqual => {
                 number(t1) && number(t2)
             }

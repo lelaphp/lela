@@ -598,3 +598,28 @@ fn the_exit_bound_falls_where_phps_does() -> Result<(), String> {
     );
     Ok(())
 }
+
+/// A jump on a double is stepped, so a NAN is coerced to its truth by the
+/// handler, which warns of it each time, as php's compiled code does
+/// (`ext/opcache/tests/jit/nan_001.phpt`); inline, the compiled test read
+/// the NAN as true and warned of nothing.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_jump_on_a_double_warns_of_a_nan_each_time() {
+    let served = crate::testing::serve::<crate::testing::Lane>(
+        &[("jit.mode", "force"), ("html_errors", "0")],
+        "$b = 1e308 * 10; $b = $b - $b;
+        for ($i = 0; $i < 3; $i++) {
+            if ($b) { echo \"nan is true\\n\"; } else { echo \"nan is false\\n\"; }
+        }",
+    );
+    let stdout = crate::testing::stdout(&served);
+    assert_eq!(
+        stdout
+            .matches("Warning: unexpected NAN value was coerced to bool")
+            .count(),
+        3,
+        "{stdout}"
+    );
+    assert_eq!(stdout.matches("nan is true").count(), 3, "{stdout}");
+}
