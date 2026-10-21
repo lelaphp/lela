@@ -6,26 +6,15 @@
 //! `zend_language_parser.y` alone, since which token bison had read when
 //! it reduces `backup_doc_comment` is a fact of its tables.
 
+mod support;
+
+use php_syntax::Parsed;
 use php_syntax::tree::{
     AnonClassDecl, ArrowFnExpr, ClassDecl, ClosureExpr, ConstDeclarator, EnumCaseDecl, EnumDecl,
     FunctionDecl, HasDocComment, InterfaceDecl, MethodDecl, Node, Param, PropertyDeclarator,
     PropertyHook, TraitDecl,
 };
-use php_syntax::{Options, Parsed, parse};
-
-fn parsed(source: &str) -> Parsed<'static> {
-    let arena: &'static php_syntax::Arena = Box::leak(Box::new(php_syntax::Arena::new()));
-    let source: &'static [u8] = Box::leak(source.as_bytes().into());
-    let parsed = parse(arena, source, &Options::default());
-    assert!(
-        parsed.diagnostics.is_empty() && parsed.missing.is_empty(),
-        "{}\n{:?}\n{:?}",
-        parsed.dump(),
-        parsed.diagnostics,
-        parsed.missing
-    );
-    parsed
-}
+use support::parse_clean as parsed;
 
 /// The doc comments of every node of `T`, in arena order, as text.
 fn docs<'p, T: Node + HasDocComment>(parsed: &'p Parsed<'_>) -> Vec<Option<&'p str>> {

@@ -3,15 +3,6 @@
 
 use super::*;
 
-/// Most fixtures don't care about the tag; strip it from expectations.
-#[track_caller]
-fn check_php(body: &str, expected: &[(SyntaxKind, &str)]) {
-    let input = format!("<?php {body}");
-    let mut full = vec![(OPEN_TAG, "<?php ")];
-    full.extend_from_slice(expected);
-    check_opts(&input, &crate::lexer::LexOptions::default(), &full);
-}
-
 #[test]
 fn keywords_case_insensitive() {
     check_php(

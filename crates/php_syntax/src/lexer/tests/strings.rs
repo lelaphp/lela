@@ -4,14 +4,6 @@
 
 use super::*;
 
-#[track_caller]
-fn check_php(body: &str, expected: &[(SyntaxKind, &str)]) {
-    let input = format!("<?php {body}");
-    let mut full = vec![(OPEN_TAG, "<?php ")];
-    full.extend_from_slice(expected);
-    check(&input, &full);
-}
-
 #[test]
 fn single_quoted() {
     check_php("'abc'", &[(SINGLE_QUOTED, "'abc'")]);

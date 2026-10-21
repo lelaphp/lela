@@ -11,27 +11,48 @@
 //! significant tokens only; a mis-parse a snapshot pins is named beside
 //! the fixture.
 
+// Each test binary includes this module and reads the part it needs.
+#![allow(dead_code)]
+
 use std::fmt::Write as _;
 
 /// Parse `src` through the real entry and hold the token stream
 /// lossless on the way: the token texts concatenate to the source, on
 /// every recovery path included.
-pub fn parse_lossless(src: &str) -> php_syntax::Parsed<'static> {
+pub fn parse_lossless(src: impl AsRef<[u8]>) -> php_syntax::Parsed<'static> {
+    let src = src.as_ref();
     // The parse is the fixture's for the rest of the test: its arena,
     // and the source in it, are kept.
     let arena: &'static php_syntax::Arena = Box::leak(Box::new(php_syntax::Arena::new()));
-    let source: &'static [u8] = Box::leak(src.as_bytes().into());
+    let source: &'static [u8] = Box::leak(src.into());
     let parsed = php_syntax::parse(arena, source, &php_syntax::Options::default());
-    let mut text = Vec::new();
-    for token in parsed.tokens {
-        text.extend_from_slice(
-            &parsed.source[token.offset as usize..(token.offset + token.len) as usize],
-        );
-    }
+    let text: Vec<u8> = parsed
+        .tokens
+        .iter()
+        .flat_map(|token| {
+            &parsed.source[token.offset as usize..(token.offset + token.len) as usize]
+        })
+        .copied()
+        .collect();
     assert_eq!(
         text,
-        src.as_bytes(),
-        "the token stream is lossless for fixture:\n{src}"
+        src,
+        "the token stream is lossless for fixture:\n{}",
+        String::from_utf8_lossy(src)
+    );
+    parsed
+}
+
+/// [`parse_lossless`] over a source that parses clean: no diagnostic
+/// and no required child the grammar did not supply.
+pub fn parse_clean(src: &str) -> php_syntax::Parsed<'static> {
+    let parsed = parse_lossless(src);
+    assert!(
+        parsed.diagnostics.is_empty() && parsed.missing.is_empty(),
+        "{}\n{:?}\n{:?}",
+        parsed.dump(),
+        parsed.diagnostics,
+        parsed.missing
     );
     parsed
 }
