@@ -25348,23 +25348,10 @@ mod tests {
     /// [`by_name`] alone, and a main op array with a cache slot of its
     /// own, not yet shared.
     fn declaring_f(strings: &mut php_heap::Strings) -> Unit {
-        use php_unit::decl::{FunctionDecl, Name};
         let by_name = by_name(strings);
         let mut body = by_name.main.clone();
         body.oplines = body.oplines.iter().take(1).copied().collect();
-        let decl = FunctionDecl {
-            name: Name::from("f"),
-            parameters: Vec::new(),
-            return_type: None,
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
-            file: Name::default(),
-            line: 0,
-            end_line: 0,
-            frameless: Vec::new(),
-        };
+        let decl = php_unit::decl::native_function(b"f");
         Unit {
             main: OpArray {
                 cache_size: 8,
@@ -26086,22 +26073,13 @@ mod tests {
     /// `FRAMELESS_ICALL_0` needs to be reached at all.
     fn with_a_nullary_frameless_native() -> Engine {
         use crate::api::abi::ExtensionBuilder;
-        use php_unit::decl::{FunctionDecl, Name};
+        use php_unit::decl::FunctionDecl;
         fn seven(_: &mut Request) -> Result<Owner<Value>, Thrown> {
             Ok(Owner::int(7))
         }
         let decl = FunctionDecl {
-            name: Name::from("seven"),
-            parameters: Vec::new(),
-            return_type: None,
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
-            file: Name::default(),
-            line: 0,
-            end_line: 0,
             frameless: vec![0],
+            ..php_unit::decl::native_function(b"seven")
         };
         let extension = ExtensionBuilder::default()
             .functions(vec![(decl, seven as crate::api::abi::Entry)])

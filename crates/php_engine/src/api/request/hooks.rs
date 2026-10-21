@@ -10,10 +10,11 @@
 //! which has none, is refused.
 
 use php_link::{ClassHooks, Held, Resolved, ResolvedHook, resolve_property};
-use php_unit::decl::{Bare, ClassDecl, FunctionDecl, HookKind, MethodDecl, Visibility};
+use php_unit::decl::{
+    Bare, ClassDecl, FunctionDecl, HookKind, MethodDecl, Visibility, native_function, parameter,
+};
 
 use super::{Link, Member, MemberAt, Request};
-use crate::api::__private::{native_function, parameter};
 use crate::api::abi::{
     Entry, PropertiesFor, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest,
 };

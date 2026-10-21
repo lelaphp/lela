@@ -753,6 +753,7 @@ mod tests {
     use super::*;
     use crate::decl::{
         ClassDecl, ClassFlags, ClassKind, EnumBacking, MethodDecl, Name, Parameter, Visibility,
+        native_function, parameter,
     };
     use crate::op::{LiveRange, OplineIdx, TryCatch};
     use crate::unit::MethodBody;
@@ -828,27 +829,15 @@ mod tests {
     #[test]
     fn a_function_prints_its_name_and_its_parameters_less_the_variadic_one() {
         let parameter = |variadic: bool| Parameter {
-            name: Name::from("x"),
-            ty: None,
-            by_ref: false,
-            prefer_ref: false,
-            promoted: false,
             variadic,
-            default: crate::decl::ParameterDefault::None,
-            attributes: Vec::new(),
+            ..parameter(b"x", None)
         };
         let decl = FunctionDecl {
-            name: Name::from("f"),
             parameters: vec![parameter(false), parameter(false), parameter(true)],
-            return_type: None,
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
             file: Name::from("a.php"),
             line: 4,
             end_line: 6,
-            frameless: Vec::new(),
+            ..native_function(b"f")
         };
         let function = OpArray {
             line_start: 4,
@@ -872,28 +861,10 @@ mod tests {
     #[test]
     fn a_method_prints_after_the_functions_under_its_class_s_name() {
         let function = |name: &str, parameters: usize| FunctionDecl {
-            name: Name::from(name),
-            parameters: (0..parameters)
-                .map(|_| Parameter {
-                    name: Name::from("x"),
-                    ty: None,
-                    by_ref: false,
-                    prefer_ref: false,
-                    promoted: false,
-                    variadic: false,
-                    default: crate::decl::ParameterDefault::None,
-                    attributes: Vec::new(),
-                })
-                .collect(),
-            return_type: None,
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
+            parameters: (0..parameters).map(|_| parameter(b"x", None)).collect(),
             file: Name::from("a.php"),
             line: 4,
-            end_line: 0,
-            frameless: Vec::new(),
+            ..native_function(name.as_bytes())
         };
         let method = |name: &str, parameters: usize| MethodDecl {
             function: function(name, parameters),
@@ -1184,17 +1155,10 @@ mod tests {
             .constant_array(&[(Key::Str(key), Zval::long(1))])
             .expect("a constant array");
         let decl = FunctionDecl {
-            name: Name(b"f\xff"[..].into()),
-            parameters: Vec::new(),
-            return_type: None,
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
             file: Name(b"\xfe.php"[..].into()),
             line: 1,
             end_line: 1,
-            frameless: Vec::new(),
+            ..native_function(b"f\xff")
         };
         let mut function = body(
             vec![Opline {

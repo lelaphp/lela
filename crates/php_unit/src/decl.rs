@@ -946,6 +946,43 @@ pub struct FunctionDecl {
     pub frameless: Vec<u32>,
 }
 
+/// A native's declaration named `name`: no parameter, no return type,
+/// the empty file and line zero, for its declarer to fill. A free
+/// function rather than an associated one, since `api` re-exports
+/// [`FunctionDecl`] and each of its methods would be an item of the
+/// extension face.
+#[must_use]
+pub fn native_function(name: &[u8]) -> FunctionDecl {
+    FunctionDecl {
+        name: Name(name.into()),
+        parameters: Vec::new(),
+        return_type: None,
+        returns_by_ref: false,
+        is_generator: false,
+        attributes: Vec::new(),
+        doc_comment: None,
+        file: Name::default(),
+        line: 0,
+        end_line: 0,
+        frameless: Vec::new(),
+    }
+}
+
+/// A parameter named `name` of type `ty`, required and by value.
+#[must_use]
+pub fn parameter(name: &[u8], ty: Option<Type>) -> Parameter {
+    Parameter {
+        name: Name(name.into()),
+        ty,
+        by_ref: false,
+        prefer_ref: false,
+        promoted: false,
+        variadic: false,
+        default: ParameterDefault::None,
+        attributes: Vec::new(),
+    }
+}
+
 /// A method: a function with a visibility, whether it is an instance
 /// member (`false` for a `static` method), and, on a native, the tentative
 /// bit of its return type.
