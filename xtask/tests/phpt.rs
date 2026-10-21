@@ -477,7 +477,9 @@ fn a_subset_the_pinned_tree_has_not_is_a_reading_that_says_so_and_not_a_silent_d
         subset: Some("php_engine".to_owned()),
         ..Ask::default()
     };
-    let readings = phpt::run(workspace(), &manifest, &registry(""), &ask).unwrap();
+    let root = Tree::new("phpt-absent-dir").unwrap();
+    scratch_workspace(workspace(), &root);
+    let readings = phpt::run(&root, &manifest, &registry(""), &ask).unwrap();
     assert_eq!(readings.len(), 1, "{readings:#?}");
     let reading = &readings[0];
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
@@ -522,7 +524,11 @@ fn a_bare_run_is_the_per_commit_lane_composed_from_the_crate_rows() {
 fn a_run_with_no_subset_runs_the_lane_rather_than_refusing() {
     let tree = fixture_tree();
     let manifest = manifest_of([Crate::named("ext/ctype")], &tree);
-    let readings = phpt::run(workspace(), &manifest, &registry(""), &Ask::default()).unwrap();
+    // A scratch workspace, so a run over this corpus is kept in no
+    // checkout's store, as one of none was in main's (#3143).
+    let root = Tree::new("phpt-no-subset").unwrap();
+    scratch_workspace(workspace(), &root);
+    let readings = phpt::run(&root, &manifest, &registry(""), &Ask::default()).unwrap();
     let scopes: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
     assert_eq!(scopes, ["ext/ctype"], "{readings:#?}");
 }
