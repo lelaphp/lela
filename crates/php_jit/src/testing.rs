@@ -80,9 +80,15 @@ impl Drop for Scratch {
 pub(crate) const MAPS_CODE: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
 
 /// An engine bound to `T` under `ini`, the request's cache holding every
-/// file the moment it is written.
+/// file the moment it is written, for no host named.
 pub(crate) fn engine<T: Tier>(ini: &[(&str, &str)]) -> Engine {
+    engine_on::<T>("", ini)
+}
+
+/// [`engine`] for the host `host` names, as `php_sapi_name()` answers it.
+pub(crate) fn engine_on<T: Tier>(host: &'static str, ini: &[(&str, &str)]) -> Engine {
     let mut builder = Engine::builder()
+        .sapi_name(host)
         .tier::<T>()
         .ini("opcache.file_update_protection", "0");
     for (name, value) in ini {
@@ -108,7 +114,7 @@ pub(crate) fn ini(entries: &[(&str, &str)]) -> StartupIni {
 
 /// The `Policy` `entries` read to.
 pub(crate) fn policy(entries: &[(&str, &str)]) -> Policy {
-    Policy::from_ini(&ini(entries), &mut Vec::new())
+    Policy::from_ini(&ini(entries), "", &mut Vec::new())
 }
 
 /// The name of the function `frame` serves, none for a file's code.
@@ -137,10 +143,13 @@ pub(crate) fn declared(names: &[&str]) -> Vec<IniDecl> {
         .collect()
 }
 
-/// php's `opcache.jit*` directives, which ext/opcache declares in the
-/// bundle and no engine of a tier's test has, declared by the test tier
-/// instead so the tier's start reads what a test sets.
-pub(crate) const OPCACHE_JIT: [&str; 19] = [
+/// php's `opcache.jit*` directives, and the two that start opcache at
+/// all, which ext/opcache declares in the bundle and no engine of a
+/// tier's test has, declared by the test tier instead so the tier's
+/// start reads what a test sets.
+pub(crate) const OPCACHE: [&str; 21] = [
+    "opcache.enable",
+    "opcache.enable_cli",
     "opcache.jit",
     "opcache.jit_buffer_size",
     "opcache.jit_debug",
@@ -163,7 +172,7 @@ pub(crate) const OPCACHE_JIT: [&str; 19] = [
 ];
 
 /// The compiled tier as a test binds it: `Jit`, its state declared with
-/// php's `opcache.jit*` beside its own two directives.
+/// php's opcache directives beside its own two.
 pub(crate) struct Lane;
 
 impl Tier for Lane {
@@ -173,7 +182,7 @@ impl Tier for Lane {
 
     fn extension() -> Option<Extension> {
         let mut ini = crate::policy::ini();
-        ini.extend(declared(&OPCACHE_JIT));
+        ini.extend(declared(&OPCACHE));
         Some(
             ExtensionBuilder::default()
                 .ini(ini)

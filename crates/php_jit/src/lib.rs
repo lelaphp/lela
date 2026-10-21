@@ -144,6 +144,7 @@ impl JitEngine {
     fn new(start: &Start) -> Result<JitEngine, Refusal> {
         Ok(JitEngine::over(
             start.ini(),
+            start.host(),
             |opcode| tier::observes(start, opcode),
             lower::Backend::new,
         ))
@@ -156,15 +157,17 @@ impl JitEngine {
     /// [`compiler::Compiler`] it runs.
     #[cfg(test)]
     fn of(ini: &StartupIni) -> JitEngine {
-        JitEngine::over(ini, |_| false, lower::Backend::new)
+        JitEngine::over(ini, "", |_| false, lower::Backend::new)
     }
 
-    /// The state over the startup ini where `observes` says which
-    /// opcodes the engine's extensions observe, which refuses the tier
-    /// past the silence opcodes ([`policy::Policy::check_support`]),
-    /// with the `Backend` `backend` makes for the host.
+    /// The state over the startup ini, for the host `host` names, where
+    /// `observes` says which opcodes the engine's extensions observe,
+    /// which refuses the tier past the silence opcodes
+    /// ([`policy::Policy::check_support`]), with the `Backend` `backend`
+    /// makes for the host.
     fn over(
         ini: &StartupIni,
+        host: &str,
         observes: impl Fn(Opcode) -> bool,
         backend: impl FnOnce(
             &policy::Policy,
@@ -172,7 +175,7 @@ impl JitEngine {
         ) -> Result<lower::Backend, lower::Unsupported>,
     ) -> JitEngine {
         let mut started = Vec::new();
-        let mut policy = policy::Policy::from_ini(ini, &mut started);
+        let mut policy = policy::Policy::from_ini(ini, host, &mut started);
         policy.check_support(observes);
         let backend = if policy.mode() == policy::Mode::Off {
             None
@@ -265,6 +268,7 @@ mod tests {
         let asked = [("opcache.jit", "tracing"), ("opcache.jit_debug", "0xfffff")];
         let none = JitEngine::over(
             &ini(&asked),
+            "",
             |_| false,
             |_, _| Err(crate::lower::Unsupported("a test's host")),
         );
@@ -290,6 +294,36 @@ mod tests {
         );
         let second = scratch.serve(&engine, "echo 1;");
         assert_eq!(String::from_utf8_lossy(&second.stderr), "");
+    }
+
+    /// On the command line php starts opcache, and so its compiled tier,
+    /// only under `opcache.enable_cli` (#3126): the loop the pinned php
+    /// writes no `TRACE` line for without it writes none here, and with
+    /// it writes the lines of a loop it compiled.
+    #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+    #[test]
+    fn the_command_line_runs_the_tier_only_under_opcache_enable_cli() {
+        let program = "function f($x) { return $x + 1; } function g($x) { return f($x) * 2; }
+            $s = 0; for ($i = 0; $i < 5; $i++) { $s = g($s) + 1; } echo $s, \"\\n\";";
+        let asked = [
+            ("opcache.jit", "tracing"),
+            ("opcache.jit_hot_loop", "1"),
+            ("opcache.jit_debug", "0x3000"),
+        ];
+        let off =
+            testing::Scratch::new().serve(&testing::engine_on::<Lane>("cli", &asked), program);
+        assert_eq!(testing::stdout(&off), "93\n");
+        assert_eq!(String::from_utf8_lossy(&off.stderr), "");
+        let mut on = asked.to_vec();
+        on.push(("opcache.enable_cli", "1"));
+        let traced =
+            testing::Scratch::new().serve(&testing::engine_on::<Lane>("cli", &on), program);
+        assert_eq!(testing::stdout(&traced), "93\n");
+        assert!(
+            String::from_utf8_lossy(&traced.stderr).contains("---- TRACE 1 start (loop)"),
+            "{}",
+            String::from_utf8_lossy(&traced.stderr)
+        );
     }
 
     /// With its compiled tier disabled php writes no `opcache.jit_debug` line

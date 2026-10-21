@@ -309,7 +309,7 @@ impl Tier for Panics {
 
     fn extension() -> Option<Extension> {
         let mut ini = crate::policy::ini();
-        ini.extend(testing::declared(&testing::OPCACHE_JIT));
+        ini.extend(testing::declared(&testing::OPCACHE));
         Some(
             ExtensionBuilder::default()
                 .ini(ini)
@@ -411,7 +411,7 @@ impl Tier for Spy {
 
     fn extension() -> Option<Extension> {
         let mut ini = crate::policy::ini();
-        ini.extend(testing::declared(&testing::OPCACHE_JIT));
+        ini.extend(testing::declared(&testing::OPCACHE));
         Some(
             ExtensionBuilder::default()
                 .ini(ini)
@@ -601,7 +601,7 @@ mod ran {
 
         fn extension() -> Option<Extension> {
             let mut ini = crate::policy::ini();
-            ini.extend(testing::declared(&testing::OPCACHE_JIT));
+            ini.extend(testing::declared(&testing::OPCACHE));
             Some(
                 ExtensionBuilder::default()
                     .ini(ini)

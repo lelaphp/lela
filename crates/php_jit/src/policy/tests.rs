@@ -27,8 +27,13 @@ fn ini(entries: &[(&str, &str)]) -> StartupIni {
 
 /// The `Policy` `entries` read to, with the lines it logged.
 fn read_ini(entries: &[(&str, &str)]) -> (Policy, Vec<Note>) {
+    read_on("", entries)
+}
+
+/// [`read_ini`] for the host `host` names.
+fn read_on(host: &str, entries: &[(&str, &str)]) -> (Policy, Vec<Note>) {
     let mut notes = Vec::new();
-    let policy = Policy::from_ini(&ini(entries), &mut notes);
+    let policy = Policy::from_ini(&ini(entries), host, &mut notes);
     (policy, notes)
 }
 
@@ -524,4 +529,72 @@ fn an_observed_opcode_past_the_silence_opcodes_runs_the_tier_off() {
         Refused::ObservedOpcode.to_string(),
         "JIT is incompatible with third party extensions that setup user opcode handlers. JIT disabled."
     );
+}
+
+/// php sets its tier up only where opcache starts (`accel_startup`,
+/// `Z/ext/opcache/ZendAccelerator.c:3210-3220`): with `opcache.enable`
+/// on, and on the command line and in phpdbg with `opcache.enable_cli`
+/// on too, which no other host reads. Elsewhere the tier runs `Off` with
+/// no `opcache.jit_debug` bit, and an observed opcode refuses nothing,
+/// so no warning is raised; `jit.mode` names its lane whatever the two
+/// say, and refuses with php's warning only where php set its tier up.
+#[test]
+fn the_tier_is_set_up_only_where_opcache_starts() {
+    let echo = |opcode| opcode == Opcode::Echo;
+    let tracing = ("opcache.jit", "tracing");
+    let debug = ("opcache.jit_debug", "0x3000");
+    let cli_on = ("opcache.enable_cli", "1");
+    let disabled = ("opcache.enable", "0");
+    let force = ("jit.mode", "force");
+    for (host, asked, mode, warned) in [
+        ("cli", &[tracing, debug][..], Mode::Off, false),
+        ("phpdbg", &[tracing, debug], Mode::Off, false),
+        (
+            "cli",
+            &[tracing, debug, ("opcache.enable_cli", "0")],
+            Mode::Off,
+            false,
+        ),
+        ("cli", &[tracing, debug, cli_on], Mode::Tracing, true),
+        (
+            "phpdbg",
+            &[tracing, debug, ("opcache.enable_cli", "On")],
+            Mode::Tracing,
+            true,
+        ),
+        ("cli", &[tracing, debug, cli_on, disabled], Mode::Off, false),
+        ("cgi-fcgi", &[tracing, debug], Mode::Tracing, true),
+        (
+            "fpm-fcgi",
+            &[tracing, debug, ("opcache.enable_cli", "0")],
+            Mode::Tracing,
+            true,
+        ),
+        ("fpm-fcgi", &[tracing, debug, disabled], Mode::Off, false),
+        ("cli-server", &[tracing, debug], Mode::Tracing, true),
+        ("cli", &[force], Mode::Force, false),
+        ("cli", &[force, tracing], Mode::Force, false),
+        ("cli", &[force, tracing, cli_on], Mode::Force, true),
+        (
+            "cli",
+            &[("jit.mode", "exit-fuzz"), disabled],
+            Mode::ExitFuzz,
+            false,
+        ),
+    ] {
+        let (mut policy, _) = read_on(host, asked);
+        assert_eq!(policy.mode(), mode, "{host} {asked:?}");
+        assert_eq!(
+            policy.debugs(),
+            asked.contains(&debug) && mode != Mode::Off,
+            "{host} {asked:?}"
+        );
+        policy.check_support(echo);
+        assert_eq!(
+            policy.refused(),
+            warned.then_some(Refused::ObservedOpcode),
+            "{host} {asked:?}"
+        );
+        assert_eq!(policy.mode(), Mode::Off, "{host} {asked:?}");
+    }
 }
