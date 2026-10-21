@@ -110,6 +110,7 @@ tier::on_heap
 tier::primed
 tier::restore
 tier::room
+tier::running_func
 tier::safepoint_at
 tier::sample
 tier::serve_kept
@@ -124,5 +125,6 @@ tier::trace_num
 tier::unwind
 tier::word
 [kernels]
+tier::call_held
 tier::release
 tier::step_held

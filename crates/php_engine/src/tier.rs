@@ -66,7 +66,9 @@ use held::{Entered, Kept, Scope, Units};
 pub use sampled::{
     Building, Sample, building, building_call, class_number, numbered_class, on_heap, sample,
 };
-pub use view::{Epoch, FuncRef, Held, MapPtrRaw, UnitView, epoch, epoch_state, func, landing};
+pub use view::{
+    Epoch, FuncRef, Held, MapPtrRaw, UnitView, epoch, epoch_state, func, landing, running_func,
+};
 
 pub use crate::api::values::ClassId;
 
@@ -1142,6 +1144,46 @@ pub fn step_held(
         }
         stepped => Ok(stepped),
     }
+}
+
+/// The `DO_UCALL`, `DO_FCALL` or `DO_FCALL_BY_NAME` at `frame`'s opline
+/// of `held`, made as compiled code makes a call to the callee its trace
+/// recorded, `callee`, which the `INIT_*` before it pushed: the handler's
+/// inline path, php's `i_init_func_execute_data` writing the header's
+/// words ([`Request::enter_call`]), and the callee's activation over
+/// `callee`, with no dispatch (`jit-design.md` §5.2, #3147). `Pushed`
+/// of the callee, or `Threw` of it where its prologue or the interrupt
+/// left a throwable pending. Where an observer of the opcode is
+/// declared, the opline is another, or the inline path refuses the call,
+/// the opline is stepped over `held` as [`step_held`] steps it.
+pub fn call_held(
+    req: &mut Request,
+    frame: FrameRef,
+    (held, callee): (Held<'_>, Held<'_>),
+    epoch: &Epoch,
+) -> Result<Stepped, Fatal> {
+    let at = req.vm().opline(frame);
+    let op = exec::opline_at(held.code(), at).ok_or_else(|| past_the_end(frame, at))?;
+    let flagged = match op.opcode {
+        php_unit::Opcode::DoUcall => false,
+        php_unit::Opcode::DoFcall | php_unit::Opcode::DoFcallByName => true,
+        _ => return step_held(req, frame, held, epoch),
+    };
+    if Declared::of(req).tells(op.opcode) {
+        return step_held(req, frame, held, epoch);
+    }
+    let returns_to = (op.out_type != php_unit::OperandKind::Unused).then_some(op.out);
+    let Some(pushed) = req.enter_call(returns_to, frame, flagged) else {
+        return step_held(req, frame, held, epoch);
+    };
+    // The callee the trace recorded, as its `INIT_*` guarded it; a
+    // closure's frame reading a cache of its own is served from its unit.
+    if running_func(req, pushed) == Some(callee.func()) {
+        return activated_over(req, pushed, callee.code());
+    }
+    let serving = exec::standing(req, pushed)?;
+    let code = exec::serving_code(&serving, pushed)?;
+    activated_over(req, pushed, code)
 }
 
 /// The one handler at `frame`'s opline over `code`, with `Nop` at the

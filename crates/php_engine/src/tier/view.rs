@@ -225,6 +225,23 @@ fn row(req: &Request, offset: MapPtrOffset) -> Option<&super::published::Func> {
     }
 }
 
+/// The op array an activated user frame runs, read off its
+/// `EX(run_time_cache)` as php's compiled code reads `EX(func)`, with no
+/// lookup of its function: what a kernel names the frame it leaves the
+/// interpreter in by ([`func`] for any frame); none for a frame that is
+/// no activated user frame, a call being built or a native's. A closure's frame
+/// that reads a cache of its own names that cache, the request's, which
+/// no trace records, as a frame none of whose op arrays an epoch holds
+/// does.
+#[must_use]
+pub fn running_func(req: &Request, frame: FrameRef) -> Option<FuncRef> {
+    let header = req.vm().at(frame)?;
+    header
+        .info
+        .user()
+        .then(|| FuncRef(header.runtime_cache().offset()))
+}
+
 /// The op array `frame` serves; none for a frame that serves none.
 #[must_use]
 pub fn func(req: &Request, frame: FrameRef) -> Option<FuncRef> {
@@ -232,12 +249,19 @@ pub fn func(req: &Request, frame: FrameRef) -> Option<FuncRef> {
 }
 
 /// The row of the op array `frame` serves, where an epoch holds it: none
-/// for a request's op array and a frame that serves none.
+/// for a request's op array and a frame that serves none. An activated
+/// frame names its row by its `EX(run_time_cache)` ([`running_func`]),
+/// with no lookup of its function; any other frame, a call being built or
+/// a native's among them, and a closure's that reads a cache of its own,
+/// the request's, is looked up.
 fn held(req: &Request, frame: FrameRef) -> Option<&super::published::Func> {
-    match req.served_op_array(frame)?.runtime_cache {
-        MapPtrOffset::Engine(offset) => req.arena().func(offset),
-        MapPtrOffset::Request(_) => None,
+    let header = req.vm().at(frame)?;
+    if header.info.user()
+        && let MapPtrOffset::Engine(offset) = header.runtime_cache().offset()
+    {
+        return req.arena().func(offset);
     }
+    row(req, req.served_op_array(frame)?.runtime_cache)
 }
 
 /// The landing word of opline `at` of the op array `frame` serves, what

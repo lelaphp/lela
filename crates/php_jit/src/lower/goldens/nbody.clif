@@ -207,8 +207,8 @@ function u0:0(i64, i64) -> i32 system_v {
 @0004                               brif v67, block30, block31
 
                                 block30:
-@0004                               v69 = iconst.i64 0x7000_0200
-@0004                               v70 = call_indirect sig1, v69(v0, v27, v68, v63, v64)  ; v69 = 0x7000_0200, v68 = 17
+@0004                               v69 = iconst.i64 0x7000_0300
+@0004                               v70 = call_indirect sig1, v69(v0, v27, v68, v63, v64)  ; v69 = 0x7000_0300, v68 = 17
 @0004                               brif v70, block32, block33
 
                                 block33:
@@ -307,8 +307,8 @@ function u0:0(i64, i64) -> i32 system_v {
 @0008                               brif v111, block46, block47
 
                                 block46:
-@0008                               v113 = iconst.i64 0x7000_0200
-@0008                               v114 = call_indirect sig1, v113(v0, v71, v112, v107, v108)  ; v113 = 0x7000_0200, v112 = 21
+@0008                               v113 = iconst.i64 0x7000_0300
+@0008                               v114 = call_indirect sig1, v113(v0, v71, v112, v107, v108)  ; v113 = 0x7000_0300, v112 = 21
 @0008                               brif v114, block48, block49
 
                                 block49:
@@ -403,8 +403,8 @@ function u0:0(i64, i64) -> i32 system_v {
 @000c                               brif v155, block62, block63
 
                                 block62:
-@000c                               v157 = iconst.i64 0x7000_0200
-@000c                               v158 = call_indirect sig1, v157(v0, v115, v156, v151, v152)  ; v157 = 0x7000_0200, v156 = 25
+@000c                               v157 = iconst.i64 0x7000_0300
+@000c                               v158 = call_indirect sig1, v157(v0, v115, v156, v151, v152)  ; v157 = 0x7000_0300, v156 = 25
 @000c                               brif v158, block64, block65
 
                                 block65:
@@ -443,8 +443,8 @@ function u0:0(i64, i64) -> i32 system_v {
 @0012                               brif v175, block66, block67
 
                                 block66:
-@0012                               v177 = iconst.i64 0x7000_0200
-@0012                               v178 = call_indirect sig1, v177(v0, v170, v176, v171, v172)  ; v177 = 0x7000_0200, v176 = 31
+@0012                               v177 = iconst.i64 0x7000_0300
+@0012                               v178 = call_indirect sig1, v177(v0, v170, v176, v171, v172)  ; v177 = 0x7000_0300, v176 = 31
 @0012                               brif v178, block68, block69
 
                                 block69:
@@ -496,8 +496,8 @@ function u0:0(i64, i64) -> i32 system_v {
 @0016                               brif v197, block73, block74
 
                                 block73:
-@0016                               v199 = iconst.i64 0x7000_0200
-@0016                               v200 = call_indirect sig1, v199(v0, v180, v198, v193, v194)  ; v199 = 0x7000_0200, v198 = 35
+@0016                               v199 = iconst.i64 0x7000_0300
+@0016                               v200 = call_indirect sig1, v199(v0, v180, v198, v193, v194)  ; v199 = 0x7000_0300, v198 = 35
 @0016                               brif v200, block75, block76
 
                                 block76:
@@ -539,8 +539,8 @@ function u0:0(i64, i64) -> i32 system_v {
 @0017                               v226 = iconst.i64 784
 @0017                               v227 = iadd.i64 v204, v226  ; v226 = 784
 @0017                               v228 = iconst.i32 36
-@0017                               v229 = iconst.i64 0x7000_0300
-@0017                               v230 = call_indirect sig2, v229(v0, v204, v228, v225, v220, v227)  ; v229 = 0x7000_0300, v228 = 36
+@0017                               v229 = iconst.i64 0x7000_0400
+@0017                               v230 = call_indirect sig2, v229(v0, v204, v228, v225, v220, v227)  ; v229 = 0x7000_0400, v228 = 36
 @0017                               brif v230, block86, block87
 
                                 block87:
@@ -565,8 +565,8 @@ function u0:0(i64, i64) -> i32 system_v {
 @0017                               v240 = iconst.i64 784
 @0017                               v241 = iadd.i64 v204, v240  ; v240 = 784
 @0017                               v242 = iconst.i32 36
-@0017                               v243 = iconst.i64 0x7000_0300
-@0017                               v244 = call_indirect sig2, v243(v0, v204, v242, v239, v234, v241)  ; v243 = 0x7000_0300, v242 = 36
+@0017                               v243 = iconst.i64 0x7000_0400
+@0017                               v244 = call_indirect sig2, v243(v0, v204, v242, v239, v234, v241)  ; v243 = 0x7000_0400, v242 = 36
 @0017                               brif v244, block86, block91
 
                                 block91:
@@ -600,8 +600,8 @@ function u0:0(i64, i64) -> i32 system_v {
 @0019                               brif v254, block92, block93
 
                                 block92:
-@0019                               v256 = iconst.i64 0x7000_0200
-@0019                               v257 = call_indirect sig1, v256(v0, v249, v255, v250, v251)  ; v256 = 0x7000_0200, v255 = 38
+@0019                               v256 = iconst.i64 0x7000_0300
+@0019                               v257 = call_indirect sig1, v256(v0, v249, v255, v250, v251)  ; v256 = 0x7000_0300, v255 = 38
 @0019                               brif v257, block94, block95
 
                                 block95:
@@ -644,8 +644,8 @@ function u0:0(i64, i64) -> i32 system_v {
 @001a                               v281 = iconst.i64 832
 @001a                               v282 = iadd.i64 v258, v281  ; v281 = 832
 @001a                               v283 = iconst.i32 39
-@001a                               v284 = iconst.i64 0x7000_0300
-@001a                               v285 = call_indirect sig2, v284(v0, v258, v283, v280, v275, v282)  ; v284 = 0x7000_0300, v283 = 39
+@001a                               v284 = iconst.i64 0x7000_0400
+@001a                               v285 = call_indirect sig2, v284(v0, v258, v283, v280, v275, v282)  ; v284 = 0x7000_0400, v283 = 39
 @001a                               brif v285, block86, block105
 
                                 block105:
@@ -670,8 +670,8 @@ function u0:0(i64, i64) -> i32 system_v {
 @001a                               v295 = iconst.i64 832
 @001a                               v296 = iadd.i64 v258, v295  ; v295 = 832
 @001a                               v297 = iconst.i32 39
-@001a                               v298 = iconst.i64 0x7000_0300
-@001a                               v299 = call_indirect sig2, v298(v0, v258, v297, v294, v289, v296)  ; v298 = 0x7000_0300, v297 = 39
+@001a                               v298 = iconst.i64 0x7000_0400
+@001a                               v299 = call_indirect sig2, v298(v0, v258, v297, v294, v289, v296)  ; v298 = 0x7000_0400, v297 = 39
 @001a                               brif v299, block86, block109
 
                                 block109:
@@ -702,8 +702,8 @@ function u0:0(i64, i64) -> i32 system_v {
 @001c                               brif v309, block110, block111
 
                                 block110:
-@001c                               v311 = iconst.i64 0x7000_0200
-@001c                               v312 = call_indirect sig1, v311(v0, v304, v310, v305, v306)  ; v311 = 0x7000_0200, v310 = 41
+@001c                               v311 = iconst.i64 0x7000_0300
+@001c                               v312 = call_indirect sig1, v311(v0, v304, v310, v305, v306)  ; v311 = 0x7000_0300, v310 = 41
 @001c                               brif v312, block112, block113
 
                                 block113:

@@ -974,7 +974,7 @@ impl<'a> Emit<'a> {
         // The `ExitCtx`, the frame's room and the opline come first.
         let params: &[Type] = match kernel {
             Kernel::Step => &[I64, I64, I32, I32, I64],
-            Kernel::PushCall => &[I64, I64, I32, I32, I32, I64],
+            Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
             Kernel::Release => &[I64, I64, I32, I64, I32],
             Kernel::Copy => &[I64, I64, I32, I64, I32, I64],
         };
@@ -1026,7 +1026,17 @@ impl<'a> Emit<'a> {
         let [room, opline] = self.served(line)?;
         let func = self.func_of(line.frame)?;
         let stood = self.b.ins().stack_addr(I64, self.stood, 0);
-        self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?;
+        match self.entered_by(at, line) {
+            Some(callee) => {
+                let callee = self.func_of(callee)?;
+                self.call(
+                    Kernel::Call,
+                    &[room, opline, func, callee, stood],
+                    leave_of(line),
+                )?;
+            }
+            None => self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?,
+        }
         if matches!(
             line.opcode,
             Opcode::DoFcall | Opcode::DoIcall | Opcode::DoUcall | Opcode::DoFcallByName
@@ -1061,6 +1071,21 @@ impl<'a> Emit<'a> {
             }
         }
         Ok(())
+    }
+
+    /// The frame a `DO_*CALL` at `at` enters, where the trace follows the
+    /// call into its callee: what [`Kernel::Call`] makes the call to.
+    fn entered_by(&self, at: OpId, line: &Line) -> Option<Frame> {
+        if !matches!(
+            line.opcode,
+            Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName
+        ) {
+            return None;
+        }
+        match self.ir.ops.get(at.index() + 1) {
+            Some(Op::Enter { frame }) => Some(*frame),
+            _ => None,
+        }
     }
 
     /// php's IP guard: leave through `exit` unless the last kernel left

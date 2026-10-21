@@ -376,6 +376,7 @@ kernels! {
     Request => mod wrapped {
         Step => step(func: u32) -> Stood = tier::step_held;
         PushCall => push_call(func: u32, callee: u32) -> Stood = tier::step_held;
+        Call => call(func: u32, callee: u32) -> Stood = tier::call_held;
         Release => release(word: u64, type_info: u32) = tier::release;
         Copy => copy(word: u64, type_info: u32) -> Zval;
     }
@@ -410,6 +411,21 @@ fn push_call(req: &mut Request, on: On<'_>, func: u32, callee: u32) -> Result<St
         });
     }
     let stepped = tier::step_held(req, frame, held, epoch)?;
+    stood(req, stepped, (frame, func))
+}
+
+/// The `call` kernel (`jit-design.md` §5.2): the `DO_*CALL` at `at` of
+/// the op array the engine numbers `func`, a call to the op array it
+/// numbers `callee`, which the trace recorded and its `INIT_*` pushed,
+/// made as the handler's inline path makes it and the callee activated,
+/// with no dispatch ([`tier::call_held`]); where the interpreter stands
+/// after it, in the callee, named by the op array it runs, which a
+/// `DO_FCALL` of a callee another call varies holds to the one recorded.
+fn call(req: &mut Request, on: On<'_>, func: u32, callee: u32) -> Result<Stood, Fatal> {
+    let frame = standing(req, on.room, on.at)?;
+    let (entered, _) = held(on, callee)?;
+    let (held, epoch) = held(on, func)?;
+    let stepped = tier::call_held(req, frame, (held, entered), epoch)?;
     stood(req, stepped, (frame, func))
 }
 
@@ -489,7 +505,7 @@ fn where_stood(req: &mut Request, frame: FrameRef, func: Option<u32>) -> Result<
         tier::room(req, frame).ok_or_else(|| internal("a step went on in a frame with no room"))?;
     let func = match func {
         Some(func) => func,
-        None => tier::func(req, frame)
+        None => tier::running_func(req, frame)
             .and_then(engine_offset)
             .unwrap_or(u32::MAX),
     };

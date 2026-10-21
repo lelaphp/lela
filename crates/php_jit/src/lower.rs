@@ -248,6 +248,12 @@ pub(crate) enum Kernel {
     /// where it resolves to another, nothing is pushed and `stood.call`
     /// is null.
     PushCall,
+    /// `call(cx, frame, opline: u32, func: u32, callee: u32, stood: *mut
+    /// Stood)`: a `DO_*CALL` of the op array the engine numbers `func`,
+    /// to the callee the trace recorded, which it numbers `callee`, made
+    /// through `php_engine::tier::call_held` with no dispatch, and where
+    /// the interpreter stands after it, in the callee, written to `stood`.
+    Call,
     /// `release(cx, frame, opline: u32, word: u64, type_info: u32)`:
     /// php's `zval_ptr_dtor` of the counted value the zval names, a
     /// destructor's throw answered as one.
@@ -260,9 +266,10 @@ pub(crate) enum Kernel {
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 4] = [
+    pub(crate) const ALL: [Kernel; 5] = [
         Kernel::Step,
         Kernel::PushCall,
+        Kernel::Call,
         Kernel::Release,
         Kernel::Copy,
     ];
