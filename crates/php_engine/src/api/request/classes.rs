@@ -389,7 +389,7 @@ impl Request {
         let at = u32::try_from(at).ok()?;
         match published {
             Some(class) => self.declare_published(unit, at, class, decl),
-            None => self.bind_declared(unit, at, None, None),
+            None => self.bind_declared(unit, at, None, None).ok()?,
         }
         Some(true)
     }
@@ -630,9 +630,9 @@ impl Request {
         at: u32,
         composed: Option<php_link::Composed>,
         record: Option<LinkedClass<ClassId>>,
-    ) {
+    ) -> Result<(), Thrown> {
         let Some(class) = ClassId::local(self.own_classes.len()) else {
-            return;
+            return Ok(());
         };
         let place = self.buckets.claim(unit, at);
         let row = Declared {
@@ -645,7 +645,7 @@ impl Request {
             self.declared.push(&decl.name.0, Named { place, class });
         }
         self.own_classes.push(row);
-        self.bind_members(class, record);
+        self.bind_members(class, record)
     }
 
     /// `zend_accel_class_hash_copy` for one class a held unit published
@@ -723,7 +723,11 @@ impl Request {
     ///   string(9) "Inherited"
     /// }
     /// ```
-    pub(super) fn bind_members(&mut self, class: ClassId, record: Option<LinkedClass<ClassId>>) {
+    pub(super) fn bind_members(
+        &mut self,
+        class: ClassId,
+        record: Option<LinkedClass<ClassId>>,
+    ) -> Result<(), Thrown> {
         let parent = self
             .symbols()
             .class_decl(class)
@@ -732,10 +736,10 @@ impl Request {
             .declared_row(class)
             .and_then(|row| self.members_of(row, class))
         else {
-            return;
+            return Ok(());
         };
         let Some((functions, members)) = self.place_own(class, members) else {
-            return;
+            return Ok(());
         };
         let record = record.or_else(|| self.record_at_bind(class));
         let placed = self
@@ -753,6 +757,7 @@ impl Request {
                 placed,
             };
         }
+        self.link_blocks(class)
     }
 
     /// The placed properties of `class`, declared by `decl`, over its

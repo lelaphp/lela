@@ -123,3 +123,4 @@ enum_methods
 frameless_table
 type_to_string
 type_to_string_called
+written_methods

@@ -1813,7 +1813,7 @@ impl Shared {
         let room = match &mut made {
             Ok(unit) => {
                 req.count_keys_made(crate::unit_cache::keys_of(unit));
-                req.note_loop_vars(unit.loop_vars);
+                req.note_pushed(crate::api::request::Pushed::of(unit));
                 req.ready_unit(unit)
             }
             Err(_) => None,
@@ -5715,7 +5715,7 @@ impl Engine {
         // `zend_deactivate`'s `zend_ini_deactivate`, after
         // `shutdown_executor` (`Z/Zend/zend.c:1320-1330`).
         req.ini_deactivate();
-        req.free_loop_var_stack();
+        req.free_compiler_stacks();
         // `php_free_request_globals`' `clear_last_error()`.
         req.clear_last_error_strings();
         // `zend_post_deactivate_modules`, after the executor is shut

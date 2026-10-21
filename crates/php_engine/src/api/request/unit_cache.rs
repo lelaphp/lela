@@ -554,7 +554,7 @@ impl Request {
             |unit| self.publish_unit(unit),
         );
         let scanned = scanned.get();
-        self.note_loop_vars(scanned.map_or(0, |scanned| scanned.loops));
+        self.note_pushed(scanned.map_or_else(super::Pushed::default, |scanned| scanned.pushed));
         let cached = crate::unit_cache::served(compiled, |unit| self.take_unit(unit));
         self.count_keys_made(keys_counted(scanned, validation, &cached));
         // The primary file compiled through the host's handle, which
@@ -1001,14 +1001,15 @@ fn disk<'a>(file_cache: &'a FileCache, build: &'a [u8; crate::unit_cache::BUILD]
 
 /// What a compile [`Request::cached_source`] ran read and made: the
 /// source's length, which the primary file's `zend_stream_fixup` reads
-/// it into, the most `CG(loop_var_stack)` held, and the runtime
+/// it into, the most php's compiler stacks held ([`super::Pushed`]),
+/// and the runtime
 /// definition keys an accepted unit made, which opcache's miss leaves
 /// counted in `CG(rtd_key_counter)`. A refusal's keys are counted as it
 /// is raised ([`Request::declare_refused`]), so none are here.
 #[derive(Clone, Copy)]
 struct Scanned {
     len: usize,
-    loops: u32,
+    pushed: super::Pushed,
     keys: u32,
 }
 
@@ -1031,7 +1032,7 @@ impl Scanned {
         let unit = compiled.as_ref().ok();
         Scanned {
             len: source.len(),
-            loops: unit.map_or(0, |unit| unit.loop_vars),
+            pushed: unit.map_or_else(super::Pushed::default, super::Pushed::of),
             keys: unit.map_or(0, crate::unit_cache::keys_of),
         }
     }

@@ -7,7 +7,8 @@
 //! same order after the enum's own methods.
 
 use crate::decl::{
-    EnumBacking, FunctionDecl, MethodDecl, Parameter, Type, Visibility, native_function, parameter,
+    ClassDecl, ClassKind, EnumBacking, FunctionDecl, MethodDecl, Parameter, Type, Visibility,
+    native_function, parameter,
 };
 
 /// The rows, public and no instance member, each with the empty file
@@ -27,6 +28,29 @@ pub fn enum_methods(backing: EnumBacking) -> Vec<MethodDecl> {
         ));
     }
     out
+}
+
+/// How many rows [`enum_methods`] gives an enum of `backing`: `cases`,
+/// and `from` and `tryFrom` where it is backed.
+fn given(backing: EnumBacking) -> usize {
+    match backing {
+        EnumBacking::Pure => 1,
+        EnumBacking::Int | EnumBacking::String => 3,
+    }
+}
+
+/// The methods `class`'s declaration writes: every row of its
+/// `methods` but, for an enum, the [`enum_methods`] after them, which
+/// php registers as the enum links (`zend_enum_register_funcs`) as
+/// internal functions under its known names (`ZSTR_KNOWN`), so no
+/// compile makes a string or an op array for one.
+#[must_use]
+pub fn written_methods(class: &ClassDecl) -> &[MethodDecl] {
+    if class.kind != ClassKind::Enum {
+        return &class.methods;
+    }
+    let written = class.methods.len().saturating_sub(given(class.backing));
+    class.methods.get(..written).unwrap_or_default()
 }
 
 fn method(name: &[u8], parameters: Vec<Parameter>, returns: Type) -> MethodDecl {

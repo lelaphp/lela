@@ -499,14 +499,15 @@ impl Request {
                 raised.site().line,
             );
         }
-        self.bind_declared(
+        // The memory limit refusing what the link lays ends the request.
+        let bound = self.bind_declared(
             &candidate.unit,
             candidate.at,
             linking.composed,
             linking.record,
         );
-        candidate.linked = true;
-        true
+        candidate.linked = bound.is_ok();
+        candidate.linked
     }
 
     /// `preload_resolve_deps`: the parent, interface or trait `decl`

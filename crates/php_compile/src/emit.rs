@@ -378,7 +378,7 @@ const FETCH_LOCAL: u32 = 1 << 2;
 
 /// `ZEND_FETCH_GLOBAL` (`Z/Zend/zend_compile.h:1082`), the same slot for
 /// a name `zend_is_auto_global` answers for, printed `(global)`.
-const FETCH_GLOBAL: u32 = 1 << 1;
+pub(crate) const FETCH_GLOBAL: u32 = 1 << 1;
 
 /// `IS_VOID` (`Z/Zend/zend_types.h:637`), the type code `void` carries
 /// in a declared type's mask.
@@ -1592,8 +1592,19 @@ pub(crate) fn unit(
     }
     // Made where the caller takes it: the main op array is laid in the
     // unit as the unit is.
+    let main = emit.op_array(filename, 1, lines.max(1));
+    let delayed_fetches = crate::delayed::most_held(
+        std::iter::once(&main)
+            .chain(
+                (emit.functions_declared.iter())
+                    .chain(&dynamic)
+                    .map(|(_, code)| code),
+            )
+            .chain(emit.methods.iter().map(|method| &method.body))
+            .chain(emit.hooks.iter().map(|hook| &hook.body)),
+    );
     Ok(Unit {
-        main: emit.op_array(filename, 1, lines.max(1)),
+        main,
         functions: emit.functions_declared,
         dynamic,
         methods: emit.methods,
@@ -1607,6 +1618,7 @@ pub(crate) fn unit(
         constants: emit.attributed_constants,
         halt_offset: emit.halted,
         loop_vars: emit.loop_var_peak,
+        delayed_fetches,
         cell: emit.cell,
     })
 }
