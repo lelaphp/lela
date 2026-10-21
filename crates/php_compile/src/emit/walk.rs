@@ -17,8 +17,9 @@
 //! **What is refused.** A construct the tree parses and the emitter
 //! cannot emit yet is refused here, at the node's line, as
 //! [`crate::Raise::Unread`] in the one-line `this compiler cannot read
-//! yet` shape at `Level::Parse`, which the phpt lane counts as unread; what the grammar does not parse is php's
-//! parse error from `Parsed::diagnostics`, raised before this walk runs.
+//! yet` shape at `Level::Parse`, which the phpt lane counts as unread;
+//! what the grammar does not parse is php's parse error from
+//! `Parsed::diagnostics`, raised before this walk runs.
 
 use php_syntax::tree::{
     Block, ClassBody, ClassMember, Modifier, Node, NodeId, ParamList, Stmt, TokenId, TypeExpr,
@@ -337,9 +338,13 @@ impl Emit<'_> {
         }
     }
 
-    /// `InternalError`: the tree is not what the grammar promised
-    /// (design §10).
-    fn internal(&self, what: impl AsRef<str>) -> CompileError {
+    /// `InternalError` at the line the compiler stands on: the tree, or
+    /// the compile's own tables, are not what the grammar and the compile
+    /// promised (design §10), raised at `Level::Error`, so no fold
+    /// passes over it and no `eval` throws it as a parse error.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn internal(&self, what: impl AsRef<str>) -> CompileError {
         Refused {
             level: Level::Error,
             message: format!("InternalError: {}", what.as_ref()).into(),

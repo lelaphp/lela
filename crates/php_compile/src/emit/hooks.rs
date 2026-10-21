@@ -157,7 +157,7 @@ impl Emit<'_> {
             .ok()
             .and_then(|at| self.classes.get(at))
         else {
-            return Err(self.fatal("InternalError: a set hook of a class the unit has not"));
+            return Err(self.internal("a set hook of a class the unit has not"));
         };
         let lookup = |name: &[u8]| {
             self.bound_class(name).map(|decl| php_link::Held {
@@ -406,7 +406,7 @@ impl Emit<'_> {
             )));
         }
         let Some(value) = written.pop() else {
-            return Err(self.fatal("InternalError: a set hook's one parameter gone"));
+            return Err(self.internal("a set hook's one parameter gone"));
         };
         let named = String::from_utf8_lossy(&value.name).into_owned();
         let refused = |what: &str| {
@@ -587,7 +587,7 @@ impl Emit<'_> {
         value: php_syntax::tree::Expr,
     ) -> Result<(), CompileError> {
         let Some(property) = self.active_property.clone() else {
-            return Err(self.fatal("InternalError: a set hook's short form outside a hook"));
+            return Err(self.internal("a set hook's short form outside a hook"));
         };
         let line = self.line;
         let name = self.string(&property)?;

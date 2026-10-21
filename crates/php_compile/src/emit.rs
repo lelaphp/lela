@@ -3602,7 +3602,7 @@ impl<'a> Emit<'a> {
         enclosing: Option<u32>,
     ) -> Result<(), CompileError> {
         let Some(var) = self.fast_call_var else {
-            return Err(self.fatal("InternalError: a `finally` with no fast-call temporary"));
+            return Err(self.internal("a `finally` with no fast-call temporary"));
         };
         self.unwind.pop();
         self.unwind.push(Unwind::DiscardException {
@@ -4187,8 +4187,7 @@ impl<'a> Emit<'a> {
             match active.and_then(|at| self.classes.get(at).map(|decl| (at, decl))) {
                 Some((at, decl)) => (at, decl.kind, decl.properties.len()),
                 None => {
-                    return Err(self
-                        .fatal("InternalError: a promoted property of a class the unit has not"));
+                    return Err(self.internal("a promoted property of a class the unit has not"));
                 }
             };
         let (hooks, is_virtual) = match &parameter.hooks {
@@ -4236,9 +4235,7 @@ impl<'a> Emit<'a> {
             self.hooked_property_verified(decl, &declared)?;
         }
         let Some(decl) = self.classes.get_mut(at) else {
-            return Err(
-                self.fatal("InternalError: a promoted property of a class the unit has not")
-            );
+            return Err(self.internal("a promoted property of a class the unit has not"));
         };
         decl.properties.push(declared);
         Ok(())
@@ -4272,7 +4269,7 @@ impl<'a> Emit<'a> {
             .get(class)
             .map(|decl| (decl.name.0.to_vec(), decl.kind, decl.flags))
         else {
-            return Err(self.fatal("InternalError: a method of a class the unit has not"));
+            return Err(self.internal("a method of a class the unit has not"));
         };
         let name = method.function.name.clone();
         let is_abstract = self.begin_method_decl(&class_name, kind, flags, method)?;
@@ -4316,7 +4313,7 @@ impl<'a> Emit<'a> {
         self.line = method.function.line;
         self.magic_method(&class_name, &declared)?;
         let Some(decl) = self.classes.get_mut(class) else {
-            return Err(self.fatal("InternalError: a method of a class the unit has not"));
+            return Err(self.internal("a method of a class the unit has not"));
         };
         // `add_stringable_interface`: a class that declares
         // `__toString` implements `Stringable`, written or not.
@@ -6217,7 +6214,7 @@ impl<'a> Emit<'a> {
     ) -> Result<ConstExpr, CompileError> {
         if !constant.is_case {
             let Some(value) = constant.value else {
-                return Err(self.fatal("InternalError: a class constant with no value"));
+                return Err(self.internal("a class constant with no value"));
             };
             return self.const_expr(value);
         }
@@ -6248,7 +6245,7 @@ impl<'a> Emit<'a> {
     /// `zend_verify_enum` refuses them when the class links.
     fn enum_funcs_registered(&mut self, at: usize) -> Result<(), CompileError> {
         let Some(decl) = self.classes.get_mut(at) else {
-            return Err(self.fatal("InternalError: an enum the unit has not"));
+            return Err(self.internal("an enum the unit has not"));
         };
         decl.methods.extend(php_unit::enum_methods(decl.backing));
         Ok(())
@@ -6287,7 +6284,7 @@ impl<'a> Emit<'a> {
     ) -> Result<(), CompileError> {
         let Some((kind, backing)) = self.classes.get(at).map(|decl| (decl.kind, decl.backing))
         else {
-            return Err(self.fatal("InternalError: a constant of a class the unit has not"));
+            return Err(self.internal("a constant of a class the unit has not"));
         };
         self.line = constant.line;
         let member = format!(
@@ -6336,7 +6333,7 @@ impl<'a> Emit<'a> {
         }
         let attributes = self.case_attributes(constant)?;
         let Some(decl) = self.classes.get_mut(at) else {
-            return Err(self.fatal("InternalError: a constant of a class the unit has not"));
+            return Err(self.internal("a constant of a class the unit has not"));
         };
         decl.constants.push(ClassConstDecl {
             name: Name(constant.name.clone().into_boxed_slice()),
@@ -6940,7 +6937,7 @@ impl<'a> Emit<'a> {
         let Some((kind, is_readonly_class, declared_before)) = (self.classes.get(at))
             .map(|decl| (decl.kind, decl.flags.is_readonly, decl.properties.len()))
         else {
-            return Err(self.fatal("InternalError: a property of a class the unit has not"));
+            return Err(self.internal("a property of a class the unit has not"));
         };
         self.line = property.line;
         if kind == ClassKind::Enum {
@@ -7037,7 +7034,7 @@ impl<'a> Emit<'a> {
             self.hooked_property_verified(decl, &declared)?;
         }
         let Some(decl) = self.classes.get_mut(at) else {
-            return Err(self.fatal("InternalError: a property of a class the unit has not"));
+            return Err(self.internal("a property of a class the unit has not"));
         };
         decl.properties.push(declared);
         Ok(())
@@ -7982,7 +7979,7 @@ impl<'a> Emit<'a> {
                         FETCH_CLASS_SELF => b"self",
                         FETCH_CLASS_PARENT => b"parent",
                         _ => {
-                            return Err(self.fatal("InternalError: a class name that did not fold"));
+                            return Err(self.internal("a class name that did not fold"));
                         }
                     };
                     Ok(ConstExpr::ClassName {
@@ -8826,7 +8823,7 @@ impl<'a> Emit<'a> {
             return Ok(());
         }
         let Some((name, value, unevaluated)) = declared else {
-            return Err(self.fatal("InternalError: an attributed `const` that declared nothing"));
+            return Err(self.internal("an attributed `const` that declared nothing"));
         };
         let first = self
             .list(node.const_declarators)
@@ -8841,9 +8838,7 @@ impl<'a> Emit<'a> {
         // The value `ZEND_DECLARE_ATTRIBUTED_CONST` evaluates, which a
         // value the compiler could not fold is the tree of.
         let Some(value) = unevaluated.or_else(|| folded_const_expr(value)) else {
-            return Err(
-                self.fatal("InternalError: an attributed `const` whose value folded to no scalar")
-            );
+            return Err(self.internal("an attributed `const` whose value folded to no scalar"));
         };
         let at = u32::try_from(self.attributed_constants.len()).unwrap_or(u32::MAX);
         self.attributed_constants.push(ConstDecl {
@@ -12242,7 +12237,7 @@ impl<'a> Emit<'a> {
     fn yield_expr(&mut self, id: NodeId<tree::YieldExpr>) -> Result<Where, CompileError> {
         self.mark_function_as_generator()?;
         if !self.fn_flags.generator {
-            return Err(self.fatal("InternalError: a `yield` in a body the scan found none in"));
+            return Err(self.internal("a `yield` in a body the scan found none in"));
         }
         let node = self.parsed.tree[id];
         let key = match node.key {
@@ -12311,7 +12306,7 @@ impl<'a> Emit<'a> {
     fn yield_from(&mut self, id: NodeId<tree::YieldFromExpr>) -> Result<Where, CompileError> {
         self.mark_function_as_generator()?;
         if !self.fn_flags.generator {
-            return Err(self.fatal("InternalError: a `yield` in a body the scan found none in"));
+            return Err(self.internal("a `yield` in a body the scan found none in"));
         }
         if self.returns_by_ref {
             return Err(
