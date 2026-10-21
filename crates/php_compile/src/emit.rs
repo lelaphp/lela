@@ -1959,24 +1959,10 @@ impl<'a> Emit<'a> {
 
     /// What the heap refused the compile, at the line the compiler
     /// stands on: `zend_mm`'s limit, which php raises as `E_ERROR` where
-    /// the compile asked for the memory, a fatal no `try` around an
-    /// `eval` catches and no fold passes over ([`Self::constant_of`]):
-    ///
-    /// ```php
-    /// ini_set('display_errors', '0');
-    /// register_shutdown_function(function () {
-    ///     $e = error_get_last();
-    ///     echo $e['type'], ' ', strtok($e['message'], '('), 'on line ', $e['line'], "\n";
-    /// });
-    /// $parts = array_fill(0, 3, "'" . str_repeat('a', 2000000) . "'");
-    /// $code = '$y = ' . implode(' . ', $parts) . ';';
-    /// ini_set('memory_limit', '20M');
-    /// try { eval($code); } catch (ParseError $e) { echo "caught\n"; }
-    /// echo "unreached\n";
-    /// ```
-    /// ```expect exit=255
-    /// 1 Allowed memory size of 20971520 bytes exhausted on line 1
-    /// ```
+    /// the compile asked for the memory. So it bails out of the compile
+    /// as a compile error does, past what the compile had declared, no
+    /// `try` around an `eval` catches it, and no fold passes over it
+    /// ([`Self::constant_of`] holds all three).
     fn fatal_of(&self, fatal: Fatal) -> CompileError {
         let mut refused = self.fatal(crate::fatal_message(fatal));
         refused.level = Level::Error;
@@ -2063,23 +2049,33 @@ impl<'a> Emit<'a> {
     /// leaves the file at the fatal and folds nothing after it.
     ///
     /// So the heap refusing the string a class constant's fold makes is
-    /// the request's `E_ERROR`, as php's `zend_eval_const_expr` raises
-    /// it, and not a node left to the class to evaluate:
+    /// the request's `E_ERROR` at the constant's line, as php's
+    /// `zend_eval_const_expr` raises it, and not a node left to the class
+    /// to evaluate; the function the `eval` declared before it stands.
+    /// The constant is folded from a smaller one, so the fold, and not
+    /// the source or its scan, is what outgrows the limit:
     ///
     /// ```php
     /// ini_set('display_errors', '0');
     /// register_shutdown_function(function () {
     ///     $e = error_get_last();
     ///     echo $e['type'], ' ', strtok($e['message'], '('), 'on line ', $e['line'], "\n";
+    ///     var_dump(function_exists('f'), class_exists('C', false));
     /// });
-    /// $parts = array_fill(0, 3, "'" . str_repeat('a', 2000000) . "'");
-    /// $code = 'class C { const X = ' . implode(' . ', $parts) . '; }';
-    /// ini_set('memory_limit', '20M');
-    /// eval($code);
+    /// $a = str_repeat('a', 1000000);
+    /// $x = implode(' . ', array_fill(0, 16, 'self::A'));
+    /// ini_set('memory_limit', '16M');
+    /// try {
+    ///     eval("function f() {}\nclass C {\n    const A = '$a';\n    const X = $x;\n}");
+    /// } catch (ParseError $e) {
+    ///     echo "caught\n";
+    /// }
     /// echo "unreached\n";
     /// ```
     /// ```expect exit=255
-    /// 1 Allowed memory size of 20971520 bytes exhausted on line 1
+    /// 1 Allowed memory size of 16777216 bytes exhausted on line 4
+    /// bool(true)
+    /// bool(false)
     /// ```
     pub(crate) fn constant_of(&mut self, expr: tree::Expr) -> Result<Option<Zval>, CompileError> {
         match self.constant_expr(expr) {
