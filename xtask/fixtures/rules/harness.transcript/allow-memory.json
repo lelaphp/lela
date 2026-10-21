@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "printf 'x\\n' >> ~/.claude/projects/p/memory/MEMORY.md", "description": "Append to the project's memory"}}

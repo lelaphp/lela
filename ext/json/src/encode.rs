@@ -81,21 +81,7 @@ pub(super) fn encode(
 ) -> Wrote {
     let value = value.deref();
     match value.as_ref() {
-        ValueRef::Undef | ValueRef::Null => buf.append(req, b"null")?,
-        ValueRef::Bool(true) => buf.append(req, b"true")?,
-        ValueRef::Bool(false) => buf.append(req, b"false")?,
-        ValueRef::Int(n) => buf.append(req, n.to_string().as_bytes())?,
-        ValueRef::Float(f) => {
-            if f.is_finite() {
-                encode_double(req, buf, f, options, enc.precision)?;
-            } else {
-                enc.error_code = JSON_ERROR_INF_OR_NAN;
-                buf.append(req, b"0")?;
-            }
-        }
-        ValueRef::Str(s) => return escape_string(req, buf, s.as_bytes(), options, enc),
-        ValueRef::Object(o) => {
-            let object = o;
+        ValueRef::Object(object) => {
             if enc
                 .serializable
                 .is_some_and(|ce| object.instance_of(req, ce))
@@ -110,9 +96,44 @@ pub(super) fn encode(
             {
                 return enum_case(req, buf, object, options, enc);
             }
-            return held(req, buf, &value, options, enc);
+            held(req, buf, &value, options, enc)
         }
-        ValueRef::Array(_) => return held(req, buf, &value, options, enc),
+        ValueRef::Array(_) => held(req, buf, &value, options, enc),
+        _ => encode_scalar(req, buf, &value, options, enc),
+    }
+}
+
+/// [`encode`]'s arms over a value that holds no other, a call of their
+/// own, so what writing one takes is off the stack of a nest encoded
+/// level by level (#3159).
+#[inline(never)]
+fn encode_scalar(
+    req: &mut Request,
+    buf: &mut SmartStr,
+    value: &Value,
+    options: i64,
+    enc: &mut Encoder,
+) -> Wrote {
+    match value.as_ref() {
+        ValueRef::Undef | ValueRef::Null => buf.append(req, b"null")?,
+        ValueRef::Bool(true) => buf.append(req, b"true")?,
+        ValueRef::Bool(false) => buf.append(req, b"false")?,
+        ValueRef::Int(n) => buf.append(req, n.to_string().as_bytes())?,
+        ValueRef::Float(f) => {
+            if f.is_finite() {
+                encode_double(req, buf, f, options, enc.precision)?;
+            } else {
+                enc.error_code = JSON_ERROR_INF_OR_NAN;
+                buf.append(req, b"0")?;
+            }
+        }
+        ValueRef::Str(s) => return escape_string(req, buf, s.as_bytes(), options, enc),
+        ValueRef::Object(_) | ValueRef::Array(_) => {
+            return Err(php_ext::raising::fatal(
+                req,
+                "InternalError: json_encode's scalar arm handed an array or an object",
+            ));
+        }
         ValueRef::Resource(_) | ValueRef::Reference(_) => {
             enc.error_code = JSON_ERROR_UNSUPPORTED_TYPE;
             partial_null(req, buf, options)?;
@@ -583,6 +604,10 @@ impl Guard {
 /// b
 /// {"a":1,"b":2}
 /// ```
+///
+/// A call of its own, so what reading an object's table takes is off
+/// the stack of a nest of arrays encoded level by level (#3159).
+#[inline(never)]
 fn encode_object(
     req: &mut Request,
     buf: &mut SmartStr,
@@ -755,7 +780,9 @@ fn write_row(
 
 /// One key of an object: the string escaped with `JSON_NUMERIC_CHECK`
 /// taken off it, and an integer key quoted as php's
-/// `smart_str_append_long` between two quotes.
+/// `smart_str_append_long` between two quotes. A call of its own, as
+/// [`encode_scalar`] is.
+#[inline(never)]
 fn write_key(
     req: &mut Request,
     buf: &mut SmartStr,

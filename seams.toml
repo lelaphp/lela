@@ -629,6 +629,7 @@ text = "Each clippy.toml the row names is generated from the manifest and commit
 [[rule]]
 id = "git.no-verify"
 tool = "Bash"
+where = "checkout"   # a scratch repository outside every checkout has no hooks for the flag to skip (#3186, ruled 2026-10-21)
 deny_argv = ["--no-verify", "-n", "-c core.hooksPath", "--config-env core.hooksPath"]
 with = ["git commit", "git merge"]   # git merge --no-verify skips pre-merge-commit as git commit's skips pre-commit (#2751); -n there is --no-stat, refused all the same
 text = "Commits run the pre-commit hook; --no-verify is not available to agents."
@@ -756,15 +757,17 @@ tool = "Bash"
 # or `patch` naming one; the path `~`-relative, `$HOME`'s or absolute.
 # permit reads the person's answers there (#2247); reading one is none
 # of these.
+# A project's memory/ is not a transcript and is written as any file
+# (#3185, ruled 2026-10-21).
 deny_pattern = '''(?x)
-  [0-9&]?>>?\|?\s*['"]?(?:~|\$\{?HOME\}?|/[^\s'"|;&)<>]*)/\.claude/projects/
-| \btee\b[^|;&\n]*[\s'"](?:~|\$\{?HOME\}?|/[^\s'"|;&)<>]*)/\.claude/projects/
-| \b(?:sed|perl)\b[^|;&\n]*\s(?:-[a-zA-Z]*i|--in-place)[^|;&\n]*[\s'"](?:~|\$\{?HOME\}?|/[^\s'"|;&)<>]*)/\.claude/projects/
-| \b(?:cp|mv|ln|install)\b[^|;&\n]*[\s'"](?:~|\$\{?HOME\}?|/[^\s'"|;&)<>]*)/\.claude/projects/[^\s'"|;&)<>]*
+  [0-9&]?>>?\|?\s*['"]?(?:~|\$\{?HOME\}?|/[^\s'"|;&)<>]*)/\.claude/projects/(?:[^/\s'"|;&)<>]*/?(?:$|[\s'\"|;&)<>])|[^/\s'"|;&)<>]+/(?:[^m\s'\"|;&)<>]|m[^e]|me[^m]|mem[^o]|memo[^r]|memor[^y]|memory[^/]))
+| \btee\b[^|;&\n]*[\s'"](?:~|\$\{?HOME\}?|/[^\s'"|;&)<>]*)/\.claude/projects/(?:[^/\s'"|;&)<>]*/?(?:$|[\s'\"|;&)<>])|[^/\s'"|;&)<>]+/(?:[^m\s'\"|;&)<>]|m[^e]|me[^m]|mem[^o]|memo[^r]|memor[^y]|memory[^/]))
+| \b(?:sed|perl)\b[^|;&\n]*\s(?:-[a-zA-Z]*i|--in-place)[^|;&\n]*[\s'"](?:~|\$\{?HOME\}?|/[^\s'"|;&)<>]*)/\.claude/projects/(?:[^/\s'"|;&)<>]*/?(?:$|[\s'\"|;&)<>])|[^/\s'"|;&)<>]+/(?:[^m\s'\"|;&)<>]|m[^e]|me[^m]|mem[^o]|memo[^r]|memor[^y]|memory[^/]))
+| \b(?:cp|mv|ln|install)\b[^|;&\n]*[\s'"](?:~|\$\{?HOME\}?|/[^\s'"|;&)<>]*)/\.claude/projects/(?:[^/\s'"|;&)<>]*/?(?:$|[\s'\"|;&)<>])|[^/\s'"|;&)<>]+/(?:[^m\s'\"|;&)<>]|m[^e]|me[^m]|mem[^o]|memo[^r]|memor[^y]|memory[^/]))[^\s'"|;&)<>]*
     ['"]?(?:\s+(?:-\S*|[0-9]*>&?\S*))*\s*(?:$|[|;&\n)])
-| \b(?:git\s+(?:-C\s+\S+\s+)?(?:apply|checkout|restore)|patch)\b[^|;&\n]*[\s'"=](?:~|\$\{?HOME\}?|/[^\s'"|;&)<>]*)/\.claude/projects/
+| \b(?:git\s+(?:-C\s+\S+\s+)?(?:apply|checkout|restore)|patch)\b[^|;&\n]*[\s'"=](?:~|\$\{?HOME\}?|/[^\s'"|;&)<>]*)/\.claude/projects/(?:[^/\s'"|;&)<>]*/?(?:$|[\s'\"|;&)<>])|[^/\s'"|;&)<>]+/(?:[^m\s'\"|;&)<>]|m[^e]|me[^m]|mem[^o]|memo[^r]|memor[^y]|memory[^/]))
 '''
-text = "A session's transcript is Claude Code's record of what the person said; no agent writes it."
+text = "A session's transcript is Claude Code's record of what the person said; no agent writes it, nor anything else under ~/.claude/projects but a project's memory/."
 
 [[rule]]
 id = "divergence.reason"

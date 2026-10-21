@@ -3091,23 +3091,66 @@ pub(crate) fn concat_assign(
 ///   thrown in %s on line 4
 /// ```
 pub(crate) fn compare(req: &mut Request, left: &Value, right: &Value) -> Result<Ordering, Thrown> {
-    let (left, right) = (left.deref(), right.deref());
-    if let (Some(a), Some(b)) = (left.as_array(), right.as_array()) {
-        return compare_arrays(req, a, b);
+    if left.as_php_ref().is_some() || right.as_php_ref().is_some() {
+        return compare_dereferenced(req, left, right);
     }
-    compare_values(req, &left, &right)
+    match (left.as_ref(), right.as_ref()) {
+        (ValueRef::Array(a), ValueRef::Array(b)) => compare_arrays(req, a, b),
+        // `TYPE_PAIR(IS_OBJECT, IS_OBJECT)`: one object is equal to
+        // itself, and two are the left one's `compare` handler's, which
+        // `ZEND_UNCOMPARABLE` answers as `1`. Here and not in
+        // [`compare_values`], so a nest of objects compared level by
+        // level keeps this frame between two handlers and no other
+        // (#3159).
+        (ValueRef::Object(a), ValueRef::Object(b)) => {
+            if a == b {
+                Ok(Ordering::Equal)
+            } else {
+                handler_compare(req, a, left, right)
+            }
+        }
+        _ => compare_values(req, left, right),
+    }
 }
 
-/// [`compare`] past `TYPE_PAIR(IS_ARRAY, IS_ARRAY)`, which it never
-/// sees: a call of its own, so that what the other pairs take is off
-/// the stack while two nested arrays are compared level by level (#2221).
+/// `Z_OBJ_HANDLER_P(object, compare)(op1, op2)`: the comparison
+/// `object`'s handler table answers for the two sides, `None`,
+/// `ZEND_UNCOMPARABLE`, as `1`.
+#[inline]
+fn handler_compare(
+    req: &mut Request,
+    object: PhpObject,
+    left: &Value,
+    right: &Value,
+) -> Result<Ordering, Thrown> {
+    Ok(req
+        .object_handlers(object.heap())
+        .compare(req, left, right)?
+        .unwrap_or(Ordering::Greater))
+}
+
+/// [`compare`] over what a reference on either side holds. A call of its
+/// own, so the values it reads out are off the stack of a nest compared
+/// level by level through [`compare`], which holds none (#3159).
+#[inline(never)]
+fn compare_dereferenced(
+    req: &mut Request,
+    left: &Value,
+    right: &Value,
+) -> Result<Ordering, Thrown> {
+    compare(req, &left.deref(), &right.deref())
+}
+
+/// [`compare`] past `TYPE_PAIR(IS_ARRAY, IS_ARRAY)` and
+/// `TYPE_PAIR(IS_OBJECT, IS_OBJECT)`, which it never sees: a call of its
+/// own, so that what the other pairs take is off the stack while two
+/// nested arrays or objects are compared level by level (#2221, #3159).
 #[inline(never)]
 fn compare_values(req: &mut Request, left: &Value, right: &Value) -> Result<Ordering, Thrown> {
     if let (Some(a), Some(b)) = (scalar(left), scalar(right)) {
         return Ok(php_heap::compare(a, b, req.ini().precision()));
     }
     Ok(match (left.as_ref(), right.as_ref()) {
-        (ValueRef::Object(a), ValueRef::Object(b)) if a == b => Ordering::Equal,
         // `TYPE_PAIR(IS_OBJECT, IS_NULL)` and its mirror: an object is
         // greater than a null whatever its truth.
         (ValueRef::Object(_), ValueRef::Undef | ValueRef::Null) => Ordering::Greater,
@@ -3147,10 +3190,9 @@ fn compare_values(req: &mut Request, left: &Value, right: &Value) -> Result<Orde
         }
         // `Z_OBJ_HANDLER_P(object, compare)(op1, op2)`, the object side's
         // table; `None` is `ZEND_UNCOMPARABLE`, which is `1`.
-        (ValueRef::Object(o), _) | (_, ValueRef::Object(o)) => req
-            .object_handlers(o.heap())
-            .compare(req, left, right)?
-            .unwrap_or(Ordering::Greater),
+        (ValueRef::Object(o), _) | (_, ValueRef::Object(o)) => {
+            handler_compare(req, o, left, right)?
+        }
         (ValueRef::Array(_), _) => Ordering::Greater,
         (_, ValueRef::Array(_)) => Ordering::Less,
         (a, b) => php_heap::compare(silent_number(a), silent_number(b), req.ini().precision()),
@@ -3505,6 +3547,11 @@ fn silent_number(value: ValueRef) -> Scalar<'static> {
 /// bool(true)
 /// int(1)
 /// ```
+///
+/// A call of its own, so the walk it keeps across each element's compare
+/// is off the stack of a nest of objects compared through [`compare`]
+/// (#3159).
+#[inline(never)]
 fn compare_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<Ordering, Thrown> {
     if left.heap().is_same(right.heap()) {
         return Ok(Ordering::Equal);

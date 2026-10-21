@@ -25,6 +25,7 @@ use crate::private::{HTML_NS, Private, ns_is};
 /// A step of the serialisation that failed: a write libxml refused, or
 /// markup that well-formedness, where it is required, forbids; or the
 /// stack come down to its limit on the way down the tree, php's `Error`.
+#[derive(Clone, Copy)]
 enum Failed {
     Refused,
     Deep,
@@ -361,12 +362,14 @@ impl Serializer<'_> {
     /// `dom_xml_serialization_algorithm`: the node, then each child by
     /// the same algorithm, php's recursion, refused where the stack has
     /// come down to its limit, as `dom_xml_serialize_check_stack_limit`
-    /// refuses it.
+    /// refuses it. The nest is deeper than php's budget holds, at php's
+    /// bytes a level and at this engine's (#3159), so both engines refuse
+    /// it.
     ///
     /// ```php
     /// $doc = Dom\XMLDocument::createEmpty();
     /// $node = $doc->createElement('a');
-    /// for ($i = 0; $i < 40000; $i++) { $p = $doc->createElement('a'); $p->appendChild($node); $node = $p; }
+    /// for ($i = 0; $i < 100000; $i++) { $p = $doc->createElement('a'); $p->appendChild($node); $node = $p; }
     /// $doc->appendChild($node);
     /// try { $doc->saveXml(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
     /// try { $doc->documentElement->innerHTML; } catch (Error $e) { echo $e->getMessage(), "\n"; }
@@ -385,8 +388,14 @@ impl Serializer<'_> {
         if self.req.limits().stack_overflowed() {
             return Err(Failed::Deep);
         }
-        let Some(frame) = self.node(node, map, namespace, indent)? else {
-            return Ok(());
+        // The frame is read where `node` left it, never moved out of its
+        // answer: a nest keeps one frame's bytes at each level, not two
+        // (#3159).
+        let made = self.node(node, map, namespace, indent);
+        let frame = match &made {
+            Ok(Some(frame)) => frame,
+            Ok(None) => return Ok(()),
+            Err(failed) => return Err(*failed),
         };
         let mut next = frame.next;
         while let Some(child) = next {
@@ -409,6 +418,10 @@ impl Serializer<'_> {
 
     /// `dom_xml_serialization_algorithm` for one node: what it writes
     /// before its children, and the frame its children are written from.
+    /// A call of its own, so what writing a node takes is off the stack
+    /// of a nest written level by level, which keeps only the frame
+    /// (#3159).
+    #[inline(never)]
     fn node(
         &mut self,
         node: Node,
