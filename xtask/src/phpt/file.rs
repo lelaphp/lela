@@ -253,14 +253,13 @@ pub fn conflicts(path: &Path, dirs: &mut BTreeMap<PathBuf, Vec<String>>) -> Vec<
 /// Upstream's `parse_conflicts` (run-tests.php:3227-3232): `#` to the end
 /// of its line dropped, the text trimmed, and one key a line, trimmed.
 fn keys(text: &str) -> Vec<String> {
-    const TRIM: [char; 6] = [' ', '\t', '\n', '\r', '\0', '\x0B'];
     let bare = Regex::new("#.*").map_or_else(
         |_| text.to_owned(),
         |comment| comment.replace_all(text, "").into_owned(),
     );
-    bare.trim_matches(TRIM)
+    bare.trim_matches(super::adapter::TRIM)
         .split('\n')
-        .map(|key| key.trim_matches(TRIM).to_owned())
+        .map(|key| key.trim_matches(super::adapter::TRIM).to_owned())
         .collect()
 }
 

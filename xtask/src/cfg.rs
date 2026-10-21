@@ -142,32 +142,25 @@ impl Target {
             Predicate::Option { name, value } => {
                 Some(self.options.contains(&(name.clone(), value.clone())))
             }
-            // Three-valued: a decided true wins `any` and a decided false
-            // wins `all`, whatever the undecided members say.
-            Predicate::Any(list) => {
-                let mut undecided = false;
-                for p in list {
-                    match self.holds(p) {
-                        Some(true) => return Some(true),
-                        None => undecided = true,
-                        Some(false) => {}
-                    }
-                }
-                (!undecided).then_some(false)
-            }
-            Predicate::All(list) => {
-                let mut undecided = false;
-                for p in list {
-                    match self.holds(p) {
-                        Some(false) => return Some(false),
-                        None => undecided = true,
-                        Some(true) => {}
-                    }
-                }
-                (!undecided).then_some(true)
-            }
+            Predicate::Any(list) => self.decided(list, true),
+            Predicate::All(list) => self.decided(list, false),
             Predicate::Not(p) => self.holds(p).map(|b| !b),
         }
+    }
+
+    /// `any` (`wins` true) or `all` (`wins` false), three-valued: a member
+    /// decided `wins` decides the list whatever the undecided members say;
+    /// otherwise an undecided member leaves it undecided.
+    fn decided(&self, list: &[Predicate], wins: bool) -> Option<bool> {
+        let mut undecided = false;
+        for p in list {
+            match self.holds(p) {
+                Some(held) if held == wins => return Some(wins),
+                None => undecided = true,
+                Some(_) => {}
+            }
+        }
+        (!undecided).then_some(!wins)
     }
 
     /// Whether the item an attribute stands on is compiled for this target

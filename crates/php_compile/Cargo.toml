@@ -17,6 +17,9 @@ php_syntax = { path = "../php_syntax" }
 php_unit = { path = "../php_unit" }
 php_link = { path = "../php_link" }
 
+[dev-dependencies]
+expect-test.workspace = true
+
 # The stack limit on the main thread: libtest runs a `#[test]` on a thread
 # of its own, and this one has to stand where `execve` left the environment.
 [[test]]

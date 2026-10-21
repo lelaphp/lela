@@ -431,8 +431,7 @@ impl Files {
         if !self.0.contains_key(file) {
             let module = match crate::read_if(&root.join(file))? {
                 Some(text) => {
-                    let parsed = syn::parse_file(&text)
-                        .with_context(|| format!("parsing {}", file.display()))?;
+                    let parsed = crate::rust::parsed(&text, file)?;
                     let mut module = Module {
                         inner: levels_of(&parsed.attrs, file)?,
                         children: BTreeMap::new(),

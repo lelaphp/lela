@@ -19,8 +19,8 @@ use crate::key::Snapshot;
 use crate::layout;
 use crate::lines;
 use crate::lock::CargoLock;
-use crate::manifest::{self, Budget, Crate, Generated, Manifest};
-use crate::reading::{Reading, Status, Store};
+use crate::manifest::{self, Budget, Crate, Generated, Manifest, OneOrMany};
+use crate::reading::{Reading, Status, Store, plural};
 use crate::sources::{self, Standing};
 
 /// The instrument whose readings this module writes.
@@ -320,20 +320,15 @@ fn generated_readings(snapshot: &Snapshot, manifest: &Manifest) -> Result<Vec<Re
             adrs.sort_unstable();
             adrs.dedup();
             reading.adr = adrs.join(", ");
-            let cited = if adrs.is_empty() {
-                String::new()
+            let cited = OneOrMany::Many(adrs.iter().map(|n| (*n).to_owned()).collect()).adr_cited();
+            let cited = if cited.is_empty() {
+                cited
             } else {
-                format!(
-                    " ({})",
-                    adrs.iter()
-                        .map(|n| format!("ADR-{n}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
+                format!(" {cited}")
             };
             let from = format!(
                 "rule{} {}",
-                if carried.len() == 1 { "" } else { "s" },
+                plural(carried.len()),
                 carried
                     .iter()
                     .map(|r| r.id.as_str())
@@ -385,10 +380,9 @@ pub(crate) struct Count {
 pub(crate) fn count(root: &Path, krate: &Crate) -> Result<Count> {
     let mut out = Count::default();
     for path in sources::rust(root, krate)? {
-        let Some(text) = text_of(root, &path)? else {
+        let Some(n) = lines_of(root, &path)? else {
             continue;
         };
-        let n = u64::try_from(lines::count(&path, &text))?;
         if sources::is_binding(&path) {
             out.bindings += n;
         } else {
@@ -486,14 +480,10 @@ pub(crate) fn committed_generated(root: &Path, exceptions: &[&str]) -> Result<Ve
 /// ignore, less the harness's own negative controls, which break the
 /// rules on purpose.
 fn crate_tree_files(root: &Path) -> Result<Vec<String>> {
-    let mut out = Vec::new();
-    let dirs = layout::CRATE_DIRS.iter().map(|d| d.dir);
-    for dir in dirs.chain([layout::HARNESS]) {
-        out.extend(
-            git::files(root, Path::new(dir))?
-                .into_iter()
-                .filter(|path| !path.starts_with("xtask/fixtures/")),
-        );
-    }
+    let dirs: Vec<&str> = (layout::CRATE_DIRS.iter().map(|d| d.dir))
+        .chain([layout::HARNESS])
+        .collect();
+    let mut out = git::files_under(root, &dirs)?;
+    out.retain(|path| !path.starts_with("xtask/fixtures/"));
     Ok(out)
 }

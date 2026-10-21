@@ -97,7 +97,7 @@ use anyhow::{Context, Result, bail};
 use crate::key::Snapshot;
 use crate::reading::{Reading, Status, Store};
 use crate::tally::{Judged, Judgement, Outcome, Tally};
-use crate::ticket::{self, Gh, STAMPED_OVER, State};
+use crate::ticket::{self, Gh, State};
 use crate::track::{Ticket, rev, short};
 use crate::track_next::{self, Next};
 use crate::usage::{Spent, Total};
@@ -545,12 +545,7 @@ fn hold(
 /// A reading of the instrument over `scope`, stamped over the tree at
 /// `root` as it stands now.
 fn stamped(root: &Path, scope: &str) -> Result<Reading> {
-    Reading::stamped_over(
-        INSTRUMENT,
-        scope,
-        &Snapshot::disk(root)?,
-        Path::new(STAMPED_OVER),
-    )
+    ticket::stamped_over(INSTRUMENT, scope, &Snapshot::disk(root)?)
 }
 
 /// The run's own reading, scoped to [`RUN`]: how many tickets it worked,
