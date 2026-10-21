@@ -1224,6 +1224,21 @@ fn a_push_of_main_that_fast_forwards_a_revision_still_cited_as_next_is_refused()
     let (code, out) = scratch.run(&["push", "-q", fresh.to_str().unwrap(), "main"], true);
     assert_ne!(code, 0, "a remote with no main yet reads main whole: {out}");
     assert!(out.contains(&format!("{file}:2:")), "{out}");
+    assert_eq!(scratch.calls("cargo").len(), 2, "done was not asked");
+
+    // A remote sha this clone does not hold, a `main` moved there and not
+    // fetched, is a range nothing can read: refused, not read as clean.
+    let unheld = "1234567890abcdef1234567890abcdef12345678";
+    let out = Command::new(workspace().join("scripts/hooks/next-cited"))
+        .args([unheld, "HEAD"])
+        .current_dir(&scratch.root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(&format!("{unheld} is no commit")),
+        "{out:?}"
+    );
 }
 
 /// computed reads the working tree and the merge commits the index: a

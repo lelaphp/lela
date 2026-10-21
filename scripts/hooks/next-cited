@@ -31,6 +31,14 @@ cd "$(git rev-parse --show-toplevel)" || exit 1
 if [ $# -eq 2 ]; then
     base=$1 tip=$2
     case $base in *[!0]*) ;; *) base=$(git hash-object -t tree /dev/null) ;; esac
+    # A sha this clone does not hold, a remote moved and not fetched, is
+    # a range nothing here can read: refused, never read as clean.
+    for end in "$base" "$tip"; do
+        if ! git cat-file -e "$end^{tree}" 2>/dev/null; then
+            echo "next-cited: $end is no commit this clone holds, so the range cannot be read; fetch it and try again" >&2
+            exit 1
+        fi
+    done
     changed() { git diff --name-only -z --diff-filter=d "$base" "$tip" -- "$@"; }
     holds() { git grep -q -I -w NEXT "$tip" -- "$1"; }
     at() { git show "$tip:$1"; }
