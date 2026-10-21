@@ -175,8 +175,8 @@ impl Files {
         );
     }
 
-    /// `php <dir>/<file>` in the tree's directory, the path as upstream's
-    /// runner hands it: the file compiled as a file is and served as
+    /// `php <dir>/<file>` in the tree's directory, the path as
+    /// `run-tests.php` hands it: the file compiled as a file is and served as
     /// [`Engine::serve_capture`] serves a source, what the request wrote
     /// and how it ended.
     pub fn serve(&self, engine: &Engine, file: &str) -> Served {

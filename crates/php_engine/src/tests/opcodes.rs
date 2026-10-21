@@ -80,8 +80,6 @@ impl<const N: u8> Shows<N> {
     }
 }
 
-/// `source` served as `main.php` under `builder` with `extensions`, the
-/// startup ini set from `ini`; what it wrote.
 /// What `source` wrote, served as `main.php` in a tree named `name`,
 /// one of the test's own, by an engine of `builder` with `extensions`
 /// and `ini`.
@@ -98,8 +96,7 @@ fn served(
     }
     let engine = builder.build();
     let files = Files::new(&format!("opcodes-{name}"), &[]);
-    let dir = files.path();
-    let served = serve_main(&engine, dir, source);
+    let served = serve_main(&engine, &files, source);
     served.stdout_text()
 }
 

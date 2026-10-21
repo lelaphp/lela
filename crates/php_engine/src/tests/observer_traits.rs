@@ -47,12 +47,11 @@ fn a_native_trait_method_is_observed_under_the_class_that_uses_it() {
     let engine = Engine::cli_builder()
         .extensions(&[greets(), TestExt::<0>::observing()])
         .build();
-    let files = Files::new("observer-traits-native_trait", &[]);
-    let dir = files.path();
+    let files = Files::new("observer-traits-native-trait", &[]);
     rec.mark("built");
     let served = serve_main(
         &engine,
-        dir,
+        &files,
         "<?php\nclass Foo { use Greets; }\nclass Bar { use Greets; }\nclass Baz extends Foo {}\n\
          var_dump((new Foo)->greet(), (new Bar)->greet(), (new Baz)->greet());\n",
     );
@@ -90,12 +89,11 @@ fn a_native_trait_method_taken_under_an_alias_carries_its_name_and_visibility() 
     let engine = Engine::cli_builder()
         .extensions(&[greets(), TestExt::<0>::observing()])
         .build();
-    let files = Files::new("observer-traits-native_trait_alias", &[]);
-    let dir = files.path();
+    let files = Files::new("observer-traits-native-trait-alias", &[]);
     rec.mark("built");
     let served = serve_main(
         &engine,
-        dir,
+        &files,
         "<?php\nclass Foo { use Greets { greet as hello; greet as protected prot; } }\n\
          var_dump((new Foo)->hello());\n\
          try { (new Foo)->prot(); } catch (Error $e) { echo $e->getMessage(), \"\\n\"; }\n",

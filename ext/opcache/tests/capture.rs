@@ -100,7 +100,10 @@ echo implode(' ', $s['functions']), ' | ', implode(' ', $s['classes']), ' | ', c
 ";
     let first = engine.serve_capture_in(dir, b"first.php", program, Capture::default());
     let second = engine.serve_capture_in(dir, b"second.php", program, Capture::default());
-    let compiled = dir.join("compiled.inc").canonicalize().unwrap_or_default();
+    let compiled = dir
+        .join("compiled.inc")
+        .canonicalize()
+        .expect("the compiled file resolves");
     let listed = "compiled preloaded | Kept Unlinked | 2\n";
     assert_eq!(
         first.stdout_text(),
@@ -161,7 +164,10 @@ fn a_fatal_startup_serves_nothing_and_the_cache_logs_its_own_events() {
         "<?php include __DIR__ . '/held.inc'; opcache_reset();",
         Capture::default(),
     );
-    let held = dir.join("held.inc").canonicalize().unwrap_or_default();
+    let held = dir
+        .join("held.inc")
+        .canonicalize()
+        .expect("the held file resolves");
     let stderr = String::from_utf8_lossy(&events.stderr);
     let lines: Vec<&str> = stderr
         .lines()

@@ -144,9 +144,8 @@ fn stepped(name: &str, builder: EngineBuilder, main: &str) -> (Vec<Event>, Strin
         .extensions(&[TestExt::<0>::stepping(), TestExt::<1>::stepping()])
         .build();
     let files = Files::new(&format!("statements-{name}"), &[("inc.php", INC)]);
-    let dir = files.path();
     rec.mark("built");
-    let served = serve_main(&engine, dir, main);
+    let served = serve_main(&engine, &files, main);
     rec.mark("served");
     (
         statements(&rec.events().between("built", "served")),
@@ -264,11 +263,10 @@ fn what_a_statement_handler_throws_is_raised_where_the_statement_stands() {
         ])
         .build();
     let files = Files::new("statements-thrown", &[]);
-    let dir = files.path();
     rec.mark("built");
     let served = serve_main(
         &engine,
-        dir,
+        &files,
         "<?php\nfunction f() {\n    echo 'ran';\n}\ntry { f(); } catch (Exception $e) {\n    \
          echo $e->getMessage(), ' after ', $e->getPrevious()->getMessage(), ' at ', $e->getLine(), \"\\n\";\n}\n",
     );

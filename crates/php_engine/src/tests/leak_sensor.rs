@@ -89,9 +89,7 @@ echo "done\n";
 "#,
         Capture::default(),
     );
-    let stdout = served.stdout_text();
-    assert_eq!(stdout, "node\ndone\n");
-    assert_eq!(served.exit_code, 0);
+    served.assert_clean("node\ndone\n");
 }
 
 /// The faulty native's dropped owner is the one block the heap holds
@@ -291,12 +289,9 @@ $a = new A; $a['x'] = $s; $a['x'] .= 'd'; echo $a['x'], ' ', $a['y'] ?? 'none', 
 "#,
         Capture::default(),
     );
-    let stdout = served.stdout_text();
-    assert_eq!(
-        stdout,
-        "aaaaa aaaaa\nstdClass aaaaab\nstring(6) \"aaaaab\"\nobject(Closure)#4 (5) {\n  [\"name\"]=>\n  string(31) \"{closure:Standard input code:8}\"\n  [\"file\"]=>\n  string(19) \"Standard input code\"\n  [\"line\"]=>\n  int(8)\n  [\"static\"]=>\n  array(1) {\n    [\"s\"]=>\n    string(6) \"aaaaab\"\n  }\n  [\"parameter\"]=>\n  array(1) {\n    [\"$x\"]=>\n    string(10) \"<required>\"\n  }\n}\naaaaabd none\n"
+    served.assert_clean(
+        "aaaaa aaaaa\nstdClass aaaaab\nstring(6) \"aaaaab\"\nobject(Closure)#4 (5) {\n  [\"name\"]=>\n  string(31) \"{closure:Standard input code:8}\"\n  [\"file\"]=>\n  string(19) \"Standard input code\"\n  [\"line\"]=>\n  int(8)\n  [\"static\"]=>\n  array(1) {\n    [\"s\"]=>\n    string(6) \"aaaaab\"\n  }\n  [\"parameter\"]=>\n  array(1) {\n    [\"$x\"]=>\n    string(10) \"<required>\"\n  }\n}\naaaaabd none\n",
     );
-    assert_eq!(served.exit_code, 0);
 }
 
 /// `Leaky`'s table, faulty on purpose in two slots: `read_property`

@@ -6708,7 +6708,7 @@ mod tests {
         );
         let first = engine.serve_capture(&program, crate::test::Capture::default());
         let second = engine.serve_capture(&program, crate::test::Capture::default());
-        let resolved = script.canonicalize().unwrap_or_default();
+        let resolved = script.canonicalize().expect("the preload file resolves");
         assert_eq!(
             first.stdout_text(),
             format!(
@@ -6796,7 +6796,10 @@ mod tests {
         let dir = files.path();
         let cache = dir.join("cache");
         std::fs::create_dir(&cache).expect("the tree takes the cache's directory");
-        let script = dir.join("kept.inc").canonicalize().unwrap_or_default();
+        let script = dir
+            .join("kept.inc")
+            .canonicalize()
+            .expect("the kept file resolves");
         let engine = || {
             Engine::cli_builder()
                 .extensions(&[file_caching(dir)])
