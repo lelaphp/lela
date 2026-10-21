@@ -49,33 +49,37 @@ fn a_goto_s_label_slot_is_nulled_and_no_slot_is_shared() {
 fn a_switch_of_few_cases_is_the_is_equal_chain_and_a_match_is_its_jump_table() {
     let source = b"<?php\n$a = 1;\nswitch ($a) { case 1: echo \"a\"; break; case 2: echo \"b\"; break; default: echo \"c\"; }\necho match ($a) { 1 => \"x\", \"s\" => \"y\", default => \"z\" };\n";
     let (unit, _strings) = unit_and_strings(source);
-    assert_eq!(
-        unit.dump(&[]).text(),
-        "\n$_main:\n     ; (lines=20, args=0, vars=1, tmps=4)\n\
-         \x20    ; (before optimizer)\n     ; :1-5\n     ; return  [] RANGE[0..0]\n\
-         0000 ASSIGN CV0($a) int(1)\n\
-         0001 T2 = IS_EQUAL CV0($a) int(1)\n\
-         0002 JMPNZ T2 0006\n\
-         0003 T2 = IS_EQUAL CV0($a) int(2)\n\
-         0004 JMPNZ T2 0008\n\
-         0005 JMP 0010\n\
-         0006 ECHO string(\"a\")\n\
-         0007 JMP 0011\n\
-         0008 ECHO string(\"b\")\n\
-         0009 JMP 0011\n\
-         0010 ECHO string(\"c\")\n\
-         0011 MATCH CV0($a) 1: 0012, \"s\": 0014, default: 0016\n\
-         0012 T4 = QM_ASSIGN string(\"x\")\n\
-         0013 JMP 0018\n\
-         0014 T4 = QM_ASSIGN string(\"y\")\n\
-         0015 JMP 0018\n\
-         0016 T4 = QM_ASSIGN string(\"z\")\n\
-         0017 JMP 0018\n\
-         0018 ECHO T4\n\
-         0019 RETURN int(1)\n\
-         LIVE RANGES:\n\
-         \x20    4: 0017 - 0018 (tmp/var)\n"
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=20, args=0, vars=1, tmps=4)
+             ; (before optimizer)
+             ; :1-5
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN CV0($a) int(1)
+        0001 T2 = IS_EQUAL CV0($a) int(1)
+        0002 JMPNZ T2 0006
+        0003 T2 = IS_EQUAL CV0($a) int(2)
+        0004 JMPNZ T2 0008
+        0005 JMP 0010
+        0006 ECHO string("a")
+        0007 JMP 0011
+        0008 ECHO string("b")
+        0009 JMP 0011
+        0010 ECHO string("c")
+        0011 MATCH CV0($a) 1: 0012, "s": 0014, default: 0016
+        0012 T4 = QM_ASSIGN string("x")
+        0013 JMP 0018
+        0014 T4 = QM_ASSIGN string("y")
+        0015 JMP 0018
+        0016 T4 = QM_ASSIGN string("z")
+        0017 JMP 0018
+        0018 ECHO T4
+        0019 RETURN int(1)
+        LIVE RANGES:
+             4: 0017 - 0018 (tmp/var)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     let table = &unit.main.oplines[11];
     assert_eq!(table.opcode, Opcode::Match);
     assert_eq!(table.op2_type, OperandKind::Const);
@@ -96,30 +100,29 @@ fn a_switch_of_few_cases_is_the_is_equal_chain_and_a_match_is_its_jump_table() {
 /// `JMPZ` over the temporary the inner one left.
 #[test]
 fn a_conditional_is_jmpz_between_two_qm_assigns_and_a_shorthand_one_is_jmp_set() {
-    assert_eq!(
-        oplines_of(
+    expect![[r#"
+        0000 ASSIGN CV0($a) int(1)
+        0001 JMPZ CV0($a) 0004
+        0002 T2 = QM_ASSIGN string("t")
+        0003 JMP 0005
+        0004 T2 = QM_ASSIGN string("f")
+        0005 ECHO T2
+        0006 T3 = JMP_SET CV0($a) 0008
+        0007 T3 = QM_ASSIGN string("f")
+        0008 ECHO T3
+        0009 JMPZ CV0($a) 0012
+        0010 T4 = QM_ASSIGN string("t")
+        0011 JMP 0013
+        0012 T4 = QM_ASSIGN string("f")
+        0013 JMPZ T4 0016
+        0014 T5 = QM_ASSIGN string("y")
+        0015 JMP 0017
+        0016 T5 = QM_ASSIGN string("n")
+        0017 ECHO T5
+        0018 RETURN int(1)
+    "#]].assert_eq(&oplines_of(
             b"<?php\n$a = 1;\necho $a ? \"t\" : \"f\";\necho $a ?: \"f\";\necho ($a ? \"t\" : \"f\") ? \"y\" : \"n\";\n"
-        ),
-        "0000 ASSIGN CV0($a) int(1)\n\
-         0001 JMPZ CV0($a) 0004\n\
-         0002 T2 = QM_ASSIGN string(\"t\")\n\
-         0003 JMP 0005\n\
-         0004 T2 = QM_ASSIGN string(\"f\")\n\
-         0005 ECHO T2\n\
-         0006 T3 = JMP_SET CV0($a) 0008\n\
-         0007 T3 = QM_ASSIGN string(\"f\")\n\
-         0008 ECHO T3\n\
-         0009 JMPZ CV0($a) 0012\n\
-         0010 T4 = QM_ASSIGN string(\"t\")\n\
-         0011 JMP 0013\n\
-         0012 T4 = QM_ASSIGN string(\"f\")\n\
-         0013 JMPZ T4 0016\n\
-         0014 T5 = QM_ASSIGN string(\"y\")\n\
-         0015 JMP 0017\n\
-         0016 T5 = QM_ASSIGN string(\"n\")\n\
-         0017 ECHO T5\n\
-         0018 RETURN int(1)\n"
-    );
+        ));
 }
 
 /// The three sentences `zend_compile_conditional` refuses an
@@ -174,34 +177,33 @@ fn an_unparenthesised_nested_conditional_is_refused_in_php_s_words() {
 /// before the chain, its `extended_value` the default's target.
 #[test]
 fn a_switch_of_five_long_cases_is_switch_long_over_its_table_before_the_chain() {
-    assert_eq!(
-        oplines_of(b"<?php\n$a = 3;\nswitch ($a) { case 1: echo \"a\"; break; case 2: echo \"b\"; break; case 3: echo \"c\"; break; case 4: echo \"d\"; break; case 5: echo \"e\"; break; default: echo \"f\"; }\n"),
-        "0000 ASSIGN CV0($a) int(3)\n\
-         0001 SWITCH_LONG CV0($a) 1: 0013, 2: 0015, 3: 0017, 4: 0019, 5: 0021, default: 0023\n\
-         0002 T2 = IS_EQUAL CV0($a) int(1)\n\
-         0003 JMPNZ T2 0013\n\
-         0004 T2 = IS_EQUAL CV0($a) int(2)\n\
-         0005 JMPNZ T2 0015\n\
-         0006 T2 = IS_EQUAL CV0($a) int(3)\n\
-         0007 JMPNZ T2 0017\n\
-         0008 T2 = IS_EQUAL CV0($a) int(4)\n\
-         0009 JMPNZ T2 0019\n\
-         0010 T2 = IS_EQUAL CV0($a) int(5)\n\
-         0011 JMPNZ T2 0021\n\
-         0012 JMP 0023\n\
-         0013 ECHO string(\"a\")\n\
-         0014 JMP 0024\n\
-         0015 ECHO string(\"b\")\n\
-         0016 JMP 0024\n\
-         0017 ECHO string(\"c\")\n\
-         0018 JMP 0024\n\
-         0019 ECHO string(\"d\")\n\
-         0020 JMP 0024\n\
-         0021 ECHO string(\"e\")\n\
-         0022 JMP 0024\n\
-         0023 ECHO string(\"f\")\n\
-         0024 RETURN int(1)\n"
-    );
+    expect![[r#"
+        0000 ASSIGN CV0($a) int(3)
+        0001 SWITCH_LONG CV0($a) 1: 0013, 2: 0015, 3: 0017, 4: 0019, 5: 0021, default: 0023
+        0002 T2 = IS_EQUAL CV0($a) int(1)
+        0003 JMPNZ T2 0013
+        0004 T2 = IS_EQUAL CV0($a) int(2)
+        0005 JMPNZ T2 0015
+        0006 T2 = IS_EQUAL CV0($a) int(3)
+        0007 JMPNZ T2 0017
+        0008 T2 = IS_EQUAL CV0($a) int(4)
+        0009 JMPNZ T2 0019
+        0010 T2 = IS_EQUAL CV0($a) int(5)
+        0011 JMPNZ T2 0021
+        0012 JMP 0023
+        0013 ECHO string("a")
+        0014 JMP 0024
+        0015 ECHO string("b")
+        0016 JMP 0024
+        0017 ECHO string("c")
+        0018 JMP 0024
+        0019 ECHO string("d")
+        0020 JMP 0024
+        0021 ECHO string("e")
+        0022 JMP 0024
+        0023 ECHO string("f")
+        0024 RETURN int(1)
+    "#]].assert_eq(&oplines_of(b"<?php\n$a = 3;\nswitch ($a) { case 1: echo \"a\"; break; case 2: echo \"b\"; break; case 3: echo \"c\"; break; case 4: echo \"d\"; break; case 5: echo \"e\"; break; default: echo \"f\"; }\n"));
 }
 
 /// Two `string` cases are a `SWITCH_STRING`; with no default the
@@ -210,35 +212,34 @@ fn a_switch_of_five_long_cases_is_switch_long_over_its_table_before_the_chain() 
 /// (`determine_switch_jumptable_type`).
 #[test]
 fn a_switch_of_two_string_cases_is_switch_string_and_a_numeric_string_case_is_not() {
-    assert_eq!(
-        oplines_of(b"<?php\n$a = \"y\";\nswitch ($a) { case \"x\": echo \"a\"; break; case \"y\": echo \"b\"; break; }\n"),
-        "0000 ASSIGN CV0($a) string(\"y\")\n\
-         0001 SWITCH_STRING CV0($a) \"x\": 0007, \"y\": 0009, default: 0011\n\
-         0002 T2 = IS_EQUAL CV0($a) string(\"x\")\n\
-         0003 JMPNZ T2 0007\n\
-         0004 T2 = IS_EQUAL CV0($a) string(\"y\")\n\
-         0005 JMPNZ T2 0009\n\
-         0006 JMP 0011\n\
-         0007 ECHO string(\"a\")\n\
-         0008 JMP 0011\n\
-         0009 ECHO string(\"b\")\n\
-         0010 JMP 0011\n\
-         0011 RETURN int(1)\n"
-    );
-    assert_eq!(
-        oplines_of(
-            b"<?php\nswitch ($a) { case \"1\": echo \"a\"; break; case \"x\": echo \"b\"; }\n"
-        ),
-        "0000 T1 = IS_EQUAL CV0($a) string(\"1\")\n\
-         0001 JMPNZ T1 0005\n\
-         0002 T1 = IS_EQUAL CV0($a) string(\"x\")\n\
-         0003 JMPNZ T1 0007\n\
-         0004 JMP 0008\n\
-         0005 ECHO string(\"a\")\n\
-         0006 JMP 0008\n\
-         0007 ECHO string(\"b\")\n\
-         0008 RETURN int(1)\n"
-    );
+    expect![[r#"
+        0000 ASSIGN CV0($a) string("y")
+        0001 SWITCH_STRING CV0($a) "x": 0007, "y": 0009, default: 0011
+        0002 T2 = IS_EQUAL CV0($a) string("x")
+        0003 JMPNZ T2 0007
+        0004 T2 = IS_EQUAL CV0($a) string("y")
+        0005 JMPNZ T2 0009
+        0006 JMP 0011
+        0007 ECHO string("a")
+        0008 JMP 0011
+        0009 ECHO string("b")
+        0010 JMP 0011
+        0011 RETURN int(1)
+    "#]].assert_eq(&oplines_of(b"<?php\n$a = \"y\";\nswitch ($a) { case \"x\": echo \"a\"; break; case \"y\": echo \"b\"; break; }\n"));
+    expect![[r#"
+        0000 T1 = IS_EQUAL CV0($a) string("1")
+        0001 JMPNZ T1 0005
+        0002 T1 = IS_EQUAL CV0($a) string("x")
+        0003 JMPNZ T1 0007
+        0004 JMP 0008
+        0005 ECHO string("a")
+        0006 JMP 0008
+        0007 ECHO string("b")
+        0008 RETURN int(1)
+    "#]]
+    .assert_eq(&oplines_of(
+        b"<?php\nswitch ($a) { case \"1\": echo \"a\"; break; case \"x\": echo \"b\"; }\n",
+    ));
 }
 
 /// A constant `true` or `false` subject tests each case alone, a
@@ -248,39 +249,38 @@ fn a_switch_of_two_string_cases_is_switch_string_and_a_numeric_string_case_is_no
 /// `zend_hash_index_add`, while the chain tests both.
 #[test]
 fn a_constant_subject_is_tested_as_php_tests_it_and_a_repeated_case_keeps_its_first_target() {
-    assert_eq!(
-        oplines_of(b"<?php\nswitch (true) { case $a: echo \"a\"; break; case 2: echo \"b\"; }\nswitch (false) { case $a: echo \"a\"; }\nswitch (3) { case $a: echo \"a\"; case 1: echo \"b\"; }\nswitch ($a) { case 1: case 2: case 3: case 4: case 4: echo \"x\"; }\n"),
-        "0000 JMPNZ CV0($a) 0003\n\
-         0001 JMPNZ int(2) 0005\n\
-         0002 JMP 0006\n\
-         0003 ECHO string(\"a\")\n\
-         0004 JMP 0006\n\
-         0005 ECHO string(\"b\")\n\
-         0006 JMPZ CV0($a) 0008\n\
-         0007 JMP 0009\n\
-         0008 ECHO string(\"a\")\n\
-         0009 T3 = IS_EQUAL CV0($a) int(3)\n\
-         0010 JMPNZ T3 0014\n\
-         0011 T3 = IS_EQUAL int(3) int(1)\n\
-         0012 JMPNZ T3 0015\n\
-         0013 JMP 0016\n\
-         0014 ECHO string(\"a\")\n\
-         0015 ECHO string(\"b\")\n\
-         0016 SWITCH_LONG CV0($a) 1: 0028, 2: 0028, 3: 0028, 4: 0028, default: 0029\n\
-         0017 T4 = IS_EQUAL CV0($a) int(1)\n\
-         0018 JMPNZ T4 0028\n\
-         0019 T4 = IS_EQUAL CV0($a) int(2)\n\
-         0020 JMPNZ T4 0028\n\
-         0021 T4 = IS_EQUAL CV0($a) int(3)\n\
-         0022 JMPNZ T4 0028\n\
-         0023 T4 = IS_EQUAL CV0($a) int(4)\n\
-         0024 JMPNZ T4 0028\n\
-         0025 T4 = IS_EQUAL CV0($a) int(4)\n\
-         0026 JMPNZ T4 0028\n\
-         0027 JMP 0029\n\
-         0028 ECHO string(\"x\")\n\
-         0029 RETURN int(1)\n"
-    );
+    expect![[r#"
+        0000 JMPNZ CV0($a) 0003
+        0001 JMPNZ int(2) 0005
+        0002 JMP 0006
+        0003 ECHO string("a")
+        0004 JMP 0006
+        0005 ECHO string("b")
+        0006 JMPZ CV0($a) 0008
+        0007 JMP 0009
+        0008 ECHO string("a")
+        0009 T3 = IS_EQUAL CV0($a) int(3)
+        0010 JMPNZ T3 0014
+        0011 T3 = IS_EQUAL int(3) int(1)
+        0012 JMPNZ T3 0015
+        0013 JMP 0016
+        0014 ECHO string("a")
+        0015 ECHO string("b")
+        0016 SWITCH_LONG CV0($a) 1: 0028, 2: 0028, 3: 0028, 4: 0028, default: 0029
+        0017 T4 = IS_EQUAL CV0($a) int(1)
+        0018 JMPNZ T4 0028
+        0019 T4 = IS_EQUAL CV0($a) int(2)
+        0020 JMPNZ T4 0028
+        0021 T4 = IS_EQUAL CV0($a) int(3)
+        0022 JMPNZ T4 0028
+        0023 T4 = IS_EQUAL CV0($a) int(4)
+        0024 JMPNZ T4 0028
+        0025 T4 = IS_EQUAL CV0($a) int(4)
+        0026 JMPNZ T4 0028
+        0027 JMP 0029
+        0028 ECHO string("x")
+        0029 RETURN int(1)
+    "#]].assert_eq(&oplines_of(b"<?php\nswitch (true) { case $a: echo \"a\"; break; case 2: echo \"b\"; }\nswitch (false) { case $a: echo \"a\"; }\nswitch (3) { case $a: echo \"a\"; case 1: echo \"b\"; }\nswitch ($a) { case 1: case 2: case 3: case 4: case 4: echo \"x\"; }\n"));
 }
 
 /// A temporary subject is compared by `CASE`, which keeps it alive
@@ -291,45 +291,44 @@ fn a_constant_subject_is_tested_as_php_tests_it_and_a_repeated_case_keeps_its_fi
 /// that `FREE` with the distance to the loop's end in its `op2`.
 #[test]
 fn a_temporary_subject_is_case_and_freed_where_break_lands_and_on_the_way_out_of_a_switch() {
-    assert_eq!(
-        oplines_of(b"<?php\nswitch (strlen($a)) { case 1: echo \"a\"; break; case 2: echo \"b\"; }\nfor ($i = 0; $i < 3; $i++) { continue; break 1; }\nwhile ($i) { switch (strlen($a)) { case 1: continue 2; case 2: break 2; default: break; } }\n"),
-        "0000 T2 = STRLEN CV0($a)\n\
-         0001 T3 = CASE T2 int(1)\n\
-         0002 JMPNZ T3 0006\n\
-         0003 T3 = CASE T2 int(2)\n\
-         0004 JMPNZ T3 0008\n\
-         0005 JMP 0009\n\
-         0006 ECHO string(\"a\")\n\
-         0007 JMP 0009\n\
-         0008 ECHO string(\"b\")\n\
-         0009 FREE T2\n\
-         0010 ASSIGN CV1($i) int(0)\n\
-         0011 JMP 0015\n\
-         0012 JMP 0014\n\
-         0013 JMP 0017\n\
-         0014 PRE_INC CV1($i)\n\
-         0015 T6 = IS_SMALLER CV1($i) int(3)\n\
-         0016 JMPNZ T6 0012\n\
-         0017 JMP 0030\n\
-         0018 T7 = STRLEN CV0($a)\n\
-         0019 T8 = CASE T7 int(1)\n\
-         0020 JMPNZ T8 0024\n\
-         0021 T8 = CASE T7 int(2)\n\
-         0022 JMPNZ T8 0026\n\
-         0023 JMP 0028\n\
-         0024 FREE T7 loop-end(+5)\n\
-         0025 JMP 0030\n\
-         0026 FREE T7 loop-end(+3)\n\
-         0027 JMP 0031\n\
-         0028 JMP 0029\n\
-         0029 FREE T7\n\
-         0030 JMPNZ CV1($i) 0018\n\
-         0031 RETURN int(1)\n\
-         LIVE RANGES:\n\
-         \x20    2: 0001 - 0009 (tmp/var)\n\
-         \x20    7: 0019 - 0024 (tmp/var)\n\
-         \x20    7: 0028 - 0029 (tmp/var)\n"
-    );
+    expect![[r#"
+        0000 T2 = STRLEN CV0($a)
+        0001 T3 = CASE T2 int(1)
+        0002 JMPNZ T3 0006
+        0003 T3 = CASE T2 int(2)
+        0004 JMPNZ T3 0008
+        0005 JMP 0009
+        0006 ECHO string("a")
+        0007 JMP 0009
+        0008 ECHO string("b")
+        0009 FREE T2
+        0010 ASSIGN CV1($i) int(0)
+        0011 JMP 0015
+        0012 JMP 0014
+        0013 JMP 0017
+        0014 PRE_INC CV1($i)
+        0015 T6 = IS_SMALLER CV1($i) int(3)
+        0016 JMPNZ T6 0012
+        0017 JMP 0030
+        0018 T7 = STRLEN CV0($a)
+        0019 T8 = CASE T7 int(1)
+        0020 JMPNZ T8 0024
+        0021 T8 = CASE T7 int(2)
+        0022 JMPNZ T8 0026
+        0023 JMP 0028
+        0024 FREE T7 loop-end(+5)
+        0025 JMP 0030
+        0026 FREE T7 loop-end(+3)
+        0027 JMP 0031
+        0028 JMP 0029
+        0029 FREE T7
+        0030 JMPNZ CV1($i) 0018
+        0031 RETURN int(1)
+        LIVE RANGES:
+             2: 0001 - 0009 (tmp/var)
+             7: 0019 - 0024 (tmp/var)
+             7: 0028 - 0029 (tmp/var)
+    "#]].assert_eq(&oplines_of(b"<?php\nswitch (strlen($a)) { case 1: echo \"a\"; break; case 2: echo \"b\"; }\nfor ($i = 0; $i < 3; $i++) { continue; break 1; }\nwhile ($i) { switch (strlen($a)) { case 1: continue 2; case 2: break 2; default: break; } }\n"));
 }
 
 /// `match` as `zend_compile_match` shapes it: two conditions of one
@@ -340,36 +339,35 @@ fn a_temporary_subject_is_case_and_freed_where_break_lands_and_on_the_way_out_of
 /// constant `null`.
 #[test]
 fn a_match_is_its_table_or_the_is_identical_chain_and_match_error_where_no_arm_is_default() {
-    assert_eq!(
-        oplines_of(b"<?php\n$a = 2;\necho match ($a) { 1, 2 => \"x\", \"s\" => \"y\" };\necho match (true) { default => \"d\" };\necho match ($a) { 1 => \"one\" };\n$x = match ($a) {};\n"),
-        "0000 ASSIGN CV0($a) int(2)\n\
-         0001 MATCH CV0($a) 1: 0003, 2: 0003, \"s\": 0005, default: 0002\n\
-         0002 MATCH_ERROR CV0($a)\n\
-         0003 T4 = QM_ASSIGN string(\"x\")\n\
-         0004 JMP 0007\n\
-         0005 T4 = QM_ASSIGN string(\"y\")\n\
-         0006 JMP 0007\n\
-         0007 ECHO T4\n\
-         0008 JMP 0009\n\
-         0009 T6 = QM_ASSIGN string(\"d\")\n\
-         0010 JMP 0011\n\
-         0011 ECHO T6\n\
-         0012 T7 = IS_IDENTICAL CV0($a) int(1)\n\
-         0013 JMPNZ T7 0016\n\
-         0014 JMP 0015\n\
-         0015 MATCH_ERROR CV0($a)\n\
-         0016 T8 = QM_ASSIGN string(\"one\")\n\
-         0017 JMP 0018\n\
-         0018 ECHO T8\n\
-         0019 JMP 0020\n\
-         0020 MATCH_ERROR CV0($a)\n\
-         0021 ASSIGN CV1($x) null\n\
-         0022 RETURN int(1)\n\
-         LIVE RANGES:\n\
-         \x20    4: 0006 - 0007 (tmp/var)\n\
-         \x20    6: 0010 - 0011 (tmp/var)\n\
-         \x20    8: 0017 - 0018 (tmp/var)\n"
-    );
+    expect![[r#"
+        0000 ASSIGN CV0($a) int(2)
+        0001 MATCH CV0($a) 1: 0003, 2: 0003, "s": 0005, default: 0002
+        0002 MATCH_ERROR CV0($a)
+        0003 T4 = QM_ASSIGN string("x")
+        0004 JMP 0007
+        0005 T4 = QM_ASSIGN string("y")
+        0006 JMP 0007
+        0007 ECHO T4
+        0008 JMP 0009
+        0009 T6 = QM_ASSIGN string("d")
+        0010 JMP 0011
+        0011 ECHO T6
+        0012 T7 = IS_IDENTICAL CV0($a) int(1)
+        0013 JMPNZ T7 0016
+        0014 JMP 0015
+        0015 MATCH_ERROR CV0($a)
+        0016 T8 = QM_ASSIGN string("one")
+        0017 JMP 0018
+        0018 ECHO T8
+        0019 JMP 0020
+        0020 MATCH_ERROR CV0($a)
+        0021 ASSIGN CV1($x) null
+        0022 RETURN int(1)
+        LIVE RANGES:
+             4: 0006 - 0007 (tmp/var)
+             6: 0010 - 0011 (tmp/var)
+             8: 0017 - 0018 (tmp/var)
+    "#]].assert_eq(&oplines_of(b"<?php\n$a = 2;\necho match ($a) { 1, 2 => \"x\", \"s\" => \"y\" };\necho match (true) { default => \"d\" };\necho match ($a) { 1 => \"one\" };\n$x = match ($a) {};\n"));
 }
 
 /// The lines are `zend_compile_expr_inner`'s, set as each expression
@@ -512,20 +510,19 @@ fn a_continue_targeting_a_switch_is_a_break_with_php_s_warning() {
             ),
         ]
     );
-    assert_eq!(
-        oplines_of(b"<?php\nfor (;;) { switch ($a) { case 1: continue; } }\nswitch ($a) { case 1: continue; }\n"),
-        "0000 JMP 0005\n\
-         0001 T1 = IS_EQUAL CV0($a) int(1)\n\
-         0002 JMPNZ T1 0004\n\
-         0003 JMP 0005\n\
-         0004 JMP 0005\n\
-         0005 JMPNZ bool(true) 0001\n\
-         0006 T2 = IS_EQUAL CV0($a) int(1)\n\
-         0007 JMPNZ T2 0009\n\
-         0008 JMP 0010\n\
-         0009 JMP 0010\n\
-         0010 RETURN int(1)\n"
-    );
+    expect![[r#"
+        0000 JMP 0005
+        0001 T1 = IS_EQUAL CV0($a) int(1)
+        0002 JMPNZ T1 0004
+        0003 JMP 0005
+        0004 JMP 0005
+        0005 JMPNZ bool(true) 0001
+        0006 T2 = IS_EQUAL CV0($a) int(1)
+        0007 JMPNZ T2 0009
+        0008 JMP 0010
+        0009 JMP 0010
+        0010 RETURN int(1)
+    "#]].assert_eq(&oplines_of(b"<?php\nfor (;;) { switch ($a) { case 1: continue; } }\nswitch ($a) { case 1: continue; }\n"));
 }
 
 #[test]

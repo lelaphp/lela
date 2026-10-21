@@ -69,56 +69,74 @@ class C {
 $o = new C;
 echo f(1), C::s(), $o->m(1), $o->p;
 ";
-    let header = |name: &str, lines: u32, args: u32, vars: u32, tmps: u32, span: &str| {
-        format!(
-            "\n{name}:\n     ; (lines={lines}, args={args}, vars={vars}, tmps={tmps})\n\
-             \x20    ; (before optimizer)\n     ; :{span}\n     ; return  [] RANGE[0..0]\n"
-        )
-    };
-    let expected = format!(
-        "{}{}{}{}{}{}{}{}{}{}",
-        header("$_main", 17, 0, 1, 7, "1-17"),
-        "0000 V1 = NEW 0 string(\"C\")\n\
-         0001 DO_FCALL\n\
-         0002 ASSIGN CV0($o) V1\n\
-         0003 INIT_FCALL 1 128 string(\"f\")\n\
-         0004 SEND_VAL int(1) 1\n\
-         0005 V4 = DO_UCALL\n\
-         0006 ECHO V4\n\
-         0007 INIT_STATIC_METHOD_CALL 0 string(\"C\") string(\"s\")\n\
-         0008 V5 = DO_UCALL\n\
-         0009 ECHO V5\n\
-         0010 INIT_METHOD_CALL 1 CV0($o) string(\"m\")\n\
-         0011 SEND_VAL_EX int(1) 1\n\
-         0012 V6 = DO_FCALL\n\
-         0013 ECHO V6\n\
-         0014 T7 = FETCH_OBJ_R CV0($o) string(\"p\")\n\
-         0015 ECHO T7\n\
-         0016 RETURN int(1)\n\
-         LIVE RANGES:\n\
-         \x20    1: 0001 - 0002 (new)\n",
-        header("f", 6, 2, 2, 1, "2-5"),
-        "0000 CV0($a) = RECV 1\n\
-         0001 CV1($b) = RECV_INIT 2 int(2)\n\
-         0002 ECHO CV0($a)\n\
-         0003 T2 = ADD CV0($a) CV1($b)\n\
-         0004 RETURN T2\n\
-         0005 RETURN null\n",
-        header("C::m", 7, 1, 1, 2, "8-11"),
-        "0000 CV0($x) = RECV 1\n\
-         0001 T1 = FETCH_OBJ_R THIS string(\"p\")\n\
-         0002 ECHO T1\n\
-         0003 INIT_METHOD_CALL 0 THIS string(\"m2\")\n\
-         0004 V2 = DO_FCALL\n\
-         0005 RETURN V2\n\
-         0006 RETURN null\n",
-        header("C::s", 2, 0, 0, 0, "12-12"),
-        "0000 RETURN int(3)\n\
-         0001 RETURN null\n",
-        header("C::m2", 1, 0, 0, 0, "13-13"),
-        "0000 RETURN null\n",
-    );
-    assert_eq!(dump_of(source), expected);
+    expect![[r#"
+
+        $_main:
+             ; (lines=17, args=0, vars=1, tmps=7)
+             ; (before optimizer)
+             ; :1-17
+             ; return  [] RANGE[0..0]
+        0000 V1 = NEW 0 string("C")
+        0001 DO_FCALL
+        0002 ASSIGN CV0($o) V1
+        0003 INIT_FCALL 1 128 string("f")
+        0004 SEND_VAL int(1) 1
+        0005 V4 = DO_UCALL
+        0006 ECHO V4
+        0007 INIT_STATIC_METHOD_CALL 0 string("C") string("s")
+        0008 V5 = DO_UCALL
+        0009 ECHO V5
+        0010 INIT_METHOD_CALL 1 CV0($o) string("m")
+        0011 SEND_VAL_EX int(1) 1
+        0012 V6 = DO_FCALL
+        0013 ECHO V6
+        0014 T7 = FETCH_OBJ_R CV0($o) string("p")
+        0015 ECHO T7
+        0016 RETURN int(1)
+        LIVE RANGES:
+             1: 0001 - 0002 (new)
+
+        f:
+             ; (lines=6, args=2, vars=2, tmps=1)
+             ; (before optimizer)
+             ; :2-5
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV 1
+        0001 CV1($b) = RECV_INIT 2 int(2)
+        0002 ECHO CV0($a)
+        0003 T2 = ADD CV0($a) CV1($b)
+        0004 RETURN T2
+        0005 RETURN null
+
+        C::m:
+             ; (lines=7, args=1, vars=1, tmps=2)
+             ; (before optimizer)
+             ; :8-11
+             ; return  [] RANGE[0..0]
+        0000 CV0($x) = RECV 1
+        0001 T1 = FETCH_OBJ_R THIS string("p")
+        0002 ECHO T1
+        0003 INIT_METHOD_CALL 0 THIS string("m2")
+        0004 V2 = DO_FCALL
+        0005 RETURN V2
+        0006 RETURN null
+
+        C::s:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :12-12
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(3)
+        0001 RETURN null
+
+        C::m2:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :13-13
+             ; return  [] RANGE[0..0]
+        0000 RETURN null
+    "#]]
+    .assert_eq(&dump_of(source));
     let (unit, _strings) = unit_and_strings(source);
     assert_eq!(
         unit.functions[0].1.safepoints.first(),
@@ -145,26 +163,29 @@ echo f(1), C::s(), $o->m(1), $o->p;
 /// The dump is the oracle's under `[regime.dump]` at 8.5.9 (#2684).
 #[test]
 fn an_optional_parameter_before_a_required_one_is_a_recv_whatever_its_spelling() {
-    assert_eq!(
-        dump_of(b"<?php function f(?int $a = null, $b, Foo $c = null, $d) {}"),
-        "\n$_main:\n\
-        \x20    ; (lines=1, args=0, vars=0, tmps=0)\n\
-        \x20    ; (before optimizer)\n\
-        \x20    ; :1-1\n\
-        \x20    ; return  [] RANGE[0..0]\n\
-        0000 RETURN int(1)\n\
-        \nf:\n\
-        \x20    ; (lines=5, args=4, vars=4, tmps=0)\n\
-        \x20    ; (before optimizer)\n\
-        \x20    ; :1-1\n\
-        \x20    ; return  [] RANGE[0..0]\n\
-        0000 CV0($a) = RECV 1\n\
-        0001 CV1($b) = RECV 2\n\
-        0002 CV2($c) = RECV 3\n\
-        0003 CV3($d) = RECV 4\n\
-        0004 RETURN null\n\
-        "
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+
+        f:
+             ; (lines=5, args=4, vars=4, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV 1
+        0001 CV1($b) = RECV 2
+        0002 CV2($c) = RECV 3
+        0003 CV3($d) = RECV 4
+        0004 RETURN null
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php function f(?int $a = null, $b, Foo $c = null, $d) {}",
+    ));
 }
 
 /// A parameter's default is `zend_const_expr_to_zval`'s: under
@@ -177,26 +198,26 @@ fn an_optional_parameter_before_a_required_one_is_a_recv_whatever_its_spelling()
 /// (#2685).
 #[test]
 fn a_class_name_in_a_parameter_default_folds_to_its_string() {
-    assert_eq!(
-        dump_of(b"<?php class P {} class C extends P { function f($a = self::class, $b = parent::class, $c = Baz::class, $d = self::X) {} }"),
-        "\n$_main:\n\
-         \x20    ; (lines=1, args=0, vars=0, tmps=0)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 RETURN int(1)\n\
-         \nC::f:\n\
-         \x20    ; (lines=5, args=4, vars=4, tmps=0)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 CV0($a) = RECV_INIT 1 string(\"C\")\n\
-         0001 CV1($b) = RECV_INIT 2 string(\"P\")\n\
-         0002 CV2($c) = RECV_INIT 3 string(\"Baz\")\n\
-         0003 CV3($d) = RECV_INIT 4 zval(type=11)\n\
-         0004 RETURN null\n\
-         "
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+
+        C::f:
+             ; (lines=5, args=4, vars=4, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV_INIT 1 string("C")
+        0001 CV1($b) = RECV_INIT 2 string("P")
+        0002 CV2($c) = RECV_INIT 3 string("Baz")
+        0003 CV3($d) = RECV_INIT 4 zval(type=11)
+        0004 RETURN null
+    "#]].assert_eq(&dump_of(b"<?php class P {} class C extends P { function f($a = self::class, $b = parent::class, $c = Baz::class, $d = self::X) {} }"));
 }
 
 /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION` (#384): a
@@ -210,19 +231,27 @@ fn a_class_name_in_a_parameter_default_folds_to_its_string() {
 fn a_parameter_default_naming_a_constant_is_an_unevaluated_constant() {
     let source: &[u8] =
         b"<?php\nclass A { const X = 5; }\nfunction f($a = PHP_INT_MAX, $b = A::X, $c = 1) { echo $a; }\n";
-    assert_eq!(
-        dump_of(source),
-        "\n$_main:\n     ; (lines=1, args=0, vars=0, tmps=0)\n\
-         \x20    ; (before optimizer)\n     ; :1-4\n     ; return  [] RANGE[0..0]\n\
-         0000 RETURN int(1)\n\
-         \nf:\n     ; (lines=5, args=3, vars=3, tmps=0)\n\
-         \x20    ; (before optimizer)\n     ; :3-3\n     ; return  [] RANGE[0..0]\n\
-         0000 CV0($a) = RECV_INIT 1 zval(type=11)\n\
-         0001 CV1($b) = RECV_INIT 2 zval(type=11)\n\
-         0002 CV2($c) = RECV_INIT 3 int(1)\n\
-         0003 ECHO CV0($a)\n\
-         0004 RETURN null\n"
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-4
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+
+        f:
+             ; (lines=5, args=3, vars=3, tmps=0)
+             ; (before optimizer)
+             ; :3-3
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV_INIT 1 zval(type=11)
+        0001 CV1($b) = RECV_INIT 2 zval(type=11)
+        0002 CV2($c) = RECV_INIT 3 int(1)
+        0003 ECHO CV0($a)
+        0004 RETURN null
+    "#]]
+    .assert_eq(&dump_of(source));
     let (unit, _strings) = unit_and_strings(source);
     let body = &unit.functions[0].1;
     let unevaluated: Vec<&ConstExpr> = body
@@ -280,6 +309,7 @@ fn a_parameter_default_naming_a_constant_is_an_unevaluated_constant() {
 /// implicit return carries `-1` and prints `(function)`; a promoted
 /// parameter is the `ASSIGN_OBJ`/`OP_DATA` pair after the prologue.
 #[test]
+#[allow(clippy::too_many_lines)] // one op array per declaration: the dump is the test
 fn typed_parameters_and_a_return_type_compile_to_php_s_op_arrays() {
     let source: &[u8] = b"<?php
 function f(int $a, ?string $b = null, float ...$rest): int {
@@ -291,40 +321,58 @@ class C {
     public function __construct(public int $p, protected readonly string $q = \"s\") {}
 }
 ";
-    let header = |name: &str, lines: u32, args: u32, vars: u32, tmps: u32, span: &str| {
-        format!(
-            "\n{name}:\n     ; (lines={lines}, args={args}, vars={vars}, tmps={tmps})\n\
-             \x20    ; (before optimizer)\n     ; :{span}\n     ; return  [] RANGE[0..0]\n"
-        )
-    };
-    let expected = format!(
-        "{}{}{}{}{}{}{}{}{}{}",
-        header("$_main", 1, 0, 0, 0, "1-10"),
-        "0000 RETURN int(1)\n",
-        header("f", 7, 2, 3, 0, "2-4"),
-        "0000 CV0($a) = RECV 1\n\
-         0001 CV1($b) = RECV_INIT 2 null\n\
-         0002 CV2($rest) = RECV_VARIADIC 3\n\
-         0003 VERIFY_RETURN_TYPE CV0($a)\n\
-         0004 RETURN CV0($a)\n\
-         0005 VERIFY_RETURN_TYPE\n\
-         0006 RETURN null\n",
-        header("g", 3, 1, 1, 0, "5-5"),
-        "0000 CV0($x) = RECV 1\n\
-         0001 RETURN_BY_REF CV0($x)\n\
-         0002 RETURN_BY_REF (function) null\n",
-        header("h", 1, 0, 0, 0, "6-6"),
-        "0000 RETURN null\n",
-        header("C::__construct", 7, 2, 2, 0, "8-8"),
-        "0000 CV0($p) = RECV 1\n\
-         0001 CV1($q) = RECV_INIT 2 string(\"s\")\n\
-         0002 ASSIGN_OBJ THIS string(\"p\")\n\
-         0003 OP_DATA CV0($p)\n\
-         0004 ASSIGN_OBJ THIS string(\"q\")\n\
-         0005 OP_DATA CV1($q)\n\
-         0006 RETURN null\n",
-    );
-    assert_eq!(dump_of(source), expected);
+    expect![[r#"
+
+        $_main:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-10
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+
+        f:
+             ; (lines=7, args=2, vars=3, tmps=0)
+             ; (before optimizer)
+             ; :2-4
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV 1
+        0001 CV1($b) = RECV_INIT 2 null
+        0002 CV2($rest) = RECV_VARIADIC 3
+        0003 VERIFY_RETURN_TYPE CV0($a)
+        0004 RETURN CV0($a)
+        0005 VERIFY_RETURN_TYPE
+        0006 RETURN null
+
+        g:
+             ; (lines=3, args=1, vars=1, tmps=0)
+             ; (before optimizer)
+             ; :5-5
+             ; return  [] RANGE[0..0]
+        0000 CV0($x) = RECV 1
+        0001 RETURN_BY_REF CV0($x)
+        0002 RETURN_BY_REF (function) null
+
+        h:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :6-6
+             ; return  [] RANGE[0..0]
+        0000 RETURN null
+
+        C::__construct:
+             ; (lines=7, args=2, vars=2, tmps=0)
+             ; (before optimizer)
+             ; :8-8
+             ; return  [] RANGE[0..0]
+        0000 CV0($p) = RECV 1
+        0001 CV1($q) = RECV_INIT 2 string("s")
+        0002 ASSIGN_OBJ THIS string("p")
+        0003 OP_DATA CV0($p)
+        0004 ASSIGN_OBJ THIS string("q")
+        0005 OP_DATA CV1($q)
+        0006 RETURN null
+    "#]]
+    .assert_eq(&dump_of(source));
     let (unit, _strings) = unit_and_strings(source);
     let f = &unit.functions[0].0;
     assert_eq!(f.return_type, Some(Type::Int));

@@ -13,42 +13,43 @@ use super::*;
 /// is the oracle's under `[regime.dump]` at 8.5.9 (#2674).
 #[test]
 fn an_abstract_hook_is_dumped_and_an_abstract_method_is_not() {
-    assert_eq!(
-        dump_of(
-            b"<?php interface I { public mixed $i { get; } } \
-              abstract class A { abstract public int $p { get; set; } abstract function m(); }"
-        ),
-        "\n$_main:\n\
-         \x20    ; (lines=1, args=0, vars=0, tmps=0)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 RETURN int(1)\n\
-         \n\
-         I::$i::get:\n\
-         \x20    ; (lines=2, args=0, vars=0, tmps=0)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 VERIFY_RETURN_TYPE\n\
-         0001 RETURN null\n\
-         \n\
-         A::$p::get:\n\
-         \x20    ; (lines=2, args=0, vars=0, tmps=0)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 VERIFY_RETURN_TYPE\n\
-         0001 RETURN null\n\
-         \n\
-         A::$p::set:\n\
-         \x20    ; (lines=2, args=1, vars=1, tmps=0)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 CV0($value) = RECV 1\n\
-         0001 RETURN null\n"
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+
+        I::$i::get:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 VERIFY_RETURN_TYPE
+        0001 RETURN null
+
+        A::$p::get:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 VERIFY_RETURN_TYPE
+        0001 RETURN null
+
+        A::$p::set:
+             ; (lines=2, args=1, vars=1, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 CV0($value) = RECV 1
+        0001 RETURN null
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php interface I { public mixed $i { get; } } \
+              abstract class A { abstract public int $p { get; set; } abstract function m(); }",
+    ));
 }
 
 /// A class completes after the classes its hooks declare, so php's
@@ -58,46 +59,47 @@ fn an_abstract_hook_is_dumped_and_an_abstract_method_is_not() {
 /// oracle's under `[regime.dump]` at 8.5.9 (#2690).
 #[test]
 fn a_class_declared_in_a_hook_is_dumped_before_the_hook_s_class() {
-    assert_eq!(
-        dump_of(
-            b"<?php class T { public $p { get => new class { \
-              public $q { get => 1; } function m() {} }; } }"
-        ),
-        "\n$_main:\n\
-         \x20    ; (lines=1, args=0, vars=0, tmps=0)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 RETURN int(1)\n\
-         \n\
-         class@anonymous::m:\n\
-         \x20    ; (lines=1, args=0, vars=0, tmps=0)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 RETURN null\n\
-         \n\
-         class@anonymous::$q::get:\n\
-         \x20    ; (lines=2, args=0, vars=0, tmps=0)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 RETURN int(1)\n\
-         0001 RETURN null\n\
-         \n\
-         T::$p::get:\n\
-         \x20    ; (lines=5, args=0, vars=0, tmps=3)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 V0 = DECLARE_ANON_CLASS string(\"class@anonymous\\x00:1$0\")\n\
-         0001 V1 = NEW 0 V0\n\
-         0002 DO_FCALL\n\
-         0003 RETURN V1\n\
-         0004 RETURN null\n\
-         LIVE RANGES:\n\
-         \x20    1: 0002 - 0003 (new)\n"
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+
+        class@anonymous::m:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 RETURN null
+
+        class@anonymous::$q::get:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+        0001 RETURN null
+
+        T::$p::get:
+             ; (lines=5, args=0, vars=0, tmps=3)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 V0 = DECLARE_ANON_CLASS string("class@anonymous\x00:1$0")
+        0001 V1 = NEW 0 V0
+        0002 DO_FCALL
+        0003 RETURN V1
+        0004 RETURN null
+        LIVE RANGES:
+             1: 0002 - 0003 (new)
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php class T { public $p { get => new class { \
+              public $q { get => 1; } function m() {} }; } }",
+    ));
 }
 
 /// `zend_compile_class_decl` names a class `zend_prefix_with_ns` over
@@ -116,20 +118,21 @@ fn a_class_declared_in_a_hook_is_dumped_before_the_hook_s_class() {
 fn a_class_declared_in_a_namespace_takes_the_namespace_on_its_name() {
     let source: &[u8] = b"<?php namespace A; class M {} new M;";
     let (unit, _strings) = unit_and_strings(source);
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(
-            4,
-            0,
-            2,
-            "0000 V0 = NEW 0 string(\"A\\\\M\")\n\
-             0001 DO_FCALL\n\
-             0002 FREE V0\n\
-             0003 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    0: 0001 - 0002 (new)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=4, args=0, vars=0, tmps=2)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 V0 = NEW 0 string("A\\M")
+        0001 DO_FCALL
+        0002 FREE V0
+        0003 RETURN int(1)
+        LIVE RANGES:
+             0: 0001 - 0002 (new)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     let names: Vec<&[u8]> = unit.classes.iter().map(|c| c.name.0.as_ref()).collect();
     assert_eq!(
         names,
@@ -174,11 +177,18 @@ fn a_class_with_properties_and_constants_is_bound_with_no_opline() {
     let (unit, _strings) = unit_and_strings(
         b"<?php\nclass M { /** P */ public $x, $y = 1 /** P2 */; /** K */ const A = 1, B = 2; static $s; /** F */ final protected const C = -A; }\n/** D */ { } class N /** D2 */ { var $v /** V */; }\necho 1;\n",
     );
-    assert_eq!(
-        unit.dump(&[]).text(),
-        "\n$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n     ; (before optimizer)\n     ; :1-5\n     ; return  [] RANGE[0..0]\n0000 ECHO int(1)\n0001 RETURN int(1)\n",
-        "the class emits no opline; php binds it at compile time"
-    );
+    // the class emits no opline; php binds it at compile time
+    expect![[r#"
+
+        $_main:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-5
+             ; return  [] RANGE[0..0]
+        0000 ECHO int(1)
+        0001 RETURN int(1)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     assert_eq!(unit.classes.len(), 2, "two classes, got {:?}", unit.classes);
     let (m, n) = (&unit.classes[0], &unit.classes[1]);
     assert_eq!(

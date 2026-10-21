@@ -901,4 +901,8 @@ pub(crate) fn fatal_message(fatal: Fatal) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::needless_raw_string_hashes,
+    reason = "expect-test writes every multi-line snapshot as r#\"…\"#, a dump without a quote as well"
+)]
 mod tests;

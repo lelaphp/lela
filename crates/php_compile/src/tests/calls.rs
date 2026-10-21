@@ -6,22 +6,23 @@ use super::*;
 #[test]
 fn a_nested_call_sends_what_the_inner_call_returned() {
     let (unit, _strings) = unit_and_strings(b"<?php var_dump(extension_loaded('demo'));");
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(
-            7,
-            0,
-            2,
-            "0000 INIT_FCALL 1 96 string(\"var_dump\")\n\
-             0001 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
-             0002 SEND_VAL string(\"demo\") 1\n\
-             0003 V0 = DO_ICALL\n\
-             0004 SEND_VAR V0 1\n\
-             0005 DO_ICALL\n\
-             0006 RETURN int(1)\n"
-        ),
-        "php's, the inner call's `V0 = ` and the outer's bare"
-    );
+    // php's, the inner call's `V0 = ` and the outer's bare
+    expect![[r#"
+
+        $_main:
+             ; (lines=7, args=0, vars=0, tmps=2)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 INIT_FCALL 1 96 string("var_dump")
+        0001 INIT_FCALL 1 96 string("extension_loaded")
+        0002 SEND_VAL string("demo") 1
+        0003 V0 = DO_ICALL
+        0004 SEND_VAR V0 1
+        0005 DO_ICALL
+        0006 RETURN int(1)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     assert_eq!(unit.main.oplines[0].extended_value, 1, "one argument");
     assert_eq!(
         unit.main.oplines[0].op1, 96,
@@ -94,25 +95,25 @@ fn a_replaced_hook_makes_every_call_it_would_not_see_do_fcall() {
 /// before it.
 #[test]
 fn the_four_file_constructs_are_one_include_or_eval_each() {
-    assert_eq!(
-        dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=9, args=0, vars=2, tmps=7)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 V2 = INCLUDE_OR_EVAL (include) string("a.php")
+        0001 ASSIGN CV0($r) V2
+        0002 T4 = CONCAT CV1($x) string("b")
+        0003 INCLUDE_OR_EVAL (require_once) T4
+        0004 INCLUDE_OR_EVAL (include_once) string("c")
+        0005 INCLUDE_OR_EVAL (require) string("d")
+        0006 V8 = INCLUDE_OR_EVAL (include_once) string("e")
+        0007 ECHO V8
+        0008 RETURN int(1)
+    "#]].assert_eq(&dump_of(
             b"<?php $r = include \"a.php\"; require_once $x . \"b\"; include_once \"c\"; require \"d\"; echo include_once \"e\";"
-        ),
-        main_dump(
-            9,
-            2,
-            7,
-            "0000 V2 = INCLUDE_OR_EVAL (include) string(\"a.php\")\n\
-             0001 ASSIGN CV0($r) V2\n\
-             0002 T4 = CONCAT CV1($x) string(\"b\")\n\
-             0003 INCLUDE_OR_EVAL (require_once) T4\n\
-             0004 INCLUDE_OR_EVAL (include_once) string(\"c\")\n\
-             0005 INCLUDE_OR_EVAL (require) string(\"d\")\n\
-             0006 V8 = INCLUDE_OR_EVAL (include_once) string(\"e\")\n\
-             0007 ECHO V8\n\
-             0008 RETURN int(1)\n"
-        )
-    );
+        ));
 }
 
 /// The oracle's dump of `eval` (#573), the fifth construct of
@@ -122,19 +123,22 @@ fn the_four_file_constructs_are_one_include_or_eval_each() {
 /// second is the whole `$x . "b"`, so the `CONCAT` stands before it.
 #[test]
 fn eval_is_the_fifth_include_or_eval() {
-    assert_eq!(
-        dump_of(b"<?php $r = eval(\"return 1;\"); eval($x . \"b\");"),
-        main_dump(
-            5,
-            2,
-            4,
-            "0000 V2 = INCLUDE_OR_EVAL (eval) string(\"return 1;\")\n\
-             0001 ASSIGN CV0($r) V2\n\
-             0002 T4 = CONCAT CV1($x) string(\"b\")\n\
-             0003 INCLUDE_OR_EVAL (eval) T4\n\
-             0004 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=5, args=0, vars=2, tmps=4)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 V2 = INCLUDE_OR_EVAL (eval) string("return 1;")
+        0001 ASSIGN CV0($r) V2
+        0002 T4 = CONCAT CV1($x) string("b")
+        0003 INCLUDE_OR_EVAL (eval) T4
+        0004 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php $r = eval(\"return 1;\"); eval($x . \"b\");",
+    ));
 }
 
 /// The string an `eval` hands over, compiled as `compile_string`
@@ -150,15 +154,18 @@ fn an_eval_string_begins_in_code_and_returns_null() {
     let mut strings = php_heap::Strings::new();
     let unit = compile_source(&mut Arena::new(), b"echo 1; ?>x", &options, &mut strings)
         .expect("the source compiles");
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(
-            3,
-            0,
-            0,
-            "0000 ECHO int(1)\n0001 ECHO string(\"x\")\n0002 RETURN null\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=3, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ECHO int(1)
+        0001 ECHO string("x")
+        0002 RETURN null
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
 }
 
 /// The oracle's dump of `echo nope($a);` (#252), a name php's
@@ -171,19 +178,20 @@ fn an_eval_string_begins_in_code_and_returns_null() {
 #[test]
 fn a_name_the_bundle_has_not_is_init_fcall_by_name_over_the_constant_pair() {
     let (unit, _strings) = unit_and_strings(b"<?php echo nope($a);");
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(
-            5,
-            1,
-            1,
-            "0000 INIT_FCALL_BY_NAME 1 string(\"nope\")\n\
-             0001 SEND_VAR_EX CV0($a) 1\n\
-             0002 V1 = DO_FCALL_BY_NAME\n\
-             0003 ECHO V1\n\
-             0004 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=5, args=0, vars=1, tmps=1)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 INIT_FCALL_BY_NAME 1 string("nope")
+        0001 SEND_VAR_EX CV0($a) 1
+        0002 V1 = DO_FCALL_BY_NAME
+        0003 ECHO V1
+        0004 RETURN int(1)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     let init = unit.main.oplines[0];
     assert_eq!(
         init.op1, 0,
@@ -214,25 +222,26 @@ fn a_name_the_bundle_has_not_is_init_fcall_by_name_over_the_constant_pair() {
 #[test]
 fn a_call_by_name_sends_each_argument_as_php_sends_it_for_an_unknown_callee() {
     let (unit, _strings) = unit_and_strings(b"<?php echo NoPe(nope2($a), 1 + $a, 'x');");
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(
-            11,
-            1,
-            3,
-            "0000 INIT_FCALL_BY_NAME 3 string(\"NoPe\")\n\
-             0001 INIT_FCALL_BY_NAME 1 string(\"nope2\")\n\
-             0002 SEND_VAR_EX CV0($a) 1\n\
-             0003 V1 = DO_FCALL_BY_NAME\n\
-             0004 SEND_VAR_NO_REF_EX V1 1\n\
-             0005 T2 = ADD int(1) CV0($a)\n\
-             0006 SEND_VAL_EX T2 2\n\
-             0007 SEND_VAL_EX string(\"x\") 3\n\
-             0008 V3 = DO_FCALL_BY_NAME\n\
-             0009 ECHO V3\n\
-             0010 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=11, args=0, vars=1, tmps=3)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 INIT_FCALL_BY_NAME 3 string("NoPe")
+        0001 INIT_FCALL_BY_NAME 1 string("nope2")
+        0002 SEND_VAR_EX CV0($a) 1
+        0003 V1 = DO_FCALL_BY_NAME
+        0004 SEND_VAR_NO_REF_EX V1 1
+        0005 T2 = ADD int(1) CV0($a)
+        0006 SEND_VAL_EX T2 2
+        0007 SEND_VAL_EX string("x") 3
+        0008 V3 = DO_FCALL_BY_NAME
+        0009 ECHO V3
+        0010 RETURN int(1)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     assert_eq!(literal_text(&unit, 0).as_deref(), Some(&b"NoPe"[..]));
     assert_eq!(literal_text(&unit, 1).as_deref(), Some(&b"nope"[..]));
     assert_eq!(literal_text(&unit, 2).as_deref(), Some(&b"nope2"[..]));
@@ -251,20 +260,21 @@ fn a_call_by_name_sends_each_argument_as_php_sends_it_for_an_unknown_callee() {
 #[test]
 fn a_name_the_bundle_has_keeps_init_fcall_and_do_icall() {
     let (unit, _strings) = unit_and_strings(b"<?php echo StrLen('a', 'b');");
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(
-            6,
-            0,
-            1,
-            "0000 INIT_FCALL 2 112 string(\"strlen\")\n\
-             0001 SEND_VAL string(\"a\") 1\n\
-             0002 SEND_VAL string(\"b\") 2\n\
-             0003 V0 = DO_ICALL\n\
-             0004 ECHO V0\n\
-             0005 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=6, args=0, vars=0, tmps=1)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 INIT_FCALL 2 112 string("strlen")
+        0001 SEND_VAL string("a") 1
+        0002 SEND_VAL string("b") 2
+        0003 V0 = DO_ICALL
+        0004 ECHO V0
+        0005 RETURN int(1)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     assert_eq!(
         unit.main.literals.len(),
         4,
@@ -282,27 +292,28 @@ fn a_name_the_bundle_has_keeps_init_fcall_and_do_icall() {
 #[test]
 fn a_call_a_frameless_entry_serves_is_frameless_icall_with_its_row() {
     let source = b"<?php $a = \"x\"; $b = str_contains($a, \"y\"); $t = trim($a); $u = trim($a, \"x\"); substr($a, 1); echo str_contains($a . \"z\", \"z\");";
-    assert_eq!(
-        dump_of(source),
-        main_dump(
-            13,
-            4,
-            10,
-            "0000 ASSIGN CV0($a) string(\"x\")\n\
-             0001 T5 = FRAMELESS_ICALL_2(str_contains) CV0($a) string(\"y\")\n\
-             0002 ASSIGN CV1($b) T5\n\
-             0003 T7 = FRAMELESS_ICALL_1(trim) CV0($a)\n\
-             0004 ASSIGN CV2($t) T7\n\
-             0005 T9 = FRAMELESS_ICALL_2(trim) CV0($a) string(\"x\")\n\
-             0006 ASSIGN CV3($u) T9\n\
-             0007 T11 = FRAMELESS_ICALL_2(substr) CV0($a) int(1)\n\
-             0008 FREE T11\n\
-             0009 T12 = CONCAT CV0($a) string(\"z\")\n\
-             0010 T13 = FRAMELESS_ICALL_2(str_contains) T12 string(\"z\")\n\
-             0011 ECHO T13\n\
-             0012 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=13, args=0, vars=4, tmps=10)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN CV0($a) string("x")
+        0001 T5 = FRAMELESS_ICALL_2(str_contains) CV0($a) string("y")
+        0002 ASSIGN CV1($b) T5
+        0003 T7 = FRAMELESS_ICALL_1(trim) CV0($a)
+        0004 ASSIGN CV2($t) T7
+        0005 T9 = FRAMELESS_ICALL_2(trim) CV0($a) string("x")
+        0006 ASSIGN CV3($u) T9
+        0007 T11 = FRAMELESS_ICALL_2(substr) CV0($a) int(1)
+        0008 FREE T11
+        0009 T12 = CONCAT CV0($a) string("z")
+        0010 T13 = FRAMELESS_ICALL_2(str_contains) T12 string("z")
+        0011 ECHO T13
+        0012 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(source));
     let unit = unit_of(source);
     let rows: Vec<(Opcode, u32)> = unit
         .main
@@ -376,25 +387,26 @@ fn each_arity_php_declares_is_a_frameless_call_with_its_row() {
 #[test]
 fn a_third_argument_is_an_op_data_after_the_frameless_call() {
     let source = b"<?php $a = \"x\"; $s = substr($a, 1, 2); substr($a, 1, 2);";
-    assert_eq!(
-        dump_of(source),
-        main_dump(
-            8,
-            2,
-            4,
-            "0000 ASSIGN CV0($a) string(\"x\")\n\
-             0001 T3 = FRAMELESS_ICALL_3(substr) CV0($a) int(1)\n\
-             0002 OP_DATA int(2)\n\
-             0003 ASSIGN CV1($s) T3\n\
-             0004 T5 = FRAMELESS_ICALL_3(substr) CV0($a) int(1)\n\
-             0005 OP_DATA int(2)\n\
-             0006 FREE T5\n\
-             0007 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    3: 0002 - 0003 (tmp/var)\n\
-             \x20    5: 0005 - 0006 (tmp/var)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=8, args=0, vars=2, tmps=4)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN CV0($a) string("x")
+        0001 T3 = FRAMELESS_ICALL_3(substr) CV0($a) int(1)
+        0002 OP_DATA int(2)
+        0003 ASSIGN CV1($s) T3
+        0004 T5 = FRAMELESS_ICALL_3(substr) CV0($a) int(1)
+        0005 OP_DATA int(2)
+        0006 FREE T5
+        0007 RETURN int(1)
+        LIVE RANGES:
+             3: 0002 - 0003 (tmp/var)
+             5: 0005 - 0006 (tmp/var)
+    "#]]
+    .assert_eq(&dump_of(source));
 }
 
 /// The oracle's dump of `zend_compile_func_in_array`'s shape:
@@ -406,27 +418,27 @@ fn a_third_argument_is_an_op_data_after_the_frameless_call() {
 /// witness's on [`special`], since php's call there is frameless.
 #[test]
 fn in_array_over_a_literal_haystack_is_in_array_with_its_flag() {
-    assert_eq!(
-        dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=11, args=0, vars=1, tmps=5)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 T1 = IN_ARRAY 0 CV0($a) array(...)
+        0001 ECHO T1
+        0002 T2 = IN_ARRAY 1 CV0($a) array(...)
+        0003 ECHO T2
+        0004 T3 = IN_ARRAY 0 CV0($a) array(...)
+        0005 ECHO T3
+        0006 T4 = IN_ARRAY 1 CV0($a) array(...)
+        0007 ECHO T4
+        0008 T5 = IN_ARRAY 0 CV0($a) array(...)
+        0009 ECHO T5
+        0010 RETURN int(1)
+    "#]].assert_eq(&dump_of(
             b"<?php echo in_array($a, [\"x\", \"y\"]), in_array($a, [1, \"b\"], true), in_array($a, [], null), in_array($a, [\"1\", 2], \\TRUE), in_array($a, ['y'], '');"
-        ),
-        main_dump(
-            11,
-            1,
-            5,
-            "0000 T1 = IN_ARRAY 0 CV0($a) array(...)\n\
-             0001 ECHO T1\n\
-             0002 T2 = IN_ARRAY 1 CV0($a) array(...)\n\
-             0003 ECHO T2\n\
-             0004 T3 = IN_ARRAY 0 CV0($a) array(...)\n\
-             0005 ECHO T3\n\
-             0006 T4 = IN_ARRAY 1 CV0($a) array(...)\n\
-             0007 ECHO T4\n\
-             0008 T5 = IN_ARRAY 0 CV0($a) array(...)\n\
-             0009 ECHO T5\n\
-             0010 RETURN int(1)\n"
-        )
-    );
+        ));
 }
 
 /// A count no entry serves is the ordinary call, whatever the
@@ -435,27 +447,30 @@ fn in_array_over_a_literal_haystack_is_in_array_with_its_flag() {
 /// bundle has not is the call by name.
 #[test]
 fn a_count_no_entry_serves_is_the_ordinary_call() {
-    assert_eq!(
-        dump_of(b"<?php str_contains($a); trim($a, $b, $c); nope($a, $b);"),
-        main_dump(
-            13,
-            3,
-            3,
-            "0000 INIT_FCALL 1 96 string(\"str_contains\")\n\
-             0001 SEND_VAR CV0($a) 1\n\
-             0002 DO_ICALL\n\
-             0003 INIT_FCALL 3 128 string(\"trim\")\n\
-             0004 SEND_VAR CV0($a) 1\n\
-             0005 SEND_VAR CV1($b) 2\n\
-             0006 SEND_VAR CV2($c) 3\n\
-             0007 DO_ICALL\n\
-             0008 INIT_FCALL_BY_NAME 2 string(\"nope\")\n\
-             0009 SEND_VAR_EX CV0($a) 1\n\
-             0010 SEND_VAR_EX CV1($b) 2\n\
-             0011 DO_FCALL_BY_NAME\n\
-             0012 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=13, args=0, vars=3, tmps=3)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 INIT_FCALL 1 96 string("str_contains")
+        0001 SEND_VAR CV0($a) 1
+        0002 DO_ICALL
+        0003 INIT_FCALL 3 128 string("trim")
+        0004 SEND_VAR CV0($a) 1
+        0005 SEND_VAR CV1($b) 2
+        0006 SEND_VAR CV2($c) 3
+        0007 DO_ICALL
+        0008 INIT_FCALL_BY_NAME 2 string("nope")
+        0009 SEND_VAR_EX CV0($a) 1
+        0010 SEND_VAR_EX CV1($b) 2
+        0011 DO_FCALL_BY_NAME
+        0012 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php str_contains($a); trim($a, $b, $c); nope($a, $b);",
+    ));
 }
 
 /// The oracle's dump of `zend_compile_ns_call`'s shape for an
@@ -469,39 +484,39 @@ fn a_count_no_entry_serves_is_the_ordinary_call() {
 /// takes no branch of its own (`in_jmp_frameless_branch`).
 #[test]
 fn an_unqualified_name_in_a_namespace_is_jmp_frameless_around_the_call_by_name() {
-    assert_eq!(
-        dump_of(b"<?php namespace Foo; $a = \"x\"; $b = str_contains($a, \"y\"); \\trim($a); trim(nope($a));"),
-        main_dump(
-            25,
-            2,
-            7,
-            "0000 ASSIGN CV0($a) string(\"x\")\n\
-             0001 JMP_FRAMELESS 8 string(\"foo\\\\str_contains\") 0007\n\
-             0002 INIT_NS_FCALL_BY_NAME 2 string(\"Foo\\\\str_contains\")\n\
-             0003 SEND_VAR_EX CV0($a) 1\n\
-             0004 SEND_VAL_EX string(\"y\") 2\n\
-             0005 V3 = DO_FCALL_BY_NAME\n\
-             0006 JMP 0008\n\
-             0007 V3 = FRAMELESS_ICALL_2(str_contains) CV0($a) string(\"y\")\n\
-             0008 ASSIGN CV1($b) V3\n\
-             0009 T5 = FRAMELESS_ICALL_1(trim) CV0($a)\n\
-             0010 FREE T5\n\
-             0011 JMP_FRAMELESS 40 string(\"foo\\\\trim\") 0019\n\
-             0012 INIT_NS_FCALL_BY_NAME 1 string(\"Foo\\\\trim\")\n\
-             0013 INIT_NS_FCALL_BY_NAME 1 string(\"Foo\\\\nope\")\n\
-             0014 SEND_VAR_EX CV0($a) 1\n\
-             0015 V6 = DO_FCALL_BY_NAME\n\
-             0016 SEND_VAR_NO_REF_EX V6 1\n\
-             0017 V7 = DO_FCALL_BY_NAME\n\
-             0018 JMP 0023\n\
-             0019 INIT_NS_FCALL_BY_NAME 1 string(\"Foo\\\\nope\")\n\
-             0020 SEND_VAR_EX CV0($a) 1\n\
-             0021 V8 = DO_FCALL_BY_NAME\n\
-             0022 V7 = FRAMELESS_ICALL_1(trim) V8\n\
-             0023 FREE V7\n\
-             0024 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=25, args=0, vars=2, tmps=7)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN CV0($a) string("x")
+        0001 JMP_FRAMELESS 8 string("foo\\str_contains") 0007
+        0002 INIT_NS_FCALL_BY_NAME 2 string("Foo\\str_contains")
+        0003 SEND_VAR_EX CV0($a) 1
+        0004 SEND_VAL_EX string("y") 2
+        0005 V3 = DO_FCALL_BY_NAME
+        0006 JMP 0008
+        0007 V3 = FRAMELESS_ICALL_2(str_contains) CV0($a) string("y")
+        0008 ASSIGN CV1($b) V3
+        0009 T5 = FRAMELESS_ICALL_1(trim) CV0($a)
+        0010 FREE T5
+        0011 JMP_FRAMELESS 40 string("foo\\trim") 0019
+        0012 INIT_NS_FCALL_BY_NAME 1 string("Foo\\trim")
+        0013 INIT_NS_FCALL_BY_NAME 1 string("Foo\\nope")
+        0014 SEND_VAR_EX CV0($a) 1
+        0015 V6 = DO_FCALL_BY_NAME
+        0016 SEND_VAR_NO_REF_EX V6 1
+        0017 V7 = DO_FCALL_BY_NAME
+        0018 JMP 0023
+        0019 INIT_NS_FCALL_BY_NAME 1 string("Foo\\nope")
+        0020 SEND_VAR_EX CV0($a) 1
+        0021 V8 = DO_FCALL_BY_NAME
+        0022 V7 = FRAMELESS_ICALL_1(trim) V8
+        0023 FREE V7
+        0024 RETURN int(1)
+    "#]].assert_eq(&dump_of(b"<?php namespace Foo; $a = \"x\"; $b = str_contains($a, \"y\"); \\trim($a); trim(nope($a));"));
 }
 
 /// The three constants `zend_add_ns_func_name_literal` lays down,
@@ -586,25 +601,26 @@ fn a_namespace_call_carries_php_s_three_constants() {
 /// name by the parser and no opcode of its own anywhere.
 #[test]
 fn an_exit_or_a_die_is_php_s_init_fcall_over_exit() {
-    assert_eq!(
-        dump_of(b"<?php exit; exit(0); exit(\"msg\"); die;"),
-        main_dump(
-            11,
-            0,
-            4,
-            "0000 INIT_FCALL 0 80 string(\"exit\")\n\
-             0001 DO_ICALL\n\
-             0002 INIT_FCALL 1 96 string(\"exit\")\n\
-             0003 SEND_VAL int(0) 1\n\
-             0004 DO_ICALL\n\
-             0005 INIT_FCALL 1 96 string(\"exit\")\n\
-             0006 SEND_VAL string(\"msg\") 1\n\
-             0007 DO_ICALL\n\
-             0008 INIT_FCALL 0 80 string(\"exit\")\n\
-             0009 DO_ICALL\n\
-             0010 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=11, args=0, vars=0, tmps=4)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 INIT_FCALL 0 80 string("exit")
+        0001 DO_ICALL
+        0002 INIT_FCALL 1 96 string("exit")
+        0003 SEND_VAL int(0) 1
+        0004 DO_ICALL
+        0005 INIT_FCALL 1 96 string("exit")
+        0006 SEND_VAL string("msg") 1
+        0007 DO_ICALL
+        0008 INIT_FCALL 0 80 string("exit")
+        0009 DO_ICALL
+        0010 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(b"<?php exit; exit(0); exit(\"msg\"); die;"));
 }
 
 /// [`Options::assertions`] off, php's `zend.assertions = -1`: an
@@ -631,13 +647,15 @@ fn an_assertion_under_assertions_off_is_the_constant_true() {
     .expect("the source compiles")
     .dump(&[])
     .text();
-    assert_eq!(
-        dump,
-        main_dump(
-            2,
-            1,
-            1,
-            "0000 ASSIGN CV0($a) bool(true)\n0001 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=2, args=0, vars=1, tmps=1)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN CV0($a) bool(true)
+        0001 RETURN int(1)
+    "#]]
+    .assert_eq(&dump);
 }
