@@ -32,7 +32,8 @@ fn served(engine: &Engine, source: &str) -> (String, Observables) {
 
 /// `builder` with `INF` and `NAN` among its persistent constants, as
 /// ext/standard declares them, which the bundle of these tests has
-/// not: what the diagnostics tests echo to raise php's warning.
+/// not: what the diagnostics tests and units.rs's cached unit echo to
+/// raise php's warning.
 fn declaring_nan(builder: EngineBuilder) -> EngineBuilder {
     let constant = |name: &str, value: f64| php_unit::decl::ConstDecl {
         name: Name::from(name),

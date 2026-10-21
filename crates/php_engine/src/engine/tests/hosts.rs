@@ -130,11 +130,6 @@ fn a_host_s_ini_value_is_read_as_the_scanner_reads_a_bare_word() {
     }
 }
 
-/// A program served as php's phpdbg serves one
-/// ([`Primary::Bare`]): the throwable it leaves uncaught is kept
-/// for the host, its class, site and `__toString`, and nothing is
-/// rendered; the handler `set_exception_handler` set has it first,
-/// and what it takes is not kept; the file is no included file.
 /// The native a host's own extension declares, for the test below.
 #[php_macros::php_function]
 fn host_module_answer() -> i64 {
@@ -157,6 +152,11 @@ fn an_extension_the_host_built_starts_after_the_bundle() {
     assert_eq!(body, "42 loaded phpdbg");
 }
 
+/// A program served as php's phpdbg serves one
+/// ([`Primary::Bare`]): the throwable it leaves uncaught is kept
+/// for the host, its class, site and `__toString`, and nothing is
+/// rendered; the handler `set_exception_handler` set has it first,
+/// and what it takes is not kept; the file is no included file.
 #[test]
 fn a_program_served_for_a_host_that_renders_the_uncaught_keeps_it() {
     let files = Files::new(
