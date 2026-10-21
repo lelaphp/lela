@@ -40,7 +40,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use php_engine::tier::{self, Epoch, MapPtrRaw, Request, Word};
+use php_engine::tier::{self, Epoch, FuncRef, MapPtrRaw, Request, Word};
 use php_unit::OplineIdx;
 
 use crate::lower::{Compiled, Fuzzed, Mark};
@@ -164,6 +164,8 @@ pub(crate) struct Trace<P: Pages = Native> {
     /// Where a loop whose interrupt test takes php's stub stands its
     /// frame as it answers `lower::INTERRUPTED`: its header's opline.
     pub(crate) stub: Option<OplineIdx>,
+    /// The op array and opline its first recorded opline stands at.
+    pub(crate) opens: Option<(FuncRef, OplineIdx)>,
     #[cfg_attr(
         not(test),
         expect(
@@ -577,6 +579,7 @@ impl<P: Pages> TraceTable<P> {
             exits: built,
             leaves: compiled.leaves,
             stub: compiled.stub,
+            opens: compiled.opens,
             map_ptrs: compiled.map_ptrs,
             marks: compiled.marks,
             fuzzed: compiled.fuzzed,

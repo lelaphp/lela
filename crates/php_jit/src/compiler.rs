@@ -284,12 +284,12 @@ fn pipeline_with(
         (Outcome::Abort(stop) | Outcome::Blacklist(stop), Some(trace)) => {
             shared.dump(lines, &TraceEvent::Abort { trace, stop });
             // A side's exit is what php blacklists, by its parent's number.
-            let blacklisted = match start {
-                Start::Side { parent, exit } => TraceEvent::ExitBlacklisted {
+            let blacklisted = match start.grew() {
+                Some((parent, exit)) => TraceEvent::ExitBlacklisted {
                     trace: parent,
                     exit,
                 },
-                Start::Loop | Start::Enter | Start::Return => TraceEvent::Blacklisted { trace },
+                None => TraceEvent::Blacklisted { trace },
             };
             if settled == State::Blacklisted {
                 shared.dump(lines, &blacklisted);

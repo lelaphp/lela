@@ -216,6 +216,34 @@ fn a_for_loop_roots_at_its_condition_as_php_does() -> Result<(), String> {
         ]
     );
     assert_eq!(code.oplines[7].opcode, Opcode::Jmpnz);
+    // The issue's own loop, in the file's code: the condition first.
+    let plan = [
+        ("record.function", ""),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ];
+    let (recorded, _) = testing::records::recording(
+        &plan,
+        "for ($i = 0; $i < 100; $i++) { $x = 5; } echo $x, \"\\n\";",
+    )?;
+    let record = &recorded.record;
+    let code = recorded
+        .view
+        .op_array(record.root)
+        .ok_or("the view holds the file's code")?;
+    let opcodes: Vec<Opcode> = (record.events.iter())
+        .filter_map(|event| match event {
+            Event::Op { opline, .. } => Some(code.oplines[opline.0 as usize].opcode),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        (record.stop, opcodes.as_slice()),
+        (
+            Stop::Loop,
+            [Opcode::IsSmaller, Opcode::Assign, Opcode::PreInc].as_slice()
+        )
+    );
     Ok(())
 }
 

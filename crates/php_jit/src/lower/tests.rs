@@ -62,7 +62,7 @@ fn lowered(fixture: Fixture) -> Result<TraceIr, String> {
         let answers = match header.interrupt {
             Interrupt::Exit(exit) => i64::from(exit.0),
             // CLIF writes an `i32` constant signed.
-            Interrupt::Stub => i64::from(i32::from_ne_bytes(INTERRUPTED.to_ne_bytes())),
+            Interrupt::Stub(_) => i64::from(i32::from_ne_bytes(INTERRUPTED.to_ne_bytes())),
         };
         interrupt_test(&clif, answers)?;
     }

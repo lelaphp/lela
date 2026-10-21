@@ -81,6 +81,9 @@ pub(crate) struct Compiled {
     /// once it answers [`INTERRUPTED`]: its header's opline. None for a
     /// loop whose test takes an exit and for a trace that does not loop.
     pub(crate) stub: Option<OplineIdx>,
+    /// The op array and opline the trace's first recorded opline stands
+    /// at, where a frame entering it stands.
+    pub(crate) opens: Option<(FuncRef, OplineIdx)>,
     /// The slots of the requests' runtime caches the code reads, which
     /// `enter` lays down on a request's first entry.
     pub(crate) map_ptrs: Box<[MapPtrRaw]>,
@@ -174,15 +177,26 @@ pub(crate) const INTERRUPTED: u32 = u32::MAX - 2;
 /// first trace it enters (#2957).
 pub(crate) const INTERRUPT_AT: i32 = 8;
 
+/// Where the trace's first recorded opline stands.
+fn opens_at(ir: &TraceIr) -> Option<(FuncRef, OplineIdx)> {
+    ir.ops.iter().find_map(|op| match op {
+        Op::Line(line) => {
+            let frame = ir.frames.get(usize::from(line.frame.0))?;
+            Some((frame.func, line.opline))
+        }
+        _ => None,
+    })
+}
+
 /// The opline a loop whose interrupt test takes php's stub stands its
 /// frame at, its header's.
 fn stub_at(ir: &TraceIr) -> Option<OplineIdx> {
     let End::Loop(header) = ir.end else {
         return None;
     };
-    match (header.interrupt, ir.ops.get(header.at.index())) {
-        (Interrupt::Stub, Some(Op::Line(line))) => Some(line.opline),
-        _ => None,
+    match header.interrupt {
+        Interrupt::Stub(at) => Some(at),
+        Interrupt::Exit(_) => None,
     }
 }
 
@@ -357,6 +371,7 @@ impl Backend {
                 End::Loop(_) => None,
             },
             stub: stub_at(ir),
+            opens: opens_at(ir),
             map_ptrs: ir.map_ptrs.clone().into_boxed_slice(),
             marks,
             name,

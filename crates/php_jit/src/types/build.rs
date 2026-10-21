@@ -1509,24 +1509,18 @@ impl<'a> Builder<'a> {
         }
         let closes = match repeat {
             None => Closes::Leave,
-            Some(repeat) if self.stubbed(repeat) => Closes::Stub,
-            Some(_) => Closes::Interrupt,
+            Some(repeat) => Closes::Loop {
+                repeat,
+                stub: self
+                    .stubbed(repeat)
+                    .then(|| self.at_header_opline())
+                    .flatten(),
+            },
         };
         let numbered = self.number(closes)?;
-        let end = match (repeat, closes, numbered.interrupt, numbered.end) {
-            (Some(repeat), Closes::Stub, ..) => End::Loop(LoopHeader {
-                at: self.header,
-                repeat,
-                interrupt: Interrupt::Stub,
-            }),
-            (Some(repeat), _, Some(interrupt), _) => End::Loop(LoopHeader {
-                at: self.header,
-                repeat,
-                interrupt: Interrupt::Exit(interrupt),
-            }),
-            (_, _, _, Some(exit)) => End::Leave(exit),
-            _ => return Err(mismatch("a trace with no end")),
-        };
+        let end = numbered
+            .end
+            .ok_or_else(|| mismatch("a trace with no end"))?;
         Ok(TraceIr {
             entry: Entry {
                 start: self.rec.start,
@@ -1555,25 +1549,7 @@ impl<'a> Builder<'a> {
     /// after a guard does. The places an opline unwinds from are numbered
     /// apart, one per set of stores.
     fn number(&mut self, closes: Closes) -> Result<Numbered, Abort> {
-        let mut order: Vec<(Order, Source)> = Vec::new();
-        for (at, guard) in self.guards.iter().enumerate() {
-            let key = match guard.at {
-                GuardAt::Entry => Order::Entry(self.guarded_slot(guard.check)),
-                GuardAt::Before(op) => Order::At(op, Stage::Before),
-                GuardAt::Within(op) => Order::At(op, Stage::Within),
-            };
-            order.push((key, Source::Guard(at)));
-        }
-        for (at, (op, ..)) in self.leaves.iter().enumerate() {
-            order.push((Order::At(*op, Stage::Leaves), Source::Leave(at)));
-        }
-        match closes {
-            Closes::Interrupt => order.push((Order::End, Source::Interrupt)),
-            Closes::Leave => order.push((Order::End, Source::End)),
-            Closes::Stub => {}
-        }
-        // Stable: within one place, in the order they were placed.
-        order.sort_by_key(|(key, _)| *key);
+        let (order, stubbed) = self.order(closes);
         let mut exits = Exits::default();
         let mut unwinds: Vec<Unwind> = Vec::new();
         let mut known: HashMap<ValueId, ZvalType> = HashMap::new();
@@ -1581,8 +1557,7 @@ impl<'a> Builder<'a> {
             exits: Vec::new(),
             unwinds: Vec::new(),
             guards: Vec::with_capacity(self.guards.len()),
-            interrupt: None,
-            end: None,
+            end: stubbed,
         };
         for (_, source) in order {
             let draft = match source {
@@ -1591,7 +1566,7 @@ impl<'a> Builder<'a> {
                     let (_, _, draft) = self.leaves[at];
                     draft
                 }
-                Source::Interrupt => self.interrupt(),
+                Source::Interrupt(_) => self.interrupt(),
                 Source::End => self.end_draft.unwrap_or_else(|| self.start()),
             };
             let spec = self.spec(&draft, &known);
@@ -1641,13 +1616,57 @@ impl<'a> Builder<'a> {
                         }
                     }
                 }
-                Source::Interrupt => numbered.interrupt = Some(exits.take(spec)?),
-                Source::End => numbered.end = Some(exits.take(spec)?),
+                Source::Interrupt(repeat) => {
+                    numbered.end = Some(End::Loop(LoopHeader {
+                        at: self.header,
+                        repeat,
+                        interrupt: Interrupt::Exit(exits.take(spec)?),
+                    }));
+                }
+                Source::End => numbered.end = Some(End::Leave(exits.take(spec)?)),
             }
         }
         numbered.exits = exits.specs;
         numbered.unwinds = unwinds;
         Ok(numbered)
+    }
+
+    /// Every place that takes an exit, in the order the trace meets them,
+    /// and the end of a loop whose interrupt test takes php's stub, which
+    /// takes none.
+    fn order(&self, closes: Closes) -> (Vec<(Order, Source)>, Option<End>) {
+        let mut order: Vec<(Order, Source)> = Vec::new();
+        for (at, guard) in self.guards.iter().enumerate() {
+            let key = match guard.at {
+                GuardAt::Entry => Order::Entry(self.guarded_slot(guard.check)),
+                GuardAt::Before(op) => Order::At(op, Stage::Before),
+                GuardAt::Within(op) => Order::At(op, Stage::Within),
+            };
+            order.push((key, Source::Guard(at)));
+        }
+        for (at, (op, ..)) in self.leaves.iter().enumerate() {
+            order.push((Order::At(*op, Stage::Leaves), Source::Leave(at)));
+        }
+        let mut stubbed = None;
+        match closes {
+            Closes::Loop { repeat, stub: None } => {
+                order.push((Order::End, Source::Interrupt(repeat)));
+            }
+            Closes::Loop {
+                repeat,
+                stub: Some(at),
+            } => {
+                stubbed = Some(End::Loop(LoopHeader {
+                    at: self.header,
+                    repeat,
+                    interrupt: Interrupt::Stub(at),
+                }));
+            }
+            Closes::Leave => order.push((Order::End, Source::End)),
+        }
+        // Stable: within one place, in the order they were placed.
+        order.sort_by_key(|(key, _)| *key);
+        (order, stubbed)
     }
 
     /// The slot a guard holds a value of; none for a guard on no value.
@@ -1668,7 +1687,7 @@ impl<'a> Builder<'a> {
     /// where the test leaves, so no deoptimisation is needed
     /// (`zend_jit_trace_stack_needs_deoptimization`).
     fn stubbed(&self, repeat: Repeat) -> bool {
-        let root = !matches!(self.rec.start, Start::Side { .. });
+        let root = self.rec.start.grew().is_none();
         root && repeat != Repeat::Return
             && self.uses_initial_ip()
             && self
@@ -1730,6 +1749,14 @@ impl<'a> Builder<'a> {
         Draft {
             grows: Grows::Never,
             ..draft(Point::Before(self.header), frame, self.at_header())
+        }
+    }
+
+    /// The opline of a loop's header, where it is one.
+    fn at_header_opline(&self) -> Option<OplineIdx> {
+        match self.ops.get(self.header.index()) {
+            Some(Op::Line(line)) => Some(line.opline),
+            _ => None,
         }
     }
 
@@ -1869,31 +1896,52 @@ impl<'a> Builder<'a> {
         let Some(Op::Line(line)) = self.ops.get(def.index()) else {
             return None;
         };
-        let numbers = |operand: Operand| match operand {
+        // A constant that is a number, or a value that may be one.
+        let number = |operand: Operand| match operand {
             Operand::Constant(Constant::Long(_) | Constant::Double(_)) => true,
-            Operand::Value(value) => {
-                let types = self.val(value).types;
-                types.meets(Types::NUMBER) && !types.meets(Types::REF.or(Types::STRING))
-            }
+            Operand::Value(value) => self.val(value).types.meets(Types::NUMBER),
             Operand::Constant(_) | Operand::Unused => false,
         };
-        let checked = match line.opcode {
-            Opcode::PreInc | Opcode::PreDec | Opcode::PostInc | Opcode::PostDec => {
-                (line.op1_def == Some(back) || line.out == Some(back)) && numbers(line.op1)
-            }
-            Opcode::AssignOp => {
-                line.op1_def == Some(back)
-                    && matches!(
+        // A variable or a temporary no reference holds.
+        let unreferenced = |operand: Operand| match operand {
+            Operand::Value(value) => !self.val(value).types.meets(Types::REF),
+            Operand::Constant(_) | Operand::Unused => true,
+        };
+        let step = matches!(
+            line.opcode,
+            Opcode::PreInc | Opcode::PreDec | Opcode::PostInc | Opcode::PostDec
+        );
+        let checked = if line.op1_def == Some(back) {
+            match line.opcode {
+                _ if step => {
+                    let Operand::Value(read) = line.op1 else {
+                        return None;
+                    };
+                    !self.val(read).types.meets(Types::STRING) && number(line.op1)
+                }
+                Opcode::AssignOp => {
+                    matches!(
                         line.imm,
                         Imm::Binary(Opcode::Add | Opcode::Sub | Opcode::Mul)
-                    )
-                    && numbers(line.op1)
-                    && numbers(line.op2)
+                    ) && unreferenced(line.op2)
+                        && number(line.op1)
+                        && number(line.op2)
+                }
+                _ => false,
             }
-            Opcode::Add | Opcode::Sub | Opcode::Mul => {
-                line.out == Some(back) && numbers(line.op1) && numbers(line.op2)
+        } else if line.out == Some(back) {
+            match line.opcode {
+                Opcode::Add | Opcode::Sub | Opcode::Mul => {
+                    unreferenced(line.op1)
+                        && unreferenced(line.op2)
+                        && number(line.op1)
+                        && number(line.op2)
+                }
+                _ if step => unreferenced(line.op1) && number(line.op1),
+                _ => false,
             }
-            _ => false,
+        } else {
+            false
         };
         let inline = line.form == Form::Inline
             && within(line.opcode, ZvalType::Long) == Some(Within::Rerun)
@@ -2100,22 +2148,24 @@ impl Exits {
 }
 
 /// The exits numbered, the unwinds, the guards naming their exits, and
-/// the exits a loop's interrupt test and a trace's end take.
+/// how the trace ends, through the exits a loop's interrupt test or a
+/// trace's end take.
 struct Numbered {
     exits: Vec<ExitSpec>,
     unwinds: Vec<Unwind>,
     guards: Vec<Guard>,
-    interrupt: Option<ExitId>,
-    end: Option<ExitId>,
+    end: Option<End>,
 }
 
-/// How a trace ends, for its numbering: a loop through its interrupt
-/// test's exit or through php's stub, or a trace that does not loop
-/// through the exit it ends by.
+/// How a trace ends, for its numbering: a loop, its interrupt test
+/// taking an exit or, where `stub` names the header's opline, php's
+/// stub; or a trace that does not loop, through the exit it ends by.
 #[derive(Clone, Copy)]
 enum Closes {
-    Interrupt,
-    Stub,
+    Loop {
+        repeat: Repeat,
+        stub: Option<OplineIdx>,
+    },
     Leave,
 }
 
@@ -2157,7 +2207,7 @@ enum Leaves {
 enum Source {
     Guard(usize),
     Leave(usize),
-    Interrupt,
+    Interrupt(Repeat),
     End,
 }
 

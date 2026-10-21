@@ -81,7 +81,7 @@ impl<'a> Dump<'a> {
                 };
                 let interrupt = match header.interrupt {
                     Interrupt::Exit(exit) => format!("exit {}", exit.0),
-                    Interrupt::Stub => "stub".to_owned(),
+                    Interrupt::Stub(_) => "stub".to_owned(),
                 };
                 writeln!(text, "loop at {}, {repeat}, interrupt {interrupt}", at.0)?;
                 for (id, value) in ids(self.ir) {

@@ -337,7 +337,7 @@ impl<'a> Emit<'a> {
                 let flag = self.b.ins().load(I8, trusted(), interrupt, 0);
                 match header.interrupt {
                     Interrupt::Exit(exit) => self.leave_if(flag, exit)?,
-                    Interrupt::Stub => self.stub_if(flag)?,
+                    Interrupt::Stub(_) => self.stub_if(flag)?,
                 }
                 for at in split..self.ir.ops.len() {
                     self.op(at)?;

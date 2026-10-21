@@ -79,6 +79,15 @@ impl Start {
 }
 
 impl Start {
+    /// For a side trace, the trace and exit it grows from; none for a
+    /// root.
+    pub(crate) fn grew(self) -> Option<(TraceId, ExitId)> {
+        match self {
+            Start::Side { parent, exit } => Some((parent, exit)),
+            Start::Loop | Start::Enter | Start::Return => None,
+        }
+    }
+
     /// The start as a record's text form and a trace's dump write it:
     /// its word, a side trace's as `side <parent>/<exit>`.
     pub(crate) fn written(self) -> String {
@@ -459,9 +468,10 @@ pub(crate) fn run(
         start: recorder.start,
         root: recorder.rerooted.map_or(root, |(func, _)| func),
         // A side trace php rooted at a loop it unrolled is a root.
-        entered: match recorder.start {
-            Start::Side { .. } => entered,
-            Start::Loop | Start::Enter | Start::Return => Vec::new(),
+        entered: if recorder.start.grew().is_some() {
+            entered
+        } else {
+            Vec::new()
         },
         events: recorder.events,
         stop,
@@ -483,6 +493,9 @@ pub(crate) enum Headed {
     /// `break`, a return or a throw: the interpreter goes on at the
     /// frame named.
     Away(FrameRef),
+    /// It was not stepped: its op array is not one a trace reads. The
+    /// interpreter goes on where it stands.
+    Unstepped,
 }
 
 /// `frame`, which a back edge of loop `header` left where it lands,
@@ -503,11 +516,14 @@ pub(crate) fn headed(
         .filter(|func| view.hold(req, *func))
         .and_then(|func| view.op_array(func))
     else {
-        return Ok(Headed::Stands(frame));
+        return Ok(Headed::Unstepped);
     };
-    let Some(root) = loop_root(code, header).filter(|root| *root != from) else {
-        return Ok(Headed::Stands(frame));
+    let Some(root) = loop_root(code, header) else {
+        return Ok(Headed::Unstepped);
     };
+    if root == from {
+        return Ok(Headed::Stands(frame));
+    }
     let (mut at, mut depth) = (frame, 0u32);
     loop {
         if depth == 0 {
@@ -564,12 +580,9 @@ struct Recorder<'p> {
     policy: &'p Policy,
     start: Start,
     epoch: Epoch,
-    /// The claimed word: the op array and safepoint whose heat started
-    /// the recording, php's bad root cache key.
-    word: (FuncRef, SafepointIdx),
-    /// For a side trace, the trace and exit whose word claimed it, which
-    /// is the claimed word in place of `word`.
-    grew: Option<(TraceId, ExitId)>,
+    /// The claimed word, whose heat started the recording: php's bad root
+    /// cache key.
+    claimed: Claimed,
     /// php's `orig_opline`: the op array and opline the trace is rooted
     /// at, which closes a loop and names recursion. A return trace's is
     /// the opline its first return lands on, unknown until then.
@@ -595,6 +608,14 @@ struct Recorder<'p> {
     stood: Option<TraceId>,
 }
 
+/// The word a recording was claimed on: a root's, by its op array and
+/// safepoint, or an exit's, by its trace and exit.
+#[derive(Debug, Clone, Copy)]
+enum Claimed {
+    Root(FuncRef, SafepointIdx),
+    Exit(TraceId, ExitId),
+}
+
 /// How one step of the loop ended: on to the next opline, stopped, or
 /// stopped at an inner loop's header, which php records again at once.
 enum Went {
@@ -614,10 +635,9 @@ impl<'p> Recorder<'p> {
             policy,
             start,
             epoch,
-            word,
-            grew: match start {
-                Start::Side { parent, exit } => Some((parent, exit)),
-                Start::Loop | Start::Enter | Start::Return => None,
+            claimed: match start.grew() {
+                Some((trace, exit)) => Claimed::Exit(trace, exit),
+                None => Claimed::Root(word.0, word.1),
             },
             root: None,
             events: Vec::new(),
@@ -646,10 +666,9 @@ impl<'p> Recorder<'p> {
     /// php's `zend_jit_trace_bad_stop_event` for the root: the stop the
     /// claimed word last failed on, where it failed `times` times.
     fn root_bad_stop(&self, times: u8) -> Option<Stop> {
-        let (func, at) = self.word;
-        let word = match self.grew {
-            Some((trace, exit)) => crate::table::exit_word(&self.epoch, trace, exit),
-            None => self.epoch.word(func, at),
+        let word = match self.claimed {
+            Claimed::Root(func, at) => self.epoch.word(func, at),
+            Claimed::Exit(trace, exit) => crate::table::exit_word(&self.epoch, trace, exit),
         };
         policy::bad_stop(word, times)
     }
@@ -1011,7 +1030,7 @@ impl<'p> Recorder<'p> {
     /// attempts at it failed, when it is unrolled up to php's limit and
     /// a second visit at one depth makes the unrolled loop the trace.
     fn loop_header(&mut self, func: FuncRef, at: OplineIdx, header: SafepointIdx) -> Went {
-        let side = matches!(self.start, Start::Side { .. });
+        let side = self.start.grew().is_some();
         let depth = self.level + self.ret_level;
         if !side && self.root == Some((func, at)) && depth == 0 {
             return Went::Stopped(Stop::Loop);

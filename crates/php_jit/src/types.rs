@@ -509,8 +509,9 @@ pub(crate) enum Interrupt {
     /// at its header, as php's stub goes on at the header's handler,
     /// which is the trace. Where php's code keeps its initial
     /// instruction pointer and holds nothing in registers at the loop's
-    /// end, so the interpreter needs nothing back.
-    Stub,
+    /// end, so the interpreter needs nothing back. The header's opline,
+    /// where the frame is stood for the stub.
+    Stub(OplineIdx),
 }
 
 /// What a looping trace repeats: php's three stops that make a loop.

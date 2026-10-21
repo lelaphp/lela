@@ -63,6 +63,7 @@ fn compiled(bytes: &[u8], exits: Vec<ExitSpec>) -> Compiled {
         exits: exits.into(),
         leaves: None,
         stub: None,
+        opens: None,
         fuzzed: crate::lower::Fuzzed::default(),
         map_ptrs: Box::new([]),
         marks: Box::new([]),
