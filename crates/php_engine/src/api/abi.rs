@@ -96,6 +96,9 @@ pub struct Start {
     /// The process states of this extension and of every one before it
     /// in bundle order, as each was started for the process.
     pub(crate) process: Vec<crate::process_scope::ProcessState>,
+    /// The bundle's opcode observers, whose declarations the tier's
+    /// start asks of this start ([`crate::observer::observes`]).
+    pub(crate) opcodes: Box<[crate::observer::OpcodeObserver]>,
 }
 
 impl Start {

@@ -124,10 +124,23 @@ pub type OpcodesDeclared = fn(&Start) -> Opcodes;
 
 /// One extension's opcode observer as its builder took it: what it
 /// declares and the handler it is told through.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct OpcodeObserver {
     pub(crate) declared: OpcodesDeclared,
     pub(crate) handler: OpcodeHandler,
+}
+
+/// `zend_get_user_opcode_handler(opcode) != NULL` as the tier's start
+/// reads it, once every extension's start has declared what it observes,
+/// as `zend_jit_check_support` reads it after every `MINIT`
+/// (`Z/ext/opcache/jit/zend_jit.c:3743-3756`): whether a declaration of
+/// the bundle's, asked of `start`, names `opcode`. A declaration is a
+/// plain function of the start it is handed, and an extension keeps no
+/// state it could change (ADR-0005), so asking it again answers what
+/// the engine fixes as it starts ([`ObservedOpcodes::start`]).
+#[must_use]
+pub fn observes(start: &Start, opcode: Opcode) -> bool {
+    (start.opcodes.iter()).any(|observer| (observer.declared)(start).contains(opcode))
 }
 
 /// The engine's opcode observers, fixed as it starts: the links of the

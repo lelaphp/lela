@@ -4485,6 +4485,9 @@ impl Engine {
             },
             host: sapi_name,
             process: Vec::new(),
+            opcodes: (shared.supplied.opcodes.links().iter())
+                .map(|&(_, observer)| observer)
+                .collect(),
         };
         // `zend_startup_modules`: each `MINIT` in bundle order, its process
         // start (once for the process, ADR-0010) and then its engine

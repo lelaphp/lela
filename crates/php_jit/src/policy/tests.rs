@@ -6,10 +6,10 @@
 use std::sync::atomic::Ordering;
 
 use php_engine::tier::{Epoch, FuncRef, SafepointIdx, StartupIni, Word};
-use php_unit::{OpArray, OplineIdx, Unit};
+use php_unit::{OpArray, Opcode, OplineIdx, Unit};
 
 use super::{
-    Claim, Compile, Holder, JitDebug, Mode, Note, Outcome, Place, Policy, Setting, State,
+    Claim, Compile, Holder, JitDebug, Mode, Note, Outcome, Place, Policy, Refused, Setting, State,
     TraceEvent, bad_stop, bump, claim, read, settle,
 };
 use crate::record::{Start, Stop};
@@ -479,4 +479,47 @@ fn a_failed_attempt_keeps_its_stop_and_a_release_counts_none() {
     }
     assert_eq!(bad_stop(word, 0), None);
     assert_eq!(bad_stop(&Word::sealed(), 0), None);
+}
+
+/// php's `zend_jit_check_support` over the opcodes the extensions
+/// observe: one past the two silence opcodes runs the tier `Off` with
+/// its `opcache.jit_debug` bits cleared, refused with php's warning
+/// where php sets its tier up, `opcache.jit=off` among them, and with
+/// none where php never does; the silence opcodes alone refuse nothing.
+#[test]
+fn an_observed_opcode_past_the_silence_opcodes_runs_the_tier_off() {
+    let echo = |opcode| opcode == Opcode::Echo;
+    let silence = |opcode| matches!(opcode, Opcode::BeginSilence | Opcode::EndSilence);
+    let debug = ("opcache.jit_debug", "0x3f000");
+    for (asked, warned) in [
+        (&[("opcache.jit", "tracing"), debug][..], true),
+        (&[("opcache.jit", "off"), debug], true),
+        (&[("opcache.jit", "1205")], true),
+        (&[("opcache.jit", "tracing"), ("jit.mode", "force")], true),
+        (&[("opcache.jit", "disable"), ("jit.mode", "force")], false),
+        (&[("opcache.jit", "disable")], false),
+        (&[("opcache.jit", "1245")], false),
+        (
+            &[("opcache.jit", "tracing"), ("opcache.jit_buffer_size", "0")],
+            false,
+        ),
+    ] {
+        let (mut policy, _) = read_ini(asked);
+        let refused = policy.check_support(echo);
+        assert_eq!(
+            refused,
+            warned.then_some(Refused::ObservedOpcode),
+            "{asked:?}"
+        );
+        assert_eq!(policy.mode(), Mode::Off, "{asked:?}");
+        assert!(!policy.debugs(), "{asked:?}");
+    }
+    let (mut policy, _) = read_ini(&[("opcache.jit", "tracing"), debug]);
+    assert_eq!(policy.check_support(silence), None);
+    assert_eq!(policy.mode(), Mode::Tracing);
+    assert!(policy.debugs());
+    assert_eq!(
+        Refused::ObservedOpcode.to_string(),
+        "JIT is incompatible with third party extensions that setup user opcode handlers. JIT disabled."
+    );
 }

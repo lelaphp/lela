@@ -29,6 +29,7 @@ use std::sync::atomic::Ordering;
 
 use php_engine::api::request::Ini;
 use php_engine::tier::{Epoch, FuncRef, SafepointIdx, StartupIni, Word};
+use php_unit::Opcode;
 
 use crate::types::ExitId;
 use php_unit::decl::{IniDecl, Name};
@@ -190,6 +191,27 @@ impl std::fmt::Display for Note {
     }
 }
 
+/// Why php refuses its compiled tier as it starts, with a warning raised
+/// once through the startup diagnostics, whatever `opcache.jit_debug`
+/// asks, since it is php's `zend_error` and not a `TRACE` line; the
+/// tier then runs `Off` ([`Policy::check_support`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Refused {
+    /// An extension observes an opcode other than the two silence
+    /// opcodes (design §7.1).
+    ObservedOpcode,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refused::ObservedOpcode => f.write_str(
+                "JIT is incompatible with third party extensions that setup user opcode handlers. JIT disabled.",
+            ),
+        }
+    }
+}
+
 /// `jit.mode`'s word for a `Mode`.
 fn mode_name(mode: Mode) -> &'static str {
     match mode {
@@ -241,6 +263,12 @@ pub(crate) struct Policy {
     max_polymorphic_calls: u32,
     buffer_size: u64,
     debug: JitDebug,
+    /// Whether php sets its compiled tier up under these directives,
+    /// `JIT_G(enabled) && JIT_G(buffer_size)`: `opcache.jit` on or off
+    /// and a buffer, which is where `zend_jit_check_support` runs
+    /// (`Z/ext/opcache/ZendAccelerator.c:3253-3254`), so where its
+    /// refusal warns ([`Policy::check_support`]).
+    set_up: bool,
 }
 
 /// The value the host set for `name`, none where it set none.
@@ -357,6 +385,7 @@ impl Policy {
             (None, Setting::Disable | Setting::Off | Setting::Invalid) => Mode::Off,
         };
         let mode = if buffer_size > 0 { asked } else { Mode::Off };
+        let set_up = buffer_size > 0 && matches!(setting, Setting::Off | Setting::On { .. });
         if matches!(mode, Mode::Force | Mode::ExitFuzz) {
             notes.push(Note::Lane(mode));
         }
@@ -406,6 +435,7 @@ impl Policy {
             max_polymorphic_calls: count(ini, "opcache.jit_max_polymorphic_calls", 2),
             buffer_size: u64::try_from(buffer_size).unwrap_or(0),
             debug,
+            set_up,
         };
         if mode == Mode::Off {
             policy.off();
@@ -419,6 +449,29 @@ impl Policy {
     pub(crate) fn off(&mut self) {
         self.mode = Mode::Off;
         self.debug = JitDebug::default();
+    }
+
+    /// `zend_jit_check_support` past the directives, once every other
+    /// extension's start has declared what it observes
+    /// (`Z/ext/opcache/jit/zend_jit.c:3728-3756`): where an extension
+    /// observes an opcode other than `ZEND_BEGIN_SILENCE` and
+    /// `ZEND_END_SILENCE`, by `observes`, php's
+    /// `zend_get_user_opcode_handler(i) != NULL` over every opcode, the
+    /// tier runs `Off` (`jit-design.md` §4.3, *Observed opcodes*), and
+    /// the refusal is answered where php sets its tier up, which is where
+    /// it warns; none where the tier runs as the directives say. At the
+    /// two silence opcodes nothing is refused: compiled code serves them
+    /// through the interpreter's handler, which tells their observers.
+    pub(crate) fn check_support(&mut self, observes: impl Fn(Opcode) -> bool) -> Option<Refused> {
+        let beyond = (0..=u8::MAX)
+            .filter_map(Opcode::from_u8)
+            .filter(|opcode| !matches!(opcode, Opcode::BeginSilence | Opcode::EndSilence))
+            .any(observes);
+        if !beyond {
+            return None;
+        }
+        self.off();
+        self.set_up.then_some(Refused::ObservedOpcode)
     }
 
     /// How the tier runs.

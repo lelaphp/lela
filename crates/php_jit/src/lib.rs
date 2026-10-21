@@ -30,14 +30,18 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use php_engine::api::raising::{self, Level};
 use php_engine::tier::{
-    Extension, ExtensionBuilder, Flow, FrameRef, Refusal, Request, Site, Start, StartupIni, Thrown,
-    Tier,
+    self, Extension, ExtensionBuilder, Flow, FrameRef, Refusal, Request, Site, Start, StartupIni,
+    Thrown, Tier,
 };
+use php_unit::Opcode;
 
 mod compiler;
 mod dispatch;
 mod lower;
+#[cfg(test)]
+mod observed;
 mod policy;
 mod record;
 mod table;
@@ -114,8 +118,12 @@ pub(crate) struct JitEngine {
 pub(crate) struct Shared {
     policy: policy::Policy,
     backend: Option<lower::Backend>,
+    /// Why php would refuse the tier as it starts, which the first
+    /// request raises as php's startup warning.
+    refused: Option<policy::Refused>,
     started: Box<[policy::Note]>,
-    /// Whether a request wrote the start's lines yet: once per engine.
+    /// Whether a request wrote the start's warning and lines yet: once
+    /// per engine.
     told: AtomicBool,
     /// The engine's `PERF` outputs, which every epoch's table writes to.
     perf: table::Outputs,
@@ -137,20 +145,30 @@ impl JitEngine {
         reason = "an engine start answers a Refusal where it fails; this one never does"
     )]
     fn new(start: &Start) -> Result<JitEngine, Refusal> {
-        Ok(JitEngine::of(start.ini()))
+        Ok(JitEngine::over(
+            start.ini(),
+            |opcode| tier::observes(start, opcode),
+            lower::Backend::new,
+        ))
     }
 
-    /// The state over the startup ini: the `Policy` as the directives
-    /// say, the host's `Backend` over the kernels `enter` lists, or the
-    /// tier `Off` where the host has none, the lines its start logged,
-    /// and the [`compiler::Compiler`] it runs.
+    /// The state over the startup ini of an engine whose extensions
+    /// observe no opcode: the `Policy` as the directives say, the host's
+    /// `Backend` over the kernels `enter` lists, or the tier `Off` where
+    /// the host has none, the lines its start logged, and the
+    /// [`compiler::Compiler`] it runs.
+    #[cfg(test)]
     fn of(ini: &StartupIni) -> JitEngine {
-        JitEngine::over(ini, lower::Backend::new)
+        JitEngine::over(ini, |_| false, lower::Backend::new)
     }
 
-    /// [`JitEngine::of`] with the `Backend` `backend` makes for the host.
+    /// The state over the startup ini where `observes` says which
+    /// opcodes the engine's extensions observe, which refuses the tier
+    /// past the silence opcodes ([`policy::Policy::check_support`]),
+    /// with the `Backend` `backend` makes for the host.
     fn over(
         ini: &StartupIni,
+        observes: impl Fn(Opcode) -> bool,
         backend: impl FnOnce(
             &policy::Policy,
             lower::Symbols,
@@ -158,6 +176,7 @@ impl JitEngine {
     ) -> JitEngine {
         let mut started = Vec::new();
         let mut policy = policy::Policy::from_ini(ini, &mut started);
+        let refused = policy.check_support(observes);
         let backend = if policy.mode() == policy::Mode::Off {
             None
         } else {
@@ -175,6 +194,7 @@ impl JitEngine {
         let shared = Arc::new(Shared {
             policy,
             backend,
+            refused,
             started: started.into_boxed_slice(),
             told: AtomicBool::new(false),
             perf,
@@ -185,9 +205,12 @@ impl JitEngine {
         }
     }
 
-    /// The first request's start writes the lines the engine's start
-    /// logged, once and where `opcache.jit_debug` asks for any line, so
-    /// php's default writes nothing (`jit-design.md` §4).
+    /// The first request's start raises the warning of a refused tier,
+    /// php's `zend_error` from `zend_jit_check_support`, at `Unknown` on
+    /// line 0 as a diagnostic of the engine's start is shown, and writes
+    /// the lines the engine's start logged, where `opcache.jit_debug`
+    /// asks for any line, so php's default writes nothing; each once per
+    /// engine (`jit-design.md` §4, §4.3).
     #[expect(
         clippy::unnecessary_wraps,
         reason = "a request start answers a Thrown where it fails; this one never does"
@@ -197,13 +220,21 @@ impl JitEngine {
             return Ok(());
         };
         let shared = &engine.shared;
-        if !shared.policy.debugs() || shared.told.swap(true, Ordering::Relaxed) {
+        let refused = shared.refused;
+        if (refused.is_none() && !shared.policy.debugs())
+            || shared.told.swap(true, Ordering::Relaxed)
+        {
             return Ok(());
         }
         let mut lines = String::new();
-        for note in &shared.started {
-            // Writing to a `String` does not fail.
-            writeln!(lines, "{note}").unwrap_or_default();
+        if shared.policy.debugs() {
+            for note in &shared.started {
+                // Writing to a `String` does not fail.
+                writeln!(lines, "{note}").unwrap_or_default();
+            }
+        }
+        if let Some(refused) = refused {
+            raising::startup(req, Level::Warning, &refused.to_string());
         }
         req.response_mut().write_stderr(lines.as_bytes());
         Ok(())
@@ -236,9 +267,11 @@ mod tests {
     #[test]
     fn a_host_with_no_backend_runs_off() {
         let asked = [("opcache.jit", "tracing"), ("opcache.jit_debug", "0xfffff")];
-        let none = JitEngine::over(&ini(&asked), |_, _| {
-            Err(crate::lower::Unsupported("a test's host"))
-        });
+        let none = JitEngine::over(
+            &ini(&asked),
+            |_| false,
+            |_, _| Err(crate::lower::Unsupported("a test's host")),
+        );
         assert_eq!(none.shared.policy.mode(), Mode::Off);
         assert!(none.shared.backend.is_none());
         assert!(!none.shared.policy.debugs());

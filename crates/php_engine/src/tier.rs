@@ -43,6 +43,9 @@ pub use crate::api::request::Request;
 /// thread as ADR-0010's Threads has them: started through the engine's
 /// one home and joined before every fork.
 pub use crate::fork::{Parked, Worker};
+/// Whether the bundle observes an opcode, which the compiled tier's start
+/// asks before it runs (`jit-design.md` §4.3, *Observed opcodes*).
+pub use crate::observer::observes;
 pub use php_compile::Hooked;
 pub use php_heap::{Fatal, FrameRef};
 
