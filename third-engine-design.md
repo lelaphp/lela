@@ -693,11 +693,11 @@ The set is declared once in `seams.toml`, as its `[[seam]]` rows, and `xtask sta
 | ops | ops.lock | 209 |  |
 | api | api.lock | 1499 | 1500 |
 | sapi | sapi.lock | 58 |  |
-| tier | tier.lock | 118 |  |
+| tier | tier.lock | 119 |  |
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 410 |  |
 
-<!-- /computed in=f04e622a4c6b6cf8c57cc5943d35de5954c46437ab96f32e26f55b123902916c out=d78d1a00d5e9819481b4ac6ee4036eb65f8e35e76309da01d0041dd04da17ebc -->
+<!-- /computed in=6b50c204273710a766bcaa9526cec2d78d88452ff12d0bafc4bef66dac29d84f out=4ad899c5b949f00f63f3b1a4e115ddf530c455c74dea9b770cf22e1bb2cbb7bc -->
 
 What a lock holds that its row does not say. `heap.lock` carries the VM stack's entry slot and its peers, `VmStack::entry`, `push_entry`, `current` and `MapTable::base`. `tier.lock` is the widening of `php_engine` toward the tier, in two sections: the face, a few dozen items reviewed one by one, and the kernels named by `php_jit`'s `kernels!` list, about three hundred, generated from the list and diffed as one section. `process.lock` is `php_process`'s surface, whose one consumer is `php_engine`. `link.lock` is `php_link`'s surface, the linker and the linked class record that the compiler and the engine both call (ADR-0012). Dax's `effects.lock` is retired, its content being `ops.lock`'s effects column. A lock is one of three kinds, and `xtask api-check` regenerates each from what it is a lock of: the public items of the crate the lock lives with (`heap.lock`, `process.lock`, `unit.lock`, `link.lock`, `api.lock`, and the harness's own `xtask.lock`), or of one module of its producer (`layer.lock`, where a crate outside the seam's consumers that `use`s the module fails); what the consumers import from the producer (`sapi.lock`, `tier.lock`, which is why both are headers carrying nothing until a consumer exists); or the rows of the file the seam is generated from (`ops.lock`, rendered from `ops.toml`'s `[[op]]` rows). All three fail on any difference; adding an item means committing the new lock line with the code. This is how "smallest possible codebase" is measured at the interface, where callers pay, not only in lines.
 

@@ -7,8 +7,8 @@
 //! The tier declares its state as an extension does (`jit-design.md`
 //! §4): `jit.mode` and `jit.compile`, and `JitEngine`, whose `policy`
 //! reads php's `opcache.jit*` directives at engine start. Under
-//! `Mode::Off` a safepoint answers `Continue` before it reads any word,
-//! and an engine bound to `Jit` runs as one bound to `Nop` does;
+//! `Mode::Off` the engine binds `Nop`'s loop (`Jit::asked`), so it runs
+//! as one bound to `Nop` does and no safepoint reads a word;
 //! otherwise a hot safepoint records (`dispatch`, `record`) and the
 //! pipeline compiles what it recorded through the engine's `Backend`
 //! and publishes it in the epoch's trace table (`compiler`); the next
@@ -32,8 +32,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use php_engine::api::raising::{self, Level};
 use php_engine::tier::{
-    self, Extension, ExtensionBuilder, Flow, FrameRef, Refusal, Request, Site, Start, StartupIni,
-    Thrown, Tier,
+    self, Extension, ExtensionBuilder, Flow, FrameRef, Refusal, Request, Site, Start, Started,
+    StartupIni, Thrown, Tier,
 };
 use php_unit::Opcode;
 
@@ -58,17 +58,24 @@ mod enter;
 pub use enter::bench;
 
 /// The compiled tier (`jit-design.md` §2.4): asked at the loop's three
-/// safepoints, it visits the word the site carries, and under `Mode::Off`
-/// answers [`Flow::Continue`] before it reads it, so it touches no shared
-/// state and the loop runs `frame.opline` as it would under `Nop`.
+/// safepoints, it visits the word the site carries; under `Mode::Off`
+/// it is never asked, the engine bound to `Nop`'s loop ([`Jit::asked`]).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Jit;
 
 impl Tier for Jit {
-    #[inline(always)] // jit-design.md §4: one constant under Mode::Off, so the branch on `Flow` folds as `Nop`'s does
-    #[allow(clippy::inline_always)]
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
         dispatch::safepoint(req, frame, site)
+    }
+
+    /// The engine binds `Jit`'s loop only where the tier runs
+    /// ([`policy::Bound`]); under `Off` it binds `Nop`'s, so the loop
+    /// pays nothing at a safepoint, as php's VM keeps its own handlers
+    /// where its compiled tier does not start.
+    fn asked(started: &Started<'_>) -> bool {
+        started
+            .engine::<JitEngine>()
+            .is_some_and(|engine| engine.shared.bound.asked())
     }
 
     /// The tier's state (`jit-design.md` §4): its two directives,
@@ -117,6 +124,8 @@ pub(crate) struct JitEngine {
 #[derive(Debug)]
 pub(crate) struct Shared {
     policy: policy::Policy,
+    /// Whether the engine binds `Jit`'s loop ([`Jit::asked`]).
+    bound: policy::Bound,
     backend: Option<lower::Backend>,
     started: Box<[policy::Note]>,
     /// Whether a request wrote the start's warning and lines yet: once
@@ -180,12 +189,12 @@ impl JitEngine {
         let backend = if policy.mode() == policy::Mode::Off {
             None
         } else {
-            let made = backend(&policy, enter::wrapped::symbols()).ok();
-            if made.is_none() {
-                policy.off();
-            }
-            made
+            backend(&policy, enter::wrapped::symbols()).ok()
         };
+        let bound = policy.bound(backend.is_some());
+        if backend.is_none() {
+            policy.off();
+        }
         let perf = if policy.mode() == policy::Mode::Off {
             table::Outputs::none()
         } else {
@@ -193,6 +202,7 @@ impl JitEngine {
         };
         let shared = Arc::new(Shared {
             policy,
+            bound,
             backend,
             started: started.into_boxed_slice(),
             told: AtomicBool::new(false),
@@ -258,6 +268,52 @@ mod tests {
         assert!(asked.shared.backend.is_some(), "this host has a backend");
         let lane = JitEngine::of(&ini(&[("jit.mode", "force")]));
         assert_eq!(lane.shared.policy.mode(), Mode::Force);
+    }
+
+    /// The engine start decides once how the engine binds the tier
+    /// (#3133): `Nop`'s loop wherever php's tier never starts or is set
+    /// up and not on, `Jit`'s only where it runs.
+    #[test]
+    fn the_engine_start_binds_jits_loop_only_where_the_tier_runs() {
+        use crate::policy::Bound;
+        let bound = |asked: &[(&str, &str)], host: &'static str| {
+            JitEngine::over(&ini(asked), host, |_| false, crate::lower::Backend::new)
+                .shared
+                .bound
+        };
+        let tracing = ("opcache.jit", "tracing");
+        for (asked, host, expected) in [
+            (&[][..], "", Bound::Never),
+            (&[("opcache.jit", "disable")][..], "", Bound::Never),
+            (&[("opcache.jit", "sideways")][..], "", Bound::Never),
+            (
+                &[tracing, ("opcache.jit_buffer_size", "0")][..],
+                "",
+                Bound::Never,
+            ),
+            (&[tracing, ("opcache.enable", "0")][..], "", Bound::Never),
+            (&[tracing][..], "cli", Bound::Never),
+            (&[("opcache.jit", "off")][..], "", Bound::Runtime),
+            (&[tracing][..], "", Bound::On),
+            (
+                &[tracing, ("opcache.enable_cli", "1")][..],
+                "cli",
+                Bound::On,
+            ),
+            (&[("jit.mode", "force")][..], "", Bound::On),
+        ] {
+            assert_eq!(bound(asked, host), expected, "{asked:?} on {host:?}");
+            assert_eq!(expected.asked(), expected == Bound::On);
+        }
+        let refused = JitEngine::over(&ini(&[tracing]), "", |_| true, crate::lower::Backend::new);
+        assert_eq!(refused.shared.bound, Bound::Never, "a refused tier");
+        let unbacked = JitEngine::over(
+            &ini(&[tracing]),
+            "",
+            |_| false,
+            |_, _| Err(crate::lower::Unsupported("a test's host")),
+        );
+        assert_eq!(unbacked.shared.bound, Bound::Never, "no backend");
     }
 
     /// A host with no `Backend` runs the tier `Off` (`jit-design.md`

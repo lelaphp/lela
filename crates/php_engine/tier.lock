@@ -57,6 +57,7 @@ tier::SafepointIdx
 tier::Sample
 tier::Site
 tier::Start
+tier::Started
 tier::StartupIni
 tier::Stepped
 tier::Thrown

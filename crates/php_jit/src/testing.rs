@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use php_engine::test::{Capture, Engine, Served};
 use php_engine::tier::{
-    self, Extension, ExtensionBuilder, Flow, FrameRef, Request, Site, StartupIni, Tier,
+    self, Extension, ExtensionBuilder, Flow, FrameRef, Request, Site, Started, StartupIni, Tier,
 };
 use php_unit::decl::{IniDecl, Name};
 
@@ -178,6 +178,10 @@ pub(crate) struct Lane;
 impl Tier for Lane {
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
         crate::dispatch::safepoint(req, frame, site)
+    }
+
+    fn asked(started: &Started<'_>) -> bool {
+        <crate::Jit as Tier>::asked(started)
     }
 
     fn extension() -> Option<Extension> {

@@ -444,6 +444,99 @@ fn under_off_no_word_is_written() {
     assert!(spied.unwrap_or_default().written > 0);
 }
 
+/// What the loop asked a tier bound as `Jit` is over a serving: each
+/// site it was asked at, and the back edges whose word the visit wrote.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Asked {
+    loops: u32,
+    entries: u32,
+    returns: u32,
+    loops_written: u32,
+}
+
+/// `Lane` bound as the `jit` build binds `Jit` ([`Tier::asked`]), with
+/// every site it is asked at counted and a back edge's word read before
+/// and after its visit.
+struct Counted;
+
+impl Tier for Counted {
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+        let halves = |req: &Request| {
+            let word = tier::word(req, frame, site.idx());
+            [0, 1].map(|half| word.halves()[half].load(Ordering::Relaxed))
+        };
+        let before = halves(req);
+        let flow = super::safepoint(req, frame, site);
+        let written = before != halves(req);
+        let asked = req.state::<Asked>();
+        match site {
+            Site::Loop(_) => {
+                asked.loops += 1;
+                asked.loops_written += u32::from(written);
+            }
+            Site::Entry => asked.entries += 1,
+            Site::Return(_) => asked.returns += 1,
+        }
+        flow
+    }
+
+    fn asked(started: &tier::Started<'_>) -> bool {
+        <crate::Jit as Tier>::asked(started)
+    }
+
+    fn extension() -> Option<Extension> {
+        let mut ini = crate::policy::ini();
+        ini.extend(testing::declared(&testing::OPCACHE));
+        Some(
+            ExtensionBuilder::default()
+                .ini(ini)
+                .engine_state(crate::JitEngine::new)
+                .request_state::<Asked>()
+                .build("jit"),
+        )
+    }
+}
+
+/// A tier that is `Off` is never asked (#3133): the engine binds `Nop`'s
+/// loop, so no loop's back edge reads its word or bumps its heat, and
+/// no call or return asks either, under a zero buffer, G1's setting, as
+/// under `opcache.jit=disable` and `off` and on the command line without
+/// `opcache.enable_cli`. Under tracing the same program asks at every
+/// back edge and bumps the header's heat.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_tier_that_is_off_is_asked_at_no_back_edge() {
+    let program = "function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $i; } return $s; }
+        for ($j = 0; $j < 5; $j++) { echo f($j); }";
+    for (host, off) in [
+        (
+            "",
+            &[("opcache.jit", "tracing"), ("opcache.jit_buffer_size", "0")][..],
+        ),
+        ("", &[("opcache.jit", "disable")]),
+        ("", &[("opcache.jit", "off")]),
+        ("cli", &[("opcache.jit", "tracing")]),
+    ] {
+        let engine = testing::engine_on::<Counted>(host, off);
+        let (served, asked) = testing::Scratch::new().serve_kept::<Asked>(&engine, program);
+        assert_eq!(testing::stdout(&served), "00136", "{off:?} on {host:?}");
+        assert_eq!(
+            asked.unwrap_or_default(),
+            Asked::default(),
+            "{off:?} on {host:?}"
+        );
+    }
+    let on = [("opcache.jit", "tracing"), ("opcache.jit_hot_loop", "255")];
+    let scratch = testing::Scratch::new();
+    let (served, asked) = scratch.serve_kept::<Asked>(&testing::engine::<Counted>(&on), program);
+    assert_eq!(testing::stdout(&served), "00136");
+    let asked = asked.unwrap_or_default();
+    // The back edges of `f`'s loop, ten over its five calls, and of
+    // `$main`'s, five, each bumping its header's heat.
+    assert_eq!((asked.loops, asked.loops_written), (15, 15), "{asked:?}");
+    assert!(asked.entries >= 6 && asked.returns >= 5, "{asked:?}");
+}
+
 /// A loop in `$main` that no call activates is a root of its own: the
 /// entry's recording stops at the `eval`, whose code is no root, and the
 /// loop's header claims when its back-edge visits it, the recording

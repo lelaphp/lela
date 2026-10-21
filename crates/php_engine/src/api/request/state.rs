@@ -24,6 +24,18 @@ pub(crate) struct StateSlots {
 }
 
 impl StateSlots {
+    /// The engine state of type `E` among `states`, the engine's, as
+    /// [`Request::engine`] and the tier's start read it; `None` for a
+    /// type no extension built.
+    pub(crate) fn engine_state<'s, E: Send + Sync + 'static>(
+        &self,
+        states: &'s [Box<dyn Any + Send + Sync>],
+    ) -> Option<&'s E> {
+        states
+            .get(self.engine.get(TypeId::of::<E>())?)?
+            .downcast_ref::<E>()
+    }
+
     /// The places the bundle's `extensions` declare request states at,
     /// in bundle order, and the engine states `engine` holds.
     pub(crate) fn of(
@@ -242,8 +254,7 @@ impl Request {
     /// built, where the design names a bug.
     #[must_use]
     pub fn engine<E: Send + Sync + 'static>(&self) -> Option<&E> {
-        let at = self.shared.state_slots.engine.get(TypeId::of::<E>())?;
-        self.shared.engine_states.get(at)?.downcast_ref::<E>()
+        (self.shared.state_slots).engine_state(&self.shared.engine_states)
     }
 
     /// Every value of type `T` an extension of the bundle handed over

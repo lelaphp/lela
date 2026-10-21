@@ -65,6 +65,41 @@ pub(crate) enum Mode {
     ExitFuzz,
 }
 
+/// Whether the engine's loop asks the tier at all, decided once at
+/// engine start from the [`Policy`] and the host's `Backend`, which is
+/// the one bit `Jit::asked` answers the engine with: the loop bound to
+/// `Nop` where the tier can never compile a trace, `Jit`'s where it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Bound {
+    /// The tier never runs in this process: opcache does not start for
+    /// the host, `opcache.jit=disable`, a refused setting, a buffer of
+    /// no bytes ([`SetUp`]), a refusal of `zend_jit_check_support`, or a
+    /// host with no `Backend`. php's VM keeps its own handlers.
+    Never,
+    /// Set up and not on, `opcache.jit=off` with a buffer, which php may
+    /// turn on from a request with `ini_set('opcache.jit', 'tracing')`
+    /// (`zend_jit_config`, `Z/ext/opcache/jit/zend_jit.c:3646-3700`). It
+    /// binds `Nop`'s loop as `Never` does: php gives an op array its
+    /// counters as it persists it and only while `JIT_G(on)`
+    /// (`Z/ext/opcache/zend_persist.c:721-726`, `:1471-1473`), so code
+    /// cached under `off` runs php's own handlers whatever is set later,
+    /// and this tier reads the startup ini alone, so it runs no trace
+    /// whatever a request sets.
+    Runtime,
+    /// The tier runs: tracing, or a lane `jit.mode` names.
+    On,
+}
+
+impl Bound {
+    /// Whether the engine binds `Jit`'s loop.
+    pub(crate) fn asked(self) -> bool {
+        match self {
+            Bound::Never | Bound::Runtime => false,
+            Bound::On => true,
+        }
+    }
+}
+
 /// Where a trace compiles: on the engine's compile thread, or on the
 /// request's at the claim (`jit.compile`). `Force` and `ExitFuzz` imply
 /// `Inline`, and so does an `opcache.jit_debug` that asks for a root's
@@ -517,6 +552,17 @@ impl Policy {
             if self.set_up == SetUp::Yes {
                 self.set_up = SetUp::Refused(Refused::ObservedOpcode);
             }
+        }
+    }
+
+    /// How the engine binds the tier, for a host whose `Backend` was
+    /// `backed`, made, where the directives asked for one ([`Bound`]).
+    pub(crate) fn bound(&self, backed: bool) -> Bound {
+        match (self.mode, self.set_up) {
+            (Mode::Off, SetUp::Yes) => Bound::Runtime,
+            (Mode::Off, _) => Bound::Never,
+            _ if !backed => Bound::Never,
+            _ => Bound::On,
         }
     }
 

@@ -1618,15 +1618,17 @@ impl Shared {
     }
 
     /// The opcodes the bundle observes, asked of each extension once its
-    /// engine start is over, and the loop bound to them: the one that
-    /// tells their observers where any is declared and the one with no
-    /// test where none is, as php resolves an opline's handler when it
-    /// compiles it (design §5.8, §7.1).
+    /// engine start is over, and the loop bound to them and to the tier
+    /// the engine started: the one that tells their observers where any
+    /// is declared and the one with no test where none is, as php
+    /// resolves an opline's handler when it compiles it (design §5.8,
+    /// §7.1), and `Nop`'s where the tier does not serve the engine
+    /// ([`crate::tier::Tier::asked`]).
     fn observe_opcodes(&mut self, start: &Start, bind_loops: BindLoops) {
         (self.supplied.observers).retain(|(_, registered)| registered.is_none_or(|r| r(start)));
         self.observers = self.supplied.observers.count();
         self.opcodes = crate::observer::ObservedOpcodes::start(&self.supplied.opcodes, start);
-        self.loops = bind_loops(&self.opcodes);
+        self.loops = bind_loops(self);
     }
 
     /// The tables the compiler reads, as [`Declared`].
@@ -3710,8 +3712,8 @@ impl EngineBuilder {
                 trace_to: self.trace_to,
                 #[cfg(debug_assertions)]
                 sense_leaks: self.sense_leaks,
-                // No opcode is declared until the extensions have started.
-                loops: (self.bind_loops)(&crate::observer::ObservedOpcodes::default()),
+                // No loop is bound until the extensions have started.
+                loops: Loops::unstarted(),
                 locked: Vec::new(),
                 script_encodings: Vec::new(),
                 units,
