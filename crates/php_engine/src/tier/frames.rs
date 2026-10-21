@@ -290,7 +290,7 @@ mod tests {
 
     use crate::api::abi::{Extension, ExtensionBuilder};
     use crate::api::request::{Raised, Request};
-    use crate::engine::{Engine, EngineBuilder};
+    use crate::engine::Engine;
     use crate::tests::stepped::{Stepper, Stepping};
     use crate::tier::{Flow, Site, Tier};
 
@@ -312,10 +312,9 @@ mod tests {
         ))
     }
 
-    /// What the tier read at every opline it stood at, or of every
-    /// evaluation it served, and whether it has taken the request over:
-    /// its request state, read back by the test once the request ended
-    /// ([`super::super::serve_kept`]).
+    /// What the evaluating tier read of every evaluation it served, and
+    /// whether it has taken the request over: its request state, read
+    /// back by the test once the request ended ([`kept`]).
     #[derive(Default)]
     struct Seen {
         lines: Vec<String>,
@@ -329,19 +328,14 @@ mod tests {
             .build("seeing")
     }
 
-    /// What `source` echoed served on the engine `builder` makes, and
-    /// what the tier saw.
-    fn seen(builder: EngineBuilder, source: &str) -> (String, Vec<String>) {
-        let (served, seen) = super::super::serve_kept::<Seen>(
-            &builder.build(),
-            &std::env::current_dir().unwrap_or_default(),
-            b"Standard input code",
-            source,
-        );
-        (
-            served.stdout_text(),
-            seen.map(|seen| seen.lines).unwrap_or_default(),
-        )
+    /// What `source` echoed served on `engine`, and the request state of
+    /// type `T` its tier kept ([`crate::tier::serve_kept`]).
+    fn kept<T: Send + 'static>(engine: &Engine, source: &str) -> (String, T) {
+        let dir = std::env::current_dir().expect("the test has a working directory");
+        let (served, kept) =
+            crate::tier::serve_kept::<T>(engine, &dir, b"Standard input code", source);
+        let kept = kept.expect("the tier declared its state, and the request built it");
+        (served.stdout_text(), kept)
     }
 
     /// What `source` echoed under the shared debugging double
@@ -350,11 +344,8 @@ mod tests {
         let engine = Engine::cli_builder()
             .tier::<Stepper<false, false, true>>()
             .build();
-        let dir = std::env::current_dir().expect("the test has a working directory");
-        let (served, kept) =
-            super::super::serve_kept::<Stepping>(&engine, &dir, b"Standard input code", source);
-        let kept = kept.expect("the stepper declared its state, and the request built it");
-        (served.stdout_text(), kept.seen)
+        let (out, stepping) = kept::<Stepping>(&engine, source);
+        (out, stepping.seen)
     }
 
     /// Every opline of the main op array and of the function it calls
@@ -432,12 +423,12 @@ mod tests {
         let code = ExtensionBuilder::default()
             .register(Code(code.to_vec()))
             .build("init");
-        seen(
-            Engine::cli_builder()
-                .tier::<Initializer>()
-                .extensions(&[code]),
-            source,
-        )
+        let engine = Engine::cli_builder()
+            .tier::<Initializer>()
+            .extensions(&[code])
+            .build();
+        let (out, seen) = kept::<Seen>(&engine, source);
+        (out, seen.lines)
     }
 
     /// Statements evaluated under a name of the host's before the
