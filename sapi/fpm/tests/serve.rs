@@ -35,15 +35,21 @@ fn tree(name: &str) -> PathBuf {
     dir
 }
 
+/// What a master in `dir` logs to, the slow log its pool may name, and
+/// where its stderr goes when its [`Pool`] asks.
+const FPM_LOG: &str = "fpm.log";
+const SLOW_LOG: &str = "slow.log";
+const STDERR: &str = "stderr";
+
 /// A configuration in `dir` of one static child listening on
-/// [`socket`], logging to `fpm.log`, with `more` after it.
+/// [`socket`], logging to [`FPM_LOG`], with `more` after it.
 fn conf(dir: &Path, more: &str) -> PathBuf {
     let path = dir.join("php-fpm.conf");
     std::fs::write(
         &path,
         format!(
             "[global]\nerror_log = {}\n[www]\nlisten = {}\npm = static\npm.max_children = 1\n{more}",
-            dir.join("fpm.log").display(),
+            dir.join(FPM_LOG).display(),
             socket(dir).display()
         ),
     )
@@ -83,8 +89,8 @@ struct Master {
     child: Option<Child>,
 }
 
-/// What a master logged, read once it has exited: `fpm.log` and
-/// `slow.log` of its directory, empty where it wrote none.
+/// What a master logged, read once it has exited: [`FPM_LOG`] and
+/// [`SLOW_LOG`] of its directory, empty where it wrote none.
 struct Log {
     fpm: String,
     slow: String,
@@ -109,7 +115,7 @@ impl Master {
             command.args(["-d", define]);
         }
         let stderr = if pool.stderr {
-            std::fs::File::create(master.dir.join("stderr"))
+            std::fs::File::create(master.dir.join(STDERR))
                 .expect("the master's stderr is made")
                 .into()
         } else {
@@ -134,11 +140,7 @@ impl Master {
 
     /// The master's pid, while it runs.
     fn pid(&self) -> Option<Pid> {
-        let id = self.child.as_ref()?.id();
-        i32::try_from(id)
-            .ok()
-            .filter(|&pid| pid > 0)
-            .map(Pid::from_raw)
+        one_process(i64::from(self.child.as_ref()?.id()))
     }
 
     /// A connection to the pool, tried for ten seconds.
@@ -171,8 +173,8 @@ impl Master {
         self.halt(signal);
         let read = |file: &str| std::fs::read_to_string(self.dir.join(file)).unwrap_or_default();
         Log {
-            fpm: read("fpm.log"),
-            slow: read("slow.log"),
+            fpm: read(FPM_LOG),
+            slow: read(SLOW_LOG),
         }
     }
 
@@ -189,7 +191,7 @@ impl Master {
         }
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(10) {
-            if !matches!(child.try_wait(), Ok(None)) {
+            if let Ok(Some(_)) = child.try_wait() {
                 return;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -217,7 +219,7 @@ fn a_configuration_test_says_the_file_is_sound() {
         .args(["-n", "-t", "-y"])
         .arg(&path)
         .output()
-        .unwrap();
+        .expect("php-fpm -t runs");
     std::fs::remove_dir_all(&dir).ok();
     let said = String::from_utf8_lossy(&out.stderr);
     let expected = format!(
@@ -233,7 +235,10 @@ fn a_configuration_test_says_the_file_is_sound() {
 /// or not.
 #[test]
 fn with_no_file_named_the_configuration_is_the_builds_sysconfdirs() {
-    let out = php_fpm().args(["-n", "-t"]).output().unwrap();
+    let out = php_fpm()
+        .args(["-n", "-t"])
+        .output()
+        .expect("php-fpm -t runs");
     let said = String::from_utf8_lossy(&out.stderr);
     let expected = format!("{}/php-fpm.conf", php_sapi::PHP_SYSCONFDIR);
     assert!(said.contains(&expected), "{out:?}");
@@ -393,20 +398,24 @@ fn quit_child(name: &str, busy: bool) -> (String, String) {
     let stream = master.connect();
     let served = std::thread::spawn(move || response(stream, &script));
     let started = Instant::now();
-    let mut child = String::new();
-    while child.is_empty() && started.elapsed() < Duration::from_secs(10) {
+    let mut child = None;
+    while child.is_none() && started.elapsed() < Duration::from_secs(10) {
         std::thread::sleep(Duration::from_millis(10));
-        child = std::fs::read_to_string(&pid).unwrap_or_default();
+        child = std::fs::read_to_string(&pid)
+            .ok()
+            .and_then(|written| written.trim().parse().ok())
+            .and_then(one_process);
     }
+    let child = child.expect("the child wrote its pid, one process's, within ten seconds");
     let body = if busy {
-        quit(&child);
+        quit(child);
         served.join().expect("the request's thread")
     } else {
         let body = served.join().expect("the request's thread");
-        quit(&child);
+        quit(child);
         body
     };
-    let log = master.dir().join("fpm.log");
+    let log = master.dir().join(FPM_LOG);
     let exited = format!("child {child} exited");
     let started = Instant::now();
     let mut line = None;
@@ -429,13 +438,19 @@ fn quit_child(name: &str, busy: bool) -> (String, String) {
     (body, line.unwrap_or_default())
 }
 
-/// `SIGQUIT` sent to the child whose pid `pid` spells, as a master
-/// finishing sends it. A pid of 0 or below is refused: `kill(2)` would
-/// signal the test runner's own process group, or every process it may.
-fn quit(pid: &str) {
-    let pid: i32 = pid.trim().parse().expect("the child wrote its pid");
-    assert!(pid > 0, "the child's pid {pid} names no one process");
-    kill(Pid::from_raw(pid), Signal::SIGQUIT).expect("the child is sent SIGQUIT");
+/// `raw` as the pid of one process, `None` for 0 or below, which
+/// `kill(2)` reads as the test runner's own process group, or every
+/// process it may signal, or past what a pid holds.
+fn one_process(raw: i64) -> Option<Pid> {
+    i32::try_from(raw)
+        .ok()
+        .filter(|&pid| pid > 0)
+        .map(Pid::from_raw)
+}
+
+/// `SIGQUIT` sent to the child `pid`, as a master finishing sends it.
+fn quit(pid: Pid) {
+    kill(pid, Signal::SIGQUIT).expect("the child is sent SIGQUIT");
 }
 
 /// A child sent `SIGQUIT` as it waits in `accept` ends on its own with
@@ -621,7 +636,7 @@ echo listed();
     let inode = |path: &Path| std::fs::metadata(path).map_or(0, |m| m.ino());
     let named = [
         (inode(Path::new("/dev/null")), "null"),
-        (inode(&master.dir().join("stderr")), "the master's stderr"),
+        (inode(&master.dir().join(STDERR)), "the master's stderr"),
         (inode(&script), "the script"),
     ];
     master.stop();
@@ -678,7 +693,7 @@ fn readable_php_fpm(dir: &Path) -> Command {
         return command;
     }
     let copy = dir.join("php-fpm");
-    std::fs::copy(&binary, &copy).unwrap();
+    std::fs::copy(&binary, &copy).expect("the binary is copied to be signed");
     let entitlements = dir.join("readable.plist");
     std::fs::write(
         &entitlements,
@@ -686,13 +701,13 @@ fn readable_php_fpm(dir: &Path) -> Command {
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
          <plist version=\"1.0\"><dict><key>com.apple.security.get-task-allow</key><true/></dict></plist>\n",
     )
-    .unwrap();
+    .expect("the entitlements are written");
     let signed = Command::new("codesign")
         .args(["-s", "-", "-f", "--entitlements"])
         .arg(&entitlements)
         .arg(&copy)
         .output()
-        .unwrap();
+        .expect("codesign runs");
     assert!(signed.status.success(), "{signed:?}");
     let mut command = Command::new(copy);
     command.arg("-R");
@@ -718,7 +733,7 @@ const NESTED: &[(&str, &str)] = &[
 /// `more`, each past its sixteen-digit room address, and the test
 /// directory as the engine resolved it; the entry's head is held here.
 fn slow_frames(name: &str, more: &str, files: &[(&str, &str)]) -> (Vec<String>, PathBuf) {
-    let directives = format!("slowlog = {{dir}}/slow.log\nrequest_slowlog_timeout = 1\n{more}");
+    let directives = format!("slowlog = {{dir}}/{SLOW_LOG}\nrequest_slowlog_timeout = 1\n{more}");
     let pool = Pool {
         directives: &directives,
         readable: true,
