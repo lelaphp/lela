@@ -895,9 +895,12 @@ fn a_process_fence_forks_in_the_binary_and_never_in_the_harness() {
 
 /// A `process` fence of a crate behind a feature the binary under test
 /// does not turn on is served by `php` built with that feature, and one
-/// of a crate it carries by the binary under test (#2721): in the
-/// fixture, `sapi/cli` turns `posix` on and not `zend_test`, and each
-/// stand-in prints its own name.
+/// of a crate it carries by the binary under test (#2721); under a
+/// regime that sets the tier's `jit.mode`, by `php` built with the
+/// tier's feature beside the crate's, where the binary under test would
+/// serve it with no tier (#2962): in the fixture, `sapi/cli` turns
+/// `posix` on and not `zend_test`, and each stand-in prints its own
+/// name.
 #[test]
 fn a_process_fence_is_served_by_a_php_carrying_its_crate_s_feature() {
     use std::os::unix::fs::PermissionsExt;
@@ -912,15 +915,28 @@ fn a_process_fence_is_served_by_a_php_carrying_its_crate_s_feature() {
         path
     };
     let binary = Binary::standing(&root, crate::oracle::hosts::CLI, stand_in("default"))
-        .featuring("zend_test", stand_in("featured"));
-    for (krate, served) in [("ext/zend_test", "featured"), ("ext/posix", "default")] {
+        .featuring(&["zend_test"], stand_in("featured"))
+        .featuring(&["zend_test", "jit"], stand_in("featured-tier"))
+        .featuring(&["jit"], stand_in("tier"));
+    let force = manifest.pin.regime("jit-force").unwrap();
+    for (krate, served, under_force) in [
+        ("ext/zend_test", "featured", "featured-tier"),
+        ("ext/posix", "default", "tier"),
+    ] {
         let krate = manifest.crate_named(krate).unwrap();
         let found = super::extract(&root, krate, None, Target::built()).unwrap();
         let [witness] = found.witnesses.as_slice() else {
             panic!("{found:#?}")
         };
-        let (ran, _) = judge::serve(&manifest.pin.oracle(), &binary, witness, None).unwrap();
+        let oracle = manifest.pin.oracle();
+        let (ran, _) = judge::serve(&oracle, &binary, witness, None).unwrap();
         assert_eq!(String::from_utf8_lossy(&ran.stdout).trim_end(), served);
+        let forced = super::fence::Witness {
+            regime: Some("jit-force".to_owned()),
+            ..witness.clone()
+        };
+        let (ran, _) = judge::serve(&oracle, &binary, &forced, Some(force)).unwrap();
+        assert_eq!(String::from_utf8_lossy(&ran.stdout).trim_end(), under_force);
     }
 }
 

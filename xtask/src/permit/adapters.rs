@@ -103,10 +103,7 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
     let (text, mut call) = match call {
         Ok(read) => read,
         Err(err) => {
-            println!(
-                "{}",
-                deny_output(&format!("permit could not judge this call: {err:#}"))
-            );
+            unjudged(&err);
             return Ok(());
         }
     };
@@ -171,14 +168,17 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
                 eprintln!("xtask permit: the decision stands but was not recorded: {err:#}");
             }
         }
-        Err(err) => {
-            println!(
-                "{}",
-                deny_output(&format!("permit could not judge this call: {err:#}"))
-            );
-        }
+        Err(err) => unjudged(&err),
     }
     Ok(())
+}
+
+/// The deny a call this build could not judge is, printed: why, `err`.
+fn unjudged(err: &anyhow::Error) {
+    println!(
+        "{}",
+        deny_output(&format!("permit could not judge this call: {err:#}"))
+    );
 }
 
 /// The audit entry of each approval that admitted an `Edit` or a

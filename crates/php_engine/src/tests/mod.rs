@@ -15,8 +15,9 @@
 //! face takes for a native and gives up (#2059, #2080), and the frames
 //! a fatal leaves, whose annexes leave with them (#2554), an
 //! extension's optimizer passes where the unit cache runs them (#2386),
-//! and the running execution's trace number across a fiber switch and a
-//! generator's resume (#2738).
+//! the running execution's trace number across a fiber switch and a
+//! generator's resume (#2738), and the request's storage as a native
+//! holds it, an `Emalloc` and a `FreshString` (design §5.13).
 
 use crate::api;
 
@@ -45,6 +46,8 @@ mod periodic;
 mod pool;
 mod statements;
 mod stepped;
+#[cfg(debug_assertions)]
+mod storage;
 #[cfg(debug_assertions)]
 mod table_copy;
 pub(crate) mod test_ext;

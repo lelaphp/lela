@@ -25,12 +25,13 @@
 
 use php_heap::FrameRef;
 
-use super::observer::{observed, scratch};
+use super::observer::observed;
 use super::test_ext::{Event, Phase, Recording, TestExt};
 use crate::api::abi::{Extension, ExtensionBuilder};
 use crate::api::request::{Opcode, Raised, Request};
 use crate::engine::{Engine, EngineBuilder};
 use crate::probe::Probe;
+use crate::test::Files;
 use crate::tier::{self, Flow, Site, Stepped, Tier};
 
 /// What a stepping tier keeps, its request state: how many handlers it
@@ -283,21 +284,22 @@ fn served(builder: fn() -> EngineBuilder, programs: &[Program]) -> (Vec<Seen>, u
         .build();
     let mut stdouts = Vec::new();
     for program in programs {
-        let dir = scratch(&format!("stepped_{}", program.name));
+        let files = Files::new(&format!("stepped-{}", program.name), &[]);
+        let dir = files.path();
         for (name, source) in program.beside {
-            std::fs::write(dir.join(name), source).ok();
+            files.write(name, source);
         }
         rec.mark(program.name);
         let main = dir.join("main.php");
-        std::fs::write(&main, program.source).ok();
+        files.write("main.php", program.source);
         let (out, kept) = tier::serve_kept::<Stepping>(
             &engine,
-            &dir,
+            dir,
             main.to_string_lossy().as_bytes(),
             program.source,
         );
         steps += kept.map_or(0, |kept| kept.steps);
-        stdouts.push(String::from_utf8_lossy(&out.stdout).into_owned());
+        stdouts.push(out.stdout_text());
     }
     rec.mark("end");
     let events = rec.events();

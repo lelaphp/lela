@@ -6,10 +6,10 @@
 use std::sync::atomic::Ordering;
 
 use php_engine::tier::{Epoch, FuncRef, SafepointIdx, StartupIni, Word};
-use php_unit::{OpArray, OplineIdx, Unit};
+use php_unit::{OpArray, Opcode, OplineIdx, Unit};
 
 use super::{
-    Claim, Compile, Holder, JitDebug, Mode, Note, Outcome, Place, Policy, Setting, State,
+    Claim, Compile, Holder, JitDebug, Mode, Note, Outcome, Place, Policy, Refused, Setting, State,
     TraceEvent, bad_stop, bump, claim, read, settle,
 };
 use crate::record::{Start, Stop};
@@ -27,8 +27,13 @@ fn ini(entries: &[(&str, &str)]) -> StartupIni {
 
 /// The `Policy` `entries` read to, with the lines it logged.
 fn read_ini(entries: &[(&str, &str)]) -> (Policy, Vec<Note>) {
+    read_on("", entries)
+}
+
+/// [`read_ini`] for the host `host` names.
+fn read_on(host: &str, entries: &[(&str, &str)]) -> (Policy, Vec<Note>) {
     let mut notes = Vec::new();
-    let policy = Policy::from_ini(&ini(entries), &mut notes);
+    let policy = Policy::from_ini(&ini(entries), host, &mut notes);
     (policy, notes)
 }
 
@@ -479,4 +484,117 @@ fn a_failed_attempt_keeps_its_stop_and_a_release_counts_none() {
     }
     assert_eq!(bad_stop(word, 0), None);
     assert_eq!(bad_stop(&Word::sealed(), 0), None);
+}
+
+/// php's `zend_jit_check_support` over the opcodes the extensions
+/// observe: one past the two silence opcodes runs the tier `Off` with
+/// its `opcache.jit_debug` bits cleared, refused with php's warning
+/// where php sets its tier up, `opcache.jit=off` among them, and with
+/// none where php never does; the silence opcodes alone refuse nothing.
+#[test]
+fn an_observed_opcode_past_the_silence_opcodes_runs_the_tier_off() {
+    let echo = |opcode| opcode == Opcode::Echo;
+    let silence = |opcode| matches!(opcode, Opcode::BeginSilence | Opcode::EndSilence);
+    let debug = ("opcache.jit_debug", "0x3f000");
+    for (asked, warned) in [
+        (&[("opcache.jit", "tracing"), debug][..], true),
+        (&[("opcache.jit", "off"), debug], true),
+        (&[("opcache.jit", "1205")], true),
+        (&[("opcache.jit", "tracing"), ("jit.mode", "force")], true),
+        (&[("opcache.jit", "disable"), ("jit.mode", "force")], false),
+        (&[("opcache.jit", "disable")], false),
+        (&[("opcache.jit", "1245")], false),
+        (
+            &[("opcache.jit", "tracing"), ("opcache.jit_buffer_size", "0")],
+            false,
+        ),
+    ] {
+        let (mut policy, _) = read_ini(asked);
+        policy.check_support(echo);
+        let refused = policy.refused();
+        assert_eq!(
+            refused,
+            warned.then_some(Refused::ObservedOpcode),
+            "{asked:?}"
+        );
+        assert_eq!(policy.mode(), Mode::Off, "{asked:?}");
+        assert!(!policy.debugs(), "{asked:?}");
+    }
+    let (mut policy, _) = read_ini(&[("opcache.jit", "tracing"), debug]);
+    policy.check_support(silence);
+    assert_eq!(policy.refused(), None);
+    assert_eq!(policy.mode(), Mode::Tracing);
+    assert!(policy.debugs());
+    assert_eq!(
+        Refused::ObservedOpcode.to_string(),
+        "JIT is incompatible with third party extensions that setup user opcode handlers. JIT disabled."
+    );
+}
+
+/// php sets its tier up only where opcache starts (`accel_startup`,
+/// `Z/ext/opcache/ZendAccelerator.c:3210-3220`): with `opcache.enable`
+/// on, and on the command line and in phpdbg with `opcache.enable_cli`
+/// on too, which no other host reads. Elsewhere the tier runs `Off` with
+/// no `opcache.jit_debug` bit, and an observed opcode refuses nothing,
+/// so no warning is raised; `jit.mode` names its lane whatever the two
+/// say, and refuses with php's warning only where php set its tier up.
+#[test]
+fn the_tier_is_set_up_only_where_opcache_starts() {
+    let echo = |opcode| opcode == Opcode::Echo;
+    let tracing = ("opcache.jit", "tracing");
+    let debug = ("opcache.jit_debug", "0x3000");
+    let cli_on = ("opcache.enable_cli", "1");
+    let disabled = ("opcache.enable", "0");
+    let force = ("jit.mode", "force");
+    for (host, asked, mode, warned) in [
+        ("cli", &[tracing, debug][..], Mode::Off, false),
+        ("phpdbg", &[tracing, debug], Mode::Off, false),
+        (
+            "cli",
+            &[tracing, debug, ("opcache.enable_cli", "0")],
+            Mode::Off,
+            false,
+        ),
+        ("cli", &[tracing, debug, cli_on], Mode::Tracing, true),
+        (
+            "phpdbg",
+            &[tracing, debug, ("opcache.enable_cli", "On")],
+            Mode::Tracing,
+            true,
+        ),
+        ("cli", &[tracing, debug, cli_on, disabled], Mode::Off, false),
+        ("cgi-fcgi", &[tracing, debug], Mode::Tracing, true),
+        (
+            "fpm-fcgi",
+            &[tracing, debug, ("opcache.enable_cli", "0")],
+            Mode::Tracing,
+            true,
+        ),
+        ("fpm-fcgi", &[tracing, debug, disabled], Mode::Off, false),
+        ("cli-server", &[tracing, debug], Mode::Tracing, true),
+        ("cli", &[force], Mode::Force, false),
+        ("cli", &[force, tracing], Mode::Force, false),
+        ("cli", &[force, tracing, cli_on], Mode::Force, true),
+        (
+            "cli",
+            &[("jit.mode", "exit-fuzz"), disabled],
+            Mode::ExitFuzz,
+            false,
+        ),
+    ] {
+        let (mut policy, _) = read_on(host, asked);
+        assert_eq!(policy.mode(), mode, "{host} {asked:?}");
+        assert_eq!(
+            policy.debugs(),
+            asked.contains(&debug) && mode != Mode::Off,
+            "{host} {asked:?}"
+        );
+        policy.check_support(echo);
+        assert_eq!(
+            policy.refused(),
+            warned.then_some(Refused::ObservedOpcode),
+            "{host} {asked:?}"
+        );
+        assert_eq!(policy.mode(), Mode::Off, "{host} {asked:?}");
+    }
 }

@@ -271,7 +271,6 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use std::sync::Mutex;
     use std::thread::ThreadId;
 
@@ -281,7 +280,7 @@ mod tests {
         Admission, Extension, ExtensionBuilder, Lookup, PostStartup, PreloadThread, Validation,
     };
     use crate::engine::Engine;
-    use crate::test::Capture;
+    use crate::test::{Capture, Files};
 
     /// Where each step stood: the thread a take ran on, and the thread
     /// each diagnostic was raised on, with whether its request was the
@@ -351,11 +350,14 @@ mod tests {
             .build(tag)
     }
 
-    fn served(dir: &Path, take: &str, preload: &str, program: &str) -> Vec<crate::test::Served> {
-        std::fs::create_dir_all(dir).ok();
+    /// The two requests an engine serves `program` with, `DIR` in it the
+    /// tree's directory, after its startup preloaded `preload` on a
+    /// thread whose take answers `take`; the tree holds `after.inc` beside.
+    fn served(files: &Files, take: &str, preload: &str, program: &str) -> Vec<crate::test::Served> {
+        files.write("preload.inc", preload);
+        files.write("after.inc", "<?php echo \"after\\n\";");
+        let dir = files.path();
         let script = dir.join("preload.inc");
-        std::fs::write(&script, preload).ok();
-        std::fs::write(dir.join("after.inc"), "<?php echo \"after\\n\";").ok();
         let engine = Engine::cli_builder()
             .extensions(&[preloading_on_a_thread(&dir.to_string_lossy())])
             .ini("t.preload", script.as_os_str().as_encoded_bytes())
@@ -364,7 +366,6 @@ mod tests {
         let program = program.replace("DIR", &dir.to_string_lossy());
         let first = engine.serve_capture(&program, Capture::default());
         let second = engine.serve_capture(&program, Capture::default());
-        std::fs::remove_dir_all(dir).ok();
         vec![first, second]
     }
 
@@ -373,15 +374,15 @@ mod tests {
     /// requests after are served on the host's thread, outside it.
     #[test]
     fn a_preload_that_takes_its_thread_is_served_on_it_and_no_request_after_is() {
-        let dir =
-            std::env::temp_dir().join(format!("engine-preload-thread-{}", std::process::id()));
-        let preload = std::env::temp_dir().canonicalize().unwrap_or_default();
-        let preload = preload
-            .join(dir.file_name().unwrap_or_default())
+        let files = Files::new("preload-thread", &[]);
+        let dir = files.path();
+        let preload = dir
+            .canonicalize()
+            .expect("the tree resolves")
             .join("preload.inc");
         let preload = preload.display();
         let served = served(
-            &dir,
+            &files,
             "1",
             "<?php echo \"preloading\\n\", $u; function on_thread() { return 'f'; }",
             "<?php echo on_thread(), \"\\n\", $v; include 'DIR/after.inc';",
@@ -416,7 +417,7 @@ mod tests {
         assert_eq!(
             served
                 .iter()
-                .map(|s| String::from_utf8_lossy(&s.stdout).into_owned())
+                .map(crate::test::Served::stdout_text)
                 .collect::<Vec<_>>(),
             [
                 format!(
@@ -436,21 +437,18 @@ mod tests {
     /// a file that exits on the thread fails it the same way.
     #[test]
     fn a_failed_take_or_an_exit_on_the_thread_fails_the_startup_with_status_one() {
-        let base =
-            std::env::temp_dir().join(format!("engine-preload-refused-{}", std::process::id()));
         let refused = served(
-            &base.join("take"),
+            &Files::new("preload-refused-take", &[]),
             "0",
             "<?php echo \"preloading\\n\";",
             "<?php echo 1;",
         );
         let exited = served(
-            &base.join("exit"),
+            &Files::new("preload-refused-exit", &[]),
             "1",
             "<?php echo \"preloading\\n\"; exit(0);",
             "<?php echo 1;",
         );
-        std::fs::remove_dir_all(&base).ok();
         assert_eq!(
             (
                 refused[0].stdout.as_slice(),
@@ -476,11 +474,11 @@ mod tests {
     /// refuses any other user with "Permission denied".
     #[test]
     fn a_preload_file_the_thread_may_not_open_names_why() {
-        let dir = std::env::temp_dir().join(format!("engine-preload-shut-{}", std::process::id()));
+        let files = Files::new("preload-shut", &[("shut/preload.inc", "<?php echo 1;")]);
+        let dir = files.path();
         let shut = dir.join("shut");
-        std::fs::create_dir_all(&shut).ok();
-        std::fs::write(shut.join("preload.inc"), "<?php echo 1;").ok();
-        std::fs::set_permissions(&shut, std::os::unix::fs::PermissionsExt::from_mode(0o000)).ok();
+        let mode = |mode| std::os::unix::fs::PermissionsExt::from_mode(mode);
+        std::fs::set_permissions(&shut, mode(0o000)).expect("the directory is shut");
         let engine = Engine::cli_builder()
             .extensions(&[preloading_on_a_thread(&dir.to_string_lossy())])
             .ini(
@@ -490,10 +488,9 @@ mod tests {
             .ini("t.take", "1")
             .build();
         let served = engine.serve_capture("<?php echo 1;", Capture::default());
-        std::fs::set_permissions(&shut, std::os::unix::fs::PermissionsExt::from_mode(0o755)).ok();
-        std::fs::remove_dir_all(&dir).ok();
+        std::fs::set_permissions(&shut, mode(0o755)).expect("the directory is opened again");
         let root = php_process::process::euid() == 0;
-        let stdout = String::from_utf8_lossy(&served.stdout);
+        let stdout = served.stdout_text();
         assert!(
             root || stdout.starts_with("\nWarning: PHP Startup: Failed to open stream: Permission denied in Unknown on line 0\n"),
             "{stdout}"
@@ -506,19 +503,18 @@ mod tests {
     /// time as php's child does, and the startup fails with status 1.
     #[test]
     fn a_deadline_armed_on_the_preload_thread_is_served() {
-        let base =
-            std::env::temp_dir().join(format!("engine-preload-deadline-{}", std::process::id()));
         let served = served(
-            &base,
+            &Files::new("preload-deadline", &[]),
             "1",
             "<?php set_time_limit(1); while (true) {}",
             "<?php echo 1;",
         );
         assert!(
-            String::from_utf8_lossy(&served[0].stdout)
+            served[0]
+                .stdout_text()
                 .contains("Maximum execution time of 1 second exceeded"),
             "{}",
-            String::from_utf8_lossy(&served[0].stdout)
+            served[0].stdout_text()
         );
         assert_eq!(served[0].exit_code, 1);
     }

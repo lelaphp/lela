@@ -8,6 +8,7 @@ The data files the design cites and the extraction records behind them; each is 
 ├── INDEX.md
 ├── api-lock-v0.md
 ├── compression-2826
+├── date-2830
 ├── documents-2829
 ├── extract.log
 ├── fileinfo
@@ -20,4 +21,4 @@ The data files the design cites and the extraction records behind them; each is 
 ├── syntax-extraction.md
 └── uri-storage-2832
 ```
-<!-- /computed in=6885a3710e09638f23cc038ebe51307994f4e30285378af57f2ff0ddef8696ce out=d6f3de59bda8f66bb3dd79b78ecdaffebd0a874f1c23277c1c43684866c1fd7d -->
+<!-- /computed in=513a9a7733b748d1a4c71ebb5d7a92af2cadfc1472e070f1fa72664b7151efcf out=e750f05882b6dfa908d77fc5fc6a7d790dd26759d2783ccfbc93f585138f70f3 -->

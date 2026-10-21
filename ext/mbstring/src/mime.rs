@@ -306,6 +306,32 @@ pub(crate) fn header_encode(
 ///  =?UTF-8?B?w7HDscOxw7HDscOxw7HDsQ==?="
 /// mb_encode_mimeheader(): Argument #2 ($charset) must be a valid encoding, "pass" given
 /// ```
+///
+/// A stateful charset is encoded a word at a time, each line closed back
+/// to ASCII before the fold, the first line shortened by the indent.
+///
+/// ```php
+/// $input = str_repeat('あ€', 18);
+/// foreach (['B', 'Q'] as $transfer) {
+///     echo mb_encode_mimeheader($input, 'JIS', $transfer, "\r\n", 12), "\n";
+/// }
+/// ```
+/// ```expect
+/// =?ISO-2022-JP?B?GyRCJCIbKEI/GyRCJCIbKEI/GyRCJCIbKEI/?=
+///  =?ISO-2022-JP?B?GyRCJCIbKEI/GyRCJCIbKEI/GyRCJCIbKEI/GyRCJCIbKEI/?=
+///  =?ISO-2022-JP?B?GyRCJCIbKEI/GyRCJCIbKEI/GyRCJCIbKEI/GyRCJCIbKEI/?=
+///  =?ISO-2022-JP?B?GyRCJCIbKEI/GyRCJCIbKEI/GyRCJCIbKEI/GyRCJCIbKEI/?=
+///  =?ISO-2022-JP?B?GyRCJCIbKEI/GyRCJCIbKEI/GyRCJCIbKEI/?=
+/// =?ISO-2022-JP?Q?=1B=24B=24=22=1B=28B=3F=1B=24B=24=22=1B=28B?=
+///  =?ISO-2022-JP?Q?=3F=1B=24B=24=22=1B=28B=3F=1B=24B=24=22=1B=28B=3F?=
+///  =?ISO-2022-JP?Q?=1B=24B=24=22=1B=28B=3F=1B=24B=24=22=1B=28B=3F?=
+///  =?ISO-2022-JP?Q?=1B=24B=24=22=1B=28B=3F=1B=24B=24=22=1B=28B=3F?=
+///  =?ISO-2022-JP?Q?=1B=24B=24=22=1B=28B=3F=1B=24B=24=22=1B=28B=3F?=
+///  =?ISO-2022-JP?Q?=1B=24B=24=22=1B=28B=3F=1B=24B=24=22=1B=28B=3F?=
+///  =?ISO-2022-JP?Q?=1B=24B=24=22=1B=28B=3F=1B=24B=24=22=1B=28B=3F?=
+///  =?ISO-2022-JP?Q?=1B=24B=24=22=1B=28B=3F=1B=24B=24=22=1B=28B=3F?=
+///  =?ISO-2022-JP?Q?=1B=24B=24=22=1B=28B=3F=1B=24B=24=22=1B=28B=3F?=
+/// ```
 #[php_function]
 fn mb_encode_mimeheader(
     req: &mut Request,

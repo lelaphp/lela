@@ -2224,7 +2224,7 @@ mod tests {
             "<?php var_dump(ini_set('t.flag', '0'), ini_set('t.flag', 'bad'), ini_get('t.flag'));",
             crate::test::Capture::default(),
         );
-        let out = String::from_utf8_lossy(&served.stdout);
+        let out = served.stdout_text();
         assert!(
             out.contains("Deprecated: ini_set(): t.flag INI setting is deprecated"),
             "{out}"
@@ -2273,7 +2273,7 @@ mod tests {
             .build()
             .serve_capture(script, crate::test::Capture::default());
         assert_eq!(
-            String::from_utf8_lossy(&refused.stdout),
+            refused.stdout_text(),
             "\nWarning: PHP Startup: t.flag refused in Unknown on line 0\nstring(1) \"1\"\nstring(1) \"1\"\n"
         );
         let taken = Engine::cli_builder()
@@ -2281,10 +2281,7 @@ mod tests {
             .ini("t.flag", "2")
             .build()
             .serve_capture(script, crate::test::Capture::default());
-        assert_eq!(
-            String::from_utf8_lossy(&taken.stdout),
-            "string(1) \"2\"\nstring(1) \"2\"\n"
-        );
+        assert_eq!(taken.stdout_text(), "string(1) \"2\"\nstring(1) \"2\"\n");
     }
 
     /// An extension's entries declared with `OnUpdateLong` and
@@ -2321,7 +2318,7 @@ mod tests {
                 crate::test::Capture::default(),
             );
         assert_eq!(
-            String::from_utf8_lossy(&served.stdout),
+            served.stdout_text(),
             "\nWarning: Invalid \"t.any\" setting. Invalid quantity \"3q\": unknown multiplier \"q\", interpreting as \"3\" for backwards compatibility in Unknown on line 0\n\
              \nWarning: Invalid \"t.positive\" setting. Invalid quantity \"-1x\": unknown multiplier \"x\", interpreting as \"-1\" for backwards compatibility in Unknown on line 0\n\
              \nWarning: Invalid \"t.positive\" setting. Invalid quantity \"0x\": no digits after base prefix, interpreting as \"0\" for backwards compatibility in Standard input code on line 1\n\

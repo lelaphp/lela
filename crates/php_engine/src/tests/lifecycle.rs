@@ -42,7 +42,7 @@ fn builds_or_drops_no_engine_state(events: &Events) -> bool {
 
 fn serve(engine: &Engine) {
     let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
-    assert_eq!(served.stdout, b"ran");
+    assert_eq!(served.stdout_text(), "ran");
 }
 
 /// `php_request_startup` and `php_request_shutdown` as an extension
@@ -319,7 +319,7 @@ fn a_fatal_in_a_request_end_function_is_raised_where_nothing_is_executing() {
         .build();
     let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "ran\nFatal error: raised by 0 in Unknown on line 0\nStack trace:\n#0 {main}\n"
     );
     assert_eq!(served.exit_code, 255);
@@ -348,7 +348,7 @@ fn each_request_end_function_is_guarded_on_its_own() {
     let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
     rec.mark("served");
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "ran\nFatal error: raised by 2 in Unknown on line 0\nStack trace:\n#0 {main}\n\
          \nFatal error: raised by 1 in Unknown on line 0\nStack trace:\n#0 {main}\n"
     );
@@ -385,7 +385,7 @@ fn each_deactivate_function_is_guarded_on_its_own() {
     rec.mark("built");
     let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
     rec.mark("served");
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert!(stdout.contains("Fatal error: raised by 2 in Unknown on line 0"));
     assert!(stdout.contains("Fatal error: raised by 1 in Unknown on line 0"));
     let events = rec.events().between("built", "served");
@@ -749,7 +749,7 @@ fn an_engine_start_that_refuses_starts_no_later_extension_and_refuses_every_requ
     let refused = "\nWarning: test_ext_1 refuses to start under 'cli' in Unknown on line 0\n\nFatal error: Unable to start test_ext_1 module in Unknown on line 0\nStack trace:\n#0 {main}\n";
     for _ in 0..2 {
         let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
-        assert_eq!(String::from_utf8_lossy(&served.stdout), refused);
+        assert_eq!(served.stdout_text(), refused);
         assert_eq!(served.exit_code, -2);
     }
     rec.mark("served");
@@ -893,7 +893,7 @@ fn a_refused_process_start_is_remembered_for_every_later_engine() {
             .extensions(bundle())
             .build();
         let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
-        assert_eq!(String::from_utf8_lossy(&served.stdout), refused);
+        assert_eq!(served.stdout_text(), refused);
         assert_eq!(served.exit_code, -2);
     }
     rec.mark("end");
@@ -989,10 +989,7 @@ fn an_extension_whose_required_dependency_is_absent_is_not_started() {
         .extensions(&[declaring("SPL", "ArrayObject", &[]), pdo(), pdo_driver()])
         .build();
     let served = control.serve_capture(probe, Capture::default());
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "bool(true)\nbool(true)\nbool(true)\n"
-    );
+    assert_eq!(served.stdout_text(), "bool(true)\nbool(true)\nbool(true)\n");
     let engine = Engine::cli_builder()
         .ini("extension_dir", "/nope")
         .ini("extension", "x")
@@ -1000,7 +997,7 @@ fn an_extension_whose_required_dependency_is_absent_is_not_started() {
         .extensions(&[pdo(), pdo_driver()])
         .build();
     let served = engine.serve_capture(probe, Capture::default());
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     let refused = [
         "\nWarning: Cannot load module \"PDO\" because required module \"spl\" is not loaded in Unknown on line 0\n",
         "\nWarning: Cannot load module \"pdo_driver\" because required module \"pdo\" is not loaded in Unknown on line 0\n",
@@ -1137,10 +1134,7 @@ fn lived(builder: EngineBuilder) -> (String, Events) {
         Capture::default(),
     );
     drop(engine);
-    (
-        String::from_utf8_lossy(&served.stdout).into_owned(),
-        rec.events(),
-    )
+    (served.stdout_text(), rec.events())
 }
 
 /// The tier declares its state as an extension declares it and is no

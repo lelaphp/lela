@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{Expr, Token};
@@ -53,8 +53,7 @@ impl Declared {
             if !text.contains("dependencies(") && !text.contains("Dependency") {
                 continue;
             }
-            let parsed =
-                syn::parse_file(&text).with_context(|| format!("parsing {}", file.display()))?;
+            let parsed = crate::api_check::inventory::parsed(&text, &file)?;
             let mut scan = Scan::default();
             scan.visit_file(&parsed);
             let at = krate.relative(&file).display().to_string();

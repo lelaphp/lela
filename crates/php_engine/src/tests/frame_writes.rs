@@ -144,7 +144,7 @@ fn serve<P: Stop>(plan: P, source: &str) -> String {
             .build("debugger")])
         .build();
     let served = engine.serve_capture(source, Capture::default());
-    String::from_utf8_lossy(&served.stdout).into_owned()
+    served.stdout_text()
 }
 
 /// A local of the paused frame changed, and an expression evaluated

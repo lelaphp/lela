@@ -1121,23 +1121,14 @@ impl Gh {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
-            .context("running gh");
+            .output();
         let mut spent = self.spent.borrow_mut();
         let verb = spent
             .entry(args.get(1).copied().unwrap_or("").to_owned())
             .or_default();
         verb.calls += 1;
         verb.took += started.elapsed();
-        let out = out?;
-        if !out.status.success() {
-            bail!(
-                "gh {}: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        String::from_utf8(out.stdout).context("gh wrote something that is not UTF-8")
+        crate::printed(out, &format!("gh {}", args.join(" ")))
     }
 }
 

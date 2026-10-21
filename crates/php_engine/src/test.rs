@@ -111,15 +111,131 @@ pub struct Served {
 
 pub use crate::trace::Entered;
 
+/// A tree of files for one test, at `<temp>/dax-<pid>-<name>`, under the
+/// system's temporary directory and named for the process and the test:
+/// laid down fresh by [`Files::new`], each step asserted, so a tree that
+/// could not be written stops the test where it failed rather than as
+/// a request that reads nothing, and removed when it is dropped.
+#[derive(Debug)]
+pub struct Files {
+    dir: std::path::PathBuf,
+}
+
+impl Files {
+    /// The tree `name` holding each `(file, text)` of `files`, a file's
+    /// directories made as its path names them, over whatever an earlier
+    /// process of the same id left there.
+    ///
+    /// # Panics
+    ///
+    /// Where the tree cannot be removed, made or written, the io error
+    /// in the message.
+    #[must_use]
+    pub fn new(name: &str, files: &[(&str, &str)]) -> Files {
+        let dir = std::env::temp_dir().join(format!("dax-{}-{name}", std::process::id()));
+        let removed = std::fs::remove_dir_all(&dir);
+        assert!(
+            !matches!(&removed, Err(error) if error.kind() != std::io::ErrorKind::NotFound),
+            "what stands at {} is removed first: {removed:?}",
+            dir.display()
+        );
+        let made = std::fs::create_dir_all(&dir);
+        assert!(made.is_ok(), "{} is made: {made:?}", dir.display());
+        let tree = Files { dir };
+        for (file, text) in files {
+            tree.write(file, text);
+        }
+        tree
+    }
+
+    /// The tree's directory.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.dir
+    }
+
+    /// `contents` written to `file` in the tree, a file there replaced,
+    /// and the directories its path names made.
+    ///
+    /// # Panics
+    ///
+    /// Where the file or its directories cannot be written, the io error
+    /// in the message.
+    pub fn write(&self, file: &str, contents: impl AsRef<[u8]>) {
+        let path = self.dir.join(file);
+        if let Some(parent) = path.parent() {
+            let made = std::fs::create_dir_all(parent);
+            assert!(made.is_ok(), "{} is made: {made:?}", parent.display());
+        }
+        let written = std::fs::write(&path, contents);
+        assert!(
+            written.is_ok(),
+            "{} is written: {written:?}",
+            path.display()
+        );
+    }
+
+    /// `php <dir>/<file>` in the tree's directory, the path as
+    /// `run-tests.php` hands it: the file compiled as a file is and served as
+    /// [`Engine::serve_capture`] serves a source, what the request wrote
+    /// and how it ended.
+    pub fn serve(&self, engine: &Engine, file: &str) -> Served {
+        let path = self.dir.join(file);
+        engine.serve_capture_with(
+            &self.dir,
+            path.as_os_str().as_encoded_bytes(),
+            None,
+            Vec::new(),
+            Capture::default(),
+            false,
+        )
+    }
+}
+
+impl Drop for Files {
+    fn drop(&mut self) {
+        // A tree something else removed first is gone all the same.
+        std::fs::remove_dir_all(&self.dir).ok();
+    }
+}
+
+impl Served {
+    /// What the request wrote to its body, as text, a byte that is no
+    /// UTF-8 replaced.
+    #[must_use]
+    pub fn stdout_text(&self) -> String {
+        String::from_utf8_lossy(&self.stdout).into_owned()
+    }
+
+    /// The request wrote `expected`, ended with status 0 and raised no
+    /// fatal, held in one comparison whose failure prints both streams
+    /// as text.
+    ///
+    /// # Panics
+    ///
+    /// Where any of the three differs, with stdout and stderr whole.
+    #[track_caller]
+    pub fn assert_clean(&self, expected: &str) {
+        let stdout = self.stdout_text();
+        assert_eq!(
+            (stdout.as_str(), self.exit_code, self.fatal.as_deref()),
+            (expected, 0, None),
+            "\nstdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&self.stderr)
+        );
+    }
+}
+
 impl Engine {
     /// Serve `source` as a CLI request into `sink` and hand back what it
     /// wrote, the shape every extension's capture test reads. The request
     /// is named `Standard input code`, the CLI's name for a piped source
     /// (`php -r`, stdin); a test that pins `__FILE__` or the `in %s on
     /// line %d` of a diagnostic to another name serves through
-    /// [`Engine::serve_capture_as`].
+    /// [`Engine::serve_capture_in`].
     pub fn serve_capture(&self, source: &str, sink: Capture) -> Served {
-        self.serve_capture_as(b"Standard input code", source, sink)
+        let cwd = std::env::current_dir().unwrap_or_default();
+        self.serve_capture_in(&cwd, b"Standard input code", source, sink)
     }
 
     /// Serve `source` as [`Engine::serve_capture`] does, with what it
@@ -144,19 +260,13 @@ impl Engine {
         served(observables, Vec::new(), Box::new(Capture::default()))
     }
 
-    /// [`Engine::serve_capture`] with the request named `name`: what
+    /// [`Engine::serve_capture`] with the request named `name` and its
+    /// working directory `dir`. The name is what
     /// `$_SERVER['SCRIPT_NAME']` and `$argv[0]` read, and, expanded
-    /// against the working directory as php opens its primary file,
-    /// what `__FILE__` and every diagnostic's `in %s` read (#1569), which
-    /// under the CLI is `argv` of that one word.
-    pub fn serve_capture_as(&self, name: &[u8], source: &str, sink: Capture) -> Served {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        self.serve_capture_in(&cwd, name, source, sink)
-    }
-
-    /// [`Engine::serve_capture_as`] with the request's working directory
-    /// `dir` rather than the process's: what `__DIR__`, a relative
-    /// `include` and `getcwd()` read.
+    /// against `dir` as php opens its primary file, what `__FILE__` and
+    /// every diagnostic's `in %s` read (#1569), which under the CLI is
+    /// `argv` of that one word; the directory is what `__DIR__`, a
+    /// relative `include` and `getcwd()` read.
     pub fn serve_capture_in(&self, dir: &Path, name: &[u8], source: &str, sink: Capture) -> Served {
         self.serve_capture_with(dir, name, Some(source), Vec::new(), sink, false)
     }
@@ -363,4 +473,59 @@ pub(crate) fn request_on(engine: &Engine) -> crate::api::request::Request {
             ..RequestDescription::default()
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Engine, Files, Served};
+
+    /// A request that missed its expectation prints what it wrote and
+    /// what it logged as text, the bytes of neither as an array.
+    #[test]
+    #[should_panic(expected = "stdout:\ngot\n\nstderr:\nPHP Warning:  logged\n")]
+    fn a_failing_assert_clean_prints_both_streams_as_text() {
+        let served = Served {
+            stdout: b"got\n".to_vec(),
+            stderr: b"PHP Warning:  logged\n".to_vec(),
+            ..Served::default()
+        };
+        served.assert_clean("wanted\n");
+    }
+
+    /// A clean request meets `assert_clean`; one that ended with another
+    /// status does not, however it wrote what was expected.
+    #[test]
+    fn assert_clean_holds_the_status_and_the_fatal_with_the_body() {
+        let served = Served {
+            stdout: b"ok\n".to_vec(),
+            ..Served::default()
+        };
+        served.assert_clean("ok\n");
+        let exited = Served {
+            exit_code: 1,
+            ..served
+        };
+        let missed = std::panic::catch_unwind(|| exited.assert_clean("ok\n"));
+        assert!(missed.is_err(), "status 1 is not clean");
+    }
+
+    /// A tree is laid down with its directories, served from, written
+    /// again between requests, and gone once dropped.
+    #[test]
+    fn a_tree_is_served_from_rewritten_and_removed_on_drop() {
+        let files = Files::new(
+            "test-files",
+            &[
+                ("main.php", "<?php include 'sub/inc.php';"),
+                ("sub/inc.php", "<?php echo \"one\\n\";"),
+            ],
+        );
+        let engine = Engine::cli_builder().build();
+        files.serve(&engine, "main.php").assert_clean("one\n");
+        files.write("sub/inc.php", "<?php echo \"two\\n\";");
+        files.serve(&engine, "main.php").assert_clean("two\n");
+        let dir = files.path().to_path_buf();
+        drop(files);
+        assert!(!dir.exists(), "{} is removed", dir.display());
+    }
 }

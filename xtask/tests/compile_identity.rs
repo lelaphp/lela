@@ -127,7 +127,7 @@ impl Scratch {
     /// none: what a test that lays its own files down starts from.
     fn of(name: &str, only: &[&str]) -> Scratch {
         let root = Tree::new(&format!("identity-{name}")).unwrap();
-        scratch_workspace(workspace(), &root).unwrap();
+        scratch_workspace(workspace(), &root);
         let corpus = root.join("corpus");
         fs::create_dir_all(&corpus).unwrap();
         let fixtures = xtask::package_dir().join("fixtures/compile-identity/corpus");

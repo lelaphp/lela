@@ -21,8 +21,7 @@ fn served(src: &str, expected: &str) {
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(src, Capture::default());
-    assert_eq!(served.fatal, None);
-    assert_eq!(String::from_utf8_lossy(&served.stdout), expected);
+    served.assert_clean(expected);
 }
 
 /// The stylesheet `"<xsl:stylesheet ...>"` whose one template is `body`,

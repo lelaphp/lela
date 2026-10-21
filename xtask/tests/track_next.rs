@@ -7,12 +7,18 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 
 use xtask::scratch::Tree;
 use xtask::ticket::Gh;
 use xtask::track_next::{Next, next};
+
+mod common {
+    pub mod repo;
+    pub mod run;
+}
+use common::repo::Repo;
+use common::run::Run;
 
 /// A recorded tracker beside a scratch repository: `gh issue list`
 /// answers with `list.json`, every other call is written to `calls`.
@@ -30,11 +36,7 @@ impl Recorded {
         );
         fs::write(dir.join("gh"), script).unwrap();
         fs::set_permissions(dir.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
-        git(&dir.join("repo"), &["init", "-q", "-b", "main"]);
-        git(
-            &dir.join("repo"),
-            &["commit", "-q", "--allow-empty", "-m", "main"],
-        );
+        Repo::init(&dir.join("repo")).git(&["commit", "-q", "--allow-empty", "-m", "main"]);
         Recorded { dir }
     }
 
@@ -75,14 +77,11 @@ impl Recorded {
     /// A branch of the clone recording `ticket`, the way `worktree add
     /// --ticket` records it.
     fn records(&self, branch: &str, ticket: u64) {
-        git(
-            &self.repo(),
-            &[
-                "config",
-                &format!("branch.{branch}.ticket"),
-                &ticket.to_string(),
-            ],
-        );
+        Repo::at(&self.repo()).git(&[
+            "config",
+            &format!("branch.{branch}.ticket"),
+            &ticket.to_string(),
+        ]);
     }
 
     fn calls(&self) -> Vec<String> {
@@ -92,22 +91,6 @@ impl Recorded {
             .map(str::to_owned)
             .collect()
     }
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(["-c", "user.name=x", "-c", "user.email=x@x"])
-        .args([
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/var/empty",
-        ])
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "git {}", args.join(" "));
 }
 
 const READY: &[&str] = &["ready-for-agent"];
@@ -187,21 +170,13 @@ fn a_label_track_passes_over_an_unlabelled_ticket_which_is_mains() {
         (20, READY, &[]),
     ]);
     let run = |track: &str| {
-        let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-            .arg("--root")
-            .arg(recorded.repo())
+        Run::at(&recorded.repo())
             .args(["track", "next", "--track", track])
             .env("PATH", format!("{}:/usr/bin:/bin", recorded.dir.display()))
             .env_remove("CARGO")
             .env_remove("CARGO_MANIFEST_DIR")
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8(out.stdout).unwrap()
+            .go()
+            .ok()
     };
     assert_eq!(run("parity-hosts"), "#21 ticket 21\n");
     assert_eq!(run("main"), "#20 ticket 20\n");

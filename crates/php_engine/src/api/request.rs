@@ -1681,8 +1681,7 @@ mod tests {
             crate::test::Capture::default(),
         );
 
-        assert_eq!(String::from_utf8_lossy(&served.stdout), "d\nafter\n");
-        assert_eq!(served.fatal, None);
+        served.assert_clean("d\nafter\n");
     }
 
     /// `zend_objects_destroy_object`'s `E_CORE_ERROR`

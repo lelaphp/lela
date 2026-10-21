@@ -110,7 +110,7 @@ fn receipt_of(source: &str) -> String {
     let served = engine.serve_capture(source, Capture::default());
     assert_eq!(served.fatal, None);
     assert_eq!(served.exit_code, 0);
-    let receipt = String::from_utf8_lossy(&served.stdout).into_owned();
+    let receipt = served.stdout_text();
     assert!(receipt.starts_with("done\n"), "{receipt}");
     println!("{receipt}");
     receipt

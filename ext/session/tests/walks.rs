@@ -36,6 +36,6 @@ ob_end_flush();
 "#,
         Capture::default(),
     );
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "new 120\n");
+    assert_eq!(served.stdout_text(), "new 120\n");
     assert_eq!(String::from_utf8_lossy(&served.stderr), "");
 }

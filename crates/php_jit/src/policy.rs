@@ -29,6 +29,7 @@ use std::sync::atomic::Ordering;
 
 use php_engine::api::request::Ini;
 use php_engine::tier::{Epoch, FuncRef, SafepointIdx, StartupIni, Word};
+use php_unit::Opcode;
 
 use crate::types::ExitId;
 use php_unit::decl::{IniDecl, Name};
@@ -153,8 +154,9 @@ impl Setting {
 
 /// A line the start of a tier that runs logs (`jit-design.md` §4,
 /// §4.7). A tier that runs [`Mode::Off`] logs none, as php writes none:
-/// php never starts its compiled tier under `opcache.jit=disable`, a
-/// refused setting or a zero buffer, so nothing reads `opcache.jit_debug`
+/// php never starts its compiled tier where opcache does not start, nor
+/// under `opcache.jit=disable`, a refused setting or a zero buffer
+/// ([`SetUp`]), so nothing reads `opcache.jit_debug`
 /// and php writes nothing whatever the bits ask (`gh13232.phpt`); a
 /// refused setting's warning is the opcache extension's. Under
 /// `opcache.jit=off` php starts it and runs no trace, so no `TRACE` line
@@ -186,6 +188,68 @@ impl std::fmt::Display for Note {
             Note::Unknown { directive, value } => {
                 write!(f, "JIT: {directive}={value} is not known; read as unset")
             }
+        }
+    }
+}
+
+/// How php's start leaves its compiled tier, decided once at engine
+/// start from the directives and the host: `accel_startup`, which starts
+/// opcache at all, and `accel_post_startup`, which sets the tier up only
+/// where opcache started, `JIT_G(enabled)` holds and the buffer is not
+/// empty, and then asks `zend_jit_check_support`
+/// (`Z/ext/opcache/ZendAccelerator.c:3210-3220`, `:3253-3254`). Only a
+/// tier set up is refused with php's warning; under any other, nothing
+/// reads `opcache.jit_debug` and nothing is raised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SetUp {
+    /// opcache does not start for the host: `opcache.enable` is off, or
+    /// the host is the command line or phpdbg (`accel_sapi_is_cli`) and
+    /// `opcache.enable_cli` is off, php's `Opcode Caching is disabled
+    /// for CLI`.
+    Unstarted,
+    /// opcache starts and its tier is not set up: `opcache.jit=disable`,
+    /// a setting `zend_jit_config` refuses, or a buffer of no bytes.
+    Disabled,
+    /// Set up as the directives ask: `opcache.jit` on or off, with a
+    /// buffer.
+    Yes,
+    /// Set up and refused by `zend_jit_check_support`.
+    Refused(Refused),
+}
+
+impl SetUp {
+    /// `accel_startup`'s verdict and `accel_post_startup`'s test over the
+    /// startup ini, for the host `php_sapi_name()` names.
+    fn of(ini: &StartupIni, host: &str, setting: Setting, buffer_size: i64) -> SetUp {
+        let flag = |name: &str, default: bool| value(ini, name).map_or(default, Ini::parse_bool);
+        let command_line = matches!(host, "cli" | "phpdbg");
+        let started =
+            flag("opcache.enable", true) && (!command_line || flag("opcache.enable_cli", false));
+        match setting {
+            _ if !started => SetUp::Unstarted,
+            Setting::Off | Setting::On { .. } if buffer_size > 0 => SetUp::Yes,
+            _ => SetUp::Disabled,
+        }
+    }
+}
+
+/// Why php refuses its compiled tier once it set it up, with a warning
+/// raised once through the startup diagnostics, whatever
+/// `opcache.jit_debug` asks, since it is php's `zend_error` and not a
+/// `TRACE` line; the tier then runs `Off` ([`Policy::check_support`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Refused {
+    /// An extension observes an opcode other than the two silence
+    /// opcodes (design §7.1).
+    ObservedOpcode,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refused::ObservedOpcode => f.write_str(
+                "JIT is incompatible with third party extensions that setup user opcode handlers. JIT disabled.",
+            ),
         }
     }
 }
@@ -241,6 +305,10 @@ pub(crate) struct Policy {
     max_polymorphic_calls: u32,
     buffer_size: u64,
     debug: JitDebug,
+    /// How php's start leaves its tier under these directives and this
+    /// host, which is where `zend_jit_check_support` runs and so where its
+    /// refusal warns ([`Policy::check_support`]).
+    set_up: SetUp,
 }
 
 /// The value the host set for `name`, none where it set none.
@@ -286,11 +354,15 @@ fn count(ini: &StartupIni, name: &str, default: u32) -> u32 {
 impl Policy {
     /// The directives under php's names and defaults
     /// (`Z/ext/opcache/zend_accelerator_module.c:343-362`), plus
-    /// `jit.mode` and `jit.compile`, with what the start logs pushed to
-    /// `notes`. A value outside php's bounds reads as the default, as
-    /// php's handlers keep it; `jit.mode`, where set, names the `Mode`
-    /// whatever `opcache.jit` says, which is how the tier's lanes serve a
-    /// corpus. A tier that runs `Off` reads no `opcache.jit_debug` bit
+    /// `jit.mode` and `jit.compile`, for the host `host` names, with what
+    /// the start logs pushed to `notes`. A value outside php's bounds
+    /// reads as the default, as php's handlers keep it. The tier runs
+    /// only where php sets it up ([`SetUp`]): not where opcache does not
+    /// start, `opcache.enable` off or, on the command line and in phpdbg,
+    /// `opcache.enable_cli` off. `jit.mode`, where set, names the `Mode`
+    /// whatever `opcache.jit`, `opcache.enable` and `opcache.enable_cli`
+    /// say, which is how the tier's lanes serve a corpus that sets none
+    /// of them. A tier that runs `Off` reads no `opcache.jit_debug` bit
     /// ([`Policy::off`]), so it writes no line, as php writes none
     /// ([`Note`]).
     ///
@@ -330,9 +402,10 @@ impl Policy {
     /// opcache.jit_max_polymorphic_calls '2'
     /// opcache.jit_max_trace_length '1024'
     /// ```
-    pub(crate) fn from_ini(ini: &StartupIni, notes: &mut Vec<Note>) -> Policy {
+    pub(crate) fn from_ini(ini: &StartupIni, host: &str, notes: &mut Vec<Note>) -> Policy {
         let setting = value(ini, "opcache.jit").map_or(Setting::Disable, Setting::of);
         let buffer_size = long(ini, "opcache.jit_buffer_size", 64 << 20);
+        let set_up = SetUp::of(ini, host, setting, buffer_size);
         let lane = match value(ini, "jit.mode").unwrap_or_default() {
             b"" => None,
             b"tracing" => Some(Mode::Tracing),
@@ -346,15 +419,15 @@ impl Policy {
                 None
             }
         };
-        let asked = match (lane, setting) {
-            (Some(mode), _) => mode,
-            (None, Setting::On { crto }) => {
+        let asked = match (lane, setting, set_up) {
+            (Some(mode), ..) => mode,
+            (None, Setting::On { crto }, SetUp::Yes) => {
                 if (crto / 10) % 10 != HOT_TRACE {
                     notes.push(Note::AsTracing { crto });
                 }
                 Mode::Tracing
             }
-            (None, Setting::Disable | Setting::Off | Setting::Invalid) => Mode::Off,
+            (None, ..) => Mode::Off,
         };
         let mode = if buffer_size > 0 { asked } else { Mode::Off };
         if matches!(mode, Mode::Force | Mode::ExitFuzz) {
@@ -406,6 +479,7 @@ impl Policy {
             max_polymorphic_calls: count(ini, "opcache.jit_max_polymorphic_calls", 2),
             buffer_size: u64::try_from(buffer_size).unwrap_or(0),
             debug,
+            set_up,
         };
         if mode == Mode::Off {
             policy.off();
@@ -419,6 +493,40 @@ impl Policy {
     pub(crate) fn off(&mut self) {
         self.mode = Mode::Off;
         self.debug = JitDebug::default();
+    }
+
+    /// `zend_jit_check_support` past the directives, once every other
+    /// extension's start has declared what it observes
+    /// (`Z/ext/opcache/jit/zend_jit.c:3728-3756`): where an extension
+    /// observes an opcode other than `ZEND_BEGIN_SILENCE` and
+    /// `ZEND_END_SILENCE`, by `observes`, php's
+    /// `zend_get_user_opcode_handler(i) != NULL` over every opcode, the
+    /// tier runs `Off` (`jit-design.md` §4.3, *Observed opcodes*), and
+    /// the refusal is kept where php sets its tier up ([`SetUp::Yes`]),
+    /// which is where it warns ([`Policy::refused`]); none where the tier
+    /// runs as the directives say. At the
+    /// two silence opcodes nothing is refused: compiled code serves them
+    /// through the interpreter's handler, which tells their observers.
+    pub(crate) fn check_support(&mut self, observes: impl Fn(Opcode) -> bool) {
+        let beyond = (0..=u8::MAX)
+            .filter_map(Opcode::from_u8)
+            .filter(|opcode| !matches!(opcode, Opcode::BeginSilence | Opcode::EndSilence))
+            .any(observes);
+        if beyond {
+            self.off();
+            if self.set_up == SetUp::Yes {
+                self.set_up = SetUp::Refused(Refused::ObservedOpcode);
+            }
+        }
+    }
+
+    /// Why php refuses the tier it set up, which the engine's first
+    /// request raises as php's warning; none where it does not.
+    pub(crate) fn refused(&self) -> Option<Refused> {
+        match self.set_up {
+            SetUp::Refused(refused) => Some(refused),
+            SetUp::Unstarted | SetUp::Disabled | SetUp::Yes => None,
+        }
     }
 
     /// How the tier runs.

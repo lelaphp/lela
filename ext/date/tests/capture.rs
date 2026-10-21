@@ -10,7 +10,7 @@ fn the_extension_is_loaded() {
         .build();
     let sink = Capture::default();
     let served = engine.serve_capture("<?php var_dump(extension_loaded('date'));", sink);
-    assert_eq!(served.stdout, b"bool(true)\n");
+    assert_eq!(served.stdout_text(), "bool(true)\n");
 }
 
 /// `OnUpdate_date_timezone` at `ZEND_INI_STAGE_STARTUP`: a zone the
@@ -30,7 +30,7 @@ fn a_startup_timezone_the_database_has_not_leaves_the_default() {
         Capture::default(),
     );
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "\nWarning: PHP Startup: Invalid date.timezone value 'foo', using 'UTC' instead in Unknown on line 0\nstring(3) \"UTC\"\nstring(3) \"UTC\"\n"
     );
 }
@@ -59,6 +59,5 @@ $n = 0; foreach (get_object_vars($d) as $_) $n++; foreach ((array) $d as $_) $n+
 "#,
         Capture::default(),
     );
-    assert_eq!(served.fatal, None);
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "16\n10\n");
+    served.assert_clean("16\n10\n");
 }

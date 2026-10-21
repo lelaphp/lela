@@ -21,7 +21,7 @@ use crate::lower::Compiled;
 use crate::policy::Place;
 use crate::record::Start;
 use crate::testing;
-use crate::types::{ExitId, ExitSpec, Frame, Landing};
+use crate::types::{ExitId, ExitSpec, Frame, Grows, Landing};
 
 type Heap = TraceTable<HeapPages>;
 
@@ -48,6 +48,8 @@ fn exit(link: Option<TraceId>) -> ExitSpec {
         opline: Some(OplineIdx(1)),
         landing: Landing::Plain,
         stores: Vec::new(),
+        known: Vec::new(),
+        grows: Grows::Side,
         link,
     }
 }

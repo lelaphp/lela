@@ -21,6 +21,13 @@ if markers=$(git diff --cached --check | grep -E ': leftover conflict marker$');
     echo "pre-merge-commit: the line above is a conflict marker left in, which the merge would commit; the merge stands uncommitted: resolve it, or exempt a file that holds one on purpose by its conflict-marker-size in .gitattributes" >&2
     exit 1
 fi
+# A revision still cited as `NEXT`, which the merge would bring onto
+# `main`, refuses it, as pre-commit's check does, naming each line.
+if unnumbered=$("$(dirname "$0")/next-cited") && [ -n "$unnumbered" ]; then
+    printf '%s\n' "$unnumbered" >&2
+    echo "pre-merge-commit: the revision cited above is still NEXT, which the merge would bring onto main; the merge stands uncommitted: number it as its ledger row is numbered, and \`git commit\` finishes it through pre-commit" >&2
+    exit 1
+fi
 if [ -z "$regions" ]; then
     echo "pre-merge-commit: pre-commit names no region files as regions='...', so the merge's regions are unread; the merge stands uncommitted" >&2
     exit 1

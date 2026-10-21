@@ -143,7 +143,7 @@ fn a_persistent_share_is_lent_to_one_request_at_a_time() {
     for _ in 0..2 {
         let out = engine.serve_capture(&source, Capture::default());
         assert_eq!(out.fatal, None);
-        served.push(String::from_utf8_lossy(&out.stdout).into_owned());
+        served.push(out.stdout_text());
     }
     assert_eq!(served, ["ok 1", "ok 0"]);
     assert_eq!(reports(&seen, 1), [Seen::Accepted]);
@@ -159,7 +159,7 @@ fn a_persistent_share_is_lent_to_one_request_at_a_time() {
             .map(|one| {
                 let out = one.join().unwrap_or_else(|_| panic!("a request panicked"));
                 assert_eq!(out.fatal, None);
-                String::from_utf8_lossy(&out.stdout).into_owned()
+                out.stdout_text()
             })
             .collect()
     });

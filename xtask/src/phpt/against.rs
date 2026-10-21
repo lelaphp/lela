@@ -8,13 +8,19 @@
 //! test, at `target/harness/phpt-runs/<tree>/<scope>.json`, in the
 //! reading store, so CI's upload of the store carries them and a run CI
 //! took can serve as a base (harness §4.2, #725). The key is the tree the
-//! engine's binary is built from, [`built_from`], and not the tree the
+//! engine's binary is built from, the tracked files under the paths its
+//! dep-info names ([`BuiltFrom::keyed`], #3109), and not the tree the
 //! subset's reading is stamped with: that one is the crate's own, which
-//! does not move when `php_engine` does, while the verdicts do. The same
-//! key is taken from a commit's objects, so the run a worktree at the
-//! merge base took is found by the commit alone from any worktree of the
-//! repository ([`roots`]), and a run over sources that are no commit's is
-//! found by none.
+//! does not move when `php_engine` does, while the verdicts do. A commit
+//! that writes no source of the binary, `seams.toml`, `ext/clippy.toml`,
+//! a crate it does not link, leaves the key where it was, and every run
+//! kept under it stands. The paths are kept beside the runs ([`KEYED`]),
+//! and a run is looked for under the tree over each set of them kept, so
+//! the key is taken from a commit's objects as from the working tree: the
+//! run a worktree at the merge base took, or one an earlier commit with
+//! the same binary took, is found by the commit alone from any worktree of
+//! the repository ([`roots`]), and a run over sources that are no commit's
+//! is found by none.
 //!
 //! **What a miss keeps.** Beside its verdict, each test that missed keeps
 //! its first differing lines and its signature under `misses`, by the same
@@ -59,10 +65,12 @@
 //! reading (harness §4.5, #725).
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -73,28 +81,21 @@ use super::{INSTRUMENT, Judgement, Lane, Scope, Tally};
 use crate::git;
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
+use crate::oracle::built_from::BuiltFrom;
 use crate::oracle::{Pin, Runner};
 use crate::reading::{Reading, Status, listed};
 use crate::tally::Judgement as _;
 use crate::track;
 
-/// What the engine's binary is built from: the crates, extensions and
-/// hosts it links ([`crate::layout::CRATE_DIRS`]), the workspace's lock,
-/// and `ops.toml`, which two `build.rs` read.
-fn built_from() -> Vec<PathBuf> {
-    let files = ["Cargo.toml", "Cargo.lock", "ops.toml"];
-    let dirs = crate::layout::CRATE_DIRS.iter().map(|d| d.dir);
-    files.into_iter().chain(dirs).map(PathBuf::from).collect()
-}
-
 /// The engine's sources as the run found them, by each file's stat data:
-/// every file under [`built_from`] the index tracks, and the index. What
+/// every file the index tracks, a superset of what any binary's run is
+/// kept under ([`BuiltFrom::keyed`]), and the index. What
 /// [`Runs::after`] asks after each subset before it asks git anything, as
 /// git's index takes a file whose stat data is the one it recorded as
 /// unchanged, so a run of many subsets over sources nobody writes asks
 /// git nothing after any of them (#2972).
 struct Stood {
-    /// Each tracked file under [`built_from`], then the index.
+    /// Each tracked file, then the index.
     files: Vec<PathBuf>,
     /// Each file's stat data, `None` for one gone, as of the last time the
     /// sources were found where the run began.
@@ -120,11 +121,7 @@ impl Stood {
     fn of(root: &Path) -> Result<Stood> {
         let index = root.join(git::rev_parse(root, &["--git-path", "index"])?);
         let indexed = Stood::stat(std::slice::from_ref(&index));
-        let paths = built_from();
-        let mut args = vec!["ls-files", "-z", "--cached", "--"];
-        for path in &paths {
-            args.push(path.to_str().context("a source path is not UTF-8")?);
-        }
+        let args = ["ls-files", "-z", "--cached"];
         let mut files: Vec<PathBuf> = (git::listed(root, &args)?.into_iter())
             .map(|path| root.join(path))
             .collect();
@@ -211,8 +208,6 @@ pub(crate) struct Runs {
     /// The workspaces a base's run and a target are looked for in,
     /// [`roots`].
     roots: Vec<PathBuf>,
-    /// The engine's tree, [`built_from`], which the run keeps its own by.
-    tree: String,
     /// The engine's sources by their stat data, which [`Runs::moved`]
     /// asks before git.
     stood: Stood,
@@ -223,11 +218,11 @@ pub(crate) struct Runs {
     base: Option<Base>,
 }
 
-/// The commit a run is held against: its short id and the key its runs
-/// stand under.
+/// The commit a run is held against: its short id and its tracked files,
+/// which its runs are kept under.
 struct Base {
     commit: String,
-    tree: String,
+    snapshot: Arc<Snapshot>,
 }
 
 impl Runs {
@@ -250,7 +245,6 @@ impl Runs {
         Ok(Runs {
             root: root.to_path_buf(),
             roots: roots(root),
-            tree: snapshot.tracked_over(&built_from())?,
             stood,
             snapshot,
             commit: git::head_commit(root)?,
@@ -302,13 +296,11 @@ impl Runs {
     ) -> Result<Option<Reading>> {
         let scope = &held_as.to_string();
         let run = self.run_of(tally, runner);
-        let moved = self.moved()?;
+        let (paths, key) = self.keyed(runner)?;
+        let moved = self.moved(&paths, &key)?;
         if let (Some(run), false) = (&run, moved) {
-            let file = path(&self.root, &self.tree, scope);
-            let text = serde_json::to_string_pretty(run).context("rendering the run")?;
-            // Replaced whole, as a reading's file is, so a comparison
-            // reading it from another worktree never finds it cut short.
-            crate::reading::replace(&file, text.as_bytes())?;
+            remember(&self.root, &paths)?;
+            keep(&path(&self.root, &key, scope), run)?;
         }
         let Some(base) = &self.base else {
             return Ok(None);
@@ -327,20 +319,32 @@ impl Runs {
             (Ok(_), None) => Err(format!("this run measured no engine: {}", subset.message)),
             (Ok(was), Some(run)) => diff(&was, &run, target),
         };
-        held(manifest, &self.snapshot, held_as, &base.commit, diff).map(Some)
+        let scope = held_as.held_against().to_string();
+        let reading = Reading::for_scope(INSTRUMENT, &scope, manifest, &self.snapshot)?;
+        compared(reading.under(&manifest.pin), &base.commit, diff).map(Some)
+    }
+
+    /// The paths a run on `runner` is kept under, what the binary is built
+    /// from ([`BuiltFrom::keyed`]), and the key of the tree the run began
+    /// at over them.
+    fn keyed(&self, runner: &Runner) -> Result<(Vec<PathBuf>, String)> {
+        let built = runner.binary().map_or(BuiltFrom::Unlisted, BuiltFrom::of);
+        let paths = built.keyed(&self.root);
+        let key = self.snapshot.tracked_over(&paths)?;
+        Ok((paths, key))
     }
 
     /// Whether the engine's sources were written since the run began: not
     /// where no file's stat data moved; where one did, the tree's tracked
-    /// files under [`built_from`] held to the tree the run keys its own by,
+    /// files under `paths` held to `key`, the one the run keeps its own by,
     /// and, where they stand still, the stat data taken before that kept,
     /// so a file touched and not written is asked of git once.
-    fn moved(&self) -> Result<bool> {
+    fn moved(&self, paths: &[PathBuf], key: &str) -> Result<bool> {
         let now = Stood::stat(&self.stood.files);
         if now == *self.stood.stat.borrow() {
             return Ok(false);
         }
-        let moved = Snapshot::disk(&self.root)?.tracked_over(&built_from())? != self.tree;
+        let moved = Snapshot::disk(&self.root)?.tracked_over(paths)? != key;
         if !moved {
             self.stood.stat.replace(now);
         }
@@ -369,45 +373,44 @@ impl Runs {
         (tally, runner): (&Tally, &Runner),
     ) -> Option<PathBuf> {
         let engine = matches!(runner, Runner::Engine(_) | Runner::Linked);
-        (engine && whole(tally)).then(|| path(Path::new(""), &self.tree, &scope.to_string()))
+        let (_, key) = self.keyed(runner).ok()?;
+        (engine && whole(tally)).then(|| path(Path::new(""), &key, &scope.to_string()))
     }
 
     /// The run a tally is where it judged every test the subset holds,
     /// named by `engine`.
     fn kept(&self, tally: &Tally, engine: String) -> Option<Run> {
-        whole(tally).then(|| Run {
+        let mut run = Run {
             commit: self.commit.clone(),
             corpus: self.corpus.clone(),
             engine,
             recipe: self.recipe.clone(),
-            verdicts: tally
-                .judged
-                .iter()
-                .map(|j| (j.id.clone(), j.judgement))
-                .collect(),
-            misses: tally
-                .judged
-                .iter()
-                .filter_map(|j| Some((j.id.clone(), j.miss.clone()?)))
-                .collect(),
-            skips: tally
-                .judged
-                .iter()
-                .filter(|j| j.judgement == Judgement::Skip)
-                .map(|j| (j.id.clone(), j.note.clone()))
-                .collect(),
-        })
+            verdicts: BTreeMap::new(),
+            misses: BTreeMap::new(),
+            skips: BTreeMap::new(),
+        };
+        for judged in whole(tally).then_some(&tally.judged)? {
+            let id = &judged.id;
+            run.verdicts.insert(id.clone(), judged.judgement);
+            if let Some(miss) = &judged.miss {
+                run.misses.insert(id.clone(), miss.clone());
+            }
+            if judged.judgement == Judgement::Skip {
+                run.skips.insert(id.clone(), judged.note.clone());
+            }
+        }
+        Some(run)
     }
 }
 
 impl Base {
-    /// The commit `named` names in the repository at `root`, keyed by the
-    /// tree its engine is built from; a name that is no commit is refused.
+    /// The commit `named` names in the repository at `root`, with the
+    /// files it tracks; a name that is no commit is refused.
     fn at(root: &Path, named: &str) -> Result<Base> {
         let full = track::rev(root, named).with_context(|| format!("--against {named}"))?;
         Ok(Base {
             commit: track::short(&full).to_owned(),
-            tree: Snapshot::commit(root, &full)?.tracked_over(&built_from())?,
+            snapshot: Snapshot::commit(root, &full)?,
         })
     }
 
@@ -415,27 +418,26 @@ impl Base {
     /// is `recipe`, from the first of `roots` that keeps one, or why there
     /// is none, naming each root looked in or the run under another pin.
     fn run(&self, roots: &[PathBuf], scope: &str, recipe: &str) -> Result<Result<Run, String>> {
-        let Base { commit, tree } = self;
+        let commit = &self.commit;
         let take = super::base::call(commit, scope);
-        match read(roots, tree, scope)? {
-            Some(run) if run.recipe == recipe => return Ok(Ok(run)),
-            Some(_) => {
+        match kept(roots, &self.snapshot, scope, recipe)? {
+            Kept::Fresh(run) => return Ok(Ok(run)),
+            Kept::Stale => {
                 return Ok(Err(format!(
                     "the run of {scope} kept at {commit} is stale; {STALE}; take one with `{take}`"
                 )));
             }
-            None => {}
+            Kept::None => {}
         }
-        let looked: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
-        let looked = looked.join(", ");
+        let looked = looked(roots);
         let fetch = roots.first().map_or_else(String::new, |root| {
             format!(
                 "fetch the runs CI's dashboard keeps with `{}`, or ",
-                fetch(root, tree)
+                fetch(root)
             )
         });
         Ok(Err(format!(
-            "no run of {scope} is kept at {commit} (the engine's tree {tree}) in {looked}; {fetch}take one with `{take}`, which builds the engine at {commit} in a worktree of its own and keeps the run in the main worktree"
+            "no run of {scope} is kept at {commit}'s engine in {looked}; {fetch}take one with `{take}`, which builds the engine at {commit} in a worktree of its own and keeps the run in the main worktree"
         )))
     }
 }
@@ -444,14 +446,14 @@ impl Base {
 /// its runner keeps, each under its engine's tree (#2362).
 pub(crate) const UPLOAD: &str = "phpt-runs";
 
-/// The line that lays the runs CI kept under the engine's tree `tree` into
-/// the workspace at `root`, where [`roots`] looks first (#2362): the
-/// latest [`UPLOAD`] downloaded apart, since `gh` writes over no file,
-/// and that tree's runs copied in where the workspace keeps none, as
-/// [`carry`] copies a worktree's.
-pub(crate) fn fetch(root: &Path, tree: &str) -> String {
+/// The line that lays the runs CI kept into the workspace at `root`,
+/// where [`roots`] looks first (#2362): the latest [`UPLOAD`] downloaded
+/// apart, since `gh` writes over no file, and every run and every set of
+/// sources one was kept over ([`KEYED`]) copied in where the workspace
+/// keeps none, as [`carry`] copies a worktree's.
+pub(crate) fn fetch(root: &Path) -> String {
     format!(
-        "d=$(mktemp -d) && gh run download -n {UPLOAD} -D \"$d\" && rsync -a --ignore-existing \"$d/{tree}\" '{}/'",
+        "d=$(mktemp -d) && gh run download -n {UPLOAD} -D \"$d\" && rsync -a --ignore-existing \"$d/\" '{}/'",
         root.join(RUNS).display()
     )
 }
@@ -476,7 +478,7 @@ const STALE: &str = "oracle.toml changed since it was taken";
 /// its checkouts ([`track::checkouts`]), or `root` alone where git cannot
 /// list them. The one rule for where a run lives: in the workspace
 /// that took it ([`Runs::after`]), keyed by the tree its engine is built
-/// from, so a run taken in a worktree at a base, as the skip of
+/// from ([`keys`]), so a run taken in a worktree at a base, as the skip of
 /// [`Base::run`] asks, is found by the commit from every other worktree
 /// while that one stands (#1869). The main worktree outlives the others,
 /// so `worktree retire` carries a branch worktree's runs into it
@@ -485,29 +487,123 @@ fn roots(root: &Path) -> Vec<PathBuf> {
     track::checkouts(root).unwrap_or_else(|_| fs::canonicalize(root).into_iter().collect())
 }
 
+/// The workspaces at `roots`, as a run not kept in any names them.
+fn looked(roots: &[PathBuf]) -> String {
+    let looked: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
+    looked.join(", ")
+}
+
 fn path(root: &Path, tree: &str, scope: &str) -> PathBuf {
     root.join(RUNS).join(tree).join(format!("{scope}.json"))
 }
 
-/// The run of `scope` kept at the engine tree `tree`, from the first of
-/// `roots` that keeps one.
-fn read(roots: &[PathBuf], tree: &str, scope: &str) -> Result<Option<Run>> {
+/// Where a workspace keeps each set of paths a run was kept under
+/// ([`BuiltFrom::keyed`]), under [`RUNS`]: one file per set, named by its
+/// id, beside the runs, so `worktree retire` carries it with them
+/// and CI's upload holds it (#3109).
+const KEYED: &str = "built-from";
+
+/// Keep `paths`, the set a run at `root` is kept under, among the sets
+/// [`keys`] looks under, where it is not kept already and is not the one
+/// [`keys`] looks under with none kept.
+fn remember(root: &Path, paths: &[PathBuf]) -> Result<()> {
+    if paths == BuiltFrom::Unlisted.keyed(root) {
+        return Ok(());
+    }
+    let text = serde_json::to_string_pretty(paths).context("rendering a set of sources")?;
+    let file =
+        (root.join(RUNS).join(KEYED)).join(format!("{}.json", git::blob_id(text.as_bytes())));
+    if file.is_file() {
+        return Ok(());
+    }
+    crate::reading::replace(&file, text.as_bytes())
+}
+
+/// Every key a run at `snapshot`'s engine may be kept under: its tracked
+/// files over each set of paths a run was kept under in any of `roots`
+/// ([`remember`]), and over [`BuiltFrom::Unlisted`]'s, which needs none
+/// kept. Two trees with one key over a set build one binary from it, since
+/// the set holds every manifest the build resolved its packages from, so a
+/// run found under any is the engine's at this tree.
+fn keys(snapshot: &Snapshot, roots: &[PathBuf]) -> Result<Vec<String>> {
+    let mut sets = BTreeSet::from([BuiltFrom::Unlisted.keyed(snapshot.root())]);
     for root in roots {
-        let file = path(root, tree, scope);
-        if file.is_file() {
-            let text = crate::read(&file)?;
-            let run = serde_json::from_str(&text)
-                .with_context(|| format!("{} is not a run", file.display()))?;
-            return Ok(Some(run));
+        let Ok(files) = crate::entries(&root.join(RUNS).join(KEYED)) else {
+            continue;
+        };
+        for file in files
+            .iter()
+            .filter(|file| file.extension().is_some_and(|e| e == "json"))
+        {
+            let set: Vec<PathBuf> = serde_json::from_str(&crate::read(file)?)
+                .with_context(|| format!("{} is not a set of paths", file.display()))?;
+            sets.insert(set);
         }
     }
-    Ok(None)
+    sets.iter().map(|set| snapshot.tracked_over(set)).collect()
+}
+
+/// What the workspaces at `roots` keep of `scope` at `snapshot`'s engine.
+enum Kept {
+    /// The newest run under any of its [`keys`] taken under the pin.
+    Fresh(Run),
+    /// Runs under other pins alone.
+    Stale,
+    None,
+}
+
+/// The run of `scope` at `snapshot`'s engine, under any of its [`keys`]
+/// in any of `roots`, the newest of those taken under the pin whose digest
+/// is `recipe`.
+fn kept(roots: &[PathBuf], snapshot: &Snapshot, scope: &str, recipe: &str) -> Result<Kept> {
+    let mut found: Option<(Option<SystemTime>, Run)> = None;
+    let mut stale = false;
+    for key in keys(snapshot, roots)? {
+        for root in roots {
+            let file = path(root, &key, scope);
+            let Some(run) = read(&file)? else {
+                continue;
+            };
+            if run.recipe != recipe {
+                stale = true;
+                continue;
+            }
+            let at = written(&file);
+            if found.as_ref().is_none_or(|(newest, _)| at > *newest) {
+                found = Some((at, run));
+            }
+        }
+    }
+    Ok(match found {
+        Some((_, run)) => Kept::Fresh(run),
+        None if stale => Kept::Stale,
+        None => Kept::None,
+    })
+}
+
+/// `run` kept at `file`, a subset's or a target's, replaced whole as a
+/// reading's file is, so a comparison reading it from another worktree
+/// never finds it cut short.
+pub(super) fn keep(file: &Path, run: &Run) -> Result<()> {
+    let text = serde_json::to_string_pretty(run).context("rendering the run")?;
+    crate::reading::replace(file, text.as_bytes())
+}
+
+/// The run kept at `file`, if one is: a subset's or a target's.
+pub(super) fn read(file: &Path) -> Result<Option<Run>> {
+    let Some(text) = crate::read_if(file)? else {
+        return Ok(None);
+    };
+    let run =
+        serde_json::from_str(&text).with_context(|| format!("{} is not a run", file.display()))?;
+    Ok(Some(run))
 }
 
 /// Where the workspace `snapshot` stands in keeps the run of `scope` taken
-/// at its engine tree, the file [`regressed`] reads as this tree's run.
+/// on a binary with no dep-info of its own ([`BuiltFrom::Unlisted`]), one
+/// of the files [`regressed`] reads as this tree's run.
 pub fn kept_run(snapshot: &Snapshot, scope: &str) -> Result<PathBuf> {
-    let tree = snapshot.tracked_over(&built_from())?;
+    let tree = snapshot.tracked_over(&BuiltFrom::Unlisted.keyed(snapshot.root()))?;
     Ok(path(snapshot.root(), &tree, scope))
 }
 
@@ -535,17 +631,17 @@ pub(crate) fn regressed(
     scope: &str,
 ) -> Result<Against> {
     let roots = roots(snapshot.root());
-    let tree = snapshot.tracked_over(&built_from())?;
-    let run = match read(&roots, &tree, scope)? {
-        Some(run) if run.recipe == pin.digest() => run,
-        Some(_) => {
+    let run = match kept(&roots, snapshot, scope, pin.digest())? {
+        Kept::Fresh(run) => run,
+        Kept::Stale => {
             return Ok(Against::Unrun(format!(
                 "the run of {scope} kept at this tree's engine is stale; {STALE}"
             )));
         }
-        None => {
+        Kept::None => {
             return Ok(Against::Unrun(format!(
-                "no run of {scope} is kept at this tree's engine ({tree}); take one with `cargo xtask phpt --subset {scope}`"
+                "no run of {scope} is kept at this tree's engine (in {}); take one with `cargo xtask phpt --subset {scope}`",
+                looked(&roots)
             )));
         }
     };
@@ -633,14 +729,13 @@ pub(crate) fn carry(from: &Path, into: &Path) -> Result<Carried> {
 /// stale once the carried one is fresh (#2725), as a run `phpt --base`
 /// takes again under a moved pin is.
 fn supersedes(file: &Path, to: &Path) -> bool {
-    let recipe = |path: &Path| {
-        let text = fs::read_to_string(path).ok()?;
-        serde_json::from_str::<Run>(&text)
-            .ok()
-            .map(|run| run.recipe)
-    };
-    let modified = |path: &Path| fs::metadata(path).and_then(|m| m.modified()).ok();
-    recipe(file) != recipe(to) && modified(file) > modified(to)
+    let recipe = |path: &Path| read(path).ok().flatten().map(|run| run.recipe);
+    recipe(file) != recipe(to) && written(file) > written(to)
+}
+
+/// When the file at `path` was last written, where that can be read.
+fn written(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 /// The head's run against the stored one, or why the two do not compare;
@@ -679,20 +774,6 @@ pub(crate) fn diff(was: &Run, run: &Run, target: Option<&Target>) -> Result<Diff
     Ok(diff)
 }
 
-/// The comparison's reading over `scope`, at the scope the subset's
-/// reading has, [`Scope::held_against`].
-fn held(
-    manifest: &Manifest,
-    snapshot: &Snapshot,
-    scope: &Scope,
-    commit: &str,
-    diff: Result<Diff, String>,
-) -> Result<Reading> {
-    let scope = scope.held_against().to_string();
-    let reading = Reading::for_scope(INSTRUMENT, &scope, manifest, snapshot)?.under(&manifest.pin);
-    compared(reading, commit, diff)
-}
-
 /// The words, the counts and the status of one comparison: fail while a
 /// test met at `commit` is not met here, a skip that says why where no
 /// verdict is given, and a pass otherwise.
@@ -701,18 +782,13 @@ pub(crate) fn compared(
     commit: &str,
     diff: Result<Diff, String>,
 ) -> Result<Reading> {
-    let scope = reading.scope.clone();
     let diff = match diff {
-        Ok(diff) if diff.held == 0 => Err(format!(
-            "no test met its expectation at {commit}, so nothing is held"
-        )),
-        diff => diff,
-    };
-    let diff = match diff {
-        Ok(diff) => diff,
-        Err(why) => {
+        Ok(diff) if diff.held > 0 => diff,
+        diff => {
+            let none = format!("no test met its expectation at {commit}, so nothing is held");
             reading.status = Status::Skip;
-            reading.message = format!("{scope}: no verdict against {commit}; {why}");
+            let why = diff.err().unwrap_or(none);
+            reading.message = format!("{}: no verdict against {commit}; {why}", reading.scope);
             return Ok(reading);
         }
     };
@@ -737,8 +813,8 @@ pub(crate) fn compared(
     };
     reading.status = status;
     reading.message = format!(
-        "{scope}: of {} tests met at {commit}, {lost}; {} newly met",
-        diff.held, diff.fixed
+        "{}: of {} tests met at {commit}, {lost}; {} newly met",
+        reading.scope, diff.held, diff.fixed
     );
     Ok(reading)
 }

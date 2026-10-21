@@ -99,11 +99,10 @@ mod tests {
         let Some(nobody) = Account::named(b"nobody") else {
             return assert!(Account::named(b"nobody").is_some());
         };
-        let dir = std::env::temp_dir().join(format!("opcache-preload-user-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).ok();
-        let secret = dir.join("root-only");
-        std::fs::write(&secret, "root").ok();
-        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).ok();
+        let files = php_ext::test::Files::new("opcache-preload-user", &[("root-only", "root")]);
+        let secret = files.path().join("root-only");
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600))
+            .expect("the file is its owner's alone");
         let before = (uid(), euid(), gid(), egid());
         let (name, user, group) = (nobody.name.clone(), nobody.uid, nobody.gid);
         #[allow(clippy::disallowed_methods)] // a test's own thread, which no fork waits on
@@ -120,7 +119,6 @@ mod tests {
         })
         .join();
         let after = (uid(), euid(), gid(), egid());
-        std::fs::remove_dir_all(&dir).ok();
         let Ok((took, ids, opened, child)) = taken else {
             return assert!(taken.is_ok(), "the thread ended in a panic");
         };

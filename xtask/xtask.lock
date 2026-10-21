@@ -302,6 +302,7 @@ scratch::KEEP
 scratch::Tree
 scratch::Tree::new
 scratch::Tree::path
+scratch::UNHOOKED
 scratch::cargo
 scratch::repository
 scratch::xtask

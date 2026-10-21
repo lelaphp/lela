@@ -29,9 +29,6 @@ use libz_sys as z;
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, efree, emalloc};
 
-#[cfg(test)]
-mod qualification;
-
 // SAFETY: zlib's own `zError`, which libz-sys does not declare, from the
 // library it links: an `int` in, a pointer into a static table out.
 unsafe extern "C" {
@@ -646,17 +643,4 @@ impl Drop for GzFile {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::ffi::CStr;
-
-    /// The version handed to the init calls is the header's, as a C
-    /// string with one NUL, at its end.
-    #[test]
-    fn the_init_calls_are_handed_the_header_s_version() {
-        let handed = CStr::from_bytes_with_nul(&super::HEADER_VERSION);
-        assert_eq!(
-            handed.map(CStr::to_bytes),
-            Ok(crate::header::ZLIB_VERSION.as_bytes())
-        );
-    }
-}
+mod tests;

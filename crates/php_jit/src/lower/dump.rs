@@ -2,7 +2,9 @@
 //! reader: what `types` built, op by op in the order the trace goes,
 //! each value where it is written with its slot, its types in php's
 //! `zend_dump_type_info` words and whether a register holds it, each
-//! guard where it is held, and every exit with what it stores.
+//! guard where it is held, every exit with what it stores, the slots
+//! whose types it knows there and whether it grows no side trace, and
+//! every unwind with what it stores.
 //!
 //! ```text
 //! trace enter e1, stop recursive call
@@ -25,8 +27,8 @@ use php_heap::ZvalType;
 
 use crate::record::func_name as func;
 use crate::types::{
-    Check, Constant, Def, End, ExitSpec, Form, Guard, GuardAt, Home, Landing, Layout, Op, OpId,
-    Operand, Place, Repeat, Slot, Stored, TraceIr, Types, ValueId,
+    Check, Constant, Def, End, ExitSpec, Form, Grows, Guard, GuardAt, Home, Landing, Layout, Op,
+    OpId, Operand, Place, Read, Repeat, Slot, Store, Stored, TraceIr, Types, Unwind, ValueId,
 };
 
 /// The text of `ir`.
@@ -106,6 +108,9 @@ impl<'a> Dump<'a> {
         for (at, exit) in self.ir.exits.iter().enumerate() {
             self.exit(text, at, exit)?;
         }
+        for (at, unwind) in self.ir.unwinds.iter().enumerate() {
+            self.unwind(text, at, unwind)?;
+        }
         for (at, raw) in self.ir.map_ptrs.iter().enumerate() {
             writeln!(text, "map {at}: offset {} slot {}", raw.offset, raw.slot)?;
         }
@@ -174,8 +179,8 @@ impl<'a> Dump<'a> {
                 if let Some(exit) = line.exit {
                     write!(text, " leaves -> exit {}", exit.0)?;
                 }
-                if let Some(exit) = line.freed {
-                    write!(text, " frees -> exit {}", exit.0)?;
+                if let Some(unwind) = line.unwind {
+                    write!(text, " unwinds -> unwind {}", unwind.0)?;
                 }
                 writeln!(text)
             }
@@ -217,18 +222,44 @@ impl<'a> Dump<'a> {
             }
         };
         write!(text, "exit {at}: f{} {opline} {landing}", exit.frame.0)?;
-        for store in &exit.stores {
-            let from = match store.from {
-                Stored::Value(value) => format!("#{}", value.0),
-                Stored::Bool(on) => on.to_string(),
-                Stored::Copied(value) => format!("copied #{}", value.0),
-            };
-            write!(text, " {}={from}", self.slot(store.slot))?;
+        self.stores(text, &exit.stores)?;
+        for known in &exit.known {
+            write!(
+                text,
+                " {}:{}",
+                self.slot(known.slot),
+                Types::of_tag(known.tag)
+            )?;
+        }
+        if exit.grows == Grows::Never {
+            write!(text, " to vm")?;
         }
         if let Some(link) = exit.link {
             write!(text, " link {}", link.get())?;
         }
         writeln!(text)
+    }
+
+    fn unwind(&self, text: &mut String, at: usize, unwind: &Unwind) -> fmt::Result {
+        write!(text, "unwind {at}:")?;
+        self.stores(text, &unwind.stores)?;
+        writeln!(text)
+    }
+
+    /// What an exit or an unwind stores, slot by slot.
+    fn stores(&self, text: &mut String, stores: &[Store]) -> fmt::Result {
+        for store in stores {
+            let from = match store.from {
+                Stored::Value(value) => format!("#{}", value.0),
+                Stored::Bool(on) => on.to_string(),
+                Stored::Copied { value, read } => match read {
+                    Read::InPlace => format!("copied #{}", value.0),
+                    Read::Through => format!("copied #{} through a reference", value.0),
+                },
+            };
+            write!(text, " {}={from}", self.slot(store.slot))?;
+        }
+        Ok(())
     }
 
     /// A value with its slot, its types and its home.
@@ -296,6 +327,6 @@ fn check(check: Check) -> String {
         Check::Direction { taken } => {
             format!("direction {}", if taken { "taken" } else { "fell" })
         }
-        Check::Caller { func: f, opline } => format!("caller {} {:04}", func(f), opline.0),
+        Check::Stands { func: f, opline } => format!("stands {} {:04}", func(f), opline.0),
     }
 }

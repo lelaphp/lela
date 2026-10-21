@@ -350,9 +350,7 @@ fn denied_lints<'a>(manifest: &'a Manifest, row: &str) -> Vec<&'a Rule> {
 /// is textual, so the comments stay.
 fn add_member(root: &Path, row: &str) -> Result<bool> {
     let path = root.join("Cargo.toml");
-    let text = crate::read(&path)?;
-    let table: toml::Table =
-        toml::from_str(&text).with_context(|| format!("{}", path.display()))?;
+    let (text, table) = (crate::read(&path)?, crate::read_toml::<toml::Table>(&path)?);
     let members = table
         .get("workspace")
         .and_then(|w| w.get("members"))
@@ -390,10 +388,7 @@ fn push_array(text: &str, start: usize, item: &str) -> Result<(usize, String)> {
         ","
     };
     Ok(if inside.contains('\n') {
-        let indent = inside
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .map_or("    ", |l| &l[..l.len() - l.trim_start().len()]);
+        let indent = indent_of(inside).unwrap_or("    ");
         (
             open + 1 + last.len(),
             format!("{comma}\n{indent}\"{item}\","),
@@ -403,6 +398,12 @@ fn push_array(text: &str, start: usize, item: &str) -> Result<(usize, String)> {
     } else {
         (open + 1 + last.len(), format!("{comma} \"{item}\""))
     })
+}
+
+/// The indent of the first line of `inside` that is not blank.
+fn indent_of(inside: &str) -> Option<&str> {
+    let line = inside.lines().find(|l| !l.trim().is_empty())?;
+    Some(&line[..line.len() - line.trim_start().len()])
 }
 
 /// The offset of the `key =` line inside the `[table]` of a TOML text,
@@ -479,9 +480,7 @@ const LISTS: [&str; 2] = ["default", "host"];
 /// written here.
 fn bundle_feature(root: &Path, name: &str) -> Result<Edit> {
     let path = root.join(BUNDLE).join("Cargo.toml");
-    let text = crate::read(&path)?;
-    let table: toml::Table =
-        toml::from_str(&text).with_context(|| format!("{}", path.display()))?;
+    let (text, table) = (crate::read(&path)?, crate::read_toml::<toml::Table>(&path)?);
     let package = format!("php_ext_{name}");
     let has = |section: &str, key: &str| {
         table
@@ -593,12 +592,7 @@ fn bundle_line(root: &Path, name: &str) -> Result<Edit> {
             format!("\n{indent}#[cfg(feature = \"{name}\")]\n{indent}{entry},\n{outer}"),
         )
     } else {
-        let indent = inside
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .map_or(format!("{outer}    "), |l| {
-                l[..l.len() - l.trim_start().len()].to_owned()
-            });
+        let indent = indent_of(inside).map_or(format!("{outer}    "), str::to_owned);
         let comma = if last.ends_with(',') { "" } else { "," };
         (
             open + 1 + last.len(),

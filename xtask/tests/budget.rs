@@ -11,7 +11,9 @@ use xtask::{budget, generated};
 
 mod common {
     pub mod repo;
+    pub mod run;
 }
+use common::run::xtask;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -36,7 +38,7 @@ fn scratch(name: &str) -> Tree {
 #[test]
 fn a_file_that_is_not_text_is_counted_as_no_lines_and_not_as_a_failure() {
     let root = scratch("not-text");
-    common::repo::scratch_workspace(workspace(), &root).unwrap();
+    common::repo::scratch_workspace(workspace(), &root);
     std::fs::copy(workspace().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
     let manifest = Manifest::load(&root).unwrap();
     let before = budget::run(&root, &manifest).unwrap();
@@ -111,7 +113,7 @@ fn the_tracked_workspace_passes_with_the_manifests_numbers() {
 #[test]
 fn without_the_scripts_row_the_tree_is_measured_and_held_to_nothing() {
     let root = scratch("no-row");
-    common::repo::scratch_workspace(workspace(), &root).unwrap();
+    common::repo::scratch_workspace(workspace(), &root);
     std::fs::copy(workspace().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
     std::fs::create_dir_all(root.join("scripts/hooks")).unwrap();
     std::fs::write(
@@ -145,7 +147,7 @@ fn without_the_scripts_row_the_tree_is_measured_and_held_to_nothing() {
 #[test]
 fn the_scripts_row_names_the_generators_and_everything_else_under_scripts_counts() {
     let root = scratch("scripts");
-    common::repo::scratch_workspace(workspace(), &root).unwrap();
+    common::repo::scratch_workspace(workspace(), &root);
     std::fs::copy(workspace().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
     std::fs::create_dir_all(root.join("scripts/hooks")).unwrap();
     std::fs::write(
@@ -721,14 +723,9 @@ fn a_clippy_rule_clippy_cannot_hold_is_refused_naming_why() {
 #[test]
 fn the_binary_writes_the_readings_and_exits_nonzero_on_a_failure() {
     let fixture = xtask::package_dir().join("fixtures/budget/ceiling");
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(&fixture)
-        .arg("budget")
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!out.status.success(), "{stdout}");
+    let ran = xtask(&fixture, &["budget"]);
+    assert_ne!(ran.code(), 0, "{ran}");
+    let stdout = ran.stdout;
     assert!(stdout.contains("fail budget php_heap"), "{stdout}");
     let store = Store::of_workspace(&fixture);
     let heap = store.read("budget", "php_heap").unwrap().unwrap();
@@ -743,22 +740,17 @@ fn the_binary_writes_the_readings_and_exits_nonzero_on_a_failure() {
 #[test]
 fn lock_packages_counts_the_third_party_packages_and_not_the_workspaces_crates() {
     let fixture = xtask::package_dir().join("fixtures/budget/lock-packages");
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(&fixture)
-        .arg("budget")
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let ran = xtask(&fixture, &["budget"]);
     std::fs::remove_dir_all(fixture.join("target")).ok();
-    assert!(!out.status.success(), "{stdout}");
+    assert_ne!(ran.code(), 0, "{ran}");
+    let stdout = ran.stdout;
     assert!(
         stdout.contains("third-party Cargo.lock packages: 161 over the ceiling of 160"),
         "{stdout}"
     );
 
     let root = scratch("lock-packages");
-    common::repo::scratch_workspace(workspace(), &root).unwrap();
+    common::repo::scratch_workspace(workspace(), &root);
     let lock = std::fs::read_to_string(fixture.join("Cargo.lock")).unwrap();
     let mut third_party = 0;
     let kept: Vec<&str> = lock

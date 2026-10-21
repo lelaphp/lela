@@ -7,7 +7,7 @@ use php_ext::test::{Capture, Engine};
 fn the_extension_is_loaded() {
     let sink = Capture::default();
     let served = engine().serve_capture("<?php var_dump(extension_loaded('mbstring'));", sink);
-    assert_eq!(served.stdout, b"bool(true)\n");
+    assert_eq!(served.stdout_text(), "bool(true)\n");
 }
 
 fn engine() -> Engine {
@@ -29,9 +29,7 @@ $x = $z . $z;
 foreach ($a as $key => $v) { echo $key, '=', $v, "\n"; }
 "#;
     let served = engine().serve_capture(source, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "kkkkkkkkkk=é\n");
-    assert_eq!(served.fatal, None);
-    assert_eq!(served.exit_code, 0);
+    served.assert_clean("kkkkkkkkkk=é\n");
 }
 
 /// Two arrays converted with twenty strings of their keys' size
@@ -50,10 +48,5 @@ mb_convert_variables('UTF-8', 'ISO-8859-1', $b);
 foreach ([$a, $b] as $c) { foreach ($c as $key => $v) { echo $key, '=', $v, "\n"; } }
 "#;
     let served = engine().serve_capture(source, Capture::default());
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "kkkkkkkkkk=é\nkkkkkkkkkk=é\n"
-    );
-    assert_eq!(served.fatal, None);
-    assert_eq!(served.exit_code, 0);
+    served.assert_clean("kkkkkkkkkk=é\nkkkkkkkkkk=é\n");
 }

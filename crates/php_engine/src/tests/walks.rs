@@ -323,12 +323,7 @@ fn a_foreach_walk_gives_back_what_it_took_on_every_way_out() {
          unset($e); echo guarded($a) ? 'recursive ' : 'walked '; $a = null; echo \"after\\n\";\n",
         Capture::default(),
     );
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "2 100 2 100\ngone after\nthrown at the first row thrown at the first row gone after\ninside walked gone after\n"
-    );
-    assert_eq!(served.fatal, None);
-    assert_eq!(served.exit_code, 0);
+    served.assert_clean("2 100 2 100\ngone after\nthrown at the first row thrown at the first row gone after\ninside walked gone after\n");
 }
 
 /// A foreach walk reads the rows as they stand under [`Hold::None`]: a
@@ -347,17 +342,9 @@ fn a_foreach_walk_reads_the_rows_as_they_stand_where_it_holds_nothing() {
         )
     };
     let served = armed().serve_capture(&script("false"), Capture::default());
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "v9223372036854775807 new \n"
-    );
-    assert_eq!(served.fatal, None);
+    served.assert_clean("v9223372036854775807 new \n");
     let served = armed().serve_capture(&script("true"), Capture::default());
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "v9223372036854775807 w9223372036854775807 x9223372036854775807 \n"
-    );
-    assert_eq!(served.fatal, None);
+    served.assert_clean("v9223372036854775807 w9223372036854775807 x9223372036854775807 \n");
 }
 
 /// A foreach walk holding nothing ends at the table's destruction: the
@@ -375,17 +362,9 @@ fn a_foreach_walk_holding_nothing_ends_where_the_table_is_destroyed() {
         )
     };
     let served = armed().serve_capture(&script("false"), Capture::default());
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "v9223372036854775807 \n"
-    );
-    assert_eq!(served.fatal, None);
+    served.assert_clean("v9223372036854775807 \n");
     let served = armed().serve_capture(&script("true"), Capture::default());
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "v9223372036854775807 w9223372036854775807 x9223372036854775807 \n"
-    );
-    assert_eq!(served.fatal, None);
+    served.assert_clean("v9223372036854775807 w9223372036854775807 x9223372036854775807 \n");
 }
 
 /// A live walk owns each row's key and value for its step: a callback
@@ -400,11 +379,7 @@ fn a_live_walk_s_row_stands_after_the_callback_unsets_it() {
          echo live_reads($a, function ($k) { global $a; unset($a[$k]); $GLOBALS['x' . $k] = s('z'); }), $a === [] ? 'emptied' : 'not emptied', \"\\n\";\n",
         Capture::default(),
     );
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "v9223372036854775807 w9223372036854775807 emptied\n"
-    );
-    assert_eq!(served.exit_code, 0);
+    served.assert_clean("v9223372036854775807 w9223372036854775807 emptied\n");
 }
 
 /// A foreach walk over an object's property table reads php's
@@ -419,11 +394,7 @@ fn a_foreach_walk_reads_an_object_s_declared_rows_then_its_dynamic_ones() {
          echo object_rows($o, function () {}, true), \"\\n\";\n",
         Capture::default(),
     );
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "\\0P\\0a=a \\0*\\0b=b c=c d=d \n"
-    );
-    assert_eq!(served.fatal, None);
+    served.assert_clean("\\0P\\0a=a \\0*\\0b=b c=c d=d \n");
 }
 
 /// Holding the object's table, a foreach walk reads the dynamic rows it
@@ -445,14 +416,9 @@ fn a_foreach_walk_over_an_object_reads_its_slots_as_they_stand() {
         )
     };
     let served = armed().serve_capture(&script("true"), Capture::default());
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "a=a d=d9223372036854775807 e=e9223372036854775807 \n"
-    );
-    assert_eq!(served.fatal, None);
+    served.assert_clean("a=a d=d9223372036854775807 e=e9223372036854775807 \n");
     let served = armed().serve_capture(&script("false"), Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "a=a d=new f=f \n");
-    assert_eq!(served.fatal, None);
+    served.assert_clean("a=a d=new f=f \n");
 }
 
 /// A foreach walk over an object's table holding nothing ends at the
@@ -469,17 +435,11 @@ fn a_foreach_walk_over_an_object_holding_nothing_ends_where_it_is_destroyed() {
         )
     };
     let served = armed().serve_capture(&script("false"), Capture::default());
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "gone a=a9223372036854775807 \n"
-    );
-    assert_eq!(served.fatal, None);
+    served.assert_clean("gone a=a9223372036854775807 \n");
     let served = armed().serve_capture(&script("true"), Capture::default());
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "gone a=a9223372036854775807 d=d9223372036854775807 e=e9223372036854775807 \n"
+    served.assert_clean(
+        "gone a=a9223372036854775807 d=d9223372036854775807 e=e9223372036854775807 \n",
     );
-    assert_eq!(served.fatal, None);
 }
 
 /// A guarded walk over an object's property table marks its dynamic
@@ -494,8 +454,7 @@ fn a_guarded_walk_over_an_object_marks_its_table() {
          echo object_guarded($o), ' ', object_guarded($o), \"\\n\";\n",
         Capture::default(),
     );
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "inside inside\n");
-    assert_eq!(served.fatal, None);
+    served.assert_clean("inside inside\n");
 }
 
 /// A row a foreach walk holding nothing lends is pinned for its step, so
@@ -512,12 +471,7 @@ fn a_row_freed_during_its_own_step_is_destroyed_there_and_its_bytes_wait() {
          echo $a === [] ? 'emptied' : 'not emptied', \"\\n\";\n",
         Capture::default(),
     );
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "gone unset read object unset read v9223372036854775807 emptied\n"
-    );
-    assert_eq!(served.fatal, None);
-    assert_eq!(served.exit_code, 0);
+    served.assert_clean("gone unset read object unset read v9223372036854775807 emptied\n");
 }
 
 /// A row the callback appends to in place, the string's one owner the
@@ -534,12 +488,7 @@ fn a_pinned_row_appended_to_is_copied_not_moved() {
          echo foreach_calls($a, function ($k) { global $a; $a['k'] .= s('x') . s('x') . s('x') . s('x'); $GLOBALS['y'] = s('z'); }, false), $a['k'] === s('v') . s('x') . s('x') . s('x') . s('x') ? 'appended' : 'not appended', \"\\n\";\n",
         Capture::default(),
     );
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "v9223372036854775807 appended\n"
-    );
-    assert_eq!(served.fatal, None);
-    assert_eq!(served.exit_code, 0);
+    served.assert_clean("v9223372036854775807 appended\n");
 }
 
 /// A row pinned by a walk outside a fiber and by a walk inside it that
@@ -561,10 +510,5 @@ fn a_row_pinned_across_a_fiber_suspend_stands_until_its_last_pin_goes() {
          $fiber->resume(); echo \"\\n\";\n",
         Capture::default(),
     );
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "suspended read v9223372036854775807 read v9223372036854775807 \n"
-    );
-    assert_eq!(served.fatal, None);
-    assert_eq!(served.exit_code, 0);
+    served.assert_clean("suspended read v9223372036854775807 read v9223372036854775807 \n");
 }

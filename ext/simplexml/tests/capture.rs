@@ -18,7 +18,7 @@ fn the_extension_is_loaded() {
         .build();
     let sink = Capture::default();
     let served = engine.serve_capture("<?php var_dump(extension_loaded('simplexml'));", sink);
-    assert_eq!(served.stdout, b"bool(true)\n");
+    assert_eq!(served.stdout_text(), "bool(true)\n");
 }
 
 /// `current()`, `key()` and the movers over an element read the table
@@ -45,6 +45,5 @@ fn the_pointer_natives_over_an_element_give_up_the_table_they_read() {
 echo @current($x), @key($x), @next($x), @reset($x), @end($x), @prev($x), "\n";"#,
         Capture::default(),
     );
-    assert_eq!(served.fatal, None);
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "1b212\n");
+    served.assert_clean("1b212\n");
 }

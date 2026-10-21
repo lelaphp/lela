@@ -13,10 +13,7 @@ use crate::test::Capture;
 fn armed(source: &str) -> (String, i32) {
     let engine = Engine::cli_builder().sense_leaks(LeakSensor::Armed).build();
     let served = engine.serve_capture(source, Capture::default());
-    (
-        String::from_utf8_lossy(&served.stdout).into_owned(),
-        served.exit_code,
-    )
+    (served.stdout_text(), served.exit_code)
 }
 
 /// A constant expression that throws while it builds an array gives up

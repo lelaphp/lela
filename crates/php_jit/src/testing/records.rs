@@ -121,7 +121,7 @@ impl Tier for Records {
                 .ini(
                     testing::declared(&PLAN)
                         .into_iter()
-                        .chain(testing::declared(&testing::OPCACHE_JIT))
+                        .chain(testing::declared(&testing::OPCACHE))
                         .collect(),
                 )
                 .engine_state(recorder)
@@ -137,7 +137,11 @@ impl Tier for Records {
     reason = "an engine start answers a Refusal where it fails; this one never does"
 )]
 pub(crate) fn recorder(start: &EngineStart) -> Result<Recorder, Refusal> {
-    Ok(Recorder(Policy::from_ini(start.ini(), &mut Vec::new())))
+    Ok(Recorder(Policy::from_ini(
+        start.ini(),
+        start.host(),
+        &mut Vec::new(),
+    )))
 }
 
 /// The plan's entry `name`, set.

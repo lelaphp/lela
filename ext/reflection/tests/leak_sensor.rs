@@ -13,7 +13,7 @@ fn served(src: &str, expected: &str) {
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(src, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), expected);
+    assert_eq!(served.stdout_text(), expected);
 }
 
 /// The closure `ReflectionFunction::getClosure()` makes of a function

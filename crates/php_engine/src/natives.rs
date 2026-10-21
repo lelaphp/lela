@@ -2529,10 +2529,7 @@ mod tests {
         let served = Engine::builder()
             .build()
             .serve_capture(source, Capture::default());
-        (
-            String::from_utf8_lossy(&served.stdout).into_owned(),
-            served.fatal,
-        )
+        (served.stdout_text(), served.fatal)
     }
 
     /// php's `ZEND_PARSE_PARAMETERS_START(0, 1)`: `$real_usage` is

@@ -439,7 +439,8 @@ impl Control {
     fn start(&mut self) {
         self.shared.held().phase = Phase::Starting;
         let shared = Arc::clone(&self.shared);
-        let Some(thread) = crate::fork::spawn("php-timer", move || shared.serve()) else {
+        let builder = std::thread::Builder::new().name("php-timer".to_owned());
+        let Ok(thread) = crate::fork::spawn(builder, move || shared.serve()) else {
             return;
         };
         self.shared.started();

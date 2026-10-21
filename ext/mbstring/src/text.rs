@@ -883,6 +883,46 @@ fn mb_substr(
 /// string(0) ""
 /// string(0) ""
 /// ```
+///
+/// A cut of a stateful encoding takes whole characters, opened with the
+/// escape that shifts to them and closed back to ASCII, and is empty
+/// where the length cannot hold both escapes and a character, or where
+/// it starts after the opening escape, as offset 3 does; a cut of a
+/// fixed-width or multibyte encoding starts at the character its offset
+/// falls in and keeps the whole characters that fit.
+///
+/// ```php
+/// $jis = "\x1b\x24\x42\x30\x21\x30\x22\x1b\x28\x42";
+/// foreach ([0, 3] as $start) {
+///     foreach ([0, 1, 4, 7, 8, 9, 20, 40] as $length) {
+///         echo $start, ' ', $length, ' [', bin2hex(mb_strcut($jis, $start, $length, 'JIS')), "]\n";
+///     }
+/// }
+/// echo bin2hex(mb_strcut("\x00a\x00b\x00c", 1, 3, 'UTF-16BE')), "\n";
+/// echo bin2hex(mb_strcut("\x82\xa0\x82\xa2", 1, 3, 'SJIS')), "\n";
+/// echo bin2hex(mb_strcut('あいう', 1, 5, 'UTF-8')), "\n";
+/// ```
+/// ```expect
+/// 0 0 []
+/// 0 1 []
+/// 0 4 []
+/// 0 7 []
+/// 0 8 [1b244230211b2842]
+/// 0 9 [1b244230211b2842]
+/// 0 20 [1b2442302130221b2842]
+/// 0 40 [1b2442302130221b2842]
+/// 3 0 []
+/// 3 1 []
+/// 3 4 []
+/// 3 7 []
+/// 3 8 []
+/// 3 9 []
+/// 3 20 []
+/// 3 40 []
+/// 0061
+/// 82a0
+/// e38182
+/// ```
 #[php_function]
 fn mb_strcut(
     req: &mut Request,

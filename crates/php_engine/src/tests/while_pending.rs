@@ -87,7 +87,7 @@ fn a_call_inside_the_step_answers_the_pending_throwable() {
          try { echo pending_conversion(new T), \"\\n\"; } catch (Exception $e) { echo 'caught ', $e->getMessage(), \"\\n\"; }\n",
         Capture::default(),
     );
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert_eq!(stdout, "caught first\n");
     assert_eq!(served.exit_code, 0, "{stdout}");
 }
@@ -109,7 +109,7 @@ fn a_refused_write_inside_the_step_answers_the_pending_throwable() {
          try { echo pending_write($t), \"\\n\"; } catch (Exception $e) { echo 'caught ', $e->getMessage(), ' ', isset($t->n) ? 'set' : 'unset', \"\\n\"; }\n",
         Capture::default(),
     );
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert_eq!(stdout, "caught first unset\n");
     assert_eq!(served.exit_code, 0, "{stdout}");
 }

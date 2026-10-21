@@ -381,8 +381,7 @@ fn in_request(body: fn(&mut Request) -> Result<(), Thrown>) {
         .extensions(&[php_ext_lexbor::extension(), probe])
         .build();
     let served = engine.serve_capture("<?php echo 'served';", Capture::default());
-    assert_eq!(served.fatal, None);
-    assert_eq!(served.stdout, b"served");
+    served.assert_clean("served");
 }
 
 /// `body` served in a request with the heap lent and a fresh URL

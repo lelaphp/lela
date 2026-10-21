@@ -1206,7 +1206,6 @@ test::Engine::realpath
 test::Engine::refused
 test::Engine::serve
 test::Engine::serve_capture
-test::Engine::serve_capture_as
 test::Engine::serve_capture_in
 test::Engine::serve_capture_traced_in
 test::Engine::serve_through
@@ -1216,7 +1215,15 @@ test::Engine::strip
 test::Engine::unit
 test::Engine::zend_version_info
 test::Entered
+test::Files
+test::Files::new
+test::Files::path
+test::Files::serve
+test::Files::write
 test::LeakSensor
+test::Served
+test::Served::assert_clean
+test::Served::stdout_text
 values::Charset
 values::Charset::named
 values::Charset::next_char

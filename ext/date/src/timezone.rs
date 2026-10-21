@@ -697,6 +697,63 @@ impl DateTimeZone {
     /// 2800 88
     /// 2744 0
     /// ```
+    ///
+    /// What the request's heap counts for a zone (design §5.13): each name
+    /// parsed once into the request's cache, a name again taking the object
+    /// alone and its release giving that back, a name in another case
+    /// taking storage of its own and keeping the name as written, an
+    /// unknown name refused each time it is asked for, and an
+    /// abbreviation's zone, and its clone, the object alone.
+    ///
+    /// ```php
+    /// $names = ['Europe/Amsterdam', 'America/New_York', 'Asia/Tokyo', 'Europe/London', 'Australia/Sydney', 'Africa/Cairo', 'America/Chicago', 'Europe/Paris', 'Asia/Kolkata', 'Pacific/Auckland'];
+    /// $zones = [];
+    /// foreach ($names as $name) {
+    ///     $before = memory_get_usage();
+    ///     $zones[] = new DateTimeZone($name);
+    ///     echo $name, ':', memory_get_usage() - $before, "\n";
+    /// }
+    /// $before = memory_get_usage();
+    /// $again = new DateTimeZone('Europe/Amsterdam');
+    /// echo 'repeat:', memory_get_usage() - $before, "\n";
+    /// $before = memory_get_usage();
+    /// unset($again);
+    /// echo 'release:', memory_get_usage() - $before, "\n";
+    /// $before = memory_get_usage();
+    /// $alias = new DateTimeZone('europe/amsterdam');
+    /// echo 'alias:', memory_get_usage() - $before, ':', $alias->getName(), "\n";
+    /// for ($j = 0; $j < 2; $j++) {
+    ///     try { new DateTimeZone('Mars/Olympus'); }
+    ///     catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// $before = memory_get_usage();
+    /// $abbreviation = new DateTimeZone('EST');
+    /// $after = memory_get_usage();
+    /// $cloned = clone $abbreviation;
+    /// echo 'abbr:', $after - $before, ':clone:', memory_get_usage() - $after, "\n";
+    /// $before = memory_get_usage();
+    /// unset($abbreviation, $cloned);
+    /// echo 'abbr-release:', memory_get_usage() - $before, "\n";
+    /// ```
+    /// ```expect
+    /// Europe/Amsterdam:2392
+    /// America/New_York:2440
+    /// Asia/Tokyo:656
+    /// Europe/London:2136
+    /// Australia/Sydney:1536
+    /// Africa/Cairo:1792
+    /// America/Chicago:2424
+    /// Europe/Paris:1744
+    /// Asia/Kolkata:1168
+    /// Pacific/Auckland:1584
+    /// repeat:80
+    /// release:-80
+    /// alias:1768:europe/amsterdam
+    /// DateTimeZone::__construct(): Unknown or bad timezone (Mars/Olympus)
+    /// DateTimeZone::__construct(): Unknown or bad timezone (Mars/Olympus)
+    /// abbr:96:clone:96
+    /// abbr-release:-192
+    /// ```
     fn __construct(req: &mut Request, this: This<Self>, timezone: Path) -> Result<(), Thrown> {
         let Err(printed) = initialize(req, this.object(), timezone.0.as_bytes())? else {
             return Ok(());

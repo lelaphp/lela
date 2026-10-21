@@ -5653,7 +5653,7 @@ mod tests {
                 .ini("zend.max_allowed_stack_size", limit)
                 .build()
                 .serve_capture(source, Capture::default());
-            let stdout = String::from_utf8_lossy(&served.stdout);
+            let stdout = served.stdout_text();
             let lines: Vec<&str> = stdout.lines().collect();
             assert_eq!(
                 lines.len(),
@@ -5681,7 +5681,7 @@ mod tests {
         let served = Engine::cli_builder()
             .build()
             .serve_capture(source, Capture::default());
-        let stdout = String::from_utf8_lossy(&served.stdout);
+        let stdout = served.stdout_text();
         let (refused, dumped) = stdout.split_once('\n').unwrap_or_default();
         assert!(
             refused.starts_with("Maximum call stack size of ")
@@ -5703,8 +5703,7 @@ mod tests {
         let served = Engine::cli_builder()
             .build()
             .serve_capture(source, Capture::default());
-        assert_eq!(String::from_utf8_lossy(&served.stdout), "a,kkkkkkkkkk,");
-        assert_eq!(served.fatal, None);
+        served.assert_clean("a,kkkkkkkkkk,");
     }
 
     fn array(req: &mut Request, entries: Vec<(Key, Value)>) -> Value {

@@ -1,5 +1,5 @@
 //! The running execution's trace number (#2738; `jit-design.md` §4.9,
-//! revisions 23 and NEXT; design §5.11, revision 52): php's
+//! revisions 23 and 30; design §5.11, revision 52): php's
 //! `EG(jit_trace_num)`, which the tier reads and writes through
 //! [`tier::trace_num`] and [`tier::set_trace_num`] and the engine keeps
 //! with the execution state. A program reaches it here through two
@@ -94,13 +94,8 @@ fn traced() -> Extension {
 fn serve(source: &str) -> String {
     let engine = Engine::cli_builder().extensions(&[traced()]).build();
     let served = engine.serve_capture(source, Capture::default());
-    assert_eq!(
-        served.exit_code,
-        0,
-        "{}",
-        String::from_utf8_lossy(&served.stdout)
-    );
-    String::from_utf8_lossy(&served.stdout).into_owned()
+    assert_eq!(served.exit_code, 0, "{}", served.stdout_text());
+    served.stdout_text()
 }
 
 /// A fiber's body reads [`TraceNum::NONE`] whatever its resumer's

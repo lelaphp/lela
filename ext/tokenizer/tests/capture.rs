@@ -10,7 +10,7 @@ fn served(source: &str) -> String {
         .extensions(&[php_ext_tokenizer::extension()])
         .build();
     let served = engine.serve_capture(source, Capture::default());
-    String::from_utf8_lossy(&served.stdout).into_owned()
+    served.stdout_text()
 }
 
 #[test]

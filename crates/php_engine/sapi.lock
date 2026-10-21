@@ -50,6 +50,7 @@ getopt::OptError
 getopt::Stopped
 getopt::Taken
 host_thread
+main_thread
 readable::Callee
 readable::Code
 readable::Innermost
