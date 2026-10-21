@@ -521,7 +521,22 @@ impl Request {
     /// `zend_compile`'s names for a request-only unit: the file's name
     /// and each name [`php_compile::op_array_names`] lists, made as
     /// strings of the request and held while the unit lives. The `Err`
-    /// is the memory limit.
+    /// is the memory limit. An enum's `cases`, `from` and `tryFrom` are
+    /// php's internal functions, registered as it links under php's
+    /// known strings, so none of their names is made:
+    ///
+    /// ```php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W { function __toString() { return ""; } }');
+    /// echo m('enum E1 { case A; case B; }'), "\n";
+    /// echo m('enum E2: int { case A = 1; }'), "\n";
+    /// echo m('enum E3: string { case A = "a"; function Label() { return 1; } }'), "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 1344
+    /// 1288
+    /// 1464
+    /// ```
     pub(crate) fn hold_unit_names(&mut self, unit: &PublishedUnit) -> Result<(), Thrown> {
         let at = self.unit_strings.held(unit);
         let Some(held) = self.unit_strings.units.get_mut(at) else {
@@ -570,10 +585,9 @@ impl Request {
             .map(|(decl, _): &(FunctionDecl, php_unit::OpArray)| &decl.name)
             .filter(|name| !name.0.starts_with(b"{"))
             .chain(unit.classes.iter().map(|class| &class.name))
-            .chain(
-                (unit.classes.iter())
-                    .flat_map(|class| class.methods.iter().map(|method| &method.function.name)),
-            )
+            .chain((unit.classes.iter()).flat_map(|class| {
+                (php_unit::written_methods(class).iter()).map(|method| &method.function.name)
+            }))
             .filter(|name| name.0.iter().any(u8::is_ascii_uppercase));
         // `zend_new_interned_string` hands back the interned string for a
         // lowered name opcache holds, `count` or `__tostring`, and the

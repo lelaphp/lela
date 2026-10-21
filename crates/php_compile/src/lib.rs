@@ -797,8 +797,9 @@ impl<'u> Parts<'u> {
                 .iter()
                 .filter_map(|property| property.hooks.as_deref())
                 .flat_map(|hooks| hooks.get.iter().chain(&hooks.set));
-            class
-                .methods
+            // An enum's `cases`, `from` and `tryFrom` are php's internal
+            // functions, named by its known strings.
+            php_unit::written_methods(class)
                 .iter()
                 .chain(hooks)
                 .map(|method| &method.function)
