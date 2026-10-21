@@ -24,8 +24,7 @@ use std::collections::HashSet;
 
 use php_unit::{OpArray, Opcode, OperandKind, Opline};
 
-/// `sizeof(void *)`: one slot of `cache_size`.
-const SLOT: u32 = 8;
+use crate::exec::SLOT_BYTES as SLOT;
 
 /// `sizeof(zval)`: what a `RECV_INIT` over an `IS_CONSTANT_AST` keeps its
 /// evaluated default in, past every other slot.
@@ -50,7 +49,8 @@ enum Table {
     Frameless,
 }
 
-/// `add_static_slot`'s kinds, the bias on its member string's hash.
+/// `add_static_slot`'s kinds, the bias on its member string's hash
+/// (`Z/Zend/Optimizer/compact_literals.c:34-36`, `:46-77`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Member {
     ClassConstant,
@@ -110,7 +110,10 @@ impl<'a> Counted<'a> {
     /// The slots `op` takes, none where it shares one.
     fn site(&mut self, op: &Opline) {
         use Opcode as O;
-        let (op1, op2) = (constant(op.op1_type), constant(op.op2_type));
+        let (op1, op2) = (
+            op.op1_type == OperandKind::Const,
+            op.op2_type == OperandKind::Const,
+        );
         let this = op.op1_type == OperandKind::Unused;
         match op.opcode {
             O::AssignObjOp
@@ -248,10 +251,4 @@ impl<'a> Counted<'a> {
             .get(at as usize)
             .is_some_and(|literal| literal.as_const_expr().is_some())
     }
-}
-
-/// Whether an operand is a `CONST`, an index into the op array's
-/// constants.
-fn constant(kind: OperandKind) -> bool {
-    kind == OperandKind::Const
 }

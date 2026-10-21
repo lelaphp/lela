@@ -623,9 +623,10 @@ args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protectio
 
 # Under opcache a held program's runtime cache is what
 # `zend_optimizer_compact_literals` counts (#3211): four calls of one
-# function share one slot, and four `new`s of one class one, so a program
-# of four of each reads what a program of one of each reads, the two of
-# one length. Each first line reads php's.
+# function share one slot, and four `new`s of one class one, so the
+# program of four of each, of one length with the program of one of each,
+# lays the same cache; it reads more for its frame's temporaries alone.
+# Each first line reads php's.
 [[line]]
 name = "a-program-s-runtime-cache-shares-one-slot-per-name"
 args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=0", "-d", "opcache.jit=off", "one.php"]

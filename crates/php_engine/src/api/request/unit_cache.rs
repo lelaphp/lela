@@ -511,7 +511,8 @@ impl Request {
             self.revalidated_path(written.unwrap_or(path), &full);
         }
         let resolved = lookup == Lookup::Resolved;
-        let written = (written.filter(|_| !resolved)).and_then(|written| self.written_key(written));
+        let written = (written.filter(|_| lookup == Lookup::AsWritten))
+            .and_then(|written| self.written_key(written));
         let levels = levels(file_cache.as_ref(), memory, &shared.units.build);
         // `persistent_compile_file` opens the file to resolve its path
         // wherever the lookup by the key misses.

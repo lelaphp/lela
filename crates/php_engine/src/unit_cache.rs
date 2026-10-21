@@ -450,7 +450,9 @@ pub(crate) struct Asked<'a> {
 /// What opcache's optimizer makes of a unit it persists that a request
 /// reads, `zend_optimize_script` under `opcache.optimization_level`, which
 /// `cache_script_in_shared_memory` and `cache_script_in_file_cache` call
-/// on what they compiled and the preload on what it holds. The engine
+/// on what they compiled (`Z/ext/opcache/ZendAccelerator.c:1581`,
+/// `:1563`) and `preload_optimize` on what the preload holds (`:4425`,
+/// `:4441`). The engine
 /// runs none of its passes over what executes (design §6.1); of pass 11,
 /// `zend_optimizer_compact_literals`, it keeps the runtime cache size the
 /// pass counts, as the room each op array's cache takes of a request's
@@ -515,7 +517,8 @@ impl Optimizer {
     /// `validation`: these with the accelerator on (every validation but
     /// `EveryHit`) where it optimizes what it compiled, `optimizing`,
     /// which with a restart pending it does only where a file cache keeps
-    /// the file, as `file_cache_compile_file` does; none where it
+    /// the file, as `file_cache_compile_file` does
+    /// (`Z/ext/opcache/ZendAccelerator.c:2156-2163`); none where it
     /// compiled as php without the accelerator does.
     pub(crate) fn on_miss(self, validation: Validation, optimizing: bool) -> Optimizer {
         if validation == Validation::EveryHit || !optimizing {
