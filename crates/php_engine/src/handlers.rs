@@ -13605,7 +13605,7 @@ fn assign_property(
         // temporary takes under `RETURN_VALUE_USED`, is the coercion
         // where there was one, php's `tmp`.
         Some((slot, true)) => {
-            let Some(typed) = req.declared_typed_property(object.class(), bytes) else {
+            let Some(typed) = req.typed_property_at(object.class(), slot) else {
                 req.release(value);
                 return Err(Fatal::error(format!(
                     "InternalError: ZEND_ASSIGN_OBJ placed the typed property ${}, whose declared type the class does not carry",
@@ -16555,11 +16555,10 @@ fn property_ptr(
         PropertyPlace::Std => {
             let silent = req.serves_accessor(object.class(), crate::api::request::Accessor::Get);
             // `BP_VAR_RW` reads an unwritten slot before the placement.
-            req.read_before_write(object, bytes)?;
-            if req.place_withheld(object, bytes) {
-                return Ok(PropertyPtr::Withheld);
+            match req.place_for_read_write(object, bytes, silent)? {
+                crate::api::request::ReadWriteSlot::Withheld => return Ok(PropertyPtr::Withheld),
+                crate::api::request::ReadWriteSlot::Placed(placed) => placed,
             }
-            req.declared_slot_for_write(object, bytes, "modify", silent)?
         }
     };
     if let Some((slot, typed)) = placed {
@@ -16645,7 +16644,7 @@ fn land_step(
             .assign_declared_slot(object.heap(), slot, stepped, strict)
             .map(|pair| landed_out(req, frame, op, pair)));
     }
-    let Some(typed) = req.declared_typed_property(object.class(), bytes) else {
+    let Some(typed) = req.typed_property_at(object.class(), slot) else {
         req.release(stepped);
         let shown = String::from_utf8_lossy(bytes);
         return Err(Fatal::error(format!(
@@ -17376,7 +17375,7 @@ fn typed_step(
     step: IncDec,
     (held, stepped): (Value, Value),
 ) -> Result<Result<Value, Thrown>, Fatal> {
-    let Some(declared) = req.declared_typed_property(object.class(), bytes) else {
+    let Some(declared) = req.typed_property_at(object.class(), slot) else {
         req.release(stepped);
         let shown = String::from_utf8_lossy(bytes);
         return Err(Fatal::error(format!(

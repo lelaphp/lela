@@ -126,7 +126,7 @@ mod preload;
 mod properties;
 mod publish;
 use properties::IN_GET;
-pub(crate) use properties::{Accessor, RefSource, TypedProperty, Walked};
+pub(crate) use properties::{Accessor, ReadWriteSlot, RefSource, TypedProperty, Walked};
 mod recording;
 mod resources;
 pub use resources::{ResourceDtor, Resources};

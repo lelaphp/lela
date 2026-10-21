@@ -93,6 +93,47 @@ impl Found<'_> {
     }
 }
 
+/// What `zend_get_property_offset` answered for a name on an object of
+/// a class ([`Request::place_property`]), placed once by a property
+/// access and handed to each step of it, as php's handlers place a name
+/// once and read the offset after.
+#[derive(Clone, Copy)]
+pub(super) enum Placement {
+    /// A declared slot the scope reaches.
+    Reached(DeclaredSlot),
+    /// A declared slot the scope may not reach:
+    /// `ZEND_WRONG_PROPERTY_OFFSET` after `zend_bad_property_access`,
+    /// unless a magic accessor serves the name.
+    Denied(DeclaredSlot),
+    /// A row of the chain's that places no slot the scope reads: a
+    /// `static` property, a parent's private one, a virtual one, which
+    /// [`Request::unplaced`] judges.
+    Unslotted,
+    /// No class of the chain declares the name, `static` or not: a
+    /// dynamic property's, unless a NUL byte leads it.
+    Undeclared,
+}
+
+impl Placement {
+    /// The declared slot, reached or not.
+    pub(super) fn slot(self) -> Option<DeclaredSlot> {
+        match self {
+            Placement::Reached(placed) | Placement::Denied(placed) => Some(placed),
+            Placement::Unslotted | Placement::Undeclared => None,
+        }
+    }
+}
+
+/// What [`Request::place_for_read_write`] answers: a slot whose readonly
+/// or set visibility withholds its place, so the operation is made over
+/// what `read_property` answers; or what
+/// [`Request::declared_slot_for_write`] placed, the slot and whether it
+/// is typed, none for a name no slot holds.
+pub(crate) enum ReadWriteSlot {
+    Withheld,
+    Placed(Option<(u32, bool)>),
+}
+
 /// What a write to a typed declared slot reads off its
 /// `zend_property_info`: the class that declared it, which the
 /// `TypeError` of a value the type refuses and the `Error` of a write
@@ -655,7 +696,47 @@ impl Request {
     /// string(3) "foo"
     /// ```
     pub(super) fn declared_slot(&self, class: ClassId, name: &[u8]) -> Option<DeclaredSlot> {
-        let (at, declaring, p) = self.placed_row(class, name)?;
+        self.place_property(class, name).slot()
+    }
+
+    /// `zend_get_property_offset` over `name` on an object of `class`,
+    /// made once by a property access and handed to each step of it
+    /// ([`Placement`]): the one find of `ce->properties_info`, the scope
+    /// read only where the row's flags ask for it, and the visibility
+    /// measured once.
+    pub(super) fn place_property(&self, class: ClassId, name: &[u8]) -> Placement {
+        let placing = match self.find_property_info(class, name) {
+            InfoFound::Row(found) => found,
+            InfoFound::Absent => return Placement::Undeclared,
+            InfoFound::Unrecorded => match self.placing_by_slots(class, name) {
+                Some(found) => found,
+                None => return Placement::Unslotted,
+            },
+        };
+        // The scope read once, where the row's flags first ask for it.
+        let scope = std::cell::OnceCell::new();
+        let scope = || *scope.get_or_init(|| self.property_scope());
+        let Some(placed) = self.slot_of_row(class, name, placing, &scope) else {
+            return Placement::Unslotted;
+        };
+        if self.reaches_from(&placed, scope) {
+            Placement::Reached(placed)
+        } else {
+            Placement::Denied(placed)
+        }
+    }
+
+    /// The declared slot the row `found` places `name` at for the
+    /// executing scope ([`Request::placed_row`]), with the flags the
+    /// slot is read and written under.
+    fn slot_of_row(
+        &self,
+        class: ClassId,
+        name: &[u8],
+        found: Found<'_>,
+        scope: &impl Fn() -> Option<ClassId>,
+    ) -> Option<DeclaredSlot> {
+        let (at, declaring, p) = self.placed_from(class, name, found, scope)?;
         let root = if p.visibility == Visibility::Protected
             || p.set_visibility == Some(Visibility::Protected)
         {
@@ -714,10 +795,16 @@ impl Request {
     /// int(1)
     /// ```
     pub(super) fn reaches(&self, placed: &DeclaredSlot) -> bool {
+        self.reaches_from(placed, || self.property_scope())
+    }
+
+    /// [`Request::reaches`] from the scope `scope` reads, asked only for
+    /// a property that is not public.
+    fn reaches_from(&self, placed: &DeclaredSlot, scope: impl Fn() -> Option<ClassId>) -> bool {
         if placed.visibility == Visibility::Public {
             return true;
         }
-        let scope = self.property_scope();
+        let scope = scope();
         match placed.visibility {
             Visibility::Public => true,
             _ if scope == Some(placed.declaring) => true,
@@ -837,10 +924,21 @@ impl Request {
     /// not reach ([`Request::static_as_instance`], whose notice for one
     /// it may reach is raised here unless `silent`). `None` is a
     /// dynamic property.
-    fn unplaced(&mut self, class: ClassId, name: &[u8], silent: bool) -> Option<Unplaced> {
+    fn unplaced(
+        &mut self,
+        placement: Placement,
+        class: ClassId,
+        name: &[u8],
+        silent: impl FnOnce(&Self) -> bool,
+    ) -> Option<Unplaced> {
         if Self::bad_property_name(name) {
             return Some(Unplaced::BadName);
         }
+        // A name no class of the chain declares is no `static`'s.
+        if !matches!(placement, Placement::Unslotted) {
+            return None;
+        }
+        let silent = silent(self);
         match self.static_as_instance(class, name, silent) {
             Some(Err(visibility)) => Some(Unplaced::Denied(visibility)),
             _ => None,
@@ -897,7 +995,9 @@ impl Request {
     }
 
     fn placed_row(&self, class: ClassId, name: &[u8]) -> Option<(usize, ClassId, &PropertyDecl)> {
-        self.placed_from(class, name, self.placing(class, name)?)
+        self.placed_from(class, name, self.placing(class, name)?, &|| {
+            self.property_scope()
+        })
     }
 
     /// [`Request::placed_row`] from the row the find answered.
@@ -906,6 +1006,7 @@ impl Request {
         class: ClassId,
         name: &[u8],
         placing: Found<'a>,
+        scope: &impl Fn() -> Option<ClassId>,
     ) -> Option<(usize, ClassId, &'a PropertyDecl)> {
         let (declaring, p) = (placing.info.declaring, placing.property);
         let found = placing.slot().map(|slot| (slot, declaring, p));
@@ -914,7 +1015,7 @@ impl Request {
         if p.visibility == Visibility::Public && !placing.place.changed {
             return found;
         }
-        if self.property_scope() != Some(declaring) {
+        if scope() != Some(declaring) {
             if placing.place.changed
                 && let Some(own) = self.parent_private(class, name)
             {
@@ -1690,7 +1791,7 @@ impl Request {
         else {
             return Ok(got);
         };
-        let Some(typed) = self.declared_typed_property(class, name) else {
+        let Some(typed) = self.typed_property_at(class, placed.slot) else {
             return Ok(got);
         };
         let strict = self.function_strict_types(getter);
@@ -1891,12 +1992,17 @@ impl Request {
     /// accessor cannot answer: the `Error` for a declared property the
     /// scope may not reach, or for a name that starts with a NUL byte.
     fn wrong_offset(&mut self, class: ClassId, name: &[u8]) -> Option<Thrown> {
-        if let Some(placed) = self.declared_slot(class, name) {
-            return (!self.reaches(&placed))
-                .then(|| self.inaccessible_property(class, placed.visibility, name));
+        let placement = self.place_property(class, name);
+        match placement {
+            Placement::Reached(_) => None,
+            Placement::Denied(placed) => {
+                Some(self.inaccessible_property(class, placed.visibility, name))
+            }
+            Placement::Unslotted | Placement::Undeclared => {
+                let miss = self.unplaced(placement, class, name, |_| true)?;
+                Some(self.unplaced_error(class, name, miss))
+            }
         }
-        let miss = self.unplaced(class, name, true)?;
-        Some(self.unplaced_error(class, name, miss))
     }
 
     /// `zend_bad_property_access`: php's `Error` for a property the
@@ -2247,8 +2353,9 @@ impl Request {
         // read, so a slot that holds a value is placed and returned
         // without a lookup.
         let mut wrong = false;
-        if let Some(placed) = self.declared_slot(class, name) {
-            if self.reaches(&placed) {
+        let placement = self.place_property(class, name);
+        if let Some(placed) = placement.slot() {
+            if matches!(placement, Placement::Reached(_)) {
                 let z = o.slot(placed.slot);
                 if !z.is_undef() {
                     return Ok(Owner::take(self, Value::of_slot(z).deref()));
@@ -2279,11 +2386,9 @@ impl Request {
                 }
                 wrong = true;
             }
-        } else if let Some(miss) = self.unplaced(
-            class,
-            name,
-            silent || self.serves_accessor(class, Accessor::Get),
-        ) {
+        } else if let Some(miss) = self.unplaced(placement, class, name, |req| {
+            silent || req.serves_accessor(class, Accessor::Get)
+        }) {
             if !silent && !self.serves_accessor(class, Accessor::Get) {
                 return Err(self.unplaced_error(class, name, miss));
             }
@@ -2412,8 +2517,8 @@ impl Request {
     /// Object of class stdClass could not be converted to string
     /// Cannot modify private(set) property Test::$n from global scope
     /// ```
-    pub(crate) fn place_withheld(&self, object: PhpObject, name: &[u8]) -> bool {
-        let Some(placed) = self.declared_slot(object.class(), name) else {
+    fn place_withheld(&self, placement: Placement) -> bool {
+        let Some(placed) = placement.slot() else {
             return false;
         };
         if !self.may_access(placed.declaring, placed.visibility) {
@@ -2493,21 +2598,36 @@ impl Request {
         operation: &str,
         silent: bool,
     ) -> Result<Option<(u32, bool)>, Thrown> {
+        let placement = self.place_property(object.class(), name);
+        self.slot_for_write(object, name, placement, operation, silent)
+    }
+
+    /// [`Request::declared_slot_for_write`] over the placement the
+    /// access made.
+    fn slot_for_write(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        placement: Placement,
+        operation: &str,
+        silent: bool,
+    ) -> Result<Option<(u32, bool)>, Thrown> {
         let class = object.class();
-        let Some(placed) = self.declared_slot(class, name) else {
-            if let Some(miss) = self.unplaced(class, name, silent)
-                && !silent
-            {
-                return Err(self.unplaced_error(class, name, miss));
+        let placed = match placement {
+            Placement::Reached(placed) => placed,
+            Placement::Denied(_) if silent => return Ok(None),
+            Placement::Denied(placed) => {
+                return Err(self.inaccessible_property(class, placed.visibility, name));
             }
-            return Ok(None);
-        };
-        if !self.reaches(&placed) {
-            if silent {
+            Placement::Unslotted | Placement::Undeclared => {
+                if let Some(miss) = self.unplaced(placement, class, name, |_| silent)
+                    && !silent
+                {
+                    return Err(self.unplaced_error(class, name, miss));
+                }
                 return Ok(None);
             }
-            return Err(self.inaccessible_property(class, placed.visibility, name));
-        }
+        };
         // A slot an `unset` emptied, on a class with a `__set`, is the
         // setter's: `zend_std_write_property` reaches the magic method
         // before the set visibility, which `write_std_property` holds the
@@ -2560,15 +2680,44 @@ impl Request {
         object: PhpObject,
         name: &[u8],
     ) -> Result<(), Thrown> {
+        let placement = self.place_property(object.class(), name);
+        self.read_before_write_at(object, name, placement)
+    }
+
+    /// `zend_std_get_property_ptr_ptr` under `BP_VAR_RW` over a name the
+    /// standard handlers serve, the name placed once and the placement
+    /// handed to each of its steps: the unwritten slot read first
+    /// ([`Request::read_before_write`]), then a slot whose write is
+    /// withheld ([`Request::place_withheld`]), then the slot itself
+    /// ([`Request::declared_slot_for_write`]), `silent` where the class
+    /// serves a `__get`.
+    pub(crate) fn place_for_read_write(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        silent: bool,
+    ) -> Result<ReadWriteSlot, Thrown> {
+        let placement = self.place_property(object.class(), name);
+        self.read_before_write_at(object, name, placement)?;
+        if self.place_withheld(placement) {
+            return Ok(ReadWriteSlot::Withheld);
+        }
+        self.slot_for_write(object, name, placement, "modify", silent)
+            .map(ReadWriteSlot::Placed)
+    }
+
+    fn read_before_write_at(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        placement: Placement,
+    ) -> Result<(), Thrown> {
         let class = object.class();
         let o = object.heap();
-        let Some(placed) = self.declared_slot(class, name) else {
+        let Placement::Reached(placed) = placement else {
             return Ok(());
         };
-        if !self.reaches(&placed)
-            || !o.slot(placed.slot).is_undef()
-            || self.lazy_slot(o, placed.slot)
-        {
+        if !o.slot(placed.slot).is_undef() || self.lazy_slot(o, placed.slot) {
             return Ok(());
         }
         let magic = self.serves_accessor(class, Accessor::Get)
@@ -2627,6 +2776,19 @@ impl Request {
         name: &[u8],
     ) -> Option<TypedProperty> {
         let (_, declaring, p) = self.placed_row(class, name)?;
+        p.ty.clone().map(|ty| TypedProperty {
+            declaring,
+            ty,
+            readonly: p.is_readonly,
+        })
+    }
+
+    /// [`Request::declared_typed_property`] of the property in slot
+    /// `slot` of an object of `class`, the slot a placement answered:
+    /// `zend_get_typed_property_info_for_slot`, read off the slot's row
+    /// with no find of the name.
+    pub(crate) fn typed_property_at(&self, class: ClassId, slot: u32) -> Option<TypedProperty> {
+        let (declaring, p) = self.placed_property(class, slot)?;
         p.ty.clone().map(|ty| TypedProperty {
             declaring,
             ty,
@@ -3122,8 +3284,7 @@ impl Request {
         let o = object.heap();
         if let Some(placed) = self.declared_slot(object.class(), name.as_bytes()) {
             let value = if placed.typed {
-                let Some(typed) = self.declared_typed_property(object.class(), name.as_bytes())
-                else {
+                let Some(typed) = self.typed_property_at(object.class(), placed.slot) else {
                     value.give_up(self);
                     name.give_up(self);
                     return self.fatal_of(Err(Fatal::error(
@@ -4651,8 +4812,9 @@ impl Request {
         }
         let unsetter = self.magic_accessor(class, Accessor::Unset);
         let mut wrong = false;
-        if let Some(placed) = self.declared_slot(class, name) {
-            if self.reaches(&placed) {
+        let placement = self.place_property(class, name);
+        if let Some(placed) = placement.slot() {
+            if matches!(placement, Placement::Reached(_)) {
                 let empty = o.slot(placed.slot).is_undef();
                 // `error = Z_TYPE_P(slot) != IS_UNDEF || (Z_PROP_FLAG_P(slot)
                 // & IS_PROP_UNINIT) || !zobj->ce->__unset`: a slot that
@@ -4697,7 +4859,7 @@ impl Request {
                 }
                 wrong = true;
             }
-        } else if let Some(miss) = self.unplaced(class, name, unsetter.is_some()) {
+        } else if let Some(miss) = self.unplaced(placement, class, name, |_| unsetter.is_some()) {
             if unsetter.is_none() {
                 return Err(self.unplaced_error(class, name, miss));
             }
