@@ -109,15 +109,32 @@ if markers=$(git diff --cached --check | grep -E ': leftover conflict marker$');
     echo "pre-commit: the staged line above is a conflict marker left in; resolve it, or exempt a file that holds one on purpose by its conflict-marker-size in .gitattributes" >&2
     exit 1
 fi
-# A branch writes a ledger revision it adds as `NEXT`, since two branches
-# that both take the next number conflict at their merges, and the merge
-# into `main` numbers it (#2982, the specs skill's merging.md); so a
-# commit on `main` that still carries one is refused, naming where.
-if [ "$(git symbolic-ref --short -q HEAD)" = main ] &&
-    unnumbered=$(git grep --cached -n -E '[Rr]evision NEXT([^A-Za-z]|$)' -- \
-        third-engine-design.md jit-design.md harness-design.md); then
+# A branch writes a ledger revision it adds as `NEXT` (`NEXT-2` for a
+# second in one file) and cites it so wherever it is named, since two
+# branches that both take the next number conflict at their merges, and
+# the merge into `main` numbers row and citations alike (#2982, the specs
+# skill's merging.md). So a commit on `main` whose Markdown or Rust still
+# cites one, the ledger row or prose such as "revisions 11 and NEXT", is
+# refused, naming where: three citations landed so and 04a539f18 numbered
+# them by hand. Only the files the commit changes are read, a merge's
+# being what it brings in; text in backticks quotes the convention rather
+# than citing a revision, and xtask/fixtures holds the negative controls.
+cited='(^|[^A-Za-z])[Rr]evisions? +(([0-9]+|NEXT(-[0-9]+)?),? +(and +)?)*NEXT(-[0-9]+)?([^A-Za-z0-9]|$)'
+next_cited() {
+    local file hit
+    git diff --cached --name-only -z --diff-filter=d -- '*.md' '*.rs' ':!xtask/fixtures' |
+        while IFS= read -r -d '' file; do
+            git grep --cached -n -I -E "$cited" -- "$file" | while IFS= read -r hit; do
+                printf '%s\n' "${hit#*:*:}" | sed 's/`[^`]*`//g' | grep -qE "$cited" &&
+                    printf '%s\n' "$hit"
+            done
+        done
+    return 0
+}
+if [ "$(git symbolic-ref --short -q HEAD)" = main ] && unnumbered=$(next_cited) &&
+    [ -n "$unnumbered" ]; then
     printf '%s\n' "$unnumbered" >&2
-    echo "pre-commit: a ledger revision above is still NEXT; number it with the next free revision of its file before it lands on main" >&2
+    echo "pre-commit: the revision cited above is still NEXT; number it as its ledger row is numbered before it lands on main" >&2
     exit 1
 fi
 # A builder commits from a linked worktree, whose .git is a file, while

@@ -1,0 +1,4 @@
+//! A recorded trace's numbering (jit-design.md §6.4,
+//! revisions 23 and NEXT; design §5.11, revision 52).
+
+pub fn numbered() {}

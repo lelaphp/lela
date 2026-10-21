@@ -825,25 +825,47 @@ fn a_vocab_refusal_ends_the_hook_before_clippy_runs() {
     assert_eq!(scratch.calls("computed"), Vec::<String>::new());
 }
 
-/// A ledger revision a branch adds is written `NEXT` and numbered by the
-/// merge into `main` (#2982): a commit on a branch carries one, and a
-/// commit on `main` that still does is refused before anything runs,
-/// naming the line.
+/// A revision a branch adds is written `NEXT` and numbered by the merge
+/// into `main` (#2982), its ledger row and every citation of it: a commit
+/// on `main` whose Markdown or Rust still cites one, as
+/// `fixtures/hooks/next/cited.md` and `cited.rs` do in each shape that has
+/// landed, is refused before anything runs, naming each line, and the same
+/// commit on a branch is not. Prose that names NEXT and cites no revision,
+/// the convention quoted in backticks among it, is no citation.
 #[test]
-fn a_ledger_revision_still_next_is_refused_on_main_and_not_on_a_branch() {
+fn a_revision_still_cited_as_next_is_refused_on_main_and_not_on_a_branch() {
+    let fixture = xtask::package_dir().join("fixtures/hooks/next");
+    let read = |name: &str| fs::read_to_string(fixture.join(name)).unwrap();
     let scratch = scratch("next", &Computed::Rendered);
     scratch.git(&["checkout", "-q", "-B", "main"], false);
-    let ledger = "# a region file\n\n**NEXT. Revision NEXT (2026-10-19).** A change.\n";
-    write(&scratch.root, "harness-design.md", ledger);
-    scratch.git(&["add", "--", "harness-design.md"], false);
-    let (code, out) = scratch.run(&["commit", "-q", "-m", "a ledger row"], true);
+    write(&scratch.root, "docs/notes.md", &read("prose.md"));
+    scratch.git(&["add", "--", "docs/notes.md"], false);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "prose"], true);
+    assert_eq!(code, 0, "prose is no citation: {out}");
+
+    fs::remove_file(scratch.dir.join("cargo.log")).unwrap();
+    write(&scratch.root, "docs/ledger.md", &read("cited.md"));
+    write(
+        &scratch.root,
+        "crates/php_heap/src/trace.rs",
+        &read("cited.rs"),
+    );
+    let staged = ["docs/ledger.md", "crates/php_heap/src/trace.rs"];
+    scratch.git(&[&["add", "--"][..], &staged].concat(), false);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "citations"], true);
     assert_eq!(code, 1, "{out}");
-    assert!(out.contains("harness-design.md:3:"), "{out}");
+    for line in [3, 5, 7, 9, 11] {
+        assert!(
+            out.contains(&format!("docs/ledger.md:{line}:")),
+            "{line}: {out}"
+        );
+    }
+    assert!(out.contains("crates/php_heap/src/trace.rs:2:"), "{out}");
     assert!(out.contains("is still NEXT"), "{out}");
     assert_eq!(scratch.calls("cargo"), Vec::<String>::new());
 
     scratch.git(&["checkout", "-q", "-b", "t9"], false);
-    let (code, out) = scratch.run(&["commit", "-q", "-m", "a ledger row"], true);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "citations"], true);
     assert_eq!(code, 0, "{out}");
 }
 
