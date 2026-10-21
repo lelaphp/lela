@@ -41,7 +41,7 @@ pub(crate) type Cached = Option<Result<PublishedUnit, CompileRefused>>;
 /// refusal, and what the compile had declared before it
 /// ([`php_compile::Declared`]) published for the request, which php's
 /// `zend_bailout` out of the compile leaves standing in its tables.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct CompileRefused {
     /// The refusal, what it declared taken into `declared`.
     pub(crate) error: CompileError,
