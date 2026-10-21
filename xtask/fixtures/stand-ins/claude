@@ -1,0 +1,68 @@
+#!/bin/sh
+# The session `xtask track work` starts, standing in for `claude` in
+# tests/track_work.rs: laid at <scratch>/bin/claude, it writes what it was
+# started with into <scratch>, the directory above its own, and does what
+# the test wrote down there. The tracker it closes a ticket at stands at
+# $STAND_IN_TRACKER, laid by tests/common/tracker.rs as
+# fixtures/stand-ins/gh's header says.
+#
+#   session.args      appended: the arguments but the prompt, then the
+#                     prompt's first line, `/<skill> <n>`, the ticket
+#   session.prompt    appended: the whole prompt, which runs to several
+#                     lines (#115)
+#   session.cwd       appended: where it was started
+#   session.subagent  appended: the subagents' model, or `unset`
+#   act.frontier      run as shell instead of an act when started on
+#                     `/frontier` (#85)
+#   act.<n>, act      what it does for ticket <n>, or for every ticket:
+#                     any of `commit` (a file named for the ticket,
+#                     committed on the branch), `ready` (the branch's
+#                     ready record), `close` (the ticket closed at the
+#                     tracker) and `spend <usd>` (a `usage` reading of
+#                     turn 3 at that price, as the plugin records once a
+#                     turn, #210)
+#   then              run as shell after the act, before it ends: how a
+#                     test breaks the harness from inside a session
+dir=$(cd "$(dirname "$0")/.." && pwd -P)
+rest='' i=0
+for a; do
+    i=$((i + 1))
+    [ $i -lt $# ] && rest="$rest $a"
+    prompt=$a
+done
+line=$(printf '%s\n' "$prompt" | sed -n 1p)
+n=${line##* }
+printf '%s\n' "${rest# } $line" >> "$dir/session.args"
+printf '%s\n' "$prompt" >> "$dir/session.prompt"
+pwd -P >> "$dir/session.cwd"
+printf '%s\n' "${CLAUDE_CODE_SUBAGENT_MODEL-unset}" >> "$dir/session.subagent"
+if [ "$line" = /frontier ]; then
+    sh "$dir/act.frontier"
+    exit $?
+fi
+act=$(cat "$dir/act.$n" 2>/dev/null || cat "$dir/act")
+case $act in *commit*)
+    echo worked > "worked.$n.txt" &&
+        git add -- "worked.$n.txt" &&
+        git -c commit.gpgsign=false -c core.hooksPath=/var/empty -c user.name=x -c user.email=x@x \
+            commit -q -m 'the work' -- "worked.$n.txt" || exit 3
+    ;;
+esac
+case $act in *ready*)
+    git config "branch.t$n.ready-$n" nothing || exit 5
+    ;;
+esac
+case $act in *close*)
+    issue="$STAND_IN_TRACKER/issues/$n.json"
+    sed 's/"state":"OPEN"/"state":"CLOSED"/' "$issue" > "$issue.closed" &&
+        mv "$issue.closed" "$issue" || exit 6
+    ;;
+esac
+case $act in *spend*)
+    usd=${act##*spend }
+    printf '{"context":{"tokens":152000,"window":200000,"percent":76},"rateLimits":[],"cost":{"usd":%s}}' "$usd" |
+        cargo xtask usage record --session stand-in --turn 3 > /dev/null || exit 4
+    ;;
+esac
+[ ! -f "$dir/then" ] || sh "$dir/then"
+exit 0

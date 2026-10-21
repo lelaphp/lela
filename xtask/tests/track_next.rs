@@ -1,95 +1,66 @@
 //! `xtask track next`, the ticket a track works next (#73): the frontier
-//! held without the network. The tracker is a shell file answering `issue
-//! list` from a recorded transcript, and the clone is a scratch repository
-//! with one commit on `main` whose branch records are written by hand, so
-//! each of the four filters is held against an answer this test wrote
-//! down.
-
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+//! held without the network. The tracker is a [`Tracker`] answering
+//! `issue list` with the open issues each test lays, and the clone is a
+//! scratch repository with one commit on `main` whose branch records are
+//! written by hand, so each of the four filters is held against an answer
+//! this test wrote down.
 
 use xtask::scratch::Tree;
-use xtask::ticket::Gh;
+use xtask::ticket::{Open, State};
 use xtask::track_next::{Next, next};
 
 mod common {
     pub mod repo;
     pub mod run;
+    pub mod tracker;
 }
 use common::repo::Repo;
 use common::run::Run;
+use common::tracker::{Tracker, blocked_by, open};
 
-/// A recorded tracker beside a scratch repository: `gh issue list`
-/// answers with `list.json`, every other call is written to `calls`.
-struct Recorded {
-    dir: Tree,
+/// A scratch clone beside the tracker it asks: `main` with one commit,
+/// and branch records a test writes by hand.
+struct Scratch {
+    repo: Tree,
+    tracker: Tracker,
 }
 
-impl Recorded {
-    fn lay(name: &str) -> Recorded {
-        let dir = Tree::new(&format!("track-next-{name}")).unwrap();
-        fs::create_dir_all(dir.join("repo")).unwrap();
-        let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = list ]; then cat '{0}/list.json'; exit $?; fi\nprintf '%s\\n' \"$*\" >> '{0}/calls'\nexit 0\n",
-            dir.display()
-        );
-        fs::write(dir.join("gh"), script).unwrap();
-        fs::set_permissions(dir.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
-        Repo::init(&dir.join("repo")).git(&["commit", "-q", "--allow-empty", "-m", "main"]);
-        Recorded { dir }
+impl Scratch {
+    fn lay(name: &str) -> Scratch {
+        let repo = Tree::new(&format!("track-next-{name}")).unwrap();
+        Repo::init(&repo).git(&["commit", "-q", "--allow-empty", "-m", "main"]);
+        Scratch {
+            repo,
+            tracker: Tracker::empty(&format!("track-next-{name}")),
+        }
     }
 
-    fn repo(&self) -> PathBuf {
-        self.dir.join("repo")
-    }
-
-    fn gh(&self) -> Gh {
-        Gh::at(&self.dir.join("gh"))
-    }
-
-    /// The transcript: one open issue per row, `(number, labels, the
+    /// The tracker's open list: one issue per row, `(number, labels, the
     /// open tickets blocking it)`, oldest last so the order is judged and
     /// not inherited.
     fn open(&self, rows: &[(u64, &[&str], &[u64])]) {
-        let issues = rows
+        let issues: Vec<Open> = rows
             .iter()
-            .map(|(number, labels, blockers)| {
-                serde_json::json!({
-                    "number": number,
-                    "title": format!("ticket {number}"),
-                    "url": format!("https://example.invalid/issues/{number}"),
-                    "labels": labels.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>(),
-                    "blockedBy": {
-                        "nodes": blockers.iter().map(|n| serde_json::json!({"number": n, "state": "OPEN"})).collect::<Vec<_>>(),
-                        "totalCount": blockers.len(),
-                    },
-                })
+            .map(|&(number, labels, blockers)| {
+                let blockers: Vec<(u64, State)> =
+                    blockers.iter().map(|&n| (n, State::Open)).collect();
+                Open {
+                    blocked_by: blocked_by(&blockers),
+                    ..open(number, labels)
+                }
             })
-            .collect::<Vec<_>>();
-        fs::write(
-            self.dir.join("list.json"),
-            serde_json::Value::Array(issues).to_string(),
-        )
-        .unwrap();
+            .collect();
+        self.tracker.listing(&issues);
     }
 
     /// A branch of the clone recording `ticket`, the way `worktree add
     /// --ticket` records it.
     fn records(&self, branch: &str, ticket: u64) {
-        Repo::at(&self.repo()).git(&[
+        Repo::at(&self.repo).git(&[
             "config",
             &format!("branch.{branch}.ticket"),
             &ticket.to_string(),
         ]);
-    }
-
-    fn calls(&self) -> Vec<String> {
-        fs::read_to_string(self.dir.join("calls"))
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_owned)
-            .collect()
     }
 }
 
@@ -97,8 +68,8 @@ const READY: &[&str] = &["ready-for-agent"];
 
 #[test]
 fn the_four_filters_pass_a_ticket_over_and_the_oldest_left_is_next() {
-    let recorded = Recorded::lay("filters");
-    recorded.open(&[
+    let scratch = Scratch::lay("filters");
+    scratch.open(&[
         (30, &["ready-for-agent", "track:main"], &[]),
         (20, READY, &[]),
         (14, &["ready-for-agent", "track:t-x"], &[]),
@@ -106,8 +77,8 @@ fn the_four_filters_pass_a_ticket_over_and_the_oldest_left_is_next() {
         (11, READY, &[12]),
         (10, READY, &[]),
     ]);
-    recorded.records("t10", 10);
-    let found = next(&recorded.repo(), &recorded.gh(), "main").unwrap();
+    scratch.records("t10", 10);
+    let found = next(&scratch.repo, &scratch.tracker.gh(), "main").unwrap();
     assert_eq!(
         found,
         Some(Next {
@@ -120,18 +91,18 @@ fn the_four_filters_pass_a_ticket_over_and_the_oldest_left_is_next() {
         "10 is recorded by a branch, 11 is blocked by the open 12, 12 has no ready label, 14 is t-x's; 20 and 30 are main's, and no census weighs any of them, so the order is the number's"
     );
     assert!(
-        recorded.calls().is_empty(),
+        scratch.tracker.calls().is_empty(),
         "next asks the tracker nothing but the list: {:?}",
-        recorded.calls()
+        scratch.tracker.calls()
     );
 
-    let t_y = next(&recorded.repo(), &recorded.gh(), "t-y").unwrap();
+    let t_y = next(&scratch.repo, &scratch.tracker.gh(), "t-y").unwrap();
     assert_eq!(
         t_y, None,
         "an unlabelled ticket is main's alone, and no ticket is t-y's"
     );
 
-    let t_x = next(&recorded.repo(), &recorded.gh(), "t-x").unwrap();
+    let t_x = next(&scratch.repo, &scratch.tracker.gh(), "t-x").unwrap();
     assert_eq!(
         t_x.map(|n| n.number),
         Some(14),
@@ -141,20 +112,12 @@ fn the_four_filters_pass_a_ticket_over_and_the_oldest_left_is_next() {
 
 #[test]
 fn a_blocker_that_is_closed_does_not_block() {
-    let recorded = Recorded::lay("closed-blocker");
-    fs::write(
-        recorded.dir.join("list.json"),
-        serde_json::json!([{
-            "number": 5,
-            "title": "ticket 5",
-            "url": "https://example.invalid/issues/5",
-            "labels": [{"name": "ready-for-agent"}],
-            "blockedBy": {"nodes": [{"number": 4, "state": "CLOSED"}], "totalCount": 1},
-        }])
-        .to_string(),
-    )
-    .unwrap();
-    let found = next(&recorded.repo(), &recorded.gh(), "main").unwrap();
+    let scratch = Scratch::lay("closed-blocker");
+    scratch.tracker.listing(&[Open {
+        blocked_by: blocked_by(&[(4, State::Closed)]),
+        ..open(5, READY)
+    }]);
+    let found = next(&scratch.repo, &scratch.tracker.gh(), "main").unwrap();
     assert_eq!(found.map(|n| n.number), Some(5));
 }
 
@@ -164,15 +127,18 @@ fn a_blocker_that_is_closed_does_not_block() {
 /// `main`'s run names the unlabelled one, so the two never compete for it.
 #[test]
 fn a_label_track_passes_over_an_unlabelled_ticket_which_is_mains() {
-    let recorded = Recorded::lay("unlabelled");
-    recorded.open(&[
+    let scratch = Scratch::lay("unlabelled");
+    scratch.open(&[
         (21, &["ready-for-agent", "track:parity-hosts"], &[]),
         (20, READY, &[]),
     ]);
     let run = |track: &str| {
-        Run::at(&recorded.repo())
+        Run::at(&scratch.repo)
             .args(["track", "next", "--track", track])
-            .env("PATH", format!("{}:/usr/bin:/bin", recorded.dir.display()))
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", scratch.tracker.bin().display()),
+            )
             .env_remove("CARGO")
             .env_remove("CARGO_MANIFEST_DIR")
             .go()
@@ -184,9 +150,9 @@ fn a_label_track_passes_over_an_unlabelled_ticket_which_is_mains() {
 
 #[test]
 fn an_empty_frontier_is_none_and_not_an_error() {
-    let recorded = Recorded::lay("empty");
-    recorded.open(&[(12, &[], &[]), (11, READY, &[12])]);
-    let found = next(&recorded.repo(), &recorded.gh(), "t-y").unwrap();
+    let scratch = Scratch::lay("empty");
+    scratch.open(&[(12, &[], &[]), (11, READY, &[12])]);
+    let found = next(&scratch.repo, &scratch.tracker.gh(), "t-y").unwrap();
     assert_eq!(found, None);
     assert_eq!(
         Next::render(None, "t-y"),

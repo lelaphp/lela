@@ -19,9 +19,11 @@ use xtask::scratch::Tree;
 mod common {
     pub mod repo;
     pub mod run;
+    pub mod tracker;
 }
 use common::repo::Repo;
 use common::run::{Ran, Run, xtask};
+use common::tracker::{Tracker, issue};
 
 /// What condition 1 asks of `ext/pcre`, the crate most of these tests
 /// change: [`FRESH`] less `port-map`, which is asked of the crate
@@ -1882,39 +1884,26 @@ fn a_rule_at_the_stop_is_not_judged_at_the_call() {
 
 // ---------------------------------------------------------------- 7 (#31)
 
-/// A recorded `gh` in the scratch repository that answers `issue view
-/// <n>` with the fixture body named, so the `ticket` reading `done` reads
-/// is the one the instrument writes, and nothing reaches the tracker.
+/// The ticket `number` at a [`Tracker`] with the fixture body named, so
+/// the `ticket` reading `done` reads is the one the instrument writes,
+/// and nothing reaches the tracker.
 fn ticket_read(root: &Path, number: u64, body: &str) {
     ticket_act(root, number, body, xtask::ticket::Act::Read);
 }
 
-/// The same recorded `gh` under any act of the instrument: it answers
-/// every call with the issue and exits 0, so a close goes through the way
-/// the tracker would take it, and the reading recorded is the close's.
+/// The same tracker under any act of the instrument: a close goes through
+/// the way the tracker would take it, and the reading recorded is the
+/// close's.
 fn ticket_act(root: &Path, number: u64, body: &str, act: xtask::ticket::Act) -> Reading {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = root.join("target/gh");
-    std::fs::create_dir_all(&dir).unwrap();
-    let issue = serde_json::json!({
-        "number": number,
-        "title": format!("ticket {number}"),
-        "body": std::fs::read_to_string(fixtures().join("done/ticket").join(body)).unwrap(),
-        "state": "OPEN",
-        "url": format!("https://example.invalid/issues/{number}"),
+    let tracker = Tracker::empty("done-ticket");
+    tracker.with_issue(&xtask::ticket::Issue {
+        body: std::fs::read_to_string(fixtures().join("done/ticket").join(body)).unwrap(),
+        ..issue(number)
     });
-    std::fs::write(dir.join("issue.json"), issue.to_string()).unwrap();
-    let gh = dir.join("gh");
-    std::fs::write(
-        &gh,
-        format!("#!/bin/sh\ncat '{}/issue.json'\n", dir.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
     let reading = xtask::ticket::run(
         root,
         &xtask::manifest::Manifest::load(root).unwrap(),
-        &xtask::ticket::Gh::at(&gh),
+        &tracker.gh(),
         act,
         xtask::track::Ticket::new(number),
         None,

@@ -178,7 +178,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::key::Snapshot;
 use crate::manifest::{Manifest, Rule};
@@ -876,7 +876,7 @@ fn paths(clause: &str) -> Vec<(usize, &str)> {
 }
 
 /// One issue as the tracker answers it.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Issue {
     pub number: u64,
     pub title: String,
@@ -904,7 +904,7 @@ pub struct Issue {
 
 /// What the tracker counts under one parent: the sub-issues it holds, as
 /// `gh issue view --json subIssuesSummary` answers it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SubIssues {
     pub total: u64,
 }
@@ -912,7 +912,7 @@ pub struct SubIssues {
 /// One open issue as `gh issue list` answers it: what the frontier is
 /// judged from, the labels and the blocking relation carried as the
 /// tracker spells them.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Open {
     pub number: u64,
     pub title: String,
@@ -930,13 +930,13 @@ impl Open {
 }
 
 /// One label, by name.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Label {
     pub name: String,
 }
 
 /// The tickets blocking one, as the tracker nests them.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct BlockedBy {
     pub nodes: Vec<Blocker>,
 }
@@ -955,14 +955,14 @@ impl BlockedBy {
 }
 
 /// One ticket in a blocking relation: its number and whether it is open.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Blocker {
     pub number: u64,
     pub state: State,
 }
 
 /// An issue's state as `gh` spells it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum State {
     Open,

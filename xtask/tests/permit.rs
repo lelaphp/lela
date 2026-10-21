@@ -14,9 +14,11 @@ use xtask::witness::{self, Accept, Ask};
 mod common {
     pub mod repo;
     pub mod run;
+    pub mod tracker;
 }
 use common::repo::{Repo, scratch_workspace};
 use common::run::{Ran, Run, xtask};
+use common::tracker::{Tracker, issue, labels};
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -1295,47 +1297,24 @@ fn an_edit_inside_a_computed_region_body_is_denied_and_one_beside_it_allowed() {
 /// but the instrument that read its acceptance criteria; a chart sheet
 /// carries none, so the row names `frontier:chart` and the close of a
 /// filled sheet is not the act the rule is for. The label is the
-/// tracker's fact, so permit asks the tracker, here a recorded `gh` first
+/// tracker's fact, so permit asks the tracker, here a [`Tracker`] first
 /// on `PATH` and never the network: the sheet's close is let through, the
 /// same call on a ticket carrying no such label is denied as before, and
-/// a tracker that will not answer leaves the denial standing.
+/// a number the tracker answers is no issue leaves the denial standing.
 #[test]
 fn a_close_is_denied_unless_the_tracker_says_the_issue_carries_the_exempt_label() {
-    use std::os::unix::fs::PermissionsExt;
     let root = scratch("exempt-label");
-    let bin = root.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let issue = |number: u64, labels: &str| {
-        serde_json::json!({
-            "number": number,
-            "title": format!("issue {number}"),
-            "body": "",
-            "state": "OPEN",
-            "url": format!("https://example.invalid/issues/{number}"),
-            "labels": labels
-                .split_whitespace()
-                .map(|name| serde_json::json!({ "name": name }))
-                .collect::<Vec<_>>(),
-            "blocking": { "nodes": [] },
+    let tracker = Tracker::empty("exempt-label");
+    tracker
+        .with_issue(&xtask::ticket::Issue {
+            labels: labels(&["frontier:chart", "track:t-opus-5"]),
+            ..issue(460)
         })
-        .to_string()
-    };
-    std::fs::write(
-        bin.join("460.json"),
-        issue(460, "frontier:chart track:t-opus-5"),
-    )
-    .unwrap();
-    std::fs::write(bin.join("28.json"), issue(28, "ready-for-agent")).unwrap();
-    let gh = bin.join("gh");
-    std::fs::write(
-        &gh,
-        format!(
-            "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = view ] && [ -f '{0}/'\"$3\"'.json' ]; then cat '{0}/'\"$3\"'.json'; exit 0; fi\nexit 1\n",
-            bin.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        .with_issue(&xtask::ticket::Issue {
+            labels: labels(&["ready-for-agent"]),
+            ..issue(28)
+        })
+        .none(9001);
 
     let judged = |command: &str| -> Option<String> {
         let stdin = serde_json::json!({
@@ -1345,7 +1324,7 @@ fn a_close_is_denied_unless_the_tracker_says_the_issue_carries_the_exempt_label(
         .to_string();
         let path = format!(
             "{}:{}",
-            bin.display(),
+            tracker.bin().display(),
             std::env::var("PATH").unwrap_or_default()
         );
         let ran = Run::at(&root)
