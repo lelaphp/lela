@@ -277,17 +277,10 @@ impl Snapshot {
     /// an edit to a tracked one, and an untracked `.DS_Store` would
     /// otherwise leave a clean checkout matching no commit.
     pub(crate) fn tracked_over(&self, paths: &[PathBuf]) -> Result<String> {
-        let asked = self.tracked_keys.lock().ok();
-        if let Some(key) = asked.as_ref().and_then(|k| k.get(paths)) {
-            return Ok(key.clone());
-        }
-        drop(asked);
-        self.covering(paths)?;
-        let key = git::listing_id(&under(&self.tracked, paths));
-        if let Ok(mut asked) = self.tracked_keys.lock() {
-            asked.insert(paths.to_vec(), key.clone());
-        }
-        Ok(key)
+        memo(&self.tracked_keys, paths.to_vec(), || {
+            self.covering(paths)?;
+            Ok(git::listing_id(&under(&self.tracked, paths)))
+        })
     }
 
     /// Refuse `paths` where the snapshot was read under others: the files
