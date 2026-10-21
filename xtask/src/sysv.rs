@@ -130,7 +130,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -248,7 +248,7 @@ impl Standing {
 
     /// The machine's objects as `ipcs -a` lists them.
     fn ipcs() -> Result<Standing> {
-        Ok(Standing::parse(&printed(
+        Ok(Standing::parse(&crate::printed(
             Command::new("ipcs").arg("-a").output(),
             "ipcs -a",
         )?))
@@ -393,24 +393,13 @@ impl<'a> Row<'a> {
     }
 }
 
-/// What a command named `what` printed on its first stream, where it ran
-/// and exited 0.
-fn printed(out: std::io::Result<Output>, what: &str) -> Result<String> {
-    let out = out.with_context(|| format!("running {what}"))?;
-    if !out.status.success() {
-        let said = String::from_utf8_lossy(&out.stderr);
-        bail!("{what} exited {}: {}", out.status, said.trim());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
 /// Each semaphore set's processes, by `perl`'s `semctl(GETPID)` over its
 /// semaphores in turn until the kernel refuses the next number; `sets`
 /// are the ids. A set this user may not read names none.
 fn semaphore_pids(sets: &[String]) -> Result<BTreeMap<u64, BTreeSet<u32>>> {
     const READ: &str = "use IPC::SysV qw(GETPID); for my $id (@ARGV) { for (my $i = 0; defined(my $pid = semctl($id, $i, GETPID, 0)); $i++) { print \"$id $pid\\n\" if $pid + 0 > 0; } }";
     let perl = Command::new("perl").arg("-e").arg(READ).args(sets).output();
-    let read = printed(perl, "perl reading the semaphores' processes")?;
+    let read = crate::printed(perl, "perl reading the semaphores' processes")?;
     let mut pids: BTreeMap<u64, BTreeSet<u32>> = BTreeMap::new();
     for line in read.lines() {
         if let Some((id, pid)) = line.split_once(' ')
@@ -498,7 +487,7 @@ impl Clock {
     /// Now, in the zone `date +%z` names, which is the one `ipcs` prints
     /// in: both read this process's environment.
     pub(crate) fn now() -> Result<Clock> {
-        let zone = printed(Command::new("date").arg("+%z").output(), "date +%z")?;
+        let zone = crate::printed(Command::new("date").arg("+%z").output(), "date +%z")?;
         let east =
             offset(zone.trim()).with_context(|| format!("date +%z printed {:?}", zone.trim()))?;
         Ok(Clock {
