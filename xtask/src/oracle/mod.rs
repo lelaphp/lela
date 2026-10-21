@@ -71,13 +71,15 @@ pub const TREE_VARIABLE: &str = "TEST_PHP_SRCDIR";
 /// [`Promise::word`] gives, `tree` for the pinned php-src, `oracle` for
 /// the pinned php, `mysql` for the `MySQL` server of
 /// `ci/mysql/compose.yaml` (#3084), `locale` for the locales the tests
-/// name and `main-stack` for a main thread whose size reads (#3180). A test that would skip for a fact the
-/// machine has not, saying so on stderr, fails instead where the fact was
-/// promised, naming what it looked for; so a runner whose provisioning
-/// broke turns red rather than quietly measuring less. The name is stated
-/// here and, for the tests that cannot depend on xtask, in
-/// `crates/php_compile/tests/support/skip.rs`; the workflow reads it, beside [`TREE_VARIABLE`], off
-/// `xtask status --section oracle` and sets it under that name (#36).
+/// name and `main-stack` for a main thread whose size reads (#3180). A
+/// test that would skip for a fact the machine has not, saying so on
+/// stderr, fails instead where the fact was promised, naming what it
+/// looked for; so a runner whose provisioning broke turns red rather
+/// than quietly measuring less. The name is stated here and, for the
+/// tests that cannot depend on xtask, in
+/// `crates/php_compile/tests/support/skip.rs`; the workflow reads it,
+/// beside [`TREE_VARIABLE`], off `xtask status --section oracle` and sets
+/// it under that name (#36).
 pub const PROMISE_VARIABLE: &str = "XTASK_PROMISED";
 
 /// The environment variable `xtask test` sets for each test executable it
