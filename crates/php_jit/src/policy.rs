@@ -597,15 +597,25 @@ impl Policy {
         (hot != 0).then_some(if lane { 1 } else { u32::from(hot) })
     }
 
-    /// How many failed attempts blacklist a word of `start`'s kind:
-    /// `opcache.jit_blacklist_side_trace` for a side, the root's
-    /// otherwise, at most the 63 the word keeps.
-    pub(crate) fn attempts(&self, start: Start) -> u8 {
-        let limit = match start {
-            Start::Side { .. } => self.blacklist_side,
-            Start::Loop | Start::Enter | Start::Return => self.blacklist_root,
-        };
-        limit.min(ATTEMPTS_MAX)
+    /// `opcache.jit_blacklist_root_trace`: how many failed attempts
+    /// blacklist a root, at most the 63 the word keeps.
+    pub(crate) fn blacklist_root(&self) -> u8 {
+        self.blacklist_root.min(ATTEMPTS_MAX)
+    }
+
+    /// When failed attempts blacklist a word of `start`'s kind
+    /// ([`Spent`]): a root's after `opcache.jit_blacklist_root_trace`
+    /// of them, an exit's once its heat reaches the heat it is claimed
+    /// at plus `opcache.jit_blacklist_side_trace`.
+    pub(crate) fn spent(&self, start: Start) -> Spent {
+        match start {
+            Start::Side { .. } => Spent::At(
+                self.threshold(start)
+                    .unwrap_or(0)
+                    .saturating_add(u32::from(self.blacklist_side)),
+            ),
+            Start::Loop | Start::Enter | Start::Return => Spent::After(self.blacklist_root()),
+        }
     }
 
     /// `opcache.jit_max_trace_length`: how many records a recording holds
@@ -826,6 +836,164 @@ pub(crate) enum Outcome {
     Released,
 }
 
+/// When a claimed word's failed attempts blacklist it, as php counts
+/// them for a root and for an exit, which it counts apart.
+///
+/// A loop whose recording sees a throw aborts at each turn and is
+/// blacklisted at its sixteenth abort:
+///
+/// ```php
+/// function g($i) {
+///     try { throw new Exception("x"); } catch (Exception $e) { return $i; }
+/// }
+/// $s = 0;
+/// for ($i = 0; $i < 16; $i++) {
+///     $s += g($i);
+/// }
+/// echo $s, "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 120
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:5
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) $main() %s:6
+/// ---- TRACE 1 abort (exception)
+///
+/// ---- TRACE 1 start (loop) $main() %s:6
+/// ---- TRACE 1 abort (exception)
+///
+/// ---- TRACE 1 start (loop) $main() %s:6
+/// ---- TRACE 1 abort (exception)
+///
+/// ---- TRACE 1 start (loop) $main() %s:6
+/// ---- TRACE 1 abort (exception)
+///
+/// ---- TRACE 1 start (loop) $main() %s:6
+/// ---- TRACE 1 abort (exception)
+///
+/// ---- TRACE 1 start (loop) $main() %s:6
+/// ---- TRACE 1 abort (exception)
+///
+/// ---- TRACE 1 start (loop) $main() %s:6
+/// ---- TRACE 1 abort (exception)
+///
+/// ---- TRACE 1 start (loop) $main() %s:6
+/// ---- TRACE 1 abort (exception)
+///
+/// ---- TRACE 1 start (loop) $main() %s:6
+/// ---- TRACE 1 abort (exception)
+///
+/// ---- TRACE 1 start (loop) $main() %s:6
+/// ---- TRACE 1 abort (exception)
+///
+/// ---- TRACE 1 start (loop) $main() %s:6
+/// ---- TRACE 1 abort (exception)
+///
+/// ---- TRACE 1 start (loop) $main() %s:6
+/// ---- TRACE 1 abort (exception)
+///
+/// ---- TRACE 1 start (loop) $main() %s:6
+/// ---- TRACE 1 abort (exception)
+///
+/// ---- TRACE 1 start (loop) $main() %s:6
+/// ---- TRACE 1 abort (exception)
+///
+/// ---- TRACE 1 start (loop) $main() %s:6
+/// ---- TRACE 1 abort (exception)
+///
+/// ---- TRACE 1 start (loop) $main() %s:6
+/// ---- TRACE 1 abort (exception)
+/// ---- TRACE 1 blacklisted
+///
+/// ```
+///
+/// A side that aborts on every attempt records again at its exit's next
+/// firing and blacklists the exit at its ninth abort, the exit's count
+/// having reached `opcache.jit_hot_side_exit` plus
+/// `opcache.jit_blacklist_side_trace`, one past the side's eight; the
+/// rest of the throws leave through the exit with no line:
+///
+/// ```php
+/// function f($i) { if ($i % 2) throw new Exception("x"); return $i; }
+/// $s = 0;
+/// for ($i = 0; $i < 41; $i++) {
+///     try { $s += f($i); } catch (Exception $e) { $s++; }
+/// }
+/// echo $s, "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 440
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:3
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) $main() %s:4
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit %d f() %s:2
+/// ---- TRACE 2 start (side trace 1/%d) f() %s:2
+/// ---- TRACE 2 abort (exception)
+///
+///      TRACE 1 exit %d f() %s:2
+/// ---- TRACE 2 start (side trace 1/%d) f() %s:2
+/// ---- TRACE 2 abort (exception)
+///
+///      TRACE 1 exit %d f() %s:2
+/// ---- TRACE 2 start (side trace 1/%d) f() %s:2
+/// ---- TRACE 2 abort (exception)
+///
+///      TRACE 1 exit %d f() %s:2
+/// ---- TRACE 2 start (side trace 1/%d) f() %s:2
+/// ---- TRACE 2 abort (exception)
+///
+///      TRACE 1 exit %d f() %s:2
+/// ---- TRACE 2 start (side trace 1/%d) f() %s:2
+/// ---- TRACE 2 abort (exception)
+///
+///      TRACE 1 exit %d f() %s:2
+/// ---- TRACE 2 start (side trace 1/%d) f() %s:2
+/// ---- TRACE 2 abort (exception)
+///
+///      TRACE 1 exit %d f() %s:2
+/// ---- TRACE 2 start (side trace 1/%d) f() %s:2
+/// ---- TRACE 2 abort (exception)
+///
+///      TRACE 1 exit %d f() %s:2
+/// ---- TRACE 2 start (side trace 1/%d) f() %s:2
+/// ---- TRACE 2 abort (exception)
+///
+///      TRACE 1 exit %d f() %s:2
+/// ---- TRACE 2 start (side trace 1/%d) f() %s:2
+/// ---- TRACE 2 abort (exception)
+/// ---- EXIT 1/%d blacklisted
+///
+///      TRACE 1 exit %d $main() %s:7
+/// ---- TRACE 2 start (side trace 1/%d) $main() %s:7
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+///
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Spent {
+    /// A root's word, at this many failed attempts, which its state
+    /// keeps, php's bad root cache (`zend_jit_trace_is_bad_root`,
+    /// `Z/ext/opcache/jit/zend_jit_trace.c:7765-7798`); its heat starts
+    /// again at each, as php starts a root's count again when it fires.
+    After(u8),
+    /// An exit's word, once its heat reaches this, the one count php
+    /// keeps for an exit, held to `opcache.jit_hot_side_exit` plus
+    /// `opcache.jit_blacklist_side_trace` (`zend_jit_trace_exit_is_bad`,
+    /// `:8299-8309`): its heat runs on through its attempts, so a side
+    /// that aborted records again at the exit's next firing, and the
+    /// exit is blacklisted at the attempt past the side's count, or, for
+    /// an exit that grows none, at the firing that reaches it
+    /// ([`spend`]).
+    At(u32),
+}
+
 /// The word's state, by one relaxed load: all ones reads blacklisted.
 #[inline(always)] // jit-design.md §4.9: the load at every visit of a word
 #[allow(clippy::inline_always)]
@@ -904,7 +1072,7 @@ impl Holder {
 pub(crate) struct Claim {
     holder: Holder,
     start: Start,
-    attempts: u8,
+    spent: Spent,
     settled: bool,
 }
 
@@ -935,9 +1103,15 @@ impl Claim {
             Outcome::Published(trace) => (trace.get() << ID_SHIFT) | COMPILED,
             Outcome::Abort(stop) => {
                 attempts = attempts.saturating_add(1).min(ATTEMPTS_MAX);
-                // php's counter starts again when it fires (`zend_jit_trace_hot_root`).
-                heat.store(0, Ordering::Relaxed);
-                if attempts >= self.attempts {
+                let spent = match self.spent {
+                    Spent::After(limit) => {
+                        // A root's count starts again when it fires.
+                        heat.store(0, Ordering::Relaxed);
+                        attempts >= limit
+                    }
+                    Spent::At(bound) => heat.load(Ordering::Relaxed) >= bound,
+                };
+                if spent {
                     BLACKLISTED
                 } else {
                     // The stop kept where the trace number would stand,
@@ -948,7 +1122,9 @@ impl Claim {
             }
             Outcome::Blacklist(_) => BLACKLISTED,
             Outcome::Released => {
-                heat.store(0, Ordering::Relaxed);
+                if let Spent::After(_) = self.spent {
+                    heat.store(0, Ordering::Relaxed);
+                }
                 held & !STATE & !(u32::from(ATTEMPTS_MAX) << ATTEMPTS_SHIFT)
             }
         };
@@ -982,9 +1158,79 @@ pub(crate) fn claim(holder: Holder, policy: &Policy, start: Start) -> Option<Cla
     Some(Claim {
         holder,
         start,
-        attempts: policy.attempts(start),
+        spent: policy.spent(start),
         settled: false,
     })
+}
+
+/// One firing of an exit that grows no side, php's
+/// `ZEND_JIT_EXIT_TO_VM`, counted as php's `zend_jit_trace_exit` counts
+/// it: its word's heat bumped, and the word blacklisted at the firing
+/// whose heat reaches its bound ([`Spent::At`]), after which it is left
+/// with no line. Whether this firing blacklisted it, which writes php's
+/// `---- EXIT m/k blacklisted`; a word not cold is neither bumped nor
+/// stored.
+///
+/// An element a fetch does not find leaves its loop's trace through
+/// such an exit, for the interpreter to warn of, and the ninth firing
+/// blacklists it, `opcache.jit_hot_side_exit` plus
+/// `opcache.jit_blacklist_side_trace` under the recipe's thresholds; the
+/// thirteen after it write nothing:
+///
+/// ```php
+/// function h($a) {
+///     $s = 0;
+///     for ($i = 0; $i < 58; $i++) {
+///         $s += $a[$i % 5];
+///     }
+///     return $s;
+/// }
+/// error_reporting(E_ALL & ~E_WARNING);
+/// echo h([1, 2, 3]), "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 72
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:9
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) h() %s:4
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit %d h() %s:5
+///      TRACE 1 exit %d h() %s:5
+///      TRACE 1 exit %d h() %s:5
+///      TRACE 1 exit %d h() %s:5
+///      TRACE 1 exit %d h() %s:5
+///      TRACE 1 exit %d h() %s:5
+///      TRACE 1 exit %d h() %s:5
+///      TRACE 1 exit %d h() %s:5
+///      TRACE 1 exit %d h() %s:5
+/// ---- EXIT 1/%d blacklisted
+///      TRACE 1 exit %d h() %s:7
+/// ---- TRACE 2 start (side trace 1/3) h() %s:7
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+///
+/// ```
+pub(crate) fn spend(word: &Word, policy: &Policy, start: Start) -> bool {
+    let Spent::At(bound) = policy.spent(start) else {
+        return false;
+    };
+    let state = &word.halves()[1];
+    let held = state.load(Ordering::Relaxed);
+    if held & STATE != COLD || bump(word) < bound {
+        return false;
+    }
+    state
+        .compare_exchange(
+            held,
+            (held & !STATE) | BLACKLISTED,
+            Ordering::Release,
+            Ordering::Relaxed,
+        )
+        .is_ok()
 }
 
 /// End `claim` with `outcome`, one release store; an abort also stores

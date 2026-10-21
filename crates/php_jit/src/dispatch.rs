@@ -369,9 +369,13 @@ fn followed<'t>(
 /// word bumped toward `opcache.jit_hot_side_exit` and claimed at it under
 /// `Holder::Exit`, so a side trace is recorded from the landing, php's
 /// `zend_jit_trace_hot_side`. An exit that grows none, php's
-/// `ZEND_JIT_EXIT_TO_VM`, is bumped and claimed by nothing; so is one
-/// that names no opline, whose side php holds to the opline it stands at
-/// with a guard this tier does not hold yet.
+/// `ZEND_JIT_EXIT_TO_VM`, is claimed by nothing and spent
+/// ([`policy::spend`]): blacklisted at the firing that brings its heat to
+/// `opcache.jit_hot_side_exit` plus `opcache.jit_blacklist_side_trace`,
+/// with php's `---- EXIT m/k blacklisted` after its exit line, and left
+/// with no line from then on. One that names no opline is bumped and
+/// claimed by nothing, its side being one php holds to the opline it
+/// stands at with a guard this tier does not hold yet.
 ///
 /// A `for` over lines leaves its trace through its test, `exit 3`, at the
 /// line past the loop, where a side trace of it starts, named by its
@@ -441,7 +445,19 @@ fn sided(
         parent: trace,
         exit: exited.exit,
     };
-    let claims = exit.grows == Grows::Side && exit.opline.is_some();
+    if exit.grows == Grows::Never {
+        if policy::spend(&exit.word, &shared.policy, start) {
+            let mut lines = Vec::new();
+            let event = TraceEvent::ExitBlacklisted {
+                trace,
+                exit: exited.exit,
+            };
+            shared.dump(&mut lines, &event);
+            req.response_mut().write_stderr(&lines);
+        }
+        return Visited::Continue;
+    }
+    let claims = exit.opline.is_some();
     let req: &Request = req;
     let holder = || {
         Some(Holder::Exit {

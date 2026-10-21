@@ -9,8 +9,8 @@ use php_engine::tier::{Epoch, FuncRef, SafepointIdx, StartupIni, Word};
 use php_unit::{OpArray, Opcode, OplineIdx, Unit};
 
 use super::{
-    Claim, Compile, Holder, JitDebug, Mode, Note, Outcome, Place, Policy, Refused, Setting, State,
-    TraceEvent, bad_stop, bump, claim, read, settle,
+    Claim, Compile, Holder, JitDebug, Mode, Note, Outcome, Place, Policy, Refused, Setting, Spent,
+    State, TraceEvent, bad_stop, bump, claim, read, settle, spend,
 };
 use crate::record::{Start, Stop};
 use crate::table::TraceId;
@@ -156,8 +156,8 @@ fn the_directives_take_phps_defaults_and_bounds_and_jit_mode_names_the_lane() {
     assert_eq!(policy.threshold(Start::Return), Some(8));
     assert_eq!(policy.threshold(side()), Some(8));
     assert_eq!(
-        (policy.attempts(Start::Loop), policy.attempts(side())),
-        (16, 8)
+        (policy.spent(Start::Loop), policy.spent(side())),
+        (Spent::After(16), Spent::At(16))
     );
     assert_eq!(policy.buffer_size, 64 << 20);
     assert_eq!(
@@ -239,7 +239,8 @@ fn row(start: Start, outcome: Outcome) -> (State, u32, u32) {
 
 /// The machine as a table, one row per `(State, Start, Outcome)` from
 /// cold: a publish compiles, an abort is cold again with one more
-/// attempt and no heat, a blacklist is at once; claim is `None` on a
+/// attempt, a root's with no heat and a side's with its heat kept, a
+/// blacklist is at once; claim is `None` on a
 /// word that is not cold.
 #[test]
 fn the_state_machine_as_a_table() {
@@ -259,7 +260,7 @@ fn the_state_machine_as_a_table() {
             Outcome::Abort(Stop::NotSupported),
             (State::Cold, 1, 0),
         ),
-        (side(), Outcome::Abort(Stop::TooLong), (State::Cold, 1, 0)),
+        (side(), Outcome::Abort(Stop::TooLong), (State::Cold, 1, 3)),
         (
             Start::Loop,
             Outcome::Blacklist(Stop::TooManyTraces),
@@ -291,28 +292,81 @@ fn the_state_machine_as_a_table() {
     );
 }
 
-/// Sixteen aborts blacklist a root and eight a side, each abort a claim
-/// of its own after the word is cold again.
+/// Sixteen aborts blacklist a root, each abort a claim of its own after
+/// the word is cold again with no heat, as php's bad root cache counts
+/// them; the exit a side grows from, whose heat is kept, is blacklisted
+/// by the abort that finds its heat at `opcache.jit_hot_side_exit` plus
+/// `opcache.jit_blacklist_side_trace`, its ninth at php's defaults,
+/// claimed at the exit's eighth firing and at each firing after, as
+/// php's `zend_jit_trace_exit_is_hot` and `_is_bad` keep one count.
 #[test]
-fn sixteen_aborts_blacklist_a_root_and_eight_a_side() {
-    let (policy, _) = read_ini(&[]);
-    for (start, limit) in [(Start::Loop, 16), (side(), 8)] {
-        let (epoch, func) = fixture();
-        let holder = root(&epoch, func, 0);
-        for attempt in 1..=limit {
-            assert_eq!(
-                read(holder.word()),
-                State::Cold,
-                "{start:?} before attempt {attempt}"
-            );
-            let claimed = claim(holder.clone(), &policy, start);
-            assert!(claimed.is_some());
-            if let Some(claimed) = claimed {
-                settle(claimed, &Outcome::Abort(Stop::LoopExit));
-            }
+fn sixteen_aborts_blacklist_a_root_and_a_sides_exit_its_ninth() {
+    let (policy, _) = read_ini(&[("opcache.jit", "tracing")]);
+    let (epoch, func) = fixture();
+    let holder = root(&epoch, func, 0);
+    for attempt in 1..=16 {
+        assert_eq!(read(holder.word()), State::Cold, "before attempt {attempt}");
+        let claimed = claim(holder.clone(), &policy, Start::Loop);
+        assert!(claimed.is_some());
+        if let Some(claimed) = claimed {
+            settle(claimed, &Outcome::Abort(Stop::LoopExit));
         }
-        assert_eq!(read(holder.word()), State::Blacklisted, "{start:?}");
-        assert!(claim(holder, &policy, start).is_none());
+        assert_eq!(heat(holder.word()), 0);
+    }
+    assert_eq!(read(holder.word()), State::Blacklisted);
+    assert!(claim(holder, &policy, Start::Loop).is_none());
+
+    let (epoch, func) = fixture();
+    let holder = root(&epoch, func, 1);
+    let word = holder.word();
+    let threshold = policy.threshold(side()).unwrap_or(u32::MAX);
+    let (mut firings, mut aborts) = (0, 0);
+    while read(word) == State::Cold && firings < 100 {
+        firings += 1;
+        if bump(word) < threshold {
+            continue;
+        }
+        let claimed = claim(holder.clone(), &policy, side());
+        assert!(claimed.is_some(), "firing {firings}");
+        if let Some(claimed) = claimed {
+            aborts += 1;
+            settle(claimed, &Outcome::Abort(Stop::Exception));
+        }
+    }
+    assert_eq!((read(word), firings, aborts), (State::Blacklisted, 16, 9));
+}
+
+/// An exit that grows no side is spent at the firing that brings its
+/// heat to `opcache.jit_hot_side_exit` plus
+/// `opcache.jit_blacklist_side_trace`, sixteen at php's defaults and
+/// nine under the recipe's threshold of one, once; a root's word is never
+/// spent.
+#[test]
+fn an_exit_that_grows_no_side_is_blacklisted_at_its_bound() {
+    for (ini, bound) in [
+        (vec![("opcache.jit", "tracing")], 16),
+        (
+            vec![
+                ("opcache.jit", "tracing"),
+                ("opcache.jit_hot_side_exit", "1"),
+            ],
+            9,
+        ),
+        (
+            vec![
+                ("opcache.jit", "tracing"),
+                ("opcache.jit_hot_side_exit", "0"),
+            ],
+            8,
+        ),
+    ] {
+        let (policy, _) = read_ini(&ini);
+        let word = Word::default();
+        let spent: Vec<u32> = (1..=40).filter(|_| spend(&word, &policy, side())).collect();
+        assert_eq!(read(&word), State::Blacklisted, "{ini:?}");
+        assert_eq!(spent, [bound], "{ini:?}: the firing that spent it");
+        assert_eq!(heat(&word), bound, "{ini:?}: bumped until it was spent");
+        assert!(!spend(&Word::default(), &policy, Start::Loop));
     }
 }
 
