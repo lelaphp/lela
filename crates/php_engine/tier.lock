@@ -101,12 +101,14 @@ tier::frame
 tier::free_operands
 tier::func
 tier::interrupted
+tier::landing
 tier::numbered_class
 tier::observes
 tier::on_heap
 tier::primed
 tier::restore
 tier::room
+tier::safepoint_at
 tier::sample
 tier::serve_kept
 tier::set_argv

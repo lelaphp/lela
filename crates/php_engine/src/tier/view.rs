@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use php_link::LinkedClass;
 use php_unit::decl::Parameter;
-use php_unit::{CacheSlot, MapPtrOffset, OpArray};
+use php_unit::{CacheSlot, MapPtrOffset, OpArray, OplineIdx};
 
 use super::published::SEALED;
 use super::{FrameRef, Request, SafepointIdx, Word};
@@ -47,6 +47,26 @@ impl Epoch {
     #[must_use]
     pub fn word(&self, f: FuncRef, at: SafepointIdx) -> &Word {
         self.func(f).map_or(&SEALED, |func| func.word(at))
+    }
+
+    /// The landing word of opline `at` of the op array `f` names
+    /// (`jit-design.md` §2.2): the word of the returns that land there,
+    /// which php's `zend_jit_trace_setup_ret_counter` arms on the opline
+    /// past a call; sealed until a tier armed it
+    /// ([`Epoch::lay_landing`]), and for an op array this epoch holds no
+    /// row for.
+    #[must_use]
+    pub fn landing(&self, f: FuncRef, at: OplineIdx) -> &Word {
+        self.func(f).map_or(&SEALED, |func| func.landing(at))
+    }
+
+    /// The landing word of opline `at` of the op array `f` names, for a
+    /// tier to arm, the op array's landing words laid down sealed the
+    /// first time; none for an op array this epoch holds no row for, and
+    /// past its last opline.
+    #[must_use]
+    pub fn lay_landing(&self, f: FuncRef, at: OplineIdx) -> Option<&Word> {
+        self.func(f)?.lay_landing(at)
     }
 
     /// The row of a held op array.
@@ -149,6 +169,32 @@ pub fn word(req: &Request, frame: FrameRef, at: SafepointIdx) -> &Word {
             MapPtrOffset::Request(_) => None,
         });
     held.map_or(&SEALED, |func| func.word(at))
+}
+
+/// The landing word of opline `at` of the op array `frame` serves, what
+/// the tier reads where a return lands there ([`Epoch::landing`]): the
+/// sealed word until a tier armed it, and for an op array no epoch holds.
+#[must_use]
+pub fn landing(req: &Request, frame: FrameRef, at: OplineIdx) -> &Word {
+    let held = req
+        .served_op_array(frame)
+        .and_then(|code| match code.runtime_cache {
+            MapPtrOffset::Engine(offset) => req.arena().func(offset),
+            MapPtrOffset::Request(_) => None,
+        });
+    held.map_or(&SEALED, |func| func.landing(at))
+}
+
+/// The opline safepoint `at` of the op array `frame` serves stands at,
+/// the back-edge's header or the `RETURN` its number names, where a
+/// tier that serves the site's opline itself stands the frame first: a
+/// `RETURN`'s inline path raises its site before it stands its frame
+/// there. None for a frame that serves no op array and past its last
+/// safepoint.
+#[must_use]
+pub fn safepoint_at(req: &Request, frame: FrameRef, at: SafepointIdx) -> Option<OplineIdx> {
+    let code = req.served_op_array(frame)?;
+    code.safepoints.get(usize::try_from(at.0).ok()?).copied()
 }
 
 /// Where a request keeps one slot of a held op array's `run_time_cache`:
