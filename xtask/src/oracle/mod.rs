@@ -69,13 +69,14 @@ pub const TREE_VARIABLE: &str = "TEST_PHP_SRCDIR";
 /// The environment variable a runner sets to say what of the pin this
 /// machine has (#38): a whitespace-separated list of the words
 /// [`Promise::word`] gives, `tree` for the pinned php-src, `oracle` for
-/// the pinned php and `mysql` for the `MySQL` server of
-/// `ci/mysql/compose.yaml` (#3084). A test that would skip for a fact the
+/// the pinned php, `mysql` for the `MySQL` server of
+/// `ci/mysql/compose.yaml` (#3084), `locale` for the locales the tests
+/// name and `main-stack` for a main thread whose size reads (#3180). A test that would skip for a fact the
 /// machine has not, saying so on stderr, fails instead where the fact was
 /// promised, naming what it looked for; so a runner whose provisioning
 /// broke turns red rather than quietly measuring less. The name is stated
 /// here and, for the tests that cannot depend on xtask, in
-/// `ext/mysqlnd/tests/support/mysql.rs`; the workflow reads it, beside [`TREE_VARIABLE`], off
+/// `crates/php_compile/tests/support/skip.rs`; the workflow reads it, beside [`TREE_VARIABLE`], off
 /// `xtask status --section oracle` and sets it under that name (#36).
 pub const PROMISE_VARIABLE: &str = "XTASK_PROMISED";
 
@@ -84,11 +85,15 @@ pub const PROMISE_VARIABLE: &str = "XTASK_PROMISED";
 /// for a fact this machine did not promise appends `<test>\t<word>` to
 /// it, the test named after the thread libtest runs it on, so the reading
 /// counts the tests that skipped. Unset, as under a bare `cargo test`,
-/// nothing is written. `MysqlServer::with` spells the name too.
+/// nothing is written. `crates/php_compile/tests/support/skip.rs` spells
+/// the name too.
 pub const SKIPPED_VARIABLE: &str = "XTASK_SKIPPED";
 
-/// One fact a machine can promise to have: the pin's tree or binary, or
-/// the `MySQL` server. What a guarded test asks through [`Promise::or_skip`].
+/// One fact a machine can promise to have: the pin's tree or binary, the
+/// `MySQL` server, the locales or the main thread's size. What a guarded
+/// test asks through [`Promise::or_skip`], or, in a test that cannot
+/// depend on xtask, through `crates/php_compile/tests/support/skip.rs`,
+/// which spells the word itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Promise {
     /// The pinned php-src, where [`Source::tree`] answers.
@@ -96,15 +101,24 @@ pub enum Promise {
     /// The pinned php, at [`Binary::file`].
     Oracle,
     /// The `MySQL` server of `ci/mysql/compose.yaml` on `127.0.0.1:3306`,
-    /// which the tests of `ext/mysqli` and `ext/pdo_mysql` run against. They
-    /// cannot depend on xtask, so `MysqlServer::with`, in
-    /// `ext/mysqlnd/tests/support/mysql.rs`, reads the word off
-    /// [`PROMISE_VARIABLE`] itself (#3084).
+    /// which the tests of `ext/mysqli` and `ext/pdo_mysql` run against
+    /// through `MysqlServer::with` (#3084).
     Mysql,
+    /// Every locale `ext/standard`'s tests name, which CI generates.
+    Locale,
+    /// A main thread whose size `php_heap::main_call_stack_size` reads,
+    /// which `php_compile`'s stack test measures past.
+    MainStack,
 }
 
 impl Promise {
-    const ALL: [Promise; 3] = [Promise::Tree, Promise::Oracle, Promise::Mysql];
+    const ALL: [Promise; 5] = [
+        Promise::Tree,
+        Promise::Oracle,
+        Promise::Mysql,
+        Promise::Locale,
+        Promise::MainStack,
+    ];
 
     /// The word [`PROMISE_VARIABLE`] lists for this fact.
     pub fn word(self) -> &'static str {
@@ -112,6 +126,8 @@ impl Promise {
             Promise::Tree => "tree",
             Promise::Oracle => "oracle",
             Promise::Mysql => "mysql",
+            Promise::Locale => "locale",
+            Promise::MainStack => "main-stack",
         }
     }
 

@@ -5,15 +5,18 @@
 //! the next request under the process's locale again.
 //!
 //! A test that names a locale runs inside [`with_locale`] and, on a host
-//! whose C library lacks it, says it skipped and measures nothing; CI
-//! generates every locale these tests and the witnesses name
-//! (`.github/workflows/harness.yml`), so there it runs.
+//! whose C library lacks it, skips and measures nothing, the skip counted
+//! by `xtask test` (#3180); CI generates every locale these tests and the
+//! witnesses name and promises them (`.github/workflows/harness.yml`), so
+//! there an absent one fails.
 
 #![allow(
     clippy::disallowed_methods,
     reason = "a test starts its own threads (seams.toml rule fork.threads)"
 )]
 
+#[path = "../../../crates/php_compile/tests/support/skip.rs"]
+mod skip;
 mod support;
 
 use std::path::Path;
@@ -40,15 +43,18 @@ fn served(engine: &Engine, source: &str) -> String {
 /// `test` called where the C library has the locale `name`, asked the
 /// way a phpt's `--SKIPIF--` asks: a request's `setlocale()`, which
 /// answers what `newlocale(3)` answers for the name. Where it is absent,
-/// `test` is never called and the skip is said on stderr, since a Rust
-/// test has no skip of its own.
+/// `test` is never called and the test skips, or fails where the machine
+/// promised its locales, since a Rust test has no skip of its own.
 fn with_locale(engine: &Engine, name: &str, test: impl FnOnce()) {
     let probe =
         format!(r#"<?php echo setlocale(LC_ALL, "{name}") === false ? "absent" : "present";"#);
     if served(engine, &probe) == "present" {
         test();
     } else {
-        eprintln!("skipped: the C library has no {name} locale on this host");
+        skip::skip(
+            skip::LOCALE,
+            &format!("the C library has no {name} locale on this host"),
+        );
     }
 }
 

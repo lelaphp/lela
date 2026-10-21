@@ -555,12 +555,16 @@ mod tests {
     /// entry to the thread's own, names the main thread's number, and a
     /// re-entry moves the limit to that budget below its frame until it
     /// is left; under a size the ini gave, a re-entry moves nothing. A
-    /// platform whose main thread's size cannot be read skips, saying so.
+    /// platform whose main thread's size cannot be read skips, and fails
+    /// where the machine promised the size (#3180).
     #[test]
     fn detect_on_a_thread_past_the_main_threads_size_allows_the_main_threads() {
         match php_heap::main_call_stack_size() {
             Some(main) => detect_past_the_main_thread(main),
-            None => eprintln!("skipped: this platform's main thread has no size to read"),
+            None => crate::skip::skip(
+                crate::skip::MAIN_STACK,
+                "this platform's main thread has no size to read",
+            ),
         }
     }
 

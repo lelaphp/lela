@@ -88,7 +88,8 @@ jobs:
       # all the same.
       # `update-locale` is left out: it sets the system's default LANG,
       # which nothing here reads. A name that fails to build fails the
-      # step, so no test here reads an absent locale as its skip.
+      # step, and the corpus step below promises the locales, so a test
+      # that finds one absent fails rather than skip (#3180).
       - name: the named locales the tests ask for
         run: |
           sudo locale-gen de_DE de_DE.UTF-8 fr_FR fr_FR.UTF-8 tr_TR is_IS is_IS.UTF-8
@@ -125,10 +126,11 @@ jobs:
       # run in the oracle job below. The one step running the tree's two
       # tests fails the job there, before the suite, and the suite reads
       # the same tree. The MySQL server started above is promised too, so
-      # a mysqli or pdo_mysql test that finds none fails here (#3084).
+      # a mysqli or pdo_mysql test that finds none fails here (#3084), and
+      # so are the locales generated above (#3180).
       - uses: ./.github/actions/corpus
         with:
-          promise: tree mysql
+          promise: tree mysql locale
       - name: the tree is at the pin's commit and holds every test the pin counts
         run: cargo test -p xtask --test oracle a_tree_the_variable_names_
       # The crate's own tests as the reading `done`'s condition 1 asks
