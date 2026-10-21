@@ -264,10 +264,13 @@ fn reading(
     };
     let s = plural(usize::try_from(n).unwrap_or(usize::MAX));
     reading.message = format!("{name}: {n} test{s} {verb}");
-    if *passed && counts.skipped_unpromised > 0 {
-        let skipped = counts.skipped_unpromised;
+    if counts.skipped_unpromised > 0 {
+        let (skipped, of_them) = (
+            counts.skipped_unpromised,
+            if *passed { " of them" } else { "" },
+        );
         reading.message = format!(
-            "{}, {skipped} of them skipped for a fact this machine did not promise",
+            "{}, {skipped}{of_them} skipped for a fact this machine did not promise",
             reading.message
         );
     }
@@ -374,9 +377,14 @@ fn execute(executable: &Executable, built: &Built, run: &Run) -> Result<Ran> {
     }
     let dir = run.target_dir.join("skipped");
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let skipped = dir.join(executable.path.file_name().unwrap_or_default());
-    if skipped.exists() {
-        fs::remove_file(&skipped).with_context(|| format!("removing {}", skipped.display()))?;
+    let named = executable.path.file_name();
+    let skipped =
+        dir.join(named.with_context(|| format!("{} names no file", executable.path.display()))?);
+    match fs::remove_file(&skipped) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(e).with_context(|| format!("removing {}", skipped.display()));
+        }
+        _ => {}
     }
     command.env(SKIPPED_VARIABLE, &skipped);
     batch::without_git(&mut command);
@@ -386,15 +394,15 @@ fn execute(executable: &Executable, built: &Built, run: &Run) -> Result<Ran> {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let mut counts = Counts::of(&stdout);
-    if skipped.exists() {
-        let text = fs::read_to_string(&skipped)
-            .with_context(|| format!("reading {}", skipped.display()))?;
-        let tests: BTreeSet<&str> = text
-            .lines()
-            .filter_map(|line| line.split_once('\t').map(|(test, _)| test))
-            .collect();
-        counts.skipped_unpromised = tests.len() as u64;
-    }
+    let text = match fs::read_to_string(&skipped) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        read => read.with_context(|| format!("reading {}", skipped.display()))?,
+    };
+    let tests: BTreeSet<&str> = text
+        .lines()
+        .filter_map(|line| line.split_once('\t').map(|(test, _)| test))
+        .collect();
+    counts.skipped_unpromised = tests.len() as u64;
     Ok(Ran {
         counts,
         passed: out.status.success(),

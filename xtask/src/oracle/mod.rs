@@ -70,11 +70,12 @@ pub const TREE_VARIABLE: &str = "TEST_PHP_SRCDIR";
 /// machine has (#38): a whitespace-separated list of the words
 /// [`Promise::word`] gives, `tree` for the pinned php-src, `oracle` for
 /// the pinned php and `mysql` for the `MySQL` server of
-/// `ci/mysql/compose.yaml` (#3084). A test that would skip for a fact the machine has not,
-/// saying so on stderr, fails instead where the fact was promised, naming
-/// what it looked for; so a runner whose provisioning broke turns red
-/// rather than quietly measuring less. The name is stated here and
-/// nowhere else; the workflow reads it, beside [`TREE_VARIABLE`], off
+/// `ci/mysql/compose.yaml` (#3084). A test that would skip for a fact the
+/// machine has not, saying so on stderr, fails instead where the fact was
+/// promised, naming what it looked for; so a runner whose provisioning
+/// broke turns red rather than quietly measuring less. The name is stated
+/// here and, for the tests that cannot depend on xtask, in
+/// `ext/mysqlnd/tests/support/mysql.rs`; the workflow reads it, beside [`TREE_VARIABLE`], off
 /// `xtask status --section oracle` and sets it under that name (#36).
 pub const PROMISE_VARIABLE: &str = "XTASK_PROMISED";
 
@@ -2374,13 +2375,16 @@ mod skipped_tests {
     /// thread the test started is named by its id.
     #[test]
     fn a_skip_is_a_line_naming_the_test_and_the_word() {
-        let tree = Tree::new("oracle-skipped").unwrap();
+        let tree = Tree::new("oracle-skipped").expect("a scratch tree");
         let file = tree.join("skipped");
-        Promise::Tree.skipped(&file).unwrap();
+        Promise::Tree
+            .skipped(&file)
+            .expect("the test's skip is written");
         let apart = std::thread::spawn(move || Promise::Mysql.skipped(&file));
-        apart.join().unwrap().unwrap();
-        let text = std::fs::read_to_string(tree.join("skipped")).unwrap();
-        let (own, started) = text.split_once('\n').unwrap();
+        let written = apart.join().expect("the started thread ends");
+        written.expect("the started thread's skip is written");
+        let text = std::fs::read_to_string(tree.join("skipped")).expect("the skips are read");
+        let (own, started) = text.split_once('\n').expect("two lines");
         assert_eq!(
             own,
             "oracle::skipped_tests::a_skip_is_a_line_naming_the_test_and_the_word\ttree"

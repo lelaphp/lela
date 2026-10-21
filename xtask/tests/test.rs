@@ -218,9 +218,9 @@ fn done_is_red_for_a_crate_with_a_failing_test_and_green_once_it_passes() {
 
 /// What `done` says of `root`'s changes since `HEAD`.
 fn judged(root: &Path, manifest: &Manifest, store: &Store) -> done::Verdict {
-    let registry = Registry::load(root).unwrap();
-    let snapshot = xtask::key::Snapshot::disk(root).unwrap();
-    done::judge(&snapshot, manifest, &registry, store, Some("HEAD"), &[]).unwrap()
+    let registry = Registry::load(root).expect("the registry");
+    let snapshot = xtask::key::Snapshot::disk(root).expect("the tree");
+    done::judge(&snapshot, manifest, &registry, store, Some("HEAD"), &[]).expect("the verdict")
 }
 
 /// A fresh passing reading of `php_heap` for each instrument condition 1
@@ -230,14 +230,15 @@ fn fresh_but_test(root: &Path, manifest: &Manifest, store: &Store) {
         if instrument == "test" || instrument == "phpt" || instrument == "port-map" {
             continue;
         }
-        let snapshot = xtask::key::Snapshot::disk(root).unwrap();
-        let mut reading = Reading::for_scope(instrument, "php_heap", manifest, &snapshot).unwrap();
+        let snapshot = xtask::key::Snapshot::disk(root).expect("the tree");
+        let mut reading =
+            Reading::for_scope(instrument, "php_heap", manifest, &snapshot).expect("a reading");
         if xtask::reading::UNDER_RECIPE.contains(&instrument) {
             reading = reading.under(&manifest.pin);
         }
         reading.status = Status::Pass;
         reading.message = String::from("php_heap: measured");
-        store.record(&[reading]).unwrap();
+        store.record(&[reading]).expect("the reading is recorded");
     }
 }
 
@@ -249,10 +250,10 @@ const SKIPS: &str = r#"#[cfg(test)]
 mod tests {
     fn skip() {
         use std::io::Write as _;
-        let file = std::env::var_os("VARIABLE").unwrap();
-        let test = std::thread::current().name().unwrap().to_owned();
-        let mut out = std::fs::OpenOptions::new().create(true).append(true).open(file).unwrap();
-        out.write_all(format!("{test}\tmysql\n").as_bytes()).unwrap();
+        let file = std::env::var_os("VARIABLE").expect("the file xtask test names");
+        let test = std::thread::current().name().expect("libtest's name").to_owned();
+        let mut out = std::fs::OpenOptions::new().create(true).append(true).open(file).expect("the file");
+        out.write_all(format!("{test}\tmysql\n").as_bytes()).expect("the skip");
     }
 
     #[test]
@@ -278,17 +279,17 @@ mod tests {
 fn a_reading_counts_the_tests_that_skipped_and_done_notes_them() {
     let root = scratch("test-skipped");
     let lib = root.join("crates/php_heap/src/lib.rs");
-    std::fs::write(&lib, SKIPS.replace("VARIABLE", SKIPPED_VARIABLE)).unwrap();
+    std::fs::write(&lib, SKIPS.replace("VARIABLE", SKIPPED_VARIABLE)).expect("the tests that skip");
     let root = committed(root);
     std::fs::write(
         &lib,
         format!("{SKIPS}\n/// Changed.\npub fn two() {{}}\n").replace("VARIABLE", SKIPPED_VARIABLE),
     )
-    .unwrap();
-    let manifest = Manifest::load(&root).unwrap();
+    .expect("the crate changed");
+    let manifest = Manifest::load(&root).expect("the manifest");
     let store = Store::of_workspace(&root);
     fresh_but_test(&root, &manifest, &store);
-    let readings = test::run(&root, &manifest, &[]).unwrap();
+    let readings = test::run(&root, &manifest, &[]).expect("the readings");
     assert_eq!(readings[0].status, Status::Pass, "{readings:#?}");
     assert_eq!(int(&readings[0], "passed"), 3, "{readings:#?}");
     assert_eq!(int(&readings[0], "skipped_unpromised"), 2, "{readings:#?}");
@@ -296,7 +297,7 @@ fn a_reading_counts_the_tests_that_skipped_and_done_notes_them() {
         readings[0].message,
         "php_heap: 3 tests passed, 2 of them skipped for a fact this machine did not promise"
     );
-    store.record(&readings).unwrap();
+    store.record(&readings).expect("the readings are recorded");
     let verdict = judged(&root, &manifest, &store);
     assert!(verdict.met(), "{verdict:#?}");
     assert!(
