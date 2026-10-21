@@ -128,11 +128,13 @@ fn encode_scalar(
             }
         }
         ValueRef::Str(s) => return escape_string(req, buf, s.as_bytes(), options, enc),
-        // An object and an array are [`encode`]'s and never reach here.
-        ValueRef::Resource(_)
-        | ValueRef::Reference(_)
-        | ValueRef::Object(_)
-        | ValueRef::Array(_) => {
+        ValueRef::Object(_) | ValueRef::Array(_) => {
+            return Err(php_ext::raising::fatal(
+                req,
+                "InternalError: json_encode's scalar arm handed an array or an object",
+            ));
+        }
+        ValueRef::Resource(_) | ValueRef::Reference(_) => {
             enc.error_code = JSON_ERROR_UNSUPPORTED_TYPE;
             partial_null(req, buf, options)?;
             return Ok(false);
