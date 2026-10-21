@@ -36,12 +36,15 @@ use crate::tier::{self, Flow, Site, Stepped, Tier};
 
 /// What a stepping tier keeps, its request state: how many handlers it
 /// dispatched through `step` or `unwind`, so a serving that stepped
-/// nothing does not pass as one, and whether it has raised the
-/// interrupt it is armed with.
+/// nothing does not pass as one, whether it has raised the interrupt it
+/// is armed with, and, for a [`Stepper`] that `SEES`, where it stood
+/// before each handler, `"<line> <opcode>"`, or `"<line> threw <class>"`
+/// where it stood unwinding a throwable.
 #[derive(Debug, Default)]
-struct Stepping {
+pub(crate) struct Stepping {
     steps: usize,
     fired: bool,
+    pub(crate) seen: Vec<String>,
 }
 
 /// The extension a stepping tier declares its state through.
@@ -63,14 +66,16 @@ fn fire(req: &mut Request) {
 /// a frame unwinding is unwound where it is not the serving's entry,
 /// where the entry catches what is pending or where nothing is, and
 /// handed back otherwise; the entry frame's leaving is handed back
-/// unless `steps_leaving`; anything else is one `step`.
-fn stepped(req: &mut Request, frame: FrameRef, steps_leaving: bool) -> Flow {
+/// unless `steps_leaving`; anything else is one `step`. Where it stood
+/// is kept in [`Stepping::seen`] where `sees`.
+fn stepped(req: &mut Request, frame: FrameRef, steps_leaving: bool, sees: bool) -> Flow {
     let mut at = frame;
     let mut unwinding = false;
     loop {
-        let Some(opcode) = tier::frame(req, at).and_then(|view| {
+        let Some((line, opcode)) = tier::frame(req, at).and_then(|view| {
             let code = view.op_array()?;
-            code.opline(view.opline()).map(|op| op.opcode())
+            let opcode = code.opline(view.opline()).map(|op| op.opcode())?;
+            Some((view.line(), opcode))
         }) else {
             return Flow::Resume(at);
         };
@@ -79,6 +84,15 @@ fn stepped(req: &mut Request, frame: FrameRef, steps_leaving: bool) -> Flow {
             || (req.diagnostics().raised().is_none() && req.diagnostics().bailing_out())
         {
             return Flow::Resume(at);
+        }
+        if sees {
+            let stood = match req.diagnostics().raised() {
+                Some(Raised::Throwable(object)) if unwinding => {
+                    format!("{line} threw {}", req.symbols().class_name(object.class()))
+                }
+                _ => format!("{line} {}", opcode.name()),
+            };
+            req.state::<Stepping>().seen.push(stood);
         }
         let entry = tier::entry(req);
         let stepped = if unwinding {
@@ -132,15 +146,29 @@ fn leaves(opcode: Opcode) -> bool {
     )
 }
 
-/// A stepping host: every serving taken over at its entry frame's
+/// A stepping host, the one stepping double the engine's tests drive
+/// the tier face with: every serving taken over at its entry frame's
 /// `Site::Entry`, the reentered ones a native's callback serves too.
 /// `Stepper<false>` is the debugger, which hands the entry frame's
 /// leaving back to the loop as phpdbg does; `Stepper<true>` a recorder,
 /// which steps it, so `step` itself ends the serving. An `ARMED` one
-/// raises the interrupt ([`fire`]) at its first entry.
-pub(super) struct Stepper<const STEPS_LEAVING: bool, const ARMED: bool = false>;
+/// raises the interrupt ([`fire`]) at its first entry; one that `SEES`
+/// keeps where it stood before each handler ([`Stepping::seen`]).
+///
+/// Its exit rule is phpdbg's (`sapi/phpdbg/src/debugger.rs`'s `stepped`):
+/// the serving handed back is `Flow::Resume` at the frame it stands in,
+/// a fatal is `Flow::Bail`, and a `step` or `unwind` that ended the
+/// serving, `Stepped::Done`, answers `Flow::Returned`, since the entry
+/// frame has left and there is nothing for the loop to go on with.
+pub(crate) struct Stepper<
+    const STEPS_LEAVING: bool,
+    const ARMED: bool = false,
+    const SEES: bool = false,
+>;
 
-impl<const STEPS_LEAVING: bool, const ARMED: bool> Tier for Stepper<STEPS_LEAVING, ARMED> {
+impl<const STEPS_LEAVING: bool, const ARMED: bool, const SEES: bool> Tier
+    for Stepper<STEPS_LEAVING, ARMED, SEES>
+{
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
         if site != Site::Entry || frame != tier::entry(req) {
             return Flow::Continue;
@@ -148,7 +176,7 @@ impl<const STEPS_LEAVING: bool, const ARMED: bool> Tier for Stepper<STEPS_LEAVIN
         if ARMED {
             fire(req);
         }
-        stepped(req, frame, STEPS_LEAVING)
+        stepped(req, frame, STEPS_LEAVING, SEES)
     }
 
     fn extension() -> Option<Extension> {

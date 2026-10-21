@@ -281,17 +281,18 @@ pub fn set_stdin(req: &mut Request, stdin: OwnedFd) {
 
 #[cfg(test)]
 mod tests {
-    //! The face as a debugging host drives it: a tier that takes the
-    //! serving over at its entry and steps it one handler at a time,
-    //! unwinding a frame that catches what it threw and handing the rest
-    //! back, as `sapi/phpdbg` does.
+    //! The face as a debugging host drives it: the shared stepping double
+    //! ([`Stepper`]), which takes the serving over at its entry and steps
+    //! it one handler at a time, unwinding a frame that catches what it
+    //! threw and handing the rest back, as `sapi/phpdbg` does.
 
     use php_heap::FrameRef;
 
     use crate::api::abi::{Extension, ExtensionBuilder};
     use crate::api::request::{Raised, Request};
     use crate::engine::{Engine, EngineBuilder};
-    use crate::tier::{Flow, Site, Stepped, Tier};
+    use crate::tests::stepped::{Stepper, Stepping};
+    use crate::tier::{Flow, Site, Tier};
 
     /// The class of the throwable pending, and the `file` and `line` it
     /// carries, read through the native face as phpdbg reads them off it.
@@ -343,62 +344,17 @@ mod tests {
         )
     }
 
-    struct Stepper;
-
-    impl Tier for Stepper {
-        fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
-            if site != Site::Entry || frame != super::entry(req) {
-                return Flow::Continue;
-            }
-            let mut at = frame;
-            let mut unwinding = false;
-            loop {
-                let Some((line, opcode)) = super::frame(req, at).map(|v| (v.line(), v.opcode()))
-                else {
-                    return Flow::Resume(at);
-                };
-                let what = match described(req) {
-                    Some((class, _, _)) if unwinding => format!("{line} threw {class}"),
-                    _ => format!("{line} {opcode}"),
-                };
-                req.state::<Seen>().lines.push(what);
-                let stepped = if unwinding {
-                    if at == super::entry(req) && !super::catches(req, at) {
-                        return Flow::Resume(at);
-                    }
-                    crate::tier::unwind(req, at)
-                } else if at == super::entry(req) && opcode == "ZEND_RETURN" {
-                    return Flow::Resume(at);
-                } else {
-                    crate::tier::step(req, at)
-                };
-                match stepped {
-                    Ok(Stepped::Threw(frame)) => {
-                        at = frame;
-                        unwinding = true;
-                    }
-                    Ok(
-                        Stepped::Same(frame)
-                        | Stepped::Pushed(frame)
-                        | Stepped::Popped(frame)
-                        | Stepped::Moved(frame),
-                    ) => {
-                        at = frame;
-                        unwinding = false;
-                    }
-                    Ok(Stepped::Done) => return Flow::Continue,
-                    Err(fatal) => return Flow::Bail(fatal),
-                }
-            }
-        }
-
-        fn extension() -> Option<Extension> {
-            Some(seeing())
-        }
-    }
-
+    /// What `source` echoed under the shared debugging double
+    /// ([`Stepper`]), and where it stood before each handler.
     fn stepped(source: &str) -> (String, Vec<String>) {
-        seen(Engine::cli_builder().tier::<Stepper>(), source)
+        let engine = Engine::cli_builder()
+            .tier::<Stepper<false, false, true>>()
+            .build();
+        let dir = std::env::current_dir().expect("the test has a working directory");
+        let (served, kept) =
+            super::super::serve_kept::<Stepping>(&engine, &dir, b"Standard input code", source);
+        let kept = kept.expect("the stepper declared its state, and the request built it");
+        (served.stdout_text(), kept.seen)
     }
 
     /// Every opline of the main op array and of the function it calls
