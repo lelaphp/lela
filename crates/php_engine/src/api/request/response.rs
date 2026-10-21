@@ -213,6 +213,50 @@ impl OutputSink for Kept {
     }
 }
 
+/// What a test reads back of a [`Kept`] it lent a request
+/// ([`Engine::serve_into`](crate::engine::Engine::serve_into)).
+#[cfg(test)]
+impl Kept {
+    /// The body, as text.
+    pub(crate) fn body(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+
+    /// The calls beside the body, in the order the request made them.
+    pub(crate) fn aside(&self) -> &[Aside] {
+        &self.aside
+    }
+
+    /// The log's entries alone, one per call, as text.
+    pub(crate) fn log(&self) -> Vec<String> {
+        self.aside
+            .iter()
+            .filter_map(|aside| match aside {
+                Aside::Log(entry) => Some(String::from_utf8_lossy(entry).into_owned()),
+                Aside::Stderr(_) => None,
+            })
+            .collect()
+    }
+
+    /// The log as php's CLI writes it to stderr, `"%s\n"` per entry
+    /// (`sapi_cli_log_message`).
+    pub(crate) fn logged(&self) -> String {
+        self.log().into_iter().map(|entry| entry + "\n").collect()
+    }
+
+    /// The error stream alone, as a host with an `error_log` file would
+    /// have it, the log parted from it.
+    pub(crate) fn stderr(&self) -> String {
+        self.aside
+            .iter()
+            .filter_map(|aside| match aside {
+                Aside::Stderr(bytes) => Some(String::from_utf8_lossy(bytes)),
+                Aside::Log(_) => None,
+            })
+            .collect()
+    }
+}
+
 /// The sink, the `php_output` layer, the header callback, the
 /// connection's status and whether the host closed the response, whose
 /// fields no file but this one reads.

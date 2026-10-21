@@ -6231,60 +6231,10 @@ mod tests {
     use php_heap::{Fatal, FrameRef};
 
     use crate::api::abi::OnModify;
+    use crate::api::request::{Aside, Kept};
     use crate::observer::Untold;
     use crate::probe::{Asked, Probe};
     use crate::tier::Site;
-
-    /// One call the sink saw on a channel beside the body.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    enum Saw {
-        Log(Vec<u8>),
-        Stderr(Vec<u8>),
-    }
-
-    /// Everything the request wrote, kept: the body as `Capture` keeps
-    /// it behind the `test` feature, and the log and the error stream
-    /// as the calls the sink saw, in the order it saw them.
-    #[derive(Default)]
-    struct Kept {
-        body: Vec<u8>,
-        seen: Vec<Saw>,
-    }
-
-    impl Kept {
-        /// The log's entries alone, one per call.
-        fn log(&self) -> Vec<Vec<u8>> {
-            self.seen
-                .iter()
-                .filter_map(|saw| match saw {
-                    Saw::Log(entry) => Some(entry.clone()),
-                    Saw::Stderr(_) => None,
-                })
-                .collect()
-        }
-
-        /// The log as php's CLI writes it to stderr, `"%s\n"` per entry.
-        fn logged(&self) -> String {
-            let mut text = String::new();
-            for entry in self.log() {
-                text.push_str(&String::from_utf8_lossy(&entry));
-                text.push('\n');
-            }
-            text
-        }
-
-        /// The error stream alone, as a host with an `error_log` file
-        /// would have it, the log parted from it.
-        fn stderr(&self) -> String {
-            let mut text = String::new();
-            for saw in &self.seen {
-                if let Saw::Stderr(bytes) = saw {
-                    text.push_str(&String::from_utf8_lossy(bytes));
-                }
-            }
-            text
-        }
-    }
 
     /// Each known name stands at php's `zend_known_string_id` for it,
     /// and the engine's table answers it by position.
@@ -6312,21 +6262,6 @@ mod tests {
             assert_eq!(known.bytes(), bytes);
             let held = engine.shared.known(known).map(|s| s.bytes().to_vec());
             assert_eq!(held.as_deref(), Some(bytes));
-        }
-    }
-
-    impl OutputSink for Kept {
-        fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
-            self.body.extend_from_slice(bytes);
-            Ok(())
-        }
-        fn flush(&mut self) {}
-        fn send_headers(&mut self, _: &ResponseHead) {}
-        fn log(&mut self, entry: &[u8]) {
-            self.seen.push(Saw::Log(entry.to_vec()));
-        }
-        fn write_stderr(&mut self, bytes: &[u8]) {
-            self.seen.push(Saw::Stderr(bytes.to_vec()));
         }
     }
 
@@ -6388,7 +6323,7 @@ mod tests {
                 },
                 &mut sink,
             );
-            String::from_utf8_lossy(&sink.body).into_owned()
+            sink.body()
         };
         assert_eq!(dir_under("/srv/one"), "/srv/one");
         assert_eq!(dir_under("/srv/two"), "/srv/two");
@@ -6411,10 +6346,7 @@ mod tests {
     fn served(engine: &Engine, source: &str) -> (String, Observables) {
         let mut sink = Kept::default();
         let observables = engine.serve_into(description(source), &mut sink);
-        (
-            String::from_utf8_lossy(&sink.body).into_owned(),
-            observables,
-        )
+        (sink.body(), observables)
     }
 
     /// A unit compiled from source the host handed over is the request's
@@ -7167,7 +7099,7 @@ mod tests {
                 description("<?php\ndeclare(ticks=0): enddeclare;"),
                 &mut logged,
             );
-        assert!(logged.body.is_empty());
+        assert!(logged.body().is_empty());
         assert_eq!(
             logged.logged(),
             "PHP Parse error:  a `declare` in the alternative syntax this compiler cannot read yet in witness.php on line 2\n"
@@ -7182,7 +7114,7 @@ mod tests {
                 description("<?php\ndeclare(ticks=0): enddeclare;"),
                 &mut masked,
             );
-        assert!(masked.body.is_empty(), "E_PARSE is masked out");
+        assert!(masked.body().is_empty(), "E_PARSE is masked out");
         assert_eq!(observables.exit_code, 255, "the status is php's regardless");
     }
 
@@ -7231,7 +7163,7 @@ mod tests {
             .ini("error_reporting", "0")
             .build()
             .serve_into(description(&source), &mut masked);
-        assert!(masked.body.is_empty(), "E_COMPILE_ERROR is masked out");
+        assert!(masked.body().is_empty(), "E_COMPILE_ERROR is masked out");
         assert_eq!(observables.exit_code, 255, "the status is php's regardless");
 
         let (body, observables) = served(
@@ -7258,7 +7190,7 @@ mod tests {
             .build()
             .serve_into(description("<?php echo NAN;"), &mut displayed);
         assert_eq!(
-            String::from_utf8_lossy(&displayed.body),
+            displayed.body(),
             "\nWarning: unexpected NAN value was coerced to string in witness.php on line 1\nNAN"
         );
         assert!(
@@ -7272,7 +7204,7 @@ mod tests {
             .ini("log_errors", "1")
             .build()
             .serve_into(description("<?php echo NAN;"), &mut logged);
-        assert_eq!(String::from_utf8_lossy(&logged.body), "NAN");
+        assert_eq!(logged.body(), "NAN");
         assert_eq!(
             logged.logged(),
             "PHP Warning:  unexpected NAN value was coerced to string in witness.php on line 1\n"
@@ -7318,7 +7250,7 @@ mod tests {
             .build()
             .serve_into(description("<?php\necho NAN;"), &mut around);
         assert_eq!(
-            String::from_utf8_lossy(&around.body),
+            around.body(),
             format!("<PRE>\nWarning: {NAN_WARNING} in witness.php on line 2\n</PRE>NAN")
         );
         assert_eq!(
@@ -7341,7 +7273,7 @@ mod tests {
             .build()
             .serve_into(description("<?php\necho NAN;"), &mut html);
         assert_eq!(
-            String::from_utf8_lossy(&html.body),
+            html.body(),
             format!(
                 "<br />\n<b>Warning</b>:  {NAN_WARNING} in <b>witness.php</b> on line <b>2</b><br />\nNAN"
             )
@@ -7355,7 +7287,7 @@ mod tests {
             .build()
             .serve_into(description("<?php\necho NAN;"), &mut around);
         assert_eq!(
-            String::from_utf8_lossy(&around.body),
+            around.body(),
             format!(
                 "<PRE><br />\n<b>Warning</b>:  {NAN_WARNING} in <b>witness.php</b> on line <b>2</b><br />\n</PRE>NAN"
             )
@@ -7380,7 +7312,7 @@ mod tests {
             .build()
             .serve_into(description(source), &mut every);
         assert_eq!(
-            String::from_utf8_lossy(&every.body),
+            every.body(),
             format!("{}NAN{}NAN{}NAN", warning(2), warning(2), warning(3))
         );
 
@@ -7390,7 +7322,7 @@ mod tests {
             .build()
             .serve_into(description(source), &mut once_a_site);
         assert_eq!(
-            String::from_utf8_lossy(&once_a_site.body),
+            once_a_site.body(),
             format!("{}NANNAN{}NAN", warning(2), warning(3)),
             "the repeat on line 2 is dropped and the one on line 3 stands"
         );
@@ -7402,7 +7334,7 @@ mod tests {
             .build()
             .serve_into(description(source), &mut once);
         assert_eq!(
-            String::from_utf8_lossy(&once.body),
+            once.body(),
             format!("{}NANNANNAN", warning(2)),
             "the site no longer parts them, so one warning stands for all three"
         );
@@ -7426,7 +7358,7 @@ mod tests {
             .build()
             .serve_into(description("<?php\necho NAN;"), &mut fault);
         assert_eq!(
-            String::from_utf8_lossy(&fault.body),
+            fault.body(),
             format!(
                 "<?xml version=\"1.0\"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>42</int></value></member><member><name>faultString</name><value><string>Warning:{NAN_WARNING} in witness.php on line 2</string></value></member></struct></value></fault></methodResponse>NAN"
             )
@@ -7459,10 +7391,7 @@ mod tests {
                 },
                 &mut kept,
             );
-            (
-                String::from_utf8_lossy(&kept.body).into_owned(),
-                kept.stderr(),
-            )
+            (kept.body(), kept.stderr())
         };
         for host in ["cli", "cgi", "phpdbg"] {
             assert_eq!(
@@ -7502,10 +7431,7 @@ mod tests {
                 .build();
             let mut kept = Kept::default();
             engine.serve_into(description("<?php\necho NAN;"), &mut kept);
-            (
-                String::from_utf8_lossy(&kept.body).into_owned(),
-                kept.stderr(),
-            )
+            (kept.body(), kept.stderr())
         };
         let on_stderr = (
             String::from("NAN"),
@@ -7546,14 +7472,14 @@ mod tests {
             .ini("log_errors", "1")
             .build()
             .serve_into(description("<?php\necho NAN;"), &mut kept);
-        assert_eq!(String::from_utf8_lossy(&kept.body), "NAN");
+        assert_eq!(kept.body(), "NAN");
         assert_eq!(
-            kept.seen,
+            kept.aside(),
             vec![
-                Saw::Log(
+                Aside::Log(
                     format!("PHP Warning:  {NAN_WARNING} in witness.php on line 2").into_bytes()
                 ),
-                Saw::Stderr(
+                Aside::Stderr(
                     format!("Warning: {NAN_WARNING} in witness.php on line 2\n").into_bytes()
                 ),
             ]
@@ -7686,7 +7612,7 @@ mod tests {
                 },
                 &mut sink,
             );
-            assert_eq!(String::from_utf8_lossy(&sink.body), "shared");
+            assert_eq!(sink.body(), "shared");
             assert_eq!(observables.exit_code, 0);
         }
         assert_eq!(
@@ -7967,10 +7893,7 @@ mod tests {
                 },
                 &mut sink,
             );
-            (
-                String::from_utf8_lossy(&sink.body).into_owned(),
-                observables,
-            )
+            (sink.body(), observables)
         };
         let (body, observables) = serve("thrown.php");
         assert_eq!(body, "none\n");
@@ -8043,7 +7966,7 @@ mod tests {
             let mut sink = Kept::default();
             engine.serve_into(described(), &mut sink);
             assert_eq!(
-                String::from_utf8_lossy(&sink.body),
+                sink.body(),
                 format!(
                     "\nWarning: unexpected NAN value was coerced to string in {} on line 3\naNANz",
                     expanded.to_string_lossy()
@@ -8055,7 +7978,7 @@ mod tests {
             .ini("error_reporting", "0")
             .build()
             .serve_into(described(), &mut masked);
-        assert_eq!(String::from_utf8_lossy(&masked.body), "aNANz");
+        assert_eq!(masked.body(), "aNANz");
     }
 
     /// What `memory_get_usage()` reads (design §5.13) after a request
@@ -8109,11 +8032,10 @@ mod tests {
         }
         // The compiler's arena, the object store's table and the VM
         // stack's first page, and nothing else, before a line runs
-        // (design §5.4, §5.6, §5.13): `zend_arena_create(64 * 1024)`, 1024
-        // buckets of a pointer each, and `ZEND_VM_STACK_PAGE_SIZE`.
+        // ([`crate::test::STARTED`]).
         assert_eq!(
             started_at,
-            vec![65_536 + 8192 + 262_144, 65_536 + 8192 + 262_144],
+            vec![crate::test::STARTED, crate::test::STARTED],
             "every request starts where the one before it did"
         );
         assert_eq!(
@@ -8288,12 +8210,9 @@ mod tests {
             .ini("log_errors", "1")
             .build()
             .serve_into(description("<?php\nnope();"), &mut logged);
-        assert!(logged.body.is_empty(), "display_errors is off");
+        assert!(logged.body().is_empty(), "display_errors is off");
         assert_eq!(
-            logged
-                .log()
-                .first()
-                .map(|entry| String::from_utf8_lossy(entry).into_owned()),
+            logged.log().first().cloned(),
             observables.fatal,
             "what the log holds is the fatal, once"
         );
@@ -8304,7 +8223,7 @@ mod tests {
             .ini("error_reporting", "0")
             .build()
             .serve_into(description("<?php\nnope();"), &mut masked);
-        assert!(masked.body.is_empty(), "E_ERROR is masked out");
+        assert!(masked.body().is_empty(), "E_ERROR is masked out");
         assert!(masked.log().is_empty(), "log_errors is off");
     }
 
@@ -8325,9 +8244,8 @@ mod tests {
         assert_eq!(
             fatal.log(),
             vec![
-                b"PHP Fatal error:  Uncaught Error: Call to undefined function nope() \
-                   in witness.php:2\nStack trace:\n#0 {main}\n  thrown in witness.php on line 2"
-                    .to_vec()
+                "PHP Fatal error:  Uncaught Error: Call to undefined function nope() \
+                 in witness.php:2\nStack trace:\n#0 {main}\n  thrown in witness.php on line 2"
             ],
             "four lines, one call"
         );
@@ -8341,8 +8259,8 @@ mod tests {
         assert_eq!(
             warned.log(),
             vec![
-                format!("PHP Warning:  {NAN_WARNING} in witness.php on line 2").into_bytes(),
-                format!("PHP Warning:  {NAN_WARNING} in witness.php on line 3").into_bytes(),
+                format!("PHP Warning:  {NAN_WARNING} in witness.php on line 2"),
+                format!("PHP Warning:  {NAN_WARNING} in witness.php on line 3"),
             ],
             "two lines, two calls"
         );

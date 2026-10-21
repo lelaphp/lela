@@ -45,7 +45,7 @@ mod owners;
 mod periodic;
 mod pool;
 mod statements;
-mod stepped;
+pub(crate) mod stepped;
 #[cfg(debug_assertions)]
 mod storage;
 #[cfg(debug_assertions)]

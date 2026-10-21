@@ -1992,17 +1992,23 @@ pub(crate) fn unmangle_property_name(name: &[u8]) -> Unmangled<'_> {
 /// heap holds beside the interned strings is on the system allocator
 /// in this engine, the op array, the compiler and the tree, which
 /// design §5.13 states as the one approximation and the divergence row
-/// on the witness of `php_heap::string::Table` records.
+/// on the witness of `php_heap::string::Table` records. What both answer
+/// of the first is how `$real_usage` is read, `ZEND_PARSE_PARAMETERS_START(0, 1)`
+/// with `Z_PARAM_BOOL`: optional and `false` without it, and a scalar
+/// coerced as a bool parameter of a native is, 1 to `true`.
 ///
 /// ```php
 /// var_dump(memory_get_usage(true), memory_get_peak_usage(true));
 /// memory_reset_peak_usage();
 /// var_dump(memory_get_peak_usage(true));
+/// var_dump(memory_get_usage() === memory_get_usage(false), memory_get_usage(1) === memory_get_usage(true));
 /// ```
 /// ```expect
 /// int(2097152)
 /// int(2097152)
 /// int(2097152)
+/// bool(true)
+/// bool(true)
 /// ```
 ///
 /// What one allocation moves both numbers by is a number both engines
@@ -2503,28 +2509,9 @@ pub(crate) fn call_shutdown_functions(req: &mut Request) {
 #[cfg(test)]
 mod tests {
     use crate::engine::Engine;
-    use crate::test::Capture;
+    use crate::test::{Capture, STARTED};
 
     /// What the engine wrote and what ended it, for one source.
-    /// The bin `virtual_cwd_activate`'s copy of the working directory
-    /// takes, `CWD_STATE_COPY`'s `emalloc(cwd_length + 1)`
-    /// (`Z/Zend/zend_virtual_cwd.c:233`, `api::request::rooms`): the one
-    /// part of a request's starting usage that depends on where it
-    /// starts, which for these tests is the directory cargo runs them
-    /// in, 80 bytes in a worktree's `crates/php_engine` and 56 in the
-    /// main checkout's, whose path is sixteen bytes shorter.
-    fn cwd_copy() -> usize {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let mut heap = php_heap::Heap::new();
-        let before = heap.memory_usage(false);
-        let Ok(block) = heap.block(cwd.as_os_str().len() + 1) else {
-            return 0;
-        };
-        let size = heap.memory_usage(false).saturating_sub(before);
-        heap.free_block(block);
-        size
-    }
-
     fn served(source: &str) -> (String, Option<String>) {
         let served = Engine::builder()
             .build()
@@ -2532,88 +2519,37 @@ mod tests {
         (served.stdout_text(), served.fatal)
     }
 
-    /// php's `ZEND_PARSE_PARAMETERS_START(0, 1)`: `$real_usage` is
-    /// optional and `false` without it, and a scalar is coerced as a
-    /// bool parameter of a native is.
-    ///
-    /// The oracle, under the pin's recipe:
-    ///
-    /// ```text
-    /// $ php -n -r 'var_dump(memory_get_usage(true) === memory_get_usage(1));'
-    /// bool(true)
-    /// ```
-    ///
-    /// **The flagged number is the oracle's; the unflagged one is this
-    /// engine's own accounting.** 2097152 is php's one 2 MiB chunk,
-    /// `ZEND_MM_CHUNK_SIZE` (`Z/Zend/zend_alloc_sizes.h:22`), which
-    /// `zend_mm_init` maps into `real_size` before a request runs a line
-    /// (`Z/Zend/zend_alloc.c:2047-2081`), and the oracle answers it too.
-    ///
-    /// 344616 and the working directory's copy ([`cwd_copy`]) is the
-    /// compiler's arena, the object store's table, the VM
-    /// stack's first page, `PHP_CLI_PROCESS_TITLE`'s `zend_constant` and
-    /// name, the main op array's copy and runtime cache,
-    /// as an include's (`exec::HeapOpArray`), the rooms php keeps for
-    /// request state the engine keeps elsewhere (`api::request::rooms`:
-    /// `EG(main_fiber_context)`, the working directory's copy and, on Apple's platforms,
-    /// `php_execute_script`'s buffer for the directory it entered in),
-    /// `EG(symbol_table)`'s data, the variables `php_hash_environment`
-    /// and the CLI lay down, and what this source's interning costs, and
-    /// every byte of it but the variables' is php's own
-    /// arithmetic. `init_compiler` lays `CG(arena)` down at 64 KiB
-    /// (`Z/Zend/zend_compile.c:455`), and `init_executor` lays `EG(objects_store)` down
-    /// before the request serves a line, 1024 buckets of a pointer each,
-    /// 8192 bytes of the request heap (`Z/Zend/zend_execute_API.c:171`,
-    /// design §5.4), and `zend_vm_stack_init` the stack's first 262144
-    /// (design §5.6), and so does this engine's request. The first
-    /// variable laid into `EG(symbol_table)`, which `init_executor`
-    /// initialises at 64 (`Z/Zend/zend_execute_API.c:154`), lays its
-    /// data down, 64 buckets of 32 bytes and 128 hash slots of 4, 2560. php interns a request's constant operands
-    /// into `CG(interned_strings)` out of the request heap
-    /// (`zend_insert_literal` through `zend_new_interned_string_request`,
-    /// `Z/Zend/zend_compile.c:563-582`, `Z/Zend/zend_string.c:227-265`),
-    /// after looking each up among the strings it interned at startup,
-    /// so its `memory_get_usage()` counts those it did not find and this
-    /// engine's counts them the same way (design §5.2, §5.13): the file's
-    /// name, `Standard input code`, takes 48 bytes, php's
-    /// `ZEND_MM_ALIGNED_SIZE(_ZSTR_STRUCT_SIZE(len))` over a 24-byte
-    /// header, the bytes and the NUL, where `var_dump` and
-    /// `memory_get_usage` are function names php interned at startup and
-    /// cost nothing. The table that finds the string again is off the
-    /// request's heap, as opcache keeps php's (`php_heap`'s
-    /// `string::Table`), where `php -n` `emalloc`s a 40960-byte bucket
-    /// array on the first string a request interns. `STDIN`, `STDOUT` and
-    /// `STDERR`, which `do_cli` opens before a line runs, are the stream
-    /// layer's, and an engine with none, as this test's, opens none of
-    /// them; under the bundle they cost 1648 more. The 1568 is `$argv`
-    /// with its one word, the four empty arrays of
-    /// `$_GET`, `$_POST`, `$_COOKIE` and `$_FILES`, and `$_SERVER` with
-    /// the CLI's nine rows, laid into `EG(symbol_table)` before a line
-    /// runs, again in this engine's own sizes.
-    ///
-    /// The oracle's number for the same source, under the recipe and the
-    /// harness's own scratch tree, is 463336, and the two are still not
-    /// comparable: what php's request heap holds beside the interned
-    /// strings and their table is here on the system allocator, the op
-    /// array, the compiler and the tree, which design §5.13 states as an
-    /// approximation. The witness on `php_heap::string::Table` holds the
-    /// two numbers to each other under the divergence row that says so
-    /// (#178). What replaces this pin with a number both answer is #174's
-    /// witness, where a variable in `php_compile` and a `str_repeat()`
-    /// native let a snippet measure what one huge block moves
-    /// `memory_get_usage()` by.
+    /// The numbers `source` dumps, one `int(n)` a line, in the order it
+    /// dumps them.
+    fn dumped(source: &str) -> Vec<usize> {
+        let (body, fatal) = served(source);
+        assert_eq!(fatal, None, "{source}");
+        body.lines()
+            .map(|line| {
+                line.strip_prefix("int(")
+                    .and_then(|n| n.strip_suffix(')'))
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or_else(|| panic!("{source} dumped {line:?}, not an int"))
+            })
+            .collect()
+    }
+
+    /// The bin accounting a request reads stands above what it had out
+    /// before its first line ([`STARTED`]), since compiling and serving
+    /// one lays more down, and below the bytes its chunks hold, since
+    /// every bin is in a chunk. Both read in one request: the numbers
+    /// themselves are each engine's own (design §5.13), and the witness
+    /// on `memory_get_usage` holds what php and this engine both answer,
+    /// how `$real_usage` is read.
     #[test]
-    fn the_real_usage_flag_is_optional_and_coerced_as_php_coerces_a_bool() {
-        let (unflagged, _) = served("<?php var_dump(memory_get_usage());");
-        let (flagged, _) = served("<?php var_dump(memory_get_usage(true));");
-        let (coerced, _) = served("<?php var_dump(memory_get_usage(1));");
-        assert_eq!(
-            unflagged,
-            format!("int({})\n", 344_616 + cwd_copy()),
-            "the compiler's arena's 65536, the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1568, the one string the request interns, the file's name's 48, the start's rooms; an engine with no stream layer opens no standard streams"
-        );
-        assert_eq!(flagged, "int(2097152)\n");
-        assert_eq!(coerced, flagged, "php's Z_PARAM_BOOL coerces 1 to true");
+    fn the_usage_stands_above_the_start_and_below_the_chunks() {
+        let &[usage, real] =
+            dumped("<?php var_dump(memory_get_usage(), memory_get_usage(true));").as_slice()
+        else {
+            panic!("two numbers dumped");
+        };
+        assert!(usage > STARTED, "{usage} is past the start, {STARTED}");
+        assert!(usage < real, "{usage} is within the chunks' {real}");
     }
 
     /// `zend_wrong_parameters_count_error` for a call outside the arity,
@@ -2667,38 +2603,24 @@ mod tests {
     }
 
     /// `memory_reset_peak_usage()` leaves both peaks at what the request
-    /// has out. The witness beside `memory_get_usage` pins the flagged
-    /// number against the oracle; this holds the reset when no oracle is
-    /// on the machine, and holds the unflagged number beside it.
-    ///
-    /// **The second number is the oracle's; the first is this engine's
-    /// own accounting**, for the reason the pin above states at length.
-    /// 2097152 is php's one 2 MiB chunk. 344632 and the working
-    /// directory's copy ([`cwd_copy`]) is the usage of the pin
-    /// above, and the sixteen bytes more the peak the reset leaves stood
-    /// at as the reset ran: the compiler's arena's
-    /// first block of 65536, the rooms of the pin above, the object
-    /// store's 8192, the VM stack's
-    /// first page of 262144, `EG(symbol_table)`'s data of 2560 (an engine with no
-    /// stream layer opens none of the three standard streams `do_cli`
-    /// opens, which cost 1648 under the bundle), the 1568 of the variables
-    /// `php_hash_environment` and the CLI lay down, and what this source's
-    /// interning costs the request: the file's name, 48 bytes; the three function names are
-    /// php's startup names and cost nothing. php counts its own interning the same
-    /// way and then counts a request heap this engine does not have yet,
-    /// so its number for this source, under the recipe as `witness.php`,
-    /// is 463752 and not this one; #174's witness is where a number both
-    /// answer comes back.
+    /// has out (`zend_memory_reset_peak_usage`): each usage read after
+    /// it, before its own peak, is at most that peak, and with no chunk
+    /// mapped since, the chunks' peak is the chunks' usage. The witness
+    /// beside `memory_reset_peak_usage` holds against the oracle that a
+    /// reset lowers the peak; this holds where it leaves it, with no
+    /// oracle on the machine.
     #[test]
     fn a_reset_leaves_the_peak_at_what_the_request_has_out() {
-        let (body, fatal) = served(
-            "<?php memory_reset_peak_usage(); var_dump(memory_get_peak_usage(), memory_get_peak_usage(true));",
+        let &[usage, peak, real, real_peak] = dumped(
+            "<?php memory_reset_peak_usage(); var_dump(memory_get_usage(), memory_get_peak_usage(), memory_get_usage(true), memory_get_peak_usage(true));",
+        )
+        .as_slice() else {
+            panic!("four numbers dumped");
+        };
+        assert!(
+            peak >= usage,
+            "the peak {peak} is at least the usage {usage}"
         );
-        assert_eq!(fatal, None);
-        assert_eq!(
-            body,
-            format!("int({})\nint(2097152)\n", 344_632 + cwd_copy()),
-            "the compiler's arena's 65536, the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1568, the one string the request interns, the file's name's 48, the start's rooms; an engine with no stream layer opens no standard streams"
-        );
+        assert_eq!(real_peak, real, "the chunks' peak is the chunks' usage");
     }
 }

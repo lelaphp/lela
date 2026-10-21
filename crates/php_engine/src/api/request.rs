@@ -132,6 +132,8 @@ mod resources;
 pub use resources::{ResourceDtor, Resources};
 mod response;
 pub use response::Response;
+#[cfg(test)]
+pub(crate) use response::{Aside, Kept};
 mod rooms;
 pub(crate) mod ropes;
 #[cfg(debug_assertions)]
