@@ -1172,5 +1172,5 @@ fn the_week_section_and_its_row_are_refused() {
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).
-#[path = "tracked/status.rs"]
+#[path = "tracked/status/mod.rs"]
 mod tracked;

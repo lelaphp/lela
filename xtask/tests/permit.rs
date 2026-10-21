@@ -1832,5 +1832,5 @@ fn denied(manifest: &Manifest, root: &Path, line: &str) -> bool {
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).
-#[path = "tracked/permit.rs"]
+#[path = "tracked/permit/mod.rs"]
 mod tracked;
