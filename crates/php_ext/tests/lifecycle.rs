@@ -37,7 +37,7 @@ fn an_extension_declared_through_the_facade_is_handed_every_phase_in_order() {
     rec.mark("served");
     drop(engine);
     rec.mark("dropped");
-    assert_eq!(served.stdout, b"ran");
+    assert_eq!(served.stdout_text(), "ran");
     assert_eq!(
         rec.events().0,
         [
@@ -93,7 +93,7 @@ fn an_engine_start_declared_through_the_facade_refuses_the_engine() {
     let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
     rec.mark("served");
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "\nWarning: test_ext_0 refuses to start under 'cli' in Unknown on line 0\n\nFatal error: Unable to start test_ext_0 module in Unknown on line 0\n"
     );
     assert_eq!(served.exit_code, -2);
