@@ -248,19 +248,35 @@ fn the_string_offset_spellings_and_the_variable_variable_are_php_s() {
 /// `IS_UNUSED` receiver, `FETCH_OBJ_R THIS`, as `"{$this->p}"` does.
 #[test]
 fn this_s_property_in_a_string_is_fetched_off_this() {
-    let dump = dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-5
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+
+        C::m:
+             ; (lines=7, args=0, vars=0, tmps=5)
+             ; (before optimizer)
+             ; :3-3
+             ; return  [] RANGE[0..0]
+        0000 T0 = FETCH_OBJ_R THIS string("p")
+        0001 T3 = ROPE_INIT 3 T0
+        0002 T3 = ROPE_ADD 1 T3 string(" ")
+        0003 T1 = FETCH_OBJ_R THIS string("p")
+        0004 T2 = ROPE_END 2 T3 T1
+        0005 RETURN T2
+        0006 RETURN null
+        LIVE RANGES:
+             3: 0001 - 0004 (rope)
+    "#]]
+    .assert_eq(&dump_of(
         b"<?php
 class C {
     public function m() { return \"$this->p {$this->p}\"; }
 }
 ",
-    );
-    let m = "0000 T0 = FETCH_OBJ_R THIS string(\"p\")\n\
-             0001 T3 = ROPE_INIT 3 T0\n\
-             0002 T3 = ROPE_ADD 1 T3 string(\" \")\n\
-             0003 T1 = FETCH_OBJ_R THIS string(\"p\")\n\
-             0004 T2 = ROPE_END 2 T3 T1\n\
-             0005 RETURN T2\n\
-             0006 RETURN null\n";
-    assert!(dump.contains(m), "php's C::m, {dump}");
+    ));
 }

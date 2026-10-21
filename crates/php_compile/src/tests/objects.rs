@@ -207,7 +207,76 @@ fn a_method_of_a_namespaced_class_is_a_known_callee_in_its_namespace() {
 /// it compiled.
 #[test]
 fn a_call_the_class_being_compiled_pins_down_is_do_ucall() {
-    let dump = dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-15
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+
+        C::p:
+             ; (lines=2, args=1, vars=1, tmps=0)
+             ; (before optimizer)
+             ; :3-3
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV 1
+        0001 RETURN null
+
+        C::f:
+             ; (lines=2, args=1, vars=1, tmps=0)
+             ; (before optimizer)
+             ; :4-4
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV 1
+        0001 RETURN null
+
+        C::g:
+             ; (lines=2, args=1, vars=1, tmps=0)
+             ; (before optimizer)
+             ; :5-5
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV 1
+        0001 RETURN null
+
+        C::s:
+             ; (lines=6, args=1, vars=1, tmps=1)
+             ; (before optimizer)
+             ; :6-6
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV 1
+        0001 INIT_STATIC_METHOD_CALL 1 string("C") string("s")
+        0002 SEND_VAR CV0($a) 1
+        0003 V1 = DO_UCALL
+        0004 RETURN V1
+        0005 RETURN null
+
+        C::m:
+             ; (lines=18, args=1, vars=1, tmps=5)
+             ; (before optimizer)
+             ; :7-13
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV 1
+        0001 INIT_METHOD_CALL 1 THIS string("p")
+        0002 SEND_VAR CV0($a) 1
+        0003 DO_UCALL
+        0004 INIT_METHOD_CALL 1 THIS string("f")
+        0005 SEND_REF CV0($a) 1
+        0006 DO_UCALL
+        0007 INIT_METHOD_CALL 1 THIS string("g")
+        0008 SEND_VAR_EX CV0($a) 1
+        0009 DO_FCALL
+        0010 INIT_STATIC_METHOD_CALL 1 (self) (exception) string("s")
+        0011 SEND_VAL int(1) 1
+        0012 DO_UCALL
+        0013 INIT_METHOD_CALL 1 THIS string("m")
+        0014 SEND_VAR_EX CV0($a) 1
+        0015 V5 = DO_FCALL
+        0016 RETURN V5
+        0017 RETURN null
+    "#]]
+    .assert_eq(&dump_of(
         b"<?php
 class C {
     private function p($a) {}
@@ -223,33 +292,7 @@ class C {
     }
 }
 ",
-    );
-    let s = "0000 CV0($a) = RECV 1\n\
-             0001 INIT_STATIC_METHOD_CALL 1 string(\"C\") string(\"s\")\n\
-             0002 SEND_VAR CV0($a) 1\n\
-             0003 V1 = DO_UCALL\n\
-             0004 RETURN V1\n\
-             0005 RETURN null\n";
-    let m = "0000 CV0($a) = RECV 1\n\
-             0001 INIT_METHOD_CALL 1 THIS string(\"p\")\n\
-             0002 SEND_VAR CV0($a) 1\n\
-             0003 DO_UCALL\n\
-             0004 INIT_METHOD_CALL 1 THIS string(\"f\")\n\
-             0005 SEND_REF CV0($a) 1\n\
-             0006 DO_UCALL\n\
-             0007 INIT_METHOD_CALL 1 THIS string(\"g\")\n\
-             0008 SEND_VAR_EX CV0($a) 1\n\
-             0009 DO_FCALL\n\
-             0010 INIT_STATIC_METHOD_CALL 1 (self) (exception) string(\"s\")\n\
-             0011 SEND_VAL int(1) 1\n\
-             0012 DO_UCALL\n\
-             0013 INIT_METHOD_CALL 1 THIS string(\"m\")\n\
-             0014 SEND_VAR_EX CV0($a) 1\n\
-             0015 V5 = DO_FCALL\n\
-             0016 RETURN V5\n\
-             0017 RETURN null\n";
-    assert!(dump.contains(s), "php's C::s, {dump}");
-    assert!(dump.contains(m), "php's C::m, {dump}");
+    ));
 }
 
 /// `zend_compile_static_call` over a class bound early (#2016):
@@ -260,24 +303,43 @@ class C {
 /// method inherited stays `DO_FCALL`.
 #[test]
 fn a_static_call_to_an_inherited_method_is_do_ucall() {
-    let dump = dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=6, args=0, vars=1, tmps=2)
+             ; (before optimizer)
+             ; :1-6
+             ; return  [] RANGE[0..0]
+        0000 INIT_STATIC_METHOD_CALL 1 string("B") string("foo")
+        0001 SEND_REF CV0($x) 1
+        0002 DO_UCALL
+        0003 INIT_STATIC_METHOD_CALL 0 string("B") string("p")
+        0004 DO_FCALL
+        0005 RETURN int(1)
+
+        A::foo:
+             ; (lines=2, args=1, vars=1, tmps=0)
+             ; (before optimizer)
+             ; :2-2
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV 1
+        0001 RETURN null
+
+        A::p:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :2-2
+             ; return  [] RANGE[0..0]
+        0000 RETURN null
+    "#]]
+    .assert_eq(&dump_of(
         b"<?php
 class A { static function foo(&$a) {} private static function p() {} }
 class B extends A {}
 B::foo($x);
 B::p();
 ",
-    );
-    assert!(
-        dump.contains(
-            "0000 INIT_STATIC_METHOD_CALL 1 string(\"B\") string(\"foo\")\n\
-             0001 SEND_REF CV0($x) 1\n\
-             0002 DO_UCALL\n\
-             0003 INIT_STATIC_METHOD_CALL 0 string(\"B\") string(\"p\")\n\
-             0004 DO_FCALL\n"
-        ),
-        "php's $_main, {dump}"
-    );
+    ));
 }
 
 /// `zend_get_compatible_func_or_null`: a public method of a class

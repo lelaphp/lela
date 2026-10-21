@@ -11,32 +11,42 @@ use super::*;
 /// `VERIFY_NEVER_TYPE`.
 #[test]
 fn an_arrow_function_returning_never_compiles_its_body_as_a_statement() {
-    let dump = dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=5, args=0, vars=2, tmps=4)
+             ; (before optimizer)
+             ; :1-4
+             ; return  [] RANGE[0..0]
+        0000 T2 = DECLARE_LAMBDA_FUNCTION 0
+        0001 ASSIGN CV0($a) T2
+        0002 T4 = DECLARE_LAMBDA_FUNCTION 1
+        0003 ASSIGN CV1($b) T4
+        0004 RETURN int(1)
+
+        {closure::2}:
+             ; (lines=5, args=0, vars=0, tmps=2)
+             ; (before optimizer)
+             ; :2-2
+             ; return  [] RANGE[0..0]
+        0000 V0 = NEW 1 string("Exception")
+        0001 SEND_VAL_EX string("Here") 1
+        0002 DO_FCALL
+        0003 THROW V0
+        0004 VERIFY_NEVER_TYPE
+        LIVE RANGES:
+             0: 0001 - 0003 (new)
+
+        {closure::3}:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :3-3
+             ; return  [] RANGE[0..0]
+        0000 VERIFY_NEVER_TYPE
+    "#]]
+    .assert_eq(&dump_of(
         b"<?php\n$a = fn(): never => throw new Exception(\"Here\");\n$b = fn(): never => 42;\n",
-    );
-    let closures: Vec<&str> = dump.split("\n\n").skip(1).collect();
-    assert_eq!(closures.len(), 2, "{dump}");
-    assert!(
-        closures[0].ends_with(
-            "     ; (lines=5, args=0, vars=0, tmps=2)\n\
-             \x20    ; (before optimizer)\n     ; :2-2\n     ; return  [] RANGE[0..0]\n\
-             0000 V0 = NEW 1 string(\"Exception\")\n\
-             0001 SEND_VAL_EX string(\"Here\") 1\n\
-             0002 DO_FCALL\n\
-             0003 THROW V0\n\
-             0004 VERIFY_NEVER_TYPE\n\
-             LIVE RANGES:\n     0: 0001 - 0003 (new)"
-        ),
-        "{dump}"
-    );
-    assert!(
-        closures[1].ends_with(
-            "     ; (lines=1, args=0, vars=0, tmps=0)\n\
-             \x20    ; (before optimizer)\n     ; :3-3\n     ; return  [] RANGE[0..0]\n\
-             0000 VERIFY_NEVER_TYPE\n"
-        ),
-        "{dump}"
-    );
+    ));
 }
 
 /// `zend_compile_func_decl` as the oracle at 8.5.9 dumps it under
@@ -508,51 +518,108 @@ $f = fn (): float => 1.5;
 /// `ZEND_RETURNS_FUNCTION`.
 #[test]
 fn a_by_reference_parameter_is_sent_by_ref_as_php_emits_it() {
-    let cases: &[(&[u8], &str)] = &[
+    let cases: &[(&[u8], Expect)] = &[
         (
             b"<?php function f(&$x) {} $a = 1; f($a);",
-            "0000 ASSIGN CV0($a) int(1)\n\
-             0001 INIT_FCALL 1 96 string(\"f\")\n\
-             0002 SEND_REF CV0($a) 1\n\
-             0003 DO_UCALL\n\
-             0004 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=5, args=0, vars=1, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ASSIGN CV0($a) int(1)
+                0001 INIT_FCALL 1 96 string("f")
+                0002 SEND_REF CV0($a) 1
+                0003 DO_UCALL
+                0004 RETURN int(1)
+
+                f:
+                     ; (lines=2, args=1, vars=1, tmps=0)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 CV0($x) = RECV 1
+                0001 RETURN null
+            "#]],
         ),
         (
             b"<?php function f(&...$r) {} $a = 1; f($a, $a);",
-            "0000 ASSIGN CV0($a) int(1)\n\
-             0001 INIT_FCALL 2 128 string(\"f\")\n\
-             0002 SEND_REF CV0($a) 1\n\
-             0003 SEND_REF CV0($a) 2\n\
-             0004 DO_UCALL\n\
-             0005 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=6, args=0, vars=1, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ASSIGN CV0($a) int(1)
+                0001 INIT_FCALL 2 128 string("f")
+                0002 SEND_REF CV0($a) 1
+                0003 SEND_REF CV0($a) 2
+                0004 DO_UCALL
+                0005 RETURN int(1)
+
+                f:
+                     ; (lines=2, args=0, vars=1, tmps=0)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 CV0($r) = RECV_VARIADIC 1
+                0001 RETURN null
+            "#]],
         ),
         (
             b"<?php function f(&$x) {} f(1);",
-            "0000 INIT_FCALL 1 96 string(\"f\")\n\
-             0001 SEND_VAL_EX int(1) 1\n\
-             0002 DO_UCALL\n\
-             0003 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 INIT_FCALL 1 96 string("f")
+                0001 SEND_VAL_EX int(1) 1
+                0002 DO_UCALL
+                0003 RETURN int(1)
+
+                f:
+                     ; (lines=2, args=1, vars=1, tmps=0)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 CV0($x) = RECV 1
+                0001 RETURN null
+            "#]],
         ),
         (
             b"<?php function &f(&$x) { return $x; } $a = 1; $b = &f($a);",
-            "0000 ASSIGN CV0($a) int(1)\n\
-             0001 INIT_FCALL 1 96 string(\"f\")\n\
-             0002 SEND_REF CV0($a) 1\n\
-             0003 V3 = DO_UCALL\n\
-             0004 ASSIGN_REF (function) CV1($b) V3\n\
-             0005 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=6, args=0, vars=2, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ASSIGN CV0($a) int(1)
+                0001 INIT_FCALL 1 96 string("f")
+                0002 SEND_REF CV0($a) 1
+                0003 V3 = DO_UCALL
+                0004 ASSIGN_REF (function) CV1($b) V3
+                0005 RETURN int(1)
+
+                f:
+                     ; (lines=3, args=1, vars=1, tmps=0)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 CV0($x) = RECV 1
+                0001 RETURN_BY_REF CV0($x)
+                0002 RETURN_BY_REF (function) null
+            "#]],
         ),
     ];
-    for (source, oplines) in cases {
-        let dumped = dump_of(source);
-        let (main, _) = dumped
-            .split_once("\n\nf:")
-            .expect("the main op array, then f's");
-        assert!(
-            main.trim_end().ends_with(oplines.trim_end()),
-            "{}\n{dumped}",
-            String::from_utf8_lossy(source)
-        );
+    for (source, expected) in cases {
+        expected.assert_eq(&dump_of(source));
     }
 }
 
@@ -561,13 +628,23 @@ fn a_by_reference_parameter_is_sent_by_ref_as_php_emits_it() {
 /// which carries `ZEND_RETURNS_FUNCTION` as php's does.
 #[test]
 fn a_by_reference_return_is_return_by_ref_as_php_emits_it() {
-    let dumped = dump_of(b"<?php function &f(&$x) { return $x; }");
-    assert!(
-        dumped.trim_end().ends_with(
-            "0000 CV0($x) = RECV 1\n\
-             0001 RETURN_BY_REF CV0($x)\n\
-             0002 RETURN_BY_REF (function) null"
-        ),
-        "{dumped}"
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+
+        f:
+             ; (lines=3, args=1, vars=1, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 CV0($x) = RECV 1
+        0001 RETURN_BY_REF CV0($x)
+        0002 RETURN_BY_REF (function) null
+    "#]]
+    .assert_eq(&dump_of(b"<?php function &f(&$x) { return $x; }"));
 }

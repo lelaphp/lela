@@ -222,25 +222,42 @@ fn a_while_is_the_same_shape_and_the_body_keeps_its_lines() {
 /// temporary.
 #[test]
 fn foreach_over_this_by_reference_fetches_it_into_a_var() {
-    let dump = dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-5
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+
+        C::g:
+             ; (lines=11, args=0, vars=1, tmps=4)
+             ; (before optimizer)
+             ; :3-3
+             ; return  [] RANGE[0..0]
+        0000 V1 = FETCH_THIS
+        0001 V2 = FE_RESET_RW V1 0004
+        0002 FE_FETCH_RW V2 CV0($v) 0004
+        0003 JMP 0002
+        0004 FE_FREE V2
+        0005 T3 = FETCH_THIS
+        0006 V4 = FE_RESET_R T3 0009
+        0007 FE_FETCH_R V4 CV0($v) 0009
+        0008 JMP 0007
+        0009 FE_FREE V4
+        0010 RETURN null
+        LIVE RANGES:
+             2: 0002 - 0004 (loop)
+             4: 0007 - 0009 (loop)
+    "#]]
+    .assert_eq(&dump_of(
         b"<?php
 class C {
     public function g() { foreach ($this as &$v) {} foreach ($this as $v) {} }
 }
 ",
-    );
-    let g = "0000 V1 = FETCH_THIS\n\
-             0001 V2 = FE_RESET_RW V1 0004\n\
-             0002 FE_FETCH_RW V2 CV0($v) 0004\n\
-             0003 JMP 0002\n\
-             0004 FE_FREE V2\n\
-             0005 T3 = FETCH_THIS\n\
-             0006 V4 = FE_RESET_R T3 0009\n\
-             0007 FE_FETCH_R V4 CV0($v) 0009\n\
-             0008 JMP 0007\n\
-             0009 FE_FREE V4\n\
-             0010 RETURN null\n";
-    assert!(dump.contains(g), "php's C::g, {dump}");
+    ));
 }
 
 /// #301's program under the oracle's `[regime.dump]`: `foreach` as

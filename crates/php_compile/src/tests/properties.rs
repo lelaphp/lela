@@ -211,40 +211,62 @@ fn what_stands_beside_a_static_property_read_is_refused_as_not_yet_read() {
 /// numbered after the delayed fetches, and `OP_DATA` carries it.
 #[test]
 fn an_assignment_to_self_through_a_property_reads_the_value_first() {
-    let dump = dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=13, args=0, vars=1, tmps=10)
+             ; (before optimizer)
+             ; :1-5
+             ; return  [] RANGE[0..0]
+        0000 V1 = NEW 0 string("stdClass")
+        0001 DO_FCALL
+        0002 ASSIGN CV0($a) V1
+        0003 T6 = QM_ASSIGN CV0($a)
+        0004 V4 = FETCH_OBJ_W (dim write) CV0($a) string("x")
+        0005 ASSIGN_DIM V4 NEXT
+        0006 OP_DATA T6
+        0007 T10 = QM_ASSIGN CV0($a)
+        0008 V7 = FETCH_DIM_W CV0($a) int(0)
+        0009 V8 = FETCH_OBJ_W (dim write) V7 string("p")
+        0010 ASSIGN_DIM V8 int(1)
+        0011 OP_DATA T10
+        0012 RETURN int(1)
+        LIVE RANGES:
+             1: 0001 - 0002 (new)
+             6: 0004 - 0005 (tmp/var)
+             10: 0008 - 0010 (tmp/var)
+    "#]]
+    .assert_eq(&dump_of(
         b"<?php
 $a = new stdClass;
 $a->x[] = $a;
 $a[0]->p[1] = $a;
 ",
-    );
-    let main = "0003 T6 = QM_ASSIGN CV0($a)\n\
-                0004 V4 = FETCH_OBJ_W (dim write) CV0($a) string(\"x\")\n\
-                0005 ASSIGN_DIM V4 NEXT\n\
-                0006 OP_DATA T6\n\
-                0007 T10 = QM_ASSIGN CV0($a)\n\
-                0008 V7 = FETCH_DIM_W CV0($a) int(0)\n\
-                0009 V8 = FETCH_OBJ_W (dim write) V7 string(\"p\")\n\
-                0010 ASSIGN_DIM V8 int(1)\n\
-                0011 OP_DATA T10\n\
-                0012 RETURN int(1)\n";
-    assert!(dump.contains(main), "php's main, {dump}");
-    // `zend_is_variable` takes no call, so the walk stops at
-    // `$a->m()`, and a `static` property's class is walked into.
-    let dump = dump_of(b"<?php\n$a->m()->x[0] = $a;\n$a::$s[0] = $a;\n");
-    let main = "0000 INIT_METHOD_CALL 0 CV0($a) string(\"m\")\n\
-                0001 V1 = DO_FCALL\n\
-                0002 V1 = SEPARATE V1\n\
-                0003 V2 = FETCH_OBJ_W (dim write) V1 string(\"x\")\n\
-                0004 ASSIGN_DIM V2 int(0)\n\
-                0005 OP_DATA CV0($a)\n\
-                0006 V4 = FETCH_CLASS (exception) CV0($a)\n\
-                0007 T7 = QM_ASSIGN CV0($a)\n\
-                0008 V5 = FETCH_STATIC_PROP_W (dim write) string(\"s\") V4\n\
-                0009 ASSIGN_DIM V5 int(0)\n\
-                0010 OP_DATA T7\n\
-                0011 RETURN int(1)\n";
-    assert!(dump.contains(main), "php's main, {dump}");
+    ));
+    expect![[r#"
+
+        $_main:
+             ; (lines=12, args=0, vars=1, tmps=7)
+             ; (before optimizer)
+             ; :1-4
+             ; return  [] RANGE[0..0]
+        0000 INIT_METHOD_CALL 0 CV0($a) string("m")
+        0001 V1 = DO_FCALL
+        0002 V1 = SEPARATE V1
+        0003 V2 = FETCH_OBJ_W (dim write) V1 string("x")
+        0004 ASSIGN_DIM V2 int(0)
+        0005 OP_DATA CV0($a)
+        0006 V4 = FETCH_CLASS (exception) CV0($a)
+        0007 T7 = QM_ASSIGN CV0($a)
+        0008 V5 = FETCH_STATIC_PROP_W (dim write) string("s") V4
+        0009 ASSIGN_DIM V5 int(0)
+        0010 OP_DATA T7
+        0011 RETURN int(1)
+        LIVE RANGES:
+             1: 0002 - 0003 (tmp/var)
+             7: 0008 - 0009 (tmp/var)
+    "#]]
+    .assert_eq(&dump_of(b"<?php\n$a->m()->x[0] = $a;\n$a::$s[0] = $a;\n"));
 }
 
 /// `zend_delayed_compile_prop` as the oracle at 8.5.9 dumps it under
