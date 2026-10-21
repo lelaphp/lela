@@ -76,7 +76,7 @@ loop at 0, loop, interrupt exit 23
   -> #26 f0.CV17 [undef, ref, any]
 end: back to 0
 exit 0: f0 0045 plain
-exit 1: f0 0046 plain f0.T40=false
+exit 1: f0 0047 plain
 exit 2: f0 0028 plain
 exit 3: f0 0029 plain
 exit 4: f0 0029 plain f0.T25:double
@@ -96,6 +96,6 @@ exit 17: f0 0038 plain f0.T34:double
 exit 18: f0 0039 plain
 exit 19: f0 0040 plain
 exit 20: f0 0040 plain f0.T36:double
-exit 21: f0 0041 plain f0.T37=true f0.T36:double
+exit 21: f0 0042 plain f0.T36:double
 exit 22: f0 0044 plain
 exit 23: f0 0045 plain to vm

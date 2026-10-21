@@ -39,12 +39,12 @@ function u0:0(i64, i64) -> i32 system_v {
 
                                 block9(v21: i64, v22: i64, v152: f64):
                                     v154 -> v21
-                                    v175 -> v21
-                                    v222 -> v21
-                                    v173 -> v22
+                                    v171 -> v21
+                                    v218 -> v21
+                                    v169 -> v22
                                     v151 -> v152
-                                    v172 -> v152
-                                    v219 -> v152
+                                    v168 -> v152
+                                    v215 -> v152
 @0000                               v20 = load.i8 notrap aligned v2
 @0000                               brif v20, block10, block11
 
@@ -171,7 +171,7 @@ function u0:0(i64, i64) -> i32 system_v {
 @0011                               v105 = stack_addr.i64 ss0
 @0011                               v106 = load.i64 notrap v105
                                     v148 -> v106
-                                    v220 -> v106
+                                    v216 -> v106
 @0012                               v107 = load.i64 notrap aligned v106+96
 @0012                               v108 = load.i32 notrap aligned v107+24
 @0012                               v109 = uextend.i64 v108
@@ -281,45 +281,53 @@ function u0:0(i64, i64) -> i32 system_v {
                                     store.i64 notrap aligned v21, v22+160
                                     v166 = iconst.i32 4
                                     store notrap aligned v166, v22+168  ; v166 = 4
-                                    v167 = iconst.i8 0
-                                    v168 = uextend.i32 v167  ; v167 = 0
-                                    v169 = iconst.i32 2
-                                    v170 = iadd v168, v169  ; v169 = 2
-                                    store notrap aligned v170, v22+328
-                                    v171 = iconst.i32 4
-                                    return v171  ; v171 = 4
+                                    v167 = iconst.i32 4
+                                    return v167  ; v167 = 4
 
                                 block14 cold:
                                     store.f64 notrap aligned v152, v22+144
-                                    v174 = iconst.i32 5
-                                    store notrap aligned v174, v22+152  ; v174 = 5
-                                    store.i64 notrap aligned v21, v173+160
-                                    v176 = iconst.i32 4
-                                    store notrap aligned v176, v173+168  ; v176 = 4
-                                    v177 = iconst.i32 5
-                                    return v177  ; v177 = 5
+                                    v170 = iconst.i32 5
+                                    store notrap aligned v170, v22+152  ; v170 = 5
+                                    store.i64 notrap aligned v21, v169+160
+                                    v172 = iconst.i32 4
+                                    store notrap aligned v172, v169+168  ; v172 = 4
+                                    v173 = iconst.i32 5
+                                    return v173  ; v173 = 5
 
                                 block17 cold:
                                     store.f64 notrap aligned v152, v22+144
-                                    v178 = iconst.i32 5
-                                    store notrap aligned v178, v22+152  ; v178 = 5
+                                    v174 = iconst.i32 5
+                                    store notrap aligned v174, v22+152  ; v174 = 5
                                     store.i64 notrap aligned v21, v22+160
-                                    v179 = iconst.i32 4
-                                    store notrap aligned v179, v22+168  ; v179 = 4
-                                    v180 = iconst.i32 6
-                                    return v180  ; v180 = 6
+                                    v175 = iconst.i32 4
+                                    store notrap aligned v175, v22+168  ; v175 = 4
+                                    v176 = iconst.i32 6
+                                    return v176  ; v176 = 6
 
                                 block19 cold:
                                     store.f64 notrap aligned v152, v22+144
-                                    v181 = iconst.i32 5
-                                    store notrap aligned v181, v22+152  ; v181 = 5
+                                    v177 = iconst.i32 5
+                                    store notrap aligned v177, v22+152  ; v177 = 5
                                     store.i64 notrap aligned v21, v22+160
-                                    v182 = iconst.i32 4
-                                    store notrap aligned v182, v22+168  ; v182 = 4
-                                    v183 = iconst.i32 7
-                                    return v183  ; v183 = 7
+                                    v178 = iconst.i32 4
+                                    store notrap aligned v178, v22+168  ; v178 = 4
+                                    v179 = iconst.i32 7
+                                    return v179  ; v179 = 7
 
                                 block21 cold:
+                                    store.f64 notrap aligned v152, v22+144
+                                    v180 = iconst.i32 5
+                                    store notrap aligned v180, v22+152  ; v180 = 5
+                                    store.i64 notrap aligned v21, v22+160
+                                    v181 = iconst.i32 4
+                                    store notrap aligned v181, v22+168  ; v181 = 4
+                                    store.i64 notrap aligned v49, v46+112
+                                    v182 = iconst.i32 4
+                                    store notrap aligned v182, v46+120  ; v182 = 4
+                                    v183 = iconst.i32 8
+                                    return v183  ; v183 = 8
+
+                                block23 cold:
                                     store.f64 notrap aligned v152, v22+144
                                     v184 = iconst.i32 5
                                     store notrap aligned v184, v22+152  ; v184 = 5
@@ -329,140 +337,127 @@ function u0:0(i64, i64) -> i32 system_v {
                                     store.i64 notrap aligned v49, v46+112
                                     v186 = iconst.i32 4
                                     store notrap aligned v186, v46+120  ; v186 = 4
-                                    v187 = iconst.i32 8
-                                    return v187  ; v187 = 8
-
-                                block23 cold:
-                                    store.f64 notrap aligned v152, v22+144
-                                    v188 = iconst.i32 5
-                                    store notrap aligned v188, v22+152  ; v188 = 5
-                                    store.i64 notrap aligned v21, v22+160
-                                    v189 = iconst.i32 4
-                                    store notrap aligned v189, v22+168  ; v189 = 4
-                                    store.i64 notrap aligned v49, v46+112
-                                    v190 = iconst.i32 4
-                                    store notrap aligned v190, v46+120  ; v190 = 4
                                     store.i64 notrap aligned v55, v46+160
-                                    v191 = iconst.i32 4
-                                    store notrap aligned v191, v46+168  ; v191 = 4
-                                    v192 = iconst.i32 9
-                                    return v192  ; v192 = 9
+                                    v187 = iconst.i32 4
+                                    store notrap aligned v187, v46+168  ; v187 = 4
+                                    v188 = iconst.i32 9
+                                    return v188  ; v188 = 9
 
                                 block25 cold:
                                     store.f64 notrap aligned v152, v22+144
-                                    v193 = iconst.i32 5
-                                    store notrap aligned v193, v22+152  ; v193 = 5
+                                    v189 = iconst.i32 5
+                                    store notrap aligned v189, v22+152  ; v189 = 5
                                     store.i64 notrap aligned v21, v22+160
-                                    v194 = iconst.i32 4
-                                    store notrap aligned v194, v22+168  ; v194 = 4
+                                    v190 = iconst.i32 4
+                                    store notrap aligned v190, v22+168  ; v190 = 4
                                     store.i64 notrap aligned v49, v46+112
-                                    v195 = iconst.i32 4
-                                    store notrap aligned v195, v46+120  ; v195 = 4
+                                    v191 = iconst.i32 4
+                                    store notrap aligned v191, v46+120  ; v191 = 4
                                     store.i64 notrap aligned v60, v46+176
-                                    v196 = iconst.i32 4
-                                    store notrap aligned v196, v46+184  ; v196 = 4
-                                    v197 = iconst.i32 10
-                                    return v197  ; v197 = 10
+                                    v192 = iconst.i32 4
+                                    store notrap aligned v192, v46+184  ; v192 = 4
+                                    v193 = iconst.i32 10
+                                    return v193  ; v193 = 10
 
                                 block27 cold:
                                     store.f64 notrap aligned v152, v22+144
-                                    v198 = iconst.i32 5
-                                    store notrap aligned v198, v22+152  ; v198 = 5
+                                    v194 = iconst.i32 5
+                                    store notrap aligned v194, v22+152  ; v194 = 5
                                     store.i64 notrap aligned v21, v22+160
-                                    v199 = iconst.i32 4
-                                    store notrap aligned v199, v22+168  ; v199 = 4
+                                    v195 = iconst.i32 4
+                                    store notrap aligned v195, v22+168  ; v195 = 4
                                     store.i64 notrap aligned v49, v46+112
-                                    v200 = iconst.i32 4
-                                    store notrap aligned v200, v46+120  ; v200 = 4
+                                    v196 = iconst.i32 4
+                                    store notrap aligned v196, v46+120  ; v196 = 4
                                     store.i64 notrap aligned v72, v46+192
-                                    v201 = iconst.i32 4
-                                    store notrap aligned v201, v46+200  ; v201 = 4
-                                    v202 = iconst.i32 11
-                                    return v202  ; v202 = 11
+                                    v197 = iconst.i32 4
+                                    store notrap aligned v197, v46+200  ; v197 = 4
+                                    v198 = iconst.i32 11
+                                    return v198  ; v198 = 11
 
                                 block29 cold:
                                     store.f64 notrap aligned v152, v22+144
-                                    v203 = iconst.i32 5
-                                    store notrap aligned v203, v22+152  ; v203 = 5
+                                    v199 = iconst.i32 5
+                                    store notrap aligned v199, v22+152  ; v199 = 5
                                     store.i64 notrap aligned v21, v22+160
-                                    v204 = iconst.i32 4
-                                    store notrap aligned v204, v22+168  ; v204 = 4
+                                    v200 = iconst.i32 4
+                                    store notrap aligned v200, v22+168  ; v200 = 4
                                     store.i64 notrap aligned v49, v46+112
-                                    v205 = iconst.i32 4
-                                    store notrap aligned v205, v46+120  ; v205 = 4
+                                    v201 = iconst.i32 4
+                                    store notrap aligned v201, v46+120  ; v201 = 4
                                     store.i64 notrap aligned v84, v46+208
-                                    v206 = iconst.i32 4
-                                    store notrap aligned v206, v46+216  ; v206 = 4
-                                    v207 = iconst.i32 12
-                                    return v207  ; v207 = 12
+                                    v202 = iconst.i32 4
+                                    store notrap aligned v202, v46+216  ; v202 = 4
+                                    v203 = iconst.i32 12
+                                    return v203  ; v203 = 12
 
                                 block31 cold:
                                     store.f64 notrap aligned v152, v22+144
-                                    v208 = iconst.i32 5
-                                    store notrap aligned v208, v22+152  ; v208 = 5
+                                    v204 = iconst.i32 5
+                                    store notrap aligned v204, v22+152  ; v204 = 5
                                     store.i64 notrap aligned v21, v22+160
-                                    v209 = iconst.i32 4
-                                    store notrap aligned v209, v22+168  ; v209 = 4
+                                    v205 = iconst.i32 4
+                                    store notrap aligned v205, v22+168  ; v205 = 4
                                     store.i64 notrap aligned v49, v46+112
-                                    v210 = iconst.i32 4
-                                    store notrap aligned v210, v46+120  ; v210 = 4
+                                    v206 = iconst.i32 4
+                                    store notrap aligned v206, v46+120  ; v206 = 4
                                     store.i64 notrap aligned v90, v46+224
-                                    v211 = iconst.i32 4
-                                    store notrap aligned v211, v46+232  ; v211 = 4
-                                    v212 = iconst.i32 13
-                                    return v212  ; v212 = 13
+                                    v207 = iconst.i32 4
+                                    store notrap aligned v207, v46+232  ; v207 = 4
+                                    v208 = iconst.i32 13
+                                    return v208  ; v208 = 13
 
                                 block41 cold:
                                     store.f64 notrap aligned v152, v106+144
-                                    v213 = iconst.i32 5
-                                    store notrap aligned v213, v106+152  ; v213 = 5
+                                    v209 = iconst.i32 5
+                                    store notrap aligned v209, v106+152  ; v209 = 5
                                     store.i64 notrap aligned v21, v106+160
-                                    v214 = iconst.i32 4
-                                    store notrap aligned v214, v106+168  ; v214 = 4
-                                    v215 = iconst.i32 14
-                                    return v215  ; v215 = 14
+                                    v210 = iconst.i32 4
+                                    store notrap aligned v210, v106+168  ; v210 = 4
+                                    v211 = iconst.i32 14
+                                    return v211  ; v211 = 14
 
                                 block45 cold:
                                     store.f64 notrap aligned v152, v106+144
-                                    v216 = iconst.i32 5
-                                    store notrap aligned v216, v106+152  ; v216 = 5
+                                    v212 = iconst.i32 5
+                                    store notrap aligned v212, v106+152  ; v212 = 5
                                     store.i64 notrap aligned v21, v106+160
-                                    v217 = iconst.i32 4
-                                    store notrap aligned v217, v106+168  ; v217 = 4
-                                    v218 = iconst.i32 15
-                                    return v218  ; v218 = 15
+                                    v213 = iconst.i32 4
+                                    store notrap aligned v213, v106+168  ; v213 = 4
+                                    v214 = iconst.i32 15
+                                    return v214  ; v214 = 15
 
                                 block35 cold:
                                     store.f64 notrap aligned v152, v106+144
-                                    v221 = iconst.i32 5
-                                    store notrap aligned v221, v106+152  ; v221 = 5
-                                    store.i64 notrap aligned v21, v220+160
-                                    v223 = iconst.i32 4
-                                    store notrap aligned v223, v220+168  ; v223 = 4
-                                    v224 = iconst.i32 16
-                                    return v224  ; v224 = 16
+                                    v217 = iconst.i32 5
+                                    store notrap aligned v217, v106+152  ; v217 = 5
+                                    store.i64 notrap aligned v21, v216+160
+                                    v219 = iconst.i32 4
+                                    store notrap aligned v219, v216+168  ; v219 = 4
+                                    v220 = iconst.i32 16
+                                    return v220  ; v220 = 16
 
                                 block49 cold:
                                     store.f64 notrap aligned v153, v148+144
-                                    v225 = iconst.i32 5
-                                    store notrap aligned v225, v148+152  ; v225 = 5
+                                    v221 = iconst.i32 5
+                                    store notrap aligned v221, v148+152  ; v221 = 5
                                     store.i64 notrap aligned v154, v148+160
-                                    v226 = iconst.i32 4
-                                    store notrap aligned v226, v148+168  ; v226 = 4
-                                    v227 = iconst.i32 17
-                                    return v227  ; v227 = 17
+                                    v222 = iconst.i32 4
+                                    store notrap aligned v222, v148+168  ; v222 = 4
+                                    v223 = iconst.i32 17
+                                    return v223  ; v223 = 17
 
                                 block10 cold:
                                     store.f64 notrap aligned v152, v22+144
-                                    v228 = iconst.i32 5
-                                    store notrap aligned v228, v22+152  ; v228 = 5
+                                    v224 = iconst.i32 5
+                                    store notrap aligned v224, v22+152  ; v224 = 5
                                     store.i64 notrap aligned v21, v22+160
-                                    v229 = iconst.i32 4
-                                    store notrap aligned v229, v22+168  ; v229 = 4
-                                    v230 = iconst.i32 18
-                                    return v230  ; v230 = 18
+                                    v225 = iconst.i32 4
+                                    store notrap aligned v225, v22+168  ; v225 = 4
+                                    v226 = iconst.i32 18
+                                    return v226  ; v226 = 18
 
                                 block33 cold:
-                                    v231 = iconst.i32 -1
-                                    return v231  ; v231 = -1
+                                    v227 = iconst.i32 -1
+                                    return v227  ; v227 = -1
 }

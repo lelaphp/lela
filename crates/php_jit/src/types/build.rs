@@ -518,19 +518,13 @@ impl<'a> Builder<'a> {
         self.own_exit(idx, frame, &op, form, t1);
         self.stands(idx, frame, &op, after.as_ref(), ahead);
         if let Some(taken) = branch {
-            let jump = if fused { after } else { None };
-            self.direction(
-                idx,
-                frame,
-                at,
-                op1,
-                jump,
+            let to = Branched {
                 taken,
-                form,
+                fused,
                 len,
                 target,
-                written.slot,
-            );
+            };
+            self.direction(idx, frame, at, op1, form, to);
         }
         if form == Form::Step && op.opcode.effects().contains(Effects::CALL) {
             self.clobber(idx);
@@ -666,56 +660,40 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The direction guard of a conditional jump.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the one place the opline's parts meet"
-    )]
+    /// The direction guard of a conditional jump, leaving where the jump
+    /// goes the way it did not go.
     fn direction(
         &mut self,
         idx: OpId,
         frame: Frame,
         at: OplineIdx,
         op1: Operand,
-        jump: Option<Opline>,
-        taken: bool,
         form: Form,
-        len: u32,
-        target: Option<OplineIdx>,
-        out_slot: Option<Slot>,
+        to: Branched,
     ) {
-        if jump.is_none() && matches!(op1, Operand::Constant(_)) {
+        let Branched {
+            taken,
+            fused,
+            len,
+            target,
+        } = to;
+        if !fused && matches!(op1, Operand::Constant(_)) {
             // A constant condition goes one way; nothing to hold.
             return;
         }
-        let exit = match (form, jump) {
-            (Form::Inline, Some(jump)) => {
-                let jumps_on_false = jump.opcode == Opcode::Jmpz;
-                // The value that sends the jump the other way.
-                let other = if jumps_on_false { taken } else { !taken };
-                let extra = out_slot.map(|slot| Store {
-                    slot,
-                    from: Stored::Bool(other),
-                });
-                Draft {
-                    point: Point::Before(idx),
-                    frame,
-                    at: At::Opline(OplineIdx(at.0 + 1)),
-                    extra,
-                    grows: Grows::Side,
-                    link: None,
-                }
-            }
-            (Form::Inline, None) => draft(Point::Before(idx), frame, At::Opline(at)),
-            (Form::Step, _) => {
-                let other = if taken {
-                    Some(OplineIdx(at.0 + len))
-                } else {
-                    target
-                };
-                let to = other.map_or(At::Stands, At::Opline);
-                draft(Point::After(idx), frame, to)
-            }
+        // Where the jump goes the way it did not go, as php's exit lands
+        // on the other target (`zend_jit_trace_handler`'s
+        // `exit_opline`): a compared value the fused jump read is dead
+        // past it, so nothing is stored for it.
+        let other = if taken {
+            Some(OplineIdx(at.0 + len))
+        } else {
+            target
+        };
+        let to = other.map_or(At::Stands, At::Opline);
+        let exit = match form {
+            Form::Inline => draft(Point::Before(idx), frame, to),
+            Form::Step => draft(Point::After(idx), frame, to),
         };
         self.guards.push(Placed {
             at: GuardAt::Within(idx),
@@ -1958,6 +1936,16 @@ fn went(
         (None, false, true) => None,
         _ => Some(OplineIdx(at.0 + len)),
     }
+}
+
+/// Which way a conditional jump went, the jump fused to a comparison or
+/// the opline's own, and where it goes: `len` oplines on, or to `target`.
+#[derive(Clone, Copy)]
+struct Branched {
+    taken: bool,
+    fused: bool,
+    len: u32,
+    target: Option<OplineIdx>,
 }
 
 /// The jump after `op` it is fused to, where it is a comparison whose

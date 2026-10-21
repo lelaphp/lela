@@ -669,9 +669,8 @@ impl<'a> Emit<'a> {
     }
 
     /// Every exit's block a site branched to: the scalars the trace keeps
-    /// in registers stored to their slots with their type words, the
-    /// booleans a mispredicted comparison leaves, and the exit's number
-    /// answered; every unwind's, its stores and [`UNWOUND`].
+    /// in registers stored to their slots with their type words, and the
+    /// exit's number answered; every unwind's, its stores and [`UNWOUND`].
     fn exit_blocks(&mut self) -> Result<(), Abort> {
         self.b.set_srcloc(SourceLoc::default());
         let ir = self.ir;
@@ -722,10 +721,6 @@ impl<'a> Emit<'a> {
                         let held = self.register(value)?;
                         self.store(store.slot, held)?;
                     }
-                }
-                Stored::Bool(b) => {
-                    let held = Scalar::Bool(self.b.ins().iconst(I8, i64::from(b)));
-                    self.store(store.slot, held)?;
                 }
                 // Its site wrote the slot before it branched here.
                 Stored::Copied { .. } => {}

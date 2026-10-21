@@ -147,7 +147,7 @@ exit 0: f0 0061 plain
 exit 1: f0 0061 plain f0.CV6:array
 exit 2: f0 0061 plain f0.CV6:array f0.CV8:long
 exit 3: f0 0061 plain f0.CV6:array f0.CV8:long f0.CV9:long
-exit 4: f0 0062 plain f0.CV10=#7 f0.T45=false f0.CV6:array f0.CV8:long f0.CV9:long f0.CV10:long
+exit 4: f0 0063 plain f0.CV10=#7 f0.CV6:array f0.CV8:long f0.CV9:long f0.CV10:long
 exit 5: f0 0014 plain f0.CV10=#7 f0.CV6:array f0.CV8:long f0.CV9:long f0.CV10:long
 exit 6: f0 0015 plain f0.CV10=#7 f0.CV6:array f0.CV8:long f0.CV9:long f0.CV10:long
 exit 7: f0 0016 plain f0.CV10=#7 f0.CV6:array f0.CV8:long f0.CV9:long f0.CV10:long

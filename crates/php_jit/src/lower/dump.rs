@@ -251,7 +251,6 @@ impl<'a> Dump<'a> {
         for store in stores {
             let from = match store.from {
                 Stored::Value(value) => format!("#{}", value.0),
-                Stored::Bool(on) => on.to_string(),
                 Stored::Copied { value, read } => match read {
                     Read::InPlace => format!("copied #{}", value.0),
                     Read::Through => format!("copied #{} through a reference", value.0),

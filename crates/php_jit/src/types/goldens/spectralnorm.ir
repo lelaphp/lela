@@ -68,7 +68,7 @@ exit 0: f0 0016 plain
 exit 1: f0 0016 plain f0.CV1:array
 exit 2: f0 0016 plain f0.CV1:array f0.CV3:long
 exit 3: f0 0016 plain f0.CV1:array f0.CV3:long f0.CV4:double
-exit 4: f0 0017 plain f0.CV4=#1 f0.CV5=#3 f0.T9=false f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long
+exit 4: f0 0018 plain f0.CV4=#1 f0.CV5=#3 f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long
 exit 5: f0 0008 plain f0.CV4=#1 f0.CV5=#3 f0.CV0:long f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long
 exit 6: f0 0011 restore call f0.CV4=#1 f0.CV5=#3 f0.CV0:long f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long
 exit 7: f1 0002 plain f0.CV4=#1 f0.CV5=#3 f1.CV0:long f1.CV1:long

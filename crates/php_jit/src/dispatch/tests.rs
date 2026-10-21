@@ -545,8 +545,9 @@ fn a_tier_that_is_off_is_asked_at_no_back_edge() {
 /// the same `TRACE 2 start (loop) $main() …:4` line, after a return root
 /// at `$main`'s landing past the `eval` that aborts at the inner loop
 /// (`zend_jit_trace_setup_ret_counter`), which this tier does not root
-/// yet, and before the side trace its compiled loop exits into, where
-/// this tier, which grows none yet (#2964), writes the exit's line.
+/// yet; its compiled loop leaves through php's `TRACE 2 exit 1 …:5`,
+/// the line past the loop the jump goes to, where php then grows a side
+/// trace, which this tier does not yet (#2964).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_main_loop_no_call_activates_is_a_root_at_its_header() {
@@ -566,7 +567,7 @@ fn a_main_loop_no_call_activates_is_a_root_at_its_header() {
             "---- TRACE 2 stop (loop)",
             "---- TRACE 2 compiled",
             "",
-            "     TRACE 2 exit 1 $main() body.php:4",
+            "     TRACE 2 exit 1 $main() body.php:5",
         ]
     );
 }

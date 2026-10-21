@@ -39,7 +39,8 @@
 //!   array of one is held to its layout at each read by a long key.
 //! - **`SMART_BRANCH`.** A comparison fused to the jump after it is one
 //!   compare-and-branch, whose mispredicted direction leaves through an
-//!   exit at the jump with the comparison's value written as a constant.
+//!   exit at the opline the jump goes to the other way, as php's lands
+//!   there, the comparison's value dead past the jump.
 //! - **The clobber rule.** After a kernel whose opcode carries the `call`
 //!   effect in `ops.toml`, every value whose facts came from memory other
 //!   code can write, a slot a symbol table reaches or one that may hold a
@@ -438,8 +439,6 @@ pub(crate) struct Store {
 pub(crate) enum Stored {
     /// A value the trace holds.
     Value(ValueId),
-    /// A boolean the exit knows: a mispredicted comparison's.
-    Bool(bool),
     /// A fetched element whose type its guard did not hold, which the
     /// guard's own place copies into the fetch's slot as the fetch copies
     /// it before it leaves, read in place or through the reference the

@@ -281,104 +281,94 @@ function u0:0(i64, i64) -> i32 system_v {
                                     return v153  ; v153 = 0
 
                                 block7 cold:
-                                    v154 = iconst.i8 0
-                                    v155 = uextend.i32 v154  ; v154 = 0
-                                    v156 = iconst.i32 2
-                                    v157 = iadd v155, v156  ; v156 = 2
-                                    store notrap aligned v157, v4+1016
-                                    v158 = iconst.i32 1
-                                    return v158  ; v158 = 1
+                                    v154 = iconst.i32 1
+                                    return v154  ; v154 = 1
 
                                 block9 cold:
-                                    v159 = iconst.i32 2
-                                    return v159  ; v159 = 2
+                                    v155 = iconst.i32 2
+                                    return v155  ; v155 = 2
 
                                 block11 cold:
-                                    v160 = iconst.i32 3
-                                    return v160  ; v160 = 3
+                                    v156 = iconst.i32 3
+                                    return v156  ; v156 = 3
 
                                 block13 cold:
-                                    v161 = iconst.i32 4
-                                    return v161  ; v161 = 4
+                                    v157 = iconst.i32 4
+                                    return v157  ; v157 = 4
 
                                 block15 cold:
-                                    v162 = iconst.i32 5
-                                    return v162  ; v162 = 5
+                                    v158 = iconst.i32 5
+                                    return v158  ; v158 = 5
 
                                 block18 cold:
-                                    v163 = iconst.i32 6
-                                    return v163  ; v163 = 6
+                                    v159 = iconst.i32 6
+                                    return v159  ; v159 = 6
 
                                 block20 cold:
-                                    v164 = iconst.i32 7
-                                    return v164  ; v164 = 7
+                                    v160 = iconst.i32 7
+                                    return v160  ; v160 = 7
 
                                 block22 cold:
-                                    v165 = iconst.i32 8
-                                    return v165  ; v165 = 8
+                                    v161 = iconst.i32 8
+                                    return v161  ; v161 = 8
 
                                 block25 cold:
-                                    v166 = iconst.i32 9
-                                    return v166  ; v166 = 9
+                                    v162 = iconst.i32 9
+                                    return v162  ; v162 = 9
 
                                 block28 cold:
-                                    v167 = iconst.i32 10
-                                    return v167  ; v167 = 10
+                                    v163 = iconst.i32 10
+                                    return v163  ; v163 = 10
 
                                 block30 cold:
-                                    v168 = iconst.i32 11
-                                    return v168  ; v168 = 11
+                                    v164 = iconst.i32 11
+                                    return v164  ; v164 = 11
 
                                 block32 cold:
-                                    v169 = iconst.i32 12
-                                    return v169  ; v169 = 12
+                                    v165 = iconst.i32 12
+                                    return v165  ; v165 = 12
 
                                 block35 cold:
-                                    v170 = iconst.i32 13
-                                    return v170  ; v170 = 13
+                                    v166 = iconst.i32 13
+                                    return v166  ; v166 = 13
 
                                 block37 cold:
-                                    v171 = iconst.i32 14
-                                    return v171  ; v171 = 14
+                                    v167 = iconst.i32 14
+                                    return v167  ; v167 = 14
 
                                 block39 cold:
-                                    v172 = iconst.i32 15
-                                    return v172  ; v172 = 15
+                                    v168 = iconst.i32 15
+                                    return v168  ; v168 = 15
 
                                 block42 cold:
-                                    v173 = iconst.i32 16
-                                    return v173  ; v173 = 16
+                                    v169 = iconst.i32 16
+                                    return v169  ; v169 = 16
 
                                 block44 cold:
-                                    v174 = iconst.i32 17
-                                    return v174  ; v174 = 17
+                                    v170 = iconst.i32 17
+                                    return v170  ; v170 = 17
 
                                 block46 cold:
-                                    v175 = iconst.i32 18
-                                    return v175  ; v175 = 18
+                                    v171 = iconst.i32 18
+                                    return v171  ; v171 = 18
 
                                 block49 cold:
-                                    v176 = iconst.i32 19
-                                    return v176  ; v176 = 19
+                                    v172 = iconst.i32 19
+                                    return v172  ; v172 = 19
 
                                 block51 cold:
-                                    v177 = iconst.i32 20
-                                    return v177  ; v177 = 20
+                                    v173 = iconst.i32 20
+                                    return v173  ; v173 = 20
 
                                 block53 cold:
-                                    v178 = iconst.i8 1
-                                    v179 = uextend.i32 v178  ; v178 = 1
-                                    v180 = iconst.i32 2
-                                    v181 = iadd v179, v180  ; v180 = 2
-                                    store notrap aligned v181, v4+968
-                                    v182 = iconst.i32 21
-                                    return v182  ; v182 = 21
+                                    v174 = iconst.i32 21
+                                    return v174  ; v174 = 21
 
                                 block55 cold:
-                                    v183 = iconst.i32 22
-                                    return v183  ; v183 = 22
+                                    v175 = iconst.i32 22
+                                    return v175  ; v175 = 22
 
                                 block2 cold:
-                                    v184 = iconst.i32 23
-                                    return v184  ; v184 = 23
+                                    v176 = iconst.i32 23
+                                    return v176  ; v176 = 23
 }
