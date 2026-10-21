@@ -146,10 +146,13 @@ pub trait Tier: 'static {
     /// all, asked once as the engine binds its loop, after every engine
     /// state is built: where it answers `false` the engine binds
     /// [`Nop`]'s loop, so a safepoint costs the loop nothing, as php's VM
-    /// keeps its own handlers wherever its compiled tier does not start
-    /// (`opcache.jit_buffer_size=0`). The engine then serves as one bound
-    /// to `Nop` does, so a tier that [`HOLDS`](Tier::HOLDS) answers
-    /// `true`.
+    /// keeps its own handlers where its compiled tier is not on, an op
+    /// array given php's heat handlers only as it is persisted while
+    /// `JIT_G(on)` (`Z/ext/opcache/zend_persist.c:721-726`, `:1471-1473`).
+    /// A tier that [`HOLDS`](Tier::HOLDS) or hooks the compile
+    /// ([`HOOKED`](Tier::HOOKED)) is bound whatever it answers, since
+    /// `Nop`'s loop neither holds a frame nor runs a hooked call as it
+    /// does.
     #[must_use]
     fn asked(started: &Started<'_>) -> bool {
         let _ = started;
@@ -487,10 +490,11 @@ pub(crate) struct Loops {
 
 impl Loops {
     /// `T`'s loop for the engine `shared` started, or `Nop`'s where `T`
-    /// is not asked ([`Tier::asked`]), told as its declared set
-    /// says ([`Loops::told`]).
+    /// is not asked ([`Tier::asked`]) and neither holds a frame nor
+    /// hooks the compile, told as its declared set says
+    /// ([`Loops::told`]).
     pub(crate) fn bound<T: Tier>(shared: &crate::engine::Shared) -> Loops {
-        if T::asked(&Started { shared }) {
+        if T::HOLDS || T::HOOKED != Hooked::NONE || T::asked(&Started { shared }) {
             Loops::told::<T>(&shared.opcodes)
         } else {
             Loops::told::<Nop>(&shared.opcodes)
