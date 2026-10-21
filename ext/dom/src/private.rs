@@ -1001,7 +1001,6 @@ mod tests {
             "<?php $d = Dom\\XMLDocument::createFromString('<r/>'); replace_private($d); replace_private($d); echo $d->documentElement->nodeName, \"\\n\";",
             Capture::default(),
         );
-        assert_eq!(served.fatal, None);
-        assert_eq!(String::from_utf8_lossy(&served.stdout), "r\n");
+        served.assert_clean("r\n");
     }
 }

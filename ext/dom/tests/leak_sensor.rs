@@ -19,8 +19,7 @@ fn served(src: &str, expected: &str) {
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(src, Capture::default());
-    assert_eq!(served.fatal, None);
-    assert_eq!(String::from_utf8_lossy(&served.stdout), expected);
+    served.assert_clean(expected);
 }
 
 /// A modern document made by `Dom\Implementation` or cloned keeps the
@@ -202,7 +201,7 @@ fn what_lexbor_made_is_given_back_by_each_request_s_end() {
         }
         let served = engine.serve_capture(src, Capture::default());
         assert_eq!(served.fatal, None, "round {round}");
-        let stdout = String::from_utf8_lossy(&served.stdout).into_owned();
+        let stdout = served.stdout_text();
         let (shown, start) = stdout
             .rsplit_once('\n')
             .map_or((stdout.as_str(), ""), |(a, _)| {

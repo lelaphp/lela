@@ -13,7 +13,7 @@ fn armed(source: &str) -> String {
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(source, Capture::default());
-    String::from_utf8_lossy(&served.stdout).into_owned()
+    served.stdout_text()
 }
 
 /// A type `FFI::new` takes from a `FFI\CType` it does not solely own is

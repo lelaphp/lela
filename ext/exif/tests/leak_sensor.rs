@@ -3,7 +3,7 @@
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
 
-use php_ext::test::{Capture, Engine, LeakSensor};
+use php_ext::test::{Capture, Engine, Files, LeakSensor};
 
 /// What one request of an armed engine with this extension alone wrote.
 fn armed(source: &str) -> String {
@@ -17,7 +17,7 @@ fn armed(source: &str) -> String {
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(source, Capture::default());
-    String::from_utf8_lossy(&served.stdout).into_owned()
+    served.stdout_text()
 }
 
 /// `exif_read_data` lays a section's values into an array of their own
@@ -26,13 +26,13 @@ fn armed(source: &str) -> String {
 /// answer, making no array it does not hand on (#2100).
 #[test]
 fn a_section_laid_into_the_answer_makes_no_array_of_its_own() {
-    let path = std::env::temp_dir().join(format!("exif-leak-{}.tiff", std::process::id()));
+    let files = Files::new("exif-leak", &[]);
+    let path = files.path().join("section.tiff");
     let tiff: &[u8] = b"MM\0\x2A\0\0\0\x08\0\x03\x01\x0F\0\x02\0\0\0\x04ACM\0\x01\x12\0\x03\0\0\0\x01\0\x06\0\0\x82\x98\0\x02\0\0\0\x04A\0B\0\0\0\0\0";
-    std::fs::write(&path, tiff).ok();
+    files.write("section.tiff", tiff);
     let stdout = armed(&format!(
         "<?php $r = exif_read_data('{}'); echo $r['MimeType'], ' ', $r['Make'], ' ', $r['COMPUTED']['Copyright'], \"\\n\";",
         path.display()
     ));
-    std::fs::remove_file(&path).ok();
     assert_eq!(stdout, "image/tiff ACM A, B\n");
 }

@@ -31,7 +31,7 @@ fn tight_limit_fatal_releases_every_date_and_serves_again() {
             Capture::default(),
         );
         assert_eq!(served.exit_code, 255);
-        let stdout = String::from_utf8_lossy(&served.stdout).into_owned();
+        let stdout = served.stdout_text();
         assert!(
             stdout.starts_with(
                 "\nFatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate "
