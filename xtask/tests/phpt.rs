@@ -28,10 +28,12 @@ mod common {
     pub mod phpt_tree;
     pub mod registry;
     pub mod repo;
+    pub mod run;
 }
 use common::phpt_tree::fixture_tree;
 use common::registry::registry;
-use common::repo::scratch_workspace;
+use common::repo::{Repo, scratch_workspace};
+use common::run::Run;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -91,7 +93,7 @@ struct Scratch {
 impl Scratch {
     fn new(name: &str, tests: &[(&str, &str)]) -> Scratch {
         let root = Tree::new(&format!("phpt-{name}")).unwrap();
-        scratch_workspace(workspace(), &root).unwrap();
+        scratch_workspace(workspace(), &root);
         fs::create_dir_all(root.join("ext/fixture")).unwrap();
         fs::write(
             root.join("ext/fixture/Cargo.toml"),
@@ -416,7 +418,7 @@ fn with_no_engine_built_the_reading_is_a_skip_that_says_so_and_no_test_runs() {
         return;
     }
     let root = Tree::new("phpt-absent").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     let manifest = manifest();
     let ask = Ask {
         subset: Some("pcre".to_owned()),
@@ -506,7 +508,7 @@ fn a_bare_run_is_the_per_commit_lane_composed_from_the_crate_rows() {
     // has no binary crate, so it carries no feature and a crate behind
     // one is outside its lane (revision 63); one with no subset owns none.
     let root = Tree::new("phpt-lane").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     let readings = phpt::run(&root, &manifest, &registry(""), &Ask::default()).unwrap();
     let scopes: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
     assert_eq!(
@@ -535,7 +537,7 @@ fn the_reading_of_an_extension_subset_is_stamped_over_the_crate_so_done_can_read
         ..Ask::default()
     };
     let root = Tree::new("phpt-stamp").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     let readings = phpt::run(&root, &manifest, &registry(""), &ask).unwrap();
     let reading = &readings[0];
     assert_eq!(reading.scope, "ext/pcre");
@@ -590,7 +592,7 @@ fn a_corpus_directory_no_crate_owns_is_stamped_over_the_workspace() {
 #[test]
 fn the_variable_names_the_tree_to_a_run_of_the_binary() {
     let root = Tree::new("phpt-variable").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     // The scratch clone's pin, its `[source].path` pointed nowhere, so the
     // fallback is absent whichever machine this runs on.
     let pinned = root.join("nowhere-pinned");
@@ -612,28 +614,19 @@ fn the_variable_names_the_tree_to_a_run_of_the_binary() {
         .collect();
     fs::write(&pin, text.join("\n")).unwrap();
     let tree = fixture_tree();
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(&root)
+    let ran = Run::at(&root)
         .args(["phpt", "--subset", "Zend/tests"])
-        .env(xtask::oracle::TREE_VARIABLE, &tree)
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    let stderr = String::from_utf8(out.stderr).unwrap();
+        .env(xtask::oracle::TREE_VARIABLE, &*tree)
+        .go();
     assert!(
-        stdout.contains("Zend/tests") && !stderr.contains("neither place"),
-        "the subset resolved under the fixture:\n{stdout}\n{stderr}"
+        ran.stdout.contains("Zend/tests") && !ran.stderr.contains("neither place"),
+        "the subset resolved under the fixture: {ran}"
     );
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(&root)
+    let stderr = Run::at(&root)
         .args(["phpt", "--subset", "Zend/tests"])
         .env(xtask::oracle::TREE_VARIABLE, root.join("nowhere"))
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(!out.status.success());
+        .go()
+        .failed();
     assert!(
         stderr.contains(&format!(
             "{}={}",
@@ -653,7 +646,7 @@ fn the_variable_names_the_tree_to_a_run_of_the_binary() {
 fn a_relative_root_reaches_the_verdicts_an_absolute_one_does() {
     let Some(oracle) = oracle() else { return };
     let root = Tree::new("phpt-relative-root").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     fs::create_dir_all(root.join("ext/ctype")).unwrap();
     fs::write(
         root.join("ext/ctype/Cargo.toml"),
@@ -680,22 +673,19 @@ fn a_relative_root_reaches_the_verdicts_an_absolute_one_does() {
         fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let run = |given: &Path| {
-        let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-            .arg("--root")
-            .arg(given)
+        let stdout = Run::at(given)
             .args(["phpt", "--subset", "ext/ctype", "--jobs", "1"])
             .current_dir(&root)
             .env(xtask::oracle::TREE_VARIABLE, &corpus)
-            .output()
-            .unwrap();
+            .go()
+            .stdout;
         // The verdicts, the reading's line up to what it was run by.
-        let stdout = String::from_utf8_lossy(&out.stdout);
         let verdicts = stdout
             .lines()
             .find(|line| line.contains(" phpt ext/ctype: "))
             .and_then(|line| line.split(';').next())
             .map(str::to_owned);
-        (verdicts, stdout.into_owned())
+        (verdicts, stdout)
     };
     let (absolute, said) = run(root.path());
     assert_eq!(
@@ -888,20 +878,7 @@ fn a_binary_the_tree_has_not_moved_past_writes_an_ordinary_reading_that_names_it
 /// the commit's id.
 fn commit_all(root: &Path, message: &str) -> String {
     fs::write(root.join(".gitignore"), "target/\n").unwrap();
-    let git = |args: &[&str]| {
-        let out = Command::new("git")
-            .args(["-c", "user.name=xtask", "-c", "user.email=xtask@scratch"])
-            .args(["-c", "commit.gpgsign=false"])
-            .args(args)
-            .current_dir(root)
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "git {args:?}: {out:?}");
-        String::from_utf8(out.stdout).unwrap().trim().to_owned()
-    };
-    git(&["add", "-A"]);
-    git(&["commit", "-q", "-m", message]);
-    git(&["rev-parse", "HEAD"])
+    Repo::at(root).commit(message)
 }
 
 /// A binary standing where the engine's would that writes `two` for the
@@ -1976,7 +1953,7 @@ impl OneTree {
     /// A checkout of its own, committed, as a builder's worktree is.
     fn checkout(name: &str) -> Tree {
         let root = Tree::new(&format!("phpt-apart-{name}")).unwrap();
-        scratch_workspace(workspace(), &root).unwrap();
+        scratch_workspace(workspace(), &root);
         commit_all(&root, name);
         root
     }
@@ -2355,12 +2332,7 @@ fn a_run_writes_nothing_into_the_pinned_tree() {
         .collect();
     let mut scratch = Scratch::new("writes", &tests);
     let corpus = scratch.root.join("corpus");
-    let init = Command::new("git")
-        .args(["init", "-q", "-b", "main"])
-        .current_dir(&corpus)
-        .status()
-        .unwrap();
-    assert!(init.success());
+    Repo::init(&corpus);
     scratch.manifest.pin.source.commit = commit_all(&corpus, "the pin");
     fs::write(
         corpus.join("ext/fixture/tests/stray.php"),

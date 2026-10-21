@@ -16,8 +16,10 @@ use xtask::scratch::Tree;
 
 mod common {
     pub mod repo;
+    pub mod run;
 }
 use common::repo::scratch_workspace;
+use common::run::Run;
 
 const SESSION: &str = "5d0c7a1e-2b4f-4e8a-9c61-0f3b8d2e7a45";
 const ASK: &str = "toolu_01AskFixtureApproval0001";
@@ -100,7 +102,7 @@ fn the_persons_answer_admits_the_change_and_no_forged_answer_does() {
 /// diff applies to it and the readings land in its store.
 fn scratch(name: &str) -> Tree {
     let dir = Tree::new(&format!("permit-approval-{name}")).unwrap();
-    scratch_workspace(workspace(), &dir).unwrap();
+    scratch_workspace(workspace(), &dir);
     std::fs::copy(
         fixture().join("docs/divergence.toml"),
         dir.join("docs/divergence.toml"),
@@ -111,29 +113,13 @@ fn scratch(name: &str) -> Tree {
 
 /// `xtask --root <root> permit <args>` over `input`; the hook's stdout.
 fn permit(root: &Path, input: &Value, args: &[&str]) -> Value {
-    let mut child = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(root)
-        .arg("permit")
+    let out = Run::at(root)
+        .args(["permit"])
         .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    std::io::Write::write_all(
-        &mut child.stdin.take().unwrap(),
-        input.to_string().as_bytes(),
-    )
-    .unwrap();
-    let out = child.wait_with_output().unwrap();
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    serde_json::from_slice(&out.stdout).unwrap_or(Value::Null)
+        .stdin(input.to_string())
+        .go()
+        .ok();
+    serde_json::from_str(&out).unwrap_or(Value::Null)
 }
 
 /// The id git gives `bytes` as a blob.

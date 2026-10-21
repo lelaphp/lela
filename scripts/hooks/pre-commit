@@ -109,15 +109,13 @@ if markers=$(git diff --cached --check | grep -E ': leftover conflict marker$');
     echo "pre-commit: the staged line above is a conflict marker left in; resolve it, or exempt a file that holds one on purpose by its conflict-marker-size in .gitattributes" >&2
     exit 1
 fi
-# A branch writes a ledger revision it adds as `NEXT`, since two branches
-# that both take the next number conflict at their merges, and the merge
-# into `main` numbers it (#2982, the specs skill's merging.md); so a
-# commit on `main` that still carries one is refused, naming where.
-if [ "$(git symbolic-ref --short -q HEAD)" = main ] &&
-    unnumbered=$(git grep --cached -n -E '[Rr]evision NEXT([^A-Za-z]|$)' -- \
-        third-engine-design.md jit-design.md harness-design.md); then
+# A revision a commit on `main` still cites as `NEXT`, the ledger row or
+# prose such as "revisions 11 and NEXT", refuses it before anything runs,
+# naming each line; `next-cited` beside this file says what is read and
+# why, and pre-merge-commit asks it the same of a merge git commits itself.
+if unnumbered=$("$(dirname "$0")/next-cited") && [ -n "$unnumbered" ]; then
     printf '%s\n' "$unnumbered" >&2
-    echo "pre-commit: a ledger revision above is still NEXT; number it with the next free revision of its file before it lands on main" >&2
+    echo "pre-commit: the revision cited above is still NEXT; number it as its ledger row is numbered before it lands on main" >&2
     exit 1
 fi
 # A builder commits from a linked worktree, whose .git is a file, while

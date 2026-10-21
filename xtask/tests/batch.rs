@@ -9,12 +9,16 @@
 //! built on it.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use xtask::manifest::Manifest;
 use xtask::reading::{Number, Reading, Status};
 use xtask::scratch::Tree;
 use xtask::{clippy, test};
+
+mod common {
+    pub mod repo;
+}
+use common::repo::Repo;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -79,31 +83,7 @@ fn committed(fixture: &Path, name: &str) -> Tree {
     )
     .unwrap();
     std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
-    for args in [
-        &["init", "-q", "-b", "main"][..],
-        &["add", "-A"],
-        &[
-            "-c",
-            "user.name=x",
-            "-c",
-            "user.email=x@x",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/var/empty",
-            "commit",
-            "-q",
-            "-m",
-            "scratch",
-        ],
-    ] {
-        let out = Command::new("git")
-            .args(args)
-            .current_dir(&root)
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "git {args:?}");
-    }
+    Repo::init(&root).commit("scratch");
     root
 }
 

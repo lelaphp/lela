@@ -342,7 +342,7 @@ fn api_lock_of(manifest: &Manifest, beside: u64, private: u64) -> Reading {
     // A reading hashes its scope's tree through git, so the scratch tree
     // is a repository, the way every scratch workspace here is.
     let scratch = Tree::new("api-check-ceiling").unwrap();
-    scratch_workspace(workspace(), &scratch).unwrap();
+    scratch_workspace(workspace(), &scratch);
     let crate_dir = scratch.join("crates/php_ext");
     fs::create_dir_all(crate_dir.join("src")).unwrap();
     fs::copy(
@@ -603,7 +603,7 @@ fn bundle_reading(scratch: &str, enabled: &str) -> Reading {
 /// fixture's, each a path in the workspace and its new text.
 fn bundle_reading_with(scratch: &str, enabled: &str, replaced: &[(&str, &str)]) -> Reading {
     let root = Tree::new(scratch).unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     let from = fixture("registration");
     for file in [
         "crates/php_bundle/Cargo.toml",
@@ -964,7 +964,7 @@ fn a_tier_face_item_the_lock_does_not_list_fails_the_tier_reading() {
 #[test]
 fn each_section_is_held_against_the_consumers_that_read_it() {
     let root = Tree::new("api-check-tier-face").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     let from = fixture("tier-face");
     for file in [
         "crates/php_engine/Cargo.toml",

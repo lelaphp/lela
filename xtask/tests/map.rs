@@ -12,8 +12,10 @@ use xtask::scratch::Tree;
 
 mod common {
     pub mod repo;
+    pub mod run;
 }
-use common::repo::scratch_workspace;
+use common::repo::{Repo, scratch_workspace};
+use common::run::{Run, xtask};
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -44,15 +46,10 @@ fn map() -> String {
 #[test]
 fn the_map_is_read_from_the_index_and_not_from_a_render_in_flight() {
     let root = Tree::new("map-staged").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    let repo = scratch_workspace(workspace(), &root);
     let rendered = "# map\n\n<!-- computed exec cmd=\"ls\" inputs=x name=x | do not edit; run computed -->\nx\n<!-- /computed in=1 out=2 -->\n";
     std::fs::write(root.join("AGENTS.md"), rendered).unwrap();
-    let add = Command::new("git")
-        .args(["add", "--", "AGENTS.md"])
-        .current_dir(&root)
-        .output()
-        .unwrap();
-    assert!(add.status.success(), "{add:?}");
+    repo.git(&["add", "--", "AGENTS.md"]);
     std::fs::write(
         root.join("AGENTS.md"),
         "# map\n\n<!-- computed exec cmd=\"ls\" inputs=x name=x | do not edit; run computed -->\n<!-- /computed -->\n",
@@ -73,22 +70,11 @@ fn the_commit_s_index_is_read_for_its_own_repository_alone() {
         return;
     }
     let root = Tree::new("map-foreign-index").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    let repo = scratch_workspace(workspace(), &root);
     std::fs::write(root.join("only-here"), "x\n").unwrap();
-    let git = |dir: &Path, args: &[&str]| {
-        let out = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "{out:?}");
-        String::from_utf8(out.stdout).unwrap()
-    };
-    git(&root, &["add", "--", "only-here"]);
-    let ours = git(
-        workspace(),
-        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
-    );
+    repo.git(&["add", "--", "only-here"]);
+    let ours =
+        Repo::at(workspace()).git(&["rev-parse", "--path-format=absolute", "--git-path", "index"]);
     let child = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -286,7 +272,7 @@ fn xtask_args(opener: &str) -> Vec<String> {
 /// it, so a section that reads one, `invocation` the type's source,
 /// renders it.
 fn tracked_tree(root: &Path, regions: &[(String, String)]) {
-    scratch_workspace(workspace(), root).unwrap();
+    scratch_workspace(workspace(), root);
     let locks = Command::new("git")
         .args(["ls-files", "-z", "--", "*.lock"])
         .current_dir(workspace())
@@ -354,18 +340,9 @@ fn every_status_region_renders_the_same_bytes_whatever_the_store_holds() {
         regions
             .iter()
             .map(|(_, opener)| {
-                let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-                    .arg("--root")
-                    .arg(&*root)
-                    .args(xtask_args(opener))
-                    .output()
-                    .unwrap();
-                assert!(
-                    out.status.success(),
-                    "{opener}: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-                String::from_utf8(out.stdout).unwrap()
+                let ran = Run::at(&root).args(xtask_args(opener)).go();
+                assert_eq!(ran.code(), 0, "{opener}: {ran}");
+                ran.stdout
             })
             .collect()
     };
@@ -495,18 +472,7 @@ fn the_invocation_region_is_the_types_and_a_field_it_gains_stales_it() {
         !stale.status.success() && said.contains("invocation") && said.contains("stale"),
         "a field the type gains stales the region until it is rendered: {said}"
     );
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(&*root)
-        .args(xtask_args(opener))
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let rendered = String::from_utf8(out.stdout).unwrap();
+    let rendered = Run::at(&root).args(xtask_args(opener)).go().ok();
     assert!(
         rendered.contains("| `gained` | `u8` | no section gives it | A field the type gained. |"),
         "{rendered}"
@@ -668,19 +634,8 @@ fn block_cap() -> usize {
 
 /// `xtask status --session --format json` over a root: the two blocks.
 fn session_blocks(root: &Path) -> (String, String) {
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .args(["--root"])
-        .arg(root)
-        .args(["status", "--session", "--format", "json"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let out = xtask(root, &["status", "--session", "--format", "json"]).ok();
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
     (
         value["map"].as_str().unwrap().to_owned(),
         value["facts"].as_str().unwrap().to_owned(),
@@ -690,18 +645,9 @@ fn session_blocks(root: &Path) -> (String, String) {
 /// The section of the local file rendered from this workspace's store,
 /// as `computed run` renders it into the local file.
 fn section(name: &str) -> String {
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .args(["--root"])
-        .arg(workspace())
-        .args(["status", "--section", name])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{name}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8(out.stdout).unwrap()
+    let ran = xtask(workspace(), &["status", "--section", name]);
+    assert_eq!(ran.code(), 0, "{name}: {ran}");
+    ran.stdout
 }
 
 /// What is wrong with a block against the cap, if anything.
@@ -731,7 +677,7 @@ fn the_map_and_the_local_facts_are_each_under_the_engines_cap_with_room() {
     // The map as the hook hands it, from a scratch workspace holding the
     // staged map, so a render in flight here is not what is measured.
     let root = Tree::new("map-cap").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     std::fs::write(root.join("AGENTS.md"), map()).unwrap();
     let (map, _) = session_blocks(&root);
     assert!(

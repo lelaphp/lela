@@ -27,8 +27,10 @@ use xtask::witness;
 
 mod common {
     pub mod repo;
+    pub mod run;
 }
 use common::repo::scratch_workspace;
+use common::run::Run;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -354,7 +356,7 @@ fn the_fixture_whose_variant_binary_differs_from_its_md5_refuses_the_run() {
 /// `lib`.
 fn scratch(name: &str, lib: &str) -> Tree {
     let root = Tree::new(&format!("variant-{name}")).unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     fs::create_dir_all(root.join("ext/fixture/src")).unwrap();
     fs::write(
         root.join("ext/fixture/Cargo.toml"),
@@ -461,7 +463,7 @@ fn witness_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_it()
 #[test]
 fn crosscheck_renders_an_extension_whose_row_names_a_variant_under_it() {
     let root = Tree::new("variant-crosscheck").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     let fixtures = xtask::package_dir().join("fixtures/crosscheck");
     let body = format!(
         "for arg in \"$@\"; do\n  case \"$arg\" in\n    --re) exec cat '{}' ;;\n    --ri) exec cat '{}' ;;\n  esac\ndone\nexit 1",
@@ -807,19 +809,16 @@ fn phpt_featured(name: &str, build: &str) -> Option<(Tree, Reading)> {
     shell(&cargo, build);
     let temp = root.join("tmp");
     fs::create_dir_all(&temp).unwrap();
-    let out = std::process::Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .args(["--root", &root.display().to_string()])
+    let ran = Run::at(&root)
         .args(["phpt", "--subset", "ext/fixture", "--jobs", "1"])
         .env("CARGO", &cargo)
         .env("TMPDIR", &temp)
         .env("TEST_PHP_SRCDIR", root.join("corpus"))
-        .output()
-        .unwrap();
-    let said = String::from_utf8_lossy(&out.stdout);
+        .go();
     let reading = Store::of_workspace(&root)
         .read("phpt", "ext/fixture")
         .unwrap()
-        .unwrap_or_else(|| panic!("no reading: {said}{}", String::from_utf8_lossy(&out.stderr)));
+        .unwrap_or_else(|| panic!("no reading: {ran}"));
     Some((root, reading))
 }
 
@@ -879,7 +878,7 @@ fn crosscheck_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_i
         return;
     };
     let root = Tree::new("variant-crosscheck-unpinned").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     let mut manifest = Manifest::load(workspace()).unwrap();
     manifest.pin = Pin::parse(
         &(tracked_text() + &variant_table("fixture-variant", other, Path::new("/opt/php"), "0")),

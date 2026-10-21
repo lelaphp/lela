@@ -25,9 +25,11 @@ use xtask::scratch::Tree;
 mod common {
     pub mod registry;
     pub mod repo;
+    pub mod run;
 }
 use common::registry::registry;
 use common::repo::scratch_workspace;
+use common::run::xtask;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -62,7 +64,7 @@ struct Scratch {
 impl Scratch {
     fn new(name: &str) -> Scratch {
         let root = Tree::new(&format!("crosscheck-{name}")).unwrap();
-        scratch_workspace(workspace(), &root).unwrap();
+        scratch_workspace(workspace(), &root);
         let store = Store::at(root.join("target/harness"));
         Scratch {
             root,
@@ -538,7 +540,7 @@ fn an_absent_oracle_is_a_skip_and_not_a_pass() {
 #[test]
 fn staged_with_no_file_a_rendering_reads_renders_nothing() {
     let root = Tree::new("crosscheck-staged").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     fs::create_dir_all(root.join("xtask/src")).unwrap();
     fs::write(root.join("xtask/src/lib.rs"), "// moved\n").unwrap();
     let add = std::process::Command::new("git")
@@ -547,18 +549,7 @@ fn staged_with_no_file_a_rendering_reads_renders_nothing() {
         .status()
         .unwrap();
     assert!(add.success());
-    let out = std::process::Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(&*root)
-        .args(["crosscheck", "--staged"])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        out.status.success(),
-        "{stdout}{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let stdout = xtask(&root, &["crosscheck", "--staged"]).ok();
     assert!(
         stdout.contains("no extension the binary carries renders again for what is staged"),
         "{stdout}"

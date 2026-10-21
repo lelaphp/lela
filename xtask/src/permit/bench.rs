@@ -148,7 +148,7 @@ pub(crate) fn scratch_workspace(root: &Path, dir: &Path) -> Result<()> {
     ] {
         fs::copy(root.join(file), dir.join(file)).with_context(|| format!("copying {file}"))?;
     }
-    git(dir, &["init", "-q"], None)?;
+    git(dir, &["init", "-q", "-b", "main"], None)?;
     git(dir, &["add", "."], None)?;
     let commit = [
         &crate::scratch::UNHOOKED[..],

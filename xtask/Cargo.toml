@@ -22,7 +22,7 @@ own.compile_identity = ["src/compile_identity", "tests/compile_identity.rs", "fi
 own.worktree = ["src/worktree.rs", "tests/worktree.rs"]
 own.permit = ["src/permit", "tests/permit.rs", "fixtures/rules", "fixtures/approval", "tests/common"]
 own.phpt = ["src/phpt", "tests/phpt.rs", "fixtures/phpt", "tests/common"]
-own.new_sapi = ["src/new_sapi.rs", "tests/new_sapi.rs", "fixtures/new-sapi"]
+own.new_sapi = ["src/new_sapi.rs", "tests/new_sapi.rs", "fixtures/new-sapi", "tests/common"]
 
 [lints]
 workspace = true

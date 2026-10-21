@@ -18,6 +18,13 @@ use xtask::oracle::{
 };
 use xtask::scratch::Tree;
 
+mod common {
+    pub mod repo;
+    pub mod run;
+}
+use common::repo::Repo;
+use common::run::xtask;
+
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
 }
@@ -447,33 +454,7 @@ fn an_absent_tree_names_the_variable_and_the_pins_path_and_not_one_of_them() {
 /// of its own, and that commit as `git rev-parse HEAD` prints it.
 fn fixture_checkout(name: &str) -> (Tree, String) {
     let tree = fixture_tree(name);
-    let git = |args: &[&str]| {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(&tree)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8(out.stdout).unwrap().trim().to_owned()
-    };
-    git(&["init", "-q"]);
-    git(&[
-        "-c",
-        "user.name=xtask",
-        "-c",
-        "user.email=xtask@example",
-        "commit",
-        "-q",
-        "--allow-empty",
-        "-m",
-        "the fixture's one commit",
-    ]);
-    let head = git(&["rev-parse", "HEAD"]);
+    let head = Repo::init(&tree).commit("the fixture's one commit");
     (tree, head)
 }
 
@@ -623,18 +604,12 @@ fn ci_files() -> Vec<(String, String)> {
 /// count.
 #[test]
 fn no_workflow_holds_a_directory_of_the_corpus() {
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(workspace())
-        .args(["status", "--section", "corpus", "--format", "json"])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let corpus: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let out = xtask(
+        workspace(),
+        &["status", "--section", "corpus", "--format", "json"],
+    )
+    .ok();
+    let corpus: serde_json::Value = serde_json::from_str(&out).unwrap();
     let firsts: Vec<String> = corpus["patterns"]
         .as_array()
         .unwrap()

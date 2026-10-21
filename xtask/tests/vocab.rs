@@ -5,12 +5,18 @@
 //! writes; how the glossary itself is read is held beside the glossary.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use xtask::manifest::{AvoidFrom, Manifest, Rule};
 use xtask::reading::{Number, Reading, Status, Store};
 use xtask::scratch::Tree;
 use xtask::vocab;
+
+mod common {
+    pub mod repo;
+    pub mod run;
+}
+use common::repo::Repo;
+use common::run::xtask;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -39,7 +45,7 @@ fn scratch(name: &str, krate: &str, from: &Path) -> Tree {
         format!("[package]\nname = \"{package}\"\nedition = \"2024\"\n"),
     )
     .unwrap();
-    committed(&dir);
+    Repo::init(&dir).commit("fixture");
     dir
 }
 
@@ -56,20 +62,6 @@ fn fixture_reading(name: &str) -> Reading {
 /// The findings a reading lists, one per line after the rule's text.
 fn findings(reading: &Reading) -> Vec<&str> {
     reading.message.lines().skip(1).collect()
-}
-
-fn xtask(root: &Path, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(root)
-        .args(args)
-        .output()
-        .unwrap();
-    (
-        out.status.success(),
-        String::from_utf8(out.stdout).unwrap(),
-        String::from_utf8(out.stderr).unwrap(),
-    )
 }
 
 #[test]
@@ -156,9 +148,9 @@ fn a_thing_found_and_not_done_is_a_ticket_and_the_words_that_hide_it_fail() {
 #[test]
 fn the_instrument_writes_a_reading_per_crate_with_instrument_vocab() {
     let root = scratch("reading", "crates/php_ext", &fixture("vocab.avoid"));
-    let (ok, out, err) = xtask(&root, &["vocab"]);
-    assert!(!ok, "the fixture must fail: {out}{err}");
-    assert!(out.contains("Serve"), "{out}");
+    let ran = xtask(&root, &["vocab"]);
+    assert_ne!(ran.code(), 0, "the fixture must fail: {ran}");
+    assert!(ran.stdout.contains("Serve"), "{ran}");
 
     let store = Store::of_workspace(&root);
     let reading = store.read("vocab", "php_ext").unwrap().unwrap();
@@ -173,8 +165,7 @@ fn the_instrument_writes_a_reading_per_crate_with_instrument_vocab() {
     // A lock under the crate is not read.
     let other = scratch("nolock", "crates/php_heap", &fixture("vocab.avoid"));
     std::fs::write(other.join("crates/php_heap/heap.lock"), "heap::run\n").unwrap();
-    let (ok, _, _) = xtask(&other, &["vocab", "--crate", "php_heap"]);
-    assert!(!ok);
+    xtask(&other, &["vocab", "--crate", "php_heap"]).failed();
     let reading = Store::of_workspace(&other)
         .read("vocab", "php_heap")
         .unwrap()
@@ -190,42 +181,13 @@ fn the_instrument_writes_a_reading_per_crate_with_instrument_vocab() {
 #[test]
 fn a_crate_that_does_not_exist_yet_gets_no_reading() {
     let root = scratch("absent", "crates/php_ext", &fixture("vocab.avoid"));
-    let (ok, _, err) = xtask(&root, &["vocab", "--crate", "php_heap"]);
-    assert!(ok, "{err}");
+    xtask(&root, &["vocab", "--crate", "php_heap"]).ok();
     assert!(
         Store::of_workspace(&root)
             .read("vocab", "php_heap")
             .unwrap()
             .is_none()
     );
-}
-
-/// `dir` as a repository with everything under it in one commit, so a
-/// reading can be stamped.
-fn committed(dir: &Path) {
-    for args in [
-        vec!["init", "-q"],
-        vec!["add", "."],
-        vec![
-            "-c",
-            "user.name=xtask",
-            "-c",
-            "user.email=xtask@localhost",
-            "commit",
-            "-q",
-            "-m",
-            "fixture",
-        ],
-    ] {
-        let ok = Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok);
-    }
 }
 
 /// A copy of the fixture at `from` in a scratch directory, whole, with the
@@ -237,7 +199,7 @@ fn scratch_workspace(name: &str, from: &Path) -> (Tree, PathBuf) {
     let dir = base.join("a/b/c/d");
     copy_tree(from, &dir);
     std::fs::copy(workspace().join("oracle.toml"), base.join("oracle.toml")).unwrap();
-    committed(&dir);
+    Repo::init(&dir).commit("fixture");
     (base, dir)
 }
 

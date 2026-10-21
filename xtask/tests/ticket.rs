@@ -8,7 +8,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::Command;
 
 use xtask::manifest::Manifest;
 use xtask::reading::{Reading, Status, Store};
@@ -17,6 +16,11 @@ use xtask::ticket::{
     Act, CAP, Gh, MERGED, Reach, Successors, Verdict, merged, parent, run, stranded,
 };
 use xtask::track::Ticket;
+
+mod common {
+    pub mod repo;
+}
+use common::repo::Repo;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -368,34 +372,10 @@ fn done(successors: Successors) -> Act {
     Act::Close(Verdict::Done, successors, Reach::Landed)
 }
 
-/// `git` in `root` under a fixed name, its stdout trimmed.
-fn git(root: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args([
-            "-c",
-            "user.name=x",
-            "-c",
-            "user.email=x@x",
-            "-c",
-            "commit.gpgsign=false",
-        ])
-        .args(args)
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_owned()
-}
-
 /// A repository of this test's own on `main` with one empty commit.
 fn repository(name: &str) -> Tree {
     let root = Tree::new(name).unwrap();
-    git(&root, &["init", "-q", "-b", "main"]);
-    git(&root, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    Repo::init(&root).git(&["commit", "-q", "--allow-empty", "-m", "base"]);
     root
 }
 
@@ -406,7 +386,7 @@ fn repository(name: &str) -> Tree {
 #[test]
 fn ready_records_each_ticket_of_the_branch_with_its_successors_and_closes_nothing() {
     let root = repository("ticket-ready");
-    git(&root, &["checkout", "-q", "-b", "t7"]);
+    Repo::at(&root).git(&["checkout", "-q", "-b", "t7"]);
     let recorded = Recorded::lay("ready");
     recorded.issue(7, "OPEN", UNTICKED);
     recorded.issue(8, "OPEN", TICKED);
@@ -445,8 +425,11 @@ fn ready_records_each_ticket_of_the_branch_with_its_successors_and_closes_nothin
     assert_eq!(second.status, Status::Pass, "{}", second.message);
     let again = ready(7, opens_nine());
     assert_eq!(again.status, Status::Pass, "{}", again.message);
-    assert_eq!(git(&root, &["config", "branch.t7.ready-7"]), "9");
-    assert_eq!(git(&root, &["config", "branch.t7.ready-8"]), "nothing");
+    assert_eq!(Repo::at(&root).git(&["config", "branch.t7.ready-7"]), "9");
+    assert_eq!(
+        Repo::at(&root).git(&["config", "branch.t7.ready-8"]),
+        "nothing"
+    );
     assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
 }
 
@@ -459,17 +442,11 @@ fn ready_records_each_ticket_of_the_branch_with_its_successors_and_closes_nothin
 #[test]
 fn a_merge_into_main_closes_every_ready_ticket_its_subject_names() {
     let root = repository("ticket-merged");
-    git(&root, &["checkout", "-q", "-b", "t7"]);
-    git(
-        &root,
-        &["commit", "-q", "--allow-empty", "-m", "the bundle"],
-    );
-    git(&root, &["config", "branch.t7.ticket", "7"]);
+    Repo::at(&root).git(&["checkout", "-q", "-b", "t7"]);
+    Repo::at(&root).git(&["commit", "-q", "--allow-empty", "-m", "the bundle"]);
+    Repo::at(&root).git(&["config", "branch.t7.ticket", "7"]);
     for (n, successors) in [("7", "nothing"), ("8", "12"), ("9", "nothing")] {
-        git(
-            &root,
-            &["config", &format!("branch.t7.ready-{n}"), successors],
-        );
+        Repo::at(&root).git(&["config", &format!("branch.t7.ready-{n}"), successors]);
     }
     let recorded = Recorded::lay("merged");
     for n in [7, 8, 9, 11, 12] {
@@ -483,18 +460,15 @@ fn a_merge_into_main_closes_every_ready_ticket_its_subject_names() {
         "off main nothing is closed"
     );
 
-    git(&root, &["checkout", "-q", "main"]);
-    git(
-        &root,
-        &[
-            "merge",
-            "-q",
-            "--no-ff",
-            "t7",
-            "-m",
-            "Merge t7: the bundle (#7, #8, #9, #10, #11)",
-        ],
-    );
+    Repo::at(&root).git(&["checkout", "-q", "main"]);
+    Repo::at(&root).git(&[
+        "merge",
+        "-q",
+        "--no-ff",
+        "t7",
+        "-m",
+        "Merge t7: the bundle (#7, #8, #9, #10, #11)",
+    ]);
     let (readings, phases) = tickets_merged(&root, &recorded);
     let verdicts: Vec<(&str, Status)> = readings
         .iter()
@@ -539,7 +513,7 @@ fn a_merge_into_main_closes_every_ready_ticket_its_subject_names() {
     let dir = Tree::new("ticket-merged-store").unwrap();
     let store = Store::at(dir.to_path_buf());
     store.record(&readings).unwrap();
-    let head = git(&root, &["rev-parse", "HEAD"]);
+    let head = Repo::at(&root).git(&["rev-parse", "HEAD"]);
     let unmet = stranded(&root, &store, &head).unwrap();
     assert_eq!(unmet.len(), 1, "{unmet:?}");
     assert!(
@@ -598,20 +572,17 @@ fn phases_named(phases: &Reading) {
 #[test]
 fn a_merge_landing_part_of_a_blocked_ticket_leaves_it_open_and_done_does_not_name_it() {
     let root = repository("ticket-partial");
-    git(&root, &["checkout", "-q", "-b", "t13"]);
-    git(&root, &["commit", "-q", "--allow-empty", "-m", "part"]);
-    git(&root, &["checkout", "-q", "main"]);
-    git(
-        &root,
-        &[
-            "merge",
-            "-q",
-            "--no-ff",
-            "t13",
-            "-m",
-            "Merge t13: part of the port (#13, #15, #17)",
-        ],
-    );
+    Repo::at(&root).git(&["checkout", "-q", "-b", "t13"]);
+    Repo::at(&root).git(&["commit", "-q", "--allow-empty", "-m", "part"]);
+    Repo::at(&root).git(&["checkout", "-q", "main"]);
+    Repo::at(&root).git(&[
+        "merge",
+        "-q",
+        "--no-ff",
+        "t13",
+        "-m",
+        "Merge t13: part of the port (#13, #15, #17)",
+    ]);
     let recorded = Recorded::lay("partial");
     recorded.blocked(13, UNTICKED, &[(14, "OPEN"), (16, "CLOSED")]);
     recorded.blocked(15, UNTICKED, &[(16, "CLOSED")]);
@@ -637,7 +608,7 @@ fn a_merge_landing_part_of_a_blocked_ticket_leaves_it_open_and_done_does_not_nam
         "{}",
         readings[0].message
     );
-    let parent = git(&root, &["rev-parse", "--short", "HEAD^1"]);
+    let parent = Repo::at(&root).git(&["rev-parse", "--short", "HEAD^1"]);
     assert!(
         readings[1]
             .message
@@ -653,7 +624,7 @@ fn a_merge_landing_part_of_a_blocked_ticket_leaves_it_open_and_done_does_not_nam
     let dir = Tree::new("ticket-partial-store").unwrap();
     let store = Store::at(dir.to_path_buf());
     store.record(&readings).unwrap();
-    let head = git(&root, &["rev-parse", "HEAD"]);
+    let head = Repo::at(&root).git(&["rev-parse", "HEAD"]);
     let unmet = stranded(&root, &store, &head).unwrap();
     assert_eq!(unmet.len(), 2, "{unmet:?}");
     assert!(
@@ -686,21 +657,18 @@ fn merged_with_ready(
     ready: &[(u64, &str)],
 ) -> (Tree, Recorded) {
     let root = repository(name);
-    git(&root, &["checkout", "-q", "-b", branch]);
-    git(&root, &["commit", "-q", "--allow-empty", "-m", "the work"]);
+    Repo::at(&root).git(&["checkout", "-q", "-b", branch]);
+    Repo::at(&root).git(&["commit", "-q", "--allow-empty", "-m", "the work"]);
     let recorded = Recorded::lay(name);
     for &(n, successors) in ready {
-        git(
-            &root,
-            &["config", &format!("branch.{branch}.ready-{n}"), successors],
-        );
+        Repo::at(&root).git(&["config", &format!("branch.{branch}.ready-{n}"), successors]);
         recorded.issue(n, "OPEN", TICKED);
         for successor in successors.split(' ').filter_map(|s| s.parse().ok()) {
             recorded.issue(successor, "OPEN", TICKED);
         }
     }
-    git(&root, &["checkout", "-q", "main"]);
-    git(&root, &["merge", "-q", "--no-ff", branch, "-m", subject]);
+    Repo::at(&root).git(&["checkout", "-q", "main"]);
+    Repo::at(&root).git(&["merge", "-q", "--no-ff", branch, "-m", subject]);
     (root, recorded)
 }
 
@@ -797,7 +765,7 @@ fn a_ticket_the_tracker_cannot_read_is_named_and_the_rest_of_the_merge_closes() 
         ],
         "{readings:#?}"
     );
-    let parent = git(&root, &["rev-parse", "--short", "HEAD^1"]);
+    let parent = Repo::at(&root).git(&["rev-parse", "--short", "HEAD^1"]);
     assert!(
         readings[1]
             .message
@@ -812,7 +780,7 @@ fn a_ticket_the_tracker_cannot_read_is_named_and_the_rest_of_the_merge_closes() 
     let dir = Tree::new("ticket-unreadable-store").unwrap();
     let store = Store::at(dir.to_path_buf());
     store.record(&readings).unwrap();
-    let head = git(&root, &["rev-parse", "HEAD"]);
+    let head = Repo::at(&root).git(&["rev-parse", "HEAD"]);
     let unmet = stranded(&root, &store, &head).unwrap();
     assert_eq!(unmet.len(), 1, "{unmet:?}");
     assert!(unmet[0].contains("#21 could not be read"), "{unmet:?}");
@@ -836,13 +804,13 @@ fn a_ticket_the_tracker_cannot_read_is_named_and_the_rest_of_the_merge_closes() 
 #[test]
 fn a_commit_is_landed_once_main_contains_it_and_unmerged_before() {
     let root = Tree::new("ticket-reach").unwrap();
-    git(&root, &["init", "-q", "-b", "main"]);
-    git(&root, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    Repo::init(&root);
+    Repo::at(&root).git(&["commit", "-q", "--allow-empty", "-m", "base"]);
     assert_eq!(Reach::of(&root).unwrap(), Reach::Landed);
 
-    git(&root, &["checkout", "-q", "-b", "t7"]);
-    git(&root, &["commit", "-q", "--allow-empty", "-m", "the work"]);
-    let tip = git(&root, &["rev-parse", "--short=7", "HEAD"]);
+    Repo::at(&root).git(&["checkout", "-q", "-b", "t7"]);
+    Repo::at(&root).git(&["commit", "-q", "--allow-empty", "-m", "the work"]);
+    let tip = Repo::at(&root).git(&["rev-parse", "--short=7", "HEAD"]);
     assert_eq!(
         Reach::of(&root).unwrap(),
         Reach::Unmerged {
@@ -851,9 +819,9 @@ fn a_commit_is_landed_once_main_contains_it_and_unmerged_before() {
         }
     );
 
-    git(&root, &["checkout", "-q", "main"]);
-    git(&root, &["merge", "-q", "--no-ff", "--no-edit", "t7"]);
-    git(&root, &["checkout", "-q", "t7"]);
+    Repo::at(&root).git(&["checkout", "-q", "main"]);
+    Repo::at(&root).git(&["merge", "-q", "--no-ff", "--no-edit", "t7"]);
+    Repo::at(&root).git(&["checkout", "-q", "t7"]);
     assert_eq!(Reach::of(&root).unwrap(), Reach::Landed);
 }
 

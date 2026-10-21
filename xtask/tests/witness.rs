@@ -28,9 +28,11 @@ use xtask::witness::{self, Accept, Ask, Scope};
 mod common {
     pub mod registry;
     pub mod repo;
+    pub mod run;
 }
 use common::registry::registry;
-use common::repo::scratch_workspace;
+use common::repo::{Repo, scratch_workspace};
+use common::run::xtask;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -79,7 +81,7 @@ fn block(fences: &str) -> String {
 /// holds the lane to serving its witnesses without it.
 fn scratch(name: &str, text: &str) -> Tree {
     let root = Tree::new(&format!("witness-{name}")).unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     fs::create_dir_all(root.join("ext/fixture/src")).unwrap();
     fs::write(
         root.join("ext/fixture/Cargo.toml"),
@@ -298,27 +300,22 @@ fn a_narrowed_run_writes_no_reading() {
         ),
     )
     .unwrap();
-    let xtask = |item: &str| {
-        Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-            .arg("--root")
-            .arg(root.path())
-            .args(["witness", "--crate", "ext/fixture", "--item", item])
-            .output()
-            .unwrap()
+    let narrowed = |item: &str| {
+        xtask(
+            &root,
+            &["witness", "--crate", "ext/fixture", "--item", item],
+        )
     };
-    let out = xtask("one");
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let ran = narrowed("one");
     assert!(
-        stdout.contains("witness: a run narrowed to the fences on one writes no reading"),
-        "{stdout}{}",
-        String::from_utf8_lossy(&out.stderr)
+        ran.stdout
+            .contains("witness: a run narrowed to the fences on one writes no reading"),
+        "{ran}"
     );
     let store = Store::of_workspace(root.path());
     assert!(store.read("witness", "ext/fixture").unwrap().is_none());
 
-    let out = xtask("nope");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = narrowed("nope").failed();
     assert!(stderr.contains("no fence stands on nope"), "{stderr}");
     assert!(store.read("witness", "ext/fixture").unwrap().is_none());
 }
@@ -1408,29 +1405,7 @@ fn a_crate_whose_sources_cannot_be_read_fails_and_names_the_crate() {
     // Two bytes no text is: the file is there and is not one the fence
     // grammar can read.
     fs::write(root.join("ext/pcre/src/lib.rs"), [0xff, 0xfe]).unwrap();
-    for args in [
-        vec!["init", "-q", "-b", "main"],
-        vec!["add", "-A"],
-        vec![
-            "-c",
-            "user.name=x",
-            "-c",
-            "user.email=x@x",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-q",
-            "-m",
-            "scratch",
-        ],
-    ] {
-        let status = Command::new("git")
-            .args(&args)
-            .current_dir(&root)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
-    }
+    Repo::init(&root).commit("scratch");
     let readings = witness::run(
         &root,
         &manifest(),
@@ -1473,12 +1448,7 @@ fn staged_narrows_the_run_to_the_crates_with_a_staged_change() {
     };
     assert!(staged(Vec::new()).is_empty(), "nothing is staged yet");
 
-    let added = Command::new("git")
-        .args(["add", "--", "ext/fixture"])
-        .current_dir(&root)
-        .status()
-        .unwrap();
-    assert!(added.success(), "git add ext/fixture");
+    Repo::at(&root).git(&["add", "--", "ext/fixture"]);
     let readings = staged(Vec::new());
     assert_eq!(readings.len(), 1, "{readings:#?}");
     assert_eq!(readings[0].scope, "ext/fixture");
@@ -1499,7 +1469,7 @@ fn a_witness_that_kills_its_server_fails_alone_and_the_next_is_served() {
     }
     let fixture = fixture_at("witness", "abort");
     let root = Tree::new("witness-abort").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     let pin = manifest().oracle.pin;
     let seams = fs::read_to_string(fixture.join("seams.toml"))
         .unwrap()
@@ -1509,18 +1479,9 @@ fn a_witness_that_kills_its_server_fails_alone_and_the_next_is_served() {
     for file in ["ext/pcre/Cargo.toml", "ext/pcre/src/lib.rs"] {
         fs::copy(fixture.join(file), root.join(file)).unwrap();
     }
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(root.path())
-        .args(["witness", "--crate", "ext/pcre"])
-        .output()
-        .unwrap();
-    let said = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(!out.status.success(), "{said}");
+    let ran = xtask(&root, &["witness", "--crate", "ext/pcre"]);
+    assert_ne!(ran.code(), 0, "{ran}");
+    let said = ran.stdout + &ran.stderr;
     let reading = Store::of_workspace(root.path())
         .read("witness", "ext/pcre")
         .unwrap()

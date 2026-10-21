@@ -15,7 +15,6 @@
 //! (#2545).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use quote::ToTokens;
 use syn::{FnArg, ImplItem, Item, ReceiverKind, Signature, TraitItem, Type};
@@ -23,6 +22,11 @@ use xtask::manifest::Manifest;
 use xtask::reading::{Reading, Status};
 use xtask::scratch::Tree;
 use xtask::{api_check, budget, clippy, new_sapi, unsafe_audit};
+
+mod common {
+    pub mod repo;
+}
+use common::repo::Repo;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -45,31 +49,7 @@ fn scratch(name: &str) -> Tree {
         seams.replace("../../../oracle.toml", pin.to_str().unwrap()),
     )
     .unwrap();
-    for args in [
-        vec!["init", "-q"],
-        vec!["add", "."],
-        vec![
-            "-c",
-            "user.name=fixture",
-            "-c",
-            "user.email=fixture@localhost",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/var/empty",
-            "commit",
-            "-q",
-            "-m",
-            "fixture",
-        ],
-    ] {
-        let status = Command::new("git")
-            .args(&args)
-            .current_dir(&dir)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
-    }
+    Repo::init(&dir).commit("fixture");
     dir
 }
 
