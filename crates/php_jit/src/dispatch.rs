@@ -447,13 +447,11 @@ fn sided(
     };
     if exit.grows == Grows::Never {
         if policy::spend(&exit.word, &shared.policy, start) {
-            let mut lines = Vec::new();
             let event = TraceEvent::ExitBlacklisted {
                 trace,
                 exit: exited.exit,
             };
-            shared.dump(&mut lines, &event);
-            req.response_mut().write_stderr(&lines);
+            written(req, shared, &event);
         }
         return Visited::Continue;
     }
@@ -603,9 +601,7 @@ pub(crate) fn hot(
             None => at,
         };
     };
-    let mut lines = Vec::new();
-    shared.dump(&mut lines, &TraceEvent::Done);
-    req.response_mut().write_stderr(&lines);
+    written(req, shared, &TraceEvent::Done);
     match stood.filter(|(at, id)| opens(req, *at, *id, shared)) {
         Some((at, id)) => match run(req, at, id, shared) {
             Flow::Continue => flow,
@@ -613,6 +609,14 @@ pub(crate) fn hot(
         },
         None => flow,
     }
+}
+
+/// `event`'s line, where `opcache.jit_debug` asks for it, written to the
+/// request's error stream.
+fn written(req: &mut Request, shared: &Shared, event: &TraceEvent<'_>) {
+    let mut lines = Vec::new();
+    shared.dump(&mut lines, event);
+    req.response_mut().write_stderr(&lines);
 }
 
 /// Where a recording of `start` claimed at `at` on `frame` begins.

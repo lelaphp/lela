@@ -18,9 +18,10 @@
 //! joins when the Linux targets are measured; until then [`Unmapped`]
 //! maps nothing there, and a table over it compiles nothing.
 //!
-//! Beside the arena, the three calls the `PERF_DUMP` record needs that
-//! only `unsafe` reaches: the jitdump's one mapping, the monotonic clock
-//! its records are stamped with, and the thread that wrote them.
+//! Beside the arena, the system's page its size is rounded to, and the
+//! three calls the `PERF_DUMP` record needs that only `unsafe` reaches:
+//! the jitdump's one mapping, the monotonic clock its records are
+//! stamped with, and the thread that wrote them.
 #![deny(
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block
@@ -398,13 +399,12 @@ impl Pages for Unmapped {
 #[cfg(unix)]
 pub(crate) fn map_once(file: &std::fs::File) -> io::Result<()> {
     use std::os::fd::AsRawFd;
-    const PAGE: usize = 4096;
     // SAFETY: a fresh private mapping of an open file, overlapping
     // nothing, read by nothing.
     let at = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
-            PAGE,
+            page_size(),
             libc::PROT_READ | libc::PROT_EXEC,
             libc::MAP_PRIVATE,
             file.as_raw_fd(),
@@ -415,7 +415,7 @@ pub(crate) fn map_once(file: &std::fs::File) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: the mapping just made, which nothing else names.
-    unsafe { libc::munmap(at, PAGE) };
+    unsafe { libc::munmap(at, page_size()) };
     Ok(())
 }
 

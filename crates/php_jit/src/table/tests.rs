@@ -244,13 +244,14 @@ fn a_full_arena_is_a_compiler_error_and_stops_nothing() {
 
 /// Under `opcache.jit_buffer_size=16K` the arena holds php's buffer,
 /// 16K rounded up to the page, and no more (#3112's ruling): half of it
-/// is published, and a body past the other half is `Full::Code`, where
-/// an arena of one whole chunk would have taken it.
+/// is published, and a body past the other half is `Full::Code`, where,
+/// on a target whose page is below a chunk, an arena of one whole chunk
+/// would have taken it.
 #[test]
 fn a_small_buffer_holds_what_phps_holds() {
     let table = table(&[("opcache.jit_buffer_size", "16K")]);
     let held = super::code::capacity(16 << 10);
-    assert!((16 << 10..CHUNK).contains(&held), "{held}");
+    assert!(held >= 16 << 10, "{held}");
     assert_eq!(
         table.publish(compiled(&vec![0; held / 2], vec![]), Start::Loop),
         Ok(trace(1))

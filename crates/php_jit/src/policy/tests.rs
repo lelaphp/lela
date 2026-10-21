@@ -240,7 +240,8 @@ fn row(start: Start, outcome: Outcome) -> (State, u32, u32) {
 /// The machine as a table, one row per `(State, Start, Outcome)` from
 /// cold: a publish compiles, an abort is cold again with one more
 /// attempt, a root's with no heat and a side's with its heat kept, a
-/// blacklist is at once; claim is `None` on a
+/// release counts no attempt, a root's with no heat and a side's with
+/// the firing that claimed it uncounted, a blacklist is at once; claim is `None` on a
 /// word that is not cold.
 #[test]
 fn the_state_machine_as_a_table() {
@@ -261,6 +262,8 @@ fn the_state_machine_as_a_table() {
             (State::Cold, 1, 0),
         ),
         (side(), Outcome::Abort(Stop::TooLong), (State::Cold, 1, 3)),
+        (Start::Loop, Outcome::Released, (State::Cold, 0, 0)),
+        (side(), Outcome::Released, (State::Cold, 0, 2)),
         (
             Start::Loop,
             Outcome::Blacklist(Stop::TooManyTraces),
@@ -542,7 +545,7 @@ fn a_failed_attempt_keeps_its_stop_and_a_release_counts_none() {
 
 /// A lane's `jit.mode` leaves to the interpreter a program whose
 /// directives say php's tier never starts, `opcache.jit=disable`, a
-/// refused setting or a zero buffer, with no lane's line, and still
+/// refused setting or a zero buffer, with no note, and still
 /// names its lane over `off`, `tracing` and nothing set (#3136's ruling).
 #[test]
 fn a_lane_leaves_a_tier_that_never_starts_to_the_interpreter() {
@@ -563,8 +566,9 @@ fn a_lane_leaves_a_tier_that_never_starts_to_the_interpreter() {
             asked.push(("jit.mode", lane));
             let (policy, notes) = read_on("cli", &asked);
             assert_eq!(policy.bound(true), bound, "{asked:?}");
-            let lined = notes.iter().any(|note| matches!(note, Note::Lane(_)));
-            assert_eq!(lined, bound == Bound::On, "{asked:?}: {notes:?}");
+            let lined = [Note::Lane(policy.mode())];
+            let expected: &[Note] = if bound == Bound::On { &lined } else { &[] };
+            assert_eq!(notes, expected, "{asked:?}");
         }
     }
 }

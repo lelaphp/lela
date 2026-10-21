@@ -345,19 +345,6 @@ fn value<'a>(ini: &'a StartupIni, name: &str) -> Option<&'a [u8]> {
         .and_then(|(_, value)| value.as_deref())
 }
 
-/// Whether the directives the host set say php's tier can never start,
-/// whatever starts opcache: `opcache.jit=disable`, a setting
-/// `zend_jit_config` refuses, or a zero `opcache.jit_buffer_size`, each
-/// set and not php's default, so a lane leaves the program to the
-/// interpreter (#3136's ruling). `opcache.jit=off` is not one: php may
-/// turn it on from a request.
-fn never(ini: &StartupIni) -> bool {
-    let setting = value(ini, "opcache.jit").map(Setting::of);
-    matches!(setting, Some(Setting::Disable | Setting::Invalid))
-        || value(ini, "opcache.jit_buffer_size")
-            .is_some_and(|size| Ini::parse_quantity(size).0 <= 0)
-}
-
 /// `name` read as php's quantity, `default` where unset.
 fn long(ini: &StartupIni, name: &str, default: i64) -> i64 {
     value(ini, name).map_or(default, |text| Ini::parse_quantity(text).0)
@@ -401,8 +388,9 @@ impl Policy {
     /// `opcache.enable_cli` off. `jit.mode`, where set, names the `Mode`
     /// whatever `opcache.jit`, `opcache.enable` and `opcache.enable_cli`
     /// say, which is how the tier's lanes serve a corpus that sets none
-    /// of them, but where the directives set say php's tier never starts
-    /// ([`never`]): a test that says so is a test about having no tier,
+    /// of them, but where the directives set say php's tier never starts,
+    /// `opcache.jit=disable`, a setting php refuses or a zero buffer: a
+    /// test that says so is a test about having no tier,
     /// served by the interpreter with no lane's line (#3136's ruling). A
     /// tier that runs `Off` reads no `opcache.jit_debug` bit
     /// ([`Policy::off`]), so it writes no line, as php writes none
@@ -461,15 +449,21 @@ impl Policy {
                 None
             }
         };
+        // `opcache.jit=disable` or a setting php refuses, set and not
+        // php's default `disable`, says php's tier never starts, which a
+        // lane gives way to (#3136's ruling); a zero buffer is the line
+        // below's. `off` is not one: php may turn it on from a request.
+        let disabled = value(ini, "opcache.jit").is_some()
+            && matches!(setting, Setting::Disable | Setting::Invalid);
         let asked = match (lane, setting, set_up) {
-            (Some(mode), ..) if !never(ini) => mode,
+            (Some(mode), ..) if !disabled => mode,
             (None, Setting::On { crto }, SetUp::Yes) => {
                 if (crto / 10) % 10 != HOT_TRACE {
                     notes.push(Note::AsTracing { crto });
                 }
                 Mode::Tracing
             }
-            _ => Mode::Off,
+            (Some(_) | None, ..) => Mode::Off,
         };
         let mode = if buffer_size > 0 { asked } else { Mode::Off };
         if matches!(mode, Mode::Force | Mode::ExitFuzz) {
@@ -845,8 +839,9 @@ pub(crate) enum Outcome {
     Blacklist(Stop),
     /// Cold again with no attempt counted: the recording became the trace
     /// of another word, a loop php unrolled and rooted the trace at
-    /// (`zend_jit_trace_subtrace`), and this word's heat starts again as
-    /// php's `zend_jit_trace_hot_root` starts a root's count again.
+    /// (`zend_jit_trace_subtrace`), and a root's heat starts again as
+    /// php's `zend_jit_trace_hot_root` starts a root's count again, where
+    /// an exit's firing is not counted ([`Spent::At`]).
     Released,
 }
 
@@ -1136,9 +1131,13 @@ impl Claim {
             }
             Outcome::Blacklist(_) => BLACKLISTED,
             Outcome::Released => {
-                if let Spent::After(_) = self.spent {
-                    heat.store(0, Ordering::Relaxed);
-                }
+                // A root's count starts again; an exit's firing counts
+                // nothing, as php's exit count does not move for it.
+                let left = match self.spent {
+                    Spent::After(_) => 0,
+                    Spent::At(_) => heat.load(Ordering::Relaxed).saturating_sub(1),
+                };
+                heat.store(left, Ordering::Relaxed);
                 held & !STATE & !(u32::from(ATTEMPTS_MAX) << ATTEMPTS_SHIFT)
             }
         };
@@ -1247,8 +1246,9 @@ pub(crate) fn spend(word: &Word, policy: &Policy, start: Start) -> bool {
         .is_ok()
 }
 
-/// End `claim` with `outcome`, one release store; an abort also stores
-/// zero to the heat, as php's hot root starts its count again. The
+/// End `claim` with `outcome`, one release store; a root's abort also
+/// stores zero to the heat, as php's hot root starts its count again,
+/// where an exit's keeps it ([`Spent`]). The
 /// state the word was left in, which says whether an abort blacklisted
 /// it.
 pub(crate) fn settle(mut claim: Claim, outcome: &Outcome) -> State {
