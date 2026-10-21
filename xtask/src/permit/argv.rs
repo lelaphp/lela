@@ -498,10 +498,10 @@ impl Lexer {
             word.text.push_str(&value);
         }
         let word = command.words.len();
-        let assigns = command.next == Next::Argument;
+        let listed = command.next == Next::Argument;
         self.end_word(command);
         let next = self.chars.get(self.at);
-        if assigns && next.is_some_and(|c| !c.is_whitespace() && !";&|()<>".contains(*c)) {
+        if listed && next.is_some_and(|c| !c.is_whitespace() && !";&|()<>".contains(*c)) {
             command.joined.push(word);
             command.open(false);
         }
@@ -558,6 +558,15 @@ impl Lexer {
             .is_some_and(|w| !w.quoted && w.text.bytes().all(|b| b.is_ascii_digit()))
         {
             command.word = None;
+            // A digit straight after an array's `)` is zsh's descriptor
+            // and bash's more of the assignment: neither runs it.
+            if command
+                .joined
+                .last()
+                .is_some_and(|at| at + 1 == command.words.len())
+            {
+                command.joined.pop();
+            }
         }
         self.end_word(command);
         command.redirected = true;
@@ -613,7 +622,10 @@ impl Lexer {
     /// Where word text follows an array's `)` straight after, `P=(a)x git
     /// commit`, the command is read as zsh runs it, `x` the program, and
     /// then as bash runs it, `P=(a)x` an assignment and `git` the program,
-    /// both joined as the command stands (#3198).
+    /// both joined as the command stands (#3198). What the line assigns
+    /// is zsh's reading's, as before: bash's would replace a program the
+    /// line runs by `$P` with a word no rule names, `P=(git)Q=1; $P
+    /// commit` running `gitQ=1`.
     fn end(&mut self, command: &mut Command, after: Joint) {
         self.end_word(command);
         command.next = Next::Argument;
@@ -631,7 +643,9 @@ impl Lexer {
         self.run(words, redirected, after);
         if !joined.is_empty() {
             let zsh = std::mem::replace(&mut self.before, before);
+            let assigned = self.assigned.0.clone();
             self.run(bash, redirected, after);
+            self.assigned.0 = assigned;
             self.before = zsh;
         }
     }
@@ -1780,6 +1794,8 @@ mod tests {
         assert_eq!(words("P=(a) git commit"), [["git", "commit"]]);
         assert_eq!(words("P=(a)b"), [["b"]]);
         assert_eq!(words("P=(a)>f git commit"), [["git", "commit"]]);
+        assert_eq!(words("P=(a)2>f git commit"), [["git", "commit"]]);
+        assert_eq!(words("P=(git)Q=1; $P commit"), [["git", "commit"]]);
     }
 
     /// Whether a command of the line is the one `phrase` names.
