@@ -8,12 +8,12 @@ use std::ptr;
 use super::*;
 
 /// A kernel that raises a fatal.
-fn refuse(_: &mut Tally, _: On<'_>, why: u64) -> Result<u64, Fatal> {
+fn refuse(_: &mut Tally, _: On<'_, '_>, why: u64) -> Result<u64, Fatal> {
     Err(Fatal::error(format!("refused {why}")))
 }
 
 /// A kernel that panics.
-fn explode(_: &mut Tally, _: On<'_>, _: u64) -> Result<u64, Fatal> {
+fn explode(_: &mut Tally, _: On<'_, '_>, _: u64) -> Result<u64, Fatal> {
     panic!("the kernel panicked")
 }
 
@@ -22,7 +22,7 @@ fn explode(_: &mut Tally, _: On<'_>, _: u64) -> Result<u64, Fatal> {
     clippy::unnecessary_wraps,
     reason = "a kernel answers a Result; this one never fails"
 )]
-fn throw(t: &mut Tally, _: On<'_>, n: u64) -> Result<u64, Fatal> {
+fn throw(t: &mut Tally, _: On<'_, '_>, n: u64) -> Result<u64, Fatal> {
     t.thrown = true;
     Ok(n)
 }
@@ -295,12 +295,12 @@ pub(crate) mod entered {
     }
 
     /// A kernel that panics.
-    fn explode(_: &mut Request, _: On<'_>) -> Result<u64, Fatal> {
+    fn explode(_: &mut Request, _: On<'_, '_>) -> Result<u64, Fatal> {
         panic!("the kernel panicked")
     }
 
     /// A kernel that re-enters PHP, calling `inner` from the frame it serves.
-    fn reenter(req: &mut Request, on: On<'_>) -> Result<u64, Fatal> {
+    fn reenter(req: &mut Request, on: On<'_, '_>) -> Result<u64, Fatal> {
         let frame = standing(req, on.room, on.at)?;
         tier::call(req, Under::Frame(frame), b"inner", &[]);
         Ok(0)
@@ -311,7 +311,7 @@ pub(crate) mod entered {
     /// The kernel `jit-design.md` §4.9 *Tested* asks for: the
     /// number of the trace that calls it kept, then the opline served
     /// whole as the `step` kernel serves it.
-    fn number(req: &mut Request, on: On<'_>) -> Result<Stood, Fatal> {
+    fn number(req: &mut Request, on: On<'_, '_>) -> Result<Stood, Fatal> {
         let running = tier::trace_num(req).raw();
         req.state::<Numbered>().0.push(running);
         let frame = standing(req, on.room, on.at)?;

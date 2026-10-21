@@ -96,7 +96,7 @@ pub(crate) struct ExitCtx<'a, R = Request> {
     /// The epoch the trace was taken from, which holds every op array it
     /// recorded: what a kernel serves those op arrays out of
     /// ([`tier::step_held`]), none for a stand-in request.
-    epoch: Option<&'a Epoch>,
+    holding: Option<Holding<'a>>,
     lent: PhantomData<&'a mut R>,
 }
 
@@ -122,7 +122,7 @@ impl<'a, R: Crossed> ExitCtx<'a, R> {
             interrupt,
             at: At::First,
             pending: None,
-            epoch: None,
+            holding: None,
             lent: PhantomData,
         }
     }
@@ -227,7 +227,7 @@ const _: () =
 pub(crate) unsafe fn crossed<R: Crossed, T: Out>(
     cx: *mut ExitCtx<'_, R>,
     out: *mut T,
-    kernel: impl FnOnce(&mut R, Option<&Epoch>) -> Result<T, Fatal>,
+    kernel: impl FnOnce(&mut R, Option<&Holding<'_>>) -> Result<T, Fatal>,
 ) -> Status {
     // SAFETY: the caller hands the live context `enter` made, borrowed by
     // nothing else for the length of this call.
@@ -236,8 +236,8 @@ pub(crate) unsafe fn crossed<R: Crossed, T: Out>(
     // whole life, and compiled code touches the request only through
     // wrappers, one at a time on its stack.
     let req = unsafe { &mut *cx.req };
-    let epoch = cx.epoch;
-    match catch_unwind(AssertUnwindSafe(|| kernel(req, epoch))) {
+    let holding = cx.holding.as_ref();
+    match catch_unwind(AssertUnwindSafe(|| kernel(req, holding))) {
         // SAFETY: the caller hands an out slot as `put` asks.
         Ok(answer) => unsafe { answered(cx, out, answer) },
         Err(payload) => {
@@ -286,13 +286,45 @@ unsafe fn answered<R: Crossed, T: Out>(
 pub(crate) struct Room(pub(crate) *mut u8);
 
 /// Where a kernel serves: the room of its frame, the opline, and the
-/// epoch the trace that called it holds its op arrays in, none for a
-/// stand-in request.
+/// hold on the epoch the trace that called it holds its op arrays in,
+/// none for a stand-in request.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct On<'a> {
+pub(crate) struct On<'h, 'a> {
     pub(crate) room: Room,
     pub(crate) at: OplineIdx,
-    pub(crate) epoch: Option<&'a Epoch>,
+    pub(crate) holding: Option<&'h Holding<'a>>,
+}
+
+/// The epoch an `enter` took its trace from, and the op array its
+/// kernels served last, by the engine offset that numbers it: compiled
+/// code steps the oplines of one op array one after another, so a kernel finds it
+/// again with one compare and no row of the epoch read.
+#[derive(Debug)]
+pub(crate) struct Holding<'a> {
+    epoch: &'a Epoch,
+    last: std::cell::Cell<Option<(u32, Held<'a>)>>,
+}
+
+impl<'a> Holding<'a> {
+    /// The hold on `epoch`, having served nothing yet.
+    fn of(epoch: &'a Epoch) -> Holding<'a> {
+        Holding {
+            epoch,
+            last: std::cell::Cell::new(None),
+        }
+    }
+
+    /// The op array the engine numbers `func`, as the epoch holds it.
+    fn held(&self, func: u32) -> Option<Held<'a>> {
+        if let Some((last, held)) = self.last.get()
+            && last == func
+        {
+            return Some(held);
+        }
+        let held = self.epoch.held(FuncRef::at(MapPtrOffset::Engine(func)))?;
+        self.last.set(Some((func, held)));
+        Some(held)
+    }
 }
 
 /// One `extern "C"` wrapper per listed kernel (`jit-design.md` §4.6,
@@ -348,7 +380,7 @@ macro_rules! kernels {
         ) -> $crate::enter::Status {
             let (room, at) = ($crate::enter::Room(frame), php_unit::OplineIdx(opline));
             // SAFETY: this wrapper's own contract, handed on whole.
-            unsafe { $crate::enter::crossed(cx, out, |req, epoch| super::$name(req, $crate::enter::On { room, at, epoch }, $($arg),*)) }
+            unsafe { $crate::enter::crossed(cx, out, |req, holding| super::$name(req, $crate::enter::On { room, at, holding }, $($arg),*)) }
         }
     };
     (@wrapper $request:ty, $name:ident ( $($arg:ident : $ty:ty),* )) => {
@@ -367,7 +399,7 @@ macro_rules! kernels {
             let (room, at) = ($crate::enter::Room(frame), php_unit::OplineIdx(opline));
             // SAFETY: this wrapper's own contract; a kernel that answers
             // nothing has no out pointer.
-            unsafe { $crate::enter::crossed(cx, std::ptr::null_mut::<()>(), |req, epoch| super::$name(req, $crate::enter::On { room, at, epoch }, $($arg),*)) }
+            unsafe { $crate::enter::crossed(cx, std::ptr::null_mut::<()>(), |req, holding| super::$name(req, $crate::enter::On { room, at, holding }, $($arg),*)) }
         }
     };
 }
@@ -386,7 +418,7 @@ kernels! {
 /// array the engine numbers `func`, which the trace recorded and its epoch
 /// holds, served whole over that op array ([`tier::step_held`]), and
 /// where the interpreter stands after it.
-fn step(req: &mut Request, on: On<'_>, func: u32) -> Result<Stood, Fatal> {
+fn step(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<Stood, Fatal> {
     let frame = standing(req, on.room, on.at)?;
     let (held, epoch) = held(on, func)?;
     let stepped = tier::step_held(req, frame, held, epoch)?;
@@ -400,7 +432,7 @@ fn step(req: &mut Request, on: On<'_>, func: u32) -> Result<Stood, Fatal> {
 /// recorded; where it holds another, or none yet, nothing is pushed and
 /// the call stood is null, so compiled code leaves for the interpreter to
 /// serve the opline whole.
-fn push_call(req: &mut Request, on: On<'_>, func: u32, callee: u32) -> Result<Stood, Fatal> {
+fn push_call(req: &mut Request, on: On<'_, '_>, func: u32, callee: u32) -> Result<Stood, Fatal> {
     let frame = standing(req, on.room, on.at)?;
     let (held, epoch) = held(on, func)?;
     if tier::primed(req, frame, held, on.at).and_then(engine_offset) != Some(callee) {
@@ -421,7 +453,7 @@ fn push_call(req: &mut Request, on: On<'_>, func: u32, callee: u32) -> Result<St
 /// with no dispatch ([`tier::call_held`]); where the interpreter stands
 /// after it, in the callee, named by the op array it runs, which a
 /// `DO_FCALL` of a callee another call varies holds to the one recorded.
-fn call(req: &mut Request, on: On<'_>, func: u32, callee: u32) -> Result<Stood, Fatal> {
+fn call(req: &mut Request, on: On<'_, '_>, func: u32, callee: u32) -> Result<Stood, Fatal> {
     let frame = standing(req, on.room, on.at)?;
     let (entered, _) = held(on, callee)?;
     let (held, epoch) = held(on, func)?;
@@ -430,20 +462,20 @@ fn call(req: &mut Request, on: On<'_>, func: u32, callee: u32) -> Result<Stood, 
 }
 
 /// The op array the engine numbers `func`, as the epoch of the trace
-/// that recorded it holds it.
-fn held(on: On<'_>, func: u32) -> Result<(Held<'_>, &Epoch), Fatal> {
-    let epoch = on
-        .epoch
+/// that recorded it holds it, and that epoch.
+fn held<'a>(on: On<'_, 'a>, func: u32) -> Result<(Held<'a>, &'a Epoch), Fatal> {
+    let holding = on
+        .holding
         .ok_or_else(|| internal("a kernel was called with no epoch to serve from"))?;
-    let held = epoch
-        .held(FuncRef::at(MapPtrOffset::Engine(func)))
+    let held = holding
+        .held(func)
         .ok_or_else(|| internal("a trace stepped an op array its epoch does not hold"))?;
-    Ok((held, epoch))
+    Ok((held, holding.epoch))
 }
 
 /// The `release` kernel: php's `zval_ptr_dtor` of the counted value
 /// compiled code gives up, a destructor's throw left pending.
-fn release(req: &mut Request, on: On<'_>, word: u64, type_info: u32) -> Result<(), Fatal> {
+fn release(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Result<(), Fatal> {
     standing(req, on.room, on.at)?;
     tier::release(req, zval(word, type_info));
     Ok(())
@@ -455,7 +487,7 @@ fn release(req: &mut Request, on: On<'_>, word: u64, type_info: u32) -> Result<(
     clippy::unnecessary_wraps,
     reason = "a kernel answers a Result; this one never fails"
 )]
-fn copy(_: &mut Request, _: On<'_>, word: u64, type_info: u32) -> Result<Zval, Fatal> {
+fn copy(_: &mut Request, _: On<'_, '_>, word: u64, type_info: u32) -> Result<Zval, Fatal> {
     let z = zval(word, type_info);
     let z = z.as_reference().map_or(z, |reference| reference.val());
     z.addref();
@@ -639,7 +671,7 @@ pub(crate) fn enter(
     tier::set_trace_num(req, TraceNum::from_raw(trace.id.get()));
     let mut cx = ExitCtx::new(&mut *req);
     cx.at = at;
-    cx.epoch = Some(epoch);
+    cx.holding = Some(Holding::of(epoch));
     // SAFETY: `cx` lives on this frame for the whole call and nothing but
     // the code and its wrappers touches the request meanwhile; `room` is
     // the room of a frame on the request's stack.
@@ -772,7 +804,7 @@ impl Crossed for Tally {
 /// mapping and the `catch_unwind` the bar measures.
 #[cfg(any(test, feature = "bench"))]
 #[inline(never)]
-fn tally(t: &mut Tally, _: On<'_>, n: u64) -> Result<u64, Fatal> {
+fn tally(t: &mut Tally, _: On<'_, '_>, n: u64) -> Result<u64, Fatal> {
     if n == u64::MAX {
         return Err(Fatal::error("the tally's last step"));
     }
@@ -858,7 +890,7 @@ pub mod bench {
         let on = On {
             room: Room(frame),
             at: OplineIdx(opline),
-            epoch: None,
+            holding: None,
         };
         let answer = super::tally(req, on, n);
         // SAFETY: the caller hands an out slot valid for one write.
@@ -899,12 +931,12 @@ pub mod bench {
                 }
             }
             Through::Direct => {
-                let kernel: fn(&mut Tally, On<'_>, u64) -> Result<u64, Fatal> =
+                let kernel: fn(&mut Tally, On<'_, '_>, u64) -> Result<u64, Fatal> =
                     black_box(super::tally);
                 let on = On {
                     room: Room(std::ptr::null_mut()),
                     at: OplineIdx(0),
-                    epoch: None,
+                    holding: None,
                 };
                 for i in 0..n {
                     last = kernel(&mut tally, on, i)?;
