@@ -828,12 +828,12 @@ mod tests {
 
     #[test]
     fn a_function_prints_its_name_and_its_parameters_less_the_variadic_one() {
-        let parameter = |variadic: bool| Parameter {
+        let x = |variadic: bool| Parameter {
             variadic,
             ..parameter(b"x", None)
         };
         let decl = FunctionDecl {
-            parameters: vec![parameter(false), parameter(false), parameter(true)],
+            parameters: vec![x(false), x(false), x(true)],
             file: Name::from("a.php"),
             line: 4,
             end_line: 6,
