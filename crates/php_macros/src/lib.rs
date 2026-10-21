@@ -125,14 +125,12 @@ fn cfgs(attrs: &[Attribute]) -> Vec<Attribute> {
         .collect()
 }
 
-/// The message of what an expansion, or a read of its input, refused;
-/// the test fails where the input was taken.
+/// The message of what an expansion, or a read of its input, refused,
+/// and `(taken)` where it took the input, which no message reads as, so
+/// the row's own assertion fails and names the row.
 #[cfg(test)]
 fn refused<T>(answer: syn::Result<T>) -> String {
-    answer
-        .err()
-        .map(|error| error.to_string())
-        .expect("the input is refused")
+    answer.map_or_else(|error| error.to_string(), |_| String::from("(taken)"))
 }
 
 #[cfg(test)]
