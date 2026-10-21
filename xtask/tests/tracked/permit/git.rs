@@ -151,14 +151,14 @@ fn an_array_assignment_after_a_cd_leaves_the_commit_in_the_worktree() {
         "allow-git-c.json",
         "deny-array-then.json",
     ] {
-        let mut call = call(&dir.join(name));
-        let line = call
+        let mut fixture = call(&dir.join(name));
+        let line = fixture
             .tool_input
             .command
             .as_deref()
-            .map(|l| l.replace("/var/empty/t3069", &linked));
-        call.tool_input.command = line;
-        let judged = judge(&manifest, merging.path(), &call).unwrap();
+            .map(|l| l.replace("/var/empty/wt", &linked));
+        fixture.tool_input.command = line;
+        let judged = judge(&manifest, merging.path(), &fixture).unwrap();
         let refused = judged.denial().is_some_and(|d| d.rule == "git.operation");
         assert_eq!(refused, name.starts_with("deny"), "{name}: {judged:?}");
     }

@@ -224,6 +224,9 @@ struct Command {
     words: Vec<String>,
     word: Option<Word>,
     next: Next,
+    /// Whether it carries a redirection, so a command of no words still
+    /// runs one.
+    redirected: bool,
 }
 
 impl Command {
@@ -243,11 +246,7 @@ impl Command {
             Some(first) if DECLARING.contains(&first.as_str()) => true,
             _ => self.words.iter().all(|w| is_assignment(w)),
         };
-        at_assignment
-            && word
-                .text
-                .strip_suffix('=')
-                .is_some_and(|name| is_name(name.strip_suffix('+').unwrap_or(name)))
+        at_assignment && word.text.strip_suffix('=').and_then(assigns).is_some()
     }
 
     /// A quote or a substitution opens a word even when it adds no text.
@@ -447,7 +446,9 @@ impl Lexer {
     /// The elements of an array assignment, `NAME=(…)` or `NAME+=(…)`, up
     /// to the `)` that matches its `(` (#3165): they are words of the
     /// assignment and no commands, a `$(…)` among them still running, and
-    /// the word ends at the `)` as zsh ends it. A separator among them is
+    /// the word ends at the `)` as zsh ends it. A process substitution
+    /// among them runs too, `<(…)`, `>(…)` or zsh's `=(…)`, and a newline
+    /// ends the line a heredoc's body follows. A separator among them is
     /// one more space, as zsh reads `;` there and bash refuses the line;
     /// a parenthesis nested in an element is its text, a zsh pattern. The
     /// value is the elements joined by spaces, as `$P` expands in zsh, and
@@ -462,6 +463,14 @@ impl Lexer {
             match c {
                 ')' if depth == 0 => break,
                 '#' if elements.word.is_none() => self.comment(),
+                '<' | '>' | '=' if self.eat('(') => {
+                    elements.open(false);
+                    self.child(|lexer| lexer.list(Some(')')));
+                }
+                '\n' => {
+                    self.end_word(&mut elements);
+                    self.skip_heredoc_bodies();
+                }
                 c if c.is_whitespace() || matches!(c, ';' | '&' | '|') => {
                     self.end_word(&mut elements);
                 }
@@ -539,6 +548,7 @@ impl Lexer {
             command.word = None;
         }
         self.end_word(command);
+        command.redirected = true;
         command.next = Next::Target { writes: c == '>' };
         if c == '<' && self.eat('<') {
             if !self.eat('<') {
@@ -582,23 +592,24 @@ impl Lexer {
     /// a `;` or a newline leaves the separator before it standing, so a
     /// line continued after `&&` or `|`, or opening a subshell after one,
     /// joins what follows as that separator does ([`Joint`]). Where it
-    /// runs no program, an assignment alone, the `&&` after it joins what
-    /// follows to the chain the assignment stands in, so after a command
-    /// and a `;`, `||` or `&` it is joined as by that separator: `cd /wt;
-    /// P=x && git add` runs `git add` wherever the `cd` left the shell
-    /// (#3165).
+    /// runs no program, an assignment or a redirection alone, the `&&` or
+    /// `|` after it joins what follows to the chain it stands in, so after
+    /// a command and a `;`, `||` or `&` it is joined as by that separator:
+    /// `cd /wt; P=x && git add` runs `git add` wherever the `cd` left the
+    /// shell (#3165).
     fn end(&mut self, command: &mut Command, after: Joint) {
         self.end_word(command);
         command.next = Next::Argument;
         let words = std::mem::take(&mut command.words);
         self.assigned.read(&words);
-        let empty = words.is_empty();
+        let redirected = std::mem::take(&mut command.redirected);
+        let empty = words.is_empty() && !redirected;
         let Some(argv) = Argv::running(words, &self.assigned) else {
             let begins =
                 !self.commands.is_empty() && matches!(self.before, Joint::Then | Joint::Background);
             self.before = match after {
                 Joint::Then if empty => self.before,
-                Joint::And if !empty && begins => Joint::Then,
+                Joint::And | Joint::Pipe if !empty && begins => Joint::Then,
                 _ => after,
             };
             return;
@@ -709,28 +720,28 @@ impl Assigned {
             _ if words.iter().all(|w| is_assignment(w)) => words,
             _ => return,
         };
-        for (name, value) in operands.iter().filter_map(|w| w.split_once('=')) {
-            let (name, value) = match name.strip_suffix('+') {
-                Some(name) => (
-                    name,
-                    format!("{}{value}", self.0.get(name).map_or("", String::as_str)),
-                ),
-                None => (name, value.to_owned()),
+        for (set, value) in operands.iter().filter_map(|w| w.split_once('=')) {
+            let Some((name, append)) = assigns(set) else {
+                continue;
             };
-            if is_name(name) {
-                self.0.insert(name.to_owned(), value);
-            }
+            let prior = self.0.get(name).filter(|_| append);
+            let value = format!("{}{value}", prior.map_or("", String::as_str));
+            self.0.insert(name.to_owned(), value);
         }
     }
 
-    /// The words `$X` or `${X}` stands for, split as an unquoted expansion
-    /// is; `None` for any other word, or a variable the line never
-    /// assigned.
+    /// The words `$X`, `${X}` or an array's `${X[@]}` or `${X[*]}` stands
+    /// for, split as an unquoted expansion is; `None` for any other word,
+    /// or a variable the line never assigned.
     fn expand(&self, word: &str) -> Option<Vec<String>> {
         let name = word.strip_prefix('$')?;
         let name = name
             .strip_prefix('{')
             .and_then(|n| n.strip_suffix('}'))
+            .unwrap_or(name);
+        let name = ["[@]", "[*]"]
+            .iter()
+            .find_map(|all| name.strip_suffix(all))
             .unwrap_or(name);
         let value = self.0.get(name)?;
         Some(value.split_whitespace().map(str::to_owned).collect())
@@ -861,10 +872,16 @@ fn basename(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
-/// `NAME=value`, or `NAME+=value`, which appends.
 fn is_assignment(word: &str) -> bool {
     word.split_once('=')
-        .is_some_and(|(name, _)| is_name(name.strip_suffix('+').unwrap_or(name)))
+        .is_some_and(|(set, _)| assigns(set).is_some())
+}
+
+/// The name the left side of an assignment sets, `NAME` or `NAME+`, and
+/// whether it appends to the value; `None` where it names no variable.
+fn assigns(set: &str) -> Option<(&str, bool)> {
+    let (name, append) = set.strip_suffix('+').map_or((set, false), |n| (n, true));
+    is_name(name).then_some((name, append))
 }
 
 /// A shell variable's name: a letter or `_`, then letters, digits and `_`.
@@ -986,8 +1003,13 @@ impl Argv {
         loop {
             let word = words.get(at)?;
             if RESERVED.contains(&word.as_str()) || is_assignment(word) {
+                // `GIT_DIR+=…` extends a value the line may not say.
                 let set = word.split_once('=');
-                moves.extend(set.and_then(|(name, value)| Move::git_tree(name, value, assigned)));
+                let set = set.and_then(|(set, value)| Some((assigns(set)?, value)));
+                moves.extend(set.and_then(|((name, append), value)| {
+                    let tree = Move::git_tree(name, value, assigned)?;
+                    Some(if append { Move::Unsaid } else { tree })
+                }));
                 at += 1;
                 continue;
             }
@@ -1556,6 +1578,7 @@ mod tests {
             [[into("/a"), into("sub")]]
         );
         assert_eq!(moves("GIT_WORK_TREE=/wt git checkout"), [[reaches("/wt")]]);
+        assert_eq!(moves("GIT_DIR+=/x git status"), [[Move::Unsaid]]);
         assert_eq!(
             moves("export GIT_DIR=/wt/.git; git status"),
             [vec![], vec![reaches("/wt/.git")]]
@@ -1632,10 +1655,9 @@ mod tests {
             let joints = line.joints().iter().map(|j| (j.before, j.after));
             (words.collect(), line.shells().to_vec(), joints.collect())
         };
-        let line = "P=(a b) && git add -- \"${P[@]}\"";
-        assert_eq!(words(line), [["git", "add", "--", "${P[@]}"]]);
-        assert_eq!(read(line).1, [Vec::<u32>::new()]);
-        assert_eq!(read(line).2, [(And, Then)]);
+        let (words_of, shells, joints) = read("P=(a b) && git add -- \"${P[@]}\"");
+        assert_eq!(words_of, [["git", "add", "--", "${P[@]}"]]);
+        assert_eq!((shells, joints), (vec![vec![]], vec![(And, Then)]));
         for (array, scalar) in [
             ("P=(a (x) \")\" b\\) # c)\n d) && git add", "P=a && git add"),
             ("A=1 P+=(x) && git add", "A=1 P+=x && git add"),
@@ -1651,15 +1673,30 @@ mod tests {
             words("P=(a $(git rev-parse HEAD)) && git add"),
             [vec!["git", "rev-parse", "HEAD"], vec!["git", "add"]]
         );
+        for substituted in ["<(git add)", ">(git add)", "=(git add)"] {
+            let line = format!("P=(a {substituted}) && x");
+            assert_eq!(words(&line), [vec!["git", "add"], vec!["x"]], "{line}");
+        }
+        assert_eq!(
+            words("cat <<EOF && P=(x\nEOF\n)\ngit commit -n\nEOF"),
+            [vec!["cat"], vec!["git", "commit", "-n"], vec!["EOF"]]
+        );
+        assert_eq!(
+            words("P=(git commit -n); \"${P[@]}\"; ${P[*]}"),
+            [["git", "commit", "-n"], ["git", "commit", "-n"]]
+        );
         assert_eq!(words("P=(a)b"), [["b"]]);
         assert_eq!(
             words("P=(git commit); P+=(-n); $P"),
             [["git", "commit", "-n"]]
         );
-        assert_eq!(
-            read("cd /wt; P=(a) && git add").2,
-            [(Then, Then), (Then, Then)]
-        );
+        for chained in [
+            "cd /wt; P=(a) && git add",
+            "cd /wt; P=a | git add",
+            "cd /wt; >x && git add",
+        ] {
+            assert_eq!(read(chained).2, [(Then, Then), (Then, Then)], "{chained}");
+        }
         assert_eq!(
             read("cd /wt && P=a && git add").2,
             [(Then, And), (And, Then)]
