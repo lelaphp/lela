@@ -35,6 +35,7 @@ use php_engine::tier::{
     self, Building, Epoch, Fatal, FrameRef, FuncRef, Request, SafepointIdx, Sample, Stepped,
     UnitView,
 };
+use php_heap::ZvalType;
 use php_unit::{OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use crate::JitRequest;
@@ -289,8 +290,21 @@ pub(crate) enum Event {
 pub(crate) struct TraceRecord {
     pub(crate) start: Start,
     pub(crate) root: FuncRef,
+    /// For a side trace, what its parent's exit knew of the slots of the
+    /// frame it starts in, php's stack map that `zend_jit_trace_build_tssa`
+    /// reads a side's entry types from; empty for a root.
+    pub(crate) entered: Vec<Entered>,
     pub(crate) events: Vec<Event>,
     pub(crate) stop: Stop,
+}
+
+/// One slot of the frame a side trace starts in whose type its parent's
+/// exit knew, php's `STACK_TYPE`: the slot, a variable or a temporary
+/// numbered past the variables, and its type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Entered {
+    pub(crate) var: u32,
+    pub(crate) tag: ZvalType,
 }
 
 /// A recording and the view it was read through, which holds the
@@ -319,6 +333,10 @@ pub(crate) struct Ended {
     /// claimed word's safepoint: a loop php unrolled and made the trace
     /// of (`zend_jit_trace_subtrace`), rooted at its header.
     pub(crate) rerooted: Option<(FuncRef, SafepointIdx)>,
+    /// The compiled trace whose root the recording stopped at, a loop's
+    /// header or a call's entry, which php's interpreter, going on there,
+    /// enters at once, the trace being that opline's handler.
+    pub(crate) stood: Option<TraceId>,
 }
 
 /// php's `ZEND_JIT_TRACE_MAX_CALL_DEPTH`: how many calls deep a trace
@@ -424,6 +442,7 @@ pub(crate) fn run(
     start: Start,
     at: SafepointIdx,
     policy: &Policy,
+    entered: Vec<Entered>,
 ) -> Result<(Recorded, Ended), Bailed> {
     let mut req = Recording::set(req);
     let mut view = UnitView::new(&req);
@@ -439,6 +458,11 @@ pub(crate) fn run(
     let record = TraceRecord {
         start: recorder.start,
         root: recorder.rerooted.map_or(root, |(func, _)| func),
+        // A side trace php rooted at a loop it unrolled is a root.
+        entered: match recorder.start {
+            Start::Side { .. } => entered,
+            Start::Loop | Start::Enter | Start::Return => Vec::new(),
+        },
         events: recorder.events,
         stop,
     };
@@ -520,6 +544,7 @@ pub(crate) fn refused(req: &Request, frame: FrameRef, start: Start, stop: Stop) 
     let record = TraceRecord {
         start,
         root: tier::func(req, frame).unwrap_or(REQUEST_SCOPED),
+        entered: Vec::new(),
         events: Vec::new(),
         stop,
     };
@@ -542,6 +567,9 @@ struct Recorder<'p> {
     /// The claimed word: the op array and safepoint whose heat started
     /// the recording, php's bad root cache key.
     word: (FuncRef, SafepointIdx),
+    /// For a side trace, the trace and exit whose word claimed it, which
+    /// is the claimed word in place of `word`.
+    grew: Option<(TraceId, ExitId)>,
     /// php's `orig_opline`: the op array and opline the trace is rooted
     /// at, which closes a loop and names recursion. A return trace's is
     /// the opline its first return lands on, unknown until then.
@@ -564,6 +592,7 @@ struct Recorder<'p> {
     /// php's `ZEND_CALL_MEGAMORPHIC`.
     megamorphic: Vec<FrameRef>,
     rerooted: Option<(FuncRef, SafepointIdx)>,
+    stood: Option<TraceId>,
 }
 
 /// How one step of the loop ended: on to the next opline, stopped, or
@@ -586,6 +615,10 @@ impl<'p> Recorder<'p> {
             start,
             epoch,
             word,
+            grew: match start {
+                Start::Side { parent, exit } => Some((parent, exit)),
+                Start::Loop | Start::Enter | Start::Return => None,
+            },
             root: None,
             events: Vec::new(),
             length: HEAD,
@@ -599,6 +632,7 @@ impl<'p> Recorder<'p> {
             loop_unrolls: 0,
             megamorphic: Vec::new(),
             rerooted: None,
+            stood: None,
         }
     }
 
@@ -613,7 +647,11 @@ impl<'p> Recorder<'p> {
     /// claimed word last failed on, where it failed `times` times.
     fn root_bad_stop(&self, times: u8) -> Option<Stop> {
         let (func, at) = self.word;
-        policy::bad_stop(self.epoch.word(func, at), times)
+        let word = match self.grew {
+            Some((trace, exit)) => crate::table::exit_word(&self.epoch, trace, exit),
+            None => self.epoch.word(func, at),
+        };
+        policy::bad_stop(word, times)
     }
 
     /// The recording loop from `frame`, rooted in `root`'s op array.
@@ -736,6 +774,7 @@ impl<'p> Recorder<'p> {
     fn ended(&self, at: FrameRef) -> Ended {
         Ended {
             rerooted: self.rerooted,
+            stood: self.stood,
             ..ended(at, true)
         }
     }
@@ -829,7 +868,10 @@ impl<'p> Recorder<'p> {
                 }
                 Went::On
             }
-            State::Compiled(id) => Went::Stopped(Stop::Link(id)),
+            State::Compiled(id) => {
+                self.stood = Some(id);
+                Went::Stopped(Stop::Link(id))
+            }
             State::Blacklisted => Went::Stopped(Stop::BlackList),
             State::Cold | State::Recording => Went::On,
         }
@@ -949,6 +991,7 @@ impl<'p> Recorder<'p> {
         let limit = self.policy.attempts(Start::Loop).saturating_sub(1);
         match policy::read(self.epoch.word(func, header)) {
             State::Compiled(id) => {
+                self.stood = Some(id);
                 let compiled_loop = self.start == Start::Loop
                     && depth == 0
                     && self.root_bad_stop(limit) != Some(Stop::CompiledLoop);
@@ -1168,6 +1211,7 @@ fn ended(at: FrameRef, stepped: bool) -> Ended {
         inner: None,
         stepped,
         rerooted: None,
+        stood: None,
     }
 }
 

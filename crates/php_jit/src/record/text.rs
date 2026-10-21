@@ -18,7 +18,9 @@
 //! for a request's; an operand not sampled is `-`, a sampled one its
 //! type with what was followed to it and its class, `object#3`; a
 //! conditional jump is `taken` or `fell`; a side trace's start is
-//! `side <parent>/<exit>`, and a link's stop `link <trace>`.
+//! `side <parent>/<exit>`, the slots its parent's exit knew the types of
+//! an `entered` line of `var:kind` after the root, and a link's stop
+//! `link <trace>`.
 
 use std::fmt::Write as _;
 
@@ -26,7 +28,7 @@ use php_engine::tier::{self, FuncRef, Sample};
 use php_heap::ZvalType;
 use php_unit::{MapPtrOffset, OplineIdx};
 
-use super::{Event, Start, Stop, TraceRecord, func_name as func};
+use super::{Entered, Event, Start, Stop, TraceRecord, func_name as func};
 use crate::table::TraceId;
 use crate::types::ExitId;
 
@@ -65,6 +67,12 @@ impl TraceRecord {
         // Writing to a `String` does not fail.
         writeln!(text, "start {start}").unwrap_or_default();
         writeln!(text, "root {}", func(self.root)).unwrap_or_default();
+        if !self.entered.is_empty() {
+            let slots: Vec<String> = (self.entered.iter())
+                .map(|slot| format!("{}:{}", slot.var, kind_name(slot.tag)))
+                .collect();
+            writeln!(text, "entered {}", slots.join(" ")).unwrap_or_default();
+        }
         for event in &self.events {
             match event {
                 Event::Op {
@@ -114,15 +122,24 @@ impl TraceRecord {
             .and_then(parse_func)
             .ok_or_else(|| refused(at, line))?;
         let mut events = Vec::new();
+        let mut entered = Vec::new();
         for (at, line) in lines {
             if let Some(stop) = line.strip_prefix("stop ") {
                 let stop = parse_stop(stop).ok_or_else(|| refused(at, line))?;
                 return Ok(TraceRecord {
                     start,
                     root,
+                    entered,
                     events,
                     stop,
                 });
+            }
+            if let Some(slots) = line.strip_prefix("entered ")
+                && events.is_empty()
+                && entered.is_empty()
+            {
+                entered = parse_entered(slots).ok_or_else(|| refused(at, line))?;
+                continue;
             }
             events.push(parse_event(line).ok_or_else(|| refused(at, line))?);
         }
@@ -146,16 +163,36 @@ fn parse_func(text: &str) -> Option<FuncRef> {
     Some(FuncRef::at(offset))
 }
 
+/// A kind's name in the text form.
+fn kind_name(tag: ZvalType) -> &'static str {
+    KINDS
+        .iter()
+        .find(|(kind, _)| *kind == tag)
+        .map_or("undef", |(_, name)| name)
+}
+
+/// The slots an `entered` line names, `var:kind` each; none for a text
+/// that names none or a word it does not know.
+fn parse_entered(text: &str) -> Option<Vec<Entered>> {
+    let slots: Option<Vec<Entered>> = (text.split(' '))
+        .map(|slot| {
+            let (var, name) = slot.split_once(':')?;
+            let tag = KINDS.iter().find(|(_, n)| *n == name)?.0;
+            Some(Entered {
+                var: var.parse().ok()?,
+                tag,
+            })
+        })
+        .collect();
+    slots.filter(|slots| !slots.is_empty())
+}
+
 /// A sample in the text form.
 fn sample(sampled: Option<Sample>) -> String {
     let Some(sampled) = sampled else {
         return "-".to_owned();
     };
-    let mut text = KINDS
-        .iter()
-        .find(|(kind, _)| *kind == sampled.kind)
-        .map_or("undef", |(_, name)| name)
-        .to_owned();
+    let mut text = kind_name(sampled.kind).to_owned();
     for (on, mark) in [
         (sampled.packed, ".packed"),
         (sampled.reference, ".reference"),

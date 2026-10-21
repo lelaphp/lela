@@ -564,3 +564,27 @@ fn a_step_the_trace_ends_at_is_held_to_where_it_goes_on() {
         }
     }
 }
+
+/// A side trace that returns an array its parent's exit knew the type of
+/// serves `VERIFY_RETURN_TYPE` inline and lowers it to nothing: the array
+/// stands in its slot, of the declared type, so there is nothing to check
+/// or move, as php's code emits nothing; the lowering had taken every
+/// inline `VERIFY_RETURN_TYPE` for a scalar's and refused the trace, so
+/// spectralnorm's side trace past its inner loop aborted with `JIT
+/// compilation error` on every attempt.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_side_trace_returning_an_array_its_parent_knew_compiles() -> Result<(), String> {
+    let recorded = goldens::recorded(SPECTRALNORM)?;
+    let record = crate::record::TraceRecord::parse(
+        "start side 4/3\nroot e2\nentered 2:array 3:long 4:double\n\
+         op e2 23 array.packed - - -\nop e2 24 array.packed - - -\nstop return\n",
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    let ir = crate::types::build(&record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let backend = golden_backend().map_err(|e| format!("{e:?}"))?;
+    backend
+        .compile(&ir, named(SPECTRALNORM))
+        .map(|_| ())
+        .map_err(|abort| format!("{abort:?}\n{}", super::dump::render(&ir)))
+}

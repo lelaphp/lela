@@ -988,6 +988,15 @@ impl<'a> Builder<'a> {
     /// unset; anything else is anything.
     fn entry_types(&self, slot: Slot) -> Types {
         let meta = self.meta(slot.frame);
+        // A side trace enters with what its parent's exit knew of the
+        // frame it starts in, as php's side reads its parent's stack map;
+        // a slot a symbol table reaches is guarded at every read still.
+        let known = (self.rec.entered.iter())
+            .find(|entered| slot.frame == Frame::ROOT && entered.var == slot.var)
+            .filter(|_| !self.aliased(slot));
+        if let Some(known) = known {
+            return Types::of_tag(known.tag);
+        }
         let cv = slot.var < meta.code.num_cvs;
         if !cv {
             return Types::UNKNOWN.without(Types::UNDEF);

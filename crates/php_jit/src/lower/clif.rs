@@ -929,11 +929,28 @@ impl<'a> Emit<'a> {
 
     // ------------------------------------------------------------ inline forms
 
+    /// Whether an inline `VERIFY_RETURN_TYPE` leaves its operand where it
+    /// stands: read from memory and written back to the same slot, as a
+    /// value of no scalar kind, an array, is.
+    fn stays(&self, line: &Line) -> Result<bool, Abort> {
+        let (Operand::Value(read), Some(written), None) = (line.op1, line.op1_def, line.out) else {
+            return Ok(false);
+        };
+        let (read, written) = (self.value(read)?, self.value(written)?);
+        Ok(read.home == Home::Memory
+            && written.home == Home::Memory
+            && read.slot == written.slot
+            && Kind::of(read.types).is_none())
+    }
+
     /// One inline opline (`jit-design.md` §4.3), the scalar core.
     fn inline(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         match line.opcode {
             Opcode::Jmp => Ok(()),
             Opcode::Jmpz | Opcode::Jmpnz | Opcode::JmpzEx | Opcode::JmpnzEx => self.jump(at, line),
+            // A return value of the declared type the slot already holds:
+            // nothing to check and nothing to move, as php's code emits none.
+            Opcode::VerifyReturnType if self.stays(line)? => Ok(()),
             Opcode::QmAssign | Opcode::VerifyReturnType => {
                 let held = self.scalar(at, line.op1)?;
                 for value in [line.out, line.op1_def].into_iter().flatten() {

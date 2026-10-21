@@ -99,7 +99,7 @@ impl Tier for Records {
             at,
         };
         crate::table::of(req, &policy, &crate::table::Outputs::none());
-        match run(req, frame, start, at, &policy) {
+        match run(req, frame, start, at, &policy, Vec::new()) {
             Ok((recorded, ended)) => {
                 let kept = req.state::<Kept>();
                 kept.taken.push(recorded);

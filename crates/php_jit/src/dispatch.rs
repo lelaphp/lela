@@ -38,6 +38,7 @@ use crate::policy::{
 };
 use crate::record::{self, Bailed, Ended, Headed, Start, Stop};
 use crate::table::{self, TraceId, TraceName};
+use crate::types::Grows;
 use crate::{JitEngine, Shared};
 
 #[cfg(test)]
@@ -179,9 +180,9 @@ fn looped(
 /// slot is empty, and an exit word that reads cold, recording or
 /// blacklisted, are a `Resume` of the landed frame; so is a throwable a
 /// kernel left pending, which the loop unwinds from where it was raised.
-/// A cold exit word is bumped and claimed by nothing: what records a side
-/// trace from a hot exit is #2964's, so until then no exit word reads
-/// compiled.
+/// A cold exit word is bumped, and claimed at `opcache.jit_hot_side_exit`
+/// for a side trace recorded from the landing ([`sided`]), which `run`
+/// goes on in no further: the recording ran the program on.
 ///
 /// A compiled loop leaves through its interrupt test once the engine's
 /// timer raises the interrupt, and the `Resume` hands the loop its
@@ -220,6 +221,36 @@ fn looped(
 /// ```expect exit=0 regime=jit-force process wall=1s
 /// alarm
 /// spun
+/// ```
+///
+/// php's lines for it: the guard on `$done` the handler's write fails
+/// leaves the trace entered again through its first exit, which grows a
+/// side trace:
+///
+/// ```php
+/// pcntl_async_signals(true); $done = false;
+/// pcntl_signal(SIGALRM, function () use (&$done) { $done = true; echo "alarm\n"; });
+/// pcntl_alarm(1); $n = 0; while (!$done) { $n++; } echo $n > 1000 ? "spun\n" : "short\n";
+/// ```
+/// ```expect exit=0 regime=jit-inline process wall=1s
+/// alarm
+/// spun
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:2
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) $main() %s:4
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+/// ---- TRACE 2 start (enter) {closure:%s:3}() %s:3
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+///
+///      TRACE 1 exit 0 $main() %s:4
+/// ---- TRACE 3 start (side trace 1/0) $main() %s:4
+/// ---- TRACE 3 stop (return)
+/// ---- TRACE 3 compiled
 /// ```
 #[inline(never)]
 pub(crate) fn run(req: &mut Request, frame: FrameRef, id: TraceId, shared: &Shared) -> Flow {
@@ -260,7 +291,18 @@ pub(crate) fn run(req: &mut Request, frame: FrameRef, id: TraceId, shared: &Shar
             Some(link) => Some(link),
             // A trace's end is no side exit: php returns to the interpreter.
             None if trace.leaves == Some(exited.exit) => None,
-            None => sided(req, shared, trace.id, exited, &exit.word),
+            None => match sided(req, shared, trace.id, exited, exit) {
+                Sided::Enter(side) => Some(side),
+                Sided::Resume => None,
+                // A trace ran, so a recording that stepped nothing
+                // resumes the landed frame.
+                Sided::Hot(claim) => {
+                    return match hot(req, frame, claim, SafepointIdx::ENTRY, shared) {
+                        Flow::Continue => Flow::Resume(frame),
+                        flow => flow,
+                    };
+                }
+            },
         };
         match next.and_then(|next| table.get(next)) {
             Some(next) => trace = next,
@@ -269,30 +311,78 @@ pub(crate) fn run(req: &mut Request, frame: FrameRef, id: TraceId, shared: &Shar
     }
 }
 
-/// What an exit with no link goes on to (`jit-design.md` §4.9): the side
-/// trace its word names, entered with no line written, as php's exit is
-/// patched to jump to it; otherwise none, a cold word bumped toward
-/// `opcache.jit_hot_side_exit` and claimed by nothing, recording a side
-/// trace being #2964's, and php's
-/// `TRACE n exit m` line written for the place it landed, as
-/// `zend_jit_trace_exit` writes it unless the interrupt is raised or the
-/// request records (`Z/ext/opcache/jit/zend_jit_trace.c:8806-8824`).
+/// What an exit with no link goes on to: the side trace its word names,
+/// a side trace to record from its word's claim, or the interpreter.
+enum Sided {
+    Enter(TraceId),
+    Hot(Claim),
+    Resume,
+}
+
+/// What an exit with no link goes on to (`jit-design.md` §4.9), php's
+/// `zend_jit_trace_exit` (`Z/ext/opcache/jit/zend_jit_trace.c:8796-8894`):
+/// the side trace its word names, entered with no line written, as php's
+/// exit is patched to jump to it; nothing at all while the interrupt is
+/// raised or the request records, php returning there before it counts;
+/// otherwise php's `TRACE n exit m` line for the place it landed, and its
+/// word bumped toward `opcache.jit_hot_side_exit` and claimed at it under
+/// `Holder::Exit`, so a side trace is recorded from the landing, php's
+/// `zend_jit_trace_hot_side`. An exit that grows none, php's
+/// `ZEND_JIT_EXIT_TO_VM`, is bumped and claimed by nothing; so is one
+/// that names no opline, whose side php holds to the opline it stands at
+/// with a guard this tier does not hold yet.
+///
+/// A `for` over lines leaves its trace through its test, `exit 3`, at the
+/// line past the loop, where a side trace of it starts, named by its
+/// parent's number and exit and that line, as php's
+/// `zend_jit_trace_hot_side` names it; the second call's root links to
+/// the loop, which leaves through the side:
+///
+/// ```php
+/// function a($n) {
+///     $s = 0;
+///     for ($i = 0;
+///          $i < $n;
+///          $i++) {
+///         $s += $i;
+///     }
+///     return $s;
+/// }
+/// echo a(100), " ", a(200), "\n";
+/// ```
+/// ```expect exit=0 regime=jit-inline process
+/// 4950 19900
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:11
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) a() %s:5
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 3 a() %s:9
+/// ---- TRACE 2 start (side trace 1/3) a() %s:9
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+///
+/// ---- TRACE 3 start (enter) a() %s:3
+/// ---- TRACE 3 stop (link to 1)
+/// ---- TRACE 3 compiled
+/// ```
 fn sided(
     req: &mut Request,
     shared: &Shared,
     trace: TraceId,
     exited: Exited,
-    word: &Word,
-) -> Option<TraceId> {
-    match policy::read(word) {
-        State::Compiled(side) => return Some(side),
-        State::Cold => {
-            policy::bump(word);
-        }
-        State::Recording | State::Blacklisted => {}
+    exit: &table::Exit,
+) -> Sided {
+    if let State::Compiled(side) = policy::read(&exit.word) {
+        return Sided::Enter(side);
     }
-    let quiet = req.limits().interrupt().raised().load(Ordering::Relaxed) || record::recording(req);
-    if !quiet && shared.policy.debug().any(JitDebug::TRACE_EXIT) {
+    if req.limits().interrupt().raised().load(Ordering::Relaxed) || record::recording(req) {
+        return Sided::Resume;
+    }
+    if shared.policy.debug().any(JitDebug::TRACE_EXIT) {
         let mut lines = Vec::new();
         placed(req, exited.frame, false, |at| {
             let event = TraceEvent::Exit {
@@ -304,7 +394,24 @@ fn sided(
         });
         req.response_mut().write_stderr(&lines);
     }
-    None
+    let start = Start::Side {
+        parent: trace,
+        exit: exited.exit,
+    };
+    let claims = exit.grows == Grows::Side && exit.opline.is_some();
+    let req: &Request = req;
+    let holder = || {
+        Some(Holder::Exit {
+            epoch: tier::epoch(req),
+            trace,
+            exit: exited.exit,
+        })
+    };
+    match visit(&exit.word, &shared.policy, start, claims, holder) {
+        Visited::Enter(side) => Sided::Enter(side),
+        Visited::Hot(claim) => Sided::Hot(claim),
+        Visited::Continue => Sided::Resume,
+    }
 }
 
 /// The cold path (`jit-design.md` §4.9): the `TRACE start` line, the
@@ -343,7 +450,7 @@ pub(crate) fn hot(
     shared: &Shared,
 ) -> Flow {
     let mut stepped = false;
-    let flow = loop {
+    let (flow, stood) = loop {
         let start = claim.start();
         // A loop's recording starts where php's trace roots, past the
         // body its back edge landed on.
@@ -367,13 +474,10 @@ pub(crate) fn hot(
         // A frame that shows no op array has no place to record from.
         let Some(name) = started(req, shared, frame, next, start) else {
             policy::settle(claim, &Outcome::Released);
-            break resumed(frame, stepped);
+            break (resumed(frame, stepped), None);
         };
-        if table.is_none_or(table::TraceTable::full) {
-            if let Some(table) = table {
-                table.stop();
-            }
-            let recorded = record::refused(req, frame, start, Stop::TooManyTraces);
+        if let Some(refusal) = refused(table, start) {
+            let recorded = record::refused(req, frame, start, refusal);
             settled(
                 req,
                 shared,
@@ -383,9 +487,10 @@ pub(crate) fn hot(
                     name,
                 },
             );
-            break resumed(frame, stepped);
+            break (resumed(frame, stepped), None);
         }
-        let (recorded, ended) = match record::run(req, frame, start, at, &shared.policy) {
+        let entered = side_entered(table, start);
+        let (recorded, ended) = match record::run(req, frame, start, at, &shared.policy, entered) {
             Ok(done) => done,
             // php's bailout leaves the recorder with nothing written after
             // the start line and nothing counted against the root.
@@ -398,8 +503,9 @@ pub(crate) fn hot(
             }
         };
         stepped |= ended.stepped;
+        let stop = recorded.record.stop;
         let Some((rooted, name)) = rerooted(req, shared, claim, name, &ended) else {
-            break resumed(ended.at, stepped);
+            break (resumed(ended.at, stepped), None);
         };
         let job = Job {
             recorded,
@@ -420,7 +526,15 @@ pub(crate) fn hot(
             _ => None,
         };
         let Some(inner) = repeat else {
-            break resumed(ended.at, stepped);
+            // php's interpreter goes on at the opline the recording
+            // stopped at, whose handler is the trace compiled there: the
+            // one just published at its loop's header, or the one the
+            // recording stopped at.
+            let stood = match (outcome, stop) {
+                (Some(Outcome::Published(id)), Stop::Loop) => Some(id),
+                _ => ended.stood,
+            };
+            break (resumed(ended.at, stepped), stood.map(|id| (ended.at, id)));
         };
         frame = ended.at;
         claim = inner;
@@ -432,7 +546,45 @@ pub(crate) fn hot(
     let mut lines = Vec::new();
     shared.dump(&mut lines, &TraceEvent::Done);
     req.response_mut().write_stderr(&lines);
-    flow
+    match stood.map(|(at, id)| run(req, at, id, shared)) {
+        Some(Flow::Continue) | None => flow,
+        Some(ran) => ran,
+    }
+}
+
+/// Why a recording of `start` is refused before it records, php's
+/// checks in `zend_jit_trace_hot_root` and `zend_jit_trace_hot_side`
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:8164-8167`, `:8513-8525`): a
+/// table whose next id reached `opcache.jit_max_root_traces`, which a hot
+/// root stops the counters of, and a side of a root that has
+/// `opcache.jit_max_side_traces`.
+fn refused(table: Option<&table::Table>, start: Start) -> Option<Stop> {
+    let Some(table) = table else {
+        return Some(Stop::TooManyTraces);
+    };
+    let side = match start {
+        Start::Side { parent, .. } => Some(parent),
+        Start::Loop | Start::Enter | Start::Return => None,
+    };
+    if table.full() {
+        if side.is_none() {
+            table.stop();
+        }
+        return Some(Stop::TooManyTraces);
+    }
+    side.filter(|parent| table.children_full(*parent))
+        .map(|_| Stop::TooManyChildren)
+}
+
+/// What a side trace of `start` enters with: what its parent's exit knew
+/// of the slots of the frame it landed in; nothing for a root.
+fn side_entered(table: Option<&table::Table>, start: Start) -> Vec<record::Entered> {
+    let Start::Side { parent, exit } = start else {
+        return Vec::new();
+    };
+    (table.and_then(|table| table.get(parent)))
+        .and_then(|trace| trace.exits.get(usize::from(exit.0)))
+        .map_or_else(Vec::new, |exit| exit.entered.to_vec())
 }
 
 /// `job` settled: a recording that stopped where a trace compiles

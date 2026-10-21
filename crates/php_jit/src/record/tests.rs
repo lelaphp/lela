@@ -578,9 +578,23 @@ impl Draw {
         let link = Stop::Link(trace(1 + self.next(TraceId::LIMIT - 1)));
         let stop = Stop::of_code(code).unwrap_or(link);
         let events = (0..self.next(40)).map(|_| self.event()).collect();
+        let entered = match start {
+            Start::Side { .. } => (0..self.next(4))
+                .map(|var| super::Entered {
+                    var: var * 3,
+                    tag: if self.next(2) == 0 {
+                        ZvalType::Long
+                    } else {
+                        ZvalType::Double
+                    },
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
         TraceRecord {
             start,
             root: self.func(),
+            entered,
             events,
             stop,
         }
