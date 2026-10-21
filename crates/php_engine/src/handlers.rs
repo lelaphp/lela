@@ -8019,18 +8019,16 @@ fn fetched_obj(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     fetch_obj(req, frame, code, op, PropertyRead::Warning)
 }
 
-/// The inline path of `ZEND_FETCH_OBJ_R` over a constant name
-/// (`ZEND_FETCH_OBJ_R_SPEC_CV_CONST`, `_UNUSED_CONST`,
+/// The inline path of `ZEND_FETCH_OBJ_R` over a constant name or one a
+/// CV holds (`ZEND_FETCH_OBJ_R_SPEC_CV_CONST`, `_CV_CV`, `_UNUSED_*`,
 /// `Z/Zend/zend_vm_def.h:2102-2160`): the receiver a CV holds, or
-/// `$this`, whose class is the one the cache slot was primed with, and
-/// the place the slot names, a declared slot or a dynamic property's
-/// bucket ([`cached_place`]), read in place, `ZVAL_COPY_DEREF` into the
-/// temporary. `None`, with nothing touched, for a name that is no
-/// constant, a container that is a temporary, which the fetch would
-/// free, or no object, a lazy object, a place the cache does not name
-/// for this class and frame ([`Request::cached_property`]), one nothing
-/// holds, whose read is `__get`'s or the warning's, and a temporary
-/// holding an owner.
+/// `$this`, and the place [`inline_place`] names on it, a declared slot
+/// or a dynamic property's bucket, read in place, `ZVAL_COPY_DEREF` into
+/// the temporary. `None`, with nothing touched, for a name a temporary
+/// holds, a container that is a temporary, which the fetch would free,
+/// or no object, a lazy object, a place [`inline_place`] does not name,
+/// one nothing holds, whose read is `__get`'s or the warning's, and a
+/// temporary holding an owner.
 #[inline(always)] // the handler's fast half, as php's is in the handler
 #[allow(clippy::inline_always)]
 fn inline_fetch_obj_r(
@@ -8041,9 +8039,10 @@ fn inline_fetch_obj_r(
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
     let object = inline_receiver(req, frame, code, op, a, b)?;
-    let (place, _) = cached_place(
+    let (place, _) = inline_place(
         req,
         (frame, code, op),
+        b,
         property_cache_slot(op),
         object,
         false,
@@ -8061,36 +8060,139 @@ fn inline_fetch_obj_r(
     Some(Ok(advanced()))
 }
 
-/// The place cache slot `slot` of a property opcode over a constant name
-/// names on `object` ([`Request::cached_property`]), and whether its
-/// property is typed: the declared slot in place, or the bucket of the
-/// object's dynamic table the name is in, found by the name's known hash
+/// The place a property opcode's inline path reads or writes on
+/// `object`, and whether its property is typed. Over a constant name, the
+/// place cache slot `slot` names ([`Request::cached_property`]): the
+/// declared slot in place, or the bucket of the object's dynamic table
+/// the name is in, found by the name's known hash
 /// (`zend_hash_find_known_hash(zobj->properties, name)`,
-/// `Z/Zend/zend_vm_def.h:2154`), for a `write` only in a table nothing
-/// else shares, whose separation is the kernel's. None where the cache
-/// names no place for this class and frame, and where the table holds
-/// no such name, which is `__get`'s, the warning's or a write that lays
-/// it down.
+/// `Z/Zend/zend_vm_def.h:2154`). Over a name a `CV` holds, which no
+/// cache serves (`cache_slot == NULL`), the bucket of a name that places
+/// as a dynamic property by the rule the cache was primed by
+/// ([`Request::places_dynamic`]) on an object the standard handlers serve,
+/// which is `zend_std_read_property`'s and `zend_std_write_property`'s
+/// one find of `ce->properties_info` and one of `zobj->properties`. For a
+/// `write`, only in a table nothing else shares, whose separation is the
+/// kernel's. None where the cache names no place for this class and
+/// frame, where a computed name is a declared property's or no string,
+/// and where the table holds no such name, which is `__get`'s, the
+/// warning's or a write that lays it down.
+///
+/// A name a variable holds is read, written, stepped, compound-assigned
+/// and fetched for a reference through the bucket every pass, through a
+/// reference the bucket holds, into a table a cast shares only once it
+/// is separated, and on a class whose `__get` or `__set` serves what the
+/// table does not hold; a declared, a `static` and a NUL-led name take
+/// the kernel's diagnostics, and a class with handlers of its own takes
+/// the write through them:
+///
+/// ```php
+/// class C { public $d = 1; private $h = 2; public static $s = 3; }
+/// #[AllowDynamicProperties] class M { public function __get($n) { return "get $n"; } }
+/// class S { public function __set($n, $v) { echo "set $n\n"; } }
+/// function f($o, $q) { for ($i = 0; $i < 2; $i++) { $x = $o->$q; $o->$q = $i; $o->$q++; --$o->$q; $o->$q += 10; $r = &$o->$q; } return $x; }
+/// $o = new stdClass; $o->p = 0; $q = str_repeat('p', 1);
+/// var_dump(f($o, $q), $o);
+/// $x = 5; $o->p = &$x; $o->$q++; $o->$q = 7; var_dump($x);
+/// unset($o->p); $o->a = 1; $o->p = 1; $a = (array) $o; $o->$q = 'y'; var_dump($a['p'], $o);
+/// $m = new M; $m->p = 1; echo f($m, $q), "\n"; unset($m->p); echo $m->$q, "\n";
+/// $t = new S; $t->$q = 1; $t->$q = 2;
+/// $c = new C; $d = 'd'; $h = 'h'; $s = 's'; $k = 1; $n = "\0n";
+/// echo f($c, $d), "\n";
+/// try { echo $c->$h; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// echo $c->$s ?? "none", "|", $c->$s, "\n";
+/// try { echo $c->$n; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $o->$k = 2; var_dump($o->$k, $o->$u ?? 'u');
+/// $ao = new ArrayObject([], ArrayObject::ARRAY_AS_PROPS); $ao->$q = 5; $ao->$q++; var_dump(count($ao), $ao['p']);
+/// ```
+/// ```expect
+/// int(10)
+/// object(stdClass)#1 (1) {
+///   ["p"]=>
+///   int(11)
+/// }
+/// int(7)
+/// int(1)
+/// object(stdClass)#1 (2) {
+///   ["a"]=>
+///   int(1)
+///   ["p"]=>
+///   string(1) "y"
+/// }
+/// 10
+/// get p
+/// set p
+/// set p
+/// 10
+/// Cannot access private property C::$h
+/// none|
+/// Notice: Accessing static property C::$s as non static in %s on line 15
+///
+/// Warning: Undefined property: C::$s in %s on line 15
+///
+/// Cannot access property starting with "\0"
+///
+/// Warning: Undefined variable $u in %s on line 17
+/// int(2)
+/// string(1) "u"
+/// int(1)
+/// int(6)
+/// ```
 #[inline(always)] // as `inline_fetch_obj_r`
 #[allow(clippy::inline_always)]
-fn cached_place(
-    req: &Request,
+fn inline_place(
+    req: &mut Request,
     (frame, code, op): (FrameRef, &OpArray, &Opline),
+    b: impl Operand,
     slot: CacheSlot,
     object: php_heap::Obj,
     write: bool,
 ) -> Option<(php_heap::ZvalRef, bool)> {
+    if b.kind() != OperandKind::Const {
+        let name = crate::operand::deref(b.read(req.slots_mut(frame), code, op.op2)).as_str()?;
+        return computed_place(req, object, name, write);
+    }
     let class = crate::api::values::ClassId(object.class());
     match req.cached_property(frame, slot, class)? {
         exec::PropertyOffset::Declared { slot, typed } => Some((object.slot_ref(slot)?, typed)),
         exec::PropertyOffset::Dynamic => {
-            let table = object
-                .properties()
-                .filter(|table| !write || (table.refcount() == 1 && !table.is_immutable()))?;
             let name = code.literals.get(op.op2 as usize)?.as_str()?;
-            Some((table.value_ref(php_heap::Key::Str(name))?, false))
+            Some((dynamic_bucket(object, name, write)?, false))
         }
     }
+}
+
+/// [`inline_place`] over a name the program computed: the bucket of a
+/// name that places as a dynamic property ([`Request::places_dynamic_on_std`]).
+/// A call of its own, so that the constant name's path keeps to the
+/// registers it needs.
+#[inline(never)]
+fn computed_place(
+    req: &Request,
+    object: php_heap::Obj,
+    name: php_heap::Str,
+    write: bool,
+) -> Option<(php_heap::ZvalRef, bool)> {
+    let class = crate::api::values::ClassId(object.class());
+    if !req.places_dynamic_on_std(class, name.bytes()) {
+        return None;
+    }
+    Some((dynamic_bucket(object, name, write)?, false))
+}
+
+/// The bucket `name` stands in in `object`'s dynamic table, found by
+/// the name's hash, for a `write` only in a table nothing else shares.
+#[inline(always)] // as `inline_fetch_obj_r`
+#[allow(clippy::inline_always)]
+fn dynamic_bucket(
+    object: php_heap::Obj,
+    name: php_heap::Str,
+    write: bool,
+) -> Option<php_heap::ZvalRef> {
+    object
+        .properties()
+        .filter(|table| !write || (table.refcount() == 1 && !table.is_immutable()))?
+        .value_ref(php_heap::Key::Str(name))
 }
 
 /// [`Request::prime_property`] for a property opcode whose name is a
@@ -8121,8 +8223,9 @@ fn property_cache_slot(op: &Opline) -> CacheSlot {
 
 /// The object a property opcode's inline path works on: `$this` for an
 /// `UNUSED` container, the object a CV holds, a reference followed,
-/// for a CV, and only where the name is a constant and the object is
-/// not lazy. None for every other container, which the kernel reads.
+/// for a CV, and only where the name is a constant or a CV's and the
+/// object is not lazy. None for every other container, and for a name a
+/// temporary holds, whose `FREE_OP2` is the kernel's.
 #[inline(always)] // as `inline_fetch_obj_r`
 #[allow(clippy::inline_always)]
 fn inline_receiver(
@@ -8133,7 +8236,7 @@ fn inline_receiver(
     a: impl Operand,
     b: impl Operand,
 ) -> Option<php_heap::Obj> {
-    if b.kind() != OperandKind::Const {
+    if !matches!(b.kind(), OperandKind::Const | OperandKind::Cv) {
         return None;
     }
     let object = match a.kind() {
@@ -8410,10 +8513,10 @@ fn fetched_obj_place(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Op
     fetch_obj_place(req, frame, code, op, PropertyRead::Silent)
 }
 
-/// The inline path of `ZEND_FETCH_OBJ_W` over a constant name
-/// (`zend_fetch_property_address`'s cached arm,
-/// `Z/Zend/zend_execute.c:3540-3560`): the place the cache slot names
-/// on a receiver of the class it was primed with ([`cached_place`]),
+/// The inline path of `ZEND_FETCH_OBJ_W` over a constant name or one a
+/// CV holds (`zend_fetch_property_address`'s cached arm and
+/// `zend_std_get_property_ptr_ptr`'s dynamic one,
+/// `Z/Zend/zend_execute.c:3540-3560`): the place [`inline_place`] names,
 /// where it holds a value, left in the `VAR` as an `IS_INDIRECT` for the
 /// write after it. `None` as [`inline_fetch_obj_r`]'s, and for a typed slot, whose
 /// fetch flags are [`fetch_flags`]', and a `VAR` holding an owner.
@@ -8427,9 +8530,10 @@ fn inline_fetch_obj_w(
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
     let object = inline_receiver(req, frame, code, op, a, b)?;
-    let (place, typed) = cached_place(
+    let (place, typed) = inline_place(
         req,
         (frame, code, op),
+        b,
         property_cache_slot(op),
         object,
         true,
@@ -13173,11 +13277,11 @@ pub(crate) fn assign_obj<
     assigned_obj(req, frame, code, op)
 }
 
-/// The inline path of `ZEND_ASSIGN_OBJ` over a constant name
-/// (`ZEND_ASSIGN_OBJ_SPEC_CV_CONST_OP_DATA_*`, `_UNUSED_CONST_*`,
-/// `Z/Zend/zend_vm_def.h:2489-2537`): the place the cache slot names on
-/// a receiver of the class it was primed with ([`cached_place`]), a
-/// declared slot or a dynamic property's bucket, holding a value that
+/// The inline path of `ZEND_ASSIGN_OBJ` over a constant name or one a CV
+/// holds (`ZEND_ASSIGN_OBJ_SPEC_CV_CONST_OP_DATA_*`, `_CV_CV_*`,
+/// `_UNUSED_*`, `Z/Zend/zend_vm_def.h:2489-2537`): the place
+/// [`inline_place`] names, a declared slot or a dynamic property's
+/// bucket, holding a value that
 /// owns nothing, takes the `OP_DATA` value as
 /// `zend_assign_to_variable` takes it, a constant copied, a temporary
 /// moved and a CV copied with one more owner, and the temporary takes it
@@ -13218,9 +13322,10 @@ fn inline_assign_obj(
     (a, b, data): (impl Operand, impl Operand, impl Operand),
 ) -> Option<Edge> {
     let object = inline_receiver(req, frame, code, op, a, b)?;
-    let (place, typed) = cached_place(
+    let (place, typed) = inline_place(
         req,
         (frame, code, op),
+        b,
         property_cache_slot(op),
         object,
         true,
@@ -16036,10 +16141,10 @@ pub(crate) fn assign_obj_op<T: Tier>(
     Ok(advance_over_data(req, frame, at))
 }
 
-/// The inline path of `ZEND_ASSIGN_OBJ_OP` over a constant name
-/// (`zend_binary_assign_op_obj_dim`'s cached place,
-/// `Z/Zend/zend_vm_def.h:1046-1068`): the place the cache slot names
-/// ([`cached_place`]) holding a number, and an `OP_DATA` value that is
+/// The inline path of `ZEND_ASSIGN_OBJ_OP` over a constant name or one a
+/// CV holds (`zend_binary_assign_op_obj_dim`'s place,
+/// `Z/Zend/zend_vm_def.h:1046-1068`): the place [`inline_place`] names
+/// holding a number, and an `OP_DATA` value that is
 /// one, under the ten operators [`inline::compound`] names, computed by
 /// [`inline::binary`] and written in place and, under
 /// `RETURN_VALUE_USED`, into the temporary. `None`, with nothing
@@ -16079,7 +16184,7 @@ fn inline_assign_obj_op(
     // `CACHE_ADDR((opline+1)->extended_value)`: the operator is in the
     // opline's own field, so the slot is in the `OP_DATA`'s.
     let slot = CacheSlot(data.extended_value);
-    let (place, typed) = cached_place(req, (frame, code, op), slot, object, true)?;
+    let (place, typed) = inline_place(req, (frame, code, op), b, slot, object, true)?;
     if typed {
         return None;
     }
@@ -16888,9 +16993,9 @@ fn incdec_obj(
 }
 
 /// The inline path of the four `*_INC_OBJ`/`*_DEC_OBJ` over a constant
-/// name (`zend_pre_incdec_property_zval` and its `POST_` twin over the
-/// cached place, `Z/Zend/zend_execute.c:2283`): the place the cache slot
-/// names ([`cached_place`]) holding a number, stepped by
+/// name or one a CV holds (`zend_pre_incdec_property_zval` and its
+/// `POST_` twin over the place, `Z/Zend/zend_execute.c:2283`): the place
+/// [`inline_place`] names holding a number, stepped by
 /// [`inline::step`] in place, the value before or after it in the
 /// temporary. `None`, with nothing touched, as [`inline_fetch_obj_r`]'s,
 /// for a typed slot, and for anything that is no number.
@@ -16933,9 +17038,10 @@ fn inline_incdec_obj(
 ) -> Option<Edge> {
     let (a, b) = (ByKind(op.op1_type), ByKind(op.op2_type));
     let object = inline_receiver(req, frame, code, op, a, b)?;
-    let (place, typed) = cached_place(
+    let (place, typed) = inline_place(
         req,
         (frame, code, op),
+        b,
         property_cache_slot(op),
         object,
         true,

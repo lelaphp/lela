@@ -73,6 +73,19 @@ enum Unplaced {
     Denied(Visibility),
 }
 
+/// What [`Request::find_property_info`] found for a name in a class's
+/// `ce->properties_info`.
+#[derive(Clone, Copy)]
+enum InfoFound {
+    /// The row of the name: the class's own declaration, or the one it
+    /// inherited, a parent's private one included.
+    Row(PropertyInfo),
+    /// No class of the chain declares the name.
+    Absent,
+    /// The class has no linked record, so its declarations answer.
+    Unrecorded,
+}
+
 /// What a write to a typed declared slot reads off its
 /// `zend_property_info`: the class that declared it, which the
 /// `TypeError` of a value the type refuses and the `Error` of a write
@@ -369,10 +382,71 @@ impl Request {
                 typed: placed.typed,
             });
         }
-        let declared = self.placed_named(class, name).is_some()
-            || self.chain_declaration(class, name).is_some();
-        (!declared && !Self::bad_property_name(name))
+        self.places_dynamic(class, name)
             .then_some(crate::exec::PropertyOffset::Dynamic)
+    }
+
+    /// `zend_get_property_offset`'s `ZEND_DYNAMIC_PROPERTY_OFFSET`
+    /// whatever the scope (`Z/Zend/zend_object_handlers.c:384-389`):
+    /// whether `name` is a dynamic property of objects of `class`, which
+    /// is a name no class of the chain declares, an instance or a
+    /// `static` property, private or not
+    /// ([`Request::find_property_info`]), and that leads with no NUL byte.
+    /// One rule for a name a cache slot holds ([`Request::cacheable_offset`])
+    /// and for one the program computed, which no cache serves
+    /// (`cache_slot == NULL`) and which a property opcode's inline path
+    /// places by it every pass.
+    pub(crate) fn places_dynamic(&self, class: ClassId, name: &[u8]) -> bool {
+        if Self::bad_property_name(name) {
+            return false;
+        }
+        match self.find_property_info(class, name) {
+            InfoFound::Absent => true,
+            InfoFound::Row(_) => false,
+            InfoFound::Unrecorded => {
+                self.placed_named(class, name).is_none()
+                    && self.chain_declaration(class, name).is_none()
+            }
+        }
+    }
+
+    /// `zend_hash_num_elements(&ce->properties_info) != 0`: whether any
+    /// class of `class`'s chain declares a property, instance or
+    /// `static`, which a class with no record answers by its placed
+    /// properties and the chain's declarations.
+    pub(super) fn declares_properties(&self, class: ClassId) -> bool {
+        match self.linked_class(class) {
+            Some(record) => !record.properties.rows().is_empty(),
+            None => {
+                !self.placed_properties(class).is_empty()
+                    || self.symbols().lineage(class).any(|here| {
+                        self.symbols()
+                            .class_decl(here)
+                            .is_some_and(|decl| !decl.properties.is_empty())
+                    })
+            }
+        }
+    }
+
+    /// [`Request::places_dynamic`] on an object of `class` the standard
+    /// handlers serve, `zobj->handlers->read_property ==
+    /// zend_std_read_property`: what a property opcode's inline path
+    /// places a computed name by, the class's row read once ([`Made`]),
+    /// so a class whose `ce->properties_info` is empty finds nothing in
+    /// it. False before an object of the class was made, which an object
+    /// of it standing never is.
+    ///
+    /// [`Made`]: super::class_data::Made
+    pub(crate) fn places_dynamic_on_std(&self, class: ClassId, name: &[u8]) -> bool {
+        let Some(made) = self.made_ref(class) else {
+            return false;
+        };
+        made.standard
+            && if made.declares {
+                self.places_dynamic(class, name)
+            } else {
+                !Self::bad_property_name(name)
+            }
     }
 
     /// `zend_update_property_ex(prop_info->ce, ...)`, what an engine or a
@@ -482,12 +556,17 @@ impl Request {
 
     /// The placed row `ce->properties_info` holds for `name`, whatever
     /// the scope: the last of the name, a class's own declaration being
-    /// appended after a parent's private one it hides.
+    /// appended after a parent's private one it hides; none, with no row
+    /// read, where the table holds no row of the name
+    /// ([`Request::find_property_info`]).
     pub(super) fn placed_named(
         &self,
         class: ClassId,
         name: &[u8],
     ) -> Option<(usize, ClassId, &PropertyDecl)> {
+        if let InfoFound::Absent = self.find_property_info(class, name) {
+            return None;
+        }
         self.placed(class)
             .rev()
             .find(|(_, _, p)| &*p.name.0 == name)
@@ -691,9 +770,15 @@ impl Request {
 
     /// The declaration of `name`, an instance or a `static` property, of
     /// the nearest class of `class`'s chain that declares one, beside
-    /// that class: what `ce->properties_info` finds where no placed row
-    /// does.
+    /// that class: the row `ce->properties_info` holds, read off the
+    /// record in one find ([`Request::find_property_info`]), and the
+    /// chain's declarations walked only for a class with no record.
     fn chain_declaration(&self, class: ClassId, name: &[u8]) -> Option<(ClassId, &PropertyDecl)> {
+        match self.find_property_info(class, name) {
+            InfoFound::Row(info) => return Some((info.declaring, self.property_decl(info)?)),
+            InfoFound::Absent => return None,
+            InfoFound::Unrecorded => {}
+        }
         self.symbols().lineage(class).find_map(|here| {
             let p = self
                 .symbols()
@@ -1023,15 +1108,34 @@ impl Request {
     /// keeps across what writes the request and reads the declaration
     /// through again ([`Request::property_decl`]).
     pub(crate) fn property_info(&self, class: ClassId, name: &[u8]) -> Option<PropertyInfo> {
+        match self.find_property_info(class, name) {
+            InfoFound::Row(info) => Some(info),
+            InfoFound::Absent | InfoFound::Unrecorded => None,
+        }
+    }
+
+    /// `zend_hash_find(&ce->properties_info, name)`, skipped where the
+    /// table is empty (`zend_hash_num_elements(&ce->properties_info) ==
+    /// 0`, `Z/Zend/zend_object_handlers.c:362`): the one find every
+    /// placement of a name starts from, so a name no class of the chain
+    /// declares, instance or `static`, private or not, is known for a
+    /// dynamic property's after it and no class's declarations are read.
+    fn find_property_info(&self, class: ClassId, name: &[u8]) -> InfoFound {
+        let Some(record) = self.linked_class(class) else {
+            return InfoFound::Unrecorded;
+        };
+        if record.properties.rows().is_empty() {
+            return InfoFound::Absent;
+        }
         let row = |row: &Row<ClassId>| PropertyInfo {
             declaring: row.holder_in(class),
             at: row.at,
         };
-        let found = self.linked_class(class)?.properties.find(name, |at| {
+        let found = record.properties.find(name, |at| {
             self.property_decl(row(at))
                 .map_or(&[][..], |property| &property.name.0)
-        })?;
-        Some(row(found))
+        });
+        found.map_or(InfoFound::Absent, |found| InfoFound::Row(row(found)))
     }
 
     /// `ZEND_REF_ADD_TYPE_SOURCE` (`Z/Zend/zend_types.h:1082`): the
