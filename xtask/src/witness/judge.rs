@@ -44,6 +44,7 @@ use crate::divergence::{Divergence, Registry};
 use crate::oracle::expect::Expectation;
 use crate::oracle::hosts::FPM;
 use crate::oracle::{self, Observation, Oracle, Pin, Program, Regime, Verdict as Compared, linked};
+use crate::phpt::Lane;
 use crate::scratch::Full;
 use anyhow::{Context, Result};
 
@@ -477,6 +478,21 @@ fn lacking<'w>(oracle: &Oracle<'_>, witness: &'w Witness) -> Result<Option<&'w s
 /// §8, revision 61). A panic in the linked engine is trouble the witness
 /// borks on, never the lane's end; the trouble is the sentence it borks
 /// with.
+/// The bundle features the `php` serving a `process` fence is built
+/// with: its crate's where the binary under test does not turn it on,
+/// and the tier's where its regime sets the lane's `jit.mode`, so the
+/// lane runs on a binary that carries the tier, as the phpt lane's
+/// `--jit` builds it (#2962).
+fn features<'w>(witness: &'w Witness, regime: Option<&Regime>) -> Vec<&'w str> {
+    let mut features: Vec<&str> = witness.feature.as_deref().into_iter().collect();
+    if regime.is_some_and(|regime| regime.sets(Lane::DIRECTIVE))
+        && !features.contains(&Lane::FEATURE)
+    {
+        features.push(Lane::FEATURE);
+    }
+    features
+}
+
 pub(super) fn serve(
     oracle: &Oracle<'_>,
     binary: &Binary,
@@ -492,7 +508,7 @@ pub(super) fn serve(
                 oracle,
                 &witness.snippet,
                 witness.regime.as_deref(),
-                witness.feature.as_deref(),
+                &features(witness, regime),
             )
             .context("the php binary did not serve it"),
         served @ (Served::Cgi | Served::Fpm | Served::Makala | Served::Phpdbg) => {

@@ -534,7 +534,7 @@ fn rendering(
         } else {
             engines
                 .binary
-                .serve(oracle, &program, None, None)
+                .serve(oracle, &program, None, &[])
                 .map(|(served, _)| served)
                 .map_err(|trouble| format!("the php binary did not serve it: {trouble:#}"))
         };

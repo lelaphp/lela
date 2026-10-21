@@ -231,13 +231,17 @@ impl Lane {
 
     /// The engine-only directive the lane sets (jit-design.md §7).
     fn ini(self) -> String {
-        format!("jit.mode={}", self.as_str())
+        format!("{}={}", Lane::DIRECTIVE, self.as_str())
     }
+
+    /// The engine-only directive that names a lane, which a witness's
+    /// regime sets to run its fence under one (#2962).
+    pub(crate) const DIRECTIVE: &'static str = "jit.mode";
 
     /// The bundle's feature the lane's engine is built with: `jit.mode`
     /// reaches the compiled tier only in a `php` built with
     /// `php_bundle/jit`, the build that binds `php_bundle::Tier` (#3053).
-    const FEATURE: &str = "jit";
+    pub(crate) const FEATURE: &'static str = "jit";
 }
 
 /// One directory of the corpus: where it stands in the pinned tree, and
