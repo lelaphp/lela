@@ -1391,7 +1391,10 @@ impl Emit<'_> {
 
 /// The refusal for a construct the emitter cannot emit yet, at the
 /// node's own line: the `Level::Parse` sentence the phpt lane reads as
-/// unread.
+/// unread. Cold and a call of its own, so the sentence it formats is off
+/// the stack of every recursive compile that may refuse (#3159).
+#[cold]
+#[inline(never)]
 pub(super) fn unread(line: u32, what: &str) -> CompileError {
     CompileError {
         level: Level::Parse,

@@ -54,6 +54,9 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: Arrow functions on the right hand side of |> must be parenthesized in %s on line 2
     /// ```
+    /// A call of its own, so what it takes is off the stack of a
+    /// left-nested chain of the other operators (#3159).
+    #[inline(never)]
     pub(super) fn pipe(
         &mut self,
         operand: tree::Expr,

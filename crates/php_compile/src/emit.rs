@@ -1873,8 +1873,20 @@ impl<'a> Emit<'a> {
 
     /// `zend_check_stack_limit`, at the top of `zend_compile_expr` and
     /// `zend_eval_const_expr`: php's `E_COMPILE_ERROR` once the frame
-    /// stands past the thread's limit.
+    /// stands past the thread's limit. The refusal is a cold call of its
+    /// own, so the sentence it formats is off the stack of every level
+    /// of a nested expression (#3159).
     fn check_stack(&self) -> Result<(), CompileError> {
+        if self.stack.overflowed() {
+            return self.stack_refused();
+        }
+        Ok(())
+    }
+
+    /// [`Self::check_stack`]'s refusal.
+    #[cold]
+    #[inline(never)]
+    fn stack_refused(&self) -> Result<(), CompileError> {
         self.stack.check(self.line)
     }
 
@@ -10813,6 +10825,8 @@ impl<'a> Emit<'a> {
     /// compiler stands on: php's own sentence for what its compiler
     /// refuses after the parse, which ends the request as its
     /// `E_COMPILE_ERROR` does.
+    #[cold]
+    #[inline(never)]
     fn compile_error(&self, message: impl Into<Cow<'static, str>>) -> CompileError {
         CompileError {
             level: Level::CompileError,
@@ -11482,6 +11496,13 @@ impl<'a> Emit<'a> {
 
     /// `ZEND_AST_AND`, `ZEND_AST_OR`, `ZEND_AST_COALESCE`, the pipe and
     /// `ZEND_AST_BINARY_OP`, each to its compile.
+    ///
+    /// Inlined into [`Self::expr_node`], with [`Self::binary`], so a
+    /// left-nested chain stands in one frame per operator, where php's
+    /// stands in `zend_compile_expr_inner` and `zend_compile_binary_op`,
+    /// rather than two each saving every register it uses (#3159).
+    #[allow(clippy::inline_always)] // measured: 800 bytes a level of `1+1+…` to 400
+    #[inline(always)]
     fn binary_expr(&mut self, id: NodeId<tree::BinaryExpr>) -> Result<Where, CompileError> {
         let node = &self.parsed.tree[id];
         let left = node.lhs;
@@ -12315,6 +12336,9 @@ impl<'a> Emit<'a> {
     ///
     /// `zend_eval_const_expr` folds neither side, so `1 ?? 2` is the
     /// two oplines any other pair is.
+    /// A call of its own, so what it takes is off the stack of a
+    /// left-nested chain of the other operators (#3159).
+    #[inline(never)]
     fn coalesce(&mut self, left: tree::Expr, right: tree::Expr) -> Result<Where, CompileError> {
         let held = self.silent_read(left)?;
         let (op1_type, op1) = self.operand(held);
@@ -12357,6 +12381,9 @@ impl<'a> Emit<'a> {
     /// compiled where that truth settles it (`0 && f()`), and where it
     /// does not, the right side alone is the answer, as the constant it
     /// folds to or as one `BOOL` over it.
+    /// A call of its own, so what it takes is off the stack of a
+    /// left-nested chain of the other operators (#3159).
+    #[inline(never)]
     fn short_circuiting(
         &mut self,
         or: bool,
@@ -14087,6 +14114,8 @@ impl<'a> Emit<'a> {
     /// deeper, as php's is, and this frame, which a left-nested chain
     /// stands in once per operator, holds the two compiles and nothing
     /// else.
+    #[allow(clippy::inline_always)] // measured: as `binary_expr`'s
+    #[inline(always)]
     fn binary(
         &mut self,
         op: BinaryOp,
@@ -14102,7 +14131,10 @@ impl<'a> Emit<'a> {
     /// the `ZEND_CONCAT`, comparison and bitwise arms each to its own,
     /// the value where `zend_try_ct_eval_binary_op` folds the arithmetic
     /// over two constants, and the opcode into a temporary where it
-    /// does not (`zend_emit_op_tmp`).
+    /// does not (`zend_emit_op_tmp`). A call of its own, so what an arm
+    /// takes is off the stack of a left-nested chain, which stands in
+    /// [`Self::binary`] once per operator (#3159).
+    #[inline(never)]
     fn binary_operands(
         &mut self,
         op: BinaryOp,
