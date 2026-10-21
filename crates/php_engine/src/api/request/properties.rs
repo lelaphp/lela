@@ -457,7 +457,7 @@ impl Request {
             InfoFound::Row(row) if !row.reads_scope() && hooks == php_link::ClassHooks::Absent => {
                 return Some(crate::exec::PropertyOffset::Declared {
                     slot: row.place.slot?,
-                    typed: row.property.ty.is_some(),
+                    ty: row.place.ty,
                 });
             }
             InfoFound::Unrecorded
@@ -489,7 +489,7 @@ impl Request {
             {
                 Some(crate::exec::PropertyOffset::Declared {
                     slot: placed.slot,
-                    typed: placed.typed,
+                    ty: placed.ty,
                 })
             }
             _ => None,
@@ -736,6 +736,7 @@ impl Request {
             place: RowPlace {
                 slot: u32::try_from(slot).ok(),
                 changed,
+                ty: crate::exec::SlotType::of(property),
             },
         })
     }
@@ -842,7 +843,7 @@ impl Request {
             declaring,
             visibility: p.visibility,
             set_visibility: p.set_visibility,
-            typed: p.ty.is_some(),
+            ty: crate::exec::SlotType::of(p),
             readonly: p.is_readonly,
             root,
         })
@@ -1878,7 +1879,7 @@ impl Request {
     ) -> Result<Value, Thrown> {
         let Some(placed) = self
             .declared_slot(class, name)
-            .filter(|p| p.typed && self.reaches(p))
+            .filter(|p| p.ty.typed() && self.reaches(p))
         else {
             return Ok(got);
         };
@@ -2465,7 +2466,7 @@ impl Request {
                 // (`uninit_error` with `prop_info` set).
                 let magic = self.serves_accessor(class, Accessor::Get)
                     || (silent && self.serves_accessor(class, Accessor::Isset));
-                if placed.typed && (o.slot_uninit(placed.slot) || !magic) {
+                if placed.ty.typed() && (o.slot_uninit(placed.slot) || !magic) {
                     if quiet {
                         return Ok(Owner::null());
                     }
@@ -2755,7 +2756,7 @@ impl Request {
         if let Some(thrown) = self.set_refusal(&placed, name, operation) {
             return Err(thrown);
         }
-        Ok(Some((placed.slot, placed.typed)))
+        Ok(Some((placed.slot, placed.ty.typed())))
     }
 
     /// `if (UNEXPECTED(Z_TYPE_P(retval) == IS_UNDEF))` in
@@ -2816,7 +2817,7 @@ impl Request {
         if magic && !o.slot_uninit(placed.slot) {
             return Ok(());
         }
-        if placed.typed {
+        if placed.ty.typed() {
             return Err(self.uninitialized_property(placed.declaring, name));
         }
         // `ZVAL_NULL(retval)` before the warning, so what an error handler
@@ -3374,7 +3375,7 @@ impl Request {
     ) -> Result<(), Thrown> {
         let o = object.heap();
         if let Some(placed) = self.declared_slot(object.class(), name.as_bytes()) {
-            let value = if placed.typed {
+            let value = if placed.ty.typed() {
                 let Some(typed) = self.typed_property_at(object.class(), placed.slot) else {
                     value.give_up(self);
                     name.give_up(self);

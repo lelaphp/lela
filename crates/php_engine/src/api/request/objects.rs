@@ -428,9 +428,10 @@ pub(super) struct PropertiesInfo<'r> {
 }
 
 /// What `row` of `class`'s `properties_info` places its name at among
-/// `placed`, the class's slots: the slot of its property, and
+/// `placed`, the class's slots: the slot of its property,
 /// `ZEND_ACC_CHANGED`, which `do_inherit_property` sets on a property
-/// redeclared over a parent's private one and keeps down the chain. A
+/// redeclared over a parent's private one and keeps down the chain, and
+/// what a write to the slot is held to ([`crate::exec::SlotType`]). A
 /// private instance property of a class above keeps its slot on the
 /// objects of every class below it, so a slot of the name another class
 /// declared private is that parent's property.
@@ -463,7 +464,8 @@ fn row_place<'d>(
             &property.name.0,
         )
     });
-    RowPlace { slot, changed }
+    let ty = declared(info).map_or(crate::exec::SlotType::UNTYPED, crate::exec::SlotType::of);
+    RowPlace { slot, changed, ty }
 }
 
 /// `ZEND_ACC_CHANGED` of the property `name` that `declaring` declares,

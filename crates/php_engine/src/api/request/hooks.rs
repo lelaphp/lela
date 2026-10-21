@@ -575,7 +575,7 @@ impl Request {
         if read == PropertyRead::Silent {
             return Ok(Value::null());
         }
-        if placed.typed {
+        if placed.ty.typed() {
             return Err(self.uninitialized_property(object.class(), name));
         }
         let class = self.symbols().class_name(object.class());
