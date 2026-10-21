@@ -7,7 +7,7 @@
 )]
 
 use php_ext::abi::Extension;
-use php_ext::test::{Capture, Engine};
+use php_ext::test::{Capture, Engine, Files};
 
 #[test]
 fn the_extension_is_loaded() {
@@ -24,7 +24,7 @@ fn the_extension_is_loaded() {
         .build();
     let sink = Capture::default();
     let served = engine.serve_capture("<?php var_dump(extension_loaded('mysqli'));", sink);
-    assert_eq!(served.stdout, b"bool(true)\n");
+    assert_eq!(served.stdout_text(), "bool(true)\n");
 }
 
 /// A `p:` link the first request leaves open is given back to the engine's
@@ -54,13 +54,13 @@ fn a_persistent_link_serves_the_next_request() {
     let connect = "mysqli_connect('p:127.0.0.1', 'root', '', 'test')";
     let first = format!("<?php $l = {connect}; echo mysqli_thread_id($l);");
     let served = engine.serve_capture(&first, Capture::default());
-    let thread = String::from_utf8_lossy(&served.stdout).into_owned();
+    let thread = served.stdout_text();
     assert!(thread.parse::<u64>().is_ok(), "{thread}");
     let stats = "foreach (mysqli_get_links_stats() as $k => $n) echo \"$k=$n \";";
     let second = format!("<?php {stats} $l = {connect}; echo mysqli_thread_id($l), ' '; {stats}");
     let served = engine.serve_capture(&second, Capture::default());
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         format!(
             "total=0 active_plinks=0 cached_plinks=1 {thread} total=1 active_plinks=1 cached_plinks=0 "
         )
@@ -105,11 +105,11 @@ fn a_persistent_link_keeps_its_socket_however_full_the_stream_pool_is() {
         $l = {connect}; echo mysqli_thread_id($l);"
     );
     let served = engine.serve_capture(&first, Capture::default());
-    let thread = String::from_utf8_lossy(&served.stdout).into_owned();
+    let thread = served.stdout_text();
     assert!(thread.parse::<u64>().is_ok(), "{thread}");
     let second = format!("<?php $l = {connect}; echo mysqli_thread_id($l);");
     let served = engine.serve_capture(&second, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), thread);
+    assert_eq!(served.stdout_text(), thread);
 }
 
 /// A link `mysqli_init()` made and the first request connected without
@@ -138,7 +138,7 @@ fn a_link_from_init_connected_without_p_is_closed_as_the_request_ends() {
         .build();
     let first = "<?php $l = mysqli_init(); $kept = $l; $l->real_connect('127.0.0.1', 'root', '', 'test'); echo $l->thread_id;";
     let served = engine.serve_capture(first, Capture::default());
-    let thread = String::from_utf8_lossy(&served.stdout).into_owned();
+    let thread = served.stdout_text();
     assert!(thread.parse::<u64>().is_ok(), "{thread}");
     let second = format!(
         "<?php $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
@@ -152,7 +152,7 @@ fn a_link_from_init_connected_without_p_is_closed_as_the_request_ends() {
         echo $open ? 'open' : 'gone';"
     );
     let served = engine.serve_capture(&second, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "gone");
+    assert_eq!(served.stdout_text(), "gone");
 }
 
 /// A session save handler whose `write` queries through a link in a
@@ -184,7 +184,12 @@ fn a_session_written_at_the_request_end_still_has_the_link() {
     let setup = format!(
         "<?php $l = mysqli_connect('127.0.0.1', 'root', '', 'test'); mysqli_query($l, '{table}'); mysqli_query($l, 'DELETE FROM t1689');"
     );
-    assert_eq!(engine.serve_capture(&setup, Capture::default()).stdout, b"");
+    assert_eq!(
+        engine
+            .serve_capture(&setup, Capture::default())
+            .stdout_text(),
+        ""
+    );
     for (key, connect) in [
         (
             "init",
@@ -216,18 +221,17 @@ fn a_session_written_at_the_request_end_still_has_the_link() {
             $_SESSION['{key}'] = 1;"
         );
         assert_eq!(
-            engine.serve_capture(&written, Capture::default()).stdout,
-            b""
+            engine
+                .serve_capture(&written, Capture::default())
+                .stdout_text(),
+            ""
         );
     }
     let read = "<?php $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
         foreach (mysqli_query($l, 'SELECT k, v FROM t1689 ORDER BY k') as $r) echo $r['k'], ' ', $r['v'], \"\\n\";
         mysqli_query($l, 'DROP TABLE t1689');";
     let served = engine.serve_capture(read, Capture::default());
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "init init|i:1;\np p|i:1;\n"
-    );
+    assert_eq!(served.stdout_text(), "init init|i:1;\np p|i:1;\n");
 }
 
 /// An engine of `extensions` with `ini` set and the request leak sensor
@@ -277,8 +281,8 @@ fn an_armed_request_over_the_wire_leaves_none_of_its_packets_held() {
     ) else {
         return;
     };
-    let file = std::env::temp_dir().join(format!("t2092-{}.csv", std::process::id()));
-    std::fs::write(&file, "1,a\n2,b\n").expect("the file the server asks for");
+    let files = Files::new("mysqli-local-infile", &[("rows.csv", "1,a\n2,b\n")]);
+    let file = files.path().join("rows.csv");
     let source = format!(
         "<?php $l = mysqli_init();
         mysqli_options($l, MYSQLI_OPT_LOCAL_INFILE, true);
@@ -302,9 +306,8 @@ fn an_armed_request_over_the_wire_leaves_none_of_its_packets_held() {
         file.display()
     );
     let served = engine.serve_capture(&source, Capture::default());
-    std::fs::remove_file(&file).ok();
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "bool(true)\n1 a\n2 b\nint(42)\nfloat(1.5)\nstring(4) \"text\"\n"
     );
 }
@@ -338,7 +341,7 @@ fn an_armed_request_reading_its_warnings_leaves_none_held() {
         var_dump($w->errno, $w->message);";
     let served = engine.serve_capture(source, Capture::default());
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "int(1365)\nstring(13) \"Division by 0\"\n"
     );
 }
@@ -372,10 +375,7 @@ fn an_armed_request_refused_by_the_server_leaves_none_held() {
     let source = "<?php mysqli_report(MYSQLI_REPORT_OFF);
         var_dump(@mysqli_connect('127.0.0.1', 'nobody', 'x'), mysqli_connect_errno());";
     let served = engine.serve_capture(source, Capture::default());
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "bool(false)\nint(1045)\n"
-    );
+    assert_eq!(served.stdout_text(), "bool(false)\nint(1045)\n");
 }
 
 /// `mysqli_stmt_error_list()` answers the list it builds and allocates
@@ -406,7 +406,7 @@ fn an_armed_request_reading_a_statements_errors_leaves_none_held() {
         mysqli_stmt_prepare($s, 'SELECT nope');
         var_dump(mysqli_stmt_error_list($s)[0]['errno']);";
     let served = engine.serve_capture(source, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "int(1054)\n");
+    assert_eq!(served.stdout_text(), "int(1054)\n");
 }
 
 /// A text option of `mysqli_options()` given as a number, and the class
@@ -437,10 +437,7 @@ fn an_armed_request_whose_text_arguments_are_converted_leaves_none_held() {
         $class = 'std'; $class .= 'Class';
         var_dump(get_class(mysqli_query($l, 'SELECT 1 AS a')->fetch_object($class)));";
     let served = engine.serve_capture(source, Capture::default());
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "bool(true)\nstring(8) \"stdClass\"\n"
-    );
+    assert_eq!(served.stdout_text(), "bool(true)\nstring(8) \"stdClass\"\n");
 }
 
 /// The server's public key read from the file `MYSQLI_SERVER_PUBLIC_KEY`
@@ -467,8 +464,8 @@ fn an_armed_request_reading_the_servers_key_from_a_file_leaves_none_held() {
     ) else {
         return;
     };
-    let file = std::env::temp_dir().join(format!("t2092-{}.pem", std::process::id()));
-    std::fs::write(&file, "not a key\n").expect("the key file");
+    let files = Files::new("mysqli-public-key", &[("key.pem", "not a key\n")]);
+    let file = files.path().join("key.pem");
     let source = format!(
         "<?php mysqli_report(MYSQLI_REPORT_OFF);
         $l = mysqli_init();
@@ -477,11 +474,7 @@ fn an_armed_request_reading_the_servers_key_from_a_file_leaves_none_held() {
         file.display()
     );
     let served = engine.serve_capture(&source, Capture::default());
-    std::fs::remove_file(&file).ok();
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "bool(false)\nint(1045)\n"
-    );
+    assert_eq!(served.stdout_text(), "bool(false)\nint(1045)\n");
 }
 
 /// A `p:` link waiting in mysqli's free links as the engine ends is
@@ -538,7 +531,7 @@ fn a_free_persistent_link_is_quit_as_the_engine_ends() {
         "<?php $l = mysqli_connect('p:127.0.0.1', 'root', '', 'test', {port}); echo $l ? 'connected' : 'refused';"
     );
     let served = engine.serve_capture(&script, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "connected");
+    assert_eq!(served.stdout_text(), "connected");
     assert!(
         received.recv_timeout(Duration::from_millis(200)).is_err(),
         "the free link was closed before the engine ended"

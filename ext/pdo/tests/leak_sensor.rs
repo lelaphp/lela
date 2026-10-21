@@ -97,6 +97,6 @@ fn a_leak_from_a_connector_s_factory_names_its_extension() {
         "<?php $p = new PDO('leaky:x'); echo 'made';",
         Capture::default(),
     );
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert!(stdout.contains(", allocated by pdo_leaky in "), "{stdout}");
 }

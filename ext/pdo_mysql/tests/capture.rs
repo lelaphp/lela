@@ -33,7 +33,7 @@ fn the_extension_is_loaded() {
         .build();
     let sink = Capture::default();
     let served = engine.serve_capture("<?php var_dump(extension_loaded('pdo_mysql'));", sink);
-    assert_eq!(served.stdout, b"bool(true)\n");
+    assert_eq!(served.stdout_text(), "bool(true)\n");
 }
 
 /// A persistent connection given back to the engine's pool at the end of
@@ -60,7 +60,7 @@ fn a_persistent_connection_serves_the_next_request_and_a_dead_one_is_replaced() 
         "{open} $db->exec('SET @kept = 7'); echo $db->query('SELECT CONNECTION_ID()')->fetchColumn();"
     );
     let served = engine.serve_capture(&first, Capture::default());
-    let id = String::from_utf8_lossy(&served.stdout).into_owned();
+    let id = served.stdout_text();
     if id == "no server" {
         return;
     }
@@ -68,20 +68,17 @@ fn a_persistent_connection_serves_the_next_request_and_a_dead_one_is_replaced() 
         "{open} echo $db->query('SELECT CONNECTION_ID()')->fetchColumn(), ' ', $db->query('SELECT @kept')->fetchColumn();"
     );
     let served = engine.serve_capture(&second, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), format!("{id} 7"));
+    assert_eq!(served.stdout_text(), format!("{id} 7"));
     let kill = format!(
         "<?php $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', ''); $db->exec('KILL {id}'); $db->query('SELECT SLEEP(0.2)'); echo 'killed';"
     );
     let served = engine.serve_capture(&kill, Capture::default());
-    assert_eq!(served.stdout, b"killed");
+    assert_eq!(served.stdout_text(), "killed");
     let third = format!(
         "{open} $now = $db->query('SELECT CONNECTION_ID()')->fetchColumn(); var_dump($now != '{id}', $db->query('SELECT @kept')->fetchColumn());"
     );
     let served = engine.serve_capture(&third, Capture::default());
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "bool(true)\nNULL\n"
-    );
+    assert_eq!(served.stdout_text(), "bool(true)\nNULL\n");
 }
 
 /// A session save handler whose `write` goes through a persistent
@@ -131,13 +128,13 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_connection() {
         session_start();
         $_SESSION['a'] = 1;";
     let served = engine.serve_capture(written, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "");
+    assert_eq!(served.stdout_text(), "");
     let read = "<?php $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
         var_dump($db->query('SELECT v FROM t1695')->fetchAll(PDO::FETCH_COLUMN));
         $db->exec('DROP TABLE t1695');";
     let served = engine.serve_capture(read, Capture::default());
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "array(1) {\n  [0]=>\n  string(6) \"a|i:1;\"\n}\n"
     );
 }
@@ -232,7 +229,7 @@ fn a_persistent_connection_past_the_pool_s_bound_is_closed() {
         $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_PERSISTENT => true]);
         echo $db->query('SELECT CONNECTION_ID()')->fetchColumn();";
     let served = engine.serve_capture(first, Capture::default());
-    let thread = String::from_utf8_lossy(&served.stdout).into_owned();
+    let thread = served.stdout_text();
     assert!(thread.parse::<u64>().is_ok(), "{thread}");
     let second = format!(
         "<?php $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
@@ -244,7 +241,7 @@ fn a_persistent_connection_past_the_pool_s_bound_is_closed() {
         echo $open ? 'open' : 'gone';"
     );
     let served = engine.serve_capture(&second, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "gone");
+    assert_eq!(served.stdout_text(), "gone");
 }
 
 /// A persistent connection waits between requests in one list, PDO's,
@@ -286,10 +283,10 @@ fn a_persistent_connection_keeps_its_socket_however_full_the_stream_pool_is() {
         {open}"
     );
     let served = engine.serve_capture(&first, Capture::default());
-    let thread = String::from_utf8_lossy(&served.stdout).into_owned();
+    let thread = served.stdout_text();
     assert!(thread.parse::<u64>().is_ok(), "{thread}");
     let served = engine.serve_capture(&format!("<?php {open}"), Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), thread);
+    assert_eq!(served.stdout_text(), thread);
 }
 
 /// A persistent connection waiting in PDO's pool as the engine ends is
@@ -344,7 +341,7 @@ fn a_pooled_persistent_connection_is_quit_as_the_engine_ends() {
         "<?php new PDO('mysql:host=127.0.0.1;port={port};dbname=test', 'root', '', [PDO::ATTR_PERSISTENT => true]); echo 'connected';"
     );
     let served = engine.serve_capture(&script, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "connected");
+    assert_eq!(served.stdout_text(), "connected");
     assert!(
         received.recv_timeout(Duration::from_millis(200)).is_err(),
         "the pooled connection was closed before the engine ended"

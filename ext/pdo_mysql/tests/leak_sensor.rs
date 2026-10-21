@@ -32,7 +32,7 @@ fn armed(body: &str) -> Option<String> {
         "<?php $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);\n{body}"
     );
     let served = engine.serve_capture(&source, Capture::default());
-    Some(String::from_utf8_lossy(&served.stdout).into_owned())
+    Some(served.stdout_text())
 }
 
 /// An emulated prepare quotes each bound value into the query as its
