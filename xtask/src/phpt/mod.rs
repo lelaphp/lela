@@ -488,6 +488,16 @@ impl Subset {
             .collect()
     }
 
+    /// Whether the subset is an extension's with no tests of its own, as
+    /// `ext/lexbor`'s is: one the design derives whose directory the tree
+    /// has not, or holds no `.phpt` under (#1231, #1598). Its reading is a
+    /// skip naming the directory, no run of it is kept, and it holds
+    /// nothing against any base (#725, #3143).
+    pub(crate) fn testless(&self, manifest: &Manifest) -> Result<bool> {
+        let derived = (manifest.crate_named(&self.scope)).is_some_and(Crate::derives_subset);
+        Ok(derived && (!self.absent().is_empty() || self.tests()?.is_empty()))
+    }
+
     /// The per-commit lane (harness §7, revision 63): every subset of
     /// every crate the binary under test carries or whose row names an
     /// oracle variant (#2029), in manifest order, under the pinned tree at
@@ -762,10 +772,7 @@ pub(crate) fn reading(
     // own, whose reading is a skip naming the directory, and not the
     // manifest and the pin disagreeing, which a row that names its
     // directories is (#1231, #1598).
-    let testless = manifest
-        .crate_named(&subset.scope)
-        .is_some_and(Crate::derives_subset)
-        && (!absent.is_empty() || subset.tests()?.is_empty());
+    let testless = subset.testless(manifest)?;
     // A subset of a crate not yet created: its tests are that crate's, and
     // an engine built without it would not answer for it, so the reading
     // says so ahead of whether an engine is built, as `budget` and
@@ -1059,6 +1066,16 @@ pub enum Engine {
     /// subset keeps its target under the variant's pin with no php named
     /// (#1970).
     Control,
+}
+
+/// Whether the subset `scope` names is testless in the pinned tree on this
+/// machine ([`Subset::testless`]); one that cannot be resolved is not.
+pub(crate) fn testless(manifest: &Manifest, scope: &str) -> bool {
+    let tree = manifest.pin.source.tree();
+    let subset = tree.and_then(|tree| Subset::resolve(manifest, &tree, scope));
+    subset
+        .and_then(|subset| subset.testless(manifest))
+        .is_ok_and(|testless| testless)
 }
 
 /// Run what was asked for: one reading per subset, each written by the

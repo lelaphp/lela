@@ -25,6 +25,16 @@ fn reading_of(diff: Result<Diff, String>) -> Reading {
     .unwrap()
 }
 
+/// A tally of one test of `ext/ctype`, met: a run the engine keeps.
+fn one_met() -> Tally {
+    let id = "phpt:php-src/ext/ctype/tests/one.phpt";
+    let judged = crate::phpt::Judged::new(id, "one.phpt", Judgement::Pass, "");
+    Tally {
+        judged: vec![judged],
+        found: 1,
+    }
+}
+
 fn count(reading: &Reading, key: &str) -> i64 {
     match reading.numbers.get(key) {
         Some(crate::reading::Number::Int(n)) => *n,
@@ -277,7 +287,9 @@ fn after_asks_git_nothing_while_the_engines_sources_stand_still() {
         corpus: runs.corpus.clone(),
         engine: "the linked engine".to_owned(),
         recipe: runs.recipe.clone(),
-        verdicts: BTreeMap::new(),
+        verdicts: (one_met().judged.iter())
+            .map(|j| (j.id.clone(), j.judgement))
+            .collect(),
         misses: BTreeMap::new(),
         skips: BTreeMap::new(),
     };
@@ -290,7 +302,7 @@ fn after_asks_git_nothing_while_the_engines_sources_stand_still() {
         let held = runs.after(
             &manifest,
             &held_as,
-            (&Tally::default(), &Runner::Linked),
+            (&one_met(), &Runner::Linked),
             &subset,
             None,
         );
@@ -403,13 +415,7 @@ fn a_commit_that_leaves_the_binary_keeps_its_runs_and_one_that_moves_it_does_not
     let runs = Runs::new(root, &manifest, None).unwrap();
     let subset = Reading::new(INSTRUMENT, scope);
     let held_as = Scope::of(scope);
-    let kept = runs.after(
-        &manifest,
-        &held_as,
-        (&Tally::default(), &engine),
-        &subset,
-        None,
-    );
+    let kept = runs.after(&manifest, &held_as, (&one_met(), &engine), &subset, None);
     assert_eq!(kept.unwrap(), None);
     assert!(kept_at(root, pin, "HEAD", scope).unwrap().is_ok());
 
@@ -454,5 +460,76 @@ fn a_commit_that_leaves_the_binary_keeps_its_runs_and_one_that_moves_it_does_not
     assert!(
         matches!(&unrun, Against::Unrun(why) if why.contains("no run of ext/ctype")),
         "{unrun:?}"
+    );
+}
+
+/// A run of no test is no evidence about the tree (#3143): the engine's is
+/// never kept, and one a store kept before, as main's kept a scratch
+/// corpus's `ext/ctype` at 37474a3, is read as no run, at the base and
+/// here. So `phpt --base` takes the base's run where only that one stands,
+/// and the run it carries in replaces it, after which `done` has a verdict.
+#[test]
+fn a_run_of_no_test_is_no_run_and_the_bases_run_carried_in_replaces_it() {
+    let (tree, binary) = workspace_with_a_binary("against-none");
+    let root: &Path = &tree;
+    let manifest = Manifest::load(&crate::built_root()).unwrap();
+    let pin = &manifest.pin;
+    let (scope, engine) = (Scope::of("ext/ctype"), Runner::Engine(binary));
+    let runs = Runs::new(root, &manifest, None).unwrap();
+    let after = |tally: &Tally| {
+        let subset = Reading::new(INSTRUMENT, "ext/ctype");
+        let kept = runs.after(&manifest, &scope, (tally, &engine), &subset, None);
+        assert_eq!(kept.unwrap(), None);
+    };
+    let unrun = |root: &Path| {
+        let why = kept_at(root, pin, "HEAD", "ext/ctype")
+            .unwrap()
+            .unwrap_err();
+        assert!(why.contains("no run of ext/ctype is kept at "), "{why}");
+        let now = Snapshot::disk(root).unwrap();
+        let here = regressed(&now, "HEAD", pin, "ext/ctype").unwrap();
+        assert!(matches!(here, Against::Unrun(_)), "{here:?}");
+    };
+    let none = Tally::default();
+    assert_eq!(runs.run_kept_at(&scope, (&none, &engine)), None);
+    after(&none);
+    unrun(root);
+
+    // The run of one test kept, and emptied as the store's was: no run.
+    let at = root.join(runs.run_kept_at(&scope, (&one_met(), &engine)).unwrap());
+    after(&one_met());
+    let run = read(&at).unwrap().unwrap();
+    let emptied = Run {
+        verdicts: BTreeMap::new(),
+        ..run.clone()
+    };
+    keep(&at, &emptied).unwrap();
+    unrun(root);
+
+    // `--base` takes it in a worktree of its own and carries it in.
+    let base = Tree::new("against-none-base").unwrap();
+    let there = base.join(at.strip_prefix(root).unwrap());
+    fs::create_dir_all(there.parent().unwrap()).unwrap();
+    keep(&there, &run).unwrap();
+    assert_eq!(carry(&base, root).unwrap().carried, 1);
+    assert_eq!(
+        kept_at(root, pin, "HEAD", "ext/ctype").unwrap(),
+        Ok(run.clone())
+    );
+    // A run of none carried after it, under another pin, replaces nothing.
+    let later = Tree::new("against-none-later").unwrap();
+    let there = later.join(at.strip_prefix(root).unwrap());
+    fs::create_dir_all(there.parent().unwrap()).unwrap();
+    let moved = Run {
+        recipe: "moved".to_owned(),
+        ..emptied
+    };
+    keep(&there, &moved).unwrap();
+    assert_eq!(carry(&later, root).unwrap().carried, 0);
+    assert_eq!(kept_at(root, pin, "HEAD", "ext/ctype").unwrap(), Ok(run));
+    let now = Snapshot::disk(root).unwrap();
+    assert_eq!(
+        regressed(&now, "HEAD", pin, "ext/ctype").unwrap(),
+        Against::Held
     );
 }

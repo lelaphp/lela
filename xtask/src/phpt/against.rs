@@ -4,10 +4,11 @@
 //! and the comparison's reading fails while any is, naming them.
 //!
 //! **What a run is, and what keys it.** Every run in which the engine
-//! judged every test a subset holds is kept as its verdicts, one per
-//! test, at `target/harness/phpt-runs/<tree>/<scope>.json`, in the
-//! reading store, so CI's upload of the store carries them and a run CI
-//! took can serve as a base (harness §4.2, #725). The key is the tree the
+//! judged every test a subset holds, and it holds one, is kept as its
+//! verdicts, one per test, at
+//! `target/harness/phpt-runs/<tree>/<scope>.json`, in the reading store,
+//! so CI's upload of the store carries them and a run CI took can serve
+//! as a base (harness §4.2, #725). The key is the tree the
 //! engine's binary is built from, the tracked files under the paths its
 //! dep-info names ([`BuiltFrom::keyed`], #3109), and not the tree the
 //! subset's reading is stamped with: that one is the crate's own, which
@@ -185,6 +186,19 @@ pub(crate) struct Run {
     pub skips: BTreeMap<String, String>,
 }
 
+impl Run {
+    /// Whether the run holds a test, as a run of the engine must to be
+    /// kept or read (#3143). A run of none is no evidence about the tree:
+    /// `xtask`'s own tests took one of `ext/ctype` over a scratch corpus
+    /// into the store of the checkout they ran in, and it stood as the
+    /// base's run, the 49 tests of the head's not the same as its none, and
+    /// `--base` would not replace it. So one is never kept, and one kept
+    /// before is read as no run at all.
+    fn holds_a_test(&self) -> bool {
+        !self.verdicts.is_empty()
+    }
+}
+
 /// What a head's run comes to against the stored one.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Diff {
@@ -352,29 +366,30 @@ impl Runs {
     }
 
     /// The run a tally is where the engine judged every test the subset
-    /// holds, and none where anything else ran or anything was left.
+    /// holds, and none where anything else ran, anything was left or the
+    /// subset holds no test ([`Run::holds_a_test`]).
     fn run_of(&self, tally: &Tally, runner: &Runner) -> Option<Run> {
         let engine = match runner {
             Runner::Engine(_) => runner.stamp()?,
             Runner::Linked => "the linked engine".to_owned(),
             _ => return None,
         };
-        self.kept(tally, engine)
+        self.kept(tally, engine).filter(Run::holds_a_test)
     }
 
     /// Where the engine's run of `scope` is kept after it, relative to the
-    /// workspace's root, where it will be: the engine judged every test the
-    /// subset holds. What a reading held to a target points to for the met
-    /// tests it does not name (#2033); `after` keeps it there unless the
-    /// sources moved while it ran.
+    /// workspace's root, where it will be: [`Runs::run_of`] is one. What a
+    /// reading held to a target points to for the met tests it does not
+    /// name (#2033); `after` keeps it there unless the sources moved while
+    /// it ran.
     pub(crate) fn run_kept_at(
         &self,
         scope: &Scope,
         (tally, runner): (&Tally, &Runner),
     ) -> Option<PathBuf> {
-        let engine = matches!(runner, Runner::Engine(_) | Runner::Linked);
+        self.run_of(tally, runner)?;
         let (_, key) = self.keyed(runner).ok()?;
-        (engine && whole(tally)).then(|| path(Path::new(""), &key, &scope.to_string()))
+        Some(path(Path::new(""), &key, &scope.to_string()))
     }
 
     /// The run a tally is where it judged every test the subset holds,
@@ -554,14 +569,14 @@ enum Kept {
 
 /// The run of `scope` at `snapshot`'s engine, under any of its [`keys`]
 /// in any of `roots`, the newest of those taken under the pin whose digest
-/// is `recipe`.
+/// is `recipe`; a run of no test is none ([`Run::holds_a_test`]).
 fn kept(roots: &[PathBuf], snapshot: &Snapshot, scope: &str, recipe: &str) -> Result<Kept> {
     let mut found: Option<(Option<SystemTime>, Run)> = None;
     let mut stale = false;
     for key in keys(snapshot, roots)? {
         for root in roots {
             let file = path(root, &key, scope);
-            let Some(run) = read(&file)? else {
+            let Some(run) = read(&file)?.filter(Run::holds_a_test) else {
                 continue;
             };
             if run.recipe != recipe {
@@ -648,7 +663,6 @@ pub(crate) fn regressed(
     let base = Base::at(snapshot.root(), base)?;
     let was = match base.run(&roots, scope, pin.digest())? {
         Ok(was) => was,
-        Err(_) if run.verdicts.is_empty() => return Ok(Against::Held),
         Err(why) => return Ok(Against::Unmet(why)),
     };
     let target = Target::kept(&roots, pin, scope)?;
@@ -672,10 +686,8 @@ pub(crate) fn regressed(
     )))
 }
 
-/// Whether a tally judged every test its subset holds, which a run must
-/// to be kept. A subset that holds none in the pinned tree, as an
-/// extension with no tests of its own does (`ext/lexbor`), is kept as a
-/// run of none, which holds nothing against any base (#725).
+/// Whether a tally judged every test its subset holds, which a run or a
+/// target must to be kept.
 fn whole(tally: &Tally) -> bool {
     tally.judged.len() == tally.found
 }
@@ -727,10 +739,16 @@ pub(crate) fn carry(from: &Path, into: &Path) -> Result<Carried> {
 /// Whether the run kept at `file` takes the place of the one standing at
 /// `to`: taken after it and under another pin, so the one standing is
 /// stale once the carried one is fresh (#2725), as a run `phpt --base`
-/// takes again under a moved pin is.
+/// takes again under a moved pin is. A run of no test is read as no run
+/// (#3143): one holding a test replaces it, and it replaces none that does.
 fn supersedes(file: &Path, to: &Path) -> bool {
-    let recipe = |path: &Path| read(path).ok().flatten().map(|run| run.recipe);
-    recipe(file) != recipe(to) && written(file) > written(to)
+    let (carried, standing) = (read(file).ok().flatten(), read(to).ok().flatten());
+    let tested = |run: &Option<Run>| run.as_ref().is_some_and(Run::holds_a_test);
+    if tested(&carried) != tested(&standing) {
+        return tested(&carried);
+    }
+    let recipe = |run: Option<Run>| run.map(|run| run.recipe);
+    recipe(carried) != recipe(standing) && written(file) > written(to)
 }
 
 /// When the file at `path` was last written, where that can be read.

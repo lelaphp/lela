@@ -62,6 +62,7 @@ use crate::key::{self, Snapshot};
 use crate::manifest::{Crate, Manifest};
 use crate::miri;
 use crate::permit;
+use crate::phpt;
 use crate::phpt::against::{self, Against};
 use crate::port_map;
 use crate::reading::{Number, Reading, Status, Store, plural};
@@ -796,6 +797,9 @@ fn no_regression(
     };
     match against::regressed(asking.snapshot, asking.base, &pin, scope)? {
         Against::Held => {}
+        // An extension with no tests of its own keeps no run (#3143) and
+        // holds nothing against any base (#725).
+        Against::Unrun(_) if phpt::testless(asking.manifest, scope) => {}
         Against::Unrun(why) => {
             let sought = [("phpt".to_owned(), scope.clone(), key.to_owned())];
             let digest = asking.manifest.pin.digest();

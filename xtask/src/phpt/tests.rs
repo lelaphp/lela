@@ -1087,6 +1087,10 @@ fn an_extension_with_no_test_directory_reads_as_a_skip_and_a_name_that_is_nothin
         &tree,
     );
     let registry = registry("");
+    // A scratch workspace, so a run over this corpus is kept in no
+    // checkout's store (#3143).
+    let root = Tree::new("phpt-testless").unwrap();
+    crate::permit::scratch_workspace(&workspace(), &root).unwrap();
     for (subset, has) in [
         (Some("ext/testless"), "has no such directory"),
         (Some("ext/hollow"), "holds no .phpt under it"),
@@ -1097,7 +1101,7 @@ fn an_extension_with_no_test_directory_reads_as_a_skip_and_a_name_that_is_nothin
             jobs: NonZeroUsize::new(1),
             ..Ask::default()
         };
-        let readings = super::run(&workspace(), &manifest, &registry, &ask).unwrap();
+        let readings = super::run(&root, &manifest, &registry, &ask).unwrap();
         assert_eq!(
             readings.len(),
             if subset.is_some() { 1 } else { 2 },
@@ -1124,7 +1128,7 @@ fn an_extension_with_no_test_directory_reads_as_a_skip_and_a_name_that_is_nothin
         subset: Some("ext/nosuch".to_owned()),
         ..Ask::default()
     };
-    let refused = super::run(&workspace(), &manifest, &registry, &ask).unwrap_err();
+    let refused = super::run(&root, &manifest, &registry, &ask).unwrap_err();
     assert!(format!("{refused:#}").contains("ext/nosuch"), "{refused:#}");
 }
 

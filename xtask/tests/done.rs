@@ -13,6 +13,7 @@ use xtask::divergence::Registry;
 use xtask::done::Base;
 use xtask::done::{self, FRESH, Verdict};
 use xtask::manifest::Manifest;
+use xtask::oracle::Promise;
 use xtask::reading::{Reading, Status, Store, UNDER_RECIPE};
 use xtask::scratch::Tree;
 
@@ -936,8 +937,36 @@ fn a_subset_is_held_to_no_regression_against_the_runs_kept_at_the_base() {
             && verdict.unmet[0].contains("cargo xtask phpt --base "),
         "{verdict:#?}"
     );
-    // A subset that holds no test here holds nothing a base met.
+    // A run of none is no run (#3143), here as at the base.
     keep_run(&root, None, "ext/pcre", "");
+    keep_run(&root, Some("HEAD"), "ext/pcre", "");
+    let verdict = judge(&root);
+    assert!(
+        verdict.unmet.len() == 1 && unrun("ext/pcre")(&verdict.unmet[0]),
+        "{verdict:#?}"
+    );
+}
+
+/// An extension with no tests of its own in the pinned tree, as
+/// `ext/lexbor`, keeps no run (#3143), and condition 1 holds it to nothing
+/// with none kept, as it held the run of none kept before (#725).
+#[test]
+fn an_extension_with_no_tests_of_its_own_is_met_with_no_run_kept() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let tree = manifest.pin.source.tree();
+    if Promise::Tree.or_skip(tree).unwrap().is_none() {
+        return;
+    }
+    let root = scratch("testless");
+    let toml = "[package]\nname = \"php_ext_lexbor\"\nversion = \"0.0.0\"\nedition = \"2024\"\n";
+    write(&root, "ext/lexbor/Cargo.toml", toml);
+    write(&root, "ext/lexbor/src/lib.rs", "pub fn parse() {}\n");
+    let store = Store::of_workspace(&root);
+    let asked = asked_of(&root, "ext/lexbor");
+    assert!(asked.iter().any(|(i, _)| *i == "phpt"), "{asked:?}");
+    for (instrument, scope) in asked.iter().filter(|(i, _)| *i != "phpt") {
+        met(&store, &root, instrument, scope);
+    }
     assert!(judge(&root).met(), "{:#?}", judge(&root));
 }
 
