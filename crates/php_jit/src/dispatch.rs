@@ -102,6 +102,35 @@ pub(crate) fn visit(
 /// its caller's landing ([`Site`]'s third arm visits no word of the
 /// callee's), which reads sealed, a word no visit acts on, until a
 /// compiled trace armed it.
+///
+/// A loop in `$main` that no call activates is a root at its header:
+/// the entry's recording aborts at the throwable `t()` throws, and the
+/// loop's back edge claims its word:
+///
+/// ```php
+/// function t() { throw new Exception("x"); }
+/// try { t(); } catch (Exception $e) {}
+/// $s = 0;
+/// for ($i = 0; $i < 3; $i++) { $s += $i; }
+/// echo $s, "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 3
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:3
+/// ---- TRACE 1 abort (exception)
+///
+/// ---- TRACE 1 start (loop) $main() %s:5
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 1 $main() %s:6
+/// ---- TRACE 2 start (side trace 1/1) $main() %s:6
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+///
+/// ```
 #[inline(never)]
 pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
     let start = match site {
@@ -668,6 +697,34 @@ fn sided(
 /// ---- TRACE 1 start (enter) $main() %s:3
 /// ---- TRACE 1 stop (return)
 /// ---- TRACE 1 compiled
+///
+/// ```
+///
+/// #2999's program: the fiber `body()` runs inside `$main`'s recording,
+/// so its loop records nothing, and `work()`'s loop is a root at its
+/// header, recorded again at once where `$main`'s recording stops at it,
+/// whose exit grows a side trace at the line past the loop; php's
+/// optimizer numbers that exit otherwise (#1220):
+///
+/// ```php
+/// function body() { $s = 0; for ($i = 0; $i < 3; $i++) { if ($i == 1) { Fiber::suspend(1); } $s += $i; } echo "never\n"; }
+/// function work() { $s = 0; for ($i = 0; $i < 3; $i++) { $s += $i; } return $s; }
+/// $f = new Fiber("body"); $f->start(); echo work(), "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 3
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:4
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) work() %s:3
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit %d work() %s:3
+/// ---- TRACE 2 start (side trace 1/%d) work() %s:3
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
 ///
 /// ```
 #[inline(never)]
