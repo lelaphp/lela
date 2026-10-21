@@ -212,8 +212,7 @@ request-shaped arm has, paired under §2 to §5 rather than as percentiles
 set of programs pairs each program under §2 to §5, states each one's
 ratio as `1 + paired_pct / 100`, and their geometric mean, which inherits
 the floor — one `NOISE-SWAMPED` constituent and the aggregate is
-published unsigned. Its A/A control holds every program's row to §2's
-verdict, so one resolved row fails it.
+published unsigned.
 
 ## 11. Where a workload lives
 

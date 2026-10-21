@@ -128,10 +128,9 @@ pub(crate) fn declared(root: &Path) -> Result<Vec<Declared>> {
             |stem| stem.to_string_lossy().into_owned(),
         );
         for (bar, held, load) in BARS {
-            let against = if held == Held::Control {
-                "itself"
-            } else {
-                "php-fpm behind a FastCGI client"
+            let against = match held {
+                Held::Series => "php-fpm behind a FastCGI client",
+                Held::Control => "itself",
             };
             let (root, entry) = (root.to_path_buf(), entry.clone());
             bars.push(Declared {

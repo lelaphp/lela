@@ -8,8 +8,9 @@
 //! **The bars today.** G3's denominator (#2948): the pinned php under
 //! `[regime.jit-tracing]` against itself under `[regime.jit-off]`, what
 //! php's own JIT buys on these programs, and its A/A control, `jit-off`
-//! against `jit-off`. G1 (#2947) and G2 (#2965) are [`bar`]s over the same
-//! programs whose arms are the engine's builds.
+//! against `jit-off`. G2 (#2965) is a [`bar`] over the same programs whose
+//! arms are the engine's build, and G1 (#2947) one over the seven kernels
+//! alone, `PROGRAMS[..7]`.
 //!
 //! **What every arm runs under.** The recipe, as the oracle's every run
 //! is, then the regimes, then [`INI`]: php.ini-production's values for the
@@ -32,7 +33,7 @@ use crate::oracle::Pin;
 /// (#2736, #2740), and `bench_quiet.php`, php-src's `Zend/bench.php` at the
 /// pinned tag with its two timing lines printing names alone, so the arms'
 /// bytes can be held equal (protocol §5, §11).
-pub(crate) const PROGRAMS: [&str; 8] = [
+pub(crate) const PROGRAMS: &[&str] = &[
     "fib",
     "nbody",
     "mandelbrot",
@@ -78,22 +79,24 @@ impl Php {
         args.extend(ini.flat_map(|line| ["-d".to_owned(), line]));
         args.push(script.display().to_string());
         let (name, env) = (self.name.clone(), env.clone());
-        let program = self.binary.clone();
+        let (program, reads) = (self.binary.clone(), vec![script.to_path_buf()]);
         Ok(Arm {
             name,
             program,
             args,
-            stdin: String::new(),
             env,
+            reads,
+            ..Arm::default()
         })
     }
 }
 
-/// A bar over [`PROGRAMS`], its arms named by `arms` from the pin once
-/// it is measured, or why this machine has none, which is its skip.
+/// A bar over `programs`, [`PROGRAMS`] or a part of it, its arms named by
+/// `arms` from the pin once it is measured, or why this machine has none,
+/// which is its skip.
 pub(crate) fn bar(
     root: &Path,
-    id: &str,
+    (id, programs): (&str, &'static [&'static str]),
     about: String,
     held: Held,
     arms: impl FnOnce(&Pin) -> Result<Result<[Php; 2], String>> + 'static,
@@ -111,13 +114,13 @@ pub(crate) fn bar(
         };
         let workloads = root.join("docs/perf/workloads");
         let mut set = Vec::new();
-        for program in PROGRAMS {
+        for program in programs {
             let script = workloads.join(format!("{program}.php"));
             let [a, b] = &arms;
             let side = |php: &Php| -> Result<Box<dyn Side>> {
                 Ok(Box::new(Spawned::from(php.running(&pin, &script, &env)?)))
             };
-            set.push((program.to_owned(), [side(a)?, side(b)?]));
+            set.push(((*program).to_owned(), [side(a)?, side(b)?]));
         }
         Ok(Ok(Arms::Set(set)))
     };
@@ -142,7 +145,7 @@ pub(crate) fn oracle(root: &Path) -> [Declared; 2] {
         let about = format!(
             "the pinned php under [regime.{a}] against [regime.{b}] over the seven kernels and Zend/bench.php"
         );
-        bar(root, id, about, held, move |pin| {
+        bar(root, (id, PROGRAMS), about, held, move |pin| {
             if let Some(why) = pin.oracle.absent() {
                 return Ok(Err(why));
             }
@@ -193,5 +196,10 @@ mod tests {
         assert!(args.starts_with("-n "), "{args}");
         assert!(recipe < regime && regime < limit && limit < own, "{args}");
         assert!(args.ends_with("fib.php"), "{args}");
+        assert_eq!(
+            arm.reads,
+            [script],
+            "the script is pinned beside the binary"
+        );
     }
 }

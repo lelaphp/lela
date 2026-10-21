@@ -123,8 +123,9 @@ impl Label {
 }
 
 /// One arm of a bar: the program a rep runs once, its arguments, what it
-/// reads on stdin, and the environment it runs in, which a bar's file
-/// leaves the harness's own.
+/// reads on stdin, and, which a bar's file leaves out, the environment it
+/// runs in, the harness's own by default, and the files it runs beside its
+/// program, which the run pins with it (§6): a php arm's workload.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Arm {
@@ -136,6 +137,8 @@ struct Arm {
     stdin: String,
     #[serde(skip)]
     env: Environment,
+    #[serde(skip)]
+    reads: Vec<PathBuf>,
 }
 
 /// One bar: what is measured, and the two arms a rep times against each
@@ -158,7 +161,7 @@ impl Bar {
     /// One bar read from a TOML file: how the negative control is run, and
     /// how a person points the instrument at a pair of their own.
     fn read(path: &Path) -> Result<Bar> {
-        crate::read_toml(path).context("not a bar")
+        crate::read_toml(path).context("reading a bar")
     }
 
     /// The bar as the run measures it, two processes, an A/A control
@@ -367,6 +370,11 @@ pub(crate) trait Side {
     fn name(&self) -> &str;
     /// The program the arm runs, which the run pins.
     fn program(&self) -> &Path;
+    /// What else the run pins of the arm: the files its program reads,
+    /// none by default.
+    fn reads(&self) -> &[PathBuf] {
+        &[]
+    }
     /// One run, a nonzero exit or no answer refusing the run, naming the
     /// arm.
     fn once(&mut self) -> Result<Sample>;
@@ -398,7 +406,8 @@ pub(crate) type Sides = Result<Arms, String>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Held {
     /// An A/A control: a pass while every row's paired delta has its sign
-    /// swamped (§2, §4.3).
+    /// swamped (§2, §4.3), a set's rows each held as one pair's is until a
+    /// person rules otherwise (#3127).
     Control,
     /// A series: two arms that differ, its reading stating the measurement
     /// and the distance to go to the second arm, and held by [`series`]'s
@@ -459,6 +468,10 @@ impl Side for Spawned {
         &self.program
     }
 
+    fn reads(&self) -> &[PathBuf] {
+        &self.arm.reads
+    }
+
     fn once(&mut self) -> Result<Sample> {
         once(&self.arm, &self.program)
     }
@@ -479,6 +492,12 @@ struct Ratio {
 }
 
 impl Took {
+    /// Whether the bar is a set, its rows named by their programs, and not
+    /// one pair.
+    fn set(&self) -> bool {
+        self.rows.iter().any(|(program, _)| program.is_some())
+    }
+
     /// How many rows' paired deltas have their sign established.
     fn resolved(&self) -> usize {
         let resolved = |(_, row): &&(_, Measured)| sign_of(&row.delta) == RESOLVED;
@@ -624,12 +643,21 @@ fn once(arm: &Arm, program: &Path) -> Result<Sample> {
 /// One bar measured: `reps` paired reps after [`WARMUP`] discarded ones,
 /// the order alternated so a penalty on whichever process runs second
 /// cancels across reps instead of being charged to one arm; the arms' bytes
-/// held equal inside every rep; the programs pinned at both ends. A byte
-/// disagreement re-reads the pin first, since a program that moved
-/// underneath the run explains one (§6).
+/// held equal inside every rep; the programs, and what each reads, pinned
+/// at both ends. A byte disagreement re-reads the pin first, since a
+/// program that moved underneath the run explains one (§6).
 fn measure(id: &str, [a, b]: &mut [Box<dyn Side>; 2], reps: usize) -> Result<Measured> {
-    let programs = [a.program().to_path_buf(), b.program().to_path_buf()];
-    let before = [Pin::take(&programs[0])?, Pin::take(&programs[1])?];
+    let programs: Vec<PathBuf> = [&*a, &*b]
+        .iter()
+        .flat_map(|side| {
+            std::iter::once(side.program()).chain(side.reads().iter().map(PathBuf::as_path))
+        })
+        .map(Path::to_path_buf)
+        .collect();
+    let before = programs
+        .iter()
+        .map(|path| Pin::take(path))
+        .collect::<Result<Vec<_>>>()?;
     let (mut a_values, mut b_values, mut delta) = (Vec::new(), Vec::new(), Vec::new());
     let mut spent = [Vec::new(), Vec::new()];
     let mut vacuous = false;
@@ -702,7 +730,7 @@ fn measure_each(
 
 /// §6's second end: each program as it is now against the pin taken at the
 /// start, and a refusal naming the one that moved.
-fn holds(programs: &[PathBuf; 2], before: &[Pin; 2]) -> Result<()> {
+fn holds(programs: &[PathBuf], before: &[Pin]) -> Result<()> {
     for (path, pinned) in programs.iter().zip(before) {
         if &Pin::take(path)? != pinned {
             bail!(
@@ -746,7 +774,7 @@ fn declared(root: &Path) -> Result<Vec<Declared>> {
             "permit".to_owned(),
         ],
         stdin: CALL.to_owned(),
-        env: Environment::default(),
+        ..Arm::default()
     };
     let permit = Bar {
         id: "permit".to_owned(),
@@ -1050,7 +1078,7 @@ fn rendered(
 /// What a set's rendering and reading say of its rows taken together: the
 /// geomean, its verdict and how many rows resolved; nothing for a pair.
 fn geomean(took: &Took) -> String {
-    if took.rows.len() < 2 {
+    if !took.set() {
         return String::new();
     }
     let ratio = took.ratio();
@@ -1109,10 +1137,11 @@ fn load_text(load: Option<[f64; 3]>) -> String {
     )
 }
 
-/// One row's numbers, each key after `prefix`: its two arms, the paired
-/// delta under the unit's keys, what each arm spent, the delta as a share,
-/// and a set's row its ratio.
-fn row_numbers(prefix: &str, row: &Measured) -> Vec<(String, f64)> {
+/// One row's numbers: its two arms, the paired delta under the unit's
+/// keys, what each arm spent and the delta as a share, and, where the row
+/// is a set's, its ratio, each key after its program's name, `fib_`.
+fn row_numbers(program: Option<&str>, row: &Measured) -> Vec<(String, f64)> {
+    let prefix = program.map_or_else(String::new, |p| format!("{p}_"));
     let numbers = [
         ("a_median", row.a.median),
         ("a_iqr", row.a.iqr),
@@ -1126,7 +1155,7 @@ fn row_numbers(prefix: &str, row: &Measured) -> Vec<(String, f64)> {
     let numbers = (numbers.into_iter()).map(|(key, value)| (row.unit.key(key), value));
     let [a, b] = row.spent;
     let spent = (a.numbers("a").into_iter()).chain(b.numbers("b"));
-    let ratio = (!prefix.is_empty()).then(|| ("ratio".to_owned(), row.ratio()));
+    let ratio = program.map(|_| ("ratio".to_owned(), row.ratio()));
     (numbers.chain(spent))
         .chain([("paired_pct".to_owned(), row.paired_pct)])
         .chain(ratio)
@@ -1150,7 +1179,7 @@ fn recorded(
 ) -> Result<Reading> {
     let mut reading = Reading::stamped_over(INSTRUMENT, bar.id, snapshot, Path::new("."))?;
     reading.status = bar.held.status(took);
-    if bar.held != Held::Control
+    if bar.held == Held::Series
         && let Some(to_go) = to_go(took)
     {
         reading
@@ -1162,12 +1191,9 @@ fn recorded(
     reading.count("warmup_discarded", u64::try_from(WARMUP)?)?;
     let mut numbers = Vec::new();
     for (program, row) in &took.rows {
-        let prefix = program
-            .as_ref()
-            .map_or_else(String::new, |p| format!("{p}_"));
-        numbers.extend(row_numbers(&prefix, row));
+        numbers.extend(row_numbers(program.as_deref(), row));
     }
-    if took.rows.len() > 1 {
+    if took.set() {
         numbers.push(("geomean_ratio".to_owned(), took.ratio().value));
         reading.count("resolved", u64::try_from(took.resolved())?)?;
     }
@@ -1269,7 +1295,7 @@ mod tests {
         }
     }
 
-    /// A bar of one pair, or of a set where `programs` names each row.
+    /// A bar of `rows`, each named `p<n>` where `set`, one pair where not.
     fn took(rows: Vec<Measured>, set: bool) -> Took {
         let named = |i: usize| set.then(|| format!("p{i}"));
         Took {
