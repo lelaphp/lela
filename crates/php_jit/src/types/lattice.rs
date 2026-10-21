@@ -273,47 +273,61 @@ pub(crate) fn binary_of(extended: u32) -> Option<Opcode> {
 }
 
 /// What a binary operator yields over operands of `a` and `b`, php's
-/// `zend_update_type_info` for `ADD` to `POW`, the comparisons and the
-/// bitwise operators, without ranges.
+/// `binary_op_result_type` (`Z/Zend/Optimizer/zend_inference.c:2259-2355`)
+/// for `ADD` to `POW` and the bitwise operators, without ranges, and its
+/// inference's boolean for the comparisons. An undefined operand reads as
+/// null, and one that may be an object may be overloaded, as GMP's are,
+/// so what it yields may be an object or false: php's trace inference runs
+/// at optimisation level 0, which ignores no overloading
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:1332`).
 pub(crate) fn binary(op: Opcode, a: Types, b: Types) -> Types {
-    let (a, b) = (deref(a), deref(b));
-    let numbers = a.kinds().within(Types::NUMBER) && b.kinds().within(Types::NUMBER);
-    let doubled = (a.kinds() == Types::DOUBLE && b.kinds().within(Types::NUMBER))
-        || (b.kinds() == Types::DOUBLE && a.kinds().within(Types::NUMBER));
-    match op {
+    let read = |t: Types| {
+        let kinds = deref(t).kinds();
+        if kinds.meets(Types::UNDEF) {
+            kinds.without(Types::UNDEF).or(Types::NULL)
+        } else {
+            kinds
+        }
+    };
+    let (a, b) = (read(a), read(b));
+    let overloaded = if a.meets(Types::OBJECT) || b.meets(Types::OBJECT) {
+        Types::OBJECT.or(Types::FALSE)
+    } else {
+        Types::NONE
+    };
+    let doubled = a == Types::DOUBLE || b == Types::DOUBLE;
+    let array = Types::of_tag(ZvalType::Array);
+    let yields = match op {
         Opcode::Add | Opcode::Sub | Opcode::Mul => {
-            if doubled {
-                Types::DOUBLE
-            } else if numbers {
+            if a == Types::LONG && b == Types::LONG {
                 Types::NUMBER
-            } else if op == Opcode::Add && a.kinds() == Types::ARRAY && b.kinds() == Types::ARRAY {
-                Types::of_tag(ZvalType::Array)
+            } else if doubled {
+                Types::DOUBLE
+            } else if op == Opcode::Add && a == Types::ARRAY && b == Types::ARRAY {
+                array
+            } else if op == Opcode::Add && a.meets(Types::ARRAY) && b.meets(Types::ARRAY) {
+                Types::NUMBER.or(array)
             } else {
-                Types::ANY
+                Types::NUMBER
             }
         }
-        Opcode::Div | Opcode::Pow => {
-            if doubled {
-                Types::DOUBLE
-            } else if numbers {
-                Types::NUMBER
-            } else {
-                Types::ANY
-            }
-        }
+        Opcode::Div | Opcode::Pow if doubled => Types::DOUBLE,
+        Opcode::Div | Opcode::Pow => Types::NUMBER,
         Opcode::Mod | Opcode::Sl | Opcode::Sr => Types::LONG,
         Opcode::BwOr | Opcode::BwAnd | Opcode::BwXor => {
-            if a.kinds()
-                .within(Types::NUMBER.or(Types::BOOL).or(Types::NULL))
-                && b.kinds()
-                    .within(Types::NUMBER.or(Types::BOOL).or(Types::NULL))
-            {
-                Types::LONG
+            let strings = if a.meets(Types::STRING) && b.meets(Types::STRING) {
+                Types::STRING
             } else {
-                Types::LONG.or(Types::STRING)
+                Types::NONE
+            };
+            if a.within(Types::STRING) && b.within(Types::STRING) {
+                strings
+            } else {
+                strings.or(Types::LONG)
             }
         }
-        Opcode::Concat | Opcode::FastConcat => Types::STRING,
+        // php adds no object here: "TODO: +MAY_BE_OBJECT ???".
+        Opcode::Concat | Opcode::FastConcat => return Types::STRING,
         Opcode::IsEqual
         | Opcode::IsNotEqual
         | Opcode::IsSmaller
@@ -322,9 +336,10 @@ pub(crate) fn binary(op: Opcode, a: Types, b: Types) -> Types {
         | Opcode::IsNotIdentical
         | Opcode::Case
         | Opcode::CaseStrict
-        | Opcode::BoolXor => Types::BOOL,
-        _ => Types::ANY,
-    }
+        | Opcode::BoolXor => return Types::BOOL,
+        _ => return Types::ANY,
+    };
+    yields.or(overloaded)
 }
 
 /// What `++` or `--` makes of `a`, php's `zend_update_type_info` for

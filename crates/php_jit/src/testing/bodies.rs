@@ -9,7 +9,7 @@ use php_unit::OplineIdx;
 
 use crate::lower::{Compiled, Fuzzed, Stood};
 use crate::table::TraceName;
-use crate::types::{ExitSpec, Frame, Landing};
+use crate::types::{ExitSpec, Frame, Grows, Landing};
 
 /// aarch64, encoded by hand: a body keeps a 48-byte frame, the
 /// `Stood` a kernel writes at `sp + 16`.
@@ -141,6 +141,8 @@ pub(crate) fn landing(opline: u32, landing: Landing) -> ExitSpec {
         opline: Some(OplineIdx(opline)),
         landing,
         stores: Vec::new(),
+        known: Vec::new(),
+        grows: Grows::Side,
         link: None,
     }
 }

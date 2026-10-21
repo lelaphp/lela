@@ -32,7 +32,7 @@ use php_engine::tier::Flow;
 use php_engine::tier::{self, Fatal, FrameRef, Request, SafepointIdx, Site, Word};
 
 use crate::compiler::{self, Job};
-use crate::enter::{self, Crossed as _, Exited};
+use crate::enter::{self, Crossed as _, Exited, Left};
 use crate::policy::{
     self, Claim, Holder, JitDebug, Mode, Outcome, Place, Policy, State, TraceEvent,
 };
@@ -194,7 +194,8 @@ pub(crate) fn run(req: &mut Request, frame: FrameRef, id: TraceId, shared: &Shar
     let mut frame = frame;
     loop {
         let exited = match enter::enter(req, frame, trace) {
-            Ok(exited) => exited,
+            Ok(Left::Exit(exited)) => exited,
+            Ok(Left::Unwound(frame)) => return Flow::Resume(frame),
             Err(fatal) => return Flow::Bail(fatal),
         };
         frame = exited.frame;

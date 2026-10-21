@@ -4,7 +4,7 @@
 //! loop, then the exits numbered and laid out from the state the trace
 //! held where each leaves.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use php_engine::tier::{FuncRef, MapPtrRaw, Sample, UnitView};
 use php_heap::ZvalType;
@@ -13,14 +13,15 @@ use php_unit::{CacheSlot, Effects, OpArray, Opcode, OperandKind, Opline, OplineI
 
 use super::lattice::{self, Types};
 use super::opcodes::{
-    Declared, Within, arith, assigned, constant, constant_types, guard_sites, inline_may_leave,
-    is_call, keeps_temporaries, may_exit, op1_types, out_types, packed_guard, param_types, params,
-    reads, reads_by_name, referenced, slot_of, within, writes, written, written_after_entry,
+    Declared, Within, arith, assigned, check_sites, constant, constant_types, guard_sites,
+    inline_may_leave, is_call, keeps_temporaries, may_exit, op1_types, out_types, packed_guard,
+    param_types, params, reads, reads_by_name, referenced, slot_of, within, writes, written,
+    written_after_entry,
 };
 use super::{
-    Abort, Check, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo, Fused, Guard, GuardAt,
-    Home, Imm, Landing, Layout, Line, LoopHeader, Op, OpId, Operand, Place, Repeat, Slot, Store,
-    Stored, TraceIr, Value, ValueId,
+    Abort, Check, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo, Fused, Grows, Guard,
+    GuardAt, Home, Imm, Known, Landing, Layout, Line, LoopHeader, Op, OpId, Operand, Place, Read,
+    Repeat, Slot, Store, Stored, TraceIr, Unwind, UnwindId, Value, ValueId,
 };
 use crate::record::{self, Event, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -96,13 +97,14 @@ enum At {
     /// The frame stands where it goes on.
     Stands,
     /// After a fetch whose element's type a guard holds: the opline past
-    /// it with the element stored and its temporaries freed, or, while a
-    /// call is under way, the fetch again.
+    /// it with the element, read as `read` says, stored and its
+    /// temporaries freed, or, while a call is under way, the fetch again.
     Fetched {
         fetch: OplineIdx,
         op1: bool,
         op2: bool,
         out: ValueId,
+        read: Read,
     },
 }
 
@@ -113,15 +115,24 @@ struct Draft {
     frame: Frame,
     at: At,
     extra: Option<Store>,
+    grows: Grows,
     link: Option<TraceId>,
 }
 
-/// What an opline sees of its three operands once its guards held, and
-/// which it sees through a reference.
+/// What an opline sees of its three operands once its guards held, which
+/// it sees through a reference, and what php's inference knows of each,
+/// which is what it writes is typed by.
 #[derive(Clone, Copy)]
 struct Seen {
     types: [Types; 3],
     referenced: [bool; 3],
+    /// The seen types of a value no symbol table reaches, and the value's
+    /// own of one a symbol table reaches, which a guard narrows for its
+    /// opline alone, as php's `CHECK_OP_TRACE_TYPE` narrows `op1_info`
+    /// and leaves the SSA variable's info as anything: so what an opline
+    /// over such a variable writes is what it writes over anything, and
+    /// the opline that reads it holds it, as php's does.
+    inferred: [Types; 3],
 }
 
 /// What one opline wrote: its `out` slot, and the values it wrote there
@@ -159,9 +170,17 @@ struct Builder<'a> {
     /// The frames live now, the running one last.
     stack: Vec<Frame>,
     values: Vec<Value>,
+    /// Per value, its types where it was made, before a guard narrowed
+    /// them: what the trace knows of its slot before the guard holds.
+    born: Vec<Types>,
     ops: Vec<Op>,
     snapshots: Vec<Snapshot>,
     guards: Vec<Placed>,
+    /// php's code generator's guards on a value a symbol table reaches at
+    /// an opline its inference guards nowhere (`CHECK_OP_TRACE_TYPE`), held
+    /// once a guard of its inference holds the same value anywhere in the
+    /// trace, which is what marks it `MAY_BE_GUARD`.
+    checks: Vec<Placed>,
     leaves: Vec<(OpId, Leaves, Draft)>,
     calls: Vec<Call>,
     map_ptrs: Vec<MapPtrRaw>,
@@ -191,9 +210,11 @@ impl<'a> Builder<'a> {
             slots: Vec::new(),
             stack: Vec::new(),
             values: Vec::new(),
+            born: Vec::new(),
             ops: Vec::new(),
             snapshots: Vec::new(),
             guards: Vec::new(),
+            checks: Vec::new(),
             leaves: Vec::new(),
             calls: Vec::new(),
             map_ptrs: Vec::new(),
@@ -487,7 +508,7 @@ impl<'a> Builder<'a> {
             form,
             map_ptr,
             exit: None,
-            freed: None,
+            unwind: None,
         }));
         let fused = fused.is_some();
         let len = if fused || data_line.is_some() { 2 } else { 1 };
@@ -540,7 +561,7 @@ impl<'a> Builder<'a> {
         fused: bool,
     ) -> Written {
         let code = self.meta(frame).code;
-        let [t1, t2, td] = seen.types;
+        let [t1, t2, td] = seen.inferred;
         let writes = writes(op, data_line);
         let slot = slot_of(frame, op.out_type, op.out);
         let pushes = form == Form::Inline && is_call(op.opcode);
@@ -681,6 +702,7 @@ impl<'a> Builder<'a> {
                     frame,
                     at: At::Opline(OplineIdx(at.0 + 1)),
                     extra,
+                    grows: Grows::Side,
                     link: None,
                 }
             }
@@ -702,36 +724,46 @@ impl<'a> Builder<'a> {
         });
     }
 
-    /// The exit an opline itself takes where it cannot finish: an inline
-    /// one before it does anything, which the interpreter runs again, a
-    /// stepped one that threw, at its opline with what it threw pending;
-    /// and an inline fetch's from a temporary array, where freeing the
-    /// array threw once the fetch was done.
+    /// Where an opline itself leaves: through an exit where an inline
+    /// one cannot finish, before it does anything, which the interpreter
+    /// runs again; through an unwind where a kernel it calls throws, a
+    /// stepped one that may, an inline assignment over a counted value,
+    /// whose destructor may, and an inline fetch from a temporary array,
+    /// which frees it once its element is read.
     fn own_exit(&mut self, idx: OpId, frame: Frame, op: &Opline, form: Form, old: Types) {
         let Some(Op::Line(line)) = self.ops.get(idx.index()) else {
             return;
         };
-        let (at, op1) = (line.opline, line.op1);
-        let unfinished = match form {
-            Form::Inline if inline_may_leave(op.opcode) => {
-                draft(Point::Before(idx), frame, At::Opline(at))
+        let (at, op1, may_leave) = (line.opline, line.op1, inline_may_leave(line));
+        if form == Form::Inline && may_leave {
+            let unfinished = draft(Point::Before(idx), frame, At::Opline(at));
+            // An element a fetch does not find is the interpreter's to
+            // warn of, through php's `ZEND_JIT_EXIT_TO_VM`
+            // (`zend_jit_fetch_dimension_address_inner`).
+            let grows = if op.opcode == Opcode::FetchDimR {
+                Grows::Never
+            } else {
+                Grows::Side
+            };
+            self.leaves.push((
+                idx,
+                Leaves::Unfinished,
+                Draft {
+                    grows,
+                    ..unfinished
+                },
+            ));
+        }
+        let throws = match form {
+            Form::Inline => {
+                (op.opcode == Opcode::Assign && !old.within(UNCOUNTED))
+                    || (op.opcode == Opcode::FetchDimR && self.is_temp(op1))
             }
-            // An assignment over a value a reference counts frees it, and
-            // its destructor may throw once the assignment is done.
-            Form::Inline if op.opcode == Opcode::Assign && !old.within(UNCOUNTED) => {
-                draft(Point::After(idx), frame, At::Opline(at))
-            }
-            Form::Step if op.opcode.effects().contains(Effects::THROW) => {
-                draft(Point::After(idx), frame, At::Opline(at))
-            }
-            _ => return,
+            Form::Step => op.opcode.effects().contains(Effects::THROW),
         };
-        self.leaves.push((idx, Leaves::Unfinished, unfinished));
-        if form == Form::Inline && op.opcode == Opcode::FetchDimR && self.is_temp(op1) {
-            // The temporary array the fetch read is freed once its element
-            // is read, and freeing it may run a destructor that throws.
-            let freed = draft(Point::After(idx), frame, At::Opline(at));
-            self.leaves.push((idx, Leaves::Freed, freed));
+        if throws {
+            let unwind = draft(Point::After(idx), frame, At::Opline(at));
+            self.leaves.push((idx, Leaves::Thrown, unwind));
         }
     }
 
@@ -907,6 +939,7 @@ impl<'a> Builder<'a> {
 
     fn value(&mut self, slot: Slot, types: Types, def: Def, home: Home) -> ValueId {
         let id = ValueId(u32::try_from(self.values.len()).unwrap_or(u32::MAX));
+        self.born.push(types);
         self.values.push(Value {
             slot,
             types,
@@ -1073,28 +1106,58 @@ impl<'a> Builder<'a> {
     ) -> Seen {
         let t1 = self.types_of(frame, operands[0]);
         let mut held: [Option<(Types, bool)>; 3] = [None; 3];
-        for site in guard_sites(op, data_line, samples, t1, self.meta(frame).code) {
-            let at = site as usize;
+        let sites = guard_sites(op, data_line, samples, t1, self.meta(frame).code);
+        for site in &sites {
+            let at = *site as usize;
             if let Some(guarded) = self.guard_use(idx, here, operands[at], samples[at]) {
                 held[at] = Some(guarded);
+            }
+        }
+        for site in check_sites(op, samples) {
+            let at = site as usize;
+            if !sites.contains(&site) {
+                self.check_use(idx, here, operands[at], samples[at]);
             }
         }
         let mut seen = Seen {
             types: [Types::NONE; 3],
             referenced: [false; 3],
+            inferred: [Types::NONE; 3],
         };
         for (at, operand) in operands.into_iter().enumerate() {
-            (seen.types[at], seen.referenced[at]) =
-                held[at].unwrap_or_else(|| (self.types_of(frame, operand), false));
+            let types = self.types_of(frame, operand);
+            (seen.types[at], seen.referenced[at]) = held[at].unwrap_or((types, false));
+            seen.inferred[at] = match operand {
+                Operand::Value(value) if self.aliased(self.val(value).slot) => types,
+                _ => seen.types[at],
+            };
         }
         if let Some(layout) = packed_guard(op, samples, self.meta(frame).code)
             && let Operand::Value(value) = operands[0]
         {
             let types = self.val(value).types;
-            if types.either_layout() && !self.aliased(self.val(value).slot) {
+            let slot = self.val(value).slot;
+            if types.either_layout() && !self.aliased(slot) {
                 self.val_mut(value).types = types.laid_out(layout);
                 seen.types[0] = types.laid_out(layout);
+                seen.inferred[0] = types.laid_out(layout);
                 self.place(idx, here, value, Check::Layout { value, layout }, None);
+            } else if self.aliased(slot)
+                && seen.types[0].either_layout()
+                && matches!(
+                    op.opcode,
+                    Opcode::FetchDimR | Opcode::FetchDimIs | Opcode::FetchListR
+                )
+            {
+                // An array a symbol table reaches, read by a long key, has
+                // its layout held at the read by php's code generator, as
+                // its type is, and narrowed for this opline alone.
+                seen.types[0] = seen.types[0].laid_out(layout);
+                self.guards.push(Placed {
+                    at: GuardAt::Before(idx),
+                    check: Check::Layout { value, layout },
+                    exit: draft(Point::Before(idx), slot.frame, At::Opline(here)),
+                });
             }
         }
         seen
@@ -1167,10 +1230,39 @@ impl<'a> Builder<'a> {
         Some((types.narrowed(tag), false))
     }
 
+    /// php's code generator's guard on an operand its inference does not
+    /// guard at this opline (`CHECK_OP_TRACE_TYPE` over an operand marked
+    /// `MAY_BE_GUARD` elsewhere): only on a value a symbol table reaches,
+    /// whose mark no guard clears, held before the opline where the
+    /// recording saw a type, and kept once a guard of php's inference
+    /// holds the same value ([`Builder::checks`]). It narrows nothing the
+    /// opline sees: the oplines it is held at are stepped, or read the
+    /// operand as the inference's guard held it.
+    fn check_use(&mut self, idx: OpId, here: OplineIdx, operand: Operand, sample: Option<Sample>) {
+        let (Operand::Value(value), Some(sample)) = (operand, sample) else {
+            return;
+        };
+        let slot = self.val(value).slot;
+        if sample.indirect || sample.reference || !self.aliased(slot) {
+            return;
+        }
+        self.checks.push(Placed {
+            at: GuardAt::Before(idx),
+            check: Check::Type {
+                value,
+                tag: sample.kind,
+            },
+            exit: draft(Point::Before(idx), slot.frame, At::Opline(here)),
+        });
+    }
+
     /// Where the guard on a value no symbol table reaches is held: once at
     /// entry for what the root's frame entered with; by the inline op that
     /// computed it for an arithmetic's overflow and a fetched element's
-    /// type, as php's code generator holds a guarded value it writes;
+    /// type, as php's code generator holds a guarded value it writes, an
+    /// element twice, read in place and through the reference it is, as
+    /// php's two reads of it each hold it, and an arithmetic only where
+    /// php's code generator serves it inline ([`Builder::over_aliased`]);
     /// before the op that reads it otherwise.
     fn place(
         &mut self,
@@ -1184,23 +1276,36 @@ impl<'a> Builder<'a> {
         let computed = match (held.def, tag) {
             (Def::Op(def), Some(tag)) => match self.ops.get(def.index()) {
                 Some(Op::Line(line)) if line.form == Form::Inline => within(line.opcode, tag)
+                    .filter(|kind| {
+                        *kind == Within::Fetched || !self.over_aliased(line.op1, line.op2)
+                    })
                     .map(|kind| (def, line.frame, line.opline, kind, line.op1, line.op2)),
                 _ => None,
             },
             _ => None,
         };
+        let mut then = None;
         let (at, exit) = match (held.def, computed) {
             (Def::Entry, _) if held.slot.frame == Frame::ROOT => (GuardAt::Entry, self.start()),
             (_, Some((def, frame, opline, kind, op1, op2))) => {
+                let fetched = |read| At::Fetched {
+                    fetch: opline,
+                    op1: self.is_temp(op1),
+                    op2: self.is_temp(op2),
+                    out: value,
+                    read,
+                };
                 let to = match kind {
                     Within::Rerun => At::Opline(opline),
-                    Within::Fetched => At::Fetched {
-                        fetch: opline,
-                        op1: self.is_temp(op1),
-                        op2: self.is_temp(op2),
-                        out: value,
-                    },
+                    Within::Fetched => fetched(Read::InPlace),
                 };
+                if let (Within::Fetched, Some(tag)) = (kind, tag) {
+                    then = Some(Placed {
+                        at: GuardAt::Within(def),
+                        check: Check::Deref { value, tag },
+                        exit: draft(Point::Before(def), frame, fetched(Read::Through)),
+                    });
+                }
                 if !self.aliased(held.slot) && self.val(value).types.scalar() {
                     self.val_mut(value).home = Home::Register;
                 }
@@ -1212,6 +1317,18 @@ impl<'a> Builder<'a> {
             ),
         };
         self.guards.push(Placed { at, check, exit });
+        self.guards.extend(then);
+    }
+
+    /// Whether an opline reads a value a symbol table reaches, which php's
+    /// inference holds as possibly undefined, so its code generator serves
+    /// the opline's arithmetic through the handler and the opline that
+    /// reads what it wrote holds its type (`zend_jit_trace.c`, `ZEND_ADD`'s
+    /// `MAY_BE_UNDEF` arm).
+    fn over_aliased(&self, op1: Operand, op2: Operand) -> bool {
+        [op1, op2].into_iter().any(|operand| {
+            matches!(operand, Operand::Value(value) if self.aliased(self.val(value).slot))
+        })
     }
 
     /// An exit at the trace's entry: the root's first opline, nothing to
@@ -1226,6 +1343,7 @@ impl<'a> Builder<'a> {
             frame: Frame::ROOT,
             at: first.map_or(At::Stands, At::Opline),
             extra: None,
+            grows: Grows::Side,
             link: None,
         }
     }
@@ -1375,6 +1493,7 @@ impl<'a> Builder<'a> {
             frame,
             at,
             extra: None,
+            grows: Grows::Side,
             link,
         });
         let final_snapshot = self.snapshot();
@@ -1383,6 +1502,16 @@ impl<'a> Builder<'a> {
     }
 
     fn finish(mut self) -> Result<TraceIr, Abort> {
+        let marked: HashSet<ValueId> = (self.guards.iter())
+            .filter_map(|placed| match placed.check {
+                Check::Type { value, .. } => Some(value),
+                _ => None,
+            })
+            .collect();
+        let checks = std::mem::take(&mut self.checks);
+        self.guards.extend(checks.into_iter().filter(
+            |placed| matches!(placed.check, Check::Type { value, .. } if marked.contains(&value)),
+        ));
         let repeat = self.repeat;
         if repeat.is_some() {
             self.close_phis()?;
@@ -1408,17 +1537,22 @@ impl<'a> Builder<'a> {
             ops: self.ops,
             guards: numbered.guards,
             exits: numbered.exits,
+            unwinds: numbered.unwinds,
             map_ptrs: self.map_ptrs,
             end,
         })
     }
 
     /// The exits numbered in the order the trace meets them: the guards
-    /// held at entry, a loop's interrupt test at its header, then op by
-    /// op the guards before it, those it holds itself and its own exit,
-    /// and last the exit a trace that does not loop ends through. Each
-    /// guard and each opline that leaves names its exit, one an earlier
-    /// place took where their specs match ([`Exits::take`]).
+    /// held at entry, then op by op the guards before it, those it holds
+    /// itself and its own exit, and last a loop's interrupt test, which
+    /// php takes where it closes the loop, or the exit a trace that does
+    /// not loop ends through. Each guard and each opline that leaves
+    /// names its exit, one an earlier place took where their specs match
+    /// ([`Exits::take`]); a guard on a value no symbol table reaches makes
+    /// its type known to the exits after it, as php's `SET_STACK_TYPE`
+    /// after a guard does. The places an opline unwinds from are numbered
+    /// apart, one per set of stores.
     fn number(&mut self, loops: bool) -> Result<Numbered, Abort> {
         let mut order: Vec<(Order, Source)> = Vec::new();
         for (at, guard) in self.guards.iter().enumerate() {
@@ -1432,16 +1566,22 @@ impl<'a> Builder<'a> {
         for (at, (op, ..)) in self.leaves.iter().enumerate() {
             order.push((Order::At(*op, Stage::Leaves), Source::Leave(at)));
         }
-        order.push(if loops {
-            (Order::Header, Source::Interrupt)
-        } else {
-            (Order::End, Source::End)
-        });
+        order.push((
+            Order::End,
+            if loops {
+                Source::Interrupt
+            } else {
+                Source::End
+            },
+        ));
         // Stable: within one place, in the order they were placed.
         order.sort_by_key(|(key, _)| *key);
         let mut exits = Exits::default();
+        let mut unwinds: Vec<Unwind> = Vec::new();
+        let mut known: HashMap<ValueId, ZvalType> = HashMap::new();
         let mut numbered = Numbered {
             exits: Vec::new(),
+            unwinds: Vec::new(),
             guards: Vec::with_capacity(self.guards.len()),
             interrupt: None,
             end: None,
@@ -1456,30 +1596,59 @@ impl<'a> Builder<'a> {
                 Source::Interrupt => self.interrupt(),
                 Source::End => self.end_draft.unwrap_or_else(|| self.start()),
             };
-            let id = exits.take(self.spec(&draft))?;
+            let spec = self.spec(&draft, &known);
             match source {
                 Source::Guard(at) => {
                     let placed = self.guards[at];
                     numbered.guards.push(Guard {
                         at: placed.at,
                         check: placed.check,
-                        exit: id,
+                        exit: exits.take(spec)?,
                     });
+                    let held = match placed.check {
+                        Check::Type { value, tag } => Some((value, tag)),
+                        Check::Layout { value, .. } => Some((value, ZvalType::Array)),
+                        Check::Deref { .. } | Check::Direction { .. } | Check::Stands { .. } => {
+                            None
+                        }
+                    };
+                    if let Some((value, tag)) = held
+                        && !self.aliased(self.val(value).slot)
+                    {
+                        known.insert(value, tag);
+                    }
                 }
                 Source::Leave(at) => {
                     let (op, leaves, _) = self.leaves[at];
+                    let left = match leaves {
+                        Leaves::Unfinished => Left::Exit(exits.take(spec)?),
+                        Leaves::Thrown => {
+                            let unwind = Unwind {
+                                stores: spec.stores,
+                            };
+                            let id = unwinds.iter().position(|held| *held == unwind);
+                            let id = id.unwrap_or_else(|| {
+                                unwinds.push(unwind);
+                                unwinds.len() - 1
+                            });
+                            Left::Unwind(UnwindId(
+                                u16::try_from(id).map_err(|_| mismatch("too many unwinds"))?,
+                            ))
+                        }
+                    };
                     if let Some(Op::Line(line)) = self.ops.get_mut(op.index()) {
-                        match leaves {
-                            Leaves::Unfinished => line.exit = Some(id),
-                            Leaves::Freed => line.freed = Some(id),
+                        match left {
+                            Left::Exit(id) => line.exit = Some(id),
+                            Left::Unwind(id) => line.unwind = Some(id),
                         }
                     }
                 }
-                Source::Interrupt => numbered.interrupt = Some(id),
-                Source::End => numbered.end = Some(id),
+                Source::Interrupt => numbered.interrupt = Some(exits.take(spec)?),
+                Source::End => numbered.end = Some(exits.take(spec)?),
             }
         }
         numbered.exits = exits.specs;
+        numbered.unwinds = unwinds;
         Ok(numbered)
     }
 
@@ -1490,7 +1659,10 @@ impl<'a> Builder<'a> {
             Some(Op::Line(line)) => line.frame,
             _ => Frame::ROOT,
         };
-        draft(Point::Before(self.header), frame, self.at_header())
+        Draft {
+            grows: Grows::Never,
+            ..draft(Point::Before(self.header), frame, self.at_header())
+        }
     }
 
     /// The opline of a loop's header.
@@ -1568,6 +1740,9 @@ impl<'a> Builder<'a> {
                 Narrowed::Tag(tag) => entered.types.narrowed(tag),
                 Narrowed::Layout(layout) => entered.types.laid_out(layout),
             };
+            // Held on what the loop entered with, the phi is of its type
+            // from the header on, as php's phi loses `MAY_BE_GUARD`.
+            self.born[value.0 as usize] = phi.types;
             self.guards[at] = Placed {
                 at: GuardAt::Entry,
                 check: match check {
@@ -1594,8 +1769,9 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// One exit's spec from its draft and the state it leaves.
-    fn spec(&self, draft: &Draft) -> ExitSpec {
+    /// One exit's spec from its draft and the state it leaves, the values
+    /// in `known` held by a guard before it.
+    fn spec(&self, draft: &Draft, known: &HashMap<ValueId, ZvalType>) -> ExitSpec {
         let empty = Snapshot::default();
         let snapshot = match draft.point {
             Point::Start => &empty,
@@ -1613,13 +1789,14 @@ impl<'a> Builder<'a> {
                 op1,
                 op2,
                 out,
+                read,
             } => {
                 if calls {
                     (Some(fetch), Landing::RestoreCall)
                 } else {
                     extra = Some(Store {
                         slot: self.val(out).slot,
-                        from: Stored::Copied(out),
+                        from: Stored::Copied { value: out, read },
                     });
                     let landing = if op1 || op2 {
                         Landing::FreeTemps { op1, op2 }
@@ -1644,11 +1821,38 @@ impl<'a> Builder<'a> {
             stores.push(extra);
         }
         stores.sort_by_key(|store| store.slot);
+        // What the trace knows of the frame's slots there: a value's type
+        // where it was made one, or once a guard before it held it, and
+        // what an entry guard held of a slot the trace has not read yet.
+        let held = |value: ValueId| {
+            known
+                .get(&value)
+                .copied()
+                .or_else(|| self.born[value.0 as usize].tag())
+        };
+        let read: HashSet<Slot> = snapshot.values.iter().map(|(slot, _)| *slot).collect();
+        let entered = (known.keys())
+            .filter(|value| self.val(**value).def == Def::Entry)
+            .map(|value| (self.val(*value).slot, *value))
+            .filter(|(slot, _)| !read.contains(slot));
+        let mut known: Vec<Known> = (snapshot.values.iter().copied())
+            .chain(entered)
+            .filter(|(slot, _)| slot.frame == draft.frame)
+            .filter_map(|(slot, value)| {
+                Some(Known {
+                    slot,
+                    tag: held(value)?,
+                })
+            })
+            .collect();
+        known.sort_by_key(|known| known.slot);
         ExitSpec {
             frame: draft.frame,
             opline,
             landing,
             stores,
+            known,
+            grows: draft.grows,
             link: draft.link,
         }
     }
@@ -1704,6 +1908,7 @@ fn draft(point: Point, frame: Frame, at: At) -> Draft {
         frame,
         at,
         extra: None,
+        grows: Grows::Side,
         link: None,
     }
 }
@@ -1745,10 +1950,11 @@ impl Exits {
     }
 }
 
-/// The exits numbered, the guards naming theirs, and the exits a loop's
-/// interrupt test and a trace's end take.
+/// The exits numbered, the unwinds, the guards naming their exits, and
+/// the exits a loop's interrupt test and a trace's end take.
 struct Numbered {
     exits: Vec<ExitSpec>,
+    unwinds: Vec<Unwind>,
     guards: Vec<Guard>,
     interrupt: Option<ExitId>,
     end: Option<ExitId>,
@@ -1759,11 +1965,10 @@ struct Numbered {
 enum Order {
     /// A guard held as the trace enters.
     Entry,
-    /// A loop's interrupt test, at its header.
-    Header,
     /// At an op, in the order of the op's stages.
     At(OpId, Stage),
-    /// The exit a trace that does not loop ends through.
+    /// Where the trace ends: a loop's interrupt test, or the exit a trace
+    /// that does not loop ends through.
     End,
 }
 
@@ -1776,13 +1981,21 @@ enum Stage {
     Leaves,
 }
 
-/// Why an opline leaves through an exit of its own.
+/// Why an opline leaves of its own.
 #[derive(Clone, Copy)]
 enum Leaves {
-    /// It cannot finish, or what it ran threw.
+    /// It cannot finish: through an exit.
     Unfinished,
-    /// It finished, and freeing a temporary it read threw.
-    Freed,
+    /// A kernel it called threw, bailed out or panicked: through an
+    /// unwind.
+    Thrown,
+}
+
+/// Where an opline leaves of its own, numbered.
+#[derive(Clone, Copy)]
+enum Left {
+    Exit(ExitId),
+    Unwind(UnwindId),
 }
 
 /// Where an exit's draft is kept until it is numbered.

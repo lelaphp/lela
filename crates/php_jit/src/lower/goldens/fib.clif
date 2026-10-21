@@ -124,63 +124,63 @@ function u0:0(i64, i64) -> i32 system_v {
 @000d                               v76 = load.i64 notrap v75
 @000d                               jump block1(v76)
 
-                                block2 cold:
-                                    v77 = iconst.i32 0
-                                    return v77  ; v77 = 0
-
                                 block4 cold:
-                                    v78 = iconst.i8 1
-                                    v79 = uextend.i32 v78  ; v78 = 1
-                                    v80 = iconst.i32 2
-                                    v81 = iadd v79, v80  ; v80 = 2
-                                    store notrap aligned v81, v4+104
+                                    v77 = iconst.i8 1
+                                    v78 = uextend.i32 v77  ; v77 = 1
+                                    v79 = iconst.i32 2
+                                    v80 = iadd v78, v79  ; v79 = 2
+                                    store notrap aligned v80, v4+104
+                                    v81 = iconst.i32 0
+                                    return v81  ; v81 = 0
+
+                                block6 cold:
                                     v82 = iconst.i32 1
                                     return v82  ; v82 = 1
 
-                                block6 cold:
+                                block9 cold:
                                     v83 = iconst.i32 2
                                     return v83  ; v83 = 2
 
-                                block9 cold:
-                                    v84 = iconst.i32 3
-                                    return v84  ; v84 = 3
-
                                 block11 cold:
                                     store.i64 notrap aligned v25, v4+112
-                                    v85 = iconst.i32 4
-                                    store notrap aligned v85, v4+120  ; v85 = 4
+                                    v84 = iconst.i32 4
+                                    store notrap aligned v84, v4+120  ; v84 = 4
+                                    v85 = iconst.i32 3
+                                    return v85  ; v85 = 3
+
+                                block13 cold:
                                     v86 = iconst.i32 4
                                     return v86  ; v86 = 4
 
-                                block13 cold:
-                                    v87 = iconst.i32 5
-                                    return v87  ; v87 = 5
-
                                 block15 cold:
-                                    v88 = iconst.i8 1
-                                    v89 = uextend.i32 v88  ; v88 = 1
-                                    v90 = iconst.i32 2
-                                    v91 = iadd v89, v90  ; v90 = 2
-                                    store notrap aligned v91, v40+104
+                                    v87 = iconst.i8 1
+                                    v88 = uextend.i32 v87  ; v87 = 1
+                                    v89 = iconst.i32 2
+                                    v90 = iadd v88, v89  ; v89 = 2
+                                    store notrap aligned v90, v40+104
+                                    v91 = iconst.i32 5
+                                    return v91  ; v91 = 5
+
+                                block17 cold:
                                     v92 = iconst.i32 6
                                     return v92  ; v92 = 6
 
-                                block17 cold:
+                                block20 cold:
                                     v93 = iconst.i32 7
                                     return v93  ; v93 = 7
 
-                                block20 cold:
-                                    v94 = iconst.i32 8
-                                    return v94  ; v94 = 8
-
                                 block22 cold:
                                     store.i64 notrap aligned v61, v40+112
-                                    v95 = iconst.i32 4
-                                    store notrap aligned v95, v40+120  ; v95 = 4
+                                    v94 = iconst.i32 4
+                                    store notrap aligned v94, v40+120  ; v94 = 4
+                                    v95 = iconst.i32 8
+                                    return v95  ; v95 = 8
+
+                                block24 cold:
                                     v96 = iconst.i32 9
                                     return v96  ; v96 = 9
 
-                                block24 cold:
+                                block2 cold:
                                     v97 = iconst.i32 10
                                     return v97  ; v97 = 10
 }

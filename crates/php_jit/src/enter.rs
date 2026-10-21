@@ -492,8 +492,20 @@ fn zval(word: u64, type_info: u32) -> Zval {
     unsafe { std::mem::transmute::<Words, Zval>(words) }
 }
 
-/// Where a trace left the interpreter (`jit-design.md` §4.6): the exit it
-/// left through, and the frame the loop goes on in, landed.
+/// How a trace gave the interpreter back its request (`jit-design.md`
+/// §4.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Left {
+    /// Through an exit, landed.
+    Exit(Exited),
+    /// Through an unwind, which takes no exit: a throwable a kernel left
+    /// pending, which the loop unwinds from where it was raised, in the
+    /// frame that stands.
+    Unwound(FrameRef),
+}
+
+/// Where a trace left the interpreter through an exit: the exit, and the
+/// frame the loop goes on in, landed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Exited {
     pub(crate) exit: ExitId,
@@ -502,15 +514,15 @@ pub(crate) struct Exited {
 
 /// What compiled code is entered as (`jit-design.md` §4.3): the
 /// `ExitCtx` and the room of the frame the trace was recorded in, and the
-/// exit it left through, or [`lower::ABANDONED`].
+/// exit it left through, [`lower::UNWOUND`] or [`lower::ABANDONED`].
 type Entry = unsafe extern "C" fn(*mut ExitCtx<'_>, *mut u8) -> u32;
 
 /// `trace` called on `frame` (`jit-design.md` §4.6), with the request's
 /// trace number, php's `EG(jit_trace_num)`, the trace's for the length of
 /// the call and the one before it again after. A panic a wrapper caught
-/// is resumed and a fatal returned, read before the exit; otherwise the
-/// exit is landed ([`land`]). Reads no word and follows no link: what
-/// happens next is `dispatch`'s.
+/// is resumed and a fatal returned, read before the exit; an unwind hands
+/// back the frame that stands, and an exit is landed ([`land`]). Reads no
+/// word and follows no link: what happens next is `dispatch`'s.
 ///
 /// The crossing's invariant is per fiber stack (§4.6): a fiber's compiled
 /// loop suspends from inside the kernel that serves `Fiber::suspend`, its
@@ -527,7 +539,7 @@ type Entry = unsafe extern "C" fn(*mut ExitCtx<'_>, *mut u8) -> u32;
 /// ```expect exit=0 regime=jit-force process
 /// 44850 44850
 /// ```
-pub(crate) fn enter(req: &mut Request, frame: FrameRef, trace: &Trace) -> Result<Exited, Fatal> {
+pub(crate) fn enter(req: &mut Request, frame: FrameRef, trace: &Trace) -> Result<Left, Fatal> {
     let room = tier::room(req, frame)
         .ok_or_else(|| internal("a trace entered on a frame with no room"))?;
     // SAFETY: the table published bytes `lower` compiled for this ABI at
@@ -548,15 +560,22 @@ pub(crate) fn enter(req: &mut Request, frame: FrameRef, trace: &Trace) -> Result
         Some(Pending::Bailout(fatal)) => return Err(fatal),
         None => {}
     }
+    if answer == lower::UNWOUND {
+        if !req.unwinding() {
+            return Err(internal("a trace unwound with no throwable pending"));
+        }
+        let frame = tier::current(req).ok_or_else(|| internal("a trace left no frame standing"))?;
+        return Ok(Left::Unwound(frame));
+    }
     let id = u16::try_from(answer)
         .ok()
         .filter(|id| usize::from(*id) < trace.exits.len())
         .ok_or_else(|| internal("a trace left through no exit of its own and kept nothing"))?;
     let frame = land(req, &trace.exits[usize::from(id)])?;
-    Ok(Exited {
+    Ok(Left::Exit(Exited {
         exit: ExitId(id),
         frame,
-    })
+    }))
 }
 
 /// The landing (the glossary's Landing): the frame the loop goes on in,
