@@ -686,9 +686,8 @@ pub(crate) fn regressed(
     )))
 }
 
-/// Whether a tally judged every test its subset holds, which a run must
-/// to be kept: a target of none, as an extension with no tests of its own
-/// keeps (`ext/lexbor`), but never the engine's run of none (#3143).
+/// Whether a tally judged every test its subset holds, which a run or a
+/// target must to be kept.
 fn whole(tally: &Tally) -> bool {
     tally.judged.len() == tally.found
 }
@@ -740,14 +739,16 @@ pub(crate) fn carry(from: &Path, into: &Path) -> Result<Carried> {
 /// Whether the run kept at `file` takes the place of the one standing at
 /// `to`: taken after it and under another pin, so the one standing is
 /// stale once the carried one is fresh (#2725), as a run `phpt --base`
-/// takes again under a moved pin is; or holding a test where the one
-/// standing holds none, which is read as no run (#3143).
+/// takes again under a moved pin is. A run of no test is read as no run
+/// (#3143): one holding a test replaces it, and it replaces none that does.
 fn supersedes(file: &Path, to: &Path) -> bool {
     let (carried, standing) = (read(file).ok().flatten(), read(to).ok().flatten());
     let tested = |run: &Option<Run>| run.as_ref().is_some_and(Run::holds_a_test);
+    if tested(&carried) != tested(&standing) {
+        return tested(&carried);
+    }
     let recipe = |run: Option<Run>| run.map(|run| run.recipe);
-    (tested(&carried) && !tested(&standing))
-        || (recipe(carried) != recipe(standing) && written(file) > written(to))
+    recipe(carried) != recipe(standing) && written(file) > written(to)
 }
 
 /// When the file at `path` was last written, where that can be read.

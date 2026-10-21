@@ -512,6 +512,20 @@ fn a_run_of_no_test_is_no_run_and_the_bases_run_carried_in_replaces_it() {
     fs::create_dir_all(there.parent().unwrap()).unwrap();
     keep(&there, &run).unwrap();
     assert_eq!(carry(&base, root).unwrap().carried, 1);
+    assert_eq!(
+        kept_at(root, pin, "HEAD", "ext/ctype").unwrap(),
+        Ok(run.clone())
+    );
+    // A run of none carried after it, under another pin, replaces nothing.
+    let later = Tree::new("against-none-later").unwrap();
+    let there = later.join(at.strip_prefix(root).unwrap());
+    fs::create_dir_all(there.parent().unwrap()).unwrap();
+    let moved = Run {
+        recipe: "moved".to_owned(),
+        ..emptied
+    };
+    keep(&there, &moved).unwrap();
+    assert_eq!(carry(&later, root).unwrap().carried, 0);
     assert_eq!(kept_at(root, pin, "HEAD", "ext/ctype").unwrap(), Ok(run));
     let now = Snapshot::disk(root).unwrap();
     assert_eq!(

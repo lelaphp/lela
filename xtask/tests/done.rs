@@ -983,11 +983,11 @@ fn a_subset_is_held_to_no_regression_against_the_runs_kept_at_the_base() {
     );
 }
 
-/// A subset that holds no test in the pinned tree, as `ext/lexbor`'s
-/// derived one, keeps no run (#3143), and condition 1 holds it to nothing,
-/// as it held the run of none kept before (#725).
+/// An extension with no tests of its own in the pinned tree, as
+/// `ext/lexbor`, keeps no run (#3143), and condition 1 holds it to nothing
+/// with none kept, as it held the run of none kept before (#725).
 #[test]
-fn a_subset_that_holds_no_test_keeps_no_run_and_holds_nothing() {
+fn an_extension_with_no_tests_of_its_own_is_met_with_no_run_kept() {
     let manifest = Manifest::load(workspace()).unwrap();
     let tree = manifest.pin.source.tree();
     if Promise::Tree.or_skip(tree).unwrap().is_none() {
