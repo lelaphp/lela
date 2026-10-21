@@ -1097,19 +1097,19 @@ pub(crate) fn armed(word: &Word) -> bool {
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:3404-3418`): a sealed word made
 /// cold, so the returns that land on it count toward
 /// `opcache.jit_hot_return`; one armed already, whatever its state, is
-/// left, as php arms an opline whose `trace_flags` are clear. Whether
-/// this call armed it.
-pub(crate) fn arm(word: &Word) -> bool {
+/// left, as php arms an opline whose `trace_flags` are clear.
+pub(crate) fn arm(word: &Word) {
     if armed(word) {
-        return false;
+        return;
     }
     // The heat first: a sealed word is never bumped, and a visit that
     // finds the state cold finds no heat left over from the seal.
     let [heat, state] = word.halves();
     heat.store(0, Ordering::Relaxed);
+    // Another arming of the same landing may win; either leaves it cold.
     state
         .compare_exchange(u32::MAX, COLD, Ordering::Release, Ordering::Relaxed)
-        .is_ok()
+        .ok();
 }
 
 /// A word in the recording state, owned until it is settled once

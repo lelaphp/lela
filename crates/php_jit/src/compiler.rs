@@ -279,7 +279,7 @@ fn pipeline_with(
     };
     if matches!(outcome, Outcome::Published(_)) && shared.policy.threshold(Start::Return).is_some()
     {
-        armed(&recorded, claim.epoch());
+        arm_landings(&recorded, claim.epoch());
     }
     let start = claim.start();
     let settled = policy::settle(claim, &outcome);
@@ -310,7 +310,7 @@ fn pipeline_with(
 /// `opcache.jit_hot_return` is not zero
 /// (`zend_jit_trace_setup_ret_counter`, `Z/ext/opcache/jit/zend_jit_trace.c:3404-3418`;
 /// `jit-design.md` §2.2, #3036).
-fn armed(recorded: &Recorded, epoch: &Epoch) {
+fn arm_landings(recorded: &Recorded, epoch: &Epoch) {
     for (func, at) in record::landings(&recorded.record, &recorded.view) {
         if let Some(word) = epoch.lay_landing(func, at) {
             policy::arm(word);

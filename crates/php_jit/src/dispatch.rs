@@ -27,7 +27,7 @@
 //! `zend_jit_trace_setup_ret_counter`), and the callee's own `RETURN`
 //! word is neither read nor claimed. A trace that leaves for the
 //! interpreter at an armed landing visits it too, as php's interpreter
-//! runs the landing's handler ([`landing`]).
+//! runs the landing's handler ([`visit_landing`]).
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -260,26 +260,31 @@ fn returned(
     decided: Visited,
     shared: &Shared,
 ) -> Flow {
-    let Some(stands) = tier::safepoint_at(req, frame, at) else {
-        return Flow::Bail(Fatal::error(
+    let stepped = match tier::safepoint_at(req, frame, at) {
+        Some(stands) => {
+            tier::stand(req, frame, stands);
+            tier::step(req, frame)
+        }
+        None => Err(Fatal::error(
             "InternalError: a return site whose number names no RETURN",
-        ));
+        )),
     };
-    tier::stand(req, frame, stands);
-    let caller = match tier::step(req, frame) {
+    let caller = match stepped {
         Ok(Stepped::Popped(caller)) => caller,
-        Ok(Stepped::Threw(at)) => {
+        // Nothing was recorded: a claim is given back with nothing counted
+        // against the landing, as a recording's bailout gives one back.
+        gone => {
             if let Visited::Hot(claim) = decided {
                 policy::settle(claim, &Outcome::Released);
             }
-            return Flow::Resume(at);
+            return match gone {
+                Ok(Stepped::Threw(at)) => Flow::Resume(at),
+                Err(fatal) => Flow::Bail(fatal),
+                Ok(_) => Flow::Bail(Fatal::error(
+                    "InternalError: a return the tier stepped popped to no caller",
+                )),
+            };
         }
-        Ok(Stepped::Same(_) | Stepped::Pushed(_) | Stepped::Moved(_) | Stepped::Done) => {
-            return Flow::Bail(Fatal::error(
-                "InternalError: a return the tier stepped popped to no caller",
-            ));
-        }
-        Err(fatal) => return Flow::Bail(fatal),
     };
     let flow = match decided {
         Visited::Continue => Flow::Continue,
@@ -503,7 +508,7 @@ fn followed<'t>(
             Some(next) => next,
             // Left for the interpreter, which runs the opline's handler:
             // where a return lands, the landing's.
-            None => match landing(req, shared, frame, Some(trace.id)) {
+            None => match visit_landing(req, shared, frame, Some(trace.id)) {
                 Visited::Enter(id) => match table.get(id) {
                     Some(next) => next,
                     None => return Flow::Resume(frame),
@@ -532,7 +537,12 @@ fn followed<'t>(
 /// frame there, as php's `zend_jit_trace_exit` answers 1 at its own
 /// trace's first opline and the opline's own handler runs, not the trace
 /// again; a frame at no armed landing is left as it is.
-fn landing(req: &mut Request, shared: &Shared, frame: FrameRef, left: Option<TraceId>) -> Visited {
+fn visit_landing(
+    req: &mut Request,
+    shared: &Shared,
+    frame: FrameRef,
+    left: Option<TraceId>,
+) -> Visited {
     if req.limits().interrupt().raised().load(Ordering::Relaxed)
         || req.state::<JitRequest>().recording
     {
@@ -855,7 +865,7 @@ fn went_on(
     let ran = match (stood.filter(|(at, id)| opens(req, *at, *id, shared)), &flow) {
         (Some((at, id)), _) => run(req, at, id, shared),
         (None, Flow::Resume(at)) if activated => safepoint(req, *at, Site::Entry),
-        (None, Flow::Resume(at)) => match landing(req, shared, *at, None) {
+        (None, Flow::Resume(at)) => match visit_landing(req, shared, *at, None) {
             Visited::Continue => Flow::Continue,
             Visited::Enter(id) => run(req, *at, id, shared),
             Visited::Hot(claim) => hot(req, *at, claim, shared),

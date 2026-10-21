@@ -531,7 +531,10 @@ pub(crate) struct Opening {
 /// trace that ends where another trace or the interpreter goes on, the
 /// opline past its last where that is a call, an `include` or an `eval`
 /// or a `yield`, and past the call each frame below the one it ends in
-/// made. Each as its op array and opline; none for any other stop.
+/// made; `DO_ICALL`, a native's call, is not among php's. Each as its op
+/// array and opline, but one whose `trace_flags` php has set already, a
+/// loop's header or an opline the recorder does not serve, which php's
+/// arming leaves as it is; none for any other stop.
 pub(crate) fn landings(record: &TraceRecord, view: &UnitView) -> Vec<(FuncRef, OplineIdx)> {
     let past = |(func, at): (FuncRef, OplineIdx)| (func, OplineIdx(at.0.saturating_add(1)));
     let mut last = None;
@@ -573,6 +576,12 @@ pub(crate) fn landings(record: &TraceRecord, view: &UnitView) -> Vec<(FuncRef, O
         armed.extend(called.map(past));
         armed.extend(calls.into_iter().rev().map(past));
     }
+    armed.retain(|(func, at)| {
+        (view.op_array(*func)).is_some_and(|code| {
+            header_at(code, *at).is_none()
+                && (code.oplines.get(at.0 as usize)).is_some_and(|op| !unsupported(op.opcode))
+        })
+    });
     armed
 }
 
@@ -1122,11 +1131,8 @@ impl<'p> Recorder<'p> {
 
     /// A return to `caller`, php's "Return from function": at depth zero
     /// the end of a loop or entry trace, or a return php follows past a
-    /// return trace's root; deeper, one level back. Then the landing it
-    /// returned to, as php reads the `trace_flags` of the opline a return
-    /// lands on (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1294-1325`): a
-    /// return trace compiled there is linked to, and one blacklisted there
-    /// stops the recording.
+    /// return trace's root; deeper, one level back. The landing it
+    /// returned to is read where every opline is ([`Recorder::landed`]).
     fn popped(
         &mut self,
         req: &Request,
@@ -1170,19 +1176,7 @@ impl<'p> Recorder<'p> {
             };
             *func = landed;
         }
-        let landing = self.epoch.landing(*func, position(req, caller));
-        if !policy::armed(landing) {
-            return Went::On;
-        }
-        match policy::read(landing) {
-            State::Compiled(id) => {
-                self.stood = Some(id);
-                self.link_at = Some((*func, position(req, caller)));
-                Went::Stopped(Stop::Link(id))
-            }
-            State::Blacklisted => Went::Stopped(Stop::BlackList),
-            State::Cold | State::Recording => Went::On,
-        }
+        Went::On
     }
 
     /// A return trace's return past its root that php follows, its
@@ -1227,7 +1221,7 @@ impl<'p> Recorder<'p> {
     fn landed(&mut self, req: &Request, view: &UnitView, frame: FrameRef, func: FuncRef) -> Went {
         let at = position(req, frame);
         let Some(header) = view.op_array(func).and_then(|code| header_at(code, at)) else {
-            return Went::On;
+            return self.return_landing(func, at);
         };
         let depth = self.level + self.ret_level;
         let limit = self.policy.blacklist_root().saturating_sub(1);
@@ -1246,6 +1240,27 @@ impl<'p> Recorder<'p> {
             }
             State::Blacklisted => Went::Stopped(Stop::BlackList),
             State::Cold | State::Recording => self.loop_header(func, at, header),
+        }
+    }
+
+    /// An armed return landing the recording reached, read as php reads
+    /// its `trace_flags` at every opline it records
+    /// (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1294-1325`): a return
+    /// trace compiled there is linked to, and one blacklisted stops the
+    /// recording.
+    fn return_landing(&mut self, func: FuncRef, at: OplineIdx) -> Went {
+        let landing = self.epoch.landing(func, at);
+        if !policy::armed(landing) {
+            return Went::On;
+        }
+        match policy::read(landing) {
+            State::Compiled(id) => {
+                self.stood = Some(id);
+                self.link_at = Some((func, at));
+                Went::Stopped(Stop::Link(id))
+            }
+            State::Blacklisted => Went::Stopped(Stop::BlackList),
+            State::Cold | State::Recording => Went::On,
         }
     }
 
