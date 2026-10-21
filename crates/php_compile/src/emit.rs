@@ -1593,7 +1593,7 @@ pub(crate) fn unit(
         // slot the refused statement took and never filled ending them.
         // A refusal php throws is the parser's, made before `zend_compile`
         // declared or counted anything, as is a parse error.
-        let bailed = !refused.thrown && refused.level != Level::Parse;
+        let bailed = refused.raise != crate::Raise::Thrown && refused.level != Level::Parse;
         if bailed {
             refused.keys_made = u32::try_from(emit.runtime_keys.len()).unwrap_or(u32::MAX);
         }
@@ -1638,7 +1638,7 @@ pub(crate) fn unit(
                 .into(),
                 line,
                 raised: std::mem::take(&mut emit.diagnostics),
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
@@ -1673,7 +1673,7 @@ pub(crate) fn unit(
             message: crate::fatal_message(limit).into(),
             line: lines.max(1),
             raised: diagnostics,
-            thrown: false,
+            raise: crate::Raise::Fatal,
             stage: crate::Stage::Compiling,
             declared: None,
             keys_made: u32::try_from(emit.runtime_keys.len()).unwrap_or(u32::MAX),
@@ -1817,7 +1817,7 @@ fn headers_numbered(oplines: &[Opline], safepoints: &[OplineIdx]) -> Result<(), 
                 .into(),
                 line: op.lineno,
                 raised: Vec::new(),
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
@@ -1957,21 +1957,44 @@ impl<'a> Emit<'a> {
         number
     }
 
-    /// [`Emit::fatal`] over what the heap refused the compile.
+    /// What the heap refused the compile, at the line the compiler
+    /// stands on: `zend_mm`'s limit, which php raises as `E_ERROR` where
+    /// the compile asked for the memory, a fatal no `try` around an
+    /// `eval` catches and no fold passes over ([`Self::constant_of`]):
+    ///
+    /// ```php
+    /// ini_set('display_errors', '0');
+    /// register_shutdown_function(function () {
+    ///     $e = error_get_last();
+    ///     echo $e['type'], ' ', strtok($e['message'], '('), 'on line ', $e['line'], "\n";
+    /// });
+    /// $parts = array_fill(0, 3, "'" . str_repeat('a', 2000000) . "'");
+    /// $code = '$y = ' . implode(' . ', $parts) . ';';
+    /// ini_set('memory_limit', '20M');
+    /// try { eval($code); } catch (ParseError $e) { echo "caught\n"; }
+    /// echo "unreached\n";
+    /// ```
+    /// ```expect exit=255
+    /// 1 Allowed memory size of 20971520 bytes exhausted on line 1
+    /// ```
     fn fatal_of(&self, fatal: Fatal) -> CompileError {
-        self.fatal(crate::fatal_message(fatal))
+        let mut refused = self.fatal(crate::fatal_message(fatal));
+        refused.level = Level::Error;
+        refused
     }
 
-    /// The compile-time fatal for what stands on the statement's line:
-    /// this compiler's sentence for what it cannot read yet, which the
-    /// engine renders as the parse error #163 framed it as.
+    /// The compile-time fatal for what stands on the statement's line,
+    /// in this compiler's own sentence at `Level::Parse`, the parse error
+    /// #163 framed it as, which no fold passes over. A construct this
+    /// compiler cannot read yet is [`Self::unread`], which a fold leaves
+    /// unfolded.
     fn fatal(&self, message: impl Into<Cow<'static, str>>) -> CompileError {
         Refused {
             level: Level::Parse,
             message: message.into(),
             line: self.line,
             raised: Vec::new(),
-            thrown: false,
+            raise: crate::Raise::Fatal,
             stage: crate::Stage::Compiling,
             declared: None,
             keys_made: 0,
@@ -2034,14 +2057,35 @@ impl<'a> Emit<'a> {
     }
 
     /// [`Self::constant_expr`] asked for a fold: the value where the
-    /// expression is a constant one, nothing where it is not, and the
-    /// fatal through, since php's compiler leaves the file at
-    /// `E_COMPILE_ERROR` and folds nothing after it.
+    /// expression is a constant one, nothing where it is not or where
+    /// this compiler cannot read it yet, which the compile then meets as
+    /// it stands, and every other refusal through, since php's compiler
+    /// leaves the file at the fatal and folds nothing after it.
+    ///
+    /// So the heap refusing the string a class constant's fold makes is
+    /// the request's `E_ERROR`, as php's `zend_eval_const_expr` raises
+    /// it, and not a node left to the class to evaluate:
+    ///
+    /// ```php
+    /// ini_set('display_errors', '0');
+    /// register_shutdown_function(function () {
+    ///     $e = error_get_last();
+    ///     echo $e['type'], ' ', strtok($e['message'], '('), 'on line ', $e['line'], "\n";
+    /// });
+    /// $parts = array_fill(0, 3, "'" . str_repeat('a', 2000000) . "'");
+    /// $code = 'class C { const X = ' . implode(' . ', $parts) . '; }';
+    /// ini_set('memory_limit', '20M');
+    /// eval($code);
+    /// echo "unreached\n";
+    /// ```
+    /// ```expect exit=255
+    /// 1 Allowed memory size of 20971520 bytes exhausted on line 1
+    /// ```
     pub(crate) fn constant_of(&mut self, expr: tree::Expr) -> Result<Option<Zval>, CompileError> {
         match self.constant_expr(expr) {
             Ok(value) => Ok(Some(value)),
-            Err(Unfolded::Refused(refused)) if refused.level == Level::CompileError => Err(refused),
-            Err(Unfolded::NoConstant(_) | Unfolded::Refused(_)) => Ok(None),
+            Err(Unfolded::NoConstant(_) | Unfolded::Unread(_)) => Ok(None),
+            Err(Unfolded::Refused(refused)) => Err(refused),
         }
     }
 
@@ -2199,18 +2243,18 @@ impl<'a> Emit<'a> {
             // `CompileError`, a top statement being walked by
             // `top_statements`.
             Stmt::HaltCompilerStmt(_) => {
-                let mut thrown = self
-                    .compile_error("__HALT_COMPILER() can only be used from the outermost scope");
-                thrown.thrown = true;
-                return Err(thrown);
+                return Err(walk::thrown(
+                    self.line,
+                    "__HALT_COMPILER() can only be used from the outermost scope",
+                ));
             }
         }
         Ok(())
     }
 
     /// The refusal for a construct this compiler cannot emit yet, at
-    /// the line the emitter stands on: the `Level::Parse` sentence the
-    /// phpt lane reads as unread.
+    /// the line the emitter stands on: [`crate::Raise::Unread`], whose
+    /// sentence the phpt lane reads as unread ([`walk::unread`]).
     fn unread(&self, what: &str) -> CompileError {
         walk::unread(self.line, what)
     }
@@ -6808,7 +6852,7 @@ impl<'a> Emit<'a> {
                 message: message.into(),
                 line,
                 raised: Vec::new(),
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
@@ -7579,7 +7623,7 @@ impl<'a> Emit<'a> {
                 message: refused.refusal.to_string().into(),
                 line: refused.site.line,
                 raised: Vec::new(),
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
@@ -8181,7 +8225,7 @@ impl<'a> Emit<'a> {
             // walk refuses that folds to nothing.
             _ => match self.eval_const(expr)? {
                 Some(folded) => self.folded(folded),
-                None => Err(self.fatal("a constant expression this compiler cannot read yet")),
+                None => Err(self.unread("a constant expression")),
             },
         }
     }
@@ -8243,8 +8287,7 @@ impl<'a> Emit<'a> {
     /// A value `zend_eval_const_expr` folded, as the constant expression
     /// a declaration keeps.
     fn folded(&self, folded: Zval) -> Result<ConstExpr, CompileError> {
-        folded_const_expr(folded)
-            .ok_or_else(|| self.fatal("a constant expression this compiler cannot read yet"))
+        folded_const_expr(folded).ok_or_else(|| self.unread("a constant expression"))
     }
 
     /// [`Self::const_expr`] for an expression evaluated each time it is
@@ -8579,20 +8622,17 @@ impl<'a> Emit<'a> {
     }
 
     /// `zend_is_allowed_in_const_expr`'s refusal, php's
-    /// `Constant expression contains invalid operations`, unless the
-    /// node is one this compiler cannot read yet, whose own refusal
-    /// stands instead so the phpt lane counts the file as unread: an
+    /// `Constant expression contains invalid operations`, for a node
+    /// that is no constant. A node this compiler cannot read yet keeps
+    /// its own refusal, so the phpt lane counts the file as unread (an
     /// argument list with a `...` in it is php's first-class callable,
-    /// which its walk allows and this does not read.
+    /// which its walk allows and this does not read), and every other
+    /// refusal the fold met is the answer as it stands.
     fn const_refused(&mut self, expr: tree::Expr) -> Result<ConstExpr, CompileError> {
         match self.constant_expr(expr) {
             Ok(folded) => self.folded(folded),
-            Err(Unfolded::Refused(refused))
-                if unread(&refused) || refused.level == Level::CompileError =>
-            {
-                Err(refused)
-            }
-            Err(Unfolded::NoConstant(_) | Unfolded::Refused(_)) => {
+            Err(Unfolded::Unread(refused) | Unfolded::Refused(refused)) => Err(refused),
+            Err(Unfolded::NoConstant(_)) => {
                 Err(self.compile_error("Constant expression contains invalid operations"))
             }
         }
@@ -10222,7 +10262,7 @@ impl<'a> Emit<'a> {
                 message: message.into(),
                 line,
                 raised: Vec::new(),
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
@@ -10338,7 +10378,7 @@ impl<'a> Emit<'a> {
                 message: String::from(refused).into(),
                 line,
                 raised: Vec::new(),
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
@@ -10960,7 +11000,7 @@ impl<'a> Emit<'a> {
             message: message.into(),
             line: self.line,
             raised: Vec::new(),
-            thrown: false,
+            raise: crate::Raise::Fatal,
             stage: crate::Stage::Compiling,
             declared: None,
             keys_made: 0,
@@ -15855,10 +15895,8 @@ impl<'a> Emit<'a> {
 
     /// `ZEND_AST_CONST`: what [`Self::named_constant`] substitutes.
     fn name_constant(&mut self, token: TokenId) -> Result<Zval, Unfolded> {
-        self.named_constant(token)?.ok_or_else(|| {
-            self.fatal("a constant this compiler cannot read yet")
-                .into()
-        })
+        self.named_constant(token)?
+            .ok_or_else(|| self.unread("a constant").into())
     }
 
     /// A `"…"` or a heredoc with nothing interpolated is one string
@@ -19347,13 +19385,6 @@ fn compound_op(kind: SyntaxKind) -> Option<BinaryOp> {
 /// `ZEND_FREE_VOID_CAST` (`Z/Zend/zend_compile.h:1106`): the
 /// `extended_value` of the `FREE` a `(void)` cast leaves.
 const FREE_VOID_CAST: u32 = 1 << 2;
-
-/// Whether a refusal is the one-line shape a construct this compiler
-/// cannot emit yet is refused in, which `xtask phpt` reads as unread
-/// (`xtask/src/phpt/adapter.rs`): the sentence [`walk::unread`] writes.
-fn unread(refused: &CompileError) -> bool {
-    refused.level == Level::Parse && refused.message.ends_with("this compiler cannot read yet")
-}
 
 /// Which constants php's compiler substitutes where they are named,
 /// `CG(compiler_options)`'s bits over `zend_try_ct_eval_const`.

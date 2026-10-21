@@ -26,24 +26,35 @@ use php_syntax::tree::{self, NodeId};
 use php_unit::Level;
 
 use super::{Emit, Fold, truth};
-use crate::CompileError;
+use crate::{CompileError, Raise};
 
 /// What a fold of a node answers where it has no value for it: the node
-/// is no constant, php's `zend_eval_const_expr` leaving it standing, or
+/// is no constant, php's `zend_eval_const_expr` leaving it standing; it
+/// is one this compiler cannot read yet ([`crate::Raise::Unread`]); or
 /// the compile refused. The first is the common answer, every variable
 /// and call an array expression holds, so it is a state of its own and no
 /// refusal: it allocates nothing, where a [`CompileError`] is a box
 /// (#3208). `why` is the sentence a compile that needed the constant
 /// refuses with ([`Emit::constant_value`]).
+///
+/// The first two leave the node unfolded, for the compile to meet as it
+/// stands; a refusal is the answer, whatever its level, since php's
+/// compile stops at it. A refusal is sorted into one of the two once,
+/// where it becomes an answer of a fold ([`From`]), and every fold
+/// matches the variant.
 #[derive(Debug)]
 pub(crate) enum Unfolded {
     NoConstant(&'static str),
+    Unread(CompileError),
     Refused(CompileError),
 }
 
 impl From<CompileError> for Unfolded {
     fn from(refused: CompileError) -> Unfolded {
-        Unfolded::Refused(refused)
+        match refused.raise {
+            Raise::Unread => Unfolded::Unread(refused),
+            Raise::Fatal | Raise::Thrown => Unfolded::Refused(refused),
+        }
     }
 }
 
@@ -83,7 +94,7 @@ impl Emit<'_> {
     pub(crate) fn constant_value(&mut self, expr: tree::Expr) -> Result<Zval, CompileError> {
         self.constant_expr(expr).map_err(|unfolded| match unfolded {
             Unfolded::NoConstant(why) => self.fatal(why),
-            Unfolded::Refused(refused) => refused,
+            Unfolded::Unread(refused) | Unfolded::Refused(refused) => refused,
         })
     }
 
@@ -138,8 +149,8 @@ impl Emit<'_> {
     /// not fold, since php evaluates every child before it reads either,
     /// and under a compile's fold the right one only once the left one
     /// has, as `zend_compile_expr` would have emitted the left one's
-    /// oplines. A compile error from either is the answer, the left one's
-    /// first.
+    /// oplines. A refusal from either is the answer, the left one's
+    /// first; a side left unfolded leaves the node unfolded.
     pub(super) fn constant_pair(
         &mut self,
         left: tree::Expr,
@@ -149,16 +160,11 @@ impl Emit<'_> {
             return Ok((self.constant_expr(left)?, self.constant_expr(right)?));
         }
         let left = match self.constant_expr(left) {
-            Err(Unfolded::Refused(refused)) if refused.level == Level::CompileError => {
-                return Err(refused.into());
-            }
+            Err(refused @ Unfolded::Refused(_)) => return Err(refused),
             left => left,
         };
-        let right = self.constant_expr(right);
-        match (left, right) {
-            (_, Err(Unfolded::Refused(refused))) if refused.level == Level::CompileError => {
-                Err(refused.into())
-            }
+        match (left, self.constant_expr(right)) {
+            (_, Err(refused @ Unfolded::Refused(_))) => Err(refused),
             (Ok(left), Ok(right)) => Ok((left, right)),
             (Err(unfolded), _) | (_, Err(unfolded)) => Err(unfolded),
         }

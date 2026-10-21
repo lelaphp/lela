@@ -6103,13 +6103,13 @@ pub(crate) fn refused_program(req: &mut Request, refused: &CompileRefused, file:
 /// The refusal itself, past what was raised before it
 /// ([`refused_program`]).
 pub(crate) fn refusal_raised(req: &mut Request, refused: &CompileError, file: &[u8]) {
-    match (refused.stage, refused.thrown) {
+    match (refused.stage, refused.raise) {
         // Opened before anything compiled or ran: `zend_error` finds no
         // file compiling and none executing.
         (php_compile::Stage::Opening, _) => {
             req.end_in_compile_time(refused.level, &refused.message, b"Unknown", 0);
         }
-        (php_compile::Stage::Compiling, true) => {
+        (php_compile::Stage::Compiling, php_compile::Raise::Thrown) => {
             req.end_in_uncaught(
                 refused.level,
                 refused.message.as_bytes(),
@@ -6117,7 +6117,7 @@ pub(crate) fn refusal_raised(req: &mut Request, refused: &CompileError, file: &[
                 refused.line,
             );
         }
-        (php_compile::Stage::Compiling, false) => {
+        (php_compile::Stage::Compiling, php_compile::Raise::Fatal | php_compile::Raise::Unread) => {
             req.end_in_compile_time(refused.level, &refused.message, file, refused.line);
         }
     }

@@ -309,7 +309,7 @@ impl StackLimit {
             ).into(),
             line,
             raised: Vec::new(),
-            thrown: false,
+            raise: crate::Raise::Fatal,
             stage: crate::Stage::Compiling,
             declared: None,
             keys_made: 0,

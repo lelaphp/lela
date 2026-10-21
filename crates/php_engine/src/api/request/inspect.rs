@@ -182,7 +182,7 @@ impl Request {
                 // after what it had declared.
                 let error = &refused.error;
                 let thrown = error.level == Level::Parse
-                    || error.thrown
+                    || error.raise == php_compile::Raise::Thrown
                     || error.stage == php_compile::Stage::Opening;
                 if let Some(noted) = self.declare_refused(&refused, path) {
                     for raised in error.raised.get(noted..).unwrap_or_default() {

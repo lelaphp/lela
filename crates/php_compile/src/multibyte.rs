@@ -25,7 +25,7 @@ use std::borrow::Cow;
 use php_syntax::tree::{self, DeclareStmt, TokenId};
 use php_syntax::{Arena, Holder, Parsed, Span, SyntaxKind, TokenValue};
 
-use crate::{CompileError, Level, Options, Refused};
+use crate::{CompileError, Level, Options, Raise, Refused};
 
 /// One encoding, as the functions that fetched it name it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -427,7 +427,7 @@ pub(crate) struct Refusal {
     pub(crate) level: Level,
     pub(crate) message: String,
     pub(crate) line: u32,
-    pub(crate) thrown: bool,
+    pub(crate) raise: Raise,
 }
 
 impl Refusal {
@@ -438,7 +438,7 @@ impl Refusal {
             message: self.message.clone().into(),
             line: self.line,
             raised,
-            thrown: self.thrown,
+            raise: self.raise,
             stage: crate::Stage::Compiling,
             declared: None,
             keys_made: 0,
@@ -580,8 +580,8 @@ fn scan_declared<'p>(
                         message,
                     ),
                 )),
-                Read::Refused { message, thrown } => {
-                    refused = Some((declared.close, message, thrown));
+                Read::Refused { message, raise } => {
+                    refused = Some((declared.close, message, raise));
                     break 'reparse;
                 }
                 Read::Again(reread) => {
@@ -598,7 +598,7 @@ fn scan_declared<'p>(
         }
         break;
     }
-    let refused = refused.map(|(close, message, thrown)| {
+    let refused = refused.map(|(close, message, raise)| {
         let line = current.lines.line_number(close.saturating_sub(1));
         let before = warnings.len() + position(&current.diagnostics, close);
         Refusal {
@@ -606,7 +606,7 @@ fn scan_declared<'p>(
             level: Level::CompileError,
             message,
             line,
-            thrown,
+            raise,
         }
     });
     if !warnings.is_empty() {
@@ -648,7 +648,7 @@ enum Read {
     Warned(String),
     Refused {
         message: String,
-        thrown: bool,
+        raise: Raise,
     },
     /// The file as read, through the filter the directive chose, for
     /// the scanner to go on in from where it stands.
@@ -667,7 +667,7 @@ fn read(
     if crate::emit::written(parsed, declared.value).is_none() {
         return Read::Refused {
             message: "Encoding must be a literal".to_owned(),
-            thrown: true,
+            raise: Raise::Thrown,
         };
     }
     let Some(multibyte) = options.multibyte else {
@@ -699,7 +699,7 @@ fn read(
         Some(reread) => Read::Again(reread),
         None => Read::Refused {
             message: Unconverted(multibyte.encodings.name(named)).message(),
-            thrown: false,
+            raise: Raise::Fatal,
         },
     }
 }
@@ -1024,8 +1024,8 @@ mod tests {
         assert_eq!(
             refused
                 .err()
-                .map(|e| (e.message.to_string(), e.line, e.thrown, e.raised.len())),
-            Some(("Encoding must be a literal".to_owned(), 2, true, 1))
+                .map(|e| (e.message.to_string(), e.line, e.raise, e.raised.len())),
+            Some(("Encoding must be a literal".to_owned(), 2, Raise::Thrown, 1))
         );
     }
 }
