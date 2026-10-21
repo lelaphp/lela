@@ -6,7 +6,9 @@
 //! body is that one's own and not the test's. Every `.rs` file of the
 //! crate the rule's scope covers is read, its test modules and `tests/`
 //! alike; a fn is a test by an attribute whose last segment is `test`,
-//! so `#[test]` and `#[tokio::test]` both are.
+//! so `#[test]` and `#[tokio::test]` both are. A macro's body is tokens
+//! to syn and is not read, so a test a macro writes is not held. A file
+//! that does not parse fails the crate's reading, naming it.
 
 use std::path::Path;
 
@@ -19,7 +21,8 @@ use crate::manifest::{Crate, Rule};
 pub(super) const CHECK: &str = "silent-return";
 
 /// Each test-level return in `krate`'s sources `rule` covers, as
-/// `file:line`; `None` when the rule covers no source of the crate.
+/// `file:line`, and each covered file that does not parse, as syn's
+/// refusal; `None` when the rule covers no source of the crate.
 pub(super) fn sites(root: &Path, krate: &Crate, rule: &Rule) -> Result<Option<Vec<String>>> {
     let mut covered = None;
     for file in crate::git::files(root, &krate.path())? {
@@ -29,10 +32,15 @@ pub(super) fn sites(root: &Path, krate: &Crate, rule: &Rule) -> Result<Option<Ve
         }
         let text =
             std::fs::read_to_string(root.join(path)).with_context(|| format!("reading {file}"))?;
-        let mut tests = Tests::default();
-        tests.visit_file(&crate::rust::parsed(&text, path)?);
         let sites = covered.get_or_insert_with(Vec::new);
-        sites.extend(tests.0.into_iter().map(|line| format!("{file}:{line}")));
+        match crate::rust::parsed(&text, path) {
+            Ok(parsed) => {
+                let mut tests = Tests::default();
+                tests.visit_file(&parsed);
+                sites.extend(tests.0.into_iter().map(|line| format!("{file}:{line}")));
+            }
+            Err(e) => sites.push(format!("{e:#}")),
+        }
     }
     Ok(covered)
 }
