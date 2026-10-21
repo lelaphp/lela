@@ -210,8 +210,7 @@ fn content_type(line: &[u8]) -> Option<Vec<u8>> {
 
 /// php's `trim()` with its default set.
 fn trim(text: &str) -> String {
-    text.trim_matches([' ', '\t', '\n', '\r', '\0', '\x0B'])
-        .to_owned()
+    text.trim_matches(super::adapter::TRIM).to_owned()
 }
 
 /// The same over bytes.
