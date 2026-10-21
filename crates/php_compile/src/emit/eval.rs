@@ -34,7 +34,7 @@ use crate::CompileError;
 /// and call an array expression holds, so it is a state of its own and no
 /// refusal: it allocates nothing, where a [`CompileError`] is a box
 /// (#3208). `why` is the sentence a compile that needed the constant
-/// refuses with ([`Emit::refusal_of`]).
+/// refuses with ([`Emit::constant_value`]).
 #[derive(Debug)]
 pub(crate) enum Unfolded {
     NoConstant(&'static str),
@@ -77,14 +77,14 @@ impl Rewrites {
 }
 
 impl Emit<'_> {
-    /// The compile's refusal for a fold that answered `unfolded`: a node
+    /// [`Self::constant_expr`] where a compile needs the value: a node
     /// that is no constant refused at the line the compile stands on, as
     /// a sentence of this compiler's own ([`Emit::fatal`]).
-    pub(crate) fn refusal_of(&self, unfolded: Unfolded) -> CompileError {
-        match unfolded {
+    pub(crate) fn constant_value(&mut self, expr: tree::Expr) -> Result<Zval, CompileError> {
+        self.constant_expr(expr).map_err(|unfolded| match unfolded {
             Unfolded::NoConstant(why) => self.fatal(why),
             Unfolded::Refused(refused) => refused,
-        }
+        })
     }
 
     /// The node where it stands after `zend_eval_const_expr`: the side a

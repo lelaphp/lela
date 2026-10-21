@@ -11303,7 +11303,7 @@ impl<'a> Emit<'a> {
 
     /// [`Self::expr`]'s body over one node, php's `zend_compile_expr_inner`.
     ///
-    /// Every compile of a nested expression passes through this frame
+    /// Every compile of a nested expression passes through this dispatch
     /// once per level, as php's passes through `zend_compile_expr_inner`,
     /// so it holds the dispatch and nothing else: each arm is one call
     /// whose answer is this function's, and what an arm reads of its
@@ -11409,10 +11409,7 @@ impl<'a> Emit<'a> {
 
     /// `ZEND_AST_ZVAL`: a number, a string or a nowdoc as written.
     fn literal_expr(&mut self, expr: tree::Expr) -> Result<Where, CompileError> {
-        match self.constant_expr(expr) {
-            Ok(value) => Ok(Where::Constant(value)),
-            Err(unfolded) => Err(self.refusal_of(unfolded)),
-        }
+        self.constant_value(expr).map(Where::Constant)
     }
 
     /// `zend_compile_const`: `true`, `false` and `null` are the values
@@ -15463,10 +15460,10 @@ impl<'a> Emit<'a> {
     /// done
     /// ```
     ///
-    /// Like [`Self::expr_node`], every fold of a nested expression passes
-    /// through this frame once per level, as php's passes through
-    /// `zend_eval_const_expr`, so it holds the dispatch and nothing else:
-    /// each arm is one call whose answer is this function's.
+    /// Every fold of a nested expression passes through this frame once
+    /// per level, as a compile passes through [`Self::expr_node`] and
+    /// php's through `zend_eval_const_expr`, so it holds the dispatch and
+    /// nothing else: each arm is one call whose answer is this function's.
     pub(crate) fn constant_expr(&mut self, expr: tree::Expr) -> Result<Zval, Unfolded> {
         if let Some(evaluated) = self.evaluated(expr) {
             return evaluated;
@@ -15488,10 +15485,10 @@ impl<'a> Emit<'a> {
                 self.string_constant(expr)
             }
             // `zend_eval_const_expr` has no `ZEND_AST_SHELL_EXEC` case,
-            // so the node stands and [`Self::expr`] compiles it. The
-            // refusal is no `cannot read yet`, so a constant expression
-            // a declaration keeps ([`Self::const_expr`]) is refused in
-            // php's own words by [`Self::const_refused`].
+            // so the node stands and [`Self::expr`] compiles it. It is
+            // no constant and no `cannot read yet`, so a constant
+            // expression a declaration keeps ([`Self::const_expr`]) is
+            // refused in php's own words by [`Self::const_refused`].
             tree::Expr::ShellExecExpr(_) => Err(Unfolded::NoConstant(
                 "a backtick operator is no constant expression",
             )),
