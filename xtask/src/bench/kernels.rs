@@ -5,14 +5,15 @@
 //! program under, measured program by program under the protocol, the
 //! reading carrying each program's ratio and their geomean (`Arms::Set`).
 //!
-//! **The bars today.** G3's denominator (#2948): the pinned php under
-//! `[regime.jit-tracing]` against itself under `[regime.jit-off]`, what
-//! php's own JIT buys on these programs, and its A/A control, `jit-off`
-//! against `jit-off`. G1 (#2947, [`door`]): the engine built with the
-//! tier's feature against the engine built without it over the seven
-//! kernels alone, `PROGRAMS[..7]`, held to a geomean of at most
-//! [`DOOR`]. G2 (#2965) is a [`bar`] over every program whose arms are the
-//! engine's build.
+//! **The bars today.** G3's denominator (#2948, [`oracle`]): the pinned
+//! php under `[regime.jit-tracing]` against itself under
+//! `[regime.jit-off]`, what php's own JIT buys on these programs, and its
+//! A/A control, `jit-off` against `jit-off`. G2 (#2965, [`compiled`]):
+//! the same pair and control on the engine built with the tier's feature,
+//! what the engine's tier buys. G1 (#2947, [`door`]): the engine built
+//! with the tier's feature against the engine built without it over the
+//! seven kernels alone, `PROGRAMS[..7]`, held to a geomean of at most
+//! [`DOOR`].
 //!
 //! **What every arm runs under.** The recipe, as the oracle's every run
 //! is, then the regimes, then [`INI`]: php.ini-production's values for the
@@ -136,33 +137,63 @@ pub(crate) fn bar(
     }
 }
 
-/// G3's denominator and its control (#2948): the pinned php under
-/// `jit-tracing` against `jit-off`, a series, and `jit-off` against
-/// itself, its A/A control. A machine without the pinned php measures
-/// neither, each a skip that says so.
-pub(crate) fn oracle(root: &Path) -> [Declared; 2] {
+/// A php binary for a bar, or why this machine has none, the bar's skip.
+type Binary = fn(&Path, &Pin) -> Result<Result<PathBuf, String>>;
+
+/// `whose` tier, `binary`, under `jit-tracing` against `jit-off` over
+/// every program, the bar `id`, a series; and `jit-off` against itself,
+/// `<id>-aa`, its A/A control.
+fn tracing(root: &Path, (id, whose): (&str, &str), binary: Binary) -> [Declared; 2] {
     [
-        ("oracle-jit", ["jit-tracing", "jit-off"], Held::Series),
-        ("oracle-jit-aa", ["jit-off", "jit-off"], Held::Control),
+        ("", ["jit-tracing", "jit-off"], Held::Series),
+        ("-aa", ["jit-off", "jit-off"], Held::Control),
     ]
-    .map(|(id, [a, b], held)| {
+    .map(|(aa, [a, b], held)| {
         let about = format!(
-            "the pinned php under [regime.{a}] against [regime.{b}] over the seven kernels and Zend/bench.php"
+            "{whose} under [regime.{a}] against [regime.{b}] over the seven kernels and Zend/bench.php"
         );
-        bar(root, (id, PROGRAMS), about, held, move |pin| {
-            if let Some(why) = pin.oracle.absent() {
-                return Ok(Err(why));
-            }
-            pin.oracle().asserted()?;
+        let at = root.to_path_buf();
+        bar(root, (&format!("{id}{aa}"), PROGRAMS), about, held, move |pin| {
+            let binary = match binary(&at, pin)? {
+                Ok(binary) => binary,
+                Err(why) => return Ok(Err(why)),
+            };
             let arm = |name: String, regime| Php {
                 name,
-                binary: pin.oracle.path.clone(),
+                binary: binary.clone(),
                 regimes: vec![regime],
                 ini: Vec::new(),
             };
             Ok(Ok([arm(a.to_owned(), a), arm(second(a, b), b)]))
         })
     })
+}
+
+/// G3's denominator and its control (#2948): the pinned php's tier. A
+/// machine without the pinned php measures neither, each a skip that says
+/// so.
+pub(crate) fn oracle(root: &Path) -> [Declared; 2] {
+    tracing(root, ("oracle-jit", "the pinned php"), |_, pin| {
+        if let Some(why) = pin.oracle.absent() {
+            return Ok(Err(why));
+        }
+        pin.oracle().asserted()?;
+        Ok(Ok(pin.oracle.path.clone()))
+    })
+}
+
+/// G2 and its control (#2965): the tier of the engine built with its
+/// feature, the build [`door`]'s first arm runs. `jit-tracing` asks the
+/// engine's `Policy` for `Mode::Tracing` and `jit-off` for `Mode::Off`
+/// (`jit-design.md` §4.7); its traces compile on the worker thread, as
+/// `jit.compile` asks by default.
+pub(crate) fn compiled(root: &Path) -> [Declared; 2] {
+    let engine = |root: &Path, _: &Pin| engine(root, true).map(Ok);
+    tracing(
+        root,
+        ("engine-jit", "the engine built as jit-feature"),
+        engine,
+    )
 }
 
 /// G1's bound (design §9.2): the tier's door may cost the build without
@@ -216,6 +247,37 @@ pub(crate) fn door(root: &Path) -> [Declared; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The engine's tier and php's are each a series beside its A/A
+    /// control, named for whose tier it is, and G1 is held to its bound.
+    #[test]
+    fn each_tier_is_a_series_beside_its_control_and_the_door_a_bound() {
+        let root = Path::new(".");
+        let bars =
+            [oracle(root), compiled(root), door(root)].map(|bars| bars.map(|b| (b.id, b.held)));
+        let named = |id: &str, held| (id.to_owned(), held);
+        assert_eq!(
+            bars[0],
+            [
+                named("oracle-jit", Held::Series),
+                named("oracle-jit-aa", Held::Control)
+            ]
+        );
+        assert_eq!(
+            bars[1],
+            [
+                named("engine-jit", Held::Series),
+                named("engine-jit-aa", Held::Control)
+            ]
+        );
+        assert_eq!(
+            bars[2],
+            [
+                named("g1", Held::Bound(DOOR)),
+                named("g1-aa", Held::Control)
+            ]
+        );
+    }
 
     /// Each program is committed where the protocol keeps its workloads
     /// (§11), and each arm runs it under the recipe, its regime and

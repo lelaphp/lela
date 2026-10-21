@@ -793,6 +793,7 @@ fn declared(root: &Path) -> Result<Vec<Declared>> {
     let mut bars = vec![permit.declared()];
     bars.extend(crate::makala::bench::declared(root)?);
     bars.extend(kernels::oracle(root));
+    bars.extend(kernels::compiled(root));
     bars.extend(kernels::door(root));
     bars.extend(
         [
