@@ -361,12 +361,14 @@ impl Serializer<'_> {
     /// `dom_xml_serialization_algorithm`: the node, then each child by
     /// the same algorithm, php's recursion, refused where the stack has
     /// come down to its limit, as `dom_xml_serialize_check_stack_limit`
-    /// refuses it.
+    /// refuses it. The nest is deeper than either engine's stack takes on
+    /// php's budget, php's frames or this engine's (#3159), so both refuse
+    /// it.
     ///
     /// ```php
     /// $doc = Dom\XMLDocument::createEmpty();
     /// $node = $doc->createElement('a');
-    /// for ($i = 0; $i < 40000; $i++) { $p = $doc->createElement('a'); $p->appendChild($node); $node = $p; }
+    /// for ($i = 0; $i < 100000; $i++) { $p = $doc->createElement('a'); $p->appendChild($node); $node = $p; }
     /// $doc->appendChild($node);
     /// try { $doc->saveXml(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
     /// try { $doc->documentElement->innerHTML; } catch (Error $e) { echo $e->getMessage(), "\n"; }
