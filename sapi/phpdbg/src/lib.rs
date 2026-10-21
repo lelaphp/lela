@@ -171,9 +171,10 @@ pub fn main() -> ExitCode {
 /// the line found and its `-d`s, every file's shebang line passed over,
 /// with extended info where the line carried `-e`.
 ///
-/// A call of its own, so the builder, two kilobytes moved through each
-/// step, stands in a frame that is gone before the first request is
-/// served, and not under every frame of it, as the CLI's is (#3209).
+/// A call of its own, as the CLI's engine is, so the builder, two
+/// kilobytes moved through each step, stands in a frame that is gone
+/// before the first request is served, and not under every frame of it
+/// (#3209).
 #[inline(never)]
 fn engine(line: &Line, beside: &[Extension]) -> Engine {
     let mut extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();

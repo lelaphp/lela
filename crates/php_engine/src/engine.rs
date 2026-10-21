@@ -5143,7 +5143,7 @@ impl Engine {
     /// host but the built-in server ends on ([`Engine::start_failed`]).
     #[expect(
         clippy::result_large_err,
-        reason = "the refusal is what the host is handed, once a request, and the request a box"
+        reason = "the Err side, the large one, is the observables a refused start hands the host once"
     )]
     pub(crate) fn begin(
         &self,
