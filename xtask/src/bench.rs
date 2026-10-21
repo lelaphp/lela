@@ -403,7 +403,7 @@ pub(crate) enum Arms {
 pub(crate) type Sides = Result<Arms, String>;
 
 /// How a bar's reading is held.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Held {
     /// An A/A control: a pass while every row's paired delta has its sign
     /// swamped (§2, §4.3), a set's rows each held as one pair's is until a
@@ -413,15 +413,24 @@ pub(crate) enum Held {
     /// and the distance to go to the second arm, and held by [`series`]'s
     /// rule where the manifest gives it a tolerance (#1902, #2336, #2659).
     Series,
+    /// A series held to a bound: a fail where the bar's ratio, a set's
+    /// geomean, is established above this, G1's 1.02 (design §9.2, #2947),
+    /// and a pass where it is at most this or its sign is not established,
+    /// as a swamped night is never a regression (protocol §1.2, §12).
+    Bound(f64),
 }
 
 impl Held {
     /// The reading's status for what a bar `took`: a control fails where a
-    /// row's sign resolved, and a series is held to no bound.
+    /// row's sign resolved, a bound where the ratio is established above
+    /// it or is no number, and a series is held to no bound.
     fn status(self, took: &Took) -> Status {
+        let Ratio { value, verdict } = took.ratio();
+        let above = |at_most| value.is_nan() || (verdict == RESOLVED && value > at_most);
         match self {
             Held::Control if took.resolved() > 0 => Status::Fail,
-            Held::Control | Held::Series => Status::Pass,
+            Held::Bound(at_most) if above(at_most) => Status::Fail,
+            Held::Control | Held::Series | Held::Bound(_) => Status::Pass,
         }
     }
 }
@@ -786,6 +795,8 @@ fn declared(root: &Path) -> Result<Vec<Declared>> {
     let mut bars = vec![permit.declared()];
     bars.extend(crate::makala::bench::declared(root)?);
     bars.extend(kernels::oracle(root));
+    bars.extend(kernels::compiled(root));
+    bars.extend(kernels::door(root));
     bars.extend(
         [
             ("jit-wrapper", [WRAPPER, DIRECT], Held::Series),
@@ -816,8 +827,12 @@ fn wrapper(root: &Path, id: &str, [a, b]: [&'static str; 2], held: Held) -> Decl
         about: format!("{CALLS} calls of php_jit's test kernel through {a}, against {b}"),
         held,
         start: Box::new(move || {
-            let program =
-                crate::oracle::profile::released(&root, "php_jit", "php_jit_bench", Some("bench"))?;
+            let program = crate::oracle::profile::released(
+                &root,
+                ("php_jit", "php_jit_bench"),
+                Some("bench"),
+                None,
+            )?;
             let arm = |name: String, way: &str| -> Box<dyn Side> {
                 let args = vec![way.to_owned(), CALLS.to_string()];
                 let arm = Arm {
@@ -1107,6 +1122,7 @@ fn held_by(bar: &Shown<'_>, took: &Took) -> String {
     match bar.held {
         Held::Control => format!("the bar is the A/A control of {PROTOCOL} §2"),
         Held::Series => format!("{series}; {to_go}"),
+        Held::Bound(at_most) => format!("a bound, its ratio held to at most {at_most:.4}"),
     }
 }
 
@@ -1179,6 +1195,11 @@ fn recorded(
 ) -> Result<Reading> {
     let mut reading = Reading::stamped_over(INSTRUMENT, bar.id, snapshot, Path::new("."))?;
     reading.status = bar.held.status(took);
+    if let Held::Bound(at_most) = bar.held {
+        reading
+            .numbers
+            .insert("bound_ratio".to_owned(), at_most.into());
+    }
     if bar.held == Held::Series
         && let Some(to_go) = to_go(took)
     {
@@ -1338,7 +1359,8 @@ mod tests {
 
     /// A set's ratio is the geomean of its rows', 0.5 and 2.0 making 1.0,
     /// its sign established only where every row's is (protocol §10); a
-    /// control over a set fails on any one resolved row.
+    /// control over a set fails on any one resolved row, and a bound on a
+    /// geomean established above it and not on a swamped one (#2947).
     #[test]
     fn a_set_is_held_by_its_geomean_and_a_control_by_each_row() {
         let set = took(vec![row(Ms, &AHEAD, -50.0), row(Ms, &BEHIND, 100.0)], true);
@@ -1356,6 +1378,10 @@ mod tests {
             "one swamped row leaves the geomean unsigned"
         );
         assert_eq!(Held::Control.status(&swamped), Status::Fail);
+        assert_eq!(Held::Bound(1.02).status(&swamped), Status::Pass);
+        assert_eq!(Held::Bound(1.0).status(&set), Status::Pass, "at the bound");
+        let behind = took(vec![row(Ms, &BEHIND, 10.0), row(Ms, &BEHIND, 10.0)], true);
+        assert_eq!(Held::Bound(1.02).status(&behind), Status::Fail);
         let quiet = took(vec![row(Ms, &STRADDLES, 3.0), row(Ms, &AHEAD, 3.0)], true);
         assert_eq!(Held::Control.status(&quiet), Status::Fail);
         let quiet = took(
