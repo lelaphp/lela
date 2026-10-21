@@ -23,7 +23,7 @@ use crate::api::values::{
 use methods::visibility_string;
 use pending::Saved;
 
-use super::{Hooks, Placed, PropertyInfo, Request, methods, pending};
+use super::{Hooks, Placed, PropertyInfo, Request, RowPlace, methods, pending};
 
 /// Where the destructors' walk was cut short, whose field no file but
 /// this one reads.
@@ -217,11 +217,37 @@ impl Request {
     /// never changes.
     pub(crate) fn placed_properties(&self, class: ClassId) -> &[PropertyInfo] {
         match self.native_class_at(class) {
-            Some(native) => self.shared.placed.get(native).map_or(&[], |placed| placed),
+            Some(native) => self
+                .shared
+                .placed
+                .get(native)
+                .map_or(&[], |placed| &placed.slots),
             None => self
                 .declared_row(class)
-                .map_or(&[], |row| &row.bound.placed),
+                .map_or(&[], |row| &row.bound.placed.slots),
         }
+    }
+
+    /// `ce->properties_info` as the class's one row holds it
+    /// ([`PropertiesInfo`]): what [`Request::find_property_info`] finds a
+    /// name in. None for a class with no linked record.
+    pub(super) fn properties_info(&self, class: ClassId) -> Option<PropertiesInfo<'_>> {
+        let (record, placed, decl) = if let Some(native) = self.native_class_at(class) {
+            (
+                self.shared.records.get(native)?,
+                self.shared.placed.get(native)?,
+                self.shared.classes.get(native)?,
+            )
+        } else {
+            let row = self.declared_row(class)?;
+            (row.bound.record.as_ref()?, &row.bound.placed, row.decl()?)
+        };
+        Some(PropertiesInfo {
+            class,
+            rows: &record.properties,
+            places: &placed.rows,
+            decl,
+        })
     }
 
     /// `*prop_info`: the declaration a property's row names, read off
@@ -368,7 +394,71 @@ pub(crate) fn placed_of<'d>(
             placed.push(row(at));
         }
     }
-    placed.into_boxed_slice()
+    let rows = record.map_or_else(Box::default, |record| {
+        record
+            .properties
+            .rows()
+            .iter()
+            .map(|row| row_place(class, decl, &placed, row, &decl_of))
+            .collect()
+    });
+    Placed {
+        slots: placed.into_boxed_slice(),
+        rows,
+    }
+}
+
+/// `ce->properties_info` of one class, read off its one row as php
+/// reads it off one `zend_class_entry`: the linked record's rows, what
+/// each places its name at, and the class's own declaration, which
+/// names every row the class declares itself, so a find of one of those
+/// reads no second class.
+#[derive(Clone, Copy)]
+pub(super) struct PropertiesInfo<'r> {
+    pub(super) class: ClassId,
+    pub(super) rows: &'r php_link::Rows<Row<ClassId>, php_link::Exact>,
+    pub(super) places: &'r [RowPlace],
+    pub(super) decl: &'r ClassDecl,
+}
+
+/// What `row` of `class`'s `properties_info` places its name at among
+/// `placed`, the class's slots: the slot of its property, and
+/// `ZEND_ACC_CHANGED`, which `do_inherit_property` sets on a property
+/// redeclared over a parent's private one and keeps down the chain. A
+/// private instance property of a class above keeps its slot on the
+/// objects of every class below it, so a slot of the name another class
+/// declared private is that parent's property.
+fn row_place<'d>(
+    class: ClassId,
+    decl: &ClassDecl,
+    placed: &[PropertyInfo],
+    row: &Row<ClassId>,
+    decl_of: &impl Fn(PropertyInfo) -> Option<&'d PropertyDecl>,
+) -> RowPlace {
+    let info = PropertyInfo {
+        declaring: row.holder_in(class),
+        at: row.at,
+    };
+    let declared = |info: PropertyInfo| {
+        if info.declaring == class {
+            decl.properties.get(usize::try_from(info.at).ok()?)
+        } else {
+            decl_of(info)
+        }
+    };
+    let slot = placed
+        .iter()
+        .position(|held| *held == info)
+        .and_then(|slot| u32::try_from(slot).ok());
+    let changed = declared(info).is_some_and(|property| {
+        placed.iter().any(|held| {
+            held.declaring != info.declaring
+                && declared(*held).is_some_and(|other| {
+                    other.visibility == Visibility::Private && other.name.0 == property.name.0
+                })
+        })
+    });
+    RowPlace { slot, changed }
 }
 
 impl Request {

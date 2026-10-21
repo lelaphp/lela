@@ -1157,7 +1157,7 @@ mod tests {
                     let name = req.property_decl(*info).map_or(&[][..], |p| &p.name.0);
                     (info.declaring, String::from_utf8_lossy(name).into_owned())
                 };
-                row.bound.placed.iter().map(shown).collect()
+                row.bound.placed.slots().iter().map(shown).collect()
             })
         };
         let parent = names.last().map(|(class, _)| *class);

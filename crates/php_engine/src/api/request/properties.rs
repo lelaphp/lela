@@ -23,7 +23,7 @@ use crate::api::values::{
 use frames::Link;
 
 use super::Frames;
-use super::{DeclaredSlot, Hooks, PropertyInfo, Request, frames};
+use super::{DeclaredSlot, Hooks, PropertyInfo, Request, RowPlace, frames};
 
 /// `IN_GET`, `IN_SET`, `IN_UNSET` and `IN_ISSET`
 /// (`Z/Zend/zend_object_handlers.c:43`, over
@@ -64,14 +64,33 @@ enum DynamicWrite {
 /// What [`Request::find_property_info`] found for a name in a class's
 /// `ce->properties_info`.
 #[derive(Clone, Copy)]
-enum InfoFound {
+enum InfoFound<'a> {
     /// The row of the name: the class's own declaration, or the one it
     /// inherited, a parent's private one included.
-    Row(PropertyInfo),
+    Row(Found<'a>),
     /// No class of the chain declares the name.
     Absent,
     /// The class has no linked record, so its declarations answer.
     Unrecorded,
+}
+
+/// The row of `ce->properties_info` a name places by, as
+/// `zend_get_property_offset` reads the `zend_property_info` its find
+/// answered: the property, `property_info->ce` and its place among that
+/// class's declarations; its declaration, whose flags the placement
+/// reads; and what the row places the name at, `property_info->offset`
+/// and `ZEND_ACC_CHANGED`.
+#[derive(Clone, Copy)]
+struct Found<'a> {
+    info: PropertyInfo,
+    property: &'a PropertyDecl,
+    place: RowPlace,
+}
+
+impl Found<'_> {
+    fn slot(self) -> Option<usize> {
+        self.place.slot.and_then(|slot| usize::try_from(slot).ok())
+    }
 }
 
 /// What a write to a typed declared slot reads off its
@@ -382,7 +401,7 @@ impl Request {
         }
         match self.find_property_info(class, name) {
             InfoFound::Absent => true,
-            InfoFound::Row(_) => false,
+            InfoFound::Row(..) => false,
             InfoFound::Unrecorded => {
                 self.placed_named(class, name).is_none()
                     && self.chain_declaration(class, name).is_none()
@@ -417,10 +436,8 @@ impl Request {
     /// led by no NUL byte: [`Request::places_dynamic`] over the class's
     /// row in the request ([`Made::dynamic_names`]), which a property
     /// opcode's inline path reads. A class that declares a property
-    /// leaves a computed name to the kernel with no find spent on it
-    /// here, where a find costs more than the scan the kernel makes of a
-    /// small class's placed rows (#3045). False before an object of the
-    /// class was made, which an object of it standing never is.
+    /// leaves a computed name to the kernel. False before an object of
+    /// the class was made, which an object of it standing never is.
     ///
     /// [`Made::dynamic_names`]: super::class_data::Made::dynamic_names
     pub(crate) fn places_dynamic_on_std(&self, class: ClassId, name: &[u8]) -> bool {
@@ -550,16 +567,48 @@ impl Request {
     }
 
     /// The placed row `ce->properties_info` holds for `name`, whatever
-    /// the scope: the last of the name, a class's own declaration being
-    /// appended after a parent's private one it hides.
+    /// the scope: the slot its row places the name at,
+    /// `property_info->offset`, read off the one find. A class with no
+    /// record answers by its placed rows, the last of the name, a
+    /// class's own declaration being appended after a parent's private
+    /// one it hides.
     pub(super) fn placed_named(
         &self,
         class: ClassId,
         name: &[u8],
     ) -> Option<(usize, ClassId, &PropertyDecl)> {
-        self.placed(class)
+        let found = self.placing(class, name)?;
+        Some((found.slot()?, found.info.declaring, found.property))
+    }
+
+    /// The row `ce->properties_info` holds for `name` as
+    /// `zend_get_property_offset` reads it ([`Found`]); none where no
+    /// class of the chain declares it.
+    fn placing(&self, class: ClassId, name: &[u8]) -> Option<Found<'_>> {
+        match self.find_property_info(class, name) {
+            InfoFound::Row(found) => Some(found),
+            InfoFound::Absent => None,
+            InfoFound::Unrecorded => self.placing_by_slots(class, name),
+        }
+    }
+
+    /// [`Request::placing`] for a class with no record: its placed rows,
+    /// the last of the name.
+    fn placing_by_slots(&self, class: ClassId, name: &[u8]) -> Option<Found<'_>> {
+        let (slot, _, property) = self
+            .placed(class)
             .rev()
-            .find(|(_, _, p)| &*p.name.0 == name)
+            .find(|(_, _, p)| &*p.name.0 == name)?;
+        Some(Found {
+            info: *self.placed_properties(class).get(slot)?,
+            property,
+            place: RowPlace {
+                slot: u32::try_from(slot).ok(),
+                // Read the scope, as nothing says a parent's private
+                // property of the name is absent.
+                changed: true,
+            },
+        })
     }
 
     /// The dynamic table's entry for `name`, a view, found by the name's
@@ -665,6 +714,9 @@ impl Request {
     /// int(1)
     /// ```
     pub(super) fn reaches(&self, placed: &DeclaredSlot) -> bool {
+        if placed.visibility == Visibility::Public {
+            return true;
+        }
         let scope = self.property_scope();
         match placed.visibility {
             Visibility::Public => true,
@@ -765,7 +817,7 @@ impl Request {
     /// chain's declarations walked only for a class with no record.
     fn chain_declaration(&self, class: ClassId, name: &[u8]) -> Option<(ClassId, &PropertyDecl)> {
         match self.find_property_info(class, name) {
-            InfoFound::Row(info) => return Some((info.declaring, self.property_decl(info)?)),
+            InfoFound::Row(found) => return Some((found.info.declaring, found.property)),
             InfoFound::Absent => return None,
             InfoFound::Unrecorded => {}
         }
@@ -845,20 +897,36 @@ impl Request {
     }
 
     fn placed_row(&self, class: ClassId, name: &[u8]) -> Option<(usize, ClassId, &PropertyDecl)> {
-        let found = self.placed_named(class, name)?;
-        let (_, declaring, p) = found;
+        self.placed_from(class, name, self.placing(class, name)?)
+    }
+
+    /// [`Request::placed_row`] from the row the find answered.
+    fn placed_from<'a>(
+        &'a self,
+        class: ClassId,
+        name: &[u8],
+        placing: Found<'a>,
+    ) -> Option<(usize, ClassId, &'a PropertyDecl)> {
+        let (declaring, p) = (placing.info.declaring, placing.property);
+        let found = placing.slot().map(|slot| (slot, declaring, p));
+        // `flags & (ZEND_ACC_CHANGED|ZEND_ACC_PRIVATE|ZEND_ACC_PROTECTED)`:
+        // only such a row reads the scope.
+        if p.visibility == Visibility::Public && !placing.place.changed {
+            return found;
+        }
         if self.property_scope() != Some(declaring) {
-            if let Some(own) = self.parent_private(class, name) {
-                return Some(
-                    self.placed(class)
-                        .find(|row| row.1 == own && &*row.2.name.0 == name)
-                        .unwrap_or(found),
-                );
+            if placing.place.changed
+                && let Some(own) = self.parent_private(class, name)
+            {
+                return self
+                    .placed(class)
+                    .find(|row| row.1 == own && &*row.2.name.0 == name)
+                    .or(found);
             } else if p.visibility == Visibility::Private && declaring != class {
                 return None;
             }
         }
-        Some(found)
+        found
     }
 
     /// `zend_asymmetric_property_has_set_access`
@@ -1099,7 +1167,7 @@ impl Request {
     /// through again ([`Request::property_decl`]).
     pub(crate) fn property_info(&self, class: ClassId, name: &[u8]) -> Option<PropertyInfo> {
         match self.find_property_info(class, name) {
-            InfoFound::Row(info) => Some(info),
+            InfoFound::Row(found) => Some(found.info),
             InfoFound::Absent | InfoFound::Unrecorded => None,
         }
     }
@@ -1110,22 +1178,64 @@ impl Request {
     /// which class of the chain declares a name, instance or `static`,
     /// private or not, or that none does and the name is a dynamic
     /// property's, with no class's declarations walked.
-    fn find_property_info(&self, class: ClassId, name: &[u8]) -> InfoFound {
-        let Some(record) = self.linked_class(class) else {
-            return InfoFound::Unrecorded;
-        };
-        if record.properties.rows().is_empty() {
+    fn find_property_info(&self, class: ClassId, name: &[u8]) -> InfoFound<'_> {
+        self.find_property_row(class, name, || php_heap::Str::hash_of(name))
+    }
+
+    fn find_property_row(
+        &self,
+        class: ClassId,
+        name: &[u8],
+        hash: impl FnOnce() -> u64,
+    ) -> InfoFound<'_> {
+        match self.properties_info(class) {
+            Some(table) => self.find_in(table, name, hash),
+            None => InfoFound::Unrecorded,
+        }
+    }
+
+    /// The one find over the class's one row ([`PropertiesInfo`]), the
+    /// name hashed only where the table holds a row, by `hash`, which a
+    /// string hands over cached (`ZSTR_H`) as `zend_hash_find` takes it;
+    /// a row the class declares itself is named by its own declaration,
+    /// one another class declared by that class's.
+    ///
+    /// [`PropertiesInfo`]: super::objects::PropertiesInfo
+    fn find_in<'a>(
+        &'a self,
+        table: super::objects::PropertiesInfo<'a>,
+        name: &[u8],
+        hash: impl FnOnce() -> u64,
+    ) -> InfoFound<'a> {
+        if table.rows.rows().is_empty() {
             return InfoFound::Absent;
         }
-        let row = |row: &Row<ClassId>| PropertyInfo {
-            declaring: row.holder_in(class),
-            at: row.at,
+        let declared = |row: &Row<ClassId>| match row.holder {
+            None => table.decl.properties.get(usize::try_from(row.at).ok()?),
+            Some(holder) => self.property_decl(PropertyInfo {
+                declaring: holder,
+                at: row.at,
+            }),
         };
-        let found = record.properties.find(name, |at| {
-            self.property_decl(row(at))
-                .map_or(&[][..], |property| &property.name.0)
+        let found = table.rows.find_hashed(hash(), name, |row| {
+            declared(row).map_or(&[][..], |property| &property.name.0)
         });
-        found.map_or(InfoFound::Absent, |found| InfoFound::Row(row(found)))
+        let Some((at, row)) = found else {
+            return InfoFound::Absent;
+        };
+        // A record whose rows the placement does not cover is answered
+        // by the declarations, as one with no record is.
+        match (table.places.get(at).copied(), declared(row)) {
+            (Some(place), Some(property)) => InfoFound::Row(Found {
+                info: PropertyInfo {
+                    declaring: row.holder_in(table.class),
+                    at: row.at,
+                },
+                property,
+                place,
+            }),
+            _ => InfoFound::Unrecorded,
+        }
     }
 
     /// `ZEND_REF_ADD_TYPE_SOURCE` (`Z/Zend/zend_types.h:1082`): the
