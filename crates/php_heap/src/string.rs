@@ -539,6 +539,16 @@ impl Str {
         self.header().h.get()
     }
 
+    /// `zend_inline_hash_func` over bytes no string holds: the hash
+    /// [`Str::hash`] caches for a string of these bytes, so a table
+    /// filed by it finds a row by a string's cached hash or by the bytes
+    /// alike, as `zend_hash_find` and `zend_hash_str_find` find one
+    /// bucket.
+    #[must_use]
+    pub fn hash_of(bytes: &[u8]) -> u64 {
+        hash_func(bytes)
+    }
+
     /// The hash written to the cache where it is unset, and none returned:
     /// what php's `zend_add_interned_string` asks of `zend_string_hash_val`
     /// before it publishes a string, so that a string a second thread can

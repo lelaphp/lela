@@ -333,6 +333,7 @@ Str::addref
 Str::bytes
 Str::forget_hash
 Str::hash
+Str::hash_of
 Str::is_empty
 Str::is_interned
 Str::is_persistent
