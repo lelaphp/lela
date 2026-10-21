@@ -552,7 +552,7 @@ The crates are `seams.toml`'s `[[crate]]` rows, counted below by the directory e
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=b4814f6b55fbe83728005b76060f50349f04aebc4c6e76b809983bb3056e9992 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
+<!-- /computed in=94d30044d3754938b305bef74133298f6792389a034a809b6e05df67deb531f1 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
 
 | Crate | Role | Interface (what callers learn) | Origin |
 |---|---|---|---|
@@ -604,7 +604,7 @@ The permitted edges are `seams.toml`'s `[[edge]]` rows, rendered here: a crate d
 | php_engine::{executor,kernels} | php_engine::{serve,headers,gpc,output} | denied |  |
 | sapi/* | php_sapi, php_proto, php_bundle, php_ext |  | ADR-0008 |
 
-<!-- /computed in=221653ad96920f6264aa23fa695ad85f33107e188e005f9a1398507cbb9813bc out=5f28278f2b9b7afde8e31c26cde0c1e4273513e0448f142cb62c5a2fb9516f2b -->
+<!-- /computed in=bf6f5770ce05d39f3655e0814682adc34b55daa85e34f2414c82385c9c7ded39 out=5f28278f2b9b7afde8e31c26cde0c1e4273513e0448f142cb62c5a2fb9516f2b -->
 
 What the rows do not say. `php_heap` depends on nothing in the workspace. `php_unit` depends on `php_heap` for names interned and literals as heap values. `php_engine` depends on `php_macros` because its attributes declare Core's natives; `php_macros` depends on no workspace crate, only on `syn`, `quote` and `proc-macro2`: a macro emits paths and never links what they name (ADR-0007). `php_ext` re-exports `api` (with `api::__private`), `tier::Nop` and the attributes only. An `ext/*` crate depends on `php_ext` and on the `ext/*` crates it declares, never on `php_engine`, `php_compile`, `php_syntax` or `php_bundle`. `php_bundle` reaches `php_jit` under `jit` on the targets `php_jit`'s `[[crate]]` row names, and names `php_jit::Jit` and nothing else; nothing depends on `php_jit` but the bundle, and `php_jit` depends on nothing under `ext/`. `php_sapi` never sees `api`; `php_proto` sees nothing. `xtask` links no workspace crate: it reaches the engine through the binaries it builds and starts, `php-linked` and the hosts' own (harness revision 84). Workspace members are the directories §4.1's count names; an extension's package is `php_ext_<name>` at path `ext/<name>`, a host's `php_sapi_<name>` at `sapi/<name>` (ADR-0008).
 
@@ -697,7 +697,7 @@ The set is declared once in `seams.toml`, as its `[[seam]]` rows, and `xtask sta
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 416 |  |
 
-<!-- /computed in=b6240db766c60324c2fb088a08b9d3415e46d6696c830d79258a2f2f4e001e72 out=8ec696ee4c9ab4e8db2c3ad49507b13f4892b411adc32329a9d27bf6ccda58f3 -->
+<!-- /computed in=19cf50973e5aa9958e20b2f044d1db07807d72752be3850ca9e66d6a69695406 out=8ec696ee4c9ab4e8db2c3ad49507b13f4892b411adc32329a9d27bf6ccda58f3 -->
 
 What a lock holds that its row does not say. `heap.lock` carries the VM stack's entry slot and its peers, `VmStack::entry`, `push_entry`, `current` and `MapTable::base`. `tier.lock` is the widening of `php_engine` toward the tier, in two sections: the face, a few dozen items reviewed one by one, and the kernels named by `php_jit`'s `kernels!` list, about three hundred, generated from the list and diffed as one section. `process.lock` is `php_process`'s surface, whose one consumer is `php_engine`. `link.lock` is `php_link`'s surface, the linker and the linked class record that the compiler and the engine both call (ADR-0012). Dax's `effects.lock` is retired, its content being `ops.lock`'s effects column. A lock is one of three kinds, and `xtask api-check` regenerates each from what it is a lock of: the public items of the crate the lock lives with (`heap.lock`, `process.lock`, `unit.lock`, `link.lock`, `api.lock`, and the harness's own `xtask.lock`), or of one module of its producer (`layer.lock`, where a crate outside the seam's consumers that `use`s the module fails); what the consumers import from the producer (`sapi.lock`, `tier.lock`, which is why both are headers carrying nothing until a consumer exists); or the rows of the file the seam is generated from (`ops.lock`, rendered from `ops.toml`'s `[[op]]` rows). All three fail on any difference; adding an item means committing the new lock line with the code. This is how "smallest possible codebase" is measured at the interface, where callers pay, not only in lines.
 
