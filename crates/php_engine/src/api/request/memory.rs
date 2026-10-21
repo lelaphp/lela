@@ -959,12 +959,32 @@ impl Request {
     /// 512
     /// 416
     /// ```
+    ///
+    /// Two programs of one length, one of which reads an element, apart
+    /// by the stack under opcache, where the program's own op array is
+    /// opcache's:
+    ///
+    /// ```php
+    /// $dir = sys_get_temp_dir();
+    /// $usage = function ($code) use ($dir) {
+    ///     file_put_contents("$dir/p.php", "<?php $code echo memory_get_usage();");
+    ///     return (int) shell_exec(escapeshellarg(PHP_BINARY) . ' -n -d opcache.enable_cli=1 -d opcache.jit=off -d opcache.file_update_protection=0 ' . escapeshellarg("$dir/p.php"));
+    /// };
+    /// echo $usage('$x = $argv[0];') - $usage('$x = $argv;   '), "\n";
+    /// ```
+    /// ```expect process
+    /// 512
+    /// ```
     pub(crate) fn note_pushed(&mut self, pushed: Pushed) {
         let stacks = &mut self.compiler_stacks;
         stacks
             .loop_vars
             .grow(&mut self.heap, pushed.loop_vars, LOOP_VAR);
-        (stacks.delayed_oplines).grow(&mut self.heap, pushed.delayed_fetches, ZEND_OP);
+        (stacks.delayed_oplines).grow(
+            &mut self.heap,
+            pushed.delayed_fetches,
+            super::declared_bytes::OPLINE,
+        );
     }
 
     /// `shutdown_compiler`'s `zend_stack_destroy` of each stack.
@@ -1103,8 +1123,6 @@ fn seconds(d: std::time::Duration) -> f64 {
 
 /// `sizeof(zend_loop_var)`.
 const LOOP_VAR: usize = 12;
-/// `sizeof(zend_op)`.
-const ZEND_OP: usize = 32;
 
 /// The most entries a compile pushed onto each of php's compiler stacks
 /// that a request keeps: `CG(loop_var_stack)`'s

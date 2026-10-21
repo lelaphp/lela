@@ -13,19 +13,32 @@
 //! `FETCH_DIM_R ~0, 1`. So the most a compile held is read off its op
 //! arrays as the longest such stretch. A chain whose dimension is itself a
 //! chain (`$a[0][$b[0]]`) held the outer's fetches beneath the inner's,
-//! which the stretches count apart; php's count is the larger only past
-//! sixteen held at once, where the stack's size moves.
+//! which the stretches count apart, and a `?->` in a chain parts it with
+//! its `JMP_NULL` where php's stack keeps the fetches before it; php's
+//! count is the larger in those only past sixteen held at once, where the
+//! stack's size moves.
 
 use php_unit::{OpArray, Opcode, OperandKind, Opline};
 
-/// `ZEND_FETCH_GLOBAL` (`Z/Zend/zend_compile.h:1082`) under
-/// `ZEND_FETCH_TYPE_MASK`, the fetch type of a variable read by name
-/// from `EG(symbol_table)`.
-const FETCH_GLOBAL: u32 = 1 << 1;
+use crate::emit::FETCH_GLOBAL;
+
+/// `ZEND_FETCH_TYPE_MASK` (`Z/Zend/zend_compile.h:1086`), the bits of a
+/// fetch by name's `extended_value` that say which table it reads.
 const FETCH_TYPE_MASK: u32 = 0xe;
 
 /// The most fetches `zend_delayed_emit_op` held at once while `op_arrays`
-/// compiled.
+/// compiled: one for an assignment to a variable named by a variable,
+/// whose `FETCH_W` the assignment writes through, which lays the stack's
+/// sixteen, 512 bytes, where the plain one keeps a name `$$n` makes none
+/// of:
+///
+/// ```php
+/// $m = memory_get_usage(); eval('$n = "zz"; $o = 1;'); $plain = memory_get_usage() - $m;
+/// $m = memory_get_usage(); eval('$n = "zz"; $$n = 1;'); echo memory_get_usage() - $m - $plain, "\n";
+/// ```
+/// ```expect regime=jit-off
+/// 480
+/// ```
 pub(crate) fn most_held<'a>(op_arrays: impl IntoIterator<Item = &'a OpArray>) -> u32 {
     op_arrays.into_iter().map(most_in).max().unwrap_or(0)
 }
@@ -41,10 +54,17 @@ fn most_in(code: &OpArray) -> u32 {
         let held = match kind(code, op) {
             Held::Always => true,
             // A fetch by name or of a `static` property is held back only
-            // as the base of a chain, which the fetch after it reads.
-            Held::AsBase => {
-                next.is_some_and(|next| kind(code, next) != Held::Never && reads(next, op))
-            }
+            // as the base of a chain, which the fetch after it reads, or as
+            // what an assignment writes, `$$n = 1` (`zend_compile_assign`'s
+            // `zend_delayed_compile_var`).
+            Held::AsBase => next.is_some_and(|next| {
+                reads(next, op)
+                    && (kind(code, next) != Held::Never
+                        || matches!(
+                            next.opcode,
+                            Opcode::Assign | Opcode::AssignOp | Opcode::AssignRef
+                        ))
+            }),
             Held::Never => false,
         };
         run = match (held, before) {
