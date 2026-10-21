@@ -39,6 +39,7 @@ use php_unit::decl::{ClassDecl, ConstExpr, FunctionDecl, PropertyDecl, TraitAdap
 use php_unit::{OpArray, Unit};
 
 use super::Request;
+use super::unit_strings::OpArrayStrings;
 use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, Emalloc, PhpArray, Value};
 
@@ -92,13 +93,16 @@ pub(super) struct Declared {
     dynamic: Vec<Dynamic>,
 }
 
-/// One dynamic definition's blocks and what holds them: the op array
-/// that declares it, by its `dynamic_func_defs`, each closure over it
-/// and the function table once it is bound. php gives the op array back
-/// at the last of them (`destroy_op_array`'s count).
+/// One dynamic definition's blocks and strings and what holds them: the
+/// op array that declares it, by its `dynamic_func_defs`, each closure
+/// over it and the function table once it is bound. php gives the op
+/// array back at the last of them (`destroy_op_array`'s count).
 #[derive(Default)]
 struct Dynamic {
     blocks: Blocks,
+    /// The strings it owns, its name and its constants among them
+    /// ([`OpArrayStrings`]).
+    strings: OpArrayStrings,
     /// The op array whose `dynamic_func_defs` holds it.
     declarer: Declarer,
     /// The closures over it that stand.
@@ -120,6 +124,14 @@ pub(super) enum Declarer {
     /// to the unit's end.
     #[default]
     Table,
+}
+
+/// What `destroy_op_array` gives back of what a unit declared that is
+/// over: its blocks and the strings an op array of it owned.
+#[derive(Default)]
+pub(super) struct Gone {
+    pub(super) blocks: Blocks,
+    pub(super) strings: OpArrayStrings,
 }
 
 /// What a unit declares, laid down: a function's and its methods' and
@@ -456,13 +468,34 @@ impl Declared {
     pub(super) fn hold(&mut self, laid: Laid) {
         self.tables.take(laid.tables);
         self.classes = laid.classes.into_iter().map(Some).collect();
-        self.dynamic = (laid.dynamic.into_iter())
-            .map(|(blocks, declarer)| Dynamic {
-                blocks,
-                declarer,
-                ..Dynamic::default()
-            })
-            .collect();
+        for (at, (blocks, declarer)) in laid.dynamic.into_iter().enumerate() {
+            if let Some(dynamic) = self.definition(at) {
+                dynamic.blocks.take(blocks);
+                dynamic.declarer = declarer;
+            }
+        }
+    }
+
+    /// The dynamic definition at `at`, laid down empty where it is not
+    /// yet.
+    fn definition(&mut self, at: usize) -> Option<&mut Dynamic> {
+        if self.dynamic.len() <= at {
+            self.dynamic.resize_with(at + 1, Dynamic::default);
+        }
+        self.dynamic.get_mut(at)
+    }
+
+    /// The strings of each dynamic definition that stands.
+    pub(super) fn strings(&self) -> impl Iterator<Item = &OpArrayStrings> {
+        (self.dynamic.iter())
+            .filter(|dynamic| !dynamic.gone)
+            .map(|dynamic| &dynamic.strings)
+    }
+
+    /// The strings the dynamic definition at `at` owns, which go with its
+    /// op array.
+    pub(super) fn definition_strings(&mut self, at: usize) -> Option<&mut OpArrayStrings> {
+        self.definition(at).map(|dynamic| &mut dynamic.strings)
     }
 
     /// The place of the class at `at` of the unit's classes' blocks.
@@ -480,7 +513,7 @@ impl Declared {
     /// One closure fewer over the dynamic definition at `at`: the blocks
     /// of each definition nothing holds any longer, `over` where the main
     /// op array has ended.
-    pub(super) fn uncount_closure(&mut self, at: usize, over: bool, dead: &mut Vec<Blocks>) {
+    pub(super) fn uncount_closure(&mut self, at: usize, over: bool, dead: &mut Vec<Gone>) {
         if let Some(dynamic) = self.dynamic.get_mut(at) {
             dynamic.closures = dynamic.closures.saturating_sub(1);
         }
@@ -498,7 +531,7 @@ impl Declared {
     /// The main op array ended: the blocks of each definition nothing
     /// holds any longer, as `destroy_op_array` gives back what its
     /// `dynamic_func_defs` held the last count of.
-    pub(super) fn main_over(&mut self, dead: &mut Vec<Blocks>) {
+    pub(super) fn main_over(&mut self, dead: &mut Vec<Gone>) {
         self.settle(true, dead);
     }
 
@@ -523,7 +556,7 @@ impl Declared {
     /// 976
     /// -976
     /// ```
-    fn settle(&mut self, over: bool, dead: &mut Vec<Blocks>) {
+    fn settle(&mut self, over: bool, dead: &mut Vec<Gone>) {
         if self.dynamic.is_empty() {
             return;
         }
@@ -538,7 +571,10 @@ impl Declared {
                 };
                 if !declarer_stands && dynamic.closures == 0 && !dynamic.bound {
                     dynamic.gone = true;
-                    dead.push(std::mem::take(&mut dynamic.blocks));
+                    dead.push(Gone {
+                        blocks: std::mem::take(&mut dynamic.blocks),
+                        strings: std::mem::take(&mut dynamic.strings),
+                    });
                     settled = false;
                 }
             }
@@ -550,20 +586,24 @@ impl Declared {
 
     /// Every block, the unit gone; nothing for a unit that declared
     /// nothing, the most of them, an `eval` in a loop's.
-    pub(super) fn all(self, dead: &mut Vec<Blocks>) {
-        if !self.tables.is_empty() {
-            dead.push(self.tables);
+    pub(super) fn all(self, dead: &mut Vec<Gone>) {
+        let mut blocks = self.tables;
+        for class in self.classes.into_iter().flatten() {
+            blocks.take(class.into_blocks());
+        }
+        if !blocks.is_empty() {
+            dead.push(Gone {
+                blocks,
+                strings: OpArrayStrings::default(),
+            });
         }
         dead.extend(
-            self.classes
-                .into_iter()
-                .flatten()
-                .map(ClassBlocks::into_blocks),
-        );
-        dead.extend(
             (self.dynamic.into_iter())
-                .map(|dynamic| dynamic.blocks)
-                .filter(|blocks| !blocks.is_empty()),
+                .filter(|dynamic| !dynamic.gone)
+                .map(|dynamic| Gone {
+                    blocks: dynamic.blocks,
+                    strings: dynamic.strings,
+                }),
         );
     }
 }
