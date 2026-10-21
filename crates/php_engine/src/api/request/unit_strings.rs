@@ -611,11 +611,12 @@ impl Request {
             }))
             .filter(|name| name.0.iter().any(u8::is_ascii_uppercase));
         // `zend_new_interned_string` hands back the interned string for a
-        // lowered name opcache holds, `count` or `__tostring`, and the
-        // one made goes (`accel_new_interned_string_for_php`).
+        // lowered name opcache holds, `count` or `__tostring` or one a
+        // cached file's constants hold, and the one made goes
+        // (`accel_new_interned_string_for_php`).
         for name in lowered {
             let lower = name.0.to_ascii_lowercase();
-            if self.shared.permanent(&lower).is_none() {
+            if self.shared.existing_interned(&lower).is_none() {
                 self.hold_name(at, &lower)?;
             }
         }
