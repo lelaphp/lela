@@ -787,22 +787,26 @@ fn a_promise_is_the_words_the_variable_lists_and_an_unknown_word_is_refused() {
         "the word and the variable are named: {err}"
     );
     assert!(
-        err.ends_with("the words it takes are tree, oracle, mysql"),
+        err.ends_with("the words it takes are tree, oracle, mysql, locale, main-stack"),
         "the words the variable takes are named: {err}"
     );
     let err = Promised::parse("tree mysq").unwrap_err().to_string();
     assert!(err.contains("\"mysq\""), "{err}");
 }
 
-/// The tests of `ext/mysqli` and `ext/pdo_mysql` cannot depend on xtask, so
-/// `MysqlServer::with` spells the two variables and the word itself: held
-/// here to the ones [`Promised::parse`] reads and `xtask test` sets
-/// (#3084, #3085).
+/// The tests of `ext/mysqli`, `ext/pdo_mysql`, `ext/standard` and
+/// `php_compile` cannot depend on xtask, so the skip they share spells
+/// the two variables and the words itself: held here to the ones
+/// [`Promised::parse`] reads and `xtask test` sets (#3084, #3085, #3180).
 #[test]
-fn the_mysql_server_s_tests_read_the_promise_by_its_own_name_and_word() {
-    let support = workspace().join("ext/mysqlnd/tests/support/mysql.rs");
-    let text = std::fs::read_to_string(&support).expect("the MySQL support file");
-    for spelt in [PROMISE_VARIABLE, Promise::Mysql.word(), SKIPPED_VARIABLE] {
+fn the_tests_beyond_xtask_skip_by_its_own_names_and_words() {
+    let support = workspace().join("crates/php_compile/tests/support/skip.rs");
+    let text = std::fs::read_to_string(&support).expect("the shared skip");
+    let words = [Promise::Mysql, Promise::Locale, Promise::MainStack].map(Promise::word);
+    for spelt in [PROMISE_VARIABLE, SKIPPED_VARIABLE]
+        .into_iter()
+        .chain(words)
+    {
         assert!(text.contains(&format!("\"{spelt}\"")), "{spelt}");
     }
 }

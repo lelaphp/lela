@@ -32,7 +32,7 @@ inputs:
     description: The command the job runs the harness by
     default: cargo xtask
   promise:
-    description: What of the pin, and of the MySQL server, this runner has, the words the promise variable takes (`tree`, `oracle`, `mysql`)
+    description: What of the pin, the MySQL server, the locales and the main thread's size this runner has, the words the promise variable takes (`tree`, `oracle`, `mysql`, `locale`, `main-stack`)
     required: true
 outputs:
   tree:

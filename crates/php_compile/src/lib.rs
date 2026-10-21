@@ -24,6 +24,11 @@
 mod emit;
 mod live;
 pub mod multibyte;
+/// A test's skip for a fact this machine lacks, shared with the tests
+/// that cannot depend on xtask (#3180).
+#[cfg(test)]
+#[path = "../tests/support/skip.rs"]
+mod skip;
 mod special;
 mod stack;
 
