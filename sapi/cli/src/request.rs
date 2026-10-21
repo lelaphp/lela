@@ -654,11 +654,8 @@ mod tests {
     #[test]
     fn a_failed_start_is_could_not_startup_and_status_one() {
         let engine = failing_start();
-        let described = describe(None, &[], false);
-        assert!(described.is_ok());
-        let Ok(description) = described else {
-            return;
-        };
+        let description =
+            describe(None, &[], false).expect("a command line of no file describes a request");
         let (served, mut sink) = engine.command_line(
             description,
             CommandLine::Direct(b"echo 'ran';".to_vec()),

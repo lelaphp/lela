@@ -16,6 +16,7 @@
 //! bundle, the commands on its stdin, and writes what it recorded to a
 //! file for the test that spawned it.
 
+use std::ffi::OsStr;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -73,9 +74,13 @@ fn requests(events: &Events) -> Vec<Vec<String>> {
 #[test]
 #[ignore = "the phpdbg the other tests spawn, run by them alone"]
 fn child() {
-    let (Some(to), Some(program)) = (std::env::var_os(EVENTS_TO), std::env::var_os(PROGRAM)) else {
-        return;
-    };
+    if let (Some(to), Some(program)) = (std::env::var_os(EVENTS_TO), std::env::var_os(PROGRAM)) {
+        recorded(&to, &program);
+    }
+}
+
+/// The child's run, over `program` and into the file `to`.
+fn recorded(to: &OsStr, program: &OsStr) {
     let rec = Recording::start();
     let argv = [
         b"phpdbg".to_vec(),
