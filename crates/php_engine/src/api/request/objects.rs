@@ -247,6 +247,7 @@ impl Request {
             rows: &record.properties,
             places: &placed.rows,
             decl,
+            hooks: record.hooks,
         })
     }
 
@@ -419,6 +420,8 @@ pub(super) struct PropertiesInfo<'r> {
     pub(super) rows: &'r php_link::Rows<Row<ClassId>, php_link::Exact>,
     pub(super) places: &'r [RowPlace],
     pub(super) decl: &'r ClassDecl,
+    /// Where the class's property hooks are, `ce->num_hooked_props`.
+    pub(super) hooks: php_link::ClassHooks,
 }
 
 /// What `row` of `class`'s `properties_info` places its name at among

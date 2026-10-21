@@ -468,22 +468,70 @@ impl Request {
         }
     }
 
-    /// Whether a name the program computed places as a dynamic property
-    /// on an object of `class` with no lookup at all: the class served by
-    /// the standard handlers, `zobj->handlers->read_property ==
-    /// zend_std_read_property`, its `ce->properties_info` empty, which
-    /// the first test of `zend_get_property_offset` reads
-    /// (`zend_hash_num_elements(&ce->properties_info) == 0`), and the name
-    /// led by no NUL byte: [`Request::places_dynamic`] over the class's
-    /// row in the request ([`Made::dynamic_names`]), which a property
-    /// opcode's inline path reads. A class that declares a property
-    /// leaves a computed name to the kernel. False before an object of
-    /// the class was made, which an object of it standing never is.
+    /// How the objects of `class` serve a property's name, read off the
+    /// class's row in the request ([`PropertyNames`]): what a property
+    /// opcode's inline path reads before it places a name the program
+    /// computed, with no lookup at all on a class served by the standard
+    /// handlers that declares no property, `ce->properties_info` empty,
+    /// the first test of `zend_get_property_offset`, where every name led
+    /// by no NUL byte is a dynamic property. None before an object of the
+    /// class was made, which an object of it standing never is.
     ///
-    /// [`Made::dynamic_names`]: super::class_data::Made::dynamic_names
-    pub(crate) fn places_dynamic_on_std(&self, class: ClassId, name: &[u8]) -> bool {
-        self.made_ref(class).is_some_and(|made| made.dynamic_names)
-            && !Self::bad_property_name(name)
+    /// [`PropertyNames`]: super::class_data::PropertyNames
+    #[inline]
+    pub(crate) fn property_names(
+        &self,
+        class: ClassId,
+    ) -> Option<super::class_data::PropertyNames> {
+        Some(self.made_ref(class)?.names)
+    }
+
+    /// Where a name the program computed is on an object of `class`, a
+    /// class the standard handlers serve that declares a property
+    /// ([`Request::property_names`]), as `zend_get_property_offset`
+    /// places it with no cache slot, which is what php's handlers pass
+    /// for a computed name: the placement the kernel makes
+    /// ([`Request::place_property`]) over the one find of
+    /// `ce->properties_info` by the name's cached hash, on a class with no
+    /// hooked property. A name no class of the chain declares is a
+    /// dynamic property, unless NUL leads it, and a declared slot the
+    /// scope reaches is the slot, the scope read only where the row's
+    /// flags ask for it. None for every other name, which the kernel
+    /// places and raises for.
+    pub(crate) fn declared_offset(
+        &self,
+        class: ClassId,
+        name: php_heap::Str,
+    ) -> Option<crate::exec::PropertyOffset> {
+        let table = self.properties_info(class)?;
+        if table.hooks != php_link::ClassHooks::Absent {
+            return None;
+        }
+        let found = self.find_in(table, name.bytes(), || name.hash());
+        match found {
+            InfoFound::Absent => (!Self::bad_property_name(name.bytes()))
+                .then_some(crate::exec::PropertyOffset::Dynamic),
+            // `flags & (ZEND_ACC_CHANGED|ZEND_ACC_PRIVATE|ZEND_ACC_PROTECTED)`
+            // clear: the row's offset, with no scope and no visibility to
+            // measure, which is what the placement answers for it.
+            InfoFound::Row(row)
+                if row.property.visibility == Visibility::Public && !row.place.changed =>
+            {
+                Some(crate::exec::PropertyOffset::Declared {
+                    slot: row.place.slot?,
+                    typed: row.property.ty.is_some(),
+                })
+            }
+            InfoFound::Row(_) | InfoFound::Unrecorded => {
+                match self.place_found(class, name.bytes(), found) {
+                    Placement::Reached(placed) => Some(crate::exec::PropertyOffset::Declared {
+                        slot: placed.slot,
+                        typed: placed.typed,
+                    }),
+                    Placement::Denied(_) | Placement::Unslotted | Placement::Undeclared => None,
+                }
+            }
+        }
     }
 
     /// `zend_update_property_ex(prop_info->ce, ...)`, what an engine or a
@@ -705,7 +753,12 @@ impl Request {
     /// read only where the row's flags ask for it, and the visibility
     /// measured once.
     pub(super) fn place_property(&self, class: ClassId, name: &[u8]) -> Placement {
-        let placing = match self.find_property_info(class, name) {
+        self.place_found(class, name, self.find_property_info(class, name))
+    }
+
+    /// [`Request::place_property`] from what the find answered.
+    fn place_found(&self, class: ClassId, name: &[u8], found: InfoFound<'_>) -> Placement {
+        let placing = match found {
             InfoFound::Row(found) => found,
             InfoFound::Absent => return Placement::Undeclared,
             InfoFound::Unrecorded => match self.placing_by_slots(class, name) {

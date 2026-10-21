@@ -59,6 +59,7 @@ pub use calls::Supplier;
 mod class_constants;
 pub(crate) use class_constants::ConstantFetch;
 mod class_data;
+pub(crate) use class_data::PropertyNames;
 mod classes;
 use classes::AccelServed;
 pub use classes::Symbols;
