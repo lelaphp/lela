@@ -15884,10 +15884,14 @@ impl<'a> Emit<'a> {
         Ok(self.string(&bytes)?)
     }
 
-    /// `ZEND_AST_CONST`: what [`Self::named_constant`] substitutes.
+    /// `ZEND_AST_CONST`: what [`Self::named_constant`] substitutes, and
+    /// no constant where it substitutes nothing, since
+    /// `zend_eval_const_expr` then leaves the node standing for the
+    /// `FETCH_CONSTANT` the compile emits (`Z/Zend/zend_compile.c:12292`).
     fn name_constant(&mut self, token: TokenId) -> Result<Zval, Unfolded> {
-        self.named_constant(token)?
-            .ok_or_else(|| self.unread("a constant").into())
+        self.named_constant(token)?.ok_or(Unfolded::NoConstant(
+            "a constant fetched as the program runs",
+        ))
     }
 
     /// A `"…"` or a heredoc with nothing interpolated is one string
