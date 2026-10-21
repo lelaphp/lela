@@ -141,6 +141,36 @@ pub trait Tier: 'static {
     fn extension() -> Option<Extension> {
         None
     }
+
+    /// Whether the engine `started` asks the tier at its safepoints at
+    /// all, asked once as the engine binds its loop, after every engine
+    /// state is built: where it answers `false` the engine binds
+    /// [`Nop`]'s loop, so a safepoint costs the loop nothing, as php's VM
+    /// keeps its own handlers wherever its compiled tier does not start
+    /// (`opcache.jit_buffer_size=0`). The engine then serves as one bound
+    /// to `Nop` does, so a tier that [`HOLDS`](Tier::HOLDS) answers
+    /// `true`.
+    #[must_use]
+    fn serves(started: &Started<'_>) -> bool {
+        let _ = started;
+        true
+    }
+}
+
+/// The started engine as its tier reads it at [`Tier::serves`]: the
+/// engine states its extensions and the tier built (ADR-0005).
+#[derive(Clone, Copy)]
+pub struct Started<'a> {
+    shared: &'a crate::engine::Shared,
+}
+
+impl<'a> Started<'a> {
+    /// The engine state of type `E`, as [`Request::engine`] reads it:
+    /// `None` for a type no extension built.
+    #[must_use]
+    pub fn engine<E: Send + Sync + 'static>(&self) -> Option<&'a E> {
+        (self.shared.state_slots).engine_state(&self.shared.engine_states)
+    }
 }
 
 /// The interpreter alone: one inlined constant, so the branch on `Flow`
@@ -435,9 +465,9 @@ fn activated<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fat
 /// One entry of the loop, as the engine binds it.
 pub(crate) type Loop = fn(&mut Request, FrameRef) -> Result<(), Fatal>;
 
-/// How an engine binds its tier's loop once its declared opcodes are
-/// fixed: [`Loops::bound`] for the tier.
-pub(crate) type BindLoops = fn(&ObservedOpcodes) -> Loops;
+/// How an engine binds its tier's loop once its engine states are built
+/// and its declared opcodes fixed: [`Loops::bound`] for the tier.
+pub(crate) type BindLoops = fn(&crate::engine::Shared) -> Loops;
 
 /// The loop's three entries, [`execute`], [`reenter`] and [`resume`],
 /// bound to one tier and to one choice of whether declared opcodes are
@@ -456,10 +486,27 @@ pub(crate) struct Loops {
 }
 
 impl Loops {
+    /// `T`'s loop for the engine `shared` started, or `Nop`'s where `T`
+    /// does not serve it ([`Tier::serves`]), told as its declared set
+    /// says ([`Loops::told`]).
+    pub(crate) fn bound<T: Tier>(shared: &crate::engine::Shared) -> Loops {
+        if T::serves(&Started { shared }) {
+            Loops::told::<T>(&shared.opcodes)
+        } else {
+            Loops::told::<Nop>(&shared.opcodes)
+        }
+    }
+
+    /// The loop of an engine not yet started, which serves nothing
+    /// until its start binds the tier's ([`Loops::bound`]).
+    pub(crate) fn unstarted() -> Loops {
+        Loops::of::<Nop, Untold>()
+    }
+
     /// `T`'s loop for an engine whose declared set is `opcodes`: the
     /// instantiation that tells the set's observers where an extension
     /// declared an opcode, and the one with no test where none did.
-    pub(crate) fn bound<T: Tier>(opcodes: &ObservedOpcodes) -> Loops {
+    fn told<T: Tier>(opcodes: &ObservedOpcodes) -> Loops {
         if opcodes.declares_any() {
             Loops::of::<T, Declared>()
         } else {
