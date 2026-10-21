@@ -576,7 +576,7 @@ mod tests {
         let thread = host_thread("php-host", 3 << 20, move || {
             rx.recv().ok();
         })
-        .expect("the system refused the thread");
+        .expect("the system starts the host thread");
         assert!(INSIDE.load(Ordering::Relaxed) & !FORKING >= 1);
         assert_eq!(fork().err().and_then(|e| e.raw_os_error()), Some(EBUSY));
         drop(tx);

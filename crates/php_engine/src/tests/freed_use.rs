@@ -315,7 +315,7 @@ fn a_write_into_a_freed_block_is_found_as_it_leaves_the_quarantine() {
         let stdout = served.stdout_text();
         let (before, after) = stdout
             .split_once("-byte block at 0x")
-            .unwrap_or_else(|| panic!("no block is named: {stdout}"));
+            .unwrap_or_else(|| panic!("the fatal names the block: {stdout}"));
         assert!(
             before.starts_with("went on\nFatal error: InternalError: a write into the "),
             "{evict}: {stdout}"
@@ -344,7 +344,7 @@ fn a_write_into_a_freed_block_still_held_at_the_end_is_raised_there() {
     let stdout = served.stdout_text();
     let (before, after) = stdout
         .split_once("-byte block at 0x")
-        .unwrap_or_else(|| panic!("no block is named: {stdout}"));
+        .unwrap_or_else(|| panic!("the fatal names the block: {stdout}"));
     assert!(
         before.starts_with("went on\nFatal error: InternalError: a write into the "),
         "{stdout}"

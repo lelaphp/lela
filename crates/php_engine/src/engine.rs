@@ -6750,9 +6750,7 @@ mod tests {
         }
         .path(script.as_os_str().as_encoded_bytes());
         let mut stale = std::fs::read(&kept_at).expect("the kept file is read");
-        *stale
-            .get_mut(8)
-            .expect("a byte past the header's first word") ^= 1;
+        stale[8] ^= 1;
         std::fs::write(&kept_at, &stale).expect("the kept file is written over");
         let third = kept.serve_capture(&program, crate::test::Capture::default());
         assert_eq!(first.stdout_text(), "kept");

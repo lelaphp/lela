@@ -1401,9 +1401,10 @@ fn a_switch_handler_reads_the_fiber_switched_into_and_out_of_as_the_current_one(
     let events = observed(&rec.events().between("built", "served"));
     // The fiber as the first switch, the one into it, names it.
     let fiber = match events.first() {
-        Some(Ext(_, FiberSwitch(_, to))) => {
-            to.split(' ').next().expect("the fiber's name").to_owned()
-        }
+        Some(Ext(_, FiberSwitch(_, to))) => to
+            .split_once(' ')
+            .map_or(to.as_str(), |(name, _)| name)
+            .to_owned(),
         _ => panic!("the first event is the switch into the fiber: {events:?}"),
     };
     let current = |to: &str| format!("{to}; current {fiber}");
@@ -1770,9 +1771,8 @@ fn a_closure_bound_to_another_scope_is_asked_of_again() {
         .into_iter()
         .filter_map(|event| match event {
             Ext(0, ObserverInit(name)) if name.contains("{closure") || name == "A::make" => Some(
-                name.split("{closure")
-                    .next()
-                    .expect("the name's head")
+                name.split_once("{closure")
+                    .map_or(name.as_str(), |(head, _)| head)
                     .to_owned()
                     + "*",
             ),

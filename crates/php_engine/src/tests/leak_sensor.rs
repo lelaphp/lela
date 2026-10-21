@@ -178,7 +178,7 @@ fn the_backtrace_mode_names_the_leaking_line() {
         })
         .expect("a thread of 8 MiB for the request")
         .join()
-        .expect("the request's thread did not run to its end");
+        .expect("the request's thread runs to its end");
     let source = include_str!("leak_sensor.rs");
     let line = source
         .lines()
@@ -246,7 +246,7 @@ fn a_request_ending_in_an_uncaught_throwable_reports_its_leak() {
         let stdout = served.stdout_text();
         let (rendered, sensed) = stdout
             .split_once(LEAKED)
-            .unwrap_or_else(|| panic!("{uncaught}: nothing is sensed: {stdout}"));
+            .unwrap_or_else(|| panic!("{uncaught}: the sensor's report: {stdout}"));
         assert!(
             rendered.contains("Fatal error: Uncaught "),
             "{uncaught}: {stdout}"

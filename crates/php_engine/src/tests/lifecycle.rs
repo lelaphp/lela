@@ -1150,7 +1150,9 @@ fn a_tiers_extension_is_served_as_the_bundles_are_and_is_no_module() {
     let (bundled, as_bundled) =
         lived(Engine::cli_builder().extensions(&[TestExt::<3>::observing_allocations()]));
     let (tiered, as_tier) = lived(Engine::cli_builder().tier::<Declaring>());
-    let loaded = plain.split('|').next().expect("the loaded extensions");
+    let (loaded, _) = plain
+        .split_once('|')
+        .expect("the loaded extensions, then the rest");
     assert_eq!(plain, format!("{loaded}|not loaded|no entry"));
     assert_eq!(bundled, format!("{loaded}test_ext_3,|loaded|0"));
     assert_eq!(tiered, format!("{loaded}|not loaded|0"));

@@ -25072,7 +25072,7 @@ mod tests {
         let guard = req.stack_mut().push_entry(outer);
         let inner = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let op = code.oplines.first().copied().expect("the first opline");
+        let op = code.oplines.first().copied().expect("opline 0");
 
         assert_eq!(
             served!(req, inner, at => r#return::<Probe, crate::operand::Const>(&mut req, inner, code, &op, at)),
@@ -25164,7 +25164,7 @@ mod tests {
         let unit = by_name(&mut strings);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let init = code.oplines.first().copied().expect("the first opline");
+        let init = code.oplines.first().copied().expect("opline 0");
         let send = code.oplines.get(1).copied().expect("opline 1");
         let call = code.oplines.get(2).copied().expect("opline 2");
 
@@ -25198,7 +25198,7 @@ mod tests {
         let unit = by_name(&mut strings);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let init = code.oplines.first().copied().expect("the first opline");
+        let init = code.oplines.first().copied().expect("opline 0");
         assert_eq!(req.cached(frame, CacheSlot(init.out)), Cached::Unprimed);
 
         assert_eq!(
@@ -25309,7 +25309,7 @@ mod tests {
         let code = crate::exec::body_of(unit, exec::Body::Function(0))
             .cloned()
             .expect("f's body");
-        let init = code.oplines.first().copied().expect("the first opline");
+        let init = code.oplines.first().copied().expect("opline 0");
         let strlen = req.function_named(Bare::resolved(b"strlen"));
 
         for call in 1..=2 {
@@ -25388,7 +25388,7 @@ mod tests {
         .published(None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let init = code.oplines.first().copied().expect("the first opline");
+        let init = code.oplines.first().copied().expect("opline 0");
         let strlen = req.function_named(Bare::resolved(b"strlen"));
 
         assert_eq!(
@@ -25440,7 +25440,7 @@ mod tests {
         .published(None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let init = code.oplines.first().copied().expect("the first opline");
+        let init = code.oplines.first().copied().expect("opline 0");
         for pass in 1..=2 {
             assert_eq!(
                 served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init, at)),
@@ -25498,9 +25498,10 @@ mod tests {
         let unit = catching(&mut strings, b"Error", b"error");
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let clause = code.oplines.first().copied().expect("the first opline");
-        let error = req.class_named(Bare::resolved(b"error"));
-        assert!(error.is_some(), "the engine declares Error");
+        let clause = code.oplines.first().copied().expect("opline 0");
+        let error = req
+            .class_named(Bare::resolved(b"error"))
+            .expect("the engine declares Error");
         assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
 
         for pass in 1..=2 {
@@ -25517,7 +25518,7 @@ mod tests {
             );
             assert_eq!(req.vm().lookups, 1, "one lookup over {pass} pass(es)");
             assert!(
-                matches!(req.cached(frame, CacheSlot(0)), Cached::Class(class) if Some(class) == error),
+                matches!(req.cached(frame, CacheSlot(0)), Cached::Class(class) if class == error),
                 "the clause's class is in the slot after pass {pass}"
             );
         }
@@ -25581,11 +25582,14 @@ mod tests {
         );
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let op = code.oplines.first().copied().expect("the first opline");
-        let closure = req.class_named(Bare::resolved(b"closure"));
-        assert!(closure.is_some(), "the engine declares Closure");
-        let callee = closure.and_then(|class| req.symbols().method_named(class, b"fromcallable"));
-        assert!(callee.is_some(), "Closure::fromCallable is a static method");
+        let op = code.oplines.first().copied().expect("opline 0");
+        let closure = req
+            .class_named(Bare::resolved(b"closure"))
+            .expect("the engine declares Closure");
+        let callee = req
+            .symbols()
+            .method_named(closure, b"fromcallable")
+            .expect("Closure::fromCallable is a static method");
         assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
 
         for pass in 1..=2 {
@@ -25600,7 +25604,7 @@ mod tests {
                 matches!(
                     req.cached(frame, CacheSlot(0)),
                     Cached::ClassAndCallee { class, scope: None, function, .. }
-                        if Some(class) == closure && Some(function) == callee
+                        if class == closure && function == callee
                 ),
                 "the class and the callee are in the slot after pass {pass}"
             );
@@ -25621,9 +25625,10 @@ mod tests {
         let unit = static_method_call(&mut strings, (b"Exception", b"exception"), None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let op = code.oplines.first().copied().expect("the first opline");
-        let exception = req.class_named(Bare::resolved(b"exception"));
-        assert!(exception.is_some(), "the engine declares Exception");
+        let op = code.oplines.first().copied().expect("opline 0");
+        let exception = req
+            .class_named(Bare::resolved(b"exception"))
+            .expect("the engine declares Exception");
 
         for pass in 1..=2 {
             req.vm_mut().stand(frame, 0);
@@ -25636,7 +25641,7 @@ mod tests {
             assert_eq!(req.vm().lookups, 1, "one lookup over {pass} pass(es)");
             assert!(
                 matches!(req.cached(frame, CacheSlot(0)), Cached::Class(class)
-                    if Some(class) == exception),
+                    if class == exception),
                 "the class alone is in the slot after pass {pass}"
             );
         }
@@ -25688,7 +25693,7 @@ mod tests {
         let unit = method_call(&mut strings);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let op = code.oplines.first().copied().expect("the first opline");
+        let op = code.oplines.first().copied().expect("opline 0");
         let exception = req.class_named(Bare::resolved(b"exception"));
         let error = req.class_named(Bare::resolved(b"error"));
         assert!(
@@ -25749,7 +25754,7 @@ mod tests {
         let unit = catching(&mut strings, b"NoPe", b"nope");
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let clause = code.oplines.first().copied().expect("the first opline");
+        let clause = code.oplines.first().copied().expect("opline 0");
         let thrown = crate::api::raising::throw_error(&mut req, "Error", "e");
         req.leave_pending(&thrown);
 
@@ -25838,7 +25843,7 @@ mod tests {
             req.prime(frame, CacheSlot(slot), Cached::Class(class));
         }
 
-        let new_op = code.oplines.first().copied().expect("the first opline");
+        let new_op = code.oplines.first().copied().expect("opline 0");
         assert_eq!(
             served!(req, frame, at => new::<Nop>(&mut req, frame, code, &new_op)),
             Ok(Stepped::Same(frame))
@@ -25912,7 +25917,7 @@ mod tests {
         let unit = jmp_frameless_over(&mut strings, b"foo\\substr");
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let jmp = code.oplines.first().copied().expect("the first opline");
+        let jmp = code.oplines.first().copied().expect("opline 0");
         assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
 
         for pass in 1..=2 {
@@ -25941,7 +25946,7 @@ mod tests {
         let unit = jmp_frameless_over(&mut strings, b"strlen");
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let jmp = code.oplines.first().copied().expect("the first opline");
+        let jmp = code.oplines.first().copied().expect("opline 0");
 
         for pass in 1..=2 {
             req.vm_mut().stand(frame, 0);
@@ -26025,7 +26030,7 @@ mod tests {
         .published(None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let call = code.oplines.first().copied().expect("the first opline");
+        let call = code.oplines.first().copied().expect("opline 0");
         assert_eq!(
             served!(req, frame, at => frameless_icall_0::<Nop>(&mut req, frame, code, &call, at)),
             Ok(Stepped::Same(frame))
@@ -26061,7 +26066,7 @@ mod tests {
         .published(None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let call = code.oplines.first().copied().expect("the first opline");
+        let call = code.oplines.first().copied().expect("opline 0");
         assert!(matches!(
             served!(req, frame, at => frameless_icall_0::<Nop>(&mut req, frame, code, &call, at)),
             Err(fatal) if matches!(fatal.reason(), php_heap::FatalReason::Error(message) if message.starts_with("InternalError: ZEND_FRAMELESS_ICALL_0 indexes frameless entry 1000000"))
@@ -26106,7 +26111,7 @@ mod tests {
         .published(None);
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let init = code.oplines.first().copied().expect("the first opline");
+        let init = code.oplines.first().copied().expect("opline 0");
 
         assert_eq!(
             served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init, at)),
@@ -26163,7 +26168,7 @@ mod tests {
         let unit = assigning();
         let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let mut op = code.oplines.first().copied().expect("the first opline");
+        let mut op = code.oplines.first().copied().expect("opline 0");
         op.out_type = OperandKind::Tmp;
         op.out = 0;
         let text = req
@@ -26255,23 +26260,18 @@ mod tests {
         let class = req
             .class_named(Bare::resolved(b"exception"))
             .expect("the engine declares Exception");
-        let made = crate::api::call::new_object_made(&mut req, class);
-        assert!(made.is_ok(), "Exception is instantiable");
-        if let Ok(object) = made {
-            let started = req.object_walk_start(object);
-            assert!(
-                matches!(started, Ok(Some(_))),
-                "Exception declares properties, so the walk is registered"
-            );
-            if let Ok(Some(idx)) = started {
-                assert!(
-                    matches!(req.object_walk(object, idx, false), Ok(None)),
-                    "the global scope sees none of Exception's properties"
-                );
-                req.heap_mut().iterator_del(idx);
-            }
-            req.release(object.as_value());
-        }
+        let object =
+            crate::api::call::new_object_made(&mut req, class).expect("Exception is instantiable");
+        let idx = req
+            .object_walk_start(object)
+            .expect("the walk starts")
+            .expect("Exception declares properties, so the walk is registered");
+        assert!(
+            matches!(req.object_walk(object, idx, false), Ok(None)),
+            "the global scope sees none of Exception's properties"
+        );
+        req.heap_mut().iterator_del(idx);
+        req.release(object.as_value());
     }
 
     /// A debug build stops at a write of a `TMP` over an owner the slot
