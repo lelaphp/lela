@@ -237,7 +237,7 @@ mod tests {
             later.load(full, None).is_none(),
             "another build keeps its own"
         );
-        let mut stale = std::fs::read(disk.path(full)).unwrap_or_default();
+        let mut stale = std::fs::read(disk.path(full)).expect("the kept file is read");
         stale[MAGIC.len()] = b'b';
         std::fs::write(disk.path(full), &stale).expect("the kept file is written over");
         assert!(
@@ -246,7 +246,7 @@ mod tests {
         );
         assert!(!disk.path(full).exists(), "and it is removed");
         disk.store(full, 7, 12, b"body");
-        let mut corrupt = std::fs::read(disk.path(full)).unwrap_or_default();
+        let mut corrupt = std::fs::read(disk.path(full)).expect("the kept file is read");
         corrupt.push(b'!');
         std::fs::write(disk.path(full), &corrupt).expect("the kept file is written over");
         assert!(

@@ -845,11 +845,7 @@ mod tests {
         assert_eq!(Zval::double(0.5).as_double(), Some(0.5));
         assert_eq!(Zval::bool(true).as_bool(), Some(true));
         let mut strings = crate::Strings::new();
-        let php = crate::Intern::intern(&mut strings, b"php");
-        assert!(php.is_ok(), "the engine's table would not intern");
-        let Ok(php) = php else {
-            return;
-        };
+        let php = crate::Intern::intern(&mut strings, b"php").expect("intern \"php\"");
         let interned = Zval::string(php);
         assert_eq!(
             interned.as_str().map(|s| s.bytes().to_vec()),
@@ -868,16 +864,13 @@ mod tests {
         let _alone = crate::serial::alone();
         let mut heap = crate::Heap::new();
         let mut stack = crate::VmStack::<()>::new();
-        let pushed = stack.push_frame(&mut heap, 2, 0, ());
-        assert!(pushed.is_ok(), "a frame of two slots fits the first page");
-        let Some(frame) = pushed.ok().and_then(|f| stack.frame_mut(f)) else {
-            return;
-        };
-        let at = frame.slot_ptr(crate::Slot(1));
-        assert!(at.is_some(), "a frame of two slots has a second");
-        let Some(at) = at else {
-            return;
-        };
+        let pushed = stack
+            .push_frame(&mut heap, 2, 0, ())
+            .expect("a frame of two slots fits the first page");
+        let frame = stack.frame_mut(pushed).expect("the frame pushed");
+        let at = frame
+            .slot_ptr(crate::Slot(1))
+            .expect("a frame of two slots has a second");
         let indirect = Zval::indirect(at);
         assert_eq!(indirect.kind(), ZvalType::Indirect);
         assert!(!indirect.is_refcounted());

@@ -6754,10 +6754,8 @@ mod tests {
             build: &kept.shared.units.build,
         }
         .path(script.as_os_str().as_encoded_bytes());
-        let mut stale = std::fs::read(&kept_at).unwrap_or_default();
-        if let Some(byte) = stale.get_mut(8) {
-            *byte ^= 1;
-        }
+        let mut stale = std::fs::read(&kept_at).expect("the kept file is read");
+        stale[8] ^= 1;
         std::fs::write(&kept_at, &stale).expect("the kept file is written over");
         let third = kept.serve_capture(&program, crate::test::Capture::default());
         assert_eq!(first.stdout_text(), "kept");
@@ -7624,16 +7622,14 @@ mod tests {
         );
         // What the cache holds after both: one unit, and the constant
         // string its `ECHO` names is the one allocation.
-        let (Some(Ok(one)), Some(Ok(again))) = (
+        let cached = || {
             engine
                 .shared
-                .cached(&name, Path::new(""), StackLimit::UNCHECKED),
-            engine
-                .shared
-                .cached(&name, Path::new(""), StackLimit::UNCHECKED),
-        ) else {
-            return;
+                .cached(&name, Path::new(""), StackLimit::UNCHECKED)
+                .expect("the unit is cached")
+                .unwrap_or_else(|_| panic!("the cached unit compiled"))
         };
+        let (one, again) = (cached(), cached());
         assert!(PublishedUnit::ptr_eq(&one, &again), "one published unit");
         let named = |unit: &PublishedUnit| {
             unit.main
@@ -7642,9 +7638,8 @@ mod tests {
                 .copied()
                 .and_then(php_heap::Zval::as_str)
         };
-        let (Some(first), Some(second)) = (named(&one), named(&again)) else {
-            return;
-        };
+        let first = named(&one).expect("a constant string");
+        let second = named(&again).expect("a constant string");
         assert_eq!(first.bytes(), b"shared");
         assert!(first.is_interned(), "a published constant is interned");
         assert!(first.is_same(second), "one `zend_string`, read by both");
@@ -7899,7 +7894,9 @@ mod tests {
         };
         let (body, observables) = serve("thrown.php");
         assert_eq!(body, "none\n");
-        let uncaught = observables.uncaught.unwrap_or_default();
+        let uncaught = observables
+            .uncaught
+            .expect("the uncaught throwable observed");
         assert_eq!(uncaught.class, b"ErrorException");
         assert_eq!(uncaught.line, 3);
         assert!(uncaught.file.ends_with(b"thrown.php"));
@@ -8430,7 +8427,7 @@ mod tests {
             .ini("opcache.opt_debug_level", "0x10000")
             .build()
             .dump_before_optimizer(&described)
-            .unwrap_or_default();
+            .expect("the dump before the optimizer");
         assert_eq!(
             String::from_utf8_lossy(&dumped),
             "\n$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n     ; (before optimizer)\n     ; witness.php:1-1\n     ; return  [] RANGE[0..0]\n0000 ECHO int(1)\n0001 RETURN int(1)\n",

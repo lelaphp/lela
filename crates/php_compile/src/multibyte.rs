@@ -888,9 +888,8 @@ mod tests {
 
     /// The dump, read while the unit's strings stand.
     fn dump(unit: &Result<(crate::Unit, php_heap::Strings), CompileError>) -> String {
-        unit.as_ref()
-            .map(|(u, _)| String::from_utf8_lossy(&u.dump(&[])).into_owned())
-            .unwrap_or_default()
+        let (unit, _) = unit.as_ref().expect("the script compiles");
+        String::from_utf8_lossy(&unit.dump(&[])).into_owned()
     }
 
     /// A byte order mark names the encoding and is taken off; UTF-16's
@@ -960,7 +959,7 @@ mod tests {
             "{}",
             dump(&unit)
         );
-        let offset = i64::try_from(script.len() - 1).unwrap_or_default();
+        let offset = i64::try_from(script.len() - 1).expect("an offset in range");
         assert_eq!(unit.map(|(u, _)| u.halt_offset), Ok(Some(offset)));
     }
 
@@ -973,7 +972,7 @@ mod tests {
         let names: Vec<Vec<u8>> = unit
             .as_ref()
             .map(|(u, _)| u.functions.iter().map(|(f, _)| f.name.0.to_vec()).collect())
-            .unwrap_or_default();
+            .expect("the script compiles");
         assert_eq!(names, vec![b"\xe9".to_vec()]);
         assert!(
             dump(&unit).contains(r#"string("\xE9A")"#),

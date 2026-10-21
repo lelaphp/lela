@@ -793,27 +793,25 @@ mod tests {
         ignore = "Miri keeps a frame's locals in allocations of its own, not on the machine stack whose bounds the probe answers"
     )]
     fn a_local_lies_within_the_bounds_the_platform_answers() {
-        if !ARMED {
+        if ARMED {
+            assert!(holds_a_local(call_stack_bounds()));
+            let size = 4 * 1024 * 1024;
+            let (bounds, held) = std::thread::Builder::new()
+                .stack_size(size)
+                .spawn(|| (call_stack_bounds(), holds_a_local(call_stack_bounds())))
+                .expect("a thread of the size asked")
+                .join()
+                .expect("the thread runs to its end");
+            assert!(held);
+            let max_size = bounds.map_or(0, |stack| stack.max_size);
+            let guard = 4 * 16 * 1024;
+            assert!(
+                max_size + guard >= size && max_size < 2 * size,
+                "a thread spawned at {size} bytes reads as {max_size}"
+            );
+        } else {
             assert_eq!(call_stack_bounds(), None);
-            return;
         }
-        assert!(holds_a_local(call_stack_bounds()));
-        let size = 4 * 1024 * 1024;
-        let spawned = std::thread::Builder::new()
-            .stack_size(size)
-            .spawn(|| (call_stack_bounds(), holds_a_local(call_stack_bounds())))
-            .ok()
-            .and_then(|thread| thread.join().ok());
-        let Some((bounds, held)) = spawned else {
-            return;
-        };
-        assert!(held);
-        let max_size = bounds.map_or(0, |stack| stack.max_size);
-        let guard = 4 * 16 * 1024;
-        assert!(
-            max_size + guard >= size && max_size < 2 * size,
-            "a thread spawned at {size} bytes reads as {max_size}"
-        );
     }
 
     /// The assumed size is a positive number of whole KiB on every

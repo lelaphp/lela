@@ -309,7 +309,7 @@ fn a_string_the_host_evaluates_tells_no_statement_until_it_returns() {
             CommandLine::Direct(code.as_bytes().to_vec()),
             Box::new(Capture::default()),
         );
-        let sink: Capture = handed_back(sink).unwrap_or_default();
+        let sink: Capture = handed_back(sink).expect("the sink handed back");
         String::from_utf8_lossy(&sink.stdout).into_owned()
     }
     let rec = Recording::start();

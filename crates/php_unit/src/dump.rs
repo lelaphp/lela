@@ -794,16 +794,14 @@ mod tests {
     /// frameless table.
     fn line(body: &OpArray, at: usize) -> String {
         let mut out = Out::default();
-        if let Some(op) = body.oplines.get(at) {
-            opline(&mut out, body, op, &[]);
-        }
+        let op = body.oplines.get(at).expect("an opline at the index asked");
+        opline(&mut out, body, op, &[]);
         utf8(out.0)
     }
 
-    /// A dump the tests below hold to text, every byte of it ASCII; one
-    /// that is not reads empty.
+    /// A dump the tests below hold to text, every byte of it ASCII.
     fn utf8(dump: Vec<u8>) -> String {
-        String::from_utf8(dump).unwrap_or_default()
+        String::from_utf8(dump).expect("a dump of UTF-8")
     }
 
     #[test]
@@ -1148,15 +1146,13 @@ mod tests {
     fn a_jump_table_prints_its_buckets_and_the_default_target() {
         use php_heap::{Intern, Key, Strings};
         let mut strings = Strings::new();
-        let Ok(s) = strings.intern(b"s") else {
-            return;
-        };
-        let Ok(table) = strings.constant_array(&[
-            (Key::Long(1), Zval::long(12)),
-            (Key::Str(s), Zval::long(14)),
-        ]) else {
-            return;
-        };
+        let s = strings.intern(b"s").expect("intern \"s\"");
+        let table = strings
+            .constant_array(&[
+                (Key::Long(1), Zval::long(12)),
+                (Key::Str(s), Zval::long(14)),
+            ])
+            .expect("a constant array");
         let mut body = body(
             vec![Opline {
                 extended_value: 16,
@@ -1183,12 +1179,10 @@ mod tests {
     fn a_name_a_key_and_the_file_print_as_their_bytes() {
         use php_heap::{Intern, Key, Strings};
         let mut strings = Strings::new();
-        let Ok(key) = strings.intern(b"\x80") else {
-            return;
-        };
-        let Ok(table) = strings.constant_array(&[(Key::Str(key), Zval::long(1))]) else {
-            return;
-        };
+        let key = strings.intern(b"\x80").expect("intern a byte above 0x7f");
+        let table = strings
+            .constant_array(&[(Key::Str(key), Zval::long(1))])
+            .expect("a constant array");
         let decl = FunctionDecl {
             name: Name(b"f\xff"[..].into()),
             parameters: Vec::new(),

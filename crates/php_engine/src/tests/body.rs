@@ -81,7 +81,7 @@ fn posted(engine: &Engine, content_type: &str, body: &[u8], program: &str) -> (S
         sapi_name: String::from("cgi-fcgi"),
         script_name: Some(b"body.php".to_vec()),
         source: Some(program.as_bytes().to_vec()),
-        cwd: std::env::current_dir().unwrap_or_default(),
+        cwd: std::env::current_dir().expect("the working directory"),
         web: Some(WebRequest {
             method: Some(Method::Post),
             content_type: Some(content_type.as_bytes().to_vec()),

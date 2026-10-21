@@ -839,15 +839,11 @@ mod tests {
         };
         let start = rec.heap.memory_usage(false);
         let drops = std::rc::Rc::new(Cell::new(0));
-        let Ok(first) = rec.heap.resource(ResourceType(3)) else {
-            return;
-        };
-        let Ok(second) = rec
+        let first = rec.heap.resource(ResourceType(3)).expect("a resource");
+        let second = rec
             .heap
             .resource_with(ResourceType(4), Observed(std::rc::Rc::clone(&drops)))
-        else {
-            return;
-        };
+            .expect("a resource");
         assert_eq!(first.id(), 1);
         assert_eq!(second.id(), 2);
         assert_eq!(rec.heap.memory_usage(false) - start, LIST + 32 + 32 + 16);
@@ -881,28 +877,22 @@ mod tests {
         Heap::release(&mut rec, Zval::resource(first));
         assert_eq!(rec.freed, vec![(2, 4, true), (1, 3, true)]);
         assert_eq!(rec.heap.memory_usage(false), start + LIST);
-        let Ok(third) = rec.heap.resource(ResourceType(3)) else {
-            return;
-        };
+        let third = rec.heap.resource(ResourceType(3)).expect("a resource");
         assert_eq!(third.id(), 3);
         // The shutdown walk closes what is open, from the top down, and
         // the sweep drops a payload nothing closed.
-        let Ok(fourth) = rec
+        let fourth = rec
             .heap
             .resource_with(ResourceType(5), Observed(std::rc::Rc::clone(&drops)))
-        else {
-            return;
-        };
+            .expect("a resource");
         Heap::close_resources(&mut rec);
         assert_eq!(rec.freed[2..], [(4, 5, true), (3, 3, true)]);
         assert!(third.is_closed() && fourth.is_closed());
         assert_eq!(drops.get(), 2);
-        let Ok(_) = rec
+        let _left_for_the_sweep = rec
             .heap
             .resource_with(ResourceType(5), Observed(std::rc::Rc::clone(&drops)))
-        else {
-            return;
-        };
+            .expect("a resource");
         drop(rec);
         assert_eq!(drops.get(), 3, "the sweep dropped the last payload");
     }
@@ -922,12 +912,10 @@ mod tests {
         };
         let start = rec.heap.memory_usage(false);
         let drops = std::rc::Rc::new(Cell::new(0));
-        let Ok(kept) = rec
+        let kept = rec
             .heap
             .resource_with(ResourceType(4), Observed(std::rc::Rc::clone(&drops)))
-        else {
-            return;
-        };
+            .expect("a resource");
         assert_eq!(rec.heap.memory_usage(false) - start, LIST + 32 + 16);
         rec.heap.resource_unlist(kept);
         rec.heap.resource_unlist(kept);
@@ -936,9 +924,7 @@ mod tests {
         assert!(rec.heap.resource_at(1).is_none());
         Heap::close_resources(&mut rec);
         assert!(!kept.is_closed() && rec.freed.is_empty());
-        let Ok(next) = rec.heap.resource(ResourceType(3)) else {
-            return;
-        };
+        let next = rec.heap.resource(ResourceType(3)).expect("a resource");
         assert_eq!(next.id(), 2, "the unlisted id stays spent");
         assert_eq!(rec.heap.memory_usage(false) - start, LIST + 32 + 16);
         let z = Zval::resource(kept);
@@ -957,9 +943,7 @@ mod tests {
         assert_eq!(drops.get(), 1);
         assert_eq!(rec.heap.memory_usage(false) - start, LIST + 32);
         // Closed first, then let go: the destructor is not served again.
-        let Ok(closed) = rec.heap.resource(ResourceType(5)) else {
-            return;
-        };
+        let closed = rec.heap.resource(ResourceType(5)).expect("a resource");
         rec.heap.resource_unlist(closed);
         Heap::resource_close(&mut rec, closed);
         Heap::release(&mut rec, Zval::resource(closed));
@@ -967,9 +951,7 @@ mod tests {
         assert_eq!(rec.heap.memory_usage(false) - start, LIST + 32);
         // Let go under a pin: destroyed at the release, its bytes kept for
         // the pin and given back with it, counted off once.
-        let Ok(pinned) = rec.heap.resource(ResourceType(6)) else {
-            return;
-        };
+        let pinned = rec.heap.resource(ResourceType(6)).expect("a resource");
         rec.heap.resource_unlist(pinned);
         let z = Zval::resource(pinned);
         rec.heap.pin_block(z);
@@ -996,9 +978,7 @@ mod tests {
         let start = heap.memory_usage(false);
         let mut ids = Vec::new();
         for i in 1..=17 {
-            let Ok(r) = heap.resource(ResourceType(1)) else {
-                return;
-            };
+            let r = heap.resource(ResourceType(1)).expect("a resource");
             ids.push(r.id());
             let list = match i {
                 1..=7 => LIST,

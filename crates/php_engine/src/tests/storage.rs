@@ -276,7 +276,7 @@ fn a_block_freed_or_kept_to_the_request_s_end_leaves_nothing() {
 #[test]
 fn a_forgotten_block_is_named_by_the_armed_sensor() {
     let served = served(LeakSensor::Armed, "<?php block_kept('forget');");
-    let fatal = served.fatal.unwrap_or_default();
+    let fatal = served.fatal.expect("the sensor's fatal");
     assert!(
         fatal.contains("the request ended with 1 block of its heap never freed, 24 bytes"),
         "{fatal}"
@@ -312,7 +312,7 @@ fn a_refused_allocation_ends_the_request_in_the_limit_s_fatal() {
     ] {
         let served = engine.serve_capture(src, Capture::default());
         assert!(!served.stdout_text().contains("unreached"));
-        let fatal = served.fatal.unwrap_or_default();
+        let fatal = served.fatal.expect("the limit's fatal");
         assert_eq!(served.exit_code, 255, "{src}");
         assert!(
             fatal.contains("Allowed memory size of 2097152 bytes exhausted"),

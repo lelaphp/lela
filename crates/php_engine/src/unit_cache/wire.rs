@@ -840,15 +840,10 @@ __halt_compiler(); data"#;
             source,
             &options,
             &mut strings,
-        );
-        assert!(unit.is_ok(), "the source compiles: {unit:?}");
-        let Ok(unit) = unit else { return };
-        let bytes = encode(&unit);
-        assert!(bytes.is_some(), "the unit encodes");
-        let Some(bytes) = bytes else { return };
-        let decoded = decode(&bytes, &mut strings);
-        assert!(decoded.is_some(), "the bytes decode");
-        let Some(decoded) = decoded else { return };
+        )
+        .expect("the source compiles");
+        let bytes = encode(&unit).expect("the unit encodes");
+        let decoded = decode(&bytes, &mut strings).expect("the bytes decode");
         assert_eq!(encode(&decoded), Some(bytes.clone()));
         assert_eq!(decoded.dump(&[]), unit.dump(&[]));
         assert_eq!(decoded.classes, unit.classes);

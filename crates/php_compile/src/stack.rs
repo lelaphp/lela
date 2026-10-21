@@ -366,26 +366,26 @@ mod tests {
     #[test]
     fn detect_reads_the_calling_threads_bounds() {
         let size = 4 * 1024 * 1024;
-        let Ok(spawned) = std::thread::Builder::new().stack_size(size).spawn(|| {
-            let stack = StackLimit::init(0, 0);
-            (stack, position())
-        }) else {
-            return;
-        };
-        let Ok((stack, local)) = spawned.join() else {
-            return;
-        };
+        let (stack, local) = std::thread::Builder::new()
+            .stack_size(size)
+            .spawn(|| {
+                let stack = StackLimit::init(0, 0);
+                (stack, position())
+            })
+            .expect("a thread of the size asked")
+            .join()
+            .expect("the thread runs to its end");
         let reserved = usize::try_from(RESERVED_MIN).unwrap_or(0);
         let read = stack.base - stack.limit + reserved;
-        if php_heap::call_stack_bounds().is_none() {
+        if php_heap::call_stack_bounds().is_some() {
+            assert!(
+                read >= size && read < 2 * size,
+                "a {size}-byte thread reads as {read}"
+            );
+            assert!(local < stack.base && local > stack.limit);
+        } else {
             assert_eq!(read, php_heap::call_stack_default_size() - 32 * 1024);
-            return;
         }
-        assert!(
-            read >= size && read < 2 * size,
-            "a {size}-byte thread reads as {read}"
-        );
-        assert!(local < stack.base && local > stack.limit);
     }
 
     /// A fiber's limit is its own stack's: the reservation above the
@@ -415,7 +415,7 @@ mod tests {
             format!("<?php\n$a = 1;\n$y = $a + {} $a;", "1 +".repeat(2000)),
             format!("<?php\nconst Y = 1{};", " + 1".repeat(2000)),
         ];
-        let Ok(spawned) = std::thread::Builder::new()
+        let refused = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
                 let options = crate::Options {
@@ -436,10 +436,10 @@ mod tests {
                     })
                     .collect::<Vec<_>>()
             })
-        else {
-            return;
-        };
-        assert_eq!(spawned.join().ok(), Some(vec![None, None]));
+            .expect("a thread of 8 MiB")
+            .join()
+            .expect("the thread runs to its end");
+        assert_eq!(refused, vec![None, None]);
     }
 
     /// `limit`'s two clamps.

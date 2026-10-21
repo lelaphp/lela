@@ -623,11 +623,10 @@ mod tests {
     fn a_thread_is_inside_while_it_stands() {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let builder = std::thread::Builder::new().name("php-test".to_owned());
-        let Ok(thread) = spawn(builder, move || {
+        let thread = spawn(builder, move || {
             rx.recv().ok();
-        }) else {
-            return;
-        };
+        })
+        .expect("the system starts the thread");
         assert!(INSIDE.load(Ordering::Relaxed) & !FORKING >= 1);
         drop(tx);
         thread.join();
@@ -639,16 +638,10 @@ mod tests {
     fn a_host_thread_is_inside_while_it_stands() {
         let _forks = forks_held();
         let (tx, rx) = std::sync::mpsc::channel::<()>();
-        let started = host_thread("php-host", 3 << 20, move || {
+        let thread = host_thread("php-host", 3 << 20, move || {
             rx.recv().ok();
-        });
-        assert!(
-            started.is_ok(),
-            "the system refused the thread: {started:?}"
-        );
-        let Ok(thread) = started else {
-            return;
-        };
+        })
+        .expect("the system starts the host thread");
         assert!(INSIDE.load(Ordering::Relaxed) & !FORKING >= 1);
         assert_eq!(fork().err().and_then(|e| e.raw_os_error()), Some(EBUSY));
         drop(tx);

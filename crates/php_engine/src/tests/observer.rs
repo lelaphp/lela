@@ -150,7 +150,9 @@ fn a_function_the_observer_declines_is_asked_of_once_and_never_begun() {
     let file = "file 'main.php'";
     let events = observed(&rec.events().between("built", "served"));
     assert_eq!(
-        events.get(..8).unwrap_or_default(),
+        events
+            .get(..8)
+            .unwrap_or_else(|| panic!("eight events: {events:?}")),
         [
             init(0, file),
             begin(0, file),
@@ -317,7 +319,7 @@ fn an_unwind_ends_every_frame_it_leaves_once() {
     assert_eq!(
         unwound(&events.between("uncaught", "exited"))
             .get(..4)
-            .unwrap_or_default(),
+            .expect("four frames unwound"),
         [
             end(0, "Exception::__construct", Some("null")),
             end(0, "b", None),
@@ -330,13 +332,14 @@ fn an_unwind_ends_every_frame_it_leaves_once() {
     // ended, and which reaches `getTraceAsString` through a call of its
     // own (`Z/Zend/zend_exceptions.c:731-733`), as
     // `observer_exception_01.phpt` shows it.
-    let file_ended = uncaught.iter().position(|e| *e == end(0, file, None));
+    let file_ended = uncaught
+        .iter()
+        .position(|e| *e == end(0, file, None))
+        .unwrap_or_else(|| panic!("the file ends: {uncaught:?}"));
     let to_string = "Exception::__toString";
     let trace = "Exception::getTraceAsString";
     assert_eq!(
-        uncaught
-            .get(file_ended.unwrap_or_default() + 1..)
-            .unwrap_or_default()
+        uncaught[file_ended + 1..]
             .iter()
             .filter(|e| !matches!(e, Ext(_, Error(_))))
             .map(|e| match e {
@@ -358,7 +361,7 @@ fn an_unwind_ends_every_frame_it_leaves_once() {
         .iter()
         .position(|e| matches!(e, Ext(_, Error(m)) if m.starts_with("Uncaught Exception: x")));
     assert!(
-        file_ended < rendered && rendered.is_some(),
+        rendered.is_some_and(|rendered| file_ended < rendered),
         "the main file ends before the uncaught throwable is rendered: {uncaught:?}"
     );
     assert_eq!(
@@ -419,13 +422,9 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
     let memory = observed(&events.between("memory", "user"));
     let fatal = memory
         .iter()
-        .position(|e| matches!(e, Ext(_, Error(m)) if m.starts_with("Allowed memory size")));
-    assert!(fatal.is_some(), "the fatal is rendered: {memory:?}");
-    let after: Vec<_> = memory
-        .iter()
-        .skip(fatal.unwrap_or_default() + 1)
-        .cloned()
-        .collect();
+        .position(|e| matches!(e, Ext(_, Error(m)) if m.starts_with("Allowed memory size")))
+        .unwrap_or_else(|| panic!("the fatal is rendered: {memory:?}"));
+    let after: Vec<_> = memory.iter().skip(fatal + 1).cloned().collect();
     assert_eq!(
         after,
         [
@@ -442,13 +441,10 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
     let user = observed(&events.between("user", "generator"));
     let fatal = user
         .iter()
-        .position(|e| matches!(e, Ext(_, Error(m)) if m == "boom"));
-    assert!(fatal.is_some(), "the fatal is rendered: {user:?}");
+        .position(|e| matches!(e, Ext(_, Error(m)) if m == "boom"))
+        .unwrap_or_else(|| panic!("the fatal is rendered: {user:?}"));
     assert_eq!(
-        user.iter()
-            .skip(fatal.unwrap_or_default() + 1)
-            .cloned()
-            .collect::<Vec<_>>(),
+        user.iter().skip(fatal + 1).cloned().collect::<Vec<_>>(),
         [
             end(0, "trigger_error", None),
             end(0, "b", None),
@@ -473,14 +469,10 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
     let resumed = observed(&events.between("generator", "end"));
     let fatal = resumed
         .iter()
-        .position(|e| matches!(e, Ext(_, Error(m)) if m.starts_with("Maximum execution time")));
-    assert!(fatal.is_some(), "the fatal is rendered: {resumed:?}");
+        .position(|e| matches!(e, Ext(_, Error(m)) if m.starts_with("Maximum execution time")))
+        .unwrap_or_else(|| panic!("the fatal is rendered: {resumed:?}"));
     assert_eq!(
-        resumed
-            .iter()
-            .skip(fatal.unwrap_or_default() + 1)
-            .cloned()
-            .collect::<Vec<_>>(),
+        resumed.iter().skip(fatal + 1).cloned().collect::<Vec<_>>(),
         [
             end(0, "b", None),
             end(0, "g", None),
@@ -532,10 +524,10 @@ fn a_fatal_in_the_shutdown_leaves_its_frames_open() {
     let shutdown = observed(&events.between("shutdown function", "destructor"));
     let fatal = shutdown
         .iter()
-        .position(|e| matches!(e, Ext(_, Error(m)) if m == "in main"));
-    assert!(fatal.is_some(), "{shutdown:?}");
+        .position(|e| matches!(e, Ext(_, Error(m)) if m == "in main"))
+        .unwrap_or_else(|| panic!("{shutdown:?}"));
     assert_eq!(
-        shutdown[fatal.unwrap_or_default() + 1..]
+        shutdown[fatal + 1..]
             .iter()
             .filter(|e| !matches!(e, Ext(_, Error(m)) if m.starts_with("Passing E_USER_ERROR")))
             .cloned()
@@ -1319,7 +1311,7 @@ fn a_fiber_inside_a_fiber_switches_with_its_resumer() {
         fibers.len() == 2 && closures.len() == 2,
         "two fibers, two closures: {nested:?}"
     );
-    let at = |names: &[String], i: usize| names.get(i).cloned().unwrap_or_default();
+    let at = |names: &[String], i: usize| names[i].clone();
     let (outer, inner) = (at(&fibers, 0), at(&fibers, 1));
     let (outer_closure, inner_closure) = (at(&closures, 0), at(&closures, 1));
     let (outer_closure, inner_closure) = (outer_closure.as_str(), inner_closure.as_str());
@@ -1409,8 +1401,11 @@ fn a_switch_handler_reads_the_fiber_switched_into_and_out_of_as_the_current_one(
     let events = observed(&rec.events().between("built", "served"));
     // The fiber as the first switch, the one into it, names it.
     let fiber = match events.first() {
-        Some(Ext(_, FiberSwitch(_, to))) => to.split(' ').next().unwrap_or_default().to_owned(),
-        _ => String::new(),
+        Some(Ext(_, FiberSwitch(_, to))) => to
+            .split_once(' ')
+            .map_or(to.as_str(), |(name, _)| name)
+            .to_owned(),
+        _ => panic!("the first event is the switch into the fiber: {events:?}"),
     };
     let current = |to: &str| format!("{to}; current {fiber}");
     assert_eq!(
@@ -1486,17 +1481,17 @@ fn a_fatal_in_a_fiber_ends_its_frames_then_its_resumers_and_no_other_fibers() {
     let events = observed(&rec.events().between("built", "served"));
     let fatal = events
         .iter()
-        .position(|e| matches!(e, Ext(_, Error(m)) if m.starts_with("Allowed memory size")));
-    assert!(fatal.is_some(), "the fatal is rendered: {events:?}");
+        .position(|e| matches!(e, Ext(_, Error(m)) if m.starts_with("Allowed memory size")))
+        .unwrap_or_else(|| panic!("the fatal is rendered: {events:?}"));
     let (fibers, closures) = named_in(&events);
     assert!(
         fibers.len() == 2 && closures.len() == 2,
         "two fibers, two closures: {events:?}"
     );
-    let at = |names: &[String], i: usize| names.get(i).cloned().unwrap_or_default();
+    let at = |names: &[String], i: usize| names[i].clone();
     let (fiber, kept_closure, closure) = (at(&fibers, 1), at(&closures, 0), at(&closures, 1));
     assert_eq!(
-        events[fatal.unwrap_or_default() + 1..],
+        events[fatal + 1..],
         [
             end(0, "deep", None),
             end(0, &closure, None),
@@ -1603,7 +1598,7 @@ fn a_fiber_destroyed_or_thrown_into_is_noticed_as_such() {
     let nested = observed(&events.between("nested", "thrown"));
     let (fibers, _) = named_in(&nested);
     assert_eq!(fibers.len(), 2, "two fibers: {nested:?}");
-    let at = |i: usize| fibers.get(i).cloned().unwrap_or_default();
+    let at = |i: usize| fibers[i].clone();
     let (outer, inner) = (at(0), at(1));
     let outer = |status: &str| format!("{outer} {status}");
     let inner = |status: &str| format!("{inner} {status}");
@@ -1775,9 +1770,12 @@ fn a_closure_bound_to_another_scope_is_asked_of_again() {
     let asked: Vec<String> = observed(&rec.events().between("built", "served"))
         .into_iter()
         .filter_map(|event| match event {
-            Ext(0, ObserverInit(name)) if name.contains("{closure") || name == "A::make" => {
-                Some(name.split("{closure").next().unwrap_or_default().to_owned() + "*")
-            }
+            Ext(0, ObserverInit(name)) if name.contains("{closure") || name == "A::make" => Some(
+                name.split_once("{closure")
+                    .map_or(name.as_str(), |(head, _)| head)
+                    .to_owned()
+                    + "*",
+            ),
             _ => None,
         })
         .collect();

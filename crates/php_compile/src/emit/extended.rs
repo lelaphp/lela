@@ -126,7 +126,7 @@ mod tests {
             &options,
             &mut strings,
         )
-        .unwrap_or_default();
+        .expect("the source compiles");
         let function = unit
             .functions
             .first()

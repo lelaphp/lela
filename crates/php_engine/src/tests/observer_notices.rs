@@ -411,7 +411,9 @@ fn the_error_observer_is_told_of_every_diagnostic_before_it_is_served() {
     );
     let undefined = |name: &str| format!("Undefined variable ${name}");
     assert_eq!(
-        events.get(..3).unwrap_or_default(),
+        events
+            .get(..3)
+            .unwrap_or_else(|| panic!("three events: {events:?}")),
         [
             Ext(0, ErrorObserved(Level::Warning, undefined("a"), false)),
             Ext(0, ErrorObserved(Level::Warning, undefined("b"), false)),

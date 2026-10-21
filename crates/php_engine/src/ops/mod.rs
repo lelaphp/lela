@@ -5682,7 +5682,9 @@ mod tests {
             .build()
             .serve_capture(source, Capture::default());
         let stdout = served.stdout_text();
-        let (refused, dumped) = stdout.split_once('\n').unwrap_or_default();
+        let (refused, dumped) = stdout
+            .split_once('\n')
+            .unwrap_or_else(|| panic!("a refusal and a dump: {stdout}"));
         assert!(
             refused.starts_with("Maximum call stack size of ")
                 && refused.ends_with(" reached. Infinite recursion?"),
@@ -5707,15 +5709,11 @@ mod tests {
     }
 
     fn array(req: &mut Request, entries: Vec<(Key, Value)>) -> Value {
-        let Ok(mut a) = req.array() else {
-            return Value::null();
-        };
+        let mut a = req.array().expect("an array");
         // The entries are the test's to hand on, made for the array.
         for (k, v) in entries {
             let (k, v) = (Owner::adopt(k), Owner::adopt(v));
-            if a.set(req, k, v).is_err() {
-                break;
-            }
+            a.set(req, k, v).expect("an entry set");
         }
         Value::array(a)
     }
