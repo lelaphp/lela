@@ -489,10 +489,28 @@ pub(crate) struct LoopHeader {
     /// The op the back edge goes to.
     pub(crate) at: OpId,
     pub(crate) repeat: Repeat,
-    /// Where the interrupt test leaves (`jit-design.md` §4.3): an exit
-    /// that never grows a side trace, numbered after every exit of the
-    /// loop's body, as php takes it where it closes the loop.
-    pub(crate) interrupt: ExitId,
+    /// Where the interrupt test leaves (`jit-design.md` §4.3).
+    pub(crate) interrupt: Interrupt,
+}
+
+/// Where a loop's interrupt test goes once the interrupt is raised, as
+/// php's `zend_jit_trace` chooses its `timeout_exit_addr`
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:7210-7228`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Interrupt {
+    /// Through this exit, php's `ZEND_JIT_EXIT_TO_VM` exit point at the
+    /// loop's header, which never grows a side trace, numbered after
+    /// every exit of the loop's body as php takes it where it closes the
+    /// loop: where php's code does not keep the instruction pointer the
+    /// trace entered with, or keeps values in registers there.
+    Exit(ExitId),
+    /// Through php's interrupt stub, `jit_stub_interrupt_handler`, which
+    /// takes no exit: the interrupt is handled and the trace entered again
+    /// at its header, as php's stub goes on at the header's handler,
+    /// which is the trace. Where php's code keeps its initial
+    /// instruction pointer and holds nothing in registers at the loop's
+    /// end, so the interpreter needs nothing back.
+    Stub,
 }
 
 /// What a looping trace repeats: php's three stops that make a loop.

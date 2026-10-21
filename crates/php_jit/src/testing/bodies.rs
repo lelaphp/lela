@@ -124,6 +124,7 @@ pub(crate) fn compiled(words: &[u32], exits: Vec<ExitSpec>) -> Compiled {
         align: 4,
         exits: exits.into(),
         leaves: None,
+        stub: None,
         fuzzed: Fuzzed::default(),
         map_ptrs: Box::new([]),
         marks: Box::new([]),

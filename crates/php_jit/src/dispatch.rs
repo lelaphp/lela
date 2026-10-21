@@ -194,9 +194,23 @@ fn looped(
 /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 2
 /// ```
 ///
+/// Where the test takes php's interrupt stub, a loop that serves an
+/// opline through the interpreter's handler and keeps nothing in
+/// registers (`types::Interrupt::Stub`), `run` makes that check itself
+/// and enters the trace again at its header, as php's stub goes on at the
+/// header's handler, which is the trace; the timeout's fatal is raised
+/// there:
+///
+/// ```php
+/// set_time_limit(1); $i = 0; for (;;) { $s = (string)$i; }
+/// ```
+/// ```expect exit=255 regime=jit-force process wall=1s
+/// Fatal error: Maximum execution time of 1 second exceeded in %s on line 2
+/// ```
+///
 /// A signal `pcntl_async_signals` delivers while a compiled loop spins is
-/// handled at the loop's check after the interrupt exit, and the loop
-/// goes on to see what the handler wrote:
+/// handled at the stub, and the loop, entered again, sees what the
+/// handler wrote:
 ///
 /// ```php
 /// pcntl_async_signals(true); $done = false;
@@ -221,6 +235,16 @@ pub(crate) fn run(req: &mut Request, frame: FrameRef, id: TraceId, shared: &Shar
         let exited = match enter::enter(req, frame, trace) {
             Ok(Left::Exit(exited)) => exited,
             Ok(Left::Unwound(frame)) => return Flow::Resume(frame),
+            // php's interrupt stub: the interrupt handled, and the trace
+            // entered again at its header, its handler.
+            Ok(Left::Interrupted(header)) => match tier::interrupted(req) {
+                Ok(false) => {
+                    frame = header;
+                    continue;
+                }
+                Ok(true) => return Flow::Resume(header),
+                Err(fatal) => return Flow::Bail(fatal),
+            },
             Err(fatal) => return Flow::Bail(fatal),
         };
         frame = exited.frame;

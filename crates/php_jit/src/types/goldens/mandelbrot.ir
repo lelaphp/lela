@@ -10,7 +10,7 @@ entry
   #13 f0.CV7 [undef, ref, any]
   #17 f0.CV11 [undef, ref, any]
   #25 f0.CV3 [undef, ref, any]
-loop at 0, loop, interrupt exit 23
+loop at 0, loop, interrupt stub
   #1 f0.CV12 [undef, ref, any] = phi(#0, #19)
   #3 f0.CV13 [undef, ref, any] = phi(#2, #15)
   #5 f0.CV14 [undef, ref, any] = phi(#4, #21)
@@ -98,4 +98,3 @@ exit 19: f0 0040 plain
 exit 20: f0 0040 plain f0.T36:double
 exit 21: f0 0042 plain f0.T36:double
 exit 22: f0 0044 plain
-exit 23: f0 0045 plain to vm

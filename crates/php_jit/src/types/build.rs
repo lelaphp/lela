@@ -20,8 +20,9 @@ use super::opcodes::{
 };
 use super::{
     Abort, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo, Fused,
-    Grows, Guard, GuardAt, Home, Imm, Known, Landing, Layout, Leave, Line, LoopHeader, Op, OpId,
-    Operand, Place, Read, Repeat, Slot, Store, Stored, TraceIr, Unwind, UnwindId, Value, ValueId,
+    Grows, Guard, GuardAt, Home, Imm, Interrupt, Known, Landing, Layout, Leave, Line, LoopHeader,
+    Op, OpId, Operand, Place, Read, Repeat, Slot, Store, Stored, TraceIr, Unwind, UnwindId, Value,
+    ValueId,
 };
 use crate::record::{self, Event, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -1497,14 +1498,24 @@ impl<'a> Builder<'a> {
         if repeat.is_some() {
             self.close_phis()?;
         }
-        let numbered = self.number(repeat.is_some())?;
-        let end = match (repeat, numbered.interrupt, numbered.end) {
-            (Some(repeat), Some(interrupt), _) => End::Loop(LoopHeader {
+        let closes = match repeat {
+            None => Closes::Leave,
+            Some(repeat) if self.stubbed(repeat) => Closes::Stub,
+            Some(_) => Closes::Interrupt,
+        };
+        let numbered = self.number(closes)?;
+        let end = match (repeat, closes, numbered.interrupt, numbered.end) {
+            (Some(repeat), Closes::Stub, ..) => End::Loop(LoopHeader {
                 at: self.header,
                 repeat,
-                interrupt,
+                interrupt: Interrupt::Stub,
             }),
-            (_, _, Some(exit)) => End::Leave(exit),
+            (Some(repeat), _, Some(interrupt), _) => End::Loop(LoopHeader {
+                at: self.header,
+                repeat,
+                interrupt: Interrupt::Exit(interrupt),
+            }),
+            (_, _, _, Some(exit)) => End::Leave(exit),
             _ => return Err(mismatch("a trace with no end")),
         };
         Ok(TraceIr {
@@ -1534,7 +1545,7 @@ impl<'a> Builder<'a> {
     /// its type known to the exits after it, as php's `SET_STACK_TYPE`
     /// after a guard does. The places an opline unwinds from are numbered
     /// apart, one per set of stores.
-    fn number(&mut self, loops: bool) -> Result<Numbered, Abort> {
+    fn number(&mut self, closes: Closes) -> Result<Numbered, Abort> {
         let mut order: Vec<(Order, Source)> = Vec::new();
         for (at, guard) in self.guards.iter().enumerate() {
             let key = match guard.at {
@@ -1547,14 +1558,11 @@ impl<'a> Builder<'a> {
         for (at, (op, ..)) in self.leaves.iter().enumerate() {
             order.push((Order::At(*op, Stage::Leaves), Source::Leave(at)));
         }
-        order.push((
-            Order::End,
-            if loops {
-                Source::Interrupt
-            } else {
-                Source::End
-            },
-        ));
+        match closes {
+            Closes::Interrupt => order.push((Order::End, Source::Interrupt)),
+            Closes::Leave => order.push((Order::End, Source::End)),
+            Closes::Stub => {}
+        }
         // Stable: within one place, in the order they were placed.
         order.sort_by_key(|(key, _)| *key);
         let mut exits = Exits::default();
@@ -1640,6 +1648,66 @@ impl<'a> Builder<'a> {
             | Check::Deref { value, .. }
             | Check::Layout { value, .. } => Some(self.val(value).slot),
             Check::Direction { .. } | Check::Stands { .. } => None,
+        }
+    }
+
+    /// Whether a loop's interrupt test takes php's interrupt stub and no
+    /// exit (`Z/ext/opcache/jit/zend_jit_trace.c:7210-7228`): in a root
+    /// trace that does not loop by returning, whose code keeps the
+    /// instruction pointer it entered with, php's
+    /// `ZEND_JIT_TRACE_USES_INITIAL_IP`, and holds nothing in registers
+    /// where the test leaves, so no deoptimisation is needed
+    /// (`zend_jit_trace_stack_needs_deoptimization`).
+    fn stubbed(&self, repeat: Repeat) -> bool {
+        let root = !matches!(self.rec.start, Start::Side { .. });
+        root && repeat != Repeat::Return
+            && self.uses_initial_ip()
+            && self
+                .spec(&self.interrupt(), &HashMap::new())
+                .stores
+                .is_empty()
+    }
+
+    /// php's `zend_jit_trace_uses_initial_ip` over the trace's ops as
+    /// php's code generator walks them (`Z/ext/opcache/jit/zend_jit_ir.c:991-1098`):
+    /// the code enters holding the trace's first opline in its
+    /// instruction pointer and tracks it, a call it begins starts reusing
+    /// the pointer for the call (`zend_jit_start_reuse_ip`) and stops
+    /// tracking, and an opline served through its handler
+    /// ([`Builder::by_handler`]) sets the pointer (`zend_jit_set_ip`),
+    /// using the one it tracks where it tracks one, and tracks its own
+    /// from then on.
+    fn uses_initial_ip(&self) -> bool {
+        let mut tracking = true;
+        for op in &self.ops {
+            match op {
+                Op::Line(line) if self.by_handler(line) => {
+                    if tracking {
+                        return true;
+                    }
+                    tracking = true;
+                }
+                Op::InitCall { .. } => tracking = false,
+                Op::Line(_) | Op::Enter { .. } | Op::Back { .. } => {}
+            }
+        }
+        false
+    }
+
+    /// Whether php's code generator serves `line` through its handler,
+    /// `zend_jit_handler`, which sets the instruction pointer: an opline
+    /// stepped here, a division, which its switch has no case for, and
+    /// an `ADD`, `SUB` or `MUL` over a variable a symbol table reaches,
+    /// which its inference holds as possibly undefined
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:4538-4552`), whatever this
+    /// tier serves inline.
+    fn by_handler(&self, line: &Line) -> bool {
+        match (line.form, line.opcode) {
+            (Form::Step, _) | (Form::Inline, Opcode::Div) => true,
+            (Form::Inline, Opcode::Add | Opcode::Sub | Opcode::Mul) => {
+                self.over_aliased(line.op1, line.op2)
+            }
+            (Form::Inline, _) => false,
         }
     }
 
@@ -2030,6 +2098,16 @@ struct Numbered {
     guards: Vec<Guard>,
     interrupt: Option<ExitId>,
     end: Option<ExitId>,
+}
+
+/// How a trace ends, for its numbering: a loop through its interrupt
+/// test's exit or through php's stub, or a trace that does not loop
+/// through the exit it ends by.
+#[derive(Clone, Copy)]
+enum Closes {
+    Interrupt,
+    Stub,
+    Leave,
 }
 
 /// Where an exit falls in the order the trace meets them.

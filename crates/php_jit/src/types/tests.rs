@@ -669,3 +669,44 @@ fn the_entry_guards_stand_in_their_slots_order() -> Result<(), String> {
     assert_eq!(entered, [(0, 0), (1, 1), (2, 2)], "{}", dump::render(&ir));
     Ok(())
 }
+
+/// A loop's interrupt test takes php's exit point only where php's code
+/// does not keep the trace's initial instruction pointer or keeps values
+/// in registers at the loop's end, and php's interrupt stub otherwise,
+/// which takes none (`Z/ext/opcache/jit/zend_jit_trace.c:7210-7228`): in
+/// a loop of the file's own code, whose variables a symbol table reaches
+/// and no register keeps, one whose oplines php serves through their
+/// handlers lists no `/VM` exit, and one served inline does. Each builds
+/// php's exits in total, as the pinned php's `TRACE 1 exit info` for the
+/// same program lists them, once and twice over (#3137).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn each_loop_builds_phps_exits_and_its_interrupt_test_takes_one_where_phps_does()
+-> Result<(), String> {
+    for (statement, php, to_vm) in [
+        ("$s = (string)$i;", [4, 5], false),
+        ("$x = \"a{$i}b\";", [5, 7], false),
+        ("$x = [$i, $i, $i, $i];", [4, 5], false),
+        ("$x = $i . \"K\" . $i . \"z\";", [6, 9], false),
+        ("$x = $i + 0.5;", [6, 9], false),
+        ("$s += $i * 5;", [5, 7], false),
+        ("$x = 5;", [5, 6], true),
+        ("$x = $y;", [5, 6], true),
+        ("$x = $i == 5;", [7, 10], true),
+    ] {
+        for (n, php) in [1, 2].into_iter().zip(php) {
+            let ir = built(&IN_MAIN, &repeated(statement, n))?;
+            let vm = ir
+                .exits
+                .iter()
+                .any(|exit| exit.grows == super::Grows::Never);
+            assert_eq!(
+                (ir.exits.len(), vm),
+                (php, to_vm),
+                "{statement} {n} times\n{}",
+                dump::render(&ir)
+            );
+        }
+    }
+    Ok(())
+}

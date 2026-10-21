@@ -502,6 +502,11 @@ pub(crate) enum Left {
     /// pending, which the loop unwinds from where it was raised, in the
     /// frame that stands.
     Unwound(FrameRef),
+    /// Through php's interrupt stub, which takes no exit: a loop's
+    /// interrupt test found the interrupt raised, and the frame that
+    /// stands is stood at the loop's header, where the stub goes on once
+    /// it handled the interrupt.
+    Interrupted(FrameRef),
 }
 
 /// Where a trace left the interpreter through an exit: the exit, and the
@@ -571,6 +576,15 @@ pub(crate) fn enter(req: &mut Request, frame: FrameRef, trace: &Trace) -> Result
             Ok(Left::Unwound(frame))
         }
         Answer::Unwound => Err(internal("a trace unwound with no throwable pending")),
+        Answer::Interrupted => {
+            let header = trace
+                .stub
+                .ok_or_else(|| internal("a trace took an interrupt stub it does not have"))?;
+            let frame =
+                tier::current(req).ok_or_else(|| internal("a trace left no frame standing"))?;
+            tier::stand(req, frame, header);
+            Ok(Left::Interrupted(frame))
+        }
         Answer::Abandoned => Err(internal(
             "a trace left through no exit of its own and kept nothing",
         )),
@@ -578,11 +592,12 @@ pub(crate) fn enter(req: &mut Request, frame: FrameRef, trace: &Trace) -> Result
 }
 
 /// What compiled code answered `enter`, decoded once: an exit of the
-/// trace's, [`lower::UNWOUND`], or anything else, [`lower::ABANDONED`]
+/// trace's, [`lower::UNWOUND`], [`lower::INTERRUPTED`], or anything else, [`lower::ABANDONED`]
 /// with nothing kept among it, which no trace answers but by a defect.
 enum Answer {
     Exit(ExitId),
     Unwound,
+    Interrupted,
     Abandoned,
 }
 
@@ -592,6 +607,7 @@ impl Answer {
         match u16::try_from(word) {
             Ok(id) if usize::from(id) < exits => Answer::Exit(ExitId(id)),
             _ if word == lower::UNWOUND => Answer::Unwound,
+            _ if word == lower::INTERRUPTED => Answer::Interrupted,
             _ => Answer::Abandoned,
         }
     }

@@ -161,6 +161,9 @@ pub(crate) struct Trace<P: Pages = Native> {
     pub(crate) exits: Box<[Exit]>,
     /// The exit it ends through where it does not loop.
     pub(crate) leaves: Option<ExitId>,
+    /// Where a loop whose interrupt test takes php's stub stands its
+    /// frame as it answers `lower::INTERRUPTED`: its header's opline.
+    pub(crate) stub: Option<OplineIdx>,
     #[cfg_attr(
         not(test),
         expect(
@@ -548,6 +551,7 @@ impl<P: Pages> TraceTable<P> {
             root: admitted.root,
             exits: built,
             leaves: compiled.leaves,
+            stub: compiled.stub,
             map_ptrs: compiled.map_ptrs,
             marks: compiled.marks,
             fuzzed: compiled.fuzzed,

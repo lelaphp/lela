@@ -100,6 +100,7 @@ fn body(len: usize) -> Compiled {
         align: 16,
         exits: Box::new([]),
         leaves: None,
+        stub: None,
         fuzzed: crate::lower::Fuzzed::default(),
         map_ptrs: Box::new([]),
         marks: Box::new([]),

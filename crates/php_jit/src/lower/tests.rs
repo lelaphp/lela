@@ -12,11 +12,11 @@ use std::path::PathBuf;
 
 use cranelift_codegen::isa;
 
-use super::{ABANDONED, Backend, INTERRUPT_AT, Kernel, Symbols, UNWOUND, Unsupported};
+use super::{ABANDONED, Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupported};
 use crate::table::TraceName;
 use crate::testing::goldens::{self, FIB, Fixture, MANDELBROT, NBODY, SPECTRALNORM, held};
 use crate::testing::{self, Lane, policy};
-use crate::types::{End, Op, TraceIr};
+use crate::types::{End, Interrupt, Op, TraceIr};
 
 /// Where `lower`'s goldens are.
 fn goldens_dir() -> PathBuf {
@@ -59,7 +59,12 @@ fn lowered(fixture: Fixture) -> Result<TraceIr, String> {
         .to_string();
     held(&goldens_dir().join(format!("{}.clif", fixture.name)), &clif)?;
     if let End::Loop(header) = ir.end {
-        interrupt_test(&clif, header.interrupt.0)?;
+        let answers = match header.interrupt {
+            Interrupt::Exit(exit) => i64::from(exit.0),
+            // CLIF writes an `i32` constant signed.
+            Interrupt::Stub => i64::from(i32::from_ne_bytes(INTERRUPTED.to_ne_bytes())),
+        };
+        interrupt_test(&clif, answers)?;
     }
     let host = Backend::new(&policy(&[]), symbols()).map_err(|e| format!("{e:?}"))?;
     for backend in [&backend, &host] {
@@ -81,8 +86,8 @@ fn lowered(fixture: Fixture) -> Result<TraceIr, String> {
 /// The interrupt test in a loop's CLIF (`jit-design.md` §4.3): the
 /// interrupt pointer loaded from the `ExitCtx` once, and the byte it
 /// points to loaded and branched on to a block that answers the header's
-/// interrupt exit.
-fn interrupt_test(clif: &str, exit: u16) -> Result<(), String> {
+/// interrupt exit, or [`INTERRUPTED`] where the test takes php's stub.
+fn interrupt_test(clif: &str, exit: i64) -> Result<(), String> {
     let lines: Vec<&str> = clif.lines().map(instruction).collect();
     let pointer = lines
         .iter()
@@ -108,7 +113,7 @@ fn interrupt_test(clif: &str, exit: u16) -> Result<(), String> {
         .next()
         .unwrap_or_default()
         .trim();
-    if answer(clif, target) == Some(i64::from(exit)) {
+    if answer(clif, target) == Some(exit) {
         Ok(())
     } else {
         Err(format!(

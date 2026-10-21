@@ -44,12 +44,12 @@ use php_engine::tier::FuncRef;
 use php_heap::{Arr, ROOM_BYTES, Ref, Zval, ZvalType};
 use php_unit::{MapPtrOffset, Opcode, OplineIdx};
 
-use super::{ABANDONED, INTERRUPT_AT, Kernel, Stood, Symbols, UNWOUND, located};
+use super::{ABANDONED, INTERRUPT_AT, INTERRUPTED, Kernel, Stood, Symbols, UNWOUND, located};
 use crate::record::Stop;
 use crate::types::{
     Abort, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home, Imm,
-    Layout, Leave, Line, Op, OpId, Operand, Repeat, Slot, Store, Stored, TraceIr, Types, UnwindId,
-    ValueId, cannot_raise,
+    Interrupt, Layout, Leave, Line, Op, OpId, Operand, Repeat, Slot, Store, Stored, TraceIr, Types,
+    UnwindId, ValueId, cannot_raise,
 };
 
 /// A layout offset as the immediate a load or a store takes.
@@ -244,6 +244,9 @@ struct Emit<'a> {
     unwinds: Vec<Option<Block>>,
     /// The block a kernel's refusal with no exit to take answers from.
     abandon: Option<Block>,
+    /// The block the interrupt test answers [`INTERRUPTED`] from, where
+    /// it takes php's stub.
+    stub: Option<Block>,
     /// The frame the trace runs in now.
     running: Frame,
     /// Under `jit.mode=exit-fuzz`, the bytes each guard fails once by.
@@ -280,6 +283,7 @@ impl<'a> Emit<'a> {
             exits: vec![None; ir.exits.len()],
             unwinds: vec![None; ir.unwinds.len()],
             abandon: None,
+            stub: None,
             running: Frame::ROOT,
             fuzz: None,
             fuzzed_sites: 0,
@@ -331,7 +335,10 @@ impl<'a> Emit<'a> {
                 self.b.switch_to_block(head);
                 self.b.set_srcloc(located(header.at.index()));
                 let flag = self.b.ins().load(I8, trusted(), interrupt, 0);
-                self.leave_if(flag, header.interrupt)?;
+                match header.interrupt {
+                    Interrupt::Exit(exit) => self.leave_if(flag, exit)?,
+                    Interrupt::Stub => self.stub_if(flag)?,
+                }
                 for at in split..self.ir.ops.len() {
                     self.op(at)?;
                 }
@@ -657,6 +664,27 @@ impl<'a> Emit<'a> {
         Ok(block)
     }
 
+    /// Leave for php's interrupt stub where `cond` is not zero, or under
+    /// exit-fuzz on the test's first pass: [`INTERRUPTED`], with nothing
+    /// to store, as `types` takes the stub only where nothing stands in a
+    /// register at the test.
+    fn stub_if(&mut self, cond: Value) -> Result<(), Abort> {
+        let cond = self.fuzzed(cond)?;
+        let to = if let Some(block) = self.stub {
+            block
+        } else {
+            let block = self.b.create_block();
+            self.b.set_cold_block(block);
+            self.stub = Some(block);
+            block
+        };
+        let on = self.b.create_block();
+        self.b.ins().brif(cond, to, &[], on, &[]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
+        Ok(())
+    }
+
     /// The block a kernel's refusal answers [`ABANDONED`] from.
     fn abandoned(&mut self) -> Block {
         if let Some(block) = self.abandon {
@@ -707,6 +735,12 @@ impl<'a> Emit<'a> {
             self.b.switch_to_block(block);
             self.b.seal_block(block);
             let answer = self.b.ins().iconst(I32, i64::from(ABANDONED));
+            self.b.ins().return_(&[answer]);
+        }
+        if let Some(block) = self.stub {
+            self.b.switch_to_block(block);
+            self.b.seal_block(block);
+            let answer = self.b.ins().iconst(I32, i64::from(INTERRUPTED));
             self.b.ins().return_(&[answer]);
         }
         Ok(())

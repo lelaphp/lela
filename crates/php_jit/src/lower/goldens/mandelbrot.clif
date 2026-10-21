@@ -369,6 +369,6 @@ function u0:0(i64, i64) -> i32 system_v {
                                     return v175  ; v175 = 22
 
                                 block2 cold:
-                                    v176 = iconst.i32 23
-                                    return v176  ; v176 = 23
+                                    v176 = iconst.i32 -3
+                                    return v176  ; v176 = -3
 }

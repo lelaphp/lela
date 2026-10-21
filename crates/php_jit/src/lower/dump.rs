@@ -27,8 +27,9 @@ use php_heap::ZvalType;
 
 use crate::record::func_name as func;
 use crate::types::{
-    Check, Constant, Def, End, ExitSpec, Form, Grows, Guard, GuardAt, Home, Landing, Layout, Op,
-    OpId, Operand, Place, Read, Repeat, Slot, Store, Stored, TraceIr, Types, Unwind, ValueId,
+    Check, Constant, Def, End, ExitSpec, Form, Grows, Guard, GuardAt, Home, Interrupt, Landing,
+    Layout, Op, OpId, Operand, Place, Read, Repeat, Slot, Store, Stored, TraceIr, Types, Unwind,
+    ValueId,
 };
 
 /// The text of `ir`.
@@ -78,12 +79,11 @@ impl<'a> Dump<'a> {
                     Repeat::Call => "recursive call",
                     Repeat::Return => "recursive return",
                 };
-                let interrupt = header.interrupt.0;
-                writeln!(
-                    text,
-                    "loop at {}, {repeat}, interrupt exit {interrupt}",
-                    at.0
-                )?;
+                let interrupt = match header.interrupt {
+                    Interrupt::Exit(exit) => format!("exit {}", exit.0),
+                    Interrupt::Stub => "stub".to_owned(),
+                };
+                writeln!(text, "loop at {}, {repeat}, interrupt {interrupt}", at.0)?;
                 for (id, value) in ids(self.ir) {
                     if let Def::Phi { entry, back } = value.def {
                         let phi = self.value(id);
