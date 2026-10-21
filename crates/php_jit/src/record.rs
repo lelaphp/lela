@@ -367,6 +367,10 @@ pub(crate) struct Ended {
     /// header or a call's entry, which php's interpreter, going on there,
     /// enters at once, the trace being that opline's handler.
     pub(crate) stood: Option<TraceId>,
+    /// Whether the recording stopped in a frame a call it followed
+    /// pushed, at the opline its activation stood it at, where php's
+    /// interpreter goes on through the entry's handler.
+    pub(crate) activated: bool,
 }
 
 /// php's `ZEND_JIT_TRACE_MAX_CALL_DEPTH`: how many calls deep a trace
@@ -764,6 +768,8 @@ struct Recorder<'p> {
     stood: Option<TraceId>,
     /// Where the recording linked, [`TraceRecord::link_at`].
     link_at: Option<(FuncRef, OplineIdx)>,
+    /// Whether it stopped at a frame's activation, [`Ended::activated`].
+    activated: bool,
 }
 
 /// The word a recording was claimed on: a root's, by its op array and
@@ -817,6 +823,7 @@ impl<'p> Recorder<'p> {
             rerooted: None,
             stood: None,
             link_at: None,
+            activated: false,
         }
     }
 
@@ -915,7 +922,7 @@ impl<'p> Recorder<'p> {
                 }
                 Stepped::Pushed(callee) => {
                     frame = callee;
-                    self.pushed(req, view, callee, &mut func)
+                    self.activating(req, view, callee, &mut func)
                 }
                 Stepped::Popped(caller) => {
                     frame = caller;
@@ -995,6 +1002,7 @@ impl<'p> Recorder<'p> {
         Ended {
             rerooted: self.rerooted,
             stood: self.stood,
+            activated: self.activated,
             ..ended(at, true)
         }
     }
@@ -1044,6 +1052,20 @@ impl<'p> Recorder<'p> {
             return Went::Stopped(Stop::TooLong);
         }
         Went::On
+    }
+
+    /// [`Recorder::pushed`], the recording's stop there kept as one at
+    /// the callee's activation ([`Ended::activated`]).
+    fn activating(
+        &mut self,
+        req: &Request,
+        view: &mut UnitView,
+        callee: FrameRef,
+        func: &mut FuncRef,
+    ) -> Went {
+        let went = self.pushed(req, view, callee, func);
+        self.activated = matches!(went, Went::Stopped(_));
+        went
     }
 
     /// A call followed into `callee`, php's "Enter into function": the
@@ -1444,6 +1466,7 @@ fn ended(at: FrameRef, stepped: bool) -> Ended {
         stepped,
         rerooted: None,
         stood: None,
+        activated: false,
     }
 }
 

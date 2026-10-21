@@ -678,7 +678,7 @@ pub(crate) fn hot(
     shared: &Shared,
 ) -> Flow {
     let mut stepped = false;
-    let (flow, stood) = loop {
+    let (flow, stood, activated) = loop {
         let start = claim.start();
         let behind = match begins(req, frame, start, claim.holder()) {
             Ok(Begins::Behind(condition)) => Some(condition),
@@ -698,7 +698,7 @@ pub(crate) fn hot(
         // A frame that shows no op array has no place to record from.
         let Some(name) = started(req, shared, frame, next, start, behind) else {
             policy::settle(claim, &Outcome::Released);
-            break (resumed(frame, stepped), None);
+            break (resumed(frame, stepped), None, false);
         };
         if let Some(refusal) = refused(table, start) {
             let recorded = record::refused(req, frame, start, refusal);
@@ -712,7 +712,7 @@ pub(crate) fn hot(
                 },
                 GoesOn::Past,
             );
-            break (resumed(frame, stepped), None);
+            break (resumed(frame, stepped), None, false);
         }
         let entered = side_entered(table, start);
         let opening = record::Opening { entered, behind };
@@ -733,7 +733,7 @@ pub(crate) fn hot(
         stepped |= ended.stepped;
         let stop = recorded.record.stop;
         let Some((rooted, name)) = rerooted(req, shared, claim, name, &ended) else {
-            break (resumed(ended.at, stepped), None);
+            break (resumed(ended.at, stepped), None, ended.activated);
         };
         let job = Job {
             recorded,
@@ -763,34 +763,41 @@ pub(crate) fn hot(
         let Some(inner) = repeat else {
             // php's interpreter goes on at the opline the recording
             // stopped at, whose handler is the trace compiled there: the
-            // one just published where it repeats, at its loop's header
-            // or its recursive return's landing, or the one the recording
-            // stopped at.
+            // one just published where it repeats, at its loop's header,
+            // its recursive call's entry or its recursive return's
+            // landing, or the one the recording stopped at.
             let stood = match (outcome, stop) {
-                (Some(Outcome::Published(id)), Stop::Loop | Stop::RecursiveRet) => Some(id),
+                (
+                    Some(Outcome::Published(id)),
+                    Stop::Loop | Stop::RecursiveCall | Stop::RecursiveRet,
+                ) => Some(id),
                 _ => ended.stood,
             };
-            break (resumed(ended.at, stepped), stood.map(|id| (ended.at, id)));
+            let stood = stood.map(|id| (ended.at, id));
+            break (resumed(ended.at, stepped), stood, ended.activated);
         };
         frame = ended.at;
         claim = inner;
     };
     written(req, shared, &TraceEvent::Done);
-    went_on(req, shared, flow, stood)
+    went_on(req, shared, flow, stood, activated)
 }
 
 /// Where a recording that answered `flow` stopped, php's interpreter
 /// goes on through the handler of the opline it stopped at: `stood`, the
-/// compiled trace whose root it stopped at, entered; otherwise, where a
-/// return landed, the landing's word visited.
+/// compiled trace whose root it stopped at, entered; otherwise, where it
+/// stopped at a call's activation, the entry's word visited as
+/// `Site::Entry` visits it, and where a return landed, the landing's.
 fn went_on(
     req: &mut Request,
     shared: &Shared,
     flow: Flow,
     stood: Option<(FrameRef, TraceId)>,
+    activated: bool,
 ) -> Flow {
     let ran = match (stood.filter(|(at, id)| opens(req, *at, *id, shared)), &flow) {
         (Some((at, id)), _) => run(req, at, id, shared),
+        (None, Flow::Resume(at)) if activated => safepoint(req, *at, Site::Entry),
         (None, Flow::Resume(at)) => match landing(req, shared, *at, None) {
             Visited::Continue => Flow::Continue,
             Visited::Enter(id) => run(req, *at, id, shared),
