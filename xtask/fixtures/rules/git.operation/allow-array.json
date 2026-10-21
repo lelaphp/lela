@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cd /var/empty/wt && P=(AGENTS.md) && git add -- \"${P[@]}\" && git commit -F m -- \"${P[@]}\"","description":"Commit by pathspec in a worktree of its own, the paths an array (#3165)"}}

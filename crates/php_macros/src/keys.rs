@@ -196,3 +196,97 @@ fn key(trees: Vec<TokenTree>) -> syn::Result<Key> {
     };
     Ok(Key { name, value })
 }
+
+#[cfg(test)]
+mod tests {
+    use quote::quote;
+
+    use super::{Form, Keys};
+    use crate::refused;
+
+    #[test]
+    fn a_key_list_that_does_not_split_into_keys_is_refused() {
+        for (tokens, message) in [
+            (quote!("x"), "php_macros: a key is an identifier"),
+            (quote!(, a), "php_macros: an empty key"),
+            (quote!(a,, b), "php_macros: an empty key"),
+            (quote!(arity =), "php_macros: a value follows `=`"),
+            (
+                quote!(arity manual),
+                "php_macros: a key is `name`, `name = ..` or `name(..)`",
+            ),
+            (
+                quote!(namespace(Dom) extra),
+                "php_macros: a key is `name`, `name = ..` or `name(..)`",
+            ),
+        ] {
+            assert_eq!(refused(Keys::parse(tokens.clone())), message, "{tokens}");
+        }
+    }
+
+    #[test]
+    fn a_php_attribute_without_a_key_list_is_refused() {
+        for item in [
+            quote!(
+                #[php]
+                fn f() {}
+            ),
+            quote!(
+                #[php = 1]
+                fn f() {}
+            ),
+        ] {
+            let mut function: syn::ItemFn = syn::parse2(item.clone()).expect("the item parses");
+            assert_eq!(
+                refused(Keys::take(&mut function.attrs)),
+                "php_macros: `#[php(..)]` takes keys",
+                "{item}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_the_item_does_not_take_as_written_is_refused() {
+        let allowed = [
+            ("final", Form::Flag),
+            ("arity", Form::Eq),
+            ("namespace", Form::List),
+            ("payload", Form::FlagOrEq),
+            ("deprecated", Form::FlagOrList),
+            ("attribute", Form::List),
+        ];
+        for (tokens, message) in [
+            (
+                quote!(bogus),
+                "php_macros: `bogus` is not a key of a method, which takes final, arity, namespace, payload, deprecated, attribute",
+            ),
+            (quote!(final, final), "php_macros: `final` is given twice"),
+            (quote!(final = 1), "php_macros: `final` is written `name`"),
+            (quote!(arity), "php_macros: `arity` is written `name = ..`"),
+            (
+                quote!(namespace),
+                "php_macros: `namespace` is written `name(..)`",
+            ),
+            (
+                quote!(payload(T)),
+                "php_macros: `payload` is written `name` or `name = ..`",
+            ),
+            (
+                quote!(deprecated = 1),
+                "php_macros: `deprecated` is written `name` or `name(..)`",
+            ),
+        ] {
+            let keys = Keys::parse(tokens.clone()).expect("the keys split");
+            assert_eq!(
+                refused(keys.allow(&allowed, "a method")),
+                message,
+                "{tokens}"
+            );
+        }
+        let keys = Keys::parse(quote!(attribute(A), attribute(B))).expect("the keys split");
+        assert!(
+            keys.allow(&allowed, "a method").is_ok(),
+            "`attribute` is given more than once"
+        );
+    }
+}

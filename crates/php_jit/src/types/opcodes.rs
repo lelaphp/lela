@@ -650,15 +650,18 @@ fn named(op: &Opline, code: &OpArray) -> bool {
 /// for (`ADD_OP1_TRACE_GUARD`, `ADD_OP2_TRACE_GUARD`,
 /// `ADD_OP1_DATA_TRACE_GUARD`), in its order.
 ///
-/// One case is not php's: a division, `DIV` and `ASSIGN_OP`'s, is guarded
-/// as a product is, where php's switch leaves it out (`// case ZEND_DIV:
-/// // TODO: check for division by zero ???`). php types a division's
-/// operands from its inference over the whole function, so a loop's
-/// variable `$i` read by `3.0 / $i` is a long there with no guard; this tier
-/// keeps no such inference, so with no guard the division sees the
-/// loop's phi as anything and is stepped on every turn (#3073, #3111). Its
-/// inline division leaves through its exit at a zero divisor, so the
-/// guard narrows nothing php's TODO is about.
+/// Where php types an operand from its inference over the whole
+/// function, which this tier does not keep (`jit-design.md` §4.2,
+/// revision 26), the operand is guarded here. A division is the first
+/// such case: `DIV` and `ASSIGN_OP`'s are guarded as a product is, where
+/// php's switch leaves them out (`// case ZEND_DIV: // TODO: check for
+/// division by zero ???`), typing them from that inference, so a loop's
+/// variable `$i` read by `3.0 / $i` is a long there with no guard; with
+/// no guard here the division sees the loop's phi as anything and is
+/// stepped on every turn (#3073). Its inline division leaves through its
+/// exit at a zero divisor, so the guard narrows nothing php's TODO is
+/// about. The guard retires if the tier ever keeps php's inference
+/// (#3149; #3111's ruling).
 #[allow(
     clippy::too_many_lines,
     clippy::match_same_arms,

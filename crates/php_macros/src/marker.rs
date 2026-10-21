@@ -30,6 +30,7 @@ mod tests {
     use quote::quote;
 
     use super::expand;
+    use crate::refused;
 
     #[test]
     fn the_item_passes_through_under_a_header_and_a_symbol() {
@@ -42,27 +43,26 @@ mod tests {
             quote!("ext/random/php_random.h", "php_random_default_algo"),
             item.clone(),
         )
-        .unwrap();
+        .expect("the item expands");
         assert_eq!(expanded.to_string(), item.to_string());
     }
 
     #[test]
     fn anything_but_two_named_strings_is_refused() {
-        for attribute in [
-            quote!(),
-            quote!("ext/random/php_random.h"),
-            quote!("ext/random/php_random.h", ""),
-            quote!("a.h", "b", "c"),
-            quote!(php_random_default_algo),
+        let shape = "php_macros: `#[mirrors]` takes the header, from php-src's root, and the symbol it declares: `#[mirrors(\"ext/random/php_random.h\", \"php_random_default_algo\")]`";
+        for (attribute, message) in [
+            (quote!(), shape),
+            (quote!("ext/random/php_random.h"), shape),
+            (quote!("ext/random/php_random.h", ""), shape),
+            (quote!("a.h", "b", "c"), shape),
+            (quote!(php_random_default_algo), "expected string literal"),
         ] {
-            assert!(
-                expand(
-                    attribute.clone(),
-                    quote!(
-                        fn f() {}
-                    )
-                )
-                .is_err(),
+            let item = quote!(
+                fn f() {}
+            );
+            assert_eq!(
+                refused(expand(attribute.clone(), item)),
+                message,
                 "{attribute}"
             );
         }

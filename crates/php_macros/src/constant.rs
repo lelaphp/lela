@@ -140,3 +140,60 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> syn::Result<Tokens> {
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use quote::quote;
+
+    use super::expand;
+    use crate::refused;
+
+    #[test]
+    fn what_is_no_constant_or_constant_module_is_refused() {
+        for (attribute, item, message) in [
+            (
+                quote!(deprecated),
+                quote!(
+                    mod m {}
+                ),
+                "php_macros: a constant module's constants each carry their own `deprecated`",
+            ),
+            (
+                quote!(),
+                quote!(
+                    mod m;
+                ),
+                "php_macros: `#[php_const]` is on an inline module",
+            ),
+            (
+                quote!(),
+                quote!(
+                    mod m {
+                        fn F(x: i64) -> i64 {
+                            x
+                        }
+                    }
+                ),
+                "php_macros: a computed constant takes nothing",
+            ),
+            (
+                quote!(),
+                quote!(
+                    mod m {
+                        struct S;
+                    }
+                ),
+                "php_macros: a constant module holds `const` items, computed `fn`s and `use`s",
+            ),
+            (
+                quote!(),
+                quote!(
+                    fn f() {}
+                ),
+                "php_macros: `#[php_const]` is on a `const` or an inline `mod`",
+            ),
+        ] {
+            assert_eq!(refused(expand(attribute, item.clone())), message, "{item}");
+        }
+    }
+}

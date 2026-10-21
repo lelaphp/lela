@@ -393,15 +393,15 @@ impl<P: Pages> std::fmt::Debug for TraceTable<P> {
 }
 
 impl<P: Pages> TraceTable<P> {
-    /// An empty table under `policy`'s bounds, its arena mapped as
-    /// `opcache.jit_buffer_size` asks, in whole chunks and at least one,
-    /// its `PERF` lines and `PERF_DUMP` records written as
+    /// An empty table under `policy`'s bounds, its arena as many bytes as
+    /// php's buffer, `opcache.jit_buffer_size` rounded up to the page
+    /// ([`code::capacity`], #3112's ruling), its `PERF` lines and `PERF_DUMP` records written as
     /// the engine's `outputs` started them. An arena that cannot be
     /// mapped is none: each publish numbers its trace and keeps no code
     /// (revision 27).
     ///
-    /// A buffer smaller than a chunk is one chunk, where php rounds it up
-    /// to the page; a trace that fits both is compiled by both:
+    /// A buffer smaller than a chunk holds what php's holds, so a trace
+    /// that fits php's fits this one:
     ///
     /// ```php
     /// function twice($n) { return $n * 2; }
@@ -415,17 +415,116 @@ impl<P: Pages> TraceTable<P> {
     /// ---- TRACE 1 stop (return)
     /// ---- TRACE 1 compiled
     /// ```
+    ///
+    /// A loop php's buffer cannot hold is a compile that finds no room,
+    /// php's `COMPILER_ERROR`, at each of its sixteen attempts, which
+    /// blacklist it (#3015's and #3112's rulings):
+    ///
+    /// ```php
+    /// $s = 0;
+    /// for ($i = 0; $i < 100; $i++) {
+    ///     $s += $i * 3; $s += $i * 4; $s += $i * 5; $s += $i * 6; $s += $i * 7;
+    ///     $s += $i * 8; $s += $i * 9; $s += $i * 10; $s += $i * 11; $s += $i * 12;
+    ///     $s += $i * 13; $s += $i * 14; $s += $i * 15; $s += $i * 16; $s += $i * 17;
+    ///     $s += $i * 18; $s += $i * 19; $s += $i * 20; $s += $i * 21; $s += $i * 22;
+    ///     $s += $i * 23; $s += $i * 24; $s += $i * 25; $s += $i * 26; $s += $i * 27;
+    ///     $s += $i * 28; $s += $i * 29; $s += $i * 30; $s += $i * 31; $s += $i * 32;
+    ///     $s += $i * 33; $s += $i * 34; $s += $i * 35; $s += $i * 36; $s += $i * 37;
+    ///     $s += $i * 38; $s += $i * 39; $s += $i * 40; $s += $i * 41; $s += $i * 42;
+    ///     $s += $i * 43; $s += $i * 44; $s += $i * 45; $s += $i * 46; $s += $i * 47;
+    ///     $s += $i * 48; $s += $i * 49; $s += $i * 50; $s += $i * 51; $s += $i * 52;
+    ///     $s += $i * 53; $s += $i * 54; $s += $i * 55; $s += $i * 56; $s += $i * 57;
+    ///     $s += $i * 58; $s += $i * 59; $s += $i * 60; $s += $i * 61; $s += $i * 62;
+    ///     $s += $i * 63; $s += $i * 64; $s += $i * 65; $s += $i * 66; $s += $i * 67;
+    ///     $s += $i * 68; $s += $i * 69; $s += $i * 70; $s += $i * 71; $s += $i * 72;
+    ///     $s += $i * 73; $s += $i * 74; $s += $i * 75; $s += $i * 76; $s += $i * 77;
+    ///     $s += $i * 78; $s += $i * 79; $s += $i * 80; $s += $i * 81; $s += $i * 82;
+    ///     $s += $i * 83; $s += $i * 84; $s += $i * 85; $s += $i * 86; $s += $i * 87;
+    ///     $s += $i * 88; $s += $i * 89; $s += $i * 90; $s += $i * 91; $s += $i * 92;
+    ///     $s += $i * 93; $s += $i * 94; $s += $i * 95; $s += $i * 96; $s += $i * 97;
+    ///     $s += $i * 98; $s += $i * 99; $s += $i * 100; $s += $i * 101; $s += $i * 102;
+    /// }
+    /// echo $s, "\n";
+    /// ```
+    /// ```expect regime=jit-small-buffer process
+    /// 25987500
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:2
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) $main() %s:3
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 abort (JIT compilation error)
+    ///
+    /// ---- TRACE 1 start (loop) $main() %s:3
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 abort (JIT compilation error)
+    ///
+    /// ---- TRACE 1 start (loop) $main() %s:3
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 abort (JIT compilation error)
+    ///
+    /// ---- TRACE 1 start (loop) $main() %s:3
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 abort (JIT compilation error)
+    ///
+    /// ---- TRACE 1 start (loop) $main() %s:3
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 abort (JIT compilation error)
+    ///
+    /// ---- TRACE 1 start (loop) $main() %s:3
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 abort (JIT compilation error)
+    ///
+    /// ---- TRACE 1 start (loop) $main() %s:3
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 abort (JIT compilation error)
+    ///
+    /// ---- TRACE 1 start (loop) $main() %s:3
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 abort (JIT compilation error)
+    ///
+    /// ---- TRACE 1 start (loop) $main() %s:3
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 abort (JIT compilation error)
+    ///
+    /// ---- TRACE 1 start (loop) $main() %s:3
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 abort (JIT compilation error)
+    ///
+    /// ---- TRACE 1 start (loop) $main() %s:3
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 abort (JIT compilation error)
+    ///
+    /// ---- TRACE 1 start (loop) $main() %s:3
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 abort (JIT compilation error)
+    ///
+    /// ---- TRACE 1 start (loop) $main() %s:3
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 abort (JIT compilation error)
+    ///
+    /// ---- TRACE 1 start (loop) $main() %s:3
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 abort (JIT compilation error)
+    ///
+    /// ---- TRACE 1 start (loop) $main() %s:3
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 abort (JIT compilation error)
+    ///
+    /// ---- TRACE 1 start (loop) $main() %s:3
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 abort (JIT compilation error)
+    /// ---- TRACE 1 blacklisted
+    ///
+    /// ```
     pub(crate) fn new(policy: &Policy, outputs: &Outputs) -> TraceTable<P> {
         TraceTable::with_perf(policy, Perf::of(outputs))
     }
 
     /// [`TraceTable::new`] with the writers given.
     pub(crate) fn with_perf(policy: &Policy, perf: Perf) -> TraceTable<P> {
-        let chunk = u64::try_from(code::CHUNK).unwrap_or(u64::MAX);
-        let chunks = usize::try_from(policy.buffer_size() / chunk)
-            .unwrap_or(usize::MAX)
-            .max(1);
-        let arena = Arena::new(chunks.saturating_mul(code::CHUNK)).ok();
+        let arena = Arena::new(code::capacity(policy.buffer_size())).ok();
         let bounds = Bounds {
             traces: policy.max_root_traces().min(TraceId::LIMIT),
             sides: policy.max_side_traces(),
