@@ -14,17 +14,18 @@
 //! model reads.
 //!
 //! The rule is one: a file is put back only in the checkout the call ran
-//! in, only where its line can write it, and never where an operation in
-//! progress there has staged it; every other file that moved is kept as
-//! it stands and named. The checkout is where the call acts, its `cwd`
-//! moved by the line's leading `cd`, `pushd` and `popd`, or by git's `-C`
-//! where every command past them is git and names one directory, at the
-//! top of its worktree ([`operation::ran_in`]), the resolution `where =
-//! "operating"` reads (#2607), and not the hook's own: a subagent's shell
-//! starts in the main checkout and `cd`s into its worktree, so the hook's
-//! checkout is often one the call never touched, and another session's
-//! merge may stand there (#2597). The line's words are read where its
-//! shell stands, the `cwd` moved by those changes.
+//! in, only where its line can write it, never where history carries it,
+//! and never where an operation in progress there has staged it; every
+//! other file that moved is kept as it stands and named. The checkout is
+//! where the call acts, its `cwd` moved by the line's leading `cd`,
+//! `pushd` and `popd`, or by git's `-C` where every command past them is
+//! git and names one directory, at the top of its worktree
+//! ([`operation::ran_in`]), the resolution `where = "operating"` reads
+//! (#2607), and not the hook's own: a subagent's shell starts in the main
+//! checkout and `cd`s into its worktree, so the hook's checkout is often
+//! one the call never touched, and another session's merge may stand
+//! there (#2597). The line's words are read where its shell stands, the
+//! `cwd` moved by those changes.
 //!
 //! What it leaves alone, on purpose:
 //!
@@ -39,6 +40,16 @@
 //!   `HEAD`, it is one of `done`'s unmet conditions, which is where a
 //!   binary that hides the path is held; a person's lost edit would be
 //!   held by nothing.
+//! - A file history carries (#3220): `HEAD` moved during the call, its
+//!   blob for the file moved with it, and the file stands at the blob
+//!   `HEAD` holds now, as another session's merge or commit in the
+//!   checkout leaves it ([`landed`]). Putting it back would leave the
+//!   checkout behind `HEAD`, and the next commit that stages it would
+//!   undo the merge. It is kept and named, and it settles nothing: no
+//!   reading, no record. What a commit carries is `done`'s to judge over
+//!   the diff. A write back to `HEAD`'s blob where `HEAD`'s blob for the
+//!   file did not move, a restore, is no change history made: it is
+//!   judged as any write is.
 //! - A call with no record of its own: no tool-use id, a record a build
 //!   older than this one never wrote, a record already taken. Nothing is
 //!   put back without the blob it was before, and stderr says so.
@@ -117,6 +128,11 @@ struct Record {
 #[derive(Debug, Serialize, Deserialize)]
 struct Guarded {
     checkout: PathBuf,
+    /// The commit `HEAD` stood at as the call began, which [`landed`]
+    /// reads history from; `None` for an unborn `HEAD`, or in a record an
+    /// older build wrote.
+    #[serde(default)]
+    head: Option<String>,
     /// The rule's text in this checkout's manifest.
     text: String,
     /// Each tracked file in scope by its path, and its blob id on disk;
@@ -149,14 +165,19 @@ enum Verdict {
     /// The line wrote it as the person approved in the session: kept, and
     /// named (#2247).
     Approved,
+    /// History carries it, a commit `HEAD` moved to during the call
+    /// ([`landed`]): kept, named, and recorded nowhere (#3220).
+    Landed,
 }
 
 impl Verdict {
-    /// The reading's status: a denial fails, a kept change is a note.
-    fn status(self) -> Status {
+    /// The reading's status: a denial fails, a kept change is a note, and
+    /// a change history carries writes none.
+    fn status(self) -> Option<Status> {
         match self {
-            Verdict::PutBack => Status::Fail,
-            Verdict::Kept | Verdict::Approved => Status::Pass,
+            Verdict::PutBack => Some(Status::Fail),
+            Verdict::Kept | Verdict::Approved => Some(Status::Pass),
+            Verdict::Landed => None,
         }
     }
 }
@@ -277,15 +298,17 @@ fn began(call: &Call, file: Option<&Path>) -> Option<SystemTime> {
 }
 
 /// Every file of the record in the checkout `held` whose blob moved and
-/// that steer did not write: put back where the call's line can write it
-/// and no operation in progress staged it, kept otherwise. A word of the
-/// line is read where its shell stands ([`shell_at`]).
+/// that steer did not write: kept where history carries it ([`landed`]),
+/// put back where the call's line can write it and no operation in
+/// progress staged it, kept otherwise. A word of the line is read where
+/// its shell stands ([`shell_at`]).
 fn sort_moved(record: &Record, call: &Call, held: &Path) -> Vec<Moved> {
     let steering = runs_steer(&record.command);
     let line = argv::Line::read(&record.command);
     let mut moved = Vec::new();
     for guarded in record.checkouts.iter().filter(|g| g.checkout == held) {
         let cwd = shell_at(call, &guarded.checkout, &line);
+        let tip = operation::head(&guarded.checkout);
         for (path, was) in &guarded.blobs {
             let now = on_disk(&guarded.checkout.join(path));
             if now == *was {
@@ -294,15 +317,24 @@ fn sort_moved(record: &Record, call: &Call, held: &Path) -> Vec<Moved> {
             if steering && steered(&guarded.checkout, path, was.as_deref(), record.at) {
                 continue;
             }
+            let landed = landed(guarded, tip.as_deref(), path, now.as_deref());
             let place = OnDisk::new(&cwd, &guarded.checkout, path);
-            let writes = writes::can_write(&line, &place);
+            let writes = landed.is_none() && writes::can_write(&line, &place);
             let approved = writes
                 .then(|| approved(&guarded.checkout, path, was.as_deref(), call))
                 .flatten();
             let staged = writes
                 .then(|| operation::staged(&guarded.checkout, path))
                 .flatten();
-            let (verdict, said) = if let Some(admission) = &approved {
+            let (verdict, said) = if let Some(moved_to) = landed {
+                let before = kept::before_the_call(was.as_deref());
+                let said = format!(
+                    "{path}: changed while the call ran to the blob HEAD holds for it, HEAD \
+                     having moved to {moved_to} during the call: history carries the change, so \
+                     it is kept as it stands and settles nothing; {before}"
+                );
+                (Verdict::Landed, said)
+            } else if let Some(admission) = &approved {
                 (Verdict::Approved, format!("{path}: {}", admission.said()))
             } else if let Some(operation) = staged {
                 let why = format!(
@@ -348,6 +380,22 @@ pub(super) fn written(root: &Path, call: &Call, line: &argv::Line) -> (PathBuf, 
         .filter(|path| writes::can_write(line, &OnDisk::new(&cwd, &checkout, path)))
         .collect();
     (checkout, paths)
+}
+
+/// The commit `HEAD` moved to during the call, `tip` now, where history
+/// carries the file at `path` as it stands, `now` its blob on disk: the
+/// commit `HEAD` stood at as the call began is not `tip`, the two hold
+/// different blobs for the file, and the file stands at `tip`'s, absent
+/// where `tip` holds none (#3220). `None` where any of it does not hold,
+/// or git cannot say, so the file is judged as any write is.
+fn landed(guarded: &Guarded, tip: Option<&str>, path: &str, now: Option<&str>) -> Option<String> {
+    let (began, tip) = (guarded.head.as_deref()?, tip?);
+    if began == tip {
+        return None;
+    }
+    let blob = |commit: &str| kept::blob_at(&guarded.checkout, commit, path).ok();
+    let holds = blob(tip)?;
+    (blob(began)? != holds && holds.as_deref() == now).then(|| tip.to_owned())
 }
 
 /// The person's approval of the file the call left at `path`, where it
@@ -446,10 +494,13 @@ fn record_moved(root: &Path, call: &Call, moved: &[Moved]) -> Result<()> {
     for one in moved {
         // After the file was put back or kept: the stamp is over it as it
         // stands now.
+        let Some(status) = one.verdict.status() else {
+            continue;
+        };
         let now = Snapshot::disk_over(&one.checkout, Path::new(&one.path))?;
         let mut reading = Reading::stamped_over(INSTRUMENT, RULE, &now, Path::new(&one.path))?;
         RULE.clone_into(&mut reading.rule);
-        reading.status = one.verdict.status();
+        reading.status = status;
         reading.message = format!("{words}: {}", one.said);
         reading.session.clone_from(&call.session_id);
         Store::of_workspace(&one.checkout).record(&[reading])?;
@@ -625,6 +676,7 @@ fn guard(checkout: &Path) -> Result<Option<Guarded>> {
     }
     Ok(Some(Guarded {
         checkout: checkout.to_path_buf(),
+        head: operation::head(checkout),
         text,
         blobs,
     }))
