@@ -11,21 +11,22 @@ use super::*;
 #[test]
 fn an_empty_for_is_php_s_forward_jump_and_a_conditional_jump_to_itself() {
     let (unit, _strings) = unit_and_strings(b"<?php set_time_limit(1); for (;;) {}");
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(
-            6,
-            0,
-            1,
-            "0000 INIT_FCALL 1 96 string(\"set_time_limit\")\n\
-             0001 SEND_VAL int(1) 1\n\
-             0002 DO_ICALL\n\
-             0003 JMP 0004\n\
-             0004 JMPNZ bool(true) 0004\n\
-             0005 RETURN int(1)\n"
-        ),
-        "the oracle's dump, byte for byte"
-    );
+    // the oracle's dump, byte for byte
+    expect![[r#"
+
+        $_main:
+             ; (lines=6, args=0, vars=0, tmps=1)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 INIT_FCALL 1 96 string("set_time_limit")
+        0001 SEND_VAL int(1) 1
+        0002 DO_ICALL
+        0003 JMP 0004
+        0004 JMPNZ bool(true) 0004
+        0005 RETURN int(1)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     assert_eq!(
         unit.main.oplines[3].op1, 4,
         "the JMP lands on the condition"
@@ -62,30 +63,31 @@ fn a_for_lays_its_lists_down_in_php_s_order() {
     let (unit, _strings) = unit_and_strings(
         b"<?php for (extension_loaded('i'); extension_loaded('a'), extension_loaded('b'); extension_loaded('s')) echo 'body';",
     );
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(
-            16,
-            0,
-            4,
-            "0000 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
-             0001 SEND_VAL string(\"i\") 1\n\
-             0002 DO_ICALL\n\
-             0003 JMP 0008\n\
-             0004 ECHO string(\"body\")\n\
-             0005 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
-             0006 SEND_VAL string(\"s\") 1\n\
-             0007 DO_ICALL\n\
-             0008 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
-             0009 SEND_VAL string(\"a\") 1\n\
-             0010 DO_ICALL\n\
-             0011 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
-             0012 SEND_VAL string(\"b\") 1\n\
-             0013 V3 = DO_ICALL\n\
-             0014 JMPNZ V3 0004\n\
-             0015 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=16, args=0, vars=0, tmps=4)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 INIT_FCALL 1 96 string("extension_loaded")
+        0001 SEND_VAL string("i") 1
+        0002 DO_ICALL
+        0003 JMP 0008
+        0004 ECHO string("body")
+        0005 INIT_FCALL 1 96 string("extension_loaded")
+        0006 SEND_VAL string("s") 1
+        0007 DO_ICALL
+        0008 INIT_FCALL 1 96 string("extension_loaded")
+        0009 SEND_VAL string("a") 1
+        0010 DO_ICALL
+        0011 INIT_FCALL 1 96 string("extension_loaded")
+        0012 SEND_VAL string("b") 1
+        0013 V3 = DO_ICALL
+        0014 JMPNZ V3 0004
+        0015 RETURN int(1)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     assert_eq!(
         unit.main.oplines[3].op1, 8,
         "the JMP lands on the condition"
@@ -101,21 +103,22 @@ fn a_for_lays_its_lists_down_in_php_s_order() {
 #[test]
 fn php_s_own_for_loop_is_an_is_smaller_and_a_pre_inc() {
     let (unit, _strings) = unit_and_strings(b"<?php for ($i = 0; $i < 1000; $i++) { echo 'dax'; }");
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(
-            7,
-            1,
-            3,
-            "0000 ASSIGN CV0($i) int(0)\n\
-             0001 JMP 0004\n\
-             0002 ECHO string(\"dax\")\n\
-             0003 PRE_INC CV0($i)\n\
-             0004 T3 = IS_SMALLER CV0($i) int(1000)\n\
-             0005 JMPNZ T3 0002\n\
-             0006 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=7, args=0, vars=1, tmps=3)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN CV0($i) int(0)
+        0001 JMP 0004
+        0002 ECHO string("dax")
+        0003 PRE_INC CV0($i)
+        0004 T3 = IS_SMALLER CV0($i) int(1000)
+        0005 JMPNZ T3 0002
+        0006 RETURN int(1)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     assert_eq!(unit.main.oplines[3].op2_type, OperandKind::Unused);
     assert_eq!(unit.main.oplines[3].out, 1, "the increment's temporary");
     assert_eq!(
@@ -189,18 +192,22 @@ fn a_while_and_a_foreach_with_a_continue_number_their_headers_under_one_rule() {
 fn a_while_is_the_same_shape_and_the_body_keeps_its_lines() {
     let (unit, _strings) =
         unit_and_strings(b"<?php\nwhile (extension_loaded('a')) {\n  echo 1;\n}");
-    assert_eq!(
-        unit.dump(&[]).text(),
-        "\n$_main:\n     ; (lines=7, args=0, vars=0, tmps=1)\n\
-         \x20    ; (before optimizer)\n     ; :1-4\n     ; return  [] RANGE[0..0]\n\
-         0000 JMP 0002\n\
-         0001 ECHO int(1)\n\
-         0002 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
-         0003 SEND_VAL string(\"a\") 1\n\
-         0004 V0 = DO_ICALL\n\
-         0005 JMPNZ V0 0001\n\
-         0006 RETURN int(1)\n"
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=7, args=0, vars=0, tmps=1)
+             ; (before optimizer)
+             ; :1-4
+             ; return  [] RANGE[0..0]
+        0000 JMP 0002
+        0001 ECHO int(1)
+        0002 INIT_FCALL 1 96 string("extension_loaded")
+        0003 SEND_VAL string("a") 1
+        0004 V0 = DO_ICALL
+        0005 JMPNZ V0 0001
+        0006 RETURN int(1)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     assert_eq!(unit.main.oplines[0].op1, 2);
     assert_eq!(unit.main.oplines[5].op2, 1);
     let lines: Vec<u32> = unit.main.oplines.iter().map(|op| op.lineno).collect();
@@ -245,22 +252,23 @@ class C {
 #[test]
 fn a_foreach_is_php_s_op_array_ending_in_its_loop_live_range() {
     let (unit, _strings) = unit_and_strings(b"<?php foreach ([1, 2] as $v) { echo $v; }");
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(
-            6,
-            1,
-            1,
-            "0000 V1 = FE_RESET_R array(...) 0004\n\
-             0001 FE_FETCH_R V1 CV0($v) 0004\n\
-             0002 ECHO CV0($v)\n\
-             0003 JMP 0001\n\
-             0004 FE_FREE V1\n\
-             0005 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    1: 0001 - 0004 (loop)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=6, args=0, vars=1, tmps=1)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 V1 = FE_RESET_R array(...) 0004
+        0001 FE_FETCH_R V1 CV0($v) 0004
+        0002 ECHO CV0($v)
+        0003 JMP 0001
+        0004 FE_FREE V1
+        0005 RETURN int(1)
+        LIVE RANGES:
+             1: 0001 - 0004 (loop)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     let array = unit.main.literals[0]
         .as_arr()
         .map(|a| a.iter().collect::<Vec<_>>());
@@ -293,20 +301,22 @@ fn a_foreach_is_php_s_op_array_ending_in_its_loop_live_range() {
 fn an_early_return_in_a_foreach_splits_the_loop_range_around_its_fe_free() {
     let (unit, _strings) =
         unit_and_strings(b"<?php\nforeach ([1, 2] as $v) {\n    echo $v;\n    return;\n}\n");
-    assert_eq!(
-        oplines_of(b"<?php\nforeach ([1, 2] as $v) {\n    echo $v;\n    return;\n}\n"),
-        "0000 V1 = FE_RESET_R array(...) 0006\n\
-         0001 FE_FETCH_R V1 CV0($v) 0006\n\
-         0002 ECHO CV0($v)\n\
-         0003 FE_FREE V1 loop-end(+3)\n\
-         0004 RETURN null\n\
-         0005 JMP 0001\n\
-         0006 FE_FREE V1\n\
-         0007 RETURN int(1)\n\
-         LIVE RANGES:\n\
-         \x20    1: 0001 - 0003 (loop)\n\
-         \x20    1: 0005 - 0006 (loop)\n"
-    );
+    expect![[r#"
+        0000 V1 = FE_RESET_R array(...) 0006
+        0001 FE_FETCH_R V1 CV0($v) 0006
+        0002 ECHO CV0($v)
+        0003 FE_FREE V1 loop-end(+3)
+        0004 RETURN null
+        0005 JMP 0001
+        0006 FE_FREE V1
+        0007 RETURN int(1)
+        LIVE RANGES:
+             1: 0001 - 0003 (loop)
+             1: 0005 - 0006 (loop)
+    "#]]
+    .assert_eq(&oplines_of(
+        b"<?php\nforeach ([1, 2] as $v) {\n    echo $v;\n    return;\n}\n",
+    ));
     assert_eq!(
         unit.main.oplines[3].op2, 3,
         "the distance to the loop's end"
@@ -339,55 +349,55 @@ fn an_early_return_in_a_foreach_splits_the_loop_range_around_its_fe_free() {
 #[test]
 fn the_key_the_jumps_and_the_reference_of_a_foreach_are_php_s() {
     let source = b"<?php\nforeach ([1, 2] as $k => $v) {\n    echo $v;\n    continue;\n}\nforeach (f($a) as &$v) { $v = 1; break; }\nforeach ($a as $v) { switch (strlen($v)) { case 1: foreach ($a as $w) { return $v; } } continue 1; }\n";
-    assert_eq!(
-        oplines_of(source),
-        "0000 V4 = FE_RESET_R array(...) 0006\n\
-         0001 T5 = FE_FETCH_R V4 CV0($v) 0006\n\
-         0002 ASSIGN CV1($k) T5\n\
-         0003 ECHO CV0($v)\n\
-         0004 JMP 0001\n\
-         0005 JMP 0001\n\
-         0006 FE_FREE V4\n\
-         0007 INIT_FCALL_BY_NAME 1 string(\"f\")\n\
-         0008 SEND_VAR_EX CV2($a) 1\n\
-         0009 V7 = DO_FCALL_BY_NAME\n\
-         0010 V7 = SEPARATE V7\n\
-         0011 V8 = FE_RESET_RW V7 0016\n\
-         0012 FE_FETCH_RW V8 CV0($v) 0016\n\
-         0013 ASSIGN CV0($v) int(1)\n\
-         0014 JMP 0016\n\
-         0015 JMP 0012\n\
-         0016 FE_FREE V8\n\
-         0017 V10 = FE_RESET_R CV2($a) 0034\n\
-         0018 FE_FETCH_R V10 CV0($v) 0034\n\
-         0019 T11 = STRLEN CV0($v)\n\
-         0020 T12 = CASE T11 int(1)\n\
-         0021 JMPNZ T12 0023\n\
-         0022 JMP 0031\n\
-         0023 V13 = FE_RESET_R CV2($a) 0030\n\
-         0024 FE_FETCH_R V13 CV3($w) 0030\n\
-         0025 FE_FREE V13 loop-end(+5)\n\
-         0026 FREE T11 loop-end(+5)\n\
-         0027 FE_FREE V10 loop-end(+7)\n\
-         0028 RETURN CV0($v)\n\
-         0029 JMP 0024\n\
-         0030 FE_FREE V13\n\
-         0031 FREE T11\n\
-         0032 JMP 0018\n\
-         0033 JMP 0018\n\
-         0034 FE_FREE V10\n\
-         0035 RETURN int(1)\n\
-         LIVE RANGES:\n\
-         \x20    4: 0001 - 0006 (loop)\n\
-         \x20    7: 0010 - 0011 (tmp/var)\n\
-         \x20    8: 0012 - 0016 (loop)\n\
-         \x20    10: 0018 - 0027 (loop)\n\
-         \x20    11: 0020 - 0026 (tmp/var)\n\
-         \x20    13: 0024 - 0025 (loop)\n\
-         \x20    13: 0029 - 0030 (loop)\n\
-         \x20    11: 0029 - 0031 (tmp/var)\n\
-         \x20    10: 0029 - 0034 (loop)\n"
-    );
+    expect![[r#"
+        0000 V4 = FE_RESET_R array(...) 0006
+        0001 T5 = FE_FETCH_R V4 CV0($v) 0006
+        0002 ASSIGN CV1($k) T5
+        0003 ECHO CV0($v)
+        0004 JMP 0001
+        0005 JMP 0001
+        0006 FE_FREE V4
+        0007 INIT_FCALL_BY_NAME 1 string("f")
+        0008 SEND_VAR_EX CV2($a) 1
+        0009 V7 = DO_FCALL_BY_NAME
+        0010 V7 = SEPARATE V7
+        0011 V8 = FE_RESET_RW V7 0016
+        0012 FE_FETCH_RW V8 CV0($v) 0016
+        0013 ASSIGN CV0($v) int(1)
+        0014 JMP 0016
+        0015 JMP 0012
+        0016 FE_FREE V8
+        0017 V10 = FE_RESET_R CV2($a) 0034
+        0018 FE_FETCH_R V10 CV0($v) 0034
+        0019 T11 = STRLEN CV0($v)
+        0020 T12 = CASE T11 int(1)
+        0021 JMPNZ T12 0023
+        0022 JMP 0031
+        0023 V13 = FE_RESET_R CV2($a) 0030
+        0024 FE_FETCH_R V13 CV3($w) 0030
+        0025 FE_FREE V13 loop-end(+5)
+        0026 FREE T11 loop-end(+5)
+        0027 FE_FREE V10 loop-end(+7)
+        0028 RETURN CV0($v)
+        0029 JMP 0024
+        0030 FE_FREE V13
+        0031 FREE T11
+        0032 JMP 0018
+        0033 JMP 0018
+        0034 FE_FREE V10
+        0035 RETURN int(1)
+        LIVE RANGES:
+             4: 0001 - 0006 (loop)
+             7: 0010 - 0011 (tmp/var)
+             8: 0012 - 0016 (loop)
+             10: 0018 - 0027 (loop)
+             11: 0020 - 0026 (tmp/var)
+             13: 0024 - 0025 (loop)
+             13: 0029 - 0030 (loop)
+             11: 0029 - 0031 (tmp/var)
+             10: 0029 - 0034 (loop)
+    "#]]
+    .assert_eq(&oplines_of(source));
     let (unit, _strings) = unit_and_strings(source);
     let jumps: Vec<(u32, u32)> = [4, 5, 15, 29, 32, 33]
         .iter()

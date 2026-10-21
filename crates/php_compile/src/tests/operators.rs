@@ -7,11 +7,18 @@ use super::*;
 #[test]
 fn arithmetic_over_two_constants_is_folded_the_way_php_folds_it() {
     let (unit, _strings) = unit_and_strings(b"<?php echo 1 + 2;");
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(2, 0, 0, "0000 ECHO int(3)\n0001 RETURN int(1)\n"),
-        "the sum is one literal and no ZEND_ADD"
-    );
+    // the sum is one literal and no ZEND_ADD
+    expect![[r#"
+
+        $_main:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ECHO int(3)
+        0001 RETURN int(1)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     assert_eq!(echoed_literal(b"<?php echo 1 + 2;").as_long(), Some(3));
     // `div_function`: a long where the division comes out whole, a
     // double where it does not.
@@ -47,23 +54,44 @@ fn arithmetic_over_two_constants_is_folded_the_way_php_folds_it() {
 /// array is php's single `ECHO` of the folded constant.
 #[test]
 fn an_operand_php_converts_is_folded_where_it_stands() {
-    assert_eq!(
-        dump_of(b"<?php echo \"1\" + 1;"),
-        main_dump(2, 0, 0, "0000 ECHO int(2)\n0001 RETURN int(1)\n")
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ECHO int(2)
+        0001 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(b"<?php echo \"1\" + 1;"));
     assert_eq!(echoed_literal(b"<?php echo \"1\" + 1;").as_long(), Some(2));
-    assert_eq!(
-        dump_of(b"<?php echo true + 1;"),
-        main_dump(2, 0, 0, "0000 ECHO int(2)\n0001 RETURN int(1)\n")
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ECHO int(2)
+        0001 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(b"<?php echo true + 1;"));
     assert_eq!(echoed_literal(b"<?php echo true + 1;").as_long(), Some(2));
     // The folded 1 and the return's 1 are two literals, as
     // `zend_add_literal` appends each.
     let (unit, _strings) = unit_and_strings(b"<?php echo null + 1;");
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(2, 0, 0, "0000 ECHO int(1)\n0001 RETURN int(1)\n")
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ECHO int(1)
+        0001 RETURN int(1)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     assert_eq!(unit.main.literals.len(), 2);
     assert_eq!(echoed_literal(b"<?php echo null + 1;").as_long(), Some(1));
     assert_eq!(echoed_literal(b"<?php echo false + 1;").as_long(), Some(1));
@@ -140,71 +168,128 @@ fn a_modulo_and_a_power_over_constants_fold_the_way_php_folds_them() {
 /// 8.5.9 (#2682).
 #[test]
 fn two_constant_arrays_under_a_plus_fold_to_the_array_php_s_add_makes() {
-    assert_eq!(
-        dump_of(b"<?php $p = [0, 1] + [2]; $q = [] + []; var_dump(isset(([0, 1] + [])[0]), empty([] + []), [1] - [1], [1] + 1);"),
-        "\n$_main:\n\
-         \x20    ; (lines=12, args=0, vars=2, tmps=6)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 ASSIGN CV0($p) array(...)\n\
-         0001 ASSIGN CV1($q) array(...)\n\
-         0002 INIT_FCALL 4 144 string(\"var_dump\")\n\
-         0003 T4 = ISSET_ISEMPTY_DIM_OBJ (isset) array(...) int(0)\n\
-         0004 SEND_VAL T4 1\n\
-         0005 SEND_VAL bool(true) 2\n\
-         0006 T5 = SUB array(...) array(...)\n\
-         0007 SEND_VAL T5 3\n\
-         0008 T6 = ADD array(...) int(1)\n\
-         0009 SEND_VAL T6 4\n\
-         0010 DO_ICALL\n\
-         0011 RETURN int(1)\n\
-         "
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=12, args=0, vars=2, tmps=6)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN CV0($p) array(...)
+        0001 ASSIGN CV1($q) array(...)
+        0002 INIT_FCALL 4 144 string("var_dump")
+        0003 T4 = ISSET_ISEMPTY_DIM_OBJ (isset) array(...) int(0)
+        0004 SEND_VAL T4 1
+        0005 SEND_VAL bool(true) 2
+        0006 T5 = SUB array(...) array(...)
+        0007 SEND_VAL T5 3
+        0008 T6 = ADD array(...) int(1)
+        0009 SEND_VAL T6 4
+        0010 DO_ICALL
+        0011 RETURN int(1)
+    "#]].assert_eq(&dump_of(b"<?php $p = [0, 1] + [2]; $q = [] + []; var_dump(isset(([0, 1] + [])[0]), empty([] + []), [1] - [1], [1] + 1);"));
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // one snapshot per case: the table is the test
 fn arithmetic_php_does_not_fold_is_emitted_as_the_opcode_php_emits() {
-    assert_eq!(
-        dump_of(b"<?php echo 1 + extension_loaded('Core');"),
-        main_dump(
-            6,
-            0,
-            2,
-            "0000 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
-             0001 SEND_VAL string(\"Core\") 1\n\
-             0002 V0 = DO_ICALL\n\
-             0003 T1 = ADD int(1) V0\n\
-             0004 ECHO T1\n\
-             0005 RETURN int(1)\n"
-        ),
-        "php's own op array, its literals in the order the oplines name them"
-    );
+    // php's own op array, its literals in the order the oplines name
+    // them
+    expect![[r#"
+
+        $_main:
+             ; (lines=6, args=0, vars=0, tmps=2)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 INIT_FCALL 1 96 string("extension_loaded")
+        0001 SEND_VAL string("Core") 1
+        0002 V0 = DO_ICALL
+        0003 T1 = ADD int(1) V0
+        0004 ECHO T1
+        0005 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(b"<?php echo 1 + extension_loaded('Core');"));
     // `zend_binary_op_produces_error`: a string that opens with no
     // number, or carries anything past the one it opens with, is left
     // to the opcode, which throws or warns where it stands.
     // The return's `1` is a slot of its own after the operands',
     // even beside an operand that is the same `1`, as
     // `zend_add_literal` appends it.
-    for (source, left, right) in [
-        (&b"<?php echo \"abc\" + 1;"[..], "string(\"abc\")", "int(1)"),
-        (b"<?php echo \"1abc\" + 1;", "string(\"1abc\")", "int(1)"),
-        (b"<?php echo \"0x1A\" + 1;", "string(\"0x1A\")", "int(1)"),
-        (b"<?php echo \"1e\" + 1;", "string(\"1e\")", "int(1)"),
-        (b"<?php echo 1 + \"\";", "int(1)", "string(\"\")"),
+    for (source, expected) in [
+        (
+            &b"<?php echo \"abc\" + 1;"[..],
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = ADD string("abc") int(1)
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
+        (
+            b"<?php echo \"1abc\" + 1;",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = ADD string("1abc") int(1)
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
+        (
+            b"<?php echo \"0x1A\" + 1;",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = ADD string("0x1A") int(1)
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
+        (
+            b"<?php echo \"1e\" + 1;",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = ADD string("1e") int(1)
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
+        (
+            b"<?php echo 1 + \"\";",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = ADD int(1) string("")
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
     ] {
         let (unit, _strings) = unit_and_strings(source);
-        assert_eq!(
-            unit.dump(&[]).text(),
-            main_dump(
-                3,
-                0,
-                1,
-                &format!("0000 T0 = ADD {left} {right}\n0001 ECHO T0\n0002 RETURN int(1)\n")
-            ),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+        expected.assert_eq(&unit.dump(&[]).text());
         assert_eq!(
             unit.main.oplines[2].op1,
             2,
@@ -214,145 +299,321 @@ fn arithmetic_php_does_not_fold_is_emitted_as_the_opcode_php_emits() {
     }
     // The divisor php's `zval_get_double` reads as zero, whatever
     // its type, and the negative power of a zero.
-    for (source, divisor) in [
-        (&b"<?php echo 2 / \"0\";"[..], "string(\"0\")"),
-        (b"<?php echo 2 / \"0.0\";", "string(\"0.0\")"),
-        (b"<?php echo 2 / false;", "bool(false)"),
-        (b"<?php echo 2 / null;", "null"),
+    for (source, expected) in [
+        (
+            &b"<?php echo 2 / \"0\";"[..],
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = DIV int(2) string("0")
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
+        (
+            b"<?php echo 2 / \"0.0\";",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = DIV int(2) string("0.0")
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
+        (
+            b"<?php echo 2 / false;",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = DIV int(2) bool(false)
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
+        (
+            b"<?php echo 2 / null;",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = DIV int(2) null
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
     ] {
-        assert_eq!(
-            dump_of(source),
-            main_dump(
-                3,
-                0,
-                1,
-                &format!("0000 T0 = DIV int(2) {divisor}\n0001 ECHO T0\n0002 RETURN int(1)\n")
-            ),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+        expected.assert_eq(&dump_of(source));
     }
     // `-"abc"` is the multiplication by -1 php emits for an operand
     // it will not fold.
-    assert_eq!(
-        dump_of(b"<?php echo -\"1abc\";"),
-        main_dump(
-            3,
-            0,
-            1,
-            "0000 T0 = MUL string(\"1abc\") int(-1)\n0001 ECHO T0\n0002 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=3, args=0, vars=0, tmps=1)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 T0 = MUL string("1abc") int(-1)
+        0001 ECHO T0
+        0002 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(b"<?php echo -\"1abc\";"));
     // `zend_binary_op_produces_error`: the division php refuses to
     // fold, so that `DivisionByZeroError` is thrown where it stands.
-    assert_eq!(
-        dump_of(b"<?php echo 1/0;"),
-        main_dump(
-            3,
-            0,
-            1,
-            "0000 T0 = DIV int(1) int(0)\n0001 ECHO T0\n0002 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=3, args=0, vars=0, tmps=1)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 T0 = DIV int(1) int(0)
+        0001 ECHO T0
+        0002 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(b"<?php echo 1/0;"));
     // `zend_compile_unary_pm`: the multiplication by -1 php emits
     // where the operand is not a constant.
-    assert_eq!(
-        dump_of(b"<?php echo -extension_loaded('Core');"),
-        main_dump(
-            6,
-            0,
-            2,
-            "0000 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
-             0001 SEND_VAL string(\"Core\") 1\n\
-             0002 V0 = DO_ICALL\n\
-             0003 T1 = MUL V0 int(-1)\n\
-             0004 ECHO T1\n\
-             0005 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=6, args=0, vars=0, tmps=2)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 INIT_FCALL 1 96 string("extension_loaded")
+        0001 SEND_VAL string("Core") 1
+        0002 V0 = DO_ICALL
+        0003 T1 = MUL V0 int(-1)
+        0004 ECHO T1
+        0005 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(b"<?php echo -extension_loaded('Core');"));
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // one snapshot per case: the table is the test
 fn a_modulo_and_a_power_php_does_not_fold_are_mod_and_pow_where_they_stand() {
     // The modulo php refuses to fold, by whatever `zval_get_long`
     // reads as zero and over an operand `zend_is_op_long_compatible`
     // refuses, and the negative power of a zero: each is the opcode,
     // to throw or deprecate where it stands.
-    for (source, left, right) in [
-        (&b"<?php echo 1 % 0;"[..], "int(1)", "int(0)"),
-        (b"<?php echo 1 % \"0\";", "int(1)", "string(\"0\")"),
-        (b"<?php echo 1 % null;", "int(1)", "null"),
-        (b"<?php echo 1.5 % 1;", "float(1.5)", "int(1)"),
-        (b"<?php echo \"1.5\" % 1;", "string(\"1.5\")", "int(1)"),
-        (b"<?php echo 1e19 % 1;", "float(1e+19)", "int(1)"),
+    for (source, expected) in [
+        (
+            &b"<?php echo 1 % 0;"[..],
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = MOD int(1) int(0)
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
+        (
+            b"<?php echo 1 % \"0\";",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = MOD int(1) string("0")
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
+        (
+            b"<?php echo 1 % null;",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = MOD int(1) null
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
+        (
+            b"<?php echo 1.5 % 1;",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = MOD float(1.5) int(1)
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
+        (
+            b"<?php echo \"1.5\" % 1;",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = MOD string("1.5") int(1)
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
+        (
+            b"<?php echo 1e19 % 1;",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = MOD float(1e+19) int(1)
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
         (
             b"<?php echo \"9223372036854775808\" % 1;",
-            "string(\"9223372036854775808\")",
-            "int(1)",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = MOD string("9223372036854775808") int(1)
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
         ),
-        (b"<?php echo INF % 1;", "float(inf)", "int(1)"),
+        (
+            b"<?php echo INF % 1;",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = MOD float(inf) int(1)
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
     ] {
-        assert_eq!(
-            dump_of(source),
-            main_dump(
-                3,
-                0,
-                1,
-                &format!("0000 T0 = MOD {left} {right}\n0001 ECHO T0\n0002 RETURN int(1)\n")
-            ),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+        expected.assert_eq(&dump_of(source));
     }
-    for (source, base) in [
-        (&b"<?php echo 0 ** -1;"[..], "int(0)"),
-        (b"<?php echo \"0\" ** -1;", "string(\"0\")"),
-        (b"<?php echo 0.0 ** -1;", "float(0)"),
+    for (source, expected) in [
+        (
+            &b"<?php echo 0 ** -1;"[..],
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = POW int(0) int(-1)
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
+        (
+            b"<?php echo \"0\" ** -1;",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = POW string("0") int(-1)
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
+        (
+            b"<?php echo 0.0 ** -1;",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = POW float(0) int(-1)
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
     ] {
-        assert_eq!(
-            dump_of(source),
-            main_dump(
-                3,
-                0,
-                1,
-                &format!("0000 T0 = POW {base} int(-1)\n0001 ECHO T0\n0002 RETURN int(1)\n")
-            ),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+        expected.assert_eq(&dump_of(source));
     }
     // `%` and `**` over a call, php's `MOD` and `POW` where `ADD`
     // stood above.
-    for (source, opcode, left) in [
+    for (source, expected) in [
         (
             &b"<?php echo 7 % extension_loaded('Core');"[..],
-            "MOD",
-            "int(7)",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=6, args=0, vars=0, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 INIT_FCALL 1 96 string("extension_loaded")
+                0001 SEND_VAL string("Core") 1
+                0002 V0 = DO_ICALL
+                0003 T1 = MOD int(7) V0
+                0004 ECHO T1
+                0005 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php echo 2 ** extension_loaded('Core');",
-            "POW",
-            "int(2)",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=6, args=0, vars=0, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 INIT_FCALL 1 96 string("extension_loaded")
+                0001 SEND_VAL string("Core") 1
+                0002 V0 = DO_ICALL
+                0003 T1 = POW int(2) V0
+                0004 ECHO T1
+                0005 RETURN int(1)
+            "#]],
         ),
     ] {
-        assert_eq!(
-            dump_of(source),
-            main_dump(
-                6,
-                0,
-                2,
-                &format!(
-                    "0000 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
-                     0001 SEND_VAL string(\"Core\") 1\n\
-                     0002 V0 = DO_ICALL\n\
-                     0003 T1 = {opcode} {left} V0\n\
-                     0004 ECHO T1\n\
-                     0005 RETURN int(1)\n"
-                )
-            ),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+        expected.assert_eq(&dump_of(source));
     }
 }
 
@@ -374,38 +635,81 @@ fn a_shift_over_constants_folds_the_way_php_folds_it_and_the_rest_is_sl_or_sr() 
         Some(24),
         "`+` binds tighter than `<<`"
     );
-    for (source, opcode, left, right) in [
-        (&b"<?php echo 1 << -1;"[..], "SL", "int(1)", "int(-1)"),
-        (b"<?php echo 1 >> -1;", "SR", "int(1)", "int(-1)"),
-        (b"<?php echo 1.5 << 1;", "SL", "float(1.5)", "int(1)"),
-        (b"<?php echo 1 << \"1x\";", "SL", "int(1)", "string(\"1x\")"),
+    for (source, expected) in [
+        (
+            &b"<?php echo 1 << -1;"[..],
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = SL int(1) int(-1)
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
+        (
+            b"<?php echo 1 >> -1;",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = SR int(1) int(-1)
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
+        (
+            b"<?php echo 1.5 << 1;",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = SL float(1.5) int(1)
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
+        (
+            b"<?php echo 1 << \"1x\";",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = SL int(1) string("1x")
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
+        ),
     ] {
-        assert_eq!(
-            dump_of(source),
-            main_dump(
-                3,
-                0,
-                1,
-                &format!("0000 T0 = {opcode} {left} {right}\n0001 ECHO T0\n0002 RETURN int(1)\n")
-            ),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+        expected.assert_eq(&dump_of(source));
     }
-    assert_eq!(
-        dump_of(b"<?php echo 1 << extension_loaded('Core');"),
-        main_dump(
-            6,
-            0,
-            2,
-            "0000 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
-             0001 SEND_VAL string(\"Core\") 1\n\
-             0002 V0 = DO_ICALL\n\
-             0003 T1 = SL int(1) V0\n\
-             0004 ECHO T1\n\
-             0005 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=6, args=0, vars=0, tmps=2)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 INIT_FCALL 1 96 string("extension_loaded")
+        0001 SEND_VAL string("Core") 1
+        0002 V0 = DO_ICALL
+        0003 T1 = SL int(1) V0
+        0004 ECHO T1
+        0005 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(b"<?php echo 1 << extension_loaded('Core');"));
 }
 
 /// `zend_compile_binary_op`'s `ZEND_CONCAT` arm: the fold over two
@@ -414,22 +718,37 @@ fn a_shift_over_constants_folds_the_way_php_folds_it_and_the_rest_is_sl_or_sr() 
 /// `ECHO` of the folded string; and a constant beside what does not
 /// fold converted where it stands, so the `CONCAT` reads a string.
 #[test]
+#[allow(clippy::too_many_lines)] // one snapshot per case: the table is the test
 fn a_concatenation_over_constants_folds_to_php_s_one_string_and_the_rest_is_concat() {
-    for (source, joined) in [
-        (&b"<?php echo 'a' . 'b';"[..], "ab"),
-        (b"<?php echo \"1\" . 2;", "12"),
+    for (source, expected) in [
+        (
+            &b"<?php echo 'a' . 'b';"[..],
+            expect![[r#"
+
+                $_main:
+                     ; (lines=2, args=0, vars=0, tmps=0)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ECHO string("ab")
+                0001 RETURN int(1)
+            "#]],
+        ),
+        (
+            b"<?php echo \"1\" . 2;",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=2, args=0, vars=0, tmps=0)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ECHO string("12")
+                0001 RETURN int(1)
+            "#]],
+        ),
     ] {
-        assert_eq!(
-            dump_of(source),
-            main_dump(
-                2,
-                0,
-                0,
-                &format!("0000 ECHO string(\"{joined}\")\n0001 RETURN int(1)\n")
-            ),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+        expected.assert_eq(&dump_of(source));
     }
     assert_eq!(echoed_string(b"<?php echo 'a' . 'b';"), b"ab");
     assert_eq!(echoed_string(b"<?php echo \"1\" . 2;"), b"12");
@@ -468,25 +787,26 @@ fn a_concatenation_over_constants_folds_to_php_s_one_string_and_the_rest_is_conc
     let (unit, _strings) = unit_and_strings(
         b"<?php $a = 1; echo 2 . $a; echo $a . 2.5; echo 'a' . 'b' . $a; echo NAN . $a;",
     );
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(
-            10,
-            1,
-            5,
-            "0000 ASSIGN CV0($a) int(1)\n\
-             0001 T2 = CONCAT string(\"2\") CV0($a)\n\
-             0002 ECHO T2\n\
-             0003 T3 = CONCAT CV0($a) string(\"2.5\")\n\
-             0004 ECHO T3\n\
-             0005 T4 = CONCAT string(\"ab\") CV0($a)\n\
-             0006 ECHO T4\n\
-             0007 T5 = CONCAT string(\"NAN\") CV0($a)\n\
-             0008 ECHO T5\n\
-             0009 RETURN int(1)\n"
-        ),
-        "php's own op array"
-    );
+    // php's own op array
+    expect![[r#"
+
+        $_main:
+             ; (lines=10, args=0, vars=1, tmps=5)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN CV0($a) int(1)
+        0001 T2 = CONCAT string("2") CV0($a)
+        0002 ECHO T2
+        0003 T3 = CONCAT CV0($a) string("2.5")
+        0004 ECHO T3
+        0005 T4 = CONCAT string("ab") CV0($a)
+        0006 ECHO T4
+        0007 T5 = CONCAT string("NAN") CV0($a)
+        0008 ECHO T5
+        0009 RETURN int(1)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     assert_eq!(
         literal_text(&unit, 1),
         Some(b"2".to_vec()),
@@ -520,15 +840,19 @@ fn a_nan_a_fold_converts_is_the_warning_the_unit_carries() {
     use php_unit::{Diagnostic, Level};
     let (unit, _strings) =
         unit_and_strings(b"<?php\necho 'a';\necho NAN . 'z';\necho 1 . NAN . NAN;");
-    assert_eq!(
-        unit.dump(&[]).text(),
-        "\n$_main:\n     ; (lines=4, args=0, vars=0, tmps=0)\n\
-         \x20    ; (before optimizer)\n     ; :1-4\n     ; return  [] RANGE[0..0]\n\
-         0000 ECHO string(\"a\")\n\
-         0001 ECHO string(\"NANz\")\n\
-         0002 ECHO string(\"1NANNAN\")\n\
-         0003 RETURN int(1)\n"
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=4, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-4
+             ; return  [] RANGE[0..0]
+        0000 ECHO string("a")
+        0001 ECHO string("NANz")
+        0002 ECHO string("1NANNAN")
+        0003 RETURN int(1)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     let coerced = |line| Diagnostic {
         level: Level::Warning,
         line,
@@ -553,26 +877,29 @@ fn a_nan_a_fold_converts_is_the_warning_the_unit_carries() {
 /// the bytes php reads.
 #[test]
 fn a_cast_is_php_s_opline_and_an_escape_is_php_s_byte() {
-    assert_eq!(
-        dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=13, args=0, vars=2, tmps=7)
+             ; (before optimizer)
+             ; :1-8
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN CV0($x) int(1)
+        0001 T3 = CAST (long) CV0($x)
+        0002 FREE T3
+        0003 T4 = CAST (double) int(1)
+        0004 FREE T4
+        0005 T5 = CAST (string) CV0($x)
+        0006 ASSIGN CV1($s) T5
+        0007 T7 = BOOL CV0($x)
+        0008 T8 = CAST (long) string("12abc")
+        0009 ECHO T8
+        0010 ECHO string("\xFF")
+        0011 ECHO string("NANz")
+        0012 RETURN int(1)
+    "#]].assert_eq(&dump_of(
             b"<?php\n$x = 1;\n(integer)$x;\n(float)1;\n$s = (string)$x;\n(boolean)$x;\necho (int)\"12abc\", \"\\777\", NAN . \"z\";\n",
-        ),
-        "\n$_main:\n     ; (lines=13, args=0, vars=2, tmps=7)\n\
-         \x20    ; (before optimizer)\n     ; :1-8\n     ; return  [] RANGE[0..0]\n\
-         0000 ASSIGN CV0($x) int(1)\n\
-         0001 T3 = CAST (long) CV0($x)\n\
-         0002 FREE T3\n\
-         0003 T4 = CAST (double) int(1)\n\
-         0004 FREE T4\n\
-         0005 T5 = CAST (string) CV0($x)\n\
-         0006 ASSIGN CV1($s) T5\n\
-         0007 T7 = BOOL CV0($x)\n\
-         0008 T8 = CAST (long) string(\"12abc\")\n\
-         0009 ECHO T8\n\
-         0010 ECHO string(\"\\xFF\")\n\
-         0011 ECHO string(\"NANz\")\n\
-         0012 RETURN int(1)\n"
-    );
+        ));
 }
 
 /// `zend_compile_cast`'s other two arms: `(array)` and `(object)` are
@@ -580,17 +907,23 @@ fn a_cast_is_php_s_opline_and_an_escape_is_php_s_byte() {
 /// the dump prints as php's does.
 #[test]
 fn an_array_and_an_object_cast_are_php_s_oplines() {
-    assert_eq!(
-        dump_of(b"<?php\n$x = 1;\n$a = (array)$x;\n$o = (object)$a;\n"),
-        "\n$_main:\n     ; (lines=6, args=0, vars=3, tmps=5)\n\
-         \x20    ; (before optimizer)\n     ; :1-5\n     ; return  [] RANGE[0..0]\n\
-         0000 ASSIGN CV0($x) int(1)\n\
-         0001 T4 = CAST (array) CV0($x)\n\
-         0002 ASSIGN CV1($a) T4\n\
-         0003 T6 = CAST (object) CV1($a)\n\
-         0004 ASSIGN CV2($o) T6\n\
-         0005 RETURN int(1)\n"
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=6, args=0, vars=3, tmps=5)
+             ; (before optimizer)
+             ; :1-5
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN CV0($x) int(1)
+        0001 T4 = CAST (array) CV0($x)
+        0002 ASSIGN CV1($a) T4
+        0003 T6 = CAST (object) CV1($a)
+        0004 ASSIGN CV2($o) T6
+        0005 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php\n$x = 1;\n$a = (array)$x;\n$o = (object)$a;\n",
+    ));
 }
 
 /// `zend_compile_unary_op` for `ZEND_BW_NOT` (#478): one `BW_NOT`
@@ -606,35 +939,36 @@ fn an_array_and_an_object_cast_are_php_s_oplines() {
 /// 8.5.9.
 #[test]
 fn a_bitwise_not_is_the_oracle_s_opline_or_its_fold() {
-    assert_eq!(
-        dump_of(
-            b"<?php $a = 6; $b = ~$a; $c = ~1; $d = ~\"ab\"; $e = ~1.5; $f = ~~$a; \
-              $g = -~$a; $h = ~$a instanceof C; $i = ~1.0;"
-        ),
-        main_dump(
-            18,
-            9,
-            17,
-            "0000 ASSIGN CV0($a) int(6)\n\
-             0001 T10 = BW_NOT CV0($a)\n\
-             0002 ASSIGN CV1($b) T10\n\
-             0003 ASSIGN CV2($c) int(-2)\n\
-             0004 ASSIGN CV3($d) string(\"\\x9E\\x9D\")\n\
-             0005 T14 = BW_NOT float(1.5)\n\
-             0006 ASSIGN CV4($e) T14\n\
-             0007 T16 = BW_NOT CV0($a)\n\
-             0008 T17 = BW_NOT T16\n\
-             0009 ASSIGN CV5($f) T17\n\
-             0010 T19 = BW_NOT CV0($a)\n\
-             0011 T20 = MUL T19 int(-1)\n\
-             0012 ASSIGN CV6($g) T20\n\
-             0013 T22 = BW_NOT CV0($a)\n\
-             0014 T23 = INSTANCEOF T22 string(\"C\")\n\
-             0015 ASSIGN CV7($h) T23\n\
-             0016 ASSIGN CV8($i) int(-2)\n\
-             0017 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=18, args=0, vars=9, tmps=17)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN CV0($a) int(6)
+        0001 T10 = BW_NOT CV0($a)
+        0002 ASSIGN CV1($b) T10
+        0003 ASSIGN CV2($c) int(-2)
+        0004 ASSIGN CV3($d) string("\x9E\x9D")
+        0005 T14 = BW_NOT float(1.5)
+        0006 ASSIGN CV4($e) T14
+        0007 T16 = BW_NOT CV0($a)
+        0008 T17 = BW_NOT T16
+        0009 ASSIGN CV5($f) T17
+        0010 T19 = BW_NOT CV0($a)
+        0011 T20 = MUL T19 int(-1)
+        0012 ASSIGN CV6($g) T20
+        0013 T22 = BW_NOT CV0($a)
+        0014 T23 = INSTANCEOF T22 string("C")
+        0015 ASSIGN CV7($h) T23
+        0016 ASSIGN CV8($i) int(-2)
+        0017 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php $a = 6; $b = ~$a; $c = ~1; $d = ~\"ab\"; $e = ~1.5; $f = ~~$a; \
+              $g = -~$a; $h = ~$a instanceof C; $i = ~1.0;",
+    ));
 }
 
 /// `zend_eval_const_expr`'s `ZEND_AST_CAST` arm (#357): the walk
@@ -646,28 +980,30 @@ fn a_bitwise_not_is_the_oracle_s_opline_or_its_fold() {
 /// outside such a walk is the opline still.
 #[test]
 fn a_cast_inside_an_array_expression_folds_and_one_outside_it_does_not() {
-    assert_eq!(
-        oplines_of(b"<?php\n$a = [(int)\"1\", $b]; $c = [(string)1, (float)$b];\n"),
-        "0000 T3 = INIT_ARRAY 2 (packed) int(1) NEXT\n\
-         0001 T3 = ADD_ARRAY_ELEMENT CV1($b) NEXT\n\
-         0002 ASSIGN CV0($a) T3\n\
-         0003 T5 = INIT_ARRAY 2 (packed) string(\"1\") NEXT\n\
-         0004 T6 = CAST (double) CV1($b)\n\
-         0005 T5 = ADD_ARRAY_ELEMENT T6 NEXT\n\
-         0006 ASSIGN CV2($c) T5\n\
-         0007 RETURN int(1)\n\
-         LIVE RANGES:\n\
-         \x20    3: 0001 - 0002 (tmp/var)\n\
-         \x20    5: 0004 - 0006 (tmp/var)\n"
-    );
-    assert_eq!(
-        oplines_of(b"<?php\n$x = (int)\"1\";\necho (int)\"2\";\n"),
-        "0000 T1 = CAST (long) string(\"1\")\n\
-         0001 ASSIGN CV0($x) T1\n\
-         0002 T3 = CAST (long) string(\"2\")\n\
-         0003 ECHO T3\n\
-         0004 RETURN int(1)\n"
-    );
+    expect![[r#"
+        0000 T3 = INIT_ARRAY 2 (packed) int(1) NEXT
+        0001 T3 = ADD_ARRAY_ELEMENT CV1($b) NEXT
+        0002 ASSIGN CV0($a) T3
+        0003 T5 = INIT_ARRAY 2 (packed) string("1") NEXT
+        0004 T6 = CAST (double) CV1($b)
+        0005 T5 = ADD_ARRAY_ELEMENT T6 NEXT
+        0006 ASSIGN CV2($c) T5
+        0007 RETURN int(1)
+        LIVE RANGES:
+             3: 0001 - 0002 (tmp/var)
+             5: 0004 - 0006 (tmp/var)
+    "#]]
+    .assert_eq(&oplines_of(
+        b"<?php\n$a = [(int)\"1\", $b]; $c = [(string)1, (float)$b];\n",
+    ));
+    expect![[r#"
+        0000 T1 = CAST (long) string("1")
+        0001 ASSIGN CV0($x) T1
+        0002 T3 = CAST (long) string("2")
+        0003 ECHO T3
+        0004 RETURN int(1)
+    "#]]
+    .assert_eq(&oplines_of(b"<?php\n$x = (int)\"1\";\necho (int)\"2\";\n"));
     // `zend_try_ct_eval_cast`: `(bool)`, `(int)`, `(float)`,
     // `(string)` and `(array)` fold, a `(string)` of a double or an
     // array does not, since one reads `precision` and the other
@@ -705,32 +1041,32 @@ fn a_cast_inside_an_array_expression_folds_and_one_outside_it_does_not() {
 /// them to, a string pair and a double against a string included.
 #[test]
 fn a_comparison_is_is_smaller_where_it_does_not_fold_and_the_bool_where_it_does() {
-    assert_eq!(
-        dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=16, args=0, vars=1, tmps=4)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 T1 = IS_SMALLER CV0($a) int(2)
+        0001 ECHO T1
+        0002 T2 = IS_SMALLER int(1) CV0($a)
+        0003 ECHO T2
+        0004 T3 = POST_INC CV0($a)
+        0005 ECHO T3
+        0006 T4 = PRE_INC CV0($a)
+        0007 ECHO T4
+        0008 ECHO bool(true)
+        0009 ECHO bool(true)
+        0010 ECHO bool(true)
+        0011 ECHO bool(false)
+        0012 ECHO bool(false)
+        0013 ECHO bool(true)
+        0014 ECHO bool(true)
+        0015 RETURN int(1)
+    "#]].assert_eq(&dump_of(
             b"<?php echo $a < 2, 1 < $a, $a++, ++$a, 1 < 2, 1.5 < 2, \"a\" < \"b\", 2 < 1, \"10\" < \"9\", 1.5 < \"abc\", null < true;"
-        ),
-        main_dump(
-            16,
-            1,
-            4,
-            "0000 T1 = IS_SMALLER CV0($a) int(2)\n\
-             0001 ECHO T1\n\
-             0002 T2 = IS_SMALLER int(1) CV0($a)\n\
-             0003 ECHO T2\n\
-             0004 T3 = POST_INC CV0($a)\n\
-             0005 ECHO T3\n\
-             0006 T4 = PRE_INC CV0($a)\n\
-             0007 ECHO T4\n\
-             0008 ECHO bool(true)\n\
-             0009 ECHO bool(true)\n\
-             0010 ECHO bool(true)\n\
-             0011 ECHO bool(false)\n\
-             0012 ECHO bool(false)\n\
-             0013 ECHO bool(true)\n\
-             0014 ECHO bool(true)\n\
-             0015 RETURN int(1)\n"
-        )
-    );
+        ));
 }
 
 /// The oracle's dump, `vars=1, tmps=19`: `<=` is `IS_SMALLER_OR_EQUAL`
@@ -743,55 +1079,55 @@ fn a_comparison_is_is_smaller_where_it_does_not_fold_and_the_bool_where_it_does(
 /// kind; `2 <=> $a` and `2 + $a` keep their order.
 #[test]
 fn the_rest_of_the_comparison_level_is_the_opcode_php_emits_with_php_s_operand_order() {
-    assert_eq!(
-        dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=39, args=0, vars=1, tmps=19)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 T1 = IS_SMALLER_OR_EQUAL CV0($a) int(2)
+        0001 ECHO T1
+        0002 T2 = IS_SMALLER_OR_EQUAL int(2) CV0($a)
+        0003 ECHO T2
+        0004 T3 = IS_SMALLER int(2) CV0($a)
+        0005 ECHO T3
+        0006 T4 = IS_SMALLER CV0($a) int(2)
+        0007 ECHO T4
+        0008 T5 = IS_SMALLER_OR_EQUAL int(2) CV0($a)
+        0009 ECHO T5
+        0010 T6 = IS_SMALLER_OR_EQUAL CV0($a) int(2)
+        0011 ECHO T6
+        0012 T7 = IS_EQUAL CV0($a) int(2)
+        0013 ECHO T7
+        0014 T8 = IS_EQUAL CV0($a) int(2)
+        0015 ECHO T8
+        0016 T9 = IS_NOT_EQUAL CV0($a) int(2)
+        0017 ECHO T9
+        0018 T10 = IS_NOT_EQUAL CV0($a) int(2)
+        0019 ECHO T10
+        0020 T11 = IS_NOT_EQUAL CV0($a) int(2)
+        0021 ECHO T11
+        0022 T12 = IS_IDENTICAL CV0($a) int(2)
+        0023 ECHO T12
+        0024 T13 = IS_IDENTICAL CV0($a) int(2)
+        0025 ECHO T13
+        0026 T14 = IS_NOT_IDENTICAL CV0($a) int(2)
+        0027 ECHO T14
+        0028 T15 = IS_NOT_IDENTICAL CV0($a) int(2)
+        0029 ECHO T15
+        0030 T16 = SPACESHIP CV0($a) int(2)
+        0031 ECHO T16
+        0032 T17 = SPACESHIP int(2) CV0($a)
+        0033 ECHO T17
+        0034 T18 = MUL CV0($a) int(2)
+        0035 ECHO T18
+        0036 T19 = ADD int(2) CV0($a)
+        0037 ECHO T19
+        0038 RETURN int(1)
+    "#]].assert_eq(&dump_of(
             b"<?php echo $a <= 2, 2 <= $a, $a > 2, 2 > $a, $a >= 2, 2 >= $a, $a == 2, 2 == $a, $a != 2, 2 != $a, $a <> 2, $a === 2, 2 === $a, $a !== 2, 2 !== $a, $a <=> 2, 2 <=> $a, 2 * $a, 2 + $a;"
-        ),
-        main_dump(
-            39,
-            1,
-            19,
-            "0000 T1 = IS_SMALLER_OR_EQUAL CV0($a) int(2)\n\
-             0001 ECHO T1\n\
-             0002 T2 = IS_SMALLER_OR_EQUAL int(2) CV0($a)\n\
-             0003 ECHO T2\n\
-             0004 T3 = IS_SMALLER int(2) CV0($a)\n\
-             0005 ECHO T3\n\
-             0006 T4 = IS_SMALLER CV0($a) int(2)\n\
-             0007 ECHO T4\n\
-             0008 T5 = IS_SMALLER_OR_EQUAL int(2) CV0($a)\n\
-             0009 ECHO T5\n\
-             0010 T6 = IS_SMALLER_OR_EQUAL CV0($a) int(2)\n\
-             0011 ECHO T6\n\
-             0012 T7 = IS_EQUAL CV0($a) int(2)\n\
-             0013 ECHO T7\n\
-             0014 T8 = IS_EQUAL CV0($a) int(2)\n\
-             0015 ECHO T8\n\
-             0016 T9 = IS_NOT_EQUAL CV0($a) int(2)\n\
-             0017 ECHO T9\n\
-             0018 T10 = IS_NOT_EQUAL CV0($a) int(2)\n\
-             0019 ECHO T10\n\
-             0020 T11 = IS_NOT_EQUAL CV0($a) int(2)\n\
-             0021 ECHO T11\n\
-             0022 T12 = IS_IDENTICAL CV0($a) int(2)\n\
-             0023 ECHO T12\n\
-             0024 T13 = IS_IDENTICAL CV0($a) int(2)\n\
-             0025 ECHO T13\n\
-             0026 T14 = IS_NOT_IDENTICAL CV0($a) int(2)\n\
-             0027 ECHO T14\n\
-             0028 T15 = IS_NOT_IDENTICAL CV0($a) int(2)\n\
-             0029 ECHO T15\n\
-             0030 T16 = SPACESHIP CV0($a) int(2)\n\
-             0031 ECHO T16\n\
-             0032 T17 = SPACESHIP int(2) CV0($a)\n\
-             0033 ECHO T17\n\
-             0034 T18 = MUL CV0($a) int(2)\n\
-             0035 ECHO T18\n\
-             0036 T19 = ADD int(2) CV0($a)\n\
-             0037 ECHO T19\n\
-             0038 RETURN int(1)\n"
-        )
-    );
+        ));
 }
 
 /// The oracle's dump, `vars=0, tmps=0`: every comparison over two
@@ -801,39 +1137,39 @@ fn the_rest_of_the_comparison_level_is_the_opcode_php_emits_with_php_s_operand_o
 /// `1 === "1"` and `null === false` are false where `==` says true.
 #[test]
 fn every_comparison_over_two_constants_folds_to_the_value_php_folds_it_to() {
-    assert_eq!(
-        dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=23, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ECHO bool(true)
+        0001 ECHO bool(false)
+        0002 ECHO bool(false)
+        0003 ECHO bool(true)
+        0004 ECHO bool(true)
+        0005 ECHO bool(true)
+        0006 ECHO bool(false)
+        0007 ECHO bool(false)
+        0008 ECHO bool(true)
+        0009 ECHO bool(false)
+        0010 ECHO bool(true)
+        0011 ECHO int(-1)
+        0012 ECHO int(1)
+        0013 ECHO int(0)
+        0014 ECHO int(1)
+        0015 ECHO int(-1)
+        0016 ECHO bool(true)
+        0017 ECHO bool(false)
+        0018 ECHO bool(true)
+        0019 ECHO bool(true)
+        0020 ECHO bool(true)
+        0021 ECHO bool(false)
+        0022 RETURN int(1)
+    "#]].assert_eq(&dump_of(
             b"<?php echo 1 <= 2, 2 <= 1, 1 > 2, 2 > 1, 1 >= 1, 1 == \"1\", 1 != \"1\", \"abc\" == \"ABC\", 1 === 1, 1 === \"1\", 1 !== 1.0, 1 <=> 2, 2 <=> 1, 1 <=> 1, \"10\" <=> \"9\", 1.5 <=> \"abc\", null == false, null === false, \"1e3\" == \"1000\", \"abc\" <= \"abd\", 1.5 >= \"1.5\", 2 > \"10\";"
-        ),
-        main_dump(
-            23,
-            0,
-            0,
-            "0000 ECHO bool(true)\n\
-             0001 ECHO bool(false)\n\
-             0002 ECHO bool(false)\n\
-             0003 ECHO bool(true)\n\
-             0004 ECHO bool(true)\n\
-             0005 ECHO bool(true)\n\
-             0006 ECHO bool(false)\n\
-             0007 ECHO bool(false)\n\
-             0008 ECHO bool(true)\n\
-             0009 ECHO bool(false)\n\
-             0010 ECHO bool(true)\n\
-             0011 ECHO int(-1)\n\
-             0012 ECHO int(1)\n\
-             0013 ECHO int(0)\n\
-             0014 ECHO int(1)\n\
-             0015 ECHO int(-1)\n\
-             0016 ECHO bool(true)\n\
-             0017 ECHO bool(false)\n\
-             0018 ECHO bool(true)\n\
-             0019 ECHO bool(true)\n\
-             0020 ECHO bool(true)\n\
-             0021 ECHO bool(false)\n\
-             0022 RETURN int(1)\n"
-        )
-    );
+        ));
 }
 
 /// The oracle's dump, `vars=2, tmps=7`: a `===` or `!==` against a
@@ -844,31 +1180,31 @@ fn every_comparison_over_two_constants_folds_to_the_value_php_folds_it_to() {
 /// it is the opcode itself, and a `==` against null is `IS_EQUAL`.
 #[test]
 fn an_identity_against_null_or_a_bool_is_the_type_check_php_emits_in_its_place() {
-    assert_eq!(
-        dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=15, args=0, vars=2, tmps=7)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 T2 = TYPE_CHECK (null) CV0($a)
+        0001 ECHO T2
+        0002 T3 = TYPE_CHECK (null) CV0($a)
+        0003 ECHO T3
+        0004 T4 = TYPE_CHECK TYPE [null, true, long, double, string, array, object, resource] CV0($a)
+        0005 ECHO T4
+        0006 T5 = TYPE_CHECK TYPE [null, false, long, double, string, array, object, resource] CV0($a)
+        0007 ECHO T5
+        0008 T6 = IS_IDENTICAL CV0($a) int(1)
+        0009 ECHO T6
+        0010 T7 = IS_EQUAL CV0($a) null
+        0011 ECHO T7
+        0012 T8 = IS_NOT_IDENTICAL CV0($a) CV1($b)
+        0013 ECHO T8
+        0014 RETURN int(1)
+    "#]].assert_eq(&dump_of(
             b"<?php echo $a === null, null === $a, $a !== false, true !== $a, $a === 1, $a == null, $a !== $b;"
-        ),
-        main_dump(
-            15,
-            2,
-            7,
-            "0000 T2 = TYPE_CHECK (null) CV0($a)\n\
-             0001 ECHO T2\n\
-             0002 T3 = TYPE_CHECK (null) CV0($a)\n\
-             0003 ECHO T3\n\
-             0004 T4 = TYPE_CHECK TYPE [null, true, long, double, string, array, object, resource] CV0($a)\n\
-             0005 ECHO T4\n\
-             0006 T5 = TYPE_CHECK TYPE [null, false, long, double, string, array, object, resource] CV0($a)\n\
-             0007 ECHO T5\n\
-             0008 T6 = IS_IDENTICAL CV0($a) int(1)\n\
-             0009 ECHO T6\n\
-             0010 T7 = IS_EQUAL CV0($a) null\n\
-             0011 ECHO T7\n\
-             0012 T8 = IS_NOT_IDENTICAL CV0($a) CV1($b)\n\
-             0013 ECHO T8\n\
-             0014 RETURN int(1)\n"
-        )
-    );
+        ));
 }
 
 /// `zend_do_free` over every place php frees a value: an expression
@@ -879,27 +1215,30 @@ fn an_identity_against_null_or_a_bool_is_the_type_check_php_emits_in_its_place()
 /// `vars=2, tmps=10`.
 #[test]
 fn a_post_inc_nothing_reads_is_the_pre_inc_zend_do_free_makes_it() {
-    assert_eq!(
-        dump_of(b"<?php $a++; ++$a; $b = $a++; for ($a++, $b++; $a++, $a < 1; $a++, ++$a) {}"),
-        main_dump(
-            13,
-            2,
-            10,
-            "0000 PRE_INC CV0($a)\n\
-             0001 PRE_INC CV0($a)\n\
-             0002 T4 = POST_INC CV0($a)\n\
-             0003 ASSIGN CV1($b) T4\n\
-             0004 PRE_INC CV0($a)\n\
-             0005 PRE_INC CV1($b)\n\
-             0006 JMP 0009\n\
-             0007 PRE_INC CV0($a)\n\
-             0008 PRE_INC CV0($a)\n\
-             0009 PRE_INC CV0($a)\n\
-             0010 T11 = IS_SMALLER CV0($a) int(1)\n\
-             0011 JMPNZ T11 0007\n\
-             0012 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=13, args=0, vars=2, tmps=10)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 PRE_INC CV0($a)
+        0001 PRE_INC CV0($a)
+        0002 T4 = POST_INC CV0($a)
+        0003 ASSIGN CV1($b) T4
+        0004 PRE_INC CV0($a)
+        0005 PRE_INC CV1($b)
+        0006 JMP 0009
+        0007 PRE_INC CV0($a)
+        0008 PRE_INC CV0($a)
+        0009 PRE_INC CV0($a)
+        0010 T11 = IS_SMALLER CV0($a) int(1)
+        0011 JMPNZ T11 0007
+        0012 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php $a++; ++$a; $b = $a++; for ($a++, $b++; $a++, $a < 1; $a++, ++$a) {}",
+    ));
 }
 
 /// The same over `--`: `$a--;` as a statement is php's `PRE_DEC
@@ -909,27 +1248,30 @@ fn a_post_inc_nothing_reads_is_the_pre_inc_zend_do_free_makes_it() {
 /// `vars=2, tmps=10`.
 #[test]
 fn a_post_dec_nothing_reads_is_the_pre_dec_zend_do_free_makes_it() {
-    assert_eq!(
-        dump_of(b"<?php $a--; --$a; $b = $a--; echo --$a, $a--; for ($a--; $a-- > 1; --$a) {}"),
-        main_dump(
-            15,
-            2,
-            10,
-            "0000 PRE_DEC CV0($a)\n\
-             0001 PRE_DEC CV0($a)\n\
-             0002 T4 = POST_DEC CV0($a)\n\
-             0003 ASSIGN CV1($b) T4\n\
-             0004 T6 = PRE_DEC CV0($a)\n\
-             0005 ECHO T6\n\
-             0006 T7 = POST_DEC CV0($a)\n\
-             0007 ECHO T7\n\
-             0008 PRE_DEC CV0($a)\n\
-             0009 JMP 0011\n\
-             0010 PRE_DEC CV0($a)\n\
-             0011 T10 = POST_DEC CV0($a)\n\
-             0012 T11 = IS_SMALLER int(1) T10\n\
-             0013 JMPNZ T11 0010\n\
-             0014 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=15, args=0, vars=2, tmps=10)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 PRE_DEC CV0($a)
+        0001 PRE_DEC CV0($a)
+        0002 T4 = POST_DEC CV0($a)
+        0003 ASSIGN CV1($b) T4
+        0004 T6 = PRE_DEC CV0($a)
+        0005 ECHO T6
+        0006 T7 = POST_DEC CV0($a)
+        0007 ECHO T7
+        0008 PRE_DEC CV0($a)
+        0009 JMP 0011
+        0010 PRE_DEC CV0($a)
+        0011 T10 = POST_DEC CV0($a)
+        0012 T11 = IS_SMALLER int(1) T10
+        0013 JMPNZ T11 0010
+        0014 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php $a--; --$a; $b = $a--; echo --$a, $a--; for ($a--; $a-- > 1; --$a) {}",
+    ));
 }

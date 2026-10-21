@@ -17,22 +17,23 @@ use super::*;
 fn a_class_constant_is_fetch_class_constant_over_the_resolved_class_name() {
     let (unit, _strings) =
         unit_and_strings(b"<?php namespace A; class M { const K = 1; } new M; echo M::K;");
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(
-            6,
-            0,
-            3,
-            "0000 V0 = NEW 0 string(\"A\\\\M\")\n\
-             0001 DO_FCALL\n\
-             0002 FREE V0\n\
-             0003 T2 = FETCH_CLASS_CONSTANT string(\"A\\\\M\") string(\"K\")\n\
-             0004 ECHO T2\n\
-             0005 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    0: 0001 - 0002 (new)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=6, args=0, vars=0, tmps=3)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 V0 = NEW 0 string("A\\M")
+        0001 DO_FCALL
+        0002 FREE V0
+        0003 T2 = FETCH_CLASS_CONSTANT string("A\\M") string("K")
+        0004 ECHO T2
+        0005 RETURN int(1)
+        LIVE RANGES:
+             0: 0001 - 0002 (new)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
 }
 
 /// The constant table `zend_compile_class_const` leaves (#392):
@@ -79,28 +80,30 @@ fn a_class_constant_fetch_adds_the_constant_s_name_before_the_class_s_pair() {
 /// it, as every other class reference does.
 #[test]
 fn a_static_property_read_is_fetch_static_prop_r_over_the_resolved_class_name() {
-    assert_eq!(
-        dump_of(b"<?php echo C::$p;"),
-        main_dump(
-            3,
-            0,
-            1,
-            "0000 T0 = FETCH_STATIC_PROP_R string(\"p\") string(\"C\")\n\
-             0001 ECHO T0\n\
-             0002 RETURN int(1)\n"
-        )
-    );
-    assert_eq!(
-        dump_of(b"<?php namespace A; class C { } echo C::$p;"),
-        main_dump(
-            3,
-            0,
-            1,
-            "0000 T0 = FETCH_STATIC_PROP_R string(\"p\") string(\"A\\\\C\")\n\
-             0001 ECHO T0\n\
-             0002 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=3, args=0, vars=0, tmps=1)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 T0 = FETCH_STATIC_PROP_R string("p") string("C")
+        0001 ECHO T0
+        0002 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(b"<?php echo C::$p;"));
+    expect![[r#"
+
+        $_main:
+             ; (lines=3, args=0, vars=0, tmps=1)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 T0 = FETCH_STATIC_PROP_R string("p") string("A\\C")
+        0001 ECHO T0
+        0002 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(b"<?php namespace A; class C { } echo C::$p;"));
 }
 
 /// `zend_compile_assign`'s `ZEND_AST_STATIC_PROP` arm (#470): the
@@ -112,21 +115,24 @@ fn a_static_property_read_is_fetch_static_prop_r_over_the_resolved_class_name() 
 /// `zend_do_free`.
 #[test]
 fn a_static_property_write_is_assign_static_prop_over_the_op_data_beside_it() {
-    assert_eq!(
-        dump_of(b"<?php class T { public static $a = 1; } T::$a = 5; var_dump(T::$a);"),
-        main_dump(
-            7,
-            0,
-            3,
-            "0000 ASSIGN_STATIC_PROP string(\"a\") string(\"T\")\n\
-             0001 OP_DATA int(5)\n\
-             0002 INIT_FCALL 1 96 string(\"var_dump\")\n\
-             0003 T1 = FETCH_STATIC_PROP_R string(\"a\") string(\"T\")\n\
-             0004 SEND_VAL T1 1\n\
-             0005 DO_ICALL\n\
-             0006 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=7, args=0, vars=0, tmps=3)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN_STATIC_PROP string("a") string("T")
+        0001 OP_DATA int(5)
+        0002 INIT_FCALL 1 96 string("var_dump")
+        0003 T1 = FETCH_STATIC_PROP_R string("a") string("T")
+        0004 SEND_VAL T1 1
+        0005 DO_ICALL
+        0006 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php class T { public static $a = 1; } T::$a = 5; var_dump(T::$a);",
+    ));
 }
 
 /// `zend_compile_compound_assign`, `zend_compile_pre_incdec`,
@@ -141,31 +147,32 @@ fn a_static_property_write_is_assign_static_prop_over_the_op_data_beside_it() {
 /// `POST_INC_STATIC_PROP` into `T8`.
 #[test]
 fn the_compound_step_and_reference_writes_to_a_static_property_are_the_oracle_s_oplines() {
-    assert_eq!(
-        dump_of(
-            b"<?php class C { public static $p = 1; } C::$p += 2; ++C::$p; --C::$p; \
-              C::$p++; C::$p--; $x = 1; C::$p = &$x; var_dump(C::$p++);"
-        ),
-        main_dump(
-            14,
-            1,
-            9,
-            "0000 ASSIGN_STATIC_PROP_OP (ADD) string(\"p\") string(\"C\")\n\
-             0001 OP_DATA int(2)\n\
-             0002 PRE_INC_STATIC_PROP string(\"p\") string(\"C\")\n\
-             0003 PRE_DEC_STATIC_PROP string(\"p\") string(\"C\")\n\
-             0004 PRE_INC_STATIC_PROP string(\"p\") string(\"C\")\n\
-             0005 PRE_DEC_STATIC_PROP string(\"p\") string(\"C\")\n\
-             0006 ASSIGN CV0($x) int(1)\n\
-             0007 ASSIGN_STATIC_PROP_REF string(\"p\") string(\"C\")\n\
-             0008 OP_DATA CV0($x)\n\
-             0009 INIT_FCALL 1 96 string(\"var_dump\")\n\
-             0010 T8 = POST_INC_STATIC_PROP string(\"p\") string(\"C\")\n\
-             0011 SEND_VAL T8 1\n\
-             0012 DO_ICALL\n\
-             0013 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=14, args=0, vars=1, tmps=9)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN_STATIC_PROP_OP (ADD) string("p") string("C")
+        0001 OP_DATA int(2)
+        0002 PRE_INC_STATIC_PROP string("p") string("C")
+        0003 PRE_DEC_STATIC_PROP string("p") string("C")
+        0004 PRE_INC_STATIC_PROP string("p") string("C")
+        0005 PRE_DEC_STATIC_PROP string("p") string("C")
+        0006 ASSIGN CV0($x) int(1)
+        0007 ASSIGN_STATIC_PROP_REF string("p") string("C")
+        0008 OP_DATA CV0($x)
+        0009 INIT_FCALL 1 96 string("var_dump")
+        0010 T8 = POST_INC_STATIC_PROP string("p") string("C")
+        0011 SEND_VAL T8 1
+        0012 DO_ICALL
+        0013 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php class C { public static $p = 1; } C::$p += 2; ++C::$p; --C::$p; \
+              C::$p++; C::$p--; $x = 1; C::$p = &$x; var_dump(C::$p++);",
+    ));
 }
 
 /// What stands beside a `C::$p` read and is not read yet is refused
@@ -247,73 +254,93 @@ $a[0]->p[1] = $a;
 /// by `SEND_VAL` to a callee the table has.
 #[test]
 fn property_fetches_compile_to_php_s_op_arrays() {
-    let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+    let cases: &[(&[u8], Expect)] = &[
         (
             b"<?php $x = $o->p;",
-            3,
-            2,
-            2,
-            "0000 T2 = FETCH_OBJ_R CV1($o) string(\"p\")\n\
-             0001 ASSIGN CV0($x) T2\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=2, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T2 = FETCH_OBJ_R CV1($o) string("p")
+                0001 ASSIGN CV0($x) T2
+                0002 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $x = $o->p + $o->q;",
-            5,
-            2,
-            4,
-            "0000 T2 = FETCH_OBJ_R CV1($o) string(\"p\")\n\
-             0001 T3 = FETCH_OBJ_R CV1($o) string(\"q\")\n\
-             0002 T4 = ADD T2 T3\n\
-             0003 ASSIGN CV0($x) T4\n\
-             0004 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    2: 0001 - 0002 (tmp/var)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=5, args=0, vars=2, tmps=4)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T2 = FETCH_OBJ_R CV1($o) string("p")
+                0001 T3 = FETCH_OBJ_R CV1($o) string("q")
+                0002 T4 = ADD T2 T3
+                0003 ASSIGN CV0($x) T4
+                0004 RETURN int(1)
+                LIVE RANGES:
+                     2: 0001 - 0002 (tmp/var)
+            "#]],
         ),
         (
             b"<?php (new E)->p;",
-            5,
-            0,
-            3,
-            "0000 V0 = NEW 0 string(\"E\")\n\
-             0001 DO_FCALL\n\
-             0002 T2 = FETCH_OBJ_R V0 string(\"p\")\n\
-             0003 FREE T2\n\
-             0004 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    0: 0001 - 0002 (new)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=5, args=0, vars=0, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V0 = NEW 0 string("E")
+                0001 DO_FCALL
+                0002 T2 = FETCH_OBJ_R V0 string("p")
+                0003 FREE T2
+                0004 RETURN int(1)
+                LIVE RANGES:
+                     0: 0001 - 0002 (new)
+            "#]],
         ),
         (
             b"<?php $o->p->q()->r;",
-            6,
-            1,
-            3,
-            "0000 T1 = FETCH_OBJ_R CV0($o) string(\"p\")\n\
-             0001 INIT_METHOD_CALL 0 T1 string(\"q\")\n\
-             0002 V2 = DO_FCALL\n\
-             0003 T3 = FETCH_OBJ_R V2 string(\"r\")\n\
-             0004 FREE T3\n\
-             0005 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=6, args=0, vars=1, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T1 = FETCH_OBJ_R CV0($o) string("p")
+                0001 INIT_METHOD_CALL 0 T1 string("q")
+                0002 V2 = DO_FCALL
+                0003 T3 = FETCH_OBJ_R V2 string("r")
+                0004 FREE T3
+                0005 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php var_dump($o->p);",
-            5,
-            1,
-            2,
-            "0000 INIT_FCALL 1 96 string(\"var_dump\")\n\
-             0001 T1 = FETCH_OBJ_R CV0($o) string(\"p\")\n\
-             0002 SEND_VAL T1 1\n\
-             0003 DO_ICALL\n\
-             0004 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=5, args=0, vars=1, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 INIT_FCALL 1 96 string("var_dump")
+                0001 T1 = FETCH_OBJ_R CV0($o) string("p")
+                0002 SEND_VAL T1 1
+                0003 DO_ICALL
+                0004 RETURN int(1)
+            "#]],
         ),
     ];
-    for (source, lines, vars, tmps, oplines) in cases {
-        assert_eq!(
-            dump_of(source),
-            main_dump(*lines, *vars, *tmps, oplines),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+    for (source, expected) in cases {
+        expected.assert_eq(&dump_of(source));
     }
     let (unit, _strings) = unit_and_strings(b"<?php $o->p;");
     assert_eq!(
@@ -332,58 +359,73 @@ fn property_fetches_compile_to_php_s_op_arrays() {
 /// `FETCH_THIS` into a `VAR` where it stands, before the value.
 #[test]
 fn a_property_assignment_compiles_to_assign_obj_as_php_emits_it() {
-    let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+    let cases: &[(&[u8], Expect)] = &[
         (
             b"<?php $o->p = 1;",
-            3,
-            1,
-            1,
-            "0000 ASSIGN_OBJ CV0($o) string(\"p\")\n\
-             0001 OP_DATA int(1)\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=1, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ASSIGN_OBJ CV0($o) string("p")
+                0001 OP_DATA int(1)
+                0002 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $x = $o->q->p = $y;",
-            5,
-            3,
-            3,
-            "0000 V3 = FETCH_OBJ_W CV1($o) string(\"q\")\n\
-             0001 T4 = ASSIGN_OBJ V3 string(\"p\")\n\
-             0002 OP_DATA CV2($y)\n\
-             0003 ASSIGN CV0($x) T4\n\
-             0004 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    4: 0002 - 0003 (tmp/var)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=5, args=0, vars=3, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V3 = FETCH_OBJ_W CV1($o) string("q")
+                0001 T4 = ASSIGN_OBJ V3 string("p")
+                0002 OP_DATA CV2($y)
+                0003 ASSIGN CV0($x) T4
+                0004 RETURN int(1)
+                LIVE RANGES:
+                     4: 0002 - 0003 (tmp/var)
+            "#]],
         ),
         (
             b"<?php $this->p = 1;",
-            4,
-            0,
-            2,
-            "0000 V0 = FETCH_THIS\n\
-             0001 ASSIGN_OBJ V0 string(\"p\")\n\
-             0002 OP_DATA int(1)\n\
-             0003 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=0, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V0 = FETCH_THIS
+                0001 ASSIGN_OBJ V0 string("p")
+                0002 OP_DATA int(1)
+                0003 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $o->q->r->p = 1;",
-            5,
-            1,
-            3,
-            "0000 V1 = FETCH_OBJ_W CV0($o) string(\"q\")\n\
-             0001 V2 = FETCH_OBJ_W V1 string(\"r\")\n\
-             0002 ASSIGN_OBJ V2 string(\"p\")\n\
-             0003 OP_DATA int(1)\n\
-             0004 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=5, args=0, vars=1, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V1 = FETCH_OBJ_W CV0($o) string("q")
+                0001 V2 = FETCH_OBJ_W V1 string("r")
+                0002 ASSIGN_OBJ V2 string("p")
+                0003 OP_DATA int(1)
+                0004 RETURN int(1)
+            "#]],
         ),
     ];
-    for (source, lines, vars, tmps, oplines) in cases {
-        assert_eq!(
-            dump_of(source),
-            main_dump(*lines, *vars, *tmps, oplines),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+    for (source, expected) in cases {
+        expected.assert_eq(&dump_of(source));
     }
 }
 
@@ -398,47 +440,50 @@ fn a_property_assignment_compiles_to_assign_obj_as_php_emits_it() {
 /// `SEPARATE` and the fetch after it.
 #[test]
 fn a_call_under_a_property_write_is_the_oracle_s_separate() {
-    assert_eq!(
-        dump_of(b"<?php f()->p = 1; f()->a->b = 2; $o->m()->p = 3; $f()->p = 4; C::m()->p = 5;"),
-        main_dump(
-            27,
-            2,
-            11,
-            "0000 INIT_FCALL_BY_NAME 0 string(\"f\")\n\
-             0001 V2 = DO_FCALL_BY_NAME\n\
-             0002 V2 = SEPARATE V2\n\
-             0003 ASSIGN_OBJ V2 string(\"p\")\n\
-             0004 OP_DATA int(1)\n\
-             0005 INIT_FCALL_BY_NAME 0 string(\"f\")\n\
-             0006 V4 = DO_FCALL_BY_NAME\n\
-             0007 V4 = SEPARATE V4\n\
-             0008 V5 = FETCH_OBJ_W V4 string(\"a\")\n\
-             0009 ASSIGN_OBJ V5 string(\"b\")\n\
-             0010 OP_DATA int(2)\n\
-             0011 INIT_METHOD_CALL 0 CV0($o) string(\"m\")\n\
-             0012 V7 = DO_FCALL\n\
-             0013 V7 = SEPARATE V7\n\
-             0014 ASSIGN_OBJ V7 string(\"p\")\n\
-             0015 OP_DATA int(3)\n\
-             0016 INIT_DYNAMIC_CALL 0 CV1($f)\n\
-             0017 V9 = DO_FCALL\n\
-             0018 V9 = SEPARATE V9\n\
-             0019 ASSIGN_OBJ V9 string(\"p\")\n\
-             0020 OP_DATA int(4)\n\
-             0021 INIT_STATIC_METHOD_CALL 0 string(\"C\") string(\"m\")\n\
-             0022 V11 = DO_FCALL\n\
-             0023 V11 = SEPARATE V11\n\
-             0024 ASSIGN_OBJ V11 string(\"p\")\n\
-             0025 OP_DATA int(5)\n\
-             0026 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    2: 0002 - 0003 (tmp/var)\n\
-             \x20    4: 0007 - 0008 (tmp/var)\n\
-             \x20    7: 0013 - 0014 (tmp/var)\n\
-             \x20    9: 0018 - 0019 (tmp/var)\n\
-             \x20    11: 0023 - 0024 (tmp/var)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=27, args=0, vars=2, tmps=11)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 INIT_FCALL_BY_NAME 0 string("f")
+        0001 V2 = DO_FCALL_BY_NAME
+        0002 V2 = SEPARATE V2
+        0003 ASSIGN_OBJ V2 string("p")
+        0004 OP_DATA int(1)
+        0005 INIT_FCALL_BY_NAME 0 string("f")
+        0006 V4 = DO_FCALL_BY_NAME
+        0007 V4 = SEPARATE V4
+        0008 V5 = FETCH_OBJ_W V4 string("a")
+        0009 ASSIGN_OBJ V5 string("b")
+        0010 OP_DATA int(2)
+        0011 INIT_METHOD_CALL 0 CV0($o) string("m")
+        0012 V7 = DO_FCALL
+        0013 V7 = SEPARATE V7
+        0014 ASSIGN_OBJ V7 string("p")
+        0015 OP_DATA int(3)
+        0016 INIT_DYNAMIC_CALL 0 CV1($f)
+        0017 V9 = DO_FCALL
+        0018 V9 = SEPARATE V9
+        0019 ASSIGN_OBJ V9 string("p")
+        0020 OP_DATA int(4)
+        0021 INIT_STATIC_METHOD_CALL 0 string("C") string("m")
+        0022 V11 = DO_FCALL
+        0023 V11 = SEPARATE V11
+        0024 ASSIGN_OBJ V11 string("p")
+        0025 OP_DATA int(5)
+        0026 RETURN int(1)
+        LIVE RANGES:
+             2: 0002 - 0003 (tmp/var)
+             4: 0007 - 0008 (tmp/var)
+             7: 0013 - 0014 (tmp/var)
+             9: 0018 - 0019 (tmp/var)
+             11: 0023 - 0024 (tmp/var)
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php f()->p = 1; f()->a->b = 2; $o->m()->p = 3; $f()->p = 4; C::m()->p = 5;",
+    ));
 }
 
 /// #444's shapes under the oracle's `[regime.dump]`: a property as
@@ -446,35 +491,40 @@ fn a_call_under_a_property_write_is_the_oracle_s_separate() {
 /// source in an `OP_DATA`, `(function)` and a `MAKE_REF` over a call.
 #[test]
 fn a_property_bound_by_reference_is_assign_obj_ref_as_php_emits_it() {
-    let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+    let cases: &[(&[u8], Expect)] = &[
         (
             b"<?php $o->p = &$x;",
-            3,
-            2,
-            1,
-            "0000 ASSIGN_OBJ_REF CV0($o) string(\"p\")\n\
-             0001 OP_DATA CV1($x)\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=2, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ASSIGN_OBJ_REF CV0($o) string("p")
+                0001 OP_DATA CV1($x)
+                0002 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $o->p = &f();",
-            6,
-            1,
-            3,
-            "0000 INIT_FCALL_BY_NAME 0 string(\"f\")\n\
-             0001 V2 = DO_FCALL_BY_NAME\n\
-             0002 V3 = MAKE_REF V2\n\
-             0003 ASSIGN_OBJ_REF (function) CV0($o) string(\"p\")\n\
-             0004 OP_DATA V3\n\
-             0005 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=6, args=0, vars=1, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 INIT_FCALL_BY_NAME 0 string("f")
+                0001 V2 = DO_FCALL_BY_NAME
+                0002 V3 = MAKE_REF V2
+                0003 ASSIGN_OBJ_REF (function) CV0($o) string("p")
+                0004 OP_DATA V3
+                0005 RETURN int(1)
+            "#]],
         ),
     ];
-    for (source, lines, vars, tmps, oplines) in cases {
-        assert_eq!(
-            dump_of(source),
-            main_dump(*lines, *vars, *tmps, oplines),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+    for (source, expected) in cases {
+        expected.assert_eq(&dump_of(source));
     }
 }

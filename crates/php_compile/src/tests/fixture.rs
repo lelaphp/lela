@@ -34,16 +34,6 @@ pub(super) fn unit_of(source: &[u8]) -> Unit {
     unit_and_strings(source).0
 }
 
-/// php's dump of a one-line file's main op array, the file unnamed
-/// as `Options::default` leaves it: the header with these counts,
-/// then the oplines.
-pub(super) fn main_dump(lines: usize, vars: u32, tmps: u32, oplines: &str) -> String {
-    format!(
-        "\n$_main:\n     ; (lines={lines}, args=0, vars={vars}, tmps={tmps})\n\
-         \x20    ; (before optimizer)\n     ; :1-1\n     ; return  [] RANGE[0..0]\n{oplines}"
-    )
-}
-
 /// The dump of one source, read while the table its strings were
 /// interned into still stands, under the frameless table of the
 /// bundle the source compiled against, as the engine hands it to
