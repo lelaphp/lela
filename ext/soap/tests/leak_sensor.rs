@@ -19,7 +19,7 @@ fn armed(source: &str) -> String {
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(source, Capture::default());
-    String::from_utf8_lossy(&served.stdout).into_owned()
+    served.stdout_text()
 }
 
 /// A fault the client raises while it goes on is kept in its

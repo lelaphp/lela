@@ -10,7 +10,7 @@ fn the_extension_is_loaded() {
         .build();
     let sink = Capture::default();
     let served = engine.serve_capture("<?php var_dump(extension_loaded('session'));", sink);
-    assert_eq!(served.stdout, b"bool(true)\n");
+    assert_eq!(served.stdout_text(), "bool(true)\n");
 }
 
 /// A deprecation `OnUpdateTransSid` raises over a startup value
@@ -32,7 +32,7 @@ fn a_startup_deprecation_sends_no_header() {
         Capture::default(),
     );
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "\nDeprecated: PHP Startup: Enabling session.use_trans_sid INI setting is deprecated in Unknown on line 0\nstring(0) \"\"\nstring(4) \"/tmp\"\n"
     );
 }
@@ -53,7 +53,7 @@ fn the_startup_rules_meet_the_values_in_declaration_order() {
         .build();
     let served = engine.serve_capture("<?php echo \"ok\\n\";", Capture::default());
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "\nDeprecated: PHP Startup: Disabling session.use_only_cookies INI setting is deprecated in Unknown on line 0\n\nDeprecated: PHP Startup: Enabling session.use_trans_sid INI setting is deprecated in Unknown on line 0\n\nDeprecated: PHP Startup: session.sid_length INI setting is deprecated in Unknown on line 0\nok\n"
     );
 }
@@ -78,7 +78,7 @@ fn a_startup_upload_progress_freq_out_of_range_keeps_the_default() {
             Capture::default(),
         );
         assert_eq!(
-            String::from_utf8_lossy(&served.stdout),
+            served.stdout_text(),
             format!(
                 "\nWarning: PHP Startup: session.upload_progress.freq must be {bound} in Unknown on line 0\nstring(2) \"1%\"\n"
             )

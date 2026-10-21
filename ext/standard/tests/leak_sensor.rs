@@ -23,7 +23,7 @@ fn armed(source: &str) -> String {
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(source, Capture::default());
-    String::from_utf8_lossy(&served.stdout).into_owned()
+    served.stdout_text()
 }
 
 /// `fgetcsv` and `fscanf` read a line for their parser, `fgetcsv` the
@@ -531,7 +531,7 @@ fn a_leak_from_a_supplied_filter_names_its_extension() {
         "<?php $m = fopen('php://memory', 'w+'); stream_filter_append($m, 'leaky', STREAM_FILTER_WRITE);\nfwrite($m, 'x'); echo 'written';\n",
         Capture::default(),
     );
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert!(stdout.starts_with("written"), "{stdout}");
     assert!(
         stdout.contains("InternalError: the request ended with"),

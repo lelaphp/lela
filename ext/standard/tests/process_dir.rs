@@ -19,7 +19,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use php_ext::test::{Capture, Engine};
+use php_ext::test::{Capture, Engine, Files};
 
 /// Every way a request starts a child with no `$cwd`: `proc_open` of an
 /// array and of a string, `exec`, `shell_exec`, `system`, `passthru` and
@@ -51,21 +51,18 @@ proc_close($p);
 
 fn served(engine: &Engine, dir: &Path, source: &str) -> (String, Option<String>) {
     let served = engine.serve_capture_in(dir, b"Standard input code", source, Capture::default());
-    (
-        String::from_utf8_lossy(&served.stdout).into_owned(),
-        served.fatal,
-    )
+    (served.stdout_text(), served.fatal)
 }
 
 #[test]
 fn a_child_inherits_the_process_s_directory_it_cannot_enter_and_is_moved_into_another() {
     // Canonical, as `getcwd(3)` and `pwd -P` name it: macOS's is under a
     // link, `/var` to `/private/var`.
-    let temp = std::env::temp_dir();
-    let temp = temp.canonicalize().unwrap_or(temp);
-    let base = temp.join(format!("php-process-dir-{}", std::process::id()));
+    let files = Files::new("standard-process-dir", &[]);
+    let base = files.path().canonicalize().expect("the tree resolves");
     let (locked, other) = (base.join("locked"), base.join("other"));
-    assert!(fs::create_dir_all(&locked).is_ok() && fs::create_dir_all(&other).is_ok());
+    fs::create_dir(&locked).expect("the tree takes the locked directory");
+    fs::create_dir(&other).expect("the tree takes the other directory");
     let engine = Engine::builder()
         .extensions(&[
             php_ext_lexbor::extension(),
@@ -84,11 +81,11 @@ fn a_child_inherits_the_process_s_directory_it_cannot_enter_and_is_moved_into_an
     // process's.
     let in_none = served(&engine, Path::new(""), EVERY_SPAWN);
     let in_other = served(&engine, &other, WHERE);
-    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).ok();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700))
+        .expect("the locked directory is opened again");
     if let Ok(before) = before {
         std::env::set_current_dir(before).ok();
     }
-    fs::remove_dir_all(&base).ok();
 
     assert!(entered, "the process entered the directory and locked it");
     let every = "proc_open array\nproc_open string\nexec\nshell_exec\nsystem\npassthru\npopen\n";

@@ -19,7 +19,7 @@ fn armed(source: &str) -> (String, String) {
         .build();
     let served = engine.serve_capture(source, Capture::default());
     (
-        String::from_utf8_lossy(&served.stdout).into_owned(),
+        served.stdout_text(),
         String::from_utf8_lossy(&served.stderr).into_owned(),
     )
 }

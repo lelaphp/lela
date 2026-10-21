@@ -73,9 +73,7 @@ fn a_foreach_walk_holds_the_table_a_class_keeps() {
          echo built_rows($x, function ($k) use ($x) { get_object_vars($x); $GLOBALS['s' . $k] = str_repeat('z', 24); $GLOBALS['t' . $k] = str_repeat('y', 24); }), \"\\n\";\n",
         Capture::default(),
     );
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "bbbbbbbbbbbbbbbbbbbbbbbb cccccccccccccccccccccccc dddddddddddddddddddddddd \n"
+    served.assert_clean(
+        "bbbbbbbbbbbbbbbbbbbbbbbb cccccccccccccccccccccccc dddddddddddddddddddddddd \n",
     );
-    assert_eq!(served.fatal, None);
 }
