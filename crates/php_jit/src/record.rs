@@ -361,6 +361,9 @@ const HEAD: u32 = 2;
 /// Whether a recording is under way on the request, on whichever
 /// execution: php's `JIT_G(tracing)`, which `zend_jit_trace_hot_root`
 /// tests before it records (`Z/ext/opcache/jit/zend_jit_trace.c:8140`).
+/// A visit reads it through `dispatch::quiet`, beside the trace the
+/// request submitted, in one look-up of the request's state; the tests
+/// read it here.
 ///
 /// A fiber suspended inside its own recording: `$main`'s recording stops
 /// at the `eval`, whose code is no root, so the fiber's `body()` roots;
@@ -390,6 +393,7 @@ const HEAD: u32 = 2;
 /// ---- TRACE 2 compiled
 ///
 /// ```
+#[cfg(test)]
 pub(crate) fn recording(req: &mut Request) -> bool {
     req.state::<JitRequest>().recording
 }

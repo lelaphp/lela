@@ -17,7 +17,7 @@ use php_engine::tier::{
 };
 use php_unit::{OpArray, OplineIdx, Unit};
 
-use super::{Visited, visit};
+use super::{Submitted, Visited, quieted, visit};
 use crate::policy::{self, Holder, Outcome, State};
 use crate::record::{self, Start, Stop};
 use crate::table::TraceId;
@@ -167,6 +167,44 @@ fn a_visit_while_recording_bumps_and_does_not_claim() {
     }
     let visited = visit(word, &policy, Start::Loop, true, || root(&epoch, func, 1));
     assert_eq!(decided(visited), "hot loop");
+}
+
+/// A request that submitted a loop's trace closed at its header claims
+/// nothing while the job is under way, nor once it is published until it
+/// visits a loop or a return site, where php's interpreter would have
+/// entered the trace already: a call's entry the body makes meanwhile is
+/// bumped and left. Then it claims again.
+#[test]
+fn a_request_claims_nothing_until_it_reaches_the_trace_it_submitted() {
+    let policy = testing::policy(&[("jit.mode", "force")]);
+    let (epoch, func) = fixture();
+    let word = epoch.word(func, SafepointIdx(1));
+    let holder = Holder::Root {
+        epoch: epoch.clone(),
+        func,
+        at: SafepointIdx(1),
+    };
+    let claim = policy::claim(holder.clone(), &policy, Start::Loop);
+    assert_eq!(policy::read(word), State::Recording);
+    let mut state = crate::JitRequest {
+        submitted: Some(Submitted {
+            word: holder,
+            short: true,
+        }),
+        ..crate::JitRequest::default()
+    };
+    let at = |state: &mut crate::JitRequest, site| quieted(state, Some(site));
+    assert!(at(&mut state, Site::Entry), "under way");
+    assert!(at(&mut state, Site::Loop(SafepointIdx(1))), "under way");
+    if let Some(claim) = claim {
+        policy::settle(claim, &Outcome::Published(trace(1)));
+    }
+    assert_eq!(policy::read(word), State::Compiled(trace(1)));
+    assert!(at(&mut state, Site::Entry), "short of the trace");
+    assert!(quieted(&mut state, None), "short of the trace");
+    assert!(!at(&mut state, Site::Return(SafepointIdx(0))), "reached");
+    assert!(state.submitted.is_none());
+    assert!(!at(&mut state, Site::Entry));
 }
 
 /// The trace-dump lanes' ini: `force`, inline, and php's `TRACE` lines.

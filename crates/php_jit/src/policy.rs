@@ -920,6 +920,11 @@ impl Claim {
         self.holder.epoch()
     }
 
+    /// What holds its word.
+    pub(crate) fn holder(&self) -> &Holder {
+        &self.holder
+    }
+
     /// The one release store that ends the claim; the state it left.
     fn store(&self, outcome: &Outcome) -> State {
         let [heat, state] = self.holder.word().halves();

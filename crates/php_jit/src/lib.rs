@@ -96,10 +96,13 @@ impl Tier for Jit {
 /// The tier's request state (`jit-design.md` §4): whether a recording is
 /// under way on the request, php's `JIT_G(tracing)`, which no fiber switch
 /// saves (§4.9, revision 30), set and cleared by `record`'s guard
-/// alone and read through `record::recording`.
+/// alone; and the trace it last submitted to the worker and has not
+/// reached yet, while which it claims nothing (`dispatch::Submitted`).
+/// `dispatch::quiet` reads both.
 #[derive(Debug, Default)]
 pub(crate) struct JitRequest {
     recording: bool,
+    submitted: Option<dispatch::Submitted>,
 }
 
 /// The tier's engine state (`jit-design.md` §4): where a recording

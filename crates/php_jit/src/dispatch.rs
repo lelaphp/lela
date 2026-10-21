@@ -40,7 +40,7 @@ use crate::policy::{
 use crate::record::{self, Bailed, Ended, Headed, Start, Stop};
 use crate::table::{self, TraceId, TraceName};
 use crate::types::Grows;
-use crate::{JitEngine, Shared};
+use crate::{JitEngine, JitRequest, Shared};
 
 #[cfg(test)]
 mod tests;
@@ -103,7 +103,7 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow 
         Site::Entry => Start::Enter,
         Site::Return(_) => Start::Return,
     };
-    let claims = start != Start::Return && !record::recording(req);
+    let claims = !quiet(req, Some(site)) && start != Start::Return;
     let (decided, shared) = {
         let req: &Request = req;
         let Some(engine) = req.engine::<JitEngine>() else {
@@ -424,7 +424,7 @@ fn sided(
         State::Blacklisted => return Visited::Continue,
         State::Cold | State::Recording => {}
     }
-    if req.limits().interrupt().raised().load(Ordering::Relaxed) || record::recording(req) {
+    if req.limits().interrupt().raised().load(Ordering::Relaxed) || quiet(req, None) {
         return Visited::Continue;
     }
     if shared.policy.debug().any(JitDebug::TRACE_EXIT) {
@@ -523,6 +523,7 @@ pub(crate) fn hot(
                     claim,
                     name,
                 },
+                false,
             );
             break (resumed(frame, stepped), None);
         }
@@ -550,7 +551,9 @@ pub(crate) fn hot(
             claim: rooted,
             name,
         };
-        let outcome = settled(req, shared, job);
+        // A loop's trace closed at its header leaves the interpreter at
+        // that header, short of the trace.
+        let outcome = settled(req, shared, job, stop == Stop::Loop);
         let repeat = match (outcome, ended.inner) {
             (Some(Outcome::Abort(Stop::InnerLoop)), Some((func, header))) => policy::claim(
                 Holder::Root {
@@ -680,16 +683,75 @@ fn side_entered(table: Option<&table::Table>, start: Start) -> Vec<record::Enter
 /// worker; any other settled here at once as the attempt it failed, as
 /// php writes its abort before it records again. Its lines written;
 /// what it settled as, where it was settled here.
-fn settled(req: &mut Request, shared: &Shared, job: Job) -> Option<Outcome> {
+fn settled(req: &mut Request, shared: &Shared, job: Job, short: bool) -> Option<Outcome> {
     let mut lines = Vec::new();
     let outcome = if job.recorded.record.stop.compiles() {
+        let word = job.claim.holder().clone();
         let engine = req.engine::<JitEngine>();
-        engine.and_then(|engine| engine.compiler.submit(shared, job, &mut lines))
+        match engine.map(|engine| engine.compiler.submit(shared, job, &mut lines)) {
+            Some(None) => {
+                req.state::<JitRequest>().submitted = Some(Submitted { word, short });
+                None
+            }
+            Some(settled) => settled,
+            None => None,
+        }
     } else {
         Some(compiler::pipeline(shared, job, &mut lines))
     };
     req.response_mut().write_stderr(&lines);
     outcome
+}
+
+/// A trace the request submitted to the worker (`jit-design.md` §4.8,
+/// revision NEXT-9, as built until a person rules on #3191) and has
+/// not reached yet, while which the request claims no word, as while it
+/// records (revision 30). php compiles where it records and its
+/// interpreter goes on at the opline the recording stopped at, whose
+/// handler is then the trace, so nothing it runs between the two heats a
+/// root; under `jit.compile=thread` the interpreter runs on meanwhile, and
+/// what it ran heated what php never reaches. On spectralnorm, the outer
+/// loop's recordings stopped at the inner loop's claimed header as at an
+/// inner loop, spending the outer's attempts, and `eval_A`, called from
+/// the interpreted inner loop, became a root, so the next inner loop's
+/// trace linked to it at the call where php's inlines it, and closed no
+/// loop. A word visited meanwhile is bumped and left. Under
+/// `jit.compile=inline` nothing is submitted.
+#[derive(Debug)]
+pub(crate) struct Submitted {
+    /// The trace's word, which reads recording while its job is queued
+    /// or under way.
+    word: Holder,
+    /// Whether the interpreter goes on short of the trace: at the header
+    /// a loop's trace closed at, where php's would have entered it. The
+    /// request reaches it at the next loop or return site it visits, the
+    /// loop's back edge or the return of what its body called, its loop
+    /// having ended or not.
+    short: bool,
+}
+
+/// Whether the request claims no word at `site`, a safepoint's or, for
+/// none, an exit's landing: a recording under way, or a trace it
+/// submitted it has not reached ([`Submitted`]); one it reached is
+/// forgotten here.
+fn quiet(req: &mut Request, site: Option<Site>) -> bool {
+    quieted(req.state::<JitRequest>(), site)
+}
+
+/// [`quiet`] over the request's state.
+fn quieted(state: &mut JitRequest, site: Option<Site>) -> bool {
+    if state.recording {
+        return true;
+    }
+    let Some(submitted) = &state.submitted else {
+        return false;
+    };
+    let under_way = policy::read(submitted.word.word()) == State::Recording;
+    let short = submitted.short && !matches!(site, Some(Site::Loop(_) | Site::Return(_)));
+    if !under_way && !short {
+        state.submitted = None;
+    }
+    under_way || short
 }
 
 /// The claim the recorded trace settles and the name it is published
