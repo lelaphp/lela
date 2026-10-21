@@ -766,9 +766,10 @@ fn ci_reads_the_variables_off_the_oracle_section_and_spells_neither() {
     );
 }
 
-/// The promise (#38): what a runner says this machine has of the pin,
-/// the words the variable lists. A word outside the two is refused
-/// naming them, so a misspelt promise is never an unmade one.
+/// The promise (#38): what a runner says this machine has, the words the
+/// variable lists. A word outside the three is refused naming them, so a
+/// misspelt promise is never an unmade one: `mysq` promises no server
+/// (#3084).
 #[test]
 fn a_promise_is_the_words_the_variable_lists_and_an_unknown_word_is_refused() {
     let none = Promised::parse("").unwrap();
@@ -777,15 +778,32 @@ fn a_promise_is_the_words_the_variable_lists_and_an_unknown_word_is_refused() {
     assert!(tree.holds(Promise::Tree) && !tree.holds(Promise::Oracle));
     let both = Promised::parse(" oracle\ttree ").unwrap();
     assert!(both.holds(Promise::Tree) && both.holds(Promise::Oracle));
+    let server = Promised::parse("tree mysql").unwrap();
+    assert!(server.holds(Promise::Tree) && server.holds(Promise::Mysql));
+    assert!(!server.holds(Promise::Oracle));
     let err = Promised::parse("tree php-src").unwrap_err().to_string();
     assert!(
         err.contains("php-src") && err.contains(PROMISE_VARIABLE),
         "the word and the variable are named: {err}"
     );
     assert!(
-        err.contains("tree") && err.contains("oracle"),
+        err.ends_with("the words it takes are tree, oracle, mysql"),
         "the words the variable takes are named: {err}"
     );
+    let err = Promised::parse("tree mysq").unwrap_err().to_string();
+    assert!(err.contains("\"mysq\""), "{err}");
+}
+
+/// The tests of `ext/mysqli` and `ext/pdo_mysql` cannot depend on xtask, so
+/// `MysqlServer::with` spells the variable and the word itself: held here
+/// to the ones [`Promised::parse`] reads (#3084).
+#[test]
+fn the_mysql_server_s_tests_read_the_promise_by_its_own_name_and_word() {
+    let support = workspace().join("ext/mysqlnd/tests/support/mysql.rs");
+    let text = std::fs::read_to_string(&support).unwrap();
+    for spelt in [PROMISE_VARIABLE, Promise::Mysql.word()] {
+        assert!(text.contains(&format!("\"{spelt}\"")), "{spelt}");
+    }
 }
 
 /// The decision every guarded test takes (#38): a fact the pin names

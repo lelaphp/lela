@@ -3,7 +3,8 @@
 # (#1345): 8.4, on 127.0.0.1:3306, root with an empty password from any host,
 # and a `test` database. A run gets a fresh server, since the runner outlives
 # it: where nothing answers, `xtask phpt` and the witnesses refuse rather than
-# skip (#1366).
+# skip (#1366), and the tests of mysqli and pdo_mysql fail in a job whose
+# promise lists `mysql` (#3084).
 #
 # On Linux, the compose file itself, recreated with a fresh data volume; the
 # runner's user is in the `docker` group (scripts/ci/runner.sh). On the Mac,

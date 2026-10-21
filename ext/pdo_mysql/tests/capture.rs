@@ -11,6 +11,10 @@
     reason = "a test starts its own threads (seams.toml rule fork.threads)"
 )]
 
+#[path = "../../mysqlnd/tests/support/mysql.rs"]
+mod mysql;
+
+use mysql::MysqlServer;
 use php_ext::abi::{Dependency, DependencyKind, ExtensionBuilder};
 use php_ext::request::Request;
 use php_ext::test::{Capture, Engine};
@@ -43,42 +47,42 @@ fn the_extension_is_loaded() {
 /// Skipped where no server answers on `ci/mysql/compose.yaml`'s address.
 #[test]
 fn a_persistent_connection_serves_the_next_request_and_a_dead_one_is_replaced() {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_json::extension(),
-            php_ext_standard::extension(),
-            php_ext_uri::extension(),
-            php_ext_spl::extension(),
-            php_ext_pdo::extension(),
-            php_ext_mysqlnd::extension(),
-            php_ext_pdo_mysql::extension(),
-        ])
-        .build();
-    let open = "<?php try { $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_PERSISTENT => true]); } catch (PDOException $e) { exit('no server'); }";
-    let first = format!(
-        "{open} $db->exec('SET @kept = 7'); echo $db->query('SELECT CONNECTION_ID()')->fetchColumn();"
-    );
-    let served = engine.serve_capture(&first, Capture::default());
-    let id = served.stdout_text();
-    if id == "no server" {
-        return;
-    }
-    let second = format!(
-        "{open} echo $db->query('SELECT CONNECTION_ID()')->fetchColumn(), ' ', $db->query('SELECT @kept')->fetchColumn();"
-    );
-    let served = engine.serve_capture(&second, Capture::default());
-    assert_eq!(served.stdout_text(), format!("{id} 7"));
-    let kill = format!(
-        "<?php $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', ''); $db->exec('KILL {id}'); $db->query('SELECT SLEEP(0.2)'); echo 'killed';"
-    );
-    let served = engine.serve_capture(&kill, Capture::default());
-    assert_eq!(served.stdout_text(), "killed");
-    let third = format!(
-        "{open} $now = $db->query('SELECT CONNECTION_ID()')->fetchColumn(); var_dump($now != '{id}', $db->query('SELECT @kept')->fetchColumn());"
-    );
-    let served = engine.serve_capture(&third, Capture::default());
-    assert_eq!(served.stdout_text(), "bool(true)\nNULL\n");
+    MysqlServer::with(|_| {
+        let engine = Engine::builder()
+            .extensions(&[
+                php_ext_lexbor::extension(),
+                php_ext_json::extension(),
+                php_ext_standard::extension(),
+                php_ext_uri::extension(),
+                php_ext_spl::extension(),
+                php_ext_pdo::extension(),
+                php_ext_mysqlnd::extension(),
+                php_ext_pdo_mysql::extension(),
+            ])
+            .build();
+        let open = "<?php $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_PERSISTENT => true]);";
+        let first = format!(
+            "{open} $db->exec('SET @kept = 7'); echo $db->query('SELECT CONNECTION_ID()')->fetchColumn();"
+        );
+        let served = engine.serve_capture(&first, Capture::default());
+        let id = served.stdout_text();
+        assert!(id.parse::<u64>().is_ok(), "{id}");
+        let second = format!(
+            "{open} echo $db->query('SELECT CONNECTION_ID()')->fetchColumn(), ' ', $db->query('SELECT @kept')->fetchColumn();"
+        );
+        let served = engine.serve_capture(&second, Capture::default());
+        assert_eq!(served.stdout_text(), format!("{id} 7"));
+        let kill = format!(
+            "<?php $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', ''); $db->exec('KILL {id}'); $db->query('SELECT SLEEP(0.2)'); echo 'killed';"
+        );
+        let served = engine.serve_capture(&kill, Capture::default());
+        assert_eq!(served.stdout_text(), "killed");
+        let third = format!(
+            "{open} $now = $db->query('SELECT CONNECTION_ID()')->fetchColumn(); var_dump($now != '{id}', $db->query('SELECT @kept')->fetchColumn());"
+        );
+        let served = engine.serve_capture(&third, Capture::default());
+        assert_eq!(served.stdout_text(), "bool(true)\nNULL\n");
+    });
 }
 
 /// A session save handler whose `write` goes through a persistent
@@ -90,53 +94,51 @@ fn a_persistent_connection_serves_the_next_request_and_a_dead_one_is_replaced() 
 /// with none listening the test says so and passes.
 #[test]
 fn a_session_written_at_the_request_end_still_has_the_persistent_connection() {
-    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
-        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
-        return;
-    }
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_json::extension(),
-            php_ext_uri::extension(),
-            php_ext_standard::extension(),
-            php_ext_spl::extension(),
-            php_ext_session::extension(),
-            php_ext_pdo::extension(),
-            php_ext_mysqlnd::extension(),
-            php_ext_pdo_mysql::extension(),
-        ])
-        .build();
-    let written = "<?php ini_set('session.use_cookies', '0'); ini_set('session.cache_limiter', '');
-        $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_PERSISTENT => true]);
-        $db->exec('CREATE TABLE IF NOT EXISTS t1695 (v TEXT)');
-        $db->exec('DELETE FROM t1695');
-        class H implements SessionHandlerInterface {
-            function __construct(public $db) {}
-            function open(string $p, string $n): bool { return true; }
-            function close(): bool { return true; }
-            function read(string $id): string|false { return ''; }
-            function write(string $id, string $data): bool {
-                global $db;
-                return $db->exec(\"INSERT INTO t1695 VALUES ('$data')\") === 1;
+    MysqlServer::with(|_| {
+        let engine = Engine::builder()
+            .extensions(&[
+                php_ext_lexbor::extension(),
+                php_ext_json::extension(),
+                php_ext_uri::extension(),
+                php_ext_standard::extension(),
+                php_ext_spl::extension(),
+                php_ext_session::extension(),
+                php_ext_pdo::extension(),
+                php_ext_mysqlnd::extension(),
+                php_ext_pdo_mysql::extension(),
+            ])
+            .build();
+        let written = "<?php ini_set('session.use_cookies', '0'); ini_set('session.cache_limiter', '');
+            $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_PERSISTENT => true]);
+            $db->exec('CREATE TABLE IF NOT EXISTS t1695 (v TEXT)');
+            $db->exec('DELETE FROM t1695');
+            class H implements SessionHandlerInterface {
+                function __construct(public $db) {}
+                function open(string $p, string $n): bool { return true; }
+                function close(): bool { return true; }
+                function read(string $id): string|false { return ''; }
+                function write(string $id, string $data): bool {
+                    global $db;
+                    return $db->exec(\"INSERT INTO t1695 VALUES ('$data')\") === 1;
+                }
+                function destroy(string $id): bool { return true; }
+                function gc(int $m): int|false { return 0; }
             }
-            function destroy(string $id): bool { return true; }
-            function gc(int $m): int|false { return 0; }
-        }
-        session_set_save_handler(new H($db), false);
-        session_id('t1695');
-        session_start();
-        $_SESSION['a'] = 1;";
-    let served = engine.serve_capture(written, Capture::default());
-    assert_eq!(served.stdout_text(), "");
-    let read = "<?php $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
-        var_dump($db->query('SELECT v FROM t1695')->fetchAll(PDO::FETCH_COLUMN));
-        $db->exec('DROP TABLE t1695');";
-    let served = engine.serve_capture(read, Capture::default());
-    assert_eq!(
-        served.stdout_text(),
-        "array(1) {\n  [0]=>\n  string(6) \"a|i:1;\"\n}\n"
-    );
+            session_set_save_handler(new H($db), false);
+            session_id('t1695');
+            session_start();
+            $_SESSION['a'] = 1;";
+        let served = engine.serve_capture(written, Capture::default());
+        assert_eq!(served.stdout_text(), "");
+        let read = "<?php $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
+            var_dump($db->query('SELECT v FROM t1695')->fetchAll(PDO::FETCH_COLUMN));
+            $db->exec('DROP TABLE t1695');";
+        let served = engine.serve_capture(read, Capture::default());
+        assert_eq!(
+            served.stdout_text(),
+            "array(1) {\n  [0]=>\n  string(6) \"a|i:1;\"\n}\n"
+        );
+    });
 }
 
 /// A connector of the test's own, `filler:`, whose persistent connections
@@ -197,51 +199,49 @@ impl Connection for Filled {
 /// listening the test says so and passes.
 #[test]
 fn a_persistent_connection_past_the_pool_s_bound_is_closed() {
-    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
-        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
-        return;
-    }
-    let filler = ExtensionBuilder::default()
-        .dependencies(vec![Dependency {
-            name: String::from("pdo"),
-            kind: DependencyKind::Required,
-            rel: None,
-            version: None,
-        }])
-        .register::<&'static dyn Connector>(&FILLER)
-        .build("pdo_filler");
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_json::extension(),
-            php_ext_standard::extension(),
-            php_ext_uri::extension(),
-            php_ext_spl::extension(),
-            php_ext_pdo::extension(),
-            filler,
-            php_ext_mysqlnd::extension(),
-            php_ext_pdo_mysql::extension(),
-        ])
-        .build();
-    let first = "<?php for ($i = 0; $i < 1024; $i++) {
-            new PDO('filler:', null, null, [PDO::ATTR_PERSISTENT => \"n$i\"]);
-        }
-        $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_PERSISTENT => true]);
-        echo $db->query('SELECT CONNECTION_ID()')->fetchColumn();";
-    let served = engine.serve_capture(first, Capture::default());
-    let thread = served.stdout_text();
-    assert!(thread.parse::<u64>().is_ok(), "{thread}");
-    let second = format!(
-        "<?php $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
-        for ($i = 0; $i < 50; $i++) {{
-            $open = $db->query('SELECT COUNT(*) FROM information_schema.processlist WHERE id = {thread}')->fetchColumn() != 0;
-            if (!$open) break;
-            $db->exec('DO SLEEP(0.02)');
-        }}
-        echo $open ? 'open' : 'gone';"
-    );
-    let served = engine.serve_capture(&second, Capture::default());
-    assert_eq!(served.stdout_text(), "gone");
+    MysqlServer::with(|_| {
+        let filler = ExtensionBuilder::default()
+            .dependencies(vec![Dependency {
+                name: String::from("pdo"),
+                kind: DependencyKind::Required,
+                rel: None,
+                version: None,
+            }])
+            .register::<&'static dyn Connector>(&FILLER)
+            .build("pdo_filler");
+        let engine = Engine::builder()
+            .extensions(&[
+                php_ext_lexbor::extension(),
+                php_ext_json::extension(),
+                php_ext_standard::extension(),
+                php_ext_uri::extension(),
+                php_ext_spl::extension(),
+                php_ext_pdo::extension(),
+                filler,
+                php_ext_mysqlnd::extension(),
+                php_ext_pdo_mysql::extension(),
+            ])
+            .build();
+        let first = "<?php for ($i = 0; $i < 1024; $i++) {
+                new PDO('filler:', null, null, [PDO::ATTR_PERSISTENT => \"n$i\"]);
+            }
+            $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_PERSISTENT => true]);
+            echo $db->query('SELECT CONNECTION_ID()')->fetchColumn();";
+        let served = engine.serve_capture(first, Capture::default());
+        let thread = served.stdout_text();
+        assert!(thread.parse::<u64>().is_ok(), "{thread}");
+        let second = format!(
+            "<?php $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
+            for ($i = 0; $i < 50; $i++) {{
+                $open = $db->query('SELECT COUNT(*) FROM information_schema.processlist WHERE id = {thread}')->fetchColumn() != 0;
+                if (!$open) break;
+                $db->exec('DO SLEEP(0.02)');
+            }}
+            echo $open ? 'open' : 'gone';"
+        );
+        let served = engine.serve_capture(&second, Capture::default());
+        assert_eq!(served.stdout_text(), "gone");
+    });
 }
 
 /// A persistent connection waits between requests in one list, PDO's,
@@ -255,38 +255,36 @@ fn a_persistent_connection_past_the_pool_s_bound_is_closed() {
 /// test says so and passes.
 #[test]
 fn a_persistent_connection_keeps_its_socket_however_full_the_stream_pool_is() {
-    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
-        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
-        return;
-    }
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_json::extension(),
-            php_ext_uri::extension(),
-            php_ext_standard::extension(),
-            php_ext_spl::extension(),
-            php_ext_pdo::extension(),
-            php_ext_mysqlnd::extension(),
-            php_ext_pdo_mysql::extension(),
-        ])
-        .build();
-    let open = "$db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_PERSISTENT => true]);
-        echo $db->query('SELECT CONNECTION_ID()')->fetchColumn();";
-    let first = format!(
-        "<?php $s = stream_socket_server('tcp://127.0.0.1:0');
-        $port = explode(':', stream_socket_get_name($s, false))[1];
-        for ($i = 0; $i < 1024; $i++) {{
-            $kept[] = pfsockopen(\"127.0.0.1:$port/$i\", -1);
-            $accepted[] = stream_socket_accept($s, 1);
-        }}
-        {open}"
-    );
-    let served = engine.serve_capture(&first, Capture::default());
-    let thread = served.stdout_text();
-    assert!(thread.parse::<u64>().is_ok(), "{thread}");
-    let served = engine.serve_capture(&format!("<?php {open}"), Capture::default());
-    assert_eq!(served.stdout_text(), thread);
+    MysqlServer::with(|_| {
+        let engine = Engine::builder()
+            .extensions(&[
+                php_ext_lexbor::extension(),
+                php_ext_json::extension(),
+                php_ext_uri::extension(),
+                php_ext_standard::extension(),
+                php_ext_spl::extension(),
+                php_ext_pdo::extension(),
+                php_ext_mysqlnd::extension(),
+                php_ext_pdo_mysql::extension(),
+            ])
+            .build();
+        let open = "$db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_PERSISTENT => true]);
+            echo $db->query('SELECT CONNECTION_ID()')->fetchColumn();";
+        let first = format!(
+            "<?php $s = stream_socket_server('tcp://127.0.0.1:0');
+            $port = explode(':', stream_socket_get_name($s, false))[1];
+            for ($i = 0; $i < 1024; $i++) {{
+                $kept[] = pfsockopen(\"127.0.0.1:$port/$i\", -1);
+                $accepted[] = stream_socket_accept($s, 1);
+            }}
+            {open}"
+        );
+        let served = engine.serve_capture(&first, Capture::default());
+        let thread = served.stdout_text();
+        assert!(thread.parse::<u64>().is_ok(), "{thread}");
+        let served = engine.serve_capture(&format!("<?php {open}"), Capture::default());
+        assert_eq!(served.stdout_text(), thread);
+    });
 }
 
 /// A persistent connection waiting in PDO's pool as the engine ends is
@@ -304,60 +302,59 @@ fn a_pooled_persistent_connection_is_quit_as_the_engine_ends() {
     use std::net::{Shutdown, TcpListener, TcpStream};
     use std::time::Duration;
 
-    if TcpStream::connect("127.0.0.1:3306").is_err() {
-        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
-        return;
-    }
-    let relay = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = relay.local_addr().unwrap().port();
-    let (sent, received) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let (mut client, _) = relay.accept().unwrap();
-        let mut upstream = TcpStream::connect("127.0.0.1:3306").unwrap();
-        let (mut from, mut to) = (upstream.try_clone().unwrap(), client.try_clone().unwrap());
-        std::thread::spawn(move || std::io::copy(&mut from, &mut to));
-        let mut seen = Vec::new();
-        let mut chunk = [0; 4096];
-        while let Ok(n @ 1..) = client.read(&mut chunk) {
-            seen.extend_from_slice(&chunk[..n]);
-            upstream.write_all(&chunk[..n]).ok();
+    MysqlServer::with(|server| {
+        let at = server.at();
+        let relay = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = relay.local_addr().unwrap().port();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut client, _) = relay.accept().unwrap();
+            let mut upstream = TcpStream::connect(at).unwrap();
+            let (mut from, mut to) = (upstream.try_clone().unwrap(), client.try_clone().unwrap());
+            std::thread::spawn(move || std::io::copy(&mut from, &mut to));
+            let mut seen = Vec::new();
+            let mut chunk = [0; 4096];
+            while let Ok(n @ 1..) = client.read(&mut chunk) {
+                seen.extend_from_slice(&chunk[..n]);
+                upstream.write_all(&chunk[..n]).ok();
+            }
+            upstream.shutdown(Shutdown::Write).ok();
+            sent.send(seen).ok();
+        });
+        let engine = Engine::builder()
+            .extensions(&[
+                php_ext_lexbor::extension(),
+                php_ext_json::extension(),
+                php_ext_standard::extension(),
+                php_ext_uri::extension(),
+                php_ext_spl::extension(),
+                php_ext_pdo::extension(),
+                php_ext_mysqlnd::extension(),
+                php_ext_pdo_mysql::extension(),
+            ])
+            .build();
+        let script = format!(
+            "<?php new PDO('mysql:host=127.0.0.1;port={port};dbname=test', 'root', '', [PDO::ATTR_PERSISTENT => true]); echo 'connected';"
+        );
+        let served = engine.serve_capture(&script, Capture::default());
+        assert_eq!(served.stdout_text(), "connected");
+        assert!(
+            received.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the pooled connection was closed before the engine ended"
+        );
+        drop(engine);
+        let seen = received.recv_timeout(Duration::from_secs(10)).unwrap();
+        let mut last = &[][..];
+        let mut rest = &seen[..];
+        while let [a, b, c, _, ..] = *rest {
+            let len = usize::from(a) | usize::from(b) << 8 | usize::from(c) << 16;
+            last = &rest[..(4 + len).min(rest.len())];
+            rest = &rest[last.len()..];
         }
-        upstream.shutdown(Shutdown::Write).ok();
-        sent.send(seen).ok();
+        assert_eq!(
+            last,
+            [1, 0, 0, 0, 1],
+            "the last packet the server was sent is no COM_QUIT"
+        );
     });
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_json::extension(),
-            php_ext_standard::extension(),
-            php_ext_uri::extension(),
-            php_ext_spl::extension(),
-            php_ext_pdo::extension(),
-            php_ext_mysqlnd::extension(),
-            php_ext_pdo_mysql::extension(),
-        ])
-        .build();
-    let script = format!(
-        "<?php new PDO('mysql:host=127.0.0.1;port={port};dbname=test', 'root', '', [PDO::ATTR_PERSISTENT => true]); echo 'connected';"
-    );
-    let served = engine.serve_capture(&script, Capture::default());
-    assert_eq!(served.stdout_text(), "connected");
-    assert!(
-        received.recv_timeout(Duration::from_millis(200)).is_err(),
-        "the pooled connection was closed before the engine ended"
-    );
-    drop(engine);
-    let seen = received.recv_timeout(Duration::from_secs(10)).unwrap();
-    let mut last = &[][..];
-    let mut rest = &seen[..];
-    while let [a, b, c, _, ..] = *rest {
-        let len = usize::from(a) | usize::from(b) << 8 | usize::from(c) << 16;
-        last = &rest[..(4 + len).min(rest.len())];
-        rest = &rest[last.len()..];
-    }
-    assert_eq!(
-        last,
-        [1, 0, 0, 0, 1],
-        "the last packet the server was sent is no COM_QUIT"
-    );
 }

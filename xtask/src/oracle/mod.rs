@@ -68,8 +68,9 @@ pub const TREE_VARIABLE: &str = "TEST_PHP_SRCDIR";
 
 /// The environment variable a runner sets to say what of the pin this
 /// machine has (#38): a whitespace-separated list of the words
-/// [`Promise::word`] gives, `tree` for the pinned php-src and `oracle` for
-/// the pinned php. A test that would skip for a fact the machine has not,
+/// [`Promise::word`] gives, `tree` for the pinned php-src, `oracle` for
+/// the pinned php and `mysql` for the `MySQL` server of
+/// `ci/mysql/compose.yaml` (#3084). A test that would skip for a fact the machine has not,
 /// saying so on stderr, fails instead where the fact was promised, naming
 /// what it looked for; so a runner whose provisioning broke turns red
 /// rather than quietly measuring less. The name is stated here and
@@ -77,24 +78,31 @@ pub const TREE_VARIABLE: &str = "TEST_PHP_SRCDIR";
 /// `xtask status --section oracle` and sets it under that name (#36).
 pub const PROMISE_VARIABLE: &str = "XTASK_PROMISED";
 
-/// One fact of the pin a machine can promise to have: the tree or the
-/// binary. What a guarded test asks through [`Promise::or_skip`].
+/// One fact a machine can promise to have: the pin's tree or binary, or
+/// the `MySQL` server. What a guarded test asks through [`Promise::or_skip`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Promise {
     /// The pinned php-src, where [`Source::tree`] answers.
     Tree,
     /// The pinned php, at [`Binary::file`].
     Oracle,
+    /// The `MySQL` server of `ci/mysql/compose.yaml` on `127.0.0.1:3306`,
+    /// which the tests of `ext/mysqli` and `ext/pdo_mysql` run against. They
+    /// cannot depend on xtask, so `MysqlServer::with`, in
+    /// `ext/mysqlnd/tests/support/mysql.rs`, reads the word off
+    /// [`PROMISE_VARIABLE`] itself (#3084).
+    Mysql,
 }
 
 impl Promise {
-    const ALL: [Promise; 2] = [Promise::Tree, Promise::Oracle];
+    const ALL: [Promise; 3] = [Promise::Tree, Promise::Oracle, Promise::Mysql];
 
     /// The word [`PROMISE_VARIABLE`] lists for this fact.
     pub fn word(self) -> &'static str {
         match self {
             Promise::Tree => "tree",
             Promise::Oracle => "oracle",
+            Promise::Mysql => "mysql",
         }
     }
 
@@ -134,7 +142,7 @@ impl Promised {
             let Some(promise) = Promise::ALL.into_iter().find(|p| p.word() == word) else {
                 bail!(
                     "{PROMISE_VARIABLE} lists {word:?}, which promises nothing; the words it takes are {}",
-                    Promise::ALL.map(Promise::word).join(" and ")
+                    Promise::ALL.map(Promise::word).join(", ")
                 );
             };
             if !promised.contains(&promise) {
