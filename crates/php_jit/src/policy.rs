@@ -72,12 +72,10 @@ pub(crate) enum Bound {
     /// Set up and not on, `opcache.jit=off` with a buffer, which php may
     /// turn on from a request with `ini_set('opcache.jit', 'tracing')`
     /// (`zend_jit_config`, `Z/ext/opcache/jit/zend_jit.c:3646-3700`). It
-    /// binds `Nop`'s loop as `Never` does: php gives an op array its
-    /// counters as it persists it and only while `JIT_G(on)`
-    /// (`Z/ext/opcache/zend_persist.c:721-726`, `:1471-1473`), so code
-    /// cached under `off` runs php's own handlers whatever is set later,
-    /// and this tier reads the startup ini alone, so it runs no trace
-    /// whatever a request sets.
+    /// binds `Nop`'s loop as `Never` does because this tier reads the
+    /// startup ini alone (`jit-design.md` §4.7), so it runs no trace
+    /// whatever a request sets, which #3139 is to change (#3140's
+    /// ruling).
     Runtime,
     /// The tier runs: tracing, or a lane `jit.mode` names.
     On,

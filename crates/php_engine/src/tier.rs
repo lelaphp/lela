@@ -146,9 +146,7 @@ pub trait Tier: 'static {
     /// all, asked once as the engine binds its loop, after every engine
     /// state is built: where it answers `false` the engine binds
     /// [`Nop`]'s loop, so a safepoint costs the loop nothing, as php's VM
-    /// keeps its own handlers where its compiled tier is not on, an op
-    /// array given php's heat handlers only as it is persisted while
-    /// `JIT_G(on)` (`Z/ext/opcache/zend_persist.c:721-726`, `:1471-1473`).
+    /// keeps its own handlers where its compiled tier is not on.
     /// A tier that [`HOLDS`](Tier::HOLDS) or hooks the compile
     /// ([`HOOKED`](Tier::HOOKED)) is bound whatever it answers, since
     /// `Nop`'s loop neither holds a frame nor runs a hooked call as it
