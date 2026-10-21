@@ -753,6 +753,7 @@ impl Request {
                 placed,
             };
         }
+        self.link_blocks(class);
     }
 
     /// The placed properties of `class`, declared by `decl`, over its

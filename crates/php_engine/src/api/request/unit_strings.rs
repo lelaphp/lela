@@ -28,11 +28,11 @@ use std::collections::{HashMap, HashSet};
 
 use php_heap::{Str, Zval};
 use php_link::NameHasher;
-use php_unit::decl::FunctionDecl;
+use php_unit::decl::{FunctionDecl, TraitAdaptation};
 use php_unit::{PublishedUnit, Unit, WeakUnit};
 
 use super::Request;
-use super::declared_bytes::{self, Blocks, Declared};
+use super::declared_bytes::{self, Blocks, ClassBlocks, Declared};
 use crate::api::raising::Thrown;
 use crate::api::values::{PhpString, Value};
 
@@ -346,6 +346,27 @@ impl UnitStrings {
         (dead, constants)
     }
 
+    /// Whether the request holds no request-only unit.
+    pub(super) fn is_empty(&self) -> bool {
+        self.units.is_empty()
+    }
+
+    /// The blocks of the class at `at` of the unit at `unit`'s classes,
+    /// taken out while it links, where the unit laid them.
+    pub(super) fn class_blocks(&mut self, unit: *const Unit, at: usize) -> Option<ClassBlocks> {
+        self.class_slot(unit, at)?.take()
+    }
+
+    /// The place the blocks of the class at `at` of the unit at `unit`'s
+    /// classes stand in.
+    pub(super) fn class_slot(
+        &mut self,
+        unit: *const Unit,
+        at: usize,
+    ) -> Option<&mut Option<ClassBlocks>> {
+        self.held_mut(unit)?.declared.class_slot(at)
+    }
+
     /// The entry for the unit at `unit`, where the request holds one.
     fn held_mut(&mut self, unit: *const Unit) -> Option<&mut Held> {
         (self.units.iter_mut()).find(|held| std::ptr::eq(held.unit.as_ptr(), unit))
@@ -596,6 +617,35 @@ impl Request {
             let lower = name.0.to_ascii_lowercase();
             if self.shared.permanent(&lower).is_none() {
                 self.hold_name(at, &lower)?;
+            }
+        }
+        // And each trait a class uses, `zend_compile_use_trait`'s
+        // `trait_names`: the name as it resolved, and its lowered form
+        // where it is not its name (`zend_string_tolower`), neither
+        // interned.
+        for name in unit.classes.iter().flat_map(|class| &class.traits) {
+            self.hold_name(at, &name.0)?;
+            if name.0.iter().any(u8::is_ascii_uppercase) {
+                self.hold_name(at, &name.0.to_ascii_lowercase())?;
+            }
+        }
+        // And each name an adaptation writes, a string of its own for
+        // each (`zend_compile_method_ref`, `zend_compile_trait_precedence`,
+        // `zend_compile_trait_alias`).
+        for adaptation in unit.classes.iter().flat_map(|class| &class.adaptations) {
+            let names: Vec<&php_unit::decl::Name> = match adaptation {
+                TraitAdaptation::Insteadof {
+                    trait_name,
+                    method,
+                    excluded,
+                } => [method, trait_name].into_iter().chain(excluded).collect(),
+                TraitAdaptation::As { method, alias, .. } => std::iter::once(&method.method)
+                    .chain(&method.trait_name)
+                    .chain(alias)
+                    .collect(),
+            };
+            for name in names {
+                self.hold_name(at, &name.0)?;
             }
         }
         Ok(())
