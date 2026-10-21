@@ -435,7 +435,7 @@ impl Request {
             if let Some(standing) = standing {
                 self.links.unlinked.remove(standing);
             }
-            self.bind_declared(unit, at, composed, record);
+            self.bind_declared(unit, at, composed, record)?;
             self.emit_recorded(recording);
             return Ok(());
         }
@@ -536,8 +536,7 @@ impl Request {
         if let Some(standing) = self.unlinked_named(Bare::resolved(name)) {
             self.links.unlinked.remove(standing);
         }
-        self.bind_declared(&unit, at, linking.composed, linking.record);
-        Ok(())
+        self.bind_declared(&unit, at, linking.composed, linking.record)
     }
 
     /// What a link refused, at its level and site, the request ended in

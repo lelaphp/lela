@@ -660,3 +660,28 @@ fn an_assertion_under_assertions_off_is_the_constant_true() {
     "#]]
     .assert_eq(&dump);
 }
+
+/// `init_op_array` starts every op array's `cache_size` at
+/// `zend_op_array_extension_handles * sizeof(void*)`
+/// (`Z/Zend/zend_opcode.c:95`), so with one taken the program's
+/// call and a function's take the slot after it, and each cache is one
+/// slot larger than with none.
+#[test]
+fn an_op_array_extension_keeps_the_first_slot_of_every_cache() {
+    let source = b"<?php function f() { return strlen('x' . mt_rand()); } echo memory_get_usage();";
+    let mut strings = php_heap::Strings::new();
+    let plain = compile_parsed(source, &bundled(), &mut strings).expect("the source compiles");
+    let options = Options {
+        op_array_extensions: 1,
+        ..bundled()
+    };
+    let kept = compile_parsed(source, &options, &mut strings).expect("the source compiles");
+    assert_eq!(kept.main.cache_size, plain.main.cache_size + 8);
+    assert_eq!(
+        kept.main.oplines[0].out,
+        plain.main.oplines[0].out + 8,
+        "the program's INIT_FCALL takes the slot after the handle's"
+    );
+    let function = |unit: &Unit| unit.functions[0].1.cache_size;
+    assert_eq!(function(&kept), function(&plain) + 8);
+}

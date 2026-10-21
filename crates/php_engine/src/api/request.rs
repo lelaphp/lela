@@ -106,6 +106,7 @@ pub use limits::{Interrupt, TimeLimitSuspended};
 mod linking;
 mod load_file;
 mod memory;
+pub(crate) use memory::Pushed;
 pub use memory::{Allocation, AllocationObserverId, Memory, ObserveAllocations};
 pub use memory::{StandaloneHeap, ecalloc, efree, emalloc, erealloc};
 mod methods;
@@ -496,10 +497,10 @@ pub struct Request {
     /// constants and their names, held while each unit lives
     /// ([`unit_strings::UnitStrings`]).
     unit_strings: unit_strings::UnitStrings,
-    /// `CG(loop_var_stack)`'s elements and how many they hold, laid down
-    /// by the first compile of the request that pushed one and kept to
-    /// its end ([`Request::note_loop_vars`]).
-    loop_var_stack: Option<(php_heap::Block, u32)>,
+    /// `CG(loop_var_stack)`'s and `CG(delayed_oplines_stack)`'s elements,
+    /// laid down by the first compile of the request that pushed onto
+    /// one and kept to its end ([`Request::note_pushed`]).
+    compiler_stacks: memory::CompilerStacks,
     /// php's `EG(function_table)` past the natives, each function under
     /// its name: the preload's, published, in the order its table holds
     /// them, then each the request declared, in the order declared. A
@@ -1035,19 +1036,27 @@ impl Request {
     /// of its own that no host reads: the engine's startup, its end where
     /// the host left no sink ([`EngineBuilder::ends_into`](crate::engine::EngineBuilder::ends_into)), and a unit
     /// test's.
-    pub(crate) fn new(shared: Arc<Shared>, description: RequestDescription) -> Request {
+    pub(crate) fn new(shared: Arc<Shared>, description: RequestDescription) -> Box<Request> {
         Request::lent(shared, description, Box::new(response::Kept::default()))
     }
 
     /// A request the host lent `sink`, which every call reaches as the
     /// request makes it and which [`Request::release_sink`] hands back
     /// (design §4.3 seam 4).
+    ///
+    /// The request is boxed here, once, and held by its box wherever it
+    /// is served: php's request state is `EG()`, a global, so none of it
+    /// stands on the C stack its walks recurse down, and a `Request` held
+    /// by value put its ten kilobytes, and a copy, under every frame of
+    /// the request (#3209). A call of its own, so the value made in place
+    /// before it is boxed stands in this frame and no caller's.
     #[allow(clippy::too_many_lines)] // one line per field of the request
+    #[inline(never)]
     pub(crate) fn lent(
         shared: Arc<Shared>,
         description: RequestDescription,
         sink: Box<dyn OutputSink + Send>,
-    ) -> Request {
+    ) -> Box<Request> {
         let cwd = description.cwd.clone();
         let exit_status = description.exit_status;
         let output = Output::activate(description.web.as_ref());
@@ -1072,7 +1081,7 @@ impl Request {
             .arena
             .enter(|arena| shared.units.restart(&arena.files));
         let typed_ini = shared.typed_ini;
-        let mut req = Request {
+        let mut req = Box::new(Request {
             // Fields are made in the order written: the request stands
             // inside the engine before its deadlines are laid.
             _inside: crate::fork::Inside::enter(),
@@ -1142,7 +1151,7 @@ impl Request {
             user_functions: PinnedRows::default(),
             named_callees: std::collections::HashMap::new(),
             unit_strings: unit_strings::UnitStrings::default(),
-            loop_var_stack: None,
+            compiler_stacks: memory::CompilerStacks::default(),
             functions: tables.functions,
             static_vars: static_vars::StaticVars::default(),
             preloading: None,
@@ -1154,7 +1163,7 @@ impl Request {
             hold: hold::Holding::default(),
             traces: traces::Scratch::default(),
             foreign: foreign::Table::default(),
-        };
+        });
         req.activate();
         req
     }
@@ -1197,15 +1206,16 @@ impl Request {
         &mut self.weakrefs
     }
 
-    /// `CG(rtd_key_counter)` over the units this request compiled for
-    /// itself: where the next compile counts its runtime definition keys
-    /// on from ([`crate::engine::Shared::compile_for`]).
+    /// `CG(rtd_key_counter)` over the compiles made for this request, its
+    /// own ([`crate::engine::Shared::compile_for`]) and the files the unit
+    /// cache compiled for it ([`crate::engine::Shared::compile_file`]):
+    /// where the next compile counts its runtime definition keys on from.
     pub(crate) fn keys_made(&self) -> u32 {
         self.keys_made
     }
 
-    /// The `made` runtime definition keys of a compile this request just
-    /// made for itself, counted on, saturating at `u32::MAX`.
+    /// The `made` runtime definition keys of a compile just made for this
+    /// request, counted on, saturating at `u32::MAX`.
     pub(crate) fn count_keys_made(&mut self, made: u32) {
         self.keys_made = self.keys_made.saturating_add(made);
     }

@@ -152,6 +152,14 @@ pub struct Unit {
     /// (`zend_stack_push`), and which the request that compiled the unit
     /// keeps to its end (`shutdown_compiler`).
     pub loop_vars: u32,
+    /// The most fetches `CG(delayed_oplines_stack)` held at once while the
+    /// unit compiled (`zend_delayed_emit_op`, `Z/Zend/zend_compile.c:2458`):
+    /// a dimension's, a property's or a `static` property's that a chain
+    /// held back until the rest of it compiled. The stack's 32-byte
+    /// `zend_op`s are allocated sixteen at a time (`zend_stack_push`) and
+    /// kept by the request that compiled the unit to its end
+    /// (`shutdown_compiler`).
+    pub delayed_fetches: u32,
     /// The cell every closure of the unit's constant expressions reaches
     /// the unit through, bound when the unit is published.
     pub cell: UnitCell,

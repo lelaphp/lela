@@ -29,7 +29,7 @@ mod opcode {
     include!(concat!(env!("OUT_DIR"), "/opcode.rs"));
 }
 
-pub use enum_methods::enum_methods;
+pub use enum_methods::{enum_methods, written_methods};
 pub use frameless::{FramelessEntry, frameless_table};
 pub use op::{
     BoundVar, CacheSlot, ConstIdx, Effects, LiveKind, LiveRange, MapPtrOffset, OpArray,

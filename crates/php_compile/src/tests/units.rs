@@ -239,29 +239,35 @@ fn a_fatal_carries_what_the_scanner_raised_before_it() {
     };
     assert_eq!(
         refused(b"<?php\necho \"\\777\";\necho 1 +;\necho \"\\777\";"),
-        Some(CompileError {
-            level: Level::Parse,
-            message: "syntax error, unexpected token \";\"".into(),
-            line: 3,
-            raised: vec![overflow(2)],
-            thrown: false,
-            stage: crate::Stage::Compiling,
-            declared: None,
-            keys_made: 0,
-        })
+        Some(
+            Refused {
+                level: Level::Parse,
+                message: "syntax error, unexpected token \";\"".into(),
+                line: 3,
+                raised: vec![overflow(2)],
+                thrown: false,
+                stage: crate::Stage::Compiling,
+                declared: None,
+                keys_made: 0,
+            }
+            .into()
+        )
     );
     assert_eq!(
         refused(b"<?php\necho \"\\777\";\n(unset)$x;\necho \"\\777\";"),
-        Some(CompileError {
-            level: Level::CompileError,
-            message: "The (unset) cast is no longer supported".into(),
-            line: 3,
-            raised: vec![overflow(2), overflow(4)],
-            thrown: false,
-            stage: crate::Stage::Compiling,
-            declared: None,
-            keys_made: 0,
-        })
+        Some(
+            Refused {
+                level: Level::CompileError,
+                message: "The (unset) cast is no longer supported".into(),
+                line: 3,
+                raised: vec![overflow(2), overflow(4)],
+                thrown: false,
+                stage: crate::Stage::Compiling,
+                declared: None,
+                keys_made: 0,
+            }
+            .into()
+        )
     );
 }
 
@@ -307,7 +313,7 @@ fn a_namespace_after_a_statement_is_php_s_compile_error() {
     let trouble = compile_parsed(b"<?php 1;\nnamespace Foo;", &bundled(), &mut strings).err();
     assert_eq!(
         trouble,
-        Some(CompileError {
+        Some(Refused {
             level: Level::CompileError,
             message: "Namespace declaration statement has to be the very first statement or after any declare call in the script".into(),
             line: 2,
@@ -316,7 +322,7 @@ fn a_namespace_after_a_statement_is_php_s_compile_error() {
             stage: crate::Stage::Compiling,
             declared: None,
             keys_made: 0,
-        })
+        }.into())
     );
 }
 
@@ -337,16 +343,19 @@ fn what_php_refuses_is_the_first_parse_error_in_phps_words() {
     let trouble = compile_parsed(b"<?php\necho 1 +;", &Options::default(), &mut strings).err();
     assert_eq!(
         trouble,
-        Some(CompileError {
-            level: Level::Parse,
-            message: "syntax error, unexpected token \";\"".into(),
-            line: 2,
-            raised: Vec::new(),
-            thrown: false,
-            stage: crate::Stage::Compiling,
-            declared: None,
-            keys_made: 0,
-        })
+        Some(
+            Refused {
+                level: Level::Parse,
+                message: "syntax error, unexpected token \";\"".into(),
+                line: 2,
+                raised: Vec::new(),
+                thrown: false,
+                stage: crate::Stage::Compiling,
+                declared: None,
+                keys_made: 0,
+            }
+            .into()
+        )
     );
 }
 
@@ -357,15 +366,18 @@ fn what_php_refuses_is_the_first_parse_error_in_phps_words() {
 /// the parser's own refusal, raised before the walk runs.
 #[test]
 fn an_unread_expression_inside_parentheses_names_the_expression() {
-    let compiled = || CompileError {
-        level: Level::Parse,
-        message: String::from("compiled").into(),
-        line: 0,
-        raised: Vec::new(),
-        thrown: false,
-        stage: crate::Stage::Compiling,
-        declared: None,
-        keys_made: 0,
+    let compiled = || {
+        Refused {
+            level: Level::Parse,
+            message: String::from("compiled").into(),
+            line: 0,
+            raised: Vec::new(),
+            thrown: false,
+            stage: crate::Stage::Compiling,
+            declared: None,
+            keys_made: 0,
+        }
+        .into()
     };
     let error = refused(b"<?php\n$a = (function () { declare(ticks=0): enddeclare; });\n")
         .unwrap_or_else(compiled);
@@ -388,7 +400,7 @@ fn a_refusal_carries_the_functions_and_the_early_bound_classes_that_landed() {
     use php_unit::TopLevel;
     let source = b"<?php\nfunction f(int $a = null) { return fn() => 1; }\nclass A {}\ninterface I {}\nclass C implements I {}\nfunction g() {}\n$h = function () { break 2; };\n";
     let declared = refused(source)
-        .and_then(|error| error.declared)
+        .and_then(|mut error| error.declared.take())
         .expect("the refusal carries what landed");
     assert_eq!(
         declared.unit.top_level,
@@ -479,7 +491,7 @@ fn what_a_declare_refuses_is_what_php_refuses() {
         let mut strings = php_heap::Strings::new();
         compile_parsed(source, &bundled(), &mut strings)
             .err()
-            .map(|e| e.message.into_owned())
+            .map(|e| e.message.to_string())
     };
     assert_eq!(
         refused(b"<?php echo 1; declare(strict_types=1);").as_deref(),

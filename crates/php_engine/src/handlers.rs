@@ -76,7 +76,7 @@ use crate::exec::{
     cleanup_unfinished_calls, free_carried_value, has_only_fatal_errors, restore_silenced,
 };
 use crate::observer::OnThrow;
-use crate::operand::{ByKind, Operand};
+use crate::operand::{ByKind, Operand, Var};
 use crate::ops::inline::{self, Arith, Binary, Bitwise, Shift};
 use crate::ops::{DimRead, Offset, Switched, array_entry, string_dim_offset, string_offset};
 use crate::tier::{Flow, Next, SafepointIdx, Site, Stepped, Tier};
@@ -8004,7 +8004,12 @@ pub(crate) fn fetch_obj_r<T: Tier, A: Operand + Default, B: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_fetch_obj_r(req, frame, code, op, (A::default(), B::default())) {
+    let kinds = (A::default(), B::default());
+    if nests(kinds) {
+        req.vm_mut().stand(frame, at);
+        return fetched_obj_nested::<B>(req, frame, code, op);
+    }
+    if let Some(edge) = inline_fetch_obj_r(req, frame, code, op, kinds) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -8019,16 +8024,32 @@ fn fetched_obj(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     fetch_obj(req, frame, code, op, PropertyRead::Warning)
 }
 
+/// `FETCH_OBJ_R` over a `VAR` container, its inline path and then its
+/// kernel's, in a call of its own as [`nests`] says.
+#[inline(never)]
+fn fetched_obj_nested<B: Operand + Default>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    match inline_fetch_obj_r(req, frame, code, op, (Var, B::default())) {
+        Some(edge) => edge,
+        None => fetch_obj(req, frame, code, op, PropertyRead::Warning),
+    }
+}
+
 /// The inline path of `ZEND_FETCH_OBJ_R` over a constant name or one a
 /// CV holds (`ZEND_FETCH_OBJ_R_SPEC_CV_CONST`, `_CV_CV`, `_UNUSED_*`,
-/// `Z/Zend/zend_vm_def.h:2102-2160`): the receiver a CV holds, or
-/// `$this`, and the place [`inline_place`] names on it, a declared slot
-/// or a dynamic property's bucket, read in place, `ZVAL_COPY_DEREF` into
-/// the temporary. `None`, with nothing touched, for a name a temporary
-/// holds, a container that is a temporary, which the fetch would free,
-/// or no object, a lazy object, a place [`inline_place`] does not name,
-/// one nothing holds, whose read is `__get`'s or the warning's, and a
-/// temporary holding an owner.
+/// `Z/Zend/zend_vm_def.h:2102-2160`): the receiver [`inline_receiver`]
+/// reads, and the place [`inline_place`] names on it, a declared slot or
+/// a dynamic property's bucket, read in place, `ZVAL_COPY_DEREF` into
+/// the temporary, and a `VAR` container given up (`FREE_OP1`). `None`,
+/// with nothing touched, for a name a temporary holds, a `TMP`
+/// container, no object, a lazy object, a place [`inline_place`] does
+/// not name, one nothing holds, whose read is `__get`'s or the
+/// warning's, a temporary holding an owner, and a `VAR` holding the
+/// object's last owner, whose release is the kernel's.
 #[inline(always)] // the handler's fast half, as php's is in the handler
 #[allow(clippy::inline_always)]
 fn inline_fetch_obj_r(
@@ -8038,7 +8059,7 @@ fn inline_fetch_obj_r(
     op: &Opline,
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
-    let object = inline_receiver(req, frame, code, op, a, b)?;
+    let (object, container) = inline_receiver(req, frame, code, op, a, b)?;
     let (place, _) = inline_place(
         req,
         (frame, code, op),
@@ -8051,10 +8072,12 @@ fn inline_fetch_obj_r(
     if z.is_undef() {
         return None;
     }
-    let out = req.slots_mut(frame).get_mut(op.out as usize)?;
-    if out.is_refcounted() {
+    let slots = req.slots_mut(frame);
+    if slots.get(op.out as usize)?.is_refcounted() {
         return None;
     }
+    container.give_up(slots)?;
+    let out = slots.get_mut(op.out as usize)?;
     z.addref();
     *out = z;
     Some(Ok(advanced()))
@@ -8313,11 +8336,109 @@ fn property_cache_slot(op: &Opline) -> CacheSlot {
     CacheSlot(op.extended_value & !(FETCH_REF | FETCH_DIM_WRITE))
 }
 
-/// The object a property opcode's inline path works on: `$this` for an
-/// `UNUSED` container, the object a CV holds, a reference followed,
-/// for a CV, and only where the name is a constant or a CV's and the
-/// object is not lazy. None for every other container, and for a name a
-/// temporary holds, whose `FREE_OP2` is the kernel's.
+/// The inline path of a property opcode `ops.toml` does not specialise
+/// over a `VAR` container, a nested fetch's or a call's, served by a call
+/// of its own through `over_container!`, as [`nests`] says of a
+/// specialised one.
+#[inline(never)]
+fn nested<R>(path: impl FnOnce() -> R) -> R {
+    path()
+}
+
+/// Whether a specialised property opcode's handler at the kinds `a` and
+/// `b` is served by a call of its own, its inline path and then its
+/// kernel's, so that the loop's arm is the one call a kernel's is: a
+/// `VAR` container, a nested fetch's or a call's, under a name
+/// [`inline_receiver`] takes, a constant or a CV's, where `$this`'s and a
+/// CV's inline path is laid in the arm. The arms a `VAR` container
+/// specialises are a dozen copies of the path: laid inline they moved
+/// the loop's own blocks, one more instruction on every opline of an
+/// empty body, and served through a closure in the arm, four of the
+/// seven kernels retired 0.07% to 0.12% more. A name a temporary holds has no inline path, so its arm
+/// stays the kernel's call.
+#[inline] // a test of two constants, laid as `var_receiver` is
+fn nests((a, b): (impl Operand, impl Operand)) -> bool {
+    a.kind() == OperandKind::Var && matches!(b.kind(), OperandKind::Const | OperandKind::Cv)
+}
+
+/// The inline path of a property opcode `ops.toml` does not specialise,
+/// whose handler reads its container's kind off the opline, at the kind
+/// it names: `UNUSED`, `CV` or `VAR`, the three such an opcode's `op1`
+/// takes, the `VAR`'s [`nested`]. So the receiver's decode and what it
+/// holds are known where the path is compiled, as a specialised
+/// handler's are.
+macro_rules! over_container {
+    ($kind:expr, |$a:ident| $path:expr) => {
+        match $kind {
+            OperandKind::Unused => {
+                let $a = crate::operand::Unused;
+                $path
+            }
+            OperandKind::Cv => {
+                let $a = crate::operand::Cv;
+                $path
+            }
+            OperandKind::Var => nested(|| {
+                let $a = crate::operand::Var;
+                $path
+            }),
+            OperandKind::Const | OperandKind::Tmp => None,
+        }
+    };
+}
+
+/// The object a property opcode's inline path works on, and what the
+/// opcode gives up of its container once the path has done its work:
+/// `$this` for an `UNUSED` container, the object a CV holds, and the
+/// object a `VAR` names, through the `IS_INDIRECT` a write fetch left in
+/// it or as the value it owns, as `GET_OP1_OBJ_ZVAL_PTR_PTR_UNDEF(BP_VAR_W)`
+/// reads it (`_get_zval_ptr_ptr_var`); a reference is followed for a CV
+/// and a `VAR` alike, and only where the name is a constant or a CV's and
+/// the object is not lazy. None for every other container, and for a name
+/// a temporary holds, whose `FREE_OP2` is the kernel's.
+///
+/// A nested write takes the `VAR` its fetch left: an `IS_INDIRECT`
+/// to a declared slot, typed or not, or to one holding a reference, and
+/// an object a call returned, whose owner is given up after the write
+/// where the property still holds the object and by the kernel where
+/// the `VAR` held the last, so the destructor runs after the write as
+/// php runs it:
+///
+/// ```php
+/// class D { public $x = 0; public int $t = 0; function __construct(public $n = 'd') {} function __destruct() { echo "~{$this->n},"; } }
+/// class C { public D $d; public $u; function __construct() { $this->d = new D; $this->u = new D('u'); } function get() { return $this->d; } }
+/// function mk($n) { return new D($n); }
+/// function &ru($o) { return $o->u; }
+/// $o = new C; $q = 'd';
+/// for ($i = 0; $i < 2; $i++) { $o->d->x = $i; $o->$q->t = $i + 1; $o->u->x++; $o->u->x += 10; ++$o->d->t; $o->get()->x += 5; $o->get()->t = 7; $o->get()->t++; $y = $o->get()->x; ru($o)->x = $i; }
+/// mk('m')->x = 3; mk('n')->x++; mk('p')->x .= 's'; echo $y, " ", mk('r')->x, "\n";
+/// $o->d->t = "5"; $o->u->t--; ru($o)->t += 2;
+/// var_dump($o);
+/// ```
+/// ```expect
+/// ~m,~n,~p,6 ~r,0
+/// object(C)#1 (2) {
+///   ["d"]=>
+///   object(D)#2 (3) {
+///     ["x"]=>
+///     int(6)
+///     ["t"]=>
+///     int(5)
+///     ["n"]=>
+///     string(1) "d"
+///   }
+///   ["u"]=>
+///   object(D)#3 (3) {
+///     ["x"]=>
+///     int(1)
+///     ["t"]=>
+///     int(1)
+///     ["n"]=>
+///     string(1) "u"
+///   }
+/// }
+/// ~d,~u,
+/// ```
 #[inline(always)] // as `inline_fetch_obj_r`
 #[allow(clippy::inline_always)]
 fn inline_receiver(
@@ -8327,7 +8448,7 @@ fn inline_receiver(
     op: &Opline,
     a: impl Operand,
     b: impl Operand,
-) -> Option<php_heap::Obj> {
+) -> Option<(php_heap::Obj, Held)> {
     if !matches!(b.kind(), OperandKind::Const | OperandKind::Cv) {
         return None;
     }
@@ -8336,9 +8457,71 @@ fn inline_receiver(
         OperandKind::Cv => {
             crate::operand::deref(a.read(req.slots_mut(frame), code, op.op1)).as_obj()?
         }
+        OperandKind::Var => return var_receiver(req.slots_mut(frame), code, op, a),
         _ => return None,
     };
-    (object.laziness() == php_heap::Laziness::Eager).then_some(object)
+    (object.laziness() == php_heap::Laziness::Eager).then_some((object, Held::Lent))
+}
+
+/// [`inline_receiver`] over a `VAR` container `a`: the slot an
+/// `IS_INDIRECT` names, a reference followed, or the value the `VAR`
+/// owns, and only an object that is not lazy. `#[inline]` and not
+/// always: the build that lays every local out apart, the test suite's,
+/// keeps its locals off the loop's frame, which the eighty handlers a
+/// property opcode's kinds specialise made 20 KiB larger laid in each,
+/// and a recursion through a generator's destructor took past its
+/// thread's 2 MiB.
+#[inline]
+fn var_receiver(
+    slots: &[Zval],
+    code: &OpArray,
+    op: &Opline,
+    a: impl Operand,
+) -> Option<(php_heap::Obj, Held)> {
+    let z = a.read(slots, code, op.op1);
+    let (object, held) = match z.as_indirect() {
+        Some(place) => (crate::operand::deref(place.read()).as_obj()?, Held::Lent),
+        None => (crate::operand::deref(z).as_obj()?, Held::Owner(op.op1)),
+    };
+    (object.laziness() == php_heap::Laziness::Eager).then_some((object, held))
+}
+
+/// What a property opcode holds of the container [`inline_receiver`]
+/// read its object from, which `FREE_OP1()` gives up after the opcode's
+/// work (`zval_ptr_dtor_nogc(EX_VAR(opline->op1.var))`). Given up once:
+/// [`Held::give_up`] takes it.
+enum Held {
+    /// `$this`, a CV, or the place a `VAR`'s `IS_INDIRECT` names, of
+    /// which the opcode owns nothing, so nothing is given up.
+    Lent,
+    /// The `VAR` the opline's `op1` field names, its slot read through
+    /// [`Var`], holding an owner of the object or of a reference to it,
+    /// which the opcode gives up.
+    Owner(u32),
+}
+
+impl Held {
+    /// The container's owner given up where another stands, `GC_DELREF`
+    /// and nothing after it, as `zval_ptr_dtor_nogc` gives up a count
+    /// that stays above zero, and the `VAR` emptied. None, with nothing
+    /// touched, where the owner is the last, whose release destroys the
+    /// object and is the kernel's; so an inline path gives its container
+    /// up after every test that may refuse it and before it writes the
+    /// property, past a temporary written with a value that owns nothing,
+    /// which the kernel writes again.
+    #[inline] // as `var_receiver`
+    #[must_use]
+    fn give_up(self, slots: &mut [Zval]) -> Option<()> {
+        let Held::Owner(at) = self else {
+            return Some(());
+        };
+        let slot = slots.get_mut(Var.slot(at)?)?;
+        if !php_heap::Heap::release_nogc_kept(*slot) {
+            return None;
+        }
+        *slot = Zval::UNDEF;
+        Some(())
+    }
 }
 
 /// `ZEND_FETCH_OBJ_IS` (`Z/Zend/zend_vm_def.h:2276`), a link of a chain
@@ -8591,7 +8774,12 @@ pub(crate) fn fetch_obj_w<T: Tier, A: Operand + Default, B: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_fetch_obj_w(req, frame, code, op, (A::default(), B::default())) {
+    let kinds = (A::default(), B::default());
+    if nests(kinds) {
+        req.vm_mut().stand(frame, at);
+        return fetched_obj_place_nested::<B>(req, frame, code, op);
+    }
+    if let Some(edge) = inline_fetch_obj_w(req, frame, code, op, kinds) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -8605,10 +8793,28 @@ fn fetched_obj_place(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Op
     fetch_obj_place(req, frame, code, op, PropertyRead::Silent)
 }
 
+/// `FETCH_OBJ_W` over a `VAR` container, its inline path and then its
+/// kernel's, in a call of its own as [`nests`] says.
+#[inline(never)]
+fn fetched_obj_place_nested<B: Operand + Default>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    match inline_fetch_obj_w(req, frame, code, op, (Var, B::default())) {
+        Some(edge) => edge,
+        None => fetch_obj_place(req, frame, code, op, PropertyRead::Silent),
+    }
+}
+
 /// The inline path of `ZEND_FETCH_OBJ_W` over a constant name or one a
 /// CV holds (`zend_fetch_property_address`'s cached arm and
 /// `zend_std_get_property_ptr_ptr`'s dynamic one,
-/// `Z/Zend/zend_execute.c:3540-3560`): the place [`inline_place`] names,
+/// `Z/Zend/zend_execute.c:3540-3560`), and of `ZEND_FETCH_OBJ_RW`, whose
+/// cached arm is the same: on the receiver [`inline_receiver`] reads, a
+/// `VAR` container given up as `FREE_VAR_PTR_AND_EXTRACT_RESULT_IF_NECESSARY`
+/// gives it up where an owner is left, the place [`inline_place`] names,
 /// where it holds a value, left in the `VAR` as an `IS_INDIRECT` for the
 /// write after it, a typed slot's as an untyped one's where the fetch
 /// carries neither `ZEND_FETCH_REF` nor `ZEND_FETCH_DIM_WRITE`. `None` as
@@ -8648,7 +8854,7 @@ fn inline_fetch_obj_w(
     op: &Opline,
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
-    let object = inline_receiver(req, frame, code, op, a, b)?;
+    let (object, container) = inline_receiver(req, frame, code, op, a, b)?;
     let (place, ty) = inline_place(
         req,
         (frame, code, op),
@@ -8665,11 +8871,12 @@ fn inline_fetch_obj_w(
     if !placed || place.read().is_undef() {
         return None;
     }
-    let out = req
-        .slots_mut(frame)
-        .get_mut(op.out as usize)
-        .filter(|out| !out.is_refcounted())?;
-    *out = Zval::indirect(place);
+    let slots = req.slots_mut(frame);
+    if slots.get(op.out as usize)?.is_refcounted() {
+        return None;
+    }
+    container.give_up(slots)?;
+    *slots.get_mut(op.out as usize)? = Zval::indirect(place);
     Some(Ok(advanced()))
 }
 
@@ -8680,7 +8887,10 @@ fn inline_fetch_obj_w(
 /// `Undefined property` for a declared slot nothing has written and
 /// leaves it holding `null`, the uninitialised-access `Error` for a
 /// typed one, and the same warning after the creation's deprecation for
-/// a name no class declared ([`Request::dynamic_property_ref`]).
+/// a name no class declared ([`Request::dynamic_property_ref`]). A slot
+/// that holds a value takes [`fetch_obj_w`]'s inline path, whose cached
+/// arm `zend_fetch_property_address` takes under either fetch type, so
+/// the step or the compound assignment after it lands in place.
 ///
 /// ```php
 /// class C { public $p; public int $t; }
@@ -8711,6 +8921,17 @@ pub(crate) fn fetch_obj_rw<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    let b = ByKind(op.op2_type);
+    let inline = over_container!(op.op1_type, |a| inline_fetch_obj_w(
+        req,
+        frame,
+        code,
+        op,
+        (a, b)
+    ));
+    if let Some(edge) = inline {
+        return edge;
+    }
     fetch_obj_place(req, frame, code, op, PropertyRead::Warning)
 }
 
@@ -13389,14 +13610,12 @@ pub(crate) fn assign_obj<
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_assign_obj(
-        req,
-        frame,
-        code,
-        op,
-        at,
-        (A::default(), B::default(), D::default()),
-    ) {
+    let kinds = (A::default(), B::default(), D::default());
+    if nests((kinds.0, kinds.1)) {
+        req.vm_mut().stand(frame, at);
+        return assigned_obj_nested::<B, D>(req, frame, code, op, at);
+    }
+    if let Some(edge) = inline_assign_obj(req, frame, code, op, at, kinds) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -13405,13 +13624,14 @@ pub(crate) fn assign_obj<
 
 /// The inline path of `ZEND_ASSIGN_OBJ` over a constant name or one a CV
 /// holds (`ZEND_ASSIGN_OBJ_SPEC_CV_CONST_OP_DATA_*`, `_CV_CV_*`,
-/// `_UNUSED_*`, `Z/Zend/zend_vm_def.h:2489-2537`): the place
-/// [`inline_place`] names, a declared slot or a dynamic property's
-/// bucket, holding a value that
+/// `_VAR_*`, `_UNUSED_*`, `Z/Zend/zend_vm_def.h:2489-2537`): on the
+/// receiver [`inline_receiver`] reads, the place [`inline_place`] names,
+/// a declared slot or a dynamic property's bucket, holding a value that
 /// owns nothing, takes the `OP_DATA` value as
 /// `zend_assign_to_variable` takes it, a constant copied, a temporary
 /// moved and a CV copied with one more owner, and the temporary takes it
-/// too under `RETURN_VALUE_USED`; nothing is given up, so nothing runs.
+/// too under `RETURN_VALUE_USED`; nothing is given up but a `VAR`
+/// container's owner where another stands, so nothing runs.
 /// A typed slot takes a value its type holds as it stands
 /// ([`exec::SlotType::admits`]) the same way, which is
 /// `zend_assign_to_typed_prop` where `i_zend_check_property_type`'s first
@@ -13480,7 +13700,7 @@ fn inline_assign_obj(
     at: u32,
     (a, b, data): (impl Operand, impl Operand, impl Operand),
 ) -> Option<Edge> {
-    let object = inline_receiver(req, frame, code, op, a, b)?;
+    let (object, container) = inline_receiver(req, frame, code, op, a, b)?;
     let (place, ty) = inline_place(
         req,
         (frame, code, op),
@@ -13493,15 +13713,16 @@ fn inline_assign_obj(
     if held.is_undef() || held.is_refcounted() {
         return None;
     }
-    let z = data_value(req, frame, code, op, (at, data), ty)?;
+    let z = data_value(req.slots_mut(frame), code, op, (at, data), ty, container)?;
     place.write(z);
     Some(Ok(Next::jump(at.saturating_add(2))))
 }
 
 /// The `OP_DATA` value the inline path of `ASSIGN_OBJ` takes into a
-/// slot that holds `ty`, by [`taken_value`]'s rule: the `OP_DATA`
-/// opline after `at`, whose `op1` is of the kind `data` is, as the
-/// assignment's handler was resolved over it where its unit was
+/// slot that holds `ty`, by [`taken_value`]'s rule, its `container` given
+/// up after the last test and before the take ([`Held::give_up`]): the
+/// `OP_DATA` opline after `at`, whose `op1` is of the kind `data` is, as
+/// the assignment's handler was resolved over it where its unit was
 /// published (`php_unit::Handler`), php's `_OP_DATA_CV` and the rest, so
 /// neither its opcode nor its kind is tested here. None, with nothing
 /// taken, for a value the slot's type does not hold as it stands
@@ -13510,19 +13731,19 @@ fn inline_assign_obj(
 #[inline(always)] // as `inline_fetch_dim_r`
 #[allow(clippy::inline_always)]
 fn data_value(
-    req: &mut Request,
-    frame: FrameRef,
+    slots: &mut [Zval],
     code: &OpArray,
     op: &Opline,
     (at, data): (u32, impl Operand),
     ty: exec::SlotType,
+    container: Held,
 ) -> Option<Zval> {
     let field = exec::opline_at(code, at.saturating_add(1))?.op1;
-    let slots = req.slots_mut(frame);
     let taking = taking(slots, code, op, data, field)?;
     if !ty.admits(taking.z) {
         return None;
     }
+    container.give_up(slots)?;
     taking.take(slots)
 }
 
@@ -13620,6 +13841,22 @@ fn taken_value(
     field: u32,
 ) -> Option<Zval> {
     taking(slots, code, op, value, field)?.take(slots)
+}
+
+/// `ASSIGN_OBJ` over a `VAR` container, its inline path and then its
+/// kernel's, in a call of its own as [`nests`] says.
+#[inline(never)]
+fn assigned_obj_nested<B: Operand + Default, D: Operand + Default>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    at: u32,
+) -> Edge {
+    match inline_assign_obj(req, frame, code, op, at, (Var, B::default(), D::default())) {
+        Some(edge) => edge,
+        None => assigned_obj(req, frame, code, op),
+    }
 }
 
 /// `ASSIGN_OBJ` past its inline path: the value, the receiver and the
@@ -16238,7 +16475,10 @@ pub(crate) fn assign_obj_op<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if let Some(edge) = inline_assign_obj_op(req, frame, code, op) {
+    let inline = over_container!(op.op1_type, |a| inline_assign_obj_op(
+        req, frame, code, op, a
+    ));
+    if let Some(edge) = inline {
         return edge;
     }
     let Some(kernel) = binary_op_of(op.extended_value) else {
@@ -16364,15 +16604,17 @@ pub(crate) fn assign_obj_op<T: Tier>(
 /// int(2)
 /// Cannot modify readonly property C::$r
 /// ```
+#[inline(never)] // a call of its own at each kind, as the one path over the opline's kind was
 fn inline_assign_obj_op(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    a: impl Operand,
 ) -> Option<Edge> {
     let rule = inline::compound(op.extended_value)?;
-    let (a, b) = (ByKind(op.op1_type), ByKind(op.op2_type));
-    let object = inline_receiver(req, frame, code, op, a, b)?;
+    let b = ByKind(op.op2_type);
+    let (object, container) = inline_receiver(req, frame, code, op, a, b)?;
     let (at, data) = data_after(req, frame, code, op).ok()?;
     // `CACHE_ADDR((opline+1)->extended_value)`: the operator is in the
     // opline's own field, so the slot is in the `OP_DATA`'s.
@@ -16388,6 +16630,7 @@ fn inline_assign_obj_op(
     if op.out_type != OperandKind::Unused {
         write_owning_nothing(slots, op, z)?;
     }
+    container.give_up(slots)?;
     place.write(z);
     Some(Ok(Next::jump(at.saturating_add(2))))
 }
@@ -17219,9 +17462,27 @@ fn incdec_obj(
     op: &Opline,
     step: IncDec,
 ) -> Edge {
-    if let Some(edge) = inline_incdec_obj(req, frame, code, op, step) {
+    let inline = over_container!(op.op1_type, |a| inline_incdec_obj(
+        req, frame, code, op, step, a
+    ));
+    if let Some(edge) = inline {
         return edge;
     }
+    stepped_obj(req, frame, code, op, step)
+}
+
+/// The four `*_INC_OBJ`/`*_DEC_OBJ` past their inline path. A call of
+/// its own, as [`fetched_obj`] is: laid in the handler beside the inline
+/// paths at each kind, its registers were saved before they ran, four
+/// instructions on a step.
+#[inline(never)]
+fn stepped_obj(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    step: IncDec,
+) -> Edge {
     let container = match op.op1_type {
         OperandKind::Cv => exec::operand(req, frame, code, op.op1_type, op.op1),
         _ => exec::container(req, frame, op.op1_type, op.op1, "ZEND_PRE_INC_OBJ")?,
@@ -17332,9 +17593,10 @@ fn inline_incdec_obj(
     code: &OpArray,
     op: &Opline,
     step: IncDec,
+    a: impl Operand,
 ) -> Option<Edge> {
-    let (a, b) = (ByKind(op.op1_type), ByKind(op.op2_type));
-    let object = inline_receiver(req, frame, code, op, a, b)?;
+    let b = ByKind(op.op2_type);
+    let (object, container) = inline_receiver(req, frame, code, op, a, b)?;
     let (place, ty) = inline_place(
         req,
         (frame, code, op),
@@ -17356,6 +17618,11 @@ fn inline_incdec_obj(
     if op.out_type != OperandKind::Unused {
         let out = if step.post { held } else { stepped };
         write_owning_nothing(req.slots_mut(frame), op, out)?;
+    }
+    // The slots are found only where an owner is given up: a step whose
+    // temporary is unused reads none.
+    if matches!(container, Held::Owner(_)) {
+        container.give_up(req.slots_mut(frame))?;
     }
     place.write(stepped);
     Some(Ok(advanced()))
