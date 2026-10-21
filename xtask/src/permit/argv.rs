@@ -19,7 +19,9 @@
 //! xtask`, a path), as its name and the words it receives, so `with =
 //! "xtask phpt"` names every form (#1860). What a shell can hide beyond
 //! that (a variable the line does not assign, an alias, a function) is
-//! not read; pre-push and CI run `done` behind it.
+//! not read; pre-push and CI run `done` behind it. The parentheses of
+//! an array assignment, `P=(a b)`, open no subshell: its elements are
+//! words of the assignment (#3165).
 //!
 //! The same reading gives a `deny_pattern` its text ([`Line::text`]): the
 //! line with the heredoc bodies it carries as text removed, so a pattern
@@ -229,6 +231,25 @@ impl Command {
         self.word.get_or_insert_with(Word::default).text.push(c);
     }
 
+    /// Whether a `(` here opens an array assignment (#3165): the word
+    /// being read is an unquoted `NAME=` or `NAME+=`, standing where an
+    /// assignment does, among the command's first words or after a
+    /// declaring builtin.
+    fn opens_array(&self) -> bool {
+        let Some(word) = self.word.as_ref().filter(|w| !w.quoted) else {
+            return false;
+        };
+        let at_assignment = match self.words.first() {
+            Some(first) if DECLARING.contains(&first.as_str()) => true,
+            _ => self.words.iter().all(|w| is_assignment(w)),
+        };
+        at_assignment
+            && word
+                .text
+                .strip_suffix('=')
+                .is_some_and(|name| is_name(name.strip_suffix('+').unwrap_or(name)))
+    }
+
     /// A quote or a substitution opens a word even when it adds no text.
     fn open(&mut self, quoted: bool) {
         let word = self.word.get_or_insert_with(|| Word {
@@ -342,44 +363,19 @@ impl Lexer {
     fn list(&mut self, close: Option<char>) {
         let mut command = Command::default();
         while let Some(c) = self.bump() {
+            if self.quote(&mut command, c) {
+                continue;
+            }
             match c {
                 c if Some(c) == close => break,
-                '\\' => match self.bump() {
-                    Some('\n') | None => {}
-                    Some(c) => {
-                        command.open(true);
-                        command.push(c);
-                    }
-                },
-                '\'' => {
-                    command.open(true);
-                    while let Some(c) = self.bump().filter(|c| *c != '\'') {
-                        command.push(c);
-                    }
-                }
-                '"' => {
-                    command.open(true);
-                    self.expand(&mut command, Some('"'));
-                }
-                '`' => {
-                    command.open(false);
-                    self.backquote();
-                }
-                '$' if self.eat('(') => {
-                    command.open(false);
-                    self.child(|lexer| lexer.list(Some(')')));
-                }
-                '#' if command.word.is_none() => {
-                    while self.chars.get(self.at).is_some_and(|c| *c != '\n') {
-                        self.at += 1;
-                    }
-                }
+                '#' if command.word.is_none() => self.comment(),
                 '<' | '>' => self.redirection(&mut command, c),
                 '&' if self.eat('>') => {
                     self.end_word(&mut command);
                     self.eat('>');
                     command.next = Next::Target { writes: true };
                 }
+                '(' if command.opens_array() => self.array(&mut command),
                 '(' => {
                     self.end(&mut command, Joint::Then);
                     self.child(|lexer| lexer.list(Some(')')));
@@ -405,6 +401,89 @@ impl Lexer {
             }
         }
         self.end(&mut command, Joint::Then);
+    }
+
+    /// An escape, a quote or a substitution `c` opens, read into the word
+    /// being read; `false` where `c` opens none.
+    fn quote(&mut self, command: &mut Command, c: char) -> bool {
+        match c {
+            '\\' => match self.bump() {
+                Some('\n') | None => {}
+                Some(c) => {
+                    command.open(true);
+                    command.push(c);
+                }
+            },
+            '\'' => {
+                command.open(true);
+                while let Some(c) = self.bump().filter(|c| *c != '\'') {
+                    command.push(c);
+                }
+            }
+            '"' => {
+                command.open(true);
+                self.expand(command, Some('"'));
+            }
+            '`' => {
+                command.open(false);
+                self.backquote();
+            }
+            '$' if self.eat('(') => {
+                command.open(false);
+                self.child(|lexer| lexer.list(Some(')')));
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// A comment, up to the newline that ends it.
+    fn comment(&mut self) {
+        while self.chars.get(self.at).is_some_and(|c| *c != '\n') {
+            self.at += 1;
+        }
+    }
+
+    /// The elements of an array assignment, `NAME=(…)` or `NAME+=(…)`, up
+    /// to the `)` that matches its `(` (#3165): they are words of the
+    /// assignment and no commands, a `$(…)` among them still running, and
+    /// the word ends at the `)` as zsh ends it. A separator among them is
+    /// one more space, as zsh reads `;` there and bash refuses the line;
+    /// a parenthesis nested in an element is its text, a zsh pattern. The
+    /// value is the elements joined by spaces, as `$P` expands in zsh, and
+    /// an append's is led by one, so it extends the value as `+=` does.
+    fn array(&mut self, command: &mut Command) {
+        let mut elements = Command::default();
+        let mut depth = 0_usize;
+        while let Some(c) = self.bump() {
+            if self.quote(&mut elements, c) {
+                continue;
+            }
+            match c {
+                ')' if depth == 0 => break,
+                '#' if elements.word.is_none() => self.comment(),
+                c if c.is_whitespace() || matches!(c, ';' | '&' | '|') => {
+                    self.end_word(&mut elements);
+                }
+                c => {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => depth -= 1,
+                        _ => {}
+                    }
+                    elements.push(c);
+                }
+            }
+        }
+        self.end_word(&mut elements);
+        let value = elements.words.join(" ");
+        if let Some(word) = command.word.as_mut() {
+            if word.text.ends_with("+=") && !value.is_empty() {
+                word.text.push(' ');
+            }
+            word.text.push_str(&value);
+        }
+        self.end_word(command);
     }
 
     /// The text of a double-quoted word up to `close`, or of a heredoc
@@ -502,16 +581,24 @@ impl Lexer {
     /// The command read so far, ended by `after`. Where it has no words,
     /// a `;` or a newline leaves the separator before it standing, so a
     /// line continued after `&&` or `|`, or opening a subshell after one,
-    /// joins what follows as that separator does ([`Joint`]).
+    /// joins what follows as that separator does ([`Joint`]). Where it
+    /// runs no program, an assignment alone, the `&&` after it joins what
+    /// follows to the chain the assignment stands in, so after a command
+    /// and a `;`, `||` or `&` it is joined as by that separator: `cd /wt;
+    /// P=x && git add` runs `git add` wherever the `cd` left the shell
+    /// (#3165).
     fn end(&mut self, command: &mut Command, after: Joint) {
         self.end_word(command);
         command.next = Next::Argument;
         let words = std::mem::take(&mut command.words);
         self.assigned.read(&words);
-        let kept = Some(self.before).filter(|_| words.is_empty());
+        let empty = words.is_empty();
         let Some(argv) = Argv::running(words, &self.assigned) else {
-            self.before = match kept {
-                Some(before) if after == Joint::Then => before,
+            let begins =
+                !self.commands.is_empty() && matches!(self.before, Joint::Then | Joint::Background);
+            self.before = match after {
+                Joint::Then if empty => self.before,
+                Joint::And if !empty && begins => Joint::Then,
                 _ => after,
             };
             return;
@@ -623,8 +710,15 @@ impl Assigned {
             _ => return,
         };
         for (name, value) in operands.iter().filter_map(|w| w.split_once('=')) {
+            let (name, value) = match name.strip_suffix('+') {
+                Some(name) => (
+                    name,
+                    format!("{}{value}", self.0.get(name).map_or("", String::as_str)),
+                ),
+                None => (name, value.to_owned()),
+            };
             if is_name(name) {
-                self.0.insert(name.to_owned(), value.to_owned());
+                self.0.insert(name.to_owned(), value);
             }
         }
     }
@@ -767,8 +861,10 @@ fn basename(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
+/// `NAME=value`, or `NAME+=value`, which appends.
 fn is_assignment(word: &str) -> bool {
-    word.split_once('=').is_some_and(|(name, _)| is_name(name))
+    word.split_once('=')
+        .is_some_and(|(name, _)| is_name(name.strip_suffix('+').unwrap_or(name)))
 }
 
 /// A shell variable's name: a letter or `_`, then letters, digits and `_`.
@@ -1518,6 +1614,59 @@ mod tests {
         let line = Line::read("x && bash -c 'cd /wt; y'");
         assert_eq!(line.joints().len(), line.commands().len());
         assert_eq!(line.joints()[1].before, And);
+    }
+
+    /// #3165: a `(` straight after `NAME=` or `NAME+=` where an
+    /// assignment stands opens an array, its elements words of the
+    /// assignment, a parenthesis, a quoted or escaped `)`, a comment and a
+    /// separator among them alike, so the line reads as it does with a
+    /// scalar; a `$(…)` among them runs, the word ends at the `)`, and a
+    /// `(` anywhere else opens a subshell.
+    #[test]
+    fn an_array_assignment_is_one_word_and_opens_no_subshell() {
+        use Joint::{And, Then};
+        type Read = (Vec<Vec<String>>, Vec<Vec<u32>>, Vec<(Joint, Joint)>);
+        let read = |line: &str| -> Read {
+            let line = Line::read(line);
+            let words = line.commands().iter().map(|a| a.words.clone());
+            let joints = line.joints().iter().map(|j| (j.before, j.after));
+            (words.collect(), line.shells().to_vec(), joints.collect())
+        };
+        let line = "P=(a b) && git add -- \"${P[@]}\"";
+        assert_eq!(words(line), [["git", "add", "--", "${P[@]}"]]);
+        assert_eq!(read(line).1, [Vec::<u32>::new()]);
+        assert_eq!(read(line).2, [(And, Then)]);
+        for (array, scalar) in [
+            ("P=(a (x) \")\" b\\) # c)\n d) && git add", "P=a && git add"),
+            ("A=1 P+=(x) && git add", "A=1 P+=x && git add"),
+            ("P=() && git add", "P= && git add"),
+            (
+                "typeset -a P=(x; y) && git add",
+                "typeset -a P='x y' && git add",
+            ),
+        ] {
+            assert_eq!(read(array), read(scalar), "{array}");
+        }
+        assert_eq!(
+            words("P=(a $(git rev-parse HEAD)) && git add"),
+            [vec!["git", "rev-parse", "HEAD"], vec!["git", "add"]]
+        );
+        assert_eq!(words("P=(a)b"), [["b"]]);
+        assert_eq!(
+            words("P=(git commit); P+=(-n); $P"),
+            [["git", "commit", "-n"]]
+        );
+        assert_eq!(
+            read("cd /wt; P=(a) && git add").2,
+            [(Then, Then), (Then, Then)]
+        );
+        assert_eq!(
+            read("cd /wt && P=a && git add").2,
+            [(Then, And), (And, Then)]
+        );
+        for subshell in ["P= (git add)", "\"P\"=(git add)", "echo P=(git add)"] {
+            assert!(read(subshell).1.contains(&vec![0]), "{subshell}");
+        }
     }
 
     /// Whether a command of the line is the one `phrase` names.

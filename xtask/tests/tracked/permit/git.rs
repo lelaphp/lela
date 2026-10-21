@@ -133,6 +133,37 @@ fn the_git_operation_rule_refuses_staging_where_another_hand_s_merge_stands() {
     }
 }
 
+/// #3165 as it happened: from a checkout where another session's merge
+/// stands, `allow-array.json`, a `cd` into a linked worktree joined by
+/// `&&` to `P=(…)` and the commit, and `allow-git-c.json`'s `git -C` are
+/// judged in the worktree alone and let through; `deny-array-then.json`'s
+/// `;` after the `cd` runs the commit where the line started as well
+/// (#2995), and is refused.
+#[test]
+fn an_array_assignment_after_a_cd_leaves_the_commit_in_the_worktree() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let merging = operating("operation-array");
+    Repo::at(&merging).git(&["worktree", "add", "-q", "-b", "own", "own"]);
+    let linked = merging.path().join("own").display().to_string();
+    let dir = fixtures().join("rules/git.operation");
+    for name in [
+        "allow-array.json",
+        "allow-git-c.json",
+        "deny-array-then.json",
+    ] {
+        let mut call = call(&dir.join(name));
+        let line = call
+            .tool_input
+            .command
+            .as_deref()
+            .map(|l| l.replace("/var/empty/t3069", &linked));
+        call.tool_input.command = line;
+        let judged = judge(&manifest, merging.path(), &call).unwrap();
+        let refused = judged.denial().is_some_and(|d| d.rule == "git.operation");
+        assert_eq!(refused, name.starts_with("deny"), "{name}: {judged:?}");
+    }
+}
+
 /// `git.merge-commits-itself` as #2751 ruled it: a merge that commits
 /// itself is refused in the main checkout and let through in a linked
 /// worktree, where a builder merges `main` into its branch; a neighbour

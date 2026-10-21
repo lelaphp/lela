@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git -C /var/empty/t3069 commit -F m -- AGENTS.md","description":"Commit by pathspec in a worktree of its own, placed by -C"}}
