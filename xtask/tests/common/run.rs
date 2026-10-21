@@ -15,16 +15,18 @@
 
 use std::ffi::OsStr;
 use std::fmt;
+use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 
-/// One run of the binary to be made: `--root` and the arguments, and the
-/// environment beside the test's own. Stdin is closed, as `output` leaves
-/// it.
+/// One run of the binary to be made: `--root` and the arguments, the
+/// environment beside the test's own, and what it reads on stdin, which
+/// is closed where the test gives it nothing.
 #[derive(Debug)]
 pub struct Run {
     command: Command,
+    stdin: Option<Vec<u8>>,
 }
 
 impl Run {
@@ -32,7 +34,10 @@ impl Run {
     pub fn at(root: &Path) -> Run {
         let mut command = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")));
         command.arg("--root").arg(root);
-        Run { command }
+        Run {
+            command,
+            stdin: None,
+        }
     }
 
     /// `args` after the ones already given.
@@ -51,13 +56,47 @@ impl Run {
         self
     }
 
+    /// `key` taken out of the binary's environment, which the test's
+    /// process may carry.
+    pub fn env_remove(mut self, key: impl AsRef<OsStr>) -> Run {
+        self.command.env_remove(key);
+        self
+    }
+
+    /// The binary started in `dir`, where it is not the test's own.
+    pub fn current_dir(mut self, dir: impl AsRef<Path>) -> Run {
+        self.command.current_dir(dir);
+        self
+    }
+
+    /// `text` on the binary's stdin, as a hook hands it its event.
+    pub fn stdin(mut self, text: impl AsRef<[u8]>) -> Run {
+        self.stdin = Some(text.as_ref().to_vec());
+        self
+    }
+
     /// The run, to its end.
     pub fn go(mut self) -> Ran {
         let line = line(&self.command);
-        let out = self
+        let started = self
             .command
-            .output()
-            .unwrap_or_else(|err| panic!("running {line}: {err}"));
+            .stdin(if self.stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        let mut child = started.unwrap_or_else(|err| panic!("running {line}: {err}"));
+        if let (Some(text), Some(mut pipe)) = (self.stdin, child.stdin.take()) {
+            // A binary that exits before reading all of it closes the
+            // pipe; what it said is the test's, not the write's.
+            pipe.write_all(&text).ok();
+        }
+        let out = child
+            .wait_with_output()
+            .unwrap_or_else(|err| panic!("waiting on {line}: {err}"));
         Ran {
             line,
             status: out.status,

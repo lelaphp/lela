@@ -11,7 +11,9 @@ use xtask::{budget, generated};
 
 mod common {
     pub mod repo;
+    pub mod run;
 }
+use common::run::xtask;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -721,14 +723,9 @@ fn a_clippy_rule_clippy_cannot_hold_is_refused_naming_why() {
 #[test]
 fn the_binary_writes_the_readings_and_exits_nonzero_on_a_failure() {
     let fixture = xtask::package_dir().join("fixtures/budget/ceiling");
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(&fixture)
-        .arg("budget")
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!out.status.success(), "{stdout}");
+    let ran = xtask(&fixture, &["budget"]);
+    assert_ne!(ran.code(), 0, "{ran}");
+    let stdout = ran.stdout;
     assert!(stdout.contains("fail budget php_heap"), "{stdout}");
     let store = Store::of_workspace(&fixture);
     let heap = store.read("budget", "php_heap").unwrap().unwrap();
@@ -743,15 +740,10 @@ fn the_binary_writes_the_readings_and_exits_nonzero_on_a_failure() {
 #[test]
 fn lock_packages_counts_the_third_party_packages_and_not_the_workspaces_crates() {
     let fixture = xtask::package_dir().join("fixtures/budget/lock-packages");
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(&fixture)
-        .arg("budget")
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let ran = xtask(&fixture, &["budget"]);
     std::fs::remove_dir_all(fixture.join("target")).ok();
-    assert!(!out.status.success(), "{stdout}");
+    assert_ne!(ran.code(), 0, "{ran}");
+    let stdout = ran.stdout;
     assert!(
         stdout.contains("third-party Cargo.lock packages: 161 over the ceiling of 160"),
         "{stdout}"

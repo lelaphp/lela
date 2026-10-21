@@ -9,7 +9,6 @@
 //! in place, and the workspace's own `ext/` gains no crate.
 
 use std::path::Path;
-use std::process::Command;
 
 use xtask::manifest::{Crate, Manifest};
 use xtask::reading::{Reading, Status};
@@ -18,8 +17,10 @@ use xtask::{api_check, budget, new_ext, unsafe_audit, vocab};
 
 mod common {
     pub mod repo;
+    pub mod run;
 }
 use common::repo::Repo;
+use common::run::xtask;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -457,16 +458,7 @@ fn a_workspace_without_the_facade_refuses() {
 #[test]
 fn the_binary_prints_what_it_laid_down_and_exits_nonzero_on_a_refusal() {
     let root = scratch("binary");
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .args(["--root", root.to_str().unwrap(), "new-ext", "demo"])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        out.status.success(),
-        "{stdout}{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let stdout = xtask(&root, &["new-ext", "demo"]).ok();
     assert!(stdout.contains("ext/demo/src/lib.rs"), "{stdout}");
     assert!(
         stdout.contains("wrote crates/php_bundle/Cargo.toml")
@@ -477,14 +469,6 @@ fn the_binary_prints_what_it_laid_down_and_exits_nonzero_on_a_refusal() {
         stdout.contains("crates/php_bundle/src/lib.rs: enabled() gains php_ext_demo::extension"),
         "the two edits are printed: {stdout}"
     );
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .args(["--root", root.to_str().unwrap(), "new-ext", "demo"])
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("exists"),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let err = xtask(&root, &["new-ext", "demo"]).failed();
+    assert!(err.contains("exists"), "{err}");
 }

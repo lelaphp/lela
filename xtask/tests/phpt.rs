@@ -28,10 +28,12 @@ mod common {
     pub mod phpt_tree;
     pub mod registry;
     pub mod repo;
+    pub mod run;
 }
 use common::phpt_tree::fixture_tree;
 use common::registry::registry;
 use common::repo::{Repo, scratch_workspace};
+use common::run::Run;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -612,28 +614,19 @@ fn the_variable_names_the_tree_to_a_run_of_the_binary() {
         .collect();
     fs::write(&pin, text.join("\n")).unwrap();
     let tree = fixture_tree();
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(&root)
+    let ran = Run::at(&root)
         .args(["phpt", "--subset", "Zend/tests"])
-        .env(xtask::oracle::TREE_VARIABLE, &tree)
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    let stderr = String::from_utf8(out.stderr).unwrap();
+        .env(xtask::oracle::TREE_VARIABLE, &*tree)
+        .go();
     assert!(
-        stdout.contains("Zend/tests") && !stderr.contains("neither place"),
-        "the subset resolved under the fixture:\n{stdout}\n{stderr}"
+        ran.stdout.contains("Zend/tests") && !ran.stderr.contains("neither place"),
+        "the subset resolved under the fixture: {ran}"
     );
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(&root)
+    let stderr = Run::at(&root)
         .args(["phpt", "--subset", "Zend/tests"])
         .env(xtask::oracle::TREE_VARIABLE, root.join("nowhere"))
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(!out.status.success());
+        .go()
+        .failed();
     assert!(
         stderr.contains(&format!(
             "{}={}",
@@ -680,22 +673,19 @@ fn a_relative_root_reaches_the_verdicts_an_absolute_one_does() {
         fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let run = |given: &Path| {
-        let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-            .arg("--root")
-            .arg(given)
+        let stdout = Run::at(given)
             .args(["phpt", "--subset", "ext/ctype", "--jobs", "1"])
             .current_dir(&root)
             .env(xtask::oracle::TREE_VARIABLE, &corpus)
-            .output()
-            .unwrap();
+            .go()
+            .stdout;
         // The verdicts, the reading's line up to what it was run by.
-        let stdout = String::from_utf8_lossy(&out.stdout);
         let verdicts = stdout
             .lines()
             .find(|line| line.contains(" phpt ext/ctype: "))
             .and_then(|line| line.split(';').next())
             .map(str::to_owned);
-        (verdicts, stdout.into_owned())
+        (verdicts, stdout)
     };
     let (absolute, said) = run(root.path());
     assert_eq!(

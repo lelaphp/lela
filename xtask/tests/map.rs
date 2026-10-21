@@ -12,8 +12,10 @@ use xtask::scratch::Tree;
 
 mod common {
     pub mod repo;
+    pub mod run;
 }
 use common::repo::scratch_workspace;
+use common::run::{Run, xtask};
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -354,18 +356,9 @@ fn every_status_region_renders_the_same_bytes_whatever_the_store_holds() {
         regions
             .iter()
             .map(|(_, opener)| {
-                let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-                    .arg("--root")
-                    .arg(&*root)
-                    .args(xtask_args(opener))
-                    .output()
-                    .unwrap();
-                assert!(
-                    out.status.success(),
-                    "{opener}: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-                String::from_utf8(out.stdout).unwrap()
+                let ran = Run::at(&root).args(xtask_args(opener)).go();
+                assert_eq!(ran.code(), 0, "{opener}: {ran}");
+                ran.stdout
             })
             .collect()
     };
@@ -495,18 +488,7 @@ fn the_invocation_region_is_the_types_and_a_field_it_gains_stales_it() {
         !stale.status.success() && said.contains("invocation") && said.contains("stale"),
         "a field the type gains stales the region until it is rendered: {said}"
     );
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(&*root)
-        .args(xtask_args(opener))
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let rendered = String::from_utf8(out.stdout).unwrap();
+    let rendered = Run::at(&root).args(xtask_args(opener)).go().ok();
     assert!(
         rendered.contains("| `gained` | `u8` | no section gives it | A field the type gained. |"),
         "{rendered}"
@@ -668,19 +650,8 @@ fn block_cap() -> usize {
 
 /// `xtask status --session --format json` over a root: the two blocks.
 fn session_blocks(root: &Path) -> (String, String) {
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .args(["--root"])
-        .arg(root)
-        .args(["status", "--session", "--format", "json"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let out = xtask(root, &["status", "--session", "--format", "json"]).ok();
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
     (
         value["map"].as_str().unwrap().to_owned(),
         value["facts"].as_str().unwrap().to_owned(),
@@ -690,18 +661,9 @@ fn session_blocks(root: &Path) -> (String, String) {
 /// The section of the local file rendered from this workspace's store,
 /// as `computed run` renders it into the local file.
 fn section(name: &str) -> String {
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .args(["--root"])
-        .arg(workspace())
-        .args(["status", "--section", name])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{name}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8(out.stdout).unwrap()
+    let ran = xtask(workspace(), &["status", "--section", name]);
+    assert_eq!(ran.code(), 0, "{name}: {ran}");
+    ran.stdout
 }
 
 /// What is wrong with a block against the cap, if anything.

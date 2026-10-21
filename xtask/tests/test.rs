@@ -6,7 +6,6 @@
 //! the reading the ticket is for: a crate with a failing test is not done.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use xtask::divergence::Registry;
 use xtask::done;
@@ -17,8 +16,10 @@ use xtask::test;
 
 mod common {
     pub mod repo;
+    pub mod run;
 }
 use common::repo::Repo;
+use common::run::{Run, xtask};
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -82,14 +83,9 @@ fn a_crate_with_a_failing_test_reads_fail_with_the_passed_and_the_failed_counted
 #[test]
 fn the_binary_writes_the_reading_and_exits_nonzero_on_a_failure() {
     let root = repository("test-binary");
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(root.path())
-        .args(["test", "--crate", "php_heap"])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!out.status.success(), "{stdout}");
+    let ran = xtask(&root, &["test", "--crate", "php_heap"]);
+    assert_ne!(ran.code(), 0, "{ran}");
+    let stdout = ran.stdout;
     assert!(
         stdout.starts_with("fail test php_heap: php_heap: 1 test failed"),
         "{stdout}"
@@ -282,19 +278,11 @@ fn spans(name: &str, declared: &str) -> (Reading, [(u128, u128); 3]) {
     let toml = std::fs::read_to_string(heap.join("Cargo.toml")).unwrap();
     std::fs::write(heap.join("Cargo.toml"), format!("{toml}{declared}")).unwrap();
     let root = committed(root);
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(root.path())
+    Run::at(&root)
         .args(["test", "--crate", "php_heap"])
         .env("CARGO_BUILD_JOBS", "3")
-        .output()
-        .unwrap();
-    let said = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        out.status.success(),
-        "{said}{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+        .go()
+        .ok();
     let reading = Store::of_workspace(root.path())
         .read("test", "php_heap")
         .unwrap()
@@ -373,19 +361,7 @@ fn staged_leaves_out_an_executable_whose_own_paths_are_not_staged() {
         let text = std::fs::read_to_string(&file).unwrap();
         std::fs::write(&file, format!("{text}{line}\n")).unwrap();
         Repo::at(&root).git(&["add", "--", &format!("crates/php_heap/{path}")]);
-        let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-            .arg("--root")
-            .arg(root.path())
-            .args(["test", "--staged"])
-            .output()
-            .unwrap();
-        let said = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(
-            out.status.success(),
-            "{said}{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        said
+        xtask(&root, &["test", "--staged"]).ok()
     };
     let ran = |test: &str| root.join(format!("target/tmp/{test}.span")).exists();
     let read = || {

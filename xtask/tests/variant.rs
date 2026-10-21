@@ -27,8 +27,10 @@ use xtask::witness;
 
 mod common {
     pub mod repo;
+    pub mod run;
 }
 use common::repo::scratch_workspace;
+use common::run::Run;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -807,19 +809,16 @@ fn phpt_featured(name: &str, build: &str) -> Option<(Tree, Reading)> {
     shell(&cargo, build);
     let temp = root.join("tmp");
     fs::create_dir_all(&temp).unwrap();
-    let out = std::process::Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .args(["--root", &root.display().to_string()])
+    let ran = Run::at(&root)
         .args(["phpt", "--subset", "ext/fixture", "--jobs", "1"])
         .env("CARGO", &cargo)
         .env("TMPDIR", &temp)
         .env("TEST_PHP_SRCDIR", root.join("corpus"))
-        .output()
-        .unwrap();
-    let said = String::from_utf8_lossy(&out.stdout);
+        .go();
     let reading = Store::of_workspace(&root)
         .read("phpt", "ext/fixture")
         .unwrap()
-        .unwrap_or_else(|| panic!("no reading: {said}{}", String::from_utf8_lossy(&out.stderr)));
+        .unwrap_or_else(|| panic!("no reading: {ran}"));
     Some((root, reading))
 }
 

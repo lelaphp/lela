@@ -2,7 +2,6 @@
 //! manifest and the store and computes nothing else.
 
 use std::path::Path;
-use std::process::Command;
 
 use xtask::manifest::Manifest;
 use xtask::oracle::{PROMISE_VARIABLE, Platform, TREE_VARIABLE};
@@ -11,8 +10,10 @@ use xtask::scratch::Tree;
 
 mod common {
     pub mod repo;
+    pub mod run;
 }
 use common::repo::Repo;
+use common::run::{Ran, Run};
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -28,29 +29,13 @@ fn scratch(name: &str) -> Tree {
     dir
 }
 
-fn status(root: &Path, args: &[&str]) -> (bool, String, String) {
-    status_with_stdin(root, args, "")
+fn status(root: &Path, args: &[&str]) -> Ran {
+    Run::at(root).args(["status"]).args(args).go()
 }
 
 /// `status` with the hook's stdin, the JSON head every hook event carries.
-fn status_with_stdin(root: &Path, args: &[&str], stdin: &str) -> (bool, String, String) {
-    let mut child = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(root)
-        .arg("status")
-        .args(args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    std::io::Write::write_all(&mut child.stdin.take().unwrap(), stdin.as_bytes()).unwrap();
-    let out = child.wait_with_output().unwrap();
-    (
-        out.status.success(),
-        String::from_utf8(out.stdout).unwrap(),
-        String::from_utf8(out.stderr).unwrap(),
-    )
+fn status_with_stdin(root: &Path, args: &[&str], stdin: &str) -> Ran {
+    Run::at(root).args(["status"]).args(args).stdin(stdin).go()
 }
 
 /// The rules section in Markdown is each rule's id, ADR, predicate and
@@ -60,8 +45,7 @@ fn status_with_stdin(root: &Path, args: &[&str], stdin: &str) -> (bool, String, 
 fn rules_prints_each_rule_with_its_adr_and_the_failure_text_under_uncut() {
     let root = scratch("rules");
     let text = "Extension state is request-scoped, immutable engine-scoped or process-scoped";
-    let (ok, md, err) = status(&root, &["--section", "rules"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "rules"]).ok();
     assert!(
         md.starts_with("| rule | adr | predicate | reading |\n"),
         "{md}"
@@ -76,16 +60,14 @@ fn rules_prints_each_rule_with_its_adr_and_the_failure_text_under_uncut() {
         "the failure's text is not the map's: {md}"
     );
 
-    let (ok, uncut, err) = status(&root, &["--section", "rules", "--uncut"]);
-    assert!(ok, "{err}");
+    let uncut = status(&root, &["--section", "rules", "--uncut"]).ok();
     assert!(
         uncut.starts_with("| rule | adr | predicate | reading | text |\n"),
         "{uncut}"
     );
     assert!(uncut.contains(text), "{uncut}");
 
-    let (ok, json, _) = status(&root, &["--section", "rules", "--format", "json"]);
-    assert!(ok);
+    let json = status(&root, &["--section", "rules", "--format", "json"]).ok();
     assert!(json.contains(text), "{json}");
     let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
     let row = rows
@@ -114,15 +96,13 @@ fn tracked_renders_no_reading_whatever_the_store_holds() {
         .unwrap();
     let row = "| harness.self |  | deny |";
 
-    let (ok, live, err) = status(&root, &["--section", "rules"]);
-    assert!(ok, "{err}");
+    let live = status(&root, &["--section", "rules"]).ok();
     assert!(live.contains(&format!("{row} fail |")), "{live}");
     assert!(
         live.starts_with("| rule | adr | predicate | reading |\n"),
         "{live}"
     );
-    let (ok, tracked, err) = status(&root, &["--section", "rules", "--tracked"]);
-    assert!(ok, "{err}");
+    let tracked = status(&root, &["--section", "rules", "--tracked"]).ok();
     assert!(
         tracked.starts_with("| rule | adr | predicate |\n|---|---|---|\n"),
         "{tracked}"
@@ -130,14 +110,16 @@ fn tracked_renders_no_reading_whatever_the_store_holds() {
     assert!(tracked.contains(&format!("{row}\n")), "{tracked}");
     assert!(!tracked.contains("reading"), "{tracked}");
     for section in ["locks", "bundle"] {
-        let (ok, out, err) = status(&root, &["--section", section, "--tracked"]);
-        assert!(ok, "{section}: {err}");
+        let ran = status(&root, &["--section", section, "--tracked"]);
+        assert_eq!(ran.code(), 0, "{section}: {ran}");
+        let out = ran.stdout;
         assert!(!out.contains("reading"), "{section}: {out}");
     }
 
     for section in ["git", "permits", "phpt"] {
-        let (ok, out, err) = status(&root, &["--section", section, "--tracked"]);
-        assert!(!ok, "{section}: {out}");
+        let ran = status(&root, &["--section", section, "--tracked"]);
+        assert_ne!(ran.code(), 0, "{section}: {ran}");
+        let err = ran.stderr;
         assert!(
             err.contains(&format!("the {section} section is this checkout's")),
             "{section}: {err}"
@@ -149,8 +131,9 @@ fn tracked_renders_no_reading_whatever_the_store_holds() {
 fn every_section_reports_no_reading_when_the_store_is_gone() {
     let root = scratch("empty");
     for section in ["rules", "locks", "budget"] {
-        let (ok, md, err) = status(&root, &["--section", section]);
-        assert!(ok, "{section}: {err}");
+        let ran = status(&root, &["--section", section]);
+        assert_eq!(ran.code(), 0, "{section}: {ran}");
+        let md = ran.stdout;
         assert!(md.contains("no reading"), "{section}: {md}");
     }
     assert!(
@@ -169,8 +152,7 @@ fn every_section_reports_no_reading_when_the_store_is_gone() {
 fn modules_renders_each_lock_by_its_defining_modules_the_widest_first() {
     let root = scratch("modules");
     let store = Store::of_workspace(&root);
-    let (ok, md, err) = status(&root, &["--section", "modules"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "modules"]).ok();
     assert_eq!(md, "no reading\n");
 
     let mut api = Reading::new("api-check", "api");
@@ -184,8 +166,7 @@ fn modules_renders_each_lock_by_its_defining_modules_the_widest_first() {
     heap.numbers.insert("items".into(), 9.into());
     store.record(&[api, heap]).unwrap();
 
-    let (ok, md, err) = status(&root, &["--section", "modules"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "modules"]).ok();
     assert_eq!(
         md,
         "| seam | module | items | share | commit |\n|---|---|---|---|---|\n\
@@ -193,8 +174,7 @@ fn modules_renders_each_lock_by_its_defining_modules_the_widest_first() {
          | api | php_engine::api::values | 1 | 25.0% | 21ad0fb8 |\n"
     );
 
-    let (ok, json, err) = status(&root, &["--section", "modules", "--format", "json"]);
-    assert!(ok, "{err}");
+    let json = status(&root, &["--section", "modules", "--format", "json"]).ok();
     let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(rows[0]["lock"], "api.lock");
     assert_eq!(rows[0]["module"], "php_engine::api::request");
@@ -221,8 +201,7 @@ fn crates_counts_the_manifest_rows_by_directory_and_lists_each_under_uncut() {
             .count()
     };
 
-    let (ok, md, err) = status(&root, &["--section", "crates"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "crates"]).ok();
     assert!(
         md.starts_with("| directory | crates | behind a feature |\n|---|---|---|\n"),
         "{md}"
@@ -237,8 +216,7 @@ fn crates_counts_the_manifest_rows_by_directory_and_lists_each_under_uncut() {
     }
     assert!(md.ends_with("| xtask | 1 | 0 |\n"), "{md}");
 
-    let (ok, uncut, err) = status(&root, &["--section", "crates", "--uncut"]);
-    assert!(ok, "{err}");
+    let uncut = status(&root, &["--section", "crates", "--uncut"]).ok();
     assert!(
         uncut.starts_with("| crate | directory | feature | created |\n"),
         "{uncut}"
@@ -257,8 +235,7 @@ fn crates_counts_the_manifest_rows_by_directory_and_lists_each_under_uncut() {
     );
     assert_eq!(uncut.lines().count(), manifest.crates.len() + 2, "{uncut}");
 
-    let (ok, json, err) = status(&root, &["--section", "crates", "--format", "json"]);
-    assert!(ok, "{err}");
+    let json = status(&root, &["--section", "crates", "--format", "json"]).ok();
     let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
     let rows = rows.as_array().unwrap();
     assert_eq!(rows.len(), manifest.crates.len());
@@ -280,8 +257,7 @@ fn edges_renders_every_edge_row_with_its_qualifiers_and_adrs() {
     let root = scratch("edges");
     let manifest = Manifest::load(&root).unwrap();
 
-    let (ok, md, err) = status(&root, &["--section", "edges"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "edges"]).ok();
     assert!(
         md.starts_with("| from | to | as | adr |\n|---|---|---|---|\n"),
         "{md}"
@@ -314,8 +290,7 @@ fn edges_renders_every_edge_row_with_its_qualifiers_and_adrs() {
     assert!(row("php_sapi").contains("| through sapi.lock |"), "{md}");
     assert!(row("ext/*").contains("| these only | ADR-0004 |"), "{md}");
 
-    let (ok, json, err) = status(&root, &["--section", "edges", "--format", "json"]);
-    assert!(ok, "{err}");
+    let json = status(&root, &["--section", "edges", "--format", "json"]).ok();
     let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(rows, serde_json::to_value(&manifest.edges).unwrap());
 }
@@ -347,8 +322,7 @@ fn locks_and_budget_render_the_readings_the_instruments_wrote() {
     )
     .unwrap();
     let ceiling = Manifest::load(&root).unwrap().budget.api_items.to_string();
-    let (ok, md, _) = status(&root, &["--section", "locks"]);
-    assert!(ok);
+    let md = status(&root, &["--section", "locks"]).ok();
     assert!(
         md.contains(&format!("| api | api.lock | 3 | {ceiling} | pass |")),
         "{md}"
@@ -359,8 +333,7 @@ fn locks_and_budget_render_the_readings_the_instruments_wrote() {
         "{md}"
     );
 
-    let (ok, md, _) = status(&root, &["--section", "budget"]);
-    assert!(ok);
+    let md = status(&root, &["--section", "budget"]).ok();
     assert!(
         md.contains("php_heap")
             && md.contains("20001")
@@ -374,8 +347,7 @@ fn locks_and_budget_render_the_readings_the_instruments_wrote() {
         "scripts/** has its row beside the crates (#34): {md}"
     );
 
-    let (ok, json, _) = status(&root, &["--section", "budget", "--format", "json"]);
-    assert!(ok);
+    let json = status(&root, &["--section", "budget", "--format", "json"]).ok();
     let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
     let row = rows
         .as_array()
@@ -408,8 +380,7 @@ fn the_rows_of_crates_not_yet_created_fold_into_one() {
     xtask.message = "xtask: 11298 lines under the ceiling of 14000".into();
     store.record(std::slice::from_ref(&xtask)).unwrap();
 
-    let (ok, md, err) = status(&root, &["--section", "budget", "--uncut"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "budget", "--uncut"]).ok();
     let folded = md
         .lines()
         .find(|l| l.starts_with("| 3 crates not yet created |"))
@@ -429,8 +400,7 @@ fn the_rows_of_crates_not_yet_created_fold_into_one() {
         "{md}"
     );
 
-    let (ok, json, _) = status(&root, &["--section", "budget", "--format", "json"]);
-    assert!(ok);
+    let json = status(&root, &["--section", "budget", "--format", "json"]).ok();
     let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
     let row = rows.as_array().unwrap().last().unwrap();
     assert_eq!(row["crate"], "3 crates not yet created");
@@ -442,8 +412,7 @@ fn the_rows_of_crates_not_yet_created_fold_into_one() {
     let mut control = Reading::new("phpt", "ext/pcre@control");
     control.message = "ext/pcre@control: 0 of 165 differ".into();
     store.record(std::slice::from_ref(&control)).unwrap();
-    let (ok, md, _) = status(&root, &["--section", "phpt"]);
-    assert!(ok);
+    let md = status(&root, &["--section", "phpt"]).ok();
     assert!(
         md.lines().any(|l| l.starts_with("| ext/pcre | skip |")),
         "a lone row stays: {md}"
@@ -486,8 +455,7 @@ fn the_settled_rows_of_a_section_fold_into_one_line_that_does_not_grow() {
     record("budget", "php_syntax", Status::Pass, &[("lines", spare)]);
     record("budget", "php_heap", Status::Pass, &[("lines", near)]);
     record("budget", "php_unit", Status::Fail, &[("lines", 1)]);
-    let (ok, md, err) = status(&root, &["--section", "budget"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "budget"]).ok();
     assert!(
         !md.contains("| php_syntax |"),
         "a pass with room is counted: {md}"
@@ -506,19 +474,18 @@ fn the_settled_rows_of_a_section_fold_into_one_line_that_does_not_grow() {
             && line.ends_with("`cargo xtask status --section budget --uncut`."),
         "{line}"
     );
-    let (ok, whole, _) = status(&root, &["--section", "budget", "--uncut"]);
+    let whole = status(&root, &["--section", "budget", "--uncut"]).ok();
     assert!(
-        ok && whole.contains("| php_syntax |") && !whole.contains("--uncut"),
+        whole.contains("| php_syntax |") && !whole.contains("--uncut"),
         "{whole}"
     );
-    let (ok, json, _) = status(&root, &["--section", "budget", "--format", "json"]);
-    assert!(ok && json.contains("\"php_syntax\""), "{json}");
+    let json = status(&root, &["--section", "budget", "--format", "json"]).ok();
+    assert!(json.contains("\"php_syntax\""), "{json}");
 
     record("witness", "ext/broken", Status::Fail, &[("failed", 1)]);
     record("witness", "ext/missing", Status::Skip, &[]);
     record("witness", "ext/a0", Status::Pass, &[("passed", 3)]);
-    let (ok, before, _) = status(&root, &["--section", "witness"]);
-    assert!(ok, "{before}");
+    let before = status(&root, &["--section", "witness"]).ok();
     for n in 1..=50 {
         record(
             "witness",
@@ -527,8 +494,7 @@ fn the_settled_rows_of_a_section_fold_into_one_line_that_does_not_grow() {
             &[("passed", 3)],
         );
     }
-    let (ok, after, _) = status(&root, &["--section", "witness"]);
-    assert!(ok);
+    let after = status(&root, &["--section", "witness"]).ok();
     assert_eq!(
         before.replace("1 more crates", "51 more crates"),
         after,
@@ -539,7 +505,7 @@ fn the_settled_rows_of_a_section_fold_into_one_line_that_does_not_grow() {
         "{after}"
     );
     assert!(!after.contains("| ext/a7 |"), "{after}");
-    let (_, uncut, _) = status(&root, &["--section", "witness", "--uncut"]);
+    let uncut = status(&root, &["--section", "witness", "--uncut"]).stdout;
     assert_eq!(
         uncut.lines().filter(|l| l.starts_with("| ext/a")).count(),
         51
@@ -547,8 +513,7 @@ fn the_settled_rows_of_a_section_fold_into_one_line_that_does_not_grow() {
 
     record("witness", "ext/broken", Status::Pass, &[("passed", 1)]);
     record("witness", "ext/missing", Status::Pass, &[("passed", 1)]);
-    let (ok, settled, _) = status(&root, &["--section", "witness"]);
-    assert!(ok);
+    let settled = status(&root, &["--section", "witness"]).ok();
     assert_eq!(
         settled, "53 crates pass; every row: `cargo xtask status --section witness --uncut`.\n",
         "a section with every row settled is the line alone"
@@ -558,8 +523,7 @@ fn the_settled_rows_of_a_section_fold_into_one_line_that_does_not_grow() {
     record("phpt", "ext/date@against", Status::Fail, &[("lost", 1)]);
     record("phpt", "ext/spl", Status::Pass, &[("passed", 9)]);
     record("phpt", "ext/spl@against", Status::Pass, &[("held", 9)]);
-    let (ok, md, err) = status(&root, &["--section", "phpt"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "phpt"]).ok();
     assert!(
         md.contains("| ext/date | pass |") && md.contains("| fail lost=1 |"),
         "a pass below its target is a row: {md}"
@@ -571,28 +535,17 @@ fn the_settled_rows_of_a_section_fold_into_one_line_that_does_not_grow() {
 /// `status` with the two variables of the pin as the test wants them,
 /// set or removed, since the process running the tests may carry either
 /// (CI sets both for the suite).
-fn status_with_pin(
-    root: &Path,
-    args: &[&str],
-    tree: Option<&Path>,
-    promise: Option<&str>,
-) -> (bool, String, String) {
-    let mut command = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")));
-    command.arg("--root").arg(root).arg("status").args(args);
-    match tree {
-        Some(tree) => command.env(TREE_VARIABLE, tree),
-        None => command.env_remove(TREE_VARIABLE),
+fn status_with_pin(root: &Path, args: &[&str], tree: Option<&Path>, promise: Option<&str>) -> Ran {
+    let run = Run::at(root).args(["status"]).args(args);
+    let run = match tree {
+        Some(tree) => run.env(TREE_VARIABLE, tree),
+        None => run.env_remove(TREE_VARIABLE),
     };
     match promise {
-        Some(promise) => command.env(PROMISE_VARIABLE, promise),
-        None => command.env_remove(PROMISE_VARIABLE),
-    };
-    let out = command.output().unwrap();
-    (
-        out.status.success(),
-        String::from_utf8(out.stdout).unwrap(),
-        String::from_utf8(out.stderr).unwrap(),
-    )
+        Some(promise) => run.env(PROMISE_VARIABLE, promise),
+        None => run.env_remove(PROMISE_VARIABLE),
+    }
+    .go()
 }
 
 /// A scratch workspace whose pin's `[source].path` is `path`: the tracked
@@ -627,13 +580,13 @@ fn fixture_tree(name: &str) -> Tree {
 
 /// The `oracle` section as JSON, under the two variables as given.
 fn oracle_json(root: &Path, tree: Option<&Path>, promise: Option<&str>) -> serde_json::Value {
-    let (ok, json, err) = status_with_pin(
+    let json = status_with_pin(
         root,
         &["--section", "oracle", "--format", "json"],
         tree,
         promise,
-    );
-    assert!(ok, "{err}");
+    )
+    .ok();
     serde_json::from_str(&json).unwrap()
 }
 
@@ -646,9 +599,7 @@ fn oracle_finds_the_tree_the_variable_names_and_states_both_names() {
     let named = fixture_tree("named");
     let pinned = fixture_tree("named-pinned");
     let root = scratch_with_pin_path("oracle-named", &pinned);
-    let (ok, md, err) =
-        status_with_pin(&root, &["--section", "oracle"], Some(&named), Some("tree"));
-    assert!(ok, "{err}");
+    let md = status_with_pin(&root, &["--section", "oracle"], Some(&named), Some("tree")).ok();
     let named_text = named.display().to_string();
     assert!(
         md.contains(&format!("| tree | {TREE_VARIABLE} | {named_text} | set |")),
@@ -684,8 +635,7 @@ fn oracle_finds_the_tree_the_variable_names_and_states_both_names() {
 fn oracle_falls_back_to_the_pins_path_when_the_variable_is_unset() {
     let pinned = fixture_tree("pinned");
     let root = scratch_with_pin_path("oracle-pinned", &pinned);
-    let (ok, md, err) = status_with_pin(&root, &["--section", "oracle"], None, None);
-    assert!(ok, "{err}");
+    let md = status_with_pin(&root, &["--section", "oracle"], None, None).ok();
     assert!(
         md.contains(&format!("| tree | {TREE_VARIABLE} |  | unset |")),
         "{md}"
@@ -721,8 +671,7 @@ fn oracle_falls_back_to_the_pins_path_when_the_variable_is_unset() {
 fn oracle_names_both_places_when_the_tree_is_at_neither() {
     let nowhere = Path::new("/nowhere/pinned/php-src");
     let root = scratch_with_pin_path("oracle-absent", nowhere);
-    let (ok, md, err) = status_with_pin(&root, &["--section", "oracle"], None, None);
-    assert!(ok, "{err}");
+    let md = status_with_pin(&root, &["--section", "oracle"], None, None).ok();
     assert!(
         md.contains(&format!(
             "| pin |  | {} | not a directory |",
@@ -798,8 +747,7 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
         json["variants"].as_object().unwrap().len(),
         pinned_here.count()
     );
-    let (ok, md, err) = status_with_pin(&root, &["--section", "oracle"], None, None);
-    assert!(ok, "{err}");
+    let md = status_with_pin(&root, &["--section", "oracle"], None, None).ok();
     assert!(
         md.contains(&format!(
             "| binary |  | {path} | php {}, md5 {} |",
@@ -830,8 +778,7 @@ fn oracle_states_the_pins_tag_and_commit() {
     let json = oracle_json(&root, None, None);
     assert_eq!(json["pin"]["tag"], source.tag.as_str());
     assert_eq!(json["pin"]["commit"], source.commit.as_str());
-    let (ok, md, err) = status_with_pin(&root, &["--section", "oracle"], None, None);
-    assert!(ok, "{err}");
+    let md = status_with_pin(&root, &["--section", "oracle"], None, None).ok();
     assert!(
         md.contains(&format!("| tag |  | {} | the pin's |", source.tag)),
         "{md}"
@@ -852,8 +799,7 @@ fn oracle_states_the_pins_tag_and_commit() {
 fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
     let root = scratch("corpus");
     let source = Manifest::load(workspace()).unwrap().pin.source;
-    let (ok, json, err) = status(&root, &["--section", "corpus", "--format", "json"]);
-    assert!(ok, "{err}");
+    let json = status(&root, &["--section", "corpus", "--format", "json"]).ok();
     let corpus: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(corpus["tag"], source.tag.as_str());
     assert_eq!(corpus["commit"], source.commit.as_str());
@@ -919,11 +865,10 @@ fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
             "{krate} builds {binary}"
         );
     }
-    let (_, again, _) = status(&root, &["--section", "corpus", "--format", "json"]);
+    let again = status(&root, &["--section", "corpus", "--format", "json"]).stdout;
     assert_eq!(again, json, "the key is the patterns', not the call's");
 
-    let (ok, md, err) = status(&root, &["--section", "corpus"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "corpus"]).ok();
     assert!(md.contains(&format!("| key | {key} |")), "{md}");
     assert!(md.contains("/sapi/*/tests/"), "{md}");
     assert!(
@@ -946,8 +891,7 @@ fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
 #[test]
 fn a_section_that_has_no_renderer_yet_is_refused() {
     let root = scratch("unknown");
-    let (ok, _, err) = status(&root, &["--section", "gates"]);
-    assert!(!ok);
+    let err = status(&root, &["--section", "gates"]).failed();
     assert!(err.contains("gates"), "{err}");
 }
 
@@ -958,8 +902,9 @@ fn a_section_that_has_no_renderer_yet_is_refused() {
 fn the_local_sections_render_from_the_store_alone() {
     let root = scratch("local");
     for section in ["phpt", "witness", "mutants", "ticket", "permits", "bundle"] {
-        let (ok, md, err) = status(&root, &["--section", section]);
-        assert!(ok, "{section}: {err}");
+        let ran = status(&root, &["--section", section]);
+        assert_eq!(ran.code(), 0, "{section}: {ran}");
+        let md = ran.stdout;
         assert!(md.contains("no reading"), "{section}: {md}");
     }
 
@@ -970,8 +915,7 @@ fn the_local_sections_render_from_the_store_alone() {
     phpt.numbers.insert("failed".into(), 1.into());
     phpt.message = "Zend/tests: 1 of 10 failed".into();
     store.record(std::slice::from_ref(&phpt)).unwrap();
-    let (ok, md, _) = status(&root, &["--section", "phpt"]);
-    assert!(ok);
+    let md = status(&root, &["--section", "phpt"]).ok();
     assert!(
         md.contains("Zend/tests") && md.contains("failed=1") && md.contains("fail"),
         "{md}"
@@ -987,8 +931,7 @@ fn the_local_sections_render_from_the_store_alone() {
     ticket.session = "session-abc".into();
     ticket.message = "#28: 7 of 7 criteria ticked; closed by xtask ticket close at 905018f".into();
     store.record(std::slice::from_ref(&ticket)).unwrap();
-    let (ok, md, _) = status(&root, &["--section", "ticket"]);
-    assert!(ok, "{md}");
+    let md = status(&root, &["--section", "ticket"]).ok();
     let row = md
         .lines()
         .find(|l| l.contains("| 28 |"))
@@ -1005,8 +948,7 @@ fn the_local_sections_render_from_the_store_alone() {
     denial.message = "Edit seams.toml: Harness configuration ... by a person.".into();
     store.record(std::slice::from_ref(&denial)).unwrap();
     store.record(std::slice::from_ref(&denial)).unwrap();
-    let (ok, md, _) = status(&root, &["--section", "permits"]);
-    assert!(ok, "{md}");
+    let md = status(&root, &["--section", "permits"]).ok();
     let row = md.lines().find(|l| l.contains("harness.self")).unwrap();
     assert!(row.contains("| 2 |"), "two denials in the log: {row}");
     assert!(
@@ -1014,8 +956,7 @@ fn the_local_sections_render_from_the_store_alone() {
         "a rule that never fired says so: {md}"
     );
 
-    let (ok, json, _) = status(&root, &["--section", "permits", "--format", "json"]);
-    assert!(ok);
+    let json = status(&root, &["--section", "permits", "--format", "json"]).ok();
     let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
     let row = rows["rules"]
         .as_array()
@@ -1044,8 +985,7 @@ fn a_row_clips_its_message_and_leaves_zeros_out_and_the_json_has_them() {
     phpt.message = format!("ext/dom: 691 of 871 missed:\n{}", names.join(", "));
     store.record(std::slice::from_ref(&phpt)).unwrap();
 
-    let (ok, md, err) = status(&root, &["--section", "phpt"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "phpt"]).ok();
     let row = md.lines().find(|l| l.starts_with("| ext/dom |")).unwrap();
     let cells: Vec<&str> = row.trim_matches('|').split(" | ").collect();
     assert_eq!(cells[2], "failed=691", "{row}");
@@ -1060,8 +1000,7 @@ fn a_row_clips_its_message_and_leaves_zeros_out_and_the_json_has_them() {
         "{message}"
     );
 
-    let (ok, json, _) = status(&root, &["--section", "phpt", "--format", "json"]);
-    assert!(ok);
+    let json = status(&root, &["--section", "phpt", "--format", "json"]).ok();
     let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
     let reading = &rows[0]["reading"];
     assert_eq!(reading["message"], phpt.message.as_str());
@@ -1120,31 +1059,25 @@ fn tickets_counts_the_weeks_closes_in_the_main_worktrees_store_and_the_checkouts
         ])
         .unwrap();
 
-    let (ok, md, err) = status(&checkout, &["--section", "tickets"]);
-    assert!(ok, "{err}");
+    let md = status(&checkout, &["--section", "tickets"]).ok();
     assert_eq!(
         md,
         "the last 7 days: 3 closes, 1 of them withdrawals, opened 3 tickets, 1.00 per close\n"
     );
-    let (ok, json, err) = status(&checkout, &["--section", "tickets", "--format", "json"]);
-    assert!(ok, "{err}");
+    let json = status(&checkout, &["--section", "tickets", "--format", "json"]).ok();
     let json: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(json["closes"], 3);
     assert_eq!(json["withdrawn"], 1);
     assert_eq!(json["opens"], 3);
     assert_eq!(json["opens_per_close"], 1.0);
     // The main worktree reads its own store once, and has no withdrawal.
-    let (ok, md, err) = status(&main, &["--section", "tickets"]);
-    assert!(ok, "{err}");
+    let md = status(&main, &["--section", "tickets"]).ok();
     assert!(
         md.contains(": 2 closes, 0 of them withdrawals, opened 3 tickets"),
         "{md}"
     );
-    let (ok, _, err) = status(&main, &["--section", "tickets", "--tracked"]);
-    assert!(
-        !ok && err.contains("--tracked renders the tree alone"),
-        "{err}"
-    );
+    let err = status(&main, &["--section", "tickets", "--tracked"]).failed();
+    assert!(err.contains("--tracked renders the tree alone"), "{err}");
 }
 
 /// `git` is volatile: the log and the status of the working tree.
@@ -1153,8 +1086,7 @@ fn git_prints_the_log_and_the_status() {
     let root = scratch("git");
     Repo::init(&root).git(&["commit", "-q", "--allow-empty", "-m", "the first commit"]);
     std::fs::write(root.join("untracked.txt"), "x").unwrap();
-    let (ok, md, err) = status(&root, &["--section", "git"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "git"]).ok();
     assert!(md.contains("the first commit"), "{md}");
     assert!(md.contains("?? untracked.txt"), "{md}");
 }
@@ -1171,16 +1103,14 @@ fn git_cuts_the_status_at_twenty_paths_and_names_the_rest() {
         std::fs::write(root.join(format!("untracked-{i:02}.txt")), "x").unwrap();
     }
     // The scratch's own seams.toml, oracle.toml and docs/ are untracked too.
-    let (ok, md, err) = status(&root, &["--section", "git"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "git"]).ok();
     let paths = md.lines().filter(|l| l.starts_with("?? ")).count();
     assert_eq!(paths, 20, "{md}");
     assert!(
         md.contains("\n… and 23 more; git status --short\n```"),
         "{md}"
     );
-    let (ok, json, err) = status(&root, &["--section", "git", "--format", "json"]);
-    assert!(ok, "{err}");
+    let json = status(&root, &["--section", "git", "--format", "json"]).ok();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(value["status"].as_array().map(Vec::len), Some(21), "{json}");
     assert_eq!(value["status_omitted"], 23, "{json}");
@@ -1229,8 +1159,7 @@ fn phpt_takes_the_reading_at_the_track_tip_and_never_a_retired_branchs() {
         .unwrap();
     assert_eq!(track.land(&worktree).unwrap(), 2);
 
-    let (ok, json, err) = status(&root, &["--section", "phpt", "--format", "json"]);
-    assert!(ok, "{err}");
+    let json = status(&root, &["--section", "phpt", "--format", "json"]).ok();
     let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
     let rows = rows.as_array().unwrap();
     assert_eq!(
@@ -1241,11 +1170,8 @@ fn phpt_takes_the_reading_at_the_track_tip_and_never_a_retired_branchs() {
     assert_eq!(rows[0]["scope"], "ext/date");
     assert_eq!(rows[0]["reading"]["commit"], tip.as_str(), "{json}");
     assert_eq!(rows[0]["reading"]["numbers"]["passed"], 613, "{json}");
-    let (ok, md, _) = status(&root, &["--section", "phpt"]);
-    assert!(
-        ok && md.contains("passed=613") && !md.contains("ext/spl"),
-        "{md}"
-    );
+    let md = status(&root, &["--section", "phpt"]).ok();
+    assert!(md.contains("passed=613") && !md.contains("ext/spl"), "{md}");
 }
 
 /// `--every --log` renders every phpt reading of a log it is handed, one
@@ -1261,8 +1187,10 @@ fn every_phpt_reading_of_a_log_handed_in_is_one_versioned_line() {
     let expected = std::fs::read_to_string(fixture.join("expected.jsonl")).unwrap();
     let every = ["--section", "phpt", "--format", "jsonl", "--every", "--log"];
 
-    let (ok, lines, err) = status(&root, &[&every[..], &[log.to_str().unwrap()]].concat());
-    assert!(ok, "{err}");
+    let ran = status(&root, &[&every[..], &[log.to_str().unwrap()]].concat());
+    assert_eq!(ran.code(), 0, "{ran}");
+    let lines = ran.stdout;
+    let err = ran.stderr;
     assert_eq!(lines, expected);
     assert!(err.contains("1 line unreadable at 4"), "{err}");
     for line in lines.lines() {
@@ -1271,12 +1199,11 @@ fn every_phpt_reading_of_a_log_handed_in_is_one_versioned_line() {
     }
 
     let text = std::fs::read_to_string(&log).unwrap();
-    let (ok, piped, err) = status_with_stdin(&root, &[&every[..], &["-"]].concat(), &text);
-    assert!(ok, "{err}");
+    let piped = status_with_stdin(&root, &[&every[..], &["-"]].concat(), &text).ok();
     assert_eq!(piped, expected, "the standard input reads as the file does");
 
-    let (ok, _, err) = status(&root, &[&every[..], &["no-such-log.jsonl"]].concat());
-    assert!(!ok && err.contains("no-such-log.jsonl"), "{err}");
+    let err = status(&root, &[&every[..], &["no-such-log.jsonl"]].concat()).failed();
+    assert!(err.contains("no-such-log.jsonl"), "{err}");
 }
 
 /// `--every --log` renders every budget, api-check (`locks` by its other
@@ -1306,8 +1233,10 @@ fn every_budget_api_check_and_witness_reading_of_a_log_handed_in_is_one_versione
             "--log",
         ];
 
-        let (ok, lines, err) = status(&root, &[&every[..], &[log.to_str().unwrap()]].concat());
-        assert!(ok, "{section}: {err}");
+        let ran = status(&root, &[&every[..], &[log.to_str().unwrap()]].concat());
+        assert_eq!(ran.code(), 0, "{section}: {ran}");
+        let lines = ran.stdout;
+        let err = ran.stderr;
         assert_eq!(lines, expected, "{section}");
         assert!(
             err.contains(&format!("1 line unreadable at {torn}")),
@@ -1323,8 +1252,9 @@ fn every_budget_api_check_and_witness_reading_of_a_log_handed_in_is_one_versione
         }
 
         let text = std::fs::read_to_string(&log).unwrap();
-        let (ok, piped, err) = status_with_stdin(&root, &[&every[..], &["-"]].concat(), &text);
-        assert!(ok, "{section}: {err}");
+        let ran = status_with_stdin(&root, &[&every[..], &["-"]].concat(), &text);
+        assert_eq!(ran.code(), 0, "{section}: {ran}");
+        let piped = ran.stdout;
         assert_eq!(
             piped, expected,
             "{section}: the standard input reads as the file does"
@@ -1356,11 +1286,11 @@ fn every_renders_the_stores_log_and_the_section_without_it_is_unchanged() {
         ])
         .unwrap();
 
-    let (ok, lines, err) = status(
+    let lines = status(
         &root,
         &["--section", "phpt", "--format", "jsonl", "--every"],
-    );
-    assert!(ok, "{err}");
+    )
+    .ok();
     let passed: Vec<i64> = lines
         .lines()
         .map(|l| {
@@ -1371,8 +1301,7 @@ fn every_renders_the_stores_log_and_the_section_without_it_is_unchanged() {
         .collect();
     assert_eq!(passed, [400, 613], "{lines}");
 
-    let (ok, json, err) = status(&root, &["--section", "phpt", "--format", "json"]);
-    assert!(ok, "{err}");
+    let json = status(&root, &["--section", "phpt", "--format", "json"]).ok();
     let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(rows.as_array().unwrap().len(), 1, "{json}");
     assert_eq!(rows[0]["reading"]["numbers"]["passed"], 613, "{json}");
@@ -1386,8 +1315,8 @@ fn every_renders_the_stores_log_and_the_section_without_it_is_unchanged() {
         ),
         (&["--section", "phpt", "--log", "-"][..], "--every"),
     ] {
-        let (ok, _, err) = status(&root, args);
-        assert!(!ok && err.contains(says), "{args:?}: {err}");
+        let err = status(&root, args).failed();
+        assert!(err.contains(says), "{args:?}: {err}");
     }
 }
 
@@ -1452,13 +1381,13 @@ fn parity_store(name: &str, pin: &Path) -> Tree {
 #[test]
 fn parity_states_met_of_target_per_suite_and_in_total_and_names_the_suites_outside() {
     let root = parity_store("parity", Path::new(NO_TREE));
-    let (ok, json, err) = status_with_pin(
+    let json = status_with_pin(
         &root,
         &["--section", "parity", "--format", "json"],
         None,
         None,
-    );
-    assert!(ok, "{err}");
+    )
+    .ok();
     let parity: serde_json::Value = serde_json::from_str(&json).unwrap();
     let suite = |name: &str| {
         parity["suites"]
@@ -1565,13 +1494,13 @@ fn parity_names_every_unbuilt_suite_of_the_pinned_tree() {
         std::fs::write(tree.join(under).join(file), "").unwrap();
     }
     let root = parity_store("parity-tree", &tree);
-    let (ok, json, err) = status_with_pin(
+    let json = status_with_pin(
         &root,
         &["--section", "parity", "--format", "json"],
         None,
         None,
-    );
-    assert!(ok, "{err}");
+    )
+    .ok();
     let parity: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(parity["unbuilt_from"], "tree", "{json}");
     let unbuilt: Vec<&str> = parity["outside"]
@@ -1593,8 +1522,7 @@ fn parity_names_every_unbuilt_suite_of_the_pinned_tree() {
         "a suite ruled out stays under its ruling: {json}"
     );
 
-    let (ok, md, err) = status_with_pin(&root, &["--section", "parity"], None, None);
-    assert!(ok, "{err}");
+    let md = status_with_pin(&root, &["--section", "parity"], None, None).ok();
     assert!(
         md.contains(
             "Outside parity, not built by the pinned php: ext/enchant, ext/oci8, sapi/pi3web."
@@ -1608,8 +1536,7 @@ fn parity_names_every_unbuilt_suite_of_the_pinned_tree() {
 #[test]
 fn parity_renders_as_markdown_for_a_session() {
     let root = parity_store("parity-md", Path::new(NO_TREE));
-    let (ok, md, err) = status_with_pin(&root, &["--section", "parity"], None, None);
-    assert!(ok, "{err}");
+    let md = status_with_pin(&root, &["--section", "parity"], None, None).ok();
     assert!(
         md.contains("| ext/ctype | held | 47 | 48 | 10 | 2 | pass |"),
         "{md}"
@@ -1650,8 +1577,7 @@ Read CONTEXT.md first.
     let local = root.join(".claude/harness.local.md");
     assert!(!local.exists());
 
-    let (ok, text, err) = status(&root, &["--session"]);
-    assert!(ok, "{err}");
+    let text = status(&root, &["--session"]).ok();
     assert!(
         text.starts_with(
             "# The map
@@ -1686,8 +1612,7 @@ Read CONTEXT.md first.
         "# Local\n\n<!-- computed exec cmd=\"x\" volatile name=budget -->\n| crate |\n<!-- /computed in=a out=b -->\n",
     )
     .unwrap();
-    let (ok, text, _) = status(&root, &["--session"]);
-    assert!(ok);
+    let text = status(&root, &["--session"]).ok();
     assert!(
         text.contains(
             "# The map
@@ -1701,23 +1626,26 @@ Read CONTEXT.md first.
     // the map as the file is, the facts with the note that they are
     // unrendered; the Markdown is the two joined.
     std::fs::write(&local, "# Local\n\n<!-- /computed -->\n").unwrap();
-    let (ok, json, err) = status(&root, &["--session", "--format", "json"]);
-    assert!(ok, "{err}");
+    let json = status(&root, &["--session", "--format", "json"]).ok();
     let blocks: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(blocks["map"], "# The map\n\nRead CONTEXT.md first.\n");
     let facts = blocks["facts"].as_str().unwrap();
     assert!(facts.starts_with("# Local\n"), "{facts}");
     assert!(facts.contains("unrendered"), "{facts}");
-    let (_, text, _) = status(&root, &["--session"]);
+    let text = status(&root, &["--session"]).stdout;
     assert_eq!(
         text,
         format!("{}\n{facts}", blocks["map"].as_str().unwrap())
     );
 
-    let (ok, _, err) = status(&root, &["--session", "--section", "rules"]);
-    assert!(!ok, "one of --section and --session: {err}");
-    let (ok, _, _) = status(&root, &[]);
-    assert!(!ok, "one of --section and --session is required");
+    let ran = status(&root, &["--session", "--section", "rules"]);
+    assert_ne!(ran.code(), 0, "one of --section and --session: {ran}");
+    let ran = status(&root, &[]);
+    assert_ne!(
+        ran.code(),
+        0,
+        "one of --section and --session is required: {ran}"
+    );
 }
 
 /// Three denials of one rule across two sessions: the rule's row counts
@@ -1736,8 +1664,7 @@ fn permits_counts_denials_per_session_and_in_total() {
     denial.session = "9a8b7c6d-0000-4000-8000-000000000000".into();
     store.record(std::slice::from_ref(&denial)).unwrap();
 
-    let (ok, md, err) = status(&root, &["--section", "permits"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "permits"]).ok();
     let row = md.lines().find(|l| l.contains("harness.self")).unwrap();
     assert!(row.contains("| 3 |"), "three denials in total: {row}");
     assert!(
@@ -1745,8 +1672,7 @@ fn permits_counts_denials_per_session_and_in_total() {
         "per session, the newest first: {row}"
     );
 
-    let (ok, json, _) = status(&root, &["--section", "permits", "--format", "json"]);
-    assert!(ok);
+    let json = status(&root, &["--section", "permits", "--format", "json"]).ok();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     let row = value["rules"]
         .as_array()
@@ -1788,8 +1714,7 @@ fn the_sessions_cell_of_permits_does_not_grow_as_sessions_are_added() {
     for n in 1..=5 {
         deny(n);
     }
-    let (ok, md, err) = status(&root, &["--section", "permits"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "permits"]).ok();
     let before = cell(&md);
     assert_eq!(
         before, "00000005=1 00000004=1 00000003=1 +2 more",
@@ -1798,20 +1723,17 @@ fn the_sessions_cell_of_permits_does_not_grow_as_sessions_are_added() {
     for n in 6..=55 {
         deny(n);
     }
-    let (ok, md, _) = status(&root, &["--section", "permits"]);
-    assert!(ok);
+    let md = status(&root, &["--section", "permits"]).ok();
     let after = cell(&md);
     assert_eq!(after, "00000037=1 00000036=1 00000035=1 +52 more");
     assert_eq!(before.len() + 1, after.len(), "one digit more: {after}");
 
-    let (ok, whole, _) = status(&root, &["--section", "permits", "--uncut"]);
-    assert!(ok);
+    let whole = status(&root, &["--section", "permits", "--uncut"]).ok();
     let whole = cell(&whole);
     assert_eq!(whole.split(' ').count(), 55, "{whole}");
     assert!(!whole.contains("more"), "{whole}");
 
-    let (ok, json, _) = status(&root, &["--section", "permits", "--format", "json"]);
-    assert!(ok);
+    let json = status(&root, &["--section", "permits", "--format", "json"]).ok();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     let row = value["rules"]
         .as_array()
@@ -1855,8 +1777,7 @@ fn permits_separates_the_calls_denied_from_the_calls_handed_to_the_next_candidat
     unjudged.session = session.into();
     store.record(std::slice::from_ref(&unjudged)).unwrap();
 
-    let (ok, json, err) = status(&root, &["--section", "permits", "--format", "json"]);
-    assert!(ok, "{err}");
+    let json = status(&root, &["--section", "permits", "--format", "json"]).ok();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     let row = |id: &str| {
         value["rules"]
@@ -1875,8 +1796,7 @@ fn permits_separates_the_calls_denied_from_the_calls_handed_to_the_next_candidat
     assert_eq!(walked_past["handed_on"], 0, "{walked_past}");
     row("computed.region-body");
 
-    let (ok, md, err) = status(&root, &["--section", "permits"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "permits"]).ok();
     assert!(
         md.contains("| denials | handed on |"),
         "the two are two columns:\n{md}"
@@ -1911,8 +1831,7 @@ fn permits_carries_a_row_for_the_proposed_git_pathspec_rule() {
     denial.session = "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11".into();
     store.record(std::slice::from_ref(&denial)).unwrap();
 
-    let (ok, md, err) = status(&root, &["--section", "permits"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "permits"]).ok();
     let row = md
         .lines()
         .find(|l| l.contains("git.pathspec"))
@@ -1937,15 +1856,13 @@ fn permits_renders_the_bench_reading_as_before() {
         .record_measurement(std::slice::from_ref(&bench))
         .unwrap();
 
-    let (ok, md, err) = status(&root, &["--section", "permits"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "permits"]).ok();
     let row = md
         .lines()
         .find(|l| l.starts_with("| permit |"))
         .unwrap_or_else(|| panic!("no line for permit:\n{md}"));
     assert!(row.contains("| 1 | 1 |"), "one reading, one failure: {row}");
-    let (ok, json, _) = status(&root, &["--section", "permits", "--format", "json"]);
-    assert!(ok);
+    let json = status(&root, &["--section", "permits", "--format", "json"]).ok();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     let permit = value["instruments"]
         .as_array()
@@ -2003,14 +1920,12 @@ fn permits_lists_the_instruments_and_the_candidates_for_silent() {
     old.status = Status::Fail;
     store.record(std::slice::from_ref(&old)).unwrap();
 
-    let (ok, md, err) = status(&root, &["--section", "permits"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "permits"]).ok();
     assert!(
         !md.contains(" silent |") && md.contains("silent_days"),
         "no window in the manifest: no silent column, and the key is named: {md}"
     );
-    let (ok, json, _) = status(&root, &["--section", "permits", "--format", "json"]);
-    assert!(ok);
+    let json = status(&root, &["--section", "permits", "--format", "json"]).ok();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(value["instruments"][0]["silent"], serde_json::Value::Null);
 
@@ -2019,8 +1934,7 @@ fn permits_lists_the_instruments_and_the_candidates_for_silent() {
         format!("{manifest}\n[telemetry]\nsilent_days = 14\n"),
     )
     .unwrap();
-    let (ok, md, err) = status(&root, &["--section", "permits"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "permits"]).ok();
     let row = |name: &str| {
         md.lines()
             .find(|l| l.starts_with(&format!("| {name} |")))
@@ -2037,8 +1951,7 @@ fn permits_lists_the_instruments_and_the_candidates_for_silent() {
         row("clippy")
     );
 
-    let (ok, json, _) = status(&root, &["--section", "permits", "--format", "json"]);
-    assert!(ok);
+    let json = status(&root, &["--section", "permits", "--format", "json"]).ok();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     let instruments = value["instruments"].as_array().unwrap();
     let of = |name: &str| {
@@ -2061,10 +1974,10 @@ fn permits_lists_the_instruments_and_the_candidates_for_silent() {
 #[test]
 fn the_week_section_and_its_row_are_refused() {
     let root = scratch("week");
-    let (ok, _, err) = status(&root, &["--section", "week"]);
-    assert!(!ok && err.contains("invalid value 'week'"), "{err}");
-    let (ok, _, err) = status(&root, &["--section", "rules", "--week", "1"]);
-    assert!(!ok && err.contains("unexpected argument '--week'"), "{err}");
+    let err = status(&root, &["--section", "week"]).failed();
+    assert!(err.contains("invalid value 'week'"), "{err}");
+    let err = status(&root, &["--section", "rules", "--week", "1"]).failed();
+    assert!(err.contains("unexpected argument '--week'"), "{err}");
     let text = format!(
         "{}\n[[week]]\ndays = \"3-7\"\n",
         std::fs::read_to_string(root.join("seams.toml")).unwrap()
@@ -2093,8 +2006,7 @@ fn permits_marks_this_session_and_the_session_block_carries_it() {
     store.record(std::slice::from_ref(&denial)).unwrap();
 
     let this = "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11";
-    let (ok, md, err) = status(&root, &["--section", "permits", "--session-id", this]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "permits", "--session-id", this]).ok();
     let row = md.lines().find(|l| l.contains("harness.self")).unwrap();
     assert!(
         row.contains("| 3 | 0 | 1 |"),
@@ -2102,14 +2014,14 @@ fn permits_marks_this_session_and_the_session_block_carries_it() {
     );
     let row = md.lines().find(|l| l.contains("ext.no-locks")).unwrap();
     assert!(row.contains("| 0 | 0 | 0 |"), "{row}");
-    let (_, md, _) = status(&root, &["--section", "permits"]);
+    let md = status(&root, &["--section", "permits"]).stdout;
     let row = md.lines().find(|l| l.contains("harness.self")).unwrap();
     assert!(
         row.contains("| 3 | 0 |  |"),
         "no session named, no count: {row}"
     );
 
-    let (ok, json, _) = status(
+    let json = status(
         &root,
         &[
             "--section",
@@ -2119,8 +2031,8 @@ fn permits_marks_this_session_and_the_session_block_carries_it() {
             "--format",
             "json",
         ],
-    );
-    assert!(ok);
+    )
+    .ok();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     let row = value["rules"]
         .as_array()
@@ -2134,8 +2046,7 @@ fn permits_marks_this_session_and_the_session_block_carries_it() {
     let head = format!(
         r#"{{"session_id":"{this}","transcript_path":"x","cwd":"x","hook_event_name":"SessionStart","source":"resume"}}"#
     );
-    let (ok, text, err) = status_with_stdin(&root, &["--session"], &head);
-    assert!(ok, "{err}");
+    let text = status_with_stdin(&root, &["--session"], &head).ok();
     assert!(text.starts_with("# The map\n"), "{text}");
     assert!(text.contains("## permits this session"), "{text}");
     let row = text.lines().find(|l| l.contains("harness.self")).unwrap();
@@ -2147,8 +2058,7 @@ fn permits_marks_this_session_and_the_session_block_carries_it() {
         !text.lines().any(|l| l.contains("ext.no-locks")),
         "only the rules this session fired: {text}"
     );
-    let (ok, json, _) = status_with_stdin(&root, &["--session", "--format", "json"], &head);
-    assert!(ok);
+    let json = status_with_stdin(&root, &["--session", "--format", "json"], &head).ok();
     let blocks: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert!(
         blocks["facts"]
@@ -2163,14 +2073,18 @@ fn permits_marks_this_session_and_the_session_block_carries_it() {
     );
 
     let quiet = r#"{"session_id":"00000000-0000-4000-8000-000000000000","hook_event_name":"SessionStart","source":"startup"}"#;
-    let (ok, text, _) = status_with_stdin(&root, &["--session"], quiet);
-    assert!(ok);
+    let text = status_with_stdin(&root, &["--session"], quiet).ok();
     assert!(
         !text.contains("this session"),
         "a session with no denial adds nothing: {text}"
     );
-    let (ok, text, _) = status_with_stdin(&root, &["--session"], "not json");
-    assert!(ok, "a head that is not JSON is no session, not an error");
+    let ran = status_with_stdin(&root, &["--session"], "not json");
+    assert_eq!(
+        ran.code(),
+        0,
+        "a head that is not JSON is no session, not an error: {ran}"
+    );
+    let text = ran.stdout;
     assert!(!text.contains("this session"), "{text}");
 }
 
@@ -2187,8 +2101,7 @@ fn a_torn_log_line_is_named_and_the_rest_of_the_section_and_the_session_render()
     std::fs::create_dir_all(store.root().join("log")).unwrap();
     std::fs::copy(&fixture, store.root().join("log/permit.jsonl")).unwrap();
 
-    let (ok, md, err) = status(&root, &["--section", "permits"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "permits"]).ok();
     let row = md.lines().find(|l| l.contains("harness.self")).unwrap();
     assert!(
         row.contains("| 1 |"),
@@ -2201,15 +2114,13 @@ fn a_torn_log_line_is_named_and_the_rest_of_the_section_and_the_session_render()
         "the torn lines are named: {md}"
     );
 
-    let (ok, json, _) = status(&root, &["--section", "permits", "--format", "json"]);
-    assert!(ok);
+    let json = status(&root, &["--section", "permits", "--format", "json"]).ok();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(value["unreadable"], serde_json::json!([2, 3]));
 
     let this = "5e55100c-0000-4000-8000-000000000000";
     let head = format!(r#"{{"session_id":"{this}","hook_event_name":"SessionStart"}}"#);
-    let (ok, text, err) = status_with_stdin(&root, &["--session"], &head);
-    assert!(ok, "{err}");
+    let text = status_with_stdin(&root, &["--session"], &head).ok();
     assert!(text.starts_with("# The map\n"), "{text}");
     assert!(text.contains("## permits this session"), "{text}");
     assert!(text.contains("log: 2 lines unreadable at 2, 3."), "{text}");
@@ -2234,8 +2145,10 @@ fn an_unreadable_reading_file_degrades_only_its_own_row_and_is_named() {
     std::fs::create_dir_all(cut.parent().unwrap()).unwrap();
     std::fs::write(&cut, "instrument = \"unsafe-au").unwrap();
 
-    let (ok, md, err) = status(&root, &["--section", "budget", "--uncut"]);
-    assert!(ok, "{err}");
+    let ran = status(&root, &["--section", "budget", "--uncut"]);
+    assert_eq!(ran.code(), 0, "{ran}");
+    let md = ran.stdout;
+    let err = ran.stderr;
     let row = |name: &str| {
         md.lines()
             .find(|l| l.starts_with(&format!("| {name} |")))
@@ -2251,8 +2164,7 @@ fn an_unreadable_reading_file_degrades_only_its_own_row_and_is_named() {
         "{err}"
     );
 
-    let (ok, json, err) = status(&root, &["--section", "budget", "--format", "json"]);
-    assert!(ok, "{err}");
+    let json = status(&root, &["--section", "budget", "--format", "json"]).ok();
     let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert!(
         rows.as_array()
@@ -2261,7 +2173,6 @@ fn an_unreadable_reading_file_degrades_only_its_own_row_and_is_named() {
             .any(|r| r["crate"] == "php_heap")
     );
 
-    let (ok, md, err) = status(&root, &["--section", "divergence"]);
-    assert!(ok, "{err}");
+    let md = status(&root, &["--section", "divergence"]).ok();
     assert!(md.contains("total"), "{md}");
 }

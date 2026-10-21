@@ -20,8 +20,10 @@ use xtask::scratch::Tree;
 
 mod common {
     pub mod repo;
+    pub mod run;
 }
 use common::repo::Repo;
+use common::run::xtask;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -602,18 +604,12 @@ fn ci_files() -> Vec<(String, String)> {
 /// count.
 #[test]
 fn no_workflow_holds_a_directory_of_the_corpus() {
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(workspace())
-        .args(["status", "--section", "corpus", "--format", "json"])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let corpus: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let out = xtask(
+        workspace(),
+        &["status", "--section", "corpus", "--format", "json"],
+    )
+    .ok();
+    let corpus: serde_json::Value = serde_json::from_str(&out).unwrap();
     let firsts: Vec<String> = corpus["patterns"]
         .as_array()
         .unwrap()

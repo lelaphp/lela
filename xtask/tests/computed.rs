@@ -13,8 +13,10 @@ use xtask::scratch::Tree;
 
 mod common {
     pub mod repo;
+    pub mod run;
 }
 use common::repo::Repo;
+use common::run::{Ran, Run, xtask};
 
 /// A directory with one stand-in `computed` in it, which records the
 /// arguments and the directory it was called from, prints `said` on
@@ -40,22 +42,14 @@ fn stand_in(name: &str, said: &str, code: i32) -> Tree {
 }
 
 /// The subcommand against `dir/root`, with only `dir/bin` on `PATH`.
-fn regions(dir: &Path, files: &[&str]) -> (i32, String, String) {
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(dir.join("root"))
-        .arg("regions")
+fn regions(dir: &Path, files: &[&str]) -> Ran {
+    Run::at(&dir.join("root"))
+        .args(["regions"])
         .args(files)
         .env("PATH", dir.join("bin"))
         .env_remove("CARGO")
         .env_remove("CARGO_MANIFEST_DIR")
-        .output()
-        .unwrap();
-    (
-        out.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    )
+        .go()
 }
 
 /// Exit 1 with a `written` line is a file written: named on its own line
@@ -71,8 +65,10 @@ fn a_written_region_names_its_file_and_a_kept_one_does_not() {
          \x20   exit status 1\n",
         1,
     );
-    let (code, out, err) = regions(&dir, &["AGENTS.md", ".claude/harness.local.md"]);
-    assert_eq!(code, 0, "{out}{err}");
+    let ran = regions(&dir, &["AGENTS.md", ".claude/harness.local.md"]);
+    assert_eq!(ran.code(), 0, "{ran}");
+    let out = ran.stdout;
+    let err = ran.stderr;
     assert_eq!(
         out,
         "AGENTS.md: written\n.claude/harness.local.md: unchanged\n"
@@ -96,8 +92,7 @@ fn a_written_region_names_its_file_and_a_kept_one_does_not() {
 #[test]
 fn every_region_fresh_is_unchanged() {
     let dir = stand_in("fresh", "", 0);
-    let (code, out, _) = regions(&dir, &["AGENTS.md"]);
-    assert_eq!(code, 0, "{out}");
+    let out = regions(&dir, &["AGENTS.md"]).ok();
     assert_eq!(out, "AGENTS.md: unchanged\n");
 }
 
@@ -110,8 +105,10 @@ fn a_broken_marker_is_a_refusal_naming_the_line() {
         "AGENTS.md:79: unterminated region opened at line 62\n",
         2,
     );
-    let (code, out, err) = regions(&dir, &["AGENTS.md"]);
-    assert_eq!(code, 1, "{out}{err}");
+    let ran = regions(&dir, &["AGENTS.md"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    let out = ran.stdout;
+    let err = ran.stderr;
     assert_eq!(out, "");
     assert!(err.contains("a computed marker is broken"), "{err}");
     assert!(err.contains("AGENTS.md:79: unterminated"), "{err}");
@@ -122,8 +119,10 @@ fn a_broken_marker_is_a_refusal_naming_the_line() {
 fn no_computed_on_path_is_a_refusal_naming_the_install() {
     let dir = stand_in("missing", "", 0);
     fs::remove_file(dir.join("bin/computed")).unwrap();
-    let (code, out, err) = regions(&dir, &["AGENTS.md"]);
-    assert_eq!(code, 1, "{out}{err}");
+    let ran = regions(&dir, &["AGENTS.md"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    let out = ran.stdout;
+    let err = ran.stderr;
     assert_eq!(out, "");
     assert!(err.contains("computed did not run"), "{err}");
     assert!(err.contains("cargo install computed"), "{err}");
@@ -140,8 +139,10 @@ fn an_untrusted_region_is_a_refusal_carrying_the_trust_line() {
          ext/AGENTS.md:9 extensions tree stale written\n",
         1,
     );
-    let (code, out, err) = regions(&dir, &["AGENTS.md", "ext/AGENTS.md"]);
-    assert_eq!(code, 1, "{out}{err}");
+    let ran = regions(&dir, &["AGENTS.md", "ext/AGENTS.md"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    let out = ran.stdout;
+    let err = ran.stderr;
     assert_eq!(out, "AGENTS.md: unchanged\next/AGENTS.md: written\n");
     assert!(err.contains("untrusted"), "{err}");
     assert!(err.contains("a person runs, once"), "{err}");
@@ -155,8 +156,8 @@ fn an_untrusted_region_is_a_refusal_carrying_the_trust_line() {
 #[test]
 fn regions_is_a_subcommand_and_needs_a_file() {
     let dir = stand_in("usage", "", 0);
-    let (code, out, err) = regions(&dir, &[]);
-    assert_eq!(code, 2, "{out}{err}");
+    let ran = regions(&dir, &[]);
+    assert_eq!(ran.code(), 2, "{ran}");
     let help = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--help")
         .output()
@@ -205,25 +206,15 @@ fn laid(name: &str) -> (Tree, String) {
 #[test]
 fn staged_refuses_a_region_that_would_carry_an_unstaged_change() {
     let (dir, rendered) = laid("computed-staged");
-    let staged = || {
-        let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-            .arg("--root")
-            .arg(&*dir)
-            .args(["regions", "--staged", "MAP.md"])
-            .output()
-            .unwrap();
-        (
-            out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
-        )
-    };
+    let staged = || xtask(&dir, &["regions", "--staged", "MAP.md"]);
 
     // The lock changed in the working tree alone, beside a staged change.
     fs::write(dir.join("x.lock"), "two\n").unwrap();
     fs::write(dir.join("other.txt"), "b\n").unwrap();
     Repo::at(&dir).git(&["add", "--", "other.txt"]);
-    let (code, err) = staged();
-    assert_eq!(code, 1, "{err}");
+    let ran = staged();
+    assert_eq!(ran.code(), 1, "{ran}");
+    let err = ran.stderr;
     assert!(err.contains("does not stage"), "{err}");
     assert!(err.contains("MAP.md:3 lock reads x.lock"), "{err}");
     assert!(
@@ -236,15 +227,16 @@ fn staged_refuses_a_region_that_would_carry_an_unstaged_change() {
     Repo::at(&dir).git(&["add", "--", "x.lock"]);
     fs::create_dir_all(dir.join("d/b")).unwrap();
     fs::write(dir.join("d/b/f"), "").unwrap();
-    let (code, err) = staged();
-    assert_eq!(code, 1, "{err}");
+    let ran = staged();
+    assert_eq!(ran.code(), 1, "{ran}");
+    let err = ran.stderr;
     assert!(err.contains("dirs reads d/b/"), "{err}");
     assert!(!err.contains("lock reads"), "x.lock is staged now: {err}");
     assert_eq!(fs::read_to_string(dir.join("MAP.md")).unwrap(), rendered);
 
     // Every path a region would read is staged: no refusal of this kind.
     Repo::at(&dir).git(&["add", "--", "d"]);
-    let (_, err) = staged();
+    let err = staged().stderr;
     assert!(!err.contains("does not stage"), "{err}");
 }
 

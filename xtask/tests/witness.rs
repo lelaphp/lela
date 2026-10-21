@@ -28,9 +28,11 @@ use xtask::witness::{self, Accept, Ask, Scope};
 mod common {
     pub mod registry;
     pub mod repo;
+    pub mod run;
 }
 use common::registry::registry;
 use common::repo::{Repo, scratch_workspace};
+use common::run::xtask;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -298,27 +300,22 @@ fn a_narrowed_run_writes_no_reading() {
         ),
     )
     .unwrap();
-    let xtask = |item: &str| {
-        Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-            .arg("--root")
-            .arg(root.path())
-            .args(["witness", "--crate", "ext/fixture", "--item", item])
-            .output()
-            .unwrap()
+    let narrowed = |item: &str| {
+        xtask(
+            &root,
+            &["witness", "--crate", "ext/fixture", "--item", item],
+        )
     };
-    let out = xtask("one");
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let ran = narrowed("one");
     assert!(
-        stdout.contains("witness: a run narrowed to the fences on one writes no reading"),
-        "{stdout}{}",
-        String::from_utf8_lossy(&out.stderr)
+        ran.stdout
+            .contains("witness: a run narrowed to the fences on one writes no reading"),
+        "{ran}"
     );
     let store = Store::of_workspace(root.path());
     assert!(store.read("witness", "ext/fixture").unwrap().is_none());
 
-    let out = xtask("nope");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = narrowed("nope").failed();
     assert!(stderr.contains("no fence stands on nope"), "{stderr}");
     assert!(store.read("witness", "ext/fixture").unwrap().is_none());
 }
@@ -1482,18 +1479,9 @@ fn a_witness_that_kills_its_server_fails_alone_and_the_next_is_served() {
     for file in ["ext/pcre/Cargo.toml", "ext/pcre/src/lib.rs"] {
         fs::copy(fixture.join(file), root.join(file)).unwrap();
     }
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(root.path())
-        .args(["witness", "--crate", "ext/pcre"])
-        .output()
-        .unwrap();
-    let said = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(!out.status.success(), "{said}");
+    let ran = xtask(&root, &["witness", "--crate", "ext/pcre"]);
+    assert_ne!(ran.code(), 0, "{ran}");
+    let said = ran.stdout + &ran.stderr;
     let reading = Store::of_workspace(root.path())
         .read("witness", "ext/pcre")
         .unwrap()

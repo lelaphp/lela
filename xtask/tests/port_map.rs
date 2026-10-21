@@ -141,7 +141,9 @@ fn the_fixture_fails_the_instrument_as_the_run_reads_it_and_the_exit_says_so() {
         root.join("crates/php_ext/api.lock"),
     )
     .unwrap();
-    let err = xtask(&root, &["port-map"]).failed();
+    let ran = xtask(&root, &["port-map"]);
+    assert_ne!(ran.code(), 0, "the unmatched row is a failure: {ran}");
+    let err = ran.stderr;
     assert!(err.contains("1 of 1 readings fail"), "{err}");
     assert_eq!(last(&root).status, Status::Fail);
 }
@@ -153,7 +155,9 @@ fn the_fixture_fails_the_instrument_as_the_run_reads_it_and_the_exit_says_so() {
 fn a_tree_that_is_no_mahout_tree_is_a_skip_and_not_a_pass() {
     let root = scratch("absent");
     let absent = root.join("no-such-tree");
-    let out = xtask(&root, &["port-map", "--tree", absent.to_str().unwrap()]).ok();
+    let ran = xtask(&root, &["port-map", "--tree", absent.to_str().unwrap()]);
+    assert_eq!(ran.code(), 0, "a skip owes no failing exit: {ran}");
+    let out = ran.stdout;
     let reading = last(&root);
     assert_eq!(reading.status, Status::Skip, "{reading:?}");
     assert!(

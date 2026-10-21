@@ -149,8 +149,8 @@ fn a_thing_found_and_not_done_is_a_ticket_and_the_words_that_hide_it_fail() {
 fn the_instrument_writes_a_reading_per_crate_with_instrument_vocab() {
     let root = scratch("reading", "crates/php_ext", &fixture("vocab.avoid"));
     let ran = xtask(&root, &["vocab"]);
+    assert_ne!(ran.code(), 0, "the fixture must fail: {ran}");
     assert!(ran.stdout.contains("Serve"), "{ran}");
-    ran.failed();
 
     let store = Store::of_workspace(&root);
     let reading = store.read("vocab", "php_ext").unwrap().unwrap();

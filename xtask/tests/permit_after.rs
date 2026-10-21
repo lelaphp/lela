@@ -9,7 +9,7 @@
 //! checkout's.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use xtask::divergence::Registry;
 use xtask::done;
@@ -20,8 +20,10 @@ use xtask::scratch::Tree;
 
 mod common {
     pub mod repo;
+    pub mod run;
 }
 use common::repo::scratch_workspace;
+use common::run::{Ran, Run};
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -48,24 +50,8 @@ fn stdin(event: &str, session: &str, id: &str, cwd: &Path, command: &str) -> Str
 }
 
 /// `xtask --root <root> permit <args>` with `input` on stdin.
-fn permit(root: &Path, input: &str, args: &[&str]) -> (i32, String, String) {
-    let mut child = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(root)
-        .arg("permit")
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    std::io::Write::write_all(&mut child.stdin.take().unwrap(), input.as_bytes()).unwrap();
-    let out = child.wait_with_output().unwrap();
-    (
-        out.status.code().unwrap(),
-        String::from_utf8(out.stdout).unwrap(),
-        String::from_utf8(out.stderr).unwrap(),
-    )
+fn permit(root: &Path, input: &str, args: &[&str]) -> Ran {
+    Run::at(root).args(["permit"]).args(args).stdin(input).go()
 }
 
 /// The call itself, as the `Bash` tool runs it, in `root`. A commit the
@@ -128,17 +114,18 @@ fn through_the_hooks_while(
     command: &str,
     meanwhile: impl FnOnce(),
 ) -> (String, String) {
-    let (code, _, err) = permit(root, &stdin("PreToolUse", SESSION, id, root, command), &[]);
-    assert_eq!(code, 0, "{err}");
+    permit(root, &stdin("PreToolUse", SESSION, id, root, command), &[]).ok();
     assert!(record(root, SESSION, id).is_file(), "the blobs were taken");
     meanwhile();
     shell(root, command);
-    let (code, out, err) = permit(
+    let ran = permit(
         root,
         &stdin("PostToolUse", SESSION, id, root, command),
         &["--after"],
     );
-    assert_eq!(code, 0, "{err}");
+    assert_eq!(ran.code(), 0, "{ran}");
+    let out = ran.stdout;
+    let err = ran.stderr;
     assert!(!record(root, SESSION, id).exists(), "the record is spent");
     (out, err)
 }
@@ -201,12 +188,12 @@ fn the_fixture_a_python_program_writing_the_registry_is_put_back_and_denied() {
     );
     let was = read(&root, "docs/divergence.toml");
 
-    let (code, _, err) = permit(
+    permit(
         &root,
         &stdin("PreToolUse", SESSION, id, &root, command),
         &[],
-    );
-    assert_eq!(code, 0, "{err}");
+    )
+    .ok();
     shell(&root, command);
     assert_ne!(
         read(&root, "docs/divergence.toml"),
@@ -215,8 +202,7 @@ fn the_fixture_a_python_program_writing_the_registry_is_put_back_and_denied() {
     );
     let mut after = probe.clone();
     after["cwd"] = root.to_str().unwrap().into();
-    let (code, out, err) = permit(&root, &after.to_string(), &["--after"]);
-    assert_eq!(code, 0, "{err}");
+    let out = permit(&root, &after.to_string(), &["--after"]).ok();
 
     assert_eq!(read(&root, "docs/divergence.toml"), was, "put back");
     assert_denied(&root, &out, "docs/divergence.toml", "never named");
@@ -247,24 +233,24 @@ fn a_call_that_exits_non_zero_is_settled_on_the_failure_event() {
         "toolu_failed",
         "echo '# then failed' >> oracle.toml; exit 1",
     );
-    let (code, _, err) = permit(
+    permit(
         &root,
         &stdin("PreToolUse", SESSION, id, &root, command),
         &[],
-    );
-    assert_eq!(code, 0, "{err}");
+    )
+    .ok();
     let ran = Command::new("sh")
         .args(["-c", command])
         .current_dir(&root)
         .status()
         .unwrap();
     assert!(!ran.success(), "the call fails");
-    let (code, out, err) = permit(
+    let out = permit(
         &root,
         &stdin("PostToolUseFailure", SESSION, id, &root, command),
         &["--after"],
-    );
-    assert_eq!(code, 0, "{err}");
+    )
+    .ok();
     assert!(!record(&root, SESSION, id).exists(), "the record is spent");
     assert_eq!(read(&root, "oracle.toml"), was, "put back");
     let hook: serde_json::Value =
@@ -557,12 +543,14 @@ fn a_call_with_no_record_is_left_as_it_stands() {
     let command = "echo '# unpaired' >> oracle.toml";
     shell(&root, command);
     let written = read(&root, "oracle.toml");
-    let (code, out, err) = permit(
+    let ran = permit(
         &root,
         &stdin("PostToolUse", SESSION, "toolu_never_seen", &root, command),
         &["--after"],
     );
-    assert_eq!(code, 0, "{err}");
+    assert_eq!(ran.code(), 0, "{ran}");
+    let out = ran.stdout;
+    let err = ran.stderr;
     assert_eq!(out.trim(), "");
     assert!(err.contains("nothing is put back"), "{err}");
     assert_eq!(read(&root, "oracle.toml"), written);
@@ -577,19 +565,20 @@ fn concurrent_sessions_keep_their_own_records() {
     let other = "9a8b7c6d-0000-4000-8000-000000000001";
     let command = "echo '# one' >> oracle.toml";
     for session in [SESSION, other] {
-        let (code, _, err) = permit(
+        permit(
             &root,
             &stdin("PreToolUse", session, "toolu_same", &root, command),
             &[],
-        );
-        assert_eq!(code, 0, "{err}");
+        )
+        .ok();
     }
     shell(&root, command);
-    let (_, out, _) = permit(
+    let out = permit(
         &root,
         &stdin("PostToolUse", other, "toolu_same", &root, command),
         &["--after"],
-    );
+    )
+    .stdout;
     assert!(out.contains("block"), "{out}");
     assert!(!record(&root, other, "toolu_same").exists());
     assert!(
@@ -648,7 +637,7 @@ fn a_write_the_person_approved_stands_and_one_that_differs_is_put_back() {
         &root,
         "echo x >> docs/divergence.toml",
     );
-    let (_, out, _) = permit(&root, &line, &[]);
+    let out = permit(&root, &line, &[]).stdout;
     assert!(
         out.contains("\"deny\"") && out.contains("harness.self-shell"),
         "{out}"
@@ -680,8 +669,7 @@ fn a_write_the_person_approved_stands_and_one_that_differs_is_put_back() {
         // approval's diff applies to the file as it stands, so
         // harness.self-shell's denial is lifted for both, and the write
         // is held to the diff after it.
-        let (code, before, err) = permit(&root, &hook("PreToolUse"), &[]);
-        assert_eq!(code, 0, "{err}");
+        let before = permit(&root, &hook("PreToolUse"), &[]).ok();
         assert!(!before.contains("\"deny\""), "{before}");
         assert!(
             before.contains("toolu_01AskFixtureApproval0001"),
@@ -702,8 +690,7 @@ fn a_write_the_person_approved_stands_and_one_that_differs_is_put_back() {
         };
         assert!(entries().is_empty(), "{:?}", entries());
         shell(&root, &command);
-        let (code, out, err) = permit(&root, &hook("PostToolUse"), &["--after"]);
-        assert_eq!(code, 0, "{err}");
+        let out = permit(&root, &hook("PostToolUse"), &["--after"]).ok();
         if stands {
             assert_eq!(read(&root, "docs/divergence.toml"), written);
             let hook: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
@@ -885,12 +872,12 @@ fn a_record_an_older_build_took_of_the_hook_s_checkout_is_not_compared() {
     let root = scratch("linked-older");
     let (_base, linked) = linked_worktree(&root);
     let command = format!("cd {} && touch docs/divergence.toml", linked.display());
-    let (code, _, err) = permit(
+    permit(
         &root,
         &stdin("PreToolUse", SESSION, "toolu_older", &root, &command),
         &[],
-    );
-    assert_eq!(code, 0, "{err}");
+    )
+    .ok();
     let file = record(&root, SESSION, "toolu_older");
     let mut taken: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
@@ -904,12 +891,12 @@ fn a_record_an_older_build_took_of_the_hook_s_checkout_is_not_compared() {
     );
     std::fs::write(root.join("docs/divergence.toml"), &merged).unwrap();
     shell(&root, &command);
-    let (code, out, err) = permit(
+    let out = permit(
         &root,
         &stdin("PostToolUse", SESSION, "toolu_older", &root, &command),
         &["--after"],
-    );
-    assert_eq!(code, 0, "{err}");
+    )
+    .ok();
     assert_eq!(read(&root, "docs/divergence.toml"), merged);
     assert!(!out.contains("divergence.toml"), "{out}");
 }
@@ -994,9 +981,7 @@ fn a_start_admitted_while_another_merge_stood_is_recorded_once_it_has_run() {
         } else {
             &[]
         };
-        let (code, out, err) = permit(&root, &input.to_string(), args);
-        assert_eq!(code, 0, "{err}");
-        out
+        permit(&root, &input.to_string(), args).ok()
     };
     let start = "git merge --no-ff --no-commit topic";
     std::fs::write(&marker, "0".repeat(40) + "\n").unwrap();
@@ -1036,21 +1021,20 @@ fn a_steer_call_that_lands_a_merges_union_stands_and_the_merge_commits_it() {
     let union = format!("{tracked}{}{}", row("head.toml"), row("merged.toml"));
 
     let call = |id: &str, command: &str| {
-        let (code, out, err) = permit(
+        let out = permit(
             &root,
             &stdin("PreToolUse", SESSION, id, &root, command),
             &[],
-        );
-        assert_eq!(code, 0, "{err}");
+        )
+        .ok();
         assert!(!out.contains("\"deny\""), "{command} is admitted: {out}");
         shell(&root, command);
-        let (code, out, err) = permit(
+        permit(
             &root,
             &stdin("PostToolUse", SESSION, id, &root, command),
             &["--after"],
-        );
-        assert_eq!(code, 0, "{err}");
-        out
+        )
+        .ok()
     };
     call("toolu_union_start", "git merge --no-commit merged || true");
     assert!(

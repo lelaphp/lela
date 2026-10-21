@@ -8,7 +8,6 @@
 //! reads it, not how it was measured.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use xtask::divergence::Registry;
 use xtask::done::Base;
@@ -19,8 +18,10 @@ use xtask::scratch::Tree;
 
 mod common {
     pub mod repo;
+    pub mod run;
 }
 use common::repo::Repo;
+use common::run::{Ran, Run, xtask};
 
 /// What condition 1 asks of `ext/pcre`, the crate most of these tests
 /// change: [`FRESH`] less `port-map`, which is asked of the crate
@@ -168,6 +169,11 @@ fn judge_since(root: &Path, base: Option<&str>) -> Verdict {
     .unwrap()
 }
 
+/// `done --hook` over `root` with `event` on stdin, as the Stop hook runs it.
+fn hook(root: &Path, event: &str) -> Ran {
+    Run::at(root).args(["done", "--hook"]).stdin(event).go()
+}
+
 /// A passing reading of `instrument` over `scope`, stamped through the
 /// constructor with the scope's tree now.
 fn fresh(root: &Path, instrument: &str, scope: &str) -> Reading {
@@ -270,32 +276,6 @@ fn keep_run(root: &Path, at: Option<&str>, scope: &str, verdict: &str) {
     std::fs::write(&file, run.to_string()).unwrap();
 }
 
-fn xtask(root: &Path, args: &[&str], stdin: Option<&str>) -> (i32, String, String) {
-    let mut child = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(root)
-        .args(args)
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
-        use std::io::Write;
-        pipe.write_all(text.as_bytes()).unwrap();
-    }
-    let out = child.wait_with_output().unwrap();
-    (
-        out.status.code().unwrap_or(-1),
-        String::from_utf8(out.stdout).unwrap(),
-        String::from_utf8(out.stderr).unwrap(),
-    )
-}
-
 // ---------------------------------------------------------------- 1, 2
 
 /// Over a diff in xtask, the harness's own sources, witness and phpt are
@@ -350,8 +330,10 @@ fn with_no_readings_every_instrument_of_the_touched_crate_is_unmet_and_the_exit_
     );
     assert!(verdict.notes.is_empty(), "{verdict:#?}");
 
-    let (code, out, err) = xtask(&root, &["done", "--base", "HEAD"], None);
-    assert_eq!(code, 1, "{out}{err}");
+    let ran = xtask(&root, &["done", "--base", "HEAD"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    let out = ran.stdout;
+    let err = ran.stderr;
     assert!(out.contains("unmet:"), "{out}");
     assert!(out.contains("- phpt: no run of ext/pcre is kept"), "{out}");
     assert!(
@@ -500,8 +482,9 @@ fn on_a_ticket_branch_a_bare_done_measures_since_its_merge_base_with_main() {
         ["xtask"],
         "main's own change is not this turn's: {verdict:#?}"
     );
-    let (code, out, err) = xtask(&root, &["done"], None);
-    assert_eq!(code, 1, "{out}{err}");
+    let ran = xtask(&root, &["done"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    let out = ran.stdout;
     assert!(
         out.contains(&format!("since main ({})", &cut[..7])),
         "{out}"
@@ -581,8 +564,9 @@ fn base_overrides_main() {
     assert_eq!(verdict.base.since, "HEAD");
     assert_eq!(verdict.base.commit, head);
     assert!(verdict.crates.is_empty(), "{verdict:#?}");
-    let (code, out, err) = xtask(&root, &["done", "--base", &cut], None);
-    assert_eq!(code, 1, "{out}{err}");
+    let ran = xtask(&root, &["done", "--base", &cut]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    let out = ran.stdout;
     assert!(out.contains(&format!("since {}", &cut[..7])), "{out}");
 }
 
@@ -591,12 +575,7 @@ fn base_overrides_main() {
 #[test]
 fn the_stop_hook_holds_a_turn_against_mains_base() {
     let (root, _) = on_a_ticket_branch("hook");
-    let (code, out, err) = xtask(
-        &root,
-        &["done", "--hook"],
-        Some("{\"session_id\":\"s\",\"stop_hook_active\":false}"),
-    );
-    assert_eq!(code, 0, "{out}{err}");
+    let out = hook(&root, "{\"session_id\":\"s\",\"stop_hook_active\":false}").ok();
     let block: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     let reason = block["reason"].as_str().unwrap();
     assert!(reason.contains("since main ("), "{reason}");
@@ -616,8 +595,10 @@ fn a_stale_build_judges_no_turn_and_hands_it_on() {
     let stale = std::fs::read_to_string(fixtures().join("stale/seams.toml")).unwrap();
     std::fs::write(root.join("seams.toml"), stale).unwrap();
     let stdin = "{\"session_id\":\"s\",\"stop_hook_active\":false}";
-    let (code, out, err) = xtask(&root, &["done", "--hook"], Some(stdin));
-    assert_eq!(code, 1, "{out}{err}");
+    let ran = hook(&root, stdin);
+    assert_eq!(ran.code(), 1, "{ran}");
+    let out = ran.stdout;
+    let err = ran.stderr;
     assert!(out.trim().is_empty(), "{out}");
     assert!(err.contains("seams.toml"), "{err}");
 }
@@ -628,8 +609,7 @@ fn an_unchanged_tree_is_done() {
     let verdict = judge(&root);
     assert!(verdict.met(), "{verdict:#?}");
     assert!(verdict.crates.is_empty());
-    let (code, out, _) = xtask(&root, &["done", "--base", "HEAD"], None);
-    assert_eq!(code, 0);
+    let out = xtask(&root, &["done", "--base", "HEAD"]).ok();
     assert!(out.contains("every condition of done is met"), "{out}");
 }
 
@@ -649,14 +629,14 @@ fn an_instrument_named_not_run_is_a_note_and_never_a_silent_pass() {
             met(&store, &root, instrument, &scope);
         }
     }
-    let (code, out, err) = xtask(&root, &["done", "--base", "HEAD"], None);
-    assert_eq!(code, 1, "{out}{err}");
+    let ran = xtask(&root, &["done", "--base", "HEAD"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    let out = ran.stdout;
     assert!(out.contains("- witness: no reading for ext/pcre"), "{out}");
 
     let mut args = vec!["done", "--base", "HEAD"];
     args.extend(ORACLE_JOB);
-    let (code, out, err) = xtask(&root, &args, None);
-    assert_eq!(code, 0, "{out}{err}");
+    let out = xtask(&root, &args).ok();
     assert!(
         out.contains("every condition of done is met over what ran; witness and crosscheck did not run in this run\n"),
         "{out}"
@@ -681,8 +661,9 @@ fn an_instrument_named_not_run_is_a_note_and_never_a_silent_pass() {
     failed.status = Status::Fail;
     failed.message = "1 fence failed".into();
     store.record(&[failed]).unwrap();
-    let (code, out, _) = xtask(&root, &args, None);
-    assert_eq!(code, 1, "{out}");
+    let ran = xtask(&root, &args);
+    assert_eq!(ran.code(), 1, "{ran}");
+    let out = ran.stdout;
     assert!(
         out.contains("- witness: ext/pcre fail: 1 fence failed"),
         "{out}"
@@ -692,13 +673,12 @@ fn an_instrument_named_not_run_is_a_note_and_never_a_silent_pass() {
     let unchanged = scratch("not-run-unchanged");
     let mut args = vec!["done", "--base", "HEAD"];
     args.extend(ORACLE_JOB);
-    let (code, out, _) = xtask(&unchanged, &args, None);
-    assert_eq!(code, 0, "{out}");
+    let out = xtask(&unchanged, &args).ok();
     assert!(out.contains("no touched crate is asked for one"), "{out}");
 
     // What `--not-run` names is an instrument condition 1 knows.
-    let (code, _, err) = xtask(&unchanged, &["done", "--not-run", "oracle"], None);
-    assert_eq!(code, 2, "{err}");
+    let ran = xtask(&unchanged, &["done", "--not-run", "oracle"]);
+    assert_eq!(ran.code(), 2, "{ran}");
 }
 
 #[test]
@@ -1308,8 +1288,9 @@ fn permit_over_the_diff_denies_a_lock_in_an_extension_and_notes_the_harness_file
         ],
         "{verdict:#?}"
     );
-    let (code, out, _) = xtask(&root, &["done", "--base", "HEAD"], None);
-    assert_eq!(code, 1);
+    let ran = xtask(&root, &["done", "--base", "HEAD"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    let out = ran.stdout;
     assert!(out.contains("notes:\n- seams.toml is in the diff"), "{out}");
 }
 
@@ -1356,8 +1337,7 @@ fn the_hook_blocks_with_the_list_on_the_recorded_stop_stdin_and_passes_when_acti
     let root = scratch("hook");
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
     let stop = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();
-    let (code, out, err) = xtask(&root, &["done", "--hook"], Some(&stop));
-    assert_eq!(code, 0, "{err}");
+    let out = hook(&root, &stop).ok();
     let block: serde_json::Value =
         serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
     let shape: serde_json::Value = serde_json::from_str(
@@ -1376,12 +1356,10 @@ fn the_hook_blocks_with_the_list_on_the_recorded_stop_stdin_and_passes_when_acti
     );
 
     let active = std::fs::read_to_string(fixtures().join("hooks/stop-active.json")).unwrap();
-    let (code, out, err) = xtask(&root, &["done", "--hook"], Some(&active));
-    assert_eq!(code, 0, "{err}");
+    let out = hook(&root, &active).ok();
     assert_eq!(out, "", "the second Stop passes");
 
-    let (code, out, _) = xtask(&root, &["done", "--hook"], Some("not json"));
-    assert_eq!(code, 0);
+    let out = hook(&root, "not json").ok();
     assert!(out.contains("\"decision\":\"block\""), "{out}");
     assert!(
         out.contains("could not read the Stop hook's stdin"),
@@ -1393,8 +1371,7 @@ fn the_hook_blocks_with_the_list_on_the_recorded_stop_stdin_and_passes_when_acti
 fn the_hook_prints_nothing_when_done_is_met() {
     let root = scratch("hook-met");
     let stop = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();
-    let (code, out, err) = xtask(&root, &["done", "--hook"], Some(&stop));
-    assert_eq!(code, 0, "{err}");
+    let out = hook(&root, &stop).ok();
     assert_eq!(out, "");
 }
 
@@ -1404,8 +1381,8 @@ fn the_hook_prints_nothing_when_done_is_met() {
 fn every_verdict_is_one_reading_of_done_over_the_workspace() {
     let root = scratch("reading");
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
-    let (code, _, _) = xtask(&root, &["done", "--base", "HEAD"], None);
-    assert_eq!(code, 1);
+    let ran = xtask(&root, &["done", "--base", "HEAD"]);
+    assert_eq!(ran.code(), 1, "{ran}");
     let store = Store::of_workspace(&root);
     let reading = store.read("done", "workspace").unwrap().unwrap();
     assert_eq!(reading.status, Status::Fail);
@@ -1421,7 +1398,7 @@ fn every_verdict_is_one_reading_of_done_over_the_workspace() {
     assert_eq!(reading.commit.len(), 7);
 
     let stop = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();
-    xtask(&root, &["done", "--hook"], Some(&stop));
+    hook(&root, &stop);
     assert_eq!(
         store.history("done").unwrap().readings.len(),
         2,
@@ -1721,8 +1698,7 @@ fn the_hook_holds_a_session_that_closed_a_ticket_to_its_reply_once() {
     let root = scratch("reply");
     with_the_stop_rule(&root);
     closed(&root, "28", SESSION);
-    let (code, out, err) = xtask(&root, &["done", "--hook"], Some(&stop_fixture("deny.json")));
-    assert_eq!(code, 0, "{err}");
+    let out = hook(&root, &stop_fixture("deny.json")).ok();
     let block: serde_json::Value =
         serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
     assert_eq!(block["decision"], "block");
@@ -1778,13 +1754,12 @@ fn the_hook_holds_a_session_that_closed_a_ticket_to_its_reply_once() {
     let active = stop_fixture("deny.json")
         .replace("\"stop_hook_active\": false", "\"stop_hook_active\": true");
     assert_ne!(active, stop_fixture("deny.json"));
-    let (code, out, err) = xtask(&root, &["done", "--hook"], Some(&active));
-    assert_eq!(code, 0, "{err}");
+    let out = hook(&root, &active).ok();
     assert_eq!(out, "", "the second Stop passes");
 
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
     closed(&root, "29", SESSION);
-    let (_, out, _) = xtask(&root, &["done", "--hook"], Some(&stop_fixture("deny.json")));
+    let out = hook(&root, &stop_fixture("deny.json")).stdout;
     let block: serde_json::Value = serde_json::from_str(&out).unwrap();
     let reason = block["reason"].as_str().unwrap();
     let list = reason
@@ -1811,17 +1786,15 @@ fn a_close_the_previous_stop_read_is_not_held_again_on_a_later_turn() {
     SESSION.clone_into(&mut old.session);
     Store::of_workspace(&root).record(&[old]).unwrap();
     let plain = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();
-    let (code, out, err) = xtask(&root, &["done", "--hook"], Some(&plain));
-    assert_eq!(code, 0, "{err}");
+    let out = hook(&root, &plain).ok();
     assert_eq!(out, "", "the earlier turn's Stop, with a plain reply");
-    let (code, out, err) = xtask(&root, &["done", "--hook"], Some(&stop_fixture("deny.json")));
-    assert_eq!(code, 0, "{err}");
+    let out = hook(&root, &stop_fixture("deny.json")).ok();
     assert_eq!(
         out, "",
         "the close at the epoch was read by the Stop before"
     );
     closed(&root, "29", SESSION);
-    let (_, out, _) = xtask(&root, &["done", "--hook"], Some(&stop_fixture("deny.json")));
+    let out = hook(&root, &stop_fixture("deny.json")).stdout;
     assert!(
         out.contains("This session closed #29;"),
         "a close since that Stop is this turn's: {out}"
@@ -1837,8 +1810,7 @@ fn a_session_that_closed_no_ticket_has_its_reply_read_by_nothing() {
     let root = scratch("reply-none");
     with_the_stop_rule(&root);
     let passes = |what: &str| {
-        let (code, out, err) = xtask(&root, &["done", "--hook"], Some(&stop_fixture("deny.json")));
-        assert_eq!(code, 0, "{err}");
+        let out = hook(&root, &stop_fixture("deny.json")).ok();
         assert_eq!(out, "", "{what}");
         assert!(
             Store::of_workspace(&root)
@@ -1869,12 +1841,7 @@ fn a_reply_that_names_the_ticket_it_opened_does_not_fire() {
     let root = scratch("reply-opened");
     with_the_stop_rule(&root);
     closed(&root, "28", SESSION);
-    let (code, out, err) = xtask(
-        &root,
-        &["done", "--hook"],
-        Some(&stop_fixture("allow.json")),
-    );
-    assert_eq!(code, 0, "{err}");
+    let out = hook(&root, &stop_fixture("allow.json")).ok();
     assert_eq!(out, "", "the reply names #40 and #41");
 }
 
@@ -1898,8 +1865,7 @@ fn every_rule_at_the_stop_has_a_reply_that_fires_and_one_that_does_not() {
         let dir = fixtures().join("rules").join(id);
         for (name, fires) in [("deny.json", true), ("allow.json", false)] {
             let stdin = std::fs::read_to_string(dir.join(name)).unwrap();
-            let (code, out, err) = xtask(&root, &["done", "--hook"], Some(&stdin));
-            assert_eq!(code, 0, "{err}");
+            let out = hook(&root, &stdin).ok();
             assert_eq!(!out.is_empty(), fires, "{id}/{name}: {out}");
         }
     }
@@ -1986,8 +1952,9 @@ fn the_tracks_ticket_is_held_to_its_boxes_from_the_store_and_stale_after_an_edit
         "{verdict:#?}"
     );
     assert!(!verdict.met());
-    let (code, out, err) = xtask(&root, &["done", "--base", "HEAD"], None);
-    assert_eq!(code, 1, "{out}{err}");
+    let ran = xtask(&root, &["done", "--base", "HEAD"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    let out = ran.stdout;
     assert!(out.contains("for #31\n"), "the head line names it: {out}");
     assert!(out.contains("- ticket: no reading for #31"), "{out}");
 
@@ -2004,8 +1971,7 @@ fn the_tracks_ticket_is_held_to_its_boxes_from_the_store_and_stale_after_an_edit
     ticket_read(&root, 31, "ticked.md");
     let verdict = judge(&root);
     assert!(verdict.met(), "{verdict:#?}");
-    let (code, out, _) = xtask(&root, &["done", "--base", "HEAD"], None);
-    assert_eq!(code, 0, "{out}");
+    xtask(&root, &["done", "--base", "HEAD"]).ok();
 
     // The reading is over the tree; the work changed since, so the claim
     // is re-asserted by reading again, and not by `done` asking gh.
@@ -2047,10 +2013,9 @@ fn a_branch_that_records_no_ticket_is_not_asked_and_says_nothing_about_tickets()
     let verdict = judge(&root);
     assert_eq!(verdict.ticket, None);
     assert!(verdict.met(), "{verdict:#?}");
-    let (code, out, _) = xtask(&root, &["done", "--base", "HEAD"], None);
-    assert_eq!(code, 0);
+    let out = xtask(&root, &["done", "--base", "HEAD"]).ok();
     assert!(!out.contains("ticket"), "{out}");
-    let (_, out, _) = xtask(&root, &["done", "--base", "HEAD", "--hook"], None);
+    let out = xtask(&root, &["done", "--base", "HEAD", "--hook"]).stdout;
     assert!(!out.contains("ticket"), "{out}");
 
     Repo::at(&root).git(&["config", "branch.main.ticket", "31"]);
@@ -2068,8 +2033,7 @@ fn the_stop_hook_holds_a_turn_on_the_tickets_unticked_boxes() {
     Repo::at(&root).git(&["config", "branch.main.ticket", "31"]);
     ticket_read(&root, 31, "unticked.md");
     let stop = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();
-    let (code, out, err) = xtask(&root, &["done", "--hook"], Some(&stop));
-    assert_eq!(code, 0, "{err}");
+    let out = hook(&root, &stop).ok();
     let block: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     let reason = block["reason"].as_str().unwrap();
     assert!(
@@ -2078,7 +2042,7 @@ fn the_stop_hook_holds_a_turn_on_the_tickets_unticked_boxes() {
         "{reason}"
     );
     ticket_read(&root, 31, "ticked.md");
-    let (_, out, _) = xtask(&root, &["done", "--hook"], Some(&stop));
+    let out = hook(&root, &stop).stdout;
     assert_eq!(out, "", "every box ticked: the turn ends");
 }
 
@@ -2165,10 +2129,9 @@ fn a_withdrawn_branch_ticket_is_met_and_a_refused_withdrawal_is_not() {
     let verdict = judge(&root);
     assert!(about_the_ticket(&verdict).is_empty(), "{verdict:#?}");
     assert!(verdict.met(), "{verdict:#?}");
-    let (code, out, _) = xtask(&root, &["done", "--base", "HEAD"], None);
-    assert_eq!(code, 0, "{out}");
+    xtask(&root, &["done", "--base", "HEAD"]).ok();
     let stop = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();
-    let (_, out, _) = xtask(&root, &["done", "--hook"], Some(&stop));
+    let out = hook(&root, &stop).stdout;
     assert_eq!(out, "", "withdrawn: the turn ends");
 
     // No box at all, withdrawn: the instrument settled it, so the

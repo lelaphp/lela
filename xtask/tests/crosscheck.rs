@@ -25,9 +25,11 @@ use xtask::scratch::Tree;
 mod common {
     pub mod registry;
     pub mod repo;
+    pub mod run;
 }
 use common::registry::registry;
 use common::repo::scratch_workspace;
+use common::run::xtask;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -547,18 +549,7 @@ fn staged_with_no_file_a_rendering_reads_renders_nothing() {
         .status()
         .unwrap();
     assert!(add.success());
-    let out = std::process::Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(&*root)
-        .args(["crosscheck", "--staged"])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        out.status.success(),
-        "{stdout}{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let stdout = xtask(&root, &["crosscheck", "--staged"]).ok();
     assert!(
         stdout.contains("no extension the binary carries renders again for what is staged"),
         "{stdout}"
