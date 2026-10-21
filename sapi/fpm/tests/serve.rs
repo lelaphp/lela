@@ -11,9 +11,11 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use nix::sys::signal::{Signal, kill, killpg};
+use nix::unistd::Pid;
 use php_proto::fcgi::{self, Header, Kind};
 
 /// The binary under test, let run as root with `-R`: as root php-fpm
@@ -29,21 +31,23 @@ fn php_fpm() -> Command {
 fn tree(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("sapi-fpm-{name}-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir).expect("the test's directory is made");
     dir
 }
 
-/// A configuration of one static child listening at `listen`.
-fn conf(dir: &Path, listen: &str) -> PathBuf {
+/// A configuration in `dir` of one static child listening on
+/// [`socket`], logging to `fpm.log`, with `more` after it.
+fn conf(dir: &Path, more: &str) -> PathBuf {
     let path = dir.join("php-fpm.conf");
     std::fs::write(
         &path,
         format!(
-            "[global]\nerror_log = {}\n[www]\nlisten = {listen}\npm = static\npm.max_children = 1\n",
-            dir.join("fpm.log").display()
+            "[global]\nerror_log = {}\n[www]\nlisten = {}\npm = static\npm.max_children = 1\n{more}",
+            dir.join("fpm.log").display(),
+            socket(dir).display()
         ),
     )
-    .unwrap();
+    .expect("the configuration is written");
     path
 }
 
@@ -56,10 +60,159 @@ fn socket(dir: &Path) -> PathBuf {
     dir.join("fpm.sock")
 }
 
+/// What a [`Master`] is started with: the directives its pool takes past
+/// [`conf`]'s, with `{dir}` read as the test's directory; the `-d`
+/// defines; whether its stderr goes to `stderr` in the directory rather
+/// than nowhere; and whether it runs [`readable_php_fpm`], whose child
+/// the master can read.
+#[derive(Default)]
+struct Pool<'a> {
+    directives: &'a str,
+    defines: &'a [&'a str],
+    stderr: bool,
+    readable: bool,
+}
+
+/// A php-fpm master in the foreground, `-n -F -y`, on a directory of
+/// the test's own, which it owns before anything can panic: dropped, as a
+/// test that panics drops it, it halts the master and removes the
+/// directory, so no master outlives its test to hold a socket another
+/// test's descriptors can see (#3093).
+struct Master {
+    dir: PathBuf,
+    child: Option<Child>,
+}
+
+/// What a master logged, read once it has exited: `fpm.log` and
+/// `slow.log` of its directory, empty where it wrote none.
+struct Log {
+    fpm: String,
+    slow: String,
+}
+
+impl Master {
+    /// The master of `pool`, started on the directory `name` gives.
+    fn start(name: &str, pool: &Pool) -> Master {
+        let mut master = Master {
+            dir: tree(name),
+            child: None,
+        };
+        let dir = master.dir.display().to_string();
+        let path = conf(&master.dir, &pool.directives.replace("{dir}", &dir));
+        let mut command = if pool.readable {
+            readable_php_fpm(&master.dir)
+        } else {
+            php_fpm()
+        };
+        command.arg("-n");
+        for define in pool.defines {
+            command.args(["-d", define]);
+        }
+        let stderr = if pool.stderr {
+            std::fs::File::create(master.dir.join("stderr"))
+                .expect("the master's stderr is made")
+                .into()
+        } else {
+            Stdio::null()
+        };
+        let child = command
+            .args(["-F", "-y"])
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(stderr)
+            .spawn()
+            .expect("php-fpm starts");
+        master.child = Some(child);
+        master
+    }
+
+    /// The test's directory, where the pool's script and logs are.
+    fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// The master's pid, while it runs.
+    fn pid(&self) -> Option<Pid> {
+        let id = self.child.as_ref()?.id();
+        i32::try_from(id)
+            .ok()
+            .filter(|&pid| pid > 0)
+            .map(Pid::from_raw)
+    }
+
+    /// A connection to the pool, tried for ten seconds.
+    fn connect(&self) -> UnixStream {
+        let socket = socket(&self.dir);
+        let started = Instant::now();
+        loop {
+            match UnixStream::connect(&socket) {
+                Ok(stream) => return stream,
+                Err(refused) => {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(10),
+                        "nothing listens at {} after ten seconds: {refused}",
+                        socket.display()
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
+    }
+
+    /// The master sent `SIGTERM`, as a master finishing is, and what it
+    /// logged once it exited.
+    fn stop(self) -> Log {
+        self.stop_with(Signal::SIGTERM)
+    }
+
+    /// The master sent `signal`, and what it logged once it exited.
+    fn stop_with(mut self, signal: Signal) -> Log {
+        self.halt(signal);
+        let read = |file: &str| std::fs::read_to_string(self.dir.join(file)).unwrap_or_default();
+        Log {
+            fpm: read("fpm.log"),
+            slow: read("slow.log"),
+        }
+    }
+
+    /// The master sent `signal` and waited for, ten seconds at most; past
+    /// them its process group, which its `setsid` made the pool's, is
+    /// killed, and the master with it.
+    fn halt(&mut self, signal: Signal) {
+        let pid = self.pid();
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if let Some(pid) = pid {
+            kill(pid, signal).ok();
+        }
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(10) {
+            if !matches!(child.try_wait(), Ok(None)) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if let Some(pid) = pid {
+            killpg(pid, Signal::SIGKILL).ok();
+        }
+        child.kill().ok();
+        child.wait().ok();
+    }
+}
+
+impl Drop for Master {
+    fn drop(&mut self) {
+        self.halt(Signal::SIGTERM);
+        std::fs::remove_dir_all(&self.dir).ok();
+    }
+}
+
 #[test]
 fn a_configuration_test_says_the_file_is_sound() {
     let dir = tree("test");
-    let path = conf(&dir, "127.0.0.1:9");
+    let path = conf(&dir, "");
     let out = php_fpm()
         .args(["-n", "-t", "-y"])
         .arg(&path)
@@ -186,48 +339,38 @@ fn inherited() -> Vec<u64> {
         .unwrap_or_default()
 }
 
-/// A connection to the pool listening at `socket`, tried for ten seconds
-/// from `started`.
-fn connect(socket: &Path, started: Instant) -> Option<UnixStream> {
-    loop {
-        match UnixStream::connect(socket) {
-            Ok(stream) => return Some(stream),
-            Err(_) if started.elapsed() < Duration::from_secs(10) => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(_) => return None,
-        }
-    }
-}
-
 #[test]
 fn a_request_is_served_by_a_child_under_the_host_s_name() {
-    let dir = tree("serve");
-    let socket = socket(&dir);
-    let path = conf(&dir, &socket.display().to_string());
-    let script = dir.join("index.php");
-    std::fs::write(&script, "<?php echo PHP_SAPI, ' ', $_GET['q'];").unwrap();
-    let mut master = php_fpm()
-        .args(["-n", "-F", "-y"])
-        .arg(&path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let started = Instant::now();
-    let body = connect(&socket, started)
-        .map(|s| response(s, &script))
-        .unwrap_or_default();
-    Command::new("kill")
-        .arg("-TERM")
-        .arg(master.id().to_string())
-        .status()
-        .ok();
-    master.wait().ok();
-    std::fs::remove_dir_all(&dir).ok();
+    let master = Master::start("serve", &Pool::default());
+    let script = master.dir().join("index.php");
+    std::fs::write(&script, "<?php echo PHP_SAPI, ' ', $_GET['q'];").expect("the script");
+    let body = response(master.connect(), &script);
+    master.stop();
     let body = String::from_utf8_lossy(&body);
     assert!(body.ends_with("\r\n\r\nfpm-fcgi 1"), "{body:?}");
+}
+
+/// A test that panics while its master serves leaves neither the master,
+/// nor a child of its pool, nor its directory (#3093): the panic drops the
+/// [`Master`], whose `Drop` halts the master and removes the directory.
+/// The panic carries the master's pid and directory out; the pid names
+/// the pool's process group too, which the master's `setsid` made, and a
+/// `kill` of signal 0 to it finds no process left.
+#[test]
+fn a_test_that_panics_while_its_master_serves_leaves_no_master_and_no_directory() {
+    let panicked = std::panic::catch_unwind(|| {
+        let master = Master::start("panics", &Pool::default());
+        drop(master.connect());
+        let pid = master.pid().expect("the master runs");
+        std::panic::panic_any((pid, master.dir().to_path_buf()));
+    })
+    .expect_err("the closure panics");
+    let (pid, dir) = *panicked
+        .downcast::<(Pid, PathBuf)>()
+        .expect("the panic carries the master's pid and directory");
+    assert_eq!(kill(pid, None), Err(nix::errno::Errno::ESRCH), "{pid}");
+    assert_eq!(killpg(pid, None), Err(nix::errno::Errno::ESRCH), "{pid}");
+    assert!(!dir.exists(), "{}", dir.display());
 }
 
 /// What a request answered and the line the master logged for the child
@@ -235,11 +378,9 @@ fn a_request_is_served_by_a_child_under_the_host_s_name() {
 /// finishing sends it, while the request runs (`busy`) or once it is
 /// served and the child waits in `accept`.
 fn quit_child(name: &str, busy: bool) -> (String, String) {
-    let dir = tree(name);
-    let socket = socket(&dir);
-    let path = conf(&dir, &socket.display().to_string());
-    let pid = dir.join("pid");
-    let script = dir.join("index.php");
+    let master = Master::start(name, &Pool::default());
+    let pid = master.dir().join("pid");
+    let script = master.dir().join("index.php");
     std::fs::write(
         &script,
         format!(
@@ -248,18 +389,9 @@ fn quit_child(name: &str, busy: bool) -> (String, String) {
             if busy { "usleep(500000);" } else { "" }
         ),
     )
-    .unwrap();
-    let mut master = php_fpm()
-        .args(["-n", "-F", "-y"])
-        .arg(&path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let stream = connect(&socket, Instant::now());
-    let served =
-        std::thread::spawn(move || stream.map(|s| response(s, &script)).unwrap_or_default());
+    .expect("the script");
+    let stream = master.connect();
+    let served = std::thread::spawn(move || response(stream, &script));
     let started = Instant::now();
     let mut child = String::new();
     while child.is_empty() && started.elapsed() < Duration::from_secs(10) {
@@ -267,14 +399,14 @@ fn quit_child(name: &str, busy: bool) -> (String, String) {
         child = std::fs::read_to_string(&pid).unwrap_or_default();
     }
     let body = if busy {
-        Command::new("kill").args(["-QUIT", &child]).status().ok();
-        served.join().unwrap()
+        quit(&child);
+        served.join().expect("the request's thread")
     } else {
-        let body = served.join().unwrap();
-        Command::new("kill").args(["-QUIT", &child]).status().ok();
+        let body = served.join().expect("the request's thread");
+        quit(&child);
         body
     };
-    let log = dir.join("fpm.log");
+    let log = master.dir().join("fpm.log");
     let exited = format!("child {child} exited");
     let started = Instant::now();
     let mut line = None;
@@ -287,12 +419,7 @@ fn quit_child(name: &str, busy: bool) -> (String, String) {
             .and_then(|l| l.split_once("] "))
             .map(|(_, rest)| rest.to_owned());
     }
-    Command::new("kill")
-        .args(["-TERM", &master.id().to_string()])
-        .status()
-        .ok();
-    master.wait().ok();
-    std::fs::remove_dir_all(&dir).ok();
+    master.stop();
     let body = String::from_utf8_lossy(&body);
     let body = body
         .rsplit("\r\n\r\n")
@@ -300,6 +427,15 @@ fn quit_child(name: &str, busy: bool) -> (String, String) {
         .unwrap_or_default()
         .to_owned();
     (body, line.unwrap_or_default())
+}
+
+/// `SIGQUIT` sent to the child whose pid `pid` spells, as a master
+/// finishing sends it. A pid of 0 or below is refused: `kill(2)` would
+/// signal the test runner's own process group, or every process it may.
+fn quit(pid: &str) {
+    let pid: i32 = pid.trim().parse().expect("the child wrote its pid");
+    assert!(pid > 0, "the child's pid {pid} names no one process");
+    kill(Pid::from_raw(pid), Signal::SIGQUIT).expect("the child is sent SIGQUIT");
 }
 
 /// A child sent `SIGQUIT` as it waits in `accept` ends on its own with
@@ -331,53 +467,26 @@ fn a_child_sent_sigquit_mid_request_serves_it_and_exits_with_code_0() {
 
 #[test]
 fn a_request_body_file_that_does_not_open_is_a_warning_the_pool_logs() {
-    let dir = tree("body-file");
-    let socket = socket(&dir);
-    let path = dir.join("php-fpm.conf");
-    let log = dir.join("fpm.log");
-    std::fs::write(
-        &path,
-        format!(
-            "[global]\nerror_log = {}\n[www]\nlisten = {}\npm = static\npm.max_children = 1\ncatch_workers_output = yes\nphp_admin_flag[log_errors] = on\n",
-            log.display(),
-            socket.display()
-        ),
-    )
-    .unwrap();
-    let script = dir.join("index.php");
-    std::fs::write(&script, "<?php echo 'ran';").unwrap();
-    let mut master = php_fpm()
-        .args(["-n", "-F", "-y"])
-        .arg(&path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let pool = Pool {
+        directives: "catch_workers_output = yes\nphp_admin_flag[log_errors] = on\n",
+        ..Pool::default()
+    };
+    let master = Master::start("body-file", &pool);
+    let script = master.dir().join("index.php");
+    std::fs::write(&script, "<?php echo 'ran';").expect("the script");
     let script = script.display().to_string();
-    let missing = dir.join("missing").display().to_string();
-    let body = connect(&socket, Instant::now())
-        .map(|s| {
-            request(
-                s,
-                &[
-                    ("SCRIPT_FILENAME", script.as_str()),
-                    ("REQUEST_METHOD", "POST"),
-                    ("CONTENT_TYPE", "application/x-www-form-urlencoded"),
-                    ("CONTENT_LENGTH", "3"),
-                    ("REQUEST_BODY_FILE", missing.as_str()),
-                ],
-            )
-        })
-        .unwrap_or_default();
-    Command::new("kill")
-        .arg("-QUIT")
-        .arg(master.id().to_string())
-        .status()
-        .ok();
-    master.wait().ok();
-    let written = std::fs::read_to_string(&log).unwrap_or_default();
-    std::fs::remove_dir_all(&dir).ok();
+    let missing = master.dir().join("missing").display().to_string();
+    let body = request(
+        master.connect(),
+        &[
+            ("SCRIPT_FILENAME", script.as_str()),
+            ("REQUEST_METHOD", "POST"),
+            ("CONTENT_TYPE", "application/x-www-form-urlencoded"),
+            ("CONTENT_LENGTH", "3"),
+            ("REQUEST_BODY_FILE", missing.as_str()),
+        ],
+    );
+    let written = master.stop_with(Signal::SIGQUIT).fpm;
     let expected = format!(
         "said into stderr: \"NOTICE: PHP message: PHP Warning:  REQUEST_BODY_FILE: open('{missing}') failed: No such file or directory (2) in Unknown on line 0\""
     );
@@ -400,35 +509,16 @@ fn a_request_body_file_that_does_not_open_is_a_warning_the_pool_logs() {
 #[test]
 #[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
 fn the_fork_stress_passes_under_a_child() {
-    let dir = tree("fork");
-    let socket = socket(&dir);
-    let path = conf(&dir, &socket.display().to_string());
-    let script = dir.join("stress.php");
-    std::fs::write(&script, STRESS).unwrap();
-    let mut master = php_fpm()
-        .args(["-n", "-F", "-y"])
-        .arg(&path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let started = Instant::now();
+    let master = Master::start("fork", &Pool::default());
+    let script = master.dir().join("stress.php");
+    std::fs::write(&script, STRESS).expect("the stress");
     let script = script.display().to_string();
     let pairs = [
         ("SCRIPT_FILENAME", script.as_str()),
         ("REQUEST_METHOD", "GET"),
     ];
-    let body = connect(&socket, started)
-        .map(|s| request_within(s, &pairs, Duration::from_mins(5)))
-        .unwrap_or_default();
-    Command::new("kill")
-        .arg("-TERM")
-        .arg(master.id().to_string())
-        .status()
-        .ok();
-    master.wait().ok();
-    std::fs::remove_dir_all(&dir).ok();
+    let body = request_within(master.connect(), &pairs, Duration::from_mins(5));
+    master.stop();
     let body = String::from_utf8_lossy(&body);
     assert!(
         body.ends_with(
@@ -508,10 +598,14 @@ echo "$workers_otherwise of 8 workers did not end with status 0\n";
 #[test]
 fn a_process_a_request_execs_holds_the_master_s_saved_stderr_the_script_and_no_socket() {
     use std::os::unix::fs::MetadataExt;
-    let dir = tree("exec-fds");
-    let socket = socket(&dir);
-    let path = conf(&dir, &socket.display().to_string());
-    let script = dir.join("index.php");
+    let ours = inherited();
+    let pool = Pool {
+        defines: &["opcache.file_update_protection=0"],
+        stderr: true,
+        ..Pool::default()
+    };
+    let master = Master::start("exec-fds", &pool);
+    let script = master.dir().join("index.php");
     std::fs::write(
         &script,
         "<?php
@@ -520,38 +614,17 @@ register_shutdown_function(function () { echo \"--\\n\", listed(); });
 echo listed();
 ",
     )
-    .unwrap();
-    let stderr = dir.join("stderr");
-    let inode = |path: &Path| std::fs::metadata(path).map_or(0, |m| m.ino());
-    let ours = inherited();
-    let mut master = php_fpm()
-        .args(["-n", "-d", "opcache.file_update_protection=0", "-F", "-y"])
-        .arg(&path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(std::fs::File::create(&stderr).unwrap())
-        .spawn()
-        .unwrap();
-    let started = Instant::now();
+    .expect("the script");
     let bodies: Vec<Vec<u8>> = (0..2)
-        .map(|_| {
-            connect(&socket, started)
-                .map(|s| response(s, &script))
-                .unwrap_or_default()
-        })
+        .map(|_| response(master.connect(), &script))
         .collect();
-    Command::new("kill")
-        .arg("-TERM")
-        .arg(master.id().to_string())
-        .status()
-        .ok();
-    master.wait().ok();
+    let inode = |path: &Path| std::fs::metadata(path).map_or(0, |m| m.ino());
     let named = [
         (inode(Path::new("/dev/null")), "null"),
-        (inode(&stderr), "the master's stderr"),
+        (inode(&master.dir().join("stderr")), "the master's stderr"),
         (inode(&script), "the script"),
     ];
-    std::fs::remove_dir_all(&dir).ok();
+    master.stop();
     let held = |listed: &str| -> Vec<&'static str> {
         listed
             .lines()
@@ -645,53 +718,29 @@ const NESTED: &[(&str, &str)] = &[
 /// `more`, each past its sixteen-digit room address, and the test
 /// directory as the engine resolved it; the entry's head is held here.
 fn slow_frames(name: &str, more: &str, files: &[(&str, &str)]) -> (Vec<String>, PathBuf) {
-    let dir = tree(name);
-    let socket = socket(&dir);
-    let path = dir.join("php-fpm.conf");
-    let slowlog = dir.join("slow.log");
-    std::fs::write(
-        &path,
-        format!(
-            "[global]\nerror_log = {}\n[www]\nlisten = {}\npm = static\npm.max_children = 1\n\
-             slowlog = {}\nrequest_slowlog_timeout = 1\n{more}",
-            dir.join("fpm.log").display(),
-            socket.display(),
-            slowlog.display()
-        ),
-    )
-    .unwrap();
+    let directives = format!("slowlog = {{dir}}/slow.log\nrequest_slowlog_timeout = 1\n{more}");
+    let pool = Pool {
+        directives: &directives,
+        readable: true,
+        ..Pool::default()
+    };
+    let master = Master::start(name, &pool);
     for (file, text) in files {
-        std::fs::write(dir.join(file), text).unwrap();
+        std::fs::write(master.dir().join(file), text).expect("the program's files");
     }
-    let script = dir.join("slow.php");
-    let mut master = readable_php_fpm(&dir)
-        .args(["-n", "-F", "-y"])
-        .arg(&path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let started = Instant::now();
+    let script = master.dir().join("slow.php");
     let shown = script.display().to_string();
     let pairs = [
         ("SCRIPT_FILENAME", shown.as_str()),
         ("REQUEST_METHOD", "GET"),
     ];
-    let body = connect(&socket, started)
-        .map(|s| request_within(s, &pairs, Duration::from_secs(20)))
-        .unwrap_or_default();
-    Command::new("kill")
-        .arg("-TERM")
-        .arg(master.id().to_string())
-        .status()
-        .ok();
-    master.wait().ok();
-    let logged = std::fs::read_to_string(&slowlog).unwrap_or_default();
-    let log = std::fs::read_to_string(dir.join("fpm.log")).unwrap_or_default();
+    let body = request_within(master.connect(), &pairs, Duration::from_secs(20));
     // The op arrays' files are the paths the engine opened, resolved.
-    let real = std::fs::canonicalize(&dir).unwrap();
-    std::fs::remove_dir_all(&dir).ok();
+    let real = std::fs::canonicalize(master.dir()).expect("the test's directory resolves");
+    let Log {
+        fpm: log,
+        slow: logged,
+    } = master.stop();
     assert!(String::from_utf8_lossy(&body).ends_with("done"), "{body:?}");
     let mut lines = logged.lines();
     assert_eq!(lines.next(), Some(""), "{logged}\n{log}");
