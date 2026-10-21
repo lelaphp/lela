@@ -10,6 +10,9 @@
 //! `mysql` among the words of xtask's `XTASK_PROMISED`, and then it
 //! fails naming the address (#3084). A skip is written where xtask's
 //! `XTASK_SKIPPED` names a file, so `xtask test` counts it (#3085).
+//!
+//! A test that holds what a client sends the server connects the client
+//! through a [`MysqlRelay`] and reads the bytes back as [`Packets`].
 
 #![allow(
     dead_code,
@@ -17,8 +20,10 @@
 )]
 
 use std::fs::OpenOptions;
-use std::io::Write as _;
-use std::net::{SocketAddr, TcpStream};
+use std::io::{Read as _, Write as _};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::time::Duration;
 
 /// Where `ci/mysql/compose.yaml` publishes the server, the address every
 /// test's PHP connects to.
@@ -48,10 +53,91 @@ impl MysqlServer {
             Err(absent) => skip(&absent),
         }
     }
+}
 
-    /// The server's address.
+/// A relay of the test's own between one client and the server: it hands
+/// the server's bytes back as they come and keeps every byte the client
+/// sends, which it hands on once the client closes its side.
+pub struct MysqlRelay {
+    at: SocketAddr,
+    sent: Receiver<Packets>,
+}
+
+impl MysqlRelay {
+    /// A relay to `server` on a free local address, for one client.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a test starts its own threads (seams.toml rule fork.threads)"
+    )]
+    pub fn start(server: &MysqlServer) -> MysqlRelay {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("the relay binds a free address");
+        let at = listener.local_addr().expect("the relay's address");
+        let upstream = server.at;
+        let (sent, received) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut client, _) = listener.accept().expect("the client connects to the relay");
+            let mut upstream =
+                TcpStream::connect(upstream).expect("the relay connects to the server");
+            let mut from = upstream.try_clone().expect("the server's side, to read");
+            let mut to = client.try_clone().expect("the client's side, to write");
+            std::thread::spawn(move || std::io::copy(&mut from, &mut to));
+            let mut seen = Vec::new();
+            let mut chunk = [0; 4096];
+            while let Ok(n @ 1..) = client.read(&mut chunk) {
+                seen.extend_from_slice(&chunk[..n]);
+                upstream.write_all(&chunk[..n]).ok();
+            }
+            upstream.shutdown(Shutdown::Write).ok();
+            sent.send(Packets(seen)).ok();
+        });
+        MysqlRelay { at, sent: received }
+    }
+
+    /// Where the client connects.
     pub fn at(&self) -> SocketAddr {
         self.at
+    }
+
+    /// What the client sent the server, once it has closed its side,
+    /// waiting at most `within`; `None` while it holds its side open.
+    pub fn closed_within(&self, within: Duration) -> Option<Packets> {
+        match self.sent.recv_timeout(within) {
+            Ok(packets) => Some(packets),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("the relay ended without handing on what the client sent")
+            }
+        }
+    }
+}
+
+/// The bytes a client sent the server, the protocol's packets end to end:
+/// each a three-byte little-endian length, a sequence number and that
+/// many bytes of payload.
+pub struct Packets(Vec<u8>);
+
+impl Packets {
+    /// The last packet, whole, or what was sent of it where the bytes end
+    /// inside it.
+    pub fn last(&self) -> &[u8] {
+        let mut last = &[][..];
+        let mut rest = &self.0[..];
+        while let [a, b, c, _, ..] = *rest {
+            let len = usize::from(a) | usize::from(b) << 8 | usize::from(c) << 16;
+            last = &rest[..(4 + len).min(rest.len())];
+            rest = &rest[last.len()..];
+        }
+        last
+    }
+
+    /// That the last packet is a `COM_QUIT`: one byte of payload, the
+    /// command `0x01`, at sequence number 0.
+    pub fn assert_quit(&self) {
+        assert_eq!(
+            self.last(),
+            [1, 0, 0, 0, 1],
+            "the last packet the server was sent is no COM_QUIT"
+        );
     }
 }
 

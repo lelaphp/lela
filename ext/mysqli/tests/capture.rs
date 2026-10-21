@@ -9,7 +9,7 @@
 #[path = "../../mysqlnd/tests/support/mysql.rs"]
 mod mysql;
 
-use mysql::MysqlServer;
+use mysql::{MysqlRelay, MysqlServer};
 use php_ext::abi::Extension;
 use php_ext::test::{Capture, Engine, Files};
 
@@ -480,29 +480,11 @@ fn an_armed_request_reading_the_servers_key_from_a_file_leaves_none_held() {
 /// test says so and passes.
 #[test]
 fn a_free_persistent_link_is_quit_as_the_engine_ends() {
-    use std::io::{Read as _, Write as _};
-    use std::net::{Shutdown, TcpListener, TcpStream};
     use std::time::Duration;
 
     MysqlServer::with(|server| {
-        let at = server.at();
-        let relay = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = relay.local_addr().unwrap().port();
-        let (sent, received) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let (mut client, _) = relay.accept().unwrap();
-            let mut upstream = TcpStream::connect(at).unwrap();
-            let (mut from, mut to) = (upstream.try_clone().unwrap(), client.try_clone().unwrap());
-            std::thread::spawn(move || std::io::copy(&mut from, &mut to));
-            let mut seen = Vec::new();
-            let mut chunk = [0; 4096];
-            while let Ok(n @ 1..) = client.read(&mut chunk) {
-                seen.extend_from_slice(&chunk[..n]);
-                upstream.write_all(&chunk[..n]).ok();
-            }
-            upstream.shutdown(Shutdown::Write).ok();
-            sent.send(seen).ok();
-        });
+        let relay = MysqlRelay::start(server);
+        let port = relay.at().port();
         let engine = Engine::builder()
             .extensions(&[
                 php_ext_lexbor::extension(),
@@ -520,22 +502,13 @@ fn a_free_persistent_link_is_quit_as_the_engine_ends() {
         let served = engine.serve_capture(&script, Capture::default());
         assert_eq!(served.stdout_text(), "connected");
         assert!(
-            received.recv_timeout(Duration::from_millis(200)).is_err(),
+            relay.closed_within(Duration::from_millis(200)).is_none(),
             "the free link was closed before the engine ended"
         );
         drop(engine);
-        let seen = received.recv_timeout(Duration::from_secs(10)).unwrap();
-        let mut last = &[][..];
-        let mut rest = &seen[..];
-        while let [a, b, c, _, ..] = *rest {
-            let len = usize::from(a) | usize::from(b) << 8 | usize::from(c) << 16;
-            last = &rest[..(4 + len).min(rest.len())];
-            rest = &rest[last.len()..];
-        }
-        assert_eq!(
-            last,
-            [1, 0, 0, 0, 1],
-            "the last packet the server was sent is no COM_QUIT"
-        );
+        relay
+            .closed_within(Duration::from_secs(10))
+            .expect("the client closes its side as the engine ends")
+            .assert_quit();
     });
 }
