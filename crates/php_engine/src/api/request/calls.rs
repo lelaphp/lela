@@ -164,15 +164,15 @@ impl Request {
         let Some(closure) = object.closure(self).cloned() else {
             return Ok(Value::null());
         };
-        let cache_size = self
+        let room = self
             .user_function(closure.function)
-            .map(|user| user.shape.cache_size);
-        let own_cache = match cache_size.filter(|_| {
+            .map(|user| user.shape.cache_size.room);
+        let own_cache = match room.filter(|_| {
             object.native::<ClosureObject>(self).is_some_and(|payload| {
                 closure.scope != Some(scope) || payload.cache != ClosureCache::Function
             })
         }) {
-            Some(size) => Some(self.own_cache(size)?),
+            Some(room) => Some(self.own_cache(room)?),
             None => None,
         };
         let held = object.native_mut::<ClosureObject>(self).map(|payload| {

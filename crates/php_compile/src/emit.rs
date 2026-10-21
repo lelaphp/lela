@@ -5320,6 +5320,7 @@ impl<'a> Emit<'a> {
             line_start,
             line_end,
             cache_size,
+            cache_room: cache_size,
             runtime_cache: php_unit::MapPtrOffset::default(),
             dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs),
             bound_vars: std::mem::take(&mut self.static_vars),

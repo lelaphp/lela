@@ -718,7 +718,7 @@ impl Request {
     /// `INCLUDE_OR_EVAL` holds it ([`exec::HeapOpArray`]): `copy`, made
     /// before the frame was pushed, and the runtime cache
     /// `i_init_code_execute_data` lays down after the symbol table is
-    /// attached, `cache_size` bytes. Both go when the frame is popped,
+    /// attached, its room's bytes ([`php_unit::OpArray::cache_room`]). Both go when the frame is popped,
     /// whether the file returned or threw, and an `eval`'s as an
     /// include's:
     ///
@@ -746,7 +746,7 @@ impl Request {
         let annex = self.vm.at(frame).and_then(|header| header.annex);
         let size = (annex.and_then(|id| self.annexes.get(id)))
             .and_then(|extra| extra.unit.as_ref())
-            .map_or(0, |unit| unit.main.cache_size);
+            .map_or(0, |unit| unit.main.cache_room);
         let cache =
             crate::api::values::Emalloc::new(self, usize::try_from(size).unwrap_or(usize::MAX));
         let (run_time_cache, refused) = match cache {
@@ -1641,7 +1641,7 @@ impl Request {
             }
         }
         if own_cache {
-            exec::lay_own_cache(&mut self.map, cache, shape.cache_size);
+            exec::lay_own_cache(&mut self.map, cache, shape.cache_size.slots);
         } else {
             exec::lay_runtime_cache(&mut self.map, &mut self.heap, cache, shape.cache_size)?;
         }
@@ -2258,8 +2258,8 @@ impl Request {
         }
     }
 
-    /// A cache of the request's own for a closure, its `cache_size`
-    /// bytes `emalloc`ed as `zend_create_closure_ex` allocates them
+    /// A cache of the request's own for a closure, `room` bytes, its
+    /// op array's [`php_unit::OpArray::cache_room`], `emalloc`ed as `zend_create_closure_ex` allocates them
     /// (`Z/Zend/zend_closures.c:813`) and its slots laid down at its
     /// first call ([`exec::RuntimeCaches::own_cache`]). A closure bound
     /// to another scope takes sixteen bytes more than one bound to its
@@ -2277,8 +2277,8 @@ impl Request {
     /// ```
     ///
     /// The `Err` is the memory limit's fatal.
-    pub(crate) fn own_cache(&mut self, cache_size: u32) -> Result<exec::CacheAt, Thrown> {
-        let room = self.heap.block(cache_size as usize);
+    pub(crate) fn own_cache(&mut self, room: u32) -> Result<exec::CacheAt, Thrown> {
+        let room = self.heap.block(room as usize);
         let room = self.fatal_of(room)?;
         Ok(self.map.own_cache(Some(room)))
     }
@@ -2305,10 +2305,10 @@ impl Request {
     pub(crate) fn lay_closure_cache(
         &mut self,
         at: exec::CacheAt,
-        cache_size: u32,
+        size: exec::CacheSize,
         scope: Option<crate::api::values::ClassId>,
     ) -> Result<(), Thrown> {
-        let laid = exec::lay_runtime_cache(&mut self.map, &mut self.heap, at, cache_size);
+        let laid = exec::lay_runtime_cache(&mut self.map, &mut self.heap, at, size);
         self.fatal_of(laid)?;
         self.map.map(at).laid_for = scope;
         Ok(())

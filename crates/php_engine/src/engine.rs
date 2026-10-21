@@ -1715,6 +1715,25 @@ impl Shared {
             .saturating_add(u32::from(tier))
     }
 
+    /// What opcache's optimizer makes of a unit the accelerator persists
+    /// ([`crate::unit_cache::Optimizer`]): pass 11's count where the
+    /// startup's `opcache.optimization_level` has its bit, from past the
+    /// op array extensions' slots, which is where the compiler's first
+    /// slot stands too; no pass where it has not, or where no extension
+    /// declares the entry.
+    pub(crate) fn optimizer(&self) -> crate::unit_cache::Optimizer {
+        use crate::unit_cache::Optimizer;
+        let level = self
+            .ini_default(b"opcache.optimization_level")
+            .map_or(0, ini_quantity);
+        if level & Optimizer::PASS_11 == 0 {
+            return Optimizer::Off;
+        }
+        Optimizer::CompactLiterals {
+            first: self.op_array_extensions().saturating_mul(exec::SLOT_BYTES),
+        }
+    }
+
     /// One source compiled with its constant strings interned into the
     /// engine's table, which is what publication is (design §5.2, §6.3):
     /// opcache's persist walks an op array's constants and re-interns
@@ -1960,6 +1979,7 @@ impl Shared {
             protection: 0,
             now: crate::unit_cache::now(),
             levels: crate::unit_cache::Levels::Memory,
+            optimizer: self.optimizer(),
         };
         let arena = self.arena.current();
         let (compiled, _, _) = self.units.file(

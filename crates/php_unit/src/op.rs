@@ -367,7 +367,17 @@ pub struct OpArray {
     pub filename: Name,
     pub line_start: u32,
     pub line_end: u32,
+    /// `op_array->cache_size` as php's compiler leaves it, a slot of its
+    /// own for every site (`zend_alloc_cache_slot`): what the oplines'
+    /// slots index, and what the engine lays the cache down at.
     pub cache_size: u32,
+    /// The bytes php's heap gives the op array's runtime cache:
+    /// `cache_size`, or, for an op array opcache's optimizer persisted,
+    /// the count `zend_optimizer_compact_literals` makes, where sites
+    /// naming one function, class or member share a slot. Set
+    /// before the unit is published, and read where a request allocates
+    /// the cache.
+    pub cache_room: u32,
     /// `ZEND_MAP_PTR(op_array->run_time_cache)`: which runtime cache of
     /// the request serving the op array is its own ([`MapPtrOffset`]),
     /// laid down on the op array's first activation.

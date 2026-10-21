@@ -661,14 +661,14 @@ pub(crate) fn closure_cache(
     // chosen here, and counts its op array.
     req.count_closure(function);
     if let ClosureCache::Own(_) = from {
-        return req.own_cache(size).map(ClosureCache::Own);
+        return req.own_cache(size.room).map(ClosureCache::Own);
     }
     if !req.cache_laid(cache) {
         if real {
             req.lay_closure_cache(cache, size, scope)?;
             return Ok(ClosureCache::Function);
         }
-        return req.own_cache(size).map(ClosureCache::Own);
+        return req.own_cache(size.room).map(ClosureCache::Own);
     }
     let function_scope = if real {
         req.laid_for(cache)
@@ -678,7 +678,7 @@ pub(crate) fn closure_cache(
     if function_scope == scope {
         Ok(ClosureCache::Function)
     } else {
-        req.own_cache(size).map(ClosureCache::Own)
+        req.own_cache(size.room).map(ClosureCache::Own)
     }
 }
 

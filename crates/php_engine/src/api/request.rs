@@ -779,8 +779,8 @@ pub(crate) struct FrameShape {
     pub(crate) entry: u32,
     /// `ZEND_MAP_PTR(op_array->run_time_cache)`.
     pub(crate) cache: exec::CacheAt,
-    /// `op_array.cache_size`.
-    pub(crate) cache_size: u32,
+    /// `op_array.cache_size`, its slots and its room.
+    pub(crate) cache_size: exec::CacheSize,
     /// Whether a parameter, the variadic's included, takes its argument
     /// by reference: a call to a function none of whose parameters does
     /// sends every argument by value, which the `SEND_*_EX` oplines read
@@ -822,7 +822,7 @@ impl FrameShape {
             cache: code.map_or_else(exec::CacheAt::default, |code| {
                 exec::CacheAt::of(code.runtime_cache)
             }),
-            cache_size: code.map_or(0, |code| code.cache_size),
+            cache_size: code.map_or_else(exec::CacheSize::default, exec::CacheSize::of),
             by_ref: decl.parameters.iter().any(|p| p.by_ref),
             sent: exec::CallInfo::sent(|number| {
                 sent_parameter(decl, number).is_some_and(|parameter| parameter.by_ref)

@@ -1442,13 +1442,34 @@ pub(crate) fn init_runtime_cache(
         map.map(at).lay_down(code.cache_size);
         return Ok(());
     }
-    lay_runtime_cache(map, heap, at, code.cache_size)
+    lay_runtime_cache(map, heap, at, CacheSize::of(code))
+}
+
+/// An op array's runtime cache as a request lays it down: the bytes of
+/// slots its oplines index, which the engine's cache holds
+/// ([`OpArray::cache_size`]), and the bytes php's heap gives it, fewer
+/// where opcache's optimizer shared slots
+/// ([`OpArray::cache_room`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CacheSize {
+    pub(crate) slots: u32,
+    pub(crate) room: u32,
+}
+
+impl CacheSize {
+    /// What `code` lays down.
+    pub(crate) fn of(code: &OpArray) -> CacheSize {
+        CacheSize {
+            slots: code.cache_size,
+            room: code.cache_room,
+        }
+    }
 }
 
 /// `zend_init_func_run_time_cache` over a function's cache pointer and
 /// size ([`FrameShape`](crate::api::request::FrameShape)): laid down on
 /// the function's first activation in the request, found laid down by
-/// every one after, and its `cache_size` bytes carved from the
+/// every one after, and its room carved from the
 /// compiler's arena as `init_func_run_time_cache_i` carves them
 /// (`Z/Zend/zend_execute.c:4455`). The arena's blocks are 64 KiB, so a
 /// cache moves nothing until the newest block has not the room for it,
@@ -1476,11 +1497,11 @@ pub(crate) fn lay_runtime_cache(
     map: &mut RuntimeCaches,
     heap: &mut php_heap::Heap,
     at: CacheAt,
-    cache_size: u32,
+    size: CacheSize,
 ) -> Result<(), Fatal> {
     if !map.laid(at) {
-        heap.carve(cache_size as usize)?;
-        map.map(at).lay_down(cache_size);
+        heap.carve(size.room as usize)?;
+        map.map(at).lay_down(size.slots);
     }
     Ok(())
 }
@@ -1720,7 +1741,7 @@ const _: () = assert!(std::mem::size_of::<PropertyOffset>() == 8);
 
 /// `sizeof(void *)`: what `zend_alloc_cache_slot` grows `cache_size` by
 /// for one slot, so a slot's number is its byte offset over this.
-const SLOT_BYTES: u32 = 8;
+pub(crate) const SLOT_BYTES: u32 = 8;
 
 /// The VM stack and its frames, and the calls being built.
 #[derive(Default)]
