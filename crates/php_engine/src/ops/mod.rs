@@ -3102,15 +3102,31 @@ pub(crate) fn compare(req: &mut Request, left: &Value, right: &Value) -> Result<
         // [`compare_values`], so a nest of objects compared level by
         // level keeps this frame between two handlers and no other
         // (#3159).
-        (ValueRef::Object(a), ValueRef::Object(b)) => Ok(if a == b {
-            Ordering::Equal
-        } else {
-            req.object_handlers(a.heap())
-                .compare(req, left, right)?
-                .unwrap_or(Ordering::Greater)
-        }),
+        (ValueRef::Object(a), ValueRef::Object(b)) => {
+            if a == b {
+                Ok(Ordering::Equal)
+            } else {
+                handler_compare(req, a, left, right)
+            }
+        }
         _ => compare_values(req, left, right),
     }
+}
+
+/// `Z_OBJ_HANDLER_P(object, compare)(op1, op2)`: the comparison
+/// `object`'s handler table answers for the two sides, `None`,
+/// `ZEND_UNCOMPARABLE`, as `1`.
+#[inline]
+fn handler_compare(
+    req: &mut Request,
+    object: PhpObject,
+    left: &Value,
+    right: &Value,
+) -> Result<Ordering, Thrown> {
+    Ok(req
+        .object_handlers(object.heap())
+        .compare(req, left, right)?
+        .unwrap_or(Ordering::Greater))
 }
 
 /// [`compare`] over what a reference on either side holds. A call of its
@@ -3174,10 +3190,9 @@ fn compare_values(req: &mut Request, left: &Value, right: &Value) -> Result<Orde
         }
         // `Z_OBJ_HANDLER_P(object, compare)(op1, op2)`, the object side's
         // table; `None` is `ZEND_UNCOMPARABLE`, which is `1`.
-        (ValueRef::Object(o), _) | (_, ValueRef::Object(o)) => req
-            .object_handlers(o.heap())
-            .compare(req, left, right)?
-            .unwrap_or(Ordering::Greater),
+        (ValueRef::Object(o), _) | (_, ValueRef::Object(o)) => {
+            handler_compare(req, o, left, right)?
+        }
         (ValueRef::Array(_), _) => Ordering::Greater,
         (_, ValueRef::Array(_)) => Ordering::Less,
         (a, b) => php_heap::compare(silent_number(a), silent_number(b), req.ini().precision()),
