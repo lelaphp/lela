@@ -3126,10 +3126,7 @@ mod tests {
         let _alone = alone();
         let mut nothing = Nothing::new();
         let start = nothing.heap.memory_usage(false);
-        let a = nothing
-            .heap
-            .array()
-            .expect("the heap would not allocate a header");
+        let a = nothing.heap.array().expect("an array's header");
         assert_eq!(nothing.heap.memory_usage(false), start + 56);
         assert!(matches!(
             nothing.heap.array_append(a, Zval::long(1)),

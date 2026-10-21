@@ -119,11 +119,7 @@ mod tests {
     fn grow_to(heap: &mut Heap, chunks: usize) -> Vec<crate::Str> {
         let mut held = Vec::new();
         while heap.memory_usage(true) < chunks * CHUNK_SIZE {
-            let allocated = heap.string(&[b'x'; 4000]);
-            assert!(allocated.is_ok(), "the heap would not allocate a run");
-            if let Ok(s) = allocated {
-                held.push(s);
-            }
+            held.push(heap.string(&[b'x'; 4000]).expect("a run"));
         }
         held
     }

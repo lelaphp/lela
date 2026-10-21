@@ -903,14 +903,13 @@ mod tests {
         let mut strings = Vec::new();
         for len in [0usize, 1, 7, 8, 100, 3000, 5000, 3_000_000] {
             let bytes = vec![b'x'; len];
-            let allocated = heap.string(&bytes);
-            assert!(allocated.is_ok(), "the heap would not allocate {len}");
-            if let Ok(s) = allocated {
-                assert_eq!(s.len(), len);
-                assert_eq!(s.bytes(), bytes.as_slice());
-                assert_eq!(s.refcount(), 1);
-                strings.push(s);
-            }
+            let s = heap
+                .string(&bytes)
+                .unwrap_or_else(|e| panic!("a string of {len} bytes: {e:?}"));
+            assert_eq!(s.len(), len);
+            assert_eq!(s.bytes(), bytes.as_slice());
+            assert_eq!(s.refcount(), 1);
+            strings.push(s);
         }
         assert!(heap.memory_usage(false) > start);
         for s in strings {
@@ -948,13 +947,10 @@ mod tests {
             let mut heap = Heap::new();
             started_at.push(heap.memory_usage(false) - STARTED);
             let heap_start = STARTED;
-            let made = heap.string(b"made");
-            assert!(made.is_ok());
-            if let Ok(made) = made {
-                assert!(!made.is_interned() && !made.is_persistent());
-                assert_eq!(heap.memory_usage(false), heap_start + 32);
-                heap.release_string(made);
-            }
+            let made = heap.string(b"made").expect("the string \"made\"");
+            assert!(!made.is_interned() && !made.is_persistent());
+            assert_eq!(heap.memory_usage(false), heap_start + 32);
+            heap.release_string(made);
             assert_eq!(heap.memory_usage(false), heap_start);
         }
         assert_eq!(started_at, vec![0, 0], "every request starts at zero");
@@ -1013,7 +1009,7 @@ mod tests {
         let real = heap.memory_usage(true);
         let s = heap
             .string(&vec![b'x'; 3_000_000])
-            .expect("the heap would not allocate 3 MB");
+            .expect("a string of 3 MB");
         let rounded = 3_000_032usize.next_multiple_of(page);
         let node = 24;
         assert_eq!(heap.memory_usage(false) - start, rounded + node);
@@ -1039,7 +1035,7 @@ mod tests {
         let s = nothing
             .heap
             .string(b"demo")
-            .expect("the heap would not allocate four bytes");
+            .expect("a string of four bytes");
         assert_eq!(nothing.heap.memory_usage(false) - start, 32);
         let z = Zval::string(s);
         assert!(z.is_refcounted());
@@ -1058,20 +1054,11 @@ mod tests {
     fn an_append_extends_the_one_owner_s_string_and_copies_a_shared_one() {
         let _alone = alone();
         let mut nothing = Recorder { heap: Heap::new() };
-        let s = nothing
-            .heap
-            .string(b"abc")
-            .expect("the heap would not allocate five bytes");
-        let tail = nothing
-            .heap
-            .string(b"de")
-            .expect("the heap would not allocate five bytes");
+        let s = nothing.heap.string(b"abc").expect("the string \"abc\"");
+        let tail = nothing.heap.string(b"de").expect("the string \"de\"");
         let start = nothing.heap.memory_usage(false);
         // 24 + 3 + 1 and 24 + 5 + 1 both round into the 32-byte bin.
-        let grown = nothing
-            .heap
-            .string_append(s, tail)
-            .expect("the append was refused");
+        let grown = nothing.heap.string_append(s, tail).expect("an append");
         assert!(
             grown.is_same(s),
             "a string with one owner moved within its bin"
@@ -1079,17 +1066,11 @@ mod tests {
         assert_eq!(grown.bytes(), b"abcde");
         assert_eq!(nothing.heap.memory_usage(false), start);
         // Ten bytes are the 40-byte bin: the slot moves up, once.
-        let twice = nothing
-            .heap
-            .string_append(grown, grown)
-            .expect("the append was refused");
+        let twice = nothing.heap.string_append(grown, grown).expect("an append");
         assert_eq!(twice.bytes(), b"abcdeabcde");
         assert_eq!(nothing.heap.memory_usage(false), start - 32 + 40);
         twice.addref();
-        let copy = nothing
-            .heap
-            .string_append(twice, tail)
-            .expect("the append was refused");
+        let copy = nothing.heap.string_append(twice, tail).expect("an append");
         assert!(!copy.is_same(twice), "a shared string was written into");
         assert_eq!(twice.bytes(), b"abcdeabcde");
         assert_eq!(twice.refcount(), 1);
@@ -1237,11 +1218,8 @@ mod tests {
             matches!(refused.map(Fatal::into_reason), Some(FatalReason::Error(text)) if text == said)
         );
         assert_eq!(heap.memory_usage(false), before);
-        let small = heap.block(16);
-        assert!(small.is_ok(), "the heap still allocates");
-        if let Ok(small) = small {
-            heap.free_block(small);
-        }
+        let small = heap.block(16).expect("the heap still allocates");
+        heap.free_block(small);
     }
 
     /// `is_zend_ptr` answers for any address inside a chunk or a huge
@@ -1256,8 +1234,8 @@ mod tests {
         let mut heap = Heap::new();
         heap.gc_mem_caches();
         heap.gc_mem_caches();
-        let small = heap.block(100).expect("the heap would not allocate");
-        let huge = heap.block(3_000_000).expect("the heap would not allocate");
+        let small = heap.block(100).expect("a small block");
+        let huge = heap.block(3_000_000).expect("a huge block");
         let small_at = small.bytes().as_ptr().addr();
         let huge_at = huge.bytes().as_ptr().addr();
         let huge_end = huge_at + 3_000_000usize.next_multiple_of(mm::real_page_size());
@@ -1285,11 +1263,7 @@ mod tests {
             let mut held = Vec::new();
             // Runs of a whole page each, past what one chunk holds.
             for _ in 0..700 {
-                let allocated = heap.string(&[b'x'; 4000]);
-                assert!(allocated.is_ok(), "the heap would not allocate a run");
-                if let Ok(s) = allocated {
-                    held.push(s);
-                }
+                held.push(heap.string(&[b'x'; 4000]).expect("a run"));
             }
             assert!(heap.memory_usage(true) > mm::CHUNK_SIZE);
             assert!(mm::MAPPINGS.load(Relaxed) > before);
@@ -1311,9 +1285,7 @@ mod tests {
     fn an_owner_dropped_unconsumed_is_recorded_with_the_line_that_made_it() {
         let _alone = alone();
         let mut heap = Heap::new();
-        let s = heap
-            .string(b"a string of its own block")
-            .expect("the heap would not allocate");
+        let s = heap.string(b"a string of its own block").expect("a string");
         let z = Zval::string(s);
         let at = s.gc().block();
         let first = std::panic::Location::caller();
@@ -1358,7 +1330,7 @@ mod tests {
         let held = hooks
             .heap
             .string(b"a string an owner holds")
-            .expect("the heap would not allocate");
+            .expect("a string");
         let owned = Zval::string(held);
         hooks.heap.fatal_leaving(true);
         owners::made(owned, site);
@@ -1367,7 +1339,7 @@ mod tests {
         let s = hooks
             .heap
             .string(b"a string of its own block")
-            .expect("the heap would not allocate");
+            .expect("a string");
         let z = Zval::string(s);
         Heap::release(&mut hooks, z);
         Heap::release(&mut hooks, z);
@@ -1395,7 +1367,7 @@ mod tests {
         let s = hooks
             .heap
             .string(b"a string of its own block")
-            .expect("the heap would not allocate");
+            .expect("a string");
         Heap::release(&mut hooks, Zval::string(s));
         assert_eq!(hooks.heap.take_sensed(), None);
         let read = s.bytes();
@@ -1430,7 +1402,7 @@ mod tests {
         let s = hooks
             .heap
             .string(b"a string of its own block")
-            .expect("the heap would not allocate");
+            .expect("a string");
         let z = Zval::string(s);
         Heap::release(&mut hooks, z);
         assert_eq!(hooks.heap.memory_usage(false), start);
@@ -1491,7 +1463,7 @@ mod tests {
         let stale = hooks
             .heap
             .string(b"a string of its own block")
-            .expect("the heap would not allocate");
+            .expect("a string");
         let at = stale.address().as_ptr().addr();
         hooks.heap.release_string(stale);
         let fresh = hooks.heap.string(b"a string of its own block");
@@ -1580,9 +1552,7 @@ mod tests {
         for (how, leave) in leaves {
             for word in [0, 1, 2] {
                 let mut heap = Heap::new();
-                let s = heap
-                    .string(b"a string of its own block")
-                    .expect("the heap would not allocate");
+                let s = heap.string(b"a string of its own block").expect("a string");
                 let at = s.address();
                 heap.release_string(s);
                 let words: *mut u64 = at.as_ptr().cast();
@@ -1708,7 +1678,7 @@ mod tests {
         ];
         let at = |z: Zval| z.counted().map(|at| at.block().as_ptr().addr());
         for (kind, make) in kinds {
-            let refused = |e| panic!("the heap would not allocate a {kind}: {e:?}");
+            let refused = |e| panic!("a {kind}: {e:?}");
             let stale = make(&mut hooks.heap).unwrap_or_else(refused);
             let other = make(&mut hooks.heap).unwrap_or_else(refused);
             Heap::release(&mut hooks, other);

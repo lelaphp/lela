@@ -1105,15 +1105,11 @@ mod tests {
     #[test]
     fn interning_the_same_bytes_twice_gives_one_string() {
         let mut strings = Strings::new();
-        let first = strings
-            .intern(b"var_dump")
-            .expect("the table would not intern");
-        let again = strings
-            .intern(b"var_dump")
-            .expect("the table would not intern");
+        let first = strings.intern(b"var_dump").expect("intern \"var_dump\"");
+        let again = strings.intern(b"var_dump").expect("intern \"var_dump\"");
         let other = strings
             .intern(b"extension_loaded")
-            .expect("the table would not intern");
+            .expect("intern \"extension_loaded\"");
         assert_eq!(first, again);
         assert_eq!(first.address(), again.address());
         assert_ne!(first, other);
@@ -1125,7 +1121,7 @@ mod tests {
     #[test]
     fn an_interned_string_is_frozen_and_hashed_before_it_is_published() {
         let mut strings = Strings::new();
-        let s = strings.intern(b"php").expect("the table would not intern");
+        let s = strings.intern(b"php").expect("intern \"php\"");
         assert!(s.is_interned());
         assert!(s.is_persistent());
         assert_eq!(s.refcount(), 1);
@@ -1173,7 +1169,7 @@ mod tests {
         let mut strings = Strings::new();
         let s = strings
             .intern(b"zend_string")
-            .expect("the table would not intern");
+            .expect("intern \"zend_string\"");
         let frozen = strings.intern(b"x").expect("the frozen table answers");
         assert_eq!(s.header().h.get(), hash_func(b"zend_string"));
         assert_eq!(frozen.header().h.get(), hash_func(b"x"));

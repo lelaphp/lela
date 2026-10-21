@@ -1291,17 +1291,11 @@ mod tests {
         let start = r.heap.memory_usage(false);
         assert_eq!(start, crate::STARTED);
         assert_eq!(std::mem::size_of::<ObjHeader>(), 40);
-        let plain = r
-            .heap
-            .object(7, 0, 0)
-            .expect("the heap would not allocate an object");
+        let plain = r.heap.object(7, 0, 0).expect("an object");
         assert_eq!(r.heap.memory_usage(false) - start, 40);
         assert_eq!(plain.class(), 7);
         assert_eq!(plain.refcount(), 1);
-        let three = r
-            .heap
-            .object(7, 3, 0)
-            .expect("the heap would not allocate an object");
+        let three = r.heap.object(7, 3, 0).expect("an object");
         // Forty and forty-eight, the 88 of php's `zend_object_alloc` in
         // the 96-byte bin.
         assert_eq!(r.heap.memory_usage(false) - start, 40 + 96);
@@ -1414,17 +1408,13 @@ mod tests {
         let mut r = Recorder::new();
         let mut held = Vec::new();
         for _ in 1..INIT_SIZE {
-            let o = r.heap.object(1, 0, 0);
-            assert!(o.is_ok(), "the heap would not allocate an object");
-            if let Ok(o) = o {
-                held.push(o);
-            }
+            held.push(r.heap.object(1, 0, 0).expect("an object"));
         }
         let start = r.heap.memory_usage(false);
         let grown = r
             .heap
             .object(1, 0, 0)
-            .expect("the heap would not grow the store");
+            .expect("an object past the store's first table");
         assert_eq!(grown.id(), ObjectId(INIT_SIZE));
         // Sixteen kilobytes for the new table, the old eight back, and
         // the object itself.
@@ -1564,7 +1554,7 @@ mod tests {
         let o = r
             .heap
             .object_with(3, 2, 0, Counted(Arc::clone(&dropped), 42))
-            .expect("the heap would not allocate the payload");
+            .expect("an object and its payload");
         // Forty, two slots and sixteen of payload: the 88 of a 96 bin.
         assert_eq!(r.heap.memory_usage(false) - start, 96);
         assert_eq!(r.heap.native::<Counted>(o).map(|c| c.1), Some(42));

@@ -845,8 +845,7 @@ mod tests {
         assert_eq!(Zval::double(0.5).as_double(), Some(0.5));
         assert_eq!(Zval::bool(true).as_bool(), Some(true));
         let mut strings = crate::Strings::new();
-        let php = crate::Intern::intern(&mut strings, b"php")
-            .expect("the engine's table would not intern");
+        let php = crate::Intern::intern(&mut strings, b"php").expect("intern \"php\"");
         let interned = Zval::string(php);
         assert_eq!(
             interned.as_str().map(|s| s.bytes().to_vec()),
