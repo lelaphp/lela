@@ -32,6 +32,19 @@ pub fn call_stack_bounds() -> Option<CallStack> {
     platform::call_stack_bounds()
 }
 
+/// The `max_size` [`call_stack_bounds`] answers on the process's main
+/// thread, asked from whichever thread: the stack php's CLI and each
+/// php-fpm worker serve a request on, which the shell's `ulimit -s`
+/// sizes, and so the budget php's `EG(stack_limit)` is worked out of
+/// there (design §5.6). A host that serves on a thread of its own size
+/// reads php's budget here. `None` where the platform's main-thread arm
+/// cannot be asked from another thread or there is none: Haiku and a
+/// platform php has no arm for.
+#[must_use]
+pub fn main_call_stack_size() -> Option<usize> {
+    platform::main_call_stack_size()
+}
+
 /// `zend_call_stack_default_size`: the size php assumes for a thread on
 /// this platform when nothing could ask, the rlimit's default: 8 MiB on
 /// Linux, 4 MiB on FreeBSD and NetBSD, 2 MiB on `DragonFly`, 512 KiB on
@@ -143,18 +156,44 @@ mod platform {
         unsafe { libc::pthread_main_np() != 0 }
     }
 
+    unsafe extern "C" {
+        /// `pthread_main_thread_np`, the process's first thread's
+        /// `pthread_t`, which `libc` does not carry. The threading library
+        /// keeps that thread's record in static storage and answers the
+        /// stack calls for it from the record without looking the thread
+        /// up, so it reads the same after the first thread has ended, as
+        /// it does in a host that moved its `main` to another thread and
+        /// ended the first (`php_process::stand_aside`); the stack itself
+        /// stays mapped.
+        fn pthread_main_thread_np() -> libc::pthread_t;
+    }
+
     pub(super) fn call_stack_bounds() -> Option<CallStack> {
         // SAFETY: `pthread_self` takes no argument and answers the
         // calling thread's own handle, which stays valid while the
         // thread runs, and this thread is running it.
         let this = unsafe { libc::pthread_self() };
-        // SAFETY: `this` is the calling thread's handle, so it names a
-        // live thread; the call reads its attributes and writes nothing.
-        let base = unsafe { libc::pthread_get_stackaddr_np(this) }.addr();
-        // SAFETY: as above, `this` names a live thread and the call reads
-        // its attributes and writes nothing.
-        let size = unsafe { libc::pthread_get_stacksize_np(this) };
-        let max_size = if is_main_thread() {
+        bounds(this, is_main_thread())
+    }
+
+    pub(super) fn main_call_stack_size() -> Option<usize> {
+        // SAFETY: `pthread_main_thread_np` takes no argument, reads
+        // nothing of ours and answers the first thread's handle.
+        let main = unsafe { pthread_main_thread_np() };
+        bounds(main, true).map(|stack| stack.max_size)
+    }
+
+    /// `zend_call_stack_get_macos` over `thread`, the calling thread or,
+    /// where `main` says so, the process's first.
+    fn bounds(thread: libc::pthread_t, main: bool) -> Option<CallStack> {
+        // SAFETY: `thread` is the calling thread's own, which is
+        // running, or the process's first, whose record the library keeps
+        // static; the call reads that record and writes nothing.
+        let base = unsafe { libc::pthread_get_stackaddr_np(thread) }.addr();
+        // SAFETY: as above, `thread`'s record stands and the call reads
+        // it and writes nothing.
+        let size = unsafe { libc::pthread_get_stacksize_np(thread) };
+        let max_size = if main {
             let page = page_size()?;
             let guard = base.checked_sub(size)?.checked_next_multiple_of(page)?;
             base.checked_sub(guard.checked_add(page)?)?
@@ -262,6 +301,13 @@ mod platform {
             return proc_maps_bounds();
         }
         pthread_bounds()
+    }
+
+    /// The main thread's arm sizes it by the rlimit alone, which any
+    /// thread reads; the mapping below that would cap it is the main
+    /// thread's own to find, and is not asked.
+    pub(super) fn main_call_stack_size() -> Option<usize> {
+        stack_rlimit()
     }
 }
 
@@ -383,6 +429,11 @@ mod platform {
         }
         pthread_bounds()
     }
+
+    /// The main thread's arm asks the kernel, not the calling thread.
+    pub(super) fn main_call_stack_size() -> Option<usize> {
+        sysctl_bounds().map(|stack| stack.max_size)
+    }
 }
 
 /// `zend_call_stack_get_openbsd`: `pthread_stackseg_np` on a thread the
@@ -482,6 +533,12 @@ mod platform {
             return vm_bounds();
         }
         pthread_bounds()
+    }
+
+    /// The main thread's arm reads the process's argument strings, not
+    /// the calling thread.
+    pub(super) fn main_call_stack_size() -> Option<usize> {
+        vm_bounds().map(|stack| stack.max_size)
     }
 }
 
@@ -611,6 +668,12 @@ mod platform {
         }
         pthread_bounds()
     }
+
+    /// The main thread's arm sizes it by the rlimit, which any thread
+    /// reads.
+    pub(super) fn main_call_stack_size() -> Option<usize> {
+        stack_rlimit()
+    }
 }
 
 /// `zend_call_stack_get_haiku`: the kernel's information on the calling
@@ -622,6 +685,11 @@ mod platform {
     use std::ptr::null;
 
     use super::{CallStack, page_size};
+
+    /// Haiku's arm reads the calling thread's own information.
+    pub(super) fn main_call_stack_size() -> Option<usize> {
+        None
+    }
 
     pub(super) fn call_stack_bounds() -> Option<CallStack> {
         // SAFETY: a null name asks for the calling thread's own id; the
@@ -730,6 +798,12 @@ mod platform {
         }
         pthread_bounds()
     }
+
+    /// The main thread's arm sizes it by the rlimit, which any thread
+    /// reads.
+    pub(super) fn main_call_stack_size() -> Option<usize> {
+        stack_rlimit()
+    }
 }
 
 /// A platform php has no arm for, or Windows, whose arm is month two:
@@ -749,6 +823,10 @@ mod platform {
     use super::CallStack;
 
     pub(super) fn call_stack_bounds() -> Option<CallStack> {
+        None
+    }
+
+    pub(super) fn main_call_stack_size() -> Option<usize> {
         None
     }
 }

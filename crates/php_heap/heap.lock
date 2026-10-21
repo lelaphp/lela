@@ -438,6 +438,7 @@ emalloc
 erealloc
 identical
 identical_constants
+main_call_stack_size
 numeric_prefix
 owners::consumed
 owners::dropped
