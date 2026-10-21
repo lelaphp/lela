@@ -91,12 +91,14 @@ pub(super) fn one(
     binary: &Binary,
     kept: &mut Kept,
 ) -> Result<Judged> {
+    // Unserved until the run of record answers ([`of_record`]): a fence
+    // that stops before it entered nothing that is known.
+    kept.entered = Record::Unserved;
     match lacking(oracle, witness) {
         Ok(None) => {}
         Ok(Some(name)) => {
             // Not run, so what it would have entered is not known: its
             // natives are no witness short for a locale this host lacks.
-            kept.entered = Record::Unserved;
             return Ok(judged(
                 witness,
                 Judgement::Skipped,
@@ -105,17 +107,11 @@ pub(super) fn one(
                 ),
             ));
         }
-        Err(trouble) => {
-            kept.entered = Record::Unserved;
-            return borked(witness, trouble);
-        }
+        Err(trouble) => return borked(witness, trouble),
     }
     let oracle_out = match ran_by_oracle(oracle, witness) {
         Ok(out) => out,
-        Err(trouble) => {
-            kept.entered = Record::Unserved;
-            return borked(witness, trouble.context("the oracle did not run it"));
-        }
+        Err(trouble) => return borked(witness, trouble.context("the oracle did not run it")),
     };
     let on = On {
         oracle,
@@ -142,7 +138,6 @@ fn both(
     kept: &mut Kept,
 ) -> Result<Judged> {
     let Some(status) = oracle_out.exit.code() else {
-        kept.entered = Record::Unserved;
         return Ok(judged(
             witness,
             Judgement::Bork,
@@ -171,7 +166,6 @@ fn both(
         let (stdout, stderr, lines) = match streams {
             Ok(written) => written,
             Err(refused) => {
-                kept.entered = Record::Unserved;
                 return Ok(judged(
                     witness,
                     Judgement::Unpinned,
@@ -197,6 +191,7 @@ fn both(
     }
     let witness = &captured;
     if exit == Exit::Bare {
+        kept.entered = Record::default();
         return Ok(judged(
             witness,
             Judgement::Unpinned,
@@ -231,10 +226,7 @@ fn of_record(
             kept.entered = Record::Entered(natives);
             Ok(out)
         }
-        Err(trouble) => {
-            kept.entered = Record::Unserved;
-            Err(borked(witness, trouble))
-        }
+        Err(trouble) => Err(borked(witness, trouble)),
     }
 }
 
@@ -269,7 +261,6 @@ fn alone(
         ended(oracle_out)
     );
     if on.ask.accept == Accept::Streams && witness.capture {
-        kept.entered = Record::Unserved;
         return Ok(judged(
             witness,
             Judgement::Unpinned,
