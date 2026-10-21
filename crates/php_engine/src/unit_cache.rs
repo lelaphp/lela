@@ -463,6 +463,69 @@ pub(crate) type Answered = (
     Option<EarlyBound>,
 );
 
+/// Whether `unit`, compiled under `validation`, takes the names a
+/// program reads from the request it was compiled for, as php without
+/// the cache names them: [`Validation::EveryHit`] stands for php
+/// compiling every include afresh, and an anonymous class's name is made
+/// on from that request's `CG(rtd_key_counter)`, which the next include
+/// or request has moved, so a unit declaring one is never held to be
+/// served again. A unit declaring none reads the same however often it
+/// is compiled, its keys binding named declarations alone, and is held;
+/// its hit counts the keys php's compile would have made
+/// ([`crate::api::request::Request::cached_source`]). Under opcache the
+/// held unit keeps its miss's names, as `zend_persistent_script` does.
+///
+/// ```php
+/// $inc = __DIR__ . '/anonymous.inc'; file_put_contents($inc, "<?php\nreturn new class {};\n"); touch($inc, time() - 10);
+/// $n = fn ($o) => strstr(get_class($o), '$');
+/// $a = include $inc;
+/// echo $n($a), ' ', $n(eval('return new class {};')), ' ', $n($b = include $inc), ' ', $n(eval('return new class {};')), "\n";
+/// var_dump($a instanceof $b);
+/// ```
+/// ```expect
+/// $0 $1 $2 $3
+/// bool(false)
+/// ```
+/// ```php
+/// $inc = __DIR__ . '/anonymous.inc'; file_put_contents($inc, "<?php\nreturn new class {};\n"); touch($inc, time() - 10);
+/// $n = fn ($o) => strstr(get_class($o), '$');
+/// $a = include $inc;
+/// echo $n($a), ' ', $n(eval('return new class {};')), ' ', $n($b = include $inc), ' ', $n(eval('return new class {};')), "\n";
+/// var_dump($a instanceof $b);
+/// ```
+/// ```expect regime=jit-off
+/// $0 $1 $0 $2
+/// bool(true)
+/// ```
+///
+/// A class declared in a block takes a key too, which the hit of a
+/// unit with no anonymous class counts without the cache, as the
+/// compile php makes of each include counts it, and counts nothing
+/// under opcache:
+///
+/// ```php
+/// $inc = __DIR__ . '/guarded.inc'; file_put_contents($inc, "<?php\nif (!class_exists('Guarded', false)) { class Guarded {} }\n"); touch($inc, time() - 10);
+/// include $inc; include $inc;
+/// echo strstr(get_class(eval('return new class {};')), '$'), "\n";
+/// ```
+/// ```expect
+/// $2
+/// ```
+/// ```php
+/// $inc = __DIR__ . '/guarded.inc'; file_put_contents($inc, "<?php\nif (!class_exists('Guarded', false)) { class Guarded {} }\n"); touch($inc, time() - 10);
+/// include $inc; include $inc;
+/// echo strstr(get_class(eval('return new class {};')), '$'), "\n";
+/// ```
+/// ```expect regime=jit-off
+/// $1
+/// ```
+pub(crate) fn named_by_request(validation: Validation, unit: &Result<Unit, CompileError>) -> bool {
+    validation == Validation::EveryHit
+        && unit
+            .as_ref()
+            .is_ok_and(|unit| unit.classes.iter().any(|class| class.flags.is_anonymous))
+}
+
 /// A unit held nowhere, answered as `filed`.
 fn alone(unit: Result<Unit, CompileError>, filed: Filed) -> Answered {
     (
@@ -688,7 +751,8 @@ impl UnitCache {
     /// whose stamp the validation or the `protection` needs and the
     /// system does not give, and one written within `protection` seconds
     /// of `now`, is compiled and held and kept nowhere, as php behaves
-    /// without the cache; any miss while a restart is pending is kept in
+    /// without the cache, and so is a unit [`named_by_request`]; any miss
+    /// while a restart is pending is kept in
     /// the file cache alone. [`Levels::Disk`] asks and keeps in the file
     /// cache alone and counts nothing. Nothing where the file cannot be
     /// read. What is `compile`d or `decode`d takes no map-pointer offset
@@ -774,7 +838,7 @@ impl UnitCache {
             && observed.is_none_or(|stamp| {
                 protection > 0 && now.saturating_sub(i64::from(protection)) < stamp.seconds()
             });
-        if unheld {
+        if unheld || named_by_request(validation, &unit) {
             return alone(unit, Filed::Compiled);
         }
         if let (Some(disk), Ok(compiled)) = (&disk, &unit)

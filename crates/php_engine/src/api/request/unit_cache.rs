@@ -550,10 +550,8 @@ impl Request {
         );
         let scanned = scanned.get();
         self.note_loop_vars(scanned.map_or(0, |scanned| scanned.loops));
-        // The keys a refused compile made are counted as the refusal is
-        // raised ([`Request::declare_refused`]).
-        self.count_keys_made(scanned.map_or(0, |scanned| scanned.keys));
         let cached = crate::unit_cache::served(compiled, |unit| self.take_unit(unit));
+        self.count_keys_made(Scanned::keys_made(scanned, validation, &cached));
         // The primary file compiled through the host's handle, which
         // `zend_stream_fixup` reads it into and `CG(open_files)` lists.
         if handle == HandlePath::Host
@@ -1010,6 +1008,21 @@ struct Scanned {
 }
 
 impl Scanned {
+    /// The runtime definition keys the request counts for the file
+    /// served as `cached` under `validation`, where `scanned` says what a
+    /// compile that ran made: the keys an accepted unit made; none for a
+    /// refusal, whose keys are counted as it is raised
+    /// ([`Request::declare_refused`]); none for a hit under opcache, and
+    /// without it the keys php's compile of the include would have made
+    /// ([`crate::unit_cache::named_by_request`]).
+    fn keys_made(scanned: Option<Scanned>, validation: Validation, cached: &Cached) -> u32 {
+        match (scanned, cached) {
+            (Some(scanned), _) => scanned.keys,
+            (None, Some(Ok(unit))) if validation == Validation::EveryHit => super::keys_of(unit),
+            (None, _) => 0,
+        }
+    }
+
     /// What compiling `source` to `compiled` read and made.
     fn of(source: &[u8], compiled: &Result<php_unit::Unit, php_compile::CompileError>) -> Scanned {
         let unit = compiled.as_ref().ok();
