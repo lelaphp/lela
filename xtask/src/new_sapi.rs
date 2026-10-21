@@ -33,15 +33,11 @@ use anyhow::{Result, bail};
 
 use crate::layout;
 use crate::manifest::Manifest;
-use crate::new_ext::{Laid, lint_attributes};
-use crate::phpt;
+use crate::new_ext::{BUNDLE, Laid, lint_attributes, subsets, unrefused};
 use crate::reading::listed;
 
 /// The facade every host depends on (ADR-0008), relative to the root.
 const FACADE: &str = "crates/php_sapi";
-
-/// The enabled set every host serves on (ADR-0004), relative to the root.
-const BUNDLE: &str = "crates/php_bundle";
 
 /// Lay `sapi/<name>` down with its binary `binary`, `php-<name>` where the
 /// line names none, or refuse and write nothing.
@@ -63,20 +59,7 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str, binary: Option<&str>) -
         bail!("{bin}: a binary's name is ascii letters, digits, `-` and `_`");
     }
     let row = format!("sapi/{name}");
-    let Some(krate) = manifest.crate_named(&row) else {
-        bail!(
-            "seams.toml has no [[crate]] row for {row}, so the crate would have no ceiling; the row is a person's (harness §11): propose it in the commit message"
-        );
-    };
-    for (dir, what) in [(FACADE, "the facade"), (BUNDLE, "the bundle")] {
-        if !root.join(dir).join("Cargo.toml").is_file() {
-            bail!("{dir} is not a crate yet; {what} lands before any host (ADR-0008)");
-        }
-    }
-    let dir = root.join(layout::path(&row));
-    if dir.exists() {
-        bail!("{row} exists; new-sapi lays a crate down once and never overwrites");
-    }
+    let (krate, dir) = unrefused(root, manifest, &row, FACADE, "new-sapi", "host (ADR-0008)")?;
     let package = layout::package(&row);
     // The lints the manifest denies under the row, at both crate roots.
     let lints = lint_attributes(manifest, &row);
@@ -89,18 +72,11 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str, binary: Option<&str>) -
     ];
     let mut laid = Laid::files(root, dir, &row, files)?;
 
-    // Which subsets are the crate's is the `[[crate]]` row's sentence and
-    // is read there, never spelled again here (#18, harness §4.1).
-    let owned: Vec<String> = krate
-        .subsets()
-        .iter()
-        .map(|under| format!("{}/{}", phpt::CORPUS, under.display()))
-        .collect();
-    let named: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let owned = subsets(krate);
     laid.notes.push(if owned.is_empty() {
         format!("phpt subset: none; the [[crate]] row for {row} names none")
     } else {
-        format!("phpt subset: {} at the pinned tag", listed(&named))
+        format!("phpt subset: {} at the pinned tag", listed(&owned))
     });
     laid.notes.push(format!(
         "left: the host itself; {bin} serves the file its line names until the host's own request description and sink replace the template's"

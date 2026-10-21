@@ -726,9 +726,7 @@ pub(crate) fn carry(from: &Path, into: &Path) -> Result<Carried> {
             carried.kept += 1;
             continue;
         }
-        if let Some(dir) = to.parent() {
-            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        }
+        crate::make_parent(&to)?;
         fs::copy(&file, &to)
             .with_context(|| format!("copying {} to {}", file.display(), to.display()))?;
         carried.carried += 1;

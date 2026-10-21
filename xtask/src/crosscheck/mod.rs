@@ -230,9 +230,7 @@ fn kept_at(store: &Store, digest: &str, scope: &str, column: Column) -> PathBuf 
 
 /// The oracle's rendering written at `path`, [`kept_at`], and the path.
 fn keep(path: PathBuf, rendering: &[u8]) -> Result<PathBuf> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
+    crate::make_parent(&path)?;
     fs::write(&path, rendering)
         .with_context(|| format!("keeping the oracle's rendering at {}", path.display()))?;
     Ok(path)

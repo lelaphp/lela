@@ -1071,7 +1071,7 @@ impl Claim {
     /// A claim of `lane`'s in `dir`, from now, covering what `covers` says.
     fn laid(dir: &Path, lane: &str, covers: Covers) -> Result<Claim> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        crate::make_dir(dir)?;
         let mut path = dir.join(format!(
             "{lane}-{}-{}",
             std::process::id(),

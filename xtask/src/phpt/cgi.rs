@@ -32,9 +32,7 @@ const BESIDE: &str = "sapi/cgi/php-cgi";
 /// name php-cgi builds it by.
 pub(crate) fn linked(binary: &Path, root: &Path) -> Result<PathBuf> {
     let link = root.join(BESIDE);
-    if let Some(dir) = link.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
+    crate::make_parent(&link)?;
     crate::remove(&link)?;
     std::os::unix::fs::symlink(binary, &link)
         .with_context(|| format!("linking {} to {}", link.display(), binary.display()))?;
@@ -212,8 +210,7 @@ fn content_type(line: &[u8]) -> Option<Vec<u8>> {
 
 /// php's `trim()` with its default set.
 fn trim(text: &str) -> String {
-    text.trim_matches([' ', '\t', '\n', '\r', '\0', '\x0B'])
-        .to_owned()
+    text.trim_matches(super::adapter::TRIM).to_owned()
 }
 
 /// The same over bytes.

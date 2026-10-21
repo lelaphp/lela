@@ -59,7 +59,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 
 use super::{Consulted, Entry, Held, SCOPE};
 use crate::divergence::Registry;
@@ -171,7 +171,7 @@ fn compared(oracle: &Oracle<'_>, fpm: &Path, host: &Path, entry: &Entry) -> Resu
     let own = oracle.tree("fpm-compare")?;
     let (by_makala, by_fpm) = (own.join("m"), own.join("f"));
     for dir in [&by_makala, &by_fpm] {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        crate::make_dir(dir)?;
         std::fs::write(dir.join(&entry.script), &entry.program)?;
     }
     let nginx = &oracle.pin().fastcgi()?.nginx;

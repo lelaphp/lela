@@ -12,7 +12,7 @@
 //! response's head let go and its body held.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -24,7 +24,7 @@ use super::Column;
 use crate::oracle::hosts::CLI;
 use crate::oracle::{self, Ended, Observation, Oracle, normalise_in};
 use crate::scratch::Tree;
-use crate::witness::fence::Served;
+use crate::witness::{self, fence::Served};
 
 /// What serves a module's rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +107,7 @@ impl Host {
 /// engine's witness build serving the same request where it is one.
 pub(crate) fn side(
     oracle: &Oracle<'_>,
-    engine: Option<&crate::witness::Binary>,
+    engine: Option<&witness::Binary>,
     host: Host,
     module: &str,
     column: Column,
@@ -117,8 +117,8 @@ pub(crate) fn side(
     let served = match (host, engine) {
         (Host::Cli, _) => bail!("the CLI renders {module} by its flags, not as a request"),
         (Host::Cgi | Host::Fpm, None) => {
-            let path = oracle.pinned_host(crate::witness::host_of(served))?;
-            crate::witness::served_as(oracle, served, &path, &program, REQUEST, None, &[])?
+            let path = oracle.pinned_host(witness::host_of(served))?;
+            witness::served_as(oracle, served, &path, &program, REQUEST, None, &[])?
         }
         (Host::Cgi | Host::Fpm, Some(binary)) => {
             (binary.serve_request(oracle, served, &program, REQUEST, None)?).0
@@ -167,11 +167,6 @@ pub(crate) fn without_head(rules: &oracle::Normalise, bytes: Vec<u8>) -> Vec<u8>
     }
 }
 
-/// How many ports the server is offered before the run gives up: a port
-/// found free can be taken before the server binds it, and the server
-/// then says so and exits.
-const ATTEMPTS: usize = 3;
-
 /// `snippet` served by the built-in server of the CLI at `php`: the
 /// program written as the recipe's `script_name` in a tree of its own,
 /// with the recipe's preamble; the server started on a loopback port
@@ -192,14 +187,11 @@ pub(crate) fn served_by_server(
     let timeout = Duration::from_secs(recipe.limits.timeout_s);
     let started = Instant::now();
     let mut refused = Vec::new();
-    for _ in 0..ATTEMPTS {
-        let port = TcpListener::bind(("127.0.0.1", 0))
-            .and_then(|listener| listener.local_addr())
-            .context("finding a free loopback port")?
-            .port();
+    for _ in 0..witness::ATTEMPTS {
+        let port = witness::free_port()?;
         let mut server = Command::new(php);
         server.args(&recipe.args);
-        crate::witness::under_recipe(recipe, &mut server, &[], &[])?.stderr(Stdio::piped());
+        witness::under_recipe(recipe, &mut server, &[], &[])?.stderr(Stdio::piped());
         server
             .arg("-S")
             .arg(format!("127.0.0.1:{port}"))
@@ -223,8 +215,9 @@ pub(crate) fn served_by_server(
         });
     }
     bail!(
-        "{} listened on none of {ATTEMPTS} ports: {}",
+        "{} listened on none of {} ports: {}",
         php.display(),
+        witness::ATTEMPTS,
         refused.join("; ")
     )
 }

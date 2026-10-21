@@ -95,23 +95,7 @@ pub fn files(root: &Path, scope: &Path) -> Result<Vec<String>> {
 
 /// [`files`] under each of `scopes` at once, one listing of their union.
 pub(crate) fn files_under(root: &Path, scopes: &[impl AsRef<Path>]) -> Result<Vec<String>> {
-    let mut args = vec![
-        "ls-files",
-        "-z",
-        "--cached",
-        "--others",
-        "--exclude-standard",
-        "--",
-    ];
-    for scope in scopes {
-        args.push(
-            scope
-                .as_ref()
-                .to_str()
-                .context("the scope path is not UTF-8")?,
-        );
-    }
-    let mut paths = listed(root, &args)?;
+    let mut paths = listed_under(root, &[], scopes)?;
     paths.retain(|path| root.join(path).is_file());
     paths.sort_unstable();
     paths.dedup();
@@ -202,6 +186,28 @@ pub(crate) fn listed(root: &Path, args: &[&str]) -> Result<Vec<String>> {
         .filter(|e| !e.is_empty())
         .map(str::to_owned)
         .collect())
+}
+
+/// What `git ls-files` lists under `scopes`, tracked or not and not
+/// ignored, with `flags` before the pathspec (`-t` tags each entry).
+pub(crate) fn listed_under(
+    root: &Path,
+    flags: &[&str],
+    scopes: &[impl AsRef<Path>],
+) -> Result<Vec<String>> {
+    let mut args = vec!["ls-files", "-z"];
+    args.extend(flags);
+    args.extend(["--cached", "--others", "--exclude-standard", "--"]);
+    for scope in scopes {
+        let scope = scope.as_ref().to_str();
+        args.push(scope.context("the scope path is not UTF-8")?);
+    }
+    listed(root, &args)
+}
+
+/// The untracked files git does not ignore, relative to `root`.
+pub(crate) fn untracked(root: &Path) -> Result<Vec<String>> {
+    listed(root, &["ls-files", "-z", "--others", "--exclude-standard"])
 }
 
 /// What `git <args>` lists with `-z`, each entry's head and path parted
@@ -403,7 +409,7 @@ pub fn changed_since(root: &Path, base: &str) -> Result<Vec<Change>> {
         None,
     )?;
     let mut out = changes(&listing);
-    let untracked = listed(root, &["ls-files", "-z", "--others", "--exclude-standard"])?;
+    let untracked = untracked(root)?;
     out.extend(untracked.into_iter().map(|path| Change {
         path,
         deleted: false,

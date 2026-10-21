@@ -56,7 +56,6 @@
 //! this instrument is how a settled row reaches the file, and the reading
 //! it writes is what says so afterwards.
 
-use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
@@ -223,12 +222,11 @@ pub fn run(root: &Path, file: &str, proposal: &Path, dry_run: bool) -> Result<Re
         .with_context(|| format!("reading the proposal at {}", proposal.display()))?;
     let ground = Ground::of(root, file, working)?;
     let verdict = ground.judge(&proposed)?;
-    let mut reading = Reading::stamped_over(
-        INSTRUMENT,
-        file,
-        &Snapshot::disk_over(root, Path::new(file))?,
-        Path::new(file),
-    )?;
+    let stamped = || {
+        let over = Path::new(file);
+        Reading::stamped_over(INSTRUMENT, file, &Snapshot::disk_over(root, over)?, over)
+    };
+    let mut reading = stamped()?;
     if let Err(unread) = loads(file, ground.tracked(), &proposed) {
         reading.status = Status::Fail;
         reading.message = format!(
@@ -259,8 +257,7 @@ pub fn run(root: &Path, file: &str, proposal: &Path, dry_run: bool) -> Result<Re
                 // taken after the write, so the sensor beside `permit` can
                 // tell steer's write from one made beside it in the same
                 // call (#1516).
-                let after = Snapshot::disk_over(root, Path::new(file))?;
-                reading = Reading::stamped_over(INSTRUMENT, file, &after, Path::new(file))?;
+                reading = stamped()?;
             }
             let dry = if dry_run {
                 " (dry run, not written)"
@@ -421,9 +418,7 @@ fn identity(row: &Value) -> String {
             return value.clone();
         }
     }
-    let mut out = String::new();
-    write!(out, "{row}").ok();
-    out
+    row.to_string()
 }
 
 fn path_of(at: &str, key: &str) -> String {
