@@ -64,7 +64,11 @@ fn bump_entry(req: &mut Request) -> i64 {
     let Some(frame) = req.innermost_user_frame() else {
         return -2;
     };
-    let word = tier::word(req, frame, SafepointIdx::ENTRY);
+    let epoch = tier::epoch(req);
+    let Some(held) = tier::func(req, frame).and_then(|f| epoch.held(f)) else {
+        return -1;
+    };
+    let word = held.word(req, SafepointIdx::ENTRY);
     let [heat, state] = word.halves();
     if state.load(Ordering::Relaxed) == u32::MAX {
         return -1;

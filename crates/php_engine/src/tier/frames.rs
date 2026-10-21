@@ -396,7 +396,7 @@ mod tests {
     struct Initializer;
 
     impl Tier for Initializer {
-        fn safepoint(req: &mut Request, _: FrameRef, site: Site) -> Flow {
+        fn safepoint(req: &mut Request, _: FrameRef, site: Site, _: crate::tier::Held<'_>) -> Flow {
             if site != Site::Entry || std::mem::replace(&mut req.state::<Seen>().begun, true) {
                 return Flow::Continue;
             }

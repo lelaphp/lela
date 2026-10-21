@@ -66,10 +66,7 @@ use held::{Entered, Kept, Scope, Units};
 pub use sampled::{
     Building, Sample, building, building_call, class_number, numbered_class, on_heap, sample,
 };
-pub use view::{
-    Epoch, FuncRef, Held, MapPtrRaw, UnitView, epoch, epoch_state, func, landing, safepoint_at,
-    word,
-};
+pub use view::{Epoch, FuncRef, Held, MapPtrRaw, UnitView, epoch, epoch_state, func, landing};
 
 pub use crate::api::values::ClassId;
 
@@ -123,8 +120,10 @@ pub enum Flow {
 /// The tier: one method at the safepoints, and the state it declares as
 /// an extension would.
 pub trait Tier: 'static {
-    /// Asked at the three sites and nowhere else.
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow;
+    /// Asked at the three sites and nowhere else, with `held`, the op
+    /// array the loop holds for `frame` (`jit-design.md` §2.2, #3144), so
+    /// the tier reads the site's word from what the loop has in hand.
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: Held<'_>) -> Flow;
 
     /// Which of php's execution hooks the tier replaces, as phpdbg
     /// replaces `zend_execute_ex`: every unit the engine compiles is
@@ -187,7 +186,7 @@ pub struct Nop;
 impl Tier for Nop {
     #[inline(always)] // jit-design.md §2.2: one constant, so the branch on `Flow` folds
     #[allow(clippy::inline_always)]
-    fn safepoint(_: &mut Request, _: FrameRef, _: Site) -> Flow {
+    fn safepoint(_: &mut Request, _: FrameRef, _: Site, _: Held<'_>) -> Flow {
         Flow::Continue
     }
 }
@@ -456,15 +455,19 @@ fn answered(req: &mut Request, flow: Flow, frame: FrameRef) -> Result<Stepped, F
     Ok(Stepped::Same(at))
 }
 
-/// The activation of a frame, its prologue having raised nothing
-/// (design §5.6, §4.3 seam 8): the interrupt check, then `Site::Entry`,
-/// then the frame the loop goes on in.
+/// The activation of a frame serving `code`, its prologue having
+/// raised nothing (design §5.6, §4.3 seam 8): the interrupt check, then
+/// `Site::Entry`, then the frame the loop goes on in.
 #[inline]
-fn activated<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
+fn activated<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+) -> Result<Stepped, Fatal> {
     if interrupt::check(req)? {
         return Ok(Stepped::Threw(frame));
     }
-    let flow = T::safepoint(req, frame, Site::Entry);
+    let flow = T::safepoint(req, frame, Site::Entry, Held::of(code));
     answered(req, flow, frame)
 }
 
@@ -664,7 +667,13 @@ fn serve<T: Tier, D: Telling>(req: &mut Request, entry: FrameRef) -> Result<(), 
         crate::observer::returned(req, entry, None);
         return Ok(());
     }
-    let flow = T::safepoint(req, entry, Site::Entry);
+    // The op array the entry frame serves, held for its site through a
+    // share of its unit, once a serving: the loop holds none of it yet.
+    let flow = {
+        let serving = exec::standing(req, entry)?;
+        let code = exec::serving_code(&serving, entry)?;
+        T::safepoint(req, entry, Site::Entry, Held::of(code))
+    };
     let first = answered(req, flow, entry)?;
     serve_frame::<T, D>(req, first)
 }
@@ -1050,7 +1059,7 @@ fn entered<T: Tier, D: Telling>(
             return Ok(Stepped::Threw(threw));
         }
     }
-    activated::<T>(req, callee)
+    activated::<T>(req, callee, code)
 }
 
 /// The internal error for a frame the loop was sent into that serves no

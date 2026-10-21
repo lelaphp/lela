@@ -178,6 +178,11 @@ impl std::fmt::Debug for Held<'_> {
 }
 
 impl<'a> Held<'a> {
+    /// The op array the loop holds in hand.
+    pub(crate) fn of(code: &'a OpArray) -> Held<'a> {
+        Held(code)
+    }
+
     /// The op array itself, for the engine's own loop.
     pub(crate) fn code(self) -> &'a OpArray {
         self.0
@@ -190,23 +195,21 @@ impl<'a> Held<'a> {
         FuncRef(self.0.runtime_cache)
     }
 
-    /// The word of safepoint `at`, read at the op array's offset in the
-    /// epoch `req` started in ([`word`] without the frame's lookup): the
-    /// sealed word for a request's op array and past the last safepoint.
+    /// The word of safepoint `at`, what the tier reads at a site
+    /// (`jit-design.md` §3.2), read at the op array's offset in the epoch
+    /// `req` started in: the sealed word for an op array no epoch holds,
+    /// as `eval`'s and an uncached include's, and past the op array's last
+    /// safepoint.
     #[must_use]
     pub fn word(self, req: &Request, at: SafepointIdx) -> &Word {
         row(req, self.0.runtime_cache).map_or(&SEALED, |func| func.word(at))
     }
 
-    /// The landing word of opline `at` ([`landing`] without the frame's
-    /// lookup).
-    #[must_use]
-    pub fn landing(self, req: &Request, at: OplineIdx) -> &Word {
-        row(req, self.0.runtime_cache).map_or(&SEALED, |func| func.landing(at))
-    }
-
-    /// The opline safepoint `at` stands at ([`safepoint_at`] without the
-    /// frame's lookup).
+    /// The opline safepoint `at` stands at, the back-edge's header or the
+    /// `RETURN` its number names, where a tier that serves the site's
+    /// opline itself stands the frame first: a `RETURN`'s inline path
+    /// raises its site before it stands its frame there. None past the
+    /// last safepoint.
     #[must_use]
     pub fn safepoint_at(self, at: SafepointIdx) -> Option<OplineIdx> {
         self.0.safepoints.get(usize::try_from(at.0).ok()?).copied()
@@ -228,15 +231,6 @@ pub fn func(req: &Request, frame: FrameRef) -> Option<FuncRef> {
     Some(FuncRef(req.served_op_array(frame)?.runtime_cache))
 }
 
-/// The word of safepoint `at` of the op array `frame` serves, what the
-/// tier reads at a site (`jit-design.md` §3.2): the sealed word for an op
-/// array no epoch holds, as `eval`'s and an uncached include's, for a
-/// frame that serves none, and past the op array's last safepoint.
-#[must_use]
-pub fn word(req: &Request, frame: FrameRef, at: SafepointIdx) -> &Word {
-    held(req, frame).map_or(&SEALED, |func| func.word(at))
-}
-
 /// The row of the op array `frame` serves, where an epoch holds it: none
 /// for a request's op array and a frame that serves none.
 fn held(req: &Request, frame: FrameRef) -> Option<&super::published::Func> {
@@ -252,18 +246,6 @@ fn held(req: &Request, frame: FrameRef) -> Option<&super::published::Func> {
 #[must_use]
 pub fn landing(req: &Request, frame: FrameRef, at: OplineIdx) -> &Word {
     held(req, frame).map_or(&SEALED, |func| func.landing(at))
-}
-
-/// The opline safepoint `at` of the op array `frame` serves stands at,
-/// the back-edge's header or the `RETURN` its number names, where a
-/// tier that serves the site's opline itself stands the frame first: a
-/// `RETURN`'s inline path raises its site before it stands its frame
-/// there. None for a frame that serves no op array and past its last
-/// safepoint.
-#[must_use]
-pub fn safepoint_at(req: &Request, frame: FrameRef, at: SafepointIdx) -> Option<OplineIdx> {
-    let code = req.served_op_array(frame)?;
-    code.safepoints.get(usize::try_from(at.0).ok()?).copied()
 }
 
 /// Where a request keeps one slot of a held op array's `run_time_cache`:

@@ -55,7 +55,7 @@ pub(crate) struct Recorder(Policy);
 pub(crate) struct Records;
 
 impl Tier for Records {
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
         let asked = record::recording(req);
         req.state::<Kept>().asked.push(asked);
         if site != Site::Entry {

@@ -330,15 +330,17 @@ struct Unwound {
 struct Panics;
 
 impl Tier for Panics {
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
         if record::recording(req) {
             resume_unwind(Box::new("a kernel panicked under a recording"));
         }
         if site != Site::Entry || function_of(req, frame).as_deref() != Some(b"f") {
             return Flow::Continue;
         }
-        let caught = catch_unwind(AssertUnwindSafe(|| super::safepoint(req, frame, site)));
-        let word = policy::read(tier::word(req, frame, SafepointIdx::ENTRY));
+        let caught = catch_unwind(AssertUnwindSafe(|| {
+            super::safepoint(req, frame, site, held)
+        }));
+        let word = policy::read(held.word(req, SafepointIdx::ENTRY));
         let after = record::recording(req);
         let trace = tier::trace_num(req);
         let unwound = req.state::<Unwound>();
@@ -439,13 +441,13 @@ struct Spied {
 struct Spy;
 
 impl Tier for Spy {
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
         let halves = |req: &Request| {
-            let word = tier::word(req, frame, site.idx());
+            let word = held.word(req, site.idx());
             [0, 1].map(|half| word.halves()[half].load(Ordering::Relaxed))
         };
         let before = halves(req);
-        let flow = super::safepoint(req, frame, site);
+        let flow = super::safepoint(req, frame, site, held);
         let after = halves(req);
         let spied = req.state::<Spied>();
         spied.sites += 1;
@@ -502,13 +504,13 @@ struct Asked {
 struct Counted;
 
 impl Tier for Counted {
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
         let halves = |req: &Request| {
-            let word = tier::word(req, frame, site.idx());
+            let word = held.word(req, site.idx());
             [0, 1].map(|half| word.halves()[half].load(Ordering::Relaxed))
         };
         let before = halves(req);
-        let flow = super::safepoint(req, frame, site);
+        let flow = super::safepoint(req, frame, site, held);
         let written = before != halves(req);
         let asked = req.state::<Asked>();
         match site {
@@ -765,7 +767,7 @@ mod ran {
     struct Running;
 
     impl Tier for Running {
-        fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+        fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
             if site != Site::Entry || function_of(req, frame).as_deref() != Some(b"f") {
                 return Flow::Continue;
             }
@@ -930,7 +932,7 @@ mod ran {
     struct SideRuns<const PUBLISHED: bool>;
 
     impl<const PUBLISHED: bool> Tier for SideRuns<PUBLISHED> {
-        fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+        fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
             if site != Site::Entry || function_of(req, frame).as_deref() != Some(b"f") {
                 return Flow::Continue;
             }

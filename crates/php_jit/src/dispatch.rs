@@ -33,7 +33,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use php_engine::tier::Flow;
-use php_engine::tier::{self, Epoch, Fatal, FrameRef, Request, SafepointIdx, Site, Stepped, Word};
+use php_engine::tier::{
+    self, Epoch, Fatal, FrameRef, Held, Request, SafepointIdx, Site, Stepped, Word,
+};
 use php_unit::OplineIdx;
 
 use crate::compiler::{self, Job};
@@ -132,7 +134,7 @@ pub(crate) fn visit(
 ///
 /// ```
 #[inline(never)]
-pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: Held<'_>) -> Flow {
     let start = match site {
         Site::Loop(_) => Start::Loop,
         Site::Entry => Start::Enter,
@@ -167,7 +169,7 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow 
             Some(match rooted {
                 Rooted::Safepoint(at) => Holder::Root {
                     epoch,
-                    func: tier::func(req, frame)?,
+                    func: held.func(),
                     at,
                 },
                 Rooted::Landing(caller, at) => Holder::Landing {
@@ -178,7 +180,7 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow 
             })
         };
         let word = match rooted {
-            Rooted::Safepoint(at) => tier::word(req, frame, at),
+            Rooted::Safepoint(at) => held.word(req, at),
             Rooted::Landing(caller, at) => tier::landing(req, caller, at),
         };
         match visit(word, &shared.policy, start, claims, holder) {
@@ -188,7 +190,7 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow 
     };
     match (site, decided) {
         (_, Visited::Continue) => Flow::Continue,
-        (Site::Return(at), decided) => returned(req, frame, at, decided, &shared),
+        (Site::Return(at), decided) => returned(req, (frame, held), at, decided, &shared),
         (Site::Loop(header), Visited::Enter(id)) => looped(req, frame, header, id, &shared),
         (Site::Entry, Visited::Enter(id)) => run(req, frame, id, &shared),
         (Site::Loop(_) | Site::Entry, Visited::Hot(claim)) => hot(req, frame, claim, &shared),
@@ -255,12 +257,12 @@ fn landing_past(req: &Request, frame: FrameRef) -> Option<(FrameRef, OplineIdx)>
 /// ```
 fn returned(
     req: &mut Request,
-    frame: FrameRef,
+    (frame, held): (FrameRef, Held<'_>),
     at: SafepointIdx,
     decided: Visited,
     shared: &Shared,
 ) -> Flow {
-    let stepped = match tier::safepoint_at(req, frame, at) {
+    let stepped = match held.safepoint_at(at) {
         Some(stands) => {
             tier::stand(req, frame, stands);
             tier::step(req, frame)
@@ -864,7 +866,15 @@ fn went_on(
 ) -> Flow {
     let ran = match (stood.filter(|(at, id)| opens(req, *at, *id, shared)), &flow) {
         (Some((at, id)), _) => run(req, at, id, shared),
-        (None, Flow::Resume(at)) if activated => safepoint(req, *at, Site::Entry),
+        // The callee's op array, as the epoch holds it; one of the
+        // request's reads the sealed word, which nothing visits.
+        (None, Flow::Resume(at)) if activated => {
+            let epoch = tier::epoch(req);
+            match tier::func(req, *at).and_then(|f| epoch.held(f)) {
+                Some(held) => safepoint(req, *at, Site::Entry, held),
+                None => Flow::Continue,
+            }
+        }
         (None, Flow::Resume(at)) => match visit_landing(req, shared, *at, None) {
             Visited::Continue => Flow::Continue,
             Visited::Enter(id) => run(req, *at, id, shared),

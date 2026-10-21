@@ -199,7 +199,7 @@ pub(crate) mod entered {
     struct Entering<P>(PhantomData<P>);
 
     impl<P: Plan> Tier for Entering<P> {
-        fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+        fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
             if site != Site::Entry {
                 return Flow::Continue;
             }
