@@ -7,7 +7,9 @@
 
 mod support;
 
+use std::ffi::OsStr;
 use std::io::Write as _;
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::PathBuf;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
@@ -29,7 +31,7 @@ impl Connector for Counted {
 
     fn open(&self, req: &mut Request, source: &Source<'_>) -> Result<Box<dyn Connection>, Failure> {
         let _ = req;
-        let log = PathBuf::from(String::from_utf8_lossy(source.dsn).into_owned());
+        let log = PathBuf::from(OsStr::from_bytes(source.dsn));
         Ok(Box::new(Link { log }))
     }
 }

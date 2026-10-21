@@ -208,6 +208,9 @@ pub(super) struct LimitsState {
     /// (`zend_call_stack_init`) from the two `zend.*_stack_size`
     /// entries; what the compiler is held to (design §5.6).
     stack_limit: StackLimit,
+    /// The stack the request's first scope of the loop was measured to
+    /// take ([`Request::note_scope_cost`]), none before it.
+    scope_cost: Option<std::num::NonZeroUsize>,
     /// php's `EG(jit_trace_num)`, the running execution's trace number
     /// ([`crate::tier::trace_num`]), kept here beside the stack limit
     /// because a fiber switch swaps both ([`Request::switch_execution`]).
@@ -238,6 +241,7 @@ impl LimitsState {
             deadlines: crate::interrupt::Deadlines::new(timer, &interrupt),
             interrupt,
             stack_limit: StackLimit::UNCHECKED,
+            scope_cost: None,
             trace_num: TraceNum::NONE,
             reentry: None,
         }
@@ -283,7 +287,40 @@ impl Request {
         self.limits.stack_limit.reentered()
     }
 
-    /// The serving [`Self::stack_reentered`] began is over.
+    /// A scope of the loop about to serve a frame php serves in the same
+    /// `execute_ex` ([`StackLimit::nested`]): the limit moved below it
+    /// by what the scope takes, until [`Self::stack_left`] puts it back;
+    /// none where the thread has no room for one.
+    /// The charge is what a scope was measured to take, `first` before
+    /// one was; the room left below it at least `room` and twice the
+    /// charge, for what the scope's frames call, a native's call back
+    /// into the loop among them, whose frame is the size of a scope's.
+    pub(crate) fn stack_nested(&mut self, first: usize, room: usize) -> Option<Reentered> {
+        let charge = self
+            .limits
+            .scope_cost
+            .map_or(first, std::num::NonZeroUsize::get);
+        let room = room.max(charge.saturating_mul(2));
+        self.limits.stack_limit.nested(charge, room)
+    }
+
+    /// Whether a scope of the loop is still to be measured: the first
+    /// of the request.
+    pub(crate) fn scope_unmeasured(&self) -> bool {
+        self.limits.scope_cost.is_none()
+    }
+
+    /// `cost`, the stack the request's first scope of the loop took from
+    /// the call that began it to its body: what every scope after it is
+    /// charged: the loop's bodies are near one size, one scope's frame
+    /// for each of the binary's tiers and observers (1,760 to 1,792
+    /// bytes measured on #3051), and the room twice the charge.
+    pub(crate) fn note_scope_cost(&mut self, cost: std::num::NonZeroUsize) {
+        self.limits.scope_cost = Some(cost);
+    }
+
+    /// The serving [`Self::stack_reentered`] or the scope
+    /// [`Self::stack_nested`] began is over.
     pub(crate) fn stack_left(&mut self, reentered: Reentered) {
         self.limits.stack_limit.left(reentered);
     }

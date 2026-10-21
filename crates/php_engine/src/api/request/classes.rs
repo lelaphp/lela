@@ -1646,6 +1646,9 @@ impl Request {
             self.functions.push(&decl.name.0, declared);
             crate::observer::function_declared(self, declared, lowered);
         }
+        // The function table holds the op array, and what its unit made
+        // for it, from here.
+        self.bind_dynamic(unit, at);
         Ok(())
     }
 

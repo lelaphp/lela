@@ -12,9 +12,21 @@
 //! and none per call. A share is never given back while the loop
 //! serves, so the op arrays the loop keeps are borrowed from the shares
 //! it holds, and a call or a return reads one with a load and a compare.
+//!
+//! A file's unit the request compiled for itself, an `eval`'s or an
+//! uncached include's, is not held so: php frees its op array at its
+//! frame's return (`destroy_op_array` in `zend_leave_helper`), and the
+//! next `eval` is compiled in its room. So the loop serves such a frame,
+//! and what it calls, in a [`Scope`] of its own, which holds the one
+//! share of that unit, keeps what it enters apart from what the loop
+//! kept around it, and is over at the first edge that leaves the frame:
+//! the share is given back there, and the loop around it goes on with
+//! the op arrays it kept, as php's `zend_leave_helper` goes on in the
+//! caller's `EX(func)`.
 
 use std::cell::{Cell, OnceCell};
 
+use php_compile::Reentered;
 use php_heap::FrameRef;
 use php_unit::{OpArray, PublishedUnit};
 
@@ -30,6 +42,23 @@ const BLOCK: usize = 16;
 /// up afresh ([`Entered::Full`]), so what it holds stays bounded.
 const BLOCKS: usize = 16;
 
+/// What the first [`Scope`] of a request is charged of the thread's
+/// stack, before it is measured ([`Scope::measured`]): php's limit
+/// moves this far below it ([`php_compile::StackLimit::nested`]), so a
+/// scope costs a native's recursion below it none of php's budget. An
+/// optimised loop's frame is about 1,800 bytes (#3051); an unoptimised
+/// one's, with every handler in line, about 450 KiB.
+const FIRST_SCOPE_CHARGE: usize = if cfg!(debug_assertions) {
+    512 * 1024
+} else {
+    4 * 1024
+};
+
+/// The stack a frame served without a scope still has above the thread's
+/// floor where the loop stops nesting scopes: room for the compile of
+/// the next `eval`, which php's limit, at the floor there, holds.
+const SCOPE_ROOM: usize = 256 * 1024;
+
 /// How many frames, and how many functions, the loop keeps the op array
 /// of, one place per number modulo this: a return to a frame, or a call
 /// to a function, whose place another took since is a lookup again,
@@ -39,12 +68,13 @@ const KEPT: usize = 16;
 /// The units the loop holds a share of while it serves, each kept from
 /// the first frame that entered it until the loop lets them all go:
 /// added to and never changed while a serving borrows them, so what is
-/// borrowed from one stands as long as the loop holds it. A block is laid down where the one before
-/// it is full. At most one is a file's unit the request compiled for
-/// itself ([`Request::took_unit`]): a frame of a second lets them all go
-/// ([`Entered::Full`]), and each is given back to the request
-/// ([`Units::give_back`]), so an `eval` in a loop is compiled in the room
-/// of the one before it.
+/// borrowed from one stands as long as the loop holds it. A block is
+/// laid down where the one before it is full. A file's unit the request
+/// compiled for itself ([`Request::took_unit`]) is held by the [`Scope`]
+/// its frame is served in, not here, unless the machine stack has no
+/// room for one more scope: then at most one such unit is held here, a
+/// frame of a second lets them all go ([`Entered::Full`]), and each is
+/// given back to the request ([`Units::give_back`]).
 #[derive(Default)]
 pub(super) struct Units {
     blocks: [OnceCell<Box<[OnceCell<PublishedUnit>; BLOCK]>>; BLOCKS],
@@ -54,40 +84,152 @@ pub(super) struct Units {
 }
 
 /// A frame the loop enters afresh, as [`Units::enter`] found it: its op
-/// array, out of a held unit, or no place for its unit until the units
-/// held are let go.
+/// array, out of a held unit or the scope's own; a share of a file's
+/// unit the request compiled for itself, which the frame is served in a
+/// scope of its own over ([`Scope::took`]); or no place for its unit
+/// until the units held are let go.
 pub(super) enum Entered<'u> {
     Held(&'u OpArray),
+    Took(PublishedUnit, Reentered),
     Full,
 }
 
-/// The op arrays of the frames the loop entered and of the functions it
-/// called, out of the held [`Units`], each at its number modulo
-/// [`KEPT`]; a place no number holds yet holds [`Kept::NONE`].
-pub(super) struct Kept<'u> {
-    frames: [(u32, Option<&'u OpArray>); KEPT],
-    functions: [(u32, Option<&'u OpArray>); KEPT],
+/// The frames one serving of the loop serves: every frame of the
+/// serving, or a frame whose unit the request compiled for itself and
+/// the frames it calls, while it stands. A frame pushed later stands at
+/// a higher number (`FrameRef` is the position on the stack), so an
+/// edge to a frame below the scope's own has left it.
+#[derive(Clone, Copy)]
+pub(super) enum Scope<'u> {
+    /// Every frame of the serving, its units held in [`Units`].
+    Whole,
+    /// A scope of its own ([`Scope::took`]).
+    Took {
+        /// The frame the scope serves first, the lowest it serves.
+        base: FrameRef,
+        /// The share of the base frame's unit the scope holds.
+        unit: &'u PublishedUnit,
+        /// Where the stack stood at the call that began the scope.
+        above: usize,
+    },
 }
 
-impl Default for Kept<'_> {
-    fn default() -> Self {
-        Kept {
-            frames: [(Kept::NONE, None); KEPT],
-            functions: [(Kept::NONE, None); KEPT],
+/// Where the stack stands: the address of a local of the calling frame,
+/// as php's `zend_call_stack_position` reads it.
+#[inline]
+pub(super) fn here() -> usize {
+    let here = 0u8;
+    std::ptr::addr_of!(here).addr()
+}
+
+impl<'u> Scope<'u> {
+    /// `frame` and what it calls, its unit `unit`, held for the scope,
+    /// begun by a call that stood at `above` on the stack.
+    pub(super) fn took(frame: FrameRef, unit: &'u PublishedUnit, above: usize) -> Scope<'u> {
+        Scope::Took {
+            base: frame,
+            unit,
+            above,
+        }
+    }
+
+    /// A scope's body begun: where it is the request's first, what it
+    /// took of the stack since the call that began it noted as every
+    /// next scope's charge ([`Request::note_scope_cost`]). Nothing for
+    /// the whole serving.
+    #[inline]
+    pub(super) fn measured(self, req: &mut Request) {
+        if let Scope::Took { above, .. } = self
+            && let Some(cost) = req.scope_unmeasured().then(|| above.saturating_sub(here()))
+            && let Some(cost) = std::num::NonZeroUsize::new(cost)
+        {
+            req.note_scope_cost(cost);
+        }
+    }
+
+    /// The op array of `frame` where it is the scope's own, a file's
+    /// whose unit the scope holds, kept for the return to it; none for
+    /// any other, which [`Units::enter`] enters.
+    #[inline]
+    pub(super) fn own(self, kept: &mut Kept<'u>, frame: FrameRef) -> Option<&'u OpArray> {
+        let Scope::Took { base, unit, .. } = self else {
+            return None;
+        };
+        if frame != base {
+            return None;
+        }
+        let code = exec::code_of(unit);
+        kept.keep(frame, code);
+        Some(code)
+    }
+
+    /// Whether an edge to `frame` leaves the scope: a frame below its
+    /// own, which the scope around it serves.
+    #[inline]
+    pub(super) fn left(self, frame: FrameRef) -> bool {
+        match self {
+            Scope::Whole => false,
+            Scope::Took { base, .. } => frame.0 < base.0,
+        }
+    }
+}
+
+/// The op arrays of the frames a serving entered and of the functions it
+/// called, out of the held [`Units`] or its [`Scope`]'s share, each at
+/// its number modulo [`KEPT`].
+#[derive(Default)]
+pub(super) struct Kept<'u> {
+    frames: Places<'u>,
+    functions: Places<'u>,
+}
+
+/// [`KEPT`] places, each a number and the op array kept for it: the
+/// numbers apart from the op arrays, so that a new one, and one
+/// forgotten, is written as zeroes end to end with no padding between,
+/// as a scope lays one down for each `eval` it serves. A place that
+/// keeps no op array keeps nothing, whatever its number.
+#[derive(Default)]
+struct Places<'u> {
+    numbers: [u32; KEPT],
+    codes: [Option<&'u OpArray>; KEPT],
+}
+
+impl<'u> Places<'u> {
+    /// The op array kept for `number`, where its place keeps one for it.
+    #[inline]
+    fn get(&self, number: u32) -> Option<&'u OpArray> {
+        let at = number as usize % KEPT;
+        if *self.numbers.get(at)? == number {
+            *self.codes.get(at)?
+        } else {
+            None
+        }
+    }
+
+    /// `code` kept for `number`, in the place of whatever its place kept.
+    #[inline]
+    fn set(&mut self, number: u32, code: &'u OpArray) {
+        let at = number as usize % KEPT;
+        if let (Some(kept), Some(place)) = (self.numbers.get_mut(at), self.codes.get_mut(at)) {
+            *kept = number;
+            *place = Some(code);
         }
     }
 }
 
 impl Units {
-    /// `frame` entered afresh: the op array it serves, its unit held, a
-    /// function's found through the function table and a file's through
-    /// the frame's annex ([`Request::unit_of`]), and kept for the return
-    /// to the frame and for the next call to its function. None for a
-    /// frame that stands nowhere or serves nothing.
+    /// `frame` entered afresh: the op array it serves, its
+    /// unit held, a function's found through the function table and a
+    /// file's through the frame's annex ([`Request::unit_of`]), and kept
+    /// for the return to the frame and for the next call to its
+    /// function. A file's frame whose unit the request compiled for
+    /// itself is served in a scope of its own ([`Entered::Took`]), where
+    /// the machine stack has room for one. None for a frame that stands
+    /// nowhere or serves nothing.
     #[inline(never)]
     pub(super) fn enter<'u>(
         &'u self,
-        req: &Request,
+        req: &mut Request,
         kept: &mut Kept<'u>,
         frame: FrameRef,
     ) -> Option<Entered<'u>> {
@@ -96,13 +238,32 @@ impl Units {
         // A file's frame whose unit the request compiled for itself: an
         // `eval`'s, or a file no cache keeps. A function's unit is held by
         // the function table as long as the request is.
-        let took = header.function.is_none() && req.took_unit(unit);
+        if header.function.is_none() && req.took_unit(unit) {
+            let unit = PublishedUnit::clone(unit);
+            return match req.stack_nested(FIRST_SCOPE_CHARGE, SCOPE_ROOM) {
+                Some(moved) => Some(Entered::Took(unit, moved)),
+                None => self.enter_held(kept, frame, &unit, (body, None), true),
+            };
+        }
+        self.enter_held(kept, frame, unit, (body, header.function), false)
+    }
+
+    /// `frame`, serving `body` of `unit`, entered with its unit held
+    /// here; `took` where the request compiled the unit for itself.
+    fn enter_held<'u>(
+        &'u self,
+        kept: &mut Kept<'u>,
+        frame: FrameRef,
+        unit: &PublishedUnit,
+        (body, function): (exec::Body, Option<Function>),
+        took: bool,
+    ) -> Option<Entered<'u>> {
         let Some(held) = self.hold(unit, took) else {
             return Some(Entered::Full);
         };
         let code = exec::body_of(held, body)?;
         kept.keep(frame, code);
-        if let Some(function) = header.function {
+        if let Some(function) = function {
             kept.keep_called(function, code);
         }
         Some(Entered::Held(code))
@@ -166,17 +327,12 @@ impl Units {
 }
 
 impl<'u> Kept<'u> {
-    /// The number no frame and no function has, which an empty place
-    /// holds.
-    const NONE: u32 = u32::MAX;
-
     /// The op array of a callee of `function`, pushed by a call to a
     /// function the loop has called before; none otherwise, and the loop
     /// enters it.
     #[inline]
     pub(super) fn called(&self, function: Function) -> Option<&'u OpArray> {
-        let (kept, code) = *self.functions.get(function.0 as usize % KEPT)?;
-        if kept == function.0 { code } else { None }
+        self.functions.get(function.0)
     }
 
     /// The op array of `frame`, returned to from a callee, as the loop
@@ -184,8 +340,7 @@ impl<'u> Kept<'u> {
     /// number, which it enters again.
     #[inline]
     pub(super) fn returned(&self, frame: FrameRef) -> Option<&'u OpArray> {
-        let (entered, code) = *self.frames.get(frame.0 as usize % KEPT)?;
-        if entered == frame.0 { code } else { None }
+        self.frames.get(frame.0)
     }
 
     /// `frame` entered, serving `code`: kept for the return to it. A
@@ -195,16 +350,12 @@ impl<'u> Kept<'u> {
     /// to its number reads.
     #[inline]
     pub(super) fn keep(&mut self, frame: FrameRef, code: &'u OpArray) {
-        if let Some(entered) = self.frames.get_mut(frame.0 as usize % KEPT) {
-            *entered = (frame.0, Some(code));
-        }
+        self.frames.set(frame.0, code);
     }
 
     /// `function`, called and serving `code`: kept for the next call.
     fn keep_called(&mut self, function: Function, code: &'u OpArray) {
-        if let Some(called) = self.functions.get_mut(function.0 as usize % KEPT) {
-            *called = (function.0, Some(code));
-        }
+        self.functions.set(function.0, code);
     }
 
     /// Every frame the loop entered forgotten, where it goes on along an
@@ -212,6 +363,6 @@ impl<'u> Kept<'u> {
     /// `Resume` raised), which may have entered frames the loop did not:
     /// each is entered again on a return to it.
     pub(super) fn forget(&mut self) {
-        self.frames = [(Kept::NONE, None); KEPT];
+        self.frames = Places::default();
     }
 }

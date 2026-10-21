@@ -64,6 +64,7 @@ mod classes;
 use classes::AccelServed;
 pub use classes::Symbols;
 mod constants;
+mod declared_bytes;
 pub(crate) use constants::{ConstantAt, halt_offset_key};
 mod diagnostics;
 pub use diagnostics::Diagnostics;
@@ -87,7 +88,6 @@ pub use frame_reads::{ChainFrame, FrameId, FrameView};
 mod frames;
 pub(crate) use frames::CodeFrom;
 use frames::{Expand, Link, Slots, links_of};
-mod hash_bytes;
 mod include;
 pub use include::Code;
 mod ini;
@@ -326,8 +326,8 @@ pub struct Request {
     /// the request, the primary one first (`php_execute_script_ex`),
     /// then each an `INCLUDE_OR_EVAL` opened, which the once forms read
     /// before they open one (`zend_include_or_eval`), on the request's
-    /// heap ([`hash_bytes::IncludedFiles`]).
-    included_files: hash_bytes::IncludedFiles,
+    /// heap ([`include::IncludedFiles`]).
+    included_files: include::IncludedFiles,
     /// The request's constants and `PHP_SAPI` ([`constants::Constants`]).
     constants: constants::Constants,
     /// The class constants' state ([`class_constants::ClassConstants`]).
@@ -1098,7 +1098,7 @@ impl Request {
             variables: variables::VariablesState::default(),
             tables: vec![SymbolTable::global()],
             symtable_cache: Vec::new(),
-            included_files: hash_bytes::IncludedFiles::default(),
+            included_files: include::IncludedFiles::default(),
             constants: constants::Constants::default(),
             class_constants: class_constants::ClassConstants::default(),
             class_natives: Vec::new(),
