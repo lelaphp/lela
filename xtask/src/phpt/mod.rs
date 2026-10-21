@@ -417,20 +417,25 @@ impl Subset {
                 krate.name
             );
         }
-        let under = PathBuf::from(named);
-        if source.join(&under).is_dir() {
-            return Ok(Subset {
-                scope: named.to_owned(),
-                dirs: vec![Dir::at(source, under)],
-                root: source.to_path_buf(),
-                holds: Holds::Every,
-            });
+        if source.join(named).is_dir() {
+            return Ok(Subset::whole(source, PathBuf::from(named)));
         }
         bail!(
             "no subset {name:?}: the manifest has no crate {named} and no crate {as_crate}, and the pinned php-src at {} ({}) has no {named}",
             source.display(),
             manifest.pin.source.tag
         )
+    }
+
+    /// Every `.phpt` of the directory `under` of the pinned tree at
+    /// `source`, a subset of its own named by its place in the tree.
+    fn whole(source: &Path, under: PathBuf) -> Subset {
+        Subset {
+            scope: under.to_string_lossy().into_owned(),
+            dirs: vec![Dir::at(source, under)],
+            root: source.to_path_buf(),
+            holds: Holds::Every,
+        }
     }
 
     /// The subset one crate owns: every directory its row names under the
@@ -513,12 +518,7 @@ impl Subset {
         ROOTS
             .iter()
             .flat_map(|root| root.subsets(source))
-            .map(|under| Subset {
-                scope: under.to_string_lossy().into_owned(),
-                dirs: vec![Dir::at(source, under)],
-                root: source.to_path_buf(),
-                holds: Holds::Every,
-            })
+            .map(|under| Subset::whole(source, under))
             .filter(|subset| {
                 subset
                     .dirs
