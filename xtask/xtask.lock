@@ -356,6 +356,8 @@ ticket::run
 ticket::stranded
 ticket::ticket_of
 trace_dump::Ask
+trace_dump::Side
+trace_dump::Side::name
 trace_dump::kept
 trace_dump::run
 track::Ticket

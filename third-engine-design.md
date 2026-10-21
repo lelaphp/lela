@@ -695,9 +695,9 @@ The set is declared once in `seams.toml`, as its `[[seam]]` rows, and `xtask sta
 | sapi | sapi.lock | 58 |  |
 | tier | tier.lock | 118 |  |
 | layer | layer.lock | 38 |  |
-| harness | xtask.lock | 413 |  |
+| harness | xtask.lock | 415 |  |
 
-<!-- /computed in=b3ab6ef58d3f42819ed7e8675113c93ba074e374b15238d01e87860072c0b875 out=e4e55913a7323a383ce86da78d090e5fa12d2c0bfec09185a980f6f5ac231067 -->
+<!-- /computed in=edd19379a8aa1548c5a64c687dde639c73e9553aaeffca60dc20c3a6e722c980 out=0e3916c552869ae509fc74437db2be157e610863aad363d7da6f8686cb589b6a -->
 
 What a lock holds that its row does not say. `heap.lock` carries the VM stack's entry slot and its peers, `VmStack::entry`, `push_entry`, `current` and `MapTable::base`. `tier.lock` is the widening of `php_engine` toward the tier, in two sections: the face, a few dozen items reviewed one by one, and the kernels named by `php_jit`'s `kernels!` list, about three hundred, generated from the list and diffed as one section. `process.lock` is `php_process`'s surface, whose one consumer is `php_engine`. `link.lock` is `php_link`'s surface, the linker and the linked class record that the compiler and the engine both call (ADR-0012). Dax's `effects.lock` is retired, its content being `ops.lock`'s effects column. A lock is one of three kinds, and `xtask api-check` regenerates each from what it is a lock of: the public items of the crate the lock lives with (`heap.lock`, `process.lock`, `unit.lock`, `link.lock`, `api.lock`, and the harness's own `xtask.lock`), or of one module of its producer (`layer.lock`, where a crate outside the seam's consumers that `use`s the module fails); what the consumers import from the producer (`sapi.lock`, `tier.lock`, which is why both are headers carrying nothing until a consumer exists); or the rows of the file the seam is generated from (`ops.lock`, rendered from `ops.toml`'s `[[op]]` rows). All three fail on any difference; adding an item means committing the new lock line with the code. This is how "smallest possible codebase" is measured at the interface, where callers pay, not only in lines.
 

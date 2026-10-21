@@ -306,9 +306,8 @@ fn command_line() -> Result<()> {
         Command::Miri { crates } => record(&store, &miri::run(&root, &manifest, &crates)?),
         Command::Phpt(ask) => phpt_command(&root, &manifest, &store, ask),
         Command::PortMap { tree } => port_map::command(&root, &manifest, &store, tree.as_deref()),
-        ask @ (Command::CompileIdentity(_) | Command::TraceDump(_)) => {
-            compared(&root, &manifest, &store, ask)
-        }
+        Command::CompileIdentity(ask) => compile_identity::command(&root, &manifest, &store, &ask),
+        Command::TraceDump(ask) => trace_dump::command(&root, &manifest, &store, &ask),
         Command::Crosscheck { ext, staged } => {
             crosscheck_command(&root, &manifest, &store, ext, staged)
         }
@@ -341,19 +340,6 @@ fn command_line() -> Result<()> {
         Command::Worktree { .. } => bail!("worktree: answered above"),
         Command::Steer { .. } => bail!("steer: answered above"),
     }
-}
-
-/// `compile-identity` and `trace-dump`, the two lanes that hold the
-/// engine to the oracle through the registry and nothing else of the
-/// harness's own files.
-fn compared(root: &Path, manifest: &Manifest, store: &Store, ask: Command) -> Result<()> {
-    let registry = Registry::load(root)?;
-    let readings = match ask {
-        Command::CompileIdentity(ask) => compile_identity::run(root, manifest, &registry, &ask)?,
-        Command::TraceDump(ask) => trace_dump::run(root, manifest, &registry, store, &ask)?,
-        _ => bail!("compared: a lane other than compile-identity and trace-dump"),
-    };
-    record(store, &readings)
 }
 
 /// What `new-ext` or `new-sapi` laid down, a file a line, and its notes.

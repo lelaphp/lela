@@ -29,7 +29,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use crate::bench::kernels::{KERNELS, MEMORY};
 use crate::crosscheck::first_difference;
@@ -63,7 +63,7 @@ pub struct Ask {
     #[arg(long, value_name = "NAME", conflicts_with = "program")]
     pub kernel: Vec<String>,
     /// A program outside the kernels by its path, repeatable: its reading
-    /// is scoped by the file's stem.
+    /// is scoped by the file's stem, which may not be a kernel's name.
     #[arg(long, value_name = "PATH")]
     pub program: Vec<PathBuf>,
     /// The binary whose lines are held to the oracle's; without it, `php`
@@ -72,24 +72,54 @@ pub struct Ask {
     pub engine: Option<PathBuf>,
 }
 
+/// One program a run holds: its reading's scope and its path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Traced {
+    scope: String,
+    path: PathBuf,
+}
+
 impl Ask {
-    /// Each program the run holds, by its scope: the programs named, or
-    /// the kernels named or all seven.
-    fn programs(&self, root: &Path) -> Vec<(String, PathBuf)> {
+    /// Each program the run holds: the programs named, or the kernels
+    /// named or all seven. A kernel name [`KERNELS`] lacks, a program with
+    /// no stem and one whose stem is a kernel's are refused, so a reading
+    /// stands under no scope a typo made and none shadows a kernel's.
+    fn programs(&self, root: &Path) -> Result<Vec<Traced>> {
+        let traced = |scope: &str, path: PathBuf| Traced {
+            scope: scope.to_owned(),
+            path,
+        };
         if !self.program.is_empty() {
-            let stem = |path: &Path| path.file_stem().map(|s| s.to_string_lossy().into_owned());
-            let scoped = |path: &PathBuf| (stem(path).unwrap_or_default(), path.clone());
-            return self.program.iter().map(scoped).collect();
+            let named = |path: &PathBuf| {
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default();
+                ensure!(!stem.is_empty(), "{} names no program", path.display());
+                ensure!(
+                    !KERNELS.contains(&stem),
+                    "{} is scoped {stem}, a kernel's name",
+                    path.display()
+                );
+                Ok(traced(stem, path.clone()))
+            };
+            return self.program.iter().map(named).collect();
         }
         let named: Vec<&str> = self.kernel.iter().map(String::as_str).collect();
+        if let Some(unknown) = named.iter().find(|k| !KERNELS.contains(k)) {
+            bail!(
+                "{unknown} is not one of the seven kernels: {}",
+                KERNELS.join(", ")
+            );
+        }
         let kernels = if named.is_empty() {
             KERNELS
         } else {
             &named[..]
         };
         let workloads = root.join("docs/perf/workloads");
-        let at = |k: &&str| ((*k).to_owned(), workloads.join(format!("{k}.php")));
-        kernels.iter().map(at).collect()
+        let at = |k: &&str| traced(k, workloads.join(format!("{k}.php")));
+        Ok(kernels.iter().map(at).collect())
     }
 }
 
@@ -98,12 +128,32 @@ pub(crate) fn id_of(scope: &str) -> String {
     format!("{}dump/{scope}", Kind::Trace.prefix())
 }
 
-/// Where a side's lines for `scope` are kept: under the store, the
+/// The two sides a run keeps lines for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    /// The pinned php's.
+    Oracle,
+    /// The engine's.
+    Engine,
+}
+
+impl Side {
+    /// The extension of the file the side's lines are kept in, and the
+    /// side's name in a reading's message.
+    pub fn name(self) -> &'static str {
+        match self {
+            Side::Oracle => "oracle",
+            Side::Engine => "engine",
+        }
+    }
+}
+
+/// Where `side`'s lines for `scope` are kept: under the store, the
 /// instrument and the scope, `<digest>.oracle` and `<digest>.engine` for
 /// the pin's digest, so a pin bump leaves the old lines beside the new.
-pub fn kept(store: &Store, digest: &str, scope: &str, side: &str) -> PathBuf {
+pub fn kept(store: &Store, digest: &str, scope: &str, side: Side) -> PathBuf {
     let dir = store.root().join(INSTRUMENT).join(scope);
-    dir.join(format!("{digest}.{side}"))
+    dir.join(format!("{digest}.{}", side.name()))
 }
 
 /// The lines of `stream` the diff holds, each ended by a newline.
@@ -118,7 +168,9 @@ pub(crate) fn lines(stream: &[u8]) -> Vec<u8> {
 
 /// The ini both sides run under after the recipe's and `regime`'s: the
 /// kernels' memory limit, the regime's `opcache.jit_debug` without
-/// [`TRACE_EXIT`], and the engine's two directives.
+/// [`TRACE_EXIT`], and the engine's two directives. The value is read as
+/// decimal or `0x` hexadecimal; any other spelling php's
+/// `zend_ini_parse_quantity` reads refuses the run rather than be misread.
 fn ini(regime: &Regime) -> Result<Vec<String>> {
     let debug = (regime.ini.iter().rev())
         .find_map(|line| line.strip_prefix("opcache.jit_debug="))
@@ -156,6 +208,13 @@ fn engine(root: &Path, ask: &Ask) -> Result<PathBuf> {
     )
 }
 
+/// `xtask trace-dump`: [`run`] under the tracked registry, its readings
+/// recorded.
+pub(crate) fn command(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) -> Result<()> {
+    let registry = Registry::load(root)?;
+    crate::record(store, &run(root, manifest, &registry, store, ask)?)
+}
+
 /// Run what was asked for: one reading per program, written by the
 /// caller through `record`, and both sides' lines kept in the store.
 pub fn run(
@@ -171,10 +230,11 @@ pub fn run(
     let oracle = pin.oracle();
     let mut built = None;
     let mut readings = Vec::new();
-    for (scope, program) in ask.programs(root) {
+    for traced in ask.programs(root)? {
+        let scope = &traced.scope;
         // What the lines are a function of is the whole engine and the
         // program, so the reading is stamped over the workspace.
-        let reading = Reading::stamped_over(INSTRUMENT, &scope, &snapshot, Path::new("."))?;
+        let reading = Reading::stamped_over(INSTRUMENT, scope, &snapshot, Path::new("."))?;
         let mut reading = reading.under(pin);
         if let Some(why) = pin.oracle.absent() {
             reading.status = Status::Skip;
@@ -183,18 +243,18 @@ pub fn run(
             continue;
         }
         oracle.asserted()?;
-        let binary = built.get_or_insert_with(|| engine(root, ask).map_err(|e| format!("{e:#}")));
-        let judged = match binary {
-            Ok(binary) => held(
-                &oracle,
-                (store, registry),
-                (&program, binary),
-                &ini,
-                &mut reading,
-            ),
-            Err(why) => Err(anyhow!("the engine's php did not build: {why}")),
+        let held = match built.get_or_insert_with(|| engine(root, ask)) {
+            Ok(engine) => {
+                let sides = Sides {
+                    oracle: &oracle,
+                    engine,
+                    ini: &ini,
+                };
+                sides.held(&traced, (store, registry), &mut reading)
+            }
+            Err(why) => Err(anyhow!("the engine's php did not build: {why:#}")),
         };
-        if let Err(trouble) = judged {
+        if let Err(trouble) = held {
             reading.status = Status::Fail;
             reading.message = format!("{scope}: {trouble:#}");
         }
@@ -203,43 +263,75 @@ pub fn run(
     Ok(readings)
 }
 
-/// `program` run by both sides, both sides' lines kept, and the verdict
-/// on the engine's written into `reading`, scoped to the program.
-fn held(
-    oracle: &Oracle<'_>,
-    (store, registry): (&Store, &Registry),
-    (program, engine): (&Path, &Path),
-    ini: &[String],
-    reading: &mut Reading,
-) -> Result<()> {
-    if !program.is_file() {
-        bail!("there is no program at {}", program.display());
-    }
-    let ran = |binary: &Path| -> Result<Observation> {
-        oracle.run_under(&Invocation {
-            regimes: &[REGIME],
-            ini,
-            ..Invocation::new(binary, Program::File(program))
-        })
-    };
-    let theirs = ran(&oracle.pin().oracle.path)?;
-    let ours = ran(engine).context("the engine's run")?;
-    let scope = reading.scope.clone();
-    let (expected, actual) = (lines(&theirs.stderr), lines(&ours.stderr));
-    for (side, bytes) in [("oracle", &expected), ("engine", &actual)] {
-        let path = kept(store, oracle.pin().digest(), &scope, side);
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+/// What both sides of a run run under: the oracle, the engine's binary
+/// and the ini after the regime's.
+struct Sides<'a> {
+    oracle: &'a Oracle<'a>,
+    engine: &'a Path,
+    ini: &'a [String],
+}
+
+impl Sides<'_> {
+    /// `traced` run by both sides, both sides' lines kept, and the verdict
+    /// on the engine's written into `reading`.
+    fn held(
+        &self,
+        traced: &Traced,
+        (store, registry): (&Store, &Registry),
+        reading: &mut Reading,
+    ) -> Result<()> {
+        let program = traced.path.as_path();
+        ensure!(
+            program.is_file(),
+            "there is no program at {}",
+            program.display()
+        );
+        let ran = |binary: &Path| -> Result<Observation> {
+            self.oracle.run_under(&Invocation {
+                regimes: &[REGIME],
+                ini: self.ini,
+                ..Invocation::new(binary, Program::File(program))
+            })
+        };
+        let theirs = ran(&self.oracle.pin().oracle.path)?;
+        let ours = ran(self.engine).context("the engine's run")?;
+        let (expected, actual) = (lines(&theirs.stderr), lines(&ours.stderr));
+        for (side, bytes) in [(Side::Oracle, &expected), (Side::Engine, &actual)] {
+            let path = kept(store, self.oracle.pin().digest(), &traced.scope, side);
+            if let Some(dir) = path.parent() {
+                fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+            }
+            fs::write(&path, bytes).with_context(|| format!("keeping {}", path.display()))?;
         }
-        fs::write(&path, bytes).with_context(|| format!("keeping {}", path.display()))?;
+        let count = |bytes: &[u8]| String::from_utf8_lossy(bytes).lines().count() as u64;
+        reading.count("oracle_lines", count(&expected))?;
+        reading.count("engine_lines", count(&actual))?;
+        let (status, verdict) = judged(registry, &id_of(&traced.scope), &expected, &actual);
+        let ended = [(Side::Oracle, &theirs), (Side::Engine, &ours)].into_iter();
+        let ended = ended.filter(|(_, seen)| seen.exit != Ended::Status(0));
+        let ended =
+            ended.map(|(side, seen)| format!("the {}'s run ended on {}", side.name(), seen.exit));
+        let mut notes: Vec<String> = ended.collect();
+        if theirs.stdout != ours.stdout {
+            notes.push("the engine's first stream is not the oracle's".to_owned());
+        }
+        let under = format!("under [regime.{REGIME}] and {}", self.ini.join(" "));
+        let said = format!("{}: {under}: {verdict}", traced.scope);
+        reading.status = status;
+        reading.message = std::iter::once(said)
+            .chain(notes)
+            .collect::<Vec<_>>()
+            .join("; ");
+        Ok(())
     }
-    let count = |bytes: &[u8]| String::from_utf8_lossy(bytes).lines().count();
-    reading.count("oracle_lines", count(&expected) as u64)?;
-    reading.count("engine_lines", count(&actual) as u64)?;
-    let id = id_of(&scope);
-    let (status, verdict) = match oracle::compare(registry, &id, &expected, &actual) {
+}
+
+/// The verdict on the engine's lines against the oracle's under `id`:
+/// the status and what the reading says of it.
+fn judged(registry: &Registry, id: &str, expected: &[u8], actual: &[u8]) -> (Status, String) {
+    match oracle::compare(registry, id, expected, actual) {
         Verdict::Same => {
-            let n = count(&expected);
+            let n = String::from_utf8_lossy(expected).lines().count();
             (
                 Status::Pass,
                 format!("the engine's {n} TRACE lines are the oracle's"),
@@ -253,22 +345,7 @@ fn held(
             )
         }
         Verdict::Differs(diff) => (Status::Fail, first_difference(&diff, "trace dump")),
-    };
-    let ended = [("oracle", &theirs), ("engine", &ours)].into_iter();
-    let ended = ended.filter(|(_, seen)| seen.exit != Ended::Status(0));
-    let mut notes: Vec<String> = ended
-        .map(|(side, seen)| format!("the {side}'s run ended on {}", seen.exit))
-        .collect();
-    if theirs.stdout != ours.stdout {
-        notes.push("the engine's first stream is not the oracle's".to_owned());
     }
-    let under = format!("under [regime.{REGIME}] and {}", ini.join(" "));
-    reading.status = status;
-    reading.message = std::iter::once(format!("{scope}: {under}: {verdict}"))
-        .chain(notes)
-        .collect::<Vec<_>>()
-        .join("; ");
-    Ok(())
 }
 
 #[cfg(test)]
@@ -286,7 +363,7 @@ mod tests {
     }
 
     /// Both sides run the regime's `opcache.jit_debug` less the exit bit,
-    /// read in either base php reads it, after the memory limit and before
+    /// read as decimal or `0x` hexadecimal, after the memory limit and before
     /// the engine's two directives; a regime with no `jit_debug` refuses
     /// the run.
     #[test]
@@ -314,30 +391,63 @@ mod tests {
 
     /// Without a program named, the run holds the seven kernels, each by
     /// its name, at its path under the workloads; a program named is
-    /// scoped by its stem.
+    /// scoped by its stem; an unknown kernel, a program with no stem and
+    /// one scoped as a kernel are refused.
     #[test]
     fn the_run_holds_the_seven_kernels_unless_a_program_is_named() {
         let root = Path::new("/w");
-        let programs = Ask::default().programs(root);
-        let scopes: Vec<&str> = programs.iter().map(|(scope, _)| scope.as_str()).collect();
+        let programs = Ask::default().programs(root).unwrap();
+        let scopes: Vec<&str> = programs.iter().map(|t| t.scope.as_str()).collect();
         assert_eq!(scopes, KERNELS);
-        assert_eq!(programs[0].1, root.join("docs/perf/workloads/fib.php"));
-        let one = Ask {
-            kernel: vec!["nbody".to_owned()],
+        assert_eq!(programs[0].path, root.join("docs/perf/workloads/fib.php"));
+        let ask = |kernel: &str| Ask {
+            kernel: vec![kernel.to_owned()],
+            ..Ask::default()
+        };
+        let nbody = Traced {
+            scope: "nbody".to_owned(),
+            path: root.join("docs/perf/workloads/nbody.php"),
+        };
+        assert_eq!(ask("nbody").programs(root).unwrap(), [nbody]);
+        let typo = ask("nbdy").programs(root).unwrap_err().to_string();
+        assert!(
+            typo.contains("nbdy is not one of the seven kernels"),
+            "{typo}"
+        );
+        let program = |path: &str| Ask {
+            program: vec![PathBuf::from(path)],
             ..Ask::default()
         };
         assert_eq!(
-            one.programs(root),
-            [(
-                "nbody".to_owned(),
-                root.join("docs/perf/workloads/nbody.php")
-            )]
+            program("x/fiber_hot_loop.php").programs(root).unwrap()[0].scope,
+            "fiber_hot_loop"
         );
-        let named = Ask {
-            program: vec![PathBuf::from("x/fiber_hot_loop.php")],
-            ..Ask::default()
-        };
-        assert_eq!(named.programs(root)[0].0, "fiber_hot_loop");
+        for refused in ["x/fib.php", "/"] {
+            assert!(program(refused).programs(root).is_err(), "{refused}");
+        }
         assert_eq!(id_of("fib"), "trace:dump/fib");
+    }
+
+    /// The negative control without the oracle (harness §14 item 4): the
+    /// fixture's engine lines against its kept oracle lines are a fail
+    /// naming the loop's root on both sides, and the oracle's lines against
+    /// themselves a pass.
+    #[test]
+    fn the_fixtures_engine_lines_against_its_oracle_lines_fail() {
+        let fixtures = crate::package_dir().join("fixtures/trace-dump");
+        let read = |name: &str| fs::read(fixtures.join(name)).unwrap();
+        let (oracle, engine) = (read("oracle.lines"), read("engine.lines"));
+        let registry = Registry::parse("").unwrap();
+        let (status, said) = judged(&registry, "trace:dump/loop", &oracle, &engine);
+        assert_eq!(status, Status::Fail, "{said}");
+        assert!(
+            said.contains("at line 3") && said.contains("%SCRATCH%/loop.php:4"),
+            "{said}"
+        );
+        let (status, said) = judged(&registry, "trace:dump/loop", &oracle, &oracle);
+        assert_eq!(
+            (status, said.as_str()),
+            (Status::Pass, "the engine's 8 TRACE lines are the oracle's")
+        );
     }
 }

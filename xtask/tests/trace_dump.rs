@@ -18,7 +18,7 @@ use xtask::manifest::Manifest;
 use xtask::oracle::Promise;
 use xtask::reading::{Number, Reading, Status, Store};
 use xtask::scratch::Tree;
-use xtask::trace_dump::{self, Ask};
+use xtask::trace_dump::{self, Ask, Side};
 
 mod common {
     pub mod manifest;
@@ -94,7 +94,7 @@ impl Scratch {
     }
 
     /// What the run kept for `side` of `loop.php`.
-    fn kept(&self, side: &str) -> String {
+    fn kept(&self, side: Side) -> String {
         let digest = self.manifest.pin.digest();
         fs::read_to_string(trace_dump::kept(&self.store, digest, "loop", side)).unwrap()
     }
@@ -120,7 +120,11 @@ fn the_oracles_lines_are_a_pass_and_the_engines_lines_apart_are_not() {
     let oracle_lines = fs::read_to_string(fixtures().join("oracle.lines")).unwrap();
     let reading = scratch.one("oracle.lines", &registry(""));
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
-    assert_eq!(scratch.kept("oracle"), oracle_lines, "php's lines are kept");
+    assert_eq!(
+        scratch.kept(Side::Oracle),
+        oracle_lines,
+        "php's lines are kept"
+    );
     assert_eq!(count(&reading, "oracle_lines"), 8, "{reading:#?}");
     assert!(
         reading
@@ -135,10 +139,10 @@ fn the_oracles_lines_are_a_pass_and_the_engines_lines_apart_are_not() {
 
     let reading = scratch.one("engine.lines", &registry(""));
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
-    assert_eq!(scratch.kept("oracle"), oracle_lines);
+    assert_eq!(scratch.kept(Side::Oracle), oracle_lines);
     let engine_lines = fs::read_to_string(fixtures().join("engine.lines")).unwrap();
     assert_eq!(
-        scratch.kept("engine"),
+        scratch.kept(Side::Engine),
         engine_lines,
         "the engine's lines are kept"
     );
