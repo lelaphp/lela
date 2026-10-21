@@ -11,7 +11,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-use php_compile::StackLimit;
+use php_compile::{Reentered, StackLimit};
 
 use super::{Forked, Periodic, Receiving, Reentry, Request};
 use crate::api::abi::{Beneath, chain};
@@ -272,6 +272,20 @@ impl Request {
         self.limits.stack_limit
     }
 
+    /// A native's call back into PHP, or a generator's resume, entering
+    /// the loop from this frame: the limit a native's own recursion is
+    /// held to moves to php's budget below it
+    /// ([`StackLimit::reentered`]), until [`Self::left_reentry`] puts it
+    /// back.
+    pub(crate) fn reenter_stack(&mut self) -> Reentered {
+        self.limits.stack_limit.reentered()
+    }
+
+    /// The serving [`Self::reenter_stack`] began is over.
+    pub(crate) fn left_reentry(&mut self, reentered: Reentered) {
+        self.limits.stack_limit.left(reentered);
+    }
+
     /// `zend_unset_timeout` then `zend_set_timeout` over
     /// `max_execution_time` as the ini table has it now: at request
     /// start, and again whenever the entry moves, which is php's
@@ -362,7 +376,11 @@ impl Request {
 impl<'r> Limits<&'r Request> {
     /// `zend_call_stack_overflowed(EG(stack_limit))`: whether the
     /// machine stack has come down to the limit request start worked
-    /// out, `zend.max_allowed_stack_size` less `zend.reserved_stack_size`.
+    /// out, `zend.max_allowed_stack_size` less `zend.reserved_stack_size`,
+    /// and under detect php's own budget, the process's main thread's
+    /// size, below the frame that last called back into PHP, however
+    /// much larger the thread a host serves on is
+    /// (`php_compile::StackLimit`, #3142).
     /// A native that walks a nest by recursing asks it at each level and
     /// raises its own refusal, as `php_url_encode_hash_ex` raises
     /// `Maximum call stack size reached.`; the one php's engine raises is

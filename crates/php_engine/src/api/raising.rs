@@ -680,7 +680,7 @@ pub fn call_stack_end(req: &mut Request) -> Result<(), Thrown> {
 }
 
 /// `zend_call_stack_size_error`: php's sentence over `size`.
-fn call_stack_size_error(req: &mut Request, size: usize) -> Thrown {
+pub(crate) fn call_stack_size_error(req: &mut Request, size: usize) -> Thrown {
     throw_error(
         req,
         "Error",

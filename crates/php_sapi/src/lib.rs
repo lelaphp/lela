@@ -318,9 +318,12 @@ pub fn exit(status: i32) -> ! {
 /// they are touched, so a request that does not recurse holds what it
 /// would on 8 MiB. When the tail-call dispatch of §5.8 (revision 147)
 /// gives the loop a dispatcher's frame, the size comes down with what a
-/// level costs. The number in php's stack-limit `Error` is this size less
-/// `zend.reserved_stack_size`, as php's is its main thread's, which the
-/// shell's `ulimit -s` sets.
+/// level costs. The size is the loop's re-entry's alone: a native's own
+/// recursion, whose level costs about what php's C costs, is held to the
+/// size the process's main thread has, as php's is, and the number in
+/// php's stack-limit `Error` is that size less `zend.reserved_stack_size`,
+/// php's main thread's, which the shell's `ulimit -s` sets
+/// (`php_compile::StackLimit`, #3142).
 ///
 /// The witness recurses through `array_map` 6,000 levels deep, #3022's
 /// bar, which php takes whole on its main thread and the lanes' build
