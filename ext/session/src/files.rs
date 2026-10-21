@@ -609,10 +609,8 @@ mod tests {
     /// above holds the refusal.
     #[test]
     fn the_process_owns_what_it_creates() -> std::io::Result<()> {
-        let path = std::env::temp_dir().join(format!("sess-uid-{}", std::process::id()));
-        std::fs::write(&path, b"")?;
-        let owner = std::fs::metadata(&path)?.uid();
-        std::fs::remove_file(&path)?;
+        let files = php_ext::test::Files::new("session-owner", &[("created", "")]);
+        let owner = std::fs::metadata(files.path().join("created"))?.uid();
         assert!(!foreign(owner, uids()));
         Ok(())
     }
