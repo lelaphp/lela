@@ -19,10 +19,10 @@ entry
   #46 f0.CV7 [double]
   #49 f0.CV6 [packed array]
   #69 f0.CV8 [long]
-  guard #23 long -> exit 0
-  guard #6 long -> exit 1
-  guard #49 packed -> exit 2
-  guard #69 long -> exit 3
+  guard #49 packed -> exit 0
+  guard #69 long -> exit 1
+  guard #23 long -> exit 2
+  guard #6 long -> exit 3
 loop at 0, loop, interrupt exit 31
   #1 f0.CV3 [undef, ref, any] = phi(#0, #63)
   #3 f0.CV4 [undef, ref, any] = phi(#2, #65)
@@ -144,9 +144,9 @@ loop at 0, loop, interrupt exit 31
   checks direction taken -> exit 30
 end: back to 0
 exit 0: f0 0014 plain
-exit 1: f0 0014 plain f0.CV9:long
-exit 2: f0 0014 plain f0.CV9:long f0.CV10:long
-exit 3: f0 0014 plain f0.CV6:array f0.CV9:long f0.CV10:long
+exit 1: f0 0014 plain f0.CV6:array
+exit 2: f0 0014 plain f0.CV6:array f0.CV8:long
+exit 3: f0 0014 plain f0.CV6:array f0.CV8:long f0.CV9:long
 exit 4: f0 0014 plain f0.CV10=#7 f0.CV6:array f0.CV8:long f0.CV9:long f0.CV10:long
 exit 5: f0 0015 plain f0.CV10=#7 f0.CV6:array f0.CV8:long f0.CV9:long f0.CV10:long
 exit 6: f0 0016 plain f0.CV10=#7 f0.CV6:array f0.CV8:long f0.CV9:long f0.CV10:long

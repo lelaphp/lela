@@ -642,3 +642,30 @@ fn a_jump_on_a_double_warns_of_a_nan_each_time() {
     );
     assert_eq!(stdout.matches("nan is true").count(), 3, "{stdout}");
 }
+
+/// The guards a loop holds at entry stand in their slots' order, as
+/// php's code holds the types the trace entered with slot by slot, so
+/// each exit knows the types of the slots before its own: `$n`, `$s`
+/// and `$i`, as the pinned php's `TRACE 1 exit info` lists `exit_0`,
+/// `exit_1` knowing `$n` and `exit_2` knowing `$n` and `$s`.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn the_entry_guards_stand_in_their_slots_order() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $i; } return $s; }
+        echo f(5), \"\\n\";",
+    )?;
+    let entered: Vec<(u32, usize)> = (ir.guards.iter())
+        .filter(|guard| guard.at == GuardAt::Entry)
+        .filter_map(|guard| match guard.check {
+            Check::Type { value, .. } => {
+                let exit = &ir.exits[usize::from(guard.exit.0)];
+                Some((ir.values[value.0 as usize].slot.var, exit.known.len()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(entered, [(0, 0), (1, 1), (2, 2)], "{}", dump::render(&ir));
+    Ok(())
+}

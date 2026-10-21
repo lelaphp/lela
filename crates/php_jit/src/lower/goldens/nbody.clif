@@ -35,28 +35,28 @@ function u0:0(i64, i64) -> i32 system_v {
                                     v290 -> v20
                                     v309 -> v20
                                     v2 = load.i64 notrap aligned v0+8
-                                    v3 = load.i8 notrap aligned v1+232
-                                    v4 = iconst.i8 4
-                                    v5 = icmp ne v3, v4  ; v4 = 4
-                                    brif v5, block1, block2
+                                    v3 = load.i64 notrap aligned v1+176
+                                    v4 = load.i32 notrap aligned v3+8
+                                    v5 = iconst.i32 4
+                                    v6 = band v4, v5  ; v5 = 4
+                                    v7 = iconst.i32 0
+                                    v8 = icmp eq v6, v7  ; v7 = 0
+                                    brif v8, block1, block2
 
                                 block2:
-                                    v6 = load.i8 notrap aligned v1+248
-                                    v7 = iconst.i8 4
-                                    v8 = icmp ne v6, v7  ; v7 = 4
-                                    brif v8, block3, block4
+                                    v9 = load.i8 notrap aligned v1+216
+                                    v10 = iconst.i8 4
+                                    v11 = icmp ne v9, v10  ; v10 = 4
+                                    brif v11, block3, block4
 
                                 block4:
-                                    v9 = load.i64 notrap aligned v1+176
-                                    v10 = load.i32 notrap aligned v9+8
-                                    v11 = iconst.i32 4
-                                    v12 = band v10, v11  ; v11 = 4
-                                    v13 = iconst.i32 0
-                                    v14 = icmp eq v12, v13  ; v13 = 0
+                                    v12 = load.i8 notrap aligned v1+232
+                                    v13 = iconst.i8 4
+                                    v14 = icmp ne v12, v13  ; v13 = 4
                                     brif v14, block5, block6
 
                                 block6:
-                                    v15 = load.i8 notrap aligned v1+216
+                                    v15 = load.i8 notrap aligned v1+248
                                     v16 = iconst.i8 4
                                     v17 = icmp ne v15, v16  ; v16 = 4
                                     brif v17, block7, block8

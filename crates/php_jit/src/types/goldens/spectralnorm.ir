@@ -8,10 +8,10 @@ entry
   #8 f1.CV2 [undef]
   #18 f0.CV1 [packed array]
   #23 f0.CV0 [long]
-  guard #4 long -> exit 0
-  guard #2 long -> exit 1
-  guard #18 packed -> exit 2
-  guard #0 double -> exit 3
+  guard #18 packed -> exit 0
+  guard #4 long -> exit 1
+  guard #0 double -> exit 2
+  guard #2 long -> exit 3
 loop at 0, loop, interrupt exit 18
   #1 f0.CV4 [double] reg = phi(#0, #21)
   #3 f0.CV5 [long] reg = phi(#2, #22)
@@ -65,9 +65,9 @@ loop at 0, loop, interrupt exit 18
   checks direction taken -> exit 17
 end: back to 0
 exit 0: f0 0008 plain
-exit 1: f0 0008 plain f0.CV3:long
-exit 2: f0 0008 plain f0.CV3:long f0.CV5:long
-exit 3: f0 0008 plain f0.CV1:array f0.CV3:long f0.CV5:long
+exit 1: f0 0008 plain f0.CV1:array
+exit 2: f0 0008 plain f0.CV1:array f0.CV3:long
+exit 3: f0 0008 plain f0.CV1:array f0.CV3:long f0.CV4:double
 exit 4: f0 0008 plain f0.CV4=#1 f0.CV5=#3 f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long
 exit 5: f0 0011 restore call f0.CV4=#1 f0.CV5=#3 f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long
 exit 6: f1 0002 plain f0.CV4=#1 f0.CV5=#3 f1.CV0:long f1.CV1:long

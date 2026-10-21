@@ -1560,7 +1560,7 @@ impl<'a> Builder<'a> {
         let mut order: Vec<(Order, Source)> = Vec::new();
         for (at, guard) in self.guards.iter().enumerate() {
             let key = match guard.at {
-                GuardAt::Entry => Order::Entry,
+                GuardAt::Entry => Order::Entry(self.guarded_slot(guard.check)),
                 GuardAt::Before(op) => Order::At(op, Stage::Before),
                 GuardAt::Within(op) => Order::At(op, Stage::Within),
             };
@@ -1653,6 +1653,16 @@ impl<'a> Builder<'a> {
         numbered.exits = exits.specs;
         numbered.unwinds = unwinds;
         Ok(numbered)
+    }
+
+    /// The slot a guard holds a value of; none for a guard on no value.
+    fn guarded_slot(&self, check: Check) -> Option<Slot> {
+        match check {
+            Check::Type { value, .. }
+            | Check::Deref { value, .. }
+            | Check::Layout { value, .. } => Some(self.val(value).slot),
+            Check::Direction { .. } | Check::Stands { .. } => None,
+        }
     }
 
     /// A loop's interrupt test: at its header, storing what the header's
@@ -2037,8 +2047,10 @@ struct Numbered {
 /// Where an exit falls in the order the trace meets them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Order {
-    /// A guard held as the trace enters.
-    Entry,
+    /// A guard held as the trace enters, by the slot it holds, as php's
+    /// code holds the entry's types slot by slot (`zend_jit_trace`'s
+    /// loop over `op_array->last_var + op_array->T`).
+    Entry(Option<Slot>),
     /// At an op, in the order of the op's stages.
     At(OpId, Stage),
     /// Where the trace ends: a loop's interrupt test, or the exit a trace

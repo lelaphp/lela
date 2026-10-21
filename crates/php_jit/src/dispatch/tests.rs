@@ -573,8 +573,9 @@ fn a_main_loop_no_call_activates_is_a_root_at_its_header() {
 /// Under `jit.mode=exit-fuzz` every guard a compiled trace holds fails
 /// once, the loop's interrupt test among them, and the interpreter goes
 /// on at each landing to print what it prints under `force`: `a`'s three
-/// entry guards, on `$n`, `$s` and `$i`, leave through exits of their
-/// own, each knowing the types those before it held, as
+/// entry guards, on `$n`, `$s` and `$i` in their slots' order, leave
+/// through exits of their own, each knowing the types those before it
+/// held, as
 /// php's stack map does; the interrupt test through its own, numbered
 /// last and growing no side trace, php's `ZEND_JIT_EXIT_TO_VM`; the
 /// `+=`'s and the increment's overflow guards through theirs, where the
