@@ -1585,8 +1585,7 @@ mod tests {
     /// test refuses the call before it.
     fn destructible() -> php_unit::decl::ClassDecl {
         use php_unit::decl::{
-            ClassDecl, ClassFlags, ClassKind, EnumBacking, FunctionDecl, MethodDecl, Name,
-            Visibility,
+            ClassDecl, ClassFlags, ClassKind, EnumBacking, MethodDecl, Name, Visibility,
         };
         ClassDecl {
             name: Name(b"Destructible".as_slice().into()),
@@ -1602,19 +1601,7 @@ mod tests {
             constants: Vec::new(),
             properties: Vec::new(),
             methods: vec![MethodDecl {
-                function: FunctionDecl {
-                    name: Name(b"__destruct".as_slice().into()),
-                    parameters: Vec::new(),
-                    return_type: None,
-                    returns_by_ref: false,
-                    is_generator: false,
-                    attributes: Vec::new(),
-                    doc_comment: None,
-                    file: Name(Box::new([])),
-                    line: 0,
-                    end_line: 0,
-                    frameless: Vec::new(),
-                },
+                function: php_unit::decl::native_function(b"__destruct"),
                 visibility: Visibility::Public,
                 is_instance: true,
                 is_abstract: false,

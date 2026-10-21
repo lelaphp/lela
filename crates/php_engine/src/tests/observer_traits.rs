@@ -8,11 +8,9 @@
 use php_macros::php_class;
 use php_unit::decl::ClassKind;
 
-use super::observer::{observed, serve_main};
-use super::test_ext::{Event, Phase, Recording, TestExt};
+use super::observer::observe;
+use super::test_ext::{Event, Phase, TestExt};
 use crate::api::abi::{Extension, ExtensionBuilder, This};
-use crate::engine::Engine;
-use crate::test::Files;
 
 /// `trait Greets { function greet(): bool }`, a native trait as
 /// `_ZendTestTrait` is one.
@@ -43,21 +41,14 @@ fn event(phase: Phase) -> Event {
 /// once, under the first class to call it.
 #[test]
 fn a_native_trait_method_is_observed_under_the_class_that_uses_it() {
-    let rec = Recording::start();
-    let engine = Engine::cli_builder()
-        .extensions(&[greets(), TestExt::<0>::observing()])
-        .build();
-    let files = Files::new("observer-traits-native-trait", &[]);
-    rec.mark("built");
-    let served = serve_main(
-        &engine,
-        &files,
+    let (served, events) = observe(
+        &[greets(), TestExt::<0>::observing()],
+        "observer-traits-native-trait",
         "<?php\nclass Foo { use Greets; }\nclass Bar { use Greets; }\nclass Baz extends Foo {}\n\
          var_dump((new Foo)->greet(), (new Bar)->greet(), (new Baz)->greet());\n",
     );
-    rec.mark("served");
     assert_eq!(served.stdout_text(), "bool(true)\nbool(true)\nbool(true)\n");
-    let calls: Vec<Event> = observed(&rec.events().between("built", "served"))
+    let calls: Vec<Event> = events
         .into_iter()
         .filter(|event| {
             matches!(
@@ -85,25 +76,18 @@ fn a_native_trait_method_is_observed_under_the_class_that_uses_it() {
 /// `zend_traits_copy_functions` gives the copy the alias's visibility.
 #[test]
 fn a_native_trait_method_taken_under_an_alias_carries_its_name_and_visibility() {
-    let rec = Recording::start();
-    let engine = Engine::cli_builder()
-        .extensions(&[greets(), TestExt::<0>::observing()])
-        .build();
-    let files = Files::new("observer-traits-native-trait-alias", &[]);
-    rec.mark("built");
-    let served = serve_main(
-        &engine,
-        &files,
+    let (served, events) = observe(
+        &[greets(), TestExt::<0>::observing()],
+        "observer-traits-native-trait-alias",
         "<?php\nclass Foo { use Greets { greet as hello; greet as protected prot; } }\n\
          var_dump((new Foo)->hello());\n\
          try { (new Foo)->prot(); } catch (Error $e) { echo $e->getMessage(), \"\\n\"; }\n",
     );
-    rec.mark("served");
     assert_eq!(
         served.stdout_text(),
         "bool(true)\nCall to protected method Foo::prot() from global scope\n"
     );
-    let calls: Vec<Event> = observed(&rec.events().between("built", "served"))
+    let calls: Vec<Event> = events
         .into_iter()
         .filter(|event| {
             matches!(

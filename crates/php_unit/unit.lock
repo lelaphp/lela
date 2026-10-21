@@ -115,6 +115,8 @@ decl::Type::mask
 decl::Visibility
 decl::class_attribute_refusal
 decl::hook_attribute_refusal
+decl::native_function
+decl::parameter
 decl::shown
 decl::shown_bytes
 enum_methods

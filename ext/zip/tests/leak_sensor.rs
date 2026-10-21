@@ -3,7 +3,7 @@
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
 
-use php_ext::test::{Capture, Engine, LeakSensor};
+use php_ext::test::{Capture, Engine};
 
 /// What one request of an armed engine with this extension and the
 /// standard and pcre ones it lists and matches names through wrote.
@@ -16,7 +16,6 @@ fn armed(source: &str) -> String {
             php_ext_pcre::extension(),
             php_ext_zip::extension(),
         ])
-        .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(source, Capture::default());
     served.stdout_text()

@@ -4,23 +4,14 @@
 //! still held.
 #![cfg(debug_assertions)]
 
-use php_ext::test::{Capture, Engine, LeakSensor};
+mod support;
+
+use php_ext::test::{Capture, Engine};
 
 /// What one request of an armed engine with this extension and the
 /// three it is built over wrote.
 fn armed(source: &str) -> String {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_json::extension(),
-            php_ext_uri::extension(),
-            php_ext_standard::extension(),
-            php_ext_hash::extension(),
-            php_ext_spl::extension(),
-            php_ext_phar::extension(),
-        ])
-        .sense_leaks(LeakSensor::Armed)
-        .build();
+    let engine = support::engine();
     let served = engine.serve_capture(source, Capture::default());
     served.stdout_text()
 }
@@ -58,17 +49,8 @@ unlink($p);
 #[test]
 fn the_directory_a_build_iterates_is_given_up() {
     let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_json::extension(),
-            php_ext_uri::extension(),
-            php_ext_standard::extension(),
-            php_ext_hash::extension(),
-            php_ext_spl::extension(),
-            php_ext_phar::extension(),
-        ])
+        .extensions(support::extensions())
         .ini("phar.readonly", "0")
-        .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(
         r#"<?php

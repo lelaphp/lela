@@ -3542,19 +3542,7 @@ mod tests {
                 ..OpArray::default()
             },
             functions: vec![(
-                php_unit::decl::FunctionDecl {
-                    name: php_unit::decl::Name::from("f"),
-                    parameters: Vec::new(),
-                    return_type: None,
-                    returns_by_ref: false,
-                    is_generator: false,
-                    attributes: Vec::new(),
-                    doc_comment: None,
-                    file: php_unit::decl::Name::default(),
-                    line: 0,
-                    end_line: 0,
-                    frameless: Vec::new(),
-                },
+                php_unit::decl::native_function(b"f"),
                 OpArray {
                     cache_size: 8,
                     ..OpArray::default()

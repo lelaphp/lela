@@ -3,14 +3,13 @@
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
 
-use php_ext::test::{Capture, Engine, LeakSensor};
+use php_ext::test::{Capture, Engine};
 
 /// `src` served by an armed engine with this extension alone, what it
 /// wrote held to `expected`.
 fn served(src: &str, expected: &str) {
     let engine = Engine::builder()
         .extensions(&[php_ext_gd::extension()])
-        .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(src, Capture::default());
     served.assert_clean(expected);

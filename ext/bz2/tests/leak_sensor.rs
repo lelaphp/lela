@@ -3,7 +3,7 @@
 //! ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
 
-use php_ext::test::{Capture, Engine, LeakSensor};
+use php_ext::test::{Capture, Engine};
 
 /// What one request of an armed engine with this extension and the
 /// standard one it writes files through wrote.
@@ -15,7 +15,6 @@ fn armed(source: &str) -> String {
             php_ext_standard::extension(),
             php_ext_bz2::extension(),
         ])
-        .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(source, Capture::default());
     served.stdout_text()

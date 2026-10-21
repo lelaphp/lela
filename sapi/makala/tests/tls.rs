@@ -24,7 +24,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use common::{Ending, Server, eventually, manifest_dir, read_until_closed};
+use common::{Ending, Request, Server, eventually, manifest_dir, read_until_closed};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, ProtocolVersion, RootCertStore, StreamOwned};
@@ -124,7 +124,7 @@ fn connect(
 /// `close_notify`.
 fn scheme_over(stream: &mut StreamOwned<ClientConnection, TcpStream>) -> String {
     stream
-        .write_all(b"GET /scheme.php HTTP/1.1\r\nHost: a.test\r\nConnection: close\r\n\r\n")
+        .write_all(&Request::get("/scheme.php").host("a.test").close().bytes())
         .unwrap_or_else(|e| panic!("{e}"));
     let mut read = Vec::new();
     stream
@@ -189,10 +189,7 @@ fn tls_1_3_and_1_2_serve_a_php_request_and_tls_1_1_is_refused() {
     );
     assert_ne!(refused.ending, Ending::Open);
     // The clear port serves on beside it, saying `http` and no `HTTPS`.
-    let clear = server.exchange(
-        b"GET /scheme.php HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n",
-        WAIT,
-    );
+    let clear = server.exchange(&Request::get("/scheme.php").close().bytes(), WAIT);
     assert_eq!(clear.response().body, b"http (no HTTPS)\n");
 }
 

@@ -10,10 +10,9 @@
 
 mod common;
 
-use std::io::Write;
 use std::process::{Command, Stdio};
 
-use common::{Server, read_response};
+use common::{Request, Server, read_response};
 
 /// The engine makala starts carries neither `pcntl` nor `posix`, though
 /// the build this test runs under turns both features on, as a build of
@@ -35,10 +34,7 @@ fn a_build_with_pcntl_and_posix_on_serves_without_them() {
         )],
     );
     let server = Server::start(&root);
-    let mut stream = server.connect();
-    stream
-        .write_all(b"GET /t.php HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
-        .unwrap_or_else(|e| panic!("{e}"));
+    let mut stream = server.send(&Request::get("/t.php").close());
     let response = read_response(&mut stream);
     assert_eq!(
         String::from_utf8_lossy(&response.body),

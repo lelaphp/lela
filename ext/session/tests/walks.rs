@@ -3,7 +3,9 @@
 //! released after its free fails the test as the `InternalError` it is.
 #![cfg(debug_assertions)]
 
-use php_ext::test::{Capture, Engine, LeakSensor};
+mod support;
+
+use php_ext::test::Capture;
 
 /// `session_unset` destroys the session's variables in order, serving
 /// each destructor as it goes, and ends where a destructor replaces
@@ -11,15 +13,7 @@ use php_ext::test::{Capture, Engine, LeakSensor};
 /// after are left as they were.
 #[test]
 fn session_unset_ends_where_a_destructor_replaces_the_session() {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_uri::extension(),
-            php_ext_standard::extension(),
-            php_ext_session::extension(),
-        ])
-        .sense_leaks(LeakSensor::Armed)
-        .build();
+    let engine = support::engine();
     let served = engine.serve_capture(
         r#"<?php
 ob_start();

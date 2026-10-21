@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-use xtask::divergence::Registry;
+use xtask::divergence::{Registry, Status};
 use xtask::oracle::{
     self, PROMISE_VARIABLE, Pin, Program, Promise, Promised, Regime, Runner, Split, TREE_VARIABLE,
     Verdict,
@@ -19,9 +19,11 @@ use xtask::scratch::Tree;
 
 mod common {
     pub mod manifest;
+    pub mod registry;
     pub mod repo;
     pub mod run;
 }
+use common::registry::{Row, rows};
 use common::repo::Repo;
 use common::run::xtask;
 
@@ -45,17 +47,8 @@ fn pin() -> Option<Pin> {
 /// mechanics and not which rows a person keeps in `docs/divergence.toml`:
 /// a row dropped there breaks nothing here (#2142).
 fn registry() -> Registry {
-    Registry::parse(
-        r#"
-[[divergence]]
-id = "trace:fixture"
-kind = "trace"
-reason = "A difference a person accepted, for the comparison's tests."
-status = "accepted"
-since = "2026-10-06"
-"#,
-    )
-    .unwrap()
+    rows(&[Row::accepted("trace:fixture")
+        .reason("A difference a person accepted, for the comparison's tests.")])
 }
 
 #[test]
@@ -1136,21 +1129,10 @@ fn compare_is_differs_with_the_diff_otherwise() {
 
 #[test]
 fn an_open_or_fixed_row_does_not_accept_a_difference() {
-    let text = r#"
-[[divergence]]
-id = "witness:open"
-kind = "witness"
-reason = ""
-status = "open"
-since = "2026-09-07"
-[[divergence]]
-id = "witness:fixed"
-kind = "witness"
-reason = "Was accepted; now the engine agrees."
-status = "fixed"
-since = "2026-09-07"
-"#;
-    let registry = Registry::parse(text).unwrap();
+    let registry = rows(&[
+        Row::open("witness:open"),
+        Row::accepted("witness:fixed").status(Status::Fixed),
+    ]);
     for id in ["witness:open", "witness:fixed"] {
         let verdict = oracle::compare(&registry, id, b"a", b"b");
         assert!(matches!(verdict, Verdict::Differs(_)), "{id}: {verdict:?}");

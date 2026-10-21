@@ -17,9 +17,9 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_unit::decl::{FunctionDecl, MethodDecl, Name, Parameter, Type, Visibility};
-
-use crate::api::__private::{native_function, parameter};
+use php_unit::decl::{
+    FunctionDecl, MethodDecl, Name, Parameter, Type, Visibility, native_function, parameter,
+};
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;

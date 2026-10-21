@@ -68,6 +68,15 @@ pub(crate) fn check(input: &str, expected: &[(SyntaxKind, &str)]) {
     check_opts(input, &LexOptions::default(), expected);
 }
 
+/// [`check`] over `body` after `<?php `, the tag's token taken as read,
+/// for the fixtures that do not care about the tag.
+#[track_caller]
+pub(crate) fn check_php(body: &str, expected: &[(SyntaxKind, &str)]) {
+    let input = format!("<?php {body}");
+    let full = [&[(OPEN_TAG, "<?php ")], expected].concat();
+    check(&input, &full);
+}
+
 /// Byte-input variant for non-UTF-8 fixtures (BOM, NUL, binary trailers).
 #[track_caller]
 pub(crate) fn check_bytes(input: &[u8], expected: &[(SyntaxKind, &[u8])]) {

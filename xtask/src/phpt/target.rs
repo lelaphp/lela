@@ -472,6 +472,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::common::registry::{Row, rows};
     use crate::phpt::against::diff;
     use crate::scratch::Tree;
 
@@ -489,13 +490,10 @@ mod tests {
     /// The registry the fixture reads under: a row over the test the engine
     /// skipped, and one over the oracle's own miss.
     fn registry() -> Registry {
-        let row = |name: &str| {
-            format!(
-                "[[divergence]]\nid = \"{}\"\nkind = \"phpt\"\nreason = \"a person's reason\"\nstatus = \"accepted\"\nsince = \"2026-09-30\"\n",
-                id(name)
-            )
-        };
-        Registry::parse(&format!("{}\n{}", row("row.phpt"), row("oracle-row.phpt"))).unwrap()
+        rows(&[
+            Row::accepted(&id("row.phpt")),
+            Row::accepted(&id("oracle-row.phpt")),
+        ])
     }
 
     /// Where the tests' reading points to what it does not name.
@@ -640,12 +638,8 @@ mod tests {
         control
             .verdicts
             .insert(id("covered.phpt"), Judgement::Diverged);
-        let registry = Registry::parse(&format!(
-            "[[divergence]]\nid = \"{}\"\nkind = \"phpt\"\nreason = \"a person's reason\"\nstatus = \"accepted\"\nsince = \"2026-10-05\"\ncovers = [\"{}\"]\n",
-            id("oracle-row.phpt"),
-            id("covered.phpt")
-        ))
-        .unwrap();
+        let registry =
+            rows(&[Row::accepted(&id("oracle-row.phpt")).covers(&[&id("covered.phpt")])]);
         let ids = [
             "covered.phpt",
             "gh10370_1.phpt",

@@ -39,21 +39,12 @@ pub fn frameless_table<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decl::Name;
+    use crate::decl::native_function;
 
     fn declared(name: &str, frameless: &[u32]) -> FunctionDecl {
         FunctionDecl {
-            name: Name::from(name),
-            parameters: Vec::new(),
-            return_type: None,
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
-            file: Name::default(),
-            line: 0,
-            end_line: 0,
             frameless: frameless.to_vec(),
+            ..native_function(name.as_bytes())
         }
     }
 

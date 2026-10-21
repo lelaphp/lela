@@ -19,11 +19,10 @@
 use std::cmp::Ordering;
 
 use php_unit::Level;
-use php_unit::decl::{Bare, FunctionDecl, MethodDecl, Name, Type};
+use php_unit::decl::{Bare, FunctionDecl, MethodDecl, Name, Type, native_function};
 
 use php_macros::php_class;
 
-use crate::api::__private::native_function;
 use crate::api::abi::{
     Callable, CloneObj, ConstArray, Core, CoreTable, DebugInfo, Entry, FromArgument, GcTable,
     Instance, NamedVariadic, ObjectHandlers, Passed, Raw, Refusals, Static, This, Union, Untyped,

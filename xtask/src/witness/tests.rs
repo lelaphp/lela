@@ -18,7 +18,7 @@ use super::judge::{Run, held};
 use super::process::Binary;
 use super::{Accept, Ask, Judgement, Tally, capture, judge};
 use crate::cfg::Target;
-use crate::common::registry::registry;
+use crate::common::registry::{Row, registry, rows};
 use crate::divergence::Registry;
 use crate::manifest::Manifest;
 use crate::oracle::{Observation, Program, Promise};
@@ -519,12 +519,13 @@ fn a_witness_that_differs_notes_the_difference_under_each_run_that_missed() {
 }
 
 /// Two runs made up for [`held`], so the one rule both are held by is
-/// read without php: the oracle's streams and status, then the engine's.
+/// read without php: the oracle's streams and status, then the engine's,
+/// under an accepted row over the fence where `accepted` says so.
 fn held_over(
     fences: &str,
     oracle: (&str, i32),
     engine: (&str, i32),
-    rows: &str,
+    accepted: bool,
 ) -> (Judgement, String) {
     let text = block(fences);
     let found = fence::extract(Path::new("ext/fixture/src/lib.rs"), &text);
@@ -536,10 +537,14 @@ fn held_over(
         wall: Duration::ZERO,
     };
     let (oracle, engine) = (observed(oracle), observed(engine));
-    let rows = rows.replace("{id}", &witness.id());
+    let registry = if accepted {
+        rows(&[Row::accepted(&witness.id()).reason("A row a person wrote.")])
+    } else {
+        registry("")
+    };
     let judged = held(
         &manifest().pin,
-        &registry(&rows),
+        &registry,
         witness,
         witness.exit,
         &[(Run::Oracle, &oracle), (Run::Engine, &engine)],
@@ -547,15 +552,13 @@ fn held_over(
     (judged.judgement, judged.note)
 }
 
-const ROW: &str = "[[divergence]]\nid = \"{id}\"\nkind = \"witness\"\nreason = \"A row a person wrote.\"\nstatus = \"accepted\"\nsince = \"2026-09-09\"\n";
-
 /// The oracle's run is held to the fences as the engine's is (#783): a
 /// fence the oracle does not meet fails however the engine ran, and the
 /// note names the run that missed, by its stream or by its status.
 #[test]
 fn a_fence_the_oracle_does_not_meet_fails_and_names_the_oracle() {
     let fence = "/// ```expect\n/// 1\n/// ```\n";
-    let (judgement, note) = held_over(fence, ("2", 0), ("1", 0), "");
+    let (judgement, note) = held_over(fence, ("2", 0), ("1", 0), false);
     assert_eq!(judgement, Judgement::Fail, "{note}");
     assert!(
         note.contains("not what the oracle ran") && note.contains("+2"),
@@ -563,21 +566,24 @@ fn a_fence_the_oracle_does_not_meet_fails_and_names_the_oracle() {
     );
     assert!(!note.contains("linked engine"), "{note}");
 
-    let (judgement, note) = held_over(fence, ("1", 255), ("1", 0), "");
+    let (judgement, note) = held_over(fence, ("1", 255), ("1", 0), false);
     assert_eq!(judgement, Judgement::Fail, "{note}");
     assert!(
         note.contains("not what the oracle ran") && note.contains("+status 255"),
         "{note}"
     );
 
-    let (judgement, note) = held_over(fence, ("1", 0), ("2", 0), "");
+    let (judgement, note) = held_over(fence, ("1", 0), ("2", 0), false);
     assert_eq!(judgement, Judgement::Fail, "{note}");
     assert!(
         note.contains("not what the linked engine ran") && !note.contains("oracle"),
         "{note}"
     );
 
-    assert_eq!(held_over(fence, ("1", 0), ("1", 0), "").0, Judgement::Pass);
+    assert_eq!(
+        held_over(fence, ("1", 0), ("1", 0), false).0,
+        Judgement::Pass
+    );
 }
 
 /// The negative control of the rule (harness §4.1, #783): the fixture's
@@ -666,26 +672,26 @@ fn a_fence_a_trace_row_covers_is_held_to_the_engine_alone_and_one_it_does_not_bo
 /// id is admitted under a `trace:` row's `covers` alone.
 #[test]
 fn a_trace_row_pins_the_fences_it_covers_and_accepts_no_difference_for_them() {
-    let text = "[[divergence]]\nid = \"trace:x\"\nkind = \"trace\"\nreason = \"A row a person wrote.\"\nstatus = \"accepted\"\nsince = \"2026-10-09\"\ncovers = [\"witness:abc\", \"trace:y\"]\n";
-    let rows = registry(text);
+    let row = Row::accepted("trace:x").covers(&["witness:abc", "trace:y"]);
+    let registry = rows(std::slice::from_ref(&row));
     assert_eq!(
-        rows.pinning("witness:abc").map(|r| r.id.as_str()),
+        registry.pinning("witness:abc").map(|r| r.id.as_str()),
         Some("trace:x")
     );
-    assert!(rows.accepted("witness:abc").is_none());
+    assert!(registry.accepted("witness:abc").is_none());
     assert_eq!(
-        rows.accepted("trace:y").map(|r| r.id.as_str()),
+        registry.accepted("trace:y").map(|r| r.id.as_str()),
         Some("trace:x")
     );
-    assert!(rows.pinning("trace:y").is_none());
+    assert!(registry.pinning("trace:y").is_none());
 
-    let open = registry(&text.replace("\"accepted\"", "\"open\""));
+    let open = rows(&[row.status(crate::divergence::Status::Open)]);
     assert!(open.pinning("witness:abc").is_none());
 
     let phpt = Registry::parse(
-        &text
-            .replace("kind = \"trace\"", "kind = \"phpt\"")
-            .replace("trace:", "phpt:"),
+        &Row::accepted("phpt:x")
+            .covers(&["witness:abc", "phpt:y"])
+            .toml(),
     )
     .unwrap_err()
     .to_string();
@@ -737,11 +743,11 @@ fn a_capture_whose_two_runs_differ_names_the_line_and_captures_nothing() {
 fn an_accepted_row_accepts_one_run_missing_the_fence_and_never_both() {
     let fence = "/// ```expect\n/// 1\n/// ```\n";
     for (oracle, engine) in [(("1", 0), ("2", 0)), (("2", 0), ("1", 0))] {
-        let (judgement, note) = held_over(fence, oracle, engine, ROW);
+        let (judgement, note) = held_over(fence, oracle, engine, true);
         assert_eq!(judgement, Judgement::Diverged, "{note}");
         assert_eq!(note, "A row a person wrote.");
     }
-    let (judgement, note) = held_over(fence, ("2", 0), ("3", 0), ROW);
+    let (judgement, note) = held_over(fence, ("2", 0), ("3", 0), true);
     assert_eq!(judgement, Judgement::Fail, "{note}");
     assert!(
         note.contains("the oracle ran") && note.contains("the linked engine ran"),

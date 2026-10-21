@@ -7,14 +7,14 @@
 //! 2026-09-21); the witnesses in `value.rs` hold the rest through the
 //! engine, the `` `…` `` mark beside `unescape` since #609.
 
+mod support;
+
 use php_syntax::tree::{HeredocExpr, LiteralExpr, StringPart};
-use php_syntax::{Holder, Options, TokenValue, parse};
+use php_syntax::{Holder, TokenValue};
 
 /// The value of every `LiteralExpr` in `src`, in source order.
 fn values(src: &str) -> Vec<TokenValue> {
-    let arena = php_syntax::Arena::new();
-    let parsed = parse(&arena, src.as_bytes(), &Options::default());
-    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let parsed = support::parse_clean(src);
     let mut nodes: Vec<&LiteralExpr> = parsed.tree.nodes::<LiteralExpr>().iter().collect();
     nodes.sort_by_key(|n| n.range.start);
     nodes
@@ -29,8 +29,7 @@ fn values(src: &str) -> Vec<TokenValue> {
 /// The bytes of every text part of the one heredoc in `src`, in source
 /// order.
 fn parts(src: &str) -> Vec<Vec<u8>> {
-    let arena = php_syntax::Arena::new();
-    let parsed = parse(&arena, src.as_bytes(), &Options::default());
+    let parsed = support::parse_clean(src);
     let bytes = |v: Option<TokenValue>| match v {
         Some(TokenValue::Bytes(b)) => b,
         other => panic!("not bytes: {other:?}"),

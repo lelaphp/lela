@@ -4,19 +4,14 @@
 
 #![cfg(debug_assertions)]
 
-use php_ext::test::{Capture, Engine, Files, LeakSensor};
+mod support;
+
+use php_ext::test::{Capture, Files};
 
 /// `source` served by an engine of this extension alone with the sensor
 /// armed: what it wrote, and the fatal that ended it, if any.
 fn armed(source: &str) -> (String, Option<String>) {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_uri::extension(),
-            php_ext_standard::extension(),
-        ])
-        .sense_leaks(LeakSensor::Armed)
-        .build();
+    let engine = support::engine();
     let served = engine.serve_capture(source, Capture::default());
     (served.stdout_text(), served.fatal)
 }

@@ -2,7 +2,7 @@
 //! engine that serves the next.
 #![cfg(debug_assertions)]
 
-use php_ext::test::{Capture, Engine, LeakSensor};
+use php_ext::test::{Capture, Engine};
 
 /// The limit's fatal mid-loop releases every date the array held, and
 /// the engine serves the next request as the first. The size the fatal
@@ -20,7 +20,6 @@ fn tight_limit_fatal_releases_every_date_and_serves_again() {
         .ini("log_errors", "0")
         .ini("fatal_error_backtraces", "Off")
         .ini("memory_limit", "2M")
-        .sense_leaks(LeakSensor::Armed)
         .build();
     let mut first = None;
     for _ in 0..2 {

@@ -19,11 +19,13 @@ use xtask::scratch::Tree;
 
 mod common {
     pub mod manifest;
+    pub mod registry;
     pub mod repo;
     pub mod run;
     pub mod tracker;
 }
 use common::manifest::Tracked;
+use common::registry::Row;
 use common::repo::Repo;
 use common::run::{Ran, Run, xtask};
 use common::tracker::{Tracker, issue};
@@ -1146,9 +1148,8 @@ fn an_open_divergence_row_on_a_changed_scope_fails_and_on_another_scope_does_not
 fn a_row_the_diff_itself_proposes_touches_it_whatever_crate_it_names() {
     let root = scratch("proposed");
     let mut registry = std::fs::read_to_string(root.join("docs/divergence.toml")).unwrap();
-    registry.push_str(
-        "\n[[divergence]]\nid = \"phpt:php-src/ext/spl/tests/heap_top.phpt\"\nkind = \"phpt\"\nreason = \"\"\nstatus = \"open\"\nsince = \"2026-09-08\"\n",
-    );
+    registry.push('\n');
+    registry.push_str(&Row::open("phpt:php-src/ext/spl/tests/heap_top.phpt").toml());
     write(&root, "docs/divergence.toml", &registry);
     let verdict = judge(&root);
     let line = verdict

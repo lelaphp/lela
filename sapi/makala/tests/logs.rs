@@ -15,7 +15,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use common::{Server, eventually, read_response};
+use common::{Request, Server, eventually, read_response};
 
 /// The access line of a served request: the time, the peer, the request
 /// line, the status, the body's bytes in and out, and the time it took.
@@ -31,14 +31,8 @@ fn a_served_request_has_its_access_line() {
     let log = root.join("access.log");
     let log_arg = log.to_string_lossy().into_owned();
     let server = Server::with_args(&root, &["--threads", "2", "--access-log", &log_arg]);
-    let mut stream = server.connect();
+    let mut stream = server.send(&Request::new("PUT", "/echo.php?x=1").close().body("hello"));
     let peer = stream.local_addr().unwrap_or_else(|e| panic!("{e}"));
-    stream
-        .write_all(
-            b"PUT /echo.php?x=1 HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\
-              Content-Length: 5\r\n\r\nhello",
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
     let response = read_response(&mut stream);
     assert_eq!(response.body, b"HELLO");
     let read = || std::fs::read_to_string(&log).unwrap_or_default();
@@ -110,7 +104,7 @@ fn a_blocked_log_destination_does_not_delay_responses() {
     let started = Instant::now();
     for n in 0..20 {
         stream
-            .write_all(b"GET /fast.php HTTP/1.1\r\nHost: a\r\n\r\n")
+            .write_all(&Request::get("/fast.php").bytes())
             .unwrap_or_else(|e| panic!("{e}"));
         let mut seen = Vec::new();
         let mut buf = [0u8; 1024];
@@ -223,9 +217,8 @@ fn each_refused_request_logs_php_fpms_line_for_it() {
             .collect::<Vec<_>>()
     };
     for (n, (target, line)) in refusals.iter().enumerate() {
-        let request =
-            format!("GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-        server.exchange(request.as_bytes(), Duration::from_secs(30));
+        let request = Request::get(target).host("localhost").close();
+        server.exchange(&request.bytes(), Duration::from_secs(30));
         assert!(
             eventually(Duration::from_secs(10), || logged().len() > n),
             "{target}: {:?}",

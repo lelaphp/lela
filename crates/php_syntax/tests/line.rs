@@ -28,15 +28,14 @@
 //! 4. **`static` as a class reference**, which it refuses too, "a class
 //!    reference of the scope this compiler cannot read yet".
 
+mod support;
+
+use php_syntax::SyntaxKind;
 use php_syntax::tree::Element;
-use php_syntax::{Options, SyntaxKind, parse};
 
 /// The line of every node of `kind` in `src`, in source order.
 fn lines(src: &str, kind: SyntaxKind) -> Vec<u32> {
-    let arena = php_syntax::Arena::new();
-    let parsed = parse(&arena, src.as_bytes(), &Options::default());
-    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-    assert!(parsed.missing.is_empty(), "{:?}", parsed.missing);
+    let parsed = support::parse_clean(src);
     parsed
         .tree
         .elements()

@@ -32,7 +32,7 @@ mod common {
     pub mod run;
 }
 use common::manifest::{Tracked, of_rows, pin};
-use common::registry::registry;
+use common::registry::{Row, registry, rows};
 use common::repo::{Repo, scratch_workspace};
 use common::run::xtask;
 
@@ -339,13 +339,8 @@ fn a_witness_that_differs_is_a_difference_the_registry_can_accept() {
 
     // An accepted row names one side of a difference between the engine
     // and the oracle, so it never accepts a fence both runs miss (#783).
-    let accepted = |snippet: &str| {
-        format!(
-            "[[divergence]]\nid = \"{}\"\nkind = \"witness\"\nreason = \"A row a person wrote.\"\nstatus = \"accepted\"\nsince = \"2026-09-09\"\n",
-            witness_id(snippet)
-        )
-    };
-    let reading = run(&root, &registry(&accepted("echo 1;")), Accept::Nothing);
+    let accepted = |snippet: &str| rows(&[Row::accepted(&witness_id(snippet))]);
+    let reading = run(&root, &accepted("echo 1;"), Accept::Nothing);
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
 
     // A fence the oracle meets and the engine misses: the bundle
@@ -363,7 +358,7 @@ fn a_witness_that_differs_is_a_difference_the_registry_can_accept() {
     );
     let reading = run(
         &root,
-        &registry(&accepted("var_dump(extension_loaded('zend_test'));")),
+        &accepted("var_dump(extension_loaded('zend_test'));"),
         Accept::Nothing,
     );
     assert_eq!(
