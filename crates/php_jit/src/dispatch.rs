@@ -85,40 +85,33 @@ pub(crate) fn visit(
     }
 }
 
-/// `Jit::safepoint`: under `Off`, `Continue` before any word is read;
-/// otherwise the site's word visited. Here, and only here, `Continue`
-/// means nothing happened.
-#[inline(always)] // jit-design.md §4: the mode test inlined into the loop's three sites
-#[allow(clippy::inline_always)]
-pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
-    let Some(engine) = req.engine::<JitEngine>() else {
-        return Flow::Continue;
-    };
-    if engine.shared.policy.mode() == Mode::Off {
-        return Flow::Continue;
-    }
-    visited(req, frame, site)
-}
-
-/// The site's word visited, and what came of it.
+/// `Jit::safepoint`, the site's word visited and what came of it,
+/// outlined, so the loop's site is one call. An engine whose tier runs
+/// `Off` binds `Nop`'s loop and never asks (`Jit::serves`); asked under
+/// `Off` all the same, it answers `Continue` before any word is read.
+/// Here, and only here, `Continue` means nothing happened.
 #[inline(never)]
-fn visited(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
     let at = site.idx();
     let start = match site {
         Site::Loop(_) => Start::Loop,
         Site::Entry => Start::Enter,
         Site::Return(_) => Start::Return,
     };
+    let Some(engine) = req.engine::<JitEngine>() else {
+        return Flow::Continue;
+    };
+    if engine.shared.policy.mode() == Mode::Off {
+        return Flow::Continue;
+    }
+    let shared = Arc::clone(&engine.shared);
     let claims = start != Start::Return && !record::recording(req);
-    let (decided, shared) = {
+    let decided = {
         let req: &Request = req;
-        let Some(engine) = req.engine::<JitEngine>() else {
-            return Flow::Continue;
-        };
         // A table a hot root found full stopped its counters, as php's
         // `zend_jit_stop_counter_handlers` does: no word is claimed more.
         let holder = || {
-            let table = table::of(req, &engine.shared.policy, &engine.shared.perf)?;
+            let table = table::of(req, &shared.policy, &shared.perf)?;
             if table.stopped() {
                 return None;
             }
@@ -129,8 +122,7 @@ fn visited(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
             })
         };
         let word = tier::word(req, frame, at);
-        let decided = visit(word, &engine.shared.policy, start, claims, holder);
-        (decided, Arc::clone(&engine.shared))
+        visit(word, &shared.policy, start, claims, holder)
     };
     match decided {
         Visited::Continue => Flow::Continue,
