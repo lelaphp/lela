@@ -124,10 +124,11 @@ jobs:
       # this runner cannot have, so the tests that spawn it skip here and
       # run in the oracle job below. The one step running the tree's two
       # tests fails the job there, before the suite, and the suite reads
-      # the same tree.
+      # the same tree. The MySQL server started above is promised too, so
+      # a mysqli or pdo_mysql test that finds none fails here (#3084).
       - uses: ./.github/actions/corpus
         with:
-          promise: tree
+          promise: tree mysql
       - name: the tree is at the pin's commit and holds every test the pin counts
         run: cargo test -p xtask --test oracle a_tree_the_variable_names_
       # The crate's own tests as the reading `done`'s condition 1 asks

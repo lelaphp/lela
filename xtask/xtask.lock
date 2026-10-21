@@ -199,6 +199,7 @@ oracle::Runner
 oracle::Runner::binary
 oracle::Runner::resolve
 oracle::Runner::stamp
+oracle::SKIPPED_VARIABLE
 oracle::Sapi
 oracle::Sent
 oracle::Source

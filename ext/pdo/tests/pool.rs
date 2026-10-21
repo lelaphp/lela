@@ -5,12 +5,14 @@
 //! writes a line to a file each time PDO calls its `closer`, so the test
 //! reads what was closed without a server.
 
+mod support;
+
 use std::io::Write as _;
 use std::path::PathBuf;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::request::Request;
-use php_ext::test::{Capture, Engine};
+use php_ext::test::{Capture, Engine, Files};
 use php_ext_pdo::connector::{Connection, Connector, Failure, Prepared, Source};
 
 /// The connector, `counted:<path>`: each connection appends `closed` to
@@ -102,15 +104,11 @@ fn counted() -> Extension {
 /// until it, too, gives one back past the bound.
 #[test]
 fn a_persistent_connection_past_the_pool_s_bound_is_closed_with_the_ending_request() {
-    let log = std::env::temp_dir().join(format!("t1798-pdo-pool-{}.log", std::process::id()));
-    std::fs::remove_file(&log).ok();
+    let files = Files::new("pdo-pool", &[]);
+    let log = files.path().join("closed.log");
     let engine = Engine::builder()
-        .extensions(&[
-            php_ext_json::extension(),
-            php_ext_spl::extension(),
-            php_ext_pdo::extension(),
-            counted(),
-        ])
+        .extensions(support::extensions())
+        .extensions([counted()])
         .build();
     let script = format!(
         "<?php for ($i = 0; $i < 1025; $i++) {{ \
@@ -118,14 +116,13 @@ fn a_persistent_connection_past_the_pool_s_bound_is_closed_with_the_ending_reque
         log.display()
     );
     let served = engine.serve_capture(&script, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "done");
+    assert_eq!(served.stdout_text(), "done");
     let closed = || std::fs::read_to_string(&log).unwrap_or_default();
     assert_eq!(closed(), "closed\n");
 
     let served = engine.serve_capture(&script, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "done");
+    assert_eq!(served.stdout_text(), "done");
     assert_eq!(closed(), "closed\nclosed\n");
-    std::fs::remove_file(&log).ok();
 }
 
 /// A persistent connection found dead is closed through the connector's
@@ -135,15 +132,11 @@ fn a_persistent_connection_past_the_pool_s_bound_is_closed_with_the_ending_reque
 /// pool kept from the last request, found dead as it is taken out.
 #[test]
 fn a_persistent_connection_found_dead_is_closed() {
-    let log = std::env::temp_dir().join(format!("t1957-pdo-{}.dead", std::process::id()));
-    std::fs::remove_file(&log).ok();
+    let files = Files::new("pdo-dead", &[]);
+    let log = files.path().join("closed.dead");
     let engine = Engine::builder()
-        .extensions(&[
-            php_ext_json::extension(),
-            php_ext_spl::extension(),
-            php_ext_pdo::extension(),
-            counted(),
-        ])
+        .extensions(support::extensions())
+        .extensions([counted()])
         .build();
     let script = format!(
         "<?php $o = [PDO::ATTR_PERSISTENT => 'p']; $a = new PDO('counted:{0}', null, null, $o); \
@@ -152,13 +145,12 @@ fn a_persistent_connection_found_dead_is_closed() {
     );
     let closed = || std::fs::read_to_string(&log).unwrap_or_default();
     let served = engine.serve_capture(&script, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "done");
+    assert_eq!(served.stdout_text(), "done");
     assert_eq!(closed(), "closed\n");
 
     let served = engine.serve_capture(&script, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "done");
+    assert_eq!(served.stdout_text(), "done");
     assert_eq!(closed(), "closed\nclosed\nclosed\n");
-    std::fs::remove_file(&log).ok();
 }
 
 /// A persistent connection waiting in the engine's pool as the engine
@@ -169,25 +161,20 @@ fn a_persistent_connection_found_dead_is_closed() {
 /// of its last clone.
 #[test]
 fn a_pooled_persistent_connection_is_closed_as_the_engine_ends() {
-    let log = std::env::temp_dir().join(format!("t1961-pdo-end-{}.log", std::process::id()));
-    std::fs::remove_file(&log).ok();
+    let files = Files::new("pdo-end", &[]);
+    let log = files.path().join("closed.log");
     let engine = Engine::builder()
-        .extensions(&[
-            php_ext_json::extension(),
-            php_ext_spl::extension(),
-            php_ext_pdo::extension(),
-            counted(),
-        ])
+        .extensions(support::extensions())
+        .extensions([counted()])
         .build();
     let script = format!(
         "<?php new PDO('counted:{}', null, null, [PDO::ATTR_PERSISTENT => 'p']); echo 'done';",
         log.display()
     );
     let served = engine.serve_capture(&script, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "done");
+    assert_eq!(served.stdout_text(), "done");
     let closed = || std::fs::read_to_string(&log).unwrap_or_default();
     assert_eq!(closed(), "");
     drop(engine);
     assert_eq!(closed(), "closed\n");
-    std::fs::remove_file(&log).ok();
 }
