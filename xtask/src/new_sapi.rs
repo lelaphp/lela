@@ -73,11 +73,10 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str, binary: Option<&str>) -
     let mut laid = Laid::files(root, dir, &row, files)?;
 
     let owned = subsets(krate);
-    let named: Vec<&str> = owned.iter().map(String::as_str).collect();
     laid.notes.push(if owned.is_empty() {
         format!("phpt subset: none; the [[crate]] row for {row} names none")
     } else {
-        format!("phpt subset: {} at the pinned tag", listed(&named))
+        format!("phpt subset: {} at the pinned tag", listed(&owned))
     });
     laid.notes.push(format!(
         "left: the host itself; {bin} serves the file its line names until the host's own request description and sink replace the template's"

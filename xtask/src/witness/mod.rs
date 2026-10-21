@@ -340,7 +340,7 @@ pub(crate) fn reading(
                     "; {} of {} kernels or natives without a witness: {}. {}",
                     tally.missing.len(),
                     tally.subjects,
-                    listed(&tally.missing.iter().map(String::as_str).collect::<Vec<_>>()),
+                    listed(&tally.missing),
                     rule.map(|r| r.text.as_str()).unwrap_or_default()
                 )
             };

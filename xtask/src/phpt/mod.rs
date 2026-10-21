@@ -989,7 +989,6 @@ fn words(
                 .map(|under| under.to_string_lossy().into_owned())
                 .collect()
         };
-        let named: Vec<&str> = named.iter().map(String::as_str).collect();
         let (whose, why) = match outcome {
             Outcome::Absent(why) => ("the design derives", format!("; {why}")),
             _ => ("the [[crate]] row names", String::new()),

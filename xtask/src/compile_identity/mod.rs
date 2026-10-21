@@ -297,7 +297,6 @@ pub(crate) fn reading(
             .iter()
             .map(|under| under.to_string_lossy().into_owned())
             .collect();
-        let named: Vec<&str> = named.iter().map(String::as_str).collect();
         format!(
             "{scope}: the corpus names {}, and {} has no such directory",
             listed(&named),

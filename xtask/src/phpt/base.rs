@@ -104,8 +104,7 @@ pub(crate) fn take(
             listed(&missing)
         );
     }
-    let kept: Vec<&str> = wanted.iter().map(String::as_str).collect();
-    say(&format!("kept: {} at {base}", listed(&kept)));
+    say(&format!("kept: {} at {base}", listed(&wanted)));
     Ok(())
 }
 

@@ -1150,8 +1150,7 @@ impl Log {
 /// `name`: how many of `noun` and where, at most five named and the rest
 /// counted, then `after`; none when it read everything.
 fn unreadable(name: &str, noun: &str, at: &[String], after: &str) -> Option<String> {
-    let names: Vec<&str> = at.iter().map(String::as_str).collect();
-    let (n, listed) = (at.len(), listed(&names));
+    let (n, listed) = (at.len(), listed(at));
     (n > 0).then(|| {
         format!(
             "{name}: {n} {noun}{} unreadable at {listed}{after}",
@@ -1355,8 +1354,13 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 
 /// At most five names, and how many more there are: how a reading's
 /// message names what missed, the same way in every lane.
-pub(crate) fn listed(names: &[&str]) -> String {
-    let shown = names.iter().take(5).copied().collect::<Vec<_>>().join(", ");
+pub(crate) fn listed(names: &[impl AsRef<str>]) -> String {
+    let shown = names
+        .iter()
+        .take(5)
+        .map(AsRef::as_ref)
+        .collect::<Vec<_>>()
+        .join(", ");
     if names.len() > 5 {
         format!("{shown} and {} more", names.len() - 5)
     } else {

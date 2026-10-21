@@ -30,30 +30,11 @@ use super::miss::{Miss, Signature};
 use super::{Judgement, Tally};
 use crate::tally::Judgement as _;
 
-/// At most this many tests are named under an unread construct; the rest
-/// are counted. The house's rendering of a long list
-/// (`reading::Log::unreadable_note`).
-const NAMED: usize = 5;
-
 /// One signature and the tests that missed with it, as [`Census::rows`]
 /// orders them: each test by its path in the corpus.
 pub(crate) struct Row {
     pub signature: Signature,
     pub tests: Vec<String>,
-}
-
-impl Row {
-    /// The tests named, at most [`NAMED`] of them and the rest counted.
-    fn named(&self) -> String {
-        let shown: Vec<&str> = self.tests.iter().take(NAMED).map(String::as_str).collect();
-        let rest = self.tests.len().saturating_sub(shown.len());
-        let shown = shown.join(", ");
-        if rest == 0 {
-            shown
-        } else {
-            format!("{shown} and {rest} more")
-        }
-    }
 }
 
 /// The misses of one run, or of a lane's subsets folded together, by
@@ -195,7 +176,7 @@ impl Census {
                 "  {:>5}  {}: {}",
                 row.tests.len(),
                 row.signature,
-                row.named()
+                crate::reading::listed(&row.tests)
             );
         }
         let rows = self.rows();

@@ -194,8 +194,7 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str) -> Result<Laid> {
     render_guidance(root, &mut laid)?;
 
     let owned = subsets(krate);
-    let named: Vec<&str> = owned.iter().map(String::as_str).collect();
-    let subset = listed(&named);
+    let subset = listed(&owned);
     laid.notes.push(if owned.is_empty() {
         format!(
             "phpt subset: {subset} is not in the pinned php-src tree ({}); `xtask phpt --subset` has nothing to run",
