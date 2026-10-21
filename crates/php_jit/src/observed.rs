@@ -189,7 +189,7 @@ fn an_observed_opcode_past_the_silence_opcodes_refuses_the_tier_with_phps_warnin
     assert_eq!(stdout(&served), "99\n");
     let stderr = String::from_utf8_lossy(&served.stderr);
     assert!(!stderr.contains("Warning"), "{stderr}");
-    let inside = between(&stderr, 3)?;
+    let inside = between(&stderr, 2)?;
     for opcode in ["<told ZEND_BEGIN_SILENCE>", "<told ZEND_END_SILENCE>"] {
         assert!(
             inside.iter().any(|line| line == opcode),

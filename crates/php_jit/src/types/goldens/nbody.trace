@@ -1,5 +1,6 @@
 start loop
 root e3
+op e3 61 long long - taken
 op e3 14 array.packed.reference long - -
 op e3 15 array.packed.reference long - -
 op e3 16 double double - -
@@ -41,5 +42,4 @@ op e3 55 array.packed.reference long double -
 op e3 57 double double - -
 op e3 58 array.packed.reference long double -
 op e3 60 long - - -
-op e3 61 long long - taken
 stop loop

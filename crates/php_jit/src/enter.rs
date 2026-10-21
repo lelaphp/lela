@@ -81,8 +81,8 @@ impl Crossed for Request {
 /// The first argument of every trace and every kernel wrapper
 /// (`jit-design.md` §4.6): a local of the `enter` that made it, its
 /// address held by compiled code for exactly that call. Compiled code
-/// reads `req` at offset zero and `interrupt` at
-/// [`lower::INTERRUPT_AT`], and nothing else; `pending` has no C layout
+/// reads `req` at offset zero, `interrupt` at [`lower::INTERRUPT_AT`] and
+/// `at` at [`lower::ENTRY_AT`], and nothing else; `pending` has no C layout
 /// and is the wrappers' alone. It borrows the request mutably for `'a`,
 /// so the request outlives it and nothing else touches the request
 /// while compiled code may.
@@ -90,6 +90,8 @@ impl Crossed for Request {
 pub(crate) struct ExitCtx<'a, R = Request> {
     req: *mut R,
     interrupt: *const AtomicBool,
+    /// Where the trace is entered.
+    at: At,
     pending: Option<Pending>,
     lent: PhantomData<&'a mut R>,
 }
@@ -99,6 +101,10 @@ const _: () = assert!(offset_of!(ExitCtx<'static>, req) == 0);
 const _: () = assert!(
     lower::INTERRUPT_AT >= 0
         && offset_of!(ExitCtx<'static>, interrupt) == lower::INTERRUPT_AT.unsigned_abs() as usize
+);
+const _: () = assert!(
+    lower::ENTRY_AT >= 0
+        && offset_of!(ExitCtx<'static>, at) == lower::ENTRY_AT.unsigned_abs() as usize
 );
 
 impl<'a, R: Crossed> ExitCtx<'a, R> {
@@ -110,6 +116,7 @@ impl<'a, R: Crossed> ExitCtx<'a, R> {
         ExitCtx {
             req: ptr::from_mut(req),
             interrupt,
+            at: At::First,
             pending: None,
             lent: PhantomData,
         }
@@ -502,6 +509,26 @@ pub(crate) enum Left {
     /// pending, which the loop unwinds from where it was raised, in the
     /// frame that stands.
     Unwound(FrameRef),
+    /// Through php's interrupt stub, which takes no exit: a loop's
+    /// interrupt test found the interrupt raised, and the frame that
+    /// stands is stood at the loop's header, where the stub goes on once
+    /// it handled the interrupt.
+    Interrupted(FrameRef),
+    /// Entered at its loop's body, the trace found the frame holding
+    /// other than it knows there: nothing ran and the frame stands where
+    /// it stood, so `dispatch` goes on to the loop's header and enters the
+    /// trace at its first op there, whose guards take php's exits.
+    Declined,
+}
+
+/// Where a trace is entered: at its first op, or at its loop's body
+/// (`types::BodyEntry`), as compiled code reads it in the `ExitCtx`, a
+/// `u32` that is not zero at the body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub(crate) enum At {
+    First = 0,
+    Body = 1,
 }
 
 /// Where a trace left the interpreter through an exit: the exit, and the
@@ -539,7 +566,12 @@ type Entry = unsafe extern "C" fn(*mut ExitCtx<'_>, *mut u8) -> u32;
 /// ```expect exit=0 regime=jit-force process
 /// 44850 44850
 /// ```
-pub(crate) fn enter(req: &mut Request, frame: FrameRef, trace: &Trace) -> Result<Left, Fatal> {
+pub(crate) fn enter(
+    req: &mut Request,
+    frame: FrameRef,
+    trace: &Trace,
+    at: At,
+) -> Result<Left, Fatal> {
     let room = tier::room(req, frame)
         .ok_or_else(|| internal("a trace entered on a frame with no room"))?;
     // SAFETY: the table published bytes `lower` compiled for this ABI at
@@ -549,6 +581,7 @@ pub(crate) fn enter(req: &mut Request, frame: FrameRef, trace: &Trace) -> Result
     let before = tier::trace_num(req);
     tier::set_trace_num(req, TraceNum::from_raw(trace.id.get()));
     let mut cx = ExitCtx::new(&mut *req);
+    cx.at = at;
     // SAFETY: `cx` lives on this frame for the whole call and nothing but
     // the code and its wrappers touches the request meanwhile; `room` is
     // the room of a frame on the request's stack.
@@ -571,6 +604,17 @@ pub(crate) fn enter(req: &mut Request, frame: FrameRef, trace: &Trace) -> Result
             Ok(Left::Unwound(frame))
         }
         Answer::Unwound => Err(internal("a trace unwound with no throwable pending")),
+        Answer::Declined if at == At::Body => Ok(Left::Declined),
+        Answer::Declined => Err(internal("a trace declined an entry at its first op")),
+        Answer::Interrupted => {
+            let header = trace
+                .stub
+                .ok_or_else(|| internal("a trace took an interrupt stub it does not have"))?;
+            let frame =
+                tier::current(req).ok_or_else(|| internal("a trace left no frame standing"))?;
+            tier::stand(req, frame, header);
+            Ok(Left::Interrupted(frame))
+        }
         Answer::Abandoned => Err(internal(
             "a trace left through no exit of its own and kept nothing",
         )),
@@ -578,11 +622,13 @@ pub(crate) fn enter(req: &mut Request, frame: FrameRef, trace: &Trace) -> Result
 }
 
 /// What compiled code answered `enter`, decoded once: an exit of the
-/// trace's, [`lower::UNWOUND`], or anything else, [`lower::ABANDONED`]
+/// trace's, [`lower::UNWOUND`], [`lower::INTERRUPTED`], or anything else, [`lower::ABANDONED`]
 /// with nothing kept among it, which no trace answers but by a defect.
 enum Answer {
     Exit(ExitId),
     Unwound,
+    Interrupted,
+    Declined,
     Abandoned,
 }
 
@@ -592,6 +638,8 @@ impl Answer {
         match u16::try_from(word) {
             Ok(id) if usize::from(id) < exits => Answer::Exit(ExitId(id)),
             _ if word == lower::UNWOUND => Answer::Unwound,
+            _ if word == lower::INTERRUPTED => Answer::Interrupted,
+            _ if word == lower::DECLINED => Answer::Declined,
             _ => Answer::Abandoned,
         }
     }

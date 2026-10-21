@@ -95,6 +95,18 @@ impl Types {
             .map(|(tag, _)| *tag)
     }
 
+    /// The type bytes a slot holding one of these may show, where they
+    /// rule some out: none where they may be a reference or are every
+    /// kind, when any byte may stand.
+    pub(crate) fn tags(self) -> Option<impl Iterator<Item = ZvalType>> {
+        let every = Types::ANY.or(Types::UNDEF).kinds();
+        (!self.meets(Types::REF) && self.kinds() != every).then(move || {
+            (TAGS.into_iter())
+                .filter(move |(_, bit)| self.meets(*bit))
+                .map(|(tag, _)| tag)
+        })
+    }
+
     /// The kinds of one tag, an array's of either layout, php's
     /// `zend_jit_trace_type_to_info`; none for a tag no value has.
     pub(crate) fn of_tag(tag: ZvalType) -> Types {

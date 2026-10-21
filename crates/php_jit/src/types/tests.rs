@@ -19,8 +19,8 @@ use php_heap::ZvalType;
 use php_unit::Opcode;
 
 use super::{
-    Check, Def, End, Form, Frame, Home, Landing, Op, OpId, Operand, Repeat, Slot, TraceIr, Types,
-    ValueId,
+    Check, Def, End, Form, Frame, GuardAt, Home, Landing, Op, OpId, Operand, Repeat, Slot, TraceIr,
+    Types, ValueId,
 };
 use crate::lower::dump;
 use crate::record::Stop;
@@ -386,16 +386,17 @@ fn a_fetched_elements_guard_frees_the_temporary_it_read() -> Result<(), String> 
 /// places that leave with one spec share one exit, as php's
 /// `zend_jit_trace_get_exit_point` reuses them, so it builds under php's
 /// 512. Each statement leaves at two oplines, the `MUL`'s overflow and
-/// the `ASSIGN_OP`'s, but the last, whose sum the loop's phi takes, and
-/// the first `ASSIGN_OP` holds the guard on `$s` too, through an exit of
-/// its own, since its overflow guard knows the type that guard held. With
-/// the entry guard, the `$i++`, the loop's test and its interrupt test,
-/// which grows no side trace and leaves through an exit of its own, php's
-/// `ZEND_JIT_EXIT_TO_VM`, that is 504, where an exit per place was 754.
-/// php's is 502: its inference over the whole function knows `$i` long,
-/// so it holds no entry guard on it nor an overflow on `$i++`, and it
-/// moves `$s`'s guard to the entry with an overflow guard on the last
-/// `+=` (#3135).
+/// the `ASSIGN_OP`'s, the last's too: the loop's phi of `$s` is guarded
+/// long at entry, and the sum its back edge brings is held long within
+/// the last `+=`, which reruns where it overflows, as php's
+/// `is_checked_guard` moves the phi's guard (#3135), so no guard on `$s`
+/// stands at the header. With the entry guards on `$s` and `$i`, the
+/// `$i++`'s overflow, the loop's test and its interrupt test, which grows
+/// no side trace and leaves through an exit of its own, php's
+/// `ZEND_JIT_EXIT_TO_VM`, that is 505, where an exit per place was 754.
+/// php's is 502: its inference over the whole function knows `$i` long
+/// and its range, so it holds no entry guard on it and no overflow on
+/// `$i++` or on `$i * 1`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_long_loop_shares_its_exits_as_php_reuses_them() -> Result<(), String> {
@@ -410,7 +411,25 @@ fn a_long_loop_shares_its_exits_as_php_reuses_them() -> Result<(), String> {
             echo f(3), \"\\n\";"
         ),
     )?;
-    assert_eq!(ir.exits.len(), 504, "{}", dump::render(&ir));
+    assert_eq!(ir.exits.len(), 505, "{}", dump::render(&ir));
+    let s = |value: ValueId| ir.values[value.0 as usize].slot.var == 1;
+    let on_s: Vec<_> = (ir.guards.iter())
+        .filter_map(|guard| match guard.check {
+            Check::Type { value, tag } if s(value) => Some((guard.at, tag)),
+            _ => None,
+        })
+        .collect();
+    let last = ir
+        .ops
+        .iter()
+        .rposition(|op| matches!(op, Op::Line(line) if line.opcode == Opcode::AssignOp));
+    let last = OpId(u32::try_from(last.ok_or("no +=")?).map_err(|e| e.to_string())?);
+    assert!(
+        on_s.contains(&(GuardAt::Entry, ZvalType::Long))
+            && on_s.contains(&(GuardAt::Within(last), ZvalType::Long))
+            && !on_s.iter().any(|(at, _)| matches!(at, GuardAt::Before(_))),
+        "$s held at entry and within the last +=, and not at the header: {on_s:?}"
+    );
     for (at, exit) in ir.exits.iter().enumerate() {
         assert!(
             !ir.exits[..at].contains(exit),
@@ -622,4 +641,109 @@ fn a_jump_on_a_double_warns_of_a_nan_each_time() {
         "{stdout}"
     );
     assert_eq!(stdout.matches("nan is true").count(), 3, "{stdout}");
+}
+
+/// The guards a loop holds at entry stand in their slots' order, as
+/// php's code holds the types the trace entered with slot by slot, so
+/// each exit knows the types of the slots before its own: `$n`, `$s`
+/// and `$i`, as the pinned php's `TRACE 1 exit info` lists `exit_0`,
+/// `exit_1` knowing `$n` and `exit_2` knowing `$n` and `$s`.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn the_entry_guards_stand_in_their_slots_order() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $i; } return $s; }
+        echo f(5), \"\\n\";",
+    )?;
+    let entered: Vec<(u32, usize)> = (ir.guards.iter())
+        .filter(|guard| guard.at == GuardAt::Entry)
+        .filter_map(|guard| match guard.check {
+            Check::Type { value, .. } => {
+                let exit = &ir.exits[usize::from(guard.exit.0)];
+                Some((ir.values[value.0 as usize].slot.var, exit.known.len()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(entered, [(0, 0), (1, 1), (2, 2)], "{}", dump::render(&ir));
+    Ok(())
+}
+
+/// A `for` loop's trace, rooted at its condition, keeps a second way in
+/// at the opline its back edge lands on, the body's first, `+=` at 4
+/// past the condition's `IS_SMALLER` at 6: the op after the condition's,
+/// with every variable it holds there, `$n`, `$s` and `$i`, so the
+/// interpreter's back edge enters the trace there and steps nothing on
+/// to the condition. A loop whose condition makes a call keeps none: the
+/// call's frame stands between.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loops_trace_keeps_a_way_in_at_the_body_its_back_edge_lands_on() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $i; } return $s; }
+        echo f(5), \"\\n\";",
+    )?;
+    let body = ir.body.as_ref().ok_or("no way in at the body")?;
+    let at = ir.ops.get(body.at.index());
+    assert!(
+        matches!(at, Some(Op::Line(line)) if line.opline.0 == 4 && line.opcode == Opcode::AssignOp),
+        "{at:?}\n{}",
+        dump::render(&ir)
+    );
+    assert_eq!(body.opline.0, 4);
+    let mut held: Vec<u32> = body.holds.iter().map(|(slot, _)| slot.var).collect();
+    held.sort_unstable();
+    held.dedup();
+    assert_eq!(held, [0, 1, 2], "{:?}", body.holds);
+    let called = built(
+        &IN_F,
+        "function g($i) { return $i; }
+        function f($n) { $s = 0; for ($i = 0; g($i) < $n; $i++) { $s += $i; } return $s; }
+        echo f(5), \"\\n\";",
+    )?;
+    assert_eq!(called.body, None, "{}", dump::render(&called));
+    Ok(())
+}
+
+/// A loop's interrupt test takes php's exit point only where php's code
+/// does not keep the trace's initial instruction pointer or keeps values
+/// in registers at the loop's end, and php's interrupt stub otherwise,
+/// which takes none (`Z/ext/opcache/jit/zend_jit_trace.c:7210-7228`): in
+/// a loop of the file's own code, whose variables a symbol table reaches
+/// and no register keeps, one whose oplines php serves through their
+/// handlers lists no `/VM` exit, and one served inline does. Each builds
+/// php's exits in total, as the pinned php's `TRACE 1 exit info` for the
+/// same program lists them, once and twice over (#3137).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn each_loop_builds_phps_exits_and_its_interrupt_test_takes_one_where_phps_does()
+-> Result<(), String> {
+    for (statement, php, to_vm) in [
+        ("$s = (string)$i;", [4, 5], false),
+        ("$x = \"a{$i}b\";", [5, 7], false),
+        ("$x = [$i, $i, $i, $i];", [4, 5], false),
+        ("$x = $i . \"K\" . $i . \"z\";", [6, 9], false),
+        ("$x = $i + 0.5;", [6, 9], false),
+        ("$s += $i * 5;", [5, 7], false),
+        ("$x = 5;", [5, 6], true),
+        ("$x = $y;", [5, 6], true),
+        ("$x = $i == 5;", [7, 10], true),
+    ] {
+        for (n, php) in [1, 2].into_iter().zip(php) {
+            let ir = built(&IN_MAIN, &repeated(statement, n))?;
+            let vm = ir
+                .exits
+                .iter()
+                .any(|exit| exit.grows == super::Grows::Never);
+            assert_eq!(
+                (ir.exits.len(), vm),
+                (php, to_vm),
+                "{statement} {n} times\n{}",
+                dump::render(&ir)
+            );
+        }
+    }
+    Ok(())
 }

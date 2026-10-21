@@ -6,7 +6,7 @@
 
 use php_engine::tier::{self, FuncRef, Sample};
 use php_heap::ZvalType;
-use php_unit::{MapPtrOffset, OplineIdx};
+use php_unit::{MapPtrOffset, Opcode, OplineIdx};
 
 use super::{Event, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -172,6 +172,77 @@ fn a_do_while_not_loop_closes_at_its_header() -> Result<(), String> {
     assert!(
         oplines.windows(2).all(|pair| pair[0] < pair[1]),
         "one pass down the body to the back-edge: {oplines:?}"
+    );
+    Ok(())
+}
+
+/// A `for` loop's trace roots at its condition, the loop's header php's
+/// CFG finds, where the back edge lands on the body: `JMP` to the
+/// condition at 3, the body at 4 and 5, `IS_SMALLER` at 6 fused to the
+/// `JMPNZ` at 7, one `Op` (design §5.8), so the record is the condition,
+/// then the body, as the pinned php's `TRACE_BYTECODE` dump lists
+/// `IS_SMALLER`, `JMPNZ`, then the body (#3134).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_for_loop_roots_at_its_condition_as_php_does() -> Result<(), String> {
+    let (recorded, out) = testing::records::recording(
+        &at("a", "loop"),
+        "function a($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $i; } return $s; }
+        echo a(5), \"\\n\";",
+    )?;
+    assert_eq!(out, "10\n");
+    let record = &recorded.record;
+    assert_eq!((record.start, record.stop), (Start::Loop, Stop::Loop));
+    let code = recorded
+        .view
+        .op_array(record.root)
+        .ok_or("the view holds a()")?;
+    let ops: Vec<(u32, Opcode, Option<bool>)> = record
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Op { opline, branch, .. } => {
+                Some((opline.0, code.oplines[opline.0 as usize].opcode, *branch))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ops,
+        [
+            (6, Opcode::IsSmaller, Some(true)),
+            (4, Opcode::AssignOp, None),
+            (5, Opcode::PreInc, None),
+        ]
+    );
+    assert_eq!(code.oplines[7].opcode, Opcode::Jmpnz);
+    // The issue's own loop, in the file's code: the condition first.
+    let plan = [
+        ("record.function", ""),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ];
+    let (recorded, _) = testing::records::recording(
+        &plan,
+        "for ($i = 0; $i < 100; $i++) { $x = 5; } echo $x, \"\\n\";",
+    )?;
+    let record = &recorded.record;
+    let code = recorded
+        .view
+        .op_array(record.root)
+        .ok_or("the view holds the file's code")?;
+    let opcodes: Vec<Opcode> = (record.events.iter())
+        .filter_map(|event| match event {
+            Event::Op { opline, .. } => Some(code.oplines[opline.0 as usize].opcode),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        (record.stop, opcodes.as_slice()),
+        (
+            Stop::Loop,
+            [Opcode::IsSmaller, Opcode::Assign, Opcode::PreInc].as_slice()
+        )
     );
     Ok(())
 }
@@ -535,9 +606,23 @@ impl Draw {
         let link = Stop::Link(trace(1 + self.next(TraceId::LIMIT - 1)));
         let stop = Stop::of_code(code).unwrap_or(link);
         let events = (0..self.next(40)).map(|_| self.event()).collect();
+        let entered = match start {
+            Start::Side { .. } => (0..self.next(4))
+                .map(|var| super::Entered {
+                    var: var * 3,
+                    tag: if self.next(2) == 0 {
+                        ZvalType::Long
+                    } else {
+                        ZvalType::Double
+                    },
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
         TraceRecord {
             start,
             root: self.func(),
+            entered,
             events,
             stop,
         }

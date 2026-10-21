@@ -277,13 +277,22 @@ fn pipeline_with(
         Some(_) => failed(stop),
         None => failed(Stop::TooManyTraces),
     };
+    let start = claim.start();
     let settled = policy::settle(claim, &outcome);
     match (outcome, number) {
         (Outcome::Published(trace), _) => shared.dump(lines, &TraceEvent::Compiled { trace }),
         (Outcome::Abort(stop) | Outcome::Blacklist(stop), Some(trace)) => {
             shared.dump(lines, &TraceEvent::Abort { trace, stop });
+            // A side's exit is what php blacklists, by its parent's number.
+            let blacklisted = match start.grew() {
+                Some((parent, exit)) => TraceEvent::ExitBlacklisted {
+                    trace: parent,
+                    exit,
+                },
+                None => TraceEvent::Blacklisted { trace },
+            };
             if settled == State::Blacklisted {
-                shared.dump(lines, &TraceEvent::Blacklisted { trace });
+                shared.dump(lines, &blacklisted);
             }
         }
         _ => {}

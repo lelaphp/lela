@@ -17,7 +17,7 @@ use php_engine::tier::{
 };
 use php_unit::{OpArray, OplineIdx, Unit};
 
-use super::{Visited, visit};
+use super::{GoesOn, Submitted, Visited, quieted, visit};
 use crate::policy::{self, Holder, Outcome, State};
 use crate::record::{self, Start, Stop};
 use crate::table::TraceId;
@@ -169,6 +169,44 @@ fn a_visit_while_recording_bumps_and_does_not_claim() {
     assert_eq!(decided(visited), "hot loop");
 }
 
+/// A request that submitted a loop's trace closed at its header claims
+/// nothing while the job is under way, nor once it is published until it
+/// visits a loop or a return site, where php's interpreter would have
+/// entered the trace already: a call's entry the body makes meanwhile is
+/// bumped and left. Then it claims again.
+#[test]
+fn a_request_claims_nothing_until_it_reaches_the_trace_it_submitted() {
+    let policy = testing::policy(&[("jit.mode", "force")]);
+    let (epoch, func) = fixture();
+    let word = epoch.word(func, SafepointIdx(1));
+    let holder = Holder::Root {
+        epoch: epoch.clone(),
+        func,
+        at: SafepointIdx(1),
+    };
+    let claim = policy::claim(holder.clone(), &policy, Start::Loop);
+    assert_eq!(policy::read(word), State::Recording);
+    let mut state = crate::JitRequest {
+        submitted: Some(Submitted {
+            word: holder,
+            goes_on: GoesOn::Short,
+        }),
+        ..crate::JitRequest::default()
+    };
+    let at = |state: &mut crate::JitRequest, site| quieted(state, Some(site));
+    assert!(at(&mut state, Site::Entry), "under way");
+    assert!(at(&mut state, Site::Loop(SafepointIdx(1))), "under way");
+    if let Some(claim) = claim {
+        policy::settle(claim, &Outcome::Published(trace(1)));
+    }
+    assert_eq!(policy::read(word), State::Compiled(trace(1)));
+    assert!(at(&mut state, Site::Entry), "short of the trace");
+    assert!(quieted(&mut state, None), "short of the trace");
+    assert!(!at(&mut state, Site::Return(SafepointIdx(0))), "reached");
+    assert!(state.submitted.is_none());
+    assert!(!at(&mut state, Site::Entry));
+}
+
 /// The trace-dump lanes' ini: `force`, inline, and php's `TRACE` lines.
 const DUMPED: [(&str, &str); 3] = [
     ("jit.mode", "force"),
@@ -191,8 +229,9 @@ fn lines(served: &php_engine::test::Served) -> Vec<String> {
 /// A destructor that runs a hot loop inside a recording: the loop is
 /// bumped and not recorded, so one `TRACE start` is written, the root's;
 /// the next request enters that root, which leaves where its call's
-/// cache slot, the request's, holds no callee yet, and records a root
-/// of its own, the function the first recorded inside its root.
+/// cache slot, the request's, holds no callee yet, and records a side
+/// trace from that exit's word, which follows the call into `f` and goes on to the
+/// file's return, as php's `zend_jit_trace_hot_side` records one.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_destructors_hot_loop_inside_a_recording_starts_no_second_trace() {
@@ -219,7 +258,7 @@ fn a_destructors_hot_loop_inside_a_recording_starts_no_second_trace() {
         lines(&second),
         [
             "     TRACE 1 exit 0 $main() body.php:4",
-            "---- TRACE 2 start (enter) f() body.php:3",
+            "---- TRACE 2 start (side trace 1/0) $main() body.php:4",
             "---- TRACE 2 stop (return)",
             "---- TRACE 2 compiled",
             "",
@@ -231,15 +270,14 @@ fn a_destructors_hot_loop_inside_a_recording_starts_no_second_trace() {
 /// first root hot after it is refused with `too many traces` and
 /// blacklisted, and the counters stop, so no later root starts, as
 /// `zend_jit_trace_hot_root` refuses one and
-/// `zend_jit_stop_counter_handlers` stops the rest. php under the
-/// recipe's hot counters with `opcache.jit_max_root_traces=3` writes the
-/// same for this program's `b`, its third trace, a side trace of `a`'s
-/// loop taking the second, which nothing here grows yet (#2964): `a`'s
-/// compiled loop leaves where it ends, and the exit's line is written:
-/// `---- TRACE 3 start (enter) b() …:3`, `---- TRACE 3 abort (too many
-/// traces)`, `---- TRACE 3 blacklisted`, and nothing for `c` or `d`.
-/// php numbers that exit `exit 3`, as its trace starts at the loop's
-/// condition (#3134).
+/// `zend_jit_stop_counter_handlers` stops the rest. Before it, `a`'s
+/// compiled loop leaves through php's `exit 3`, the trace started at the
+/// loop's condition, holding the three variables' types at entry and
+/// meeting the jump's direction before the body (#3134), and the hot exit
+/// starts a side trace that the full table refuses before it records, as
+/// php's `zend_jit_trace_hot_side` does, blacklisting the exit. The pinned
+/// php under the recipe's hot counters with the same bound writes these
+/// lines, line for line.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_full_table_refuses_one_root_and_stops_the_counters() {
@@ -263,7 +301,11 @@ fn a_full_table_refuses_one_root_and_stops_the_counters() {
             "---- TRACE 1 stop (loop)",
             "---- TRACE 1 compiled",
             "",
-            "     TRACE 1 exit 4 a() body.php:2",
+            "     TRACE 1 exit 3 a() body.php:2",
+            "---- TRACE 2 start (side trace 1/3) a() body.php:2",
+            "---- TRACE 2 abort (too many traces)",
+            "---- EXIT 1/3 blacklisted",
+            "",
             "---- TRACE 2 start (enter) b() body.php:3",
             "---- TRACE 2 abort (too many traces)",
             "---- TRACE 2 blacklisted",
@@ -544,8 +586,10 @@ fn a_tier_that_is_off_is_asked_at_no_back_edge() {
 /// the same `TRACE 2 start (loop) $main() …:4` line, after a return root
 /// at `$main`'s landing past the `eval` that aborts at the inner loop
 /// (`zend_jit_trace_setup_ret_counter`), which this tier does not root
-/// yet, and before the side trace its compiled loop exits into, where
-/// this tier, which grows none yet (#2964), writes the exit's line.
+/// yet; its compiled loop leaves through php's `TRACE 2 exit 1 …:5`,
+/// the line past the loop the jump goes to, and grows php's side trace
+/// there, `TRACE 3 start (side trace 2/1) $main() …:5`, which goes on to
+/// the file's return.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_main_loop_no_call_activates_is_a_root_at_its_header() {
@@ -565,24 +609,33 @@ fn a_main_loop_no_call_activates_is_a_root_at_its_header() {
             "---- TRACE 2 stop (loop)",
             "---- TRACE 2 compiled",
             "",
-            "     TRACE 2 exit 3 $main() body.php:4",
+            "     TRACE 2 exit 1 $main() body.php:5",
+            "---- TRACE 3 start (side trace 2/1) $main() body.php:5",
+            "---- TRACE 3 stop (return)",
+            "---- TRACE 3 compiled",
+            "",
         ]
     );
 }
 
 /// Under `jit.mode=exit-fuzz` every guard a compiled trace holds fails
 /// once, the loop's interrupt test among them, and the interpreter goes
-/// on at each landing to print what it prints under `force`: `a`'s two
-/// entry guards leave through exits of their own, the second knowing the
-/// type the first held, as php's stack map does; the interrupt test
-/// through its own, numbered last and growing no side trace, php's
-/// `ZEND_JIT_EXIT_TO_VM`; the guard on `$s` at the header and the
-/// increment's overflow guard through theirs; then the loop runs
-/// compiled to its end; the second call's trace links to it, its guards
-/// failed already, and leaves where the loop ends. A jump's direction is
-/// never failed: its exit lands where the jump it did not expect went.
-/// php numbers the end `exit 3`, as its trace starts at the loop's
-/// condition and meets the jump's direction before the body (#3134).
+/// on at each landing to print what it prints under `force`: `a`'s three
+/// entry guards, `$n`, `$s` and `$i` in their slots' order, leave through
+/// exits of their own, each knowing the types those before it held, as
+/// php's stack map does; the interrupt test through its own, numbered
+/// last and growing no side trace, php's `ZEND_JIT_EXIT_TO_VM`; the
+/// `+=`'s and the increment's overflow guards through theirs, where php
+/// holds the guards of the loop's phis (#3135); then the loop runs
+/// compiled to its end, through php's `exit 3`, the trace starting at the
+/// loop's condition and meeting the jump's direction before the body
+/// (#3134). Each exit but the interrupt test's, taken once, grows a side
+/// trace, as php's does at its first exit under the recipe's
+/// `opcache.jit_hot_side_exit=1`, so under `force` the loop's end is
+/// written once and the second call's trace, linking into the loop,
+/// leaves through the side its end grew, writing nothing. A jump's
+/// direction is never failed: its exit lands where the jump it did not
+/// expect went.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn under_exit_fuzz_every_guard_fails_once_and_the_output_is_forces() {
@@ -596,15 +649,40 @@ fn under_exit_fuzz_every_guard_fails_once_and_the_output_is_forces() {
     };
     let force = testing::serve::<Lane>(&DUMPED, program);
     assert_eq!(testing::stdout(&force), "45190\n");
-    assert_eq!(exits(&force), ["     TRACE 1 exit 4 a() body.php:2"; 2]);
+    assert_eq!(exits(&force), ["     TRACE 1 exit 3 a() body.php:2"]);
     let mut fuzzed = DUMPED.to_vec();
     fuzzed[0] = ("jit.mode", "exit-fuzz");
     let fuzz = testing::serve::<Lane>(&fuzzed, program);
     assert_eq!(testing::stdout(&fuzz), "45190\n");
     assert_eq!(
         exits(&fuzz),
-        [0, 1, 5, 2, 3, 4, 4].map(|exit| format!("     TRACE 1 exit {exit} a() body.php:2"))
+        [0, 1, 2, 6, 4, 5, 3].map(|exit| format!("     TRACE 1 exit {exit} a() body.php:2"))
     );
+}
+
+/// A loop's trace entered at its body from its back edge
+/// (`types::BodyEntry`) holds the frame to what it knows there: under
+/// exit-fuzz every guard fails once, and the interpreter, going on at
+/// each landing, comes to the back edge with the frame as it left it;
+/// where `$s` turned a string the entry declines, nothing ran, and the
+/// trace is entered at its condition, whose guards take the exits. What
+/// it prints is the interpreter's under force, exit-fuzz and tracing.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loop_entered_at_its_body_holds_the_frame_to_what_it_knows_there() {
+    let program = "function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) {
+            $s = $i < 4 ? $s + $i : \"s$i\"; } return $s; }
+        echo f(8), f(3), f(8), \"\\n\";";
+    for mode in ["force", "exit-fuzz", "tracing"] {
+        let mut ini = DUMPED.to_vec();
+        ini[0] = ("jit.mode", mode);
+        let served = testing::serve::<Lane>(&ini, program);
+        assert_eq!(
+            (testing::stdout(&served), served.fatal),
+            ("s73s7\n".to_owned(), None),
+            "{mode}"
+        );
+    }
 }
 
 /// `run` from trace to trace (`jit-design.md` §4.9 *Tested*), on the one
@@ -622,12 +700,13 @@ mod ran {
 
     use super::super::run;
     use crate::enter::tests::entered::numbered;
-    use crate::policy::{self, State};
+    use crate::policy::{self, Holder, Outcome, State};
     use crate::record::Start;
     use crate::table;
     use crate::testing::bodies::{Numbered, answering, calling, compiled, landing};
+    use crate::testing::records::trace;
     use crate::testing::{self, Scratch, function_of, stdout};
-    use crate::types::Landing;
+    use crate::types::{ExitId, Landing};
 
     /// What `run` answered at `f`'s activation, and what became of the
     /// cold exit's word.
@@ -740,6 +819,150 @@ mod ran {
             "{stderr}"
         );
     }
+
+    /// What `run` did from a root whose exit's word names a side trace.
+    #[derive(Debug, Default)]
+    struct Sided {
+        entered: Vec<u32>,
+        resumed: Option<(bool, u32)>,
+        /// The side's own exit word's state and heat after it was visited.
+        cold: Option<(State, u32)>,
+    }
+
+    /// At `f`'s activation: a root serving `f`'s opline 0 that leaves
+    /// through an exit landing at opline 1, whose word is settled compiled
+    /// as a side's, published where `published`, serving opline 1 and
+    /// leaving through a cold exit landing at opline 2; or naming trace
+    /// 99, which no publish wrote; then `run` from the root.
+    fn sided(req: &mut Request, frame: FrameRef, published: bool) -> Flow {
+        let Some(shared) = req
+            .engine::<crate::JitEngine>()
+            .map(|engine| Arc::clone(&engine.shared))
+        else {
+            return Flow::Bail(Fatal::error("no engine state"));
+        };
+        let epoch = table::holding(req, &shared.policy, &shared.perf);
+        let Some(table) = table::of_epoch(&epoch) else {
+            return Flow::Bail(Fatal::error("no table"));
+        };
+        let number = (numbered::number as *const ()).addr();
+        let body = |at: u32| answering(calling(number, at, &[], true), 0);
+        let root = compiled(&body(0), vec![landing(1, Landing::Plain)]);
+        let Ok(root) = table.publish(root, Start::Enter) else {
+            return Flow::Bail(Fatal::error("the root was not published"));
+        };
+        let grew = Start::Side {
+            parent: root,
+            exit: ExitId(0),
+        };
+        let side = if published {
+            let side = compiled(&body(1), vec![landing(2, Landing::Plain)]);
+            match table.publish(side, grew) {
+                Ok(side) => side,
+                Err(_) => return Flow::Bail(Fatal::error("the side was not published")),
+            }
+        } else {
+            trace(99)
+        };
+        let holder = Holder::Exit {
+            epoch: tier::epoch(req),
+            trace: root,
+            exit: ExitId(0),
+        };
+        let Some(claim) = policy::claim(holder, &shared.policy, grew) else {
+            return Flow::Bail(Fatal::error("the root's exit was not claimed"));
+        };
+        policy::settle(claim, &Outcome::Published(side));
+        let flow = run(req, frame, root, &shared);
+        let resumed = match flow {
+            Flow::Resume(at) => tier::frame(req, at).map(|view| (at == frame, view.opline().0)),
+            _ => None,
+        };
+        let cold = (table.get(side))
+            .and_then(|trace| trace.exits.first())
+            .map(|exit| {
+                let heat = exit.word.halves()[0].load(Ordering::Relaxed);
+                (policy::read(&exit.word), heat)
+            });
+        let entered = std::mem::take(&mut req.state::<Numbered>().0);
+        let kept = req.state::<Sided>();
+        kept.entered = entered;
+        kept.resumed = resumed;
+        kept.cold = cold;
+        flow
+    }
+
+    /// [`sided`] with the side published, and with none.
+    struct SideRuns<const PUBLISHED: bool>;
+
+    impl<const PUBLISHED: bool> Tier for SideRuns<PUBLISHED> {
+        fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+            if site != Site::Entry || function_of(req, frame).as_deref() != Some(b"f") {
+                return Flow::Continue;
+            }
+            sided(req, frame, PUBLISHED)
+        }
+
+        fn extension() -> Option<Extension> {
+            let mut ini = crate::policy::ini();
+            ini.extend(testing::declared(&testing::OPCACHE));
+            Some(
+                ExtensionBuilder::default()
+                    .ini(ini)
+                    .engine_state(crate::JitEngine::new)
+                    .request_state::<Sided>()
+                    .request_state::<Numbered>()
+                    .build("jit"),
+            )
+        }
+    }
+
+    /// A side trace's exit that lands at a word nothing compiled is a
+    /// `Resume` of the frame it landed (`jit-design.md` §4.9): the root is
+    /// entered, its exit's word names the side, which is entered on the
+    /// frame the root's exit landed with no line written, and the side's
+    /// exit lands at its cold word, which is bumped, so `run` answers
+    /// `Resume` of `f`'s frame at opline 2.
+    #[test]
+    fn a_side_traces_exit_that_lands_cold_resumes_the_frame_it_landed() {
+        let engine = testing::engine::<SideRuns<true>>(&[
+            ("opcache.jit", "tracing"),
+            ("opcache.jit_debug", "32768"),
+        ]);
+        let program = r#"function f() { echo "a"; echo "b"; echo "c"; echo "d"; } f();"#;
+        let (served, kept) = Scratch::new().serve_kept::<Sided>(&engine, program);
+        assert_eq!(stdout(&served), "abcd");
+        let kept = kept.unwrap_or_default();
+        assert_eq!(kept.entered, [1, 2]);
+        assert_eq!(kept.resumed, Some((true, 2)));
+        assert_eq!(kept.cold, Some((State::Cold, 1)));
+        let stderr = String::from_utf8_lossy(&served.stderr);
+        let lines: Vec<&str> = stderr.lines().collect();
+        assert!(
+            lines.len() == 1 && lines[0].starts_with("     TRACE 2 exit 0 f() "),
+            "the side's exit alone is written: {stderr}"
+        );
+    }
+
+    /// An exit whose word names a side trace no publish wrote, the
+    /// window §3.2 names, is a `Resume` of the frame it landed: the root
+    /// ran and its exit landed `f`'s frame at opline 1, where the
+    /// interpreter goes on.
+    #[test]
+    fn a_missing_side_target_resumes_the_frame_its_exit_landed() {
+        let engine = testing::engine::<SideRuns<false>>(&[
+            ("opcache.jit", "tracing"),
+            ("opcache.jit_debug", "32768"),
+        ]);
+        let program = r#"function f() { echo "a"; echo "b"; echo "c"; echo "d"; } f();"#;
+        let (served, kept) = Scratch::new().serve_kept::<Sided>(&engine, program);
+        assert_eq!(stdout(&served), "abcd");
+        let kept = kept.unwrap_or_default();
+        assert_eq!(kept.entered, [1]);
+        assert_eq!(kept.resumed, Some((true, 1)));
+        assert_eq!(kept.cold, None);
+        assert_eq!(String::from_utf8_lossy(&served.stderr), "");
+    }
 }
 
 /// A frame the tier moved at its activation goes on where the tier left
@@ -803,4 +1026,23 @@ fn a_throw_in_a_compiled_loop_unwinds_through_no_exit() {
             .any(|line| line.starts_with("     TRACE 1 exit")),
         "{lines:?}"
     );
+}
+
+/// A loop's back edge lands on its body, and its trace is recorded and
+/// entered at its condition, php's header (`record::headed`): a body that
+/// leaves the loop on the way there, a `break`, records nothing and goes
+/// on where it went, and one that gets there records from the condition,
+/// where php's trace takes its heat.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_body_that_leaves_on_the_way_to_the_condition_goes_on_where_it_went() {
+    let program =
+        "function f($n) { for ($i = 0; $i < 10; $i++) { if ($i == $n) { break; } } return $i; }
+        echo f(1), f(5), \"\\n\";";
+    let served = testing::serve::<Lane>(&DUMPED, program);
+    assert_eq!(testing::stdout(&served), "15\n");
+    let starts: Vec<String> = (lines(&served).into_iter())
+        .filter(|line| line.contains("start (loop)"))
+        .collect();
+    assert_eq!(starts, ["---- TRACE 1 start (loop) f() body.php:2"]);
 }

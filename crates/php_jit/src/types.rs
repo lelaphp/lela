@@ -22,8 +22,10 @@
 //!   array, a reference's inner type, a conditional jump's direction, the
 //!   caller a return lands in. A guard on what the trace entered with is
 //!   held once at entry, and a loop's phi guard moves to its entry value
-//!   where the back edge already has the type, as php's "propagate
-//!   guards through Phi sources" does. What an opline writes is typed by
+//!   where the back edge already has the type, or where an inline
+//!   arithmetic made what it brings and holds it long within itself,
+//!   rerun where it overflows, as php's "propagate guards through Phi
+//!   sources" does with `is_checked_guard`. What an opline writes is typed by
 //!   what php's inference knows of its operands, so where it reads a
 //!   variable a symbol table reaches, which php types as anything, the
 //!   opline that reads what it wrote holds it, as php's does.
@@ -37,7 +39,8 @@
 //!   array of one is held to its layout at each read by a long key.
 //! - **`SMART_BRANCH`.** A comparison fused to the jump after it is one
 //!   compare-and-branch, whose mispredicted direction leaves through an
-//!   exit at the jump with the comparison's value written as a constant.
+//!   exit at the opline the jump goes to the other way, as php's lands
+//!   there, the comparison's value dead past the jump.
 //! - **The clobber rule.** After a kernel whose opcode carries the `call`
 //!   effect in `ops.toml`, every value whose facts came from memory other
 //!   code can write, a slot a symbol table reaches or one that may hold a
@@ -100,6 +103,31 @@ pub(crate) struct TraceIr {
     pub(crate) unwinds: Vec<Unwind>,
     pub(crate) map_ptrs: Vec<MapPtrRaw>,
     pub(crate) end: End,
+    /// Where a loop's trace is entered from its back edge, where that
+    /// lands past its header ([`BodyEntry`]): none for a trace entered at
+    /// its first op alone.
+    pub(crate) body: Option<BodyEntry>,
+}
+
+/// The second way into a trace rooted at a loop's condition, php's header
+/// (`jit-design.md` §4.1, revision 53, as built until a person rules
+/// on #3178), whether it closes the loop or leaves it: at the opline the
+/// loop's back edge lands on, the body of a `for` or a `while`. The engine's
+/// back edge stands the frame there, past the condition the interpreter
+/// just served; entering at the body takes the trace's ops from `at` on
+/// with what the frame holds, each value the trace keeps there read from
+/// its slot and held to what the trace knows of it. A frame holding
+/// anything else declines the entry, taking no exit, and `dispatch`
+/// steps on to the condition and enters there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BodyEntry {
+    /// The op the entry goes on at.
+    pub(crate) at: OpId,
+    /// Its opline, in the frame the trace entered in, where the frame
+    /// stands.
+    pub(crate) opline: OplineIdx,
+    /// What each slot of that frame holds there, the trace's value of it.
+    pub(crate) holds: Vec<(Slot, ValueId)>,
 }
 
 /// Where the trace was recorded from and why the recording stopped.
@@ -436,8 +464,6 @@ pub(crate) struct Store {
 pub(crate) enum Stored {
     /// A value the trace holds.
     Value(ValueId),
-    /// A boolean the exit knows: a mispredicted comparison's.
-    Bool(bool),
     /// A fetched element whose type its guard did not hold, which the
     /// guard's own place copies into the fetch's slot as the fetch copies
     /// it before it leaves, read in place or through the reference the
@@ -488,10 +514,29 @@ pub(crate) struct LoopHeader {
     /// The op the back edge goes to.
     pub(crate) at: OpId,
     pub(crate) repeat: Repeat,
-    /// Where the interrupt test leaves (`jit-design.md` §4.3): an exit
-    /// that never grows a side trace, numbered after every exit of the
-    /// loop's body, as php takes it where it closes the loop.
-    pub(crate) interrupt: ExitId,
+    /// Where the interrupt test leaves (`jit-design.md` §4.3).
+    pub(crate) interrupt: Interrupt,
+}
+
+/// Where a loop's interrupt test goes once the interrupt is raised, as
+/// php's `zend_jit_trace` chooses its `timeout_exit_addr`
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:7210-7228`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Interrupt {
+    /// Through this exit, php's `ZEND_JIT_EXIT_TO_VM` exit point at the
+    /// loop's header, which never grows a side trace, numbered after
+    /// every exit of the loop's body as php takes it where it closes the
+    /// loop: where php's code does not keep the instruction pointer the
+    /// trace entered with, or keeps values in registers there.
+    Exit(ExitId),
+    /// Through php's interrupt stub, `jit_stub_interrupt_handler`, which
+    /// takes no exit: the interrupt is handled and the trace entered again
+    /// at its header, as php's stub goes on at the header's handler,
+    /// which is the trace. Where php's code keeps its initial
+    /// instruction pointer and holds nothing in registers at the loop's
+    /// end, so the interpreter needs nothing back. The header's opline,
+    /// where the frame is stood for the stub.
+    Stub(OplineIdx),
 }
 
 /// What a looping trace repeats: php's three stops that make a loop.

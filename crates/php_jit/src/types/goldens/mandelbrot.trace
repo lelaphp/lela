@@ -1,5 +1,6 @@
 start loop
 root e0
+op e0 45 long long - taken
 op e0 28 double - - -
 op e0 29 double double - -
 op e0 30 double double - -
@@ -14,5 +15,4 @@ op e0 38 double double - -
 op e0 39 double double - -
 op e0 40 double double - taken
 op e0 44 long - - -
-op e0 45 long long - taken
 stop loop

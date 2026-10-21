@@ -57,7 +57,7 @@ use php_unit::OplineIdx;
 use crate::policy::{JitDebug, Mode, Policy};
 use crate::record::Stop;
 use crate::table::TraceName;
-use crate::types::{Abort, End, ExitId, ExitSpec, Op, TraceIr};
+use crate::types::{Abort, End, ExitId, ExitSpec, Interrupt, Op, TraceIr};
 
 /// A trace in final bytes (`jit-design.md` §4.3), what the `Backend` makes
 /// and `table::TraceTable::publish` copies into the code arena once:
@@ -77,6 +77,16 @@ pub(crate) struct Compiled {
     /// php's return to the interpreter at a trace's end
     /// (`zend_jit_trace_return`), which no side trace grows from.
     pub(crate) leaves: Option<ExitId>,
+    /// Where a loop whose interrupt test takes php's stub stands its frame
+    /// once it answers [`INTERRUPTED`]: its header's opline. None for a
+    /// loop whose test takes an exit and for a trace that does not loop.
+    pub(crate) stub: Option<OplineIdx>,
+    /// The op array and opline the trace's first recorded opline stands
+    /// at, where a frame entering it stands.
+    pub(crate) opens: Option<(FuncRef, OplineIdx)>,
+    /// Where a loop's trace is entered at its body too: the opline its
+    /// back edge lands on (`types::BodyEntry`).
+    pub(crate) body: Option<OplineIdx>,
     /// The slots of the requests' runtime caches the code reads, which
     /// `enter` lays down on a request's first entry.
     pub(crate) map_ptrs: Box<[MapPtrRaw]>,
@@ -155,11 +165,56 @@ pub(crate) const ABANDONED: u32 = u32::MAX;
 /// throwable pending on the request is unwound from where it was raised.
 pub(crate) const UNWOUND: u32 = u32::MAX - 1;
 
+/// What compiled code answers where a loop's interrupt test takes php's
+/// interrupt stub, `jit_stub_interrupt_handler`, and no exit
+/// (`types::Interrupt::Stub`): past every
+/// [`ExitId`](crate::types::ExitId), and neither [`ABANDONED`] nor
+/// [`UNWOUND`]. Nothing is stored; `enter` stands the frame at the loop's
+/// header, [`Compiled::stub`], for `dispatch` to make the loop's
+/// interrupt check and enter the trace again there.
+pub(crate) const INTERRUPTED: u32 = u32::MAX - 2;
+
+/// What compiled code answers where a loop's trace entered at its body
+/// (`types::BodyEntry`) finds the frame holding other than it knows:
+/// past every [`ExitId`](crate::types::ExitId), and none of
+/// [`ABANDONED`], [`UNWOUND`] and [`INTERRUPTED`]. Nothing ran and
+/// nothing is stored.
+pub(crate) const DECLINED: u32 = u32::MAX - 3;
+
+/// Where compiled code reads, in the `ExitCtx`, where it is entered
+/// (`enter::At`), a `u32` that is not zero at a loop's body
+/// (`types::BodyEntry`): the field `enter` lays down past the interrupt
+/// pointer.
+pub(crate) const ENTRY_AT: i32 = 16;
+
 /// Where compiled code reads the interrupt pointer in the `ExitCtx`
 /// (`jit-design.md` §4.6): the request at offset zero, the pointer to its
 /// interrupt byte at offset eight, the field `enter` lays down with the
 /// first trace it enters (#2957).
 pub(crate) const INTERRUPT_AT: i32 = 8;
+
+/// Where the trace's first recorded opline stands.
+fn opens_at(ir: &TraceIr) -> Option<(FuncRef, OplineIdx)> {
+    ir.ops.iter().find_map(|op| match op {
+        Op::Line(line) => {
+            let frame = ir.frames.get(usize::from(line.frame.0))?;
+            Some((frame.func, line.opline))
+        }
+        _ => None,
+    })
+}
+
+/// The opline a loop whose interrupt test takes php's stub stands its
+/// frame at, its header's.
+fn stub_at(ir: &TraceIr) -> Option<OplineIdx> {
+    let End::Loop(header) = ir.end else {
+        return None;
+    };
+    match header.interrupt {
+        Interrupt::Stub(at) => Some(at),
+        Interrupt::Exit(_) => None,
+    }
+}
 
 /// A kernel compiled code calls (`jit-design.md` §4.6, §5.2), by the
 /// wrapper `enter`'s `kernels!` list makes of it. Every wrapper is
@@ -331,6 +386,9 @@ impl Backend {
                 End::Leave(exit) => Some(exit),
                 End::Loop(_) => None,
             },
+            stub: stub_at(ir),
+            opens: opens_at(ir),
+            body: ir.body.as_ref().map(|body| body.opline),
             map_ptrs: ir.map_ptrs.clone().into_boxed_slice(),
             marks,
             name,

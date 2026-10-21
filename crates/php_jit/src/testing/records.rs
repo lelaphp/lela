@@ -99,7 +99,7 @@ impl Tier for Records {
             at,
         };
         crate::table::of(req, &policy, &crate::table::Outputs::none());
-        match run(req, frame, start, at, &policy) {
+        match run(req, frame, start, at, &policy, record::Opening::default()) {
             Ok((recorded, ended)) => {
                 let kept = req.state::<Kept>();
                 kept.taken.push(recorded);
@@ -181,10 +181,13 @@ pub(crate) fn settle_words(req: &mut Request) {
         .then(|| view.op_array(func))
         .flatten()
         .map(|code| {
-            (0..code.oplines.len())
+            let mut headers: Vec<SafepointIdx> = (0..code.oplines.len())
                 .filter_map(|at| header_at(code, OplineIdx(u32::try_from(at).ok()?)))
-                .skip(1)
-                .collect()
+                .collect();
+            // The first is the outermost, whose body its back edge lands
+            // on first, wherever php's trace roots it.
+            headers.sort_by_key(|header| code.safepoints.get(header.0 as usize).copied());
+            headers.into_iter().skip(1).collect()
         })
         .unwrap_or_default();
     for at in headers {

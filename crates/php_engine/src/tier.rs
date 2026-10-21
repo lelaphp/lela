@@ -997,6 +997,16 @@ pub fn unwind(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
     unwind_frame::<Nop>(req, frame)
 }
 
+/// The interrupt check the loop makes at a back edge (design §5.8), for
+/// a tier that handles the interrupt where php's compiled code does, in
+/// its interrupt stub (`jit_stub_interrupt_handler`), and goes on in its
+/// own code: the interrupt cleared, then php's timeout fatal, or each
+/// extension's interrupt hook served. `Ok(true)` where a hook left a
+/// throwable pending, which the tier hands back to the loop to unwind.
+pub fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
+    interrupt::check(req)
+}
+
 /// The internal error for a frame whose position is past the end of
 /// its op array, which no unit the compiler wrote reaches.
 #[cold]

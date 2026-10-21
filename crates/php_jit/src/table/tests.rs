@@ -62,6 +62,9 @@ fn compiled(bytes: &[u8], exits: Vec<ExitSpec>) -> Compiled {
         align: 4,
         exits: exits.into(),
         leaves: None,
+        stub: None,
+        opens: None,
+        body: None,
         fuzzed: crate::lower::Fuzzed::default(),
         map_ptrs: Box::new([]),
         marks: Box::new([]),
@@ -707,6 +710,10 @@ mod epoch {
             ("jit.mode", "force"),
             ("opcache.jit_debug", "258048"),
             ("opcache.jit_buffer_size", "64K"),
+            // Each function a root of its own: with no side trace, the
+            // loop's dynamic call leaves to the interpreter, which
+            // activates the callee.
+            ("opcache.jit_hot_side_exit", "0"),
         ]);
         let functions = 800;
         let mut program = String::new();

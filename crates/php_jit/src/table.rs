@@ -40,13 +40,13 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use php_engine::tier::{self, Epoch, MapPtrRaw, Request, Word};
+use php_engine::tier::{self, Epoch, FuncRef, MapPtrRaw, Request, Word};
 use php_unit::OplineIdx;
 
 use crate::lower::{Compiled, Fuzzed, Mark};
 use crate::policy::{Place, Policy};
-use crate::record::{Start, Stop};
-use crate::types::{ExitId, Landing};
+use crate::record::{Entered, Start, Stop};
+use crate::types::{ExitId, Grows, Landing};
 
 #[allow(
     unsafe_code,
@@ -161,6 +161,14 @@ pub(crate) struct Trace<P: Pages = Native> {
     pub(crate) exits: Box<[Exit]>,
     /// The exit it ends through where it does not loop.
     pub(crate) leaves: Option<ExitId>,
+    /// Where a loop whose interrupt test takes php's stub stands its
+    /// frame as it answers `lower::INTERRUPTED`: its header's opline.
+    pub(crate) stub: Option<OplineIdx>,
+    /// The op array and opline its first recorded opline stands at.
+    pub(crate) opens: Option<(FuncRef, OplineIdx)>,
+    /// Where it is entered at a loop's body too, the opline its back edge
+    /// lands on.
+    pub(crate) body: Option<OplineIdx>,
     #[cfg_attr(
         not(test),
         expect(
@@ -218,6 +226,11 @@ pub(crate) struct Exit {
     pub(crate) opline: Option<OplineIdx>,
     pub(crate) landing: Landing,
     pub(crate) link: Option<TraceId>,
+    /// Whether a side trace may grow from it, php's `flags`.
+    pub(crate) grows: Grows,
+    /// What it knows of the slots of the frame it lands in, php's stack
+    /// map, which a side trace grown from it enters with.
+    pub(crate) entered: Box<[Entered]>,
     pub(crate) word: Word,
 }
 
@@ -462,6 +475,19 @@ impl<P: Pages> TraceTable<P> {
         self.stopped.store(true, Ordering::Relaxed);
     }
 
+    /// Whether the root `parent` grew from, or `parent` itself where it
+    /// is a root, has `opcache.jit_max_side_traces` side traces, so a side
+    /// of it is refused with `TOO_MANY_CHILDREN`, as php's
+    /// `zend_jit_trace_hot_side` refuses one before it records
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:8521-8525`).
+    pub(crate) fn children_full(&self, parent: TraceId) -> bool {
+        let writer = self.writer();
+        let rows = &writer.counts.rows;
+        let root = rows.get(parent.row()).map_or(parent, |row| row.root);
+        rows.get(root.row())
+            .is_some_and(|row| row.sides >= self.bounds.sides)
+    }
+
     /// Whether [`TraceTable::stop`] stopped it.
     pub(crate) fn stopped(&self) -> bool {
         self.stopped.load(Ordering::Relaxed)
@@ -519,6 +545,13 @@ impl<P: Pages> TraceTable<P> {
                 opline: spec.opline,
                 landing: spec.landing,
                 link: spec.link,
+                grows: spec.grows,
+                entered: (spec.known.iter())
+                    .map(|known| Entered {
+                        var: known.slot.var,
+                        tag: known.tag,
+                    })
+                    .collect(),
                 word: Word::default(),
             })
             .collect();
@@ -548,6 +581,9 @@ impl<P: Pages> TraceTable<P> {
             root: admitted.root,
             exits: built,
             leaves: compiled.leaves,
+            stub: compiled.stub,
+            opens: compiled.opens,
+            body: compiled.body,
             map_ptrs: compiled.map_ptrs,
             marks: compiled.marks,
             fuzzed: compiled.fuzzed,

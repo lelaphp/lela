@@ -16,13 +16,6 @@
 //!
 //! so the sealed word, all ones, reads blacklisted: the one bit pattern
 //! the engine knows, and a layout invariant held by a test below.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "dispatch (#2952) is the first caller of the state machine and the recorder (#2951) of the dump"
-    )
-)]
 
 use std::io::{self, Write};
 use std::sync::atomic::Ordering;
@@ -725,6 +718,9 @@ impl Policy {
             TraceEvent::Blacklisted { trace } if debug.any(JitDebug::TRACE_BLACKLIST) => {
                 writeln!(sink, "---- TRACE {} blacklisted", trace.get())
             }
+            TraceEvent::ExitBlacklisted { trace, exit } if debug.any(JitDebug::TRACE_BLACKLIST) => {
+                writeln!(sink, "---- EXIT {}/{} blacklisted", trace.get(), exit.0)
+            }
             TraceEvent::Done
                 if debug.any(
                     JitDebug::TRACE_STOP
@@ -785,6 +781,12 @@ pub(crate) enum TraceEvent<'a> {
     },
     Blacklisted {
         trace: TraceId,
+    },
+    /// An exit of `trace` that grows no side trace from now on, php's
+    /// `zend_jit_blacklist_trace_exit` line.
+    ExitBlacklisted {
+        trace: TraceId,
+        exit: ExitId,
     },
     /// A trace left through `exit` for the interpreter, at the place it
     /// landed: php's `zend_jit_trace_exit` line.
@@ -916,6 +918,11 @@ impl Claim {
     /// published into.
     pub(crate) fn epoch(&self) -> &Epoch {
         self.holder.epoch()
+    }
+
+    /// What holds its word.
+    pub(crate) fn holder(&self) -> &Holder {
+        &self.holder
     }
 
     /// The one release store that ends the claim; the state it left.
