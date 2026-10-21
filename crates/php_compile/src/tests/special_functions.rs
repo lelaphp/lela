@@ -79,6 +79,16 @@ fn the_four_special_names_fold_to_the_constant_php_dumps() {
     }
 }
 
+/// Whether the source compiles to the ordinary call of `name`: an
+/// `INIT_FCALL` first, over that lowered name, and a `DO_ICALL`.
+fn ordinary_call(source: &[u8], name: &[u8]) -> bool {
+    let (unit, _strings) = unit_and_strings(source);
+    let oplines = &unit.main.oplines;
+    oplines.first().map(|op| op.opcode) == Some(Opcode::InitFcall)
+        && literal_text(&unit, 0).as_deref() == Some(name)
+        && oplines.iter().any(|op| op.opcode == Opcode::DoIcall)
+}
+
 /// What php leaves to the call itself is the ordinary call here,
 /// and never a constant or an opcode it is not: a `chr` whose long
 /// is not written as such or is outside the byte, an `ord` over any

@@ -263,16 +263,6 @@ pub(super) fn folded(source: &[u8]) -> Option<php_heap::Zval> {
         .flatten()
 }
 
-/// Whether the source compiles to the ordinary call of `name`: an
-/// `INIT_FCALL` first, over that lowered name, and a `DO_ICALL`.
-pub(super) fn ordinary_call(source: &[u8], name: &[u8]) -> bool {
-    let (unit, _strings) = unit_and_strings(source);
-    let oplines = &unit.main.oplines;
-    oplines.first().map(|op| op.opcode) == Some(Opcode::InitFcall)
-        && literal_text(&unit, 0).as_deref() == Some(name)
-        && oplines.iter().any(|op| op.opcode == Opcode::DoIcall)
-}
-
 /// The oplines and the live-range table of one source's main op
 /// array, the header left off: what the oracle's dump prints after
 /// `; return  [] RANGE[0..0]`.
