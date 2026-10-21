@@ -810,9 +810,9 @@ mod tests {
         String::from_utf8(dump).expect("a dump of UTF-8")
     }
 
-    /// What the dump prints past the main op array's header: its
-    /// oplines and tables, then every other op array, as
-    /// `php_compile`'s `oplines_of` cuts it.
+    /// What the dump prints past the main op array's header,
+    /// `; return  [] RANGE[0..0]`: its oplines and tables, then every
+    /// other op array whole.
     fn past_main_header(unit: &Unit) -> String {
         utf8(unit.dump(&[]))
             .split_once("RANGE[0..0]\n")
@@ -1560,18 +1560,7 @@ mod tests {
     /// prints `LIVE RANGES:` after the oplines and one line per range,
     /// the temporary's slot as the range holds it, the range, and the kind's
     /// word, the ranges in the order of their starts; the
-    /// `try`/`catch` table follows it.
-    ///
-    /// ```text
-    /// LIVE RANGES:
-    ///      11: 0004 - 0011 (loop)
-    ///      12: 0006 - 0009 (silence)
-    ///      15: 0012 - 0014 (rope)
-    ///      18: 0017 - 0022 (new)
-    ///      22: 0024 - 0025 (tmp/var)
-    /// EXCEPTION TABLE:
-    ///      0026, 0030, -, -
-    /// ```
+    /// `try`/`catch` table follows it, as the snapshot below holds.
     #[test]
     fn the_live_range_table_follows_the_oplines_with_php_s_five_kinds() {
         let range = |var, kind, start, end| LiveRange {
