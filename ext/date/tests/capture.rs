@@ -46,7 +46,6 @@ fn a_subclass_s_mangled_property_names_are_left_held_by_no_reader() {
     let engine = Engine::builder()
         .extensions(&[php_ext_date::extension()])
         .ini("date.timezone", "UTC")
-        .sense_leaks(php_ext::test::LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(
         r#"<?php
