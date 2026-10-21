@@ -185,10 +185,8 @@ impl Held {
             return Ok(None);
         };
         let file = krate.path().join(LINES);
-        let text = match fs::read_to_string(root.join(&file)) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
+        let Some(text) = crate::read_if(&root.join(&file))? else {
+            return Ok(None);
         };
         Held::parse(host, file, &text).map(Some)
     }

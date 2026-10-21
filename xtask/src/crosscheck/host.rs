@@ -101,24 +101,30 @@ impl Host {
     }
 }
 
-/// The oracle's rendering of `module` through `host`, which is not the
-/// CLI: the pinned host from `[sapi]`, its digest asserted, or the pinned
-/// `php` for the server.
-pub(crate) fn oracle_side(
+/// The rendering of `module` through `host`, which is not the CLI: by the
+/// oracle where `engine` is none, the pinned host from `[sapi]` with its
+/// digest asserted or the pinned `php` for the server, and by the
+/// engine's witness build serving the same request where it is one.
+pub(crate) fn side(
     oracle: &Oracle<'_>,
+    engine: Option<&crate::witness::Binary>,
     host: Host,
     module: &str,
     column: Column,
 ) -> Result<Observation> {
     let program = column.program(module);
-    let served = match host {
-        Host::Cli => bail!("the CLI renders {module} by its flags, not as a request"),
-        Host::Cgi | Host::Fpm => {
-            let served = requested(host);
+    let served = requested(host);
+    let served = match (host, engine) {
+        (Host::Cli, _) => bail!("the CLI renders {module} by its flags, not as a request"),
+        (Host::Cgi | Host::Fpm, None) => {
             let path = oracle.pinned_host(crate::witness::host_of(served))?;
             crate::witness::served_as(oracle, served, &path, &program, REQUEST, None, &[])?
         }
-        Host::Server => served_by_server(oracle, &oracle.pin().oracle.path, &program)?,
+        (Host::Cgi | Host::Fpm, Some(binary)) => {
+            (binary.serve_request(oracle, served, &program, REQUEST, None)?).0
+        }
+        (Host::Server, None) => served_by_server(oracle, &oracle.pin().oracle.path, &program)?,
+        (Host::Server, Some(binary)) => served_by_server(oracle, &binary.host(CLI)?, &program)?,
     };
     Ok(body(oracle, served))
 }
@@ -129,29 +135,6 @@ fn requested(host: Host) -> Served {
         Host::Fpm => Served::Fpm,
         Host::Cli | Host::Cgi | Host::Server => Served::Cgi,
     }
-}
-
-/// The engine's rendering through `host`: its witness build serving the
-/// same request.
-pub(crate) fn engine_side(
-    oracle: &Oracle<'_>,
-    binary: &crate::witness::Binary,
-    host: Host,
-    module: &str,
-    column: Column,
-) -> Result<Observation> {
-    let program = column.program(module);
-    let served = match host {
-        Host::Cli => bail!("the CLI renders {module} by its flags, not as a request"),
-        Host::Cgi | Host::Fpm => {
-            let served = requested(host);
-            binary
-                .serve_request(oracle, served, &program, REQUEST, None)?
-                .0
-        }
-        Host::Server => served_by_server(oracle, &binary.host(CLI)?, &program)?,
-    };
-    Ok(body(oracle, served))
 }
 
 /// The response's body: a CGI-shaped host writes its head first, and the

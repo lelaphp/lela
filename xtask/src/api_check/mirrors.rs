@@ -34,7 +34,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{Attribute, ImplItem, Item, LitStr, Token, TraitItem, Type};
@@ -159,8 +159,7 @@ fn markers(krate: &Present) -> Result<Vec<Marker>> {
         if !text.contains("mirrors") {
             continue;
         }
-        let parsed =
-            syn::parse_file(&text).with_context(|| format!("parsing {}", file.display()))?;
+        let parsed = super::inventory::parsed(&text, &file)?;
         found.file = krate.relative(&file).to_path_buf();
         found.visit_file(&parsed);
     }
@@ -333,19 +332,8 @@ fn named(attr: &Attribute) -> Result<Declaration, String> {
 
 impl<'ast> Visit<'ast> for Found {
     fn visit_item(&mut self, item: &'ast Item) {
-        let attributed = match item {
-            Item::Const(i) => Some((&i.attrs, &i.ident)),
-            Item::Enum(i) => Some((&i.attrs, &i.ident)),
-            Item::Fn(i) => Some((&i.attrs, &i.sig.ident)),
-            Item::Static(i) => Some((&i.attrs, &i.ident)),
-            Item::Struct(i) => Some((&i.attrs, &i.ident)),
-            Item::Trait(i) => Some((&i.attrs, &i.ident)),
-            Item::Type(i) => Some((&i.attrs, &i.ident)),
-            Item::Union(i) => Some((&i.attrs, &i.ident)),
-            _ => None,
-        };
-        if let Some((attrs, ident)) = attributed {
-            self.take(attrs, &ident.to_string());
+        if let Some((_, name, _, attrs)) = super::inventory::plain_item(item) {
+            self.take(attrs, &name);
         }
         match item {
             Item::Impl(i) => self.inside(type_name(&i.self_ty), |f| visit::visit_item_impl(f, i)),
@@ -379,12 +367,8 @@ impl<'ast> Visit<'ast> for Found {
 /// segment, `Rng` for `impl crate::rng::Rng`, and `impl` for a self type
 /// that is no path.
 fn type_name(ty: &Type) -> String {
-    match ty {
-        Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
-        Type::Reference(r) => Some(type_name(&r.elem)),
-        _ => None,
-    }
-    .unwrap_or_else(|| "impl".to_owned())
+    let path = super::inventory::self_type_path(ty);
+    (path.and_then(|mut segments| segments.pop())).unwrap_or_else(|| "impl".to_owned())
 }
 
 #[cfg(test)]

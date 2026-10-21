@@ -387,16 +387,8 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
     // fence stands between the two.
     let mut request = None;
     let mut host = Served::Cgi;
-    if let Some(at) = next_fence(lines, after)
-        && first_word(info_at(lines, at).unwrap_or_default()) == REQUEST
-    {
-        let (body, next) = body_of(lines, at)
-            .ok_or_else(|| Problem::at(file, at, "a request fence no line of the block closes"))?;
-        match info_at(lines, at)
-            .unwrap_or_default()
-            .split_whitespace()
-            .nth(1)
-        {
+    if let Some((at, info, body, next)) = follows(file, lines, after, REQUEST)? {
+        match info.split_whitespace().nth(1) {
             None => {}
             Some(FPM) => host = Served::Fpm,
             Some(PHPDBG) => host = Served::Phpdbg,
@@ -441,15 +433,9 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
     }
     let (stdout, after) = body_of(lines, opened)
         .ok_or_else(|| Problem::at(file, opened, "an expect fence no line of the block closes"))?;
-    let (stderr, after) = match next_fence(lines, after) {
-        Some(at) if first_word(info_at(lines, at).unwrap_or_default()) == STDERR => {
-            body_of(lines, at)
-                .map(|(body, after)| (Some(body), after))
-                .ok_or_else(|| {
-                    Problem::at(file, at, "a stderr fence no line of the block closes")
-                })?
-        }
-        _ => (None, after),
+    let (stderr, after) = match follows(file, lines, after, STDERR)? {
+        Some((.., body, after)) => (Some(body), after),
+        None => (None, after),
     };
     Ok((
         Witness {
@@ -482,6 +468,33 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
 
 /// The body of the fence opened at `start`, and the index after the line
 /// that closes it; nothing when no doc line of the block does.
+/// The fence that opens next after `after` where its first word is `word`:
+/// where it opens, its info, its body and the index after it; none where
+/// the next fence is another or there is none.
+fn follows<'a>(
+    file: &Path,
+    lines: &[&'a str],
+    after: usize,
+    word: &str,
+) -> Result<Option<(usize, &'a str, String, usize)>, Problem> {
+    let Some(at) = next_fence(lines, after) else {
+        return Ok(None);
+    };
+    let info = info_at(lines, at).unwrap_or_default();
+    if first_word(info) != word {
+        return Ok(None);
+    }
+    let closes = || {
+        Problem::at(
+            file,
+            at,
+            format!("a {word} fence no line of the block closes"),
+        )
+    };
+    let (body, next) = body_of(lines, at).ok_or_else(closes)?;
+    Ok(Some((at, info, body, next)))
+}
+
 fn body_of(lines: &[&str], start: usize) -> Option<(String, usize)> {
     let mut body: Vec<&str> = Vec::new();
     for (index, line) in lines.iter().enumerate().skip(start + 1) {

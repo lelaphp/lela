@@ -389,11 +389,7 @@ pub(crate) fn reading(
     };
     // Over the snapshot the run took after any `--accept` it made, since
     // that writes the sources the stamp is over.
-    let mut reading = run.reading(
-        under_rule(Reading::for_crate(INSTRUMENT, krate, snapshot)?, rule),
-        &outcome,
-        message,
-    )?;
+    let mut reading = run.reading(under_rule(krate, snapshot, rule)?, &outcome, message)?;
     reading.count(numbers::PASSED, run.count(Judgement::Pass))?;
     reading.count(numbers::FAILED, run.against().len() as u64)?;
     reading.count(numbers::DIVERGED, run.count(Judgement::Diverged))?;
@@ -469,14 +465,16 @@ fn held<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
     lock.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The reading under the coverage rule, when the manifest has one: the
-/// rule's id and its ADR, on every reading the instrument writes.
-fn under_rule(mut reading: Reading, rule: Option<&Rule>) -> Reading {
+/// `krate`'s reading over `snapshot`, under the coverage rule where the
+/// manifest has one: the rule's id and its ADR, on every reading the
+/// instrument writes.
+fn under_rule(krate: &Crate, snapshot: &Snapshot, rule: Option<&Rule>) -> Result<Reading> {
+    let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
     if let Some(rule) = rule {
         reading.rule.clone_from(&rule.id);
         reading.adr = rule.adr.adr_field();
     }
-    reading
+    Ok(reading)
 }
 
 /// What one `xtask witness` run was asked for.
@@ -677,8 +675,7 @@ fn run_in(
     for slot in slots {
         let (one, tally) = match slot {
             Slot::Unrun(krate, why, failed) => {
-                let mut unrun = under_rule(Reading::for_crate(INSTRUMENT, krate, &snapshot)?, rule)
-                    .under(&manifest.pin);
+                let mut unrun = under_rule(krate, &snapshot, rule)?.under(&manifest.pin);
                 unrun.message = format!("{}: {why}", krate.name);
                 if failed {
                     unrun.status = Status::Fail;
@@ -689,8 +686,7 @@ fn run_in(
             Slot::Ready(at) => (&ready[at], finished[at].take()),
         };
         if let Some(why) = &full {
-            let unrun = under_rule(Reading::for_crate(INSTRUMENT, one.krate, &snapshot)?, rule)
-                .under(&manifest.pin);
+            let unrun = under_rule(one.krate, &snapshot, rule)?.under(&manifest.pin);
             readings.push(Full::skipped(unrun, &one.krate.name, why)?);
             continue;
         }
@@ -730,43 +726,35 @@ fn find<'a>(
         if !crates.is_empty() && !crates.iter().any(|n| n == &krate.name) {
             continue;
         }
-        if krate.name == crate::done::HARNESS {
-            // The harness measures the engine and carries no witness of its
-            // own; `done` asks it for none either (§4.5).
-            slots.push(Slot::Unrun(
-                krate,
-                String::from("the harness carries no witness"),
-                false,
-            ));
+        // The harness measures the engine and carries no witness of its
+        // own; `done` asks it for none either (§4.5).
+        let unrun = if krate.name == crate::done::HARNESS {
+            Some("the harness carries no witness")
+        } else {
+            (!sources::exists(root, krate)).then_some(sources::NOT_YET_CREATED)
+        };
+        if let Some(why) = unrun {
+            slots.push(Slot::Unrun(krate, why.to_owned(), false));
             continue;
         }
-        if !sources::exists(root, krate) {
-            slots.push(Slot::Unrun(
-                krate,
-                sources::NOT_YET_CREATED.to_owned(),
-                false,
-            ));
-            continue;
-        }
-        let picked = oracles
-            .of(krate.oracle.as_deref())
-            .and_then(|oracle| Ok((oracle, extract(root, krate, rule, Target::built())?)));
-        let (oracle, found) = match picked {
-            Ok((oracle, found)) => (oracle, ask.scope.narrow(found)),
+        // A host's own lines are read before anything runs, as its fences
+        // are, so a file that cannot be read fails the crate as a source
+        // would.
+        let picked = oracles.of(krate.oracle.as_deref()).and_then(|oracle| {
+            let found = extract(root, krate, rule, Target::built())?;
+            Ok((oracle, found, host::Held::of(root, krate)?))
+        });
+        let (oracle, found, held) = match picked {
+            Ok((oracle, found, held)) => (
+                oracle,
+                ask.scope.narrow(found),
+                held.map(|held| held.narrowed(&ask.scope)),
+            ),
             // A source the grammar could not read, or an oracle variant
             // the pin does not carry: the crate's reading fails and names
             // it, since `done` asks the crate for a witness reading and a
             // pass over sources never seen, or never held to an oracle,
             // would say the crate was measured when it was not.
-            Err(unread) => {
-                slots.push(Slot::Unrun(krate, format!("{unread:#}"), true));
-                continue;
-            }
-        };
-        // A host's own lines, read before anything runs, as its fences are:
-        // a file that cannot be read fails the crate as a source would.
-        let held = match host::Held::of(root, krate) {
-            Ok(held) => held.map(|held| held.narrowed(&ask.scope)),
             Err(unread) => {
                 slots.push(Slot::Unrun(krate, format!("{unread:#}"), true));
                 continue;

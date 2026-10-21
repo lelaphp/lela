@@ -158,9 +158,7 @@ impl Bar {
     /// One bar read from a TOML file: how the negative control is run, and
     /// how a person points the instrument at a pair of their own.
     fn read(path: &Path) -> Result<Bar> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading the bar at {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("{} is not a bar", path.display()))
+        crate::read_toml(path).context("not a bar")
     }
 
     /// The bar as the run measures it, two processes, an A/A control
@@ -481,12 +479,6 @@ struct Ratio {
 }
 
 impl Took {
-    /// What the bar's rows measured in, the first row's unit: every arm
-    /// of a bar measures in one.
-    fn unit(&self) -> Unit {
-        self.rows.first().map_or(Unit::Ms, |(_, row)| row.unit)
-    }
-
     /// How many rows' paired deltas have their sign established.
     fn resolved(&self) -> usize {
         let resolved = |(_, row): &&(_, Measured)| sign_of(&row.delta) == RESOLVED;
@@ -913,9 +905,7 @@ pub fn run(
     let log = match log {
         None => store.history(INSTRUMENT)?.readings,
         Some(path) => {
-            let text = std::fs::read_to_string(path)
-                .with_context(|| format!("reading the history at {}", path.display()))?;
-            let mut log = crate::reading::Log::handed(&text).readings;
+            let mut log = crate::reading::Log::handed(&crate::read(path)?).readings;
             log.retain(|reading| reading.instrument == INSTRUMENT);
             log
         }
@@ -977,7 +967,7 @@ pub fn run(
         bail!(
             "{} bar{} refused the run or regressed two nights running, each recorded as a failing reading: {}",
             refused.len(),
-            if refused.len() == 1 { "" } else { "s" },
+            crate::reading::plural(refused.len()),
             refused.join("; ")
         );
     }
@@ -1098,9 +1088,10 @@ fn held_by(bar: &Shown<'_>, took: &Took) -> String {
 /// first arm is ahead, and none where the sign is not established (§1.2)
 /// or the second arm measured nothing.
 fn to_go(took: &Took) -> Option<f64> {
-    let ratio = took.ratio();
+    // Every arm of a bar measures in one unit, the first row's.
+    let (ratio, (_, first)) = (took.ratio(), took.rows.first()?);
     (ratio.verdict == RESOLVED && ratio.value.is_finite())
-        .then(|| ((ratio.value - 1.0) * 100.0 * took.unit().worse()).max(0.0))
+        .then(|| ((ratio.value - 1.0) * 100.0 * first.unit.worse()).max(0.0))
 }
 
 /// A measured number as the store keeps it: to the microsecond, which is
