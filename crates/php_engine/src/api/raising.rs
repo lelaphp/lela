@@ -679,6 +679,19 @@ pub fn call_stack_end(req: &mut Request) -> Result<(), Thrown> {
     Err(call_stack_size_error(req, stack.floor_size()))
 }
 
+/// `execute_ex`'s own check at the loop's entry, the one a native's call
+/// back into PHP and a generator's resume pass
+/// (`php_compile::StackLimit::entry_overflowed`): the same `Error`, held
+/// under detect to the whole of the thread a host sized for that
+/// re-entry rather than php's budget, and naming php's budget either way.
+pub(crate) fn call_stack_entry(req: &mut Request) -> Result<(), Thrown> {
+    let stack = req.stack_limit();
+    if !stack.entry_overflowed() {
+        return Ok(());
+    }
+    Err(call_stack_size_error(req, stack.max_stack_size()))
+}
+
 /// `zend_call_stack_size_error`: php's sentence over `size`.
 fn call_stack_size_error(req: &mut Request, size: usize) -> Thrown {
     throw_error(

@@ -11,7 +11,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-use php_compile::StackLimit;
+use php_compile::{Reentered, StackLimit};
 
 use super::{Forked, Periodic, Receiving, Reentry, Request};
 use crate::api::abi::{Beneath, chain};
@@ -266,10 +266,26 @@ impl Request {
         std::mem::swap(&mut self.limits.trace_num, other);
     }
 
-    /// The thread's stack limit as request start read it, for the
-    /// compiler of whatever this request compiles.
+    /// The stack limit request start read on the thread, where the
+    /// innermost native's call back into PHP has moved it under detect
+    /// ([`Self::stack_reentered`]), for the compiler of whatever this
+    /// request compiles and the raisers that ask it.
     pub(crate) fn stack_limit(&self) -> StackLimit {
         self.limits.stack_limit
+    }
+
+    /// A native's call back into PHP, or a generator's resume, entering
+    /// the loop from this frame: the limit a native's own recursion is
+    /// held to moves to php's budget below it
+    /// ([`StackLimit::reentered`]), until [`Self::stack_left`] puts it
+    /// back.
+    pub(crate) fn stack_reentered(&mut self) -> Reentered {
+        self.limits.stack_limit.reentered()
+    }
+
+    /// The serving [`Self::stack_reentered`] began is over.
+    pub(crate) fn stack_left(&mut self, reentered: Reentered) {
+        self.limits.stack_limit.left(reentered);
     }
 
     /// `zend_unset_timeout` then `zend_set_timeout` over
@@ -362,7 +378,11 @@ impl Request {
 impl<'r> Limits<&'r Request> {
     /// `zend_call_stack_overflowed(EG(stack_limit))`: whether the
     /// machine stack has come down to the limit request start worked
-    /// out, `zend.max_allowed_stack_size` less `zend.reserved_stack_size`.
+    /// out, `zend.max_allowed_stack_size` less `zend.reserved_stack_size`,
+    /// and under detect php's own budget, the process's main thread's
+    /// size, below the frame that last called back into PHP, however
+    /// much larger the thread a host serves on is
+    /// (`php_compile::StackLimit`, #3142).
     /// A native that walks a nest by recursing asks it at each level and
     /// raises its own refusal, as `php_url_encode_hash_ex` raises
     /// `Maximum call stack size reached.`; the one php's engine raises is

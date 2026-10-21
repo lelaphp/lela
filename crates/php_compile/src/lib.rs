@@ -27,7 +27,7 @@ pub mod multibyte;
 mod special;
 mod stack;
 
-pub use stack::StackLimit;
+pub use stack::{Reentered, StackLimit};
 
 /// The token stream and the tree (design §4.9), handed up for
 /// `php_engine::api::syntax` and nothing of the compiler's own: the

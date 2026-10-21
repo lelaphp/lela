@@ -29,7 +29,7 @@
 //! at `serve`: the limit is what the thread has, and a nesting past it
 //! is the same fatal php raises on the same thread, earlier.
 
-use php_heap::{call_stack_bounds, call_stack_default_size};
+use php_heap::{call_stack_bounds, call_stack_default_size, main_call_stack_size};
 use php_unit::Level;
 
 use crate::CompileError;
@@ -47,12 +47,50 @@ use crate::CompileError;
 /// holds every other walk to the floor ([`exhausted`](Self::exhausted)),
 /// so a nesting php takes whole under a small limit is taken whole here
 /// too and one deeper than the thread is an `Error`.
+///
+/// Under detect the limit is php's own, worked out of the size php's
+/// main thread has ([`php_heap::main_call_stack_size`]), where the
+/// thread a host serves on is larger: a request is served on a stack
+/// sized for the loop's own re-entry, whose level costs a multiple of
+/// php's (design §5.6, #3043), and a native's own recursion, which
+/// costs about what php's C costs, would otherwise go that multiple
+/// deeper than php before it is refused (#3142; the design's sentence for
+/// it is #3158's to settle). The loop's entry is
+/// held to the floor instead ([`entry_overflowed`](Self::entry_overflowed)),
+/// and at each native's call back into PHP the limit moves to php's
+/// budget below the frame that called ([`reentered`](Self::reentered)),
+/// so the stack a callback recursion took above it is not charged to a
+/// native's recursion below it at the loop's price.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StackLimit {
     base: usize,
     limit: usize,
     floor: usize,
+    allowed: Allowed,
 }
+
+/// How the limit stands: where [`StackLimit::init`] or
+/// [`StackLimit::fiber`] put it, or php's budget measured down from the
+/// frame that last entered the loop from a native.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Allowed {
+    /// A size `zend.max_allowed_stack_size` gave, `-1` among them, or a
+    /// fiber's stack: the loop's entry is held to the limit too.
+    #[default]
+    Fixed,
+    /// Detect: `span` bytes below the base, or below the frame a
+    /// re-entry stands at, never past the floor; the loop's entry is
+    /// held to the floor. `span` is the main thread's size, or the
+    /// thread's own where that is smaller, less
+    /// `zend.reserved_stack_size`: the number php's sentence names.
+    Detected { span: usize },
+}
+
+/// Where [`StackLimit::reentered`] found the limit, which
+/// [`StackLimit::left`] puts back once the serving it began is over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "the limit a re-entry moved is put back when it is over"]
+pub struct Reentered(Option<usize>);
 
 /// `ZEND_MAX_ALLOWED_STACK_SIZE_DETECT`, the entry's default.
 const DETECT: i64 = 0;
@@ -81,6 +119,7 @@ impl StackLimit {
         base: 0,
         limit: 0,
         floor: 0,
+        allowed: Allowed::Fixed,
     };
 
     /// `zend_call_stack_init` on the calling thread, from the two ini
@@ -94,9 +133,15 @@ impl StackLimit {
     /// `php_heap::call_stack_bounds`; on a thread it cannot describe,
     /// the base is where this frame stands and the size is
     /// `php_heap::call_stack_default_size` less the 32 KiB php allows
-    /// for the frames already below the real base. A positive number is
-    /// the size to allow below the base the platform read, or below
-    /// this frame where it read none.
+    /// for the frames already below the real base. Where the thread is
+    /// larger than the process's main thread, detect allows what the
+    /// main thread has, php's budget, and the rest of the thread is the
+    /// loop's entry's ([`Allowed::Detected`]). A positive number is the
+    /// size to allow below the base the platform read, or below this
+    /// frame where it read none. Where the main thread's size cannot be
+    /// read, under `ulimit -s unlimited` on Linux among them, php's
+    /// main thread falls back to the size php assumes
+    /// ([`php_heap::call_stack_default_size`]), and so does the budget.
     #[must_use]
     pub fn init(max_allowed: i64, reserved: u64) -> StackLimit {
         let reserved = reserved.max(RESERVED_MIN);
@@ -108,15 +153,26 @@ impl StackLimit {
             |stack| stack.max_size,
         );
         let floor = limit(base, thread, reserved);
-        let limit = match max_allowed {
-            DETECT => floor,
+        let (limit, allowed) = match max_allowed {
+            DETECT => {
+                let main = main_call_stack_size().unwrap_or_else(call_stack_default_size);
+                let php = read.map_or(thread, |_| main.min(thread));
+                let limit = limit(base, php, reserved).max(floor);
+                let span = base.saturating_sub(limit);
+                (limit, Allowed::Detected { span })
+            }
             allowed if allowed > 0 => {
                 let size = usize::try_from(allowed).unwrap_or(usize::MAX);
-                limit(base, size, reserved)
+                (limit(base, size, reserved), Allowed::Fixed)
             }
-            _ => 0,
+            _ => (0, Allowed::Fixed),
         };
-        StackLimit { base, limit, floor }
+        StackLimit {
+            base,
+            limit,
+            floor,
+            allowed,
+        }
     }
 
     /// The limit inside a fiber, which `zend_fiber_execute` writes over
@@ -145,6 +201,32 @@ impl StackLimit {
             base,
             limit,
             floor: limit,
+            allowed: Allowed::Fixed,
+        }
+    }
+
+    /// A native calling back into PHP, `zend_call_function`, or a
+    /// generator resumed, from the calling frame: under detect the limit
+    /// moves to php's budget below this frame, never past the floor, so
+    /// a native's own recursion inside the callback has what php's has
+    /// there whatever the loop's re-entries above it took; otherwise it
+    /// stands. What it was is handed back for [`left`](Self::left).
+    #[inline]
+    pub fn reentered(&mut self) -> Reentered {
+        let Allowed::Detected { span } = self.allowed else {
+            return Reentered(None);
+        };
+        let held = self.limit;
+        self.limit = position().saturating_sub(span).max(self.floor);
+        Reentered(Some(held))
+    }
+
+    /// The serving [`reentered`](Self::reentered) began is over: the
+    /// limit stands where it stood before it.
+    #[inline]
+    pub fn left(&mut self, reentered: Reentered) {
+        if let Reentered(Some(limit)) = reentered {
+            self.limit = limit;
         }
     }
 
@@ -222,6 +304,19 @@ impl StackLimit {
         position() <= self.limit
     }
 
+    /// `execute_ex`'s own `zend_call_stack_overflowed(EG(stack_limit))`
+    /// at its entry, the loop's re-entry from a native: the limit where
+    /// a size was given, and under detect the floor, the whole of the
+    /// thread the host sized for the loop's re-entry (design §5.6).
+    #[must_use]
+    pub fn entry_overflowed(&self) -> bool {
+        let at = match self.allowed {
+            Allowed::Fixed => self.limit,
+            Allowed::Detected { .. } => self.floor,
+        };
+        position() <= at
+    }
+
     /// `EG(stack_limit)` itself: the address a frame at or below has
     /// [`overflowed`](Self::overflowed), zero where nothing is checked.
     #[must_use]
@@ -231,10 +326,15 @@ impl StackLimit {
 
     /// The size `zend_call_stack_size_error` names, the stack's base less
     /// its limit: `zend.max_allowed_stack_size` less
-    /// `zend.reserved_stack_size`.
+    /// `zend.reserved_stack_size`, and under detect php's main thread's
+    /// size less the reservation, wherever the limit stands and whichever
+    /// limit refused.
     #[must_use]
     pub fn max_stack_size(&self) -> usize {
-        self.base.saturating_sub(self.limit)
+        match self.allowed {
+            Allowed::Fixed => self.base.saturating_sub(self.limit),
+            Allowed::Detected { span } => span,
+        }
     }
 
     /// Whether the calling thread has come down to the floor, what a
@@ -448,6 +548,47 @@ mod tests {
         assert_eq!(limit(100, 200, 10), 0);
         assert_eq!(limit(usize::MAX - 10, 5, 100), usize::MAX);
         assert_eq!(limit(1000, 200, 50), 850);
+    }
+
+    /// On a thread larger than the process's main thread, detect holds
+    /// a native's recursion to the main thread's size and the loop's
+    /// entry to the thread's own, names the main thread's number, and a
+    /// re-entry moves the limit to that budget below its frame until it
+    /// is left; under a size the ini gave, a re-entry moves nothing.
+    #[test]
+    fn detect_on_a_thread_past_the_main_threads_size_allows_the_main_threads() {
+        let Some(main) = php_heap::main_call_stack_size() else {
+            return;
+        };
+        let size = main.saturating_mul(4);
+        let (at_init, clear, moved, left, local) = std::thread::Builder::new()
+            .stack_size(size)
+            .spawn(|| {
+                let mut stack = StackLimit::init(0, 0);
+                let at_init = stack;
+                let clear = !stack.overflowed() && !stack.entry_overflowed();
+                let reentered = stack.reentered();
+                let moved = stack;
+                stack.left(reentered);
+                (at_init, clear, moved, stack, position())
+            })
+            .expect("a thread four times the main thread's size")
+            .join()
+            .expect("the thread runs to its end");
+        let reserved = usize::try_from(RESERVED_MIN).expect("the reserve fits an address");
+        assert_eq!(at_init.max_stack_size(), main - reserved);
+        assert_eq!(at_init.base - at_init.limit, main - reserved);
+        assert!(at_init.base - at_init.floor >= size - reserved);
+        assert!(clear);
+        assert!(moved.limit < at_init.limit && moved.limit > local.saturating_sub(main));
+        assert_eq!(moved.max_stack_size(), main - reserved);
+        assert_eq!(left, at_init);
+        let mut fixed = StackLimit::init(1024 * 1024, 0);
+        let before = fixed;
+        let reentered = fixed.reentered();
+        assert_eq!(fixed, before);
+        fixed.left(reentered);
+        assert_eq!(fixed, before);
     }
 
     /// One frame below the caller, which is where the compiler checks.
