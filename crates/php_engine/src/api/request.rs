@@ -938,7 +938,8 @@ impl Placed {
 /// what makes a public property's placement read the scope; and what a
 /// write to the slot is held to, its type's mask and flags read once
 /// where the class's `properties_info` is built, as php's `prop_info`
-/// carries them.
+/// carries them (a kernel placement reads them off the declaration it
+/// placed, `DeclaredSlot`'s).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RowPlace {
     pub(crate) slot: Option<u32>,

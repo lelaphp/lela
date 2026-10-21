@@ -1624,17 +1624,17 @@ pub(crate) enum PropertyOffset {
 
 /// What a write to a declared slot is held to, read off its property
 /// where the class's `properties_info` is built and kept beside the
-/// offset, as php
-/// keeps `prop_info` in `CACHE_PTR_EX(cache_slot + 2)` and reads its type
-/// and flags at every write: whether the property carries a type,
-/// whether it is guarded, `readonly` or of a set visibility
-/// (`ZEND_ACC_READONLY|ZEND_ACC_PPP_SET_MASK`), whose write reads the
-/// scope and the slot's flags before its type, and the kinds of value
-/// that land in it as they stand. One `u16` behind these three
-/// questions, so a place and its slot type come back from a placement
-/// in two registers: as an enum of a tag and a mask the pair came back
-/// through memory, and the computed name's read, write and step paid
-/// five to fifteen instructions for it.
+/// offset, as php keeps `prop_info` in `CACHE_PTR_EX(cache_slot + 2)`
+/// and reads its type and flags at every write: whether the property
+/// carries a type, whether it is guarded, `readonly` or of a set
+/// visibility the writing scope lacks (`ZEND_ACC_READONLY`,
+/// `ZEND_ACC_PPP_SET_MASK && !zend_asymmetric_property_has_set_access`),
+/// whose write reads the scope and the slot's flags before its type, and
+/// the kinds of value that land in it as they stand. One `u16` behind
+/// these questions, so a place and its slot type come back from a
+/// placement in two registers: as an enum of a tag and a mask the pair
+/// came back through memory, and the computed name's read, write and
+/// step paid five to fifteen instructions for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SlotType(u16);
 
@@ -1642,24 +1642,36 @@ impl SlotType {
     /// The bit of a property with no type; php lets only a typed
     /// property be `readonly` or of a set visibility.
     const NO_TYPE: u16 = 1 << 15;
-    /// The bit of a guarded property.
-    const GUARDED: u16 = 1 << 14;
-    /// The kinds of value, one bit per `IS_*` code below the two flags.
-    const KINDS: u16 = SlotType::GUARDED - 1;
+    /// The bit of a `readonly` property.
+    const READONLY: u16 = 1 << 14;
+    /// The bit of a property of a set visibility, which a placement
+    /// from a scope that holds it lifts ([`SlotType::set_reached`]).
+    const SET: u16 = 1 << 13;
+    /// The kinds of value, one bit per `IS_*` code below the guard bits.
+    const KINDS: u16 = SlotType::SET - 1;
 
     /// `prop_info == NULL`: no type, every value landing as it stands.
     pub(crate) const UNTYPED: SlotType = SlotType(SlotType::NO_TYPE | SlotType::KINDS);
 
-    /// What a write to a slot of `property` is held to: a typed
-    /// property's kinds are its type's mask of value kinds,
-    /// `ZEND_TYPE_FULL_MASK` within `MAY_BE_ANY`
+    /// What a write to a slot of `property` is held to whatever the
+    /// scope: a typed property's kinds are its type's mask of value
+    /// kinds, `ZEND_TYPE_FULL_MASK` within `MAY_BE_ANY`
     /// ([`php_unit::decl::Type::mask`]), and a guarded one's none.
     pub(crate) fn of(property: &php_unit::decl::PropertyDecl) -> SlotType {
+        let ty = SlotType::set_reached(property);
+        match property.set_visibility {
+            Some(_) if ty.typed() => SlotType(SlotType::SET | (ty.0 & SlotType::READONLY)),
+            _ => ty,
+        }
+    }
+
+    /// What a write to a slot of `property` is held to from a scope that
+    /// has its set visibility, `zend_asymmetric_property_has_set_access`:
+    /// a typed property's kinds, or none for a `readonly` one.
+    pub(crate) fn set_reached(property: &php_unit::decl::PropertyDecl) -> SlotType {
         match &property.ty {
             None => SlotType::UNTYPED,
-            Some(_) if property.is_readonly || property.set_visibility.is_some() => {
-                SlotType(SlotType::GUARDED)
-            }
+            Some(_) if property.is_readonly => SlotType(SlotType::READONLY),
             Some(ty) => {
                 let mask = ty.mask() & php_unit::decl::Type::MAY_BE_ANY;
                 SlotType(u16::try_from(mask).map_or(0, |mask| mask & SlotType::KINDS))
@@ -1676,6 +1688,8 @@ impl SlotType {
     /// guarded slot, is the kernel's typed write to coerce or refuse.
     /// The untyped slot's answer comes first, from its one bit, so the
     /// write php's untyped slot makes with no `prop_info` pays one test.
+    /// A kind past the kind bits (`IS_PTR`, 13, the highest) reads a
+    /// bit [`SlotType::KINDS`] clears, so neither guard bit is read as a kind.
     #[inline]
     pub(crate) fn admits(self, z: Zval) -> bool {
         self.0 & SlotType::NO_TYPE != 0
@@ -1687,14 +1701,21 @@ impl SlotType {
         self.0 & SlotType::NO_TYPE == 0
     }
 
-    /// Whether the property is `readonly` or of a set visibility.
+    /// Whether the property is `readonly` or of a set visibility the
+    /// placement did not find the scope holding.
     pub(crate) fn guarded(self) -> bool {
-        self.0 & SlotType::GUARDED != 0
+        self.0 & (SlotType::READONLY | SlotType::SET) != 0
+    }
+
+    /// Whether the guard is a set visibility alone, which the scope's
+    /// set access lifts.
+    pub(crate) fn set_restricted(self) -> bool {
+        self.0 & (SlotType::READONLY | SlotType::SET) == SlotType::SET
     }
 }
 
-// The offset a cache slot keeps, two words as it was with a bool beside
-// the slot: the slot type's tag leaves the niche `Dynamic` takes.
+// The offset a cache slot keeps, eight bytes as it was with a bool beside
+// the slot: the slot, the slot type and the variant's tag in the padding.
 const _: () = assert!(std::mem::size_of::<PropertyOffset>() == 8);
 
 /// `sizeof(void *)`: what `zend_alloc_cache_slot` grows `cache_size` by
