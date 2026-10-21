@@ -333,12 +333,17 @@ impl Walk {
 
     /// One value of the tracked file against the proposal's at the same
     /// path. A table recurses key by key, an array of tables recurses into
-    /// every row it carries and admits new ones beside them, and every
-    /// other value must be what it was.
+    /// every row it carries and admits new ones beside them, an empty
+    /// array admits rows as one of none does, and every other value must
+    /// be what it was.
     fn value(&mut self, at: &str, old: &Value, new: &Value) {
         match (old, new) {
             (Value::Table(old), Value::Table(new)) => self.table(at, old, new),
-            (Value::Array(old), Value::Array(new)) if rows(old) => self.rows(at, old, new),
+            (Value::Array(old), Value::Array(new))
+                if rows(old) || (old.is_empty() && rows(new)) =>
+            {
+                self.rows(at, old, new);
+            }
             _ if old == new => {}
             _ => self.refused.push(path_of(at, "")),
         }
@@ -351,8 +356,15 @@ impl Walk {
                 None => self.refused.push(path_of(at, key)),
             }
         }
-        for key in new.keys().filter(|k| !old.contains_key(*k)) {
-            self.added.push(path_of(at, key));
+        // An array of tables the tracked file does not carry is its rows,
+        // each added by its identity as a row appended to one it carries
+        // is: so a merge base with no row and the side that adds one name
+        // the row by one path (#3141).
+        for (key, new_value) in new.iter().filter(|(k, _)| !old.contains_key(*k)) {
+            match new_value {
+                Value::Array(added) if rows(added) => self.rows(&path_of(at, key), &[], added),
+                _ => self.added.push(path_of(at, key)),
+            }
         }
     }
 
@@ -549,6 +561,52 @@ mod tests {
         assert_eq!(
             verdict(&tracked, &grown),
             Verdict::Refused(vec!["divergence[phpt:cause].covers".to_owned()])
+        );
+    }
+
+    /// An array of tables a file does not carry, or carries empty, is its
+    /// rows, each added by its identity as one appended beside a row is
+    /// (#3141); a value of another shape where none stood is one addition.
+    #[test]
+    fn rows_where_the_file_has_none_are_each_an_addition_by_identity() {
+        let none = "# no row\n";
+        let two = "[[divergence]]\nid = \"trace:a\"\n[[divergence]]\nid = \"trace:b\"\n";
+        let named = ["divergence[trace:a]", "divergence[trace:b]"].map(str::to_owned);
+        assert_eq!(verdict(none, two), Verdict::Additive(named.to_vec()));
+        assert_eq!(
+            verdict("divergence = []\n", two),
+            Verdict::Additive(named.to_vec())
+        );
+        let doubled = format!("{two}[[divergence]]\nid = \"trace:a\"\n");
+        assert_eq!(
+            verdict(none, &doubled),
+            Verdict::Refused(vec!["divergence[trace:a] twice".to_owned()])
+        );
+        assert_eq!(
+            verdict(none, "[budget]\ntotal = 1\n"),
+            Verdict::Additive(vec!["budget".to_owned()])
+        );
+    }
+
+    /// A merge whose base holds no row: each side's row is named by its id
+    /// on both walks, so the union is a union (#3141).
+    #[test]
+    fn a_merge_over_a_base_of_no_row_is_the_union_of_each_sides_row() {
+        let (head, merged) = (
+            "[[divergence]]\nid = \"trace:head\"\n",
+            "[[divergence]]\nid = \"trace:merged\"\n",
+        );
+        let ground = Ground::Merge {
+            base: "# no row\n".to_owned(),
+            head: head.to_owned(),
+            merged: merged.to_owned(),
+        };
+        assert_eq!(
+            ground.judge(&format!("{head}{merged}")).expect("all parse"),
+            Verdict::Union {
+                head: vec!["divergence[trace:head]".to_owned()],
+                merged: vec!["divergence[trace:merged]".to_owned()],
+            }
         );
     }
 

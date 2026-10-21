@@ -327,17 +327,24 @@ fn a_table_the_pins_reader_does_not_know_is_refused_and_one_it_knows_is_written(
 /// branch stopped on the conflict both appends make, markers in the
 /// working file.
 fn merging(name: &str, merged: &str) -> Tree {
+    let sides = [fixture("merge/head.toml"), fixture(merged)];
+    merging_over(name, &fixture("merge/base.toml"), sides)
+}
+
+/// The same over the registry `base`, `head` on `HEAD` and `merged` on
+/// the branch.
+fn merging_over(name: &str, base: &str, [head, merged]: [String; 2]) -> Tree {
     let file = xtask::divergence::FILE;
-    let root = scratch_at(name, file, &fixture("merge/base.toml"));
+    let root = scratch_at(name, file, base);
     let repo = Repo::at(&root);
     let side = |branch: &str, body: &str| {
-        fs::write(root.join(file), fixture(body)).expect("the registry");
+        fs::write(root.join(file), body).expect("the registry");
         repo.git(&["commit", "-q", "-am", branch]);
     };
     repo.git(&["checkout", "-q", "-b", "merged"]);
-    side("merged", merged);
+    side("merged", &merged);
     repo.git(&["checkout", "-q", "-"]);
-    side("head", "merge/head.toml");
+    side("head", &head);
     // The merge stops on the conflict.
     repo.refused(&["merge", "-q", "merged"]);
     assert!(
@@ -349,15 +356,12 @@ fn merging(name: &str, merged: &str) -> Tree {
     root
 }
 
-#[test]
-fn a_conflicted_merge_of_two_additions_is_resolved_by_their_union() {
+/// The union steered and written, the reading naming each side's row.
+fn steered_as_the_union(root: &Tree, union: &str) {
     let file = xtask::divergence::FILE;
-    let root = merging("union", "merge/merged.toml");
     let proposal = root.join("proposed.toml");
-    let union = fixture("merge/union.toml");
-    fs::write(&proposal, &union).expect("the proposal");
-
-    let reading = steer::run(&root, file, &proposal, false).expect("the instrument runs");
+    fs::write(&proposal, union).expect("the proposal");
+    let reading = steer::run(root, file, &proposal, false).expect("the instrument runs");
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
     assert_eq!(reading.numbers["added"], 1.into(), "{}", reading.message);
     for named in [
@@ -374,6 +378,34 @@ fn a_conflicted_merge_of_two_additions_is_resolved_by_their_union() {
     let written = fs::read_to_string(root.join(file)).expect("the registry");
     assert_eq!(written, union, "the union is the file now");
     assert!(!written.contains("<<<<<<<"), "no conflict marker stands");
+}
+
+#[test]
+fn a_conflicted_merge_of_two_additions_is_resolved_by_their_union() {
+    let root = merging("union", "merge/merged.toml");
+    steered_as_the_union(&root, &fixture("merge/union.toml"));
+}
+
+/// A merge base whose registry holds no row, as a scratch's empty one
+/// does, each side appending one (#3141): the whole array is new on
+/// both sides, and the union is still each side's row by its id, not a
+/// row `MERGE_HEAD` carries named as carried by neither.
+#[test]
+fn a_conflicted_merge_over_a_base_of_no_row_is_resolved_by_their_union() {
+    let empty = xtask::package_dir().join("fixtures/registry/empty.toml");
+    let empty = fs::read_to_string(empty).expect("the empty registry");
+    let base = fixture("merge/base.toml");
+    let row = |side: &str| {
+        let whole = fixture(side);
+        whole
+            .strip_prefix(base.as_str())
+            .expect("a side appends to the base")
+            .to_owned()
+    };
+    let (head, merged) = (row("merge/head.toml"), row("merge/merged.toml"));
+    let sides = [format!("{empty}{head}"), format!("{empty}{merged}")];
+    let root = merging_over("union-over-no-row", &empty, sides);
+    steered_as_the_union(&root, &format!("{empty}{head}{merged}"));
 }
 
 #[test]
