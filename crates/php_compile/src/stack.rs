@@ -488,47 +488,6 @@ mod tests {
         assert!(local < stack.base && local > stack.limit);
     }
 
-    /// On a thread larger than the process's main thread, detect holds
-    /// a native's recursion to the main thread's size and the loop's
-    /// entry to the thread's own, names the main thread's number, and a
-    /// re-entry moves the limit to that budget below its frame until it
-    /// is left.
-    #[test]
-    fn detect_on_a_thread_past_the_main_threads_size_allows_the_main_threads() {
-        let Some(main) = php_heap::main_call_stack_size() else {
-            return;
-        };
-        let size = main.saturating_mul(4);
-        let Ok(spawned) = std::thread::Builder::new().stack_size(size).spawn(|| {
-            let mut stack = StackLimit::init(0, 0);
-            let at_init = stack;
-            let clear = !stack.overflowed() && !stack.entry_overflowed();
-            let reentered = stack.reentered();
-            let moved = stack;
-            stack.left(reentered);
-            (at_init, clear, moved, stack, position())
-        }) else {
-            return;
-        };
-        let Ok((at_init, clear, moved, left, local)) = spawned.join() else {
-            return;
-        };
-        let reserved = usize::try_from(RESERVED_MIN).unwrap_or(0);
-        assert_eq!(at_init.max_stack_size(), main - reserved);
-        assert_eq!(at_init.base - at_init.limit, main - reserved);
-        assert!(at_init.base - at_init.floor >= size - reserved);
-        assert!(clear);
-        assert!(moved.limit < at_init.limit && moved.limit > local.saturating_sub(main));
-        assert_eq!(moved.max_stack_size(), main - reserved);
-        assert_eq!(left, at_init);
-        let mut fixed = StackLimit::init(1024 * 1024, 0);
-        let before = fixed;
-        let reentered = fixed.reentered();
-        assert_eq!(fixed, before);
-        fixed.left(reentered);
-        assert_eq!(fixed, before);
-    }
-
     /// A fiber's limit is its own stack's: the reservation above the
     /// lowest address, doubled on Apple, and php's least where the entry
     /// asks for less.
@@ -589,6 +548,47 @@ mod tests {
         assert_eq!(limit(100, 200, 10), 0);
         assert_eq!(limit(usize::MAX - 10, 5, 100), usize::MAX);
         assert_eq!(limit(1000, 200, 50), 850);
+    }
+
+    /// On a thread larger than the process's main thread, detect holds
+    /// a native's recursion to the main thread's size and the loop's
+    /// entry to the thread's own, names the main thread's number, and a
+    /// re-entry moves the limit to that budget below its frame until it
+    /// is left; under a size the ini gave, a re-entry moves nothing.
+    #[test]
+    fn detect_on_a_thread_past_the_main_threads_size_allows_the_main_threads() {
+        let Some(main) = php_heap::main_call_stack_size() else {
+            return;
+        };
+        let size = main.saturating_mul(4);
+        let (at_init, clear, moved, left, local) = std::thread::Builder::new()
+            .stack_size(size)
+            .spawn(|| {
+                let mut stack = StackLimit::init(0, 0);
+                let at_init = stack;
+                let clear = !stack.overflowed() && !stack.entry_overflowed();
+                let reentered = stack.reentered();
+                let moved = stack;
+                stack.left(reentered);
+                (at_init, clear, moved, stack, position())
+            })
+            .expect("a thread four times the main thread's size")
+            .join()
+            .expect("the thread runs to its end");
+        let reserved = usize::try_from(RESERVED_MIN).expect("the reserve fits an address");
+        assert_eq!(at_init.max_stack_size(), main - reserved);
+        assert_eq!(at_init.base - at_init.limit, main - reserved);
+        assert!(at_init.base - at_init.floor >= size - reserved);
+        assert!(clear);
+        assert!(moved.limit < at_init.limit && moved.limit > local.saturating_sub(main));
+        assert_eq!(moved.max_stack_size(), main - reserved);
+        assert_eq!(left, at_init);
+        let mut fixed = StackLimit::init(1024 * 1024, 0);
+        let before = fixed;
+        let reentered = fixed.reentered();
+        assert_eq!(fixed, before);
+        fixed.left(reentered);
+        assert_eq!(fixed, before);
     }
 
     /// One frame below the caller, which is where the compiler checks.
