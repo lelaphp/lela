@@ -2509,19 +2509,7 @@ pub(crate) fn call_shutdown_functions(req: &mut Request) {
 #[cfg(test)]
 mod tests {
     use crate::engine::Engine;
-    use crate::test::Capture;
-
-    /// What a request has out before it serves a line (design §5.4,
-    /// §5.6, §5.13), as `php_heap` sizes each part of it: `CG(arena)`'s
-    /// first block, `init_compiler`'s `zend_arena_create(64 * 1024)`
-    /// (`zend_arena::FIRST_BLOCK`); `EG(objects_store)`, the 1024 buckets
-    /// of a pointer each `init_executor` gives `zend_objects_store_init`
-    /// (`object::INIT_SIZE`); and the VM stack's first page,
-    /// `ZEND_VM_STACK_PAGE_SLOTS` zvals (`stack::PAGE_SIZE`). engine.rs's
-    /// `what_memory_get_usage_reads_starts_where_it_started_for_every_request`
-    /// holds a fresh request to exactly this.
-    const STARTED: usize =
-        64 * 1024 + 1024 * size_of::<usize>() + 16 * 1024 * size_of::<php_heap::Zval>();
+    use crate::test::{Capture, STARTED};
 
     /// What the engine wrote and what ended it, for one source.
     fn served(source: &str) -> (String, Option<String>) {
@@ -2618,8 +2606,9 @@ mod tests {
     /// has out (`zend_memory_reset_peak_usage`): each usage read after
     /// it, before its own peak, is at most that peak, and with no chunk
     /// mapped since, the chunks' peak is the chunks' usage. The witness
-    /// beside `memory_reset_peak_usage` holds the reset against the
-    /// oracle; this holds it when no oracle is on the machine.
+    /// beside `memory_reset_peak_usage` holds against the oracle that a
+    /// reset lowers the peak; this holds where it leaves it, with no
+    /// oracle on the machine.
     #[test]
     fn a_reset_leaves_the_peak_at_what_the_request_has_out() {
         let &[usage, peak, real, real_peak] = dumped(

@@ -475,6 +475,21 @@ pub(crate) fn request_on(engine: &Engine) -> crate::api::request::Request {
     )
 }
 
+/// What `memory_get_usage()` reads of a request before it serves a line
+/// (design §5.4, §5.6, §5.13), the three parts `php_heap` lays down
+/// when the request's heap is made: `CG(arena)`'s first block,
+/// `init_compiler`'s `zend_arena_create(64 * 1024)`
+/// (`php_heap::zend_arena::FIRST_BLOCK`); `EG(objects_store)`, the 1024
+/// buckets of a `zend_object *` each that `init_executor` gives
+/// `zend_objects_store_init` (`php_heap::object::INIT_SIZE`); and the VM
+/// stack's first page, `ZEND_VM_STACK_PAGE_SLOTS`, sixteen thousand
+/// zvals (`php_heap::stack::PAGE_SIZE`). `php_heap` keeps the three
+/// figures to itself, so they are restated here once, over its own
+/// [`php_heap::Zval`].
+#[cfg(test)]
+pub(crate) const STARTED: usize =
+    64 * 1024 + 1024 * size_of::<usize>() + 16 * 1024 * size_of::<php_heap::Zval>();
+
 #[cfg(test)]
 mod tests {
     use super::{Engine, Files, Served};

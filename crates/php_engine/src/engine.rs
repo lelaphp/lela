@@ -8029,11 +8029,10 @@ mod tests {
         }
         // The compiler's arena, the object store's table and the VM
         // stack's first page, and nothing else, before a line runs
-        // (design §5.4, §5.6, §5.13): `zend_arena_create(64 * 1024)`, 1024
-        // buckets of a pointer each, and `ZEND_VM_STACK_PAGE_SIZE`.
+        // ([`crate::test::STARTED`]).
         assert_eq!(
             started_at,
-            vec![65_536 + 8192 + 262_144, 65_536 + 8192 + 262_144],
+            vec![crate::test::STARTED, crate::test::STARTED],
             "every request starts where the one before it did"
         );
         assert_eq!(
