@@ -266,8 +266,10 @@ impl Request {
         std::mem::swap(&mut self.limits.trace_num, other);
     }
 
-    /// The thread's stack limit as request start read it, for the
-    /// compiler of whatever this request compiles.
+    /// The stack limit request start read on the thread, where the
+    /// innermost native's call back into PHP has moved it under detect
+    /// ([`Self::stack_reentered`]), for the compiler of whatever this
+    /// request compiles and the raisers that ask it.
     pub(crate) fn stack_limit(&self) -> StackLimit {
         self.limits.stack_limit
     }
@@ -275,14 +277,14 @@ impl Request {
     /// A native's call back into PHP, or a generator's resume, entering
     /// the loop from this frame: the limit a native's own recursion is
     /// held to moves to php's budget below it
-    /// ([`StackLimit::reentered`]), until [`Self::left_reentry`] puts it
+    /// ([`StackLimit::reentered`]), until [`Self::stack_left`] puts it
     /// back.
-    pub(crate) fn reenter_stack(&mut self) -> Reentered {
+    pub(crate) fn stack_reentered(&mut self) -> Reentered {
         self.limits.stack_limit.reentered()
     }
 
-    /// The serving [`Self::reenter_stack`] began is over.
-    pub(crate) fn left_reentry(&mut self, reentered: Reentered) {
+    /// The serving [`Self::stack_reentered`] began is over.
+    pub(crate) fn stack_left(&mut self, reentered: Reentered) {
         self.limits.stack_limit.left(reentered);
     }
 

@@ -545,9 +545,9 @@ pub(crate) fn reenter<T: Tier, D: Telling>(
     req: &mut Request,
     frame: FrameRef,
 ) -> Result<(), Fatal> {
-    let reentered = req.reenter_stack();
+    let reentered = req.stack_reentered();
     let outcome = serving::<T, D>(req, frame);
-    req.left_reentry(reentered);
+    req.stack_left(reentered);
     outcome
 }
 
@@ -562,7 +562,9 @@ pub(crate) fn reenter<T: Tier, D: Telling>(
 /// throwable it did not catch pending for the resumer to read.
 pub(crate) fn resume<T: Tier, D: Telling>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal> {
     let guard = req.stack_mut().push_entry(frame);
+    let reentered = req.stack_reentered();
     if refused_at_entry(req) {
+        req.stack_left(reentered);
         req.stack_mut().pop_entry(guard);
         return Ok(());
     }
@@ -571,9 +573,8 @@ pub(crate) fn resume<T: Tier, D: Telling>(req: &mut Request, frame: FrameRef) ->
     } else {
         Stepped::Same(frame)
     };
-    let reentered = req.reenter_stack();
     let outcome = serve_frame::<T, D>(req, first);
-    req.left_reentry(reentered);
+    req.stack_left(reentered);
     crate::observer::loop_left(req, &outcome);
     req.stack_mut().pop_entry(guard);
     outcome
