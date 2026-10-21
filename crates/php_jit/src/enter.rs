@@ -560,22 +560,41 @@ pub(crate) fn enter(req: &mut Request, frame: FrameRef, trace: &Trace) -> Result
         Some(Pending::Bailout(fatal)) => return Err(fatal),
         None => {}
     }
-    if answer == lower::UNWOUND {
-        if !req.unwinding() {
-            return Err(internal("a trace unwound with no throwable pending"));
+    match Answer::of(answer, trace.exits.len()) {
+        Answer::Exit(exit) => {
+            let frame = land(req, &trace.exits[usize::from(exit.0)])?;
+            Ok(Left::Exit(Exited { exit, frame }))
         }
-        let frame = tier::current(req).ok_or_else(|| internal("a trace left no frame standing"))?;
-        return Ok(Left::Unwound(frame));
+        Answer::Unwound if req.unwinding() => {
+            let frame =
+                tier::current(req).ok_or_else(|| internal("a trace left no frame standing"))?;
+            Ok(Left::Unwound(frame))
+        }
+        Answer::Unwound => Err(internal("a trace unwound with no throwable pending")),
+        Answer::Abandoned => Err(internal(
+            "a trace left through no exit of its own and kept nothing",
+        )),
     }
-    let id = u16::try_from(answer)
-        .ok()
-        .filter(|id| usize::from(*id) < trace.exits.len())
-        .ok_or_else(|| internal("a trace left through no exit of its own and kept nothing"))?;
-    let frame = land(req, &trace.exits[usize::from(id)])?;
-    Ok(Left::Exit(Exited {
-        exit: ExitId(id),
-        frame,
-    }))
+}
+
+/// What compiled code answered `enter`, decoded once: an exit of the
+/// trace's, [`lower::UNWOUND`], or anything else, [`lower::ABANDONED`]
+/// with nothing kept among it, which no trace answers but by a defect.
+enum Answer {
+    Exit(ExitId),
+    Unwound,
+    Abandoned,
+}
+
+impl Answer {
+    /// The word compiled code answered, for a trace of `exits` exits.
+    fn of(word: u32, exits: usize) -> Answer {
+        match u16::try_from(word) {
+            Ok(id) if usize::from(id) < exits => Answer::Exit(ExitId(id)),
+            _ if word == lower::UNWOUND => Answer::Unwound,
+            _ => Answer::Abandoned,
+        }
+    }
 }
 
 /// The landing (the glossary's Landing): the frame the loop goes on in,

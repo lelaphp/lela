@@ -48,7 +48,7 @@ use super::{ABANDONED, INTERRUPT_AT, Kernel, Stood, Symbols, UNWOUND, located};
 use crate::record::Stop;
 use crate::types::{
     Abort, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home, Imm,
-    Layout, Line, Op, OpId, Operand, Repeat, Slot, Store, Stored, TraceIr, Types, UnwindId,
+    Layout, Leave, Line, Op, OpId, Operand, Repeat, Slot, Store, Stored, TraceIr, Types, UnwindId,
     ValueId, cannot_raise,
 };
 
@@ -209,14 +209,6 @@ enum Num {
         long: Value,
         double: Value,
     },
-}
-
-/// Where compiled code goes when a kernel answers anything but
-/// `Continue`: an exit, or an unwind, which takes none.
-#[derive(Debug, Clone, Copy)]
-enum Leave {
-    Exit(ExitId),
-    Unwind(UnwindId),
 }
 
 /// Where a kernel serving `line` leaves: its exit, where an inline form

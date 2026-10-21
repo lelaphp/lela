@@ -683,3 +683,31 @@ fn a_call_the_tier_moved_at_its_activation_goes_on_where_the_tier_left_it() {
         );
     }
 }
+
+/// A destructor that throws while a compiled loop's assignment frees the
+/// object it overwrites: the loop leaves through its unwind, which takes
+/// no exit and writes no `TRACE 1 exit` line, as php's compiled code
+/// jumps to its stub for a throwable, with the sum it kept in a register
+/// stored, so the `catch` in the loop's own frame reads it.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_throw_in_a_compiled_loop_unwinds_through_no_exit() {
+    let program = "class D { public $i; function __construct($i) { $this->i = $i; }
+            function __destruct() { if ($this->i == 5) { throw new Exception(\"d\"); } } }
+        function f() { $s = 0; for ($i = 0; $i < 10; $i++) { $s += $i; $o = new D($i);
+            try { $o = 1; } catch (Exception $e) { return $s; } } return -1; }
+        echo f(), \"\\n\";";
+    let served = testing::serve::<Lane>(&DUMPED, program);
+    assert_eq!(testing::stdout(&served), "15\n");
+    let lines = lines(&served);
+    assert!(
+        lines.iter().any(|line| line == "---- TRACE 1 compiled"),
+        "{lines:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.starts_with("     TRACE 1 exit")),
+        "{lines:?}"
+    );
+}

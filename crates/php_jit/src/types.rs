@@ -405,6 +405,14 @@ pub(crate) enum Grows {
     Never,
 }
 
+/// Where an opline leaves of its own: through an exit, or through an
+/// unwind, which takes none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Leave {
+    Exit(ExitId),
+    Unwind(UnwindId),
+}
+
 /// Where compiled code goes when a kernel answers anything but
 /// `Continue`: the scalars the trace keeps in registers stored, so the
 /// interpreter unwinds over its slots from where the throwable was

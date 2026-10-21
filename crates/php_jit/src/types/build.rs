@@ -20,8 +20,8 @@ use super::opcodes::{
 };
 use super::{
     Abort, Check, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo, Fused, Grows, Guard,
-    GuardAt, Home, Imm, Known, Landing, Layout, Line, LoopHeader, Op, OpId, Operand, Place, Read,
-    Repeat, Slot, Store, Stored, TraceIr, Unwind, UnwindId, Value, ValueId,
+    GuardAt, Home, Imm, Known, Landing, Layout, Leave, Line, LoopHeader, Op, OpId, Operand, Place,
+    Read, Repeat, Slot, Store, Stored, TraceIr, Unwind, UnwindId, Value, ValueId,
 };
 use crate::record::{self, Event, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -1623,8 +1623,8 @@ impl<'a> Builder<'a> {
                 }
                 Source::Leave(at) => {
                     let (op, leaves, _) = self.leaves[at];
-                    let left = match leaves {
-                        Leaves::Unfinished => Left::Exit(exits.take(spec)?),
+                    let leave = match leaves {
+                        Leaves::Unfinished => Leave::Exit(exits.take(spec)?),
                         Leaves::Thrown => {
                             let unwind = Unwind {
                                 stores: spec.stores,
@@ -1634,15 +1634,15 @@ impl<'a> Builder<'a> {
                                 unwinds.push(unwind);
                                 unwinds.len() - 1
                             });
-                            Left::Unwind(UnwindId(
+                            Leave::Unwind(UnwindId(
                                 u16::try_from(id).map_err(|_| mismatch("too many unwinds"))?,
                             ))
                         }
                     };
                     if let Some(Op::Line(line)) = self.ops.get_mut(op.index()) {
-                        match left {
-                            Left::Exit(id) => line.exit = Some(id),
-                            Left::Unwind(id) => line.unwind = Some(id),
+                        match leave {
+                            Leave::Exit(id) => line.exit = Some(id),
+                            Leave::Unwind(id) => line.unwind = Some(id),
                         }
                     }
                 }
@@ -1992,13 +1992,6 @@ enum Leaves {
     /// A kernel it called threw, bailed out or panicked: through an
     /// unwind.
     Thrown,
-}
-
-/// Where an opline leaves of its own, numbered.
-#[derive(Clone, Copy)]
-enum Left {
-    Exit(ExitId),
-    Unwind(UnwindId),
 }
 
 /// Where an exit's draft is kept until it is numbered.
