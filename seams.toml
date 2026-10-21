@@ -629,6 +629,7 @@ text = "Each clippy.toml the row names is generated from the manifest and commit
 [[rule]]
 id = "git.no-verify"
 tool = "Bash"
+where = "checkout"   # a scratch repository outside every checkout has no hooks for the flag to skip (#3186, ruled 2026-10-21)
 deny_argv = ["--no-verify", "-n", "-c core.hooksPath", "--config-env core.hooksPath"]
 with = ["git commit", "git merge"]   # git merge --no-verify skips pre-merge-commit as git commit's skips pre-commit (#2751); -n there is --no-stat, refused all the same
 text = "Commits run the pre-commit hook; --no-verify is not available to agents."
