@@ -47,11 +47,50 @@ pub struct LinkedClass<H> {
     /// `ce->destructor`: the position of `__destruct`'s row in
     /// `methods`, set as [`LinkedClass::constructor`] is.
     pub destructor: Option<u32>,
+    /// `ce->__get`, `ce->__set`, `ce->__isset` and `ce->__unset`, set as
+    /// [`LinkedClass::constructor`] is, so a property access asks whether
+    /// the class serves one by reading a position, never by a lookup.
+    pub accessors: Accessors,
     /// Where the class's property hooks are: `ce->num_hooked_props != 0`,
     /// or a parent's private hooked property only that parent's scope
     /// reaches, so a property access on a class with neither asks no
     /// hook.
     pub hooks: ClassHooks,
+}
+
+/// The positions in a linked class's `methods` of the four magic
+/// methods a property access is served by, `zend_add_magic_method`'s
+/// `ce->__get`, `ce->__set`, `ce->__isset` and `ce->__unset`, which
+/// `zend_do_inheritance` copies down; none for a class without one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Accessors {
+    pub get: Option<u32>,
+    pub set: Option<u32>,
+    pub isset: Option<u32>,
+    pub unset: Option<u32>,
+}
+
+/// One of the four magic methods a property access is served by, which
+/// names its position among [`Accessors`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Accessor {
+    Get,
+    Set,
+    Isset,
+    Unset,
+}
+
+impl Accessors {
+    /// The position of `accessor`'s row among the record's methods.
+    #[must_use]
+    pub fn of(&self, accessor: Accessor) -> Option<u32> {
+        match accessor {
+            Accessor::Get => self.get,
+            Accessor::Set => self.set,
+            Accessor::Isset => self.isset,
+            Accessor::Unset => self.unset,
+        }
+    }
 }
 
 /// Where a linked class's property hooks are, as `do_inherit_property`
@@ -83,6 +122,7 @@ impl<H> Default for LinkedClass<H> {
             interfaces: Box::default(),
             constructor: None,
             destructor: None,
+            accessors: Accessors::default(),
             hooks: ClassHooks::Absent,
         }
     }

@@ -150,7 +150,7 @@ impl Request {
 
     /// The method at the position of `class`'s function table `at`
     /// picks out of its linked record.
-    fn resolved_method(
+    pub(super) fn resolved_method(
         &self,
         class: ClassId,
         at: impl FnOnce(&LinkedClass<ClassId>) -> Option<u32>,

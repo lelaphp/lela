@@ -550,7 +550,7 @@ impl Request {
         if !initialises {
             return Ok((object, None));
         }
-        let guarded = self.serves_accessor(object.class(), b"__get")
+        let guarded = self.serves_accessor(object.class(), super::Accessor::Get)
             && self.guard_word(object, name) & IN_GET != 0;
         let instance = self.lazy_init(object)?;
         if guarded

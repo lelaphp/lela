@@ -68,6 +68,13 @@ pub(crate) struct Made {
     /// The handler table objects of the class are reached through
     /// ([`Request::handlers_of`]).
     pub(crate) handlers: &'static dyn ObjectHandlers,
+    /// Whether every name but one led by NUL is a dynamic property of the
+    /// class's objects whatever the scope: the table `std_object_handlers`,
+    /// no class of the chain declaring one of its own
+    /// ([`Request::own_handlers`]), and `ce->properties_info` empty, no
+    /// class of the chain declaring a property, instance or `static`
+    /// ([`Request::places_dynamic_on_std`]).
+    pub(crate) dynamic_names: bool,
     /// Whether `create_object` is `zend_default_exception_new`'s
     /// ([`Request::records_throw_site`]).
     throw_site: bool,
@@ -229,6 +236,7 @@ impl Request {
             declared_by,
             create: self.native_new_of(class),
             handlers: self.handlers_of(class),
+            dynamic_names: self.own_handlers(class).is_none() && !self.declares_properties(class),
             throw_site: self.records_throw_site(class),
         };
         self.class_data.rows.row(class).made = Some(made);

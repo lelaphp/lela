@@ -2486,19 +2486,47 @@ pub(crate) fn free_operand(req: &mut Request, frame: FrameRef, kind: OperandKind
 /// bool(true)
 /// int(2)
 /// ```
+///
+/// A string is the name as the operand holds it, never a copy; the one
+/// a variable holds is held by the handler too, so a `__get` or a `__set`
+/// that writes the variable, through `global` or a reference, leaves the
+/// name the access was made by standing until the access is done:
+///
+/// ```php
+/// class G { function __get($n) { global $g; $g = str_repeat('z', 2); return "got $n"; } function __set($n, $v) { global $g; $g = 'x'; echo "set $n\n"; } }
+/// $g = str_repeat('w', 2); $o = new G;
+/// echo $o->$g, " ", $g, "\n";
+/// $g = str_repeat('v', 2); $o->$g = 1; echo $g, "\n";
+/// $r = str_repeat('r', 2); $g = &$r; echo $o->$g, " ", $r, "\n";
+/// $o2 = new stdClass; $o2->{'a' . 'b'} = 1; $o2->{$r . 'c'} = 2; var_dump($o2);
+/// ```
+/// ```expect
+/// got ww zz
+/// set vv
+/// x
+/// got rr zz
+/// object(stdClass)#2 (2) {
+///   ["ab"]=>
+///   int(1)
+///   ["zzc"]=>
+///   int(2)
+/// }
+/// ```
 #[derive(Default)]
 pub(crate) struct Member {
     read: Option<Value>,
     /// Whether the handler holds an owner of what was read: a
-    /// constant string is the op array's, and anything else is the
-    /// string the conversion answered with one owner.
+    /// constant string is the op array's and a `TMP`'s the operand's,
+    /// while any other operand's string takes one more owner and anything
+    /// else is the string the conversion answered with one.
     owned: bool,
 }
 
 impl Member {
     /// The name, read and converted on the first ask and the same value
-    /// after it: the constant itself, or a string the handler holds one
-    /// owner of until [`Member::release`].
+    /// after it: a string as the operand holds it, with one more owner
+    /// the handler holds until [`Member::release`] where the operand is a
+    /// variable, or the string the conversion of anything else made.
     pub(crate) fn name(
         &mut self,
         req: &mut Request,
@@ -2509,8 +2537,23 @@ impl Member {
         if let Some(read) = self.read {
             return Ok(read);
         }
-        let value = operand(req, frame, code, op.op2_type, op.op2).deref();
-        let name = if op.op2_type == OperandKind::Const && value.as_str_bytes().is_some() {
+        let held = operand(req, frame, code, op.op2_type, op.op2);
+        let value = held.deref();
+        // `zval_try_get_tmp_string`: a string is the name as it stands,
+        // never a copy. A constant is the op array's, and a `TMP`'s
+        // string is the operand's until `FREE_OP2`; what a `CV`, a `VAR`
+        // or a reference holds takes one more owner, which user code a
+        // `__get` or a `__set` runs cannot take away from under it.
+        let name = if value.as_str_bytes().is_some() {
+            let borrowed = match op.op2_type {
+                OperandKind::Const => true,
+                OperandKind::Tmp => held.as_php_ref().is_none(),
+                OperandKind::Var | OperandKind::Cv | OperandKind::Unused => false,
+            };
+            if !borrowed {
+                req.addref(&value);
+                self.owned = true;
+            }
             value
         } else {
             self.owned = true;
