@@ -11277,11 +11277,27 @@ impl<'a> Emit<'a> {
             return self.memoized(node);
         }
         let inner = self.chain_inner.take() == Some(node);
+        match self.chain_end(node) {
+            Some(end) if !inner => self.chain_ended(node, fetch, end),
+            _ => self.expr_node(node, fetch),
+        }
+    }
+
+    /// [`Self::expr_under`] over a node a chain of `?->` ends at, every
+    /// `JMP_NULL` its compile laid down aimed past it. A call of its own,
+    /// so the value it holds for the aim is off the frame every other
+    /// node's compile answers straight into, a level of a nested
+    /// expression among them (#3208).
+    #[inline(never)]
+    fn chain_ended(
+        &mut self,
+        node: tree::Expr,
+        fetch: Fetch,
+        end: chain::ChainEnd,
+    ) -> Result<Where, CompileError> {
         let checkpoint = self.short_circuits.len();
         let value = self.expr_node(node, fetch)?;
-        if !inner && let Some(end) = self.chain_end(node) {
-            self.short_circuit_commit(checkpoint, value, end);
-        }
+        self.short_circuit_commit(checkpoint, value, end);
         Ok(value)
     }
 
@@ -11294,6 +11310,15 @@ impl<'a> Emit<'a> {
     /// node is read in that call's frame. An arm that read its node here
     /// would add its locals to every level of every nesting, which an
     /// unoptimised build lays out side by side rather than overlapping.
+    ///
+    /// Inlined into [`Self::expr_under`] and [`Self::chain_ended`], so
+    /// the dispatch answers straight into the slot `expr_under`'s caller
+    /// gave it and a left-nested chain stands in one 160-byte frame per
+    /// operator, php's two frames' size. Left to the optimiser, which
+    /// inlines it nowhere once it has two callers, it is a frame of its
+    /// own with its arms inlined into it, 2,048 bytes a level (#3208).
+    #[allow(clippy::inline_always)] // measured on #3208: the dispatch stands in expr_under's frame
+    #[inline(always)]
     fn expr_node(&mut self, expr: tree::Expr, fetch: Fetch) -> Result<Where, CompileError> {
         let line = expr.line(self.parsed);
         self.line = line;
