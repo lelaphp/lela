@@ -253,6 +253,30 @@ fn a_crate_whose_sources_name_debug_assertions_is_linted_again_in_release() {
     );
 }
 
+/// The sensor of `tests.no-silent-return` (#3079): a `return` at a
+/// `#[test]` fn's own level fails the crate's reading, naming each site,
+/// in `src/` and `tests/` alike; one inside a closure or a nested fn, and
+/// `return Err(..)`, are not the test's and pass.
+#[test]
+fn a_return_at_a_tests_own_level_fails_and_one_in_a_closure_or_of_err_does_not() {
+    let fixture = xtask::package_dir().join("fixtures/rules/tests.no-silent-return");
+    let root = committed(&fixture, "silent-return");
+    let manifest = Manifest::load(&root).unwrap();
+    let readings = clippy::run(&root, &manifest, &[]).unwrap();
+    let heap = of(&readings, "php_heap");
+    assert_eq!(heap.status, Status::Fail, "{heap:#?}");
+    assert_eq!(heap.rule, "tests.no-silent-return");
+    let named = "crates/php_heap/src/array.rs:17, crates/php_heap/tests/early.rs:6: a return at a #[test] fn's own level";
+    assert!(
+        heap.message.contains(named) && heap.message.contains("(fixture)"),
+        "{}",
+        heap.message
+    );
+    let unit = of(&readings, "php_unit");
+    assert_eq!(unit.status, Status::Pass, "{unit:#?}");
+    assert_eq!(unit.rule, "tests.no-silent-return");
+}
+
 /// A fixture's rule, the crates that fail with what each message names,
 /// and the crates that pass.
 type Expected<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);

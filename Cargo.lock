@@ -2504,6 +2504,7 @@ dependencies = [
  "clap",
  "md5",
  "nix",
+ "proc-macro2",
  "quote",
  "regex-lite",
  "serde",
