@@ -8487,16 +8487,16 @@ fn var_receiver(
 }
 
 /// What a property opcode holds of the container [`inline_receiver`]
-/// read its object from, which `FREE_OP1_VAR_PTR` gives up after the
-/// opcode's work (`zval_ptr_dtor_nogc(EX_VAR(opline->op1.var))`).
-#[derive(Clone, Copy)]
+/// read its object from, which `FREE_OP1()` gives up after the opcode's
+/// work (`zval_ptr_dtor_nogc(EX_VAR(opline->op1.var))`). Given up once:
+/// [`Held::give_up`] takes it.
 enum Held {
     /// `$this`, a CV, or the place a `VAR`'s `IS_INDIRECT` names, of
     /// which the opcode owns nothing, so nothing is given up.
     Lent,
-    /// The `VAR` whose field, and so whose slot ([`Var`]), this is,
-    /// holding an owner of the object or of a reference to it, which the
-    /// opcode gives up.
+    /// The `VAR` the opline's `op1` field names, its slot read through
+    /// [`Var`], holding an owner of the object or of a reference to it,
+    /// which the opcode gives up.
     Owner(u32),
 }
 
@@ -8515,7 +8515,7 @@ impl Held {
         let Held::Owner(at) = self else {
             return Some(());
         };
-        let slot = slots.get_mut(at as usize)?;
+        let slot = slots.get_mut(Var.slot(at)?)?;
         if !php_heap::Heap::release_nogc_kept(*slot) {
             return None;
         }
@@ -8813,7 +8813,7 @@ fn fetched_obj_place_nested<B: Operand + Default>(
 /// `zend_std_get_property_ptr_ptr`'s dynamic one,
 /// `Z/Zend/zend_execute.c:3540-3560`), and of `ZEND_FETCH_OBJ_RW`, whose
 /// cached arm is the same: on the receiver [`inline_receiver`] reads, a
-/// `VAR` container given up as `FREE_VAR_PTR_AND_EXTRACT_RESULT_IF_NEEDED`
+/// `VAR` container given up as `FREE_VAR_PTR_AND_EXTRACT_RESULT_IF_NECESSARY`
 /// gives it up where an owner is left, the place [`inline_place`] names,
 /// where it holds a value, left in the `VAR` as an `IS_INDIRECT` for the
 /// write after it, a typed slot's as an untyped one's where the fetch
