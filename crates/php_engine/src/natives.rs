@@ -1518,6 +1518,20 @@ fn dump(req: &mut Request, value: &Value, level: usize) {
         _ => "",
     };
     let value = &value.deref();
+    if let Some(array) = value.as_array() {
+        dump_array(req, common, array, level);
+    } else if let Some(object) = value.as_object() {
+        dump_object(req, common, object, level);
+    } else {
+        dump_scalar(req, common, value);
+    }
+}
+
+/// [`dump`] over a value that holds no other, a call of its own, so its
+/// texts are off the stack of a nest of objects or arrays dumped level
+/// by level (#3159).
+#[inline(never)]
+fn dump_scalar(req: &mut Request, common: &str, value: &Value) {
     if let Some(b) = value.as_bool() {
         req.response_mut()
             .write(format!("{common}bool({b})\n").as_bytes());
@@ -1538,10 +1552,6 @@ fn dump(req: &mut Request, value: &Value, level: usize) {
             .write(format!("{common}string({}) \"", s.len()).as_bytes());
         req.response_mut().write(s.as_bytes());
         req.response_mut().write(b"\"\n");
-    } else if let Some(array) = value.as_array() {
-        dump_array(req, common, array, level);
-    } else if let Some(object) = value.as_object() {
-        dump_object(req, common, object, level);
     } else if let Some(resource) = value.as_resource() {
         // `IS_RESOURCE`: the list's id and the type's name through
         // `zend_rsrc_list_get_rsrc_type`, which is `Unknown` once
@@ -1572,6 +1582,11 @@ fn dump(req: &mut Request, value: &Value, level: usize) {
 /// walk's owner is given up as `GC_DTOR_NO_REF(myht)` frees the array
 /// where it was the last. The mark is asked before the header is
 /// written, as php asks it, so a marked array writes `*RECURSION*` alone.
+///
+/// A call of its own, so the walk it keeps is off the stack of a nest of
+/// objects dumped level by level, as [`dump_object`]'s is off an array's
+/// (#3159).
+#[inline(never)]
 fn dump_array(req: &mut Request, common: &str, array: PhpArray, level: usize) {
     if array.is_recursive() {
         req.response_mut().write(b"*RECURSION*\n");
@@ -1732,27 +1747,18 @@ fn dump_array(req: &mut Request, common: &str, array: PhpArray, level: usize) {
 ///   }
 /// }
 /// ```
+///
+/// A call of its own, as [`dump_array`] is.
+#[inline(never)]
 fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize) {
     // `php_var_dump`'s `ZEND_ACC_ENUM` arm, ahead of the recursion
-    // guard as php has it: a case is its class and its case name,
-    // `zend_enum_fetch_case_name`, and none of its properties.
+    // guard as php has it.
     if req
         .symbols()
         .class_decl(object.class())
         .is_some_and(|decl| decl.kind == ClassKind::Enum)
     {
-        let class = req.symbols().class_name(object.class());
-        let case = object
-            .prop(req, b"name")
-            .and_then(|name| name.as_str_bytes().map(<[u8]>::to_vec))
-            .unwrap_or_default();
-        req.response_mut().write(
-            format!(
-                "{common}enum({class}::{})\n",
-                String::from_utf8_lossy(&case)
-            )
-            .as_bytes(),
-        );
+        dump_enum(req, common, object);
         return;
     }
     if object.is_recursive_in(req, RecursionGuard::Debug) {
@@ -1768,39 +1774,16 @@ fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize)
             return;
         }
     };
-    // `Z_OBJ_HANDLER_P(struc, get_class_name)`, then
-    // `php_var_dump_object_prefix`, read after the table as php reads
-    // them: what a lazy object is, before `object(`. The name as its
-    // bytes stand, as php's `%s` prints `ZSTR_VAL`.
-    let name = object.handlers(req).get_class_name(req, object);
-    let prefix = match object.laziness() {
-        Laziness::Eager => "",
-        Laziness::Ghost => "lazy ghost ",
-        Laziness::Proxy | Laziness::Forwarding => "lazy proxy ",
-    };
-    let mut header = format!("{common}{prefix}object(").into_bytes();
-    header.extend_from_slice(php_unit::decl::shown_bytes(&name));
-    header.extend_from_slice(format!(")#{} ({}) {{\n", object.index(), held.count()).as_bytes());
-    req.response_mut().write(&header);
+    dump_object_header(req, common, object, held.count());
     // `ZEND_HASH_FOREACH_KEY_VAL(myht, num, key, val)`
     // (`Z/ext/standard/var.c:196`) over the table held until
     // `zend_release_properties`: the walk takes no owner of its own.
+    // What a row writes before its value is a call of its own, so a
+    // nest of objects keeps at each level only the walk and the table
+    // (#3159).
     let walked = walk::properties(req, &held, Unwritten::Shown, |req, row| -> walk::Step {
-        if too_deep(req, level, req.stack_limit().overflowed()) {
-            return Ok(ControlFlow::Continue(()));
-        }
-        match row.key() {
-            Key::Int(at) => req
-                .response_mut()
-                .write(format!("{:w$}[{at}]=>\n", "", w = level + 1).as_bytes()),
-            Key::Str(name) => dump_property_name(req, level, name.as_bytes()),
-        }
-        match row.uninitialized() {
-            Some(ty) => {
-                let line = format!("{:w$}uninitialized({ty})\n", "", w = level + 1);
-                req.response_mut().write(line.as_bytes());
-            }
-            None => dump(req, row.value(), level + 2),
+        if dump_property_head(req, level, row) {
+            dump(req, row.value(), level + 2);
         }
         Ok(ControlFlow::Continue(()))
     });
@@ -1818,6 +1801,68 @@ fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize)
     object.unprotect_in(req, RecursionGuard::Debug);
     if let Err(thrown) = left {
         leave_chained(req, thrown);
+    }
+}
+
+/// `php_var_dump`'s `ZEND_ACC_ENUM` arm: a case is its class and its
+/// case name, `zend_enum_fetch_case_name`, and none of its properties.
+#[inline(never)]
+fn dump_enum(req: &mut Request, common: &str, object: PhpObject) {
+    let class = req.symbols().class_name(object.class());
+    let case = object
+        .prop(req, b"name")
+        .and_then(|name| name.as_str_bytes().map(<[u8]>::to_vec))
+        .unwrap_or_default();
+    req.response_mut().write(
+        format!(
+            "{common}enum({class}::{})\n",
+            String::from_utf8_lossy(&case)
+        )
+        .as_bytes(),
+    );
+}
+
+/// `Z_OBJ_HANDLER_P(struc, get_class_name)`, then
+/// `php_var_dump_object_prefix`, read after the table as php reads
+/// them: what a lazy object is, before `object(`, and the `count` rows
+/// the table holds. The name as its bytes stand, as php's `%s` prints
+/// `ZSTR_VAL`.
+#[inline(never)]
+fn dump_object_header(req: &mut Request, common: &str, object: PhpObject, count: usize) {
+    let name = object.handlers(req).get_class_name(req, object);
+    let prefix = match object.laziness() {
+        Laziness::Eager => "",
+        Laziness::Ghost => "lazy ghost ",
+        Laziness::Proxy | Laziness::Forwarding => "lazy proxy ",
+    };
+    let mut header = format!("{common}{prefix}object(").into_bytes();
+    header.extend_from_slice(php_unit::decl::shown_bytes(&name));
+    header.extend_from_slice(format!(")#{} ({count}) {{\n", object.index()).as_bytes());
+    req.response_mut().write(&header);
+}
+
+/// `php_object_property_dump` up to its value: the refusal where the
+/// stack has come down to the limit ([`too_deep`]), else the row's key,
+/// and for a typed property nothing has written its `uninitialized(T)`;
+/// whether the value is still to be dumped.
+#[inline(never)]
+fn dump_property_head(req: &mut Request, level: usize, row: &walk::Row) -> bool {
+    if too_deep(req, level, req.stack_limit().overflowed()) {
+        return false;
+    }
+    match row.key() {
+        Key::Int(at) => req
+            .response_mut()
+            .write(format!("{:w$}[{at}]=>\n", "", w = level + 1).as_bytes()),
+        Key::Str(name) => dump_property_name(req, level, name.as_bytes()),
+    }
+    match row.uninitialized() {
+        Some(ty) => {
+            let line = format!("{:w$}uninitialized({ty})\n", "", w = level + 1);
+            req.response_mut().write(line.as_bytes());
+            false
+        }
+        None => true,
     }
 }
 
@@ -1850,6 +1895,8 @@ fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize)
 /// }
 /// 36
 /// ```
+#[cold]
+#[inline(never)]
 fn leave_chained(req: &mut Request, thrown: crate::api::raising::Thrown) {
     use crate::api::request::Raised;
     let thrown = match req.take_raised() {
