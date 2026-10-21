@@ -177,9 +177,7 @@ fn what_memory_get_usage_reads_starts_where_it_started_for_every_request() {
                     filename: b"witness.php",
                     cwd: Path::new(""),
                     kind: SourceKind::File,
-                    keys_before: 0,
-                    request_classes: RequestClasses::default(),
-                    multibyte: None,
+                    request: ForRequest::none(None),
                 },
                 CompileIni {
                     precision: 14,

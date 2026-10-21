@@ -526,6 +526,26 @@ pub(crate) fn named_by_request(validation: Validation, unit: &Result<Unit, Compi
             .is_ok_and(|unit| unit.classes.iter().any(|class| class.flags.is_anonymous))
 }
 
+/// The runtime definition keys and anonymous class names `unit`'s
+/// compile made, which [`crate::api::request::Request::count_keys_made`]
+/// counts on for the request it was compiled for, saturating at
+/// `u32::MAX`.
+pub(crate) fn keys_of(unit: &Unit) -> u32 {
+    u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX)
+}
+
+/// The runtime definition keys a request counts for `unit` served as a
+/// hit under `validation`: none under opcache, whose hit compiles
+/// nothing; without it the keys php's compile of the include would
+/// have made, as [`named_by_request`] reads [`Validation::EveryHit`].
+pub(crate) fn hit_keys(validation: Validation, unit: &Unit) -> u32 {
+    if validation == Validation::EveryHit {
+        keys_of(unit)
+    } else {
+        0
+    }
+}
+
 /// A unit held nowhere, answered as `filed`.
 fn alone(unit: Result<Unit, CompileError>, filed: Filed) -> Answered {
     (

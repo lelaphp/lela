@@ -1531,35 +1531,39 @@ fn link_trampolines(
 /// (`VCWD_GETCWD`, the request's own under ZTS), which is the request's
 /// for a request and the process's for a unit compiled outside one
 /// ([`Engine::unit`]), and whether the source is a file or the string an
-/// `eval` handed over ([`SourceKind`]), with the runtime definition keys
-/// the request made before it, which a unit compiled for no request made
-/// none of ([`php_compile::Options::keys_before`]), and the classes the request
-/// had declared by then, which a unit compiled for no request has none of
-/// ([`php_compile::RequestClasses`]); and, where `zend.multibyte` is on,
-/// the encoding functions bound to the request and what the scanner
-/// reads beside them ([`crate::multibyte::Bound`]).
+/// `eval` handed over ([`SourceKind`]), with what the request it
+/// compiles for brings ([`ForRequest`]).
 #[derive(Clone, Copy)]
 struct Origin<'a> {
     filename: &'a [u8],
     cwd: &'a Path,
     kind: SourceKind,
-    keys_before: u32,
-    request_classes: RequestClasses<'a>,
-    multibyte: Option<Multibyte<'a>>,
+    request: ForRequest<'a>,
 }
 
-/// What the request a file compiles for brings to its compile
-/// ([`Shared::compile_file`]): the classes it has declared
-/// ([`php_compile::RequestClasses`]), the encoding functions
-/// `zend.multibyte` bound for it ([`crate::multibyte::Bound`]), and
+/// What the request a source compiles for brings to its compile: the
+/// classes it has declared ([`php_compile::RequestClasses`]), where
+/// `zend.multibyte` is on the encoding functions bound for it and what
+/// the scanner reads beside them ([`crate::multibyte::Bound`]), and
 /// `CG(rtd_key_counter)` as it stands
-/// ([`php_compile::Options::keys_before`]). A unit compiled for no
-/// request has declared nothing and made no keys.
+/// ([`php_compile::Options::keys_before`]).
 #[derive(Clone, Copy)]
-pub(crate) struct FileRequest<'a> {
+pub(crate) struct ForRequest<'a> {
     pub(crate) classes: RequestClasses<'a>,
     pub(crate) multibyte: Option<Multibyte<'a>>,
     pub(crate) keys_before: u32,
+}
+
+impl<'a> ForRequest<'a> {
+    /// A unit compiled for no request, under `multibyte`: it has
+    /// declared nothing and made no keys.
+    pub(crate) fn none(multibyte: Option<Multibyte<'a>>) -> ForRequest<'a> {
+        ForRequest {
+            classes: RequestClasses::default(),
+            multibyte,
+            keys_before: 0,
+        }
+    }
 }
 
 /// What the engine has declared, as the compiler reads it: php's
@@ -1758,7 +1762,7 @@ impl Shared {
         let mut made = self.compiled_for(req, source, filename, kind);
         let room = match &mut made {
             Ok(unit) => {
-                req.count_keys_made(crate::api::request::keys_of(unit));
+                req.count_keys_made(crate::unit_cache::keys_of(unit));
                 req.note_loop_vars(unit.loop_vars);
                 req.ready_unit(unit)
             }
@@ -1826,9 +1830,11 @@ impl Shared {
                 filename,
                 cwd,
                 kind,
-                keys_before,
-                request_classes,
-                multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
+                request: ForRequest {
+                    classes: request_classes,
+                    multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
+                    keys_before,
+                },
             };
             compile(
                 source,
@@ -1909,14 +1915,7 @@ impl Shared {
         let (compiled, _, _) = self.units.file(
             &arena.files,
             asked,
-            |source| {
-                let request = FileRequest {
-                    classes: RequestClasses::default(),
-                    multibyte: self.unbound(),
-                    keys_before: 0,
-                };
-                self.compile_file(source, path, cwd, stack, request)
-            },
+            |source| self.compile_file(source, path, cwd, stack, ForRequest::none(self.unbound())),
             |_| None,
             |unit| self.publish_compiled(unit),
             // No request to publish its early-bound classes for, so
@@ -1958,7 +1957,7 @@ impl Shared {
         path: &[u8],
         cwd: &Path,
         stack: StackLimit,
-        request: FileRequest<'_>,
+        request: ForRequest<'_>,
     ) -> Result<Unit, CompileError> {
         self.compile_shared(
             source,
@@ -1966,9 +1965,7 @@ impl Shared {
                 filename: path,
                 cwd,
                 kind: SourceKind::File,
-                keys_before: request.keys_before,
-                request_classes: request.classes,
-                multibyte: request.multibyte,
+                request,
             },
             stack,
         )
@@ -4843,9 +4840,7 @@ impl Engine {
             filename,
             cwd: &cwd,
             kind: SourceKind::File,
-            keys_before: 0,
-            request_classes: RequestClasses::default(),
-            multibyte: self.shared.unbound(),
+            request: ForRequest::none(self.shared.unbound()),
         };
         self.shared.publish(source, origin, stack).ok()
     }
@@ -4891,9 +4886,7 @@ impl Engine {
                     filename: &script,
                     cwd: &description.cwd,
                     kind: SourceKind::File,
-                    keys_before: 0,
-                    request_classes: RequestClasses::default(),
-                    multibyte: self.shared.unbound(),
+                    request: ForRequest::none(self.shared.unbound()),
                 };
                 self.shared.publish(source, origin, stack).ok()?
             }
@@ -5832,10 +5825,10 @@ fn compile(
         functions: declared.functions,
         frameless: declared.frameless,
         classes: declared.classes,
-        request_classes: origin.request_classes,
+        request_classes: origin.request.classes,
         stack,
-        keys_before: origin.keys_before,
-        multibyte: origin.multibyte,
+        keys_before: origin.request.keys_before,
+        multibyte: origin.request.multibyte,
         hooked: declared.hooked,
         extended_info: declared.extended_info,
         op_array_extensions: declared.op_array_extensions,

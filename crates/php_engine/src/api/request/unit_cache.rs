@@ -19,7 +19,7 @@ use super::{AccelServed, Request, Unresolved};
 use crate::api::abi::{Admission, FileCache, Lookup, Validation};
 use crate::api::raising::Thrown;
 use crate::api::values::{Emalloc, PhpString};
-use crate::engine::FileRequest;
+use crate::engine::ForRequest;
 use crate::exec::IncludeKind;
 use crate::supplied::chain::FileArgs;
 use crate::supplied::tell;
@@ -533,7 +533,7 @@ impl Request {
         let stack = self.stack_limit();
         let bound = crate::multibyte::bound(self, shared.compile_multibyte());
         let holds = |name: &[u8]| self.class_named(Bare::resolved(name)).is_some();
-        let request = FileRequest {
+        let request = ForRequest {
             classes: php_compile::RequestClasses::new(&holds),
             multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
             keys_before: self.keys_made(),
@@ -556,7 +556,7 @@ impl Request {
         let scanned = scanned.get();
         self.note_loop_vars(scanned.map_or(0, |scanned| scanned.loops));
         let cached = crate::unit_cache::served(compiled, |unit| self.take_unit(unit));
-        self.count_keys_made(Scanned::keys_made(scanned, validation, &cached));
+        self.count_keys_made(keys_counted(scanned, validation, &cached));
         // The primary file compiled through the host's handle, which
         // `zend_stream_fixup` reads it into and `CG(open_files)` lists.
         if handle == HandlePath::Host
@@ -1012,29 +1012,27 @@ struct Scanned {
     keys: u32,
 }
 
-impl Scanned {
-    /// The runtime definition keys the request counts for the file
-    /// served as `cached` under `validation`, where `scanned` says what a
-    /// compile that ran made: the keys an accepted unit made; none for a
-    /// refusal, whose keys are counted as it is raised
-    /// ([`Request::declare_refused`]); none for a hit under opcache, and
-    /// without it the keys php's compile of the include would have made
-    /// ([`crate::unit_cache::named_by_request`]).
-    fn keys_made(scanned: Option<Scanned>, validation: Validation, cached: &Cached) -> u32 {
-        match (scanned, cached) {
-            (Some(scanned), _) => scanned.keys,
-            (None, Some(Ok(unit))) if validation == Validation::EveryHit => super::keys_of(unit),
-            (None, _) => 0,
-        }
+/// The runtime definition keys the request counts for the file served
+/// as `cached` under `validation`, where `scanned` says what a compile
+/// that ran made: the keys an accepted unit made, none for a refusal,
+/// whose keys are counted as it is raised ([`Request::declare_refused`]),
+/// and a hit's ([`crate::unit_cache::hit_keys`]).
+fn keys_counted(scanned: Option<Scanned>, validation: Validation, cached: &Cached) -> u32 {
+    match (scanned, cached) {
+        (Some(scanned), _) => scanned.keys,
+        (None, Some(Ok(unit))) => crate::unit_cache::hit_keys(validation, unit),
+        (None, _) => 0,
     }
+}
 
+impl Scanned {
     /// What compiling `source` to `compiled` read and made.
     fn of(source: &[u8], compiled: &Result<php_unit::Unit, php_compile::CompileError>) -> Scanned {
         let unit = compiled.as_ref().ok();
         Scanned {
             len: source.len(),
             loops: unit.map_or(0, |unit| unit.loop_vars),
-            keys: unit.map_or(0, super::keys_of),
+            keys: unit.map_or(0, crate::unit_cache::keys_of),
         }
     }
 }

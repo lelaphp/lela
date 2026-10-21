@@ -1212,13 +1212,6 @@ impl Request {
     }
 }
 
-/// The runtime definition keys and anonymous class names `unit`'s
-/// compile made, which [`Request::count_keys_made`] counts on for the
-/// request it was compiled for, saturating at `u32::MAX`.
-pub(crate) fn keys_of(unit: &php_unit::Unit) -> u32 {
-    u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX)
-}
-
 impl<'r> Diagnostics<&'r mut Request> {
     /// The slot for a throwable PHP code served by a stream's kind, a
     /// filter or a user-space wrapper raised inside an operation whose
