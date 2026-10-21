@@ -14,3 +14,9 @@ writes `engine.lines` stands for the engine's through `run`, and the
 reading is a fail naming both lines of the loop's root; the same binary
 writing `oracle.lines` is a pass, and the lines the run keeps for the
 oracle are `oracle.lines`.
+
+`fiber_hot_loop.php` suspends a fiber on every pass of a hot loop and
+resumes it until it ends, so the loop's recording takes the suspension
+inside it: the program #627's diff is run on, `cargo xtask trace-dump
+--program xtask/fixtures/trace-dump/fiber_hot_loop.php` (jit-design.md
+§4.9, *The exclusion is the request's*).
