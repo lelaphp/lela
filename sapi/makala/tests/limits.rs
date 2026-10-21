@@ -253,7 +253,7 @@ fn an_idle_connection_closes_at_the_keep_alive_limit_and_not_the_header_timeout(
     let request = Request::get("/echo.php").bytes();
     let server = server(&["--limit", "keep-alive-idle=500ms"]);
     let mut stream = server.connect();
-    stream.write_all(&request).unwrap_or_else(|e| panic!("{e}"));
+    stream.write_all(&request).expect("write the request");
     let exchange = read_until_closed(&mut stream, WAIT);
     assert_eq!(exchange.codes(), [200], "{}", exchange.text());
     assert_eq!(exchange.ending, Ending::Closed, "{}", exchange.text());
@@ -265,13 +265,13 @@ fn an_idle_connection_closes_at_the_keep_alive_limit_and_not_the_header_timeout(
         "header-timeout=300ms",
     ]);
     let mut stream = server.connect();
-    stream.write_all(&request).unwrap_or_else(|e| panic!("{e}"));
+    stream.write_all(&request).expect("write the request");
     let first = read_until_closed(&mut stream, Duration::from_millis(1200));
     assert_eq!(first.codes(), [200], "{}", first.text());
     assert_eq!(first.ending, Ending::Open);
     stream
         .write_all(&Request::get("/echo.php?again").close().bytes())
-        .unwrap_or_else(|e| panic!("{e}"));
+        .expect("write the request");
     let second = read_until_closed(&mut stream, WAIT);
     assert_eq!(second.codes(), [200], "{}", second.text());
     assert!(second.text().contains("again"), "{}", second.text());
@@ -305,9 +305,7 @@ fn a_body_slower_than_the_minimum_rate_is_cut_and_frees_its_thread() {
 fn a_reader_slower_than_the_minimum_rate_is_cut_and_frees_its_thread() {
     let server = server(&["--threads", "1", "--limit", "response-data-rate=4000000,1s"]);
     let stalled = server.send(&Request::get("/big.php"));
-    let mut next = server.connect();
-    next.write_all(&Request::get("/echo.php?next").close().bytes())
-        .unwrap_or_else(|e| panic!("{e}"));
+    let mut next = server.send(&Request::get("/echo.php?next").close());
     let exchange = read_until_closed(&mut next, Duration::from_secs(40));
     assert_eq!(exchange.codes(), [200], "{}", exchange.text());
     assert_eq!(exchange.response().body, b"served /echo.php?next 0\n");
@@ -384,7 +382,7 @@ fn head_sends_no_content_and_the_program_writes_on() {
     );
     stream
         .write_all(&Request::get("/echo.php?after").close().bytes())
-        .unwrap_or_else(|e| panic!("{e}"));
+        .expect("write the request");
     let after = read_until_closed(&mut stream, WAIT);
     assert_eq!(after.codes(), [200], "{}", after.text());
 }
@@ -425,25 +423,16 @@ fn expect_100_continue_is_answered_before_the_body_is_read() {
 fn date_is_on_every_response() {
     let server = server(&[]);
     for (case, request) in [
-        (
-            "200",
-            "GET /echo.php HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n".to_owned(),
-        ),
-        (
-            "404",
-            "GET /none.php HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n".to_owned(),
-        ),
-        (
-            "302",
-            "GET /redirect.php HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n".to_owned(),
-        ),
-        ("400", "GET /echo.php HTTP/1.1\r\n\r\n".to_owned()),
+        ("200", Request::get("/echo.php").close().bytes()),
+        ("404", Request::get("/none.php").close().bytes()),
+        ("302", Request::get("/redirect.php").close().bytes()),
+        ("400", b"GET /echo.php HTTP/1.1\r\n\r\n".to_vec()),
         (
             "431",
-            format!("GET /echo.php HTTP/1.1\r\nHost: a\r\n{}\r\n", fields(101)),
+            format!("GET /echo.php HTTP/1.1\r\nHost: a\r\n{}\r\n", fields(101)).into_bytes(),
         ),
     ] {
-        let exchange = server.exchange(request.as_bytes(), WAIT);
+        let exchange = server.exchange(&request, WAIT);
         assert_eq!(
             exchange.codes().first().map(u16::to_string).as_deref(),
             Some(case)
