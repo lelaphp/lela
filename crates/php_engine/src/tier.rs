@@ -651,13 +651,13 @@ fn serve<T: Tier, D: Telling>(req: &mut Request, entry: FrameRef) -> Result<(), 
 /// Error: Maximum call stack size of %d bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
 /// ```
 fn refused_at_entry(req: &mut Request) -> bool {
-    let stack = req.stack_limit();
-    if !stack.entry_overflowed() {
-        return false;
+    match crate::api::raising::call_stack_entry(req) {
+        Ok(()) => false,
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            true
+        }
     }
-    let thrown = crate::api::raising::call_stack_size_error(req, stack.max_stack_size());
-    req.leave_pending(&thrown);
-    true
 }
 
 /// The loop itself (design §5.8): from the edge its first step took,
