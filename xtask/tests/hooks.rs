@@ -829,9 +829,10 @@ fn a_vocab_refusal_ends_the_hook_before_clippy_runs() {
 /// into `main` (#2982), its ledger row and every citation of it: a commit
 /// on `main` whose Markdown or Rust still cites one, as
 /// `fixtures/hooks/next/cited.md` and `cited.rs` do in each shape that has
-/// landed, is refused before anything runs, naming each line, and the same
-/// commit on a branch is not. Prose that names NEXT and cites no revision,
-/// the convention quoted in backticks among it, is no citation.
+/// landed, one wrapped onto the next line among them, is refused before
+/// anything runs, naming each line, and the same commit on a branch is not.
+/// Prose that names NEXT and cites no revision, the convention quoted in
+/// backticks and a line that ends in "revision" among it, is no citation.
 #[test]
 fn a_revision_still_cited_as_next_is_refused_on_main_and_not_on_a_branch() {
     let fixture = xtask::package_dir().join("fixtures/hooks/next");
@@ -860,7 +861,12 @@ fn a_revision_still_cited_as_next_is_refused_on_main_and_not_on_a_branch() {
             "{line}: {out}"
         );
     }
-    assert!(out.contains("crates/php_heap/src/trace.rs:2:"), "{out}");
+    for line in [2, 3] {
+        assert!(
+            out.contains(&format!("crates/php_heap/src/trace.rs:{line}:")),
+            "{line}: {out}"
+        );
+    }
     assert!(out.contains("is still NEXT"), "{out}");
     assert_eq!(scratch.calls("cargo"), Vec::<String>::new());
 
@@ -1136,6 +1142,43 @@ fn a_merge_that_leaves_a_region_unrendered_is_refused_until_committed_through_pr
     assert_eq!(scratch.git(&["rev-parse", "HEAD^2"], false), t9);
     let agents = scratch.git(&["show", "HEAD:AGENTS.md"], false);
     assert!(agents.ends_with("rendered\n"), "{agents}");
+}
+
+/// A merge `git merge` commits itself runs pre-merge-commit and not
+/// pre-commit: a branch whose work still cites a revision as `NEXT`, as
+/// `fixtures/hooks/next/cited.rs` does, is refused there too before
+/// `computed`, naming the line, and the merge stands uncommitted.
+#[test]
+fn a_merge_that_brings_a_revision_still_cited_as_next_onto_main_is_refused() {
+    let cited = xtask::package_dir().join("fixtures/hooks/next/cited.rs");
+    let scratch = scratch("merge-next", &Computed::Rendered);
+    scratch.git(&["checkout", "-q", "-B", "main"], false);
+    scratch.git(&["checkout", "-q", "-b", "t9"], false);
+    let file = "crates/php_heap/src/trace.rs";
+    write(&scratch.root, file, &fs::read_to_string(cited).unwrap());
+    scratch.git(&["add", "--", file], false);
+    scratch.git(&["commit", "-q", "-m", "the work of #9"], false);
+    scratch.git(&["checkout", "-q", "main"], false);
+    let before = scratch.head();
+    let (code, out) = scratch.run(
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "t9",
+            "-m",
+            "Merge t9: the work (#9)",
+        ],
+        true,
+    );
+    assert_ne!(code, 0, "{out}");
+    assert_eq!(scratch.head(), before, "the merge was not committed: {out}");
+    assert!(out.contains(&format!("{file}:2:")), "{out}");
+    assert!(
+        out.contains("pre-merge-commit: the revision cited above is still NEXT"),
+        "{out}"
+    );
+    assert_eq!(scratch.calls("computed"), Vec::<String>::new());
 }
 
 /// computed reads the working tree and the merge commits the index: a
