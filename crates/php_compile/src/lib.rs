@@ -351,8 +351,7 @@ impl std::fmt::Debug for CompileError {
 pub struct Refused {
     pub level: Level,
     /// php's text, a constant one borrowed where it is one, so a
-    /// refusal the compiler makes and drops, a fold that finds no
-    /// constant among them, allocates its box and no text.
+    /// refusal in the compiler's own constant words allocates no text.
     pub message: Cow<'static, str>,
     pub line: u32,
     pub raised: Vec<Diagnostic>,
