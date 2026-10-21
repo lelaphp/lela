@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "echo x > ~/.claude/projects/p/s/tool-results/t.txt", "description": "Write a session's tool result"}}

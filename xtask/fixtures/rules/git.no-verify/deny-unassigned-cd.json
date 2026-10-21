@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "cd \"$S/repo\" && git commit --no-verify -m msg", "description": "Commit with --no-verify past a cd permit cannot follow"}}
