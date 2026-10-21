@@ -60,7 +60,9 @@ pub(crate) struct Const;
 pub(crate) struct Tmp;
 
 /// `IS_VAR`: a temporary as `IS_TMP_VAR` is, which may hold a reference
-/// or an `IS_INDIRECT`; an inline path takes neither.
+/// or an `IS_INDIRECT`; an inline path takes neither as a value, and a
+/// property opcode's follows both to its receiver
+/// (`handlers::inline_receiver`).
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Var;
 

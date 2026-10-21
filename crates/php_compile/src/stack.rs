@@ -54,9 +54,9 @@ use crate::{CompileError, Refused};
 /// sized for the loop's own re-entry, whose level costs a multiple of
 /// php's (design §5.6, #3043), and a native's own recursion, which
 /// costs about what php's C costs, would otherwise go that multiple
-/// deeper than php before it is refused (#3142; the design's sentence for
-/// it is #3158's to settle). The loop's entry is
-/// held to the floor instead ([`entry_overflowed`](Self::entry_overflowed)),
+/// deeper than php before it is refused (#3142, ruled on #3158). The
+/// loop's entry is held to the floor instead
+/// ([`entry_overflowed`](Self::entry_overflowed)),
 /// and at each native's call back into PHP the limit moves to php's
 /// budget below the frame that called ([`reentered`](Self::reentered)),
 /// so the stack a callback recursion took above it is not charged to a
@@ -216,6 +216,21 @@ impl StackLimit {
     /// a native's own recursion inside the callback has what php's has
     /// there whatever the loop's re-entries above it took; otherwise it
     /// stands. What it was is handed back for [`left`](Self::left).
+    ///
+    /// A recursion that alternates between a native and its callback,
+    /// `serialize()` calling `__serialize` calling `serialize()`, meets
+    /// php's budget afresh below each re-entry, so it is refused only at
+    /// the floor, where php refuses it at a depth of 5,000: the engine
+    /// never refuses a recursion php serves, and this difference is a
+    /// by-design divergence (design §5.6, #3158).
+    ///
+    /// ```php
+    /// class S { function __construct(public $n) {} function __serialize(): array { return $this->n ? [serialize(new S($this->n - 1))] : []; } }
+    /// try { echo strlen(serialize(new S(5000))), "\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect capture
+    /// Maximum call stack size of 8339456 bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
+    /// ```
     #[inline]
     pub fn reentered(&mut self) -> Reentered {
         let Allowed::Detected { span } = self.allowed else {
