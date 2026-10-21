@@ -950,6 +950,25 @@ enum Walk {
 /// `mb_recursive_convert_variable` over a slot's value: a string
 /// converted, an array separated and walked, a reference's array
 /// separated in place, an object's properties written in place.
+///
+/// Each array's recursion mark is cleared on every way out, a refusal
+/// at the stack limit among them, as php's `GC_TRY_UNPROTECT_RECURSION`
+/// clears it before each `return true`, so the nest a refused walk
+/// stood in is walked whole by the next.
+///
+/// ```php
+/// $a = ["x"]; for ($i = 0; $i < 3000; $i++) { $a = [$a]; }
+/// $b = [$a];
+/// try { mb_convert_variables('UTF-8', 'UTF-8', $a); } catch (Error $e) { echo get_class($e), "\n"; }
+/// try { mb_convert_variables('UTF-8', 'UTF-8', $b); } catch (Error $e) { echo get_class($e), "\n"; }
+/// var_dump(mb_check_encoding($a, 'UTF-8'), count(mb_convert_encoding($b, 'UTF-8', 'UTF-8')));
+/// ```
+/// ```expect regime=small-stack
+/// Error
+/// Error
+/// bool(true)
+/// int(1)
+/// ```
 fn convert_value(
     req: &mut Request,
     value: &Value,
@@ -967,12 +986,13 @@ fn convert_value(
                 ValueRef::Array(array) if !array.is_recursive() => {
                     let original = array;
                     original.protect();
-                    let walked = match r.separate_array(req)? {
-                        Some(separated) => convert_array_in(req, separated, from, to)?,
-                        None => false,
+                    let walked = match r.separate_array(req) {
+                        Ok(Some(separated)) => convert_array_in(req, separated, from, to),
+                        Ok(None) => Ok(false),
+                        Err(thrown) => Err(thrown),
                     };
                     original.unprotect();
-                    Ok(if walked { Walk::Stopped } else { Walk::Kept })
+                    Ok(if walked? { Walk::Stopped } else { Walk::Kept })
                 }
                 ValueRef::Array(_) => Ok(Walk::Stopped),
                 _ => convert_value(req, &inner, from, to),
@@ -988,12 +1008,19 @@ fn convert_value(
                 return Ok(Walk::Stopped);
             }
             original.protect();
-            let separated = original.copy(req)?;
+            let separated = match original.copy(req) {
+                Ok(separated) => separated,
+                Err(thrown) => {
+                    original.unprotect();
+                    return Err(thrown);
+                }
+            };
             // The copy has the one owner, so the walk's writes never
             // separate it and the view walked is the array it owns.
             let stopped = match convert_array_in(req, *separated, from, to) {
                 Ok(stopped) => stopped,
                 Err(thrown) => {
+                    original.unprotect();
                     separated.give_up(req);
                     return Err(thrown);
                 }
