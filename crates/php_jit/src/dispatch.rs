@@ -262,10 +262,13 @@ fn returned(
     decided: Visited,
     shared: &Shared,
 ) -> Flow {
+    // The epoch the landing's trace is taken from, which holds the
+    // returning frame's op array for the step.
+    let epoch = table::holding(req, &shared.policy, &shared.perf);
     let stepped = match held.safepoint_at(at) {
         Some(stands) => {
             tier::stand(req, frame, stands);
-            tier::step(req, frame)
+            tier::step_held(req, frame, held, &epoch)
         }
         None => Err(Fatal::error(
             "InternalError: a return site whose number names no RETURN",
@@ -290,7 +293,9 @@ fn returned(
     };
     let flow = match decided {
         Visited::Continue => Flow::Continue,
-        Visited::Enter(id) => run(req, caller, id, shared),
+        Visited::Enter(id) => {
+            run_held(req, caller, (id, At::First), shared, &epoch).unwrap_or(Flow::Continue)
+        }
         Visited::Hot(claim) => hot(req, caller, claim, shared),
     };
     match flow {
@@ -433,7 +438,19 @@ fn run_at(
     at: At,
 ) -> Option<Flow> {
     let epoch = table::holding(req, &shared.policy, &shared.perf);
-    let Some(table) = table::of_epoch(&epoch) else {
+    run_held(req, frame, (id, at), shared, &epoch)
+}
+
+/// [`run_at`] out of `epoch`, a hold its caller took on the epoch the
+/// request holds.
+fn run_held(
+    req: &mut Request,
+    frame: FrameRef,
+    (id, at): (TraceId, At),
+    shared: &Shared,
+    epoch: &Epoch,
+) -> Option<Flow> {
+    let Some(table) = table::of_epoch(epoch) else {
         return Some(Flow::Continue);
     };
     let Some(trace) = table.get(id) else {
@@ -443,11 +460,11 @@ fn run_at(
     if at == At::Body && (trace.body.is_none() || trace.body != stands) {
         return None;
     }
-    let entered = enter::enter(req, frame, (&epoch, trace), at);
+    let entered = enter::enter(req, frame, (epoch, trace), at);
     if matches!(entered, Ok(Left::Declined)) {
         return None;
     }
-    Some(followed(req, shared, (&epoch, table), trace, entered))
+    Some(followed(req, shared, (epoch, table), trace, entered))
 }
 
 /// What `trace` left through, `entered`, followed from trace to trace
@@ -608,12 +625,16 @@ fn visit_landing(
     frame: FrameRef,
     left: Option<TraceId>,
 ) -> Visited {
-    if req.limits().interrupt().raised().load(Ordering::Relaxed)
-        || req.state::<JitRequest>().recording
-    {
+    if req.limits().interrupt().raised().load(Ordering::Relaxed) {
         return Visited::Continue;
     }
-    let claims = !quiet(req, None);
+    let claims = {
+        let state = req.state::<JitRequest>();
+        if state.recording {
+            return Visited::Continue;
+        }
+        !quieted(state, None)
+    };
     let req: &Request = req;
     let Some(at) = tier::frame(req, frame).map(|view| view.opline()) else {
         return Visited::Continue;
@@ -624,7 +645,6 @@ fn visit_landing(
     {
         return Visited::Continue;
     }
-    let func = tier::func(req, frame);
     let holder = || {
         let table = table::of(req, &shared.policy, &shared.perf)?;
         if table.stopped() {
@@ -632,7 +652,7 @@ fn visit_landing(
         }
         Some(Holder::Landing {
             epoch: tier::epoch(req),
-            func: func?,
+            func: tier::func(req, frame)?,
             at,
         })
     };
