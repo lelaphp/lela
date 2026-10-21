@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use common::{Ending, Server, eventually, read_until_closed};
+use common::{Ending, Request, Server, eventually, read_until_closed};
 
 /// Long enough for any answer on a loaded machine; a server that closes
 /// ends the wait at once.
@@ -250,10 +250,10 @@ fn a_head_begun_with_the_request_before_it_is_timed_by_the_header_timeout() {
 /// keep-alive limit still serves its next request, the two clocks apart.
 #[test]
 fn an_idle_connection_closes_at_the_keep_alive_limit_and_not_the_header_timeout() {
-    let request = b"GET /echo.php HTTP/1.1\r\nHost: a\r\n\r\n";
+    let request = Request::get("/echo.php").bytes();
     let server = server(&["--limit", "keep-alive-idle=500ms"]);
     let mut stream = server.connect();
-    stream.write_all(request).unwrap_or_else(|e| panic!("{e}"));
+    stream.write_all(&request).unwrap_or_else(|e| panic!("{e}"));
     let exchange = read_until_closed(&mut stream, WAIT);
     assert_eq!(exchange.codes(), [200], "{}", exchange.text());
     assert_eq!(exchange.ending, Ending::Closed, "{}", exchange.text());
@@ -265,12 +265,12 @@ fn an_idle_connection_closes_at_the_keep_alive_limit_and_not_the_header_timeout(
         "header-timeout=300ms",
     ]);
     let mut stream = server.connect();
-    stream.write_all(request).unwrap_or_else(|e| panic!("{e}"));
+    stream.write_all(&request).unwrap_or_else(|e| panic!("{e}"));
     let first = read_until_closed(&mut stream, Duration::from_millis(1200));
     assert_eq!(first.codes(), [200], "{}", first.text());
     assert_eq!(first.ending, Ending::Open);
     stream
-        .write_all(b"GET /echo.php?again HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+        .write_all(&Request::get("/echo.php?again").close().bytes())
         .unwrap_or_else(|e| panic!("{e}"));
     let second = read_until_closed(&mut stream, WAIT);
     assert_eq!(second.codes(), [200], "{}", second.text());
@@ -293,10 +293,7 @@ fn a_body_slower_than_the_minimum_rate_is_cut_and_frees_its_thread() {
     let exchange = read_until_closed(&mut slow, WAIT);
     assert_eq!(exchange.codes(), [408], "{}", exchange.text());
     assert_eq!(exchange.ending, Ending::Closed);
-    let next = server.exchange(
-        b"GET /echo.php?next HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n",
-        WAIT,
-    );
+    let next = server.exchange(&Request::get("/echo.php?next").close().bytes(), WAIT);
     assert_eq!(next.codes(), [200], "{}", next.text());
 }
 
@@ -307,12 +304,9 @@ fn a_body_slower_than_the_minimum_rate_is_cut_and_frees_its_thread() {
 #[test]
 fn a_reader_slower_than_the_minimum_rate_is_cut_and_frees_its_thread() {
     let server = server(&["--threads", "1", "--limit", "response-data-rate=4000000,1s"]);
-    let mut stalled = server.connect();
-    stalled
-        .write_all(b"GET /big.php HTTP/1.1\r\nHost: a\r\n\r\n")
-        .unwrap_or_else(|e| panic!("{e}"));
+    let stalled = server.send(&Request::get("/big.php"));
     let mut next = server.connect();
-    next.write_all(b"GET /echo.php?next HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+    next.write_all(&Request::get("/echo.php?next").close().bytes())
         .unwrap_or_else(|e| panic!("{e}"));
     let exchange = read_until_closed(&mut next, Duration::from_secs(40));
     assert_eq!(exchange.codes(), [200], "{}", exchange.text());
@@ -378,10 +372,7 @@ fn head_sends_no_content_and_the_program_writes_on() {
     let server = server(&[]);
     let log = limits_root().join("head.log");
     std::fs::remove_file(&log).ok();
-    let mut stream = server.connect();
-    stream
-        .write_all(b"HEAD /head.php HTTP/1.1\r\nHost: a\r\n\r\n")
-        .unwrap_or_else(|e| panic!("{e}"));
+    let mut stream = server.send(&Request::new("HEAD", "/head.php"));
     let head = read_until_closed(&mut stream, Duration::from_millis(1500));
     assert_eq!(head.codes(), [200], "{}", head.text());
     assert!(head.text().ends_with("\r\n\r\n"), "{}", head.text());
@@ -392,7 +383,7 @@ fn head_sends_no_content_and_the_program_writes_on() {
         "written"
     );
     stream
-        .write_all(b"GET /echo.php?after HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+        .write_all(&Request::get("/echo.php?after").close().bytes())
         .unwrap_or_else(|e| panic!("{e}"));
     let after = read_until_closed(&mut stream, WAIT);
     assert_eq!(after.codes(), [200], "{}", after.text());
@@ -470,10 +461,7 @@ fn date_is_on_every_response() {
 #[test]
 fn a_response_without_a_length_is_chunked_on_1_1_and_close_delimited_on_1_0() {
     let server = server(&[]);
-    let exchange = server.exchange(
-        b"GET /echo.php HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n",
-        WAIT,
-    );
+    let exchange = server.exchange(&Request::get("/echo.php").close().bytes(), WAIT);
     let response = exchange.response();
     assert_eq!(response.header("Transfer-Encoding"), Some("chunked"));
     assert_eq!(response.body, b"served /echo.php 0\n");
@@ -486,10 +474,7 @@ fn a_response_without_a_length_is_chunked_on_1_1_and_close_delimited_on_1_0() {
     assert_eq!(response.body, b"served /echo.php 0\n");
     assert_eq!(exchange.ending, Ending::Closed);
 
-    let exchange = server.exchange(
-        b"GET /sized.php HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n",
-        WAIT,
-    );
+    let exchange = server.exchange(&Request::get("/sized.php").close().bytes(), WAIT);
     let response = exchange.response();
     assert_eq!(response.header("Content-Length"), Some("5"));
     assert_eq!(response.header("Transfer-Encoding"), None);

@@ -11,10 +11,9 @@
 
 mod common;
 
-use std::io::Write;
 use std::time::Duration;
 
-use common::{Ending, Server, read_until_closed};
+use common::{Ending, Request, Server, read_until_closed};
 
 /// Long enough for any answer on a loaded machine.
 const WAIT: Duration = Duration::from_secs(30);
@@ -31,15 +30,7 @@ fn connections_past_the_cap_wait_in_the_listen_queue_and_are_served_in_turn() {
     let server = Server::with_args(&root, &["--threads", "2", "--limit", "connections=1"]);
     let held = server.connect();
     let mut waiting: Vec<_> = (1..=3)
-        .map(|n| {
-            let mut stream = server.connect();
-            write!(
-                stream,
-                "GET /echo.php?n={n} HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"
-            )
-            .unwrap_or_else(|e| panic!("{e}"));
-            stream
-        })
+        .map(|n| server.send(&Request::get(&format!("/echo.php?n={n}")).close()))
         .collect();
     for stream in &mut waiting {
         let early = read_until_closed(stream, Duration::from_millis(500));
@@ -76,12 +67,7 @@ fn requests_beyond_the_pool_wait_in_the_queue_and_are_served_in_turn() {
     let server = Server::with_args(&root, &["--threads", "1", "--queue", "1"]);
     let mut streams: Vec<_> = (1..=4)
         .map(|n| {
-            let mut stream = server.connect();
-            write!(
-                stream,
-                "GET /slow.php?n={n} HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"
-            )
-            .unwrap_or_else(|e| panic!("{e}"));
+            let stream = server.send(&Request::get(&format!("/slow.php?n={n}")).close());
             // Each is in line before the next is sent, so their order is
             // the one they came in.
             std::thread::sleep(Duration::from_millis(50));
