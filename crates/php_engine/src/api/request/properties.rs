@@ -1098,7 +1098,7 @@ impl Request {
 
     /// `zend_hash_find(&ce->properties_info, name)`, skipped where the
     /// table is empty (`zend_hash_num_elements(&ce->properties_info) ==
-    /// 0`, `Z/Zend/zend_object_handlers.c:362`): the one find that says
+    /// 0`, `Z/Zend/zend_object_handlers.c:376`): the one find that says
     /// which class of the chain declares a name, instance or `static`,
     /// private or not, or that none does and the name is a dynamic
     /// property's, with no class's declarations walked.
@@ -3084,7 +3084,7 @@ impl Request {
     }
 
     /// `zend_std_write_property`'s dynamic arm up to `found`
-    /// (`Z/Zend/zend_object_handlers.c:1124-1135`): the object's dynamic
+    /// (`Z/Zend/zend_object_handlers.c:1164-1175`): the object's dynamic
     /// table, separated first where a clone or a cast shares it
     /// (`zend_array_dup`), so a reference the other holder's copy owns
     /// alone is its value here and not a cell both write through, and
@@ -4017,12 +4017,24 @@ impl Request {
     ) -> Result<Option<php_heap::ZvalRef>, Thrown> {
         let o = object.heap();
         let key = php_heap::Key::Str(name.heap());
-        let held = o.properties().is_some_and(|table| table.contains(key));
-        if !held && let Err(thrown) = self.dynamic_property_creation(object, name.as_bytes()) {
+        // `zend_hash_find(zobj->properties, name)`: a name the table holds
+        // is its bucket, found once, and raises nothing.
+        match self.dynamic_place(o, key) {
+            Ok(Some(place)) => {
+                self.release(Value::string(name));
+                return Ok(Some(place));
+            }
+            Ok(None) => {}
+            Err(thrown) => {
+                self.release(Value::string(name));
+                return Err(thrown);
+            }
+        }
+        if let Err(thrown) = self.dynamic_property_creation(object, name.as_bytes()) {
             self.release(Value::string(name));
             return Err(thrown);
         }
-        if !held && read == PropertyRead::Warning {
+        if read == PropertyRead::Warning {
             let class = self.symbols().class_name(object.class());
             let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
             crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
