@@ -209,3 +209,76 @@ fn base64_decode_strict(input: &[u8]) -> Option<Vec<u8>> {
     }
     Some(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Meta, MetaValue, parse};
+
+    /// The meta data as `name=value` in order, which `MetaValue` cannot
+    /// show itself.
+    fn shown(meta: &Meta) -> String {
+        let pairs: Vec<String> = meta
+            .iter()
+            .map(|(name, value)| {
+                let value = match value {
+                    MetaValue::Bool(flag) => flag.to_string(),
+                    MetaValue::Int(number) => number.to_string(),
+                    MetaValue::Str(text) => String::from_utf8_lossy(text).into_owned(),
+                    MetaValue::Value(_) => String::from("(a request value)"),
+                };
+                format!("{}={value}", String::from_utf8_lossy(name))
+            })
+            .collect();
+        pairs.join(" ")
+    }
+
+    #[test]
+    fn the_part_before_the_comma_is_read_as_php_reads_it() {
+        type Parsed<'a> = Result<(&'a str, bool, &'a [u8]), &'a str>;
+        let table: &[(&[u8], Parsed<'_>)] = &[
+            (b",A%20brief", Ok(("base64=false", false, b"A%20brief"))),
+            (b",a,b", Ok(("base64=false", false, b"a,b"))),
+            (
+                b"text/plain,x",
+                Ok(("mediatype=text/plain base64=false", false, b"x")),
+            ),
+            (b"/,x", Ok(("mediatype=/ base64=false", false, b"x"))),
+            (b";base64,SGk=", Ok(("base64=true", true, b"SGk="))),
+            (
+                b"text/plain;charset=utf-8;base64,SGVsbG8=",
+                Ok((
+                    "mediatype=text/plain charset=utf-8 base64=true",
+                    true,
+                    b"SGVsbG8=",
+                )),
+            ),
+            (
+                b"text/plain;a=1;b=3;a=2,z",
+                Ok(("mediatype=text/plain a=2 b=3 base64=false", false, b"z")),
+            ),
+            (
+                b"text/plain;mediatype=x,z",
+                Ok(("mediatype=text/plain base64=false", false, b"z")),
+            ),
+            (
+                b"text/plain;a=;b=c=d,z",
+                Ok(("mediatype=text/plain a= b=c=d base64=false", false, b"z")),
+            ),
+            (b"", Err("no comma in URL")),
+            (b"text/plain;a=b;c", Err("no comma in URL")),
+            (b"foo,", Err("illegal media type")),
+            (b";a=b,x", Err("illegal media type")),
+            (b";base64;a=b,x", Err("illegal media type")),
+            (b"text;a=b/c,x", Err("illegal media type")),
+            (b"text/plain;bad,", Err("illegal parameter")),
+            (b"text/plain;a=b;c,", Err("illegal parameter")),
+            (b"text/plain;base64x,", Err("illegal parameter")),
+            (b"text/plain;base64;a=b,", Err("illegal parameter")),
+        ];
+        for (path, expected) in table {
+            let parsed = parse(path).map(|(meta, base64, data)| (shown(&meta), base64, data));
+            let expected = expected.map(|(meta, base64, data)| (meta.to_owned(), base64, data));
+            assert_eq!(parsed, expected, "{}", String::from_utf8_lossy(path));
+        }
+    }
+}
