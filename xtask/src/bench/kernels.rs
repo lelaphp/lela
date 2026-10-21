@@ -188,12 +188,8 @@ pub(crate) fn oracle(root: &Path) -> [Declared; 2] {
 /// (`jit-design.md` §4.7); its traces compile on the worker thread, as
 /// `jit.compile` asks by default.
 pub(crate) fn compiled(root: &Path) -> [Declared; 2] {
-    let engine = |root: &Path, _: &Pin| engine(root, true).map(Ok);
-    tracing(
-        root,
-        ("engine-jit", "the engine built as jit-feature"),
-        engine,
-    )
+    let bar = ("engine-jit", "the engine built as jit-feature");
+    tracing(root, bar, |root, _| engine(root, true).map(Ok))
 }
 
 /// G1's bound (design §9.2): the tier's door may cost the build without
@@ -253,30 +249,11 @@ mod tests {
     #[test]
     fn each_tier_is_a_series_beside_its_control_and_the_door_a_bound() {
         let root = Path::new(".");
-        let bars =
-            [oracle(root), compiled(root), door(root)].map(|bars| bars.map(|b| (b.id, b.held)));
-        let named = |id: &str, held| (id.to_owned(), held);
-        assert_eq!(
-            bars[0],
-            [
-                named("oracle-jit", Held::Series),
-                named("oracle-jit-aa", Held::Control)
-            ]
-        );
-        assert_eq!(
-            bars[1],
-            [
-                named("engine-jit", Held::Series),
-                named("engine-jit-aa", Held::Control)
-            ]
-        );
-        assert_eq!(
-            bars[2],
-            [
-                named("g1", Held::Bound(DOOR)),
-                named("g1-aa", Held::Control)
-            ]
-        );
+        let bars = [oracle(root), compiled(root), door(root)].map(|b| b.map(|b| (b.id, b.held)));
+        let pair = |id: &str, held| [(id.to_owned(), held), (format!("{id}-aa"), Held::Control)];
+        let series = |id| pair(id, Held::Series);
+        let door = pair("g1", Held::Bound(DOOR));
+        assert_eq!(bars, [series("oracle-jit"), series("engine-jit"), door]);
     }
 
     /// Each program is committed where the protocol keeps its workloads
