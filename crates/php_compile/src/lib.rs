@@ -144,10 +144,11 @@ pub struct Options<'a> {
     /// `CG(rtd_key_counter)` as the source starts compiling: how many
     /// runtime definition keys and anonymous class names were made before
     /// it, which the `$` of each one this source makes counts on from. A
-    /// file compiled for the cache starts from none; an `eval`'s string
-    /// continues the request's count, so two `eval`s of one string
-    /// declare two anonymous classes, as php's one `CG(rtd_key_counter)`
-    /// makes them.
+    /// file compiled for no request starts from none; a source compiled
+    /// for a request, an `eval`'s string or a file opcache's miss
+    /// compiles, continues the request's count, so two `eval`s of one
+    /// string declare two anonymous classes, as php's one
+    /// `CG(rtd_key_counter)` makes them.
     pub keys_before: u32,
     /// `CG(multibyte)`, `zend.multibyte` as it stands while the file
     /// compiles, with the encoding functions the engine bound and what
@@ -167,6 +168,13 @@ pub struct Options<'a> {
     /// a string of its own, `-r`'s code, is compiled without it, as
     /// `zend_eval_stringl` compiles under `ZEND_COMPILE_DEFAULT_FOR_EVAL`.
     pub extended_info: bool,
+    /// `zend_op_array_extension_handles`: the runtime cache slots every
+    /// op array keeps for the extensions that took one at startup
+    /// (`zend_get_op_array_extension_handle`), which `init_op_array`
+    /// starts `cache_size` at and each slot the compiler allocates
+    /// follows (`Z/Zend/zend_opcode.c:95`); the tier takes one as
+    /// it starts. None for an engine where nothing took one.
+    pub op_array_extensions: u32,
 }
 
 impl Default for Options<'_> {
@@ -190,6 +198,7 @@ impl Default for Options<'_> {
             multibyte: None,
             hooked: Hooked::NONE,
             extended_info: false,
+            op_array_extensions: 0,
         }
     }
 }

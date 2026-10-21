@@ -181,6 +181,17 @@ impl ObservedOpcodes {
     pub(crate) fn declares_any(&self) -> bool {
         !self.any.is_empty()
     }
+
+    /// Whether an extension declared an opcode other than
+    /// `ZEND_BEGIN_SILENCE` and `ZEND_END_SILENCE`, which
+    /// `zend_jit_check_support` refuses the tier over
+    /// (`Z/ext/opcache/jit/zend_jit.c:3743-3756`).
+    pub(crate) fn refuses_tier(&self) -> bool {
+        (0..=u8::MAX)
+            .filter_map(Opcode::from_u8)
+            .filter(|opcode| !matches!(opcode, Opcode::BeginSilence | Opcode::EndSilence))
+            .any(|opcode| self.any.contains(opcode))
+    }
 }
 
 /// Whether a loop tells the observers of the declared opcodes, a type

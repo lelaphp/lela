@@ -46,6 +46,7 @@ pub(crate) fn post_startup(
         memory: u64::try_from(consumption(req)).unwrap_or(0),
         max_wasted: u32::try_from(atoi(value(req, "opcache.max_wasted_percentage"))).unwrap_or(5),
         keys: u64::try_from(max_cached_keys(req)).unwrap_or(u64::MAX),
+        tier: crate::ini::jit_starts(req),
     };
     req.code_mut().unit_cache().bound(budget);
     let file_cache_only = flag(req, "opcache.file_cache_only");

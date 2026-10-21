@@ -19,6 +19,7 @@ use super::{AccelServed, Request, Unresolved};
 use crate::api::abi::{Admission, FileCache, Lookup, Validation};
 use crate::api::raising::Thrown;
 use crate::api::values::{Emalloc, PhpString};
+use crate::engine::ForRequest;
 use crate::exec::IncludeKind;
 use crate::supplied::chain::FileArgs;
 use crate::supplied::tell;
@@ -156,6 +157,11 @@ pub struct CacheBudget {
     /// `ZCSG(hash).max_num_entries`: how many names files are held
     /// under.
     pub keys: u64,
+    /// Whether the tier started in the segment (`zend_jit_startup`, in
+    /// `accel_post_startup` once the segment is laid down), which takes
+    /// the `zend_get_op_array_extension_handle` every op array compiled
+    /// after it keeps a runtime cache slot for.
+    pub tier: bool,
 }
 
 /// What [`UnitCache::reset`] did.
@@ -445,6 +451,21 @@ impl Request {
     /// int(1)
     /// int(1)
     /// ```
+    ///
+    /// A compile that runs makes its runtime definition keys and
+    /// anonymous class names on from the request's `CG(rtd_key_counter)`
+    /// and leaves them counted there, as opcache's miss compiles with
+    /// what the request made before it; a hit compiles nothing and counts nothing,
+    /// its unit keeping the names its miss persisted:
+    ///
+    /// ```php
+    /// $inc = __DIR__ . '/anonymous.inc'; file_put_contents($inc, "<?php\nreturn new class {};\n"); touch($inc, time() - 10);
+    /// $n = fn ($o) => strstr(get_class($o), '$');
+    /// echo $n(eval('return new class {};')), ' ', $n(include $inc), ' ', $n(eval('return new class {};')), ' ', $n(include $inc), ' ', $n(eval('return new class {};')), "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// $0 $1 $2 $1 $3
+    /// ```
     pub(crate) fn cached_source(&mut self, args: FileArgs<'_>) -> Cached {
         let FileArgs {
             path,
@@ -511,34 +532,37 @@ impl Request {
         };
         let stack = self.stack_limit();
         let bound = crate::multibyte::bound(self, shared.compile_multibyte());
-        let multibyte = bound.as_ref().map(crate::multibyte::Bound::settings);
         let holds = |name: &[u8]| self.class_named(Bare::resolved(name)).is_some();
-        let request_classes = php_compile::RequestClasses::new(&holds);
+        let request = ForRequest {
+            classes: php_compile::RequestClasses::new(&holds),
+            multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
+            keys_before: self.keys_made(),
+        };
         let (arena, cwd) = (Arc::clone(&self.arena), &self.cwd);
-        // What the compile read and the most `CG(loop_var_stack)` held.
+        // What a compile that ran read and made, none for a hit.
         let scanned = std::cell::Cell::new(None);
         let (compiled, filed, early) = shared.units.file(
             &arena.files,
             asked,
             |source| {
-                let compiled =
-                    shared.compile_file(source, path, cwd, stack, request_classes, multibyte);
-                let loops = compiled.as_ref().map_or(0, |unit| unit.loop_vars);
-                scanned.set(Some((source.len(), loops)));
+                let compiled = shared.compile_file(source, path, cwd, stack, request);
+                scanned.set(Some(Scanned::of(source, &compiled)));
                 compiled
             },
             |body| shared.decode_kept(body),
             |unit| shared.publish_compiled(unit),
             |unit| self.publish_unit(unit),
         );
-        self.note_loop_vars(scanned.get().map_or(0, |(_, loops)| loops));
+        let scanned = scanned.get();
+        self.note_loop_vars(scanned.map_or(0, |scanned| scanned.loops));
         let cached = crate::unit_cache::served(compiled, |unit| self.take_unit(unit));
+        self.count_keys_made(keys_counted(scanned, validation, &cached));
         // The primary file compiled through the host's handle, which
         // `zend_stream_fixup` reads it into and `CG(open_files)` lists.
         if handle == HandlePath::Host
-            && let Some((len, _)) = scanned.get()
+            && let Some(scanned) = scanned
         {
-            self.fill_primary_handle(len).ok();
+            self.fill_primary_handle(scanned.len).ok();
         }
         if matches!(cached, Some(Ok(_))) {
             self.tell_compiled(&full, validation, filed);
@@ -972,6 +996,44 @@ fn disk<'a>(file_cache: &'a FileCache, build: &'a [u8; crate::unit_cache::BUILD]
         directory: &file_cache.directory,
         read_only: file_cache.read_only,
         build,
+    }
+}
+
+/// What a compile [`Request::cached_source`] ran read and made: the
+/// source's length, which the primary file's `zend_stream_fixup` reads
+/// it into, the most `CG(loop_var_stack)` held, and the runtime
+/// definition keys an accepted unit made, which opcache's miss leaves
+/// counted in `CG(rtd_key_counter)`. A refusal's keys are counted as it
+/// is raised ([`Request::declare_refused`]), so none are here.
+#[derive(Clone, Copy)]
+struct Scanned {
+    len: usize,
+    loops: u32,
+    keys: u32,
+}
+
+/// The runtime definition keys the request counts for the file served
+/// as `cached` under `validation`, where `scanned` says what a compile
+/// that ran made: the keys an accepted unit made, none for a refusal,
+/// whose keys are counted as it is raised ([`Request::declare_refused`]),
+/// and a hit's ([`crate::unit_cache::hit_keys`]).
+fn keys_counted(scanned: Option<Scanned>, validation: Validation, cached: &Cached) -> u32 {
+    match (scanned, cached) {
+        (Some(scanned), _) => scanned.keys,
+        (None, Some(Ok(unit))) => crate::unit_cache::hit_keys(validation, unit),
+        (None, _) => 0,
+    }
+}
+
+impl Scanned {
+    /// What compiling `source` to `compiled` read and made.
+    fn of(source: &[u8], compiled: &Result<php_unit::Unit, php_compile::CompileError>) -> Scanned {
+        let unit = compiled.as_ref().ok();
+        Scanned {
+            len: source.len(),
+            loops: unit.map_or(0, |unit| unit.loop_vars),
+            keys: unit.map_or(0, crate::unit_cache::keys_of),
+        }
     }
 }
 

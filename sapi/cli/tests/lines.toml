@@ -601,3 +601,22 @@ stop = "SIGINT"
 http = "GET /run.php%00.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
 [[line.serve.request]]
 http = "GET /a.txt%00.php HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+
+# Under opcache with its tier set up, `opcache.jit=off` (#3075), every op
+# array's runtime cache keeps a slot for `zend_jit_startup`'s op array
+# extension handle, so the program's own cache, which
+# `i_init_code_execute_data` `emalloc`s and its frame frees before the
+# shutdown functions, is one slot larger than without the tier: a closure
+# handed to `register_shutdown_function` and an anonymous class move it into
+# the next bin, a stored closure and a plain class do not. Each first line
+# reads php's.
+[[line]]
+name = "a-program-s-runtime-cache-keeps-the-tier-s-slot"
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=0", "-d", "opcache.jit=off", "shutdown.php"]
+files = { "shutdown.php" = '<?php register_shutdown_function(function () { echo "s\n"; }); echo memory_get_usage(), "\n";', "anonymous.php" = '<?php $o = new class { function __destruct() { } }; echo memory_get_usage(), "\n";', "stored.php" = '<?php $f = function () { }; echo memory_get_usage(), "\n";', "plain.php" = '<?php class K {} echo memory_get_usage(), "\n";' }
+[[line.then]]
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=0", "-d", "opcache.jit=off", "anonymous.php"]
+[[line.then]]
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=0", "-d", "opcache.jit=off", "stored.php"]
+[[line.then]]
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=0", "-d", "opcache.jit=off", "plain.php"]
