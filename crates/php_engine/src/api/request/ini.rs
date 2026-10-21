@@ -1143,8 +1143,10 @@ impl Request {
     /// 320
     /// ```
     ///
-    /// The key is the entry's name, `ini_entry->name`, the engine's
-    /// permanent string, so the table holds no string of the request's.
+    /// The key is the entry's name, `ini_entry->name`, the permanent
+    /// string startup interned for it, so the table holds no string of
+    /// the request's; a name startup's table refused is left to the
+    /// request ([`Request::kept_string`]), whose heap then holds it.
     fn ini_modified(&mut self, name: &[u8]) {
         let table = if let Some(table) = self.ini.table {
             table
@@ -1157,16 +1159,14 @@ impl Request {
             self.ini.table = Some(table);
             table
         };
-        let key = match self.shared.permanent(name) {
-            Some(key) => key,
-            None => match self.kept_string(name) {
-                Ok(key) => key.heap(),
-                Err(_) => return,
-            },
+        let Ok(key) = self.kept_string(name) else {
+            return;
         };
-        let added = self
-            .heap
-            .array_add_new(table, php_heap::Key::Str(key), php_heap::Zval::null());
+        let added = self.heap.array_add_new(
+            table,
+            php_heap::Key::Str(key.heap()),
+            php_heap::Zval::null(),
+        );
         self.fatal_of(added).ok();
     }
 
