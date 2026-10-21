@@ -3,13 +3,14 @@
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
 
-use php_ext::test::{Capture, Engine, LeakSensor};
+mod support;
+
+use php_ext::test::{Capture, Engine};
 
 /// What one request of an armed engine with this extension alone wrote.
 fn armed(source: &str) -> String {
     let engine = Engine::builder()
         .extensions(&[php_ext_session::extension()])
-        .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(source, Capture::default());
     served.stdout_text()
@@ -37,15 +38,7 @@ $m = memory_get_usage(); session_set_cookie_params(['path' => 123456, 'PATH' => 
 /// `php_serialize` handlers alike (#2235).
 #[test]
 fn a_read_that_throws_in_a_session_decode_makes_no_delayed_call() {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_uri::extension(),
-            php_ext_standard::extension(),
-            php_ext_session::extension(),
-        ])
-        .sense_leaks(LeakSensor::Armed)
-        .build();
+    let engine = support::engine();
     let served = engine.serve_capture(
         r#"<?php
 class A { function __wakeup() { echo "wakeup A\n"; throw new Exception("wake"); } }
@@ -68,15 +61,7 @@ ob_end_flush();
 /// request with no block held.
 #[test]
 fn a_delayed_throw_after_a_good_php_serialize_read_binds_the_value() {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_uri::extension(),
-            php_ext_standard::extension(),
-            php_ext_session::extension(),
-        ])
-        .sense_leaks(LeakSensor::Armed)
-        .build();
+    let engine = support::engine();
     let served = engine.serve_capture(
         r#"<?php
 class A { function __wakeup() { echo "wakeup A\n"; throw new Exception("wake"); } }

@@ -15,6 +15,8 @@
     reason = "a test starts its own threads (seams.toml rule fork.threads)"
 )]
 
+mod support;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -63,13 +65,7 @@ fn a_child_inherits_the_process_s_directory_it_cannot_enter_and_is_moved_into_an
     let (locked, other) = (base.join("locked"), base.join("other"));
     fs::create_dir(&locked).expect("the tree takes the locked directory");
     fs::create_dir(&other).expect("the tree takes the other directory");
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_uri::extension(),
-            php_ext_standard::extension(),
-        ])
-        .build();
+    let engine = support::engine();
     let before = std::env::current_dir();
     // The process stands in `locked`, which its own user may then not
     // enter, read or search; the request stands there too.
