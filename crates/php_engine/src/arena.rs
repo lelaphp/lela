@@ -55,14 +55,19 @@ use php_link::LinkedClass;
 /// The rows of one chunk, `1 << CHUNK_BITS` of them: a number's low
 /// bits are its slot in the chunk, its high bits the chunk's place in
 /// the directory.
-const CHUNK_BITS: u32 = 8;
+const CHUNK_BITS: u32 = 9;
 const CHUNK: usize = 1 << CHUNK_BITS;
 
 /// The most chunks a column's directory holds, so the most rows it
-/// holds is `CHUNKS * CHUNK`, two million: past the classes, methods and
-/// op arrays any program publishes into one epoch, and a column whose
-/// numbers could name more is held to it ([`Column::below`]).
-const CHUNKS: usize = 1 << 13;
+/// holds is `CHUNKS * CHUNK`, eight million: past the classes and
+/// methods any program publishes into one epoch, and past the map
+/// pointers the engine numbers op arrays by (`tier::published::Funcs`),
+/// which every publication of an epoch advances, a unit published again
+/// after its file changed and a trait's copied method among them; a
+/// column whose numbers could name more is held to it
+/// ([`Column::below`]). The directory of such a column is laid whole
+/// where the column is made, 16 KiB a thousand chunks.
+const CHUNKS: usize = 1 << 14;
 
 /// One chunk of a column, laid down on first use and never moved: a
 /// fixed-length array, so a number's slot in it is its low bits with no
@@ -117,9 +122,12 @@ impl<T> Column<T> {
         let chunk = if let Some(chunk) = laid.get() {
             chunk
         } else {
-            // Made before it is offered, so a chunk that cannot be made
-            // fails this fill alone; a thread that laid the chunk first
-            // keeps its own, and this one is dropped.
+            // Made through a `Vec` so the chunk is laid on the heap and
+            // never built on the stack; its length is `CHUNK`, so the
+            // conversion holds, and the row is handed back rather than a
+            // panic where it would not. Made before it is offered: a
+            // thread that laid the chunk first keeps its own, and this
+            // one is dropped.
             let slots: Vec<OnceLock<T>> = (0..CHUNK).map(|_| OnceLock::new()).collect();
             let Ok(fresh) = Chunk::try_from(slots) else {
                 return Err(row);
