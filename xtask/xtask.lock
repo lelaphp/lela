@@ -355,6 +355,9 @@ ticket::ready_of
 ticket::run
 ticket::stranded
 ticket::ticket_of
+trace_dump::Ask
+trace_dump::kept
+trace_dump::run
 track::Ticket
 track::Ticket::new
 track::Ticket::number

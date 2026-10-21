@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=31196e0a47517785400f5d7dcebffcc7c55f097d323167fb0db3266f88299022 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=031b730cda5465b410785f304ab0d2fb284d797805b0d8ae207843540d6abf5a out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -130,9 +130,9 @@ third-engine-design.md
 | sapi | sapi.lock | 58 |  |
 | tier | tier.lock | 118 |  |
 | layer | layer.lock | 38 |  |
-| harness | xtask.lock | 410 |  |
+| harness | xtask.lock | 413 |  |
 
-<!-- /computed in=8d156b1c3b5dff9241df28721028c128da5ccdf5438bc3dfa2ec6347e71f7b8e out=c88f632af8408602f30777f571bb3238c2e09dd51fcae76289c1103e8782cb67 -->
+<!-- /computed in=cbe7047f1e162e698b6194b6ebf4d71ef180b7ed21eb94c54f9345282a155c60 out=e4e55913a7323a383ce86da78d090e5fa12d2c0bfec09185a980f6f5ac231067 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -158,6 +158,7 @@ Commands:
   port-map           Join the Mahout census to `api.lock`: each item `same`, `renamed` or `gone`, the rows not yet taken as the number; one reading, at the lock's crate
   compile-identity   Compile a corpus under the oracle's dump recipe and under the engine, and hold every file to byte-identity; one reading per corpus, scoped to the corpus
   crosscheck         Hold each default extension's `--re` and `--ri` rendering to the oracle's bytes, kept in the store; one reading per extension per flag
+  trace-dump         Hold the engine's `TRACE` lines under `jit.mode=force` to the oracle's under `[regime.jit-inline]` on the seven kernels, kept in the store; one reading per kernel
   fpm-compare        Hold makala to the pinned php-fpm: each request of the HTTP-served subset served by both, the status, header lines and body compared; one reading, at makala's crate
   soak               Many clients against one makala for a fixed time, each response held to the request served alone; one reading, at makala's crate
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
@@ -173,7 +174,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=dcdd1afde96f157d1cdb38aa8010ebdf40fe92a4e25b42d8cee69a6474da9002 out=c8233224fd65a9fba70b2adb4454ef938dd14d9245aac865d46385b070f21ea6 -->
+<!-- /computed in=0f5e980ef15f93ae076f8116757ac7a6dcd67fa0db206f9d0f0e71dde7de54fc out=3cd3cb054942af5a16b72ec93f51ae9766812a0b5d3e22db3c68a63e5cd94e26 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

@@ -73,7 +73,7 @@ pub struct Reading {
     /// The subcommands that write one, in the order `cli::Command` has
     /// them: `api-check | permit | done | track-work | ticket | usage |
     /// bench | budget | clippy | test | miri | phpt | port-map |
-    /// compile-identity | crosscheck | fpm-compare | soak | unsafe-audit |
+    /// compile-identity | crosscheck | trace-dump | fpm-compare | soak | unsafe-audit |
     /// steer | divergence-reason | witness | vocab`; `fuzz | mutants` are
     /// named by harness-design.md §4.2 and not built yet.
     pub instrument: String,
@@ -142,7 +142,7 @@ impl std::fmt::Display for Reading {
 
 /// The instruments whose runs are taken under the oracle's recipe: a
 /// reading of one is fresh only under the pin it records (#1387).
-pub const UNDER_RECIPE: [&str; 4] = ["witness", "phpt", "crosscheck", "fpm-compare"];
+pub const UNDER_RECIPE: [&str; 5] = ["witness", "phpt", "crosscheck", "trace-dump", "fpm-compare"];
 
 impl Reading {
     /// A reading of `instrument` over a crate, stamped over the crate's

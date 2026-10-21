@@ -159,7 +159,7 @@ _Avoid_: transition, continuation, `Next` (the handler's return inside the loop)
 ### Harness
 
 **Instrument**:
-One `xtask` subcommand that measures or judges something and ends by writing a reading, in the order `cli::Command` has them: `api-check`, `permit`, `done`, `track-work`, `ticket`, `usage`, `bench`, `budget`, `clippy`, `test`, `miri`, `phpt`, `port-map`, `compile-identity`, `crosscheck`, `fpm-compare`, `soak`, `unsafe-audit`, `steer`, `divergence-reason`, `witness`, `vocab`; `fuzz` and `mutants` are named by `harness-design.md` §4.2 and not built yet. What an instrument does to a crate or a rule is to *hold* it. The design of record for the harness is `harness-design.md`.
+One `xtask` subcommand that measures or judges something and ends by writing a reading, in the order `cli::Command` has them: `api-check`, `permit`, `done`, `track-work`, `ticket`, `usage`, `bench`, `budget`, `clippy`, `test`, `miri`, `phpt`, `port-map`, `compile-identity`, `crosscheck`, `trace-dump`, `fpm-compare`, `soak`, `unsafe-audit`, `steer`, `divergence-reason`, `witness`, `vocab`; `fuzz` and `mutants` are named by `harness-design.md` §4.2 and not built yet. What an instrument does to a crate or a rule is to *hold* it. The design of record for the harness is `harness-design.md`.
 _Avoid_: check (the manifest's `check` predicate and `api_check`, its module), gate (that is a numbered pass/fail bar such as G1), tool (a rule's `tool`, and the hook's `tool_name` and `tool_input`, Claude Code's words), script (php's `script_name`)
 
 **Command**:
@@ -179,7 +179,7 @@ The one-shaped value an instrument writes after a run: instrument, scope, rule, 
 _Avoid_: result, artefact, report, telemetry (the manifest's `[telemetry]` table: the field `telemetry` and `Telemetry`, its type), output (php's `OutputOp`, `output_buffer_op`, `output_started_at`; seam 4's `OutputSink`)
 
 **Seat**:
-One of the machine's few places a building instrument runs in, `XTASK_SEATS` of them (three unless set), each an exclusive lock on a file under `XTASK_SEAT_DIR` that the operating system gives back however its holder ends. `clippy`, `test`, `miri`, `phpt`, `compile-identity`, `crosscheck`, `fpm-compare`, `soak`, `witness` and `bench` take one before they build and wait while every one is held; what a seated instrument spawns sits in its seat (`seat`, #2982).
+One of the machine's few places a building instrument runs in, `XTASK_SEATS` of them (three unless set), each an exclusive lock on a file under `XTASK_SEAT_DIR` that the operating system gives back however its holder ends. `clippy`, `test`, `miri`, `phpt`, `compile-identity`, `crosscheck`, `trace-dump`, `fpm-compare`, `soak`, `witness` and `bench` take one before they build and wait while every one is held; what a seated instrument spawns sits in its seat (`seat`, #2982).
 _Avoid_: lease
 
 **Snapshot**:

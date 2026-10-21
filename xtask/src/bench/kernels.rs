@@ -12,7 +12,7 @@
 //! the same pair and control on the engine built with the tier's feature,
 //! what the engine's tier buys. G1 (#2947, [`door`]): the engine built
 //! with the tier's feature against the engine built without it over the
-//! seven kernels alone, `PROGRAMS[..7]`, held to a geomean of at most
+//! seven kernels alone, [`KERNELS`], held to a geomean of at most
 //! [`DOOR`].
 //!
 //! **What every arm runs under.** The recipe, as the oracle's every run
@@ -49,10 +49,19 @@ pub(crate) const PROGRAMS: &[&str] = &[
     "bench_quiet",
 ];
 
+/// The seven kernels alone, [`PROGRAMS`] less `bench_quiet.php`: G1's
+/// programs, and the trace-dump diff's (`jit-design.md` §4.1).
+pub(crate) const KERNELS: &[&str] = PROGRAMS.split_at(7).0;
+
 /// The ini every arm runs each program under after the recipe's and its
 /// regimes': [`PRODUCTION`] and the memory limit the module's rustdoc
 /// states.
-const INI: [&str; 3] = [PRODUCTION[0], PRODUCTION[1], "memory_limit=512M"];
+const INI: [&str; 3] = [PRODUCTION[0], PRODUCTION[1], MEMORY];
+
+/// The memory limit `string_munge.php` fits under on every arm, the
+/// module's rustdoc says why, which the trace-dump diff runs the kernels
+/// under too.
+pub(crate) const MEMORY: &str = "memory_limit=512M";
 
 /// One arm of a bar over [`PROGRAMS`]: its name, the php binary, the
 /// pin's regimes it runs each program under in order, and ini after
@@ -244,7 +253,7 @@ pub(crate) fn door(root: &Path) -> [Declared; 2] {
             "the engine built as {a} with opcache.jit_buffer_size=0 against {b} over the seven kernels"
         );
         let at = root.to_path_buf();
-        bar(root, (id, &PROGRAMS[..7]), about, held, move |_| {
+        bar(root, (id, KERNELS), about, held, move |_| {
             let arm = |name: String, build: Build| -> Result<Php> {
                 Ok(Php {
                     name,
