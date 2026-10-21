@@ -925,3 +925,196 @@ fn method_pieces(
         .then(|| method_entry(class, method, &entry_ident, &reads));
     Ok((declaration, entry, checks))
 }
+
+#[cfg(test)]
+mod tests {
+    use quote::quote;
+
+    use super::expand;
+    use crate::refused;
+
+    #[test]
+    fn a_class_header_the_attribute_cannot_declare_is_refused() {
+        for (attribute, item, message) in [
+            (
+                quote!(),
+                quote!(
+                    fn f() {}
+                ),
+                "php_macros: `#[php_class]` is on a struct, an enum or an impl",
+            ),
+            (
+                quote!(new = make),
+                quote!(
+                    struct C;
+                ),
+                "php_macros: `new` lays a payload down; the header names none",
+            ),
+            (
+                quote!(dynamic_properties = sometimes),
+                quote!(
+                    struct C;
+                ),
+                "php_macros: `dynamic_properties` is `forbidden`, `deprecated` or `allowed`",
+            ),
+            (
+                quote!(),
+                quote!(
+                    struct C<T>(T);
+                ),
+                "php_macros: a class header has no generics",
+            ),
+            (
+                quote!(extends(A, B)),
+                quote!(
+                    struct C;
+                ),
+                "php_macros: a class extends one parent",
+            ),
+            (
+                quote!(beside(8)),
+                quote!(
+                    struct C;
+                ),
+                "php_macros: `beside(..)` goes with the `size = N` of the struct it is allocated beside",
+            ),
+        ] {
+            assert_eq!(refused(expand(attribute, item.clone())), message, "{item}");
+        }
+    }
+
+    #[test]
+    fn an_enum_the_attribute_cannot_declare_is_refused() {
+        for (attribute, item, message) in [
+            (
+                quote!(),
+                quote!(
+                    enum E {
+                        A(i64),
+                    }
+                ),
+                "php_macros: an enum case carries no fields",
+            ),
+            (
+                quote!(backed = string),
+                quote!(
+                    enum E {
+                        A,
+                    }
+                ),
+                "php_macros: a string-backed case takes `#[php(value = \"..\")]`",
+            ),
+            (
+                quote!(),
+                quote!(
+                    enum E {
+                        #[php(value = "a")]
+                        A,
+                    }
+                ),
+                "php_macros: `value` is a string-backed case's",
+            ),
+            (
+                quote!(backed = int),
+                quote!(
+                    enum E {
+                        #[php(value = "a")]
+                        A,
+                    }
+                ),
+                "php_macros: `value` is a string-backed case's",
+            ),
+            (
+                quote!(backed = float),
+                quote!(
+                    enum E {
+                        A,
+                    }
+                ),
+                "php_macros: `backed` is `string` or `int`",
+            ),
+        ] {
+            assert_eq!(refused(expand(attribute, item.clone())), message, "{item}");
+        }
+    }
+
+    #[test]
+    fn a_member_impl_the_attribute_cannot_declare_is_refused() {
+        for (item, message) in [
+            (
+                quote!(
+                    impl C {
+                        const X: i64;
+                    }
+                ),
+                "php_macros: a class constant has a value; a property without one is `#[php(property)]`",
+            ),
+            (
+                quote!(
+                    impl C {
+                        type T = i64;
+                    }
+                ),
+                "php_macros: a member impl holds methods, constants and properties",
+            ),
+            (
+                quote!(
+                    impl Display for C {}
+                ),
+                "php_macros: `#[php_class]` is on `impl Class`, no trait, no generics",
+            ),
+            (
+                quote!(
+                    impl<T> C<T> {}
+                ),
+                "php_macros: `#[php_class]` is on `impl Class`, no trait, no generics",
+            ),
+            (
+                quote!(
+                    impl [u8] {}
+                ),
+                "php_macros: `#[php_class]` is on `impl Class`",
+            ),
+            (
+                quote!(
+                    impl C {
+                        #[php(property, virtual)]
+                        const x: i64 = 1;
+                    }
+                ),
+                "php_macros: a virtual property has no slot, so no default (`@virtual`)",
+            ),
+            (
+                quote!(
+                    impl C {
+                        #[php(implementation = D::f)]
+                        fn f() {}
+                    }
+                ),
+                "php_macros: `implementation =` names another method's entry; this method has a body of its own",
+            ),
+            (
+                quote!(
+                    impl C {
+                        #[php(tentative, final)]
+                        fn f() -> i64 {
+                            0
+                        }
+                    }
+                ),
+                "php_macros: a tentative return is refused on a final method and on __construct and __destruct (design §4.7)",
+            ),
+            (
+                quote!(
+                    impl C {
+                        #[php(tentative)]
+                        fn __construct() {}
+                    }
+                ),
+                "php_macros: a tentative return is refused on a final method and on __construct and __destruct (design §4.7)",
+            ),
+        ] {
+            assert_eq!(refused(expand(quote!(), item.clone())), message, "{item}");
+        }
+    }
+}

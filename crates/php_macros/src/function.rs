@@ -428,3 +428,84 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> syn::Result<Tokens> {
         #(#modules)*
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use quote::quote;
+
+    use super::expand;
+    use crate::refused;
+
+    #[test]
+    fn a_function_the_attribute_cannot_declare_is_refused() {
+        for (attribute, item, message) in [
+            (
+                quote!(),
+                quote!(
+                    fn f<T>() {}
+                ),
+                "php_macros: a native is a plain `fn`: no generics, no `async`, no C variadic",
+            ),
+            (
+                quote!(),
+                quote!(
+                    async fn f() {}
+                ),
+                "php_macros: a native is a plain `fn`: no generics, no `async`, no C variadic",
+            ),
+            (
+                quote!(),
+                quote!(
+                    fn f(self) {}
+                ),
+                "php_macros: a native takes no Rust `self`; the receiver is `this: This<Self>`",
+            ),
+            (
+                quote!(),
+                quote!(
+                    fn f(x: i64, this: This<Self>) {}
+                ),
+                "php_macros: `this` comes first after the request",
+            ),
+            (
+                quote!(),
+                quote!(
+                    fn f((a, b): (i64, i64)) {}
+                ),
+                "php_macros: a parameter is an identifier, its PHP name",
+            ),
+            (
+                quote!(),
+                quote!(
+                    fn f(x: i64, request: &mut Request) {}
+                ),
+                "php_macros: `&mut Request` comes first",
+            ),
+            (
+                quote!(arity = auto),
+                quote!(
+                    fn f() {}
+                ),
+                "php_macros: `arity` is `arity = manual`",
+            ),
+            (
+                quote!(tentative),
+                quote!(
+                    fn f() -> i64 {
+                        0
+                    }
+                ),
+                "php_macros: a tentative return is a method's, never a function's (design §4.7)",
+            ),
+            (
+                quote!(),
+                quote!(
+                    fn f(this: This<Self>) {}
+                ),
+                "php_macros: a function has no receiver",
+            ),
+        ] {
+            assert_eq!(refused(expand(attribute, item.clone())), message, "{item}");
+        }
+    }
+}

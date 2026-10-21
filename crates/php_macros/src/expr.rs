@@ -405,3 +405,34 @@ fn arguments(input: ParseStream<'_>) -> syn::Result<Vec<Tokens>> {
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use quote::quote;
+
+    use super::const_expr;
+    use crate::refused;
+
+    #[test]
+    fn what_php_could_not_read_as_a_constant_expression_is_refused() {
+        for (tokens, message) in [
+            (quote!(1 2), "php_macros: a constant expression ends here"),
+            (
+                quote!(0x10),
+                "php_macros: a default is written in decimal or octal, the radixes the declaration model keeps",
+            ),
+            (
+                quote!(0b10),
+                "php_macros: a default is written in decimal or octal, the radixes the declaration model keeps",
+            ),
+            (quote!(1i64), "php_macros: a php integer carries no suffix"),
+            (quote!(09), "php_macros: `09` is not a php integer"),
+            (
+                quote!(9_223_372_036_854_775_808),
+                "php_macros: `9223372036854775808` is not a php integer",
+            ),
+        ] {
+            assert_eq!(refused(const_expr(tokens.clone())), message, "{tokens}");
+        }
+    }
+}
