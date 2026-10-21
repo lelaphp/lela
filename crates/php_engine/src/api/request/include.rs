@@ -1196,7 +1196,7 @@ impl Request {
             return Thrown::of(None);
         }
         let raised = error.raised.iter();
-        if error.level == Level::Parse || error.raise == php_compile::Raise::Thrown {
+        if !error.bailed() {
             if matches!(kind, SourceKind::Eval(_)) {
                 for raised in raised.clone() {
                     self.note_error_in(raised.level, &raised.message, path, raised.line);

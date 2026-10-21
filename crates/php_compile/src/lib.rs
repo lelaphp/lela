@@ -382,6 +382,23 @@ pub struct Refused {
     pub keys_made: u32,
 }
 
+impl Refused {
+    /// Whether php's compile bailed out at the refusal, `zend_bailout`
+    /// out of `zend_compile` past what it had declared and counted: a
+    /// compile error, a heap fatal. A parse error, this compiler's own
+    /// refusal of what it cannot read yet, and a refusal php throws are
+    /// the parser's, made before `zend_compile` declared or counted
+    /// anything, which leave it as it returns: an `include` or an `eval`
+    /// throws the one php throws, and a parse error as the `ParseError`.
+    #[must_use]
+    pub fn bailed(&self) -> bool {
+        match self.raise {
+            Raise::Fatal => self.level != Level::Parse,
+            Raise::Thrown | Raise::Unread => false,
+        }
+    }
+}
+
 /// How a [`Refused`] reaches the request: php's fatal, php's thrown
 /// `CompileError`, or this compiler's own sentence where php would have
 /// compiled the source. Decided where the refusal is made and matched by

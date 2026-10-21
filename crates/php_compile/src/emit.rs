@@ -1593,7 +1593,7 @@ pub(crate) fn unit(
         // slot the refused statement took and never filled ending them.
         // A refusal php throws is the parser's, made before `zend_compile`
         // declared or counted anything, as is a parse error.
-        let bailed = refused.raise != crate::Raise::Thrown && refused.level != Level::Parse;
+        let bailed = refused.bailed();
         if bailed {
             refused.keys_made = u32::try_from(emit.runtime_keys.len()).unwrap_or(u32::MAX);
         }
