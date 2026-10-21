@@ -62,7 +62,7 @@ pub use frames::{
     Argument, Aside, Called, Compiled, Evaluated, Under, begin, below, call, catches, compile,
     entry, evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
 };
-use held::{Entered, Kept, Units};
+use held::{Entered, Kept, Scope, Units};
 pub use sampled::{Building, Sample, building, class_number, numbered_class, on_heap, sample};
 pub use view::{Epoch, FuncRef, MapPtrRaw, UnitView, epoch, epoch_state, func, word};
 
@@ -737,12 +737,16 @@ fn refused_at_entry(req: &mut Request) -> bool {
 /// The units the loop holds a share of are held until the serving ends
 /// or a frame's unit has no place ([`held::Units`]); then the loop gives
 /// them back to the request and takes the edge up again holding none,
-/// in the places it laid down before.
+/// in the places it laid down before. A file's frame whose unit the
+/// request compiled for itself, an `eval`'s or an uncached include's, is
+/// served in a scope of its own ([`serve_took`]), which gives that unit
+/// back as the edge leaves the frame, so the loop around it never lets
+/// its own units go for it.
 fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
     let mut stepped = first;
     let mut units = Units::default();
     loop {
-        let served = serve_held::<T, D>(req, stepped, &units)?;
+        let served = serve_held::<T, D>(req, stepped, &units, Scope::WHOLE)?;
         units.give_back(req);
         match served {
             Some(again) => stepped = again,
@@ -751,23 +755,43 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
     }
 }
 
-/// [`serve_frame`] while `units` has a place for every unit its frames
-/// enter: `None` where the serving is over, and the edge it was taking
-/// up where every place is taken.
-#[inline(always)] // the loop's body, called once a serving
+/// [`serve_frame`] over the frames of `scope` while `units` has a place
+/// for every unit its frames enter: `None` where the serving is over,
+/// and the edge it was taking up where every place is taken or where the
+/// edge left the scope. One body of the loop, called once a serving and
+/// once a scope.
+#[inline(always)] // the loop's body, called once a serving and once a scope
 #[allow(clippy::inline_always)]
+// One function, so the optimiser reads every edge of the loop together:
+// the loop out of line, one copy for both callers, measured the call
+// edges 3 to 6% higher (#3051).
+#[allow(clippy::too_many_lines)]
 fn serve_held<'u, T: Tier, D: Telling>(
     req: &mut Request,
     first: Stepped,
     units: &'u Units,
+    scope: Scope<'u>,
 ) -> Result<Option<Stepped>, Fatal> {
     let declared = D::of(req);
+    scope.measured(req);
     let mut kept = Kept::<'u>::default();
     let mut stepped = first;
+    // Every way out of this loop is taken once a serving, a scope or a
+    // restart and is marked cold, so the estimate that places the
+    // handlers' calls in line reads the loop as the hot code it is.
     loop {
-        // An edge the loop takes up the frame of afresh, through the
-        // function table or the frame's annex.
+        // An edge the loop takes up the frame of afresh, through what it
+        // kept, the function table or the frame's annex.
         let (mut frame, pushed) = match stepped {
+            Stepped::Same(frame)
+            | Stepped::Popped(frame)
+            | Stepped::Moved(frame)
+            | Stepped::Threw(frame)
+                if scope.left(frame) =>
+            {
+                std::hint::cold_path();
+                return Ok(Some(stepped));
+            }
             Stepped::Same(frame) => {
                 kept.forget();
                 (frame, false)
@@ -783,17 +807,47 @@ fn serve_held<'u, T: Tier, D: Telling>(
                     // The entry frame caught nothing: the throwable stays
                     // pending for the caller, the native that re-entered
                     // the loop or `serve` once the main frame is popped.
+                    std::hint::cold_path();
                     return Ok(None);
                 }
                 stepped = unwound;
                 continue;
             }
-            Stepped::Done => return Ok(None),
+            Stepped::Done => {
+                std::hint::cold_path();
+                return Ok(None);
+            }
         };
-        let mut body = match units.enter(req, &mut kept, frame) {
-            Some(Entered::Held(code)) => code,
-            Some(Entered::Full) => return Ok(Some(stepped)),
-            None => return Err(no_frame(frame)),
+        // A return to a frame the loop entered, which a scope that served
+        // its callee hands back: its op array as the loop left it.
+        let kept_body = if pushed { None } else { kept.returned(frame) };
+        let mut body = match kept_body.or_else(|| scope.own(&mut kept, frame)) {
+            Some(code) => code,
+            None => match units.enter(req, &mut kept, frame) {
+                Some(Entered::Held(code)) => code,
+                Some(Entered::Took(unit, moved)) => {
+                    let Some(left) =
+                        serve_took::<T, D>(req, (stepped, frame), units, (unit, moved))?
+                    else {
+                        std::hint::cold_path();
+                        return Ok(None);
+                    };
+                    // A scope that let every unit go with its frames still
+                    // standing (`Entered::Full`) hands back an edge into
+                    // them, frames this loop did not enter.
+                    if edge_frame(left).is_some_and(|at| at.0 >= frame.0) {
+                        std::hint::cold_path();
+                        kept.forget();
+                    }
+                    stepped = left;
+                    continue;
+                }
+                Some(Entered::Full) => {
+                    std::hint::cold_path();
+                    return Ok(Some(stepped));
+                }
+                None => return Err(no_frame(frame)),
+            },
         };
         if pushed {
             let start = req.vm().opline(frame);
@@ -871,6 +925,94 @@ fn serve_held<'u, T: Tier, D: Telling>(
             }
         };
     }
+}
+
+/// `frame`, which the edge `first` takes up, a file's whose unit the request compiled
+/// for itself, `unit`, and the frames it calls, served in a scope of
+/// their own (design §5.8): the scope holds the share of `unit` the loop
+/// reads its op array through and keeps the op arrays it enters apart
+/// from those the loop around it kept, which it never lets go for it.
+/// The scope is over at the first edge to a frame below its own, which
+/// it hands back, or where the serving is; the share is given back to
+/// the request there ([`Request::give_back`]), so the unit's room is
+/// free for the next compile once the frame's own share has gone with
+/// it, as php's `zend_leave_helper` frees an `eval`'s op array at its
+/// return, and the loop goes on in the frame returned to with the op
+/// array it kept for it. An `eval` in a loop compiles each in the room
+/// of the one before it and costs the loop around it one scope:
+///
+/// ```php
+/// function f($n) { return $n ? eval('return f($n - 1) + 1;') : 0; }
+/// $s = 0;
+/// for ($i = 0; $i < 3; $i++) {
+///     $s += eval('return ' . $i . ';') + f(3);
+///     try { eval('throw new Exception("e" . $i);'); } catch (Exception $e) { echo $e->getMessage(), " "; }
+/// }
+/// echo $s, "\n";
+/// ```
+/// ```expect
+/// e0 e1 e2 12
+/// ```
+///
+/// A scope takes its own frames of the thread's stack, which php's
+/// `eval` does not, so php's limit moves below each by what it takes
+/// ([`php_compile::StackLimit::nested`]), and where the thread has no
+/// room for another the frame is served in the scope it stands in, as
+/// php serves every `eval`. A recursion through `eval` is php's depth
+/// whatever the limit, and past what the thread holds of scopes:
+///
+/// ```php
+/// function f($n) { return $n ? eval('return f($n - 1);') + 1 : 0; }
+/// echo f(5000), "\n";
+/// ```
+/// ```expect regime=small-stack
+/// 5000
+/// ```
+///
+/// ```php
+/// function f($n) { return $n ? eval('return f($n - 1);') + 1 : 0; }
+/// echo f(40000), "\n";
+/// ```
+/// ```expect
+/// 40000
+/// ```
+#[inline(always)] // once a scope, in the loop's body
+#[allow(clippy::inline_always)]
+fn serve_took<T: Tier, D: Telling>(
+    req: &mut Request,
+    (first, frame): (Stepped, FrameRef),
+    units: &Units,
+    (unit, moved): (php_unit::PublishedUnit, php_compile::Reentered),
+) -> Result<Option<Stepped>, Fatal> {
+    let scope = Scope::took(frame, &unit, held::here());
+    let served = serve_scope::<T, D>(req, first, units, scope);
+    req.stack_left(moved);
+    req.give_back(unit);
+    served
+}
+
+/// The frame an edge takes up, none for the serving's end.
+fn edge_frame(stepped: Stepped) -> Option<FrameRef> {
+    match stepped {
+        Stepped::Same(frame)
+        | Stepped::Pushed(frame)
+        | Stepped::Popped(frame)
+        | Stepped::Moved(frame)
+        | Stepped::Threw(frame) => Some(frame),
+        Stepped::Done => None,
+    }
+}
+
+/// [`serve_held`] over a scope a frame of a unit the request compiled
+/// for itself is served in, out of line.
+#[inline(never)]
+fn serve_scope<T: Tier, D: Telling>(
+    req: &mut Request,
+    first: Stepped,
+    units: &Units,
+    scope: Scope<'_>,
+) -> Result<Option<Stepped>, Fatal> {
+    serve_held::<T, D>(req, first, units, scope)
 }
 
 /// A callee just pushed taken up by the loop, standing at `start`: what
