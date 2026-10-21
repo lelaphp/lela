@@ -1011,9 +1011,9 @@ mod tests {
         let mut heap = Heap::new();
         let start = heap.memory_usage(false);
         let real = heap.memory_usage(true);
-        let allocated = heap.string(&vec![b'x'; 3_000_000]);
-        assert!(allocated.is_ok(), "the heap would not allocate 3 MB");
-        let Ok(s) = allocated else { return };
+        let s = heap
+            .string(&vec![b'x'; 3_000_000])
+            .expect("the heap would not allocate 3 MB");
         let rounded = 3_000_032usize.next_multiple_of(page);
         let node = 24;
         assert_eq!(heap.memory_usage(false) - start, rounded + node);
@@ -1036,9 +1036,10 @@ mod tests {
         let _alone = alone();
         let mut nothing = Recorder { heap: Heap::new() };
         let start = nothing.heap.memory_usage(false);
-        let allocated = nothing.heap.string(b"demo");
-        assert!(allocated.is_ok(), "the heap would not allocate four bytes");
-        let Ok(s) = allocated else { return };
+        let s = nothing
+            .heap
+            .string(b"demo")
+            .expect("the heap would not allocate four bytes");
         assert_eq!(nothing.heap.memory_usage(false) - start, 32);
         let z = Zval::string(s);
         assert!(z.is_refcounted());
@@ -1057,17 +1058,20 @@ mod tests {
     fn an_append_extends_the_one_owner_s_string_and_copies_a_shared_one() {
         let _alone = alone();
         let mut nothing = Recorder { heap: Heap::new() };
-        let pair = (nothing.heap.string(b"abc"), nothing.heap.string(b"de"));
-        assert!(
-            pair.0.is_ok() && pair.1.is_ok(),
-            "the heap would not allocate five bytes"
-        );
-        let (Ok(s), Ok(tail)) = pair else { return };
+        let s = nothing
+            .heap
+            .string(b"abc")
+            .expect("the heap would not allocate five bytes");
+        let tail = nothing
+            .heap
+            .string(b"de")
+            .expect("the heap would not allocate five bytes");
         let start = nothing.heap.memory_usage(false);
         // 24 + 3 + 1 and 24 + 5 + 1 both round into the 32-byte bin.
-        let grown = nothing.heap.string_append(s, tail);
-        assert!(grown.is_ok(), "the append was refused");
-        let Ok(grown) = grown else { return };
+        let grown = nothing
+            .heap
+            .string_append(s, tail)
+            .expect("the append was refused");
         assert!(
             grown.is_same(s),
             "a string with one owner moved within its bin"
@@ -1075,15 +1079,17 @@ mod tests {
         assert_eq!(grown.bytes(), b"abcde");
         assert_eq!(nothing.heap.memory_usage(false), start);
         // Ten bytes are the 40-byte bin: the slot moves up, once.
-        let twice = nothing.heap.string_append(grown, grown);
-        assert!(twice.is_ok(), "the append was refused");
-        let Ok(twice) = twice else { return };
+        let twice = nothing
+            .heap
+            .string_append(grown, grown)
+            .expect("the append was refused");
         assert_eq!(twice.bytes(), b"abcdeabcde");
         assert_eq!(nothing.heap.memory_usage(false), start - 32 + 40);
         twice.addref();
-        let copy = nothing.heap.string_append(twice, tail);
-        assert!(copy.is_ok(), "the append was refused");
-        let Ok(copy) = copy else { return };
+        let copy = nothing
+            .heap
+            .string_append(twice, tail)
+            .expect("the append was refused");
         assert!(!copy.is_same(twice), "a shared string was written into");
         assert_eq!(twice.bytes(), b"abcdeabcde");
         assert_eq!(twice.refcount(), 1);
@@ -1250,11 +1256,8 @@ mod tests {
         let mut heap = Heap::new();
         heap.gc_mem_caches();
         heap.gc_mem_caches();
-        let (small, huge) = (heap.block(100), heap.block(3_000_000));
-        assert!(small.is_ok() && huge.is_ok(), "the heap would not allocate");
-        let (Ok(small), Ok(huge)) = (small, huge) else {
-            return;
-        };
+        let small = heap.block(100).expect("the heap would not allocate");
+        let huge = heap.block(3_000_000).expect("the heap would not allocate");
         let small_at = small.bytes().as_ptr().addr();
         let huge_at = huge.bytes().as_ptr().addr();
         let huge_end = huge_at + 3_000_000usize.next_multiple_of(mm::real_page_size());
@@ -1308,11 +1311,9 @@ mod tests {
     fn an_owner_dropped_unconsumed_is_recorded_with_the_line_that_made_it() {
         let _alone = alone();
         let mut heap = Heap::new();
-        let made = heap.string(b"a string of its own block");
-        assert!(made.is_ok(), "the heap would not allocate");
-        let Ok(s) = made else {
-            return;
-        };
+        let s = heap
+            .string(b"a string of its own block")
+            .expect("the heap would not allocate");
         let z = Zval::string(s);
         let at = s.gc().block();
         let first = std::panic::Location::caller();
@@ -1354,21 +1355,19 @@ mod tests {
         let _alone = alone();
         let mut hooks = Recorder { heap: Heap::new() };
         let site = std::panic::Location::caller();
-        let held = hooks.heap.string(b"a string an owner holds");
-        assert!(held.is_ok(), "the heap would not allocate");
-        let Ok(held) = held else {
-            return;
-        };
+        let held = hooks
+            .heap
+            .string(b"a string an owner holds")
+            .expect("the heap would not allocate");
         let owned = Zval::string(held);
         hooks.heap.fatal_leaving(true);
         owners::made(owned, site);
         owners::dropped(owned);
         assert_eq!(hooks.heap.take_sensed(), None);
-        let made = hooks.heap.string(b"a string of its own block");
-        assert!(made.is_ok(), "the heap would not allocate");
-        let Ok(s) = made else {
-            return;
-        };
+        let s = hooks
+            .heap
+            .string(b"a string of its own block")
+            .expect("the heap would not allocate");
         let z = Zval::string(s);
         Heap::release(&mut hooks, z);
         Heap::release(&mut hooks, z);
@@ -1393,11 +1392,10 @@ mod tests {
     fn a_read_of_a_freed_strings_bytes_is_refused_and_named() {
         let _alone = alone();
         let mut hooks = Recorder { heap: Heap::new() };
-        let made = hooks.heap.string(b"a string of its own block");
-        assert!(made.is_ok(), "the heap would not allocate");
-        let Ok(s) = made else {
-            return;
-        };
+        let s = hooks
+            .heap
+            .string(b"a string of its own block")
+            .expect("the heap would not allocate");
         Heap::release(&mut hooks, Zval::string(s));
         assert_eq!(hooks.heap.take_sensed(), None);
         let read = s.bytes();
@@ -1429,11 +1427,10 @@ mod tests {
         let _alone = alone();
         let mut hooks = Recorder { heap: Heap::new() };
         let start = hooks.heap.memory_usage(false);
-        let made = hooks.heap.string(b"a string of its own block");
-        assert!(made.is_ok(), "the heap would not allocate");
-        let Ok(s) = made else {
-            return;
-        };
+        let s = hooks
+            .heap
+            .string(b"a string of its own block")
+            .expect("the heap would not allocate");
         let z = Zval::string(s);
         Heap::release(&mut hooks, z);
         assert_eq!(hooks.heap.memory_usage(false), start);
@@ -1491,11 +1488,10 @@ mod tests {
     fn the_most_recently_freed_slot_of_a_bin_is_held_back_and_its_use_refused() {
         let _alone = alone();
         let mut hooks = Recorder { heap: Heap::new() };
-        let made = hooks.heap.string(b"a string of its own block");
-        assert!(made.is_ok(), "the heap would not allocate");
-        let Ok(stale) = made else {
-            return;
-        };
+        let stale = hooks
+            .heap
+            .string(b"a string of its own block")
+            .expect("the heap would not allocate");
         let at = stale.address().as_ptr().addr();
         hooks.heap.release_string(stale);
         let fresh = hooks.heap.string(b"a string of its own block");
@@ -1542,9 +1538,7 @@ mod tests {
     fn a_free_of_a_quarantined_slot_is_refused_and_named() {
         let _alone = alone();
         let mut heap = Heap::new();
-        let Ok(at) = heap.mm.alloc(32) else {
-            return;
-        };
+        let at = heap.mm.alloc(32).expect("a slot");
         let held = heap.memory_usage(false);
         // SAFETY: the block was allocated just above and nothing names it.
         unsafe { heap.mm.free(at) };
@@ -1586,11 +1580,9 @@ mod tests {
         for (how, leave) in leaves {
             for word in [0, 1, 2] {
                 let mut heap = Heap::new();
-                let made = heap.string(b"a string of its own block");
-                assert!(made.is_ok(), "the heap would not allocate");
-                let Ok(s) = made else {
-                    return;
-                };
+                let s = heap
+                    .string(b"a string of its own block")
+                    .expect("the heap would not allocate");
                 let at = s.address();
                 heap.release_string(s);
                 let words: *mut u64 = at.as_ptr().cast();
@@ -1716,14 +1708,9 @@ mod tests {
         ];
         let at = |z: Zval| z.counted().map(|at| at.block().as_ptr().addr());
         for (kind, make) in kinds {
-            let made = (make(&mut hooks.heap), make(&mut hooks.heap));
-            assert!(
-                made.0.is_ok() && made.1.is_ok(),
-                "the heap would not allocate a {kind}"
-            );
-            let (Ok(stale), Ok(other)) = made else {
-                return;
-            };
+            let refused = |e| panic!("the heap would not allocate a {kind}: {e:?}");
+            let stale = make(&mut hooks.heap).unwrap_or_else(refused);
+            let other = make(&mut hooks.heap).unwrap_or_else(refused);
             Heap::release(&mut hooks, other);
             Heap::release(&mut hooks, stale);
             assert_eq!(hooks.heap.take_sensed(), None, "{kind}");
@@ -1731,9 +1718,7 @@ mod tests {
             addref_by_kind(stale);
             let site = line!() - 1;
             assert!(stale.is_refcounted(), "a {kind} is refcounted");
-            let Some(block) = at(stale) else {
-                return;
-            };
+            let block = at(stale).expect("a refcounted block");
             assert_eq!(
                 hooks.heap.take_sensed(),
                 Some(Fatal::error(format!(

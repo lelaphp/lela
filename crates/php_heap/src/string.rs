@@ -1067,18 +1067,12 @@ mod tests {
         let _alone = crate::serial::alone();
         let mut heap = crate::Heap::new();
         let base = heap.memory_usage(false);
-        let Ok(mut fresh) = heap.string_fresh(2103) else {
-            return;
-        };
+        let mut fresh = heap.string_fresh(2103).expect("a fresh string");
         fresh.bytes_mut()[..5].copy_from_slice(b"hello");
         assert_eq!(heap.memory_usage(false) - base, 2560);
-        let Ok(cut) = heap.string_truncate(fresh, 5) else {
-            return;
-        };
+        let cut = heap.string_truncate(fresh, 5).expect("a truncated string");
         assert_eq!(heap.memory_usage(false) - base, 32);
-        let Ok(same) = heap.string_truncate(cut, 3) else {
-            return;
-        };
+        let same = heap.string_truncate(cut, 3).expect("a truncated string");
         let s = same.finish();
         assert_eq!(s.bytes(), b"hel");
         assert_eq!(heap.memory_usage(false) - base, 32);
@@ -1094,14 +1088,10 @@ mod tests {
         let _alone = crate::serial::alone();
         let mut heap = crate::Heap::new();
         let base = heap.memory_usage(false);
-        let Ok(mut fresh) = heap.string_fresh(5) else {
-            return;
-        };
+        let mut fresh = heap.string_fresh(5).expect("a fresh string");
         fresh.bytes_mut().copy_from_slice(b"hello");
         assert_eq!(heap.memory_usage(false) - base, 32);
-        let Ok(mut grown) = heap.string_extend(fresh, 40) else {
-            return;
-        };
+        let mut grown = heap.string_extend(fresh, 40).expect("an extended string");
         assert_eq!(heap.memory_usage(false) - base, 80);
         assert_eq!(&grown.bytes_mut()[..7], b"hello\0\0");
         grown.set_len(3);
@@ -1115,18 +1105,15 @@ mod tests {
     #[test]
     fn interning_the_same_bytes_twice_gives_one_string() {
         let mut strings = Strings::new();
-        let interned = (
-            strings.intern(b"var_dump"),
-            strings.intern(b"var_dump"),
-            strings.intern(b"extension_loaded"),
-        );
-        assert!(
-            interned.0.is_ok() && interned.1.is_ok() && interned.2.is_ok(),
-            "the table would not intern"
-        );
-        let (Ok(first), Ok(again), Ok(other)) = interned else {
-            return;
-        };
+        let first = strings
+            .intern(b"var_dump")
+            .expect("the table would not intern");
+        let again = strings
+            .intern(b"var_dump")
+            .expect("the table would not intern");
+        let other = strings
+            .intern(b"extension_loaded")
+            .expect("the table would not intern");
         assert_eq!(first, again);
         assert_eq!(first.address(), again.address());
         assert_ne!(first, other);
@@ -1138,11 +1125,7 @@ mod tests {
     #[test]
     fn an_interned_string_is_frozen_and_hashed_before_it_is_published() {
         let mut strings = Strings::new();
-        let interned = strings.intern(b"php");
-        assert!(interned.is_ok(), "the table would not intern");
-        let Ok(s) = interned else {
-            return;
-        };
+        let s = strings.intern(b"php").expect("the table would not intern");
         assert!(s.is_interned());
         assert!(s.is_persistent());
         assert_eq!(s.refcount(), 1);
@@ -1161,17 +1144,13 @@ mod tests {
     fn the_frozen_table_answers_the_empty_string_and_every_single_byte() {
         let mut one = Strings::new();
         let mut another = Strings::new();
-        let frozen = (
-            one.intern(b""),
-            another.intern(b""),
-            one.intern(b"a"),
-            another.intern(b"a"),
-            one.intern(&[0xff]),
-        );
-        let (Ok(empty), Ok(elsewhere), Ok(a), Ok(also_a), Ok(high)) = frozen else {
-            // The frozen table allocates nothing and always answers.
-            return;
-        };
+        // The frozen table allocates nothing and always answers.
+        let answered = "the frozen table answers";
+        let empty = one.intern(b"").expect(answered);
+        let elsewhere = another.intern(b"").expect(answered);
+        let a = one.intern(b"a").expect(answered);
+        let also_a = another.intern(b"a").expect(answered);
+        let high = one.intern(&[0xff]).expect(answered);
         assert_eq!(empty.address(), elsewhere.address());
         assert!(empty.is_empty());
         assert!(empty.is_valid_utf8());
@@ -1192,11 +1171,10 @@ mod tests {
     #[test]
     fn a_published_string_carries_its_hash_already() {
         let mut strings = Strings::new();
-        let interned = (strings.intern(b"zend_string"), strings.intern(b"x"));
-        assert!(interned.0.is_ok(), "the table would not intern");
-        let (Ok(s), Ok(frozen)) = interned else {
-            return;
-        };
+        let s = strings
+            .intern(b"zend_string")
+            .expect("the table would not intern");
+        let frozen = strings.intern(b"x").expect("the frozen table answers");
         assert_eq!(s.header().h.get(), hash_func(b"zend_string"));
         assert_eq!(frozen.header().h.get(), hash_func(b"x"));
     }

@@ -1635,14 +1635,14 @@ mod tests {
     }
 
     /// Two objects, each in the other's slot: `$a->b = $b; $b->a = $a;`.
-    fn pair(r: &mut Recorder) -> Option<(Obj, Obj)> {
-        let a = r.heap.object(1, 1, 0).ok()?;
-        let b = r.heap.object(1, 1, 0).ok()?;
+    fn pair(r: &mut Recorder) -> (Obj, Obj) {
+        let a = r.heap.object(1, 1, 0).expect("an object");
+        let b = r.heap.object(1, 1, 0).expect("an object");
         Heap::object_set_slot(r, a, 0, Zval::object(b));
         b.addref();
         Heap::object_set_slot(r, b, 0, Zval::object(a));
         a.addref();
-        Some((a, b))
+        (a, b)
     }
 
     /// A two-object cycle whose outside owners are gone is two roots
@@ -1654,7 +1654,7 @@ mod tests {
         let _alone = alone();
         let mut r = Recorder::new();
         let start = r.heap.memory_usage(false);
-        let Some((a, b)) = pair(&mut r) else { return };
+        let (a, b) = pair(&mut r);
         Heap::release(&mut r, Zval::object(a));
         Heap::release(&mut r, Zval::object(b));
         assert_eq!(r.heap.gc_status().roots, 2);
@@ -1675,7 +1675,7 @@ mod tests {
     fn an_object_its_destructor_resurrects_is_kept() {
         let _alone = alone();
         let mut r = Recorder::new();
-        let Some((a, b)) = pair(&mut r) else { return };
+        let (a, b) = pair(&mut r);
         r.keep = Some(1);
         Heap::release(&mut r, Zval::object(a));
         Heap::release(&mut r, Zval::object(b));
@@ -1700,10 +1700,8 @@ mod tests {
         let _alone = alone();
         let mut r = Recorder::new();
         let start = r.heap.memory_usage(false);
-        let Ok(a) = r.heap.array() else { return };
-        let Ok(cell) = r.heap.reference(Zval::array(a)) else {
-            return;
-        };
+        let a = r.heap.array().expect("an array");
+        let cell = r.heap.reference(Zval::array(a)).expect("a reference");
         cell.addref();
         assert_eq!(r.heap.array_append(a, Zval::reference(cell)), Ok(true));
         Heap::release(&mut r, Zval::reference(cell));
@@ -1720,7 +1718,7 @@ mod tests {
     fn a_live_root_leaves_the_buffer_and_nothing_is_freed() {
         let _alone = alone();
         let mut r = Recorder::new();
-        let Some((a, b)) = pair(&mut r) else { return };
+        let (a, b) = pair(&mut r);
         Heap::release(&mut r, Zval::object(b));
         assert_eq!(r.heap.gc_status().roots, 1);
         assert_eq!(Heap::gc_collect_cycles(&mut r), 0);
@@ -1738,9 +1736,7 @@ mod tests {
     fn a_held_release_is_a_possible_root_and_never_the_last() {
         let _alone = alone();
         let mut r = Recorder::new();
-        let Ok(o) = r.heap.object(1, 0, 0) else {
-            return;
-        };
+        let o = r.heap.object(1, 0, 0).expect("an object");
         let z = Zval::object(o);
         o.addref();
         assert!(Heap::release_held(&mut r, z));
@@ -1765,13 +1761,9 @@ mod tests {
         let _alone = alone();
         let mut r = Recorder::new();
         let start = r.heap.memory_usage(false);
-        let (Ok(o), Ok(a), Ok(s)) = (
-            r.heap.object(1, 0, 0),
-            r.heap.array(),
-            r.heap.string(b"held"),
-        ) else {
-            return;
-        };
+        let o = r.heap.object(1, 0, 0).expect("an object");
+        let a = r.heap.array().expect("an array");
+        let s = r.heap.string(b"held").expect("the string \"held\"");
         assert_eq!(r.heap.array_append(a, Zval::string(s)), Ok(true));
         let (object, table) = (Zval::object(o), Zval::array(a));
         o.addref();
@@ -1815,9 +1807,8 @@ mod tests {
         let _alone = alone();
         let mut r = Recorder::new();
         let start = r.heap.memory_usage(false);
-        let (Ok(a), Ok(s)) = (r.heap.array(), r.heap.string(b"held")) else {
-            return;
-        };
+        let a = r.heap.array().expect("an array");
+        let s = r.heap.string(b"held").expect("the string \"held\"");
         assert_eq!(r.heap.array_append(a, Zval::string(s)), Ok(true));
         let table = Zval::array(a);
         r.heap.pin_block(table);
@@ -1844,7 +1835,7 @@ mod tests {
         let _alone = alone();
         let mut r = Recorder::new();
         let start = r.heap.memory_usage(false);
-        let Some((a, b)) = pair(&mut r) else { return };
+        let (a, b) = pair(&mut r);
         r.heap.pin_block(Zval::object(a));
         Heap::release(&mut r, Zval::object(a));
         Heap::release(&mut r, Zval::object(b));

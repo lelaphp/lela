@@ -281,14 +281,13 @@ mod tests {
     )]
     fn a_body_suspends_and_returns_in_the_order_it_is_resumed() -> Result<(), Fatal> {
         let mut probe = Probe::default();
-        let Ok(mut fiber) = FiberStack::new(SIZE, |probe: &mut Probe, first| {
+        let mut fiber = FiberStack::new(SIZE, |probe: &mut Probe, first| {
             probe.log.push(first);
             let second = suspend(probe, 10).unwrap_or(-1);
             probe.log.push(second);
             second * 3
-        }) else {
-            return Err(Fatal::error("no stack"));
-        };
+        })
+        .expect("a fiber's stack");
         assert!(fiber.base() > fiber.end());
         assert!(matches!(
             fiber.resume(&mut probe, 1)?,
@@ -311,7 +310,7 @@ mod tests {
     )]
     fn a_suspend_leaves_the_innermost_fiber_and_nothing_below_it() -> Result<(), Fatal> {
         let mut probe = Probe::default();
-        let Ok(mut outer) = FiberStack::new(SIZE, |probe: &mut Probe, _| {
+        let mut outer = FiberStack::new(SIZE, |probe: &mut Probe, _| {
             let Ok(mut inner) = FiberStack::new(SIZE, |probe: &mut Probe, _| {
                 probe.log.push(20);
                 suspend(probe, 21).ok();
@@ -326,9 +325,8 @@ mod tests {
             inner.resume(probe, 0).ok();
             probe.log.push(13);
             14
-        }) else {
-            return Err(Fatal::error("no stack"));
-        };
+        })
+        .expect("a fiber's stack");
         assert!(matches!(
             outer.resume(&mut probe, 0)?,
             Switched::Suspended(12)

@@ -2892,17 +2892,13 @@ mod tests {
     fn a_constant_array_is_immutable_and_finds_its_keys() {
         use crate::{Intern, Strings};
         let mut strings = Strings::new();
-        let Ok(s) = strings.intern(b"s") else {
-            return;
-        };
+        let s = strings.intern(b"s").expect("intern \"s\"");
         let entries = [
             (Key::Long(1), Zval::long(12)),
             (Key::Str(s), Zval::long(14)),
             (Key::Long(-3), Zval::long(16)),
         ];
-        let Ok(a) = strings.constant_array(&entries) else {
-            return;
-        };
+        let a = strings.constant_array(&entries).expect("a constant array");
         assert!(a.is_immutable());
         assert_eq!(a.refcount(), 1);
         assert!(!Zval::array(a).is_refcounted());
@@ -2970,9 +2966,7 @@ mod tests {
         drop(strings);
         let mut nothing = Nothing::new();
         let before = nothing.heap.memory_usage(false);
-        let Ok(copy) = nothing.heap.separate(e) else {
-            return;
-        };
+        let copy = nothing.heap.separate(e).expect("a separated copy");
         assert!(!copy.is_same(e) && !copy.is_immutable());
         assert_eq!(nothing.heap.memory_usage(false) - before, HEADER);
         assert!(e.is_empty() && e.is_immutable());
@@ -2990,19 +2984,15 @@ mod tests {
     fn a_separated_immutable_array_keeps_the_count_it_was_published_with() {
         let _alone = alone();
         let mut nothing = Nothing::new();
-        let Ok(a) = nothing
+        let a = nothing
             .strings
             .constant_array(&[(Key::Long(0), Zval::long(1))])
-        else {
-            return;
-        };
+            .expect("a constant array");
         assert!(a.is_immutable());
         assert!(!Zval::array(a).is_refcounted());
         let published = a.header().gc.refcount();
         for _ in 0..3 {
-            let Ok(copy) = nothing.heap.separate(a) else {
-                return;
-            };
+            let copy = nothing.heap.separate(a).expect("a separated copy");
             assert!(
                 !copy.is_same(a),
                 "an immutable array is copied, never written"
@@ -3026,13 +3016,9 @@ mod tests {
     fn an_add_new_of_a_held_key_is_a_second_row_the_lookup_finds() {
         let _alone = alone();
         let mut nothing = Nothing::new();
-        let (Ok(a), Ok(b), Ok(c)) = (
-            nothing.strings.intern(b"a"),
-            nothing.strings.intern(b"b"),
-            nothing.heap.array(),
-        ) else {
-            return;
-        };
+        let a = nothing.strings.intern(b"a").expect("intern \"a\"");
+        let b = nothing.strings.intern(b"b").expect("intern \"b\"");
+        let c = nothing.heap.array().expect("an array");
         for (key, n) in [(a, 1), (b, 2), (a, 3)] {
             assert!(
                 nothing
@@ -3083,7 +3069,7 @@ mod tests {
         let _alone = alone();
         let mut nothing = Nothing::new();
         let start = nothing.heap.memory_usage(false);
-        let Ok(a) = nothing.heap.array() else { return };
+        let a = nothing.heap.array().expect("an array");
         for i in 0..300 {
             assert!(matches!(
                 nothing.heap.array_append(a, Zval::long(i)),
@@ -3094,9 +3080,7 @@ mod tests {
         assert_eq!(nothing.heap.memory_usage(false) - start, 12344);
         assert_eq!(nothing.heap.memory_peak() - start, 12344);
         let stood = a.data_addr();
-        let Ok(block) = nothing.heap.block(5000) else {
-            return;
-        };
+        let block = nothing.heap.block(5000).expect("a block");
         assert_eq!(nothing.heap.memory_usage(false) - start, 12344 + 8192);
         for i in 300..900 {
             assert!(matches!(
@@ -3142,9 +3126,10 @@ mod tests {
         let _alone = alone();
         let mut nothing = Nothing::new();
         let start = nothing.heap.memory_usage(false);
-        let a = nothing.heap.array();
-        assert!(a.is_ok(), "the heap would not allocate a header");
-        let Ok(a) = a else { return };
+        let a = nothing
+            .heap
+            .array()
+            .expect("the heap would not allocate a header");
         assert_eq!(nothing.heap.memory_usage(false), start + 56);
         assert!(matches!(
             nothing.heap.array_append(a, Zval::long(1)),
@@ -3168,8 +3153,7 @@ mod tests {
         assert_eq!(a.table_size(), 16);
         assert_eq!(a.len(), 9);
         assert_eq!(a.next_free(), 9);
-        let key = nothing.heap.string(b"name");
-        let Ok(key) = key else { return };
+        let key = nothing.heap.string(b"name").expect("the string \"name\"");
         assert!(Heap::array_update(&mut nothing, a, Key::Str(key), Zval::long(10)).is_ok());
         assert!(!a.is_packed());
         assert_eq!(nothing.heap.memory_usage(false), start + 56 + 640 + 32);
@@ -3191,7 +3175,7 @@ mod tests {
         let _alone = alone();
         let mut nothing = Nothing::new();
         let start = nothing.heap.memory_usage(false);
-        let Ok(a) = nothing.heap.array() else { return };
+        let a = nothing.heap.array().expect("an array");
         let names: Vec<Vec<u8>> = (0..9).map(|i| format!("k{i}").into_bytes()).collect();
         for (i, name) in (0..8).zip(&names) {
             assert!(Heap::array_str_update(&mut nothing, a, name, Zval::long(i)).is_ok());
@@ -3221,7 +3205,7 @@ mod tests {
         let _alone = alone();
         let mut nothing = Nothing::new();
         let start = nothing.heap.memory_usage(false);
-        let Ok(a) = nothing.heap.array() else { return };
+        let a = nothing.heap.array().expect("an array");
         for i in 0..8 {
             assert!(matches!(
                 nothing.heap.array_append(a, Zval::long(i)),
@@ -3229,9 +3213,7 @@ mod tests {
             ));
         }
         assert_eq!(a.table_size(), 8);
-        let Ok(key) = nothing.heap.string(b"name") else {
-            return;
-        };
+        let key = nothing.heap.string(b"name").expect("the string \"name\"");
         assert!(Heap::array_update(&mut nothing, a, Key::Str(key), Zval::long(9)).is_ok());
         assert!(!a.is_packed());
         assert_eq!(a.table_size(), 16);
@@ -3250,7 +3232,7 @@ mod tests {
     fn the_next_free_element_is_php_s() {
         let _alone = alone();
         let mut nothing = Nothing::new();
-        let Ok(a) = nothing.heap.array() else { return };
+        let a = nothing.heap.array().expect("an array");
         assert_eq!(a.next_free(), i64::MIN);
         assert!(Heap::array_update(&mut nothing, a, Key::Long(-5), Zval::long(1)).is_ok());
         assert_eq!(a.next_free(), -4);
@@ -3289,10 +3271,8 @@ mod tests {
         let _alone = alone();
         let mut nothing = Nothing::new();
         let start = nothing.heap.memory_usage(false);
-        let Ok(a) = nothing.heap.array() else { return };
-        let Ok(key) = nothing.strings.intern(b"k") else {
-            return;
-        };
+        let a = nothing.heap.array().expect("an array");
+        let key = nothing.strings.intern(b"k").expect("intern \"k\"");
         assert!(Heap::array_update(&mut nothing, a, Key::Str(key), Zval::long(0)).is_ok());
         for i in 1..8 {
             assert!(matches!(
@@ -3346,7 +3326,7 @@ mod tests {
     fn a_packed_table_with_holes_and_its_trimmed_end() {
         let _alone = alone();
         let mut nothing = Nothing::new();
-        let Ok(a) = nothing.heap.array() else { return };
+        let a = nothing.heap.array().expect("an array");
         assert!(Heap::array_update(&mut nothing, a, Key::Long(0), Zval::long(0)).is_ok());
         assert!(Heap::array_update(&mut nothing, a, Key::Long(3), Zval::long(3)).is_ok());
         assert!(a.is_packed(), "a key below the table size keeps it packed");
@@ -3376,10 +3356,11 @@ mod tests {
         let _alone = alone();
         let mut nothing = Nothing::new();
         let start = nothing.heap.memory_usage(false);
-        let Ok(a) = nothing.heap.array() else { return };
-        let Ok(s) = nothing.heap.string(b"shared") else {
-            return;
-        };
+        let a = nothing.heap.array().expect("an array");
+        let s = nothing
+            .heap
+            .string(b"shared")
+            .expect("the string \"shared\"");
         assert!(matches!(
             nothing.heap.array_append(a, Zval::string(s)),
             Ok(true)
@@ -3389,9 +3370,7 @@ mod tests {
         nothing.heap.addref(z);
         assert_eq!(a.refcount(), 2);
         let before = nothing.heap.memory_usage(false);
-        let Ok(b) = nothing.heap.separate(a) else {
-            return;
-        };
+        let b = nothing.heap.separate(a).expect("a separated copy");
         assert!(!b.is_same(a), "two owners: a copy");
         assert_eq!(a.refcount(), 1);
         assert_eq!(b.refcount(), 1);
@@ -3433,18 +3412,12 @@ mod tests {
         {
             let mut nothing = Nothing::new();
             let start = nothing.heap.memory_usage(false);
-            let Ok(outer) = nothing.heap.array() else {
-                return;
-            };
-            let Ok(inner) = nothing.heap.array() else {
-                return;
-            };
-            let Ok(held) = nothing
+            let outer = nothing.heap.array().expect("an array");
+            let inner = nothing.heap.array().expect("an array");
+            let held = nothing
                 .heap
                 .resource_with(crate::ResourceType(1), Tracked(dropped.clone()))
-            else {
-                return;
-            };
+                .expect("a resource");
             let held = Zval::resource(held);
             assert!(held.as_resource().is_some());
             assert!(matches!(nothing.heap.array_append(inner, held), Ok(true)));
@@ -3452,12 +3425,10 @@ mod tests {
                 nothing.heap.array_append(outer, Zval::array(inner)),
                 Ok(true)
             ));
-            let Ok(swept) = nothing
+            let swept = nothing
                 .heap
                 .resource_with(crate::ResourceType(1), Tracked(dropped.clone()))
-            else {
-                return;
-            };
+                .expect("a resource");
             assert!(nothing.heap.resource_native::<Tracked>(swept).is_some());
             Heap::release(&mut nothing, Zval::array(outer));
             assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -3479,7 +3450,7 @@ mod tests {
     fn a_sort_keeps_keys_and_is_stable() {
         let _alone = alone();
         let mut nothing = Nothing::new();
-        let Ok(a) = nothing.heap.array() else { return };
+        let a = nothing.heap.array().expect("an array");
         for v in [3, 1, 2, 1] {
             assert!(matches!(
                 nothing.heap.array_append(a, Zval::long(v)),
@@ -3507,7 +3478,7 @@ mod tests {
     fn a_renumbered_sort_packs_the_table() {
         let _alone = alone();
         let mut nothing = Nothing::new();
-        let Ok(a) = nothing.heap.array() else { return };
+        let a = nothing.heap.array().expect("an array");
         for v in [3, 1, 2] {
             assert!(matches!(
                 nothing.heap.array_append(a, Zval::long(v)),
@@ -3542,25 +3513,23 @@ mod tests {
         let _alone = alone();
         let mut nothing = Nothing::new();
         let start = nothing.heap.memory_usage(false);
-        let Ok(a) = nothing.heap.array() else {
-            return;
-        };
+        let a = nothing.heap.array().expect("an array");
         let rows = 100_000;
         for i in 0..rows {
-            let (Ok(key), Ok(value)) = (
-                nothing.heap.string(format!("key{i}").as_bytes()),
-                nothing.heap.string(format!("value{i}").as_bytes()),
-            ) else {
-                return;
-            };
+            let key = nothing
+                .heap
+                .string(format!("key{i}").as_bytes())
+                .expect("a key");
+            let value = nothing
+                .heap
+                .string(format!("value{i}").as_bytes())
+                .expect("a value");
             assert!(
                 Heap::array_update(&mut nothing, a, Key::Str(key), Zval::string(value)).is_ok()
             );
             nothing.heap.release_string(key);
         }
-        let Ok(three) = nothing.heap.string(b"key3") else {
-            return;
-        };
+        let three = nothing.heap.string(b"key3").expect("the string \"key3\"");
         assert!(Heap::array_del(&mut nothing, a, Key::Str(three)));
         let size = a.table_size();
         let held = a.len();
@@ -3586,13 +3555,16 @@ mod tests {
 
     /// A hash of `n` string-keyed elements `k0`, `k1`, … holding their
     /// index.
-    fn hash_of(nothing: &mut Nothing, n: i64) -> Option<Arr> {
-        let a = nothing.heap.array().ok()?;
+    fn hash_of(nothing: &mut Nothing, n: i64) -> Arr {
+        let a = nothing.heap.array().expect("an array");
         for i in 0..n {
-            let key = nothing.strings.intern(format!("k{i}").as_bytes()).ok()?;
-            Heap::array_update(nothing, a, Key::Str(key), Zval::long(i)).ok()?;
+            let key = nothing
+                .strings
+                .intern(format!("k{i}").as_bytes())
+                .expect("a key");
+            Heap::array_update(nothing, a, Key::Str(key), Zval::long(i)).expect("an update");
         }
-        Some(a)
+        a
     }
 
     /// `zend_hash_rehash` with iterators (`Z/Zend/zend_hash.c:1395-1434`):
@@ -3603,16 +3575,12 @@ mod tests {
     fn a_rehash_moves_every_iterator_with_its_bucket() {
         let _alone = alone();
         let mut nothing = Nothing::new();
-        let Some(a) = hash_of(&mut nothing, 8) else {
-            return;
-        };
+        let a = hash_of(&mut nothing, 8);
         let at_five = nothing.heap.iterator_add(a, 5);
         let at_end = nothing.heap.iterator_add(a, 8);
         assert_eq!(a.iterators_count(), 2);
         for k in [b"k1", b"k2"] {
-            let Ok(key) = nothing.strings.intern(k) else {
-                return;
-            };
+            let key = nothing.strings.intern(k).expect("intern");
             assert!(Heap::array_del(&mut nothing, a, Key::Str(key)));
         }
         assert_eq!(
@@ -3652,13 +3620,9 @@ mod tests {
     fn a_trimmed_end_clamps_the_iterators_past_it() {
         let _alone = alone();
         let mut nothing = Nothing::new();
-        let Some(a) = hash_of(&mut nothing, 3) else {
-            return;
-        };
+        let a = hash_of(&mut nothing, 3);
         let past = nothing.heap.iterator_add(a, 3);
-        let Ok(key) = nothing.strings.intern(b"k2") else {
-            return;
-        };
+        let key = nothing.strings.intern(b"k2").expect("intern \"k2\"");
         assert!(Heap::array_del(&mut nothing, a, Key::Str(key)));
         assert_eq!(nothing.heap.iterator_pos(past, a), 2);
         nothing.heap.iterator_del(past);
@@ -3675,32 +3639,25 @@ mod tests {
     fn a_copy_carries_the_iterators_and_a_destroy_poisons_them() {
         let _alone = alone();
         let mut nothing = Nothing::new();
-        let Some(a) = hash_of(&mut nothing, 4) else {
-            return;
-        };
+        let a = hash_of(&mut nothing, 4);
         let walk = nothing.heap.iterator_add(a, 3);
-        let Ok(key) = nothing.strings.intern(b"k0") else {
-            return;
-        };
+        let key = nothing.strings.intern(b"k0").expect("intern \"k0\"");
         assert!(Heap::array_del(&mut nothing, a, Key::Str(key)));
         a.addref();
-        let Ok(copy) = nothing.heap.separate(a) else {
-            return;
-        };
+        let copy = nothing.heap.separate(a).expect("a separated copy");
         assert!(!copy.is_same(a));
         assert_eq!(copy.iterators_count(), 1, "the copy is walked too");
         assert_eq!(nothing.heap.iterator_pos(walk, copy), 2, "k3, compacted");
         assert_eq!(a.iterators_count(), 0, "and the source no longer");
-        let Ok((pos, held)) = nothing.heap.iterator_pos_ex(walk, copy) else {
-            return;
-        };
+        let (pos, held) = nothing
+            .heap
+            .iterator_pos_ex(walk, copy)
+            .expect("the iterator's position");
         assert!(held.is_same(copy) && pos == 2);
         Heap::release(&mut nothing, Zval::array(a));
         Heap::release(&mut nothing, Zval::array(copy));
         nothing.heap.iterator_del(walk);
-        let Some(b) = hash_of(&mut nothing, 1) else {
-            return;
-        };
+        let b = hash_of(&mut nothing, 1);
         let again = nothing.heap.iterator_add(b, 0);
         assert_eq!(again, walk, "the freed slot is the next one given");
         nothing.heap.iterator_del(again);
@@ -3720,9 +3677,8 @@ mod tests {
         let start = nothing.heap.memory_usage(false);
         let table = EmbeddedArr::new(64);
         let a = table.arr();
-        let (Ok(x), Ok(y)) = (nothing.heap.string(b"xx"), nothing.heap.string(b"yy")) else {
-            return;
-        };
+        let x = nothing.heap.string(b"xx").expect("the string \"xx\"");
+        let y = nothing.heap.string(b"yy").expect("the string \"yy\"");
         let strings = nothing.heap.memory_usage(false);
         assert!(
             nothing
@@ -3739,9 +3695,7 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(nothing.heap.memory_usage(false), strings + 64 * 40);
-        let Some(place) = a.str_value_ref(b"xx") else {
-            return;
-        };
+        let place = a.str_value_ref(b"xx").expect("the row \"xx\"");
         place.write(Zval::long(2));
         assert_eq!(a.str_find(b"xx").and_then(Zval::as_long), Some(2));
         assert_eq!(a.str_find(b"yy").and_then(Zval::as_indirect), Some(at));

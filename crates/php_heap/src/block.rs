@@ -122,9 +122,7 @@ mod tests {
         let mut heap = Heap::new();
         let start = heap.memory_usage(false);
         let peak = heap.memory_peak();
-        let Ok(mut block) = heap.block(25) else {
-            return;
-        };
+        let mut block = heap.block(25).expect("a block");
         assert_eq!(block.len(), 25);
         assert!(block.bytes().iter().all(|b| *b == 0));
         assert_eq!(heap.memory_usage(false) - start, 32);
@@ -132,23 +130,17 @@ mod tests {
         // A size in the same bin is the same slot, `zend_mm_realloc_heap`'s
         // reallocation in place.
         let stood = block.at;
-        let Ok(block) = heap.block_resize(block, 30) else {
-            return;
-        };
+        let block = heap.block_resize(block, 30).expect("a resized block");
         assert_eq!(block.at, stood);
         assert_eq!(heap.memory_usage(false) - start, 32);
-        let Ok(block) = heap.block_resize(block, 16384) else {
-            return;
-        };
+        let block = heap.block_resize(block, 16384).expect("a resized block");
         assert_eq!(&block.bytes()[..4], b"abc\0");
         assert_eq!(block.bytes()[16383], 0);
         assert_eq!(heap.memory_usage(false) - start, 16384);
         // php's `zend_mm_realloc_slow` restores the peak: the 32 and the
         // 16384 never count together.
         assert_eq!(heap.memory_peak(), peak.max(start + 16384));
-        let Ok(block) = heap.block_resize(block, 10) else {
-            return;
-        };
+        let block = heap.block_resize(block, 10).expect("a resized block");
         assert_eq!(&block.bytes()[..4], b"abc\0");
         assert_eq!(heap.memory_usage(false) - start, 16);
         heap.free_block(block);

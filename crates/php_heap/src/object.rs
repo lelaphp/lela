@@ -1263,12 +1263,8 @@ mod tests {
         for members_first in [false, true] {
             let mut r = Recorder::new();
             r.members_first = members_first;
-            let Ok(outer) = r.heap.object_with(3, 1, 0, 0u8) else {
-                return;
-            };
-            let Ok(inner) = r.heap.object(3, 0, 0) else {
-                return;
-            };
+            let outer = r.heap.object_with(3, 1, 0, 0u8).expect("an object");
+            let inner = r.heap.object(3, 0, 0).expect("an object");
             outer.write_slot(0, Zval::object(inner));
             let (o, i) = (outer.id(), inner.id());
             Heap::release(&mut r, Zval::object(outer));
@@ -1295,15 +1291,17 @@ mod tests {
         let start = r.heap.memory_usage(false);
         assert_eq!(start, crate::STARTED);
         assert_eq!(std::mem::size_of::<ObjHeader>(), 40);
-        let plain = r.heap.object(7, 0, 0);
-        assert!(plain.is_ok(), "the heap would not allocate an object");
-        let Ok(plain) = plain else { return };
+        let plain = r
+            .heap
+            .object(7, 0, 0)
+            .expect("the heap would not allocate an object");
         assert_eq!(r.heap.memory_usage(false) - start, 40);
         assert_eq!(plain.class(), 7);
         assert_eq!(plain.refcount(), 1);
-        let three = r.heap.object(7, 3, 0);
-        assert!(three.is_ok(), "the heap would not allocate an object");
-        let Ok(three) = three else { return };
+        let three = r
+            .heap
+            .object(7, 3, 0)
+            .expect("the heap would not allocate an object");
         // Forty and forty-eight, the 88 of php's `zend_object_alloc` in
         // the 96-byte bin.
         assert_eq!(r.heap.memory_usage(false) - start, 40 + 96);
@@ -1332,10 +1330,8 @@ mod tests {
     fn a_freed_handle_is_the_next_one_given() {
         let _alone = alone();
         let mut recorder = Recorder::new();
-        let ids: Vec<Option<Obj>> = (0..3).map(|_| recorder.heap.object(1, 0, 0).ok()).collect();
-        let [Some(first), Some(second), Some(third)] = ids[..] else {
-            return;
-        };
+        let [first, second, third] =
+            std::array::from_fn(|_| recorder.heap.object(1, 0, 0).expect("an object"));
         assert_eq!(
             (first.id(), second.id(), third.id()),
             (ObjectId(1), ObjectId(2), ObjectId(3))
@@ -1368,9 +1364,8 @@ mod tests {
     fn a_pinned_object_keeps_only_its_bytes_until_the_pin_goes() {
         let _alone = alone();
         let mut r = Recorder::new();
-        let (Ok(outer), Ok(inner)) = (r.heap.object(1, 1, 0), r.heap.object(1, 0, 0)) else {
-            return;
-        };
+        let outer = r.heap.object(1, 1, 0).expect("an object");
+        let inner = r.heap.object(1, 0, 0).expect("an object");
         let (id, member) = (outer.id(), inner.id());
         outer.write_slot(0, Zval::object(inner));
         let start = r.heap.memory_usage(false);
@@ -1390,9 +1385,7 @@ mod tests {
             96,
             "the member's forty bytes and the object's fifty-six are counted off"
         );
-        let Ok(other) = r.heap.object(1, 0, 0) else {
-            return;
-        };
+        let other = r.heap.object(1, 0, 0).expect("an object");
         assert_eq!(other.id(), id, "the id is reused at once");
         Heap::release(&mut r, Zval::object(other));
         let (held, served) = (r.heap.memory_usage(false), r.log.len());
@@ -1428,9 +1421,10 @@ mod tests {
             }
         }
         let start = r.heap.memory_usage(false);
-        let grown = r.heap.object(1, 0, 0);
-        assert!(grown.is_ok(), "the heap would not grow the store");
-        let Ok(grown) = grown else { return };
+        let grown = r
+            .heap
+            .object(1, 0, 0)
+            .expect("the heap would not grow the store");
         assert_eq!(grown.id(), ObjectId(INIT_SIZE));
         // Sixteen kilobytes for the new table, the old eight back, and
         // the object itself.
@@ -1451,12 +1445,11 @@ mod tests {
     fn a_release_to_zero_serves_the_destructor_once_and_frees_after_it() {
         let _alone = alone();
         let mut r = Recorder::new();
-        let Ok(o) = r.heap.object(1, 1, 0) else {
-            return;
-        };
-        let Ok(s) = r.heap.string(b"held by the slot") else {
-            return;
-        };
+        let o = r.heap.object(1, 1, 0).expect("an object");
+        let s = r
+            .heap
+            .string(b"held by the slot")
+            .expect("the string \"held by the slot\"");
         o.write_slot(0, Zval::string(s));
         let z = Zval::object(o);
         r.heap.addref(z);
@@ -1511,9 +1504,7 @@ mod tests {
             heap: Heap::new(),
             served: 0,
         };
-        let Ok(o) = k.heap.object(1, 0, 0) else {
-            return;
-        };
+        let o = k.heap.object(1, 0, 0).expect("an object");
         Heap::release(&mut k, Zval::object(o));
         assert_eq!(k.served, 1);
         assert_eq!(k.heap.objects(), 1, "the destructor's owner keeps it");
@@ -1531,11 +1522,9 @@ mod tests {
     fn an_array_of_objects_serves_the_destructors_in_order() {
         let _alone = alone();
         let mut r = Recorder::new();
-        let Ok(a) = r.heap.array() else { return };
+        let a = r.heap.array().expect("an array");
         for _ in 0..3 {
-            let Ok(o) = r.heap.object(1, 0, 0) else {
-                return;
-            };
+            let o = r.heap.object(1, 0, 0).expect("an object");
             assert_eq!(r.heap.array_append(a, Zval::object(o)), Ok(true));
         }
         assert_eq!(r.heap.objects(), 3);
@@ -1574,9 +1563,8 @@ mod tests {
         let start = r.heap.memory_usage(false);
         let o = r
             .heap
-            .object_with(3, 2, 0, Counted(Arc::clone(&dropped), 42));
-        assert!(o.is_ok(), "the heap would not allocate the payload");
-        let Ok(o) = o else { return };
+            .object_with(3, 2, 0, Counted(Arc::clone(&dropped), 42))
+            .expect("the heap would not allocate the payload");
         // Forty, two slots and sixteen of payload: the 88 of a 96 bin.
         assert_eq!(r.heap.memory_usage(false) - start, 96);
         assert_eq!(r.heap.native::<Counted>(o).map(|c| c.1), Some(42));
@@ -1600,12 +1588,10 @@ mod tests {
         assert_eq!(dropped.load(Relaxed), 1);
         assert_eq!(r.heap.memory_usage(false), start);
         // What no release reached is dropped with the heap, once.
-        let Ok(kept) = r
+        let kept = r
             .heap
             .object_with(3, 0, 0, Counted(Arc::clone(&dropped), 1))
-        else {
-            return;
-        };
+            .expect("an object");
         assert_eq!(
             kept.id(),
             ObjectId(1),
@@ -1622,25 +1608,22 @@ mod tests {
     fn a_clone_shares_what_the_old_holds_with_one_more_owner() {
         let _alone = alone();
         let mut r = Recorder::new();
-        let Ok(o) = r.heap.object(2, 1, 0) else {
-            return;
-        };
-        let Ok(s) = r.heap.string(b"in the slot") else {
-            return;
-        };
+        let o = r.heap.object(2, 1, 0).expect("an object");
+        let s = r
+            .heap
+            .string(b"in the slot")
+            .expect("the string \"in the slot\"");
         o.write_slot(0, Zval::string(s));
-        let Ok(table) = r.heap.object_properties(o) else {
-            return;
-        };
-        let Ok(name) = r.heap.string(b"dyn") else {
-            return;
-        };
+        let table = r.heap.object_properties(o).expect("the properties table");
+        let name = r.heap.string(b"dyn").expect("the string \"dyn\"");
         assert!(Heap::array_update(&mut r, table, crate::Key::Str(name), Zval::long(1)).is_ok());
         // The bucket took its own owner of the key.
         r.heap.release_string(name);
-        let Ok(Some(new)) = r.heap.object_clone(o, 0) else {
-            return;
-        };
+        let new = r
+            .heap
+            .object_clone(o, 0)
+            .expect("a clone")
+            .expect("an object with no payload clones");
         assert_eq!(new.id(), ObjectId(2));
         assert_eq!(new.class(), 2);
         assert_eq!(s.refcount(), 2);
@@ -1668,23 +1651,20 @@ mod tests {
         let _alone = alone();
         let dropped = Arc::new(AtomicU32::new(0));
         let mut r = Recorder::new();
-        let Ok(o) = r
+        let o = r
             .heap
             .object_with(3, 1, 0, Counted(Arc::clone(&dropped), 42))
-        else {
-            return;
-        };
-        let Ok(s) = r.heap.string(b"in the slot") else {
-            return;
-        };
+            .expect("an object");
+        let s = r
+            .heap
+            .string(b"in the slot")
+            .expect("the string \"in the slot\"");
         o.write_slot(0, Zval::string(s));
         let copied = r.heap.native::<Counted>(o).map_or(0, |c| c.1);
-        let Ok(new) = r
+        let new = r
             .heap
             .object_clone_with(o, 0, Counted(Arc::clone(&dropped), copied))
-        else {
-            return;
-        };
+            .expect("a clone");
         assert_eq!(new.id(), ObjectId(2));
         assert_eq!(new.class(), 3);
         assert_eq!(s.refcount(), 2);
@@ -1704,10 +1684,7 @@ mod tests {
     fn the_shutdown_walks_serve_each_once_in_php_s_orders() {
         let _alone = alone();
         let mut r = Recorder::new();
-        let ids: Vec<Option<Obj>> = (0..3).map(|_| r.heap.object(1, 0, 0).ok()).collect();
-        let [Some(_a), Some(b), Some(_c)] = ids[..] else {
-            return;
-        };
+        let [_a, b, _c] = std::array::from_fn(|_| r.heap.object(1, 0, 0).expect("an object"));
         Heap::release(&mut r, Zval::object(b));
         r.log.clear();
         Heap::call_destructors(&mut r);
@@ -1717,9 +1694,7 @@ mod tests {
         );
         // With reuse off, an object made now is above `top`, not in
         // `b`'s bucket.
-        let Ok(late) = r.heap.object(1, 0, 0) else {
-            return;
-        };
+        let late = r.heap.object(1, 0, 0).expect("an object");
         assert_eq!(late.id(), ObjectId(4));
         r.log.clear();
         Heap::free_object_storage(&mut r);
@@ -1744,24 +1719,16 @@ mod tests {
         use crate::{Direction, TableRow};
         let _alone = alone();
         let mut r = Recorder::new();
-        let Ok(o) = r.heap.object(2, 3, 0) else {
-            return;
-        };
+        let o = r.heap.object(2, 3, 0).expect("an object");
         o.write_slot(1, Zval::long(1));
-        let Ok(table) = r.heap.object_properties(o) else {
-            return;
-        };
+        let table = r.heap.object_properties(o).expect("the properties table");
         let mut keys = Vec::new();
         for (name, n) in [(&b"x"[..], 5), (&b"y"[..], 6)] {
-            let Ok(key) = r.heap.string(name) else {
-                return;
-            };
+            let key = r.heap.string(name).expect("a string");
             assert!(Heap::array_update(&mut r, table, crate::Key::Str(key), Zval::long(n)).is_ok());
             keys.push(key);
         }
-        let Ok(t) = r.heap.object_property_table(o) else {
-            return;
-        };
+        let t = r.heap.object_property_table(o).expect("the property table");
         assert_eq!((t.len(), t.used()), (5, 5));
         t.reset();
         assert_eq!(t.position(), 0);
@@ -1788,15 +1755,11 @@ mod tests {
         assert_eq!(t.position(), 2, "the tombstone is no row to a move");
         t.end();
         table.addref();
-        let Ok(copy) = r
+        let copy = r
             .heap
             .object_properties_copy(o, &[keys[0], keys[0], keys[1]])
-        else {
-            return;
-        };
-        let Some(copied) = o.property_table() else {
-            return;
-        };
+            .expect("a copy of the properties");
+        let copied = o.property_table().expect("the copied property table");
         assert!(copied.table().is_same(copy));
         assert_eq!(
             copied.seek(Direction::Forward).map(|(row, _)| row),

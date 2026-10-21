@@ -16,9 +16,7 @@ fn a_lent_block_is_counted_and_given_back_and_an_unlent_one_is_not_seen() {
     let _alone = alone();
     let mut heap = Heap::new();
     let start = heap.memory_usage(false);
-    let Ok(at) = heap.lend(|| emalloc(240)) else {
-        return;
-    };
+    let at = heap.lend(|| emalloc(240)).expect("the lend");
     assert_eq!(heap.memory_usage(false), start + 256, "the 256 bin");
     // SAFETY: a block the lend answered, freed under a lend of its heap.
     let freed = heap.lend(|| unsafe { efree(at) });
@@ -54,9 +52,8 @@ fn the_lend_ends_with_the_call_and_an_inner_lend_puts_the_outer_back() {
         let b = emalloc(64);
         (a, b)
     });
-    let Ok((Ok(a), b)) = lent else {
-        return;
-    };
+    let (a, b) = lent.expect("the outer lend");
+    let a = a.expect("the inner lend");
     assert_eq!(inner.memory_usage(false), inner_start + 64);
     assert_eq!(outer.memory_usage(false), outer_start + 64);
     let after = emalloc(64);
@@ -111,9 +108,7 @@ fn the_entries_keep_their_c_contracts_under_a_lend() {
         }
         (all_zero, kept, texts)
     });
-    let Ok((all_zero, kept, (dup, ndup))) = lent else {
-        return;
-    };
+    let (all_zero, kept, (dup, ndup)) = lent.expect("the lend");
     assert!(all_zero && kept);
     assert_eq!(dup.as_bytes(), b"Europe/Amsterdam");
     assert_eq!(ndup.as_bytes(), b"Europe");

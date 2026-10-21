@@ -281,12 +281,11 @@ mod tests {
             served: Vec::new(),
         };
         let start = rec.heap.memory_usage(false);
-        let Ok(s) = rec.heap.string(b"held by a ref") else {
-            return;
-        };
-        let Ok(r) = rec.heap.reference(Zval::string(s)) else {
-            return;
-        };
+        let s = rec
+            .heap
+            .string(b"held by a ref")
+            .expect("the string \"held by a ref\"");
+        let r = rec.heap.reference(Zval::string(s)).expect("a reference");
         assert_eq!(rec.heap.memory_usage(false) - start, 32 + 40);
         let z = Zval::reference(r);
         assert!(z.is_refcounted());
@@ -302,9 +301,7 @@ mod tests {
         assert_eq!(s.refcount(), 1);
         // A write through the reference: the string is released after
         // the write and the heap reads the cell and the long alone.
-        let Ok(o) = rec.heap.object(7, 0, 0) else {
-            return;
-        };
+        let o = rec.heap.object(7, 0, 0).expect("an object");
         Heap::reference_set(&mut rec, r, Zval::object(o));
         assert_eq!(rec.heap.memory_usage(false) - start, 32 + 40);
         assert_eq!(r.val().as_obj().map(|o| o.id().0), Some(1));
