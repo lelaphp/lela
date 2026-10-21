@@ -243,6 +243,8 @@ $a->x[] = $a;
 $a[0]->p[1] = $a;
 ",
     ));
+    // `zend_is_variable` takes no call, so the walk stops at
+    // `$a->m()`, and a `static` property's class is walked into.
     expect![[r#"
 
         $_main:

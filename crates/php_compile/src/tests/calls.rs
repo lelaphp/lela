@@ -6,7 +6,8 @@ use super::*;
 #[test]
 fn a_nested_call_sends_what_the_inner_call_returned() {
     let (unit, _strings) = unit_and_strings(b"<?php var_dump(extension_loaded('demo'));");
-    // php's, the inner call's `V0 = ` and the outer's bare
+    // php's dump: the inner call's result is `V0 = `, the outer
+    // call's is bare.
     expect![[r#"
 
         $_main:

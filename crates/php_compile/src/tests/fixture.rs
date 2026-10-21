@@ -253,9 +253,9 @@ pub(super) fn folded(source: &[u8]) -> Option<php_heap::Zval> {
         .flatten()
 }
 
-/// The oplines and the live-range table of one source's main op
-/// array, the header left off: what the oracle's dump prints after
-/// `; return  [] RANGE[0..0]`.
+/// What the dump of one source prints past the main op array's
+/// header, `; return  [] RANGE[0..0]`: its oplines and live-range
+/// table, then every other op array whole.
 pub(super) fn oplines_of(source: &[u8]) -> String {
     let dump = dump_of(source);
     dump.split_once("RANGE[0..0]\n")
