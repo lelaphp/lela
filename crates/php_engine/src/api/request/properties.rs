@@ -215,14 +215,6 @@ impl Request {
         self.properties.ref_sources.retain(|(at, _)| *at != word);
     }
 
-    /// `zend_get_executed_scope` (`Z/Zend/zend_execute_API.c:712`): the
-    /// chain walked from `EG(current_execute_data)` to the first link
-    /// that is user code or a function with a scope, and that link's
-    /// `func->common.scope`: a user method's class, a closure's bound
-    /// scope, and none for a plain user function or the main op array.
-    /// A native with no scope, `constant()` or `get_class()` called
-    /// from a method, is walked past, so the scope a native reads is
-    /// its caller's; a native method's is its own class.
     /// `get_fake_or_executed_scope`: the scope a property is placed and
     /// its visibility measured from, the scope a write named for itself
     /// ([`Request::write_property_as_declared`]) or the executed one.
@@ -497,10 +489,26 @@ impl Request {
         self.in_fake_scope(scope, f)
     }
 
+    /// `zend_get_executed_scope` (`Z/Zend/zend_execute_API.c:712`): the
+    /// chain walked from `EG(current_execute_data)` to the first link
+    /// that is user code or a function with a scope, and that link's
+    /// `func->common.scope`: a user method's class, a closure's bound
+    /// scope, and none for a plain user function or the main op array.
+    /// A native with no scope, `constant()` or `get_class()` called
+    /// from a method, is walked past, so the scope a native reads is
+    /// its caller's; a native method's is its own class.
+    ///
+    /// The user frame the loop is executing is the walk's first link
+    /// wherever nothing stands above it but calls being built
+    /// ([`crate::exec::Vm::executing_top`]), and its scope is read off
+    /// it without the walk, as php's first iteration reads `EX(func)`.
     pub(crate) fn executed_scope(&self) -> Option<ClassId> {
+        if let Some(frame) = self.vm.executing_top() {
+            return self.scope_of(crate::exec::FrameAt { req: self, frame });
+        }
         for link in self.chain() {
             let (function, closure, carried) = match link {
-                Link::Frame(_, state) => (state.function(), state.closure(), state.scope()),
+                Link::Frame(_, state) => return self.scope_of(state),
                 Link::Call(call) => (
                     call.function(),
                     call.closure(),
@@ -516,7 +524,7 @@ impl Request {
                 .or_else(|| self.method_class(function?))
                 .or(carried);
             let user = function.is_some_and(|function| self.user_function(function).is_some());
-            if scope.is_some() || user || matches!(link, Link::Frame(..)) {
+            if scope.is_some() || user {
                 return scope;
             }
         }

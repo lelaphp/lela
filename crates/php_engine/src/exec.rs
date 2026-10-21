@@ -1961,6 +1961,30 @@ impl Vm {
         (info.serving_native() && !info.leaving()).then_some(frame)
     }
 
+    /// The user frame the loop is executing, read off the top of the
+    /// stack where the chain's walk would hand it out first: no switch,
+    /// site or placeholder stands, which leaves the walk nothing to pass
+    /// over or expand, and every record above the frame is a call still
+    /// being built. None otherwise, a native's call being served or a
+    /// frame being left among them, which the walk answers. What
+    /// `zend_get_executed_scope` reads in one load from a user frame,
+    /// `EX(func)`, is read from this.
+    #[inline]
+    pub(crate) fn executing_top(&self) -> Option<&HeapFrame> {
+        if !(self.switches.is_empty() && self.sites.is_empty() && self.placeholders.is_empty()) {
+            return None;
+        }
+        let mut at = self.stack.len();
+        loop {
+            at = at.checked_sub(1)?;
+            let frame = self.stack.frame(FrameRef(u32::try_from(at).ok()?))?;
+            let info = frame.header().info;
+            if !info.building() {
+                return (info.user() && !info.leaving()).then_some(frame);
+            }
+        }
+    }
+
     /// The call being served where it is a native's, php's
     /// `execute_data` inside a native: [`Vm::current_at`] where that is
     /// one, and none while a user frame is current or a call is still
