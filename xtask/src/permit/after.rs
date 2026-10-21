@@ -43,13 +43,14 @@
 //! - A file history carries (#3220): `HEAD` moved during the call, its
 //!   blob for the file moved with it, and the file stands at the blob
 //!   `HEAD` holds now, as another session's merge or commit in the
-//!   checkout leaves it ([`landed`]). Putting it back would leave the
+//!   checkout leaves it ([`landed_at`]). Putting it back would leave the
 //!   checkout behind `HEAD`, and the next commit that stages it would
 //!   undo the merge. It is kept and named, and it settles nothing: no
 //!   reading, no record. What a commit carries is `done`'s to judge over
 //!   the diff. A write back to `HEAD`'s blob where `HEAD`'s blob for the
-//!   file did not move, a restore, is no change history made: it is
-//!   judged as any write is.
+//!   file did not move, a restore, is no change history made, and nor is
+//!   a commit the call's own line makes ([`moves_head`]): each is judged
+//!   as any write is.
 //! - A call with no record of its own: no tool-use id, a record a build
 //!   older than this one never wrote, a record already taken. Nothing is
 //!   put back without the blob it was before, and stderr says so.
@@ -128,7 +129,7 @@ struct Record {
 #[derive(Debug, Serialize, Deserialize)]
 struct Guarded {
     checkout: PathBuf,
-    /// The commit `HEAD` stood at as the call began, which [`landed`]
+    /// The commit `HEAD` stood at as the call began, which [`landed_at`]
     /// reads history from; `None` for an unborn `HEAD`, or in a record an
     /// older build wrote.
     #[serde(default)]
@@ -166,7 +167,7 @@ enum Verdict {
     /// named (#2247).
     Approved,
     /// History carries it, a commit `HEAD` moved to during the call
-    /// ([`landed`]): kept, named, and recorded nowhere (#3220).
+    /// ([`landed_at`]): kept, named, and recorded nowhere (#3220).
     Landed,
 }
 
@@ -298,7 +299,7 @@ fn began(call: &Call, file: Option<&Path>) -> Option<SystemTime> {
 }
 
 /// Every file of the record in the checkout `held` whose blob moved and
-/// that steer did not write: kept where history carries it ([`landed`]),
+/// that steer did not write: kept where history carries it ([`landed_at`]),
 /// put back where the call's line can write it and no operation in
 /// progress staged it, kept otherwise. A word of the line is read where
 /// its shell stands ([`shell_at`]).
@@ -308,7 +309,13 @@ fn sort_moved(record: &Record, call: &Call, held: &Path) -> Vec<Moved> {
     let mut moved = Vec::new();
     for guarded in record.checkouts.iter().filter(|g| g.checkout == held) {
         let cwd = shell_at(call, &guarded.checkout, &line);
-        let tip = operation::head(&guarded.checkout);
+        // A line that moves `HEAD` itself makes the history it would be
+        // credited with, so it is credited with none.
+        let tip = if moves_head(&line) {
+            None
+        } else {
+            operation::head(&guarded.checkout)
+        };
         for (path, was) in &guarded.blobs {
             let now = on_disk(&guarded.checkout.join(path));
             if now == *was {
@@ -317,7 +324,7 @@ fn sort_moved(record: &Record, call: &Call, held: &Path) -> Vec<Moved> {
             if steering && steered(&guarded.checkout, path, was.as_deref(), record.at) {
                 continue;
             }
-            let landed = landed(guarded, tip.as_deref(), path, now.as_deref());
+            let landed = landed_at(guarded, tip.as_deref(), path, now.as_deref());
             let place = OnDisk::new(&cwd, &guarded.checkout, path);
             let writes = landed.is_none() && writes::can_write(&line, &place);
             let approved = writes
@@ -327,13 +334,12 @@ fn sort_moved(record: &Record, call: &Call, held: &Path) -> Vec<Moved> {
                 .then(|| operation::staged(&guarded.checkout, path))
                 .flatten();
             let (verdict, said) = if let Some(moved_to) = landed {
-                let before = kept::before_the_call(was.as_deref());
-                let said = format!(
-                    "{path}: changed while the call ran to the blob HEAD holds for it, HEAD \
-                     having moved to {moved_to} during the call: history carries the change, so \
-                     it is kept as it stands and settles nothing; {before}"
+                let why = format!(
+                    "HEAD moved to {moved_to} during the call and holds it at this blob: history \
+                     carries the change, so it is kept as it stands and settles nothing"
                 );
-                (Verdict::Landed, said)
+                let said = kept_words(&guarded.checkout, path, &why, was.as_deref());
+                (Verdict::Landed, format!("{path}: {said}"))
             } else if let Some(admission) = &approved {
                 (Verdict::Approved, format!("{path}: {}", admission.said()))
             } else if let Some(operation) = staged {
@@ -387,8 +393,15 @@ pub(super) fn written(root: &Path, call: &Call, line: &argv::Line) -> (PathBuf, 
 /// commit `HEAD` stood at as the call began is not `tip`, the two hold
 /// different blobs for the file, and the file stands at `tip`'s, absent
 /// where `tip` holds none (#3220). `None` where any of it does not hold,
-/// or git cannot say, so the file is judged as any write is.
-fn landed(guarded: &Guarded, tip: Option<&str>, path: &str, now: Option<&str>) -> Option<String> {
+/// where `tip` is `None` since the call's line moves `HEAD` itself
+/// ([`moves_head`]), or where git cannot say, so the file is judged as
+/// any write is.
+fn landed_at(
+    guarded: &Guarded,
+    tip: Option<&str>,
+    path: &str,
+    now: Option<&str>,
+) -> Option<String> {
     let (began, tip) = (guarded.head.as_deref()?, tip?);
     if began == tip {
         return None;
@@ -610,6 +623,28 @@ fn runs_steer(command: &str) -> bool {
         .any(|argv| argv.invokes(&steer))
 }
 
+/// Whether one of the line's simple commands runs a git command that
+/// makes a commit or moves `HEAD`, `git -C <dir> commit` among them
+/// ([`argv::Argv::runs`]). Such a line's history is its own, so a write it
+/// commits is judged as the write it is ([`landed_at`]).
+fn moves_head(line: &argv::Line) -> bool {
+    const MOVES: [&str; 10] = [
+        "git commit",
+        "git merge",
+        "git pull",
+        "git rebase",
+        "git reset",
+        "git switch",
+        "git checkout",
+        "git cherry-pick",
+        "git revert",
+        "git am",
+    ];
+    line.commands()
+        .iter()
+        .any(|argv| MOVES.iter().any(|phrase| argv.runs(phrase)))
+}
+
 /// The one checkout a call is held in: the one it ran in, where its
 /// workspace moved by its line acts ([`operation::ran_in`]), and never
 /// the hook's own where the call ran elsewhere (#2597, #2607).
@@ -640,6 +675,9 @@ fn guard(checkout: &Path) -> Result<Option<Guarded>> {
     else {
         return Ok(None);
     };
+    // `HEAD` before the blobs: a commit that lands between the two reads
+    // leaves the blobs at its own, which then do not move.
+    let head = operation::head(checkout);
     let mut args = vec!["ls-files".to_owned(), "-s".to_owned(), "-z".to_owned()];
     args.push("--".to_owned());
     args.extend(scope.iter().map(|s| format!(":(glob){s}")));
@@ -676,7 +714,7 @@ fn guard(checkout: &Path) -> Result<Option<Guarded>> {
     }
     Ok(Some(Guarded {
         checkout: checkout.to_path_buf(),
-        head: operation::head(checkout),
+        head,
         text,
         blobs,
     }))

@@ -906,6 +906,20 @@ fn a_write_back_to_head_is_put_back_though_head_moved_for_another_file() {
     assert_denied(&root, &out, pin, "");
 }
 
+/// #3220's third side: a call whose line writes the pin and commits it
+/// moves `HEAD` itself, so the history is the call's own and credits it
+/// with nothing: the write is put back and denied as before.
+#[test]
+fn a_write_the_call_commits_itself_is_put_back_and_denied() {
+    let root = scratch("self-commit");
+    let pin = "oracle.toml";
+    let was = read(&root, pin);
+    let command = format!("echo '# committed' >> {pin} && git commit -qm pin -- {pin}");
+    let (out, _) = through_the_hooks(&root, "toolu_self_commit", &command);
+    assert_eq!(read(&root, pin), was, "put back");
+    assert_denied(&root, &out, pin, "# committed");
+}
+
 /// #2597: a call that writes a harness file in its own worktree, its
 /// shell moved there by a leading `cd`, is put back and denied there, in
 /// that checkout's store, and the main checkout is not touched.
