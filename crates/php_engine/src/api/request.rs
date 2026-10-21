@@ -1035,19 +1035,27 @@ impl Request {
     /// of its own that no host reads: the engine's startup, its end where
     /// the host left no sink ([`EngineBuilder::ends_into`](crate::engine::EngineBuilder::ends_into)), and a unit
     /// test's.
-    pub(crate) fn new(shared: Arc<Shared>, description: RequestDescription) -> Request {
+    pub(crate) fn new(shared: Arc<Shared>, description: RequestDescription) -> Box<Request> {
         Request::lent(shared, description, Box::new(response::Kept::default()))
     }
 
     /// A request the host lent `sink`, which every call reaches as the
     /// request makes it and which [`Request::release_sink`] hands back
     /// (design §4.3 seam 4).
+    ///
+    /// The request is boxed here, once, and held by its box wherever it
+    /// is served: php's request state is `EG()`, a global, so none of it
+    /// stands on the C stack its walks recurse down, and a `Request` held
+    /// by value put its ten kilobytes, and a copy, under every frame of
+    /// the request (#3209). A call of its own, so the value made in place
+    /// before it is boxed stands in this frame and no caller's.
     #[allow(clippy::too_many_lines)] // one line per field of the request
+    #[inline(never)]
     pub(crate) fn lent(
         shared: Arc<Shared>,
         description: RequestDescription,
         sink: Box<dyn OutputSink + Send>,
-    ) -> Request {
+    ) -> Box<Request> {
         let cwd = description.cwd.clone();
         let exit_status = description.exit_status;
         let output = Output::activate(description.web.as_ref());
@@ -1072,7 +1080,7 @@ impl Request {
             .arena
             .enter(|arena| shared.units.restart(&arena.files));
         let typed_ini = shared.typed_ini;
-        let mut req = Request {
+        let mut req = Box::new(Request {
             // Fields are made in the order written: the request stands
             // inside the engine before its deadlines are laid.
             _inside: crate::fork::Inside::enter(),
@@ -1154,7 +1162,7 @@ impl Request {
             hold: hold::Holding::default(),
             traces: traces::Scratch::default(),
             foreign: foreign::Table::default(),
-        };
+        });
         req.activate();
         req
     }

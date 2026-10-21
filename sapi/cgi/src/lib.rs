@@ -878,6 +878,12 @@ fn print(text: &str) -> i32 {
 /// line passed over while `cgi.check_shebang_line` is on, as `main` sets
 /// `CG(skip_shebang)` under it (`Z/sapi/cgi/cgi_main.c:2523`); with
 /// extended info where a shell's line carried `-e`.
+///
+/// A call of its own, as the CLI's engine is, so the builder, two
+/// kilobytes moved through each step, stands in a frame that is gone
+/// before the first request is served, and not under every frame of it
+/// (#3209).
+#[inline(never)]
 fn engine(
     ini: &[(Vec<u8>, Vec<u8>)],
     files: IniFiles,

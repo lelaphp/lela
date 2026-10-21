@@ -284,6 +284,11 @@ fn print(text: &str) -> i32 {
 /// under the line's `-c` and `-n`, its `HARDCODED_INI` and the line's
 /// `-d`s ([`php_sapi::start`]); with extended info where the line carried
 /// `-e`.
+///
+/// A call of its own, so the builder, two kilobytes moved through each
+/// step, stands in a frame that is gone before the first request is
+/// served, and not under every frame of it (#3209).
+#[inline(never)]
 fn engine(startup: &Startup) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = cli_defaults(Engine::builder())
@@ -355,6 +360,9 @@ fn cli_defaults(builder: EngineBuilder) -> EngineBuilder {
 /// #0 {main}
 /// 1
 /// ```
+///
+/// A call of its own, as [`engine`] is.
+#[inline(never)]
 fn server_engine(startup: &Startup) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = cli_defaults(Engine::builder())

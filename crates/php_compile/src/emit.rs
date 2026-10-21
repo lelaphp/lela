@@ -117,10 +117,11 @@ use php_unit::{
 
 use php_syntax::magic_const_name;
 
-use crate::{CompileError, Options, SourceKind, StackLimit};
+use crate::{CompileError, Options, Refused, SourceKind, StackLimit};
 use args::{Args, Callee, Plan};
 use attributes::InternalAttribute;
 use by_name::Symbols;
+use eval::Unfolded;
 use imports::{Imports, Namespacing, Symbol};
 use member::{Member, MethodName, PropName};
 use target::Target;
@@ -1539,7 +1540,7 @@ pub(crate) fn unit(
     let mut dynamic = Vec::with_capacity(emit.dynamic.len());
     for def in std::mem::take(&mut emit.dynamic) {
         let Some(def) = def else {
-            let refused = CompileError {
+            let refused = Refused {
                 level: Level::Error,
                 message: String::from(
                     "InternalError: a dynamic function definition whose body never landed",
@@ -1551,7 +1552,8 @@ pub(crate) fn unit(
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
-            };
+            }
+            .into();
             return Err(crate::refused_after(refused, raised, options, emit.strings));
         };
         dynamic.push(def);
@@ -1576,7 +1578,7 @@ pub(crate) fn unit(
     // `zend_mm`'s limit, raised as `E_ERROR` where the compile asked for
     // the memory.
     if let Err(limit) = parts.intern(options.kind, emit.strings) {
-        return Err(CompileError {
+        return Err(Refused {
             level: Level::Error,
             message: crate::fatal_message(limit).into(),
             line: lines.max(1),
@@ -1585,7 +1587,8 @@ pub(crate) fn unit(
             stage: crate::Stage::Compiling,
             declared: None,
             keys_made: u32::try_from(emit.runtime_keys.len()).unwrap_or(u32::MAX),
-        });
+        }
+        .into());
     }
     // Made where the caller takes it: the main op array is laid in the
     // unit as the unit is.
@@ -1710,20 +1713,23 @@ fn headers_numbered(oplines: &[Opline], safepoints: &[OplineIdx]) -> Result<(), 
         if target.0 as usize > at {
             continue;
         }
-        let refused = |what: &str| CompileError {
-            level: Level::Error,
-            message: format!(
-                "InternalError: {} at opline {at} jumps back to {:04} {what}",
-                op.opcode.name().trim_start_matches("ZEND_"),
-                target.0
-            )
-            .into(),
-            line: op.lineno,
-            raised: Vec::new(),
-            thrown: false,
-            stage: crate::Stage::Compiling,
-            declared: None,
-            keys_made: 0,
+        let refused = |what: &str| {
+            Refused {
+                level: Level::Error,
+                message: format!(
+                    "InternalError: {} at opline {at} jumps back to {:04} {what}",
+                    op.opcode.name().trim_start_matches("ZEND_"),
+                    target.0
+                )
+                .into(),
+                line: op.lineno,
+                raised: Vec::new(),
+                thrown: false,
+                stage: crate::Stage::Compiling,
+                declared: None,
+                keys_made: 0,
+            }
+            .into()
         };
         if !op.opcode.is_safepoint_site() {
             return Err(refused("with no safepoint column for its number"));
@@ -1867,7 +1873,7 @@ impl<'a> Emit<'a> {
     /// this compiler's sentence for what it cannot read yet, which the
     /// engine renders as the parse error #163 framed it as.
     fn fatal(&self, message: impl Into<Cow<'static, str>>) -> CompileError {
-        CompileError {
+        Refused {
             level: Level::Parse,
             message: message.into(),
             line: self.line,
@@ -1877,6 +1883,7 @@ impl<'a> Emit<'a> {
             declared: None,
             keys_made: 0,
         }
+        .into()
     }
 
     /// `zend_check_stack_limit`, at the top of `zend_compile_expr` and
@@ -1940,8 +1947,8 @@ impl<'a> Emit<'a> {
     pub(crate) fn constant_of(&mut self, expr: tree::Expr) -> Result<Option<Zval>, CompileError> {
         match self.constant_expr(expr) {
             Ok(value) => Ok(Some(value)),
-            Err(refused) if refused.level == Level::CompileError => Err(refused),
-            Err(_) => Ok(None),
+            Err(Unfolded::Refused(refused)) if refused.level == Level::CompileError => Err(refused),
+            Err(Unfolded::NoConstant(_) | Unfolded::Refused(_)) => Ok(None),
         }
     }
 
@@ -2099,12 +2106,10 @@ impl<'a> Emit<'a> {
             // `CompileError`, a top statement being walked by
             // `top_statements`.
             Stmt::HaltCompilerStmt(_) => {
-                return Err(CompileError {
-                    thrown: true,
-                    ..self.compile_error(
-                        "__HALT_COMPILER() can only be used from the outermost scope",
-                    )
-                });
+                let mut thrown = self
+                    .compile_error("__HALT_COMPILER() can only be used from the outermost scope");
+                thrown.thrown = true;
+                return Err(thrown);
             }
         }
         Ok(())
@@ -2783,10 +2788,9 @@ impl<'a> Emit<'a> {
         for id in ids {
             let element = &tree[*id];
             let Some(value) = element.value else {
-                return Err(CompileError {
-                    line: last,
-                    ..self.compile_error("Cannot use empty array elements in arrays")
-                });
+                let mut refused = self.compile_error("Cannot use empty array elements in arrays");
+                refused.line = last;
+                return Err(refused);
             };
             last = element.line();
             let key = element.key.map(|key| tree[key].key);
@@ -6695,15 +6699,18 @@ impl<'a> Emit<'a> {
         let shown = String::from_utf8_lossy(&attribute.name.0).into_owned();
         let targets = config.targets();
         let on_target = targets & target != 0;
-        let refused = |message: String| CompileError {
-            level: Level::Error,
-            message: message.into(),
-            line,
-            raised: Vec::new(),
-            thrown: false,
-            stage: crate::Stage::Compiling,
-            declared: None,
-            keys_made: 0,
+        let refused = |message: String| {
+            Refused {
+                level: Level::Error,
+                message: message.into(),
+                line,
+                raised: Vec::new(),
+                thrown: false,
+                stage: crate::Stage::Compiling,
+                declared: None,
+                keys_made: 0,
+            }
+            .into()
         };
         if !on_target && !delayed {
             return Err(refused(format!(
@@ -6734,10 +6741,9 @@ impl<'a> Emit<'a> {
                     .map(|class| class.name.as_slice()),
             )
         {
-            return Err(CompileError {
-                level: Level::CompileError,
-                ..refused(sentence)
-            });
+            let mut refused = refused(sentence);
+            refused.level = Level::CompileError;
+            return Err(refused);
         }
         Ok(on_target.then_some(config))
     }
@@ -7465,7 +7471,7 @@ impl<'a> Emit<'a> {
         }
         match linking.outcome {
             php_link::Linked::Linked => Ok(true),
-            php_link::Linked::Refused(refused) => Err(CompileError {
+            php_link::Linked::Refused(refused) => Err(Refused {
                 level: refused.refusal.level(),
                 message: refused.refusal.to_string().into(),
                 line: refused.site.line,
@@ -7474,7 +7480,8 @@ impl<'a> Emit<'a> {
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
-            }),
+            }
+            .into()),
         }
     }
 
@@ -8477,9 +8484,14 @@ impl<'a> Emit<'a> {
     fn const_refused(&mut self, expr: tree::Expr) -> Result<ConstExpr, CompileError> {
         match self.constant_expr(expr) {
             Ok(folded) => self.folded(folded),
-            Err(refused) if unread(&refused) => Err(refused),
-            Err(refused) if refused.level == Level::CompileError => Err(refused),
-            Err(_) => Err(self.compile_error("Constant expression contains invalid operations")),
+            Err(Unfolded::Refused(refused))
+                if unread(&refused) || refused.level == Level::CompileError =>
+            {
+                Err(refused)
+            }
+            Err(Unfolded::NoConstant(_) | Unfolded::Refused(_)) => {
+                Err(self.compile_error("Constant expression contains invalid operations"))
+            }
         }
     }
 
@@ -10101,15 +10113,18 @@ impl<'a> Emit<'a> {
             .oplines
             .get(at as usize)
             .map_or(self.line, |op| op.lineno);
-        let refused = |message: String| CompileError {
-            level: Level::CompileError,
-            message: message.into(),
-            line,
-            raised: Vec::new(),
-            thrown: false,
-            stage: crate::Stage::Compiling,
-            declared: None,
-            keys_made: 0,
+        let refused = |message: String| {
+            Refused {
+                level: Level::CompileError,
+                message: message.into(),
+                line,
+                raised: Vec::new(),
+                thrown: false,
+                stage: crate::Stage::Compiling,
+                declared: None,
+                keys_made: 0,
+            }
+            .into()
         };
         let name = self
             .constants
@@ -10215,7 +10230,7 @@ impl<'a> Emit<'a> {
                 .oplines
                 .get(op_num as usize)
                 .map_or(self.line, |op| op.lineno);
-            return Err(CompileError {
+            return Err(Refused {
                 level: Level::CompileError,
                 message: String::from(refused).into(),
                 line,
@@ -10224,7 +10239,8 @@ impl<'a> Emit<'a> {
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
-            });
+            }
+            .into());
         }
         Ok(())
     }
@@ -10836,7 +10852,7 @@ impl<'a> Emit<'a> {
     #[cold]
     #[inline(never)]
     fn compile_error(&self, message: impl Into<Cow<'static, str>>) -> CompileError {
-        CompileError {
+        Refused {
             level: Level::CompileError,
             message: message.into(),
             line: self.line,
@@ -10846,6 +10862,7 @@ impl<'a> Emit<'a> {
             declared: None,
             keys_made: 0,
         }
+        .into()
     }
 
     /// `zend_compile_for_expr_list`: every expression compiled in turn,
@@ -11268,23 +11285,48 @@ impl<'a> Emit<'a> {
             return self.memoized(node);
         }
         let inner = self.chain_inner.take() == Some(node);
+        match self.chain_end(node) {
+            Some(end) if !inner => self.chain_ended(node, fetch, end),
+            _ => self.expr_node(node, fetch),
+        }
+    }
+
+    /// [`Self::expr_under`] over a node a chain of `?->` ends at, every
+    /// `JMP_NULL` its compile laid down aimed past it. A call of its own,
+    /// so the value it holds for the aim is off the frame every other
+    /// node's compile answers straight into, a level of a nested
+    /// expression among them (#3208).
+    #[inline(never)]
+    fn chain_ended(
+        &mut self,
+        node: tree::Expr,
+        fetch: Fetch,
+        end: chain::ChainEnd,
+    ) -> Result<Where, CompileError> {
         let checkpoint = self.short_circuits.len();
         let value = self.expr_node(node, fetch)?;
-        if !inner && let Some(end) = self.chain_end(node) {
-            self.short_circuit_commit(checkpoint, value, end);
-        }
+        self.short_circuit_commit(checkpoint, value, end);
         Ok(value)
     }
 
     /// [`Self::expr`]'s body over one node, php's `zend_compile_expr_inner`.
     ///
-    /// Every compile of a nested expression passes through this frame
+    /// Every compile of a nested expression passes through this dispatch
     /// once per level, as php's passes through `zend_compile_expr_inner`,
     /// so it holds the dispatch and nothing else: each arm is one call
     /// whose answer is this function's, and what an arm reads of its
     /// node is read in that call's frame. An arm that read its node here
     /// would add its locals to every level of every nesting, which an
     /// unoptimised build lays out side by side rather than overlapping.
+    ///
+    /// Inlined into [`Self::expr_under`] and [`Self::chain_ended`], so
+    /// the dispatch answers straight into the slot `expr_under`'s caller
+    /// gave it and a left-nested chain stands in one 160-byte frame per
+    /// operator, php's two frames' size. Left to the optimiser, which
+    /// inlines it nowhere once it has two callers, it is a frame of its
+    /// own with its arms inlined into it, 2,048 bytes a level (#3208).
+    #[allow(clippy::inline_always)] // measured on #3208: the dispatch stands in expr_under's frame
+    #[inline(always)]
     fn expr_node(&mut self, expr: tree::Expr, fetch: Fetch) -> Result<Where, CompileError> {
         let line = expr.line(self.parsed);
         self.line = line;
@@ -11375,7 +11417,7 @@ impl<'a> Emit<'a> {
 
     /// `ZEND_AST_ZVAL`: a number, a string or a nowdoc as written.
     fn literal_expr(&mut self, expr: tree::Expr) -> Result<Where, CompileError> {
-        Ok(Where::Constant(self.constant_expr(expr)?))
+        self.constant_value(expr).map(Where::Constant)
     }
 
     /// `zend_compile_const`: `true`, `false` and `null` are the values
@@ -15426,11 +15468,11 @@ impl<'a> Emit<'a> {
     /// done
     /// ```
     ///
-    /// Like [`Self::expr_node`], every fold of a nested expression passes
-    /// through this frame once per level, as php's passes through
-    /// `zend_eval_const_expr`, so it holds the dispatch and nothing else:
-    /// each arm is one call whose answer is this function's.
-    pub(crate) fn constant_expr(&mut self, expr: tree::Expr) -> Result<Zval, CompileError> {
+    /// Every fold of a nested expression passes through this frame once
+    /// per level, as a compile passes through [`Self::expr_node`] and
+    /// php's through `zend_eval_const_expr`, so it holds the dispatch and
+    /// nothing else: each arm is one call whose answer is this function's.
+    pub(crate) fn constant_expr(&mut self, expr: tree::Expr) -> Result<Zval, Unfolded> {
         if let Some(evaluated) = self.evaluated(expr) {
             return evaluated;
         }
@@ -15444,42 +15486,42 @@ impl<'a> Emit<'a> {
         let folded = match expr {
             tree::Expr::ParenExpr(id) => self.paren_constant(id),
             tree::Expr::LiteralExpr(id) => self.literal_constant(id),
-            tree::Expr::MagicConstExpr(id) => self.magic_node(id),
+            tree::Expr::MagicConstExpr(id) => Ok(self.magic_node(id)?),
             tree::Expr::NowdocExpr(id) => self.nowdoc_constant(id),
             tree::Expr::NameRef(token) => self.name_constant(token),
             tree::Expr::InterpolatedStringExpr(_) | tree::Expr::HeredocExpr(_) => {
                 self.string_constant(expr)
             }
             // `zend_eval_const_expr` has no `ZEND_AST_SHELL_EXEC` case,
-            // so the node stands and [`Self::expr`] compiles it. The
-            // refusal is no `cannot read yet`, so a constant expression
-            // a declaration keeps ([`Self::const_expr`]) is refused in
-            // php's own words by [`Self::const_refused`].
-            tree::Expr::ShellExecExpr(_) => {
-                self.no_constant("a backtick operator is no constant expression")
-            }
+            // so the node stands and [`Self::expr`] compiles it. It is
+            // no constant and no `cannot read yet`, so a constant
+            // expression a declaration keeps ([`Self::const_expr`]) is
+            // refused in php's own words by [`Self::const_refused`].
+            tree::Expr::ShellExecExpr(_) => Err(Unfolded::NoConstant(
+                "a backtick operator is no constant expression",
+            )),
             tree::Expr::UnaryExpr(id) => self.unary_constant(id),
             // `zend_compile_cast` folds nothing, which [`Self::cast`]
             // copies: under a compile the cast is its opline, a `TMP`,
             // and no fold over it happens, so `-(float)"0"` is the `CAST`
             // and the `MUL` over it.
             tree::Expr::CastExpr(id) if eval_const_expr => self.cast_constant(id, line),
-            tree::Expr::CastExpr(_) => self.no_constant("a cast compiled is its opline"),
+            tree::Expr::CastExpr(_) => Err(Unfolded::NoConstant("a cast compiled is its opline")),
             tree::Expr::BinaryExpr(id) => self.operator_constant(id),
             tree::Expr::ArrayExpr(id) => self.array_constant(id),
-            tree::Expr::ListExpr(_) => {
-                Err(self.compile_error("Cannot use list() as standalone expression"))
-            }
+            tree::Expr::ListExpr(_) => Err(self
+                .compile_error("Cannot use list() as standalone expression")
+                .into()),
             // `zend_is_allowed_in_const_expr` allows `ZEND_AST_CALL`
             // for the first-class callable alone, `f(...)`, which folds
             // to nothing and is kept as the tree
             // ([`Self::const_callable`]).
             tree::Expr::CallExpr(_) if eval_const_expr => {
-                self.no_constant("a call is no constant expression")
+                Err(Unfolded::NoConstant("a call is no constant expression"))
             }
             tree::Expr::CallExpr(id) => self.call_constant(id, line),
             tree::Expr::CloneExpr(_) | tree::Expr::ExitExpr(_) => {
-                self.no_constant("a call is no constant expression")
+                Err(Unfolded::NoConstant("a call is no constant expression"))
             }
             tree::Expr::NewExpr(id) => self.new_constant(id),
             tree::Expr::SimpleVarExpr(_)
@@ -15488,7 +15530,7 @@ impl<'a> Emit<'a> {
             | tree::Expr::AssignExpr(_)
             | tree::Expr::PrefixIncDecExpr(_)
             | tree::Expr::PostfixIncDecExpr(_) => {
-                self.no_constant("a variable is no constant expression")
+                Err(Unfolded::NoConstant("a variable is no constant expression"))
             }
             // `zend_eval_const_expr` folds no property fetch, and
             // `zend_compile_prop` emits its fetch.
@@ -15497,80 +15539,83 @@ impl<'a> Emit<'a> {
             // ([`Self::dimension_fold`]); `zend_compile_dim` folds
             // nothing.
             tree::Expr::SubscriptExpr(id) if eval_const_expr => self.subscript_constant(id),
-            tree::Expr::SubscriptExpr(_) => {
-                self.no_constant("a dimension is read as the program serves")
-            }
+            tree::Expr::SubscriptExpr(_) => Err(Unfolded::NoConstant(
+                "a dimension is read as the program serves",
+            )),
             tree::Expr::ScopedAccessExpr(id) => self.scoped_constant(id, line),
-            tree::Expr::MatchExpr(_) => self.no_constant("a match is no constant expression"),
-            tree::Expr::ErrorSuppressExpr(_) => {
-                self.no_constant("a silenced expression is no constant expression")
+            tree::Expr::MatchExpr(_) => {
+                Err(Unfolded::NoConstant("a match is no constant expression"))
             }
-            tree::Expr::InstanceofExpr(_) => {
-                self.no_constant("an instanceof is no constant expression")
-            }
+            tree::Expr::ErrorSuppressExpr(_) => Err(Unfolded::NoConstant(
+                "a silenced expression is no constant expression",
+            )),
+            tree::Expr::InstanceofExpr(_) => Err(Unfolded::NoConstant(
+                "an instanceof is no constant expression",
+            )),
             // `zend_compile_conditional` folds nothing.
             tree::Expr::TernaryExpr(id) if eval_const_expr => self.ternary_constant(id),
-            tree::Expr::TernaryExpr(_) => {
-                self.no_constant("a conditional is folded by no compile of it")
-            }
+            tree::Expr::TernaryExpr(_) => Err(Unfolded::NoConstant(
+                "a conditional is folded by no compile of it",
+            )),
             // `zend_compile_throw` emits an opline whatever stands
             // around it, so a `throw` folds to nothing, and
             // `zend_compile_include_or_eval` emits its opline the same
             // way for a file and for an `eval`;
             // `zend_compile_isset_or_empty` emits one over the CV.
-            tree::Expr::ThrowExpr(_) => self.no_constant("a `throw` is no constant expression"),
-            tree::Expr::IncludeExpr(_) => {
-                self.no_constant("an `include` is no constant expression")
+            tree::Expr::ThrowExpr(_) => {
+                Err(Unfolded::NoConstant("a `throw` is no constant expression"))
             }
+            tree::Expr::IncludeExpr(_) => Err(Unfolded::NoConstant(
+                "an `include` is no constant expression",
+            )),
             tree::Expr::IssetExpr(_) | tree::Expr::EmptyExpr(_) => {
-                self.no_constant("an `isset` is no constant expression")
+                Err(Unfolded::NoConstant("an `isset` is no constant expression"))
             }
             tree::Expr::ClosureExpr(_) | tree::Expr::ArrowFnExpr(_) => {
-                self.no_constant("a closure is no constant expression")
+                Err(Unfolded::NoConstant("a closure is no constant expression"))
             }
             // `zend_compile_print` emits its `ECHO` whatever stands
             // around it, so a `print` folds to nothing.
-            tree::Expr::PrintExpr(_) => self.no_constant("a `print` is no constant expression"),
-            tree::Expr::EvalExpr(_) => self.no_constant("an `eval` is no constant expression"),
+            tree::Expr::PrintExpr(_) => {
+                Err(Unfolded::NoConstant("a `print` is no constant expression"))
+            }
+            tree::Expr::EvalExpr(_) => {
+                Err(Unfolded::NoConstant("an `eval` is no constant expression"))
+            }
             // `zend_compile_yield` emits its opline whatever stands
             // around it.
             tree::Expr::YieldExpr(_) | tree::Expr::YieldFromExpr(_) => {
-                self.no_constant("a `yield` is no constant expression")
+                Err(Unfolded::NoConstant("a `yield` is no constant expression"))
             }
         };
         self.record_fold(expr, &folded);
         folded
     }
 
-    /// A node [`Self::constant_expr`] folds to nothing, refused as `why`.
-    fn no_constant(&self, why: &'static str) -> Result<Zval, CompileError> {
-        Err(self.fatal(why))
-    }
-
     /// `'(' expr ')'`, which php's grammar drops: the inner node folded.
-    fn paren_constant(&mut self, id: NodeId<tree::ParenExpr>) -> Result<Zval, CompileError> {
+    fn paren_constant(&mut self, id: NodeId<tree::ParenExpr>) -> Result<Zval, Unfolded> {
         match self.parsed.tree[id].inner {
             Some(inner) => self.constant_expr(inner),
-            None => Err(self.unread("an expression inside parentheses")),
+            None => Err(self.unread("an expression inside parentheses").into()),
         }
     }
 
     /// `ZEND_AST_ZVAL` written as a number or a quoted string.
-    fn literal_constant(&mut self, id: NodeId<tree::LiteralExpr>) -> Result<Zval, CompileError> {
+    fn literal_constant(&mut self, id: NodeId<tree::LiteralExpr>) -> Result<Zval, Unfolded> {
         let node = &self.parsed.tree[id];
         let Some(token) = node.value else {
-            return Err(self.unread("a literal"));
+            return Err(self.unread("a literal").into());
         };
         match TokenValue::of(self.parsed, Holder::Scalar(node), token) {
             Some(TokenValue::Int(n)) => Ok(Zval::long(n)),
             Some(TokenValue::Float(f)) => Ok(Zval::double(f)),
-            Some(TokenValue::Bytes(bytes)) => self.string(&bytes),
-            None => Err(self.unread("a literal")),
+            Some(TokenValue::Bytes(bytes)) => Ok(self.string(&bytes)?),
+            None => Err(self.unread("a literal").into()),
         }
     }
 
     /// `ZEND_AST_ZVAL` written as a nowdoc.
-    fn nowdoc_constant(&mut self, id: NodeId<tree::NowdocExpr>) -> Result<Zval, CompileError> {
+    fn nowdoc_constant(&mut self, id: NodeId<tree::NowdocExpr>) -> Result<Zval, Unfolded> {
         let node = &self.parsed.tree[id];
         let mut bytes = Vec::new();
         for token in self.list(node.text) {
@@ -15580,13 +15625,15 @@ impl<'a> Emit<'a> {
                 bytes.extend(text);
             }
         }
-        self.string(&bytes)
+        Ok(self.string(&bytes)?)
     }
 
     /// `ZEND_AST_CONST`: what [`Self::named_constant`] substitutes.
-    fn name_constant(&mut self, token: TokenId) -> Result<Zval, CompileError> {
-        self.named_constant(token)?
-            .ok_or_else(|| self.fatal("a constant this compiler cannot read yet"))
+    fn name_constant(&mut self, token: TokenId) -> Result<Zval, Unfolded> {
+        self.named_constant(token)?.ok_or_else(|| {
+            self.fatal("a constant this compiler cannot read yet")
+                .into()
+        })
     }
 
     /// A `"…"` or a heredoc with nothing interpolated is one string
@@ -15598,7 +15645,7 @@ impl<'a> Emit<'a> {
     /// once for every fold that asked, each a temporary written and
     /// never read. Its line is the parser's and no compile's, so the
     /// compile that reads it leaves `CG(zend_lineno)` where it stood.
-    fn string_constant(&mut self, expr: tree::Expr) -> Result<Zval, CompileError> {
+    fn string_constant(&mut self, expr: tree::Expr) -> Result<Zval, Unfolded> {
         let tree = &self.parsed.tree;
         let parts: &[tree::StringPart] = match expr {
             tree::Expr::InterpolatedStringExpr(id) => tree.list(tree[id].parts),
@@ -15609,14 +15656,18 @@ impl<'a> Emit<'a> {
             .iter()
             .any(|part| !matches!(part, tree::StringPart::LiteralStringPart(_)))
         {
-            return Err(self.fatal("an interpolated string is no constant expression"));
+            return Err(Unfolded::NoConstant(
+                "an interpolated string is no constant expression",
+            ));
         }
         let line = self.line;
         let value = self.expr(expr);
         self.line = line;
         match value? {
             Where::Constant(value) => Ok(value),
-            _ => Err(self.fatal("an interpolated string is no constant expression")),
+            _ => Err(Unfolded::NoConstant(
+                "an interpolated string is no constant expression",
+            )),
         }
     }
 
@@ -15630,7 +15681,7 @@ impl<'a> Emit<'a> {
     /// arm refuses `null`, `false`, `true` and a double the long
     /// conversion would lose something of, and folds a string as it
     /// stands.
-    fn unary_constant(&mut self, id: NodeId<tree::UnaryExpr>) -> Result<Zval, CompileError> {
+    fn unary_constant(&mut self, id: NodeId<tree::UnaryExpr>) -> Result<Zval, Unfolded> {
         let node = &self.parsed.tree[id];
         let operand = self.required(node.operand, "a unary operator")?;
         match node.op.map(|op| self.kind(op)) {
@@ -15641,43 +15692,44 @@ impl<'a> Emit<'a> {
                     value,
                     Zval::long(if kind == SyntaxKind::MINUS { -1 } else { 1 }),
                 )
-                .ok_or_else(|| self.fatal("arithmetic this compiler cannot fold yet"))
+                .ok_or(Unfolded::NoConstant(
+                    "arithmetic this compiler cannot fold yet",
+                ))
             }
             Some(SyntaxKind::BANG) => {
                 let value = self.constant_expr(operand)?;
                 if value.as_double().is_some() {
-                    return Err(self.fatal("a `!` over a float is left to its opcode"));
+                    return Err(Unfolded::NoConstant(
+                        "a `!` over a float is left to its opcode",
+                    ));
                 }
                 Ok(Zval::bool(!truth(value)))
             }
             Some(SyntaxKind::TILDE) => {
                 let value = self.constant_expr(operand)?;
-                self.bw_not_fold(value)?
-                    .ok_or_else(|| self.fatal("a `~` over this constant is left to its opcode"))
+                self.bw_not_fold(value)?.ok_or(Unfolded::NoConstant(
+                    "a `~` over this constant is left to its opcode",
+                ))
             }
-            _ => Err(self.unread("a unary operator")),
+            _ => Err(self.unread("a unary operator").into()),
         }
     }
 
     /// `zend_eval_const_expr`'s `ZEND_AST_CAST` arm: the operand folded,
     /// then `zend_try_ct_eval_cast` over it. `(unset)` is refused where
     /// it stands, as php's grammar puts it.
-    fn cast_constant(
-        &mut self,
-        id: NodeId<tree::CastExpr>,
-        line: u32,
-    ) -> Result<Zval, CompileError> {
+    fn cast_constant(&mut self, id: NodeId<tree::CastExpr>, line: u32) -> Result<Zval, Unfolded> {
         let node = &self.parsed.tree[id];
         let to = self.cast_to(node.op, line)?;
         let operand = self.required(node.operand, "a cast")?;
         let value = self.constant_expr(operand)?;
         self.cast_fold(to, value)?
-            .ok_or_else(|| self.fatal("a cast this compiler cannot fold"))
+            .ok_or(Unfolded::NoConstant("a cast this compiler cannot fold"))
     }
 
     /// `zend_eval_const_expr`'s `ZEND_AST_AND`, `ZEND_AST_OR`,
     /// `ZEND_AST_COALESCE` and `ZEND_AST_BINARY_OP` arms.
-    fn operator_constant(&mut self, id: NodeId<tree::BinaryExpr>) -> Result<Zval, CompileError> {
+    fn operator_constant(&mut self, id: NodeId<tree::BinaryExpr>) -> Result<Zval, Unfolded> {
         let node = &self.parsed.tree[id];
         let left = node.lhs;
         let right = self.required(node.rhs, "a binary operator")?;
@@ -15692,41 +15744,37 @@ impl<'a> Emit<'a> {
             Some(SyntaxKind::QUESTION_QUESTION) => self.coalesce_constant(id, left, right),
             Some(kind) => match binary_op(kind) {
                 Some(op) => self.binary_constant(op, left, right),
-                None => Err(self.unread("a binary operator")),
+                None => Err(self.unread("a binary operator").into()),
             },
-            None => Err(self.unread("a binary operator")),
+            None => Err(self.unread("a binary operator").into()),
         }
     }
 
     /// `ZEND_AST_ARRAY` whose every element folds.
-    fn array_constant(&mut self, id: NodeId<tree::ArrayExpr>) -> Result<Zval, CompileError> {
+    fn array_constant(&mut self, id: NodeId<tree::ArrayExpr>) -> Result<Zval, Unfolded> {
         let elements = self.list(self.parsed.tree[id].array_elements);
-        self.constant_array(elements)?
-            .ok_or_else(|| self.fatal("an array expression that is no constant"))
+        self.constant_array(elements)?.ok_or(Unfolded::NoConstant(
+            "an array expression that is no constant",
+        ))
     }
 
     /// A call of a name in [`crate::special`]'s table over constants
     /// (`zend_try_compile_special_func`), the arguments read before the
     /// callee.
-    fn call_constant(
-        &mut self,
-        id: NodeId<tree::CallExpr>,
-        line: u32,
-    ) -> Result<Zval, CompileError> {
+    fn call_constant(&mut self, id: NodeId<tree::CallExpr>, line: u32) -> Result<Zval, Unfolded> {
         let node = &self.parsed.tree[id];
         let (callee, args) = (node.callee, node.args);
         let arguments = self.arguments(args, line)?;
         if let Args::CallableConvert = arguments {
-            return Err(self.fatal("a first-class callable folds to no constant"));
+            return Err(Unfolded::NoConstant(
+                "a first-class callable folds to no constant",
+            ));
         }
         let Some(arguments) = arguments.positional() else {
-            return Err(walk::unread(
-                line,
-                "a named argument in a constant expression",
-            ));
+            return Err(walk::unread(line, "a named argument in a constant expression").into());
         };
         let tree::Expr::NameRef(name) = self.peel(callee) else {
-            return Err(self.fatal("a call is no constant expression"));
+            return Err(Unfolded::NoConstant("a call is no constant expression"));
         };
         let name = self.text(name).to_vec();
         let (resolved, runtime) = self.function_name(&name);
@@ -15735,14 +15783,11 @@ impl<'a> Emit<'a> {
         } else {
             self.special_constant(self.arena.lowercase(resolved), &arguments)?
         };
-        folded.ok_or_else(|| self.fatal("a call this compiler cannot fold"))
+        folded.ok_or(Unfolded::NoConstant("a call this compiler cannot fold"))
     }
 
     /// `zend_eval_const_expr`'s `ZEND_AST_DIM` arm.
-    fn subscript_constant(
-        &mut self,
-        id: NodeId<tree::SubscriptExpr>,
-    ) -> Result<Zval, CompileError> {
+    fn subscript_constant(&mut self, id: NodeId<tree::SubscriptExpr>) -> Result<Zval, Unfolded> {
         let node = &self.parsed.tree[id];
         let (base, index) = (node.base, node.index);
         self.dimension_fold(base, index)
@@ -15758,7 +15803,7 @@ impl<'a> Emit<'a> {
         &mut self,
         id: NodeId<tree::ScopedAccessExpr>,
         line: u32,
-    ) -> Result<Zval, CompileError> {
+    ) -> Result<Zval, Unfolded> {
         match self.scoped_of(id, line)? {
             Scoped::Constant { class, name } => {
                 let operand = self.evaluated_class(class)?;
@@ -15769,13 +15814,17 @@ impl<'a> Emit<'a> {
                     },
                     None => None,
                 };
-                folded.ok_or_else(|| self.fatal("a class constant is fetched at run time"))
+                folded.ok_or(Unfolded::NoConstant(
+                    "a class constant is fetched at run time",
+                ))
             }
-            Scoped::Property { .. } => Err(self.fatal("a variable is no constant expression")),
+            Scoped::Property { .. } => {
+                Err(Unfolded::NoConstant("a variable is no constant expression"))
+            }
             Scoped::ClassName { class } => {
                 let operand = self.decoded_class(class)?;
                 self.resolved_class_name(operand)?
-                    .ok_or_else(|| self.fatal("a class name is fetched at run time"))
+                    .ok_or(Unfolded::NoConstant("a class name is fetched at run time"))
             }
         }
     }
@@ -15791,7 +15840,7 @@ impl<'a> Emit<'a> {
         op: BinaryOp,
         left: tree::Expr,
         right: tree::Expr,
-    ) -> Result<Zval, CompileError> {
+    ) -> Result<Zval, Unfolded> {
         let (left, right) = self.constant_pair(left, right)?;
         self.constant_operands(op, left, right)
     }
@@ -15804,22 +15853,26 @@ impl<'a> Emit<'a> {
         op: BinaryOp,
         left: Zval,
         right: Zval,
-    ) -> Result<Zval, CompileError> {
+    ) -> Result<Zval, Unfolded> {
         if op == BinaryOp::Concat {
-            return self
-                .concat_fold(left, right)?
-                .ok_or_else(|| self.fatal("a concatenation this compiler cannot fold yet"));
+            return self.concat_fold(left, right)?.ok_or(Unfolded::NoConstant(
+                "a concatenation this compiler cannot fold yet",
+            ));
         }
         if bitwise(op) {
             return self
                 .bitwise_fold(op, left, right)?
-                .ok_or_else(|| self.fatal("a bitwise operator this compiler cannot fold yet"));
+                .ok_or(Unfolded::NoConstant(
+                    "a bitwise operator this compiler cannot fold yet",
+                ));
         }
         if compares(op) {
             return Ok(self.compare_fold(op, left, right));
         }
         self.arithmetic_fold(op, left, right)?
-            .ok_or_else(|| self.fatal("arithmetic this compiler cannot fold yet"))
+            .ok_or(Unfolded::NoConstant(
+                "arithmetic this compiler cannot fold yet",
+            ))
     }
 
     /// `zend_eval_const_expr`'s `ZEND_AST_DIM` arm
@@ -15850,12 +15903,12 @@ impl<'a> Emit<'a> {
         &mut self,
         base: tree::Expr,
         index: Option<tree::Expr>,
-    ) -> Result<Zval, CompileError> {
+    ) -> Result<Zval, Unfolded> {
         let Some(index) = index else {
-            return Err(self.compile_error("Cannot use [] for reading"));
+            return Err(self.compile_error("Cannot use [] for reading").into());
         };
         let (container, dim) = self.constant_pair(base, index)?;
-        let refused = |emit: &Self| emit.fatal("a dimension this compiler leaves to the request");
+        let refused = || Unfolded::NoConstant("a dimension this compiler leaves to the request");
         if let Some(array) = container.as_arr() {
             let key = match (dim.as_long(), dim.as_str()) {
                 (Some(n), _) => Key::Long(n),
@@ -15863,28 +15916,28 @@ impl<'a> Emit<'a> {
                     Some(n) => Key::Long(n),
                     None => Key::Str(s),
                 },
-                (None, None) => return Err(refused(self)),
+                (None, None) => return Err(refused()),
             };
-            return array.get(key).ok_or_else(|| refused(self));
+            return array.get(key).ok_or_else(refused);
         }
         if let Some(text) = container.as_str() {
             let offset = match (dim.as_long(), dim.as_str()) {
                 (Some(n), _) => n,
                 (None, Some(s)) => match numeric_prefix(s.bytes()) {
                     Some((Number::Long(n), _)) => n,
-                    _ => return Err(refused(self)),
+                    _ => return Err(refused()),
                 },
-                (None, None) => return Err(refused(self)),
+                (None, None) => return Err(refused()),
             };
             let byte = usize::try_from(offset)
                 .ok()
                 .and_then(|at| text.bytes().get(at).copied());
             return match byte {
-                Some(byte) => self.string(&[byte]),
-                None => Err(refused(self)),
+                Some(byte) => Ok(self.string(&[byte])?),
+                None => Err(refused()),
             };
         }
-        Err(refused(self))
+        Err(refused())
     }
 
     /// `zend_try_ct_eval_array` (`Z/Zend/zend_compile.c:10085`) over an
@@ -20018,7 +20071,7 @@ mod tests {
         let refused = |oplines: &[Opline]| {
             headers_numbered(oplines, &entry)
                 .err()
-                .map(|refused| (refused.level, refused.message.into_owned()))
+                .map(|refused| (refused.level, refused.message.to_string()))
         };
         assert_eq!(
             refused(&[jump(Opcode::Nop, 0, 0), jump(Opcode::Jmp, 0, 2)]),

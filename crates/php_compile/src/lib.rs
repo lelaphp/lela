@@ -319,12 +319,48 @@ impl SourceKind {
 /// for a fatal after the parse every one of them, then the compiler's
 /// own; each in the order raised, for the engine to render before the
 /// fatal as php's request shows them.
+///
+/// The refusal is a pointer's width, its [`Refused`] boxed and read
+/// through `Deref`: every compile answers a `Result<_, CompileError>`,
+/// and a nested expression keeps one answer a level on the stack while
+/// the level below compiles, so the answer is as wide as what succeeds,
+/// the 24 bytes of where an expression's value stands, and not the 72
+/// of a refusal held in place (#3208).
+#[derive(Clone, PartialEq)]
+pub struct CompileError(Box<Refused>);
+
+impl From<Refused> for CompileError {
+    fn from(refused: Refused) -> CompileError {
+        CompileError(Box::new(refused))
+    }
+}
+
+impl std::ops::Deref for CompileError {
+    type Target = Refused;
+
+    fn deref(&self) -> &Refused {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for CompileError {
+    fn deref_mut(&mut self) -> &mut Refused {
+        &mut self.0
+    }
+}
+
+impl std::fmt::Debug for CompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// What a [`CompileError`] says, each field read through it.
 #[derive(Debug, Clone, PartialEq)]
-pub struct CompileError {
+pub struct Refused {
     pub level: Level,
     /// php's text, a constant one borrowed where it is one, so a
-    /// refusal the compiler makes and drops, a fold that finds no
-    /// constant among them, allocates nothing.
+    /// refusal in the compiler's own constant words allocates no text.
     pub message: Cow<'static, str>,
     pub line: u32,
     pub raised: Vec<Diagnostic>,
@@ -332,7 +368,7 @@ pub struct CompileError {
     /// `zend_throw_exception(zend_ce_compile_error)` from the parser's
     /// modifier lists and two statements, rather than raising it as a
     /// fatal: a `try` around the `include` or the `eval` catches it, and
-    /// uncaught it renders as the fatal at [`CompileError::level`].
+    /// uncaught it renders as the fatal at [`Refused::level`].
     pub thrown: bool,
     /// Where php stood when it refused, which is where `zend_error`
     /// places it.
@@ -368,7 +404,7 @@ pub struct Declared<U = Unit> {
     /// [`Unit::top_level`] in the order it landed.
     pub unit: U,
     /// For each of the unit's [`Unit::top_level`], how many of the
-    /// refusal's [`CompileError::raised`] php had raised when it landed.
+    /// refusal's [`Refused::raised`] php had raised when it landed.
     pub raised_before: Vec<usize>,
 }
 
@@ -376,7 +412,7 @@ pub struct Declared<U = Unit> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Stage {
     /// Compiling it, `zend_is_compiling()`: the refusal stands in the
-    /// file at [`CompileError::line`].
+    /// file at [`Refused::line`].
     #[default]
     Compiling,
     /// Opening it for the scanner, before anything compiled
@@ -532,8 +568,8 @@ fn compile_in(
         },
         SourceKind::Eval(_) => multibyte::Source::Eval,
     };
-    let opened =
-        multibyte::open(multibyte.encodings, source, from).map_err(|refused| CompileError {
+    let opened = multibyte::open(multibyte.encodings, source, from).map_err(|refused| {
+        CompileError::from(Refused {
             level: Level::CompileError,
             message: refused.message().into(),
             line: 0,
@@ -542,7 +578,8 @@ fn compile_in(
             stage: Stage::Opening,
             declared: None,
             keys_made: 0,
-        })?;
+        })
+    })?;
     let parsed = php_syntax::parse(arena, &opened.text, &syntax_options(options));
     let scanning = multibyte::Scanning {
         original: source.get(opened.bom..).unwrap_or_default(),
@@ -577,7 +614,7 @@ fn export_in(
 ) -> Result<Vec<u8>, CompileError> {
     let parsed = php_syntax::parse(arena, source, &syntax_options(options));
     if let Some(fatal) = parsed.diagnostics.iter().find(|d| d.level.is_fatal()) {
-        return Err(CompileError {
+        return Err(Refused {
             level: level_of(fatal.level),
             message: fatal.message.clone().into(),
             line: fatal.line,
@@ -586,7 +623,8 @@ fn export_in(
             stage: Stage::Compiling,
             declared: None,
             keys_made: 0,
-        });
+        }
+        .into());
     }
     emit::export(arena, &parsed, options, strings)
 }
@@ -652,7 +690,7 @@ fn compile_scanned<'p>(
         }
         let level = level_of(diagnostic.level);
         if diagnostic.level.is_fatal() {
-            return Err(CompileError {
+            return Err(Refused {
                 level,
                 message: diagnostic.message.clone().into(),
                 line: diagnostic.line,
@@ -661,7 +699,8 @@ fn compile_scanned<'p>(
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
-            });
+            }
+            .into());
         }
         raised.push(Diagnostic {
             level,

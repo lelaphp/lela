@@ -575,7 +575,7 @@ fn what_stands_beside_new_and_the_calls_is_refused_as_not_yet_read() {
         let mut strings = php_heap::Strings::new();
         compile_parsed(source, &bundled(), &mut strings)
             .err()
-            .map(|e| e.message.into_owned())
+            .map(|e| e.message.to_string())
     };
     assert_eq!(refused(b"<?php echo E::class;").as_deref(), None);
     assert_eq!(refused(b"<?php f($o->p, name: $o->q);").as_deref(), None);
@@ -755,7 +755,7 @@ fn a_class_reference_of_the_scope_or_an_expression_compiles_as_php_emits_it() {
     "#]].assert_eq(&oplines_of(
             b"<?php echo self::$p; new $c; var_dump($o instanceof $c); echo $o::X, static::Y; $o::m(); parent::$q = 1; new static;"
         ));
-    let refused_message = |source: &[u8]| refused(source).map(|e| e.message.into_owned());
+    let refused_message = |source: &[u8]| refused(source).map(|e| e.message.to_string());
     assert_eq!(
         refused_message(b"<?php function f() { return self::X; }").as_deref(),
         Some("Cannot use \"self\" when no class scope is active")
@@ -855,7 +855,7 @@ fn a_nullsafe_chain_written_to_is_phps_compile_error() {
     ];
     for (source, message) in cases {
         assert_eq!(
-            refused(source).map(|e| e.message.into_owned()),
+            refused(source).map(|e| e.message.to_string()),
             Some(String::from(*message)),
             "{}",
             String::from_utf8_lossy(source)

@@ -25,7 +25,7 @@ use std::borrow::Cow;
 use php_syntax::tree::{self, DeclareStmt, TokenId};
 use php_syntax::{Arena, Holder, Parsed, Span, SyntaxKind, TokenValue};
 
-use crate::{CompileError, Level, Options};
+use crate::{CompileError, Level, Options, Refused};
 
 /// One encoding, as the functions that fetched it name it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -433,7 +433,7 @@ pub(crate) struct Refusal {
 impl Refusal {
     /// The fatal, with what was raised before it.
     pub(crate) fn error(&self, raised: Vec<php_unit::Diagnostic>) -> CompileError {
-        CompileError {
+        Refused {
             level: self.level,
             message: self.message.clone().into(),
             line: self.line,
@@ -443,6 +443,7 @@ impl Refusal {
             declared: None,
             keys_made: 0,
         }
+        .into()
     }
 }
 
@@ -1023,7 +1024,7 @@ mod tests {
         assert_eq!(
             refused
                 .err()
-                .map(|e| (e.message.into_owned(), e.line, e.thrown, e.raised.len())),
+                .map(|e| (e.message.to_string(), e.line, e.thrown, e.raised.len())),
             Some(("Encoding must be a literal".to_owned(), 2, true, 1))
         );
     }
