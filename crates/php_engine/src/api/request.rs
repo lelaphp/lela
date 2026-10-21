@@ -64,6 +64,7 @@ mod classes;
 use classes::AccelServed;
 pub use classes::Symbols;
 mod constants;
+mod declared_bytes;
 pub(crate) use constants::{ConstantAt, halt_offset_key};
 mod diagnostics;
 pub use diagnostics::Diagnostics;

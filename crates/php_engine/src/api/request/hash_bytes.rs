@@ -38,7 +38,7 @@ pub(crate) struct HashBytes {
 
 impl HashBytes {
     /// `zend_hash_init(ht, size, ...)` over a table embedded in `EG`.
-    fn embedded(size: u32) -> HashBytes {
+    pub(super) fn embedded(size: u32) -> HashBytes {
         HashBytes {
             size: check_size(size),
             ..HashBytes::default()
