@@ -14,7 +14,7 @@ mod common {
     pub mod repo;
     pub mod run;
 }
-use common::repo::scratch_workspace;
+use common::repo::{Repo, scratch_workspace};
 use common::run::{Run, xtask};
 
 fn workspace() -> &'static Path {
@@ -46,15 +46,10 @@ fn map() -> String {
 #[test]
 fn the_map_is_read_from_the_index_and_not_from_a_render_in_flight() {
     let root = Tree::new("map-staged").unwrap();
-    scratch_workspace(workspace(), &root);
+    let repo = scratch_workspace(workspace(), &root);
     let rendered = "# map\n\n<!-- computed exec cmd=\"ls\" inputs=x name=x | do not edit; run computed -->\nx\n<!-- /computed in=1 out=2 -->\n";
     std::fs::write(root.join("AGENTS.md"), rendered).unwrap();
-    let add = Command::new("git")
-        .args(["add", "--", "AGENTS.md"])
-        .current_dir(&root)
-        .output()
-        .unwrap();
-    assert!(add.status.success(), "{add:?}");
+    repo.git(&["add", "--", "AGENTS.md"]);
     std::fs::write(
         root.join("AGENTS.md"),
         "# map\n\n<!-- computed exec cmd=\"ls\" inputs=x name=x | do not edit; run computed -->\n<!-- /computed -->\n",
@@ -75,22 +70,11 @@ fn the_commit_s_index_is_read_for_its_own_repository_alone() {
         return;
     }
     let root = Tree::new("map-foreign-index").unwrap();
-    scratch_workspace(workspace(), &root);
+    let repo = scratch_workspace(workspace(), &root);
     std::fs::write(root.join("only-here"), "x\n").unwrap();
-    let git = |dir: &Path, args: &[&str]| {
-        let out = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "{out:?}");
-        String::from_utf8(out.stdout).unwrap()
-    };
-    git(&root, &["add", "--", "only-here"]);
-    let ours = git(
-        workspace(),
-        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
-    );
+    repo.git(&["add", "--", "only-here"]);
+    let ours =
+        Repo::at(workspace()).git(&["rev-parse", "--path-format=absolute", "--git-path", "index"]);
     let child = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",

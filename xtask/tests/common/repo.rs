@@ -1,7 +1,11 @@
-//! A scratch git repository, made as `xtask::scratch::repository` makes
-//! its own: on `main` unless a test names another branch, and every call
-//! under [`UNHOOKED`], named, unsigned and unhooked, so a person's
-//! `commit.gpgsign`, `init.defaultBranch` or hooks are never the test's.
+//! A scratch git repository a test lays out by hand, on the branch
+//! `xtask::scratch::repository` lays its copy of the workspace on, `main`
+//! unless a test names another, and every call under [`UNHOOKED`], the
+//! identity, signing and hooks path that function commits under, so a
+//! person's `commit.gpgsign`, `init.defaultBranch` or hooks are never the
+//! test's. Where `repository` also points the clone's own hooks at
+//! `scripts/hooks` for the calls a test makes through the binary, a `Repo`
+//! holds no hooks of its own to point anywhere.
 //! Each file of `tests/common` is one topic: an integration test includes
 //! the topics it calls by name, as `mod common { pub mod repo; }`, and
 //! the unit tests under `src` include theirs once, in lib.rs, by `#[path]`.

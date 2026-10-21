@@ -22,7 +22,7 @@ mod common {
     pub mod repo;
     pub mod run;
 }
-use common::repo::scratch_workspace;
+use common::repo::{Repo, scratch_workspace};
 use common::run::{Ran, Run};
 
 fn workspace() -> &'static Path {
@@ -73,21 +73,6 @@ fn shell(root: &Path, command: &str) {
         "{command}: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-}
-
-fn git(root: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args(["-c", "user.name=x", "-c", "user.email=x@x"])
-        .args(args)
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8(out.stdout).unwrap()
 }
 
 fn read(root: &Path, path: &str) -> String {
@@ -166,7 +151,9 @@ fn assert_denied(root: &Path, out: &str, path: &str, written: &str) {
         .and_then(|rest| rest.get(..40))
         .unwrap_or_else(|| panic!("the denial names the kept blob: {reason}"));
     assert!(
-        git(root, &["cat-file", "-p", kept]).contains(written),
+        Repo::at(root)
+            .git(&["cat-file", "-p", kept])
+            .contains(written),
         "the call's write is kept"
     );
 }
@@ -342,7 +329,7 @@ fn a_kept_change_is_unmet_in_done_until_a_person_commits_or_restores_it() {
     let root = scratch("kept-done");
     let pin = "oracle.toml";
     let keep = |id: &str, rows: &str| {
-        let was = git(&root, &["rev-parse", &format!("HEAD:{pin}")]);
+        let was = Repo::at(&root).git(&["rev-parse", &format!("HEAD:{pin}")]);
         let edited = format!("{}\n# {rows}\n", read(&root, pin));
         let (out, _) = through_the_hooks_while(&root, id, "git status --short", || {
             std::fs::write(root.join(pin), &edited).unwrap();
@@ -355,10 +342,10 @@ fn a_kept_change_is_unmet_in_done_until_a_person_commits_or_restores_it() {
         }
     };
     keep("toolu_kept_then_committed", "a person's regime");
-    git(&root, &["commit", "-qam", "a person's regime"]);
+    Repo::at(&root).git(&["commit", "-qam", "a person's regime"]);
     assert_eq!(unmet(&root), Vec::<String>::new(), "committed");
     keep("toolu_kept_then_restored", "a regime a person drops");
-    git(&root, &["checkout", "HEAD", "--", pin]);
+    Repo::at(&root).git(&["checkout", "HEAD", "--", pin]);
     assert_eq!(unmet(&root), Vec::<String>::new(), "restored");
     // An edit made outside any call is condition 6's note, not the spent
     // record's change.
@@ -377,7 +364,7 @@ fn a_kept_change_back_at_head_says_done_lists_nothing() {
     std::fs::write(root.join(pin), edited).unwrap();
     let (out, _) =
         through_the_hooks_while(&root, "toolu_kept_at_head", "git status --short", || {
-            git(&root, &["checkout", "HEAD", "--", pin]);
+            Repo::at(&root).git(&["checkout", "HEAD", "--", pin]);
         });
     assert_kept(&root, &out, pin);
     assert!(out.contains("`done` lists nothing"), "{out}");
@@ -518,8 +505,8 @@ fn a_write_the_rule_exempts_stands_and_the_settings_beside_it_are_put_back() {
     std::fs::create_dir_all(root.join(".claude/skills/build")).unwrap();
     std::fs::write(root.join(".claude/skills/build/SKILL.md"), "# build\n").unwrap();
     std::fs::write(root.join(".claude/settings.json"), "{}\n").unwrap();
-    git(&root, &["add", ".claude"]);
-    git(&root, &["commit", "-q", "-m", "the skill and the settings"]);
+    Repo::at(&root).git(&["add", ".claude"]);
+    Repo::at(&root).git(&["commit", "-q", "-m", "the skill and the settings"]);
     let settings = read(&root, ".claude/settings.json");
     let (out, _) = through_the_hooks(
         &root,
@@ -596,8 +583,8 @@ fn a_file_is_put_back_to_its_unstaged_edit_and_an_untracked_one_is_left() {
     let root = scratch("unstaged");
     std::fs::create_dir_all(root.join(".claude")).unwrap();
     std::fs::write(root.join(".claude/settings.json"), "{}\n").unwrap();
-    git(&root, &["add", ".claude/settings.json"]);
-    git(&root, &["commit", "-q", "-m", "settings"]);
+    Repo::at(&root).git(&["add", ".claude/settings.json"]);
+    Repo::at(&root).git(&["commit", "-q", "-m", "settings"]);
     let edited = format!(
         "{}\n# a person's edit, not staged\n",
         read(&root, "oracle.toml")
@@ -656,7 +643,7 @@ fn a_write_the_person_approved_stands_and_one_that_differs_is_put_back() {
             root.join("docs/divergence.toml"),
         )
         .unwrap();
-        git(&root, &["commit", "-qam", "the fixture's registry"]);
+        Repo::at(&root).git(&["commit", "-qam", "the fixture's registry"]);
         let was = read(&root, "docs/divergence.toml");
         let command = format!("cat > docs/divergence.toml <<'EOF'\n{written}EOF");
         let hook = |event: &str| {
@@ -723,7 +710,9 @@ fn a_write_the_person_approved_stands_and_one_that_differs_is_put_back() {
             assert_eq!(entries[0]["call"], id);
             assert_eq!(
                 entries[0]["after"],
-                git(&root, &["hash-object", "docs/divergence.toml"]).trim()
+                Repo::at(&root)
+                    .git(&["hash-object", "docs/divergence.toml"])
+                    .trim()
             );
         } else {
             assert_eq!(read(&root, "docs/divergence.toml"), was);
@@ -739,17 +728,14 @@ fn a_write_the_person_approved_stands_and_one_that_differs_is_put_back() {
 fn linked_worktree(root: &Path) -> (Tree, std::path::PathBuf) {
     let base = Tree::new("permit-after-linked").unwrap();
     let linked = base.join("t1");
-    git(
-        root,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "t1",
-            linked.to_str().unwrap(),
-        ],
-    );
+    Repo::at(root).git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "t1",
+        linked.to_str().unwrap(),
+    ]);
     let linked = linked.canonicalize().unwrap();
     (base, linked)
 }
@@ -757,11 +743,11 @@ fn linked_worktree(root: &Path) -> (Tree, std::path::PathBuf) {
 /// A merge stopped before its commit in `root`, staging `path` as
 /// `content`: the marker git keeps, the file written and added.
 fn merging_with(root: &Path, path: &str, content: &str) {
-    let head = git(root, &["rev-parse", "HEAD"]);
-    let git_dir = git(root, &["rev-parse", "--absolute-git-dir"]);
+    let head = Repo::at(root).git(&["rev-parse", "HEAD"]);
+    let git_dir = Repo::at(root).git(&["rev-parse", "--absolute-git-dir"]);
     std::fs::write(Path::new(git_dir.trim()).join("MERGE_HEAD"), head).unwrap();
     std::fs::write(root.join(path), content).unwrap();
-    git(root, &["add", "--", path]);
+    Repo::at(root).git(&["add", "--", path]);
 }
 
 /// #2597: a builder's call runs in its worktree, its shell starting in
@@ -787,12 +773,9 @@ fn a_call_in_a_worktree_leaves_the_main_checkout_s_merge_as_it_stands() {
         merged,
         "the merge's file stands"
     );
-    let status = git(
-        &root,
-        &["status", "--porcelain", "--", "docs/divergence.toml"],
-    );
+    let status = Repo::at(&root).git(&["status", "--porcelain", "--", "docs/divergence.toml"]);
     assert_eq!(
-        status, "M  docs/divergence.toml\n",
+        status, "M  docs/divergence.toml",
         "staged, and the working tree with it"
     );
     assert!(
@@ -824,11 +807,8 @@ fn a_harness_file_a_merge_staged_is_not_put_back() {
         merged,
         "the merge's file stands"
     );
-    let status = git(
-        &root,
-        &["status", "--porcelain", "--", "docs/divergence.toml"],
-    );
-    assert_eq!(status, "M  docs/divergence.toml\n", "still staged");
+    let status = Repo::at(&root).git(&["status", "--porcelain", "--", "docs/divergence.toml"]);
+    assert_eq!(status, "M  docs/divergence.toml", "still staged");
     let hook: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     assert!(hook.get("decision").is_none(), "nothing is denied: {out}");
     let said = hook["hookSpecificOutput"]["additionalContext"]
@@ -962,14 +942,14 @@ fn a_call_by_pushd_into_its_worktree_leaves_the_main_checkout_alone() {
 #[test]
 fn a_start_admitted_while_another_merge_stood_is_recorded_once_it_has_run() {
     let root = scratch("operation-settled");
-    let main = git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]);
-    git(&root, &["checkout", "-q", "-b", "topic"]);
+    let main = Repo::at(&root).git(&["rev-parse", "--abbrev-ref", "HEAD"]);
+    Repo::at(&root).git(&["checkout", "-q", "-b", "topic"]);
     shell(
         &root,
         "echo topic > topic.txt && git add topic.txt && git commit -q -m topic",
     );
-    git(&root, &["checkout", "-q", main.trim()]);
-    let git_dir = git(&root, &["rev-parse", "--absolute-git-dir"]);
+    Repo::at(&root).git(&["checkout", "-q", main.trim()]);
+    let git_dir = Repo::at(&root).git(&["rev-parse", "--absolute-git-dir"]);
     let marker = Path::new(git_dir.trim()).join("MERGE_HEAD");
     let hook = |event: &str, agent: &str, command: &str| {
         let input = serde_json::json!({"session_id": SESSION, "agent_id": agent,
@@ -1011,13 +991,13 @@ fn a_steer_call_that_lands_a_merges_union_stands_and_the_merge_commits_it() {
         whole.strip_prefix(base.as_str()).unwrap().to_owned()
     };
     let tracked = read(&root, file);
-    let main = git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]);
-    git(&root, &["checkout", "-q", "-b", "merged"]);
+    let main = Repo::at(&root).git(&["rev-parse", "--abbrev-ref", "HEAD"]);
+    Repo::at(&root).git(&["checkout", "-q", "-b", "merged"]);
     std::fs::write(root.join(file), format!("{tracked}{}", row("merged.toml"))).unwrap();
-    git(&root, &["commit", "-q", "-am", "the merged side's row"]);
-    git(&root, &["checkout", "-q", main.trim()]);
+    Repo::at(&root).git(&["commit", "-q", "-am", "the merged side's row"]);
+    Repo::at(&root).git(&["checkout", "-q", main.trim()]);
     std::fs::write(root.join(file), format!("{tracked}{}", row("head.toml"))).unwrap();
-    git(&root, &["commit", "-q", "-am", "HEAD's row"]);
+    Repo::at(&root).git(&["commit", "-q", "-am", "HEAD's row"]);
     let union = format!("{tracked}{}{}", row("head.toml"), row("merged.toml"));
 
     let call = |id: &str, command: &str| {
@@ -1066,9 +1046,14 @@ fn a_steer_call_that_lands_a_merges_union_stands_and_the_merge_commits_it() {
     assert_eq!(read(&root, file), union, "steer's write stands");
     call("toolu_union_add", &format!("git add -- {file}"));
     call("toolu_union_commit", "git commit -q -m merged");
-    assert_eq!(git(&root, &["show", &format!("HEAD:{file}")]), union);
     assert_eq!(
-        git(&root, &["rev-list", "--parents", "-n1", "HEAD"])
+        Repo::at(&root).git(&["show", &format!("HEAD:{file}")]),
+        union.trim_end(),
+        "the commit holds the union, its trailing newline aside"
+    );
+    assert_eq!(
+        Repo::at(&root)
+            .git(&["rev-list", "--parents", "-n1", "HEAD"])
             .split(' ')
             .count(),
         3,
@@ -1084,13 +1069,13 @@ fn a_conflicted_registry_written_beside_steer_is_put_back_to_its_markers() {
     let root = scratch("conflict-written");
     let file = "docs/divergence.toml";
     let tracked = read(&root, file);
-    let main = git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]);
-    git(&root, &["checkout", "-q", "-b", "merged"]);
+    let main = Repo::at(&root).git(&["rev-parse", "--abbrev-ref", "HEAD"]);
+    Repo::at(&root).git(&["checkout", "-q", "-b", "merged"]);
     std::fs::write(root.join(file), format!("{tracked}\n# the merged side\n")).unwrap();
-    git(&root, &["commit", "-q", "-am", "merged"]);
-    git(&root, &["checkout", "-q", main.trim()]);
+    Repo::at(&root).git(&["commit", "-q", "-am", "merged"]);
+    Repo::at(&root).git(&["checkout", "-q", main.trim()]);
     std::fs::write(root.join(file), format!("{tracked}\n# HEAD's side\n")).unwrap();
-    git(&root, &["commit", "-q", "-am", "head"]);
+    Repo::at(&root).git(&["commit", "-q", "-am", "head"]);
     shell(&root, "git merge -q merged || true");
     let conflicted = read(&root, file);
     assert!(
