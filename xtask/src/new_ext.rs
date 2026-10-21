@@ -40,7 +40,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::computed;
 use crate::generated;
-use crate::manifest::{Manifest, Rule};
+use crate::manifest::{Crate, Manifest, Rule};
 use crate::phpt;
 use crate::reading::listed;
 
@@ -51,7 +51,7 @@ const FACADE: &str = "crates/php_ext";
 const GUIDANCE: &str = "ext/AGENTS.md";
 
 /// The enabled set every extension reaches (ADR-0004), relative to the root.
-const BUNDLE: &str = "crates/php_bundle";
+pub(crate) const BUNDLE: &str = "crates/php_bundle";
 
 /// What one run laid down.
 #[derive(Debug)]
@@ -115,6 +115,44 @@ impl Edit {
     }
 }
 
+/// The refusals before anything is written, as `instrument` lays down a
+/// crate at `row` beside `facade` and the bundle: no `[[crate]]` row (the
+/// ceiling is the manifest's, and the row is a person's), the facade or
+/// the bundle not yet a crate, or the crate's directory already there.
+/// The row's crate and the directory otherwise.
+pub(crate) fn unrefused<'m>(
+    root: &Path,
+    manifest: &'m Manifest,
+    row: &str,
+    facade: &str,
+    instrument: &str,
+    one: &str,
+) -> Result<(&'m Crate, PathBuf)> {
+    let Some(krate) = manifest.crate_named(row) else {
+        bail!(
+            "seams.toml has no [[crate]] row for {row}, so the crate would have no ceiling; the row is a person's (harness §11): propose it in the commit message"
+        );
+    };
+    for (dir, what) in [(facade, "the facade"), (BUNDLE, "the bundle")] {
+        if !root.join(dir).join("Cargo.toml").is_file() {
+            bail!("{dir} is not a crate yet; {what} lands before any {one}");
+        }
+    }
+    let dir = root.join(row);
+    if dir.exists() {
+        bail!("{row} exists; {instrument} lays a crate down once and never overwrites");
+    }
+    Ok((krate, dir))
+}
+
+/// The phpt subsets the `[[crate]]` row names, under the pinned corpus:
+/// the row's sentence, never spelled again here (#18, harness §4.1).
+pub(crate) fn subsets(krate: &Crate) -> Vec<String> {
+    (krate.subsets().iter())
+        .map(|under| format!("{}/{}", phpt::CORPUS, under.display()))
+        .collect()
+}
+
 /// Lay `ext/<name>` down, or refuse and write nothing.
 pub fn run(root: &Path, manifest: &Manifest, name: &str) -> Result<Laid> {
     if name.is_empty()
@@ -128,21 +166,14 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str) -> Result<Laid> {
         );
     }
     let row = format!("ext/{name}");
-    if manifest.crate_named(&row).is_none() {
-        bail!(
-            "seams.toml has no [[crate]] row for {row}, so the crate would have no ceiling; the row is a person's (harness §11): propose it in the commit message"
-        );
-    }
-    if !root.join(FACADE).join("Cargo.toml").is_file() {
-        bail!("{FACADE} is not a crate yet; the facade lands before any extension (ADR-0004)");
-    }
-    if !root.join(BUNDLE).join("Cargo.toml").is_file() {
-        bail!("{BUNDLE} is not a crate yet; the bundle lands before any extension (ADR-0004)");
-    }
-    let dir = root.join(&row);
-    if dir.exists() {
-        bail!("{row} exists; new-ext lays a crate down once and never overwrites");
-    }
+    let (krate, dir) = unrefused(
+        root,
+        manifest,
+        &row,
+        FACADE,
+        "new-ext",
+        "extension (ADR-0004)",
+    )?;
     // The bundle's two edits are computed here, so a bundle whose shape the
     // edit cannot read refuses before anything is written; they are
     // written after the crate is.
@@ -166,29 +197,17 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str) -> Result<Laid> {
     }
     render_guidance(root, &mut laid)?;
 
-    // Which subsets are the crate's is the `[[crate]]` row's sentence and
-    // is read there, never spelled again here (#18, harness §4.1).
-    let krate = manifest.crate_named(&row);
-    let owned: Vec<String> = krate
-        .map(|krate| {
-            krate
-                .subsets()
-                .iter()
-                .map(|under| format!("{}/{}", phpt::CORPUS, under.display()))
-                .collect()
-        })
-        .unwrap_or_default();
+    let owned = subsets(krate);
     let named: Vec<&str> = owned.iter().map(String::as_str).collect();
     let subset = listed(&named);
-    if krate.is_some_and(|krate| !krate.subsets().is_empty()) {
-        laid.notes
-            .push(format!("phpt subset: {subset} at the pinned tag"));
-    } else {
-        laid.notes.push(format!(
+    laid.notes.push(if owned.is_empty() {
+        format!(
             "phpt subset: {subset} is not in the pinned php-src tree ({}); `xtask phpt --subset` has nothing to run",
             manifest.pin.source.tag
-        ));
-    }
+        )
+    } else {
+        format!("phpt subset: {subset} at the pinned tag")
+    });
     laid.notes
         .push("left: nothing of the witness; `xtask witness` holds it to the oracle".to_owned());
     Ok(laid)
