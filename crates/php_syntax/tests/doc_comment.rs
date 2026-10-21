@@ -6,26 +6,15 @@
 //! `zend_language_parser.y` alone, since which token bison had read when
 //! it reduces `backup_doc_comment` is a fact of its tables.
 
+mod support;
+
+use php_syntax::Parsed;
 use php_syntax::tree::{
     AnonClassDecl, ArrowFnExpr, ClassDecl, ClosureExpr, ConstDeclarator, EnumCaseDecl, EnumDecl,
     FunctionDecl, HasDocComment, InterfaceDecl, MethodDecl, Node, Param, PropertyDeclarator,
     PropertyHook, TraitDecl,
 };
-use php_syntax::{Options, Parsed, parse};
-
-fn parsed(source: &str) -> Parsed<'static> {
-    let arena: &'static php_syntax::Arena = Box::leak(Box::new(php_syntax::Arena::new()));
-    let source: &'static [u8] = Box::leak(source.as_bytes().into());
-    let parsed = parse(arena, source, &Options::default());
-    assert!(
-        parsed.diagnostics.is_empty() && parsed.missing.is_empty(),
-        "{}\n{:?}\n{:?}",
-        parsed.dump(),
-        parsed.diagnostics,
-        parsed.missing
-    );
-    parsed
-}
+use support::parse_clean;
 
 /// The doc comments of every node of `T`, in arena order, as text.
 fn docs<'p, T: Node + HasDocComment>(parsed: &'p Parsed<'_>) -> Vec<Option<&'p str>> {
@@ -50,7 +39,7 @@ fn docs<'p, T: Node + HasDocComment>(parsed: &'p Parsed<'_>) -> Vec<Option<&'p s
 /// read the same way, and a trait takes before its name.
 #[test]
 fn a_class_like_takes_inside_its_head() {
-    let p = parsed(
+    let p = parse_clean(
         "<?php
 class F extends /** D5 */ A {}
 class F2 extends A /** D6 */ {}
@@ -92,7 +81,7 @@ trait T3 {}
 /// before its name and after nothing else in its head.
 #[test]
 fn a_function_or_method_takes_before_its_name() {
-    let p = parsed(
+    let p = parse_clean(
         "<?php
 function /** X */ f() {}
 function f2 /** X2 */ () {}
@@ -122,7 +111,7 @@ class M {
 /// declarator's alone, and one before `,`, `;` or `=` is that declarator's.
 #[test]
 fn a_property_declarator_takes_after_its_last_token() {
-    let p = parsed(
+    let p = parse_clean(
         "<?php
 class M {
   /** P */ public $x, $y;
@@ -157,7 +146,7 @@ class M {
 /// declarator, and a top-level `const` takes the same way.
 #[test]
 fn a_const_declarator_takes_after_its_expression() {
-    let p = parsed(
+    let p = parse_clean(
         "<?php
 class M {
   const A = 1, B = 2;
@@ -188,7 +177,7 @@ class Y6 {}
 /// once `case` is shifted, so a comment after `case` is the next case's.
 #[test]
 fn an_enum_case_takes_before_case() {
-    let p = parsed(
+    let p = parse_clean(
         "<?php
 enum E: int {
   /** C1 */ case A = 0;
@@ -214,7 +203,7 @@ enum E: int {
 /// declaration after, and a comment after the group stands.
 #[test]
 fn an_attribute_group_gives_back_what_it_took() {
-    let p = parsed(
+    let p = parse_clean(
         "<?php
 /** D4 */ #[Attr(static function(){})] class Y1 {}
 /** D9 */ #[Attr(/** IN */ 1)] class Y2 {}
@@ -243,7 +232,7 @@ fn an_attribute_group_gives_back_what_it_took() {
 /// declaration's, so the classes hold that too.
 #[test]
 fn a_parameter_and_a_closure_take_too() {
-    let p = parsed(
+    let p = parse_clean(
         "<?php
 class C { function __construct(/** PA */ public $a, public $b /** PB */, public $c = 1) {} }
 $g1 = fn($x /** B */) => 1; class X1 {}
@@ -293,7 +282,7 @@ $g6 = function () /** G */ { }; class X6 {}
 /// {}` N4, `new class(/** N5 */ 1) {}` N5).
 #[test]
 fn an_anonymous_class_takes_before_its_brace() {
-    let p = parsed(
+    let p = parse_clean(
         "<?php
 $o = new class /** N */ {};
 $o2 = new class /** N2 */ extends stdClass {};
@@ -324,7 +313,7 @@ $o6 = new class {};
 /// get { … } }` HT).
 #[test]
 fn a_property_hook_takes_before_its_name() {
-    let p = parsed(
+    let p = parse_clean(
         "<?php
 class H {
   public $q { /** HG */ get { return 1; } }

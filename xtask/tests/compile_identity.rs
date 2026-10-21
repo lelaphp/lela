@@ -41,7 +41,7 @@ mod common {
     pub mod repo;
 }
 use common::manifest::{of_rows, pin};
-use common::registry::registry;
+use common::registry::{Row, registry, rows};
 use common::repo::scratch_workspace;
 
 fn workspace() -> &'static Path {
@@ -439,22 +439,10 @@ fn a_difference_an_accepted_row_names_is_met() {
         return;
     }
     let scratch = Scratch::new("accepted");
-    let accepted = registry(
-        r#"
-[[divergence]]
-id = "compile:corpus/identity.phpt"
-kind = "compile"
-reason = "A person's sentence about this file."
-status = "accepted"
-since = "2026-09-11"
-[[divergence]]
-id = "compile:corpus/plain.php"
-kind = "compile"
-reason = "A person's sentence about that one."
-status = "accepted"
-since = "2026-09-11"
-"#,
-    );
+    let accepted = rows(&[
+        Row::accepted("compile:corpus/identity.phpt"),
+        Row::accepted("compile:corpus/plain.php"),
+    ]);
     let reading = scratch.run(&accepted, &scratch.emits_nothing());
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     assert_eq!(count(&reading, "diverged"), 2);

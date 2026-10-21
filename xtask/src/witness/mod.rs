@@ -154,6 +154,7 @@ use crate::sources;
 use crate::tally::{self, Outcome};
 use anchor::Record;
 use fence::Extracted;
+pub(crate) use host::{ATTEMPTS, free_port};
 pub(crate) use process::{Binary, host_of, served_as, under_recipe};
 use watch::{Journal, Watch};
 
@@ -340,7 +341,7 @@ pub(crate) fn reading(
                     "; {} of {} kernels or natives without a witness: {}. {}",
                     tally.missing.len(),
                     tally.subjects,
-                    listed(&tally.missing.iter().map(String::as_str).collect::<Vec<_>>()),
+                    listed(&tally.missing),
                     rule.map(|r| r.text.as_str()).unwrap_or_default()
                 )
             };

@@ -268,11 +268,10 @@ impl Standing {
             });
             let moved = lock_moved(root, manifest, taken)?;
             if !moved.is_empty() {
-                let names: Vec<&str> = moved.iter().map(String::as_str).collect();
                 println!(
                     "{instrument}: {} is staged and pins a dependency otherwise than where the reading was taken, so no reading stands for {}",
                     lock::FILE,
-                    listed(&names)
+                    listed(&moved)
                 );
             }
             standing.retain(|scope, _| !moved.contains(scope));

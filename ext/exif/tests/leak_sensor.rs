@@ -3,19 +3,13 @@
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
 
-use php_ext::test::{Capture, Engine, Files, LeakSensor};
+mod support;
+
+use php_ext::test::{Capture, Files};
 
 /// What one request of an armed engine with this extension alone wrote.
 fn armed(source: &str) -> String {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_standard::extension(),
-            php_ext_uri::extension(),
-            php_ext_exif::extension(),
-        ])
-        .sense_leaks(LeakSensor::Armed)
-        .build();
+    let engine = support::engine();
     let served = engine.serve_capture(source, Capture::default());
     served.stdout_text()
 }

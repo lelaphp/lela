@@ -50,6 +50,7 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 syn.workspace = true
+proc-macro2 = { workspace = true, features = ["span-locations"] }   # the line of a test-level return clippy's reading names (#3105)
 
 [dev-dependencies]
 # tests/new_sapi.rs: a stand-in's parameter types as written, held to the

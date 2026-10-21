@@ -53,7 +53,7 @@ impl Declared {
             if !text.contains("dependencies(") && !text.contains("Dependency") {
                 continue;
             }
-            let parsed = crate::api_check::inventory::parsed(&text, &file)?;
+            let parsed = crate::rust::parsed(&text, &file)?;
             let mut scan = Scan::default();
             scan.visit_file(&parsed);
             let at = krate.relative(&file).display().to_string();

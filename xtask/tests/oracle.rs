@@ -10,18 +10,20 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-use xtask::divergence::Registry;
+use xtask::divergence::{Registry, Status};
 use xtask::oracle::{
-    self, PROMISE_VARIABLE, Pin, Program, Promise, Promised, Regime, Runner, Split, TREE_VARIABLE,
-    Verdict,
+    self, PROMISE_VARIABLE, Pin, Program, Promise, Promised, Regime, Runner, SKIPPED_VARIABLE,
+    Split, TREE_VARIABLE, Verdict,
 };
 use xtask::scratch::Tree;
 
 mod common {
     pub mod manifest;
+    pub mod registry;
     pub mod repo;
     pub mod run;
 }
+use common::registry::{Row, rows};
 use common::repo::Repo;
 use common::run::xtask;
 
@@ -45,17 +47,8 @@ fn pin() -> Option<Pin> {
 /// mechanics and not which rows a person keeps in `docs/divergence.toml`:
 /// a row dropped there breaks nothing here (#2142).
 fn registry() -> Registry {
-    Registry::parse(
-        r#"
-[[divergence]]
-id = "trace:fixture"
-kind = "trace"
-reason = "A difference a person accepted, for the comparison's tests."
-status = "accepted"
-since = "2026-10-06"
-"#,
-    )
-    .unwrap()
+    rows(&[Row::accepted("trace:fixture")
+        .reason("A difference a person accepted, for the comparison's tests.")])
 }
 
 #[test]
@@ -773,9 +766,10 @@ fn ci_reads_the_variables_off_the_oracle_section_and_spells_neither() {
     );
 }
 
-/// The promise (#38): what a runner says this machine has of the pin,
-/// the words the variable lists. A word outside the two is refused
-/// naming them, so a misspelt promise is never an unmade one.
+/// The promise (#38): what a runner says this machine has, the words the
+/// variable lists. A word outside the three is refused naming them, so a
+/// misspelt promise is never an unmade one: `mysq` promises no server
+/// (#3084).
 #[test]
 fn a_promise_is_the_words_the_variable_lists_and_an_unknown_word_is_refused() {
     let none = Promised::parse("").unwrap();
@@ -784,15 +778,33 @@ fn a_promise_is_the_words_the_variable_lists_and_an_unknown_word_is_refused() {
     assert!(tree.holds(Promise::Tree) && !tree.holds(Promise::Oracle));
     let both = Promised::parse(" oracle\ttree ").unwrap();
     assert!(both.holds(Promise::Tree) && both.holds(Promise::Oracle));
+    let server = Promised::parse("tree mysql").unwrap();
+    assert!(server.holds(Promise::Tree) && server.holds(Promise::Mysql));
+    assert!(!server.holds(Promise::Oracle));
     let err = Promised::parse("tree php-src").unwrap_err().to_string();
     assert!(
         err.contains("php-src") && err.contains(PROMISE_VARIABLE),
         "the word and the variable are named: {err}"
     );
     assert!(
-        err.contains("tree") && err.contains("oracle"),
+        err.ends_with("the words it takes are tree, oracle, mysql"),
         "the words the variable takes are named: {err}"
     );
+    let err = Promised::parse("tree mysq").unwrap_err().to_string();
+    assert!(err.contains("\"mysq\""), "{err}");
+}
+
+/// The tests of `ext/mysqli` and `ext/pdo_mysql` cannot depend on xtask, so
+/// `MysqlServer::with` spells the two variables and the word itself: held
+/// here to the ones [`Promised::parse`] reads and `xtask test` sets
+/// (#3084, #3085).
+#[test]
+fn the_mysql_server_s_tests_read_the_promise_by_its_own_name_and_word() {
+    let support = workspace().join("ext/mysqlnd/tests/support/mysql.rs");
+    let text = std::fs::read_to_string(&support).expect("the MySQL support file");
+    for spelt in [PROMISE_VARIABLE, Promise::Mysql.word(), SKIPPED_VARIABLE] {
+        assert!(text.contains(&format!("\"{spelt}\"")), "{spelt}");
+    }
 }
 
 /// The decision every guarded test takes (#38): a fact the pin names
@@ -1136,21 +1148,10 @@ fn compare_is_differs_with_the_diff_otherwise() {
 
 #[test]
 fn an_open_or_fixed_row_does_not_accept_a_difference() {
-    let text = r#"
-[[divergence]]
-id = "witness:open"
-kind = "witness"
-reason = ""
-status = "open"
-since = "2026-09-07"
-[[divergence]]
-id = "witness:fixed"
-kind = "witness"
-reason = "Was accepted; now the engine agrees."
-status = "fixed"
-since = "2026-09-07"
-"#;
-    let registry = Registry::parse(text).unwrap();
+    let registry = rows(&[
+        Row::open("witness:open"),
+        Row::accepted("witness:fixed").status(Status::Fixed),
+    ]);
     for id in ["witness:open", "witness:fixed"] {
         let verdict = oracle::compare(&registry, id, b"a", b"b");
         assert!(matches!(verdict, Verdict::Differs(_)), "{id}: {verdict:?}");

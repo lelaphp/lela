@@ -901,7 +901,7 @@ fn reason(said: &str, pattern: &str) -> Option<String> {
 }
 
 /// What php's `trim` and `ltrim` take off: `" \t\n\r\0\x0B"`.
-const TRIM: [char; 6] = [' ', '\t', '\n', '\r', '\0', '\x0B'];
+pub(super) const TRIM: [char; 6] = [' ', '\t', '\n', '\r', '\0', '\x0B'];
 
 /// A command line's words, split on whitespace: a test's `--ARGS--`.
 fn words(text: &str) -> Vec<String> {

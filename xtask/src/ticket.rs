@@ -195,6 +195,12 @@ pub(crate) const INSTRUMENT: &str = "ticket";
 /// `done`'s rustdoc). One statement, read by the writer and the reader.
 pub(crate) const STAMPED_OVER: &str = ".";
 
+/// A reading of `instrument` over `scope`, stamped over the workspace,
+/// [`STAMPED_OVER`], as `snapshot` holds it.
+pub(crate) fn stamped_over(instrument: &str, scope: &str, snapshot: &Snapshot) -> Result<Reading> {
+    Reading::stamped_over(instrument, scope, snapshot, Path::new(STAMPED_OVER))
+}
+
 /// What a ready record says of a branch whose work opened nothing.
 const NOTHING: &str = "nothing";
 
@@ -1589,7 +1595,7 @@ fn secs(span: Duration) -> String {
 /// A reading of the instrument over `scope`, stamped over the workspace
 /// as every reading of the instrument is, taken in the session named.
 fn stamped(snapshot: &Snapshot, scope: &str, session_id: Option<&str>) -> Result<Reading> {
-    let mut reading = Reading::stamped_over(INSTRUMENT, scope, snapshot, Path::new(STAMPED_OVER))?;
+    let mut reading = stamped_over(INSTRUMENT, scope, snapshot)?;
     session_id
         .unwrap_or_default()
         .clone_into(&mut reading.session);

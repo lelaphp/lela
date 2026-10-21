@@ -565,11 +565,41 @@ pub(crate) fn execute<T: Tier, D: Telling>(
 /// entry frame did not catch stays pending and `Ok(())` says the
 /// serving is over, not that the frame returned; the caller reads the
 /// pending slot, as php's caller reads `EG(exception)`.
+///
+/// Under detect, a native's own recursion inside the serving is held to
+/// php's budget below this frame, and the limit stands where it stood
+/// once the serving is over (`php_compile::StackLimit::reentered`): six
+/// thousand levels of recursion through `array_map` take several times
+/// php's budget on this engine's stack, and the natives that walk a nest
+/// at the bottom of it walk it whole, as php's do there (#3142).
+///
+/// ```php
+/// function bottom() {
+///     $a = []; for ($i = 0; $i < 200; $i++) { $a = [$a]; }
+///     $o = new stdClass; $o->x = [1]; $p = new stdClass; $p->x = [1];
+///     return [$o == $p, json_encode($a, 0, 1000) !== false, strlen(serialize($a))];
+/// }
+/// function m($n) { return $n == 0 ? bottom() : array_map(fn($x) => m($x), [$n - 1])[0]; }
+/// var_dump(m(6000));
+/// ```
+/// ```expect
+/// array(3) {
+///   [0]=>
+///   bool(true)
+///   [1]=>
+///   bool(true)
+///   [2]=>
+///   int(2006)
+/// }
+/// ```
 pub(crate) fn reenter<T: Tier, D: Telling>(
     req: &mut Request,
     frame: FrameRef,
 ) -> Result<(), Fatal> {
-    serving::<T, D>(req, frame)
+    let reentered = req.stack_reentered();
+    let outcome = serving::<T, D>(req, frame);
+    req.stack_left(reentered);
+    outcome
 }
 
 /// `zend_generator_resume`'s `zend_execute_ex(generator->execute_data)`
@@ -583,7 +613,9 @@ pub(crate) fn reenter<T: Tier, D: Telling>(
 /// throwable it did not catch pending for the resumer to read.
 pub(crate) fn resume<T: Tier, D: Telling>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal> {
     let guard = req.stack_mut().push_entry(frame);
+    let reentered = req.stack_reentered();
     if refused_at_entry(req) {
+        req.stack_left(reentered);
         req.stack_mut().pop_entry(guard);
         return Ok(());
     }
@@ -593,6 +625,7 @@ pub(crate) fn resume<T: Tier, D: Telling>(req: &mut Request, frame: FrameRef) ->
         Stepped::Same(frame)
     };
     let outcome = serve_frame::<T, D>(req, first);
+    req.stack_left(reentered);
     crate::observer::loop_left(req, &outcome);
     req.stack_mut().pop_entry(guard);
     outcome
@@ -640,7 +673,12 @@ fn serve<T: Tier, D: Telling>(req: &mut Request, entry: FrameRef) -> Result<(), 
 /// php enters `execute_ex` again for every call a native makes back
 /// into PHP and for every generator it resumes, never for a user
 /// function a user function calls, so this is where a recursion through
-/// a callback is refused before it ends the process.
+/// a callback is refused before it ends the process. Under detect the
+/// limit here is the whole of the thread, which the host sized so that
+/// this recursion, whose level costs a multiple of php's, reaches php's
+/// depth (design §5.6, #3043); a native's own recursion is held to
+/// php's budget (`php_compile::StackLimit::entry_overflowed`), and the
+/// number named is php's either way.
 ///
 /// Under the small-stack regime a recursion through `array_map` reaches
 /// the ini's 256K in both engines; the number is the ini's less the
@@ -665,7 +703,7 @@ fn serve<T: Tier, D: Telling>(req: &mut Request, entry: FrameRef) -> Result<(), 
 /// Error: Maximum call stack size of %d bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
 /// ```
 fn refused_at_entry(req: &mut Request) -> bool {
-    match crate::api::raising::call_stack_limit(req) {
+    match crate::api::raising::call_stack_entry(req) {
         Ok(()) => false,
         Err(thrown) => {
             req.leave_pending(&thrown);

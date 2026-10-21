@@ -264,7 +264,7 @@ fn features(krate: &Present) -> Result<BTreeMap<String, Vec<String>>> {
 /// written, with the `cfg`s around it.
 fn registrations(file: &Path) -> Result<Vec<Registration>> {
     let mut calls = Calls::default();
-    calls.visit_file(&super::inventory::parse_file(file)?);
+    calls.visit_file(&crate::rust::parse_file(file)?);
     Ok(calls.found)
 }
 

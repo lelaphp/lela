@@ -3,14 +3,6 @@
 
 use super::*;
 
-#[track_caller]
-fn check_php(body: &str, expected: &[(SyntaxKind, &str)]) {
-    let input = format!("<?php {body}");
-    let mut full = vec![(OPEN_TAG, "<?php ")];
-    full.extend_from_slice(expected);
-    check(&input, &full);
-}
-
 #[test]
 fn basic_heredoc() {
     // T_START_HEREDOC's extent: `<<<LABEL` through the newline inclusive.

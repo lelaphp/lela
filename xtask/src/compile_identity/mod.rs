@@ -297,7 +297,6 @@ pub(crate) fn reading(
             .iter()
             .map(|under| under.to_string_lossy().into_owned())
             .collect();
-        let named: Vec<&str> = named.iter().map(String::as_str).collect();
         format!(
             "{scope}: the corpus names {}, and {} has no such directory",
             listed(&named),
@@ -411,13 +410,10 @@ pub fn run(
     // path refuses nothing: nothing is dumped, every file is counted as
     // not dumped, and the reading says why.
     let oracle = manifest.pin.oracle();
-    let pinned = &manifest.pin.oracle.path;
-    let oracle_absent = if pinned.is_file() {
+    let oracle_absent = manifest.pin.oracle.absent();
+    if oracle_absent.is_none() {
         oracle.asserted()?;
-        None
-    } else {
-        Some(format!("the pinned php is not at {}", pinned.display()))
-    };
+    }
     if let Some(file) = &ask.file {
         let corpus = around(manifest, file)?;
         return one(

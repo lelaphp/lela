@@ -213,8 +213,8 @@ ini = ["opcache.enable_cli=1", "opcache.jit=tracing", "opcache.jit_buffer_size=6
 # The tier's exit-fuzz lane on the witnesses (jit-design §4.6, §7): php ignores the engine-only jit.mode.
 ini = ["opcache.enable_cli=1", "opcache.jit=tracing", "opcache.jit_buffer_size=64M", "jit.mode=exit-fuzz"]
 [regime.jit-small-buffer]
-# A code buffer that fills: php rounds 16K to the page; the engine's arena
-# is one 64K chunk. The trace-dump bits of jit-inline (jit-design §4.1).
+# A code buffer that fills: php rounds 16K to the page, and the engine's
+# arena holds the same (#3112). The trace-dump bits of jit-inline (jit-design §4.1).
 ini = ["opcache.enable_cli=1", "opcache.jit=tracing", "opcache.jit_buffer_size=16K", "opcache.jit_debug=258048"]
 
 [regime.short-tags]

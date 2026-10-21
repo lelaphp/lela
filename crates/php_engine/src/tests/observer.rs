@@ -71,6 +71,23 @@ pub(super) fn serve_main(engine: &Engine, files: &Files, source: &str) -> Served
     serve_file(engine, files, "main.php", source)
 }
 
+/// The main file's frame as the observer names it, the file
+/// [`serve_main`] serves.
+pub(super) const MAIN: &str = "file 'main.php'";
+
+/// `source` served as `main.php` ([`serve_main`]) in a fresh `Files`
+/// named `name`, by an engine built with `extensions`, and what the
+/// observer saw ([`observed`]) from the build on.
+pub(super) fn observe(extensions: &[Extension], name: &str, source: &str) -> (Served, Vec<Event>) {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder().extensions(extensions).build();
+    let files = Files::new(name, &[]);
+    rec.mark("built");
+    let served = serve_main(&engine, &files, source);
+    rec.mark("served");
+    (served, observed(&rec.events().between("built", "served")))
+}
+
 /// `observer_basic_01.phpt`'s order, two observers deep: a function's
 /// handlers are resolved on its first call, every observer asked in
 /// declaration order, and never again in the request; begin handlers
@@ -79,27 +96,19 @@ pub(super) fn serve_main(engine: &Engine, files: &Files, source: &str) -> Served
 /// as a function's is, and ends with the `1` its implicit return gives.
 #[test]
 fn calls_begin_in_declaration_order_and_end_in_reverse_with_what_they_returned() {
-    let rec = Recording::start();
-    let engine = Engine::cli_builder()
-        .extensions(&[TestExt::<0>::observing(), TestExt::<1>::observing()])
-        .build();
-    let files = Files::new("observer-calls", &[]);
-    rec.mark("built");
-    let served = serve_main(
-        &engine,
-        &files,
+    let (served, events) = observe(
+        &[TestExt::<0>::observing(), TestExt::<1>::observing()],
+        "observer-calls",
         "<?php\nfunction g($y) { return $y * 2; }\nfunction f($x) { return g($x) + 1; }\necho f(1), f(2);\n",
     );
-    rec.mark("served");
     assert_eq!(served.stdout_text(), "35");
-    let file = "file 'main.php'";
     assert_eq!(
-        observed(&rec.events().between("built", "served")),
+        events,
         [
-            init(0, file),
-            init(1, file),
-            begin(0, file),
-            begin(1, file),
+            init(0, MAIN),
+            init(1, MAIN),
+            begin(0, MAIN),
+            begin(1, MAIN),
             init(0, "f"),
             init(1, "f"),
             begin(0, "f"),
@@ -120,8 +129,8 @@ fn calls_begin_in_declaration_order_and_end_in_reverse_with_what_they_returned()
             end(0, "g", Some("4")),
             end(1, "f", Some("5")),
             end(0, "f", Some("5")),
-            end(1, file, Some("1")),
-            end(0, file, Some("1")),
+            end(1, MAIN, Some("1")),
+            end(0, MAIN, Some("1")),
         ]
     );
 }
@@ -134,28 +143,19 @@ fn calls_begin_in_declaration_order_and_end_in_reverse_with_what_they_returned()
 /// `observer_zend_call_function_01.phpt`.
 #[test]
 fn a_function_the_observer_declines_is_asked_of_once_and_never_begun() {
-    let rec = Recording::start();
-    let engine = Engine::cli_builder()
-        .extensions(&[TestExt::<0>::observing()])
-        .build();
-    let files = Files::new("observer-declined", &[]);
-    rec.mark("built");
-    serve_main(
-        &engine,
-        &files,
+    let (_, events) = observe(
+        &[TestExt::<0>::observing()],
+        "observer-declined",
         "<?php\nfunction declined() { return 1; }\nclass C { static function m() { return declined(); } }\n\
          C::m(); C::m();\nset_error_handler(function () { return declined(); });\necho $undefined;\n",
     );
-    rec.mark("served");
-    let file = "file 'main.php'";
-    let events = observed(&rec.events().between("built", "served"));
     assert_eq!(
         events
             .get(..8)
             .unwrap_or_else(|| panic!("eight events: {events:?}")),
         [
-            init(0, file),
-            begin(0, file),
+            init(0, MAIN),
+            begin(0, MAIN),
             init(0, "C::m"),
             begin(0, "C::m"),
             init(0, "declined"),
@@ -175,7 +175,7 @@ fn a_function_the_observer_declines_is_asked_of_once_and_never_begun() {
             .any(|e| *e == begin(0, "declined") || *e == end(0, "declined", Some("1"))),
         "never begun or ended: {events:?}"
     );
-    assert_eq!(events.last(), Some(&end(0, file, Some("1"))));
+    assert_eq!(events.last(), Some(&end(0, MAIN, Some("1"))));
 }
 
 /// `observer_basic_03.phpt` and `observer_eval_01.phpt`: an included
@@ -201,14 +201,13 @@ fn an_include_and_an_eval_are_begun_and_ended_inside_their_includer() {
     );
     rec.mark("served");
     assert_eq!(served.stdout_text(), "h7");
-    let file = "file 'main.php'";
     let inc = "file 'inc.php'";
     let evaluated = "file 'main.php(3) : eval()'d code'";
     assert_eq!(
         observed(&rec.events().between("built", "served")),
         [
-            init(0, file),
-            begin(0, file),
+            init(0, MAIN),
+            begin(0, MAIN),
             init(0, inc),
             begin(0, inc),
             init(0, "h"),
@@ -218,7 +217,7 @@ fn an_include_and_an_eval_are_begun_and_ended_inside_their_includer() {
             init(0, evaluated),
             begin(0, evaluated),
             end(0, evaluated, Some("7")),
-            end(0, file, Some("1")),
+            end(0, MAIN, Some("1")),
         ]
     );
 }
@@ -231,26 +230,18 @@ fn an_include_and_an_eval_are_begun_and_ended_inside_their_includer() {
 /// native that sets the handler is observed as any native is.
 #[test]
 fn begin_runs_before_the_parameters_are_received() {
-    let rec = Recording::start();
-    let engine = Engine::cli_builder()
-        .extensions(&[TestExt::<0>::observing()])
-        .build();
-    let files = Files::new("observer-recv", &[]);
-    rec.mark("built");
-    serve_main(
-        &engine,
-        &files,
+    let (_, events) = observe(
+        &[TestExt::<0>::observing()],
+        "observer-recv",
         "<?php\nfunction t(array $a) { return $a; }\n\
          try { t(1); } catch (TypeError $e) { echo 'a'; }\n\
          set_error_handler('t');\ntry { echo $u; } catch (TypeError $e) { echo 'b'; }\n",
     );
-    rec.mark("served");
-    let file = "file 'main.php'";
     assert_eq!(
-        observed(&rec.events().between("built", "served")),
+        events,
         [
-            init(0, file),
-            begin(0, file),
+            init(0, MAIN),
+            begin(0, MAIN),
             init(0, "t"),
             begin(0, "t"),
             end(0, "t", None),
@@ -259,7 +250,7 @@ fn begin_runs_before_the_parameters_are_received() {
             end(0, "set_error_handler", Some("null")),
             begin(0, "t"),
             end(0, "t", None),
-            end(0, file, Some("1")),
+            end(0, MAIN, Some("1")),
         ]
     );
 }
@@ -281,7 +272,6 @@ fn an_unwind_ends_every_frame_it_leaves_once() {
         .extensions(&[TestExt::<0>::observing()])
         .build();
     let files = Files::new("observer-unwind", &[]);
-    let file = "file 'main.php'";
     let nested = "<?php\nfunction b() { throw new Exception('x'); }\nfunction a() { b(); }\n";
 
     rec.mark("caught");
@@ -312,7 +302,7 @@ fn an_unwind_ends_every_frame_it_leaves_once() {
             end(0, "Exception::__construct", Some("null")),
             end(0, "b", None),
             end(0, "a", None),
-            end(0, file, Some("1"))
+            end(0, MAIN, Some("1"))
         ]
     );
     let uncaught = observed(&events.between("uncaught", "exited"));
@@ -324,7 +314,7 @@ fn an_unwind_ends_every_frame_it_leaves_once() {
             end(0, "Exception::__construct", Some("null")),
             end(0, "b", None),
             end(0, "a", None),
-            end(0, file, None)
+            end(0, MAIN, None)
         ]
     );
     // `zend_exception_error` renders the throwable through its
@@ -334,7 +324,7 @@ fn an_unwind_ends_every_frame_it_leaves_once() {
     // `observer_exception_01.phpt` shows it.
     let file_ended = uncaught
         .iter()
-        .position(|e| *e == end(0, file, None))
+        .position(|e| *e == end(0, MAIN, None))
         .unwrap_or_else(|| panic!("the file ends: {uncaught:?}"));
     let to_string = "Exception::__toString";
     let trace = "Exception::getTraceAsString";
@@ -370,7 +360,7 @@ fn an_unwind_ends_every_frame_it_leaves_once() {
             end(0, "exit", None),
             end(0, "b", None),
             end(0, "a", None),
-            end(0, file, None)
+            end(0, MAIN, None)
         ]
     );
 }
@@ -391,7 +381,6 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
         .extensions(&[TestExt::<0>::observing()])
         .build();
     let files = Files::new("observer-bailout", &[]);
-    let file = "file 'main.php'";
 
     rec.mark("memory");
     serve_main(
@@ -430,7 +419,7 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
         [
             end(0, "b", None),
             end(0, "a", None),
-            end(0, file, None),
+            end(0, MAIN, None),
             init(0, "s"),
             begin(0, "s"),
             end(0, "s", Some("null")),
@@ -449,11 +438,11 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
             end(0, "trigger_error", None),
             end(0, "b", None),
             end(0, "a", None),
-            end(0, file, None)
+            end(0, MAIN, None)
         ],
         "every open frame ended once after the fatal: {user:?}"
     );
-    for name in ["a", "b", "trigger_error", file] {
+    for name in ["a", "b", "trigger_error", MAIN] {
         let begun = user.iter().filter(|e| **e == begin(0, name)).count();
         let ended = user
             .iter()
@@ -477,7 +466,7 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
             end(0, "b", None),
             end(0, "g", None),
             end(0, "a", None),
-            end(0, file, None)
+            end(0, MAIN, None)
         ],
         "every open frame ended once after the fatal: {resumed:?}"
     );
@@ -500,7 +489,6 @@ fn a_fatal_in_the_shutdown_leaves_its_frames_open() {
         .extensions(&[TestExt::<0>::observing()])
         .build();
     let files = Files::new("observer-shutdown-fatal", &[]);
-    let file = "file 'main.php'";
     rec.mark("shutdown function");
     serve_main(
         &engine,
@@ -536,7 +524,7 @@ fn a_fatal_in_the_shutdown_leaves_its_frames_open() {
             end(0, "trigger_error", None),
             end(0, "inner", None),
             end(0, "outer", None),
-            end(0, file, None),
+            end(0, MAIN, None),
             init(0, "sd"),
             begin(0, "sd"),
             init(0, "inner2"),
@@ -585,28 +573,20 @@ fn probe() -> Extension {
 /// it, here the error handler `trigger_error` calls.
 #[test]
 fn natives_are_begun_before_their_entry_and_ended_after_it() {
-    let rec = Recording::start();
-    let engine = Engine::cli_builder()
-        .extensions(&[TestExt::<0>::observing()])
-        .build();
-    let files = Files::new("observer-natives", &[]);
-    rec.mark("built");
-    let served = serve_main(
-        &engine,
-        &files,
+    let (served, events) = observe(
+        &[TestExt::<0>::observing()],
+        "observer-natives",
         "<?php\nfunction f($s) { return strcmp($s, 'a'); }\n\
          function h($no, $str) { return f($str) === 0; }\n\
          echo f('b'), (new Exception('m'))->getMessage();\n\
          set_error_handler('h');\ntrigger_error('a');\n",
     );
-    rec.mark("served");
     assert_eq!(served.stdout_text(), "1m");
-    let file = "file 'main.php'";
     assert_eq!(
-        observed(&rec.events().between("built", "served")),
+        events,
         [
-            init(0, file),
-            begin(0, file),
+            init(0, MAIN),
+            begin(0, MAIN),
             init(0, "f"),
             begin(0, "f"),
             init(0, "strcmp"),
@@ -632,7 +612,7 @@ fn natives_are_begun_before_their_entry_and_ended_after_it() {
             end(0, "f", Some("0")),
             end(0, "h", Some("bool")),
             end(0, "trigger_error", Some("bool")),
-            end(0, file, Some("1")),
+            end(0, MAIN, Some("1")),
         ]
     );
 }
@@ -649,29 +629,21 @@ fn natives_are_begun_before_their_entry_and_ended_after_it() {
 /// `Z/Zend/zend_execute.c:1597`).
 #[test]
 fn a_native_that_throws_is_ended_before_the_frames_the_throw_leaves() {
-    let rec = Recording::start();
-    let engine = Engine::cli_builder()
-        .extensions(&[TestExt::<0>::observing(), probe()])
-        .build();
-    let files = Files::new("observer-native-throw", &[]);
-    rec.mark("built");
-    let served = serve_main(
-        &engine,
-        &files,
+    let (served, events) = observe(
+        &[TestExt::<0>::observing(), probe()],
+        "observer-native-throw",
         "<?php\n$a = [];\nfunction f($s) { return strcmp($s, 'a'); }\n\
          try { f($a); } catch (TypeError $e) { echo 'c'; }\n\
          try { frameless_probe($a); } catch (TypeError $e) { echo 'd'; }\n\
          set_error_handler('strcmp');\n\
          try { trigger_error('x'); } catch (ArgumentCountError $e) { echo 'e'; }\n",
     );
-    rec.mark("served");
     assert_eq!(served.stdout_text(), "cde");
-    let file = "file 'main.php'";
     assert_eq!(
-        observed(&rec.events().between("built", "served")),
+        events,
         [
-            init(0, file),
-            begin(0, file),
+            init(0, MAIN),
+            begin(0, MAIN),
             init(0, "f"),
             begin(0, "f"),
             init(0, "strcmp"),
@@ -689,7 +661,7 @@ fn a_native_that_throws_is_ended_before_the_frames_the_throw_leaves() {
             begin(0, "strcmp"),
             end(0, "strcmp", Some("null")),
             end(0, "trigger_error", None),
-            end(0, file, Some("1")),
+            end(0, MAIN, Some("1")),
         ]
     );
 }
@@ -699,25 +671,17 @@ fn a_native_that_throws_is_ended_before_the_frames_the_throw_leaves() {
 /// every call as a full call is.
 #[test]
 fn a_frameless_call_is_observed_as_a_full_call() {
-    let rec = Recording::start();
-    let engine = Engine::cli_builder()
-        .extensions(&[TestExt::<0>::observing(), probe()])
-        .build();
-    let files = Files::new("observer-frameless", &[]);
-    rec.mark("built");
-    let served = serve_main(
-        &engine,
-        &files,
+    let (served, events) = observe(
+        &[TestExt::<0>::observing(), probe()],
+        "observer-frameless",
         "<?php\nfunction f($s) { return \\frameless_probe($s); }\nf('a'); f('');\n",
     );
-    rec.mark("served");
     assert_eq!(served.stdout_text(), "");
-    let file = "file 'main.php'";
     assert_eq!(
-        observed(&rec.events().between("built", "served")),
+        events,
         [
-            init(0, file),
-            begin(0, file),
+            init(0, MAIN),
+            begin(0, MAIN),
             init(0, "f"),
             begin(0, "f"),
             init(0, "frameless_probe"),
@@ -728,7 +692,7 @@ fn a_frameless_call_is_observed_as_a_full_call() {
             begin(0, "frameless_probe"),
             end(0, "frameless_probe", Some("bool")),
             end(0, "f", Some("bool")),
-            end(0, file, Some("1")),
+            end(0, MAIN, Some("1")),
         ]
     );
 }
@@ -889,24 +853,17 @@ fn pending_end(observed: &mut Observed<'_>, returned: Option<&Value>) {
 /// to catch after.
 #[test]
 fn a_natives_throwable_stands_pending_while_its_end_handlers_are_called() {
-    let rec = Recording::start();
-    let engine = Engine::cli_builder()
-        .extensions(&[ExtensionBuilder::default()
+    let (served, events) = observe(
+        &[ExtensionBuilder::default()
             .observer(pending_init)
-            .build("observer_pending")])
-        .build();
-    let files = Files::new("observer-pending", &[]);
-    rec.mark("built");
-    let served = serve_main(
-        &engine,
-        &files,
+            .build("observer_pending")],
+        "observer-pending",
         "<?php\nfunction f($s) { return strcmp($s, 'a'); }\n\
          try { f([]); } catch (TypeError $e) { echo 'c'; }\n",
     );
-    rec.mark("served");
     assert_eq!(served.stdout_text(), "c");
     assert_eq!(
-        observed(&rec.events().between("built", "served")),
+        events,
         [
             Ext(9, End(String::from("strcmp pending true"), None)),
             Ext(9, End(String::from("f pending true"), None)),
@@ -1000,28 +957,20 @@ fn fiber_started(file: &str, fiber: &impl Fn(&str) -> String, closure: &str) -> 
 /// the delegating frame's own `return` ends it with its own.
 #[test]
 fn a_generator_is_begun_at_each_resumption_and_ended_at_each_yield() {
-    let rec = Recording::start();
-    let engine = Engine::cli_builder()
-        .extensions(&[TestExt::<0>::observing()])
-        .build();
-    let files = Files::new("observer-generator", &[]);
-    rec.mark("built");
-    let served = serve_main(
-        &engine,
-        &files,
+    let (served, events) = observe(
+        &[TestExt::<0>::observing()],
+        "observer-generator",
         "<?php\nfunction bar() { for ($i = 10; $i < 12; $i++) { yield $i; } }\n\
          function foo() { yield 0; yield from bar(); yield 42; return 1337; }\n\
          function run() { $g = foo(); foreach ($g as $v) { echo $v, ','; } return $g->getReturn(); }\n\
          echo run();\n",
     );
-    rec.mark("served");
     assert_eq!(served.stdout_text(), "0,10,11,42,1337");
-    let file = "file 'main.php'";
     assert_eq!(
-        observed(&rec.events().between("built", "served")),
+        events,
         [
-            init(0, file),
-            begin(0, file),
+            init(0, MAIN),
+            begin(0, MAIN),
             init(0, "run"),
             begin(0, "run"),
             init(0, "foo"),
@@ -1044,7 +993,7 @@ fn a_generator_is_begun_at_each_resumption_and_ended_at_each_yield() {
             begin(0, "Generator::getReturn"),
             end(0, "Generator::getReturn", Some("1337")),
             end(0, "run", Some("1337")),
-            end(0, file, Some("1")),
+            end(0, MAIN, Some("1")),
         ]
     );
 }
@@ -1072,14 +1021,13 @@ fn a_generator_resumed_by_hand_pairs_each_resumption() {
     );
     rec.mark("end");
     assert_eq!(served.stdout_text(), "012Done");
-    let file = "file 'main.php'";
     let events = rec.events();
     // A native read of the generator, begun and ended with what it gave.
     let read = |name: &str, gave: &str| [begin(0, name), end(0, name, Some(gave))];
     let current = |gave: &str| read("Generator::current", gave);
     let mut expected = vec![
-        init(0, file),
-        begin(0, file),
+        init(0, MAIN),
+        begin(0, MAIN),
         init(0, "run"),
         begin(0, "run"),
         init(0, "Generator::current"),
@@ -1119,7 +1067,7 @@ fn a_generator_resumed_by_hand_pairs_each_resumption() {
     ]);
     expected.extend(read("Generator::next", "null"));
     expected.extend(current("null"));
-    expected.extend([end(0, "run", Some("'Done'")), end(0, file, Some("1"))]);
+    expected.extend([end(0, "run", Some("'Done'")), end(0, MAIN, Some("1"))]);
     assert_eq!(observed(&events.between("by_hand", "end")), expected);
 }
 
@@ -1141,7 +1089,6 @@ fn a_generator_left_by_a_throwable_is_ended_with_nothing() {
          function run() { foreach (foo() as $v) { echo $v; } return 'unseen'; }\necho run();\n",
     );
     rec.mark("end");
-    let file = "file 'main.php'";
     let events = rec.events();
     // Up to the main file's end; what renders the throwable after it,
     // `Exception::__toString`, is the natives' (#1810).
@@ -1152,13 +1099,13 @@ fn a_generator_left_by_a_throwable_is_ended_with_nothing() {
     assert!(rendered.is_some(), "the throwable is rendered: {thrown:?}");
     let file_ended = thrown
         .iter()
-        .position(|e| *e == end(0, file, None))
+        .position(|e| *e == end(0, MAIN, None))
         .map_or(0, |at| at + 1);
     assert_eq!(
         thrown[..file_ended],
         [
-            init(0, file),
-            begin(0, file),
+            init(0, MAIN),
+            begin(0, MAIN),
             init(0, "run"),
             begin(0, "run"),
             init(0, "foo"),
@@ -1172,7 +1119,7 @@ fn a_generator_left_by_a_throwable_is_ended_with_nothing() {
             end(0, "Exception::__construct", Some("null")),
             end(0, "foo", None),
             end(0, "run", None),
-            end(0, file, None),
+            end(0, MAIN, None),
         ]
     );
 }
@@ -1185,30 +1132,21 @@ fn a_generator_left_by_a_throwable_is_ended_with_nothing() {
 /// the fiber is ended inside it, after the switch back into it.
 #[test]
 fn a_fiber_is_noticed_at_its_creation_each_switch_and_its_destruction() {
-    let rec = Recording::start();
-    let engine = Engine::cli_builder()
-        .extensions(&[TestExt::<0>::observing()])
-        .build();
-    let files = Files::new("observer-fiber", &[]);
-    rec.mark("built");
-    let served = serve_main(
-        &engine,
-        &files,
+    let (served, events) = observe(
+        &[TestExt::<0>::observing()],
+        "observer-fiber",
         "<?php\nfunction inner() { return Fiber::suspend() . 'i'; }\n\
          $fiber = new Fiber(function () { return inner(); });\n\
          $fiber->start();\n$fiber->resume('r');\necho $fiber->getReturn();\n",
     );
-    rec.mark("served");
     assert_eq!(served.stdout_text(), "ri");
-    let events = observed(&rec.events().between("built", "served"));
     let (fiber, closure) = one_named_in(&events);
     let fiber = |status: &str| format!("{fiber} {status}");
     let closure = closure.as_str();
-    let file = "file 'main.php'";
     assert_eq!(
         events,
         [
-            fiber_started(file, &fiber, closure),
+            fiber_started(MAIN, &fiber, closure),
             vec![
                 init(0, "Fiber::resume"),
                 begin(0, "Fiber::resume"),
@@ -1222,7 +1160,7 @@ fn a_fiber_is_noticed_at_its_creation_each_switch_and_its_destruction() {
                 init(0, "Fiber::getReturn"),
                 begin(0, "Fiber::getReturn"),
                 end(0, "Fiber::getReturn", Some("'ri'")),
-                end(0, file, Some("1")),
+                end(0, MAIN, Some("1")),
             ],
         ]
         .concat()
@@ -1252,7 +1190,6 @@ fn a_frame_open_in_a_suspended_fiber_is_ended_in_that_fiber_and_nowhere_else() {
     );
     rec.mark("end");
     assert_eq!(served.stdout_text(), "di");
-    let file = "file 'main.php'";
     let same_height = observed(&rec.events().between("same_height", "end"));
     let (fiber, closure) = one_named_in(&same_height);
     let fiber = |status: &str| format!("{fiber} {status}");
@@ -1260,7 +1197,7 @@ fn a_frame_open_in_a_suspended_fiber_is_ended_in_that_fiber_and_nowhere_else() {
     assert_eq!(
         same_height,
         [
-            fiber_started(file, &fiber, closure),
+            fiber_started(MAIN, &fiber, closure),
             vec![
                 init(0, "declined"),
                 init(0, "Fiber::resume"),
@@ -1275,7 +1212,7 @@ fn a_frame_open_in_a_suspended_fiber_is_ended_in_that_fiber_and_nowhere_else() {
                 init(0, "Fiber::getReturn"),
                 begin(0, "Fiber::getReturn"),
                 end(0, "Fiber::getReturn", Some("'i'")),
-                end(0, file, Some("1")),
+                end(0, MAIN, Some("1")),
             ],
         ]
         .concat()
@@ -1304,7 +1241,6 @@ fn a_fiber_inside_a_fiber_switches_with_its_resumer() {
     );
     rec.mark("end");
     assert_eq!(nested.stdout_text(), "m1");
-    let file = "file 'main.php'";
     let nested = observed(&rec.events().between("nested", "end"));
     let (fibers, closures) = named_in(&nested);
     assert!(
@@ -1320,8 +1256,8 @@ fn a_fiber_inside_a_fiber_switches_with_its_resumer() {
     assert_eq!(
         nested,
         [
-            init(0, file),
-            begin(0, file),
+            init(0, MAIN),
+            begin(0, MAIN),
             init(0, "Fiber::__construct"),
             begin(0, "Fiber::__construct"),
             end(0, "Fiber::__construct", Some("null")),
@@ -1369,7 +1305,7 @@ fn a_fiber_inside_a_fiber_switches_with_its_resumer() {
             init(0, "Fiber::getReturn"),
             begin(0, "Fiber::getReturn"),
             end(0, "Fiber::getReturn", Some("1")),
-            end(0, file, Some("1")),
+            end(0, MAIN, Some("1")),
         ]
     );
 }
@@ -1382,23 +1318,15 @@ fn a_fiber_inside_a_fiber_switches_with_its_resumer() {
 /// and each switch out of it, its last among them (#2014).
 #[test]
 fn a_switch_handler_reads_the_fiber_switched_into_and_out_of_as_the_current_one() {
-    let rec = Recording::start();
-    let engine = Engine::cli_builder()
-        .extensions(&[TestExt::<0>::builder()
+    let (served, events) = observe(
+        &[TestExt::<0>::builder()
             .fiber_switch(current_at_switch)
-            .build("test_ext_0")])
-        .build();
-    let files = Files::new("observer-fiber-current", &[]);
-    rec.mark("built");
-    let served = serve_main(
-        &engine,
-        &files,
+            .build("test_ext_0")],
+        "observer-fiber-current",
         "<?php\n$fiber = new Fiber(function () { Fiber::suspend(); });\n\
          $fiber->start();\n$fiber->resume();\necho 'done';\n",
     );
-    rec.mark("served");
     assert_eq!(served.stdout_text(), "done");
-    let events = observed(&rec.events().between("built", "served"));
     // The fiber as the first switch, the one into it, names it.
     let fiber = match events.first() {
         Some(Ext(_, FiberSwitch(_, to))) => to
@@ -1461,15 +1389,9 @@ fn current_at_switch(req: &mut Request, from: ObservedFiber, to: ObservedFiber) 
 /// leaves a suspended fiber's at a fatal.
 #[test]
 fn a_fatal_in_a_fiber_ends_its_frames_then_its_resumers_and_no_other_fibers() {
-    let rec = Recording::start();
-    let engine = Engine::cli_builder()
-        .extensions(&[TestExt::<0>::observing()])
-        .build();
-    let files = Files::new("observer-fiber-fatal", &[]);
-    rec.mark("built");
-    serve_main(
-        &engine,
-        &files,
+    let (_, events) = observe(
+        &[TestExt::<0>::observing()],
+        "observer-fiber-fatal",
         "<?php\nfunction held() { Fiber::suspend(); }\n\
          $kept = new Fiber(function () { held(); });\n$kept->start();\n\
          function deep() { $s = '.'; while (true) { $s .= $s; } }\n\
@@ -1477,8 +1399,6 @@ fn a_fatal_in_a_fiber_ends_its_frames_then_its_resumers_and_no_other_fibers() {
          $fiber = new Fiber(function () { Fiber::suspend(); deep(); });\n$fiber->start();\n\
          ini_set('memory_limit', '2M');\nresumer($fiber);\n",
     );
-    rec.mark("served");
-    let events = observed(&rec.events().between("built", "served"));
     let fatal = events
         .iter()
         .position(|e| matches!(e, Ext(_, Error(m)) if m.starts_with("Allowed memory size")))
@@ -1499,7 +1419,7 @@ fn a_fatal_in_a_fiber_ends_its_frames_then_its_resumers_and_no_other_fibers() {
             destroy(0, &format!("{fiber} dead")),
             end(0, "Fiber::resume", None),
             end(0, "resumer", None),
-            end(0, "file 'main.php'", None),
+            end(0, MAIN, None),
         ],
         "{events:?}"
     );
@@ -1521,30 +1441,21 @@ fn a_fatal_in_a_fiber_ends_its_frames_then_its_resumers_and_no_other_fibers() {
 /// out of it and its destruction are noticed.
 #[test]
 fn a_fiber_destroyed_while_suspended_ends_its_frames_inside_it() {
-    let rec = Recording::start();
-    let engine = Engine::cli_builder()
-        .extensions(&[TestExt::<0>::observing()])
-        .build();
-    let files = Files::new("observer-fiber-destroyed", &[]);
-    rec.mark("built");
-    serve_main(
-        &engine,
-        &files,
+    let (_, events) = observe(
+        &[TestExt::<0>::observing()],
+        "observer-fiber-destroyed",
         "<?php\nfunction inner() { Fiber::suspend(); }\n\
          $fiber = new Fiber(function () { inner(); });\n$fiber->start();\n",
     );
-    rec.mark("served");
-    let events = observed(&rec.events().between("built", "served"));
     let (fiber, closure) = one_named_in(&events);
     let fiber = |status: &str| format!("{fiber} {status}");
     let closure = closure.as_str();
-    let file = "file 'main.php'";
     assert_eq!(
         events,
         [
-            fiber_started(file, &fiber, closure),
+            fiber_started(MAIN, &fiber, closure),
             vec![
-                end(0, file, Some("1")),
+                end(0, MAIN, Some("1")),
                 switch(0, "main running", &fiber("suspended destroyed")),
                 end(0, "Fiber::suspend", None),
                 end(0, "inner", None),
@@ -1651,15 +1562,9 @@ fn a_fiber_destroyed_or_thrown_into_is_noticed_as_such() {
 /// suspended outside any `try`, which resumes nothing.
 #[test]
 fn a_generator_is_observed_through_yield_from_throw_close_and_a_fiber() {
-    let rec = Recording::start();
-    let engine = Engine::cli_builder()
-        .extensions(&[TestExt::<0>::observing()])
-        .build();
-    let files = Files::new("observer-generator-paths", &[]);
-    rec.mark("built");
-    let served = serve_main(
-        &engine,
-        &files,
+    let (served, events) = observe(
+        &[TestExt::<0>::observing()],
+        "observer-generator-paths",
         "<?php\nfunction foo() { yield 0; yield from [1, 2];\n\
          try { yield 3; } catch (Exception $e) { echo 'c'; }\n\
          try { yield 4; } finally { echo 'f'; } }\n\
@@ -1667,9 +1572,7 @@ fn a_generator_is_observed_through_yield_from_throw_close_and_a_fiber() {
          run();\n\
          $fiber = new Fiber(function () { $g = foo(); echo $g->current(); });\n$fiber->start();\n",
     );
-    rec.mark("served");
     assert_eq!(served.stdout_text(), "0123c4f0");
-    let events = observed(&rec.events().between("built", "served"));
     let foo: Vec<Event> = events
         .iter()
         .filter(|e| matches!(e, Ext(_, Begin(n) | End(n, _)) if n == "foo"))
@@ -1703,20 +1606,13 @@ fn a_generator_is_observed_through_yield_from_throw_close_and_a_fiber() {
 /// witness on `CacheOf` serves that through opcache.
 #[test]
 fn a_trait_method_is_asked_of_once_per_class_that_uses_it() {
-    let rec = Recording::start();
-    let engine = Engine::cli_builder()
-        .extensions(&[TestExt::<0>::observing()])
-        .build();
-    let files = Files::new("observer-trait-copies", &[]);
-    rec.mark("built");
-    serve_main(
-        &engine,
-        &files,
+    let (_, events) = observe(
+        &[TestExt::<0>::observing()],
+        "observer-trait-copies",
         "<?php\ntrait T { function f() { return 1; } }\nclass A { use T; }\nclass B { use T; }\n\
          (new A)->f(); (new B)->f(); (new A)->f();\n",
     );
-    rec.mark("served");
-    let methods: Vec<Event> = observed(&rec.events().between("built", "served"))
+    let methods: Vec<Event> = events
         .into_iter()
         .filter(|event| {
             matches!(
@@ -1747,15 +1643,9 @@ fn a_trait_method_is_asked_of_once_per_class_that_uses_it() {
 /// scope, shares the method's (`$p`).
 #[test]
 fn a_closure_bound_to_another_scope_is_asked_of_again() {
-    let rec = Recording::start();
-    let engine = Engine::cli_builder()
-        .extensions(&[TestExt::<0>::observing()])
-        .build();
-    let files = Files::new("observer-rebound", &[]);
-    rec.mark("built");
-    let served = serve_main(
-        &engine,
-        &files,
+    let (served, events) = observe(
+        &[TestExt::<0>::observing()],
+        "observer-rebound",
         "<?php\nclass A { function make() { return function () { return 1; }; } }\nclass B {}\n\
          $f = function () { return 1; };\n$f(); $f();\n\
          $g = Closure::bind($f, null, A::class);\n$g(); $g();\n\
@@ -1765,9 +1655,8 @@ fn a_closure_bound_to_another_scope_is_asked_of_again() {
          $o = Closure::bind($m, null, B::class);\n$o();\n\
          $p = Closure::fromCallable([new A, 'make']);\n$p();\necho \"done\\n\";\n",
     );
-    rec.mark("served");
     assert_eq!(served.stdout_text(), "done\n");
-    let asked: Vec<String> = observed(&rec.events().between("built", "served"))
+    let asked: Vec<String> = events
         .into_iter()
         .filter_map(|event| match event {
             Ext(0, ObserverInit(name)) if name.contains("{closure") || name == "A::make" => Some(

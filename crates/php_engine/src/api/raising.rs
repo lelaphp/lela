@@ -679,6 +679,19 @@ pub fn call_stack_end(req: &mut Request) -> Result<(), Thrown> {
     Err(call_stack_size_error(req, stack.floor_size()))
 }
 
+/// `execute_ex`'s own check at the loop's entry, the one a native's call
+/// back into PHP and a generator's resume pass
+/// (`php_compile::StackLimit::entry_overflowed`): the same `Error`, held
+/// under detect to the whole of the thread a host sized for that
+/// re-entry rather than php's budget, and naming php's budget either way.
+pub(crate) fn call_stack_entry(req: &mut Request) -> Result<(), Thrown> {
+    let stack = req.stack_limit();
+    if !stack.entry_overflowed() {
+        return Ok(());
+    }
+    Err(call_stack_size_error(req, stack.max_stack_size()))
+}
+
 /// `zend_call_stack_size_error`: php's sentence over `size`.
 fn call_stack_size_error(req: &mut Request, size: usize) -> Thrown {
     throw_error(
@@ -1618,7 +1631,7 @@ pub fn throwing_warnings<R>(
 
 #[cfg(test)]
 mod tests {
-    use php_unit::decl::{FunctionDecl, Name, Parameter, ParameterDefault, Type};
+    use php_unit::decl::{FunctionDecl, Parameter, Type};
 
     use crate::api::abi::{Entry, ExtensionBuilder};
     use crate::api::request::Request;
@@ -1630,30 +1643,15 @@ mod tests {
 
     fn parameter(name: &[u8], ty: Type, variadic: bool) -> Parameter {
         Parameter {
-            name: Name(name.into()),
-            ty: Some(ty),
-            by_ref: false,
-            prefer_ref: false,
-            promoted: false,
             variadic,
-            default: ParameterDefault::None,
-            attributes: Vec::new(),
+            ..php_unit::decl::parameter(name, Some(ty))
         }
     }
 
     fn declared(name: &[u8], parameters: Vec<Parameter>) -> FunctionDecl {
         FunctionDecl {
-            name: Name(name.into()),
             parameters,
-            return_type: None,
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
-            file: Name(Box::new([])),
-            line: 0,
-            end_line: 0,
-            frameless: Vec::new(),
+            ..php_unit::decl::native_function(name)
         }
     }
 

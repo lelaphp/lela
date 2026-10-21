@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::*;
-use crate::common::registry::registry;
+use crate::common::registry::{Row, registry, rows};
 use crate::manifest::Crate;
 
 fn fixtures() -> PathBuf {
@@ -173,16 +173,7 @@ fn the_two_columns_have_their_own_flag_scope_and_key() {
     assert_eq!(Host::Cli.id("ctype", Column::Ri), "crosscheck:ctype/ri");
     let oracle = fs::read(fixtures().join("oracle.ri")).unwrap();
     let engine = fs::read(fixtures().join("engine.ri")).unwrap();
-    let accepted = registry(
-        r#"
-[[divergence]]
-id = "crosscheck:ctype"
-kind = "crosscheck"
-reason = "the --re row (fixture)."
-status = "accepted"
-since = "2026-09-18"
-"#,
-    );
+    let accepted = rows(&[Row::accepted("crosscheck:ctype")]);
     assert!(
         matches!(
             judge(
@@ -249,19 +240,12 @@ fn the_renumbered_fixture_is_a_pass_under_the_row_and_not_without_it() {
 fn a_difference_an_accepted_row_names_is_diverged_and_a_pass() {
     let oracle = fs::read(fixtures().join("oracle.re")).unwrap();
     let engine = fs::read(fixtures().join("engine.re")).unwrap();
-    let row = |status: &str| {
-        format!(
-            r#"
-[[divergence]]
-id = "crosscheck:ctype"
-kind = "crosscheck"
-reason = "ctype_alnun is the fixture's one byte (fixture)."
-status = "{status}"
-since = "2026-09-18"
-"#
-        )
+    let row = |status: crate::divergence::Status| {
+        rows(&[Row::accepted("crosscheck:ctype")
+            .reason("ctype_alnun is the fixture's one byte (fixture).")
+            .status(status)])
     };
-    let accepted = registry(&row("accepted"));
+    let accepted = row(crate::divergence::Status::Accepted);
     let judged = judge(
         &accepted,
         &Host::Cli.id("ctype", Column::Re),
@@ -298,7 +282,7 @@ since = "2026-09-18"
     assert!(
         matches!(
             judge(
-                &registry(&row("open")),
+                &row(crate::divergence::Status::Open),
                 &Host::Cli.id("ctype", Column::Re),
                 &oracle,
                 &Rendering::Bytes(engine)

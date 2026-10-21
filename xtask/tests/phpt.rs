@@ -33,7 +33,7 @@ mod common {
 }
 use common::manifest::{of_rows, pin};
 use common::phpt_tree::fixture_tree;
-use common::registry::registry;
+use common::registry::{Row, registry, rows};
 use common::repo::{Repo, scratch_workspace};
 use common::run::Run;
 
@@ -319,9 +319,7 @@ fn the_same_missed_expectation_passes_under_an_accepted_divergence_row() {
             "--TEST--\nA wrong expectation\n--FILE--\n<?php echo \"four\";\n--EXPECT--\nfive\n",
         )],
     );
-    let accepted = registry(
-        "[[divergence]]\nid = \"phpt:php-src/ext/fixture/tests/missed.phpt\"\nkind = \"phpt\"\nreason = \"A person wrote why this one is allowed to differ.\"\nstatus = \"accepted\"\nsince = \"2026-09-08\"\n",
-    );
+    let accepted = rows(&[Row::accepted("phpt:php-src/ext/fixture/tests/missed.phpt")]);
     let reading = scratch.run(&accepted, &scratch.engine);
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     assert_eq!(count(&reading, "diverged"), 1);

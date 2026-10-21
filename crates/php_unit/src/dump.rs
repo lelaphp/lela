@@ -747,12 +747,18 @@ fn percent_g(value: f64) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::needless_raw_string_hashes,
+    reason = "expect-test writes every multi-line snapshot as r#\"…\"#, a dump without a quote as well"
+)]
 mod tests {
+    use expect_test::expect;
     use php_heap::Intern as _;
 
     use super::*;
     use crate::decl::{
         ClassDecl, ClassFlags, ClassKind, EnumBacking, MethodDecl, Name, Parameter, Visibility,
+        native_function, parameter,
     };
     use crate::op::{LiveRange, OplineIdx, TryCatch};
     use crate::unit::MethodBody;
@@ -804,6 +810,16 @@ mod tests {
         String::from_utf8(dump).expect("a dump of UTF-8")
     }
 
+    /// What the dump prints past the main op array's header,
+    /// `; return  [] RANGE[0..0]`: its oplines and tables, then every
+    /// other op array whole.
+    fn past_main_header(unit: &Unit) -> String {
+        utf8(unit.dump(&[]))
+            .split_once("RANGE[0..0]\n")
+            .map(|(_, rest)| rest.to_owned())
+            .expect("the main op array's header")
+    }
+
     #[test]
     fn the_header_is_php_s_four_lines_and_a_blank_line_before_the_name() {
         let unit = Unit {
@@ -819,36 +835,30 @@ mod tests {
             ),
             ..Unit::default()
         };
-        assert_eq!(
-            utf8(unit.dump(&[])),
-            "\n$_main:\n     ; (lines=1, args=0, vars=0, tmps=0)\n     ; (before optimizer)\n     ; a.php:1-1\n     ; return  [] RANGE[0..0]\n0000 RETURN int(1)\n"
-        );
+        expect![[r#"
+
+            $_main:
+                 ; (lines=1, args=0, vars=0, tmps=0)
+                 ; (before optimizer)
+                 ; a.php:1-1
+                 ; return  [] RANGE[0..0]
+            0000 RETURN int(1)
+        "#]]
+        .assert_eq(&utf8(unit.dump(&[])));
     }
 
     #[test]
     fn a_function_prints_its_name_and_its_parameters_less_the_variadic_one() {
-        let parameter = |variadic: bool| Parameter {
-            name: Name::from("x"),
-            ty: None,
-            by_ref: false,
-            prefer_ref: false,
-            promoted: false,
+        let x = |variadic: bool| Parameter {
             variadic,
-            default: crate::decl::ParameterDefault::None,
-            attributes: Vec::new(),
+            ..parameter(b"x", None)
         };
         let decl = FunctionDecl {
-            name: Name::from("f"),
-            parameters: vec![parameter(false), parameter(false), parameter(true)],
-            return_type: None,
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
+            parameters: vec![x(false), x(false), x(true)],
             file: Name::from("a.php"),
             line: 4,
             end_line: 6,
-            frameless: Vec::new(),
+            ..native_function(b"f")
         };
         let function = OpArray {
             line_start: 4,
@@ -860,9 +870,15 @@ mod tests {
             functions: vec![(decl, function)],
             ..Unit::default()
         };
-        assert!(utf8(unit.dump(&[])).ends_with(
-            "\nf:\n     ; (lines=0, args=2, vars=0, tmps=0)\n     ; (before optimizer)\n     ; a.php:4-6\n     ; return  [] RANGE[0..0]\n"
-        ));
+        expect![[r#"
+
+            f:
+                 ; (lines=0, args=2, vars=0, tmps=0)
+                 ; (before optimizer)
+                 ; a.php:4-6
+                 ; return  [] RANGE[0..0]
+        "#]]
+        .assert_eq(&past_main_header(&unit));
     }
 
     /// `zend_foreach_op_array` reaches a class's methods after the
@@ -872,28 +888,10 @@ mod tests {
     #[test]
     fn a_method_prints_after_the_functions_under_its_class_s_name() {
         let function = |name: &str, parameters: usize| FunctionDecl {
-            name: Name::from(name),
-            parameters: (0..parameters)
-                .map(|_| Parameter {
-                    name: Name::from("x"),
-                    ty: None,
-                    by_ref: false,
-                    prefer_ref: false,
-                    promoted: false,
-                    variadic: false,
-                    default: crate::decl::ParameterDefault::None,
-                    attributes: Vec::new(),
-                })
-                .collect(),
-            return_type: None,
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
+            parameters: (0..parameters).map(|_| parameter(b"x", None)).collect(),
             file: Name::from("a.php"),
             line: 4,
-            end_line: 0,
-            frameless: Vec::new(),
+            ..native_function(name.as_bytes())
         };
         let method = |name: &str, parameters: usize| MethodDecl {
             function: function(name, parameters),
@@ -954,18 +952,27 @@ mod tests {
             ],
             ..Unit::default()
         };
-        let dump = utf8(unit.dump(&[]));
-        let header = |name: &str, args: usize, line: u32| {
-            format!(
-                "\n{name}:\n     ; (lines=0, args={args}, vars=0, tmps=0)\n     ; (before optimizer)\n     ; a.php:{line}-{line}\n     ; return  [] RANGE[0..0]\n"
-            )
-        };
-        assert!(dump.ends_with(&format!(
-            "{}{}{}",
-            header("f", 0, 2),
-            header("C::m", 1, 4),
-            header("C::n", 0, 6)
-        )));
+        expect![[r#"
+
+            f:
+                 ; (lines=0, args=0, vars=0, tmps=0)
+                 ; (before optimizer)
+                 ; a.php:2-2
+                 ; return  [] RANGE[0..0]
+
+            C::m:
+                 ; (lines=0, args=1, vars=0, tmps=0)
+                 ; (before optimizer)
+                 ; a.php:4-4
+                 ; return  [] RANGE[0..0]
+
+            C::n:
+                 ; (lines=0, args=0, vars=0, tmps=0)
+                 ; (before optimizer)
+                 ; a.php:6-6
+                 ; return  [] RANGE[0..0]
+        "#]]
+        .assert_eq(&past_main_header(&unit));
     }
 
     /// `zend_dump_const`: each type of constant printed as the value and
@@ -1184,17 +1191,10 @@ mod tests {
             .constant_array(&[(Key::Str(key), Zval::long(1))])
             .expect("a constant array");
         let decl = FunctionDecl {
-            name: Name(b"f\xff"[..].into()),
-            parameters: Vec::new(),
-            return_type: None,
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
             file: Name(b"\xfe.php"[..].into()),
             line: 1,
             end_line: 1,
-            frameless: Vec::new(),
+            ..native_function(b"f\xff")
         };
         let mut function = body(
             vec![Opline {
@@ -1560,18 +1560,7 @@ mod tests {
     /// prints `LIVE RANGES:` after the oplines and one line per range,
     /// the temporary's slot as the range holds it, the range, and the kind's
     /// word, the ranges in the order of their starts; the
-    /// `try`/`catch` table follows it.
-    ///
-    /// ```text
-    /// LIVE RANGES:
-    ///      11: 0004 - 0011 (loop)
-    ///      12: 0006 - 0009 (silence)
-    ///      15: 0012 - 0014 (rope)
-    ///      18: 0017 - 0022 (new)
-    ///      22: 0024 - 0025 (tmp/var)
-    /// EXCEPTION TABLE:
-    ///      0026, 0030, -, -
-    /// ```
+    /// `try`/`catch` table follows it, as the snapshot below holds.
     #[test]
     fn the_live_range_table_follows_the_oplines_with_php_s_five_kinds() {
         let range = |var, kind, start, end| LiveRange {
@@ -1599,9 +1588,17 @@ mod tests {
             },
             ..Unit::default()
         };
-        assert!(utf8(unit.dump(&[])).ends_with(
-            "     ; return  [] RANGE[0..0]\nLIVE RANGES:\n     11: 0004 - 0011 (loop)\n     12: 0006 - 0009 (silence)\n     15: 0012 - 0014 (rope)\n     18: 0017 - 0022 (new)\n     22: 0024 - 0025 (tmp/var)\nEXCEPTION TABLE:\n     0026, 0030, -, -\n"
-        ));
+        expect![[r#"
+            LIVE RANGES:
+                 11: 0004 - 0011 (loop)
+                 12: 0006 - 0009 (silence)
+                 15: 0012 - 0014 (rope)
+                 18: 0017 - 0022 (new)
+                 22: 0024 - 0025 (tmp/var)
+            EXCEPTION TABLE:
+                 0026, 0030, -, -
+        "#]]
+        .assert_eq(&past_main_header(&unit));
     }
 
     /// The oracle prints `EXCEPTION TABLE:` and `     0033, 0037, 0040,
@@ -1629,9 +1626,11 @@ mod tests {
             },
             ..Unit::default()
         };
-        assert!(
-            utf8(unit.dump(&[]))
-                .ends_with("EXCEPTION TABLE:\n     0033, 0037, 0040, 0041\n     0002, -, -, -\n")
-        );
+        expect![[r#"
+            EXCEPTION TABLE:
+                 0033, 0037, 0040, 0041
+                 0002, -, -, -
+        "#]]
+        .assert_eq(&past_main_header(&unit));
     }
 }

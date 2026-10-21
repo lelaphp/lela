@@ -493,7 +493,14 @@ pub fn judge(
             Condition::Fresh => {
                 for krate in &crates {
                     let now = KeyNow::of(snapshot, krate, &crates)?;
-                    fresh_readings(&asking, krate, &now, &mut not_judged, &mut unmet)?;
+                    fresh_readings(
+                        &asking,
+                        krate,
+                        &now,
+                        &mut not_judged,
+                        &mut unmet,
+                        &mut notes,
+                    )?;
                 }
                 if !not_run.is_empty() {
                     notes.push(format!(
@@ -849,13 +856,16 @@ impl KeyNow {
 
 /// Conditions 1 and 2 for one touched crate, held to its key now, so a
 /// reading taken before a crate it is built from changed is stale. A
-/// missing reading of an instrument in `not_run` goes to `not_judged`.
+/// missing reading of an instrument in `not_run` goes to `not_judged`,
+/// and a fresh passing `test` reading whose tests skipped for a fact this
+/// machine did not promise is a note naming how many (#3085).
 fn fresh_readings(
     asking: &Asking,
     krate: &Crate,
     now: &KeyNow,
     not_judged: &mut Vec<String>,
     unmet: &mut Vec<String>,
+    notes: &mut Vec<String>,
 ) -> Result<()> {
     let (root, store, not_run) = (asking.snapshot.root(), asking.store, asking.not_run);
     let pin = asking.manifest.pin.digest();
@@ -915,6 +925,16 @@ fn fresh_readings(
                 "{instrument}: {scope} {}: {}",
                 reading.status.as_str(),
                 reading.message
+            ));
+        }
+        if instrument == "test"
+            && reading.status == Status::Pass
+            && let Some(Number::Int(skipped)) = reading.numbers.get("skipped_unpromised")
+            && *skipped > 0
+        {
+            let s = plural(usize::try_from(*skipped).unwrap_or(usize::MAX));
+            notes.push(format!(
+                "test: {scope} passed with {skipped} test{s} skipped for a fact this machine did not promise"
             ));
         }
         if instrument == "witness"

@@ -1,0 +1,32 @@
+# A negative-control fixture (harness-design.md §4.1): a workspace that must
+# fail the instrument named by its directory. The pin is the real one, by path.
+# The sensor `xtask clippy` runs for the rule whose `check` names
+# silent-return (#3079): php_heap's tests return at their own level, in
+# src/array.rs as crates/php_heap/src/array.rs once did and in tests/, so
+# it fails naming those two lines and no other; php_unit's tests return
+# only inside a closure and a nested fn, or with Err(..), so it passes.
+[oracle]
+pin = "../../../../oracle.toml"
+[budget]
+total = 1000
+new = 1000
+docs = 1000
+harness = 1000
+lock_packages = 1000
+clean_build_release_s = 1000
+api_items = 1000
+bindings = 1000
+
+[[crate]]
+name = "php_heap"
+budget = 100
+
+[[crate]]
+name = "php_unit"
+budget = 100
+
+[[rule]]
+id = "tests.no-silent-return"
+scope = "crates/*"
+check = "silent-return"
+text = "A test that returns early passes without asserting (fixture)."

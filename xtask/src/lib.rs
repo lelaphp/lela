@@ -192,6 +192,18 @@ pub(crate) fn remove(path: &Path) -> Result<()> {
     }
 }
 
+/// The directory `dir` made, with every one above it that is missing, an
+/// error naming it where it cannot be.
+pub(crate) fn make_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))
+}
+
+/// The directory the file at `path` goes in, made as [`make_dir`] makes
+/// one, so the file can be written there.
+pub(crate) fn make_parent(path: &Path) -> Result<()> {
+    path.parent().map_or(Ok(()), make_dir)
+}
+
 /// `contents` written to the file at `path`, an error naming it where it
 /// cannot be: every instrument's write of a file it lays down.
 pub(crate) fn write(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {

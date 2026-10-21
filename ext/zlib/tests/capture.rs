@@ -1,6 +1,8 @@
 //! The extension through the `Capture` sink (design §4.10, ADR-0002): a
 //! fresh engine with this crate alone, never the bundle.
 
+mod support;
+
 use php_ext::test::{Capture, Engine};
 
 #[test]
@@ -20,15 +22,7 @@ fn the_extension_is_loaded() {
 #[cfg(debug_assertions)]
 #[test]
 fn turning_output_compression_on_keeps_nothing_of_the_output_layer_s() {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_uri::extension(),
-            php_ext_standard::extension(),
-            php_ext_zlib::extension(),
-        ])
-        .sense_leaks(php_ext::test::LeakSensor::Armed)
-        .build();
+    let engine = support::engine();
     let served = engine.serve_capture(
         "<?php var_dump(ini_set('zlib.output_compression', '1'), ini_get('zlib.output_compression'));",
         Capture::default(),

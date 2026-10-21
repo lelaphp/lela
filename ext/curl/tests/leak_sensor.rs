@@ -4,14 +4,13 @@
 //! block still held.
 #![cfg(debug_assertions)]
 
-use php_ext::test::{Capture, Engine, Files, LeakSensor};
+use php_ext::test::{Capture, Engine, Files};
 
 /// `src` served by an armed engine with this extension, what it wrote
 /// held to `expected`.
 fn served(src: &str, expected: &str) {
     let engine = Engine::builder()
         .extensions(&[php_ext_curl::extension()])
-        .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(src, Capture::default());
     served.assert_clean(expected);

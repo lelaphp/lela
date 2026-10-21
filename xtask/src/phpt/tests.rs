@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::common::phpt_tree::fixture_tree;
-use crate::common::registry::registry;
+use crate::common::registry::{Row, registry, rows};
 use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest};
 use crate::oracle::{Program, Promise, Runner};
@@ -428,9 +428,7 @@ fn the_same_missed_expectation_is_diverged_under_an_accepted_row() {
             "--TEST--\nA wrong expectation\n--FILE--\n<?php echo \"four\";\n--EXPECT--\nfive\n",
         )],
     );
-    let accepted = registry(
-        "[[divergence]]\nid = \"phpt:php-src/ext/fixture/tests/missed.phpt\"\nkind = \"phpt\"\nreason = \"A person wrote why this one is allowed to differ.\"\nstatus = \"accepted\"\nsince = \"2026-09-08\"\n",
-    );
+    let accepted = rows(&[Row::accepted("phpt:php-src/ext/fixture/tests/missed.phpt")]);
     let tally = run(&subset, &accepted);
     let (judgement, note) = only(&tally);
     assert_eq!(judgement, Judgement::Diverged, "{tally:#?}");
@@ -453,9 +451,9 @@ fn a_missed_expectation_a_row_covers_is_diverged_and_fails_without_it() {
             "--TEST--\nA wrong expectation\n--FILE--\n<?php echo \"four\";\n--EXPECT--\nfive\n",
         )],
     );
-    let covering = registry(
-        "[[divergence]]\nid = \"phpt:fixture-cause\"\nkind = \"phpt\"\nreason = \"One reason a person wrote for every test it covers.\"\nstatus = \"accepted\"\nsince = \"2026-09-28\"\ncovers = [\"phpt:php-src/ext/fixture/tests/missed.phpt\"]\n",
-    );
+    let covering = rows(&[Row::accepted("phpt:fixture-cause")
+        .reason("One reason a person wrote for every test it covers.")
+        .covers(&["phpt:php-src/ext/fixture/tests/missed.phpt"])]);
     let tally = run(&subset, &covering);
     let (judgement, note) = only(&tally);
     assert_eq!(judgement, Judgement::Diverged, "{tally:#?}");
@@ -2388,11 +2386,7 @@ fn a_run_counts_the_targets_misses_the_engine_skipped() {
         ("row.phpt", "pass"),
         ("oracle-skip.phpt", "skip"),
     ]);
-    let registry = Registry::parse(&format!(
-        "[[divergence]]\nid = \"{}\"\nkind = \"phpt\"\nreason = \"a person's reason\"\nstatus = \"accepted\"\nsince = \"2026-10-04\"\n",
-        fixture_id("row.phpt")
-    ))
-    .unwrap();
+    let registry = rows(&[Row::accepted(&fixture_id("row.phpt"))]);
     let held = |skipped: Judgement| {
         let judged = [
             ("met.phpt", Judgement::Pass),

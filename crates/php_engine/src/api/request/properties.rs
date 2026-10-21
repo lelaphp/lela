@@ -78,8 +78,8 @@ enum InfoFound<'a> {
 /// `zend_get_property_offset` reads the `zend_property_info` its find
 /// answered: the property, `property_info->ce` and its place among that
 /// class's declarations; its declaration, whose flags the placement
-/// reads; and what the row places the name at, `property_info->offset`
-/// and `ZEND_ACC_CHANGED`.
+/// reads; and what the row places the name at, `property_info->offset`,
+/// `ZEND_ACC_CHANGED` and what a write there is held to.
 #[derive(Clone, Copy)]
 struct Found<'a> {
     info: PropertyInfo,
@@ -438,9 +438,11 @@ impl Request {
     /// `static`, private or not, and that leads with no NUL byte
     /// (`Z/Zend/zend_object_handlers.c:384-389`); a row whose flags read
     /// no scope ([`Found::reads_scope`]) its offset, on a class with no
-    /// hooked property; and the slot the placement reaches from the
-    /// scope ([`Request::place_found`]) for any other row, where its
-    /// property has no hooks. None for every other name.
+    /// hooked property, unless a set visibility asks the scope whether
+    /// it may write; and the slot the placement reaches from the scope
+    /// ([`Request::place_found`]) for any other row, where its property
+    /// has no hooks, with what a write from the scope is held to
+    /// ([`Request::write_type`]). None for every other name.
     #[inline(always)] // its callers' fast arm: out of line it cost 37 instructions on a computed read
     #[allow(clippy::inline_always)]
     fn offset_of(
@@ -454,10 +456,14 @@ impl Request {
             || (!Self::bad_property_name(name)).then_some(crate::exec::PropertyOffset::Dynamic);
         match found {
             InfoFound::Absent => return dynamic(),
-            InfoFound::Row(row) if !row.reads_scope() && hooks == php_link::ClassHooks::Absent => {
+            InfoFound::Row(row)
+                if !row.reads_scope()
+                    && hooks == php_link::ClassHooks::Absent
+                    && !row.place.ty.set_restricted() =>
+            {
                 return Some(crate::exec::PropertyOffset::Declared {
                     slot: row.place.slot?,
-                    typed: row.property.ty.is_some(),
+                    ty: row.place.ty,
                 });
             }
             InfoFound::Unrecorded
@@ -489,11 +495,61 @@ impl Request {
             {
                 Some(crate::exec::PropertyOffset::Declared {
                     slot: placed.slot,
-                    typed: placed.typed,
+                    ty: if placed.ty.set_restricted() {
+                        self.write_type(class, &placed)
+                    } else {
+                        placed.ty
+                    },
                 })
             }
             _ => None,
         }
+    }
+
+    /// What a write to the slot `placed` reached is held to from the
+    /// executing scope: a set visibility the scope holds lifts its guard
+    /// (`zend_asymmetric_property_has_set_access`), so the scope's writes
+    /// are a typed slot's; any other is its slot type as it stands. So a
+    /// class steps and writes its own `protected(set)` and `private(set)`
+    /// properties on the inline path, a child the `protected(set)` one, a
+    /// closure bound to the class its `private(set)` one by a computed
+    /// name, and every other scope is refused by the kernel:
+    ///
+    /// ```php
+    /// class P { public protected(set) int $n = 0; public private(set) int $p = 0; public private(set) D $d;
+    ///     function __construct() { $this->d = new D; }
+    ///     function bump($q) { for ($i = 0; $i < 2; $i++) { $this->n++; $this->$q += 2; $this->p = $i; $this->d->x = $i; } } }
+    /// class C extends P { function more() { $this->n++; try { $this->p = 9; } catch (Error $e) { echo $e->getMessage(), "\n"; } } }
+    /// class D { public $x = 0; }
+    /// $c = new C; $c->bump('n'); $c->more();
+    /// $f = function ($q) { $this->$q = 40; }; Closure::bind($f, $c, P::class)('p');
+    /// var_dump($c->n, $c->p, $c->d->x);
+    /// try { $c->n = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $c->p++; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $c->d->x = 5; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($c->d->x);
+    /// ```
+    /// ```expect
+    /// Cannot modify private(set) property P::$p from scope C
+    /// int(7)
+    /// int(40)
+    /// int(1)
+    /// Cannot modify protected(set) property P::$n from global scope
+    /// Cannot modify private(set) property P::$p from global scope
+    /// int(5)
+    /// ```
+    ///
+    /// A call of its own, asked only for a set-restricted slot, so the
+    /// placement of every other row saves none of the registers it needs.
+    #[inline(never)]
+    fn write_type(&self, class: ClassId, placed: &DeclaredSlot) -> crate::exec::SlotType {
+        if self.set_barred(placed).is_some() {
+            return placed.ty;
+        }
+        self.placed_property(class, placed.slot)
+            .map_or(placed.ty, |(_, property)| {
+                crate::exec::SlotType::set_reached(property)
+            })
     }
 
     /// `zend_hash_num_elements(&ce->properties_info) != 0`: whether any
@@ -736,6 +792,7 @@ impl Request {
             place: RowPlace {
                 slot: u32::try_from(slot).ok(),
                 changed,
+                ty: crate::exec::SlotType::of(property),
             },
         })
     }
@@ -830,6 +887,14 @@ impl Request {
         scope: &impl Fn() -> Option<ClassId>,
     ) -> Option<DeclaredSlot> {
         let (at, declaring, p) = self.placed_from(class, name, found, scope)?;
+        // The row's slot type where the row is what it placed, read once
+        // where the class's table was built; a parent's private row the
+        // scope placed instead reads its own.
+        let ty = if std::ptr::eq(p, found.property) {
+            found.place.ty
+        } else {
+            crate::exec::SlotType::of(p)
+        };
         let root = if p.visibility == Visibility::Protected
             || p.set_visibility == Some(Visibility::Protected)
         {
@@ -842,7 +907,7 @@ impl Request {
             declaring,
             visibility: p.visibility,
             set_visibility: p.set_visibility,
-            typed: p.ty.is_some(),
+            ty,
             readonly: p.is_readonly,
             root,
         })
@@ -1878,7 +1943,7 @@ impl Request {
     ) -> Result<Value, Thrown> {
         let Some(placed) = self
             .declared_slot(class, name)
-            .filter(|p| p.typed && self.reaches(p))
+            .filter(|p| p.ty.typed() && self.reaches(p))
         else {
             return Ok(got);
         };
@@ -2465,7 +2530,7 @@ impl Request {
                 // (`uninit_error` with `prop_info` set).
                 let magic = self.serves_accessor(class, Accessor::Get)
                     || (silent && self.serves_accessor(class, Accessor::Isset));
-                if placed.typed && (o.slot_uninit(placed.slot) || !magic) {
+                if placed.ty.typed() && (o.slot_uninit(placed.slot) || !magic) {
                     if quiet {
                         return Ok(Owner::null());
                     }
@@ -2755,7 +2820,7 @@ impl Request {
         if let Some(thrown) = self.set_refusal(&placed, name, operation) {
             return Err(thrown);
         }
-        Ok(Some((placed.slot, placed.typed)))
+        Ok(Some((placed.slot, placed.ty.typed())))
     }
 
     /// `if (UNEXPECTED(Z_TYPE_P(retval) == IS_UNDEF))` in
@@ -2816,7 +2881,7 @@ impl Request {
         if magic && !o.slot_uninit(placed.slot) {
             return Ok(());
         }
-        if placed.typed {
+        if placed.ty.typed() {
             return Err(self.uninitialized_property(placed.declaring, name));
         }
         // `ZVAL_NULL(retval)` before the warning, so what an error handler
@@ -3374,7 +3439,7 @@ impl Request {
     ) -> Result<(), Thrown> {
         let o = object.heap();
         if let Some(placed) = self.declared_slot(object.class(), name.as_bytes()) {
-            let value = if placed.typed {
+            let value = if placed.ty.typed() {
                 let Some(typed) = self.typed_property_at(object.class(), placed.slot) else {
                     value.give_up(self);
                     name.give_up(self);

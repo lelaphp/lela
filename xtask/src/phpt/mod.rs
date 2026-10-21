@@ -417,20 +417,25 @@ impl Subset {
                 krate.name
             );
         }
-        let under = PathBuf::from(named);
-        if source.join(&under).is_dir() {
-            return Ok(Subset {
-                scope: named.to_owned(),
-                dirs: vec![Dir::at(source, under)],
-                root: source.to_path_buf(),
-                holds: Holds::Every,
-            });
+        if source.join(named).is_dir() {
+            return Ok(Subset::whole(source, PathBuf::from(named)));
         }
         bail!(
             "no subset {name:?}: the manifest has no crate {named} and no crate {as_crate}, and the pinned php-src at {} ({}) has no {named}",
             source.display(),
             manifest.pin.source.tag
         )
+    }
+
+    /// Every `.phpt` of the directory `under` of the pinned tree at
+    /// `source`, a subset of its own named by its place in the tree.
+    fn whole(source: &Path, under: PathBuf) -> Subset {
+        Subset {
+            scope: under.to_string_lossy().into_owned(),
+            dirs: vec![Dir::at(source, under)],
+            root: source.to_path_buf(),
+            holds: Holds::Every,
+        }
     }
 
     /// The subset one crate owns: every directory its row names under the
@@ -523,12 +528,7 @@ impl Subset {
         ROOTS
             .iter()
             .flat_map(|root| root.subsets(source))
-            .map(|under| Subset {
-                scope: under.to_string_lossy().into_owned(),
-                dirs: vec![Dir::at(source, under)],
-                root: source.to_path_buf(),
-                holds: Holds::Every,
-            })
+            .map(|under| Subset::whole(source, under))
             .filter(|subset| {
                 subset
                     .dirs
@@ -996,7 +996,6 @@ fn words(
                 .map(|under| under.to_string_lossy().into_owned())
                 .collect()
         };
-        let named: Vec<&str> = named.iter().map(String::as_str).collect();
         let (whose, why) = match outcome {
             Outcome::Absent(why) => ("the design derives", format!("; {why}")),
             _ => ("the [[crate]] row names", String::new()),
@@ -1554,6 +1553,12 @@ impl<'f> Build<'f> {
         profile::featured(root, &self.0.join("+"))
     }
 
+    /// The engine's `php` built with the features into their directory.
+    pub(crate) fn built(&self, root: &Path) -> Result<PathBuf> {
+        let (features, into) = (self.features(), self.target_dir(root));
+        profile::build(root, &CLI.package(), ENGINE, Some(&features), Some(&into))
+    }
+
     /// The engine built now, saying for whom and what it took; a build
     /// that fails is the reason that refuses what runs on it.
     fn run(&self, root: &Path, runs: &str) -> Result<Runner, String> {
@@ -1563,7 +1568,7 @@ impl<'f> Build<'f> {
             into.display()
         );
         let started = std::time::Instant::now();
-        let engine = profile::build(root, &CLI.package(), ENGINE, Some(&features), Some(&into));
+        let engine = self.built(root);
         println!(
             "phpt: the engine with {features} took {:.1}s to build",
             started.elapsed().as_secs_f64()

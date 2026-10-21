@@ -1,0 +1,341 @@
+//! Engine and request startup: the startup ini entries, the bundle's
+//! startup handlers and what a refused startup serves.
+
+use super::*;
+
+use crate::api::abi::OnModify;
+
+/// What the pinned oracle answers for
+/// `var_dump(ini_get('error_append_string'))` under
+/// `php_request_startup` starts the buffer the ini asks for before
+/// the program runs: the handler `output_handler` names, which must
+/// be a function by then, php's warning where it is not, or else
+/// `output_buffering`'s default handler.
+#[test]
+fn the_request_starts_the_buffer_output_handler_or_output_buffering_names() {
+    let program = "<?php function h($s) { return '[' . $s . ']'; } echo 'x'; echo 'y';";
+    let serve = |name: &str, value: &str| {
+        let engine = Engine::cli_builder().ini(name, value).build();
+        let out = engine.serve_capture(program, crate::test::Capture::default());
+        out.stdout_text()
+    };
+    assert_eq!(
+        serve("output_handler", "h"),
+        "\nWarning: PHP Request Startup: function \"h\" not found or invalid function name in Unknown on line 0\nxy"
+    );
+    assert_eq!(serve("output_buffering", "4096"), "xy");
+    assert_eq!(serve("output_handler", ""), "xy");
+}
+
+/// A startup diagnostic is its message's bytes: `extension_dir` set to
+/// `a/<0xE4>/w`, which a host's ini text can carry and `-d` does not
+/// yet (#1686), is written as php writes it,
+/// `php -n -d extension_dir=a/$'\xe4'/w -d extension=x -r ''` with
+/// the `dlopen` parentheses the engine cannot make.
+#[test]
+fn a_startup_diagnostic_writes_its_bytes() {
+    let mut builder = Engine::cli_builder();
+    builder
+        .ini_entries
+        .extend_from_slice(b"extension_dir=\"a/\xe4/w\"\nextension=x\n");
+    let out = builder
+        .build()
+        .serve_capture("", crate::test::Capture::default());
+    let expected: &[u8] = b"\nWarning: PHP Startup: Unable to load dynamic library 'x' (tried: a/\xe4/w/x (dynamic modules are not supported), a/\xe4/w/x.so (dynamic modules are not supported)) in Unknown on line 0\n";
+    assert_eq!(out.stdout, expected);
+}
+
+/// `zend_register_ini_entries_ex` sets each entry before it walks to
+/// the next, so a handler at startup sees the host's value of an
+/// entry declared before its own, and what it writes to the error
+/// stream is kept for the host to write before it serves, as
+/// opcache's handlers log a refused setting.
+#[test]
+fn a_startup_handler_sees_the_entries_before_it_and_its_stderr_is_kept() {
+    let second: OnModify = |req, value| {
+        let mut line = req.ini().get(b"t.first").unwrap_or_default().to_vec();
+        line.extend_from_slice(b" then ");
+        line.extend_from_slice(value.unwrap_or_default());
+        line.push(b'\n');
+        req.response_mut().write_stderr(&line);
+        Ok(true)
+    };
+    let first: OnModify = |_, _| Ok(true);
+    let entry = |name: &str| php_unit::decl::IniDecl {
+        name: Name(name.as_bytes().into()),
+        default: Some(b"0"[..].into()),
+        user: true,
+        per_dir: true,
+        system: true,
+    };
+    let extension = crate::api::abi::ExtensionBuilder::default()
+        .ini(vec![entry("t.first"), entry("t.second")])
+        .on_modify(b"t.first", first)
+        .on_modify(b"t.second", second)
+        .build("t");
+    let engine = Engine::cli_builder()
+        .extensions(&[extension])
+        .ini("t.second", "2")
+        .ini("t.first", "1")
+        .build();
+    assert!(engine.startup_errors().ends_with(b"1 then 2\n"));
+}
+
+/// Two extensions that intercept one native stack in bundle order,
+/// each at its `MINIT`: the later serves
+/// first and passes through to the earlier, the earlier to the
+/// native, and each hands on the call's own arguments.
+#[test]
+fn interceptions_of_one_native_stack_in_bundle_order() {
+    let earlier: Entry = |req| {
+        req.response_mut().write(b"earlier ");
+        crate::api::call::passthrough(req, None)
+    };
+    let later: Entry = |req| {
+        req.response_mut().write(b"later ");
+        crate::api::call::passthrough(req, None)
+    };
+    let extensions = [
+        crate::api::abi::ExtensionBuilder::default()
+            .intercept(b"strlen", earlier)
+            .build("earlier"),
+        crate::api::abi::ExtensionBuilder::default()
+            .intercept(b"strlen", later)
+            .build("later"),
+    ];
+    let served = Engine::cli_builder()
+        .extensions(&extensions)
+        .build()
+        .serve_capture(
+            "<?php $f = 'strlen'; echo $f('abcd'), ' ', $f('ab');",
+            crate::test::Capture::default(),
+        );
+    assert_eq!(served.stdout_text(), "later earlier 4 later earlier 2");
+}
+
+/// A startup an extension refuses serves nothing, and every request
+/// ends with the status it named.
+#[test]
+fn a_refused_startup_serves_nothing() {
+    let refusing = crate::api::abi::ExtensionBuilder::default()
+        .post_startup(|req, _| {
+            req.response_mut().write_stderr(b"refused\n");
+            crate::api::abi::PostStartup::Refuse { status: -2 }
+        })
+        .build("t");
+    let engine = Engine::cli_builder().extensions(&[refusing]).build();
+    let first = engine.serve_capture("<?php echo 1;", crate::test::Capture::default());
+    let second = engine.serve_capture("<?php echo 2;", crate::test::Capture::default());
+    assert_eq!(
+        (
+            first.stdout.as_slice(),
+            first.stderr.as_slice(),
+            first.exit_code
+        ),
+        (&b""[..], &b"refused\n"[..], -2)
+    );
+    assert_eq!((second.stderr.as_slice(), second.exit_code), (&b""[..], -2));
+}
+
+/// What the pinned oracle answers for `ini_get` under `-n` and one
+/// `-d` whose value carries a newline, so the text holds a section:
+/// after `[PATH=/x]` no entry reaches a directive, after `[foo]` or a
+/// bare `[PATH]` every one does. And a constant at startup is Zend's
+/// or `main`'s, a double one written at one digit as
+/// `zend_double_to_str` writes it before `precision` is registered,
+/// while `M_PI`, `ext/standard`'s, is not there yet and stands.
+#[test]
+fn the_startup_entries_are_read_as_php_init_config_reads_them() {
+    let read = |name: &str, value: &str, probe: &[u8]| {
+        let engine = Engine::cli_builder().ini(name, value).build();
+        engine
+            .shared
+            .ini_default(probe)
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+    };
+    assert_eq!(
+        read("x", "1\n[PATH=/x]\nprecision=3", b"precision").as_deref(),
+        Some("14")
+    );
+    assert_eq!(
+        read("x", "1\n[foo]\nprecision=3", b"precision").as_deref(),
+        Some("3")
+    );
+    assert_eq!(
+        read("x", "1\n[PATH]\nprecision=3", b"precision").as_deref(),
+        Some("3")
+    );
+    assert_eq!(
+        read("error_log", "PHP_FLOAT_EPSILON", b"error_log").as_deref(),
+        Some("2.0E-16")
+    );
+    assert_eq!(
+        read("docref_root", "PHP_INT_SIZE | 1", b"docref_root").as_deref(),
+        Some("9")
+    );
+    assert_eq!(
+        read("precision", "M_PI", b"precision").as_deref(),
+        Some("M_PI")
+    );
+}
+
+/// The `[PATH=]` and `[HOST=]` tables as the pinned oracle keeps them:
+/// `php -n -d 'x=1<newline>[PATH=/w]…'` dumps `get_cfg_var('/w')` as
+/// `["precision"]=>"5"` and `["arr"]=>[0=>"a","k"=>"b"]`, a `name[]=`
+/// nested in the section's table; and php-cgi serving `/w/sub/t.php`
+/// for `SERVER_NAME=Example.com` reads `precision` 3 and
+/// `serialize_precision` 7, the host's table and then each directory
+/// from the root down, the nested array set as nothing.
+#[test]
+fn a_section_s_table_nests_its_arrays_and_activates_its_strings() {
+    let text = "1\n[PATH=/w]\nprecision=5\narr[]=a\narr[k]=b\n\
+                [PATH=/w/sub/]\nprecision=3\n[HOST=Example.COM]\nserialize_precision=7";
+    let engine = Engine::cli_builder().ini("x", text).build();
+    let str = |s: &str| Configured::Str(s.as_bytes().to_vec());
+    let name = |s: &str| ConfiguredKey::Name(s.as_bytes().to_vec());
+    assert_eq!(
+        engine.shared.configured(b"/w"),
+        Some(&Configured::Array(vec![
+            (name("precision"), str("5")),
+            (
+                name("arr"),
+                Configured::Array(vec![
+                    (ConfiguredKey::Index(0), str("a")),
+                    (name("k"), str("b")),
+                ])
+            ),
+        ]))
+    );
+    let row = |n: &str, v: &str| {
+        (
+            n.as_bytes().to_vec(),
+            v.as_bytes().to_vec(),
+            IniOrigin::Admin,
+        )
+    };
+    assert_eq!(
+        engine.activated_ini(Some(b"Example.com"), b"/w/sub/t.php"),
+        vec![
+            row("serialize_precision", "7"),
+            row("precision", "5"),
+            row("precision", "3"),
+        ]
+    );
+    assert_eq!(engine.activated_ini(Some(b"other"), b"sub/t.php"), vec![]);
+    let none = Engine::cli_builder().ini("arr[]", "a").build();
+    assert_eq!(none.activated_ini(Some(b"arr"), b"/arr/t.php"), vec![]);
+}
+
+/// What the pinned oracle answers under `-n -d disable_functions=<list>`
+/// for [`disabled_functions`]'s cases: a disabled native is no
+/// function to a call, a dynamic call, `function_exists()`,
+/// `get_defined_functions()` or a callback's check; the list splits
+/// at spaces and commas alone; a name is matched as the table's
+/// lowered key; an unknown one is passed over; `exit` and `die` stay,
+/// each with php's startup warning;
+/// and a user function may take a disabled native's name (Zend's
+/// `bug79382.phpt`). A list a host lays over the started engine, as
+/// php-fpm's child lays its pool's (`fpm_php_apply_defines_ex`), takes
+/// the same natives out and raises nothing a request shows (#2273).
+#[test]
+fn disable_functions_takes_its_natives_out_of_the_function_table() {
+    const PROBE: &str = r#"<?php
+            $listed = false;
+            foreach (get_defined_functions()['internal'] as $name) { $listed = $listed || $name === 'strlen'; }
+            var_dump(function_exists('strlen'), function_exists('defined'), function_exists('exit'), $listed);
+            try { strlen('a'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+            try { $f = 'defined'; $f('A'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+            try { set_error_handler('strlen'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+        "#;
+    const UNDEFINED_STRLEN: &str = "Call to undefined function strlen()\n";
+    const UNDEFINED_DEFINED: &str = "Call to undefined function defined()\n";
+    const CALLBACK: &str = "set_error_handler(): Argument #1 ($callback) must be a valid callback or null, function \"strlen\" not found or invalid function name\n";
+    let served_under = |list: &str| {
+        let engine = Engine::cli_builder().ini("disable_functions", list).build();
+        served(&engine, PROBE).0
+    };
+    let laid = |list: &str| {
+        let mut engine = Engine::cli_builder().build();
+        let entry = (b"disable_functions".to_vec(), list.as_bytes().to_vec());
+        let laid = engine.alter_master_ini(vec![(entry.0, entry.1, IniOrigin::Admin)]);
+        assert_eq!(laid, Ok(Vec::new()));
+        engine
+    };
+    let answers = |strlen: bool, defined: bool| {
+        let mut expected = format!("bool({strlen})\nbool({defined})\nbool(true)\nbool({strlen})\n");
+        if !strlen {
+            expected.push_str(UNDEFINED_STRLEN);
+        }
+        if !defined {
+            expected.push_str(UNDEFINED_DEFINED);
+        }
+        if !strlen {
+            expected.push_str(CALLBACK);
+        }
+        expected
+    };
+    for (list, strlen, defined) in [
+        ("", true, true),
+        ("strlen", false, true),
+        (" strlen , defined", false, false),
+        ("strlen,,defined", false, false),
+        ("STRLEN", true, true),
+        ("nosuchfn,strlen", false, true),
+        ("\tstrlen", true, true),
+        ("die,strlen", false, true),
+        ("exit", true, true),
+    ] {
+        // `zend_disable_function`'s startup warning for a name it keeps.
+        let mut kept = String::new();
+        for name in list.split([' ', ',']) {
+            if matches!(name, "exit" | "die" | "clone") {
+                kept.push_str("\nWarning: Cannot disable function ");
+                kept.push_str(name);
+                kept.push_str("() in Unknown on line 0\n");
+            }
+        }
+        let expected = kept + &answers(strlen, defined);
+        assert_eq!(served_under(list), expected, "{list:?}");
+        let (out, _) = served(&laid(list), PROBE);
+        assert_eq!(out, answers(strlen, defined), "laid {list:?}");
+    }
+    let taken = "<?php function strlen($x) { return 42; } var_dump(strlen('foobar'));";
+    let engine = Engine::cli_builder()
+        .ini("disable_functions", "strlen")
+        .build();
+    assert_eq!(served(&engine, taken).0, "int(42)\n");
+    assert_eq!(served(&laid("strlen"), taken).0, "int(42)\n");
+}
+
+/// `zend_ini_parse_quantity` (`Z/Zend/zend_ini.c:613-841`), which is
+/// how `opcache.opt_debug_level=0x10000` is a bit and not a zero: a
+/// base prefix is read as `strtoul` with base zero reads it, a
+/// leading `0` before a digit is octal, a `K`, `M` or `G` multiplies,
+/// and every shape php interprets as zero for backward compatibility
+/// is zero.
+#[test]
+fn a_whole_number_ini_value_is_read_as_php_s_quantity_reads_it() {
+    let read = |value: &str| ini_quantity(value.as_bytes());
+    assert_eq!(
+        read("0x10000"),
+        0x1_0000,
+        "the dump bit, as the pin writes it"
+    );
+    assert_eq!(
+        read("  0X10 "),
+        16,
+        "whitespace either side, and either case"
+    );
+    assert_eq!(read("65536"), 65536, "the same number in decimal");
+    assert_eq!(read("0777"), 511, "a leading zero before a digit is octal");
+    assert_eq!(read("0o17"), 15, "and the explicit octal prefix");
+    assert_eq!(read("0b101"), 5, "and the binary one");
+    assert_eq!(read("-1"), -1, "the sign is read before the digits");
+    assert_eq!(read("2M"), 2 << 20, "a multiplier over decimal digits");
+    assert_eq!(read("0"), 0, "a bare zero is no prefix at all");
+    assert_eq!(read(""), 0, "nothing at all");
+    assert_eq!(read("off"), 0, "no valid leading digits");
+    assert_eq!(read("0z1"), 0, "an unknown prefix");
+    assert_eq!(read("0x"), 0, "no digits after the prefix");
+    assert_eq!(read("09"), 0, "octal that holds no octal digit");
+}

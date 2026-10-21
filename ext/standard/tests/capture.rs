@@ -6,18 +6,14 @@
     reason = "a test starts its own threads (seams.toml rule fork.threads)"
 )]
 
-use php_ext::test::{Capture, Engine};
+mod support;
+
+use php_ext::test::Capture;
 
 /// What the engine wrote and what ended it, for one source, under an
 /// engine of this extension alone.
 fn served(source: &str) -> (String, Option<String>) {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_uri::extension(),
-            php_ext_standard::extension(),
-        ])
-        .build();
+    let engine = support::engine();
     let served = engine.serve_capture(source, Capture::default());
     (served.stdout_text(), served.fatal)
 }
@@ -168,15 +164,7 @@ fn extract_refs_walks_the_array_live_under_a_destructor() {
 /// sensor armed where the build has one, a debug build's: what it wrote,
 /// and the fatal that ended it, if any.
 fn armed(source: &str) -> (String, Option<String>) {
-    let engine = Engine::builder().extensions(&[
-        php_ext_lexbor::extension(),
-        php_ext_uri::extension(),
-        php_ext_standard::extension(),
-    ]);
-    #[cfg(debug_assertions)]
-    let engine = engine.sense_leaks(php_ext::test::LeakSensor::Armed);
-    let engine = engine.build();
-    let served = engine.serve_capture(source, Capture::default());
+    let served = support::engine().serve_capture(source, Capture::default());
     (served.stdout_text(), served.fatal)
 }
 
@@ -307,13 +295,7 @@ fn accepted(listener: &std::net::TcpListener) -> Vec<(std::net::TcpStream, Vec<u
 fn a_persistent_socket_is_lent_to_one_request_at_a_time() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap_or_else(|e| panic!("{e}"));
     let port = listener.local_addr().map_or(0, |a| a.port());
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_uri::extension(),
-            php_ext_standard::extension(),
-        ])
-        .build();
+    let engine = support::engine();
     let source = |tag: &str| {
         format!("<?php $s = pfsockopen('127.0.0.1', {port}); fwrite($s, '{tag}'); usleep(300000);")
     };

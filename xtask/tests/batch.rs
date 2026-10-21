@@ -273,16 +273,34 @@ mod tracked {
     /// lifts a denial again (an inner `allow`, or one on the `mod` item),
     /// naming the source and the lints, and pass where the crate root, a
     /// module above the source or the crate's Cargo `[lints]` denies them.
+    /// The rule whose `check` names `silent-return` is held the same way
+    /// (#3079): a `return` at a `#[test]` fn's own level fails naming each
+    /// site, in `src/` and `tests/` alike, and one inside a closure or a
+    /// nested fn, or `return Err(..)`, is not the test's and passes.
     #[test]
-    fn each_deny_lints_rule_fails_a_crate_whose_covered_source_no_module_denies_it_at() {
+    fn each_rule_clippy_holds_fails_a_crate_its_fixture_breaks_it_in() {
         let manifest = Manifest::load(workspace()).unwrap();
         let rules: Vec<_> = manifest
             .rules
             .iter()
-            .filter(|r| r.predicate.deny_lints.is_some())
+            .filter(|r| {
+                r.predicate.deny_lints.is_some()
+                    || r.predicate.check.as_deref() == Some("silent-return")
+            })
             .collect();
-        assert!(rules.len() >= 2, "lints.no-panic and unsafe.one-op");
-        let expected: [Expected; 2] = [
+        assert!(
+            rules.len() >= 3,
+            "lints.no-panic, unsafe.one-op and tests.no-silent-return"
+        );
+        let expected: [Expected; 3] = [
+            (
+                "tests.no-silent-return",
+                &[(
+                    "php_heap",
+                    "crates/php_heap/src/array.rs:17, crates/php_heap/tests/early.rs:6: a return at a #[test] fn's own level",
+                )],
+                &["php_unit"],
+            ),
             (
                 "lints.no-panic",
                 &[
@@ -316,7 +334,7 @@ mod tracked {
                 .find(|(id, _, _)| *id == rule.id)
                 .unwrap_or_else(|| panic!("rule {} has no fixture this test reads", rule.id));
             let fixture = xtask::package_dir().join("fixtures/rules").join(&rule.id);
-            let root = committed(&fixture, &format!("deny-lints-{}", rule.id));
+            let root = committed(&fixture, &format!("clippy-rule-{}", rule.id));
             let manifest = Manifest::load(&root).unwrap();
             let readings = clippy::run(&root, &manifest, &[]).unwrap();
             for (krate, named) in *failing {

@@ -3,14 +3,13 @@
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
 
-use php_ext::test::{Capture, Engine, LeakSensor};
+use php_ext::test::{Capture, Engine};
 
 /// What one request of an armed engine with this extension alone wrote.
 fn armed(source: &str) -> String {
     let engine = Engine::builder()
         .extensions(&[php_ext_ffi::extension()])
         .ini("ffi.enable", "1")
-        .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(source, Capture::default());
     served.stdout_text()

@@ -6,8 +6,11 @@
 //! reading per crate that exists; `--crate` narrows it to the ones named,
 //! `--staged` to the crates with a staged change. The numbers are the sums
 //! over every test binary and the doctests of the crate: `passed`,
-//! `failed`, `ignored` and `filtered`, with `ms` beside them; a crate whose
-//! tests do not build has none and fails all the same.
+//! `failed`, `ignored` and `filtered`, with `ms` beside them, and
+//! `skipped_unpromised`, the tests among the passed that skipped for a
+//! fact this machine did not promise, read off the file each executable
+//! is handed under [`SKIPPED_VARIABLE`] (#3085); a crate whose tests do
+//! not build has none and fails all the same.
 //!
 //! A run is three steps over every crate at once, as `cargo test` would
 //! take them one crate at a time (#2165), and a crate with a binary takes
@@ -46,7 +49,7 @@
 //! compile names no `error[E0382]` fails its crate's reading as a failed
 //! test, as the nightly's rustdoc would fail it ([`Pin`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::num::NonZeroUsize;
@@ -60,6 +63,7 @@ use serde::Deserialize;
 use crate::batch::{self, Built, Executable, Package, Run, Targets, tail};
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
+use crate::oracle::SKIPPED_VARIABLE;
 use crate::reading::{Number, Reading, Status, Store, millis, plural};
 use crate::sources;
 use crate::tally::{self, Apart};
@@ -260,6 +264,16 @@ fn reading(
     };
     let s = plural(usize::try_from(n).unwrap_or(usize::MAX));
     reading.message = format!("{name}: {n} test{s} {verb}");
+    if counts.skipped_unpromised > 0 {
+        let (skipped, of_them) = (
+            counts.skipped_unpromised,
+            if *passed { " of them" } else { "" },
+        );
+        reading.message = format!(
+            "{}, {skipped}{of_them} skipped for a fact this machine did not promise",
+            reading.message
+        );
+    }
     if !passed {
         reading.message = format!("{}\n{}", reading.message, tail(&all.text, 40));
     }
@@ -352,21 +366,45 @@ impl Beside {
 }
 
 /// One test executable run as `cargo test` runs it: no argument, in the
-/// package's directory, with cargo's environment for it.
+/// package's directory, with cargo's environment for it, and
+/// [`SKIPPED_VARIABLE`] naming a file of its own under the target
+/// directory, whose distinct tests are its `skipped_unpromised`.
 fn execute(executable: &Executable, built: &Built, run: &Run) -> Result<Ran> {
     let mut command = Command::new(&executable.path);
     command.current_dir(built.package.dir());
     for (key, value) in environment(executable, built, run) {
         command.env(key, value);
     }
+    let dir = run.target_dir.join("skipped");
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let named = executable.path.file_name();
+    let skipped =
+        dir.join(named.with_context(|| format!("{} names no file", executable.path.display()))?);
+    match fs::remove_file(&skipped) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(e).with_context(|| format!("removing {}", skipped.display()));
+        }
+        _ => {}
+    }
+    command.env(SKIPPED_VARIABLE, &skipped);
     batch::without_git(&mut command);
     let out = command
         .output()
         .with_context(|| format!("running {}", executable.path.display()))?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
+    let mut counts = Counts::of(&stdout);
+    let text = match fs::read_to_string(&skipped) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        read => read.with_context(|| format!("reading {}", skipped.display()))?,
+    };
+    let tests: BTreeSet<&str> = text
+        .lines()
+        .filter_map(|line| line.split_once('\t').map(|(test, _)| test))
+        .collect();
+    counts.skipped_unpromised = tests.len() as u64;
     Ok(Ran {
-        counts: Counts::of(&stdout),
+        counts,
         passed: out.status.success(),
         text: format!("{stdout}{stderr}"),
     })
@@ -638,7 +676,7 @@ impl Pin {
         let mut args: Vec<String> = ["--", "--nocapture", "--test-threads=1"]
             .map(String::from)
             .into();
-        let files: std::collections::BTreeSet<String> = pinned
+        let files: BTreeSet<String> = pinned
             .iter()
             .flat_map(|(_, pins)| pins.iter().map(|pin| format!("{} - ", pin.file)))
             .collect();
@@ -715,6 +753,7 @@ struct Counts {
     failed: u64,
     ignored: u64,
     filtered: u64,
+    skipped_unpromised: u64,
 }
 
 impl Counts {
@@ -723,7 +762,8 @@ impl Counts {
         reading.count("passed", self.passed)?;
         reading.count("failed", self.failed)?;
         reading.count("ignored", self.ignored)?;
-        reading.count("filtered", self.filtered)
+        reading.count("filtered", self.filtered)?;
+        reading.count("skipped_unpromised", self.skipped_unpromised)
     }
 
     /// `other` added to these counts.
@@ -733,6 +773,7 @@ impl Counts {
         self.failed += other.failed;
         self.ignored += other.ignored;
         self.filtered += other.filtered;
+        self.skipped_unpromised += other.skipped_unpromised;
     }
 
     /// `test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0
@@ -891,6 +932,7 @@ mod tests {
                 failed: 1,
                 ignored: 1,
                 filtered: 3,
+                skipped_unpromised: 0,
             }
         );
     }

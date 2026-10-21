@@ -6,11 +6,13 @@
 //! lexer's tokens and a hand-written event stream, so what is tested is the
 //! tree the engine will walk and the dump every fixture renders through.
 
+mod support;
+
 use php_syntax::tree::{
     self, Built, ClassDecl, Element, Event, Expr, ExprStmt, HasAttributes, HasDocComment,
     LiteralExpr, MemberAccessExpr, MemberSelector, Node, SimpleVarExpr, TOMBSTONE, TernaryExpr,
 };
-use php_syntax::{FileId, LexOptions, SyntaxKind, Token, lex, parse};
+use php_syntax::{FileId, LexOptions, SyntaxKind, Token, lex};
 
 /// One hand-built tree with the source and the tokens it was built over.
 struct Hand {
@@ -390,15 +392,7 @@ fn the_token_texts_concatenate_to_the_input() {
         b"<?= 'x' ?>\n<?php 0x1G;",
         b"\xff\xfe<?php \"\xc3\x28\";",
     ] {
-        let arena = php_syntax::Arena::new();
-        let parsed = parse(&arena, source, &php_syntax::Options::default());
-        let mut text = Vec::new();
-        for token in parsed.tokens {
-            text.extend_from_slice(
-                &parsed.source[token.offset as usize..(token.offset + token.len) as usize],
-            );
-        }
-        assert_eq!(text, source, "{}", String::from_utf8_lossy(source));
+        let parsed = support::parse_lossless(source);
         // One root over every significant token until the grammar lands.
         let significant = parsed.tokens.iter().filter(|t| !t.kind.is_trivia()).count();
         let in_tree = parsed

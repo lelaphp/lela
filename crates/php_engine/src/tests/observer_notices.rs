@@ -13,7 +13,7 @@
 use php_macros::php_function;
 use php_unit::decl::Bare;
 
-use super::observer::{serve_file, serve_main};
+use super::observer::{MAIN, serve_file, serve_main};
 use super::test_ext::{Event, Events, Phase, Recording, TestExt, observed_name, record};
 use crate::api::abi::{
     Admission, ExtensionBuilder, Lookup, Observed, ObserverHandlers, Removed, Validation,
@@ -81,22 +81,21 @@ fn declarations_are_told_as_the_file_loads_and_as_their_oplines_run() {
     );
     rec.mark("served");
     assert_eq!(served.stdout_text(), "foo\n");
-    let file = "file 'main.php'";
     assert_eq!(
         only(&rec.events().between("built", "served"), &declaring()),
         [
             declared("foo"),
             linked("a"),
             linked("b"),
-            init(file),
-            begin(file),
+            init(MAIN),
+            begin(MAIN),
             declared("nested"),
             linked("c"),
             linked("d"),
             init("foo"),
             begin("foo"),
             Ext(0, End("foo".to_owned(), Some("null".to_owned()))),
-            Ext(0, End(file.to_owned(), Some("1".to_owned()))),
+            Ext(0, End(MAIN.to_owned(), Some("1".to_owned()))),
         ]
     );
 }
@@ -467,7 +466,7 @@ fn a_fatal_is_told_before_it_is_rendered_and_the_frames_ended() {
                     Ext(0, Error("Foo error".to_owned())),
                     Ext(0, End("trigger_error".to_owned(), None)),
                     Ext(0, End("foo".to_owned(), None)),
-                    Ext(0, End("file 'main.php'".to_owned(), None)),
+                    Ext(0, End(MAIN.to_owned(), None)),
                 ])
         }),
         "{events:?}"

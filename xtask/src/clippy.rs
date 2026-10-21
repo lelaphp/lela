@@ -32,6 +32,10 @@
 //! Cargo `[lints]`, the workspace's where it inherits them. A crate a
 //! rule reaches carries the rule's id on its reading, and fails naming
 //! the sources and the lints no module above them denies.
+//!
+//! It is the sensor of `tests.no-silent-return` too, the rule whose
+//! `check` names [`returns::CHECK`]: a crate the rule reaches fails naming
+//! each return at a `#[test]` fn's own level ([`returns`], #3079).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -46,6 +50,8 @@ use crate::manifest::{Crate, Manifest};
 use crate::reading::{Reading, Status, Store};
 use crate::rust;
 use crate::sources::{self, Standing};
+
+mod returns;
 
 /// The instrument name the reading carries.
 pub(crate) const INSTRUMENT: &str = "clippy";
@@ -245,9 +251,9 @@ fn clippy_said(reading: &mut Reading, krate: &Crate, run: &Run) -> Result<()> {
     Ok(())
 }
 
-/// What the manifest's `deny_lints` rules ask of one crate: the rules
-/// whose scope covers a source of it, their ADRs, and one line per rule
-/// a covered source is not held to.
+/// What the manifest's `deny_lints` rules, and the rule [`returns`]
+/// senses, ask of one crate: the rules whose scope covers a source of it,
+/// their ADRs, and one line per rule a covered source is not held to.
 #[derive(Debug, Default)]
 struct Denied {
     rules: Vec<String>,
@@ -307,6 +313,20 @@ impl Denied {
                     rule.id,
                     rule.text,
                     if cited.is_empty() { "" } else { " " },
+                ));
+            }
+        }
+        if let Some(rule) = manifest.rule_checked_by(returns::CHECK)
+            && let Some(sites) = returns::sites(root, krate, rule)?
+        {
+            out.rules.push(rule.id.clone());
+            out.adrs.extend(rule.adr.iter().map(str::to_owned));
+            if !sites.is_empty() {
+                out.unmet.push(format!(
+                    "{}: a return at a #[test] fn's own level (seams.toml rule {}: {})",
+                    sites.join(", "),
+                    rule.id,
+                    rule.text
                 ));
             }
         }
@@ -431,8 +451,7 @@ impl Files {
         if !self.0.contains_key(file) {
             let module = match crate::read_if(&root.join(file))? {
                 Some(text) => {
-                    let parsed = syn::parse_file(&text)
-                        .with_context(|| format!("parsing {}", file.display()))?;
+                    let parsed = crate::rust::parsed(&text, file)?;
                     let mut module = Module {
                         inner: levels_of(&parsed.attrs, file)?,
                         children: BTreeMap::new(),

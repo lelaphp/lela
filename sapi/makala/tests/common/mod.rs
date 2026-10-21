@@ -127,12 +127,103 @@ impl Server {
         stream.write_all(bytes).unwrap_or_else(|e| panic!("{e}"));
         read_until_closed(&mut stream, wait)
     }
+
+    /// `request` written on a connection of its own, left open for the
+    /// test to read.
+    pub fn send(&self, request: &Request) -> TcpStream {
+        let mut stream = self.connect();
+        stream
+            .write_all(&request.bytes())
+            .expect("write the request");
+        stream
+    }
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
         self.child.kill().ok();
         self.child.wait().ok();
+    }
+}
+
+/// A well-formed HTTP/1.1 request, for a test whose subject is not the
+/// framing: the request line, `Host: a` unless [`Request::host`] names
+/// another, then the fields in the order they were added, and the body
+/// with its `Content-Length`. A test of the framing writes its bytes.
+#[derive(Debug, Clone)]
+pub struct Request {
+    method: String,
+    target: String,
+    host: String,
+    fields: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+impl Request {
+    /// `method target`, no field but the host's and no body.
+    pub fn new(method: &str, target: &str) -> Request {
+        Request {
+            method: method.to_owned(),
+            target: target.to_owned(),
+            host: "a".to_owned(),
+            fields: Vec::new(),
+            body: Vec::new(),
+        }
+    }
+
+    /// `GET target`.
+    pub fn get(target: &str) -> Request {
+        Request::new("GET", target)
+    }
+
+    /// `POST target`.
+    pub fn post(target: &str) -> Request {
+        Request::new("POST", target)
+    }
+
+    /// The `Host` field's value.
+    #[must_use]
+    pub fn host(mut self, host: &str) -> Request {
+        host.clone_into(&mut self.host);
+        self
+    }
+
+    /// One more field, after those already added.
+    #[must_use]
+    pub fn field(mut self, name: &str, value: &str) -> Request {
+        self.fields.push((name.to_owned(), value.to_owned()));
+        self
+    }
+
+    /// `Connection: close`, after the fields already added.
+    #[must_use]
+    pub fn close(self) -> Request {
+        self.field("Connection", "close")
+    }
+
+    /// The body, and its `Content-Length` after the fields already
+    /// added.
+    #[must_use]
+    pub fn body(self, body: impl Into<Vec<u8>>) -> Request {
+        let body = body.into();
+        let mut request = self.field("Content-Length", &body.len().to_string());
+        request.body = body;
+        request
+    }
+
+    /// The request as the client writes it.
+    pub fn bytes(&self) -> Vec<u8> {
+        let mut bytes = format!(
+            "{} {} HTTP/1.1\r\nHost: {}\r\n",
+            self.method, self.target, self.host
+        )
+        .into_bytes();
+        for (name, value) in &self.fields {
+            bytes.extend_from_slice(&[name.as_bytes(), b": ", value.as_bytes(), b"\r\n"].concat());
+        }
+        bytes.extend_from_slice(b"\r\n");
+        bytes.extend_from_slice(&self.body);
+        bytes
     }
 }
 

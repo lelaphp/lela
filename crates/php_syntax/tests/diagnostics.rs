@@ -4,9 +4,6 @@
 //! the same source, read once; the fixture suites hold the tree, this
 //! file holds the list.
 
-// This file reads the diagnostics alone; the dump and the snapshot
-// assertion are the fixture suites'.
-#[allow(dead_code)]
 mod support;
 
 use php_syntax::{FileId, Level, LexOptions, Options, parse};

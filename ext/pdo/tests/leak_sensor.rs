@@ -1,10 +1,14 @@
 //! A connector's calls are served as the extension that registered it
 //! (#2864): a block its factory allocates and drops is named after that
-//! extension, not ext/pdo, whose native made the call.
+//! extension, not ext/pdo, whose native made the call. The sensor is a
+//! debug build's alone.
+#![cfg(debug_assertions)]
+
+mod support;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::request::Request;
-use php_ext::test::{Capture, Engine, LeakSensor};
+use php_ext::test::{Capture, Engine};
 use php_ext::values::PhpString;
 use php_ext_pdo::connector::{Connection, Connector, Failure, Prepared, Source};
 
@@ -85,18 +89,13 @@ fn leaky() -> Extension {
 #[test]
 fn a_leak_from_a_connector_s_factory_names_its_extension() {
     let engine = Engine::builder()
-        .extensions(&[
-            php_ext_json::extension(),
-            php_ext_spl::extension(),
-            php_ext_pdo::extension(),
-            leaky(),
-        ])
-        .sense_leaks(LeakSensor::Armed)
+        .extensions(support::extensions())
+        .extensions([leaky()])
         .build();
     let served = engine.serve_capture(
         "<?php $p = new PDO('leaky:x'); echo 'made';",
         Capture::default(),
     );
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert!(stdout.contains(", allocated by pdo_leaky in "), "{stdout}");
 }

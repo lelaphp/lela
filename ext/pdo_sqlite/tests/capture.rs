@@ -2,18 +2,13 @@
 //! fresh engine with this crate and `pdo`, its one dependency, never the
 //! bundle.
 
+mod support;
+
 use php_ext::test::{Capture, Engine, Files};
 
 #[test]
 fn the_extension_is_loaded() {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_json::extension(),
-            php_ext_spl::extension(),
-            php_ext_pdo::extension(),
-            php_ext_pdo_sqlite::extension(),
-        ])
-        .build();
+    let engine = support::engine();
     let sink = Capture::default();
     let served = engine.serve_capture(
         "<?php var_dump(extension_loaded('pdo_sqlite'), (new PDO('sqlite::memory:'))->query('SELECT 6 * 7')->fetchColumn());",
@@ -27,14 +22,7 @@ fn the_extension_is_loaded() {
 /// counts the row the first wrote into its `:memory:` database.
 #[test]
 fn a_persistent_connection_serves_the_next_request() {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_json::extension(),
-            php_ext_spl::extension(),
-            php_ext_pdo::extension(),
-            php_ext_pdo_sqlite::extension(),
-        ])
-        .build();
+    let engine = support::engine();
     let open = "$db = new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => true]);";
     let first = format!(
         "<?php {open} @$db->sqliteCreateFunction('f', fn() => 1, 0); $db->exec('CREATE TABLE t (a)'); $db->exec('INSERT INTO t VALUES (1)'); echo 'made';"
@@ -113,14 +101,7 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_connection() {
 /// (#1784).
 #[test]
 fn a_persistent_connection_s_open_transaction_is_rolled_back_at_the_request_end() {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_json::extension(),
-            php_ext_spl::extension(),
-            php_ext_pdo::extension(),
-            php_ext_pdo_sqlite::extension(),
-        ])
-        .build();
+    let engine = support::engine();
     let open = "function db() { static $db; return $db ??= new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => true]); } $db = db();";
     let first = format!(
         "<?php {open} $db->exec('CREATE TABLE t (a)'); $db->beginTransaction(); $db->exec('INSERT INTO t VALUES (1)'); var_dump($db->inTransaction());"

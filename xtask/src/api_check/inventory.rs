@@ -50,6 +50,7 @@ use syn::visit::Visit;
 use syn::{ImplItem, Item, TraitItem, Type, UseTree, Visibility};
 
 use super::workspace::{Crates, Present};
+use crate::rust::parse_file;
 
 /// One module of one crate: the crate's manifest name and the module path
 /// from the root.
@@ -683,17 +684,6 @@ fn generates(module: &Module, name: &str) -> bool {
 
 fn parse(file: &Path) -> Result<Vec<Item>> {
     Ok(parse_file(file)?.items)
-}
-
-/// The Rust file at `file`, parsed, an error naming it where it cannot be
-/// read or is not one.
-pub(super) fn parse_file(file: &Path) -> Result<syn::File> {
-    parsed(&crate::read(file)?, file)
-}
-
-/// `text`, the Rust file at `file`, parsed.
-pub(super) fn parsed(text: &str, file: &Path) -> Result<syn::File> {
-    syn::parse_file(text).with_context(|| format!("parsing {}", file.display()))
 }
 
 fn is_pub(vis: &Visibility) -> bool {

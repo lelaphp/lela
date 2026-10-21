@@ -159,7 +159,7 @@ fn markers(krate: &Present) -> Result<Vec<Marker>> {
         if !text.contains("mirrors") {
             continue;
         }
-        let parsed = super::inventory::parsed(&text, &file)?;
+        let parsed = crate::rust::parsed(&text, &file)?;
         found.file = krate.relative(&file).to_path_buf();
         found.visit_file(&parsed);
     }

@@ -32,7 +32,7 @@ use serde::Deserialize;
 
 use crate::key::Snapshot;
 use crate::reading::{Number, Reading, Status, Store};
-use crate::ticket::{self, STAMPED_OVER};
+use crate::ticket;
 use crate::track;
 
 /// The instrument's name, the `instrument` field of every reading
@@ -104,12 +104,7 @@ pub fn scope_of(root: &Path, session: &str) -> Result<String> {
 /// measured, never judged.
 pub fn reading(root: &Path, usage: &SessionUsage, session: &str, turn: u64) -> Result<Reading> {
     let scope = scope_of(root, session)?;
-    let mut reading = Reading::stamped_over(
-        INSTRUMENT,
-        &scope,
-        &Snapshot::disk(root)?,
-        Path::new(STAMPED_OVER),
-    )?;
+    let mut reading = ticket::stamped_over(INSTRUMENT, &scope, &Snapshot::disk(root)?)?;
     reading.status = Status::Pass;
     session.clone_into(&mut reading.session);
     reading.count(TURN, turn)?;
