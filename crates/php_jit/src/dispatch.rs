@@ -36,7 +36,7 @@ use crate::enter::{self, Crossed as _, Exited, Left};
 use crate::policy::{
     self, Claim, Holder, JitDebug, Mode, Outcome, Place, Policy, State, TraceEvent,
 };
-use crate::record::{self, Bailed, Ended, Start, Stop};
+use crate::record::{self, Bailed, Ended, Headed, Start, Stop};
 use crate::table::{self, TraceId, TraceName};
 use crate::{JitEngine, Shared};
 
@@ -132,8 +132,35 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow 
     };
     match decided {
         Visited::Continue => Flow::Continue,
-        Visited::Enter(id) => run(req, frame, id, &shared),
+        Visited::Enter(id) => match site {
+            Site::Loop(header) => looped(req, frame, header, id, &shared),
+            Site::Entry | Site::Return(_) => run(req, frame, id, &shared),
+        },
         Visited::Hot(claim) => hot(req, frame, claim, at, &shared),
+    }
+}
+
+/// A loop's trace `id` entered from its back edge, which left `frame`
+/// where it lands: on at the opline php's trace roots at, the condition
+/// of a `for` or a `while` past the body ([`record::headed`]), where
+/// php's handler is the trace; a body that went another way on the way
+/// there resumes where it went, and one that got there and entered
+/// nothing resumes there.
+fn looped(
+    req: &mut Request,
+    frame: FrameRef,
+    header: SafepointIdx,
+    id: TraceId,
+    shared: &Shared,
+) -> Flow {
+    match record::headed(req, frame, header) {
+        Ok(Headed::Stands(at)) => run(req, at, id, shared),
+        Ok(Headed::Stepped(at)) => match run(req, at, id, shared) {
+            Flow::Continue => Flow::Resume(at),
+            flow => flow,
+        },
+        Ok(Headed::Away(at)) => Flow::Resume(at),
+        Err(fatal) => Flow::Bail(fatal),
     }
 }
 
@@ -294,6 +321,22 @@ pub(crate) fn hot(
     let mut stepped = false;
     let flow = loop {
         let start = claim.start();
+        // A loop's recording starts where php's trace roots, past the
+        // body its back edge landed on.
+        if start == Start::Loop {
+            match record::headed(req, frame, at) {
+                Ok(Headed::Stands(_)) => {}
+                Ok(Headed::Stepped(header)) => (frame, stepped) = (header, true),
+                Ok(Headed::Away(away)) => {
+                    policy::settle(claim, &Outcome::Released);
+                    return Flow::Resume(away);
+                }
+                Err(fatal) => {
+                    policy::settle(claim, &Outcome::Released);
+                    return Flow::Bail(fatal);
+                }
+            }
+        }
         let epoch = table::holding(req, &shared.policy, &shared.perf);
         let table = table::of_epoch(&epoch);
         let next = table.and_then(table::TraceTable::next);

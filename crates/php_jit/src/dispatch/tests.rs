@@ -238,8 +238,9 @@ fn a_destructors_hot_loop_inside_a_recording_starts_no_second_trace() {
 /// compiled loop leaves where it ends, and the exit's line is written:
 /// `---- TRACE 3 start (enter) b() …:3`, `---- TRACE 3 abort (too many
 /// traces)`, `---- TRACE 3 blacklisted`, and nothing for `c` or `d`.
-/// php numbers that exit `exit 3`, as its trace starts at the loop's
-/// condition (#3134).
+/// The exit is php's `exit 3`: the trace starts at the loop's condition,
+/// holds the three variables' types at entry and meets the jump's
+/// direction before the body (#3134).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_full_table_refuses_one_root_and_stops_the_counters() {
@@ -263,7 +264,7 @@ fn a_full_table_refuses_one_root_and_stops_the_counters() {
             "---- TRACE 1 stop (loop)",
             "---- TRACE 1 compiled",
             "",
-            "     TRACE 1 exit 5 a() body.php:2",
+            "     TRACE 1 exit 3 a() body.php:2",
             "---- TRACE 2 start (enter) b() body.php:3",
             "---- TRACE 2 abort (too many traces)",
             "---- TRACE 2 blacklisted",
@@ -565,7 +566,7 @@ fn a_main_loop_no_call_activates_is_a_root_at_its_header() {
             "---- TRACE 2 stop (loop)",
             "---- TRACE 2 compiled",
             "",
-            "     TRACE 2 exit 3 $main() body.php:4",
+            "     TRACE 2 exit 1 $main() body.php:4",
         ]
     );
 }
@@ -573,19 +574,17 @@ fn a_main_loop_no_call_activates_is_a_root_at_its_header() {
 /// Under `jit.mode=exit-fuzz` every guard a compiled trace holds fails
 /// once, the loop's interrupt test among them, and the interpreter goes
 /// on at each landing to print what it prints under `force`: `a`'s three
-/// entry guards, on `$n`, `$s` and `$i` in their slots' order, leave
-/// through exits of their own, each knowing the types those before it
-/// held, as
+/// entry guards, `$n`, `$s` and `$i` in their slots' order, leave through
+/// exits of their own, each knowing the types those before it held, as
 /// php's stack map does; the interrupt test through its own, numbered
 /// last and growing no side trace, php's `ZEND_JIT_EXIT_TO_VM`; the
-/// `+=`'s and the increment's overflow guards through theirs, where the
-/// loop's phis are held, as php's `is_checked_guard` holds them (#3135);
-/// then the loop runs compiled to its end; the second call's trace links
-/// to it, its guards failed already, and leaves where the loop ends. A
-/// jump's direction is never failed: its exit lands where the jump it did
-/// not expect went. php numbers the end `exit 3`, as its trace starts at
-/// the loop's condition and meets the jump's direction before the body
-/// (#3134).
+/// `+=`'s and the increment's overflow guards through theirs, where php
+/// holds the guards of the loop's phis (#3135); then the loop runs
+/// compiled to its end, through php's `exit 3`, the trace starting at the
+/// loop's condition and meeting the jump's direction before the body
+/// (#3134); the second call's trace, its guards failed already, leaves
+/// there too. A jump's direction is never failed: its exit lands where
+/// the jump it did not expect went.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn under_exit_fuzz_every_guard_fails_once_and_the_output_is_forces() {
@@ -599,14 +598,14 @@ fn under_exit_fuzz_every_guard_fails_once_and_the_output_is_forces() {
     };
     let force = testing::serve::<Lane>(&DUMPED, program);
     assert_eq!(testing::stdout(&force), "45190\n");
-    assert_eq!(exits(&force), ["     TRACE 1 exit 5 a() body.php:2"; 2]);
+    assert_eq!(exits(&force), ["     TRACE 1 exit 3 a() body.php:2"; 2]);
     let mut fuzzed = DUMPED.to_vec();
     fuzzed[0] = ("jit.mode", "exit-fuzz");
     let fuzz = testing::serve::<Lane>(&fuzzed, program);
     assert_eq!(testing::stdout(&fuzz), "45190\n");
     assert_eq!(
         exits(&fuzz),
-        [0, 1, 2, 6, 3, 4, 5, 5].map(|exit| format!("     TRACE 1 exit {exit} a() body.php:2"))
+        [0, 1, 2, 6, 4, 5, 3, 3].map(|exit| format!("     TRACE 1 exit {exit} a() body.php:2"))
     );
 }
 
@@ -806,4 +805,23 @@ fn a_throw_in_a_compiled_loop_unwinds_through_no_exit() {
             .any(|line| line.starts_with("     TRACE 1 exit")),
         "{lines:?}"
     );
+}
+
+/// A loop's back edge lands on its body, and its trace is recorded and
+/// entered at its condition, php's header (`record::headed`): a body that
+/// leaves the loop on the way there, a `break`, records nothing and goes
+/// on where it went, and one that gets there records from the condition,
+/// where php's trace takes its heat.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_body_that_leaves_on_the_way_to_the_condition_goes_on_where_it_went() {
+    let program =
+        "function f($n) { for ($i = 0; $i < 10; $i++) { if ($i == $n) { break; } } return $i; }
+        echo f(1), f(5), \"\\n\";";
+    let served = testing::serve::<Lane>(&DUMPED, program);
+    assert_eq!(testing::stdout(&served), "15\n");
+    let starts: Vec<String> = (lines(&served).into_iter())
+        .filter(|line| line.contains("start (loop)"))
+        .collect();
+    assert_eq!(starts, ["---- TRACE 1 start (loop) f() body.php:2"]);
 }

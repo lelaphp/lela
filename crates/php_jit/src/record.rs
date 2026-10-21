@@ -445,6 +445,76 @@ pub(crate) fn run(
     Ok((Recorded { record, view }, ended))
 }
 
+/// Where the interpreter stands once a loop's back edge, which left
+/// `frame` where it lands, has been stepped on to the opline php's trace
+/// of the loop roots at ([`loop_root`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Headed {
+    /// It stood there already, and nothing was stepped.
+    Stands(FrameRef),
+    /// It was stepped there: the rest of the body and, for a `for`, its
+    /// step, served by the interpreter's handlers.
+    Stepped(FrameRef),
+    /// It was stepped and went another way before it got there, a
+    /// `break`, a return or a throw: the interpreter goes on at the
+    /// frame named.
+    Away(FrameRef),
+}
+
+/// `frame`, which a back edge of loop `header` left where it lands,
+/// stepped on to where php's trace of the loop is rooted and entered:
+/// php's heat and its trace stand at the loop's header, the condition
+/// of a `for` or a `while`, which the interpreter reaches past the body
+/// the back edge lands on, so a recording starts there and a trace is
+/// entered there, as php's handler at that opline is the trace. A call
+/// the body makes is stepped through; a fatal is the step's.
+pub(crate) fn headed(
+    req: &mut Request,
+    frame: FrameRef,
+    header: SafepointIdx,
+) -> Result<Headed, Fatal> {
+    let from = position(req, frame);
+    let mut view = UnitView::new(req);
+    let Some(code) = tier::func(req, frame)
+        .filter(|func| view.hold(req, *func))
+        .and_then(|func| view.op_array(func))
+    else {
+        return Ok(Headed::Stands(frame));
+    };
+    let Some(root) = loop_root(code, header).filter(|root| *root != from) else {
+        return Ok(Headed::Stands(frame));
+    };
+    let (mut at, mut depth) = (frame, 0u32);
+    loop {
+        if depth == 0 {
+            let now = position(req, at);
+            if now == root {
+                return Ok(Headed::Stepped(at));
+            }
+            let leaving = (code.oplines.get(now.0 as usize))
+                .is_some_and(|op| leaves(op.opcode) && at == tier::entry(req));
+            if now.0 < from.0 || now.0 > root.0 || leaving {
+                return Ok(Headed::Away(at));
+            }
+        }
+        match tier::step(req, at)? {
+            Stepped::Same(next) => at = next,
+            Stepped::Pushed(callee) => {
+                depth += 1;
+                at = callee;
+            }
+            Stepped::Popped(caller) if depth > 0 => {
+                depth -= 1;
+                at = caller;
+            }
+            Stepped::Popped(next) | Stepped::Moved(next) | Stepped::Threw(next) => {
+                return Ok(Headed::Away(next));
+            }
+            Stepped::Done => return Err(stepped_past_entry()),
+        }
+    }
+}
+
 /// A recording refused before its first opline: no event, and `stop`.
 pub(crate) fn refused(req: &Request, frame: FrameRef, start: Start, stop: Stop) -> Recorded {
     let record = TraceRecord {
@@ -1106,17 +1176,66 @@ fn position(req: &Request, frame: FrameRef) -> OplineIdx {
     tier::frame(req, frame).map_or(OplineIdx(0), |view| view.opline())
 }
 
-/// The loop header standing at `at`: a safepoint past the entry whose
-/// opline is `at` and that is no return's own number.
+/// The loop header standing at `at`, as php's trace roots it: the
+/// safepoint past the entry, and no return's own number, whose loop
+/// [`loop_root`] finds at `at`.
 pub(crate) fn header_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
-    let op = code.oplines.get(at.0 as usize)?;
     code.safepoints
         .iter()
         .enumerate()
         .skip(1)
-        .find(|(number, site)| **site == at && !(returns(op.opcode) && op.out as usize == *number))
+        .filter(|(number, site)| !is_return_site(code, **site, *number))
+        .find(|(_, site)| {
+            (**site == at || before_body(code, **site) == Some(at)) && rooted(code, **site) == at
+        })
         .and_then(|(number, _)| u32::try_from(number).ok())
         .map(SafepointIdx)
+}
+
+/// The opline php's trace of loop `header` roots at, where the safepoint
+/// numbers an opline the back edge lands on: the block php's CFG finds
+/// as the loop's header (`zend_cfg_identify_loops`), the one
+/// `zend_jit_setup_hot_trace_counters` marks `ZEND_JIT_TRACE_START_LOOP`
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:8963-8980`). A `for` or a
+/// `while` is compiled with its condition after its body and a `JMP` to
+/// the condition before it (`zend_compile_for`, `zend_compile_while`), so
+/// the loop is entered at its condition, which dominates the body and is
+/// its header, while the back edge's `JMPNZ` lands on the body; every
+/// other loop is entered where its back edge lands.
+pub(crate) fn loop_root(code: &OpArray, header: SafepointIdx) -> Option<OplineIdx> {
+    code.safepoints
+        .get(header.0 as usize)
+        .map(|site| rooted(code, *site))
+}
+
+/// [`loop_root`] of the loop whose back edge lands on `site`.
+fn rooted(code: &OpArray, site: OplineIdx) -> OplineIdx {
+    before_body(code, site)
+        .filter(|condition| {
+            // The condition's own jump back to the body, at or past the
+            // `JMP`'s target: a `JMP` past a loop entered where it lands,
+            // an `else`'s or a `break`'s, is followed by none.
+            (code.oplines.iter().skip(condition.0 as usize))
+                .any(|op| op.jump_target() == Some(site))
+        })
+        .unwrap_or(site)
+}
+
+/// Where the `JMP` right before `site` goes, where it goes past it: a
+/// `for`'s or a `while`'s jump to its condition.
+fn before_body(code: &OpArray, site: OplineIdx) -> Option<OplineIdx> {
+    let jump = code.oplines.get(site.0.checked_sub(1)? as usize)?;
+    (jump.opcode == Opcode::Jmp)
+        .then(|| jump.jump_target())
+        .flatten()
+        .filter(|to| to.0 > site.0)
+}
+
+/// Whether safepoint `number`, standing at `site`, is a return's own.
+fn is_return_site(code: &OpArray, site: OplineIdx, number: usize) -> bool {
+    code.oplines
+        .get(site.0 as usize)
+        .is_some_and(|op| returns(op.opcode) && op.out as usize == number)
 }
 
 /// Whether `op` jumps or falls through as its operand says: an opline
