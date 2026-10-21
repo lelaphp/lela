@@ -2,7 +2,7 @@
 //! fresh engine with this crate and `pdo`, its one dependency, never the
 //! bundle.
 
-use php_ext::test::{Capture, Engine};
+use php_ext::test::{Capture, Engine, Files};
 
 #[test]
 fn the_extension_is_loaded() {
@@ -19,7 +19,7 @@ fn the_extension_is_loaded() {
         "<?php var_dump(extension_loaded('pdo_sqlite'), (new PDO('sqlite::memory:'))->query('SELECT 6 * 7')->fetchColumn());",
         sink,
     );
-    assert_eq!(served.stdout, b"bool(true)\nint(42)\n");
+    assert_eq!(served.stdout_text(), "bool(true)\nint(42)\n");
 }
 
 /// A persistent connection given back to the engine's pool at the end of
@@ -40,11 +40,11 @@ fn a_persistent_connection_serves_the_next_request() {
         "<?php {open} @$db->sqliteCreateFunction('f', fn() => 1, 0); $db->exec('CREATE TABLE t (a)'); $db->exec('INSERT INTO t VALUES (1)'); echo 'made';"
     );
     let served = engine.serve_capture(&first, Capture::default());
-    assert_eq!(served.stdout, b"made");
+    assert_eq!(served.stdout_text(), "made");
     let second = "<?php $db = new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => true, PDO::ATTR_ERRMODE => PDO::ERRMODE_SILENT]); var_dump($db->query('SELECT COUNT(*) FROM t')->fetchColumn(), $db->query('SELECT f()')); echo $db->errorInfo()[2];";
     let served = engine.serve_capture(second, Capture::default());
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "int(1)\nbool(false)\nno such function: f"
     );
 }
@@ -69,8 +69,8 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_connection() {
             php_ext_pdo_sqlite::extension(),
         ])
         .build();
-    let path = std::env::temp_dir().join(format!("t1695-{}.sqlite", std::process::id()));
-    std::fs::remove_file(&path).ok();
+    let files = Files::new("pdo-sqlite-session", &[]);
+    let path = files.path().join("session.sqlite");
     let dsn = format!("sqlite:{}", path.display());
     let written = format!(
         "<?php ini_set('session.use_cookies', '0'); ini_set('session.cache_limiter', '');
@@ -94,14 +94,13 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_connection() {
         $_SESSION['a'] = 1;"
     );
     let served = engine.serve_capture(&written, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "");
+    assert_eq!(served.stdout_text(), "");
     let read = format!(
         "<?php var_dump((new PDO('{dsn}'))->query('SELECT v FROM t')->fetchAll(PDO::FETCH_COLUMN));"
     );
     let served = engine.serve_capture(&read, Capture::default());
-    std::fs::remove_file(&path).ok();
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "array(1) {\n  [0]=>\n  string(6) \"a|i:1;\"\n}\n"
     );
 }
@@ -127,13 +126,10 @@ fn a_persistent_connection_s_open_transaction_is_rolled_back_at_the_request_end(
         "<?php {open} $db->exec('CREATE TABLE t (a)'); $db->beginTransaction(); $db->exec('INSERT INTO t VALUES (1)'); var_dump($db->inTransaction());"
     );
     let served = engine.serve_capture(&first, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "bool(true)\n");
+    assert_eq!(served.stdout_text(), "bool(true)\n");
     let second = format!(
         "<?php {open} var_dump($db->inTransaction(), $db->query('SELECT COUNT(*) FROM t')->fetchColumn());"
     );
     let served = engine.serve_capture(&second, Capture::default());
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "bool(false)\nint(0)\n"
-    );
+    assert_eq!(served.stdout_text(), "bool(false)\nint(0)\n");
 }

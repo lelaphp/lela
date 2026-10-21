@@ -24,7 +24,7 @@ var_dump($m->format([new S, 5]), $m->getErrorMessage(), $m->getPattern());
 "#;
     let served = engine.serve_capture(script, Capture::default());
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "string(10) \"5 then str\"\nstring(12) \"U_ZERO_ERROR\"\nstring(19) \"{1,number} then {0}\"\n"
     );
     assert_eq!(String::from_utf8_lossy(&served.stderr), "");
@@ -47,7 +47,7 @@ var_dump(msgfmt_create("en", "{0,"), intl_get_error_code());
     for _ in 0..64 {
         let served = engine.serve_capture(script, Capture::default());
         assert_eq!(
-            String::from_utf8_lossy(&served.stdout),
+            served.stdout_text(),
             "IntlException\nFound unconstructed MessageFormatter\nFound unconstructed MessageFormatter\nNULL\nint(65801)\n"
         );
         assert_eq!(String::from_utf8_lossy(&served.stderr), "");

@@ -22,7 +22,7 @@ fn armed(source: &str) -> String {
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(source, Capture::default());
-    String::from_utf8_lossy(&served.stdout).into_owned()
+    served.stdout_text()
 }
 
 /// An archive of one file, `b.txt`, written by hand as the witness of
@@ -79,5 +79,5 @@ unlink("$d/f"); rmdir($d); unlink($p);
 "#,
         Capture::default(),
     );
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "1\n");
+    assert_eq!(served.stdout_text(), "1\n");
 }
