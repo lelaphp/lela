@@ -11,6 +11,11 @@ use xtask::divergence::{self, Cause, Kind, Registry, Retires, Status};
 use xtask::manifest::Manifest;
 use xtask::scratch::Tree;
 
+mod common {
+    pub mod repo;
+}
+use common::repo::Repo;
+
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
 }
@@ -37,28 +42,7 @@ fn scratch(name: &str) -> Tree {
 /// reading can be stamped.
 fn committed(name: &str) -> Tree {
     let root = scratch(name);
-    for args in [
-        &["init", "-q"][..],
-        &["-c", "user.name=x", "-c", "user.email=x@x", "add", "."],
-        &[
-            "-c",
-            "user.name=x",
-            "-c",
-            "user.email=x@x",
-            "commit",
-            "-q",
-            "-m",
-            "scratch",
-        ],
-    ] {
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
-    }
+    Repo::init(&root).commit("scratch");
     root
 }
 

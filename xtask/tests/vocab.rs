@@ -12,6 +12,11 @@ use xtask::reading::{Number, Reading, Status, Store};
 use xtask::scratch::Tree;
 use xtask::vocab;
 
+mod common {
+    pub mod repo;
+}
+use common::repo::Repo;
+
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
 }
@@ -39,7 +44,7 @@ fn scratch(name: &str, krate: &str, from: &Path) -> Tree {
         format!("[package]\nname = \"{package}\"\nedition = \"2024\"\n"),
     )
     .unwrap();
-    committed(&dir);
+    Repo::init(&dir).commit("fixture");
     dir
 }
 
@@ -200,34 +205,6 @@ fn a_crate_that_does_not_exist_yet_gets_no_reading() {
     );
 }
 
-/// `dir` as a repository with everything under it in one commit, so a
-/// reading can be stamped.
-fn committed(dir: &Path) {
-    for args in [
-        vec!["init", "-q"],
-        vec!["add", "."],
-        vec![
-            "-c",
-            "user.name=xtask",
-            "-c",
-            "user.email=xtask@localhost",
-            "commit",
-            "-q",
-            "-m",
-            "fixture",
-        ],
-    ] {
-        let ok = Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok);
-    }
-}
-
 /// A copy of the fixture at `from` in a scratch directory, whole, with the
 /// tracked pin beside it where the fixture's manifest points, and one
 /// commit: a fixture that carries its own `seams.toml` is a workspace of
@@ -237,7 +214,7 @@ fn scratch_workspace(name: &str, from: &Path) -> (Tree, PathBuf) {
     let dir = base.join("a/b/c/d");
     copy_tree(from, &dir);
     std::fs::copy(workspace().join("oracle.toml"), base.join("oracle.toml")).unwrap();
-    committed(&dir);
+    Repo::init(&dir).commit("fixture");
     (base, dir)
 }
 

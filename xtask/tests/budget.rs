@@ -36,7 +36,7 @@ fn scratch(name: &str) -> Tree {
 #[test]
 fn a_file_that_is_not_text_is_counted_as_no_lines_and_not_as_a_failure() {
     let root = scratch("not-text");
-    common::repo::scratch_workspace(workspace(), &root).unwrap();
+    common::repo::scratch_workspace(workspace(), &root);
     std::fs::copy(workspace().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
     let manifest = Manifest::load(&root).unwrap();
     let before = budget::run(&root, &manifest).unwrap();
@@ -111,7 +111,7 @@ fn the_tracked_workspace_passes_with_the_manifests_numbers() {
 #[test]
 fn without_the_scripts_row_the_tree_is_measured_and_held_to_nothing() {
     let root = scratch("no-row");
-    common::repo::scratch_workspace(workspace(), &root).unwrap();
+    common::repo::scratch_workspace(workspace(), &root);
     std::fs::copy(workspace().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
     std::fs::create_dir_all(root.join("scripts/hooks")).unwrap();
     std::fs::write(
@@ -145,7 +145,7 @@ fn without_the_scripts_row_the_tree_is_measured_and_held_to_nothing() {
 #[test]
 fn the_scripts_row_names_the_generators_and_everything_else_under_scripts_counts() {
     let root = scratch("scripts");
-    common::repo::scratch_workspace(workspace(), &root).unwrap();
+    common::repo::scratch_workspace(workspace(), &root);
     std::fs::copy(workspace().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
     std::fs::create_dir_all(root.join("scripts/hooks")).unwrap();
     std::fs::write(
@@ -758,7 +758,7 @@ fn lock_packages_counts_the_third_party_packages_and_not_the_workspaces_crates()
     );
 
     let root = scratch("lock-packages");
-    common::repo::scratch_workspace(workspace(), &root).unwrap();
+    common::repo::scratch_workspace(workspace(), &root);
     let lock = std::fs::read_to_string(fixture.join("Cargo.lock")).unwrap();
     let mut third_party = 0;
     let kept: Vec<&str> = lock

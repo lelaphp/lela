@@ -62,7 +62,7 @@ struct Scratch {
 impl Scratch {
     fn new(name: &str) -> Scratch {
         let root = Tree::new(&format!("crosscheck-{name}")).unwrap();
-        scratch_workspace(workspace(), &root).unwrap();
+        scratch_workspace(workspace(), &root);
         let store = Store::at(root.join("target/harness"));
         Scratch {
             root,
@@ -538,7 +538,7 @@ fn an_absent_oracle_is_a_skip_and_not_a_pass() {
 #[test]
 fn staged_with_no_file_a_rendering_reads_renders_nothing() {
     let root = Tree::new("crosscheck-staged").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     fs::create_dir_all(root.join("xtask/src")).unwrap();
     fs::write(root.join("xtask/src/lib.rs"), "// moved\n").unwrap();
     let add = std::process::Command::new("git")

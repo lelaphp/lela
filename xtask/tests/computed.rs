@@ -11,6 +11,11 @@ use std::process::Command;
 
 use xtask::scratch::Tree;
 
+mod common {
+    pub mod repo;
+}
+use common::repo::Repo;
+
 /// A directory with one stand-in `computed` in it, which records the
 /// arguments and the directory it was called from, prints `said` on
 /// stderr, and exits with `code`.
@@ -160,18 +165,6 @@ fn regions_is_a_subcommand_and_needs_a_file() {
     assert!(help.contains("\n  regions "), "{help}");
 }
 
-/// git in `dir`, as a test's scratch repository runs it.
-fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(["-c", "user.name=xtask", "-c", "user.email=xtask@scratch"])
-        .args(["-c", "commit.gpgsign=false"])
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "git {args:?}: {out:?}");
-}
-
 /// A scratch repository with one region file, MAP.md, rendered by the
 /// real `computed` and committed: an `exec` region over x.lock at line 3
 /// and a `tree` region over d, beside other.txt.
@@ -190,15 +183,14 @@ fn laid(name: &str) -> (Tree, String) {
         ),
     )
     .unwrap();
-    git(&dir, &["init", "-q"]);
+    let repo = Repo::init(&dir);
     let laid = Command::new("computed")
         .args(["run", "--trust", "MAP.md"])
         .current_dir(&*dir)
         .output()
         .expect("computed is on PATH, as CI installs it");
     assert!(laid.status.code().is_some_and(|c| c < 2), "{laid:?}");
-    git(&dir, &["add", "."]);
-    git(&dir, &["commit", "-q", "-m", "scratch"]);
+    repo.commit("scratch");
     let rendered = fs::read_to_string(dir.join("MAP.md")).unwrap();
     assert!(rendered.contains("\none\n"), "{rendered}");
     (dir, rendered)
@@ -229,7 +221,7 @@ fn staged_refuses_a_region_that_would_carry_an_unstaged_change() {
     // The lock changed in the working tree alone, beside a staged change.
     fs::write(dir.join("x.lock"), "two\n").unwrap();
     fs::write(dir.join("other.txt"), "b\n").unwrap();
-    git(&dir, &["add", "--", "other.txt"]);
+    Repo::at(&dir).git(&["add", "--", "other.txt"]);
     let (code, err) = staged();
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("does not stage"), "{err}");
@@ -241,7 +233,7 @@ fn staged_refuses_a_region_that_would_carry_an_unstaged_change() {
     assert_eq!(fs::read_to_string(dir.join("MAP.md")).unwrap(), rendered);
 
     // A directory the tree region would list, untracked.
-    git(&dir, &["add", "--", "x.lock"]);
+    Repo::at(&dir).git(&["add", "--", "x.lock"]);
     fs::create_dir_all(dir.join("d/b")).unwrap();
     fs::write(dir.join("d/b/f"), "").unwrap();
     let (code, err) = staged();
@@ -251,7 +243,7 @@ fn staged_refuses_a_region_that_would_carry_an_unstaged_change() {
     assert_eq!(fs::read_to_string(dir.join("MAP.md")).unwrap(), rendered);
 
     // Every path a region would read is staged: no refusal of this kind.
-    git(&dir, &["add", "--", "d"]);
+    Repo::at(&dir).git(&["add", "--", "d"]);
     let (_, err) = staged();
     assert!(!err.contains("does not stage"), "{err}");
 }
@@ -282,15 +274,8 @@ fn a_pathspec_commit_carries_no_region_of_an_unstaged_lock() {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
     }
-    git(&dir, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
-    let head = || {
-        let out = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&*dir)
-            .output()
-            .unwrap();
-        String::from_utf8(out.stdout).unwrap()
-    };
+    Repo::at(&dir).git(&["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    let head = || Repo::at(&dir).git(&["rev-parse", "HEAD"]);
     let before = head();
 
     // The region rendered from the lock as the working tree has it.

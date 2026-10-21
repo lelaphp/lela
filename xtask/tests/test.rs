@@ -15,6 +15,11 @@ use xtask::reading::{Number, Reading, Status, Store, epoch_seconds};
 use xtask::scratch::Tree;
 use xtask::test;
 
+mod common {
+    pub mod repo;
+}
+use common::repo::Repo;
+
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
 }
@@ -106,23 +111,6 @@ fn a_crate_the_manifest_does_not_name_is_refused() {
     );
 }
 
-fn sh(root: &Path, args: &[&str]) {
-    let out = Command::new(args[0])
-        .args(&args[1..])
-        .current_dir(root)
-        .env("GIT_AUTHOR_NAME", "x")
-        .env("GIT_AUTHOR_EMAIL", "x@x")
-        .env("GIT_COMMITTER_NAME", "x")
-        .env("GIT_COMMITTER_EMAIL", "x@x")
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
 /// The fixture copied into a scratch tree of its own, with the tracked
 /// pin and registry beside its manifest, so two tests running at once
 /// build in two `target/` directories and neither removes the other's
@@ -169,20 +157,7 @@ fn repository(name: &str) -> Tree {
 /// `root` committed once.
 fn committed(root: Tree) -> Tree {
     std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
-    sh(&root, &["git", "init", "-q", "-b", "main"]);
-    sh(&root, &["git", "add", "-A"]);
-    sh(
-        &root,
-        &[
-            "git",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-q",
-            "-m",
-            "scratch",
-        ],
-    );
+    Repo::init(&root).commit("scratch");
     root
 }
 
@@ -397,10 +372,7 @@ fn staged_leaves_out_an_executable_whose_own_paths_are_not_staged() {
         let file = heap.join(path);
         let text = std::fs::read_to_string(&file).unwrap();
         std::fs::write(&file, format!("{text}{line}\n")).unwrap();
-        sh(
-            &root,
-            &["git", "add", "--", &format!("crates/php_heap/{path}")],
-        );
+        Repo::at(&root).git(&["add", "--", &format!("crates/php_heap/{path}")]);
         let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
             .arg("--root")
             .arg(root.path())

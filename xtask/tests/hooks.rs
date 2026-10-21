@@ -107,7 +107,7 @@ fn executable(path: &Path, body: &str) {
 fn scratch(name: &str, computed: &Computed) -> Scratch {
     let dir = Tree::new(&format!("hooks-{name}")).unwrap();
     let root = dir.join("root");
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     for file in REGIONS {
         write(&root, file, "# a region file\n\n<!-- computed layout -->\n");
     }

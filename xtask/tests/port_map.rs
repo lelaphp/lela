@@ -11,6 +11,11 @@ use xtask::port_map;
 use xtask::reading::{Number, Status, Store};
 use xtask::scratch::Tree;
 
+mod common {
+    pub mod repo;
+}
+use common::repo::Repo;
+
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
 }
@@ -38,28 +43,7 @@ fn scratch(name: &str) -> Tree {
     ] {
         std::fs::copy(workspace().join(file), dir.join(file)).unwrap();
     }
-    for args in [
-        &["init", "-q"][..],
-        &["-c", "user.name=x", "-c", "user.email=x@x", "add", "."],
-        &[
-            "-c",
-            "user.name=x",
-            "-c",
-            "user.email=x@x",
-            "commit",
-            "-q",
-            "-m",
-            "scratch",
-        ],
-    ] {
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(&dir)
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
-    }
+    Repo::init(&dir).commit("scratch");
     dir
 }
 

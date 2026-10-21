@@ -30,7 +30,7 @@ mod common {
     pub mod repo;
 }
 use common::registry::registry;
-use common::repo::scratch_workspace;
+use common::repo::{Repo, scratch_workspace};
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -79,7 +79,7 @@ fn block(fences: &str) -> String {
 /// holds the lane to serving its witnesses without it.
 fn scratch(name: &str, text: &str) -> Tree {
     let root = Tree::new(&format!("witness-{name}")).unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     fs::create_dir_all(root.join("ext/fixture/src")).unwrap();
     fs::write(
         root.join("ext/fixture/Cargo.toml"),
@@ -1408,29 +1408,7 @@ fn a_crate_whose_sources_cannot_be_read_fails_and_names_the_crate() {
     // Two bytes no text is: the file is there and is not one the fence
     // grammar can read.
     fs::write(root.join("ext/pcre/src/lib.rs"), [0xff, 0xfe]).unwrap();
-    for args in [
-        vec!["init", "-q", "-b", "main"],
-        vec!["add", "-A"],
-        vec![
-            "-c",
-            "user.name=x",
-            "-c",
-            "user.email=x@x",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-q",
-            "-m",
-            "scratch",
-        ],
-    ] {
-        let status = Command::new("git")
-            .args(&args)
-            .current_dir(&root)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
-    }
+    Repo::init(&root).commit("scratch");
     let readings = witness::run(
         &root,
         &manifest(),
@@ -1473,12 +1451,7 @@ fn staged_narrows_the_run_to_the_crates_with_a_staged_change() {
     };
     assert!(staged(Vec::new()).is_empty(), "nothing is staged yet");
 
-    let added = Command::new("git")
-        .args(["add", "--", "ext/fixture"])
-        .current_dir(&root)
-        .status()
-        .unwrap();
-    assert!(added.success(), "git add ext/fixture");
+    Repo::at(&root).git(&["add", "--", "ext/fixture"]);
     let readings = staged(Vec::new());
     assert_eq!(readings.len(), 1, "{readings:#?}");
     assert_eq!(readings[0].scope, "ext/fixture");
@@ -1499,7 +1472,7 @@ fn a_witness_that_kills_its_server_fails_alone_and_the_next_is_served() {
     }
     let fixture = fixture_at("witness", "abort");
     let root = Tree::new("witness-abort").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     let pin = manifest().oracle.pin;
     let seams = fs::read_to_string(fixture.join("seams.toml"))
         .unwrap()

@@ -9,6 +9,11 @@ use xtask::oracle::{PROMISE_VARIABLE, Platform, TREE_VARIABLE};
 use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::Tree;
 
+mod common {
+    pub mod repo;
+}
+use common::repo::Repo;
+
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
 }
@@ -1072,32 +1077,9 @@ fn a_row_clips_its_message_and_leaves_zeros_out_and_the_json_has_them() {
 #[test]
 fn tickets_counts_the_weeks_closes_in_the_main_worktrees_store_and_the_checkouts() {
     let main = scratch("tickets");
-    let run = |args: &[&str]| {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(&main)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    };
-    run(&["init", "-q", "-b", "main"]);
-    run(&[
-        "-c",
-        "user.name=t",
-        "-c",
-        "user.email=t@t",
-        "commit",
-        "-q",
-        "--allow-empty",
-        "-m",
-        "first",
-    ]);
-    run(&["worktree", "add", "-q", "-b", "t1", "wt"]);
+    let repo = Repo::init(&main);
+    repo.git(&["commit", "-q", "--allow-empty", "-m", "first"]);
+    repo.git(&["worktree", "add", "-q", "-b", "t1", "wt"]);
     let checkout = main.join("wt");
     for file in ["seams.toml", "oracle.toml", "docs/divergence.toml"] {
         std::fs::create_dir_all(checkout.join(file).parent().unwrap()).unwrap();
@@ -1169,31 +1151,7 @@ fn tickets_counts_the_weeks_closes_in_the_main_worktrees_store_and_the_checkouts
 #[test]
 fn git_prints_the_log_and_the_status() {
     let root = scratch("git");
-    let run = |args: &[&str]| {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    };
-    run(&["init", "-q", "-b", "main"]);
-    run(&[
-        "-c",
-        "user.name=t",
-        "-c",
-        "user.email=t@t",
-        "commit",
-        "-q",
-        "--allow-empty",
-        "-m",
-        "the first commit",
-    ]);
+    Repo::init(&root).git(&["commit", "-q", "--allow-empty", "-m", "the first commit"]);
     std::fs::write(root.join("untracked.txt"), "x").unwrap();
     let (ok, md, err) = status(&root, &["--section", "git"]);
     assert!(ok, "{err}");
@@ -1208,28 +1166,7 @@ fn git_prints_the_log_and_the_status() {
 #[test]
 fn git_cuts_the_status_at_twenty_paths_and_names_the_rest() {
     let root = scratch("git-cut");
-    for args in [
-        &["init", "-q", "-b", "main"][..],
-        &[
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "cut",
-        ],
-    ] {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(out.status.success());
-    }
+    Repo::init(&root).git(&["commit", "-q", "--allow-empty", "-m", "cut"]);
     for i in 0..40 {
         std::fs::write(root.join(format!("untracked-{i:02}.txt")), "x").unwrap();
     }
@@ -1258,30 +1195,15 @@ fn git_cuts_the_status_at_twenty_paths_and_names_the_rest() {
 #[test]
 fn phpt_takes_the_reading_at_the_track_tip_and_never_a_retired_branchs() {
     let root = scratch("chain");
-    let git = |args: &[&str]| {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8(out.stdout).unwrap().trim().to_owned()
-    };
-    git(&["init", "-q", "-b", "t-x"]);
-    git(&["commit", "-q", "--allow-empty", "-m", "cut"]);
-    let cut = git(&["rev-parse", "--short", "HEAD"]);
-    git(&["switch", "-q", "-c", "behind"]);
-    git(&["commit", "-q", "--allow-empty", "-m", "the branch"]);
-    let branch = git(&["rev-parse", "--short", "HEAD"]);
-    git(&["switch", "-q", "t-x"]);
-    git(&["commit", "-q", "--allow-empty", "-m", "the tip"]);
-    let tip = git(&["rev-parse", "--short", "HEAD"]);
+    let repo = Repo::init_on(&root, "t-x");
+    repo.git(&["commit", "-q", "--allow-empty", "-m", "cut"]);
+    let cut = repo.git(&["rev-parse", "--short", "HEAD"]);
+    repo.git(&["switch", "-q", "-c", "behind"]);
+    repo.git(&["commit", "-q", "--allow-empty", "-m", "the branch"]);
+    let branch = repo.git(&["rev-parse", "--short", "HEAD"]);
+    repo.git(&["switch", "-q", "t-x"]);
+    repo.git(&["commit", "-q", "--allow-empty", "-m", "the tip"]);
+    let tip = repo.git(&["rev-parse", "--short", "HEAD"]);
 
     let phpt = |scope: &str, commit: &str, at: &str, passed: i64| {
         let mut r = Reading::new("phpt", scope);

@@ -100,7 +100,7 @@ fn the_persons_answer_admits_the_change_and_no_forged_answer_does() {
 /// diff applies to it and the readings land in its store.
 fn scratch(name: &str) -> Tree {
     let dir = Tree::new(&format!("permit-approval-{name}")).unwrap();
-    scratch_workspace(workspace(), &dir).unwrap();
+    scratch_workspace(workspace(), &dir);
     std::fs::copy(
         fixture().join("docs/divergence.toml"),
         dir.join("docs/divergence.toml"),

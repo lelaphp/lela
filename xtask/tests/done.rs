@@ -17,6 +17,11 @@ use xtask::manifest::Manifest;
 use xtask::reading::{Reading, Status, Store, UNDER_RECIPE};
 use xtask::scratch::Tree;
 
+mod common {
+    pub mod repo;
+}
+use common::repo::Repo;
+
 /// What condition 1 asks of `ext/pcre`, the crate most of these tests
 /// change: [`FRESH`] less `port-map`, which is asked of the crate
 /// `api.lock` lives with and of no other (§4.5 condition 1, #148), less
@@ -52,41 +57,6 @@ fn write(root: &Path, path: &str, text: &str) {
     let file = root.join(path);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, text).unwrap();
-}
-
-fn sh(root: &Path, args: &[&str]) -> String {
-    let out = Command::new(args[0])
-        .args(&args[1..])
-        .current_dir(root)
-        .env("GIT_AUTHOR_NAME", "x")
-        .env("GIT_AUTHOR_EMAIL", "x@x")
-        .env("GIT_COMMITTER_NAME", "x")
-        .env("GIT_COMMITTER_EMAIL", "x@x")
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8(out.stdout).unwrap()
-}
-
-/// One commit of everything in the working tree.
-fn commit(root: &Path, message: &str) {
-    sh(root, &["git", "add", "-A"]);
-    sh(
-        root,
-        &[
-            "git",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-q",
-            "-m",
-            message,
-        ],
-    );
 }
 
 /// A scratch repository: the tracked manifest, pin and registry, and the
@@ -128,8 +98,7 @@ fn repository(name: &str, registry: &Path) -> Tree {
         write(&root, &format!("crates/php_ext/{file}"), &text);
     }
     write(&root, ".gitignore", "target/\n");
-    sh(&root, &["git", "init", "-q", "-b", "main"]);
-    commit(&root, "scratch");
+    Repo::init(&root).commit("scratch");
     root
 }
 
@@ -285,7 +254,7 @@ fn unrun(scope: &str) -> impl Fn(&String) -> bool {
 fn keep_run(root: &Path, at: Option<&str>, scope: &str, verdict: &str) {
     let snapshot = match at {
         Some(rev) => {
-            let commit = sh(root, &["git", "rev-parse", rev]);
+            let commit = Repo::at(root).git(&["rev-parse", rev]);
             xtask::key::Snapshot::commit(root, commit.trim()).unwrap()
         }
         None => std::sync::Arc::new(xtask::key::Snapshot::disk(root).unwrap()),
@@ -470,7 +439,7 @@ fn a_dependents_reading_is_stale_once_a_crate_in_its_closure_changes() {
         std::fs::copy(workspace().join(file), root.join(file)).unwrap();
     }
     write(&root, ".gitignore", "target/\n");
-    commit(&root, "the harness's own files");
+    Repo::at(&root).commit("the harness's own files");
     let stale = "witness: the reading for ext/reflection is stale";
 
     write(
@@ -506,14 +475,14 @@ fn a_dependents_reading_is_stale_once_a_crate_in_its_closure_changes() {
 /// Returns the root and the commit the branch was cut at.
 fn on_a_ticket_branch(name: &str) -> (Tree, String) {
     let root = scratch(name);
-    let cut = sh(&root, &["git", "rev-parse", "HEAD"]).trim().to_owned();
-    sh(&root, &["git", "checkout", "-q", "-b", "t9"]);
+    let cut = Repo::at(&root).git(&["rev-parse", "HEAD"]);
+    Repo::at(&root).git(&["checkout", "-q", "-b", "t9"]);
     write(&root, "xtask/src/lib.rs", "pub fn measure() {}\n");
-    commit(&root, "the turn's change");
-    sh(&root, &["git", "checkout", "-q", "main"]);
+    Repo::at(&root).commit("the turn's change");
+    Repo::at(&root).git(&["checkout", "-q", "main"]);
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
-    commit(&root, "main's own change");
-    sh(&root, &["git", "checkout", "-q", "t9"]);
+    Repo::at(&root).commit("main's own change");
+    Repo::at(&root).git(&["checkout", "-q", "t9"]);
     (root, cut)
 }
 
@@ -544,12 +513,9 @@ fn on_a_ticket_branch_a_bare_done_measures_since_its_merge_base_with_main() {
 #[test]
 fn a_checkout_without_a_local_main_measures_since_origins() {
     let (root, cut) = on_a_ticket_branch("origin-main");
-    let main = sh(&root, &["git", "rev-parse", "main"]).trim().to_owned();
-    sh(
-        &root,
-        &["git", "update-ref", "refs/remotes/origin/main", &main],
-    );
-    sh(&root, &["git", "branch", "-q", "-D", "main"]);
+    let main = Repo::at(&root).git(&["rev-parse", "main"]);
+    Repo::at(&root).git(&["update-ref", "refs/remotes/origin/main", &main]);
+    Repo::at(&root).git(&["branch", "-q", "-D", "main"]);
     let verdict = judge_since(&root, None);
     assert_eq!(verdict.base.since, "main");
     assert_eq!(verdict.base.commit, cut, "{verdict:#?}");
@@ -559,12 +525,12 @@ fn a_checkout_without_a_local_main_measures_since_origins() {
 #[test]
 fn on_main_the_base_is_mains_tip() {
     let (root, _) = on_a_ticket_branch("on-main");
-    sh(&root, &["git", "checkout", "-q", "main"]);
+    Repo::at(&root).git(&["checkout", "-q", "main"]);
     let verdict = judge_since(&root, None);
     assert_eq!(verdict.base.since, "main");
     assert_eq!(
         verdict.base.commit,
-        sh(&root, &["git", "rev-parse", "main"]).trim()
+        Repo::at(&root).git(&["rev-parse", "main"])
     );
     assert!(verdict.crates.is_empty(), "{verdict:#?}");
 }
@@ -574,7 +540,7 @@ fn on_main_the_base_is_mains_tip() {
 #[test]
 fn a_detached_head_measures_since_its_merge_base_with_main() {
     let (root, cut) = on_a_ticket_branch("detached");
-    sh(&root, &["git", "checkout", "-q", "--detach"]);
+    Repo::at(&root).git(&["checkout", "-q", "--detach"]);
     let verdict = judge_since(&root, None);
     assert_eq!(verdict.base.since, "main");
     assert_eq!(verdict.base.commit, cut, "{verdict:#?}");
@@ -610,7 +576,7 @@ fn the_head_line_names_the_ref_and_the_commit_and_a_commit_only_once() {
 #[test]
 fn base_overrides_main() {
     let (root, cut) = on_a_ticket_branch("base-wins");
-    let head = sh(&root, &["git", "rev-parse", "HEAD"]).trim().to_owned();
+    let head = Repo::at(&root).git(&["rev-parse", "HEAD"]);
     let verdict = judge_since(&root, Some("HEAD"));
     assert_eq!(verdict.base.since, "HEAD");
     assert_eq!(verdict.base.commit, head);
@@ -910,7 +876,7 @@ fn a_reading_under_the_recipe_is_stale_once_the_recipe_changes() {
     // under the old: the base's is stale and names the call that takes it
     // again (#2725).
     keep_run(&root, None, "ext/pcre", "pass");
-    let base = sh(&root, &["git", "rev-parse", "--short", "HEAD"]);
+    let base = Repo::at(&root).git(&["rev-parse", "--short", "HEAD"]);
     let base = base.trim();
     let line = format!(
         "phpt: the run of ext/pcre kept at {base} is stale; oracle.toml changed since it was taken; take one with `cargo xtask phpt --base {base} --subset ext/pcre`"
@@ -996,7 +962,7 @@ fn a_subset_is_held_to_no_regression_against_the_runs_kept_at_the_base() {
     let store = Store::of_workspace(&root);
     record_asked(&store, &root, "ext/pcre");
     assert!(judge(&root).met(), "{:#?}", judge(&root));
-    let base = sh(&root, &["git", "rev-parse", "--short", "HEAD"]);
+    let base = Repo::at(&root).git(&["rev-parse", "--short", "HEAD"]);
     for (then, now, held) in [
         ("pass", "fail", true),
         ("diverged", "skip", true),
@@ -1014,8 +980,7 @@ fn a_subset_is_held_to_no_regression_against_the_runs_kept_at_the_base() {
         assert_eq!(judge(&root).unmet, unmet, "{then} then, {now} now");
     }
     let kept = xtask::phpt::kept_run(
-        &xtask::key::Snapshot::commit(&root, sh(&root, &["git", "rev-parse", "HEAD"]).trim())
-            .unwrap(),
+        &xtask::key::Snapshot::commit(&root, &Repo::at(&root).git(&["rev-parse", "HEAD"])).unwrap(),
         "ext/pcre",
     )
     .unwrap();
@@ -1130,7 +1095,7 @@ fn a_porting_crates_crosscheck_readings_are_the_ports_meter() {
     );
     write(&root, "ext/standard/src/lib.rs", "pub fn str_repeat() {}\n");
     mark_porting(&root, "ext/standard");
-    commit(&root, "ext/standard, its port partial");
+    Repo::at(&root).commit("ext/standard, its port partial");
     write(
         &root,
         "ext/standard/src/lib.rs",
@@ -1683,7 +1648,7 @@ fn a_crate_with_a_row_and_no_reading_is_unmet_the_way_an_extension_is() {
     );
     assert_ne!(with_a_row, seams, "the tracked manifest still has the row");
     std::fs::write(root.join("seams.toml"), with_a_row).unwrap();
-    commit(&root, "the row");
+    Repo::at(&root).commit("the row");
 
     write(
         &root,
@@ -1718,7 +1683,7 @@ fn with_the_stop_rule(root: &Path) {
         let mut text = std::fs::read_to_string(&path).unwrap();
         text.push_str(STOP_RULE_ROW);
         std::fs::write(&path, text).unwrap();
-        commit(root, "the row");
+        Repo::at(root).commit("the row");
     }
 }
 
@@ -2012,7 +1977,7 @@ fn about_the_ticket(verdict: &Verdict) -> Vec<String> {
 #[test]
 fn the_tracks_ticket_is_held_to_its_boxes_from_the_store_and_stale_after_an_edit() {
     let root = scratch("ticket");
-    sh(&root, &["git", "config", "branch.main.ticket", "31"]);
+    Repo::at(&root).git(&["config", "branch.main.ticket", "31"]);
     let verdict = judge(&root);
     assert_eq!(verdict.ticket, Some(xtask::track::Ticket::new(31)));
     assert_eq!(
@@ -2063,7 +2028,7 @@ fn the_tracks_ticket_is_held_to_its_boxes_from_the_store_and_stale_after_an_edit
 #[test]
 fn a_reading_of_another_ticket_does_not_answer_for_the_branchs_own() {
     let root = scratch("other-ticket");
-    sh(&root, &["git", "config", "branch.main.ticket", "31"]);
+    Repo::at(&root).git(&["config", "branch.main.ticket", "31"]);
     ticket_read(&root, 30, "ticked.md");
     let verdict = judge(&root);
     assert_eq!(
@@ -2088,8 +2053,8 @@ fn a_branch_that_records_no_ticket_is_not_asked_and_says_nothing_about_tickets()
     let (_, out, _) = xtask(&root, &["done", "--base", "HEAD", "--hook"], None);
     assert!(!out.contains("ticket"), "{out}");
 
-    sh(&root, &["git", "config", "branch.main.ticket", "31"]);
-    sh(&root, &["git", "checkout", "-q", "--detach"]);
+    Repo::at(&root).git(&["config", "branch.main.ticket", "31"]);
+    Repo::at(&root).git(&["checkout", "-q", "--detach"]);
     let verdict = judge(&root);
     assert_eq!(verdict.ticket, None);
     assert!(verdict.met(), "{verdict:#?}");
@@ -2100,7 +2065,7 @@ fn a_branch_that_records_no_ticket_is_not_asked_and_says_nothing_about_tickets()
 #[test]
 fn the_stop_hook_holds_a_turn_on_the_tickets_unticked_boxes() {
     let root = scratch("hook-ticket");
-    sh(&root, &["git", "config", "branch.main.ticket", "31"]);
+    Repo::at(&root).git(&["config", "branch.main.ticket", "31"]);
     ticket_read(&root, 31, "unticked.md");
     let stop = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();
     let (code, out, err) = xtask(&root, &["done", "--hook"], Some(&stop));
@@ -2123,7 +2088,7 @@ fn the_stop_hook_holds_a_turn_on_the_tickets_unticked_boxes() {
 #[test]
 fn a_refused_close_with_every_box_ticked_is_met_and_a_ticket_with_no_box_is_not() {
     let root = scratch("refused-close");
-    sh(&root, &["git", "config", "branch.main.ticket", "31"]);
+    Repo::at(&root).git(&["config", "branch.main.ticket", "31"]);
     let store = Store::of_workspace(&root);
     let mut refused = Reading::stamped_over(
         "ticket",
@@ -2178,7 +2143,7 @@ fn a_refused_close_with_every_box_ticked_is_met_and_a_ticket_with_no_box_is_not(
 fn a_withdrawn_branch_ticket_is_met_and_a_refused_withdrawal_is_not() {
     use xtask::ticket::{Act, Reach, Successors, Verdict as Close};
     let root = scratch("withdrawn");
-    sh(&root, &["git", "config", "branch.main.ticket", "31"]);
+    Repo::at(&root).git(&["config", "branch.main.ticket", "31"]);
     let reach = Reach::of(&root).unwrap();
     let withdrawn = |reason: &str| {
         Act::Close(

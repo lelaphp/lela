@@ -18,6 +18,11 @@ use xtask::oracle::{
 };
 use xtask::scratch::Tree;
 
+mod common {
+    pub mod repo;
+}
+use common::repo::Repo;
+
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
 }
@@ -447,33 +452,7 @@ fn an_absent_tree_names_the_variable_and_the_pins_path_and_not_one_of_them() {
 /// of its own, and that commit as `git rev-parse HEAD` prints it.
 fn fixture_checkout(name: &str) -> (Tree, String) {
     let tree = fixture_tree(name);
-    let git = |args: &[&str]| {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(&tree)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8(out.stdout).unwrap().trim().to_owned()
-    };
-    git(&["init", "-q"]);
-    git(&[
-        "-c",
-        "user.name=xtask",
-        "-c",
-        "user.email=xtask@example",
-        "commit",
-        "-q",
-        "--allow-empty",
-        "-m",
-        "the fixture's one commit",
-    ]);
-    let head = git(&["rev-parse", "HEAD"]);
+    let head = Repo::init(&tree).commit("the fixture's one commit");
     (tree, head)
 }
 

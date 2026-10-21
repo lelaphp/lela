@@ -13,42 +13,13 @@ use std::process::Command;
 use xtask::scratch::Tree;
 use xtask::track::{Ticket, Track};
 
-fn sh(root: &Path, args: &[&str]) -> String {
-    let out = Command::new(args[0])
-        .args(&args[1..])
-        .current_dir(root)
-        .env("GIT_AUTHOR_NAME", "x")
-        .env("GIT_AUTHOR_EMAIL", "x@x")
-        .env("GIT_COMMITTER_NAME", "x")
-        .env("GIT_COMMITTER_EMAIL", "x@x")
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8(out.stdout).unwrap()
+mod common {
+    pub mod repo;
 }
-
-fn commit(root: &Path, message: &str) {
-    sh(
-        root,
-        &[
-            "git",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            message,
-        ],
-    );
-}
+use common::repo::Repo;
 
 fn rev(root: &Path, name: &str) -> String {
-    sh(root, &["git", "rev-parse", name]).trim().to_owned()
+    Repo::at(root).git(&["rev-parse", name])
 }
 
 /// A scratch repository on `main` by name, one commit in, as the `done`
@@ -56,8 +27,7 @@ fn rev(root: &Path, name: &str) -> String {
 /// what git prints of it.
 fn scratch(name: &str) -> Tree {
     let root = Tree::new(&format!("track-{name}")).unwrap();
-    sh(&root, &["git", "init", "-q", "-b", "main"]);
-    commit(&root, "scratch");
+    Repo::init(&root).commit("scratch");
     root
 }
 
@@ -66,11 +36,12 @@ fn scratch(name: &str) -> Tree {
 /// base is where the branch was taken off, not `main`'s tip.
 fn on_a_branch(name: &str) -> Tree {
     let root = scratch(name);
-    sh(&root, &["git", "checkout", "-q", "-b", "t30"]);
-    commit(&root, "the ticket's change");
-    sh(&root, &["git", "checkout", "-q", "main"]);
-    commit(&root, "main moves on");
-    sh(&root, &["git", "checkout", "-q", "t30"]);
+    let repo = Repo::at(&root);
+    repo.git(&["checkout", "-q", "-b", "t30"]);
+    repo.commit("the ticket's change");
+    repo.git(&["checkout", "-q", "main"]);
+    repo.commit("main moves on");
+    repo.git(&["checkout", "-q", "t30"]);
     root
 }
 
@@ -129,7 +100,7 @@ fn main_is_its_own_base() {
 #[test]
 fn a_detached_head_is_stated_not_refused() {
     let root = on_a_branch("detached");
-    sh(&root, &["git", "checkout", "-q", "--detach"]);
+    Repo::at(&root).git(&["checkout", "-q", "--detach"]);
     let track = Track::of(&root, None).unwrap();
     assert_eq!(track.branch, None);
     assert_eq!(track.base, rev(&root, "HEAD^"));
@@ -160,11 +131,8 @@ fn a_branch_not_yet_made_is_taken_off_mains_tip() {
 fn main_known_only_as_origins_is_the_base_all_the_same() {
     let root = on_a_branch("origin");
     let main = rev(&root, "main");
-    sh(
-        &root,
-        &["git", "update-ref", "refs/remotes/origin/main", &main],
-    );
-    sh(&root, &["git", "branch", "-q", "-D", "main"]);
+    Repo::at(&root).git(&["update-ref", "refs/remotes/origin/main", &main]);
+    Repo::at(&root).git(&["branch", "-q", "-D", "main"]);
     let track = Track::of(&root, Some("t31")).unwrap();
     assert_eq!(track.base, main);
 }
@@ -172,16 +140,13 @@ fn main_known_only_as_origins_is_the_base_all_the_same() {
 #[test]
 fn a_linked_worktrees_store_is_the_main_worktrees() {
     let root = on_a_branch("linked");
-    sh(&root, &["git", "checkout", "-q", "main"]);
+    Repo::at(&root).git(&["checkout", "-q", "main"]);
     // The linked worktree stands beside the repository, in a scratch tree
     // of its own: `git worktree add` writes the directory itself, and one
     // that is already there and not empty is refused.
     let beside = Tree::new("track-linked-worktree").unwrap();
     let dir = beside.join("wt");
-    sh(
-        &root,
-        &["git", "worktree", "add", "-q", dir.to_str().unwrap(), "t30"],
-    );
+    Repo::at(&root).git(&["worktree", "add", "-q", dir.to_str().unwrap(), "t30"]);
     let track = Track::of(&dir, None).unwrap();
     assert_eq!(track.branch.as_deref(), Some("t30"));
     assert_eq!(
@@ -195,7 +160,7 @@ fn a_linked_worktrees_store_is_the_main_worktrees() {
 #[test]
 fn json_is_the_same_facts_as_one_object() {
     let root = on_a_branch("json");
-    sh(&root, &["git", "config", "branch.t30.ticket", "30"]);
+    Repo::at(&root).git(&["config", "branch.t30.ticket", "30"]);
     let (code, out, err) = xtask(&root, &["track", "--json"]);
     assert_eq!(code, 0, "{err}");
     let value: serde_json::Value =
@@ -210,7 +175,7 @@ fn json_is_the_same_facts_as_one_object() {
         })
     );
 
-    sh(&root, &["git", "checkout", "-q", "--detach"]);
+    Repo::at(&root).git(&["checkout", "-q", "--detach"]);
     let (_, out, _) = xtask(&root, &["track", "--json"]);
     let value: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(value["branch"], serde_json::Value::Null);
@@ -249,7 +214,7 @@ fn a_branch_names_its_ticket_by_record_and_never_by_its_name() {
     assert_eq!(code, 0);
     assert!(out.contains("ticket: none"), "stated plainly: {out}");
 
-    sh(&root, &["git", "config", "branch.t30.ticket", "30"]);
+    Repo::at(&root).git(&["config", "branch.t30.ticket", "30"]);
     let recorded = Track::of(&root, None).unwrap();
     assert_eq!(recorded.ticket, Some(Ticket::new(30)));
     let (code, out, _) = xtask(&root, &["track"]);
@@ -260,7 +225,7 @@ fn a_branch_names_its_ticket_by_record_and_never_by_its_name() {
     );
 
     // A record that is not a number is an error, not a branch with none.
-    sh(&root, &["git", "config", "branch.t30.ticket", "thirty"]);
+    Repo::at(&root).git(&["config", "branch.t30.ticket", "thirty"]);
     let err = Track::of(&root, Some("t30")).unwrap_err();
     assert!(format!("{err:#}").contains("thirty"), "{err:#}");
 }

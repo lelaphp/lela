@@ -44,7 +44,7 @@ fn map() -> String {
 #[test]
 fn the_map_is_read_from_the_index_and_not_from_a_render_in_flight() {
     let root = Tree::new("map-staged").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     let rendered = "# map\n\n<!-- computed exec cmd=\"ls\" inputs=x name=x | do not edit; run computed -->\nx\n<!-- /computed in=1 out=2 -->\n";
     std::fs::write(root.join("AGENTS.md"), rendered).unwrap();
     let add = Command::new("git")
@@ -73,7 +73,7 @@ fn the_commit_s_index_is_read_for_its_own_repository_alone() {
         return;
     }
     let root = Tree::new("map-foreign-index").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     std::fs::write(root.join("only-here"), "x\n").unwrap();
     let git = |dir: &Path, args: &[&str]| {
         let out = Command::new("git")
@@ -286,7 +286,7 @@ fn xtask_args(opener: &str) -> Vec<String> {
 /// it, so a section that reads one, `invocation` the type's source,
 /// renders it.
 fn tracked_tree(root: &Path, regions: &[(String, String)]) {
-    scratch_workspace(workspace(), root).unwrap();
+    scratch_workspace(workspace(), root);
     let locks = Command::new("git")
         .args(["ls-files", "-z", "--", "*.lock"])
         .current_dir(workspace())
@@ -731,7 +731,7 @@ fn the_map_and_the_local_facts_are_each_under_the_engines_cap_with_room() {
     // The map as the hook hands it, from a scratch workspace holding the
     // staged map, so a render in flight here is not what is measured.
     let root = Tree::new("map-cap").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     std::fs::write(root.join("AGENTS.md"), map()).unwrap();
     let (map, _) = session_blocks(&root);
     assert!(

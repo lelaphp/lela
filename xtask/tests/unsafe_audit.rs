@@ -6,6 +6,11 @@ use xtask::manifest::Manifest;
 use xtask::reading::Status;
 use xtask::unsafe_audit;
 
+mod common {
+    pub mod repo;
+}
+use common::repo::Repo;
+
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
 }
@@ -68,28 +73,7 @@ fn a_host_s_unsafe_is_at_home_under_its_ffi_directory_alone() {
         "sapi/phpdbg/src/lib.rs",
         "#![forbid(unsafe_code)]\npub fn tty() -> i32 {\n    unsafe { 0 }\n}\n",
     );
-    let commit = [
-        "-c",
-        "user.name=x",
-        "-c",
-        "user.email=x@x",
-        "-c",
-        "commit.gpgsign=false",
-        "-c",
-        "core.hooksPath=/var/empty",
-        "commit",
-        "-q",
-        "-m",
-        "hosts",
-    ];
-    for args in [&["init", "-q"][..], &["add", "."], &commit] {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(&tree)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
-    }
+    Repo::init(&tree).commit("hosts");
     let mut manifest = Manifest::load(workspace()).unwrap();
     manifest.crates = vec![
         xtask::manifest::Crate::named("sapi/fpm"),

@@ -7,12 +7,17 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use xtask::scratch::Tree;
 use xtask::ticket::Gh;
 use xtask::track_next::{Next, next};
+
+mod common {
+    pub mod repo;
+}
+use common::repo::Repo;
 
 /// A recorded tracker beside a scratch repository: `gh issue list`
 /// answers with `list.json`, every other call is written to `calls`.
@@ -30,11 +35,7 @@ impl Recorded {
         );
         fs::write(dir.join("gh"), script).unwrap();
         fs::set_permissions(dir.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
-        git(&dir.join("repo"), &["init", "-q", "-b", "main"]);
-        git(
-            &dir.join("repo"),
-            &["commit", "-q", "--allow-empty", "-m", "main"],
-        );
+        Repo::init(&dir.join("repo")).git(&["commit", "-q", "--allow-empty", "-m", "main"]);
         Recorded { dir }
     }
 
@@ -75,14 +76,11 @@ impl Recorded {
     /// A branch of the clone recording `ticket`, the way `worktree add
     /// --ticket` records it.
     fn records(&self, branch: &str, ticket: u64) {
-        git(
-            &self.repo(),
-            &[
-                "config",
-                &format!("branch.{branch}.ticket"),
-                &ticket.to_string(),
-            ],
-        );
+        Repo::at(&self.repo()).git(&[
+            "config",
+            &format!("branch.{branch}.ticket"),
+            &ticket.to_string(),
+        ]);
     }
 
     fn calls(&self) -> Vec<String> {
@@ -92,22 +90,6 @@ impl Recorded {
             .map(str::to_owned)
             .collect()
     }
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(["-c", "user.name=x", "-c", "user.email=x@x"])
-        .args([
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/var/empty",
-        ])
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "git {}", args.join(" "));
 }
 
 const READY: &[&str] = &["ready-for-agent"];

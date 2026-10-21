@@ -14,7 +14,7 @@ use xtask::witness::{self, Accept, Ask};
 mod common {
     pub mod repo;
 }
-use common::repo::scratch_workspace;
+use common::repo::{Repo, scratch_workspace};
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -795,20 +795,16 @@ fn a_worktree_named_by_a_branch_with_a_slash_is_a_checkout_of_its_own() {
 fn a_file_in_a_worktree_beside_the_checkout_is_judged_against_that_worktree() {
     let tree = Tree::new("permit-beside").unwrap();
     let root = tree.join("repo");
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     let beside = tree.join("repo-worktrees/t-x/beside");
-    sh(
-        &root,
-        &[
-            "git",
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "t-x/beside",
-            beside.to_str().unwrap(),
-        ],
-    );
+    Repo::at(&root).git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "t-x/beside",
+        beside.to_str().unwrap(),
+    ]);
     let marker = "edited by a person, says the worktree's manifest";
     let manifest = std::fs::read_to_string(beside.join("seams.toml")).unwrap();
     let manifest = manifest.replacen("are edited by a person.", &format!("are {marker}."), 1);
@@ -867,16 +863,12 @@ fn a_file_in_a_worktree_beside_the_checkout_is_judged_against_that_worktree() {
 
     // A clone beside is another repository: its files are no workspace's.
     let clone = tree.join("repo-t-y");
-    sh(
-        &tree,
-        &[
-            "git",
-            "clone",
-            "-q",
-            root.to_str().unwrap(),
-            clone.to_str().unwrap(),
-        ],
-    );
+    Repo::at(&tree).git(&[
+        "clone",
+        "-q",
+        root.to_str().unwrap(),
+        clone.to_str().unwrap(),
+    ]);
     let call = edit(&clone.join("oracle.toml"));
     assert_eq!(call.workspace(&root), root);
     assert_eq!(call.path(&root), None);
@@ -886,18 +878,14 @@ fn a_file_in_a_worktree_beside_the_checkout_is_judged_against_that_worktree() {
 /// place `worktree add` lays one (revision 56).
 fn worktree_beside(tree: &Path, root: &Path, branch: &str) -> PathBuf {
     let beside = tree.join("repo-worktrees").join(branch);
-    sh(
-        root,
-        &[
-            "git",
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            branch,
-            beside.to_str().unwrap(),
-        ],
-    );
+    Repo::at(root).git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        branch,
+        beside.to_str().unwrap(),
+    ]);
     beside.canonicalize().unwrap()
 }
 
@@ -1016,7 +1004,7 @@ fn a_call_in_a_worktree_whose_manifest_differs_is_judged_by_that_worktrees_build
 fn a_hand_off_that_does_not_run_leaves_the_call_unjudged() {
     let tree = Tree::new("permit-hand-off-fails").unwrap();
     let root = tree.join("repo");
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     let beside = worktree_beside(&tree, &root, "t-x/unbuilt");
     let manifest = std::fs::read_to_string(beside.join("seams.toml")).unwrap();
     std::fs::write(
@@ -1236,7 +1224,7 @@ fn diff_judges_a_fixture_source_by_the_fixture_manifest() {
     );
     let site = "pub fn read(p: *const u8) -> u8 {\n    unsafe { *p }\n}\n";
     write(&root, &format!("{fixture}/ext/pcre/src/ffi/mod.rs"), site);
-    sh(&root, &["git", "add", "-A"]);
+    Repo::at(&root).git(&["add", "-A"]);
     let (code, out, err) = permit(&root, "", &["--diff"]);
     assert_eq!(code, 0, "a home of the fixture's manifest: {out}{err}");
 
@@ -1245,7 +1233,7 @@ fn diff_judges_a_fixture_source_by_the_fixture_manifest() {
         &format!("{fixture}/crates/php_unit/src/lib.rs"),
         site,
     );
-    sh(&root, &["git", "add", "-A"]);
+    Repo::at(&root).git(&["add", "-A"]);
     let (code, out, _) = permit(&root, "", &["--diff"]);
     assert_eq!(code, 1, "outside the fixture's homes: {out}");
     assert!(
@@ -1418,7 +1406,7 @@ fn permit(root: &Path, stdin: &str, args: &[&str]) -> (i32, String, String) {
 /// workspace's store.
 fn scratch(name: &str) -> Tree {
     let dir = Tree::new(&format!("permit-{name}")).unwrap();
-    scratch_workspace(workspace(), &dir).unwrap();
+    scratch_workspace(workspace(), &dir);
     dir
 }
 
@@ -1554,11 +1542,7 @@ fn above_the_command_hook_a_denial_is_recorded_and_a_note_is_left_to_it() {
 fn an_abort_the_function_hook_admits_is_its_starter_s_under_the_command_hook_too() {
     let root = scratch("operation-adapters");
     let worktree = root.join("own");
-    let git = |dir: &Path, args: &[&str]| {
-        let out = Command::new("git").args(args).current_dir(dir).output();
-        assert!(out.unwrap().status.success(), "git {}", args.join(" "));
-    };
-    git(&root, &["worktree", "add", "-q", "-b", "own", "own"]);
+    Repo::at(&root).git(&["worktree", "add", "-q", "-b", "own", "own"]);
     let line = |command: &str| {
         serde_json::json!({
             "session_id": "s1",
@@ -1682,23 +1666,6 @@ fn bench_with_the_bar_missed_exits_zero_and_records_fail() {
     );
 }
 
-fn sh(root: &Path, args: &[&str]) {
-    let out = Command::new(args[0])
-        .args(&args[1..])
-        .current_dir(root)
-        .env("GIT_AUTHOR_NAME", "x")
-        .env("GIT_AUTHOR_EMAIL", "x@x")
-        .env("GIT_COMMITTER_NAME", "x")
-        .env("GIT_COMMITTER_EMAIL", "x@x")
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
 fn write(root: &Path, path: &str, text: &str) {
     let file = root.join(path);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -1717,7 +1684,7 @@ fn diff_judges_the_staged_files_and_refuses_a_denied_one_with_the_rule_id() {
 
     let locked = "use std::sync::Mutex;\n\npub struct Cache(Mutex<Vec<u8>>);\n";
     write(&root, "ext/pcre/src/cache.rs", locked);
-    sh(&root, &["git", "add", "ext/pcre/src/cache.rs"]);
+    Repo::at(&root).git(&["add", "ext/pcre/src/cache.rs"]);
     let (code, out, _) = permit(&root, "", &["--diff"]);
     assert_eq!(code, 1, "a denied staged file refuses the commit: {out}");
     assert!(
@@ -1744,7 +1711,7 @@ fn diff_judges_the_staged_files_and_refuses_a_denied_one_with_the_rule_id() {
     );
     let (code, out, _) = permit(&root, "", &["--diff"]);
     assert_eq!(code, 1, "the staged content still holds the lock: {out}");
-    sh(&root, &["git", "add", "ext/pcre/src/cache.rs"]);
+    Repo::at(&root).git(&["add", "ext/pcre/src/cache.rs"]);
     let (code, out, err) = permit(&root, "", &["--diff"]);
     assert_eq!(code, 0, "{out}{err}");
 
@@ -1756,7 +1723,7 @@ fn diff_judges_the_staged_files_and_refuses_a_denied_one_with_the_rule_id() {
         "seams.toml",
         &format!("{manifest}\n# a person's note\n"),
     );
-    sh(&root, &["git", "add", "seams.toml"]);
+    Repo::at(&root).git(&["add", "seams.toml"]);
     let (code, out, err) = permit(&root, "", &["--diff"]);
     assert_eq!(code, 0, "{out}{err}");
     assert!(out.contains("note seams.toml"), "{out}");
@@ -2745,12 +2712,7 @@ fn what_accept_wrote_permit_diff_permits_over_the_same_tree() {
         "the oracle's status is on the fence line and nothing else moved"
     );
 
-    let add = Command::new("git")
-        .args(["add", "--", CRATE])
-        .current_dir(&root)
-        .status()
-        .unwrap();
-    assert!(add.success());
+    Repo::at(&root).git(&["add", "--", CRATE]);
     let (code, out, err) = xtask(&root, &["permit", "--diff"]);
     assert_eq!(code, 0, "{out}{err}");
     assert!(!out.contains("deny "), "{out}");
@@ -2771,31 +2733,22 @@ fn what_accept_wrote_permit_diff_permits_over_the_same_tree() {
 #[test]
 fn a_verdict_the_merged_branch_carried_is_the_branchs_and_not_the_merges() {
     let root = scratch("merge-verdict");
-    let git = |args: &[&str]| {
-        let unhooked = [
-            "git",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/var/empty",
-        ];
-        sh(&root, &[&unhooked[..], args].concat());
-    };
+    let repo = Repo::at(&root);
     let tail = "pub fn other() {}\n";
     lay_down(&root, &format!("{}{tail}", block("exit")));
-    git(&["add", "--", CRATE]);
-    git(&["commit", "-q", "-m", "the fence"]);
-    git(&["checkout", "-q", "-b", "branch"]);
+    repo.git(&["add", "--", CRATE]);
+    repo.git(&["commit", "-q", "-m", "the fence"]);
+    repo.git(&["checkout", "-q", "-b", "branch"]);
     write(&root, FILE, &format!("{}{tail}", block("exit=3")));
-    git(&["commit", "-q", "-am", "the branch's accept"]);
-    git(&["checkout", "-q", "-"]);
+    repo.git(&["commit", "-q", "-am", "the branch's accept"]);
+    repo.git(&["checkout", "-q", "-"]);
     write(
         &root,
         FILE,
         &format!("{}{tail}pub fn mains() {{}}\n", block("exit")),
     );
-    git(&["commit", "-q", "-am", "main moves on"]);
-    git(&["merge", "-q", "--no-ff", "--no-commit", "branch"]);
+    repo.git(&["commit", "-q", "-am", "main moves on"]);
+    repo.git(&["merge", "-q", "--no-ff", "--no-commit", "branch"]);
 
     let (code, out, err) = xtask(&root, &["permit", "--diff"]);
     assert_eq!(code, 0, "{out}{err}");
@@ -2804,7 +2757,7 @@ fn a_verdict_the_merged_branch_carried_is_the_branchs_and_not_the_merges() {
     let merged = std::fs::read_to_string(root.join(FILE)).unwrap();
     let authored = block("exit=4").replace("native", "another");
     write(&root, FILE, &format!("{merged}{authored}"));
-    git(&["add", "--", FILE]);
+    repo.git(&["add", "--", FILE]);
     let (code, out, err) = xtask(&root, &["permit", "--diff"]);
     assert_eq!(code, 1, "{out}{err}");
     assert!(out.contains(EXIT_AUTHORED), "{out}");
@@ -2819,24 +2772,15 @@ fn a_verdict_the_merged_branch_carried_is_the_branchs_and_not_the_merges() {
 #[test]
 fn a_capture_fence_the_merged_side_carries_is_that_sides_and_one_the_merge_edits_is_denied() {
     let root = scratch("merge-capture");
-    let git = |args: &[&str]| {
-        let unhooked = [
-            "git",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/var/empty",
-        ];
-        sh(&root, &[&unhooked[..], args].concat());
-    };
+    let repo = Repo::at(&root);
     let other = "ext/ctype/src/other.rs";
     let capture = "/// ```php\n/// echo 1;\n/// ```\n/// ```expect capture\n/// 1\n/// ```\n";
     lay_down(&root, &format!("{}pub fn tail() {{}}\n", block("exit")));
     let shared = "/// ```php\n/// exit(3);\n/// ```\npub fn other() {}\n";
     write(&root, other, shared);
-    git(&["add", "--", CRATE]);
-    git(&["commit", "-q", "-m", "the base"]);
-    git(&["checkout", "-q", "-b", "main-side"]);
+    repo.git(&["add", "--", CRATE]);
+    repo.git(&["commit", "-q", "-m", "the base"]);
+    repo.git(&["checkout", "-q", "-b", "main-side"]);
     write(
         &root,
         FILE,
@@ -2846,20 +2790,20 @@ fn a_capture_fence_the_merged_side_carries_is_that_sides_and_one_the_merge_edits
         ),
     );
     write(&root, other, &format!("{capture}{shared}"));
-    git(&[
+    repo.git(&[
         "commit",
         "-q",
         "-am",
         "main's capture, pinned by --accept --streams",
     ]);
-    git(&["checkout", "-q", "-"]);
+    repo.git(&["checkout", "-q", "-"]);
     write(
         &root,
         FILE,
         &format!("{}pub fn tail() {{}}\npub fn mine() {{}}\n", block("exit")),
     );
-    git(&["commit", "-q", "-am", "the branch moves on"]);
-    git(&["merge", "-q", "--no-ff", "--no-commit", "main-side"]);
+    repo.git(&["commit", "-q", "-am", "the branch moves on"]);
+    repo.git(&["merge", "-q", "--no-ff", "--no-commit", "main-side"]);
 
     let (code, out, err) = xtask(&root, &["permit", "--diff"]);
     assert_eq!(code, 0, "{out}{err}");
@@ -2867,7 +2811,7 @@ fn a_capture_fence_the_merged_side_carries_is_that_sides_and_one_the_merge_edits
 
     let merged = std::fs::read_to_string(root.join(FILE)).unwrap();
     write(&root, FILE, &merged.replace("/// 1\n", "/// 2\n"));
-    git(&["add", "--", FILE]);
+    repo.git(&["add", "--", FILE]);
     let (code, out, err) = xtask(&root, &["permit", "--diff"]);
     assert_eq!(code, 1, "{out}{err}");
     assert!(
@@ -2882,35 +2826,26 @@ fn a_capture_fence_the_merged_side_carries_is_that_sides_and_one_the_merge_edits
 #[test]
 fn a_second_copy_of_a_fence_both_parents_inherit_is_the_merges() {
     let root = scratch("merge-capture-twice");
-    let git = |args: &[&str]| {
-        let unhooked = [
-            "git",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/var/empty",
-        ];
-        sh(&root, &[&unhooked[..], args].concat());
-    };
+    let repo = Repo::at(&root);
     let capture = "/// ```php\n/// echo 1;\n/// ```\n/// ```expect capture\n/// 1\n/// ```\npub fn captured() {}\n";
     lay_down(&root, &format!("{capture}pub fn tail() {{}}\n"));
-    git(&["add", "--", CRATE]);
-    git(&["commit", "-q", "-m", "the base"]);
-    git(&["checkout", "-q", "-b", "other-side"]);
+    repo.git(&["add", "--", CRATE]);
+    repo.git(&["commit", "-q", "-m", "the base"]);
+    repo.git(&["checkout", "-q", "-b", "other-side"]);
     write(
         &root,
         FILE,
         &format!("{capture}pub fn tail() {{}}\npub fn theirs() {{}}\n"),
     );
-    git(&["commit", "-q", "-am", "the other side"]);
-    git(&["checkout", "-q", "-"]);
+    repo.git(&["commit", "-q", "-am", "the other side"]);
+    repo.git(&["checkout", "-q", "-"]);
     write(
         &root,
         FILE,
         &format!("pub fn mine() {{}}\n{capture}pub fn tail() {{}}\n"),
     );
-    git(&["commit", "-q", "-am", "this side"]);
-    git(&["merge", "-q", "--no-ff", "--no-commit", "other-side"]);
+    repo.git(&["commit", "-q", "-am", "this side"]);
+    repo.git(&["merge", "-q", "--no-ff", "--no-commit", "other-side"]);
     let (code, out, err) = xtask(&root, &["permit", "--diff"]);
     assert_eq!(code, 0, "{out}{err}");
 
@@ -2920,7 +2855,7 @@ fn a_second_copy_of_a_fence_both_parents_inherit_is_the_merges() {
         FILE,
         &format!("{merged}{}", capture.replace("captured", "again")),
     );
-    git(&["add", "--", FILE]);
+    repo.git(&["add", "--", FILE]);
     let (code, out, err) = xtask(&root, &["permit", "--diff"]);
     assert_eq!(code, 1, "{out}{err}");
     assert!(out.contains("witness.capture-authored"), "{out}");
@@ -2938,24 +2873,8 @@ fn a_second_copy_of_a_fence_both_parents_inherit_is_the_merges() {
 #[test]
 fn a_verdict_a_branch_captured_stands_on_main_after_the_merge_and_a_typed_one_does_not() {
     let root = scratch("merged-capture");
-    let git = |args: &[&str]| {
-        let unhooked = [
-            "git",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/var/empty",
-        ];
-        sh(&root, &[&unhooked[..], args].concat());
-    };
-    let head = || {
-        let out = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&root)
-            .output()
-            .unwrap();
-        String::from_utf8(out.stdout).unwrap().trim().to_owned()
-    };
+    let repo = Repo::at(&root);
+    let head = || repo.git(&["rev-parse", "HEAD"]);
     let reported = |base: &str| {
         let (_, out, err) = xtask(&root, &["done", "--base", base]);
         let said = format!("{out}{err}");
@@ -2966,25 +2885,25 @@ fn a_verdict_a_branch_captured_stands_on_main_after_the_merge_and_a_typed_one_do
     };
     let tail = "\npub fn other() {}\n";
     lay_down(&root, &format!("{}{tail}", block("exit")));
-    git(&["add", "--", CRATE]);
-    git(&["commit", "-q", "-m", "the fence"]);
+    repo.git(&["add", "--", CRATE]);
+    repo.git(&["commit", "-q", "-m", "the fence"]);
     let base = head();
 
     // The branch captures the verdict and `witness` measures its commit;
     // the reading reaches the store's log alone, as a retire leaves it.
-    git(&["checkout", "-q", "-b", "branch"]);
+    repo.git(&["checkout", "-q", "-b", "branch"]);
     write(&root, FILE, &format!("{}{tail}", block("exit=3")));
-    git(&["commit", "-q", "-am", "the branch's accept"]);
+    repo.git(&["commit", "-q", "-am", "the branch's accept"]);
     witness_reading(&root);
     std::fs::remove_file(root.join("target/harness/witness/ext/ctype.toml")).unwrap();
-    git(&["checkout", "-q", "-"]);
+    repo.git(&["checkout", "-q", "-"]);
     write(
         &root,
         FILE,
         &format!("{}{tail}\npub fn mains() {{}}\n", block("exit")),
     );
-    git(&["commit", "-q", "-am", "main moves the crate on"]);
-    git(&["merge", "-q", "--no-ff", "-m", "merge the branch", "branch"]);
+    repo.git(&["commit", "-q", "-am", "main moves the crate on"]);
+    repo.git(&["merge", "-q", "--no-ff", "-m", "merge the branch", "branch"]);
     let merged = std::fs::read_to_string(root.join(FILE)).unwrap();
     assert!(
         merged.contains("exit=3") && merged.contains("mains"),
@@ -2994,12 +2913,12 @@ fn a_verdict_a_branch_captured_stands_on_main_after_the_merge_and_a_typed_one_do
 
     // A verdict typed by hand on a second branch, in a commit nothing
     // measured, merged the same way.
-    git(&["checkout", "-q", "-b", "typed"]);
+    repo.git(&["checkout", "-q", "-b", "typed"]);
     let typed = block("exit=4").replace("native", "another");
     write(&root, FILE, &format!("{merged}\n{typed}"));
-    git(&["commit", "-q", "-am", "a verdict typed by hand"]);
-    git(&["checkout", "-q", "-"]);
-    git(&[
+    repo.git(&["commit", "-q", "-am", "a verdict typed by hand"]);
+    repo.git(&["checkout", "-q", "-"]);
+    repo.git(&[
         "merge",
         "-q",
         "--no-ff",
@@ -3036,21 +2955,12 @@ fn xtask(root: &Path, args: &[&str]) -> (i32, String, String) {
 fn checkout(name: &str, ticket: Option<u32>) -> Tree {
     let dir = scratch(name);
     if let Some(ticket) = ticket {
-        let head = Command::new("git")
-            .args(["symbolic-ref", "--short", "HEAD"])
-            .current_dir(&dir)
-            .output()
-            .unwrap();
+        let repo = Repo::at(&dir);
         let key = format!(
             "branch.{}.ticket",
-            String::from_utf8_lossy(&head.stdout).trim()
+            repo.git(&["symbolic-ref", "--short", "HEAD"])
         );
-        let set = Command::new("git")
-            .args(["config", &key, &ticket.to_string()])
-            .current_dir(&dir)
-            .status()
-            .unwrap();
-        assert!(set.success(), "git config {key}");
+        repo.git(&["config", &key, &ticket.to_string()]);
     }
     dir
 }
@@ -3059,12 +2969,7 @@ fn checkout(name: &str, ticket: Option<u32>) -> Tree {
 /// before its commit: `MERGE_HEAD` in its git dir.
 fn operating(name: &str) -> Tree {
     let dir = checkout(name, None);
-    let git_dir = Command::new("git")
-        .args(["rev-parse", "--absolute-git-dir"])
-        .current_dir(&dir)
-        .output()
-        .unwrap();
-    let git_dir = PathBuf::from(String::from_utf8_lossy(&git_dir.stdout).trim());
+    let git_dir = PathBuf::from(Repo::at(&dir).git(&["rev-parse", "--absolute-git-dir"]));
     std::fs::write(git_dir.join("MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
     dir
 }
@@ -3234,12 +3139,7 @@ fn a_rule_where_ticketed_judges_past_a_change_that_may_not_move_the_line() {
 fn a_rule_where_main_judges_only_the_main_checkout() {
     let manifest = probe(|rule| rule.within = Where::Main);
     let main = checkout("where-main-only", None);
-    let out = Command::new("git")
-        .args(["worktree", "add", "-q", "-b", "own", "own"])
-        .current_dir(main.path())
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "git worktree add");
+    Repo::at(&main).git(&["worktree", "add", "-q", "-b", "own", "own"]);
     let linked = main.path().join("own");
     let line = "cargo xtask phpt --census";
     assert!(denied(&manifest, main.path(), line));
@@ -3265,18 +3165,10 @@ fn harness_self_shell_judges_a_write_where_it_runs_and_only_in_a_checkout() {
         .find(|r| r.id == "harness.self-shell");
     rule.unwrap().within = Where::Checkout;
     let main = checkout("self-shell-main", None);
-    let git = |dir: &Path, args: &[&str]| {
-        let out = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "git {args:?}");
-    };
-    git(main.path(), &["worktree", "add", "-q", "-b", "own", "own"]);
+    Repo::at(&main).git(&["worktree", "add", "-q", "-b", "own", "own"]);
     let (main, linked) = (main.path(), main.path().join("own"));
     let outside = Tree::new("permit-self-shell-outside").unwrap();
-    git(outside.path(), &["init", "-q", "repo"]);
+    Repo::init(&outside.join("repo"));
     let refused = |root: &Path, line: &str| {
         let judged = judge(&manifest, root, &bash(line)).unwrap();
         judged
@@ -3343,12 +3235,7 @@ fn harness_self_shell_judges_a_write_where_it_runs_and_only_in_a_checkout() {
 fn a_merge_that_commits_itself_is_refused_in_main_alone() {
     let manifest = Manifest::load(workspace()).unwrap();
     let main = checkout("merge-commits-itself", None);
-    let out = Command::new("git")
-        .args(["worktree", "add", "-q", "-b", "own", "own"])
-        .current_dir(main.path())
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "git worktree add");
+    Repo::at(&main).git(&["worktree", "add", "-q", "-b", "own", "own"]);
     let linked = main.path().join("own");
     let refused = |root: &Path, line: &str| {
         judge(&manifest, root, &bash(line))

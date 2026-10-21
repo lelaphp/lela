@@ -35,7 +35,7 @@ const SESSION: &str = "5d0c7a1e-2b4f-4e8a-9c61-0f3b8d2e7a45";
 
 fn scratch(name: &str) -> Tree {
     let dir = Tree::new(&format!("permit-after-{name}")).unwrap();
-    scratch_workspace(workspace(), &dir).unwrap();
+    scratch_workspace(workspace(), &dir);
     dir
 }
 
