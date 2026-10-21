@@ -1,14 +1,15 @@
 //! `link` through its public signature, over a table of declarations:
 //! one refusal at each stage `zend_do_link_class` walks, in its order
-//! (an enum's functions, the parent, the traits' adaptations, the
+//! (an enum's functions, the traits' adaptations, the parent, the
 //! interfaces), each its sentence at the class's line, and one class
-//! that links.
+//! with a parent and an interface that links.
 
 use php_link::{Held, Linked, Refused, link};
 use php_unit::decl::{
     ClassDecl, ClassFlags, ClassKind, ConstExpr, EnumBacking, MethodDecl, Name, TraitAdaptation,
     Visibility, native_function,
 };
+use php_unit::enum_methods;
 
 /// A declaration named `name` of `kind` at line 1 of `t.php`, with
 /// nothing in it: `ClassDecl` has no `Default`.
@@ -59,13 +60,12 @@ fn table() -> Vec<ClassDecl> {
     let mut suit = class("Suit", ClassKind::Enum);
     suit.line = 2;
     suit.methods.push(method(b"Cases"));
-    suit.methods
-        .extend(php_unit::enum_methods(EnumBacking::Pure));
+    suit.methods.extend(enum_methods(EnumBacking::Pure));
     let mut extends_final = class("ExtendsFinal", ClassKind::Class);
-    extends_final.line = 3;
+    extends_final.line = 4;
     extends_final.parent = Some(Name::from("F"));
     let mut adapts = class("Adapts", ClassKind::Class);
-    adapts.line = 4;
+    adapts.line = 3;
     adapts.traits.push(Name::from("T"));
     adapts.adaptations.push(TraitAdaptation::Insteadof {
         trait_name: Name::from("T"),
@@ -93,8 +93,9 @@ fn table() -> Vec<ClassDecl> {
 }
 
 /// What `link` came to for the class of `table` named `name`, the
-/// table its lookup, by name in any case.
-fn linked(table: &[ClassDecl], name: &str) -> Linked {
+/// table its lookup, by name in any case, and the line the class is
+/// declared at.
+fn outcome(table: &[ClassDecl], name: &str) -> (Linked, u32) {
     let lookup = |wanted: &[u8]| {
         table
             .iter()
@@ -112,31 +113,29 @@ fn linked(table: &[ClassDecl], name: &str) -> Linked {
         .iter()
         .find(|decl| *decl.name.0 == *name.as_bytes())
         .expect("the table holds the class");
-    link(child, &lookup, &holder, &values).outcome
+    (link(child, &lookup, &holder, &values).outcome, child.line)
 }
 
 #[test]
 fn each_stage_refuses_with_its_sentence_at_the_class() {
     let table = table();
-    for (name, sentence, line) in [
-        ("Suit", "Cannot redeclare Suit::cases()", 2),
-        (
-            "ExtendsFinal",
-            "Class ExtendsFinal cannot extend final class F",
-            3,
-        ),
+    for (name, sentence) in [
+        ("Suit", "Cannot redeclare Suit::cases()"),
         (
             "Adapts",
             "A precedence rule was defined for T::missing but this method does not exist",
-            4,
+        ),
+        (
+            "ExtendsFinal",
+            "Class ExtendsFinal cannot extend final class F",
         ),
         (
             "ImplementsClass",
             "ImplementsClass cannot implement P - it is not an interface",
-            5,
         ),
     ] {
-        let refused = match linked(&table, name) {
+        let (linked, line) = outcome(&table, name);
+        let refused = match linked {
             Linked::Refused(Refused { refusal, site }) => Some((refusal.to_string(), site.line)),
             Linked::Linked => None,
         };
@@ -145,6 +144,6 @@ fn each_stage_refuses_with_its_sentence_at_the_class() {
 }
 
 #[test]
-fn a_class_whose_every_stage_holds_links() {
-    assert_eq!(linked(&table(), "Links"), Linked::Linked);
+fn a_class_with_a_parent_and_an_interface_links() {
+    assert_eq!(outcome(&table(), "Links").0, Linked::Linked);
 }
