@@ -33,7 +33,10 @@
 //! with that feature, into the target directory the phpt lane builds that
 //! engine in ([`profile::featured`]), so the child it starts carries its
 //! own extension as the oracle's variant does, and the two lanes share
-//! one build (#2721).
+//! one build (#2721). A `process` fence under a regime that sets the
+//! tier's `jit.mode` is served by `php` built with the tier's feature
+//! beside it, as the phpt lane's `--jit` builds it (#3053), so the lane
+//! the regime names runs on a binary that carries the tier (#2962).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -46,12 +49,11 @@ use anyhow::{Result, anyhow};
 
 use super::anchor::Entry;
 use super::fence::Served;
-use crate::carried::BUNDLE;
 use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, MAKALA, PHPDBG};
 use crate::oracle::profile;
 use crate::oracle::{Ended, Invocation, Observation, Oracle, Program, Recipe, Stdin, normalise_in};
 use crate::phpt::environment::Environment;
-use crate::phpt::{cgi, file::Phpt};
+use crate::phpt::{Build, cgi, file::Phpt};
 use crate::scratch::Tree;
 
 // The hosts a fence is served by, each its own binary: `sapi/cli`'s
@@ -69,15 +71,15 @@ const TRACE: &str = "PHP_WITNESS_TRACE";
 #[derive(Debug)]
 pub(crate) struct Binary {
     root: PathBuf,
-    built: Mutex<BTreeMap<Build, Slot>>,
+    built: Mutex<BTreeMap<Key, Slot>>,
 }
 
 /// Where one build's path, or its failure, is kept once it ran.
 type Slot = Arc<OnceLock<Result<PathBuf, String>>>;
 
-/// A binary a run builds: a host by its crate, and the bundle feature
-/// `php` is built with on, where there is one.
-type Build = (&'static str, Option<String>);
+/// The key of a binary a run builds: a host by its crate, and the bundle
+/// features `php` is built with on, none for the binary under test.
+type Key = (&'static str, Vec<String>);
 
 impl Binary {
     /// The binaries of the workspace at `root`, not yet built.
@@ -94,21 +96,21 @@ impl Binary {
     #[cfg(test)]
     pub(crate) fn standing(root: &Path, host: EngineHost, path: PathBuf) -> Binary {
         let binary = Binary::of(root);
-        binary.stand(host, None, path);
+        binary.stand(host, &[], path);
         binary
     }
 
-    /// The same with `path` standing in for `php` built with `feature`.
+    /// The same with `path` standing in for `php` built with `features`.
     #[cfg(test)]
-    pub(crate) fn featuring(self, feature: &str, path: PathBuf) -> Binary {
-        self.stand(CLI, Some(feature), path);
+    pub(crate) fn featuring(self, features: &[&str], path: PathBuf) -> Binary {
+        self.stand(CLI, features, path);
         self
     }
 
     #[cfg(test)]
-    fn stand(&self, host: EngineHost, feature: Option<&str>, path: PathBuf) {
+    fn stand(&self, host: EngineHost, features: &[&str], path: PathBuf) {
         let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
-        let key = (host.krate, feature.map(str::to_owned));
+        let key = (host.krate, owned(features));
         built.insert(key, Arc::new(OnceLock::from(Ok(path))));
     }
 
@@ -117,26 +119,28 @@ impl Binary {
     /// host's own line runs (#1975), and the CLI's what `crosscheck`
     /// starts as the built-in server.
     pub(crate) fn host(&self, host: EngineHost) -> Result<PathBuf> {
-        self.built(host, None)
+        self.built(host, &[])
     }
 
-    /// Where `host`'s binary is, `php` built with `feature` of the bundle
-    /// on into [`profile::featured`] where there is one, built now in the
+    /// Where `host`'s binary is, `php` built with `features` of the bundle
+    /// on into [`profile::featured`] where there are any, as the phpt lane
+    /// names that build's directory, built now in the
     /// lanes' profile ([`profile::build`]) if this run has not built it
     /// yet: every request it serves records the natives it entered where
     /// `PHP_WITNESS_TRACE` names a file, with no build of its own for the
     /// lane (#2168).
-    fn built(&self, host: EngineHost, feature: Option<&str>) -> Result<PathBuf> {
+    fn built(&self, host: EngineHost, features: &[&str]) -> Result<PathBuf> {
         // The map's lock is held to find the build's slot alone, so one
         // host's build never waits on another's.
         let slot = {
             let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
-            let key = (host.krate, feature.map(str::to_owned));
+            let key = (host.krate, owned(features));
             Arc::clone(built.entry(key).or_default())
         };
         let path = slot.get_or_init(|| {
-            let on = feature.map(|feature| format!("{BUNDLE}/{feature}"));
-            let into = feature.map(|feature| profile::featured(&self.root, feature));
+            let build = (!features.is_empty()).then(|| Build::of(features.to_vec()));
+            let on = build.as_ref().map(Build::features);
+            let into = build.as_ref().map(|build| build.target_dir(&self.root));
             let (package, binary) = (host.package(), host.binary);
             profile::build(&self.root, &package, binary, on.as_deref(), into.as_deref())
                 .map_err(|e| format!("{e:#}"))
@@ -144,8 +148,8 @@ impl Binary {
         path.clone().map_err(|why| anyhow!("{why}"))
     }
 
-    /// `snippet` served by the binary, the one built with `feature` where
-    /// there is one, under the recipe, and `regime`'s arguments and ini
+    /// `snippet` served by the binary, the one built with `features` where
+    /// there are any, under the recipe, and `regime`'s arguments and ini
     /// after it where the fence names one, as the oracle serves it; with
     /// the natives every request it served entered, in the order they
     /// were appended.
@@ -154,9 +158,9 @@ impl Binary {
         oracle: &Oracle<'_>,
         snippet: &str,
         regime: Option<&str>,
-        feature: Option<&str>,
+        features: &[&str],
     ) -> Result<(Observation, Vec<Entry>)> {
-        let binary = self.built(CLI, feature)?;
+        let binary = self.built(CLI, features)?;
         traced(|env| {
             oracle.run_under(&Invocation {
                 regimes: regime.as_slice(),
@@ -165,6 +169,11 @@ impl Binary {
             })
         })
     }
+}
+
+/// A build's features as its key holds them.
+fn owned(features: &[&str]) -> Vec<String> {
+    features.iter().map(|&feature| feature.to_owned()).collect()
 }
 
 /// What `serve` observed, served with `PHP_WITNESS_TRACE` naming a file

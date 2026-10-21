@@ -216,6 +216,49 @@ fn startup_value<'a>(start: &'a Start, name: &[u8]) -> &'a [u8] {
 /// opcode's opens with is passed over; php warns `Invalid opcode name`
 /// there, and an engine start has no warning to raise that does not
 /// refuse the start.
+///
+/// Under the compiled tier's force lane (`jit-design.md` §4.3,
+/// *Observed opcodes*), the two silence opcodes are told from inside a
+/// compiled loop as the interpreter tells them, and any other refuses
+/// the tier with php's startup warning, as `zend_jit_check_support`
+/// refuses it; the child is served with the switches on, which only
+/// startup sets, and php ignores the engine's `jit.mode`:
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/opcodes' . getmypid(); @mkdir($dir);
+/// file_put_contents("$dir/loop.php", '<?php
+/// function f($x) { return $x + 1; }
+/// $s = 0;
+/// for ($i = 0; $i < 3; $i++) { $s += @f($i); }
+/// echo $s, "\n";');
+/// foreach (['ZEND_BEGIN_SILENCE ZEND_END_SILENCE', 'ZEND_ECHO'] as $opcodes) {
+///     $p = proc_open([PHP_BINARY, '-n', '-d', 'display_errors=1', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=tracing',
+///         '-d', 'opcache.jit_buffer_size=64M', '-d', 'jit.mode=force', '-d', 'zend_test.observer.enabled=1',
+///         '-d', "zend_test.observer.show_opcode_in_user_handler=$opcodes", "$dir/loop.php"], [1 => ['pipe', 'w']], $pipes);
+///     echo str_replace(realpath($dir), 'D', stream_get_contents($pipes[1])), "--\n"; proc_close($p);
+/// }
+/// exec('rm -rf ' . escapeshellarg($dir));
+/// ```
+/// ```expect process regime=jit-force
+/// <!-- init 'D/loop.php' -->
+/// <!-- opcode: 'ZEND_BEGIN_SILENCE' in user handler -->
+/// <!-- init f() -->
+/// <!-- opcode: 'ZEND_END_SILENCE' in user handler -->
+/// <!-- opcode: 'ZEND_BEGIN_SILENCE' in user handler -->
+/// <!-- opcode: 'ZEND_END_SILENCE' in user handler -->
+/// <!-- opcode: 'ZEND_BEGIN_SILENCE' in user handler -->
+/// <!-- opcode: 'ZEND_END_SILENCE' in user handler -->
+/// 6
+/// --
+///
+/// Warning: JIT is incompatible with third party extensions that setup user opcode handlers. JIT disabled. in Unknown on line 0
+/// <!-- init 'D/loop.php' -->
+/// <!-- init f() -->
+/// <!-- opcode: 'ZEND_ECHO' in user handler -->
+/// 6<!-- opcode: 'ZEND_ECHO' in user handler -->
+///
+/// --
+/// ```
 fn observed_opcodes(start: &Start) -> Opcodes {
     let mut opcodes = Opcodes::default();
     if !Ini::parse_bool(startup_value(start, ENABLED)) {
@@ -427,6 +470,83 @@ fn indent(depth: usize) -> Vec<u8> {
 /// every one under `observe_all`; a function under `observe_functions`
 /// or where `observe_function_names` names it; a file under
 /// `observe_includes`; none otherwise.
+///
+/// Under the compiled tier's force lane (`jit-design.md` §4.3,
+/// *Observed calls*), a loop's calls are begun and ended as the
+/// interpreter begins and ends them, a call the loop's trace inlines, a
+/// native's and a silenced one among them; the child is served with the
+/// switches on, which only startup sets, and php ignores the engine's
+/// `jit.mode`:
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/observed' . getmypid(); @mkdir($dir);
+/// file_put_contents("$dir/loop.php", '<?php
+/// function f($x) { return $x + 1; }
+/// function g($x) { return f($x) * 2; }
+/// function gen() { yield 1; yield 2; }
+/// function thrower($i) { if ($i == 1) { throw new Exception("x"); } return $i; }
+/// $s = 0;
+/// for ($i = 0; $i < 3; $i++) { $s = g($s) + strcmp("b", "a") + @f($i); }
+/// for ($i = 0; $i < 3; $i++) { try { $s += thrower($i); } catch (Exception $e) { $s += 100; } }
+/// foreach (gen() as $v) { $s += $v; }
+/// echo $s, "\n";');
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=tracing', '-d', 'opcache.jit_buffer_size=64M',
+///     '-d', 'jit.mode=force', '-d', 'zend_test.observer.enabled=1', '-d', 'zend_test.observer.observe_all=1',
+///     '-d', 'zend_test.observer.show_return_value=1', "$dir/loop.php"], [1 => ['pipe', 'w']], $pipes);
+/// echo str_replace(realpath($dir), 'D', stream_get_contents($pipes[1])); proc_close($p);
+/// exec('rm -rf ' . escapeshellarg($dir));
+/// ```
+/// ```expect process regime=jit-force
+/// <!-- init 'D/loop.php' -->
+/// <file 'D/loop.php'>
+///   <!-- init g() -->
+///   <g>
+///     <!-- init f() -->
+///     <f>
+///     </f:1>
+///   </g:2>
+///   <!-- init strcmp() -->
+///   <strcmp>
+///   </strcmp:1>
+///   <f>
+///   </f:1>
+///   <g>
+///     <f>
+///     </f:5>
+///   </g:10>
+///   <strcmp>
+///   </strcmp:1>
+///   <f>
+///   </f:2>
+///   <g>
+///     <f>
+///     </f:14>
+///   </g:28>
+///   <strcmp>
+///   </strcmp:1>
+///   <f>
+///   </f:3>
+///   <!-- init thrower() -->
+///   <thrower>
+///   </thrower:0>
+///   <thrower>
+///     <!-- init Exception::__construct() -->
+///     <Exception::__construct>
+///     </Exception::__construct:NULL>
+///     <!-- Exception: Exception -->
+///   </thrower:NULL>
+///   <thrower>
+///   </thrower:2>
+///   <!-- init gen() -->
+///   <gen>
+///   </gen:1>
+///   <gen>
+///   </gen:2>
+///   <gen>
+///   </gen:NULL>
+/// 137
+/// </file 'D/loop.php'>
+/// ```
 fn fcall_init(observed: &mut Observed<'_>) -> ObserverHandlers {
     let switches = Switches::of(observed);
     if !switches.enabled {

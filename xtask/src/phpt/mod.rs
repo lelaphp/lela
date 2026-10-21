@@ -231,13 +231,17 @@ impl Lane {
 
     /// The engine-only directive the lane sets (jit-design.md §7).
     fn ini(self) -> String {
-        format!("jit.mode={}", self.as_str())
+        format!("{}={}", Lane::DIRECTIVE, self.as_str())
     }
+
+    /// The engine-only directive that names a lane, which a witness's
+    /// regime sets to run its fence under one (#2962).
+    pub(crate) const DIRECTIVE: &'static str = "jit.mode";
 
     /// The bundle's feature the lane's engine is built with: `jit.mode`
     /// reaches the compiled tier only in a `php` built with
     /// `php_bundle/jit`, the build that binds `php_bundle::Tier` (#3053).
-    const FEATURE: &str = "jit";
+    pub(crate) const FEATURE: &'static str = "jit";
 }
 
 /// One directory of the corpus: where it stands in the pinned tree, and
@@ -1490,13 +1494,19 @@ fn featured(
 /// ([`profile::featured`]) so the default build stands (#2029). A row's
 /// feature beside its oracle variant, the tier's under a tier's lane
 /// (#3053), or both; the tier's alone is where the witness lane builds
-/// it (#2721).
+/// it (#2721). The witness lane's `process` fences are built by the same
+/// value, so the two lanes name one build alike (#2962).
 ///
 /// [`profile::featured`]: crate::oracle::profile::featured
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Build<'f>(Vec<&'f str>);
+pub(crate) struct Build<'f>(Vec<&'f str>);
 
 impl<'f> Build<'f> {
+    /// The engine with `features` on, in the order given.
+    pub(crate) fn of(features: Vec<&'f str>) -> Build<'f> {
+        Build(features)
+    }
+
     /// The binary under test `ask` has the run build: the engine with the
     /// tier's feature under a tier's lane, unless a binary is named or the
     /// run is the control's; `--unkept` is the control's, and refused
@@ -1517,13 +1527,13 @@ impl<'f> Build<'f> {
     }
 
     /// The features as cargo's `--features` takes them.
-    fn features(&self) -> String {
+    pub(crate) fn features(&self) -> String {
         let named: Vec<String> = self.0.iter().map(|f| format!("{BUNDLE}/{f}")).collect();
         named.join(",")
     }
 
     /// The target directory the engine is built into.
-    fn target_dir(&self, root: &Path) -> PathBuf {
+    pub(crate) fn target_dir(&self, root: &Path) -> PathBuf {
         profile::featured(root, &self.0.join("+"))
     }
 

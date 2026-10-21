@@ -637,6 +637,14 @@ pub struct Regime {
 pub(crate) const WORKSPACE: &str = "{workspace}";
 
 impl Regime {
+    /// Whether one of the regime's ini lines sets `directive`.
+    pub(crate) fn sets(&self, directive: &str) -> bool {
+        (self.ini.iter()).any(|line| {
+            line.split_once('=')
+                .is_some_and(|(name, _)| name.trim() == directive)
+        })
+    }
+
     /// [`WORKSPACE`] in each of the regime's lines, its ini and its
     /// arguments, the workspace at `root`.
     fn placed(&mut self, root: &Path) {
