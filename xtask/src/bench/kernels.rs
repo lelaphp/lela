@@ -8,9 +8,11 @@
 //! **The bars today.** G3's denominator (#2948): the pinned php under
 //! `[regime.jit-tracing]` against itself under `[regime.jit-off]`, what
 //! php's own JIT buys on these programs, and its A/A control, `jit-off`
-//! against `jit-off`. G2 (#2965) is a [`bar`] over the same programs whose
-//! arms are the engine's build, and G1 (#2947) one over the seven kernels
-//! alone, `PROGRAMS[..7]`.
+//! against `jit-off`. G1 (#2947, [`door`]): the engine built with the
+//! tier's feature against the engine built without it over the seven
+//! kernels alone, `PROGRAMS[..7]`, held to a geomean of at most
+//! [`DOOR`]. G2 (#2965) is a [`bar`] over every program whose arms are the
+//! engine's build.
 //!
 //! **What every arm runs under.** The recipe, as the oracle's every run
 //! is, then the regimes, then [`INI`]: php.ini-production's values for the
@@ -26,8 +28,10 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use super::{Arm, Arms, Declared, Environment, Held, PRODUCTION, Side, Sides, Spawned, second};
+use crate::carried::BUNDLE;
 use crate::manifest::Manifest;
-use crate::oracle::Pin;
+use crate::oracle::{Pin, hosts::CLI, profile};
+use crate::phpt::Lane;
 
 /// The programs, by stem under `docs/perf/workloads/`: the seven kernels
 /// (#2736, #2740), and `bench_quiet.php`, php-src's `Zend/bench.php` at the
@@ -157,6 +161,54 @@ pub(crate) fn oracle(root: &Path) -> [Declared; 2] {
                 ini: Vec::new(),
             };
             Ok(Ok([arm(a.to_owned(), a), arm(second(a, b), b)]))
+        })
+    })
+}
+
+/// G1's bound (design §9.2): the tier's door may cost the build without
+/// the feature 2% and no more, above which `jit-design.md` §3 is revisited.
+const DOOR: f64 = 1.02;
+
+/// The engine's `php` in the bench lane's profile, with the tier's feature
+/// of the bundle on into the directory the lanes build it in
+/// ([`profile::featured`]) where `jit`, and the default build otherwise.
+fn engine(root: &Path, jit: bool) -> Result<PathBuf> {
+    let on = jit.then(|| format!("{BUNDLE}/{}", Lane::FEATURE));
+    let into = jit.then(|| profile::featured(root, Lane::FEATURE));
+    let (package, binary) = (CLI.package(), CLI.binary);
+    profile::released(root, (&package, binary), on.as_deref(), into.as_deref())
+}
+
+/// G1, the door cost, and its control (#2947): the engine built with the
+/// tier's feature, `php_jit::Jit` bound and `opcache.jit_buffer_size=0`,
+/// against the engine built without the feature, over the seven kernels
+/// and held to [`DOOR`]; and the build without the feature against
+/// itself, its A/A control. Both arms of each run one command line,
+/// `[regime.jit-tracing]` and the zero buffer, so the binary is the one
+/// difference: the featured engine's `Policy` asks for tracing and runs
+/// `Mode::Off` (`jit-design.md` §4.7), and the other has no tier to ask.
+pub(crate) fn door(root: &Path) -> [Declared; 2] {
+    const JIT: &str = "jit-feature";
+    const PLAIN: &str = "no-jit-feature";
+    [
+        ("g1", JIT, Held::Bound(DOOR)),
+        ("g1-aa", PLAIN, Held::Control),
+    ]
+    .map(|(id, a, held)| {
+        let about = format!(
+            "the engine built as {a} with opcache.jit_buffer_size=0 against {PLAIN} over the seven kernels"
+        );
+        let at = root.to_path_buf();
+        bar(root, (id, &PROGRAMS[..7]), about, held, move |_| {
+            let plain = engine(&at, false)?;
+            let first = if a == JIT { engine(&at, true)? } else { plain.clone() };
+            let arm = |name: String, binary| Php {
+                name,
+                binary,
+                regimes: vec!["jit-tracing"],
+                ini: vec!["opcache.jit_buffer_size=0".to_owned()],
+            };
+            Ok(Ok([arm(a.to_owned(), first), arm(second(a, PLAIN), plain)]))
         })
     })
 }
