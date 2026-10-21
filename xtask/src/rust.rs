@@ -19,7 +19,12 @@
 //! comment that swallowed the rest of the file (#47). A rule read two ways
 //! is two rules, which is what harness-design.md §4.1 says of a rule stated
 //! anywhere but the manifest, and what the two hook adapters were taught on
-//! 2026-09-08.
+//! 2026-09-08. One parse of a file as Rust beside it, [`parse_file`], so every
+//! reader names the file it could not parse alike.
+
+use std::path::Path;
+
+use anyhow::{Context, Result};
 
 /// The character offsets in `text` where an unsafe contract is asserted,
 /// so a sensor of `unsafe.homes` counts them, names their lines or asks
@@ -311,6 +316,17 @@ impl Scan<'_> {
             .and_then(|i| self.chars.get(i))
             .is_some_and(|c| c.is_alphanumeric() || *c == '_')
     }
+}
+
+/// The Rust file at `file`, parsed, an error naming it where it cannot be
+/// read or is not one.
+pub(crate) fn parse_file(file: &Path) -> Result<syn::File> {
+    parsed(&crate::read(file)?, file)
+}
+
+/// `text`, the Rust file at `file`, parsed.
+pub(crate) fn parsed(text: &str, file: &Path) -> Result<syn::File> {
+    syn::parse_file(text).with_context(|| format!("parsing {}", file.display()))
 }
 
 #[cfg(test)]

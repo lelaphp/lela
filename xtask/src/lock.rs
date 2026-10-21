@@ -174,10 +174,7 @@ struct Module {
 impl Module {
     /// The items of `file`, this module's source.
     fn file(&self, file: &Path, out: &mut Vec<Expanded>) -> Result<()> {
-        let text = crate::read(file)?;
-        let parsed =
-            syn::parse_file(&text).with_context(|| format!("parsing {}", file.display()))?;
-        self.items(&parsed.items, out)
+        self.items(&crate::rust::parse_file(file)?.items, out)
     }
 
     fn items(&self, items: &[syn::Item], out: &mut Vec<Expanded>) -> Result<()> {
