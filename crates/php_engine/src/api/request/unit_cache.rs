@@ -157,6 +157,11 @@ pub struct CacheBudget {
     /// `ZCSG(hash).max_num_entries`: how many names files are held
     /// under.
     pub keys: u64,
+    /// Whether the tier started in the segment (`zend_jit_startup`, in
+    /// `accel_post_startup` once the segment is laid down), which takes
+    /// the `zend_get_op_array_extension_handle` every op array compiled
+    /// after it keeps a runtime cache slot for.
+    pub tier: bool,
 }
 
 /// What [`UnitCache::reset`] did.

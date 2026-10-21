@@ -675,6 +675,48 @@ impl UnitCache {
         self.budget.set(budget).ok();
     }
 
+    /// `zend_op_array_extension_handles` as the cache's start left it:
+    /// one where the tier started in the segment, `zend_jit_startup`'s
+    /// `zend_get_op_array_extension_handle` for
+    /// `zend_jit_profile_counter_rid`
+    /// (`Z/ext/opcache/jit/zend_jit.c:3782`), and none otherwise, so
+    /// every op array compiled after it keeps one slot more at the head
+    /// of its runtime cache ([`php_compile::Options::op_array_extensions`]).
+    /// `opcache.jit=off` starts the tier with nothing to compile; the
+    /// default `disable` never starts it.
+    ///
+    /// A program's or an included file's runtime cache is `emalloc`ed at
+    /// its size as `i_init_code_execute_data` lays it down, and freed
+    /// with its frame, the program's before the shutdown functions are served;
+    /// so the slot moves what a file reads while it is served where it moves
+    /// the cache into the next bin. Two files of one length, the first a
+    /// slot more than the second, read their caches in one 16-byte bin
+    /// under opcache without the tier, and 24 and 16 with it:
+    ///
+    /// ```php
+    /// file_put_contents(__DIR__ . '/a.inc', '<?php new stdClass;        return memory_get_usage();');
+    /// file_put_contents(__DIR__ . '/b.inc', '<?php /* no slot here */ return memory_get_usage();');
+    /// touch(__DIR__ . '/a.inc', time() - 10); touch(__DIR__ . '/b.inc', time() - 10);
+    /// $read = function ($file) { include $file; $m = memory_get_usage(); return (include $file) - $m; };
+    /// echo $read(__DIR__ . '/a.inc') - $read(__DIR__ . '/b.inc'), "\n";
+    /// ```
+    /// ```expect regime=immutable-literals
+    /// 0
+    /// ```
+    /// ```php
+    /// file_put_contents(__DIR__ . '/a.inc', '<?php new stdClass;        return memory_get_usage();');
+    /// file_put_contents(__DIR__ . '/b.inc', '<?php /* no slot here */ return memory_get_usage();');
+    /// touch(__DIR__ . '/a.inc', time() - 10); touch(__DIR__ . '/b.inc', time() - 10);
+    /// $read = function ($file) { include $file; $m = memory_get_usage(); return (include $file) - $m; };
+    /// echo $read(__DIR__ . '/a.inc') - $read(__DIR__ . '/b.inc'), "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 8
+    /// ```
+    pub(crate) fn op_array_extensions(&self) -> u32 {
+        self.budget.get().map_or(0, |budget| u32::from(budget.tier))
+    }
+
     /// `zend_accel_hash_is_full`, which marks the memory exhausted and
     /// schedules a restart where enough is wasted.
     fn hash_full(&self, files: &Files) -> bool {

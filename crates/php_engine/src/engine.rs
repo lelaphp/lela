@@ -1564,7 +1564,9 @@ pub(crate) struct FileRequest<'a> {
 
 /// What the engine has declared, as the compiler reads it: php's
 /// `CG(function_table)`, `CG(class_table)` and the persistent constants,
-/// each a view of the engine's own table.
+/// each a view of the engine's own table; and what startup set beside
+/// them, the hooks, extended info and the op array extension slots
+/// ([`php_compile::Options::op_array_extensions`]).
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Declared<'a> {
     pub(crate) constants: Indexed<'a, ConstDecl, Exact>,
@@ -1573,6 +1575,7 @@ pub(crate) struct Declared<'a> {
     pub(crate) classes: Indexed<'a, ClassDecl, Folded>,
     pub(crate) hooked: php_compile::Hooked,
     pub(crate) extended_info: bool,
+    pub(crate) op_array_extensions: u32,
 }
 
 impl Shared {
@@ -1654,6 +1657,7 @@ impl Shared {
             classes: Indexed::new(&self.classes, &self.class_keys.names),
             hooked: self.hooked,
             extended_info: self.extended_info,
+            op_array_extensions: self.units.op_array_extensions(),
         }
     }
 
@@ -5834,6 +5838,7 @@ fn compile(
         multibyte: origin.multibyte,
         hooked: declared.hooked,
         extended_info: declared.extended_info,
+        op_array_extensions: declared.op_array_extensions,
     };
     php_compile::compile_source_into(laid.arena, source, &options, strings, laid.room)
 }

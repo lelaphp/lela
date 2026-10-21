@@ -543,24 +543,43 @@ fn jit_setting(value: &[u8]) -> Jit {
 /// kept it, which a zero `opcache.jit_buffer_size` or the file cache
 /// alone does not.
 fn jit_configured(req: &mut Request) -> bool {
-    let Some(me) = req.extensions().named(crate::PRODUCT.as_bytes()) else {
-        return false;
-    };
-    let master = |name: &str| {
-        req.ini()
-            .extension_ini(me)
-            .into_iter()
-            .find(|held| held.decl.name.0.as_ref() == name.as_bytes())
-            .and_then(|held| held.master)
-            .map(<[u8]>::into_vec)
-            .unwrap_or_default()
-    };
-    if jit_setting(&master("opcache.jit")) != Jit::Enabled {
-        return false;
-    }
-    let buffer = Ini::parse_quantity(&master("opcache.jit_buffer_size")).0;
     let started = req.state::<State>().startup == crate::Startup::Ok;
-    !started || buffer > 0 && !flag(req, "opcache.file_cache_only")
+    jit_enabled(req) && (!started || jit_kept(req))
+}
+
+/// Whether `accel_post_startup`, over a cache that started, starts the
+/// tier in the segment it laid down (`zend_jit_startup`,
+/// `Z/ext/opcache/ZendAccelerator.c:3321-3331`): the setting the engine
+/// started with enabled it, and [`jit_kept`].
+pub(crate) fn jit_starts(req: &mut Request) -> bool {
+    jit_enabled(req) && jit_kept(req)
+}
+
+/// `JIT_G(enabled)` as the startup's `opcache.jit` set it: anything but
+/// `disable`.
+fn jit_enabled(req: &mut Request) -> bool {
+    jit_setting(&master(req, "opcache.jit")) == Jit::Enabled
+}
+
+/// What a started cache keeps `JIT_G(enabled)` for: a buffer to start
+/// in, and a segment, which the file cache alone lays none of.
+fn jit_kept(req: &mut Request) -> bool {
+    let buffer = Ini::parse_quantity(&master(req, "opcache.jit_buffer_size")).0;
+    buffer > 0 && !flag(req, "opcache.file_cache_only")
+}
+
+/// The startup value of opcache's entry `name`, empty where it has none.
+fn master(req: &mut Request, name: &str) -> Vec<u8> {
+    let Some(me) = req.extensions().named(crate::PRODUCT.as_bytes()) else {
+        return Vec::new();
+    };
+    req.ini()
+        .extension_ini(me)
+        .into_iter()
+        .find(|held| held.decl.name.0.as_ref() == name.as_bytes())
+        .and_then(|held| held.master)
+        .map(<[u8]>::into_vec)
+        .unwrap_or_default()
 }
 
 /// `zend_jit_parse_config_num` over `ZEND_STRTOL`'s whole reading: the

@@ -322,6 +322,9 @@ enum ClassRef<'a> {
     Fetched(u32),
 }
 
+/// `sizeof(void*)`: what one runtime cache slot takes of `cache_size`.
+const SLOT: u32 = 8;
+
 /// `ZEND_FETCH_CLASS_SELF`, `_PARENT` and `_STATIC`
 /// (`Z/Zend/zend_compile.h:1028`), the fetch types of a class reference
 /// of the scope, and `ZEND_FETCH_CLASS_DEFAULT`, a class by name.
@@ -582,6 +585,10 @@ pub(crate) struct Emit<'a> {
     attributed_constants: Vec<ConstDecl>,
     /// [`Options::keys_before`]: the keys made before this source.
     keys_before: u32,
+    /// `zend_op_array_extension_handles * sizeof(void*)`, what
+    /// `init_op_array` starts every op array's `cache_size` at
+    /// ([`Options::op_array_extensions`]).
+    first_slot: u32,
     /// The functions the file declares with their bodies,
     /// [`Unit::functions`]: `CG(function_table)` past the natives, each
     /// entry landing once its body has compiled, which is when php's
@@ -1382,7 +1389,7 @@ impl<'a> Emit<'a> {
             http_response_header: ResponseHeader::Predefined,
             safepoints: entry_safepoints(),
             temporaries: 0,
-            cache_slots: 0,
+            cache_slots: options.op_array_extensions.saturating_mul(SLOT),
             line: 1,
             diagnostics: Vec::new(),
             classes: Vec::new(),
@@ -1392,6 +1399,7 @@ impl<'a> Emit<'a> {
             runtime_keys: Vec::new(),
             attributed_constants: Vec::new(),
             keys_before: options.keys_before,
+            first_slot: options.op_array_extensions.saturating_mul(SLOT),
             functions_declared: Vec::new(),
             landed: Vec::new(),
             dynamic: Vec::new(),
@@ -1836,7 +1844,6 @@ impl<'a> Emit<'a> {
     /// row, as an offset in bytes, `op_array->cache_size` grown by
     /// `count * sizeof(void*)`.
     fn cache_slots(&mut self, count: u32) -> u32 {
-        const SLOT: u32 = 8;
         let at = self.cache_slots;
         self.cache_slots = self.cache_slots.saturating_add(count.saturating_mul(SLOT));
         at
@@ -5119,7 +5126,7 @@ impl<'a> Emit<'a> {
             http_response_header: std::mem::take(&mut self.http_response_header),
             safepoints: std::mem::replace(&mut self.safepoints, entry_safepoints()),
             temporaries: std::mem::take(&mut self.temporaries),
-            cache_slots: std::mem::take(&mut self.cache_slots),
+            cache_slots: std::mem::replace(&mut self.cache_slots, self.first_slot),
             loops: std::mem::take(&mut self.loops),
             current_loop: self.current_loop.take(),
             jumps: std::mem::take(&mut self.jumps),
@@ -19859,6 +19866,7 @@ mod tests {
             runtime_keys: Vec::new(),
             attributed_constants: Vec::new(),
             keys_before: 0,
+            first_slot: 0,
             functions_declared: Vec::new(),
             landed: Vec::new(),
             dynamic: Vec::new(),
