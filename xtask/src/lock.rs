@@ -18,7 +18,8 @@ pub struct CargoLock {
     pub package: Vec<Package>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// One `[[package]]` whole, as the lock pins it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Package {
     pub name: String,
     pub version: String,
@@ -26,6 +27,10 @@ pub struct Package {
     /// workspace crate has none.
     #[serde(default)]
     pub source: Option<String>,
+    #[serde(default)]
+    checksum: Option<String>,
+    #[serde(default)]
+    dependencies: Vec<String>,
 }
 
 impl CargoLock {
@@ -43,10 +48,7 @@ impl CargoLock {
     /// The package a crate name refers to; `Cargo.lock` writes `-` where a
     /// path writes `_`, so both are tried.
     pub fn package(&self, name: &str) -> Option<&Package> {
-        let dashed = name.replace('_', "-");
-        self.package
-            .iter()
-            .find(|p| p.name == name || p.name == dashed)
+        self.package.iter().find(|p| p.is(name))
     }
 
     /// Expand `prefix::*` to the type paths the module holds. A standard
@@ -264,23 +266,12 @@ impl Module {
     }
 }
 
-/// One `[[package]]` whole, as the lock pins it.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct Pinned {
-    name: String,
-    version: String,
-    #[serde(default)]
-    source: Option<String>,
-    #[serde(default)]
-    checksum: Option<String>,
-    #[serde(default)]
-    dependencies: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct Pins {
-    #[serde(default)]
-    package: Vec<Pinned>,
+impl Package {
+    /// Whether the package is the crate `name`; `Cargo.lock` writes `-`
+    /// where a path writes `_`, so both are tried.
+    fn is(&self, name: &str) -> bool {
+        self.name == name || self.name == name.replace('_', "-")
+    }
 }
 
 /// The packages `package` reaches in the lock `text`, itself first and
@@ -289,13 +280,9 @@ struct Pins {
 /// equal (#1312). A dependency is written `name`, `name version` or
 /// `name version (source)`, and matches every package of that name and
 /// version. `None` when the text is no lock or names no such package.
-pub(crate) fn closure(text: &str, package: &str) -> Option<Vec<Pinned>> {
-    let pins: Pins = toml::from_str(text).ok()?;
-    let dashed = package.replace('_', "-");
-    let first = pins
-        .package
-        .iter()
-        .position(|p| p.source.is_none() && (p.name == package || p.name == dashed))?;
+pub(crate) fn closure(text: &str, package: &str) -> Option<Vec<Package>> {
+    let pins: CargoLock = toml::from_str(text).ok()?;
+    let first = (pins.package.iter()).position(|p| p.source.is_none() && p.is(package))?;
     let mut reached = vec![false; pins.package.len()];
     reached[first] = true;
     let mut queue = vec![first];
