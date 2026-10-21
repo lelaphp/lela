@@ -594,8 +594,12 @@ impl Emit<'_> {
         let name_at = self.literal(name);
         let out = self.temporary();
         let slots = self.cache_slots(3);
+        // `zend_compile_assign`'s held-back `FETCH_OBJ_W` of
+        // `$this->prop`, laid down as the `ASSIGN_OBJ` after the value.
+        let held = self.held_back();
         let value = self.expr(value)?;
         let (data_type, data) = self.operand(value);
+        drop(held);
         self.line = line;
         self.push(Opline {
             opcode: Opcode::AssignObj,

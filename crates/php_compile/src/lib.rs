@@ -21,7 +21,6 @@
     clippy::unimplemented
 )]
 
-mod delayed;
 mod emit;
 mod live;
 pub mod multibyte;

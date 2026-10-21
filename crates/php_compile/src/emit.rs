@@ -93,8 +93,10 @@
 //! after it, as `zend_compile_array` emits them.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::num::NonZeroI64;
+use std::rc::Rc;
 
 use php_syntax::tree::{self, Block, Node, NodeId, Stmt, StmtList, TokenId};
 use php_syntax::{Arena, ArenaVec, Holder, Parsed, SyntaxKind, TokenValue};
@@ -378,7 +380,7 @@ const FETCH_LOCAL: u32 = 1 << 2;
 
 /// `ZEND_FETCH_GLOBAL` (`Z/Zend/zend_compile.h:1082`), the same slot for
 /// a name `zend_is_auto_global` answers for, printed `(global)`.
-pub(crate) const FETCH_GLOBAL: u32 = 1 << 1;
+const FETCH_GLOBAL: u32 = 1 << 1;
 
 /// `IS_VOID` (`Z/Zend/zend_types.h:637`), the type code `void` carries
 /// in a declared type's mask.
@@ -665,6 +667,11 @@ pub(crate) struct Emit<'a> {
     loop_vars: u32,
     /// The most [`Emit::loop_vars`] has held ([`Unit::loop_vars`]).
     loop_var_peak: u32,
+    /// `CG(delayed_oplines_stack)`, across every op array being
+    /// compiled: how many fetches `zend_delayed_emit_op` holds back now,
+    /// each a [`HeldBack`] standing while its fetch waits to be laid
+    /// down, and the most it has held ([`Unit::delayed_fetches`]).
+    delayed: Rc<DelayedStack>,
     /// `CG(context).fast_call_var`: the temporary the innermost
     /// `finally` keeps its return address and its delayed throwable in,
     /// and none outside one.
@@ -952,6 +959,36 @@ struct DimLink {
     kind: OperandKind,
     at: u32,
     out: u32,
+    held: HeldBack,
+}
+
+/// `CG(delayed_oplines_stack)` (`Z/Zend/zend_compile.c:425`), a
+/// `zend_stack` of the `zend_op`s `zend_delayed_emit_op` holds back
+/// while the rest of a chain of dimensions and properties compiles
+/// (`:2458`) and `zend_delayed_compile_end` lays down: how many it holds
+/// now and the most it has held. The stack is the compile's, so a chain
+/// in a closure written inside a dimension stands on what the outer
+/// chain holds.
+#[derive(Default)]
+struct DelayedStack {
+    held: Cell<u32>,
+    most: Cell<u32>,
+}
+
+/// One fetch `zend_delayed_emit_op` pushed onto [`DelayedStack`], which
+/// stands on the stack for as long as this lives: beside the held-back
+/// fetch until the fetch is laid down, as `zend_delayed_compile_end`
+/// pops it. One of no stack holds nothing, which is what a fetch php's
+/// compile does not delay carries.
+#[derive(Default)]
+struct HeldBack(Option<Rc<DelayedStack>>);
+
+impl Drop for HeldBack {
+    fn drop(&mut self) {
+        if let Some(stack) = &self.0 {
+            stack.held.set(stack.held.get().saturating_sub(1));
+        }
+    }
 }
 
 /// `zend_delayed_compile_dim`'s `type`, php's `BP_VAR_*` a chain of
@@ -1026,10 +1063,11 @@ const FETCH_REF: u32 = 1;
 /// php's delayed `zend_delayed_compile_prop`: the name's operand with
 /// its cache slots and the `VAR` the fetch writes into, all taken where
 /// the fetch was written and the opline laid down after the value.
-#[derive(Clone, Copy)]
 struct PropLink {
     name: PropName,
     out: u32,
+    /// Its place on the stack while it waits to be laid down.
+    _held: HeldBack,
 }
 
 /// What a chain of dimensions or of property fetches stands on, php's
@@ -1049,25 +1087,62 @@ enum Base {
         container: Box<Base>,
         links: Vec<DimLink>,
     },
+    /// A property's fetch, and what a `?->` under it laid down early,
+    /// which php's stack keeps until the chain ends (`zend_delayed_compile_prop`
+    /// turns each into a `NOP` where it stands).
     Prop {
         object: Box<Base>,
         name: PropName,
         out: u32,
+        held: HeldBack,
+        flushed: Vec<HeldBack>,
     },
+    /// A `static` property's fetch, held back where php's compile delays
+    /// it ([`Emit::hold_base`]) and holding nothing where it does not.
     StaticProp {
         name: (OperandKind, u32),
         class: (OperandKind, u32),
         out: u32,
         slots: u32,
+        held: HeldBack,
     },
     /// A variable fetched by name, `zend_compile_simple_var_no_cv`
     /// with `delayed`: the name's operand, the table and the
-    /// temporary, the opline laid down by [`by_name`].
+    /// temporary, the opline laid down by [`by_name`], held back where
+    /// php's compile delays it ([`Emit::hold_base`]).
     ByName {
         name: (OperandKind, u32),
         table: Symbols,
         out: u32,
+        held: HeldBack,
     },
+}
+
+impl Base {
+    /// Every fetch held back in this base, taken out where a `?->` lays
+    /// them down early, for the stack to keep until the chain ends.
+    fn take_held(&mut self, into: &mut Vec<HeldBack>) {
+        match self {
+            Base::Settled(_) => {}
+            Base::Dim { container, links } => {
+                container.take_held(into);
+                into.extend(links.iter_mut().map(|link| std::mem::take(&mut link.held)));
+            }
+            Base::Prop {
+                object,
+                held,
+                flushed,
+                ..
+            } => {
+                object.take_held(into);
+                into.push(std::mem::take(held));
+                into.append(flushed);
+            }
+            Base::StaticProp { held, .. } | Base::ByName { held, .. } => {
+                into.push(std::mem::take(held));
+            }
+        }
+    }
 }
 
 /// What stands over the last held-back opline of a base, the compile
@@ -1101,6 +1176,20 @@ struct IsLink {
     op2: u32,
     out: u32,
     extended_value: u32,
+    /// Its place on the stack, and what a `?->` under it laid down
+    /// early, which the stack keeps until the chain ends.
+    held: HeldBack,
+    flushed: Vec<HeldBack>,
+}
+
+/// Where a link of a `BP_VAR_IS` chain stands: the outermost, which
+/// `isset` and `??` compile with `zend_compile_var`, or under another,
+/// as the base `zend_delayed_compile_var` compiles. php's compile holds
+/// a fetch by name or of a `static` property back only under another.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Place {
+    Outermost,
+    Under,
 }
 
 /// What stands under one link of a `BP_VAR_IS` chain.
@@ -1426,6 +1515,7 @@ impl<'a> Emit<'a> {
             unwind: Vec::new(),
             loop_vars: 0,
             loop_var_peak: 0,
+            delayed: Rc::default(),
             fast_call_var: None,
             try_catch_offset: None,
             generators: walk::generators(&parsed.tree),
@@ -1593,16 +1683,7 @@ pub(crate) fn unit(
     // Made where the caller takes it: the main op array is laid in the
     // unit as the unit is.
     let main = emit.op_array(filename, 1, lines.max(1));
-    let delayed_fetches = crate::delayed::most_held(
-        std::iter::once(&main)
-            .chain(
-                (emit.functions_declared.iter())
-                    .chain(&dynamic)
-                    .map(|(_, code)| code),
-            )
-            .chain(emit.methods.iter().map(|method| &method.body))
-            .chain(emit.hooks.iter().map(|hook| &hook.body)),
-    );
+    let delayed_fetches = emit.delayed.most.get();
     Ok(Unit {
         main,
         functions: emit.functions_declared,
@@ -2519,7 +2600,10 @@ impl<'a> Emit<'a> {
         let (receiver, links) = self.prop_chain(object, Fetch::Rw)?;
         let name = self.prop_name(name)?;
         let out = self.temporary();
+        // The step is the chain's last held-back `FETCH_OBJ_RW`.
+        let held = self.held_back();
         let (op1_type, op1) = self.prop_fetches(receiver, &links, Fetch::Rw);
+        drop(held);
         self.push(Opline {
             opcode: match (pre, up) {
                 (true, true) => Opcode::PreIncObj,
@@ -3093,13 +3177,17 @@ impl<'a> Emit<'a> {
                     return Err(self.fatal("an `unset` of an element that is no dimension"));
                 };
                 let (base, index) = (self.parsed.tree[id].base, self.parsed.tree[id].index);
-                let container = self.delayed_var(base, Fetch::Unset)?;
+                let mut container = self.delayed_var(base, Fetch::Unset)?;
+                self.hold_base(&mut container);
                 let Some(index) = index else {
                     return Err(walk::refused(line, "Cannot use [] for unsetting"));
                 };
                 let dim = self.expr(index)?;
                 let (op2_type, op2) = self.dim_operand(dim);
+                // The `UNSET_DIM` is the held-back `FETCH_DIM_UNSET`.
+                let held = self.held_back();
                 let (op1_type, op1) = self.base_fetch(container, Fetch::Unset, Over::Dim);
+                drop(held);
                 self.push(Opline {
                     opcode: Opcode::UnsetDim,
                     op1_type,
@@ -3112,7 +3200,10 @@ impl<'a> Emit<'a> {
             Target::Prop { object, name } => {
                 let object = self.delayed_object(object, Fetch::Unset)?;
                 let name = self.prop_name(name)?;
+                // The `UNSET_OBJ` is the held-back `FETCH_OBJ_UNSET`.
+                let held = self.held_back();
                 let (op1_type, op1) = self.base_fetch(object, Fetch::Unset, Over::Obj);
+                drop(held);
                 self.push(Opline {
                     opcode: Opcode::UnsetObj,
                     op1_type,
@@ -11955,7 +12046,7 @@ impl<'a> Emit<'a> {
         // cache slots of a property stand in `extended_value` where the
         // fetch left them, `ZEND_ISEMPTY` in the bit below them.
         let mut delayed = Vec::new();
-        self.silent_link(var, &mut delayed)?;
+        self.silent_link(var, &mut delayed, Place::Outermost)?;
         let Some(last) = delayed.last_mut() else {
             return Err(self.fatal("an `isset` over a chain with no link"));
         };
@@ -12569,7 +12660,7 @@ impl<'a> Emit<'a> {
         // auto-global, is `FETCH_IS` by its name.
         if self.is_by_name(expr) {
             let mut delayed = Vec::new();
-            return match self.silent_under(expr, &mut delayed)? {
+            return match self.silent_under(expr, &mut delayed, Place::Outermost)? {
                 Under::Value(value) => Ok(value),
                 Under::Link => match self.lay_silent(&mut delayed, None) {
                     Some(out) => Ok(Where::Temporary(out)),
@@ -12582,7 +12673,7 @@ impl<'a> Emit<'a> {
         }
         let checkpoint = self.short_circuits.len();
         let mut delayed = Vec::new();
-        self.silent_link(expr, &mut delayed)?;
+        self.silent_link(expr, &mut delayed, Place::Outermost)?;
         let Some(out) = self.lay_silent(&mut delayed, None) else {
             return Err(self.fatal("a `??` over a chain with no link"));
         };
@@ -12625,13 +12716,14 @@ impl<'a> Emit<'a> {
         &mut self,
         expr: tree::Expr,
         delayed: &mut Vec<IsLink>,
+        place: Place,
     ) -> Result<(), CompileError> {
         let line = self.line_of(expr);
         match self.peel(expr) {
             tree::Expr::SubscriptExpr(id) => {
                 let node = &self.parsed.tree[id];
                 let (container, index) = (node.base, node.index);
-                let under = self.silent_under(container, delayed)?;
+                let under = self.silent_under(container, delayed, Place::Under)?;
                 let Some(index) = index else {
                     return Err(self.compile_error("Cannot use [] for reading"));
                 };
@@ -12646,6 +12738,8 @@ impl<'a> Emit<'a> {
                     op2,
                     out,
                     extended_value: 0,
+                    held: self.held_back(),
+                    flushed: Vec::new(),
                 });
                 Ok(())
             }
@@ -12658,16 +12752,22 @@ impl<'a> Emit<'a> {
                 // `?->` stands over. Under a dimension `$this` is no
                 // receiver but `zend_compile_simple_var`'s temporary
                 // ([`Self::silent_under`]).
+                let mut flushed = Vec::new();
                 let op1 = if self.is_this(object) {
                     Some(self.receiver_of(object)?)
                 } else {
-                    let mut under = self.silent_under(object, delayed)?;
+                    let mut under = self.silent_under(object, delayed, Place::Under)?;
                     // A `?->`: the links under it laid down now and the
                     // `JMP_NULL` over what they left, as
-                    // `zend_delayed_compile_prop` flushes them.
+                    // `zend_delayed_compile_prop` flushes them, each a `NOP`
+                    // the stack holds until the chain ends.
                     if self.is_nullsafe(id) {
                         let pair = match under {
                             Under::Link => {
+                                for link in delayed.iter_mut() {
+                                    flushed.push(std::mem::take(&mut link.held));
+                                    flushed.append(&mut link.flushed);
+                                }
                                 let out = self.lay_silent(delayed, None).unwrap_or_default();
                                 under = Under::Value(Where::Temporary(out));
                                 (OperandKind::Tmp, out)
@@ -12687,6 +12787,8 @@ impl<'a> Emit<'a> {
                     op2: name.at,
                     out,
                     extended_value: name.slots,
+                    held: self.held_back(),
+                    flushed,
                 });
                 Ok(())
             }
@@ -12703,6 +12805,12 @@ impl<'a> Emit<'a> {
                     slots: extended_value,
                 } = self.static_operands(class, &name)?;
                 let out = self.temporary();
+                // `zend_compile_static_prop` holds it back only under
+                // another link, where `zend_delayed_compile_var` compiles it.
+                let held = match place {
+                    Place::Under => self.held_back(),
+                    Place::Outermost => HeldBack::default(),
+                };
                 delayed.push(IsLink {
                     opcode: Opcode::FetchStaticPropIs,
                     op1: Some(name),
@@ -12710,6 +12818,8 @@ impl<'a> Emit<'a> {
                     op2,
                     out,
                     extended_value,
+                    held,
+                    flushed: Vec::new(),
                 });
                 Ok(())
             }
@@ -12741,10 +12851,19 @@ impl<'a> Emit<'a> {
         &mut self,
         expr: tree::Expr,
         delayed: &mut Vec<IsLink>,
+        place: Place,
     ) -> Result<Under, CompileError> {
         if self.is_by_name(expr) {
             return Ok(match self.delayed_named(expr, Fetch::Is)? {
-                Some(Base::ByName { name, table, out }) => {
+                Some(Base::ByName {
+                    name, table, out, ..
+                }) => {
+                    // Held back only under another link, as
+                    // `zend_delayed_compile_var` compiles it with `delayed`.
+                    let held = match place {
+                        Place::Under => self.held_back(),
+                        Place::Outermost => HeldBack::default(),
+                    };
                     delayed.push(IsLink {
                         opcode: Opcode::FetchIs,
                         op1: Some(name),
@@ -12752,6 +12871,8 @@ impl<'a> Emit<'a> {
                         op2: 0,
                         out,
                         extended_value: table.fetch_type(),
+                        held,
+                        flushed: Vec::new(),
                     });
                     Under::Link
                 }
@@ -12761,7 +12882,7 @@ impl<'a> Emit<'a> {
             });
         }
         if self.is_fetch(expr) {
-            self.silent_link(expr, delayed)?;
+            self.silent_link(expr, delayed, place)?;
             return Ok(Under::Link);
         }
         Ok(Under::Value(self.chain_link_under(expr, Fetch::Is)?))
@@ -13130,7 +13251,9 @@ impl<'a> Emit<'a> {
             }
             Target::Cv(name) => Base::Settled((OperandKind::Cv, self.lookup_cv(name))),
             Target::Dim(_) | Target::ByName(_) | Target::Prop { .. } => {
-                self.delayed_var(target, Fetch::Write)?
+                let mut held = self.delayed_var(target, Fetch::Write)?;
+                self.hold_base(&mut held);
+                held
             }
             Target::List(_) => {
                 return Err(walk::unread(
@@ -13148,7 +13271,10 @@ impl<'a> Emit<'a> {
         // fetch becomes `ASSIGN_OBJ_REF` over the object's own fetch,
         // `ZEND_FETCH_REF` off and `ZEND_RETURNS_FUNCTION` on, the source
         // in the `OP_DATA` after it, and the fetch's `VAR` what it leaves.
-        if let Base::Prop { object, name, out } = held {
+        if let Base::Prop {
+            object, name, out, ..
+        } = held
+        {
             let (op1_type, op1) = self.base_fetch(*object, Fetch::Write, Over::Obj);
             self.push(Opline {
                 opcode: Opcode::AssignObjRef,
@@ -13267,7 +13393,8 @@ impl<'a> Emit<'a> {
             dimensions.push(node.index);
             base = self.peel(node.base);
         }
-        let container = self.delayed_var(base, fetch)?;
+        let mut container = self.delayed_var(base, fetch)?;
+        self.hold_base(&mut container);
         let mut links = Vec::with_capacity(dimensions.len());
         for index in dimensions.clone().iter().rev() {
             let (kind, at) = match index {
@@ -13285,13 +13412,55 @@ impl<'a> Emit<'a> {
                 }
                 None => (OperandKind::Unused, 0),
             };
+            let out = self.temporary();
             links.push(DimLink {
                 kind,
                 at,
-                out: self.temporary(),
+                out,
+                held: self.held_back(),
             });
         }
         Ok((container, links))
+    }
+
+    /// `zend_delayed_emit_op`'s push of one fetch onto
+    /// `CG(delayed_oplines_stack)` (`Z/Zend/zend_compile.c:2458`), which
+    /// stands there while what this answers lives, and the most the stack
+    /// has held taken in. An assignment to a variable a variable names
+    /// holds its `FETCH_W` back, which lays the stack's sixteen, 512
+    /// bytes, where the plain one keeps a name `$$n` makes none of; and a
+    /// chain whose dimension is a chain of its own holds the outer's
+    /// fetches beneath the inner's, so ten over ten grow it past sixteen:
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); eval('$n = "zz"; $o = 1;'); $plain = memory_get_usage() - $m;
+    /// $m = memory_get_usage(); eval('$n = "zz"; $$n = 1;'); echo memory_get_usage() - $m - $plain, "\n";
+    /// $a = 1; $b = 1;
+    /// $nested = '$c = $a' . str_repeat('[0]', 10) . '[$b' . str_repeat('[0]', 10) . '];';
+    /// $flat = str_pad('$c = $a[0]', strlen($nested) - 1) . ';';
+    /// @eval($flat); @eval($flat);
+    /// $m = memory_get_usage(); @eval($nested); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 480
+    /// 512
+    /// ```
+    fn held_back(&self) -> HeldBack {
+        let stack = &self.delayed;
+        let held = stack.held.get().saturating_add(1);
+        stack.held.set(held);
+        stack.most.set(stack.most.get().max(held));
+        HeldBack(Some(Rc::clone(stack)))
+    }
+
+    /// A chain's base held back where it is a fetch by name or of a
+    /// `static` property: `zend_delayed_compile_var` compiles each with
+    /// `delayed`, where `zend_compile_var` at the outermost compiles it in
+    /// place and holds nothing.
+    fn hold_base(&self, base: &mut Base) {
+        if let Base::StaticProp { held, .. } | Base::ByName { held, .. } = base {
+            *held = self.held_back();
+        }
     }
 
     /// `zend_delayed_compile_var` (`Z/Zend/zend_compile.c:12019`), the
@@ -13357,22 +13526,27 @@ impl<'a> Emit<'a> {
             (tree::Expr::MemberAccessExpr(id), _) => {
                 let name = self.member_of(id)?;
                 let object = self.parsed.tree[id].obj;
-                let mut held = self.delayed_object(object, fetch)?;
+                let mut object_held = self.delayed_object(object, fetch)?;
                 // `zend_delayed_compile_prop` under a `?->`: what the
                 // object's chain held back is laid down now, and the
                 // `JMP_NULL` over it stands before the member's own fetch.
+                // php turns each into a `NOP` on the stack, which holds
+                // it until the chain ends.
+                let mut flushed = Vec::new();
                 if self.is_nullsafe(id) && !self.is_this(object) {
-                    let settled = self.base_fetch(held, fetch, Over::Obj);
+                    object_held.take_held(&mut flushed);
+                    let settled = self.base_fetch(object_held, fetch, Over::Obj);
                     self.jmp_null(settled, fetch == Fetch::Is);
-                    held = Base::Settled(settled);
+                    object_held = Base::Settled(settled);
                 }
-                let object = held;
                 let name = self.prop_name(name)?;
                 let out = self.temporary();
                 Base::Prop {
-                    object: Box::new(object),
+                    object: Box::new(object_held),
                     name,
                     out,
+                    held: self.held_back(),
+                    flushed,
                 }
             }
             // `zend_compile_static_prop` with `delayed`, the other
@@ -13391,6 +13565,7 @@ impl<'a> Emit<'a> {
                     class,
                     out,
                     slots,
+                    held: HeldBack::default(),
                 }
             }
             // `zend_compile_simple_var`'s `is_this_fetch` arm under
@@ -13458,7 +13633,9 @@ impl<'a> Emit<'a> {
         if self.is_this(object) {
             return Ok(Base::Settled(self.receiver(object)?));
         }
-        self.delayed_var(object, fetch)
+        let mut base = self.delayed_var(object, fetch)?;
+        self.hold_base(&mut base);
+        Ok(base)
     }
 
     /// The fetch oplines of a chain, each the container of the next, and
@@ -13549,13 +13726,17 @@ impl<'a> Emit<'a> {
         };
         match container {
             Base::Settled(pair) => pair,
-            Base::ByName { name, table, out } => self.lay_fetch_by_name(name, table, out, fetch),
+            Base::ByName {
+                name, table, out, ..
+            } => self.lay_fetch_by_name(name, table, out, fetch),
             // `zend_delayed_compile_dim`'s own oplines, every link of
             // the chain laid down here: the one the chain over this
             // base reads is the last of them, and it is the one `over`
             // patches.
             Base::Dim { container, links } => self.dim_fetches(*container, &links, fetch, over),
-            Base::Prop { object, name, out } => {
+            Base::Prop {
+                object, name, out, ..
+            } => {
                 let (op1_type, op1) = self.base_fetch(*object, fetch, Over::Obj);
                 self.push(Opline {
                     opcode: match fetch {
@@ -13582,6 +13763,7 @@ impl<'a> Emit<'a> {
                 class: (class_type, class_at),
                 out,
                 slots,
+                ..
             } => {
                 self.push(Opline {
                     opcode: match fetch {
@@ -13782,12 +13964,16 @@ impl<'a> Emit<'a> {
         let (base, links) = self.prop_chain(object, Fetch::Write)?;
         let name = self.prop_name(name)?;
         let out = self.temporary();
+        // The `ASSIGN_OBJ` is the chain's last held-back `FETCH_OBJ_W`,
+        // laid down after the value.
+        let held = self.held_back();
         // The delayed fetch's line, as [`Self::assign_dim`] keeps it.
         let line = self.line;
         let value = self.source(value)?;
         let (data_type, data) = self.operand(value);
         self.line = line;
         let (op1_type, op1) = self.prop_fetches(base, &links, Fetch::Write);
+        drop(held);
         self.push(Opline {
             opcode: Opcode::AssignObj,
             op1_type,
@@ -13835,6 +14021,9 @@ impl<'a> Emit<'a> {
             slots,
         } = self.static_operands(class, name)?;
         let out = self.temporary();
+        // `zend_delayed_compile_var`'s one held-back fetch, laid down
+        // after the value.
+        let held = self.held_back();
         // The delayed fetch's line, as [`Self::assign_dim`] keeps it.
         let line = self.line;
         let value = self.source(value)?;
@@ -13857,6 +14046,7 @@ impl<'a> Emit<'a> {
             op1: data,
             ..Opline::default()
         });
+        drop(held);
         Ok(Where::Temporary(out))
     }
 
@@ -13943,11 +14133,14 @@ impl<'a> Emit<'a> {
         let (receiver, links) = self.prop_chain(object, Fetch::Rw)?;
         let name = self.prop_name(name)?;
         let out = self.temporary();
+        // The `ASSIGN_OBJ_OP` is the chain's last held-back `FETCH_OBJ_RW`.
+        let held = self.held_back();
         // The delayed fetch's line, as [`Self::assign_prop`] keeps it.
         let line = self.line;
         let value = self.expr(value)?;
         let (data_type, data) = self.operand(value);
         let (op1_type, op1) = self.prop_fetches(receiver, &links, Fetch::Rw);
+        drop(held);
         self.line = line;
         self.push(Opline {
             opcode: Opcode::AssignObjOp,
@@ -13997,7 +14190,11 @@ impl<'a> Emit<'a> {
         for &name in names.iter().rev() {
             let name = self.prop_name(name)?;
             let out = self.temporary();
-            links.push(PropLink { name, out });
+            links.push(PropLink {
+                name,
+                out,
+                _held: self.held_back(),
+            });
         }
         Ok((receiver, links))
     }
@@ -14056,6 +14253,9 @@ impl<'a> Emit<'a> {
             slots,
         } = self.static_operands(class, name)?;
         let out = self.temporary();
+        // `zend_delayed_compile_var`'s one held-back fetch, laid down
+        // after the value.
+        let held = self.held_back();
         // The delayed fetch's line, as [`Self::assign_static_prop`]
         // keeps it.
         let line = self.line;
@@ -14080,6 +14280,7 @@ impl<'a> Emit<'a> {
             extended_value: slots,
             ..Opline::default()
         });
+        drop(held);
         Ok(Where::Temporary(out))
     }
 
@@ -14150,6 +14351,9 @@ impl<'a> Emit<'a> {
             slots,
         } = self.static_operands(class, name)?;
         let out = self.temporary();
+        // `zend_delayed_compile_var`'s one held-back fetch, laid down
+        // after the value.
+        let held = self.held_back();
         let (data_type, data, flags) = self.ref_source_of(source, false)?;
         self.push(Opline {
             opcode: Opcode::AssignStaticPropRef,
@@ -14168,6 +14372,7 @@ impl<'a> Emit<'a> {
             op1: data,
             ..Opline::default()
         });
+        drop(held);
         Ok(Where::Returned(out))
     }
 
@@ -15019,7 +15224,7 @@ impl<'a> Emit<'a> {
             Fetched::Dim(name, index) => {
                 // `zend_compile_dim` under `BP_VAR_R`: an auto-global's
                 // fetch by name held back while the offset compiles.
-                let container = match AutoGlobal::of(name) {
+                let mut container = match AutoGlobal::of(name) {
                     Some(global) => {
                         self.arm(global);
                         let name = self.string(name)?;
@@ -15027,13 +15232,19 @@ impl<'a> Emit<'a> {
                     }
                     None => Base::Settled(self.in_string_operand(name)?),
                 };
+                self.hold_base(&mut container);
                 let index = match index {
                     Offset::Value(value) => Where::Constant(*value),
                     Offset::Var(name) => self.in_string_var(name)?,
                 };
                 let (kind, at) = self.dim_operand(index);
                 let out = self.temporary();
-                let link = DimLink { kind, at, out };
+                let link = DimLink {
+                    kind,
+                    at,
+                    out,
+                    held: self.held_back(),
+                };
                 match self.dim_fetches(container, &[link], Fetch::Read, Over::Dim) {
                     (OperandKind::Tmp, at) => Ok(Where::Temporary(at)),
                     _ => Err(self.fatal("a dimension read with no dimension")),
@@ -15059,6 +15270,8 @@ impl<'a> Emit<'a> {
                 let name_at = self.literal(name);
                 let out = self.temporary();
                 let slots = self.cache_slots(3);
+                // `zend_compile_prop`'s one held-back fetch, laid down at once.
+                drop(self.held_back());
                 self.push(Opline {
                     opcode: Opcode::FetchObjR,
                     op1_type,
@@ -19991,6 +20204,7 @@ mod tests {
             unwind: Vec::new(),
             loop_vars: 0,
             loop_var_peak: 0,
+            delayed: Rc::default(),
             fast_call_var: None,
             try_catch_offset: None,
             generators: Vec::new(),
