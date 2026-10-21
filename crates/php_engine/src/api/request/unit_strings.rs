@@ -224,10 +224,7 @@ enum Owner {
 /// which php's compile frees as it goes. A constant is told by its
 /// allocation, not its bytes, since two written alike are two strings.
 fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Owner, Zval)> {
-    let owner_of = |at: usize| match at.checked_sub(unit.functions.len()) {
-        Some(at) if at < unit.dynamic.len() => Owner::Definition(at),
-        _ => Owner::Tables,
-    };
+    let owner_of = |at: usize| function_owner(unit, at);
     let bodies = || {
         (unit.functions.iter().chain(&unit.dynamic))
             .map(|(_, body)| body)
@@ -312,7 +309,16 @@ fn point(by_bytes: &mut HashMap<Box<[u8]>, Option<PhpString>, NameHasher>, s: Ph
 /// and each dynamic definition's, then each method's, hook's and
 /// class's.
 fn name_owner(unit: &Unit, index: usize) -> Owner {
-    match index.checked_sub(1 + unit.functions.len()) {
+    index
+        .checked_sub(1)
+        .map_or(Owner::Tables, |at| function_owner(unit, at))
+}
+
+/// The op array that is the function at `at` of the unit's functions
+/// followed by its dynamic definitions: a definition's own, or the
+/// unit's tables for a function and for any place past them.
+fn function_owner(unit: &Unit, at: usize) -> Owner {
+    match at.checked_sub(unit.functions.len()) {
         Some(at) if at < unit.dynamic.len() => Owner::Definition(at),
         _ => Owner::Tables,
     }
@@ -468,7 +474,14 @@ impl UnitStrings {
 
     /// The entry for the unit at `unit`, where the request holds one.
     fn held_mut(&mut self, unit: *const Unit) -> Option<&mut Held> {
-        (self.units.iter_mut()).find(|held| std::ptr::eq(held.unit.as_ptr(), unit))
+        let at = self.position(unit)?;
+        self.units.get_mut(at)
+    }
+
+    /// The place of the entry for the unit at `unit`, where the request
+    /// holds one.
+    fn position(&self, unit: *const Unit) -> Option<usize> {
+        (self.units.iter()).position(|held| std::ptr::eq(held.unit.as_ptr(), unit))
     }
 
     /// The entry for `unit`, laid down where there is none.
@@ -789,6 +802,19 @@ impl Request {
         Ok(())
     }
 
+    /// `name`, a name a class of the unit at `unit` takes as it links,
+    /// made as a string of the request's and held with the unit's names,
+    /// unless opcache holds the bytes (`zend_new_interned_string`).
+    pub(super) fn hold_class_name(&mut self, unit: *const Unit, name: &[u8]) -> Result<(), Thrown> {
+        if self.shared.existing_interned(name).is_some() {
+            return Ok(());
+        }
+        match self.unit_strings.position(unit) {
+            Some(at) => self.hold_name(at, Owner::Tables, name),
+            None => Ok(()),
+        }
+    }
+
     /// `name` made as a string of the request's, held by the unit at
     /// `at` with its names, or with the names of its op array `owner`
     /// names.
@@ -884,10 +910,16 @@ impl Request {
     /// $i = $o(1);
     /// $m = memory_get_usage(); unset($o); echo memory_get_usage() - $m, "\n";
     /// $m = memory_get_usage(); unset($i); echo memory_get_usage() - $m, "\n";
+    /// $o = eval('return function () { return function () { return 2; }; };');
+    /// $i = $o();
+    /// $m = memory_get_usage(); unset($o); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); unset($i); echo memory_get_usage() - $m, "\n";
     /// ```
     /// ```expect regime=jit-off
     /// -936
     /// -1536
+    /// -640
+    /// -720
     /// ```
     pub(crate) fn uncount_closure(&mut self, function: crate::api::call::Function) {
         let Some((unit, dynamic)) = self.closure_unit(function) else {
@@ -994,9 +1026,7 @@ impl Request {
             crate::exec::Body::Dynamic(at) => Some(at as usize),
             _ => None,
         };
-        let at = (self.unit_strings.units.iter())
-            .position(|held| std::ptr::eq(held.unit.as_ptr(), unit))?;
-        Some((at, dynamic))
+        Some((self.unit_strings.position(unit)?, dynamic))
     }
 
     /// Every request-only unit's strings given up at the request's end,

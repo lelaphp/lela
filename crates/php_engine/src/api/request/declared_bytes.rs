@@ -44,7 +44,7 @@ use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, Emalloc, PhpArray, Value};
 
 /// `sizeof(zend_op)`.
-const OPLINE: usize = 32;
+pub(super) const OPLINE: usize = 32;
 /// `sizeof(zval)`.
 const ZVAL: usize = 16;
 /// `INITIAL_OP_ARRAY_SIZE` (`Z/Zend/zend_compile.h`).
@@ -177,6 +177,15 @@ pub(super) struct ClassBlocks {
 }
 
 impl ClassBlocks {
+    /// The `HashTable` inside the `zend_class_entry` that is `table`.
+    fn table(&self, table: Table) -> php_heap::Arr {
+        match table {
+            Table::Methods => self.functions.arr(),
+            Table::Constants => self.constants.arr(),
+            Table::Properties => self.properties.arr(),
+        }
+    }
+
     /// Its blocks as [`Blocks`], to be given back with a unit's.
     fn into_blocks(self) -> Blocks {
         let mut emalloced = self.emalloced;
@@ -221,43 +230,30 @@ impl ClassBlocks {
     /// 1288
     /// ```
     fn link(&mut self, req: &mut Request, linking: &Linking) -> Result<(), Thrown> {
-        let tables = |blocks: &Self| {
-            [
-                blocks.functions.arr(),
-                blocks.constants.arr(),
-                blocks.properties.arr(),
-            ]
-        };
-        for (table, count) in tables(self).into_iter().zip(linking.first.counts()) {
-            add_rows(req, table, count)?;
+        for table in Table::ALL {
+            add_rows(req, self.table(table), linking.first.of(table))?;
         }
         self.defaults.grow(req, linking.trait_slots.instance)?;
         self.statics.grow(req, linking.trait_slots.statics)?;
         if let Some(parent) = &linking.parent {
             self.defaults.inherit(req, parent.slots.instance)?;
             self.statics.inherit(req, parent.slots.statics)?;
-            // Properties, constants, methods, as `zend_do_inheritance_ex`
-            // walks them; each only where the parent's table has rows.
-            let order = [2, 1, 0];
-            let tables = tables(self);
-            let (sizes, rows) = (parent.tables.counts(), parent.rows.counts());
-            for at in order {
-                let (Some(&table), Some(&size), Some(&count)) =
-                    (tables.get(at), sizes.get(at), rows.get(at))
-                else {
-                    continue;
-                };
+            // As `zend_do_inheritance_ex` walks them, each only where the
+            // parent's table has rows.
+            for table in [Table::Properties, Table::Constants, Table::Methods] {
+                let size = parent.tables.of(table);
                 if size == 0 {
                     continue;
                 }
-                let room = u32::try_from(table.num_used() as usize + size).unwrap_or(u32::MAX);
-                let extended = req.heap.array_extend(table, room);
+                let rows = self.table(table);
+                let room = u32::try_from(rows.num_used() as usize + size).unwrap_or(u32::MAX);
+                let extended = req.heap.array_extend(rows, room);
                 req.fatal_of(extended)?;
-                add_rows(req, table, count)?;
+                add_rows(req, rows, parent.rows.of(table))?;
             }
         }
-        for (table, count) in tables(self).into_iter().zip(linking.last.counts()) {
-            add_rows(req, table, count)?;
+        for table in Table::ALL {
+            add_rows(req, self.table(table), linking.last.of(table))?;
         }
         for &size in &linking.interfaces {
             let laid = match self.interfaces.take() {
@@ -321,9 +317,13 @@ pub(super) struct Members {
 }
 
 impl Members {
-    /// The counts in [`ClassBlocks::link`]'s order of its tables.
-    fn counts(self) -> [usize; 3] {
-        [self.methods, self.constants, self.properties]
+    /// The count for `table`.
+    fn of(self, table: Table) -> usize {
+        match table {
+            Table::Methods => self.methods,
+            Table::Constants => self.constants,
+            Table::Properties => self.properties,
+        }
     }
 }
 
@@ -469,7 +469,7 @@ impl Declared {
         self.tables.take(laid.tables);
         self.classes = laid.classes.into_iter().map(Some).collect();
         for (at, (blocks, declarer)) in laid.dynamic.into_iter().enumerate() {
-            if let Some(dynamic) = self.definition(at) {
+            if let Some(dynamic) = self.definition_laid(at) {
                 dynamic.blocks.take(blocks);
                 dynamic.declarer = declarer;
             }
@@ -477,8 +477,8 @@ impl Declared {
     }
 
     /// The dynamic definition at `at`, laid down empty where it is not
-    /// yet.
-    fn definition(&mut self, at: usize) -> Option<&mut Dynamic> {
+    /// yet, as the unit's strings are taken in before its blocks.
+    fn definition_laid(&mut self, at: usize) -> Option<&mut Dynamic> {
         if self.dynamic.len() <= at {
             self.dynamic.resize_with(at + 1, Dynamic::default);
         }
@@ -495,7 +495,7 @@ impl Declared {
     /// The strings the dynamic definition at `at` owns, which go with its
     /// op array.
     pub(super) fn definition_strings(&mut self, at: usize) -> Option<&mut OpArrayStrings> {
-        self.definition(at).map(|dynamic| &mut dynamic.strings)
+        self.definition_laid(at).map(|dynamic| &mut dynamic.strings)
     }
 
     /// The place of the class at `at` of the unit's classes' blocks.
@@ -748,15 +748,13 @@ fn class(req: &mut Request, class: &ClassDecl) -> Result<ClassBlocks, Thrown> {
 /// ```
 fn lay_class(req: &mut Request, blocks: &mut ClassBlocks, class: &ClassDecl) -> Result<(), Thrown> {
     // An enum's `cases`, `from` and `tryFrom` are its link's.
-    for (table, count) in [
-        (
-            blocks.functions.arr(),
-            php_unit::written_methods(class).len(),
-        ),
-        (blocks.properties.arr(), class.properties.len()),
-        (blocks.constants.arr(), class.constants.len()),
-    ] {
-        add_rows(req, table, count)?;
+    let written = Members {
+        methods: php_unit::written_methods(class).len(),
+        constants: class.constants.len(),
+        properties: class.properties.len(),
+    };
+    for table in Table::ALL {
+        add_rows(req, blocks.table(table), written.of(table))?;
     }
     // The default values, reallocated one at a time
     // (`zend_declare_typed_property`), which leaves the bin of the last.
@@ -794,20 +792,21 @@ fn lay_class(req: &mut Request, blocks: &mut ClassBlocks, class: &ClassDecl) -> 
     // (`zend_compile_trait_alias`), and the two lists `zend_add_to_list`
     // keeps them in, reallocated an adaptation at a time to one more
     // than it holds, the end's `NULL`.
-    let mut lists = [0usize; 2];
+    let (mut precedences, mut aliases) = (0, 0);
     for adaptation in &class.adaptations {
-        let (len, list) = match adaptation {
+        let len = match adaptation {
             TraitAdaptation::Insteadof { excluded, .. } => {
-                (PRECEDENCE + excluded.len().saturating_sub(1) * POINTER, 0)
+                precedences += 1;
+                PRECEDENCE + excluded.len().saturating_sub(1) * POINTER
             }
-            TraitAdaptation::As { .. } => (ALIAS, 1),
+            TraitAdaptation::As { .. } => {
+                aliases += 1;
+                ALIAS
+            }
         };
         blocks.emalloced.push(Emalloc::new(req, len)?);
-        if let Some(count) = lists.get_mut(list) {
-            *count += 1;
-        }
     }
-    for count in lists {
+    for count in [precedences, aliases] {
         if count > 0 {
             blocks
                 .emalloced
@@ -891,31 +890,75 @@ enum Table {
     Properties,
 }
 
+impl Table {
+    /// The three, in the order `zend_do_link_class` binds a trait's
+    /// members.
+    const ALL: [Table; 3] = [Table::Methods, Table::Constants, Table::Properties];
+}
+
 impl Request {
     /// `zend_do_link_class`'s blocks for `class` as it binds
     /// ([`ClassBlocks::link`]), where a unit the request compiled for
-    /// itself declared it; nothing for any other class. What the memory
-    /// limit refuses ends the request.
-    pub(super) fn link_blocks(&mut self, class: ClassId) {
+    /// itself declared it; nothing for any other class. The `Err` is the
+    /// memory limit's fatal.
+    pub(super) fn link_blocks(&mut self, class: ClassId) -> Result<(), Thrown> {
         if self.unit_strings.is_empty() {
-            return;
+            return Ok(());
         }
         let Some((unit, at)) = self
             .declared_row(class)
             .map(|row| (php_unit::PublishedUnit::as_ptr(&row.unit), row.at as usize))
         else {
-            return;
+            return Ok(());
         };
         let Some(mut blocks) = self.unit_strings.class_blocks(unit, at) else {
-            return;
+            return Ok(());
         };
-        if let Some(linking) = self.linking(class) {
-            blocks.link(self, &linking).ok();
-        }
+        let linked = match self.linking(class) {
+            Some(linking) => blocks.link(self, &linking),
+            None => Ok(()),
+        };
         match self.unit_strings.class_slot(unit, at) {
             Some(slot) => *slot = Some(blocks),
             None => blocks.into_blocks().free(self),
         }
+        linked?;
+        self.hold_trait_property_names(class)
+    }
+
+    /// The names `zend_declare_typed_property` makes for each property a
+    /// trait gave `class` that is not public, mangled under the class
+    /// (`zend_mangle_property_name`), as strings of the class's unit; a
+    /// public one keeps the trait's:
+    ///
+    /// ```php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W { function __toString() { return ""; } } trait TP { private $pp = 1; protected $qq = 2; } trait TQ { public $rr = 3; }');
+    /// echo m('class CP2 { use TP; }') - m('class CP3 { use TQ; }'), "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 80
+    /// ```
+    fn hold_trait_property_names(&mut self, class: ClassId) -> Result<(), Thrown> {
+        let Some(row) = self.declared_row(class) else {
+            return Ok(());
+        };
+        let Some((decl, written)) = row.decl().zip(row.unit.classes.get(row.at as usize)) else {
+            return Ok(());
+        };
+        let unit = php_unit::PublishedUnit::as_ptr(&row.unit);
+        let mangled: Vec<Vec<u8>> = (decl.properties.get(written.properties.len()..))
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|property| {
+                let prefix = php_compile::mangling(property.visibility, &decl.name.0)?;
+                Some([prefix.as_slice(), &property.name.0].concat())
+            })
+            .collect();
+        for name in mangled {
+            self.hold_class_name(unit, &name)?;
+        }
+        Ok(())
     }
 
     /// What `class`'s link adds to its blocks, counted off its
@@ -947,11 +990,12 @@ impl Request {
         let parent = (decl.parent.as_ref())
             .and_then(|name| self.class_named(name.into()))
             .and_then(|parent| {
-                self.inherited(
-                    class,
-                    parent,
-                    [composed, decl.constants.len(), decl.properties.len()],
-                )
+                let own = Members {
+                    methods: composed,
+                    constants: decl.constants.len(),
+                    properties: decl.properties.len(),
+                };
+                self.inherited(class, parent, own)
             });
         let taken = parent
             .as_ref()
@@ -976,10 +1020,14 @@ impl Request {
     /// What `parent` gives `class` as it links: its tables' sizes, the
     /// rows of them `class`'s record took past its own, the first `own`
     /// of each table, and its slots.
-    fn inherited(&self, class: ClassId, parent: ClassId, own: [usize; 3]) -> Option<Inherited> {
+    fn inherited(&self, class: ClassId, parent: ClassId, own: Members) -> Option<Inherited> {
         let theirs = self.linked_class(parent)?;
         let ours = self.linked_class(class)?;
-        let [methods, constants, properties] = own;
+        let Members {
+            methods,
+            constants,
+            properties,
+        } = own;
         let pair = (class, parent);
         Some(Inherited {
             tables: Members {
@@ -1025,25 +1073,28 @@ impl Request {
     ) -> usize {
         (theirs.rows().iter())
             .filter(|row| {
-                let name = self.row_name(parent, **row, table);
-                ours.find_at(name, |row| self.row_name(class, *row, table))
-                    .is_some_and(|(at, _)| at >= own)
+                let Some(name) = self.row_name(parent, **row, table) else {
+                    return false;
+                };
+                ours.find_at(name, |row| {
+                    self.row_name(class, *row, table).unwrap_or_default()
+                })
+                .is_some_and(|(at, _)| at >= own)
             })
             .count()
     }
 
-    /// The name of the member a row of `class`'s `table` is.
-    fn row_name(&self, class: ClassId, row: Row<ClassId>, table: Table) -> &[u8] {
-        let Some(decl) = self.symbols().class_decl(row.holder_in(class)) else {
-            return &[];
-        };
+    /// The name of the member a row of `class`'s `table` is; none where
+    /// no declaration names it.
+    fn row_name(&self, class: ClassId, row: Row<ClassId>, table: Table) -> Option<&[u8]> {
+        let decl = self.symbols().class_decl(row.holder_in(class))?;
         let at = row.at as usize;
         let name = match table {
-            Table::Methods => decl.methods.get(at).map(|method| &method.function.name),
-            Table::Constants => decl.constants.get(at).map(|constant| &constant.name),
-            Table::Properties => decl.properties.get(at).map(|property| &property.name),
+            Table::Methods => &decl.methods.get(at)?.function.name,
+            Table::Constants => &decl.constants.get(at)?.name,
+            Table::Properties => &decl.properties.get(at)?.name,
         };
-        name.map_or(&[][..], |name| &name.0)
+        Some(&name.0)
     }
 
     /// `default_properties_count` and `default_static_members_count` of
