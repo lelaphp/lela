@@ -63,6 +63,26 @@ impl<'de> Deserialize<'de> for Version {
     }
 }
 
+/// `at` as either side keeps it: toml's datetime in the store, or the
+/// text [`Reading::to_json`] writes in the log, whose own `Deserialize`
+/// reads only toml's form (#2164).
+fn either_at<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Datetime, D::Error> {
+    struct Either;
+    impl<'de> serde::de::Visitor<'de> for Either {
+        type Value = Datetime;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a datetime, or its RFC 3339 text")
+        }
+        fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Datetime, E> {
+            text.parse().map_err(E::custom)
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Datetime, A::Error> {
+            Datetime::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+        }
+    }
+    deserializer.deserialize_any(Either)
+}
+
 /// One reading, the one shape every instrument writes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,6 +122,7 @@ pub struct Reading {
     #[serde(alias = "tree")]
     key: String,
     pub commit: String,
+    #[serde(deserialize_with = "either_at")]
     pub at: Datetime,
     /// The session of the call a `permit` reading judged, from the
     /// hook's `session_id`; the session a `ticket` close named, the one a
@@ -296,60 +317,11 @@ impl Reading {
 
 impl Reading {
     /// One line of the log back into a reading; the inverse of `to_json`,
-    /// in one pass: the line is read into [`Line`], whose `at` is the text
-    /// `to_json` writes, and only `at` is parsed again (#2164). A field
-    /// the reading has not is refused, as the reading's own `Deserialize`
-    /// refuses one.
+    /// in one pass: `at` is read from the text `to_json` writes (#2164).
+    /// A field the reading has not is refused, as in the store.
     pub fn from_json(line: &str) -> Result<Reading> {
-        let line: Line = serde_json::from_str(line).context("a log line that is not a reading")?;
-        let at = line
-            .at
-            .parse::<Datetime>()
-            .context("a log line whose `at` is not a datetime")?;
-        Ok(Reading {
-            v: line.v,
-            instrument: line.instrument,
-            scope: line.scope,
-            rule: line.rule,
-            status: line.status,
-            numbers: line.numbers,
-            message: line.message,
-            adr: line.adr,
-            key: line.key,
-            commit: line.commit,
-            at,
-            session: line.session,
-            groups: line.groups,
-            recipe: line.recipe,
-        })
+        serde_json::from_str(line).context("a log line that is not a reading")
     }
-}
-
-/// A reading as one line of the log holds it: [`Reading`]'s fields, with
-/// `at` the text `to_json` writes in place of toml's datetime, whose own
-/// `Deserialize` reads only toml's form of it.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Line {
-    #[serde(default)]
-    v: Version,
-    instrument: String,
-    scope: String,
-    rule: String,
-    status: Status,
-    numbers: BTreeMap<String, Number>,
-    message: String,
-    adr: String,
-    #[serde(alias = "tree")]
-    key: String,
-    commit: String,
-    at: String,
-    #[serde(default)]
-    session: String,
-    #[serde(default)]
-    groups: BTreeMap<String, Number>,
-    #[serde(default)]
-    recipe: Option<String>,
 }
 
 /// A line of a log handed in, in either shape the published history has
@@ -365,7 +337,8 @@ enum Kept {
         instrument: String,
         scope: String,
         status: Status,
-        at: String,
+        #[serde(deserialize_with = "either_at")]
+        at: Datetime,
         #[serde(default)]
         rule: String,
         #[serde(default)]
@@ -391,7 +364,8 @@ enum Kept {
         i: String,
         s: String,
         t: Status,
-        a: String,
+        #[serde(deserialize_with = "either_at")]
+        a: Datetime,
         #[serde(default)]
         c: String,
         #[serde(default)]
@@ -405,7 +379,7 @@ impl Reading {
     /// [`Reading::new`] leaves them.
     fn from_kept(line: &str) -> Result<Reading> {
         let kept: Kept = serde_json::from_str(line).context("a line that is no reading")?;
-        let (mut reading, at) = match kept {
+        Ok(match kept {
             Kept::Whole {
                 v,
                 instrument,
@@ -421,37 +395,29 @@ impl Reading {
                 session,
                 groups,
                 recipe,
-            } => (
-                Reading {
-                    v,
-                    rule,
-                    status,
-                    numbers,
-                    message,
-                    adr,
-                    key,
-                    commit,
-                    session,
-                    groups,
-                    recipe,
-                    ..Reading::new(&instrument, &scope)
-                },
+            } => Reading {
+                v,
+                rule,
+                status,
+                numbers,
+                message,
+                adr,
+                key,
+                commit,
                 at,
-            ),
-            Kept::Lean { i, s, t, a, c, n } => (
-                Reading {
-                    status: t,
-                    numbers: n,
-                    commit: c,
-                    ..Reading::new(&i, &s)
-                },
-                a,
-            ),
-        };
-        reading.at = at
-            .parse()
-            .with_context(|| format!("a line whose time {at:?} is not a datetime"))?;
-        Ok(reading)
+                session,
+                groups,
+                recipe,
+                ..Reading::new(&instrument, &scope)
+            },
+            Kept::Lean { i, s, t, a, c, n } => Reading {
+                status: t,
+                numbers: n,
+                commit: c,
+                at: a,
+                ..Reading::new(&i, &s)
+            },
+        })
     }
 }
 
