@@ -1197,18 +1197,26 @@ impl Request {
         &mut self.weakrefs
     }
 
-    /// `CG(rtd_key_counter)` over the units this request compiled for
-    /// itself: where the next compile counts its runtime definition keys
-    /// on from ([`crate::engine::Shared::compile_for`]).
+    /// `CG(rtd_key_counter)` over the compiles made for this request, its
+    /// own ([`crate::engine::Shared::compile_for`]) and the files the unit
+    /// cache compiled for it ([`crate::engine::Shared::compile_file`]):
+    /// where the next compile counts its runtime definition keys on from.
     pub(crate) fn keys_made(&self) -> u32 {
         self.keys_made
     }
 
-    /// The `made` runtime definition keys of a compile this request just
-    /// made for itself, counted on, saturating at `u32::MAX`.
+    /// The `made` runtime definition keys of a compile just made for this
+    /// request, counted on, saturating at `u32::MAX`.
     pub(crate) fn count_keys_made(&mut self, made: u32) {
         self.keys_made = self.keys_made.saturating_add(made);
     }
+}
+
+/// The runtime definition keys and anonymous class names `unit`'s
+/// compile made, which [`Request::count_keys_made`] counts on for the
+/// request it was compiled for, saturating at `u32::MAX`.
+pub(crate) fn keys_of(unit: &php_unit::Unit) -> u32 {
+    u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX)
 }
 
 impl<'r> Diagnostics<&'r mut Request> {

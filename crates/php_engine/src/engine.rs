@@ -1532,8 +1532,8 @@ fn link_trampolines(
 /// for a request and the process's for a unit compiled outside one
 /// ([`Engine::unit`]), and whether the source is a file or the string an
 /// `eval` handed over ([`SourceKind`]), with the runtime definition keys
-/// the request made before it where it is an `eval`'s
-/// ([`php_compile::Options::keys_before`]), and the classes the request
+/// the request made before it, which a unit compiled for no request made
+/// none of ([`php_compile::Options::keys_before`]), and the classes the request
 /// had declared by then, which a unit compiled for no request has none of
 /// ([`php_compile::RequestClasses`]); and, where `zend.multibyte` is on,
 /// the encoding functions bound to the request and what the scanner
@@ -1546,6 +1546,20 @@ struct Origin<'a> {
     keys_before: u32,
     request_classes: RequestClasses<'a>,
     multibyte: Option<Multibyte<'a>>,
+}
+
+/// What the request a file compiles for brings to its compile
+/// ([`Shared::compile_file`]): the classes it has declared
+/// ([`php_compile::RequestClasses`]), the encoding functions
+/// `zend.multibyte` bound for it ([`crate::multibyte::Bound`]), and
+/// `CG(rtd_key_counter)` as it stands
+/// ([`php_compile::Options::keys_before`]). A unit compiled for no
+/// request has declared nothing and made no keys.
+#[derive(Clone, Copy)]
+pub(crate) struct FileRequest<'a> {
+    pub(crate) classes: RequestClasses<'a>,
+    pub(crate) multibyte: Option<Multibyte<'a>>,
+    pub(crate) keys_before: u32,
 }
 
 /// What the engine has declared, as the compiler reads it: php's
@@ -1740,7 +1754,7 @@ impl Shared {
         let mut made = self.compiled_for(req, source, filename, kind);
         let room = match &mut made {
             Ok(unit) => {
-                req.count_keys_made(u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX));
+                req.count_keys_made(crate::api::request::keys_of(unit));
                 req.note_loop_vars(unit.loop_vars);
                 req.ready_unit(unit)
             }
@@ -1892,15 +1906,12 @@ impl Shared {
             &arena.files,
             asked,
             |source| {
-                let multibyte = self.unbound();
-                self.compile_file(
-                    source,
-                    path,
-                    cwd,
-                    stack,
-                    RequestClasses::default(),
-                    multibyte,
-                )
+                let request = FileRequest {
+                    classes: RequestClasses::default(),
+                    multibyte: self.unbound(),
+                    keys_before: 0,
+                };
+                self.compile_file(source, path, cwd, stack, request)
             },
             |_| None,
             |unit| self.publish_compiled(unit),
@@ -1929,32 +1940,21 @@ impl Shared {
         )
     }
 
-    /// `source`, read from the file `path` names, compiled and published
-    /// as a file of its own, for a request that has declared
-    /// `request_classes`.
-    pub(crate) fn publish_file(
-        &self,
-        source: &[u8],
-        path: &[u8],
-        cwd: &Path,
-        stack: StackLimit,
-        request_classes: RequestClasses<'_>,
-        multibyte: Option<Multibyte<'_>>,
-    ) -> Result<PublishedUnit, CompileError> {
-        self.compile_file(source, path, cwd, stack, request_classes, multibyte)
-            .map(|unit| self.publish_compiled(unit))
-    }
-
-    /// [`Shared::publish_file`]'s compile alone, which the unit cache
-    /// publishes where it holds the unit and hands its request otherwise.
+    /// `source`, read from the file `path` names, compiled as a file of
+    /// its own, which the unit cache and the preload publish where they
+    /// hold the unit and the unit cache hands its request otherwise,
+    /// its runtime definition keys made on from the `keys_before` the
+    /// request it compiles for had made, as opcache's miss compiles under
+    /// the request's `CG(rtd_key_counter)` and persists the names it made
+    /// ([`Request::count_keys_made`]); a unit compiled for no request
+    /// starts from none.
     pub(crate) fn compile_file(
         &self,
         source: &[u8],
         path: &[u8],
         cwd: &Path,
         stack: StackLimit,
-        request_classes: RequestClasses<'_>,
-        multibyte: Option<Multibyte<'_>>,
+        request: FileRequest<'_>,
     ) -> Result<Unit, CompileError> {
         self.compile_shared(
             source,
@@ -1962,9 +1962,9 @@ impl Shared {
                 filename: path,
                 cwd,
                 kind: SourceKind::File,
-                keys_before: 0,
-                request_classes,
-                multibyte,
+                keys_before: request.keys_before,
+                request_classes: request.classes,
+                multibyte: request.multibyte,
             },
             stack,
         )

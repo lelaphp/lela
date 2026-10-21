@@ -144,10 +144,11 @@ pub struct Options<'a> {
     /// `CG(rtd_key_counter)` as the source starts compiling: how many
     /// runtime definition keys and anonymous class names were made before
     /// it, which the `$` of each one this source makes counts on from. A
-    /// file compiled for the cache starts from none; an `eval`'s string
-    /// continues the request's count, so two `eval`s of one string
-    /// declare two anonymous classes, as php's one `CG(rtd_key_counter)`
-    /// makes them.
+    /// file compiled for no request starts from none; a source compiled
+    /// for a request, an `eval`'s string or a file opcache's miss
+    /// compiles, continues the request's count, so two `eval`s of one
+    /// string declare two anonymous classes, as php's one
+    /// `CG(rtd_key_counter)` makes them.
     pub keys_before: u32,
     /// `CG(multibyte)`, `zend.multibyte` as it stands while the file
     /// compiles, with the encoding functions the engine bound and what
