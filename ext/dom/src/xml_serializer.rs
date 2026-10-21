@@ -25,6 +25,7 @@ use crate::private::{HTML_NS, Private, ns_is};
 /// A step of the serialisation that failed: a write libxml refused, or
 /// markup that well-formedness, where it is required, forbids; or the
 /// stack come down to its limit on the way down the tree, php's `Error`.
+#[derive(Clone, Copy)]
 enum Failed {
     Refused,
     Deep,
@@ -361,8 +362,8 @@ impl Serializer<'_> {
     /// `dom_xml_serialization_algorithm`: the node, then each child by
     /// the same algorithm, php's recursion, refused where the stack has
     /// come down to its limit, as `dom_xml_serialize_check_stack_limit`
-    /// refuses it. The nest is deeper than either engine's stack takes on
-    /// php's budget, php's frames or this engine's (#3159), so both refuse
+    /// refuses it. The nest is deeper than php's budget holds, at php's
+    /// bytes a level and at this engine's (#3159), so both engines refuse
     /// it.
     ///
     /// ```php
@@ -394,8 +395,7 @@ impl Serializer<'_> {
         let frame = match &made {
             Ok(Some(frame)) => frame,
             Ok(None) => return Ok(()),
-            Err(Failed::Refused) => return Err(Failed::Refused),
-            Err(Failed::Deep) => return Err(Failed::Deep),
+            Err(failed) => return Err(*failed),
         };
         let mut next = frame.next;
         while let Some(child) = next {
