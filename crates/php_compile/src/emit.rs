@@ -11501,7 +11501,7 @@ impl<'a> Emit<'a> {
     /// left-nested chain stands in one frame per operator, where php's
     /// stands in `zend_compile_expr_inner` and `zend_compile_binary_op`,
     /// rather than two each saving every register it uses (#3159).
-    #[allow(clippy::inline_always)] // measured: 800 bytes a level of `1+1+…` to 400
+    #[allow(clippy::inline_always)] // measured on #3159: one frame a level of `1+1+…`, not two
     #[inline(always)]
     fn binary_expr(&mut self, id: NodeId<tree::BinaryExpr>) -> Result<Where, CompileError> {
         let node = &self.parsed.tree[id];
@@ -12336,6 +12336,7 @@ impl<'a> Emit<'a> {
     ///
     /// `zend_eval_const_expr` folds neither side, so `1 ?? 2` is the
     /// two oplines any other pair is.
+    ///
     /// A call of its own, so what it takes is off the stack of a
     /// left-nested chain of the other operators (#3159).
     #[inline(never)]
@@ -12381,6 +12382,7 @@ impl<'a> Emit<'a> {
     /// compiled where that truth settles it (`0 && f()`), and where it
     /// does not, the right side alone is the answer, as the constant it
     /// folds to or as one `BOOL` over it.
+    ///
     /// A call of its own, so what it takes is off the stack of a
     /// left-nested chain of the other operators (#3159).
     #[inline(never)]
