@@ -1623,7 +1623,7 @@ impl Shared {
     /// is declared and the one with no test where none is, as php
     /// resolves an opline's handler when it compiles it (design §5.8,
     /// §7.1), and `Nop`'s where the tier does not serve the engine
-    /// ([`crate::tier::Tier::serves`]).
+    /// ([`crate::tier::Tier::asked`]).
     fn observe_opcodes(&mut self, start: &Start, bind_loops: BindLoops) {
         (self.supplied.observers).retain(|(_, registered)| registered.is_none_or(|r| r(start)));
         self.observers = self.supplied.observers.count();

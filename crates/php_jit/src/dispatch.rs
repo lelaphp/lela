@@ -87,7 +87,7 @@ pub(crate) fn visit(
 
 /// `Jit::safepoint`, the site's word visited and what came of it,
 /// outlined, so the loop's site is one call. An engine whose tier runs
-/// `Off` binds `Nop`'s loop and never asks (`Jit::serves`); asked under
+/// `Off` binds `Nop`'s loop and never asks (`Jit::asked`); asked under
 /// `Off` all the same, it answers `Continue` before any word is read.
 /// Here, and only here, `Continue` means nothing happened. The engine
 /// state is looked up once, and its `Arc` is shared on only past a visit

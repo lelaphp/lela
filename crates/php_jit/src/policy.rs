@@ -67,7 +67,7 @@ pub(crate) enum Mode {
 
 /// Whether the engine's loop asks the tier at all, decided once at
 /// engine start from the [`Policy`] and the host's `Backend`, which is
-/// the one bit `Jit::serves` answers the engine with: the loop bound to
+/// the one bit `Jit::asked` answers the engine with: the loop bound to
 /// `Nop` where the tier can never compile a trace, `Jit`'s where it does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Bound {
@@ -92,7 +92,7 @@ pub(crate) enum Bound {
 
 impl Bound {
     /// Whether the engine binds `Jit`'s loop.
-    pub(crate) fn serves(self) -> bool {
+    pub(crate) fn asked(self) -> bool {
         match self {
             Bound::Never | Bound::Runtime => false,
             Bound::On => true,

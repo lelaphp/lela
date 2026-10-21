@@ -151,13 +151,13 @@ pub trait Tier: 'static {
     /// to `Nop` does, so a tier that [`HOLDS`](Tier::HOLDS) answers
     /// `true`.
     #[must_use]
-    fn serves(started: &Started<'_>) -> bool {
+    fn asked(started: &Started<'_>) -> bool {
         let _ = started;
         true
     }
 }
 
-/// The started engine as its tier reads it at [`Tier::serves`]: the
+/// The started engine as its tier reads it at [`Tier::asked`]: the
 /// engine states its extensions and the tier built (ADR-0005).
 #[derive(Clone, Copy)]
 pub struct Started<'a> {
@@ -487,10 +487,10 @@ pub(crate) struct Loops {
 
 impl Loops {
     /// `T`'s loop for the engine `shared` started, or `Nop`'s where `T`
-    /// does not serve it ([`Tier::serves`]), told as its declared set
+    /// is not asked ([`Tier::asked`]), told as its declared set
     /// says ([`Loops::told`]).
     pub(crate) fn bound<T: Tier>(shared: &crate::engine::Shared) -> Loops {
-        if T::serves(&Started { shared }) {
+        if T::asked(&Started { shared }) {
             Loops::told::<T>(&shared.opcodes)
         } else {
             Loops::told::<Nop>(&shared.opcodes)

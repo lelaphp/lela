@@ -7,7 +7,7 @@
 //! The tier declares its state as an extension does (`jit-design.md`
 //! §4): `jit.mode` and `jit.compile`, and `JitEngine`, whose `policy`
 //! reads php's `opcache.jit*` directives at engine start. Under
-//! `Mode::Off` the engine binds `Nop`'s loop (`Jit::serves`), so it runs
+//! `Mode::Off` the engine binds `Nop`'s loop (`Jit::asked`), so it runs
 //! as one bound to `Nop` does and no safepoint reads a word;
 //! otherwise a hot safepoint records (`dispatch`, `record`) and the
 //! pipeline compiles what it recorded through the engine's `Backend`
@@ -59,7 +59,7 @@ pub use enter::bench;
 
 /// The compiled tier (`jit-design.md` §2.4): asked at the loop's three
 /// safepoints, it visits the word the site carries; under `Mode::Off`
-/// it is never asked, the engine bound to `Nop`'s loop ([`Jit::serves`]).
+/// it is never asked, the engine bound to `Nop`'s loop ([`Jit::asked`]).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Jit;
 
@@ -72,10 +72,10 @@ impl Tier for Jit {
     /// ([`policy::Bound`]); under `Off` it binds `Nop`'s, so the loop
     /// pays nothing at a safepoint, as php's VM keeps its own handlers
     /// where its compiled tier does not start.
-    fn serves(started: &Started<'_>) -> bool {
+    fn asked(started: &Started<'_>) -> bool {
         started
             .engine::<JitEngine>()
-            .is_some_and(|engine| engine.shared.bound.serves())
+            .is_some_and(|engine| engine.shared.bound.asked())
     }
 
     /// The tier's state (`jit-design.md` §4): its two directives,
@@ -124,7 +124,7 @@ pub(crate) struct JitEngine {
 #[derive(Debug)]
 pub(crate) struct Shared {
     policy: policy::Policy,
-    /// Whether the engine binds `Jit`'s loop ([`Jit::serves`]).
+    /// Whether the engine binds `Jit`'s loop ([`Jit::asked`]).
     bound: policy::Bound,
     backend: Option<lower::Backend>,
     started: Box<[policy::Note]>,

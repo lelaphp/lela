@@ -180,8 +180,8 @@ impl Tier for Lane {
         crate::dispatch::safepoint(req, frame, site)
     }
 
-    fn serves(started: &Started<'_>) -> bool {
-        <crate::Jit as Tier>::serves(started)
+    fn asked(started: &Started<'_>) -> bool {
+        <crate::Jit as Tier>::asked(started)
     }
 
     fn extension() -> Option<Extension> {

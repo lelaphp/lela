@@ -454,7 +454,7 @@ struct Asked {
     loops_written: u32,
 }
 
-/// `Lane` bound as the `jit` build binds `Jit` ([`Tier::serves`]), with
+/// `Lane` bound as the `jit` build binds `Jit` ([`Tier::asked`]), with
 /// every site it is asked at counted and a back edge's word read before
 /// and after its visit.
 struct Counted;
@@ -480,8 +480,8 @@ impl Tier for Counted {
         flow
     }
 
-    fn serves(started: &tier::Started<'_>) -> bool {
-        <crate::Jit as Tier>::serves(started)
+    fn asked(started: &tier::Started<'_>) -> bool {
+        <crate::Jit as Tier>::asked(started)
     }
 
     fn extension() -> Option<Extension> {
