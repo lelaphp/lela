@@ -260,7 +260,8 @@ fn ticks_reload_what_a_reference_holds() -> Result<(), String> {
 }
 
 /// A kernel that may throw and calls nothing, a cast to string, reads
-/// nothing again: it may only leave.
+/// nothing again: it may only unwind, which takes no exit, as php's
+/// compiled code jumps to its stub for a throwable and takes no exit point.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_throwing_kernel_reloads_nothing_but_may_leave() -> Result<(), String> {
@@ -278,8 +279,9 @@ fn a_throwing_kernel_reloads_nothing_but_may_leave() -> Result<(), String> {
     let Some(Op::Line(line)) = ir.ops.get(at.index()) else {
         return Err("no cast".to_owned());
     };
-    let exit = line.exit.ok_or("a throwing kernel leaves")?;
-    assert_eq!(ir.exits[usize::from(exit.0)].landing, Landing::Plain);
+    let unwind = line.unwind.ok_or("a throwing kernel unwinds")?;
+    assert!(usize::from(unwind.0) < ir.unwinds.len());
+    assert_eq!(line.exit, None, "a step finishes or unwinds");
     Ok(())
 }
 
@@ -358,7 +360,7 @@ fn a_fetched_elements_guard_frees_the_temporary_it_read() -> Result<(), String> 
         dump::render(&ir)
     );
     // Freeing the array may run a destructor once the fetch is done: an
-    // exit of its own, at the fetch, past it.
+    // unwind, which takes no exit, as php's exception stub takes none.
     let fetch = ir
         .ops
         .iter()
@@ -370,23 +372,30 @@ fn a_fetched_elements_guard_frees_the_temporary_it_read() -> Result<(), String> 
         })
         .ok_or_else(|| format!("no inline fetch:\n{}", dump::render(&ir)))?;
     let freed = fetch
-        .freed
+        .unwind
         .ok_or("the free of the fetched array leaves nowhere")?;
-    let exit = &ir.exits[usize::from(freed.0)];
-    assert_eq!(exit.opline, Some(fetch.opline));
-    assert_ne!(Some(freed), fetch.exit);
+    assert!(usize::from(freed.0) < ir.unwinds.len());
+    assert!(
+        fetch.exit.is_some(),
+        "a hole leaves through the fetch's exit"
+    );
     Ok(())
 }
 
 /// A loop of 250 `$s += $i * k;` statements, which php compiles: its
 /// places that leave with one spec share one exit, as php's
 /// `zend_jit_trace_get_exit_point` reuses them, so it builds under php's
-/// 512. Each statement leaves at two oplines: the `MUL`'s overflow, and
-/// the `ASSIGN_OP`'s overflow and its own exit (the first's guard on
-/// `$s` too), at its opline storing what the `MUL` left. With the entry
-/// guard, the `$i++` and the loop's test that is 503, where an exit per
-/// place was 754; the interrupt test shares the first `MUL`'s, which
-/// php's `ZEND_JIT_EXIT_TO_VM` keeps apart once a spec carries it (#2964).
+/// 512. Each statement leaves at two oplines, the `MUL`'s overflow and
+/// the `ASSIGN_OP`'s, but the last, whose sum the loop's phi takes, and
+/// the first `ASSIGN_OP` holds the guard on `$s` too, through an exit of
+/// its own, since its overflow guard knows the type that guard held. With
+/// the entry guard, the `$i++`, the loop's test and its interrupt test,
+/// which grows no side trace and leaves through an exit of its own, php's
+/// `ZEND_JIT_EXIT_TO_VM`, that is 504, where an exit per place was 754.
+/// php's is 502: its inference over the whole function knows `$i` long,
+/// so it holds no entry guard on it nor an overflow on `$i++`, and it
+/// moves `$s`'s guard to the entry with an overflow guard on the last
+/// `+=` (#3135).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_long_loop_shares_its_exits_as_php_reuses_them() -> Result<(), String> {
@@ -401,7 +410,7 @@ fn a_long_loop_shares_its_exits_as_php_reuses_them() -> Result<(), String> {
             echo f(3), \"\\n\";"
         ),
     )?;
-    assert_eq!(ir.exits.len(), 503, "{}", dump::render(&ir));
+    assert_eq!(ir.exits.len(), 504, "{}", dump::render(&ir));
     for (at, exit) in ir.exits.iter().enumerate() {
         assert!(
             !ir.exits[..at].contains(exit),
@@ -509,4 +518,108 @@ fn a_division_at_a_loops_header_is_inline() -> Result<(), String> {
         assert_eq!(stepped, None, "{body}");
     }
     Ok(())
+}
+
+/// A loop in the file's own code, where the plan records.
+const IN_MAIN: [(&str, &str); 3] = [
+    ("record.function", ""),
+    ("record.start", "loop"),
+    ("record.headers", "0"),
+];
+
+/// `statement` written `n` times in the body of a loop of the file's own
+/// code, every variable a symbol table reaches.
+fn repeated(statement: &str, n: usize) -> String {
+    format!(
+        "function f($a) {{ return $a; }}
+        $a = [1, 2, 3]; $b = true; $y = 1; $s = 0; $x = 0;
+        for ($i = 0; $i < 100; $i++) {{ {} }}
+        echo \"ok\\n\";",
+        statement.repeat(n)
+    )
+}
+
+/// The exits one more `statement` takes in a loop of the file's own
+/// code, as php's `zend_jit_trace_get_exit_point` takes them: the pinned
+/// php's `TRACE 1 exit info` (`opcache.jit_debug` bit 20) for the loop at
+/// two and three statements under the recipe's hot counters (#3113). A
+/// variable a symbol table reaches is guarded at every opline php's code
+/// generator holds its recorded type at, a cast to string of an int and
+/// a rope part or an element of an array written out take none of their own, a
+/// throw none at all, and an exit at an opline is new where the types the
+/// trace knows of the frame's slots differ from an earlier one's.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn each_statement_takes_the_exits_php_takes() -> Result<(), String> {
+    for (statement, php) in [
+        ("$s = (string)$i;", 1),
+        ("$x = \"a{$i}b\";", 2),
+        ("$x = [$i, $i, $i, $i];", 1),
+        ("$x = $i . \"K\" . $i . \"z\";", 3),
+        ("$x = $a[$i % 3];", 7),
+        ("$x = $i + 0.5;", 3),
+        ("$x = $i == 5;", 3),
+        ("$x = $i ^ 5;", 3),
+        ("$x = 5;", 1),
+        ("$s += $i * 5;", 2),
+        ("$x = $b && $i;", 4),
+        ("$x = $y;", 1),
+    ] {
+        let two = built(&IN_MAIN, &repeated(statement, 2))?;
+        let three = built(&IN_MAIN, &repeated(statement, 3))?;
+        assert_eq!(
+            three.exits.len() - two.exits.len(),
+            php,
+            "{statement}\n{}",
+            dump::render(&three)
+        );
+    }
+    Ok(())
+}
+
+/// php's 512 exits bound `$x = 5;` at the count php's exits reach: one
+/// exit a statement, the loop's entry guard, its test's direction, the
+/// increment's guard and the interrupt test, which grows no side trace
+/// and leaves through an exit of its own, php's `ZEND_JIT_EXIT_TO_VM`, so
+/// 508 statements build and 509 are refused with `too many side exits`,
+/// as the pinned php refuses them (#3113).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn the_exit_bound_falls_where_phps_does() -> Result<(), String> {
+    let ir = built(&IN_MAIN, &repeated("$x = 5;", 508))?;
+    assert_eq!(ir.exits.len(), 512);
+    let refused = built(&IN_MAIN, &repeated("$x = 5;", 509));
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|why| why.contains("TooManyExits")),
+        "{:?}",
+        refused.map(|ir| ir.exits.len())
+    );
+    Ok(())
+}
+
+/// A jump on a double is stepped, so a NAN is coerced to its truth by the
+/// handler, which warns of it each time, as php's compiled code does
+/// (`ext/opcache/tests/jit/nan_001.phpt`); inline, the compiled test read
+/// the NAN as true and warned of nothing.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_jump_on_a_double_warns_of_a_nan_each_time() {
+    let served = crate::testing::serve::<crate::testing::Lane>(
+        &[("jit.mode", "force"), ("html_errors", "0")],
+        "$b = 1e308 * 10; $b = $b - $b;
+        for ($i = 0; $i < 3; $i++) {
+            if ($b) { echo \"nan is true\\n\"; } else { echo \"nan is false\\n\"; }
+        }",
+    );
+    let stdout = crate::testing::stdout(&served);
+    assert_eq!(
+        stdout
+            .matches("Warning: unexpected NAN value was coerced to bool")
+            .count(),
+        3,
+        "{stdout}"
+    );
+    assert_eq!(stdout.matches("nan is true").count(), 3, "{stdout}");
 }

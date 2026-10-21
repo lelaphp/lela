@@ -223,10 +223,11 @@ pub(crate) mod entered {
                 return Flow::Bail(Fatal::error("the body was not published"));
             };
             match enter(req, frame, trace) {
-                Ok(exited) => {
+                Ok(crate::enter::Left::Exit(exited)) => {
                     req.state::<Seen>().exits.push((function, exited.exit.0));
                     Flow::Resume(exited.frame)
                 }
+                Ok(crate::enter::Left::Unwound(frame)) => Flow::Resume(frame),
                 Err(fatal) => Flow::Bail(fatal),
             }
         }

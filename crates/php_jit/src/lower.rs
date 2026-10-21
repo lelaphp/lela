@@ -17,9 +17,11 @@
 //! keeps behind its frames, is a call of a kernel through the one
 //! emitter; [`Kernel`] lists them and [`Symbols`] holds their addresses.
 //! Every kernel answers the crossing's status word, zero to go on, and on
-//! anything else compiled code leaves through the opline's exit, or,
-//! where the opline names none, answers [`ABANDONED`], for `enter` to
-//! read what the kernel kept.
+//! anything else compiled code leaves through the opline's exit where an
+//! inline form has one, or through its unwind, which stores the
+//! registers and answers [`UNWOUND`], taking no exit, or, where the
+//! opline names neither, answers [`ABANDONED`], for `enter` to read what
+//! the kernel kept.
 //!
 //! **The interrupt test** (`jit-design.md` §4.3). A trace that loops loads
 //! the interrupt pointer at offset [`INTERRUPT_AT`] of its `ExitCtx` once
@@ -145,6 +147,13 @@ pub(crate) struct Unsupported(pub(crate) &'static str);
 /// [`ExitId`](crate::types::ExitId), which is sixteen bits. `enter` reads
 /// what the kernel kept in the `ExitCtx`, a fatal or a panic to resume.
 pub(crate) const ABANDONED: u32 = u32::MAX;
+
+/// What compiled code answers where a kernel threw, bailed out or
+/// panicked and the trace stored what it keeps in registers, taking no
+/// exit (`types::Unwind`): past every [`ExitId`](crate::types::ExitId),
+/// and not [`ABANDONED`]. `enter` reads what the kernel kept, and a
+/// throwable pending on the request is unwound from where it was raised.
+pub(crate) const UNWOUND: u32 = u32::MAX - 1;
 
 /// Where compiled code reads the interrupt pointer in the `ExitCtx`
 /// (`jit-design.md` §4.6): the request at offset zero, the pointer to its

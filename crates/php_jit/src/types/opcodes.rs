@@ -9,7 +9,7 @@ use php_unit::decl::{Parameter, Type};
 use php_unit::{ConstIdx, OpArray, Opcode, OperandKind, Opline};
 
 use super::lattice::{self, Types};
-use super::{Constant, Frame, Layout, Slot};
+use super::{Constant, Frame, Imm, Layout, Line, Slot};
 
 /// php's `MAX_ARG_FLAG_NUM`: past it, how a send passes is read late.
 const MAX_ARG_FLAG_NUM: u32 = 12;
@@ -590,18 +590,24 @@ pub(super) fn is_call(opcode: Opcode) -> bool {
 }
 
 /// The inline oplines that may not finish, and leave the trace for the
-/// interpreter to serve them again: a division by zero or a shift by a
-/// negative number throws, an element past a packed array is a hole, a
+/// interpreter to serve them again: a division or a modulo by zero or a
+/// shift by a negative number throws, where no constant divisor or shift
+/// rules it out as php's code generator rules it out
+/// ([`cannot_raise`](super::cannot_raise)), an element past a packed array is a hole, a
 /// call's frame may not fit, a value sent where the callee takes a
 /// reference is refused, a parameter's check may fail.
-pub(super) fn inline_may_leave(opcode: Opcode) -> bool {
+pub(super) fn inline_may_leave(line: &Line) -> bool {
+    let arithmetic = match (line.opcode, line.imm) {
+        (Opcode::AssignOp, Imm::Binary(binary)) => Some(binary),
+        (Opcode::Div | Opcode::Mod | Opcode::Sl | Opcode::Sr, _) => Some(line.opcode),
+        _ => None,
+    };
+    if let Some(op) = arithmetic {
+        return !super::cannot_raise(op, line.op2);
+    }
     matches!(
-        opcode,
-        Opcode::Div
-            | Opcode::Mod
-            | Opcode::Sl
-            | Opcode::Sr
-            | Opcode::AssignOp
+        line.opcode,
+        Opcode::AssignOp
             | Opcode::FetchDimR
             | Opcode::AssignDim
             | Opcode::InitFcall
@@ -818,6 +824,31 @@ pub(super) fn guard_sites(
         Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd if k2 == Some(ZvalType::String) => {
             vec![Op2]
         }
+        _ => vec![],
+    }
+}
+
+/// The operands php's code generator holds the recorded type of where its
+/// inference adds no guard (`CHECK_OP_TRACE_TYPE` in
+/// `zend_jit_trace.c`'s cases): a concatenation's two, a rope part's, and
+/// an arithmetic's where the recording saw a number, in the order it holds
+/// them; it holds one only where the operand's inference is marked
+/// `MAY_BE_GUARD` ([`guard_sites`] elsewhere).
+pub(super) fn check_sites(op: &Opline, samples: [Option<Sample>; 3]) -> Vec<Site> {
+    use Site::{Op1, Op2};
+    let number = |at: usize| {
+        matches!(
+            kind_of(samples[at]),
+            Some(ZvalType::Long | ZvalType::Double)
+        )
+    };
+    match op.opcode {
+        Opcode::Concat | Opcode::FastConcat => vec![Op1, Op2],
+        Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd => vec![Op2],
+        Opcode::Add | Opcode::Sub | Opcode::Mul => [(Op1, 0), (Op2, 1)]
+            .into_iter()
+            .filter_map(|(site, at)| number(at).then_some(site))
+            .collect(),
         _ => vec![],
     }
 }

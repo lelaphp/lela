@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use cranelift_codegen::isa;
 
-use super::{ABANDONED, Backend, INTERRUPT_AT, Kernel, Symbols, Unsupported};
+use super::{ABANDONED, Backend, INTERRUPT_AT, Kernel, Symbols, UNWOUND, Unsupported};
 use crate::table::TraceName;
 use crate::testing::goldens::{self, FIB, Fixture, MANDELBROT, NBODY, SPECTRALNORM, held};
 use crate::testing::{self, Lane, policy};
@@ -220,12 +220,12 @@ fn calls_of(clif: &str, kernel: Kernel) -> Vec<String> {
 const IN_F: [(&str, &str); 2] = [("record.function", "f"), ("record.start", "loop")];
 
 /// A fetch from a temporary array frees it through [`Kernel::Release`],
-/// whose refusal leaves through the exit `types` gives the free, never
-/// abandoned; the fetched element's guard copies it through
-/// [`Kernel::Copy`] for the exit that goes on past the fetch.
+/// whose refusal leaves through the unwind `types` gives the free, never
+/// abandoned and taking no exit; the fetched element's guard copies it
+/// through [`Kernel::Copy`] for the exit that goes on past the fetch.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
-fn a_temporary_arrays_free_leaves_through_its_exit() -> Result<(), String> {
+fn a_temporary_arrays_free_leaves_through_an_unwind() -> Result<(), String> {
     let (ir, clif) = compiled(
         &IN_F,
         "function g() { $a = []; $a[] = 1.5; return $a; }
@@ -236,18 +236,20 @@ fn a_temporary_arrays_free_leaves_through_its_exit() -> Result<(), String> {
         }
         echo f(3), \"\\n\";",
     )?;
-    let freed = ir
-        .ops
-        .iter()
-        .find_map(|op| match op {
-            Op::Line(line) => line.freed,
-            _ => None,
-        })
-        .ok_or("no fetch frees a temporary")?;
+    assert!(
+        ir.ops
+            .iter()
+            .any(|op| matches!(op, Op::Line(line) if line.unwind.is_some())),
+        "no fetch frees a temporary"
+    );
     let releases = calls_of(&clif, Kernel::Release);
     assert!(!releases.is_empty(), "{clif}");
     for to in releases {
-        assert_eq!(answer(&clif, &to), Some(i64::from(freed.0)), "{clif}");
+        assert_eq!(
+            answer(&clif, &to),
+            Some(i64::from(UNWOUND.cast_signed())),
+            "{clif}"
+        );
     }
     // A copy names no exit of its own: a fatal or a panic in it is
     // answered as abandoned, for `enter` to read what the kernel kept.
