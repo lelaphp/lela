@@ -19924,19 +19924,7 @@ mod tests {
         assert!(emit.class(&read).is_ok());
         assert_eq!(emit.classes[0].name.0.as_ref(), b"A\\M".as_slice());
         emit.classes[0].methods.push(MethodDecl {
-            function: FunctionDecl {
-                name: Name(b"f".as_slice().into()),
-                parameters: Vec::new(),
-                return_type: None,
-                returns_by_ref: false,
-                is_generator: false,
-                attributes: Vec::new(),
-                doc_comment: None,
-                file: Name(Box::new([])),
-                line: 0,
-                end_line: 0,
-                frameless: Vec::new(),
-            },
+            function: php_unit::decl::native_function(b"f"),
             visibility: Visibility::Public,
             is_instance: false,
             is_abstract: false,

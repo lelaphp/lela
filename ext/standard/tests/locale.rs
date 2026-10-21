@@ -14,6 +14,8 @@
     reason = "a test starts its own threads (seams.toml rule fork.threads)"
 )]
 
+mod support;
+
 use std::path::Path;
 use std::thread;
 
@@ -52,13 +54,7 @@ fn has_locale(engine: &Engine, name: &str) -> bool {
 
 #[test]
 fn two_requests_at_once_never_read_each_other_s_locale() {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_uri::extension(),
-            php_ext_standard::extension(),
-        ])
-        .build();
+    let engine = support::engine();
     if !has_locale(&engine, "de_DE") {
         return;
     }
@@ -106,13 +102,7 @@ fn two_requests_at_once_never_read_each_other_s_locale() {
 /// answer moves.
 #[test]
 fn an_environment_locale_the_c_library_refuses_fails_setlocale() {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_uri::extension(),
-            php_ext_standard::extension(),
-        ])
-        .build();
+    let engine = support::engine();
     let answered = served(
         &engine,
         r#"<?php $before = setlocale(LC_ALL, "0"); putenv("LC_ALL="); putenv("LANG=xx_XX");

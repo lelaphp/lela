@@ -14,7 +14,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::{Server, read_response, root, unchunked};
+use common::{Request, Server, read_response, root, unchunked};
 
 /// A `GET` is PHP's response over HTTP/1.1: the code and the header lines
 /// the program set, php's own `X-Powered-By` and `Content-type`, the
@@ -37,10 +37,7 @@ fn a_get_is_answered_with_php_s_status_headers_and_body() {
         )],
     );
     let server = Server::start(&root);
-    let mut stream = server.connect();
-    stream
-        .write_all(b"GET /?x=1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .unwrap_or_else(|e| panic!("{e}"));
+    let mut stream = server.send(&Request::get("/?x=1").host("localhost").close());
     let response = read_response(&mut stream);
     assert_eq!(response.status, "HTTP/1.1 201 Created");
     assert_eq!(response.header("X-Powered-By"), Some("PHP/8.5.9"));
@@ -191,14 +188,13 @@ fn a_post_body_reaches_php_input_through_the_stream() {
     );
     let server = Server::start(&root);
     let body = vec![b'y'; 40_000];
-    let mut stream = server.connect();
-    write!(
-        stream,
-        "PUT /post.php HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
-         Content-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
-        body.len()
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
+    let mut stream = server.send(
+        &Request::new("PUT", "/post.php")
+            .host("localhost")
+            .close()
+            .field("Content-Type", "application/octet-stream")
+            .field("Content-Length", &body.len().to_string()),
+    );
     let (first, rest) = body.split_at(10_000);
     stream.write_all(first).unwrap_or_else(|e| panic!("{e}"));
     let mut seen = Vec::new();
@@ -248,14 +244,13 @@ fn a_form_post_is_post_and_input_whole() {
     let server = Server::start(&root);
     let mut body = b"a=1&big=".to_vec();
     body.resize(body.len() + 40_000, b'y');
-    let mut stream = server.connect();
-    write!(
-        stream,
-        "POST /form.php HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
-         Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n",
-        body.len()
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
+    let mut stream = server.send(
+        &Request::post("/form.php")
+            .host("localhost")
+            .close()
+            .field("Content-Type", "application/x-www-form-urlencoded")
+            .field("Content-Length", &body.len().to_string()),
+    );
     let (first, rest) = body.split_at(10_000);
     stream.write_all(first).unwrap_or_else(|e| panic!("{e}"));
     std::thread::sleep(Duration::from_millis(200));
@@ -291,14 +286,13 @@ fn a_relative_upload_tmp_dir_is_under_the_process_s_working_directory() {
     );
     let body = "--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\n\
                 Content-Type: text/plain\r\n\r\nhello\r\n--b--\r\n";
-    let mut stream = server.connect();
-    write!(
-        stream,
-        "POST /up.php HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
-         Content-Type: multipart/form-data; boundary=b\r\nContent-Length: {}\r\n\r\n{body}",
-        body.len()
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
+    let mut stream = server.send(
+        &Request::post("/up.php")
+            .host("localhost")
+            .close()
+            .field("Content-Type", "multipart/form-data; boundary=b")
+            .body(body),
+    );
     let response = read_response(&mut stream);
     assert_eq!(
         String::from_utf8_lossy(&response.body),
@@ -326,10 +320,7 @@ fn connection_aborted_turns_true_on_the_write_after_the_client_closes() {
         )],
     );
     let server = Server::start(&root);
-    let mut stream = server.connect();
-    stream
-        .write_all(b"GET /abort.php HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .unwrap_or_else(|e| panic!("{e}"));
+    let mut stream = server.send(&Request::get("/abort.php").host("localhost"));
     let mut seen = Vec::new();
     let mut buf = [0u8; 1024];
     while !seen.windows(5).any(|w| w == b"first") {
@@ -365,14 +356,16 @@ fn header_fields_reach_server_as_nginx_passes_them() {
         )],
     );
     let server = Server::start(&root);
-    let mut stream = server.connect();
-    stream
-        .write_all(
-            b"GET /fields.php HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 10.0.0.1\r\n\
-              X_Forwarded_For: 6.6.6.6\r\nCookie: a=1\r\nX-Two: 1\r\nCookie: b=2\r\n\
-              X-Two: 2\r\nConnection: close\r\n\r\n",
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
+    let mut stream = server.send(
+        &Request::get("/fields.php")
+            .field("X-Forwarded-For", "10.0.0.1")
+            .field("X_Forwarded_For", "6.6.6.6")
+            .field("Cookie", "a=1")
+            .field("X-Two", "1")
+            .field("Cookie", "b=2")
+            .field("X-Two", "2")
+            .close(),
+    );
     let response = read_response(&mut stream);
     assert_eq!(
         String::from_utf8_lossy(&response.body),
@@ -395,13 +388,12 @@ fn forwarded_fields_are_trusted_from_no_proxy() {
         )],
     );
     let server = Server::start(&root);
-    let mut stream = server.connect();
-    stream
-        .write_all(
-            b"GET /peer.php HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 10.9.9.9\r\n\
-              Forwarded: for=10.8.8.8\r\nConnection: close\r\n\r\n",
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
+    let mut stream = server.send(
+        &Request::get("/peer.php")
+            .field("X-Forwarded-For", "10.9.9.9")
+            .field("Forwarded", "for=10.8.8.8")
+            .close(),
+    );
     let response = read_response(&mut stream);
     assert_eq!(
         String::from_utf8_lossy(&response.body),
@@ -411,9 +403,9 @@ fn forwarded_fields_are_trusted_from_no_proxy() {
 
 /// What one `GET` of `path` on a connection of its own reads back, whole.
 fn get(server: &Server, path: &str) -> Vec<u8> {
-    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    let request = Request::get(path).host("localhost").close();
     server
-        .exchange(request.as_bytes(), Duration::from_secs(30))
+        .exchange(&request.bytes(), Duration::from_secs(30))
         .bytes
 }
 

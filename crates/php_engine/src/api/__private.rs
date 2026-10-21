@@ -5,8 +5,8 @@
 //! `__private` (`ext.no-private`).
 
 use php_unit::decl::{
-    Attribute, AttributeArgument, Bare, ClassDecl, ClassKind, ConstExpr, FunctionDecl, MethodDecl,
-    Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
+    Attribute, AttributeArgument, Bare, ClassDecl, ClassKind, ConstExpr, MethodDecl, Name,
+    PropertyDecl, Type, Visibility,
 };
 
 use crate::api::abi::{Cases, Class, ClassRef, ExtensionBuilder, ObjectHandlers};
@@ -21,39 +21,7 @@ use crate::api::values::{ClassId, Owner, Value, ValueRef};
 /// lets a backtrace taken inside it print them.
 pub type Entry = fn(&mut Request) -> Result<Owner<Value>, Thrown>;
 
-/// A function declaration named `name`, the rest for the expansion to
-/// fill.
-#[must_use]
-pub fn native_function(name: &[u8]) -> FunctionDecl {
-    FunctionDecl {
-        name: Name(name.into()),
-        parameters: Vec::new(),
-        return_type: None,
-        returns_by_ref: false,
-        is_generator: false,
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-        frameless: Vec::new(),
-    }
-}
-
-/// A parameter named `name` of type `ty`, required and by value.
-#[must_use]
-pub fn parameter(name: &[u8], ty: Option<Type>) -> Parameter {
-    Parameter {
-        name: Name(name.into()),
-        ty,
-        by_ref: false,
-        prefer_ref: false,
-        promoted: false,
-        variadic: false,
-        default: ParameterDefault::None,
-        attributes: Vec::new(),
-    }
-}
+pub use php_unit::decl::{native_function, parameter};
 
 /// A public instance property named `name` of type `ty`, no default.
 #[must_use]

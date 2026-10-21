@@ -11,7 +11,7 @@ use php_ext::attr::php_function;
 use php_ext::call::call;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::test::{Capture, Engine, LeakSensor};
+use php_ext::test::{Capture, Engine};
 use php_ext::values::walk::{self, GiveUp, Hold};
 use php_ext::values::{Key, Owner, PhpObject, PhpString, Value};
 
@@ -66,7 +66,6 @@ fn a_foreach_walk_holds_the_table_a_class_keeps() {
             php_ext_simplexml::extension(),
             walks(),
         ])
-        .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(
         "<?php $x = simplexml_load_string('<a><b>bbbbbbbbbbbbbbbbbbbbbbbb</b><c>cccccccccccccccccccccccc</c><d>dddddddddddddddddddddddd</d></a>');\n\

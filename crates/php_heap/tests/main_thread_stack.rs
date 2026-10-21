@@ -5,7 +5,14 @@
 //! `php_heap::call_stack_bounds` answers faults there unless the bounds
 //! end above that page (#1104). They end one page above the end php's
 //! `zend_call_stack_get_macos` reckons, which `docs/divergence.toml`
-//! records as `trace:macos-main-thread-guard-page` (#2583).
+//! records as `trace:macos-main-thread-guard-page` (#2583). The size
+//! those bounds answer is what `php_heap::main_call_stack_size` answers
+//! from any thread (#3142).
+
+#![allow(
+    clippy::disallowed_methods,
+    reason = "a test starts its own threads (seams.toml rule fork.threads)"
+)]
 
 /// A frame that writes a KiB of its own and calls itself until the KiB
 /// stands within 2 KiB of `end`: the deepest write lands in the last
@@ -76,9 +83,37 @@ fn the_main_threads_end_is_one_page_above_phps() -> Result<(), String> {
     Ok(())
 }
 
+/// The main thread's size as the main thread reads its own bounds, and
+/// as a thread started at another size asks for it: one number, where
+/// the platform's arm reads the main thread from anywhere.
+#[cfg(all(any(target_os = "macos", target_os = "linux"), not(miri)))]
+fn the_main_threads_size_reads_the_same_from_any_thread() -> Result<(), String> {
+    let own = php_heap::call_stack_bounds()
+        .map(|stack| stack.max_size)
+        .ok_or("the main thread's bounds were not read")?;
+    let here = php_heap::main_call_stack_size();
+    let there = std::thread::Builder::new()
+        .stack_size(3 * 1024 * 1024)
+        .spawn(php_heap::main_call_stack_size)
+        .map_err(|err| format!("spawning a thread: {err}"))?
+        .join()
+        .map_err(|_| "the spawned thread panicked")?;
+    if here != Some(own) || there != Some(own) {
+        return Err(format!(
+            "the main thread's bounds answer {own} bytes, main_call_stack_size {here:?} on it and {there:?} on a thread of 3 MiB"
+        ));
+    }
+    Ok(())
+}
+
 fn main() {
     #[cfg(all(target_os = "macos", not(miri)))]
     if let Err(message) = the_main_threads_end_is_one_page_above_phps() {
+        eprintln!("{message}");
+        std::process::exit(1);
+    }
+    #[cfg(all(any(target_os = "macos", target_os = "linux"), not(miri)))]
+    if let Err(message) = the_main_threads_size_reads_the_same_from_any_thread() {
         eprintln!("{message}");
         std::process::exit(1);
     }

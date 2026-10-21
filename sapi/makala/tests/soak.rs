@@ -18,7 +18,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use common::{Server, read_response};
+use common::{Request, Server, read_response};
 
 /// How long the clients send. #2336 rules 30 s; under a loaded machine's
 /// debug build each client still sends tens of requests in that time.
@@ -71,26 +71,19 @@ const PROGRAMS: [(&str, &str); 6] = [
 /// The request each client sends for the program numbered `n`.
 fn request(n: usize) -> Vec<u8> {
     let (name, _) = PROGRAMS[n % PROGRAMS.len()];
-    let head = |target: &str, extra: &str| {
-        format!("GET /{target} HTTP/1.1\r\nHost: a\r\nConnection: close\r\n{extra}\r\n")
-            .into_bytes()
-    };
+    let get = |target: &str| Request::get(&format!("/{target}")).close();
     match name {
-        "state.php" => head("state.php?p=4", ""),
-        "body.php" => {
-            let body = format!("a={n}&b=%E2%82%AC{}", "x".repeat(n % 7 * 40));
-            format!(
-                "POST /body.php HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\
-                 Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{body}",
-                body.len()
-            )
-            .into_bytes()
-        }
-        "cookie.php" => head("cookie.php", "Cookie: c=makala\r\n"),
-        "class.php" => head("class.php?n=3", ""),
-        "throws.php" => head("throws.php?m=caught", ""),
-        _ => head(name, ""),
+        "state.php" => get("state.php?p=4"),
+        "body.php" => Request::post("/body.php")
+            .close()
+            .field("Content-Type", "application/x-www-form-urlencoded")
+            .body(format!("a={n}&b=%E2%82%AC{}", "x".repeat(n % 7 * 40))),
+        "cookie.php" => get("cookie.php").field("Cookie", "c=makala"),
+        "class.php" => get("class.php?n=3"),
+        "throws.php" => get("throws.php?m=caught"),
+        _ => get(name),
     }
+    .bytes()
 }
 
 /// The response's status, its header lines but the server's `date`, and

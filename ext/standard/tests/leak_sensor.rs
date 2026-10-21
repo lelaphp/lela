@@ -4,24 +4,19 @@
 //! A leak from a filter an extension supplies names that extension.
 #![cfg(debug_assertions)]
 
+mod support;
+
 use php_ext::abi::ExtensionBuilder;
 use php_ext::raising::Thrown;
 use php_ext::request::{
     Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter, Streams as _,
 };
-use php_ext::test::{Capture, Engine, LeakSensor};
+use php_ext::test::{Capture, Engine};
 use php_ext::values::{PhpString, Value};
 
 /// What one request of an armed engine with this extension alone wrote.
 fn armed(source: &str) -> String {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_lexbor::extension(),
-            php_ext_uri::extension(),
-            php_ext_standard::extension(),
-        ])
-        .sense_leaks(LeakSensor::Armed)
-        .build();
+    let engine = support::engine();
     let served = engine.serve_capture(source, Capture::default());
     served.stdout_text()
 }
@@ -525,7 +520,6 @@ fn a_leak_from_a_supplied_filter_names_its_extension() {
                 .rinit(register_leaky)
                 .build("leak_filter"),
         ])
-        .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(
         "<?php $m = fopen('php://memory', 'w+'); stream_filter_append($m, 'leaky', STREAM_FILTER_WRITE);\nfwrite($m, 'x'); echo 'written';\n",

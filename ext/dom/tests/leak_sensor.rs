@@ -3,21 +3,14 @@
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
 
-use php_ext::test::{Capture, Engine, LeakSensor};
+mod support;
+
+use php_ext::test::Capture;
 
 /// `src` served by an armed engine with this extension alone, what it
 /// wrote held to `expected`.
 fn served(src: &str, expected: &str) {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_libxml::extension(),
-            php_ext_lexbor::extension(),
-            php_ext_standard::extension(),
-            php_ext_uri::extension(),
-            php_ext_dom::extension(),
-        ])
-        .sense_leaks(LeakSensor::Armed)
-        .build();
+    let engine = support::engine();
     let served = engine.serve_capture(src, Capture::default());
     served.assert_clean(expected);
 }
@@ -169,16 +162,7 @@ fn an_evaluator_constructed_anew_in_its_own_callback_evaluates_to_its_end() {
 /// between leaves the next as it found it.
 #[test]
 fn what_lexbor_made_is_given_back_by_each_request_s_end() {
-    let engine = Engine::builder()
-        .extensions(&[
-            php_ext_libxml::extension(),
-            php_ext_lexbor::extension(),
-            php_ext_standard::extension(),
-            php_ext_uri::extension(),
-            php_ext_dom::extension(),
-        ])
-        .sense_leaks(LeakSensor::Armed)
-        .build();
+    let engine = support::engine();
     let src = "<?php $m = memory_get_usage();\n\
          $d = Dom\\HTMLDocument::createFromString(str_repeat('<div class=a><p>x <b>y</b></p></div>', 300), LIBXML_NOERROR);\n\
          $d->body->firstChild->innerHTML = '<i>z</i><template><u>t</u></template>';\n\

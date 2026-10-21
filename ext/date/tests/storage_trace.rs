@@ -11,7 +11,7 @@ use php_ext::abi::{ExtensionBuilder, IniStage};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::{Allocation, AllocationObserverId, Ini, ObserveAllocations, Request};
-use php_ext::test::{Capture, Engine, LeakSensor};
+use php_ext::test::{Capture, Engine};
 
 const SWITCH: &[u8] = b"zend_test.zend_mm_custom_handlers.enabled";
 
@@ -105,7 +105,6 @@ fn receipt_of(source: &str) -> String {
     let engine = Engine::builder()
         .extensions(&[php_ext_date::extension(), observer])
         .ini("date.timezone", "UTC")
-        .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(source, Capture::default());
     assert_eq!(served.fatal, None);

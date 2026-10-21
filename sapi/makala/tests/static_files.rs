@@ -16,16 +16,11 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
-use common::{Response, Server, read_response, read_until_closed};
+use common::{Request, Response, Server, read_response, read_until_closed};
 
 /// `method target` on a connection of its own, its response read whole.
 fn ask(server: &Server, method: &str, target: &str) -> Response {
-    let mut stream = server.connect();
-    write!(
-        stream,
-        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
+    let mut stream = server.send(&Request::new(method, target).host("localhost").close());
     read_response(&mut stream)
 }
 
@@ -62,10 +57,7 @@ fn a_static_file_is_served_with_its_mime_type() {
         );
         assert_eq!(String::from_utf8_lossy(&response.body), body, "{target}");
     }
-    let mut stream = server.connect();
-    stream
-        .write_all(b"HEAD /style.css HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
-        .unwrap_or_else(|e| panic!("{e}"));
+    let mut stream = server.send(&Request::new("HEAD", "/style.css").close());
     let head = read_until_closed(&mut stream, Duration::from_secs(30));
     assert!(
         head.text().starts_with("HTTP/1.1 200 OK\r\n"),
@@ -298,7 +290,7 @@ fn a_slow_static_download_holds_no_request_thread() {
     std::fs::write(root.join("large.bin"), vec![b'x'; 32 << 20]).unwrap_or_else(|e| panic!("{e}"));
     let server = Server::with_args(&root, &["--threads", "1"]);
     let mut slow = server.connect();
-    slow.write_all(b"GET /large.bin HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+    slow.write_all(&Request::get("/large.bin").close().bytes())
         .unwrap_or_else(|e| panic!("{e}"));
     let mut first = [0u8; 1024];
     let read = std::io::Read::read(&mut slow, &mut first).unwrap_or_else(|e| panic!("{e}"));
@@ -308,10 +300,7 @@ fn a_slow_static_download_holds_no_request_thread() {
         String::from_utf8_lossy(&first[..read])
     );
     let started = std::time::Instant::now();
-    let mut program = server.connect();
-    program
-        .write_all(b"GET /run.php HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
-        .unwrap_or_else(|e| panic!("{e}"));
+    let mut program = server.send(&Request::get("/run.php").close());
     let answer = read_until_closed(&mut program, Duration::from_secs(3));
     assert_eq!(answer.codes(), [200], "{}", answer.text());
     assert_eq!(answer.response().body, b"ran");
@@ -338,10 +327,7 @@ fn a_static_file_that_shrinks_while_it_goes_cuts_its_connection() {
     let file = root.join("large.bin");
     std::fs::write(&file, vec![b'x'; 32 << 20]).unwrap_or_else(|e| panic!("{e}"));
     let server = Server::start(&root);
-    let mut stream = server.connect();
-    stream
-        .write_all(b"GET /large.bin HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
-        .unwrap_or_else(|e| panic!("{e}"));
+    let mut stream = server.send(&Request::get("/large.bin").close());
     let mut first = [0u8; 1024];
     let read = std::io::Read::read(&mut stream, &mut first).unwrap_or_else(|e| panic!("{e}"));
     assert!(first[..read].starts_with(b"HTTP/1.1 200 OK\r\n"));

@@ -958,7 +958,7 @@ mod tests {
     use php_ext::attr::php_function;
     use php_ext::raising::Thrown;
     use php_ext::request::Request;
-    use php_ext::test::{Capture, Engine, LeakSensor};
+    use php_ext::test::{Capture, Engine};
     use php_ext::values::Value;
 
     use super::Private;
@@ -995,7 +995,6 @@ mod tests {
                 crate::extension(),
                 replacing(),
             ])
-            .sense_leaks(LeakSensor::Armed)
             .build();
         let served = engine.serve_capture(
             "<?php $d = Dom\\XMLDocument::createFromString('<r/>'); replace_private($d); replace_private($d); echo $d->documentElement->nodeName, \"\\n\";",

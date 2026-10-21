@@ -25298,14 +25298,9 @@ mod tests {
     /// `StrLen("abc")` where its function table has not the name at
     /// compile time and the program declares it before the call runs.
     fn by_name(strings: &mut php_heap::Strings) -> PublishedUnit {
-        let text = |strings: &mut php_heap::Strings, bytes: &[u8]| {
-            strings
-                .intern(bytes)
-                .map_or(php_heap::Zval::UNDEF, php_heap::Zval::string)
-        };
-        let written = text(strings, b"StrLen");
-        let lowered = text(strings, b"strlen");
-        let argument = text(strings, b"abc");
+        let written = interned(strings, b"StrLen");
+        let lowered = interned(strings, b"strlen");
+        let argument = interned(strings, b"abc");
         Unit {
             main: OpArray {
                 oplines: vec![
@@ -25342,11 +25337,9 @@ mod tests {
         .published(None)
     }
 
-    /// Interned `bytes` as a constant, `UNDEF` where the table is full.
+    /// Interned `bytes` as a constant.
     fn interned(strings: &mut php_heap::Strings, bytes: &[u8]) -> php_heap::Zval {
-        strings
-            .intern(bytes)
-            .map_or(php_heap::Zval::UNDEF, php_heap::Zval::string)
+        php_heap::Zval::string(strings.intern(bytes).expect("intern a constant"))
     }
 
     /// `ZEND_INIT_FCALL_BY_NAME` resolves the pair's lowered name into
@@ -25431,23 +25424,10 @@ mod tests {
     /// [`by_name`] alone, and a main op array with a cache slot of its
     /// own, not yet shared.
     fn declaring_f(strings: &mut php_heap::Strings) -> Unit {
-        use php_unit::decl::{FunctionDecl, Name};
         let by_name = by_name(strings);
         let mut body = by_name.main.clone();
         body.oplines = body.oplines.iter().take(1).copied().collect();
-        let decl = FunctionDecl {
-            name: Name::from("f"),
-            parameters: Vec::new(),
-            return_type: None,
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
-            file: Name::default(),
-            line: 0,
-            end_line: 0,
-            frameless: Vec::new(),
-        };
+        let decl = php_unit::decl::native_function(b"f");
         Unit {
             main: OpArray {
                 cache_size: 8,
@@ -26169,22 +26149,13 @@ mod tests {
     /// `FRAMELESS_ICALL_0` needs to be reached at all.
     fn with_a_nullary_frameless_native() -> Engine {
         use crate::api::abi::ExtensionBuilder;
-        use php_unit::decl::{FunctionDecl, Name};
+        use php_unit::decl::FunctionDecl;
         fn seven(_: &mut Request) -> Result<Owner<Value>, Thrown> {
             Ok(Owner::int(7))
         }
         let decl = FunctionDecl {
-            name: Name::from("seven"),
-            parameters: Vec::new(),
-            return_type: None,
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
-            file: Name::default(),
-            line: 0,
-            end_line: 0,
             frameless: vec![0],
+            ..php_unit::decl::native_function(b"seven")
         };
         let extension = ExtensionBuilder::default()
             .functions(vec![(decl, seven as crate::api::abi::Entry)])

@@ -27,7 +27,7 @@ pub mod multibyte;
 mod special;
 mod stack;
 
-pub use stack::StackLimit;
+pub use stack::{Reentered, StackLimit};
 
 /// The token stream and the tree (design §4.9), handed up for
 /// `php_engine::api::syntax` and nothing of the compiler's own: the
@@ -984,17 +984,11 @@ mod tests {
     /// default where it has one.
     fn parameter(name: &str, ty: Type, default: Option<ConstExpr>) -> Parameter {
         Parameter {
-            name: Name::from(name),
-            ty: Some(ty),
-            by_ref: false,
-            prefer_ref: false,
-            promoted: false,
-            variadic: false,
             default: default.map_or(
                 php_unit::decl::ParameterDefault::None,
                 php_unit::decl::ParameterDefault::Expr,
             ),
-            attributes: Vec::new(),
+            ..php_unit::decl::parameter(name.as_bytes(), Some(ty))
         }
     }
 
@@ -1080,17 +1074,9 @@ mod tests {
         ]
         .into_iter()
         .map(|(name, parameters, frameless)| FunctionDecl {
-            name: Name::from(name),
             parameters,
-            return_type: None,
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
-            file: Name(Box::new([])),
-            line: 0,
-            end_line: 0,
             frameless,
+            ..php_unit::decl::native_function(name.as_bytes())
         })
         .collect()
     }
@@ -1109,19 +1095,7 @@ mod tests {
                 .iter()
                 .map(|(name, _)| *name)
                 .chain(CALLED)
-                .map(|name| FunctionDecl {
-                    name: Name(name.into()),
-                    parameters: Vec::new(),
-                    return_type: None,
-                    returns_by_ref: false,
-                    is_generator: false,
-                    attributes: Vec::new(),
-                    doc_comment: None,
-                    file: Name(Box::new([])),
-                    line: 0,
-                    end_line: 0,
-                    frameless: Vec::new(),
-                })
+                .map(php_unit::decl::native_function)
                 .chain(frameless_natives())
                 .collect()
         });
@@ -6247,19 +6221,7 @@ mod tests {
                 constants: Vec::new(),
                 properties: Vec::new(),
                 methods: vec![MethodDecl {
-                    function: FunctionDecl {
-                        name: Name(b"f".as_slice().into()),
-                        parameters: Vec::new(),
-                        return_type: None,
-                        returns_by_ref: false,
-                        is_generator: false,
-                        attributes: Vec::new(),
-                        doc_comment: None,
-                        file: Name(Box::new([])),
-                        line: 0,
-                        end_line: 0,
-                        frameless: Vec::new(),
-                    },
+                    function: php_unit::decl::native_function(b"f"),
                     visibility: Visibility::Public,
                     is_instance: false,
                     is_abstract: false,
@@ -8557,19 +8519,7 @@ $f = fn (): float => 1.5;
             ClassDecl, ClassFlags, ClassKind, EnumBacking, MethodDecl, Visibility,
         };
         let method = |name: &[u8], visibility| MethodDecl {
-            function: FunctionDecl {
-                name: Name(name.into()),
-                parameters: Vec::new(),
-                return_type: None,
-                returns_by_ref: false,
-                is_generator: false,
-                attributes: Vec::new(),
-                doc_comment: None,
-                file: Name(Box::new([])),
-                line: 0,
-                end_line: 0,
-                frameless: Vec::new(),
-            },
+            function: php_unit::decl::native_function(name),
             visibility,
             is_instance: false,
             is_abstract: false,

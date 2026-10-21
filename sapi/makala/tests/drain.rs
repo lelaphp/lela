@@ -16,7 +16,7 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use common::{Ending, Server, eventually, read_until_closed};
+use common::{Ending, Request, Server, eventually, read_until_closed};
 
 /// Long enough for any answer on a loaded machine.
 const WAIT: Duration = Duration::from_secs(30);
@@ -52,9 +52,7 @@ fn read_until(stream: &mut TcpStream, bytes: &[u8]) -> Vec<u8> {
 /// A request for `slow.php` sleeping `ms`, on a connection left open
 /// after it, read until the program has begun.
 fn begun(server: &Server, ms: u32) -> TcpStream {
-    let mut stream = server.connect();
-    write!(stream, "GET /slow.php?ms={ms} HTTP/1.1\r\nHost: a\r\n\r\n")
-        .unwrap_or_else(|e| panic!("{e}"));
+    let mut stream = server.send(&Request::get(&format!("/slow.php?ms={ms}")));
     read_until(&mut stream, b"begun\n");
     stream
 }
@@ -110,7 +108,7 @@ fn no_connection_is_accepted_after_sigterm() {
 fn an_idle_keep_alive_connection_is_closed_at_sigterm() {
     let server = Server::start(&root("drain-idle"));
     let mut idle = server.connect();
-    idle.write_all(b"GET /fast.php HTTP/1.1\r\nHost: a\r\n\r\n")
+    idle.write_all(&Request::get("/fast.php").bytes())
         .unwrap_or_else(|e| panic!("{e}"));
     read_until(&mut idle, b"fast\r\n0\r\n\r\n");
     let mut stream = begun(&server, 5000);

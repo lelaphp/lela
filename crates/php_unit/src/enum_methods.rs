@@ -7,7 +7,7 @@
 //! same order after the enum's own methods.
 
 use crate::decl::{
-    EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault, Type, Visibility,
+    EnumBacking, FunctionDecl, MethodDecl, Parameter, Type, Visibility, native_function, parameter,
 };
 
 /// The rows, public and no instance member, each with the empty file
@@ -16,16 +16,7 @@ use crate::decl::{
 /// `null`, each over `int|string $value`, where the enum is backed.
 #[must_use]
 pub fn enum_methods(backing: EnumBacking) -> Vec<MethodDecl> {
-    let value = || Parameter {
-        name: Name::from("value"),
-        ty: Some(Type::Union(vec![Type::Int, Type::String])),
-        by_ref: false,
-        prefer_ref: false,
-        promoted: false,
-        variadic: false,
-        default: ParameterDefault::None,
-        attributes: Vec::new(),
-    };
+    let value = || parameter(b"value", Some(Type::Union(vec![Type::Int, Type::String])));
     let mut out = vec![method(b"cases", Vec::new(), Type::Array)];
     if backing != EnumBacking::Pure {
         out.push(method(b"from", vec![value()], Type::CalledClass));
@@ -41,17 +32,9 @@ pub fn enum_methods(backing: EnumBacking) -> Vec<MethodDecl> {
 fn method(name: &[u8], parameters: Vec<Parameter>, returns: Type) -> MethodDecl {
     MethodDecl {
         function: FunctionDecl {
-            name: Name(name.into()),
             parameters,
             return_type: Some(returns),
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
-            file: Name(Box::new([])),
-            line: 0,
-            end_line: 0,
-            frameless: Vec::new(),
+            ..native_function(name)
         },
         visibility: Visibility::Public,
         is_instance: false,
