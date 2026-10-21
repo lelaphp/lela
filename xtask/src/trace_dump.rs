@@ -298,9 +298,7 @@ impl Sides<'_> {
         let (expected, actual) = (lines(&theirs.stderr), lines(&ours.stderr));
         for (side, bytes) in [(Side::Oracle, &expected), (Side::Engine, &actual)] {
             let path = kept(store, self.oracle.pin().digest(), &traced.scope, side);
-            if let Some(dir) = path.parent() {
-                fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-            }
+            crate::make_parent(&path)?;
             fs::write(&path, bytes).with_context(|| format!("keeping {}", path.display()))?;
         }
         let count = |bytes: &[u8]| String::from_utf8_lossy(bytes).lines().count() as u64;

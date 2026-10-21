@@ -370,9 +370,7 @@ pub fn session(
     }
     let local_path = root.join(LOCAL);
     if !local_path.exists() {
-        if let Some(dir) = local_path.parent() {
-            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        }
+        crate::make_parent(&local_path)?;
         fs::write(&local_path, local_template()).with_context(|| format!("writing {LOCAL}"))?;
     }
     let mut facts = fs::read_to_string(&local_path).with_context(|| format!("reading {LOCAL}"))?;

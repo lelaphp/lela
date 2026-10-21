@@ -451,12 +451,10 @@ pub fn xtask(bin: &'static str) -> &'static Path {
 /// so only a `git gc --prune=now` in the workspace during it can take a
 /// borrowed object away.
 pub fn repository(workspace: &Path, to: &Path, scopes: &[&str]) -> Result<()> {
-    std::fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
+    crate::make_dir(to)?;
     for file in crate::git::files_under(workspace, scopes)? {
         let target = to.join(&file);
-        if let Some(dir) = target.parent() {
-            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        }
+        crate::make_parent(&target)?;
         std::fs::copy(workspace.join(&file), &target)
             .with_context(|| format!("copying {file} into {}", to.display()))?;
     }

@@ -714,9 +714,7 @@ impl Store {
     /// on. A short write is an error, never retried, since a retry could
     /// only tear the line it means to finish.
     fn append_line(log: &Path, line: &[u8]) -> Result<()> {
-        if let Some(dir) = log.parent() {
-            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        }
+        crate::make_parent(log)?;
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -1078,7 +1076,7 @@ pub(crate) fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path
         .parent()
         .with_context(|| format!("{} names no directory", path.display()))?;
-    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    crate::make_dir(dir)?;
     let name = path
         .file_name()
         .with_context(|| format!("{} names no file", path.display()))?

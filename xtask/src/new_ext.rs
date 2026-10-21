@@ -33,7 +33,6 @@
 //! down once and never overwritten).
 
 use std::fmt::Write as _;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -76,10 +75,7 @@ impl Laid {
         let mut written = Vec::new();
         for (rel, text) in files {
             let path = dir.join(rel);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("creating {}", parent.display()))?;
-            }
+            crate::make_parent(&path)?;
             crate::write(&path, text)?;
             written.push(format!("{row}/{rel}"));
         }
