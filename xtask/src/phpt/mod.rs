@@ -488,6 +488,14 @@ impl Subset {
             .collect()
     }
 
+    /// Whether the subset holds no test: a directory of it is absent from
+    /// the tree, or none holds a `.phpt` it admits, as an extension with no
+    /// tests of its own (`ext/lexbor`, #1598). No run of it is kept, and it
+    /// holds nothing against any base (#725, #3143).
+    pub(crate) fn holds_none(&self) -> Result<bool> {
+        Ok(!self.absent().is_empty() || self.tests()?.is_empty())
+    }
+
     /// The per-commit lane (harness §7, revision 63): every subset of
     /// every crate the binary under test carries or whose row names an
     /// oracle variant (#2029), in manifest order, under the pinned tree at
@@ -765,7 +773,7 @@ pub(crate) fn reading(
     let testless = manifest
         .crate_named(&subset.scope)
         .is_some_and(Crate::derives_subset)
-        && (!absent.is_empty() || subset.tests()?.is_empty());
+        && subset.holds_none()?;
     // A subset of a crate not yet created: its tests are that crate's, and
     // an engine built without it would not answer for it, so the reading
     // says so ahead of whether an engine is built, as `budget` and

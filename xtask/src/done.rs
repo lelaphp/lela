@@ -62,6 +62,7 @@ use crate::key::{self, Snapshot};
 use crate::manifest::{Crate, Manifest};
 use crate::miri;
 use crate::permit;
+use crate::phpt::Subset;
 use crate::phpt::against::{self, Against};
 use crate::port_map;
 use crate::reading::{Number, Reading, Status, Store, plural};
@@ -796,6 +797,7 @@ fn no_regression(
     };
     match against::regressed(asking.snapshot, asking.base, &pin, scope)? {
         Against::Held => {}
+        Against::Unrun(_) if holds_none(asking.manifest, scope) => {}
         Against::Unrun(why) => {
             let sought = [("phpt".to_owned(), scope.clone(), key.to_owned())];
             let digest = asking.manifest.pin.digest();
@@ -810,6 +812,18 @@ fn no_regression(
         Against::Unmet(why) => unmet.push(format!("phpt: {why}")),
     }
     Ok(())
+}
+
+/// Whether the subset of `scope` holds no test in the pinned tree on this
+/// machine ([`Subset::holds_none`]), so no run of it is kept here (#3143)
+/// and it holds nothing against any base (#725); one that cannot be
+/// resolved is held as any other.
+fn holds_none(manifest: &Manifest, scope: &str) -> bool {
+    let tree = manifest.pin.source.tree();
+    let subset = tree.and_then(|tree| Subset::resolve(manifest, &tree, scope));
+    subset
+        .and_then(|subset| subset.holds_none())
+        .unwrap_or(false)
 }
 
 /// A touched crate's key now ([`Snapshot::key`], its tree and its dependency

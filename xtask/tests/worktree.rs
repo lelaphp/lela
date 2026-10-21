@@ -810,7 +810,7 @@ fn retiring_carries_the_worktrees_kept_phpt_runs_into_mains() {
     let recipe = Manifest::load(&root).unwrap().pin.digest().to_owned();
     let run = |engine: &str| {
         format!(
-            "{{\"commit\": \"0000000\", \"corpus\": \"php-8.5.9\", \"engine\": \"{engine}\", \"recipe\": \"{recipe}\", \"verdicts\": {{}}}}\n"
+            "{{\"commit\": \"0000000\", \"corpus\": \"php-8.5.9\", \"engine\": \"{engine}\", \"recipe\": \"{recipe}\", \"verdicts\": {{\"phpt:php-src/ext/pcre/tests/one.phpt\": \"pass\"}}}}\n"
         )
     };
     let runs = format!("target/harness/phpt-runs/{tree}");
@@ -883,7 +883,7 @@ fn a_run_ci_kept_fetched_by_the_skips_line_is_the_bases_run() {
         &upload,
         &format!("{tree}/ext/pcre.json"),
         &format!(
-            "{{\"commit\": \"0000000\", \"corpus\": \"php-8.5.9\", \"engine\": \"CI's\", \"recipe\": \"{}\", \"verdicts\": {{}}}}\n",
+            "{{\"commit\": \"0000000\", \"corpus\": \"php-8.5.9\", \"engine\": \"CI's\", \"recipe\": \"{}\", \"verdicts\": {{\"phpt:php-src/ext/pcre/tests/one.phpt\": \"pass\"}}}}\n",
             Manifest::load(&root).unwrap().pin.digest()
         ),
     );
@@ -1006,6 +1006,21 @@ fn one_call_takes_the_merge_bases_run_and_keeps_it_in_the_main_worktree() {
     sh(&dir, &["git", "add", "-A"]);
     commit(&dir, "touch ext/ctype");
 
+    // A run of none kept at the base, as a scratch corpus's stood in main's
+    // store (#3143), is no run, and the call takes one in its place.
+    let none = format!(
+        "target/harness/phpt-runs/{}/ext/ctype.json",
+        engine_tree(&root)
+    );
+    let recipe = Manifest::load(&root).unwrap().pin.digest().to_owned();
+    write(
+        &root,
+        &none,
+        &format!(
+            "{{\"commit\": \"0000000\", \"corpus\": \"php-8.5.9\", \"engine\": \"e\", \"recipe\": \"{recipe}\", \"verdicts\": {{}}}}\n"
+        ),
+    );
+
     // Before the call, the comparison names it.
     engine_at(&dir.join("target/release-da/php"), &oracle);
     let (_, unkept) = phpt_in(
@@ -1038,6 +1053,9 @@ fn one_call_takes_the_merge_bases_run_and_keeps_it_in_the_main_worktree() {
     }
     assert!(kept.iter().all(|run| run.is_file()), "{kept:?}: {out}");
     assert_eq!(kept.len(), 1, "{out}");
+    let run: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(root.join(&none)).unwrap()).unwrap();
+    assert_eq!(run["verdicts"].as_object().unwrap().len(), 1, "{out}");
 
     // The comparison from the branch's worktree finds the run by the base.
     engine_at(&dir.join("target/release-da/php"), &oracle);
