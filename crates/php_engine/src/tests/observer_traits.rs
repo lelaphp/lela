@@ -57,10 +57,7 @@ fn a_native_trait_method_is_observed_under_the_class_that_uses_it() {
          var_dump((new Foo)->greet(), (new Bar)->greet(), (new Baz)->greet());\n",
     );
     rec.mark("served");
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "bool(true)\nbool(true)\nbool(true)\n"
-    );
+    assert_eq!(served.stdout_text(), "bool(true)\nbool(true)\nbool(true)\n");
     let calls: Vec<Event> = observed(&rec.events().between("built", "served"))
         .into_iter()
         .filter(|event| {
@@ -105,7 +102,7 @@ fn a_native_trait_method_taken_under_an_alias_carries_its_name_and_visibility() 
     );
     rec.mark("served");
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "bool(true)\nCall to protected method Foo::prot() from global scope\n"
     );
     let calls: Vec<Event> = observed(&rec.events().between("built", "served"))

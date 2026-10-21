@@ -86,7 +86,7 @@ fn frames_let_go_after_a_fatal_or_left_standing_leave_no_annex() {
         b"Standard input code",
         "<?php\nfunction pause() {}\npause();\necho \"on\\n\";\n",
     );
-    let out = String::from_utf8_lossy(&served.stdout);
+    let out = served.stdout_text();
     assert!(
         counted.is_some_and(|counted| counted.bailed_out
             && counted.left

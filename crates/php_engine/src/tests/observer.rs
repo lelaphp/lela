@@ -88,7 +88,7 @@ fn calls_begin_in_declaration_order_and_end_in_reverse_with_what_they_returned()
         "<?php\nfunction g($y) { return $y * 2; }\nfunction f($x) { return g($x) + 1; }\necho f(1), f(2);\n",
     );
     rec.mark("served");
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "35");
+    assert_eq!(served.stdout_text(), "35");
     let file = "file 'main.php'";
     assert_eq!(
         observed(&rec.events().between("built", "served")),
@@ -197,7 +197,7 @@ fn an_include_and_an_eval_are_begun_and_ended_inside_their_includer() {
         "<?php\necho include __DIR__ . '/inc.php';\necho eval('$v = 7; return $v;');\n",
     );
     rec.mark("served");
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "h7");
+    assert_eq!(served.stdout_text(), "h7");
     let file = "file 'main.php'";
     let inc = "file 'inc.php'";
     let evaluated = "file 'main.php(3) : eval()'d code'";
@@ -612,7 +612,7 @@ fn natives_are_begun_before_their_entry_and_ended_after_it() {
          set_error_handler('h');\ntrigger_error('a');\n",
     );
     rec.mark("served");
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "1m");
+    assert_eq!(served.stdout_text(), "1m");
     let file = "file 'main.php'";
     assert_eq!(
         observed(&rec.events().between("built", "served")),
@@ -678,7 +678,7 @@ fn a_native_that_throws_is_ended_before_the_frames_the_throw_leaves() {
          try { trigger_error('x'); } catch (ArgumentCountError $e) { echo 'e'; }\n",
     );
     rec.mark("served");
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "cde");
+    assert_eq!(served.stdout_text(), "cde");
     let file = "file 'main.php'";
     assert_eq!(
         observed(&rec.events().between("built", "served")),
@@ -725,7 +725,7 @@ fn a_frameless_call_is_observed_as_a_full_call() {
         "<?php\nfunction f($s) { return \\frameless_probe($s); }\nf('a'); f('');\n",
     );
     rec.mark("served");
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "");
+    assert_eq!(served.stdout_text(), "");
     let file = "file 'main.php'";
     assert_eq!(
         observed(&rec.events().between("built", "served")),
@@ -786,7 +786,8 @@ fn depths_at_the_page(observer: fn(&mut Observed<'_>) -> ObserverHandlers) -> Ve
         ])
         .build();
     let served = engine.serve_capture(AT_THE_PAGE, Capture::default());
-    String::from_utf8_lossy(&served.stdout)
+    served
+        .stdout_text()
         .lines()
         .filter_map(|line| {
             let (_, depths) = line.split_once(": ")?;
@@ -866,7 +867,7 @@ fn a_user_frame_takes_the_observers_temporary_where_one_is_registered() {
                 .build("observer_room")])
             .build();
         let served = engine.serve_capture(DEPTH, Capture::default());
-        String::from_utf8_lossy(&served.stdout).parse::<u32>().ok()
+        served.stdout_text().parse::<u32>().ok()
     };
     let (registered, declined) = (depth(|_| true), depth(|_| false));
     assert!(
@@ -918,7 +919,7 @@ fn a_natives_throwable_stands_pending_while_its_end_handlers_are_called() {
          try { f([]); } catch (TypeError $e) { echo 'c'; }\n",
     );
     rec.mark("served");
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "c");
+    assert_eq!(served.stdout_text(), "c");
     assert_eq!(
         observed(&rec.events().between("built", "served")),
         [
@@ -1030,7 +1031,7 @@ fn a_generator_is_begun_at_each_resumption_and_ended_at_each_yield() {
          echo run();\n",
     );
     rec.mark("served");
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "0,10,11,42,1337");
+    assert_eq!(served.stdout_text(), "0,10,11,42,1337");
     let file = "file 'main.php'";
     assert_eq!(
         observed(&rec.events().between("built", "served")),
@@ -1087,7 +1088,7 @@ fn a_generator_resumed_by_hand_pairs_each_resumption() {
          return 'Done'; }\necho run();\n",
     );
     rec.mark("end");
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "012Done");
+    assert_eq!(served.stdout_text(), "012Done");
     let file = "file 'main.php'";
     let events = rec.events();
     // A native read of the generator, begun and ended with what it gave.
@@ -1217,7 +1218,7 @@ fn a_fiber_is_noticed_at_its_creation_each_switch_and_its_destruction() {
          $fiber->start();\n$fiber->resume('r');\necho $fiber->getReturn();\n",
     );
     rec.mark("served");
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "ri");
+    assert_eq!(served.stdout_text(), "ri");
     let events = observed(&rec.events().between("built", "served"));
     let (fiber, closure) = one_named_in(&events);
     let fiber = |status: &str| format!("{fiber} {status}");
@@ -1270,7 +1271,7 @@ fn a_frame_open_in_a_suspended_fiber_is_ended_in_that_fiber_and_nowhere_else() {
          $fiber->start();\necho declined();\n$fiber->resume();\necho $fiber->getReturn();\n",
     );
     rec.mark("end");
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "di");
+    assert_eq!(served.stdout_text(), "di");
     let file = "file 'main.php'";
     let same_height = observed(&rec.events().between("same_height", "end"));
     let (fiber, closure) = one_named_in(&same_height);
@@ -1323,7 +1324,7 @@ fn a_fiber_inside_a_fiber_switches_with_its_resumer() {
          $fiber->start();\necho 'm';\n$fiber->resume();\necho $fiber->getReturn();\n",
     );
     rec.mark("end");
-    assert_eq!(String::from_utf8_lossy(&nested.stdout), "m1");
+    assert_eq!(nested.stdout_text(), "m1");
     let file = "file 'main.php'";
     let nested = observed(&rec.events().between("nested", "end"));
     let (fibers, closures) = named_in(&nested);
@@ -1418,7 +1419,7 @@ fn a_switch_handler_reads_the_fiber_switched_into_and_out_of_as_the_current_one(
          $fiber->start();\n$fiber->resume();\necho 'done';\n",
     );
     rec.mark("served");
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "done");
+    assert_eq!(served.stdout_text(), "done");
     let events = observed(&rec.events().between("built", "served"));
     // The fiber as the first switch, the one into it, names it.
     let fiber = match events.first() {
@@ -1690,7 +1691,7 @@ fn a_generator_is_observed_through_yield_from_throw_close_and_a_fiber() {
          $fiber = new Fiber(function () { $g = foo(); echo $g->current(); });\n$fiber->start();\n",
     );
     rec.mark("served");
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "0123c4f0");
+    assert_eq!(served.stdout_text(), "0123c4f0");
     let events = observed(&rec.events().between("built", "served"));
     let foo: Vec<Event> = events
         .iter()
@@ -1790,7 +1791,7 @@ fn a_closure_bound_to_another_scope_is_asked_of_again() {
          $p = Closure::fromCallable([new A, 'make']);\n$p();\necho \"done\\n\";\n",
     );
     rec.mark("served");
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "done\n");
+    assert_eq!(served.stdout_text(), "done\n");
     let asked: Vec<String> = observed(&rec.events().between("built", "served"))
         .into_iter()
         .filter_map(|event| match event {

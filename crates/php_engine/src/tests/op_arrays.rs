@@ -181,7 +181,7 @@ echo \"\\n\";
         Capture::default(),
     );
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "[shape 3 4 5 6 8 11 12 13 15 16 17 19]6\
          [picks 23 25 24 26 28 29 30 33 34 35]Error\
          [k::m 46 47 49]4\
@@ -290,7 +290,7 @@ echo route('a', 2), \"\\n\";
         Capture::default(),
     );
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "[64 oplines
 0002 SWITCH_STRING -> 0008 0010 0012
 0004 JMPNZ -> 0008

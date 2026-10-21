@@ -150,7 +150,7 @@ fn stepped(name: &str, builder: EngineBuilder, main: &str) -> (Vec<Event>, Strin
     rec.mark("served");
     (
         statements(&rec.events().between("built", "served")),
-        String::from_utf8_lossy(&served.stdout).into_owned(),
+        served.stdout_text(),
     )
 }
 
@@ -274,7 +274,7 @@ fn what_a_statement_handler_throws_is_raised_where_the_statement_stands() {
     );
     rec.mark("served");
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "stopped by 1 after stopped by 0 at 3\n"
     );
     assert_eq!(

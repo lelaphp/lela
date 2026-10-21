@@ -89,7 +89,7 @@ echo "done\n";
 "#,
         Capture::default(),
     );
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert_eq!(stdout, "node\ndone\n");
     assert_eq!(served.exit_code, 0);
 }
@@ -108,7 +108,7 @@ fn a_dropped_owner_fails_the_request_as_an_internal_error() {
         "<?php echo 'a';\ndropped_owner();\necho 'went on';\n",
         Capture::default(),
     );
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert!(
         stdout.starts_with(&format!("awent on\n{LEAKED}")),
         "{stdout}"
@@ -126,7 +126,7 @@ fn a_debug_engine_is_armed_unless_built_with_the_sensor_off() {
     let program = "<?php dropped_owner();\necho 'went on';\n";
     let armed = Engine::cli_builder().extensions(&[faulty()]).build();
     let served = armed.serve_capture(program, Capture::default());
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert!(
         stdout.starts_with(&format!("went on\n{LEAKED}")),
         "{stdout}"
@@ -137,8 +137,7 @@ fn a_debug_engine_is_armed_unless_built_with_the_sensor_off() {
         .sense_leaks(LeakSensor::Off)
         .build();
     let served = off.serve_capture(program, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "went on");
-    assert_eq!(served.exit_code, 0);
+    served.assert_clean("went on");
 }
 
 /// A block a lifecycle hook allocated and dropped is named with the
@@ -150,7 +149,7 @@ fn a_leak_from_a_lifecycle_hook_names_its_extension() {
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture("<?php echo strlen('a');\n", Capture::default());
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert!(stdout.starts_with(&format!("1\n{LEAKED}")), "{stdout}");
     assert!(
         stdout.contains(", allocated by leak_hooks in Unknown on line 0\n"),
@@ -177,10 +176,7 @@ fn the_backtrace_mode_names_the_leaking_line() {
                 .sense_leaks(LeakSensor::Traced)
                 .build();
             let served = engine.serve_capture("<?php dropped_owner();\n", Capture::default());
-            (
-                String::from_utf8_lossy(&served.stdout).into_owned(),
-                served.exit_code,
-            )
+            (served.stdout_text(), served.exit_code)
         })
         .map(std::thread::JoinHandle::join);
     assert!(
@@ -232,7 +228,7 @@ fn a_request_ending_in_a_fatal_reports_nothing() {
             &format!("<?php dropped_owner();\n{fatal}\n"),
             Capture::default(),
         );
-        let stdout = String::from_utf8_lossy(&served.stdout);
+        let stdout = served.stdout_text();
         assert!(stdout.contains(rendered), "{fatal}: {stdout}");
         assert!(!stdout.contains("InternalError"), "{fatal}: {stdout}");
         assert_eq!(served.exit_code, 255, "{fatal}");
@@ -254,7 +250,7 @@ fn a_request_ending_in_an_uncaught_throwable_reports_its_leak() {
             &format!("<?php dropped_owner();\n{uncaught}\n"),
             Capture::default(),
         );
-        let stdout = String::from_utf8_lossy(&served.stdout);
+        let stdout = served.stdout_text();
         let (rendered, sensed) = stdout.split_once(LEAKED).unwrap_or_default();
         assert!(
             rendered.contains("Fatal error: Uncaught "),
@@ -295,7 +291,7 @@ $a = new A; $a['x'] = $s; $a['x'] .= 'd'; echo $a['x'], ' ', $a['y'] ?? 'none', 
 "#,
         Capture::default(),
     );
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert_eq!(
         stdout,
         "aaaaa aaaaa\nstdClass aaaaab\nstring(6) \"aaaaab\"\nobject(Closure)#4 (5) {\n  [\"name\"]=>\n  string(31) \"{closure:Standard input code:8}\"\n  [\"file\"]=>\n  string(19) \"Standard input code\"\n  [\"line\"]=>\n  int(8)\n  [\"static\"]=>\n  array(1) {\n    [\"s\"]=>\n    string(6) \"aaaaab\"\n  }\n  [\"parameter\"]=>\n  array(1) {\n    [\"$x\"]=>\n    string(10) \"<required>\"\n  }\n}\naaaaabd none\n"
@@ -360,7 +356,7 @@ fn a_leak_from_an_extension_class_s_handler_names_its_extension() {
         "<?php $o = new Leaky; $c = clone $o; echo 1, ' served';\n",
     ] {
         let served = engine.serve_capture(program, Capture::default());
-        let stdout = String::from_utf8_lossy(&served.stdout);
+        let stdout = served.stdout_text();
         assert!(
             stdout.starts_with(&format!("1 served\n{LEAKED}")),
             "{stdout}"
@@ -410,7 +406,7 @@ fn a_leak_from_an_error_link_names_its_extension() {
         "<?php trigger_error('x', E_USER_NOTICE);\n",
         Capture::default(),
     );
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert!(
         stdout.contains(", allocated by leak_error in Unknown on line 0\n"),
         "{stdout}"
@@ -430,7 +426,7 @@ fn a_leak_from_a_tick_function_names_its_extension() {
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture("<?php declare(ticks=1); $a = 1;\n", Capture::default());
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert!(
         stdout.contains(", allocated by leak_tick in Unknown on line 0\n"),
         "{stdout}"

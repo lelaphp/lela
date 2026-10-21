@@ -299,7 +299,7 @@ fn served(builder: fn() -> EngineBuilder, programs: &[Program]) -> (Vec<Seen>, u
             program.source,
         );
         steps += kept.map_or(0, |kept| kept.steps);
-        stdouts.push(String::from_utf8_lossy(&out.stdout).into_owned());
+        stdouts.push(out.stdout_text());
     }
     rec.mark("end");
     let events = rec.events();

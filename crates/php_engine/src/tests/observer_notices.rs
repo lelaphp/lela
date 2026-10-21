@@ -94,7 +94,7 @@ fn declarations_are_told_as_the_file_loads_and_as_their_oplines_run() {
          \x20   class D extends A\n    {\n    }\n}\n\nfoo();\n",
     );
     rec.mark("served");
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "foo\n");
+    assert_eq!(served.stdout_text(), "foo\n");
     let file = "file 'main.php'";
     assert_eq!(
         only(&rec.events().between("built", "served"), &declaring()),
@@ -349,9 +349,9 @@ fn a_throwable_pending_at_a_fatal_is_told_uncaught_and_served_without_the_handle
     );
     rec.mark("served");
     assert!(
-        !String::from_utf8_lossy(&served.stdout).contains("handler"),
+        !served.stdout_text().contains("handler"),
         "{}",
-        String::from_utf8_lossy(&served.stdout)
+        served.stdout_text()
     );
     let events = only(
         &rec.events().between("built", "served"),

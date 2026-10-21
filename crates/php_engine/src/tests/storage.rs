@@ -230,7 +230,7 @@ fn served(sensor: LeakSensor, src: &str) -> Served {
 /// What a clean request served with the sensor armed wrote.
 fn clean(src: &str) -> String {
     let served = served(LeakSensor::Armed, src);
-    let stdout = String::from_utf8_lossy(&served.stdout).into_owned();
+    let stdout = served.stdout_text();
     assert_eq!(
         (served.exit_code, served.fatal.as_deref()),
         (0, None),
@@ -295,8 +295,7 @@ fn unarmed_a_forgotten_block_is_released_by_the_request_s_end() {
             "<?php block_kept('forget'); echo 'served';",
             Capture::default(),
         );
-        assert_eq!((served.exit_code, served.fatal), (0, None));
-        assert_eq!(served.stdout, b"served");
+        served.assert_clean("served");
     }
 }
 
@@ -312,16 +311,16 @@ fn a_refused_allocation_ends_the_request_in_the_limit_s_fatal() {
         "<?php string_refused(2050, 4194304); echo 'unreached';",
     ] {
         let served = engine.serve_capture(src, Capture::default());
+        assert!(!served.stdout_text().contains("unreached"));
         let fatal = served.fatal.unwrap_or_default();
         assert_eq!(served.exit_code, 255, "{src}");
         assert!(
             fatal.contains("Allowed memory size of 2097152 bytes exhausted"),
             "{src}: {fatal}"
         );
-        assert!(!String::from_utf8_lossy(&served.stdout).contains("unreached"));
     }
     let after = engine.serve_capture("<?php echo block_held(24);", Capture::default());
-    assert_eq!(after.stdout, b"24 true true 0");
+    assert_eq!(after.stdout_text(), "24 true true 0");
 }
 
 /// A fresh string grows bin by bin and page by page as `erealloc` grows

@@ -417,7 +417,7 @@ mod tests {
         assert_eq!(
             served
                 .iter()
-                .map(|s| String::from_utf8_lossy(&s.stdout).into_owned())
+                .map(crate::test::Served::stdout_text)
                 .collect::<Vec<_>>(),
             [
                 format!(
@@ -490,7 +490,7 @@ mod tests {
         let served = engine.serve_capture("<?php echo 1;", Capture::default());
         std::fs::set_permissions(&shut, mode(0o755)).expect("the directory is opened again");
         let root = php_process::process::euid() == 0;
-        let stdout = String::from_utf8_lossy(&served.stdout);
+        let stdout = served.stdout_text();
         assert!(
             root || stdout.starts_with("\nWarning: PHP Startup: Failed to open stream: Permission denied in Unknown on line 0\n"),
             "{stdout}"
@@ -510,10 +510,11 @@ mod tests {
             "<?php echo 1;",
         );
         assert!(
-            String::from_utf8_lossy(&served[0].stdout)
+            served[0]
+                .stdout_text()
                 .contains("Maximum execution time of 1 second exceeded"),
             "{}",
-            String::from_utf8_lossy(&served[0].stdout)
+            served[0].stdout_text()
         );
         assert_eq!(served[0].exit_code, 1);
     }

@@ -90,7 +90,7 @@ fn keeping() -> Extension {
 fn serve(source: &str) -> String {
     let engine = Engine::cli_builder().extensions(&[keeping()]).build();
     let served = engine.serve_capture(source, Capture::default());
-    String::from_utf8_lossy(&served.stdout).into_owned()
+    served.stdout_text()
 }
 
 /// A generator's frame kept while it runs is refused while the
@@ -178,7 +178,7 @@ fn a_frame_view_walks_its_callers_into_the_resumer_of_a_fiber() {
         Capture::default(),
     );
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "[{closure:f():4}:5 < f:7 < Standard input code:9]"
     );
 }
@@ -220,10 +220,7 @@ fn a_native_call_has_no_frame_and_its_caller_is_the_user_frame_it_stands_on() {
         "<?php\nfunction f($s) {\n    return strcmp($s, 'abc');\n}\necho f('abc');\n",
         Capture::default(),
     );
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "[strcmp framed=false from f:3]0"
-    );
+    assert_eq!(served.stdout_text(), "[strcmp framed=false from f:3]0");
 }
 
 /// `zend_test.observer.show_opcode` (`observer_opline_01.phpt`): a begin
@@ -264,7 +261,7 @@ fn a_handler_reads_the_opcode_its_frame_stands_on() {
         "<?php\nfunction f($a) {\n    echo $a;\n    return $a;\n}\necho f(1);\nstrlen('x');\n",
     );
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "<begin main.php ZEND_INIT_FCALL><begin f ZEND_ECHO>1<end f ZEND_RETURN>1\
          <end main.php ZEND_RETURN>"
     );
@@ -307,7 +304,7 @@ fn an_end_handler_an_uncaught_throwable_calls_reads_the_exception_op() {
          c();\nfunction d() { exit(0); }\nd();\n",
     );
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "<end b ZEND_HANDLE_EXCEPTION>f\n<end a ZEND_FAST_RET>c\n<end c ZEND_RETURN>\
          <end d ZEND_HANDLE_EXCEPTION><end main.php ZEND_HANDLE_EXCEPTION>"
     );
@@ -353,10 +350,7 @@ function c() { try { a(); } catch (Exception $e) { echo "c\n"; } }
 c();
 "#,
     );
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "f\ndtor sees a() at line 12\nc\n"
-    );
+    assert_eq!(served.stdout_text(), "f\ndtor sees a() at line 12\nc\n");
 }
 
 /// One frame of a walk as `observer_show_init_backtrace` writes it:
@@ -421,7 +415,7 @@ fn walks(source: &str) -> String {
             .build("frame_chain")])
         .build();
     let served = engine.serve_capture(source, Capture::default());
-    String::from_utf8_lossy(&served.stdout).into_owned()
+    served.stdout_text()
 }
 
 /// The walk meets the natives between two user frames, `Closure::call()`
@@ -531,7 +525,7 @@ fn a_thrown_link_at_a_generator_throw_reads_the_generators_frame_on_top() {
         "<?php\nfunction g() { try { yield 1; } catch (Exception $e) { echo \"caught\\n\"; } }\n\
          $g = g();\n$g->current();\n$g->throw(new Exception(\"e\"));\n",
     );
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "caught\n");
+    assert_eq!(served.stdout_text(), "caught\n");
     assert_eq!(
         traced.and_then(|traced| traced.0).as_deref(),
         Some(

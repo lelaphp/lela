@@ -2533,10 +2533,6 @@ echo "collected\n";
             source,
             Capture::default(),
         );
-        assert_eq!(
-            served.stdout_text(),
-            "collecting\n0\ncollected\ndtor cv\ndtor included\n"
-        );
-        assert_eq!(served.exit_code, 0);
+        served.assert_clean("collecting\n0\ncollected\ndtor cv\ndtor included\n");
     }
 }

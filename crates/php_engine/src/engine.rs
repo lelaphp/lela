@@ -6357,14 +6357,14 @@ mod tests {
             },
             &mut web,
         );
-        assert_eq!(web.stdout, b"x");
+        assert_eq!(String::from_utf8_lossy(&web.stdout), "x");
         assert_eq!(
             web.headers,
             b"X-Powered-By: PHP/8.5.9\r\nContent-type: text/html; charset=UTF-8\r\n"
         );
         let mut cli = crate::test::Capture::default();
         engine.serve_into(description("<?php echo 'x';"), &mut cli);
-        assert_eq!(cli.stdout, b"x");
+        assert_eq!(String::from_utf8_lossy(&cli.stdout), "x");
         assert_eq!(cli.headers, b"");
     }
 
@@ -6493,7 +6493,7 @@ mod tests {
         let serve = |name: &str, value: &str| {
             let engine = Engine::cli_builder().ini(name, value).build();
             let out = engine.serve_capture(program, crate::test::Capture::default());
-            String::from_utf8_lossy(&out.stdout).into_owned()
+            out.stdout_text()
         };
         assert_eq!(
             serve("output_handler", "h"),
@@ -6548,7 +6548,7 @@ mod tests {
             },
             &mut sink,
         );
-        assert_eq!(sink.stdout, b"A=1&B=2 - 3");
+        assert_eq!(String::from_utf8_lossy(&sink.stdout), "A=1&B=2 - 3");
     }
 
     /// `-d error_append_string=<value>`: `Off`, `OFF`, `oFf`, `FALSE`,
@@ -6642,10 +6642,7 @@ mod tests {
                 "<?php $f = 'strlen'; echo $f('abcd'), ' ', $f('ab');",
                 crate::test::Capture::default(),
             );
-        assert_eq!(
-            String::from_utf8_lossy(&served.stdout),
-            "later earlier 4 later earlier 2"
-        );
+        assert_eq!(served.stdout_text(), "later earlier 4 later earlier 2");
     }
 
     /// An extension that names a file to preload as the engine
@@ -6713,16 +6710,13 @@ mod tests {
         let second = engine.serve_capture(&program, crate::test::Capture::default());
         let resolved = script.canonicalize().unwrap_or_default();
         assert_eq!(
-            String::from_utf8_lossy(&first.stdout),
+            first.stdout_text(),
             format!(
                 "preloading\n\nWarning: Can't preload unlinked class Late: Unknown parent Missing in {} on line 9\nfmyn\npreloading\nagain\n",
                 resolved.display()
             )
         );
-        assert_eq!(
-            String::from_utf8_lossy(&second.stdout),
-            "fmyn\npreloading\nagain\n"
-        );
+        assert_eq!(second.stdout_text(), "fmyn\npreloading\nagain\n");
     }
 
     /// An opcache restart past the preload (design §5.14): the next
@@ -6749,8 +6743,8 @@ mod tests {
         let second = engine.serve_capture(program, crate::test::Capture::default());
         let after = engine.shared.arena.current();
         assert_eq!(scheduled, crate::api::request::Restart::Scheduled);
-        assert_eq!(String::from_utf8_lossy(&first.stdout), "gd");
-        assert_eq!(String::from_utf8_lossy(&second.stdout), "gd");
+        assert_eq!(first.stdout_text(), "gd");
+        assert_eq!(second.stdout_text(), "gd");
         assert!(!Arc::ptr_eq(&before, &after), "a new epoch");
         let preloaded = engine.shared.units.preloaded();
         let functions =
@@ -6826,9 +6820,9 @@ mod tests {
         }
         std::fs::write(&kept_at, &stale).expect("the kept file is written over");
         let third = kept.serve_capture(&program, crate::test::Capture::default());
-        assert_eq!(String::from_utf8_lossy(&first.stdout), "kept");
-        assert_eq!(String::from_utf8_lossy(&second.stdout), "kept");
-        assert_eq!(String::from_utf8_lossy(&third.stdout), "compiled");
+        assert_eq!(first.stdout_text(), "kept");
+        assert_eq!(second.stdout_text(), "kept");
+        assert_eq!(third.stdout_text(), "compiled");
     }
 
     /// A startup an extension refuses serves nothing, and every request
@@ -7588,14 +7582,12 @@ mod tests {
         let served = Engine::cli_builder()
             .build()
             .serve_capture("<?php echo 1;", crate::test::Capture::default());
-        assert_eq!(served.stdout, b"1");
-        assert_eq!(served.exit_code, 0);
-        assert_eq!(served.fatal, None);
+        served.assert_clean("1");
         let served = Engine::cli_builder().build().serve_capture(
             "<?php var_dump(extension_loaded('Core'));",
             crate::test::Capture::default(),
         );
-        assert_eq!(served.stdout, b"bool(true)\n");
+        assert_eq!(served.stdout_text(), "bool(true)\n");
     }
 
     /// How many strings the engine has published past the ones its build

@@ -49,7 +49,7 @@ fn served(extensions: &[Extension], src: &str, expected: &str) {
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(src, Capture::default());
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert_eq!(stdout, expected);
     assert_eq!(served.exit_code, 0, "{stdout}");
 }

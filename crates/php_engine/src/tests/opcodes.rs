@@ -100,7 +100,7 @@ fn served(
     let files = Files::new(&format!("opcodes-{name}"), &[]);
     let dir = files.path();
     let served = serve_main(&engine, dir, source);
-    String::from_utf8_lossy(&served.stdout).into_owned()
+    served.stdout_text()
 }
 
 /// A call under `@`, an `echo` of two values, and an undefined variable

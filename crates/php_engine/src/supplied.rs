@@ -705,10 +705,7 @@ mod tests {
                 "<?php declare(ticks=1); echo '| ';",
                 crate::test::Capture::default(),
             );
-        assert_eq!(
-            String::from_utf8_lossy(&served.stdout),
-            "earlier later | earlier later "
-        );
+        assert_eq!(served.stdout_text(), "earlier later | earlier later ");
     }
 
     /// The treater that upper-cases the query string, and the one that
@@ -863,7 +860,7 @@ mod tests {
                     "<?php $f = 'strlen'; echo $f('abcd');",
                     crate::test::Capture::default(),
                 );
-            String::from_utf8_lossy(&served.stdout).into_owned()
+            served.stdout_text()
         };
         let mut extensions = [
             zend(
@@ -948,7 +945,7 @@ mod tests {
             .extensions(extensions)
             .build()
             .serve_capture(source, crate::test::Capture::default());
-        String::from_utf8_lossy(&served.stdout).into_owned()
+        served.stdout_text()
     }
 
     /// `zend_error_cb`, each link handed the ones beneath and php's own

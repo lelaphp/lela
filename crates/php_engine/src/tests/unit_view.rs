@@ -104,7 +104,7 @@ fn serve(engine: &Engine, dir: &std::path::Path, program: &str) -> String {
         program,
         Capture::default(),
     );
-    String::from_utf8_lossy(&served.stdout).into_owned()
+    served.stdout_text()
 }
 
 /// The views a program that includes `inc.php` in `dir` built, kept past
@@ -146,10 +146,7 @@ fn a_view_holds_a_held_units_function_refuses_an_evals_and_outlives_its_request(
          eval('function own() { return hold_caller(); }');\n\
          var_dump(held(), own());",
     );
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "bool(true)\nbool(false)\n"
-    );
+    assert_eq!(served.stdout_text(), "bool(true)\nbool(false)\n");
     drop(engine);
     let views = views.map(|views| views.0).unwrap_or_default();
     assert_eq!(views.len(), 2, "two views were built");
@@ -302,7 +299,7 @@ fn a_held_functions_constant_string_reads_through_a_view_past_its_engine() {
         main.to_string_lossy().as_bytes(),
         "<?php include __DIR__ . '/inc.php'; var_dump(said());",
     );
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "bool(true)\n");
+    assert_eq!(served.stdout_text(), "bool(true)\n");
     let strings = |views: &[(UnitView, FuncRef)]| -> Vec<Vec<u8>> {
         views
             .iter()

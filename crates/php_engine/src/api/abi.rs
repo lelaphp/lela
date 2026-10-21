@@ -3398,9 +3398,7 @@ var_dump(clone $b instanceof Uncompared, $b == new Uncompared);
 "#,
                 Capture::default(),
             );
-        assert_eq!(served.fatal, None);
-        assert_eq!(
-            String::from_utf8_lossy(&served.stdout),
+        served.assert_clean(
             "Cannot directly construct Unmade, use make() instead\n\
              Cannot directly construct Unnamed\n\
              made Uncloned\n\
@@ -3408,7 +3406,7 @@ var_dump(clone $b instanceof Uncompared, $b == new Uncompared);
              Trying to clone an uncloneable object of class Uncloned\n\
              bool(true)\n\
              bool(true)\n\
-             bool(false)\n"
+             bool(false)\n",
         );
     }
 }
