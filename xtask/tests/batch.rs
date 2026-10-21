@@ -290,6 +290,19 @@ type Expected<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
 mod tracked {
     use super::*;
 
+    /// The tracked rule whose `check` names `silent-return` is the one
+    /// whose fixture `a_return_at_a_tests_own_level_fails_and_one_in_a_closure_or_of_err_does_not`
+    /// fails, so that test holds the sensor the workspace runs (#3105).
+    #[test]
+    fn the_silent_return_rule_is_the_one_its_fixture_fails_under() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let rule = manifest.rule_checked_by("silent-return").unwrap();
+        assert_eq!(rule.id, "tests.no-silent-return");
+        let fixture = xtask::package_dir().join("fixtures/rules").join(&rule.id);
+        let held = Manifest::load(&fixture).unwrap();
+        assert_eq!(held.rule_checked_by("silent-return").unwrap().id, rule.id);
+    }
+
     /// The sensor of the manifest's `deny_lints` rules (#1917): every such
     /// rule has a fixture workspace under `xtask/fixtures/rules/<id>/` whose
     /// clippy readings carry the rule, fail where a source the scope covers
