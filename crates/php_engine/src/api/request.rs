@@ -106,6 +106,7 @@ pub use limits::{Interrupt, TimeLimitSuspended};
 mod linking;
 mod load_file;
 mod memory;
+pub(crate) use memory::Pushed;
 pub use memory::{Allocation, AllocationObserverId, Memory, ObserveAllocations};
 pub use memory::{StandaloneHeap, ecalloc, efree, emalloc, erealloc};
 mod methods;
@@ -496,10 +497,10 @@ pub struct Request {
     /// constants and their names, held while each unit lives
     /// ([`unit_strings::UnitStrings`]).
     unit_strings: unit_strings::UnitStrings,
-    /// `CG(loop_var_stack)`'s elements and how many they hold, laid down
-    /// by the first compile of the request that pushed one and kept to
-    /// its end ([`Request::note_loop_vars`]).
-    loop_var_stack: Option<(php_heap::Block, u32)>,
+    /// `CG(loop_var_stack)`'s and `CG(delayed_oplines_stack)`'s elements,
+    /// laid down by the first compile of the request that pushed onto
+    /// one and kept to its end ([`Request::note_pushed`]).
+    compiler_stacks: memory::CompilerStacks,
     /// php's `EG(function_table)` past the natives, each function under
     /// its name: the preload's, published, in the order its table holds
     /// them, then each the request declared, in the order declared. A
@@ -1150,7 +1151,7 @@ impl Request {
             user_functions: PinnedRows::default(),
             named_callees: std::collections::HashMap::new(),
             unit_strings: unit_strings::UnitStrings::default(),
-            loop_var_stack: None,
+            compiler_stacks: memory::CompilerStacks::default(),
             functions: tables.functions,
             static_vars: static_vars::StaticVars::default(),
             preloading: None,

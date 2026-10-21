@@ -909,13 +909,13 @@ impl Request {
         }
     }
 
-    /// What a compile of the request left `CG(loop_var_stack)` holding
-    /// room for, `loops` being the most entries it held
-    /// ([`php_unit::Unit::loop_vars`]): `zend_stack_push` grows the
-    /// stack's elements sixteen 12-byte `zend_loop_var`s at a time with
-    /// `safe_erealloc`, and nothing shrinks them before
-    /// `shutdown_compiler`, so the request holds them from the first
-    /// compile that pushed one, a loop or a function body, to its end:
+    /// What a compile made for the request left php's compiler stacks
+    /// holding room for ([`Pushed`]): `zend_stack_push` grows a stack's
+    /// elements sixteen at a time with `safe_erealloc`, and nothing
+    /// shrinks them before `shutdown_compiler`, so the request holds them
+    /// from the first compile that pushed one to its end.
+    /// `CG(loop_var_stack)`'s, 12-byte `zend_loop_var`s, a loop's or a
+    /// function body's:
     ///
     /// ```php
     /// $m = memory_get_usage(); eval('$x = 1;'); echo memory_get_usage() - $m, "\n";
@@ -929,24 +929,51 @@ impl Request {
     /// 0
     /// 192
     /// ```
-    pub(crate) fn note_loop_vars(&mut self, loops: u32) {
-        let wanted = loops.div_ceil(16).saturating_mul(16);
-        if wanted <= self.loop_var_stack.as_ref().map_or(0, |(_, held)| *held) {
-            return;
-        }
-        let len = wanted as usize * 12;
-        let grown = match self.loop_var_stack.take() {
-            Some((held, _)) => self.heap.block_resize(held, len),
-            None => self.heap.block(len),
-        };
-        // A refusal is the memory limit's fatal, which ends the request.
-        self.loop_var_stack = grown.ok().map(|grown| (grown, wanted));
+    ///
+    /// And `CG(delayed_oplines_stack)`'s, 32-byte `zend_op`s, one a fetch
+    /// a chain of dimensions and properties held back: the first compile
+    /// that reads an element lays sixteen, and one that holds back more
+    /// than sixteen at once grows them, with opcache and without:
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); eval('$a = $argv;'); $plain = memory_get_usage() - $m;
+    /// $m = memory_get_usage(); eval('$a = $argv[0];'); echo memory_get_usage() - $m - $plain, "\n";
+    /// $m = memory_get_usage(); eval('$a = $argv[0];'); echo memory_get_usage() - $m - $plain, "\n";
+    /// $a = 1; $deep = '$b = $a' . str_repeat('[0]', 18) . ';';
+    /// $shallow = str_pad('$b = $a[0]', strlen($deep) - 1) . ';';
+    /// @eval($shallow); @eval($shallow);
+    /// $m = memory_get_usage(); @eval($deep); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 512
+    /// 0
+    /// 512
+    /// ```
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); eval('$a = $argv;'); $plain = memory_get_usage() - $m;
+    /// $m = memory_get_usage(); eval('$a = $argv[0];'); echo memory_get_usage() - $m - $plain, "\n";
+    /// $m = memory_get_usage(); eval('$o = new stdClass; $o->p = 1;'); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 512
+    /// 416
+    /// ```
+    pub(crate) fn note_pushed(&mut self, pushed: Pushed) {
+        let stacks = &mut self.compiler_stacks;
+        stacks
+            .loop_vars
+            .grow(&mut self.heap, pushed.loop_vars, LOOP_VAR);
+        (stacks.delayed_oplines).grow(&mut self.heap, pushed.delayed_fetches, ZEND_OP);
     }
 
-    /// `shutdown_compiler`'s `zend_stack_destroy(&CG(loop_var_stack))`.
-    pub(crate) fn free_loop_var_stack(&mut self) {
-        if let Some((held, _)) = self.loop_var_stack.take() {
-            self.heap.free_block(held);
+    /// `shutdown_compiler`'s `zend_stack_destroy` of each stack.
+    pub(crate) fn free_compiler_stacks(&mut self) {
+        let stacks = std::mem::take(&mut self.compiler_stacks);
+        for stack in [stacks.loop_vars, stacks.delayed_oplines] {
+            if let Some((held, _)) = stack.0 {
+                self.heap.free_block(held);
+            }
         }
     }
 
@@ -1072,4 +1099,61 @@ impl Memory<&mut Request> {
 /// `(double) hrtime / ZEND_NANO_IN_SEC`, a collector time in seconds.
 fn seconds(d: std::time::Duration) -> f64 {
     d.as_secs_f64()
+}
+
+/// `sizeof(zend_loop_var)`.
+const LOOP_VAR: usize = 12;
+/// `sizeof(zend_op)`.
+const ZEND_OP: usize = 32;
+
+/// The most entries a compile pushed onto each of php's compiler stacks
+/// that a request keeps: `CG(loop_var_stack)`'s
+/// ([`php_unit::Unit::loop_vars`]) and `CG(delayed_oplines_stack)`'s
+/// ([`php_unit::Unit::delayed_fetches`]); none of either for a compile
+/// that never ran, a hit's.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Pushed {
+    loop_vars: u32,
+    delayed_fetches: u32,
+}
+
+impl Pushed {
+    /// What `unit`'s compile pushed.
+    pub(crate) fn of(unit: &php_unit::Unit) -> Pushed {
+        Pushed {
+            loop_vars: unit.loop_vars,
+            delayed_fetches: unit.delayed_fetches,
+        }
+    }
+}
+
+/// php's compiler stacks a request keeps from the first compile that
+/// pushed onto one to its end.
+#[derive(Default)]
+pub(crate) struct CompilerStacks {
+    loop_vars: CompilerStack,
+    delayed_oplines: CompilerStack,
+}
+
+/// One `zend_stack`'s elements on the request's heap and how many they
+/// hold room for.
+#[derive(Default)]
+struct CompilerStack(Option<(php_heap::Block, u32)>);
+
+impl CompilerStack {
+    /// Room for `entries` of `element` bytes each, grown sixteen at a
+    /// time as `zend_stack_push` grows it; a refusal is the memory
+    /// limit's fatal, which ends the request.
+    fn grow(&mut self, heap: &mut php_heap::Heap, entries: u32, element: usize) {
+        let wanted = entries.div_ceil(16).saturating_mul(16);
+        if wanted <= self.0.as_ref().map_or(0, |(_, held)| *held) {
+            return;
+        }
+        let len = wanted as usize * element;
+        let grown = match self.0.take() {
+            Some((held, _)) => heap.block_resize(held, len),
+            None => heap.block(len),
+        };
+        self.0 = grown.ok().map(|grown| (grown, wanted));
+    }
 }

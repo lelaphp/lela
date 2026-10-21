@@ -1592,7 +1592,7 @@ pub(crate) fn unit(
     }
     // Made where the caller takes it: the main op array is laid in the
     // unit as the unit is.
-    Ok(Unit {
+    let mut unit = Unit {
         main: emit.op_array(filename, 1, lines.max(1)),
         functions: emit.functions_declared,
         dynamic,
@@ -1607,8 +1607,21 @@ pub(crate) fn unit(
         constants: emit.attributed_constants,
         halt_offset: emit.halted,
         loop_vars: emit.loop_var_peak,
+        delayed_fetches: 0,
         cell: emit.cell,
-    })
+    };
+    unit.delayed_fetches = crate::delayed::most_held(
+        std::iter::once(&unit.main)
+            .chain(
+                unit.functions
+                    .iter()
+                    .chain(&unit.dynamic)
+                    .map(|(_, code)| code),
+            )
+            .chain(unit.methods.iter().map(|method| &method.body))
+            .chain(unit.hooks.iter().map(|hook| &hook.body)),
+    );
+    Ok(unit)
 }
 
 /// The state of one op array under construction, what `zend_oparray_context_begin`
