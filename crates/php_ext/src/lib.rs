@@ -40,7 +40,8 @@ pub mod attr {
 }
 
 /// The test face (design §4.3 seam 4, ADR-0002): a fresh engine with one
-/// extension and the `Capture` sink.
+/// extension, the `Capture` sink and the `Served` it comes to, and a
+/// `Files` tree to serve from.
 #[cfg(feature = "test")]
 pub mod test {
     /// A debug build's request leak sensor, armed on every engine a test
@@ -51,5 +52,5 @@ pub mod test {
     /// A native a traced request entered, for the witness runner
     /// (harness §4.5 condition 2, revision 58).
     pub use php_engine::test::Entered;
-    pub use php_engine::test::{Capture, Engine};
+    pub use php_engine::test::{Capture, Engine, Files, Served};
 }

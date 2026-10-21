@@ -24,7 +24,8 @@ fn tight_limit_fatal_releases_every_date_and_serves_again() {
         .build();
     let mut first = None;
     for _ in 0..2 {
-        let served = engine.serve_capture_as(
+        let served = engine.serve_capture_in(
+            &std::env::current_dir().expect("the test runs in a directory"),
             b"witness.php",
             include_str!("limit.php"),
             Capture::default(),
