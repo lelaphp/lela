@@ -188,8 +188,10 @@ impl Scratch {
         let php = php();
         let mut info = php.as_os_str().to_owned();
         info.push(".d");
-        std::os::unix::fs::symlink(php, dir.join("php")).unwrap();
-        std::os::unix::fs::symlink(info, dir.join("php.d")).unwrap();
+        for (link, to) in [("php", php.as_os_str()), ("php.d", info.as_os_str())] {
+            fs::remove_file(dir.join(link)).ok();
+            std::os::unix::fs::symlink(to, dir.join(link)).unwrap();
+        }
         dir.join("php")
     }
 
