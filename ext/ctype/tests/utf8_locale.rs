@@ -18,7 +18,7 @@ fn macos_c_utf8_classes_bytes_past_0x7f() {
         Capture::default(),
     );
     assert_eq!(
-        served.stdout,
-        b"bool(true)\nbool(true)\nbool(true)\nbool(true)\n"
+        served.stdout_text(),
+        "bool(true)\nbool(true)\nbool(true)\nbool(true)\n"
     );
 }

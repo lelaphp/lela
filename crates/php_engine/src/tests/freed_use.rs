@@ -156,7 +156,7 @@ fn an_addref_of_a_freed_block_ends_the_request_at_the_next_sensing_point() {
             &format!("<?php echo 'a';\nfreed_addref('{kind}');\necho 'went on';\n"),
             Capture::default(),
         );
-        let stdout = String::from_utf8_lossy(&served.stdout);
+        let stdout = served.stdout_text();
         assert!(
             stdout.starts_with(&format!("a\n{REFUSED}")),
             "{kind}: {stdout}"
@@ -180,7 +180,7 @@ fn an_addref_of_a_freed_block_during_shutdown_is_raised_at_the_request_end() {
             .build("freed_use_at_end")])
         .build();
     let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert!(stdout.starts_with(&format!("ran\n{REFUSED}")), "{stdout}");
     assert!(stdout.contains(SITE), "{stdout}");
     assert!(stdout.contains(" in Unknown on line 0\n"), "{stdout}");
@@ -202,7 +202,7 @@ fn a_request_a_sensed_refusal_ended_renders_no_second() {
         "<?php echo 'a';\nfreed_addref('string');\necho 'went on';\n",
         Capture::default(),
     );
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert!(stdout.starts_with(&format!("a\n{REFUSED}")), "{stdout}");
     assert_eq!(stdout.matches("InternalError").count(), 1, "{stdout}");
     assert_eq!(served.exit_code, 255);
@@ -223,7 +223,7 @@ fn an_addref_of_a_freed_block_after_a_fatal_is_raised_at_the_request_end() {
         "<?php ini_set('memory_limit', '2M');\n$s = 'x';\nwhile (true) { $s .= $s; }\n",
         Capture::default(),
     );
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert!(
         stdout.starts_with("\nFatal error: Allowed memory size of 2097152 bytes exhausted"),
         "{stdout}"
@@ -285,7 +285,7 @@ fn a_use_of_the_most_recently_freed_slot_is_refused_the_first_time() {
             &format!("<?php echo 'a';\nfreed_then_made('{kind}');\necho 'went on';\n"),
             Capture::default(),
         );
-        let stdout = String::from_utf8_lossy(&served.stdout);
+        let stdout = served.stdout_text();
         assert!(
             stdout.starts_with(&format!("a\n{REFUSED}")),
             "{kind}: {stdout}"
@@ -312,7 +312,7 @@ fn a_write_into_a_freed_block_is_found_as_it_leaves_the_quarantine() {
             &format!("<?php freed_protected(); echo 'went on';\n{evict}\necho 'and on';\n"),
             Capture::default(),
         );
-        let stdout = String::from_utf8_lossy(&served.stdout);
+        let stdout = served.stdout_text();
         let (before, after) = stdout.split_once("-byte block at 0x").unwrap_or_default();
         assert!(
             before.starts_with("went on\nFatal error: InternalError: a write into the "),
@@ -339,7 +339,7 @@ fn a_write_into_a_freed_block_still_held_at_the_end_is_raised_there() {
         "<?php freed_protected(); echo 'went on';\n",
         Capture::default(),
     );
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     let (before, after) = stdout.split_once("-byte block at 0x").unwrap_or_default();
     assert!(
         before.starts_with("went on\nFatal error: InternalError: a write into the "),
@@ -356,8 +356,7 @@ fn a_write_into_a_freed_block_still_held_at_the_end_is_raised_there() {
         "<?php $a = [1]; unset($a); echo 'clean';\n",
         Capture::default(),
     );
-    assert_eq!(String::from_utf8_lossy(&clean.stdout), "clean");
-    assert_eq!(clean.exit_code, 0);
+    clean.assert_clean("clean");
 }
 
 /// A read of a freed string's bytes is refused rather than aborting the
@@ -371,7 +370,7 @@ fn a_read_of_a_freed_strings_bytes_ends_the_request_and_names_the_line() {
         "<?php echo 'a';\necho freed_read();\necho 'went on';\n",
         Capture::default(),
     );
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert!(
         stdout.starts_with("a\nFatal error: InternalError: a read of the block at 0x"),
         "{stdout}"

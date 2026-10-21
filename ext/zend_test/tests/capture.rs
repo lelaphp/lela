@@ -11,7 +11,7 @@ fn served(switches: &[(&str, &str)], source: &str) -> String {
         builder = builder.ini(format!("zend_test.observer.{name}"), value);
     }
     let served = builder.build().serve_capture(source, Capture::default());
-    String::from_utf8_lossy(&served.stdout).into_owned()
+    served.stdout_text()
 }
 
 #[test]

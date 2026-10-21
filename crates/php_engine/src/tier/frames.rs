@@ -338,7 +338,7 @@ mod tests {
             source,
         );
         (
-            String::from_utf8_lossy(&served.stdout).into_owned(),
+            served.stdout_text(),
             seen.map(|seen| seen.lines).unwrap_or_default(),
         )
     }

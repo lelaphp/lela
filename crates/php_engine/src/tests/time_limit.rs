@@ -63,7 +63,7 @@ fn a_handler_that_blocks_past_the_limit_with_it_suspended_does_not_end_the_reque
         &engine,
         &format!("<?php\nfunction blocks() {{}}\nblocks();\necho \"ran\\n\";\n{SPINS}"),
     );
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert_eq!(stdout.lines().next(), Some("ran"), "{stdout}");
     assert!(!stdout.contains("not stopped"), "{stdout}");
     assert!(
@@ -92,7 +92,7 @@ fn a_handler_that_blocks_past_the_limit_unsuspended_is_timed_out() {
         &engine,
         "<?php\nfunction blocks() {}\nblocks();\necho \"ran\\n\";\n",
     );
-    assert!(!String::from_utf8_lossy(&served.stdout).contains("ran"));
+    assert!(!served.stdout_text().contains("ran"));
     assert!(
         served
             .fatal
@@ -123,7 +123,7 @@ fn a_fatal_under_the_guard_resumes_the_limit() {
          blocks();\necho \"after\\n\";\n"
         ),
     );
-    let stdout = String::from_utf8_lossy(&served.stdout);
+    let stdout = served.stdout_text();
     assert!(stdout.contains("Allowed memory size"), "{stdout}");
     assert!(!stdout.contains("after"), "{stdout}");
     assert!(!stdout.contains("not stopped"), "{stdout}");

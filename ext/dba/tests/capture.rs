@@ -1,7 +1,7 @@
 //! The extension through the `Capture` sink (design §4.10, ADR-0002): a
 //! fresh engine with this crate alone, never the bundle.
 
-use php_ext::test::{Capture, Engine};
+use php_ext::test::{Capture, Engine, Files};
 
 #[test]
 fn the_extension_is_loaded() {
@@ -10,7 +10,7 @@ fn the_extension_is_loaded() {
         .build();
     let sink = Capture::default();
     let served = engine.serve_capture("<?php var_dump(extension_loaded('dba'));", sink);
-    assert_eq!(served.stdout, b"bool(true)\n");
+    assert_eq!(served.stdout_text(), "bool(true)\n");
 }
 
 /// A `dba_popen` link the first request leaves open is given back to the
@@ -24,20 +24,20 @@ fn a_persistent_link_and_its_flock_outlive_the_request() {
         .extensions(&[php_ext_dba::extension()])
         .ini("html_errors", "0")
         .build();
-    let path = std::env::temp_dir().join(format!("dba_pool_{}.db", std::process::id()));
+    let files = Files::new("dba-pool", &[]);
+    let path = files.path().join("pool.db");
     let path = path.to_string_lossy();
     let first = format!(
         "<?php dba_close(dba_open('{path}', 'n', 'flatfile')); $p = dba_popen('{path}', 'wd', 'flatfile'); dba_insert('k', 'v', $p); echo 'held';"
     );
     let served = engine.serve_capture(&first, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "held");
+    assert_eq!(served.stdout_text(), "held");
     let second = format!(
         "<?php var_dump(dba_open('{path}', 'rdt', 'flatfile')); var_dump(dba_fetch('k', dba_popen('{path}', 'wd', 'flatfile')));"
     );
     let served = engine.serve_capture(&second, Capture::default());
-    std::fs::remove_file(&*path).ok();
     assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
+        served.stdout_text(),
         "\nWarning: dba_open(): Driver initialization failed for handler: flatfile: Unable to establish lock in Standard input code on line 1\nbool(false)\nstring(1) \"v\"\n"
     );
 }
@@ -59,8 +59,8 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_link() {
             php_ext_dba::extension(),
         ])
         .build();
-    let path = std::env::temp_dir().join(format!("t1695-{}.dba", std::process::id()));
-    std::fs::remove_file(&path).ok();
+    let files = Files::new("dba-session", &[]);
+    let path = files.path().join("session.dba");
     let path = path.display();
     let written = format!(
         "<?php ini_set('session.use_cookies', '0'); ini_set('session.cache_limiter', '');
@@ -83,14 +83,10 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_link() {
         $_SESSION['a'] = 1;"
     );
     let served = engine.serve_capture(&written, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "");
+    assert_eq!(served.stdout_text(), "");
     let read = format!("<?php var_dump(dba_fetch('t1695', dba_popen('{path}', 'c', 'flatfile')));");
     let served = engine.serve_capture(&read, Capture::default());
-    std::fs::remove_file(path.to_string()).ok();
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "string(6) \"a|i:1;\"\n"
-    );
+    assert_eq!(served.stdout_text(), "string(6) \"a|i:1;\"\n");
 }
 
 /// What one engine's request writes of a `dba_popen` `cdb_make` file at
@@ -100,8 +96,8 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_link() {
 /// bucket heads over the first 2,048 bytes, so the next process reads the
 /// value (#1804).
 fn written_then_read(name: &str, then: &str) -> (String, String) {
-    let path = std::env::temp_dir().join(format!("t1804-{name}-{}.cdb", std::process::id()));
-    std::fs::remove_file(&path).ok();
+    let files = Files::new(&format!("dba-cdb-{name}"), &[]);
+    let path = files.path().join("made.cdb");
     let path = path.display();
     let built = || {
         Engine::builder()
@@ -124,11 +120,7 @@ fn written_then_read(name: &str, then: &str) -> (String, String) {
         "<?php clearstatcache(); echo filesize('{path}'), \"\\n\"; var_dump(dba_fetch('key0', dba_open('{path}', 'r', 'cdb')));"
     );
     let served = built().serve_capture(&read, Capture::default());
-    std::fs::remove_file(path.to_string()).ok();
-    (
-        String::from_utf8_lossy(&written.stdout).into_owned(),
-        String::from_utf8_lossy(&served.stdout).into_owned(),
-    )
+    (written.stdout_text(), served.stdout_text())
 }
 
 /// The oracle's bytes for the two processes: 2,066 bytes once the record

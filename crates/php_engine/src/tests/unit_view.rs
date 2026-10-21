@@ -8,7 +8,6 @@
 //! frame of the user function that called it, as the tier reads the
 //! frame at a site.
 
-use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
 use php_macros::php_function;
@@ -19,7 +18,7 @@ use crate::api::abi::{Admission, Extension, ExtensionBuilder, Lookup, Validation
 use crate::api::request::Request;
 use crate::api::values::PhpString;
 use crate::engine::Engine;
-use crate::test::Capture;
+use crate::test::{Capture, Files};
 use crate::tier::{self, FuncRef, SafepointIdx, UnitView};
 
 /// The views the natives built, with the op array each was asked to
@@ -96,19 +95,6 @@ fn viewing() -> Extension {
         .build("viewing")
 }
 
-/// A directory of the test's own holding `inc.php`, the file the cache
-/// holds, written with `source`.
-fn scratch(name: &str, source: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "php_engine_unit_view_{name}_{}",
-        std::process::id()
-    ));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).ok();
-    std::fs::write(dir.join("inc.php"), source).ok();
-    dir
-}
-
 /// What `program` wrote, served in `dir`.
 fn serve(engine: &Engine, dir: &std::path::Path, program: &str) -> String {
     let main = dir.join("main.php");
@@ -118,11 +104,11 @@ fn serve(engine: &Engine, dir: &std::path::Path, program: &str) -> String {
         program,
         Capture::default(),
     );
-    String::from_utf8_lossy(&served.stdout).into_owned()
+    served.stdout_text()
 }
 
 /// The views a program that includes `inc.php` in `dir` built, kept past
-/// its request ([`tier::serve_kept`]); `dir` is removed after.
+/// its request ([`tier::serve_kept`]).
 fn kept(dir: &std::path::Path) -> Vec<(UnitView, FuncRef)> {
     let engine = Engine::cli_builder().extensions(&[viewing()]).build();
     let main = dir.join("main.php");
@@ -132,7 +118,6 @@ fn kept(dir: &std::path::Path) -> Vec<(UnitView, FuncRef)> {
         main.to_string_lossy().as_bytes(),
         "<?php include __DIR__ . '/inc.php';",
     );
-    std::fs::remove_dir_all(dir).ok();
     views.map(|views| views.0).unwrap_or_default()
 }
 
@@ -143,26 +128,26 @@ fn kept(dir: &std::path::Path) -> Vec<(UnitView, FuncRef)> {
 /// refused one reads nothing.
 #[test]
 fn a_view_holds_a_held_units_function_refuses_an_evals_and_outlives_its_request() {
-    let dir = scratch(
-        "hold",
-        "<?php function held() { for ($i = 0; $i < 2; $i++) {} return hold_caller(); }",
+    let files = Files::new(
+        "unit-view-hold",
+        &[(
+            "inc.php",
+            "<?php function held() { for ($i = 0; $i < 2; $i++) {} return hold_caller(); }",
+        )],
     );
+    let dir = files.path();
     let engine = Engine::cli_builder().extensions(&[viewing()]).build();
     let main = dir.join("main.php");
     let (served, views) = tier::serve_kept::<Views>(
         &engine,
-        &dir,
+        dir,
         main.to_string_lossy().as_bytes(),
         "<?php include __DIR__ . '/inc.php';\n\
          eval('function own() { return hold_caller(); }');\n\
          var_dump(held(), own());",
     );
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "bool(true)\nbool(false)\n"
-    );
+    assert_eq!(served.stdout_text(), "bool(true)\nbool(false)\n");
     drop(engine);
-    std::fs::remove_dir_all(&dir).ok();
     let views = views.map(|views| views.0).unwrap_or_default();
     assert_eq!(views.len(), 2, "two views were built");
     let mut views = views.into_iter();
@@ -190,11 +175,15 @@ fn a_view_holds_a_held_units_function_refuses_an_evals_and_outlives_its_request(
 /// table reaches, and the view says so; a function of it is not.
 #[test]
 fn a_view_tells_a_files_own_code_from_its_functions() {
-    let dir = scratch(
-        "main",
-        "<?php function inner() { return hold_caller(); } hold_caller(); inner();",
+    let files = Files::new(
+        "unit-view-main",
+        &[(
+            "inc.php",
+            "<?php function inner() { return hold_caller(); } hold_caller(); inner();",
+        )],
     );
-    let views = kept(&dir);
+    let dir = files.path();
+    let views = kept(dir);
     let mains: Vec<Option<bool>> = views.iter().map(|(view, f)| view.is_main(*f)).collect();
     assert_eq!(mains, [Some(true), Some(false)]);
 }
@@ -204,12 +193,16 @@ fn a_view_tells_a_files_own_code_from_its_functions() {
 /// a file's own code lists none.
 #[test]
 fn a_view_lists_a_functions_parameters() {
-    let dir = scratch(
-        "parameters",
-        "<?php function typed(int $n, Foo|int $o, array &$a, $b = 1) { return hold_caller(); }\n\
+    let files = Files::new(
+        "unit-view-parameters",
+        &[(
+            "inc.php",
+            "<?php function typed(int $n, Foo|int $o, array &$a, $b = 1) { return hold_caller(); }\n\
          hold_caller(); $x = []; typed(1, 2, $x);",
+        )],
     );
-    let views = kept(&dir);
+    let dir = files.path();
+    let views = kept(dir);
     let listed: Vec<Option<Vec<(String, bool)>>> = views
         .iter()
         .map(|(view, f)| {
@@ -253,14 +246,17 @@ fn a_view_lists_a_functions_parameters() {
 /// first's. An `eval`'s function reads the sealed word.
 #[test]
 fn a_held_functions_words_are_shared_by_requests_and_an_evals_are_sealed() {
-    let dir = scratch("words", "<?php function hot() { return bump_entry(); }");
+    let files = Files::new(
+        "unit-view-words",
+        &[("inc.php", "<?php function hot() { return bump_entry(); }")],
+    );
+    let dir = files.path();
     let engine = Engine::cli_builder().extensions(&[viewing()]).build();
     let program = "<?php include __DIR__ . '/inc.php';\n\
                    eval('function cold() { return bump_entry(); }');\n\
                    echo hot(), ' ', hot(), ' ', cold(), \"\\n\";";
-    assert_eq!(serve(&engine, &dir, program), "1 2 -1\n");
-    assert_eq!(serve(&engine, &dir, program), "3 4 -1\n");
-    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(serve(&engine, dir, program), "1 2 -1\n");
+    assert_eq!(serve(&engine, dir, program), "3 4 -1\n");
 }
 
 /// A class the held file bound early is published and the view accepts
@@ -268,17 +264,17 @@ fn a_held_functions_words_are_shared_by_requests_and_an_evals_are_sealed() {
 /// request's own and is refused.
 #[test]
 fn a_view_holds_a_published_class_and_refuses_a_request_local_one() {
-    let dir = scratch("class", "<?php class Early {}");
+    let files = Files::new("unit-view-class", &[("inc.php", "<?php class Early {}")]);
+    let dir = files.path();
     let engine = Engine::cli_builder().extensions(&[viewing()]).build();
     let out = serve(
         &engine,
-        &dir,
+        dir,
         "<?php include __DIR__ . '/inc.php';\n\
          eval('class Own {}');\n\
          var_dump(hold_class_named('Early'), hold_class_named('stdClass'), hold_class_named('Own'));",
     );
     assert_eq!(out, "bool(true)\nbool(true)\nbool(false)\n");
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// A held function's constant string reads through a view the request
@@ -287,19 +283,23 @@ fn a_view_holds_a_published_class_and_refuses_a_request_local_one() {
 /// during the request.
 #[test]
 fn a_held_functions_constant_string_reads_through_a_view_past_its_engine() {
-    let dir = scratch(
-        "strings",
-        "<?php function said() { $s = 'a constant string'; return hold_caller(); }",
+    let files = Files::new(
+        "unit-view-strings",
+        &[(
+            "inc.php",
+            "<?php function said() { $s = 'a constant string'; return hold_caller(); }",
+        )],
     );
+    let dir = files.path();
     let engine = Engine::cli_builder().extensions(&[viewing()]).build();
     let main = dir.join("main.php");
     let (served, views) = tier::serve_kept::<Views>(
         &engine,
-        &dir,
+        dir,
         main.to_string_lossy().as_bytes(),
         "<?php include __DIR__ . '/inc.php'; var_dump(said());",
     );
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "bool(true)\n");
+    assert_eq!(served.stdout_text(), "bool(true)\n");
     let strings = |views: &[(UnitView, FuncRef)]| -> Vec<Vec<u8>> {
         views
             .iter()
@@ -312,7 +312,6 @@ fn a_held_functions_constant_string_reads_through_a_view_past_its_engine() {
     let views = views.map(|views| views.0).unwrap_or_default();
     let before = strings(&views);
     drop(engine);
-    std::fs::remove_dir_all(&dir).ok();
     assert!(
         before.contains(&b"a constant string".to_vec()),
         "read while the engine stands: {before:?}"

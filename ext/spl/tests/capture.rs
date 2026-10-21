@@ -10,7 +10,7 @@ fn the_extension_is_loaded() {
         .build();
     let sink = Capture::default();
     let served = engine.serve_capture("<?php var_dump(extension_loaded('spl'));", sink);
-    assert_eq!(served.stdout, b"bool(true)\n");
+    assert_eq!(served.stdout_text(), "bool(true)\n");
 }
 
 /// `spl_directory.c`, `spl_array.c` and the other serializable
@@ -78,5 +78,5 @@ bool(true)
         .ini("disable_functions", LIST)
         .build();
     let served = engine.serve_capture(PROBE, Capture::default());
-    assert_eq!(String::from_utf8_lossy(&served.stdout), EXPECTED);
+    assert_eq!(served.stdout_text(), EXPECTED);
 }

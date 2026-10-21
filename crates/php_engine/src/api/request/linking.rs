@@ -923,6 +923,7 @@ mod tests {
     use crate::api::abi::{Admission, ExtensionBuilder, Lookup, Validation};
     use crate::api::values::ClassId;
     use crate::engine::{Engine, RequestDescription};
+    use crate::test::Files;
 
     /// An engine whose every file is held as opcache holds it.
     fn engine() -> Engine {
@@ -944,24 +945,22 @@ mod tests {
     /// request's own is linked in every request and never published.
     #[test]
     fn a_link_over_published_classes_is_published_once_and_one_over_the_request_s_never() {
-        let dir = std::env::temp_dir().join(format!("inheritance-{}", std::process::id()));
-        assert!(std::fs::create_dir_all(&dir).is_ok());
-        let shared = dir.join("shared.php");
-        let own = dir.join("own.php");
-        let written = [
-            (
-                &shared,
-                "<?php interface I {} class P { function p() {} } \
-                       class C extends P implements I { function c(): ?I { return null; } }",
-            ),
-            (
-                &own,
-                "<?php class Q extends R implements I { function q() {} }",
-            ),
-        ];
-        for (path, source) in written {
-            assert!(std::fs::write(path, source).is_ok());
-        }
+        let files = Files::new(
+            "inheritance",
+            &[
+                (
+                    "shared.php",
+                    "<?php interface I {} class P { function p() {} } \
+                     class C extends P implements I { function c(): ?I { return null; } }",
+                ),
+                (
+                    "own.php",
+                    "<?php class Q extends R implements I { function q() {} }",
+                ),
+            ],
+        );
+        let shared = files.path().join("shared.php");
+        let own = files.path().join("own.php");
         let engine = engine();
         let code = format!(
             "require '{}'; class R {{}} require '{}';",
@@ -996,6 +995,5 @@ mod tests {
             seen.last(),
             "the second request took the first's number"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

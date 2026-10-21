@@ -126,6 +126,7 @@ mod tests {
     use super::Request;
     use crate::api::values::ClassId;
     use crate::engine::{Engine, RequestDescription};
+    use crate::test::Files;
 
     /// Two requests loading one held file: the classes its compiler bound
     /// early are published once, with the unit, and each request
@@ -134,12 +135,15 @@ mod tests {
     /// request's own, as before.
     #[test]
     fn a_held_unit_s_early_bound_classes_are_published_once_and_declared_by_number() {
-        let dir = std::env::temp_dir().join(format!("early-bound-{}", std::process::id()));
-        assert!(std::fs::create_dir_all(&dir).is_ok());
-        let file = dir.join("classes.php");
-        let source = "<?php class P { function p() {} } class C extends P { function c() {} } \
-                      class D implements Countable { function count(): int { return 0; } }";
-        assert!(std::fs::write(&file, source).is_ok());
+        let files = Files::new(
+            "early-bound",
+            &[(
+                "classes.php",
+                "<?php class P { function p() {} } class C extends P { function c() {} } \
+                 class D implements Countable { function count(): int { return 0; } }",
+            )],
+        );
+        let file = files.path().join("classes.php");
         let engine = Engine::builder().build();
         let code = format!("require '{}';", file.display());
         let mut seen = Vec::new();
@@ -177,6 +181,5 @@ mod tests {
             seen.last(),
             "published once, the same numbers"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -1825,7 +1825,7 @@ mod tests {
                 .ini("fatal_error_backtraces", "1")
                 .build()
                 .serve_capture(script, crate::test::Capture::default());
-            String::from_utf8_lossy(&out.stdout).into_owned()
+            out.stdout_text()
         };
         let thrown = served("<?php\ndeclare(encoding = M_PI);");
         assert!(

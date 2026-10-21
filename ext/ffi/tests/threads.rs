@@ -21,15 +21,19 @@ use std::time::{Duration, Instant};
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_function;
-use php_ext::test::{Capture, Engine};
+use php_ext::test::{Capture, Engine, Files};
 
 /// The callback's type as C sees it.
 type Callback = extern "C" fn(i32) -> i32;
 
 /// Where the thread a test's C library starts writes what the callback
-/// returned to it.
+/// returned to it: a file in `Files::new("ffi-threads-<name>", ..)`'s
+/// directory, named here alone since a C function reads nothing a test
+/// hands it.
 fn returned_to(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("ffi-threads-{name}"))
+    std::env::temp_dir()
+        .join(format!("dax-{}-ffi-threads-{name}", std::process::id()))
+        .join("returned")
 }
 
 /// A C library that keeps the callback and calls it from a thread of
@@ -97,9 +101,9 @@ fn holding() -> Extension {
 /// returned to C once the thread wrote it: `None` where the thread was
 /// still waiting ten seconds on.
 fn served(later: extern "C" fn(Callback), name: &str, source: &str) -> (String, Option<String>) {
+    let files = Files::new(&format!("ffi-threads-{name}"), &[]);
     let out = returned_to(name);
-    std::fs::create_dir_all(env!("CARGO_TARGET_TMPDIR")).ok();
-    std::fs::remove_file(&out).ok();
+    assert_eq!(out.parent(), Some(files.path()));
     let at = later as usize;
     let source = format!(
         "<?php\n$ffi = FFI::cdef('typedef int (*cb)(int); typedef void (*later)(cb);');\n$later = $ffi->cast('later', {at});\n{source}"
@@ -117,7 +121,7 @@ fn served(later: extern "C" fn(Callback), name: &str, source: &str) -> (String, 
         .ini("html_errors", "0")
         .build();
     let served = engine.serve_capture(&source, Capture::default());
-    let stdout = String::from_utf8_lossy(&served.stdout).into_owned();
+    let stdout = served.stdout_text();
     let until = Instant::now() + Duration::from_secs(10);
     while Instant::now() < until {
         if let Ok(returned) = std::fs::read_to_string(&out) {

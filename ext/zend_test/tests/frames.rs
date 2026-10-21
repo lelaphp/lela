@@ -114,7 +114,7 @@ fn served(main: &str) -> String {
         .extensions(&[php_ext_zend_test::extension(), debugger])
         .build();
     let served = engine.serve_capture(&format!("{F}{main}"), Capture::default());
-    String::from_utf8_lossy(&served.stdout).into_owned()
+    served.stdout_text()
 }
 
 /// `f()` in a `Fiber` the test fiber started.

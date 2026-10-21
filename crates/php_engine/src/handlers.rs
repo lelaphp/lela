@@ -26337,8 +26337,7 @@ mod tests {
             "<?php class P { public $a = 1; private $b = 2; public $c = 3; } foreach (new P as $k => $v) echo \"$k=$v \";",
             crate::test::Capture::default(),
         );
-        assert_eq!(served.stdout, b"a=1 c=3 ");
-        assert_eq!(served.fatal, None);
+        served.assert_clean("a=1 c=3 ");
     }
 
     /// The same loop from inside the class sees every property, as
@@ -26349,8 +26348,7 @@ mod tests {
             "<?php class C { public $n = 1; protected $p = 2; public $s = 'x'; private $q = 3; public function all() { foreach ($this as $k => $v) echo \"$k=$v \"; } } $c = new C; foreach ($c as $k => $v) echo \"$k=$v \"; $c->all();",
             crate::test::Capture::default(),
         );
-        assert_eq!(served.stdout, b"n=1 s=x n=1 p=2 s=x q=3 ");
-        assert_eq!(served.fatal, None);
+        served.assert_clean("n=1 s=x n=1 p=2 s=x q=3 ");
     }
 
     /// #367, the second acceptance: an object of no properties runs the
@@ -26363,8 +26361,7 @@ mod tests {
             "<?php foreach (new stdClass as $v) echo 'no'; class U { public $kept = 2; public $null; } foreach (new U as $k => $v) echo $k, ' ';",
             crate::test::Capture::default(),
         );
-        assert_eq!(served.stdout, b"kept null ");
-        assert_eq!(served.fatal, None);
+        served.assert_clean("kept null ");
     }
 
     /// The walk itself: every property `Exception` declares is

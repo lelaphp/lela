@@ -451,23 +451,20 @@ mod tests {
 
     #[test]
     fn an_entry_under_a_link_is_expanded_where_the_link_leads() {
-        let dir = std::env::temp_dir().join(format!("t1710-blacklist-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let files = php_ext::test::Files::new("opcache-blacklist-link", &[("a/real/f", "")]);
+        let dir = files.path();
         let real = dir.join("a/real");
-        assert!(std::fs::create_dir_all(&real).is_ok());
-        assert!(std::os::unix::fs::symlink(&real, dir.join("link")).is_ok());
-        assert!(std::fs::write(real.join("f"), b"").is_ok());
-        let root = std::fs::canonicalize(&dir)
+        std::os::unix::fs::symlink(&real, dir.join("link")).expect("the tree takes the link");
+        let root = std::fs::canonicalize(dir)
             .map(|root| root.into_os_string().into_encoded_bytes())
             .unwrap_or_default();
-        let base = dir.clone().into_os_string().into_encoded_bytes();
+        let base = dir.as_os_str().as_encoded_bytes().to_vec();
         let resolved = |path: &[u8]| expand(path, Some(&base)).map(|p| p[root.len()..].to_vec());
         assert_eq!(resolved(b"link/c.php"), Some(b"/a/real/c.php".to_vec()));
         assert_eq!(resolved(b"link/none/x"), Some(b"/a/real/none/x".to_vec()));
         assert_eq!(resolved(b"link/../y"), Some(b"/a/y".to_vec()));
         assert_eq!(resolved(b"link/"), Some(b"/a/real/".to_vec()));
         assert_eq!(expand(b"link/f/g", Some(&base)), None);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

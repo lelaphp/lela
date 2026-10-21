@@ -94,13 +94,8 @@ fn traced() -> Extension {
 fn serve(source: &str) -> String {
     let engine = Engine::cli_builder().extensions(&[traced()]).build();
     let served = engine.serve_capture(source, Capture::default());
-    assert_eq!(
-        served.exit_code,
-        0,
-        "{}",
-        String::from_utf8_lossy(&served.stdout)
-    );
-    String::from_utf8_lossy(&served.stdout).into_owned()
+    assert_eq!(served.exit_code, 0, "{}", served.stdout_text());
+    served.stdout_text()
 }
 
 /// A fiber's body reads [`TraceNum::NONE`] whatever its resumer's

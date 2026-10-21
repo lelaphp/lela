@@ -3,7 +3,7 @@
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
 
-use php_ext::test::{Capture, Engine, LeakSensor};
+use php_ext::test::{Capture, Engine, Files, LeakSensor};
 
 /// What one request of an armed engine with this extension alone wrote.
 fn armed(source: &str) -> String {
@@ -12,14 +12,7 @@ fn armed(source: &str) -> String {
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(source, Capture::default());
-    String::from_utf8_lossy(&served.stdout).into_owned()
-}
-
-/// A scratch directory of this process's own, by its path.
-fn scratch(name: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("openssl-leak-{name}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).ok();
-    dir.to_string_lossy().into_owned()
+    served.stdout_text()
 }
 
 /// What an array hands the extension as text, a CA path of `ca_info`, a
@@ -29,8 +22,8 @@ fn scratch(name: &str) -> String {
 /// conversion makes a string of the request's.
 #[test]
 fn the_strings_an_array_s_values_convert_to_are_given_up() {
-    let dir = scratch("convert");
-    std::fs::write(format!("{dir}/in.txt"), "hello\n").ok();
+    let files = Files::new("openssl-convert", &[("in.txt", "hello\n")]);
+    let dir = files.path().display();
     let stdout = armed(&format!(
         r"<?php
 $k = openssl_pkey_new(['private_key_bits' => 1024]);
@@ -40,7 +33,6 @@ var_dump(@openssl_csr_new(['commonName' => 'a'], $k, null, ['unstructuredName' =
 var_dump(openssl_pkcs7_sign('{dir}/in.txt', '{dir}/out.txt', $x, $k, ['X' => 42]));
 "
     ));
-    std::fs::remove_dir_all(&dir).ok();
     assert_eq!(stdout, "bool(false)\nbool(false)\nbool(true)\n");
 }
 

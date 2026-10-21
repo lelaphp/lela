@@ -16,5 +16,5 @@ fn the_extension_is_loaded() {
         .build();
     let sink = Capture::default();
     let served = engine.serve_capture("<?php var_dump(extension_loaded('dom'));", sink);
-    assert_eq!(served.stdout, b"bool(true)\n");
+    assert_eq!(served.stdout_text(), "bool(true)\n");
 }

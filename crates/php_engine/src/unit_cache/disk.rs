@@ -212,10 +212,10 @@ mod tests {
 
     #[test]
     fn a_kept_unit_is_read_by_its_build_at_its_stamp_and_refused_otherwise() {
-        let dir = std::env::temp_dir().join(format!("disk-{}", std::process::id()));
+        let files = crate::test::Files::new("disk", &[]);
         let build = [b'a'; BUILD];
         let disk = Disk {
-            directory: &dir,
+            directory: files.path(),
             read_only: false,
             build: &build,
         };
@@ -239,7 +239,7 @@ mod tests {
         );
         let mut stale = std::fs::read(disk.path(full)).unwrap_or_default();
         stale[MAGIC.len()] = b'b';
-        std::fs::write(disk.path(full), &stale).ok();
+        std::fs::write(disk.path(full), &stale).expect("the kept file is written over");
         assert!(
             disk.load(full, None).is_none(),
             "a file another build wrote is never read"
@@ -248,18 +248,17 @@ mod tests {
         disk.store(full, 7, 12, b"body");
         let mut corrupt = std::fs::read(disk.path(full)).unwrap_or_default();
         corrupt.push(b'!');
-        std::fs::write(disk.path(full), &corrupt).ok();
+        std::fs::write(disk.path(full), &corrupt).expect("the kept file is written over");
         assert!(
             !disk.holds(full, None),
             "nor one whose body is not what it wrote"
         );
-        std::fs::remove_file(disk.path(full)).ok();
+        std::fs::remove_file(disk.path(full)).expect("the kept file is removed");
         disk.store(full, 7, 12, b"body");
         assert!(
             disk.load(full, Some(8)).is_none(),
             "a changed file is not read"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A tier that replaces `zend_execute_ex`, as phpdbg's does.

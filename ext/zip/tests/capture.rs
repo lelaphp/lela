@@ -1,7 +1,7 @@
 //! The extension through the `Capture` sink (design §4.10, ADR-0002): a
 //! fresh engine with this crate alone, never the bundle.
 
-use php_ext::test::{Capture, Engine};
+use php_ext::test::{Capture, Engine, Files};
 
 fn serve(code: &str) -> Vec<u8> {
     let engine = Engine::builder()
@@ -22,8 +22,8 @@ fn the_extension_is_loaded() {
 /// round-tripped through the file the close wrote.
 #[test]
 fn an_archive_round_trips() {
-    let dir = std::env::temp_dir().join(format!("zip-capture-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap_or_default();
+    let files = Files::new("zip-capture", &[]);
+    let dir = files.path();
     let path = dir.join("t.zip");
     let path = path.to_string_lossy();
     let code = format!(
@@ -44,7 +44,6 @@ echo strlen($z->getFromName('a.txt')), "\n";
 "#
     );
     let out = serve(&code);
-    std::fs::remove_dir_all(&dir).ok();
     assert_eq!(
         String::from_utf8_lossy(&out),
         "1\n2 note 12 259\nxy 1\n30\n"
@@ -66,10 +65,9 @@ echo strlen($z->getFromName('a.txt')), "\n";
 /// this is held through `Capture` and not a witness.
 #[test]
 fn an_entry_added_once_torrentzip_is_wanted_is_written() {
-    let dir = std::env::temp_dir().join(format!("zip-torrentzip-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap_or_default();
+    let files = Files::new("zip-torrentzip", &[("a.txt", "xyz")]);
+    let dir = files.path();
     let source = dir.join("a.txt");
-    std::fs::write(&source, "xyz").unwrap_or_default();
     let source = source.to_string_lossy();
     let path = dir.join("t.zip");
     let path = path.to_string_lossy();
@@ -85,6 +83,5 @@ echo $z->getArchiveFlag(ZipArchive::AFL_IS_TORRENTZIP), ' ', $z->getNameIndex(0)
 "#
     );
     let out = serve(&code);
-    std::fs::remove_dir_all(&dir).ok();
     assert_eq!(String::from_utf8_lossy(&out), "11 0\n1\n1 ab xyzabc\n");
 }

@@ -19,10 +19,7 @@ fn served(source: &str) -> (String, Option<String>) {
         ])
         .build();
     let served = engine.serve_capture(source, Capture::default());
-    (
-        String::from_utf8_lossy(&served.stdout).into_owned(),
-        served.fatal,
-    )
+    (served.stdout_text(), served.fatal)
 }
 
 #[test]
@@ -180,10 +177,7 @@ fn armed(source: &str) -> (String, Option<String>) {
     let engine = engine.sense_leaks(php_ext::test::LeakSensor::Armed);
     let engine = engine.build();
     let served = engine.serve_capture(source, Capture::default());
-    (
-        String::from_utf8_lossy(&served.stdout).into_owned(),
-        served.fatal,
-    )
+    (served.stdout_text(), served.fatal)
 }
 
 /// `serialize` walks a nested array with the foreach walk holding

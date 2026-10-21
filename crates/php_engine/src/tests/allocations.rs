@@ -31,7 +31,7 @@ fn observed(source: &str) -> (String, Vec<Allocation>) {
     rec.mark("built");
     let served = engine.serve_capture(source, Capture::default());
     rec.mark("served");
-    let stdout = String::from_utf8_lossy(&served.stdout).into_owned();
+    let stdout = served.stdout_text();
     (stdout, told(&rec.events().between("built", "served"), 0))
 }
 
@@ -138,7 +138,7 @@ fn what_memory_get_usage_reads_is_the_same_observed_or_not() {
         .build();
     let read = |engine: &Engine, on: u8| {
         let served = engine.serve_capture(&source(on), Capture::default());
-        let stdout = String::from_utf8_lossy(&served.stdout).into_owned();
+        let stdout = served.stdout_text();
         let (read, start) = stdout.split_once('|').unwrap_or((&stdout, ""));
         (read.to_owned(), start.to_owned())
     };

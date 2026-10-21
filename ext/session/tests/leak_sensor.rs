@@ -12,7 +12,7 @@ fn armed(source: &str) -> String {
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(source, Capture::default());
-    String::from_utf8_lossy(&served.stdout).into_owned()
+    served.stdout_text()
 }
 
 /// A cookie parameter given twice in `session_set_cookie_params`'
@@ -59,8 +59,7 @@ ob_end_flush();
 "#,
         Capture::default(),
     );
-    assert_eq!(served.fatal, None);
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "caught\ncaught\n");
+    served.assert_clean("caught\ncaught\n");
 }
 
 /// A `__wakeup()` that throws after a good `php_serialize` read leaves
@@ -89,10 +88,6 @@ session_destroy(); ob_end_flush();
 "#,
         Capture::default(),
     );
-    assert_eq!(served.fatal, None);
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "wakeup A\nwake\nx,a A\n"
-    );
+    served.assert_clean("wakeup A\nwake\nx,a A\n");
     assert_eq!(String::from_utf8_lossy(&served.stderr), "");
 }

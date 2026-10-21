@@ -1797,11 +1797,13 @@ mod tests {
     fn a_parse_error_is_rendered_as_its_level() {
         let served = served("<?php refuse(); echo 'after';");
         assert_eq!(
-            String::from_utf8_lossy(&served.stdout),
-            "\nParse error: Unclosed '(' in  on line 1\n"
+            (
+                served.stdout_text().as_str(),
+                served.exit_code,
+                served.fatal
+            ),
+            ("\nParse error: Unclosed '(' in  on line 1\n", 255, None)
         );
-        assert_eq!(served.exit_code, 255);
-        assert_eq!(served.fatal, None);
     }
 
     /// A raiser naming a class the bundle does not link, `spl`'s
@@ -1815,7 +1817,7 @@ mod tests {
     fn a_raiser_naming_an_unlinked_class_is_the_internal_error_naming_it() {
         for native in ["unlinked", "unlinked_made"] {
             let served = served(&format!("<?php {native}(); echo 'after';"));
-            let stdout = String::from_utf8_lossy(&served.stdout);
+            let stdout = served.stdout_text();
             assert_eq!(
                 stdout,
                 format!(
