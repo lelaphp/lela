@@ -224,12 +224,15 @@ fn stub_at(ir: &TraceIr) -> Option<OplineIdx> {
 /// pointer it writes through is its last argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kernel {
-    /// `step(cx, frame, opline: u32, stood: *mut Stood)`: the opline
-    /// served whole through `php_engine::step` (§5.2), and where the
-    /// interpreter stands after it written to `stood`.
+    /// `step(cx, frame, opline: u32, func: u32, stood: *mut Stood)`: the
+    /// opline served whole through `php_engine::tier::step_held` (§5.2)
+    /// over the op array the engine numbers `func`, the one the trace
+    /// recorded, and where the interpreter stands after it written to
+    /// `stood`.
     Step,
-    /// `push_call(cx, frame, opline: u32, callee: u32, stood: *mut
-    /// Stood)`: an inline `INIT_*`, served as its handler serves it where
+    /// `push_call(cx, frame, opline: u32, func: u32, callee: u32, stood:
+    /// *mut Stood)`: an inline `INIT_*` of the op array the engine numbers
+    /// `func`, served as its handler serves it where
     /// its callee resolves to the op array the engine numbers `callee`;
     /// where it resolves to another, nothing is pushed and `stood.call`
     /// is null.

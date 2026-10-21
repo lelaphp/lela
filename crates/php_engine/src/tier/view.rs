@@ -69,6 +69,16 @@ impl Epoch {
         self.func(f)?.lay_landing(at)
     }
 
+    /// The op array `f` names, held by this epoch for as long as the
+    /// borrow: what compiled code that recorded `f` in this epoch hands a
+    /// step ([`super::step_held`]), so the step reads the op array the
+    /// trace holds and no frame's function. None for an op array this
+    /// epoch holds no row for, a request's.
+    #[must_use]
+    pub fn held(&self, f: FuncRef) -> Option<Held<'_>> {
+        self.func(f)?.op_array().map(Held)
+    }
+
     /// The row of a held op array.
     fn func(&self, f: FuncRef) -> Option<&super::published::Func> {
         match f.0 {
@@ -147,6 +157,68 @@ impl FuncRef {
     #[must_use]
     pub const fn at(offset: MapPtrOffset) -> FuncRef {
         FuncRef(offset)
+    }
+}
+
+/// The op array a holder holds for a frame (`jit-design.md` §2.2, #3144):
+/// the one the loop has in hand at a safepoint, or the one an epoch holds
+/// for a trace that recorded it ([`Epoch::held`]). Only those hand one
+/// out, so the borrow is the hold: the op array stands for as long as the
+/// borrow. Not the op array itself, so what a tier reads of it is what
+/// these methods say, its offset, its words and its safepoints, as php's
+/// `zend_jit_trace_counter_helper` reads `ZEND_OP_TRACE_INFO(opline,
+/// offset)` from the op array the interpreter has in hand.
+#[derive(Clone, Copy)]
+pub struct Held<'a>(&'a OpArray);
+
+impl std::fmt::Debug for Held<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Held").field(&self.0.runtime_cache).finish()
+    }
+}
+
+impl<'a> Held<'a> {
+    /// The op array itself, for the engine's own loop.
+    pub(crate) fn code(self) -> &'a OpArray {
+        self.0
+    }
+
+    /// The [`FuncRef`] that names the op array, its `runtime_cache`
+    /// offset.
+    #[must_use]
+    pub fn func(self) -> FuncRef {
+        FuncRef(self.0.runtime_cache)
+    }
+
+    /// The word of safepoint `at`, read at the op array's offset in the
+    /// epoch `req` started in ([`word`] without the frame's lookup): the
+    /// sealed word for a request's op array and past the last safepoint.
+    #[must_use]
+    pub fn word(self, req: &Request, at: SafepointIdx) -> &Word {
+        row(req, self.0.runtime_cache).map_or(&SEALED, |func| func.word(at))
+    }
+
+    /// The landing word of opline `at` ([`landing`] without the frame's
+    /// lookup).
+    #[must_use]
+    pub fn landing(self, req: &Request, at: OplineIdx) -> &Word {
+        row(req, self.0.runtime_cache).map_or(&SEALED, |func| func.landing(at))
+    }
+
+    /// The opline safepoint `at` stands at ([`safepoint_at`] without the
+    /// frame's lookup).
+    #[must_use]
+    pub fn safepoint_at(self, at: SafepointIdx) -> Option<OplineIdx> {
+        self.0.safepoints.get(usize::try_from(at.0).ok()?).copied()
+    }
+}
+
+/// The row of the epoch `req` started in at `offset`, none for a
+/// request's offset.
+fn row(req: &Request, offset: MapPtrOffset) -> Option<&super::published::Func> {
+    match offset {
+        MapPtrOffset::Engine(offset) => req.arena().func(offset),
+        MapPtrOffset::Request(_) => None,
     }
 }
 

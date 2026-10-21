@@ -964,8 +964,8 @@ impl<'a> Emit<'a> {
         let mut sig = Signature::new(self.call_conv);
         // The `ExitCtx`, the frame's room and the opline come first.
         let params: &[Type] = match kernel {
-            Kernel::Step => &[I64, I64, I32, I64],
-            Kernel::PushCall => &[I64, I64, I32, I32, I64],
+            Kernel::Step => &[I64, I64, I32, I32, I64],
+            Kernel::PushCall => &[I64, I64, I32, I32, I32, I64],
             Kernel::Release => &[I64, I64, I32, I64, I32],
             Kernel::Copy => &[I64, I64, I32, I64, I32, I64],
         };
@@ -983,6 +983,18 @@ impl<'a> Emit<'a> {
         let room = self.room(line.frame)?;
         let opline = self.b.ins().iconst(I32, i64::from(line.opline.0));
         Ok([room, opline])
+    }
+
+    /// The engine offset of the op array `frame` serves, which a step of
+    /// one of its oplines serves it from.
+    fn func_of(&mut self, frame: Frame) -> Result<Value, Abort> {
+        let func = self
+            .ir
+            .frames
+            .get(usize::from(frame.0))
+            .map(|info| info.func)
+            .ok_or_else(|| mismatch("a frame past the trace's"))?;
+        Ok(self.b.ins().iconst(I32, i64::from(engine_offset(func)?)))
     }
 
     /// A word of the [`Stood`] the last kernel wrote.
@@ -1003,8 +1015,9 @@ impl<'a> Emit<'a> {
             }
         }
         let [room, opline] = self.served(line)?;
+        let func = self.func_of(line.frame)?;
         let stood = self.b.ins().stack_addr(I64, self.stood, 0);
-        self.call(Kernel::Step, &[room, opline, stood], leave_of(line))?;
+        self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?;
         if matches!(
             line.opcode,
             Opcode::DoFcall | Opcode::DoIcall | Opcode::DoUcall | Opcode::DoFcallByName
@@ -1615,10 +1628,11 @@ impl<'a> Emit<'a> {
             .ok_or_else(|| mismatch("an inline call that cannot leave"))?;
         let callee = self.b.ins().iconst(I32, i64::from(engine_offset(*callee)?));
         let [room, opline] = self.served(line)?;
+        let func = self.func_of(line.frame)?;
         let stood = self.b.ins().stack_addr(I64, self.stood, 0);
         self.call(
             Kernel::PushCall,
-            &[room, opline, callee, stood],
+            &[room, opline, func, callee, stood],
             Some(Leave::Exit(exit)),
         )?;
         let call = self.stood_word(I64, STOOD_CALL);

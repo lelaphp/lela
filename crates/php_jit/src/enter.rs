@@ -46,7 +46,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::AtomicBool;
 
-use php_engine::tier::{self, Fatal, FrameRef, FuncRef, Request, Stepped, TraceNum};
+use php_engine::tier::{self, Epoch, Fatal, FrameRef, FuncRef, Held, Request, Stepped, TraceNum};
 use php_heap::Zval;
 use php_unit::{MapPtrOffset, OplineIdx};
 
@@ -93,6 +93,10 @@ pub(crate) struct ExitCtx<'a, R = Request> {
     /// Where the trace is entered.
     at: At,
     pending: Option<Pending>,
+    /// The epoch the trace was taken from, which holds every op array it
+    /// recorded: what a kernel serves those op arrays out of
+    /// ([`tier::step_held`]), none for a stand-in request.
+    epoch: Option<&'a Epoch>,
     lent: PhantomData<&'a mut R>,
 }
 
@@ -118,6 +122,7 @@ impl<'a, R: Crossed> ExitCtx<'a, R> {
             interrupt,
             at: At::First,
             pending: None,
+            epoch: None,
             lent: PhantomData,
         }
     }
@@ -222,7 +227,7 @@ const _: () =
 pub(crate) unsafe fn crossed<R: Crossed, T: Out>(
     cx: *mut ExitCtx<'_, R>,
     out: *mut T,
-    kernel: impl FnOnce(&mut R) -> Result<T, Fatal>,
+    kernel: impl FnOnce(&mut R, Option<&Epoch>) -> Result<T, Fatal>,
 ) -> Status {
     // SAFETY: the caller hands the live context `enter` made, borrowed by
     // nothing else for the length of this call.
@@ -231,7 +236,8 @@ pub(crate) unsafe fn crossed<R: Crossed, T: Out>(
     // whole life, and compiled code touches the request only through
     // wrappers, one at a time on its stack.
     let req = unsafe { &mut *cx.req };
-    match catch_unwind(AssertUnwindSafe(|| kernel(req))) {
+    let epoch = cx.epoch;
+    match catch_unwind(AssertUnwindSafe(|| kernel(req, epoch))) {
         // SAFETY: the caller hands an out slot as `put` asks.
         Ok(answer) => unsafe { answered(cx, out, answer) },
         Err(payload) => {
@@ -279,12 +285,22 @@ unsafe fn answered<R: Crossed, T: Out>(
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Room(pub(crate) *mut u8);
 
+/// Where a kernel serves: the room of its frame, the opline, and the
+/// epoch the trace that called it holds its op arrays in, none for a
+/// stand-in request.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct On<'a> {
+    pub(crate) room: Room,
+    pub(crate) at: OplineIdx,
+    pub(crate) epoch: Option<&'a Epoch>,
+}
+
 /// One `extern "C"` wrapper per listed kernel (`jit-design.md` §4.6,
 /// §5.1), in a `mod` the invocation names, over the request type it
 /// names. A line `name(a: A) -> T = tier::item;` writes
 /// `name(cx, frame, opline, a, out: *mut T) -> Status`, which calls the
-/// `name` beside the invocation as `name(req, Room(frame),
-/// OplineIdx(opline), a)`; a line with no `-> T` has no out pointer, and
+/// `name` beside the invocation as `name(req, On { room, at, epoch },
+/// a)`, the room, the opline and the `ExitCtx`'s epoch ([`On`]); a line with no `-> T` has no out pointer, and
 /// `= tier::item` names the engine item the kernel serves through, which
 /// the wrappers' `mod` imports, so the item's removal fails this build,
 /// and which `api-check` reads for `tier.lock`. The engine's list names
@@ -332,7 +348,7 @@ macro_rules! kernels {
         ) -> $crate::enter::Status {
             let (room, at) = ($crate::enter::Room(frame), php_unit::OplineIdx(opline));
             // SAFETY: this wrapper's own contract, handed on whole.
-            unsafe { $crate::enter::crossed(cx, out, |req| super::$name(req, room, at, $($arg),*)) }
+            unsafe { $crate::enter::crossed(cx, out, |req, epoch| super::$name(req, $crate::enter::On { room, at, epoch }, $($arg),*)) }
         }
     };
     (@wrapper $request:ty, $name:ident ( $($arg:ident : $ty:ty),* )) => {
@@ -351,26 +367,29 @@ macro_rules! kernels {
             let (room, at) = ($crate::enter::Room(frame), php_unit::OplineIdx(opline));
             // SAFETY: this wrapper's own contract; a kernel that answers
             // nothing has no out pointer.
-            unsafe { $crate::enter::crossed(cx, std::ptr::null_mut::<()>(), |req| super::$name(req, room, at, $($arg),*)) }
+            unsafe { $crate::enter::crossed(cx, std::ptr::null_mut::<()>(), |req, epoch| super::$name(req, $crate::enter::On { room, at, epoch }, $($arg),*)) }
         }
     };
 }
 
 kernels! {
     Request => mod wrapped {
-        Step => step() -> Stood = tier::step;
-        PushCall => push_call(callee: u32) -> Stood = tier::step;
+        Step => step(func: u32) -> Stood = tier::step_held;
+        PushCall => push_call(func: u32, callee: u32) -> Stood = tier::step_held;
         Release => release(word: u64, type_info: u32) = tier::release;
         Copy => copy(word: u64, type_info: u32) -> Zval;
     }
 }
 
-/// The `step` kernel (`jit-design.md` §5.2): the opline at `at` served
-/// whole, and where the interpreter stands after it.
-fn step(req: &mut Request, room: Room, at: OplineIdx) -> Result<Stood, Fatal> {
-    let frame = standing(req, room, at)?;
-    let stepped = tier::step(req, frame)?;
-    stood(req, stepped)
+/// The `step` kernel (`jit-design.md` §5.2): the opline at `at` of the op
+/// array the engine numbers `func`, which the trace recorded and its epoch
+/// holds, served whole over that op array ([`tier::step_held`]), and
+/// where the interpreter stands after it.
+fn step(req: &mut Request, on: On<'_>, func: u32) -> Result<Stood, Fatal> {
+    let frame = standing(req, on.room, on.at)?;
+    let (held, epoch) = held(on, func)?;
+    let stepped = tier::step_held(req, frame, held, epoch)?;
+    stood(req, stepped, (frame, func))
 }
 
 /// The `push_call` kernel (`jit-design.md` §4.3): the `INIT_*` at `at`
@@ -380,29 +399,36 @@ fn step(req: &mut Request, room: Room, at: OplineIdx) -> Result<Stood, Fatal> {
 /// recorded; where it holds another, or none yet, nothing is pushed and
 /// the call stood is null, so compiled code leaves for the interpreter to
 /// serve the opline whole.
-fn push_call(req: &mut Request, room: Room, at: OplineIdx, callee: u32) -> Result<Stood, Fatal> {
-    let frame = standing(req, room, at)?;
-    if tier::primed(req, frame, at).and_then(engine_offset) != Some(callee) {
-        let refused = where_stood(req, frame)?;
+fn push_call(req: &mut Request, on: On<'_>, func: u32, callee: u32) -> Result<Stood, Fatal> {
+    let frame = standing(req, on.room, on.at)?;
+    let (held, epoch) = held(on, func)?;
+    if tier::primed(req, frame, held, on.at).and_then(engine_offset) != Some(callee) {
+        let refused = where_stood(req, frame, Some(func))?;
         return Ok(Stood {
             call: ptr::null_mut(),
             ..refused
         });
     }
-    let stepped = tier::step(req, frame)?;
-    stood(req, stepped)
+    let stepped = tier::step_held(req, frame, held, epoch)?;
+    stood(req, stepped, (frame, func))
+}
+
+/// The op array the engine numbers `func`, as the epoch of the trace
+/// that recorded it holds it.
+fn held(on: On<'_>, func: u32) -> Result<(Held<'_>, &Epoch), Fatal> {
+    let epoch = on
+        .epoch
+        .ok_or_else(|| internal("a kernel was called with no epoch to serve from"))?;
+    let held = epoch
+        .held(FuncRef::at(MapPtrOffset::Engine(func)))
+        .ok_or_else(|| internal("a trace stepped an op array its epoch does not hold"))?;
+    Ok((held, epoch))
 }
 
 /// The `release` kernel: php's `zval_ptr_dtor` of the counted value
 /// compiled code gives up, a destructor's throw left pending.
-fn release(
-    req: &mut Request,
-    room: Room,
-    at: OplineIdx,
-    word: u64,
-    type_info: u32,
-) -> Result<(), Fatal> {
-    standing(req, room, at)?;
+fn release(req: &mut Request, on: On<'_>, word: u64, type_info: u32) -> Result<(), Fatal> {
+    standing(req, on.room, on.at)?;
     tier::release(req, zval(word, type_info));
     Ok(())
 }
@@ -413,7 +439,7 @@ fn release(
     clippy::unnecessary_wraps,
     reason = "a kernel answers a Result; this one never fails"
 )]
-fn copy(_: &mut Request, _: Room, _: OplineIdx, word: u64, type_info: u32) -> Result<Zval, Fatal> {
+fn copy(_: &mut Request, _: On<'_>, word: u64, type_info: u32) -> Result<Zval, Fatal> {
     let z = zval(word, type_info);
     let z = z.as_reference().map_or(z, |reference| reference.val());
     z.addref();
@@ -431,15 +457,19 @@ fn standing(req: &mut Request, room: Room, at: OplineIdx) -> Result<FrameRef, Fa
     Ok(frame)
 }
 
-/// Where the interpreter stands after a step: the frame it goes on in,
-/// whatever the step pushed or popped.
-fn stood(req: &mut Request, stepped: Stepped) -> Result<Stood, Fatal> {
+/// Where the interpreter stands after a step of `stepped`'s opline in
+/// `frame`, which serves the op array the engine numbers `func`: the
+/// frame it goes on in, whatever the step pushed or popped.
+fn stood(
+    req: &mut Request,
+    stepped: Stepped,
+    (frame, func): (FrameRef, u32),
+) -> Result<Stood, Fatal> {
     match stepped {
-        Stepped::Same(frame)
-        | Stepped::Pushed(frame)
-        | Stepped::Popped(frame)
-        | Stepped::Moved(frame)
-        | Stepped::Threw(frame) => where_stood(req, frame),
+        Stepped::Same(at) => where_stood(req, at, (at == frame).then_some(func)),
+        Stepped::Pushed(at) | Stepped::Popped(at) | Stepped::Moved(at) | Stepped::Threw(at) => {
+            where_stood(req, at, None)
+        }
         Stepped::Done => Err(internal(
             "a kernel's step ended the serving a trace runs in",
         )),
@@ -447,21 +477,26 @@ fn stood(req: &mut Request, stepped: Stepped) -> Result<Stood, Fatal> {
 }
 
 /// The [`Stood`] of `frame`: its room, the room of the call under way in
-/// it, `EX(call)`, the engine offset of its op array, none where the
-/// request alone holds it, and its opline.
-fn where_stood(req: &mut Request, frame: FrameRef) -> Result<Stood, Fatal> {
-    let call = match tier::building(req).filter(|building| building.call != frame) {
-        Some(building) => tier::room(req, building.call).map_or(ptr::null_mut(), NonNull::as_ptr),
+/// it, `EX(call)`, the engine offset of its op array, `func` where the
+/// caller knows it and looked up where not, none where the request alone
+/// holds it, and its opline.
+fn where_stood(req: &mut Request, frame: FrameRef, func: Option<u32>) -> Result<Stood, Fatal> {
+    let call = match tier::building_call(req).filter(|call| *call != frame) {
+        Some(call) => tier::room(req, call).map_or(ptr::null_mut(), NonNull::as_ptr),
         None => ptr::null_mut(),
     };
     let room =
         tier::room(req, frame).ok_or_else(|| internal("a step went on in a frame with no room"))?;
+    let func = match func {
+        Some(func) => func,
+        None => tier::func(req, frame)
+            .and_then(engine_offset)
+            .unwrap_or(u32::MAX),
+    };
     Ok(Stood {
         frame: room.as_ptr(),
         call,
-        func: tier::func(req, frame)
-            .and_then(engine_offset)
-            .unwrap_or(u32::MAX),
+        func,
         opline: tier::frame(req, frame).map_or(0, |view| view.opline().0),
     })
 }
@@ -544,7 +579,9 @@ pub(crate) struct Exited {
 /// exit it left through, [`lower::UNWOUND`] or [`lower::ABANDONED`].
 type Entry = unsafe extern "C" fn(*mut ExitCtx<'_>, *mut u8) -> u32;
 
-/// `trace` called on `frame` (`jit-design.md` §4.6), with the request's
+/// `trace` called on `frame` (`jit-design.md` §4.6), out of `epoch`, the
+/// epoch whose table holds it and whose rows hold every op array it
+/// recorded, which its kernels serve from, with the request's
 /// trace number, php's `EG(jit_trace_num)`, the trace's for the length of
 /// the call and the one before it again after. A panic a wrapper caught
 /// is resumed and a fatal returned, read before the exit; an unwind hands
@@ -569,7 +606,7 @@ type Entry = unsafe extern "C" fn(*mut ExitCtx<'_>, *mut u8) -> u32;
 pub(crate) fn enter(
     req: &mut Request,
     frame: FrameRef,
-    trace: &Trace,
+    (epoch, trace): (&Epoch, &Trace),
     at: At,
 ) -> Result<Left, Fatal> {
     let room = tier::room(req, frame)
@@ -582,6 +619,7 @@ pub(crate) fn enter(
     tier::set_trace_num(req, TraceNum::from_raw(trace.id.get()));
     let mut cx = ExitCtx::new(&mut *req);
     cx.at = at;
+    cx.epoch = Some(epoch);
     // SAFETY: `cx` lives on this frame for the whole call and nothing but
     // the code and its wrappers touches the request meanwhile; `room` is
     // the room of a frame on the request's stack.
@@ -706,7 +744,7 @@ impl Crossed for Tally {
 /// mapping and the `catch_unwind` the bar measures.
 #[cfg(any(test, feature = "bench"))]
 #[inline(never)]
-fn tally(t: &mut Tally, _: Room, _: OplineIdx, n: u64) -> Result<u64, Fatal> {
+fn tally(t: &mut Tally, _: On<'_>, n: u64) -> Result<u64, Fatal> {
     if n == u64::MAX {
         return Err(Fatal::error("the tally's last step"));
     }
@@ -731,7 +769,7 @@ pub mod bench {
 
     use php_unit::OplineIdx;
 
-    use super::{ExitCtx, Fatal, Pending, Room, Status, Tally, answered, tallied};
+    use super::{ExitCtx, Fatal, On, Pending, Room, Status, Tally, answered, tallied};
 
     /// Which way the loop's calls go.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -789,7 +827,12 @@ pub mod bench {
         let cx = unsafe { &mut *cx };
         // SAFETY: `req` came from the `&mut Tally` the `ExitCtx` borrows.
         let req = unsafe { &mut *cx.req };
-        let answer = super::tally(req, Room(frame), OplineIdx(opline), n);
+        let on = On {
+            room: Room(frame),
+            at: OplineIdx(opline),
+            epoch: None,
+        };
+        let answer = super::tally(req, on, n);
         // SAFETY: the caller hands an out slot valid for one write.
         unsafe { answered(cx, out, answer) }
     }
@@ -828,10 +871,15 @@ pub mod bench {
                 }
             }
             Through::Direct => {
-                let kernel: fn(&mut Tally, Room, OplineIdx, u64) -> Result<u64, Fatal> =
+                let kernel: fn(&mut Tally, On<'_>, u64) -> Result<u64, Fatal> =
                     black_box(super::tally);
+                let on = On {
+                    room: Room(std::ptr::null_mut()),
+                    at: OplineIdx(0),
+                    epoch: None,
+                };
                 for i in 0..n {
-                    last = kernel(&mut tally, Room(std::ptr::null_mut()), OplineIdx(0), i)?;
+                    last = kernel(&mut tally, on, i)?;
                 }
             }
         }

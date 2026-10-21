@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use php_engine::tier::Flow;
-use php_engine::tier::{self, Fatal, FrameRef, Request, SafepointIdx, Site, Stepped, Word};
+use php_engine::tier::{self, Epoch, Fatal, FrameRef, Request, SafepointIdx, Site, Stepped, Word};
 use php_unit::OplineIdx;
 
 use crate::compiler::{self, Job};
@@ -441,11 +441,11 @@ fn run_at(
     if at == At::Body && (trace.body.is_none() || trace.body != stands) {
         return None;
     }
-    let entered = enter::enter(req, frame, trace, at);
+    let entered = enter::enter(req, frame, (&epoch, trace), at);
     if matches!(entered, Ok(Left::Declined)) {
         return None;
     }
-    Some(followed(req, shared, table, trace, entered))
+    Some(followed(req, shared, (&epoch, table), trace, entered))
 }
 
 /// What `trace` left through, `entered`, followed from trace to trace
@@ -453,7 +453,7 @@ fn run_at(
 fn followed<'t>(
     req: &mut Request,
     shared: &Shared,
-    table: &'t table::Table,
+    (epoch, table): (&'t Epoch, &'t table::Table),
     mut trace: &'t table::Trace,
     mut entered: Result<Left, Fatal>,
 ) -> Flow {
@@ -465,7 +465,7 @@ fn followed<'t>(
             // entered again at its header, its handler.
             Ok(Left::Interrupted(header)) => match tier::interrupted(req) {
                 Ok(false) => {
-                    entered = enter::enter(req, header, trace, At::First);
+                    entered = enter::enter(req, header, (epoch, trace), At::First);
                     continue;
                 }
                 Ok(true) => return Flow::Resume(header),
@@ -523,7 +523,7 @@ fn followed<'t>(
             },
         };
         trace = next;
-        entered = enter::enter(req, frame, trace, At::First);
+        entered = enter::enter(req, frame, (epoch, trace), At::First);
     }
 }
 

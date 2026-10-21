@@ -48,6 +48,7 @@ tier::FrameRef
 tier::FuncRef
 tier::FuncRef::at
 tier::FuncRef::offset
+tier::Held
 tier::Hooked
 tier::MapPtrRaw
 tier::Parked
@@ -86,6 +87,7 @@ tier::at_room
 tier::begin
 tier::below
 tier::building
+tier::building_call
 tier::call
 tier::catches
 tier::class_number
@@ -123,3 +125,4 @@ tier::unwind
 tier::word
 [kernels]
 tier::release
+tier::step_held

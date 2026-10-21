@@ -108,15 +108,21 @@ pub struct Building {
 /// (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1233-1288`).
 #[must_use]
 pub fn building(req: &Request) -> Option<Building> {
-    let (call, frame) = req.vm().stack.top()?;
-    let header = frame.header();
-    if !header.info.building() {
-        return None;
-    }
+    let call = building_call(req)?;
+    let header = req.vm().stack.frame(call)?.header();
     let target = header
         .function
         .and_then(|function| req.user_function(function))
         .and_then(|user| crate::exec::body_of(&user.unit, user.body))
         .map(|code| FuncRef::at(code.runtime_cache));
     Some(Building { call, target })
+}
+
+/// The record of the call being built at the top of the stack, if one
+/// is: [`building`]'s `call` alone, what compiled code follows as
+/// `EX(call)` after a kernel, read without its callee's lookup.
+#[must_use]
+pub fn building_call(req: &Request) -> Option<FrameRef> {
+    let (call, frame) = req.vm().stack.top()?;
+    frame.header().info.building().then_some(call)
 }

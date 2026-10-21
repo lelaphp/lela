@@ -63,9 +63,12 @@ pub use frames::{
     entry, evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
 };
 use held::{Entered, Kept, Scope, Units};
-pub use sampled::{Building, Sample, building, class_number, numbered_class, on_heap, sample};
+pub use sampled::{
+    Building, Sample, building, building_call, class_number, numbered_class, on_heap, sample,
+};
 pub use view::{
-    Epoch, FuncRef, MapPtrRaw, UnitView, epoch, epoch_state, func, landing, safepoint_at, word,
+    Epoch, FuncRef, Held, MapPtrRaw, UnitView, epoch, epoch_state, func, landing, safepoint_at,
+    word,
 };
 
 pub use crate::api::values::ClassId;
@@ -1096,25 +1099,67 @@ fn unwind_frame<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, 
 pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
     let serving = exec::standing(req, frame)?;
     let code = exec::serving_code(&serving, frame)?;
+    match stepped_over(req, frame, code)? {
+        Stepped::Pushed(callee) => {
+            let serving = exec::standing(req, callee)?;
+            let code = exec::serving_code(&serving, callee)?;
+            activated_over(req, callee, code)
+        }
+        stepped => Ok(stepped),
+    }
+}
+
+/// [`step`] over `held`, the op array a holder holds for `frame`, as
+/// compiled code steps an opline of the op array its trace recorded: no
+/// share of a unit is taken and the frame's function is not looked up
+/// (`jit-design.md` §5.2, #3147). A frame the handler pushed is activated
+/// over the op array `epoch`, the epoch the holder holds `held` in,
+/// holds for it, and over a share of its unit where the epoch holds none,
+/// a request's.
+pub fn step_held(
+    req: &mut Request,
+    frame: FrameRef,
+    held: Held<'_>,
+    epoch: &Epoch,
+) -> Result<Stepped, Fatal> {
+    match stepped_over(req, frame, held.code())? {
+        Stepped::Pushed(callee) => {
+            if let Some(code) = func(req, callee).and_then(|f| epoch.held(f)) {
+                return activated_over(req, callee, code.code());
+            }
+            let serving = exec::standing(req, callee)?;
+            let code = exec::serving_code(&serving, callee)?;
+            activated_over(req, callee, code)
+        }
+        stepped => Ok(stepped),
+    }
+}
+
+/// The one handler at `frame`'s opline over `code`, with `Nop` at the
+/// safepoints, the observers told as the loop tells them ([`step`]).
+#[inline]
+fn stepped_over(req: &mut Request, frame: FrameRef, code: &OpArray) -> Result<Stepped, Fatal> {
     let at = req.vm().opline(frame);
     let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
     crate::observer::tell_before(req, frame, op.opcode);
     let next = dispatch::dispatch::<Nop>(req, frame, code, op, at)?;
     #[cfg(debug_assertions)]
     req.sensed_after(code, op)?;
-    match settled(req, frame, at, next) {
-        Stepped::Pushed(callee) => {
-            let serving = exec::standing(req, callee)?;
-            let told = Declared::of(req);
-            let code = exec::serving_code(&serving, callee)?;
-            let start = req.vm().opline(callee);
-            let entry = exec::entry_of(code);
-            match entered::<Nop, Declared>(req, callee, code, (start, entry), told)? {
-                Stepped::Threw(at) => Ok(Stepped::Threw(at)),
-                _ => Ok(Stepped::Pushed(callee)),
-            }
-        }
-        stepped => Ok(stepped),
+    Ok(settled(req, frame, at, next))
+}
+
+/// A callee a step pushed, serving `code`, activated as the loop
+/// activates it, with `Nop` at its `Site::Entry` ([`step`]): `Threw` of
+/// it where its prologue or the interrupt left a throwable pending,
+/// `Pushed` of it otherwise.
+#[inline]
+fn activated_over(req: &mut Request, callee: FrameRef, code: &OpArray) -> Result<Stepped, Fatal> {
+    let told = Declared::of(req);
+    let start = req.vm().opline(callee);
+    let entry = exec::entry_of(code);
+    match entered::<Nop, Declared>(req, callee, code, (start, entry), told)? {
+        Stepped::Threw(at) => Ok(Stepped::Threw(at)),
+        _ => Ok(Stepped::Pushed(callee)),
     }
 }
 
