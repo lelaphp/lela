@@ -146,6 +146,8 @@ Check: G5 under `force` with the time-limit and signal witnesses of §7; one `TR
 
 **NEXT-2. Revision NEXT-2 (2026-10-21).** §4.9's paragraph on the return root gains where a recording that stops at a call's activation goes on, as #3066 built it under §4.9's rulings (a recording that stops at a compiled trace's root enters it there, revision 52) and design §3.1's: through that entry's handler, as php's interpreter goes on at the opline a recording stopped at by running its handler (`zend_jit_trace_counter_helper` after `zend_jit_trace_hot_root`, `Z/ext/opcache/jit/zend_jit_vm_helpers.c:464-500`). `dispatch::hot` entered a trace just published only at a loop's header, and visited no entry, so on fib `$main`'s recording, aborting with `deep recursion` at `fib(3)`'s activation, left that entry unvisited and `fib(2)`'s rooted `TRACE 1`, and the entry trace's `recursive call` stop, at its own root, was not entered: the engine wrote a return root where php writes trace 1's exit and its side. `record::Ended::activated` names a stop in a frame a followed call pushed, where `dispatch::went_on` visits the entry as `Site::Entry` does, and a trace published at a `recursive call` stop is entered where it stopped, beside a loop's and a recursive return's. Measured with `cargo xtask trace-dump`, exit numbers set aside: fib writes php's lines but one side from a second exit php's inference spares (#3149); the other kernels write what revision NEXT measured. This states what was built under §4.9's rulings and design §3.1, reverses no ruling and no ADR, so there is no ADR; a person reads this row at the merge. Check: `grep -n 'pub(crate) activated' crates/php_jit/src/record.rs` and `grep -n 'fn went_on' crates/php_jit/src/dispatch.rs` each match.
 
+**NEXT-3. Revision NEXT-3 (2026-10-22).** §2.2's interface block states the signature Mitchell ruled on #3144 (2026-10-21, a session), its op-array half, as #3147 built it: `Tier::safepoint(req, frame, site, held: Held<'_>)`, where `Held` borrows the op array the loop holds for `frame`, so a visit reads its word at the op array's `runtime_cache` offset (`Held::word`), as php's counter handler reads `ZEND_OP_TRACE_INFO(opline, offset)`, and no longer through the frame's header, the function table and the unit's body (`Request::unit_of`). `Held` is a handle and not `&OpArray`, as the ruling chose, so the op array's layout stays off `tier.lock`; only the loop's hand and an epoch's row make one (`Epoch::held`), so the borrow is the hold. `tier::word` and `tier::safepoint_at`, the frame-taking forms, are gone for `Held::word` and `Held::safepoint_at`. §5.2's step kernel serves the op array its trace recorded out of the epoch the trace was taken from (`tier::step_held`), taking no share of a unit. The ruling's other half, the tier's engine state resolved once per `execute` through an associated type on `Tier`, waits: it threads a parameter through the generated dispatch, `crates/php_engine/build.rs`, at every site handler's call on the interpreter's hot path, which the orchestrator holds until the inline call and return land and are measured on g1 and g2. Measured, fib(36) under tracing against `opcache.jit=off`: 2.73x before, 2.75x after the step kernel, 2.67x after the safepoint (load 7 to 12), no change past the noise; the kernel crossing as a whole is the cost. This states what was built under the ruling on #3144, reverses no ADR, so there is no ADR; a person reads this row at the merge. Check: `grep -n "pub struct Held" crates/php_engine/src/tier/view.rs` and `grep -n "pub fn step_held" crates/php_engine/src/tier.rs` each match; `grep -n "pub fn word(req" crates/php_engine/src/tier/view.rs` matches nothing.
+
 **If this is wrong, it is wrong in eight places.** First, that the write view of a dual-mapped arena costs nothing on the execute path: it does not touch it, but on aarch64 the cache maintenance after a write through the other alias is the part no source in the note settles (§4.4); on macOS aarch64, whose two views are one address, #2741's `mov; ret`, concurrent publish and reused-chunk tests pass (revision 19), and on Linux aarch64 the same tests through the two aliases are the check. Second, that every loop header and every return can be numbered by the compiler and found by its handler: a backward `JMP`, `JMPZ` or `JMPNZ` and a `RETURN*` leave `result` unused in php's op arrays (§3.1; verified at 8.5.9 in every handler body and every emission, `data/ops-extraction.md`), `ops.toml` says which field per opcode, and the compiler asserts that every backward jump it emits other than `FAST_RET` has a column and a header, so a disagreement is a compile-time failure on the first op array that has one. Third, that a `UnitView` can be owned rather than borrowed, so that `types::build` runs on a thread with no request (§4.1, §4.8); if engine-immutable classes turn out not to be shareable by `Arc`, the compile thread is kept and `build` alone moves back to the recording thread. Fourth, that the entry-frame slot on the VM stack is per fiber (§2.2). Fifth, that a 24-bit one-level id, a segmented read side borrowed with two loads per trace entry, and one worker do not measurably move G1, G4 or G6. Sixth, that one interrupt test per compiled loop iteration is enough and costs what php's does: a trace has at most one back-edge, the root's, and a recursive trace is bounded by `opcache.jit_max_recursive_calls`, so every trace without a loop runs a bounded number of oplines before the interpreter's own check; G2 carries the cost and the §7 witnesses the sufficiency. Seventh, that raising `Site::Entry` at activation is where php's counter fires: it is, for a function with no typed parameters, where php installs the counter after the `RECV*` run it skips (`zend_jit_trace.c:8983-9001`, `zend_execute.c:4426-4437`); for a typed function php's counter is on opline zero, before the `RECV` that may throw, so php counts such a call and this engine does not. That is no longer an open item but a `trace` row of the registry (§4.1), kept so that a throwing `RECV` is never inside a recording. Eighth, that all ones decodes as `blacklisted` in every future layout of the word: it is a one-line invariant of `policy` with a test, and the sealed word is the only bit pattern `php_engine` knows.
 
 ---
@@ -181,8 +183,9 @@ pub trait Tier: 'static {
     /// Called at three sites and nowhere else: in a backward `JMP*` handler with the jump
     /// target as `frame.opline` (Site::Loop); by the activation of a user frame, after its
     /// `RECV*` prologue has run without raising (Site::Entry); in `RETURN*` before the frame
-    /// pops (Site::Return). `frame` is the frame the loop is executing.
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow;
+    /// pops (Site::Return). `frame` is the frame the loop is executing, and `held` the op array
+    /// the loop holds for it, which the site's word is read from (revision NEXT-3, #3144).
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: Held<'_>) -> Flow;
     /// Which of php's execution hooks the tier replaces, as phpdbg's does (design revision 58).
     const HOOKED: Hooked = Hooked::NONE;
     /// Whether the tier holds the frame `execute` enters until it executes it (revision 16).
@@ -197,6 +200,17 @@ pub trait Tier: 'static {
 /// is at, so the number does not come from the frame.
 #[derive(Clone, Copy)] pub enum Site { Loop(SafepointIdx), Entry, Return(SafepointIdx) }
 impl Site { pub fn idx(self) -> SafepointIdx; }
+
+/// The op array a holder holds for a frame: the one the loop has in hand at a site, or the one
+/// an epoch holds for a trace that recorded it (`Epoch::held`). A handle and not `&OpArray`, so
+/// the op array's layout stays off `tier.lock`; a visit reads its word at the op array's
+/// `runtime_cache` offset, as php's counter handler reads `ZEND_OP_TRACE_INFO(opline, offset)`.
+#[derive(Clone, Copy)] pub struct Held<'a>(/* &'a OpArray */);
+impl Held<'_> {
+    pub fn func(self) -> FuncRef;
+    pub fn word(self, req: &Request, at: SafepointIdx) -> &Word;      // sealed for a request-scoped op array or past the last
+    pub fn safepoint_at(self, at: SafepointIdx) -> Option<OplineIdx>; // the opline a site's number stands at
+}
 
 pub enum Flow {
     /// Nothing happened; run `frame.opline`.
@@ -215,7 +229,7 @@ pub enum Flow {
 
 pub struct Nop;
 impl Tier for Nop {
-    #[inline(always)] fn safepoint(_: &mut Request, _: FrameRef, _: Site) -> Flow { Flow::Continue }
+    #[inline(always)] fn safepoint(_: &mut Request, _: FrameRef, _: Site, _: Held<'_>) -> Flow { Flow::Continue }
 }
 
 pub fn execute<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Bailout>;
@@ -226,6 +240,10 @@ pub fn execute<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Bailou
 /// handler and never an unwind. A fused compare-and-branch handler is one handler over two
 /// oplines (design §5.8), and `Same` then names the opline after both.
 pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Bailout>;
+/// `step` over the op array a trace holds for `frame`, out of `epoch`, the epoch it was taken
+/// from: what the step kernel serves, with no share of a unit taken and no lookup of the frame's
+/// function (revision NEXT-3).
+pub fn step_held(req: &mut Request, frame: FrameRef, held: Held<'_>, epoch: &Epoch) -> Result<Stepped, Bailout>;
 
 pub enum Stepped {
     /// The same frame; continue at `frame.opline`.
@@ -353,16 +371,14 @@ impl SafepointIdx { pub const ENTRY: Self; }
 /// engine's for a held unit and the request's for a request-scoped one (revision 24).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)] pub struct FuncRef(/* MapPtrOffset */);
 pub fn func(req: &Request, frame: FrameRef) -> Option<FuncRef>;
-pub fn word(req: &Request, frame: FrameRef, at: SafepointIdx) -> &Word;   // sealed for a request-scoped op array or past the last
 /// A hold on the request's epoch (design §5.14), `Send` and `Sync`: what a holder and a view keep.
 #[derive(Clone)] pub struct Epoch(/* Arc<Arena> */);
 pub fn epoch(req: &Request) -> Epoch;
-impl Epoch { pub fn word(&self, f: FuncRef, at: SafepointIdx) -> &Word; }
+impl Epoch { pub fn word(&self, f: FuncRef, at: SafepointIdx) -> &Word; pub fn held(&self, f: FuncRef) -> Option<Held<'_>>; }
 /// A return root's word, the landing past a call (§2.2): one per opline of a held op array, laid down
 /// sealed the first time a tier arms one of its landings, sealed until armed (revision NEXT).
 pub fn landing(req: &Request, frame: FrameRef, at: OplineIdx) -> &Word;
 impl Epoch { pub fn landing(&self, f: FuncRef, at: OplineIdx) -> &Word; pub fn lay_landing(&self, f: FuncRef, at: OplineIdx) -> Option<&Word>; }
-pub fn safepoint_at(req: &Request, frame: FrameRef, at: SafepointIdx) -> Option<OplineIdx>;   // the opline a site's number stands at
 /// The tier's one value for an epoch, its trace table (§4.5): made by the epoch's first request that asks,
 /// a borrow of the request's hold; read back from a hold that outlives its request (revision 27).
 pub fn epoch_state<T: Any + Send + Sync>(req: &Request, make: impl FnOnce() -> T) -> Option<&T>;
@@ -422,7 +438,7 @@ The engine word. The design of record deleted r2 §5.14's feedback sentence (des
 ```rust
 impl Tier for Jit {
     #[inline(always)]
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow { dispatch::safepoint(req, frame, site) }
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: Held<'_>) -> Flow { dispatch::safepoint(req, frame, site, held) }
     fn extension() -> Option<Extension> {
         Some(Extension::new("jit")
             .ini(policy::INI)                      // php's opcache.jit* names, plus jit.mode and jit.compile
@@ -792,13 +808,12 @@ fn hot(req: &mut Request, frame: FrameRef, claim: Claim) -> Next {
 /// From a `Func` word: what `Jit::safepoint` is. Here, and only here, `Continue` means "nothing happened".
 /// Outlined: only a `Bound::On` engine binds `Jit`'s loop and asks it (§4, revision 59).
 #[inline(never)]
-pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: Held<'_>) -> Flow {
     let engine = req.engine::<JitEngine>();                                           // looked up once per asked safepoint
     if engine.shared.policy.mode() == Mode::Off { return Flow::Continue }             // asked under Off all the same, no word is read or written
     let at = site.idx();
-    let func = req.func(frame.func());                                                // FrameRef::func() -> FuncRef; Request::func -> &Func
-    let holder = || Holder::Root { epoch: req.epoch(), func: frame.func(), at };      // a hold on the request's epoch, as `Recorded.view`'s (§4.1)
-    match visit(req, frame, func.word(at), holder, site.into()) {
+    let holder = || Holder::Root { epoch: req.epoch(), func: held.func(), at };       // a hold on the request's epoch, as `Recorded.view`'s (§4.1)
+    match visit(req, frame, held.word(req, at), holder, site.into()) {                // the word at the held op array's offset, no frame lookup
         Next::Enter(id) => run(req, frame, id),
         Next::Continue => Flow::Continue,
         Next::Resume(f) => Flow::Resume(f),
