@@ -16270,6 +16270,39 @@ fn withheld_step(
 ///   }
 /// }
 /// ```
+///
+/// A dynamic property's bucket holding a number takes a number pair in
+/// place, and anything else, a string, a reference, a division by
+/// zero, a name laid down with its warning, an undefined value, goes
+/// through the pair of handlers; a name a call answers is the kernel's:
+///
+/// ```php
+/// #[AllowDynamicProperties] class E { public $d = 0; }
+/// function n($q) { return $q . ''; }
+/// $o = new E; $o->p = 1;
+/// $o->{n('p')} += 2; $o->{n('p')} *= 1.5; $o->{n('p')} -= 0.5; var_dump($o->p, $o->{n('p')} .= 'x');
+/// $o->i = PHP_INT_MAX; $o->{n('i')} += 1; $o->j = 7; $o->{n('j')} %= 3; $o->{n('j')} <<= 4; var_dump($o->i, $o->j);
+/// try { $o->{n('j')} /= 0; } catch (DivisionByZeroError $e) { echo $e->getMessage(), "\n"; }
+/// $o->s = '5'; $o->{n('s')} += 1; $x = 2; $o->r = &$x; $o->{n('r')} += 3; var_dump($o->s, $x);
+/// $o->{n('m')} += 4; $o->{n('u')} += $undef; var_dump($o->m, $o->u);
+/// ```
+/// ```expect
+/// float(4)
+/// string(2) "4x"
+/// float(9.223372036854776E+18)
+/// int(16)
+/// Division by zero
+/// int(6)
+/// int(5)
+///
+/// Warning: Undefined property: E::$m in %s on line 9
+///
+/// Warning: Undefined variable $undef in %s on line 9
+///
+/// Warning: Undefined property: E::$u in %s on line 9
+/// int(4)
+/// int(0)
+/// ```
 fn step_property(
     req: &mut Request,
     frame: FrameRef,
@@ -16312,16 +16345,31 @@ fn step_property(
         PropertyPtr::Served(back) => Ok(served_property_step(
             req, frame, code, step, object, key, back,
         )),
-        // The entry stands, so the pair of handlers finds it.
-        PropertyPtr::Dynamic(_) => Ok(served_property_step(
-            req,
-            frame,
-            code,
-            step,
-            object,
-            key,
-            WriteBack::Property,
-        )),
+        // `zend_binary_assign_op_obj_dim` over the bucket: a number pair
+        // made in place by the rule the inline path and the kernel make
+        // it by, and anything else, whose operation may raise and so run
+        // user code that writes the table, through the pair of handlers,
+        // which finds the entry laid down.
+        PropertyPtr::Dynamic(place) => {
+            if let Some(rule) = inline::compound(op.extended_value) {
+                let value = step.value(req, frame, code);
+                if let Some(z) = inline::binary(rule, place.read(), value.to_zval()) {
+                    place.write(z);
+                    exec::free_operand(req, frame, data.op1_type, data.op1);
+                    write_out(req, frame, op, &Value::of_slot(z));
+                    return Ok(Ok(()));
+                }
+            }
+            Ok(served_property_step(
+                req,
+                frame,
+                code,
+                step,
+                object,
+                key,
+                WriteBack::Property,
+            ))
+        }
         // A readonly or set-restricted property gets no place, so the
         // operation is made over what `read_property` answers, and what
         // it throws comes before what the write refuses
