@@ -54,7 +54,8 @@ use crate::CompileError;
 /// sized for the loop's own re-entry, whose level costs a multiple of
 /// php's (design §5.6, #3043), and a native's own recursion, which
 /// costs about what php's C costs, would otherwise go that multiple
-/// deeper than php before it is refused (#3142). The loop's entry is
+/// deeper than php before it is refused (#3142; the design's sentence for
+/// it is #3158's to settle). The loop's entry is
 /// held to the floor instead ([`entry_overflowed`](Self::entry_overflowed)),
 /// and at each native's call back into PHP the limit moves to php's
 /// budget below the frame that called ([`reentered`](Self::reentered)),
@@ -79,8 +80,9 @@ enum Allowed {
     Fixed,
     /// Detect: `span` bytes below the base, or below the frame a
     /// re-entry stands at, never past the floor; the loop's entry is
-    /// held to the floor. `span` is php's main thread's size less
-    /// `zend.reserved_stack_size`, the number php's sentence names.
+    /// held to the floor. `span` is the main thread's size, or the
+    /// thread's own where that is smaller, less
+    /// `zend.reserved_stack_size`: the number php's sentence names.
     Detected { span: usize },
 }
 
@@ -136,7 +138,10 @@ impl StackLimit {
     /// main thread has, php's budget, and the rest of the thread is the
     /// loop's entry's ([`Allowed::Detected`]). A positive number is the
     /// size to allow below the base the platform read, or below this
-    /// frame where it read none.
+    /// frame where it read none. Where the main thread's size cannot be
+    /// read, under `ulimit -s unlimited` on Linux among them, php's
+    /// main thread falls back to the size php assumes
+    /// ([`php_heap::call_stack_default_size`]), and so does the budget.
     #[must_use]
     pub fn init(max_allowed: i64, reserved: u64) -> StackLimit {
         let reserved = reserved.max(RESERVED_MIN);
@@ -150,9 +155,8 @@ impl StackLimit {
         let floor = limit(base, thread, reserved);
         let (limit, allowed) = match max_allowed {
             DETECT => {
-                let php = read
-                    .and(main_call_stack_size())
-                    .map_or(thread, |main| main.min(thread));
+                let main = main_call_stack_size().unwrap_or_else(call_stack_default_size);
+                let php = read.map_or(thread, |_| main.min(thread));
                 let limit = limit(base, php, reserved).max(floor);
                 let span = base.saturating_sub(limit);
                 (limit, Allowed::Detected { span })
