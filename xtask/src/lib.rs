@@ -139,6 +139,17 @@ pub(crate) fn read(path: &Path) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
 }
 
+/// What a command named `what` printed on its first stream, where it ran
+/// and exited 0; the error carries its status and its second stream.
+pub(crate) fn printed(out: std::io::Result<std::process::Output>, what: &str) -> Result<String> {
+    let out = out.with_context(|| format!("running {what}"))?;
+    if !out.status.success() {
+        let said = String::from_utf8_lossy(&out.stderr);
+        anyhow::bail!("{what} exited {}: {}", out.status, said.trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// The TOML file at `path` as a `T`, an error naming it where it cannot be
 /// read or is not one.
 pub(crate) fn read_toml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {

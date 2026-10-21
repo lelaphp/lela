@@ -22,7 +22,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use syn::visit::{self, Visit};
 use toml::Value;
 
@@ -263,10 +263,8 @@ fn features(krate: &Present) -> Result<BTreeMap<String, Vec<String>>> {
 /// Every `php_ext_<name>::extension` path in one file, in the order
 /// written, with the `cfg`s around it.
 fn registrations(file: &Path) -> Result<Vec<Registration>> {
-    let text = crate::read(file)?;
-    let parsed = syn::parse_file(&text).with_context(|| format!("parsing {}", file.display()))?;
     let mut calls = Calls::default();
-    calls.visit_file(&parsed);
+    calls.visit_file(&super::inventory::parse_file(file)?);
     Ok(calls.found)
 }
 

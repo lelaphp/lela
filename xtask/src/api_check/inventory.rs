@@ -227,7 +227,7 @@ impl<'a> Inventory<'a> {
                     Item::Use(_) => {}
                     Item::Mod(m) => todo.push(id.child(&m.ident.to_string())),
                     other => {
-                        if let Some((kind, name, _)) = plain_item(other) {
+                        if let Some((kind, name, ..)) = plain_item(other) {
                             out.push(format!("{kind} {name}"));
                         } else if let Item::Impl(_) = other {
                             out.push("an impl block".to_owned());
@@ -269,7 +269,7 @@ impl<'a> Inventory<'a> {
                     }
                 }
                 other => {
-                    if let Some((_, name, vis)) = plain_item(other)
+                    if let Some((_, name, vis, _)) = plain_item(other)
                         && is_pub(vis)
                     {
                         self.collect_item(id, &name, &join(prefix, &name), out)?;
@@ -558,7 +558,7 @@ impl<'a> Inventory<'a> {
         let defined = module
             .items
             .iter()
-            .any(|item| plain_item(item).is_some_and(|(_, n, _)| n == name));
+            .any(|item| plain_item(item).is_some_and(|(_, n, ..)| n == name));
         match (child, defined) {
             (Some(_), false) => return Ok(Target::Module(id.child(name))),
             (None, false) => {}
@@ -682,9 +682,18 @@ fn generates(module: &Module, name: &str) -> bool {
 }
 
 fn parse(file: &Path) -> Result<Vec<Item>> {
-    let text = crate::read(file)?;
-    let parsed = syn::parse_file(&text).with_context(|| format!("parsing {}", file.display()))?;
-    Ok(parsed.items)
+    Ok(parse_file(file)?.items)
+}
+
+/// The Rust file at `file`, parsed, an error naming it where it cannot be
+/// read or is not one.
+pub(super) fn parse_file(file: &Path) -> Result<syn::File> {
+    parsed(&crate::read(file)?, file)
+}
+
+/// `text`, the Rust file at `file`, parsed.
+pub(super) fn parsed(text: &str, file: &Path) -> Result<syn::File> {
+    syn::parse_file(text).with_context(|| format!("parsing {}", file.display()))
 }
 
 fn is_pub(vis: &Visibility) -> bool {
@@ -699,28 +708,30 @@ fn join(prefix: &str, name: &str) -> String {
     }
 }
 
-/// The kind, name and visibility of an item that is one lock line: not
-/// a module, a `use`, an impl, a macro or an extern block.
-fn plain_item(item: &Item) -> Option<(&'static str, String, &Visibility)> {
-    let (kind, ident, vis) = match item {
-        Item::Const(i) => ("const", &i.ident, &i.vis),
-        Item::Enum(i) => ("enum", &i.ident, &i.vis),
-        Item::Fn(i) => ("fn", &i.sig.ident, &i.vis),
-        Item::Static(i) => ("static", &i.ident, &i.vis),
-        Item::Struct(i) => ("struct", &i.ident, &i.vis),
-        Item::Trait(i) => ("trait", &i.ident, &i.vis),
-        Item::TraitAlias(i) => ("trait alias", &i.ident, &i.vis),
-        Item::Type(i) => ("type", &i.ident, &i.vis),
-        Item::Union(i) => ("union", &i.ident, &i.vis),
+/// The kind, name, visibility and attributes of an item that is one lock
+/// line: not a module, a `use`, an impl, a macro or an extern block.
+pub(super) fn plain_item(
+    item: &Item,
+) -> Option<(&'static str, String, &Visibility, &[syn::Attribute])> {
+    let (kind, ident, vis, attrs) = match item {
+        Item::Const(i) => ("const", &i.ident, &i.vis, &i.attrs),
+        Item::Enum(i) => ("enum", &i.ident, &i.vis, &i.attrs),
+        Item::Fn(i) => ("fn", &i.sig.ident, &i.vis, &i.attrs),
+        Item::Static(i) => ("static", &i.ident, &i.vis, &i.attrs),
+        Item::Struct(i) => ("struct", &i.ident, &i.vis, &i.attrs),
+        Item::Trait(i) => ("trait", &i.ident, &i.vis, &i.attrs),
+        Item::TraitAlias(i) => ("trait alias", &i.ident, &i.vis, &i.attrs),
+        Item::Type(i) => ("type", &i.ident, &i.vis, &i.attrs),
+        Item::Union(i) => ("union", &i.ident, &i.vis, &i.attrs),
         _ => return None,
     };
-    Some((kind, ident.to_string(), vis))
+    Some((kind, ident.to_string(), vis, attrs))
 }
 
 /// The segments of an inherent impl's self type: `[Cache]` for
 /// `impl Cache<'a>`, `[crate, request, Request]` for
 /// `impl crate::request::Request`.
-fn self_type_path(ty: &Type) -> Option<Vec<String>> {
+pub(super) fn self_type_path(ty: &Type) -> Option<Vec<String>> {
     match ty {
         Type::Path(p) => Some(
             p.path
@@ -828,19 +839,15 @@ impl Import {
 /// tokens, `format!`'s arguments and a `macro_rules!` body among them,
 /// `kernels!` lists being read by [`kernels_named`].
 pub fn uses(file: &Path) -> Result<Vec<Import>> {
-    let text = crate::read(file)?;
-    let parsed = syn::parse_file(&text).with_context(|| format!("parsing {}", file.display()))?;
-    Ok(Walk::of(&parsed))
+    Ok(Walk::of(&parse_file(file)?))
 }
 
 /// The `php_engine` paths the `kernels!` lists in a file name, each
 /// line's after its `=` (`jit-design.md` §5.3): what `tier.lock`'s kernels
 /// section is generated from.
 pub fn kernels_named(file: &Path) -> Result<Vec<String>> {
-    let text = crate::read(file)?;
-    let parsed = syn::parse_file(&text).with_context(|| format!("parsing {}", file.display()))?;
     let mut lists = Lists(Vec::new());
-    lists.visit_file(&parsed);
+    lists.visit_file(&parse_file(file)?);
     let mut out = Vec::new();
     for list in lists.0 {
         let named = list

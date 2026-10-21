@@ -242,18 +242,12 @@ impl Snapshot {
     /// and commit.
     pub fn commit(root: &Path, commit: &str) -> Result<Arc<Snapshot>> {
         let read = COMMITS.get_or_init(|| Mutex::new(BTreeMap::new()));
-        let at = (root.to_path_buf(), commit.to_owned());
-        if let Some(snapshot) = read.lock().ok().and_then(|held| held.get(&at).cloned()) {
-            return Ok(snapshot);
-        }
-        let mut files = git::blobs(root, commit, &[])?;
-        files.sort_unstable();
-        let short = commit.chars().take(7).collect();
-        let snapshot = Arc::new(Snapshot::new(root, short, files.clone(), files));
-        if let Ok(mut held) = read.lock() {
-            held.insert(at, Arc::clone(&snapshot));
-        }
-        Ok(snapshot)
+        memo(read, (root.to_path_buf(), commit.to_owned()), || {
+            let mut files = git::blobs(root, commit, &[])?;
+            files.sort_unstable();
+            let short = commit.chars().take(7).collect();
+            Ok(Arc::new(Snapshot::new(root, short, files.clone(), files)))
+        })
     }
 
     /// The workspace root the snapshot was taken in.
@@ -268,14 +262,9 @@ impl Snapshot {
     /// manifest, the one kind of path it can widen. A path outside what a
     /// [`Snapshot::disk_over`] was read under is refused.
     pub fn key(&self, path: &Path) -> Result<String> {
-        if let Some(key) = self.keys.lock().ok().and_then(|k| k.get(path).cloned()) {
-            return Ok(key);
-        }
-        let key = self.over(&closure(&self.root, path)?)?;
-        if let Ok(mut keys) = self.keys.lock() {
-            keys.insert(path.to_path_buf(), key.clone());
-        }
-        Ok(key)
+        memo(&self.keys, path.to_path_buf(), || {
+            self.over(&closure(&self.root, path)?)
+        })
     }
 
     /// The stamp of the sources under `path`: its key, and the commit
@@ -397,17 +386,25 @@ pub(crate) fn cargo_metadata(root: &Path) -> Result<String> {
         .arg("--manifest-path")
         .arg(&manifest)
         .current_dir(root)
-        .output()
-        .context("running cargo metadata")?;
-    if !out.status.success() {
-        let said = String::from_utf8_lossy(&out.stderr);
-        bail!(
-            "cargo metadata over {}: {}",
-            manifest.display(),
-            said.trim()
-        );
+        .output();
+    crate::printed(out, &format!("cargo metadata over {}", manifest.display()))
+}
+
+/// `make`'s value at `key`, kept in `cache` the first time and read from it
+/// after: what each read here that runs once per process keeps.
+fn memo<K: Ord, V: Clone>(
+    cache: &Mutex<BTreeMap<K, V>>,
+    key: K,
+    make: impl FnOnce() -> Result<V>,
+) -> Result<V> {
+    if let Some(kept) = cache.lock().ok().and_then(|held| held.get(&key).cloned()) {
+        return Ok(kept);
     }
-    String::from_utf8(out.stdout).context("cargo metadata wrote no UTF-8")
+    let value = make()?;
+    if let Ok(mut held) = cache.lock() {
+        held.insert(key, value.clone());
+    }
+    Ok(value)
 }
 
 /// The graphs read in this process, by root: `cargo metadata` runs once
@@ -420,14 +417,9 @@ impl Graph {
     /// so every path's closure is the path alone.
     pub(crate) fn of(root: &Path) -> Result<Arc<Graph>> {
         let read = READ.get_or_init(|| Mutex::new(BTreeMap::new()));
-        if let Some(graph) = read.lock().ok().and_then(|g| g.get(root).cloned()) {
-            return Ok(graph);
-        }
-        let graph = Arc::new(Graph::read(root)?);
-        if let Ok(mut held) = read.lock() {
-            held.insert(root.to_path_buf(), Arc::clone(&graph));
-        }
-        Ok(graph)
+        memo(read, root.to_path_buf(), || {
+            Ok(Arc::new(Graph::read(root)?))
+        })
     }
 
     fn read(root: &Path) -> Result<Graph> {

@@ -68,10 +68,7 @@ pub fn exists(root: &Path, krate: &Crate) -> bool {
 pub fn undeclared(root: &Path, manifest: &Manifest) -> Vec<String> {
     let mut out = Vec::new();
     for dir in layout::CRATE_DIRS {
-        let Ok(entries) = std::fs::read_dir(root.join(dir.dir)) else {
-            continue;
-        };
-        let mut names: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        let mut names = crate::entries(&root.join(dir.dir)).unwrap_or_default();
         names.sort();
         for path in names {
             if !path.join("Cargo.toml").is_file() {

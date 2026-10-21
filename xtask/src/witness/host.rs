@@ -185,10 +185,8 @@ impl Held {
             return Ok(None);
         };
         let file = krate.path().join(LINES);
-        let text = match fs::read_to_string(root.join(&file)) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
+        let Some(text) = crate::read_if(&root.join(&file))? else {
+            return Ok(None);
         };
         Held::parse(host, file, &text).map(Some)
     }
@@ -827,18 +825,22 @@ mod tests {
 
     /// A server's stop waits for what its `settled` file must match after
     /// the last answer (#2531): here the pinned host writes its log line
-    /// three seconds after it is ready and the engine's at once, so a stop sent
-    /// at the answer finds the two files apart, and one sent once the line
-    /// is there finds them alike.
+    /// some seconds after it is ready and the engine's at once, so a stop
+    /// sent at the answer finds the two files apart, and one sent once the
+    /// line is there finds them alike. The stop at the answer is held
+    /// against a host whose line comes thirty seconds late, when the host
+    /// would have ended on its own, so no stall of a loaded machine
+    /// between the answer and the stop lets the line land first.
     #[test]
     fn a_server_is_stopped_once_its_file_matches_what_it_settles_on() {
         let hosts = Tree::new("host-line-settled").unwrap();
-        let pinned = host(
-            &hosts,
-            "php-cgi",
-            "echo up > up; (/bin/sleep 3; echo done >> log) >/dev/null 2>&1 & exec /bin/sleep 30",
-        );
-        let pin = pin(&pinned, None);
+        let late = |name: &str, seconds: u32| {
+            let body = format!(
+                "echo up > up; (/bin/sleep {seconds}; echo done >> log) >/dev/null 2>&1 & exec /bin/sleep 30"
+            );
+            pin(&host(&hosts, name, &body), None)
+        };
+        let (unsettled, pin) = (late("php-cgi-later", 30), late("php-cgi", 3));
         let engine = host(
             &hosts,
             "engine",
@@ -850,7 +852,7 @@ mod tests {
                  ready = [\"up\", \"up\"]\n{settled}stop = \"SIGTERM\"\n"
             )
         };
-        assert_eq!(judged(&line(""), &pin, &engine).0, Judgement::Fail);
+        assert_eq!(judged(&line(""), &unsettled, &engine).0, Judgement::Fail);
         let settled = line("settled = [\"log\", \"^done\"]\n");
         let (judgement, note) = judged(&settled, &pin, &engine);
         assert_eq!(judgement, Judgement::Pass, "{note}");
