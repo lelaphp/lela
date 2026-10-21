@@ -16,7 +16,7 @@ use crate::tables::{
 use crate::text::{decode_runs, new_string, substitute, value_error};
 use php_ext::abi::{OrFalse, Passed, Ref, Union, Variadic};
 use php_ext::attr::php_function;
-use php_ext::raising::{Level, Thrown, docref, fatal, pending};
+use php_ext::raising::{Level, Thrown, call_stack_end, docref, fatal, pending};
 use php_ext::request::Request;
 use php_ext::values::walk::{Guarded, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef, walk};
@@ -68,12 +68,30 @@ fn convert_from(
 
 /// `php_mb_convert_encoding_recursive`: keys and strings converted,
 /// scalars kept, arrays walked, objects dropped after a warning.
+///
+/// php asks no stack limit here, as [`check_array`]'s walk asks none,
+/// so this walk is held to the thread's floor and a nest php converts
+/// whole under the small-stack regime is converted whole.
+///
+/// ```php
+/// $a = ["\xe9"]; for ($i = 0; $i < 3000; $i++) { $a = [$a]; }
+/// $out = mb_convert_encoding($a, 'UTF-8', 'ISO-8859-1');
+/// for ($i = 0; $i < 3000; $i++) { $out = $out[0]; }
+/// var_dump($out);
+/// ```
+/// ```expect regime=small-stack
+/// array(1) {
+///   [0]=>
+///   string(2) "é"
+/// }
+/// ```
 fn convert_array(
     req: &mut Request,
     input: PhpArray,
     to: Encoding,
     from: &[Encoding],
 ) -> Result<Option<Owner<PhpArray>>, Thrown> {
+    call_stack_end(req)?;
     if input.is_recursive() {
         input.unprotect();
         docref(
@@ -641,7 +659,23 @@ fn check_string(s: PhpString, enc: Encoding) -> bool {
 }
 
 /// `php_mb_check_encoding_recursive`.
-fn check_array(req: &mut Request, array: PhpArray, enc: Encoding) -> bool {
+///
+/// php asks no stack limit here and recurses to the thread's end, so a
+/// nest deeper than a small `zend.max_allowed_stack_size` is checked
+/// whole, and this walk is held to the thread's floor instead
+/// ([`php_ext::raising::call_stack_end`]), which the small-stack
+/// regime's 256K does not move; past the floor, where php faults, the
+/// walk is that `Error` (`trace:stack-floor-refusal`).
+///
+/// ```php
+/// $a = ["\xff"]; for ($i = 0; $i < 3000; $i++) { $a = [$a]; }
+/// var_dump(mb_check_encoding($a, 'UTF-8'));
+/// ```
+/// ```expect regime=small-stack
+/// bool(false)
+/// ```
+fn check_array(req: &mut Request, array: PhpArray, enc: Encoding) -> Result<bool, Thrown> {
+    call_stack_end(req)?;
     // `GC_TRY_PROTECT_RECURSION(vars)` and `ZEND_HASH_FOREACH_KEY_VAL(vars,
     // …)` (`Z/ext/mbstring/mbstring.c:5643`): a guarded walk holding
     // nothing, the argument holding the table while a nested table's
@@ -655,7 +689,7 @@ fn check_array(req: &mut Request, array: PhpArray, enc: Encoding) -> bool {
         let value = row.value().deref();
         let ok = match value.as_ref() {
             ValueRef::Str(s) => check_string(s, enc),
-            ValueRef::Array(inner) => check_array(req, inner, enc),
+            ValueRef::Array(inner) => check_array(req, inner, enc)?,
             ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Null | ValueRef::Bool(_) => true,
             _ => false,
         };
@@ -664,16 +698,14 @@ fn check_array(req: &mut Request, array: PhpArray, enc: Encoding) -> bool {
         } else {
             ControlFlow::Break(())
         })
-    });
-    match walked {
-        Ok(Guarded::Walked(invalid)) => invalid.is_none(),
-        Ok(Guarded::Recursive) => {
+    })?;
+    Ok(match walked {
+        Guarded::Walked(invalid) => invalid.is_none(),
+        Guarded::Recursive => {
             docref(req, Level::Warning, "Cannot not handle circular references");
             false
         }
-        // The body answers no throwable.
-        Err(_) => false,
-    }
+    })
 }
 
 /// `mb_check_encoding(array|string|null $value = null, ?string $encoding = null): bool`.
@@ -700,7 +732,7 @@ fn mb_check_encoding(
 ) -> Result<bool, Thrown> {
     let enc = self::encoding(req, encoding, 2)?;
     match value {
-        Some(Union::A(array)) => Ok(check_array(req, array, enc)),
+        Some(Union::A(array)) => check_array(req, array, enc),
         Some(Union::B(s)) => Ok(check_string(s, enc)),
         None => {
             docref(
@@ -918,6 +950,25 @@ enum Walk {
 /// `mb_recursive_convert_variable` over a slot's value: a string
 /// converted, an array separated and walked, a reference's array
 /// separated in place, an object's properties written in place.
+///
+/// Each array's recursion mark is cleared on every way out, a refusal
+/// at the stack limit among them, as php's `GC_TRY_UNPROTECT_RECURSION`
+/// clears it before each `return true`, so the nest a refused walk
+/// stood in is walked whole by the next.
+///
+/// ```php
+/// $a = ["x"]; for ($i = 0; $i < 3000; $i++) { $a = [$a]; }
+/// $b = [$a];
+/// try { mb_convert_variables('UTF-8', 'UTF-8', $a); } catch (Error $e) { echo get_class($e), "\n"; }
+/// try { mb_convert_variables('UTF-8', 'UTF-8', $b); } catch (Error $e) { echo get_class($e), "\n"; }
+/// var_dump(mb_check_encoding($a, 'UTF-8'), count(mb_convert_encoding($b, 'UTF-8', 'UTF-8')));
+/// ```
+/// ```expect regime=small-stack
+/// Error
+/// Error
+/// bool(true)
+/// int(1)
+/// ```
 fn convert_value(
     req: &mut Request,
     value: &Value,
@@ -935,12 +986,13 @@ fn convert_value(
                 ValueRef::Array(array) if !array.is_recursive() => {
                     let original = array;
                     original.protect();
-                    let walked = match r.separate_array(req)? {
-                        Some(separated) => convert_array_in(req, separated, from, to)?,
-                        None => false,
+                    let walked = match r.separate_array(req) {
+                        Ok(Some(separated)) => convert_array_in(req, separated, from, to),
+                        Ok(None) => Ok(false),
+                        Err(thrown) => Err(thrown),
                     };
                     original.unprotect();
-                    Ok(if walked { Walk::Stopped } else { Walk::Kept })
+                    Ok(if walked? { Walk::Stopped } else { Walk::Kept })
                 }
                 ValueRef::Array(_) => Ok(Walk::Stopped),
                 _ => convert_value(req, &inner, from, to),
@@ -956,12 +1008,19 @@ fn convert_value(
                 return Ok(Walk::Stopped);
             }
             original.protect();
-            let separated = original.copy(req)?;
+            let separated = match original.copy(req) {
+                Ok(separated) => separated,
+                Err(thrown) => {
+                    original.unprotect();
+                    return Err(thrown);
+                }
+            };
             // The copy has the one owner, so the walk's writes never
             // separate it and the view walked is the array it owns.
             let stopped = match convert_array_in(req, *separated, from, to) {
                 Ok(stopped) => stopped,
                 Err(thrown) => {
+                    original.unprotect();
                     separated.give_up(req);
                     return Err(thrown);
                 }

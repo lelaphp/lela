@@ -50,3 +50,32 @@ foreach ([$a, $b] as $c) { foreach ($c as $key => $v) { echo $key, '=', $v, "\n"
     let served = engine().serve_capture(source, Capture::default());
     served.assert_clean("kkkkkkkkkk=é\nkkkkkkkkkk=é\n");
 }
+
+/// The walks php leaves unguarded, `php_mb_check_encoding_recursive` and
+/// `php_mb_convert_encoding_recursive`, recurse in php until the thread's
+/// stack runs out and fault; here they are held to the thread's floor
+/// (`php_ext::raising::call_stack_end`): each over a nest deeper than
+/// the test harness's 2 MiB thread is the catchable `Error`, as
+/// `mb_convert_variables`' walk, which php guards, is at the limit, and
+/// the request goes on to the next.
+#[test]
+fn an_unguarded_walk_deeper_than_the_thread_is_refused_at_its_floor() {
+    let source = r#"<?php
+$a = ["x"]; for ($i = 0; $i < 200000; $i++) { $a = [$a]; }
+$walks = [
+    fn () => mb_check_encoding($a, 'UTF-8'),
+    fn () => mb_convert_encoding($a, 'UTF-8', 'UTF-8'),
+    function () use ($a) { mb_convert_variables('UTF-8', 'UTF-8', $a); },
+];
+foreach ($walks as $walk) {
+    try { $walk(); echo "whole\n"; } catch (Error $e) { echo mb_strstr($e->getMessage(), ' of ', true), "\n"; }
+}
+echo 'done';
+"#;
+    let served = engine().serve_capture(source, Capture::default());
+    assert_eq!(served.fatal, None);
+    assert_eq!(
+        served.stdout_text(),
+        format!("{}done", "Maximum call stack size\n".repeat(3))
+    );
+}
