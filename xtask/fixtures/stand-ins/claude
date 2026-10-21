@@ -54,12 +54,14 @@ case $act in *ready*)
 esac
 case $act in *close*)
     issue="$STAND_IN_TRACKER/issues/$n.json"
-    sed 's/"state":"OPEN"/"state":"CLOSED"/' "$issue" > "$issue.closed" &&
+    sed -E 's/"state"[[:space:]]*:[[:space:]]*"OPEN"/"state":"CLOSED"/' "$issue" > "$issue.closed" &&
+        grep -q '"state":"CLOSED"' "$issue.closed" &&
         mv "$issue.closed" "$issue" || exit 6
     ;;
 esac
 case $act in *spend*)
     usd=${act##*spend }
+    usd=${usd%% *}
     printf '{"context":{"tokens":152000,"window":200000,"percent":76},"rateLimits":[],"cost":{"usd":%s}}' "$usd" |
         cargo xtask usage record --session stand-in --turn 3 > /dev/null || exit 4
     ;;
