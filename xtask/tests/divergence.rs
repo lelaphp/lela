@@ -12,10 +12,12 @@ use xtask::scratch::Tree;
 
 mod common {
     pub mod manifest;
+    pub mod registry;
     pub mod repo;
     pub mod run;
 }
 use common::manifest::Tracked;
+use common::registry::Row;
 use common::repo::Repo;
 use common::run::xtask;
 
@@ -223,19 +225,46 @@ fn the_instrument_writes_a_reading_and_exits_one_on_the_fixture() {
     assert_eq!(reading.status, xtask::reading::Status::Fail);
 }
 
+/// The scratch's registry and the divergence section rendered over it
+/// with `args` after `--section divergence`.
+fn rendered(name: &str, args: &[&str]) -> (Registry, String) {
+    let root = scratch(name);
+    let registry = Registry::load(&root).expect("load the scratch's registry");
+    let section = [&["status", "--section", "divergence"][..], args].concat();
+    let text = xtask(&root, &section).ok();
+    (registry, text)
+}
+
+/// The kind of a debt row the registry holds, whichever rows it keeps.
+fn debt_kind(registry: &Registry) -> Kind {
+    registry
+        .rows()
+        .iter()
+        .find(|r| r.cause == Cause::Debt)
+        .expect("the scratch's registry has a debt row")
+        .kind
+}
+
+/// That `text` carries the counts of one kind of debt row the registry
+/// holds and the total.
+fn assert_counts(registry: &Registry, text: &str) {
+    let kind = debt_kind(registry);
+    assert!(
+        text.contains(&counts_line(registry, Some(kind))),
+        "counts by kind and status:\n{text}"
+    );
+    assert!(text.contains(&counts_line(registry, None)), "{text}");
+}
+
 /// `--uncut` renders every row with its reason whole, which is where an
-/// accepted row's reason is read; without it the section is what the
-/// local facts carry, the counts and the `open` rows, and names that
-/// command for the rest (#821).
+/// accepted row's reason is read, beside the counts by kind and status,
+/// and names no command for the rest (#821).
 #[test]
-fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
-    let root = scratch("status");
-    let registry = Registry::load(&root).unwrap();
-    let md = xtask(&root, &["status", "--section", "divergence", "--uncut"]).ok();
-    let cut = xtask(&root, &["status", "--section", "divergence"]).ok();
+fn the_uncut_section_renders_every_row_with_its_reason_whole() {
+    let (registry, md) = rendered("status-uncut", &["--uncut"]);
     assert!(
         registry.rows().iter().any(|r| r.status == Status::Accepted),
-        "the workspace's registry has an accepted row to read"
+        "the scratch's registry has an accepted row to read"
     );
     for row in registry.rows() {
         assert!(md.contains(row.id.as_str()), "{md}");
@@ -245,42 +274,42 @@ fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
             md.contains(&row.reason.replace('\n', " ")),
             "the reason is rendered: {md}"
         );
+    }
+    assert_counts(&registry, &md);
+    assert!(!md.contains("--uncut"), "{md}");
+}
+
+/// Without `--uncut` the section is what the local facts carry: the
+/// counts and the `open` rows alone, naming the command that reads every
+/// reason (#821).
+#[test]
+fn the_cut_section_lists_the_open_rows_alone_and_names_the_uncut_command() {
+    let (registry, cut) = rendered("status-cut", &[]);
+    for row in registry.rows() {
         assert_eq!(
             cut.contains(&format!("| {} ", row.id.as_str())),
             row.status == Status::Open,
             "the facts list the open rows alone: {cut}"
         );
     }
-    // The kind of a debt row the registry holds, whichever rows a person
-    // keeps.
-    let kind = registry
-        .rows()
-        .iter()
-        .find(|r| r.cause == Cause::Debt)
-        .expect("the workspace's registry has a debt row")
-        .kind;
-    for text in [&md, &cut] {
-        assert!(
-            text.contains(&counts_line(&registry, Some(kind))),
-            "counts by kind and status:\n{text}"
-        );
-        assert!(text.contains(&counts_line(&registry, None)), "{text}");
-    }
+    assert_counts(&registry, &cut);
     assert!(
         cut.contains("`cargo xtask status --section divergence --uncut`"),
         "the facts name the command that reads every reason: {cut}"
     );
-    assert!(!md.contains("--uncut"), "{md}");
+}
 
-    let json = xtask(
-        &root,
-        &["status", "--section", "divergence", "--format", "json"],
-    )
-    .ok();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+/// `--format json` carries every row, in the registry's order, and the
+/// counts by kind and status the tables render.
+#[test]
+fn the_json_section_carries_every_row_and_the_counts() {
+    let (registry, json) = rendered("status-json", &["--format", "json"]);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("the section's JSON parses");
+    let kind = debt_kind(&registry);
     assert_eq!(
-        value["rows"].as_array().unwrap().len(),
-        registry.rows().len()
+        value["rows"].as_array().map(Vec::len),
+        Some(registry.rows().len()),
+        "{json}"
     );
     assert_eq!(value["rows"][0]["id"], registry.rows()[0].id.as_str());
     assert_eq!(
@@ -291,25 +320,20 @@ fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
         value["counts"]["total"]["open"],
         registry.counts().total(Status::Open)
     );
+}
 
-    // One more accepted row changes the counts and nothing else of what
-    // the facts carry: its id and reason are read under `--uncut`.
+/// One more accepted row changes the counts and nothing else of what
+/// the facts carry: its id and reason are read under `--uncut`.
+#[test]
+fn one_more_accepted_row_changes_the_cut_section_s_counts_alone() {
+    let root = scratch("status-grown");
+    let cut = xtask(&root, &["status", "--section", "divergence"]).ok();
     let path = root.join(divergence::FILE);
-    let text = std::fs::read_to_string(&path).unwrap();
-    std::fs::write(
-        &path,
-        format!(
-            "{text}
-[[divergence]]
-id = \"trace:fixture-one-more\"
-kind = \"trace\"
-reason = \"The fixture's one more reason (fixture).\"
-status = \"accepted\"
-since = \"2026-09-29\"
-"
-        ),
-    )
-    .unwrap();
+    let text = std::fs::read_to_string(&path).expect("read the scratch's registry");
+    let row = Row::accepted("trace:fixture-one-more")
+        .reason("The fixture's one more reason (fixture).")
+        .toml();
+    std::fs::write(&path, format!("{text}\n{row}")).expect("write the grown registry");
     let grown = xtask(&root, &["status", "--section", "divergence"]).ok();
     let beside_counts = |text: &str| -> Vec<String> {
         text.lines()
@@ -317,11 +341,12 @@ since = \"2026-09-29\"
             .map(str::to_owned)
             .collect()
     };
+    assert_ne!(grown, cut, "the counts changed");
     assert_eq!(beside_counts(&grown), beside_counts(&cut), "{grown}");
     let whole = xtask(&root, &["status", "--section", "divergence", "--uncut"]).ok();
     assert!(
         whole.contains(
-            "| trace:fixture-one-more | trace | debt | accepted | 2026-09-29 | The fixture's one more reason (fixture). |"
+            "| trace:fixture-one-more | trace | debt | accepted | 2026-09-08 | The fixture's one more reason (fixture). |"
         ),
         "{whole}"
     );
