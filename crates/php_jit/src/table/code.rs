@@ -1,6 +1,8 @@
 //! The code arena (`jit-design.md` §4.4), sealed by construction: one
-//! span of pages seen through a write view and an executable view, carved
-//! into 64 KiB chunks, into which [`Arena::publish`] copies a body once.
+//! span of pages seen through a write view and an executable view, as
+//! many bytes as php's buffer holds ([`capacity`]), carved into 64 KiB
+//! chunks, the last of them as long as the span leaves it, into which
+//! [`Arena::publish`] copies a body once.
 //! Bytes are final: a [`Code`] has no way to be written again, and the
 //! chunk it lives in returns to the arena when the last `Code` in it is
 //! dropped, so a later body may reuse it.
@@ -16,9 +18,10 @@
 //! joins when the Linux targets are measured; until then [`Unmapped`]
 //! maps nothing there, and a table over it compiles nothing.
 //!
-//! Beside the arena, the three calls the `PERF_DUMP` record needs that
-//! only `unsafe` reaches: the jitdump's one mapping, the monotonic clock
-//! its records are stamped with, and the thread that wrote them.
+//! Beside the arena, the system's page its size is rounded to, and the
+//! three calls the `PERF_DUMP` record needs that only `unsafe` reaches:
+//! the jitdump's one mapping, the monotonic clock its records are
+//! stamped with, and the thread that wrote them.
 #![deny(
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block
@@ -70,6 +73,9 @@ pub(crate) struct Full;
 /// every chunk handed out, so the pages outlive the last `Code`.
 struct Region<P> {
     pages: P,
+    /// How many bytes the mapping holds: every chunk's but the last's
+    /// are [`CHUNK`].
+    len: usize,
     /// One atomic a chunk: true while the chunk is neither filling nor
     /// holding a live `Code`.
     free: Box<[AtomicBool]>,
@@ -85,6 +91,35 @@ impl ChunkIdx {
     fn start(self) -> usize {
         self.0 * CHUNK
     }
+
+    /// How many bytes the chunk holds in a mapping of `len` bytes: a
+    /// whole chunk, or what the mapping leaves the last.
+    fn len(self, len: usize) -> usize {
+        len.saturating_sub(self.start()).min(CHUNK)
+    }
+}
+
+/// How many bytes an arena holds under `opcache.jit_buffer_size` of
+/// `size`: php's buffer, the size rounded up to the page
+/// (`ZEND_MM_ALIGNED_SIZE_EX(jit_size, page_size)`,
+/// `Z/ext/opcache/ZendAccelerator.c:3257-3263`); none for none, or where
+/// the size is past what an address holds.
+pub(crate) fn capacity(size: u64) -> usize {
+    usize::try_from(size)
+        .ok()
+        .and_then(|size| size.checked_next_multiple_of(page_size()))
+        .unwrap_or(0)
+}
+
+/// The system's page, as php's `zend_get_page_size` reads it; 4096 where
+/// it cannot be read.
+fn page_size() -> usize {
+    // SAFETY: `sysconf` reads a system value and writes nothing.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    usize::try_from(page)
+        .ok()
+        .filter(|page| page.is_power_of_two())
+        .unwrap_or(4096)
 }
 
 /// One chunk handed out: while any `Code` in it lives, or the arena is
@@ -159,23 +194,27 @@ pub(crate) struct Arena<P: Pages> {
 }
 
 impl<P: Pages> Arena<P> {
-    /// An arena of `capacity` bytes, a whole number of chunks and at
-    /// least one, mapped through `P`.
+    /// An arena of `capacity` bytes, mapped through `P`, in chunks of
+    /// [`CHUNK`] bytes but the last, which holds what is left; a buffer
+    /// below one chunk is one chunk of its own length, held by the cursor
+    /// inside it (#3112's ruling). A capacity of none is refused.
     pub(crate) fn new(capacity: usize) -> io::Result<Arena<P>> {
-        if capacity == 0 || !capacity.is_multiple_of(CHUNK) {
+        if capacity == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!(
-                    "a code arena is a whole number of {CHUNK}-byte chunks, not {capacity} bytes"
-                ),
+                "a code arena holds at least one byte",
             ));
         }
         let pages = P::map_pair(capacity)?;
-        let free = (0..capacity / CHUNK)
+        let free = (0..capacity.div_ceil(CHUNK))
             .map(|_| AtomicBool::new(true))
             .collect();
         Ok(Arena {
-            region: Arc::new(Region { pages, free }),
+            region: Arc::new(Region {
+                pages,
+                len: capacity,
+                free,
+            }),
             filling: None,
         })
     }
@@ -226,7 +265,7 @@ impl<P: Pages> Arena<P> {
         let base = filling.chunk.index.start();
         let cursor = self.region.pages.rx(base).as_ptr().addr() + filling.cursor;
         let at = cursor.checked_next_multiple_of(align)? - cursor + filling.cursor;
-        (at.checked_add(len)? <= CHUNK).then_some(at)
+        (at.checked_add(len)? <= filling.chunk.index.len(self.region.len)).then_some(at)
     }
 
     /// A free chunk, taken: its atomic cleared with an acquire that pairs
@@ -360,13 +399,12 @@ impl Pages for Unmapped {
 #[cfg(unix)]
 pub(crate) fn map_once(file: &std::fs::File) -> io::Result<()> {
     use std::os::fd::AsRawFd;
-    const PAGE: usize = 4096;
     // SAFETY: a fresh private mapping of an open file, overlapping
     // nothing, read by nothing.
     let at = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
-            PAGE,
+            page_size(),
             libc::PROT_READ | libc::PROT_EXEC,
             libc::MAP_PRIVATE,
             file.as_raw_fd(),
@@ -377,7 +415,7 @@ pub(crate) fn map_once(file: &std::fs::File) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: the mapping just made, which nothing else names.
-    unsafe { libc::munmap(at, PAGE) };
+    unsafe { libc::munmap(at, page_size()) };
     Ok(())
 }
 
@@ -524,12 +562,34 @@ mod tests {
         code.entry().as_ptr().addr() - arena.region.pages.rx(0).as_ptr().addr()
     }
 
-    /// A capacity that is not a whole number of chunks is refused.
+    /// An arena holds the bytes it was made with and no more: a capacity
+    /// below one chunk is a chunk of that length, filled to its last byte
+    /// and no further, one past whole chunks a last chunk of what is left,
+    /// and none is refused; php's buffer is `opcache.jit_buffer_size`
+    /// rounded up to the page.
     #[test]
-    fn an_arena_is_a_whole_number_of_chunks() {
+    fn an_arena_holds_its_capacity_and_no_more() -> Result<(), String> {
         assert!(Arena::<HeapPages>::new(0).is_err());
-        assert!(Arena::<HeapPages>::new(CHUNK + 1).is_err());
-        assert!(Arena::<HeapPages>::new(2 * CHUNK).is_ok());
+        let page = page_size();
+        assert_eq!(
+            (capacity(16 << 10), capacity(1), capacity(0)),
+            ((16_usize << 10).next_multiple_of(page), page, 0)
+        );
+        let mut small = Arena::<HeapPages>::new(16 << 10).map_err(|e| e.to_string())?;
+        assert_eq!(small.publish(&vec![1; (16 << 10) + 1], 1).err(), Some(Full));
+        let first = published(&mut small, &vec![1; 12 << 10], 1)?;
+        let second = published(&mut small, &vec![2; 4 << 10], 1)?;
+        assert_eq!(offset(&small, &second), 12 << 10);
+        assert_eq!(small.publish(&[3], 1).err(), Some(Full));
+        drop((first, second));
+        let again = published(&mut small, &vec![4; 16 << 10], 1)?;
+        assert_eq!(offset(&small, &again), 0, "the one chunk, reused whole");
+        let mut odd = Arena::<HeapPages>::new(CHUNK + 100).map_err(|e| e.to_string())?;
+        let whole = published(&mut odd, &vec![5; CHUNK], 1)?;
+        assert_eq!(odd.publish(&[6; 101], 1).err(), Some(Full));
+        let last = published(&mut odd, &[6; 100], 1)?;
+        assert_eq!((whole.chunk(), last.chunk()), (ChunkIdx(0), ChunkIdx(1)));
+        Ok(())
     }
 
     /// Bodies fill one chunk back to back, each at its alignment, and

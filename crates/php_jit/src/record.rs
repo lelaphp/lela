@@ -1034,7 +1034,7 @@ impl<'p> Recorder<'p> {
             return Went::On;
         }
         if self.level == 0 {
-            let limit = self.policy.attempts(Start::Loop).saturating_sub(1);
+            let limit = self.policy.blacklist_root().saturating_sub(1);
             match self.start {
                 Start::Return
                     if self.policy.max_recursive_returns() > 0
@@ -1122,7 +1122,7 @@ impl<'p> Recorder<'p> {
             return Went::On;
         };
         let depth = self.level + self.ret_level;
-        let limit = self.policy.attempts(Start::Loop).saturating_sub(1);
+        let limit = self.policy.blacklist_root().saturating_sub(1);
         match policy::read(self.epoch.word(func, header)) {
             State::Compiled(id) => {
                 self.stood = Some(id);
@@ -1150,7 +1150,7 @@ impl<'p> Recorder<'p> {
         if !side && self.root == Some((func, at)) && depth == 0 {
             return Went::Stopped(Stop::Loop);
         }
-        let half = self.policy.attempts(Start::Loop) / 2;
+        let half = self.policy.blacklist_root() / 2;
         if !side || depth != 0 {
             let bad = policy::bad_stop(self.epoch.word(func, header), half);
             if bad != Some(Stop::InnerLoop)
@@ -1198,7 +1198,7 @@ impl<'p> Recorder<'p> {
             return Stop::RecursiveRet;
         }
         if let Some((at, id)) = self.backtrack_link_to_enter {
-            let half = self.policy.attempts(Start::Loop) / 2;
+            let half = self.policy.blacklist_root() / 2;
             if stop == Stop::DeepRecursion && self.root_bad_stop(half) == Some(Stop::DeepRecursion)
             {
                 self.events.truncate(at);
