@@ -89,19 +89,29 @@ impl Run {
             .stderr(Stdio::piped())
             .spawn();
         let mut child = started.unwrap_or_else(|err| panic!("running {line}: {err}"));
-        if let (Some(text), Some(mut pipe)) = (self.stdin, child.stdin.take()) {
-            // A binary that exits before reading all of it closes the
-            // pipe; what it said is the test's, not the write's.
-            pipe.write_all(&text).ok();
-        }
+        // Fed beside the wait, so a binary that prints before it has read
+        // all of stdin never fills a pipe nobody drains. One that exits
+        // before reading it closes the pipe; what it said is the test's,
+        // not the write's.
+        let feeding = self
+            .stdin
+            .zip(child.stdin.take())
+            .map(|(text, mut pipe)| std::thread::spawn(move || pipe.write_all(&text).ok()));
         let out = child
             .wait_with_output()
             .unwrap_or_else(|err| panic!("waiting on {line}: {err}"));
+        if let Some(feeding) = feeding {
+            feeding.join().ok();
+        }
+        let text = |bytes: Vec<u8>, stream: &str| {
+            String::from_utf8(bytes)
+                .unwrap_or_else(|err| panic!("{line} printed what is not UTF-8 on {stream}: {err}"))
+        };
         Ran {
+            stdout: text(out.stdout, "stdout"),
+            stderr: text(out.stderr, "stderr"),
             line,
             status: out.status,
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         }
     }
 }
