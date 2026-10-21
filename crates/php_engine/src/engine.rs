@@ -1661,8 +1661,58 @@ impl Shared {
             classes: Indexed::new(&self.classes, &self.class_keys.names),
             hooked: self.hooked,
             extended_info: self.extended_info,
-            op_array_extensions: self.units.op_array_extensions(),
+            op_array_extensions: self.op_array_extensions(),
         }
+    }
+
+    /// `zend_op_array_extension_handles` once startup is over
+    /// (`Z/Zend/zend_extensions.c:290-303`), the slots at the head of
+    /// every op array's runtime cache compiled after it
+    /// ([`php_compile::Options::op_array_extensions`]): two for each
+    /// observer registered, where any is, as `zend_observer_post_startup`
+    /// takes them (`Z/Zend/zend_observer.c:64-70`), and one where opcache
+    /// set its tier up ([`UnitCache::tier_set_up`]) and
+    /// `zend_jit_check_support` let it start, `zend_jit_startup`'s for
+    /// `zend_jit_profile_counter_rid` (`Z/ext/opcache/jit/zend_jit.c:3782`).
+    /// The check refuses the tier where a hook replaced `zend_execute_ex`,
+    /// as phpdbg's does, and where an extension observes an opcode other
+    /// than the two silence opcodes (`:3728-3756`). `opcache.jit=off` sets
+    /// the tier up with nothing to compile; the default `disable` never
+    /// does.
+    ///
+    /// A program's or an included file's runtime cache is `emalloc`ed at
+    /// its size as `i_init_code_execute_data` lays it down, and freed
+    /// with its frame, the program's before the shutdown functions are served;
+    /// so the slot moves what a file reads while it is served where it moves
+    /// the cache into the next bin. Two files of one length, the first a
+    /// slot more than the second, read their caches in one 16-byte bin
+    /// under opcache without the tier, and 24 and 16 with it:
+    ///
+    /// ```php
+    /// file_put_contents(__DIR__ . '/a.inc', '<?php new stdClass;        return memory_get_usage();');
+    /// file_put_contents(__DIR__ . '/b.inc', '<?php /* no slot here */ return memory_get_usage();');
+    /// touch(__DIR__ . '/a.inc', time() - 10); touch(__DIR__ . '/b.inc', time() - 10);
+    /// $read = function ($file) { include $file; $m = memory_get_usage(); return (include $file) - $m; };
+    /// echo $read(__DIR__ . '/a.inc') - $read(__DIR__ . '/b.inc'), "\n";
+    /// ```
+    /// ```expect regime=immutable-literals
+    /// 0
+    /// ```
+    /// ```php
+    /// file_put_contents(__DIR__ . '/a.inc', '<?php new stdClass;        return memory_get_usage();');
+    /// file_put_contents(__DIR__ . '/b.inc', '<?php /* no slot here */ return memory_get_usage();');
+    /// touch(__DIR__ . '/a.inc', time() - 10); touch(__DIR__ . '/b.inc', time() - 10);
+    /// $read = function ($file) { include $file; $m = memory_get_usage(); return (include $file) - $m; };
+    /// echo $read(__DIR__ . '/a.inc') - $read(__DIR__ . '/b.inc'), "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 8
+    /// ```
+    pub(crate) fn op_array_extensions(&self) -> u32 {
+        let tier = self.units.tier_set_up() && !self.hooked.user && !self.opcodes.refuses_tier();
+        self.observers
+            .saturating_mul(2)
+            .saturating_add(u32::from(tier))
     }
 
     /// One source compiled with its constant strings interned into the

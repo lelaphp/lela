@@ -547,12 +547,14 @@ fn jit_configured(req: &mut Request) -> bool {
     jit_enabled(req) && (!started || jit_kept(req))
 }
 
-/// Whether `accel_post_startup`, over a cache that started, starts the
-/// tier in the segment it laid down (`zend_jit_startup`,
-/// `Z/ext/opcache/ZendAccelerator.c:3321-3331`): the setting the engine
-/// started with enabled it, and [`jit_kept`].
+/// Whether `accel_post_startup`, over a cache that started, sets the
+/// tier up in the segment it laid down (`zend_jit_startup`,
+/// `Z/ext/opcache/ZendAccelerator.c:3252-3254`, `:3321-3331`): the
+/// setting the engine started with enabled it, its buffer passes
+/// `zend_jit_check_support` ([`jit_buffer_supported`]; the engine holds
+/// the check's hooks and opcodes), and [`jit_kept`].
 pub(crate) fn jit_starts(req: &mut Request) -> bool {
-    jit_enabled(req) && jit_kept(req)
+    jit_enabled(req) && jit_buffer_supported(req) && jit_kept(req)
 }
 
 /// `JIT_G(enabled)` as the startup's `opcache.jit` set it: anything but
@@ -566,6 +568,18 @@ fn jit_enabled(req: &mut Request) -> bool {
 fn jit_kept(req: &mut Request) -> bool {
     let buffer = Ini::parse_quantity(&master(req, "opcache.jit_buffer_size")).0;
     buffer > 0 && !flag(req, "opcache.file_cache_only")
+}
+
+/// `zend_jit_check_support`'s test of the buffer
+/// (`Z/ext/opcache/jit/zend_jit.c:3759-3772`): the largest the target's
+/// code can reach, 128 MiB on `aarch64` and 2 GiB on `x86_64`.
+fn jit_buffer_supported(req: &mut Request) -> bool {
+    const LARGEST: i64 = if cfg!(target_arch = "aarch64") {
+        128 << 20
+    } else {
+        2 << 30
+    };
+    Ini::parse_quantity(&master(req, "opcache.jit_buffer_size")).0 <= LARGEST
 }
 
 /// The startup value of opcache's entry `name`, empty where it has none.
