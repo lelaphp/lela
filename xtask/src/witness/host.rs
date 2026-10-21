@@ -307,10 +307,7 @@ fn both(
     };
     let mut taken = Vec::new();
     for _ in 0..ATTEMPTS {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .and_then(|probe| probe.local_addr())
-            .context("finding a free loopback port")?
-            .port();
+        let port = free_port()?;
         let renderings = ran(oracle, pinned, line, dir.path(), port)
             .and_then(|theirs| Ok((theirs, ran(oracle, engine, line, dir.path(), port)?)));
         match renderings {
@@ -328,10 +325,18 @@ fn both(
     )
 }
 
-/// How many ports a server's line is offered: a port found free can be
-/// taken by another process before the host binds it, which then says so
-/// and serves nothing (#2653).
-const ATTEMPTS: usize = 3;
+/// How many ports a server is offered, a server's line here and the
+/// built-in server `crosscheck` starts: a port found free can be taken by
+/// another process before the host binds it, which then says so and
+/// serves nothing (#2653).
+pub(crate) const ATTEMPTS: usize = 3;
+
+/// A loopback port no process holds as it is asked, which one may take
+/// before the host binds it ([`ATTEMPTS`]).
+pub(crate) fn free_port() -> Result<u16> {
+    let probe = TcpListener::bind("127.0.0.1:0").and_then(|probe| probe.local_addr());
+    Ok(probe.context("finding a free loopback port")?.port())
+}
 
 /// A server's line whose host could not bind `{port}` because something
 /// else had it: the line is run again, both hosts, on another port.
