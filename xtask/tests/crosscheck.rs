@@ -28,7 +28,7 @@ mod common {
     pub mod repo;
     pub mod run;
 }
-use common::manifest::pin;
+use common::manifest::{of_rows, pin};
 use common::registry::registry;
 use common::repo::scratch_workspace;
 use common::run::xtask;
@@ -41,12 +41,10 @@ fn workspace() -> &'static Path {
 /// tests render, under the tracked pin. The bundle's default set as the
 /// tracked rows state it is held in [`tracked`].
 fn manifest() -> Manifest {
-    let mut manifest = Manifest::of([
+    of_rows([
         xtask::manifest::Crate::named("ext/ctype"),
         xtask::manifest::Crate::named("ext/json"),
-    ]);
-    manifest.pin = pin();
-    manifest
+    ])
 }
 
 /// The tracked pin's binary, when it is on this machine; a failure where
@@ -510,7 +508,9 @@ fn a_php_linked_that_dies_on_a_signal_fails_that_extension_and_the_next_still_re
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
 /// workspace, so a person's edit there is what may turn one red (#3091).
-/// Every other test here builds the manifest it judges.
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
 mod tracked {
     use super::*;
 

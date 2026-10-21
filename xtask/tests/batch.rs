@@ -78,7 +78,9 @@ fn committed(fixture: &Path, name: &str) -> Tree {
         root.join("docs/divergence.toml"),
     )
     .unwrap();
-    Tracked::of(&root).with_pin("oracle.toml").write(&root);
+    Tracked::of(&root)
+        .with_pin(Path::new("oracle.toml"))
+        .write(&root);
     std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
     Repo::init(&root).commit("scratch");
     root
@@ -258,7 +260,9 @@ type Expected<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
 /// workspace, so a person's edit there is what may turn one red (#3091).
-/// Every other test here builds the manifest it judges.
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
 mod tracked {
     use super::*;
 

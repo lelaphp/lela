@@ -45,9 +45,7 @@ fn scratch(name: &str) -> Tree {
     copy(&fixture(), &dir);
     // The fixture names the pin by a path relative to its place in the
     // tree; the copy names the workspace's.
-    Tracked::of(&dir)
-        .with_pin(workspace().join("oracle.toml").to_str().unwrap())
-        .write(&dir);
+    Tracked::of(&dir).with_the_workspace_pin().write(&dir);
     Repo::init(&dir).commit("fixture");
     dir
 }

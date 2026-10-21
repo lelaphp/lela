@@ -12,9 +12,11 @@ use xtask::scratch::Tree;
 use xtask::vocab;
 
 mod common {
+    pub mod manifest;
     pub mod repo;
     pub mod run;
 }
+use common::manifest::Tracked;
 use common::repo::Repo;
 use common::run::xtask;
 
@@ -26,14 +28,22 @@ fn fixture(rule: &str) -> PathBuf {
     xtask::package_dir().join("fixtures/rules").join(rule)
 }
 
-/// A scratch workspace: the tracked manifest, pin and glossary, the fixture
-/// at `from` as one of the manifest's crates, and one commit so a reading
-/// can be stamped.
+/// A scratch workspace: a manifest of `php_ext` and `php_heap` and the
+/// glossary's rule as [`AVOID`] states it, the tracked pin and glossary,
+/// the fixture at `from` as one of the manifest's crates, and one commit
+/// so a reading can be stamped.
 fn scratch(name: &str, krate: &str, from: &Path) -> Tree {
     let dir = Tree::new(&format!("vocab-{name}")).unwrap();
-    for file in ["seams.toml", "oracle.toml", "CONTEXT.md"] {
+    for file in ["oracle.toml", "CONTEXT.md"] {
         std::fs::copy(workspace().join(file), dir.join(file)).unwrap();
     }
+    Tracked::minimal()
+        .with_crate("php_ext", |_| ())
+        .with_crate("php_heap", |_| ())
+        .with_rule("vocab.avoid", |rule| {
+            rule.extend(AVOID.parse::<toml::Table>().unwrap());
+        })
+        .write(&dir);
     let target = dir.join(krate);
     std::fs::create_dir_all(target.join("src")).unwrap();
     std::fs::copy(from.join("src/lib.rs"), target.join("src/lib.rs")).unwrap();
@@ -48,6 +58,13 @@ fn scratch(name: &str, krate: &str, from: &Path) -> Tree {
     Repo::init(&dir).commit("fixture");
     dir
 }
+
+/// The glossary's rule over the engine's crates, as a test states it.
+const AVOID: &str = r#"
+scope = ["crates/*", "ext/*"]
+avoid_from = "CONTEXT.md"
+text = "The glossary's _Avoid_ words appear in no public item name or rustdoc prose (fixture)."
+"#;
 
 /// The one reading of `php_ext` over the `vocab.avoid` fixture standing as
 /// `crates/php_ext`, through the instrument's library entry.
@@ -304,7 +321,9 @@ fn with_the_harness_rule(mut manifest: Manifest) -> Manifest {
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
 /// workspace, so a person's edit there is what may turn one red (#3091).
-/// Every other test here builds the manifest it judges.
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
 mod tracked {
     use super::*;
 
@@ -338,7 +357,7 @@ mod tracked {
                 let root = scratch(&name, "crates/php_ext", &dir);
                 vocab::hold(
                     &root,
-                    &Manifest::load(&root).unwrap(),
+                    &Manifest::load(workspace()).unwrap(),
                     &["php_ext".to_owned()],
                 )
                 .unwrap()

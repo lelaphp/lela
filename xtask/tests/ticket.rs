@@ -23,7 +23,7 @@ mod common {
     pub mod repo;
     pub mod tracker;
 }
-use common::manifest::pin;
+use common::manifest::of_rows;
 use common::repo::Repo;
 use common::tracker::{Tracker, blocked_by, issue, labels, open};
 
@@ -36,9 +36,7 @@ fn workspace() -> &'static Path {
 /// rules a ticket an agent may take is held to (#153) are read in
 /// [`tracked`].
 fn manifest() -> Manifest {
-    let mut manifest = Manifest::named("xtask");
-    manifest.pin = pin();
-    manifest
+    of_rows([xtask::manifest::Crate::named("xtask")])
 }
 
 /// The manifest of this workspace, whose `deny = true` rules a ticket an
@@ -1483,7 +1481,9 @@ fn a_sheet_at_the_cap_fails_before_a_ticket_is_filed_against_it_and_one_with_roo
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
 /// workspace, so a person's edit there is what may turn one red (#3091).
-/// Every other test here builds the manifest it judges.
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
 mod tracked {
     use super::*;
 

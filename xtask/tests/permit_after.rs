@@ -1000,6 +1000,10 @@ fn a_steer_call_that_lands_a_merges_union_stands_and_the_merge_commits_it() {
         let whole = std::fs::read_to_string(rows.join(side)).unwrap();
         whole.strip_prefix(base.as_str()).unwrap().to_owned()
     };
+    // The registry both sides append to holds the fixture's base row, as
+    // a person's registry holds rows; the scratch's holds none.
+    std::fs::write(root.join(file), &base).unwrap();
+    Repo::at(&root).commit("the base's row");
     let tracked = read(&root, file);
     let main = Repo::at(&root).git(&["rev-parse", "--abbrev-ref", "HEAD"]);
     Repo::at(&root).git(&["checkout", "-q", "-b", "merged"]);

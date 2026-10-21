@@ -31,14 +31,18 @@ fn fixture(rule: &str) -> PathBuf {
         .join("divergence.toml")
 }
 
-/// A scratch workspace: the tracked manifest and pin, [`REGISTRY`] as its
-/// registry, no store.
+/// A scratch workspace: a manifest of the guard's rule alone (as
+/// [`reasoned`] states it), the tracked pin, [`REGISTRY`] as its registry,
+/// no store.
 fn scratch(name: &str) -> Tree {
     let dir = Tree::new(&format!("divergence-{name}")).unwrap();
     std::fs::create_dir_all(dir.join("docs")).unwrap();
-    for file in ["seams.toml", "oracle.toml"] {
-        std::fs::copy(workspace().join(file), dir.join(file)).unwrap();
-    }
+    std::fs::copy(workspace().join("oracle.toml"), dir.join("oracle.toml")).unwrap();
+    Tracked::minimal()
+        .with_rule(REASON, |rule| {
+            rule.extend(REASON_ROW.parse::<toml::Table>().unwrap());
+        })
+        .write(&dir);
     std::fs::write(dir.join(divergence::FILE), REGISTRY).unwrap();
     dir
 }
@@ -69,14 +73,21 @@ since = "2026-09-08"
 /// the test's own: what a test of the guard's mechanics judges by, where
 /// the tracked rule is held to its fixtures in [`tracked`].
 fn reasoned() -> Manifest {
-    let mut manifest = Manifest::named("docs");
-    let mut rule = xtask::manifest::Rule::named("divergence.reason", divergence::FILE);
-    rule.predicate.deny = None;
-    rule.predicate.check = Some(divergence::INSTRUMENT.to_owned());
-    "An accepted row has a reason a person wrote (fixture).".clone_into(&mut rule.text);
-    manifest.rules.push(rule);
-    manifest
+    let row = Tracked::minimal().with_rule(REASON, |rule| {
+        rule.extend(REASON_ROW.parse::<toml::Table>().unwrap());
+    });
+    Manifest::parse(&row.text()).unwrap()
 }
+
+/// The rule this instrument evaluates, by its id.
+const REASON: &str = "divergence.reason";
+
+/// [`REASON`]'s row as a test states it, its text the test's own.
+const REASON_ROW: &str = r#"
+scope = "docs/divergence.toml"
+check = "divergence-reason"
+text = "An accepted row has a reason a person wrote (fixture)."
+"#;
 
 /// A scratch workspace that is a git repository with one commit, so a
 /// reading can be stamped.
@@ -969,7 +980,9 @@ fn status_and_the_reason_instrument_count_a_covering_row_once() {
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
 /// workspace, so a person's edit there is what may turn one red (#3091).
-/// Every other test here builds the manifest it judges.
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
 mod tracked {
     use super::*;
 

@@ -41,6 +41,8 @@ fn scratch(name: &str) -> Tree {
 fn a_file_that_is_not_text_is_counted_as_no_lines_and_not_as_a_failure() {
     let root = scratch("not-text");
     common::repo::scratch_workspace(workspace(), &root);
+    // A manifest of no row: what is measured here is the tree.
+    Tracked::minimal().write(&root);
     std::fs::copy(workspace().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
     let manifest = Manifest::load(&root).unwrap();
     let before = budget::run(&root, &manifest).unwrap();
@@ -67,6 +69,8 @@ fn workspace_reading(readings: &[xtask::reading::Reading]) -> &xtask::reading::R
 fn without_the_scripts_row_the_tree_is_measured_and_held_to_nothing() {
     let root = scratch("no-row");
     common::repo::scratch_workspace(workspace(), &root);
+    // A manifest of no row: what is measured here is the tree.
+    Tracked::minimal().write(&root);
     std::fs::copy(workspace().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
     std::fs::create_dir_all(root.join("scripts/hooks")).unwrap();
     std::fs::write(
@@ -101,6 +105,8 @@ fn without_the_scripts_row_the_tree_is_measured_and_held_to_nothing() {
 fn the_scripts_row_names_the_generators_and_everything_else_under_scripts_counts() {
     let root = scratch("scripts");
     common::repo::scratch_workspace(workspace(), &root);
+    // A manifest of no row: what is measured here is the tree.
+    Tracked::minimal().write(&root);
     std::fs::copy(workspace().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
     std::fs::create_dir_all(root.join("scripts/hooks")).unwrap();
     std::fs::write(
@@ -562,6 +568,8 @@ fn lock_packages_counts_the_third_party_packages_and_not_the_workspaces_crates()
 
     let root = scratch("lock-packages");
     common::repo::scratch_workspace(workspace(), &root);
+    // A manifest of no row: what is measured here is the tree.
+    Tracked::minimal().write(&root);
     let lock = std::fs::read_to_string(fixture.join("Cargo.lock")).unwrap();
     let mut third_party = 0;
     let kept: Vec<&str> = lock
@@ -590,7 +598,9 @@ fn lock_packages_counts_the_third_party_packages_and_not_the_workspaces_crates()
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
 /// workspace, so a person's edit there is what may turn one red (#3091).
-/// Every other test here builds the manifest it judges.
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
 mod tracked {
     use super::*;
 

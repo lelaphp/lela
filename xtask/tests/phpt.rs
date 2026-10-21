@@ -31,7 +31,7 @@ mod common {
     pub mod repo;
     pub mod run;
 }
-use common::manifest::pin;
+use common::manifest::{of_rows, pin};
 use common::phpt_tree::fixture_tree;
 use common::registry::registry;
 use common::repo::{Repo, scratch_workspace};
@@ -45,9 +45,7 @@ fn workspace() -> &'static Path {
 /// tests that run a subset of the pinned tree judge by, the extension
 /// being one whose tests stand there.
 fn manifest() -> Manifest {
-    let mut manifest = Manifest::named("ext/pcre");
-    manifest.pin = pin();
-    manifest
+    of_rows([Crate::named("ext/pcre")])
 }
 
 /// A manifest of these `[[crate]]` rows under the tracked pin with its
@@ -2471,7 +2469,9 @@ fn the_control_keeps_the_target_and_the_engines_reading_is_met_of_target() {
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
 /// workspace, so a person's edit there is what may turn one red (#3091).
-/// Every other test here builds the manifest it judges.
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
 mod tracked {
     use super::*;
 

@@ -335,9 +335,8 @@ fn an_edit_in_a_laid_worktree_is_judged_by_that_worktrees_manifest() {
     let marker = "edited by a person, says the worktree's manifest";
     Tracked::of(&dir)
         .with_rule("harness.self", |rule| {
-            let text = rule["text"].as_str().unwrap();
-            assert!(text.ends_with("are edited by a person."), "{text}");
-            let text = text.replace("are edited by a person.", &format!("are {marker}."));
+            // The marker beside the rule's own words, whatever they are.
+            let text = format!("{} Here: {marker}.", rule["text"].as_str().unwrap());
             rule.insert("text".to_owned(), text.into());
         })
         .write(&dir);

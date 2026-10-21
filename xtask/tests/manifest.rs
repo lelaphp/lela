@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use xtask::manifest::{AvoidFrom, Crate, Edge, Manifest, Rule, Scripts, Seam};
+use xtask::manifest::{AvoidFrom, Crate, Edge, Manifest, OneOrMany, Rule, Scripts, Seam};
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -466,17 +466,12 @@ fn allow_in_tests_takes_only_denied_lints_clippy_has_an_in_tests_key_for() {
 /// So a test builds a row as a [`Crate`] and writes it into a manifest.
 #[test]
 fn a_crate_row_round_trips_through_its_serialisation() {
-    for row in [Crate::named("ext/pcre"), {
-        let mut row = Crate::named("php_engine");
-        row.lock = toml::from_str::<Crate>(
-            "name = \"x\"\nbudget = 1\nlock = [\"api.lock\", \"tier.lock\"]\n",
-        )
-        .unwrap()
-        .lock;
-        row.phpt = vec!["Zend/tests".to_owned()];
-        row.porting = true;
-        row
-    }] {
+    let bare = Crate::named("ext/pcre");
+    let mut locked = Crate::named("php_engine");
+    locked.lock = OneOrMany::Many(vec!["api.lock".to_owned(), "tier.lock".to_owned()]);
+    locked.phpt = vec!["Zend/tests".to_owned()];
+    locked.porting = true;
+    for row in [bare, locked] {
         let text = toml::to_string(&row).unwrap();
         assert_eq!(toml::from_str::<Crate>(&text).unwrap(), row, "{text}");
         assert_eq!(text.contains("lock ="), !row.lock.is_empty(), "{text}");
@@ -486,7 +481,9 @@ fn a_crate_row_round_trips_through_its_serialisation() {
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
 /// workspace, so a person's edit there is what may turn one red (#3091).
-/// Every other test here builds the manifest it judges.
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
 mod tracked {
     use super::*;
 

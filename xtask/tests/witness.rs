@@ -31,7 +31,7 @@ mod common {
     pub mod repo;
     pub mod run;
 }
-use common::manifest::{Tracked, pin};
+use common::manifest::{Tracked, of_rows, pin};
 use common::registry::registry;
 use common::repo::{Repo, scratch_workspace};
 use common::run::xtask;
@@ -114,9 +114,7 @@ fn a_binary_where_the_engine_s_would_be(root: &Path) {
 /// the fixture under the tracked pin, and no rule, so nothing is counted
 /// as a kernel or native that needs a witness.
 fn fixture_manifest() -> Manifest {
-    let mut manifest = Manifest::named("ext/fixture");
-    manifest.pin = pin();
-    manifest
+    of_rows([Crate::named("ext/fixture")])
 }
 
 /// The one reading of `ext/fixture` over `root`.
@@ -1256,8 +1254,7 @@ fn a_crate_whose_sources_cannot_be_read_fails_and_names_the_crate() {
     // grammar can read.
     fs::write(root.join("ext/pcre/src/lib.rs"), [0xff, 0xfe]).unwrap();
     Repo::init(&root).commit("scratch");
-    let mut manifest = Manifest::named("ext/pcre");
-    manifest.pin = pin();
+    let manifest = of_rows([Crate::named("ext/pcre")]);
     let readings = witness::run(
         &root,
         &manifest,
@@ -1322,7 +1319,9 @@ fn a_witness_that_kills_its_server_fails_alone_and_the_next_is_served() {
     let fixture = fixture_at("witness", "abort");
     let root = Tree::new("witness-abort").unwrap();
     scratch_workspace(workspace(), &root);
-    Tracked::of(&fixture).with_pin("oracle.toml").write(&root);
+    Tracked::of(&fixture)
+        .with_pin(Path::new("oracle.toml"))
+        .write(&root);
     fs::create_dir_all(root.join("ext/pcre/src")).unwrap();
     for file in ["ext/pcre/Cargo.toml", "ext/pcre/src/lib.rs"] {
         fs::copy(fixture.join(file), root.join(file)).unwrap();
@@ -1354,7 +1353,9 @@ fn a_witness_that_kills_its_server_fails_alone_and_the_next_is_served() {
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
 /// workspace, so a person's edit there is what may turn one red (#3091).
-/// Every other test here builds the manifest it judges.
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
 mod tracked {
     use super::*;
 

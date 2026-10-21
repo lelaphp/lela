@@ -19,7 +19,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 use toml::{Table, Value};
-use xtask::manifest::{self, Crate, Manifest};
+use xtask::manifest::{self, Budget, Crate, Manifest};
 use xtask::oracle::Pin;
 
 /// A `seams.toml` as a table, changed row by row and written whole.
@@ -32,6 +32,18 @@ impl Tracked {
     /// The workspace's own `seams.toml`.
     pub fn workspace() -> Tracked {
         Tracked::of(workspace())
+    }
+
+    /// The least manifest the grammar reads: the pin, `oracle.toml` beside
+    /// it, and a `[budget]` whose every ceiling is a million, with no row,
+    /// rule or table more. A test of an instrument's mechanics adds the
+    /// rows it reads and judges by nothing a person keeps.
+    pub fn minimal() -> Tracked {
+        let budget = Table::try_from(Budget::flat(1_000_000)).unwrap();
+        Tracked {
+            table: Table::from_iter([("budget".to_owned(), Value::Table(budget))]),
+        }
+        .with_pin(Path::new("oracle.toml"))
     }
 
     /// The `seams.toml` standing at `root`.
@@ -72,12 +84,7 @@ impl Tracked {
     /// `row` added to the array of tables `array`, `[[bench]]` or any
     /// other the grammar reads.
     pub fn with_row(mut self, array: &str, row: Table) -> Tracked {
-        self.table
-            .entry(array)
-            .or_insert_with(|| Value::Array(Vec::new()))
-            .as_array_mut()
-            .unwrap()
-            .push(Value::Table(row));
+        self.array(array).push(Value::Table(row));
         self
     }
 
@@ -93,7 +100,8 @@ impl Tracked {
 
     /// `[oracle] pin` naming `path`, relative to the root the manifest is
     /// written at, or absolute.
-    pub fn with_pin(mut self, path: &str) -> Tracked {
+    pub fn with_pin(mut self, path: &Path) -> Tracked {
+        let path = path.to_str().expect("a pin path is UTF-8");
         let oracle = self
             .table
             .entry("oracle")
@@ -103,6 +111,13 @@ impl Tracked {
             .unwrap()
             .insert("pin".to_owned(), Value::from(path));
         self
+    }
+
+    /// `[oracle] pin` naming the workspace's own `oracle.toml`, by its
+    /// absolute path: a fixture's manifest names it relative to the
+    /// fixture's place in the tree, which a copy elsewhere is not.
+    pub fn with_the_workspace_pin(self) -> Tracked {
+        self.with_pin(&workspace().join("oracle.toml"))
     }
 
     /// The file as text, as [`Tracked::write`] writes it.
@@ -120,12 +135,7 @@ impl Tracked {
     /// The row of the array of tables `array` whose `key` is `name`: an
     /// empty one at the end where the file has none.
     fn row(&mut self, array: &str, key: &str, name: &str) -> &mut Table {
-        let rows = self
-            .table
-            .entry(array)
-            .or_insert_with(|| Value::Array(Vec::new()))
-            .as_array_mut()
-            .unwrap();
+        let rows = self.array(array);
         let at = rows
             .iter()
             .position(|row| row.get(key).and_then(Value::as_str) == Some(name))
@@ -135,6 +145,23 @@ impl Tracked {
             });
         rows[at].as_table_mut().unwrap()
     }
+
+    /// The array of tables `key`, an empty one where the file has none.
+    fn array(&mut self, key: &str) -> &mut Vec<Value> {
+        self.table
+            .entry(key)
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .unwrap()
+    }
+}
+
+/// A manifest of `rows` alone under the workspace's pin: what a test of
+/// an instrument's mechanics judges by, the rows it reads and no other.
+pub fn of_rows(rows: impl IntoIterator<Item = Crate>) -> Manifest {
+    let mut manifest = Manifest::of(rows);
+    manifest.pin = pin();
+    manifest
 }
 
 /// The workspace's oracle pin, read from `oracle.toml` itself and not

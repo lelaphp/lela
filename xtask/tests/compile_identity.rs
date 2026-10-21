@@ -30,7 +30,7 @@ use std::sync::OnceLock;
 
 use xtask::compile_identity::{self, Ask};
 use xtask::divergence::Registry;
-use xtask::manifest::Manifest;
+use xtask::manifest::{Crate, Manifest};
 use xtask::oracle::{Promise, Regime};
 use xtask::reading::{Number, Reading, Status};
 use xtask::scratch::Tree;
@@ -40,7 +40,7 @@ mod common {
     pub mod registry;
     pub mod repo;
 }
-use common::manifest::pin;
+use common::manifest::{of_rows, pin};
 use common::registry::registry;
 use common::repo::scratch_workspace;
 
@@ -137,8 +137,7 @@ impl Scratch {
                 fs::copy(&file, corpus.join(&name)).unwrap();
             }
         }
-        let mut manifest = Manifest::named("php_compile");
-        manifest.pin = pin();
+        let mut manifest = of_rows([Crate::named("php_compile")]);
         manifest
             .pin
             .regime

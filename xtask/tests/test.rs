@@ -137,7 +137,9 @@ fn scratch(name: &str) -> Tree {
     }
     // The fixture's pin is by a path relative to the fixture; here the
     // pin stands beside the manifest.
-    Tracked::of(&root).with_pin("oracle.toml").write(&root);
+    Tracked::of(&root)
+        .with_pin(Path::new("oracle.toml"))
+        .write(&root);
     root
 }
 

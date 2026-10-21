@@ -121,9 +121,8 @@ fn a_file_in_a_worktree_beside_the_checkout_is_judged_against_that_worktree() {
     let marker = "edited by a person, says the worktree's manifest";
     Tracked::of(&beside)
         .with_rule("harness.self", |rule| {
-            let text = rule["text"].as_str().unwrap();
-            assert!(text.ends_with("are edited by a person."), "{text}");
-            let text = text.replace("are edited by a person.", &format!("are {marker}."));
+            // The marker beside the rule's own words, whatever they are.
+            let text = format!("{} Here: {marker}.", rule["text"].as_str().unwrap());
             rule.insert("text".to_owned(), text.into());
         })
         .write(&beside);
@@ -231,9 +230,8 @@ fn a_call_in_a_worktree_whose_manifest_differs_is_judged_by_that_worktrees_build
     let marker = "not available to agents, says the worktree's manifest";
     Tracked::of(&beside)
         .with_rule("git.no-verify", |rule| {
-            let text = rule["text"].as_str().unwrap();
-            assert!(text.ends_with("not available to agents."), "{text}");
-            let text = text.replace("not available to agents.", &format!("{marker}."));
+            // The marker beside the rule's own words, whatever they are.
+            let text = format!("{} Here: {marker}.", rule["text"].as_str().unwrap());
             rule.insert("text".to_owned(), text.into());
         })
         .with_rule("worktree.only", |rule| {
@@ -436,7 +434,7 @@ fn diff_judges_a_fixture_source_by_the_fixture_manifest() {
     let root = scratch("diff-fixture");
     let fixture = "xtask/fixtures/rules/unsafe.homes";
     let manifest = Tracked::of(&fixtures().join("rules/unsafe.homes"))
-        .with_pin(workspace().join("oracle.toml").to_str().unwrap())
+        .with_the_workspace_pin()
         .text();
     write(&root, &format!("{fixture}/seams.toml"), &manifest);
     write(
@@ -1831,7 +1829,9 @@ fn denied(manifest: &Manifest, root: &Path, line: &str) -> bool {
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
 /// workspace, so a person's edit there is what may turn one red (#3091).
-/// Every other test here builds the manifest it judges.
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
 mod tracked {
     use super::*;
 

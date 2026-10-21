@@ -35,9 +35,7 @@ fn scratch(name: &str) -> Tree {
     copy(&xtask::package_dir().join("fixtures/new-ext"), &dir);
     // The fixture names the pin by a path relative to its place in the
     // tree; the copy names the workspace's.
-    Tracked::of(&dir)
-        .with_pin(workspace().join("oracle.toml").to_str().unwrap())
-        .write(&dir);
+    Tracked::of(&dir).with_the_workspace_pin().write(&dir);
     Repo::init(&dir).commit("fixture");
     dir
 }
@@ -352,7 +350,9 @@ fn the_binary_prints_what_it_laid_down_and_exits_nonzero_on_a_refusal() {
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
 /// workspace, so a person's edit there is what may turn one red (#3091).
-/// Every other test here builds the manifest it judges.
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
 mod tracked {
     use super::*;
 
