@@ -22,7 +22,7 @@ use std::sync::atomic::Ordering;
 
 use php_engine::api::request::Ini;
 use php_engine::tier::{Epoch, FuncRef, SafepointIdx, StartupIni, Word};
-use php_unit::Opcode;
+use php_unit::{Opcode, OplineIdx};
 
 use crate::types::ExitId;
 use php_unit::decl::{IniDecl, Name};
@@ -1036,14 +1036,21 @@ pub(crate) fn bump(word: &Word) -> u32 {
 
 /// Where a claimed word lives (`jit-design.md` §4.7), owned, so a claim
 /// can leave the thread that made it: a root's word by its op array and
-/// safepoint, an exit's by its trace and exit, each under the epoch it
-/// holds, which keeps the word, the op array's row or the trace table's.
+/// safepoint, a return root's by its op array and the landing opline
+/// past the call (§2.2, #3036), an exit's by its trace and exit, each
+/// under the epoch it holds, which keeps the word, the op array's row or
+/// the trace table's.
 #[derive(Debug, Clone)]
 pub(crate) enum Holder {
     Root {
         epoch: Epoch,
         func: FuncRef,
         at: SafepointIdx,
+    },
+    Landing {
+        epoch: Epoch,
+        func: FuncRef,
+        at: OplineIdx,
     },
     Exit {
         epoch: Epoch,
@@ -1054,10 +1061,12 @@ pub(crate) enum Holder {
 
 impl Holder {
     /// The word it holds: the sealed one for an exit the epoch's table
-    /// holds no trace for, which nothing claims.
+    /// holds no trace for, and for a landing no trace armed, which
+    /// nothing claims.
     pub(crate) fn word(&self) -> &Word {
         match self {
             Holder::Root { epoch, func, at } => epoch.word(*func, *at),
+            Holder::Landing { epoch, func, at } => epoch.landing(*func, *at),
             Holder::Exit { epoch, trace, exit } => crate::table::exit_word(epoch, *trace, *exit),
         }
     }
@@ -1065,9 +1074,42 @@ impl Holder {
     /// The epoch it holds.
     pub(crate) fn epoch(&self) -> &Epoch {
         match self {
-            Holder::Root { epoch, .. } | Holder::Exit { epoch, .. } => epoch,
+            Holder::Root { epoch, .. }
+            | Holder::Landing { epoch, .. }
+            | Holder::Exit { epoch, .. } => epoch,
         }
     }
+}
+
+/// Whether a landing word was armed (`jit-design.md` §2.2, #3036): any
+/// word whose state half is not the sealed word's all ones, which its op
+/// array's landings are laid down as, php's `trace_flags` of an opline
+/// `zend_jit_trace_setup_ret_counter` set. An armed landing that is
+/// blacklisted is armed: its state half keeps its attempts and the stop
+/// below the trace number's bits, so it is never all ones.
+#[inline(always)] // jit-design.md §4.9: one load where a return lands
+#[allow(clippy::inline_always)]
+pub(crate) fn armed(word: &Word) -> bool {
+    word.halves()[1].load(Ordering::Relaxed) != u32::MAX
+}
+
+/// Arm a landing word, php's `zend_jit_trace_setup_ret_counter`
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:3404-3418`): a sealed word made
+/// cold, so the returns that land on it count toward
+/// `opcache.jit_hot_return`; one armed already, whatever its state, is
+/// left, as php arms an opline whose `trace_flags` are clear. Whether
+/// this call armed it.
+pub(crate) fn arm(word: &Word) -> bool {
+    if armed(word) {
+        return false;
+    }
+    // The heat first: a sealed word is never bumped, and a visit that
+    // finds the state cold finds no heat left over from the seal.
+    let [heat, state] = word.halves();
+    heat.store(0, Ordering::Relaxed);
+    state
+        .compare_exchange(u32::MAX, COLD, Ordering::Release, Ordering::Relaxed)
+        .is_ok()
 }
 
 /// A word in the recording state, owned until it is settled once

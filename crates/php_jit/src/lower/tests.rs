@@ -270,18 +270,18 @@ fn a_temporary_arrays_free_leaves_through_an_unwind() -> Result<(), String> {
     Ok(())
 }
 
-/// A return trace lands in a caller php's IP guard holds: the caller's op
-/// array and opline read from where the return's kernel stood.
+/// A recursive return trace lands in a caller php's IP guard holds: the
+/// caller's op array and opline read from where the return's kernel
+/// stood.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_return_trace_holds_its_caller_by_where_the_return_stood() -> Result<(), String> {
     let (ir, clif) = compiled(
-        &[("record.function", "g"), ("record.start", "return")],
-        "function g(int $x) { return $x + 1; }
-        function f() { $a = g(1); return $a * 2; }
-        echo f(), \"\\n\";",
+        &[("record.function", "r"), ("record.start", "return")],
+        "function r($n) { if ($n == 0) { return 0; } $x = r($n - 1); return $x + 1; }
+        echo r(5), \"\\n\";",
     )?;
-    assert!(matches!(ir.end, End::Leave(_)));
+    assert!(matches!(ir.end, End::Loop(_)));
     assert!(
         clif.contains("stack_addr.i64 ss0+16") && clif.contains("stack_addr.i64 ss0+20"),
         "the landed op array and opline are read:\n{clif}"

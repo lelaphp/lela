@@ -39,7 +39,7 @@ use php_heap::ZvalType;
 use php_unit::{OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use crate::JitRequest;
-use crate::policy::{self, Policy, State};
+use crate::policy::{self, Holder, Policy, State};
 use crate::table::TraceId;
 use crate::types::ExitId;
 
@@ -205,6 +205,20 @@ impl Stop {
         )
     }
 
+    /// php's `p->stop >= ZEND_JIT_TRACE_STOP_LINK` of a trace that
+    /// compiles: one that ends where another trace or the interpreter
+    /// goes on, whose landings it arms ([`landings`]).
+    fn hands_on(self) -> bool {
+        matches!(
+            self,
+            Stop::Link(_)
+                | Stop::Interpreter
+                | Stop::Trampoline
+                | Stop::PropHookCall
+                | Stop::BadFunc
+        )
+    }
+
     /// `ZEND_JIT_TRACE_STOP_MAY_RECOVER`: a failure the word may try
     /// again after, where the three past it blacklist at once.
     pub(crate) fn recovers(self) -> bool {
@@ -305,6 +319,13 @@ pub(crate) struct TraceRecord {
     pub(crate) entered: Vec<Entered>,
     pub(crate) events: Vec<Event>,
     pub(crate) stop: Stop,
+    /// Where a trace that links hands on, the opline the trace it links
+    /// to roots at, php's `ZEND_JIT_TRACE_END` record's opline: what a
+    /// return past the trace's lowest frame with no opline recorded after
+    /// it is held to land on (`zend_jit_leave_func`'s IP guard,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:11188-11224`). None for any
+    /// other stop.
+    pub(crate) link_at: Option<(FuncRef, OplineIdx)>,
 }
 
 /// One slot of the frame a side trace starts in whose type its parent's
@@ -444,30 +465,32 @@ pub(crate) enum Bailed {
     Unwinding(FrameRef),
 }
 
-/// Record from `frame`, which stands at the safepoint `start` names, the
-/// claimed word's number `at`: a loop header for `Loop`, the first opline
-/// past the prologue for `Enter`, the `RETURN` for `Return`. `Ok` with
-/// the record and where the program stands; `Err` where the request
-/// bailed out under it, the recording thrown away.
+/// Record from `frame`, which stands where `start` roots, on the word
+/// `claimed` holds: a loop header for `Loop`, the first opline past the
+/// prologue for `Enter`, the caller's landing past the call a return
+/// landed from for `Return` (`jit-design.md` §2.2, #3036), an exit's
+/// landing for a side. `Ok` with the record and where the program
+/// stands; `Err` where the request bailed out under it, the recording
+/// thrown away.
 pub(crate) fn run(
     req: &mut Request,
     frame: FrameRef,
     start: Start,
-    at: SafepointIdx,
+    claimed: &Holder,
     policy: &Policy,
     opening: Opening,
 ) -> Result<(Recorded, Ended), Bailed> {
     let Opening { entered, behind } = opening;
     let mut req = Recording::set(req);
     let mut view = UnitView::new(&req);
-    let claimed = tier::func(&req, frame).filter(|root| view.hold(&req, *root));
-    let Some(root) = claimed else {
+    let held = tier::func(&req, frame).filter(|root| view.hold(&req, *root));
+    let Some(root) = held else {
         return Ok((
             refused(&req, frame, start, Stop::RequestUnit),
             ended(frame, false),
         ));
     };
-    let mut recorder = Recorder::new(policy, start, tier::epoch(&req), (root, at));
+    let mut recorder = Recorder::new(policy, start, tier::epoch(&req), Claimed::of(claimed));
     let (stop, ended) = recorder.record(&mut req, &mut view, frame, root, behind)?;
     let record = TraceRecord {
         start: recorder.start,
@@ -480,6 +503,9 @@ pub(crate) fn run(
         },
         events: recorder.events,
         stop,
+        link_at: matches!(stop, Stop::Link(_))
+            .then_some(recorder.link_at)
+            .flatten(),
     };
     Ok((Recorded { record, view }, ended))
 }
@@ -491,6 +517,59 @@ pub(crate) fn run(
 pub(crate) struct Opening {
     pub(crate) entered: Vec<Entered>,
     pub(crate) behind: Option<OplineIdx>,
+}
+
+/// The landings a compiled trace arms (`jit-design.md` §2.2, #3036),
+/// where php's code generator calls `zend_jit_trace_setup_ret_counter`
+/// once the trace's code is generated
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:7322-7368`): for a recursive
+/// call, the opline past each call into the root's op array; for a
+/// trace that ends where another trace or the interpreter goes on, the
+/// opline past its last where that is a call, an `include` or an `eval`
+/// or a `yield`, and past the call each frame below the one it ends in
+/// made. Each as its op array and opline; none for any other stop.
+pub(crate) fn landings(record: &TraceRecord, view: &UnitView) -> Vec<(FuncRef, OplineIdx)> {
+    let past = |(func, at): (FuncRef, OplineIdx)| (func, OplineIdx(at.0.saturating_add(1)));
+    let mut last = None;
+    let mut calls = Vec::new();
+    let mut armed = Vec::new();
+    for event in &record.events {
+        match event {
+            Event::Op { func, opline, .. } => last = Some((*func, *opline)),
+            Event::Enter { func } => {
+                if let Some(call) = last {
+                    if record.stop == Stop::RecursiveCall && *func == record.root {
+                        armed.push(past(call));
+                    }
+                    calls.push(call);
+                }
+            }
+            Event::Back => {
+                calls.pop();
+            }
+            Event::InitCall { .. } => {}
+        }
+    }
+    if record.stop.hands_on() {
+        let called = last.filter(|(func, at)| {
+            (view.op_array(*func))
+                .and_then(|code| code.oplines.get(at.0 as usize))
+                .is_some_and(|op| {
+                    matches!(
+                        op.opcode,
+                        Opcode::DoUcall
+                            | Opcode::DoFcall
+                            | Opcode::DoFcallByName
+                            | Opcode::Yield
+                            | Opcode::YieldFrom
+                            | Opcode::IncludeOrEval
+                    )
+                })
+        });
+        armed.extend(called.map(past));
+        armed.extend(calls.into_iter().rev().map(past));
+    }
+    armed
 }
 
 /// The condition a loop's recording begins at behind `frame`, which the
@@ -640,6 +719,7 @@ pub(crate) fn refused(req: &Request, frame: FrameRef, start: Start, stop: Stop) 
         entered: Vec::new(),
         events: Vec::new(),
         stop,
+        link_at: None,
     };
     Recorded {
         record,
@@ -661,8 +741,7 @@ struct Recorder<'p> {
     /// cache key.
     claimed: Claimed,
     /// php's `orig_opline`: the op array and opline the trace is rooted
-    /// at, which closes a loop and names recursion. A return trace's is
-    /// the opline its first return lands on, unknown until then.
+    /// at, which closes a loop and names recursion.
     root: Option<(FuncRef, OplineIdx)>,
     events: Vec<Event>,
     /// php's `idx`: the records the trace holds, its head included.
@@ -683,14 +762,29 @@ struct Recorder<'p> {
     megamorphic: Vec<FrameRef>,
     rerooted: Option<(FuncRef, SafepointIdx)>,
     stood: Option<TraceId>,
+    /// Where the recording linked, [`TraceRecord::link_at`].
+    link_at: Option<(FuncRef, OplineIdx)>,
 }
 
 /// The word a recording was claimed on: a root's, by its op array and
-/// safepoint, or an exit's, by its trace and exit.
+/// safepoint, a return root's, by its op array and landing, or an
+/// exit's, by its trace and exit.
 #[derive(Debug, Clone, Copy)]
 enum Claimed {
     Root(FuncRef, SafepointIdx),
+    Landing(FuncRef, OplineIdx),
     Exit(TraceId, ExitId),
+}
+
+impl Claimed {
+    /// Where the word `holder` holds stands.
+    fn of(holder: &Holder) -> Claimed {
+        match holder {
+            Holder::Root { func, at, .. } => Claimed::Root(*func, *at),
+            Holder::Landing { func, at, .. } => Claimed::Landing(*func, *at),
+            Holder::Exit { trace, exit, .. } => Claimed::Exit(*trace, *exit),
+        }
+    }
 }
 
 /// How one step of the loop ended: on to the next opline, stopped, or
@@ -702,20 +796,12 @@ enum Went {
 }
 
 impl<'p> Recorder<'p> {
-    fn new(
-        policy: &'p Policy,
-        start: Start,
-        epoch: Epoch,
-        word: (FuncRef, SafepointIdx),
-    ) -> Recorder<'p> {
+    fn new(policy: &'p Policy, start: Start, epoch: Epoch, claimed: Claimed) -> Recorder<'p> {
         Recorder {
             policy,
             start,
             epoch,
-            claimed: match start.grew() {
-                Some((trace, exit)) => Claimed::Exit(trace, exit),
-                None => Claimed::Root(word.0, word.1),
-            },
+            claimed,
             root: None,
             events: Vec::new(),
             length: HEAD,
@@ -730,6 +816,7 @@ impl<'p> Recorder<'p> {
             megamorphic: Vec::new(),
             rerooted: None,
             stood: None,
+            link_at: None,
         }
     }
 
@@ -745,6 +832,7 @@ impl<'p> Recorder<'p> {
     fn root_bad_stop(&self, times: u8) -> Option<Stop> {
         let word = match self.claimed {
             Claimed::Root(func, at) => self.epoch.word(func, at),
+            Claimed::Landing(func, at) => self.epoch.landing(func, at),
             Claimed::Exit(trace, exit) => crate::table::exit_word(&self.epoch, trace, exit),
         };
         policy::bad_stop(word, times)
@@ -831,7 +919,7 @@ impl<'p> Recorder<'p> {
                 }
                 Stepped::Popped(caller) => {
                     frame = caller;
-                    self.popped(req, view, caller, &mut func, &op)
+                    self.popped(req, view, caller, &mut func)
                 }
                 Stepped::Moved(caller) => {
                     frame = caller;
@@ -881,9 +969,7 @@ impl<'p> Recorder<'p> {
         root: FuncRef,
         behind: Option<OplineIdx>,
     ) -> Result<bool, Bailed> {
-        if self.start != Start::Return {
-            self.root = Some((root, behind.unwrap_or_else(|| position(req, frame))));
-        }
+        self.root = Some((root, behind.unwrap_or_else(|| position(req, frame))));
         let Some(condition) = behind else {
             return Ok(false);
         };
@@ -1004,6 +1090,7 @@ impl<'p> Recorder<'p> {
             }
             State::Compiled(id) => {
                 self.stood = Some(id);
+                self.link_at = Some((entered, position(req, callee)));
                 Went::Stopped(Stop::Link(id))
             }
             State::Blacklisted => Went::Stopped(Stop::BlackList),
@@ -1011,28 +1098,20 @@ impl<'p> Recorder<'p> {
         }
     }
 
-    /// A return to `caller`, php's "Return from function": a return
-    /// trace's own first return, which roots it where it lands; at depth
-    /// zero the end of a loop or entry trace, or a return php follows past
-    /// a return trace's root; deeper, one level back. Then the word of the
-    /// return just stepped.
+    /// A return to `caller`, php's "Return from function": at depth zero
+    /// the end of a loop or entry trace, or a return php follows past a
+    /// return trace's root; deeper, one level back. Then the landing it
+    /// returned to, as php reads the `trace_flags` of the opline a return
+    /// lands on (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1294-1325`): a
+    /// return trace compiled there is linked to, and one blacklisted there
+    /// stops the recording.
     fn popped(
         &mut self,
         req: &Request,
         view: &mut UnitView,
         caller: FrameRef,
         func: &mut FuncRef,
-        op: &Opline,
     ) -> Went {
-        let returned = (*func, SafepointIdx(op.out));
-        if self.start == Start::Return && self.root.is_none() {
-            let Some(landed) = tier::func(req, caller).filter(|f| view.hold(req, *f)) else {
-                return Went::Stopped(Stop::RequestUnit);
-            };
-            self.root = Some((landed, position(req, caller)));
-            *func = landed;
-            return Went::On;
-        }
         if self.level == 0 {
             let limit = self.policy.blacklist_root().saturating_sub(1);
             match self.start {
@@ -1069,11 +1148,18 @@ impl<'p> Recorder<'p> {
             };
             *func = landed;
         }
-        // The return just stepped, as php reads `trace_flags` of the
-        // opline it landed on: a return trace compiled there is linked to.
-        match policy::read(self.epoch.word(returned.0, returned.1)) {
-            State::Compiled(id) => Went::Stopped(Stop::Link(id)),
-            State::Cold | State::Recording | State::Blacklisted => Went::On,
+        let landing = self.epoch.landing(*func, position(req, caller));
+        if !policy::armed(landing) {
+            return Went::On;
+        }
+        match policy::read(landing) {
+            State::Compiled(id) => {
+                self.stood = Some(id);
+                self.link_at = Some((*func, position(req, caller)));
+                Went::Stopped(Stop::Link(id))
+            }
+            State::Blacklisted => Went::Stopped(Stop::BlackList),
+            State::Cold | State::Recording => Went::On,
         }
     }
 
@@ -1126,6 +1212,7 @@ impl<'p> Recorder<'p> {
         match policy::read(self.epoch.word(func, header)) {
             State::Compiled(id) => {
                 self.stood = Some(id);
+                self.link_at = Some((func, at));
                 let compiled_loop = self.start == Start::Loop
                     && depth == 0
                     && self.root_bad_stop(limit) != Some(Stop::CompiledLoop);
@@ -1182,9 +1269,20 @@ impl<'p> Recorder<'p> {
         }
     }
 
+    /// php's fall back past a failed recording ([`Recorder::fallen_back`]),
+    /// where a stop it falls back to links at no place the recording
+    /// stood at.
+    fn backtracked(&mut self, stop: Stop) -> Stop {
+        let fallen = self.fallen_back(stop);
+        if fallen != stop {
+            self.link_at = None;
+        }
+        fallen
+    }
+
     /// php's fall back past a failed recording: to the recursive call or
     /// return it saw, or to the compiled entry it would have linked to.
-    fn backtracked(&mut self, stop: Stop) -> Stop {
+    fn fallen_back(&mut self, stop: Stop) -> Stop {
         if stop.compiles() {
             return stop;
         }

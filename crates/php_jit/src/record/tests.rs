@@ -67,12 +67,13 @@ fn a_call_and_its_return_are_entered_and_left() -> Result<(), String> {
     Ok(())
 }
 
-/// A return trace: its first opline is the `RETURN` it started at, the
-/// first `Popped` roots it where it lands, and it goes on in the caller
-/// to the caller's own return.
+/// A return trace roots at its caller's landing (`jit-design.md` §2.2,
+/// #3036): its first opline is the one past `f`'s call to `g`, in `f`,
+/// and it goes on there to `f`'s own return, which, with no recursion
+/// below, ends it as php's "Return from function" does.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
-fn a_return_trace_starts_at_its_return_and_goes_on_in_the_caller() -> Result<(), String> {
+fn a_return_trace_roots_at_its_callers_landing_and_goes_on_there() -> Result<(), String> {
     let (record, out) = recorded(
         &at("g", "return"),
         "function g($x) { return $x + 1; }
@@ -82,15 +83,19 @@ fn a_return_trace_starts_at_its_return_and_goes_on_in_the_caller() -> Result<(),
     assert_eq!(out, "4\n");
     assert_eq!((record.start, record.stop), (Start::Return, Stop::Return));
     assert_eq!(enters(&record), 0);
-    let Some(Event::Op { func: first, .. }) = record.events.first() else {
+    let Some(Event::Op {
+        func: first,
+        opline,
+        ..
+    }) = record.events.first()
+    else {
         return Err(format!("no first opline: {:?}", record.events));
     };
-    assert_eq!(*first, record.root, "the RETURN is g's");
-    let in_caller = record
-        .events
-        .iter()
-        .any(|event| matches!(event, Event::Op { func, .. } if *func != record.root));
-    assert!(in_caller, "the trace goes on in f: {:?}", record.events);
+    assert_eq!(*first, record.root, "the landing is f's");
+    assert!(opline.0 > 0, "past the call: {opline:?}");
+    let all_in_f = (record.events.iter())
+        .all(|event| matches!(event, Event::Op { func, .. } if *func == record.root));
+    assert!(all_in_f, "the trace stays in f: {:?}", record.events);
     Ok(())
 }
 
@@ -619,12 +624,14 @@ impl Draw {
                 .collect(),
             _ => Vec::new(),
         };
+        let link_at = matches!(stop, Stop::Link(_)).then(|| (self.func(), OplineIdx(self.next(9))));
         TraceRecord {
             start,
             root: self.func(),
             entered,
             events,
             stop,
+            link_at,
         }
     }
 }

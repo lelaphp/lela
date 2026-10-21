@@ -285,22 +285,37 @@ fn a_throwing_kernel_reloads_nothing_but_may_leave() -> Result<(), String> {
     Ok(())
 }
 
-/// A return trace: its root's return lands in a caller the guard holds,
-/// and the trace goes on there.
+/// A recursive return trace (`jit-design.md` §2.2, #3036): rooted at
+/// `r`'s landing past its call to itself, it returns past its root into
+/// a caller the guard holds standing at that landing, goes on there, and
+/// goes back to its header through the next return, whose guard holds
+/// the caller at the header's landing, as php's `zend_jit_leave_func`
+/// holds the instruction pointer; a phi stands for the slot the call
+/// before the landing writes.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_return_trace_guards_the_caller_it_lands_in() -> Result<(), String> {
     let ir = built(
-        &[("record.function", "g"), ("record.start", "return")],
-        "function g(int $x) { return $x + 1; }
-        function f() { $a = g(1); return $a * 2; }
-        echo f(), \"\\n\";",
+        &[("record.function", "r"), ("record.start", "return")],
+        "function r($n) { if ($n == 0) { return 0; } $x = r($n - 1); return $x + 1; }
+        echo r(5), \"\\n\";",
     )?;
-    assert!(
-        ir.guards
-            .iter()
-            .any(|guard| matches!(guard.check, Check::Stands { .. }))
+    assert_eq!(ir.entry.stop, Stop::RecursiveRet);
+    let stands: Vec<_> = (ir.guards.iter())
+        .filter_map(|guard| match guard.check {
+            Check::Stands { opline, .. } => Some(opline),
+            _ => None,
+        })
+        .collect();
+    let Some(Op::Line(first)) = ir.ops.first() else {
+        return Err("no first opline".to_owned());
+    };
+    assert_eq!(
+        stands,
+        [first.opline, first.opline],
+        "each return held to the landing"
     );
+    assert!(matches!(ir.end, End::Loop(_)), "{:?}", ir.end);
     Ok(())
 }
 
