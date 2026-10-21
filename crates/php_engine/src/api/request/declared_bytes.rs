@@ -79,14 +79,53 @@ pub(super) struct Declared {
     dynamic: Vec<Dynamic>,
 }
 
-/// One dynamic definition's blocks and what holds them.
+/// One dynamic definition's blocks and what holds them: the op array
+/// that declares it, by its `dynamic_func_defs`, each closure over it
+/// and the function table once it is bound. php gives the op array back
+/// at the last of them (`destroy_op_array`'s count).
 #[derive(Default)]
 struct Dynamic {
     blocks: Blocks,
+    /// The op array whose `dynamic_func_defs` holds it.
+    declarer: Declarer,
     /// The closures over it that stand.
     closures: usize,
     /// Whether a `DECLARE_FUNCTION` bound it.
     bound: bool,
+    /// Whether its blocks were given back.
+    gone: bool,
+}
+
+/// The op array a dynamic definition is declared in.
+#[derive(Default, Clone, Copy)]
+pub(super) enum Declarer {
+    /// The unit's main op array, which ends with its execution.
+    Main,
+    /// Another dynamic definition, which goes with its own last count.
+    Dynamic(usize),
+    /// A function, a method or a hook, which the request's tables hold
+    /// to the unit's end.
+    #[default]
+    Table,
+}
+
+/// What a unit declares, laid down: a function's, a class's and its
+/// methods' and hooks' blocks together, and each dynamic definition's
+/// apart with the op array that declares it.
+#[derive(Default)]
+pub(super) struct Laid {
+    tables: Blocks,
+    dynamic: Vec<(Blocks, Declarer)>,
+}
+
+impl Laid {
+    /// Every block given back.
+    pub(super) fn free(self, req: &mut Request) {
+        self.tables.free(req);
+        for (blocks, _) in self.dynamic {
+            blocks.free(req);
+        }
+    }
 }
 
 /// `emalloc`'d blocks and hash tables, given back together.
@@ -97,6 +136,11 @@ pub(super) struct Blocks {
 }
 
 impl Blocks {
+    /// Whether it holds no block.
+    fn is_empty(&self) -> bool {
+        self.blocks.is_empty() && self.tables.is_empty()
+    }
+
     /// Every block given back.
     pub(super) fn free(self, req: &mut Request) {
         for block in self.blocks {
@@ -115,22 +159,28 @@ impl Blocks {
 }
 
 impl Declared {
+    /// Whether the unit's blocks were laid down: never for a unit that
+    /// declares nothing, an `eval` in a loop's.
+    pub(super) fn laid(&self) -> bool {
+        self.laid
+    }
+
     /// Whether the unit's blocks were laid down, and from here that they
     /// are.
     pub(super) fn lay(&mut self) -> bool {
         std::mem::replace(&mut self.laid, true)
     }
 
-    /// A function's, a class's and its methods' and hooks' blocks, held
-    /// to the unit's end; and each dynamic definition's, by its place.
-    pub(super) fn hold(&mut self, tables: Blocks, dynamic: Vec<Blocks>) {
-        self.tables.take(tables);
-        self.dynamic = dynamic
-            .into_iter()
-            .map(|blocks| Dynamic {
+    /// What [`of_unit`] laid down, held: a function's, a class's and its
+    /// members' to the unit's end, each dynamic definition's while what
+    /// holds it stands.
+    pub(super) fn hold(&mut self, laid: Laid) {
+        self.tables.take(laid.tables);
+        self.dynamic = (laid.dynamic.into_iter())
+            .map(|(blocks, declarer)| Dynamic {
                 blocks,
-                closures: 0,
-                bound: false,
+                declarer,
+                ..Dynamic::default()
             })
             .collect();
     }
@@ -142,14 +192,14 @@ impl Declared {
         }
     }
 
-    /// One closure fewer over the dynamic definition at `at`; its blocks,
-    /// where it was the last and the main op array that declared it has
-    /// ended (`over`) with nothing bound to it.
-    pub(super) fn uncount_closure(&mut self, at: usize, over: bool) -> Option<Blocks> {
-        let dynamic = self.dynamic.get_mut(at)?;
-        dynamic.closures = dynamic.closures.saturating_sub(1);
-        (over && dynamic.closures == 0 && !dynamic.bound)
-            .then(|| std::mem::take(&mut dynamic.blocks))
+    /// One closure fewer over the dynamic definition at `at`: the blocks
+    /// of each definition nothing holds any longer, `over` where the main
+    /// op array has ended.
+    pub(super) fn uncount_closure(&mut self, at: usize, over: bool, dead: &mut Vec<Blocks>) {
+        if let Some(dynamic) = self.dynamic.get_mut(at) {
+            dynamic.closures = dynamic.closures.saturating_sub(1);
+        }
+        self.settle(over, dead);
     }
 
     /// The dynamic definition at `at` bound by a `DECLARE_FUNCTION`: the
@@ -160,21 +210,70 @@ impl Declared {
         }
     }
 
-    /// The main op array ended: the blocks of each dynamic definition no
-    /// closure and no binding holds, as `destroy_op_array` gives back
-    /// what `dynamic_func_defs` held the last count of.
+    /// The main op array ended: the blocks of each definition nothing
+    /// holds any longer, as `destroy_op_array` gives back what its
+    /// `dynamic_func_defs` held the last count of.
     pub(super) fn main_over(&mut self, dead: &mut Vec<Blocks>) {
-        for dynamic in &mut self.dynamic {
-            if dynamic.closures == 0 && !dynamic.bound {
-                dead.push(std::mem::take(&mut dynamic.blocks));
+        self.settle(true, dead);
+    }
+
+    /// Each definition no closure, no binding and no op array standing
+    /// holds given back, and with it what it declared where nothing else
+    /// holds that, as `destroy_op_array` walks `dynamic_func_defs`. A
+    /// closure written in a function the `eval` declares stands with the
+    /// function, and one written in a closure with the last count of
+    /// that closure's op array:
+    ///
+    /// ```php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('$q = 1; $GLOBALS["w"] = function () use ($q) { static $t = 0; return $q; };');
+    /// echo m('function h() { return fn () => 1; }'), "\n";
+    /// $m = memory_get_usage(); $c = h(); unset($c); echo memory_get_usage() - $m, "\n";
+    /// echo m('$GLOBALS["o"] = function () { return function () { return 2; }; };'), "\n";
+    /// $m = memory_get_usage(); $i = $o(); unset($o, $i); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 392
+    /// 0
+    /// 976
+    /// -976
+    /// ```
+    fn settle(&mut self, over: bool, dead: &mut Vec<Blocks>) {
+        if self.dynamic.is_empty() {
+            return;
+        }
+        loop {
+            let gone: Vec<bool> = self.dynamic.iter().map(|dynamic| dynamic.gone).collect();
+            let mut settled = true;
+            for dynamic in self.dynamic.iter_mut().filter(|dynamic| !dynamic.gone) {
+                let declarer_stands = match dynamic.declarer {
+                    Declarer::Main => !over,
+                    Declarer::Dynamic(at) => !gone.get(at).copied().unwrap_or(true),
+                    Declarer::Table => true,
+                };
+                if !declarer_stands && dynamic.closures == 0 && !dynamic.bound {
+                    dynamic.gone = true;
+                    dead.push(std::mem::take(&mut dynamic.blocks));
+                    settled = false;
+                }
+            }
+            if settled {
+                return;
             }
         }
     }
 
-    /// Every block, the unit gone.
+    /// Every block, the unit gone; nothing for a unit that declared
+    /// nothing, the most of them, an `eval` in a loop's.
     pub(super) fn all(self, dead: &mut Vec<Blocks>) {
-        dead.push(self.tables);
-        dead.extend(self.dynamic.into_iter().map(|dynamic| dynamic.blocks));
+        if !self.tables.is_empty() {
+            dead.push(self.tables);
+        }
+        dead.extend(
+            (self.dynamic.into_iter())
+                .map(|dynamic| dynamic.blocks)
+                .filter(|blocks| !blocks.is_empty()),
+        );
     }
 }
 
@@ -198,8 +297,12 @@ impl Declared {
 /// 5904
 /// 1600
 /// ```
-pub(super) fn op_array(req: &mut Request, code: &OpArray, args: usize) -> Result<Blocks, Thrown> {
-    let mut blocks = Blocks::default();
+fn op_array(
+    req: &mut Request,
+    blocks: &mut Blocks,
+    code: &OpArray,
+    args: usize,
+) -> Result<(), Thrown> {
     blocks.blocks.push(Emalloc::new(req, REFCOUNT)?);
     // `get_next_op` grows the oplines fourfold from
     // `INITIAL_OP_ARRAY_SIZE`, and `pass_two` reallocates them to the
@@ -247,7 +350,7 @@ pub(super) fn op_array(req: &mut Request, code: &OpArray, args: usize) -> Result
         }
         blocks.tables.push(statics);
     }
-    Ok(blocks)
+    Ok(())
 }
 
 /// The `arg_info` entries of a function declared as `decl`: one a
@@ -281,8 +384,7 @@ pub(super) fn arg_infos(decl: &FunctionDecl, method: bool) -> usize {
 /// 648
 /// 1600
 /// ```
-pub(super) fn class(req: &mut Request, class: &ClassDecl) -> Result<Blocks, Thrown> {
-    let mut blocks = Blocks::default();
+fn class(req: &mut Request, blocks: &mut Blocks, class: &ClassDecl) -> Result<(), Thrown> {
     for count in [
         class.methods.len(),
         class.properties.len(),
@@ -342,19 +444,29 @@ pub(super) fn class(req: &mut Request, class: &ClassDecl) -> Result<Blocks, Thro
     if interfaces > 0 {
         blocks.blocks.push(Emalloc::new(req, interfaces * POINTER)?);
     }
-    Ok(blocks)
+    Ok(())
 }
 
-/// What `unit` declares laid down: its functions', classes' and their
-/// methods' and hooks' blocks together, and each dynamic definition's
-/// apart.
-pub(super) fn of_unit(req: &mut Request, unit: &Unit) -> Result<(Blocks, Vec<Blocks>), Thrown> {
-    let mut tables = Blocks::default();
+/// What `unit` declares laid down ([`Laid`]); where the memory limit
+/// refuses a block, every one laid before it given back.
+pub(super) fn of_unit(req: &mut Request, unit: &Unit) -> Result<Laid, Thrown> {
+    let mut laid = Laid::default();
+    match lay(req, unit, &mut laid) {
+        Ok(()) => Ok(laid),
+        Err(thrown) => {
+            laid.free(req);
+            Err(thrown)
+        }
+    }
+}
+
+/// [`of_unit`]'s blocks, laid into `laid` one by one.
+fn lay(req: &mut Request, unit: &Unit, laid: &mut Laid) -> Result<(), Thrown> {
     for (decl, code) in &unit.functions {
-        tables.take(op_array(req, code, arg_infos(decl, false))?);
+        op_array(req, &mut laid.tables, code, arg_infos(decl, false))?;
     }
     for decl in &unit.classes {
-        tables.take(class(req, decl)?);
+        class(req, &mut laid.tables, decl)?;
     }
     for method in &unit.methods {
         let decl = unit
@@ -362,7 +474,7 @@ pub(super) fn of_unit(req: &mut Request, unit: &Unit) -> Result<(Blocks, Vec<Blo
             .get(method.class as usize)
             .and_then(|class| class.methods.get(method.method as usize));
         let args = decl.map_or(0, |decl| arg_infos(&decl.function, true));
-        tables.take(op_array(req, &method.body, args)?);
+        op_array(req, &mut laid.tables, &method.body, args)?;
     }
     for hook in &unit.hooks {
         let decl = unit
@@ -372,11 +484,27 @@ pub(super) fn of_unit(req: &mut Request, unit: &Unit) -> Result<(Blocks, Vec<Blo
             .and_then(|property| property.hooks.as_deref())
             .and_then(|hooks| hooks.of(hook.kind));
         let args = decl.map_or(0, |decl| arg_infos(&decl.function, true));
-        tables.take(op_array(req, &hook.body, args)?);
+        op_array(req, &mut laid.tables, &hook.body, args)?;
     }
-    let mut dynamic = Vec::with_capacity(unit.dynamic.len());
-    for (decl, code) in &unit.dynamic {
-        dynamic.push(op_array(req, code, arg_infos(decl, false))?);
+    // Each definition's declarer: the main op array, another dynamic
+    // definition, or else what the request's tables hold.
+    let mut declarers = vec![Declarer::Table; unit.dynamic.len()];
+    let mut declared_in = |defs: &[u32], declarer: Declarer| {
+        for &at in defs {
+            if let Some(slot) = declarers.get_mut(at as usize) {
+                *slot = declarer;
+            }
+        }
+    };
+    declared_in(&unit.main.dynamic_func_defs, Declarer::Main);
+    for (at, (_, code)) in unit.dynamic.iter().enumerate() {
+        declared_in(&code.dynamic_func_defs, Declarer::Dynamic(at));
     }
-    Ok((tables, dynamic))
+    for ((decl, code), declarer) in unit.dynamic.iter().zip(declarers) {
+        let mut blocks = Blocks::default();
+        let made = op_array(req, &mut blocks, code, arg_infos(decl, false));
+        laid.dynamic.push((blocks, declarer));
+        made?;
+    }
+    Ok(())
 }
