@@ -15,7 +15,7 @@
 use crate::api::abi::{Beneath, Extension, ExtensionBuilder, Observed, ObserverHandlers, chain};
 use crate::api::request::{ChainFrame, FrameId, FrameView, Request};
 use crate::engine::Engine;
-use crate::test::Capture;
+use crate::test::{Capture, Files};
 
 /// The frame `keep()` was called from, as the extension's request state.
 #[derive(Default)]
@@ -256,10 +256,11 @@ fn a_handler_reads_the_opcode_its_frame_stands_on() {
     let engine = Engine::cli_builder()
         .extensions(&[ExtensionBuilder::default().observer(init).build("showing")])
         .build();
-    let dir = super::observer::scratch("opcode_read");
+    let files = Files::new("frames-opcode_read", &[]);
+    let dir = files.path();
     let served = super::observer::serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction f($a) {\n    echo $a;\n    return $a;\n}\necho f(1);\nstrlen('x');\n",
     );
     assert_eq!(
@@ -295,10 +296,11 @@ fn an_end_handler_an_uncaught_throwable_calls_reads_the_exception_op() {
     let engine = Engine::cli_builder()
         .extensions(&[ExtensionBuilder::default().observer(init).build("showing")])
         .build();
-    let dir = super::observer::scratch("opcode_unwound");
+    let files = Files::new("frames-opcode_unwound", &[]);
+    let dir = files.path();
     let served = super::observer::serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction b() { throw new Exception(\"x\"); }\n\
          function a() { try { b(); } finally { echo \"f\\n\"; } }\n\
          function c() { try { a(); } catch (Exception $e) { echo \"c\\n\"; } return 1; }\n\
@@ -327,10 +329,11 @@ fn an_end_handler_an_uncaught_throwable_calls_reads_the_exception_op() {
 #[test]
 fn a_backtrace_the_unwind_past_a_finally_calls_reads_its_fast_ret_line() {
     let engine = Engine::cli_builder().build();
-    let dir = super::observer::scratch("fast_ret_line");
+    let files = Files::new("frames-fast_ret_line", &[]);
+    let dir = files.path();
     let served = super::observer::serve_main(
         &engine,
-        &dir,
+        dir,
         r#"<?php
 class D { public $p = 1; function __destruct() { echo "dtor sees a() at line ", debug_backtrace()[0]['line'], "\n"; } }
 function b() { throw new Exception("x"); }

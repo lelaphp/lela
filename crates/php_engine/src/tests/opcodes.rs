@@ -10,12 +10,13 @@
 
 use php_unit::decl::{IniDecl, Name};
 
-use super::observer::{scratch, serve_main};
+use super::observer::serve_main;
 use super::stepped::Stepper;
 use super::test_ext::observed_name;
 use crate::api::abi::{Beneath, Extension, ExtensionBuilder, Observed, Opcodes, Start, chain};
 use crate::engine::{Engine, EngineBuilder};
 use crate::observer::{Declared, Untold};
+use crate::test::Files;
 use crate::tier::{Loop, Nop, execute};
 use php_unit::Opcode;
 
@@ -81,7 +82,11 @@ impl<const N: u8> Shows<N> {
 
 /// `source` served as `main.php` under `builder` with `extensions`, the
 /// startup ini set from `ini`; what it wrote.
+/// What `source` wrote, served as `main.php` in a tree named `name`,
+/// one of the test's own, by an engine of `builder` with `extensions`
+/// and `ini`.
 fn served(
+    name: &str,
     builder: EngineBuilder,
     extensions: &[Extension],
     ini: &[(&str, &str)],
@@ -92,8 +97,9 @@ fn served(
         builder = builder.ini(name, value);
     }
     let engine = builder.build();
-    let dir = scratch("opcodes");
-    let served = serve_main(&engine, &dir, source);
+    let files = Files::new(&format!("opcodes-{name}"), &[]);
+    let dir = files.path();
+    let served = serve_main(&engine, dir, source);
     String::from_utf8_lossy(&served.stdout).into_owned()
 }
 
@@ -115,6 +121,7 @@ fn a_declared_opcode_is_told_before_its_handler_and_the_handler_runs() {
         "ZEND_BEGIN_SILENCE, ZEND_END_SILENCE, ZEND_ECHO",
     )];
     let observed = served(
+        "declared",
         Engine::cli_builder(),
         &[Shows::<0>::extension()],
         &ini,
@@ -133,7 +140,7 @@ fn a_declared_opcode_is_told_before_its_handler_and_the_handler_runs() {
          <!-- opcode: 'ZEND_ECHO' in user handler -->\n\
          done\n"
     );
-    let plain = served(Engine::cli_builder(), &[], &[], SILENCED);
+    let plain = served("declared-plain", Engine::cli_builder(), &[], &[], SILENCED);
     assert_eq!(plain, "0\ndone\n");
     let told: String = observed
         .split_inclusive('\n')
@@ -154,6 +161,7 @@ fn a_skipped_recv_is_never_told_and_each_return_is() {
     let source = "<?php\nfunction f($a) {\n    echo $a;\n    return $a;\n}\necho f(1);\nf(2);\n";
     assert_eq!(
         served(
+            "skipped-recv",
             Engine::cli_builder(),
             &[Shows::<0>::extension()],
             &ini,
@@ -178,6 +186,7 @@ fn each_recv_a_prologue_serves_is_told() {
     let source = "<?php\nfunction t(int $a, $b = 2) { return $a; }\nfunction u($a, $b = 2) { return $a; }\nt(1);\nu(1);\nu(1, 3);\n";
     assert_eq!(
         served(
+            "prologue",
             Engine::cli_builder(),
             &[Shows::<0>::extension()],
             &ini,
@@ -199,6 +208,7 @@ fn a_call_with_extra_arguments_skips_each_declared_recv() {
     let source = "<?php\nfunction f($a) { return $a; }\nf(1, 2);\nfunction g($a, ...$r) { return $r; }\ng(1, 2, 3);\ng(1);\n";
     assert_eq!(
         served(
+            "extra-arguments",
             Engine::cli_builder(),
             &[Shows::<0>::extension()],
             &ini,
@@ -222,6 +232,7 @@ fn extensions_that_declare_one_opcode_are_each_told_the_later_first() {
     let source = "<?php\nfunction f() {\n    echo 'f';\n    return 1;\n}\necho f();\n";
     assert_eq!(
         served(
+            "later-first",
             Engine::cli_builder(),
             &[Shows::<1>::extension(), Shows::<2>::extension()],
             &ini,
@@ -246,12 +257,14 @@ fn a_stepping_host_is_told_as_the_loop_is() {
     let ini = [("t.opcodes_0", "ZEND_ECHO ZEND_RETURN")];
     let source = "<?php\nfunction f($a) {\n    echo $a;\n    return $a;\n}\necho f(1);\nset_error_handler('f');\necho $u;\n";
     let plain = served(
+        "stepping-plain",
         Engine::cli_builder(),
         &[Shows::<0>::extension()],
         &ini,
         source,
     );
     let stepped = served(
+        "stepping",
         Engine::cli_builder().tier::<Stepper<false>>(),
         &[Shows::<0>::extension()],
         &ini,

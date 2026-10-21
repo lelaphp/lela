@@ -8,10 +8,11 @@
 use php_macros::php_class;
 use php_unit::decl::ClassKind;
 
-use super::observer::{observed, scratch, serve_main};
+use super::observer::{observed, serve_main};
 use super::test_ext::{Event, Phase, Recording, TestExt};
 use crate::api::abi::{Extension, ExtensionBuilder, This};
 use crate::engine::Engine;
+use crate::test::Files;
 
 /// `trait Greets { function greet(): bool }`, a native trait as
 /// `_ZendTestTrait` is one.
@@ -46,11 +47,12 @@ fn a_native_trait_method_is_observed_under_the_class_that_uses_it() {
     let engine = Engine::cli_builder()
         .extensions(&[greets(), TestExt::<0>::observing()])
         .build();
-    let dir = scratch("native_trait");
+    let files = Files::new("observer-traits-native_trait", &[]);
+    let dir = files.path();
     rec.mark("built");
     let served = serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nclass Foo { use Greets; }\nclass Bar { use Greets; }\nclass Baz extends Foo {}\n\
          var_dump((new Foo)->greet(), (new Bar)->greet(), (new Baz)->greet());\n",
     );
@@ -91,11 +93,12 @@ fn a_native_trait_method_taken_under_an_alias_carries_its_name_and_visibility() 
     let engine = Engine::cli_builder()
         .extensions(&[greets(), TestExt::<0>::observing()])
         .build();
-    let dir = scratch("native_trait_alias");
+    let files = Files::new("observer-traits-native_trait_alias", &[]);
+    let dir = files.path();
     rec.mark("built");
     let served = serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nclass Foo { use Greets { greet as hello; greet as protected prot; } }\n\
          var_dump((new Foo)->hello());\n\
          try { (new Foo)->prot(); } catch (Error $e) { echo $e->getMessage(), \"\\n\"; }\n",

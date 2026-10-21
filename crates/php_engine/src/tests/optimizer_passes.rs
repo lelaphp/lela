@@ -5,26 +5,12 @@
 //! stores, in the order the passes were registered, and over nothing it
 //! serves as stored or holds as php without opcache compiles.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::api::abi::{Admission, ExtensionBuilder, FileCache, Lookup, Validation};
 use crate::api::request::Request;
 use crate::engine::Engine;
-use crate::test::Capture;
-
-fn scratch_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "php_engine_optimizer_passes_{name}_{}",
-        std::process::id()
-    ))
-}
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = scratch_path(name);
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).ok();
-    dir
-}
+use crate::test::{Capture, Files};
 
 /// The included file's name, past the directory, for a pass to print.
 fn named(path: &[u8]) -> &[u8] {
@@ -67,9 +53,11 @@ fn unadmitted(_: &mut Request, _: &[u8]) -> Admission {
     }
 }
 
-/// The file cache [`on_disk`] keeps units in.
+/// The file cache [`on_disk`] keeps units in: the directory of
+/// `Files::new("optimizer-passes-disk", ..)`, named here alone since a
+/// function pointer's admission reads nothing a test hands it.
 fn disk_directory() -> PathBuf {
-    scratch_path("disk")
+    std::env::temp_dir().join(format!("dax-{}-optimizer-passes-disk", std::process::id()))
 }
 
 /// What an accelerator answers under `opcache.file_cache_only`: kept in
@@ -99,18 +87,20 @@ fn bundle(admission: fn(&mut Request, &[u8]) -> Admission) -> [crate::api::abi::
     [admitting, after]
 }
 
-fn including(engine: &Engine, dir: &Path) -> String {
-    std::fs::write(dir.join("inc.php"), "<?php echo \"inc\\n\";").ok();
+/// What a program in `files` that includes `inc.php` twice wrote.
+fn including(engine: &Engine, files: &Files) -> String {
+    files.write("inc.php", "<?php echo \"inc\\n\";");
     let source = "<?php include __DIR__ . '/inc.php'; include __DIR__ . '/inc.php';";
-    let main = dir.join("main.php");
-    std::fs::write(&main, source).ok();
-    let served = engine.serve_capture_in(
-        dir,
-        main.to_string_lossy().as_bytes(),
-        source,
-        Capture::default(),
-    );
-    String::from_utf8_lossy(&served.stdout).into_owned()
+    files.write("main.php", source);
+    let main = files.path().join("main.php");
+    engine
+        .serve_capture_in(
+            files.path(),
+            main.to_string_lossy().as_bytes(),
+            source,
+            Capture::default(),
+        )
+        .stdout_text()
 }
 
 /// A file the cache compiles and holds is handed to every pass once,
@@ -119,13 +109,12 @@ fn including(engine: &Engine, dir: &Path) -> String {
 #[test]
 fn every_pass_runs_once_over_a_file_the_cache_compiles_and_holds() {
     let engine = Engine::cli_builder().extensions(bundle(admitted)).build();
-    let dir = scratch("held");
+    let files = Files::new("optimizer-passes-held", &[]);
     assert_eq!(
-        including(&engine, &dir),
+        including(&engine, &files),
         "first inc.php\nsecond inc.php\nthird inc.php\ninc\ninc\n"
     );
-    assert_eq!(including(&engine, &dir), "inc\ninc\n");
-    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(including(&engine, &files), "inc\ninc\n");
 }
 
 /// A file validated on every hit is one no accelerator admitted, held as
@@ -133,9 +122,8 @@ fn every_pass_runs_once_over_a_file_the_cache_compiles_and_holds() {
 #[test]
 fn no_pass_runs_where_no_accelerator_admitted_the_file() {
     let engine = Engine::cli_builder().extensions(bundle(unadmitted)).build();
-    let dir = scratch("unadmitted");
-    assert_eq!(including(&engine, &dir), "inc\ninc\n");
-    std::fs::remove_dir_all(&dir).ok();
+    let files = Files::new("optimizer-passes-unadmitted", &[]);
+    assert_eq!(including(&engine, &files), "inc\ninc\n");
 }
 
 /// Under `opcache.file_cache_only` a file compiled and kept in the file
@@ -144,14 +132,12 @@ fn no_pass_runs_where_no_accelerator_admitted_the_file() {
 #[test]
 fn every_pass_runs_over_a_file_kept_in_the_file_cache_alone() {
     let engine = Engine::cli_builder().extensions(bundle(on_disk)).build();
-    let dir = scratch("kept");
-    let disk = scratch("disk");
-    assert_eq!(disk, disk_directory());
+    let files = Files::new("optimizer-passes-kept", &[]);
+    let disk = Files::new("optimizer-passes-disk", &[]);
+    assert_eq!(disk.path(), disk_directory());
     assert_eq!(
-        including(&engine, &dir),
+        including(&engine, &files),
         "first inc.php\nsecond inc.php\nthird inc.php\ninc\ninc\n"
     );
-    assert_eq!(including(&engine, &dir), "inc\ninc\n");
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::remove_dir_all(&disk).ok();
+    assert_eq!(including(&engine, &files), "inc\ninc\n");
 }

@@ -11,7 +11,7 @@
 //! the slot.
 
 use php_unit::decl::Bare;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use php_macros::php_function;
 
@@ -22,24 +22,15 @@ use crate::api::abi::{
 use crate::api::raising::{Level, Thrown, fatal_while_pending, throw};
 use crate::api::request::Request;
 use crate::engine::Engine;
-use crate::test::{Capture, Served};
+use crate::test::{Capture, Files, Served};
 
 use Event::Ext;
 use Phase::{Begin, Declared, End, Error, ErrorObserved, Linked, ObserverInit};
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "php_engine_observer_notices_{name}_{}",
-        std::process::id()
-    ));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).ok();
-    dir
-}
-
+/// `source` served as `main.php` in `dir`, written there first.
 fn serve_main(engine: &Engine, dir: &Path, source: &str) -> Served {
     let main = dir.join("main.php");
-    std::fs::write(&main, source).ok();
+    std::fs::write(&main, source).expect("the tree takes main.php");
     engine.serve_capture_in(
         dir,
         main.to_string_lossy().as_bytes(),
@@ -92,11 +83,12 @@ fn declarations_are_told_as_the_file_loads_and_as_their_oplines_run() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("declarations");
+    let files = Files::new("observer-notices-declarations", &[]);
+    let dir = files.path();
     rec.mark("built");
     let served = serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction foo()\n{\n    echo \"foo\\n\";\n}\n\nclass A {\n}\n\nclass B extends A {\n}\n\n\
          $go = true;\nif ($go) {\n    function nested()\n    {\n    }\n\n    class C\n    {\n    }\n\n\
          \x20   class D extends A\n    {\n    }\n}\n\nfoo();\n",
@@ -142,8 +134,9 @@ fn holding() -> crate::api::abi::Extension {
 const INCLUDED: &str = "<?php\nclass B extends A {}\nclass A {}\nfunction f() {}\n";
 
 /// The notices of including [`INCLUDED`], on two requests of one engine.
-fn included_twice(engine: &Engine, dir: &Path, rec: &Recording) -> [Vec<Event>; 2] {
-    std::fs::write(dir.join("inc.php"), INCLUDED).ok();
+fn included_twice(engine: &Engine, files: &Files, rec: &Recording) -> [Vec<Event>; 2] {
+    files.write("inc.php", INCLUDED);
+    let dir = files.path();
     let main = "<?php\ninclude __DIR__ . '/inc.php';\n";
     rec.mark("first");
     serve_main(engine, dir, main);
@@ -174,7 +167,7 @@ fn without_opcache_declarations_are_told_in_source_order_on_every_load() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("compiled");
+    let files = Files::new("observer-notices-compiled", &[]);
     let inc = "file 'inc.php'";
     let expected = [
         linked("a"),
@@ -184,7 +177,7 @@ fn without_opcache_declarations_are_told_in_source_order_on_every_load() {
         linked("b"),
         Ext(0, End(inc.to_owned(), Some("1".to_owned()))),
     ];
-    let [first, second] = included_twice(&engine, &dir, &rec);
+    let [first, second] = included_twice(&engine, &files, &rec);
     assert_eq!(first, expected);
     assert_eq!(second, expected);
 }
@@ -200,7 +193,7 @@ fn a_cached_unit_replays_declared_and_linked_in_opcache_order() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing(), holding()])
         .build();
-    let dir = scratch("held");
+    let files = Files::new("observer-notices-held", &[]);
     let inc = "file 'inc.php'";
     let expected = [
         declared("f"),
@@ -210,7 +203,7 @@ fn a_cached_unit_replays_declared_and_linked_in_opcache_order() {
         begin(inc),
         Ext(0, End(inc.to_owned(), Some("1".to_owned()))),
     ];
-    let [first, second] = included_twice(&engine, &dir, &rec);
+    let [first, second] = included_twice(&engine, &files, &rec);
     assert_eq!(first, expected, "the miss that compiled and held the file");
     assert_eq!(second, expected, "the hit that served it from the cache");
 }
@@ -218,7 +211,7 @@ fn a_cached_unit_replays_declared_and_linked_in_opcache_order() {
 /// `source` served as `name` in `dir`.
 fn serve_file(engine: &Engine, dir: &Path, name: &str, source: &str) -> Served {
     let path = dir.join(name);
-    std::fs::write(&path, source).ok();
+    std::fs::write(&path, source).expect("the tree takes the file");
     engine.serve_capture_in(
         dir,
         path.to_string_lossy().as_bytes(),
@@ -241,20 +234,20 @@ fn serve_file(engine: &Engine, dir: &Path, name: &str, source: &str) -> Served {
 fn a_load_that_ends_in_a_redeclaration_tells_what_was_declared_before_it() {
     let rec = Recording::start();
     let kinds = [Declared(String::new()), Linked(String::new())];
-    let dir = scratch("redeclared");
+    let files = Files::new("observer-notices-redeclared", &[]);
+    let dir = files.path();
 
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    std::fs::write(
-        dir.join("functions.php"),
+    files.write(
+        "functions.php",
         "<?php\nfunction f1() {}\nclass B {}\nfunction g() {}\nfunction f2() {}\nclass C {}\n",
-    )
-    .ok();
+    );
     rec.mark("function");
     serve_file(
         &engine,
-        &dir,
+        dir,
         "function_main.php",
         "<?php\nfunction g() {}\ninclude __DIR__ . '/functions.php';\n",
     );
@@ -267,21 +260,20 @@ fn a_load_that_ends_in_a_redeclaration_tells_what_was_declared_before_it() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing(), holding()])
         .build();
-    std::fs::write(
-        dir.join("classes.php"),
+    files.write(
+        "classes.php",
         "<?php\nclass B {}\nfunction f1() {}\nclass A {}\nfunction f2() {}\nclass C {}\n",
-    )
-    .ok();
+    );
     serve_file(
         &engine,
-        &dir,
+        dir,
         "held_first.php",
         "<?php\ninclude __DIR__ . '/classes.php';\n",
     );
     rec.mark("class");
     serve_file(
         &engine,
-        &dir,
+        dir,
         "held_second.php",
         "<?php\nclass A {}\ninclude __DIR__ . '/classes.php';\n",
     );
@@ -301,22 +293,13 @@ fn declarations_on_one_line_are_told_in_the_order_written() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("one_line");
+    let files = Files::new("observer-notices-one_line", &[]);
+    let dir = files.path();
     let kinds = [Declared(String::new()), Linked(String::new())];
     rec.mark("class first");
-    serve_file(
-        &engine,
-        &dir,
-        "a.php",
-        "<?php\nclass A {} function f() {}\n",
-    );
+    serve_file(&engine, dir, "a.php", "<?php\nclass A {} function f() {}\n");
     rec.mark("function first");
-    serve_file(
-        &engine,
-        &dir,
-        "b.php",
-        "<?php\nfunction f() {} class A {}\n",
-    );
+    serve_file(&engine, dir, "b.php", "<?php\nfunction f() {} class A {}\n");
     rec.mark("end");
     let events = rec.events();
     assert_eq!(
@@ -355,11 +338,12 @@ fn a_throwable_pending_at_a_fatal_is_told_uncaught_and_served_without_the_handle
                 .build("pending_fatal"),
         ])
         .build();
-    let dir = scratch("pending_fatal");
+    let files = Files::new("observer-notices-pending_fatal", &[]);
+    let dir = files.path();
     rec.mark("built");
     let served = serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nset_error_handler(function ($n, $s) { echo \"handler\\n\"; return true; });\n\
          fatal_while_thrown();\n",
     );
@@ -399,11 +383,12 @@ fn an_alias_of_a_program_class_is_linked_and_an_anonymous_class_is_not() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("alias");
+    let files = Files::new("observer-notices-alias", &[]);
+    let dir = files.path();
     rec.mark("built");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nclass P {}\nclass_alias('P', 'Q');\nclass_alias('stdClass', 'R');\n$o = new class {};\n",
     );
     rec.mark("served");
@@ -429,11 +414,12 @@ fn the_error_observer_is_told_of_every_diagnostic_before_it_is_served() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("errors");
+    let files = Files::new("observer-notices-errors", &[]);
+    let dir = files.path();
     rec.mark("built");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nset_error_handler(function () { return true; });\necho $a;\n\
          restore_error_handler();\necho @$b;\nthrow new Exception('x');\n",
     );
@@ -472,11 +458,12 @@ fn a_fatal_is_told_before_it_is_rendered_and_the_frames_ended() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("fatal");
+    let files = Files::new("observer-notices-fatal", &[]);
+    let dir = files.path();
     rec.mark("built");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction foo() { trigger_error('Foo error', E_USER_ERROR); }\nfoo();\n",
     );
     rec.mark("served");
@@ -595,17 +582,18 @@ fn handlers_are_added_to_and_removed_from_one_function_for_one_request() {
             .observer(acting_init)
             .build("test_ext_0")])
         .build();
-    let dir = scratch("added");
+    let files = Files::new("observer-notices-added", &[]);
+    let dir = files.path();
     let source = "<?php\nfunction target() { return 1; }\nfunction untouched() {}\n\
                   function add() {}\nfunction add_end() {}\nfunction remove() {}\nfunction remove_end() {}\n\
                   target(); add(); add(); target(); add_end(); target();\n\
                   remove(); target(); remove_end(); target(); remove();\n";
     rec.mark("first");
-    serve_main(&engine, &dir, source);
+    serve_main(&engine, dir, source);
     rec.mark("second");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction target() { return 1; }\ntarget();\n",
     );
     rec.mark("end");
@@ -689,9 +677,10 @@ fn a_handler_that_removes_itself_is_handed_the_next_to_call() {
                 .build("test_ext_1"),
         ])
         .build();
-    let dir = scratch("self");
+    let files = Files::new("observer-notices-self", &[]);
+    let dir = files.path();
     rec.mark("built");
-    serve_main(&engine, &dir, "<?php\nfunction f() {}\nf();\nf();\n");
+    serve_main(&engine, dir, "<?php\nfunction f() {}\nf();\nf();\n");
     rec.mark("served");
     assert_eq!(
         only(
@@ -745,11 +734,12 @@ fn a_native_takes_a_handler_added_and_removed_for_one_request() {
             .observer(native_init)
             .build("test_ext_0")])
         .build();
-    let dir = scratch("native");
+    let files = Files::new("observer-notices-native", &[]);
+    let dir = files.path();
     rec.mark("built");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction add() {}\nfunction remove() {}\n\
          strcmp('a', 'b'); add(); strcmp('b', 'c'); remove(); strcmp('c', 'd');\n",
     );
@@ -798,12 +788,13 @@ fn a_handler_added_in_a_fiber_and_a_load_in_one_are_the_requests() {
             .class_linked_observer(linked_in_fiber)
             .build("test_ext_0")])
         .build();
-    let dir = scratch("fiber");
-    std::fs::write(dir.join("inc.php"), "<?php\nfunction g() {}\nclass K {}\n").ok();
+    let files = Files::new("observer-notices-fiber", &[]);
+    let dir = files.path();
+    files.write("inc.php", "<?php\nfunction g() {}\nclass K {}\n");
     rec.mark("built");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction target() { return 1; }\nfunction add() {}\ntarget();\n\
          $f = new Fiber(function () { add(); Fiber::suspend(); target(); include __DIR__ . '/inc.php'; });\n\
          $f->start();\ntarget();\n$f->resume();\n",

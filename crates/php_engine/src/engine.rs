@@ -6443,14 +6443,14 @@ mod tests {
     #[test]
     fn a_file_the_cache_holds_nowhere_moves_the_engine_s_map_pointer_count_by_nothing() {
         use crate::api::abi::{Admission, ExtensionBuilder, Lookup};
-        let dir = std::env::temp_dir().join(format!("engine-map-ptr-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).ok();
-        let file = dir.join("declares.inc");
-        std::fs::write(
-            &file,
-            "<?php class GhMapPtr {} function gh_f() {} return 1;",
-        )
-        .ok();
+        let files = Files::new(
+            "map-ptr",
+            &[(
+                "declares.inc",
+                "<?php class GhMapPtr {} function gh_f() {} return 1;",
+            )],
+        );
+        let file = files.path().join("declares.inc");
         let program = format!("<?php echo include '{}';", file.display());
         let cache = |admission: fn(&mut Request, &[u8]) -> Admission| {
             let extension = ExtensionBuilder::default().admission(admission).build("t");
@@ -6477,7 +6477,6 @@ mod tests {
         assert_eq!(served(&holding, &program).0, "1");
         let after_first = count(&holding);
         assert_eq!(served(&holding, &program).0, "1");
-        std::fs::remove_dir_all(&dir).ok();
         assert!(after_first > before, "the held file took its offsets");
         assert_eq!(count(&holding), after_first, "and took them once");
     }
@@ -6690,17 +6689,17 @@ mod tests {
     /// nothing the preload holds.
     #[test]
     fn a_preloaded_script_runs_once_and_its_declarations_stand_in_every_request() {
-        let dir = std::env::temp_dir().join(format!("engine-preload-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).ok();
-        let script = dir.join("preload.inc");
-        std::fs::write(
-            &script,
-            "<?php\necho \"preloading\\n\";\nfunction pre_f() { return 'f'; }\n\
-             class PreA { function m() { return 'm'; } }\nclass PreB extends PreA {}\n\
-             interface PreI {}\nclass PreC implements PreI {}\nreturn;\n\
-             class Late extends Missing {}\n",
-        )
-        .ok();
+        let files = Files::new(
+            "preload",
+            &[(
+                "preload.inc",
+                "<?php\necho \"preloading\\n\";\nfunction pre_f() { return 'f'; }\n\
+                 class PreA { function m() { return 'm'; } }\nclass PreB extends PreA {}\n\
+                 interface PreI {}\nclass PreC implements PreI {}\nreturn;\n\
+                 class Late extends Missing {}\n",
+            )],
+        );
+        let script = files.path().join("preload.inc");
         let engine = Engine::cli_builder()
             .extensions(&[preloading(&script)])
             .ini("t.preload", script.as_os_str().as_encoded_bytes())
@@ -6713,7 +6712,6 @@ mod tests {
         let first = engine.serve_capture(&program, crate::test::Capture::default());
         let second = engine.serve_capture(&program, crate::test::Capture::default());
         let resolved = script.canonicalize().unwrap_or_default();
-        std::fs::remove_dir_all(&dir).ok();
         assert_eq!(
             String::from_utf8_lossy(&first.stdout),
             format!(
@@ -6732,15 +6730,14 @@ mod tests {
     /// functions stand in it at the numbers they had, the very rows.
     #[test]
     fn a_restart_keeps_the_preloads_rows_at_their_numbers() {
-        let dir =
-            std::env::temp_dir().join(format!("engine-preload-restart-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).ok();
-        let script = dir.join("preload.inc");
-        std::fs::write(
-            &script,
-            "<?php\nfunction pre_g() { return 'g'; }\nclass PreD { function m() { return 'd'; } }\n",
-        )
-        .ok();
+        let files = Files::new(
+            "preload-restart",
+            &[(
+                "preload.inc",
+                "<?php\nfunction pre_g() { return 'g'; }\nclass PreD { function m() { return 'd'; } }\n",
+            )],
+        );
+        let script = files.path().join("preload.inc");
         let engine = Engine::cli_builder()
             .extensions(&[preloading(&script)])
             .ini("t.preload", script.as_os_str().as_encoded_bytes())
@@ -6751,7 +6748,6 @@ mod tests {
         let scheduled = before.files.schedule_restart();
         let second = engine.serve_capture(program, crate::test::Capture::default());
         let after = engine.shared.arena.current();
-        std::fs::remove_dir_all(&dir).ok();
         assert_eq!(scheduled, crate::api::request::Restart::Scheduled);
         assert_eq!(String::from_utf8_lossy(&first.stdout), "gd");
         assert_eq!(String::from_utf8_lossy(&second.stdout), "gd");
@@ -6802,21 +6798,20 @@ mod tests {
     /// changed since; a kept file another build wrote is never read.
     #[test]
     fn a_kept_unit_is_read_back_by_the_next_engine_and_another_builds_is_not() {
-        let dir = std::env::temp_dir().join(format!("engine-file-cache-{}", std::process::id()));
+        let files = Files::new("file-cache", &[("kept.inc", "<?php return 'kept';")]);
+        let dir = files.path();
         let cache = dir.join("cache");
-        std::fs::create_dir_all(&cache).ok();
-        let script = dir.join("kept.inc");
-        std::fs::write(&script, "<?php return 'kept';").ok();
-        let script = script.canonicalize().unwrap_or_default();
+        std::fs::create_dir(&cache).expect("the tree takes the cache's directory");
+        let script = dir.join("kept.inc").canonicalize().unwrap_or_default();
         let engine = || {
             Engine::cli_builder()
-                .extensions(&[file_caching(&dir)])
+                .extensions(&[file_caching(dir)])
                 .ini("t.file_cache", cache.as_os_str().as_encoded_bytes())
                 .build()
         };
         let program = format!("<?php echo include '{}';", script.display());
         let first = engine().serve_capture(&program, crate::test::Capture::default());
-        std::fs::write(&script, "<?php return 'compiled';").ok();
+        files.write("kept.inc", "<?php return 'compiled';");
         let second = engine().serve_capture(&program, crate::test::Capture::default());
         let kept = engine();
         let kept_at = crate::unit_cache::Disk {
@@ -6829,9 +6824,8 @@ mod tests {
         if let Some(byte) = stale.get_mut(8) {
             *byte ^= 1;
         }
-        std::fs::write(&kept_at, &stale).ok();
+        std::fs::write(&kept_at, &stale).expect("the kept file is written over");
         let third = kept.serve_capture(&program, crate::test::Capture::default());
-        std::fs::remove_dir_all(&dir).ok();
         assert_eq!(String::from_utf8_lossy(&first.stdout), "kept");
         assert_eq!(String::from_utf8_lossy(&second.stdout), "kept");
         assert_eq!(String::from_utf8_lossy(&third.stdout), "compiled");
@@ -7681,8 +7675,8 @@ mod tests {
     #[test]
     fn two_requests_serving_one_file_share_the_one_constant_string() {
         let engine = Engine::cli_builder().build();
-        let path = std::env::temp_dir().join(format!("dax-{}-shared.php", std::process::id()));
-        assert!(std::fs::write(&path, b"<?php echo 'shared';").is_ok());
+        let files = Files::new("shared", &[("shared.php", "<?php echo 'shared';")]);
+        let path = files.path().join("shared.php");
         let name = path.to_string_lossy().as_bytes().to_vec();
         for _ in 0..2 {
             let mut sink = Kept::default();
@@ -7728,53 +7722,9 @@ mod tests {
         assert_eq!(first.bytes(), b"shared");
         assert!(first.is_interned(), "a published constant is interned");
         assert!(first.is_same(second), "one `zend_string`, read by both");
-        std::fs::remove_file(&path).ok();
     }
 
-    /// A tree of files for one test, under the system's temporary
-    /// directory and named for the process and the test, served as the
-    /// CLI serves `php main.php` from that directory; removed after.
-    struct Files {
-        dir: PathBuf,
-    }
-
-    impl Files {
-        fn new(name: &str, files: &[(&str, &str)]) -> Files {
-            let dir = std::env::temp_dir().join(format!("dax-{}-{name}", std::process::id()));
-            std::fs::remove_dir_all(&dir).ok();
-            assert!(std::fs::create_dir_all(&dir).is_ok());
-            for (file, text) in files {
-                assert!(std::fs::write(dir.join(file), text).is_ok());
-            }
-            Files { dir }
-        }
-
-        /// `php <dir>/<name>` in the tree's directory, the path as
-        /// upstream's runner hands it: what the request wrote and how it
-        /// ended.
-        fn serve(&self, engine: &Engine, name: &str) -> (String, Observables) {
-            let mut sink = Kept::default();
-            let observables = engine.serve_into(
-                RequestDescription {
-                    sapi_name: String::from("cli"),
-                    script_name: Some(self.dir.join(name).as_os_str().as_encoded_bytes().to_vec()),
-                    cwd: self.dir.clone(),
-                    ..RequestDescription::default()
-                },
-                &mut sink,
-            );
-            (
-                String::from_utf8_lossy(&sink.body).into_owned(),
-                observables,
-            )
-        }
-    }
-
-    impl Drop for Files {
-        fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.dir).ok();
-        }
-    }
+    use crate::test::Files;
 
     /// The realpath cache is the engine's, as php's is a php-fpm child's
     /// (#2941): the second request resolves its program's path, and an
@@ -7795,8 +7745,7 @@ mod tests {
         let mut asked = Vec::new();
         let mut serve = || {
             let before = engine.shared.realpath_cache.looked_up();
-            let (body, observables) = files.serve(&engine, "main.php");
-            assert_eq!((body.as_str(), observables.exit_code), ("ok\n", 0));
+            files.serve(&engine, "main.php").assert_clean("ok\n");
             asked.push(engine.shared.realpath_cache.looked_up() - before);
         };
         serve();
@@ -7826,8 +7775,7 @@ mod tests {
             let engine = Engine::cli_builder().ini_default(name, value).build();
             for request in 0..2 {
                 let before = engine.shared.realpath_cache.looked_up();
-                let (body, observables) = files.serve(&engine, "main.php");
-                assert_eq!(observables.exit_code, 0, "{body}");
+                files.serve(&engine, "main.php").assert_clean("");
                 let asked = engine.shared.realpath_cache.looked_up() - before;
                 assert!(asked > 0, "{name}={value}: request {request} asked nothing");
             }
@@ -7846,8 +7794,7 @@ mod tests {
             .ini_default("realpath_cache_ttl", "0")
             .build();
         for _ in 0..2 {
-            let (_, observables) = files.serve(&engine, "main.php");
-            assert_eq!(observables.exit_code, 0);
+            files.serve(&engine, "main.php").assert_clean("");
         }
         let expires = engine.shared.realpath_cache.listed(|bucket| bucket.expires);
         assert!(!expires.is_empty(), "the program's path was entered");
@@ -7865,7 +7812,7 @@ mod tests {
         let files = Files::new("realpath-host", &[("main.php", "<?php\necho \"ok\\n\";\n")]);
         let engine = Engine::cli_builder().build();
         let program = files
-            .dir
+            .path()
             .join("main.php")
             .into_os_string()
             .into_encoded_bytes();
@@ -7877,8 +7824,7 @@ mod tests {
             asked.push(engine.shared.realpath_cache.looked_up() - before);
         }
         let before = engine.shared.realpath_cache.looked_up();
-        let (body, observables) = files.serve(&engine, "main.php");
-        assert_eq!((body.as_str(), observables.exit_code), ("ok\n", 0));
+        files.serve(&engine, "main.php").assert_clean("ok\n");
         asked.push(engine.shared.realpath_cache.looked_up() - before);
         assert!(resolved[0].is_some(), "the program resolves");
         assert_eq!(resolved[0], resolved[1]);
@@ -7888,7 +7834,7 @@ mod tests {
             [0, 0],
             "the second and the request ask nothing"
         );
-        let mut missing = files.dir.as_os_str().as_encoded_bytes().to_vec();
+        let mut missing = files.path().as_os_str().as_encoded_bytes().to_vec();
         missing.extend_from_slice(b"/missing.php");
         assert_eq!(engine.realpath(&missing), None);
     }
@@ -7909,9 +7855,9 @@ mod tests {
                 ),
             ],
         );
-        let (body, observables) = files.serve(&Engine::cli_builder().build(), "main.php");
-        assert_eq!(body, "b\nint(7)\nbool(true)\nbool(true)\n");
-        assert_eq!(observables.exit_code, 0);
+        files
+            .serve(&Engine::cli_builder().build(), "main.php")
+            .assert_clean("b\nint(7)\nbool(true)\nbool(true)\n");
     }
 
     /// An include inside a function reads and writes the function's
@@ -7934,9 +7880,9 @@ mod tests {
                 ),
             ],
         );
-        let (body, observables) = files.serve(&Engine::cli_builder().build(), "main.php");
-        assert_eq!(body, "p=z\nstring(6) \"z|ok|3\"\n");
-        assert_eq!(observables.exit_code, 0);
+        files
+            .serve(&Engine::cli_builder().build(), "main.php")
+            .assert_clean("p=z\nstring(6) \"z|ok|3\"\n");
     }
 
     /// A variable an included file writes at the top level is the
@@ -7957,9 +7903,9 @@ mod tests {
                 ),
             ],
         );
-        let (body, observables) = files.serve(&Engine::cli_builder().build(), "main.php");
-        assert_eq!(body, "end\nd2\nd3\nd1\n");
-        assert_eq!(observables.exit_code, 0);
+        files
+            .serve(&Engine::cli_builder().build(), "main.php")
+            .assert_clean("end\nd2\nd3\nd1\n");
     }
 
     /// A program served as php's phpdbg serves one
@@ -8009,8 +7955,15 @@ mod tests {
             let observables = Engine::cli_builder().build().serve_into(
                 RequestDescription {
                     sapi_name: String::from("phpdbg"),
-                    script_name: Some(files.dir.join(name).as_os_str().as_encoded_bytes().to_vec()),
-                    cwd: files.dir.clone(),
+                    script_name: Some(
+                        files
+                            .path()
+                            .join(name)
+                            .as_os_str()
+                            .as_encoded_bytes()
+                            .to_vec(),
+                    ),
+                    cwd: files.path().to_path_buf(),
                     primary: Primary::Bare,
                     ..RequestDescription::default()
                 },
@@ -8055,16 +8008,16 @@ mod tests {
                 ),
             ],
         );
-        let (body, observables) = files.serve(&Engine::cli_builder().build(), "main.php");
-        let bad = files.dir.join("bad.php");
+        let served = files.serve(&Engine::cli_builder().build(), "main.php");
+        let bad = files.path().join("bad.php");
         assert_eq!(
-            body,
+            served.stdout_text(),
             format!(
                 "syntax error, unexpected token \";\" at line 2\nafter\n\nParse error: syntax error, unexpected token \";\" in {} on line 2\n",
                 bad.canonicalize().unwrap_or(bad).display()
             )
         );
-        assert_eq!(observables.exit_code, 255);
+        assert_eq!(served.exit_code, 255);
     }
 
     /// What compiling a file raised is raised on every request that
@@ -8077,8 +8030,8 @@ mod tests {
     #[test]
     fn a_cached_unit_raises_what_compiling_it_raised_on_every_request() {
         let engine = declaring_nan(Engine::cli_builder()).build();
-        let path = std::env::temp_dir().join(format!("dax-{}-nan.php", std::process::id()));
-        assert!(std::fs::write(&path, b"<?php\necho 'a';\necho NAN . 'z';").is_ok());
+        let files = Files::new("nan", &[("nan.php", "<?php\necho 'a';\necho NAN . 'z';")]);
+        let path = files.path().join("nan.php");
         let name = path.to_string_lossy().as_bytes().to_vec();
         let described = || RequestDescription {
             sapi_name: String::from("cli"),
@@ -8105,7 +8058,6 @@ mod tests {
             .build()
             .serve_into(described(), &mut masked);
         assert_eq!(String::from_utf8_lossy(&masked.body), "aNANz");
-        std::fs::remove_file(&path).ok();
     }
 
     /// What `memory_get_usage()` reads (design §5.13) after a request

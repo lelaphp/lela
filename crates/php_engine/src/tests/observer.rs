@@ -5,7 +5,7 @@
 //! and by a fatal. The sequences are php's, as `zend_test`'s observer
 //! prints them in `Z/ext/zend_test/tests/observer_*.phpt`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use php_macros::php_function;
 
@@ -21,7 +21,7 @@ use crate::api::raising::{Level, Thrown, catch_fatal, leave_pending, throw};
 use crate::api::request::Request;
 use crate::api::values::{Owner, PhpString, Value};
 use crate::engine::Engine;
-use crate::test::{Capture, Served};
+use crate::test::{Capture, Files, Served};
 
 use Event::Ext;
 use Phase::{Begin, End, Error, FiberDestroy, FiberInit, FiberSwitch, ObserverInit};
@@ -55,20 +55,10 @@ fn end(n: u8, name: &str, returned: Option<&str>) -> Event {
     Ext(n, End(name.to_owned(), returned.map(str::to_owned)))
 }
 
-/// A directory of its own for one test's files, under the target's
-/// temporary directory, emptied first.
-pub(super) fn scratch(name: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("php_engine_observer_{name}_{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).ok();
-    dir
-}
-
-/// `source` served as `main.php` in `dir`.
+/// `source` served as `main.php` in `dir`, written there first.
 pub(super) fn serve_main(engine: &Engine, dir: &Path, source: &str) -> Served {
     let main = dir.join("main.php");
-    std::fs::write(&main, source).ok();
+    std::fs::write(&main, source).expect("the tree takes main.php");
     engine.serve_capture_in(
         dir,
         main.to_string_lossy().as_bytes(),
@@ -89,11 +79,12 @@ fn calls_begin_in_declaration_order_and_end_in_reverse_with_what_they_returned()
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing(), TestExt::<1>::observing()])
         .build();
-    let dir = scratch("calls");
+    let files = Files::new("observer-calls", &[]);
+    let dir = files.path();
     rec.mark("built");
     let served = serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction g($y) { return $y * 2; }\nfunction f($x) { return g($x) + 1; }\necho f(1), f(2);\n",
     );
     rec.mark("served");
@@ -144,11 +135,12 @@ fn a_function_the_observer_declines_is_asked_of_once_and_never_begun() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("declined");
+    let files = Files::new("observer-declined", &[]);
+    let dir = files.path();
     rec.mark("built");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction declined() { return 1; }\nclass C { static function m() { return declined(); } }\n\
          C::m(); C::m();\nset_error_handler(function () { return declined(); });\necho $undefined;\n",
     );
@@ -192,16 +184,16 @@ fn an_include_and_an_eval_are_begun_and_ended_inside_their_includer() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("include");
-    std::fs::write(
-        dir.join("inc.php"),
+    let files = Files::new("observer-include", &[]);
+    let dir = files.path();
+    files.write(
+        "inc.php",
         "<?php\nfunction h() { return 'h'; }\nreturn h();\n",
-    )
-    .ok();
+    );
     rec.mark("built");
     let served = serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\necho include __DIR__ . '/inc.php';\necho eval('$v = 7; return $v;');\n",
     );
     rec.mark("served");
@@ -240,11 +232,12 @@ fn begin_runs_before_the_parameters_are_received() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("recv");
+    let files = Files::new("observer-recv", &[]);
+    let dir = files.path();
     rec.mark("built");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction t(array $a) { return $a; }\n\
          try { t(1); } catch (TypeError $e) { echo 'a'; }\n\
          set_error_handler('t');\ntry { echo $u; } catch (TypeError $e) { echo 'b'; }\n",
@@ -285,22 +278,23 @@ fn an_unwind_ends_every_frame_it_leaves_once() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("unwind");
+    let files = Files::new("observer-unwind", &[]);
+    let dir = files.path();
     let file = "file 'main.php'";
     let nested = "<?php\nfunction b() { throw new Exception('x'); }\nfunction a() { b(); }\n";
 
     rec.mark("caught");
     serve_main(
         &engine,
-        &dir,
+        dir,
         &format!("{nested}try {{ a(); }} catch (Exception $e) {{ echo 'c'; }}\n"),
     );
     rec.mark("uncaught");
-    serve_main(&engine, &dir, &format!("{nested}a();\n"));
+    serve_main(&engine, dir, &format!("{nested}a();\n"));
     rec.mark("exited");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction b() { exit(3); }\nfunction a() { b(); }\na();\n",
     );
     rec.mark("end");
@@ -394,13 +388,14 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("bailout");
+    let files = Files::new("observer-bailout", &[]);
+    let dir = files.path();
     let file = "file 'main.php'";
 
     rec.mark("memory");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nini_set('memory_limit', '2M');\n\
          function s() { echo 's'; }\nregister_shutdown_function('s');\n\
          function b() { $s = '.'; while (true) { $s .= $s; } }\nfunction a() { return b(); }\na();\n",
@@ -408,14 +403,14 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
     rec.mark("user");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction b($no, $str) { trigger_error('boom', E_USER_ERROR); }\n\
          function a() { set_error_handler('b'); echo $u; }\na();\n",
     );
     rec.mark("generator");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nset_time_limit(1);\n\
          function b() { while (true); }\n\
          function g() { b(); yield 1; }\nfunction a() { foreach (g() as $v) {} }\na();\n",
@@ -514,12 +509,13 @@ fn a_fatal_in_the_shutdown_leaves_its_frames_open() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("shutdown_fatal");
+    let files = Files::new("observer-shutdown_fatal", &[]);
+    let dir = files.path();
     let file = "file 'main.php'";
     rec.mark("shutdown function");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction inner() { trigger_error('in main', E_USER_ERROR); }\n\
          function outer() { inner(); }\nfunction sd() { inner2(); }\n\
          function inner2() { trigger_error('in shutdown', E_USER_ERROR); }\n\
@@ -529,7 +525,7 @@ fn a_fatal_in_the_shutdown_leaves_its_frames_open() {
     rec.mark("destructor");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction inner() { trigger_error('in destructor', E_USER_ERROR); }\n\
          class D { function __destruct() { inner(); } }\n$d = new D;\n",
     );
@@ -604,11 +600,12 @@ fn natives_are_begun_before_their_entry_and_ended_after_it() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("natives");
+    let files = Files::new("observer-natives", &[]);
+    let dir = files.path();
     rec.mark("built");
     let served = serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction f($s) { return strcmp($s, 'a'); }\n\
          function h($no, $str) { return f($str) === 0; }\n\
          echo f('b'), (new Exception('m'))->getMessage();\n\
@@ -668,11 +665,12 @@ fn a_native_that_throws_is_ended_before_the_frames_the_throw_leaves() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing(), probe()])
         .build();
-    let dir = scratch("native_throw");
+    let files = Files::new("observer-native_throw", &[]);
+    let dir = files.path();
     rec.mark("built");
     let served = serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\n$a = [];\nfunction f($s) { return strcmp($s, 'a'); }\n\
          try { f($a); } catch (TypeError $e) { echo 'c'; }\n\
          try { frameless_probe($a); } catch (TypeError $e) { echo 'd'; }\n\
@@ -718,11 +716,12 @@ fn a_frameless_call_is_observed_as_a_full_call() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing(), probe()])
         .build();
-    let dir = scratch("frameless");
+    let files = Files::new("observer-frameless", &[]);
+    let dir = files.path();
     rec.mark("built");
     let served = serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction f($s) { return \\frameless_probe($s); }\nf('a'); f('');\n",
     );
     rec.mark("served");
@@ -909,11 +908,12 @@ fn a_natives_throwable_stands_pending_while_its_end_handlers_are_called() {
             .observer(pending_init)
             .build("observer_pending")])
         .build();
-    let dir = scratch("pending");
+    let files = Files::new("observer-pending", &[]);
+    let dir = files.path();
     rec.mark("built");
     let served = serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction f($s) { return strcmp($s, 'a'); }\n\
          try { f([]); } catch (TypeError $e) { echo 'c'; }\n",
     );
@@ -1018,11 +1018,12 @@ fn a_generator_is_begun_at_each_resumption_and_ended_at_each_yield() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("generator");
+    let files = Files::new("observer-generator", &[]);
+    let dir = files.path();
     rec.mark("built");
     let served = serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction bar() { for ($i = 10; $i < 12; $i++) { yield $i; } }\n\
          function foo() { yield 0; yield from bar(); yield 42; return 1337; }\n\
          function run() { $g = foo(); foreach ($g as $v) { echo $v, ','; } return $g->getReturn(); }\n\
@@ -1074,11 +1075,12 @@ fn a_generator_resumed_by_hand_pairs_each_resumption() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("generator_by_hand");
+    let files = Files::new("observer-generator_by_hand", &[]);
+    let dir = files.path();
     rec.mark("by_hand");
     let served = serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction foo() { $i = 0; while (true) { if (yield $i++) break; } }\n\
          function run() { $g = foo();\n\
          while ($g->current() !== null) { echo $g->current(); if ($g->current() === 2) { $g->send('Boop'); } $g->next(); }\n\
@@ -1146,11 +1148,12 @@ fn a_generator_left_by_a_throwable_is_ended_with_nothing() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("generator_thrown");
+    let files = Files::new("observer-generator_thrown", &[]);
+    let dir = files.path();
     rec.mark("thrown");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction foo() { yield 0; yield 1; throw new Exception('Oops!'); }\n\
          function run() { foreach (foo() as $v) { echo $v; } return 'unseen'; }\necho run();\n",
     );
@@ -1203,11 +1206,12 @@ fn a_fiber_is_noticed_at_its_creation_each_switch_and_its_destruction() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("fiber");
+    let files = Files::new("observer-fiber", &[]);
+    let dir = files.path();
     rec.mark("built");
     let served = serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction inner() { return Fiber::suspend() . 'i'; }\n\
          $fiber = new Fiber(function () { return inner(); });\n\
          $fiber->start();\n$fiber->resume('r');\necho $fiber->getReturn();\n",
@@ -1255,11 +1259,12 @@ fn a_frame_open_in_a_suspended_fiber_is_ended_in_that_fiber_and_nowhere_else() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("fiber_chain");
+    let files = Files::new("observer-fiber_chain", &[]);
+    let dir = files.path();
     rec.mark("same_height");
     let served = serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction inner() { Fiber::suspend(); return 'i'; }\nfunction declined() { return 'd'; }\n\
          $fiber = new Fiber(function () { return inner(); });\n\
          $fiber->start();\necho declined();\n$fiber->resume();\necho $fiber->getReturn();\n",
@@ -1306,11 +1311,12 @@ fn a_fiber_inside_a_fiber_switches_with_its_resumer() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("fiber_nested");
+    let files = Files::new("observer-fiber_nested", &[]);
+    let dir = files.path();
     rec.mark("nested");
     let nested = serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction in2() { Fiber::suspend(); return 2; }\n\
          function in1() { $f = new Fiber(function () { return in2(); }); $f->start(); Fiber::suspend(); $f->resume(); return 1; }\n\
          $fiber = new Fiber(function () { return in1(); });\n\
@@ -1402,11 +1408,12 @@ fn a_switch_handler_reads_the_fiber_switched_into_and_out_of_as_the_current_one(
             .fiber_switch(current_at_switch)
             .build("test_ext_0")])
         .build();
-    let dir = scratch("fiber_current");
+    let files = Files::new("observer-fiber_current", &[]);
+    let dir = files.path();
     rec.mark("built");
     let served = serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\n$fiber = new Fiber(function () { Fiber::suspend(); });\n\
          $fiber->start();\n$fiber->resume();\necho 'done';\n",
     );
@@ -1476,11 +1483,12 @@ fn a_fatal_in_a_fiber_ends_its_frames_then_its_resumers_and_no_other_fibers() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("fiber_fatal");
+    let files = Files::new("observer-fiber_fatal", &[]);
+    let dir = files.path();
     rec.mark("built");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction held() { Fiber::suspend(); }\n\
          $kept = new Fiber(function () { held(); });\n$kept->start();\n\
          function deep() { $s = '.'; while (true) { $s .= $s; } }\n\
@@ -1536,11 +1544,12 @@ fn a_fiber_destroyed_while_suspended_ends_its_frames_inside_it() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("fiber_destroyed");
+    let files = Files::new("observer-fiber_destroyed", &[]);
+    let dir = files.path();
     rec.mark("built");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction inner() { Fiber::suspend(); }\n\
          $fiber = new Fiber(function () { inner(); });\n$fiber->start();\n",
     );
@@ -1581,11 +1590,12 @@ fn a_fiber_destroyed_or_thrown_into_is_noticed_as_such() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("fiber_flags");
+    let files = Files::new("observer-fiber_flags", &[]);
+    let dir = files.path();
     rec.mark("nested");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\n$fiber = new Fiber(function () {\n\
          Fiber::suspend();\n$fiber = new Fiber(function () { Fiber::suspend(); });\n\
          $fiber->start();\nFiber::suspend(); });\n$fiber->start();\n$fiber->resume();\n",
@@ -1593,7 +1603,7 @@ fn a_fiber_destroyed_or_thrown_into_is_noticed_as_such() {
     rec.mark("thrown");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\n$fiber = new Fiber(function () { Fiber::suspend(); });\n$fiber->start();\n\
          try { $fiber->throw(new Exception); } catch (Exception $e) {}\n",
     );
@@ -1666,11 +1676,12 @@ fn a_generator_is_observed_through_yield_from_throw_close_and_a_fiber() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("generator_paths");
+    let files = Files::new("observer-generator_paths", &[]);
+    let dir = files.path();
     rec.mark("built");
     let served = serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction foo() { yield 0; yield from [1, 2];\n\
          try { yield 3; } catch (Exception $e) { echo 'c'; }\n\
          try { yield 4; } finally { echo 'f'; } }\n\
@@ -1718,11 +1729,12 @@ fn a_trait_method_is_asked_of_once_per_class_that_uses_it() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("trait_copies");
+    let files = Files::new("observer-trait_copies", &[]);
+    let dir = files.path();
     rec.mark("built");
     serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\ntrait T { function f() { return 1; } }\nclass A { use T; }\nclass B { use T; }\n\
          (new A)->f(); (new B)->f(); (new A)->f();\n",
     );
@@ -1762,11 +1774,12 @@ fn a_closure_bound_to_another_scope_is_asked_of_again() {
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
         .build();
-    let dir = scratch("rebound");
+    let files = Files::new("observer-rebound", &[]);
+    let dir = files.path();
     rec.mark("built");
     let served = serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nclass A { function make() { return function () { return 1; }; } }\nclass B {}\n\
          $f = function () { return 1; };\n$f(); $f();\n\
          $g = Closure::bind($f, null, A::class);\n$g(); $g();\n\

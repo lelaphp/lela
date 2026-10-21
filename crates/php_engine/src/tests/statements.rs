@@ -17,14 +17,14 @@
 
 use std::path::Path;
 
-use super::observer::{scratch, serve_main};
+use super::observer::serve_main;
 use super::stepped::Stepper;
 use super::test_ext::{Event, Events, Phase, Recording, TestExt, statement_name};
 use crate::api::abi::Statement;
 use crate::api::raising::Thrown;
 use crate::engine::{Engine, EngineBuilder, RequestDescription};
 use crate::probe::Probe;
-use crate::test::{Capture, handed_back};
+use crate::test::{Capture, Files, handed_back};
 use crate::{CommandLine, tier::Tier};
 
 /// The stepped program: a loop that calls a function, an include, and
@@ -143,10 +143,10 @@ fn stepped(name: &str, builder: EngineBuilder, main: &str) -> (Vec<Event>, Strin
     let engine = builder
         .extensions(&[TestExt::<0>::stepping(), TestExt::<1>::stepping()])
         .build();
-    let dir = scratch(&format!("statements_{name}"));
-    std::fs::write(dir.join("inc.php"), INC).ok();
+    let files = Files::new(&format!("statements-{name}"), &[("inc.php", INC)]);
+    let dir = files.path();
     rec.mark("built");
-    let served = serve_main(&engine, &dir, main);
+    let served = serve_main(&engine, dir, main);
     rec.mark("served");
     (
         statements(&rec.events().between("built", "served")),
@@ -263,11 +263,12 @@ fn what_a_statement_handler_throws_is_raised_where_the_statement_stands() {
                 .build("test_ext_1"),
         ])
         .build();
-    let dir = scratch("statements_thrown");
+    let files = Files::new("statements-thrown", &[]);
+    let dir = files.path();
     rec.mark("built");
     let served = serve_main(
         &engine,
-        &dir,
+        dir,
         "<?php\nfunction f() {\n    echo 'ran';\n}\ntry { f(); } catch (Exception $e) {\n    \
          echo $e->getMessage(), ' after ', $e->getPrevious()->getMessage(), ' at ', $e->getLine(), \"\\n\";\n}\n",
     );
@@ -318,9 +319,14 @@ fn a_string_the_host_evaluates_tells_no_statement_until_it_returns() {
         .extended_info(true)
         .extensions(&[TestExt::<0>::stepping()])
         .build();
-    let dir = scratch("statements_host_string");
-    std::fs::write(dir.join("inc.php"), INC).ok();
-    std::fs::write(dir.join("down.php"), "<?php\necho g(3), \"\\n\";\n").ok();
+    let files = Files::new(
+        "statements-host-string",
+        &[
+            ("inc.php", INC),
+            ("down.php", "<?php\necho g(3), \"\\n\";\n"),
+        ],
+    );
+    let dir = files.path();
     let inc = dir.join("inc.php");
     let down = dir.join("down.php");
     let shutdown = format!(
@@ -331,7 +337,7 @@ fn a_string_the_host_evaluates_tells_no_statement_until_it_returns() {
     rec.mark("built");
     let stdout = command_line(
         &engine,
-        &dir,
+        dir,
         &format!(
             "{shutdown} include_once '{}'; echo g(2), \"\\n\"; eval('echo 1, \"\\n\";');",
             inc.display()
@@ -341,7 +347,7 @@ fn a_string_the_host_evaluates_tells_no_statement_until_it_returns() {
     assert_eq!(stdout, "4\n1\n6\n");
     let fatal = command_line(
         &engine,
-        &dir,
+        dir,
         &format!(
             "{shutdown} ini_set('memory_limit', '2M'); $s = '.'; while (true) {{ $s .= $s; }}"
         ),
