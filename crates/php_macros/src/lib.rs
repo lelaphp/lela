@@ -125,6 +125,16 @@ fn cfgs(attrs: &[Attribute]) -> Vec<Attribute> {
         .collect()
 }
 
+/// The message of what an expansion, or a read of its input, refused;
+/// the test fails where the input was taken.
+#[cfg(test)]
+fn refused<T>(answer: syn::Result<T>) -> String {
+    answer
+        .err()
+        .map(|error| error.to_string())
+        .expect("the input is refused")
+}
+
 #[cfg(test)]
 mod tests {
     use super::root_for;
