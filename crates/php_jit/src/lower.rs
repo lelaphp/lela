@@ -181,6 +181,17 @@ pub(crate) const INTERRUPTED: u32 = u32::MAX - 2;
 /// nothing is stored.
 pub(crate) const DECLINED: u32 = u32::MAX - 3;
 
+/// What compiled code answers where a return past the trace's lowest
+/// frame finds the interpreter standing elsewhere than the trace goes on
+/// at (`types::Op::Back`'s `escapes`): php's `jit_stub_trace_escape`,
+/// which no exit point numbers, so no exit line is written and no word is
+/// bumped. Past every [`ExitId`](crate::types::ExitId), and none of
+/// [`ABANDONED`], [`UNWOUND`], [`INTERRUPTED`] and [`DECLINED`]. Nothing is
+/// stored, since the trace knows nothing of the frame it returned into;
+/// `enter` hands back the frame that stands, at the opline the return
+/// left it, whose handler `dispatch` runs as php's interpreter does.
+pub(crate) const ESCAPED: u32 = u32::MAX - 4;
+
 /// Where compiled code reads, in the `ExitCtx`, where it is entered
 /// (`enter::At`), a `u32` that is not zero at a loop's body
 /// (`types::BodyEntry`): the field `enter` lays down past the interrupt

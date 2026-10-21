@@ -451,7 +451,50 @@ fn run_at(
 }
 
 /// What `trace` left through, `entered`, followed from trace to trace
-/// as [`run`] says.
+/// as [`run`] says. A return past a trace's lowest frame that lands
+/// elsewhere than the trace goes on escapes, as php's
+/// `zend_jit_leave_func` escapes (`Z/ext/opcache/jit/zend_jit_ir.c:11188-11224`):
+/// no exit, no line and no word, the interpreter going on through the
+/// handler of the opline the return left the frame at, the landing's
+/// trace where one is compiled there ([`visit_landing`]). So fib's
+/// recursive return, landing past its second call, writes no exit line,
+/// as php writes none (the exit numbers are #1220's):
+///
+/// ```php
+/// function fib($n) { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); }
+/// echo fib(12), "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 144
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:3
+/// ---- TRACE 1 abort (deep recursion)
+///
+/// ---- TRACE 1 start (enter) fib() %s:2
+/// ---- TRACE 1 stop (recursive call)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit %d fib() %s:2
+/// ---- TRACE 2 start (side trace 1/%d) fib() %s:2
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+///
+/// ---- TRACE 3 start (return) fib() %s:2
+/// ---- TRACE 3 stop (recursive return)
+/// ---- TRACE 3 compiled
+///
+///      TRACE 3 exit %d fib() %s:2
+/// ---- TRACE 4 start (side trace 3/%d) fib() %s:2
+/// ---- TRACE 4 stop (link to 1)
+/// ---- TRACE 4 compiled
+///
+///      TRACE 1 exit 1 fib() %s:2
+/// ---- TRACE 5 start (side trace 1/1) fib() %s:2
+/// ---- TRACE 5 stop (return)
+/// ---- TRACE 5 compiled
+///
+/// ```
 fn followed<'t>(
     req: &mut Request,
     shared: &Shared,
@@ -463,6 +506,26 @@ fn followed<'t>(
         let exited = match entered {
             Ok(Left::Exit(exited)) => exited,
             Ok(Left::Unwound(frame)) => return Flow::Resume(frame),
+            // php's escape stub: no exit, no line and no word; the
+            // interpreter runs the handler of the opline the return left
+            // the frame at, a landing's trace where one is compiled there.
+            Ok(Left::Escaped(frame)) => match visit_landing(req, shared, frame, None) {
+                Visited::Enter(id) => match table.get(id) {
+                    Some(next) => {
+                        trace = next;
+                        entered = enter::enter(req, frame, (epoch, trace), At::First);
+                        continue;
+                    }
+                    None => return Flow::Resume(frame),
+                },
+                Visited::Continue => return Flow::Resume(frame),
+                Visited::Hot(claim) => {
+                    return match hot(req, frame, claim, shared) {
+                        Flow::Continue => Flow::Resume(frame),
+                        flow => flow,
+                    };
+                }
+            },
             // php's interrupt stub: the interrupt handled, and the trace
             // entered again at its header, its handler.
             Ok(Left::Interrupted(header)) => match tier::interrupted(req) {

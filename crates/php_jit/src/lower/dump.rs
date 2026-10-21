@@ -196,10 +196,17 @@ impl<'a> Dump<'a> {
                     .map_or("?".to_owned(), |info| func(info.func));
                 writeln!(text, "     f{} enter {named}", frame.0)
             }
-            Op::Back { frame, out } => {
+            Op::Back {
+                frame,
+                out,
+                escapes,
+            } => {
                 write!(text, "     f{} back", frame.0)?;
                 if let Some(out) = out {
                     write!(text, " to #{}", out.0)?;
+                }
+                if let Some((at, opline)) = escapes {
+                    write!(text, " escapes unless {} {:04}", func(*at), opline.0)?;
                 }
                 writeln!(text)
             }

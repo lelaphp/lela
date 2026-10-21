@@ -226,9 +226,11 @@ pub(crate) mod entered {
                     req.state::<Seen>().exits.push((function, exited.exit.0));
                     Flow::Resume(exited.frame)
                 }
-                Ok(crate::enter::Left::Unwound(frame) | crate::enter::Left::Interrupted(frame)) => {
-                    Flow::Resume(frame)
-                }
+                Ok(
+                    crate::enter::Left::Unwound(frame)
+                    | crate::enter::Left::Interrupted(frame)
+                    | crate::enter::Left::Escaped(frame),
+                ) => Flow::Resume(frame),
                 Ok(crate::enter::Left::Declined) => Flow::Continue,
                 Err(fatal) => Flow::Bail(fatal),
             }

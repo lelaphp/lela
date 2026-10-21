@@ -852,10 +852,11 @@ impl<'a> Builder<'a> {
                 self.define(slot, returned, idx, Form::Step)
             });
         self.returned = Types::NULL;
-        self.ops.push(Op::Back { frame: caller, out });
-        if let Some((func, opline)) = guard {
-            self.stands_at(idx, caller, func, opline);
-        }
+        self.ops.push(Op::Back {
+            frame: caller,
+            out,
+            escapes: guard,
+        });
         Ok(())
     }
 

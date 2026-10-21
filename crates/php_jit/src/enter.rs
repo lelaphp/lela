@@ -549,6 +549,10 @@ pub(crate) enum Left {
     /// stands is stood at the loop's header, where the stub goes on once
     /// it handled the interrupt.
     Interrupted(FrameRef),
+    /// Through php's escape stub, which takes no exit: a return past the
+    /// trace's lowest frame left the frame that stands at an opline the
+    /// trace does not go on at, whose handler the interpreter runs.
+    Escaped(FrameRef),
     /// Entered at its loop's body, the trace found the frame holding
     /// other than it knows there: nothing ran and the frame stands where
     /// it stood, so `dispatch` goes on to the loop's header and enters the
@@ -653,6 +657,11 @@ pub(crate) fn enter(
             tier::stand(req, frame, header);
             Ok(Left::Interrupted(frame))
         }
+        Answer::Escaped => {
+            let frame =
+                tier::current(req).ok_or_else(|| internal("a trace left no frame standing"))?;
+            Ok(Left::Escaped(frame))
+        }
         Answer::Abandoned => Err(internal(
             "a trace left through no exit of its own and kept nothing",
         )),
@@ -660,13 +669,15 @@ pub(crate) fn enter(
 }
 
 /// What compiled code answered `enter`, decoded once: an exit of the
-/// trace's, [`lower::UNWOUND`], [`lower::INTERRUPTED`], or anything else, [`lower::ABANDONED`]
+/// trace's, [`lower::UNWOUND`], [`lower::INTERRUPTED`], [`lower::DECLINED`],
+/// [`lower::ESCAPED`], or anything else, [`lower::ABANDONED`]
 /// with nothing kept among it, which no trace answers but by a defect.
 enum Answer {
     Exit(ExitId),
     Unwound,
     Interrupted,
     Declined,
+    Escaped,
     Abandoned,
 }
 
@@ -678,6 +689,7 @@ impl Answer {
             _ if word == lower::UNWOUND => Answer::Unwound,
             _ if word == lower::INTERRUPTED => Answer::Interrupted,
             _ if word == lower::DECLINED => Answer::Declined,
+            _ if word == lower::ESCAPED => Answer::Escaped,
             _ => Answer::Abandoned,
         }
     }
