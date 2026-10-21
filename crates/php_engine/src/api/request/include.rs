@@ -1237,6 +1237,110 @@ impl Request {
     }
 }
 
+/// `EG(included_files)`: the path of every file the request compiled,
+/// the primary one first, each the key of a row whose value is empty
+/// (`zend_hash_add_empty_element` over `opened_path`), in the table
+/// `init_executor` lays down in `EG` eight wide,
+/// `zend_hash_init(&EG(included_files), 8, ...)`.
+#[derive(Debug)]
+pub(crate) struct IncludedFiles(php_heap::EmbeddedArr);
+
+impl Default for IncludedFiles {
+    fn default() -> IncludedFiles {
+        IncludedFiles(php_heap::EmbeddedArr::new(8))
+    }
+}
+
+impl IncludedFiles {
+    /// `zend_hash_exists`.
+    pub(crate) fn contains(&self, path: &[u8]) -> bool {
+        self.0.arr().str_find(path).is_some()
+    }
+
+    /// The table's string for `path`, `zend_string_copy`'d by the
+    /// caller, as an op array's `filename` is the string its file was
+    /// compiled under; `None` for a path the request did not open.
+    pub(crate) fn held(&self, path: &[u8]) -> Option<PhpString> {
+        self.0.arr().str_key(path).map(PhpString::of)
+    }
+
+    /// The paths in the table's order, as `get_included_files()` walks
+    /// it.
+    fn paths(&self) -> Vec<Vec<u8>> {
+        let rows = self.0.arr();
+        (rows.iter())
+            .filter_map(|(key, _)| match key {
+                php_heap::Key::Str(path) => Some(path.bytes().to_vec()),
+                php_heap::Key::Long(_) => None,
+            })
+            .collect()
+    }
+}
+
+impl Request {
+    /// `zend_hash_add_empty_element(&EG(included_files), opened_path)`:
+    /// `path` put in the table where it is not there yet, its string
+    /// one more allocation the table holds and the table grown as
+    /// php's grows. A path the table has is left alone. The `Err` is the
+    /// memory limit, which has ended the request.
+    ///
+    /// Each first include of a file keeps its path's string, and the one
+    /// that finds eight paths in the table the doubled table too, as
+    /// php's `memory_get_usage()` reads them; the primary file is the
+    /// table's first where the host named one:
+    ///
+    /// ```php
+    /// $d = realpath(__DIR__) . '/'; $d .= str_repeat('f', 120 - strlen($d));
+    /// for ($i = 0; $i < 10; $i++) { file_put_contents("$d$i.inc", '<?php $x = 1;'); }
+    /// for ($i = 0; count(get_included_files()) < 8; $i++) { include_once "$d$i.inc"; }
+    /// for ($n = $i + 2; $i < $n; $i++) { $m = memory_get_usage(); include_once "$d$i.inc"; echo memory_get_usage() - $m, "\n"; }
+    /// for ($i = 0; $i < 10; $i++) { unlink("$d$i.inc"); }
+    /// ```
+    /// ```expect
+    /// 480
+    /// 160
+    /// ```
+    pub(crate) fn note_included(&mut self, path: &[u8]) -> Result<(), Thrown> {
+        if self.included_files.contains(path) {
+            return Ok(());
+        }
+        let held = self.string(path)?;
+        self.note_included_held(held)
+    }
+
+    /// [`Request::note_included`] over `held`, a string whose one owner
+    /// the table takes: one another place holds already, so no string is
+    /// made; given up where the table has its path.
+    pub(crate) fn note_included_held(&mut self, held: PhpString) -> Result<(), Thrown> {
+        let rows = self.included_files.0.arr();
+        let added = if rows.str_find(held.as_bytes()).is_some() {
+            Ok(())
+        } else {
+            let key = php_heap::Key::Str(held.heap());
+            self.heap.array_add_new(rows, key, php_heap::Zval::null())
+        };
+        // The table took an owner of its own where it took the path.
+        self.release(Value::string(held));
+        self.fatal_of(added)
+    }
+
+    /// `shutdown_executor`'s frees of the two tables a debug build of php
+    /// frees by name (`Z/Zend/zend_execute_API.c:496-502`): every
+    /// `EG(symtable_cache)` kept, then `EG(included_files)`, each path
+    /// string its row holds given up and the data freed. A release build
+    /// leaves them to the heap's mass release, as php's fast shutdown
+    /// leaves them.
+    #[cfg(debug_assertions)]
+    pub(super) fn free_hash_tables(&mut self) {
+        self.free_symbol_tables();
+        let rows = self.included_files.0.arr();
+        for at in 0..rows.num_used() {
+            self.heap.array_take_at(rows, at);
+        }
+        self.included_files.0.free_data(&mut self.heap);
+    }
+}
+
 impl Code<&Request> {
     /// `get_included_files()`: the paths, as `EG(included_files)` holds
     /// them, the primary file's first.
