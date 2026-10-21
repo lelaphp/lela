@@ -333,17 +333,12 @@ impl Walk {
 
     /// One value of the tracked file against the proposal's at the same
     /// path. A table recurses key by key, an array of tables recurses into
-    /// every row it carries and admits new ones beside them, an empty
-    /// array admits rows as one of none does, and every other value must
-    /// be what it was.
+    /// every row it carries and admits new ones beside them, and every
+    /// other value must be what it was.
     fn value(&mut self, at: &str, old: &Value, new: &Value) {
         match (old, new) {
             (Value::Table(old), Value::Table(new)) => self.table(at, old, new),
-            (Value::Array(old), Value::Array(new))
-                if rows(old) || (old.is_empty() && rows(new)) =>
-            {
-                self.rows(at, old, new);
-            }
+            (Value::Array(old), Value::Array(new)) if rows(old) => self.rows(at, old, new),
             _ if old == new => {}
             _ => self.refused.push(path_of(at, "")),
         }
@@ -564,19 +559,15 @@ mod tests {
         );
     }
 
-    /// An array of tables a file does not carry, or carries empty, is its
-    /// rows, each added by its identity as one appended beside a row is
-    /// (#3141); a value of another shape where none stood is one addition.
+    /// An array of tables a file does not carry is its rows, each added by
+    /// its identity as one appended beside a row is (#3141); a value of
+    /// another shape where none stood is one addition.
     #[test]
     fn rows_where_the_file_has_none_are_each_an_addition_by_identity() {
         let none = "# no row\n";
         let two = "[[divergence]]\nid = \"trace:a\"\n[[divergence]]\nid = \"trace:b\"\n";
         let named = ["divergence[trace:a]", "divergence[trace:b]"].map(str::to_owned);
         assert_eq!(verdict(none, two), Verdict::Additive(named.to_vec()));
-        assert_eq!(
-            verdict("divergence = []\n", two),
-            Verdict::Additive(named.to_vec())
-        );
         let doubled = format!("{two}[[divergence]]\nid = \"trace:a\"\n");
         assert_eq!(
             verdict(none, &doubled),
