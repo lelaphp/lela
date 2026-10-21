@@ -339,7 +339,7 @@ impl Request {
     pub(crate) fn take_body(&mut self) -> Vec<u8> {
         self.kept()
             .map(|kept| std::mem::take(&mut kept.body))
-            .unwrap_or_default()
+            .expect("a request that keeps its own output")
     }
 
     /// The log's entries and the error stream's bytes the request's own
@@ -348,7 +348,7 @@ impl Request {
     pub(crate) fn take_aside(&mut self) -> Vec<Aside> {
         self.kept()
             .map(|kept| std::mem::take(&mut kept.aside))
-            .unwrap_or_default()
+            .expect("a request that keeps its own output")
     }
 
     /// What [`host_status`](Self::host_status) makes, its one owner not yet named.

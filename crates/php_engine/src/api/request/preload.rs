@@ -1104,7 +1104,7 @@ mod tests {
             assert_eq!(seen, Ok(2 * ROUNDS));
             let reader = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
             assert_eq!(numbers.as_ref().map(Vec::len), Ok(2 * ROUNDS));
-            for (class, name) in numbers.unwrap_or_default() {
+            for (class, name) in numbers.expect("the publisher's numbers") {
                 assert_eq!(reader.symbols().class_name(class), name, "{class:?} moved");
             }
         });

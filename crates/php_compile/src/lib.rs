@@ -964,7 +964,7 @@ mod tests {
 
     fn unit_and_strings(source: &[u8]) -> (Unit, php_heap::Strings) {
         let mut strings = php_heap::Strings::new();
-        let unit = compile_parsed(source, &bundled(), &mut strings).unwrap_or_default();
+        let unit = compile_parsed(source, &bundled(), &mut strings).expect("the source compiles");
         (unit, strings)
     }
 
@@ -1254,7 +1254,7 @@ mod tests {
             ..bundled()
         };
         compile_source(&mut Arena::new(), source, &options, &mut strings)
-            .unwrap_or_default()
+            .expect("the source compiles")
             .dump(&[])
             .text()
     }
@@ -1305,13 +1305,15 @@ mod tests {
         let mut compile = |source: &[u8], room: Room| {
             compile_source_into(&mut arena, source, &options, &mut strings, room)
         };
-        let fresh = compile(b"echo 'a', 'b'; return 1;", Room::default()).unwrap_or_default();
-        let mut given_up = compile(b"echo 'c'; return 2;", Room::default()).unwrap_or_default();
+        let fresh =
+            compile(b"echo 'a', 'b'; return 1;", Room::default()).expect("the source compiles");
+        let mut given_up =
+            compile(b"echo 'c'; return 2;", Room::default()).expect("the source compiles");
         assert!(!given_up.main.oplines.is_empty() && !fresh.main.oplines.is_empty());
         let oplines = given_up.main.oplines.as_ptr();
         let filename = given_up.main.filename.0.as_ptr();
         let room = Room::of(&mut given_up.main);
-        let laid = compile(b"echo 'a', 'b'; return 1;", room).unwrap_or_default();
+        let laid = compile(b"echo 'a', 'b'; return 1;", room).expect("the source compiles");
         assert_eq!(fresh, laid);
         assert_eq!(
             laid.main.oplines.as_ptr(),
@@ -1381,7 +1383,7 @@ mod tests {
             .literals
             .first()
             .copied()
-            .unwrap_or(php_heap::Zval::UNDEF)
+            .expect("the echoed literal")
     }
 
     #[test]
@@ -1515,8 +1517,7 @@ mod tests {
             &options,
             &mut strings,
         );
-        assert!(compiled.is_ok(), "{compiled:?}");
-        let unit = compiled.unwrap_or_default();
+        let unit = compiled.expect("the source compiles");
         assert_eq!(
             unit.dump(&[]).text(),
             "\n$_main:\n     ; (lines=3, args=0, vars=0, tmps=0)\n\
@@ -1531,9 +1532,8 @@ mod tests {
             Some(b"Darwin".to_vec())
         );
         let lowered = compile_parsed(b"<?php echo t_lnumber;", &options, &mut strings);
-        assert!(lowered.is_ok(), "{lowered:?}");
         assert_eq!(
-            lowered.unwrap_or_default().dump(&[]).text(),
+            lowered.expect("the source compiles").dump(&[]).text(),
             "\n$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
              \x20    ; (before optimizer)\n     ; :1-1\n     ; return  [] RANGE[0..0]\n\
              0000 T0 = FETCH_CONSTANT string(\"t_lnumber\")\n\
@@ -1559,8 +1559,8 @@ mod tests {
                 cwd,
                 ..Options::default()
             };
-            let unit =
-                compile_parsed(b"<?php echo __DIR__;", &options, &mut strings).unwrap_or_default();
+            let unit = compile_parsed(b"<?php echo __DIR__;", &options, &mut strings)
+                .expect("the source compiles");
             literal_text(&unit, 0)
         }
         assert_eq!(
@@ -1901,7 +1901,7 @@ mod tests {
     /// read while the table it was interned into still stands.
     fn echoed_string(source: &[u8]) -> Vec<u8> {
         let (unit, _strings) = unit_and_strings(source);
-        literal_text(&unit, 0).unwrap_or_default()
+        literal_text(&unit, 0).expect("a string literal")
     }
 
     /// The text of the constant at `at`, for a string; nothing otherwise.
@@ -1967,7 +1967,7 @@ mod tests {
             },
             &mut strings,
         )
-        .unwrap_or_default();
+        .expect("the source compiles");
         assert_eq!(literal_text(&unit, 0), Some(b"0.333".to_vec()));
         // A constant beside a CV is converted and the `CONCAT` stands.
         let (unit, _strings) = unit_and_strings(
@@ -2944,23 +2944,14 @@ mod tests {
             ),
         ];
         assert_eq!(strings.count(), 1, "one string, carried by two units");
-        let named: Vec<Option<php_heap::Str>> = compiled
-            .iter()
-            .map(|unit| {
-                unit.as_ref()
-                    .ok()
-                    .and_then(|unit| unit.main.literals.first().copied())
-                    .and_then(php_heap::Zval::as_str)
-            })
-            .collect();
-        assert!(named.iter().all(Option::is_some), "{named:?}");
-        assert_eq!(
-            named[0].map(|s| s.bytes().to_vec()),
-            Some(b"shared".to_vec())
-        );
-        let [Some(one), Some(other)] = [named[0], named[1]] else {
-            return;
-        };
+        let [one, other] = compiled.each_ref().map(|unit| {
+            let unit = unit.as_ref().expect("the source compiles");
+            let literal = unit.main.literals.first().copied();
+            literal
+                .and_then(php_heap::Zval::as_str)
+                .expect("a string literal")
+        });
+        assert_eq!(one.bytes(), b"shared");
         assert!(one.is_same(other), "one `zend_string`, named by both units");
     }
 
@@ -3125,8 +3116,8 @@ mod tests {
             (b"<?php echo count($a);", b"count"),
         ] {
             let mut strings = php_heap::Strings::new();
-            let unit =
-                compile_parsed(source, &Options::default(), &mut strings).unwrap_or_default();
+            let unit = compile_parsed(source, &Options::default(), &mut strings)
+                .expect("the source compiles");
             let oplines = &unit.main.oplines;
             assert!(
                 oplines.first().map(|op| op.opcode) == Some(Opcode::InitFcallByName)
@@ -3153,7 +3144,7 @@ mod tests {
                 ..bundled()
             };
             compile_parsed(source, &options, &mut strings)
-                .unwrap_or_default()
+                .expect("the source compiles")
                 .main
                 .oplines
                 .iter()
@@ -3249,7 +3240,7 @@ mod tests {
         };
         let mut strings = php_heap::Strings::new();
         let unit = compile_source(&mut Arena::new(), b"echo 1; ?>x", &options, &mut strings)
-            .unwrap_or_default();
+            .expect("the source compiles");
         assert_eq!(
             unit.dump(&[]).text(),
             main_dump(
@@ -4598,7 +4589,8 @@ mod tests {
     fn oplines_of(source: &[u8]) -> String {
         let dump = dump_of(source);
         dump.split_once("RANGE[0..0]\n")
-            .map_or(dump.clone(), |(_, rest)| rest.to_owned())
+            .map(|(_, rest)| rest.to_owned())
+            .expect("the main op array's header")
     }
 
     /// The message one source refuses with, or nothing.
@@ -4620,11 +4612,9 @@ mod tests {
     fn a_refusal_carries_the_functions_and_the_early_bound_classes_that_landed() {
         use php_unit::TopLevel;
         let source = b"<?php\nfunction f(int $a = null) { return fn() => 1; }\nclass A {}\ninterface I {}\nclass C implements I {}\nfunction g() {}\n$h = function () { break 2; };\n";
-        let declared = refused(source).and_then(|error| error.declared);
-        assert!(declared.is_some(), "the refusal carries what landed");
-        let Some(declared) = declared else {
-            return;
-        };
+        let declared = refused(source)
+            .and_then(|error| error.declared)
+            .expect("the refusal carries what landed");
         assert_eq!(
             declared.unit.top_level,
             vec![
@@ -6293,7 +6283,7 @@ mod tests {
             &options,
             &mut strings,
         )
-        .unwrap_or_default()
+        .expect("the source compiles")
         .dump(&[])
         .text();
         assert_eq!(
@@ -7446,11 +7436,9 @@ $f = fn (): float => 1.5;
             let hook = property
                 .hooks
                 .as_ref()
-                .and_then(|hooks| hooks.of(body.kind));
-            assert!(hook.is_some(), "a hook's body has its declaration");
-            if let Some(hook) = hook {
-                take(&hook.function, &body.body);
-            }
+                .and_then(|hooks| hooks.of(body.kind))
+                .expect("a hook's body has its declaration");
+            take(&hook.function, &body.body);
         }
         for (name, declared, carried) in &held {
             assert_eq!(declared, carried, "{name}");
@@ -7992,7 +7980,9 @@ $f = fn (): float => 1.5;
         ];
         for (source, oplines) in cases {
             let dumped = dump_of(source);
-            let main = dumped.split("\n\nf:").next().unwrap_or_default();
+            let (main, _) = dumped
+                .split_once("\n\nf:")
+                .expect("the main op array, then f's");
             assert!(
                 main.trim_end().ends_with(oplines.trim_end()),
                 "{}\n{dumped}",
@@ -8618,7 +8608,7 @@ $f = fn (): float => 1.5;
         let dump = |source: &[u8]| {
             let mut strings = php_heap::Strings::new();
             compile_parsed(source, &options, &mut strings)
-                .unwrap_or_default()
+                .expect("the source compiles")
                 .dump(&[])
                 .text()
         };
@@ -9529,7 +9519,7 @@ $f = fn (): float => 1.5;
             &options,
             &mut strings,
         )
-        .unwrap_or_default()
+        .expect("the source compiles")
         .dump(&[])
         .text();
         assert_eq!(

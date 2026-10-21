@@ -1667,9 +1667,7 @@ mod tests {
     #[test]
     fn a_native_classs_destructor_is_served_at_the_last_release() {
         let decl = destructible();
-        let Some(method) = decl.methods.first().cloned() else {
-            return;
-        };
+        let method = decl.methods.first().cloned().expect("the first method");
         let destructible = crate::api::abi::ExtensionBuilder::default()
             .classes(vec![(
                 decl,
@@ -1700,9 +1698,7 @@ mod tests {
     #[test]
     fn a_destructor_served_on_the_pending_throwable_is_the_core_fatal() {
         let decl = destructible();
-        let Some(method) = decl.methods.first().cloned() else {
-            return;
-        };
+        let method = decl.methods.first().cloned().expect("the first method");
         let destructible = crate::api::abi::ExtensionBuilder::default()
             .classes(vec![(
                 decl,
@@ -1711,9 +1707,9 @@ mod tests {
             .build("destructible");
         let engine = Engine::cli_builder().extensions(&[destructible]).build();
         let mut request = crate::test::request_on(&engine);
-        let Ok(object) = request.new_object_of("Destructible") else {
-            return;
-        };
+        let object = request
+            .new_object_of("Destructible")
+            .expect("a Destructible");
         request.raised = Some(super::Raised::Throwable(object));
 
         request.destruct(object);

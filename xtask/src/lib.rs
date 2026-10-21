@@ -78,6 +78,7 @@ mod sysv;
 mod tally;
 pub mod test;
 pub mod ticket;
+pub mod trace_dump;
 pub mod track;
 pub mod track_chains;
 pub mod track_next;
@@ -305,10 +306,8 @@ fn command_line() -> Result<()> {
         Command::Miri { crates } => record(&store, &miri::run(&root, &manifest, &crates)?),
         Command::Phpt(ask) => phpt_command(&root, &manifest, &store, ask),
         Command::PortMap { tree } => port_map::command(&root, &manifest, &store, tree.as_deref()),
-        Command::CompileIdentity(ask) => record(
-            &store,
-            &compile_identity::run(&root, &manifest, &Registry::load(&root)?, &ask)?,
-        ),
+        Command::CompileIdentity(ask) => compile_identity::command(&root, &manifest, &store, &ask),
+        Command::TraceDump(ask) => trace_dump::command(&root, &manifest, &store, &ask),
         Command::Crosscheck { ext, staged } => {
             crosscheck_command(&root, &manifest, &store, ext, staged)
         }

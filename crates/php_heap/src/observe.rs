@@ -140,30 +140,25 @@ mod tests {
 
     /// What `observer` was told, taken out of `heap`.
     fn taken(heap: &mut Heap, observer: AllocationObserverId) -> Vec<Allocation> {
-        let back: Option<Box<dyn Any>> = heap.unobserve_allocations(observer).map(|o| o as _);
-        back.and_then(|any| any.downcast::<Recorder>().ok())
-            .map(|recorder| recorder.0)
-            .unwrap_or_default()
+        let back: Box<dyn Any> = heap
+            .unobserve_allocations(observer)
+            .expect("the observer is handed back");
+        back.downcast::<Recorder>()
+            .expect("the observer is the test's Recorder")
+            .0
     }
 
     /// One act of each entry: a string allocated and given back, a block
     /// grown where it cannot stand and so moved, and the bin caches
     /// collected.
     fn serve(heap: &mut Heap) {
-        let s = heap.string(b"hello world");
-        assert!(s.is_ok());
-        if let Ok(s) = s {
-            heap.release_string(s);
-        }
-        let block = heap.block(100);
-        assert!(block.is_ok());
-        if let Ok(block) = block {
-            let grown = heap.block_resize(block, 5000);
-            assert!(grown.is_ok());
-            if let Ok(grown) = grown {
-                heap.free_block(grown);
-            }
-        }
+        let s = heap
+            .string(b"hello world")
+            .expect("the string \"hello world\"");
+        heap.release_string(s);
+        let block = heap.block(100).expect("a block");
+        let grown = heap.block_resize(block, 5000).expect("a resized block");
+        heap.free_block(grown);
         heap.gc_mem_caches();
     }
 

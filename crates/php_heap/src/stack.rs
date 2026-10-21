@@ -1275,11 +1275,9 @@ mod tests {
         let _alone = alone();
         let mut heap = Heap::new();
         let mut stack = VmStack::<Head>::new();
-        let outer = stack.push_frame(&mut heap, 2, 0, Head::default());
-        assert!(outer.is_ok(), "a first frame fits the first page");
-        let Ok(outer) = outer else {
-            return;
-        };
+        let outer = stack
+            .push_frame(&mut heap, 2, 0, Head::default())
+            .expect("a first frame fits the first page");
         let guard = stack.push_entry(outer);
         let inner = stack.push_frame(&mut heap, 1, 0, Head::default());
         assert_eq!(stack.entry(), outer);
@@ -1309,23 +1307,19 @@ mod tests {
         let _alone = alone();
         let mut heap = Heap::new();
         let mut stack = VmStack::<Head>::new();
-        let sending = stack.push_frame(&mut heap, 2, 0, Head::default());
-        let called = stack.push_frame(&mut heap, 3, 0, Head::default());
-        assert!(
-            sending.is_ok() && called.is_ok(),
-            "two frames fit the first page"
-        );
-        let (Ok(sending), Ok(called)) = (sending, called) else {
-            return;
-        };
-        let lent = stack.top_and_frame_mut(sending);
-        assert!(lent.is_some(), "a frame below the top is lent with it");
-        if let Some((top, below)) = lent {
-            below.set(Slot(1), Zval::long(4));
-            top.set(Slot(2), below.slot(Slot(1)));
-            top.set(Slot(0), Zval::long(5));
-            below.set(Slot(0), top.slot(Slot(0)));
-        }
+        let sending = stack
+            .push_frame(&mut heap, 2, 0, Head::default())
+            .expect("two frames fit the first page");
+        let called = stack
+            .push_frame(&mut heap, 3, 0, Head::default())
+            .expect("two frames fit the first page");
+        let (top, below) = stack
+            .top_and_frame_mut(sending)
+            .expect("a frame below the top is lent with it");
+        below.set(Slot(1), Zval::long(4));
+        top.set(Slot(2), below.slot(Slot(1)));
+        top.set(Slot(0), Zval::long(5));
+        below.set(Slot(0), top.slot(Slot(0)));
         assert_eq!(
             stack.frame(called).map(|f| f.slot(Slot(2))),
             Some(Zval::long(4))
@@ -1427,11 +1421,9 @@ mod tests {
             ..Head::default()
         };
         heap.reset_peak();
-        let call = stack.push_frameless(&[Zval::UNDEF; 3], called.clone());
-        assert!(call.is_ok());
-        let Ok(call) = call else {
-            return;
-        };
+        let call = stack
+            .push_frameless(&[Zval::UNDEF; 3], called.clone())
+            .expect("a frameless call");
         assert_eq!(heap.memory_usage(false), full);
         assert_eq!(heap.memory_peak(), full);
         assert_eq!(stack.current(), call);
@@ -1546,11 +1538,9 @@ mod tests {
             opline: 3,
             ..Head::default()
         };
-        let pushed = stack.push_frame(&mut heap, 2, 0, written.clone());
-        assert!(pushed.is_ok());
-        let Ok(f) = pushed else {
-            return;
-        };
+        let f = stack
+            .push_frame(&mut heap, 2, 0, written.clone())
+            .expect("a frame");
         assert_eq!(stack.header(f), Some(&written));
         if let Some(header) = stack.header_mut(f) {
             header.opline = 4;
@@ -1563,10 +1553,9 @@ mod tests {
         }
         let moved = stack.move_to_heap(&mut heap);
         assert!(stack.is_empty());
-        assert!(matches!(moved, Ok(Some(_))), "the frame moves to the heap");
-        let Ok(Some(moved)) = moved else {
-            return;
-        };
+        let moved = moved
+            .expect("the move to the heap")
+            .expect("the frame moves to the heap");
         assert_eq!(
             (
                 moved.header().function,
@@ -1601,11 +1590,9 @@ mod tests {
             function: 1,
             ..Head::default()
         };
-        let pushed = stack.push_frame(&mut heap, 2, 0, written.clone());
-        assert!(pushed.is_ok(), "a first frame fits");
-        let Ok(f) = pushed else {
-            return;
-        };
+        let f = stack
+            .push_frame(&mut heap, 2, 0, written.clone())
+            .expect("a first frame fits");
         if let Some(frame) = stack.frame_mut(f) {
             frame.set(Slot(0), Zval::long(1));
         }
@@ -1621,11 +1608,9 @@ mod tests {
         assert_eq!(stack.frame(f).map(|f| f.slot(Slot(0))), Some(Zval::long(1)));
         assert_eq!(stack.frame(f).map(Frame::len), Some(5 + PAGE_SIZE / SLOT));
         assert_eq!(heap.memory_usage(false) - start, 2 * PAGE_SIZE);
-        let pushed = stack.push_frame(&mut heap, 1, 0, Head::default());
-        assert!(pushed.is_ok(), "a frame above fits on a fresh page");
-        let Ok(g) = pushed else {
-            return;
-        };
+        let g = stack
+            .push_frame(&mut heap, 1, 0, Head::default())
+            .expect("a frame above fits on a fresh page");
         assert!(
             stack.grow_top(&mut heap, f, 1).is_err(),
             "only the top frame grows"
@@ -1650,24 +1635,20 @@ mod tests {
             function: 3,
             ..Head::default()
         };
-        let pushed = stack.push_frame(&mut heap, 2, 0, written.clone());
-        assert!(pushed.is_ok());
-        let Ok(f) = pushed else {
-            return;
-        };
+        let f = stack
+            .push_frame(&mut heap, 2, 0, written.clone())
+            .expect("a frame");
         if let Some(frame) = stack.frame_mut(f) {
             frame.set(Slot(1), Zval::long(8));
         }
-        let moved = stack.move_to_heap(&mut heap);
-        let Ok(Some(moved)) = moved else {
-            return;
-        };
+        let moved = stack
+            .move_to_heap(&mut heap)
+            .expect("the move to the heap")
+            .expect("a frame to move");
         let held = heap.memory_usage(false);
-        let back = stack.restore_frame(&mut heap, moved);
-        assert!(back.is_ok());
-        let Ok(back) = back else {
-            return;
-        };
+        let back = stack
+            .restore_frame(&mut heap, moved)
+            .expect("the restored frame");
         assert!(
             heap.memory_usage(false) < held,
             "the frame's own allocation is given back"
@@ -1740,17 +1721,16 @@ mod tests {
         stack.pop_frame(&mut heap);
         stack.pop_frame(&mut heap);
         assert_eq!(chain(&stack), rooms(&stack));
-        let moved = stack.move_to_heap(&mut heap);
-        let Ok(Some(moved)) = moved else {
-            return;
-        };
+        let moved = stack
+            .move_to_heap(&mut heap)
+            .expect("the move to the heap")
+            .expect("a frame to move");
         assert_eq!(chain(&stack).len(), 2);
         stack.resume_frame(moved);
         assert_eq!(chain(&stack), rooms(&stack));
-        let grown = stack.push_frame(&mut heap, 1, 0, Head::default());
-        let Ok(grown) = grown else {
-            return;
-        };
+        let grown = stack
+            .push_frame(&mut heap, 1, 0, Head::default())
+            .expect("a frame");
         assert_eq!(stack.grow_top(&mut heap, grown, PAGE_SIZE / SLOT), Ok(()));
         assert_eq!(chain(&stack), rooms(&stack));
         stack.pop_frame(&mut heap);

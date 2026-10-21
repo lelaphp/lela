@@ -118,7 +118,7 @@ fn kept(dir: &std::path::Path) -> Vec<(UnitView, FuncRef)> {
         main.to_string_lossy().as_bytes(),
         "<?php include __DIR__ . '/inc.php';",
     );
-    views.map(|views| views.0).unwrap_or_default()
+    views.expect("the tier's state was kept").0
 }
 
 /// A function of a file the cache holds is held by the view; one an
@@ -148,12 +148,11 @@ fn a_view_holds_a_held_units_function_refuses_an_evals_and_outlives_its_request(
     );
     assert_eq!(served.stdout_text(), "bool(true)\nbool(false)\n");
     drop(engine);
-    let views = views.map(|views| views.0).unwrap_or_default();
+    let views = views.expect("the tier's state was kept").0;
     assert_eq!(views.len(), 2, "two views were built");
     let mut views = views.into_iter();
-    let (Some((held_view, held)), Some((own_view, own))) = (views.next(), views.next()) else {
-        return;
-    };
+    let (held_view, held) = views.next().expect("the view of inc.php");
+    let (own_view, own) = views.next().expect("the view of the eval");
     let code = held_view.op_array(held);
     assert!(
         code.is_some_and(|code| code.safepoints.len() >= 3),
@@ -230,7 +229,7 @@ fn a_view_lists_a_functions_parameters() {
     let (typed_view, typed) = &views[1];
     let masks: Vec<u32> = typed_view
         .parameters(*typed)
-        .unwrap_or_default()
+        .expect("the typed function's parameters")
         .iter()
         .map(|p| p.ty.as_ref().map_or(0, php_unit::decl::Type::mask))
         .collect();
@@ -309,7 +308,7 @@ fn a_held_functions_constant_string_reads_through_a_view_past_its_engine() {
             .map(|s| s.bytes().to_vec())
             .collect()
     };
-    let views = views.map(|views| views.0).unwrap_or_default();
+    let views = views.expect("the tier's state was kept").0;
     let before = strings(&views);
     drop(engine);
     assert!(

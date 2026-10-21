@@ -333,6 +333,15 @@ pub(crate) enum Command {
         #[arg(long)]
         staged: bool,
     },
+    /// Hold the engine's `TRACE` lines under `jit.mode=force` to the
+    /// oracle's under `[regime.jit-inline]` on the seven kernels, kept in
+    /// the store; one reading per kernel.
+    ///
+    /// Both sides' `---- TRACE` lines are kept at
+    /// `target/harness/trace-dump/<kernel>/<digest>.oracle` and `.engine`,
+    /// held through the registry under `trace:dump/<kernel>`; the engine's
+    /// side is `php` built with the tier's feature.
+    TraceDump(crate::trace_dump::Ask),
     /// Hold makala to the pinned php-fpm: each request of the HTTP-served
     /// subset served by both, the status, header lines and body compared;
     /// one reading, at makala's crate.

@@ -155,6 +155,7 @@ pub(crate) fn of_command(command: &crate::cli::Command) -> Option<Seat> {
         Command::Phpt(_) => "phpt",
         Command::CompileIdentity(_) => "compile-identity",
         Command::Crosscheck { .. } => "crosscheck",
+        Command::TraceDump(_) => "trace-dump",
         Command::FpmCompare { .. } | Command::Soak { .. } => "makala",
         Command::Witness(_) => "witness",
         Command::Bench(_) => "bench",
