@@ -60,7 +60,7 @@ use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{Oracle, Runner};
 use crate::phpt::Scope;
-use crate::reading::{Reading, listed};
+use crate::reading::{Reading, Store, listed};
 use crate::tally::{self, Judgement as _, Outcome};
 
 /// The instrument's name, the reading's `instrument` field.
@@ -362,6 +362,13 @@ impl Ask {
             .chain(self.regime.as_deref())
             .collect()
     }
+}
+
+/// `xtask compile-identity`: [`run`] under the tracked registry, its
+/// readings recorded.
+pub(crate) fn command(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) -> Result<()> {
+    let registry = Registry::load(root)?;
+    crate::record(store, &run(root, manifest, &registry, ask)?)
 }
 
 /// Run what was asked for: the reading of the corpus, written by the

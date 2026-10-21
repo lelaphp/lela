@@ -1,0 +1,8 @@
+---- TRACE 1 start (enter) $main() %SCRATCH%/loop.php:2
+---- TRACE 1 abort (inner loop)
+---- TRACE 1 start (loop) $main() %SCRATCH%/loop.php:3
+---- TRACE 1 stop (loop)
+---- TRACE 1 compiled
+---- TRACE 2 start (side trace 1/1) $main() %SCRATCH%/loop.php:6
+---- TRACE 2 stop (return)
+---- TRACE 2 compiled

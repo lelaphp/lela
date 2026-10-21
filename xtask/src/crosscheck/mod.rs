@@ -246,24 +246,24 @@ pub(crate) fn judge(registry: &Registry, id: &str, oracle: &[u8], engine: &Rende
         Rendering::Bytes(bytes) => match oracle::compare(registry, id, oracle, bytes) {
             Verdict::Same => Judgement::Pass,
             Verdict::Diverged(row) => Judgement::Diverged(row.reason.clone()),
-            Verdict::Differs(diff) => Judgement::Fail(first_difference(&diff)),
+            Verdict::Differs(diff) => Judgement::Fail(first_difference(&diff, "rendering")),
         },
     }
 }
 
-/// The note on a rendering that differs: the first differing line by its
-/// number in the oracle's rendering, the oracle's lines as `-` and the
+/// The note on what the engine wrote, `what`, where it differs from the
+/// oracle's: the first differing line by its number in the oracle's
+/// lines, the oracle's lines as `-` and the
 /// engine's as `+` up to the next line the two share, and how many lines
 /// differ in all. The whole diff of an extension is the size of the
 /// extension, `standard`'s a hundred and fifty kilobytes, and a reading is
 /// a line a person reads and a row the store keeps; the two files are in
 /// the store for the rest.
-pub(crate) fn first_difference(diff: &str) -> String {
+pub(crate) fn first_difference(diff: &str, what: &str) -> String {
     let changed = |line: &str| line.starts_with('-') || line.starts_with('+');
     let lines: Vec<&str> = diff.lines().collect();
     let Some(first) = lines.iter().position(|line| changed(line)) else {
-        return "the engine's rendering differs from the oracle's in bytes no line shows"
-            .to_owned();
+        return format!("the engine's {what} differs from the oracle's in bytes no line shows");
     };
     let at = lines[..first]
         .iter()
@@ -289,7 +289,7 @@ pub(crate) fn first_difference(diff: &str) -> String {
         format!("\n… and {rest} more line{} of this hunk", plural(rest))
     };
     format!(
-        "the engine's rendering differs from the oracle's at line {at}, {differ} line{} in all:\n{shown}{more}",
+        "the engine's {what} differs from the oracle's at line {at}, {differ} line{} in all:\n{shown}{more}",
         plural(differ)
     )
 }

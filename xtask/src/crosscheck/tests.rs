@@ -60,18 +60,18 @@ fn the_fixture_is_the_oracles_own_rendering_and_the_one_byte_apart_is_not_a_pass
 fn the_note_is_the_first_differing_line_and_the_count_of_all_of_them() {
     let diff = " same\n same\n-oracle only\n same\n-theirs\n+ours\n";
     assert_eq!(
-        first_difference(diff),
+        first_difference(diff, "rendering"),
         "the engine's rendering differs from the oracle's at line 3, 3 lines in all:\n-oracle only"
     );
     let added = " same\n+engine only\n same\n";
     assert_eq!(
-        first_difference(added),
+        first_difference(added, "rendering"),
         "the engine's rendering differs from the oracle's at line 2, 1 line in all:\n+engine only"
     );
-    assert!(first_difference(" same\n").contains("no line shows"));
+    assert!(first_difference(" same\n", "rendering").contains("no line shows"));
     let long = " head\n-a\n-b\n-c\n-d\n-e\n-f\n same\n";
     assert_eq!(
-        first_difference(long),
+        first_difference(long, "rendering"),
         "the engine's rendering differs from the oracle's at line 2, 6 lines in all:\n-a\n-b\n-c\n-d\n… and 2 more lines of this hunk"
     );
 }

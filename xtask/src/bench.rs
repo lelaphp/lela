@@ -46,7 +46,7 @@
 //! instrument states about the same call is the other thing — that the
 //! paired rig is honest about it.
 
-mod kernels;
+pub(crate) mod kernels;
 pub(crate) mod row;
 mod series;
 pub(crate) mod spent;
