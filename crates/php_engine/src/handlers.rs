@@ -9095,13 +9095,14 @@ fn property_place(
             return Ok(PropertyFound::Threw(thrown));
         }
     };
-    let name = name_value.as_str_bytes().unwrap_or_default().to_vec();
+    // A view: [`exec::Member`] holds the name until its release.
+    let name = name_value.as_str_bytes().unwrap_or_default();
     let Some(object) = container.as_object() else {
-        let thrown = non_object_place(req, (frame, code, op), read, &container, &name);
+        let thrown = non_object_place(req, (frame, code, op), read, &container, name);
         return Ok(PropertyFound::Threw(thrown));
     };
     prime_constant(req, frame, op, property_cache_slot(op), object, &name_value);
-    let (object, lent) = match req.lazy_place(object, &name) {
+    let (object, lent) = match req.lazy_place(object, name) {
         Ok(placed) => placed,
         Err(thrown) => {
             return Ok(PropertyFound::Threw(freeing_container(
@@ -9112,7 +9113,7 @@ fn property_place(
     // The guard a proxy's `__get` lent the instance is held while the
     // place is resolved there, and given back before what the fetch
     // does with it.
-    let found = property_place_on(req, (frame, op), read, object, &name, &name_value);
+    let found = property_place_on(req, (frame, op), read, object, name, &name_value);
     req.give_back_guard(lent);
     found
 }
@@ -16276,7 +16277,8 @@ fn step_property(
     name: &Value,
 ) -> Result<Result<(), Thrown>, Fatal> {
     let Compound { op, data, .. } = step;
-    let bytes = name.as_str_bytes().unwrap_or_default().to_vec();
+    // A view: [`exec::Member`] holds the name until its release.
+    let bytes = name.as_str_bytes().unwrap_or_default();
     let Some(key) = name.as_php_string() else {
         return Err(Fatal::error(
             "InternalError: ZEND_ASSIGN_OBJ_OP over a property whose name is no string",
@@ -16285,10 +16287,10 @@ fn step_property(
     // The guard a proxy's `__get` lent the instance is held while the
     // place is resolved there, and given back before the operation over
     // it, as around php's `get_property_ptr_ptr` on the instance.
-    let placed = req.lazy_place(object, &bytes).and_then(|(object, lent)| {
-        let ptr = property_ptr(req, object, &bytes, key).and_then(|ptr| match ptr {
+    let placed = req.lazy_place(object, bytes).and_then(|(object, lent)| {
+        let ptr = property_ptr(req, object, bytes, key).and_then(|ptr| match ptr {
             PropertyPtr::Slot(slot, typed) if object.heap().slot(slot).is_undef() => {
-                unwritten_step_slot(req, object, &bytes, slot, typed)
+                unwritten_step_slot(req, object, bytes, slot, typed)
             }
             ptr => Ok(ptr),
         });
@@ -16312,19 +16314,19 @@ fn step_property(
         // it throws comes before what the write refuses
         // (`zend_assign_op_overloaded_property`).
         PropertyPtr::Withheld => {
-            let precomputed = match withheld_step(req, frame, code, step, object, &bytes) {
+            let precomputed = match withheld_step(req, frame, code, step, object, bytes) {
                 Ok(stepped) => stepped,
                 Err(thrown) => return Ok(Err(thrown)),
             };
             let silent = req.serves_accessor(object.class(), crate::api::request::Accessor::Get);
-            match req.declared_slot_for_write(object, &bytes, "modify", silent) {
+            match req.declared_slot_for_write(object, bytes, "modify", silent) {
                 Ok(Some((slot, typed))) => step_slot(
                     req,
                     frame,
                     code,
                     step,
                     (object, slot, typed),
-                    &bytes,
+                    bytes,
                     Some(precomputed),
                 ),
                 Ok(None) => {
@@ -16341,7 +16343,7 @@ fn step_property(
             }
         }
         PropertyPtr::Slot(slot, typed) => {
-            step_slot(req, frame, code, step, (object, slot, typed), &bytes, None)
+            step_slot(req, frame, code, step, (object, slot, typed), bytes, None)
         }
     }
 }
