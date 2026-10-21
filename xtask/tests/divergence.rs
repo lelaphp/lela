@@ -341,15 +341,32 @@ fn one_more_accepted_row_changes_the_cut_section_s_counts_alone() {
             .map(str::to_owned)
             .collect()
     };
-    assert_ne!(grown, cut, "the counts changed");
+    let registry = Registry::load(&root).expect("load the grown registry");
+    for counts in [
+        counts_line(&registry, Some(Kind::Trace)),
+        counts_line(&registry, None),
+    ] {
+        assert!(
+            grown.contains(&counts),
+            "the grown counts, {counts}:\n{grown}"
+        );
+        assert!(
+            !cut.contains(&counts),
+            "counts the row moved, {counts}:\n{cut}"
+        );
+    }
     assert_eq!(beside_counts(&grown), beside_counts(&cut), "{grown}");
+    let added = registry
+        .rows()
+        .iter()
+        .find(|r| r.id.as_str() == "trace:fixture-one-more")
+        .expect("the grown registry holds the added row");
     let whole = xtask(&root, &["status", "--section", "divergence", "--uncut"]).ok();
-    assert!(
-        whole.contains(
-            "| trace:fixture-one-more | trace | debt | accepted | 2026-09-08 | The fixture's one more reason (fixture). |"
-        ),
-        "{whole}"
+    let line = format!(
+        "| trace:fixture-one-more | trace | debt | accepted | {} | The fixture's one more reason (fixture). |",
+        added.since
     );
+    assert!(whole.contains(&line), "{whole}");
 }
 
 /// The `crosscheck` kind (#318): `parse` accepts a row keyed by an
