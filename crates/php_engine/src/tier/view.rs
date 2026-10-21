@@ -162,13 +162,16 @@ pub fn func(req: &Request, frame: FrameRef) -> Option<FuncRef> {
 /// frame that serves none, and past the op array's last safepoint.
 #[must_use]
 pub fn word(req: &Request, frame: FrameRef, at: SafepointIdx) -> &Word {
-    let held = req
-        .served_op_array(frame)
-        .and_then(|code| match code.runtime_cache {
-            MapPtrOffset::Engine(offset) => req.arena().func(offset),
-            MapPtrOffset::Request(_) => None,
-        });
-    held.map_or(&SEALED, |func| func.word(at))
+    held(req, frame).map_or(&SEALED, |func| func.word(at))
+}
+
+/// The row of the op array `frame` serves, where an epoch holds it: none
+/// for a request's op array and a frame that serves none.
+fn held(req: &Request, frame: FrameRef) -> Option<&super::published::Func> {
+    match req.served_op_array(frame)?.runtime_cache {
+        MapPtrOffset::Engine(offset) => req.arena().func(offset),
+        MapPtrOffset::Request(_) => None,
+    }
 }
 
 /// The landing word of opline `at` of the op array `frame` serves, what
@@ -176,13 +179,7 @@ pub fn word(req: &Request, frame: FrameRef, at: SafepointIdx) -> &Word {
 /// sealed word until a tier armed it, and for an op array no epoch holds.
 #[must_use]
 pub fn landing(req: &Request, frame: FrameRef, at: OplineIdx) -> &Word {
-    let held = req
-        .served_op_array(frame)
-        .and_then(|code| match code.runtime_cache {
-            MapPtrOffset::Engine(offset) => req.arena().func(offset),
-            MapPtrOffset::Request(_) => None,
-        });
-    held.map_or(&SEALED, |func| func.landing(at))
+    held(req, frame).map_or(&SEALED, |func| func.landing(at))
 }
 
 /// The opline safepoint `at` of the op array `frame` serves stands at,
