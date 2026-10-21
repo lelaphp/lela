@@ -4,7 +4,7 @@
 //! while the other's is installed, and the thread a request ran on runs
 //! the next request under the process's locale again.
 //!
-//! A test that names a locale asks [`has_locale`] first and, on a host
+//! A test that names a locale runs inside [`with_locale`] and, on a host
 //! whose C library lacks it, says it skipped and measures nothing; CI
 //! generates every locale these tests and the witnesses name
 //! (`.github/workflows/harness.yml`), so there it runs.
@@ -37,27 +37,29 @@ fn served(engine: &Engine, source: &str) -> String {
     served.stdout_text()
 }
 
-/// Whether the C library has the locale `name`, asked the way a phpt's
-/// `--SKIPIF--` asks: a request's `setlocale()`, which answers what
-/// `newlocale(3)` answers for the name. A test that needs the locale and
-/// finds it absent says so on stderr and returns, since a Rust test has
-/// no skip of its own.
-fn has_locale(engine: &Engine, name: &str) -> bool {
+/// `test` called where the C library has the locale `name`, asked the
+/// way a phpt's `--SKIPIF--` asks: a request's `setlocale()`, which
+/// answers what `newlocale(3)` answers for the name. Where it is absent,
+/// `test` is never called and the skip is said on stderr, since a Rust
+/// test has no skip of its own.
+fn with_locale(engine: &Engine, name: &str, test: impl FnOnce()) {
     let probe =
         format!(r#"<?php echo setlocale(LC_ALL, "{name}") === false ? "absent" : "present";"#);
-    let present = served(engine, &probe) == "present";
-    if !present {
+    if served(engine, &probe) == "present" {
+        test();
+    } else {
         eprintln!("skipped: the C library has no {name} locale on this host");
     }
-    present
 }
 
 #[test]
 fn two_requests_at_once_never_read_each_other_s_locale() {
     let engine = support::engine();
-    if !has_locale(&engine, "de_DE") {
-        return;
-    }
+    with_locale(&engine, "de_DE", || two_requests_at_once(&engine));
+}
+
+/// The test above, under a C library that has `de_DE`.
+fn two_requests_at_once(engine: &Engine) {
     let files = Files::new("standard-locale", &[]);
     let dir = files.path();
     let german = source(
@@ -79,10 +81,10 @@ fn two_requests_at_once_never_read_each_other_s_locale() {
     );
     let (german, c, after) = thread::scope(|scope| {
         let german = scope.spawn(|| {
-            let first = served(&engine, &german);
-            (first, served(&engine, &after))
+            let first = served(engine, &german);
+            (first, served(engine, &after))
         });
-        let c = scope.spawn(|| served(&engine, &c));
+        let c = scope.spawn(|| served(engine, &c));
         let (german, after) = german.join().expect("the de_DE request's thread");
         (german, c.join().expect("the C request's thread"), after)
     });
