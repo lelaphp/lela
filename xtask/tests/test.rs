@@ -6,7 +6,6 @@
 //! the reading the ticket is for: a crate with a failing test is not done.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use xtask::divergence::Registry;
 use xtask::done;
@@ -14,6 +13,15 @@ use xtask::manifest::Manifest;
 use xtask::reading::{Number, Reading, Status, Store, epoch_seconds};
 use xtask::scratch::Tree;
 use xtask::test;
+
+mod common {
+    pub mod manifest;
+    pub mod repo;
+    pub mod run;
+}
+use common::manifest::Tracked;
+use common::repo::Repo;
+use common::run::{Run, xtask};
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -77,14 +85,9 @@ fn a_crate_with_a_failing_test_reads_fail_with_the_passed_and_the_failed_counted
 #[test]
 fn the_binary_writes_the_reading_and_exits_nonzero_on_a_failure() {
     let root = repository("test-binary");
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(root.path())
-        .args(["test", "--crate", "php_heap"])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!out.status.success(), "{stdout}");
+    let ran = xtask(&root, &["test", "--crate", "php_heap"]);
+    assert_ne!(ran.code(), 0, "{ran}");
+    let stdout = ran.stdout;
     assert!(
         stdout.starts_with("fail test php_heap: php_heap: 1 test failed"),
         "{stdout}"
@@ -106,25 +109,8 @@ fn a_crate_the_manifest_does_not_name_is_refused() {
     );
 }
 
-fn sh(root: &Path, args: &[&str]) {
-    let out = Command::new(args[0])
-        .args(&args[1..])
-        .current_dir(root)
-        .env("GIT_AUTHOR_NAME", "x")
-        .env("GIT_AUTHOR_EMAIL", "x@x")
-        .env("GIT_COMMITTER_NAME", "x")
-        .env("GIT_COMMITTER_EMAIL", "x@x")
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
 /// The fixture copied into a scratch tree of its own, with the tracked
-/// pin and registry beside its manifest, so two tests running at once
+/// pin and a registry with no row beside its manifest, so two tests running at once
 /// build in two `target/` directories and neither removes the other's
 /// mid-run; the tree takes itself away (#194). The instrument reads a
 /// crate's files through `git ls-files`, so a test runs it over
@@ -135,7 +121,7 @@ fn scratch(name: &str) -> Tree {
     std::fs::create_dir_all(root.join("crates/php_heap/src")).unwrap();
     std::fs::copy(workspace().join("oracle.toml"), root.join("oracle.toml")).unwrap();
     std::fs::copy(
-        workspace().join("docs/divergence.toml"),
+        xtask::package_dir().join("fixtures/registry/empty.toml"),
         root.join("docs/divergence.toml"),
     )
     .unwrap();
@@ -151,12 +137,9 @@ fn scratch(name: &str) -> Tree {
     }
     // The fixture's pin is by a path relative to the fixture; here the
     // pin stands beside the manifest.
-    let manifest = std::fs::read_to_string(root.join("seams.toml")).unwrap();
-    std::fs::write(
-        root.join("seams.toml"),
-        manifest.replace("../../../../oracle.toml", "oracle.toml"),
-    )
-    .unwrap();
+    Tracked::of(&root)
+        .with_pin(Path::new("oracle.toml"))
+        .write(&root);
     root
 }
 
@@ -169,20 +152,7 @@ fn repository(name: &str) -> Tree {
 /// `root` committed once.
 fn committed(root: Tree) -> Tree {
     std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
-    sh(&root, &["git", "init", "-q", "-b", "main"]);
-    sh(&root, &["git", "add", "-A"]);
-    sh(
-        &root,
-        &[
-            "git",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-q",
-            "-m",
-            "scratch",
-        ],
-    );
+    Repo::init(&root).commit("scratch");
     root
 }
 
@@ -307,19 +277,11 @@ fn spans(name: &str, declared: &str) -> (Reading, [(u128, u128); 3]) {
     let toml = std::fs::read_to_string(heap.join("Cargo.toml")).unwrap();
     std::fs::write(heap.join("Cargo.toml"), format!("{toml}{declared}")).unwrap();
     let root = committed(root);
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(root.path())
+    Run::at(&root)
         .args(["test", "--crate", "php_heap"])
         .env("CARGO_BUILD_JOBS", "3")
-        .output()
-        .unwrap();
-    let said = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        out.status.success(),
-        "{said}{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+        .go()
+        .ok();
     let reading = Store::of_workspace(root.path())
         .read("test", "php_heap")
         .unwrap()
@@ -397,23 +359,8 @@ fn staged_leaves_out_an_executable_whose_own_paths_are_not_staged() {
         let file = heap.join(path);
         let text = std::fs::read_to_string(&file).unwrap();
         std::fs::write(&file, format!("{text}{line}\n")).unwrap();
-        sh(
-            &root,
-            &["git", "add", "--", &format!("crates/php_heap/{path}")],
-        );
-        let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-            .arg("--root")
-            .arg(root.path())
-            .args(["test", "--staged"])
-            .output()
-            .unwrap();
-        let said = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(
-            out.status.success(),
-            "{said}{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        said
+        Repo::at(&root).git(&["add", "--", &format!("crates/php_heap/{path}")]);
+        xtask(&root, &["test", "--staged"]).ok()
     };
     let ran = |test: &str| root.join(format!("target/tmp/{test}.span")).exists();
     let read = || {

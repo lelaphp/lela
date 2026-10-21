@@ -21,9 +21,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::Column;
-use crate::oracle::hosts::{CGI, CLI, FPM};
+use crate::oracle::hosts::CLI;
 use crate::oracle::{self, Ended, Observation, Oracle, normalise_in};
 use crate::scratch::Tree;
+use crate::witness::fence::Served;
 
 /// What serves a module's rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,48 +101,40 @@ impl Host {
     }
 }
 
-/// The oracle's rendering of `module` through `host`, which is not the
-/// CLI: the pinned host from `[sapi]`, its digest asserted, or the pinned
-/// `php` for the server.
-pub(crate) fn oracle_side(
+/// The rendering of `module` through `host`, which is not the CLI: by the
+/// oracle where `engine` is none, the pinned host from `[sapi]` with its
+/// digest asserted or the pinned `php` for the server, and by the
+/// engine's witness build serving the same request where it is one.
+pub(crate) fn side(
     oracle: &Oracle<'_>,
+    engine: Option<&crate::witness::Binary>,
     host: Host,
     module: &str,
     column: Column,
 ) -> Result<Observation> {
     let program = column.program(module);
-    let served = match host {
-        Host::Cli => bail!("the CLI renders {module} by its flags, not as a request"),
-        Host::Cgi => {
-            let path = oracle.pinned_host(CGI)?;
-            crate::witness::served_as_cgi(oracle, &path, &program, REQUEST, None, &[])?
+    let served = requested(host);
+    let served = match (host, engine) {
+        (Host::Cli, _) => bail!("the CLI renders {module} by its flags, not as a request"),
+        (Host::Cgi | Host::Fpm, None) => {
+            let path = oracle.pinned_host(crate::witness::host_of(served))?;
+            crate::witness::served_as(oracle, served, &path, &program, REQUEST, None, &[])?
         }
-        Host::Fpm => {
-            let path = oracle.pinned_host(FPM)?;
-            crate::witness::served_as_fpm(oracle, &path, &program, REQUEST, &[])?
+        (Host::Cgi | Host::Fpm, Some(binary)) => {
+            (binary.serve_request(oracle, served, &program, REQUEST, None)?).0
         }
-        Host::Server => served_by_server(oracle, &oracle.pin().oracle.path, &program)?,
+        (Host::Server, None) => served_by_server(oracle, &oracle.pin().oracle.path, &program)?,
+        (Host::Server, Some(binary)) => served_by_server(oracle, &binary.host(CLI)?, &program)?,
     };
     Ok(body(oracle, served))
 }
 
-/// The engine's rendering through `host`: its witness build serving the
-/// same request.
-pub(crate) fn engine_side(
-    oracle: &Oracle<'_>,
-    binary: &crate::witness::Binary,
-    host: Host,
-    module: &str,
-    column: Column,
-) -> Result<Observation> {
-    let program = column.program(module);
-    let served = match host {
-        Host::Cli => bail!("the CLI renders {module} by its flags, not as a request"),
-        Host::Cgi => binary.serve_cgi(oracle, &program, REQUEST, None)?.0,
-        Host::Fpm => binary.serve_fpm(oracle, &program, REQUEST)?.0,
-        Host::Server => served_by_server(oracle, &binary.host(CLI)?, &program)?,
-    };
-    Ok(body(oracle, served))
+/// How a witness fence names the host that serves `host`'s request.
+fn requested(host: Host) -> Served {
+    match host {
+        Host::Fpm => Served::Fpm,
+        Host::Cli | Host::Cgi | Host::Server => Served::Cgi,
+    }
 }
 
 /// The response's body: a CGI-shaped host writes its head first, and the
@@ -206,19 +199,12 @@ pub(crate) fn served_by_server(
             .port();
         let mut server = Command::new(php);
         server.args(&recipe.args);
-        for ini in &recipe.ini {
-            server.arg("-d").arg(ini);
-        }
+        crate::witness::under_recipe(recipe, &mut server, &[], &[])?.stderr(Stdio::piped());
         server
             .arg("-S")
             .arg(format!("127.0.0.1:{port}"))
             .arg("-t")
             .arg(own.path());
-        recipe
-            .environ(&mut server)?
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
         let mut server = Server(
             server
                 .spawn()

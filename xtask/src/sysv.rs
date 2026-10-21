@@ -130,7 +130,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -211,6 +211,11 @@ const PROC: &str = "/proc/sysvipc";
 pub(crate) struct Standing(pub Vec<Object>);
 
 impl Standing {
+    /// The objects standing that `keep` holds for, in order.
+    fn having(&self, keep: impl Fn(&Object) -> bool) -> Vec<&Object> {
+        self.0.iter().filter(|o| keep(o)).collect()
+    }
+
     /// The machine's objects now, read from `/proc/sysvipc` where the
     /// machine has it and through `ipcs` where it has not, and, for each
     /// semaphore set's processes, through `perl`.
@@ -243,7 +248,7 @@ impl Standing {
 
     /// The machine's objects as `ipcs -a` lists them.
     fn ipcs() -> Result<Standing> {
-        Ok(Standing::parse(&printed(
+        Ok(Standing::parse(&crate::printed(
             Command::new("ipcs").arg("-a").output(),
             "ipcs -a",
         )?))
@@ -388,24 +393,13 @@ impl<'a> Row<'a> {
     }
 }
 
-/// What a command named `what` printed on its first stream, where it ran
-/// and exited 0.
-fn printed(out: std::io::Result<Output>, what: &str) -> Result<String> {
-    let out = out.with_context(|| format!("running {what}"))?;
-    if !out.status.success() {
-        let said = String::from_utf8_lossy(&out.stderr);
-        bail!("{what} exited {}: {}", out.status, said.trim());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
 /// Each semaphore set's processes, by `perl`'s `semctl(GETPID)` over its
 /// semaphores in turn until the kernel refuses the next number; `sets`
 /// are the ids. A set this user may not read names none.
 fn semaphore_pids(sets: &[String]) -> Result<BTreeMap<u64, BTreeSet<u32>>> {
     const READ: &str = "use IPC::SysV qw(GETPID); for my $id (@ARGV) { for (my $i = 0; defined(my $pid = semctl($id, $i, GETPID, 0)); $i++) { print \"$id $pid\\n\" if $pid + 0 > 0; } }";
     let perl = Command::new("perl").arg("-e").arg(READ).args(sets).output();
-    let read = printed(perl, "perl reading the semaphores' processes")?;
+    let read = crate::printed(perl, "perl reading the semaphores' processes")?;
     let mut pids: BTreeMap<u64, BTreeSet<u32>> = BTreeMap::new();
     for line in read.lines() {
         if let Some((id, pid)) = line.split_once(' ')
@@ -493,7 +487,7 @@ impl Clock {
     /// Now, in the zone `date +%z` names, which is the one `ipcs` prints
     /// in: both read this process's environment.
     pub(crate) fn now() -> Result<Clock> {
-        let zone = printed(Command::new("date").arg("+%z").output(), "date +%z")?;
+        let zone = crate::printed(Command::new("date").arg("+%z").output(), "date +%z")?;
         let east =
             offset(zone.trim()).with_context(|| format!("date +%z printed {:?}", zone.trim()))?;
         Ok(Clock {
@@ -609,11 +603,7 @@ pub(crate) fn claimed<'a>(
     (runner, clock): (&Runner, &Clock),
     alive: impl Fn(u32) -> bool,
 ) -> Vec<&'a Object> {
-    standing
-        .0
-        .iter()
-        .filter(|o| forsaken(o, runner, &alive) && made_within(o, windows, clock))
-        .collect()
+    standing.having(|o| forsaken(o, runner, &alive) && made_within(o, windows, clock))
 }
 
 /// The objects of `standing` the programs a cut-off run's journals name
@@ -626,11 +616,7 @@ pub(crate) fn journaled<'a>(
     (windows, clock): (&[(i64, i64)], &Clock),
     alive: impl Fn(u32) -> bool,
 ) -> Vec<&'a Object> {
-    standing
-        .0
-        .iter()
-        .filter(|o| spawned_left(o, spawned, &alive) && made_within(o, windows, clock))
-        .collect()
+    standing.having(|o| spawned_left(o, spawned, &alive) && made_within(o, windows, clock))
 }
 
 /// The segments of `standing` forsaken by `runner` that name a process:
@@ -642,10 +628,7 @@ pub(crate) fn abandoned<'a>(
     alive: impl Fn(u32) -> bool,
 ) -> Vec<&'a Object> {
     standing
-        .0
-        .iter()
-        .filter(|o| o.kind == Kind::Memory && !o.named.is_empty() && forsaken(o, runner, &alive))
-        .collect()
+        .having(|o| o.kind == Kind::Memory && !o.named.is_empty() && forsaken(o, runner, &alive))
 }
 
 /// What one sweep did: the objects it removed, each kind's ids in the
@@ -957,12 +940,7 @@ impl Claims {
                     continue;
                 };
                 drop(group);
-                for _ in 0..100 {
-                    if !alive(pid) {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
+                wait_gone(pid);
                 if let Some(journal) = journal.as_mut() {
                     writeln!(journal, "{ENDED} {number}").ok();
                 }
@@ -1387,6 +1365,16 @@ impl fmt::Display for Namespace {
             "each program runs in a private IPC namespace (unshare {})",
             flags.join(" ")
         )
+    }
+}
+
+/// Wait, as long as a second, for the process `pid` to be gone.
+pub(crate) fn wait_gone(pid: u32) {
+    for _ in 0..100 {
+        if !alive(pid) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 

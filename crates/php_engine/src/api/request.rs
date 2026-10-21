@@ -126,7 +126,7 @@ mod preload;
 mod properties;
 mod publish;
 use properties::IN_GET;
-pub(crate) use properties::{RefSource, TypedProperty, Walked};
+pub(crate) use properties::{Accessor, RefSource, TypedProperty, Walked};
 mod recording;
 mod resources;
 pub use resources::{ResourceDtor, Resources};
@@ -1390,7 +1390,7 @@ impl HeapHooks for Hooks<'_> {
                     range.kind,
                     php_unit::LiveKind::TmpVar | php_unit::LiveKind::Loop
                 ) {
-                    let slot = crate::exec::temporary_slot(code, range.var);
+                    let slot = range.var;
                     visit(req.slot(frame, slot).to_zval());
                 }
             }

@@ -40,6 +40,8 @@ const IN_UNSET: u32 = 1 << 2;
 
 const IN_ISSET: u32 = 1 << 3;
 
+pub(crate) use php_link::Accessor;
+
 /// Why `zend_get_property_offset` answered its wrong offset for a name
 /// no declared instance property holds.
 #[derive(Clone, Copy)]
@@ -49,6 +51,27 @@ enum Unplaced {
     /// A `static` property the scope may not reach
     /// (`zend_bad_property_access`).
     Denied(Visibility),
+}
+
+/// What [`Request::write_held_dynamic`] made of a write to a dynamic
+/// property: the write made, or the name and the value handed back where
+/// the table holds no bucket of the name.
+enum DynamicWrite {
+    Written(Result<(), Thrown>),
+    Absent(Owner<PhpString>, Owner<Value>),
+}
+
+/// What [`Request::find_property_info`] found for a name in a class's
+/// `ce->properties_info`.
+#[derive(Clone, Copy)]
+enum InfoFound {
+    /// The row of the name: the class's own declaration, or the one it
+    /// inherited, a parent's private one included.
+    Row(PropertyInfo),
+    /// No class of the chain declares the name.
+    Absent,
+    /// The class has no linked record, so its declarations answer.
+    Unrecorded,
 }
 
 /// What a write to a typed declared slot reads off its
@@ -347,10 +370,70 @@ impl Request {
                 typed: placed.typed,
             });
         }
-        let declared = self.placed_named(class, name).is_some()
-            || self.chain_declaration(class, name).is_some();
-        (!declared && !Self::bad_property_name(name))
+        self.places_dynamic(class, name)
             .then_some(crate::exec::PropertyOffset::Dynamic)
+    }
+
+    /// `zend_get_property_offset`'s `ZEND_DYNAMIC_PROPERTY_OFFSET`
+    /// whatever the scope (`Z/Zend/zend_object_handlers.c:384-389`):
+    /// whether `name` is a dynamic property of objects of `class`, which
+    /// is a name no class of the chain declares, an instance or a
+    /// `static` property, private or not
+    /// ([`Request::find_property_info`]), and that leads with no NUL byte.
+    /// One rule for a name a cache slot holds ([`Request::cacheable_offset`])
+    /// and for one the program computed, which no cache serves
+    /// (`cache_slot == NULL`) and which a property opcode's inline path
+    /// places by it every pass.
+    pub(crate) fn places_dynamic(&self, class: ClassId, name: &[u8]) -> bool {
+        if Self::bad_property_name(name) {
+            return false;
+        }
+        match self.find_property_info(class, name) {
+            InfoFound::Absent => true,
+            InfoFound::Row(_) => false,
+            InfoFound::Unrecorded => {
+                self.placed_named(class, name).is_none()
+                    && self.chain_declaration(class, name).is_none()
+            }
+        }
+    }
+
+    /// `zend_hash_num_elements(&ce->properties_info) != 0`: whether any
+    /// class of `class`'s chain declares a property, instance or
+    /// `static`, which a class with no record answers by its placed
+    /// properties and the chain's declarations.
+    pub(super) fn declares_properties(&self, class: ClassId) -> bool {
+        match self.linked_class(class) {
+            Some(record) => !record.properties.rows().is_empty(),
+            None => {
+                !self.placed_properties(class).is_empty()
+                    || self.symbols().lineage(class).any(|here| {
+                        self.symbols()
+                            .class_decl(here)
+                            .is_some_and(|decl| !decl.properties.is_empty())
+                    })
+            }
+        }
+    }
+
+    /// Whether a name the program computed places as a dynamic property
+    /// on an object of `class` with no lookup at all: the class served by
+    /// the standard handlers, `zobj->handlers->read_property ==
+    /// zend_std_read_property`, its `ce->properties_info` empty, which
+    /// the first test of `zend_get_property_offset` reads
+    /// (`zend_hash_num_elements(&ce->properties_info) == 0`), and the name
+    /// led by no NUL byte: [`Request::places_dynamic`] over the class's
+    /// row in the request ([`Made::dynamic_names`]), which a property
+    /// opcode's inline path reads. A class that declares a property
+    /// leaves a computed name to the kernel with no find spent on it
+    /// here, where a find costs more than the scan the kernel makes of a
+    /// small class's placed rows (#3045). False before an object of the
+    /// class was made, which an object of it standing never is.
+    ///
+    /// [`Made::dynamic_names`]: super::class_data::Made::dynamic_names
+    pub(crate) fn places_dynamic_on_std(&self, class: ClassId, name: &[u8]) -> bool {
+        self.made_ref(class).is_some_and(|made| made.dynamic_names)
+            && !Self::bad_property_name(name)
     }
 
     /// `zend_update_property_ex(prop_info->ce, ...)`, what an engine or a
@@ -669,9 +752,15 @@ impl Request {
 
     /// The declaration of `name`, an instance or a `static` property, of
     /// the nearest class of `class`'s chain that declares one, beside
-    /// that class: what `ce->properties_info` finds where no placed row
-    /// does.
+    /// that class: the row `ce->properties_info` holds, read off the
+    /// record in one find ([`Request::find_property_info`]), and the
+    /// chain's declarations walked only for a class with no record.
     fn chain_declaration(&self, class: ClassId, name: &[u8]) -> Option<(ClassId, &PropertyDecl)> {
+        match self.find_property_info(class, name) {
+            InfoFound::Row(info) => return Some((info.declaring, self.property_decl(info)?)),
+            InfoFound::Absent => return None,
+            InfoFound::Unrecorded => {}
+        }
         self.symbols().lineage(class).find_map(|here| {
             let p = self
                 .symbols()
@@ -1001,15 +1090,34 @@ impl Request {
     /// keeps across what writes the request and reads the declaration
     /// through again ([`Request::property_decl`]).
     pub(crate) fn property_info(&self, class: ClassId, name: &[u8]) -> Option<PropertyInfo> {
+        match self.find_property_info(class, name) {
+            InfoFound::Row(info) => Some(info),
+            InfoFound::Absent | InfoFound::Unrecorded => None,
+        }
+    }
+
+    /// `zend_hash_find(&ce->properties_info, name)`, skipped where the
+    /// table is empty (`zend_hash_num_elements(&ce->properties_info) ==
+    /// 0`, `Z/Zend/zend_object_handlers.c:376`): the one find that says
+    /// which class of the chain declares a name, instance or `static`,
+    /// private or not, or that none does and the name is a dynamic
+    /// property's, with no class's declarations walked.
+    fn find_property_info(&self, class: ClassId, name: &[u8]) -> InfoFound {
+        let Some(record) = self.linked_class(class) else {
+            return InfoFound::Unrecorded;
+        };
+        if record.properties.rows().is_empty() {
+            return InfoFound::Absent;
+        }
         let row = |row: &Row<ClassId>| PropertyInfo {
             declaring: row.holder_in(class),
             at: row.at,
         };
-        let found = self.linked_class(class)?.properties.find(name, |at| {
+        let found = record.properties.find(name, |at| {
             self.property_decl(row(at))
                 .map_or(&[][..], |property| &property.name.0)
-        })?;
-        Some(row(found))
+        });
+        found.map_or(InfoFound::Absent, |found| InfoFound::Row(row(found)))
     }
 
     /// `ZEND_REF_ADD_TYPE_SOURCE` (`Z/Zend/zend_types.h:1082`): the
@@ -1337,7 +1445,7 @@ impl Request {
     /// ```
     pub(crate) fn overloaded_fetch(&self, object: PhpObject, name: &[u8]) -> bool {
         let class = object.class();
-        if !self.serves_accessor(class, b"__get") {
+        if !self.serves_accessor(class, Accessor::Get) {
             return false;
         }
         if self.wrong_name(class, name) {
@@ -1696,22 +1804,49 @@ impl Request {
     }
 
     /// `zobj->ce->__get` and its three neighbours: the magic accessor
-    /// `lowered` names, which php resolves once at link time and holds
-    /// on the class entry as the pointer every handler tests. Each of
-    /// the four is public and takes a receiver, which
-    /// `zend_check_magic_method_implementation` refuses a class that
-    /// declares otherwise, so the scope that reached the property never
-    /// bars the call.
-    fn magic_accessor(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
-        self.symbols().method_named(class, lowered)
+    /// `accessor` names, which the link resolved once and the class's
+    /// record holds by position ([`php_link::Accessors`]), so asking is
+    /// a read and never a lookup by name, as php holds the pointer every
+    /// handler tests on the class entry. Each of the four is public and
+    /// takes a receiver, which `zend_check_magic_method_implementation`
+    /// refuses a class that declares otherwise, so the scope that reached
+    /// the property never bars the call. A parent's accessor, a trait's
+    /// and one declared in another case are each the class's:
+    ///
+    /// ```php
+    /// trait T { function __set($n, $v) { echo "T::__set $n\n"; } }
+    /// class P { function __get($n) { return "P::__get $n"; } function __isset($n) { echo "P::__isset $n\n"; return true; } }
+    /// class Q extends P { use T; function __unset($n) { echo "Q::__unset $n\n"; } }
+    /// class R extends Q { function __GET($n) { return "R::__get $n"; } }
+    /// foreach ([new Q, new R] as $o) { echo $o->a, "\n"; $o->b = 1; var_dump(isset($o->c), empty($o->d)); unset($o->e); }
+    /// ```
+    /// ```expect
+    /// P::__get a
+    /// T::__set b
+    /// P::__isset c
+    /// P::__isset d
+    /// bool(true)
+    /// bool(false)
+    /// Q::__unset e
+    /// R::__get a
+    /// T::__set b
+    /// P::__isset c
+    /// P::__isset d
+    /// bool(true)
+    /// bool(false)
+    /// Q::__unset e
+    /// ```
+    fn magic_accessor(&self, class: ClassId, accessor: Accessor) -> Option<Function> {
+        self.resolved_method(class, |record| record.accessors.of(accessor))
     }
 
     /// `zobj->ce->__set != NULL`, the test a handler makes before it
     /// places a name: whether the class serves the magic accessor
-    /// `lowered` names, which is what makes a placement silent
+    /// `accessor` names, which is what makes a placement silent
     /// ([`Request::declared_slot_for_write`]).
-    pub(crate) fn serves_accessor(&self, class: ClassId, lowered: &[u8]) -> bool {
-        self.magic_accessor(class, lowered).is_some()
+    pub(crate) fn serves_accessor(&self, class: ClassId, accessor: Accessor) -> bool {
+        self.linked_class(class)
+            .is_some_and(|record| record.accessors.of(accessor).is_some())
     }
 
     /// `ce->ce_flags & ZEND_ACC_USE_GUARDS`: whether `class` or a class
@@ -2012,8 +2147,8 @@ impl Request {
                 // an `unset` emptied is the magic methods' where the class
                 // has one that answers, and the same error where not
                 // (`uninit_error` with `prop_info` set).
-                let magic = self.serves_accessor(class, b"__get")
-                    || (silent && self.serves_accessor(class, b"__isset"));
+                let magic = self.serves_accessor(class, Accessor::Get)
+                    || (silent && self.serves_accessor(class, Accessor::Isset));
                 if placed.typed && (o.slot_uninit(placed.slot) || !magic) {
                     if quiet {
                         return Ok(Owner::null());
@@ -2021,24 +2156,26 @@ impl Request {
                     return Err(self.uninitialized_property(placed.declaring, name));
                 }
             } else {
-                if !silent && !self.serves_accessor(class, b"__get") {
+                if !silent && !self.serves_accessor(class, Accessor::Get) {
                     return Err(self.inaccessible_property(class, placed.visibility, name));
                 }
                 wrong = true;
             }
-        } else if let Some(miss) =
-            self.unplaced(class, name, silent || self.serves_accessor(class, b"__get"))
-        {
-            if !silent && !self.serves_accessor(class, b"__get") {
+        } else if let Some(miss) = self.unplaced(
+            class,
+            name,
+            silent || self.serves_accessor(class, Accessor::Get),
+        ) {
+            if !silent && !self.serves_accessor(class, Accessor::Get) {
                 return Err(self.unplaced_error(class, name, miss));
             }
             wrong = true;
         } else if let Some(value) = Self::dynamic_prop(o, name) {
             return Ok(Owner::take(self, value.deref()));
         }
-        let getter = self.magic_accessor(class, b"__get");
+        let getter = self.magic_accessor(class, Accessor::Get);
         let issetter = silent
-            .then(|| self.magic_accessor(class, b"__isset"))
+            .then(|| self.magic_accessor(class, Accessor::Isset))
             .flatten();
         let guard_bit = if issetter.is_some() { IN_ISSET } else { IN_GET };
         // GH-21478: a proxy that forwards, read from inside the
@@ -2261,7 +2398,7 @@ impl Request {
         if o.slot(placed.slot).is_undef()
             && !o.slot_uninit(placed.slot)
             && !self.lazy_slot(o, placed.slot)
-            && self.serves_accessor(class, b"__set")
+            && self.serves_accessor(class, Accessor::Set)
         {
             return Ok(None);
         }
@@ -2316,8 +2453,8 @@ impl Request {
         {
             return Ok(());
         }
-        let magic =
-            self.serves_accessor(class, b"__get") && self.guard_word(object, name) & IN_GET == 0;
+        let magic = self.serves_accessor(class, Accessor::Get)
+            && self.guard_word(object, name) & IN_GET == 0;
         if magic && !o.slot_uninit(placed.slot) {
             return Ok(());
         }
@@ -2646,7 +2783,7 @@ impl Request {
             if self.hooked_accessible(&hooked) {
                 return self.write_hooked(object, name, value, hooked);
             }
-            if !self.serves_accessor(class, b"__set") {
+            if !self.serves_accessor(class, Accessor::Set) {
                 let thrown = self.inaccessible_property(class, hooked.visibility, name.as_bytes());
                 value.give_up(self);
                 name.give_up(self);
@@ -2680,7 +2817,7 @@ impl Request {
         // reach, silent only for a class with a `__set` to serve it.
         if let Some(p) = placed.as_ref()
             && !self.reaches(p)
-            && !self.serves_accessor(class, b"__set")
+            && !self.serves_accessor(class, Accessor::Set)
         {
             let thrown = self.inaccessible_property(class, p.visibility, name.as_bytes());
             value.give_up(self);
@@ -2688,19 +2825,20 @@ impl Request {
             return Err(thrown);
         }
         let bad_name = placed.is_none() && Self::bad_property_name(name.as_bytes());
-        if bad_name && !self.serves_accessor(class, b"__set") {
+        if bad_name && !self.serves_accessor(class, Accessor::Set) {
             let thrown = self.bad_property_name_error();
             value.give_up(self);
             name.give_up(self);
             return Err(thrown);
         }
-        let held = placed.is_none()
-            && !bad_name
-            && o.properties()
-                .is_some_and(|table| table.contains(php_heap::Key::Str(name.heap())));
-        if held {
-            return self.write_std_property(object, name, value);
-        }
+        let (name, value) = if placed.is_none() && !bad_name {
+            match self.write_held_dynamic(o, name, value) {
+                DynamicWrite::Written(written) => return written,
+                DynamicWrite::Absent(name, value) => (name, value),
+            }
+        } else {
+            (name, value)
+        };
         // GH-21478: a proxy that forwards, written from inside the
         // instance's own `__set` for this name, writes the instance.
         if let Some(instance) = self.lazy_instance(o)
@@ -2708,7 +2846,7 @@ impl Request {
         {
             return self.write_property(instance, name, value);
         }
-        let Some(setter) = self.magic_accessor(class, b"__set") else {
+        let Some(setter) = self.magic_accessor(class, Accessor::Set) else {
             if lazy {
                 return self.lazy_write(object, name, value, false);
             }
@@ -2895,41 +3033,12 @@ impl Request {
                 }
             }
         } else {
+            let (name, value) = match self.write_held_dynamic(o, name, value) {
+                DynamicWrite::Written(written) => return written,
+                DynamicWrite::Absent(name, value) => (name, value),
+            };
             let key = php_heap::Key::Str(name.heap());
-            // `zend_array_dup` over a table a clone or a cast shares,
-            // before the entry is looked for, so a reference the other
-            // holder's copy owns alone is its value here and not a cell
-            // both write through.
-            if o.properties().is_some_and(|table| table.refcount() > 1) {
-                match self.separated_properties(o) {
-                    Ok(_) => {}
-                    Err(thrown) => {
-                        value.give_up(self);
-                        name.give_up(self);
-                        return Err(thrown);
-                    }
-                }
-            }
-            let held = o.properties().is_some_and(|table| table.contains(key));
-            // `zend_assign_to_variable` over the entry found: one that
-            // holds a reference, what `$o->p = &$x` bound, is written
-            // through, so every name of the cell reads the value, and
-            // held to the types of the properties that hold the cell
-            // (`zend_assign_to_typed_ref`) under the writing file's rule.
-            let bound = o
-                .properties()
-                .and_then(|table| table.get(key))
-                .and_then(|found| Value::of_slot(found).as_php_ref());
-            if let Some(cell) = bound {
-                name.give_up(self);
-                let strict = self.property_strict_types();
-                return self.assign_to_reference(
-                    cell.heap(),
-                    value.hand_on().undef_as_null(),
-                    strict,
-                );
-            }
-            if !held && let Err(thrown) = self.dynamic_property_creation(object, name.as_bytes()) {
+            if let Err(thrown) = self.dynamic_property_creation(object, name.as_bytes()) {
                 value.give_up(self);
                 name.give_up(self);
                 return Err(thrown);
@@ -2942,12 +3051,98 @@ impl Request {
                     return Err(thrown);
                 }
             };
-            if let Err(thrown) = self.array_update(table, key, value.hand_on()) {
-                name.give_up(self);
-                return Err(thrown);
-            }
+            let written = self.array_update(table, key, value.hand_on());
+            name.give_up(self);
+            return written;
         }
         name.give_up(self);
+        Ok(())
+    }
+
+    /// [`Request::dynamic_place`] and, where the bucket stands,
+    /// [`Request::assign_dynamic`] over it, the name given up: one find
+    /// and the write, or the name and the value handed back where the
+    /// table holds no such name, for the write that lays it down.
+    fn write_held_dynamic(
+        &mut self,
+        o: Obj,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
+    ) -> DynamicWrite {
+        match self.dynamic_place(o, php_heap::Key::Str(name.heap())) {
+            Ok(Some(place)) => {
+                name.give_up(self);
+                DynamicWrite::Written(self.assign_dynamic(place, value))
+            }
+            Ok(None) => DynamicWrite::Absent(name, value),
+            Err(thrown) => {
+                value.give_up(self);
+                name.give_up(self);
+                DynamicWrite::Written(Err(thrown))
+            }
+        }
+    }
+
+    /// `zend_std_write_property`'s dynamic arm up to `found`
+    /// (`Z/Zend/zend_object_handlers.c:1164-1175`): the object's dynamic
+    /// table, separated first where a clone or a cast shares it
+    /// (`zend_array_dup`), so a reference the other holder's copy owns
+    /// alone is its value here and not a cell both write through, and
+    /// the bucket `key` stands in, found once by its hash; none where the
+    /// object has no table or the table no such key, which a write lays
+    /// down. The place is good until anything writes the table.
+    fn dynamic_place(
+        &mut self,
+        o: Obj,
+        key: php_heap::Key,
+    ) -> Result<Option<php_heap::ZvalRef>, Thrown> {
+        let Some(table) = o.properties() else {
+            return Ok(None);
+        };
+        let table = if table.refcount() == 1 && !table.is_immutable() {
+            table
+        } else {
+            self.separated_properties(o)?
+        };
+        Ok(table.value_ref(key))
+    }
+
+    /// `found:`, `zend_assign_to_variable_ex` over the bucket a dynamic
+    /// property stands in ([`Request::dynamic_place`]): the value laid
+    /// over what the bucket held, which is released after, or, where the
+    /// bucket holds a reference, what `$o->p = &$x` bound, written
+    /// through, so every name of the cell reads the value, held to the
+    /// types of the properties that hold the cell
+    /// (`zend_assign_to_typed_ref`) under the writing file's rule. A name
+    /// a temporary holds is the kernel's, so it writes here:
+    ///
+    /// ```php
+    /// class T { public int $n = 1; }
+    /// function n($q) { return $q . ''; }
+    /// $o = new stdClass; $o->p = 'a'; $q = 'p';
+    /// $o->{n($q)} = 'b'; $a = (array) $o; $o->{n($q)} = 'c'; var_dump($a['p'], $o->p);
+    /// $t = new T; $o->p = &$t->n; $o->{n($q)} = '5';
+    /// try { $o->{n($q)} = 'x'; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($t->n);
+    /// ```
+    /// ```expect
+    /// string(1) "b"
+    /// string(1) "c"
+    /// Cannot assign string to reference held by property T::$n of type int
+    /// int(5)
+    /// ```
+    fn assign_dynamic(
+        &mut self,
+        place: php_heap::ZvalRef,
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
+        let held = Value::of_slot(place.read());
+        if let Some(cell) = held.as_php_ref() {
+            let strict = self.property_strict_types();
+            return self.assign_to_reference(cell.heap(), value.hand_on().undef_as_null(), strict);
+        }
+        place.write(value.hand_on().into_zval());
+        self.release(held);
         Ok(())
     }
 
@@ -3822,12 +4017,24 @@ impl Request {
     ) -> Result<Option<php_heap::ZvalRef>, Thrown> {
         let o = object.heap();
         let key = php_heap::Key::Str(name.heap());
-        let held = o.properties().is_some_and(|table| table.contains(key));
-        if !held && let Err(thrown) = self.dynamic_property_creation(object, name.as_bytes()) {
+        // `zend_hash_find(zobj->properties, name)`: a name the table holds
+        // is its bucket, found once, and raises nothing.
+        match self.dynamic_place(o, key) {
+            Ok(Some(place)) => {
+                self.release(Value::string(name));
+                return Ok(Some(place));
+            }
+            Ok(None) => {}
+            Err(thrown) => {
+                self.release(Value::string(name));
+                return Err(thrown);
+            }
+        }
+        if let Err(thrown) = self.dynamic_property_creation(object, name.as_bytes()) {
             self.release(Value::string(name));
             return Err(thrown);
         }
-        if !held && read == PropertyRead::Warning {
+        if read == PropertyRead::Warning {
             let class = self.symbols().class_name(object.class());
             let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
             crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
@@ -3850,7 +4057,7 @@ impl Request {
     /// and `write_property`, which is a class with a `__get` that the
     /// guard is not already holding.
     pub(crate) fn overloaded_place(&self, object: PhpObject, name: &[u8]) -> bool {
-        self.serves_accessor(object.class(), b"__get")
+        self.serves_accessor(object.class(), Accessor::Get)
             && (self.guard_word(object, name) & IN_GET == 0
                 || self.wrong_name(object.class(), name))
     }
@@ -4107,7 +4314,7 @@ impl Request {
         {
             return self.has_property(instance, name, test);
         }
-        let issetter = self.magic_accessor(class, b"__isset");
+        let issetter = self.magic_accessor(class, Accessor::Isset);
         if issetter.is_some() && test == PropertyTest::Exists {
             return Ok(false);
         }
@@ -4174,7 +4381,7 @@ impl Request {
             return Ok(truthy);
         }
         let Some(getter) = self
-            .magic_accessor(object.class(), b"__get")
+            .magic_accessor(object.class(), Accessor::Get)
             .filter(|_| self.guard_word(object, name) & IN_GET == 0)
         else {
             return Ok(false);
@@ -4216,7 +4423,7 @@ impl Request {
         test: PropertyTest,
     ) -> Result<bool, Thrown> {
         let instance = self.lazy_init(object)?;
-        if self.serves_accessor(instance.class(), b"__isset")
+        if self.serves_accessor(instance.class(), Accessor::Isset)
             && self.guard_word(instance, name) & IN_ISSET == 0
         {
             self.guard_take(instance, name, IN_ISSET);
@@ -4324,7 +4531,7 @@ impl Request {
         {
             return Err(self.unset_hooked(object, name));
         }
-        let unsetter = self.magic_accessor(class, b"__unset");
+        let unsetter = self.magic_accessor(class, Accessor::Unset);
         let mut wrong = false;
         if let Some(placed) = self.declared_slot(class, name) {
             if self.reaches(&placed) {

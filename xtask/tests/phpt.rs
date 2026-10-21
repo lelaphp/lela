@@ -25,20 +25,27 @@ use xtask::reading::{Number, Reading, Status};
 use xtask::scratch::Tree;
 
 mod common {
+    pub mod manifest;
     pub mod phpt_tree;
     pub mod registry;
     pub mod repo;
+    pub mod run;
 }
+use common::manifest::{of_rows, pin};
 use common::phpt_tree::fixture_tree;
 use common::registry::registry;
-use common::repo::scratch_workspace;
+use common::repo::{Repo, scratch_workspace};
+use common::run::Run;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
 }
 
+/// A manifest of `ext/pcre`'s row alone under the tracked pin: what the
+/// tests that run a subset of the pinned tree judge by, the extension
+/// being one whose tests stand there.
 fn manifest() -> Manifest {
-    Manifest::load(workspace()).unwrap()
+    of_rows([Crate::named("ext/pcre")])
 }
 
 /// A manifest of these `[[crate]]` rows under the tracked pin with its
@@ -55,7 +62,7 @@ fn manifest_of(rows: impl IntoIterator<Item = Crate>, tree: &Path) -> Manifest {
 /// The tracked pin's binary, when it is on this machine; a failure where
 /// this machine promised the binary (#38).
 fn oracle() -> Option<PathBuf> {
-    let pin = manifest().pin;
+    let pin = pin();
     Promise::Oracle
         .or_skip(pin.oracle.file().map(Path::to_path_buf))
         .unwrap()
@@ -68,7 +75,7 @@ fn oracle() -> Option<PathBuf> {
 /// where the runner promised the tree, they fail naming both places
 /// tried (#38).
 fn source() -> Option<PathBuf> {
-    Promise::Tree.or_skip(manifest().pin.source.tree()).unwrap()
+    Promise::Tree.or_skip(pin().source.tree()).unwrap()
 }
 
 /// A workspace of this test's own: a git repository holding the tracked
@@ -91,7 +98,7 @@ struct Scratch {
 impl Scratch {
     fn new(name: &str, tests: &[(&str, &str)]) -> Scratch {
         let root = Tree::new(&format!("phpt-{name}")).unwrap();
-        scratch_workspace(workspace(), &root).unwrap();
+        scratch_workspace(workspace(), &root);
         fs::create_dir_all(root.join("ext/fixture")).unwrap();
         fs::write(
             root.join("ext/fixture/Cargo.toml"),
@@ -152,7 +159,7 @@ impl Scratch {
 /// The tracked pin with its tree at `corpus`, as if the variable named
 /// it: the way a test points the pin at a tree of its own.
 fn pin_over(corpus: &Path) -> Pin {
-    let pin = manifest().pin.on_this_machine(Some(corpus.to_path_buf()));
+    let pin = pin().on_this_machine(Some(corpus.to_path_buf()));
     assert_eq!(
         pin.source.tree().unwrap(),
         corpus,
@@ -416,7 +423,7 @@ fn with_no_engine_built_the_reading_is_a_skip_that_says_so_and_no_test_runs() {
         return;
     }
     let root = Tree::new("phpt-absent").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     let manifest = manifest();
     let ask = Ask {
         subset: Some("pcre".to_owned()),
@@ -506,7 +513,7 @@ fn a_bare_run_is_the_per_commit_lane_composed_from_the_crate_rows() {
     // has no binary crate, so it carries no feature and a crate behind
     // one is outside its lane (revision 63); one with no subset owns none.
     let root = Tree::new("phpt-lane").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     let readings = phpt::run(&root, &manifest, &registry(""), &Ask::default()).unwrap();
     let scopes: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
     assert_eq!(
@@ -535,7 +542,7 @@ fn the_reading_of_an_extension_subset_is_stamped_over_the_crate_so_done_can_read
         ..Ask::default()
     };
     let root = Tree::new("phpt-stamp").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     let readings = phpt::run(&root, &manifest, &registry(""), &ask).unwrap();
     let reading = &readings[0];
     assert_eq!(reading.scope, "ext/pcre");
@@ -590,7 +597,7 @@ fn a_corpus_directory_no_crate_owns_is_stamped_over_the_workspace() {
 #[test]
 fn the_variable_names_the_tree_to_a_run_of_the_binary() {
     let root = Tree::new("phpt-variable").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     // The scratch clone's pin, its `[source].path` pointed nowhere, so the
     // fallback is absent whichever machine this runs on.
     let pinned = root.join("nowhere-pinned");
@@ -612,28 +619,19 @@ fn the_variable_names_the_tree_to_a_run_of_the_binary() {
         .collect();
     fs::write(&pin, text.join("\n")).unwrap();
     let tree = fixture_tree();
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(&root)
+    let ran = Run::at(&root)
         .args(["phpt", "--subset", "Zend/tests"])
-        .env(xtask::oracle::TREE_VARIABLE, &tree)
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    let stderr = String::from_utf8(out.stderr).unwrap();
+        .env(xtask::oracle::TREE_VARIABLE, &*tree)
+        .go();
     assert!(
-        stdout.contains("Zend/tests") && !stderr.contains("neither place"),
-        "the subset resolved under the fixture:\n{stdout}\n{stderr}"
+        ran.stdout.contains("Zend/tests") && !ran.stderr.contains("neither place"),
+        "the subset resolved under the fixture: {ran}"
     );
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(&root)
+    let stderr = Run::at(&root)
         .args(["phpt", "--subset", "Zend/tests"])
         .env(xtask::oracle::TREE_VARIABLE, root.join("nowhere"))
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(!out.status.success());
+        .go()
+        .failed();
     assert!(
         stderr.contains(&format!(
             "{}={}",
@@ -653,7 +651,7 @@ fn the_variable_names_the_tree_to_a_run_of_the_binary() {
 fn a_relative_root_reaches_the_verdicts_an_absolute_one_does() {
     let Some(oracle) = oracle() else { return };
     let root = Tree::new("phpt-relative-root").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     fs::create_dir_all(root.join("ext/ctype")).unwrap();
     fs::write(
         root.join("ext/ctype/Cargo.toml"),
@@ -680,22 +678,19 @@ fn a_relative_root_reaches_the_verdicts_an_absolute_one_does() {
         fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let run = |given: &Path| {
-        let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-            .arg("--root")
-            .arg(given)
+        let stdout = Run::at(given)
             .args(["phpt", "--subset", "ext/ctype", "--jobs", "1"])
             .current_dir(&root)
             .env(xtask::oracle::TREE_VARIABLE, &corpus)
-            .output()
-            .unwrap();
+            .go()
+            .stdout;
         // The verdicts, the reading's line up to what it was run by.
-        let stdout = String::from_utf8_lossy(&out.stdout);
         let verdicts = stdout
             .lines()
             .find(|line| line.contains(" phpt ext/ctype: "))
             .and_then(|line| line.split(';').next())
             .map(str::to_owned);
-        (verdicts, stdout.into_owned())
+        (verdicts, stdout)
     };
     let (absolute, said) = run(root.path());
     assert_eq!(
@@ -705,33 +700,6 @@ fn a_relative_root_reaches_the_verdicts_an_absolute_one_does() {
     );
     let (relative, said) = run(Path::new("."));
     assert_eq!(relative, absolute, "{said}");
-}
-
-#[test]
-fn the_full_corpus_is_a_flag_the_manifest_denies_at_the_tool_call() {
-    // The rule's fixture is the negative control; this asserts the flag the
-    // rule names, among the instrument's argv (#1860), is the flag the
-    // runner has.
-    let ask = Ask {
-        full: true,
-        ..Ask::default()
-    };
-    assert!(ask.full);
-    let manifest = manifest();
-    let rule = manifest
-        .rule("lanes.nightly-flags")
-        .expect("the manifest has the rule");
-    let flags = rule
-        .predicate
-        .deny_argv
-        .as_ref()
-        .expect("the rule denies an argv");
-    assert!(flags.iter().any(|f| f == "--full"), "{flags:?}");
-    assert!(
-        rule.predicate.with.iter().any(|w| w == "xtask phpt"),
-        "{:?}",
-        rule.predicate.with
-    );
 }
 
 /// A binary standing where the engine's would that prints `__FILE__` as
@@ -888,20 +856,7 @@ fn a_binary_the_tree_has_not_moved_past_writes_an_ordinary_reading_that_names_it
 /// the commit's id.
 fn commit_all(root: &Path, message: &str) -> String {
     fs::write(root.join(".gitignore"), "target/\n").unwrap();
-    let git = |args: &[&str]| {
-        let out = Command::new("git")
-            .args(["-c", "user.name=xtask", "-c", "user.email=xtask@scratch"])
-            .args(["-c", "commit.gpgsign=false"])
-            .args(args)
-            .current_dir(root)
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "git {args:?}: {out:?}");
-        String::from_utf8(out.stdout).unwrap().trim().to_owned()
-    };
-    git(&["add", "-A"]);
-    git(&["commit", "-q", "-m", message]);
-    git(&["rev-parse", "HEAD"])
+    Repo::at(root).commit(message)
 }
 
 /// A binary standing where the engine's would that writes `two` for the
@@ -1976,7 +1931,7 @@ impl OneTree {
     /// A checkout of its own, committed, as a builder's worktree is.
     fn checkout(name: &str) -> Tree {
         let root = Tree::new(&format!("phpt-apart-{name}")).unwrap();
-        scratch_workspace(workspace(), &root).unwrap();
+        scratch_workspace(workspace(), &root);
         commit_all(&root, name);
         root
     }
@@ -2355,12 +2310,7 @@ fn a_run_writes_nothing_into_the_pinned_tree() {
         .collect();
     let mut scratch = Scratch::new("writes", &tests);
     let corpus = scratch.root.join("corpus");
-    let init = Command::new("git")
-        .args(["init", "-q", "-b", "main"])
-        .current_dir(&corpus)
-        .status()
-        .unwrap();
-    assert!(init.success());
+    Repo::init(&corpus);
     scratch.manifest.pin.source.commit = commit_all(&corpus, "the pin");
     fs::write(
         corpus.join("ext/fixture/tests/stray.php"),
@@ -2514,4 +2464,41 @@ fn the_control_keeps_the_target_and_the_engines_reading_is_met_of_target() {
         "{}",
         reading.message
     );
+}
+
+/// The tests whose subject is the tracked workspace itself: each reads the
+/// `seams.toml`, `oracle.toml`, registry or sources standing in the
+/// workspace, so a person's edit there is what may turn one red (#3091).
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
+mod tracked {
+    use super::*;
+
+    #[test]
+    fn the_full_corpus_is_a_flag_the_manifest_denies_at_the_tool_call() {
+        // The rule's fixture is the negative control; this asserts the flag the
+        // rule names, among the instrument's argv (#1860), is the flag the
+        // runner has.
+        let ask = Ask {
+            full: true,
+            ..Ask::default()
+        };
+        assert!(ask.full);
+        let manifest = Manifest::load(workspace()).unwrap();
+        let rule = manifest
+            .rule("lanes.nightly-flags")
+            .expect("the manifest has the rule");
+        let flags = rule
+            .predicate
+            .deny_argv
+            .as_ref()
+            .expect("the rule denies an argv");
+        assert!(flags.iter().any(|f| f == "--full"), "{flags:?}");
+        assert!(
+            rule.predicate.with.iter().any(|w| w == "xtask phpt"),
+            "{:?}",
+            rule.predicate.with
+        );
+    }
 }

@@ -405,7 +405,7 @@ impl Request {
         if self.hooked_accessible(&hooked) {
             return Some(self.read_hooked(object, name, hooked, read));
         }
-        if read != PropertyRead::Silent && !self.serves_accessor(class, b"__get") {
+        if read != PropertyRead::Silent && !self.serves_accessor(class, super::Accessor::Get) {
             return Some(Err(self.inaccessible_property(
                 class,
                 hooked.visibility,

@@ -1,317 +1,144 @@
 //! `xtask ticket`, the closer (#28): the judgement held without the
-//! network. Every test here runs the instrument's `run` over a `gh` that
-//! is a shell file, answering `issue view` from the transcript laid beside
-//! it and appending what `issue close` asked to a file, so what the
+//! network. Every test here runs the instrument's `run` over a
+//! [`Tracker`], which answers `issue view` from the issues the test laid
+//! and records what `issue edit` and `issue close` asked, so what the
 //! tracker was asked is read back as a fact and nothing here reaches
-//! GitHub. The checkbox grammar is held beside the parser.
+//! GitHub. One test holds the types it lays to `gh`'s own answers. The
+//! checkbox grammar is held beside the parser.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::Command;
 
 use xtask::manifest::Manifest;
 use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::Tree;
 use xtask::ticket::{
-    Act, CAP, Gh, MERGED, Reach, Successors, Verdict, merged, parent, run, stranded,
+    Act, CAP, Issue, MERGED, Reach, State, SubIssues, Successors, Verdict, merged, parent, run,
+    stranded,
 };
 use xtask::track::Ticket;
+
+mod common {
+    pub mod manifest;
+    pub mod repo;
+    pub mod tracker;
+}
+use common::manifest::of_rows;
+use common::repo::Repo;
+use common::tracker::{Tracker, blocked_by, issue, labels, open};
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
 }
 
+/// The manifest a mechanics test judges by: a row, the tracked pin and no
+/// rule, so no criterion is held to a `deny = true` rule; the tracked
+/// rules a ticket an agent may take is held to (#153) are read in
+/// [`tracked`].
+fn manifest() -> Manifest {
+    of_rows([xtask::manifest::Crate::named("xtask")])
+}
+
 /// The manifest of this workspace, whose `deny = true` rules a ticket an
 /// agent may take is held to (#153).
-fn manifest() -> Manifest {
+fn tracked_manifest() -> Manifest {
     Manifest::load(workspace()).unwrap()
 }
 
-/// A recorded `gh`: a shell file in a directory of this test's own that
-/// answers `issue view <n>` with `issues/<n>.json` and appends every other
-/// call's arguments to `calls`, one line each. The instrument stamps its
-/// reading over the workspace, which it only reads.
-struct Recorded {
-    dir: Tree,
-}
-
-impl Recorded {
-    fn lay(name: &str) -> Recorded {
-        let dir = Tree::new(&format!("ticket-{name}")).unwrap();
-        fs::create_dir_all(dir.join("issues")).unwrap();
-        let recorded = Recorded { dir };
-        recorded.answering(None);
-        recorded
-    }
-
-    /// Lay the `gh` down: `issue view` from the transcript, every other
-    /// call written to `calls`, and the verb named, `edit` or `close`,
-    /// refused with `gh`'s text after being written down.
-    fn answering(&self, refusing: Option<&str>) {
-        let refusal = refusing
-            .map(|verb| {
-                format!(
-                    "if [ \"$2\" = {verb} ]; then echo 'GraphQL: no permission' >&2; exit 1; fi\n"
-                )
-            })
-            .unwrap_or_default();
-        let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then f='{0}/issues/'\"$3\"; if [ -e \"$f.none\" ]; then echo \"GraphQL: Could not resolve to an issue or pull request with the number of $3. (repository.issue)\" >&2; exit 1; fi; if [ -e \"$f.flaky\" ]; then read a n < \"$f.flaky\"; if [ \"$a\" -gt 0 ]; then echo \"$((a-1)) $n\" > \"$f.flaky\"; elif [ \"$n\" -gt 0 ]; then echo \"0 $((n-1))\" > \"$f.flaky\"; echo \"Post: read: can't assign requested address\" >&2; exit 1; fi; fi; cat \"$f.json\"; exit $?; fi\nprintf '%s\\n' \"$*\" >> '{0}/calls'\n{refusal}exit 0\n",
-            self.dir.display()
-        );
-        fs::write(self.dir.join("gh"), script).unwrap();
-        fs::set_permissions(self.dir.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
-    /// `issue view <number>` answers `answered` times, then fails `fails`
-    /// times as `gh` does when the machine has run out of ports for a
-    /// moment, then answers again (#2804).
-    fn flaky(&self, number: u64, answered: u32, fails: u32) {
-        let at = self.dir.join(format!("issues/{number}.flaky"));
-        fs::write(at, format!("{answered} {fails}\n")).unwrap();
-    }
-
-    /// `issue view <number>` answered as the tracker answers a number that
-    /// is no issue.
-    fn none(&self, number: u64) {
-        fs::write(self.dir.join(format!("issues/{number}.none")), "").unwrap();
-    }
-
-    fn issue(&self, number: u64, state: &str, body: &str) {
-        self.labelled(number, state, body, &[]);
-    }
-
-    /// An issue with labels, as the tracker answers them, which a close on
-    /// a track holds a successor to (#141).
-    fn labelled(&self, number: u64, state: &str, body: &str, labels: &[&str]) {
-        self.blocking(number, state, body, labels, &[]);
-    }
-
-    /// An issue that already blocks the numbered ones at the tracker, as
-    /// `gh issue view --json blocking` nests them, each open.
-    fn blocking(&self, number: u64, state: &str, body: &str, labels: &[&str], blocking: &[u64]) {
-        self.laid(number, state, body, labels, blocking, &[]);
-    }
-
-    /// Any issue: the ones it blocks, each open, and those blocking it,
-    /// each in the state given.
-    fn laid(
-        &self,
-        number: u64,
-        state: &str,
-        body: &str,
-        labels: &[&str],
-        blocking: &[u64],
-        blocked_by: &[(u64, &str)],
-    ) {
-        let issue = serde_json::json!({
-            "number": number,
-            "title": format!("ticket {number}"),
-            "body": body,
-            "state": state,
-            "url": format!("https://example.invalid/issues/{number}"),
-            "labels": labels.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>(),
-            "blocking": {"nodes": blocking.iter().map(|n| serde_json::json!({"number": n, "state": "OPEN"})).collect::<Vec<_>>()},
-            "blockedBy": {"nodes": blocked_by.iter().map(|(n, state)| serde_json::json!({"number": n, "state": state})).collect::<Vec<_>>()},
-        });
-        fs::write(
-            self.dir.join(format!("issues/{number}.json")),
-            issue.to_string(),
-        )
-        .unwrap();
-    }
-
-    /// An open issue with `body` blocked at the tracker by the numbered
-    /// ones, each in the state given, as `gh issue view --json blockedBy`
-    /// nests them.
-    fn blocked(&self, number: u64, body: &str, blockers: &[(u64, &str)]) {
-        self.laid(number, "OPEN", body, &[], &[], blockers);
-    }
-
-    /// A chart sheet as the tracker answers it: an issue holding `total`
-    /// sub-issues, the count the cap is measured against (#448).
-    fn sheet(&self, number: u64, state: &str, total: u64) {
-        let issue = serde_json::json!({
-            "number": number,
-            "title": format!("Chart: a track at a row, sheet {number}"),
-            "body": "## Destination\n\na row\n",
-            "state": state,
-            "url": format!("https://example.invalid/issues/{number}"),
-            "labels": [{"name": "frontier:chart"}],
-            "blocking": {"nodes": []},
-            "subIssuesSummary": {"total": total, "completed": 0, "percentCompleted": 0},
-        });
-        fs::write(
-            self.dir.join(format!("issues/{number}.json")),
-            issue.to_string(),
-        )
-        .unwrap();
-    }
-
-    fn gh(&self) -> Gh {
-        Gh::at(&self.dir.join("gh"))
-    }
-
-    /// What the tracker was asked besides `issue view`.
-    fn calls(&self) -> Vec<String> {
-        fs::read_to_string(self.dir.join("calls"))
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_owned)
-            .collect()
+/// Issue `number`, open, with `body`.
+fn with_body(number: u64, body: &str) -> Issue {
+    Issue {
+        body: body.to_owned(),
+        ..issue(number)
     }
 }
 
-/// The negative control of `harness.self` at the read (#153): the ticket
-/// laid down under `xtask/fixtures/rules/harness.self/`, which carries
-/// `ready-for-agent` and asks in two criteria for a write into the rule's
-/// scope, one the pin that `xtask steer` writes for an agent and one the
-/// hook settings that nothing writes for one. The manifest is this
-/// workspace's, so the scope the reading names is the one `permit` denies
-/// the write by.
+/// Issue `number`, open, with `body` and `labels`.
+fn labelled(number: u64, body: &str, labels: &[&str]) -> Issue {
+    Issue {
+        labels: self::labels(labels),
+        ..with_body(number, body)
+    }
+}
+
+/// Issue `number`, closed, with `body`.
+fn closed(number: u64, body: &str) -> Issue {
+    Issue {
+        state: State::Closed,
+        ..with_body(number, body)
+    }
+}
+
+/// A chart sheet as the tracker answers it: an issue holding `total`
+/// sub-issues, the count the cap is measured against (#448).
+fn sheet(number: u64, state: State, total: u64) -> Issue {
+    Issue {
+        title: format!("Chart: a track at a row, sheet {number}"),
+        body: "## Destination\n\na row\n".to_owned(),
+        state,
+        labels: labels(&["frontier:chart"]),
+        sub_issues: SubIssues { total },
+        ..issue(number)
+    }
+}
+
+/// The tracker's wire format, the one place it is written by hand: `gh
+/// issue view` and `gh issue list` answers as gh writes them, every field
+/// `Gh` asks for and the ones it does not read (`completed`,
+/// `percentCompleted`, `totalCount`) among them, parse as the issues the
+/// rest of this file lays through [`Tracker`]. An issue answered without
+/// `subIssuesSummary`, as gh answered before the field was asked for,
+/// reads as holding no sub-issues, and the cap's reading of it passes.
 #[test]
-fn a_ready_for_agent_ticket_asking_for_a_write_the_manifest_denies_fails_naming_path_and_rule() {
-    let body =
-        fs::read_to_string(xtask::package_dir().join("fixtures/rules/harness.self/ticket.md"))
-            .unwrap();
-    let recorded = Recorded::lay("denied");
-    recorded.labelled(111, "OPEN", &body, &["ready-for-agent", "track:main"]);
-    let reading = run(
-        workspace(),
-        &manifest(),
-        &recorded.gh(),
-        Act::Read,
-        Ticket::new(111),
-        None,
-    )
-    .unwrap();
-    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
-    assert_eq!(reading.rule, "harness.self");
-    assert_eq!(reading.numbers["denied"], 1.into(), "{reading:#?}");
-    assert_eq!(reading.numbers["steerable"], 1.into(), "{reading:#?}");
-    assert!(
-        reading
-            .message
-            .contains("`.claude/settings.json` gains the hook")
-            && reading.message.contains("asks for .claude/settings.json"),
-        "the criterion and the path: {}",
-        reading.message
+fn gh_s_own_answers_parse_as_the_issues_the_tracker_lays() {
+    let tracker = Tracker::empty("wire");
+    tracker.with_answer(
+        447,
+        r###"{"blockedBy":{"nodes":[{"number":12,"state":"CLOSED"}]},"blocking":{"nodes":[{"number":13,"state":"OPEN"}]},"body":"## Destination\n\na row\n","labels":[{"id":"LA_kwDO","name":"frontier:chart","description":"","color":"ededed"}],"number":447,"state":"OPEN","subIssuesSummary":{"completed":3,"percentCompleted":3,"total":100},"title":"Chart: a track at a row, sheet 447","url":"https://example.invalid/issues/447"}"###,
     );
-    assert!(
-        reading.message.contains("harness.self denies an agent"),
-        "the rule: {}",
-        reading.message
+    tracker.with_answer(
+        13,
+        r###"{"body":"## Acceptance criteria\n\n- [x] one\n","labels":[],"number":13,"state":"OPEN","title":"ticket 13","url":"https://example.invalid/issues/13"}"###,
     );
-    assert!(
-        reading
-            .message
-            .contains("gh issue edit 111 --add-label for-a-person"),
-        "what a person does with it: {}",
-        reading.message
+    tracker.listing_answer(
+        r#"[{"blockedBy":{"nodes":[{"number":4,"state":"CLOSED"}],"totalCount":1},"labels":[{"id":"LA_kwDO","name":"ready-for-agent","description":"","color":"0e8a16"}],"number":5,"title":"ticket 5","url":"https://example.invalid/issues/5"}]"#,
     );
-    // The criterion whose object is the pin is said and not refused: the
-    // write is an agent's through the instrument sanctioned to make it
-    // (#152).
-    assert!(
-        reading
-            .message
-            .contains("`cargo xtask steer oracle.toml --from <proposal>`"),
-        "the instrument that writes it: {}",
-        reading.message
+    let gh = tracker.gh();
+    assert_eq!(
+        gh.view(workspace(), Ticket::new(447)).unwrap(),
+        Issue {
+            blocking: blocked_by(&[(13, State::Open)]),
+            blocked_by: blocked_by(&[(12, State::Closed)]),
+            ..sheet(447, State::Open, CAP)
+        }
     );
-    // The same criteria under the label that says the act is a person's
-    // are held to the boxes and to nothing else.
-    recorded.labelled(111, "OPEN", &body, &["for-a-person", "track:main"]);
-    let person = run(
-        workspace(),
-        &manifest(),
-        &recorded.gh(),
-        Act::Read,
-        Ticket::new(111),
-        None,
-    )
-    .unwrap();
-    assert_eq!(person.numbers["denied"], 0.into(), "{person:#?}");
-    assert_eq!(person.numbers["steerable"], 0.into(), "{person:#?}");
-    assert!(person.rule.is_empty(), "{person:#?}");
-    assert!(
-        person.message.contains("0 of 4 criteria ticked"),
-        "{}",
-        person.message
+    assert_eq!(
+        gh.view(workspace(), Ticket::new(13)).unwrap(),
+        with_body(13, "## Acceptance criteria\n\n- [x] one\n")
     );
+    assert_eq!(
+        gh.open(workspace()).unwrap(),
+        [xtask::ticket::Open {
+            blocked_by: blocked_by(&[(4, State::Closed)]),
+            ..open(5, &["ready-for-agent"])
+        }]
+    );
+    let reading = parent(workspace(), &gh, Ticket::new(13), Some("s1")).unwrap();
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert_eq!(reading.numbers["subissues"], 0.into(), "{reading:#?}");
+    assert_eq!(reading.session, "s1");
 }
 
-/// The narrowing #152 measured (#153): a ticket the maintainer handed to
-/// an agent, every box ticked, whose first criterion's object is the pin.
-/// `xtask steer` is the sanctioned writer of that file, so the label is
-/// not wrong; the read passes and the message still says what it matched.
+/// An unexpected call fails the test that laid the tracker, naming the
+/// call: a number nothing answers for is no answer the test meant, though
+/// the instrument reads it as the tracker failing.
 #[test]
-fn a_criterion_whose_object_is_a_file_xtask_steer_writes_is_said_and_not_refused() {
-    let body = "## Acceptance criteria\n\n- [x] `oracle.toml` carries a `[regime.dump]` with the two ini entries above, with a comment that says what the regime is\n";
-    let recorded = Recorded::lay("steerable");
-    recorded.labelled(
-        152,
-        "OPEN",
-        body,
-        &["ready-for-agent", "track:parity-hosts"],
-    );
-    let reading = run(
-        workspace(),
-        &manifest(),
-        &recorded.gh(),
-        Act::Read,
-        Ticket::new(152),
-        None,
-    )
-    .unwrap();
-    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
-    assert_eq!(reading.numbers["denied"], 0.into(), "{reading:#?}");
-    assert_eq!(reading.numbers["steerable"], 1.into(), "{reading:#?}");
-    assert!(reading.rule.is_empty(), "{reading:#?}");
-    assert!(
-        reading.message.contains("asks for oracle.toml")
-            && reading
-                .message
-                .contains("`cargo xtask steer oracle.toml --from <proposal>`"),
-        "what it matched, and the call that writes it: {}",
-        reading.message
-    );
-    assert!(
-        !reading.message.contains("--add-label for-a-person"),
-        "the label is not wrong: {}",
-        reading.message
-    );
-}
-
-/// A criterion whose denied subject stays as it is asks for no write
-/// (#2391): #630's third box asks that the live numbers still render, and
-/// the read passes it, while #111's "`oracle.toml` carries" beside it is
-/// still the write, said as the steer that makes it.
-#[test]
-fn a_criterion_saying_a_denied_path_still_behaves_as_before_asks_for_no_write() {
-    let body = "## Acceptance criteria\n\n- [x] `.claude/harness.local.md` still renders this machine's live numbers, and `cargo xtask status --section rules` still prints them\n- [x] `seams.toml` is unchanged\n- [x] `oracle.toml` carries a `[regime.dump]` with the ini above\n";
-    let recorded = Recorded::lay("kept");
-    recorded.labelled(630, "OPEN", body, &["ready-for-agent"]);
-    let reading = run(
-        workspace(),
-        &manifest(),
-        &recorded.gh(),
-        Act::Read,
-        Ticket::new(630),
-        None,
-    )
-    .unwrap();
-    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
-    assert_eq!(reading.numbers["denied"], 0.into(), "{reading:#?}");
-    assert_eq!(reading.numbers["steerable"], 1.into(), "{reading:#?}");
-    assert!(
-        reading.message.contains("asks for oracle.toml")
-            && !reading.message.contains("harness.local.md")
-            && !reading.message.contains("asks for seams.toml"),
-        "{}",
-        reading.message
-    );
+#[should_panic(
+    expected = "the tracker was asked what the test laid no answer for: `gh issue view 99 --json"
+)]
+fn a_call_the_test_laid_no_answer_for_fails_it_naming_the_call() {
+    let tracker = Tracker::empty("unexpected");
+    assert!(tracker.gh().view(workspace(), Ticket::new(99)).is_err());
 }
 
 const UNTICKED: &str =
@@ -320,12 +147,12 @@ const TICKED: &str = "## Acceptance criteria\n\n- [x] one\n- [X] two\n";
 
 #[test]
 fn read_counts_the_boxes_and_names_the_unticked() {
-    let recorded = Recorded::lay("read");
-    recorded.issue(7, "OPEN", UNTICKED);
+    let tracker = Tracker::empty("read");
+    tracker.with_issue(&with_body(7, UNTICKED));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         Act::Read,
         Ticket::new(7),
         None,
@@ -344,15 +171,15 @@ fn read_counts_the_boxes_and_names_the_unticked() {
     );
     assert!(!reading.key().is_empty(), "stamped over the workspace");
     assert!(
-        recorded.calls().is_empty(),
+        tracker.calls().is_empty(),
         "read asks the tracker nothing else"
     );
 
-    recorded.issue(8, "OPEN", TICKED);
+    tracker.with_issue(&with_body(8, TICKED));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         Act::Read,
         Ticket::new(8),
         None,
@@ -360,7 +187,7 @@ fn read_counts_the_boxes_and_names_the_unticked() {
     .unwrap();
     assert_eq!(reading.status, Status::Pass);
     assert_eq!(reading.numbers["unticked"], 0.into());
-    assert!(recorded.calls().is_empty());
+    assert!(tracker.calls().is_empty());
 }
 
 /// A close of work done at a commit `main` contains, naming `successors`.
@@ -368,34 +195,10 @@ fn done(successors: Successors) -> Act {
     Act::Close(Verdict::Done, successors, Reach::Landed)
 }
 
-/// `git` in `root` under a fixed name, its stdout trimmed.
-fn git(root: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args([
-            "-c",
-            "user.name=x",
-            "-c",
-            "user.email=x@x",
-            "-c",
-            "commit.gpgsign=false",
-        ])
-        .args(args)
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_owned()
-}
-
 /// A repository of this test's own on `main` with one empty commit.
 fn repository(name: &str) -> Tree {
     let root = Tree::new(name).unwrap();
-    git(&root, &["init", "-q", "-b", "main"]);
-    git(&root, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    Repo::init(&root).git(&["commit", "-q", "--allow-empty", "-m", "base"]);
     root
 }
 
@@ -406,16 +209,16 @@ fn repository(name: &str) -> Tree {
 #[test]
 fn ready_records_each_ticket_of_the_branch_with_its_successors_and_closes_nothing() {
     let root = repository("ticket-ready");
-    git(&root, &["checkout", "-q", "-b", "t7"]);
-    let recorded = Recorded::lay("ready");
-    recorded.issue(7, "OPEN", UNTICKED);
-    recorded.issue(8, "OPEN", TICKED);
-    recorded.issue(9, "OPEN", TICKED);
+    Repo::at(&root).git(&["checkout", "-q", "-b", "t7"]);
+    let tracker = Tracker::empty("ready");
+    tracker.with_issue(&with_body(7, UNTICKED));
+    tracker.with_issue(&with_body(8, TICKED));
+    tracker.with_issue(&with_body(9, TICKED));
     let ready = |ticket: u64, successors: Successors| {
         run(
             &root,
             &manifest(),
-            &recorded.gh(),
+            &tracker.gh(),
             Act::Ready(successors),
             Ticket::new(ticket),
             None,
@@ -431,7 +234,7 @@ fn ready_records_each_ticket_of_the_branch_with_its_successors_and_closes_nothin
         refused.message
     );
 
-    recorded.issue(7, "OPEN", TICKED);
+    tracker.with_issue(&with_body(7, TICKED));
     let reading = ready(7, Successors::Nothing);
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
     assert!(
@@ -445,9 +248,12 @@ fn ready_records_each_ticket_of_the_branch_with_its_successors_and_closes_nothin
     assert_eq!(second.status, Status::Pass, "{}", second.message);
     let again = ready(7, opens_nine());
     assert_eq!(again.status, Status::Pass, "{}", again.message);
-    assert_eq!(git(&root, &["config", "branch.t7.ready-7"]), "9");
-    assert_eq!(git(&root, &["config", "branch.t7.ready-8"]), "nothing");
-    assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
+    assert_eq!(Repo::at(&root).git(&["config", "branch.t7.ready-7"]), "9");
+    assert_eq!(
+        Repo::at(&root).git(&["config", "branch.t7.ready-8"]),
+        "nothing"
+    );
+    assert!(tracker.calls().is_empty(), "{:?}", tracker.calls());
 }
 
 /// The merge into `main` closes every open ticket its subject names with
@@ -459,43 +265,34 @@ fn ready_records_each_ticket_of_the_branch_with_its_successors_and_closes_nothin
 #[test]
 fn a_merge_into_main_closes_every_ready_ticket_its_subject_names() {
     let root = repository("ticket-merged");
-    git(&root, &["checkout", "-q", "-b", "t7"]);
-    git(
-        &root,
-        &["commit", "-q", "--allow-empty", "-m", "the bundle"],
-    );
-    git(&root, &["config", "branch.t7.ticket", "7"]);
+    Repo::at(&root).git(&["checkout", "-q", "-b", "t7"]);
+    Repo::at(&root).git(&["commit", "-q", "--allow-empty", "-m", "the bundle"]);
+    Repo::at(&root).git(&["config", "branch.t7.ticket", "7"]);
     for (n, successors) in [("7", "nothing"), ("8", "12"), ("9", "nothing")] {
-        git(
-            &root,
-            &["config", &format!("branch.t7.ready-{n}"), successors],
-        );
+        Repo::at(&root).git(&["config", &format!("branch.t7.ready-{n}"), successors]);
     }
-    let recorded = Recorded::lay("merged");
+    let tracker = Tracker::empty("merged");
     for n in [7, 8, 9, 11, 12] {
-        recorded.issue(n, "OPEN", TICKED);
+        tracker.with_issue(&with_body(n, TICKED));
     }
-    recorded.issue(10, "CLOSED", TICKED);
+    tracker.with_issue(&closed(10, TICKED));
     assert!(
-        merged(&root, &manifest(), &recorded.gh(), "main")
+        merged(&root, &manifest(), &tracker.gh(), "main")
             .unwrap()
             .is_empty(),
         "off main nothing is closed"
     );
 
-    git(&root, &["checkout", "-q", "main"]);
-    git(
-        &root,
-        &[
-            "merge",
-            "-q",
-            "--no-ff",
-            "t7",
-            "-m",
-            "Merge t7: the bundle (#7, #8, #9, #10, #11)",
-        ],
-    );
-    let (readings, phases) = tickets_merged(&root, &recorded);
+    Repo::at(&root).git(&["checkout", "-q", "main"]);
+    Repo::at(&root).git(&[
+        "merge",
+        "-q",
+        "--no-ff",
+        "t7",
+        "-m",
+        "Merge t7: the bundle (#7, #8, #9, #10, #11)",
+    ]);
+    let (readings, phases) = tickets_merged(&root, &tracker);
     let verdicts: Vec<(&str, Status)> = readings
         .iter()
         .map(|r| (r.scope.as_str(), r.status))
@@ -518,7 +315,7 @@ fn a_merge_into_main_closes_every_ready_ticket_its_subject_names() {
         readings[3].message
     );
     phases_named(&phases);
-    let calls = recorded.calls();
+    let calls = tracker.calls();
     for n in [7, 8, 9] {
         assert!(
             calls
@@ -539,7 +336,7 @@ fn a_merge_into_main_closes_every_ready_ticket_its_subject_names() {
     let dir = Tree::new("ticket-merged-store").unwrap();
     let store = Store::at(dir.to_path_buf());
     store.record(&readings).unwrap();
-    let head = git(&root, &["rev-parse", "HEAD"]);
+    let head = Repo::at(&root).git(&["rev-parse", "HEAD"]);
     let unmet = stranded(&root, &store, &head).unwrap();
     assert_eq!(unmet.len(), 1, "{unmet:?}");
     assert!(
@@ -549,7 +346,7 @@ fn a_merge_into_main_closes_every_ready_ticket_its_subject_names() {
     let closed = run(
         &root,
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Nothing),
         Ticket::new(11),
         None,
@@ -598,25 +395,31 @@ fn phases_named(phases: &Reading) {
 #[test]
 fn a_merge_landing_part_of_a_blocked_ticket_leaves_it_open_and_done_does_not_name_it() {
     let root = repository("ticket-partial");
-    git(&root, &["checkout", "-q", "-b", "t13"]);
-    git(&root, &["commit", "-q", "--allow-empty", "-m", "part"]);
-    git(&root, &["checkout", "-q", "main"]);
-    git(
-        &root,
-        &[
-            "merge",
-            "-q",
-            "--no-ff",
-            "t13",
-            "-m",
-            "Merge t13: part of the port (#13, #15, #17)",
-        ],
-    );
-    let recorded = Recorded::lay("partial");
-    recorded.blocked(13, UNTICKED, &[(14, "OPEN"), (16, "CLOSED")]);
-    recorded.blocked(15, UNTICKED, &[(16, "CLOSED")]);
-    recorded.blocked(17, TICKED, &[(14, "OPEN")]);
-    let readings = tickets_merged(&root, &recorded).0;
+    Repo::at(&root).git(&["checkout", "-q", "-b", "t13"]);
+    Repo::at(&root).git(&["commit", "-q", "--allow-empty", "-m", "part"]);
+    Repo::at(&root).git(&["checkout", "-q", "main"]);
+    Repo::at(&root).git(&[
+        "merge",
+        "-q",
+        "--no-ff",
+        "t13",
+        "-m",
+        "Merge t13: part of the port (#13, #15, #17)",
+    ]);
+    let tracker = Tracker::empty("partial");
+    tracker.with_issue(&Issue {
+        blocked_by: blocked_by(&[(14, State::Open), (16, State::Closed)]),
+        ..with_body(13, UNTICKED)
+    });
+    tracker.with_issue(&Issue {
+        blocked_by: blocked_by(&[(16, State::Closed)]),
+        ..with_body(15, UNTICKED)
+    });
+    tracker.with_issue(&Issue {
+        blocked_by: blocked_by(&[(14, State::Open)]),
+        ..with_body(17, TICKED)
+    });
+    let readings = tickets_merged(&root, &tracker).0;
     let verdicts: Vec<(&str, Status)> = readings
         .iter()
         .map(|r| (r.scope.as_str(), r.status))
@@ -637,7 +440,7 @@ fn a_merge_landing_part_of_a_blocked_ticket_leaves_it_open_and_done_does_not_nam
         "{}",
         readings[0].message
     );
-    let parent = git(&root, &["rev-parse", "--short", "HEAD^1"]);
+    let parent = Repo::at(&root).git(&["rev-parse", "--short", "HEAD^1"]);
     assert!(
         readings[1]
             .message
@@ -648,12 +451,12 @@ fn a_merge_landing_part_of_a_blocked_ticket_leaves_it_open_and_done_does_not_nam
         "{}",
         readings[1].message
     );
-    assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
+    assert!(tracker.calls().is_empty(), "{:?}", tracker.calls());
 
     let dir = Tree::new("ticket-partial-store").unwrap();
     let store = Store::at(dir.to_path_buf());
     store.record(&readings).unwrap();
-    let head = git(&root, &["rev-parse", "HEAD"]);
+    let head = Repo::at(&root).git(&["rev-parse", "HEAD"]);
     let unmet = stranded(&root, &store, &head).unwrap();
     assert_eq!(unmet.len(), 2, "{unmet:?}");
     assert!(
@@ -665,8 +468,8 @@ fn a_merge_landing_part_of_a_blocked_ticket_leaves_it_open_and_done_does_not_nam
 /// [`merged`] on `main` over the merge at `HEAD`: the readings of the
 /// tickets, and the run's own, the last, set apart once it is held to be
 /// the run's (#2813).
-fn tickets_merged(root: &Path, recorded: &Recorded) -> (Vec<Reading>, Reading) {
-    let mut readings = merged(root, &manifest(), &recorded.gh(), "HEAD^1").unwrap();
+fn tickets_merged(root: &Path, tracker: &Tracker) -> (Vec<Reading>, Reading) {
+    let mut readings = merged(root, &manifest(), &tracker.gh(), "HEAD^1").unwrap();
     let run = readings.pop().expect("the run's own reading");
     assert_eq!(
         (run.scope.as_str(), run.status),
@@ -678,30 +481,27 @@ fn tickets_merged(root: &Path, recorded: &Recorded) -> (Vec<Reading>, Reading) {
 
 /// A merge of `branch` into `main` under `subject`, each ticket of
 /// `ready` readied on the branch with the successors it names, every
-/// ticket and successor open with its boxes ticked at `recorded`.
+/// ticket and successor open with its boxes ticked at `tracker`.
 fn merged_with_ready(
     name: &str,
     branch: &str,
     subject: &str,
     ready: &[(u64, &str)],
-) -> (Tree, Recorded) {
+) -> (Tree, Tracker) {
     let root = repository(name);
-    git(&root, &["checkout", "-q", "-b", branch]);
-    git(&root, &["commit", "-q", "--allow-empty", "-m", "the work"]);
-    let recorded = Recorded::lay(name);
+    Repo::at(&root).git(&["checkout", "-q", "-b", branch]);
+    Repo::at(&root).git(&["commit", "-q", "--allow-empty", "-m", "the work"]);
+    let tracker = Tracker::empty(name);
     for &(n, successors) in ready {
-        git(
-            &root,
-            &["config", &format!("branch.{branch}.ready-{n}"), successors],
-        );
-        recorded.issue(n, "OPEN", TICKED);
+        Repo::at(&root).git(&["config", &format!("branch.{branch}.ready-{n}"), successors]);
+        tracker.with_issue(&with_body(n, TICKED));
         for successor in successors.split(' ').filter_map(|s| s.parse().ok()) {
-            recorded.issue(successor, "OPEN", TICKED);
+            tracker.with_issue(&with_body(successor, TICKED));
         }
     }
-    git(&root, &["checkout", "-q", "main"]);
-    git(&root, &["merge", "-q", "--no-ff", branch, "-m", subject]);
-    (root, recorded)
+    Repo::at(&root).git(&["checkout", "-q", "main"]);
+    Repo::at(&root).git(&["merge", "-q", "--no-ff", branch, "-m", subject]);
+    (root, tracker)
 }
 
 /// The two merges post-commit left half closed (#2804), replayed with the
@@ -735,10 +535,10 @@ fn a_merge_whose_tracker_fails_a_read_for_a_moment_still_closes_every_ticket_it_
             (2536, 0),
         ),
     ] {
-        let (root, recorded) =
+        let (root, tracker) =
             merged_with_ready(&format!("replay-{branch}"), branch, subject, ready);
-        recorded.flaky(flaky, answered, 1);
-        let readings = tickets_merged(&root, &recorded).0;
+        tracker.flaky(flaky, answered, 1);
+        let readings = tickets_merged(&root, &tracker).0;
         let closed: Vec<(&str, Status)> = readings
             .iter()
             .map(|r| (r.scope.as_str(), r.status))
@@ -755,7 +555,7 @@ fn a_merge_whose_tracker_fails_a_read_for_a_moment_still_closes_every_ticket_it_
                 .collect::<Vec<_>>(),
             "{readings:#?}"
         );
-        let calls = recorded.calls();
+        let calls = tracker.calls();
         for (n, _) in ready {
             assert!(
                 calls
@@ -775,15 +575,15 @@ fn a_merge_whose_tracker_fails_a_read_for_a_moment_still_closes_every_ticket_it_
 /// passed over, as before.
 #[test]
 fn a_ticket_the_tracker_cannot_read_is_named_and_the_rest_of_the_merge_closes() {
-    let (root, recorded) = merged_with_ready(
+    let (root, tracker) = merged_with_ready(
         "unreadable",
         "t20",
         "Merge t20: the bundle (#20, #21, #22, #23)",
         &[(20, "nothing"), (21, "nothing"), (22, "nothing")],
     );
-    recorded.none(23);
-    recorded.flaky(21, 0, 3);
-    let readings = tickets_merged(&root, &recorded).0;
+    tracker.none(23);
+    tracker.flaky(21, 0, 3);
+    let readings = tickets_merged(&root, &tracker).0;
     let verdicts: Vec<(&str, Status)> = readings
         .iter()
         .map(|r| (r.scope.as_str(), r.status))
@@ -797,7 +597,7 @@ fn a_ticket_the_tracker_cannot_read_is_named_and_the_rest_of_the_merge_closes() 
         ],
         "{readings:#?}"
     );
-    let parent = git(&root, &["rev-parse", "--short", "HEAD^1"]);
+    let parent = Repo::at(&root).git(&["rev-parse", "--short", "HEAD^1"]);
     assert!(
         readings[1]
             .message
@@ -812,14 +612,14 @@ fn a_ticket_the_tracker_cannot_read_is_named_and_the_rest_of_the_merge_closes() 
     let dir = Tree::new("ticket-unreadable-store").unwrap();
     let store = Store::at(dir.to_path_buf());
     store.record(&readings).unwrap();
-    let head = git(&root, &["rev-parse", "HEAD"]);
+    let head = Repo::at(&root).git(&["rev-parse", "HEAD"]);
     let unmet = stranded(&root, &store, &head).unwrap();
     assert_eq!(unmet.len(), 1, "{unmet:?}");
     assert!(unmet[0].contains("#21 could not be read"), "{unmet:?}");
 
-    recorded.issue(20, "CLOSED", TICKED);
-    recorded.issue(22, "CLOSED", TICKED);
-    let again = tickets_merged(&root, &recorded).0;
+    tracker.with_issue(&closed(20, TICKED));
+    tracker.with_issue(&closed(22, TICKED));
+    let again = tickets_merged(&root, &tracker).0;
     assert_eq!(again.len(), 1, "{again:#?}");
     assert_eq!(
         (again[0].scope.as_str(), again[0].status),
@@ -836,13 +636,13 @@ fn a_ticket_the_tracker_cannot_read_is_named_and_the_rest_of_the_merge_closes() 
 #[test]
 fn a_commit_is_landed_once_main_contains_it_and_unmerged_before() {
     let root = Tree::new("ticket-reach").unwrap();
-    git(&root, &["init", "-q", "-b", "main"]);
-    git(&root, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    Repo::init(&root);
+    Repo::at(&root).git(&["commit", "-q", "--allow-empty", "-m", "base"]);
     assert_eq!(Reach::of(&root).unwrap(), Reach::Landed);
 
-    git(&root, &["checkout", "-q", "-b", "t7"]);
-    git(&root, &["commit", "-q", "--allow-empty", "-m", "the work"]);
-    let tip = git(&root, &["rev-parse", "--short=7", "HEAD"]);
+    Repo::at(&root).git(&["checkout", "-q", "-b", "t7"]);
+    Repo::at(&root).git(&["commit", "-q", "--allow-empty", "-m", "the work"]);
+    let tip = Repo::at(&root).git(&["rev-parse", "--short=7", "HEAD"]);
     assert_eq!(
         Reach::of(&root).unwrap(),
         Reach::Unmerged {
@@ -851,9 +651,9 @@ fn a_commit_is_landed_once_main_contains_it_and_unmerged_before() {
         }
     );
 
-    git(&root, &["checkout", "-q", "main"]);
-    git(&root, &["merge", "-q", "--no-ff", "--no-edit", "t7"]);
-    git(&root, &["checkout", "-q", "t7"]);
+    Repo::at(&root).git(&["checkout", "-q", "main"]);
+    Repo::at(&root).git(&["merge", "-q", "--no-ff", "--no-edit", "t7"]);
+    Repo::at(&root).git(&["checkout", "-q", "t7"]);
     assert_eq!(Reach::of(&root).unwrap(), Reach::Landed);
 }
 
@@ -863,8 +663,8 @@ fn a_commit_is_landed_once_main_contains_it_and_unmerged_before() {
 /// not held to it, since it says nothing of the work is in the tree.
 #[test]
 fn close_refuses_a_commit_main_does_not_contain_and_changes_nothing_at_the_tracker() {
-    let recorded = Recorded::lay("unmerged");
-    recorded.issue(7, "OPEN", TICKED);
+    let tracker = Tracker::empty("unmerged");
+    tracker.with_issue(&with_body(7, TICKED));
     let unmerged = Reach::Unmerged {
         commit: String::from("6e20eaa"),
         branch: String::from("t2166"),
@@ -872,7 +672,7 @@ fn close_refuses_a_commit_main_does_not_contain_and_changes_nothing_at_the_track
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         Act::Close(Verdict::Done, Successors::Nothing, unmerged.clone()),
         Ticket::new(7),
         None,
@@ -893,13 +693,13 @@ fn close_refuses_a_commit_main_does_not_contain_and_changes_nothing_at_the_track
         "{}",
         reading.message
     );
-    assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
+    assert!(tracker.calls().is_empty(), "{:?}", tracker.calls());
 
-    recorded.issue(8, "OPEN", "## Acceptance criteria\n\n- [ ] one\n");
+    tracker.with_issue(&with_body(8, "## Acceptance criteria\n\n- [ ] one\n"));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         Act::Close(
             Verdict::Withdrawn(String::from("measured: nothing of it is in the tree")),
             Successors::Nothing,
@@ -910,17 +710,17 @@ fn close_refuses_a_commit_main_does_not_contain_and_changes_nothing_at_the_track
     )
     .unwrap();
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
-    assert_eq!(recorded.calls().len(), 1, "{:?}", recorded.calls());
+    assert_eq!(tracker.calls().len(), 1, "{:?}", tracker.calls());
 }
 
 #[test]
 fn close_refuses_while_a_box_is_unticked_and_changes_nothing_at_the_tracker() {
-    let recorded = Recorded::lay("refuse");
-    recorded.issue(7, "OPEN", UNTICKED);
+    let tracker = Tracker::empty("refuse");
+    tracker.with_issue(&with_body(7, UNTICKED));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Nothing),
         Ticket::new(7),
         Some("s1"),
@@ -933,13 +733,13 @@ fn close_refuses_while_a_box_is_unticked_and_changes_nothing_at_the_tracker() {
         reading.message
     );
     assert_eq!(reading.session, "s1");
-    assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
+    assert!(tracker.calls().is_empty(), "{:?}", tracker.calls());
 
-    recorded.issue(9, "OPEN", "## Acceptance criteria\n\nnone yet\n");
+    tracker.with_issue(&with_body(9, "## Acceptance criteria\n\nnone yet\n"));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Nothing),
         Ticket::new(9),
         None,
@@ -948,15 +748,15 @@ fn close_refuses_while_a_box_is_unticked_and_changes_nothing_at_the_tracker() {
     assert_eq!(reading.status, Status::Fail);
     assert_eq!(reading.numbers["criteria"], 0.into());
     assert!(
-        recorded.calls().is_empty(),
+        tracker.calls().is_empty(),
         "a ticket with no box is not closed"
     );
 
-    recorded.issue(10, "CLOSED", TICKED);
+    tracker.with_issue(&closed(10, TICKED));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Nothing),
         Ticket::new(10),
         None,
@@ -969,19 +769,19 @@ fn close_refuses_while_a_box_is_unticked_and_changes_nothing_at_the_tracker() {
         reading.message
     );
     assert!(
-        recorded.calls().is_empty(),
+        tracker.calls().is_empty(),
         "a closed ticket is not closed twice"
     );
 }
 
 #[test]
 fn close_with_every_box_ticked_closes_and_records_what_closed_it_and_the_session() {
-    let recorded = Recorded::lay("close");
-    recorded.issue(8, "OPEN", TICKED);
+    let tracker = Tracker::empty("close");
+    tracker.with_issue(&with_body(8, TICKED));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Nothing),
         Ticket::new(8),
         Some("session-abc"),
@@ -996,7 +796,7 @@ fn close_with_every_box_ticked_closes_and_records_what_closed_it_and_the_session
         "{}",
         reading.message
     );
-    let calls = recorded.calls();
+    let calls = tracker.calls();
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert!(
         calls[0].starts_with("issue close 8 --comment ") && calls[0].contains(&reading.commit),
@@ -1010,19 +810,18 @@ fn close_with_every_box_ticked_closes_and_records_what_closed_it_and_the_session
 /// one `for-a-person`, one `ready-for-agent`.
 #[test]
 fn close_names_what_it_opened_through_the_tracker_s_blocking_relation() {
-    let recorded = Recorded::lay("opens");
-    recorded.issue(8, "OPEN", TICKED);
-    recorded.labelled(
+    let tracker = Tracker::empty("opens");
+    tracker.with_issue(&with_body(8, TICKED));
+    tracker.with_issue(&labelled(
         9,
-        "OPEN",
         "## Acceptance criteria\n\n- [ ] later\n",
         &["for-a-person"],
-    );
-    recorded.labelled(10, "OPEN", "no criteria yet", &["ready-for-agent"]);
+    ));
+    tracker.with_issue(&labelled(10, "no criteria yet", &["ready-for-agent"]));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Tickets(vec![Ticket::new(9), Ticket::new(10)])),
         Ticket::new(8),
         Some("s2"),
@@ -1035,7 +834,7 @@ fn close_names_what_it_opened_through_the_tracker_s_blocking_relation() {
         "{}",
         reading.message
     );
-    let calls = recorded.calls();
+    let calls = tracker.calls();
     assert_eq!(calls.len(), 2, "{calls:?}");
     assert_eq!(calls[0], "issue edit 8 --add-blocking 9,10");
     assert!(
@@ -1050,39 +849,45 @@ fn close_names_what_it_opened_through_the_tracker_s_blocking_relation() {
 /// Only the missing edge is asked for; with none missing, none is.
 #[test]
 fn close_sets_only_the_edges_the_tracker_does_not_have_yet() {
-    let recorded = Recorded::lay("edges");
-    recorded.blocking(8, "OPEN", TICKED, &[], &[9]);
-    recorded.issue(9, "OPEN", "no criteria yet");
-    recorded.issue(10, "OPEN", "no criteria yet");
+    let tracker = Tracker::empty("edges");
+    tracker.with_issue(&Issue {
+        blocking: blocked_by(&[(9, State::Open)]),
+        ..with_body(8, TICKED)
+    });
+    tracker.with_issue(&with_body(9, "no criteria yet"));
+    tracker.with_issue(&with_body(10, "no criteria yet"));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Tickets(vec![Ticket::new(9), Ticket::new(10)])),
         Ticket::new(8),
         None,
     )
     .unwrap();
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
-    let calls = recorded.calls();
+    let calls = tracker.calls();
     assert_eq!(calls.len(), 2, "{calls:?}");
     assert_eq!(calls[0], "issue edit 8 --add-blocking 10");
     assert!(calls[1].starts_with("issue close 8 "), "{calls:?}");
 
-    let recorded = Recorded::lay("edges-all");
-    recorded.blocking(8, "OPEN", TICKED, &[], &[9]);
-    recorded.issue(9, "OPEN", "no criteria yet");
+    let tracker = Tracker::empty("edges-all");
+    tracker.with_issue(&Issue {
+        blocking: blocked_by(&[(9, State::Open)]),
+        ..with_body(8, TICKED)
+    });
+    tracker.with_issue(&with_body(9, "no criteria yet"));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
     )
     .unwrap();
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
-    let calls = recorded.calls();
+    let calls = tracker.calls();
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert!(calls[0].starts_with("issue close 8 "), "{calls:?}");
 }
@@ -1094,13 +899,13 @@ fn close_sets_only_the_edges_the_tracker_does_not_have_yet() {
 /// where the close runs from.
 #[test]
 fn closing_a_tracks_ticket_refuses_a_successor_that_carries_no_track_label() {
-    let recorded = Recorded::lay("unlabelled");
-    recorded.labelled(8, "OPEN", TICKED, &["track:parity-hosts"]);
-    recorded.labelled(9, "OPEN", "no criteria yet", &["ready-for-agent"]);
+    let tracker = Tracker::empty("unlabelled");
+    tracker.with_issue(&labelled(8, TICKED, &["track:parity-hosts"]));
+    tracker.with_issue(&labelled(9, "no criteria yet", &["ready-for-agent"]));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
@@ -1121,24 +926,24 @@ fn closing_a_tracks_ticket_refuses_a_successor_that_carries_no_track_label() {
         reading.message
     );
     assert!(
-        recorded.calls().is_empty(),
+        tracker.calls().is_empty(),
         "no edge and no close: {:?}",
-        recorded.calls()
+        tracker.calls()
     );
 
     // Another track's label is no more this track's than none at all.
-    recorded.labelled(9, "OPEN", "no criteria yet", &["track:main"]);
+    tracker.with_issue(&labelled(9, "no criteria yet", &["track:main"]));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
     )
     .unwrap();
     assert_eq!(reading.status, Status::Fail, "{}", reading.message);
-    assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
+    assert!(tracker.calls().is_empty(), "{:?}", tracker.calls());
 }
 
 /// The successor carrying the closed ticket's track label closes as it
@@ -1147,70 +952,68 @@ fn closing_a_tracks_ticket_refuses_a_successor_that_carries_no_track_label() {
 /// work on `main` may file for any track (#141).
 #[test]
 fn a_successor_carrying_the_track_label_closes_and_main_asks_nothing() {
-    let recorded = Recorded::lay("labelled");
-    recorded.labelled(8, "OPEN", TICKED, &["track:parity-hosts"]);
-    recorded.labelled(9, "OPEN", "no criteria yet", &["track:parity-hosts"]);
+    let tracker = Tracker::empty("labelled");
+    tracker.with_issue(&labelled(8, TICKED, &["track:parity-hosts"]));
+    tracker.with_issue(&labelled(9, "no criteria yet", &["track:parity-hosts"]));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
     )
     .unwrap();
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
-    let calls = recorded.calls();
+    let calls = tracker.calls();
     assert_eq!(calls.len(), 2, "{calls:?}");
     assert_eq!(calls[0], "issue edit 8 --add-blocking 9");
     assert!(calls[1].starts_with("issue close 8 "), "{calls:?}");
 
-    let recorded = Recorded::lay("unlabelled-main");
-    recorded.issue(8, "OPEN", TICKED);
-    recorded.issue(9, "OPEN", "no criteria yet");
+    let tracker = Tracker::empty("unlabelled-main");
+    tracker.with_issue(&with_body(8, TICKED));
+    tracker.with_issue(&with_body(9, "no criteria yet"));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
     )
     .unwrap();
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
-    assert_eq!(recorded.calls().len(), 2, "{:?}", recorded.calls());
+    assert_eq!(tracker.calls().len(), 2, "{:?}", tracker.calls());
 
     // A ticket on two tracks holds a successor to share either of them.
-    let recorded = Recorded::lay("labelled-two");
-    recorded.labelled(
+    let tracker = Tracker::empty("labelled-two");
+    tracker.with_issue(&labelled(
         8,
-        "OPEN",
         TICKED,
         &["track:parity-hosts", "track:parity-streams"],
-    );
-    recorded.labelled(9, "OPEN", "no criteria yet", &["track:parity-streams"]);
+    ));
+    tracker.with_issue(&labelled(9, "no criteria yet", &["track:parity-streams"]));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
     )
     .unwrap();
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
-    let recorded = Recorded::lay("labelled-two-none");
-    recorded.labelled(
+    let tracker = Tracker::empty("labelled-two-none");
+    tracker.with_issue(&labelled(
         8,
-        "OPEN",
         TICKED,
         &["track:parity-hosts", "track:parity-streams"],
-    );
-    recorded.labelled(9, "OPEN", "no criteria yet", &["ready-for-agent"]);
+    ));
+    tracker.with_issue(&labelled(9, "no criteria yet", &["ready-for-agent"]));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
@@ -1227,34 +1030,34 @@ fn a_successor_carrying_the_track_label_closes_and_main_asks_nothing() {
         "{}",
         reading.message
     );
-    assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
+    assert!(tracker.calls().is_empty(), "{:?}", tracker.calls());
 
-    let recorded = Recorded::lay("labelled-main");
-    recorded.labelled(8, "OPEN", TICKED, &["track:main"]);
-    recorded.labelled(9, "OPEN", "no criteria yet", &["track:parity-hosts"]);
+    let tracker = Tracker::empty("labelled-main");
+    tracker.with_issue(&labelled(8, TICKED, &["track:main"]));
+    tracker.with_issue(&labelled(9, "no criteria yet", &["track:parity-hosts"]));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
     )
     .unwrap();
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
-    assert_eq!(recorded.calls().len(), 2, "{:?}", recorded.calls());
+    assert_eq!(tracker.calls().len(), 2, "{:?}", tracker.calls());
 }
 
 /// `--opens-nothing` is an assertion: no edge, the close alone, and the
 /// reading says who asserted it (#29).
 #[test]
 fn opens_nothing_is_an_assertion_the_reading_carries_with_its_session() {
-    let recorded = Recorded::lay("nothing");
-    recorded.issue(8, "OPEN", TICKED);
+    let tracker = Tracker::empty("nothing");
+    tracker.with_issue(&with_body(8, TICKED));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Nothing),
         Ticket::new(8),
         Some("s3"),
@@ -1270,7 +1073,7 @@ fn opens_nothing_is_an_assertion_the_reading_carries_with_its_session() {
         "{}",
         reading.message
     );
-    let calls = recorded.calls();
+    let calls = tracker.calls();
     assert_eq!(calls.len(), 1, "no edge for nothing: {calls:?}");
     assert!(
         calls[0].starts_with("issue close 8 --comment ") && calls[0].contains("opens nothing"),
@@ -1280,7 +1083,7 @@ fn opens_nothing_is_an_assertion_the_reading_carries_with_its_session() {
     let unnamed = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Nothing),
         Ticket::new(8),
         None,
@@ -1299,10 +1102,11 @@ fn opens_nothing_is_an_assertion_the_reading_carries_with_its_session() {
 /// and the tracker is asked nothing but `issue view` (#29).
 #[test]
 fn close_refuses_a_successor_that_is_closed_missing_or_unreadable_and_changes_nothing() {
-    let recorded = Recorded::lay("successor");
-    recorded.issue(8, "OPEN", TICKED);
-    recorded.issue(9, "CLOSED", "done already");
-    fs::write(recorded.dir.join("issues/11.json"), "not an issue").unwrap();
+    let tracker = Tracker::empty("successor");
+    tracker.with_issue(&with_body(8, TICKED));
+    tracker.with_issue(&closed(9, "done already"));
+    tracker.with_answer(11, "not an issue");
+    tracker.none(404);
     for (successor, expected) in [
         (9, "#9, which is closed"),
         (404, "#404 could not be read from the tracker"),
@@ -1311,7 +1115,7 @@ fn close_refuses_a_successor_that_is_closed_missing_or_unreadable_and_changes_no
         let reading = run(
             workspace(),
             &manifest(),
-            &recorded.gh(),
+            &tracker.gh(),
             done(Successors::Tickets(vec![Ticket::new(successor)])),
             Ticket::new(8),
             None,
@@ -1332,21 +1136,21 @@ fn close_refuses_a_successor_that_is_closed_missing_or_unreadable_and_changes_no
             "the call is recorded as made"
         );
     }
-    assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
+    assert!(tracker.calls().is_empty(), "{:?}", tracker.calls());
 }
 
 /// The edge is set before the close: a tracker that refuses the edge
 /// leaves the ticket open and unchanged (#29).
 #[test]
 fn a_tracker_that_refuses_the_edge_leaves_the_ticket_open() {
-    let recorded = Recorded::lay("edge");
-    recorded.issue(8, "OPEN", TICKED);
-    recorded.issue(9, "OPEN", "later");
-    recorded.answering(Some("edit"));
+    let tracker = Tracker::empty("edge");
+    tracker.with_issue(&with_body(8, TICKED));
+    tracker.with_issue(&with_body(9, "later"));
+    tracker.refusing("edit");
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
@@ -1362,7 +1166,7 @@ fn a_tracker_that_refuses_the_edge_leaves_the_ticket_open() {
         reading.message
     );
     assert_eq!(
-        recorded.calls(),
+        tracker.calls(),
         ["issue edit 8 --add-blocking 9"],
         "the edge was asked and refused; the close was not asked"
     );
@@ -1372,7 +1176,7 @@ fn a_tracker_that_refuses_the_edge_leaves_the_ticket_open() {
     let empty = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Tickets(vec![])),
         Ticket::new(8),
         None,
@@ -1384,21 +1188,21 @@ fn a_tracker_that_refuses_the_edge_leaves_the_ticket_open() {
         "{}",
         empty.message
     );
-    assert_eq!(recorded.calls().len(), 1, "{:?}", recorded.calls());
+    assert_eq!(tracker.calls().len(), 1, "{:?}", tracker.calls());
 }
 
 /// The edge is set and then the close is refused: the reading says the
 /// edge stands, since the tracker did change (#29).
 #[test]
 fn a_tracker_that_refuses_the_close_after_the_edge_says_the_edge_stands() {
-    let recorded = Recorded::lay("edge-stands");
-    recorded.issue(8, "OPEN", TICKED);
-    recorded.issue(9, "OPEN", "later");
-    recorded.answering(Some("close"));
+    let tracker = Tracker::empty("edge-stands");
+    tracker.with_issue(&with_body(8, TICKED));
+    tracker.with_issue(&with_body(9, "later"));
+    tracker.refusing("close");
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
@@ -1414,20 +1218,20 @@ fn a_tracker_that_refuses_the_close_after_the_edge_says_the_edge_stands() {
         "{}",
         reading.message
     );
-    let calls = recorded.calls();
+    let calls = tracker.calls();
     assert_eq!(calls.len(), 2, "{calls:?}");
     assert_eq!(calls[0], "issue edit 8 --add-blocking 9");
 }
 
 #[test]
 fn a_tracker_that_refuses_the_close_is_a_failed_reading_carrying_its_text() {
-    let recorded = Recorded::lay("refused");
-    recorded.issue(8, "OPEN", TICKED);
-    recorded.answering(Some("close"));
+    let tracker = Tracker::empty("refused");
+    tracker.with_issue(&with_body(8, TICKED));
+    tracker.refusing("close");
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Nothing),
         Ticket::new(8),
         None,
@@ -1440,10 +1244,11 @@ fn a_tracker_that_refuses_the_close_is_a_failed_reading_carrying_its_text() {
         reading.message
     );
 
+    tracker.none(404);
     let missing = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         Act::Read,
         Ticket::new(404),
         None,
@@ -1466,19 +1271,14 @@ fn a_tracker_that_refuses_the_close_is_a_failed_reading_carrying_its_text() {
 /// the label says whose the work is, and there is none.
 #[test]
 fn a_withdrawal_closes_a_ticket_with_no_box_ticked_and_records_the_measurement() {
-    let recorded = Recorded::lay("withdrawn");
-    recorded.labelled(
-        167,
-        "OPEN",
-        "## What happened\n\nnot in the tree\n\n## Acceptance criteria\n\n- [ ] *A person decides* which of the two\n- [ ] the decision is implemented\n",
-        &["for-a-person"],
-    );
-    recorded.issue(9, "OPEN", "## Acceptance criteria\n\n- [ ] later\n");
+    let tracker = Tracker::empty("withdrawn");
+    tracker.with_issue(&labelled(167, "## What happened\n\nnot in the tree\n\n## Acceptance criteria\n\n- [ ] *A person decides* which of the two\n- [ ] the decision is implemented\n", &["for-a-person"]));
+    tracker.with_issue(&with_body(9, "## Acceptance criteria\n\n- [ ] later\n"));
     let reason = "measured on 7d6f1e8: `cargo xtask permit --diff` exit=0 with the captured status staged; #135's `unless` sensor permits it";
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         Act::Close(
             Verdict::Withdrawn(reason.to_owned()),
             Successors::Tickets(vec![Ticket::new(9)]),
@@ -1501,7 +1301,7 @@ fn a_withdrawal_closes_a_ticket_with_no_box_ticked_and_records_the_measurement()
         "{}",
         reading.message
     );
-    let calls = recorded.calls();
+    let calls = tracker.calls();
     assert_eq!(calls.len(), 2, "{calls:?}");
     assert_eq!(calls[0], "issue edit 167 --add-blocking 9");
     assert!(
@@ -1511,15 +1311,14 @@ fn a_withdrawal_closes_a_ticket_with_no_box_ticked_and_records_the_measurement()
         "the comment says withdrawn and carries the reason: {calls:?}"
     );
 
-    recorded.issue(
+    tracker.with_issue(&with_body(
         11,
-        "OPEN",
         "## What happened\n\nfiled, then found already in the tree\n",
-    );
+    ));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         Act::Close(
             Verdict::Withdrawn("landed by #135".to_owned()),
             Successors::Nothing,
@@ -1533,18 +1332,18 @@ fn a_withdrawal_closes_a_ticket_with_no_box_ticked_and_records_the_measurement()
     assert_eq!(reading.numbers["criteria"], 0.into());
     assert_eq!(reading.numbers["withdrawn"], 1.into());
     assert!(
-        recorded.calls()[2].starts_with("issue close 11 --comment Withdrawn"),
+        tracker.calls()[2].starts_with("issue close 11 --comment Withdrawn"),
         "{:?}",
-        recorded.calls()
+        tracker.calls()
     );
 
     // A close of work done says so in the same count, so the section
     // tells the two apart from the store alone.
-    recorded.issue(8, "OPEN", TICKED);
+    tracker.with_issue(&with_body(8, TICKED));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         done(Successors::Nothing),
         Ticket::new(8),
         None,
@@ -1563,12 +1362,12 @@ fn a_withdrawal_closes_a_ticket_with_no_box_ticked_and_records_the_measurement()
 fn a_withdrawal_of_a_ticket_with_a_box_ticked_is_refused_and_changes_nothing() {
     let body =
         fs::read_to_string(xtask::package_dir().join("fixtures/ticket/half-done.md")).unwrap();
-    let recorded = Recorded::lay("half-done");
-    recorded.issue(12, "OPEN", &body);
+    let tracker = Tracker::empty("half-done");
+    tracker.with_issue(&with_body(12, &body));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         Act::Close(
             Verdict::Withdrawn("nothing here".to_owned()),
             Successors::Nothing,
@@ -1590,13 +1389,13 @@ fn a_withdrawal_of_a_ticket_with_a_box_ticked_is_refused_and_changes_nothing() {
         "{}",
         reading.message
     );
-    assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
+    assert!(tracker.calls().is_empty(), "{:?}", tracker.calls());
 
-    recorded.issue(13, "CLOSED", "## Acceptance criteria\n\n- [ ] one\n");
+    tracker.with_issue(&closed(13, "## Acceptance criteria\n\n- [ ] one\n"));
     let reading = run(
         workspace(),
         &manifest(),
-        &recorded.gh(),
+        &tracker.gh(),
         Act::Close(
             Verdict::Withdrawn("nothing here".to_owned()),
             Successors::Nothing,
@@ -1612,7 +1411,7 @@ fn a_withdrawal_of_a_ticket_with_a_box_ticked_is_refused_and_changes_nothing() {
         "{}",
         reading.message
     );
-    assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
+    assert!(tracker.calls().is_empty(), "{:?}", tracker.calls());
 }
 
 /// The cap before the ticket is filed and not the tracker's refusal after
@@ -1624,12 +1423,12 @@ fn a_withdrawal_of_a_ticket_with_a_box_ticked_is_refused_and_changes_nothing() {
 /// asked to change.
 #[test]
 fn a_sheet_at_the_cap_fails_before_a_ticket_is_filed_against_it_and_one_with_room_passes() {
-    let recorded = Recorded::lay("parent");
-    recorded.sheet(447, "OPEN", CAP);
-    recorded.sheet(460, "OPEN", 91);
-    recorded.sheet(97, "CLOSED", 12);
+    let tracker = Tracker::empty("parent");
+    tracker.with_issue(&sheet(447, State::Open, CAP));
+    tracker.with_issue(&sheet(460, State::Open, 91));
+    tracker.with_issue(&sheet(97, State::Closed, 12));
 
-    let full = parent(workspace(), &recorded.gh(), Ticket::new(447), None).unwrap();
+    let full = parent(workspace(), &tracker.gh(), Ticket::new(447), None).unwrap();
     assert_eq!(full.status, Status::Fail, "{}", full.message);
     assert_eq!(full.scope, "parent/447");
     assert_eq!(full.numbers["subissues"], 100.into(), "{full:#?}");
@@ -1656,7 +1455,7 @@ fn a_sheet_at_the_cap_fails_before_a_ticket_is_filed_against_it_and_one_with_roo
         full.message
     );
 
-    let room = parent(workspace(), &recorded.gh(), Ticket::new(460), None).unwrap();
+    let room = parent(workspace(), &tracker.gh(), Ticket::new(460), None).unwrap();
     assert_eq!(room.status, Status::Pass, "{}", room.message);
     assert_eq!(room.scope, "parent/460");
     assert_eq!(room.numbers["room"], 9.into(), "{room:#?}");
@@ -1667,7 +1466,7 @@ fn a_sheet_at_the_cap_fails_before_a_ticket_is_filed_against_it_and_one_with_roo
         room.message
     );
 
-    let closed = parent(workspace(), &recorded.gh(), Ticket::new(97), None).unwrap();
+    let closed = parent(workspace(), &tracker.gh(), Ticket::new(97), None).unwrap();
     assert_eq!(closed.status, Status::Fail, "{}", closed.message);
     assert_eq!(closed.numbers["room"], 88.into(), "{closed:#?}");
     assert!(
@@ -1676,19 +1475,166 @@ fn a_sheet_at_the_cap_fails_before_a_ticket_is_filed_against_it_and_one_with_roo
         closed.message
     );
 
-    assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
+    assert!(tracker.calls().is_empty(), "{:?}", tracker.calls());
 }
 
-/// An issue the tracker answered without the count, which every recorded
-/// transcript beside this one is, reads as holding none: the field is the
-/// one the fetch asks for now, and a reading is not owed a panic for an
-/// answer that predates it.
-#[test]
-fn an_issue_answered_without_the_count_holds_no_sub_issues() {
-    let recorded = Recorded::lay("parent-absent");
-    recorded.issue(13, "OPEN", "## Acceptance criteria\n\n- [x] one\n");
-    let reading = parent(workspace(), &recorded.gh(), Ticket::new(13), Some("s1")).unwrap();
-    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
-    assert_eq!(reading.numbers["subissues"], 0.into(), "{reading:#?}");
-    assert_eq!(reading.session, "s1");
+/// The tests whose subject is the tracked workspace itself: each reads the
+/// `seams.toml`, `oracle.toml`, registry or sources standing in the
+/// workspace, so a person's edit there is what may turn one red (#3091).
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
+mod tracked {
+    use super::*;
+
+    /// The negative control of `harness.self` at the read (#153): the ticket
+    /// laid down under `xtask/fixtures/rules/harness.self/`, which carries
+    /// `ready-for-agent` and asks in two criteria for a write into the rule's
+    /// scope, one the pin that `xtask steer` writes for an agent and one the
+    /// hook settings that nothing writes for one. The manifest is this
+    /// workspace's, so the scope the reading names is the one `permit` denies
+    /// the write by.
+    #[test]
+    fn a_ready_for_agent_ticket_asking_for_a_write_the_manifest_denies_fails_naming_path_and_rule()
+    {
+        let body =
+            fs::read_to_string(xtask::package_dir().join("fixtures/rules/harness.self/ticket.md"))
+                .unwrap();
+        let tracker = Tracker::empty("denied");
+        tracker.with_issue(&labelled(111, &body, &["ready-for-agent", "track:main"]));
+        let reading = run(
+            workspace(),
+            &tracked_manifest(),
+            &tracker.gh(),
+            Act::Read,
+            Ticket::new(111),
+            None,
+        )
+        .unwrap();
+        assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+        assert_eq!(reading.rule, "harness.self");
+        assert_eq!(reading.numbers["denied"], 1.into(), "{reading:#?}");
+        assert_eq!(reading.numbers["steerable"], 1.into(), "{reading:#?}");
+        assert!(
+            reading
+                .message
+                .contains("`.claude/settings.json` gains the hook")
+                && reading.message.contains("asks for .claude/settings.json"),
+            "the criterion and the path: {}",
+            reading.message
+        );
+        assert!(
+            reading.message.contains("harness.self denies an agent"),
+            "the rule: {}",
+            reading.message
+        );
+        assert!(
+            reading
+                .message
+                .contains("gh issue edit 111 --add-label for-a-person"),
+            "what a person does with it: {}",
+            reading.message
+        );
+        // The criterion whose object is the pin is said and not refused: the
+        // write is an agent's through the instrument sanctioned to make it
+        // (#152).
+        assert!(
+            reading
+                .message
+                .contains("`cargo xtask steer oracle.toml --from <proposal>`"),
+            "the instrument that writes it: {}",
+            reading.message
+        );
+        // The same criteria under the label that says the act is a person's
+        // are held to the boxes and to nothing else.
+        tracker.with_issue(&labelled(111, &body, &["for-a-person", "track:main"]));
+        let person = run(
+            workspace(),
+            &tracked_manifest(),
+            &tracker.gh(),
+            Act::Read,
+            Ticket::new(111),
+            None,
+        )
+        .unwrap();
+        assert_eq!(person.numbers["denied"], 0.into(), "{person:#?}");
+        assert_eq!(person.numbers["steerable"], 0.into(), "{person:#?}");
+        assert!(person.rule.is_empty(), "{person:#?}");
+        assert!(
+            person.message.contains("0 of 4 criteria ticked"),
+            "{}",
+            person.message
+        );
+    }
+
+    /// The narrowing #152 measured (#153): a ticket the maintainer handed to
+    /// an agent, every box ticked, whose first criterion's object is the pin.
+    /// `xtask steer` is the sanctioned writer of that file, so the label is
+    /// not wrong; the read passes and the message still says what it matched.
+    #[test]
+    fn a_criterion_whose_object_is_a_file_xtask_steer_writes_is_said_and_not_refused() {
+        let body = "## Acceptance criteria\n\n- [x] `oracle.toml` carries a `[regime.dump]` with the two ini entries above, with a comment that says what the regime is\n";
+        let tracker = Tracker::empty("steerable");
+        tracker.with_issue(&labelled(
+            152,
+            body,
+            &["ready-for-agent", "track:parity-hosts"],
+        ));
+        let reading = run(
+            workspace(),
+            &tracked_manifest(),
+            &tracker.gh(),
+            Act::Read,
+            Ticket::new(152),
+            None,
+        )
+        .unwrap();
+        assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+        assert_eq!(reading.numbers["denied"], 0.into(), "{reading:#?}");
+        assert_eq!(reading.numbers["steerable"], 1.into(), "{reading:#?}");
+        assert!(reading.rule.is_empty(), "{reading:#?}");
+        assert!(
+            reading.message.contains("asks for oracle.toml")
+                && reading
+                    .message
+                    .contains("`cargo xtask steer oracle.toml --from <proposal>`"),
+            "what it matched, and the call that writes it: {}",
+            reading.message
+        );
+        assert!(
+            !reading.message.contains("--add-label for-a-person"),
+            "the label is not wrong: {}",
+            reading.message
+        );
+    }
+
+    /// A criterion whose denied subject stays as it is asks for no write
+    /// (#2391): #630's third box asks that the live numbers still render, and
+    /// the read passes it, while #111's "`oracle.toml` carries" beside it is
+    /// still the write, said as the steer that makes it.
+    #[test]
+    fn a_criterion_saying_a_denied_path_still_behaves_as_before_asks_for_no_write() {
+        let body = "## Acceptance criteria\n\n- [x] `.claude/harness.local.md` still renders this machine's live numbers, and `cargo xtask status --section rules` still prints them\n- [x] `seams.toml` is unchanged\n- [x] `oracle.toml` carries a `[regime.dump]` with the ini above\n";
+        let tracker = Tracker::empty("kept");
+        tracker.with_issue(&labelled(630, body, &["ready-for-agent"]));
+        let reading = run(
+            workspace(),
+            &tracked_manifest(),
+            &tracker.gh(),
+            Act::Read,
+            Ticket::new(630),
+            None,
+        )
+        .unwrap();
+        assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+        assert_eq!(reading.numbers["denied"], 0.into(), "{reading:#?}");
+        assert_eq!(reading.numbers["steerable"], 1.into(), "{reading:#?}");
+        assert!(
+            reading.message.contains("asks for oracle.toml")
+                && !reading.message.contains("harness.local.md")
+                && !reading.message.contains("asks for seams.toml"),
+            "{}",
+            reading.message
+        );
+    }
 }

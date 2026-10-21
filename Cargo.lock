@@ -1075,6 +1075,8 @@ dependencies = [
  "php_ext_zip",
  "php_ext_zlib",
  "php_jit",
+ "syn",
+ "toml",
 ]
 
 [[package]]

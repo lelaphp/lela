@@ -13,6 +13,11 @@ use xtask::reading::Status;
 use xtask::scratch::Tree;
 use xtask::steer;
 
+mod common {
+    pub mod repo;
+}
+use common::repo::Repo;
+
 /// A scratch workspace carrying one of the harness's own files, a git
 /// repository with one commit so that a reading can be stamped.
 fn scratch(name: &str, pin: &str) -> Tree {
@@ -26,19 +31,7 @@ fn scratch_at(name: &str, file: &str, body: &str) -> Tree {
         fs::create_dir_all(parent).expect("the tracked file's directory");
     }
     fs::write(dir.join(file), body).expect("the tracked file");
-    let who = ["-c", "user.name=x", "-c", "user.email=x@x"];
-    for args in [
-        &["init", "-q"][..],
-        &[&who[..], &["add", "."]].concat(),
-        &[&who[..], &["commit", "-q", "-m", "the pin"]].concat(),
-    ] {
-        let run = std::process::Command::new("git")
-            .args(args)
-            .current_dir(&dir)
-            .output()
-            .expect("git runs");
-        assert!(run.status.success(), "git {args:?}");
-    }
+    Repo::init(&dir).commit("the pin");
     dir
 }
 
@@ -210,8 +203,15 @@ fn every_negative_control_is_refused_at_the_path_it_moved_and_writes_nothing() {
     }
 }
 
-/// A covering row (harness-design.md §4.3, revision 62) proposed beside the
-/// tracked registry: one reason for three tests of its kind.
+/// The registry the covering row is proposed beside, in place of the
+/// tracked one, whose rows a person keeps (#3091): one row, whose id a
+/// covering row may not cover again.
+const REGISTRY: &str = "# The divergence registry (fixture).\n\n[[divergence]]\n\
+id = \"phpt:php-src/ext/opcache/tests/gh9164.phpt\"\nkind = \"phpt\"\n\
+reason = \"The fixture's one reason (fixture).\"\nstatus = \"accepted\"\nsince = \"2026-09-07\"\n";
+
+/// A covering row (harness-design.md §4.3, revision 62) proposed beside
+/// [`REGISTRY`]: one reason for three tests of its kind.
 const COVERING: &str = "\n[[divergence]]\nid = \"phpt:fixture-cause\"\nkind = \"phpt\"\n\
 reason = \"One reason (fixture).\"\nstatus = \"accepted\"\nsince = \"2026-09-28\"\n\
 covers = [\"phpt:php-src/ext/fixture/tests/a.phpt\", \"phpt:php-src/ext/fixture/tests/b.phpt\", \
@@ -219,13 +219,8 @@ covers = [\"phpt:php-src/ext/fixture/tests/a.phpt\", \"phpt:php-src/ext/fixture/
 
 #[test]
 fn a_new_row_with_covers_is_one_addition_to_the_registry() {
-    let tracked = fs::read_to_string(
-        xtask::package_dir()
-            .join("..")
-            .join(xtask::divergence::FILE),
-    )
-    .expect("the tracked registry");
-    let root = scratch_at("covers", xtask::divergence::FILE, &tracked);
+    let tracked = REGISTRY;
+    let root = scratch_at("covers", xtask::divergence::FILE, tracked);
     let proposal = root.join("proposed.toml");
     fs::write(&proposal, format!("{tracked}{COVERING}")).expect("the proposal");
 
@@ -334,30 +329,17 @@ fn a_table_the_pins_reader_does_not_know_is_refused_and_one_it_knows_is_written(
 fn merging(name: &str, merged: &str) -> Tree {
     let file = xtask::divergence::FILE;
     let root = scratch_at(name, file, &fixture("merge/base.toml"));
-    let git = |args: &[&str]| {
-        let run = std::process::Command::new("git")
-            .args(["-c", "user.name=x", "-c", "user.email=x@x"])
-            .args(args)
-            .current_dir(&root)
-            .output()
-            .expect("git runs");
-        run.status.success()
-    };
+    let repo = Repo::at(&root);
     let side = |branch: &str, body: &str| {
         fs::write(root.join(file), fixture(body)).expect("the registry");
-        assert!(
-            git(&["commit", "-q", "-am", branch]),
-            "the commit on {branch}"
-        );
+        repo.git(&["commit", "-q", "-am", branch]);
     };
-    assert!(git(&["checkout", "-q", "-b", "merged"]));
+    repo.git(&["checkout", "-q", "-b", "merged"]);
     side("merged", merged);
-    assert!(git(&["checkout", "-q", "-"]));
+    repo.git(&["checkout", "-q", "-"]);
     side("head", "merge/head.toml");
-    assert!(
-        !git(&["merge", "-q", "merged"]),
-        "the merge stops on the conflict"
-    );
+    // The merge stops on the conflict.
+    repo.refused(&["merge", "-q", "merged"]);
     assert!(
         fs::read_to_string(root.join(file))
             .expect("the registry")

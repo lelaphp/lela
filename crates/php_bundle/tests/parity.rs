@@ -218,35 +218,42 @@ fn manifest_dir() -> PathBuf {
         .expect("cargo sets CARGO_MANIFEST_DIR for a test it runs")
 }
 
-/// The oracle's binary, from the one file that pins it.
+/// The oracle's binary, `[oracle] path` in the one file that pins it,
+/// read as TOML; a pin that cannot be read or names no path fails with
+/// why, rather than running a binary named nothing.
 fn oracle() -> PathBuf {
     let pin = manifest_dir().join("../../oracle.toml");
-    let text = std::fs::read_to_string(&pin).unwrap_or_default();
-    let path = text
-        .lines()
-        .skip_while(|line| line.trim() != "[oracle]")
-        .find_map(|line| line.trim().strip_prefix("path = \""))
-        .and_then(|rest| rest.split('"').next())
-        .unwrap_or_default();
+    let table: toml::Table = std::fs::read_to_string(&pin)
+        .map_err(|e| e.to_string())
+        .and_then(|text| toml::from_str(&text).map_err(|e| e.to_string()))
+        .unwrap_or_else(|e| panic!("{} is read as TOML: {e}", pin.display()));
+    let path = table
+        .get("oracle")
+        .and_then(|oracle| oracle.get("path"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or_else(|| panic!("{} names no `[oracle] path`", pin.display()));
     PathBuf::from(path)
 }
 
+/// What the oracle prints for `source` under `-n`; an oracle that does
+/// not start or answer fails with why, so `recapture` never pins nothing.
 fn run_oracle(source: &str) -> String {
-    let Ok(mut child) = Command::new(oracle())
+    let oracle = oracle();
+    let mut child = Command::new(&oracle)
         .arg("-n")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
-    else {
-        return String::new();
-    };
+        .unwrap_or_else(|e| panic!("{} starts: {e}", oracle.display()));
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(source.as_bytes()).ok();
+        stdin
+            .write_all(source.as_bytes())
+            .unwrap_or_else(|e| panic!("{} reads the program: {e}", oracle.display()));
     }
-    child
+    let out = child
         .wait_with_output()
-        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
-        .unwrap_or_default()
+        .unwrap_or_else(|e| panic!("{} answers: {e}", oracle.display()));
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 /// The prelude folded onto the program's first line, after its `<?php`.

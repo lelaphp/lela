@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# next-cited: the revisions still cited as `NEXT` in what a commit on
+# `main` would take, one `file:line:text` each, for pre-commit and
+# pre-merge-commit to refuse it on, and in what a push of `main` would
+# add, for pre-push. A branch writes a ledger revision it
+# adds as `NEXT` (`NEXT-2` for a second in one file) and cites it so
+# wherever it is named, since two branches that both take the next
+# number conflict at their merges, and the merge into `main` numbers row
+# and citations alike (#2982, the specs skill's merging.md); three
+# citations a merge missed landed so, and 04a539f18 numbered them by
+# hand. Not a hook git runs: no hook is named so.
+#
+# Read are the Markdown and Rust files the index changes against HEAD, a
+# merge's being what it brings in, and of those the ones with NEXT in
+# them. A citation is `revision` or `revisions`, then any run of numbers
+# and NEXTs joined by commas or `and`, then the NEXT; text in backticks
+# quotes the convention rather than citing a revision, and a citation
+# wrapped onto the next line, the next line's comment marker taken off,
+# is named at the line it starts on. xtask/fixtures holds the negative
+# controls and is not read. Prints nothing and exits 0 off `main`, where
+# NEXT is the rule.
+#
+# `next-cited <base> <tip>` is the range form, for pre-push: the files
+# `git diff <base> <tip>` changes, read at <tip>, whatever branch is
+# checked out, since a fast-forward onto `main` writes no commit and so
+# runs neither commit hook (#3138). A <base> of all zeros, a ref the
+# remote does not have yet, is the empty tree: every file at <tip> is
+# what the push adds.
+set -u
+cd "$(git rev-parse --show-toplevel)" || exit 1
+if [ $# -eq 2 ]; then
+    base=$1 tip=$2
+    case $base in *[!0]*) ;; *) base=$(git hash-object -t tree /dev/null) ;; esac
+    # A sha this clone does not hold, a remote moved and not fetched, is
+    # a range nothing here can read: refused, never read as clean.
+    for end in "$base" "$tip"; do
+        if ! git cat-file -e "$end^{tree}" 2>/dev/null; then
+            echo "next-cited: $end is no commit this clone holds, so the range cannot be read; fetch it and try again" >&2
+            exit 1
+        fi
+    done
+    changed() { git diff --name-only -z --diff-filter=d "$base" "$tip" -- "$@"; }
+    holds() { git grep -q -I -w NEXT "$tip" -- "$1"; }
+    at() { git show "$tip:$1"; }
+elif [ $# -eq 0 ]; then
+    [ "$(git symbolic-ref --short -q HEAD)" = main ] || exit 0
+    changed() { git diff --cached --name-only -z --diff-filter=d -- "$@"; }
+    holds() { git grep --cached -q -I -w NEXT -- "$1"; }
+    at() { git show ":$1"; }
+else
+    echo "next-cited: no arguments, or a <base> and a <tip>" >&2
+    exit 2
+fi
+# Each line is read with its backticked spans taken out and a space at
+# either end, so the pattern's edges need no `^` or `$` inside a group.
+read_cited='
+function plain(s) { gsub(/`[^`]*`/, "", s); return " " s " " }
+function body(s) { sub(/^[ \t]*(\/\/[\/!]?|#+|\*|>)?[ \t]*/, "", s); return s }
+{ raw[NR] = $0 }
+END {
+    re = "[^A-Za-z][Rr]evisions? +(([0-9]+|NEXT(-[0-9]+)?),? +(and +)?)*NEXT(-[0-9]+)?[^A-Za-z0-9]"
+    for (i = 1; i <= NR; i++) {
+        if (plain(raw[i]) ~ re) { print file ":" i ":" raw[i]; continue }
+        if (i < NR && plain(raw[i + 1]) !~ re && plain(raw[i] " " body(raw[i + 1])) ~ re)
+            print file ":" i ":" raw[i]
+    }
+}'
+changed '*.md' '*.rs' ':!xtask/fixtures' |
+    while IFS= read -r -d '' file; do
+        holds ":(literal)$file" || continue
+        at "$file" | awk -v file="$file" "$read_cited"
+    done
+exit 0

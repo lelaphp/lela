@@ -137,7 +137,7 @@ mod watch;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -154,8 +154,7 @@ use crate::sources;
 use crate::tally::{self, Outcome};
 use anchor::Record;
 use fence::Extracted;
-pub(crate) use fpm::served_as_fpm;
-pub(crate) use process::{Binary, served_as_cgi};
+pub(crate) use process::{Binary, host_of, served_as, under_recipe};
 use watch::{Journal, Watch};
 
 /// The instrument's name, the reading's `instrument` field.
@@ -390,11 +389,7 @@ pub(crate) fn reading(
     };
     // Over the snapshot the run took after any `--accept` it made, since
     // that writes the sources the stamp is over.
-    let mut reading = run.reading(
-        under_rule(Reading::for_crate(INSTRUMENT, krate, snapshot)?, rule),
-        &outcome,
-        message,
-    )?;
+    let mut reading = run.reading(under_rule(krate, snapshot, rule)?, &outcome, message)?;
     reading.count(numbers::PASSED, run.count(Judgement::Pass))?;
     reading.count(numbers::FAILED, run.against().len() as u64)?;
     reading.count(numbers::DIVERGED, run.count(Judgement::Diverged))?;
@@ -417,34 +412,6 @@ pub(crate) fn reading(
 /// did on each fence a `trace:` row holds to the engine alone.
 fn tail(tally: &Tally) -> String {
     let run = &tally.witnesses;
-    // What did not run for want of the oracle, and what the engine did
-    // not serve for its trace there, as a message's tail.
-    let unrun = match (&tally.oracle_absent, run.not_run()) {
-        (Some(why), n) if n > 0 => {
-            let s = if n == 1 { "" } else { "es" };
-            format!("; {n} witness{s} did not run, {why}")
-        }
-        _ => String::new(),
-    };
-    let unrun = match tally.unserved.len() {
-        0 => unrun,
-        n => {
-            let s = if n == 1 { "" } else { "s" };
-            format!(
-                "{unrun}; {n} fence{s} the engine did not serve: {}",
-                tally.unserved.join("; ")
-            )
-        }
-    };
-    // What a `locale=<name>` the host lacks kept from running, as a
-    // message's tail (#1678).
-    let unrun = match run.count(Judgement::Skipped) {
-        0 => unrun,
-        n => {
-            let s = if n == 1 { "" } else { "es" };
-            format!("{unrun}; {n} witness{s} skipped for a locale this host lacks")
-        }
-    };
     // What the oracle did on each fence a `trace:` row holds to the engine
     // alone, recorded and not judged (harness §4.3, §8; #1650).
     let covered: Vec<String> = run
@@ -453,26 +420,61 @@ fn tail(tally: &Tally) -> String {
         .filter(|j| j.judgement == Judgement::Covered)
         .map(|j| format!("{}: {}", j.id, j.note))
         .collect();
-    match covered.len() {
-        0 => unrun,
-        n => {
-            let s = if n == 1 { "" } else { "s" };
-            format!(
-                "{unrun}; {n} fence{s} held to the engine alone: {}",
-                covered.join("; ")
-            )
-        }
-    }
+    let why = tally.oracle_absent.as_deref();
+    // Each clause with its count, said where the count is not zero: what
+    // did not run for want of the oracle, what the engine did not serve for
+    // its trace there, what a `locale=<name>` the host lacks kept from
+    // running (#1678), and the fences held to the engine alone.
+    let clauses = [
+        (
+            why.map_or(0, |_| run.not_run()),
+            "witness",
+            "es",
+            format!("did not run, {}", why.unwrap_or_default()),
+        ),
+        (
+            tally.unserved.len() as u64,
+            "fence",
+            "s",
+            format!("the engine did not serve: {}", tally.unserved.join("; ")),
+        ),
+        (
+            run.count(Judgement::Skipped),
+            "witness",
+            "es",
+            "skipped for a locale this host lacks".to_owned(),
+        ),
+        (
+            covered.len() as u64,
+            "fence",
+            "s",
+            format!("held to the engine alone: {}", covered.join("; ")),
+        ),
+    ];
+    let said = clauses.into_iter().filter(|(n, ..)| *n > 0);
+    let said = said.map(|(n, what, es, clause)| {
+        let es = if n == 1 { "" } else { es };
+        format!("; {n} {what}{es} {clause}")
+    });
+    said.collect::<Vec<_>>().concat()
 }
 
-/// The reading under the coverage rule, when the manifest has one: the
-/// rule's id and its ADR, on every reading the instrument writes.
-fn under_rule(mut reading: Reading, rule: Option<&Rule>) -> Reading {
+/// The value under `lock`, a poisoned one included: a fence whose run
+/// panicked leaves what it gathered as it was.
+fn held<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
+    lock.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// `krate`'s reading over `snapshot`, under the coverage rule where the
+/// manifest has one: the rule's id and its ADR, on every reading the
+/// instrument writes.
+fn under_rule(krate: &Crate, snapshot: &Snapshot, rule: Option<&Rule>) -> Result<Reading> {
+    let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
     if let Some(rule) = rule {
         reading.rule.clone_from(&rule.id);
         reading.adr = rule.adr.adr_field();
     }
-    reading
+    Ok(reading)
 }
 
 /// What one `xtask witness` run was asked for.
@@ -673,8 +675,7 @@ fn run_in(
     for slot in slots {
         let (one, tally) = match slot {
             Slot::Unrun(krate, why, failed) => {
-                let mut unrun = under_rule(Reading::for_crate(INSTRUMENT, krate, &snapshot)?, rule)
-                    .under(&manifest.pin);
+                let mut unrun = under_rule(krate, &snapshot, rule)?.under(&manifest.pin);
                 unrun.message = format!("{}: {why}", krate.name);
                 if failed {
                     unrun.status = Status::Fail;
@@ -685,8 +686,7 @@ fn run_in(
             Slot::Ready(at) => (&ready[at], finished[at].take()),
         };
         if let Some(why) = &full {
-            let unrun = under_rule(Reading::for_crate(INSTRUMENT, one.krate, &snapshot)?, rule)
-                .under(&manifest.pin);
+            let unrun = under_rule(one.krate, &snapshot, rule)?.under(&manifest.pin);
             readings.push(Full::skipped(unrun, &one.krate.name, why)?);
             continue;
         }
@@ -726,43 +726,35 @@ fn find<'a>(
         if !crates.is_empty() && !crates.iter().any(|n| n == &krate.name) {
             continue;
         }
-        if krate.name == crate::done::HARNESS {
-            // The harness measures the engine and carries no witness of its
-            // own; `done` asks it for none either (§4.5).
-            slots.push(Slot::Unrun(
-                krate,
-                String::from("the harness carries no witness"),
-                false,
-            ));
+        // The harness measures the engine and carries no witness of its
+        // own; `done` asks it for none either (§4.5).
+        let unrun = if krate.name == crate::done::HARNESS {
+            Some("the harness carries no witness")
+        } else {
+            (!sources::exists(root, krate)).then_some(sources::NOT_YET_CREATED)
+        };
+        if let Some(why) = unrun {
+            slots.push(Slot::Unrun(krate, why.to_owned(), false));
             continue;
         }
-        if !sources::exists(root, krate) {
-            slots.push(Slot::Unrun(
-                krate,
-                sources::NOT_YET_CREATED.to_owned(),
-                false,
-            ));
-            continue;
-        }
-        let picked = oracles
-            .of(krate.oracle.as_deref())
-            .and_then(|oracle| Ok((oracle, extract(root, krate, rule, Target::built())?)));
-        let (oracle, found) = match picked {
-            Ok((oracle, found)) => (oracle, ask.scope.narrow(found)),
-            // A source the grammar could not read, or an oracle variant
-            // the pin does not carry: the crate's reading fails and names
-            // it, since `done` asks the crate for a witness reading and a
+        // A host's own lines are read before anything runs, as its fences
+        // are, so a file that cannot be read fails the crate as a source
+        // would.
+        let picked = oracles.of(krate.oracle.as_deref()).and_then(|oracle| {
+            let found = extract(root, krate, rule, Target::built())?;
+            Ok((oracle, found, host::Held::of(root, krate)?))
+        });
+        let (oracle, found, held) = match picked {
+            Ok((oracle, found, held)) => (
+                oracle,
+                ask.scope.narrow(found),
+                held.map(|held| held.narrowed(&ask.scope)),
+            ),
+            // A source the grammar could not read, an oracle variant the
+            // pin does not carry, or a host's lines that could not be read:
+            // the crate's reading fails and names it, since `done` asks the crate for a witness reading and a
             // pass over sources never seen, or never held to an oracle,
             // would say the crate was measured when it was not.
-            Err(unread) => {
-                slots.push(Slot::Unrun(krate, format!("{unread:#}"), true));
-                continue;
-            }
-        };
-        // A host's own lines, read before anything runs, as its fences are:
-        // a file that cannot be read fails the crate as a source would.
-        let held = match host::Held::of(root, krate) {
-            Ok(held) => held.map(|held| held.narrowed(&ask.scope)),
             Err(unread) => {
                 slots.push(Slot::Unrun(krate, format!("{unread:#}"), true));
                 continue;
@@ -1112,16 +1104,8 @@ fn serve(
     }
     let mut kept = judge::Kept::default();
     let judged = judge::one(oracle, registry, ask, witness, regime, binary, &mut kept)?;
-    gathered
-        .captured
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .extend(kept.captured);
-    gathered
-        .entered
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(witness.id(), kept.entered);
+    held(&gathered.captured).extend(kept.captured);
+    held(&gathered.entered).insert(witness.id(), kept.entered);
     if let Some(watch) = watch {
         watch.served(witness)?;
     }
@@ -1152,11 +1136,7 @@ fn serve_absent(
                 Record::Unserved
             }
         };
-        gathered
-            .entered
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(witness.id(), record);
+        held(&gathered.entered).insert(witness.id(), record);
     }
     unserved
 }

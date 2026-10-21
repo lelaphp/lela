@@ -22,6 +22,7 @@
 //! The version, the digest and the path are values of the pin and appear in
 //! no source file (§10 rule 5).
 
+pub(crate) mod built_from;
 mod closure;
 pub(crate) mod expect;
 mod fastcgi;
@@ -30,6 +31,7 @@ pub(crate) mod linked;
 pub(crate) mod profile;
 mod variant;
 
+use built_from::BuiltFrom;
 pub(crate) use closure::Closure;
 pub use closure::ClosureDigest;
 pub use fastcgi::{Mapping, Param, Piece, Sent, Split, Variable};
@@ -635,6 +637,14 @@ pub struct Regime {
 pub(crate) const WORKSPACE: &str = "{workspace}";
 
 impl Regime {
+    /// Whether one of the regime's ini lines sets `directive`.
+    pub(crate) fn sets(&self, directive: &str) -> bool {
+        (self.ini.iter()).any(|line| {
+            line.split_once('=')
+                .is_some_and(|(name, _)| name.trim() == directive)
+        })
+    }
+
     /// [`WORKSPACE`] in each of the regime's lines, its ini and its
     /// arguments, the workspace at `root`.
     fn placed(&mut self, root: &Path) {
@@ -1911,56 +1921,6 @@ impl Runner {
     }
 }
 
-/// Where the engine's binary is built from: the crates that go into it,
-/// every directory of [`crate::layout::CRATE_DIRS`] (design §4.1,
-/// ADR-0008). `xtask` is not among them, since the harness is not linked
-/// into `php`, and `target` is no source at all.
-fn engine_sources() -> impl Iterator<Item = &'static str> {
-    crate::layout::CRATE_DIRS.iter().map(|d| d.dir)
-}
-
-/// The newest source of the host at `host` under `root`, and when it was
-/// written: the engine's sources and the host's own, but no other
-/// host's. `None` where the tree carries none, and then no binary is
-/// behind anything: a workspace of a test's own with no engine in it is
-/// not a tree a binary can have fallen behind.
-fn newest_source(root: &Path, host: &Path) -> Option<(PathBuf, SystemTime)> {
-    let mut found = Vec::new();
-    for dir in engine_sources() {
-        crate::tally::files_under(&root.join(dir), &mut found).ok();
-    }
-    found
-        .into_iter()
-        .filter(|path| {
-            let relative = path.strip_prefix(root).unwrap_or(path);
-            let other_host = relative.starts_with("sapi") && !relative.starts_with(host);
-            is_engine_source(relative) && !other_host
-        })
-        .filter_map(|path| {
-            let written = path.metadata().and_then(|at| at.modified()).ok()?;
-            Some((path, written))
-        })
-        .max_by_key(|(_, written)| *written)
-}
-
-/// Whether one file under [`engine_sources`], named relative to the root,
-/// is code the binary is built from: a `.rs` the crate is compiled from or
-/// a `.toml` its `build.rs` reads, and not one of the files
-/// [`crate::sources::rust`] leaves out of a crate's sources for the same
-/// reason. A test, a bench, an example or a fixture is not linked into
-/// `php`, so writing one moves no binary and leaves none behind the tree.
-fn is_engine_source(relative: &Path) -> bool {
-    relative
-        .extension()
-        .is_some_and(|kind| kind == "rs" || kind == "toml")
-        && !relative.components().any(|part| {
-            matches!(
-                part.as_os_str().to_str(),
-                Some("tests" | "tests.rs" | "benches" | "examples" | "fixtures")
-            )
-        })
-}
-
 /// A binary named on the command line, by the path every program is
 /// handed: one that names no file is refused before anything runs, and a
 /// relative one is made absolute against the directory `xtask` was invoked
@@ -1983,19 +1943,22 @@ fn named_binary(path: &Path) -> Result<PathBuf> {
 ///
 /// The engine's binary carries no digest of its own sources the way a
 /// build of the harness does (harness-design.md §4.4), so what says
-/// whether it is this tree's is when it was written, which is what cargo
-/// decides a rebuild by. A binary whose write time cannot be read, and a
-/// tree with no engine source in it, are left as the engine: this says a
-/// binary is behind the tree only where it measured that it is.
+/// whether it is this tree's is when it was written against what it is
+/// built from, the paths cargo's dep-info beside it names
+/// ([`BuiltFrom::newest`]), which is what cargo decides a relink by: a
+/// binary cargo leaves standing as fresh is fresh here, whatever else
+/// under the crate directories was written since (#3109). A binary whose
+/// write time cannot be read, and a tree with no engine source in it, are
+/// left as the engine: this says a binary is behind the tree only where it
+/// measured that it is.
 ///
 /// The other hosts' binaries beside it ([`hosts::HOSTS`]) are what a
 /// CGI-shaped test, `sapi/fpm/tests` and a `--PHPDBG--` test of the lane
-/// run; since ADR-0008 each is built by a crate of its own, so a build of `php` alone leaves them
-/// where they were: where one stands there it is held to the tree with
-/// the engine's, and the lot is behind the tree when any is. Each is held
-/// to the sources it is built from, which are every host's but the other
-/// hosts' own, since writing `sapi/fpm` moves no `php` and cargo relinks
-/// none.
+/// run; since ADR-0008 each is built by a crate of its own, so a build of
+/// `php` alone leaves them where they were: where one stands there it is
+/// held to the tree with the engine's, and the lot is behind the tree when
+/// any is. Each is held to its own dep-info, so writing `sapi/fpm` moves
+/// no `php`, as cargo relinks none.
 fn against_the_tree(root: &Path, path: PathBuf) -> Runner {
     let behind = hosts::HOSTS.iter().find_map(|host| {
         // The binary under test is `path`, whatever its name; the other
@@ -2006,7 +1969,7 @@ fn against_the_tree(root: &Path, path: PathBuf) -> Runner {
             path.with_file_name(host.binary)
         };
         let built = binary.metadata().and_then(|at| at.modified()).ok()?;
-        let (source, written) = newest_source(root, Path::new(host.krate))?;
+        let (source, written) = BuiltFrom::of(&binary).newest(root, Path::new(host.krate))?;
         (written > built).then_some((binary, source))
     });
     let Some((path, source)) = behind else {

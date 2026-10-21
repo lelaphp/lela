@@ -2,10 +2,10 @@
 //! (#77) and the frontier until it empties (#78), a closed ticket's branch
 //! left for /specs and `main` never moved (#1749): held against a scratch
 //! repository shaped as main's checkout, on `main` with no record of a
-//! track or a model (ADR-0009), a bare `origin` beside it, a tracker that
-//! is a shell file answering `issue list` and `issue view` from recorded
-//! transcripts, as the `track_next` tests do, and a session that is a
-//! shell file named `claude` first on `PATH`, recording what it was
+//! track or a model (ADR-0009), a bare `origin` beside it, a [`Tracker`]
+//! answering `issue list` and `issue view` with what each test lays, as
+//! the `track_next` tests do, and a session that is
+//! `fixtures/stand-ins/claude` first on `PATH`, recording what it was
 //! started with, committing on the branch and closing the ticket or not,
 //! as the act the test wrote down says, for every ticket or for one.
 
@@ -15,6 +15,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use xtask::scratch::{self, Tree};
+use xtask::ticket::{Issue, Open, State};
+
+mod common {
+    pub mod tracker;
+}
+use common::tracker::{Tracker, blocked_by, issue, open};
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -73,12 +79,13 @@ const READ: [&str; 6] = [
 ];
 
 /// The scratch: main's checkout at `repo`, its bare `origin.git`, the
-/// two stand-ins under `bin`, the tracker's transcripts and what the
-/// session wrote down.
+/// session and the build under `bin`, what the session wrote down, and
+/// the tracker it asks.
 struct Scratch {
     dir: Tree,
     root: PathBuf,
     origin: PathBuf,
+    tracker: Tracker,
 }
 
 impl Scratch {
@@ -122,110 +129,59 @@ impl Scratch {
                 "main",
             ],
         );
-        let scratch = Scratch { dir, root, origin };
+        let scratch = Scratch {
+            dir,
+            root,
+            origin,
+            tracker: Tracker::empty(&format!("track-work-{name}")),
+        };
         scratch.stand_ins();
         scratch
     }
 
-    /// The tracker, `bin/gh`: `issue list` answers with `list.json`,
-    /// `issue view <n>` with `view.<n>.json` where the test wrote one and
-    /// `view.json` otherwise, and every other call is written to `calls`.
-    /// The build, `bin/cargo`: [`scratch::cargo`], so the worktree is
-    /// laid down with a harness it did not compile.
-    /// The session, `bin/claude`: appends its arguments, its directory
-    /// and the subagents' model to what earlier sessions wrote, then does
-    /// what `act.<n>` says, or `act` where the test wrote none for the
-    /// ticket: `commit` commits a file named for the ticket on the branch, `close` flips the
-    /// ticket's recorded state to closed, `spend <usd>` records what the
-    /// plugin would once a turn, a `usage` reading of turn 3 at that price
-    /// through this crate's own binary in the worktree (#210), and any of
-    /// them together. Started on
-    /// `/frontier` (#85) it runs the shell file `act.frontier` instead,
-    /// where the test writes what the planning session files. The prompt
-    /// is the last argument and runs to several lines (#115), so
-    /// `session.args` records its first line, `/<skill> <n>`, which is
-    /// also where the ticket is read from, and `session.prompt` keeps the
-    /// whole of it for a test that reads the rest.
+    /// The session, `bin/claude`: `fixtures/stand-ins/claude`, whose
+    /// header says what it records and what each act does. The build,
+    /// `bin/cargo`: [`scratch::cargo`], so the worktree is laid down with
+    /// a harness it did not compile, and the session's `cargo xtask` is
+    /// this crate's own binary.
     fn stand_ins(&self) {
-        let dir = self.dir.display();
-        let bin = scratch::xtask(env!("CARGO_BIN_EXE_xtask"));
-        let xtask = bin.display();
-        let gh = format!(
-            "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = list ]; then cat '{dir}/list.json'; exit $?; fi\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then f='{dir}/view.'$3'.json'; [ -f \"$f\" ] || f='{dir}/view.json'; cat \"$f\"; exit $?; fi\nprintf '%s\\n' \"$*\" >> '{dir}/calls'\nexit 0\n"
-        );
-        let claude = format!(
-            "#!/bin/sh\n# the last argument is the prompt; its first line is `/<skill> <n>`\nrest=''; i=0\nfor a; do i=$((i+1)); [ $i -lt $# ] && rest=\"$rest $a\"; prompt=$a; done\nline=$(printf '%s\\n' \"$prompt\" | sed -n 1p); n=${{line##* }}\nprintf '%s\\n' \"${{rest# }} $line\" >> '{dir}/session.args'\nprintf '%s\\n' \"$prompt\" >> '{dir}/session.prompt'\npwd -P >> '{dir}/session.cwd'\nprintf '%s\\n' \"${{CLAUDE_CODE_SUBAGENT_MODEL-unset}}\" >> '{dir}/session.subagent'\nif [ \"$line\" = /frontier ]; then sh '{dir}/act.frontier'; exit $?; fi\nact=$(cat '{dir}/act.'$n 2>/dev/null || cat '{dir}/act')\nview='{dir}/view.'$n'.json'; [ -f \"$view\" ] || view='{dir}/view.json'\ncase \"$act\" in *commit*) echo worked > worked.$n.txt && git add -- worked.$n.txt && git -c commit.gpgsign=false -c core.hooksPath=/var/empty -c user.name=x -c user.email=x@x commit -q -m 'the work' -- worked.$n.txt || exit 3;; esac\ncase \"$act\" in *ready*) git config branch.t$n.ready-$n nothing || exit 5;; esac\ncase \"$act\" in *close*) sed 's/\"OPEN\"/\"CLOSED\"/' \"$view\" > '{dir}/view.tmp' && mv '{dir}/view.tmp' \"$view\";; esac\ncase \"$act\" in *spend*) usd=${{act##*spend }}; printf '{{\"context\":{{\"tokens\":152000,\"window\":200000,\"percent\":76}},\"rateLimits\":[],\"cost\":{{\"usd\":%s}}}}' \"$usd\" | '{xtask}' --root \"$(pwd -P)\" usage record --session stand-in --turn 3 >/dev/null || exit 4;; esac\nexit 0\n"
-        );
-        for (name, text) in [("gh", gh), ("claude", claude)] {
-            let file = self.dir.join("bin").join(name);
-            fs::write(&file, text).unwrap();
-            fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        scratch::cargo(&self.dir.join("bin"), bin).unwrap();
+        let claude = self.dir.join("bin/claude");
+        fs::copy(
+            xtask::package_dir().join("fixtures/stand-ins/claude"),
+            &claude,
+        )
+        .unwrap();
+        fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+        scratch::cargo(
+            &self.dir.join("bin"),
+            scratch::xtask(env!("CARGO_BIN_EXE_xtask")),
+        )
+        .unwrap();
     }
 
     /// The open tickets, each `ready-for-agent` and unblocked, and the
-    /// ticket `issue view` answers with, open.
+    /// ticket `issue view` answers for, open.
     fn tracker(&self, open: &[u64], viewed: u64) {
-        let issues = open
+        let ready: Vec<Open> = open
             .iter()
-            .map(|&number| (number, ["ready-for-agent"].as_slice()))
-            .collect::<Vec<_>>();
-        fs::write(self.dir.join("list.json"), listed(&issues)).unwrap();
-        fs::write(
-            self.dir.join("view.json"),
-            serde_json::json!({
-                "number": viewed,
-                "title": format!("ticket {viewed}"),
-                "body": "## Acceptance criteria\n\n- [x] done\n",
-                "state": "OPEN",
-                "url": format!("https://example.invalid/issues/{viewed}"),
-            })
-            .to_string(),
-        )
-        .unwrap();
+            .map(|&number| self::open(number, &["ready-for-agent"]))
+            .collect();
+        self.tracker.listing(&ready);
+        self.viewed(viewed);
     }
 
-    /// One more label on the listed ticket `number`, as the tracker
-    /// spells it: how a test puts a ticket on the frontier's research or
-    /// decision side (#81).
-    fn label(&self, number: u64, label: &str) {
-        let file = self.dir.join("list.json");
-        let mut issues: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
-        for issue in issues.as_array_mut().unwrap() {
-            if issue["number"] == number {
-                issue["labels"]
-                    .as_array_mut()
-                    .unwrap()
-                    .push(serde_json::json!({"name": label}));
-            }
-        }
-        fs::write(&file, issues.to_string()).unwrap();
-    }
-
-    /// The ticket `issue view <n>` answers with for `number` alone, open.
+    /// The ticket `issue view <n>` answers with for `number`, open.
     fn viewed(&self, number: u64) {
-        fs::write(
-            self.dir.join(format!("view.{number}.json")),
-            serde_json::json!({
-                "number": number,
-                "title": format!("ticket {number}"),
-                "body": "## Acceptance criteria\n\n- [x] done\n",
-                "state": "OPEN",
-                "url": format!("https://example.invalid/issues/{number}"),
-            })
-            .to_string(),
-        )
-        .unwrap();
+        self.tracker.with_issue(&ticket(number));
     }
 
     /// The ticket `number` closed at the tracker by a person, as `issue
     /// view <n>` answers for it.
     fn closed_by_hand(&self, number: u64) {
-        let view = self.dir.join(format!("view.{number}.json"));
-        let text = fs::read_to_string(&view).unwrap();
-        fs::write(&view, text.replace("\"OPEN\"", "\"CLOSED\"")).unwrap();
+        self.tracker.with_issue(&Issue {
+            state: State::Closed,
+            ..ticket(number)
+        });
     }
 
     /// What the session does when started, for every ticket.
@@ -239,28 +195,32 @@ impl Scratch {
     }
 
     /// What the session started on `/frontier` does, as shell: the first
-    /// time it replaces the tracker's open list with `list.next.json`,
-    /// written from `filed`, the tickets it filed, each with its labels;
-    /// the second time it files nothing (#85).
+    /// time it replaces the tracker's open list with `filed`, the tickets
+    /// it filed, each `ready-for-agent` and unblocked unless it names its
+    /// own labels; the second time it files nothing (#85).
     fn frontier_files(&self, filed: &[(u64, &[&str])]) {
-        fs::write(self.dir.join("list.next.json"), listed(filed)).unwrap();
-        let dir = self.dir.display();
+        let filed: Vec<Open> = filed
+            .iter()
+            .map(|&(number, labels)| open(number, labels))
+            .collect();
+        let next = self.dir.join("list.next.json");
+        fs::write(&next, serde_json::to_string(&filed).unwrap()).unwrap();
+        let (dir, list) = (self.dir.display(), self.tracker.file("list.json"));
         fs::write(
             self.dir.join("act.frontier"),
             format!(
-                "if [ ! -f '{dir}/planned' ]; then touch '{dir}/planned'; cp '{dir}/list.next.json' '{dir}/list.json'; fi\nexit 0\n"
+                "if [ ! -f '{dir}/planned' ]; then touch '{dir}/planned'; cp '{}' '{}'; fi\nexit 0\n",
+                next.display(),
+                list.display()
             ),
         )
         .unwrap();
     }
 
-    /// One more shell line the session runs after its act, before it
-    /// ends: how a test breaks the harness from inside a session.
+    /// Shell the session runs after its act, before it ends: how a test
+    /// breaks the harness from inside a session.
     fn session_then(&self, line: &str) {
-        let file = self.dir.join("bin/claude");
-        let text = fs::read_to_string(&file).unwrap();
-        let (body, end) = text.rsplit_once("exit 0\n").unwrap();
-        fs::write(&file, format!("{body}{line}\nexit 0\n{end}")).unwrap();
+        fs::write(self.dir.join("then"), line).unwrap();
     }
 
     /// `track work` on the model and the subagents' model every test
@@ -279,8 +239,9 @@ impl Scratch {
     /// with the stand-ins first on `PATH`, `args` after `track work`.
     fn run(&self, args: &[&str]) -> (i32, String) {
         let path = format!(
-            "{}:{}",
+            "{}:{}:{}",
             self.dir.join("bin").display(),
+            self.tracker.bin().display(),
             std::env::var("PATH").unwrap_or_default()
         );
         let out = Command::new(scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
@@ -293,6 +254,7 @@ impl Scratch {
             .env_remove("CARGO_MANIFEST_DIR")
             .env_remove("CLAUDE_CODE_SUBAGENT_MODEL")
             .env("PATH", path)
+            .env("STAND_IN_TRACKER", self.tracker.bin())
             .env("GIT_AUTHOR_NAME", "x")
             .env("GIT_AUTHOR_EMAIL", "x@x")
             .env("GIT_COMMITTER_NAME", "x")
@@ -348,22 +310,21 @@ impl Scratch {
     }
 }
 
+/// Ticket `number` as `issue view` answers it: open, every box ticked.
+fn ticket(number: u64) -> Issue {
+    Issue {
+        body: "## Acceptance criteria\n\n- [x] done\n".to_owned(),
+        ..issue(number)
+    }
+}
+
 /// The tracker's open list, each ticket with its labels as the tracker
 /// spells them, unblocked.
-fn listed(issues: &[(u64, &[&str])]) -> String {
-    let issues = issues
+fn listed(issues: &[(u64, &[&str])]) -> Vec<Open> {
+    issues
         .iter()
-        .map(|(number, labels)| {
-            serde_json::json!({
-                "number": number,
-                "title": format!("ticket {number}"),
-                "url": format!("https://example.invalid/issues/{number}"),
-                "labels": labels.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>(),
-                "blockedBy": {"nodes": [], "totalCount": 0},
-            })
-        })
-        .collect::<Vec<_>>();
-    serde_json::Value::Array(issues).to_string()
+        .map(|&(number, labels)| open(number, labels))
+        .collect()
 }
 
 /// The whole path, `--one`: the next ticket, its worktree on `t<n>` off
@@ -450,7 +411,7 @@ fn a_ready_tickets_branch_is_left_its_worktree_retired_and_main_unmoved() {
         "{out}"
     );
     assert_eq!(out.matches("computed trust").count(), 1, "{out}");
-    assert_eq!(scratch.wrote("calls"), "", "{out}");
+    assert!(scratch.tracker.calls().is_empty(), "{out}");
 }
 
 /// A worktree left standing whose ticket a person closes later is not
@@ -497,15 +458,11 @@ fn a_standing_worktree_whose_ticket_a_person_closes_later_is_left_as_it_stands()
 #[test]
 fn a_run_on_a_label_track_names_its_ticket_and_lays_its_branch_off_main() {
     let scratch = Scratch::lay("label");
-    fs::write(
-        scratch.dir.join("list.json"),
-        listed(&[
-            (19, &["ready-for-agent", "track:main"]),
-            (21, &["ready-for-agent", "track:parity-hosts"]),
-            (22, &["ready-for-agent", "track:parity-compiler"]),
-        ]),
-    )
-    .unwrap();
+    scratch.tracker.listing(&listed(&[
+        (19, &["ready-for-agent", "track:main"]),
+        (21, &["ready-for-agent", "track:parity-hosts"]),
+        (22, &["ready-for-agent", "track:parity-compiler"]),
+    ]));
     scratch.viewed(21);
     scratch.act("commit");
     let main = rev(&scratch.root, "main");
@@ -759,8 +716,8 @@ fn a_tracker_that_stops_answering_stops_the_run_named() {
     scratch.viewed(21);
     scratch.act_on(20, "commit close");
     scratch.session_then(&format!(
-        "rm -f '{}'",
-        scratch.dir.join("list.json").display()
+        "touch '{}'",
+        scratch.tracker.file("down.list").display()
     ));
     let (code, out) = scratch.work(&[]);
     assert_eq!(code, 1, "{out}");
@@ -785,8 +742,8 @@ fn a_tracker_that_stops_answering_stops_the_run_named() {
 #[test]
 fn a_run_that_readies_a_blocker_does_not_lay_down_its_dependent() {
     let scratch = Scratch::lay("blocker");
-    let open = |blocker: &str| blocked(&[(21, &[], &[(20, blocker)]), (20, &[], &[])]);
-    fs::write(scratch.dir.join("list.json"), open("OPEN")).unwrap();
+    let open = |blocker| blocked(&[(21, &[], &[(20, blocker)]), (20, &[], &[])]);
+    scratch.tracker.listing(&open(State::Open));
     scratch.viewed(20);
     scratch.viewed(21);
     scratch.act_on(20, "commit ready");
@@ -802,11 +759,9 @@ fn a_run_that_readies_a_blocker_does_not_lay_down_its_dependent() {
     // /specs merges t20 and the merge closes #20; the next run names #21
     // and cuts it from that main.
     sh(&scratch.root, &["git", "merge", "-q", "--ff-only", "t20"]);
-    fs::write(
-        scratch.dir.join("list.json"),
-        blocked(&[(21, &[], &[(20, "CLOSED")])]),
-    )
-    .unwrap();
+    scratch
+        .tracker
+        .listing(&blocked(&[(21, &[], &[(20, State::Closed)])]));
     let (code, out) = scratch.work(&["--one"]);
     assert_eq!(code, 1, "#21 is left open: {out}");
     assert!(out.contains("track work: #21 ticket 21: on t21"), "{out}");
@@ -819,33 +774,25 @@ fn a_run_that_readies_a_blocker_does_not_lay_down_its_dependent() {
 
 /// One ticket of [`blocked`]'s list: its number, its labels, and its
 /// blockers, each `(number, state)`.
-type Row<'a> = (u64, &'a [&'a str], &'a [(u64, &'a str)]);
+type Row<'a> = (u64, &'a [&'a str], &'a [(u64, State)]);
 
 /// The tracker's open list as rows written whole: each ticket `ready-for-agent`
 /// unless `labels` names its own, blocked by each `(number, state)` of
 /// `blockers`.
-fn blocked(rows: &[Row]) -> String {
-    let rows = rows
-        .iter()
-        .map(|(number, labels, blockers)| {
+fn blocked(rows: &[Row]) -> Vec<Open> {
+    rows.iter()
+        .map(|&(number, labels, blockers)| {
             let labels = if labels.is_empty() {
                 &["ready-for-agent"][..]
             } else {
                 labels
             };
-            serde_json::json!({
-                "number": number,
-                "title": format!("ticket {number}"),
-                "url": format!("https://example.invalid/issues/{number}"),
-                "labels": labels.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>(),
-                "blockedBy": {
-                    "nodes": blockers.iter().map(|(number, state)| serde_json::json!({"number": number, "state": state})).collect::<Vec<_>>(),
-                    "totalCount": blockers.len(),
-                },
-            })
+            Open {
+                blocked_by: blocked_by(blockers),
+                ..open(number, labels)
+            }
         })
-        .collect::<Vec<_>>();
-    serde_json::Value::Array(rows).to_string()
+        .collect()
 }
 
 /// With `--fill`, an empty frontier starts the `/frontier` session in
@@ -854,11 +801,10 @@ fn blocked(rows: &[Row]) -> String {
 #[test]
 fn an_empty_frontier_starts_the_fill_session_in_the_checkout() {
     let scratch = Scratch::lay("fill-checkout");
-    fs::write(
-        scratch.dir.join("list.json"),
-        blocked(&[(22, &[], &[(23, "OPEN")]), (23, &["for-a-person"], &[])]),
-    )
-    .unwrap();
+    scratch.tracker.listing(&blocked(&[
+        (22, &[], &[(23, State::Open)]),
+        (23, &["for-a-person"], &[]),
+    ]));
     scratch.frontier_files(&[(23, &["for-a-person"])]);
     let (code, out) = scratch.work(&["--one", "--fill"]);
     assert_eq!(code, 0, "{out}");
@@ -887,8 +833,10 @@ fn an_empty_frontier_starts_the_fill_session_in_the_checkout() {
 #[test]
 fn a_research_ticket_starts_the_session_on_research() {
     let scratch = Scratch::lay("research");
-    scratch.tracker(&[20], 20);
-    scratch.label(20, "frontier:research");
+    scratch
+        .tracker
+        .listing(&listed(&[(20, &["ready-for-agent", "frontier:research"])]));
+    scratch.viewed(20);
     scratch.act("commit close");
     let (code, out) = scratch.work(&["--one"]);
     assert_eq!(code, 0, "{out}");
@@ -906,8 +854,10 @@ fn a_research_ticket_starts_the_session_on_research() {
 #[test]
 fn a_decision_ticket_starts_the_session_on_grill_design() {
     let scratch = Scratch::lay("decision");
-    scratch.tracker(&[20], 20);
-    scratch.label(20, "frontier:decision");
+    scratch
+        .tracker
+        .listing(&listed(&[(20, &["ready-for-agent", "frontier:decision"])]));
+    scratch.viewed(20);
     scratch.act("commit close");
     let (code, out) = scratch.work(&["--one"]);
     assert_eq!(code, 0, "{out}");
@@ -924,9 +874,11 @@ fn a_decision_ticket_starts_the_session_on_grill_design() {
 #[test]
 fn a_ticket_with_both_frontier_labels_refuses_before_a_worktree() {
     let scratch = Scratch::lay("both");
-    scratch.tracker(&[20], 20);
-    scratch.label(20, "frontier:research");
-    scratch.label(20, "frontier:decision");
+    scratch.tracker.listing(&listed(&[(
+        20,
+        &["ready-for-agent", "frontier:research", "frontier:decision"],
+    )]));
+    scratch.viewed(20);
     scratch.act("commit close");
     let (code, out) = scratch.work(&["--one"]);
     assert_eq!(code, 1, "{out}");

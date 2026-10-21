@@ -43,6 +43,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::git::{self, Index, Stamp};
+use crate::layout::normalize;
 
 /// Each file of the workspace and its blob id, read once, and the key of
 /// any scope a lookup on it ([`Snapshot::key`]). Taken from one of three
@@ -82,6 +83,10 @@ pub struct Snapshot {
     /// scope twice, as `done` stamps the workspace for its verdict and
     /// holds its ticket's reading to it, hashes the listing once.
     keys: Mutex<BTreeMap<PathBuf, String>>,
+    /// Each key over tracked files asked of it, by its paths: `done` asks
+    /// one per set of sources a phpt run was kept over, for every touched
+    /// crate ([`Snapshot::tracked_over`]).
+    tracked_keys: Mutex<BTreeMap<Vec<PathBuf>, String>>,
 }
 
 /// The commits read in this process, by root and id: a commit's files
@@ -108,6 +113,7 @@ impl Snapshot {
             tracked,
             covers: None,
             keys: Mutex::default(),
+            tracked_keys: Mutex::default(),
         }
     }
 
@@ -143,13 +149,7 @@ impl Snapshot {
                 .split_once(' ')
                 .with_context(|| format!("git ls-files -t wrote {entry:?}"))?;
             let file = root.join(path);
-            let id = if file.is_file() {
-                let bytes =
-                    fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
-                Some(git::blob_id(&bytes))
-            } else {
-                None
-            };
+            let id = file.is_file().then(|| blob(&file)).transpose()?;
             if tag != "?" {
                 tracked.insert(
                     path.to_owned(),
@@ -203,11 +203,7 @@ impl Snapshot {
                 Some(id) if !differs.contains(path) => Some(Ok(id.clone())),
                 _ => {
                     let file = root.join(path);
-                    file.is_file().then(|| {
-                        fs::read(&file)
-                            .map(|bytes| git::blob_id(&bytes))
-                            .with_context(|| format!("reading {}", file.display()))
-                    })
+                    file.is_file().then(|| blob(&file))
                 }
             }
         };
@@ -246,18 +242,12 @@ impl Snapshot {
     /// and commit.
     pub fn commit(root: &Path, commit: &str) -> Result<Arc<Snapshot>> {
         let read = COMMITS.get_or_init(|| Mutex::new(BTreeMap::new()));
-        let at = (root.to_path_buf(), commit.to_owned());
-        if let Some(snapshot) = read.lock().ok().and_then(|held| held.get(&at).cloned()) {
-            return Ok(snapshot);
-        }
-        let mut files = git::blobs(root, commit, &[])?;
-        files.sort_unstable();
-        let short = commit.chars().take(7).collect();
-        let snapshot = Arc::new(Snapshot::new(root, short, files.clone(), files));
-        if let Ok(mut held) = read.lock() {
-            held.insert(at, Arc::clone(&snapshot));
-        }
-        Ok(snapshot)
+        memo(read, (root.to_path_buf(), commit.to_owned()), || {
+            let mut files = git::blobs(root, commit, &[])?;
+            files.sort_unstable();
+            let short = commit.chars().take(7).collect();
+            Ok(Arc::new(Snapshot::new(root, short, files.clone(), files)))
+        })
     }
 
     /// The workspace root the snapshot was taken in.
@@ -272,14 +262,9 @@ impl Snapshot {
     /// manifest, the one kind of path it can widen. A path outside what a
     /// [`Snapshot::disk_over`] was read under is refused.
     pub fn key(&self, path: &Path) -> Result<String> {
-        if let Some(key) = self.keys.lock().ok().and_then(|k| k.get(path).cloned()) {
-            return Ok(key);
-        }
-        let key = self.over(&closure(&self.root, path)?)?;
-        if let Ok(mut keys) = self.keys.lock() {
-            keys.insert(path.to_path_buf(), key.clone());
-        }
-        Ok(key)
+        memo(&self.keys, path.to_path_buf(), || {
+            self.over(&closure(&self.root, path)?)
+        })
     }
 
     /// The stamp of the sources under `path`: its key, and the commit
@@ -305,8 +290,17 @@ impl Snapshot {
     /// an edit to a tracked one, and an untracked `.DS_Store` would
     /// otherwise leave a clean checkout matching no commit.
     pub(crate) fn tracked_over(&self, paths: &[PathBuf]) -> Result<String> {
+        let asked = self.tracked_keys.lock().ok();
+        if let Some(key) = asked.as_ref().and_then(|k| k.get(paths)) {
+            return Ok(key.clone());
+        }
+        drop(asked);
         self.covering(paths)?;
-        Ok(git::listing_id(&under(&self.tracked, paths)))
+        let key = git::listing_id(&under(&self.tracked, paths));
+        if let Ok(mut asked) = self.tracked_keys.lock() {
+            asked.insert(paths.to_vec(), key.clone());
+        }
+        Ok(key)
     }
 
     /// Refuse `paths` where the snapshot was read under others: the files
@@ -321,7 +315,7 @@ impl Snapshot {
             .filter(|p| {
                 !covers
                     .iter()
-                    .any(|c| whole(c) || clean(p).starts_with(clean(c)))
+                    .any(|c| whole(c) || normalize(p).starts_with(normalize(c)))
             })
             .map(|p| p.display().to_string())
             .collect();
@@ -351,13 +345,6 @@ fn closure(root: &Path, path: &Path) -> Result<Vec<PathBuf>> {
     }
 }
 
-/// `path` without its `.` components, as git's pathspec reads it.
-fn clean(path: &Path) -> PathBuf {
-    path.components()
-        .filter(|c| !matches!(c, Component::CurDir))
-        .collect()
-}
-
 /// Whether `path` names the whole tree.
 fn whole(path: &Path) -> bool {
     path.components().all(|c| matches!(c, Component::CurDir))
@@ -369,7 +356,7 @@ fn under(listing: &[(String, String)], scopes: &[PathBuf]) -> Vec<(String, Strin
     if scopes.iter().any(|s| whole(s)) {
         return listing.to_vec();
     }
-    let scopes: Vec<PathBuf> = scopes.iter().map(|s| clean(s)).collect();
+    let scopes: Vec<PathBuf> = scopes.iter().map(|s| normalize(s)).collect();
     listing
         .iter()
         .filter(|(path, _)| scopes.iter().any(|s| Path::new(path).starts_with(s)))
@@ -399,17 +386,25 @@ pub(crate) fn cargo_metadata(root: &Path) -> Result<String> {
         .arg("--manifest-path")
         .arg(&manifest)
         .current_dir(root)
-        .output()
-        .context("running cargo metadata")?;
-    if !out.status.success() {
-        let said = String::from_utf8_lossy(&out.stderr);
-        bail!(
-            "cargo metadata over {}: {}",
-            manifest.display(),
-            said.trim()
-        );
+        .output();
+    crate::printed(out, &format!("cargo metadata over {}", manifest.display()))
+}
+
+/// `make`'s value at `key`, kept in `cache` the first time and read from it
+/// after: what each read here that runs once per process keeps.
+fn memo<K: Ord, V: Clone>(
+    cache: &Mutex<BTreeMap<K, V>>,
+    key: K,
+    make: impl FnOnce() -> Result<V>,
+) -> Result<V> {
+    if let Some(kept) = cache.lock().ok().and_then(|held| held.get(&key).cloned()) {
+        return Ok(kept);
     }
-    String::from_utf8(out.stdout).context("cargo metadata wrote no UTF-8")
+    let value = make()?;
+    if let Ok(mut held) = cache.lock() {
+        held.insert(key, value.clone());
+    }
+    Ok(value)
 }
 
 /// The graphs read in this process, by root: `cargo metadata` runs once
@@ -422,14 +417,9 @@ impl Graph {
     /// so every path's closure is the path alone.
     pub(crate) fn of(root: &Path) -> Result<Arc<Graph>> {
         let read = READ.get_or_init(|| Mutex::new(BTreeMap::new()));
-        if let Some(graph) = read.lock().ok().and_then(|g| g.get(root).cloned()) {
-            return Ok(graph);
-        }
-        let graph = Arc::new(Graph::read(root)?);
-        if let Ok(mut held) = read.lock() {
-            held.insert(root.to_path_buf(), Arc::clone(&graph));
-        }
-        Ok(graph)
+        memo(read, root.to_path_buf(), || {
+            Ok(Arc::new(Graph::read(root)?))
+        })
     }
 
     fn read(root: &Path) -> Result<Graph> {
@@ -555,6 +545,12 @@ pub(crate) fn fixture(name: &str) -> crate::scratch::Tree {
     let fixture = crate::built_root().join("xtask/fixtures/closure");
     crate::scratch::repository(&fixture, &tree, &["."]).unwrap();
     tree
+}
+
+/// The blob id git gives the file's bytes.
+fn blob(file: &Path) -> Result<String> {
+    let bytes = fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    Ok(git::blob_id(&bytes))
 }
 
 #[cfg(test)]

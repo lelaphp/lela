@@ -1,0 +1,68 @@
+#!/bin/sh
+# The tracker a test talks to in place of GitHub: the one `gh` stand-in,
+# laid by tests/common/tracker.rs, which copies it into a directory of
+# the test's own and writes there what it answers from. Every path below
+# is in that directory, the one this file stands in:
+#
+#   issues/<n>.json   what `issue view <n>` answers
+#   issues/<n>.none   `issue view <n>` fails as gh does for a number that
+#                     is no issue
+#   issues/<n>.flaky  `<answered> <fails>`: `issue view <n>` answers that
+#                     many times, then fails that many as gh does when the
+#                     machine has run out of ports for a moment (#2804),
+#                     then answers again
+#   list.json         what `issue list` answers
+#   refuse.<verb>     `issue <verb>` (edit or close) fails as gh does
+#                     without permission, after it is recorded
+#   down.<verb>       `issue <verb>` fails as gh does with no network, and
+#                     is not recorded
+#   calls             one line per `issue edit` and `issue close`, its
+#                     arguments as given
+#   unexpected        one line per call nothing above answers, which then
+#                     fails; the test that laid the tracker fails naming it
+here=$(dirname "$0")
+unexpected() {
+    printf '%s\n' "$*" >> "$here/unexpected"
+    echo "gh stand-in: nothing the test laid answers \`gh $*\`" >&2
+    exit 1
+}
+if [ -e "$here/down.$2" ]; then
+    echo 'Post "https://api.github.com/graphql": dial tcp: lookup api.github.com: no such host' >&2
+    exit 1
+fi
+case "$1 $2" in
+"issue view")
+    f="$here/issues/$3"
+    if [ -e "$f.none" ]; then
+        echo "GraphQL: Could not resolve to an issue or pull request with the number of $3. (repository.issue)" >&2
+        exit 1
+    fi
+    [ -e "$f.json" ] || unexpected "$@"
+    if [ -e "$f.flaky" ]; then
+        read -r answered fails < "$f.flaky"
+        if [ "$answered" -gt 0 ]; then
+            echo "$((answered - 1)) $fails" > "$f.flaky"
+        elif [ "$fails" -gt 0 ]; then
+            echo "0 $((fails - 1))" > "$f.flaky"
+            echo "Post: read: can't assign requested address" >&2
+            exit 1
+        fi
+    fi
+    exec cat "$f.json"
+    ;;
+"issue list")
+    [ -e "$here/list.json" ] || unexpected "$@"
+    exec cat "$here/list.json"
+    ;;
+"issue edit" | "issue close")
+    printf '%s\n' "$*" >> "$here/calls"
+    if [ -e "$here/refuse.$2" ]; then
+        echo 'GraphQL: no permission' >&2
+        exit 1
+    fi
+    exit 0
+    ;;
+*)
+    unexpected "$@"
+    ;;
+esac

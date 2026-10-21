@@ -178,7 +178,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::key::Snapshot;
 use crate::manifest::{Manifest, Rule};
@@ -310,14 +310,6 @@ impl Verdict {
                 "`--withdrawn` carries the measurement that says there is nothing here, what was run and where; an empty reason withdraws nothing"
             ),
             Some(reason) => Ok(Verdict::Withdrawn(reason.trim().to_owned())),
-        }
-    }
-
-    /// The reason a withdrawal carries, none for a close of work done.
-    fn withdrawn(&self) -> Option<&str> {
-        match self {
-            Verdict::Done => None,
-            Verdict::Withdrawn(reason) => Some(reason),
         }
     }
 }
@@ -657,15 +649,6 @@ pub struct Denied {
     pub sanctioned: Option<String>,
 }
 
-impl Denied {
-    /// Whether this row says the label is wrong: it does while no
-    /// instrument may write the path, and a path `xtask steer` writes is
-    /// an act an agent takes, so the row is a note and not a refusal.
-    fn mislabelled(&self) -> bool {
-        self.sanctioned.is_none()
-    }
-}
-
 /// The criteria of a ticket carrying `ready-for-agent` that ask for a
 /// write into a denied path: one row per criterion, at the first path of
 /// its main clause a rule covers, carrying the `xtask steer` that writes
@@ -893,7 +876,7 @@ fn paths(clause: &str) -> Vec<(usize, &str)> {
 }
 
 /// One issue as the tracker answers it.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Issue {
     pub number: u64,
     pub title: String,
@@ -919,19 +902,17 @@ pub struct Issue {
     pub sub_issues: SubIssues,
 }
 
-/// What the tracker counts under one parent: the sub-issues it holds and
-/// how many of them are closed, as `gh issue view --json subIssuesSummary`
-/// answers it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+/// What the tracker counts under one parent: the sub-issues it holds, as
+/// `gh issue view --json subIssuesSummary` answers it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SubIssues {
     pub total: u64,
-    pub completed: u64,
 }
 
 /// One open issue as `gh issue list` answers it: what the frontier is
 /// judged from, the labels and the blocking relation carried as the
 /// tracker spells them.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Open {
     pub number: u64,
     pub title: String,
@@ -949,13 +930,13 @@ impl Open {
 }
 
 /// One label, by name.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Label {
     pub name: String,
 }
 
 /// The tickets blocking one, as the tracker nests them.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct BlockedBy {
     pub nodes: Vec<Blocker>,
 }
@@ -974,14 +955,14 @@ impl BlockedBy {
 }
 
 /// One ticket in a blocking relation: its number and whether it is open.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Blocker {
     pub number: u64,
     pub state: State,
 }
 
 /// An issue's state as `gh` spells it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum State {
     Open,
@@ -1140,23 +1121,14 @@ impl Gh {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
-            .context("running gh");
+            .output();
         let mut spent = self.spent.borrow_mut();
         let verb = spent
             .entry(args.get(1).copied().unwrap_or("").to_owned())
             .or_default();
         verb.calls += 1;
         verb.took += started.elapsed();
-        let out = out?;
-        if !out.status.success() {
-            bail!(
-                "gh {}: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        String::from_utf8(out.stdout).context("gh wrote something that is not UTF-8")
+        crate::printed(out, &format!("gh {}", args.join(" ")))
     }
 }
 
@@ -1214,15 +1186,10 @@ fn unlanded(commit: &str, branch: &str) -> String {
 }
 
 fn half_done(criteria: &Criteria) -> String {
+    let n = criteria.ticked.len();
+    let (is, named) = (if n == 1 { "is" } else { "are" }, named(&criteria.ticked));
     format!(
-        "a withdrawal is of a ticket with no box ticked, and {} {}: {}; work half done is not withdrawn, it is finished or its boxes are unticked by a person",
-        criteria.ticked.len(),
-        if criteria.ticked.len() == 1 {
-            "is"
-        } else {
-            "are"
-        },
-        named(&criteria.ticked)
+        "a withdrawal is of a ticket with no box ticked, and {n} {is}: {named}; work half done is not withdrawn, it is finished or its boxes are unticked by a person"
     )
 }
 
@@ -1269,13 +1236,10 @@ pub fn parent(root: &Path, gh: &Gh, sheet: Ticket, session_id: Option<&str>) -> 
     let issue = gh.view(root, sheet)?;
     let held = issue.sub_issues.total;
     let spare = CAP.saturating_sub(held);
-    let mut reading = stamped(&Snapshot::disk(root)?, &parent_scope(sheet))?;
+    let mut reading = stamped(&Snapshot::disk(root)?, &parent_scope(sheet), session_id)?;
     reading.count("subissues", held)?;
     reading.count("cap", CAP)?;
     reading.count("room", spare)?;
-    session_id
-        .unwrap_or_default()
-        .clone_into(&mut reading.session);
     let holds = format!("{sheet} holds {held} of GitHub's cap of {CAP} sub-issues");
     let (status, message) = if issue.state == State::Closed {
         (
@@ -1351,15 +1315,14 @@ fn judged(
     let ticket = Ticket::new(issue.number);
     let criteria = Criteria::parse(&issue.body);
     let rows = denied(manifest, &issue.labels, &criteria);
-    // The rows that say the label is wrong, and the rows an instrument
-    // writes, which are a note and not a refusal.
+    // The rows that say the label is wrong, a path no instrument may
+    // write, and the rows an instrument writes: a path `xtask steer`
+    // writes is an act an agent takes, so the row is a note and not a
+    // refusal.
     let (denied, steered): (Vec<&Denied>, Vec<&Denied>) =
-        rows.iter().partition(|row| row.mislabelled());
-    let mut reading = stamped(snapshot, &scope(ticket))?;
+        rows.iter().partition(|row| row.sanctioned.is_none());
+    let mut reading = stamped(snapshot, &scope(ticket), session_id)?;
     counted(&mut reading, &criteria, &denied, steered.len(), &act)?;
-    session_id
-        .unwrap_or_default()
-        .clone_into(&mut reading.session);
     let names = named(&criteria.unticked);
     let boxes = format!(
         "{} of {} criteria ticked",
@@ -1372,6 +1335,17 @@ fn judged(
         Act::Read => "",
         Act::Ready(_) => "; not ready, nothing recorded",
         Act::Close(..) => "; not closed, nothing changed at the tracker",
+    };
+    // A close at the tracker, which says what it opened and closed after
+    // `said`, or why it did not.
+    let closing = |successors: &Successors, comment: &str, said: &str| match close(
+        gh, root, issue, &reading, successors, comment,
+    ) {
+        Ok((opened, closed)) => (
+            Status::Pass,
+            format!("{ticket}: {boxes}; {said}{opened}; {closed}"),
+        ),
+        Err(text) => (Status::Fail, format!("{ticket}: {boxes}; {text}")),
     };
     let (status, message) = match act {
         // A withdrawal is held to the boxes the other way round: one
@@ -1389,13 +1363,7 @@ fn judged(
                 "Withdrawn by `xtask ticket close` at {}: {reason}; {boxes}",
                 reading.commit
             );
-            match close(gh, root, issue, &reading, &successors, &comment) {
-                Ok((opened, closed)) => (
-                    Status::Pass,
-                    format!("{ticket}: {boxes}; withdrawn: {reason}; {opened}; {closed}"),
-                ),
-                Err(text) => (Status::Fail, format!("{ticket}: {boxes}; {text}")),
-            }
+            closing(&successors, &comment, &format!("withdrawn: {reason}; "))
         }
         _ if !criteria.found => (
             Status::Fail,
@@ -1437,13 +1405,7 @@ fn judged(
                 "Closed by `xtask ticket close` at {}: {boxes}",
                 reading.commit
             );
-            match close(gh, root, issue, &reading, &successors, &comment) {
-                Ok((opened, closed)) => (
-                    Status::Pass,
-                    format!("{ticket}: {boxes}; {opened}; {closed}"),
-                ),
-                Err(text) => (Status::Fail, format!("{ticket}: {boxes}; {text}")),
-            }
+            closing(&successors, &comment, "")
         }
     };
     reading.status = status;
@@ -1475,7 +1437,10 @@ fn counted(
     match act {
         Act::Close(verdict, successors, _) => {
             reading.count(OPENS, successors.tickets().len() as u64)?;
-            reading.count(WITHDRAWN, u64::from(verdict.withdrawn().is_some()))?;
+            reading.count(
+                WITHDRAWN,
+                u64::from(matches!(verdict, Verdict::Withdrawn(_))),
+            )?;
         }
         Act::Ready(successors) => {
             reading.count(OPENS, successors.tickets().len() as u64)?;
@@ -1581,7 +1546,7 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
             Err(err) => readings.push(failed(&snapshot, ticket, &err, &again)?),
         }
     }
-    let mut own = stamped(&snapshot, MERGED)?;
+    let mut own = stamped(&snapshot, MERGED, None)?;
     let made = closes.len();
     let (by_verb, all) = gh.spent();
     let took = started.elapsed();
@@ -1622,9 +1587,13 @@ fn secs(span: Duration) -> String {
 }
 
 /// A reading of the instrument over `scope`, stamped over the workspace
-/// as every reading of the instrument is.
-fn stamped(snapshot: &Snapshot, scope: &str) -> Result<Reading> {
-    Reading::stamped_over(INSTRUMENT, scope, snapshot, Path::new(STAMPED_OVER))
+/// as every reading of the instrument is, taken in the session named.
+fn stamped(snapshot: &Snapshot, scope: &str, session_id: Option<&str>) -> Result<Reading> {
+    let mut reading = Reading::stamped_over(INSTRUMENT, scope, snapshot, Path::new(STAMPED_OVER))?;
+    session_id
+        .unwrap_or_default()
+        .clone_into(&mut reading.session);
+    Ok(reading)
 }
 
 /// The reading of a ticket [`merged`] could not even read or close for
@@ -1635,7 +1604,7 @@ fn failed(
     err: &anyhow::Error,
     again: &str,
 ) -> Result<Reading> {
-    let mut reading = stamped(snapshot, &scope(ticket))?;
+    let mut reading = stamped(snapshot, &scope(ticket), None)?;
     reading.message = format!("{err:#}");
     unclosed(reading, again)
 }
@@ -1663,7 +1632,7 @@ fn unclosed(mut reading: Reading, again: &str) -> Result<Reading> {
 /// how to wire the blocker on first.
 fn left_open(snapshot: &Snapshot, issue: &Issue, again: &str) -> Result<Reading> {
     let ticket = Ticket::new(issue.number);
-    let mut left = stamped(snapshot, &scope(ticket))?;
+    let mut left = stamped(snapshot, &scope(ticket), None)?;
     let blockers: Vec<String> = issue
         .blocked_by
         .open()

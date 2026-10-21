@@ -9,7 +9,7 @@ use php_unit::decl::{Parameter, Type};
 use php_unit::{ConstIdx, OpArray, Opcode, OperandKind, Opline};
 
 use super::lattice::{self, Types};
-use super::{Constant, Frame, Layout, Slot};
+use super::{Constant, Frame, Imm, Layout, Line, Slot};
 
 /// php's `MAX_ARG_FLAG_NUM`: past it, how a send passes is read late.
 const MAX_ARG_FLAG_NUM: u32 = 12;
@@ -23,11 +23,12 @@ const BY_REF: u32 = 1 << 0;
 /// `zend_optimizer_classify_function`.
 const BY_NAME: [&[u8]; 4] = [b"extract", b"compact", b"get_defined_vars", b"db2_execute"];
 
-/// The slot an operand of an opline of `frame` names, where it names one.
-pub(super) fn slot_of(frame: Frame, code: &OpArray, kind: OperandKind, field: u32) -> Option<Slot> {
+/// The slot an operand of an opline of `frame` names, where it names
+/// one: the field itself, a temporary's folded past the CVs by the
+/// compiler as `pass_two` folds it.
+pub(super) fn slot_of(frame: Frame, kind: OperandKind, field: u32) -> Option<Slot> {
     let var = match kind {
-        OperandKind::Cv => field,
-        OperandKind::Tmp | OperandKind::Var => code.num_cvs.checked_add(field)?,
+        OperandKind::Cv | OperandKind::Tmp | OperandKind::Var => field,
         OperandKind::Const | OperandKind::Unused => return None,
     };
     Some(Slot { frame, var })
@@ -144,15 +145,15 @@ fn slotted(kind: OperandKind) -> bool {
 }
 
 /// The slots an opline reads: its operands, and its `OP_DATA`'s.
-pub(super) fn reads(code: &OpArray, op: &Opline, after: Option<&Opline>) -> Vec<u32> {
+pub(super) fn reads(op: &Opline, after: Option<&Opline>) -> Vec<u32> {
     let mut vars = Vec::with_capacity(3);
     for (kind, field) in [(op.op1_type, op.op1), (op.op2_type, op.op2)] {
-        if let Some(slot) = slot_of(Frame::ROOT, code, kind, field) {
+        if let Some(slot) = slot_of(Frame::ROOT, kind, field) {
             vars.push(slot.var);
         }
     }
     if let Some(data) = after.filter(|data| data.opcode == Opcode::OpData)
-        && let Some(slot) = slot_of(Frame::ROOT, code, data.op1_type, data.op1)
+        && let Some(slot) = slot_of(Frame::ROOT, data.op1_type, data.op1)
     {
         vars.push(slot.var);
     }
@@ -160,12 +161,12 @@ pub(super) fn reads(code: &OpArray, op: &Opline, after: Option<&Opline>) -> Vec<
 }
 
 /// The slots an opline writes.
-pub(super) fn written(code: &OpArray, op: &Opline, after: Option<&Opline>) -> Vec<u32> {
+pub(super) fn written(op: &Opline, after: Option<&Opline>) -> Vec<u32> {
     let data = after.filter(|data| data.opcode == Opcode::OpData);
     let writes = writes(op, data);
     let mut vars = Vec::with_capacity(3);
     let mut add = |kind: OperandKind, field: u32| {
-        if let Some(slot) = slot_of(Frame::ROOT, code, kind, field) {
+        if let Some(slot) = slot_of(Frame::ROOT, kind, field) {
             vars.push(slot.var);
         }
     };
@@ -469,7 +470,7 @@ pub(super) fn written_after_entry(code: &OpArray, var: u32) -> bool {
         .count();
     code.oplines.iter().enumerate().skip(start).any(|(at, op)| {
         let after = code.oplines.get(at + 1);
-        written(code, op, after).contains(&var)
+        written(op, after).contains(&var)
     })
 }
 
@@ -504,6 +505,24 @@ pub(super) fn constant_types(constant: Constant, code: &OpArray) -> Types {
             .literals
             .get(at.0 as usize)
             .map_or(Types::ANY, Types::of_constant),
+    }
+}
+
+/// php's `zend_jit_trace_may_exit` past the jumps whose direction the
+/// record keeps (`Z/ext/opcache/jit/zend_jit_trace.c:261-320`): the
+/// oplines whose handler may go on elsewhere than the opline the record
+/// went to. A table's jump (`SWITCH_LONG`, `SWITCH_STRING`, `MATCH`),
+/// whose target the record does not say; a `NEW` with no arguments
+/// before a `DO_FCALL`, which skips the call where the class has no
+/// constructor; and a `DO_FCALL`, php's potentially polymorphic call,
+/// whose callee may be another function than the one recorded.
+pub(super) fn may_exit(op: &Opline, after: Option<&Opline>) -> bool {
+    match op.opcode {
+        Opcode::SwitchLong | Opcode::SwitchString | Opcode::Match | Opcode::DoFcall => true,
+        Opcode::New => {
+            op.extended_value == 0 && after.is_some_and(|after| after.opcode == Opcode::DoFcall)
+        }
+        _ => false,
     }
 }
 
@@ -571,18 +590,24 @@ pub(super) fn is_call(opcode: Opcode) -> bool {
 }
 
 /// The inline oplines that may not finish, and leave the trace for the
-/// interpreter to serve them again: a division by zero or a shift by a
-/// negative number throws, an element past a packed array is a hole, a
+/// interpreter to serve them again: a division or a modulo by zero or a
+/// shift by a negative number throws, where no constant divisor or shift
+/// rules it out as php's code generator rules it out
+/// ([`cannot_raise`](super::cannot_raise)), an element past a packed array is a hole, a
 /// call's frame may not fit, a value sent where the callee takes a
 /// reference is refused, a parameter's check may fail.
-pub(super) fn inline_may_leave(opcode: Opcode) -> bool {
+pub(super) fn inline_may_leave(line: &Line) -> bool {
+    let arithmetic = match (line.opcode, line.imm) {
+        (Opcode::AssignOp, Imm::Binary(binary)) => Some(binary),
+        (Opcode::Div | Opcode::Mod | Opcode::Sl | Opcode::Sr, _) => Some(line.opcode),
+        _ => None,
+    };
+    if let Some(op) = arithmetic {
+        return !super::cannot_raise(op, line.op2);
+    }
     matches!(
-        opcode,
-        Opcode::Div
-            | Opcode::Mod
-            | Opcode::Sl
-            | Opcode::Sr
-            | Opcode::AssignOp
+        line.opcode,
+        Opcode::AssignOp
             | Opcode::FetchDimR
             | Opcode::AssignDim
             | Opcode::InitFcall
@@ -799,6 +824,31 @@ pub(super) fn guard_sites(
         Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd if k2 == Some(ZvalType::String) => {
             vec![Op2]
         }
+        _ => vec![],
+    }
+}
+
+/// The operands php's code generator holds the recorded type of where its
+/// inference adds no guard (`CHECK_OP_TRACE_TYPE` in
+/// `zend_jit_trace.c`'s cases): a concatenation's two, a rope part's, and
+/// an arithmetic's where the recording saw a number, in the order it holds
+/// them; it holds one only where the operand's inference is marked
+/// `MAY_BE_GUARD` ([`guard_sites`] elsewhere).
+pub(super) fn check_sites(op: &Opline, samples: [Option<Sample>; 3]) -> Vec<Site> {
+    use Site::{Op1, Op2};
+    let number = |at: usize| {
+        matches!(
+            kind_of(samples[at]),
+            Some(ZvalType::Long | ZvalType::Double)
+        )
+    };
+    match op.opcode {
+        Opcode::Concat | Opcode::FastConcat => vec![Op1, Op2],
+        Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd => vec![Op2],
+        Opcode::Add | Opcode::Sub | Opcode::Mul => [(Op1, 0), (Op2, 1)]
+            .into_iter()
+            .filter_map(|(site, at)| number(at).then_some(site))
+            .collect(),
         _ => vec![],
     }
 }

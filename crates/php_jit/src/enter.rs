@@ -55,15 +55,17 @@ use crate::table::{Exit, Trace};
 use crate::types::{ExitId, Landing};
 
 /// What a request is to the crossing: the interrupt compiled code tests at a
-/// loop header, and whether a kernel that returned left a throwable
-/// pending.
+/// loop header, and whether a kernel that returned left the request
+/// unwinding.
 pub(crate) trait Crossed {
     /// The request's interrupt, which the engine's timer and signal
     /// delivery raise (design §5.8).
     fn interrupt(&self) -> &AtomicBool;
 
-    /// Whether a throwable or an exit stands pending.
-    fn thrown(&self) -> bool;
+    /// Whether the request unwinds: a throwable or an exit stands
+    /// pending, or a fatal is under way, which leaves every frame as an
+    /// exit does.
+    fn unwinding(&self) -> bool;
 }
 
 impl Crossed for Request {
@@ -71,8 +73,8 @@ impl Crossed for Request {
         self.limits().interrupt().raised()
     }
 
-    fn thrown(&self) -> bool {
-        self.diagnostics().raised().is_some()
+    fn unwinding(&self) -> bool {
+        self.diagnostics().raised().is_some() || self.diagnostics().bailing_out()
     }
 }
 
@@ -252,7 +254,7 @@ unsafe fn answered<R: Crossed, T: Out>(
             unsafe { value.put(out) };
             // SAFETY: as in `crossed`, `req` is the request the `ExitCtx`
             // borrows, and the kernel's borrow of it has ended.
-            if unsafe { &*cx.req }.thrown() {
+            if unsafe { &*cx.req }.unwinding() {
                 Status::Exception
             } else {
                 Status::Continue
@@ -490,8 +492,20 @@ fn zval(word: u64, type_info: u32) -> Zval {
     unsafe { std::mem::transmute::<Words, Zval>(words) }
 }
 
-/// Where a trace left the interpreter (`jit-design.md` §4.6): the exit it
-/// left through, and the frame the loop goes on in, landed.
+/// How a trace gave the interpreter back its request (`jit-design.md`
+/// §4.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Left {
+    /// Through an exit, landed.
+    Exit(Exited),
+    /// Through an unwind, which takes no exit: a throwable a kernel left
+    /// pending, which the loop unwinds from where it was raised, in the
+    /// frame that stands.
+    Unwound(FrameRef),
+}
+
+/// Where a trace left the interpreter through an exit: the exit, and the
+/// frame the loop goes on in, landed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Exited {
     pub(crate) exit: ExitId,
@@ -500,15 +514,15 @@ pub(crate) struct Exited {
 
 /// What compiled code is entered as (`jit-design.md` §4.3): the
 /// `ExitCtx` and the room of the frame the trace was recorded in, and the
-/// exit it left through, or [`lower::ABANDONED`].
+/// exit it left through, [`lower::UNWOUND`] or [`lower::ABANDONED`].
 type Entry = unsafe extern "C" fn(*mut ExitCtx<'_>, *mut u8) -> u32;
 
 /// `trace` called on `frame` (`jit-design.md` §4.6), with the request's
 /// trace number, php's `EG(jit_trace_num)`, the trace's for the length of
 /// the call and the one before it again after. A panic a wrapper caught
-/// is resumed and a fatal returned, read before the exit; otherwise the
-/// exit is landed ([`land`]). Reads no word and follows no link: what
-/// happens next is `dispatch`'s.
+/// is resumed and a fatal returned, read before the exit; an unwind hands
+/// back the frame that stands, and an exit is landed ([`land`]). Reads no
+/// word and follows no link: what happens next is `dispatch`'s.
 ///
 /// The crossing's invariant is per fiber stack (§4.6): a fiber's compiled
 /// loop suspends from inside the kernel that serves `Fiber::suspend`, its
@@ -525,7 +539,7 @@ type Entry = unsafe extern "C" fn(*mut ExitCtx<'_>, *mut u8) -> u32;
 /// ```expect exit=0 regime=jit-force process
 /// 44850 44850
 /// ```
-pub(crate) fn enter(req: &mut Request, frame: FrameRef, trace: &Trace) -> Result<Exited, Fatal> {
+pub(crate) fn enter(req: &mut Request, frame: FrameRef, trace: &Trace) -> Result<Left, Fatal> {
     let room = tier::room(req, frame)
         .ok_or_else(|| internal("a trace entered on a frame with no room"))?;
     // SAFETY: the table published bytes `lower` compiled for this ABI at
@@ -546,15 +560,41 @@ pub(crate) fn enter(req: &mut Request, frame: FrameRef, trace: &Trace) -> Result
         Some(Pending::Bailout(fatal)) => return Err(fatal),
         None => {}
     }
-    let id = u16::try_from(answer)
-        .ok()
-        .filter(|id| usize::from(*id) < trace.exits.len())
-        .ok_or_else(|| internal("a trace left through no exit of its own and kept nothing"))?;
-    let frame = land(req, &trace.exits[usize::from(id)])?;
-    Ok(Exited {
-        exit: ExitId(id),
-        frame,
-    })
+    match Answer::of(answer, trace.exits.len()) {
+        Answer::Exit(exit) => {
+            let frame = land(req, &trace.exits[usize::from(exit.0)])?;
+            Ok(Left::Exit(Exited { exit, frame }))
+        }
+        Answer::Unwound if req.unwinding() => {
+            let frame =
+                tier::current(req).ok_or_else(|| internal("a trace left no frame standing"))?;
+            Ok(Left::Unwound(frame))
+        }
+        Answer::Unwound => Err(internal("a trace unwound with no throwable pending")),
+        Answer::Abandoned => Err(internal(
+            "a trace left through no exit of its own and kept nothing",
+        )),
+    }
+}
+
+/// What compiled code answered `enter`, decoded once: an exit of the
+/// trace's, [`lower::UNWOUND`], or anything else, [`lower::ABANDONED`]
+/// with nothing kept among it, which no trace answers but by a defect.
+enum Answer {
+    Exit(ExitId),
+    Unwound,
+    Abandoned,
+}
+
+impl Answer {
+    /// The word compiled code answered, for a trace of `exits` exits.
+    fn of(word: u32, exits: usize) -> Answer {
+        match u16::try_from(word) {
+            Ok(id) if usize::from(id) < exits => Answer::Exit(ExitId(id)),
+            _ if word == lower::UNWOUND => Answer::Unwound,
+            _ => Answer::Abandoned,
+        }
+    }
 }
 
 /// The landing (the glossary's Landing): the frame the loop goes on in,
@@ -564,7 +604,7 @@ pub(crate) fn enter(req: &mut Request, frame: FrameRef, trace: &Trace) -> Result
 /// stood at, which is where the loop unwinds from, so nothing is landed.
 fn land(req: &mut Request, exit: &Exit) -> Result<FrameRef, Fatal> {
     let frame = tier::current(req).ok_or_else(|| internal("a trace left no frame standing"))?;
-    if req.thrown() {
+    if req.unwinding() {
         return Ok(frame);
     }
     if let Some(at) = exit.opline {
@@ -605,7 +645,7 @@ impl Crossed for Tally {
         &NEVER
     }
 
-    fn thrown(&self) -> bool {
+    fn unwinding(&self) -> bool {
         self.thrown
     }
 }

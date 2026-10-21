@@ -129,7 +129,7 @@ use crate::supplied::tell;
 pub(crate) use opcodes::{
     Declared, ObservedOpcodes, OpcodeObserver, Telling, Untold, tell_before, told,
 };
-pub use opcodes::{OpcodeHandler, Opcodes, OpcodesDeclared};
+pub use opcodes::{OpcodeHandler, Opcodes, OpcodesDeclared, observes};
 
 /// What an observer observes, php's `zend_execute_data` of a call: a
 /// frame the loop serves, a function's or an included, evaluated or main

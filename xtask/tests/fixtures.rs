@@ -39,33 +39,6 @@ const EVALUATED: [(&str, Instrument); 2] =
     [("allow", unsafe_audit::run), ("generated", budget::run)];
 
 #[test]
-fn every_rule_the_two_instruments_evaluate_has_a_fixture_that_fails_under_it() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let mut seen = 0;
-    for rule in &manifest.rules {
-        let predicate = rule.predicate.named()[0];
-        let Some((_, instrument)) = EVALUATED.iter().find(|(p, _)| *p == predicate) else {
-            continue;
-        };
-        seen += 1;
-        let root = fixture("rules", &rule.id);
-        let fixture_manifest = Manifest::load(&root).unwrap();
-        let readings = instrument(&root, &fixture_manifest).unwrap();
-        let failed = failures(&readings);
-        assert!(
-            failed.iter().any(|r| r.rule == rule.id),
-            "fixture {} does not fail under rule {}: {readings:#?}",
-            root.display(),
-            rule.id
-        );
-    }
-    assert!(
-        seen >= 2,
-        "the manifest's allow and generated rules are covered"
-    );
-}
-
-#[test]
 fn a_crate_one_line_over_its_ceiling_fails_with_the_ceiling_and_the_design_text() {
     let root = fixture("budget", "ceiling");
     let manifest = Manifest::load(&root).unwrap();
@@ -288,6 +261,43 @@ fn a_cargo_configuration_setting_clippy_conf_dir_fails_naming_it() {
             clippy.message.contains(named),
             "{named}: {}",
             clippy.message
+        );
+    }
+}
+
+/// The tests whose subject is the tracked workspace itself: each reads the
+/// `seams.toml`, `oracle.toml`, registry or sources standing in the
+/// workspace, so a person's edit there is what may turn one red (#3091).
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
+mod tracked {
+    use super::*;
+
+    #[test]
+    fn every_rule_the_two_instruments_evaluate_has_a_fixture_that_fails_under_it() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let mut seen = 0;
+        for rule in &manifest.rules {
+            let predicate = rule.predicate.named()[0];
+            let Some((_, instrument)) = EVALUATED.iter().find(|(p, _)| *p == predicate) else {
+                continue;
+            };
+            seen += 1;
+            let root = fixture("rules", &rule.id);
+            let fixture_manifest = Manifest::load(&root).unwrap();
+            let readings = instrument(&root, &fixture_manifest).unwrap();
+            let failed = failures(&readings);
+            assert!(
+                failed.iter().any(|r| r.rule == rule.id),
+                "fixture {} does not fail under rule {}: {readings:#?}",
+                root.display(),
+                rule.id
+            );
+        }
+        assert!(
+            seen >= 2,
+            "the manifest's allow and generated rules are covered"
         );
     }
 }

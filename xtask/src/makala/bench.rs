@@ -19,7 +19,7 @@
 //! the heads differ by what each host is (#2570, #2335). Both run under the
 //! recipe's ini with php.ini-production's values for the two entries the
 //! recipe sets for correctness and that cost every request:
-//! `zend.assertions=-1` and `opcache.protect_memory=0` ([`INI`]).
+//! `zend.assertions=-1` and `opcache.protect_memory=0` ([`PRODUCTION`]).
 //!
 //! **Two loads** ([`Load`]). `makala-fpm/<workload>` sends one request a
 //! rep from one client, so it measures latency, against a makala at its
@@ -51,21 +51,16 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use super::{Entry, workloads};
 use crate::bench::spent::{Retired, Spent};
-use crate::bench::{Declared, Held, PROTOCOL, Sample, Side, Sides, Stream, Unit};
+use crate::bench::{Arms, Declared, Held, PRODUCTION, PROTOCOL, Sample, Side, Sides, Stream, Unit};
 use crate::manifest::Manifest;
 use crate::oracle::hosts::MAKALA;
 use crate::oracle::profile;
 use crate::scratch::Tree;
 use crate::witness::makala::{Fpm, Http, Ports, Server, split_head};
 
-/// The ini entries both arms run under after the recipe's: the two the
-/// recipe sets for correctness at a cost to every request, at
-/// php.ini-production's values.
-const INI: [&str; 2] = ["zend.assertions=-1", "opcache.protect_memory=0"];
-
-/// [`INI`] as the hosts' starts take it.
+/// [`PRODUCTION`] as the hosts' starts take it.
 fn ini() -> Vec<String> {
-    INI.map(str::to_owned).to_vec()
+    PRODUCTION.map(str::to_owned).to_vec()
 }
 
 /// How a rep asks a bar's hosts.
@@ -133,9 +128,10 @@ pub(crate) fn declared(root: &Path) -> Result<Vec<Declared>> {
             |stem| stem.to_string_lossy().into_owned(),
         );
         for (bar, held, load) in BARS {
-            let against = match held {
-                Held::Series => "php-fpm behind a FastCGI client",
-                Held::Control => "itself",
+            let against = if held == Held::Control {
+                "itself"
+            } else {
+                "php-fpm behind a FastCGI client"
             };
             let (root, entry) = (root.to_path_buf(), entry.clone());
             bars.push(Declared {
@@ -178,7 +174,7 @@ fn sides(root: &Path, entry: &Entry, held: Held, load: Load) -> Result<Sides> {
         })
     };
     if held == Held::Control {
-        return Ok(Ok([makala("makala-a"), makala("makala-b")]));
+        return Ok(Ok(Arms::Pair([makala("makala-a"), makala("makala-b")])));
     }
     let (program, http) = (fpm.path.clone(), &entry.http);
     let pool = Fpm::start(
@@ -198,7 +194,7 @@ fn sides(root: &Path, entry: &Entry, held: Held, load: Load) -> Result<Sides> {
         ask,
         pid,
     };
-    Ok(Ok([makala("makala"), Box::new(fpm)]))
+    Ok(Ok(Arms::Pair([makala("makala"), Box::new(fpm)])))
 }
 
 /// Why a bar of the production server is not measured on this machine.
@@ -225,7 +221,7 @@ impl Served {
         threads: Option<usize>,
     ) -> Result<Served> {
         let recipe = &manifest.pin.recipe;
-        let binary = profile::released(root, &MAKALA.package(), MAKALA.binary, None)?;
+        let binary = profile::released(root, (&MAKALA.package(), MAKALA.binary), None, None)?;
         let own = Tree::new("bench-makala")?;
         own.write(&entry.script, &entry.program)?;
         let log = own.path().join("errors");

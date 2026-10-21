@@ -5,11 +5,19 @@
 //! `docs/divergence.md` is that rendering as a computed region.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use xtask::divergence::{self, Cause, Kind, Registry, Retires, Status};
 use xtask::manifest::Manifest;
 use xtask::scratch::Tree;
+
+mod common {
+    pub mod manifest;
+    pub mod repo;
+    pub mod run;
+}
+use common::manifest::Tracked;
+use common::repo::Repo;
+use common::run::xtask;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -23,57 +31,70 @@ fn fixture(rule: &str) -> PathBuf {
         .join("divergence.toml")
 }
 
-/// A scratch workspace: the tracked manifest, pin and registry, no store.
+/// A scratch workspace: a manifest of the guard's rule alone (as
+/// [`reasoned`] states it), the tracked pin, [`REGISTRY`] as its registry,
+/// no store.
 fn scratch(name: &str) -> Tree {
     let dir = Tree::new(&format!("divergence-{name}")).unwrap();
     std::fs::create_dir_all(dir.join("docs")).unwrap();
-    for file in ["seams.toml", "oracle.toml", divergence::FILE] {
-        std::fs::copy(workspace().join(file), dir.join(file)).unwrap();
-    }
+    std::fs::copy(workspace().join("oracle.toml"), dir.join("oracle.toml")).unwrap();
+    Tracked::minimal()
+        .with_rule(REASON, |rule| {
+            rule.extend(REASON_ROW.parse::<toml::Table>().unwrap());
+        })
+        .write(&dir);
+    std::fs::write(dir.join(divergence::FILE), REGISTRY).unwrap();
     dir
 }
+
+/// The registry a scratch starts from, in place of the tracked one, whose
+/// rows a person keeps (#3091): prose above the rows, as the tracked file
+/// carries, an accepted debt row and an accepted row of another cause,
+/// each reasoned as the guard holds them, and no open row.
+const REGISTRY: &str = r#"# The divergence registry of a scratch workspace (fixture).
+
+[[divergence]]
+id = "witness:fixture-accepted"
+kind = "witness"
+reason = "The fixture's accepted reason (fixture)."
+status = "accepted"
+since = "2026-09-07"
+
+[[divergence]]
+id = "phpt:fixture-chosen-here"
+kind = "phpt"
+cause = "by-design"
+reason = "The fixture's chosen difference, as design §3.1 chose it (fixture)."
+status = "accepted"
+since = "2026-09-08"
+"#;
+
+/// A manifest of the one rule this instrument evaluates, with a text of
+/// the test's own: what a test of the guard's mechanics judges by, where
+/// the tracked rule is held to its fixtures in [`tracked`].
+fn reasoned() -> Manifest {
+    let row = Tracked::minimal().with_rule(REASON, |rule| {
+        rule.extend(REASON_ROW.parse::<toml::Table>().unwrap());
+    });
+    Manifest::parse(&row.text()).unwrap()
+}
+
+/// The rule this instrument evaluates, by its id.
+const REASON: &str = "divergence.reason";
+
+/// [`REASON`]'s row as a test states it, its text the test's own.
+const REASON_ROW: &str = r#"
+scope = "docs/divergence.toml"
+check = "divergence-reason"
+text = "An accepted row has a reason a person wrote (fixture)."
+"#;
 
 /// A scratch workspace that is a git repository with one commit, so a
 /// reading can be stamped.
 fn committed(name: &str) -> Tree {
     let root = scratch(name);
-    for args in [
-        &["init", "-q"][..],
-        &["-c", "user.name=x", "-c", "user.email=x@x", "add", "."],
-        &[
-            "-c",
-            "user.name=x",
-            "-c",
-            "user.email=x@x",
-            "commit",
-            "-q",
-            "-m",
-            "scratch",
-        ],
-    ] {
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
-    }
+    Repo::init(&root).commit("scratch");
     root
-}
-
-fn xtask(root: &Path, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(root)
-        .args(args)
-        .output()
-        .unwrap();
-    (
-        out.status.success(),
-        String::from_utf8(out.stdout).unwrap(),
-        String::from_utf8(out.stderr).unwrap(),
-    )
 }
 
 /// The counts table's line for the debt rows of one kind, or `total`,
@@ -92,39 +113,6 @@ fn counts_line(registry: &Registry, kind: Option<Kind>) -> String {
         of(Status::Accepted),
         of(Status::Fixed)
     )
-}
-
-#[test]
-fn the_tracked_registry_loads_and_every_row_answers_for_itself() {
-    // What holds of any registry a person keeps, and nothing about which
-    // rows it keeps: a row dropped or added breaks no test here (#2142).
-    let registry = Registry::load(workspace()).unwrap();
-    for row in registry.rows() {
-        let id = row.id.as_str();
-        assert_eq!(registry.row(id).map(|r| &r.id), Some(&row.id), "{id}");
-        assert_eq!(
-            registry.accepted(id).is_some(),
-            row.status == Status::Accepted,
-            "{id}"
-        );
-        if row.status == Status::Accepted {
-            assert!(!row.reason.is_empty(), "{id}: an accepted row has a reason");
-        }
-    }
-    assert!(registry.accepted("trace:no-such").is_none());
-    let counts = registry.counts();
-    assert_eq!(
-        counts.by_status.values().sum::<u64>(),
-        u64::try_from(registry.rows().len()).unwrap()
-    );
-    assert_eq!(
-        Cause::ALL
-            .into_iter()
-            .map(|c| counts.rows_of(c))
-            .sum::<u64>(),
-        u64::try_from(registry.rows().len()).unwrap(),
-        "every row is of one cause"
-    );
 }
 
 #[test]
@@ -213,72 +201,9 @@ fn a_proposed_row_is_open_with_an_empty_reason_and_keeps_the_file_s_prose() {
 }
 
 #[test]
-fn the_reason_instrument_passes_the_tracked_registry() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let registry = Registry::load(workspace()).unwrap();
-    let reading = divergence::reason(&registry, &manifest, workspace()).unwrap();
-    assert_eq!(reading.status, xtask::reading::Status::Pass, "{reading:?}");
-    assert_eq!(reading.instrument, divergence::INSTRUMENT);
-    assert_eq!(reading.rule, "divergence.reason");
-    assert_eq!(
-        reading.numbers["rows"],
-        xtask::reading::Number::count(registry.rows().len())
-    );
-    assert_eq!(reading.numbers["unreasoned"], 0.into());
-}
-
-/// One negative-control fixture per rule this instrument evaluates
-/// (harness-design.md §4.1): every manifest rule whose `check` predicate
-/// names `divergence-reason` has a fixture registry under
-/// `xtask/fixtures/rules/<id>/` that must fail with the rule's text. Rules
-/// other instruments evaluate are not this test's.
-#[test]
-fn every_rule_this_instrument_evaluates_has_a_fixture_that_fails() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let rules: Vec<_> = manifest
-        .rules
-        .iter()
-        .filter(|r| r.predicate.check.as_deref() == Some(divergence::INSTRUMENT))
-        .collect();
-    assert!(!rules.is_empty(), "the manifest names the instrument");
-    for rule in rules {
-        let path = fixture(&rule.id);
-        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-            panic!("rule {} has no fixture at {}: {e}", rule.id, path.display())
-        });
-        let registry = Registry::parse(&text).unwrap();
-        let reading = divergence::reason(&registry, &manifest, workspace()).unwrap();
-        assert_eq!(
-            reading.status,
-            xtask::reading::Status::Fail,
-            "the fixture for {} must fail",
-            rule.id
-        );
-        assert_eq!(reading.rule, rule.id);
-        assert!(
-            reading.message.contains(&rule.text),
-            "the failure prints the rule's text: {}",
-            reading.message
-        );
-        assert!(
-            reading.message.contains("witness:0000000000000000"),
-            "the offending row is named: {}",
-            reading.message
-        );
-        assert!(
-            !reading.message.contains("phpt:Zend/tests/fixture.phpt"),
-            "a row in order is not named: {}",
-            reading.message
-        );
-        assert_eq!(reading.numbers["unreasoned"], 1.into());
-    }
-}
-
-#[test]
 fn the_instrument_writes_a_reading_and_exits_one_on_the_fixture() {
     let root = committed("instrument");
-    let (ok, out, err) = xtask(&root, &[divergence::INSTRUMENT]);
-    assert!(ok, "{err}");
+    let out = xtask(&root, &[divergence::INSTRUMENT]).ok();
     assert!(out.contains("every accepted row has a reason"), "{out}");
     let store = xtask::reading::Store::of_workspace(&root);
     let reading = store
@@ -289,8 +214,7 @@ fn the_instrument_writes_a_reading_and_exits_one_on_the_fixture() {
     assert!(!reading.commit.is_empty(), "stamped: {reading:?}");
 
     std::fs::copy(fixture("divergence.reason"), root.join(divergence::FILE)).unwrap();
-    let (ok, _, err) = xtask(&root, &[divergence::INSTRUMENT]);
-    assert!(!ok);
+    let err = xtask(&root, &[divergence::INSTRUMENT]).failed();
     assert!(err.contains("witness:0000000000000000"), "{err}");
     let reading = store
         .read(divergence::INSTRUMENT, "workspace")
@@ -307,10 +231,8 @@ fn the_instrument_writes_a_reading_and_exits_one_on_the_fixture() {
 fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
     let root = scratch("status");
     let registry = Registry::load(&root).unwrap();
-    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
-    assert!(ok, "{err}");
-    let (cut_ok, cut, cut_err) = xtask(&root, &["status", "--section", "divergence"]);
-    assert!(cut_ok, "{cut_err}");
+    let md = xtask(&root, &["status", "--section", "divergence", "--uncut"]).ok();
+    let cut = xtask(&root, &["status", "--section", "divergence"]).ok();
     assert!(
         registry.rows().iter().any(|r| r.status == Status::Accepted),
         "the workspace's registry has an accepted row to read"
@@ -350,11 +272,11 @@ fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
     );
     assert!(!md.contains("--uncut"), "{md}");
 
-    let (ok, json, _) = xtask(
+    let json = xtask(
         &root,
         &["status", "--section", "divergence", "--format", "json"],
-    );
-    assert!(ok);
+    )
+    .ok();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(
         value["rows"].as_array().unwrap().len(),
@@ -388,8 +310,7 @@ since = \"2026-09-29\"
         ),
     )
     .unwrap();
-    let (ok, grown, err) = xtask(&root, &["status", "--section", "divergence"]);
-    assert!(ok, "{err}");
+    let grown = xtask(&root, &["status", "--section", "divergence"]).ok();
     let beside_counts = |text: &str| -> Vec<String> {
         text.lines()
             .filter(|l| !l.starts_with("| trace |") && !l.starts_with("| total |"))
@@ -397,8 +318,7 @@ since = \"2026-09-29\"
             .collect()
     };
     assert_eq!(beside_counts(&grown), beside_counts(&cut), "{grown}");
-    let (ok, whole, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
-    assert!(ok, "{err}");
+    let whole = xtask(&root, &["status", "--section", "divergence", "--uncut"]).ok();
     assert!(
         whole.contains(
             "| trace:fixture-one-more | trace | debt | accepted | 2026-09-29 | The fixture's one more reason (fixture). |"
@@ -448,8 +368,7 @@ since = "2026-09-18"
     let root = scratch("crosscheck");
     std::fs::write(root.join(divergence::FILE), row).unwrap();
     let registry = Registry::load(&root).unwrap();
-    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
-    assert!(ok, "{err}");
+    let md = xtask(&root, &["status", "--section", "divergence", "--uncut"]).ok();
     assert!(
         md.contains("| crosscheck:ctype | crosscheck | debt | accepted |"),
         "{md}"
@@ -460,11 +379,11 @@ since = "2026-09-18"
     );
     assert!(md.contains("| crosscheck | 0 | 1 | 0 | 1 |"), "{md}");
     assert!(md.contains(&counts_line(&registry, None)), "{md}");
-    let (ok, json, _) = xtask(
+    let json = xtask(
         &root,
         &["status", "--section", "divergence", "--format", "json"],
-    );
-    assert!(ok);
+    )
+    .ok();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(value["counts"]["crosscheck"]["accepted"], 1);
 }
@@ -500,8 +419,7 @@ since = "2026-10-10"
 
     let root = scratch("wire");
     std::fs::write(root.join(divergence::FILE), row).unwrap();
-    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
-    assert!(ok, "{err}");
+    let md = xtask(&root, &["status", "--section", "divergence", "--uncut"]).ok();
     assert!(
         md.contains("| wire:h2spec/http2/6.5.3/1 | wire | debt | accepted |"),
         "{md}"
@@ -672,12 +590,14 @@ since = "2026-10-09"
 fn status_counts_debt_against_the_manifests_target_and_each_other_cause_on_its_own_line() {
     let root = scratch("causes");
     std::fs::write(root.join(divergence::FILE), ONE_OF_EACH).unwrap();
-    let seams = root.join("seams.toml");
-    let tracked = std::fs::read_to_string(&seams).unwrap();
-    let untargeted = tracked.split("\n[divergence]\n").next().unwrap().to_owned();
-    std::fs::write(&seams, format!("{untargeted}\n[divergence]\ntarget = 7\n")).unwrap();
-    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
-    assert!(ok, "{err}");
+    let target = |target: Option<i64>| {
+        let table = target.map(|n| toml::Table::from_iter([("target".to_owned(), n.into())]));
+        Tracked::of(&root)
+            .with_table("divergence", table)
+            .write(&root);
+    };
+    target(Some(7));
+    let md = xtask(&root, &["status", "--section", "divergence", "--uncut"]).ok();
     let lines: Vec<&str> = md.lines().collect();
     let at = |prefix: &str| {
         lines
@@ -719,11 +639,11 @@ fn status_counts_debt_against_the_manifests_target_and_each_other_cause_on_its_o
         md.contains("| phpt:fixture-chosen | phpt | by-design | accepted |"),
         "{md}"
     );
-    let (ok, json, _) = xtask(
+    let json = xtask(
         &root,
         &["status", "--section", "divergence", "--format", "json"],
-    );
-    assert!(ok);
+    )
+    .ok();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(value["target"], 7);
     assert_eq!(value["counts"]["total"]["accepted"], 1);
@@ -735,15 +655,14 @@ fn status_counts_debt_against_the_manifests_target_and_each_other_cause_on_its_o
 
     // Without the table the total is held to nothing, and says so; with
     // debt rows alone no line is about another cause.
-    std::fs::write(&seams, &untargeted).unwrap();
+    target(None);
     let debt_only = ONE_OF_EACH.split("\n[[divergence]]").nth(1).unwrap();
     std::fs::write(
         root.join(divergence::FILE),
         format!("[[divergence]]{debt_only}"),
     )
     .unwrap();
-    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence"]);
-    assert!(ok, "{err}");
+    let md = xtask(&root, &["status", "--section", "divergence"]).ok();
     assert!(md.contains("no `[divergence] target`"), "{md}");
     assert!(!md.contains("counted on its own line"), "{md}");
     assert!(md.contains("| total | 0 | 1 | 0 | 1 |"), "{md}");
@@ -756,7 +675,7 @@ fn status_counts_debt_against_the_manifests_target_and_each_other_cause_on_its_o
 /// is not named, and the rule's text is printed.
 #[test]
 fn the_guard_refuses_an_uncited_by_design_row_and_an_unretired_oracle_build_row() {
-    let manifest = Manifest::load(workspace()).unwrap();
+    let manifest = reasoned();
     for (file, number, named, says) in [
         (
             "by-design-uncited.toml",
@@ -839,8 +758,7 @@ fn status_divergence_counts_a_proposed_row_as_open() {
     registry
         .propose("phpt:Zend/tests/x.phpt", Kind::Runner)
         .unwrap();
-    let (ok, md, _) = xtask(&root, &["status", "--section", "divergence"]);
-    assert!(ok);
+    let md = xtask(&root, &["status", "--section", "divergence"]).ok();
     assert!(
         md.contains("| phpt:Zend/tests/x.phpt | runner | debt | open | "),
         "the facts list an open row: {md}"
@@ -848,44 +766,6 @@ fn status_divergence_counts_a_proposed_row_as_open() {
     assert!(md.contains("| runner | 1 | 0 | 0 | 1 |"), "{md}");
     assert!(md.contains(&counts_line(&registry, None)), "{md}");
     assert!(md.contains("| total | 1 | "), "{md}");
-}
-
-/// `docs/divergence.md` is the view; the registry is the truth. Its region's
-/// command is the status section with every reason whole, over the
-/// registry beside it, so its body is that rendering: the body opens with
-/// the section's own table head, as the section renders it over a registry
-/// of one row. Whether the body is the rendering of the rows the registry
-/// has now is `computed check`'s to hold, which pre-commit runs after
-/// `xtask regions` has rendered it and CI runs over the tree; held here, a
-/// merge that brings rows from both sides fails before the hook renders
-/// them (#1252).
-#[test]
-fn docs_divergence_md_is_the_status_section_as_a_computed_region() {
-    let page = std::fs::read_to_string(workspace().join("docs/divergence.md")).unwrap();
-    let opener = page
-        .lines()
-        .find(|l| l.starts_with("<!-- computed exec"))
-        .expect("one exec region");
-    assert!(
-        opener.contains("cmd=\"cargo xtask status --section divergence --uncut --tracked\""),
-        "the command is the status section, reasons whole: {opener}"
-    );
-    assert!(opener.contains("inputs=divergence.toml"), "{opener}");
-    let start = page.find(opener).unwrap() + opener.len();
-    let end = page[start..].find("<!-- /computed").unwrap() + start;
-    let body = page[start..end].trim();
-
-    let root = scratch("page");
-    std::fs::write(root.join(divergence::FILE), COVERING).unwrap();
-    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
-    assert!(ok, "{err}");
-    let head: Vec<&str> = md.trim().lines().take(2).collect();
-    assert_eq!(head.len(), 2, "{md}");
-    assert_eq!(
-        body.lines().take(2).collect::<Vec<_>>(),
-        head,
-        "the body is the section's rendering"
-    );
 }
 
 /// A registry of one accepted row whose reason holds for two tests it
@@ -1052,8 +932,7 @@ fn status_and_the_reason_instrument_count_a_covering_row_once() {
     let text = std::fs::read_to_string(&path).unwrap();
     std::fs::write(&path, format!("{text}\n{COVERING}")).unwrap();
     let registry = Registry::load(&root).unwrap();
-    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
-    assert!(ok, "{err}");
+    let md = xtask(&root, &["status", "--section", "divergence", "--uncut"]).ok();
     assert!(
         md.contains("| phpt:fixture-optimizer (covers 2) | phpt | debt | accepted | 2026-09-28 |"),
         "the row once, with how many ids it covers:\n{md}"
@@ -1067,11 +946,11 @@ fn status_and_the_reason_instrument_count_a_covering_row_once() {
         "{md}"
     );
     assert!(md.contains(&counts_line(&registry, None)), "{md}");
-    let (ok, json, _) = xtask(
+    let json = xtask(
         &root,
         &["status", "--section", "divergence", "--format", "json"],
-    );
-    assert!(ok);
+    )
+    .ok();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     let row = value["rows"]
         .as_array()
@@ -1081,7 +960,7 @@ fn status_and_the_reason_instrument_count_a_covering_row_once() {
         .unwrap();
     assert_eq!(row["covers"].as_array().map(Vec::len), Some(2), "{row}");
 
-    let manifest = Manifest::load(workspace()).unwrap();
+    let manifest = reasoned();
     let unreasoned =
         Registry::parse(&COVERING.replace("The fixture's one reason (fixture).", "")).unwrap();
     let reading = divergence::reason(&unreasoned, &manifest, workspace()).unwrap();
@@ -1096,4 +975,146 @@ fn status_and_the_reason_instrument_count_a_covering_row_once() {
     assert_eq!(reading.numbers["rows"], 1.into());
     assert_eq!(reading.numbers["ids"], 3.into());
     assert_eq!(reading.numbers["unreasoned"], 1.into());
+}
+
+/// The tests whose subject is the tracked workspace itself: each reads the
+/// `seams.toml`, `oracle.toml`, registry or sources standing in the
+/// workspace, so a person's edit there is what may turn one red (#3091).
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
+mod tracked {
+    use super::*;
+
+    #[test]
+    fn the_tracked_registry_loads_and_every_row_answers_for_itself() {
+        // What holds of any registry a person keeps, and nothing about which
+        // rows it keeps: a row dropped or added breaks no test here (#2142).
+        let registry = Registry::load(workspace()).unwrap();
+        for row in registry.rows() {
+            let id = row.id.as_str();
+            assert_eq!(registry.row(id).map(|r| &r.id), Some(&row.id), "{id}");
+            assert_eq!(
+                registry.accepted(id).is_some(),
+                row.status == Status::Accepted,
+                "{id}"
+            );
+            if row.status == Status::Accepted {
+                assert!(!row.reason.is_empty(), "{id}: an accepted row has a reason");
+            }
+        }
+        assert!(registry.accepted("trace:no-such").is_none());
+        let counts = registry.counts();
+        assert_eq!(
+            counts.by_status.values().sum::<u64>(),
+            u64::try_from(registry.rows().len()).unwrap()
+        );
+        assert_eq!(
+            Cause::ALL
+                .into_iter()
+                .map(|c| counts.rows_of(c))
+                .sum::<u64>(),
+            u64::try_from(registry.rows().len()).unwrap(),
+            "every row is of one cause"
+        );
+    }
+
+    #[test]
+    fn the_reason_instrument_passes_the_tracked_registry() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let registry = Registry::load(workspace()).unwrap();
+        let reading = divergence::reason(&registry, &manifest, workspace()).unwrap();
+        assert_eq!(reading.status, xtask::reading::Status::Pass, "{reading:?}");
+        assert_eq!(reading.instrument, divergence::INSTRUMENT);
+        assert_eq!(reading.rule, "divergence.reason");
+        assert_eq!(
+            reading.numbers["rows"],
+            xtask::reading::Number::count(registry.rows().len())
+        );
+        assert_eq!(reading.numbers["unreasoned"], 0.into());
+    }
+
+    /// One negative-control fixture per rule this instrument evaluates
+    /// (harness-design.md §4.1): every manifest rule whose `check` predicate
+    /// names `divergence-reason` has a fixture registry under
+    /// `xtask/fixtures/rules/<id>/` that must fail with the rule's text. Rules
+    /// other instruments evaluate are not this test's.
+    #[test]
+    fn every_rule_this_instrument_evaluates_has_a_fixture_that_fails() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let rules: Vec<_> = manifest
+            .rules
+            .iter()
+            .filter(|r| r.predicate.check.as_deref() == Some(divergence::INSTRUMENT))
+            .collect();
+        assert!(!rules.is_empty(), "the manifest names the instrument");
+        for rule in rules {
+            let path = fixture(&rule.id);
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+                panic!("rule {} has no fixture at {}: {e}", rule.id, path.display())
+            });
+            let registry = Registry::parse(&text).unwrap();
+            let reading = divergence::reason(&registry, &manifest, workspace()).unwrap();
+            assert_eq!(
+                reading.status,
+                xtask::reading::Status::Fail,
+                "the fixture for {} must fail",
+                rule.id
+            );
+            assert_eq!(reading.rule, rule.id);
+            assert!(
+                reading.message.contains(&rule.text),
+                "the failure prints the rule's text: {}",
+                reading.message
+            );
+            assert!(
+                reading.message.contains("witness:0000000000000000"),
+                "the offending row is named: {}",
+                reading.message
+            );
+            assert!(
+                !reading.message.contains("phpt:Zend/tests/fixture.phpt"),
+                "a row in order is not named: {}",
+                reading.message
+            );
+            assert_eq!(reading.numbers["unreasoned"], 1.into());
+        }
+    }
+
+    /// `docs/divergence.md` is the view; the registry is the truth. Its region's
+    /// command is the status section with every reason whole, over the
+    /// registry beside it, so its body is that rendering: the body opens with
+    /// the section's own table head, as the section renders it over a registry
+    /// of one row. Whether the body is the rendering of the rows the registry
+    /// has now is `computed check`'s to hold, which pre-commit runs after
+    /// `xtask regions` has rendered it and CI runs over the tree; held here, a
+    /// merge that brings rows from both sides fails before the hook renders
+    /// them (#1252).
+    #[test]
+    fn docs_divergence_md_is_the_status_section_as_a_computed_region() {
+        let page = std::fs::read_to_string(workspace().join("docs/divergence.md")).unwrap();
+        let opener = page
+            .lines()
+            .find(|l| l.starts_with("<!-- computed exec"))
+            .expect("one exec region");
+        assert!(
+            opener.contains("cmd=\"cargo xtask status --section divergence --uncut --tracked\""),
+            "the command is the status section, reasons whole: {opener}"
+        );
+        assert!(opener.contains("inputs=divergence.toml"), "{opener}");
+        let start = page.find(opener).unwrap() + opener.len();
+        let end = page[start..].find("<!-- /computed").unwrap() + start;
+        let body = page[start..end].trim();
+
+        let root = scratch("page");
+        std::fs::write(root.join(divergence::FILE), COVERING).unwrap();
+        let md = xtask(&root, &["status", "--section", "divergence", "--uncut"]).ok();
+        let head: Vec<&str> = md.trim().lines().take(2).collect();
+        assert_eq!(head.len(), 2, "{md}");
+        assert_eq!(
+            body.lines().take(2).collect::<Vec<_>>(),
+            head,
+            "the body is the section's rendering"
+        );
+    }
 }

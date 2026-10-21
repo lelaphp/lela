@@ -11,12 +11,19 @@ use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use xtask::divergence::Registry;
-use xtask::manifest::Manifest;
 use xtask::oracle::{
     self, PROMISE_VARIABLE, Pin, Program, Promise, Promised, Regime, Runner, Split, TREE_VARIABLE,
     Verdict,
 };
 use xtask::scratch::Tree;
+
+mod common {
+    pub mod manifest;
+    pub mod repo;
+    pub mod run;
+}
+use common::repo::Repo;
+use common::run::xtask;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -25,7 +32,7 @@ fn workspace() -> &'static Path {
 /// The tracked pin, when the binary it names is on this machine; a
 /// failure where this machine promised the binary (#38).
 fn pin() -> Option<Pin> {
-    let pin = Manifest::load(workspace()).unwrap().pin;
+    let pin = common::manifest::pin();
     // The path borrows the pin, so the question is asked of the unit and
     // the pin handed back whole.
     Promise::Oracle
@@ -447,33 +454,7 @@ fn an_absent_tree_names_the_variable_and_the_pins_path_and_not_one_of_them() {
 /// of its own, and that commit as `git rev-parse HEAD` prints it.
 fn fixture_checkout(name: &str) -> (Tree, String) {
     let tree = fixture_tree(name);
-    let git = |args: &[&str]| {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(&tree)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8(out.stdout).unwrap().trim().to_owned()
-    };
-    git(&["init", "-q"]);
-    git(&[
-        "-c",
-        "user.name=xtask",
-        "-c",
-        "user.email=xtask@example",
-        "commit",
-        "-q",
-        "--allow-empty",
-        "-m",
-        "the fixture's one commit",
-    ]);
-    let head = git(&["rev-parse", "HEAD"]);
+    let head = Repo::init(&tree).commit("the fixture's one commit");
     (tree, head)
 }
 
@@ -537,7 +518,7 @@ fn a_tree_the_variable_names_is_at_the_pin() {
         eprintln!("{TREE_VARIABLE} is unset; nothing claims a tree, skipping");
         return;
     }
-    let pin = Manifest::load(workspace()).unwrap().pin;
+    let pin = common::manifest::pin();
     let tree = pin.source.tree().unwrap();
     assert!(tree.is_dir(), "{}", tree.display());
 }
@@ -576,7 +557,7 @@ fn a_tree_the_variable_names_holds_every_test_the_pin_counts() {
         eprintln!("{TREE_VARIABLE} is unset; nothing claims a tree, skipping");
         return;
     }
-    let source = Manifest::load(workspace()).unwrap().pin.source;
+    let source = common::manifest::pin().source;
     let tree = source.tree().unwrap();
     assert_eq!(
         phpt_files_under(&tree),
@@ -623,18 +604,12 @@ fn ci_files() -> Vec<(String, String)> {
 /// count.
 #[test]
 fn no_workflow_holds_a_directory_of_the_corpus() {
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(workspace())
-        .args(["status", "--section", "corpus", "--format", "json"])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let corpus: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let out = xtask(
+        workspace(),
+        &["status", "--section", "corpus", "--format", "json"],
+    )
+    .ok();
+    let corpus: serde_json::Value = serde_json::from_str(&out).unwrap();
     let firsts: Vec<String> = corpus["patterns"]
         .as_array()
         .unwrap()
@@ -1076,7 +1051,7 @@ fn the_fastcgi_split_reads_both_keys_or_neither() {
 /// `PATH_TRANSLATED` (#2650).
 #[test]
 fn the_tracked_pin_maps_http_to_fastcgi_as_nginx_s_stock_params() {
-    let pin = Manifest::load(workspace()).unwrap().pin;
+    let pin = common::manifest::pin();
     let mapping = pin.fastcgi().unwrap();
     assert_eq!(
         mapping.split_path_info.as_ref().map(Split::as_str),
@@ -1368,6 +1343,51 @@ fn a_php_cgi_the_tree_has_moved_past_holds_back_the_php_beside_it() {
         Runner::Engine(fresh),
         "a php-cgi the tree has not moved past leaves the php beside it the engine"
     );
+}
+
+/// A binary cargo leaves standing is the engine, whatever else under the
+/// crate directories was written since (#3109): on 2026-10-20 a commit
+/// that wrote `ext/clippy.toml` alone left `target/release-da/php` fresh
+/// for cargo, and the census skipped every subset, the binary "built
+/// before ext/clippy.toml was last written". It is held to what its
+/// dep-info names, as cargo is, and a source named there written since is
+/// what puts it behind the tree.
+#[test]
+fn a_binary_cargo_leaves_standing_is_the_engine_and_one_it_relinks_is_not() {
+    let root = fixture_tree("dep-info");
+    engine_sources(root.path());
+    let source = root.path().join("crates/php_engine/src/lib.rs");
+    let ago = SystemTime::now() - Duration::from_hours(2);
+    std::fs::File::options()
+        .write(true)
+        .open(&source)
+        .unwrap()
+        .set_modified(ago)
+        .unwrap();
+    let binary = built(root.path(), "release-da", 3600);
+    let info = format!("{}: {}\n", binary.display(), source.display());
+    std::fs::write(format!("{}.d", binary.display()), info).unwrap();
+    for beside in [
+        "ext/clippy.toml",
+        "crates/php_jit/src/lib.rs",
+        "ext/AGENTS.md",
+    ] {
+        let path = root.path().join(beside);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "written after the binary\n").unwrap();
+    }
+    let pin = pin_with_path(root.path());
+    assert_eq!(
+        Runner::resolve(root.path(), &pin, None).unwrap(),
+        Runner::Engine(binary.clone()),
+        "nothing the binary is built from moved"
+    );
+    std::fs::write(&source, "// the kernels, written again\n").unwrap();
+    let behind = Runner::resolve(root.path(), &pin, None).unwrap();
+    let Runner::Stale(why) = &behind else {
+        panic!("{behind:?}")
+    };
+    assert!(why.contains("crates/php_engine/src/lib.rs"), "{why}");
 }
 
 /// The engine's binary names itself on the reading that ran it, and a

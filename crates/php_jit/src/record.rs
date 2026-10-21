@@ -1149,9 +1149,15 @@ pub(crate) fn returns(opcode: Opcode) -> bool {
     )
 }
 
-/// The oplines that leave the frame they stand in.
+/// The oplines that leave the frame they stand in: a return, a yield, and
+/// `GENERATOR_CREATE`, which moves its frame to the heap and returns the
+/// generator to the caller.
 fn leaves(opcode: Opcode) -> bool {
-    returns(opcode) || matches!(opcode, Opcode::Yield | Opcode::YieldFrom)
+    returns(opcode)
+        || matches!(
+            opcode,
+            Opcode::Yield | Opcode::YieldFrom | Opcode::GeneratorCreate
+        )
 }
 
 /// The oplines that make a frame of a call.

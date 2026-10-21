@@ -42,8 +42,9 @@ use super::process::{self, Binary};
 use super::{Accept, Ask, Captured, Judged, Judgement, fence};
 use crate::divergence::{Divergence, Registry};
 use crate::oracle::expect::Expectation;
-use crate::oracle::hosts::{CGI, FPM, PHPDBG};
+use crate::oracle::hosts::FPM;
 use crate::oracle::{self, Observation, Oracle, Pin, Program, Regime, Verdict as Compared, linked};
+use crate::phpt::Lane;
 use crate::scratch::Full;
 use anyhow::{Context, Result};
 
@@ -359,23 +360,13 @@ fn ran_by_oracle(oracle: &Oracle<'_>, witness: &Witness) -> Result<Observation> 
     };
     oracle.asserted()?;
     match witness.served {
-        Served::Phpdbg => {
-            process::served_as_phpdbg(oracle, &sapi.named(PHPDBG)?.path, snippet, request, &[])
-        }
         Served::Makala => {
             makala::served_by_mapping(oracle, &sapi.named(FPM)?.path, snippet, request)
         }
-        Served::Fpm => {
-            super::fpm::served_as_fpm(oracle, &sapi.named(FPM)?.path, snippet, request, &[])
+        served => {
+            let host = &sapi.named(process::host_of(served))?.path;
+            process::served_as(oracle, served, host, snippet, request, regime, &[])
         }
-        _ => process::served_as_cgi(
-            oracle,
-            &sapi.named(CGI)?.path,
-            snippet,
-            request,
-            regime,
-            &[],
-        ),
     }
 }
 
@@ -481,6 +472,21 @@ fn lacking<'w>(oracle: &Oracle<'_>, witness: &'w Witness) -> Result<Option<&'w s
     Ok(None)
 }
 
+/// The bundle features the `php` serving a `process` fence is built
+/// with: its crate's where the binary under test does not turn it on,
+/// and the tier's where its regime sets the lane's `jit.mode`, so the
+/// lane runs on a binary that carries the tier, as the phpt lane's
+/// `--jit` builds it (#2962).
+fn features<'w>(witness: &'w Witness, regime: Option<&Regime>) -> Vec<&'w str> {
+    let mut features: Vec<&str> = witness.feature.as_deref().into_iter().collect();
+    if regime.is_some_and(|regime| regime.sets(Lane::DIRECTIVE))
+        && !features.contains(&Lane::FEATURE)
+    {
+        features.push(Lane::FEATURE);
+    }
+    features
+}
+
 /// The run of record, and what it entered: the engine linked into the
 /// harness, which needs no binary (design §8; #119, #401), or for a fence
 /// marked `process` the `php` binary in a process of its own (harness
@@ -502,37 +508,19 @@ pub(super) fn serve(
                 oracle,
                 &witness.snippet,
                 witness.regime.as_deref(),
-                witness.feature.as_deref(),
+                &features(witness, regime),
             )
             .context("the php binary did not serve it"),
-        Served::Cgi => binary
-            .serve_cgi(
-                oracle,
-                &witness.snippet,
-                witness.request.as_deref().unwrap_or_default(),
-                witness.regime.as_deref(),
+        served @ (Served::Cgi | Served::Fpm | Served::Makala | Served::Phpdbg) => {
+            let request = witness.request.as_deref().unwrap_or_default();
+            let regime = witness.regime.as_deref();
+            (binary.serve_request(oracle, served, &witness.snippet, request, regime)).with_context(
+                || {
+                    let host = process::host_of(served).binary;
+                    format!("the {host} binary did not serve it")
+                },
             )
-            .context("the php-cgi binary did not serve it"),
-        Served::Fpm => binary
-            .serve_fpm(
-                oracle,
-                &witness.snippet,
-                witness.request.as_deref().unwrap_or_default(),
-            )
-            .context("the php-fpm binary did not serve it"),
-        Served::Makala => (binary.host(crate::oracle::hosts::MAKALA))
-            .and_then(|host| {
-                let request = witness.request.as_deref().unwrap_or_default();
-                process::traced(|env| makala::served(oracle, &host, &witness.snippet, request, env))
-            })
-            .context("the makala binary did not serve it"),
-        Served::Phpdbg => binary
-            .serve_phpdbg(
-                oracle,
-                &witness.snippet,
-                witness.request.as_deref().unwrap_or_default(),
-            )
-            .context("the phpdbg binary did not serve it"),
+        }
     }
 }
 

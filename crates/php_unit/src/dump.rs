@@ -25,11 +25,11 @@
 //! `extended_value` target the `JMP_ADDR` shape prints.
 //!
 //! **Numbers.** php prints a temporary by its frame slot, counted past
-//! the CVs (`EX_VAR_TO_NUM`); an opline holds the temporary's own
-//! number, and the slot is `num_cvs` past it, which is what the engine's
-//! `temporary_slot` computes. A jump target is the opline's index, as
-//! the compiler stores it and as php prints it after subtracting the
-//! op array's base.
+//! the CVs (`EX_VAR_TO_NUM`); an opline holds that slot already, folded
+//! by the compiler as `pass_two` folds it, and so does a live range's
+//! `var`, so both print as they stand. A jump target is the opline's
+//! index, as the compiler stores it and as php prints it after
+//! subtracting the op array's base.
 
 use std::fmt::Write as _;
 
@@ -284,7 +284,7 @@ fn shaped(
             writeln!(
                 out,
                 "     {}: {:04} - {:04} ({})",
-                body.num_cvs.saturating_add(range.var),
+                range.var,
                 range.start.0,
                 range.end.0,
                 live_kind(range.kind)
@@ -481,8 +481,8 @@ fn constant(out: &mut Out, value: Option<Zval>) {
 }
 
 /// `zend_dump_var`: a CV by its number and name, a `VAR` or `TMP` by
-/// its slot past the CVs, and `X` for a CV number the op array has no
-/// name for.
+/// its slot, which is past the CVs, and `X` for a CV number the op
+/// array has no name for.
 fn var(out: &mut Out, body: &OpArray, kind: OperandKind, number: u32) {
     match kind {
         OperandKind::Cv if number < body.num_cvs => {
@@ -496,10 +496,10 @@ fn var(out: &mut Out, body: &OpArray, kind: OperandKind, number: u32) {
             out.push(')');
         }
         OperandKind::Var => {
-            write!(out, "V{}", body.num_cvs.saturating_add(number)).ok();
+            write!(out, "V{number}").ok();
         }
         OperandKind::Tmp => {
-            write!(out, "T{}", body.num_cvs.saturating_add(number)).ok();
+            write!(out, "T{number}").ok();
         }
         _ => {
             write!(out, "X{number}").ok();
@@ -1036,11 +1036,11 @@ mod tests {
     fn a_variable_operand_is_numbered_as_php_numbers_the_frame() {
         let mut body = body(
             vec![
-                with(op(Opcode::Add), OperandKind::Cv, 0, OperandKind::Tmp, 0),
+                with(op(Opcode::Add), OperandKind::Cv, 0, OperandKind::Tmp, 2),
                 with(
                     op(Opcode::Echo),
                     OperandKind::Var,
-                    1,
+                    3,
                     OperandKind::Unused,
                     0,
                 ),
@@ -1080,11 +1080,11 @@ mod tests {
                     OperandKind::Cv,
                     0,
                 ),
-                writing(op(Opcode::DoUcall), OperandKind::Var, 0),
+                writing(op(Opcode::DoUcall), OperandKind::Var, 1),
                 writing(
                     with(op(Opcode::Add), OperandKind::Const, 0, OperandKind::Cv, 0),
                     OperandKind::Tmp,
-                    2,
+                    3,
                 ),
             ],
             vec![Zval::long(1)],
@@ -1106,7 +1106,7 @@ mod tests {
     fn an_out_of_kind_unused_prints_nothing_whatever_its_number() {
         let mut body = body(
             vec![
-                with(op(Opcode::Assign), OperandKind::Cv, 0, OperandKind::Var, 1),
+                with(op(Opcode::Assign), OperandKind::Cv, 0, OperandKind::Var, 2),
                 Opline {
                     out: 2,
                     ..with(
@@ -1520,9 +1520,9 @@ mod tests {
             num_cvs: 3,
             ..body(
                 vec![
-                    call(Opcode::FramelessIcall2, 1, 1, OperandKind::Const, 0),
-                    call(Opcode::FramelessIcall1, 0, 3, OperandKind::Unused, 0),
-                    call(Opcode::FramelessIcall1, 2, 3, OperandKind::Unused, 0),
+                    call(Opcode::FramelessIcall2, 1, 4, OperandKind::Const, 0),
+                    call(Opcode::FramelessIcall1, 0, 6, OperandKind::Unused, 0),
+                    call(Opcode::FramelessIcall1, 2, 6, OperandKind::Unused, 0),
                 ],
                 vec![needle],
             )
@@ -1558,7 +1558,7 @@ mod tests {
     /// ```
     ///
     /// prints `LIVE RANGES:` after the oplines and one line per range,
-    /// the temporary's slot past the CVs, the range, and the kind's
+    /// the temporary's slot as the range holds it, the range, and the kind's
     /// word, the ranges in the order of their starts; the
     /// `try`/`catch` table follows it.
     ///
@@ -1584,11 +1584,11 @@ mod tests {
             main: OpArray {
                 num_cvs: 8,
                 live_ranges: vec![
-                    range(3, LiveKind::Loop, 4, 11),
-                    range(4, LiveKind::Silence, 6, 9),
-                    range(7, LiveKind::Rope, 12, 14),
-                    range(10, LiveKind::New, 17, 22),
-                    range(14, LiveKind::TmpVar, 24, 25),
+                    range(11, LiveKind::Loop, 4, 11),
+                    range(12, LiveKind::Silence, 6, 9),
+                    range(15, LiveKind::Rope, 12, 14),
+                    range(18, LiveKind::New, 17, 22),
+                    range(22, LiveKind::TmpVar, 24, 25),
                 ],
                 try_catch: vec![TryCatch {
                     try_op: OplineIdx(26),

@@ -33,22 +33,27 @@
 //! with that feature, into the target directory the phpt lane builds that
 //! engine in ([`profile::featured`]), so the child it starts carries its
 //! own extension as the oracle's variant does, and the two lanes share
-//! one build (#2721).
+//! one build (#2721). A `process` fence under a regime that sets the
+//! tier's `jit.mode` is served by `php` built with the tier's feature
+//! beside it, as the phpt lane's `--jit` builds it (#3053), so the lane
+//! the regime names runs on a binary that carries the tier (#2962).
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 
 use super::anchor::Entry;
-use crate::carried::BUNDLE;
-use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, PHPDBG};
+use super::fence::Served;
+use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, MAKALA, PHPDBG};
 use crate::oracle::profile;
-use crate::oracle::{Invocation, Observation, Oracle, Program, Stdin};
+use crate::oracle::{Ended, Invocation, Observation, Oracle, Program, Recipe, Stdin, normalise_in};
 use crate::phpt::environment::Environment;
-use crate::phpt::{cgi, file::Phpt};
+use crate::phpt::{Build, cgi, file::Phpt};
 use crate::scratch::Tree;
 
 // The hosts a fence is served by, each its own binary: `sapi/cli`'s
@@ -66,15 +71,15 @@ const TRACE: &str = "PHP_WITNESS_TRACE";
 #[derive(Debug)]
 pub(crate) struct Binary {
     root: PathBuf,
-    built: Mutex<BTreeMap<Build, Slot>>,
+    built: Mutex<BTreeMap<Key, Slot>>,
 }
 
 /// Where one build's path, or its failure, is kept once it ran.
 type Slot = Arc<OnceLock<Result<PathBuf, String>>>;
 
-/// A binary a run builds: a host by its crate, and the bundle feature
-/// `php` is built with on, where there is one.
-type Build = (&'static str, Option<String>);
+/// The key of a binary a run builds: a host by its crate, and the bundle
+/// features `php` is built with on, none for the binary under test.
+type Key = (&'static str, Vec<String>);
 
 impl Binary {
     /// The binaries of the workspace at `root`, not yet built.
@@ -91,21 +96,21 @@ impl Binary {
     #[cfg(test)]
     pub(crate) fn standing(root: &Path, host: EngineHost, path: PathBuf) -> Binary {
         let binary = Binary::of(root);
-        binary.stand(host, None, path);
+        binary.stand(host, &[], path);
         binary
     }
 
-    /// The same with `path` standing in for `php` built with `feature`.
+    /// The same with `path` standing in for `php` built with `features`.
     #[cfg(test)]
-    pub(crate) fn featuring(self, feature: &str, path: PathBuf) -> Binary {
-        self.stand(CLI, Some(feature), path);
+    pub(crate) fn featuring(self, features: &[&str], path: PathBuf) -> Binary {
+        self.stand(CLI, features, path);
         self
     }
 
     #[cfg(test)]
-    fn stand(&self, host: EngineHost, feature: Option<&str>, path: PathBuf) {
+    fn stand(&self, host: EngineHost, features: &[&str], path: PathBuf) {
         let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
-        let key = (host.krate, feature.map(str::to_owned));
+        let key = (host.krate, owned(features));
         built.insert(key, Arc::new(OnceLock::from(Ok(path))));
     }
 
@@ -114,26 +119,28 @@ impl Binary {
     /// host's own line runs (#1975), and the CLI's what `crosscheck`
     /// starts as the built-in server.
     pub(crate) fn host(&self, host: EngineHost) -> Result<PathBuf> {
-        self.built(host, None)
+        self.built(host, &[])
     }
 
-    /// Where `host`'s binary is, `php` built with `feature` of the bundle
-    /// on into [`profile::featured`] where there is one, built now in the
+    /// Where `host`'s binary is, `php` built with `features` of the bundle
+    /// on into [`profile::featured`] where there are any, as the phpt lane
+    /// names that build's directory, built now in the
     /// lanes' profile ([`profile::build`]) if this run has not built it
     /// yet: every request it serves records the natives it entered where
     /// `PHP_WITNESS_TRACE` names a file, with no build of its own for the
     /// lane (#2168).
-    fn built(&self, host: EngineHost, feature: Option<&str>) -> Result<PathBuf> {
+    fn built(&self, host: EngineHost, features: &[&str]) -> Result<PathBuf> {
         // The map's lock is held to find the build's slot alone, so one
         // host's build never waits on another's.
         let slot = {
             let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
-            let key = (host.krate, feature.map(str::to_owned));
+            let key = (host.krate, owned(features));
             Arc::clone(built.entry(key).or_default())
         };
         let path = slot.get_or_init(|| {
-            let on = feature.map(|feature| format!("{BUNDLE}/{feature}"));
-            let into = feature.map(|feature| profile::featured(&self.root, feature));
+            let build = (!features.is_empty()).then(|| Build::of(features.to_vec()));
+            let on = build.as_ref().map(Build::features);
+            let into = build.as_ref().map(|build| build.target_dir(&self.root));
             let (package, binary) = (host.package(), host.binary);
             profile::build(&self.root, &package, binary, on.as_deref(), into.as_deref())
                 .map_err(|e| format!("{e:#}"))
@@ -141,8 +148,8 @@ impl Binary {
         path.clone().map_err(|why| anyhow!("{why}"))
     }
 
-    /// `snippet` served by the binary, the one built with `feature` where
-    /// there is one, under the recipe, and `regime`'s arguments and ini
+    /// `snippet` served by the binary, the one built with `features` where
+    /// there are any, under the recipe, and `regime`'s arguments and ini
     /// after it where the fence names one, as the oracle serves it; with
     /// the natives every request it served entered, in the order they
     /// were appended.
@@ -151,9 +158,9 @@ impl Binary {
         oracle: &Oracle<'_>,
         snippet: &str,
         regime: Option<&str>,
-        feature: Option<&str>,
+        features: &[&str],
     ) -> Result<(Observation, Vec<Entry>)> {
-        let binary = self.built(CLI, feature)?;
+        let binary = self.built(CLI, features)?;
         traced(|env| {
             oracle.run_under(&Invocation {
                 regimes: regime.as_slice(),
@@ -162,6 +169,11 @@ impl Binary {
             })
         })
     }
+}
+
+/// A build's features as its key holds them.
+fn owned(features: &[&str]) -> Vec<String> {
+    features.iter().map(|&feature| feature.to_owned()).collect()
 }
 
 /// What `serve` observed, served with `PHP_WITNESS_TRACE` naming a file
@@ -180,47 +192,62 @@ pub(super) fn traced(
 }
 
 impl Binary {
-    /// `snippet` served as the request `request` describes by the CGI's
-    /// binary run under the name php-cgi, under `regime` where the fence
-    /// names one, as [`Binary::serve`] serves a `process` fence; with the
-    /// natives it entered.
-    pub(crate) fn serve_cgi(
+    /// `snippet` served as the request `request` describes by the engine's
+    /// host `served` names, the CGI's binary run under the name php-cgi,
+    /// as [`served_as`] serves it; with the natives it, or its child,
+    /// entered.
+    pub(crate) fn serve_request(
         &self,
         oracle: &Oracle<'_>,
+        served: Served,
         snippet: &str,
         request: &str,
         regime: Option<&str>,
     ) -> Result<(Observation, Vec<Entry>)> {
-        let binary = self.host(CGI)?;
-        let hosts = Tree::new("witness-cgi")?;
-        let host = cgi::linked(&binary, hosts.path())?;
-        traced(|env| served_as_cgi(oracle, &host, snippet, request, regime, env))
+        let host = self.host(host_of(served))?;
+        let hosts = (host_of(served) == CGI)
+            .then(|| Tree::new("witness-cgi"))
+            .transpose()?;
+        let host = match &hosts {
+            Some(hosts) => cgi::linked(&host, hosts.path())?,
+            None => host,
+        };
+        traced(|env| served_as(oracle, served, &host, snippet, request, regime, env))
     }
+}
 
-    /// `snippet` served as the request `request` describes by `sapi/fpm`'s
-    /// binary, as [`Binary::serve_cgi`] serves one by php-cgi; with the
-    /// natives its child entered.
-    pub(crate) fn serve_fpm(
-        &self,
-        oracle: &Oracle<'_>,
-        snippet: &str,
-        request: &str,
-    ) -> Result<(Observation, Vec<Entry>)> {
-        let binary = self.host(FPM)?;
-        traced(|env| super::fpm::served_as_fpm(oracle, &binary, snippet, request, env))
+/// The host that serves a fence's request: the CGI for a fence that names
+/// no other.
+pub(crate) fn host_of(served: Served) -> EngineHost {
+    match served {
+        Served::Fpm => FPM,
+        Served::Phpdbg => PHPDBG,
+        Served::Makala => MAKALA,
+        Served::Linked | Served::Binary | Served::Cgi => CGI,
     }
+}
 
-    /// `snippet` handed to `sapi/phpdbg`'s binary with `commands` on its
-    /// prompt, as [`Binary::serve_cgi`] serves one by php-cgi; with the
-    /// natives it entered.
-    pub(super) fn serve_phpdbg(
-        &self,
-        oracle: &Oracle<'_>,
-        snippet: &str,
-        commands: &str,
-    ) -> Result<(Observation, Vec<Entry>)> {
-        let binary = self.host(PHPDBG)?;
-        traced(|env| served_as_phpdbg(oracle, &binary, snippet, commands, env))
+/// `snippet` served as the request `request` describes by the binary at
+/// `host` of the host `served` names: php-cgi under `regime` where the
+/// fence names one, php-fpm, phpdbg with `request` the commands on its
+/// prompt, or makala over HTTP. What the oracle and the engine are each
+/// held to for a fence with a request.
+pub(crate) fn served_as(
+    oracle: &Oracle<'_>,
+    served: Served,
+    host: &Path,
+    snippet: &str,
+    request: &str,
+    regime: Option<&str>,
+    env: &[(String, std::ffi::OsString)],
+) -> Result<Observation> {
+    match served {
+        Served::Fpm => super::fpm::served_as_fpm(oracle, host, snippet, request, env),
+        Served::Phpdbg => served_as_phpdbg(oracle, host, snippet, request, env),
+        Served::Makala => super::makala::served(oracle, host, snippet, request, env),
+        Served::Linked | Served::Binary | Served::Cgi => {
+            served_as_cgi(oracle, host, snippet, request, regime, env)
+        }
     }
 }
 
@@ -262,9 +289,7 @@ pub(crate) fn served_as_cgi(
     regime: Option<&str>,
     env: &[(String, std::ffi::OsString)],
 ) -> Result<Observation> {
-    let recipe = &oracle.pin().recipe;
-    let own = oracle.tree("witness-request")?;
-    let program = own.write(&recipe.script_name, format!("{}{snippet}", recipe.preamble))?;
+    let (own, program) = program(oracle, "witness-request", snippet)?;
     let program = crate::oracle::run_by(&program)?;
     let described = described(&own, &program, request, env)?;
     let flags = [String::from("-C"), String::from("-f")];
@@ -276,6 +301,52 @@ pub(crate) fn served_as_cgi(
         stdin: described.stdin.as_deref().map_or(Stdin::Null, Stdin::File),
         ..Invocation::new(host, Program::File(&program))
     })
+}
+
+/// `command` under the recipe: the recipe's ini and `ini` after it as
+/// `-d`, its arguments going on after them, the recipe's environment with
+/// `env` over it, and nothing on stdin or stdout.
+pub(crate) fn under_recipe<'c>(
+    recipe: &Recipe,
+    command: &'c mut Command,
+    ini: &[String],
+    env: &[(String, std::ffi::OsString)],
+) -> Result<&'c mut Command> {
+    for ini in recipe.ini.iter().chain(ini) {
+        command.arg("-d").arg(ini);
+    }
+    let command = recipe
+        .environ(command)?
+        .envs(env.iter().map(|(name, value)| (name, value)));
+    Ok(command.stdin(Stdio::null()).stdout(Stdio::null()))
+}
+
+/// A tree of its own named `name` with `snippet` written in it as the
+/// recipe's `script_name`, the recipe's preamble first; the tree and the
+/// program's path.
+pub(super) fn program(oracle: &Oracle<'_>, name: &str, snippet: &str) -> Result<(Tree, PathBuf)> {
+    let recipe = &oracle.pin().recipe;
+    let own = oracle.tree(name)?;
+    let program = own.write(&recipe.script_name, format!("{}{snippet}", recipe.preamble))?;
+    Ok((own, program))
+}
+
+/// What a host answering over a socket was seen to do since `started`:
+/// the `stdout` and `stderr` it gave, normalised under the recipe within
+/// the program's tree `own`, its exit the 0 a host that answered ends in.
+pub(super) fn answered(
+    oracle: &Oracle<'_>,
+    own: &Tree,
+    (stdout, stderr): (Vec<u8>, Vec<u8>),
+    started: Instant,
+) -> Observation {
+    let rules = &oracle.pin().recipe.normalise;
+    Observation {
+        stdout: normalise_in(rules, own.path(), stdout),
+        stderr: normalise_in(rules, own.path(), stderr),
+        exit: Ended::Status(0),
+        wall: started.elapsed(),
+    }
 }
 
 /// The request a fence's `request` sections describe, translated in

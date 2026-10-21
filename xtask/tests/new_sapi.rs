@@ -15,7 +15,6 @@
 //! (#2545).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use quote::ToTokens;
 use syn::{FnArg, ImplItem, Item, ReceiverKind, Signature, TraitItem, Type};
@@ -23,6 +22,13 @@ use xtask::manifest::Manifest;
 use xtask::reading::{Reading, Status};
 use xtask::scratch::Tree;
 use xtask::{api_check, budget, clippy, new_sapi, unsafe_audit};
+
+mod common {
+    pub mod manifest;
+    pub mod repo;
+}
+use common::manifest::Tracked;
+use common::repo::Repo;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -37,39 +43,10 @@ fn fixture() -> PathBuf {
 fn scratch(name: &str) -> Tree {
     let dir = Tree::new(&format!("new-sapi-{name}")).unwrap();
     copy(&fixture(), &dir);
-    // The pin is referenced by a path relative to the fixture's place in the tree.
-    let seams = std::fs::read_to_string(dir.join("seams.toml")).unwrap();
-    let pin = workspace().join("oracle.toml");
-    std::fs::write(
-        dir.join("seams.toml"),
-        seams.replace("../../../oracle.toml", pin.to_str().unwrap()),
-    )
-    .unwrap();
-    for args in [
-        vec!["init", "-q"],
-        vec!["add", "."],
-        vec![
-            "-c",
-            "user.name=fixture",
-            "-c",
-            "user.email=fixture@localhost",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/var/empty",
-            "commit",
-            "-q",
-            "-m",
-            "fixture",
-        ],
-    ] {
-        let status = Command::new("git")
-            .args(&args)
-            .current_dir(&dir)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
-    }
+    // The fixture names the pin by a path relative to its place in the
+    // tree; the copy names the workspace's.
+    Tracked::of(&dir).with_the_workspace_pin().write(&dir);
+    Repo::init(&dir).commit("fixture");
     dir
 }
 

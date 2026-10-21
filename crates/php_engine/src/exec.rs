@@ -2185,12 +2185,6 @@ pub(crate) fn body_of(unit: &Unit, body: Body) -> Option<&OpArray> {
     }
 }
 
-/// The slot a `TMP`/`VAR` operand names: temporaries stand past the last
-/// CV on the frame, as `EX_NUM_TO_VAR` places them past the last CV.
-pub(crate) fn temporary_slot(code: &OpArray, number: u32) -> u32 {
-    code.num_cvs.saturating_add(number)
-}
-
 /// One operand's value (seam 6, design §4.3): a constant from the op
 /// array's table, a CV or a temporary from the frame. An `UNUSED`
 /// operand is `&EX(This)` where the opcode reads one
@@ -2237,7 +2231,7 @@ pub(crate) fn operand(
             warning(req, &format!("Undefined variable ${name}"));
             Value::null()
         }
-        OperandKind::Tmp | OperandKind::Var => req.slot(frame, temporary_slot(code, field)),
+        OperandKind::Tmp | OperandKind::Var => req.slot(frame, field),
         OperandKind::Unused => req
             .vm()
             .this(frame)
@@ -2274,7 +2268,6 @@ pub(crate) fn operand_undef(
 pub(crate) fn container(
     req: &mut Request,
     frame: FrameRef,
-    code: &OpArray,
     kind: OperandKind,
     field: u32,
     opcode: &str,
@@ -2282,7 +2275,7 @@ pub(crate) fn container(
     match kind {
         OperandKind::Cv => Ok(req.slot(frame, field)),
         OperandKind::Var => {
-            let slot = temporary_slot(code, field);
+            let slot = field;
             let Some(at) = req.slot_ptr(frame, slot) else {
                 return Ok(Value::undef());
             };
@@ -2327,7 +2320,7 @@ pub(crate) fn take_operand(
 ) -> Value {
     match kind {
         OperandKind::Tmp | OperandKind::Var => {
-            let value = req.take_slot(frame, temporary_slot(code, field));
+            let value = req.take_slot(frame, field);
             owned_deref(req, value)
         }
         OperandKind::Const | OperandKind::Cv | OperandKind::Unused => {
@@ -2412,8 +2405,7 @@ pub(crate) fn frameless_operand(
             let z = code.literals.get(field as usize).copied();
             return (z.unwrap_or_else(Zval::null), false);
         }
-        OperandKind::Cv => field as usize,
-        OperandKind::Tmp | OperandKind::Var => temporary_slot(code, field) as usize,
+        OperandKind::Cv | OperandKind::Tmp | OperandKind::Var => field as usize,
         OperandKind::Unused => usize::MAX,
     };
     let slot = req.slots_mut(frame).get_mut(at);
@@ -2438,15 +2430,9 @@ pub(crate) fn frameless_operand(
 /// with, its slot's owner given up as `zval_ptr_dtor_nogc` gives it up,
 /// never a possible root; a `CV` and a `CONST` are nobody's to free here
 /// and nothing happens.
-pub(crate) fn free_operand(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-    kind: OperandKind,
-    field: u32,
-) {
+pub(crate) fn free_operand(req: &mut Request, frame: FrameRef, kind: OperandKind, field: u32) {
     if matches!(kind, OperandKind::Tmp | OperandKind::Var) {
-        let value = req.take_slot(frame, temporary_slot(code, field));
+        let value = req.take_slot(frame, field);
         req.release_nogc(value);
     }
 }
@@ -2500,19 +2486,47 @@ pub(crate) fn free_operand(
 /// bool(true)
 /// int(2)
 /// ```
+///
+/// A string is the name as the operand holds it, never a copy; the one
+/// a variable holds is held by the handler too, so a `__get` or a `__set`
+/// that writes the variable, through `global` or a reference, leaves the
+/// name the access was made by standing until the access is done:
+///
+/// ```php
+/// class G { function __get($n) { global $g; $g = str_repeat('z', 2); return "got $n"; } function __set($n, $v) { global $g; $g = 'x'; echo "set $n\n"; } }
+/// $g = str_repeat('w', 2); $o = new G;
+/// echo $o->$g, " ", $g, "\n";
+/// $g = str_repeat('v', 2); $o->$g = 1; echo $g, "\n";
+/// $r = str_repeat('r', 2); $g = &$r; echo $o->$g, " ", $r, "\n";
+/// $o2 = new stdClass; $o2->{'a' . 'b'} = 1; $o2->{$r . 'c'} = 2; var_dump($o2);
+/// ```
+/// ```expect
+/// got ww zz
+/// set vv
+/// x
+/// got rr zz
+/// object(stdClass)#2 (2) {
+///   ["ab"]=>
+///   int(1)
+///   ["zzc"]=>
+///   int(2)
+/// }
+/// ```
 #[derive(Default)]
 pub(crate) struct Member {
     read: Option<Value>,
     /// Whether the handler holds an owner of what was read: a
-    /// constant string is the op array's, and anything else is the
-    /// string the conversion answered with one owner.
+    /// constant string is the op array's and a `TMP`'s the operand's,
+    /// while any other operand's string takes one more owner and anything
+    /// else is the string the conversion answered with one.
     owned: bool,
 }
 
 impl Member {
     /// The name, read and converted on the first ask and the same value
-    /// after it: the constant itself, or a string the handler holds one
-    /// owner of until [`Member::release`].
+    /// after it: a string as the operand holds it, with one more owner
+    /// the handler holds until [`Member::release`] where the operand is a
+    /// variable, or the string the conversion of anything else made.
     pub(crate) fn name(
         &mut self,
         req: &mut Request,
@@ -2523,8 +2537,23 @@ impl Member {
         if let Some(read) = self.read {
             return Ok(read);
         }
-        let value = operand(req, frame, code, op.op2_type, op.op2).deref();
-        let name = if op.op2_type == OperandKind::Const && value.as_str_bytes().is_some() {
+        let held = operand(req, frame, code, op.op2_type, op.op2);
+        let value = held.deref();
+        // `zval_try_get_tmp_string`: a string is the name as it stands,
+        // never a copy. A constant is the op array's, and a `TMP`'s
+        // string is the operand's until `FREE_OP2`; what a `CV`, a `VAR`
+        // or a reference holds takes one more owner, which user code a
+        // `__get` or a `__set` runs cannot take away from under it.
+        let name = if value.as_str_bytes().is_some() {
+            let borrowed = match op.op2_type {
+                OperandKind::Const => true,
+                OperandKind::Tmp => held.as_php_ref().is_none(),
+                OperandKind::Var | OperandKind::Cv | OperandKind::Unused => false,
+            };
+            if !borrowed {
+                req.addref(&value);
+                self.owned = true;
+            }
             value
         } else {
             self.owned = true;
@@ -2545,11 +2574,11 @@ impl Member {
 
     /// `zend_tmp_string_release(tmp_name)` and `FREE_OP2()`: the string
     /// the conversion made given up, and the operand's temporary with it.
-    pub(crate) fn release(self, req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) {
+    pub(crate) fn release(self, req: &mut Request, frame: FrameRef, op: &Opline) {
         if let Some(read) = self.read.filter(|_| self.owned) {
             req.release(read);
         }
-        free_operand(req, frame, code, op.op2_type, op.op2);
+        free_operand(req, frame, op.op2_type, op.op2);
     }
 }
 
@@ -2675,7 +2704,7 @@ impl MethodName {
                 "Method name must be a string",
             ))
         };
-        free_operand(req, frame, code, op.op2_type, op.op2);
+        free_operand(req, frame, op.op2_type, op.op2);
         name
     }
 
@@ -2741,13 +2770,13 @@ impl MethodName {
 /// end
 /// d
 /// ```
-pub(crate) fn free_container_var(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) {
+pub(crate) fn free_container_var(req: &mut Request, frame: FrameRef, op: &Opline) {
     if op.op1_type != OperandKind::Var {
         return;
     }
-    let container = req.take_slot(frame, temporary_slot(code, op.op1));
+    let container = req.take_slot(frame, op.op1);
     if container.to_zval().is_refcounted() && container.refcount() == 1 {
-        let out = temporary_slot(code, op.out);
+        let out = op.out;
         if let Some(var) = req.slot_ptr(frame, out)
             && let Some(place) = var.read().as_indirect()
         {
@@ -3074,7 +3103,7 @@ pub(crate) fn free_carried_value(req: &mut Request, frame: FrameRef, code: &OpAr
     if !matches!(op.op2_type, OperandKind::Tmp | OperandKind::Var) {
         return;
     }
-    let slot = temporary_slot(code, op.op2);
+    let slot = op.op2;
     let garbage = req.take_slot(frame, slot);
     req.release(garbage);
 }
@@ -3126,6 +3155,32 @@ pub(crate) fn free_carried_value(req: &mut Request, frame: FrameRef, code: &OpAr
 /// caught
 /// bool(false)
 /// ```
+///
+/// A throw while a value is live past a call frees it through the slot
+/// the compiler folded into the range's `var`: the string `ROPE_END`
+/// made, a `tmp/var` live across `f()`, and the rope `ZEND_LIVE_ROPE`
+/// holds open across `m()`, whose strings are each given up, so the
+/// second pass through the loop leaves the heap as the first left it:
+///
+/// ```php
+/// function f() { throw new Exception("f"); }
+/// class O { function m() { throw new Exception("m"); } }
+/// $x = str_repeat("x", 3); $o = new O;
+/// for ($i = 0; $i < 2; $i++) {
+///     try { echo "a{$x}" . f() . "b"; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+///     try { echo "a{$x}{$o->m()}b"; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+///     unset($e);
+///     if ($i == 0) { $before = memory_get_usage(); }
+/// }
+/// var_dump(memory_get_usage() - $before);
+/// ```
+/// ```expect
+/// f
+/// m
+/// f
+/// m
+/// int(0)
+/// ```
 pub(crate) fn cleanup_live_vars(
     req: &mut Request,
     frame: FrameRef,
@@ -3143,7 +3198,7 @@ pub(crate) fn cleanup_live_vars(
         if catch_op != 0 && (catch_op < range.end.0 || stays_in_split_loop(code, range, catch_op)) {
             continue;
         }
-        let slot = temporary_slot(code, range.var);
+        let slot = range.var;
         if range.kind == php_unit::LiveKind::Loop
             && let Some(held) = req.slot_ptr(frame, slot).map(php_heap::ZvalRef::read)
         {
@@ -3265,7 +3320,7 @@ pub(crate) fn unfinished_execution_gc(
                     php_unit::LiveKind::TmpVar | php_unit::LiveKind::Loop
                 )
             {
-                visit(slot(temporary_slot(code, range.var)));
+                visit(slot(range.var));
             }
         }
     }

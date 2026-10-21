@@ -380,6 +380,7 @@ VmStack::restore_frame
 VmStack::resume_frame
 VmStack::set_aside
 VmStack::top
+VmStack::top_and_frame_mut
 VmStack::top_mut
 VmStack::unlink_room
 Zval

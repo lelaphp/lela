@@ -119,10 +119,7 @@ impl Column {
     /// The extension of the file the oracle's bytes are kept in under the
     /// store, and of a rendering a test hands the lane: `re` or `ri`.
     pub fn kept(self) -> &'static str {
-        match self {
-            Column::Re => "re",
-            Column::Ri => "ri",
-        }
+        &self.flag()[2..]
     }
 
     /// The reading's scope for an extension: the crate's name in the
@@ -432,7 +429,7 @@ pub fn run(
             let observed = if host == Host::Cli {
                 render(oracle, name, column)?
             } else {
-                host::oracle_side(oracle, host, name, column)?
+                host::side(oracle, None, host, name, column)?
             };
             if observed.exit != Ended::Status(0) {
                 reading.status = Status::Fail;
@@ -516,7 +513,7 @@ fn rendering(
         let program = column.program(name);
         let linked = served_linked(manifest, &engines.linked, name);
         let served = if host != Host::Cli {
-            host::engine_side(oracle, &engines.binary, host, name, column).map_err(|trouble| {
+            host::side(oracle, Some(&engines.binary), host, name, column).map_err(|trouble| {
                 format!(
                     "the engine's {} did not serve it: {trouble:#}",
                     host.invocation()
@@ -534,7 +531,7 @@ fn rendering(
         } else {
             engines
                 .binary
-                .serve(oracle, &program, None, None)
+                .serve(oracle, &program, None, &[])
                 .map(|(served, _)| served)
                 .map_err(|trouble| format!("the php binary did not serve it: {trouble:#}"))
         };

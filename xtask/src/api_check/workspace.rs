@@ -3,7 +3,7 @@
 //! workspace dependencies are read from that file. Nothing is built and
 //! cargo is not run; the instrument reads manifests and sources.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use toml::Value;
@@ -190,8 +190,8 @@ fn deps(table: &toml::Table, dir: &Path, root: &Path) -> Vec<Dep> {
 fn dep_crate(key: &str, value: &Value, dir: &Path, root: &Path) -> Option<String> {
     let entry = value.as_table()?;
     if let Some(path) = entry.get("path").and_then(Value::as_str) {
-        let target = normalize(&dir.join(path));
-        let rel = target.strip_prefix(normalize(root)).ok()?;
+        let target = layout::normalize(&dir.join(path));
+        let rel = target.strip_prefix(layout::normalize(root)).ok()?;
         return layout::name_of_path(rel);
     }
     let package = entry
@@ -200,20 +200,4 @@ fn dep_crate(key: &str, value: &Value, dir: &Path, root: &Path) -> Option<String
         .unwrap_or(key)
         .replace('-', "_");
     layout::name_of_package(&package)
-}
-
-/// A path with its `.` and `..` components folded, without touching the
-/// filesystem.
-fn normalize(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            other => out.push(other),
-        }
-    }
-    out
 }

@@ -101,11 +101,6 @@ pub(super) fn render(checkout: &Store, root: &Path, format: Table) -> Result<Str
     })
 }
 
-/// The line the session's local facts carry beside the permits.
-pub(super) fn line(checkout: &Store, root: &Path) -> Result<String> {
-    Ok(counted(checkout, root)?.line())
-}
-
 #[cfg(test)]
 mod tests {
     use super::Counts;

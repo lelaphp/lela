@@ -482,7 +482,7 @@ pub fn repository(workspace: &Path, to: &Path, scopes: &[&str]) -> Result<()> {
 /// as a person commits there: named, unsigned and unhooked, since a
 /// person's `commit.gpgsign` is not the scratch's and the real pre-commit
 /// measuring a scratch is not what a test holds.
-pub(crate) const UNHOOKED: [&str; 8] = [
+pub const UNHOOKED: [&str; 8] = [
     "-c",
     "user.name=x",
     "-c",
@@ -699,12 +699,7 @@ impl Stray {
         } else {
             kill(pid, Signal::SIGKILL).ok();
         }
-        for _ in 0..100 {
-            if !crate::sysv::alive(self.pid) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        crate::sysv::wait_gone(self.pid);
     }
 }
 

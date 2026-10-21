@@ -114,7 +114,7 @@ pub(super) fn hand_off(checkout: &Path, stdin: &str, adapter: Adapter) -> Result
 /// One candidate asked: the call written to its stdin from a thread of its
 /// own, so a build that fails before reading it, and writes its failure to
 /// a pipe nobody drains yet, cannot stall the walk.
-fn ask(mut command: Command, stdin: &str) -> anyhow::Result<Output> {
+pub(super) fn ask(mut command: Command, stdin: &str) -> anyhow::Result<Output> {
     let mut child = command.spawn()?;
     let mut pipe = child
         .stdin

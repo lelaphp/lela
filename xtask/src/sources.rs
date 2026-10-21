@@ -68,10 +68,7 @@ pub fn exists(root: &Path, krate: &Crate) -> bool {
 pub fn undeclared(root: &Path, manifest: &Manifest) -> Vec<String> {
     let mut out = Vec::new();
     for dir in layout::CRATE_DIRS {
-        let Ok(entries) = std::fs::read_dir(root.join(dir.dir)) else {
-            continue;
-        };
-        let mut names: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        let mut names = crate::entries(&root.join(dir.dir)).unwrap_or_default();
         names.sort();
         for path in names {
             if !path.join("Cargo.toml").is_file() {
@@ -252,11 +249,9 @@ impl Standing {
             }
         }
         let index = key::Snapshot::index(root, &git::Index::read(root)?)?;
-        let mut trees = BTreeMap::new();
-        for (scope, path) in scopes {
-            let key = index.key(path)?;
-            trees.insert(scope.clone(), key);
-        }
+        let trees = (scopes.iter())
+            .map(|(scope, path)| Ok((scope.clone(), index.key(path)?)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
         let mut standing = store.latest_over(instrument, &trees, manifest.pin.digest())?;
         standing.retain(|_, reading| reading.status == Status::Pass);
         if let Some(path) = harness

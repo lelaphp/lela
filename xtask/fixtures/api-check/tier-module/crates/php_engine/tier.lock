@@ -1,0 +1,6 @@
+# tier.lock: the module line tier and two of its items, so every other item php_jit reaches through tier:: has no line.
+[face]
+tier
+tier::Flow
+tier::listed
+[kernels]

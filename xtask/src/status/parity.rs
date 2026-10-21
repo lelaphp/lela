@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::Serialize;
 
-use super::{Table, cell, outlived, standing};
+use super::{Table, cell, standing};
 use crate::manifest::{Manifest, overlaps};
 use crate::phpt::row::{Row, Target};
 use crate::phpt::{self, Root, Subset};
@@ -178,12 +178,8 @@ pub(super) fn render(
     root: &Path,
     format: Table,
 ) -> Result<String> {
-    let rows = standing(store, root)?;
-    let readings: Vec<&Reading> = rows
-        .iter()
-        .filter(|row| !outlived(manifest, row))
-        .filter_map(|row| row.reading.as_ref())
-        .collect();
+    let rows = standing(manifest, store, root)?;
+    let readings: Vec<&Reading> = rows.iter().filter_map(|row| row.reading.as_ref()).collect();
     let corpus: Option<Vec<PathBuf>> = manifest.pin.source.tree().ok().map(|tree| {
         Subset::corpus(&tree)
             .into_iter()

@@ -107,7 +107,7 @@ fn executable(path: &Path, body: &str) {
 fn scratch(name: &str, computed: &Computed) -> Scratch {
     let dir = Tree::new(&format!("hooks-{name}")).unwrap();
     let root = dir.join("root");
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     for file in REGIONS {
         write(&root, file, "# a region file\n\n<!-- computed layout -->\n");
     }
@@ -825,25 +825,53 @@ fn a_vocab_refusal_ends_the_hook_before_clippy_runs() {
     assert_eq!(scratch.calls("computed"), Vec::<String>::new());
 }
 
-/// A ledger revision a branch adds is written `NEXT` and numbered by the
-/// merge into `main` (#2982): a commit on a branch carries one, and a
-/// commit on `main` that still does is refused before anything runs,
-/// naming the line.
+/// A revision a branch adds is written `NEXT` and numbered by the merge
+/// into `main` (#2982), its ledger row and every citation of it: a commit
+/// on `main` whose Markdown or Rust still cites one, as
+/// `fixtures/hooks/next/cited.md` and `cited.rs` do in each shape that has
+/// landed, one wrapped onto the next line among them, is refused before
+/// anything runs, naming each line, and the same commit on a branch is not.
+/// Prose that names NEXT and cites no revision, the convention quoted in
+/// backticks and a line that ends in "revision" among it, is no citation.
 #[test]
-fn a_ledger_revision_still_next_is_refused_on_main_and_not_on_a_branch() {
+fn a_revision_still_cited_as_next_is_refused_on_main_and_not_on_a_branch() {
+    let fixture = xtask::package_dir().join("fixtures/hooks/next");
+    let read = |name: &str| fs::read_to_string(fixture.join(name)).unwrap();
     let scratch = scratch("next", &Computed::Rendered);
     scratch.git(&["checkout", "-q", "-B", "main"], false);
-    let ledger = "# a region file\n\n**NEXT. Revision NEXT (2026-10-19).** A change.\n";
-    write(&scratch.root, "harness-design.md", ledger);
-    scratch.git(&["add", "--", "harness-design.md"], false);
-    let (code, out) = scratch.run(&["commit", "-q", "-m", "a ledger row"], true);
+    write(&scratch.root, "docs/notes.md", &read("prose.md"));
+    scratch.git(&["add", "--", "docs/notes.md"], false);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "prose"], true);
+    assert_eq!(code, 0, "prose is no citation: {out}");
+
+    fs::remove_file(scratch.dir.join("cargo.log")).unwrap();
+    write(&scratch.root, "docs/ledger.md", &read("cited.md"));
+    write(
+        &scratch.root,
+        "crates/php_heap/src/trace.rs",
+        &read("cited.rs"),
+    );
+    let staged = ["docs/ledger.md", "crates/php_heap/src/trace.rs"];
+    scratch.git(&[&["add", "--"][..], &staged].concat(), false);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "citations"], true);
     assert_eq!(code, 1, "{out}");
-    assert!(out.contains("harness-design.md:3:"), "{out}");
+    for line in [3, 5, 7, 9, 11] {
+        assert!(
+            out.contains(&format!("docs/ledger.md:{line}:")),
+            "{line}: {out}"
+        );
+    }
+    for line in [2, 3] {
+        assert!(
+            out.contains(&format!("crates/php_heap/src/trace.rs:{line}:")),
+            "{line}: {out}"
+        );
+    }
     assert!(out.contains("is still NEXT"), "{out}");
     assert_eq!(scratch.calls("cargo"), Vec::<String>::new());
 
     scratch.git(&["checkout", "-q", "-b", "t9"], false);
-    let (code, out) = scratch.run(&["commit", "-q", "-m", "a ledger row"], true);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "citations"], true);
     assert_eq!(code, 0, "{out}");
 }
 
@@ -1114,6 +1142,103 @@ fn a_merge_that_leaves_a_region_unrendered_is_refused_until_committed_through_pr
     assert_eq!(scratch.git(&["rev-parse", "HEAD^2"], false), t9);
     let agents = scratch.git(&["show", "HEAD:AGENTS.md"], false);
     assert!(agents.ends_with("rendered\n"), "{agents}");
+}
+
+/// A merge `git merge` commits itself runs pre-merge-commit and not
+/// pre-commit: a branch whose work still cites a revision as `NEXT`, as
+/// `fixtures/hooks/next/cited.rs` does, is refused there too before
+/// `computed`, naming the line, and the merge stands uncommitted.
+#[test]
+fn a_merge_that_brings_a_revision_still_cited_as_next_onto_main_is_refused() {
+    let cited = xtask::package_dir().join("fixtures/hooks/next/cited.rs");
+    let scratch = scratch("merge-next", &Computed::Rendered);
+    scratch.git(&["checkout", "-q", "-B", "main"], false);
+    scratch.git(&["checkout", "-q", "-b", "t9"], false);
+    let file = "crates/php_heap/src/trace.rs";
+    write(&scratch.root, file, &fs::read_to_string(cited).unwrap());
+    scratch.git(&["add", "--", file], false);
+    scratch.git(&["commit", "-q", "-m", "the work of #9"], false);
+    scratch.git(&["checkout", "-q", "main"], false);
+    let before = scratch.head();
+    let (code, out) = scratch.run(
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "t9",
+            "-m",
+            "Merge t9: the work (#9)",
+        ],
+        true,
+    );
+    assert_ne!(code, 0, "{out}");
+    assert_eq!(scratch.head(), before, "the merge was not committed: {out}");
+    assert!(out.contains(&format!("{file}:2:")), "{out}");
+    assert!(
+        out.contains("pre-merge-commit: the revision cited above is still NEXT"),
+        "{out}"
+    );
+    assert_eq!(scratch.calls("computed"), Vec::<String>::new());
+}
+
+/// A fast-forward onto `main` writes no commit, so neither commit hook
+/// reads what it brings (#3138): pre-push reads it instead. The branch
+/// carrying `fixtures/hooks/next/cited.rs` is pushed as itself and not
+/// read; `main` fast-forwarded onto it is refused naming the line, the
+/// remote's `main` unmoved and `done` not asked, and so is the same
+/// `main` pushed to a remote that has no `main` yet, read whole.
+#[test]
+fn a_push_of_main_that_fast_forwards_a_revision_still_cited_as_next_is_refused() {
+    let cited = xtask::package_dir().join("fixtures/hooks/next/cited.rs");
+    let scratch = scratch("push-next", &Computed::Rendered);
+    scratch.git(&["checkout", "-q", "-B", "main"], false);
+    remote(&scratch);
+    let (code, out) = scratch.run(&["push", "-q", "origin", "main"], true);
+    assert_eq!(code, 0, "{out}");
+    let before = scratch.head();
+
+    scratch.git(&["checkout", "-q", "-b", "t9"], false);
+    let file = "crates/php_heap/src/trace.rs";
+    write(&scratch.root, file, &fs::read_to_string(cited).unwrap());
+    scratch.git(&["add", "--", file], false);
+    scratch.git(&["commit", "-q", "-m", "the work of #9"], false);
+    let (code, out) = scratch.run(&["push", "-q", "origin", "t9"], true);
+    assert_eq!(code, 0, "another branch is not read: {out}");
+    assert_eq!(scratch.calls("cargo"), ["xtask done", "xtask done"]);
+
+    scratch.git(&["checkout", "-q", "main"], false);
+    scratch.git(&["merge", "-q", "--ff-only", "t9"], false);
+    let (code, out) = scratch.run(&["push", "-q", "origin", "main"], true);
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains(&format!("{file}:2:")), "{out}");
+    assert!(
+        out.contains("pre-push: the revision cited above is still NEXT"),
+        "{out}"
+    );
+    let held = scratch.git(&["rev-parse", "origin/main"], false);
+    assert_eq!(held.trim(), before, "the push was refused");
+    assert_eq!(scratch.calls("cargo").len(), 2, "done was not asked");
+
+    let fresh = scratch.dir.join("fresh.git");
+    scratch.git(&["init", "-q", "--bare", fresh.to_str().unwrap()], false);
+    let (code, out) = scratch.run(&["push", "-q", fresh.to_str().unwrap(), "main"], true);
+    assert_ne!(code, 0, "a remote with no main yet reads main whole: {out}");
+    assert!(out.contains(&format!("{file}:2:")), "{out}");
+    assert_eq!(scratch.calls("cargo").len(), 2, "done was not asked");
+
+    // A remote sha this clone does not hold, a `main` moved there and not
+    // fetched, is a range nothing can read: refused, not read as clean.
+    let unheld = "1234567890abcdef1234567890abcdef12345678";
+    let out = Command::new(workspace().join("scripts/hooks/next-cited"))
+        .args([unheld, "HEAD"])
+        .current_dir(&scratch.root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(&format!("{unheld} is no commit")),
+        "{out:?}"
+    );
 }
 
 /// computed reads the working tree and the merge commits the index: a

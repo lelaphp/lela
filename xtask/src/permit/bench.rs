@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use super::INSTRUMENT;
+use super::hand_off::ask;
 use crate::git::git;
 use crate::key::Snapshot;
 use crate::manifest::{self, Manifest};
@@ -98,21 +99,13 @@ fn bench(root: &Path, runs: usize) -> Result<Bench> {
         let which = i % shapes.len();
         let stdin = shapes[which].1.to_string();
         let start = Instant::now();
-        let mut child = Command::new(&exe)
-            .arg("--root")
-            .arg(&scratch)
-            .arg("permit")
+        let mut permit = Command::new(&exe);
+        permit.arg("--root").arg(&scratch).arg("permit");
+        permit
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("spawning xtask permit")?;
-        if let Some(mut pipe) = child.stdin.take() {
-            std::io::Write::write_all(&mut pipe, stdin.as_bytes()).context("feeding the call")?;
-        }
-        let out = child
-            .wait_with_output()
-            .context("waiting for xtask permit")?;
+            .stderr(Stdio::piped());
+        let out = ask(permit, &stdin).context("running xtask permit")?;
         times[which].push(start.elapsed().as_secs_f64() * 1000.0);
         if !out.status.success() {
             bail!(
@@ -139,8 +132,9 @@ fn bench(root: &Path, runs: usize) -> Result<Bench> {
 /// workspace's manifest, its pin, the divergence registry and a README:
 /// where `--bench` provokes denials, so the readings land in its store and
 /// not the workspace's. The tests build the same repository through
-/// `tests/common`, which cannot be reached from here; the recipe is four
-/// files and one commit, stated in both. `bench`'s A/A control over the
+/// `tests/common`, which cannot be reached from here, with a registry of
+/// no row in place of the tracked one, whose rows no test of theirs is
+/// about (#3091); the recipe is four files and one commit, stated in both. `bench`'s A/A control over the
 /// judge takes its scratch workspace from here too, at a directory of its
 /// own, so the one recipe stands in one place.
 pub(crate) fn scratch_workspace(root: &Path, dir: &Path) -> Result<()> {
@@ -155,7 +149,7 @@ pub(crate) fn scratch_workspace(root: &Path, dir: &Path) -> Result<()> {
     ] {
         fs::copy(root.join(file), dir.join(file)).with_context(|| format!("copying {file}"))?;
     }
-    git(dir, &["init", "-q"], None)?;
+    git(dir, &["init", "-q", "-b", "main"], None)?;
     git(dir, &["add", "."], None)?;
     let commit = [
         &crate::scratch::UNHOOKED[..],

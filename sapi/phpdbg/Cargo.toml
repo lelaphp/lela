@@ -21,13 +21,9 @@ name = "phpdbg"
 path = "src/main.rs"
 
 [dependencies]
-# The CLI's set (sapi/cli/Cargo.toml says why each): php's configure
-# builds an extension of the `cli` class for the CLI, CGI, embed and
-# phpdbg alike (`EXT_CLI_STATIC`, `Z/build/php.m4`), and links phpdbg
-# from the CLI's objects (`PHP_BINARY_OBJS`, `Z/sapi/phpdbg/config.m4`),
-# so the oracle's phpdbg loads every extension its CLI does (#1450). The
-# test `the_bundle_is_the_clis` holds the two lists equal.
-php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli", "dba", "zip", "gmp", "tidy", "soap", "gd", "sodium", "gettext", "readline", "ffi", "intl"] }
+# The bundle's default set and `one_thread`, the set a host serving on
+# one thread links, whose comment and `host`'s say why each (#1450, #3081).
+php_bundle = { path = "../../crates/php_bundle", features = ["one_thread"] }
 php_sapi = { path = "../../crates/php_sapi" }
 # The face its natives are declared with, as an extension declares its own
 # (ADR-0008, #1348).

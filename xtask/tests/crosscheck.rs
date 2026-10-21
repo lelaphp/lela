@@ -23,24 +23,34 @@ use xtask::reading::{Number, Reading, Status, Store};
 use xtask::scratch::Tree;
 
 mod common {
+    pub mod manifest;
     pub mod registry;
     pub mod repo;
+    pub mod run;
 }
+use common::manifest::{of_rows, pin};
 use common::registry::registry;
 use common::repo::scratch_workspace;
+use common::run::xtask;
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
 }
 
+/// The manifest a scratch judges by: rows for the two extensions these
+/// tests render, under the tracked pin. The bundle's default set as the
+/// tracked rows state it is held in [`tracked`].
 fn manifest() -> Manifest {
-    Manifest::load(workspace()).unwrap()
+    of_rows([
+        xtask::manifest::Crate::named("ext/ctype"),
+        xtask::manifest::Crate::named("ext/json"),
+    ])
 }
 
 /// The tracked pin's binary, when it is on this machine; a failure where
 /// this machine promised the binary (#38).
 fn oracle() -> Option<PathBuf> {
-    let pin = manifest().pin;
+    let pin = pin();
     Promise::Oracle
         .or_skip(pin.oracle.file().map(Path::to_path_buf))
         .unwrap()
@@ -52,7 +62,7 @@ fn fixtures() -> PathBuf {
 
 /// A workspace of this test's own: a git repository holding the tracked
 /// manifest and pin, and a store of its own for the readings and the
-/// oracle's bytes.
+/// oracle's bytes; it judges by [`manifest`].
 struct Scratch {
     root: Tree,
     store: Store,
@@ -62,7 +72,7 @@ struct Scratch {
 impl Scratch {
     fn new(name: &str) -> Scratch {
         let root = Tree::new(&format!("crosscheck-{name}")).unwrap();
-        scratch_workspace(workspace(), &root).unwrap();
+        scratch_workspace(workspace(), &root);
         let store = Store::at(root.join("target/harness"));
         Scratch {
             root,
@@ -186,114 +196,6 @@ fn below_the_floor(readings: &[Reading]) -> Result<(), String> {
 /// (#1163's) is a skip that says it is not yet created.
 fn rendered(reading: &Reading) -> bool {
     !reading.message.ends_with(": not yet created")
-}
-
-#[test]
-fn every_default_extension_reads_the_ports_reach_in_both_columns_and_the_floor_holds() {
-    if oracle().is_none() {
-        return;
-    }
-    let scratch = Scratch::new("default");
-    let readings = scratch.run(&Ask::default());
-    let carried = Carried::binary(&scratch.root).unwrap();
-    let default: Vec<&str> = scratch
-        .manifest
-        .crates
-        .iter()
-        .filter(|c| c.name.starts_with("ext/") && carried.carries(c))
-        .map(|c| c.name.as_str())
-        .collect();
-    assert!(default.contains(&"ext/ctype"), "{default:?}");
-    assert!(default.contains(&"ext/json"), "{default:?}");
-    assert!(default.contains(&"ext/hash"), "{default:?}");
-    let scopes: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
-    let expected: Vec<String> = default
-        .iter()
-        .flat_map(|name| [(*name).to_owned(), format!("{name}/ri")])
-        .collect();
-    assert_eq!(scopes, expected);
-    for scope in FLOOR {
-        assert!(scopes.contains(&scope), "the floor's {scope} is run");
-    }
-    for reading in readings.iter().filter(|r| rendered(r)) {
-        assert_eq!(reading.instrument, "crosscheck");
-        let flag = if reading.scope.ends_with("/ri") {
-            "--ri"
-        } else {
-            "--re"
-        };
-        assert!(reading.message.contains(flag), "{}", reading.message);
-        assert!(count(reading, "bytes") > 0, "{reading:#?}");
-        match reading.status {
-            Status::Pass => assert!(
-                reading
-                    .message
-                    .contains("the engine's rendering is the oracle's"),
-                "{}",
-                reading.message
-            ),
-            Status::Fail => assert!(
-                reading
-                    .message
-                    .contains("the engine's rendering differs from the oracle's at line")
-                    || reading.message.contains("the engine rendered nothing"),
-                "{}",
-                reading.message
-            ),
-            Status::Skip => panic!("a rendering is a pass or a fail: {reading:#?}"),
-        }
-    }
-    if let Err(why) = below_the_floor(&readings) {
-        panic!("{why}");
-    }
-    let kept_ri = crosscheck::kept(
-        &scratch.store,
-        &scratch.manifest.pin.oracle.md5,
-        "ctype",
-        Column::Ri,
-    );
-    assert_eq!(
-        fs::read(&kept_ri).unwrap(),
-        fs::read(fixtures().join("oracle.ri")).unwrap(),
-        "the oracle's --ri bytes at {} are the fixture's",
-        kept_ri.display()
-    );
-    let kept = crosscheck::kept(
-        &scratch.store,
-        &scratch.manifest.pin.oracle.md5,
-        "ctype",
-        Column::Re,
-    );
-    // The fixture is php's own bytes; what is kept is what a run compares,
-    // the fixture under the recipe's normalisation, its load number the
-    // pin's token (#317).
-    assert_eq!(
-        fs::read(&kept).unwrap(),
-        oracle::normalise(
-            &scratch.manifest.pin.recipe.normalise,
-            fs::read(fixtures().join("oracle.re")).unwrap()
-        ),
-        "the oracle's bytes at {} are the fixture's as the recipe normalises them",
-        kept.display()
-    );
-    let rendered = xtask::status::render(
-        &scratch.manifest,
-        &registry(""),
-        xtask::status::Against::Checkout(&scratch.store),
-        &scratch.root,
-        Section::Crosscheck,
-        Format::Md,
-        None,
-        false,
-    )
-    .unwrap();
-    // Every row the run wrote, with the status its reading carries: the
-    // section renders what the lane read and never a set pinned here
-    // (#389).
-    for reading in &readings {
-        let row = format!("| {} | {} |", reading.scope, reading.status.as_str());
-        assert!(rendered.contains(&row), "{row} in {rendered}");
-    }
 }
 
 /// The floor is a sensor and not a comment (#389, harness-design.md §7,
@@ -538,7 +440,7 @@ fn an_absent_oracle_is_a_skip_and_not_a_pass() {
 #[test]
 fn staged_with_no_file_a_rendering_reads_renders_nothing() {
     let root = Tree::new("crosscheck-staged").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     fs::create_dir_all(root.join("xtask/src")).unwrap();
     fs::write(root.join("xtask/src/lib.rs"), "// moved\n").unwrap();
     let add = std::process::Command::new("git")
@@ -547,18 +449,7 @@ fn staged_with_no_file_a_rendering_reads_renders_nothing() {
         .status()
         .unwrap();
     assert!(add.success());
-    let out = std::process::Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(&*root)
-        .args(["crosscheck", "--staged"])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        out.status.success(),
-        "{stdout}{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let stdout = xtask(&root, &["crosscheck", "--staged"]).ok();
     assert!(
         stdout.contains("no extension the binary carries renders again for what is staged"),
         "{stdout}"
@@ -611,5 +502,124 @@ fn a_php_linked_that_dies_on_a_signal_fails_that_extension_and_the_next_still_re
     for reading in &readings[2..] {
         assert!(reading.scope.starts_with("ext/json"), "{reading:#?}");
         assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    }
+}
+
+/// The tests whose subject is the tracked workspace itself: each reads the
+/// `seams.toml`, `oracle.toml`, registry or sources standing in the
+/// workspace, so a person's edit there is what may turn one red (#3091).
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
+mod tracked {
+    use super::*;
+
+    #[test]
+    fn every_default_extension_reads_the_ports_reach_in_both_columns_and_the_floor_holds() {
+        if oracle().is_none() {
+            return;
+        }
+        let mut scratch = Scratch::new("default");
+        scratch.manifest = Manifest::load(workspace()).unwrap();
+        let readings = scratch.run(&Ask::default());
+        let carried = Carried::binary(&scratch.root).unwrap();
+        let default: Vec<&str> = scratch
+            .manifest
+            .crates
+            .iter()
+            .filter(|c| c.name.starts_with("ext/") && carried.carries(c))
+            .map(|c| c.name.as_str())
+            .collect();
+        assert!(default.contains(&"ext/ctype"), "{default:?}");
+        assert!(default.contains(&"ext/json"), "{default:?}");
+        assert!(default.contains(&"ext/hash"), "{default:?}");
+        let scopes: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
+        let expected: Vec<String> = default
+            .iter()
+            .flat_map(|name| [(*name).to_owned(), format!("{name}/ri")])
+            .collect();
+        assert_eq!(scopes, expected);
+        for scope in FLOOR {
+            assert!(scopes.contains(&scope), "the floor's {scope} is run");
+        }
+        for reading in readings.iter().filter(|r| rendered(r)) {
+            assert_eq!(reading.instrument, "crosscheck");
+            let flag = if reading.scope.ends_with("/ri") {
+                "--ri"
+            } else {
+                "--re"
+            };
+            assert!(reading.message.contains(flag), "{}", reading.message);
+            assert!(count(reading, "bytes") > 0, "{reading:#?}");
+            match reading.status {
+                Status::Pass => assert!(
+                    reading
+                        .message
+                        .contains("the engine's rendering is the oracle's"),
+                    "{}",
+                    reading.message
+                ),
+                Status::Fail => assert!(
+                    reading
+                        .message
+                        .contains("the engine's rendering differs from the oracle's at line")
+                        || reading.message.contains("the engine rendered nothing"),
+                    "{}",
+                    reading.message
+                ),
+                Status::Skip => panic!("a rendering is a pass or a fail: {reading:#?}"),
+            }
+        }
+        if let Err(why) = below_the_floor(&readings) {
+            panic!("{why}");
+        }
+        let kept_ri = crosscheck::kept(
+            &scratch.store,
+            &scratch.manifest.pin.oracle.md5,
+            "ctype",
+            Column::Ri,
+        );
+        assert_eq!(
+            fs::read(&kept_ri).unwrap(),
+            fs::read(fixtures().join("oracle.ri")).unwrap(),
+            "the oracle's --ri bytes at {} are the fixture's",
+            kept_ri.display()
+        );
+        let kept = crosscheck::kept(
+            &scratch.store,
+            &scratch.manifest.pin.oracle.md5,
+            "ctype",
+            Column::Re,
+        );
+        // The fixture is php's own bytes; what is kept is what a run compares,
+        // the fixture under the recipe's normalisation, its load number the
+        // pin's token (#317).
+        assert_eq!(
+            fs::read(&kept).unwrap(),
+            oracle::normalise(
+                &scratch.manifest.pin.recipe.normalise,
+                fs::read(fixtures().join("oracle.re")).unwrap()
+            ),
+            "the oracle's bytes at {} are the fixture's as the recipe normalises them",
+            kept.display()
+        );
+        let rendered = xtask::status::render(
+            &scratch.manifest,
+            &registry(""),
+            xtask::status::Against::Checkout(&scratch.store),
+            &scratch.root,
+            Section::Crosscheck,
+            Format::Md,
+            None,
+            false,
+        )
+        .unwrap();
+        // Every row the run wrote, with the status its reading carries: the
+        // section renders what the lane read and never a set pinned here
+        // (#389).
+        for reading in &readings {
+            let row = format!("| {} | {} |", reading.scope, reading.status.as_str());
+            assert!(rendered.contains(&row), "{row} in {rendered}");
+        }
     }
 }

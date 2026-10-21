@@ -23,11 +23,18 @@
 //!   caller a return lands in. A guard on what the trace entered with is
 //!   held once at entry, and a loop's phi guard moves to its entry value
 //!   where the back edge already has the type, as php's "propagate
-//!   guards through Phi sources" does.
+//!   guards through Phi sources" does. What an opline writes is typed by
+//!   what php's inference knows of its operands, so where it reads a
+//!   variable a symbol table reaches, which php types as anything, the
+//!   opline that reads what it wrote holds it, as php's does.
 //! - **Aliasing.** A variable a symbol table reaches, every variable of a
 //!   file's own code and of a function that reads its variables by name,
 //!   is kept at guard strength: guarded at every op that reads it, never
-//!   narrowed past it, as php's `zend_jit_var_may_alias` keeps it.
+//!   narrowed past it, as php's `zend_jit_var_may_alias` keeps it, and at
+//!   the oplines php's code generator holds an operand's recorded type
+//!   at where its inference adds no guard, a concatenation's and a rope
+//!   part's, once a guard of the inference holds the same value; an
+//!   array of one is held to its layout at each read by a long key.
 //! - **`SMART_BRANCH`.** A comparison fused to the jump after it is one
 //!   compare-and-branch, whose mispredicted direction leaves through an
 //!   exit at the jump with the comparison's value written as a constant.
@@ -36,13 +43,19 @@
 //!   code can write, a slot a symbol table reaches or one that may hold a
 //!   reference, is read again as a new value; only what the trace owns
 //!   survives. A kernel with the `throw` effect alone clobbers nothing but
-//!   may exit. An array the trace owns keeps its layout across a call:
+//!   may unwind. An array the trace owns keeps its layout across a call:
 //!   no other code writes it without separating it first.
 //! - **An [`ExitSpec`] per exit**, naming the frame and opline the
 //!   interpreter goes on at, the [`Landing`], the slots whose values live
-//!   in registers and are stored, and the trace a `Link` stop links to.
-//!   Places that leave with an equal spec naming an opline share one
-//!   exit, php's reuse in `zend_jit_trace_get_exit_point`.
+//!   in registers and are stored, the slots whose types the trace knows
+//!   there, whether a side trace may grow from it, and the trace a `Link`
+//!   stop links to. Places that leave with an equal spec naming an opline
+//!   share one exit, php's reuse in `zend_jit_trace_get_exit_point`.
+//! - **No exit for a throw.** A kernel that leaves a throwable pending,
+//!   bails out or panics leaves through an [`Unwind`], which stores the
+//!   registers and is numbered apart from the exits, as php's compiled
+//!   code jumps to its stub for a throwable and takes no exit point
+//!   (`zend_jit_check_exception`, `Z/ext/opcache/jit/zend_jit_ir.c:3985`).
 //!
 //! What it is not: php's ranges and reference counts. A long arithmetic is
 //! long or double here where php's range inference proves it stays long,
@@ -69,6 +82,10 @@ use crate::table::TraceId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ExitId(pub(crate) u16);
 
+/// One unwind of a trace, by its place among the trace's unwinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct UnwindId(pub(crate) u16);
+
 /// The trace a record builds: the frames it runs in, its values, its ops
 /// in the order they are served, the guards and exits between them, the slots
 /// of the requests' runtime caches its code reads, and how it ends.
@@ -80,6 +97,7 @@ pub(crate) struct TraceIr {
     pub(crate) ops: Vec<Op>,
     pub(crate) guards: Vec<Guard>,
     pub(crate) exits: Vec<ExitSpec>,
+    pub(crate) unwinds: Vec<Unwind>,
     pub(crate) map_ptrs: Vec<MapPtrRaw>,
     pub(crate) end: End,
 }
@@ -226,10 +244,14 @@ pub(crate) struct Line {
     pub(crate) form: Form,
     /// The slot of [`TraceIr::map_ptrs`] the opline reads.
     pub(crate) map_ptr: Option<usize>,
+    /// Where it leaves when it cannot finish: an inline form the
+    /// interpreter serves again.
     pub(crate) exit: Option<ExitId>,
-    /// Where it leaves where, done, freeing a temporary it read threw:
-    /// an inline fetch from a temporary array.
-    pub(crate) freed: Option<ExitId>,
+    /// Where it leaves when a kernel it calls throws, bails out or
+    /// panics: a stepped opline that may throw, an inline assignment over
+    /// a counted value, whose destructor may, and an inline fetch from a
+    /// temporary array, which it frees.
+    pub(crate) unwind: Option<UnwindId>,
 }
 
 /// The jump a comparison is fused to: which value of the comparison it
@@ -301,7 +323,7 @@ pub(crate) enum GuardAt {
     Before(OpId),
     /// By the op, on what it computes, before it writes
     /// it: an arithmetic's overflow, a fetched element's type, a jump's
-    /// direction, a return's caller.
+    /// direction, where a step or a return left the interpreter.
     Within(OpId),
 }
 
@@ -316,8 +338,13 @@ pub(crate) enum Check {
     Layout { value: ValueId, layout: Layout },
     /// The jump goes the way it went.
     Direction { taken: bool },
-    /// The return lands in this op array at this opline, php's IP guard.
-    Caller { func: FuncRef, opline: OplineIdx },
+    /// The interpreter stands at this opline of this op array once the op
+    /// is done, php's IP guard (`jit_CMP_IP`): where a return past the
+    /// trace's lowest frame lands, and where a stepped opline whose next
+    /// opline the record does not say went, a table's jump. Its exit names
+    /// no opline, so the interpreter goes on where it stands and the exit
+    /// is right whatever the guard held.
+    Stands { func: FuncRef, opline: OplineIdx },
 }
 
 /// How an array is laid out, php's `HASH_FLAG_PACKED` set or clear.
@@ -328,18 +355,21 @@ pub(crate) enum Layout {
 }
 
 /// What an exit does: where the interpreter goes on, what the trampoline
-/// does first, what compiled code stores, and the trace it links to.
+/// does first, what compiled code stores, what the trace knows of the
+/// frame's slots there, whether a side trace grows from it, and the trace
+/// it links to.
 ///
 /// It is all an exit is: two places that leave with an equal spec that
 /// names an opline leave through one exit, as php's
 /// `zend_jit_trace_get_exit_point` reuses one whose opline, `flags` and
-/// stack map match (`Z/ext/opcache/jit/zend_jit_trace.c:168-185`). php
-/// never reuses a method call's exit, `ZEND_JIT_EXIT_METHOD_CALL`, which
-/// keeps the callee it guarded for a side trace; no guard here holds a
-/// method call's callee, so no exit is one. php's stack map also holds
-/// each slot's known type, and its `flags` `ZEND_JIT_EXIT_TO_VM`, which
-/// a spec does not carry until side traces read them (#2964), so entry
-/// guards and a loop's interrupt test share exits php keeps apart.
+/// stack map match (`Z/ext/opcache/jit/zend_jit_trace.c:168-185`). The
+/// stack map is the stores, a register per slot, php's `STACK_REF`, and
+/// the known types, php's `STACK_TYPE`, which a guard sets for the slot it
+/// holds once it held (`SET_STACK_TYPE`, `:4303-4316`), so successive
+/// guards at one place leave through exits of their own. php never
+/// reuses a method call's exit, `ZEND_JIT_EXIT_METHOD_CALL`, which keeps
+/// the callee it guarded for a side trace; no guard here holds a method
+/// call's callee, so no exit is one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ExitSpec {
     pub(crate) frame: Frame,
@@ -349,7 +379,49 @@ pub(crate) struct ExitSpec {
     pub(crate) opline: Option<OplineIdx>,
     pub(crate) landing: Landing,
     pub(crate) stores: Vec<Store>,
+    /// The slots of the exit's frame whose type the trace knows where it
+    /// leaves, by slot: what a side trace grown from it enters with.
+    pub(crate) known: Vec<Known>,
+    pub(crate) grows: Grows,
     pub(crate) link: Option<TraceId>,
+}
+
+/// One slot whose type the trace knows where an exit leaves, php's
+/// `STACK_TYPE` of a stack map's slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct Known {
+    pub(crate) slot: Slot,
+    pub(crate) tag: ZvalType,
+}
+
+/// Whether a side trace may grow from an exit, php's `flags`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Grows {
+    /// A hot exit records a side trace, php's `flags` 0.
+    Side,
+    /// The exit goes back to the interpreter alone and never grows one,
+    /// php's `ZEND_JIT_EXIT_TO_VM`: a loop's interrupt test
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:7223`).
+    Never,
+}
+
+/// Where an opline leaves of its own: through an exit, or through an
+/// unwind, which takes none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Leave {
+    Exit(ExitId),
+    Unwind(UnwindId),
+}
+
+/// Where compiled code goes when a kernel answers anything but
+/// `Continue`: the scalars the trace keeps in registers stored, so the
+/// interpreter unwinds over its slots from where the throwable was
+/// raised. No exit is taken, so none is numbered, counted toward
+/// `ZEND_JIT_TRACE_MAX_EXITS` or written as a `TRACE n exit m` line, as
+/// php's compiled code jumps to its stub for a throwable.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct Unwind {
+    pub(crate) stores: Vec<Store>,
 }
 
 /// One slot an exit writes.
@@ -368,11 +440,22 @@ pub(crate) enum Stored {
     Bool(bool),
     /// A fetched element whose type its guard did not hold, which the
     /// guard's own place copies into the fetch's slot as the fetch copies
-    /// it before it leaves: the slot is written, and the exit stores
-    /// nothing there. No other place leaves with it, as php's stack map
-    /// keeps that slot in memory where the next opline's keeps it in a
-    /// register.
-    Copied(ValueId),
+    /// it before it leaves, read in place or through the reference the
+    /// element is: the slot is written, and the exit stores nothing there.
+    /// No other place leaves with it, as php's stack map keeps that slot
+    /// in memory where the next opline's keeps it in a register, and the
+    /// two reads leave apart, as php's two guards of an element, one per
+    /// way it is read, hold the element's address in registers of their
+    /// own (`zend_jit_fetch_dim_read`).
+    Copied { value: ValueId, read: Read },
+}
+
+/// How a fetched element is read: in place, or through the reference the
+/// element is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Read {
+    InPlace,
+    Through,
 }
 
 /// What the trampoline does at an exit before the interpreter goes on
@@ -405,7 +488,9 @@ pub(crate) struct LoopHeader {
     /// The op the back edge goes to.
     pub(crate) at: OpId,
     pub(crate) repeat: Repeat,
-    /// Where the interrupt test leaves (`jit-design.md` §4.3).
+    /// Where the interrupt test leaves (`jit-design.md` §4.3): an exit
+    /// that never grows a side trace, numbered after every exit of the
+    /// loop's body, as php takes it where it closes the loop.
     pub(crate) interrupt: ExitId,
 }
 
@@ -432,6 +517,22 @@ pub(crate) enum Repeat {
 pub(crate) struct Abort {
     pub(crate) stop: Stop,
     pub(crate) why: &'static str,
+}
+
+/// Whether an inline arithmetic `op` by `by` raises no error the
+/// interpreter would throw: every operator but a division, a modulo and
+/// the two shifts, and those four by a constant that cannot raise one, a
+/// divisor other than zero and a shift that is not negative, where php's
+/// code generator tests nothing and takes no exit point
+/// (`zend_jit_long_math`).
+pub(crate) fn cannot_raise(op: Opcode, by: Operand) -> bool {
+    match (op, by) {
+        (Opcode::Div | Opcode::Mod, Operand::Constant(Constant::Long(n))) => n != 0,
+        (Opcode::Div, Operand::Constant(Constant::Double(d))) => d != 0.0,
+        (Opcode::Sl | Opcode::Sr, Operand::Constant(Constant::Long(n))) => n >= 0,
+        (Opcode::Div | Opcode::Mod | Opcode::Sl | Opcode::Sr, _) => false,
+        _ => true,
+    }
 }
 
 /// The trace `rec` builds, read through `view`, or why it builds none.

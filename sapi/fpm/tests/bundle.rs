@@ -1,31 +1,9 @@
 //! The binary carries the CLI's extensions: php's configure builds every
 //! extension outside the `cli` class for every host (#1477), and design
 //! §7.2 (revision 66) puts `pcntl` and `posix` in every host whose serving
-//! process is single-threaded, as php-fpm's children are (#1494).
-
-/// The `features` a host's manifest turns on in its `php_bundle`
-/// dependency, as written on its one line.
-fn bundle_features(manifest: &str) -> Vec<&str> {
-    let line = manifest
-        .lines()
-        .find(|line| line.starts_with("php_bundle = "))
-        .expect("a php_bundle dependency on one line");
-    let (_, list) = line
-        .split_once("features = [")
-        .expect("the dependency names its features");
-    let (list, _) = list.split_once(']').expect("the list closes on its line");
-    list.split(',')
-        .map(|feature| feature.trim().trim_matches('"'))
-        .filter(|feature| !feature.is_empty())
-        .collect()
-}
-
-#[test]
-fn the_bundle_is_the_clis() {
-    let fpm = include_str!("../Cargo.toml");
-    let cli = include_str!("../../cli/Cargo.toml");
-    assert_eq!(bundle_features(fpm), bundle_features(cli));
-}
+//! process is single-threaded, as php-fpm's children are (#1494); the host
+//! turns on the bundle's `host` (#3081), and `php-fpm -n -m` lists what it
+//! carries.
 
 /// `php-fpm -n -m` lists the extensions a build of this crate alone
 /// lacked, `pcntl` and `posix` among them.

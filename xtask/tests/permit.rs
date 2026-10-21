@@ -12,9 +12,15 @@ use xtask::scratch::Tree;
 use xtask::witness::{self, Accept, Ask};
 
 mod common {
+    pub mod manifest;
     pub mod repo;
+    pub mod run;
+    pub mod tracker;
 }
-use common::repo::scratch_workspace;
+use common::manifest::Tracked;
+use common::repo::{Repo, scratch_workspace};
+use common::run::{Ran, Run, xtask};
+use common::tracker::{Tracker, issue, labels};
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -29,246 +35,11 @@ fn call(path: &Path) -> Call {
     Call::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
-/// One fixture per rule permit judges: one call it fires on, one neighbour
-/// it lets through (harness-design.md §4.1, §7).
-#[test]
-fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let judged: Vec<_> = manifest
-        .rules
-        .iter()
-        .filter(|r| judged_at_the_call(r))
-        .collect();
-    assert!(
-        judged.len() >= 8,
-        "{:?}",
-        judged.iter().map(|r| &r.id).collect::<Vec<_>>()
-    );
-    // A rule scoped by `where` is judged in a checkout whose branch
-    // records a ticket, which the tree the tests run in need not be.
-    let ticketed = checkout("fixtures-ticketed", Some(1));
-    // One scoped to `where = "operating"` in a checkout whose merge no
-    // session of the fixture's started (#2476), and every other `Bash`
-    // rule in a checkout where none stands, since the tests' own checkout
-    // holds a merge while its merge commit's hook runs them; a write is
-    // judged against the workspace's files.
-    let merging = operating("fixtures-operating");
-    let quiet = checkout("fixtures-quiet", None);
-    for rule in judged {
-        let dir = fixtures().join("rules").join(&rule.id);
-        let kind = Kind::of(rule);
-        let workspace = || match rule.within {
-            Where::Anywhere if rule.tool.iter().any(|t| t == "Bash") => quiet.path(),
-            Where::Anywhere => workspace(),
-            Where::Ticketed => ticketed.path(),
-            Where::Operating => merging.path(),
-            Where::Main | Where::Checkout => quiet.path(),
-        };
-        // Every control of the rule's directory: each `deny*.json` (or
-        // `note*.json`) must fire, each `allow*.json` must not (#625).
-        let named = |prefix: &str| -> Vec<PathBuf> {
-            let mut all: Vec<PathBuf> = std::fs::read_dir(&dir)
-                .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
-                .map(|entry| entry.unwrap().path())
-                .filter(|p| {
-                    let name = p.file_name().unwrap().to_str().unwrap();
-                    name.starts_with(prefix) && p.extension().is_some_and(|e| e == "json")
-                })
-                .collect();
-            all.sort();
-            assert!(!all.is_empty(), "{}: no {prefix}*.json", dir.display());
-            all
-        };
-        let firing = named(match kind {
-            Kind::Deny => "deny",
-            Kind::Note => "note",
-        });
-        for fires in &firing {
-            let judgement = judge(&manifest, workspace(), &call(fires)).unwrap();
-            let finding = judgement
-                .findings
-                .iter()
-                .find(|f| f.rule == rule.id)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "{}: {} fired nothing: {judgement:?}",
-                        rule.id,
-                        fires.display()
-                    )
-                });
-            assert_eq!(finding.kind, kind, "{}", rule.id);
-            let reason = finding.reason();
-            assert!(reason.contains(&rule.id), "{reason}");
-            assert!(reason.contains(&rule.text), "{reason}");
-            for adr in rule.adr.iter() {
-                assert!(reason.contains(&format!("ADR-{adr}")), "{reason}");
-            }
-            if kind == Kind::Deny {
-                assert_eq!(
-                    judgement.denial().map(|f| f.rule.as_str()),
-                    Some(rule.id.as_str()),
-                    "{}",
-                    fires.display()
-                );
-            }
-        }
-        // `allow-main.json` is a neighbour in main's checkout, where a
-        // ticketed rule does not judge, an `allow-starter*.json` one
-        // in a checkout whose operation the fixture's session started,
-        // which a walk does not record, and an `allow-excused*.json` one
-        // under an `unless_argv` a person has yet to paste (#3068): each
-        // one's own test holds it.
-        let neighbours = named("allow").into_iter().filter(|p| {
-            let name = p.file_name().unwrap().to_string_lossy();
-            !name.starts_with("allow-starter")
-                && !unpasted(rule, &name)
-                && (rule.within == Where::Anywhere || !p.ends_with("allow-main.json"))
-        });
-        for neighbour in neighbours {
-            let judgement = judge(&manifest, workspace(), &call(&neighbour)).unwrap();
-            assert!(
-                judgement.findings.iter().all(|f| f.rule != rule.id),
-                "{}: the neighbour {} fired: {judgement:?}",
-                rule.id,
-                neighbour.display()
-            );
-        }
-    }
-}
-
 /// An `allow-excused*.json` neighbour, the call an `unless_argv` lets
 /// through, while the tracked row carries none: a person has yet to paste
 /// it, and the row's own test holds it under the row as proposed (#3068).
 fn unpasted(rule: &Rule, name: &str) -> bool {
     name.starts_with("allow-excused") && rule.predicate.unless_argv.is_none()
-}
-
-/// Every rule with a `tool` or a `scope` is either judged here, with its
-/// fixture, or carries one of the five predicates that read the tree after
-/// the write, or is read at the Stop alone (`tool = "Stop"`, #32), which
-/// `permit` never judges and no after-the-write sensor reads; a fourth
-/// kind cannot fall between the three.
-#[test]
-fn every_rule_with_a_tool_or_a_scope_is_judged_or_is_an_after_the_write_sensor() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    for rule in manifest
-        .rules
-        .iter()
-        .filter(|r| !r.tool.is_empty() || !r.scope.is_empty())
-    {
-        let p = &rule.predicate;
-        let after_the_write = p.deny_methods.is_some()
-            || p.check.is_some()
-            || p.deny_lints.is_some()
-            || p.avoid_from.is_some()
-            || p.generated.is_some();
-        if rule.tool.iter().any(|t| t == "Stop") {
-            assert!(
-                !judged_at_the_call(rule) && !after_the_write,
-                "{}: a Stop rule is judged at the call {}, after the write {}",
-                rule.id,
-                judged_at_the_call(rule),
-                after_the_write
-            );
-            continue;
-        }
-        assert!(
-            judged_at_the_call(rule) != after_the_write,
-            "{}: judged {}, after the write {}",
-            rule.id,
-            judged_at_the_call(rule),
-            after_the_write
-        );
-    }
-}
-
-/// The fixture of the `xtask.lock-line` rule #55 proposes, judged under
-/// the rule as its row would read, before a person commits it: the note
-/// fires on a new `pub` item under `xtask/src` and not on its neighbour.
-/// Once the tracked manifest carries the row, the walk above holds it and
-/// this adds nothing.
-#[test]
-fn the_proposed_xtask_lock_line_rule_notes_its_fixture_and_not_its_neighbour() {
-    let mut manifest = Manifest::load(workspace()).unwrap();
-    if manifest.rule("xtask.lock-line").is_none() {
-        let mut rule = Rule::named("xtask.lock-line", "xtask/src/**");
-        rule.predicate.deny = None;
-        rule.predicate.on = Some("pub".to_owned());
-        manifest.rules.push(rule);
-    }
-    let dir = fixtures().join("rules/xtask.lock-line");
-    let judged = judge(&manifest, workspace(), &call(&dir.join("note.json"))).unwrap();
-    let finding = judged
-        .findings
-        .iter()
-        .find(|f| f.rule == "xtask.lock-line")
-        .unwrap_or_else(|| panic!("the note did not fire: {judged:?}"));
-    assert_eq!(finding.kind, Kind::Note);
-    assert!(
-        judged.denial().is_none(),
-        "a note is not a denial: {judged:?}"
-    );
-    let judged = judge(&manifest, workspace(), &call(&dir.join("allow.json"))).unwrap();
-    assert!(
-        judged.findings.iter().all(|f| f.rule != "xtask.lock-line"),
-        "the neighbour fired: {judged:?}"
-    );
-}
-
-/// The rule #33 proposes, `git.pathspec`, built through the constructors
-/// as its row would read, so the predicate is proven before a person
-/// commits the row: `require_argv = "--"` with `with = ["git add", "git
-/// commit"]` denies a `git add` over the whole tree and a `git commit`
-/// that names no path, with the rule's id and text in the denial, and
-/// lets the pathspec forms and the hooks' own `git add -- <file>` through.
-/// Once the tracked manifest carries the row, the walk above holds it and
-/// this adds nothing.
-#[test]
-fn the_proposed_git_pathspec_rule_denies_its_fixture_and_not_its_neighbour() {
-    let manifest = with_the_pathspec_rule(Manifest::load(workspace()).unwrap());
-    let rule = manifest.rule("git.pathspec").unwrap();
-    let dir = fixtures().join("rules/git.pathspec");
-    let quiet = checkout("pathspec-quiet", None);
-    let judged = judge(&manifest, quiet.path(), &call(&dir.join("deny.json"))).unwrap();
-    let denial = judged
-        .denial()
-        .unwrap_or_else(|| panic!("the denial did not fire: {judged:?}"));
-    assert_eq!(denial.rule, "git.pathspec");
-    assert!(
-        denial.reason().contains("git.pathspec"),
-        "{}",
-        denial.reason()
-    );
-    assert!(denial.reason().contains(&rule.text), "{}", denial.reason());
-    let judged = judge(&manifest, quiet.path(), &call(&dir.join("allow.json"))).unwrap();
-    assert!(
-        judged.findings.iter().all(|f| f.rule != "git.pathspec"),
-        "the neighbour fired: {judged:?}"
-    );
-    for line in [
-        "git add .",
-        "git add -u",
-        "git commit -a -m msg",
-        "git add -- .",
-        "git -C /Users/x/dax-php commit -F /tmp/msg",
-    ] {
-        let judged = judge(&manifest, quiet.path(), &bash(line)).unwrap();
-        assert_eq!(
-            judged.denial().map(|f| f.rule.as_str()),
-            Some("git.pathspec"),
-            "{line}: {judged:?}"
-        );
-    }
-    for line in [
-        "git add -- AGENTS.md",
-        "git commit -F /tmp/msg -- xtask/src",
-        "git add -A -- xtask/fixtures/rules/git.pathspec",
-        "git worktree add -b t/x .claude/worktrees/t/x main",
-        "cargo add serde",
-    ] {
-        let judged = judge(&manifest, quiet.path(), &bash(line)).unwrap();
-        assert!(judged.denial().is_none(), "{line}: {judged:?}");
-    }
 }
 
 /// The manifest with the `git.pathspec` row #33 proposes, as the tracked
@@ -300,67 +71,12 @@ fn bash(line: &str) -> Call {
 /// names one subset, and `--full`, `--jit` with no subset and `xtask
 /// bench --jit` stay denied.
 const PROPOSED_NIGHTLY_FLAGS: &str = r#"
-[[rule]]
-id = "lanes.nightly-flags"
 tool = "Bash"
 deny_argv = ["--full", "--jit"]
 unless_argv = { "--jit" = "xtask phpt --subset" }   # grammar: unless_argv, a denied element let through where the phrase runs bounded by the option, as require_argv reads one: the tier's one-subset reading (#3052, #3068)
 with = ["xtask phpt", "xtask bench"]   # xtask however it is run: the cargo alias, cargo run -p xtask, a path, a variable the line assigns (#1860)
 text = "Nightly lanes run in CI only; run the per-crate subset, and the tier's `--jit` lane on one subset named by `--subset` (#3052)."
 "#;
-
-/// `lanes.nightly-flags`' fixtures under the row as proposed, pasted after
-/// the tracked manifest and taking its place: every `deny*.json` denied
-/// and every `allow*.json` let through. Under the row as tracked the same,
-/// save that until the paste the `allow-excused*.json` lines, the tier's
-/// one-subset reading, are denied with the rest (#3068).
-#[test]
-fn the_nightly_flags_let_the_tier_s_one_subset_reading_through() {
-    let text = std::fs::read_to_string(workspace().join("seams.toml")).unwrap();
-    let tracked = Manifest::parse(&text).unwrap();
-    let mut proposed = Manifest::parse(&(text + PROPOSED_NIGHTLY_FLAGS)).unwrap();
-    let at = proposed
-        .rules
-        .iter()
-        .position(|r| r.id == "lanes.nightly-flags")
-        .unwrap();
-    proposed.rules.remove(at);
-    let pasted = tracked
-        .rule("lanes.nightly-flags")
-        .is_some_and(|r| r.predicate.unless_argv.is_some());
-    let quiet = checkout("nightly-flags-quiet", None);
-    let dir = fixtures().join("rules/lanes.nightly-flags");
-    let mut names: Vec<String> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    for name in [
-        "allow-excused.json",
-        "deny-jit-full.json",
-        "deny-jit.json",
-        "deny-bench.json",
-    ] {
-        assert!(names.iter().any(|n| n == name), "{name}: {names:?}");
-    }
-    let denied = |manifest: &Manifest, name: &str| {
-        judge(manifest, quiet.path(), &call(&dir.join(name)))
-            .unwrap()
-            .findings
-            .iter()
-            .any(|f| f.rule == "lanes.nightly-flags")
-    };
-    for name in &names {
-        let expect = name.starts_with("deny");
-        assert_eq!(denied(&proposed, name), expect, "proposed row: {name}");
-        let excused = name.starts_with("allow-excused");
-        assert_eq!(
-            denied(&tracked, name),
-            expect || (excused && !pasted),
-            "tracked row: {name}"
-        );
-    }
-}
 
 /// The `git.no-verify` row #1001 proposes: `with` names git's `commit` and
 /// not the word, and the global option that points the hooks elsewhere is
@@ -372,322 +88,6 @@ const PROPOSED_NO_VERIFY: [&str; 4] = [
     "--config-env core.hooksPath",
 ];
 
-/// `git.no-verify` reads git commit's own argv (#1001): every `deny*.json`
-/// under its fixtures is denied and every `allow*.json` let through, under
-/// the row as tracked and under the row as proposed. A grep for the word
-/// with line numbers, a `sed -n` over it, a `head -n` over a `commit.txt`,
-/// a heredoc body naming the bypass and `git log -n 3` are allowed (#517);
-/// `-n`, `--no-verify`, `-anm` and a commit after a `cd` are denied. `deny-hooks-path.json` is the proposed row's
-/// alone until a person lands it, the tracked row naming no hooks path.
-#[test]
-fn git_no_verify_reads_git_commit_s_own_argv() {
-    let tracked = Manifest::load(workspace()).unwrap();
-    let mut proposed = tracked.clone();
-    let row = proposed
-        .rules
-        .iter_mut()
-        .find(|r| r.id == "git.no-verify")
-        .unwrap();
-    row.predicate.with = OneOrMany::Many(vec!["git commit".to_owned(), "git merge".to_owned()]);
-    row.predicate.deny_argv = Some(PROPOSED_NO_VERIFY.map(str::to_owned).to_vec());
-    let tracked_reads_hooks_path = tracked
-        .rule("git.no-verify")
-        .and_then(|r| r.predicate.deny_argv.as_ref())
-        .is_some_and(|d| d.iter().any(|e| e == "-c core.hooksPath"));
-    let tracked_reads_merge = tracked
-        .rule("git.no-verify")
-        .is_some_and(|r| r.predicate.with.iter().any(|w| w == "git merge"));
-    let dir = fixtures().join("rules/git.no-verify");
-    let mut names: Vec<String> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    assert!(names.len() >= 10, "{names:?}");
-    let denied = |manifest: &Manifest, name: &str| {
-        judge(manifest, workspace(), &call(&dir.join(name)))
-            .unwrap()
-            .findings
-            .iter()
-            .any(|f| f.rule == "git.no-verify")
-    };
-    for name in &names {
-        let expect = name.starts_with("deny");
-        assert_eq!(denied(&proposed, name), expect, "proposed row: {name}");
-        let tracked_expect = expect
-            && (name != "deny-hooks-path.json" || tracked_reads_hooks_path)
-            && (name != "deny-merge.json" || tracked_reads_merge);
-        assert_eq!(
-            denied(&tracked, name),
-            tracked_expect,
-            "tracked row: {name}"
-        );
-    }
-}
-
-#[test]
-fn a_rule_without_a_fixture_fails() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    for rule in manifest.rules.iter().filter(|r| judged_at_the_call(r)) {
-        let dir = fixtures().join("rules").join(&rule.id);
-        assert!(dir.join("allow.json").is_file(), "{}", dir.display());
-        assert!(
-            dir.join("deny.json").is_file() || dir.join("note.json").is_file(),
-            "{}",
-            dir.display()
-        );
-    }
-}
-
-/// The `exempt` key (#23): a rule `permit` judges does not judge a call
-/// whose file `exempt` covers, under the path grammar `scope` uses. The
-/// fixture is the `witness.exit-authored` edit under the fence grammar's
-/// own parser, `xtask/src/witness/fence.rs`, which the tracked row denies
-/// until a person carries the exempt onto it; the row is built here
-/// through the constructors so the predicate is proven without it, and
-/// once the manifest carries it the first half holds it as tracked.
-#[test]
-fn a_call_the_rules_exempt_covers_is_not_judged_by_that_rule() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let dir = fixtures().join("rules/witness.exit-authored");
-    let exempt = call(&dir.join("exempt.json"));
-    let rule = manifest.rule("witness.exit-authored").unwrap();
-    let judged = judge(&manifest, workspace(), &exempt).unwrap();
-    if rule.exempts(Path::new("xtask/src/witness/fence.rs")) {
-        assert!(
-            judged.findings.iter().all(|f| f.rule != rule.id),
-            "the tracked row exempts the parser: {judged:?}"
-        );
-    } else {
-        assert_eq!(
-            judged.denial().map(|f| f.rule.as_str()),
-            Some(rule.id.as_str()),
-            "the negative control: denied until the row lands: {judged:?}"
-        );
-    }
-
-    let mut manifest = manifest;
-    let rule = manifest
-        .rules
-        .iter_mut()
-        .find(|r| r.id == "witness.exit-authored")
-        .unwrap();
-    if rule.exempt.is_empty() {
-        rule.exempt = vec![
-            "xtask/src/witness/**".to_owned(),
-            "xtask/tests/witness.rs".to_owned(),
-        ];
-    }
-    let judged = judge(&manifest, workspace(), &exempt).unwrap();
-    assert!(
-        judged
-            .findings
-            .iter()
-            .all(|f| f.rule != "witness.exit-authored"),
-        "the parser's own fence line is exempt: {judged:?}"
-    );
-    let judged = judge(&manifest, workspace(), &call(&dir.join("deny.json"))).unwrap();
-    assert_eq!(
-        judged.denial().map(|f| f.rule.as_str()),
-        Some("witness.exit-authored"),
-        "an extension stays denied: {judged:?}"
-    );
-}
-
-/// Every predicate `permit` judges by a file reads `exempt` the same way:
-/// the rule over `**` fires on a write at `crates/x.rs` and not on the
-/// same write at `xtask/tests/x.rs`, which the exempt covers. `deny_argv`
-/// judges a `Bash` call, which has no file, and an exempt names files, so
-/// it is the one judged predicate an exempt cannot reach.
-#[test]
-fn every_judged_predicate_honours_exempt_under_the_scope_grammar() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let written = "pub fn read(p: *const u8) -> u8 {\n    unsafe { *p }\n}\nstatic M: std::sync::Mutex<u8> = todo!();\n";
-    let probe = |shape: fn(&mut Rule)| {
-        let mut rule = Rule::named("exempt.probe", "**");
-        rule.exempt = vec!["xtask/tests/**".to_owned()];
-        rule.predicate.deny = None;
-        shape(&mut rule);
-        rule
-    };
-    let rules = [
-        probe(|r| r.predicate.deny = Some(true)),
-        probe(|r| r.predicate.deny_pattern = Some("Mutex".to_owned())),
-        probe(|r| r.predicate.deny_types = Some(vec!["std::sync::Mutex".to_owned()])),
-        probe(|r| r.predicate.allow = Some(vec!["crates/php_heap/**".to_owned()])),
-        probe(|r| r.predicate.on = Some("pub".to_owned())),
-    ];
-    for rule in rules {
-        let name = rule.predicate.named().join(",");
-        let mut manifest = manifest.clone();
-        manifest.rules = vec![rule];
-        let write = |path: &str| {
-            let text = serde_json::json!({
-                "tool_name": "Write",
-                "tool_input": { "file_path": path, "content": written }
-            })
-            .to_string();
-            judge(&manifest, workspace(), &Call::parse(&text).unwrap()).unwrap()
-        };
-        let fired = write("crates/x.rs");
-        assert!(
-            fired.findings.iter().any(|f| f.rule == "exempt.probe"),
-            "{name}: the rule fires outside the exempt: {fired:?}"
-        );
-        let spared = write("xtask/tests/x.rs");
-        assert!(
-            spared.findings.is_empty(),
-            "{name}: the rule fires inside the exempt: {spared:?}"
-        );
-    }
-}
-
-#[test]
-fn the_harness_files_are_denied_by_their_absolute_path() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    for file in [
-        "seams.toml",
-        "docs/divergence.toml",
-        "oracle.toml",
-        ".claude/x/hooks.json",
-    ] {
-        for tool in ["Edit", "Write"] {
-            let text = serde_json::json!({
-                "tool_name": tool,
-                "tool_input": {
-                    "file_path": workspace().join(file).to_str().unwrap(),
-                    "old_string": "a", "new_string": "b", "content": "b"
-                }
-            })
-            .to_string();
-            let judgement = judge(&manifest, workspace(), &Call::parse(&text).unwrap()).unwrap();
-            let denial = judgement
-                .denial()
-                .unwrap_or_else(|| panic!("{tool} {file} allowed"));
-            assert_eq!(denial.rule, "harness.self");
-            assert!(
-                denial.reason().contains("harness.self"),
-                "{}",
-                denial.reason()
-            );
-        }
-    }
-}
-
-/// `harness.self`'s scope narrows to leave `.claude/skills/**` an ordinary
-/// file (#626), and what it leaves a person's is still denied: every
-/// `deny*.json` under its fixtures is denied by the rule, the `Edit` and
-/// the `Write` of `.claude/settings.json` among them, and every
-/// `allow*.json` is let through, the `Edit` of a skill among them.
-#[test]
-fn harness_self_lets_a_skill_through_and_still_denies_the_settings() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let dir = fixtures().join("rules/harness.self");
-    let mut names: Vec<String> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|n| n.starts_with("deny") || n.starts_with("allow"))
-        .collect();
-    names.sort();
-    for named in [
-        "allow-skill.json",
-        "deny-settings-edit.json",
-        "deny-settings-write.json",
-    ] {
-        assert!(names.iter().any(|n| n == named), "{named}: {names:?}");
-    }
-    for name in &names {
-        let judged = judge(&manifest, workspace(), &call(&dir.join(name))).unwrap();
-        let denied = judged.denial().map(|f| f.rule.as_str()) == Some("harness.self");
-        assert_eq!(denied, name.starts_with("deny"), "{name}: {judged:?}");
-        if !denied {
-            assert!(
-                judged.findings.iter().all(|f| f.rule != "harness.self"),
-                "{name}: {judged:?}"
-            );
-        }
-    }
-}
-
-/// The widening #2283 rules in: the function-hook modules,
-/// `harness-plugins/hooks/*.ts`, join `harness.self`'s scope and each of
-/// `harness.self-shell`'s five alternations, since the module hands
-/// `permit` the evidence of the person's approval. A widened scope is a
-/// changed value `steer` refuses, so a person lands it, or approves it in
-/// the session; until then the two rows are widened here by the same two
-/// substitutions as the diff put to the person, and once the tracked
-/// manifest carries them the substitutions find nothing and the tracked
-/// rows are held.
-const HOOK_MODULES: [(&str, &str); 2] = [
-    (
-        r#""harness-plugins/hooks/hooks.json", "#,
-        r#""harness-plugins/hooks/hooks.json", "harness-plugins/hooks/*.ts", "#,
-    ),
-    (
-        r"harness-plugins/hooks/hooks\.json|",
-        r#"harness-plugins/hooks/hooks\.json|harness-plugins/hooks/[^/\s'"|;&)<>]*\.ts|"#,
-    ),
-];
-
-/// The tracked manifest with [`HOOK_MODULES`] applied, where it is not.
-fn with_the_hook_modules() -> Manifest {
-    let mut text = std::fs::read_to_string(workspace().join("seams.toml")).unwrap();
-    if !text.contains("harness-plugins/hooks/*.ts") {
-        let [(scope_was, scope), (shell_was, shell)] = HOOK_MODULES;
-        assert_eq!(text.matches(scope_was).count(), 1, "harness.self's scope");
-        assert_eq!(text.matches(shell_was).count(), 5, "harness.self-shell");
-        text = text.replace(scope_was, scope).replace(shell_was, shell);
-    }
-    Manifest::parse(&text).unwrap()
-}
-
-/// Under the widened rows an `Edit`, a `Write` and the shell's writes of
-/// a hook module are denied, each by its rule, and reading one, copying
-/// it out and editing a file beside the modules are let through.
-#[test]
-fn the_hook_modules_are_a_persons_files_under_the_widened_rows() {
-    let manifest = with_the_hook_modules();
-    let dir = fixtures().join("rules/harness.self/hook-modules");
-    let mut names: Vec<String> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    for named in ["deny-edit.json", "deny-sed.json", "allow-cat.json"] {
-        assert!(names.iter().any(|n| n == named), "{named}: {names:?}");
-    }
-    for name in &names {
-        let call = call(&dir.join(name));
-        let rule = if call.tool_name == "Bash" {
-            "harness.self-shell"
-        } else {
-            "harness.self"
-        };
-        let judged = judge(&manifest, workspace(), &call).unwrap();
-        if name.starts_with("deny") {
-            assert_eq!(
-                judged.denial().map(|f| f.rule.as_str()),
-                Some(rule),
-                "{name}: {judged:?}"
-            );
-        } else {
-            assert!(judged.denial().is_none(), "{name}: {judged:?}");
-        }
-    }
-    // The rows as tracked, before the widening lands, deny none of them:
-    // what the fixtures prove is the widening and nothing beside it.
-    let tracked = Manifest::load(workspace()).unwrap();
-    if !std::fs::read_to_string(workspace().join("seams.toml"))
-        .unwrap()
-        .contains("harness-plugins/hooks/*.ts")
-    {
-        for name in names.iter().filter(|n| n.starts_with("deny")) {
-            let judged = judge(&tracked, workspace(), &call(&dir.join(name))).unwrap();
-            assert!(judged.denial().is_none(), "{name}: {judged:?}");
-        }
-    }
-}
-
 /// A worktree carries the tracked manifest, so it is a workspace of its
 /// own by the one rule (`Call::workspace`, #57); it also has a `.git`, so
 /// it is the checkout its readings go to. This one is gitignored.
@@ -695,93 +95,6 @@ fn lay_worktree(worktree: &Path) {
     std::fs::create_dir_all(worktree).unwrap();
     std::fs::write(worktree.join(".git"), "gitdir: nowhere\n").unwrap();
     std::fs::copy(workspace().join("seams.toml"), worktree.join("seams.toml")).unwrap();
-}
-
-#[test]
-fn a_file_in_an_agent_worktree_is_judged_against_that_checkout() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let worktree = workspace().join(format!(
-        ".claude/worktrees/agent-permit-{}",
-        std::process::id()
-    ));
-    lay_worktree(&worktree);
-    let text = serde_json::json!({
-        "tool_name": "Write",
-        "cwd": worktree.to_str().unwrap(),
-        "tool_input": {
-            "file_path": worktree.join("crates/php_ext/src/lib.rs").to_str().unwrap(),
-            "content": "pub struct Facade;\n"
-        }
-    })
-    .to_string();
-    let call = Call::parse(&text).unwrap();
-    let root = call.workspace(workspace());
-    assert_eq!(root, worktree.canonicalize().unwrap_or(worktree.clone()));
-    assert_eq!(
-        call.path(&root).unwrap(),
-        Path::new("crates/php_ext/src/lib.rs")
-    );
-    let judgement = judge(&manifest, &root, &call).unwrap();
-    assert!(
-        judgement.denial().is_none(),
-        "a worktree is a checkout, not .claude/** of the main one: {judgement:#?}"
-    );
-
-    // A Bash call carries no file; its cwd places it.
-    let shell = Call::parse(
-        &serde_json::json!({"tool_name": "Bash", "cwd": worktree.to_str().unwrap(),
-            "tool_input": {"command": "cargo test -p xtask"}})
-        .to_string(),
-    )
-    .unwrap();
-    assert_eq!(shell.workspace(workspace()), root);
-    // Outside any worktree, the root stands.
-    let plain = Call::parse(
-        &serde_json::json!({"tool_name": "Bash", "cwd": workspace().to_str().unwrap(),
-            "tool_input": {"command": "ls"}})
-        .to_string(),
-    )
-    .unwrap();
-    assert_eq!(
-        plain.workspace(workspace()),
-        workspace().canonicalize().unwrap()
-    );
-    // A directory under .claude/worktrees without a manifest is not a
-    // workspace; its files are the main one's `.claude/**`.
-    let stray = workspace().join(".claude/worktrees/notes/todo.md");
-    let dir = Call::parse(
-        &serde_json::json!({"tool_name": "Write",
-            "tool_input": {"file_path": stray.to_str().unwrap(), "content": "x"}})
-        .to_string(),
-    )
-    .unwrap();
-    assert_eq!(
-        dir.workspace(workspace()),
-        workspace().canonicalize().unwrap()
-    );
-    std::fs::remove_dir_all(&worktree).unwrap();
-}
-
-/// A track's worktree is named by its branch, and a branch's name is a
-/// path (`t-x/witness`), so the checkout is the first directory under
-/// `.claude/worktrees` on the way down that has a `.git`, not the first
-/// component alone (harness-design.md §5, #41).
-#[test]
-fn a_worktree_named_by_a_branch_with_a_slash_is_a_checkout_of_its_own() {
-    let track = workspace().join(format!(".claude/worktrees/t-permit-{}", std::process::id()));
-    let worktree = track.join("witness");
-    lay_worktree(&worktree);
-    let call = Call::parse(
-        &serde_json::json!({"tool_name": "Edit", "cwd": worktree.to_str().unwrap(),
-            "tool_input": {"file_path": worktree.join("seams.toml").to_str().unwrap(),
-                "old_string": "a", "new_string": "b"}})
-        .to_string(),
-    )
-    .unwrap();
-    let root = call.workspace(workspace());
-    assert_eq!(root, worktree.canonicalize().unwrap());
-    assert_eq!(call.path(&root).unwrap(), Path::new("seams.toml"));
-    std::fs::remove_dir_all(&track).unwrap();
 }
 
 /// A worktree laid down beside the checkout, where `worktree add` lays
@@ -795,28 +108,24 @@ fn a_worktree_named_by_a_branch_with_a_slash_is_a_checkout_of_its_own() {
 fn a_file_in_a_worktree_beside_the_checkout_is_judged_against_that_worktree() {
     let tree = Tree::new("permit-beside").unwrap();
     let root = tree.join("repo");
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     let beside = tree.join("repo-worktrees/t-x/beside");
-    sh(
-        &root,
-        &[
-            "git",
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "t-x/beside",
-            beside.to_str().unwrap(),
-        ],
-    );
+    Repo::at(&root).git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "t-x/beside",
+        beside.to_str().unwrap(),
+    ]);
     let marker = "edited by a person, says the worktree's manifest";
-    let manifest = std::fs::read_to_string(beside.join("seams.toml")).unwrap();
-    let manifest = manifest.replacen("are edited by a person.", &format!("are {marker}."), 1);
-    assert!(
-        manifest.contains(marker),
-        "the harness.self text is rewritten"
-    );
-    std::fs::write(beside.join("seams.toml"), manifest).unwrap();
+    Tracked::of(&beside)
+        .with_rule("harness.self", |rule| {
+            // The marker beside the rule's own words, whatever they are.
+            let text = format!("{} Here: {marker}.", rule["text"].as_str().unwrap());
+            rule.insert("text".to_owned(), text.into());
+        })
+        .write(&beside);
 
     let edit = |file: &Path| {
         Call::parse(
@@ -867,16 +176,12 @@ fn a_file_in_a_worktree_beside_the_checkout_is_judged_against_that_worktree() {
 
     // A clone beside is another repository: its files are no workspace's.
     let clone = tree.join("repo-t-y");
-    sh(
-        &tree,
-        &[
-            "git",
-            "clone",
-            "-q",
-            root.to_str().unwrap(),
-            clone.to_str().unwrap(),
-        ],
-    );
+    Repo::at(&tree).git(&[
+        "clone",
+        "-q",
+        root.to_str().unwrap(),
+        clone.to_str().unwrap(),
+    ]);
     let call = edit(&clone.join("oracle.toml"));
     assert_eq!(call.workspace(&root), root);
     assert_eq!(call.path(&root), None);
@@ -886,18 +191,14 @@ fn a_file_in_a_worktree_beside_the_checkout_is_judged_against_that_worktree() {
 /// place `worktree add` lays one (revision 56).
 fn worktree_beside(tree: &Path, root: &Path, branch: &str) -> PathBuf {
     let beside = tree.join("repo-worktrees").join(branch);
-    sh(
-        root,
-        &[
-            "git",
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            branch,
-            beside.to_str().unwrap(),
-        ],
-    );
+    Repo::at(root).git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        branch,
+        beside.to_str().unwrap(),
+    ]);
     beside.canonicalize().unwrap()
 }
 
@@ -927,21 +228,25 @@ fn a_call_in_a_worktree_whose_manifest_differs_is_judged_by_that_worktrees_build
     xtask::scratch::repository(workspace(), &root, &["."]).unwrap();
     let beside = worktree_beside(&tree, &root, "t-x/handed");
     let marker = "not available to agents, says the worktree's manifest";
-    let manifest = std::fs::read_to_string(beside.join("seams.toml")).unwrap();
-    let manifest = manifest.replacen("not available to agents.", &format!("{marker}."), 1);
-    assert!(
-        manifest.contains(marker),
-        "the git.no-verify text is rewritten"
-    );
-    std::fs::write(
-        beside.join("seams.toml"),
-        format!(
-            "{manifest}\n[[rule]]\nid = \"worktree.only\"\ntool = [\"Edit\", \"Write\"]\n\
-             scope = \"only-here/**\"\ndeny = true\n\
-             text = \"A file under only-here/ is refused by the worktree's manifest alone.\"\n"
-        ),
-    )
-    .unwrap();
+    Tracked::of(&beside)
+        .with_rule("git.no-verify", |rule| {
+            // The marker beside the rule's own words, whatever they are.
+            let text = format!("{} Here: {marker}.", rule["text"].as_str().unwrap());
+            rule.insert("text".to_owned(), text.into());
+        })
+        .with_rule("worktree.only", |rule| {
+            rule.extend(
+                r#"
+tool = ["Edit", "Write"]
+scope = "only-here/**"
+deny = true
+text = "A file under only-here/ is refused by the worktree's manifest alone."
+"#
+                .parse::<toml::Table>()
+                .unwrap(),
+            );
+        })
+        .write(&beside);
     // The checkout's dependency build, seeded the way `worktree add` seeds
     // it; where the volume cannot clone, the build there starts cold.
     std::fs::create_dir_all(beside.join("target")).unwrap();
@@ -959,8 +264,10 @@ fn a_call_in_a_worktree_whose_manifest_differs_is_judged_by_that_worktrees_build
             &serde_json::json!({"file_path": file.to_str().unwrap(), "content": "one\n"}),
         )
     };
-    let (code, out, err) = permit(&root, &write(&beside.join("only-here/one.txt")), &[]);
-    assert_eq!(code, 0, "the worktree's build judged the call: {err}");
+    let ran = permit(&root, &write(&beside.join("only-here/one.txt")), &[]);
+    assert_eq!(ran.code(), 0, "the worktree's build judged the call: {ran}");
+    let out = ran.stdout;
+    let err = ran.stderr;
     assert!(out.contains("worktree.only"), "{out}{err}");
     assert!(out.contains("\"deny\""), "{out}");
     let reading = Store::of_workspace(&beside)
@@ -982,8 +289,7 @@ fn a_call_in_a_worktree_whose_manifest_differs_is_judged_by_that_worktrees_build
 
     // The same write in the checkout is the checkout's to judge, by rules
     // that carry no such row.
-    let (code, out, err) = permit(&root, &write(&root.join("only-here/one.txt")), &[]);
-    assert_eq!(code, 0, "{err}");
+    let out = permit(&root, &write(&root.join("only-here/one.txt")), &[]).ok();
     assert!(!out.contains("worktree.only"), "{out}");
     assert!(!out.contains("\"deny\""), "{out}");
 
@@ -996,11 +302,10 @@ fn a_call_in_a_worktree_whose_manifest_differs_is_judged_by_that_worktrees_build
             &serde_json::json!({"command": "git commit --no-verify -m x"}),
         )
     };
-    let (code, out, err) = permit(&root, &commit(&beside), &[]);
-    assert_eq!(code, 0, "{err}");
-    assert!(out.contains(marker), "the worktree's rule: {out}{err}");
-    let (code, out, err) = permit(&root, &commit(&root), &["--above-the-command-hook"]);
-    assert_eq!(code, 0, "{err}");
+    let ran = permit(&root, &commit(&beside), &[]);
+    assert!(ran.stdout.contains(marker), "the worktree's rule: {ran}");
+    ran.ok();
+    let out = permit(&root, &commit(&root), &["--above-the-command-hook"]).ok();
     assert!(out.contains("git.no-verify"), "{out}");
     assert!(!out.contains(marker), "the checkout's rule: {out}");
 }
@@ -1016,22 +321,22 @@ fn a_call_in_a_worktree_whose_manifest_differs_is_judged_by_that_worktrees_build
 fn a_hand_off_that_does_not_run_leaves_the_call_unjudged() {
     let tree = Tree::new("permit-hand-off-fails").unwrap();
     let root = tree.join("repo");
-    scratch_workspace(workspace(), &root).unwrap();
+    scratch_workspace(workspace(), &root);
     let beside = worktree_beside(&tree, &root, "t-x/unbuilt");
-    let manifest = std::fs::read_to_string(beside.join("seams.toml")).unwrap();
-    std::fs::write(
-        beside.join("seams.toml"),
-        format!("{manifest}\n# a row a person has since settled\n"),
-    )
-    .unwrap();
+    // A row a person has since settled.
+    Tracked::of(&beside)
+        .with_crate("php_heap", |row| row.budget += 1)
+        .write(&beside);
     let stdin = hook_stdin(
         "Write",
         &root,
         &serde_json::json!({"file_path": beside.join("README.md").to_str().unwrap(),
             "content": "one\n"}),
     );
-    let (code, out, err) = permit(&root, &stdin, &[]);
-    assert_ne!(code, 0, "the call was not judged: {out}");
+    let ran = permit(&root, &stdin, &[]);
+    assert_ne!(ran.code(), 0, "the call was not judged: {ran}");
+    let out = ran.stdout;
+    let err = ran.stderr;
     assert!(out.trim().is_empty(), "and nothing was decided: {out}");
     assert!(
         err.contains(&beside.join("seams.toml").display().to_string()),
@@ -1099,100 +404,6 @@ fn the_ruled_no_locks_row_denies_a_once_type_and_a_thread_local_and_not_their_ne
     );
 }
 
-/// A fixture that carries a `seams.toml` is a workspace of its own, and a
-/// call into it is judged by that manifest and not the workspace's
-/// (#57): under the `unsafe.homes` fixture's rule, `ext/pcre/src/ffi/` is
-/// a home and `php_unit` is not, which is the fixture's own text and the
-/// workspace's rule says neither. The main checkout's own files resolve
-/// to the main checkout.
-#[test]
-fn a_fixture_with_a_manifest_of_its_own_is_judged_by_that_manifest() {
-    let dir = fixtures().join("rules/unsafe.homes");
-    let inside = edit_of(&dir.join("ext/pcre/src/ffi/mod.rs"));
-    let root = inside.workspace(workspace());
-    assert_eq!(
-        root,
-        dir.canonicalize().unwrap(),
-        "the fixture is the workspace"
-    );
-    assert_eq!(
-        inside.path(&root).unwrap(),
-        Path::new("ext/pcre/src/ffi/mod.rs"),
-        "and the path is relative to it"
-    );
-    let manifest = Manifest::load(&root).unwrap();
-    let judged = judge(&manifest, &root, &inside).unwrap();
-    assert!(
-        judged.denial().is_none(),
-        "a home of the fixture's manifest: {judged:#?}"
-    );
-    let outside = edit_of(&dir.join("crates/php_unit/src/lib.rs"));
-    assert_eq!(outside.workspace(workspace()), root);
-    let denial = judge(&manifest, &root, &outside).unwrap();
-    let denial = denial.denial().expect("outside the fixture's homes");
-    assert_eq!(denial.rule, "unsafe.homes");
-    assert!(
-        denial.text.contains("(fixture)"),
-        "the fixture's text, not the workspace's: {}",
-        denial.text
-    );
-    // Under the workspace's manifest no fixture source is in a home, which
-    // is the freeze #57 lifts.
-    let workspaces = Manifest::load(workspace()).unwrap();
-    assert!(
-        judge(&workspaces, workspace(), &inside)
-            .unwrap()
-            .denial()
-            .is_some(),
-        "the workspace's rule would deny the home"
-    );
-
-    // A call without a file is placed by its cwd in a checkout alone: a
-    // shell standing in the fixture is judged by the checkout's manifest,
-    // which carries the shell rules the fixture's does not.
-    let shell = Call::parse(
-        &serde_json::json!({"tool_name": "Bash", "cwd": dir.to_str().unwrap(),
-            "tool_input": {"command": "git commit --no-verify -m x"}})
-        .to_string(),
-    )
-    .unwrap();
-    assert_eq!(
-        shell.workspace(workspace()),
-        workspace().canonicalize().unwrap()
-    );
-    assert_eq!(
-        judge(&workspaces, workspace(), &shell)
-            .unwrap()
-            .denial()
-            .map(|f| f.rule.clone())
-            .as_deref(),
-        Some("git.no-verify")
-    );
-}
-
-/// The main checkout: a file of the workspace itself resolves to the
-/// workspace, and the path is relative to it.
-#[test]
-fn a_file_of_the_main_checkout_is_judged_by_its_manifest() {
-    let own = edit_of(&workspace().join("crates/php_heap/src/lib.rs"));
-    assert_eq!(
-        own.workspace(workspace()),
-        workspace().canonicalize().unwrap()
-    );
-    assert_eq!(
-        own.path(workspace()).unwrap(),
-        Path::new("crates/php_heap/src/lib.rs")
-    );
-    let manifest = Manifest::load(workspace()).unwrap();
-    assert!(
-        judge(&manifest, workspace(), &own)
-            .unwrap()
-            .denial()
-            .is_none(),
-        "php_heap is a home of the workspace's manifest"
-    );
-}
-
 /// A fixture without a manifest of its own is judged by the workspace's,
 /// as before #57: its directory is under the workspace and nothing
 /// between them carries a `seams.toml`.
@@ -1222,12 +433,9 @@ fn a_fixture_without_a_manifest_is_judged_by_the_workspaces() {
 fn diff_judges_a_fixture_source_by_the_fixture_manifest() {
     let root = scratch("diff-fixture");
     let fixture = "xtask/fixtures/rules/unsafe.homes";
-    let manifest = std::fs::read_to_string(fixtures().join("rules/unsafe.homes/seams.toml"))
-        .unwrap()
-        .replace(
-            "pin = \"../../../../oracle.toml\"",
-            &format!("pin = \"{}\"", workspace().join("oracle.toml").display()),
-        );
+    let manifest = Tracked::of(&fixtures().join("rules/unsafe.homes"))
+        .with_the_workspace_pin()
+        .text();
     write(&root, &format!("{fixture}/seams.toml"), &manifest);
     write(
         &root,
@@ -1236,64 +444,23 @@ fn diff_judges_a_fixture_source_by_the_fixture_manifest() {
     );
     let site = "pub fn read(p: *const u8) -> u8 {\n    unsafe { *p }\n}\n";
     write(&root, &format!("{fixture}/ext/pcre/src/ffi/mod.rs"), site);
-    sh(&root, &["git", "add", "-A"]);
-    let (code, out, err) = permit(&root, "", &["--diff"]);
-    assert_eq!(code, 0, "a home of the fixture's manifest: {out}{err}");
+    Repo::at(&root).git(&["add", "-A"]);
+    let ran = permit(&root, "", &["--diff"]);
+    assert_eq!(ran.code(), 0, "a home of the fixture's manifest: {ran}");
 
     write(
         &root,
         &format!("{fixture}/crates/php_unit/src/lib.rs"),
         site,
     );
-    sh(&root, &["git", "add", "-A"]);
-    let (code, out, _) = permit(&root, "", &["--diff"]);
-    assert_eq!(code, 1, "outside the fixture's homes: {out}");
+    Repo::at(&root).git(&["add", "-A"]);
+    let ran = permit(&root, "", &["--diff"]);
+    assert_eq!(ran.code(), 1, "outside the fixture's homes: {ran}");
+    let out = ran.stdout;
     assert!(
         out.contains(&format!("deny {fixture}/crates/php_unit/src/lib.rs"))
             && out.contains("(fixture)"),
         "the path is the checkout's and the text the fixture's: {out}"
-    );
-}
-
-#[test]
-fn an_edit_inside_a_computed_region_body_is_denied_and_one_beside_it_allowed() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let dir = fixtures().join("regions");
-    let inside = judge(&manifest, workspace(), &call(&dir.join("edit-body.json"))).unwrap();
-    let denial = inside.denial().expect("an edit into the body is denied");
-    assert_eq!(denial.rule, "computed.region-body");
-    assert!(
-        denial.reason().contains("computed run"),
-        "{}",
-        denial.reason()
-    );
-
-    let beside = judge(&manifest, workspace(), &call(&dir.join("edit-prose.json"))).unwrap();
-    assert!(beside.denial().is_none(), "{beside:?}");
-
-    let fenced = judge(&manifest, workspace(), &call(&dir.join("edit-fenced.json"))).unwrap();
-    assert!(
-        fenced.denial().is_none(),
-        "markers inside a fence are prose: {fenced:?}"
-    );
-
-    let rewrite = judge(&manifest, workspace(), &call(&dir.join("write-body.json"))).unwrap();
-    assert_eq!(
-        rewrite.denial().map(|f| f.rule.as_str()),
-        Some("computed.region-body"),
-        "a Write that changes a body is the same edit"
-    );
-    let same = judge(&manifest, workspace(), &call(&dir.join("write-same.json"))).unwrap();
-    assert!(same.denial().is_none(), "{same:?}");
-    let opener = judge(
-        &manifest,
-        workspace(),
-        &call(&dir.join("write-opener.json")),
-    )
-    .unwrap();
-    assert!(
-        opener.denial().is_none(),
-        "a changed opener is a template change: {opener:?}"
     );
 }
 
@@ -1302,47 +469,24 @@ fn an_edit_inside_a_computed_region_body_is_denied_and_one_beside_it_allowed() {
 /// but the instrument that read its acceptance criteria; a chart sheet
 /// carries none, so the row names `frontier:chart` and the close of a
 /// filled sheet is not the act the rule is for. The label is the
-/// tracker's fact, so permit asks the tracker, here a recorded `gh` first
+/// tracker's fact, so permit asks the tracker, here a [`Tracker`] first
 /// on `PATH` and never the network: the sheet's close is let through, the
 /// same call on a ticket carrying no such label is denied as before, and
-/// a tracker that will not answer leaves the denial standing.
+/// a number the tracker answers is no issue leaves the denial standing.
 #[test]
 fn a_close_is_denied_unless_the_tracker_says_the_issue_carries_the_exempt_label() {
-    use std::os::unix::fs::PermissionsExt;
     let root = scratch("exempt-label");
-    let bin = root.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let issue = |number: u64, labels: &str| {
-        serde_json::json!({
-            "number": number,
-            "title": format!("issue {number}"),
-            "body": "",
-            "state": "OPEN",
-            "url": format!("https://example.invalid/issues/{number}"),
-            "labels": labels
-                .split_whitespace()
-                .map(|name| serde_json::json!({ "name": name }))
-                .collect::<Vec<_>>(),
-            "blocking": { "nodes": [] },
+    let tracker = Tracker::empty("exempt-label");
+    tracker
+        .with_issue(&xtask::ticket::Issue {
+            labels: labels(&["frontier:chart", "track:t-opus-5"]),
+            ..issue(460)
         })
-        .to_string()
-    };
-    std::fs::write(
-        bin.join("460.json"),
-        issue(460, "frontier:chart track:t-opus-5"),
-    )
-    .unwrap();
-    std::fs::write(bin.join("28.json"), issue(28, "ready-for-agent")).unwrap();
-    let gh = bin.join("gh");
-    std::fs::write(
-        &gh,
-        format!(
-            "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = view ] && [ -f '{0}/'\"$3\"'.json' ]; then cat '{0}/'\"$3\"'.json'; exit 0; fi\nexit 1\n",
-            bin.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        .with_issue(&xtask::ticket::Issue {
+            labels: labels(&["ready-for-agent"]),
+            ..issue(28)
+        })
+        .none(9001);
 
     let judged = |command: &str| -> Option<String> {
         let stdin = serde_json::json!({
@@ -1352,23 +496,16 @@ fn a_close_is_denied_unless_the_tracker_says_the_issue_carries_the_exempt_label(
         .to_string();
         let path = format!(
             "{}:{}",
-            bin.display(),
+            tracker.bin().display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let mut child = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-            .arg("--root")
-            .arg(&*root)
-            .arg("permit")
+        let ran = Run::at(&root)
+            .args(["permit"])
             .env("PATH", path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        std::io::Write::write_all(&mut child.stdin.take().unwrap(), stdin.as_bytes()).unwrap();
-        let out = child.wait_with_output().unwrap();
-        assert_eq!(out.status.code(), Some(0), "permit decides with its JSON");
-        let stdout = String::from_utf8(out.stdout).unwrap();
+            .stdin(stdin)
+            .go();
+        assert_eq!(ran.code(), 0, "permit decides with its JSON: {ran}");
+        let stdout = ran.stdout;
         let text = stdout.trim();
         if text.is_empty() {
             return None;
@@ -1393,24 +530,9 @@ fn a_close_is_denied_unless_the_tracker_says_the_issue_carries_the_exempt_label(
     assert!(unknown.contains("ticket.close"), "{unknown}");
 }
 
-fn permit(root: &Path, stdin: &str, args: &[&str]) -> (i32, String, String) {
-    let mut child = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(root)
-        .arg("permit")
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    std::io::Write::write_all(&mut child.stdin.take().unwrap(), stdin.as_bytes()).unwrap();
-    let out = child.wait_with_output().unwrap();
-    (
-        out.status.code().unwrap(),
-        String::from_utf8(out.stdout).unwrap(),
-        String::from_utf8(out.stderr).unwrap(),
-    )
+/// `permit <args>` over `root` with `stdin` on its stdin, as a hook runs it.
+fn permit(root: &Path, stdin: &str, args: &[&str]) -> Ran {
+    Run::at(root).args(["permit"]).args(args).stdin(stdin).go()
 }
 
 /// A scratch workspace that is a git repository with the tracked manifest
@@ -1418,7 +540,7 @@ fn permit(root: &Path, stdin: &str, args: &[&str]) -> (i32, String, String) {
 /// workspace's store.
 fn scratch(name: &str) -> Tree {
     let dir = Tree::new(&format!("permit-{name}")).unwrap();
-    scratch_workspace(workspace(), &dir).unwrap();
+    scratch_workspace(workspace(), &dir);
     dir
 }
 
@@ -1429,16 +551,14 @@ fn the_recorded_stdin_shapes_produce_the_recorded_stdout_shapes() {
     let root = scratch("shapes");
     let dir = fixtures().join("hooks");
     let stdin = std::fs::read_to_string(dir.join("pretooluse-allow.json")).unwrap();
-    let (code, out, err) = permit(&root, &stdin, &[]);
-    assert_eq!(code, 0, "{err}");
+    let out = permit(&root, &stdin, &[]).ok();
     assert!(
         out.trim().is_empty(),
         "an allow with nothing to say prints nothing: {out}"
     );
 
     let stdin = std::fs::read_to_string(dir.join("pretooluse-deny.json")).unwrap();
-    let (code, out, err) = permit(&root, &stdin, &[]);
-    assert_eq!(code, 0, "{err}");
+    let out = permit(&root, &stdin, &[]).ok();
     let got: serde_json::Value = serde_json::from_str(&out).unwrap();
     let want: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.join("pretooluse-deny.stdout.json")).unwrap(),
@@ -1468,8 +588,7 @@ fn the_recorded_stdin_shapes_produce_the_recorded_stdout_shapes() {
 fn a_denial_is_a_reading_with_instrument_permit_and_the_rule_id() {
     let root = scratch("reading");
     let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
-    let (code, _, err) = permit(&root, &stdin, &[]);
-    assert_eq!(code, 0, "{err}");
+    permit(&root, &stdin, &[]).ok();
     let reading = Store::of_workspace(&root)
         .read("permit", "harness.self")
         .unwrap()
@@ -1490,8 +609,7 @@ fn a_denial_is_a_reading_with_instrument_permit_and_the_rule_id() {
 fn a_note_rides_on_an_allow_as_additional_context_and_is_a_reading() {
     let root = scratch("note");
     let stdin = std::fs::read_to_string(fixtures().join("rules/api.lock-line/note.json")).unwrap();
-    let (code, out, err) = permit(&root, &stdin, &[]);
-    assert_eq!(code, 0, "{err}");
+    let out = permit(&root, &stdin, &[]).ok();
     let got: serde_json::Value = serde_json::from_str(&out).unwrap();
     let head = &got["hookSpecificOutput"];
     assert_eq!(head["hookEventName"], "PreToolUse");
@@ -1517,8 +635,7 @@ fn above_the_command_hook_a_denial_is_recorded_and_a_note_is_left_to_it() {
     let root = scratch("above");
     let dir = fixtures();
     let stdin = std::fs::read_to_string(dir.join("rules/api.lock-line/note.json")).unwrap();
-    let (code, out, err) = permit(&root, &stdin, &["--above-the-command-hook"]);
-    assert_eq!(code, 0, "{err}");
+    let out = permit(&root, &stdin, &["--above-the-command-hook"]).ok();
     let got: serde_json::Value = serde_json::from_str(&out).unwrap();
     let context = got["hookSpecificOutput"]["additionalContext"]
         .as_str()
@@ -1531,8 +648,7 @@ fn above_the_command_hook_a_denial_is_recorded_and_a_note_is_left_to_it() {
     );
 
     let stdin = std::fs::read_to_string(dir.join("hooks/pretooluse-deny.json")).unwrap();
-    let (code, out, err) = permit(&root, &stdin, &["--above-the-command-hook"]);
-    assert_eq!(code, 0, "{err}");
+    let out = permit(&root, &stdin, &["--above-the-command-hook"]).ok();
     assert!(out.contains("\"deny\""), "{out}");
     let reading = store
         .read("permit", "harness.self")
@@ -1554,11 +670,7 @@ fn above_the_command_hook_a_denial_is_recorded_and_a_note_is_left_to_it() {
 fn an_abort_the_function_hook_admits_is_its_starter_s_under_the_command_hook_too() {
     let root = scratch("operation-adapters");
     let worktree = root.join("own");
-    let git = |dir: &Path, args: &[&str]| {
-        let out = Command::new("git").args(args).current_dir(dir).output();
-        assert!(out.unwrap().status.success(), "git {}", args.join(" "));
-    };
-    git(&root, &["worktree", "add", "-q", "-b", "own", "own"]);
+    Repo::at(&root).git(&["worktree", "add", "-q", "-b", "own", "own"]);
     let line = |command: &str| {
         serde_json::json!({
             "session_id": "s1",
@@ -1570,8 +682,7 @@ fn an_abort_the_function_hook_admits_is_its_starter_s_under_the_command_hook_too
         .to_string()
     };
     let admitted = |stdin: &str, args: &[&str], what: &str| {
-        let (code, out, err) = permit(&root, stdin, args);
-        assert_eq!(code, 0, "{err}");
+        let out = permit(&root, stdin, args).ok();
         assert!(!out.contains("\"deny\""), "{what} {args:?}: {out}");
     };
     let above: &[&str] = &["--above-the-command-hook"];
@@ -1608,8 +719,7 @@ fn a_large_write_on_stdin_is_judged_whole() {
         "tool_name": "Write",
         "tool_input": {"file_path": "ext/pcre/src/cache.rs", "content": content},
     });
-    let (code, out, err) = permit(&root, &call.to_string(), &[]);
-    assert_eq!(code, 0, "{err}");
+    let out = permit(&root, &call.to_string(), &[]).ok();
     let reason = serde_json::from_str::<serde_json::Value>(&out).unwrap()["hookSpecificOutput"]
         ["permissionDecisionReason"]
         .as_str()
@@ -1624,8 +734,7 @@ fn a_large_write_on_stdin_is_judged_whole() {
 #[test]
 fn a_call_that_cannot_be_read_is_denied_not_dropped() {
     let root = scratch("garbage");
-    let (code, out, _) = permit(&root, "not json", &[]);
-    assert_eq!(code, 0);
+    let out = permit(&root, "not json", &[]).ok();
     let got: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(got["hookSpecificOutput"]["permissionDecision"], "deny");
 }
@@ -1633,8 +742,7 @@ fn a_call_that_cannot_be_read_is_denied_not_dropped() {
 #[test]
 fn bench_measures_p99_against_the_bar_and_writes_a_reading() {
     let root = scratch("bench");
-    let (code, out, err) = permit(&root, "", &["--bench", "--runs", "6"]);
-    assert_eq!(code, 0, "{err}");
+    let out = permit(&root, "", &["--bench", "--runs", "6"]).ok();
     assert!(out.contains("p99"), "{out}");
     assert!(out.contains("100 ms"), "the bar is named: {out}");
     // The judge's cost is a reading over the harness crate, whose sources
@@ -1665,8 +773,13 @@ fn bench_measures_p99_against_the_bar_and_writes_a_reading() {
 #[test]
 fn bench_with_the_bar_missed_exits_zero_and_records_fail() {
     let root = scratch("bench-missed");
-    let (code, out, err) = permit(&root, "", &["--bench", "--runs", "3", "--bar", "0"]);
-    assert_eq!(code, 0, "a measurement's exit is not its status: {err}");
+    let ran = permit(&root, "", &["--bench", "--runs", "3", "--bar", "0"]);
+    assert_eq!(
+        ran.code(),
+        0,
+        "a measurement's exit is not its status: {ran}"
+    );
+    let out = ran.stdout;
     assert!(out.contains("bar p99 ≤ 0 ms: fail"), "{out}");
     let reading = Store::of_workspace(&root)
         .read("permit", "xtask")
@@ -1679,23 +792,6 @@ fn bench_with_the_bar_missed_exits_zero_and_records_fail() {
         reading.numbers["p99_ms"].as_f64() > 0.0,
         "{:?}",
         reading.numbers
-    );
-}
-
-fn sh(root: &Path, args: &[&str]) {
-    let out = Command::new(args[0])
-        .args(&args[1..])
-        .current_dir(root)
-        .env("GIT_AUTHOR_NAME", "x")
-        .env("GIT_AUTHOR_EMAIL", "x@x")
-        .env("GIT_COMMITTER_NAME", "x")
-        .env("GIT_COMMITTER_EMAIL", "x@x")
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -1712,14 +808,19 @@ fn write(root: &Path, path: &str, text: &str) {
 #[test]
 fn diff_judges_the_staged_files_and_refuses_a_denied_one_with_the_rule_id() {
     let root = scratch("diff");
-    let (code, out, err) = permit(&root, "", &["--diff"]);
-    assert_eq!(code, 0, "nothing staged is nothing denied: {out}{err}");
+    let ran = permit(&root, "", &["--diff"]);
+    assert_eq!(ran.code(), 0, "nothing staged is nothing denied: {ran}");
 
     let locked = "use std::sync::Mutex;\n\npub struct Cache(Mutex<Vec<u8>>);\n";
     write(&root, "ext/pcre/src/cache.rs", locked);
-    sh(&root, &["git", "add", "ext/pcre/src/cache.rs"]);
-    let (code, out, _) = permit(&root, "", &["--diff"]);
-    assert_eq!(code, 1, "a denied staged file refuses the commit: {out}");
+    Repo::at(&root).git(&["add", "ext/pcre/src/cache.rs"]);
+    let ran = permit(&root, "", &["--diff"]);
+    assert_eq!(
+        ran.code(),
+        1,
+        "a denied staged file refuses the commit: {ran}"
+    );
+    let out = ran.stdout;
     assert!(
         out.contains("ext.no-locks"),
         "the rule id is printed: {out}"
@@ -1742,23 +843,23 @@ fn diff_judges_the_staged_files_and_refuses_a_denied_one_with_the_rule_id() {
         "ext/pcre/src/cache.rs",
         "pub struct Cache(Vec<u8>);\n",
     );
-    let (code, out, _) = permit(&root, "", &["--diff"]);
-    assert_eq!(code, 1, "the staged content still holds the lock: {out}");
-    sh(&root, &["git", "add", "ext/pcre/src/cache.rs"]);
-    let (code, out, err) = permit(&root, "", &["--diff"]);
-    assert_eq!(code, 0, "{out}{err}");
+    let ran = permit(&root, "", &["--diff"]);
+    assert_eq!(
+        ran.code(),
+        1,
+        "the staged content still holds the lock: {ran}"
+    );
+    Repo::at(&root).git(&["add", "ext/pcre/src/cache.rs"]);
+    permit(&root, "", &["--diff"]).ok();
 
     // The harness's own file: a note, since the hook cannot tell a person
     // from an agent, and the commit goes through.
-    let manifest = std::fs::read_to_string(root.join("seams.toml")).unwrap();
-    write(
-        &root,
-        "seams.toml",
-        &format!("{manifest}\n# a person's note\n"),
-    );
-    sh(&root, &["git", "add", "seams.toml"]);
-    let (code, out, err) = permit(&root, "", &["--diff"]);
-    assert_eq!(code, 0, "{out}{err}");
+    // A person's note.
+    Tracked::of(&root)
+        .with_crate("php_heap", |row| row.budget += 1)
+        .write(&root);
+    Repo::at(&root).git(&["add", "seams.toml"]);
+    let out = permit(&root, "", &["--diff"]).ok();
     assert!(out.contains("note seams.toml"), "{out}");
     assert!(out.contains("harness.self"), "{out}");
 }
@@ -1770,23 +871,21 @@ fn diff_judges_the_staged_files_and_refuses_a_denied_one_with_the_rule_id() {
 fn a_denial_carries_the_session_of_the_call() {
     let root = scratch("session");
     let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
-    let (code, _, err) = permit(&root, &stdin, &[]);
-    assert_eq!(code, 0, "{err}");
+    permit(&root, &stdin, &[]).ok();
     let reading = Store::of_workspace(&root)
         .read("permit", "harness.self")
         .unwrap()
         .expect("the denial was recorded");
     assert_eq!(reading.session, "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11");
 
-    let (code, _, err) = permit(
+    permit(
         &root,
         "",
         &[
             "--json",
             r#"{"tool_name":"Edit","tool_input":{"file_path":"seams.toml","old_string":"a","new_string":"b"}}"#,
         ],
-    );
-    assert_eq!(code, 0, "{err}");
+    ).ok();
     let log = Store::of_workspace(&root).history("permit").unwrap();
     assert_eq!(
         log.readings.last().unwrap().session,
@@ -2070,73 +1169,6 @@ fn with_no_candidate_judging_a_write_is_denied_and_a_bash_call_is_handed_on() {
     }
 }
 
-/// The two halves of the nightly lane the phpt runner asked for (#15):
-/// the flag is denied wherever it stands in the call, not only beside the
-/// subcommand, by `lanes.nightly-flags` (#1860), save the tier's `--jit`
-/// lane on one subset `--subset` names (#3052), and upstream's runner is
-/// denied where it is run and not where it is cited, by `lanes.nightly`.
-/// The rule denied `--subset x --full` on neither count before, and denied
-/// reading the file on the second.
-#[test]
-fn the_nightly_lane_is_denied_by_the_flag_and_not_by_a_citation() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let bash = |command: &str| {
-        Call::parse(
-            &serde_json::json!({
-                "tool_name": "Bash",
-                "tool_input": { "command": command, "description": "one call" }
-            })
-            .to_string(),
-        )
-        .unwrap()
-    };
-    let denied = |command: &str| {
-        judge(&manifest, workspace(), &bash(command))
-            .unwrap()
-            .denial()
-            .map(|f| f.rule.clone())
-    };
-
-    for (command, rule) in [
-        (
-            "cargo run -q -p xtask -- phpt --full",
-            "lanes.nightly-flags",
-        ),
-        (
-            "cargo run -p xtask -- phpt --subset Zend/tests --full",
-            "lanes.nightly-flags",
-        ),
-        ("xtask phpt --jit force", "lanes.nightly-flags"),
-        (
-            "cargo run -q -p xtask -- phpt --jit exit-fuzz --full",
-            "lanes.nightly-flags",
-        ),
-        ("php run-tests.php -p target/release/php", "lanes.nightly"),
-        ("cd php-src && ./run-tests.php ext/pcre", "lanes.nightly"),
-    ] {
-        assert_eq!(
-            denied(command).as_deref(),
-            Some(rule),
-            "the lane must be denied: {command}"
-        );
-    }
-
-    for command in [
-        "cargo run -q -p xtask -- phpt --subset pcre",
-        "xtask phpt --subset Zend/tests --jit force",
-        "cargo run -q -p xtask -- phpt --jit exit-fuzz --subset tests",
-        "cargo test -p xtask --test phpt",
-        "grep -n 'EXPECTF' /Users/x/php-src-8.5.9/run-tests.php",
-        "echo 'upstream (run-tests.php:1885-1889) merges the streams'",
-    ] {
-        assert_eq!(
-            denied(command),
-            None,
-            "the subset and a citation are not the lane: {command}"
-        );
-    }
-}
-
 // ------------------------------ the build against the manifest it judges by
 
 /// The manifest an earlier build was compiled against (#16): it parses
@@ -2165,32 +1197,6 @@ fn bash_call(command: &str) -> Call {
     .unwrap()
 }
 
-/// The fixture is the quiet kind of stale and not the loud kind: it parses,
-/// and the lane it lets through is the one the manifest on disk denies
-/// (#15, #16). Nothing in the exit says so.
-#[test]
-fn the_stale_fixture_parses_and_lets_through_what_the_manifest_on_disk_denies() {
-    let stale = Manifest::parse(&stale_manifest()).unwrap();
-    let now = Manifest::load(workspace()).unwrap();
-    let call = bash_call("cargo run -p xtask -- phpt --subset Zend/tests --full");
-    assert_eq!(
-        judge(&now, workspace(), &call)
-            .unwrap()
-            .denial()
-            .map(|f| f.rule.clone())
-            .as_deref(),
-        Some("lanes.nightly-flags"),
-        "the manifest on disk denies the lane"
-    );
-    assert!(
-        judge(&stale, workspace(), &call)
-            .unwrap()
-            .denial()
-            .is_none(),
-        "and the stale one lets it through, exiting 0 as it does"
-    );
-}
-
 /// permit's exit is 0 whatever it decides, so the refusal is the one thing
 /// it says with an exit: a build that would judge by rules it was not
 /// compiled against decides nothing, names both digests, and leaves the
@@ -2201,8 +1207,14 @@ fn the_stale_fixture_parses_and_lets_through_what_the_manifest_on_disk_denies() 
 fn a_build_the_manifest_moved_under_refuses_to_judge_rather_than_judging_stale() {
     let root = scratch_with_a_stale_manifest("stale");
     let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
-    let (code, out, err) = permit(&root, &stdin, &[]);
-    assert_ne!(code, 0, "the build that cannot judge exits non-zero: {out}");
+    let ran = permit(&root, &stdin, &[]);
+    assert_ne!(
+        ran.code(),
+        0,
+        "the build that cannot judge exits non-zero: {ran}"
+    );
+    let out = ran.stdout;
+    let err = ran.stderr;
     assert!(out.trim().is_empty(), "and decides nothing: {out}");
     assert!(err.contains("seams.toml"), "{err}");
     // The digest compiled in, sha1 as `build.rs` prints it: a 40-digit
@@ -2227,8 +1239,8 @@ fn a_build_the_manifest_moved_under_refuses_to_judge_rather_than_judging_stale()
 fn the_refusal_that_hands_the_call_on_is_a_skip_that_names_the_next_candidate() {
     let root = scratch_with_a_stale_manifest("stale-reading");
     let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
-    let (code, _, err) = permit(&root, &stdin, &[]);
-    assert_ne!(code, 0, "{err}");
+    let ran = permit(&root, &stdin, &[]);
+    assert_ne!(ran.code(), 0, "{ran}");
     let reading = Store::of_workspace(&root)
         .read("permit", "permit.stale-build")
         .unwrap()
@@ -2289,8 +1301,14 @@ fn a_manifest_no_candidate_can_read_is_a_failure_the_build_records() {
         }
     })
     .to_string();
-    let (code, out, err) = permit(&root, &stdin, &[]);
-    assert_ne!(code, 0, "the build that cannot judge exits non-zero: {out}");
+    let ran = permit(&root, &stdin, &[]);
+    assert_ne!(
+        ran.code(),
+        0,
+        "the build that cannot judge exits non-zero: {ran}"
+    );
+    let out = ran.stdout;
+    let err = ran.stderr;
     assert!(out.trim().is_empty(), "and decides nothing: {out}");
     assert!(err.contains("seams.toml"), "{err}");
     let reading = Store::of_workspace(&root)
@@ -2316,8 +1334,7 @@ fn a_manifest_no_candidate_can_read_is_a_failure_the_build_records() {
 fn a_denial_is_still_a_failing_reading_under_the_rule_that_denied_it() {
     let root = scratch("denial-reading");
     let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
-    let (code, out, err) = permit(&root, &stdin, &[]);
-    assert_eq!(code, 0, "{err}");
+    let out = permit(&root, &stdin, &[]).ok();
     assert!(out.contains("harness.self"), "{out}");
     let reading = Store::of_workspace(&root)
         .read("permit", "harness.self")
@@ -2334,8 +1351,7 @@ fn a_denial_is_still_a_failing_reading_under_the_rule_that_denied_it() {
 fn a_build_over_the_manifest_it_was_compiled_against_judges_as_it_did() {
     let root = scratch("stale-control");
     let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
-    let (code, out, err) = permit(&root, &stdin, &[]);
-    assert_eq!(code, 0, "{err}");
+    let out = permit(&root, &stdin, &[]).ok();
     assert!(out.contains("harness.self"), "{out}");
     for rule in ["permit.stale-build", "permit.unjudged-call"] {
         assert!(
@@ -2345,118 +1361,6 @@ fn a_build_over_the_manifest_it_was_compiled_against_judges_as_it_did() {
                 .is_none(),
             "nothing was refused: {rule}"
         );
-    }
-}
-
-/// `unsafe.homes` judges code, and the harness's own sensors carry the
-/// keyword in their negative controls, which are strings and comments: the
-/// audit's tests pin `unsafe_sites("unsafe { a(); }")`, and while that read
-/// as a site the file could not be written to at all (#18).
-#[test]
-fn an_unsafe_inside_a_string_or_a_comment_is_not_a_site() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let denied = |content: &str| {
-        let text = serde_json::json!({
-            "tool_name": "Write",
-            "tool_input": { "file_path": "crates/php_engine/src/executor.rs", "content": content },
-        })
-        .to_string();
-        let call = Call::parse(&text).unwrap();
-        judge(&manifest, workspace(), &call)
-            .unwrap()
-            .findings
-            .iter()
-            .any(|f| f.rule == "unsafe.homes")
-    };
-
-    assert!(
-        denied("let x = unsafe { *p };"),
-        "a site outside the homes unsafe.homes names is still denied"
-    );
-    assert!(denied("pub unsafe fn go() {}"));
-    for allowed in [
-        r#"let s = "unsafe { a(); }";"#,
-        r##"let s = r#"unsafe fn b()"#;"##,
-        "// unsafe { a(); }\nlet x = 1;",
-        "/* unsafe fn b() */\nlet x = 1;",
-        "let c = \'x\'; // a char literal is not a lifetime\nlet s = \"unsafe {\";",
-    ] {
-        assert!(!denied(allowed), "{allowed:?} carries no unsafe code");
-    }
-
-    // The file the ticket found: the audit's own source, unchanged.
-    let audit = std::fs::read_to_string(workspace().join("xtask/src/unsafe_audit.rs")).unwrap();
-    assert!(
-        !denied(&audit),
-        "the audit's own negative controls are strings, not sites"
-    );
-}
-
-/// An unsafe attribute, `#[unsafe(no_mangle)]`, asserts an unsafe contract
-/// as a block does, and is a site for both sensors of `unsafe.homes`: the
-/// rule's fixture carries it outside a home and inside one (#46).
-#[test]
-fn an_unsafe_attribute_is_a_site_outside_a_home_and_not_a_finding_inside_one() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let dir = fixtures().join("rules/unsafe.homes");
-    let fired = |name: &str| {
-        judge(&manifest, workspace(), &call(&dir.join(name)))
-            .unwrap()
-            .findings
-            .iter()
-            .any(|f| f.rule == "unsafe.homes")
-    };
-    assert!(
-        fired("deny-attribute.json"),
-        "the attribute outside a home is denied at the edit"
-    );
-    assert!(
-        !fired("allow-attribute.json"),
-        "the attribute inside a home is allowed at the edit"
-    );
-}
-
-/// The two rows #28 proposes for a person to add: a ticket closes through
-/// `xtask ticket close` and by nothing else, so `gh issue close` and `gh
-/// issue reopen` are denied by `deny_argv` with `with`, the shape
-/// `git.no-verify` has, and the same act through `gh api` with a closing
-/// or reopening state by a `deny_pattern`. Each fixture is held under the
-/// row, as the tracked file carries it or as the constructors build it.
-#[test]
-fn the_proposed_ticket_close_rules_fire_on_their_fixtures_and_not_on_their_neighbours() {
-    let manifest = with_the_ticket_close_rules(Manifest::load(workspace()).unwrap());
-    for rule in ["ticket.close", "ticket.close-api"] {
-        let dir = fixtures().join("rules").join(rule);
-        let allowed = judge(&manifest, workspace(), &call(&dir.join("allow.json"))).unwrap();
-        assert!(allowed.denial().is_none(), "{rule}: {allowed:?}");
-        for fixture in [dir.join("deny.json"), dir.join("deny-reopen.json")] {
-            let judged = judge(&manifest, workspace(), &call(&fixture)).unwrap();
-            assert_eq!(
-                judged.denial().map(|f| f.rule.as_str()),
-                Some(rule),
-                "{}: {judged:?}",
-                fixture.display()
-            );
-        }
-    }
-    for line in [
-        "gh api --method PATCH /repos/o/r/issues/28 --input /tmp/close.json",
-        "gh api graphql -f query='mutation { closeIssue(input: {issueId: \"I_1\"}) { issue { id } } }'",
-    ] {
-        let judged = judge(&manifest, workspace(), &bash(line)).unwrap();
-        assert_eq!(
-            judged.denial().map(|f| f.rule.as_str()),
-            Some("ticket.close-api"),
-            "{line}: {judged:?}"
-        );
-    }
-    for line in [
-        "gh pr close 3",
-        "cargo xtask ticket close 28",
-        "gh api repos/o/r/issues?state=closed",
-    ] {
-        let judged = judge(&manifest, workspace(), &bash(line)).unwrap();
-        assert!(judged.denial().is_none(), "{line}: {judged:?}");
     }
 }
 
@@ -2658,54 +1562,6 @@ fn an_exit_in_a_file_no_crate_row_names_is_denied() {
     assert!(denied.contains(EXIT_AUTHORED), "{denied}");
 }
 
-/// The whole-file case (#134, #510): the shape the ticket named, a `Write`
-/// of a whole file with a status `--accept` captured in it, as one fixture
-/// beside the `Edit` calls the directory carries. The fixture is judged
-/// twice: over this workspace, where the file at that path carries no such
-/// line, the write adds one and is denied with the rule id; over a tree
-/// where the same file stands, it adds none and is permitted with no
-/// reading behind it, which is the file a session must be able to write
-/// again. Beside it, `beside-a-pinned-one.json` edits that same tree, the
-/// verdicts untouched, and brings one more: the negative control of the
-/// same pair, denied though the line it types stands in the file already
-/// and the crate's reading is fresh.
-#[test]
-fn the_whole_file_fixture_is_denied_here_and_permitted_where_the_file_carries_it() {
-    let dir = fixtures().join("rules/witness.exit-authored");
-    let written = call(&dir.join("whole-file.json"));
-    assert_eq!(
-        written.tool_input.file_path.as_deref(),
-        Some(FILE),
-        "the case is over the crate the scratch half lays down"
-    );
-    let text = written
-        .tool_input
-        .content
-        .clone()
-        .expect("a Write carries the whole file");
-    assert!(text.contains("exit=255"), "a captured status: {text}");
-
-    let manifest = Manifest::load(workspace()).unwrap();
-    let denied = denial(workspace(), &manifest, &written)
-        .expect("the file at that path carries no such line");
-    assert!(denied.contains(EXIT_AUTHORED), "{denied}");
-
-    let root = scratch("unless-whole-file");
-    let manifest = Manifest::load(&root).unwrap();
-    lay_down(&root, &text);
-    assert_eq!(
-        denial(&root, &manifest, &written),
-        None,
-        "the whole file as it stands adds no verdict"
-    );
-
-    witness_reading(&root);
-    let beside = call(&dir.join("beside-a-pinned-one.json"));
-    let denied = denial(&root, &manifest, &beside)
-        .expect("the edit brings a verdict the file does not carry yet");
-    assert!(denied.contains(EXIT_AUTHORED), "{denied}");
-}
-
 /// The tracked pin's binary, when it is on this machine; a failure where
 /// this machine promised the binary (#38).
 fn oracle_is_here() -> bool {
@@ -2716,54 +1572,6 @@ fn oracle_is_here() -> bool {
         .is_some()
 }
 
-/// End to end (#105): `xtask witness --accept` captures the oracle's
-/// status onto the fence line and writes its reading, and `xtask permit
-/// --diff` over that tree permits the line it wrote. Take the reading away
-/// and the same tree is denied with the rule id.
-#[test]
-fn what_accept_wrote_permit_diff_permits_over_the_same_tree() {
-    if !oracle_is_here() {
-        return;
-    }
-    let root = scratch("unless-accept");
-    lay_down(&root, &block("exit"));
-    let readings = witness::run(
-        &root,
-        &Manifest::load(&root).unwrap(),
-        &Registry::load(&root).unwrap(),
-        &Ask {
-            crates: vec![CRATE.to_owned()],
-            accept: Accept::Status,
-            ..Ask::default()
-        },
-    )
-    .unwrap();
-    Store::of_workspace(&root).record(&readings).unwrap();
-    assert_eq!(
-        std::fs::read_to_string(root.join(FILE)).unwrap(),
-        block("exit=3"),
-        "the oracle's status is on the fence line and nothing else moved"
-    );
-
-    let add = Command::new("git")
-        .args(["add", "--", CRATE])
-        .current_dir(&root)
-        .status()
-        .unwrap();
-    assert!(add.success());
-    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
-    assert_eq!(code, 0, "{out}{err}");
-    assert!(!out.contains("deny "), "{out}");
-
-    std::fs::remove_file(Store::of_workspace(&root).path("witness", CRATE).unwrap()).unwrap();
-    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
-    assert_eq!(code, 1, "{out}{err}");
-    assert!(
-        out.contains("deny ") && out.contains(EXIT_AUTHORED) && out.contains(FILE),
-        "{out}"
-    );
-}
-
 /// A merge commit displaces both its parents (#1312): a verdict the merged
 /// branch's `--accept` captured is the branch's, so `permit --diff` over
 /// the staged merge permits it with no witness reading over the merged
@@ -2771,42 +1579,33 @@ fn what_accept_wrote_permit_diff_permits_over_the_same_tree() {
 #[test]
 fn a_verdict_the_merged_branch_carried_is_the_branchs_and_not_the_merges() {
     let root = scratch("merge-verdict");
-    let git = |args: &[&str]| {
-        let unhooked = [
-            "git",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/var/empty",
-        ];
-        sh(&root, &[&unhooked[..], args].concat());
-    };
+    let repo = Repo::at(&root);
     let tail = "pub fn other() {}\n";
     lay_down(&root, &format!("{}{tail}", block("exit")));
-    git(&["add", "--", CRATE]);
-    git(&["commit", "-q", "-m", "the fence"]);
-    git(&["checkout", "-q", "-b", "branch"]);
+    repo.git(&["add", "--", CRATE]);
+    repo.git(&["commit", "-q", "-m", "the fence"]);
+    repo.git(&["checkout", "-q", "-b", "branch"]);
     write(&root, FILE, &format!("{}{tail}", block("exit=3")));
-    git(&["commit", "-q", "-am", "the branch's accept"]);
-    git(&["checkout", "-q", "-"]);
+    repo.git(&["commit", "-q", "-am", "the branch's accept"]);
+    repo.git(&["checkout", "-q", "-"]);
     write(
         &root,
         FILE,
         &format!("{}{tail}pub fn mains() {{}}\n", block("exit")),
     );
-    git(&["commit", "-q", "-am", "main moves on"]);
-    git(&["merge", "-q", "--no-ff", "--no-commit", "branch"]);
+    repo.git(&["commit", "-q", "-am", "main moves on"]);
+    repo.git(&["merge", "-q", "--no-ff", "--no-commit", "branch"]);
 
-    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
-    assert_eq!(code, 0, "{out}{err}");
+    let out = xtask(&root, &["permit", "--diff"]).ok();
     assert!(!out.contains("deny "), "{out}");
 
     let merged = std::fs::read_to_string(root.join(FILE)).unwrap();
     let authored = block("exit=4").replace("native", "another");
     write(&root, FILE, &format!("{merged}{authored}"));
-    git(&["add", "--", FILE]);
-    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
-    assert_eq!(code, 1, "{out}{err}");
+    repo.git(&["add", "--", FILE]);
+    let ran = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    let out = ran.stdout;
     assert!(out.contains(EXIT_AUTHORED), "{out}");
 }
 
@@ -2819,24 +1618,15 @@ fn a_verdict_the_merged_branch_carried_is_the_branchs_and_not_the_merges() {
 #[test]
 fn a_capture_fence_the_merged_side_carries_is_that_sides_and_one_the_merge_edits_is_denied() {
     let root = scratch("merge-capture");
-    let git = |args: &[&str]| {
-        let unhooked = [
-            "git",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/var/empty",
-        ];
-        sh(&root, &[&unhooked[..], args].concat());
-    };
+    let repo = Repo::at(&root);
     let other = "ext/ctype/src/other.rs";
     let capture = "/// ```php\n/// echo 1;\n/// ```\n/// ```expect capture\n/// 1\n/// ```\n";
     lay_down(&root, &format!("{}pub fn tail() {{}}\n", block("exit")));
     let shared = "/// ```php\n/// exit(3);\n/// ```\npub fn other() {}\n";
     write(&root, other, shared);
-    git(&["add", "--", CRATE]);
-    git(&["commit", "-q", "-m", "the base"]);
-    git(&["checkout", "-q", "-b", "main-side"]);
+    repo.git(&["add", "--", CRATE]);
+    repo.git(&["commit", "-q", "-m", "the base"]);
+    repo.git(&["checkout", "-q", "-b", "main-side"]);
     write(
         &root,
         FILE,
@@ -2846,30 +1636,30 @@ fn a_capture_fence_the_merged_side_carries_is_that_sides_and_one_the_merge_edits
         ),
     );
     write(&root, other, &format!("{capture}{shared}"));
-    git(&[
+    repo.git(&[
         "commit",
         "-q",
         "-am",
         "main's capture, pinned by --accept --streams",
     ]);
-    git(&["checkout", "-q", "-"]);
+    repo.git(&["checkout", "-q", "-"]);
     write(
         &root,
         FILE,
         &format!("{}pub fn tail() {{}}\npub fn mine() {{}}\n", block("exit")),
     );
-    git(&["commit", "-q", "-am", "the branch moves on"]);
-    git(&["merge", "-q", "--no-ff", "--no-commit", "main-side"]);
+    repo.git(&["commit", "-q", "-am", "the branch moves on"]);
+    repo.git(&["merge", "-q", "--no-ff", "--no-commit", "main-side"]);
 
-    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
-    assert_eq!(code, 0, "{out}{err}");
+    let out = xtask(&root, &["permit", "--diff"]).ok();
     assert!(!out.contains("deny "), "{out}");
 
     let merged = std::fs::read_to_string(root.join(FILE)).unwrap();
     write(&root, FILE, &merged.replace("/// 1\n", "/// 2\n"));
-    git(&["add", "--", FILE]);
-    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
-    assert_eq!(code, 1, "{out}{err}");
+    repo.git(&["add", "--", FILE]);
+    let ran = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    let out = ran.stdout;
     assert!(
         out.contains("witness.capture-authored") && out.contains(FILE),
         "{out}"
@@ -2882,37 +1672,27 @@ fn a_capture_fence_the_merged_side_carries_is_that_sides_and_one_the_merge_edits
 #[test]
 fn a_second_copy_of_a_fence_both_parents_inherit_is_the_merges() {
     let root = scratch("merge-capture-twice");
-    let git = |args: &[&str]| {
-        let unhooked = [
-            "git",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/var/empty",
-        ];
-        sh(&root, &[&unhooked[..], args].concat());
-    };
+    let repo = Repo::at(&root);
     let capture = "/// ```php\n/// echo 1;\n/// ```\n/// ```expect capture\n/// 1\n/// ```\npub fn captured() {}\n";
     lay_down(&root, &format!("{capture}pub fn tail() {{}}\n"));
-    git(&["add", "--", CRATE]);
-    git(&["commit", "-q", "-m", "the base"]);
-    git(&["checkout", "-q", "-b", "other-side"]);
+    repo.git(&["add", "--", CRATE]);
+    repo.git(&["commit", "-q", "-m", "the base"]);
+    repo.git(&["checkout", "-q", "-b", "other-side"]);
     write(
         &root,
         FILE,
         &format!("{capture}pub fn tail() {{}}\npub fn theirs() {{}}\n"),
     );
-    git(&["commit", "-q", "-am", "the other side"]);
-    git(&["checkout", "-q", "-"]);
+    repo.git(&["commit", "-q", "-am", "the other side"]);
+    repo.git(&["checkout", "-q", "-"]);
     write(
         &root,
         FILE,
         &format!("pub fn mine() {{}}\n{capture}pub fn tail() {{}}\n"),
     );
-    git(&["commit", "-q", "-am", "this side"]);
-    git(&["merge", "-q", "--no-ff", "--no-commit", "other-side"]);
-    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
-    assert_eq!(code, 0, "{out}{err}");
+    repo.git(&["commit", "-q", "-am", "this side"]);
+    repo.git(&["merge", "-q", "--no-ff", "--no-commit", "other-side"]);
+    xtask(&root, &["permit", "--diff"]).ok();
 
     let merged = std::fs::read_to_string(root.join(FILE)).unwrap();
     write(
@@ -2920,9 +1700,10 @@ fn a_second_copy_of_a_fence_both_parents_inherit_is_the_merges() {
         FILE,
         &format!("{merged}{}", capture.replace("captured", "again")),
     );
-    git(&["add", "--", FILE]);
-    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
-    assert_eq!(code, 1, "{out}{err}");
+    repo.git(&["add", "--", FILE]);
+    let ran = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    let out = ran.stdout;
     assert!(out.contains("witness.capture-authored"), "{out}");
 }
 
@@ -2938,27 +1719,11 @@ fn a_second_copy_of_a_fence_both_parents_inherit_is_the_merges() {
 #[test]
 fn a_verdict_a_branch_captured_stands_on_main_after_the_merge_and_a_typed_one_does_not() {
     let root = scratch("merged-capture");
-    let git = |args: &[&str]| {
-        let unhooked = [
-            "git",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/var/empty",
-        ];
-        sh(&root, &[&unhooked[..], args].concat());
-    };
-    let head = || {
-        let out = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&root)
-            .output()
-            .unwrap();
-        String::from_utf8(out.stdout).unwrap().trim().to_owned()
-    };
+    let repo = Repo::at(&root);
+    let head = || repo.git(&["rev-parse", "HEAD"]);
     let reported = |base: &str| {
-        let (_, out, err) = xtask(&root, &["done", "--base", base]);
-        let said = format!("{out}{err}");
+        let ran = xtask(&root, &["done", "--base", base]);
+        let said = ran.stdout + &ran.stderr;
         said.lines()
             .filter(|l| l.contains(EXIT_AUTHORED))
             .map(str::to_owned)
@@ -2966,25 +1731,25 @@ fn a_verdict_a_branch_captured_stands_on_main_after_the_merge_and_a_typed_one_do
     };
     let tail = "\npub fn other() {}\n";
     lay_down(&root, &format!("{}{tail}", block("exit")));
-    git(&["add", "--", CRATE]);
-    git(&["commit", "-q", "-m", "the fence"]);
+    repo.git(&["add", "--", CRATE]);
+    repo.git(&["commit", "-q", "-m", "the fence"]);
     let base = head();
 
     // The branch captures the verdict and `witness` measures its commit;
     // the reading reaches the store's log alone, as a retire leaves it.
-    git(&["checkout", "-q", "-b", "branch"]);
+    repo.git(&["checkout", "-q", "-b", "branch"]);
     write(&root, FILE, &format!("{}{tail}", block("exit=3")));
-    git(&["commit", "-q", "-am", "the branch's accept"]);
+    repo.git(&["commit", "-q", "-am", "the branch's accept"]);
     witness_reading(&root);
     std::fs::remove_file(root.join("target/harness/witness/ext/ctype.toml")).unwrap();
-    git(&["checkout", "-q", "-"]);
+    repo.git(&["checkout", "-q", "-"]);
     write(
         &root,
         FILE,
         &format!("{}{tail}\npub fn mains() {{}}\n", block("exit")),
     );
-    git(&["commit", "-q", "-am", "main moves the crate on"]);
-    git(&["merge", "-q", "--no-ff", "-m", "merge the branch", "branch"]);
+    repo.git(&["commit", "-q", "-am", "main moves the crate on"]);
+    repo.git(&["merge", "-q", "--no-ff", "-m", "merge the branch", "branch"]);
     let merged = std::fs::read_to_string(root.join(FILE)).unwrap();
     assert!(
         merged.contains("exit=3") && merged.contains("mains"),
@@ -2994,12 +1759,12 @@ fn a_verdict_a_branch_captured_stands_on_main_after_the_merge_and_a_typed_one_do
 
     // A verdict typed by hand on a second branch, in a commit nothing
     // measured, merged the same way.
-    git(&["checkout", "-q", "-b", "typed"]);
+    repo.git(&["checkout", "-q", "-b", "typed"]);
     let typed = block("exit=4").replace("native", "another");
     write(&root, FILE, &format!("{merged}\n{typed}"));
-    git(&["commit", "-q", "-am", "a verdict typed by hand"]);
-    git(&["checkout", "-q", "-"]);
-    git(&[
+    repo.git(&["commit", "-q", "-am", "a verdict typed by hand"]);
+    repo.git(&["checkout", "-q", "-"]);
+    repo.git(&[
         "merge",
         "-q",
         "--no-ff",
@@ -3014,21 +1779,6 @@ fn a_verdict_a_branch_captured_stands_on_main_after_the_merge_and_a_typed_one_do
     );
 }
 
-/// The binary over the scratch root, with no stdin.
-fn xtask(root: &Path, args: &[&str]) -> (i32, String, String) {
-    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
-        .arg("--root")
-        .arg(root)
-        .args(args)
-        .output()
-        .unwrap();
-    (
-        out.status.code().unwrap(),
-        String::from_utf8(out.stdout).unwrap(),
-        String::from_utf8(out.stderr).unwrap(),
-    )
-}
-
 // ------------------------------------------ `where` and `unless_pattern`
 
 /// A scratch checkout whose branch records `ticket` as `xtask worktree
@@ -3036,21 +1786,12 @@ fn xtask(root: &Path, args: &[&str]) -> (i32, String, String) {
 fn checkout(name: &str, ticket: Option<u32>) -> Tree {
     let dir = scratch(name);
     if let Some(ticket) = ticket {
-        let head = Command::new("git")
-            .args(["symbolic-ref", "--short", "HEAD"])
-            .current_dir(&dir)
-            .output()
-            .unwrap();
+        let repo = Repo::at(&dir);
         let key = format!(
             "branch.{}.ticket",
-            String::from_utf8_lossy(&head.stdout).trim()
+            repo.git(&["symbolic-ref", "--short", "HEAD"])
         );
-        let set = Command::new("git")
-            .args(["config", &key, &ticket.to_string()])
-            .current_dir(&dir)
-            .status()
-            .unwrap();
-        assert!(set.success(), "git config {key}");
+        repo.git(&["config", &key, &ticket.to_string()]);
     }
     dir
 }
@@ -3059,90 +1800,9 @@ fn checkout(name: &str, ticket: Option<u32>) -> Tree {
 /// before its commit: `MERGE_HEAD` in its git dir.
 fn operating(name: &str) -> Tree {
     let dir = checkout(name, None);
-    let git_dir = Command::new("git")
-        .args(["rev-parse", "--absolute-git-dir"])
-        .current_dir(&dir)
-        .output()
-        .unwrap();
-    let git_dir = PathBuf::from(String::from_utf8_lossy(&git_dir.stdout).trim());
+    let git_dir = PathBuf::from(Repo::at(&dir).git(&["rev-parse", "--absolute-git-dir"]));
     std::fs::write(git_dir.join("MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
     dir
-}
-
-/// `git.operation` (#2476, as #2530 ruled it): `git add -- <path>`, a
-/// commit by pathspec, another hand's `git merge --continue` and a `git
-/// restore --staged` are refused in a checkout with `MERGE_HEAD` present,
-/// the denial naming the merge and the checkout, and each is let through
-/// in one without it; a leading `cd` into the merging checkout is refused
-/// from anywhere, every subcommand the widened argv names is refused
-/// there, and what reads the index is let through. The walks above hold
-/// the fixtures where a merge stands; this adds the checkout without one.
-#[test]
-fn the_git_operation_rule_refuses_staging_where_another_hand_s_merge_stands() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let merging = operating("operation-merging");
-    let quiet = checkout("operation-quiet", None);
-    let rule = |root: &Path, line: &str| {
-        let judged = judge(&manifest, root, &bash(line)).unwrap();
-        judged.denial().map(Finding::reason)
-    };
-    let dir = fixtures().join("rules/git.operation");
-    for name in [
-        "deny.json",
-        "deny-commit.json",
-        "deny-continue.json",
-        "deny-restore.json",
-    ] {
-        let judged = judge(&manifest, merging.path(), &call(&dir.join(name))).unwrap();
-        let denial = judged
-            .denial()
-            .unwrap_or_else(|| panic!("{name}: {judged:?}"));
-        assert_eq!(denial.rule, "git.operation", "{name}");
-        let reason = denial.reason();
-        assert!(
-            reason.contains(&format!(
-                "a merge is in progress in {}",
-                merging.path().display()
-            )),
-            "{reason}"
-        );
-        let judged = judge(&manifest, quiet.path(), &call(&dir.join(name))).unwrap();
-        assert!(
-            judged.denial().is_none(),
-            "{name} without a merge: {judged:?}"
-        );
-    }
-    let allowed = judge(&manifest, merging.path(), &call(&dir.join("allow.json"))).unwrap();
-    assert!(allowed.denial().is_none(), "{allowed:?}");
-    let add = "git add -- AGENTS.md";
-    assert!(rule(quiet.path(), add).is_none());
-    let moved = format!("cd {} && {add}", merging.path().display());
-    assert!(rule(quiet.path(), &moved).is_some_and(|r| r.contains("git.operation")));
-    for line in [
-        "git reset -- AGENTS.md",
-        "git apply --cached x.patch",
-        "git rm -q --cached -- a",
-        "git mv a b",
-        "git stage -- a",
-        "git cherry-pick --skip",
-        "git revert --abort",
-        "git rebase --continue",
-        "git am --skip",
-        "git merge --abort",
-    ] {
-        let reason = rule(merging.path(), line);
-        assert!(
-            reason.is_some_and(|r| r.contains("git.operation")),
-            "{line}"
-        );
-    }
-    for line in [
-        "git status --short",
-        "git diff --cached -- AGENTS.md",
-        "git log --grep add",
-    ] {
-        assert!(rule(merging.path(), line).is_none(), "{line}");
-    }
 }
 
 /// A `Bash` rule denying `xtask phpt`, with its qualifiers set by `with`.
@@ -3166,381 +1826,1537 @@ fn denied(manifest: &Manifest, root: &Path, line: &str) -> bool {
         .any(|f| f.rule == "probe.phpt" && f.kind == Kind::Deny)
 }
 
-/// `where = "ticketed"` (#1149): the rule judges a call in a checkout
-/// whose branch records a ticket, a builder's worktree, and not one in a
-/// checkout that records none, main's, where the merge check runs; a
-/// leading `cd` or `pushd` moves the call to the checkout it names.
-#[test]
-fn a_rule_where_ticketed_judges_only_a_checkout_whose_branch_records_a_ticket() {
-    let manifest = probe(|rule| rule.within = Where::Ticketed);
-    let ticketed = checkout("where-ticketed", Some(1149));
-    let main = checkout("where-main", None);
-    let line = "cargo xtask phpt --census";
-    assert!(denied(&manifest, ticketed.path(), line));
-    assert!(!denied(&manifest, main.path(), line));
-    let moved = format!("cd {} && {line}", ticketed.path().display());
-    assert!(denied(&manifest, main.path(), &moved));
-    let moved = format!("cd {} && {line}", main.path().display());
-    assert!(!denied(&manifest, ticketed.path(), &moved));
-    // #2607: a `cd` to a variable the line assigned, and a `pushd`, move
-    // it as a `cd` does, and a `popd` moves it back.
-    let assigned = format!("W={} && cd \"$W\" && {line}", ticketed.path().display());
-    assert!(denied(&manifest, main.path(), &assigned));
-    let pushed = format!("pushd {} && {line}", ticketed.path().display());
-    assert!(denied(&manifest, main.path(), &pushed));
-    let popped = format!("pushd {} && popd && {line}", ticketed.path().display());
-    assert!(!denied(&manifest, main.path(), &popped));
-    // Without `where`, both.
-    let manifest = probe(|_| {});
-    assert!(denied(&manifest, main.path(), line));
-}
+/// The tests whose subject is the tracked workspace itself: each reads the
+/// `seams.toml`, `oracle.toml`, registry or sources standing in the
+/// workspace, so a person's edit there is what may turn one red (#3091).
+/// Every other test here judges by a manifest it builds, or by a
+/// scratch's byte-for-byte copy of the tracked one where the binary's
+/// hook or `permit` refuses any other (`built.rs`).
+mod tracked {
+    use super::*;
 
-/// #2995: a `cd` joined to what follows by anything but `&&` may fail,
-/// or runs in a shell of its own, so `where = "ticketed"` judges what
-/// follows where the line stood as well, at the root; a program moved by
-/// its own words is judged where they move it.
-#[test]
-fn a_rule_where_ticketed_judges_past_a_change_that_may_not_move_the_line() {
-    let manifest = probe(|rule| {
-        rule.within = Where::Ticketed;
-        rule.predicate.deny_pattern = Some(r"\bgit\s+add\b".to_owned());
-    });
-    let ticketed = checkout("where-ticketed-joints", Some(2995));
-    let main = checkout("where-main-joints", None);
-    let (wt, root) = (ticketed.path(), main.path());
-    let denied = |root: &Path, line: String| denied(&manifest, root, &line);
-    // Judged at the root, the ticketed checkout, though the `cd` names
-    // main's; joined by `&&`, the `cd` moves it.
-    let other = root.display();
-    assert!(denied(wt, format!("cd {other}; git add x")));
-    assert!(denied(wt, format!("cd {other} | true; git add x")));
-    assert!(!denied(wt, format!("cd {other} && git add x")));
-    // From main: piped, the `cd` moves nothing; sequenced, it may.
-    let into = wt.display();
-    assert!(!denied(root, format!("cd {into} | true; git add x")));
-    assert!(denied(root, format!("cd {into}; git add x")));
-    // A program's own words move it.
-    assert!(denied(root, format!("env -C {into} git add x")));
-    assert!(denied(root, format!("env --chdir {into} git add x")));
-    assert!(!denied(wt, format!("env -C {other} git add x")));
-    assert!(denied(root, format!("GIT_WORK_TREE={into} git add x")));
-}
-
-/// `where = "main"` (#2751): the rule judges a call in the repository's
-/// main checkout and not one in a linked worktree, wherever the line
-/// stands when a leading `cd` moves it; of a line's commands, the one the
-/// pattern hits is the one asked where it runs.
-#[test]
-fn a_rule_where_main_judges_only_the_main_checkout() {
-    let manifest = probe(|rule| rule.within = Where::Main);
-    let main = checkout("where-main-only", None);
-    let out = Command::new("git")
-        .args(["worktree", "add", "-q", "-b", "own", "own"])
-        .current_dir(main.path())
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "git worktree add");
-    let linked = main.path().join("own");
-    let line = "cargo xtask phpt --census";
-    assert!(denied(&manifest, main.path(), line));
-    assert!(!denied(&manifest, &linked, line));
-    let moved = format!("cd {} && {line}", linked.display());
-    assert!(!denied(&manifest, main.path(), &moved));
-    let moved = format!("cd {} && {line}", main.path().display());
-    assert!(denied(&manifest, &linked, &moved));
-}
-
-/// `harness.self-shell` under `where = "checkout"`, as #2887 ruled and
-/// #2915 built: a shell write to `docs/divergence.toml` is refused in a
-/// checkout, the main one or a linked worktree, however the line reaches
-/// it, and let through in a scratch repository outside every checkout,
-/// by either spelling of a linked temporary directory; a place `permit`
-/// cannot follow is read as a checkout.
-#[test]
-fn harness_self_shell_judges_a_write_where_it_runs_and_only_in_a_checkout() {
-    let mut manifest = Manifest::load(workspace()).unwrap();
-    let rule = manifest
-        .rules
-        .iter_mut()
-        .find(|r| r.id == "harness.self-shell");
-    rule.unwrap().within = Where::Checkout;
-    let main = checkout("self-shell-main", None);
-    let git = |dir: &Path, args: &[&str]| {
-        let out = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "git {args:?}");
-    };
-    git(main.path(), &["worktree", "add", "-q", "-b", "own", "own"]);
-    let (main, linked) = (main.path(), main.path().join("own"));
-    let outside = Tree::new("permit-self-shell-outside").unwrap();
-    git(outside.path(), &["init", "-q", "repo"]);
-    let refused = |root: &Path, line: &str| {
-        let judged = judge(&manifest, root, &bash(line)).unwrap();
-        judged
-            .denial()
-            .is_some_and(|f| f.rule == "harness.self-shell")
-    };
-    let write = "echo '[[divergence]]' >> docs/divergence.toml";
-    // The negative control #2887 names, in each checkout.
-    assert!(refused(main, write));
-    assert!(refused(&linked, write));
-    let (scratch, worktree) = (outside.path().display(), linked.display());
-    let unlinked = outside.path().strip_prefix("/private").ok();
-    let spellings = std::iter::once(scratch.to_string())
-        .chain(unlinked.map(|path| format!("/{}", path.display())));
-    for s in spellings {
-        let line = format!("S={s} && cd \"$S/repo\" && {write}");
-        assert!(!refused(main, &line), "{line}");
-        assert!(!refused(&linked, &line), "{line}");
+    /// One fixture per rule permit judges: one call it fires on, one neighbour
+    /// it lets through (harness-design.md §4.1, §7).
+    #[test]
+    fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let judged: Vec<_> = manifest
+            .rules
+            .iter()
+            .filter(|r| judged_at_the_call(r))
+            .collect();
+        assert!(
+            judged.len() >= 8,
+            "{:?}",
+            judged.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+        // A rule scoped by `where` is judged in a checkout whose branch
+        // records a ticket, which the tree the tests run in need not be.
+        let ticketed = checkout("fixtures-ticketed", Some(1));
+        // One scoped to `where = "operating"` in a checkout whose merge no
+        // session of the fixture's started (#2476), and every other `Bash`
+        // rule in a checkout where none stands, since the tests' own checkout
+        // holds a merge while its merge commit's hook runs them; a write is
+        // judged against the workspace's files.
+        let merging = operating("fixtures-operating");
+        let quiet = checkout("fixtures-quiet", None);
+        for rule in judged {
+            let dir = fixtures().join("rules").join(&rule.id);
+            let kind = Kind::of(rule);
+            let workspace = || match rule.within {
+                Where::Anywhere if rule.tool.iter().any(|t| t == "Bash") => quiet.path(),
+                Where::Anywhere => workspace(),
+                Where::Ticketed => ticketed.path(),
+                Where::Operating => merging.path(),
+                Where::Main | Where::Checkout => quiet.path(),
+            };
+            // Every control of the rule's directory: each `deny*.json` (or
+            // `note*.json`) must fire, each `allow*.json` must not (#625).
+            let named = |prefix: &str| -> Vec<PathBuf> {
+                let mut all: Vec<PathBuf> = std::fs::read_dir(&dir)
+                    .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+                    .map(|entry| entry.unwrap().path())
+                    .filter(|p| {
+                        let name = p.file_name().unwrap().to_str().unwrap();
+                        name.starts_with(prefix) && p.extension().is_some_and(|e| e == "json")
+                    })
+                    .collect();
+                all.sort();
+                assert!(!all.is_empty(), "{}: no {prefix}*.json", dir.display());
+                all
+            };
+            let firing = named(match kind {
+                Kind::Deny => "deny",
+                Kind::Note => "note",
+            });
+            for fires in &firing {
+                let judgement = judge(&manifest, workspace(), &call(fires)).unwrap();
+                let finding = judgement
+                    .findings
+                    .iter()
+                    .find(|f| f.rule == rule.id)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{}: {} fired nothing: {judgement:?}",
+                            rule.id,
+                            fires.display()
+                        )
+                    });
+                assert_eq!(finding.kind, kind, "{}", rule.id);
+                let reason = finding.reason();
+                assert!(reason.contains(&rule.id), "{reason}");
+                assert!(reason.contains(&rule.text), "{reason}");
+                for adr in rule.adr.iter() {
+                    assert!(reason.contains(&format!("ADR-{adr}")), "{reason}");
+                }
+                if kind == Kind::Deny {
+                    assert_eq!(
+                        judgement.denial().map(|f| f.rule.as_str()),
+                        Some(rule.id.as_str()),
+                        "{}",
+                        fires.display()
+                    );
+                }
+            }
+            // `allow-main.json` is a neighbour in main's checkout, where a
+            // ticketed rule does not judge, an `allow-starter*.json` one
+            // in a checkout whose operation the fixture's session started,
+            // which a walk does not record, and an `allow-excused*.json` one
+            // under an `unless_argv` a person has yet to paste (#3068): each
+            // one's own test holds it.
+            let neighbours = named("allow").into_iter().filter(|p| {
+                let name = p.file_name().unwrap().to_string_lossy();
+                !name.starts_with("allow-starter")
+                    && !unpasted(rule, &name)
+                    && (rule.within == Where::Anywhere || !p.ends_with("allow-main.json"))
+            });
+            for neighbour in neighbours {
+                let judgement = judge(&manifest, workspace(), &call(&neighbour)).unwrap();
+                assert!(
+                    judgement.findings.iter().all(|f| f.rule != rule.id),
+                    "{}: the neighbour {} fired: {judgement:?}",
+                    rule.id,
+                    neighbour.display()
+                );
+            }
+        }
     }
-    let piped = format!("cd {scratch}/repo && printf x 2>&1 | tee -a docs/divergence.toml");
-    assert!(!refused(main, &piped), "{piped}");
-    std::fs::create_dir(outside.join("links")).unwrap();
-    std::os::unix::fs::symlink(main.join("seams.toml"), outside.join("links/seams.toml")).unwrap();
-    std::fs::write(outside.join("file"), "").unwrap();
-    let main_dir = main.display();
-    for line in [
-        // Into a checkout by an assigned variable, by a later `cd`, by a
-        // subshell's, by git's `-C` and through a link.
-        format!("W={worktree} && cd \"$W\" && {write}"),
-        format!("cd {scratch}/repo && ls && cd {worktree} && {write}"),
-        format!("cd {scratch}/repo && (cd {worktree} && {write})"),
-        format!("cd {scratch}/repo && git -C {worktree} checkout -- seams.toml"),
-        format!("cd {scratch}/links && sed -i '' 's/a/b/' seams.toml"),
-        // Where `permit` cannot say: a variable the line did not assign,
-        // `cd -`, a directory not on disk or no directory, a change that
-        // may fail or run in a shell of its own before what follows it,
-        // one a program runs unread, and a program's own directory.
-        format!("cd \"$S/repo\" && {write}"),
-        format!("cd {scratch}/repo && cd - && {write}"),
-        format!("cd {scratch}/missing && {write}"),
-        format!("cd {scratch}/file && {write}"),
-        format!("cd {scratch}/repo; {write}"),
-        format!("cd {scratch}/repo || true && {write}"),
-        format!("cd {scratch}/repo & {write}"),
-        format!("cd {scratch}/repo | true && {write}"),
-        format!("cd {scratch}/repo\n{write}"),
-        format!("cd {scratch}/repo && xargs sh -c 'cd {worktree} && {write}' < /dev/null"),
-        format!("cd {scratch}/repo && env -C {worktree} sed -i '' 's/a/b/' seams.toml"),
-        format!("cd {scratch}/repo && patch -d {worktree} seams.toml < fix.diff"),
-        format!("cd {scratch}/repo && GIT_WORK_TREE={worktree} git checkout -- seams.toml"),
-        format!("cd {scratch}/repo && ln -sf {main_dir}/seams.toml . && {write}"),
-        format!("cd {scratch}/repo && env -iC {worktree} sed -i '' 's/a/b/' seams.toml"),
-        format!("cd {scratch}/repo && patch -d{worktree} seams.toml < fix.diff"),
-    ] {
-        assert!(refused(main, &line), "{line}");
-    }
-}
 
-/// `git.merge-commits-itself` as #2751 ruled it: a merge that commits
-/// itself is refused in the main checkout and let through in a linked
-/// worktree, where a builder merges `main` into its branch; a neighbour
-/// in main does not place a merge `-C` runs in the worktree there.
-#[test]
-fn a_merge_that_commits_itself_is_refused_in_main_alone() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let main = checkout("merge-commits-itself", None);
-    let out = Command::new("git")
-        .args(["worktree", "add", "-q", "-b", "own", "own"])
-        .current_dir(main.path())
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "git worktree add");
-    let linked = main.path().join("own");
-    let refused = |root: &Path, line: &str| {
-        judge(&manifest, root, &bash(line))
-            .unwrap()
+    /// Every rule with a `tool` or a `scope` is either judged here, with its
+    /// fixture, or carries one of the five predicates that read the tree after
+    /// the write, or is read at the Stop alone (`tool = "Stop"`, #32), which
+    /// `permit` never judges and no after-the-write sensor reads; a fourth
+    /// kind cannot fall between the three.
+    #[test]
+    fn every_rule_with_a_tool_or_a_scope_is_judged_or_is_an_after_the_write_sensor() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        for rule in manifest
+            .rules
+            .iter()
+            .filter(|r| !r.tool.is_empty() || !r.scope.is_empty())
+        {
+            let p = &rule.predicate;
+            let after_the_write = p.deny_methods.is_some()
+                || p.check.is_some()
+                || p.deny_lints.is_some()
+                || p.avoid_from.is_some()
+                || p.generated.is_some();
+            if rule.tool.iter().any(|t| t == "Stop") {
+                assert!(
+                    !judged_at_the_call(rule) && !after_the_write,
+                    "{}: a Stop rule is judged at the call {}, after the write {}",
+                    rule.id,
+                    judged_at_the_call(rule),
+                    after_the_write
+                );
+                continue;
+            }
+            assert!(
+                judged_at_the_call(rule) != after_the_write,
+                "{}: judged {}, after the write {}",
+                rule.id,
+                judged_at_the_call(rule),
+                after_the_write
+            );
+        }
+    }
+
+    /// The fixture of the `xtask.lock-line` rule #55 proposes, judged under
+    /// the rule as its row would read, before a person commits it: the note
+    /// fires on a new `pub` item under `xtask/src` and not on its neighbour.
+    /// Once the tracked manifest carries the row, the walk above holds it and
+    /// this adds nothing.
+    #[test]
+    fn the_proposed_xtask_lock_line_rule_notes_its_fixture_and_not_its_neighbour() {
+        let mut manifest = Manifest::load(workspace()).unwrap();
+        if manifest.rule("xtask.lock-line").is_none() {
+            let mut rule = Rule::named("xtask.lock-line", "xtask/src/**");
+            rule.predicate.deny = None;
+            rule.predicate.on = Some("pub".to_owned());
+            manifest.rules.push(rule);
+        }
+        let dir = fixtures().join("rules/xtask.lock-line");
+        let judged = judge(&manifest, workspace(), &call(&dir.join("note.json"))).unwrap();
+        let finding = judged
             .findings
             .iter()
-            .any(|f| f.rule == "git.merge-commits-itself" && f.kind == Kind::Deny)
-    };
-    assert!(refused(main.path(), "git merge --no-ff t1234"));
-    assert!(!refused(main.path(), "git merge --no-ff --no-commit t1234"));
-    assert!(!refused(&linked, "git merge main"));
-    let apart = format!(
-        "git -C {} merge --abort; git -C {} merge main",
-        main.path().display(),
-        linked.display()
-    );
-    assert!(!refused(main.path(), &apart));
-}
+            .find(|f| f.rule == "xtask.lock-line")
+            .unwrap_or_else(|| panic!("the note did not fire: {judged:?}"));
+        assert_eq!(finding.kind, Kind::Note);
+        assert!(
+            judged.denial().is_none(),
+            "a note is not a denial: {judged:?}"
+        );
+        let judged = judge(&manifest, workspace(), &call(&dir.join("allow.json"))).unwrap();
+        assert!(
+            judged.findings.iter().all(|f| f.rule != "xtask.lock-line"),
+            "the neighbour fired: {judged:?}"
+        );
+    }
 
-/// `unless_pattern` (#1149): a hit of the `deny_pattern` whose own command
-/// also matches it is let through, and a hit in another command of the
-/// same line is not.
-#[test]
-fn unless_pattern_allows_a_call_its_deny_pattern_matches() {
-    let manifest = probe(|rule| rule.predicate.unless_pattern = Some("--subset".to_owned()));
-    let root = workspace();
-    assert!(denied(&manifest, root, "cargo xtask phpt --census"));
-    assert!(!denied(
-        &manifest,
-        root,
-        "cargo xtask phpt --subset ext/zlib"
-    ));
-    assert!(!denied(
-        &manifest,
-        root,
-        "cargo xtask phpt --census --subset Zend/tests; echo ok"
-    ));
-    assert!(denied(
-        &manifest,
-        root,
-        "cargo xtask phpt --subset ext/zlib && cargo xtask phpt"
-    ));
-    // The row that carries one without a `deny_pattern` is refused.
-    let text = std::fs::read_to_string(workspace().join("seams.toml")).unwrap()
-        + "\n[[rule]]\nid = \"orphan\"\ntool = \"Bash\"\ndeny = true\nunless_pattern = \"x\"\ntext = \"t\"\n";
-    let refused = Manifest::parse(&text).unwrap_err().to_string();
-    assert!(
-        refused.contains("`unless_pattern` beside `deny`"),
-        "{refused}"
-    );
-}
+    /// The rule #33 proposes, `git.pathspec`, built through the constructors
+    /// as its row would read, so the predicate is proven before a person
+    /// commits the row: `require_argv = "--"` with `with = ["git add", "git
+    /// commit"]` denies a `git add` over the whole tree and a `git commit`
+    /// that names no path, with the rule's id and text in the denial, and
+    /// lets the pathspec forms and the hooks' own `git add -- <file>` through.
+    /// Once the tracked manifest carries the row, the walk above holds it and
+    /// this adds nothing.
+    #[test]
+    fn the_proposed_git_pathspec_rule_denies_its_fixture_and_not_its_neighbour() {
+        let manifest = with_the_pathspec_rule(Manifest::load(workspace()).unwrap());
+        let rule = manifest.rule("git.pathspec").unwrap();
+        let dir = fixtures().join("rules/git.pathspec");
+        let quiet = checkout("pathspec-quiet", None);
+        let judged = judge(&manifest, quiet.path(), &call(&dir.join("deny.json"))).unwrap();
+        let denial = judged
+            .denial()
+            .unwrap_or_else(|| panic!("the denial did not fire: {judged:?}"));
+        assert_eq!(denial.rule, "git.pathspec");
+        assert!(
+            denial.reason().contains("git.pathspec"),
+            "{}",
+            denial.reason()
+        );
+        assert!(denial.reason().contains(&rule.text), "{}", denial.reason());
+        let judged = judge(&manifest, quiet.path(), &call(&dir.join("allow.json"))).unwrap();
+        assert!(
+            judged.findings.iter().all(|f| f.rule != "git.pathspec"),
+            "the neighbour fired: {judged:?}"
+        );
+        for line in [
+            "git add .",
+            "git add -u",
+            "git commit -a -m msg",
+            "git add -- .",
+            "git -C /Users/x/dax-php commit -F /tmp/msg",
+        ] {
+            let judged = judge(&manifest, quiet.path(), &bash(line)).unwrap();
+            assert_eq!(
+                judged.denial().map(|f| f.rule.as_str()),
+                Some("git.pathspec"),
+                "{line}: {judged:?}"
+            );
+        }
+        for line in [
+            "git add -- AGENTS.md",
+            "git commit -F /tmp/msg -- xtask/src",
+            "git add -A -- xtask/fixtures/rules/git.pathspec",
+            "git worktree add -b t/x .claude/worktrees/t/x main",
+            "cargo add serde",
+        ] {
+            let judged = judge(&manifest, quiet.path(), &bash(line)).unwrap();
+            assert!(judged.denial().is_none(), "{line}: {judged:?}");
+        }
+    }
 
-/// `lanes.builder-subset`'s fixture (#1145, #1149), as `require_argv =
-/// "--subset"` under `with = "xtask phpt"` reads it (#1860): in a
-/// checkout whose branch records a ticket the lane without `--subset` is
-/// denied, however xtask is run, and the subsets, an extension's and
-/// Zend/tests, as a word or after `=`, pass; the merge check's call
-/// passes in a checkout that records none, and is denied in one that
-/// does, so it is `where` that lets it through.
-#[test]
-fn the_builder_subset_rule_denies_the_lane_in_a_ticketed_checkout_alone() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let dir = fixtures().join("rules/lanes.builder-subset");
-    let ticketed = checkout("builder-subset-ticketed", Some(1145));
-    let main = checkout("builder-subset-main", None);
-    let rule = |root: &Path, file: &str| {
-        let judged = judge(&manifest, root, &call(&dir.join(file))).unwrap();
-        judged.denial().map(|f| f.rule.clone())
-    };
-    let denied = Some("lanes.builder-subset".to_owned());
-    assert_eq!(rule(ticketed.path(), "deny.json"), denied);
-    assert_eq!(rule(ticketed.path(), "allow.json"), None);
-    assert_eq!(rule(ticketed.path(), "allow-zend.json"), None);
-    assert_eq!(rule(main.path(), "allow-main.json"), None);
-    assert_eq!(rule(ticketed.path(), "allow-main.json"), denied);
-    // Through `cargo run` on the package or a variable the line assigns,
-    // the lane is still run; the subset after `=` is still named.
-    assert_eq!(rule(ticketed.path(), "deny-run.json"), denied);
-    assert_eq!(rule(ticketed.path(), "deny-variable.json"), denied);
-    assert_eq!(rule(ticketed.path(), "allow-equals.json"), None);
-    // A message whose subject or body cites the instrument, under cargo
-    // or not, runs nothing (#790, #1771).
-    assert_eq!(rule(ticketed.path(), "allow-heredoc.json"), None);
-    assert_eq!(rule(ticketed.path(), "allow-message-cargo.json"), None);
-    // Reading the instrument's options runs no lane, and the exception is
-    // the instrument's own flag, not a later `-h` (#1424).
-    assert_eq!(rule(ticketed.path(), "allow-help.json"), None);
-    assert_eq!(rule(ticketed.path(), "deny-help-elsewhere.json"), denied);
-}
-
-/// `lanes.nightly`'s heredoc fixtures (#790): a commit whose message has a
-/// line opening `run-tests.php:2950)` cites upstream's runner and runs
-/// nothing, so it passes; the runner first in the call, or after a
-/// separator, is still denied, and so is its run under php.
-#[test]
-fn the_nightly_rule_denies_the_runner_where_it_is_run_and_not_a_message_line() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let dir = fixtures().join("rules/lanes.nightly");
-    let quiet = checkout("nightly-quiet", None);
-    let rule = |file: &str| {
-        let judged = judge(&manifest, quiet.path(), &call(&dir.join(file))).unwrap();
-        judged.denial().map(|f| f.rule.clone())
-    };
-    let denied = Some("lanes.nightly".to_owned());
-    assert_eq!(rule("allow-heredoc.json"), None);
-    assert_eq!(rule("deny-first.json"), denied);
-    assert_eq!(rule("deny-separator.json"), denied);
-    assert_eq!(rule("deny.json"), denied);
-    // Flags before the runner, or a binary named by a variable, still run
-    // it; reading its source does not (#1446).
-    assert_eq!(rule("deny-flags.json"), denied);
-    assert_eq!(rule("deny-variable.json"), denied);
-    assert_eq!(rule("allow-read.json"), None);
-}
-
-/// A `Bash` rule judges what a command runs, not text quoted inside it
-/// (#1771, #1832): a heredoc that cites the nightly lane's command, as a
-/// ticket's draft or a program on python's stdin, passes
-/// `lanes.nightly-flags`; the same command run after the heredoc closes,
-/// or in a body a shell reads as the commands it runs, is denied.
-#[test]
-fn the_nightly_rule_judges_what_the_call_runs_and_not_a_heredoc_that_cites_it() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let dir = fixtures().join("rules/lanes.nightly-flags");
-    let rule = |file: &str| {
-        let judged = judge(&manifest, workspace(), &call(&dir.join(file))).unwrap();
-        judged.denial().map(|f| f.rule.clone())
-    };
-    let denied = Some("lanes.nightly-flags".to_owned());
-    assert_eq!(rule("allow-heredoc-lane.json"), None);
-    assert_eq!(rule("allow-heredoc-python.json"), None);
-    assert_eq!(rule("deny-after-heredoc.json"), denied);
-    assert_eq!(rule("deny-shell-heredoc.json"), denied);
-    assert_eq!(rule("deny-heredoc-piped.json"), denied);
-}
-
-/// Every `Bash` rule judged at the call holds to each of its fixtures
-/// (#1832, #1860): every `deny*.json` is denied by the rule and every
-/// `allow*.json` let through, whether the rule reads the line as a
-/// `deny_pattern` or the command's argv as `deny_argv` or `require_argv`.
-/// A rule scoped `where = "ticketed"` is judged in a checkout whose branch
-/// records a ticket, but for an `allow-main*` call, the merge check's,
-/// which passes in main's checkout alone. A rule with an `exempt_label`
-/// asks the tracker, an `allow-starter*` call passes an operation its
-/// session started, which a walk does not record, and an
-/// `allow-excused*` call an `unless_argv` yet to be pasted: each is held
-/// by its own test.
-#[test]
-fn every_bash_rule_holds_to_each_of_its_fixtures() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let ticketed = checkout("bash-fixtures-ticketed", Some(1832));
-    let main = checkout("bash-fixtures-main", None);
-    let merging = operating("bash-fixtures-operating");
-    let rules: Vec<&Rule> = manifest
-        .rules
-        .iter()
-        .filter(|r| {
-            judged_at_the_call(r) && r.tool.iter().any(|t| t == "Bash") && r.exempt_label.is_empty()
-        })
-        .collect();
-    // `git.no-verify`, `ticket.close-api`, `lanes.nightly`,
-    // `lanes.nightly-flags`, `lanes.builder-subset` and `computed.force`
-    // at #1877: a filter that finds fewer reads nothing.
-    assert!(
-        rules.len() >= 6,
-        "{:?}",
-        rules.iter().map(|r| &r.id).collect::<Vec<_>>()
-    );
-    for rule in rules {
-        let dir = fixtures().join("rules").join(&rule.id);
+    /// `lanes.nightly-flags`' fixtures under the row as proposed, in the
+    /// tracked manifest in place of the tracked row: every `deny*.json` denied
+    /// and every `allow*.json` let through. Under the row as tracked the same,
+    /// save that until the paste the `allow-excused*.json` lines, the tier's
+    /// one-subset reading, are denied with the rest (#3068).
+    #[test]
+    fn the_nightly_flags_let_the_tier_s_one_subset_reading_through() {
+        let tracked = Manifest::load(workspace()).unwrap();
+        let proposed = Tracked::workspace()
+            .with_rule("lanes.nightly-flags", |rule| {
+                *rule = PROPOSED_NIGHTLY_FLAGS.parse().unwrap();
+            })
+            .text();
+        let proposed = Manifest::parse(&proposed).unwrap();
+        let pasted = tracked
+            .rule("lanes.nightly-flags")
+            .is_some_and(|r| r.predicate.unless_argv.is_some());
+        let quiet = checkout("nightly-flags-quiet", None);
+        let dir = fixtures().join("rules/lanes.nightly-flags");
         let mut names: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
-        for name in names
-            .iter()
-            .filter(|n| !n.starts_with("allow-starter") && !unpasted(rule, n))
-        {
-            let root = match rule.within {
-                Where::Ticketed if name.starts_with("allow-main") => main.path(),
-                Where::Ticketed => ticketed.path(),
-                Where::Anywhere => workspace(),
-                Where::Operating => merging.path(),
-                Where::Main | Where::Checkout => main.path(),
-            };
-            let judged = judge(&manifest, root, &call(&dir.join(name))).unwrap();
-            let fired = judged
+        for name in [
+            "allow-excused.json",
+            "deny-jit-full.json",
+            "deny-jit.json",
+            "deny-bench.json",
+        ] {
+            assert!(names.iter().any(|n| n == name), "{name}: {names:?}");
+        }
+        let denied = |manifest: &Manifest, name: &str| {
+            judge(manifest, quiet.path(), &call(&dir.join(name)))
+                .unwrap()
                 .findings
                 .iter()
-                .any(|f| f.rule == rule.id && f.kind == Kind::Deny);
-            assert_eq!(fired, name.starts_with("deny"), "{}: {name}", rule.id);
+                .any(|f| f.rule == "lanes.nightly-flags")
+        };
+        for name in &names {
+            let expect = name.starts_with("deny");
+            assert_eq!(denied(&proposed, name), expect, "proposed row: {name}");
+            let excused = name.starts_with("allow-excused");
+            assert_eq!(
+                denied(&tracked, name),
+                expect || (excused && !pasted),
+                "tracked row: {name}"
+            );
+        }
+    }
+
+    /// `git.no-verify` reads git commit's own argv (#1001): every `deny*.json`
+    /// under its fixtures is denied and every `allow*.json` let through, under
+    /// the row as tracked and under the row as proposed. A grep for the word
+    /// with line numbers, a `sed -n` over it, a `head -n` over a `commit.txt`,
+    /// a heredoc body naming the bypass and `git log -n 3` are allowed (#517);
+    /// `-n`, `--no-verify`, `-anm` and a commit after a `cd` are denied. `deny-hooks-path.json` is the proposed row's
+    /// alone until a person lands it, the tracked row naming no hooks path.
+    #[test]
+    fn git_no_verify_reads_git_commit_s_own_argv() {
+        let tracked = Manifest::load(workspace()).unwrap();
+        let mut proposed = tracked.clone();
+        let row = proposed
+            .rules
+            .iter_mut()
+            .find(|r| r.id == "git.no-verify")
+            .unwrap();
+        row.predicate.with = OneOrMany::Many(vec!["git commit".to_owned(), "git merge".to_owned()]);
+        row.predicate.deny_argv = Some(PROPOSED_NO_VERIFY.map(str::to_owned).to_vec());
+        let tracked_reads_hooks_path = tracked
+            .rule("git.no-verify")
+            .and_then(|r| r.predicate.deny_argv.as_ref())
+            .is_some_and(|d| d.iter().any(|e| e == "-c core.hooksPath"));
+        let tracked_reads_merge = tracked
+            .rule("git.no-verify")
+            .is_some_and(|r| r.predicate.with.iter().any(|w| w == "git merge"));
+        let dir = fixtures().join("rules/git.no-verify");
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert!(names.len() >= 10, "{names:?}");
+        let denied = |manifest: &Manifest, name: &str| {
+            judge(manifest, workspace(), &call(&dir.join(name)))
+                .unwrap()
+                .findings
+                .iter()
+                .any(|f| f.rule == "git.no-verify")
+        };
+        for name in &names {
+            let expect = name.starts_with("deny");
+            assert_eq!(denied(&proposed, name), expect, "proposed row: {name}");
+            let tracked_expect = expect
+                && (name != "deny-hooks-path.json" || tracked_reads_hooks_path)
+                && (name != "deny-merge.json" || tracked_reads_merge);
+            assert_eq!(
+                denied(&tracked, name),
+                tracked_expect,
+                "tracked row: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rule_without_a_fixture_fails() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        for rule in manifest.rules.iter().filter(|r| judged_at_the_call(r)) {
+            let dir = fixtures().join("rules").join(&rule.id);
+            assert!(dir.join("allow.json").is_file(), "{}", dir.display());
+            assert!(
+                dir.join("deny.json").is_file() || dir.join("note.json").is_file(),
+                "{}",
+                dir.display()
+            );
+        }
+    }
+
+    /// The `exempt` key (#23): a rule `permit` judges does not judge a call
+    /// whose file `exempt` covers, under the path grammar `scope` uses. The
+    /// fixture is the `witness.exit-authored` edit under the fence grammar's
+    /// own parser, `xtask/src/witness/fence.rs`, which the tracked row denies
+    /// until a person carries the exempt onto it; the row is built here
+    /// through the constructors so the predicate is proven without it, and
+    /// once the manifest carries it the first half holds it as tracked.
+    #[test]
+    fn a_call_the_rules_exempt_covers_is_not_judged_by_that_rule() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let dir = fixtures().join("rules/witness.exit-authored");
+        let exempt = call(&dir.join("exempt.json"));
+        let rule = manifest.rule("witness.exit-authored").unwrap();
+        let judged = judge(&manifest, workspace(), &exempt).unwrap();
+        if rule.exempts(Path::new("xtask/src/witness/fence.rs")) {
+            assert!(
+                judged.findings.iter().all(|f| f.rule != rule.id),
+                "the tracked row exempts the parser: {judged:?}"
+            );
+        } else {
+            assert_eq!(
+                judged.denial().map(|f| f.rule.as_str()),
+                Some(rule.id.as_str()),
+                "the negative control: denied until the row lands: {judged:?}"
+            );
+        }
+
+        let mut manifest = manifest;
+        let rule = manifest
+            .rules
+            .iter_mut()
+            .find(|r| r.id == "witness.exit-authored")
+            .unwrap();
+        if rule.exempt.is_empty() {
+            rule.exempt = vec![
+                "xtask/src/witness/**".to_owned(),
+                "xtask/tests/witness.rs".to_owned(),
+            ];
+        }
+        let judged = judge(&manifest, workspace(), &exempt).unwrap();
+        assert!(
+            judged
+                .findings
+                .iter()
+                .all(|f| f.rule != "witness.exit-authored"),
+            "the parser's own fence line is exempt: {judged:?}"
+        );
+        let judged = judge(&manifest, workspace(), &call(&dir.join("deny.json"))).unwrap();
+        assert_eq!(
+            judged.denial().map(|f| f.rule.as_str()),
+            Some("witness.exit-authored"),
+            "an extension stays denied: {judged:?}"
+        );
+    }
+
+    /// Every predicate `permit` judges by a file reads `exempt` the same way:
+    /// the rule over `**` fires on a write at `crates/x.rs` and not on the
+    /// same write at `xtask/tests/x.rs`, which the exempt covers. `deny_argv`
+    /// judges a `Bash` call, which has no file, and an exempt names files, so
+    /// it is the one judged predicate an exempt cannot reach.
+    #[test]
+    fn every_judged_predicate_honours_exempt_under_the_scope_grammar() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let written = "pub fn read(p: *const u8) -> u8 {\n    unsafe { *p }\n}\nstatic M: std::sync::Mutex<u8> = todo!();\n";
+        let probe = |shape: fn(&mut Rule)| {
+            let mut rule = Rule::named("exempt.probe", "**");
+            rule.exempt = vec!["xtask/tests/**".to_owned()];
+            rule.predicate.deny = None;
+            shape(&mut rule);
+            rule
+        };
+        let rules = [
+            probe(|r| r.predicate.deny = Some(true)),
+            probe(|r| r.predicate.deny_pattern = Some("Mutex".to_owned())),
+            probe(|r| r.predicate.deny_types = Some(vec!["std::sync::Mutex".to_owned()])),
+            probe(|r| r.predicate.allow = Some(vec!["crates/php_heap/**".to_owned()])),
+            probe(|r| r.predicate.on = Some("pub".to_owned())),
+        ];
+        for rule in rules {
+            let name = rule.predicate.named().join(",");
+            let mut manifest = manifest.clone();
+            manifest.rules = vec![rule];
+            let write = |path: &str| {
+                let text = serde_json::json!({
+                    "tool_name": "Write",
+                    "tool_input": { "file_path": path, "content": written }
+                })
+                .to_string();
+                judge(&manifest, workspace(), &Call::parse(&text).unwrap()).unwrap()
+            };
+            let fired = write("crates/x.rs");
+            assert!(
+                fired.findings.iter().any(|f| f.rule == "exempt.probe"),
+                "{name}: the rule fires outside the exempt: {fired:?}"
+            );
+            let spared = write("xtask/tests/x.rs");
+            assert!(
+                spared.findings.is_empty(),
+                "{name}: the rule fires inside the exempt: {spared:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_harness_files_are_denied_by_their_absolute_path() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        for file in [
+            "seams.toml",
+            "docs/divergence.toml",
+            "oracle.toml",
+            ".claude/x/hooks.json",
+        ] {
+            for tool in ["Edit", "Write"] {
+                let text = serde_json::json!({
+                    "tool_name": tool,
+                    "tool_input": {
+                        "file_path": workspace().join(file).to_str().unwrap(),
+                        "old_string": "a", "new_string": "b", "content": "b"
+                    }
+                })
+                .to_string();
+                let judgement =
+                    judge(&manifest, workspace(), &Call::parse(&text).unwrap()).unwrap();
+                let denial = judgement
+                    .denial()
+                    .unwrap_or_else(|| panic!("{tool} {file} allowed"));
+                assert_eq!(denial.rule, "harness.self");
+                assert!(
+                    denial.reason().contains("harness.self"),
+                    "{}",
+                    denial.reason()
+                );
+            }
+        }
+    }
+
+    /// `harness.self`'s scope narrows to leave `.claude/skills/**` an ordinary
+    /// file (#626), and what it leaves a person's is still denied: every
+    /// `deny*.json` under its fixtures is denied by the rule, the `Edit` and
+    /// the `Write` of `.claude/settings.json` among them, and every
+    /// `allow*.json` is let through, the `Edit` of a skill among them.
+    #[test]
+    fn harness_self_lets_a_skill_through_and_still_denies_the_settings() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let dir = fixtures().join("rules/harness.self");
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("deny") || n.starts_with("allow"))
+            .collect();
+        names.sort();
+        for named in [
+            "allow-skill.json",
+            "deny-settings-edit.json",
+            "deny-settings-write.json",
+        ] {
+            assert!(names.iter().any(|n| n == named), "{named}: {names:?}");
+        }
+        for name in &names {
+            let judged = judge(&manifest, workspace(), &call(&dir.join(name))).unwrap();
+            let denied = judged.denial().map(|f| f.rule.as_str()) == Some("harness.self");
+            assert_eq!(denied, name.starts_with("deny"), "{name}: {judged:?}");
+            if !denied {
+                assert!(
+                    judged.findings.iter().all(|f| f.rule != "harness.self"),
+                    "{name}: {judged:?}"
+                );
+            }
+        }
+    }
+
+    /// Under the widened rows an `Edit`, a `Write` and the shell's writes of
+    /// a hook module are denied, each by its rule, and reading one, copying
+    /// it out and editing a file beside the modules are let through.
+    #[test]
+    fn the_hook_modules_are_a_persons_files_under_the_widened_rows() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let dir = fixtures().join("rules/harness.self/hook-modules");
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        for named in ["deny-edit.json", "deny-sed.json", "allow-cat.json"] {
+            assert!(names.iter().any(|n| n == named), "{named}: {names:?}");
+        }
+        for name in &names {
+            let call = call(&dir.join(name));
+            let rule = if call.tool_name == "Bash" {
+                "harness.self-shell"
+            } else {
+                "harness.self"
+            };
+            let judged = judge(&manifest, workspace(), &call).unwrap();
+            if name.starts_with("deny") {
+                assert_eq!(
+                    judged.denial().map(|f| f.rule.as_str()),
+                    Some(rule),
+                    "{name}: {judged:?}"
+                );
+            } else {
+                assert!(judged.denial().is_none(), "{name}: {judged:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_file_in_an_agent_worktree_is_judged_against_that_checkout() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let worktree = workspace().join(format!(
+            ".claude/worktrees/agent-permit-{}",
+            std::process::id()
+        ));
+        lay_worktree(&worktree);
+        let text = serde_json::json!({
+            "tool_name": "Write",
+            "cwd": worktree.to_str().unwrap(),
+            "tool_input": {
+                "file_path": worktree.join("crates/php_ext/src/lib.rs").to_str().unwrap(),
+                "content": "pub struct Facade;\n"
+            }
+        })
+        .to_string();
+        let call = Call::parse(&text).unwrap();
+        let root = call.workspace(workspace());
+        assert_eq!(root, worktree.canonicalize().unwrap_or(worktree.clone()));
+        assert_eq!(
+            call.path(&root).unwrap(),
+            Path::new("crates/php_ext/src/lib.rs")
+        );
+        let judgement = judge(&manifest, &root, &call).unwrap();
+        assert!(
+            judgement.denial().is_none(),
+            "a worktree is a checkout, not .claude/** of the main one: {judgement:#?}"
+        );
+
+        // A Bash call carries no file; its cwd places it.
+        let shell = Call::parse(
+            &serde_json::json!({"tool_name": "Bash", "cwd": worktree.to_str().unwrap(),
+                "tool_input": {"command": "cargo test -p xtask"}})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(shell.workspace(workspace()), root);
+        // Outside any worktree, the root stands.
+        let plain = Call::parse(
+            &serde_json::json!({"tool_name": "Bash", "cwd": workspace().to_str().unwrap(),
+                "tool_input": {"command": "ls"}})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            plain.workspace(workspace()),
+            workspace().canonicalize().unwrap()
+        );
+        // A directory under .claude/worktrees without a manifest is not a
+        // workspace; its files are the main one's `.claude/**`.
+        let stray = workspace().join(".claude/worktrees/notes/todo.md");
+        let dir = Call::parse(
+            &serde_json::json!({"tool_name": "Write",
+                "tool_input": {"file_path": stray.to_str().unwrap(), "content": "x"}})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            dir.workspace(workspace()),
+            workspace().canonicalize().unwrap()
+        );
+        std::fs::remove_dir_all(&worktree).unwrap();
+    }
+
+    /// A track's worktree is named by its branch, and a branch's name is a
+    /// path (`t-x/witness`), so the checkout is the first directory under
+    /// `.claude/worktrees` on the way down that has a `.git`, not the first
+    /// component alone (harness-design.md §5, #41).
+    #[test]
+    fn a_worktree_named_by_a_branch_with_a_slash_is_a_checkout_of_its_own() {
+        let track = workspace().join(format!(".claude/worktrees/t-permit-{}", std::process::id()));
+        let worktree = track.join("witness");
+        lay_worktree(&worktree);
+        let call = Call::parse(
+            &serde_json::json!({"tool_name": "Edit", "cwd": worktree.to_str().unwrap(),
+                "tool_input": {"file_path": worktree.join("seams.toml").to_str().unwrap(),
+                    "old_string": "a", "new_string": "b"}})
+            .to_string(),
+        )
+        .unwrap();
+        let root = call.workspace(workspace());
+        assert_eq!(root, worktree.canonicalize().unwrap());
+        assert_eq!(call.path(&root).unwrap(), Path::new("seams.toml"));
+        std::fs::remove_dir_all(&track).unwrap();
+    }
+
+    /// A fixture that carries a `seams.toml` is a workspace of its own, and a
+    /// call into it is judged by that manifest and not the workspace's
+    /// (#57): under the `unsafe.homes` fixture's rule, `ext/pcre/src/ffi/` is
+    /// a home and `php_unit` is not, which is the fixture's own text and the
+    /// workspace's rule says neither. The main checkout's own files resolve
+    /// to the main checkout.
+    #[test]
+    fn a_fixture_with_a_manifest_of_its_own_is_judged_by_that_manifest() {
+        let dir = fixtures().join("rules/unsafe.homes");
+        let inside = edit_of(&dir.join("ext/pcre/src/ffi/mod.rs"));
+        let root = inside.workspace(workspace());
+        assert_eq!(
+            root,
+            dir.canonicalize().unwrap(),
+            "the fixture is the workspace"
+        );
+        assert_eq!(
+            inside.path(&root).unwrap(),
+            Path::new("ext/pcre/src/ffi/mod.rs"),
+            "and the path is relative to it"
+        );
+        let manifest = Manifest::load(&root).unwrap();
+        let judged = judge(&manifest, &root, &inside).unwrap();
+        assert!(
+            judged.denial().is_none(),
+            "a home of the fixture's manifest: {judged:#?}"
+        );
+        let outside = edit_of(&dir.join("crates/php_unit/src/lib.rs"));
+        assert_eq!(outside.workspace(workspace()), root);
+        let denial = judge(&manifest, &root, &outside).unwrap();
+        let denial = denial.denial().expect("outside the fixture's homes");
+        assert_eq!(denial.rule, "unsafe.homes");
+        assert!(
+            denial.text.contains("(fixture)"),
+            "the fixture's text, not the workspace's: {}",
+            denial.text
+        );
+        // Under the workspace's manifest no fixture source is in a home, which
+        // is the freeze #57 lifts.
+        let workspaces = Manifest::load(workspace()).unwrap();
+        assert!(
+            judge(&workspaces, workspace(), &inside)
+                .unwrap()
+                .denial()
+                .is_some(),
+            "the workspace's rule would deny the home"
+        );
+
+        // A call without a file is placed by its cwd in a checkout alone: a
+        // shell standing in the fixture is judged by the checkout's manifest,
+        // which carries the shell rules the fixture's does not.
+        let shell = Call::parse(
+            &serde_json::json!({"tool_name": "Bash", "cwd": dir.to_str().unwrap(),
+                "tool_input": {"command": "git commit --no-verify -m x"}})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            shell.workspace(workspace()),
+            workspace().canonicalize().unwrap()
+        );
+        assert_eq!(
+            judge(&workspaces, workspace(), &shell)
+                .unwrap()
+                .denial()
+                .map(|f| f.rule.clone())
+                .as_deref(),
+            Some("git.no-verify")
+        );
+    }
+
+    /// The main checkout: a file of the workspace itself resolves to the
+    /// workspace, and the path is relative to it.
+    #[test]
+    fn a_file_of_the_main_checkout_is_judged_by_its_manifest() {
+        let own = edit_of(&workspace().join("crates/php_heap/src/lib.rs"));
+        assert_eq!(
+            own.workspace(workspace()),
+            workspace().canonicalize().unwrap()
+        );
+        assert_eq!(
+            own.path(workspace()).unwrap(),
+            Path::new("crates/php_heap/src/lib.rs")
+        );
+        let manifest = Manifest::load(workspace()).unwrap();
+        assert!(
+            judge(&manifest, workspace(), &own)
+                .unwrap()
+                .denial()
+                .is_none(),
+            "php_heap is a home of the workspace's manifest"
+        );
+    }
+
+    #[test]
+    fn an_edit_inside_a_computed_region_body_is_denied_and_one_beside_it_allowed() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let dir = fixtures().join("regions");
+        let inside = judge(&manifest, workspace(), &call(&dir.join("edit-body.json"))).unwrap();
+        let denial = inside.denial().expect("an edit into the body is denied");
+        assert_eq!(denial.rule, "computed.region-body");
+        assert!(
+            denial.reason().contains("computed run"),
+            "{}",
+            denial.reason()
+        );
+
+        let beside = judge(&manifest, workspace(), &call(&dir.join("edit-prose.json"))).unwrap();
+        assert!(beside.denial().is_none(), "{beside:?}");
+
+        let fenced = judge(&manifest, workspace(), &call(&dir.join("edit-fenced.json"))).unwrap();
+        assert!(
+            fenced.denial().is_none(),
+            "markers inside a fence are prose: {fenced:?}"
+        );
+
+        let rewrite = judge(&manifest, workspace(), &call(&dir.join("write-body.json"))).unwrap();
+        assert_eq!(
+            rewrite.denial().map(|f| f.rule.as_str()),
+            Some("computed.region-body"),
+            "a Write that changes a body is the same edit"
+        );
+        let same = judge(&manifest, workspace(), &call(&dir.join("write-same.json"))).unwrap();
+        assert!(same.denial().is_none(), "{same:?}");
+        let opener = judge(
+            &manifest,
+            workspace(),
+            &call(&dir.join("write-opener.json")),
+        )
+        .unwrap();
+        assert!(
+            opener.denial().is_none(),
+            "a changed opener is a template change: {opener:?}"
+        );
+    }
+
+    /// The two halves of the nightly lane the phpt runner asked for (#15):
+    /// the flag is denied wherever it stands in the call, not only beside the
+    /// subcommand, by `lanes.nightly-flags` (#1860), save the tier's `--jit`
+    /// lane on one subset `--subset` names (#3052), and upstream's runner is
+    /// denied where it is run and not where it is cited, by `lanes.nightly`.
+    /// The rule denied `--subset x --full` on neither count before, and denied
+    /// reading the file on the second.
+    #[test]
+    fn the_nightly_lane_is_denied_by_the_flag_and_not_by_a_citation() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let bash = |command: &str| {
+            Call::parse(
+                &serde_json::json!({
+                    "tool_name": "Bash",
+                    "tool_input": { "command": command, "description": "one call" }
+                })
+                .to_string(),
+            )
+            .unwrap()
+        };
+        let denied = |command: &str| {
+            judge(&manifest, workspace(), &bash(command))
+                .unwrap()
+                .denial()
+                .map(|f| f.rule.clone())
+        };
+
+        for (command, rule) in [
+            (
+                "cargo run -q -p xtask -- phpt --full",
+                "lanes.nightly-flags",
+            ),
+            (
+                "cargo run -p xtask -- phpt --subset Zend/tests --full",
+                "lanes.nightly-flags",
+            ),
+            ("xtask phpt --jit force", "lanes.nightly-flags"),
+            (
+                "cargo run -q -p xtask -- phpt --jit exit-fuzz --full",
+                "lanes.nightly-flags",
+            ),
+            ("php run-tests.php -p target/release/php", "lanes.nightly"),
+            ("cd php-src && ./run-tests.php ext/pcre", "lanes.nightly"),
+        ] {
+            assert_eq!(
+                denied(command).as_deref(),
+                Some(rule),
+                "the lane must be denied: {command}"
+            );
+        }
+
+        for command in [
+            "cargo run -q -p xtask -- phpt --subset pcre",
+            "xtask phpt --subset Zend/tests --jit force",
+            "cargo run -q -p xtask -- phpt --jit exit-fuzz --subset tests",
+            "cargo test -p xtask --test phpt",
+            "grep -n 'EXPECTF' /Users/x/php-src-8.5.9/run-tests.php",
+            "echo 'upstream (run-tests.php:1885-1889) merges the streams'",
+        ] {
+            assert_eq!(
+                denied(command),
+                None,
+                "the subset and a citation are not the lane: {command}"
+            );
+        }
+    }
+
+    /// The fixture is the quiet kind of stale and not the loud kind: it parses,
+    /// and the lane it lets through is the one the manifest on disk denies
+    /// (#15, #16). Nothing in the exit says so.
+    #[test]
+    fn the_stale_fixture_parses_and_lets_through_what_the_manifest_on_disk_denies() {
+        let stale = Manifest::parse(&stale_manifest()).unwrap();
+        let now = Manifest::load(workspace()).unwrap();
+        let call = bash_call("cargo run -p xtask -- phpt --subset Zend/tests --full");
+        assert_eq!(
+            judge(&now, workspace(), &call)
+                .unwrap()
+                .denial()
+                .map(|f| f.rule.clone())
+                .as_deref(),
+            Some("lanes.nightly-flags"),
+            "the manifest on disk denies the lane"
+        );
+        assert!(
+            judge(&stale, workspace(), &call)
+                .unwrap()
+                .denial()
+                .is_none(),
+            "and the stale one lets it through, exiting 0 as it does"
+        );
+    }
+
+    /// `unsafe.homes` judges code, and the harness's own sensors carry the
+    /// keyword in their negative controls, which are strings and comments: the
+    /// audit's tests pin `unsafe_sites("unsafe { a(); }")`, and while that read
+    /// as a site the file could not be written to at all (#18).
+    #[test]
+    fn an_unsafe_inside_a_string_or_a_comment_is_not_a_site() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let denied = |content: &str| {
+            let text = serde_json::json!({
+                "tool_name": "Write",
+                "tool_input": { "file_path": "crates/php_engine/src/executor.rs", "content": content },
+            })
+            .to_string();
+            let call = Call::parse(&text).unwrap();
+            judge(&manifest, workspace(), &call)
+                .unwrap()
+                .findings
+                .iter()
+                .any(|f| f.rule == "unsafe.homes")
+        };
+
+        assert!(
+            denied("let x = unsafe { *p };"),
+            "a site outside the homes unsafe.homes names is still denied"
+        );
+        assert!(denied("pub unsafe fn go() {}"));
+        for allowed in [
+            r#"let s = "unsafe { a(); }";"#,
+            r##"let s = r#"unsafe fn b()"#;"##,
+            "// unsafe { a(); }\nlet x = 1;",
+            "/* unsafe fn b() */\nlet x = 1;",
+            "let c = \'x\'; // a char literal is not a lifetime\nlet s = \"unsafe {\";",
+        ] {
+            assert!(!denied(allowed), "{allowed:?} carries no unsafe code");
+        }
+
+        // The file the ticket found: the audit's own source, unchanged.
+        let audit = std::fs::read_to_string(workspace().join("xtask/src/unsafe_audit.rs")).unwrap();
+        assert!(
+            !denied(&audit),
+            "the audit's own negative controls are strings, not sites"
+        );
+    }
+
+    /// An unsafe attribute, `#[unsafe(no_mangle)]`, asserts an unsafe contract
+    /// as a block does, and is a site for both sensors of `unsafe.homes`: the
+    /// rule's fixture carries it outside a home and inside one (#46).
+    #[test]
+    fn an_unsafe_attribute_is_a_site_outside_a_home_and_not_a_finding_inside_one() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let dir = fixtures().join("rules/unsafe.homes");
+        let fired = |name: &str| {
+            judge(&manifest, workspace(), &call(&dir.join(name)))
+                .unwrap()
+                .findings
+                .iter()
+                .any(|f| f.rule == "unsafe.homes")
+        };
+        assert!(
+            fired("deny-attribute.json"),
+            "the attribute outside a home is denied at the edit"
+        );
+        assert!(
+            !fired("allow-attribute.json"),
+            "the attribute inside a home is allowed at the edit"
+        );
+    }
+
+    /// The two rows #28 proposes for a person to add: a ticket closes through
+    /// `xtask ticket close` and by nothing else, so `gh issue close` and `gh
+    /// issue reopen` are denied by `deny_argv` with `with`, the shape
+    /// `git.no-verify` has, and the same act through `gh api` with a closing
+    /// or reopening state by a `deny_pattern`. Each fixture is held under the
+    /// row, as the tracked file carries it or as the constructors build it.
+    #[test]
+    fn the_proposed_ticket_close_rules_fire_on_their_fixtures_and_not_on_their_neighbours() {
+        let manifest = with_the_ticket_close_rules(Manifest::load(workspace()).unwrap());
+        for rule in ["ticket.close", "ticket.close-api"] {
+            let dir = fixtures().join("rules").join(rule);
+            let allowed = judge(&manifest, workspace(), &call(&dir.join("allow.json"))).unwrap();
+            assert!(allowed.denial().is_none(), "{rule}: {allowed:?}");
+            for fixture in [dir.join("deny.json"), dir.join("deny-reopen.json")] {
+                let judged = judge(&manifest, workspace(), &call(&fixture)).unwrap();
+                assert_eq!(
+                    judged.denial().map(|f| f.rule.as_str()),
+                    Some(rule),
+                    "{}: {judged:?}",
+                    fixture.display()
+                );
+            }
+        }
+        for line in [
+            "gh api --method PATCH /repos/o/r/issues/28 --input /tmp/close.json",
+            "gh api graphql -f query='mutation { closeIssue(input: {issueId: \"I_1\"}) { issue { id } } }'",
+        ] {
+            let judged = judge(&manifest, workspace(), &bash(line)).unwrap();
+            assert_eq!(
+                judged.denial().map(|f| f.rule.as_str()),
+                Some("ticket.close-api"),
+                "{line}: {judged:?}"
+            );
+        }
+        for line in [
+            "gh pr close 3",
+            "cargo xtask ticket close 28",
+            "gh api repos/o/r/issues?state=closed",
+        ] {
+            let judged = judge(&manifest, workspace(), &bash(line)).unwrap();
+            assert!(judged.denial().is_none(), "{line}: {judged:?}");
+        }
+    }
+
+    /// The whole-file case (#134, #510): the shape the ticket named, a `Write`
+    /// of a whole file with a status `--accept` captured in it, as one fixture
+    /// beside the `Edit` calls the directory carries. The fixture is judged
+    /// twice: over this workspace, where the file at that path carries no such
+    /// line, the write adds one and is denied with the rule id; over a tree
+    /// where the same file stands, it adds none and is permitted with no
+    /// reading behind it, which is the file a session must be able to write
+    /// again. Beside it, `beside-a-pinned-one.json` edits that same tree, the
+    /// verdicts untouched, and brings one more: the negative control of the
+    /// same pair, denied though the line it types stands in the file already
+    /// and the crate's reading is fresh.
+    #[test]
+    fn the_whole_file_fixture_is_denied_here_and_permitted_where_the_file_carries_it() {
+        let dir = fixtures().join("rules/witness.exit-authored");
+        let written = call(&dir.join("whole-file.json"));
+        assert_eq!(
+            written.tool_input.file_path.as_deref(),
+            Some(FILE),
+            "the case is over the crate the scratch half lays down"
+        );
+        let text = written
+            .tool_input
+            .content
+            .clone()
+            .expect("a Write carries the whole file");
+        assert!(text.contains("exit=255"), "a captured status: {text}");
+
+        let manifest = Manifest::load(workspace()).unwrap();
+        let denied = denial(workspace(), &manifest, &written)
+            .expect("the file at that path carries no such line");
+        assert!(denied.contains(EXIT_AUTHORED), "{denied}");
+
+        let root = scratch("unless-whole-file");
+        let manifest = Manifest::load(&root).unwrap();
+        lay_down(&root, &text);
+        assert_eq!(
+            denial(&root, &manifest, &written),
+            None,
+            "the whole file as it stands adds no verdict"
+        );
+
+        witness_reading(&root);
+        let beside = call(&dir.join("beside-a-pinned-one.json"));
+        let denied = denial(&root, &manifest, &beside)
+            .expect("the edit brings a verdict the file does not carry yet");
+        assert!(denied.contains(EXIT_AUTHORED), "{denied}");
+    }
+
+    /// End to end (#105): `xtask witness --accept` captures the oracle's
+    /// status onto the fence line and writes its reading, and `xtask permit
+    /// --diff` over that tree permits the line it wrote. Take the reading away
+    /// and the same tree is denied with the rule id.
+    #[test]
+    fn what_accept_wrote_permit_diff_permits_over_the_same_tree() {
+        if !oracle_is_here() {
+            return;
+        }
+        let root = scratch("unless-accept");
+        lay_down(&root, &block("exit"));
+        let readings = witness::run(
+            &root,
+            &Manifest::load(&root).unwrap(),
+            &Registry::load(&root).unwrap(),
+            &Ask {
+                crates: vec![CRATE.to_owned()],
+                accept: Accept::Status,
+                ..Ask::default()
+            },
+        )
+        .unwrap();
+        Store::of_workspace(&root).record(&readings).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join(FILE)).unwrap(),
+            block("exit=3"),
+            "the oracle's status is on the fence line and nothing else moved"
+        );
+
+        Repo::at(&root).git(&["add", "--", CRATE]);
+        let out = xtask(&root, &["permit", "--diff"]).ok();
+        assert!(!out.contains("deny "), "{out}");
+
+        std::fs::remove_file(Store::of_workspace(&root).path("witness", CRATE).unwrap()).unwrap();
+        let ran = xtask(&root, &["permit", "--diff"]);
+        assert_eq!(ran.code(), 1, "{ran}");
+        let out = ran.stdout;
+        assert!(
+            out.contains("deny ") && out.contains(EXIT_AUTHORED) && out.contains(FILE),
+            "{out}"
+        );
+    }
+
+    /// `git.operation` (#2476, as #2530 ruled it): `git add -- <path>`, a
+    /// commit by pathspec, another hand's `git merge --continue` and a `git
+    /// restore --staged` are refused in a checkout with `MERGE_HEAD` present,
+    /// the denial naming the merge and the checkout, and each is let through
+    /// in one without it; a leading `cd` into the merging checkout is refused
+    /// from anywhere, every subcommand the widened argv names is refused
+    /// there, and what reads the index is let through. The walks above hold
+    /// the fixtures where a merge stands; this adds the checkout without one.
+    #[test]
+    fn the_git_operation_rule_refuses_staging_where_another_hand_s_merge_stands() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let merging = operating("operation-merging");
+        let quiet = checkout("operation-quiet", None);
+        let rule = |root: &Path, line: &str| {
+            let judged = judge(&manifest, root, &bash(line)).unwrap();
+            judged.denial().map(Finding::reason)
+        };
+        let dir = fixtures().join("rules/git.operation");
+        for name in [
+            "deny.json",
+            "deny-commit.json",
+            "deny-continue.json",
+            "deny-restore.json",
+        ] {
+            let judged = judge(&manifest, merging.path(), &call(&dir.join(name))).unwrap();
+            let denial = judged
+                .denial()
+                .unwrap_or_else(|| panic!("{name}: {judged:?}"));
+            assert_eq!(denial.rule, "git.operation", "{name}");
+            let reason = denial.reason();
+            assert!(
+                reason.contains(&format!(
+                    "a merge is in progress in {}",
+                    merging.path().display()
+                )),
+                "{reason}"
+            );
+            let judged = judge(&manifest, quiet.path(), &call(&dir.join(name))).unwrap();
+            assert!(
+                judged.denial().is_none(),
+                "{name} without a merge: {judged:?}"
+            );
+        }
+        let allowed = judge(&manifest, merging.path(), &call(&dir.join("allow.json"))).unwrap();
+        assert!(allowed.denial().is_none(), "{allowed:?}");
+        let add = "git add -- AGENTS.md";
+        assert!(rule(quiet.path(), add).is_none());
+        let moved = format!("cd {} && {add}", merging.path().display());
+        assert!(rule(quiet.path(), &moved).is_some_and(|r| r.contains("git.operation")));
+        for line in [
+            "git reset -- AGENTS.md",
+            "git apply --cached x.patch",
+            "git rm -q --cached -- a",
+            "git mv a b",
+            "git stage -- a",
+            "git cherry-pick --skip",
+            "git revert --abort",
+            "git rebase --continue",
+            "git am --skip",
+            "git merge --abort",
+        ] {
+            let reason = rule(merging.path(), line);
+            assert!(
+                reason.is_some_and(|r| r.contains("git.operation")),
+                "{line}"
+            );
+        }
+        for line in [
+            "git status --short",
+            "git diff --cached -- AGENTS.md",
+            "git log --grep add",
+        ] {
+            assert!(rule(merging.path(), line).is_none(), "{line}");
+        }
+    }
+
+    /// `where = "ticketed"` (#1149): the rule judges a call in a checkout
+    /// whose branch records a ticket, a builder's worktree, and not one in a
+    /// checkout that records none, main's, where the merge check runs; a
+    /// leading `cd` or `pushd` moves the call to the checkout it names.
+    #[test]
+    fn a_rule_where_ticketed_judges_only_a_checkout_whose_branch_records_a_ticket() {
+        let manifest = probe(|rule| rule.within = Where::Ticketed);
+        let ticketed = checkout("where-ticketed", Some(1149));
+        let main = checkout("where-main", None);
+        let line = "cargo xtask phpt --census";
+        assert!(denied(&manifest, ticketed.path(), line));
+        assert!(!denied(&manifest, main.path(), line));
+        let moved = format!("cd {} && {line}", ticketed.path().display());
+        assert!(denied(&manifest, main.path(), &moved));
+        let moved = format!("cd {} && {line}", main.path().display());
+        assert!(!denied(&manifest, ticketed.path(), &moved));
+        // #2607: a `cd` to a variable the line assigned, and a `pushd`, move
+        // it as a `cd` does, and a `popd` moves it back.
+        let assigned = format!("W={} && cd \"$W\" && {line}", ticketed.path().display());
+        assert!(denied(&manifest, main.path(), &assigned));
+        let pushed = format!("pushd {} && {line}", ticketed.path().display());
+        assert!(denied(&manifest, main.path(), &pushed));
+        let popped = format!("pushd {} && popd && {line}", ticketed.path().display());
+        assert!(!denied(&manifest, main.path(), &popped));
+        // Without `where`, both.
+        let manifest = probe(|_| {});
+        assert!(denied(&manifest, main.path(), line));
+    }
+
+    /// #2995: a `cd` joined to what follows by anything but `&&` may fail,
+    /// or runs in a shell of its own, so `where = "ticketed"` judges what
+    /// follows where the line stood as well, at the root; a program moved by
+    /// its own words is judged where they move it.
+    #[test]
+    fn a_rule_where_ticketed_judges_past_a_change_that_may_not_move_the_line() {
+        let manifest = probe(|rule| {
+            rule.within = Where::Ticketed;
+            rule.predicate.deny_pattern = Some(r"\bgit\s+add\b".to_owned());
+        });
+        let ticketed = checkout("where-ticketed-joints", Some(2995));
+        let main = checkout("where-main-joints", None);
+        let (wt, root) = (ticketed.path(), main.path());
+        let denied = |root: &Path, line: String| denied(&manifest, root, &line);
+        // Judged at the root, the ticketed checkout, though the `cd` names
+        // main's; joined by `&&`, the `cd` moves it.
+        let other = root.display();
+        assert!(denied(wt, format!("cd {other}; git add x")));
+        assert!(denied(wt, format!("cd {other} | true; git add x")));
+        assert!(!denied(wt, format!("cd {other} && git add x")));
+        // From main: piped, the `cd` moves nothing; sequenced, it may.
+        let into = wt.display();
+        assert!(!denied(root, format!("cd {into} | true; git add x")));
+        assert!(denied(root, format!("cd {into}; git add x")));
+        // A program's own words move it.
+        assert!(denied(root, format!("env -C {into} git add x")));
+        assert!(denied(root, format!("env --chdir {into} git add x")));
+        assert!(!denied(wt, format!("env -C {other} git add x")));
+        assert!(denied(root, format!("GIT_WORK_TREE={into} git add x")));
+    }
+
+    /// `where = "main"` (#2751): the rule judges a call in the repository's
+    /// main checkout and not one in a linked worktree, wherever the line
+    /// stands when a leading `cd` moves it; of a line's commands, the one the
+    /// pattern hits is the one asked where it runs.
+    #[test]
+    fn a_rule_where_main_judges_only_the_main_checkout() {
+        let manifest = probe(|rule| rule.within = Where::Main);
+        let main = checkout("where-main-only", None);
+        Repo::at(&main).git(&["worktree", "add", "-q", "-b", "own", "own"]);
+        let linked = main.path().join("own");
+        let line = "cargo xtask phpt --census";
+        assert!(denied(&manifest, main.path(), line));
+        assert!(!denied(&manifest, &linked, line));
+        let moved = format!("cd {} && {line}", linked.display());
+        assert!(!denied(&manifest, main.path(), &moved));
+        let moved = format!("cd {} && {line}", main.path().display());
+        assert!(denied(&manifest, &linked, &moved));
+    }
+
+    /// `harness.self-shell` under `where = "checkout"`, as #2887 ruled and
+    /// #2915 built: a shell write to `docs/divergence.toml` is refused in a
+    /// checkout, the main one or a linked worktree, however the line reaches
+    /// it, and let through in a scratch repository outside every checkout,
+    /// by either spelling of a linked temporary directory; a place `permit`
+    /// cannot follow is read as a checkout.
+    #[test]
+    fn harness_self_shell_judges_a_write_where_it_runs_and_only_in_a_checkout() {
+        let mut manifest = Manifest::load(workspace()).unwrap();
+        let rule = manifest
+            .rules
+            .iter_mut()
+            .find(|r| r.id == "harness.self-shell");
+        rule.unwrap().within = Where::Checkout;
+        let main = checkout("self-shell-main", None);
+        Repo::at(&main).git(&["worktree", "add", "-q", "-b", "own", "own"]);
+        let (main, linked) = (main.path(), main.path().join("own"));
+        let outside = Tree::new("permit-self-shell-outside").unwrap();
+        Repo::init(&outside.join("repo"));
+        let refused = |root: &Path, line: &str| {
+            let judged = judge(&manifest, root, &bash(line)).unwrap();
+            judged
+                .denial()
+                .is_some_and(|f| f.rule == "harness.self-shell")
+        };
+        let write = "echo '[[divergence]]' >> docs/divergence.toml";
+        // The negative control #2887 names, in each checkout.
+        assert!(refused(main, write));
+        assert!(refused(&linked, write));
+        let (scratch, worktree) = (outside.path().display(), linked.display());
+        let unlinked = outside.path().strip_prefix("/private").ok();
+        let spellings = std::iter::once(scratch.to_string())
+            .chain(unlinked.map(|path| format!("/{}", path.display())));
+        for s in spellings {
+            let line = format!("S={s} && cd \"$S/repo\" && {write}");
+            assert!(!refused(main, &line), "{line}");
+            assert!(!refused(&linked, &line), "{line}");
+        }
+        let piped = format!("cd {scratch}/repo && printf x 2>&1 | tee -a docs/divergence.toml");
+        assert!(!refused(main, &piped), "{piped}");
+        std::fs::create_dir(outside.join("links")).unwrap();
+        std::os::unix::fs::symlink(main.join("seams.toml"), outside.join("links/seams.toml"))
+            .unwrap();
+        std::fs::write(outside.join("file"), "").unwrap();
+        let main_dir = main.display();
+        for line in [
+            // Into a checkout by an assigned variable, by a later `cd`, by a
+            // subshell's, by git's `-C` and through a link.
+            format!("W={worktree} && cd \"$W\" && {write}"),
+            format!("cd {scratch}/repo && ls && cd {worktree} && {write}"),
+            format!("cd {scratch}/repo && (cd {worktree} && {write})"),
+            format!("cd {scratch}/repo && git -C {worktree} checkout -- seams.toml"),
+            format!("cd {scratch}/links && sed -i '' 's/a/b/' seams.toml"),
+            // Where `permit` cannot say: a variable the line did not assign,
+            // `cd -`, a directory not on disk or no directory, a change that
+            // may fail or run in a shell of its own before what follows it,
+            // one a program runs unread, and a program's own directory.
+            format!("cd \"$S/repo\" && {write}"),
+            format!("cd {scratch}/repo && cd - && {write}"),
+            format!("cd {scratch}/missing && {write}"),
+            format!("cd {scratch}/file && {write}"),
+            format!("cd {scratch}/repo; {write}"),
+            format!("cd {scratch}/repo || true && {write}"),
+            format!("cd {scratch}/repo & {write}"),
+            format!("cd {scratch}/repo | true && {write}"),
+            format!("cd {scratch}/repo\n{write}"),
+            format!("cd {scratch}/repo && xargs sh -c 'cd {worktree} && {write}' < /dev/null"),
+            format!("cd {scratch}/repo && env -C {worktree} sed -i '' 's/a/b/' seams.toml"),
+            format!("cd {scratch}/repo && patch -d {worktree} seams.toml < fix.diff"),
+            format!("cd {scratch}/repo && GIT_WORK_TREE={worktree} git checkout -- seams.toml"),
+            format!("cd {scratch}/repo && ln -sf {main_dir}/seams.toml . && {write}"),
+            format!("cd {scratch}/repo && env -iC {worktree} sed -i '' 's/a/b/' seams.toml"),
+            format!("cd {scratch}/repo && patch -d{worktree} seams.toml < fix.diff"),
+        ] {
+            assert!(refused(main, &line), "{line}");
+        }
+    }
+
+    /// `git.merge-commits-itself` as #2751 ruled it: a merge that commits
+    /// itself is refused in the main checkout and let through in a linked
+    /// worktree, where a builder merges `main` into its branch; a neighbour
+    /// in main does not place a merge `-C` runs in the worktree there.
+    #[test]
+    fn a_merge_that_commits_itself_is_refused_in_main_alone() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let main = checkout("merge-commits-itself", None);
+        Repo::at(&main).git(&["worktree", "add", "-q", "-b", "own", "own"]);
+        let linked = main.path().join("own");
+        let refused = |root: &Path, line: &str| {
+            judge(&manifest, root, &bash(line))
+                .unwrap()
+                .findings
+                .iter()
+                .any(|f| f.rule == "git.merge-commits-itself" && f.kind == Kind::Deny)
+        };
+        assert!(refused(main.path(), "git merge --no-ff t1234"));
+        assert!(!refused(main.path(), "git merge --no-ff --no-commit t1234"));
+        assert!(!refused(&linked, "git merge main"));
+        let apart = format!(
+            "git -C {} merge --abort; git -C {} merge main",
+            main.path().display(),
+            linked.display()
+        );
+        assert!(!refused(main.path(), &apart));
+    }
+
+    /// `unless_pattern` (#1149): a hit of the `deny_pattern` whose own command
+    /// also matches it is let through, and a hit in another command of the
+    /// same line is not.
+    #[test]
+    fn unless_pattern_allows_a_call_its_deny_pattern_matches() {
+        let manifest = probe(|rule| rule.predicate.unless_pattern = Some("--subset".to_owned()));
+        let root = workspace();
+        assert!(denied(&manifest, root, "cargo xtask phpt --census"));
+        assert!(!denied(
+            &manifest,
+            root,
+            "cargo xtask phpt --subset ext/zlib"
+        ));
+        assert!(!denied(
+            &manifest,
+            root,
+            "cargo xtask phpt --census --subset Zend/tests; echo ok"
+        ));
+        assert!(denied(
+            &manifest,
+            root,
+            "cargo xtask phpt --subset ext/zlib && cargo xtask phpt"
+        ));
+        // The row that carries one without a `deny_pattern` is refused.
+        let text = Tracked::workspace()
+            .with_rule("orphan", |rule| {
+                rule.extend(
+                    "tool = \"Bash\"\ndeny = true\nunless_pattern = \"x\"\ntext = \"t\"\n"
+                        .parse::<toml::Table>()
+                        .unwrap(),
+                );
+            })
+            .text();
+        let refused = Manifest::parse(&text).unwrap_err().to_string();
+        assert!(
+            refused.contains("`unless_pattern` beside `deny`"),
+            "{refused}"
+        );
+    }
+
+    /// `lanes.builder-subset`'s fixture (#1145, #1149), as `require_argv =
+    /// "--subset"` under `with = "xtask phpt"` reads it (#1860): in a
+    /// checkout whose branch records a ticket the lane without `--subset` is
+    /// denied, however xtask is run, and the subsets, an extension's and
+    /// Zend/tests, as a word or after `=`, pass; the merge check's call
+    /// passes in a checkout that records none, and is denied in one that
+    /// does, so it is `where` that lets it through.
+    #[test]
+    fn the_builder_subset_rule_denies_the_lane_in_a_ticketed_checkout_alone() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let dir = fixtures().join("rules/lanes.builder-subset");
+        let ticketed = checkout("builder-subset-ticketed", Some(1145));
+        let main = checkout("builder-subset-main", None);
+        let rule = |root: &Path, file: &str| {
+            let judged = judge(&manifest, root, &call(&dir.join(file))).unwrap();
+            judged.denial().map(|f| f.rule.clone())
+        };
+        let denied = Some("lanes.builder-subset".to_owned());
+        assert_eq!(rule(ticketed.path(), "deny.json"), denied);
+        assert_eq!(rule(ticketed.path(), "allow.json"), None);
+        assert_eq!(rule(ticketed.path(), "allow-zend.json"), None);
+        assert_eq!(rule(main.path(), "allow-main.json"), None);
+        assert_eq!(rule(ticketed.path(), "allow-main.json"), denied);
+        // Through `cargo run` on the package or a variable the line assigns,
+        // the lane is still run; the subset after `=` is still named.
+        assert_eq!(rule(ticketed.path(), "deny-run.json"), denied);
+        assert_eq!(rule(ticketed.path(), "deny-variable.json"), denied);
+        assert_eq!(rule(ticketed.path(), "allow-equals.json"), None);
+        // A message whose subject or body cites the instrument, under cargo
+        // or not, runs nothing (#790, #1771).
+        assert_eq!(rule(ticketed.path(), "allow-heredoc.json"), None);
+        assert_eq!(rule(ticketed.path(), "allow-message-cargo.json"), None);
+        // Reading the instrument's options runs no lane, and the exception is
+        // the instrument's own flag, not a later `-h` (#1424).
+        assert_eq!(rule(ticketed.path(), "allow-help.json"), None);
+        assert_eq!(rule(ticketed.path(), "deny-help-elsewhere.json"), denied);
+    }
+
+    /// `lanes.nightly`'s heredoc fixtures (#790): a commit whose message has a
+    /// line opening `run-tests.php:2950)` cites upstream's runner and runs
+    /// nothing, so it passes; the runner first in the call, or after a
+    /// separator, is still denied, and so is its run under php.
+    #[test]
+    fn the_nightly_rule_denies_the_runner_where_it_is_run_and_not_a_message_line() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let dir = fixtures().join("rules/lanes.nightly");
+        let quiet = checkout("nightly-quiet", None);
+        let rule = |file: &str| {
+            let judged = judge(&manifest, quiet.path(), &call(&dir.join(file))).unwrap();
+            judged.denial().map(|f| f.rule.clone())
+        };
+        let denied = Some("lanes.nightly".to_owned());
+        assert_eq!(rule("allow-heredoc.json"), None);
+        assert_eq!(rule("deny-first.json"), denied);
+        assert_eq!(rule("deny-separator.json"), denied);
+        assert_eq!(rule("deny.json"), denied);
+        // Flags before the runner, or a binary named by a variable, still run
+        // it; reading its source does not (#1446).
+        assert_eq!(rule("deny-flags.json"), denied);
+        assert_eq!(rule("deny-variable.json"), denied);
+        assert_eq!(rule("allow-read.json"), None);
+    }
+
+    /// A `Bash` rule judges what a command runs, not text quoted inside it
+    /// (#1771, #1832): a heredoc that cites the nightly lane's command, as a
+    /// ticket's draft or a program on python's stdin, passes
+    /// `lanes.nightly-flags`; the same command run after the heredoc closes,
+    /// or in a body a shell reads as the commands it runs, is denied.
+    #[test]
+    fn the_nightly_rule_judges_what_the_call_runs_and_not_a_heredoc_that_cites_it() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let dir = fixtures().join("rules/lanes.nightly-flags");
+        let rule = |file: &str| {
+            let judged = judge(&manifest, workspace(), &call(&dir.join(file))).unwrap();
+            judged.denial().map(|f| f.rule.clone())
+        };
+        let denied = Some("lanes.nightly-flags".to_owned());
+        assert_eq!(rule("allow-heredoc-lane.json"), None);
+        assert_eq!(rule("allow-heredoc-python.json"), None);
+        assert_eq!(rule("deny-after-heredoc.json"), denied);
+        assert_eq!(rule("deny-shell-heredoc.json"), denied);
+        assert_eq!(rule("deny-heredoc-piped.json"), denied);
+    }
+
+    /// Every `Bash` rule judged at the call holds to each of its fixtures
+    /// (#1832, #1860): every `deny*.json` is denied by the rule and every
+    /// `allow*.json` let through, whether the rule reads the line as a
+    /// `deny_pattern` or the command's argv as `deny_argv` or `require_argv`.
+    /// A rule scoped `where = "ticketed"` is judged in a checkout whose branch
+    /// records a ticket, but for an `allow-main*` call, the merge check's,
+    /// which passes in main's checkout alone. A rule with an `exempt_label`
+    /// asks the tracker, an `allow-starter*` call passes an operation its
+    /// session started, which a walk does not record, and an
+    /// `allow-excused*` call an `unless_argv` yet to be pasted: each is held
+    /// by its own test.
+    #[test]
+    fn every_bash_rule_holds_to_each_of_its_fixtures() {
+        let manifest = Manifest::load(workspace()).unwrap();
+        let ticketed = checkout("bash-fixtures-ticketed", Some(1832));
+        let main = checkout("bash-fixtures-main", None);
+        let merging = operating("bash-fixtures-operating");
+        let rules: Vec<&Rule> = manifest
+            .rules
+            .iter()
+            .filter(|r| {
+                judged_at_the_call(r)
+                    && r.tool.iter().any(|t| t == "Bash")
+                    && r.exempt_label.is_empty()
+            })
+            .collect();
+        // `git.no-verify`, `ticket.close-api`, `lanes.nightly`,
+        // `lanes.nightly-flags`, `lanes.builder-subset` and `computed.force`
+        // at #1877: a filter that finds fewer reads nothing.
+        assert!(
+            rules.len() >= 6,
+            "{:?}",
+            rules.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+        for rule in rules {
+            let dir = fixtures().join("rules").join(&rule.id);
+            let mut names: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            for name in names
+                .iter()
+                .filter(|n| !n.starts_with("allow-starter") && !unpasted(rule, n))
+            {
+                let root = match rule.within {
+                    Where::Ticketed if name.starts_with("allow-main") => main.path(),
+                    Where::Ticketed => ticketed.path(),
+                    Where::Anywhere => workspace(),
+                    Where::Operating => merging.path(),
+                    Where::Main | Where::Checkout => main.path(),
+                };
+                let judged = judge(&manifest, root, &call(&dir.join(name))).unwrap();
+                let fired = judged
+                    .findings
+                    .iter()
+                    .any(|f| f.rule == rule.id && f.kind == Kind::Deny);
+                assert_eq!(fired, name.starts_with("deny"), "{}: {name}", rule.id);
+            }
         }
     }
 }

@@ -229,6 +229,18 @@ pub enum Operand {
     Cv(u32),
 }
 
+/// An operand as its opline holds it: a temporary's field is its slot,
+/// which the compiler folded past the CVs.
+fn operand(kind: OperandKind, field: u32) -> Operand {
+    match kind {
+        OperandKind::Unused => Operand::Unused,
+        OperandKind::Const => Operand::Const(ConstIdx(field)),
+        OperandKind::Tmp => Operand::Tmp(field),
+        OperandKind::Var => Operand::Var(field),
+        OperandKind::Cv => Operand::Cv(field),
+    }
+}
+
 impl<'a> OplineView<'a> {
     /// Where it stands in its op array.
     #[must_use]
@@ -251,7 +263,7 @@ impl<'a> OplineView<'a> {
     /// `opline->op1`.
     #[must_use]
     pub fn op1(&self) -> Operand {
-        self.operand(self.op.op1_type, self.op.op1)
+        operand(self.op.op1_type, self.op.op1)
     }
 
     /// `opline->op2`: for a call's `INIT_FCALL`, `INIT_FCALL_BY_NAME`,
@@ -260,24 +272,14 @@ impl<'a> OplineView<'a> {
     /// or the method where the name was written.
     #[must_use]
     pub fn op2(&self) -> Operand {
-        self.operand(self.op.op2_type, self.op.op2)
+        operand(self.op.op2_type, self.op.op2)
     }
 
     /// `opline->result`, unused where nothing reads the value, as
     /// `zend_do_free` leaves it.
     #[must_use]
     pub fn out(&self) -> Operand {
-        self.operand(self.op.out_type, self.op.out)
-    }
-
-    fn operand(&self, kind: OperandKind, field: u32) -> Operand {
-        match kind {
-            OperandKind::Unused => Operand::Unused,
-            OperandKind::Const => Operand::Const(ConstIdx(field)),
-            OperandKind::Tmp => Operand::Tmp(exec::temporary_slot(self.code, field)),
-            OperandKind::Var => Operand::Var(exec::temporary_slot(self.code, field)),
-            OperandKind::Cv => Operand::Cv(field),
-        }
+        operand(self.op.out_type, self.op.out)
     }
 
     /// The oplines it may jump to, past falling through to the next one,

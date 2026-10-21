@@ -22,7 +22,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use syn::visit::{self, Visit};
 use toml::Value;
 
@@ -263,10 +263,8 @@ fn features(krate: &Present) -> Result<BTreeMap<String, Vec<String>>> {
 /// Every `php_ext_<name>::extension` path in one file, in the order
 /// written, with the `cfg`s around it.
 fn registrations(file: &Path) -> Result<Vec<Registration>> {
-    let text = crate::read(file)?;
-    let parsed = syn::parse_file(&text).with_context(|| format!("parsing {}", file.display()))?;
     let mut calls = Calls::default();
-    calls.visit_file(&parsed);
+    calls.visit_file(&super::inventory::parse_file(file)?);
     Ok(calls.found)
 }
 
@@ -325,46 +323,29 @@ impl Calls {
     }
 }
 
+/// One `visit_<node>` per node named, reading the node's `cfg`s around
+/// the walk under it ([`Calls::within`]).
+macro_rules! within_cfgs {
+    ($ast:lifetime; $($visit:ident($node:ty)),* $(,)?) => {$(
+        fn $visit(&mut self, node: &$ast $node) {
+            self.within(&node.attrs, |c| visit::$visit(c, node));
+        }
+    )*};
+}
+
 impl<'ast> Visit<'ast> for Calls {
-    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-        self.within(&node.attrs, |c| visit::visit_expr_path(c, node));
-    }
-
-    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        self.within(&node.attrs, |c| visit::visit_expr_call(c, node));
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        self.within(&node.attrs, |c| visit::visit_expr_method_call(c, node));
-    }
-
-    fn visit_expr_array(&mut self, node: &'ast syn::ExprArray) {
-        self.within(&node.attrs, |c| visit::visit_expr_array(c, node));
-    }
-
-    fn visit_expr_block(&mut self, node: &'ast syn::ExprBlock) {
-        self.within(&node.attrs, |c| visit::visit_expr_block(c, node));
-    }
-
-    fn visit_local(&mut self, node: &'ast syn::Local) {
-        self.within(&node.attrs, |c| visit::visit_local(c, node));
-    }
-
-    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-        self.within(&node.attrs, |c| visit::visit_item_fn(c, node));
-    }
-
-    fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
-        self.within(&node.attrs, |c| visit::visit_item_const(c, node));
-    }
-
-    fn visit_item_static(&mut self, node: &'ast syn::ItemStatic) {
-        self.within(&node.attrs, |c| visit::visit_item_static(c, node));
-    }
-
-    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        self.within(&node.attrs, |c| visit::visit_item_mod(c, node));
-    }
+    within_cfgs!('ast;
+        visit_expr_path(syn::ExprPath),
+        visit_expr_call(syn::ExprCall),
+        visit_expr_method_call(syn::ExprMethodCall),
+        visit_expr_array(syn::ExprArray),
+        visit_expr_block(syn::ExprBlock),
+        visit_local(syn::Local),
+        visit_item_fn(syn::ItemFn),
+        visit_item_const(syn::ItemConst),
+        visit_item_static(syn::ItemStatic),
+        visit_item_mod(syn::ItemMod),
+    );
 
     fn visit_path(&mut self, path: &'ast syn::Path) {
         let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();

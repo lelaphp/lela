@@ -875,6 +875,18 @@ impl<H> VmStack<H> {
         Some((FrameRef(u32::try_from(at).ok()?), frame))
     }
 
+    /// The frame on top of the stack and the frame at `f` below it, both
+    /// mutably, from one look at the table: the call being built and the
+    /// frame building it, which a `SEND` reads its operand from and
+    /// writes the argument into, as php's handler reaches `EX(call)` and
+    /// `EX_VAR` off two registers. None where `f` is the top itself or
+    /// no frame stands at it.
+    #[inline]
+    pub fn top_and_frame_mut(&mut self, f: FrameRef) -> Option<(&mut Frame<H>, &mut Frame<H>)> {
+        let (top, below) = self.frames.split_last_mut()?;
+        Some((top, below.get_mut(f.0 as usize)?))
+    }
+
     /// The frame on top, `f`, grown by `more` addressable slots, each
     /// `UNDEF`: php's `zend_vm_stack_extend_call_frame`, what a call
     /// whose arguments are unpacked or spread takes when they outnumber
@@ -1284,6 +1296,42 @@ mod tests {
             stack.frame(outer).map(|f| f.slot(Slot(5))),
             Some(Zval::UNDEF)
         );
+        drop(stack.close(&mut heap));
+    }
+
+    /// The top and a frame below it are lent together, each its own:
+    /// a write through one is read back through the other's frame, and
+    /// the top itself, or a frame that does not stand, lends nothing.
+    #[test]
+    fn the_top_and_a_frame_below_it_are_lent_together() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let mut stack = VmStack::<Head>::new();
+        let sending = stack
+            .push_frame(&mut heap, 2, 0, Head::default())
+            .expect("two frames fit the first page");
+        let called = stack
+            .push_frame(&mut heap, 3, 0, Head::default())
+            .expect("two frames fit the first page");
+        let (top, below) = stack
+            .top_and_frame_mut(sending)
+            .expect("a frame below the top is lent with it");
+        below.set(Slot(1), Zval::long(4));
+        top.set(Slot(2), below.slot(Slot(1)));
+        top.set(Slot(0), Zval::long(5));
+        below.set(Slot(0), top.slot(Slot(0)));
+        assert_eq!(
+            stack.frame(called).map(|f| f.slot(Slot(2))),
+            Some(Zval::long(4))
+        );
+        assert_eq!(
+            stack.frame(sending).map(|f| f.slot(Slot(0))),
+            Some(Zval::long(5))
+        );
+        assert!(stack.top_and_frame_mut(called).is_none());
+        assert!(stack.top_and_frame_mut(FrameRef(7)).is_none());
+        stack.pop_frame(&mut heap);
+        assert!(stack.top_and_frame_mut(sending).is_none());
         drop(stack.close(&mut heap));
     }
 
