@@ -21,11 +21,18 @@ fn an_empty_file_compiles_the_way_php_compiles_one() {
 #[test]
 fn echo_of_a_number_is_one_echo_and_the_final_return() {
     let (unit, _strings) = unit_and_strings(b"<?php echo 1;");
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(2, 0, 0, "0000 ECHO int(1)\n0001 RETURN int(1)\n"),
-        "the constant 1 is echoed and returned"
-    );
+    // the constant 1 is echoed and returned
+    expect![[r#"
+
+        $_main:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ECHO int(1)
+        0001 RETURN int(1)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     assert_eq!(
         (unit.main.oplines[0].op1, unit.main.oplines[1].op1),
         (0, 1),
@@ -81,25 +88,30 @@ fn dump_under_short_open_tag(source: &[u8], short_open_tag: bool) -> String {
 #[test]
 fn a_short_tag_opens_code_only_while_short_open_tag_is_on() {
     let source = b"<?\necho 1;\n";
-    let dump = |lines: usize, oplines: &str| {
-        format!(
-            "\n$_main:\n     ; (lines={lines}, args=0, vars=0, tmps=0)\n\
-             \x20    ; (before optimizer)\n     ; :1-3\n     ; return  [] RANGE[0..0]\n{oplines}"
-        )
-    };
-    assert_eq!(
-        dump_under_short_open_tag(source, false),
-        dump(
-            2,
-            "0000 ECHO string(\"<?\\necho 1;\\n\")\n0001 RETURN int(1)\n"
-        ),
-        "off, the file echoes its own text"
-    );
-    assert_eq!(
-        dump_under_short_open_tag(source, true),
-        dump(2, "0000 ECHO int(1)\n0001 RETURN int(1)\n"),
-        "on, the tag opens code and the 1 inside it is echoed"
-    );
+    // off, the file echoes its own text
+    expect![[r#"
+
+        $_main:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-3
+             ; return  [] RANGE[0..0]
+        0000 ECHO string("<?\necho 1;\n")
+        0001 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_under_short_open_tag(source, false));
+    // on, the tag opens code and the 1 inside it is echoed
+    expect![[r#"
+
+        $_main:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-3
+             ; return  [] RANGE[0..0]
+        0000 ECHO int(1)
+        0001 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_under_short_open_tag(source, true));
 }
 
 /// A unit laid down in the room of one given up (#3028) is the unit
@@ -157,15 +169,17 @@ fn the_entry_is_safepoint_zero_and_the_return_carries_its_own_number() {
 /// stands, the oracle's `[regime.dump]` of the same source.
 #[test]
 fn print_is_an_echo_whose_value_is_the_constant_one() {
-    assert_eq!(
-        oplines_of(b"<?php $r = print \"a\"; if (print $r) echo \"y\";"),
-        "0000 ECHO string(\"a\")\n\
-         0001 ASSIGN CV0($r) int(1)\n\
-         0002 ECHO CV0($r)\n\
-         0003 JMPZ int(1) 0005\n\
-         0004 ECHO string(\"y\")\n\
-         0005 RETURN int(1)\n"
-    );
+    expect![[r#"
+        0000 ECHO string("a")
+        0001 ASSIGN CV0($r) int(1)
+        0002 ECHO CV0($r)
+        0003 JMPZ int(1) 0005
+        0004 ECHO string("y")
+        0005 RETURN int(1)
+    "#]]
+    .assert_eq(&oplines_of(
+        b"<?php $r = print \"a\"; if (print $r) echo \"y\";",
+    ));
 }
 
 /// The scanner's deprecations and warning stand on the unit before
@@ -422,14 +436,28 @@ fn a_refusal_carries_the_keys_it_made_declared_or_not() {
 /// oracle's under `[regime.dump]` at 8.5.9.
 #[test]
 fn a_declare_leaves_no_opline_and_strict_types_marks_every_op_array_of_the_file() {
-    assert_eq!(
-        dump_of(b"<?php declare(strict_types=1); echo 1;"),
-        main_dump(2, 0, 0, "0000 ECHO int(1)\n0001 RETURN int(1)\n")
-    );
-    assert_eq!(
-        dump_of(b"<?php declare(ticks=0, strict_types=1); echo 1;"),
-        main_dump(2, 0, 0, "0000 ECHO int(1)\n0001 RETURN int(1)\n")
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ECHO int(1)
+        0001 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(b"<?php declare(strict_types=1); echo 1;"));
+    expect![[r#"
+
+        $_main:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ECHO int(1)
+        0001 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(b"<?php declare(ticks=0, strict_types=1); echo 1;"));
     let (unit, _strings) = unit_and_strings(b"<?php declare(strict_types=1); function f() {}");
     assert!(unit.main.strict_types);
     assert!(unit.functions.iter().all(|(_, code)| code.strict_types));

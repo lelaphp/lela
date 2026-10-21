@@ -12,26 +12,26 @@ use super::*;
 /// reads is the `PRE_*` `zend_do_free` makes of it.
 #[test]
 fn a_step_over_an_element_or_a_property_is_the_fetch_under_rw() {
-    assert_eq!(
-        oplines_of(
-            b"<?php $a[0]++; $x = $a[0][1]--; $o->p++; $y = --$o->q->r; ++$a[0]->p; $b[]++;"
-        ),
-        "0000 V5 = FETCH_DIM_RW CV0($a) int(0)\n\
-         0001 PRE_INC V5\n\
-         0002 V7 = FETCH_DIM_RW CV0($a) int(0)\n\
-         0003 V8 = FETCH_DIM_RW V7 int(1)\n\
-         0004 T9 = POST_DEC V8\n\
-         0005 ASSIGN CV1($x) T9\n\
-         0006 PRE_INC_OBJ CV2($o) string(\"p\")\n\
-         0007 V12 = FETCH_OBJ_RW CV2($o) string(\"q\")\n\
-         0008 T13 = PRE_DEC_OBJ V12 string(\"r\")\n\
-         0009 ASSIGN CV3($y) T13\n\
-         0010 V15 = FETCH_DIM_RW CV0($a) int(0)\n\
-         0011 PRE_INC_OBJ V15 string(\"p\")\n\
-         0012 V17 = FETCH_DIM_RW CV4($b) NEXT\n\
-         0013 PRE_INC V17\n\
-         0014 RETURN int(1)\n"
-    );
+    expect![[r#"
+        0000 V5 = FETCH_DIM_RW CV0($a) int(0)
+        0001 PRE_INC V5
+        0002 V7 = FETCH_DIM_RW CV0($a) int(0)
+        0003 V8 = FETCH_DIM_RW V7 int(1)
+        0004 T9 = POST_DEC V8
+        0005 ASSIGN CV1($x) T9
+        0006 PRE_INC_OBJ CV2($o) string("p")
+        0007 V12 = FETCH_OBJ_RW CV2($o) string("q")
+        0008 T13 = PRE_DEC_OBJ V12 string("r")
+        0009 ASSIGN CV3($y) T13
+        0010 V15 = FETCH_DIM_RW CV0($a) int(0)
+        0011 PRE_INC_OBJ V15 string("p")
+        0012 V17 = FETCH_DIM_RW CV4($b) NEXT
+        0013 PRE_INC V17
+        0014 RETURN int(1)
+    "#]]
+    .assert_eq(&oplines_of(
+        b"<?php $a[0]++; $x = $a[0][1]--; $o->p++; $y = --$o->q->r; ++$a[0]->p; $b[]++;",
+    ));
 }
 
 /// `zend_delayed_compile_dim` over `$this` as the oracle at 8.5.9
@@ -42,48 +42,47 @@ fn a_step_over_an_element_or_a_property_is_the_fetch_under_rw() {
 /// list.
 #[test]
 fn this_under_a_silent_dimension_is_fetched_into_a_temporary() {
-    assert_eq!(
-        dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=6, args=0, vars=0, tmps=3)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 INIT_FCALL 1 96 string("var_dump")
+        0001 T0 = FETCH_THIS
+        0002 T1 = ISSET_ISEMPTY_DIM_OBJ (isset) T0 int(0)
+        0003 SEND_VAL T1 1
+        0004 DO_ICALL
+        0005 RETURN int(1)
+
+        A::f:
+             ; (lines=17, args=0, vars=0, tmps=11)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 T0 = FETCH_THIS
+        0001 T1 = ISSET_ISEMPTY_DIM_OBJ (isset) T0 int(0)
+        0002 T2 = INIT_ARRAY 4 (packed) T1 NEXT
+        0003 T3 = FETCH_THIS
+        0004 T4 = ISSET_ISEMPTY_DIM_OBJ (empty) T3 int(0)
+        0005 T2 = ADD_ARRAY_ELEMENT T4 NEXT
+        0006 T5 = FETCH_THIS
+        0007 T6 = FETCH_DIM_IS T5 int(0)
+        0008 T7 = ISSET_ISEMPTY_DIM_OBJ (isset) T6 int(1)
+        0009 T2 = ADD_ARRAY_ELEMENT T7 NEXT
+        0010 T8 = FETCH_THIS
+        0011 T9 = FETCH_DIM_IS T8 int(0)
+        0012 T10 = COALESCE T9 0014
+        0013 T10 = QM_ASSIGN int(2)
+        0014 T2 = ADD_ARRAY_ELEMENT T10 NEXT
+        0015 RETURN T2
+        0016 RETURN null
+        LIVE RANGES:
+             2: 0003 - 0015 (tmp/var)
+    "#]].assert_eq(&dump_of(
             b"<?php class A { function f() { return [isset($this[0]), empty($this[0]), isset($this[0][1]), $this[0] ?? 2]; } } var_dump(isset($this[0]));"
-        ),
-        "\n\
-         $_main:\n\
-         \x20    ; (lines=6, args=0, vars=0, tmps=3)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 INIT_FCALL 1 96 string(\"var_dump\")\n\
-         0001 T0 = FETCH_THIS\n\
-         0002 T1 = ISSET_ISEMPTY_DIM_OBJ (isset) T0 int(0)\n\
-         0003 SEND_VAL T1 1\n\
-         0004 DO_ICALL\n\
-         0005 RETURN int(1)\n\
-         \n\
-         A::f:\n\
-         \x20    ; (lines=17, args=0, vars=0, tmps=11)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 T0 = FETCH_THIS\n\
-         0001 T1 = ISSET_ISEMPTY_DIM_OBJ (isset) T0 int(0)\n\
-         0002 T2 = INIT_ARRAY 4 (packed) T1 NEXT\n\
-         0003 T3 = FETCH_THIS\n\
-         0004 T4 = ISSET_ISEMPTY_DIM_OBJ (empty) T3 int(0)\n\
-         0005 T2 = ADD_ARRAY_ELEMENT T4 NEXT\n\
-         0006 T5 = FETCH_THIS\n\
-         0007 T6 = FETCH_DIM_IS T5 int(0)\n\
-         0008 T7 = ISSET_ISEMPTY_DIM_OBJ (isset) T6 int(1)\n\
-         0009 T2 = ADD_ARRAY_ELEMENT T7 NEXT\n\
-         0010 T8 = FETCH_THIS\n\
-         0011 T9 = FETCH_DIM_IS T8 int(0)\n\
-         0012 T10 = COALESCE T9 0014\n\
-         0013 T10 = QM_ASSIGN int(2)\n\
-         0014 T2 = ADD_ARRAY_ELEMENT T10 NEXT\n\
-         0015 RETURN T2\n\
-         0016 RETURN null\n\
-         LIVE RANGES:\n\
-         \x20    2: 0003 - 0015 (tmp/var)\n"
-    );
+        ));
 }
 
 /// `zend_delayed_compile_var` as the base of a chain of dimensions
@@ -104,51 +103,57 @@ fn the_base_of_a_chain_of_dimensions_is_the_oracle_s_delayed_fetch() {
     let source: &[u8] = b"<?php $o = new stdClass; $x = $o->p[0]; $o->p[1] = 2; \
                           $y = f()[0]; f()[1] = 3; $z = $o->p[f()]; $g()[2] = 4; \
                           function f() { return [1]; }";
-    assert_eq!(
-        dump_of(source),
-        main_dump(
-            29,
-            5,
-            19,
-            "0000 V5 = NEW 0 string(\"stdClass\")\n\
-             0001 DO_FCALL\n\
-             0002 ASSIGN CV0($o) V5\n\
-             0003 T8 = FETCH_OBJ_R CV0($o) string(\"p\")\n\
-             0004 T9 = FETCH_DIM_R T8 int(0)\n\
-             0005 ASSIGN CV1($x) T9\n\
-             0006 V11 = FETCH_OBJ_W (dim write) CV0($o) string(\"p\")\n\
-             0007 ASSIGN_DIM V11 int(1)\n\
-             0008 OP_DATA int(2)\n\
-             0009 INIT_FCALL_BY_NAME 0 string(\"f\")\n\
-             0010 V13 = DO_FCALL_BY_NAME\n\
-             0011 T14 = FETCH_DIM_R V13 int(0)\n\
-             0012 ASSIGN CV2($y) T14\n\
-             0013 INIT_FCALL_BY_NAME 0 string(\"f\")\n\
-             0014 V16 = DO_FCALL_BY_NAME\n\
-             0015 V16 = SEPARATE V16\n\
-             0016 ASSIGN_DIM V16 int(1)\n\
-             0017 OP_DATA int(3)\n\
-             0018 INIT_FCALL_BY_NAME 0 string(\"f\")\n\
-             0019 V19 = DO_FCALL_BY_NAME\n\
-             0020 T18 = FETCH_OBJ_R CV0($o) string(\"p\")\n\
-             0021 T20 = FETCH_DIM_R T18 V19\n\
-             0022 ASSIGN CV3($z) T20\n\
-             0023 INIT_DYNAMIC_CALL 0 CV4($g)\n\
-             0024 V22 = DO_FCALL\n\
-             0025 V22 = SEPARATE V22\n\
-             0026 ASSIGN_DIM V22 int(2)\n\
-             0027 OP_DATA int(4)\n\
-             0028 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    5: 0001 - 0002 (new)\n\
-             \x20    16: 0015 - 0016 (tmp/var)\n\
-             \x20    19: 0020 - 0021 (tmp/var)\n\
-             \x20    22: 0025 - 0026 (tmp/var)\n"
-        ) + "\nf:\n     ; (lines=2, args=0, vars=0, tmps=0)\n\
-             \x20    ; (before optimizer)\n     ; :1-1\n     ; return  [] RANGE[0..0]\n\
-             0000 RETURN array(...)\n\
-             0001 RETURN null\n"
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=29, args=0, vars=5, tmps=19)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 V5 = NEW 0 string("stdClass")
+        0001 DO_FCALL
+        0002 ASSIGN CV0($o) V5
+        0003 T8 = FETCH_OBJ_R CV0($o) string("p")
+        0004 T9 = FETCH_DIM_R T8 int(0)
+        0005 ASSIGN CV1($x) T9
+        0006 V11 = FETCH_OBJ_W (dim write) CV0($o) string("p")
+        0007 ASSIGN_DIM V11 int(1)
+        0008 OP_DATA int(2)
+        0009 INIT_FCALL_BY_NAME 0 string("f")
+        0010 V13 = DO_FCALL_BY_NAME
+        0011 T14 = FETCH_DIM_R V13 int(0)
+        0012 ASSIGN CV2($y) T14
+        0013 INIT_FCALL_BY_NAME 0 string("f")
+        0014 V16 = DO_FCALL_BY_NAME
+        0015 V16 = SEPARATE V16
+        0016 ASSIGN_DIM V16 int(1)
+        0017 OP_DATA int(3)
+        0018 INIT_FCALL_BY_NAME 0 string("f")
+        0019 V19 = DO_FCALL_BY_NAME
+        0020 T18 = FETCH_OBJ_R CV0($o) string("p")
+        0021 T20 = FETCH_DIM_R T18 V19
+        0022 ASSIGN CV3($z) T20
+        0023 INIT_DYNAMIC_CALL 0 CV4($g)
+        0024 V22 = DO_FCALL
+        0025 V22 = SEPARATE V22
+        0026 ASSIGN_DIM V22 int(2)
+        0027 OP_DATA int(4)
+        0028 RETURN int(1)
+        LIVE RANGES:
+             5: 0001 - 0002 (new)
+             16: 0015 - 0016 (tmp/var)
+             19: 0020 - 0021 (tmp/var)
+             22: 0025 - 0026 (tmp/var)
+
+        f:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 RETURN array(...)
+        0001 RETURN null
+    "#]]
+    .assert_eq(&dump_of(source));
 }
 
 /// The bases php refuses under a write, `zend_compile_var`'s
@@ -191,16 +196,16 @@ fn a_base_no_write_can_stand_on_is_php_s_compile_error() {
         refused(b"<?php strlen(\"a\")->p = 1;").as_deref(),
         Some("Cannot use result of built-in function in write context")
     );
-    assert_eq!(
-        oplines_of(b"<?php C::$s[0] += 1; C::$s[1]++;"),
-        "0000 V0 = FETCH_STATIC_PROP_RW string(\"s\") string(\"C\")\n\
-         0001 ASSIGN_DIM_OP (ADD) V0 int(0)\n\
-         0002 OP_DATA int(1)\n\
-         0003 V2 = FETCH_STATIC_PROP_RW string(\"s\") string(\"C\")\n\
-         0004 V3 = FETCH_DIM_RW V2 int(1)\n\
-         0005 PRE_INC V3\n\
-         0006 RETURN int(1)\n"
-    );
+    expect![[r#"
+        0000 V0 = FETCH_STATIC_PROP_RW string("s") string("C")
+        0001 ASSIGN_DIM_OP (ADD) V0 int(0)
+        0002 OP_DATA int(1)
+        0003 V2 = FETCH_STATIC_PROP_RW string("s") string("C")
+        0004 V3 = FETCH_DIM_RW V2 int(1)
+        0005 PRE_INC V3
+        0006 RETURN int(1)
+    "#]]
+    .assert_eq(&oplines_of(b"<?php C::$s[0] += 1; C::$s[1]++;"));
 }
 
 /// `zend_compile_compound_assign`, the `ZEND_AST_DIM` and
@@ -216,27 +221,30 @@ fn a_base_no_write_can_stand_on_is_php_s_compile_error() {
 /// 8.5.9.
 #[test]
 fn a_compound_assignment_to_a_dimension_and_to_a_property_are_the_oracle_s_oplines() {
-    assert_eq!(
-        dump_of(b"<?php $a = [1]; $a[0] += 1; $a[] .= \"x\"; $o->p |= 3; $b = $a[2] **= 2;"),
-        main_dump(
-            11,
-            3,
-            6,
-            "0000 ASSIGN CV0($a) array(...)\n\
-             0001 ASSIGN_DIM_OP (ADD) CV0($a) int(0)\n\
-             0002 OP_DATA int(1)\n\
-             0003 ASSIGN_DIM_OP (CONCAT) CV0($a) NEXT\n\
-             0004 OP_DATA string(\"x\")\n\
-             0005 ASSIGN_OBJ_OP (BW_OR) CV1($o) string(\"p\")\n\
-             0006 OP_DATA int(3)\n\
-             0007 T7 = ASSIGN_DIM_OP (POW) CV0($a) int(2)\n\
-             0008 OP_DATA int(2)\n\
-             0009 ASSIGN CV2($b) T7\n\
-             0010 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    7: 0008 - 0009 (tmp/var)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=11, args=0, vars=3, tmps=6)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN CV0($a) array(...)
+        0001 ASSIGN_DIM_OP (ADD) CV0($a) int(0)
+        0002 OP_DATA int(1)
+        0003 ASSIGN_DIM_OP (CONCAT) CV0($a) NEXT
+        0004 OP_DATA string("x")
+        0005 ASSIGN_OBJ_OP (BW_OR) CV1($o) string("p")
+        0006 OP_DATA int(3)
+        0007 T7 = ASSIGN_DIM_OP (POW) CV0($a) int(2)
+        0008 OP_DATA int(2)
+        0009 ASSIGN CV2($b) T7
+        0010 RETURN int(1)
+        LIVE RANGES:
+             7: 0008 - 0009 (tmp/var)
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php $a = [1]; $a[0] += 1; $a[] .= \"x\"; $o->p |= 3; $b = $a[2] **= 2;",
+    ));
 }
 
 /// `zend_adjust_for_fetch_type` under `BP_VAR_RW` (#504): every
@@ -246,22 +254,23 @@ fn a_compound_assignment_to_a_dimension_and_to_a_property_are_the_oracle_s_oplin
 /// under `[regime.dump]` at 8.5.9.
 #[test]
 fn the_links_under_a_compound_assignment_s_last_are_the_oracle_s_rw_fetches() {
-    assert_eq!(
-        dump_of(b"<?php $a = [[1]]; $a[0][1] *= 2; $o->p->q += 1;"),
-        main_dump(
-            8,
-            2,
-            5,
-            "0000 ASSIGN CV0($a) array(...)\n\
-             0001 V3 = FETCH_DIM_RW CV0($a) int(0)\n\
-             0002 ASSIGN_DIM_OP (MUL) V3 int(1)\n\
-             0003 OP_DATA int(2)\n\
-             0004 V5 = FETCH_OBJ_RW CV1($o) string(\"p\")\n\
-             0005 ASSIGN_OBJ_OP (ADD) V5 string(\"q\")\n\
-             0006 OP_DATA int(1)\n\
-             0007 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=8, args=0, vars=2, tmps=5)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN CV0($a) array(...)
+        0001 V3 = FETCH_DIM_RW CV0($a) int(0)
+        0002 ASSIGN_DIM_OP (MUL) V3 int(1)
+        0003 OP_DATA int(2)
+        0004 V5 = FETCH_OBJ_RW CV1($o) string("p")
+        0005 ASSIGN_OBJ_OP (ADD) V5 string("q")
+        0006 OP_DATA int(1)
+        0007 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(b"<?php $a = [[1]]; $a[0][1] *= 2; $o->p->q += 1;"));
 }
 
 /// `zend_delayed_compile_var`'s last two bases under a write
@@ -272,30 +281,34 @@ fn the_links_under_a_compound_assignment_s_last_are_the_oracle_s_rw_fetches() {
 /// is the oracle's under `[regime.dump]` at 8.5.9.
 #[test]
 fn a_static_property_and_this_under_a_written_dimension_are_the_oracle_s_bases() {
-    assert_eq!(
-        dump_of(b"<?php class C { public static $s = [1]; } C::$s[0] = 1;"),
-        main_dump(
-            4,
-            0,
-            2,
-            "0000 V0 = FETCH_STATIC_PROP_W (dim write) string(\"s\") string(\"C\")\n\
-             0001 ASSIGN_DIM V0 int(0)\n\
-             0002 OP_DATA int(1)\n\
-             0003 RETURN int(1)\n"
-        )
-    );
-    assert_eq!(
-        dump_of(b"<?php $this[0] = 1;"),
-        main_dump(
-            4,
-            0,
-            2,
-            "0000 V0 = FETCH_THIS\n\
-             0001 ASSIGN_DIM V0 int(0)\n\
-             0002 OP_DATA int(1)\n\
-             0003 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=4, args=0, vars=0, tmps=2)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 V0 = FETCH_STATIC_PROP_W (dim write) string("s") string("C")
+        0001 ASSIGN_DIM V0 int(0)
+        0002 OP_DATA int(1)
+        0003 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php class C { public static $s = [1]; } C::$s[0] = 1;",
+    ));
+    expect![[r#"
+
+        $_main:
+             ; (lines=4, args=0, vars=0, tmps=2)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 V0 = FETCH_THIS
+        0001 ASSIGN_DIM V0 int(0)
+        0002 OP_DATA int(1)
+        0003 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(b"<?php $this[0] = 1;"));
 }
 
 /// `$a[k] = v`, `$a[] = v` and `$a[] = &$x` as the oracle dumps them
@@ -312,94 +325,130 @@ fn a_static_property_and_this_under_a_written_dimension_are_the_oracle_s_bases()
 /// `$a` first through a `QM_ASSIGN`; and a by-reference write leaves
 /// the last link a `FETCH_DIM_W` with `ASSIGN_REF` over its `VAR`.
 #[test]
+#[allow(clippy::too_many_lines)] // one snapshot per case: the table is the test
 fn a_dimension_assignment_compiles_to_assign_dim_as_php_emits_it() {
-    let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+    let cases: &[(&[u8], Expect)] = &[
         (
             b"<?php $a[0] = 2;",
-            3,
-            1,
-            1,
-            "0000 ASSIGN_DIM CV0($a) int(0)\n\
-             0001 OP_DATA int(2)\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=1, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ASSIGN_DIM CV0($a) int(0)
+                0001 OP_DATA int(2)
+                0002 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $a[] = 3;",
-            3,
-            1,
-            1,
-            "0000 ASSIGN_DIM CV0($a) NEXT\n\
-             0001 OP_DATA int(3)\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=1, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ASSIGN_DIM CV0($a) NEXT
+                0001 OP_DATA int(3)
+                0002 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $a[\"10\"] = 1;",
-            3,
-            1,
-            1,
-            "0000 ASSIGN_DIM CV0($a) int(10)\n\
-             0001 OP_DATA int(1)\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=1, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ASSIGN_DIM CV0($a) int(10)
+                0001 OP_DATA int(1)
+                0002 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $x = $a[$k] = $v;",
-            4,
-            4,
-            2,
-            "0000 T4 = ASSIGN_DIM CV1($a) CV2($k)\n\
-             0001 OP_DATA CV3($v)\n\
-             0002 ASSIGN CV0($x) T4\n\
-             0003 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    4: 0001 - 0002 (tmp/var)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=4, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T4 = ASSIGN_DIM CV1($a) CV2($k)
+                0001 OP_DATA CV3($v)
+                0002 ASSIGN CV0($x) T4
+                0003 RETURN int(1)
+                LIVE RANGES:
+                     4: 0001 - 0002 (tmp/var)
+            "#]],
         ),
         (
             b"<?php $a[1][2] = 3;",
-            4,
-            1,
-            2,
-            "0000 V1 = FETCH_DIM_W CV0($a) int(1)\n\
-             0001 ASSIGN_DIM V1 int(2)\n\
-             0002 OP_DATA int(3)\n\
-             0003 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=1, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V1 = FETCH_DIM_W CV0($a) int(1)
+                0001 ASSIGN_DIM V1 int(2)
+                0002 OP_DATA int(3)
+                0003 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $a[0] = $a;",
-            4,
-            1,
-            2,
-            "0000 T2 = QM_ASSIGN CV0($a)\n\
-             0001 ASSIGN_DIM CV0($a) int(0)\n\
-             0002 OP_DATA T2\n\
-             0003 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=1, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T2 = QM_ASSIGN CV0($a)
+                0001 ASSIGN_DIM CV0($a) int(0)
+                0002 OP_DATA T2
+                0003 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $a[] = &$a;",
-            3,
-            1,
-            2,
-            "0000 V1 = FETCH_DIM_W CV0($a) NEXT\n\
-             0001 ASSIGN_REF V1 CV0($a)\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=1, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V1 = FETCH_DIM_W CV0($a) NEXT
+                0001 ASSIGN_REF V1 CV0($a)
+                0002 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $a[0][] = &$b;",
-            4,
-            2,
-            3,
-            "0000 V2 = FETCH_DIM_W CV0($a) int(0)\n\
-             0001 V3 = FETCH_DIM_W V2 NEXT\n\
-             0002 ASSIGN_REF V3 CV1($b)\n\
-             0003 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=2, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V2 = FETCH_DIM_W CV0($a) int(0)
+                0001 V3 = FETCH_DIM_W V2 NEXT
+                0002 ASSIGN_REF V3 CV1($b)
+                0003 RETURN int(1)
+            "#]],
         ),
     ];
-    for (source, lines, vars, tmps, oplines) in cases {
-        assert_eq!(
-            dump_of(source),
-            main_dump(*lines, *vars, *tmps, oplines),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+    for (source, expected) in cases {
+        expected.assert_eq(&dump_of(source));
     }
 }
 
@@ -465,31 +514,32 @@ fn a_constant_numeric_dimension_keeps_the_written_string_after_the_long() {
 /// oracle's under `[regime.dump]` at 8.5.9.
 #[test]
 fn a_dimension_behind_a_literal_is_the_oracle_s_oplines() {
-    assert_eq!(
-        dump_of(
-            b"<?php $a = \"ab\"[0]; $b = [1, 2][0]; $c = [[1], 2][0][0]; \
-              $d = \"ab\"[0] ?? \"d\"; $e = (\"a\" . \"b\")[0];"
-        ),
-        main_dump(
-            14,
-            5,
-            12,
-            "0000 T5 = FETCH_DIM_R string(\"ab\") int(0)\n\
-             0001 ASSIGN CV0($a) T5\n\
-             0002 T7 = FETCH_DIM_R array(...) int(0)\n\
-             0003 ASSIGN CV1($b) T7\n\
-             0004 T9 = FETCH_DIM_R array(...) int(0)\n\
-             0005 T10 = FETCH_DIM_R T9 int(0)\n\
-             0006 ASSIGN CV2($c) T10\n\
-             0007 T12 = FETCH_DIM_IS string(\"ab\") int(0)\n\
-             0008 T13 = COALESCE T12 0010\n\
-             0009 T13 = QM_ASSIGN string(\"d\")\n\
-             0010 ASSIGN CV3($d) T13\n\
-             0011 T15 = FETCH_DIM_R string(\"ab\") int(0)\n\
-             0012 ASSIGN CV4($e) T15\n\
-             0013 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=14, args=0, vars=5, tmps=12)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 T5 = FETCH_DIM_R string("ab") int(0)
+        0001 ASSIGN CV0($a) T5
+        0002 T7 = FETCH_DIM_R array(...) int(0)
+        0003 ASSIGN CV1($b) T7
+        0004 T9 = FETCH_DIM_R array(...) int(0)
+        0005 T10 = FETCH_DIM_R T9 int(0)
+        0006 ASSIGN CV2($c) T10
+        0007 T12 = FETCH_DIM_IS string("ab") int(0)
+        0008 T13 = COALESCE T12 0010
+        0009 T13 = QM_ASSIGN string("d")
+        0010 ASSIGN CV3($d) T13
+        0011 T15 = FETCH_DIM_R string("ab") int(0)
+        0012 ASSIGN CV4($e) T15
+        0013 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php $a = \"ab\"[0]; $b = [1, 2][0]; $c = [[1], 2][0][0]; \
+              $d = \"ab\"[0] ?? \"d\"; $e = (\"a\" . \"b\")[0];",
+    ));
 }
 
 /// What a dimension refuses: `[]` where a value is wanted, php's
@@ -526,71 +576,96 @@ fn a_dimension_this_compiler_cannot_read_yet_is_refused() {
 /// before the write's, the write's own temporary numbered first.
 #[test]
 fn a_dimension_read_compiles_to_fetch_dim_r_as_php_emits_it() {
-    let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+    let cases: &[(&[u8], Expect)] = &[
         (
             b"<?php echo $a[0];",
-            3,
-            1,
-            1,
-            "0000 T1 = FETCH_DIM_R CV0($a) int(0)\n\
-             0001 ECHO T1\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=1, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T1 = FETCH_DIM_R CV0($a) int(0)
+                0001 ECHO T1
+                0002 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php echo $a[\"10\"];",
-            3,
-            1,
-            1,
-            "0000 T1 = FETCH_DIM_R CV0($a) int(10)\n\
-             0001 ECHO T1\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=1, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T1 = FETCH_DIM_R CV0($a) int(10)
+                0001 ECHO T1
+                0002 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php echo $a[\"k\"];",
-            3,
-            1,
-            1,
-            "0000 T1 = FETCH_DIM_R CV0($a) string(\"k\")\n\
-             0001 ECHO T1\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=1, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T1 = FETCH_DIM_R CV0($a) string("k")
+                0001 ECHO T1
+                0002 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $x = $a[$k][1];",
-            4,
-            3,
-            3,
-            "0000 T3 = FETCH_DIM_R CV1($a) CV2($k)\n\
-             0001 T4 = FETCH_DIM_R T3 int(1)\n\
-             0002 ASSIGN CV0($x) T4\n\
-             0003 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=3, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T3 = FETCH_DIM_R CV1($a) CV2($k)
+                0001 T4 = FETCH_DIM_R T3 int(1)
+                0002 ASSIGN CV0($x) T4
+                0003 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php echo $a[$b[0]];",
-            4,
-            2,
-            2,
-            "0000 T2 = FETCH_DIM_R CV1($b) int(0)\n\
-             0001 T3 = FETCH_DIM_R CV0($a) T2\n\
-             0002 ECHO T3\n\
-             0003 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=2, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T2 = FETCH_DIM_R CV1($b) int(0)
+                0001 T3 = FETCH_DIM_R CV0($a) T2
+                0002 ECHO T3
+                0003 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $a[0] = $b[1];",
-            4,
-            2,
-            2,
-            "0000 T3 = FETCH_DIM_R CV1($b) int(1)\n\
-             0001 ASSIGN_DIM CV0($a) int(0)\n\
-             0002 OP_DATA T3\n\
-             0003 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=2, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T3 = FETCH_DIM_R CV1($b) int(1)
+                0001 ASSIGN_DIM CV0($a) int(0)
+                0002 OP_DATA T3
+                0003 RETURN int(1)
+            "#]],
         ),
     ];
-    for (source, lines, vars, tmps, oplines) in cases {
-        assert_eq!(
-            dump_of(source),
-            main_dump(*lines, *vars, *tmps, oplines),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+    for (source, expected) in cases {
+        expected.assert_eq(&dump_of(source));
     }
 }

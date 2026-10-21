@@ -14,42 +14,41 @@ use super::*;
 /// 8.5.9 (#2680).
 #[test]
 fn a_class_in_parentheses_is_the_expression_and_a_string_the_class_it_names() {
-    assert_eq!(
-        dump_of(b"<?php new (C); new C; echo (C)::X, (\"A\" . \"B\")::class, \"Foo\"::X, (\"\\\\Foo\")::X; var_dump($a instanceof (C));"),
-        "\n$_main:\n\
-         \x20    ; (lines=24, args=0, vars=1, tmps=15)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 T1 = FETCH_CONSTANT string(\"C\")\n\
-         0001 V2 = FETCH_CLASS (exception) T1\n\
-         0002 V3 = NEW 0 V2\n\
-         0003 DO_FCALL\n\
-         0004 FREE V3\n\
-         0005 V5 = NEW 0 string(\"C\")\n\
-         0006 DO_FCALL\n\
-         0007 FREE V5\n\
-         0008 T7 = FETCH_CONSTANT string(\"C\")\n\
-         0009 V8 = FETCH_CLASS (exception) T7\n\
-         0010 T9 = FETCH_CLASS_CONSTANT V8 string(\"X\")\n\
-         0011 ECHO T9\n\
-         0012 ECHO string(\"AB\")\n\
-         0013 T10 = FETCH_CLASS_CONSTANT string(\"Foo\") string(\"X\")\n\
-         0014 ECHO T10\n\
-         0015 T11 = FETCH_CLASS_CONSTANT string(\"Foo\") string(\"X\")\n\
-         0016 ECHO T11\n\
-         0017 INIT_FCALL 1 96 string(\"var_dump\")\n\
-         0018 T12 = FETCH_CONSTANT string(\"C\")\n\
-         0019 V13 = FETCH_CLASS (no-autoload) (silent) (exception) T12\n\
-         0020 T14 = INSTANCEOF CV0($a) V13\n\
-         0021 SEND_VAL T14 1\n\
-         0022 DO_ICALL\n\
-         0023 RETURN int(1)\n\
-         LIVE RANGES:\n\
-         \x20    3: 0003 - 0004 (new)\n\
-         \x20    5: 0006 - 0007 (new)\n\
-         "
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=24, args=0, vars=1, tmps=15)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 T1 = FETCH_CONSTANT string("C")
+        0001 V2 = FETCH_CLASS (exception) T1
+        0002 V3 = NEW 0 V2
+        0003 DO_FCALL
+        0004 FREE V3
+        0005 V5 = NEW 0 string("C")
+        0006 DO_FCALL
+        0007 FREE V5
+        0008 T7 = FETCH_CONSTANT string("C")
+        0009 V8 = FETCH_CLASS (exception) T7
+        0010 T9 = FETCH_CLASS_CONSTANT V8 string("X")
+        0011 ECHO T9
+        0012 ECHO string("AB")
+        0013 T10 = FETCH_CLASS_CONSTANT string("Foo") string("X")
+        0014 ECHO T10
+        0015 T11 = FETCH_CLASS_CONSTANT string("Foo") string("X")
+        0016 ECHO T11
+        0017 INIT_FCALL 1 96 string("var_dump")
+        0018 T12 = FETCH_CONSTANT string("C")
+        0019 V13 = FETCH_CLASS (no-autoload) (silent) (exception) T12
+        0020 T14 = INSTANCEOF CV0($a) V13
+        0021 SEND_VAL T14 1
+        0022 DO_ICALL
+        0023 RETURN int(1)
+        LIVE RANGES:
+             3: 0003 - 0004 (new)
+             5: 0006 - 0007 (new)
+    "#]].assert_eq(&dump_of(b"<?php new (C); new C; echo (C)::X, (\"A\" . \"B\")::class, \"Foo\"::X, (\"\\\\Foo\")::X; var_dump($a instanceof (C));"));
 }
 
 /// `zend_compile_new`, `zend_compile_static_call`,
@@ -63,54 +62,64 @@ fn a_class_in_parentheses_is_the_expression_and_a_string_the_class_it_names() {
 /// first's temporary, and `false` where the left side is a constant.
 #[test]
 fn new_compiles_to_php_s_op_array() {
-    let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+    let cases: &[(&[u8], Expect)] = &[
         (
             b"<?php $o = new E;",
-            4,
-            1,
-            3,
-            "0000 V1 = NEW 0 string(\"E\")\n\
-             0001 DO_FCALL\n\
-             0002 ASSIGN CV0($o) V1\n\
-             0003 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    1: 0001 - 0002 (new)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=1, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V1 = NEW 0 string("E")
+                0001 DO_FCALL
+                0002 ASSIGN CV0($o) V1
+                0003 RETURN int(1)
+                LIVE RANGES:
+                     1: 0001 - 0002 (new)
+            "#]],
         ),
         (
             b"<?php new E;",
-            4,
-            0,
-            2,
-            "0000 V0 = NEW 0 string(\"E\")\n\
-             0001 DO_FCALL\n\
-             0002 FREE V0\n\
-             0003 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    0: 0001 - 0002 (new)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=0, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V0 = NEW 0 string("E")
+                0001 DO_FCALL
+                0002 FREE V0
+                0003 RETURN int(1)
+                LIVE RANGES:
+                     0: 0001 - 0002 (new)
+            "#]],
         ),
         (
             b"<?php echo (new E(1))->m();",
-            7,
-            0,
-            3,
-            "0000 V0 = NEW 1 string(\"E\")\n\
-             0001 SEND_VAL_EX int(1) 1\n\
-             0002 DO_FCALL\n\
-             0003 INIT_METHOD_CALL 0 V0 string(\"m\")\n\
-             0004 V2 = DO_FCALL\n\
-             0005 ECHO V2\n\
-             0006 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    0: 0001 - 0003 (new)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=7, args=0, vars=0, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V0 = NEW 1 string("E")
+                0001 SEND_VAL_EX int(1) 1
+                0002 DO_FCALL
+                0003 INIT_METHOD_CALL 0 V0 string("m")
+                0004 V2 = DO_FCALL
+                0005 ECHO V2
+                0006 RETURN int(1)
+                LIVE RANGES:
+                     0: 0001 - 0003 (new)
+            "#]],
         ),
     ];
-    for (source, lines, vars, tmps, oplines) in cases {
-        assert_eq!(
-            dump_of(source),
-            main_dump(*lines, *vars, *tmps, oplines),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+    for (source, expected) in cases {
+        expected.assert_eq(&dump_of(source));
     }
     let (unit, _strings) = unit_and_strings(b"<?php new E; $o instanceof E;");
     assert_eq!(
@@ -169,21 +178,22 @@ fn a_method_of_a_namespaced_class_is_a_known_callee_in_its_namespace() {
     .expect("the source compiles")
     .dump(&[])
     .text();
-    assert_eq!(
-        dump,
-        main_dump(
-            7,
-            0,
-            2,
-            "0000 INIT_STATIC_METHOD_CALL 1 string(\"A\\\\M\") string(\"f\")\n\
-             0001 SEND_VAL int(1) 1\n\
-             0002 DO_FCALL\n\
-             0003 INIT_STATIC_METHOD_CALL 1 string(\"M\") string(\"f\")\n\
-             0004 SEND_VAL_EX int(1) 1\n\
-             0005 DO_FCALL\n\
-             0006 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=7, args=0, vars=0, tmps=2)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 INIT_STATIC_METHOD_CALL 1 string("A\\M") string("f")
+        0001 SEND_VAL int(1) 1
+        0002 DO_FCALL
+        0003 INIT_STATIC_METHOD_CALL 1 string("M") string("f")
+        0004 SEND_VAL_EX int(1) 1
+        0005 DO_FCALL
+        0006 RETURN int(1)
+    "#]]
+    .assert_eq(&dump);
 }
 
 /// `zend_compile_method_call` and `zend_compile_static_call` against
@@ -197,7 +207,76 @@ fn a_method_of_a_namespaced_class_is_a_known_callee_in_its_namespace() {
 /// it compiled.
 #[test]
 fn a_call_the_class_being_compiled_pins_down_is_do_ucall() {
-    let dump = dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-15
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+
+        C::p:
+             ; (lines=2, args=1, vars=1, tmps=0)
+             ; (before optimizer)
+             ; :3-3
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV 1
+        0001 RETURN null
+
+        C::f:
+             ; (lines=2, args=1, vars=1, tmps=0)
+             ; (before optimizer)
+             ; :4-4
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV 1
+        0001 RETURN null
+
+        C::g:
+             ; (lines=2, args=1, vars=1, tmps=0)
+             ; (before optimizer)
+             ; :5-5
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV 1
+        0001 RETURN null
+
+        C::s:
+             ; (lines=6, args=1, vars=1, tmps=1)
+             ; (before optimizer)
+             ; :6-6
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV 1
+        0001 INIT_STATIC_METHOD_CALL 1 string("C") string("s")
+        0002 SEND_VAR CV0($a) 1
+        0003 V1 = DO_UCALL
+        0004 RETURN V1
+        0005 RETURN null
+
+        C::m:
+             ; (lines=18, args=1, vars=1, tmps=5)
+             ; (before optimizer)
+             ; :7-13
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV 1
+        0001 INIT_METHOD_CALL 1 THIS string("p")
+        0002 SEND_VAR CV0($a) 1
+        0003 DO_UCALL
+        0004 INIT_METHOD_CALL 1 THIS string("f")
+        0005 SEND_REF CV0($a) 1
+        0006 DO_UCALL
+        0007 INIT_METHOD_CALL 1 THIS string("g")
+        0008 SEND_VAR_EX CV0($a) 1
+        0009 DO_FCALL
+        0010 INIT_STATIC_METHOD_CALL 1 (self) (exception) string("s")
+        0011 SEND_VAL int(1) 1
+        0012 DO_UCALL
+        0013 INIT_METHOD_CALL 1 THIS string("m")
+        0014 SEND_VAR_EX CV0($a) 1
+        0015 V5 = DO_FCALL
+        0016 RETURN V5
+        0017 RETURN null
+    "#]]
+    .assert_eq(&dump_of(
         b"<?php
 class C {
     private function p($a) {}
@@ -213,33 +292,7 @@ class C {
     }
 }
 ",
-    );
-    let s = "0000 CV0($a) = RECV 1\n\
-             0001 INIT_STATIC_METHOD_CALL 1 string(\"C\") string(\"s\")\n\
-             0002 SEND_VAR CV0($a) 1\n\
-             0003 V1 = DO_UCALL\n\
-             0004 RETURN V1\n\
-             0005 RETURN null\n";
-    let m = "0000 CV0($a) = RECV 1\n\
-             0001 INIT_METHOD_CALL 1 THIS string(\"p\")\n\
-             0002 SEND_VAR CV0($a) 1\n\
-             0003 DO_UCALL\n\
-             0004 INIT_METHOD_CALL 1 THIS string(\"f\")\n\
-             0005 SEND_REF CV0($a) 1\n\
-             0006 DO_UCALL\n\
-             0007 INIT_METHOD_CALL 1 THIS string(\"g\")\n\
-             0008 SEND_VAR_EX CV0($a) 1\n\
-             0009 DO_FCALL\n\
-             0010 INIT_STATIC_METHOD_CALL 1 (self) (exception) string(\"s\")\n\
-             0011 SEND_VAL int(1) 1\n\
-             0012 DO_UCALL\n\
-             0013 INIT_METHOD_CALL 1 THIS string(\"m\")\n\
-             0014 SEND_VAR_EX CV0($a) 1\n\
-             0015 V5 = DO_FCALL\n\
-             0016 RETURN V5\n\
-             0017 RETURN null\n";
-    assert!(dump.contains(s), "php's C::s, {dump}");
-    assert!(dump.contains(m), "php's C::m, {dump}");
+    ));
 }
 
 /// `zend_compile_static_call` over a class bound early (#2016):
@@ -250,24 +303,43 @@ class C {
 /// method inherited stays `DO_FCALL`.
 #[test]
 fn a_static_call_to_an_inherited_method_is_do_ucall() {
-    let dump = dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=6, args=0, vars=1, tmps=2)
+             ; (before optimizer)
+             ; :1-6
+             ; return  [] RANGE[0..0]
+        0000 INIT_STATIC_METHOD_CALL 1 string("B") string("foo")
+        0001 SEND_REF CV0($x) 1
+        0002 DO_UCALL
+        0003 INIT_STATIC_METHOD_CALL 0 string("B") string("p")
+        0004 DO_FCALL
+        0005 RETURN int(1)
+
+        A::foo:
+             ; (lines=2, args=1, vars=1, tmps=0)
+             ; (before optimizer)
+             ; :2-2
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV 1
+        0001 RETURN null
+
+        A::p:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :2-2
+             ; return  [] RANGE[0..0]
+        0000 RETURN null
+    "#]]
+    .assert_eq(&dump_of(
         b"<?php
 class A { static function foo(&$a) {} private static function p() {} }
 class B extends A {}
 B::foo($x);
 B::p();
 ",
-    );
-    assert!(
-        dump.contains(
-            "0000 INIT_STATIC_METHOD_CALL 1 string(\"B\") string(\"foo\")\n\
-             0001 SEND_REF CV0($x) 1\n\
-             0002 DO_UCALL\n\
-             0003 INIT_STATIC_METHOD_CALL 0 string(\"B\") string(\"p\")\n\
-             0004 DO_FCALL\n"
-        ),
-        "php's $_main, {dump}"
-    );
+    ));
 }
 
 /// `zend_get_compatible_func_or_null`: a public method of a class
@@ -324,38 +396,42 @@ fn a_public_method_of_a_declared_class_is_a_known_callee() {
             .dump(&[])
             .text()
     };
-    assert_eq!(
-        dump(b"<?php $a = 1; phptoken::TOKENIZE('<?php ', $a);"),
-        main_dump(
-            6,
-            1,
-            2,
-            "0000 ASSIGN CV0($a) int(1)\n\
-             0001 INIT_STATIC_METHOD_CALL 2 string(\"phptoken\") string(\"TOKENIZE\")\n\
-             0002 SEND_VAL string(\"<?php \") 1\n\
-             0003 SEND_VAR CV0($a) 2\n\
-             0004 DO_FCALL\n\
-             0005 RETURN int(1)\n"
-        )
-    );
-    assert_eq!(
-        dump(b"<?php PhpToken::hidden(1); Nope::m(1); class M {} M::m(1);"),
-        main_dump(
-            10,
-            0,
-            3,
-            "0000 INIT_STATIC_METHOD_CALL 1 string(\"PhpToken\") string(\"hidden\")\n\
-             0001 SEND_VAL_EX int(1) 1\n\
-             0002 DO_FCALL\n\
-             0003 INIT_STATIC_METHOD_CALL 1 string(\"Nope\") string(\"m\")\n\
-             0004 SEND_VAL_EX int(1) 1\n\
-             0005 DO_FCALL\n\
-             0006 INIT_STATIC_METHOD_CALL 1 string(\"M\") string(\"m\")\n\
-             0007 SEND_VAL_EX int(1) 1\n\
-             0008 DO_FCALL\n\
-             0009 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=6, args=0, vars=1, tmps=2)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN CV0($a) int(1)
+        0001 INIT_STATIC_METHOD_CALL 2 string("phptoken") string("TOKENIZE")
+        0002 SEND_VAL string("<?php ") 1
+        0003 SEND_VAR CV0($a) 2
+        0004 DO_FCALL
+        0005 RETURN int(1)
+    "#]]
+    .assert_eq(&dump(b"<?php $a = 1; phptoken::TOKENIZE('<?php ', $a);"));
+    expect![[r#"
+
+        $_main:
+             ; (lines=10, args=0, vars=0, tmps=3)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 INIT_STATIC_METHOD_CALL 1 string("PhpToken") string("hidden")
+        0001 SEND_VAL_EX int(1) 1
+        0002 DO_FCALL
+        0003 INIT_STATIC_METHOD_CALL 1 string("Nope") string("m")
+        0004 SEND_VAL_EX int(1) 1
+        0005 DO_FCALL
+        0006 INIT_STATIC_METHOD_CALL 1 string("M") string("m")
+        0007 SEND_VAL_EX int(1) 1
+        0008 DO_FCALL
+        0009 RETURN int(1)
+    "#]]
+    .assert_eq(&dump(
+        b"<?php PhpToken::hidden(1); Nope::m(1); class M {} M::m(1);",
+    ));
 }
 
 /// The two `INIT_*_METHOD_CALL`s, read as
@@ -363,74 +439,94 @@ fn a_public_method_of_a_declared_class_is_a_known_callee() {
 /// as an argument sent.
 #[test]
 fn the_method_calls_compile_to_php_s_op_arrays() {
-    let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+    let cases: &[(&[u8], Expect)] = &[
         (
             b"<?php $x = E::m();",
-            4,
-            1,
-            2,
-            "0000 INIT_STATIC_METHOD_CALL 0 string(\"E\") string(\"m\")\n\
-             0001 V1 = DO_FCALL\n\
-             0002 ASSIGN CV0($x) V1\n\
-             0003 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=1, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 INIT_STATIC_METHOD_CALL 0 string("E") string("m")
+                0001 V1 = DO_FCALL
+                0002 ASSIGN CV0($x) V1
+                0003 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php E::__construct();",
-            3,
-            0,
-            1,
-            "0000 INIT_STATIC_METHOD_CALL 0 string(\"E\") CONSTRUCTOR\n\
-             0001 DO_FCALL\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 INIT_STATIC_METHOD_CALL 0 string("E") CONSTRUCTOR
+                0001 DO_FCALL
+                0002 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $o = 1; $o->m(1, $o)->n();",
-            8,
-            1,
-            3,
-            "0000 ASSIGN CV0($o) int(1)\n\
-             0001 INIT_METHOD_CALL 2 CV0($o) string(\"m\")\n\
-             0002 SEND_VAL_EX int(1) 1\n\
-             0003 SEND_VAR_EX CV0($o) 2\n\
-             0004 V2 = DO_FCALL\n\
-             0005 INIT_METHOD_CALL 0 V2 string(\"n\")\n\
-             0006 DO_FCALL\n\
-             0007 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=8, args=0, vars=1, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ASSIGN CV0($o) int(1)
+                0001 INIT_METHOD_CALL 2 CV0($o) string("m")
+                0002 SEND_VAL_EX int(1) 1
+                0003 SEND_VAR_EX CV0($o) 2
+                0004 V2 = DO_FCALL
+                0005 INIT_METHOD_CALL 0 V2 string("n")
+                0006 DO_FCALL
+                0007 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $o = 1; $o->m(f($o));",
-            8,
-            1,
-            3,
-            "0000 ASSIGN CV0($o) int(1)\n\
-             0001 INIT_METHOD_CALL 1 CV0($o) string(\"m\")\n\
-             0002 INIT_FCALL_BY_NAME 1 string(\"f\")\n\
-             0003 SEND_VAR_EX CV0($o) 1\n\
-             0004 V2 = DO_FCALL_BY_NAME\n\
-             0005 SEND_VAR_NO_REF_EX V2 1\n\
-             0006 DO_FCALL\n\
-             0007 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=8, args=0, vars=1, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ASSIGN CV0($o) int(1)
+                0001 INIT_METHOD_CALL 1 CV0($o) string("m")
+                0002 INIT_FCALL_BY_NAME 1 string("f")
+                0003 SEND_VAR_EX CV0($o) 1
+                0004 V2 = DO_FCALL_BY_NAME
+                0005 SEND_VAR_NO_REF_EX V2 1
+                0006 DO_FCALL
+                0007 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $o = 1; \\E::m($o instanceof \\E);",
-            6,
-            1,
-            3,
-            "0000 ASSIGN CV0($o) int(1)\n\
-             0001 INIT_STATIC_METHOD_CALL 1 string(\"E\") string(\"m\")\n\
-             0002 T2 = INSTANCEOF CV0($o) string(\"E\")\n\
-             0003 SEND_VAL_EX T2 1\n\
-             0004 DO_FCALL\n\
-             0005 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=6, args=0, vars=1, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ASSIGN CV0($o) int(1)
+                0001 INIT_STATIC_METHOD_CALL 1 string("E") string("m")
+                0002 T2 = INSTANCEOF CV0($o) string("E")
+                0003 SEND_VAL_EX T2 1
+                0004 DO_FCALL
+                0005 RETURN int(1)
+            "#]],
         ),
     ];
-    for (source, lines, vars, tmps, oplines) in cases {
-        assert_eq!(
-            dump_of(source),
-            main_dump(*lines, *vars, *tmps, oplines),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+    for (source, expected) in cases {
+        expected.assert_eq(&dump_of(source));
     }
     let (unit, _strings) = unit_and_strings(b"<?php E::m(); $o->n();");
     assert_eq!(
@@ -446,26 +542,29 @@ fn the_method_calls_compile_to_php_s_op_arrays() {
 /// name, a parenthesised property among them, in `INIT_DYNAMIC_CALL`.
 #[test]
 fn a_member_and_a_callee_named_at_run_time_are_the_oracle_s_operands() {
-    assert_eq!(
-        dump_of(b"<?php echo $o->$p; $o->$m(); C::$m(); $f(); ($o->p)();"),
-        main_dump(
-            12,
-            4,
-            6,
-            "0000 T4 = FETCH_OBJ_R CV0($o) CV1($p)\n\
-             0001 ECHO T4\n\
-             0002 INIT_METHOD_CALL 0 CV0($o) CV2($m)\n\
-             0003 DO_FCALL\n\
-             0004 INIT_STATIC_METHOD_CALL 0 string(\"C\") CV2($m)\n\
-             0005 DO_FCALL\n\
-             0006 INIT_DYNAMIC_CALL 0 CV3($f)\n\
-             0007 DO_FCALL\n\
-             0008 T8 = FETCH_OBJ_R CV0($o) string(\"p\")\n\
-             0009 INIT_DYNAMIC_CALL 0 T8\n\
-             0010 DO_FCALL\n\
-             0011 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=12, args=0, vars=4, tmps=6)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 T4 = FETCH_OBJ_R CV0($o) CV1($p)
+        0001 ECHO T4
+        0002 INIT_METHOD_CALL 0 CV0($o) CV2($m)
+        0003 DO_FCALL
+        0004 INIT_STATIC_METHOD_CALL 0 string("C") CV2($m)
+        0005 DO_FCALL
+        0006 INIT_DYNAMIC_CALL 0 CV3($f)
+        0007 DO_FCALL
+        0008 T8 = FETCH_OBJ_R CV0($o) string("p")
+        0009 INIT_DYNAMIC_CALL 0 T8
+        0010 DO_FCALL
+        0011 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php echo $o->$p; $o->$m(); C::$m(); $f(); ($o->p)();",
+    ));
 }
 
 /// What stands beside these four and is not read yet is refused as
@@ -488,46 +587,56 @@ fn what_stands_beside_new_and_the_calls_is_refused_as_not_yet_read() {
 /// first's temporary.
 #[test]
 fn instanceof_compiles_to_php_s_op_array() {
-    let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+    let cases: &[(&[u8], Expect)] = &[
         (
             b"<?php $o = 1; $o instanceof E;",
-            4,
-            1,
-            2,
-            "0000 ASSIGN CV0($o) int(1)\n\
-             0001 T2 = INSTANCEOF CV0($o) string(\"E\")\n\
-             0002 FREE T2\n\
-             0003 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=1, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ASSIGN CV0($o) int(1)
+                0001 T2 = INSTANCEOF CV0($o) string("E")
+                0002 FREE T2
+                0003 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $o = 1; echo 1 instanceof E, strlen('a') instanceof E;",
-            4,
-            1,
-            1,
-            "0000 ASSIGN CV0($o) int(1)\n\
-             0001 ECHO bool(false)\n\
-             0002 ECHO bool(false)\n\
-             0003 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=1, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ASSIGN CV0($o) int(1)
+                0001 ECHO bool(false)
+                0002 ECHO bool(false)
+                0003 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $o = 1; echo $o instanceof E instanceof F;",
-            5,
-            1,
-            3,
-            "0000 ASSIGN CV0($o) int(1)\n\
-             0001 T2 = INSTANCEOF CV0($o) string(\"E\")\n\
-             0002 T3 = INSTANCEOF T2 string(\"F\")\n\
-             0003 ECHO T3\n\
-             0004 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=5, args=0, vars=1, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ASSIGN CV0($o) int(1)
+                0001 T2 = INSTANCEOF CV0($o) string("E")
+                0002 T3 = INSTANCEOF T2 string("F")
+                0003 ECHO T3
+                0004 RETURN int(1)
+            "#]],
         ),
     ];
-    for (source, lines, vars, tmps, oplines) in cases {
-        assert_eq!(
-            dump_of(source),
-            main_dump(*lines, *vars, *tmps, oplines),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+    for (source, expected) in cases {
+        expected.assert_eq(&dump_of(source));
     }
 }
 
@@ -537,55 +646,70 @@ fn instanceof_compiles_to_php_s_op_array() {
 /// `zend_compile_args`).
 #[test]
 fn this_compiles_to_fetch_this_as_php_emits_it() {
-    let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+    let cases: &[(&[u8], Expect)] = &[
         (
             b"<?php echo $this;",
-            3,
-            0,
-            1,
-            "0000 T0 = FETCH_THIS\n\
-             0001 ECHO T0\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T0 = FETCH_THIS
+                0001 ECHO T0
+                0002 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $this->p;",
-            4,
-            0,
-            2,
-            "0000 V0 = FETCH_THIS\n\
-             0001 T1 = FETCH_OBJ_R V0 string(\"p\")\n\
-             0002 FREE T1\n\
-             0003 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=0, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V0 = FETCH_THIS
+                0001 T1 = FETCH_OBJ_R V0 string("p")
+                0002 FREE T1
+                0003 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $this->m();",
-            4,
-            0,
-            2,
-            "0000 V0 = FETCH_THIS\n\
-             0001 INIT_METHOD_CALL 0 V0 string(\"m\")\n\
-             0002 DO_FCALL\n\
-             0003 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=0, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V0 = FETCH_THIS
+                0001 INIT_METHOD_CALL 0 V0 string("m")
+                0002 DO_FCALL
+                0003 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php f($this);",
-            5,
-            0,
-            2,
-            "0000 INIT_FCALL_BY_NAME 1 string(\"f\")\n\
-             0001 V0 = FETCH_THIS\n\
-             0002 SEND_VAR_EX V0 1\n\
-             0003 DO_FCALL_BY_NAME\n\
-             0004 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=5, args=0, vars=0, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 INIT_FCALL_BY_NAME 1 string("f")
+                0001 V0 = FETCH_THIS
+                0002 SEND_VAR_EX V0 1
+                0003 DO_FCALL_BY_NAME
+                0004 RETURN int(1)
+            "#]],
         ),
     ];
-    for (source, lines, vars, tmps, oplines) in cases {
-        assert_eq!(
-            dump_of(source),
-            main_dump(*lines, *vars, *tmps, oplines),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+    for (source, expected) in cases {
+        expected.assert_eq(&dump_of(source));
     }
 }
 
@@ -599,39 +723,38 @@ fn this_compiles_to_fetch_this_as_php_emits_it() {
 /// `_EXCEPTION`.
 #[test]
 fn a_class_reference_of_the_scope_or_an_expression_compiles_as_php_emits_it() {
-    assert_eq!(
-        oplines_of(
+    expect![[r#"
+        0000 T2 = FETCH_STATIC_PROP_R string("p") (self) (exception)
+        0001 ECHO T2
+        0002 V3 = FETCH_CLASS (exception) CV0($c)
+        0003 V4 = NEW 0 V3
+        0004 DO_FCALL
+        0005 FREE V4
+        0006 INIT_FCALL 1 96 string("var_dump")
+        0007 V6 = FETCH_CLASS (no-autoload) (silent) (exception) CV0($c)
+        0008 T7 = INSTANCEOF CV1($o) V6
+        0009 SEND_VAL T7 1
+        0010 DO_ICALL
+        0011 V9 = FETCH_CLASS (exception) CV1($o)
+        0012 T10 = FETCH_CLASS_CONSTANT V9 string("X")
+        0013 ECHO T10
+        0014 T11 = FETCH_CLASS_CONSTANT (static) (exception) string("Y")
+        0015 ECHO T11
+        0016 V12 = FETCH_CLASS (exception) CV1($o)
+        0017 INIT_STATIC_METHOD_CALL 0 V12 string("m")
+        0018 DO_FCALL
+        0019 ASSIGN_STATIC_PROP string("q")
+        0020 OP_DATA int(1)
+        0021 V15 = NEW 0 (static) (exception)
+        0022 DO_FCALL
+        0023 FREE V15
+        0024 RETURN int(1)
+        LIVE RANGES:
+             4: 0004 - 0005 (new)
+             15: 0022 - 0023 (new)
+    "#]].assert_eq(&oplines_of(
             b"<?php echo self::$p; new $c; var_dump($o instanceof $c); echo $o::X, static::Y; $o::m(); parent::$q = 1; new static;"
-        ),
-        "0000 T2 = FETCH_STATIC_PROP_R string(\"p\") (self) (exception)\n\
-         0001 ECHO T2\n\
-         0002 V3 = FETCH_CLASS (exception) CV0($c)\n\
-         0003 V4 = NEW 0 V3\n\
-         0004 DO_FCALL\n\
-         0005 FREE V4\n\
-         0006 INIT_FCALL 1 96 string(\"var_dump\")\n\
-         0007 V6 = FETCH_CLASS (no-autoload) (silent) (exception) CV0($c)\n\
-         0008 T7 = INSTANCEOF CV1($o) V6\n\
-         0009 SEND_VAL T7 1\n\
-         0010 DO_ICALL\n\
-         0011 V9 = FETCH_CLASS (exception) CV1($o)\n\
-         0012 T10 = FETCH_CLASS_CONSTANT V9 string(\"X\")\n\
-         0013 ECHO T10\n\
-         0014 T11 = FETCH_CLASS_CONSTANT (static) (exception) string(\"Y\")\n\
-         0015 ECHO T11\n\
-         0016 V12 = FETCH_CLASS (exception) CV1($o)\n\
-         0017 INIT_STATIC_METHOD_CALL 0 V12 string(\"m\")\n\
-         0018 DO_FCALL\n\
-         0019 ASSIGN_STATIC_PROP string(\"q\")\n\
-         0020 OP_DATA int(1)\n\
-         0021 V15 = NEW 0 (static) (exception)\n\
-         0022 DO_FCALL\n\
-         0023 FREE V15\n\
-         0024 RETURN int(1)\n\
-         LIVE RANGES:\n\
-         \x20    4: 0004 - 0005 (new)\n\
-         \x20    15: 0022 - 0023 (new)\n"
-    );
+        ));
     let refused_message = |source: &[u8]| refused(source).map(|e| e.message.into_owned());
     assert_eq!(
         refused_message(b"<?php function f() { return self::X; }").as_deref(),
@@ -654,32 +777,35 @@ fn a_class_reference_of_the_scope_or_an_expression_compiles_as_php_emits_it() {
 /// string.
 #[test]
 fn a_nullsafe_chain_is_jmp_null_over_each_link_as_php_emits_it() {
-    assert_eq!(
-        dump_of(b"<?php $a = null; echo $a?->b, $a?->m(1)?->c, \"$a?->b\";"),
-        main_dump(
-            16,
-            1,
-            6,
-            "0000 ASSIGN CV0($a) null\n\
-             0001 T2 = JMP_NULL CV0($a) 0003\n\
-             0002 T2 = FETCH_OBJ_R CV0($a) string(\"b\")\n\
-             0003 ECHO T2\n\
-             0004 T4 = JMP_NULL CV0($a) 0010\n\
-             0005 INIT_METHOD_CALL 1 CV0($a) string(\"m\")\n\
-             0006 SEND_VAL_EX int(1) 1\n\
-             0007 V3 = DO_FCALL\n\
-             0008 T4 = JMP_NULL V3 0010\n\
-             0009 T4 = FETCH_OBJ_R V3 string(\"c\")\n\
-             0010 ECHO T4\n\
-             0011 T5 = JMP_NULL CV0($a) 0013\n\
-             0012 T5 = FETCH_OBJ_R CV0($a) string(\"b\")\n\
-             0013 T6 = CAST (string) T5\n\
-             0014 ECHO T6\n\
-             0015 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    3: 0008 - 0009 (tmp/var)\n",
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=16, args=0, vars=1, tmps=6)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN CV0($a) null
+        0001 T2 = JMP_NULL CV0($a) 0003
+        0002 T2 = FETCH_OBJ_R CV0($a) string("b")
+        0003 ECHO T2
+        0004 T4 = JMP_NULL CV0($a) 0010
+        0005 INIT_METHOD_CALL 1 CV0($a) string("m")
+        0006 SEND_VAL_EX int(1) 1
+        0007 V3 = DO_FCALL
+        0008 T4 = JMP_NULL V3 0010
+        0009 T4 = FETCH_OBJ_R V3 string("c")
+        0010 ECHO T4
+        0011 T5 = JMP_NULL CV0($a) 0013
+        0012 T5 = FETCH_OBJ_R CV0($a) string("b")
+        0013 T6 = CAST (string) T5
+        0014 ECHO T6
+        0015 RETURN int(1)
+        LIVE RANGES:
+             3: 0008 - 0009 (tmp/var)
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php $a = null; echo $a?->b, $a?->m(1)?->c, \"$a?->b\";",
+    ));
 }
 
 /// php's compile errors where a `?->` chain is written to or bound.

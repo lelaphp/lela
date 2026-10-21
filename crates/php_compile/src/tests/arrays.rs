@@ -95,41 +95,44 @@ fn what_php_s_compiler_refuses_in_a_foreach_and_an_array_is_refused_in_its_words
 #[test]
 fn an_array_with_a_variable_is_init_array_and_add_array_element_as_php_emits_them() {
     let (unit, _strings) = unit_and_strings(b"<?php $a = ['x', 'y']; $b = [1, $a, 'k' => 2];");
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(
-            6,
-            2,
-            3,
-            "0000 ASSIGN CV0($a) array(...)\n\
-             0001 T3 = INIT_ARRAY 3 int(1) NEXT\n\
-             0002 T3 = ADD_ARRAY_ELEMENT CV0($a) NEXT\n\
-             0003 T3 = ADD_ARRAY_ELEMENT int(2) string(\"k\")\n\
-             0004 ASSIGN CV1($b) T3\n\
-             0005 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    3: 0002 - 0004 (tmp/var)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=6, args=0, vars=2, tmps=3)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN CV0($a) array(...)
+        0001 T3 = INIT_ARRAY 3 int(1) NEXT
+        0002 T3 = ADD_ARRAY_ELEMENT CV0($a) NEXT
+        0003 T3 = ADD_ARRAY_ELEMENT int(2) string("k")
+        0004 ASSIGN CV1($b) T3
+        0005 RETURN int(1)
+        LIVE RANGES:
+             3: 0002 - 0004 (tmp/var)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     assert_eq!(
         unit.main.oplines.get(1).map(|op| op.extended_value),
         Some((3 << 2) | 2),
         "three elements, and ZEND_ARRAY_NOT_PACKED for the string key"
     );
-    assert_eq!(
-        oplines_of(b"<?php var_dump(['x', 'y'], [1, $a = 2, 'k' => 3]);"),
-        "0000 INIT_FCALL 2 112 string(\"var_dump\")\n\
-         0001 SEND_VAL array(...) 1\n\
-         0002 T1 = INIT_ARRAY 3 int(1) NEXT\n\
-         0003 T2 = ASSIGN CV0($a) int(2)\n\
-         0004 T1 = ADD_ARRAY_ELEMENT T2 NEXT\n\
-         0005 T1 = ADD_ARRAY_ELEMENT int(3) string(\"k\")\n\
-         0006 SEND_VAL T1 2\n\
-         0007 DO_ICALL\n\
-         0008 RETURN int(1)\n\
-         LIVE RANGES:\n\
-         \x20    1: 0003 - 0006 (tmp/var)\n"
-    );
+    expect![[r#"
+        0000 INIT_FCALL 2 112 string("var_dump")
+        0001 SEND_VAL array(...) 1
+        0002 T1 = INIT_ARRAY 3 int(1) NEXT
+        0003 T2 = ASSIGN CV0($a) int(2)
+        0004 T1 = ADD_ARRAY_ELEMENT T2 NEXT
+        0005 T1 = ADD_ARRAY_ELEMENT int(3) string("k")
+        0006 SEND_VAL T1 2
+        0007 DO_ICALL
+        0008 RETURN int(1)
+        LIVE RANGES:
+             1: 0003 - 0006 (tmp/var)
+    "#]]
+    .assert_eq(&oplines_of(
+        b"<?php var_dump(['x', 'y'], [1, $a = 2, 'k' => 3]);",
+    ));
 }
 
 /// `zend_compile_array`'s `...` and `&` arms and `zend_compile_args`'
@@ -142,29 +145,31 @@ fn an_array_with_a_variable_is_init_array_and_add_array_element_as_php_emits_the
 /// folds.
 #[test]
 fn a_spread_a_reference_element_and_an_unpacked_argument_are_emitted_as_php_emits_them() {
-    assert_eq!(
-        oplines_of(b"<?php $z = [...$x, 'k' => &$x[0], &$w]; f(1, ...$x, c: 2);"),
-        "0000 T3 = INIT_ARRAY 0 NEXT\n\
-         0001 T3 = ADD_ARRAY_UNPACK CV1($x)\n\
-         0002 V4 = FETCH_DIM_W CV1($x) int(0)\n\
-         0003 T3 = ADD_ARRAY_ELEMENT (ref) V4 string(\"k\")\n\
-         0004 T3 = ADD_ARRAY_ELEMENT (ref) CV2($w) NEXT\n\
-         0005 ASSIGN CV0($z) T3\n\
-         0006 INIT_FCALL_BY_NAME 1 string(\"f\")\n\
-         0007 SEND_VAL_EX int(1) 1\n\
-         0008 SEND_UNPACK CV1($x)\n\
-         0009 SEND_VAL_EX int(2) string(\"c\")\n\
-         0010 CHECK_UNDEF_ARGS\n\
-         0011 DO_FCALL_BY_NAME\n\
-         0012 RETURN int(1)\n\
-         LIVE RANGES:\n\
-         \x20    3: 0001 - 0005 (tmp/var)\n"
-    );
-    assert_eq!(
-        oplines_of(b"<?php $q = [...[1, 2], 3, ...['k' => 4]];"),
-        "0000 ASSIGN CV0($q) array(...)\n\
-         0001 RETURN int(1)\n"
-    );
+    expect![[r#"
+        0000 T3 = INIT_ARRAY 0 NEXT
+        0001 T3 = ADD_ARRAY_UNPACK CV1($x)
+        0002 V4 = FETCH_DIM_W CV1($x) int(0)
+        0003 T3 = ADD_ARRAY_ELEMENT (ref) V4 string("k")
+        0004 T3 = ADD_ARRAY_ELEMENT (ref) CV2($w) NEXT
+        0005 ASSIGN CV0($z) T3
+        0006 INIT_FCALL_BY_NAME 1 string("f")
+        0007 SEND_VAL_EX int(1) 1
+        0008 SEND_UNPACK CV1($x)
+        0009 SEND_VAL_EX int(2) string("c")
+        0010 CHECK_UNDEF_ARGS
+        0011 DO_FCALL_BY_NAME
+        0012 RETURN int(1)
+        LIVE RANGES:
+             3: 0001 - 0005 (tmp/var)
+    "#]]
+    .assert_eq(&oplines_of(
+        b"<?php $z = [...$x, 'k' => &$x[0], &$w]; f(1, ...$x, c: 2);",
+    ));
+    expect![[r#"
+        0000 ASSIGN CV0($q) array(...)
+        0001 RETURN int(1)
+    "#]]
+    .assert_eq(&oplines_of(b"<?php $q = [...[1, 2], 3, ...['k' => 4]];"));
     assert_eq!(
         refused_message(b"<?php\nf(...$a, 1);\n").as_deref(),
         Some("Cannot use positional argument after argument unpacking")
@@ -209,35 +214,36 @@ fn the_keys_of_an_array_with_a_variable_are_emitted_as_php_emits_them() {
     let (unit, _strings) = unit_and_strings(
         b"<?php $k = '2'; $x = [1, $k, '3' => 4, 'a' => 5, 1.5 => 6, null => 7, true => 8]; $y = [$k => 1, 5 => 2, 'b' => 3]; [9223372036854775807 => 1, 2];",
     );
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(
-            17,
-            3,
-            6,
-            "0000 ASSIGN CV0($k) string(\"2\")\n\
-             0001 T4 = INIT_ARRAY 7 int(1) NEXT\n\
-             0002 T4 = ADD_ARRAY_ELEMENT CV0($k) NEXT\n\
-             0003 T4 = ADD_ARRAY_ELEMENT int(4) int(3)\n\
-             0004 T4 = ADD_ARRAY_ELEMENT int(5) string(\"a\")\n\
-             0005 T4 = ADD_ARRAY_ELEMENT int(6) float(1.5)\n\
-             0006 T4 = ADD_ARRAY_ELEMENT int(7) null\n\
-             0007 T4 = ADD_ARRAY_ELEMENT int(8) bool(true)\n\
-             0008 ASSIGN CV1($x) T4\n\
-             0009 T6 = INIT_ARRAY 3 int(1) CV0($k)\n\
-             0010 T6 = ADD_ARRAY_ELEMENT int(2) int(5)\n\
-             0011 T6 = ADD_ARRAY_ELEMENT int(3) string(\"b\")\n\
-             0012 ASSIGN CV2($y) T6\n\
-             0013 T8 = INIT_ARRAY 2 (packed) int(1) int(9223372036854775807)\n\
-             0014 T8 = ADD_ARRAY_ELEMENT int(2) NEXT\n\
-             0015 FREE T8\n\
-             0016 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    4: 0002 - 0008 (tmp/var)\n\
-             \x20    6: 0010 - 0012 (tmp/var)\n\
-             \x20    8: 0014 - 0015 (tmp/var)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=17, args=0, vars=3, tmps=6)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN CV0($k) string("2")
+        0001 T4 = INIT_ARRAY 7 int(1) NEXT
+        0002 T4 = ADD_ARRAY_ELEMENT CV0($k) NEXT
+        0003 T4 = ADD_ARRAY_ELEMENT int(4) int(3)
+        0004 T4 = ADD_ARRAY_ELEMENT int(5) string("a")
+        0005 T4 = ADD_ARRAY_ELEMENT int(6) float(1.5)
+        0006 T4 = ADD_ARRAY_ELEMENT int(7) null
+        0007 T4 = ADD_ARRAY_ELEMENT int(8) bool(true)
+        0008 ASSIGN CV1($x) T4
+        0009 T6 = INIT_ARRAY 3 int(1) CV0($k)
+        0010 T6 = ADD_ARRAY_ELEMENT int(2) int(5)
+        0011 T6 = ADD_ARRAY_ELEMENT int(3) string("b")
+        0012 ASSIGN CV2($y) T6
+        0013 T8 = INIT_ARRAY 2 (packed) int(1) int(9223372036854775807)
+        0014 T8 = ADD_ARRAY_ELEMENT int(2) NEXT
+        0015 FREE T8
+        0016 RETURN int(1)
+        LIVE RANGES:
+             4: 0002 - 0008 (tmp/var)
+             6: 0010 - 0012 (tmp/var)
+             8: 0014 - 0015 (tmp/var)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     let flags: Vec<u32> = [1usize, 9, 13]
         .iter()
         .filter_map(|&at| unit.main.oplines.get(at))

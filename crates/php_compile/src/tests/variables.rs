@@ -86,28 +86,29 @@ fn zend_do_free_marks_an_assign_a_call_and_a_pre_inc_and_frees_the_rest() {
     let (unit, _strings) = unit_and_strings(
         b"<?php $a = 1; $a + 1; str_repeat(\"a\", 3) . \"b\"; extension_loaded('Core'); $a++;",
     );
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(
-            14,
-            1,
-            6,
-            "0000 ASSIGN CV0($a) int(1)\n\
-             0001 T2 = ADD CV0($a) int(1)\n\
-             0002 FREE T2\n\
-             0003 INIT_FCALL 2 112 string(\"str_repeat\")\n\
-             0004 SEND_VAL string(\"a\") 1\n\
-             0005 SEND_VAL int(3) 2\n\
-             0006 V3 = DO_ICALL\n\
-             0007 T4 = CONCAT V3 string(\"b\")\n\
-             0008 FREE T4\n\
-             0009 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
-             0010 SEND_VAL string(\"Core\") 1\n\
-             0011 DO_ICALL\n\
-             0012 PRE_INC CV0($a)\n\
-             0013 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=14, args=0, vars=1, tmps=6)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN CV0($a) int(1)
+        0001 T2 = ADD CV0($a) int(1)
+        0002 FREE T2
+        0003 INIT_FCALL 2 112 string("str_repeat")
+        0004 SEND_VAL string("a") 1
+        0005 SEND_VAL int(3) 2
+        0006 V3 = DO_ICALL
+        0007 T4 = CONCAT V3 string("b")
+        0008 FREE T4
+        0009 INIT_FCALL 1 96 string("extension_loaded")
+        0010 SEND_VAL string("Core") 1
+        0011 DO_ICALL
+        0012 PRE_INC CV0($a)
+        0013 RETURN int(1)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     let marks: Vec<_> = unit
         .main
         .oplines
@@ -161,27 +162,28 @@ fn a_temporary_read_past_the_next_opline_has_php_s_live_range() {
     use php_unit::{LiveKind, LiveRange};
     let (unit, _strings) =
         unit_and_strings(b"<?php echo str_repeat(\"a\", 2) . str_repeat(\"b\", 2);");
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(
-            11,
-            0,
-            3,
-            "0000 INIT_FCALL 2 112 string(\"str_repeat\")\n\
-             0001 SEND_VAL string(\"a\") 1\n\
-             0002 SEND_VAL int(2) 2\n\
-             0003 V0 = DO_ICALL\n\
-             0004 INIT_FCALL 2 112 string(\"str_repeat\")\n\
-             0005 SEND_VAL string(\"b\") 1\n\
-             0006 SEND_VAL int(2) 2\n\
-             0007 V1 = DO_ICALL\n\
-             0008 T2 = CONCAT V0 V1\n\
-             0009 ECHO T2\n\
-             0010 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    0: 0004 - 0008 (tmp/var)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=11, args=0, vars=0, tmps=3)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 INIT_FCALL 2 112 string("str_repeat")
+        0001 SEND_VAL string("a") 1
+        0002 SEND_VAL int(2) 2
+        0003 V0 = DO_ICALL
+        0004 INIT_FCALL 2 112 string("str_repeat")
+        0005 SEND_VAL string("b") 1
+        0006 SEND_VAL int(2) 2
+        0007 V1 = DO_ICALL
+        0008 T2 = CONCAT V0 V1
+        0009 ECHO T2
+        0010 RETURN int(1)
+        LIVE RANGES:
+             0: 0004 - 0008 (tmp/var)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     assert_eq!(
         *unit.main.live_ranges,
         [LiveRange {
@@ -235,25 +237,26 @@ fn a_cv_is_sent_by_send_var_and_assigned_from_a_call_s_var() {
 #[test]
 fn a_silenced_call_is_php_s_op_array_ending_in_its_silence_live_range() {
     let (unit, _strings) = unit_and_strings(b"<?php echo @str_repeat(\"a\", 2);");
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(
-            8,
-            0,
-            2,
-            "0000 T0 = BEGIN_SILENCE\n\
-             0001 INIT_FCALL 2 112 string(\"str_repeat\")\n\
-             0002 SEND_VAL string(\"a\") 1\n\
-             0003 SEND_VAL int(2) 2\n\
-             0004 V1 = DO_ICALL\n\
-             0005 END_SILENCE T0\n\
-             0006 ECHO V1\n\
-             0007 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    0: 0001 - 0005 (silence)\n\
-             \x20    1: 0005 - 0006 (tmp/var)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=8, args=0, vars=0, tmps=2)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 T0 = BEGIN_SILENCE
+        0001 INIT_FCALL 2 112 string("str_repeat")
+        0002 SEND_VAL string("a") 1
+        0003 SEND_VAL int(2) 2
+        0004 V1 = DO_ICALL
+        0005 END_SILENCE T0
+        0006 ECHO V1
+        0007 RETURN int(1)
+        LIVE RANGES:
+             0: 0001 - 0005 (silence)
+             1: 0005 - 0006 (tmp/var)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
 }
 
 /// The rest of `zend_compile_silence` against the oracle's dump: a
@@ -266,53 +269,55 @@ fn a_silenced_call_is_php_s_op_array_ending_in_its_silence_live_range() {
 /// `$b`, the one CV, moves every temporary's number up by one.
 #[test]
 fn a_variable_under_a_silence_is_fetched_by_name_and_its_value_freed_past_the_end() {
-    assert_eq!(
-        oplines_of(b"<?php echo @$a, @$this; @$a; @str_repeat(\"a\", 2); @$b++; @$b = 1; @@$c;"),
-        "0000 T1 = BEGIN_SILENCE\n\
-         0001 T2 = FETCH_R (local) string(\"a\")\n\
-         0002 END_SILENCE T1\n\
-         0003 ECHO T2\n\
-         0004 T3 = BEGIN_SILENCE\n\
-         0005 T4 = FETCH_R (local) string(\"this\")\n\
-         0006 END_SILENCE T3\n\
-         0007 ECHO T4\n\
-         0008 T5 = BEGIN_SILENCE\n\
-         0009 T6 = FETCH_R (local) string(\"a\")\n\
-         0010 END_SILENCE T5\n\
-         0011 FREE T6\n\
-         0012 T7 = BEGIN_SILENCE\n\
-         0013 INIT_FCALL 2 112 string(\"str_repeat\")\n\
-         0014 SEND_VAL string(\"a\") 1\n\
-         0015 SEND_VAL int(2) 2\n\
-         0016 DO_ICALL\n\
-         0017 END_SILENCE T7\n\
-         0018 T9 = BEGIN_SILENCE\n\
-         0019 PRE_INC CV0($b)\n\
-         0020 END_SILENCE T9\n\
-         0021 T11 = BEGIN_SILENCE\n\
-         0022 ASSIGN CV0($b) int(1)\n\
-         0023 END_SILENCE T11\n\
-         0024 T13 = BEGIN_SILENCE\n\
-         0025 T14 = BEGIN_SILENCE\n\
-         0026 T15 = FETCH_R (local) string(\"c\")\n\
-         0027 END_SILENCE T14\n\
-         0028 END_SILENCE T13\n\
-         0029 FREE T15\n\
-         0030 RETURN int(1)\n\
-         LIVE RANGES:\n\
-         \x20    1: 0001 - 0002 (silence)\n\
-         \x20    2: 0002 - 0003 (tmp/var)\n\
-         \x20    3: 0005 - 0006 (silence)\n\
-         \x20    4: 0006 - 0007 (tmp/var)\n\
-         \x20    5: 0009 - 0010 (silence)\n\
-         \x20    6: 0010 - 0011 (tmp/var)\n\
-         \x20    7: 0013 - 0017 (silence)\n\
-         \x20    9: 0019 - 0020 (silence)\n\
-         \x20    11: 0022 - 0023 (silence)\n\
-         \x20    13: 0025 - 0028 (silence)\n\
-         \x20    14: 0026 - 0027 (silence)\n\
-         \x20    15: 0027 - 0029 (tmp/var)\n"
-    );
+    expect![[r#"
+        0000 T1 = BEGIN_SILENCE
+        0001 T2 = FETCH_R (local) string("a")
+        0002 END_SILENCE T1
+        0003 ECHO T2
+        0004 T3 = BEGIN_SILENCE
+        0005 T4 = FETCH_R (local) string("this")
+        0006 END_SILENCE T3
+        0007 ECHO T4
+        0008 T5 = BEGIN_SILENCE
+        0009 T6 = FETCH_R (local) string("a")
+        0010 END_SILENCE T5
+        0011 FREE T6
+        0012 T7 = BEGIN_SILENCE
+        0013 INIT_FCALL 2 112 string("str_repeat")
+        0014 SEND_VAL string("a") 1
+        0015 SEND_VAL int(2) 2
+        0016 DO_ICALL
+        0017 END_SILENCE T7
+        0018 T9 = BEGIN_SILENCE
+        0019 PRE_INC CV0($b)
+        0020 END_SILENCE T9
+        0021 T11 = BEGIN_SILENCE
+        0022 ASSIGN CV0($b) int(1)
+        0023 END_SILENCE T11
+        0024 T13 = BEGIN_SILENCE
+        0025 T14 = BEGIN_SILENCE
+        0026 T15 = FETCH_R (local) string("c")
+        0027 END_SILENCE T14
+        0028 END_SILENCE T13
+        0029 FREE T15
+        0030 RETURN int(1)
+        LIVE RANGES:
+             1: 0001 - 0002 (silence)
+             2: 0002 - 0003 (tmp/var)
+             3: 0005 - 0006 (silence)
+             4: 0006 - 0007 (tmp/var)
+             5: 0009 - 0010 (silence)
+             6: 0010 - 0011 (tmp/var)
+             7: 0013 - 0017 (silence)
+             9: 0019 - 0020 (silence)
+             11: 0022 - 0023 (silence)
+             13: 0025 - 0028 (silence)
+             14: 0026 - 0027 (silence)
+             15: 0027 - 0029 (tmp/var)
+    "#]]
+    .assert_eq(&oplines_of(
+        b"<?php echo @$a, @$this; @$a; @str_repeat(\"a\", 2); @$b++; @$b = 1; @@$c;",
+    ));
     assert_eq!(
         refused(b"<?php class C { const X = @1; }"),
         Some(CompileError {
@@ -335,13 +340,13 @@ fn a_variable_under_a_silence_is_fetched_by_name_and_its_value_freed_past_the_en
 /// under `${…}` is the same CV.
 #[test]
 fn a_global_statement_binds_each_cv_by_name() {
-    assert_eq!(
-        oplines_of(b"<?php global $a, ${'b'}; echo $a;"),
-        "0000 BIND_GLOBAL CV0($a) string(\"a\")\n\
-         0001 BIND_GLOBAL CV1($b) string(\"b\")\n\
-         0002 ECHO CV0($a)\n\
-         0003 RETURN int(1)\n"
-    );
+    expect![[r#"
+        0000 BIND_GLOBAL CV0($a) string("a")
+        0001 BIND_GLOBAL CV1($b) string("b")
+        0002 ECHO CV0($a)
+        0003 RETURN int(1)
+    "#]]
+    .assert_eq(&oplines_of(b"<?php global $a, ${'b'}; echo $a;"));
 }
 
 /// `zend_compile_compound_assign`, the `ZEND_AST_VAR` arm (#479):
@@ -353,33 +358,34 @@ fn a_global_statement_binds_each_cv_by_name() {
 /// `[regime.dump]` at 8.5.9.
 #[test]
 fn the_twelve_compound_assignments_to_a_variable_are_the_oracle_s_oplines() {
-    assert_eq!(
-        dump_of(
-            b"<?php $a = 6; $a += 1; $a -= 1; $a *= 2; $a /= 3; $a %= 5; $a **= 2; \
-              $a .= \"x\"; $a |= 3; $a ^= 1; $a &= 6; $a <<= 2; $a >>= 1; $b = $a += 2;"
-        ),
-        main_dump(
-            16,
-            2,
-            15,
-            "0000 ASSIGN CV0($a) int(6)\n\
-             0001 ASSIGN_OP (ADD) CV0($a) int(1)\n\
-             0002 ASSIGN_OP (SUB) CV0($a) int(1)\n\
-             0003 ASSIGN_OP (MUL) CV0($a) int(2)\n\
-             0004 ASSIGN_OP (DIV) CV0($a) int(3)\n\
-             0005 ASSIGN_OP (MOD) CV0($a) int(5)\n\
-             0006 ASSIGN_OP (POW) CV0($a) int(2)\n\
-             0007 ASSIGN_OP (CONCAT) CV0($a) string(\"x\")\n\
-             0008 ASSIGN_OP (BW_OR) CV0($a) int(3)\n\
-             0009 ASSIGN_OP (BW_XOR) CV0($a) int(1)\n\
-             0010 ASSIGN_OP (BW_AND) CV0($a) int(6)\n\
-             0011 ASSIGN_OP (SL) CV0($a) int(2)\n\
-             0012 ASSIGN_OP (SR) CV0($a) int(1)\n\
-             0013 T15 = ASSIGN_OP (ADD) CV0($a) int(2)\n\
-             0014 ASSIGN CV1($b) T15\n\
-             0015 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=16, args=0, vars=2, tmps=15)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 ASSIGN CV0($a) int(6)
+        0001 ASSIGN_OP (ADD) CV0($a) int(1)
+        0002 ASSIGN_OP (SUB) CV0($a) int(1)
+        0003 ASSIGN_OP (MUL) CV0($a) int(2)
+        0004 ASSIGN_OP (DIV) CV0($a) int(3)
+        0005 ASSIGN_OP (MOD) CV0($a) int(5)
+        0006 ASSIGN_OP (POW) CV0($a) int(2)
+        0007 ASSIGN_OP (CONCAT) CV0($a) string("x")
+        0008 ASSIGN_OP (BW_OR) CV0($a) int(3)
+        0009 ASSIGN_OP (BW_XOR) CV0($a) int(1)
+        0010 ASSIGN_OP (BW_AND) CV0($a) int(6)
+        0011 ASSIGN_OP (SL) CV0($a) int(2)
+        0012 ASSIGN_OP (SR) CV0($a) int(1)
+        0013 T15 = ASSIGN_OP (ADD) CV0($a) int(2)
+        0014 ASSIGN CV1($b) T15
+        0015 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php $a = 6; $a += 1; $a -= 1; $a *= 2; $a /= 3; $a %= 5; $a **= 2; \
+              $a .= \"x\"; $a |= 3; $a ^= 1; $a &= 6; $a <<= 2; $a >>= 1; $b = $a += 2;",
+    ));
 }
 
 /// `$b = &$a` as the oracle dumps it (`zend_compile_assign_ref`):
@@ -398,70 +404,105 @@ fn the_twelve_compound_assignments_to_a_variable_are_the_oracle_s_oplines() {
 #[test]
 #[allow(clippy::too_many_lines)] // one case per shape: the table is the test
 fn a_by_reference_assignment_compiles_to_assign_ref_as_php_emits_it() {
-    let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+    let cases: &[(&[u8], Expect)] = &[
         (
             b"<?php $b = &$a;",
-            2,
-            2,
-            1,
-            "0000 ASSIGN_REF CV0($b) CV1($a)\n\
-             0001 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=2, args=0, vars=2, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ASSIGN_REF CV0($b) CV1($a)
+                0001 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $b =& $a;",
-            2,
-            2,
-            1,
-            "0000 ASSIGN_REF CV0($b) CV1($a)\n\
-             0001 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=2, args=0, vars=2, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ASSIGN_REF CV0($b) CV1($a)
+                0001 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $a = &$a;",
-            2,
-            1,
-            1,
-            "0000 ASSIGN_REF CV0($a) CV0($a)\n\
-             0001 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=2, args=0, vars=1, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ASSIGN_REF CV0($a) CV0($a)
+                0001 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $c = $b = &$a;",
-            3,
-            3,
-            2,
-            "0000 V3 = ASSIGN_REF CV1($b) CV2($a)\n\
-             0001 ASSIGN CV0($c) V3\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=3, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V3 = ASSIGN_REF CV1($b) CV2($a)
+                0001 ASSIGN CV0($c) V3
+                0002 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php echo $b = &$a;",
-            3,
-            2,
-            1,
-            "0000 V2 = ASSIGN_REF CV0($b) CV1($a)\n\
-             0001 ECHO V2\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=2, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V2 = ASSIGN_REF CV0($b) CV1($a)
+                0001 ECHO V2
+                0002 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $x = ($b = &$a) + 1;",
-            4,
-            3,
-            3,
-            "0000 V3 = ASSIGN_REF CV1($b) CV2($a)\n\
-             0001 T4 = ADD V3 int(1)\n\
-             0002 ASSIGN CV0($x) T4\n\
-             0003 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=3, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V3 = ASSIGN_REF CV1($b) CV2($a)
+                0001 T4 = ADD V3 int(1)
+                0002 ASSIGN CV0($x) T4
+                0003 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $b = &$a; $a = 1; var_dump($b);",
-            6,
-            2,
-            3,
-            "0000 ASSIGN_REF CV0($b) CV1($a)\n\
-             0001 ASSIGN CV1($a) int(1)\n\
-             0002 INIT_FCALL 1 96 string(\"var_dump\")\n\
-             0003 SEND_VAR CV0($b) 1\n\
-             0004 DO_ICALL\n\
-             0005 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=6, args=0, vars=2, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 ASSIGN_REF CV0($b) CV1($a)
+                0001 ASSIGN CV1($a) int(1)
+                0002 INIT_FCALL 1 96 string("var_dump")
+                0003 SEND_VAR CV0($b) 1
+                0004 DO_ICALL
+                0005 RETURN int(1)
+            "#]],
         ),
         // `zend_compile_var(BP_VAR_W, 1)` over the source: the
         // target's own fetch is held back until it has compiled, so
@@ -469,95 +510,121 @@ fn a_by_reference_assignment_compiles_to_assign_ref_as_php_emits_it() {
         // `MAKE_REF` between the two (bug #71539).
         (
             b"<?php $a[1] = &$a[0];",
-            5,
-            1,
-            4,
-            "0000 V2 = FETCH_DIM_W CV0($a) int(0)\n\
-             0001 V3 = MAKE_REF V2\n\
-             0002 V1 = FETCH_DIM_W CV0($a) int(1)\n\
-             0003 ASSIGN_REF V1 V3\n\
-             0004 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    3: 0002 - 0003 (tmp/var)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=5, args=0, vars=1, tmps=4)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V2 = FETCH_DIM_W CV0($a) int(0)
+                0001 V3 = MAKE_REF V2
+                0002 V1 = FETCH_DIM_W CV0($a) int(1)
+                0003 ASSIGN_REF V1 V3
+                0004 RETURN int(1)
+                LIVE RANGES:
+                     3: 0002 - 0003 (tmp/var)
+            "#]],
         ),
         (
             b"<?php $b = &$o->p;",
-            3,
-            2,
-            2,
-            "0000 V2 = FETCH_OBJ_W (ref) CV1($o) string(\"p\")\n\
-             0001 ASSIGN_REF CV0($b) V2\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=2, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V2 = FETCH_OBJ_W (ref) CV1($o) string("p")
+                0001 ASSIGN_REF CV0($b) V2
+                0002 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $b = &C::$s;",
-            3,
-            1,
-            2,
-            "0000 V1 = FETCH_STATIC_PROP_W (ref) string(\"s\") string(\"C\")\n\
-             0001 ASSIGN_REF CV0($b) V1\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=1, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V1 = FETCH_STATIC_PROP_W (ref) string("s") string("C")
+                0001 ASSIGN_REF CV0($b) V1
+                0002 RETURN int(1)
+            "#]],
         ),
         // Only the outermost link of the chain is the reference's:
         // the `FETCH_OBJ_W` under it is `ZEND_FETCH_DIM_WRITE` as
         // any property under a dimension is.
         (
             b"<?php $b = &$o->p[0];",
-            4,
-            2,
-            3,
-            "0000 V2 = FETCH_OBJ_W (dim write) CV1($o) string(\"p\")\n\
-             0001 V3 = FETCH_DIM_W V2 int(0)\n\
-             0002 ASSIGN_REF CV0($b) V3\n\
-             0003 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=2, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V2 = FETCH_OBJ_W (dim write) CV1($o) string("p")
+                0001 V3 = FETCH_DIM_W V2 int(0)
+                0002 ASSIGN_REF CV0($b) V3
+                0003 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $b = &$this;",
-            3,
-            1,
-            2,
-            "0000 V1 = FETCH_THIS\n\
-             0001 ASSIGN_REF CV0($b) V1\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=1, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V1 = FETCH_THIS
+                0001 ASSIGN_REF CV0($b) V1
+                0002 RETURN int(1)
+            "#]],
         ),
         // A `static` property on the left is php's
         // `ASSIGN_STATIC_PROP_REF` arm, whose source rides in the
         // `OP_DATA` after it and is `MAKE_REF`'d like any other.
         (
             b"<?php C::$t = &$a[0];",
-            5,
-            1,
-            3,
-            "0000 V2 = FETCH_DIM_W CV0($a) int(0)\n\
-             0001 V3 = MAKE_REF V2\n\
-             0002 ASSIGN_STATIC_PROP_REF string(\"t\") string(\"C\")\n\
-             0003 OP_DATA V3\n\
-             0004 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=5, args=0, vars=1, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V2 = FETCH_DIM_W CV0($a) int(0)
+                0001 V3 = MAKE_REF V2
+                0002 ASSIGN_STATIC_PROP_REF string("t") string("C")
+                0003 OP_DATA V3
+                0004 RETURN int(1)
+            "#]],
         ),
     ];
-    for (source, lines, vars, tmps, oplines) in cases {
-        assert_eq!(
-            dump_of(source),
-            main_dump(*lines, *vars, *tmps, oplines),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+    for (source, expected) in cases {
+        expected.assert_eq(&dump_of(source));
     }
     // `zend_is_call`: a call is the source php marks
     // `ZEND_RETURNS_FUNCTION`, and the name it resolves as the
     // program serves is `INIT_FCALL_BY_NAME`.
-    assert_eq!(
-        dump_of(b"<?php $b = &f();"),
-        main_dump(
-            4,
-            1,
-            2,
-            "0000 INIT_FCALL_BY_NAME 0 string(\"f\")\n\
-             0001 V1 = DO_FCALL_BY_NAME\n\
-             0002 ASSIGN_REF (function) CV0($b) V1\n\
-             0003 RETURN int(1)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=4, args=0, vars=1, tmps=2)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 INIT_FCALL_BY_NAME 0 string("f")
+        0001 V1 = DO_FCALL_BY_NAME
+        0002 ASSIGN_REF (function) CV0($b) V1
+        0003 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(b"<?php $b = &f();"));
     // `zend_compile_var_inner`'s default arm under `BP_VAR_W`, and
     // the arm after `MAKE_REF` over a call php answered in a
     // temporary: php's own words for each.
@@ -586,99 +653,120 @@ fn a_by_reference_assignment_compiles_to_assign_ref_as_php_emits_it() {
 /// the right side made a reference; a `foreach` value that is a list
 /// is fetched into a `VAR` and read the same way.
 #[test]
+#[allow(clippy::too_many_lines)] // one snapshot per case: the table is the test
 fn a_list_compiles_to_what_zend_compile_list_assign_emits() {
-    let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+    let cases: &[(&[u8], Expect)] = &[
         (
             b"<?php [$a, $b] = $x;",
-            7,
-            3,
-            5,
-            "0000 T3 = QM_ASSIGN CV0($x)\n\
-             0001 V4 = FETCH_LIST_R T3 int(0)\n\
-             0002 ASSIGN CV1($a) V4\n\
-             0003 V6 = FETCH_LIST_R T3 int(1)\n\
-             0004 ASSIGN CV2($b) V6\n\
-             0005 FREE T3\n\
-             0006 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    3: 0001 - 0005 (tmp/var)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=7, args=0, vars=3, tmps=5)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T3 = QM_ASSIGN CV0($x)
+                0001 V4 = FETCH_LIST_R T3 int(0)
+                0002 ASSIGN CV1($a) V4
+                0003 V6 = FETCH_LIST_R T3 int(1)
+                0004 ASSIGN CV2($b) V6
+                0005 FREE T3
+                0006 RETURN int(1)
+                LIVE RANGES:
+                     3: 0001 - 0005 (tmp/var)
+            "#]],
         ),
         (
             b"<?php list('k' => $a) = $x;",
-            5,
-            2,
-            3,
-            "0000 T2 = QM_ASSIGN CV0($x)\n\
-             0001 V3 = FETCH_LIST_R T2 string(\"k\")\n\
-             0002 ASSIGN CV1($a) V3\n\
-             0003 FREE T2\n\
-             0004 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    2: 0001 - 0003 (tmp/var)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=5, args=0, vars=2, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T2 = QM_ASSIGN CV0($x)
+                0001 V3 = FETCH_LIST_R T2 string("k")
+                0002 ASSIGN CV1($a) V3
+                0003 FREE T2
+                0004 RETURN int(1)
+                LIVE RANGES:
+                     2: 0001 - 0003 (tmp/var)
+            "#]],
         ),
         (
             b"<?php [$a, [$b, $c]] = $x;",
-            11,
-            4,
-            8,
-            "0000 T4 = QM_ASSIGN CV0($x)\n\
-             0001 V5 = FETCH_LIST_R T4 int(0)\n\
-             0002 ASSIGN CV1($a) V5\n\
-             0003 V7 = FETCH_LIST_R T4 int(1)\n\
-             0004 V8 = FETCH_LIST_R V7 int(0)\n\
-             0005 ASSIGN CV2($b) V8\n\
-             0006 V10 = FETCH_LIST_R V7 int(1)\n\
-             0007 ASSIGN CV3($c) V10\n\
-             0008 FREE V7\n\
-             0009 FREE T4\n\
-             0010 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    4: 0001 - 0009 (tmp/var)\n\
-             \x20    7: 0004 - 0008 (tmp/var)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=11, args=0, vars=4, tmps=8)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T4 = QM_ASSIGN CV0($x)
+                0001 V5 = FETCH_LIST_R T4 int(0)
+                0002 ASSIGN CV1($a) V5
+                0003 V7 = FETCH_LIST_R T4 int(1)
+                0004 V8 = FETCH_LIST_R V7 int(0)
+                0005 ASSIGN CV2($b) V8
+                0006 V10 = FETCH_LIST_R V7 int(1)
+                0007 ASSIGN CV3($c) V10
+                0008 FREE V7
+                0009 FREE T4
+                0010 RETURN int(1)
+                LIVE RANGES:
+                     4: 0001 - 0009 (tmp/var)
+                     7: 0004 - 0008 (tmp/var)
+            "#]],
         ),
         (
             b"<?php [&$a] = $x;",
-            6,
-            2,
-            4,
-            "0000 V2 = MAKE_REF CV0($x)\n\
-             0001 V3 = FETCH_LIST_W V2 int(0)\n\
-             0002 V4 = MAKE_REF V3\n\
-             0003 ASSIGN_REF CV1($a) V4\n\
-             0004 FREE V2\n\
-             0005 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    2: 0001 - 0004 (tmp/var)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=6, args=0, vars=2, tmps=4)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V2 = MAKE_REF CV0($x)
+                0001 V3 = FETCH_LIST_W V2 int(0)
+                0002 V4 = MAKE_REF V3
+                0003 ASSIGN_REF CV1($a) V4
+                0004 FREE V2
+                0005 RETURN int(1)
+                LIVE RANGES:
+                     2: 0001 - 0004 (tmp/var)
+            "#]],
         ),
         (
             b"<?php foreach ($xs as $k => [$a, $b]) {}",
-            11,
-            4,
-            8,
-            "0000 V4 = FE_RESET_R CV0($xs) 0009\n\
-             0001 T10 = FE_FETCH_R V4 V5 0009\n\
-             0002 V6 = FETCH_LIST_R V5 int(0)\n\
-             0003 ASSIGN CV1($a) V6\n\
-             0004 V8 = FETCH_LIST_R V5 int(1)\n\
-             0005 ASSIGN CV2($b) V8\n\
-             0006 FREE V5\n\
-             0007 ASSIGN CV3($k) T10\n\
-             0008 JMP 0001\n\
-             0009 FE_FREE V4\n\
-             0010 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    4: 0001 - 0009 (loop)\n\
-             \x20    5: 0002 - 0006 (tmp/var)\n\
-             \x20    10: 0002 - 0007 (tmp/var)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=11, args=0, vars=4, tmps=8)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V4 = FE_RESET_R CV0($xs) 0009
+                0001 T10 = FE_FETCH_R V4 V5 0009
+                0002 V6 = FETCH_LIST_R V5 int(0)
+                0003 ASSIGN CV1($a) V6
+                0004 V8 = FETCH_LIST_R V5 int(1)
+                0005 ASSIGN CV2($b) V8
+                0006 FREE V5
+                0007 ASSIGN CV3($k) T10
+                0008 JMP 0001
+                0009 FE_FREE V4
+                0010 RETURN int(1)
+                LIVE RANGES:
+                     4: 0001 - 0009 (loop)
+                     5: 0002 - 0006 (tmp/var)
+                     10: 0002 - 0007 (tmp/var)
+            "#]],
         ),
     ];
-    for (source, lines, vars, tmps, oplines) in cases {
-        assert_eq!(
-            dump_of(source),
-            main_dump(*lines, *vars, *tmps, oplines),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+    for (source, expected) in cases {
+        expected.assert_eq(&dump_of(source));
     }
 }
 
@@ -743,21 +831,23 @@ fn a_list_of_the_wrong_shape_is_phps_compile_error() {
 /// oracle's under `[regime.dump]` at 8.5.9 (#2686).
 #[test]
 fn a_name_written_as_a_constant_other_than_a_string_is_fetched_by_name_not_a_cv() {
-    assert_eq!(
-        dump_of(b"<?php ${true} = 1; ${1}; ${'1'}; echo ${true}, ${1};"),
-        "\n$_main:\n\
-         \x20    ; (lines=6, args=0, vars=1, tmps=3)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 V1 = FETCH_W (local) string(\"1\")\n\
-         0001 ASSIGN V1 int(1)\n\
-         0002 T3 = FETCH_R (local) string(\"1\")\n\
-         0003 ECHO T3\n\
-         0004 ECHO CV0($1)\n\
-         0005 RETURN int(1)\n\
-         "
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=6, args=0, vars=1, tmps=3)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 V1 = FETCH_W (local) string("1")
+        0001 ASSIGN V1 int(1)
+        0002 T3 = FETCH_R (local) string("1")
+        0003 ECHO T3
+        0004 ECHO CV0($1)
+        0005 RETURN int(1)
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php ${true} = 1; ${1}; ${'1'}; echo ${true}, ${1};",
+    ));
 }
 
 /// #690's shapes under the oracle's `[regime.dump]`: a `global` over
@@ -767,50 +857,60 @@ fn a_name_written_as_a_constant_other_than_a_string_is_fetched_by_name_not_a_cv(
 /// step over the `VAR`.
 #[test]
 fn a_variable_named_at_run_time_is_fetched_by_name_as_php_emits_it() {
-    let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+    let cases: &[(&[u8], Expect)] = &[
         (
             b"<?php global ${$x[0]};",
-            5,
-            1,
-            4,
-            "0000 T1 = FETCH_DIM_R CV0($x) int(0)\n\
-             0001 V2 = FETCH_W (global+lock) T1\n\
-             0002 V3 = FETCH_W (local) T1\n\
-             0003 ASSIGN_REF V3 V2\n\
-             0004 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    1: 0001 - 0002 (tmp/var)\n\
-             \x20    2: 0002 - 0003 (tmp/var)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=5, args=0, vars=1, tmps=4)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T1 = FETCH_DIM_R CV0($x) int(0)
+                0001 V2 = FETCH_W (global+lock) T1
+                0002 V3 = FETCH_W (local) T1
+                0003 ASSIGN_REF V3 V2
+                0004 RETURN int(1)
+                LIVE RANGES:
+                     1: 0001 - 0002 (tmp/var)
+                     2: 0002 - 0003 (tmp/var)
+            "#]],
         ),
         (
             b"<?php global $_SERVER;",
-            4,
-            0,
-            3,
-            "0000 V0 = FETCH_W (global+lock) string(\"_SERVER\")\n\
-             0001 V1 = FETCH_W (global) string(\"_SERVER\")\n\
-             0002 ASSIGN_REF V1 V0\n\
-             0003 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    0: 0001 - 0002 (tmp/var)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=0, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V0 = FETCH_W (global+lock) string("_SERVER")
+                0001 V1 = FETCH_W (global) string("_SERVER")
+                0002 ASSIGN_REF V1 V0
+                0003 RETURN int(1)
+                LIVE RANGES:
+                     0: 0001 - 0002 (tmp/var)
+            "#]],
         ),
         (
             b"<?php $$x++;",
-            3,
-            1,
-            2,
-            "0000 V1 = FETCH_RW (local) CV0($x)\n\
-             0001 PRE_INC V1\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=1, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V1 = FETCH_RW (local) CV0($x)
+                0001 PRE_INC V1
+                0002 RETURN int(1)
+            "#]],
         ),
     ];
-    for (source, lines, vars, tmps, oplines) in cases {
-        assert_eq!(
-            dump_of(source),
-            main_dump(*lines, *vars, *tmps, oplines),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+    for (source, expected) in cases {
+        expected.assert_eq(&dump_of(source));
     }
 }
 
@@ -821,65 +921,85 @@ fn a_variable_named_at_run_time_is_fetched_by_name_as_php_emits_it() {
 /// by name are `ISSET_ISEMPTY_VAR`, and `unset` over one `UNSET_VAR`.
 #[test]
 fn an_auto_global_is_fetched_by_name_from_the_global_table_as_php_emits_it() {
-    let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+    let cases: &[(&[u8], Expect)] = &[
         (
             b"<?php $_SERVER[\"x\"] = 1;",
-            4,
-            0,
-            2,
-            "0000 V0 = FETCH_W (global) string(\"_SERVER\")\n\
-             0001 ASSIGN_DIM V0 string(\"x\")\n\
-             0002 OP_DATA int(1)\n\
-             0003 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=0, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V0 = FETCH_W (global) string("_SERVER")
+                0001 ASSIGN_DIM V0 string("x")
+                0002 OP_DATA int(1)
+                0003 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $_SERVER[\"n\"] .= \"a\";",
-            4,
-            0,
-            2,
-            "0000 V0 = FETCH_RW (global) string(\"_SERVER\")\n\
-             0001 ASSIGN_DIM_OP (CONCAT) V0 string(\"n\")\n\
-             0002 OP_DATA string(\"a\")\n\
-             0003 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=0, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V0 = FETCH_RW (global) string("_SERVER")
+                0001 ASSIGN_DIM_OP (CONCAT) V0 string("n")
+                0002 OP_DATA string("a")
+                0003 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php unset($_SERVER[\"x\"]);",
-            3,
-            0,
-            1,
-            "0000 V0 = FETCH_UNSET (global) string(\"_SERVER\")\n\
-             0001 UNSET_DIM V0 string(\"x\")\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=1)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V0 = FETCH_UNSET (global) string("_SERVER")
+                0001 UNSET_DIM V0 string("x")
+                0002 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $a = isset($_SERVER) && empty($$a);",
-            6,
-            1,
-            3,
-            "0000 T1 = ISSET_ISEMPTY_VAR (global) (isset) string(\"_SERVER\")\n\
-             0001 T1 = JMPZ_EX T1 0004\n\
-             0002 T2 = ISSET_ISEMPTY_VAR (local) (empty) CV0($a)\n\
-             0003 T1 = BOOL T2\n\
-             0004 ASSIGN CV0($a) T1\n\
-             0005 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=6, args=0, vars=1, tmps=3)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T1 = ISSET_ISEMPTY_VAR (global) (isset) string("_SERVER")
+                0001 T1 = JMPZ_EX T1 0004
+                0002 T2 = ISSET_ISEMPTY_VAR (local) (empty) CV0($a)
+                0003 T1 = BOOL T2
+                0004 ASSIGN CV0($a) T1
+                0005 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php unset($$x, $_ENV);",
-            3,
-            1,
-            0,
-            "0000 UNSET_VAR (local) CV0($x)\n\
-             0001 UNSET_VAR (global) string(\"_ENV\")\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=1, tmps=0)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 UNSET_VAR (local) CV0($x)
+                0001 UNSET_VAR (global) string("_ENV")
+                0002 RETURN int(1)
+            "#]],
         ),
     ];
-    for (source, lines, vars, tmps, oplines) in cases {
-        assert_eq!(
-            dump_of(source),
-            main_dump(*lines, *vars, *tmps, oplines),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+    for (source, expected) in cases {
+        expected.assert_eq(&dump_of(source));
     }
 }
 
@@ -891,62 +1011,82 @@ fn an_auto_global_is_fetched_by_name_from_the_global_table_as_php_emits_it() {
 /// is `true` before the request runs.
 #[test]
 fn globals_is_a_copy_of_the_table_and_its_element_a_fetch_by_name_as_php_emits_it() {
-    let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+    let cases: &[(&[u8], Expect)] = &[
         (
             b"<?php $x = $GLOBALS;",
-            3,
-            1,
-            2,
-            "0000 T1 = FETCH_GLOBALS\n\
-             0001 ASSIGN CV0($x) T1\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=1, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T1 = FETCH_GLOBALS
+                0001 ASSIGN CV0($x) T1
+                0002 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $GLOBALS[\"a\"] = 1;",
-            3,
-            0,
-            2,
-            "0000 V0 = FETCH_W (global) string(\"a\")\n\
-             0001 ASSIGN V0 int(1)\n\
-             0002 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=3, args=0, vars=0, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V0 = FETCH_W (global) string("a")
+                0001 ASSIGN V0 int(1)
+                0002 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $GLOBALS[\"a\"][\"b\"] .= \"c\";",
-            4,
-            0,
-            2,
-            "0000 V0 = FETCH_RW (global) string(\"a\")\n\
-             0001 ASSIGN_DIM_OP (CONCAT) V0 string(\"b\")\n\
-             0002 OP_DATA string(\"c\")\n\
-             0003 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=4, args=0, vars=0, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 V0 = FETCH_RW (global) string("a")
+                0001 ASSIGN_DIM_OP (CONCAT) V0 string("b")
+                0002 OP_DATA string("c")
+                0003 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php unset($GLOBALS[\"a\"]);",
-            2,
-            0,
-            0,
-            "0000 UNSET_VAR (global) string(\"a\")\n\
-             0001 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=2, args=0, vars=0, tmps=0)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 UNSET_VAR (global) string("a")
+                0001 RETURN int(1)
+            "#]],
         ),
         (
             b"<?php $b = isset($GLOBALS[\"a\"]) || isset($GLOBALS);",
-            5,
-            1,
-            2,
-            "0000 T1 = ISSET_ISEMPTY_VAR (global) (isset) string(\"a\")\n\
-             0001 T1 = JMPNZ_EX T1 0003\n\
-             0002 T1 = BOOL bool(true)\n\
-             0003 ASSIGN CV0($b) T1\n\
-             0004 RETURN int(1)\n",
+            expect![[r#"
+
+                $_main:
+                     ; (lines=5, args=0, vars=1, tmps=2)
+                     ; (before optimizer)
+                     ; :1-1
+                     ; return  [] RANGE[0..0]
+                0000 T1 = ISSET_ISEMPTY_VAR (global) (isset) string("a")
+                0001 T1 = JMPNZ_EX T1 0003
+                0002 T1 = BOOL bool(true)
+                0003 ASSIGN CV0($b) T1
+                0004 RETURN int(1)
+            "#]],
         ),
     ];
-    for (source, lines, vars, tmps, oplines) in cases {
-        assert_eq!(
-            dump_of(source),
-            main_dump(*lines, *vars, *tmps, oplines),
-            "{}",
-            String::from_utf8_lossy(source)
-        );
+    for (source, expected) in cases {
+        expected.assert_eq(&dump_of(source));
     }
 }
 

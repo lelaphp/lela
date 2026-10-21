@@ -13,42 +13,43 @@ use super::*;
 /// is the oracle's under `[regime.dump]` at 8.5.9 (#2674).
 #[test]
 fn an_abstract_hook_is_dumped_and_an_abstract_method_is_not() {
-    assert_eq!(
-        dump_of(
-            b"<?php interface I { public mixed $i { get; } } \
-              abstract class A { abstract public int $p { get; set; } abstract function m(); }"
-        ),
-        "\n$_main:\n\
-         \x20    ; (lines=1, args=0, vars=0, tmps=0)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 RETURN int(1)\n\
-         \n\
-         I::$i::get:\n\
-         \x20    ; (lines=2, args=0, vars=0, tmps=0)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 VERIFY_RETURN_TYPE\n\
-         0001 RETURN null\n\
-         \n\
-         A::$p::get:\n\
-         \x20    ; (lines=2, args=0, vars=0, tmps=0)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 VERIFY_RETURN_TYPE\n\
-         0001 RETURN null\n\
-         \n\
-         A::$p::set:\n\
-         \x20    ; (lines=2, args=1, vars=1, tmps=0)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 CV0($value) = RECV 1\n\
-         0001 RETURN null\n"
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+
+        I::$i::get:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 VERIFY_RETURN_TYPE
+        0001 RETURN null
+
+        A::$p::get:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 VERIFY_RETURN_TYPE
+        0001 RETURN null
+
+        A::$p::set:
+             ; (lines=2, args=1, vars=1, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 CV0($value) = RECV 1
+        0001 RETURN null
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php interface I { public mixed $i { get; } } \
+              abstract class A { abstract public int $p { get; set; } abstract function m(); }",
+    ));
 }
 
 /// A class completes after the classes its hooks declare, so php's
@@ -58,46 +59,47 @@ fn an_abstract_hook_is_dumped_and_an_abstract_method_is_not() {
 /// oracle's under `[regime.dump]` at 8.5.9 (#2690).
 #[test]
 fn a_class_declared_in_a_hook_is_dumped_before_the_hook_s_class() {
-    assert_eq!(
-        dump_of(
-            b"<?php class T { public $p { get => new class { \
-              public $q { get => 1; } function m() {} }; } }"
-        ),
-        "\n$_main:\n\
-         \x20    ; (lines=1, args=0, vars=0, tmps=0)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 RETURN int(1)\n\
-         \n\
-         class@anonymous::m:\n\
-         \x20    ; (lines=1, args=0, vars=0, tmps=0)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 RETURN null\n\
-         \n\
-         class@anonymous::$q::get:\n\
-         \x20    ; (lines=2, args=0, vars=0, tmps=0)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 RETURN int(1)\n\
-         0001 RETURN null\n\
-         \n\
-         T::$p::get:\n\
-         \x20    ; (lines=5, args=0, vars=0, tmps=3)\n\
-         \x20    ; (before optimizer)\n\
-         \x20    ; :1-1\n\
-         \x20    ; return  [] RANGE[0..0]\n\
-         0000 V0 = DECLARE_ANON_CLASS string(\"class@anonymous\\x00:1$0\")\n\
-         0001 V1 = NEW 0 V0\n\
-         0002 DO_FCALL\n\
-         0003 RETURN V1\n\
-         0004 RETURN null\n\
-         LIVE RANGES:\n\
-         \x20    1: 0002 - 0003 (new)\n"
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+
+        class@anonymous::m:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 RETURN null
+
+        class@anonymous::$q::get:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+        0001 RETURN null
+
+        T::$p::get:
+             ; (lines=5, args=0, vars=0, tmps=3)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 V0 = DECLARE_ANON_CLASS string("class@anonymous\x00:1$0")
+        0001 V1 = NEW 0 V0
+        0002 DO_FCALL
+        0003 RETURN V1
+        0004 RETURN null
+        LIVE RANGES:
+             1: 0002 - 0003 (new)
+    "#]]
+    .assert_eq(&dump_of(
+        b"<?php class T { public $p { get => new class { \
+              public $q { get => 1; } function m() {} }; } }",
+    ));
 }
 
 /// `zend_compile_class_decl` names a class `zend_prefix_with_ns` over
@@ -116,20 +118,21 @@ fn a_class_declared_in_a_hook_is_dumped_before_the_hook_s_class() {
 fn a_class_declared_in_a_namespace_takes_the_namespace_on_its_name() {
     let source: &[u8] = b"<?php namespace A; class M {} new M;";
     let (unit, _strings) = unit_and_strings(source);
-    assert_eq!(
-        unit.dump(&[]).text(),
-        main_dump(
-            4,
-            0,
-            2,
-            "0000 V0 = NEW 0 string(\"A\\\\M\")\n\
-             0001 DO_FCALL\n\
-             0002 FREE V0\n\
-             0003 RETURN int(1)\n\
-             LIVE RANGES:\n\
-             \x20    0: 0001 - 0002 (new)\n"
-        )
-    );
+    expect![[r#"
+
+        $_main:
+             ; (lines=4, args=0, vars=0, tmps=2)
+             ; (before optimizer)
+             ; :1-1
+             ; return  [] RANGE[0..0]
+        0000 V0 = NEW 0 string("A\\M")
+        0001 DO_FCALL
+        0002 FREE V0
+        0003 RETURN int(1)
+        LIVE RANGES:
+             0: 0001 - 0002 (new)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     let names: Vec<&[u8]> = unit.classes.iter().map(|c| c.name.0.as_ref()).collect();
     assert_eq!(
         names,
@@ -174,11 +177,18 @@ fn a_class_with_properties_and_constants_is_bound_with_no_opline() {
     let (unit, _strings) = unit_and_strings(
         b"<?php\nclass M { /** P */ public $x, $y = 1 /** P2 */; /** K */ const A = 1, B = 2; static $s; /** F */ final protected const C = -A; }\n/** D */ { } class N /** D2 */ { var $v /** V */; }\necho 1;\n",
     );
-    assert_eq!(
-        unit.dump(&[]).text(),
-        "\n$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n     ; (before optimizer)\n     ; :1-5\n     ; return  [] RANGE[0..0]\n0000 ECHO int(1)\n0001 RETURN int(1)\n",
-        "the class emits no opline; php binds it at compile time"
-    );
+    // the class emits no opline; php binds it at compile time
+    expect![[r#"
+
+        $_main:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-5
+             ; return  [] RANGE[0..0]
+        0000 ECHO int(1)
+        0001 RETURN int(1)
+    "#]]
+    .assert_eq(&unit.dump(&[]).text());
     assert_eq!(unit.classes.len(), 2, "two classes, got {:?}", unit.classes);
     let (m, n) = (&unit.classes[0], &unit.classes[1]);
     assert_eq!(
@@ -419,51 +429,65 @@ fn what_php_s_compiler_refuses_in_a_property_group_is_refused_in_its_words() {
 /// the link refuses it when the opline runs.
 #[test]
 fn an_enum_declaring_its_own_cases_or_from_compiles() {
-    let cases = dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-6
+             ; return  [] RANGE[0..0]
+        0000 DECLARE_CLASS string("foo")
+        0001 RETURN int(1)
+
+        Foo::cases:
+             ; (lines=3, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :4-4
+             ; return  [] RANGE[0..0]
+        0000 RETURN array(...)
+        0001 VERIFY_RETURN_TYPE
+        0002 RETURN null
+    "#]]
+    .assert_eq(&dump_of(
         b"<?php
 enum Foo {
     case Bar;
     public static function cases(): array { return []; }
 }
 ",
-    );
-    assert!(
-        cases.contains("0000 DECLARE_CLASS string(\"foo\")\n0001 RETURN int(1)\n"),
-        "php's $_main, {cases}"
-    );
-    assert!(
-        cases.contains(
-            "\nFoo::cases:\n     ; (lines=3, args=0, vars=0, tmps=0)\n\
-             \x20    ; (before optimizer)\n     ; :4-4\n     ; return  [] RANGE[0..0]\n\
-             0000 RETURN array(...)\n\
-             0001 VERIFY_RETURN_TYPE\n\
-             0002 RETURN null\n"
-        ),
-        "php's Foo::cases, {cases}"
-    );
-    let from = dump_of(
+    ));
+    expect![[r#"
+
+        $_main:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-6
+             ; return  [] RANGE[0..0]
+        0000 DECLARE_CLASS string("foo")
+        0001 RETURN int(1)
+
+        Foo::from:
+             ; (lines=6, args=1, vars=1, tmps=1)
+             ; (before optimizer)
+             ; :4-4
+             ; return  [] RANGE[0..0]
+        0000 CV0($value) = RECV 1
+        0001 T1 = FETCH_THIS
+        0002 VERIFY_RETURN_TYPE T1
+        0003 RETURN T1
+        0004 VERIFY_RETURN_TYPE
+        0005 RETURN null
+        LIVE RANGES:
+             1: 0002 - 0003 (tmp/var)
+    "#]]
+    .assert_eq(&dump_of(
         b"<?php
 enum Foo: int {
     case Bar = 0;
     public static function from(string|int $value): self { return $this; }
 }
 ",
-    );
-    assert!(
-        from.contains("0000 DECLARE_CLASS string(\"foo\")\n0001 RETURN int(1)\n"),
-        "php's $_main, {from}"
-    );
-    assert!(
-        from.contains(
-            "0000 CV0($value) = RECV 1\n\
-             0001 T1 = FETCH_THIS\n\
-             0002 VERIFY_RETURN_TYPE T1\n\
-             0003 RETURN T1\n\
-             0004 VERIFY_RETURN_TYPE\n\
-             0005 RETURN null\n"
-        ),
-        "php's Foo::from, {from}"
-    );
+    ));
 }
 
 /// `zend_compile_class_decl` compiles the body in the order written
@@ -473,8 +497,58 @@ enum Foo: int {
 /// `DO_UCALL`, with its argument sent by the parameter, and
 /// `$this->q($a)` to one below stays `DO_FCALL`.
 #[test]
+#[allow(clippy::too_many_lines)] // one oracle dump per class: the dumps are the test
 fn a_hook_knows_the_methods_declared_above_its_property() {
-    let dump = dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-8
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+
+        C::p:
+             ; (lines=3, args=1, vars=1, tmps=0)
+             ; (before optimizer)
+             ; :3-3
+             ; return  [] RANGE[0..0]
+        0000 CV0($r) = RECV 1
+        0001 RETURN int(1)
+        0002 RETURN null
+
+        C::q:
+             ; (lines=3, args=1, vars=1, tmps=0)
+             ; (before optimizer)
+             ; :6-6
+             ; return  [] RANGE[0..0]
+        0000 CV0($r) = RECV 1
+        0001 RETURN int(2)
+        0002 RETURN null
+
+        C::$x::get:
+             ; (lines=5, args=0, vars=1, tmps=1)
+             ; (before optimizer)
+             ; :4-4
+             ; return  [] RANGE[0..0]
+        0000 INIT_METHOD_CALL 1 THIS string("p")
+        0001 SEND_REF CV0($a) 1
+        0002 V1 = DO_UCALL
+        0003 RETURN V1
+        0004 RETURN null
+
+        C::$y::get:
+             ; (lines=5, args=0, vars=1, tmps=1)
+             ; (before optimizer)
+             ; :5-5
+             ; return  [] RANGE[0..0]
+        0000 INIT_METHOD_CALL 1 THIS string("q")
+        0001 SEND_VAR_EX CV0($a) 1
+        0002 V1 = DO_FCALL
+        0003 RETURN V1
+        0004 RETURN null
+    "#]]
+    .assert_eq(&dump_of(
         b"<?php
 class C {
     private function p(&$r) { return 1; }
@@ -483,57 +557,117 @@ class C {
     private function q(&$r) { return 2; }
 }
 ",
-    );
-    let x = "0000 INIT_METHOD_CALL 1 THIS string(\"p\")\n\
-             0001 SEND_REF CV0($a) 1\n\
-             0002 V1 = DO_UCALL\n";
-    let y = "0000 INIT_METHOD_CALL 1 THIS string(\"q\")\n\
-             0001 SEND_VAR_EX CV0($a) 1\n\
-             0002 V1 = DO_FCALL\n";
-    assert!(dump.contains(x), "php's C::$x::get, {dump}");
-    assert!(dump.contains(y), "php's C::$y::get, {dump}");
-    let call = |opcode: &str| {
-        format!(
-            "0000 INIT_METHOD_CALL 0 THIS string(\"p\")\n\
-             0001 V0 = {opcode}\n\
-             0002 RETURN V0\n"
-        )
-    };
-    let above = dump_of(
+    ));
+    expect![[r#"
+
+        $_main:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-6
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+
+        C::p:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :3-3
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+        0001 RETURN null
+
+        C::$x::get:
+             ; (lines=4, args=0, vars=0, tmps=1)
+             ; (before optimizer)
+             ; :4-4
+             ; return  [] RANGE[0..0]
+        0000 INIT_METHOD_CALL 0 THIS string("p")
+        0001 V0 = DO_UCALL
+        0002 RETURN V0
+        0003 RETURN null
+    "#]]
+    .assert_eq(&dump_of(
         b"<?php
 class C {
     private function p() { return 1; }
     public $x { get => $this->p(); }
 }
 ",
-    );
-    assert!(above.contains(&call("DO_UCALL")), "php's dump, {above}");
-    let below = dump_of(
+    ));
+    expect![[r#"
+
+        $_main:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-6
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+
+        C::p:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :4-4
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+        0001 RETURN null
+
+        C::$x::get:
+             ; (lines=4, args=0, vars=0, tmps=1)
+             ; (before optimizer)
+             ; :3-3
+             ; return  [] RANGE[0..0]
+        0000 INIT_METHOD_CALL 0 THIS string("p")
+        0001 V0 = DO_FCALL
+        0002 RETURN V0
+        0003 RETURN null
+    "#]]
+    .assert_eq(&dump_of(
         b"<?php
 class C {
     public $x { get => $this->p(); }
     private function p() { return 1; }
 }
 ",
-    );
-    assert!(below.contains(&call("DO_FCALL")), "php's dump, {below}");
-    let scoped = dump_of(
+    ));
+    expect![[r#"
+
+        $_main:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-6
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+
+        C::p:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :3-3
+             ; return  [] RANGE[0..0]
+        0000 RETURN int(1)
+        0001 RETURN null
+
+        C::$x::get:
+             ; (lines=7, args=0, vars=0, tmps=3)
+             ; (before optimizer)
+             ; :4-4
+             ; return  [] RANGE[0..0]
+        0000 INIT_STATIC_METHOD_CALL 0 (self) (exception) string("p")
+        0001 V0 = DO_UCALL
+        0002 INIT_STATIC_METHOD_CALL 0 string("C") string("p")
+        0003 V1 = DO_UCALL
+        0004 T2 = ADD V0 V1
+        0005 RETURN T2
+        0006 RETURN null
+        LIVE RANGES:
+             0: 0002 - 0004 (tmp/var)
+    "#]]
+    .assert_eq(&dump_of(
         b"<?php
 class C {
     private static function p() { return 1; }
     public $x { get => self::p() + C::p(); }
 }
 ",
-    );
-    assert!(
-        scoped.contains(
-            "0000 INIT_STATIC_METHOD_CALL 0 (self) (exception) string(\"p\")\n\
-             0001 V0 = DO_UCALL\n\
-             0002 INIT_STATIC_METHOD_CALL 0 string(\"C\") string(\"p\")\n\
-             0003 V1 = DO_UCALL\n"
-        ),
-        "php's dump, {scoped}"
-    );
+    ));
 }
 
 /// `zend_compile_static_call`'s `self::` reads
@@ -545,21 +679,59 @@ class C {
 /// above is `DO_UCALL`.
 #[test]
 fn self_in_a_class_redeclaring_a_bound_name_is_the_class_compiling() {
-    let dump = dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=3, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-6
+             ; return  [] RANGE[0..0]
+        0000 JMPZ bool(true) 0002
+        0001 DECLARE_CLASS string("a")
+        0002 RETURN int(1)
+
+        A::f:
+             ; (lines=2, args=1, vars=1, tmps=0)
+             ; (before optimizer)
+             ; :2-2
+             ; return  [] RANGE[0..0]
+        0000 CV0($r) = RECV 1
+        0001 RETURN null
+
+        A::g:
+             ; (lines=4, args=0, vars=1, tmps=1)
+             ; (before optimizer)
+             ; :4-4
+             ; return  [] RANGE[0..0]
+        0000 INIT_STATIC_METHOD_CALL 1 (self) (exception) string("f")
+        0001 SEND_VAR_EX CV0($x) 1
+        0002 DO_FCALL
+        0003 RETURN null
+
+        A::h:
+             ; (lines=1, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :4-4
+             ; return  [] RANGE[0..0]
+        0000 RETURN null
+
+        A::$p::get:
+             ; (lines=4, args=0, vars=0, tmps=1)
+             ; (before optimizer)
+             ; :4-4
+             ; return  [] RANGE[0..0]
+        0000 INIT_STATIC_METHOD_CALL 0 (self) (exception) string("h")
+        0001 V0 = DO_UCALL
+        0002 RETURN V0
+        0003 RETURN null
+    "#]].assert_eq(&dump_of(
         b"<?php
 class A { public static function f(&$r) {} }
 if (true) {
     class A { function g() { self::f($x); } private function h() {} public $p { get => self::h(); } }
 }
 ",
-    );
-    let g = "0000 INIT_STATIC_METHOD_CALL 1 (self) (exception) string(\"f\")\n\
-             0001 SEND_VAR_EX CV0($x) 1\n\
-             0002 DO_FCALL\n";
-    let p = "0000 INIT_STATIC_METHOD_CALL 0 (self) (exception) string(\"h\")\n\
-             0001 V0 = DO_UCALL\n";
-    assert!(dump.contains(g), "php's A::g, {dump}");
-    assert!(dump.contains(p), "php's A::$p::get, {dump}");
+    ));
 }
 
 /// `zend_try_early_bind` while the file compiles (#2689): the class
@@ -571,21 +743,51 @@ if (true) {
 /// dumps; `D`, which `A`'s `B` names neither, is left the same.
 #[test]
 fn a_parent_naming_the_class_being_bound_leaves_it_delayed() {
-    let dump = dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=3, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-5
+             ; return  [] RANGE[0..0]
+        0000 DECLARE_CLASS_DELAYED string("b") string("a")
+        0001 DECLARE_CLASS_DELAYED string("d") string("a")
+        0002 RETURN int(1)
+
+        A::m:
+             ; (lines=3, args=1, vars=1, tmps=0)
+             ; (before optimizer)
+             ; :2-2
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV 1
+        0001 VERIFY_RETURN_TYPE
+        0002 RETURN null
+
+        B::m:
+             ; (lines=3, args=1, vars=1, tmps=0)
+             ; (before optimizer)
+             ; :3-3
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV 1
+        0001 VERIFY_RETURN_TYPE
+        0002 RETURN null
+
+        D::m:
+             ; (lines=3, args=1, vars=1, tmps=0)
+             ; (before optimizer)
+             ; :4-4
+             ; return  [] RANGE[0..0]
+        0000 CV0($a) = RECV 1
+        0001 VERIFY_RETURN_TYPE
+        0002 RETURN null
+    "#]]
+    .assert_eq(&dump_of(
         b"<?php
 class A { public function m(B|string $a): A|string {} }
 class B extends A { public function m(A|string $a): B|string {} }
 class D extends A { public function m(A|string $a): D|string {} }
 ",
-    );
-    assert!(
-        dump.contains(
-            "0000 DECLARE_CLASS_DELAYED string(\"b\") string(\"a\")\n\
-             0001 DECLARE_CLASS_DELAYED string(\"d\") string(\"a\")\n\
-             0002 RETURN int(1)\n"
-        ),
-        "php's $_main, {dump}"
-    );
+    ));
 }
 
 /// `zend_compile_property_hooks`' `num_hooked_prop_variance_checks`
@@ -597,7 +799,25 @@ class D extends A { public function m(A|string $a): D|string {} }
 /// dumps.
 #[test]
 fn a_set_hook_unresolved_while_compiling_is_declare_class() {
-    let dump = dump_of(
+    expect![[r#"
+
+        $_main:
+             ; (lines=2, args=0, vars=0, tmps=0)
+             ; (before optimizer)
+             ; :1-9
+             ; return  [] RANGE[0..0]
+        0000 DECLARE_CLASS string("test")
+        0001 RETURN int(1)
+
+        Test::$prop::set:
+             ; (lines=2, args=1, vars=1, tmps=0)
+             ; (before optimizer)
+             ; :4-4
+             ; return  [] RANGE[0..0]
+        0000 CV0($prop) = RECV 1
+        0001 RETURN null
+    "#]]
+    .assert_eq(&dump_of(
         b"<?php
 class Test {
     public X $prop {
@@ -607,9 +827,5 @@ class Test {
 interface X {}
 interface Y {}
 ",
-    );
-    assert!(
-        dump.contains("0000 DECLARE_CLASS string(\"test\")\n0001 RETURN int(1)\n"),
-        "php's $_main, {dump}"
-    );
+    ));
 }

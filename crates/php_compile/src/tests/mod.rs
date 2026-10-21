@@ -2,6 +2,7 @@
 //! `fixture`.
 
 use super::*;
+use expect_test::{Expect, expect};
 use fixture::*;
 use php_link::Names;
 use php_unit::decl::{ConstExpr, ConstantName, Name, NameKind, Parameter, Type, Visibility};
