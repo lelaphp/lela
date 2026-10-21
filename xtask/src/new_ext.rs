@@ -49,7 +49,8 @@ const FACADE: &str = "crates/php_ext";
 /// The per-directory guidance whose `extensions` region lists the crates.
 const GUIDANCE: &str = "ext/AGENTS.md";
 
-/// The enabled set every extension reaches (ADR-0004), relative to the root.
+/// The enabled set every extension reaches and every host serves on
+/// (ADR-0004, ADR-0008), relative to the root.
 pub(crate) const BUNDLE: &str = "crates/php_bundle";
 
 /// What one run laid down.
@@ -134,7 +135,7 @@ pub(crate) fn unrefused<'m>(
             bail!("{dir} is not a crate yet; {what} lands before any {one}");
         }
     }
-    let dir = root.join(row);
+    let dir = root.join(crate::layout::path(row));
     if dir.exists() {
         bail!("{row} exists; {instrument} lays a crate down once and never overwrites");
     }

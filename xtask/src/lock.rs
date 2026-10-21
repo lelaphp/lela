@@ -11,7 +11,7 @@ use serde::Deserialize;
 /// The workspace lock file.
 pub const FILE: &str = "Cargo.lock";
 
-/// `Cargo.lock`'s package list: name, version and where it comes from.
+/// `Cargo.lock`'s package list, each `[[package]]` row whole.
 #[derive(Debug, Default, Deserialize)]
 pub struct CargoLock {
     #[serde(default)]

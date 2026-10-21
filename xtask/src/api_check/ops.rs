@@ -77,11 +77,11 @@ fn line(row: &Value) -> Result<String> {
         .with_context(|| format!("{name}: an [[op]] row without a num"))?;
     let mut out = String::new();
     write!(out, "{name:<NAME$} {num:>NUM$}").ok();
-    write!(out, " {:<OPERAND$}", listed(row, "op1", "|", false)).ok();
-    write!(out, " {:<OPERAND$}", listed(row, "op2", "|", false)).ok();
+    write!(out, " {:<OPERAND$}", cell(row, "op1", "|", false)).ok();
+    write!(out, " {:<OPERAND$}", cell(row, "op2", "|", false)).ok();
     let result = row.get("result").and_then(Value::as_str).unwrap_or(NONE);
     write!(out, " {result:<RESULT$}").ok();
-    write!(out, " {:<EFFECTS$}", listed(row, "effects", ",", true)).ok();
+    write!(out, " {:<EFFECTS$}", cell(row, "effects", ",", true)).ok();
     let safepoint = row.get("safepoint").and_then(Value::as_str).unwrap_or(NONE);
     write!(out, " {safepoint}").ok();
     Ok(out)
@@ -91,7 +91,7 @@ fn line(row: &Value) -> Result<String> {
 /// `sorted`: one operand's zval kinds as php's handler line writes them
 /// (`|`), or the effects in a fixed order so a re-extraction that lists
 /// them differently is not a diff (`,`); `-` for a row that names none.
-fn listed(row: &Value, key: &str, sep: &str, sorted: bool) -> String {
+fn cell(row: &Value, key: &str, sep: &str, sorted: bool) -> String {
     let mut names: Vec<&str> = (row.get(key).and_then(Value::as_array))
         .map(|a| a.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();

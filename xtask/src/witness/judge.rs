@@ -91,8 +91,8 @@ pub(super) fn one(
     binary: &Binary,
     kept: &mut Kept,
 ) -> Result<Judged> {
-    // Unserved until the run of record answers ([`of_record`]): a fence
-    // that stops before it entered nothing that is known.
+    // Unserved until the run of record answers ([`of_record`]): what a
+    // fence that stops before then would have entered is not known.
     kept.entered = Record::Unserved;
     match lacking(oracle, witness) {
         Ok(None) => {}
