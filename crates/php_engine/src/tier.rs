@@ -744,7 +744,7 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
     let mut stepped = first;
     let mut units = Units::default();
     loop {
-        let served = serve_held::<T, D>(req, stepped, &units, Scope::WHOLE)?;
+        let served = serve_held::<T, D>(req, stepped, &units, Scope::Whole)?;
         units.give_back(req);
         match served {
             Some(again) => stepped = again,

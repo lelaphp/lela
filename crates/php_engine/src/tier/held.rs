@@ -95,19 +95,23 @@ pub(super) enum Entered<'u> {
 }
 
 /// The frames one serving of the loop serves: every frame of the
-/// serving ([`Scope::WHOLE`]), or a frame whose unit the request
-/// compiled for itself and the frames it calls, while it stands
-/// ([`Scope::took`]). A frame pushed later stands at a higher number
-/// (`FrameRef` is the position on the stack), so an edge to a frame
-/// below the scope's own has left it.
+/// serving, or a frame whose unit the request compiled for itself and
+/// the frames it calls, while it stands. A frame pushed later stands at
+/// a higher number (`FrameRef` is the position on the stack), so an
+/// edge to a frame below the scope's own has left it.
 #[derive(Clone, Copy)]
-pub(super) struct Scope<'u> {
-    /// The frame the scope serves first, the lowest it serves.
-    base: FrameRef,
-    /// The share of the base frame's unit the scope holds.
-    took: Option<&'u PublishedUnit>,
-    /// Where the stack stood at the call that began the scope.
-    above: usize,
+pub(super) enum Scope<'u> {
+    /// Every frame of the serving, its units held in [`Units`].
+    Whole,
+    /// A scope of its own ([`Scope::took`]).
+    Took {
+        /// The frame the scope serves first, the lowest it serves.
+        base: FrameRef,
+        /// The share of the base frame's unit the scope holds.
+        unit: &'u PublishedUnit,
+        /// Where the stack stood at the call that began the scope.
+        above: usize,
+    },
 }
 
 /// Where the stack stands: the address of a local of the calling frame,
@@ -119,19 +123,12 @@ pub(super) fn here() -> usize {
 }
 
 impl<'u> Scope<'u> {
-    /// Every frame of the serving, its units held in [`Units`].
-    pub(super) const WHOLE: Scope<'static> = Scope {
-        base: FrameRef(0),
-        took: None,
-        above: 0,
-    };
-
-    /// `frame` and what it calls, its unit `took`, held for the scope,
+    /// `frame` and what it calls, its unit `unit`, held for the scope,
     /// begun by a call that stood at `above` on the stack.
-    pub(super) fn took(frame: FrameRef, took: &'u PublishedUnit, above: usize) -> Scope<'u> {
-        Scope {
+    pub(super) fn took(frame: FrameRef, unit: &'u PublishedUnit, above: usize) -> Scope<'u> {
+        Scope::Took {
             base: frame,
-            took: Some(took),
+            unit,
             above,
         }
     }
@@ -142,8 +139,11 @@ impl<'u> Scope<'u> {
     /// the whole serving.
     #[inline]
     pub(super) fn measured(self, req: &mut Request) {
-        if self.took.is_some() && req.scope_unmeasured() {
-            req.note_scope_cost(self.above.saturating_sub(here()).max(1));
+        if let Scope::Took { above, .. } = self
+            && let Some(cost) = req.scope_unmeasured().then(|| above.saturating_sub(here()))
+            && let Some(cost) = std::num::NonZeroUsize::new(cost)
+        {
+            req.note_scope_cost(cost);
         }
     }
 
@@ -152,8 +152,13 @@ impl<'u> Scope<'u> {
     /// any other, which [`Units::enter`] enters.
     #[inline]
     pub(super) fn own(self, kept: &mut Kept<'u>, frame: FrameRef) -> Option<&'u OpArray> {
-        let own = self.took.filter(|_| frame == self.base)?;
-        let code = exec::code_of(own);
+        let Scope::Took { base, unit, .. } = self else {
+            return None;
+        };
+        if frame != base {
+            return None;
+        }
+        let code = exec::code_of(unit);
         kept.keep(frame, code);
         Some(code)
     }
@@ -162,7 +167,10 @@ impl<'u> Scope<'u> {
     /// own, which the scope around it serves.
     #[inline]
     pub(super) fn left(self, frame: FrameRef) -> bool {
-        frame.0 < self.base.0
+        match self {
+            Scope::Whole => false,
+            Scope::Took { base, .. } => frame.0 < base.0,
+        }
     }
 }
 

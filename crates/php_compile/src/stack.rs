@@ -86,8 +86,9 @@ enum Allowed {
     Detected { span: usize },
 }
 
-/// Where [`StackLimit::reentered`] found the limit, which
-/// [`StackLimit::left`] puts back once the serving it began is over.
+/// Where [`StackLimit::reentered`] or [`StackLimit::nested`] found the
+/// limit, which [`StackLimit::left`] puts back once the serving or the
+/// scope it began is over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use = "the limit a re-entry moved is put back when it is over"]
 pub struct Reentered(Option<usize>);
@@ -222,19 +223,20 @@ impl StackLimit {
     }
 
     /// A frame php enters in the same `execute_ex`, an `eval`'s or an
-    /// included file's (`INCLUDE_OR_EVAL`'s `ZEND_VM_ENTER`), which the
-    /// engine's loop serves in a scope of its own, `charge` bytes of the
-    /// thread at most: where the thread has `room` bytes more than that
-    /// above the floor, the limit moves `charge` bytes down, never past
-    /// the floor, so php's budget below the scope is what it was above
-    /// it and the scope is held to none of it, a size given or detected, as php's
-    /// `eval` recursion takes nothing of the machine stack; what it was
-    /// is handed back for [`left`](Self::left). None where the thread has
-    /// no room for the scope, which the loop serves the frame without
-    /// then, as php does everywhere. With no limit there is none to move.
+    /// included file's (`INCLUDE_OR_EVAL`'s `ZEND_VM_ENTER`), served by
+    /// the caller on `charge` bytes of the thread of its own. php's
+    /// `eval` takes none of the machine stack, so the limit moves
+    /// `charge` bytes down, never past the floor, and php's budget below
+    /// the frame is what it was above it. The limit moves so whether its
+    /// size was given or detected. What it was is handed back for
+    /// [`left`](Self::left). None where the thread has less than `charge`
+    /// and `room` above its floor, or no known end, and the caller serves
+    /// the frame without moving it. With no limit there is none to move.
     #[inline]
     pub fn nested(&mut self, charge: usize, room: usize) -> Option<Reentered> {
-        if position() <= self.floor.saturating_add(charge).saturating_add(room) {
+        // A thread whose end is not known, the limit not worked out yet,
+        // has no room to measure.
+        if self.floor == 0 || position() <= self.floor.saturating_add(charge).saturating_add(room) {
             return None;
         }
         let held = self.limit;
@@ -244,8 +246,9 @@ impl StackLimit {
         Some(Reentered(Some(held)))
     }
 
-    /// The serving [`reentered`](Self::reentered) began is over: the
-    /// limit stands where it stood before it.
+    /// The serving [`reentered`](Self::reentered) or the scope
+    /// [`nested`](Self::nested) began is over: the limit stands where it
+    /// stood before it.
     #[inline]
     pub fn left(&mut self, reentered: Reentered) {
         if let Reentered(Some(limit)) = reentered {
