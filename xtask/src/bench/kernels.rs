@@ -189,21 +189,40 @@ pub(crate) fn oracle(root: &Path) -> [Declared; 2] {
 /// `jit.compile` asks by default.
 pub(crate) fn compiled(root: &Path) -> [Declared; 2] {
     let bar = ("engine-jit", "the engine built as jit-feature");
-    tracing(root, bar, |root, _| engine(root, true).map(Ok))
+    tracing(root, bar, |root, _| Build::Jit.built(root).map(Ok))
 }
 
 /// G1's bound (design §9.2): the tier's door may cost the build without
 /// the feature 2% and no more, above which `jit-design.md` §3 is revisited.
 const DOOR: f64 = 1.02;
 
-/// The engine's `php` in the bench lane's profile, with the tier's feature
-/// of the bundle on into the directory the lanes build it in
-/// ([`profile::featured`]) where `jit`, and the default build otherwise.
-fn engine(root: &Path, jit: bool) -> Result<PathBuf> {
-    let on = jit.then(|| format!("{BUNDLE}/{}", Lane::FEATURE));
-    let into = jit.then(|| profile::featured(root, Lane::FEATURE));
-    let (package, binary) = (CLI.package(), CLI.binary);
-    profile::released(root, (&package, binary), on.as_deref(), into.as_deref())
+/// A build of the engine's `php` an arm runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Build {
+    /// With the tier's feature of the bundle on, `php_jit::Jit` bound.
+    Jit,
+    /// The default build, without it.
+    Plain,
+}
+
+impl Build {
+    /// The arm's name.
+    fn name(self) -> &'static str {
+        match self {
+            Build::Jit => "jit-feature",
+            Build::Plain => "no-jit-feature",
+        }
+    }
+
+    /// The build in the bench lane's profile, [`Build::Jit`] into the
+    /// directory the lanes build it in ([`profile::featured`]).
+    fn built(self, root: &Path) -> Result<PathBuf> {
+        let jit = self == Build::Jit;
+        let on = jit.then(|| format!("{BUNDLE}/{}", Lane::FEATURE));
+        let into = jit.then(|| profile::featured(root, Lane::FEATURE));
+        let (package, binary) = (CLI.package(), CLI.binary);
+        profile::released(root, (&package, binary), on.as_deref(), into.as_deref())
+    }
 }
 
 /// G1, the door cost, and its control (#2947): the engine built with the
@@ -215,27 +234,26 @@ fn engine(root: &Path, jit: bool) -> Result<PathBuf> {
 /// difference: the featured engine's `Policy` asks for tracing and runs
 /// `Mode::Off` (`jit-design.md` §4.7), and the other has no tier to ask.
 pub(crate) fn door(root: &Path) -> [Declared; 2] {
-    const JIT: &str = "jit-feature";
-    const PLAIN: &str = "no-jit-feature";
     [
-        ("g1", JIT, Held::Bound(DOOR)),
-        ("g1-aa", PLAIN, Held::Control),
+        ("g1", Build::Jit, Held::Bound(DOOR)),
+        ("g1-aa", Build::Plain, Held::Control),
     ]
-    .map(|(id, a, held)| {
+    .map(|(id, first, held)| {
+        let (a, b) = (first.name(), Build::Plain.name());
         let about = format!(
-            "the engine built as {a} with opcache.jit_buffer_size=0 against {PLAIN} over the seven kernels"
+            "the engine built as {a} with opcache.jit_buffer_size=0 against {b} over the seven kernels"
         );
         let at = root.to_path_buf();
         bar(root, (id, &PROGRAMS[..7]), about, held, move |_| {
-            let plain = engine(&at, false)?;
-            let first = if a == JIT { engine(&at, true)? } else { plain.clone() };
-            let arm = |name: String, binary| Php {
-                name,
-                binary,
-                regimes: vec!["jit-tracing"],
-                ini: vec!["opcache.jit_buffer_size=0".to_owned()],
+            let arm = |name: String, build: Build| -> Result<Php> {
+                Ok(Php {
+                    name,
+                    binary: build.built(&at)?,
+                    regimes: vec!["jit-tracing"],
+                    ini: vec!["opcache.jit_buffer_size=0".to_owned()],
+                })
             };
-            Ok(Ok([arm(a.to_owned(), first), arm(second(a, PLAIN), plain)]))
+            Ok(Ok([arm(a.to_owned(), first)?, arm(second(a, b), Build::Plain)?]))
         })
     })
 }
