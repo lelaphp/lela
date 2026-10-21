@@ -30,6 +30,7 @@ use std::sync::atomic::Ordering;
 
 use php_engine::tier::Flow;
 use php_engine::tier::{self, Fatal, FrameRef, Request, SafepointIdx, Site, Word};
+use php_unit::OplineIdx;
 
 use crate::compiler::{self, Job};
 use crate::enter::{self, At, Crossed as _, Exited, Left};
@@ -428,7 +429,7 @@ fn sided(
     }
     if shared.policy.debug().any(JitDebug::TRACE_EXIT) {
         let mut lines = Vec::new();
-        placed(req, exited.frame, false, |at| {
+        placed(req, exited.frame, Line::Stands, |at| {
             let event = TraceEvent::Exit {
                 trace,
                 exit: exited.exit,
@@ -492,31 +493,23 @@ pub(crate) fn hot(
     let mut stepped = false;
     let (flow, stood) = loop {
         let start = claim.start();
-        // A loop's recording starts where php's trace roots, past the
-        // body its back edge landed on.
-        if start == Start::Loop {
-            match record::headed(req, frame, at) {
-                Ok(Headed::Stands(_)) => {}
-                Ok(Headed::Stepped(header)) => (frame, stepped) = (header, true),
-                Ok(Headed::Away(away)) => {
-                    policy::settle(claim, &Outcome::Released);
-                    return Flow::Resume(away);
-                }
-                Ok(Headed::Unstepped) => {
-                    policy::settle(claim, &Outcome::Released);
-                    return Flow::Continue;
-                }
-                Err(fatal) => {
-                    policy::settle(claim, &Outcome::Released);
-                    return Flow::Bail(fatal);
-                }
+        let behind = match begins(req, frame, start, at) {
+            Ok(Begins::Behind(condition)) => Some(condition),
+            Ok(Begins::Stands) => None,
+            Ok(Begins::Stepped(header)) => {
+                (frame, stepped) = (header, true);
+                None
             }
-        }
+            Err(flow) => {
+                policy::settle(claim, &Outcome::Released);
+                return flow;
+            }
+        };
         let epoch = table::holding(req, &shared.policy, &shared.perf);
         let table = table::of_epoch(&epoch);
         let next = table.and_then(table::TraceTable::next);
         // A frame that shows no op array has no place to record from.
-        let Some(name) = started(req, shared, frame, next, start) else {
+        let Some(name) = started(req, shared, frame, next, start, behind) else {
             policy::settle(claim, &Outcome::Released);
             break (resumed(frame, stepped), None);
         };
@@ -534,7 +527,8 @@ pub(crate) fn hot(
             break (resumed(frame, stepped), None);
         }
         let entered = side_entered(table, start);
-        let (recorded, ended) = match record::run(req, frame, start, at, &shared.policy, entered) {
+        let opening = record::Opening { entered, behind };
+        let (recorded, ended) = match record::run(req, frame, start, at, &shared.policy, opening) {
             Ok(done) => done,
             // php's bailout leaves the recorder with nothing written after
             // the start line and nothing counted against the root.
@@ -596,6 +590,45 @@ pub(crate) fn hot(
             ran => ran,
         },
         None => flow,
+    }
+}
+
+/// Where a recording of `start` claimed at `at` on `frame` begins.
+#[derive(Debug, Clone, Copy)]
+enum Begins {
+    /// Where the frame stands.
+    Stands,
+    /// At a loop's condition, which the back edge just served, one
+    /// compare-and-branch the recording writes down as served
+    /// (`record::behind`).
+    Behind(OplineIdx),
+    /// At a loop's condition the body was stepped on to
+    /// (`record::headed`), in this frame.
+    Stepped(FrameRef),
+}
+
+/// Where a loop's recording begins, where php's trace roots: its
+/// condition, behind the frame or past the body the back edge landed
+/// on; any other start's where the frame stands. A body that went
+/// another way on the way there is the flow to resume.
+fn begins(
+    req: &mut Request,
+    frame: FrameRef,
+    start: Start,
+    at: SafepointIdx,
+) -> Result<Begins, Flow> {
+    if start != Start::Loop {
+        return Ok(Begins::Stands);
+    }
+    if let Some(condition) = record::behind(req, frame, at) {
+        return Ok(Begins::Behind(condition));
+    }
+    match record::headed(req, frame, at) {
+        Ok(Headed::Stands(_)) => Ok(Begins::Stands),
+        Ok(Headed::Stepped(header)) => Ok(Begins::Stepped(header)),
+        Ok(Headed::Away(away)) => Err(Flow::Resume(away)),
+        Ok(Headed::Unstepped) => Err(Flow::Continue),
+        Err(fatal) => Err(Flow::Bail(fatal)),
     }
 }
 
@@ -683,7 +716,7 @@ fn rerooted(
     };
     let claimed = policy::claim(root, &shared.policy, Start::Loop)?;
     let next = table::of(req, &shared.policy, &shared.perf).and_then(table::TraceTable::next);
-    let Some(name) = started(req, shared, ended.at, next, Start::Loop) else {
+    let Some(name) = started(req, shared, ended.at, next, Start::Loop, None) else {
         policy::settle(claimed, &Outcome::Released);
         return None;
     };
@@ -713,9 +746,15 @@ fn started(
     frame: FrameRef,
     trace: Option<TraceId>,
     start: Start,
+    behind: Option<OplineIdx>,
 ) -> Option<TraceName> {
     let mut lines = Vec::new();
-    let name = placed(req, frame, start == Start::Enter, |at| {
+    let line = match (start, behind) {
+        (_, Some(at)) => Line::At(at),
+        (Start::Enter, None) => Line::Prologue,
+        (Start::Loop | Start::Return | Start::Side { .. }, None) => Line::Stands,
+    };
+    let name = placed(req, frame, line, |at| {
         if let Some(trace) = trace {
             shared.dump(&mut lines, &TraceEvent::Start { trace, start, at });
         }
@@ -725,13 +764,23 @@ fn started(
     name
 }
 
-/// What `with` makes of the [`Place`] `frame` stands at, at its opline's
-/// line or, for an `entry` php counts at a typed prologue, its first
-/// `RECV`'s; none where the frame shows no op array.
+/// Which opline's line a [`Place`] names: the one the frame stands at;
+/// for an entry php counts at a typed prologue, its first `RECV`'s; or
+/// the condition a loop's recording begins at behind the frame
+/// (`record::behind`).
+#[derive(Debug, Clone, Copy)]
+enum Line {
+    Stands,
+    Prologue,
+    At(OplineIdx),
+}
+
+/// What `with` makes of the [`Place`] `frame` stands at, at the line
+/// `line` names; none where the frame shows no op array.
 fn placed<T>(
     req: &Request,
     frame: FrameRef,
-    entry: bool,
+    line: Line,
     with: impl FnOnce(Place<'_>) -> T,
 ) -> Option<T> {
     let view = tier::frame(req, frame)?;
@@ -741,14 +790,15 @@ fn placed<T>(
     let scope = function
         .and(view.function_scope())
         .map(|class| req.symbols().class_name(class).into_bytes());
-    let typed = entry && decl.is_some_and(|decl| decl.parameters.iter().any(|p| p.ty.is_some()));
-    let line = if typed {
-        view.op_array()
-            .and_then(|code| code.opline(php_unit::OplineIdx(0)))
-            .map_or(view.line(), |op| op.line())
-    } else {
-        view.line()
+    let typed = decl.is_some_and(|decl| decl.parameters.iter().any(|p| p.ty.is_some()));
+    let at = match line {
+        Line::Prologue if typed => Some(OplineIdx(0)),
+        Line::At(at) => Some(at),
+        Line::Prologue | Line::Stands => None,
     };
+    let line = at
+        .and_then(|at| view.op_array()?.opline(at))
+        .map_or(view.line(), |op| op.line());
     Some(with(Place {
         scope: scope.as_deref(),
         function: name.as_deref(),

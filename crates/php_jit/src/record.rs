@@ -451,8 +451,9 @@ pub(crate) fn run(
     start: Start,
     at: SafepointIdx,
     policy: &Policy,
-    entered: Vec<Entered>,
+    opening: Opening,
 ) -> Result<(Recorded, Ended), Bailed> {
+    let Opening { entered, behind } = opening;
     let mut req = Recording::set(req);
     let mut view = UnitView::new(&req);
     let claimed = tier::func(&req, frame).filter(|root| view.hold(&req, *root));
@@ -463,7 +464,7 @@ pub(crate) fn run(
         ));
     };
     let mut recorder = Recorder::new(policy, start, tier::epoch(&req), (root, at));
-    let (stop, ended) = recorder.record(&mut req, &mut view, frame, root)?;
+    let (stop, ended) = recorder.record(&mut req, &mut view, frame, root, behind)?;
     let record = TraceRecord {
         start: recorder.start,
         root: recorder.rerooted.map_or(root, |(func, _)| func),
@@ -477,6 +478,78 @@ pub(crate) fn run(
         stop,
     };
     Ok((Recorded { record, view }, ended))
+}
+
+/// What a recording begins with beside its frame: for a side trace,
+/// what its parent's exit knew of the frame's slots; for a loop, the
+/// condition it begins at behind the frame ([`behind`]).
+#[derive(Debug, Default)]
+pub(crate) struct Opening {
+    pub(crate) entered: Vec<Entered>,
+    pub(crate) behind: Option<OplineIdx>,
+}
+
+/// The condition a loop's recording begins at behind `frame`, which the
+/// loop's back edge left on the body: php's trace roots at the
+/// condition of a `for` or a `while` ([`loop_root`]), which the back edge
+/// served the moment before, so where the condition is one
+/// compare-and-branch over variables and constants, which reads what it
+/// read then and writes nothing a later opline reads, it is written down
+/// as served, its jump taken back to the body, and the recording goes
+/// on at the body, with nothing stepped (`jit-design.md` §4.1, revision
+/// NEXT-8, as built until a person rules on #3178). None for any other
+/// loop, which [`headed`] steps on to its header.
+///
+/// A loop the back edge first meets after one turn records that turn as
+/// php's does, from its condition, where stepping on to the condition
+/// first recorded the turn after it, here the loop's exit:
+///
+/// ```php
+/// $g = strlen(...); $s = 0;
+/// for ($i = 0; $i < 1; $i++) { $s += $i; }
+/// echo $s, "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 0
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:2
+/// ---- TRACE 1 stop (exit to VM interpreter)
+/// ---- TRACE 1 compiled
+///
+/// ---- TRACE 2 start (loop) $main() %s:3
+/// ---- TRACE 2 stop (loop)
+/// ---- TRACE 2 compiled
+///
+///      TRACE 2 exit 1 $main() %s:4
+/// ---- TRACE 3 start (side trace 2/1) $main() %s:4
+/// ---- TRACE 3 stop (return)
+/// ---- TRACE 3 compiled
+///
+/// ```
+pub(crate) fn behind(req: &Request, frame: FrameRef, header: SafepointIdx) -> Option<OplineIdx> {
+    let mut view = UnitView::new(req);
+    let code = tier::func(req, frame)
+        .filter(|func| view.hold(req, *func))
+        .and_then(|func| view.op_array(func))?;
+    let body = position(req, frame);
+    let root = loop_root(code, header).filter(|root| *root != body)?;
+    let compare = code.oplines.get(root.0 as usize)?;
+    let jump = code.oplines.get(root.0 as usize + 1)?;
+    let read = |kind: OperandKind| matches!(kind, OperandKind::Cv | OperandKind::Const);
+    let condition = matches!(
+        compare.opcode,
+        Opcode::IsSmaller
+            | Opcode::IsSmallerOrEqual
+            | Opcode::IsEqual
+            | Opcode::IsNotEqual
+            | Opcode::IsIdentical
+            | Opcode::IsNotIdentical
+    ) && compare.fuses(jump)
+        && jump.jump_target() == Some(body)
+        && read(compare.op1_type)
+        && read(compare.op2_type);
+    condition.then_some(root)
 }
 
 /// Where the interpreter stands once a loop's back edge, which left
@@ -680,14 +753,15 @@ impl<'p> Recorder<'p> {
         view: &mut UnitView,
         mut frame: FrameRef,
         root: FuncRef,
+        behind: Option<OplineIdx>,
     ) -> Result<(Stop, Ended), Bailed> {
         let mut func = root;
         let mut stepped = false;
         if tier::on_heap(req, frame) {
             return Ok((Stop::MovedFrame, ended(frame, false)));
         }
-        if self.start != Start::Return {
-            self.root = Some((root, position(req, frame)));
+        if self.begun(req, view, frame, root, behind)? {
+            return Ok((Stop::TooLong, ended(frame, false)));
         }
         loop {
             let at = position(req, frame);
@@ -787,6 +861,42 @@ impl<'p> Recorder<'p> {
                 }
             }
         }
+    }
+
+    /// The trace's root, `frame`'s opline in `root`, or the condition
+    /// `behind` it, the fused compare a loop's back edge served before it
+    /// left `frame` on the body ([`behind`]), which is written down as
+    /// served: its operands as the frame holds them, its jump taken to
+    /// the body. Whether that made the trace too long.
+    fn begun(
+        &mut self,
+        req: &Request,
+        view: &UnitView,
+        frame: FrameRef,
+        root: FuncRef,
+        behind: Option<OplineIdx>,
+    ) -> Result<bool, Bailed> {
+        if self.start != Start::Return {
+            self.root = Some((root, behind.unwrap_or_else(|| position(req, frame))));
+        }
+        let Some(condition) = behind else {
+            return Ok(false);
+        };
+        let op = (view.op_array(root))
+            .and_then(|code| code.oplines.get(condition.0 as usize).copied())
+            .ok_or_else(|| Bailed::Fatal(off_the_end(condition)))?;
+        let (op1, op2, _) = sampled(req, frame, &op, None);
+        let classes = u32::from(op1.is_some_and(|s| s.class.is_some()))
+            + u32::from(op2.is_some_and(|s| s.class.is_some()));
+        self.events.push(Event::Op {
+            func: root,
+            opline: condition,
+            op1,
+            op2,
+            data: None,
+            branch: Some(true),
+        });
+        Ok(self.count(1 + classes))
     }
 
     /// Where a recording that stepped stopped.
