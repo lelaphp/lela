@@ -58,6 +58,28 @@ impl From<CompileError> for Unfolded {
     }
 }
 
+impl Unfolded {
+    /// What a node left unfolded because a child it waits on was answers:
+    /// the child's own answer where this compiler cannot read the child,
+    /// so the innermost cause is the one a compile that needs the value
+    /// refuses with, and `why` where the child is no constant.
+    fn of_node(self, why: &'static str) -> Unfolded {
+        match self {
+            Unfolded::NoConstant(_) => Unfolded::NoConstant(why),
+            Unfolded::Unread(_) | Unfolded::Refused(_) => self,
+        }
+    }
+}
+
+/// A child's fold as the node that waits on it reads it: the value, or
+/// the child left unfolded with why ([`Unfolded::NoConstant`] or
+/// [`Unfolded::Unread`]). A refusal is not one: [`Emit::child`] answers
+/// it as the node's own.
+enum Child {
+    Folded(Zval),
+    Unfolded(Unfolded),
+}
+
 /// What `zend_eval_const_expr` replaced a node of php's tree with: the
 /// `ZEND_AST_ZVAL` of the value it folded to, or another node, the side
 /// a `??` or a conditional picked, which did not fold.
@@ -170,6 +192,16 @@ impl Emit<'_> {
         }
     }
 
+    /// [`Self::constant_expr`] over a child the node waits on: what it
+    /// folded to, or why it did not, and a refusal as the node's answer.
+    fn child(&mut self, expr: tree::Expr) -> Result<Child, Unfolded> {
+        match self.constant_expr(expr) {
+            Ok(value) => Ok(Child::Folded(value)),
+            Err(refused @ Unfolded::Refused(_)) => Err(refused),
+            Err(unfolded) => Ok(Child::Unfolded(unfolded)),
+        }
+    }
+
     /// `zend_eval_const_expr` over a child whose fold the node does not
     /// wait on, for the rewrite alone: what it folds to is kept, and a
     /// node it does not fold is no refusal of the parent's; a compile
@@ -206,11 +238,12 @@ impl Emit<'_> {
         if self.fold == Fold::Compile {
             return Err(Unfolded::NoConstant("a `??` is no constant expression"));
         }
-        let Some(value) = self.constant_of(left)? else {
-            self.evaluate(right)?;
-            return Err(Unfolded::NoConstant(
-                "a `??` over a side that does not fold",
-            ));
+        let value = match self.child(left)? {
+            Child::Folded(value) => value,
+            Child::Unfolded(unfolded) => {
+                self.evaluate(right)?;
+                return Err(unfolded.of_node("a `??` over a side that does not fold"));
+            }
         };
         if value.kind() != ZvalType::Null {
             return Ok(value);
@@ -265,14 +298,15 @@ impl Emit<'_> {
         let node = &self.parsed.tree[id];
         let (cond, then, otherwise) = (node.cond, node.then, node.else_branch);
         let otherwise = self.required(otherwise, "a conditional")?;
-        let Some(value) = self.constant_of(cond)? else {
-            if let Some(then) = then {
-                self.evaluate(then)?;
+        let value = match self.child(cond)? {
+            Child::Folded(value) => value,
+            Child::Unfolded(unfolded) => {
+                if let Some(then) = then {
+                    self.evaluate(then)?;
+                }
+                self.evaluate(otherwise)?;
+                return Err(unfolded.of_node("a conditional over a condition that does not fold"));
             }
-            self.evaluate(otherwise)?;
-            return Err(Unfolded::NoConstant(
-                "a conditional over a condition that does not fold",
-            ));
         };
         if value.as_double().is_some_and(f64::is_nan) {
             self.raise(Level::Warning, "unexpected NAN value was coerced to bool");
@@ -288,13 +322,13 @@ impl Emit<'_> {
     /// child`: the child's fold where it folds, and otherwise the node
     /// replaced by the child, which the compile reads in its place.
     fn replaced_by(&mut self, node: tree::Expr, child: tree::Expr) -> Result<Zval, Unfolded> {
-        if let Some(value) = self.constant_of(child)? {
-            return Ok(value);
+        match self.child(child)? {
+            Child::Folded(value) => Ok(value),
+            Child::Unfolded(unfolded) => {
+                self.rewrites.record(node, Rewrite::Node(child));
+                Err(unfolded.of_node("a node replaced by a side that does not fold"))
+            }
         }
-        self.rewrites.record(node, Rewrite::Node(child));
-        Err(Unfolded::NoConstant(
-            "a node replaced by a side that does not fold",
-        ))
     }
 
     /// `zend_eval_const_expr`'s `ZEND_AST_AND` and `ZEND_AST_OR` arm
@@ -314,14 +348,14 @@ impl Emit<'_> {
         right: tree::Expr,
     ) -> Result<Zval, Unfolded> {
         if self.fold == Fold::EvalConstExpr {
-            let left = self.constant_of(left)?.map(truth);
-            let right = self.constant_of(right)?.map(truth);
+            let left = self.child(left)?;
+            let right = self.child(right)?;
             return match (left, right) {
-                (Some(held), _) if held == or => Ok(Zval::bool(held)),
-                (Some(_), Some(right)) => Ok(Zval::bool(right)),
-                _ => Err(Unfolded::NoConstant(
-                    "a short circuit over a side that does not fold",
-                )),
+                (Child::Folded(held), _) if truth(held) == or => Ok(Zval::bool(truth(held))),
+                (Child::Folded(_), Child::Folded(right)) => Ok(Zval::bool(truth(right))),
+                (Child::Unfolded(unfolded), _) | (Child::Folded(_), Child::Unfolded(unfolded)) => {
+                    Err(unfolded.of_node("a short circuit over a side that does not fold"))
+                }
             };
         }
         let held = truth(self.constant_expr(left)?);

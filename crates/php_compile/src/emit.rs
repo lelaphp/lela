@@ -20302,6 +20302,64 @@ mod tests {
         assert_eq!(emit.known_method(b"A\\M", b"f"), user);
     }
 
+    /// #3215: a node `zend_eval_const_expr` leaves unfolded because a
+    /// child it waits on is one this compiler cannot read yet answers
+    /// the child's [`eval::Unfolded::Unread`], so a compile that needs
+    /// the value refuses in the innermost sentence, the one the phpt lane
+    /// counts; a child that is no constant leaves the node's own sentence.
+    /// The `()` is a tree the parser refuses, read here past its
+    /// diagnostic: no program reaches these arms over an unread child
+    /// and then a compile that reads the answer, so this test holds the
+    /// state where no witness can.
+    #[test]
+    fn a_node_over_a_child_not_read_yet_answers_the_child_s_refusal() {
+        let answers = |source: &'static [u8]| {
+            let mut strings = php_heap::Strings::new();
+            let options = Options::default();
+            let arena = Arena::new();
+            let parsed = php_syntax::parse(&arena, source, &php_syntax::Options::default());
+            let mut emit = in_namespace(&arena, &parsed, &mut strings, &options);
+            emit.fold = Fold::EvalConstExpr;
+            let file = parsed
+                .tree
+                .root()
+                .and_then(php_syntax::tree::Element::id::<tree::SourceFile>);
+            let stmt =
+                file.and_then(|file| parsed.tree.list(parsed.tree[file].stmts).first().copied());
+            let Some(Stmt::ExprStmt(id)) = stmt else {
+                return format!("no expression statement in {source:?}");
+            };
+            match emit.constant_expr(parsed.tree[id].expr) {
+                Err(eval::Unfolded::Unread(refused)) => format!("unread: {}", refused.message),
+                Err(eval::Unfolded::NoConstant(why)) => format!("no constant: {why}"),
+                Err(eval::Unfolded::Refused(refused)) => format!("refused: {}", refused.message),
+                Ok(_) => "folded".to_owned(),
+            }
+        };
+        let unread = "unread: an expression inside parentheses this compiler cannot read yet";
+        assert_eq!(answers(b"<?php () ?? 1;"), unread);
+        assert_eq!(answers(b"<?php () ? 1 : 2;"), unread);
+        assert_eq!(answers(b"<?php true ? () : 2;"), unread);
+        assert_eq!(answers(b"<?php () && 1;"), unread);
+        assert_eq!(answers(b"<?php true && ();"), unread);
+        assert_eq!(
+            answers(b"<?php $a ?? 1;"),
+            "no constant: a `??` over a side that does not fold"
+        );
+        assert_eq!(
+            answers(b"<?php $a ? 1 : 2;"),
+            "no constant: a conditional over a condition that does not fold"
+        );
+        assert_eq!(
+            answers(b"<?php true ? $a : 2;"),
+            "no constant: a node replaced by a side that does not fold"
+        );
+        assert_eq!(
+            answers(b"<?php $a && 1;"),
+            "no constant: a short circuit over a side that does not fold"
+        );
+    }
+
     /// Design §5.7's assertion, on an op array laid down by hand (#353):
     /// a backward `JMP` whose `out` names no entry of `safepoints` is
     /// refused, as is one whose entry is another opline; a `FAST_RET`
