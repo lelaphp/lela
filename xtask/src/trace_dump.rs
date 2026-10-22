@@ -1,30 +1,31 @@
 //! `xtask trace-dump`, the trace-dump diff (`jit-design.md` §4.1;
-//! harness §7): which roots the tier records and how each recording
-//! ends, held to php's. Each of the seven kernels ([`KERNELS`]) is run by
-//! the oracle under the recipe and `[regime.jit-inline]`, whose
-//! `opcache.jit_debug` asks php for its `TRACE` lines on the second
-//! stream, and by the engine built with the tier's feature, the build the
-//! phpt lane's `--jit` and the witness lane's jit fences run
-//! ([`Build`]), under the same invocation and `jit.mode=force` and
-//! `jit.compile=inline`, the engine-only directives php ignores. The
-//! oracle's lines are kept in the store under the kernel and the pin's
-//! digest, the engine's beside them, and the two are held through
-//! [`oracle::compare`] under the divergence key `trace:dump/<kernel>`,
-//! one reading per kernel.
+//! harness §7): which roots and side traces the tier records, how each
+//! recording ends, and which exits fire, held to php's. Each of the seven
+//! kernels ([`KERNELS`]) is run by the oracle under the recipe and
+//! `[regime.jit-inline]`, whose `opcache.jit_debug` asks php for its
+//! `TRACE` lines on the second stream, and by the engine built with the
+//! tier's feature, the build the phpt lane's `--jit` and the witness
+//! lane's jit fences run ([`Build`]), under the same invocation and
+//! `jit.mode=force` and `jit.compile=inline`, the engine-only directives
+//! php ignores. The oracle's lines are kept in the store under the kernel
+//! and the pin's digest, the engine's beside them, and the two are held
+//! through [`oracle::compare`] under the divergence key
+//! `trace:dump/<kernel>`, one reading per kernel.
 //!
-//! **The lines held.** A `---- TRACE` line: a root's or a side trace's
+//! **The lines held.** What the regime's six bits print, as
+//! `opcache.jit_debug` pins them and with no mask of the instrument's
+//! own (#3155's ruling): a `---- TRACE` line, a root's or a side trace's
 //! `start`, its `stop` or `abort`, and `compiled` or `blacklisted`, the
 //! lines of `zend_jit_trace_hot_root` and `zend_jit_trace_hot_side`
-//! (`Z/ext/opcache/jit/zend_jit_trace.c:8152-8250` at the tag). The paths
-//! in them are the program's directory as the recipe's token, as every
-//! run's stream is. A `TRACE n exit m` line is php's on each pass through
-//! an exit that has no side trace: an engine that grows none yet (#2964)
-//! writes one per pass, millions on a kernel, so the run clears the exit
-//! bit from the regime's `opcache.jit_debug` on both sides and the
-//! diff holds what the regime's other five bits print, a side trace's
-//! exit number among them on its `start` line. Every other line of the
-//! stream, the engine's `JIT: jit.mode=force` among them, is not a trace
-//! line and is not held.
+//! (`Z/ext/opcache/jit/zend_jit_trace.c:8152-8250` at the tag); a
+//! `TRACE n exit m` line, php's on each pass through an exit that has no
+//! side trace yet (`:8814`, `ZEND_JIT_DEBUG_TRACE_EXIT`); and a
+//! `---- EXIT m/k blacklisted` line, an exit that grows no side spent
+//! (`:8884`). So an exit the engine places where php places none, or
+//! numbers otherwise, is a difference the diff shows. The paths in them
+//! are the program's directory as the recipe's token, as every run's
+//! stream is. Every other line of the stream, the engine's
+//! `JIT: jit.mode=force` among them, is not a trace line and is not held.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -46,12 +47,9 @@ pub(crate) const INSTRUMENT: &str = "trace-dump";
 /// The regime both sides run under.
 const REGIME: &str = "jit-inline";
 
-/// php's bit for a trace's exit line, `ZEND_JIT_DEBUG_TRACE_EXIT`
-/// (`Z/ext/opcache/jit/zend_jit.h:70` at the tag).
-const TRACE_EXIT: u64 = 1 << 15;
-
-/// What a line the diff holds starts with.
-const HELD: &[u8] = b"---- TRACE ";
+/// What a line the diff holds starts with: a trace's own line, an
+/// exit's, and an exit spent.
+const HELD: [&[u8]; 3] = [b"---- TRACE ", b"     TRACE ", b"---- EXIT "];
 
 /// What one `xtask trace-dump` run was asked for.
 #[derive(Debug, Clone, Default, clap::Args)]
@@ -158,31 +156,27 @@ pub fn kept(store: &Store, digest: &str, scope: &str, side: Side) -> PathBuf {
 pub(crate) fn lines(stream: &[u8]) -> Vec<u8> {
     let held = stream
         .split(|b| *b == b'\n')
-        .filter(|l| l.starts_with(HELD));
+        .filter(|l| HELD.iter().any(|held| l.starts_with(held)));
     held.flat_map(|line| line.iter().chain(b"\n"))
         .copied()
         .collect()
 }
 
 /// The ini both sides run under after the recipe's and `regime`'s: the
-/// kernels' memory limit, the regime's `opcache.jit_debug` without
-/// [`TRACE_EXIT`], and the engine's two directives. The value is read as
-/// decimal or `0x` hexadecimal; any other spelling php's
-/// `zend_ini_parse_quantity` reads refuses the run rather than be misread.
+/// kernels' memory limit and the engine's two directives. The regime's
+/// `opcache.jit_debug` is what asks for the lines, so a regime that sets
+/// none refuses the run rather than hold two empty streams.
 fn ini(regime: &Regime) -> Result<Vec<String>> {
-    let debug = (regime.ini.iter().rev())
-        .find_map(|line| line.strip_prefix("opcache.jit_debug="))
-        .with_context(|| format!("[regime.{REGIME}] sets no opcache.jit_debug"))?;
-    let bits = match debug.strip_prefix("0x") {
-        Some(hex) => u64::from_str_radix(hex, 16),
-        None => debug.parse(),
-    }
-    .with_context(|| format!("[regime.{REGIME}]'s opcache.jit_debug={debug} is not a number"))?;
+    ensure!(
+        regime
+            .ini
+            .iter()
+            .any(|line| line.starts_with("opcache.jit_debug=")),
+        "[regime.{REGIME}] sets no opcache.jit_debug"
+    );
     let lane = format!("{}=force", Lane::DIRECTIVE);
-    let debug = format!("opcache.jit_debug={}", bits & !TRACE_EXIT);
     Ok(vec![
         MEMORY.to_owned(),
-        debug,
         lane,
         "jit.compile=inline".to_owned(),
     ])
@@ -340,39 +334,36 @@ fn judged(registry: &Registry, id: &str, expected: &[u8], actual: &[u8]) -> (Sta
 mod tests {
     use super::*;
 
-    /// The diff holds a stream's `---- TRACE` lines and nothing else: no
-    /// exit line, no engine note and no blank line between roots.
+    /// The diff holds a stream's trace lines, a trace's, an exit's and an
+    /// exit spent, and nothing else: no engine note, no blank line between
+    /// roots and no warning.
     #[test]
-    fn the_diff_holds_the_trace_lines_alone() {
-        let stream = b"JIT: jit.mode=force\n---- TRACE 1 start (loop) $main() a.php:3\n---- TRACE 1 stop (loop)\n\n     TRACE 1 exit 2 $main() a.php:6\nWarning: x";
-        let held = "---- TRACE 1 start (loop) $main() a.php:3\n---- TRACE 1 stop (loop)\n";
+    fn the_diff_holds_the_trace_and_exit_lines_alone() {
+        let stream = b"JIT: jit.mode=force\n---- TRACE 1 start (loop) $main() a.php:3\n---- TRACE 1 stop (loop)\n\n     TRACE 1 exit 2 $main() a.php:6\n---- EXIT 1/2 blacklisted\nWarning: x";
+        let held = "---- TRACE 1 start (loop) $main() a.php:3\n---- TRACE 1 stop (loop)\n     TRACE 1 exit 2 $main() a.php:6\n---- EXIT 1/2 blacklisted\n";
         assert_eq!(String::from_utf8(lines(stream)).unwrap(), held);
         assert!(lines(b"4950").is_empty());
     }
 
-    /// Both sides run the regime's `opcache.jit_debug` less the exit bit,
-    /// read as decimal or `0x` hexadecimal, after the memory limit and before
-    /// the engine's two directives; a regime with no `jit_debug` refuses
-    /// the run.
+    /// Both sides run the regime's `opcache.jit_debug` as it is pinned,
+    /// with nothing of the instrument's over it: the memory limit and the
+    /// engine's two directives follow the regime; a regime with no
+    /// `jit_debug` refuses the run.
     #[test]
-    fn both_sides_run_the_regimes_debug_bits_less_the_exit_line() {
-        let regime = |debug: &str| Regime {
+    fn both_sides_run_the_regimes_debug_bits_unmasked() {
+        let regime = Regime {
             ini: vec![
                 "opcache.jit=tracing".to_owned(),
-                format!("opcache.jit_debug={debug}"),
+                "opcache.jit_debug=258048".to_owned(),
             ],
             ..Regime::default()
         };
-        let ran = ini(&regime("258048")).unwrap();
-        let expected = [
-            MEMORY,
-            "opcache.jit_debug=225280",
-            "jit.mode=force",
-            "jit.compile=inline",
-        ];
-        assert_eq!(ran, expected);
-        assert_eq!(ini(&regime("0x3F000")).unwrap(), expected);
-        assert_eq!(ini(&regime("4096")).unwrap()[1], "opcache.jit_debug=4096");
+        let ran = ini(&regime).unwrap();
+        assert_eq!(ran, [MEMORY, "jit.mode=force", "jit.compile=inline"]);
+        assert!(
+            !ran.iter().any(|line| line.contains("jit_debug")),
+            "{ran:?}"
+        );
         let none = ini(&Regime::default()).unwrap_err().to_string();
         assert!(none.contains("sets no opcache.jit_debug"), "{none}");
     }
@@ -435,7 +426,7 @@ mod tests {
         let (status, said) = judged(&registry, "trace:dump/loop", &oracle, &oracle);
         assert_eq!(
             (status, said.as_str()),
-            (Status::Pass, "the engine's 8 TRACE lines are the oracle's")
+            (Status::Pass, "the engine's 9 TRACE lines are the oracle's")
         );
     }
 }

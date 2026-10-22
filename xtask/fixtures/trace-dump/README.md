@@ -2,12 +2,14 @@
 
 `loop.php` is one hot `for` loop. `oracle.lines` is what the pinned php
 writes on its second stream for it under the recipe, `[regime.jit-inline]`
-and the instrument's ini, the `---- TRACE` lines alone, its directory
+and the instrument's ini, its trace lines alone, the loop's exit line among
+them (#3155's ruling), its directory
 standing as the recipe's `scratch_token`: the lines a run keeps as the
 oracle's. `engine.lines` is what the engine built with the tier's feature
 wrote for it under `jit.mode=force` when the fixture was laid: its loop
 root on line 4, the body, where php roots a `for` loop at its condition on
-line 3 (#3134), and no side trace from the loop's exit (#2964).
+line 3 (#3134), and no exit line and no side trace from the loop's exit
+(#2964).
 
 The control that must fail is in `xtask/tests/trace_dump.rs`: a binary that
 writes `engine.lines` stands for the engine's through `run`, and the

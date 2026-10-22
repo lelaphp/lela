@@ -1,5 +1,5 @@
 //! `xtask trace-dump`, the trace-dump diff (`jit-design.md` §4.1;
-//! harness §7): a program's `---- TRACE` lines written by the oracle
+//! harness §7): a program's trace and exit lines written by the oracle
 //! under `[regime.jit-inline]`, kept in the store, and held against the
 //! engine's, one reading per program. Every test here goes through the
 //! instrument's `run`, with a binary standing for the engine's that
@@ -109,8 +109,9 @@ fn count(reading: &Reading, key: &str) -> i64 {
 
 /// The negative control (harness §14 item 4): php's own lines standing
 /// for the engine's are a pass, and the lines the run keeps for the
-/// oracle are the fixture's; the engine's lines, whose loop root is a line
-/// apart and which grow no side trace, are a fail naming both roots.
+/// oracle are the fixture's, the loop's exit line among them; the engine's
+/// lines, whose loop root is a line apart and which grow no side trace,
+/// are a fail naming both roots.
 #[test]
 fn the_oracles_lines_are_a_pass_and_the_engines_lines_apart_are_not() {
     if oracle().is_none() {
@@ -125,11 +126,11 @@ fn the_oracles_lines_are_a_pass_and_the_engines_lines_apart_are_not() {
         oracle_lines,
         "php's lines are kept"
     );
-    assert_eq!(count(&reading, "oracle_lines"), 8, "{reading:#?}");
+    assert_eq!(count(&reading, "oracle_lines"), 9, "{reading:#?}");
     assert!(
         reading
             .message
-            .contains("the engine's 8 TRACE lines are the oracle's")
+            .contains("the engine's 9 TRACE lines are the oracle's")
             && reading
                 .message
                 .contains("jit.mode=force jit.compile=inline"),
