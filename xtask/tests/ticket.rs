@@ -567,6 +567,37 @@ fn a_merge_whose_tracker_fails_a_read_for_a_moment_still_closes_every_ticket_it_
     }
 }
 
+/// A pull request merged on GitHub (#3243): its subject, `Merge pull
+/// request #3167 from mitchellvanw/t3129` as b40d71039's, names the pull
+/// request, which `gh issue view` answers as `MERGED`. The ticket is the
+/// branch's: #29 closes, and the tracker is never asked for #30.
+#[test]
+fn a_pull_request_merged_on_github_names_its_branchs_ticket_and_not_its_own_number() {
+    let (root, tracker) = merged_with_ready(
+        "pull-request",
+        "t29",
+        "Merge pull request #30 from owner/t29",
+        &[(29, "nothing")],
+    );
+    let readings = tickets_merged(&root, &tracker).0;
+    let verdicts: Vec<(&str, Status)> = readings
+        .iter()
+        .map(|r| (r.scope.as_str(), r.status))
+        .collect();
+    assert_eq!(verdicts, [("29", Status::Pass)], "{readings:#?}");
+    let calls = tracker.calls();
+    assert!(
+        calls.iter().any(|c| c.starts_with("issue close 29 ")),
+        "#29 not closed: {calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.contains(" 30 ") || c.ends_with(" 30")),
+        "the pull request's number was asked for: {calls:?}"
+    );
+}
+
 /// A ticket the tracker will not answer for, every read asked again, is
 /// not passed over and does not take the run down (#2804): the tickets
 /// around it close, each close is recorded, and it is a failed reading
