@@ -499,6 +499,10 @@ pub(crate) struct Emit<'a> {
     /// `CG(active_class_entry)`: the class whose members are being
     /// compiled, and none outside a class body.
     active_class: Option<ActiveClass>,
+    /// The string the last fold a constant expression stands as was
+    /// read as ([`Self::folded`]), which a class constant's declaration
+    /// keeps ([`ActiveClass::strings`]).
+    folded_string: Option<Zval>,
     /// `CG(active_class_entry)->parent_name`: the name the class being
     /// compiled extends, which `parent` needs one of.
     active_parent: Option<Vec<u8>>,
@@ -1293,6 +1297,11 @@ struct ActiveClass {
     /// parameter's type could not be held to the property's while the
     /// file compiles.
     hooked_variance_checks: u32,
+    /// The string each constant declared so far holds, by its place among
+    /// the declaration's constants, where its fold made one: the zval
+    /// `zend_declare_class_constant_ex` keeps, which a fold that reads
+    /// the constant shares (`ZVAL_COPY_OR_DUP`) rather than makes anew.
+    strings: Vec<(usize, Zval)>,
 }
 
 impl ActiveClass {
@@ -1306,7 +1315,15 @@ impl ActiveClass {
             anonymous,
             declaring: None,
             hooked_variance_checks: 0,
+            strings: Vec::new(),
         }
+    }
+
+    /// The string the constant at `at` holds, where its fold made one.
+    fn string_of(&self, at: usize) -> Option<Zval> {
+        (self.strings.iter())
+            .find(|(held, _)| *held == at)
+            .map(|(_, value)| *value)
     }
 }
 
@@ -1515,6 +1532,7 @@ impl<'a> Emit<'a> {
             namespacing: Namespacing::Global,
             imports: Imports::default(),
             active_class: None,
+            folded_string: None,
             active_parent: None,
             active_function: None,
             this_in_scope: false,
@@ -6131,14 +6149,16 @@ impl<'a> Emit<'a> {
     /// (`ZEND_AST_CONST_ENUM_INIT`) and never the scalar it is backed by;
     /// and no `ZEND_ACC_DEPRECATED` one, fetched as the program serves,
     /// where its deprecation is raised.
-    fn foldable_constant(&self, name: &[u8]) -> Option<&ConstExpr> {
+    /// The answer is the constant's place among the declaration's and
+    /// its value.
+    fn foldable_constant(&self, name: &[u8]) -> Option<(usize, &ConstExpr)> {
         if self.in_trait() {
             return None;
         }
-        (self.active_decl()?.constants.iter())
-            .find(|c| *c.name.0 == *name)
-            .filter(|c| !c.is_case && !attributes::is_deprecated(&c.attributes))
-            .map(|c| &c.value)
+        (self.active_decl()?.constants.iter().enumerate())
+            .find(|(_, c)| *c.name.0 == *name)
+            .filter(|(_, c)| !c.is_case && !attributes::is_deprecated(&c.attributes))
+            .map(|(at, c)| (at, &c.value))
     }
 
     /// `zend_compile_use_trait` (`Z/Zend/zend_compile.c:9137`) over each
@@ -6408,7 +6428,12 @@ impl<'a> Emit<'a> {
                 "Private constant {member} cannot be final as it is not visible to other classes"
             )));
         }
+        self.folded_string = None;
         let mut value = self.case_or_constant(backing, constant, name)?;
+        let made = self.folded_string.take().filter(|made| match &value {
+            ConstExpr::Str(bytes) => made.as_str().is_some_and(|s| s.bytes() == &**bytes),
+            _ => false,
+        });
         if let Some(ty) = &ty
             && let Err(kind) = valid_default(ty, &mut value)
         {
@@ -6442,6 +6467,11 @@ impl<'a> Emit<'a> {
         let Some(decl) = self.classes.get_mut(at) else {
             return Err(self.internal("a constant of a class the unit has not"));
         };
+        if let (Some(made), Some(active)) = (made, &mut self.active_class)
+            && active.at == at
+        {
+            active.strings.push((decl.constants.len(), made));
+        }
         decl.constants.push(ClassConstDecl {
             name: Name(constant.name.clone().into_boxed_slice()),
             visibility: constant.visibility,
@@ -8379,7 +8409,25 @@ impl<'a> Emit<'a> {
     /// [`Self::value_of`] as its reader holds it: a string made afresh
     /// for the read is the reader's alone ([`Operated::Made`]), which a
     /// fold gives back once the node over it stands, as php's operand
-    /// that `ZVAL_COPY_OR_DUP` copied out of the constant is freed there.
+    /// that `ZVAL_COPY_OR_DUP` duplicated is freed there. A constant of
+    /// the class being compiled is read as the string its fold made
+    /// ([`ActiveClass::strings`]), which `ZVAL_COPY_OR_DUP` shares, so
+    /// sixteen reads of a megabyte allocate nothing and the fold's peak
+    /// is its left operand and the string it joins:
+    ///
+    /// ```php
+    /// $a = str_repeat('a', 1000000);
+    /// $x = implode(' . ', array_fill(0, 16, 'self::A'));
+    /// $code = "class C {\n    const A = '$a';\n    const X = $x;\n}";
+    /// $m = memory_get_usage();
+    /// memory_reset_peak_usage();
+    /// eval($code);
+    /// $peak = (memory_get_peak_usage() - $m) / 1e6;
+    /// echo abs($peak - 33) < 2 ? 'within 2 MB of 33 MB' : $peak, ' ', strlen(C::X), "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// within 2 MB of 33 MB 16000000
+    /// ```
     fn operated_of(&mut self, expr: &ConstExpr) -> Result<Option<Operated>, CompileError> {
         Ok(Some(match expr {
             ConstExpr::Null => Operated::Kept(Zval::null()),
@@ -8394,7 +8442,8 @@ impl<'a> Emit<'a> {
 
     /// A value `zend_eval_const_expr` folded, as the constant expression
     /// a declaration keeps.
-    fn folded(&self, folded: Zval) -> Result<ConstExpr, CompileError> {
+    fn folded(&mut self, folded: Zval) -> Result<ConstExpr, CompileError> {
+        self.folded_string = folded.as_str().map(|_| folded);
         folded_const_expr(folded).ok_or_else(|| self.unread("a constant expression"))
     }
 
@@ -17868,9 +17917,17 @@ impl<'a> Emit<'a> {
         if !refers {
             return Ok(None);
         }
-        let Some(value) = self.foldable_constant(name).cloned() else {
+        let Some((at, value)) = self.foldable_constant(name) else {
             return Ok(None);
         };
+        let held = self
+            .active_class
+            .as_ref()
+            .and_then(|class| class.string_of(at));
+        if let Some(held) = held {
+            return Ok(Some(Operated::Kept(held)));
+        }
+        let value = value.clone();
         if let ConstExpr::ImmutableArray(array) = &value
             && !array_is_const(array.value())
         {
@@ -20392,6 +20449,7 @@ mod tests {
             namespacing: Namespacing::Unbracketed,
             imports: Imports::default(),
             active_class: None,
+            folded_string: None,
             active_parent: None,
             active_function: None,
             this_in_scope: false,
