@@ -72,6 +72,46 @@ impl Request {
 /// 80
 /// 120
 /// ```
+///
+/// It is opcache's in every regime (design §5.2, revision 150). Without
+/// opcache php's compile interns through `zend_new_interned_string_request`
+/// into `CG(interned_strings)`, kept to the request's end, so under the
+/// recipe's `php -n` an `eval` reads other than php's, a by-design
+/// divergence (#3224, landed by #3233): less by a class's runtime
+/// definition key php keeps, the engine reading `256 576 512` (the file
+/// is written where the key's length, which names it, stands still):
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/w3233-key.inc';
+/// file_put_contents("$f." . getmypid(), <<<'PHP'
+/// <?php
+/// trait T9 {} interface I2 { function i(); }
+/// $m = memory_get_usage(); eval('class Q9 { use T9; }'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); eval('class CI implements I2 { function i() {} }'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); eval('interface I3 extends I2 {}'); echo memory_get_usage() - $m, "\n";
+/// PHP);
+/// rename("$f." . getmypid(), $f);
+/// include $f;
+/// ```
+/// ```expect exit=0
+/// 368
+/// 688
+/// 624
+/// ```
+///
+/// and less by a constant php keeps, more where two constants alike are
+/// one string in php's table and two here, the engine reading `80` and
+/// `0`:
+///
+/// ```php
+/// $m = memory_get_usage(); eval('$a = "xxxxxxxx"; $b = "xxxxxxxx";'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); eval('echo "zzzzzzzzqq";'); echo "\n", memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect exit=0
+/// 40
+/// zzzzzzzzqq
+/// 40
+/// ```
 pub(super) struct RequestStrings<'a> {
     pub(super) shared: &'a crate::engine::Shared,
     pub(super) hold: SharedHold,
