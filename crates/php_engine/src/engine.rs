@@ -1781,8 +1781,7 @@ impl Shared {
                 room: php_compile::Room::default(),
             },
         );
-        let kept = strings_kept(&unit);
-        let answers = home.settle(unit.as_ref().ok(), kept);
+        let answers = home.settle(strings_kept(&unit));
         Fresh { unit, answers }
     }
 
@@ -2016,7 +2015,7 @@ impl Shared {
         let mut home =
             PermanentStrings::new(&self.interned.names, &mut strings, CompileHeap::Engine);
         let unit = crate::unit_cache::decode(body, &mut home);
-        home.settle(unit.as_ref(), unit.is_some());
+        home.settle(unit.is_some());
         unit
     }
 
@@ -4005,15 +4004,18 @@ pub(crate) enum CompileHeap<'a> {
 /// so a unit's constant string that spells one is that one, flags and
 /// all, as `zend_new_interned_string` finds it, then the table units
 /// intern into, and a string that is in neither made apart from both
-/// ([`php_heap::Pending`]), which joins the table only as the compile's
-/// unit is held ([`PermanentStrings::settle`]), as opcache's buffer takes
-/// only what `zend_accel_store_interned_string` persists. So a fold's
-/// intermediate, given back as the fold goes on, is freed and never
-/// counted, and the strings of a compile refused with nothing declared
-/// go with it. Each string the compile makes is charged to its
-/// [`CompileHeap`] as well. With the file's full path, the name it was
-/// included by and the keys of the functions and classes it binds, which
-/// opcache's persist interns too ([`table_keys`], `UnitCache::hold`),
+/// ([`php_heap::Pending`]), which joins the table only where the compile
+/// answered a unit ([`PermanentStrings::settle`]), as opcache's buffer
+/// takes only what `zend_accel_store_interned_string` persists. So a
+/// fold's intermediate, given back as the fold goes on, is freed and
+/// never counted, and the strings of a compile refused with nothing
+/// declared go with it. A unit the cache serves without holding it
+/// (`Filed::Compiled`, `Filed::Unheld`) still puts its strings there,
+/// where php's are the request's. Each string the compile makes is
+/// charged to its [`CompileHeap`] as well. With the file's full path,
+/// the name it was included by and the keys of the functions and
+/// classes it binds, which opcache's persist interns as the unit is held
+/// (`UnitCache::persist_names`, `UnitCache::add_key`),
 /// `number_of_strings` moves as php's does, and not at all for a compile
 /// refused:
 ///
@@ -4112,7 +4114,7 @@ impl<'a> PermanentStrings<'a> {
     /// put in the table where its unit stands, `kept`, and given back
     /// with a unit refused that declared nothing; and whom its answer
     /// serves.
-    fn settle(self, unit: Option<&Unit>, kept: bool) -> Answers {
+    fn settle(self, kept: bool) -> Answers {
         if let CompileHeap::Request(heap) = self.heap {
             for standing in self.standing {
                 heap.release_string(standing.copy);
@@ -4120,9 +4122,6 @@ impl<'a> PermanentStrings<'a> {
         }
         if kept {
             self.strings.publish(self.made);
-        }
-        for key in unit.map(table_keys).unwrap_or_default() {
-            self.strings.intern(&key).ok();
         }
         self.answers
     }
@@ -4137,25 +4136,6 @@ fn strings_kept(unit: &Result<Unit, CompileError>) -> bool {
         Ok(_) => true,
         Err(refused) => refused.declared.is_some(),
     }
-}
-
-/// The keys of a unit's `function_table` and `class_table` that
-/// `zend_accel_script_persist` interns with the unit: the lowered name of
-/// each function its compile bound and of each class it bound early,
-/// php's `lcname` (`zend_begin_func_decl`, `zend_compile_class_decl`). A
-/// class a `DECLARE_CLASS` binds is held under its runtime definition
-/// key, a constant of the unit already.
-fn table_keys(unit: &Unit) -> Vec<Box<[u8]>> {
-    let functions = unit.functions.iter().map(|(decl, _)| &decl.name);
-    let early = (unit.classes.iter().enumerate())
-        .filter(|(at, _)| {
-            !(unit.runtime_keys.iter()).any(|(_, keyed)| usize::try_from(*keyed).ok() == Some(*at))
-        })
-        .map(|(_, decl)| &decl.name);
-    functions
-        .chain(early)
-        .map(|name| lowered(&name.0))
-        .collect()
 }
 
 impl Intern for PermanentStrings<'_> {
