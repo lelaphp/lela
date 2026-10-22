@@ -108,6 +108,16 @@ fn a_request_after_one_the_limit_ended_in_its_body_starts_fresh_on_the_same_thre
         "{status}: {first}"
     );
 
+    // What the first request's progress wrote before the limit met it:
+    // the session it names holds the first file, not done, so the
+    // second request has progress to carry over if anything carried.
+    let stored = std::fs::read_to_string(sessions.join("sess_worker3199"))
+        .unwrap_or_else(|e| panic!("the first request's session: {e}"));
+    assert!(
+        stored.contains(r#"s:10:"field_name";s:5:"first""#) && stored.contains(r#"s:4:"done";b:0"#),
+        "{stored}"
+    );
+
     let (status, second) = post(body("second", "two", 0));
     assert_eq!(
         second, "NULL\n[[\"second\"],true,true]",
