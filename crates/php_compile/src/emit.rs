@@ -12759,6 +12759,9 @@ impl<'a> Emit<'a> {
             _ => None,
         };
         let answer = self.short_circuit_from(or, left, |emit| emit.expr(right));
+        // A constant answer over a right side that compiled is the
+        // right side's fold; one the left side settled compiled none,
+        // so no claim of the right side's stands to give back.
         if let Ok(Where::Constant(_)) = answer {
             self.side_folded(right);
         }
@@ -15736,12 +15739,12 @@ impl<'a> Emit<'a> {
         if let [
             Piece {
                 fetch: Fetched::Text(bytes),
-                line,
+                line: text_line,
                 written: Written::Plain,
             },
         ] = pieces
         {
-            self.line = *line;
+            self.line = *text_line;
             let made = self.string_made(bytes, false)?;
             return Ok(Where::Constant(self.claimed(node, Operated::Made(made))));
         }
@@ -16457,7 +16460,7 @@ impl<'a> Emit<'a> {
     /// value left to the request. The steps are [`Self::fold_over`]'s
     /// spelled out: a closure here stands in the frame a left-nested
     /// chain repeats, 171 links under a 512K stack in a debug build where
-    /// this reaches 206.
+    /// this reaches 206 (measured on #3240).
     fn binary_constant(
         &mut self,
         id: NodeId<tree::BinaryExpr>,
