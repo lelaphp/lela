@@ -1452,16 +1452,22 @@ impl Arr {
         Ok(())
     }
 
-    /// `zend_hash_packed_to_hash`: the same elements as buckets, the
-    /// larger allocation taken before the smaller goes back, then the
-    /// rehash that links them.
-    fn packed_to_hash(self, mm: &mut dyn Allocate) -> Result<(), Fatal> {
-        let size = self.table_size();
+    /// `zend_hash_packed_to_hash`: the same elements as buckets in a
+    /// table of `size`, the larger allocation taken before the smaller
+    /// goes back, then the rehash that links them. php doubles
+    /// `nTableSize` before it converts a list written past its room
+    /// (`Z/Zend/zend_hash.c:1150-1154`) and leaves by a jump where the
+    /// allocation fails; here the size is the new data's and is written
+    /// with it, so a conversion the limit refuses leaves the list the
+    /// size its data holds, for the request's end and its shutdown
+    /// functions to write to.
+    fn packed_to_hash(self, mm: &mut dyn Allocate, size: u32) -> Result<(), Fatal> {
         let old = self.data_addr();
         let new = mm.alloc(Arr::data_size(size))?;
         let used = self.num_used();
         let slots: Vec<Zval> = (0..used).map(|i| self.read_slot(i)).collect();
         self.header().flags.set(self.header().flags.get() & !PACKED);
+        self.header().table_size.set(size);
         self.header().table_mask.set(Arr::size_to_mask(size));
         self.set_data_addr(new);
         for (i, val) in slots.into_iter().enumerate() {
@@ -2097,7 +2103,7 @@ fn write_long(
                 a.write_slot(idx, z);
                 return Ok(Written::Replaced(old));
             }
-            a.packed_to_hash(mm)?;
+            a.packed_to_hash(mm, a.table_size())?;
         } else if h < u64::from(a.table_size()) {
             a.add_to_packed(h as u32, z);
             return Ok(Written::Added(Pos::Slot(h as u32)));
@@ -2108,10 +2114,13 @@ fn write_long(
             a.add_to_packed(h as u32, z);
             return Ok(Written::Added(Pos::Slot(h as u32)));
         } else {
-            if a.num_used() >= a.table_size() {
-                header.table_size.set(a.table_size() + a.table_size());
-            }
-            a.packed_to_hash(mm)?;
+            let size = a.table_size();
+            let size = if a.num_used() >= size {
+                size + size
+            } else {
+                size
+            };
+            a.packed_to_hash(mm, size)?;
         }
     } else if a.is_uninitialized() {
         if h < u64::from(a.table_size()) {
@@ -2217,7 +2226,7 @@ impl Arr {
             return self.real_init_mixed(mm);
         }
         if self.is_packed() {
-            self.packed_to_hash(mm)?;
+            self.packed_to_hash(mm, self.table_size())?;
         }
         if self.num_used() >= self.table_size() {
             self.do_resize(mm)?;
@@ -2562,7 +2571,7 @@ impl crate::Heap {
             return Ok(());
         }
         if a.is_packed() {
-            a.packed_to_hash(&mut hooks.heap().tables())?;
+            a.packed_to_hash(&mut hooks.heap().tables(), a.table_size())?;
         }
         // `HT_HASH_RESET`: php's sort overwrites each bucket's chain
         // link with its position, and empties the hash index so that a
@@ -2614,7 +2623,17 @@ impl crate::Heap {
         }
         header.next_free.set(i64::from(used));
         let old = a.data_addr();
-        let new = heap.mm.alloc(Arr::packed_size(a.table_size()))?;
+        // php's `pemalloc` here leaves by a jump with the buckets
+        // renumbered and the hash index empty; a refusal here leaves the
+        // renumbered buckets linked, a hash the request's end and its
+        // shutdown functions read as the list it was becoming.
+        let new = match heap.mm.alloc(Arr::packed_size(a.table_size())) {
+            Ok(new) => new,
+            Err(fatal) => {
+                a.rehash(Some(&mut heap.iterators));
+                return Err(fatal);
+            }
+        };
         let slots: Vec<Zval> = (0..used).map(|i| a.read_bucket(i).val).collect();
         a.set_flag_byte((header.flags.get() & 0xff) | PACKED | STATIC_KEYS);
         header.table_mask.set(MIN_MASK);
@@ -2878,6 +2897,29 @@ pub(crate) enum Written {
     Added(Pos),
     Replaced(Zval),
     Refused,
+}
+
+#[cfg(test)]
+impl Arr {
+    /// Whether the data a table of `heap`'s names holds the room its
+    /// size says it has, read off the allocator: what a write that the
+    /// limit refused must leave true (`crate::refusals`). An
+    /// uninitialised table names no data of its own.
+    pub(crate) fn holds_its_room(self, heap: &crate::Heap) -> bool {
+        if self.is_uninitialized() {
+            return true;
+        }
+        let Some(data) = self.data_addr() else {
+            return true;
+        };
+        let room = if self.is_packed() {
+            Arr::packed_size(self.table_size())
+        } else {
+            Arr::data_size(self.table_size())
+        };
+        // SAFETY: the data of a live table of this heap.
+        unsafe { heap.mm.usable(data) >= room }
+    }
 }
 
 #[cfg(test)]

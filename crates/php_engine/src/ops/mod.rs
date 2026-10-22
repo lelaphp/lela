@@ -2768,8 +2768,8 @@ fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown>
 /// string while a `__toString` on the right is served, and only then
 /// destroys what the place holds (`i_zval_ptr_dtor(result)`) and leaves
 /// it `null` until the joined string lands; `vacate` is that, the caller's
-/// place given up, called once both sides are strings and never on an
-/// `Err`, which leaves the place as it stood. A right side that is
+/// place given up, called once both sides are strings, and an `Err`
+/// leaves the place as it stood. A right side that is
 /// already a string, beside a left one, is read where it stands and
 /// takes no owner, as php's `Z_STR_P(op2)`, so `$s .= $s` grows `$s` in
 /// place too. The `Ok` is the value for the place, with one owner.
@@ -2892,11 +2892,76 @@ fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown>
 /// int(7000)
 /// int(14000)
 /// ```
+///
+/// An append the limit refuses leaves each place holding the string it
+/// held, as php's `zend_string_extend` leaves it, for the shutdown
+/// functions to read: a class's property, an array's element, a declared
+/// property and a reference's cell, as a variable
+/// (`php_heap`'s `Mm::realloc_huge`). A left side converted to a string
+/// had its place `null`ed before the append, and it stays `null`:
+///
+/// ```php
+/// ini_set('memory_limit', '7M');
+/// class C { public static $s; }
+/// C::$s = str_repeat('x', 3000000);
+/// register_shutdown_function(function () { var_dump(strlen(C::$s)); });
+/// C::$s .= C::$s;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 6000032 bytes) in %s on line %d
+/// int(3000000)
+/// ```
+///
+/// ```php
+/// ini_set('memory_limit', '7M');
+/// $a = ['k' => str_repeat('x', 3000000)];
+/// register_shutdown_function(function () { var_dump(strlen($GLOBALS['a']['k'])); });
+/// $a['k'] .= $a['k'];
+/// ```
+/// ```expect exit=255
+/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 6000032 bytes) in %s on line %d
+/// int(3000000)
+/// ```
+///
+/// ```php
+/// ini_set('memory_limit', '7M');
+/// class O { public $p; }
+/// $o = new O; $o->p = str_repeat('x', 3000000);
+/// register_shutdown_function(function () { var_dump(strlen($GLOBALS['o']->p)); });
+/// $o->p .= $o->p;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 6000032 bytes) in %s on line %d
+/// int(3000000)
+/// ```
+///
+/// ```php
+/// ini_set('memory_limit', '7M');
+/// $s = str_repeat('x', 3000000); $r = &$s;
+/// register_shutdown_function(function () { var_dump(strlen($GLOBALS['s'])); });
+/// $r .= $r;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 6000032 bytes) in %s on line %d
+/// int(3000000)
+/// ```
+///
+/// ```php
+/// ini_set('memory_limit', '7M');
+/// $n = 12; $t = str_repeat('x', 3000000);
+/// register_shutdown_function(function () { var_dump($GLOBALS['n']); });
+/// $n .= $t;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 3000032 bytes) in %s on line %d
+/// NULL
+/// ```
 pub(crate) fn concat_assign(
     req: &mut Request,
     left: &Value,
     right: &Value,
     vacate: impl FnOnce(&mut Request),
+    reinstate: impl FnOnce(&mut Request, Value),
 ) -> Result<Value, Thrown> {
     // Only a place that holds a string is given up without running
     // anything, so the right side is read unowned only then: what a
@@ -2938,7 +3003,22 @@ pub(crate) fn concat_assign(
     if owned {
         req.release(Value::string(b));
     }
-    Ok(Value::string(joined?))
+    match joined {
+        Ok(joined) => Ok(Value::string(joined)),
+        // The limit refused the append, and the left string stands as it
+        // was. php grows it with `zend_string_extend` while the place
+        // still holds it, so the place keeps it for the shutdown
+        // functions; a left side converted to a string had its place
+        // `null`ed first, `ZVAL_NULL(result)`, and stays so.
+        Err(thrown) => {
+            if quiet {
+                reinstate(req, Value::string(a));
+            } else {
+                req.release(Value::string(a));
+            }
+            Err(thrown)
+        }
+    }
 }
 
 /// `zend_compare` (`Z/Zend/zend_operators.c:2312`), the one ordering
