@@ -78,7 +78,7 @@ use php_unit::{ConstIdx, Opcode, OplineIdx};
 
 pub(crate) use lattice::Types;
 
-use crate::record::{Began, Start, Stop, TraceRecord};
+use crate::record::{Began, Callee, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 
 /// One exit of a trace, by its place among the trace's exits.
@@ -241,7 +241,7 @@ pub(crate) enum Op {
     /// made.
     InitCall {
         frame: Frame,
-        target: Option<FuncRef>,
+        callee: Callee,
         began: Began,
     },
     /// The frame a call pushed runs.
@@ -606,6 +606,13 @@ pub(crate) fn cannot_raise(op: Opcode, by: Operand) -> bool {
         (Opcode::Div | Opcode::Mod | Opcode::Sl | Opcode::Sr, _) => false,
         _ => true,
     }
+}
+
+/// The types a value of the declared type `ty` may be, as php's
+/// `zend_fetch_arg_info_type` reads an `arg_info`: what a native's call
+/// returns, where it declares a return type.
+pub(crate) fn declared(ty: &php_unit::decl::Type) -> Types {
+    opcodes::of_type(Some(ty), false)
 }
 
 /// The trace `rec` builds, read through `view`, or why it builds none.

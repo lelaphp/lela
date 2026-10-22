@@ -48,7 +48,7 @@ use super::{
     ABANDONED, DECLINED, ENTRY_AT, ESCAPED, INTERRUPT_AT, INTERRUPTED, Kernel, STOOD_AT, Stood,
     Symbols, UNWOUND, located,
 };
-use crate::record::{Began, Stop};
+use crate::record::{Began, Callee, Stop};
 use crate::types::{
     Abort, BodyEntry, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home,
     Imm, Interrupt, Layout, Leave, Line, Op, OpId, Operand, Repeat, Slot, Store, Stored, TraceIr,
@@ -1761,7 +1761,7 @@ impl<'a> Emit<'a> {
     /// before anything is pushed.
     fn push_call(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         let Some(Op::InitCall {
-            target: Some(callee),
+            callee: Callee::User(callee),
             ..
         }) = self.ir.ops.get(at.index() + 1)
         else {

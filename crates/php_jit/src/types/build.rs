@@ -24,7 +24,7 @@ use super::{
     LoopHeader, Op, OpId, Operand, Place, Read, Repeat, Slot, Store, Stored, TraceIr, Unwind,
     UnwindId, Value, ValueId,
 };
-use crate::record::{self, Began, Event, Landed, Start, Stop, TraceRecord};
+use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 
 mod stack;
@@ -166,6 +166,8 @@ struct Call {
     /// php's send sets the callee's stack map to the register it sent
     /// (`SET_STACK_REF`) where no `RECV` checks a type.
     regs: Vec<Option<ValueId>>,
+    /// For a native's call, what its declaration says it returns.
+    returns: Option<Types>,
 }
 
 struct Builder<'a> {
@@ -340,7 +342,7 @@ impl<'a> Builder<'a> {
                     data,
                     branch,
                 } => self.line(*func, *opline, [*op1, *op2, *data], *branch, ahead)?,
-                Event::InitCall { target, began } => self.init_call(*target, *began)?,
+                Event::InitCall { callee, began } => self.init_call(*callee, *began)?,
                 Event::Enter { func } => self.enter(*func)?,
                 Event::Back => self.back(next)?,
             }
@@ -566,9 +568,17 @@ impl<'a> Builder<'a> {
         let writes = writes(op, data_line);
         let slot = slot_of(frame, op.out_type, op.out);
         let pushes = form == Form::Inline && is_call(op.opcode);
+        // A native's call returns what its declaration says, as php's
+        // trace TSSA types a `DO_ICALL`'s result by the `func` its record
+        // names (`Z/ext/opcache/jit/zend_jit_trace.c:2626-2650`).
+        let returns = is_call(op.opcode)
+            .then(|| self.calls.last().and_then(|call| call.returns))
+            .flatten();
         let out = match slot {
             Some(slot) if !pushes && !fused => {
-                Some(self.define(slot, out_types(op, t1, t2, td, code), idx, form))
+                let types = out_types(op, t1, t2, td, code);
+                let types = returns.map_or(types, |returns| types.and(returns));
+                Some(self.define(slot, types, idx, form))
             }
             _ => None,
         };
@@ -771,7 +781,7 @@ impl<'a> Builder<'a> {
 
     /// A call an `INIT_*` began, here or before the trace reached the
     /// frame, whose arguments sent before it the trace knows nothing of.
-    fn init_call(&mut self, target: Option<FuncRef>, began: Began) -> Result<(), Abort> {
+    fn init_call(&mut self, callee: Callee, began: Began) -> Result<(), Abort> {
         let frame = self.running()?;
         let inline = began == Began::Here
             && matches!(
@@ -783,10 +793,14 @@ impl<'a> Builder<'a> {
             inline,
             args: Vec::new(),
             regs: Vec::new(),
+            returns: match callee {
+                Callee::Native(returns) => Some(returns),
+                Callee::User(_) => None,
+            },
         });
         self.ops.push(Op::InitCall {
             frame,
-            target,
+            callee,
             began,
         });
         Ok(())
@@ -1489,7 +1503,7 @@ impl<'a> Builder<'a> {
                 matches!(
                     next,
                     Some(Event::InitCall {
-                        target: Some(_),
+                        callee: Callee::User(_),
                         began: Began::Here,
                     })
                 )

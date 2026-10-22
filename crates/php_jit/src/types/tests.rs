@@ -422,6 +422,37 @@ fn a_side_holds_an_arrays_layout_at_its_first_read() -> Result<(), String> {
     Ok(())
 }
 
+/// A native's call returns what its declaration says, as php's trace
+/// TSSA types what a `DO_ICALL` writes by the function its record names
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:2626-2650`): `strcmp()` returns
+/// an `int`, so the `+=` that reads what it wrote holds no guard on it, as
+/// php's holds none (#3264).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_natives_call_returns_what_it_declares() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += strcmp(\"a\", \"b\"); } return $s; }
+        echo f(10), \"\\n\";",
+    )?;
+    let at = stepped(&ir, Opcode::DoIcall)?;
+    let Some(Op::Line(call)) = ir.ops.get(at.index()) else {
+        return Err("no DO_ICALL".to_owned());
+    };
+    let out = call.out.ok_or("the call keeps no result")?;
+    assert_eq!(
+        ir.values[out.0 as usize].types,
+        Types::LONG,
+        "{}",
+        dump::render(&ir)
+    );
+    let on_out = (ir.guards.iter()).any(|guard| {
+        matches!(guard.check, Check::Type { value, .. } | Check::Deref { value, .. } if value == out)
+    });
+    assert!(!on_out, "{}", dump::render(&ir));
+    Ok(())
+}
+
 /// The place of the first stepped opline of `opcode`.
 fn stepped(ir: &TraceIr, opcode: Opcode) -> Result<OpId, String> {
     ir.ops

@@ -41,7 +41,7 @@ use php_unit::{OpArray, Opcode, OperandKind, Opline, OplineIdx};
 use crate::JitRequest;
 use crate::policy::{self, Holder, Policy, State};
 use crate::table::TraceId;
-use crate::types::ExitId;
+use crate::types::{self, ExitId, Types};
 
 #[cfg(test)]
 mod tests;
@@ -297,17 +297,46 @@ pub(crate) enum Event {
         data: Option<Sample>,
         branch: Option<bool>,
     },
-    /// A call an `INIT_*` began, `ZEND_JIT_TRACE_INIT_CALL`: the op
-    /// array its callee serves, none for a native's, and whether the
-    /// recording saw it begin.
-    InitCall {
-        target: Option<FuncRef>,
-        began: Began,
-    },
+    /// A call an `INIT_*` began, `ZEND_JIT_TRACE_INIT_CALL`: its callee,
+    /// php's record's `func`, and whether the recording saw it begin.
+    InitCall { callee: Callee, began: Began },
     /// A PHP-to-PHP call followed, `ZEND_JIT_TRACE_ENTER`.
     Enter { func: FuncRef },
     /// Its return, `ZEND_JIT_TRACE_BACK`.
     Back,
+}
+
+/// The callee of a call a recording wrote down, php's `func` of a
+/// `ZEND_JIT_TRACE_INIT_CALL` record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Callee {
+    /// A user function, by the op array it serves.
+    User(FuncRef),
+    /// A native, with the types its declaration says it returns, which
+    /// php's `zend_jit_trace_build_tssa` types what its `DO_ICALL` writes by
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:2626-2650`); anything where it
+    /// declares none.
+    Native(Types),
+}
+
+impl Callee {
+    /// The callee of the call `call` is building, as `req` serves it.
+    fn of(req: &Request, call: tier::Building) -> Callee {
+        match call.target {
+            Some(f) => Callee::User(f),
+            None => Callee::Native(
+                tier::native_returns(req, call.call).map_or(Types::ANY, |ty| types::declared(&ty)),
+            ),
+        }
+    }
+
+    /// The op array a user function's call serves; none for a native's.
+    pub(crate) fn user(self) -> Option<FuncRef> {
+        match self {
+            Callee::User(f) => Some(f),
+            Callee::Native(_) => None,
+        }
+    }
 }
 
 /// Where a call under way in a recorded frame began: at an `INIT_*` the
@@ -1104,7 +1133,7 @@ impl<'p> Recorder<'p> {
     fn under_way(&mut self, req: &Request, frame: FrameRef) {
         for call in tier::under_way(req, frame) {
             self.events.push(Event::InitCall {
-                target: call.target,
+                callee: Callee::of(req, call),
                 began: Began::Before,
             });
             if self.count(1) {
@@ -1162,7 +1191,7 @@ impl<'p> Recorder<'p> {
             self.megamorphic.push(call.call);
         }
         self.events.push(Event::InitCall {
-            target: call.target,
+            callee: Callee::of(req, call),
             began: Began::Here,
         });
         if self.count(1) {

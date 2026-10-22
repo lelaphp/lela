@@ -8,11 +8,12 @@ use php_engine::tier::{self, FuncRef, Sample};
 use php_heap::ZvalType;
 use php_unit::{MapPtrOffset, Opcode, OplineIdx};
 
-use super::{Began, Event, Start, Stop, TraceRecord};
+use super::{Began, Callee, Event, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 use crate::testing;
 use crate::testing::records::{at, kept, recorded, trace};
 use crate::types::ExitId;
+use crate::types::Types;
 
 /// The record's events by name, an `Op` by its opline.
 fn events(record: &TraceRecord) -> Vec<String> {
@@ -136,7 +137,7 @@ fn a_return_trace_inside_arguments_begins_with_the_calls_under_way() -> Result<(
             matches!(
                 event,
                 Event::InitCall {
-                    target: Some(_),
+                    callee: Callee::User(_),
                     ..
                 }
             )
@@ -646,7 +647,14 @@ impl Draw {
                     .flatten(),
             },
             1 => Event::InitCall {
-                target: (self.next(2) == 0).then(|| self.func()),
+                callee: if self.next(2) == 0 {
+                    Callee::User(self.func())
+                } else {
+                    Callee::Native(
+                        Types::of_bits(u16::try_from(self.next(1 << 13)).unwrap_or(0))
+                            .unwrap_or(Types::ANY),
+                    )
+                },
                 began: if self.next(2) == 0 {
                     Began::Here
                 } else {

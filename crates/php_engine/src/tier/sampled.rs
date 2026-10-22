@@ -111,6 +111,23 @@ pub fn building(req: &Request) -> Option<Building> {
     building_at(req, building_call(req)?)
 }
 
+/// The return type the native a call being built at `call` serves
+/// declares, php's `arg_info[-1]` that `zend_jit_trace_build_tssa` types
+/// what a `DO_ICALL` writes by: none for a user function's call, and for a
+/// native that declares none or returns by reference.
+#[must_use]
+pub fn native_returns(req: &Request, call: FrameRef) -> Option<php_unit::decl::Type> {
+    let function = req.vm().stack.frame(call)?.header().function?;
+    if req.user_function(function).is_some() {
+        return None;
+    }
+    let decl = req.symbols().function_decl(function)?;
+    if decl.returns_by_ref {
+        return None;
+    }
+    decl.return_type.clone()
+}
+
 /// The calls `frame` began and has not made yet, the outermost first:
 /// php's `EX(call)` and the `prev_execute_data` chain under it, which a
 /// recording that starts in `frame`, or follows a return into it, writes

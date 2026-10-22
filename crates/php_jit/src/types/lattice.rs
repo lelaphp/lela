@@ -20,6 +20,18 @@ use super::Layout;
 pub(crate) struct Types(u16);
 
 impl Types {
+    /// The bits, as a recorded trace's text form writes a native's
+    /// declared return ([`Types::of_bits`]).
+    pub(crate) fn bits(self) -> u16 {
+        self.0
+    }
+
+    /// The types `bits` names; none for a bit no type has.
+    pub(crate) fn of_bits(bits: u16) -> Option<Types> {
+        let all = Types::UNKNOWN.0 | Types::LAYOUTS;
+        (bits & !all == 0).then_some(Types(bits))
+    }
+
     pub(crate) const NONE: Types = Types(0);
     pub(crate) const UNDEF: Types = Types(1 << 0);
     pub(crate) const NULL: Types = Types(1 << 1);

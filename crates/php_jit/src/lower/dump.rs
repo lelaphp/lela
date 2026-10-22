@@ -186,10 +186,10 @@ impl<'a> Dump<'a> {
             }
             Op::InitCall {
                 frame,
-                target,
+                callee,
                 began,
             } => {
-                let target = target.map_or("native".to_owned(), func);
+                let target = callee.user().map_or("native".to_owned(), func);
                 let init = match began {
                     Began::Here => "init",
                     Began::Before => "fake-init",

@@ -397,7 +397,7 @@ pub(super) fn params(code: &OpArray, declared: Option<&[Parameter]>) -> Vec<Para
 /// a class name, `object`, `static`, `self`, `parent` and an intersection
 /// an object, `iterable` an array or an object, `callable` a string, an
 /// array or an object; a variadic parameter is an array of them.
-fn of_type(ty: Option<&Type>, variadic: bool) -> Types {
+pub(super) fn of_type(ty: Option<&Type>, variadic: bool) -> Types {
     if variadic {
         return Types::of_tag(ZvalType::Array);
     }

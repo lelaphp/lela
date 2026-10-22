@@ -91,10 +91,10 @@ impl Builder<'_> {
             .get(line.opline.0 as usize)?;
         let target = match self.ops.get(at + 1) {
             Some(Op::InitCall {
-                target,
+                callee,
                 began: Began::Here,
                 ..
-            }) => Some(*target),
+            }) => Some(callee.user()),
             _ => None,
         };
         Some((op, target.flatten()))
