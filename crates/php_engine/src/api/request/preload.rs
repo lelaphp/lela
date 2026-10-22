@@ -568,7 +568,11 @@ impl Request {
             .scripts
             .into_iter()
             .zip(0u64..)
-            .map(|((path, unit, size), order)| Arc::new(Held::preloaded(unit, path, size, order)))
+            .map(|((path, unit, size), order)| {
+                // `preload_script_in_shared_memory` persists each file.
+                self.shared.units.persist_names(&path, &unit);
+                Arc::new(Held::preloaded(unit, path, size, order))
+            })
             .collect();
         Some(Preloaded {
             classes: tables.classes,

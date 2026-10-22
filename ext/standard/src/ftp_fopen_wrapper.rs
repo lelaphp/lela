@@ -530,36 +530,6 @@ impl Transfer {
     }
 }
 
-/// The control connection a data stream keeps, `stream->wrapperthis`,
-/// with what the transfer was: `php_stream_ftp_stream_close` reads the
-/// reply that ends an upload, warns where it is no `226` or `250`, and
-/// quits.
-struct Control {
-    stream: Owner<Stream>,
-    transfer: Transfer,
-}
-
-impl Closer for Control {
-    fn close(self: Box<Self>, req: &mut Request) -> Result<(), Thrown> {
-        let Control { stream, transfer } = *self;
-        closing(req, stream, |req, stream| {
-            if transfer != Transfer::Read {
-                let reply = get_result(req, stream)?;
-                if reply.code != 226 && reply.code != 250 {
-                    let text = format!(
-                        "FTP server error {}:{}",
-                        reply.code,
-                        String::from_utf8_lossy(c_str(&reply.line))
-                    );
-                    docref(req, Level::Warning, &text);
-                }
-            }
-            command(req, stream, b"QUIT", None);
-            Ok(())
-        })
-    }
-}
-
 /// What the exchange before a transfer came to: the last reply and the
 /// size `SIZE` gave a read, or the reply that refused it.
 enum Prepared {
@@ -707,15 +677,107 @@ fn open(
             return Err(thrown);
         }
     };
-    let closer = Box::new(Control {
-        stream: control,
-        transfer,
-    });
-    if let Err(thrown) = data.set_closer(req, closer) {
+    // php's `datastream->wrapperthis = stream`: the data stream keeps the
+    // control connection until it is closed.
+    if let Err(thrown) = data.set_closer(req, Box::new(HeldControl(control))) {
         data.free(req);
         return Err(thrown);
     }
     Ok(Some(data))
+}
+
+/// What a data stream holds of its session, php's `stream->wrapperthis`
+/// (`Z/ext/standard/ftp_fopen_wrapper.c:588`): the control connection,
+/// left open for as long as the transfer is. Closing the data stream calls
+/// `php_stream_ftp_stream_close` (`Z/ext/standard/ftp_fopen_wrapper.c:99`)
+/// on it. Where `strpbrk(stream->mode, "wa+")` finds a `w`, an `a` or a
+/// `+`, that reads the server's last reply on the transfer and warns with
+/// its code and line unless the code is `226` or `250`; either way it then
+/// sends `QUIT` and closes the connection. A data connection is a socket
+/// stream, which `php_stream_xport_create` opens as `r+`
+/// (`Z/main/streams/xp_socket.c:974`), so the `+` is always there and the
+/// last reply is read when a `RETR` ends exactly as when a `STOR` does. A
+/// server that hangs up instead of replying leaves the reply buffer empty,
+/// which `strtol` reads as code `0`.
+///
+/// Four downloads from a server that ends them with `226`, `250`, `426`
+/// and a hang-up, each warning raised by the `fclose` that closes it:
+///
+/// ```php
+/// $ctl = stream_socket_server("tcp://127.0.0.1:0");
+/// $dat = stream_socket_server("tcp://127.0.0.1:0");
+/// $cport = (int) substr(strrchr(stream_socket_get_name($ctl, false), ":"), 1);
+/// $dport = (int) substr(strrchr(stream_socket_get_name($dat, false), ":"), 1);
+/// $endings = ["226 Closing data connection.", "250 Requested file action okay.", "426 Transfer aborted.", ""];
+/// if (pcntl_fork() === 0) {
+///     foreach ($endings as $ending) {
+///         $conn = stream_socket_accept($ctl);
+///         fwrite($conn, "220 ready\r\n");
+///         while (is_string($cmd = fgets($conn))) {
+///             $verb = strtok(rtrim($cmd), " ");
+///             if ($verb === "RETR") {
+///                 $data = stream_socket_accept($dat);
+///                 fwrite($conn, "150 Opening data connection.\r\n");
+///                 fwrite($data, "abc");
+///                 fclose($data);
+///                 if ($ending === "") {
+///                     break;
+///                 }
+///                 fwrite($conn, $ending . "\r\n");
+///                 continue;
+///             }
+///             fwrite($conn, match ($verb) {
+///                 "USER" => "331 Password required.",
+///                 "PASS" => "230 Logged in.",
+///                 "TYPE" => "200 Type set to I.",
+///                 "SIZE" => "213 3",
+///                 "PASV" => sprintf("227 Entering Passive Mode (127,0,0,1,%d,%d).", intdiv($dport, 256), $dport % 256),
+///                 "QUIT" => "221 Goodbye.",
+///                 default => "502 Command not implemented.",
+///             } . "\r\n");
+///             if ($verb === "QUIT") {
+///                 break;
+///             }
+///         }
+///         fclose($conn);
+///     }
+///     exit(0);
+/// }
+/// foreach ($endings as $i => $_) {
+///     $file = fopen("ftp://127.0.0.1:$cport/abc.txt", "r");
+///     echo $i, ": ", stream_get_contents($file), "\n";
+///     fclose($file);
+/// }
+/// echo "done\n";
+/// ```
+/// ```expect process
+/// 0: abc
+/// 1: abc
+/// 2: abc
+///
+/// Warning: fclose(): FTP server error 426:426 Transfer aborted.
+///  in %SCRATCH%/witness.php on line 44
+/// 3: abc
+///
+/// Warning: fclose(): FTP server error 0: in %SCRATCH%/witness.php on line 44
+/// done
+/// ```
+struct HeldControl(Owner<Stream>);
+
+impl Closer for HeldControl {
+    fn close(self: Box<Self>, req: &mut Request) -> Result<(), Thrown> {
+        let HeldControl(control) = *self;
+        closing(req, control, |req, control| {
+            let last = get_result(req, control)?;
+            if !matches!(last.code, 226 | 250) {
+                let line = String::from_utf8_lossy(c_str(&last.line));
+                let warning = format!("FTP server error {}:{line}", last.code);
+                docref(req, Level::Warning, &warning);
+            }
+            command(req, control, b"QUIT", None);
+            Ok(())
+        })
+    }
 }
 
 /// What the transfer's start came to: the data connection, or the reply
