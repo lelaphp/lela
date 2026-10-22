@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 
-use php_heap::{Zval, ZvalType};
+use php_heap::{Made, Zval, ZvalType};
 use php_syntax::tree::{self, NodeId};
 use php_unit::Level;
 
@@ -107,9 +107,87 @@ impl Rewrites {
             .get_or_insert_with(HashMap::new)
             .insert(expr, rewrite);
     }
+
+    /// The node's replacement gone with the node, as `zend_ast_destroy`
+    /// frees a child once the node over it stands as its value.
+    fn forget(&mut self, expr: tree::Expr) {
+        if let Some(rewrites) = &mut self.0 {
+            rewrites.remove(&expr);
+        }
+    }
+}
+
+/// The strings a fold made that the node it folded holds alone, each
+/// beside its node, the newest last: a node's own claim stands until the
+/// operator over it has folded, which gives it back as php's
+/// `zend_eval_const_expr` destroys the operand zvals once the value
+/// stands, or keeps it by dropping the claim. A claim is resolved by the
+/// operator that reads it ([`Emit::binary_constant`]), so the
+/// claims above a mark are only those of the operands being read.
+#[derive(Default)]
+pub(super) struct Claims(Vec<(tree::Expr, Made)>);
+
+impl Claims {
+    /// Where the claims made from here on start.
+    pub(super) fn mark(&self) -> usize {
+        self.0.len()
+    }
+
+    /// `made`, held by `node` alone.
+    pub(super) fn hold(&mut self, node: tree::Expr, made: Made) {
+        self.0.push((node, made));
+    }
+
+    /// The claims made since `mark`, taken out.
+    pub(super) fn since(&mut self, mark: usize) -> Vec<(tree::Expr, Made)> {
+        if mark >= self.0.len() {
+            return Vec::new();
+        }
+        self.0.split_off(mark)
+    }
 }
 
 impl Emit<'_> {
+    /// The operands of an operator that folded read for the last time,
+    /// `zend_eval_const_expr`'s `zend_ast_destroy` of its children once the
+    /// node is replaced by its value: the claims made while they were
+    /// read, `claims`, given back where they are an operand's own, the
+    /// node `operands` names under its parentheses, with what replaced it,
+    /// and every other kept, a string a deeper node made that an array or
+    /// a conditional holds among them. An operator that did not fold
+    /// keeps them all, since the compile reads its operands again.
+    pub(super) fn consume(
+        &mut self,
+        claims: Vec<(tree::Expr, Made)>,
+        operands: [tree::Expr; 2],
+        folded: bool,
+    ) {
+        if !folded {
+            return;
+        }
+        let peeled = operands.map(|operand| self.peel(operand));
+        for (node, made) in claims {
+            let Some(at) = peeled.iter().position(|operand| *operand == node) else {
+                continue;
+            };
+            let mut written = operands[at];
+            loop {
+                self.rewrites.forget(written);
+                if written == node {
+                    break;
+                }
+                match written {
+                    tree::Expr::ParenExpr(id) => match self.parsed.tree[id].inner {
+                        Some(inner) => written = inner,
+                        None => break,
+                    },
+                    _ => break,
+                }
+            }
+            self.strings.give_back(made);
+        }
+    }
+
     /// [`Self::constant_expr`] where a compile needs the value: a node
     /// that is no constant refused at the line the compile stands on, as
     /// a sentence of this compiler's own ([`Emit::fatal`]).

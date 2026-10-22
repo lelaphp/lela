@@ -102,7 +102,7 @@ use php_syntax::tree::{self, Block, Node, NodeId, Stmt, StmtList, TokenId};
 use php_syntax::{Arena, ArenaVec, Holder, Parsed, SyntaxKind, TokenValue};
 
 use php_heap::{
-    Arr, Exponent, Fatal, Intern, Key, Number, Scalar, Zval, ZvalType, double_to_string,
+    Arr, Exponent, Fatal, Intern, Key, Made, Number, Scalar, Zval, ZvalType, double_to_string,
     numeric_prefix,
 };
 use php_link::{Exact, Indexed};
@@ -690,6 +690,9 @@ pub(crate) struct Emit<'a> {
     /// The nodes `zend_eval_const_expr` replaced in php's tree, which
     /// every compile after it reads ([`eval`]).
     rewrites: eval::Rewrites,
+    /// The strings a fold made that the node it folded alone holds,
+    /// given back as the node over it consumes them ([`eval`]).
+    claims: eval::Claims,
     /// `op_array->fn_flags` of the op array being compiled, the bits
     /// this compiler reads back.
     fn_flags: FnFlags,
@@ -1200,6 +1203,26 @@ enum Under {
     Value(Where),
 }
 
+/// What an operator's fold answered: a string the fold made that the
+/// node over it reads once, held as the operand's own claim
+/// ([`eval::Claims`]), or a value some other place keeps, a
+/// written operand's, a constant's, or one no claim covers.
+enum Operated {
+    Made(Made),
+    Kept(Zval),
+}
+
+impl Operated {
+    /// The value, kept where it stands: a claim dropped, its string the
+    /// unit's as any other the compile made.
+    fn kept(self) -> Zval {
+        match self {
+            Operated::Made(made) => Zval::string(made.str()),
+            Operated::Kept(value) => value,
+        }
+    }
+}
+
 /// What a magic constant folds to: `__LINE__`'s number, or the string
 /// every other one is.
 enum Folded {
@@ -1500,6 +1523,7 @@ impl<'a> Emit<'a> {
             static_vars: Vec::new(),
             fold: Fold::Compile,
             rewrites: eval::Rewrites::default(),
+            claims: eval::Claims::default(),
             fn_flags: FnFlags::default(),
             numeric_dims: Vec::new(),
             methods: Vec::new(),
@@ -2032,6 +2056,14 @@ impl<'a> Emit<'a> {
         }
     }
 
+    /// [`Self::string_marked`] as a claim the one who asked holds alone
+    /// ([`Intern::intern_made`]).
+    fn string_made(&mut self, bytes: &[u8], utf8: bool) -> Result<Made, CompileError> {
+        self.strings
+            .intern_made(bytes, utf8)
+            .map_err(|fatal| self.fatal_of(fatal))
+    }
+
     /// [`Self::string`] of bytes known to be valid UTF-8 where `utf8`
     /// says so ([`Intern::intern_marked`]): a number's text, a fold of two
     /// marked strings.
@@ -2076,6 +2108,48 @@ impl<'a> Emit<'a> {
     /// 1 Allowed memory size of 16777216 bytes exhausted on line 4
     /// bool(true)
     /// bool(false)
+    /// ```
+    ///
+    /// What the limit holds is what php's fold holds at once, the string
+    /// it makes beside the operands it reads, each operand freed once the
+    /// node over it stands ([`eval::Claims`]): never the sum of the
+    /// strings the chain made on the way. So sixteen copies of a megabyte
+    /// fold under `memory_limit=40M`, and not under 32M, with opcache and
+    /// without it:
+    ///
+    /// ```php
+    /// $child = <<<'PHP'
+    /// <?php
+    /// ini_set('display_errors', '0');
+    /// register_shutdown_function(function () {
+    ///     $e = error_get_last();
+    ///     echo $e ? strtok($e['message'], '(') . 'on line ' . $e['line'] : strlen(C::X) . ' bytes', "\n";
+    /// });
+    /// $a = str_repeat('a', 1000000);
+    /// $x = implode(' . ', array_fill(0, 16, 'self::A'));
+    /// ini_set('memory_limit', $argv[1]);
+    /// eval("class C {\n    const A = '$a';\n    const X = $x;\n}");
+    /// PHP;
+    /// $f = sys_get_temp_dir() . '/fold-' . getmypid() . '.php';
+    /// file_put_contents($f, $child);
+    /// foreach (['16M', '24M', '32M', '40M', '128M'] as $limit) {
+    ///     foreach (['-n', '-n -d opcache.enable_cli=1 -d opcache.jit=off'] as $regime) {
+    ///         echo $limit, ' ', shell_exec(escapeshellarg(PHP_BINARY) . " $regime " . escapeshellarg($f) . " $limit");
+    ///     }
+    /// }
+    /// unlink($f);
+    /// ```
+    /// ```expect process
+    /// 16M Allowed memory size of 16777216 bytes exhausted on line 3
+    /// 16M Allowed memory size of 16777216 bytes exhausted on line 3
+    /// 24M Allowed memory size of 25165824 bytes exhausted on line 3
+    /// 24M Allowed memory size of 25165824 bytes exhausted on line 3
+    /// 32M Allowed memory size of 33554432 bytes exhausted on line 3
+    /// 32M Allowed memory size of 33554432 bytes exhausted on line 3
+    /// 40M 16000000 bytes
+    /// 40M 16000000 bytes
+    /// 128M 16000000 bytes
+    /// 128M 16000000 bytes
     /// ```
     pub(crate) fn constant_of(&mut self, expr: tree::Expr) -> Result<Option<Zval>, CompileError> {
         match self.constant_expr(expr) {
@@ -7937,7 +8011,7 @@ impl<'a> Emit<'a> {
                     // arm: a constant of the class being declared is
                     // its value ([`Self::active_class_constant`]).
                     if let Some(value) = self.active_class_constant(&class, name)? {
-                        return self.folded(value);
+                        return self.folded(value.kept());
                     }
                     Ok(ConstExpr::ClassConstant {
                         class: Name(class.into_boxed_slice()),
@@ -14682,6 +14756,15 @@ impl<'a> Emit<'a> {
         left: Zval,
         right: Zval,
     ) -> Result<Option<Zval>, CompileError> {
+        Ok(self
+            .concat_made(left, right)?
+            .map(|made| Zval::string(made.str())))
+    }
+
+    /// [`Self::concat_fold`]'s string as the claim of the one who asked
+    /// ([`Made`]), which hands it back once it is read
+    /// ([`Self::folded_concat`]) or keeps it by dropping the claim.
+    fn concat_made(&mut self, left: Zval, right: Zval) -> Result<Option<Made>, CompileError> {
         // `zend_binary_op_produces_error`'s concatenation arm: an array
         // on either side is the warning left to the request, and no
         // conversion is made of the other side here.
@@ -14698,7 +14781,7 @@ impl<'a> Emit<'a> {
         // `concat_function`'s `ZSTR_COPY_CONCAT_PROPERTIES_BOTH`, then the
         // interning that keeps a string the table already holds as it is.
         let utf8 = a.is_valid_utf8() && b.is_valid_utf8();
-        Ok(Some(self.string_marked(&joined, utf8)?))
+        Ok(Some(self.string_made(&joined, utf8)?))
     }
 
     /// A constant operand of a `.` as the string `zend_compile_binary_op`
@@ -16001,7 +16084,7 @@ impl<'a> Emit<'a> {
             }
             Some(SyntaxKind::QUESTION_QUESTION) => self.coalesce_constant(id, left, right),
             Some(kind) => match binary_op(kind) {
-                Some(op) => self.binary_constant(op, left, right),
+                Some(op) => self.binary_constant(id, op, left, right),
                 None => Err(self.unread("a binary operator").into()),
             },
             None => Err(self.unread("a binary operator").into()),
@@ -16072,9 +16155,17 @@ impl<'a> Emit<'a> {
                     },
                     None => None,
                 };
-                folded.ok_or(Unfolded::NoConstant(
-                    "a class constant is fetched at run time",
-                ))
+                match folded {
+                    Some(Operated::Kept(value)) => Ok(value),
+                    Some(Operated::Made(made)) => {
+                        let value = Zval::string(made.str());
+                        self.claims.hold(tree::Expr::ScopedAccessExpr(id), made);
+                        Ok(value)
+                    }
+                    None => Err(Unfolded::NoConstant(
+                        "a class constant is fetched at run time",
+                    )),
+                }
             }
             Scoped::Property { .. } => {
                 Err(Unfolded::NoConstant("a variable is no constant expression"))
@@ -16095,12 +16186,31 @@ impl<'a> Emit<'a> {
     /// value left to the request.
     fn binary_constant(
         &mut self,
+        id: NodeId<tree::BinaryExpr>,
         op: BinaryOp,
         left: tree::Expr,
         right: tree::Expr,
     ) -> Result<Zval, Unfolded> {
-        let (left, right) = self.constant_pair(left, right)?;
-        self.constant_operands(op, left, right)
+        let mark = self.claims.mark();
+        let folded = self.constant_pair(left, right).and_then(|(a, b)| {
+            if op == BinaryOp::Concat {
+                let made = self.concat_made(a, b)?.ok_or(Unfolded::NoConstant(
+                    "a concatenation this compiler cannot fold yet",
+                ))?;
+                return Ok(Operated::Made(made));
+            }
+            self.constant_operands(op, a, b).map(Operated::Kept)
+        });
+        let claims = self.claims.since(mark);
+        self.consume(claims, [left, right], folded.is_ok());
+        folded.map(|folded| match folded {
+            Operated::Kept(value) => value,
+            Operated::Made(made) => {
+                let value = Zval::string(made.str());
+                self.claims.hold(tree::Expr::BinaryExpr(id), made);
+                value
+            }
+        })
     }
 
     /// The fold of [`Self::binary_constant`] over its two folded sides,
@@ -17524,7 +17634,7 @@ impl<'a> Emit<'a> {
             && let Some(resolved) = self.constant_class(operand)?
             && let Some(value) = self.active_class_constant(resolved, written)?
         {
-            return Ok(Where::Constant(value));
+            return Ok(Where::Constant(value.kept()));
         }
         let class = self.class_ref_of(operand, FETCH_CLASS_EXCEPTION)?;
         let name = match name {
@@ -17628,7 +17738,7 @@ impl<'a> Emit<'a> {
         &mut self,
         class: &[u8],
         name: &[u8],
-    ) -> Result<Option<Zval>, CompileError> {
+    ) -> Result<Option<Operated>, CompileError> {
         if self.substitution == Substitution::NoPersistent {
             return Ok(None);
         }
@@ -17651,7 +17761,13 @@ impl<'a> Emit<'a> {
         {
             return Ok(None);
         }
-        self.value_of(&value)
+        // The constant's string made afresh for the fetch, the fetch's
+        // alone, where php's `ZVAL_COPY_OR_DUP` copies the constant's
+        // zval and its operand is freed once the node over it folds.
+        if let ConstExpr::Str(bytes) = &value {
+            return Ok(Some(Operated::Made(self.string_made(bytes, false)?)));
+        }
+        Ok(self.value_of(&value)?.map(Operated::Kept))
     }
 
     /// `zend_compile_static_prop` under `BP_VAR_R`, which delays nothing
@@ -20215,6 +20331,7 @@ mod tests {
             static_vars: Vec::new(),
             fold: Fold::Compile,
             rewrites: eval::Rewrites::default(),
+            claims: eval::Claims::default(),
             fn_flags: FnFlags::default(),
             numeric_dims: Vec::new(),
             methods: Vec::new(),

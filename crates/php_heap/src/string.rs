@@ -727,6 +727,25 @@ pub trait Intern {
     /// `zend_interned_string_ht_lookup` finds it.
     fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal>;
 
+    /// [`Intern::intern_marked`] of a string the asker alone will hold
+    /// and gives back once it has read it ([`Intern::give_back`]): a
+    /// string a fold makes that the fold above it consumes, as
+    /// `zend_eval_const_expr` destroys a child's zval once the node it
+    /// folds into stands. The [`Made`] is the claim; dropped instead of
+    /// given back, the string is kept as any other this home made.
+    fn intern_made(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Made, Fatal> {
+        self.intern_marked(bytes, valid_utf8).map(Made)
+    }
+
+    /// `made` read for the last time: the string this home made for the
+    /// claim gone, where the home made one for the asker alone, and
+    /// nothing where the string is the table's, as an interned string is
+    /// never freed by a release. A home that keeps every string it makes
+    /// to its own end gives back nothing.
+    fn give_back(&mut self, made: Made) {
+        let _ = made;
+    }
+
     /// A constant array of a unit in this home (design §5.3): the
     /// entries in this order, the keys strings this home made or
     /// integers. An engine's is php's `IS_ARRAY_IMMUTABLE`, no owner
@@ -734,6 +753,22 @@ pub trait Intern {
     /// makes one its unit owns. What a `switch` or a `match` jump table
     /// is (`zend_compile_switch`, `zend_compile_match`).
     fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal>;
+}
+
+/// One string an [`Intern`] home made for an asker that holds it alone
+/// and hands it back with [`Intern::give_back`] once it has read it.
+/// Only [`Intern::intern_made`] makes one, and it is neither copied nor
+/// cloned, so a string another place keeps, a constant operand's or one a
+/// rewrite recorded, can never be handed back as one.
+#[derive(Debug)]
+pub struct Made(Str);
+
+impl Made {
+    /// The string, a view: the claim stays the holder's.
+    #[must_use]
+    pub fn str(&self) -> Str {
+        self.0
+    }
 }
 
 /// The engine's interned strings (design §5.2, §5.14): the table a unit's

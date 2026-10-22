@@ -622,6 +622,49 @@ impl Request {
     /// bool(true)
     /// bool(false)
     /// ```
+    ///
+    /// The limit holds what php's compile holds at once, the string a fold
+    /// makes beside the operands it reads, each given back once the node
+    /// over it stands (`php_compile`'s fold claims): the file compiles
+    /// under 40M and not under 32M, as php's does in either regime:
+    ///
+    /// ```php
+    /// $child = <<<'PHP'
+    /// <?php
+    /// ini_set('display_errors', '0');
+    /// register_shutdown_function(function () {
+    ///     $e = error_get_last();
+    ///     echo $e ? strtok($e['message'], '(') . 'on line ' . $e['line'] : strlen(C::X) . ' bytes', "\n";
+    /// });
+    /// $a = str_repeat('a', 1000000);
+    /// $x = implode(' . ', array_fill(0, 16, 'self::A'));
+    /// $file = sys_get_temp_dir() . '/fold-inc-' . getmypid() . '.php';
+    /// file_put_contents($file, "<?php\nclass C {\n    const A = '$a';\n    const X = $x;\n}\n");
+    /// ini_set('memory_limit', $argv[1]);
+    /// register_shutdown_function(fn () => @unlink($file));
+    /// include $file;
+    /// PHP;
+    /// $f = sys_get_temp_dir() . '/fold-' . getmypid() . '.php';
+    /// file_put_contents($f, $child);
+    /// foreach (['16M', '24M', '32M', '40M', '128M'] as $limit) {
+    ///     foreach (['-n', '-n -d opcache.enable_cli=1 -d opcache.jit=off -d opcache.file_update_protection=0'] as $regime) {
+    ///         echo $limit, ' ', shell_exec(escapeshellarg(PHP_BINARY) . " $regime " . escapeshellarg($f) . " $limit");
+    ///     }
+    /// }
+    /// unlink($f);
+    /// ```
+    /// ```expect process
+    /// 16M Allowed memory size of 16777216 bytes exhausted on line 4
+    /// 16M Allowed memory size of 16777216 bytes exhausted on line 4
+    /// 24M Allowed memory size of 25165824 bytes exhausted on line 4
+    /// 24M Allowed memory size of 25165824 bytes exhausted on line 4
+    /// 32M Allowed memory size of 33554432 bytes exhausted on line 4
+    /// 32M Allowed memory size of 33554432 bytes exhausted on line 4
+    /// 40M 16000000 bytes
+    /// 40M 16000000 bytes
+    /// 128M 16000000 bytes
+    /// 128M 16000000 bytes
+    /// ```
     pub(crate) fn compile_for_cache(&mut self, source: &[u8], path: &[u8]) -> Fresh {
         let shared = Arc::clone(&self.shared);
         let stack = self.stack_limit();
