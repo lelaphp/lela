@@ -39,6 +39,7 @@ use php_engine::tier::{
 };
 use php_unit::OplineIdx;
 
+use crate::Shared;
 use crate::compiler::{self, Job};
 use crate::enter::{self, At, Crossed as _, Exited, Left};
 use crate::policy::{
@@ -47,14 +48,14 @@ use crate::policy::{
 use crate::record::{self, Bailed, Ended, Headed, Start, Stop};
 use crate::table::{self, TraceId, TraceName};
 use crate::types::Grows;
-use crate::{JitEngine, Shared};
 
 #[cfg(test)]
 mod tests;
 
 /// The tier's state on a request (`jit-design.md` §2.2, §4; #3144), as
-/// php's tracing tier keeps `JIT_G`: the engine's `Shared`, resolved
-/// once as the request is laid, so a visit reads the `Policy` with no
+/// php's tracing tier keeps `JIT_G`: the engine's `Shared` and where its
+/// recordings compile, resolved once as the request is laid, so a visit
+/// reads the `Policy`, and a recording that compiles submits, with no
 /// lookup of the engine state; whether a recording is under way on the
 /// request, php's `JIT_G(tracing)`, which no fiber switch saves (§4.9,
 /// revision 30), set and cleared by `record`'s guard alone; and the trace
@@ -64,6 +65,7 @@ mod tests;
 /// request it holds shared, once (`tier::state`).
 pub struct JitRequest {
     pub(crate) shared: Arc<Shared>,
+    pub(crate) submitter: compiler::Submitter,
     pub(crate) recording: Cell<bool>,
     pub(crate) submitted: Cell<Option<Submitted>>,
 }
@@ -191,7 +193,7 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: He
                 },
                 Rooted::Landing(caller, at) => Holder::Landing {
                     epoch,
-                    func: tier::func(req, caller)?,
+                    func: tier::running_func(req, caller)?,
                     at,
                 },
             })
@@ -669,7 +671,7 @@ fn visit_landing(
         }
         Some(Holder::Landing {
             epoch: tier::epoch(req),
-            func: tier::func(req, frame)?,
+            func: tier::running_func(req, frame)?,
             at,
         })
     };
@@ -1081,25 +1083,21 @@ fn side_entered(table: Option<&table::Table>, start: Start) -> Vec<record::Enter
 }
 
 /// `job` settled: a recording that stopped where a trace compiles
-/// submitted to the engine's compiler, which settles it here or on its
-/// worker; any other settled here at once as the attempt it failed, as
+/// submitted through the request's [`compiler::Submitter`], which
+/// settles it here or on the engine's worker; any other settled here at once as the attempt it failed, as
 /// php writes its abort before it records again. Its lines written;
 /// what it settled as, where it was settled here.
 fn settled(req: &mut Request, shared: &Shared, job: Job, goes_on: GoesOn) -> Option<Outcome> {
     let mut lines = Vec::new();
     let outcome = if job.recorded.record.stop.compiles() {
         let word = job.claim.holder().clone();
-        // The engine's compiler, read once a recording that compiles:
-        // the visits read the request's state alone.
-        let engine = req.engine::<JitEngine>();
-        match engine.map(|engine| engine.compiler.submit(shared, job, &mut lines)) {
-            Some(None) => {
-                if let Some(state) = tier::state::<JitRequest>(req) {
-                    state.submitted.set(Some(Submitted { word, goes_on }));
-                }
+        let state = tier::state::<JitRequest>(req);
+        match state.map(|state| (state, state.submitter.submit(shared, job, &mut lines))) {
+            Some((state, None)) => {
+                state.submitted.set(Some(Submitted { word, goes_on }));
                 None
             }
-            Some(settled) => settled,
+            Some((_, settled)) => settled,
             None => None,
         }
     } else {

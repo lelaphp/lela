@@ -370,8 +370,9 @@ fn four_threads_submit_and_every_word_settles_once() -> Result<(), String> {
         for share in shares {
             let engine = &engine;
             scope.spawn(move || {
+                let submitter = engine.compiler.submitter();
                 for job in share {
-                    let queued = engine.compiler.submit(&engine.shared, job, &mut Vec::new());
+                    let queued = submitter.submit(&engine.shared, job, &mut Vec::new());
                     assert!(queued.is_none(), "queued for the worker");
                 }
             });
@@ -433,7 +434,10 @@ fn inline_settles_on_the_request_and_off_runs_no_worker() -> Result<(), String> 
     );
     let (job, holder) = job(&[])?;
     let mut lines = Vec::new();
-    let outcome = engine.compiler.submit(&engine.shared, job, &mut lines);
+    let outcome = engine
+        .compiler
+        .submitter()
+        .submit(&engine.shared, job, &mut lines);
     assert_eq!(outcome, Some(Outcome::Published(trace(1))));
     assert_eq!(String::from_utf8_lossy(&lines), stopped(1, "compiled"));
     assert_eq!(policy::read(holder.word()), State::Compiled(trace(1)));

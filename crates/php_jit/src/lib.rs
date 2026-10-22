@@ -109,28 +109,30 @@ impl JitRequest {
     /// [`JitEngine`].
     fn laid(started: Started<'_>) -> Option<JitRequest> {
         let engine = started.engine::<JitEngine>()?;
-        Some(JitRequest::of(&engine.shared))
+        Some(JitRequest::of(&engine.shared, engine.compiler.submitter()))
     }
 
     /// The state a test's recorder lays over its `Policy` alone, with no
     /// engine state of the tier's: no `Backend` and no `PERF` file.
     #[cfg(test)]
     fn recorder(policy: &policy::Policy) -> JitRequest {
-        JitRequest::of(&Arc::new(Shared {
+        let shared = Arc::new(Shared {
             policy: policy.clone(),
             bound: policy.bound(false),
             backend: None,
             started: Box::default(),
             told: AtomicBool::new(false),
             perf: table::Outputs::none(),
-        }))
+        });
+        JitRequest::of(&shared, compiler::Submitter::INLINE)
     }
 
-    /// The state of a request over `shared`, recording nothing and
-    /// having submitted nothing.
-    fn of(shared: &Arc<Shared>) -> JitRequest {
+    /// The state of a request over `shared`, submitting through
+    /// `submitter`, recording nothing and having submitted nothing.
+    fn of(shared: &Arc<Shared>, submitter: compiler::Submitter) -> JitRequest {
         JitRequest {
             shared: Arc::clone(shared),
+            submitter,
             recording: Cell::new(false),
             submitted: Cell::new(None),
         }

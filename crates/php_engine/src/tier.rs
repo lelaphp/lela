@@ -218,7 +218,6 @@ impl Tier for Nop {
 /// Where a request keeps its tier's [`Tier::State`]
 /// (`jit-design.md` §2.2, #3144): laid once with the request, by the
 /// loop the engine bound ([`Loops::bound`]), and read by [`state`].
-#[derive(Default)]
 pub(crate) struct TierState(Option<Box<dyn Any + Send>>);
 
 impl TierState {

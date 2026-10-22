@@ -17,7 +17,8 @@
 //! the engine's interned strings it reads, and a [`Claim`], which holds
 //! its word's epoch, so a job outlives the request and the engine that
 //! made it. Dropping the [`Compiler`] drops the jobs still queued, each
-//! claim settling itself, and joins the one under way.
+//! claim settling itself, and the last hold on the worker, the engine's
+//! or a request's [`Submitter`], joins the one under way.
 
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -57,7 +58,7 @@ pub(crate) struct Compiler {
 }
 
 /// The engine's worker and the queue its body serves.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Threaded {
     worker: Arc<tier::Worker>,
     queue: Arc<Queue>,
@@ -104,21 +105,10 @@ impl Compiler {
         Compiler { worker }
     }
 
-    /// `job` through the [`pipeline`]: here, its lines added to `lines`,
-    /// and what it settled the claim with; or queued for the worker,
-    /// which writes no line (`Policy` compiles inline wherever a line is
-    /// asked), and none. Where the system refuses the worker a thread,
-    /// the queue is served here.
-    pub(crate) fn submit(&self, shared: &Shared, job: Job, lines: &mut Vec<u8>) -> Option<Outcome> {
-        let Some(threaded) = &self.worker else {
-            return Some(pipeline(shared, job, lines));
-        };
-        threaded.queue.held().jobs.push_back(job);
-        threaded.queue.changed.notify_all();
-        if !threaded.worker.wake() {
-            threaded.queue.drain();
-        }
-        None
+    /// Where a request of the engine submits its jobs, laid with the
+    /// request's `JitRequest`: the engine's worker and its queue, shared.
+    pub(crate) fn submitter(&self) -> Submitter {
+        Submitter(self.worker.clone())
     }
 
     /// Every queued job served to completion, those this thread takes
@@ -129,6 +119,36 @@ impl Compiler {
         if let Some(worker) = &self.worker {
             worker.queue.drain();
         }
+    }
+}
+
+/// Where a request's recordings compile (`jit-design.md` §4.8): on the
+/// engine's worker, through its queue, under `jit.compile=thread`;
+/// otherwise on the request. A request holds its own, laid with it, so
+/// a recording that compiles reads no engine state (#3227).
+#[derive(Debug, Clone)]
+pub(crate) struct Submitter(Option<Threaded>);
+
+impl Submitter {
+    /// Jobs compiled on the request that submits them.
+    #[cfg(test)]
+    pub(crate) const INLINE: Submitter = Submitter(None);
+
+    /// `job` through the [`pipeline`]: here, its lines added to `lines`,
+    /// and what it settled the claim with; or queued for the worker,
+    /// which writes no line (`Policy` compiles inline wherever a line is
+    /// asked), and none. Where the system refuses the worker a thread,
+    /// the queue is served here.
+    pub(crate) fn submit(&self, shared: &Shared, job: Job, lines: &mut Vec<u8>) -> Option<Outcome> {
+        let Some(threaded) = &self.0 else {
+            return Some(pipeline(shared, job, lines));
+        };
+        threaded.queue.held().jobs.push_back(job);
+        threaded.queue.changed.notify_all();
+        if !threaded.worker.wake() {
+            threaded.queue.drain();
+        }
+        None
     }
 }
 
