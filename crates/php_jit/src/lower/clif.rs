@@ -45,10 +45,10 @@ use php_heap::{Arr, ROOM_BYTES, Ref, Zval, ZvalType};
 use php_unit::{MapPtrOffset, Opcode, OplineIdx};
 
 use super::{
-    ABANDONED, DECLINED, ENTRY_AT, ESCAPED, INTERRUPT_AT, INTERRUPTED, Kernel, STANDS_AT, Stood,
+    ABANDONED, DECLINED, ENTRY_AT, ESCAPED, INTERRUPT_AT, INTERRUPTED, Kernel, STOOD_AT, Stood,
     Symbols, UNWOUND, located,
 };
-use crate::record::Stop;
+use crate::record::{Began, Stop};
 use crate::types::{
     Abort, BodyEntry, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home,
     Imm, Interrupt, Layout, Leave, Line, Op, OpId, Operand, Repeat, Slot, Store, Stored, TraceIr,
@@ -80,6 +80,20 @@ const STOOD_FRAME: i32 = imm(offset_of!(Stood, frame));
 const STOOD_CALL: i32 = imm(offset_of!(Stood, call));
 const STOOD_FUNC: i32 = imm(offset_of!(Stood, func));
 const STOOD_OPLINE: i32 = imm(offset_of!(Stood, opline));
+const _: () = assert!(STOOD_OPLINE == STOOD_FUNC + 4 && size_of::<Stood>() == 24);
+
+/// Where compiled code finds the room of a call under way.
+#[derive(Debug, Clone, Copy)]
+enum CallRoom {
+    /// In this variable, read where the trace began the call.
+    Held(Variable),
+    /// Where the interpreter stands, `EX(call)`: a call its frame began
+    /// before the trace reached it, php's fake init, which is the
+    /// innermost under way wherever compiled code reaches it, since every
+    /// call the trace began after it is made by then and the last kernel
+    /// stood the frame, or `enter` did.
+    Stood,
+}
 
 /// The type byte of `tag`, as an immediate.
 fn tag(tag: ZvalType) -> i64 {
@@ -238,7 +252,7 @@ struct Emit<'a> {
     /// Per value the trace keeps in a register, its variable.
     regs: Vec<Option<Variable>>,
     /// The rooms of the calls under way, the innermost last.
-    calls: Vec<Variable>,
+    calls: Vec<CallRoom>,
     /// Per kernel, its signature once imported.
     sigs: [Option<SigRef>; Kernel::ALL.len()],
     /// Per exit, its block once a site branches to it.
@@ -335,15 +349,15 @@ impl<'a> Emit<'a> {
             }
             None => None,
         };
-        if super::ip_guarded(self.ir) {
+        if super::stood_at_entry(self.ir) {
             // Where the frame stands as the trace enters, which `enter`
             // laid down, held as where the last kernel left it.
-            let func = self.b.ins().load(I32, trusted(), cx, STANDS_AT);
-            let opline = self.b.ins().load(I32, trusted(), cx, STANDS_AT + 4);
-            self.b.ins().stack_store(I64, func, self.stood, STOOD_FUNC);
-            self.b
-                .ins()
-                .stack_store(I64, opline, self.stood, STOOD_OPLINE);
+            // Its frame, its call and, in one word, its op array and
+            // opline, laid out alike in both.
+            for at in [STOOD_FRAME, STOOD_CALL, STOOD_FUNC] {
+                let word = self.b.ins().load(I64, trusted(), cx, STOOD_AT + at);
+                self.b.ins().stack_store(I64, word, self.stood, at);
+            }
         }
         for guard in self.ir.guards.iter().filter(|g| g.at == GuardAt::Entry) {
             self.guard(*guard)?;
@@ -587,11 +601,20 @@ impl<'a> Emit<'a> {
                     Form::Inline => self.inline(id, line),
                 }
             }
-            Op::InitCall { .. } => {
+            Op::InitCall {
+                began: Began::Here, ..
+            } => {
                 let call = self.stood_word(I64, STOOD_CALL);
                 let var = self.b.declare_var(I64);
                 self.b.def_var(var, call);
-                self.calls.push(var);
+                self.calls.push(CallRoom::Held(var));
+                Ok(())
+            }
+            Op::InitCall {
+                began: Began::Before,
+                ..
+            } => {
+                self.calls.push(CallRoom::Stood);
                 Ok(())
             }
             Op::Enter { frame } => {
@@ -1689,7 +1712,10 @@ impl<'a> Emit<'a> {
             .last()
             .ok_or_else(|| mismatch("a send with no call under way"))?;
         let held = self.scalar(at, line.op1)?;
-        let call = self.b.use_var(call);
+        let call = match call {
+            CallRoom::Held(var) => self.b.use_var(var),
+            CallRoom::Stood => self.stood_word(I64, STOOD_CALL),
+        };
         let at = slot_offset(
             number
                 .checked_sub(1)

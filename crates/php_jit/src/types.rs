@@ -78,7 +78,7 @@ use php_unit::{ConstIdx, Opcode, OplineIdx};
 
 pub(crate) use lattice::Types;
 
-use crate::record::{Start, Stop, TraceRecord};
+use crate::record::{Began, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 
 /// One exit of a trace, by its place among the trace's exits.
@@ -235,10 +235,14 @@ pub(crate) enum Op {
     /// One recorded opline, or a comparison and the jump fused to it.
     Line(Line),
     /// A call an `INIT_*` began in `frame`, to the op array named, none
-    /// for a native's.
+    /// for a native's: at an opline of the trace, or before it reached
+    /// `frame`, php's fake init, whose call compiled code finds where the
+    /// interpreter stands, `EX(call)`, once the calls begun after it are
+    /// made.
     InitCall {
         frame: Frame,
         target: Option<FuncRef>,
+        began: Began,
     },
     /// The frame a call pushed runs.
     Enter { frame: Frame },

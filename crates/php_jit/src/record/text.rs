@@ -30,7 +30,7 @@ use php_engine::tier::{self, FuncRef, Sample};
 use php_heap::ZvalType;
 use php_unit::{MapPtrOffset, OplineIdx};
 
-use super::{Entered, Event, Landed, Start, Stop, TraceRecord, func_name as func};
+use super::{Began, Entered, Event, Landed, Start, Stop, TraceRecord, func_name as func};
 use crate::table::TraceId;
 use crate::types::ExitId;
 
@@ -101,9 +101,15 @@ impl TraceRecord {
                         Some(false) => "fell",
                     }
                 ),
-                Event::InitCall { target } => {
-                    writeln!(text, "init {}", target.map_or("-".to_owned(), func))
-                }
+                Event::InitCall { target, began } => writeln!(
+                    text,
+                    "{} {}",
+                    match began {
+                        Began::Here => "init",
+                        Began::Before => "fake-init",
+                    },
+                    target.map_or("-".to_owned(), func)
+                ),
                 Event::Enter { func: f } => writeln!(text, "enter {}", func(*f)),
                 Event::Back => writeln!(text, "back"),
             }
@@ -314,10 +320,15 @@ fn parse_event(line: &str) -> Option<Event> {
                 _ => return None,
             },
         },
-        "init" => Event::InitCall {
+        word @ ("init" | "fake-init") => Event::InitCall {
             target: match words.next()? {
                 "-" => None,
                 f => Some(parse_func(f)?),
+            },
+            began: if word == "init" {
+                Began::Here
+            } else {
+                Began::Before
             },
         },
         "enter" => Event::Enter {

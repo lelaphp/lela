@@ -123,6 +123,7 @@ tier::stand
 tier::state
 tier::step
 tier::trace_num
+tier::under_way
 tier::unwind
 [kernels]
 tier::call_held

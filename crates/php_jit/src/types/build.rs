@@ -24,7 +24,7 @@ use super::{
     LoopHeader, Op, OpId, Operand, Place, Read, Repeat, Slot, Store, Stored, TraceIr, Unwind,
     UnwindId, Value, ValueId,
 };
-use crate::record::{self, Event, Landed, Start, Stop, TraceRecord};
+use crate::record::{self, Began, Event, Landed, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 
 /// php's `ZEND_JIT_TRACE_MAX_EXITS`: the most exits one trace has.
@@ -329,7 +329,7 @@ impl<'a> Builder<'a> {
                     data,
                     branch,
                 } => self.line(*func, *opline, [*op1, *op2, *data], *branch, ahead)?,
-                Event::InitCall { target } => self.init_call(*target)?,
+                Event::InitCall { target, began } => self.init_call(*target, *began)?,
                 Event::Enter { func } => self.enter(*func)?,
                 Event::Back => self.back(next)?,
             }
@@ -739,19 +739,25 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// A call an `INIT_*` began.
-    fn init_call(&mut self, target: Option<FuncRef>) -> Result<(), Abort> {
+    /// A call an `INIT_*` began, here or before the trace reached the
+    /// frame, whose arguments sent before it the trace knows nothing of.
+    fn init_call(&mut self, target: Option<FuncRef>, began: Began) -> Result<(), Abort> {
         let frame = self.running()?;
-        let inline = matches!(
-            self.ops.last(),
-            Some(Op::Line(line)) if line.form == Form::Inline
-        );
+        let inline = began == Began::Here
+            && matches!(
+                self.ops.last(),
+                Some(Op::Line(line)) if line.form == Form::Inline
+            );
         self.begin();
         self.calls.push(Call {
             inline,
             args: Vec::new(),
         });
-        self.ops.push(Op::InitCall { frame, target });
+        self.ops.push(Op::InitCall {
+            frame,
+            target,
+            began,
+        });
         Ok(())
     }
 
@@ -1419,7 +1425,13 @@ impl<'a> Builder<'a> {
                 op.op2_type == OperandKind::Unused && scalar(t1)
             }
             Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName => {
-                matches!(next, Some(Event::InitCall { target: Some(_) }))
+                matches!(
+                    next,
+                    Some(Event::InitCall {
+                        target: Some(_),
+                        began: Began::Here,
+                    })
+                )
             }
             Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName => {
                 matches!(next, Some(Event::Enter { .. }))
@@ -1797,8 +1809,16 @@ impl<'a> Builder<'a> {
                     }
                     tracking = true;
                 }
-                Op::InitCall { .. } => tracking = false,
-                Op::Line(_) | Op::Enter { .. } | Op::Back { .. } => {}
+                Op::InitCall {
+                    began: Began::Here, ..
+                } => tracking = false,
+                Op::Line(_)
+                | Op::InitCall {
+                    began: Began::Before,
+                    ..
+                }
+                | Op::Enter { .. }
+                | Op::Back { .. } => {}
             }
         }
         false

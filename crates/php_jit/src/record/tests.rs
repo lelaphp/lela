@@ -8,7 +8,7 @@ use php_engine::tier::{self, FuncRef, Sample};
 use php_heap::ZvalType;
 use php_unit::{MapPtrOffset, Opcode, OplineIdx};
 
-use super::{Event, Start, Stop, TraceRecord};
+use super::{Began, Event, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 use crate::testing;
 use crate::testing::records::{at, kept, recorded, trace};
@@ -21,7 +21,13 @@ fn events(record: &TraceRecord) -> Vec<String> {
         .iter()
         .map(|event| match event {
             Event::Op { opline, .. } => format!("op{}", opline.0),
-            Event::InitCall { .. } => "init".to_owned(),
+            Event::InitCall {
+                began: Began::Here, ..
+            } => "init".to_owned(),
+            Event::InitCall {
+                began: Began::Before,
+                ..
+            } => "fake-init".to_owned(),
             Event::Enter { .. } => "enter".to_owned(),
             Event::Back => "back".to_owned(),
         })
@@ -96,6 +102,56 @@ fn a_return_trace_roots_at_its_callers_landing_and_goes_on_there() -> Result<(),
     let all_in_f = (record.events.iter())
         .all(|event| matches!(event, Event::Op { func, .. } if *func == record.root));
     assert!(all_in_f, "the trace stays in f: {:?}", record.events);
+    Ok(())
+}
+
+/// A return trace rooted inside the arguments of calls its frame began
+/// before it writes those calls down first, the outermost first, as php's
+/// fake inits (`zend_jit_trace_record_fake_init_call`, #3254): a user
+/// function's by its op array, a native's by none, and then the landing.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_return_trace_inside_arguments_begins_with_the_calls_under_way() -> Result<(), String> {
+    let (record, out) = recorded(
+        &at("c", "return"),
+        "function c($x) { return $x + 1; }
+        function k($a, $b) { return $a + $b; }
+        function g($v) { echo k(1, strcmp(\"a\", c($v))), \"\\n\"; }
+        g(5);",
+    )?;
+    assert_eq!(out, "44\n");
+    assert_eq!(record.start, Start::Return);
+    let named = events(&record);
+    assert_eq!(
+        named.get(..2),
+        Some(&["fake-init", "fake-init"].map(str::to_owned)[..]),
+        "{named:?}"
+    );
+    assert!(
+        named.get(2).is_some_and(|op| op.starts_with("op")),
+        "{named:?}"
+    );
+    let targets: Vec<bool> = (record.events.iter().take(2))
+        .map(|event| {
+            matches!(
+                event,
+                Event::InitCall {
+                    target: Some(_),
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(
+        targets,
+        [true, false],
+        "k's, then strcmp's: {:?}",
+        record.events
+    );
+    assert!(
+        named.iter().skip(2).all(|name| name != "fake-init"),
+        "{named:?}"
+    );
     Ok(())
 }
 
@@ -591,6 +647,11 @@ impl Draw {
             },
             1 => Event::InitCall {
                 target: (self.next(2) == 0).then(|| self.func()),
+                began: if self.next(2) == 0 {
+                    Began::Here
+                } else {
+                    Began::Before
+                },
             },
             2 => Event::Enter { func: self.func() },
             _ => Event::Back,

@@ -55,7 +55,7 @@ use php_engine::tier::{FuncRef, MapPtrRaw};
 use php_unit::OplineIdx;
 
 use crate::policy::{JitDebug, Mode, Policy};
-use crate::record::Stop;
+use crate::record::{Began, Stop};
 use crate::table::TraceName;
 use crate::types::{Abort, Check, End, ExitId, ExitSpec, GuardAt, Interrupt, Op, TraceIr};
 
@@ -84,11 +84,13 @@ pub(crate) struct Compiled {
     /// The op array and opline the trace's first recorded opline stands
     /// at, where a frame entering it stands.
     pub(crate) opens: Option<(FuncRef, OplineIdx)>,
-    /// Whether its first op holds where the frame stands, php's IP guard
-    /// of a side trace whose parent's exit named no opline
-    /// (`record::Landed::Stood`): `enter` hands the code the frame's op
-    /// array and opline at [`STANDS_AT`].
-    pub(crate) ip_guard: bool,
+    /// Whether its code reads where the frame stands as it enters, which
+    /// `enter` hands it at [`STOOD_AT`] as a kernel reports it: for php's
+    /// IP guard of a side trace whose parent's exit named no opline
+    /// (`record::Landed::Stood`), and for a call its frame began before
+    /// the trace, php's fake init, whose room it reads there
+    /// ([`stood_at_entry`]).
+    pub(crate) entry_stood: bool,
     /// Where a loop's trace is entered at its body too: the opline its
     /// back edge lands on (`types::BodyEntry`).
     pub(crate) body: Option<OplineIdx>,
@@ -210,16 +212,30 @@ pub(crate) const ENTRY_AT: i32 = 16;
 pub(crate) const INTERRUPT_AT: i32 = 8;
 
 /// Where compiled code reads, in the `ExitCtx`, where the frame stands
-/// as the trace enters: the engine offset of its op array, a `u32`, and
-/// its opline at four past, the fields `enter` lays down past where it
-/// is entered for a trace whose first op holds them
-/// ([`Compiled::ip_guard`]).
-pub(crate) const STANDS_AT: i32 = 20;
+/// as the trace enters, a [`Stood`] as a kernel writes one, which `enter`
+/// lays down past where it is entered for a trace whose code reads it
+/// there ([`Compiled::entry_stood`]).
+pub(crate) const STOOD_AT: i32 = 24;
 
-/// Whether `ir`'s first op holds where the frame stands, php's IP guard.
-fn ip_guarded(ir: &TraceIr) -> bool {
-    (ir.guards.iter())
-        .any(|guard| guard.at == GuardAt::Entry && matches!(guard.check, Check::Stands { .. }))
+/// Whether `ir`'s code reads where the frame stands as it enters: its
+/// first op holds it, php's IP guard, or a call its frame began before
+/// the trace is under way before any kernel stood the frame, whose room
+/// is the stood call's.
+fn stood_at_entry(ir: &TraceIr) -> bool {
+    let ip_guarded = (ir.guards.iter())
+        .any(|guard| guard.at == GuardAt::Entry && matches!(guard.check, Check::Stands { .. }));
+    let begun_before = (ir.ops.iter())
+        .take_while(|op| !matches!(op, Op::Line(_)))
+        .any(|op| {
+            matches!(
+                op,
+                Op::InitCall {
+                    began: Began::Before,
+                    ..
+                }
+            )
+        });
+    ip_guarded || begun_before
 }
 
 /// Where the trace's first recorded opline stands.
@@ -427,7 +443,7 @@ impl Backend {
             },
             stub: stub_at(ir),
             opens: opens_at(ir),
-            ip_guard: ip_guarded(ir),
+            entry_stood: stood_at_entry(ir),
             body: ir.body.as_ref().map(|body| body.opline),
             map_ptrs: ir.map_ptrs.clone().into_boxed_slice(),
             marks,

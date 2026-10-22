@@ -298,12 +298,31 @@ pub(crate) enum Event {
         branch: Option<bool>,
     },
     /// A call an `INIT_*` began, `ZEND_JIT_TRACE_INIT_CALL`: the op
-    /// array its callee serves, none for a native's.
-    InitCall { target: Option<FuncRef> },
+    /// array its callee serves, none for a native's, and whether the
+    /// recording saw it begin.
+    InitCall {
+        target: Option<FuncRef>,
+        began: Began,
+    },
     /// A PHP-to-PHP call followed, `ZEND_JIT_TRACE_ENTER`.
     Enter { func: FuncRef },
     /// Its return, `ZEND_JIT_TRACE_BACK`.
     Back,
+}
+
+/// Where a call under way in a recorded frame began: at an `INIT_*` the
+/// recording served, or before the recording reached the frame, php's
+/// `ZEND_JIT_TRACE_FAKE_INIT_CALL`, written down as the recording starts
+/// in the frame or follows a return into it
+/// (`zend_jit_trace_record_fake_init_call`,
+/// `Z/ext/opcache/jit/zend_jit_vm_helpers.c:631-682`), so the trace knows
+/// the call its sends write and its `DO_*CALL` makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Began {
+    /// At an `INIT_*` the recording served.
+    Here,
+    /// Before the recording reached the frame.
+    Before,
 }
 
 /// One recording: where it started, the op array whose word claimed it,
@@ -1018,6 +1037,7 @@ impl<'p> Recorder<'p> {
         behind: Option<OplineIdx>,
     ) -> Result<bool, Bailed> {
         self.root = Some((root, behind.unwrap_or_else(|| position(req, frame))));
+        self.under_way(req, frame);
         let Some(condition) = behind else {
             return Ok(false);
         };
@@ -1036,6 +1056,61 @@ impl<'p> Recorder<'p> {
             branch: Some(true),
         });
         Ok(self.count(1 + classes))
+    }
+
+    /// The calls `frame` began before the recording reached it, written
+    /// down as php's fake inits, the outermost first, as php's recorder
+    /// writes them where its recording starts and where it follows a
+    /// return past its root (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:803-812`,
+    /// `:1189-1196`). php stops at none of them for the trace's length,
+    /// and neither does this: the next record stops it. A return trace
+    /// rooted inside an argument of an outer call so knows the call its
+    /// send writes and its `DO_ICALL` makes, and compiles where php's
+    /// does (the number of the exit the side trace grows from is
+    /// #3203's):
+    ///
+    /// ```php
+    /// function c($x) { $s = 0; for ($i = 0; $i < 3; $i++) { $s += $x; } return $s; }
+    /// function g($v) { printf("%d\n", c($v)); return 1; }
+    /// g(5); g(6); g(7); g(8);
+    /// ```
+    /// ```expect regime=jit-inline process
+    /// 15
+    /// 18
+    /// 21
+    /// 24
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:4
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) c() %s:2
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit %d c() %s:2
+    /// ---- TRACE 2 start (side trace 1/%d) c() %s:2
+    /// ---- TRACE 2 stop (return)
+    /// ---- TRACE 2 compiled
+    ///
+    /// ---- TRACE 3 start (enter) g() %s:3
+    /// ---- TRACE 3 stop (link to 1)
+    /// ---- TRACE 3 compiled
+    ///
+    /// ---- TRACE 4 start (return) g() %s:3
+    /// ---- TRACE 4 stop (return)
+    /// ---- TRACE 4 compiled
+    ///
+    /// ```
+    fn under_way(&mut self, req: &Request, frame: FrameRef) {
+        for call in tier::under_way(req, frame) {
+            self.events.push(Event::InitCall {
+                target: call.target,
+                began: Began::Before,
+            });
+            if self.count(1) {
+                break;
+            }
+        }
     }
 
     /// Where a recording that stepped stopped.
@@ -1088,6 +1163,7 @@ impl<'p> Recorder<'p> {
         }
         self.events.push(Event::InitCall {
             target: call.target,
+            began: Began::Here,
         });
         if self.count(1) {
             return Went::Stopped(Stop::TooLong);
@@ -1244,6 +1320,7 @@ impl<'p> Recorder<'p> {
         self.ret_level += 1;
         self.last_loop = None;
         *func = landed;
+        self.under_way(req, caller);
         None
     }
 
