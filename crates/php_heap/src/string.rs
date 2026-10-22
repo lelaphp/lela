@@ -974,16 +974,13 @@ impl Pending {
         let Some(chain) = self.slots.get_mut(&hash) else {
             return;
         };
-        let Some(at) = chain.iter().position(|held| held.s.is_same(s)) else {
-            return;
-        };
-        let Some(held) = chain.get_mut(at) else {
+        let Some(held) = chain.iter_mut().find(|held| held.s.is_same(s)) else {
             return;
         };
         held.asks = held.asks.saturating_sub(1);
         if held.asks == 0 {
-            let gone = chain.swap_remove(at);
-            free_persistent(gone.s);
+            chain.retain(|held| !held.s.is_same(s));
+            free_persistent(s);
         }
     }
 
