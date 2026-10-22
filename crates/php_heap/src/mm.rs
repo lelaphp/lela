@@ -287,6 +287,21 @@ pub(crate) struct Mm {
     traces: Option<std::collections::HashMap<usize, std::backtrace::Backtrace>>,
     /// php's fast shutdown has begun ([`Mm::keep_emptied`]).
     keep_emptied: bool,
+    /// A test's arming of the limit ([`Mm::refuse_after`]), off unless a
+    /// test arms it.
+    #[cfg(test)]
+    armed: Armed,
+}
+
+/// Where a test's arming of the limit stands ([`Mm::refuse_after`]).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Armed {
+    Off,
+    /// This many more asks served before the one refused.
+    After(usize),
+    /// The ask it was armed for refused.
+    Fired,
 }
 
 impl Mm {
@@ -341,6 +356,8 @@ impl Mm {
             #[cfg(debug_assertions)]
             traces: None,
             keep_emptied: false,
+            #[cfg(test)]
+            armed: Armed::Off,
         };
         if let Some(chunk) = main {
             mm.chunk_init(chunk, 0);
@@ -427,10 +444,49 @@ impl Mm {
         fatal
     }
 
+    /// A test's arming of the limit (`crate::refusals`): `after` more
+    /// allocations and reallocations served, and the one after them
+    /// refused as a heap at its limit refuses it, with the limit's fatal
+    /// and the limit lifted until it is rendered. The heap's own arms of
+    /// the limit are reached only at chunk growth and a huge block, so a
+    /// test cannot fill a heap until exactly the `n`th ask of an
+    /// operation is refused; this refuses it where it is asked.
+    #[cfg(test)]
+    pub(crate) fn refuse_after(&mut self, after: usize) {
+        self.armed = Armed::After(after);
+    }
+
+    /// The arming taken off, and whether it refused the ask it was armed
+    /// for.
+    #[cfg(test)]
+    pub(crate) fn disarm(&mut self) -> bool {
+        std::mem::replace(&mut self.armed, Armed::Off) == Armed::Fired
+    }
+
+    /// One ask counted against the arming: whether it is the one refused.
+    #[cfg(test)]
+    fn counted_out(&mut self) -> bool {
+        match self.armed {
+            Armed::After(0) => {
+                self.armed = Armed::Fired;
+                true
+            }
+            Armed::After(n) => {
+                self.armed = Armed::After(n - 1);
+                false
+            }
+            Armed::Off | Armed::Fired => false,
+        }
+    }
+
     /// `_emalloc`: [`Mm::alloc_heap`], and the observers told of what it
     /// answered, where there are any ([`crate::observe`]).
     #[inline]
     pub(crate) fn alloc(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
+        #[cfg(test)]
+        if self.counted_out() {
+            return Err(self.refuse(limit_exhausted(self.limit, size)));
+        }
         let at = self.alloc_heap(size)?;
         #[cfg(debug_assertions)]
         self.trace(None, at);
@@ -456,6 +512,10 @@ impl Mm {
         copy: usize,
         size: usize,
     ) -> Result<NonNull<u8>, Fatal> {
+        #[cfg(test)]
+        if self.counted_out() {
+            return Err(self.refuse(limit_exhausted(self.limit, size)));
+        }
         // SAFETY: the caller's contract, handed on.
         let to = unsafe { self.realloc_heap(at, copy, size) }?;
         #[cfg(debug_assertions)]
@@ -847,6 +907,22 @@ impl Mm {
     /// bool(true)
     /// ```
     ///
+    /// A longer rounding the limit has no room for is refused as
+    /// `zend_mm_safe_error` refuses it: the fatal, with the limit lifted
+    /// until it is rendered, and the block standing as it was for what
+    /// runs after, the shutdown functions among it.
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '7M');
+    /// $s = str_repeat('x', 3000000);
+    /// register_shutdown_function(function () { echo "shutdown sees ", strlen($GLOBALS['s']), "\n"; });
+    /// $s .= $s;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 6000032 bytes) in %s on line %d
+    /// shutdown sees 3000000
+    /// ```
+    ///
     /// # Safety
     ///
     /// `at` is a huge block of this heap holding `copy` readable bytes.
@@ -876,8 +952,9 @@ impl Mm {
                 let more = new_size - old_size;
                 if more > self.limit - self.real_size.min(self.limit)
                     && (self.gc_heap() == 0 || more > self.limit - self.real_size.min(self.limit))
+                    && !self.overflow
                 {
-                    return Err(limit_exhausted(self.limit, size));
+                    return Err(self.refuse(limit_exhausted(self.limit, size)));
                 }
                 if huge_extend(at, old_size, new_size) {
                     self.huge[index].size = new_size;

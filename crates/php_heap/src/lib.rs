@@ -54,6 +54,8 @@ pub mod owners;
 mod payload;
 mod property_table;
 mod reference;
+#[cfg(test)]
+mod refusals;
 mod resource;
 #[cfg(debug_assertions)]
 mod sensed;
@@ -1737,6 +1739,38 @@ mod tests {
         for s in held {
             heap.release_string(s);
         }
+    }
+
+    /// `zend_mm_realloc_huge`'s limit (`Z/Zend/zend_alloc.c:1640-1651`):
+    /// a huge string grown past the limit by the difference is refused
+    /// through `zend_mm_safe_error`, which lifts the limit until the fatal
+    /// is rendered, the string standing as it was; while the limit is
+    /// lifted a grow is served, as php's `heap->overflow == 0` lets it
+    /// through; once the fatal is rendered the limit holds again.
+    #[test]
+    fn a_huge_string_grown_past_the_limit_lifts_it_until_the_fatal_is_rendered() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let s = heap
+            .string_with(3_000_000, |bytes| bytes.fill(b'k'))
+            .unwrap_or_else(|f| panic!("{f:?}"));
+        assert!(heap.set_memory_limit(heap.memory_usage(true)));
+        let refused = heap.string_append(s, s);
+        assert!(
+            matches!(refused.as_ref().map_err(Fatal::reason), Err(FatalReason::Error(m)) if m.starts_with("Allowed memory size of")),
+            "{refused:?}"
+        );
+        assert!(heap.in_memory_limit_error(), "the limit lifted");
+        assert_eq!((s.len(), s.bytes().last()), (3_000_000, Some(&b'k')));
+        let grown = heap
+            .string_append(s, s)
+            .unwrap_or_else(|f| panic!("the grow while the fatal renders: {f:?}"));
+        assert_eq!(grown.len(), 6_000_000);
+        heap.overflow_rendered();
+        let after = heap.string_append(grown, grown);
+        assert!(after.is_err(), "the limit holds again");
+        heap.overflow_rendered();
+        heap.release_string(grown);
     }
 
     /// What the heap's tests pass where a request would serve a
