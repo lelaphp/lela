@@ -45,7 +45,7 @@ use crate::enter::{self, At, Crossed as _, Exited, Left};
 use crate::policy::{
     self, Claim, Holder, JitDebug, Mode, Outcome, Place, Policy, State, TraceEvent,
 };
-use crate::record::{self, Bailed, Ended, Headed, Start, Stop};
+use crate::record::{self, Bailed, Ended, Headed, Landed, Start, Stop};
 use crate::table::{self, TraceId, TraceName};
 use crate::types::Grows;
 
@@ -692,9 +692,12 @@ fn visit_landing(
 /// ([`policy::spend`]): blacklisted at the firing that brings its heat to
 /// `opcache.jit_hot_side_exit` plus `opcache.jit_blacklist_side_trace`,
 /// with php's `---- EXIT m/k blacklisted` after its exit line, and left
-/// with no line from then on. One that names no opline is bumped and
-/// claimed by nothing, its side being one php holds to the opline it
-/// stands at with a guard this tier does not hold yet.
+/// with no line from then on. One that names no opline, a table's jump
+/// or a call that may be another's, leaves the frame where it stood: its
+/// side is recorded from there and holds that opline at its first op,
+/// php's IP guard (`zend_jit_trace_opline_guard`), whose own exit names
+/// none and grows a side of its own, so php's lines stop once the side
+/// is compiled ([`record::Landed`]).
 ///
 /// A `for` over lines leaves its trace through its test, `exit 3`, at the
 /// line past the loop, where a side trace of it starts, named by its
@@ -731,6 +734,38 @@ fn visit_landing(
 ///
 /// ---- TRACE 3 start (enter) a() %s:3
 /// ---- TRACE 3 stop (link to 1)
+/// ---- TRACE 3 compiled
+/// ```
+///
+/// A `match` over strings jumps through a table, so its loop's trace
+/// holds where the frame stood past it, an exit that names no opline.
+/// The second arm's key leaves through it, and the side trace grows from
+/// that arm behind php's IP guard, so the exit's line is written once,
+/// as php's, and not at every key; php numbers the exit by the arm
+/// (#3203):
+///
+/// ```php
+/// function f($keys) { $s = 0; foreach ($keys as $k) { $s += match ($k) { 'a' => 1, 'b' => 2 }; } return $s; }
+/// echo f(['a', 'a', 'a', 'b', 'b', 'b']), "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 9
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:3
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) f() %s:2
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit %d f() %s:2
+/// ---- TRACE 2 start (side trace 1/%d) f() %s:2
+/// ---- TRACE 2 stop (link to 1)
+/// ---- TRACE 2 compiled
+///
+///      TRACE 1 exit 3 f() %s:2
+/// ---- TRACE 3 start (side trace 1/3) f() %s:2
+/// ---- TRACE 3 stop (return)
 /// ---- TRACE 3 compiled
 /// ```
 fn sided(
@@ -774,7 +809,6 @@ fn sided(
         }
         return Visited::Continue;
     }
-    let claims = exit.opline.is_some();
     let req: &Request = req;
     let holder = || {
         Some(Holder::Exit {
@@ -783,7 +817,7 @@ fn sided(
             exit: exited.exit,
         })
     };
-    visit(&exit.word, &shared.policy, start, claims, holder)
+    visit(&exit.word, &shared.policy, start, true, holder)
 }
 
 /// The cold path (`jit-design.md` §4.9): the `TRACE start` line, the
@@ -885,8 +919,7 @@ pub(crate) fn hot(
             );
             break (resumed(frame, stepped), None, false);
         }
-        let entered = side_entered(table, start);
-        let opening = record::Opening { entered, behind };
+        let opening = side_opened(table, start, behind);
         let claimed = claim.holder();
         let (recorded, ended) =
             match record::run(req, frame, start, claimed, &shared.policy, opening) {
@@ -1071,15 +1104,33 @@ fn refused(table: Option<&table::Table>, start: Start) -> Option<Stop> {
         .map(|_| Stop::TooManyChildren)
 }
 
-/// What a side trace of `start` enters with: what its parent's exit knew
-/// of the slots of the frame it landed in; nothing for a root.
-fn side_entered(table: Option<&table::Table>, start: Start) -> Vec<record::Entered> {
-    let Some((parent, exit)) = start.grew() else {
-        return Vec::new();
+/// What a recording of `start` opens with, `behind` beside it: for a
+/// side trace, what its parent's exit knew of the slots of the frame it
+/// landed in, and whether the exit named the opline it landed at or left
+/// the frame where it stood; nothing of either for a root.
+fn side_opened(
+    table: Option<&table::Table>,
+    start: Start,
+    behind: Option<OplineIdx>,
+) -> record::Opening {
+    let exit = (start.grew())
+        .and_then(|(parent, exit)| Some((table?.get(parent)?, exit)))
+        .and_then(|(trace, exit)| trace.exits.get(usize::from(exit.0)));
+    let Some(exit) = exit else {
+        return record::Opening {
+            behind,
+            ..record::Opening::default()
+        };
     };
-    (table.and_then(|table| table.get(parent)))
-        .and_then(|trace| trace.exits.get(usize::from(exit.0)))
-        .map_or_else(Vec::new, |exit| exit.entered.to_vec())
+    record::Opening {
+        entered: exit.entered.to_vec(),
+        landed: if exit.opline.is_some() {
+            Landed::Named
+        } else {
+            Landed::Stood
+        },
+        behind,
+    }
 }
 
 /// `job` settled: a recording that stopped where a trace compiles

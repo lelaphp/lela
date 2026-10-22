@@ -19,14 +19,15 @@ use php_heap::ZvalType;
 use php_unit::Opcode;
 
 use super::{
-    Check, Def, End, Form, Frame, GuardAt, Home, Landing, Op, OpId, Operand, Repeat, Slot, TraceIr,
-    Types, ValueId,
+    Check, Def, End, Form, Frame, Grows, GuardAt, Home, Landing, Op, OpId, Operand, Repeat, Slot,
+    TraceIr, Types, ValueId, build,
 };
 use crate::lower::dump;
-use crate::record::Stop;
+use crate::record::{Landed, Stop};
 use crate::testing::goldens::{
     self, FIB, Fixture, MANDELBROT, NBODY, SPECTRALNORM, held, traced as built,
 };
+use crate::testing::records::recording;
 
 /// The fixture recorded under its plan: its record held to
 /// `<name>.trace`, which is parsed and built through the recording's
@@ -764,5 +765,51 @@ fn each_loop_builds_phps_exits_and_its_interrupt_test_takes_one_where_phps_does(
             );
         }
     }
+    Ok(())
+}
+
+/// A side trace whose parent's exit named no opline, `Landed::Stood`,
+/// holds before any other guard that the frame stands at the opline it
+/// was recorded from, php's IP guard (`zend_jit_trace_opline_guard`,
+/// `Z/ext/opcache/jit/zend_jit_trace.c:4178-4180`): exit 0, which names
+/// no opline, knows nothing of the frame, as php takes it before the
+/// side's stack holds a type, and grows a side of its own. One whose
+/// exit named its opline holds none.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_side_of_an_exit_that_names_no_opline_holds_where_the_frame_stands() -> Result<(), String> {
+    let (mut recorded, _) = recording(
+        &IN_F,
+        "function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $i; } return $s; }
+        echo f(5), \"\\n\";",
+    )?;
+    let stands = |ir: &TraceIr| -> Vec<(Check, u16)> {
+        (ir.guards.iter())
+            .filter(|guard| matches!(guard.check, Check::Stands { .. }))
+            .map(|guard| (guard.check, guard.exit.0))
+            .collect()
+    };
+    let named = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    assert_eq!(stands(&named), [], "{}", dump::render(&named));
+    recorded.record.landed = Landed::Stood;
+    let ir = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let Some(Op::Line(first)) = ir.ops.first() else {
+        return Err("no first opline".to_owned());
+    };
+    let func = ir.frames[usize::from(first.frame.0)].func;
+    let check = Check::Stands {
+        func,
+        opline: first.opline,
+    };
+    assert_eq!(stands(&ir), [(check, 0)], "{}", dump::render(&ir));
+    let held = ir.guards.iter().find(|guard| guard.exit.0 == 0);
+    assert_eq!(held.map(|guard| guard.at), Some(GuardAt::Entry));
+    let exit = &ir.exits[0];
+    assert_eq!(
+        (exit.opline, exit.known.len(), exit.stores.len(), exit.grows),
+        (None, 0, 0, Grows::Side),
+        "{exit:?}"
+    );
+    assert_eq!(ir.exits.len(), named.exits.len() + 1, "one exit more");
     Ok(())
 }

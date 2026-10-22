@@ -57,7 +57,7 @@ use php_unit::OplineIdx;
 use crate::policy::{JitDebug, Mode, Policy};
 use crate::record::Stop;
 use crate::table::TraceName;
-use crate::types::{Abort, End, ExitId, ExitSpec, Interrupt, Op, TraceIr};
+use crate::types::{Abort, Check, End, ExitId, ExitSpec, GuardAt, Interrupt, Op, TraceIr};
 
 /// A trace in final bytes (`jit-design.md` §4.3), what the `Backend` makes
 /// and `table::TraceTable::publish` copies into the code arena once:
@@ -84,6 +84,11 @@ pub(crate) struct Compiled {
     /// The op array and opline the trace's first recorded opline stands
     /// at, where a frame entering it stands.
     pub(crate) opens: Option<(FuncRef, OplineIdx)>,
+    /// Whether its first op holds where the frame stands, php's IP guard
+    /// of a side trace whose parent's exit named no opline
+    /// (`record::Landed::Stood`): `enter` hands the code the frame's op
+    /// array and opline at [`STANDS_AT`].
+    pub(crate) ip_guard: bool,
     /// Where a loop's trace is entered at its body too: the opline its
     /// back edge lands on (`types::BodyEntry`).
     pub(crate) body: Option<OplineIdx>,
@@ -203,6 +208,19 @@ pub(crate) const ENTRY_AT: i32 = 16;
 /// interrupt byte at offset eight, the field `enter` lays down with the
 /// first trace it enters (#2957).
 pub(crate) const INTERRUPT_AT: i32 = 8;
+
+/// Where compiled code reads, in the `ExitCtx`, where the frame stands
+/// as the trace enters: the engine offset of its op array, a `u32`, and
+/// its opline at four past, the fields `enter` lays down past where it
+/// is entered for a trace whose first op holds them
+/// ([`Compiled::ip_guard`]).
+pub(crate) const STANDS_AT: i32 = 20;
+
+/// Whether `ir`'s first op holds where the frame stands, php's IP guard.
+fn ip_guarded(ir: &TraceIr) -> bool {
+    (ir.guards.iter())
+        .any(|guard| guard.at == GuardAt::Entry && matches!(guard.check, Check::Stands { .. }))
+}
 
 /// Where the trace's first recorded opline stands.
 fn opens_at(ir: &TraceIr) -> Option<(FuncRef, OplineIdx)> {
@@ -409,6 +427,7 @@ impl Backend {
             },
             stub: stub_at(ir),
             opens: opens_at(ir),
+            ip_guard: ip_guarded(ir),
             body: ir.body.as_ref().map(|body| body.opline),
             map_ptrs: ir.map_ptrs.clone().into_boxed_slice(),
             marks,

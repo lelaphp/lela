@@ -166,6 +166,9 @@ pub(crate) struct Trace<P: Pages = Native> {
     pub(crate) stub: Option<OplineIdx>,
     /// The op array and opline its first recorded opline stands at.
     pub(crate) opens: Option<(FuncRef, OplineIdx)>,
+    /// Whether its first op holds where the frame stands, php's IP
+    /// guard, which `enter` hands the frame's op array and opline.
+    pub(crate) ip_guard: bool,
     /// Where it is entered at a loop's body too, the opline its back edge
     /// lands on.
     pub(crate) body: Option<OplineIdx>,
@@ -682,6 +685,7 @@ impl<P: Pages> TraceTable<P> {
             leaves: compiled.leaves,
             stub: compiled.stub,
             opens: compiled.opens,
+            ip_guard: compiled.ip_guard,
             body: compiled.body,
             map_ptrs: compiled.map_ptrs,
             marks: compiled.marks,
