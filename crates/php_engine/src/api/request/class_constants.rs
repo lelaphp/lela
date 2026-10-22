@@ -381,19 +381,28 @@ impl Request {
     fn backed_enum_table(&mut self, class: ClassId) -> Result<PhpArray, Thrown> {
         let mut table = PhpArray::new(self)?.hand_on();
         for name in crate::enums::case_names(self, class) {
-            let Some(case) = self.held_case(class, &name) else {
-                continue;
+            let row = self.held_case(class, &name).and_then(|case| {
+                let (spelled, value) = (case.slot(CASE_NAME)?, case.slot(CASE_VALUE)?);
+                let key = match (value.as_int(), value.as_php_string()) {
+                    (Some(n), _) => Key::Int(n),
+                    (None, Some(s)) => Key::Str(s),
+                    (None, None) => return None,
+                };
+                Some((spelled, key))
+            });
+            let Some((spelled, key)) = row else {
+                self.release(Value::array(table));
+                return Err(crate::api::raising::fatal(
+                    self,
+                    "InternalError: a backed enum's table built over a case not made, or one whose value is no int or string",
+                ));
             };
-            let (Some(spelled), Some(value)) = (case.slot(0), case.slot(1)) else {
-                continue;
-            };
-            let key = match (value.as_int(), value.as_php_string()) {
-                (Some(n), _) => Owner::index(n),
-                (None, Some(s)) => {
-                    self.addref(&value);
+            let key = match key {
+                Key::Int(n) => Owner::index(n),
+                Key::Str(s) => {
+                    self.addref(&Value::string(s));
                     Owner::adopt(s).into_key()
                 }
-                (None, None) => continue,
             };
             self.addref(&spelled);
             if let Err(thrown) = table.add_new(self, key, Owner::adopt(spelled)) {
@@ -592,9 +601,20 @@ impl Request {
                 return Err(thrown);
             }
         };
-        case.set_slot(self, 0, spelled)?;
-        if let Some(value) = value {
-            case.set_slot(self, 1, Owner::adopt(value))?;
+        // A slot takes the value it is handed, written or given back; an
+        // error leaves the case, and a value not yet handed on, to go.
+        if let Err(thrown) = case.set_slot(self, CASE_NAME, spelled) {
+            if let Some(value) = value {
+                self.release(value);
+            }
+            self.release(case.as_value());
+            return Err(thrown);
+        }
+        if let Some(value) = value
+            && let Err(thrown) = case.set_slot(self, CASE_VALUE, Owner::adopt(value))
+        {
+            self.release(case.as_value());
+            return Err(thrown);
         }
         self.class_constants
             .enum_cases
@@ -680,6 +700,12 @@ impl<'r> Symbols<&'r Request> {
             .collect()
     }
 }
+
+/// The slot of a case's object `zend_enum_new` writes its name into,
+/// `OBJ_PROP_NUM(zobj, 0)`.
+const CASE_NAME: u32 = 0;
+/// The slot it writes a backed case's value into, the one after.
+const CASE_VALUE: u32 = 1;
 
 /// What a backed enum's `backed_enum_table` answers for a value
 /// ([`Request::backed_case_named`]).

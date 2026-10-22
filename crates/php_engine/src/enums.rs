@@ -253,8 +253,13 @@ fn by_value(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
     match req.backed_case_named(class, &wanted) {
         ByValue::Named(spelled) => {
             req.release(wanted);
-            let name = spelled.as_str_bytes().unwrap_or_default().to_vec();
-            return req.enum_case(class, &name).map(|case| case.as_value());
+            let Some(name) = spelled.as_str_bytes() else {
+                return Err(crate::api::raising::fatal(
+                    req,
+                    "InternalError: a backed enum's table names a case by no string",
+                ));
+            };
+            return req.enum_case(class, name).map(|case| case.as_value());
         }
         ByValue::Missing => return not_backing(req, class, wanted, try_from),
         // A native enum, whose table is the stub's: its cases read in turn.
