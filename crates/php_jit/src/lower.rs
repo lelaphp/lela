@@ -218,9 +218,10 @@ pub(crate) const INTERRUPT_AT: i32 = 8;
 pub(crate) const STOOD_AT: i32 = 24;
 
 /// Whether `ir`'s code reads where the frame stands as it enters: its
-/// first op holds it, php's IP guard, or a call its frame began before
+/// first op holds it, php's IP guard; a call its frame began before
 /// the trace is under way before any kernel stood the frame, whose room
-/// is the stood call's.
+/// is the stood call's; or it holds the stack's room, php's stack check,
+/// at its entry or at a call it pushes.
 fn stood_at_entry(ir: &TraceIr) -> bool {
     let ip_guarded = (ir.guards.iter())
         .any(|guard| guard.at == GuardAt::Entry && matches!(guard.check, Check::Stands { .. }));
@@ -235,7 +236,8 @@ fn stood_at_entry(ir: &TraceIr) -> bool {
                 }
             )
         });
-    ip_guarded || begun_before
+    let room_held = (ir.guards.iter()).any(|guard| matches!(guard.check, Check::Room { .. }));
+    ip_guarded || begun_before || room_held
 }
 
 /// Where the trace's first recorded opline stands.
@@ -337,11 +339,13 @@ impl Symbols {
 /// ([`Kernel::Step`], [`Kernel::PushCall`]): the room of the frame that
 /// runs, php's `EX`; the room of the call under way in it, `EX(call)`,
 /// null where none is; the op array it serves, by the engine offset that
-/// numbers it (`FuncRef`); and the opline it goes on at. A local of
-/// compiled code the kernel writes, by which compiled code follows the
-/// frame chain: the call it enters, the return it lands from, the call
-/// its sends write, the caller php's IP guard holds, and the way a
-/// stepped jump went.
+/// numbers it (`FuncRef`); the opline it goes on at; and the bytes the
+/// stack's top page has left for frames, php's `EG(vm_stack_end) -
+/// EG(vm_stack_top)`. A local of compiled code the kernel writes, by
+/// which compiled code follows the frame chain: the call it enters, the
+/// return it lands from, the call its sends write, the caller php's IP
+/// guard holds, the way a stepped jump went, and the room php's stack
+/// check holds against the frames the trace pushes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Stood {
@@ -349,6 +353,7 @@ pub(crate) struct Stood {
     pub(crate) call: *mut u8,
     pub(crate) func: u32,
     pub(crate) opline: u32,
+    pub(crate) room: usize,
 }
 
 /// The host's `Backend` (`jit-design.md` §4.3): its ISA with the flags the

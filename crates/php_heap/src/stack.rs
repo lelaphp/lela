@@ -1119,6 +1119,18 @@ impl<H> VmStack<H> {
         self.frame_mut(f).map(Frame::header_mut)
     }
 
+    /// The bytes the top page has left for frames, php's
+    /// `EG(vm_stack_end) - EG(vm_stack_top)`: what a frame pushed there
+    /// takes room from, which php's compiled code holds against the
+    /// frames it pushes (`zend_jit_stack_check`). Zero where no page
+    /// stands yet.
+    #[must_use]
+    pub fn room(&self) -> usize {
+        self.pages
+            .last()
+            .map_or(0, |page| (page.slots - page.top) * SLOT)
+    }
+
     /// How many frames stand on the stack.
     #[must_use]
     pub fn len(&self) -> usize {

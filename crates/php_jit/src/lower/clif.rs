@@ -80,7 +80,8 @@ const STOOD_FRAME: i32 = imm(offset_of!(Stood, frame));
 const STOOD_CALL: i32 = imm(offset_of!(Stood, call));
 const STOOD_FUNC: i32 = imm(offset_of!(Stood, func));
 const STOOD_OPLINE: i32 = imm(offset_of!(Stood, opline));
-const _: () = assert!(STOOD_OPLINE == STOOD_FUNC + 4 && size_of::<Stood>() == 24);
+const STOOD_ROOM: i32 = imm(offset_of!(Stood, room));
+const _: () = assert!(STOOD_OPLINE == STOOD_FUNC + 4 && size_of::<Stood>() == 32);
 
 /// Where compiled code finds the room of a call under way.
 #[derive(Debug, Clone, Copy)]
@@ -352,9 +353,9 @@ impl<'a> Emit<'a> {
         if super::stood_at_entry(self.ir) {
             // Where the frame stands as the trace enters, which `enter`
             // laid down, held as where the last kernel left it.
-            // Its frame, its call and, in one word, its op array and
-            // opline, laid out alike in both.
-            for at in [STOOD_FRAME, STOOD_CALL, STOOD_FUNC] {
+            // Its frame, its call, in one word its op array and opline,
+            // and the stack's room, laid out alike in both.
+            for at in [STOOD_FRAME, STOOD_CALL, STOOD_FUNC, STOOD_ROOM] {
                 let word = self.b.ins().load(I64, trusted(), cx, STOOD_AT + at);
                 self.b.ins().stack_store(I64, word, self.stood, at);
             }
@@ -473,6 +474,10 @@ impl<'a> Emit<'a> {
                     let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, inner, tag(t));
                     self.decline_if(other);
                 }
+                Check::Room { bytes } => {
+                    let short = self.short_of(bytes);
+                    self.decline_if(short);
+                }
                 Check::Direction { .. } | Check::Stands { .. } | Check::Arm { .. } => {
                     return Err(mismatch("a body entry past a guard it cannot hold"));
                 }
@@ -535,6 +540,15 @@ impl<'a> Emit<'a> {
     }
 
     /// Answer [`DECLINED`] where `cond` is not zero.
+    /// Whether the stack's top page has less room than `bytes` for
+    /// frames, where the last kernel, or `enter`, stood it.
+    fn short_of(&mut self, bytes: u32) -> Value {
+        let room = self.stood_word(I64, STOOD_ROOM);
+        self.b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedLessThan, room, i64::from(bytes))
+    }
+
     fn decline_if(&mut self, cond: Value) {
         let to = if let Some(block) = self.declined {
             block
@@ -715,6 +729,12 @@ impl<'a> Emit<'a> {
             // stands as the last kernel's.
             Check::Stands { func, opline } if guard.at == GuardAt::Entry => {
                 self.stands(func, opline, guard.exit)?;
+            }
+            // php's stack check (`zend_jit_stack_check`), on the room the
+            // last kernel, or `enter`, stood.
+            Check::Room { bytes } => {
+                let short = self.short_of(bytes);
+                self.leave_if(short, guard.exit)?;
             }
             Check::Direction { .. } | Check::Stands { .. } | Check::Arm { .. } => {
                 return Err(mismatch("an op's own guard held before it"));
@@ -1112,7 +1132,10 @@ impl<'a> Emit<'a> {
                         .icmp_imm_u(IntCC::Equal, went, i64::from(opline.0));
                     self.leave_where(there, guard.exit)?;
                 }
-                Check::Type { .. } | Check::Deref { .. } | Check::Layout { .. } => {
+                Check::Type { .. }
+                | Check::Deref { .. }
+                | Check::Layout { .. }
+                | Check::Room { .. } => {
                     return Err(mismatch("a stepped opline holds a guard of another kind"));
                 }
             }

@@ -27,6 +27,8 @@ use super::{
 use crate::record::{self, Began, Event, Landed, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 
+mod stack;
+
 /// php's `ZEND_JIT_TRACE_MAX_EXITS`: the most exits one trace has.
 const MAX_EXITS: usize = 512;
 /// What a value no reference counts is: what a slot may hold and be
@@ -334,7 +336,9 @@ impl<'a> Builder<'a> {
                 Event::Back => self.back(next)?,
             }
         }
-        self.end(events.get(body.len()))
+        self.end(events.get(body.len()))?;
+        self.stack_checks();
+        Ok(())
     }
 
     /// The phis of a loop: every slot of the root's frame that its body
@@ -1713,7 +1717,8 @@ impl<'a> Builder<'a> {
                         Check::Deref { .. }
                         | Check::Direction { .. }
                         | Check::Stands { .. }
-                        | Check::Arm { .. } => None,
+                        | Check::Arm { .. }
+                        | Check::Room { .. } => None,
                     };
                     if let Some((value, tag)) = held
                         && !self.aliased(self.val(value).slot)
@@ -1770,6 +1775,7 @@ impl<'a> Builder<'a> {
             let key = match (guard.at, guard.check) {
                 (GuardAt::Entry, check) => Order::Entry(self.guarded_slot(check)),
                 (GuardAt::Before(op), Check::Layout { .. }) => Order::At(op, Stage::Inside),
+                (GuardAt::Before(op), Check::Room { .. }) => Order::At(op, Stage::Pushes),
                 (GuardAt::Before(op), _) => Order::At(op, Stage::Before),
                 (GuardAt::Within(op), _) => Order::At(op, Stage::Within),
             };
@@ -1812,7 +1818,10 @@ impl<'a> Builder<'a> {
             Check::Type { value, .. }
             | Check::Deref { value, .. }
             | Check::Layout { value, .. } => Some(self.val(value).slot),
-            Check::Direction { .. } | Check::Stands { .. } | Check::Arm { .. } => None,
+            Check::Direction { .. }
+            | Check::Stands { .. }
+            | Check::Arm { .. }
+            | Check::Room { .. } => None,
         }
     }
 
@@ -2433,7 +2442,10 @@ enum Order {
 /// the layout guard php takes inside the op's code, after it
 /// (`zend_jit_fetch_dimension_address_inner`, `:11966-11980`); the
 /// guards the op holds on what it computes; then any other exit of its
-/// own.
+/// own, an inline `INIT_*`'s where the callee is not the one recorded,
+/// php's guard on the function its cache slot holds; and last the stack
+/// check of the frame it pushes (`zend_jit_init_fcall` then
+/// `zend_jit_push_call_frame`, `:8790-8906`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Stage {
     Before,
@@ -2441,6 +2453,7 @@ enum Stage {
     Inside,
     Within,
     Leaves,
+    Pushes,
 }
 
 /// Why an opline leaves of its own.

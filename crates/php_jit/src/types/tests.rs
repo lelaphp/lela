@@ -274,6 +274,60 @@ fn a_fetch_takes_its_exits_in_phps_order() -> Result<(), String> {
     Ok(())
 }
 
+/// php's stack check (`zend_jit_stack_check`, #3203): a loop whose calls
+/// push frames holds the stack's room for them once, at its entry, its
+/// first exit, back to the interpreter at the loop's first opline, as
+/// php's trace for `$s += g($i)` takes `exit_0` `0009/----/0/VM`; a trace
+/// that does not loop holds it at each `INIT_*` instead, after the call's
+/// own exit, as `zend_jit_push_call_frame` follows `zend_jit_init_fcall`'s
+/// guard on the callee.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_trace_holds_the_stacks_room_where_php_does() -> Result<(), String> {
+    let (mut recorded, _) = recording(
+        &IN_F,
+        "function g($x) { return $x + 1; }
+        function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += g($i); } return $s; }
+        echo f(10), \"\\n\";",
+    )?;
+    let rooms = |ir: &TraceIr| -> Vec<(GuardAt, u16)> {
+        (ir.guards.iter())
+            .filter(|guard| matches!(guard.check, Check::Room { .. }))
+            .map(|guard| (guard.at, guard.exit.0))
+            .collect()
+    };
+    let looping = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    assert_eq!(
+        rooms(&looping),
+        [(GuardAt::Entry, 0)],
+        "{}",
+        dump::render(&looping)
+    );
+    let first = looping.exits.first().ok_or("no exit")?;
+    assert_eq!(
+        (first.opline, first.grows, first.known.len()),
+        (Some(OplineIdx(9)), Grows::Never, 0)
+    );
+    recorded.record.stop = Stop::Link(crate::table::TraceId::new(1).ok_or("no trace 1")?);
+    let linked = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let init = (linked.ops.iter())
+        .position(|op| matches!(op, Op::Line(line) if line.opcode == Opcode::InitFcall))
+        .and_then(|at| u32::try_from(at).ok())
+        .map(OpId)
+        .ok_or("no INIT_FCALL")?;
+    let Some(Op::Line(line)) = linked.ops.get(init.index()) else {
+        return Err("no INIT_FCALL".to_owned());
+    };
+    let own = line.exit.ok_or("the INIT_FCALL has no exit of its own")?;
+    assert_eq!(
+        rooms(&linked),
+        [(GuardAt::Before(init), own.0 + 1)],
+        "{}",
+        dump::render(&linked)
+    );
+    Ok(())
+}
+
 /// The place of the first stepped opline of `opcode`.
 fn stepped(ir: &TraceIr, opcode: Opcode) -> Result<OpId, String> {
     ir.ops

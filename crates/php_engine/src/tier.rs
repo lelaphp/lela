@@ -58,7 +58,7 @@ mod sampled;
 #[cfg(dispatch = "tailcall")]
 mod tail;
 mod view;
-pub use crossing::{at_room, current, free_operands, primed, release, room, stand};
+pub use crossing::{at_room, current, free_operands, primed, release, room, stack_room, stand};
 pub use frames::{
     Argument, Aside, Called, Compiled, Evaluated, Under, begin, below, call, catches, compile,
     entry, evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,

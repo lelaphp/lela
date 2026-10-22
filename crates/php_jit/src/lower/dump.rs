@@ -346,5 +346,6 @@ fn check(check: Check) -> String {
         }
         Check::Stands { func: f, opline } => format!("stands {} {:04}", func(f), opline.0),
         Check::Arm { opline } => format!("arm {:04}", opline.0),
+        Check::Room { bytes } => format!("room {bytes}"),
     }
 }

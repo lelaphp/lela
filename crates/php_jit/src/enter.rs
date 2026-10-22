@@ -135,6 +135,7 @@ impl<'a, R: Crossed> ExitCtx<'a, R> {
                 call: ptr::null_mut(),
                 func: 0,
                 opline: 0,
+                room: 0,
             },
             pending: None,
             holding: None,
@@ -617,6 +618,7 @@ fn where_stood(
         call,
         func,
         opline: tier::frame(req, frame).map_or(0, |view| view.opline().0),
+        room: tier::stack_room(req),
     })
 }
 

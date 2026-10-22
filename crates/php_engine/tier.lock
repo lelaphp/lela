@@ -119,6 +119,7 @@ tier::set_aside
 tier::set_stdin
 tier::set_trace_num
 tier::sink
+tier::stack_room
 tier::stand
 tier::state
 tier::step
