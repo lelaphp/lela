@@ -419,8 +419,8 @@ const HEAD: u32 = 2;
 ///
 /// ```
 #[cfg(test)]
-pub(crate) fn recording(req: &mut Request) -> bool {
-    req.state::<JitRequest>().recording
+pub(crate) fn recording(req: &Request) -> bool {
+    tier::state::<JitRequest>(req).is_some_and(|state| state.recording.get())
 }
 
 /// The request recording for the length of a recording, as php sets
@@ -434,7 +434,9 @@ struct Recording<'r> {
 
 impl<'r> Recording<'r> {
     fn set(req: &'r mut Request) -> Recording<'r> {
-        req.state::<JitRequest>().recording = true;
+        if let Some(state) = tier::state::<JitRequest>(req) {
+            state.recording.set(true);
+        }
         Recording { req }
     }
 }
@@ -455,7 +457,9 @@ impl DerefMut for Recording<'_> {
 
 impl Drop for Recording<'_> {
     fn drop(&mut self) {
-        self.req.state::<JitRequest>().recording = false;
+        if let Some(state) = tier::state::<JitRequest>(self.req) {
+            state.recording.set(false);
+        }
     }
 }
 

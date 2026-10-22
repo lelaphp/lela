@@ -29,6 +29,7 @@
 //! interpreter at an armed landing visits it too, as php's interpreter
 //! runs the landing's handler ([`visit_landing`]).
 
+use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -46,10 +47,26 @@ use crate::policy::{
 use crate::record::{self, Bailed, Ended, Headed, Start, Stop};
 use crate::table::{self, TraceId, TraceName};
 use crate::types::Grows;
-use crate::{JitEngine, JitRequest, Shared};
+use crate::{JitEngine, Shared};
 
 #[cfg(test)]
 mod tests;
+
+/// The tier's state on a request (`jit-design.md` §2.2, §4; #3144), as
+/// php's tracing tier keeps `JIT_G`: the engine's `Shared`, resolved
+/// once as the request is laid, so a visit reads the `Policy` with no
+/// lookup of the engine state; whether a recording is under way on the
+/// request, php's `JIT_G(tracing)`, which no fiber switch saves (§4.9,
+/// revision 30), set and cleared by `record`'s guard alone; and the trace
+/// it last submitted to the worker and has not reached yet, while which it
+/// claims nothing (`dispatch::Submitted`). `dispatch::quiet` reads the
+/// two. Each in a `Cell`, so a visit reads the whole state through the
+/// request it holds shared, once (`tier::state`).
+pub struct JitRequest {
+    pub(crate) shared: Arc<Shared>,
+    pub(crate) recording: Cell<bool>,
+    pub(crate) submitted: Cell<Option<Submitted>>,
+}
 
 /// What a visit to a word decided.
 #[derive(Debug)]
@@ -140,16 +157,16 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: He
         Site::Entry => Start::Enter,
         Site::Return(_) => Start::Return,
     };
-    let claims = !quiet(req, Some(site));
     let (decided, shared) = {
         let req: &Request = req;
-        let Some(engine) = req.engine::<JitEngine>() else {
+        let Some(state) = tier::state::<JitRequest>(req) else {
             return Flow::Continue;
         };
-        let shared = &engine.shared;
+        let shared = &state.shared;
         if shared.policy.mode() == Mode::Off {
             return Flow::Continue;
         }
+        let claims = !quieted(state, Some(site));
         let rooted = match site {
             Site::Loop(at) => Rooted::Safepoint(at),
             Site::Entry => Rooted::Safepoint(SafepointIdx::ENTRY),
@@ -628,14 +645,14 @@ fn visit_landing(
     if req.limits().interrupt().raised().load(Ordering::Relaxed) {
         return Visited::Continue;
     }
-    let claims = {
-        let state = req.state::<JitRequest>();
-        if state.recording {
-            return Visited::Continue;
-        }
-        !quieted(state, None)
-    };
     let req: &Request = req;
+    let Some(state) = tier::state::<JitRequest>(req) else {
+        return Visited::Continue;
+    };
+    if state.recording.get() {
+        return Visited::Continue;
+    }
+    let claims = !quieted(state, None);
     let Some(at) = tier::frame(req, frame).map(|view| view.opline()) else {
         return Visited::Continue;
     };
@@ -1072,10 +1089,14 @@ fn settled(req: &mut Request, shared: &Shared, job: Job, goes_on: GoesOn) -> Opt
     let mut lines = Vec::new();
     let outcome = if job.recorded.record.stop.compiles() {
         let word = job.claim.holder().clone();
+        // The engine's compiler, read once a recording that compiles:
+        // the visits read the request's state alone.
         let engine = req.engine::<JitEngine>();
         match engine.map(|engine| engine.compiler.submit(shared, job, &mut lines)) {
             Some(None) => {
-                req.state::<JitRequest>().submitted = Some(Submitted { word, goes_on });
+                if let Some(state) = tier::state::<JitRequest>(req) {
+                    state.submitted.set(Some(Submitted { word, goes_on }));
+                }
                 None
             }
             Some(settled) => settled,
@@ -1128,23 +1149,23 @@ pub(crate) enum GoesOn {
 /// none, an exit's landing: a recording under way, or a trace it
 /// submitted it has not reached ([`Submitted`]); one it reached is
 /// forgotten here.
-fn quiet(req: &mut Request, site: Option<Site>) -> bool {
-    quieted(req.state::<JitRequest>(), site)
+fn quiet(req: &Request, site: Option<Site>) -> bool {
+    tier::state::<JitRequest>(req).is_some_and(|state| quieted(state, site))
 }
 
 /// [`quiet`] over the request's state.
-fn quieted(state: &mut JitRequest, site: Option<Site>) -> bool {
-    if state.recording {
+fn quieted(state: &JitRequest, site: Option<Site>) -> bool {
+    if state.recording.get() {
         return true;
     }
-    let Some(submitted) = &state.submitted else {
+    let Some(submitted) = state.submitted.take() else {
         return false;
     };
     let under_way = policy::read(submitted.word.word()) == State::Recording;
     let short = submitted.goes_on == GoesOn::Short
         && !matches!(site, Some(Site::Loop(_) | Site::Return(_)));
-    if !under_way && !short {
-        state.submitted = None;
+    if under_way || short {
+        state.submitted.set(Some(submitted));
     }
     under_way || short
 }

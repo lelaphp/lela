@@ -26,6 +26,7 @@
 //! generator's, and the call an `INIT_*` began. `php_sapi` re-exports
 //! this face, so a host that binds a tier names none of `php_engine`.
 
+use std::any::Any;
 use std::sync::atomic::AtomicU32;
 
 /// What a tier declares its state with, as an extension does (design
@@ -123,10 +124,28 @@ pub enum Flow {
 /// The tier: one method at the safepoints, and the state it declares as
 /// an extension would.
 pub trait Tier: 'static {
+    /// The tier's state on a request (`jit-design.md` §2.2, #3144): its
+    /// engine state resolved once, as the request is laid, and what its
+    /// visits keep on the request between them, as php's tracing tier
+    /// keeps `JIT_G`. Read at one place, [`state`], with no lookup in the
+    /// slot table the extensions' states stand in; `()` for a tier that
+    /// keeps none.
+    type State: Send + 'static;
+
     /// Asked at the three sites and nowhere else, with `held`, the op
     /// array the loop holds for `frame` (`jit-design.md` §2.2, #3144), so
     /// the tier reads the site's word from what the loop has in hand.
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: Held<'_>) -> Flow;
+
+    /// The tier's [`State`](Tier::State) for a request of the engine
+    /// `started`, laid with the request where the engine binds the tier's
+    /// loop ([`Tier::asked`]): none where it binds `Nop`'s, and by
+    /// default.
+    #[must_use]
+    fn lay(started: &Started<'_>) -> Option<Self::State> {
+        let _ = started;
+        None
+    }
 
     /// Which of php's execution hooks the tier replaces, as phpdbg
     /// replaces `zend_execute_ex`: every unit the engine compiles is
@@ -187,11 +206,40 @@ impl<'a> Started<'a> {
 pub struct Nop;
 
 impl Tier for Nop {
+    type State = ();
+
     #[inline(always)] // jit-design.md §2.2: one constant, so the branch on `Flow` folds
     #[allow(clippy::inline_always)]
     fn safepoint(_: &mut Request, _: FrameRef, _: Site, _: Held<'_>) -> Flow {
         Flow::Continue
     }
+}
+
+/// Where a request keeps its tier's [`Tier::State`]
+/// (`jit-design.md` §2.2, #3144): laid once with the request, by the
+/// loop the engine bound ([`Loops::bound`]), and read by [`state`].
+#[derive(Default)]
+pub(crate) struct TierState(Option<Box<dyn Any + Send>>);
+
+impl TierState {
+    /// The tier state of a request of the engine `shared`, as the loop it
+    /// bound lays it.
+    pub(crate) fn laid(shared: &crate::engine::Shared) -> TierState {
+        (shared.loops.lay)(Started { shared })
+    }
+
+    /// `T`'s state for a request of the engine `started`.
+    fn of<T: Tier>(started: Started<'_>) -> TierState {
+        TierState(T::lay(&started).map(|state| Box::new(state) as Box<dyn Any + Send>))
+    }
+}
+
+/// The tier's state the request was laid with, where it is an `S`
+/// ([`Tier::State`]): one check of its type, and no lookup. None where
+/// the engine binds a loop that lays none, `Nop`'s.
+#[must_use]
+pub fn state<S: Any>(req: &Request) -> Option<&S> {
+    req.tier.0.as_deref()?.downcast_ref()
 }
 
 /// One safepoint's word (`jit-design.md` §3.2): two atomics, zero at
@@ -495,6 +543,9 @@ pub(crate) struct Loops {
     pub(crate) reenter: Loop,
     /// The same loop over a generator's frame the resumption put back.
     pub(crate) resume: Loop,
+    /// The tier's state a request of the engine is laid with, the bound
+    /// tier's ([`Tier::lay`]).
+    pub(crate) lay: fn(Started<'_>) -> TierState,
 }
 
 impl Loops {
@@ -532,6 +583,7 @@ impl Loops {
             entry: execute::<T, D>,
             reenter: reenter::<T, D>,
             resume: resume::<T, D>,
+            lay: TierState::of::<T>,
         }
     }
 }

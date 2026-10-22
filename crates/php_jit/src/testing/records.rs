@@ -55,6 +55,14 @@ pub(crate) struct Recorder(Policy);
 pub(crate) struct Records;
 
 impl Tier for Records {
+    type State = crate::JitRequest;
+
+    /// The recording exclusion, over the recorder's `Policy`.
+    fn lay(started: &tier::Started<'_>) -> Option<crate::JitRequest> {
+        let recorder = started.engine::<Recorder>()?;
+        Some(crate::JitRequest::recorder(&recorder.0))
+    }
+
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
         let asked = record::recording(req);
         req.state::<Kept>().asked.push(asked);

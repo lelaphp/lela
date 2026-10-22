@@ -260,6 +260,8 @@ pub enum Unresolved {
 #[allow(clippy::struct_excessive_bools)] // php's EG and PG flags, each its own global, read alone
 pub struct Request {
     pub(crate) shared: Arc<Shared>,
+    /// The tier's state, laid with the request ([`crate::tier::state`]).
+    pub(crate) tier: crate::tier::TierState,
     description: RequestDescription,
     /// The uncaught throwable kept for a host that renders it ([`inspect::Inspected`]).
     inspect: inspect::Inspected,
@@ -1086,6 +1088,7 @@ impl Request {
             // inside the engine before its deadlines are laid.
             _inside: crate::fork::Inside::enter(),
             limits: limits::LimitsState::new(&shared.timer),
+            tier: crate::tier::TierState::laid(&shared),
             shared,
             description,
             inspect: inspect::Inspected::default(),
