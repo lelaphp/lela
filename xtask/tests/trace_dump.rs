@@ -130,7 +130,7 @@ fn the_oracles_lines_are_a_pass_and_the_engines_lines_apart_are_not() {
     assert!(
         reading
             .message
-            .contains("the engine's 9 TRACE lines are the oracle's")
+            .contains("the engine's 9 trace lines are the oracle's")
             && reading
                 .message
                 .contains("jit.mode=force jit.compile=inline"),

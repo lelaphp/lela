@@ -20,8 +20,9 @@
 //! (`Z/ext/opcache/jit/zend_jit_trace.c:8152-8250` at the tag); a
 //! `TRACE n exit m` line, php's on each pass through an exit that has no
 //! side trace yet (`:8814`, `ZEND_JIT_DEBUG_TRACE_EXIT`); and a
-//! `---- EXIT m/k blacklisted` line, an exit that grows no side spent
-//! (`:8884`). So an exit the engine places where php places none, or
+//! `---- EXIT m/k blacklisted` line, an exit blacklisted where its side
+//! trace's recording aborted past its limit or where it grows no side
+//! and is spent (`:8641`, `:8884`). So an exit the engine places where php places none, or
 //! numbers otherwise, is a difference the diff shows. The paths in them
 //! are the program's directory as the recipe's token, as every run's
 //! stream is. Every other line of the stream, the engine's
@@ -48,7 +49,7 @@ pub(crate) const INSTRUMENT: &str = "trace-dump";
 const REGIME: &str = "jit-inline";
 
 /// What a line the diff holds starts with: a trace's own line, an
-/// exit's, and an exit spent.
+/// exit's, and an exit blacklisted.
 const HELD: [&[u8]; 3] = [b"---- TRACE ", b"     TRACE ", b"---- EXIT "];
 
 /// What one `xtask trace-dump` run was asked for.
@@ -316,14 +317,14 @@ fn judged(registry: &Registry, id: &str, expected: &[u8], actual: &[u8]) -> (Sta
             let n = String::from_utf8_lossy(expected).lines().count();
             (
                 Status::Pass,
-                format!("the engine's {n} TRACE lines are the oracle's"),
+                format!("the engine's {n} trace lines are the oracle's"),
             )
         }
         Verdict::Diverged(row) => {
             let accepts = format!("{} accepts it: {}", row.id, row.reason);
             (
                 Status::Pass,
-                format!("the engine's TRACE lines differ from the oracle's, and {accepts}"),
+                format!("the engine's trace lines differ from the oracle's, and {accepts}"),
             )
         }
         Verdict::Differs(diff) => (Status::Fail, first_difference(&diff, "trace dump")),
@@ -335,7 +336,7 @@ mod tests {
     use super::*;
 
     /// The diff holds a stream's trace lines, a trace's, an exit's and an
-    /// exit spent, and nothing else: no engine note, no blank line between
+    /// exit blacklisted, and nothing else: no engine note, no blank line between
     /// roots and no warning.
     #[test]
     fn the_diff_holds_the_trace_and_exit_lines_alone() {
@@ -426,7 +427,7 @@ mod tests {
         let (status, said) = judged(&registry, "trace:dump/loop", &oracle, &oracle);
         assert_eq!(
             (status, said.as_str()),
-            (Status::Pass, "the engine's 9 TRACE lines are the oracle's")
+            (Status::Pass, "the engine's 9 trace lines are the oracle's")
         );
     }
 }
