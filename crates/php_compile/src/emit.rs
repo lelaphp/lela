@@ -8413,20 +8413,24 @@ impl<'a> Emit<'a> {
     /// the class being compiled is read as the string its fold made
     /// ([`ActiveClass::strings`]), which `ZVAL_COPY_OR_DUP` shares, so
     /// sixteen reads of a megabyte allocate nothing and the fold's peak
-    /// is its left operand and the string it joins:
+    /// is its left operand and the string it joins. `A` is folded from a
+    /// short source, so the copy of the source php's scanner makes
+    /// (`zend_prepare_string_for_scanning`), which the engine does not,
+    /// is too small to hide a megabyte read afresh:
     ///
     /// ```php
-    /// $a = str_repeat('a', 1000000);
+    /// $k = "    const B0 = 'abcdefgh';\n";
+    /// for ($i = 1; $i <= 16; $i++) { $k .= "    const B$i = self::B" . ($i - 1) . " . self::B" . ($i - 1) . ";\n"; }
     /// $x = implode(' . ', array_fill(0, 16, 'self::A'));
-    /// $code = "class C {\n    const A = '$a';\n    const X = $x;\n}";
+    /// $code = "class C {\n{$k}    const A = self::B16 . self::B16;\n    const X = $x;\n}";
     /// $m = memory_get_usage();
     /// memory_reset_peak_usage();
     /// eval($code);
     /// $peak = (memory_get_peak_usage() - $m) / 1e6;
-    /// echo abs($peak - 33) < 2 ? 'within 2 MB of 33 MB' : $peak, ' ', strlen(C::X), "\n";
+    /// echo abs($peak - 34.7) < 0.5 ? 'within 0.5 MB of 34.7 MB' : $peak, ' ', strlen(C::A), ' ', strlen(C::X), "\n";
     /// ```
     /// ```expect regime=jit-off
-    /// within 2 MB of 33 MB 16000000
+    /// within 0.5 MB of 34.7 MB 1048576 16777216
     /// ```
     fn operated_of(&mut self, expr: &ConstExpr) -> Result<Option<Operated>, CompileError> {
         Ok(Some(match expr {
