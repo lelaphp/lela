@@ -19,7 +19,7 @@ use php_unit::decl::{ClassKind, EnumBacking, Type};
 
 use crate::api::abi::{Entry, Refusals};
 use crate::api::raising::{Thrown, arity, throw_error};
-use crate::api::request::Request;
+use crate::api::request::{ByValue, Request};
 use crate::api::values::{ClassId, Owner, Value, adopted};
 
 /// Which of the three a function number of a program's enum serves.
@@ -250,6 +250,21 @@ fn by_value(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
         req.release(wanted);
         return Err(thrown);
     }
+    match req.backed_case_named(class, &wanted) {
+        ByValue::Named(spelled) => {
+            req.release(wanted);
+            let Some(name) = spelled.as_str_bytes() else {
+                return Err(crate::api::raising::fatal(
+                    req,
+                    "InternalError: a backed enum's table names a case by no string",
+                ));
+            };
+            return req.enum_case(class, name).map(|case| case.as_value());
+        }
+        ByValue::Missing => return not_backing(req, class, wanted, try_from),
+        // A native enum, whose table is the stub's: its cases read in turn.
+        ByValue::Unbuilt => {}
+    }
     for name in case_names(req, class) {
         let case = match req.enum_case(class, &name) {
             Ok(case) => case,
@@ -268,6 +283,17 @@ fn by_value(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
         }
         req.release(case.as_value());
     }
+    not_backing(req, class, wanted, try_from)
+}
+
+/// `zend_enum_get_case_by_value`'s `not_found`: `null` for `tryFrom`,
+/// and php's `ValueError` naming `wanted` for `from`, which is given up.
+fn not_backing(
+    req: &mut Request,
+    class: ClassId,
+    wanted: Value,
+    try_from: bool,
+) -> Result<Value, Thrown> {
     if try_from {
         req.release(wanted);
         return Ok(Value::null());

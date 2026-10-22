@@ -1781,10 +1781,8 @@ impl Shared {
                 room: php_compile::Room::default(),
             },
         );
-        Fresh {
-            unit,
-            answers: home.settle(),
-        }
+        let answers = home.settle(strings_kept(&unit));
+        Fresh { unit, answers }
     }
 
     /// `unit` published for every request: each op array given its
@@ -2014,10 +2012,11 @@ impl Shared {
     /// unit.
     pub(crate) fn decode_kept(&self, body: &[u8]) -> Option<Unit> {
         let mut strings = self.interned.strings();
-        crate::unit_cache::decode(
-            body,
-            &mut PermanentStrings::new(&self.interned.names, &mut strings, CompileHeap::Engine),
-        )
+        let mut home =
+            PermanentStrings::new(&self.interned.names, &mut strings, CompileHeap::Engine);
+        let unit = crate::unit_cache::decode(body, &mut home);
+        home.settle(unit.is_some());
+        unit
     }
 
     /// `source`, read from the file `path` names, compiled as a file of
@@ -3727,11 +3726,17 @@ impl EngineBuilder {
         let default_strings = default_strings(&functions, &classes);
         let mut strings = Strings::new();
         let sapi_names = crate::constants::host_names(&mut strings);
-        let units = UnitCache::new(self.hooked, self.extended_info, &functions, &classes);
         let interned = crate::arena::Interned {
             names: Arc::new(names),
             strings: Arc::new(Mutex::new(strings)),
         };
+        let units = UnitCache::new(
+            self.hooked,
+            self.extended_info,
+            &functions,
+            &classes,
+            interned.clone(),
+        );
         let arena = crate::arena::Epochs::of(crate::arena::Arena::of_engine(
             Arc::clone(&records),
             functions.len().saturating_add(methods.len()),
@@ -3998,11 +4003,44 @@ pub(crate) enum CompileHeap<'a> {
 /// the names the engine laid down at startup ([`permanent_names`]) first,
 /// so a unit's constant string that spells one is that one, flags and
 /// all, as `zend_new_interned_string` finds it, then the table units
-/// intern into, which a string that is in neither joins. Each string the
-/// compile makes is charged to its [`CompileHeap`] as well.
+/// intern into, and a string that is in neither made apart from both
+/// ([`php_heap::Pending`]), which joins the table only where the compile
+/// answered a unit ([`PermanentStrings::settle`]), as opcache's buffer
+/// takes only what `zend_accel_store_interned_string` persists. So a
+/// fold's intermediate, given back as the fold goes on, is freed and
+/// never counted, and the strings of a compile refused with nothing
+/// declared go with it. A unit the cache serves without holding it
+/// (`Filed::Compiled`, `Filed::Unheld`) still puts its strings there,
+/// where php's are the request's. Each string the compile makes is
+/// charged to its [`CompileHeap`] as well. With the file's full path,
+/// the name it was included by and the keys of the functions and
+/// classes it binds, which opcache's persist interns as the unit is held
+/// (`UnitCache::persist_names`, `UnitCache::add_key`),
+/// `number_of_strings` moves as php's does, and not at all for a compile
+/// refused:
+///
+/// ```php
+/// $n = fn () => opcache_get_status()['interned_strings_usage']['number_of_strings'];
+/// $f = sys_get_temp_dir() . '/ns-' . getmypid();
+/// file_put_contents("$f.php", "<?php\nclass NS { const A = 'zq7w'; const X = self::A . self::A . self::A . self::A; }\n");
+/// $before = $n(); include "$f.php"; echo $n() - $before, " ", strlen(NS::X), "\n";
+/// file_put_contents("$f-r.php", "<?php\nclass NR { const A = 'refused' . 'fold'; const A = 1; }\n");
+/// $before = $n();
+/// register_shutdown_function(function () use ($n, $before, $f) { echo "\n", $n() - $before, "\n"; unlink("$f.php"); unlink("$f-r.php"); });
+/// include "$f-r.php";
+/// ```
+/// ```expect regime=jit-off exit=255
+/// 3 16
+///
+/// Fatal error: Cannot redefine class constant NR::A in %s on line 2
+///
+/// 0
+/// ```
 struct PermanentStrings<'a> {
     names: &'a Strings,
     strings: &'a mut Strings,
+    /// What the compile made that neither table holds.
+    made: php_heap::Pending,
     heap: CompileHeap<'a>,
     /// The request's copy of each string the compile made and has not
     /// given back, standing until the compile ends.
@@ -4025,6 +4063,7 @@ impl<'a> PermanentStrings<'a> {
         PermanentStrings {
             names,
             strings,
+            made: php_heap::Pending::default(),
             heap,
             standing: Vec::new(),
             answers: Answers::Every,
@@ -4056,11 +4095,10 @@ impl<'a> PermanentStrings<'a> {
     /// the permanent one, and otherwise standing until the fold that made
     /// it has read it ([`Intern::give_back`]) or the compile ends
     /// ([`PermanentStrings::settle`]), as each string a miss makes stands
-    /// in its op array until opcache's persist. A string a published unit
-    /// holds stands too: opcache's buffer takes a string only as a unit
-    /// is persisted, where the engine's table also holds what an earlier
-    /// compile interned before it was done, so a fold refused once is
-    /// refused again.
+    /// in its op array until opcache's persist. A string the table holds
+    /// stands too: opcache's buffer takes a string only as a unit is
+    /// persisted, so php's miss makes its own of a string an earlier
+    /// unit put there.
     fn stand(&mut self, copy: Option<php_heap::Str>, interned: Option<php_heap::Str>) {
         let (CompileHeap::Request(heap), Some(copy)) = (&mut self.heap, copy) else {
             return;
@@ -4072,15 +4110,31 @@ impl<'a> PermanentStrings<'a> {
     }
 
     /// The compile ended: the request's copies given back, as opcache's
-    /// persist frees them once the unit is in its segment, and whom its
-    /// answer serves.
-    fn settle(self) -> Answers {
+    /// persist frees them once the unit is in its segment; what it made
+    /// put in the table where its unit stands, `kept`, and given back
+    /// with a unit refused that declared nothing; and whom its answer
+    /// serves.
+    fn settle(self, kept: bool) -> Answers {
         if let CompileHeap::Request(heap) = self.heap {
             for standing in self.standing {
                 heap.release_string(standing.copy);
             }
         }
+        if kept {
+            self.strings.publish(self.made);
+        }
         self.answers
+    }
+}
+
+/// Whether what the compile that answered `unit` made stands past it: a
+/// unit's, and a refused one's that declared something, whose functions
+/// and classes the request keeps (`Refused::declared`); a refusal that
+/// declared nothing leaves nothing to name them.
+fn strings_kept(unit: &Result<Unit, CompileError>) -> bool {
+    match unit {
+        Ok(_) => true,
+        Err(refused) => refused.declared.is_some(),
     }
 }
 
@@ -4095,31 +4149,36 @@ impl Intern for PermanentStrings<'_> {
             self.stand(copy, None);
             return Ok(held);
         }
-        let interned = self.strings.intern_marked(bytes, valid_utf8);
+        let interned = match self.strings.find(bytes) {
+            Some(held) => Ok(held),
+            None => self.made.intern(bytes, valid_utf8),
+        };
         self.stand(copy, interned.as_ref().ok().copied());
         interned
     }
 
-    /// The request's copy of a string the fold that made it has read,
-    /// given back, as `zend_eval_const_expr` frees an operand once the
-    /// value it made stands; the table's string stays, the unit's to share.
+    /// A string the fold that made it has read, given back, as
+    /// `zend_eval_const_expr` frees an operand once the value it made
+    /// stands: the request's copy, and the string itself where the
+    /// compile made it and nothing else asked for it; a string the table
+    /// held stays, the unit's to share.
     fn give_back(&mut self, made: php_heap::Made) {
-        let CompileHeap::Request(heap) = &mut self.heap else {
-            return;
-        };
         let string = made.str();
-        let named = |standing: &Standing| standing.interned.is_same(string);
-        if let Some(at) = self.standing.iter().rposition(named) {
-            let standing = self.standing.swap_remove(at);
-            heap.release_string(standing.copy);
+        if let CompileHeap::Request(heap) = &mut self.heap {
+            let named = |standing: &Standing| standing.interned.is_same(string);
+            if let Some(at) = self.standing.iter().rposition(named) {
+                let standing = self.standing.swap_remove(at);
+                heap.release_string(standing.copy);
+            }
         }
+        self.made.give_back(string);
     }
 
     fn constant_array(
         &mut self,
         entries: &[(php_heap::Key, php_heap::Zval)],
     ) -> Result<php_heap::Arr, php_heap::Fatal> {
-        self.strings.constant_array(entries)
+        self.made.constant_array(entries)
     }
 }
 

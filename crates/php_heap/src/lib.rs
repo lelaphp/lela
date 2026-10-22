@@ -91,7 +91,7 @@ pub use stack::{
     EntryGuard, FakeRoom, Frame, FrameRef, FramesAside, HEADER_AT, ROOM_BYTES, Slot, VmStack,
 };
 pub use standalone::StandaloneHeap;
-pub use string::{FreshStr, Intern, Made, Str, Strings};
+pub use string::{FreshStr, Intern, Made, Pending, Str, Strings};
 pub use zval::{PropBit, Zval, ZvalRef, ZvalType};
 
 use gc::Counted;
