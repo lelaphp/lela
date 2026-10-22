@@ -9,7 +9,6 @@
 //! `accelerator_enabled` does.
 
 use php_unit::PublishedUnit;
-use php_unit::decl::Bare;
 use std::sync::Arc;
 
 use php_compile::SourceKind;
@@ -19,12 +18,12 @@ use super::{AccelServed, Request, Unresolved};
 use crate::api::abi::{Admission, FileCache, Lookup, Validation};
 use crate::api::raising::Thrown;
 use crate::api::values::{Emalloc, PhpString};
-use crate::engine::ForRequest;
+use crate::engine::{CompileHeap, ForRequest};
 use crate::exec::IncludeKind;
 use crate::supplied::chain::FileArgs;
 use crate::supplied::tell;
 use crate::unit_cache::{
-    Asked, Cached, CompileRefused, Disk, Filed, Held, Levels, UnitKey, full_path,
+    Asked, Cached, CompileRefused, Disk, Filed, Fresh, Held, Levels, UnitKey, full_path,
 };
 
 /// What the `zend_file_handle` a file is compiled through holds when
@@ -529,28 +528,21 @@ impl Request {
             levels,
             optimizer: shared.optimizer(),
         };
-        let stack = self.stack_limit();
-        let bound = crate::multibyte::bound(self, shared.compile_multibyte());
-        let holds = |name: &[u8]| self.class_named(Bare::resolved(name)).is_some();
-        let request = ForRequest {
-            classes: php_compile::RequestClasses::new(&holds),
-            multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
-            keys_before: self.keys_made(),
-        };
-        let (arena, cwd) = (Arc::clone(&self.arena), &self.cwd);
+        let arena = Arc::clone(&self.arena);
         // What a compile that ran read and made, none for a hit.
         let scanned = std::cell::Cell::new(None);
         let (compiled, filed, early) = shared.units.file(
+            self,
             &arena.files,
             asked,
-            |source| {
-                let compiled = shared.compile_file(source, path, cwd, stack, request);
-                scanned.set(Some(Scanned::of(source, &compiled)));
+            |req, source| {
+                let compiled = req.compile_for_cache(source, path);
+                scanned.set(Some(Scanned::of(source, &compiled.unit)));
                 compiled
             },
             |body| shared.decode_kept(body),
             |unit| shared.publish_compiled(unit),
-            |unit| self.publish_unit(unit),
+            |req, unit| req.publish_unit(unit),
         );
         let scanned = scanned.get();
         self.note_pushed(scanned.map_or_else(super::Pushed::default, |scanned| scanned.pushed));
@@ -575,6 +567,123 @@ impl Request {
             self.open_include_stream(&full, handle);
         }
         cached
+    }
+
+    /// `source`, read from the file `path` names, compiled for the cache
+    /// at this request's asking ([`crate::engine::Shared::compile_file`]): under the
+    /// request's encoding and with its keys and classes, as opcache's miss
+    /// compiles on the request, and charged to the request's heap while
+    /// it runs, so a fold that outgrows `memory_limit` is the request's
+    /// `E_ERROR` at the constant's line, as php's
+    /// `zend_eval_const_expr` raises it with opcache and without it, what
+    /// the file declared before it standing; the request holds nothing of
+    /// the compile once it ends, and a hit compiles nothing:
+    ///
+    /// ```php
+    /// ini_set('display_errors', '0');
+    /// register_shutdown_function(function () {
+    ///     $e = error_get_last();
+    ///     echo $e ? $e['type'] . ' ' . strtok($e['message'], '(') . 'on line ' . $e['line'] : 'no error', "\n";
+    ///     var_dump(function_exists('f'), class_exists('C', false));
+    /// });
+    /// $a = str_repeat('a', 1000000);
+    /// $x = implode(' . ', array_fill(0, 16, 'self::A'));
+    /// $file = sys_get_temp_dir() . '/fold-' . getmypid() . '.php';
+    /// file_put_contents($file, "<?php\nfunction f() {}\nclass C {\n    const A = '$a';\n    const X = $x;\n}\n");
+    /// ini_set('memory_limit', '16M');
+    /// register_shutdown_function(fn () => @unlink($file));
+    /// include $file;
+    /// echo "included\n";
+    /// ```
+    /// ```expect exit=255
+    /// 1 Allowed memory size of 16777216 bytes exhausted on line 5
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    /// ```php
+    /// ini_set('display_errors', '0');
+    /// register_shutdown_function(function () {
+    ///     $e = error_get_last();
+    ///     echo $e ? $e['type'] . ' ' . strtok($e['message'], '(') . 'on line ' . $e['line'] : 'no error', "\n";
+    ///     var_dump(function_exists('f'), class_exists('C', false));
+    /// });
+    /// $a = str_repeat('a', 1000000);
+    /// $x = implode(' . ', array_fill(0, 16, 'self::A'));
+    /// $file = sys_get_temp_dir() . '/fold-' . getmypid() . '.php';
+    /// file_put_contents($file, "<?php\nfunction f() {}\nclass C {\n    const A = '$a';\n    const X = $x;\n}\n");
+    /// ini_set('memory_limit', '16M');
+    /// register_shutdown_function(fn () => @unlink($file));
+    /// include $file;
+    /// echo "included\n";
+    /// ```
+    /// ```expect regime=jit-off exit=255
+    /// 1 Allowed memory size of 16777216 bytes exhausted on line 5
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    ///
+    /// The limit holds what php's compile holds at once, the string a fold
+    /// makes beside the operands it reads, each given back once the node
+    /// over it stands (`php_compile`'s fold claims): the file compiles
+    /// under 40M and not under 32M, as php's does in either regime:
+    ///
+    /// ```php
+    /// $child = <<<'PHP'
+    /// <?php
+    /// ini_set('display_errors', '0');
+    /// register_shutdown_function(function () {
+    ///     $e = error_get_last();
+    ///     echo $e ? strtok($e['message'], '(') . 'on line ' . $e['line'] : strlen(C::X) . ' bytes', "\n";
+    /// });
+    /// $a = str_repeat('a', 1000000);
+    /// $x = implode(' . ', array_fill(0, 16, 'self::A'));
+    /// $file = sys_get_temp_dir() . '/fold-inc-' . getmypid() . '.php';
+    /// file_put_contents($file, "<?php\nclass C {\n    const A = '$a';\n    const X = $x;\n}\n");
+    /// ini_set('memory_limit', $argv[1]);
+    /// register_shutdown_function(fn () => @unlink($file));
+    /// include $file;
+    /// PHP;
+    /// $f = sys_get_temp_dir() . '/fold-' . getmypid() . '.php';
+    /// file_put_contents($f, $child);
+    /// foreach (['16M', '24M', '32M', '40M', '128M'] as $limit) {
+    ///     foreach (['-n', '-n -d opcache.enable_cli=1 -d opcache.jit=off -d opcache.file_update_protection=0'] as $regime) {
+    ///         echo $limit, ' ', shell_exec(escapeshellarg(PHP_BINARY) . " $regime " . escapeshellarg($f) . " $limit");
+    ///     }
+    /// }
+    /// unlink($f);
+    /// ```
+    /// ```expect process
+    /// 16M Allowed memory size of 16777216 bytes exhausted on line 4
+    /// 16M Allowed memory size of 16777216 bytes exhausted on line 4
+    /// 24M Allowed memory size of 25165824 bytes exhausted on line 4
+    /// 24M Allowed memory size of 25165824 bytes exhausted on line 4
+    /// 32M Allowed memory size of 33554432 bytes exhausted on line 4
+    /// 32M Allowed memory size of 33554432 bytes exhausted on line 4
+    /// 40M 16000000 bytes
+    /// 40M 16000000 bytes
+    /// 128M 16000000 bytes
+    /// 128M 16000000 bytes
+    /// ```
+    pub(crate) fn compile_for_cache(&mut self, source: &[u8], path: &[u8]) -> Fresh {
+        let shared = Arc::clone(&self.shared);
+        let stack = self.stack_limit();
+        let bound = crate::multibyte::bound(self, shared.compile_multibyte());
+        let keys_before = self.keys_made();
+        self.compiling_for_cache(|heap, classes, cwd| {
+            let request = ForRequest {
+                classes,
+                multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
+                keys_before,
+            };
+            shared.compile_file(
+                source,
+                path,
+                cwd,
+                stack,
+                request,
+                CompileHeap::Request(heap),
+            )
+        })
     }
 
     /// What `zend_accel_load_script` is told of a file the cache answered
@@ -1076,6 +1185,90 @@ mod tests {
 
     use super::{Request, Restart};
     use crate::engine::{Engine, RequestDescription};
+    use crate::unit_cache::UnitKey;
+
+    /// A file whose class constant folds sixteen copies of a megabyte.
+    fn folding() -> String {
+        let a = "a".repeat(1_000_000);
+        let x = vec!["self::A"; 16].join(" . ");
+        format!("<?php\nclass C {{\n    const A = '{a}';\n    const X = {x};\n}}\n")
+    }
+
+    /// A compile bound for the cache is charged to the heap of the
+    /// request that asked while it runs: a `memory_limit` that refuses it
+    /// answers that request alone and the cache holds nothing, so the
+    /// next request, with room for it, compiles it and the cache holds
+    /// that; and a compile, refused or not, leaves the request's usage
+    /// where it stood.
+    #[test]
+    fn a_cache_bound_compile_refused_by_the_asking_request_s_limit_is_held_for_no_other() {
+        let files = crate::test::Files::new("charged", &[("fold.php", &folding())]);
+        let file = files.path().join("fold.php");
+        let resolved = std::fs::canonicalize(&file).unwrap_or_default();
+        let path = resolved.as_os_str().as_encoded_bytes().to_vec();
+        let source = std::fs::read(&file).unwrap_or_default();
+        let engine = Engine::builder().build();
+        let start = |limit: &str| {
+            let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+            let code = format!("ini_set('memory_limit', '{limit}');");
+            assert!(
+                req.code_mut()
+                    .eval_stringl(code.as_bytes(), b"limit")
+                    .is_ok()
+            );
+            req
+        };
+        let held = |req: &Request| {
+            (engine.shared.units)
+                .find(&req.arena.files, &UnitKey::full(&path))
+                .is_some()
+        };
+        let class = |req: &Request| req.class_named(php_unit::decl::Bare::resolved(b"c"));
+        let code = format!("require '{}';", file.display());
+
+        for (limit, answers) in [
+            ("16M", crate::unit_cache::Answers::Asker),
+            ("128M", crate::unit_cache::Answers::Every),
+        ] {
+            let mut req = start(limit);
+            let before = req.heap.memory_usage(false);
+            let fresh = req.compile_for_cache(&source, &path);
+            assert_eq!(fresh.answers, answers, "under {limit}");
+            assert_eq!(
+                fresh.unit.is_ok(),
+                answers == crate::unit_cache::Answers::Every
+            );
+            assert_eq!(
+                req.heap.memory_usage(false),
+                before,
+                "nothing stands under {limit}"
+            );
+        }
+
+        // Refused again by the next request under the same limit, as
+        // php's compile is where opcache cached nothing.
+        for _ in 0..2 {
+            let mut refused = start("16M");
+            refused
+                .code_mut()
+                .eval_stringl(code.as_bytes(), b"loader")
+                .ok();
+            assert!(class(&refused).is_none(), "the fold's fatal declared no C");
+            assert!(
+                !held(&refused),
+                "a refusal of the asker's alone is held for no other"
+            );
+        }
+        let mut roomy = start("128M");
+        assert!(
+            roomy
+                .code_mut()
+                .eval_stringl(code.as_bytes(), b"loader")
+                .is_ok()
+        );
+        assert!(class(&roomy).is_some());
+        assert!(held(&roomy), "held once a request with room compiled it");
+    }
 
     /// `accel_activate`'s restart with no wait for `accel_is_inactive`: a
     /// chain of requests on two threads, each started before the one

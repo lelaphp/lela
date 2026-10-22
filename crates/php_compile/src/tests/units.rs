@@ -245,7 +245,7 @@ fn a_fatal_carries_what_the_scanner_raised_before_it() {
                 message: "syntax error, unexpected token \";\"".into(),
                 line: 3,
                 raised: vec![overflow(2)],
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
@@ -261,7 +261,7 @@ fn a_fatal_carries_what_the_scanner_raised_before_it() {
                 message: "The (unset) cast is no longer supported".into(),
                 line: 3,
                 raised: vec![overflow(2), overflow(4)],
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
@@ -318,7 +318,7 @@ fn a_namespace_after_a_statement_is_php_s_compile_error() {
             message: "Namespace declaration statement has to be the very first statement or after any declare call in the script".into(),
             line: 2,
             raised: Vec::new(),
-            thrown: false,
+            raise: crate::Raise::Fatal,
             stage: crate::Stage::Compiling,
             declared: None,
             keys_made: 0,
@@ -349,7 +349,7 @@ fn what_php_refuses_is_the_first_parse_error_in_phps_words() {
                 message: "syntax error, unexpected token \";\"".into(),
                 line: 2,
                 raised: Vec::new(),
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
@@ -362,8 +362,9 @@ fn what_php_refuses_is_the_first_parse_error_in_phps_words() {
 /// An expression the walk cannot emit yet inside parentheses: the
 /// refusal names the expression itself, in the sentence the phpt
 /// lane reads as a construct not read yet, where the reader named
-/// the parenthesis before (#395). A parenthesis nothing closes is
-/// the parser's own refusal, raised before the walk runs.
+/// the parenthesis before (#395), and is [`crate::Raise::Unread`]
+/// (#3215). A parenthesis nothing closes is the parser's own
+/// refusal, raised before the walk runs, and php's fatal.
 #[test]
 fn an_unread_expression_inside_parentheses_names_the_expression() {
     let compiled = || {
@@ -372,7 +373,7 @@ fn an_unread_expression_inside_parentheses_names_the_expression() {
             message: String::from("compiled").into(),
             line: 0,
             raised: Vec::new(),
-            thrown: false,
+            raise: crate::Raise::Fatal,
             stage: crate::Stage::Compiling,
             declared: None,
             keys_made: 0,
@@ -387,8 +388,10 @@ fn an_unread_expression_inside_parentheses_names_the_expression() {
         "a `declare` in the alternative syntax this compiler cannot read yet"
     );
     assert_eq!(error.line, 2);
+    assert_eq!(error.raise, crate::Raise::Unread);
     let unclosed = refused(b"<?php\n$a = (1 + 2;\n").unwrap_or_else(compiled);
     assert_eq!(unclosed.message, "syntax error, unexpected token \";\"");
+    assert_eq!(unclosed.raise, crate::Raise::Fatal);
 }
 
 /// #3029: a refusal carries what landed in php's tables before it,
@@ -424,7 +427,11 @@ fn a_refusal_carries_the_functions_and_the_early_bound_classes_that_landed() {
 fn a_thrown_refusal_carries_nothing_declared() {
     let source = b"<?php\nfunction f() {}\nclass A {}\nif (1) { __HALT_COMPILER(); }\n";
     let refused = refused(source);
-    assert!(refused.as_ref().is_some_and(|error| error.thrown));
+    assert!(
+        refused
+            .as_ref()
+            .is_some_and(|error| error.raise == crate::Raise::Thrown)
+    );
     assert!(refused.is_some_and(|error| error.declared.is_none()));
 }
 

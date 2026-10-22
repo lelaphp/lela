@@ -93,14 +93,16 @@
 //! after it, as `zend_compile_array` emits them.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::num::NonZeroI64;
+use std::rc::Rc;
 
 use php_syntax::tree::{self, Block, Node, NodeId, Stmt, StmtList, TokenId};
 use php_syntax::{Arena, ArenaVec, Holder, Parsed, SyntaxKind, TokenValue};
 
 use php_heap::{
-    Arr, Exponent, Fatal, Intern, Key, Number, Scalar, Zval, ZvalType, double_to_string,
+    Arr, Exponent, Fatal, Intern, Key, Made, Number, Scalar, Zval, ZvalType, double_to_string,
     numeric_prefix,
 };
 use php_link::{Exact, Indexed};
@@ -408,7 +410,7 @@ const FETCH_LOCAL: u32 = 1 << 2;
 
 /// `ZEND_FETCH_GLOBAL` (`Z/Zend/zend_compile.h:1082`), the same slot for
 /// a name `zend_is_auto_global` answers for, printed `(global)`.
-pub(crate) const FETCH_GLOBAL: u32 = 1 << 1;
+const FETCH_GLOBAL: u32 = 1 << 1;
 
 /// `IS_VOID` (`Z/Zend/zend_types.h:637`), the type code `void` carries
 /// in a declared type's mask.
@@ -695,6 +697,11 @@ pub(crate) struct Emit<'a> {
     loop_vars: u32,
     /// The most [`Emit::loop_vars`] has held ([`Unit::loop_vars`]).
     loop_var_peak: u32,
+    /// `CG(delayed_oplines_stack)`, across every op array being
+    /// compiled: how many fetches `zend_delayed_emit_op` holds back now,
+    /// each a [`HeldBack`] standing while its fetch waits to be laid
+    /// down, and the most it has held ([`Unit::delayed_fetches`]).
+    delayed: Rc<DelayedStack>,
     /// `CG(context).fast_call_var`: the temporary the innermost
     /// `finally` keeps its return address and its delayed throwable in,
     /// and none outside one.
@@ -713,6 +720,9 @@ pub(crate) struct Emit<'a> {
     /// The nodes `zend_eval_const_expr` replaced in php's tree, which
     /// every compile after it reads ([`eval`]).
     rewrites: eval::Rewrites,
+    /// The strings a fold made that the node it folded alone holds,
+    /// given back as the node over it consumes them ([`eval`]).
+    claims: eval::Claims,
     /// `op_array->fn_flags` of the op array being compiled, the bits
     /// this compiler reads back.
     fn_flags: FnFlags,
@@ -982,6 +992,36 @@ struct DimLink {
     kind: OperandKind,
     at: u32,
     out: u32,
+    held: HeldBack,
+}
+
+/// `CG(delayed_oplines_stack)` (`Z/Zend/zend_compile.c:425`), a
+/// `zend_stack` of the `zend_op`s `zend_delayed_emit_op` holds back
+/// while the rest of a chain of dimensions and properties compiles
+/// (`:2458`) and `zend_delayed_compile_end` lays down: how many it holds
+/// now and the most it has held. The stack is the compile's, so a chain
+/// in a closure written inside a dimension stands on what the outer
+/// chain holds.
+#[derive(Default)]
+struct DelayedStack {
+    held: Cell<u32>,
+    most: Cell<u32>,
+}
+
+/// One fetch `zend_delayed_emit_op` pushed onto [`DelayedStack`], which
+/// stands on the stack for as long as this lives: beside the held-back
+/// fetch until the fetch is laid down, as `zend_delayed_compile_end`
+/// pops it. One of no stack holds nothing, which is what a fetch php's
+/// compile does not delay carries.
+#[derive(Default)]
+struct HeldBack(Option<Rc<DelayedStack>>);
+
+impl Drop for HeldBack {
+    fn drop(&mut self) {
+        if let Some(stack) = &self.0 {
+            stack.held.set(stack.held.get().saturating_sub(1));
+        }
+    }
 }
 
 /// `zend_delayed_compile_dim`'s `type`, php's `BP_VAR_*` a chain of
@@ -1056,10 +1096,11 @@ const FETCH_REF: u32 = 1;
 /// php's delayed `zend_delayed_compile_prop`: the name's operand with
 /// its cache slots and the `VAR` the fetch writes into, all taken where
 /// the fetch was written and the opline laid down after the value.
-#[derive(Clone, Copy)]
 struct PropLink {
     name: PropName,
     out: u32,
+    /// Its place on the stack while it waits to be laid down.
+    _held: HeldBack,
 }
 
 /// What a chain of dimensions or of property fetches stands on, php's
@@ -1079,25 +1120,62 @@ enum Base {
         container: Box<Base>,
         links: Vec<DimLink>,
     },
+    /// A property's fetch, and what a `?->` under it laid down early,
+    /// which php's stack keeps until the chain ends (`zend_delayed_compile_prop`
+    /// turns each into a `NOP` where it stands).
     Prop {
         object: Box<Base>,
         name: PropName,
         out: u32,
+        held: HeldBack,
+        flushed: Vec<HeldBack>,
     },
+    /// A `static` property's fetch, held back where php's compile delays
+    /// it ([`Emit::hold_base`]) and holding nothing where it does not.
     StaticProp {
         name: (OperandKind, u32),
         class: (OperandKind, u32),
         out: u32,
         slots: u32,
+        held: HeldBack,
     },
     /// A variable fetched by name, `zend_compile_simple_var_no_cv`
     /// with `delayed`: the name's operand, the table and the
-    /// temporary, the opline laid down by [`by_name`].
+    /// temporary, the opline laid down by [`by_name`], held back where
+    /// php's compile delays it ([`Emit::hold_base`]).
     ByName {
         name: (OperandKind, u32),
         table: Symbols,
         out: u32,
+        held: HeldBack,
     },
+}
+
+impl Base {
+    /// Every fetch held back in this base, taken out where a `?->` lays
+    /// them down early, for the stack to keep until the chain ends.
+    fn take_held(&mut self, into: &mut Vec<HeldBack>) {
+        match self {
+            Base::Settled(_) => {}
+            Base::Dim { container, links } => {
+                container.take_held(into);
+                into.extend(links.iter_mut().map(|link| std::mem::take(&mut link.held)));
+            }
+            Base::Prop {
+                object,
+                held,
+                flushed,
+                ..
+            } => {
+                object.take_held(into);
+                into.push(std::mem::take(held));
+                into.append(flushed);
+            }
+            Base::StaticProp { held, .. } | Base::ByName { held, .. } => {
+                into.push(std::mem::take(held));
+            }
+        }
+    }
 }
 
 /// What stands over the last held-back opline of a base, the compile
@@ -1131,6 +1209,20 @@ struct IsLink {
     op2: u32,
     out: u32,
     extended_value: u32,
+    /// Its place on the stack, and what a `?->` under it laid down
+    /// early, which the stack keeps until the chain ends.
+    held: HeldBack,
+    flushed: Vec<HeldBack>,
+}
+
+/// Where a link of a `BP_VAR_IS` chain stands: the outermost, which
+/// `isset` and `??` compile with `zend_compile_var`, or under another,
+/// as the base `zend_delayed_compile_var` compiles. php's compile holds
+/// a fetch by name or of a `static` property back only under another.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Place {
+    Outermost,
+    Under,
 }
 
 /// What stands under one link of a `BP_VAR_IS` chain.
@@ -1139,6 +1231,26 @@ enum Under {
     Link,
     /// The value the chain is read off.
     Value(Where),
+}
+
+/// What an operator's fold answered: a string the fold made that the
+/// node over it reads once, held as the operand's own claim
+/// ([`eval::Claims`]), or a value some other place keeps, a
+/// written operand's, a constant's, or one no claim covers.
+enum Operated {
+    Made(Made),
+    Kept(Zval),
+}
+
+impl Operated {
+    /// The value, kept where it stands: a claim dropped, its string the
+    /// unit's as any other the compile made.
+    fn kept(self) -> Zval {
+        match self {
+            Operated::Made(made) => Zval::string(made.str()),
+            Operated::Kept(value) => value,
+        }
+    }
 }
 
 /// What a magic constant folds to: `__LINE__`'s number, or the string
@@ -1441,6 +1553,7 @@ impl<'a> Emit<'a> {
             static_vars: Vec::new(),
             fold: Fold::Compile,
             rewrites: eval::Rewrites::default(),
+            claims: eval::Claims::default(),
             fn_flags: FnFlags::default(),
             numeric_dims: Vec::new(),
             methods: Vec::new(),
@@ -1456,6 +1569,7 @@ impl<'a> Emit<'a> {
             unwind: Vec::new(),
             loop_vars: 0,
             loop_var_peak: 0,
+            delayed: Rc::default(),
             fast_call_var: None,
             try_catch_offset: None,
             generators: walk::generators(&parsed.tree),
@@ -1533,7 +1647,7 @@ pub(crate) fn unit(
         // slot the refused statement took and never filled ending them.
         // A refusal php throws is the parser's, made before `zend_compile`
         // declared or counted anything, as is a parse error.
-        let bailed = !refused.thrown && refused.level != Level::Parse;
+        let bailed = refused.bailed();
         if bailed {
             refused.keys_made = u32::try_from(emit.runtime_keys.len()).unwrap_or(u32::MAX);
         }
@@ -1578,7 +1692,7 @@ pub(crate) fn unit(
                 .into(),
                 line,
                 raised: std::mem::take(&mut emit.diagnostics),
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
@@ -1613,7 +1727,7 @@ pub(crate) fn unit(
             message: crate::fatal_message(limit).into(),
             line: lines.max(1),
             raised: diagnostics,
-            thrown: false,
+            raise: crate::Raise::Fatal,
             stage: crate::Stage::Compiling,
             declared: None,
             keys_made: u32::try_from(emit.runtime_keys.len()).unwrap_or(u32::MAX),
@@ -1623,16 +1737,7 @@ pub(crate) fn unit(
     // Made where the caller takes it: the main op array is laid in the
     // unit as the unit is.
     let main = emit.op_array(filename, 1, lines.max(1));
-    let delayed_fetches = crate::delayed::most_held(
-        std::iter::once(&main)
-            .chain(
-                (emit.functions_declared.iter())
-                    .chain(&dynamic)
-                    .map(|(_, code)| code),
-            )
-            .chain(emit.methods.iter().map(|method| &method.body))
-            .chain(emit.hooks.iter().map(|hook| &hook.body)),
-    );
+    let delayed_fetches = emit.delayed.most.get();
     Ok(Unit {
         main,
         functions: emit.functions_declared,
@@ -1766,7 +1871,7 @@ fn headers_numbered(oplines: &[Opline], safepoints: &[OplineIdx]) -> Result<(), 
                 .into(),
                 line: op.lineno,
                 raised: Vec::new(),
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
@@ -1906,21 +2011,30 @@ impl<'a> Emit<'a> {
         number
     }
 
-    /// [`Emit::fatal`] over what the heap refused the compile.
+    /// What the heap refused the compile, at the line the compiler
+    /// stands on: `zend_mm`'s limit, which php raises as `E_ERROR` where
+    /// the compile asked for the memory. So it bails out of the compile
+    /// as a compile error does, past what the compile had declared, no
+    /// `try` around an `eval` catches it, and no fold passes over it
+    /// ([`Self::constant_of`] holds all three).
     fn fatal_of(&self, fatal: Fatal) -> CompileError {
-        self.fatal(crate::fatal_message(fatal))
+        let mut refused = self.fatal(crate::fatal_message(fatal));
+        refused.level = Level::Error;
+        refused
     }
 
-    /// The compile-time fatal for what stands on the statement's line:
-    /// this compiler's sentence for what it cannot read yet, which the
-    /// engine renders as the parse error #163 framed it as.
+    /// The compile-time fatal for what stands on the statement's line,
+    /// in this compiler's own sentence at `Level::Parse`, the parse error
+    /// #163 framed it as, which no fold passes over. A construct this
+    /// compiler cannot read yet is [`Self::unread`], which a fold leaves
+    /// unfolded.
     fn fatal(&self, message: impl Into<Cow<'static, str>>) -> CompileError {
         Refused {
             level: Level::Parse,
             message: message.into(),
             line: self.line,
             raised: Vec::new(),
-            thrown: false,
+            raise: crate::Raise::Fatal,
             stage: crate::Stage::Compiling,
             declared: None,
             keys_made: 0,
@@ -1972,6 +2086,14 @@ impl<'a> Emit<'a> {
         }
     }
 
+    /// [`Self::string_marked`] as a claim the one who asked holds alone
+    /// ([`Intern::intern_made`]).
+    fn string_made(&mut self, bytes: &[u8], utf8: bool) -> Result<Made, CompileError> {
+        self.strings
+            .intern_made(bytes, utf8)
+            .map_err(|fatal| self.fatal_of(fatal))
+    }
+
     /// [`Self::string`] of bytes known to be valid UTF-8 where `utf8`
     /// says so ([`Intern::intern_marked`]): a number's text, a fold of two
     /// marked strings.
@@ -1983,14 +2105,87 @@ impl<'a> Emit<'a> {
     }
 
     /// [`Self::constant_expr`] asked for a fold: the value where the
-    /// expression is a constant one, nothing where it is not, and the
-    /// fatal through, since php's compiler leaves the file at
-    /// `E_COMPILE_ERROR` and folds nothing after it.
+    /// expression is a constant one, nothing where it is not or where
+    /// this compiler cannot read it yet, which the compile then meets as
+    /// it stands, and every other refusal through, since php's compiler
+    /// leaves the file at the fatal and folds nothing after it.
+    ///
+    /// So the heap refusing the string a class constant's fold makes is
+    /// the request's `E_ERROR` at the constant's line, as php's
+    /// `zend_eval_const_expr` raises it, and not a node left to the class
+    /// to evaluate; the function the `eval` declared before it stands.
+    /// The constant is folded from a smaller one, so the fold, and not
+    /// the source or its scan, is what outgrows the limit:
+    ///
+    /// ```php
+    /// ini_set('display_errors', '0');
+    /// register_shutdown_function(function () {
+    ///     $e = error_get_last();
+    ///     echo $e['type'], ' ', strtok($e['message'], '('), 'on line ', $e['line'], "\n";
+    ///     var_dump(function_exists('f'), class_exists('C', false));
+    /// });
+    /// $a = str_repeat('a', 1000000);
+    /// $x = implode(' . ', array_fill(0, 16, 'self::A'));
+    /// ini_set('memory_limit', '16M');
+    /// try {
+    ///     eval("function f() {}\nclass C {\n    const A = '$a';\n    const X = $x;\n}");
+    /// } catch (ParseError $e) {
+    ///     echo "caught\n";
+    /// }
+    /// echo "unreached\n";
+    /// ```
+    /// ```expect exit=255
+    /// 1 Allowed memory size of 16777216 bytes exhausted on line 4
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    ///
+    /// What the limit holds is what php's fold holds at once, the string
+    /// it makes beside the operands it reads, each operand freed once the
+    /// node over it stands ([`eval::Claims`]): never the sum of the
+    /// strings the chain made on the way. So sixteen copies of a megabyte
+    /// fold under `memory_limit=40M`, and not under 32M, with opcache and
+    /// without it:
+    ///
+    /// ```php
+    /// $child = <<<'PHP'
+    /// <?php
+    /// ini_set('display_errors', '0');
+    /// register_shutdown_function(function () {
+    ///     $e = error_get_last();
+    ///     echo $e ? strtok($e['message'], '(') . 'on line ' . $e['line'] : strlen(C::X) . ' bytes', "\n";
+    /// });
+    /// $a = str_repeat('a', 1000000);
+    /// $x = implode(' . ', array_fill(0, 16, 'self::A'));
+    /// ini_set('memory_limit', $argv[1]);
+    /// eval("class C {\n    const A = '$a';\n    const X = $x;\n}");
+    /// PHP;
+    /// $f = sys_get_temp_dir() . '/fold-' . getmypid() . '.php';
+    /// file_put_contents($f, $child);
+    /// foreach (['16M', '24M', '32M', '40M', '128M'] as $limit) {
+    ///     foreach (['-n', '-n -d opcache.enable_cli=1 -d opcache.jit=off'] as $regime) {
+    ///         echo $limit, ' ', shell_exec(escapeshellarg(PHP_BINARY) . " $regime " . escapeshellarg($f) . " $limit");
+    ///     }
+    /// }
+    /// unlink($f);
+    /// ```
+    /// ```expect process
+    /// 16M Allowed memory size of 16777216 bytes exhausted on line 3
+    /// 16M Allowed memory size of 16777216 bytes exhausted on line 3
+    /// 24M Allowed memory size of 25165824 bytes exhausted on line 3
+    /// 24M Allowed memory size of 25165824 bytes exhausted on line 3
+    /// 32M Allowed memory size of 33554432 bytes exhausted on line 3
+    /// 32M Allowed memory size of 33554432 bytes exhausted on line 3
+    /// 40M 16000000 bytes
+    /// 40M 16000000 bytes
+    /// 128M 16000000 bytes
+    /// 128M 16000000 bytes
+    /// ```
     pub(crate) fn constant_of(&mut self, expr: tree::Expr) -> Result<Option<Zval>, CompileError> {
         match self.constant_expr(expr) {
             Ok(value) => Ok(Some(value)),
-            Err(Unfolded::Refused(refused)) if refused.level == Level::CompileError => Err(refused),
-            Err(Unfolded::NoConstant(_) | Unfolded::Refused(_)) => Ok(None),
+            Err(Unfolded::NoConstant(_) | Unfolded::Unread(_)) => Ok(None),
+            Err(Unfolded::Refused(refused)) => Err(refused),
         }
     }
 
@@ -2148,18 +2343,18 @@ impl<'a> Emit<'a> {
             // `CompileError`, a top statement being walked by
             // `top_statements`.
             Stmt::HaltCompilerStmt(_) => {
-                let mut thrown = self
-                    .compile_error("__HALT_COMPILER() can only be used from the outermost scope");
-                thrown.thrown = true;
-                return Err(thrown);
+                return Err(walk::thrown(
+                    self.line,
+                    "__HALT_COMPILER() can only be used from the outermost scope",
+                ));
             }
         }
         Ok(())
     }
 
     /// The refusal for a construct this compiler cannot emit yet, at
-    /// the line the emitter stands on: the `Level::Parse` sentence the
-    /// phpt lane reads as unread.
+    /// the line the emitter stands on: [`crate::Raise::Unread`], whose
+    /// sentence the phpt lane reads as unread ([`walk::unread`]).
     fn unread(&self, what: &str) -> CompileError {
         walk::unread(self.line, what)
     }
@@ -2549,7 +2744,10 @@ impl<'a> Emit<'a> {
         let (receiver, links) = self.prop_chain(object, Fetch::Rw)?;
         let name = self.prop_name(name)?;
         let out = self.temporary();
+        // The step is the chain's last held-back `FETCH_OBJ_RW`.
+        let held = self.held_back();
         let (op1_type, op1) = self.prop_fetches(receiver, &links, Fetch::Rw);
+        drop(held);
         self.push(Opline {
             opcode: match (pre, up) {
                 (true, true) => Opcode::PreIncObj,
@@ -3123,13 +3321,17 @@ impl<'a> Emit<'a> {
                     return Err(self.fatal("an `unset` of an element that is no dimension"));
                 };
                 let (base, index) = (self.parsed.tree[id].base, self.parsed.tree[id].index);
-                let container = self.delayed_var(base, Fetch::Unset)?;
+                let mut container = self.delayed_var(base, Fetch::Unset)?;
+                self.hold_base(&mut container);
                 let Some(index) = index else {
                     return Err(walk::refused(line, "Cannot use [] for unsetting"));
                 };
                 let dim = self.expr(index)?;
                 let (op2_type, op2) = self.dim_operand(dim);
+                // The `UNSET_DIM` is the held-back `FETCH_DIM_UNSET`.
+                let held = self.held_back();
                 let (op1_type, op1) = self.base_fetch(container, Fetch::Unset, Over::Dim);
+                drop(held);
                 self.push(Opline {
                     opcode: Opcode::UnsetDim,
                     op1_type,
@@ -3142,7 +3344,10 @@ impl<'a> Emit<'a> {
             Target::Prop { object, name } => {
                 let object = self.delayed_object(object, Fetch::Unset)?;
                 let name = self.prop_name(name)?;
+                // The `UNSET_OBJ` is the held-back `FETCH_OBJ_UNSET`.
+                let held = self.held_back();
                 let (op1_type, op1) = self.base_fetch(object, Fetch::Unset, Over::Obj);
+                drop(held);
                 self.push(Opline {
                     opcode: Opcode::UnsetObj,
                     op1_type,
@@ -3501,7 +3706,7 @@ impl<'a> Emit<'a> {
         enclosing: Option<u32>,
     ) -> Result<(), CompileError> {
         let Some(var) = self.fast_call_var else {
-            return Err(self.fatal("InternalError: a `finally` with no fast-call temporary"));
+            return Err(self.internal("a `finally` with no fast-call temporary"));
         };
         self.unwind.pop();
         self.unwind.push(Unwind::DiscardException {
@@ -4086,8 +4291,7 @@ impl<'a> Emit<'a> {
             match active.and_then(|at| self.classes.get(at).map(|decl| (at, decl))) {
                 Some((at, decl)) => (at, decl.kind, decl.properties.len()),
                 None => {
-                    return Err(self
-                        .fatal("InternalError: a promoted property of a class the unit has not"));
+                    return Err(self.internal("a promoted property of a class the unit has not"));
                 }
             };
         let (hooks, is_virtual) = match &parameter.hooks {
@@ -4135,9 +4339,7 @@ impl<'a> Emit<'a> {
             self.hooked_property_verified(decl, &declared)?;
         }
         let Some(decl) = self.classes.get_mut(at) else {
-            return Err(
-                self.fatal("InternalError: a promoted property of a class the unit has not")
-            );
+            return Err(self.internal("a promoted property of a class the unit has not"));
         };
         decl.properties.push(declared);
         Ok(())
@@ -4171,7 +4373,7 @@ impl<'a> Emit<'a> {
             .get(class)
             .map(|decl| (decl.name.0.to_vec(), decl.kind, decl.flags))
         else {
-            return Err(self.fatal("InternalError: a method of a class the unit has not"));
+            return Err(self.internal("a method of a class the unit has not"));
         };
         let name = method.function.name.clone();
         let is_abstract = self.begin_method_decl(&class_name, kind, flags, method)?;
@@ -4215,7 +4417,7 @@ impl<'a> Emit<'a> {
         self.line = method.function.line;
         self.magic_method(&class_name, &declared)?;
         let Some(decl) = self.classes.get_mut(class) else {
-            return Err(self.fatal("InternalError: a method of a class the unit has not"));
+            return Err(self.internal("a method of a class the unit has not"));
         };
         // `add_stringable_interface`: a class that declares
         // `__toString` implements `Stringable`, written or not.
@@ -6119,7 +6321,7 @@ impl<'a> Emit<'a> {
     ) -> Result<ConstExpr, CompileError> {
         if !constant.is_case {
             let Some(value) = constant.value else {
-                return Err(self.fatal("InternalError: a class constant with no value"));
+                return Err(self.internal("a class constant with no value"));
             };
             return self.const_expr(value);
         }
@@ -6150,7 +6352,7 @@ impl<'a> Emit<'a> {
     /// `zend_verify_enum` refuses them when the class links.
     fn enum_funcs_registered(&mut self, at: usize) -> Result<(), CompileError> {
         let Some(decl) = self.classes.get_mut(at) else {
-            return Err(self.fatal("InternalError: an enum the unit has not"));
+            return Err(self.internal("an enum the unit has not"));
         };
         decl.methods.extend(php_unit::enum_methods(decl.backing));
         Ok(())
@@ -6189,7 +6391,7 @@ impl<'a> Emit<'a> {
     ) -> Result<(), CompileError> {
         let Some((kind, backing)) = self.classes.get(at).map(|decl| (decl.kind, decl.backing))
         else {
-            return Err(self.fatal("InternalError: a constant of a class the unit has not"));
+            return Err(self.internal("a constant of a class the unit has not"));
         };
         self.line = constant.line;
         let member = format!(
@@ -6238,7 +6440,7 @@ impl<'a> Emit<'a> {
         }
         let attributes = self.case_attributes(constant)?;
         let Some(decl) = self.classes.get_mut(at) else {
-            return Err(self.fatal("InternalError: a constant of a class the unit has not"));
+            return Err(self.internal("a constant of a class the unit has not"));
         };
         decl.constants.push(ClassConstDecl {
             name: Name(constant.name.clone().into_boxed_slice()),
@@ -6750,7 +6952,7 @@ impl<'a> Emit<'a> {
                 message: message.into(),
                 line,
                 raised: Vec::new(),
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
@@ -6842,7 +7044,7 @@ impl<'a> Emit<'a> {
         let Some((kind, is_readonly_class, declared_before)) = (self.classes.get(at))
             .map(|decl| (decl.kind, decl.flags.is_readonly, decl.properties.len()))
         else {
-            return Err(self.fatal("InternalError: a property of a class the unit has not"));
+            return Err(self.internal("a property of a class the unit has not"));
         };
         self.line = property.line;
         if kind == ClassKind::Enum {
@@ -6939,7 +7141,7 @@ impl<'a> Emit<'a> {
             self.hooked_property_verified(decl, &declared)?;
         }
         let Some(decl) = self.classes.get_mut(at) else {
-            return Err(self.fatal("InternalError: a property of a class the unit has not"));
+            return Err(self.internal("a property of a class the unit has not"));
         };
         decl.properties.push(declared);
         Ok(())
@@ -7521,7 +7723,7 @@ impl<'a> Emit<'a> {
                 message: refused.refusal.to_string().into(),
                 line: refused.site.line,
                 raised: Vec::new(),
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
@@ -7842,7 +8044,7 @@ impl<'a> Emit<'a> {
                     // arm: a constant of the class being declared is
                     // its value ([`Self::active_class_constant`]).
                     if let Some(value) = self.active_class_constant(&class, name)? {
-                        return self.folded(value);
+                        return self.folded(value.kept());
                     }
                     Ok(ConstExpr::ClassConstant {
                         class: Name(class.into_boxed_slice()),
@@ -7884,7 +8086,7 @@ impl<'a> Emit<'a> {
                         FETCH_CLASS_SELF => b"self",
                         FETCH_CLASS_PARENT => b"parent",
                         _ => {
-                            return Err(self.fatal("InternalError: a class name that did not fold"));
+                            return Err(self.internal("a class name that did not fold"));
                         }
                     };
                     Ok(ConstExpr::ClassName {
@@ -8123,7 +8325,7 @@ impl<'a> Emit<'a> {
             // walk refuses that folds to nothing.
             _ => match self.eval_const(expr)? {
                 Some(folded) => self.folded(folded),
-                None => Err(self.fatal("a constant expression this compiler cannot read yet")),
+                None => Err(self.unread("a constant expression")),
             },
         }
     }
@@ -8171,13 +8373,21 @@ impl<'a> Emit<'a> {
     /// interned where the unit's strings are; none for one still to
     /// evaluate.
     fn value_of(&mut self, expr: &ConstExpr) -> Result<Option<Zval>, CompileError> {
+        Ok(self.operated_of(expr)?.map(Operated::kept))
+    }
+
+    /// [`Self::value_of`] as its reader holds it: a string made afresh
+    /// for the read is the reader's alone ([`Operated::Made`]), which a
+    /// fold gives back once the node over it stands, as php's operand
+    /// that `ZVAL_COPY_OR_DUP` copied out of the constant is freed there.
+    fn operated_of(&mut self, expr: &ConstExpr) -> Result<Option<Operated>, CompileError> {
         Ok(Some(match expr {
-            ConstExpr::Null => Zval::null(),
-            ConstExpr::Bool(b) => Zval::bool(*b),
-            ConstExpr::Long { value, .. } => Zval::long(*value),
-            ConstExpr::Double(d) => Zval::double(*d),
-            ConstExpr::Str(bytes) => self.string(bytes)?,
-            ConstExpr::ImmutableArray(array) => array.value(),
+            ConstExpr::Null => Operated::Kept(Zval::null()),
+            ConstExpr::Bool(b) => Operated::Kept(Zval::bool(*b)),
+            ConstExpr::Long { value, .. } => Operated::Kept(Zval::long(*value)),
+            ConstExpr::Double(d) => Operated::Kept(Zval::double(*d)),
+            ConstExpr::Str(bytes) => Operated::Made(self.string_made(bytes, false)?),
+            ConstExpr::ImmutableArray(array) => Operated::Kept(array.value()),
             _ => return Ok(None),
         }))
     }
@@ -8185,8 +8395,7 @@ impl<'a> Emit<'a> {
     /// A value `zend_eval_const_expr` folded, as the constant expression
     /// a declaration keeps.
     fn folded(&self, folded: Zval) -> Result<ConstExpr, CompileError> {
-        folded_const_expr(folded)
-            .ok_or_else(|| self.fatal("a constant expression this compiler cannot read yet"))
+        folded_const_expr(folded).ok_or_else(|| self.unread("a constant expression"))
     }
 
     /// [`Self::const_expr`] for an expression evaluated each time it is
@@ -8521,20 +8730,17 @@ impl<'a> Emit<'a> {
     }
 
     /// `zend_is_allowed_in_const_expr`'s refusal, php's
-    /// `Constant expression contains invalid operations`, unless the
-    /// node is one this compiler cannot read yet, whose own refusal
-    /// stands instead so the phpt lane counts the file as unread: an
+    /// `Constant expression contains invalid operations`, for a node
+    /// that is no constant. A node this compiler cannot read yet keeps
+    /// its own refusal, so the phpt lane counts the file as unread (an
     /// argument list with a `...` in it is php's first-class callable,
-    /// which its walk allows and this does not read.
+    /// which its walk allows and this does not read), and every other
+    /// refusal the fold met is the answer as it stands.
     fn const_refused(&mut self, expr: tree::Expr) -> Result<ConstExpr, CompileError> {
         match self.constant_expr(expr) {
             Ok(folded) => self.folded(folded),
-            Err(Unfolded::Refused(refused))
-                if unread(&refused) || refused.level == Level::CompileError =>
-            {
-                Err(refused)
-            }
-            Err(Unfolded::NoConstant(_) | Unfolded::Refused(_)) => {
+            Err(Unfolded::Unread(refused) | Unfolded::Refused(refused)) => Err(refused),
+            Err(Unfolded::NoConstant(_)) => {
                 Err(self.compile_error("Constant expression contains invalid operations"))
             }
         }
@@ -8732,7 +8938,7 @@ impl<'a> Emit<'a> {
             return Ok(());
         }
         let Some((name, value, unevaluated)) = declared else {
-            return Err(self.fatal("InternalError: an attributed `const` that declared nothing"));
+            return Err(self.internal("an attributed `const` that declared nothing"));
         };
         let first = self
             .list(node.const_declarators)
@@ -8747,9 +8953,7 @@ impl<'a> Emit<'a> {
         // The value `ZEND_DECLARE_ATTRIBUTED_CONST` evaluates, which a
         // value the compiler could not fold is the tree of.
         let Some(value) = unevaluated.or_else(|| folded_const_expr(value)) else {
-            return Err(
-                self.fatal("InternalError: an attributed `const` whose value folded to no scalar")
-            );
+            return Err(self.internal("an attributed `const` whose value folded to no scalar"));
         };
         let at = u32::try_from(self.attributed_constants.len()).unwrap_or(u32::MAX);
         self.attributed_constants.push(ConstDecl {
@@ -10164,7 +10368,7 @@ impl<'a> Emit<'a> {
                 message: message.into(),
                 line,
                 raised: Vec::new(),
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
@@ -10280,7 +10484,7 @@ impl<'a> Emit<'a> {
                 message: String::from(refused).into(),
                 line,
                 raised: Vec::new(),
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
@@ -10902,7 +11106,7 @@ impl<'a> Emit<'a> {
             message: message.into(),
             line: self.line,
             raised: Vec::new(),
-            thrown: false,
+            raise: crate::Raise::Fatal,
             stage: crate::Stage::Compiling,
             declared: None,
             keys_made: 0,
@@ -11988,7 +12192,7 @@ impl<'a> Emit<'a> {
         // cache slots of a property stand in `extended_value` where the
         // fetch left them, `ZEND_ISEMPTY` in the bit below them.
         let mut delayed = Vec::new();
-        self.silent_link(var, &mut delayed)?;
+        self.silent_link(var, &mut delayed, Place::Outermost)?;
         let Some(last) = delayed.last_mut() else {
             return Err(self.fatal("an `isset` over a chain with no link"));
         };
@@ -12148,7 +12352,7 @@ impl<'a> Emit<'a> {
     fn yield_expr(&mut self, id: NodeId<tree::YieldExpr>) -> Result<Where, CompileError> {
         self.mark_function_as_generator()?;
         if !self.fn_flags.generator {
-            return Err(self.fatal("InternalError: a `yield` in a body the scan found none in"));
+            return Err(self.internal("a `yield` in a body the scan found none in"));
         }
         let node = self.parsed.tree[id];
         let key = match node.key {
@@ -12217,7 +12421,7 @@ impl<'a> Emit<'a> {
     fn yield_from(&mut self, id: NodeId<tree::YieldFromExpr>) -> Result<Where, CompileError> {
         self.mark_function_as_generator()?;
         if !self.fn_flags.generator {
-            return Err(self.fatal("InternalError: a `yield` in a body the scan found none in"));
+            return Err(self.internal("a `yield` in a body the scan found none in"));
         }
         if self.returns_by_ref {
             return Err(
@@ -12602,7 +12806,7 @@ impl<'a> Emit<'a> {
         // auto-global, is `FETCH_IS` by its name.
         if self.is_by_name(expr) {
             let mut delayed = Vec::new();
-            return match self.silent_under(expr, &mut delayed)? {
+            return match self.silent_under(expr, &mut delayed, Place::Outermost)? {
                 Under::Value(value) => Ok(value),
                 Under::Link => match self.lay_silent(&mut delayed, None) {
                     Some(out) => Ok(Where::Temporary(out)),
@@ -12615,7 +12819,7 @@ impl<'a> Emit<'a> {
         }
         let checkpoint = self.short_circuits.len();
         let mut delayed = Vec::new();
-        self.silent_link(expr, &mut delayed)?;
+        self.silent_link(expr, &mut delayed, Place::Outermost)?;
         let Some(out) = self.lay_silent(&mut delayed, None) else {
             return Err(self.fatal("a `??` over a chain with no link"));
         };
@@ -12658,13 +12862,14 @@ impl<'a> Emit<'a> {
         &mut self,
         expr: tree::Expr,
         delayed: &mut Vec<IsLink>,
+        place: Place,
     ) -> Result<(), CompileError> {
         let line = self.line_of(expr);
         match self.peel(expr) {
             tree::Expr::SubscriptExpr(id) => {
                 let node = &self.parsed.tree[id];
                 let (container, index) = (node.base, node.index);
-                let under = self.silent_under(container, delayed)?;
+                let under = self.silent_under(container, delayed, Place::Under)?;
                 let Some(index) = index else {
                     return Err(self.compile_error("Cannot use [] for reading"));
                 };
@@ -12679,6 +12884,8 @@ impl<'a> Emit<'a> {
                     op2,
                     out,
                     extended_value: 0,
+                    held: self.held_back(),
+                    flushed: Vec::new(),
                 });
                 Ok(())
             }
@@ -12691,16 +12898,22 @@ impl<'a> Emit<'a> {
                 // `?->` stands over. Under a dimension `$this` is no
                 // receiver but `zend_compile_simple_var`'s temporary
                 // ([`Self::silent_under`]).
+                let mut flushed = Vec::new();
                 let op1 = if self.is_this(object) {
                     Some(self.receiver_of(object)?)
                 } else {
-                    let mut under = self.silent_under(object, delayed)?;
+                    let mut under = self.silent_under(object, delayed, Place::Under)?;
                     // A `?->`: the links under it laid down now and the
                     // `JMP_NULL` over what they left, as
-                    // `zend_delayed_compile_prop` flushes them.
+                    // `zend_delayed_compile_prop` flushes them, each a `NOP`
+                    // the stack holds until the chain ends.
                     if self.is_nullsafe(id) {
                         let pair = match under {
                             Under::Link => {
+                                for link in delayed.iter_mut() {
+                                    flushed.push(std::mem::take(&mut link.held));
+                                    flushed.append(&mut link.flushed);
+                                }
                                 let out = self.lay_silent(delayed, None).unwrap_or_default();
                                 under = Under::Value(Where::Temporary(out));
                                 (OperandKind::Tmp, out)
@@ -12720,6 +12933,8 @@ impl<'a> Emit<'a> {
                     op2: name.at,
                     out,
                     extended_value: name.slots,
+                    held: self.held_back(),
+                    flushed,
                 });
                 Ok(())
             }
@@ -12736,6 +12951,12 @@ impl<'a> Emit<'a> {
                     slots: extended_value,
                 } = self.static_operands(class, &name)?;
                 let out = self.temporary();
+                // `zend_compile_static_prop` holds it back only under
+                // another link, where `zend_delayed_compile_var` compiles it.
+                let held = match place {
+                    Place::Under => self.held_back(),
+                    Place::Outermost => HeldBack::default(),
+                };
                 delayed.push(IsLink {
                     opcode: Opcode::FetchStaticPropIs,
                     op1: Some(name),
@@ -12743,6 +12964,8 @@ impl<'a> Emit<'a> {
                     op2,
                     out,
                     extended_value,
+                    held,
+                    flushed: Vec::new(),
                 });
                 Ok(())
             }
@@ -12774,10 +12997,19 @@ impl<'a> Emit<'a> {
         &mut self,
         expr: tree::Expr,
         delayed: &mut Vec<IsLink>,
+        place: Place,
     ) -> Result<Under, CompileError> {
         if self.is_by_name(expr) {
             return Ok(match self.delayed_named(expr, Fetch::Is)? {
-                Some(Base::ByName { name, table, out }) => {
+                Some(Base::ByName {
+                    name, table, out, ..
+                }) => {
+                    // Held back only under another link, as
+                    // `zend_delayed_compile_var` compiles it with `delayed`.
+                    let held = match place {
+                        Place::Under => self.held_back(),
+                        Place::Outermost => HeldBack::default(),
+                    };
                     delayed.push(IsLink {
                         opcode: Opcode::FetchIs,
                         op1: Some(name),
@@ -12785,6 +13017,8 @@ impl<'a> Emit<'a> {
                         op2: 0,
                         out,
                         extended_value: table.fetch_type(),
+                        held,
+                        flushed: Vec::new(),
                     });
                     Under::Link
                 }
@@ -12794,7 +13028,7 @@ impl<'a> Emit<'a> {
             });
         }
         if self.is_fetch(expr) {
-            self.silent_link(expr, delayed)?;
+            self.silent_link(expr, delayed, place)?;
             return Ok(Under::Link);
         }
         Ok(Under::Value(self.chain_link_under(expr, Fetch::Is)?))
@@ -13163,7 +13397,9 @@ impl<'a> Emit<'a> {
             }
             Target::Cv(name) => Base::Settled((OperandKind::Cv, self.lookup_cv(name))),
             Target::Dim(_) | Target::ByName(_) | Target::Prop { .. } => {
-                self.delayed_var(target, Fetch::Write)?
+                let mut held = self.delayed_var(target, Fetch::Write)?;
+                self.hold_base(&mut held);
+                held
             }
             Target::List(_) => {
                 return Err(walk::unread(
@@ -13181,7 +13417,10 @@ impl<'a> Emit<'a> {
         // fetch becomes `ASSIGN_OBJ_REF` over the object's own fetch,
         // `ZEND_FETCH_REF` off and `ZEND_RETURNS_FUNCTION` on, the source
         // in the `OP_DATA` after it, and the fetch's `VAR` what it leaves.
-        if let Base::Prop { object, name, out } = held {
+        if let Base::Prop {
+            object, name, out, ..
+        } = held
+        {
             let (op1_type, op1) = self.base_fetch(*object, Fetch::Write, Over::Obj);
             self.push(Opline {
                 opcode: Opcode::AssignObjRef,
@@ -13300,7 +13539,8 @@ impl<'a> Emit<'a> {
             dimensions.push(node.index);
             base = self.peel(node.base);
         }
-        let container = self.delayed_var(base, fetch)?;
+        let mut container = self.delayed_var(base, fetch)?;
+        self.hold_base(&mut container);
         let mut links = Vec::with_capacity(dimensions.len());
         for index in dimensions.clone().iter().rev() {
             let (kind, at) = match index {
@@ -13318,13 +13558,55 @@ impl<'a> Emit<'a> {
                 }
                 None => (OperandKind::Unused, 0),
             };
+            let out = self.temporary();
             links.push(DimLink {
                 kind,
                 at,
-                out: self.temporary(),
+                out,
+                held: self.held_back(),
             });
         }
         Ok((container, links))
+    }
+
+    /// `zend_delayed_emit_op`'s push of one fetch onto
+    /// `CG(delayed_oplines_stack)` (`Z/Zend/zend_compile.c:2458`), which
+    /// stands there while what this answers lives, and the most the stack
+    /// has held taken in. An assignment to a variable a variable names
+    /// holds its `FETCH_W` back, which lays the stack's sixteen, 512
+    /// bytes, where the plain one keeps a name `$$n` makes none of; and a
+    /// chain whose dimension is a chain of its own holds the outer's
+    /// fetches beneath the inner's, so ten over ten grow it past sixteen:
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); eval('$n = "zz"; $o = 1;'); $plain = memory_get_usage() - $m;
+    /// $m = memory_get_usage(); eval('$n = "zz"; $$n = 1;'); echo memory_get_usage() - $m - $plain, "\n";
+    /// $a = 1; $b = 1;
+    /// $nested = '$c = $a' . str_repeat('[0]', 10) . '[$b' . str_repeat('[0]', 10) . '];';
+    /// $flat = str_pad('$c = $a[0]', strlen($nested) - 1) . ';';
+    /// @eval($flat); @eval($flat);
+    /// $m = memory_get_usage(); @eval($nested); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 480
+    /// 512
+    /// ```
+    fn held_back(&self) -> HeldBack {
+        let stack = &self.delayed;
+        let held = stack.held.get().saturating_add(1);
+        stack.held.set(held);
+        stack.most.set(stack.most.get().max(held));
+        HeldBack(Some(Rc::clone(stack)))
+    }
+
+    /// A chain's base held back where it is a fetch by name or of a
+    /// `static` property: `zend_delayed_compile_var` compiles each with
+    /// `delayed`, where `zend_compile_var` at the outermost compiles it in
+    /// place and holds nothing.
+    fn hold_base(&self, base: &mut Base) {
+        if let Base::StaticProp { held, .. } | Base::ByName { held, .. } = base {
+            *held = self.held_back();
+        }
     }
 
     /// `zend_delayed_compile_var` (`Z/Zend/zend_compile.c:12019`), the
@@ -13390,22 +13672,27 @@ impl<'a> Emit<'a> {
             (tree::Expr::MemberAccessExpr(id), _) => {
                 let name = self.member_of(id)?;
                 let object = self.parsed.tree[id].obj;
-                let mut held = self.delayed_object(object, fetch)?;
+                let mut object_held = self.delayed_object(object, fetch)?;
                 // `zend_delayed_compile_prop` under a `?->`: what the
                 // object's chain held back is laid down now, and the
                 // `JMP_NULL` over it stands before the member's own fetch.
+                // php turns each into a `NOP` on the stack, which holds
+                // it until the chain ends.
+                let mut flushed = Vec::new();
                 if self.is_nullsafe(id) && !self.is_this(object) {
-                    let settled = self.base_fetch(held, fetch, Over::Obj);
+                    object_held.take_held(&mut flushed);
+                    let settled = self.base_fetch(object_held, fetch, Over::Obj);
                     self.jmp_null(settled, fetch == Fetch::Is);
-                    held = Base::Settled(settled);
+                    object_held = Base::Settled(settled);
                 }
-                let object = held;
                 let name = self.prop_name(name)?;
                 let out = self.temporary();
                 Base::Prop {
-                    object: Box::new(object),
+                    object: Box::new(object_held),
                     name,
                     out,
+                    held: self.held_back(),
+                    flushed,
                 }
             }
             // `zend_compile_static_prop` with `delayed`, the other
@@ -13424,6 +13711,7 @@ impl<'a> Emit<'a> {
                     class,
                     out,
                     slots,
+                    held: HeldBack::default(),
                 }
             }
             // `zend_compile_simple_var`'s `is_this_fetch` arm under
@@ -13491,7 +13779,9 @@ impl<'a> Emit<'a> {
         if self.is_this(object) {
             return Ok(Base::Settled(self.receiver(object)?));
         }
-        self.delayed_var(object, fetch)
+        let mut base = self.delayed_var(object, fetch)?;
+        self.hold_base(&mut base);
+        Ok(base)
     }
 
     /// The fetch oplines of a chain, each the container of the next, and
@@ -13582,13 +13872,17 @@ impl<'a> Emit<'a> {
         };
         match container {
             Base::Settled(pair) => pair,
-            Base::ByName { name, table, out } => self.lay_fetch_by_name(name, table, out, fetch),
+            Base::ByName {
+                name, table, out, ..
+            } => self.lay_fetch_by_name(name, table, out, fetch),
             // `zend_delayed_compile_dim`'s own oplines, every link of
             // the chain laid down here: the one the chain over this
             // base reads is the last of them, and it is the one `over`
             // patches.
             Base::Dim { container, links } => self.dim_fetches(*container, &links, fetch, over),
-            Base::Prop { object, name, out } => {
+            Base::Prop {
+                object, name, out, ..
+            } => {
                 let (op1_type, op1) = self.base_fetch(*object, fetch, Over::Obj);
                 self.push(Opline {
                     opcode: match fetch {
@@ -13615,6 +13909,7 @@ impl<'a> Emit<'a> {
                 class: (class_type, class_at),
                 out,
                 slots,
+                ..
             } => {
                 self.push(Opline {
                     opcode: match fetch {
@@ -13815,12 +14110,16 @@ impl<'a> Emit<'a> {
         let (base, links) = self.prop_chain(object, Fetch::Write)?;
         let name = self.prop_name(name)?;
         let out = self.temporary();
+        // The `ASSIGN_OBJ` is the chain's last held-back `FETCH_OBJ_W`,
+        // laid down after the value.
+        let held = self.held_back();
         // The delayed fetch's line, as [`Self::assign_dim`] keeps it.
         let line = self.line;
         let value = self.source(value)?;
         let (data_type, data) = self.operand(value);
         self.line = line;
         let (op1_type, op1) = self.prop_fetches(base, &links, Fetch::Write);
+        drop(held);
         self.push(Opline {
             opcode: Opcode::AssignObj,
             op1_type,
@@ -13868,6 +14167,9 @@ impl<'a> Emit<'a> {
             slots,
         } = self.static_operands(class, name)?;
         let out = self.temporary();
+        // `zend_delayed_compile_var`'s one held-back fetch, laid down
+        // after the value.
+        let held = self.held_back();
         // The delayed fetch's line, as [`Self::assign_dim`] keeps it.
         let line = self.line;
         let value = self.source(value)?;
@@ -13890,6 +14192,7 @@ impl<'a> Emit<'a> {
             op1: data,
             ..Opline::default()
         });
+        drop(held);
         Ok(Where::Temporary(out))
     }
 
@@ -13976,11 +14279,14 @@ impl<'a> Emit<'a> {
         let (receiver, links) = self.prop_chain(object, Fetch::Rw)?;
         let name = self.prop_name(name)?;
         let out = self.temporary();
+        // The `ASSIGN_OBJ_OP` is the chain's last held-back `FETCH_OBJ_RW`.
+        let held = self.held_back();
         // The delayed fetch's line, as [`Self::assign_prop`] keeps it.
         let line = self.line;
         let value = self.expr(value)?;
         let (data_type, data) = self.operand(value);
         let (op1_type, op1) = self.prop_fetches(receiver, &links, Fetch::Rw);
+        drop(held);
         self.line = line;
         self.push(Opline {
             opcode: Opcode::AssignObjOp,
@@ -14030,7 +14336,11 @@ impl<'a> Emit<'a> {
         for &name in names.iter().rev() {
             let name = self.prop_name(name)?;
             let out = self.temporary();
-            links.push(PropLink { name, out });
+            links.push(PropLink {
+                name,
+                out,
+                _held: self.held_back(),
+            });
         }
         Ok((receiver, links))
     }
@@ -14089,6 +14399,9 @@ impl<'a> Emit<'a> {
             slots,
         } = self.static_operands(class, name)?;
         let out = self.temporary();
+        // `zend_delayed_compile_var`'s one held-back fetch, laid down
+        // after the value.
+        let held = self.held_back();
         // The delayed fetch's line, as [`Self::assign_static_prop`]
         // keeps it.
         let line = self.line;
@@ -14113,6 +14426,7 @@ impl<'a> Emit<'a> {
             extended_value: slots,
             ..Opline::default()
         });
+        drop(held);
         Ok(Where::Temporary(out))
     }
 
@@ -14183,6 +14497,9 @@ impl<'a> Emit<'a> {
             slots,
         } = self.static_operands(class, name)?;
         let out = self.temporary();
+        // `zend_delayed_compile_var`'s one held-back fetch, laid down
+        // after the value.
+        let held = self.held_back();
         let (data_type, data, flags) = self.ref_source_of(source, false)?;
         self.push(Opline {
             opcode: Opcode::AssignStaticPropRef,
@@ -14201,6 +14518,7 @@ impl<'a> Emit<'a> {
             op1: data,
             ..Opline::default()
         });
+        drop(held);
         Ok(Where::Returned(out))
     }
 
@@ -14479,6 +14797,15 @@ impl<'a> Emit<'a> {
         left: Zval,
         right: Zval,
     ) -> Result<Option<Zval>, CompileError> {
+        Ok(self
+            .concat_made(left, right)?
+            .map(|made| Zval::string(made.str())))
+    }
+
+    /// [`Self::concat_fold`]'s string as the claim of the one who asked
+    /// ([`Made`]), which hands it back once it is read
+    /// ([`Self::binary_constant`]) or keeps it by dropping the claim.
+    fn concat_made(&mut self, left: Zval, right: Zval) -> Result<Option<Made>, CompileError> {
         // `zend_binary_op_produces_error`'s concatenation arm: an array
         // on either side is the warning left to the request, and no
         // conversion is made of the other side here.
@@ -14495,7 +14822,7 @@ impl<'a> Emit<'a> {
         // `concat_function`'s `ZSTR_COPY_CONCAT_PROPERTIES_BOTH`, then the
         // interning that keeps a string the table already holds as it is.
         let utf8 = a.is_valid_utf8() && b.is_valid_utf8();
-        Ok(Some(self.string_marked(&joined, utf8)?))
+        Ok(Some(self.string_made(&joined, utf8)?))
     }
 
     /// A constant operand of a `.` as the string `zend_compile_binary_op`
@@ -15052,7 +15379,7 @@ impl<'a> Emit<'a> {
             Fetched::Dim(name, index) => {
                 // `zend_compile_dim` under `BP_VAR_R`: an auto-global's
                 // fetch by name held back while the offset compiles.
-                let container = match AutoGlobal::of(name) {
+                let mut container = match AutoGlobal::of(name) {
                     Some(global) => {
                         self.arm(global);
                         let name = self.string(name)?;
@@ -15060,13 +15387,19 @@ impl<'a> Emit<'a> {
                     }
                     None => Base::Settled(self.in_string_operand(name)?),
                 };
+                self.hold_base(&mut container);
                 let index = match index {
                     Offset::Value(value) => Where::Constant(*value),
                     Offset::Var(name) => self.in_string_var(name)?,
                 };
                 let (kind, at) = self.dim_operand(index);
                 let out = self.temporary();
-                let link = DimLink { kind, at, out };
+                let link = DimLink {
+                    kind,
+                    at,
+                    out,
+                    held: self.held_back(),
+                };
                 match self.dim_fetches(container, &[link], Fetch::Read, Over::Dim) {
                     (OperandKind::Tmp, at) => Ok(Where::Temporary(at)),
                     _ => Err(self.fatal("a dimension read with no dimension")),
@@ -15092,6 +15425,8 @@ impl<'a> Emit<'a> {
                 let name_at = self.literal(name);
                 let out = self.temporary();
                 let slots = self.cache_slots(3);
+                // `zend_compile_prop`'s one held-back fetch, laid down at once.
+                drop(self.held_back());
                 self.push(Opline {
                     opcode: Opcode::FetchObjR,
                     op1_type,
@@ -15673,12 +16008,14 @@ impl<'a> Emit<'a> {
         Ok(self.string(&bytes)?)
     }
 
-    /// `ZEND_AST_CONST`: what [`Self::named_constant`] substitutes.
+    /// `ZEND_AST_CONST`: what [`Self::named_constant`] substitutes, and
+    /// no constant where it substitutes nothing, since
+    /// `zend_eval_const_expr` then leaves the node standing for the
+    /// `FETCH_CONSTANT` the compile emits (`Z/Zend/zend_compile.c:12292`).
     fn name_constant(&mut self, token: TokenId) -> Result<Zval, Unfolded> {
-        self.named_constant(token)?.ok_or_else(|| {
-            self.fatal("a constant this compiler cannot read yet")
-                .into()
-        })
+        self.named_constant(token)?.ok_or(Unfolded::NoConstant(
+            "a constant fetched as the program runs",
+        ))
     }
 
     /// A `"…"` or a heredoc with nothing interpolated is one string
@@ -15788,7 +16125,7 @@ impl<'a> Emit<'a> {
             }
             Some(SyntaxKind::QUESTION_QUESTION) => self.coalesce_constant(id, left, right),
             Some(kind) => match binary_op(kind) {
-                Some(op) => self.binary_constant(op, left, right),
+                Some(op) => self.binary_constant(id, op, left, right),
                 None => Err(self.unread("a binary operator").into()),
             },
             None => Err(self.unread("a binary operator").into()),
@@ -15859,9 +16196,10 @@ impl<'a> Emit<'a> {
                     },
                     None => None,
                 };
-                folded.ok_or(Unfolded::NoConstant(
+                let folded = folded.ok_or(Unfolded::NoConstant(
                     "a class constant is fetched at run time",
-                ))
+                ))?;
+                Ok(self.claimed(tree::Expr::ScopedAccessExpr(id), folded))
             }
             Scoped::Property { .. } => {
                 Err(Unfolded::NoConstant("a variable is no constant expression"))
@@ -15882,12 +16220,38 @@ impl<'a> Emit<'a> {
     /// value left to the request.
     fn binary_constant(
         &mut self,
+        id: NodeId<tree::BinaryExpr>,
         op: BinaryOp,
         left: tree::Expr,
         right: tree::Expr,
     ) -> Result<Zval, Unfolded> {
-        let (left, right) = self.constant_pair(left, right)?;
-        self.constant_operands(op, left, right)
+        let mark = self.claims.mark();
+        let folded = self.constant_pair(left, right).and_then(|(a, b)| {
+            if op == BinaryOp::Concat {
+                let made = self.concat_made(a, b)?.ok_or(Unfolded::NoConstant(
+                    "a concatenation this compiler cannot fold yet",
+                ))?;
+                return Ok(Operated::Made(made));
+            }
+            self.constant_operands(op, a, b).map(Operated::Kept)
+        });
+        let claims = self.claims.since(mark);
+        let folded = folded?;
+        self.consume(claims, [left, right]);
+        Ok(self.claimed(tree::Expr::BinaryExpr(id), folded))
+    }
+
+    /// What a node folded to, its string held as the node's own claim
+    /// where the fold made it for the node alone ([`eval::Claims`]).
+    fn claimed(&mut self, node: tree::Expr, folded: Operated) -> Zval {
+        match folded {
+            Operated::Kept(value) => value,
+            Operated::Made(made) => {
+                let value = Zval::string(made.str());
+                self.claims.hold(node, made);
+                value
+            }
+        }
     }
 
     /// The fold of [`Self::binary_constant`] over its two folded sides,
@@ -17311,7 +17675,7 @@ impl<'a> Emit<'a> {
             && let Some(resolved) = self.constant_class(operand)?
             && let Some(value) = self.active_class_constant(resolved, written)?
         {
-            return Ok(Where::Constant(value));
+            return Ok(Where::Constant(value.kept()));
         }
         let class = self.class_ref_of(operand, FETCH_CLASS_EXCEPTION)?;
         let name = match name {
@@ -17415,7 +17779,7 @@ impl<'a> Emit<'a> {
         &mut self,
         class: &[u8],
         name: &[u8],
-    ) -> Result<Option<Zval>, CompileError> {
+    ) -> Result<Option<Operated>, CompileError> {
         if self.substitution == Substitution::NoPersistent {
             return Ok(None);
         }
@@ -17438,7 +17802,7 @@ impl<'a> Emit<'a> {
         {
             return Ok(None);
         }
-        self.value_of(&value)
+        self.operated_of(&value)
     }
 
     /// `zend_compile_static_prop` under `BP_VAR_R`, which delays nothing
@@ -19168,13 +19532,6 @@ fn compound_op(kind: SyntaxKind) -> Option<BinaryOp> {
 /// `extended_value` of the `FREE` a `(void)` cast leaves.
 const FREE_VOID_CAST: u32 = 1 << 2;
 
-/// Whether a refusal is the one-line shape a construct this compiler
-/// cannot emit yet is refused in, which `xtask phpt` reads as unread
-/// (`xtask/src/phpt/adapter.rs`): the sentence [`walk::unread`] writes.
-fn unread(refused: &CompileError) -> bool {
-    refused.level == Level::Parse && refused.message.ends_with("this compiler cannot read yet")
-}
-
 /// Which constants php's compiler substitutes where they are named,
 /// `CG(compiler_options)`'s bits over `zend_try_ct_eval_const`.
 ///
@@ -20009,6 +20366,7 @@ mod tests {
             static_vars: Vec::new(),
             fold: Fold::Compile,
             rewrites: eval::Rewrites::default(),
+            claims: eval::Claims::default(),
             fn_flags: FnFlags::default(),
             numeric_dims: Vec::new(),
             methods: Vec::new(),
@@ -20024,6 +20382,7 @@ mod tests {
             unwind: Vec::new(),
             loop_vars: 0,
             loop_var_peak: 0,
+            delayed: Rc::default(),
             fast_call_var: None,
             try_catch_offset: None,
             generators: Vec::new(),
@@ -20097,6 +20456,64 @@ mod tests {
             "outside the namespace M is the global one"
         );
         assert_eq!(emit.known_method(b"A\\M", b"f"), user);
+    }
+
+    /// #3215: a node `zend_eval_const_expr` leaves unfolded because a
+    /// child it waits on is one this compiler cannot read yet answers
+    /// the child's [`eval::Unfolded::Unread`], so a compile that needs
+    /// the value refuses in the innermost sentence, the one the phpt lane
+    /// counts; a child that is no constant leaves the node's own sentence.
+    /// The `()` is a tree the parser refuses, read here past its
+    /// diagnostic: no program reaches these arms over an unread child
+    /// and then a compile that reads the answer, so this test holds the
+    /// state where no witness can.
+    #[test]
+    fn a_node_over_a_child_not_read_yet_answers_the_child_s_refusal() {
+        let answers = |source: &'static [u8]| {
+            let mut strings = php_heap::Strings::new();
+            let options = Options::default();
+            let arena = Arena::new();
+            let parsed = php_syntax::parse(&arena, source, &php_syntax::Options::default());
+            let mut emit = in_namespace(&arena, &parsed, &mut strings, &options);
+            emit.fold = Fold::EvalConstExpr;
+            let file = parsed
+                .tree
+                .root()
+                .and_then(php_syntax::tree::Element::id::<tree::SourceFile>);
+            let stmt =
+                file.and_then(|file| parsed.tree.list(parsed.tree[file].stmts).first().copied());
+            let Some(Stmt::ExprStmt(id)) = stmt else {
+                return format!("no expression statement in {source:?}");
+            };
+            match emit.constant_expr(parsed.tree[id].expr) {
+                Err(eval::Unfolded::Unread(refused)) => format!("unread: {}", refused.message),
+                Err(eval::Unfolded::NoConstant(why)) => format!("no constant: {why}"),
+                Err(eval::Unfolded::Refused(refused)) => format!("refused: {}", refused.message),
+                Ok(_) => "folded".to_owned(),
+            }
+        };
+        let unread = "unread: an expression inside parentheses this compiler cannot read yet";
+        assert_eq!(answers(b"<?php () ?? 1;"), unread);
+        assert_eq!(answers(b"<?php () ? 1 : 2;"), unread);
+        assert_eq!(answers(b"<?php true ? () : 2;"), unread);
+        assert_eq!(answers(b"<?php () && 1;"), unread);
+        assert_eq!(answers(b"<?php true && ();"), unread);
+        assert_eq!(
+            answers(b"<?php $a ?? 1;"),
+            "no constant: a `??` over a side that does not fold"
+        );
+        assert_eq!(
+            answers(b"<?php $a ? 1 : 2;"),
+            "no constant: a conditional over a condition that does not fold"
+        );
+        assert_eq!(
+            answers(b"<?php true ? $a : 2;"),
+            "no constant: a node replaced by a side that does not fold"
+        );
+        assert_eq!(
+            answers(b"<?php $a && 1;"),
+            "no constant: a short circuit over a side that does not fold"
+        );
     }
 
     /// Design §5.7's assertion, on an op array laid down by hand (#353):

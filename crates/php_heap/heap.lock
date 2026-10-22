@@ -240,10 +240,14 @@ Host::Transfer
 Host::suspensions
 Intern
 Intern::constant_array
+Intern::give_back
 Intern::intern
+Intern::intern_made
 Intern::intern_marked
 Key
 Laziness
+Made
+Made::str
 MapPtr
 MapPtr::new
 MapPtr::offset

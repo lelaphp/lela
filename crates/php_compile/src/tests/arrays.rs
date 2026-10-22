@@ -71,7 +71,7 @@ fn what_php_s_compiler_refuses_in_a_foreach_and_an_array_is_refused_in_its_words
                 message: String::from("compiled").into(),
                 line: 0,
                 raised: Vec::new(),
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,

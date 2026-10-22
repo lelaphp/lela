@@ -465,7 +465,7 @@ fn what_php_s_compiler_refuses_in_a_break_a_switch_and_a_match_is_refused_in_its
                 message: String::from("compiled").into(),
                 line: 0,
                 raised: Vec::new(),
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
