@@ -328,6 +328,100 @@ fn a_trace_holds_the_stacks_room_where_php_does() -> Result<(), String> {
     Ok(())
 }
 
+/// A side trace enters with the types its parent's exit knew, an array's
+/// without its layout, and holds the layout at its first read by a long
+/// key, as php's holds `MAY_BE_PACKED_GUARD` (#3255's ruling, #3262).
+/// #3196's program: php's `side trace 1/6` takes `exit_0` at `0007`, the
+/// fetch's exit to the interpreter, then `exit_1` there, the layout
+/// guard's, then the element's two at `0008`, and holds nothing at entry.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_side_holds_an_arrays_layout_at_its_first_read() -> Result<(), String> {
+    use php_engine::tier::Sample;
+
+    use crate::record::{Entered, Event, Start, TraceRecord};
+    use crate::table::TraceId;
+
+    let (recorded, _) = recording(
+        &IN_F,
+        "function f($a, $n) { $s = 0; for ($i = 0; $i < $n; $i++) { if ($i > 50) { $s += $a[$i]; } else { $s -= $a[$i]; } } return $s; }
+        echo f([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 10), \"\\n\";",
+    )?;
+    let f = recorded.record.root;
+    let of = |kind, packed| {
+        Some(Sample {
+            kind,
+            indirect: false,
+            reference: false,
+            packed,
+            class: None,
+        })
+    };
+    let op = |at: u32, op1, op2| Event::Op {
+        func: f,
+        opline: OplineIdx(at),
+        op1,
+        op2,
+        data: None,
+        branch: None,
+    };
+    let parent = TraceId::new(1).ok_or("no trace 1")?;
+    let side = TraceRecord {
+        start: Start::Side {
+            parent,
+            exit: ExitId(6),
+        },
+        root: f,
+        entered: [
+            ZvalType::Array,
+            ZvalType::Long,
+            ZvalType::Long,
+            ZvalType::Long,
+        ]
+        .into_iter()
+        .zip(0..)
+        .map(|(tag, var)| Entered { var, tag })
+        .collect(),
+        landed: Landed::Named,
+        events: vec![
+            op(7, of(ZvalType::Array, true), of(ZvalType::Long, false)),
+            op(8, of(ZvalType::Long, false), of(ZvalType::Long, false)),
+            op(9, None, None),
+            op(12, of(ZvalType::Long, false), None),
+        ],
+        stop: Stop::Link(parent),
+        link_at: Some((f, OplineIdx(13))),
+    };
+    let ir = build(&side, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let layouts: Vec<(GuardAt, u16)> = (ir.guards.iter())
+        .filter(|guard| matches!(guard.check, Check::Layout { .. }))
+        .map(|guard| (guard.at, guard.exit.0))
+        .collect();
+    assert_eq!(
+        layouts,
+        [(GuardAt::Before(OpId(0)), 1)],
+        "{}",
+        dump::render(&ir)
+    );
+    let entry = (ir.guards.iter()).any(|guard| guard.at == GuardAt::Entry);
+    assert!(!entry, "{}", dump::render(&ir));
+    let first: Vec<(Option<u32>, Grows, bool)> = (ir.exits.iter().take(4))
+        .map(|exit| (exit.opline.map(|at| at.0), exit.grows, exit.layout))
+        .collect();
+    assert_eq!(
+        first,
+        [
+            (Some(7), Grows::Never, false),
+            (Some(7), Grows::Side, true),
+            (Some(8), Grows::Side, false),
+            (Some(8), Grows::Side, false),
+        ],
+        "{}",
+        dump::render(&ir)
+    );
+    Ok(())
+}
+
 /// The place of the first stepped opline of `opcode`.
 fn stepped(ir: &TraceIr, opcode: Opcode) -> Result<OpId, String> {
     ir.ops
