@@ -1664,13 +1664,16 @@ impl<'a> Builder<'a> {
                 Source::End => self.end_draft.unwrap_or_else(|| self.start()),
             };
             let spec = self.spec(&draft, &known);
+            let func = (self.frames.get(usize::from(spec.frame.0)))
+                .ok_or_else(|| mismatch("an exit in no frame of the trace"))?
+                .func;
             match source {
                 Source::Guard(at) => {
                     let placed = self.guards[at];
                     numbered.guards.push(Guard {
                         at: placed.at,
                         check: placed.check,
-                        exit: exits.take(spec)?,
+                        exit: exits.take(spec, func)?,
                     });
                     let held = match placed.check {
                         Check::Type { value, tag } => Some((value, tag)),
@@ -1688,7 +1691,7 @@ impl<'a> Builder<'a> {
                 Source::Leave(at) => {
                     let (op, leaves, _) = self.leaves[at];
                     let leave = match leaves {
-                        Leaves::Unfinished => Leave::Exit(exits.take(spec)?),
+                        Leaves::Unfinished => Leave::Exit(exits.take(spec, func)?),
                         Leaves::Thrown => {
                             let unwind = Unwind {
                                 stores: spec.stores,
@@ -1714,10 +1717,10 @@ impl<'a> Builder<'a> {
                     numbered.end = Some(End::Loop(LoopHeader {
                         at: self.header,
                         repeat,
-                        interrupt: Interrupt::Exit(exits.take(spec)?),
+                        interrupt: Interrupt::Exit(exits.take(spec, func)?),
                     }));
                 }
-                Source::End => numbered.end = Some(End::Leave(exits.take(spec)?)),
+                Source::End => numbered.end = Some(End::Leave(exits.take(spec, func)?)),
             }
         }
         numbered.exits = exits.specs;
@@ -2213,25 +2216,62 @@ fn draft(point: Point, frame: Frame, at: At) -> Draft {
 }
 
 /// The exits a trace has taken so far, by number, and where each spec
-/// that names an opline was taken.
+/// that names an opline was taken, as [`Reused`] keys it.
 #[derive(Default)]
 struct Exits {
     specs: Vec<ExitSpec>,
-    taken: HashMap<ExitSpec, ExitId>,
+    taken: HashMap<Reused, ExitId>,
+}
+
+/// What two places that leave through one exit hold alike, php's reuse
+/// key: the exit's opline, `flags` and stack map, with its frame named by
+/// the op array it runs and not by its place in the trace. php's stack
+/// map is held relative to the frame pointer, the frame the exit lands
+/// in, so one guard at one opline of two inlined levels of a recursion,
+/// with the same types known, is one exit; so it is here, since an exit
+/// lands in whichever frame is current. The stores stay as they are: a
+/// register value lives in one frame's slot, so two places that store
+/// one leave from one frame.
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct Reused {
+    func: FuncRef,
+    spec: ExitSpec,
+}
+
+impl Reused {
+    /// The key of `spec`, whose frame runs `func`.
+    fn of(spec: &ExitSpec, func: FuncRef) -> Reused {
+        let relative = |slot: Slot| Slot {
+            frame: Frame::ROOT,
+            ..slot
+        };
+        Reused {
+            func,
+            spec: ExitSpec {
+                frame: Frame::ROOT,
+                known: (spec.known.iter())
+                    .map(|known| Known {
+                        slot: relative(known.slot),
+                        ..*known
+                    })
+                    .collect(),
+                ..spec.clone()
+            },
+        }
+    }
 }
 
 impl Exits {
-    /// The exit that leaves as `spec` says: php's
-    /// `zend_jit_trace_get_exit_point`, which reuses an exit whose opline,
-    /// `flags` and stack map match one taken
+    /// The exit that leaves as `spec` says, in a frame that runs `func`:
+    /// php's `zend_jit_trace_get_exit_point`, which reuses an exit whose
+    /// opline, `flags` and stack map match one taken
     /// (`Z/ext/opcache/jit/zend_jit_trace.c:168-185`), and refuses the
     /// trace with `TooManyExits` where a new one would pass
-    /// `ZEND_JIT_TRACE_MAX_EXITS`. An exit that names no opline
-    /// is never reused, as php reuses none whose `to_opline` is null.
-    fn take(&mut self, spec: ExitSpec) -> Result<ExitId, Abort> {
-        if spec.opline.is_some()
-            && let Some(id) = self.taken.get(&spec)
-        {
+    /// `ZEND_JIT_TRACE_MAX_EXITS`. An exit that names no opline is never
+    /// reused, as php reuses none whose `to_opline` is null.
+    fn take(&mut self, spec: ExitSpec, func: FuncRef) -> Result<ExitId, Abort> {
+        let key = spec.opline.is_some().then(|| Reused::of(&spec, func));
+        if let Some(id) = key.as_ref().and_then(|key| self.taken.get(key)) {
             return Ok(*id);
         }
         if self.specs.len() == MAX_EXITS {
@@ -2241,8 +2281,8 @@ impl Exits {
             });
         }
         let id = ExitId(u16::try_from(self.specs.len()).map_err(|_| mismatch("too many exits"))?);
-        if spec.opline.is_some() {
-            self.taken.insert(spec.clone(), id);
+        if let Some(key) = key {
+            self.taken.insert(key, id);
         }
         self.specs.push(spec);
         Ok(id)

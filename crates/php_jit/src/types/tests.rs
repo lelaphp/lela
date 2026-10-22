@@ -16,11 +16,11 @@
 use std::fmt::Write as _;
 
 use php_heap::ZvalType;
-use php_unit::Opcode;
+use php_unit::{Opcode, OplineIdx};
 
 use super::{
-    Check, Def, End, Form, Frame, Grows, GuardAt, Home, Landing, Op, OpId, Operand, Repeat, Slot,
-    TraceIr, Types, ValueId, build,
+    Check, Def, End, ExitId, Form, Frame, Grows, GuardAt, Home, Landing, Op, OpId, Operand, Repeat,
+    Slot, TraceIr, Types, ValueId, build,
 };
 use crate::lower::dump;
 use crate::record::{Landed, Stop};
@@ -54,6 +54,37 @@ fn fib_enters_and_recurses() -> Result<(), String> {
     let ir = golden(FIB)?;
     assert_eq!(ir.entry.stop, Stop::RecursiveCall);
     assert!(matches!(ir.end, End::Loop(header) if header.repeat == Repeat::Call));
+    Ok(())
+}
+
+/// `fib`'s recursive trace leaves through one exit at its comparison's
+/// direction in both levels it inlines, as php's `exit_1`, at opline
+/// `0003`, serves both: php's stack map is relative to the frame pointer,
+/// so the same guard at the same opline with the same types known is one
+/// exit (`zend_jit_trace_get_exit_point`, #3203). php numbers it 1 behind
+/// its `RECV`'s argument count guard, `exit_0`, which a trace entered
+/// past the prologue does not hold (`jit-design.md` §4.1).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn fib_leaves_both_levels_through_one_exit_per_place() -> Result<(), String> {
+    let ir = golden(FIB)?;
+    let directions: Vec<(Frame, ExitId)> = (ir.guards.iter())
+        .filter(|guard| matches!(guard.check, Check::Direction { .. }))
+        .filter_map(|guard| match guard.at {
+            GuardAt::Within(at) => match ir.ops.get(at.index()) {
+                Some(Op::Line(line)) => Some((line.frame, guard.exit)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        directions,
+        [(Frame(0), ExitId(0)), (Frame(1), ExitId(0))],
+        "{directions:?}"
+    );
+    let landing = ir.exits.first().map(|exit| (exit.frame, exit.opline));
+    assert_eq!(landing, Some((Frame(0), Some(OplineIdx(3)))));
     Ok(())
 }
 
