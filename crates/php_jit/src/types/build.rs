@@ -2127,7 +2127,23 @@ impl<'a> Builder<'a> {
             .filter(|value| self.val(**value).def == Def::Entry)
             .map(|value| (self.val(*value).slot, *value))
             .filter(|(slot, _)| !read.contains(slot));
+        // Past an op, a slot it wrote is known as it was before it, as
+        // php's code generator sets the type of what an op writes only
+        // once the op's code, and the exits it takes, are done
+        // (`zend_jit_trace`'s `SET_STACK_TYPE` after each op).
+        let before = match draft.point {
+            Point::After(at) => self.snapshots.get(at.index()),
+            _ => None,
+        };
+        let as_before = |(slot, value): (Slot, ValueId)| match (before, self.val(value).def) {
+            (Some(before), Def::Op(def)) if Point::After(def) == draft.point => (before.values)
+                .iter()
+                .find(|(held, _)| *held == slot)
+                .copied(),
+            _ => Some((slot, value)),
+        };
         let mut known: Vec<Known> = (snapshot.values.iter().copied())
+            .filter_map(as_before)
             .chain(entered)
             .filter(|(slot, _)| slot.frame == draft.frame)
             .filter_map(|(slot, value)| {

@@ -88,6 +88,49 @@ fn fib_leaves_both_levels_through_one_exit_per_place() -> Result<(), String> {
     Ok(())
 }
 
+/// A `foreach` over a packed array writes its key as a long, as php's
+/// inference types what `FE_FETCH_R` writes from the array's layout, so
+/// no guard holds it; the exit its end takes knows nothing of it, as
+/// php's stack map types what an op writes only once the op's exits are
+/// taken; and the `+=` that reads it leaves through exit 4 at `0005`,
+/// as php's trace takes `exit_0` to `exit_2` at `0003`, `exit_3` at
+/// `0007` and `exit_4` at `0005` (#3203).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_packed_arrays_key_is_a_long_no_guard_holds() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f($a) { $s = 0; foreach ($a as $k => $v) { $s += $k; } return $s; }
+        echo f([1, 2, 3, 4, 5, 6, 7, 8, 9]), \"\\n\";",
+    )?;
+    let at = stepped(&ir, Opcode::FeFetchR)?;
+    let Some(Op::Line(fetch)) = ir.ops.get(at.index()) else {
+        return Err("no FE_FETCH_R".to_owned());
+    };
+    let key = fetch.out.ok_or("FE_FETCH_R writes no key")?;
+    assert_eq!(ir.values[key.0 as usize].types, Types::LONG);
+    let on_key = (ir.guards.iter()).any(|guard| {
+        matches!(guard.check, Check::Type { value, .. } | Check::Deref { value, .. } if value == key)
+    });
+    assert!(!on_key, "{}", dump::render(&ir));
+    let oplines: Vec<Option<u32>> = (ir.exits.iter().take(5))
+        .map(|exit| exit.opline.map(|at| at.0))
+        .collect();
+    assert_eq!(
+        oplines,
+        [Some(3), Some(3), Some(3), Some(7), Some(5)],
+        "{}",
+        dump::render(&ir)
+    );
+    let slot = ir.values[key.0 as usize].slot;
+    assert!(
+        !ir.exits[3].known.iter().any(|known| known.slot == slot),
+        "{:?}",
+        ir.exits[3]
+    );
+    Ok(())
+}
+
 /// `mandelbrot`'s escape loop, in the file's own code: every variable a
 /// symbol table reaches, guarded at each read and never narrowed.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]

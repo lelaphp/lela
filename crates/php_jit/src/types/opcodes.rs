@@ -248,7 +248,35 @@ pub(super) fn out_types(op: &Opline, t1: Types, t2: Types, td: Types, code: &OpA
         Opcode::InitArray | Opcode::AddArrayElement => Types::of_tag(ZvalType::Array),
         Opcode::VerifyReturnType => returned(code, t1),
         Opcode::Cast => cast(op.extended_value),
+        Opcode::FeFetchR | Opcode::FeFetchRw => fetched_key(t1),
         _ => Types::UNKNOWN.without(Types::UNDEF),
+    }
+}
+
+/// What a `FE_FETCH_R` or `FE_FETCH_RW` writes as its key, over an
+/// iterated `t`, as php's `zend_update_type_info` types it: a long from a
+/// packed array, whose keys are its positions, a long or a string from a
+/// hash, and anything from an object (`Z/Zend/Optimizer/zend_inference.c:3536-3548`).
+/// So a key read from a packed array holds no guard, as php's holds none.
+fn fetched_key(t: Types) -> Types {
+    let mut key = Types::NONE;
+    if t.meets(Types::OBJECT) {
+        key = key.or(Types::ANY);
+    }
+    if t.meets(Types::ARRAY) {
+        let packed = t.meets(Types::PACKED) || !t.meets(Types::HASH);
+        let hash = t.meets(Types::HASH) || !t.meets(Types::PACKED);
+        if packed {
+            key = key.or(Types::LONG);
+        }
+        if hash {
+            key = key.or(Types::LONG).or(Types::STRING);
+        }
+    }
+    if key == Types::NONE {
+        Types::UNKNOWN.without(Types::UNDEF)
+    } else {
+        key
     }
 }
 
