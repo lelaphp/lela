@@ -789,6 +789,11 @@ pub struct Strings {
     /// The constant arrays the units published into this engine hold,
     /// freed with the table.
     arrays: Vec<Arr>,
+    /// Strings a unit holds whose bytes the table held already when the
+    /// unit was published ([`Strings::publish`]), kept as long as the
+    /// table and not counted: none while a compile holds the table from
+    /// its first string to its publication.
+    shadows: Vec<Str>,
     /// The strings [`Strings::intern_known`] interned, by position:
     /// php's `zend_known_strings`, which `ZSTR_KNOWN(id)` indexes.
     known: Vec<Str>,
@@ -807,8 +812,26 @@ impl Strings {
         Strings {
             table: Permanent::default(),
             arrays: Vec::new(),
+            shadows: Vec::new(),
             known: Vec::new(),
         }
+    }
+
+    /// What a compile made for a unit held for every request entering
+    /// the table: opcache's `zend_accel_store_interned_string` over each
+    /// string the persisted unit holds, and its constant arrays with it.
+    /// A string whose bytes the table holds already stays the unit's,
+    /// with the table, uncounted.
+    pub fn publish(&mut self, mut pending: Pending) {
+        for s in pending.take_strings() {
+            let hash = hash_func(s.bytes());
+            if self.table.find(hash, s.bytes()).is_some() {
+                self.shadows.push(s);
+            } else {
+                self.table.add(hash, s);
+            }
+        }
+        self.arrays.append(&mut pending.arrays);
     }
 
     /// Intern each of `known` and keep it at its position for
@@ -894,6 +917,105 @@ impl Drop for Strings {
             free_persistent_array(a);
         }
         for s in self.table.strings() {
+            free_persistent(s);
+        }
+        for s in self.shadows.drain(..) {
+            free_persistent(s);
+        }
+    }
+}
+
+/// The strings and constant arrays one compile bound for an engine's
+/// table has made and not given back, apart from the table until the
+/// unit they are for is held ([`Strings::publish`]): opcache's miss
+/// compiles on the request and its buffer takes a string only as
+/// `zend_accel_store_interned_string` persists the unit that holds it,
+/// so a fold's intermediate, freed as the fold goes on, and what a
+/// refused compile made never reach it. Each string is the system
+/// allocator's, laid down as the table would lay it, and given back
+/// once its last claim is and nothing kept it, or with the set where
+/// it is dropped unpublished.
+#[derive(Default)]
+pub struct Pending {
+    slots: HashMap<u64, Vec<PendingString>>,
+    arrays: Vec<Arr>,
+}
+
+/// One string a compile made and the asks it answered that were not
+/// given back: a kept ask is never given back, and neither is a claim
+/// dropped, so either keeps it.
+struct PendingString {
+    s: Str,
+    asks: u32,
+}
+
+impl Pending {
+    /// The string for these bytes the compile made, or one made now,
+    /// with one ask more on it.
+    pub fn intern(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
+        let chain = self.slots.entry(hash_func(bytes)).or_default();
+        if let Some(held) = chain.iter_mut().find(|held| held.s.bytes() == bytes) {
+            held.asks = held.asks.saturating_add(1);
+            return Ok(held.s);
+        }
+        let s = persistent(bytes)?;
+        if valid_utf8 {
+            s.mark_valid_utf8();
+        }
+        chain.push(PendingString { s, asks: 1 });
+        Ok(s)
+    }
+
+    /// One claim on `s` given back ([`Intern::give_back`]): the string
+    /// freed where no other ask stands on it; nothing for a string this
+    /// set did not make.
+    pub fn give_back(&mut self, s: Str) {
+        let hash = hash_func(s.bytes());
+        let Some(chain) = self.slots.get_mut(&hash) else {
+            return;
+        };
+        let Some(at) = chain.iter().position(|held| held.s.is_same(s)) else {
+            return;
+        };
+        let Some(held) = chain.get_mut(at) else {
+            return;
+        };
+        held.asks = held.asks.saturating_sub(1);
+        if held.asks == 0 {
+            let gone = chain.swap_remove(at);
+            free_persistent(gone.s);
+        }
+    }
+
+    /// A constant array of the unit (design §5.3), laid as
+    /// [`Strings`] lays one and the table's once the unit is published.
+    pub fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
+        let a = persistent_array(entries)?;
+        self.arrays.push(a);
+        Ok(a)
+    }
+
+    /// How many strings stand made.
+    #[cfg(test)]
+    fn count(&self) -> usize {
+        self.slots.values().map(Vec::len).sum()
+    }
+
+    /// Every string, taken out of the set.
+    fn take_strings(&mut self) -> Vec<Str> {
+        let slots = std::mem::take(&mut self.slots);
+        slots.into_values().flatten().map(|held| held.s).collect()
+    }
+}
+
+impl Drop for Pending {
+    /// A set never published: what the compile made, its unit refused,
+    /// given back.
+    fn drop(&mut self) {
+        for a in self.arrays.drain(..) {
+            free_persistent_array(a);
+        }
+        for s in self.take_strings() {
             free_persistent(s);
         }
     }
@@ -1104,6 +1226,36 @@ pub(crate) fn free_persistent(s: Str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A string a compile asked for twice stands until both asks are
+    /// given back, one asked again after its last is made anew, and what
+    /// stands enters the table as the set is published, a string the
+    /// table held already left out of its count; a set dropped
+    /// unpublished frees what it holds.
+    #[test]
+    fn a_pending_string_stands_while_an_ask_does_and_enters_the_table_published() {
+        let mut table = Strings::new();
+        let held = table.intern(b"held already").expect("a table string");
+        let mut pending = Pending::default();
+        let fold = pending.intern(b"fold", false).expect("a string");
+        let again = pending.intern(b"fold", false).expect("the same string");
+        assert!(fold.is_same(again));
+        pending.give_back(fold);
+        assert_eq!(pending.count(), 1);
+        pending.give_back(again);
+        assert_eq!(pending.count(), 0);
+        pending.intern(b"kept", true).expect("a string");
+        pending.intern(b"held already", false).expect("a shadow");
+        pending.give_back(held);
+        table.publish(pending);
+        assert_eq!(table.count(), 2);
+        assert!(table.find(b"kept").is_some_and(|s| s.is_valid_utf8()));
+        assert!(table.find(b"held already").is_some_and(|s| s.is_same(held)));
+        let mut refused = Pending::default();
+        refused.intern(b"refused", false).expect("a string");
+        drop(refused);
+        assert!(table.find(b"refused").is_none());
+    }
 
     /// `zend_string_alloc` then `zend_string_truncate`: the bytes written
     /// in place survive the cut, the NUL follows them, and the heap

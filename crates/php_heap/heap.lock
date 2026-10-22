@@ -293,6 +293,10 @@ ObserveAllocations::observe
 Origin
 Origin::new
 Origin::number
+Pending
+Pending::constant_array
+Pending::give_back
+Pending::intern
 PropBit
 PropertyTable
 PropertyTable::backward
@@ -354,6 +358,7 @@ Strings::find
 Strings::intern_known
 Strings::known
 Strings::new
+Strings::publish
 Suspensions
 Switched
 TableRow

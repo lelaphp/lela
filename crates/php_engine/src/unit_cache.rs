@@ -314,6 +314,10 @@ pub(crate) struct UnitCache {
     /// The build's identity, php's `zend_system_id`, which every unit
     /// the second level keeps carries and is read back by ([`Disk`]).
     pub(crate) build: [u8; BUILD],
+    /// The engine's interned strings, which the names a held file is
+    /// filed under join as opcache's buffer takes them ([`UnitCache::hold`],
+    /// [`UnitCache::add_key`]).
+    interned: crate::arena::Interned,
 }
 
 /// The files one epoch of the cache holds (design §5.14), what an
@@ -744,6 +748,7 @@ impl UnitCache {
         extended_info: bool,
         functions: &[php_unit::decl::FunctionDecl],
         classes: &[php_unit::decl::ClassDecl],
+        interned: crate::arena::Interned,
     ) -> UnitCache {
         let names = functions.iter().map(|decl| &*decl.name.0);
         let build = build_identity(
@@ -761,6 +766,7 @@ impl UnitCache {
             budget: OnceLock::new(),
             preloaded: OnceLock::new(),
             build,
+            interned,
         }
     }
 
@@ -801,6 +807,12 @@ impl UnitCache {
         }
         if self.hash_full(files) {
             return;
+        }
+        // `accel_new_interned_key`: the name as written is one of the
+        // buffer's strings from here, a unit's alone, as php persists
+        // no refusal.
+        if held.unit.is_ok() {
+            php_heap::Intern::intern(&mut *self.interned.strings(), &key.0).ok();
         }
         files.held.alias(key, held);
     }
@@ -1111,6 +1123,9 @@ impl UnitCache {
             files.used.fetch_add(size, Ordering::Relaxed);
             if let Ok(unit) = &held.unit {
                 files.funcs.publish(unit);
+                // `zend_accel_script_persist` interns the script's
+                // `filename`, the full path it is held under.
+                php_heap::Intern::intern(&mut *self.interned.strings(), path).ok();
             }
         }
         held
