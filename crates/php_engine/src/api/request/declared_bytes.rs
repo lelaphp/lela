@@ -721,7 +721,7 @@ pub(super) fn arg_infos(decl: &FunctionDecl, method: bool) -> usize {
 /// and so no block; an enum case's own name and its class's are the
 /// constant's key and the class's name, which the node shares.
 ///
-/// The six probes #3241 measured: an enum whose constant names a case, the enum
+/// The six declarations and reads #3241 measured: an enum whose constant names a case, the enum
 /// without it, a class whose constant names one of a class not yet
 /// declared, and the first read of that constant, which gives the copy
 /// back; then a constant naming one by two longer names, an array still
@@ -758,7 +758,6 @@ pub(super) fn arg_infos(decl: &FunctionDecl, method: bool) -> usize {
 /// 272
 /// 200 0
 /// ```
-#[derive(Default)]
 struct AstCopy {
     /// The tree's block, the header before it among its bytes.
     tree: usize,
@@ -767,30 +766,39 @@ struct AstCopy {
 }
 
 impl AstCopy {
-    /// The copy of a constant's expression.
-    fn of(expr: &ConstExpr) -> AstCopy {
-        let mut copy = AstCopy {
+    /// The `zend_ast_ref` alone, before the tree is laid after it.
+    const fn header() -> AstCopy {
+        AstCopy {
             tree: AST_REF,
             strings: Vec::new(),
-        };
+        }
+    }
+
+    /// The copy of a constant's expression.
+    fn of(expr: &ConstExpr) -> AstCopy {
+        let mut copy = AstCopy::header();
         copy.expr(expr);
         copy
     }
 
     /// The copy of a case's `ZEND_AST_CONST_ENUM_INIT`
-    /// (`zend_compile_enum_case`): its class's name, its own and its
-    /// backing value, the third child `NULL` for a pure case.
+    /// (`zend_compile_enum_case`), its backing value the third child,
+    /// `NULL` for a pure case.
     fn of_case(value: &ConstExpr) -> AstCopy {
-        let mut copy = AstCopy {
-            tree: AST_REF,
-            strings: Vec::new(),
-        };
-        copy.node(3);
-        copy.tree += 2 * AST_ZVAL;
+        let mut copy = AstCopy::header();
+        copy.enum_init();
         if !matches!(value, ConstExpr::Null) {
             copy.expr(value);
         }
         copy
+    }
+
+    /// A `ZEND_AST_CONST_ENUM_INIT` over its class's name and the case's,
+    /// which the class's name and the constant's key share, before its
+    /// value.
+    fn enum_init(&mut self) {
+        self.node(3);
+        self.tree += 2 * AST_ZVAL;
     }
 
     /// The blocks, the tree first, by their lengths.
@@ -836,10 +844,7 @@ impl AstCopy {
                 self.string(&class.0);
                 self.expr(name);
             }
-            ConstExpr::EnumCase { .. } => {
-                self.node(3);
-                self.tree += 2 * AST_ZVAL;
-            }
+            ConstExpr::EnumCase { .. } => self.enum_init(),
             ConstExpr::ClassName { class, .. } => {
                 self.node(1);
                 self.string(&class.0);
@@ -1253,11 +1258,10 @@ impl Request {
         let Some(blocks) = (self.unit_strings.class_slot(unit, at)).and_then(Option::as_mut) else {
             return;
         };
-        let (copy, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut blocks.copies)
-            .into_iter()
-            .partition(|(held, _)| *held == constant);
-        blocks.copies = kept;
-        for (_, block) in copy {
+        let copy: Vec<Emalloc> = (blocks.copies.extract_if(.., |(held, _)| *held == constant))
+            .map(|(_, block)| block)
+            .collect();
+        for block in copy {
             block.free(self);
         }
     }

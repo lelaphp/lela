@@ -290,6 +290,30 @@ impl Request {
     /// Enum case type string does not match enum backing type int
     /// Duplicate value in enum Dup for cases A and B
     /// ```
+    ///
+    /// Its constants are updated with its cases, so a constant that
+    /// refuses refuses the first opline's read of a case, `from()` and
+    /// `tryFrom()`, each time until it evaluates, where `constant()`,
+    /// `zend_get_class_constant_ex`, updates the one it names; a constant
+    /// naming one of the enum's own is read without updating the enum
+    /// again:
+    ///
+    /// ```php
+    /// enum S: string { case A = "a"; const K = Undef::X; }
+    /// foreach ([fn () => S::from("a"), fn () => S::A, fn () => S::tryFrom("b"), fn () => constant('S::A')] as $read) {
+    ///     try { var_dump($read()); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// }
+    /// enum T: int { case A = 1; const K = self::A; const L = T::K; }
+    /// var_dump(T::from(1), T::L);
+    /// ```
+    /// ```expect exit=0
+    /// Error: Class "Undef" not found
+    /// Error: Class "Undef" not found
+    /// Error: Class "Undef" not found
+    /// enum(S::A)
+    /// enum(T::A)
+    /// enum(T::A)
+    /// ```
     pub(crate) fn update_enum_constants(&mut self, class: ClassId) -> Result<(), Thrown> {
         if self
             .class_constants
