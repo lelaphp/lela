@@ -297,7 +297,7 @@ impl<'a> Builder<'a> {
         let rec = self.rec;
         let events = rec.events.as_slice();
         if rec.landed == Landed::Stood {
-            self.ip_guard();
+            self.ip_guard()?;
         }
         let unexecuted = match (rec.stop, events.last()) {
             (
@@ -1330,22 +1330,24 @@ impl<'a> Builder<'a> {
     /// (`zend_jit_trace_opline_guard`, `Z/ext/opcache/jit/zend_jit_trace.c:4178-4180`):
     /// its exit names no opline and knows nothing of the frame, as php
     /// takes it before the side's stack holds a type, and grows a side
-    /// of its own.
-    fn ip_guard(&mut self) {
-        let first = self.rec.events.iter().find_map(|event| match event {
-            Event::Op { func, opline, .. } => Some((*func, *opline)),
-            _ => None,
+    /// of its own. A side that recorded no opline has nothing to hold the
+    /// frame to, and is refused rather than entered wherever it stands.
+    fn ip_guard(&mut self) -> Result<(), Abort> {
+        let (func, opline) = (self.rec.events.iter())
+            .find_map(|event| match event {
+                Event::Op { func, opline, .. } => Some((*func, *opline)),
+                _ => None,
+            })
+            .ok_or_else(|| mismatch("a side of an exit that names no opline records none"))?;
+        self.guards.push(Placed {
+            at: GuardAt::Entry,
+            check: Check::Stands { func, opline },
+            exit: Draft {
+                at: At::Stands,
+                ..self.start()
+            },
         });
-        if let Some((func, opline)) = first {
-            self.guards.push(Placed {
-                at: GuardAt::Entry,
-                check: Check::Stands { func, opline },
-                exit: Draft {
-                    at: At::Stands,
-                    ..self.start()
-                },
-            });
-        }
+        Ok(())
     }
 
     /// An exit at the trace's entry: the root's first opline, nothing to

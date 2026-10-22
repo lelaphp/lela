@@ -162,7 +162,11 @@ impl TraceRecord {
                 entered = parse_entered(slots).ok_or_else(|| refused(at, line))?;
                 continue;
             }
-            if line == "landed stood" && events.is_empty() && landed == Landed::Named {
+            if line == "landed stood"
+                && start.grew().is_some()
+                && events.is_empty()
+                && landed == Landed::Named
+            {
                 landed = Landed::Stood;
                 continue;
             }

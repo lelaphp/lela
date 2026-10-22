@@ -120,9 +120,9 @@ const _: () = assert!(
         && offset_of!(Stands, opline) == offset_of!(Stands, func) + 4
 );
 
-/// Where a frame stands, as compiled code compares it: the engine offset
-/// of its op array, `u32::MAX` for one no engine offset numbers, and its
-/// opline.
+/// Where a frame stands, as compiled code compares it, the tail of a
+/// [`Stood`]: the engine offset of its op array and its opline, as
+/// [`where_stood`] reads them for a kernel.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 struct Stands {
@@ -743,10 +743,13 @@ pub(crate) fn enter(
     // this address, final and executable for as long as the trace, which
     // the borrow of the epoch's table keeps.
     let entry = unsafe { std::mem::transmute::<*const u8, Entry>(trace.entry().as_ptr()) };
+    // Where the frame stands as a kernel would report it, which the
+    // trace's IP guard holds as the last kernel's.
     let stands = if trace.ip_guard {
+        let stood = where_stood(req, frame, None, Some(&Holding::of(epoch)))?;
         Stands {
-            func: (tier::running_func(req, frame).and_then(engine_offset)).unwrap_or(u32::MAX),
-            opline: tier::frame(req, frame).map_or(u32::MAX, |view| view.opline().0),
+            func: stood.func,
+            opline: stood.opline,
         }
     } else {
         Stands::default()
