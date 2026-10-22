@@ -131,6 +131,38 @@ fn a_packed_arrays_key_is_a_long_no_guard_holds() -> Result<(), String> {
     Ok(())
 }
 
+/// A trace that does not loop holds a guard on what its frame entered
+/// with before the op that first reads it, as php's code generator
+/// holds a loop-invariant type at entry only where the trace loops by
+/// its own loop or recursive call (`Z/ext/opcache/jit/zend_jit_trace.c:4237-4272`),
+/// and a side's guard at the read (#3203): the array's layout among
+/// them, held where the array is read by a long key, as php's side holds
+/// `MAY_BE_PACKED_GUARD` there.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_trace_that_does_not_loop_holds_its_guards_at_the_read() -> Result<(), String> {
+    let (mut recorded, _) = recording(
+        &IN_F,
+        "function f($a, $n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $a[$i]; } return $s; }
+        echo f([1, 2, 3], 3), \"\\n\";",
+    )?;
+    let looping = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let at_entry = |ir: &TraceIr| ir.guards.iter().filter(|g| g.at == GuardAt::Entry).count();
+    assert!(at_entry(&looping) > 0, "{}", dump::render(&looping));
+    recorded.record.stop = Stop::Link(crate::table::TraceId::new(1).ok_or("no trace 1")?);
+    let linked = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    assert_eq!(at_entry(&linked), 0, "{}", dump::render(&linked));
+    let layout = (linked.guards.iter())
+        .find(|guard| matches!(guard.check, Check::Layout { .. }))
+        .map(|guard| guard.at);
+    assert!(
+        matches!(layout, Some(GuardAt::Before(_))),
+        "{layout:?}: {}",
+        dump::render(&linked)
+    );
+    Ok(())
+}
+
 /// `mandelbrot`'s escape loop, in the file's own code: every variable a
 /// symbol table reaches, guarded at each read and never narrowed.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]

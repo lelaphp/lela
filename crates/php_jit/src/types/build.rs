@@ -1256,7 +1256,14 @@ impl<'a> Builder<'a> {
     }
 
     /// Where the guard on a value no symbol table reaches is held: once at
-    /// entry for what the root's frame entered with; by the inline op that
+    /// entry for what the root's frame entered with, in a trace that loops
+    /// by its own loop or its own recursive call, as php's code generator
+    /// holds a loop-invariant type there only for those stops
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:4237-4272`), and before the op
+    /// that reads it first in any other trace, a side's among them, as
+    /// php's holds `MAY_BE_GUARD` and `MAY_BE_PACKED_GUARD` at the read; a
+    /// recursive return's loop holds only what the call wrote there, its
+    /// phi ([`Builder::close_phis`]); by the inline op that
     /// computed it for an arithmetic's overflow and a fetched element's
     /// type, as php's code generator holds a guarded value it writes, an
     /// element twice, read in place and through the reference it is, as
@@ -1285,7 +1292,12 @@ impl<'a> Builder<'a> {
         };
         let mut then = None;
         let (at, exit) = match (held.def, computed) {
-            (Def::Entry, _) if held.slot.frame == Frame::ROOT => (GuardAt::Entry, self.start()),
+            (Def::Entry, _)
+                if held.slot.frame == Frame::ROOT
+                    && matches!(self.repeat, Some(Repeat::Loop | Repeat::Call)) =>
+            {
+                (GuardAt::Entry, self.start())
+            }
             (_, Some((def, frame, opline, kind, op1, op2))) => {
                 let fetched = |read| At::Fetched {
                     fetch: opline,
