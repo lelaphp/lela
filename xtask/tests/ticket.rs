@@ -629,6 +629,75 @@ fn a_ticket_the_tracker_cannot_read_is_named_and_the_rest_of_the_merge_closes() 
     assert!(stranded(&root, &store, &head).unwrap().is_empty());
 }
 
+/// A merge made through GitHub names its pull request, `Merge pull
+/// request #30 from …`, and `gh issue view` answers a pull request too,
+/// in state `MERGED` (#3242; b40d71039 named #3167 so). The merge skips
+/// it with a reading that names it a pull request, which replaces the
+/// one that left it unclosed, so `done` names it no longer; an open
+/// issue the subject names is closed and a closed one passed over, as
+/// before, and nothing but the merge reads a pull request as a ticket.
+#[test]
+fn a_pull_request_a_merge_names_is_skipped_and_the_issues_beside_it_read_as_before() {
+    let (root, tracker) = merged_with_ready(
+        "pulled",
+        "t31",
+        "Merge pull request #30 from owner/t31 (#31, #32)",
+        &[(31, "nothing")],
+    );
+    tracker.with_issue(&closed(32, TICKED));
+    tracker.with_answer(
+        30,
+        r#"{"blockedBy":{"nodes":[],"totalCount":0},"blocking":{"nodes":[],"totalCount":0},"body":"Closes #31","labels":[],"number":30,"state":"MERGED","subIssuesSummary":{"completed":0,"percentCompleted":0,"total":0},"title":"the work","url":"https://example.invalid/pull/30"}"#,
+    );
+    let refused = tracker.gh().view(&root, Ticket::new(30)).unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("#30 is a pull request, not a ticket"),
+        "{refused:#}"
+    );
+
+    // What a run before the fix left in the store: #30 unclosed.
+    tracker.flaky(30, 0, 3);
+    let dir = Tree::new("ticket-pulled-store").unwrap();
+    let store = Store::at(dir.to_path_buf());
+    store.record(&tickets_merged(&root, &tracker).0).unwrap();
+    let head = Repo::at(&root).git(&["rev-parse", "HEAD"]);
+    assert_eq!(stranded(&root, &store, &head).unwrap().len(), 1);
+
+    let (readings, run) = tickets_merged(&root, &tracker);
+    let verdicts: Vec<(&str, Status)> = readings
+        .iter()
+        .map(|r| (r.scope.as_str(), r.status))
+        .collect();
+    assert_eq!(
+        verdicts,
+        [("31", Status::Pass), ("30", Status::Skip)],
+        "{readings:#?}"
+    );
+    assert!(
+        readings[1].message.contains("#30 is a pull request"),
+        "{}",
+        readings[1].message
+    );
+    assert!(
+        run.message.contains(
+            "name 2 ticket(s), 1 closed here, and skipped #30: pull request(s), not tickets"
+        ),
+        "{}",
+        run.message
+    );
+    assert_eq!(run.numbers["pulls"], 1.into());
+    store.record(&readings).unwrap();
+    assert!(stranded(&root, &store, &head).unwrap().is_empty());
+    assert!(
+        !tracker
+            .calls()
+            .iter()
+            .any(|c| c.contains(" 30 ") || c.contains(" 32 ")),
+        "{:?}",
+        tracker.calls()
+    );
+}
+
 /// Where a close's commit stands against `main` (#2249): `main`'s own
 /// tip is landed, a branch's commit `main` does not contain is unmerged
 /// and named with its branch, and the same commit is landed once `main`

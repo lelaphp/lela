@@ -967,12 +967,16 @@ pub struct Blocker {
     pub state: State,
 }
 
-/// An issue's state as `gh` spells it.
+/// An issue's state as `gh` spells it, and `MERGED`, which `gh issue
+/// view` answers of a number that is a merged pull request: a merge made
+/// through GitHub names its pull request as `#n` (#3242), and no ticket
+/// is ever merged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum State {
     Open,
     Closed,
+    Merged,
 }
 
 impl State {
@@ -981,6 +985,7 @@ impl State {
         match self {
             State::Open => "open",
             State::Closed => "closed",
+            State::Merged => "merged",
         }
     }
 }
@@ -1032,8 +1037,16 @@ impl Gh {
     }
 
     /// `gh issue view <n> --json …`, one issue, its labels among them,
-    /// since a close holds a successor to the closed ticket's track.
+    /// since a close holds a successor to the closed ticket's track. A
+    /// merged pull request is refused: it is no ticket.
     pub fn view(&self, root: &Path, ticket: Ticket) -> Result<Issue> {
+        self.answer(root, ticket)?
+            .with_context(|| format!("{ticket} is a pull request, not a ticket"))
+    }
+
+    /// What `gh issue view <n>` answers: the issue, or none where `#n` is
+    /// a merged pull request, which `gh` answers as well (#3242).
+    fn answer(&self, root: &Path, ticket: Ticket) -> Result<Option<Issue>> {
         let number = ticket.number().to_string();
         let text = self
             .read(
@@ -1047,8 +1060,9 @@ impl Gh {
                 ],
             )
             .with_context(|| format!("{ticket} could not be read from the tracker"))?;
-        serde_json::from_str(&text)
-            .with_context(|| format!("{ticket}: gh's answer is not an issue"))
+        let issue: Issue = serde_json::from_str(&text)
+            .with_context(|| format!("{ticket}: gh's answer is not an issue"))?;
+        Ok((issue.state != State::Merged).then_some(issue))
     }
 
     /// `gh issue list --state open --json …`: every open issue with its
@@ -1490,7 +1504,9 @@ impl Closed {
 /// whichever branch wrote it (#2358). Those with no ready record are read
 /// after every close, so a blocker the same merge closes holds nothing,
 /// and each is left open as [`left_open`] says. A ticket closed already,
-/// and a number the tracker answers is no issue, is passed over. One the
+/// and a number the tracker answers is no issue, is passed over; a number
+/// it answers as a merged pull request is [`pulled`], skipped with a
+/// reading that says so (#3242). One the
 /// tracker cannot read, or whose close it refuses, is [`unclosed`] and the
 /// run goes on, so one failure of the network neither passes a ticket
 /// over nor loses the closes made before it (#2804). Off `main` nothing is closed: the fast-forward that brings
@@ -1513,6 +1529,7 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
     let again = format!("`xtask ticket merged --since {parent}` on main again");
     let mut readings = Vec::new();
     let mut unready = Vec::new();
+    let mut pulls = Vec::new();
     let named = named_by_merges(root, &format!("{since}..HEAD"))?;
     let hashing = Instant::now();
     let snapshot = Snapshot::disk(root)?;
@@ -1520,7 +1537,11 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
     let mut closes = Vec::new();
     for &ticket in &named {
         let began = Instant::now();
-        let outcome = gh.view(root, ticket).and_then(|issue| {
+        let outcome = gh.answer(root, ticket).and_then(|answer| {
+            let Some(issue) = answer else {
+                pulls.push(ticket);
+                return Ok(None);
+            };
             if issue.state == State::Closed {
                 return Ok(None);
             }
@@ -1544,6 +1565,9 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
             Err(err) => readings.push(failed(&snapshot, ticket, &err, &again)?),
         }
     }
+    for &pull in &pulls {
+        readings.push(pulled(&snapshot, pull)?);
+    }
     for ticket in unready {
         match gh.view(root, ticket) {
             Ok(issue) if issue.state == State::Closed => {}
@@ -1557,7 +1581,9 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
     let (by_verb, all) = gh.spent();
     let took = started.elapsed();
     own.status = Status::Pass;
-    own.count("named", named.len() as u64)?;
+    let tickets = named.len().saturating_sub(pulls.len());
+    own.count("named", tickets as u64)?;
+    own.count("pulls", pulls.len() as u64)?;
     own.count("closed", made as u64)?;
     own.count("gh_calls", all.calls)?;
     own.count("gh_ms", millis(all.took))?;
@@ -1572,10 +1598,19 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
             .map(|(verb, s)| format!("gh {verb} {} time(s) in {}", s.calls, secs(s.took))),
     );
     phases.push(format!("the workspace read in {}", secs(hashed)));
+    let skipped = pulls.iter().map(Ticket::to_string).collect::<Vec<_>>();
+    let skipped = if skipped.is_empty() {
+        String::new()
+    } else {
+        format!(
+            ", and skipped {}: pull request(s), not tickets",
+            skipped.join(", ")
+        )
+    };
     own.message = format!(
-        "the merges since {} name {} ticket(s), {} closed here; {}; {} in all",
+        "the merges since {} name {} ticket(s), {} closed here{skipped}; {}; {} in all",
         parent.trim(),
-        named.len(),
+        tickets,
         made,
         phases.join("; "),
         secs(took)
@@ -1625,6 +1660,19 @@ fn unclosed(mut reading: Reading, again: &str) -> Result<Reading> {
         "{}; the merge did not close it: close it with `xtask ticket close {}` naming what it opened, or, once what stopped it is settled, run {again}",
         reading.message, reading.scope
     );
+    Ok(reading)
+}
+
+/// The reading of a number a merge names that `gh` answers as a merged
+/// pull request (#3242): skipped, since a merge made through GitHub names
+/// its pull request and not a ticket, and the ticket the pull request
+/// closes is GitHub's to close. It replaces a reading that left the
+/// number [`unclosed`], so `done` names it no longer.
+fn pulled(snapshot: &Snapshot, pull: Ticket) -> Result<Reading> {
+    let mut reading = stamped(snapshot, &scope(pull), None)?;
+    reading.status = Status::Skip;
+    reading.message =
+        format!("{pull} is a pull request a merge into main names, not a ticket; skipped");
     Ok(reading)
 }
 
