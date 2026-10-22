@@ -16344,20 +16344,8 @@ impl<'a> Emit<'a> {
         right: tree::Expr,
     ) -> Result<Zval, Unfolded> {
         let mark = self.claims.mark();
-        let folded = self.constant_pair(left, right).and_then(|(a, b)| {
-            if op == BinaryOp::Concat {
-                let made = self.concat_made(a, b)?.ok_or(Unfolded::NoConstant(
-                    "a concatenation this compiler cannot fold yet",
-                ))?;
-                return Ok(Operated::Made(made));
-            }
-            if bitwise(op) {
-                return self.bitwise_made(op, a, b)?.ok_or(Unfolded::NoConstant(
-                    "a bitwise operator this compiler cannot fold yet",
-                ));
-            }
-            self.constant_operands(op, a, b).map(Operated::Kept)
-        });
+        let folded =
+            (self.constant_pair(left, right)).and_then(|(a, b)| self.constant_operands(op, a, b));
         let claims = self.claims.since(mark);
         let folded = folded?;
         self.consume(claims, [left, right]);
@@ -16379,29 +16367,33 @@ impl<'a> Emit<'a> {
 
     /// The fold of [`Self::binary_constant`] over its two folded sides,
     /// out of the frame a left-nested chain stands in once per
-    /// operator.
+    /// operator: the string a concatenation or a bitwise operator over
+    /// two strings makes is the node's claim ([`Operated::Made`]), and
+    /// every other value is kept.
     fn constant_operands(
         &mut self,
         op: BinaryOp,
         left: Zval,
         right: Zval,
-    ) -> Result<Zval, Unfolded> {
+    ) -> Result<Operated, Unfolded> {
         if op == BinaryOp::Concat {
-            return self.concat_fold(left, right)?.ok_or(Unfolded::NoConstant(
+            let made = self.concat_made(left, right)?.ok_or(Unfolded::NoConstant(
                 "a concatenation this compiler cannot fold yet",
-            ));
+            ))?;
+            return Ok(Operated::Made(made));
         }
         if bitwise(op) {
             return self
-                .bitwise_fold(op, left, right)?
+                .bitwise_made(op, left, right)?
                 .ok_or(Unfolded::NoConstant(
                     "a bitwise operator this compiler cannot fold yet",
                 ));
         }
         if compares(op) {
-            return Ok(self.compare_fold(op, left, right));
+            return Ok(Operated::Kept(self.compare_fold(op, left, right)));
         }
         self.arithmetic_fold(op, left, right)?
+            .map(Operated::Kept)
             .ok_or(Unfolded::NoConstant(
                 "arithmetic this compiler cannot fold yet",
             ))
