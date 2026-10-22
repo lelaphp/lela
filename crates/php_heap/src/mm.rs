@@ -359,6 +359,12 @@ impl Mm {
             #[cfg(test)]
             armed: Armed::Off,
         };
+        // A debug build's sensor of the lend's slot (ADR-0014): a heap is
+        // made where its request starts, and no lend stands there.
+        #[cfg(debug_assertions)]
+        if crate::lend::standing() {
+            mm.sensed.record(crate::sensed::Sensed::MadeUnderLend);
+        }
         if let Some(chunk) = main {
             mm.chunk_init(chunk, 0);
             mm.chunks.push(chunk);

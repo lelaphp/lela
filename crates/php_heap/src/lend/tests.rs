@@ -139,3 +139,24 @@ fn a_refusal_of_the_limit_is_served_by_the_system_and_answered_after_the_call() 
     let freed = heap.lend(|| unsafe { efree(kept) });
     assert!(freed.is_ok());
 }
+
+/// A heap made while a lend stands on its thread is sensed in a debug
+/// build, as the `InternalError` naming the slot, where its request
+/// would otherwise start with C served by the lent heap; a heap made
+/// once the lend has ended senses nothing.
+#[test]
+fn a_heap_made_while_a_lend_stands_is_sensed() {
+    let _alone = alone();
+    let mut outer = Heap::new();
+    let mut inner = outer.lend(Heap::new).expect("the lend");
+    let sensed = inner.take_sensed();
+    if cfg!(debug_assertions) {
+        assert!(
+            matches!(sensed.as_ref().map(Fatal::reason), Some(FatalReason::Error(text)) if text.contains("lend still stood")),
+            "{sensed:?}"
+        );
+    } else {
+        assert_eq!(sensed, None);
+    }
+    assert_eq!(Heap::new().take_sensed(), None);
+}

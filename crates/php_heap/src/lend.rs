@@ -83,6 +83,14 @@ impl Drop for Restore {
     }
 }
 
+/// Whether a lend stands on this thread: what a debug build asks as it
+/// makes a heap (`Mm`'s birth), since a heap made while another's lend
+/// stands would have C served by that other heap outside its own lends.
+#[cfg(debug_assertions)]
+pub(crate) fn standing() -> bool {
+    LENT.get().is_some()
+}
+
 /// `lending` put in the slot, and what stood there answered.
 #[inline(never)]
 fn enter(lending: NonNull<Lending>) -> Option<NonNull<Lending>> {
