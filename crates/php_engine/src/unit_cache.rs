@@ -455,6 +455,26 @@ pub(crate) enum Compiled {
     Alone(Box<Unit>),
 }
 
+/// Whom a compile's answer serves: every request that asks for the file,
+/// or the one that asked alone, whose `memory_limit` refused the compile
+/// (`crate::engine::CompileHeap`), which another request with room for
+/// it compiles again, as php compiles a file afresh where opcache cached
+/// nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Answers {
+    /// Any request: what a held unit answers.
+    Every,
+    /// The request that asked, and no other.
+    Asker,
+}
+
+/// A compile [`UnitCache::file`] ran: the unit or the refusal, and whom
+/// it answers.
+pub(crate) struct Fresh {
+    pub(crate) unit: Result<Unit, CompileError>,
+    pub(crate) answers: Answers,
+}
+
 /// What [`UnitCache::file`] answers: the unit, what it did with the
 /// file, and the classes a held unit's compiler bound early.
 pub(crate) type Answered = (
@@ -785,15 +805,20 @@ impl UnitCache {
     /// cache alone and counts nothing. Nothing where the file cannot be
     /// read. What is `compile`d or `decode`d takes no map-pointer offset
     /// until it is held, `share`d as it is; one held nowhere is answered
-    /// [`Compiled::Alone`], its caller's own (GH-8646).
-    pub(crate) fn file(
+    /// [`Compiled::Alone`], its caller's own (GH-8646), and so is one
+    /// that answers the request that asked alone ([`Answers::Asker`]).
+    /// `compile` and `publish` are handed `caller`, the request the file
+    /// is compiled and its classes published for, or nothing.
+    #[allow(clippy::too_many_arguments)] // the table, the question, the caller and the four steps, each one fact
+    pub(crate) fn file<A>(
         &self,
+        caller: &mut A,
         files: &Files,
         asked: Asked<'_>,
-        compile: impl FnOnce(&[u8]) -> Result<Unit, CompileError>,
+        compile: impl FnOnce(&mut A, &[u8]) -> Fresh,
         decode: impl FnOnce(&[u8]) -> Option<Unit>,
         share: impl FnOnce(Unit) -> PublishedUnit,
-        publish: impl FnOnce(&PublishedUnit) -> EarlyBound,
+        publish: impl FnOnce(&mut A, &PublishedUnit) -> EarlyBound,
     ) -> Answered {
         let Asked {
             path,
@@ -839,7 +864,7 @@ impl UnitCache {
             // Under its full path alone: `zend_file_cache_script_load`
             // files no key, which the next include adds after opening it.
             let unit = share(unit);
-            let early = publish(&unit);
+            let early = publish(caller, &unit);
             let read = Read {
                 unit: Ok(unit),
                 early,
@@ -860,13 +885,13 @@ impl UnitCache {
         let Some(source) = source_or_read(handed, path) else {
             return (None, Filed::Unheld, None);
         };
-        let unit = compile(&source);
+        let Fresh { unit, answers } = compile(caller, &source);
         let size = u64::try_from(source.len()).unwrap_or(u64::MAX);
         let unheld = stamped
             && observed.is_none_or(|stamp| {
                 protection > 0 && now.saturating_sub(i64::from(protection)) < stamp.seconds()
             });
-        if unheld || named_by_request(validation, &unit) {
+        if unheld || answers == Answers::Asker || named_by_request(validation, &unit) {
             return alone(unit, Filed::Compiled);
         }
         if let (Some(disk), Ok(compiled)) = (&disk, &unit)
@@ -880,7 +905,7 @@ impl UnitCache {
         }
         let unit = unit.map(share);
         let early = match &unit {
-            Ok(compiled) => publish(compiled),
+            Ok(compiled) => publish(caller, compiled),
             Err(_) => Arc::new([]),
         };
         let read = Read {
