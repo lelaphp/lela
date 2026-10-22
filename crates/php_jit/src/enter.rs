@@ -331,8 +331,9 @@ impl<'a> Holding<'a> {
 /// §5.1), in a `mod` the invocation names, over the request type it
 /// names. A line `name(a: A) -> T = tier::item;` writes
 /// `name(cx, frame, opline, a, out: *mut T) -> Status`, which calls the
-/// `name` beside the invocation as `name(req, On { room, at, epoch },
-/// a)`, the room, the opline and the `ExitCtx`'s epoch ([`On`]); a line with no `-> T` has no out pointer, and
+/// `name` beside the invocation as `name(req, On { room, at, holding },
+/// a)`, the room, the opline and the `ExitCtx`'s hold on the epoch
+/// ([`On`]); a line with no `-> T` has no out pointer, and
 /// `= tier::item` names the engine item the kernel serves through, which
 /// the wrappers' `mod` imports, so the item's removal fails this build,
 /// and which `api-check` reads for `tier.lock`. The engine's list names
@@ -526,8 +527,49 @@ fn stood(
 
 /// The [`Stood`] of `frame`: its room, the room of the call under way in
 /// it, `EX(call)`, the engine offset of its op array, `func` where the
-/// caller knows it and looked up where not, none where the request alone
-/// holds it, and its opline.
+/// caller knows it and read off the frame where not
+/// ([`tier::running_func`]), none where the request alone holds it, and
+/// its opline. A trait's method copied into its class reads a cache of
+/// its own, which is no op array's, so its frame is named by the op array
+/// it runs, the one its trace recorded, and its recursive return roots
+/// and escapes as php's does (the exit numbers are #1220's):
+///
+/// ```php
+/// trait T { function fib($n) { if ($n < 2) { return $n; } return $this->fib($n - 1) + $this->fib($n - 2); } }
+/// class C { use T; }
+/// echo (new C)->fib(12), "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 144
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:3
+/// ---- TRACE 1 abort (deep recursion)
+///
+/// ---- TRACE 1 start (enter) C::fib() %s:2
+/// ---- TRACE 1 stop (recursive call)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit %d C::fib() %s:2
+/// ---- TRACE 2 start (side trace 1/%d) C::fib() %s:2
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+///
+/// ---- TRACE 3 start (return) C::fib() %s:2
+/// ---- TRACE 3 stop (recursive return)
+/// ---- TRACE 3 compiled
+///
+///      TRACE 3 exit %d C::fib() %s:2
+/// ---- TRACE 4 start (side trace 3/%d) C::fib() %s:2
+/// ---- TRACE 4 stop (link to 1)
+/// ---- TRACE 4 compiled
+///
+///      TRACE 1 exit %d C::fib() %s:2
+/// ---- TRACE 5 start (side trace 1/%d) C::fib() %s:2
+/// ---- TRACE 5 stop (return)
+/// ---- TRACE 5 compiled
+///
+/// ```
 fn where_stood(req: &mut Request, frame: FrameRef, func: Option<u32>) -> Result<Stood, Fatal> {
     let call = match tier::building_call(req).filter(|call| *call != frame) {
         Some(call) => tier::room(req, call).map_or(ptr::null_mut(), NonNull::as_ptr),

@@ -1176,8 +1176,8 @@ pub fn call_held(
     let Some(pushed) = req.enter_call(returns_to, frame, flagged) else {
         return step_held(req, frame, held, epoch);
     };
-    // The callee the trace recorded, as its `INIT_*` guarded it; a
-    // closure's frame reading a cache of its own is served from its unit.
+    // The callee the trace recorded, as its `INIT_*` guarded it; any
+    // other is served from its unit.
     if running_func(req, pushed) == Some(callee.func()) {
         return activated_over(req, pushed, callee.code());
     }
