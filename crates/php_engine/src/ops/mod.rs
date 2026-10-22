@@ -2961,7 +2961,7 @@ pub(crate) fn concat_assign(
     left: &Value,
     right: &Value,
     vacate: impl FnOnce(&mut Request),
-    restore: impl FnOnce(&mut Request, Value),
+    reinstate: impl FnOnce(&mut Request, Value),
 ) -> Result<Value, Thrown> {
     // Only a place that holds a string is given up without running
     // anything, so the right side is read unowned only then: what a
@@ -3012,7 +3012,7 @@ pub(crate) fn concat_assign(
         // `null`ed first, `ZVAL_NULL(result)`, and stays so.
         Err(thrown) => {
             if quiet {
-                restore(req, Value::string(a));
+                reinstate(req, Value::string(a));
             } else {
                 req.release(Value::string(a));
             }
