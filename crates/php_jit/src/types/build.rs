@@ -161,6 +161,11 @@ struct Placed {
 struct Call {
     inline: bool,
     args: Vec<Option<Types>>,
+    /// Per argument, the register value a send wrote it from, which an
+    /// untyped parameter of an inlined callee goes on being held in, as
+    /// php's send sets the callee's stack map to the register it sent
+    /// (`SET_STACK_REF`) where no `RECV` checks a type.
+    regs: Vec<Option<ValueId>>,
 }
 
 struct Builder<'a> {
@@ -201,6 +206,9 @@ struct Builder<'a> {
     end_draft: Option<Draft>,
     /// What the trace repeats, where its stop makes it loop.
     repeat: Option<Repeat>,
+    /// An inlined callee's untyped parameter, by the value it entered
+    /// with, and the caller's register value it was sent from ([`Call::regs`]).
+    held: HashMap<ValueId, ValueId>,
 }
 
 impl<'a> Builder<'a> {
@@ -233,6 +241,7 @@ impl<'a> Builder<'a> {
                 Stop::RecursiveRet => Some(Repeat::Return),
                 _ => None,
             },
+            held: HashMap::new(),
         };
         let root = builder.frame(rec.root, Place::Root, None)?;
         builder.stack.push(root);
@@ -773,6 +782,7 @@ impl<'a> Builder<'a> {
         self.calls.push(Call {
             inline,
             args: Vec::new(),
+            regs: Vec::new(),
         });
         self.ops.push(Op::InitCall {
             frame,
@@ -802,15 +812,25 @@ impl<'a> Builder<'a> {
             return;
         }
         let types = by_value.then(|| assigned(self.types_of(frame, op1)));
+        let reg = match op1 {
+            Operand::Value(value) if by_value && self.val(value).home == Home::Register => {
+                Some(value)
+            }
+            _ => None,
+        };
         let Some(call) = self.calls.last_mut() else {
             return;
         };
         let at = op.op2.saturating_sub(1) as usize;
         if call.args.len() <= at {
             call.args.resize(at + 1, None);
+            call.regs.resize(at + 1, None);
         }
         if let Some(arg) = call.args.get_mut(at) {
             *arg = types;
+        }
+        if let Some(held) = call.regs.get_mut(at) {
+            *held = reg;
         }
     }
 
@@ -835,6 +855,14 @@ impl<'a> Builder<'a> {
             };
             let value = self.value(slot, types, Def::Op(idx), Home::Memory);
             self.set(slot, value);
+            let reg = call
+                .as_ref()
+                .and_then(|call| call.regs.get(param.number.saturating_sub(1) as usize))
+                .copied()
+                .flatten();
+            if let (Declared::Untyped, Some(reg)) = (param.declared, reg) {
+                self.held.insert(value, reg);
+            }
         }
         self.ops.push(Op::Enter { frame });
         Ok(())
@@ -1703,13 +1731,14 @@ impl<'a> Builder<'a> {
             let func = (self.frames.get(usize::from(spec.frame.0)))
                 .ok_or_else(|| mismatch("an exit in no frame of the trace"))?
                 .func;
+            let func = (func, self.held_at(&draft));
             match source {
                 Source::Guard(at) => {
                     let placed = self.guards[at];
                     numbered.guards.push(Guard {
                         at: placed.at,
                         check: placed.check,
-                        exit: exits.take(spec, func)?,
+                        exit: exits.take(spec, func.clone())?,
                     });
                     let held = match placed.check {
                         Check::Type { value, tag } => Some((value, tag)),
@@ -1729,7 +1758,7 @@ impl<'a> Builder<'a> {
                 Source::Leave(at) => {
                     let (op, leaves, _) = self.leaves[at];
                     let leave = match leaves {
-                        Leaves::Unfinished => Leave::Exit(exits.take(spec, func)?),
+                        Leaves::Unfinished => Leave::Exit(exits.take(spec, func.clone())?),
                         Leaves::Thrown => {
                             let unwind = Unwind {
                                 stores: spec.stores,
@@ -1755,15 +1784,35 @@ impl<'a> Builder<'a> {
                     numbered.end = Some(End::Loop(LoopHeader {
                         at: self.header,
                         repeat,
-                        interrupt: Interrupt::Exit(exits.take(spec, func)?),
+                        interrupt: Interrupt::Exit(exits.take(spec, func.clone())?),
                     }));
                 }
-                Source::End => numbered.end = Some(End::Leave(exits.take(spec, func)?)),
+                Source::End => numbered.end = Some(End::Leave(exits.take(spec, func.clone())?)),
             }
         }
         numbered.exits = exits.specs;
         numbered.unwinds = unwinds;
         Ok(numbered)
+    }
+
+    /// The untyped parameters of `draft`'s frame that hold, where it
+    /// leaves, the value they entered with, each with the caller's
+    /// register value it was sent from: what php's stack map holds as a
+    /// register reference there, so the exit is not one its caller's
+    /// level shares, where php's typed `RECV` reads the parameter from
+    /// its slot and its stack map holds none.
+    fn held_at(&self, draft: &Draft) -> Vec<(u32, ValueId)> {
+        let empty = Snapshot::default();
+        let snapshot = match draft.point {
+            Point::Start => &empty,
+            Point::Before(at) => self.snapshots.get(at.index()).unwrap_or(&empty),
+            Point::After(at) => self.snapshots.get(at.index() + 1).unwrap_or(&empty),
+            Point::End => self.snapshots.last().unwrap_or(&empty),
+        };
+        (snapshot.values.iter())
+            .filter(|(slot, _)| slot.frame == draft.frame)
+            .filter_map(|(slot, value)| Some((slot.var, *self.held.get(value)?)))
+            .collect()
     }
 
     /// Every place that takes an exit, in the order the trace meets them,
@@ -2346,17 +2395,24 @@ struct Exits {
 struct Reused {
     func: FuncRef,
     spec: ExitSpec,
+    /// The frame's untyped parameters php's stack map holds in the
+    /// caller's registers they were sent from, by variable, which keep
+    /// an inlined level's exits apart from its caller's, as php's
+    /// register references do (`Builder::held_at`).
+    held: Vec<(u32, ValueId)>,
 }
 
 impl Reused {
-    /// The key of `spec`, whose frame runs `func`.
-    fn of(spec: &ExitSpec, func: FuncRef) -> Reused {
+    /// The key of `spec`, whose frame runs `func` with `held` in the
+    /// registers they were sent from.
+    fn of(spec: &ExitSpec, (func, held): (FuncRef, Vec<(u32, ValueId)>)) -> Reused {
         let relative = |slot: Slot| Slot {
             frame: Frame::ROOT,
             ..slot
         };
         Reused {
             func,
+            held,
             spec: ExitSpec {
                 frame: Frame::ROOT,
                 known: (spec.known.iter())
@@ -2379,7 +2435,11 @@ impl Exits {
     /// trace with `TooManyExits` where a new one would pass
     /// `ZEND_JIT_TRACE_MAX_EXITS`. An exit that names no opline is never
     /// reused, as php reuses none whose `to_opline` is null.
-    fn take(&mut self, spec: ExitSpec, func: FuncRef) -> Result<ExitId, Abort> {
+    fn take(
+        &mut self,
+        spec: ExitSpec,
+        func: (FuncRef, Vec<(u32, ValueId)>),
+    ) -> Result<ExitId, Abort> {
         let key = spec.opline.is_some().then(|| Reused::of(&spec, func));
         if let Some(id) = key.as_ref().and_then(|key| self.taken.get(key)) {
             return Ok(*id);
