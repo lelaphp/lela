@@ -553,7 +553,9 @@ pub(super) fn staged(checkout: &Path, path: &str) -> Option<Operation> {
     differs.then_some(operation)
 }
 
-fn head(checkout: &Path) -> Option<String> {
+/// The commit `HEAD` stands at in `checkout`, its full id; `None` for an
+/// unborn one.
+pub(super) fn head(checkout: &Path) -> Option<String> {
     git::rev_parse(checkout, &["--verify", "--quiet", "HEAD"]).ok()
 }
 
