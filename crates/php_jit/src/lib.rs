@@ -26,6 +26,7 @@
     clippy::unimplemented
 )]
 
+use std::cell::Cell;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,6 +40,7 @@ use php_unit::Opcode;
 
 mod compiler;
 mod dispatch;
+use dispatch::JitRequest;
 mod lower;
 #[cfg(test)]
 mod observed;
@@ -64,6 +66,8 @@ pub use enter::bench;
 pub struct Jit;
 
 impl Tier for Jit {
+    type State = JitRequest;
+
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
         dispatch::safepoint(req, frame, site, held)
     }
@@ -78,31 +82,61 @@ impl Tier for Jit {
             .is_some_and(|engine| engine.shared.bound.asked())
     }
 
-    /// The tier's state (`jit-design.md` §4): its two directives,
+    /// [`JitRequest`], laid with each request of an engine that binds
+    /// `Jit`'s loop.
+    fn lay(started: &Started<'_>) -> Option<JitRequest> {
+        JitRequest::laid(*started)
+    }
+
+    /// The tier's state (`jit-design.md` §4): its two directives and
     /// [`JitEngine`], built last at engine start, after the opcache
-    /// extension registered php's `opcache.jit*`, and [`JitRequest`].
+    /// extension registered php's `opcache.jit*`; its request's,
+    /// [`JitRequest`], is the tier's own ([`Jit::lay`]).
     fn extension() -> Option<Extension> {
         Some(
             ExtensionBuilder::default()
                 .ini(policy::ini())
                 .engine_state(JitEngine::new)
-                .request_state::<JitRequest>()
                 .rinit(JitEngine::request_started)
                 .build("jit"),
         )
     }
 }
 
-/// The tier's request state (`jit-design.md` §4): whether a recording is
-/// under way on the request, php's `JIT_G(tracing)`, which no fiber switch
-/// saves (§4.9, revision 30), set and cleared by `record`'s guard
-/// alone; and the trace it last submitted to the worker and has not
-/// reached yet, while which it claims nothing (`dispatch::Submitted`).
-/// `dispatch::quiet` reads both.
-#[derive(Debug, Default)]
-pub(crate) struct JitRequest {
-    recording: bool,
-    submitted: Option<dispatch::Submitted>,
+impl JitRequest {
+    /// The state a request of the engine `started` is laid with, its
+    /// engine state's [`Shared`]; none where the engine built no
+    /// [`JitEngine`].
+    fn laid(started: Started<'_>) -> Option<JitRequest> {
+        let engine = started.engine::<JitEngine>()?;
+        Some(JitRequest::of(&engine.shared, engine.compiler.submitter()))
+    }
+
+    /// The state a test's recorder lays over its `Policy` alone, with no
+    /// engine state of the tier's: no `Backend` and no `PERF` file.
+    #[cfg(test)]
+    fn recorder(policy: &policy::Policy) -> JitRequest {
+        let shared = Arc::new(Shared {
+            policy: policy.clone(),
+            bound: policy.bound(false),
+            backend: None,
+            started: Box::default(),
+            told: AtomicBool::new(false),
+            perf: table::Outputs::none(),
+        });
+        JitRequest::of(&shared, compiler::Submitter::INLINE)
+    }
+
+    /// The state of a request over `shared`, submitting through
+    /// `submitter`, recording nothing and having submitted nothing.
+    fn of(shared: &Arc<Shared>, submitter: compiler::Submitter) -> JitRequest {
+        JitRequest {
+            shared: Arc::clone(shared),
+            submitter,
+            recording: Cell::new(false),
+            submitted: Cell::new(None),
+        }
+    }
 }
 
 /// The tier's engine state (`jit-design.md` §4): where a recording

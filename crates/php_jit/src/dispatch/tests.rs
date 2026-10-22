@@ -186,25 +186,23 @@ fn a_request_claims_nothing_until_it_reaches_the_trace_it_submitted() {
     };
     let claim = policy::claim(holder.clone(), &policy, Start::Loop);
     assert_eq!(policy::read(word), State::Recording);
-    let mut state = crate::JitRequest {
-        submitted: Some(Submitted {
-            word: holder,
-            goes_on: GoesOn::Short,
-        }),
-        ..crate::JitRequest::default()
-    };
-    let at = |state: &mut crate::JitRequest, site| quieted(state, Some(site));
-    assert!(at(&mut state, Site::Entry), "under way");
-    assert!(at(&mut state, Site::Loop(SafepointIdx(1))), "under way");
+    let state = crate::JitRequest::recorder(&policy);
+    state.submitted.set(Some(Submitted {
+        word: holder,
+        goes_on: GoesOn::Short,
+    }));
+    let at = |state: &crate::JitRequest, site| quieted(state, Some(site));
+    assert!(at(&state, Site::Entry), "under way");
+    assert!(at(&state, Site::Loop(SafepointIdx(1))), "under way");
     if let Some(claim) = claim {
         policy::settle(claim, &Outcome::Published(trace(1)));
     }
     assert_eq!(policy::read(word), State::Compiled(trace(1)));
-    assert!(at(&mut state, Site::Entry), "short of the trace");
-    assert!(quieted(&mut state, None), "short of the trace");
-    assert!(!at(&mut state, Site::Return(SafepointIdx(0))), "reached");
-    assert!(state.submitted.is_none());
-    assert!(!at(&mut state, Site::Entry));
+    assert!(at(&state, Site::Entry), "short of the trace");
+    assert!(quieted(&state, None), "short of the trace");
+    assert!(!at(&state, Site::Return(SafepointIdx(0))), "reached");
+    assert!(state.submitted.take().is_none());
+    assert!(!at(&state, Site::Entry));
 }
 
 /// The trace-dump lanes' ini: `force`, inline, and php's `TRACE` lines.
@@ -330,6 +328,12 @@ struct Unwound {
 struct Panics;
 
 impl Tier for Panics {
+    type State = crate::JitRequest;
+
+    fn lay(started: &tier::Started<'_>) -> Option<crate::JitRequest> {
+        crate::JitRequest::laid(*started)
+    }
+
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
         if record::recording(req) {
             resume_unwind(Box::new("a kernel panicked under a recording"));
@@ -441,6 +445,12 @@ struct Spied {
 struct Spy;
 
 impl Tier for Spy {
+    type State = crate::JitRequest;
+
+    fn lay(started: &tier::Started<'_>) -> Option<crate::JitRequest> {
+        crate::JitRequest::laid(*started)
+    }
+
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
         let halves = |req: &Request| {
             let word = held.word(req, site.idx());
@@ -504,6 +514,12 @@ struct Asked {
 struct Counted;
 
 impl Tier for Counted {
+    type State = crate::JitRequest;
+
+    fn lay(started: &tier::Started<'_>) -> Option<crate::JitRequest> {
+        crate::JitRequest::laid(*started)
+    }
+
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
         let halves = |req: &Request| {
             let word = held.word(req, site.idx());
@@ -767,6 +783,12 @@ mod ran {
     struct Running;
 
     impl Tier for Running {
+        type State = crate::JitRequest;
+
+        fn lay(started: &tier::Started<'_>) -> Option<crate::JitRequest> {
+            crate::JitRequest::laid(*started)
+        }
+
         fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
             if site != Site::Entry || function_of(req, frame).as_deref() != Some(b"f") {
                 return Flow::Continue;
@@ -932,6 +954,12 @@ mod ran {
     struct SideRuns<const PUBLISHED: bool>;
 
     impl<const PUBLISHED: bool> Tier for SideRuns<PUBLISHED> {
+        type State = crate::JitRequest;
+
+        fn lay(started: &tier::Started<'_>) -> Option<crate::JitRequest> {
+            crate::JitRequest::laid(*started)
+        }
+
         fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
             if site != Site::Entry || function_of(req, frame).as_deref() != Some(b"f") {
                 return Flow::Continue;

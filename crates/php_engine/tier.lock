@@ -120,6 +120,7 @@ tier::set_stdin
 tier::set_trace_num
 tier::sink
 tier::stand
+tier::state
 tier::step
 tier::trace_num
 tier::unwind

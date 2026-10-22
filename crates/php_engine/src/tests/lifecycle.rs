@@ -1107,6 +1107,8 @@ fn a_diagnostic_raised_at_engine_end_is_displayed_and_logged_where_the_host_left
 struct Declaring;
 
 impl crate::tier::Tier for Declaring {
+    type State = ();
+
     fn safepoint(
         _: &mut Request,
         _: php_heap::FrameRef,
