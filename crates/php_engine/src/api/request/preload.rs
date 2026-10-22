@@ -343,7 +343,10 @@ impl Request {
         if let Ok(unit) = &unit {
             self.count_keys_made(crate::unit_cache::keys_of(unit));
         }
-        let unit = unit.map(|unit| shared.publish_compiled(unit));
+        // The preload optimizes what it holds (`zend_optimize_script`
+        // in `preload_optimize`).
+        let optimizer = shared.optimizer();
+        let unit = unit.map(|unit| shared.publish_compiled(optimizer.optimized(unit)));
         if let (Ok(unit), Some(preloading)) = (&unit, &mut self.preloading) {
             let size = u64::try_from(source.len()).unwrap_or(u64::MAX);
             preloading

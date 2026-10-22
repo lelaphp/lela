@@ -326,6 +326,36 @@ enum ClassRef<'a> {
 /// `sizeof(void*)`: what one runtime cache slot takes of `cache_size`.
 const SLOT: u32 = 8;
 
+/// `cache_size` once the sites have taken `slots` of it, as `pass_two`
+/// finishes it (`Z/Zend/zend_opcode.c:1140-1147`): a `RECV_INIT` whose
+/// default php could not fold, an `IS_CONSTANT_AST`, keeps the value it
+/// evaluates to in the runtime cache, a zval past every slot, so a
+/// function with such a default lays a cache sixteen bytes larger for
+/// each:
+///
+/// ```php
+/// class A {}
+/// $fs = [function ($a = 1) { new stdClass; }, function ($a = X) { new stdClass; }, function ($a = X, $b = Y) { new stdClass; }];
+/// foreach ($fs as $f) { $m = memory_get_usage(); $b = Closure::bind($f, null, A::class); echo memory_get_usage() - $m, " "; unset($b); }
+/// ```
+/// ```expect
+/// 400 408 424
+/// ```
+fn defaults_cached(oplines: &[Opline], literals: &[Zval], slots: u32) -> u32 {
+    let unfolded = oplines
+        .iter()
+        .filter(|op| op.opcode == Opcode::RecvInit)
+        .filter(|op| {
+            literals
+                .get(op.op2 as usize)
+                .is_some_and(|literal| literal.as_const_expr().is_some())
+        })
+        .count();
+    let zval = u32::try_from(std::mem::size_of::<Zval>()).unwrap_or(16);
+    let unfolded = u32::try_from(unfolded).unwrap_or(u32::MAX);
+    slots.saturating_add(unfolded.saturating_mul(zval))
+}
+
 /// `ZEND_FETCH_CLASS_SELF`, `_PARENT` and `_STATIC`
 /// (`Z/Zend/zend_compile.h:1028`), the fetch types of a class reference
 /// of the scope, and `ZEND_FETCH_CLASS_DEFAULT`, a class by name.
@@ -5274,9 +5304,11 @@ impl<'a> Emit<'a> {
         let vars = std::mem::take(&mut self.vars);
         let num_cvs = u32::try_from(vars.len()).unwrap_or(u32::MAX);
         crate::live::fold_slots(&mut oplines, &mut live_ranges, num_cvs);
+        let literals = std::mem::take(&mut self.constants);
+        let cache_size = defaults_cached(&oplines, &literals, self.cache_slots);
         OpArray {
             oplines,
-            literals: std::mem::take(&mut self.constants),
+            literals,
             const_exprs: std::mem::take(&mut self.const_exprs),
             vars,
             num_cvs,
@@ -5287,7 +5319,8 @@ impl<'a> Emit<'a> {
             filename,
             line_start,
             line_end,
-            cache_size: self.cache_slots,
+            cache_size,
+            cache_room: cache_size,
             runtime_cache: php_unit::MapPtrOffset::default(),
             dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs),
             bound_vars: std::mem::take(&mut self.static_vars),

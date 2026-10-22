@@ -511,10 +511,8 @@ impl Request {
             self.revalidated_path(written.unwrap_or(path), &full);
         }
         let resolved = lookup == Lookup::Resolved;
-        let written = match lookup {
-            Lookup::AsWritten => written.and_then(|written| self.written_key(written)),
-            Lookup::Resolved => None,
-        };
+        let written = (written.filter(|_| lookup == Lookup::AsWritten))
+            .and_then(|written| self.written_key(written));
         let levels = levels(file_cache.as_ref(), memory, &shared.units.build);
         // `persistent_compile_file` opens the file to resolve its path
         // wherever the lookup by the key misses.
@@ -529,6 +527,7 @@ impl Request {
             protection,
             now,
             levels,
+            optimizer: shared.optimizer(),
         };
         let stack = self.stack_limit();
         let bound = crate::multibyte::bound(self, shared.compile_multibyte());
