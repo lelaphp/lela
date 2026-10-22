@@ -311,7 +311,8 @@ impl<'a> Builder<'a> {
         match self.repeat {
             Some(Repeat::Loop) => self.loop_phis(body)?,
             Some(Repeat::Call) => self.call_phis(),
-            Some(Repeat::Return) | None => {}
+            Some(Repeat::Return) => self.ret_phi(body.first()),
+            None => {}
         }
         for (at, event) in body.iter().enumerate() {
             let ahead = events.get(at + 1..).unwrap_or_default();
@@ -324,23 +325,7 @@ impl<'a> Builder<'a> {
                     op2,
                     data,
                     branch,
-                } => {
-                    let root_return = at == 0 && rec.start == Start::Return;
-                    self.line(
-                        *func,
-                        *opline,
-                        [*op1, *op2, *data],
-                        *branch,
-                        ahead,
-                        root_return,
-                    )?;
-                    if root_return {
-                        self.back(next)?;
-                        if self.repeat == Some(Repeat::Return) {
-                            self.ret_phi();
-                        }
-                    }
-                }
+                } => self.line(*func, *opline, [*op1, *op2, *data], *branch, ahead)?,
                 Event::InitCall { target } => self.init_call(*target)?,
                 Event::Enter { func } => self.enter(*func)?,
                 Event::Back => self.back(next)?,
@@ -407,12 +392,18 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The phi of a recursive return: the slot the call the root returned
-    /// to writes, php's `zend_jit_trace_add_ret_phis`.
-    fn ret_phi(&mut self) {
-        self.header = OpId(u32::try_from(self.ops.len()).unwrap_or(u32::MAX));
-        if let Some(Op::Back { out: Some(out), .. }) = self.ops.last() {
-            let slot = self.val(*out).slot;
+    /// The phi of a recursive return, php's `zend_jit_trace_add_ret_phis`
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:763-788`): the slot the call
+    /// before the trace's first opline writes, the landing a return trace
+    /// is rooted at (`jit-design.md` §2.2), where its value is used.
+    fn ret_phi(&mut self, first: Option<&Event>) {
+        let Some(Event::Op { func, opline, .. }) = first else {
+            return;
+        };
+        let call = (opline.0.checked_sub(1))
+            .and_then(|at| self.meta(Frame::ROOT).code.oplines.get(at as usize))
+            .filter(|call| is_call(call.opcode) && self.frames[0].func == *func);
+        if let Some(slot) = call.and_then(|call| slot_of(Frame::ROOT, call.out_type, call.out)) {
             self.phi(slot);
         }
     }
@@ -434,7 +425,6 @@ impl<'a> Builder<'a> {
         samples: [Option<Sample>; 3],
         branch: Option<bool>,
         ahead: &[Event],
-        root_return: bool,
     ) -> Result<(), Abort> {
         let next = ahead.first();
         let frame = self.running()?;
@@ -465,7 +455,7 @@ impl<'a> Builder<'a> {
             [op1, op2, data],
             samples,
         );
-        let form = self.form(frame, &op, seen, next, root_return);
+        let form = self.form(frame, &op, seen, next);
         let map_ptr = self.map_ptr(func, &op, form);
         self.record_send(frame, &op, op1);
         if !keeps_temporaries(op.opcode) {
@@ -821,14 +811,25 @@ impl<'a> Builder<'a> {
     }
 
     /// A return: back into the frame that called, or, past the trace's
-    /// lowest frame, into a caller whose call the guard holds.
+    /// lowest frame, into a caller whose call the guard holds: where the
+    /// trace goes on there, the opline recorded next, or, past the last,
+    /// the header its recursive return goes back to or the opline it
+    /// links at, as php's `zend_jit_leave_func` holds the instruction
+    /// pointer to the next record's opline
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:11188-11224`).
     fn back(&mut self, next: Option<&Event>) -> Result<(), Abort> {
         let idx = self.begin();
         let from = self.running()?;
         self.stack.pop();
         let next_op = match next {
             Some(Event::Op { func, opline, .. }) => Some((*func, *opline)),
-            _ => None,
+            Some(_) => None,
+            None => match (self.repeat, self.ops.get(self.header.index())) {
+                (Some(Repeat::Return), Some(Op::Line(line))) => {
+                    Some((self.frames[usize::from(line.frame.0)].func, line.opline))
+                }
+                _ => self.rec.link_at,
+            },
         };
         let (caller, call_at, guard) = if let Some(&caller) = self.stack.last() {
             (caller, self.meta(from).called_at, None)
@@ -851,10 +852,11 @@ impl<'a> Builder<'a> {
                 self.define(slot, returned, idx, Form::Step)
             });
         self.returned = Types::NULL;
-        self.ops.push(Op::Back { frame: caller, out });
-        if let Some((func, opline)) = guard {
-            self.stands_at(idx, caller, func, opline);
-        }
+        self.ops.push(Op::Back {
+            frame: caller,
+            out,
+            escapes: guard,
+        });
         Ok(())
     }
 
@@ -1341,14 +1343,7 @@ impl<'a> Builder<'a> {
     /// How an opline is compiled: inline where it is in the scalar core
     /// and its operands' types are the ones the inline code serves,
     /// through `step` otherwise.
-    fn form(
-        &self,
-        frame: Frame,
-        op: &Opline,
-        seen: Seen,
-        next: Option<&Event>,
-        root_return: bool,
-    ) -> Form {
+    fn form(&self, frame: Frame, op: &Opline, seen: Seen, next: Option<&Event>) -> Form {
         let [t1, t2, td] = seen.types;
         // An opline that writes its variable `op1` writes through what it
         // sees through a reference, which only its handler does.
@@ -1401,7 +1396,7 @@ impl<'a> Builder<'a> {
                 matches!(next, Some(Event::Enter { .. }))
             }
             Opcode::Return => {
-                (root_return || matches!(next, Some(Event::Back)))
+                matches!(next, Some(Event::Back))
                     && (scalar(t1) || op.op1_type == OperandKind::Unused)
                     && self.uncounted(frame)
             }

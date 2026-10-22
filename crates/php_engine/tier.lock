@@ -48,6 +48,7 @@ tier::FrameRef
 tier::FuncRef
 tier::FuncRef::at
 tier::FuncRef::offset
+tier::Held
 tier::Hooked
 tier::MapPtrRaw
 tier::Parked
@@ -86,6 +87,7 @@ tier::at_room
 tier::begin
 tier::below
 tier::building
+tier::building_call
 tier::call
 tier::catches
 tier::class_number
@@ -98,15 +100,18 @@ tier::evaluate
 tier::evaluate_code
 tier::exit
 tier::frame
+tier::frame_cache
 tier::free_operands
 tier::func
 tier::interrupted
+tier::landing
 tier::numbered_class
 tier::observes
 tier::on_heap
 tier::primed
 tier::restore
 tier::room
+tier::running_func
 tier::sample
 tier::serve_kept
 tier::set_argv
@@ -118,6 +123,7 @@ tier::stand
 tier::step
 tier::trace_num
 tier::unwind
-tier::word
 [kernels]
+tier::call_held
 tier::release
+tier::step_held

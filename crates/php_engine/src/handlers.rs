@@ -21356,6 +21356,7 @@ fn inline_identical<T: Tier, const NOT: bool>(
         return Some(branch_fused::<T>(
             req,
             frame,
+            code,
             at.saturating_add(1),
             jump,
             answer,
@@ -21663,6 +21664,7 @@ fn inline_type_check<T: Tier>(
         return Some(branch_fused::<T>(
             req,
             frame,
+            code,
             at.saturating_add(1),
             jump,
             answer,
@@ -22165,6 +22167,7 @@ fn inline_isset_dim<T: Tier>(
         return Some(branch_fused::<T>(
             req,
             frame,
+            code,
             at.saturating_add(1),
             jump,
             answer,
@@ -22802,9 +22805,14 @@ fn counted(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> E
 /// (`jit-design.md` §2.2), then the interrupt check, then the site with
 /// the number the compiler wrote in `result`. A forward jump is neither
 /// and costs one comparison.
-pub(crate) fn jmp<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, op: &Opline) -> Edge {
+pub(crate) fn jmp<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
     let at = req.vm().opline(frame);
-    jumped::<T>(req, frame, at, op.op1, op.out)
+    jumped::<T>(req, frame, code, at, op.op1, op.out)
 }
 
 /// `ZEND_VM_JMP` from the opline at `at` to `target`, the frame left at
@@ -22813,13 +22821,21 @@ pub(crate) fn jmp<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, op: 
 /// `number`, the one the compiler wrote into the jump's `result`.
 #[inline(always)] // the back-edge of every loop, in the loop
 #[allow(clippy::inline_always)]
-fn jumped<T: Tier>(req: &mut Request, frame: FrameRef, at: u32, target: u32, number: u32) -> Edge {
+fn jumped<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    at: u32,
+    target: u32,
+    number: u32,
+) -> Edge {
     if target <= at {
         req.vm_mut().stand(frame, target);
         if crate::interrupt::check(req)? {
             return Ok(Stepped::Threw(frame).into());
         }
-        match T::safepoint(req, frame, Site::Loop(SafepointIdx(number))) {
+        let held = crate::tier::Held::of(code);
+        match T::safepoint(req, frame, Site::Loop(SafepointIdx(number)), held) {
             Flow::Continue => {}
             // The tier ran the jump and on past it (`jit-design.md` §2.2).
             flow => return crate::tier::resumed(req, flow, frame),
@@ -22995,7 +23011,7 @@ fn branched<T: Tier, const ON: bool, const EX: bool>(
         return jump_to(op.op2);
     }
     let at = req.vm().opline(frame);
-    jumped::<T>(req, frame, at, op.op2, op.out)
+    jumped::<T>(req, frame, code, at, op.op2, op.out)
 }
 
 /// `ZEND_JMP_SET`: the left operand of `a ?: c`
@@ -23422,7 +23438,7 @@ pub(crate) fn r#return<T: Tier, A: Operand + Default>(
 /// before it keeps to the registers it needs.
 #[inline(never)]
 fn returned<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
-    if let Some(edge) = return_site::<T>(req, frame, op) {
+    if let Some(edge) = return_site::<T>(req, frame, code, op) {
         return edge;
     }
     let returned = exec::take_operand(req, frame, code, op.op1_type, op.op1);
@@ -23438,11 +23454,17 @@ fn returned<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Op
 /// left to do here.
 #[inline(always)] // once per return, in the RETURN arms
 #[allow(clippy::inline_always)]
-fn return_site<T: Tier>(req: &mut Request, frame: FrameRef, op: &Opline) -> Option<Edge> {
+fn return_site<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Option<Edge> {
     if req.stack_mut().entry() == frame {
         return None;
     }
-    match T::safepoint(req, frame, Site::Return(SafepointIdx(op.out))) {
+    let held = crate::tier::Held::of(code);
+    match T::safepoint(req, frame, Site::Return(SafepointIdx(op.out)), held) {
         Flow::Continue => None,
         flow => Some(crate::tier::resumed(req, flow, frame)),
     }
@@ -23508,7 +23530,7 @@ fn inline_return<T: Tier>(
         }
         _ => return None,
     };
-    return_plainly::<T>(req, frame, (code.num_cvs, moved), z, SafepointIdx(op.out))
+    return_plainly::<T>(req, frame, (code, moved), z, SafepointIdx(op.out))
 }
 
 /// [`inline_return`] once its operand is read: the frame left by
@@ -23519,12 +23541,12 @@ fn inline_return<T: Tier>(
 fn return_plainly<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
-    (cvs, moved): (u32, Option<usize>),
+    (code, moved): (&OpArray, Option<usize>),
     z: Zval,
     site: SafepointIdx,
 ) -> Option<Edge> {
-    let leave = req.leaves_plainly(frame, cvs, moved, z)?;
-    match T::safepoint(req, frame, Site::Return(site)) {
+    let leave = req.leaves_plainly(frame, code.num_cvs, moved, z)?;
+    match T::safepoint(req, frame, Site::Return(site), crate::tier::Held::of(code)) {
         Flow::Continue => {}
         // The tier ran the return and the caller's landing
         // (`jit-design.md` §2.2); the frame it left is not this one.
@@ -23715,6 +23737,7 @@ fn smart_branch<T: Tier, S: Branch>(
     branch_fused::<T>(
         req,
         frame,
+        code,
         at.saturating_add(1),
         jump,
         answer.as_bool() == Some(true),
@@ -23822,6 +23845,7 @@ pub(crate) mod branch {
 fn branch_fused<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
+    code: &OpArray,
     at: u32,
     fused: branch::Fused<'_>,
     answer: bool,
@@ -23829,7 +23853,7 @@ fn branch_fused<T: Tier>(
     if answer != fused.on {
         return jump_to(at.saturating_add(1));
     }
-    jumped::<T>(req, frame, at, fused.jump.op2, fused.jump.out)
+    jumped::<T>(req, frame, code, at, fused.jump.op2, fused.jump.out)
 }
 
 /// The inline path of the binary operators (design §5.8,
@@ -23887,6 +23911,7 @@ fn inline_compare<T: Tier, S: Branch>(
         return Some(branch_fused::<T>(
             req,
             frame,
+            code,
             at.saturating_add(1),
             jump,
             answer,
@@ -23927,7 +23952,7 @@ fn inline_branch<T: Tier, const ON: bool, const EX: bool>(
     if EX {
         return Some(jump_to(op.op2));
     }
-    Some(jumped::<T>(req, frame, at, op.op2, op.out))
+    Some(jumped::<T>(req, frame, code, at, op.op2, op.out))
 }
 
 /// The inline path of `ZEND_BOOL` (`NOT` false) and `ZEND_BOOL_NOT`
@@ -25018,7 +25043,7 @@ pub(crate) fn return_by_ref<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if let Some(edge) = return_site::<T>(req, frame, op) {
+    if let Some(edge) = return_site::<T>(req, frame, code, op) {
         return edge;
     }
     let by_value = match op.op1_type {

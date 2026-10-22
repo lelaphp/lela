@@ -64,8 +64,8 @@ pub use enter::bench;
 pub struct Jit;
 
 impl Tier for Jit {
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
-        dispatch::safepoint(req, frame, site)
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
+        dispatch::safepoint(req, frame, site, held)
     }
 
     /// The engine binds `Jit`'s loop only where the tier runs

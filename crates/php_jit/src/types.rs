@@ -243,8 +243,17 @@ pub(crate) enum Op {
     /// The frame a call pushed runs.
     Enter { frame: Frame },
     /// A return lands in `frame`, and `out` is what the call's slot holds
-    /// after it, where the call keeps one.
-    Back { frame: Frame, out: Option<ValueId> },
+    /// after it, where the call keeps one. A return past the trace's
+    /// lowest frame `escapes` unless the interpreter stands at that
+    /// opline of that op array after it, php's IP guard in
+    /// `zend_jit_leave_func` (`Z/ext/opcache/jit/zend_jit_ir.c:11188-11224`):
+    /// no exit, the frame left to the handler of the opline it stands
+    /// at ([`crate::lower::ESCAPED`]).
+    Back {
+        frame: Frame,
+        out: Option<ValueId>,
+        escapes: Option<(FuncRef, OplineIdx)>,
+    },
 }
 
 /// One recorded opline: where it stands, what it reads and writes, how

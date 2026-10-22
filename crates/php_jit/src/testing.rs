@@ -176,8 +176,8 @@ pub(crate) const OPCACHE: [&str; 21] = [
 pub(crate) struct Lane;
 
 impl Tier for Lane {
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
-        crate::dispatch::safepoint(req, frame, site)
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
+        crate::dispatch::safepoint(req, frame, site, held)
     }
 
     fn asked(started: &Started<'_>) -> bool {

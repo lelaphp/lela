@@ -45,8 +45,8 @@ use php_heap::{Arr, ROOM_BYTES, Ref, Zval, ZvalType};
 use php_unit::{MapPtrOffset, Opcode, OplineIdx};
 
 use super::{
-    ABANDONED, DECLINED, ENTRY_AT, INTERRUPT_AT, INTERRUPTED, Kernel, Stood, Symbols, UNWOUND,
-    located,
+    ABANDONED, DECLINED, ENTRY_AT, ESCAPED, INTERRUPT_AT, INTERRUPTED, Kernel, Stood, Symbols,
+    UNWOUND, located,
 };
 use crate::record::Stop;
 use crate::types::{
@@ -247,6 +247,8 @@ struct Emit<'a> {
     unwinds: Vec<Option<Block>>,
     /// The block a kernel's refusal with no exit to take answers from.
     abandon: Option<Block>,
+    /// The block a return past the lowest frame escapes from.
+    escape: Option<Block>,
     /// The block the interrupt test answers [`INTERRUPTED`] from, where
     /// it takes php's stub.
     stub: Option<Block>,
@@ -288,6 +290,7 @@ impl<'a> Emit<'a> {
             exits: vec![None; ir.exits.len()],
             unwinds: vec![None; ir.unwinds.len()],
             abandon: None,
+            escape: None,
             stub: None,
             declined: None,
             running: Frame::ROOT,
@@ -587,15 +590,15 @@ impl<'a> Emit<'a> {
                 self.running = *frame;
                 Ok(())
             }
-            Op::Back { frame, .. } => {
+            Op::Back { frame, escapes, .. } => {
                 let room = self.stood_word(I64, STOOD_FRAME);
                 self.b.def_var(self.room_var(*frame)?, room);
                 self.running = *frame;
-                for guard in self.within(id) {
-                    let Check::Stands { func, opline } = guard.check else {
-                        return Err(mismatch("a return holds a guard of another kind"));
-                    };
-                    self.stands(func, opline, guard.exit)?;
+                if let Some((func, opline)) = *escapes {
+                    self.escapes(func, opline)?;
+                }
+                if !self.within(id).is_empty() {
+                    return Err(mismatch("a return holds a guard"));
                 }
                 Ok(())
             }
@@ -888,6 +891,12 @@ impl<'a> Emit<'a> {
             let answer = self.b.ins().iconst(I32, i64::from(ABANDONED));
             self.b.ins().return_(&[answer]);
         }
+        if let Some(block) = self.escape {
+            self.b.switch_to_block(block);
+            self.b.seal_block(block);
+            let answer = self.b.ins().iconst(I32, i64::from(ESCAPED));
+            self.b.ins().return_(&[answer]);
+        }
         if let Some(block) = self.stub {
             self.b.switch_to_block(block);
             self.b.seal_block(block);
@@ -964,8 +973,8 @@ impl<'a> Emit<'a> {
         let mut sig = Signature::new(self.call_conv);
         // The `ExitCtx`, the frame's room and the opline come first.
         let params: &[Type] = match kernel {
-            Kernel::Step => &[I64, I64, I32, I64],
-            Kernel::PushCall => &[I64, I64, I32, I32, I64],
+            Kernel::Step => &[I64, I64, I32, I32, I64],
+            Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
             Kernel::Release => &[I64, I64, I32, I64, I32],
             Kernel::Copy => &[I64, I64, I32, I64, I32, I64],
         };
@@ -983,6 +992,18 @@ impl<'a> Emit<'a> {
         let room = self.room(line.frame)?;
         let opline = self.b.ins().iconst(I32, i64::from(line.opline.0));
         Ok([room, opline])
+    }
+
+    /// The engine offset of the op array `frame` serves, which a step of
+    /// one of its oplines serves it from.
+    fn func_of(&mut self, frame: Frame) -> Result<Value, Abort> {
+        let func = self
+            .ir
+            .frames
+            .get(usize::from(frame.0))
+            .map(|info| info.func)
+            .ok_or_else(|| mismatch("a frame past the trace's"))?;
+        Ok(self.b.ins().iconst(I32, i64::from(engine_offset(func)?)))
     }
 
     /// A word of the [`Stood`] the last kernel wrote.
@@ -1003,8 +1024,19 @@ impl<'a> Emit<'a> {
             }
         }
         let [room, opline] = self.served(line)?;
+        let func = self.func_of(line.frame)?;
         let stood = self.b.ins().stack_addr(I64, self.stood, 0);
-        self.call(Kernel::Step, &[room, opline, stood], leave_of(line))?;
+        match self.entered_by(at, line) {
+            Some(callee) => {
+                let callee = self.func_of(callee)?;
+                self.call(
+                    Kernel::Call,
+                    &[room, opline, func, callee, stood],
+                    leave_of(line),
+                )?;
+            }
+            None => self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?,
+        }
         if matches!(
             line.opcode,
             Opcode::DoFcall | Opcode::DoIcall | Opcode::DoUcall | Opcode::DoFcallByName
@@ -1041,6 +1073,21 @@ impl<'a> Emit<'a> {
         Ok(())
     }
 
+    /// The frame a `DO_*CALL` at `at` enters, where the trace follows the
+    /// call into its callee: what [`Kernel::Call`] makes the call to.
+    fn entered_by(&self, at: OpId, line: &Line) -> Option<Frame> {
+        if !matches!(
+            line.opcode,
+            Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName
+        ) {
+            return None;
+        }
+        match self.ir.ops.get(at.index() + 1) {
+            Some(Op::Enter { frame }) => Some(*frame),
+            _ => None,
+        }
+    }
+
     /// php's IP guard: leave through `exit` unless the last kernel left
     /// the interpreter at `opline` of `func`. The exit names no opline, so
     /// exit-fuzz fails it too.
@@ -1057,6 +1104,43 @@ impl<'a> Emit<'a> {
             .icmp_imm_u(IntCC::NotEqual, at, i64::from(opline.0));
         let other = self.b.ins().bor(other_func, other_opline);
         self.leave_if(other, exit)
+    }
+
+    /// php's IP guard past a trace's lowest frame (`zend_jit_leave_func`):
+    /// on unless the last kernel left the interpreter elsewhere than
+    /// `opline` of `func`, where the trace escapes ([`ESCAPED`]) with
+    /// nothing to store, as php's `jit_stub_trace_escape` takes no exit.
+    /// Never failed by exit-fuzz, as it names no exit.
+    fn escapes(&mut self, func: FuncRef, opline: OplineIdx) -> Result<(), Abort> {
+        let landed = self.stood_word(I32, STOOD_FUNC);
+        let at = self.stood_word(I32, STOOD_OPLINE);
+        let other_func =
+            self.b
+                .ins()
+                .icmp_imm_u(IntCC::NotEqual, landed, i64::from(engine_offset(func)?));
+        let other_opline = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, at, i64::from(opline.0));
+        let other = self.b.ins().bor(other_func, other_opline);
+        let to = self.escape_block();
+        let on = self.b.create_block();
+        self.b.ins().brif(other, to, &[], on, &[]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
+        Ok(())
+    }
+
+    /// The trace's one escape block, made the first time a return
+    /// branches to it: [`ESCAPED`] answered, nothing stored.
+    fn escape_block(&mut self) -> Block {
+        if let Some(block) = self.escape {
+            return block;
+        }
+        let block = self.b.create_block();
+        self.b.set_cold_block(block);
+        self.escape = Some(block);
+        block
     }
 
     /// The opline the trace serves next in `frame` after the op at `at`,
@@ -1615,10 +1699,11 @@ impl<'a> Emit<'a> {
             .ok_or_else(|| mismatch("an inline call that cannot leave"))?;
         let callee = self.b.ins().iconst(I32, i64::from(engine_offset(*callee)?));
         let [room, opline] = self.served(line)?;
+        let func = self.func_of(line.frame)?;
         let stood = self.b.ins().stack_addr(I64, self.stood, 0);
         self.call(
             Kernel::PushCall,
-            &[room, opline, callee, stood],
+            &[room, opline, func, callee, stood],
             Some(Leave::Exit(exit)),
         )?;
         let call = self.stood_word(I64, STOOD_CALL);

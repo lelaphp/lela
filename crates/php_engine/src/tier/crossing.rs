@@ -12,7 +12,7 @@ use std::ptr::NonNull;
 use php_heap::{FrameRef, ROOM_BYTES, Zval};
 use php_unit::{CacheSlot, Opcode, OplineIdx};
 
-use super::FuncRef;
+use super::{FuncRef, Held};
 use crate::api::request::Request;
 use crate::api::values::Value;
 use crate::exec;
@@ -63,11 +63,11 @@ pub fn stand(req: &mut Request, frame: FrameRef, at: OplineIdx) {
 /// where a pass primed it with a user function: what each pushes with no
 /// lookup (`ZEND_INIT_FCALL_SPEC_CONST`'s `CACHED_PTR`), so compiled code
 /// that inlined a call to one callee asks before the engine pushes one.
-/// None for a slot not primed, a native and any other opline.
+/// None for a slot not primed, a native and any other opline. `held` is
+/// the op array `frame` serves, as compiled code holds it.
 #[must_use]
-pub fn primed(req: &Request, frame: FrameRef, at: OplineIdx) -> Option<FuncRef> {
-    let code = req.served_op_array(frame)?;
-    let op = exec::opline_at(code, at.0)?;
+pub fn primed(req: &Request, frame: FrameRef, held: Held<'_>, at: OplineIdx) -> Option<FuncRef> {
+    let op = exec::opline_at(held.code(), at.0)?;
     let init = matches!(
         op.opcode,
         Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName

@@ -18,9 +18,9 @@ use crate::testing::{self, function_of};
 /// activation of the function `record.function` names (empty for the
 /// included file's own code), or with `record.every` set, of every
 /// function once, then, for `record.start=loop`, the first
-/// loop header it reaches past the `record.headers` it passes and, for
-/// `return`, the first return, stepping
-/// only within that frame. `record.compiled` and `record.blacklisted`
+/// loop header it reaches past the `record.headers` it passes, stepping
+/// only within that frame, and, for `return`, the landing the first
+/// return lands on, following the calls on the way. `record.compiled` and `record.blacklisted`
 /// name functions met before whose entry words are settled so first;
 /// `record.compiled_inner` names one whose loop headers after its first
 /// are settled compiled.
@@ -55,7 +55,7 @@ pub(crate) struct Recorder(Policy);
 pub(crate) struct Records;
 
 impl Tier for Records {
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
         let asked = record::recording(req);
         req.state::<Kept>().asked.push(asked);
         if site != Site::Entry {
@@ -86,25 +86,20 @@ impl Tier for Records {
         let skip = plan(req, "record.headers")
             .and_then(|n| std::str::from_utf8(&n).ok()?.parse().ok())
             .unwrap_or(0);
-        let at = match walk_to(req, frame, start, skip) {
-            Ok(at) => at,
+        let (at, root) = match walk_to(req, frame, start, skip) {
+            Ok(walked) => walked,
             Err(flow) => return flow,
         };
         let Some(policy) = req.engine::<Recorder>().map(|recorder| recorder.0.clone()) else {
             return Flow::Continue;
         };
-        let root = Holder::Root {
-            epoch: tier::epoch(req),
-            func: held.unwrap_or(REQUEST),
-            at,
-        };
         crate::table::of(req, &policy, &crate::table::Outputs::none());
-        match run(req, frame, start, at, &policy, record::Opening::default()) {
+        match run(req, at, start, &root, &policy, record::Opening::default()) {
             Ok((recorded, ended)) => {
                 let kept = req.state::<Kept>();
                 kept.taken.push(recorded);
                 kept.roots.push(root);
-                if ended.stepped {
+                if ended.stepped || at != frame {
                     Flow::Resume(ended.at)
                 } else {
                     Flow::Continue
@@ -204,8 +199,9 @@ pub(crate) fn settle_words(req: &mut Request) {
 
 /// Whether the recording tier recorded from `func`'s entry already.
 fn recorded_from(req: &mut Request, func: FuncRef) -> bool {
-    (req.state::<Kept>().roots.iter())
-        .any(|root| matches!(root, Holder::Root { func: f, .. } if *f == func))
+    (req.state::<Kept>().roots.iter()).any(|root| {
+        matches!(root, Holder::Root { func: f, .. } | Holder::Landing { func: f, .. } if *f == func)
+    })
 }
 
 /// The name of an op array no epoch holds.
@@ -220,17 +216,26 @@ pub(crate) fn met(req: &mut Request, name: &[u8]) -> Option<FuncRef> {
         .map(|(_, f)| *f)
 }
 
-/// `frame` stepped within itself to where `start` records from: the
-/// safepoint's number there.
+/// `frame` stepped to where `start` records from: within itself for an
+/// entry or a loop, and for a return into the calls it makes until one
+/// returns; the frame it records in there, `frame` or, for a return, the
+/// caller the first return landed in, and the holder of the word that
+/// roots there.
 pub(crate) fn walk_to(
     req: &mut Request,
-    frame: FrameRef,
+    mut frame: FrameRef,
     start: Start,
     mut skip: u32,
-) -> Result<SafepointIdx, Flow> {
+) -> Result<(FrameRef, Holder), Flow> {
     let mut view = UnitView::new(req);
-    let Some(func) = tier::func(req, frame).filter(|f| view.hold(req, *f)) else {
+    let Some(mut func) = tier::func(req, frame).filter(|f| view.hold(req, *f)) else {
         return Err(Flow::Continue);
+    };
+    let epoch = tier::epoch(req);
+    let root = |func, at| Holder::Root {
+        epoch: epoch.clone(),
+        func,
+        at,
     };
     loop {
         let at = tier::frame(req, frame).map_or(OplineIdx(0), |view| view.opline());
@@ -242,18 +247,46 @@ pub(crate) fn walk_to(
         };
         let header = view.op_array(func).and_then(|code| header_at(code, at));
         match (start, header) {
-            (Start::Enter, _) => return Ok(SafepointIdx::ENTRY),
-            (Start::Loop, Some(header)) if skip == 0 => return Ok(header),
+            (Start::Enter, _) => return Ok((frame, root(func, SafepointIdx::ENTRY))),
+            (Start::Loop, Some(header)) if skip == 0 => return Ok((frame, root(func, header))),
             (Start::Loop, Some(_)) => skip -= 1,
-            (Start::Return, _) if returns(op.opcode) => return Ok(SafepointIdx(op.out)),
+            (Start::Return, _) if returns(op.opcode) => return landed(req, frame),
             _ => {}
         }
         match tier::step(req, frame) {
             Ok(Stepped::Same(next)) if next == frame => {}
-            Ok(_) => return Err(Flow::Continue),
+            Ok(Stepped::Pushed(callee)) if start == Start::Return => {
+                let Some(entered) = tier::func(req, callee).filter(|f| view.hold(req, *f)) else {
+                    return Err(Flow::Resume(callee));
+                };
+                (frame, func) = (callee, entered);
+            }
+            Ok(
+                Stepped::Pushed(at) | Stepped::Popped(at) | Stepped::Moved(at) | Stepped::Threw(at),
+            ) => {
+                return Err(Flow::Resume(at));
+            }
+            Ok(Stepped::Same(at)) => return Err(Flow::Resume(at)),
+            Ok(Stepped::Done) => return Err(Flow::Returned),
             Err(fatal) => return Err(Flow::Bail(fatal)),
         }
     }
+}
+
+/// The return `frame` stands at stepped: the caller it popped to and the
+/// holder of its landing's word (`jit-design.md` §2.2).
+fn landed(req: &mut Request, frame: FrameRef) -> Result<(FrameRef, Holder), Flow> {
+    let caller = match tier::step(req, frame) {
+        Ok(Stepped::Popped(caller)) => caller,
+        Ok(_) => return Err(Flow::Continue),
+        Err(fatal) => return Err(Flow::Bail(fatal)),
+    };
+    let holder = Holder::Landing {
+        epoch: tier::epoch(req),
+        func: tier::func(req, caller).unwrap_or(REQUEST),
+        at: tier::frame(req, caller).map_or(OplineIdx(0), |view| view.opline()),
+    };
+    Ok((caller, holder))
 }
 
 /// A plan: the function to record at and the start.

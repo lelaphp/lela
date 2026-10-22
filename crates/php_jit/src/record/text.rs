@@ -20,7 +20,8 @@
 //! conditional jump is `taken` or `fell`; a side trace's start is
 //! `side <parent>/<exit>`, the slots its parent's exit knew the types of
 //! an `entered` line of `var:kind` after the root, and a link's stop
-//! `link <trace>`.
+//! `link <trace>`, after a `link-at` line naming the op array and opline
+//! it hands on at.
 
 use std::fmt::Write as _;
 
@@ -104,6 +105,9 @@ impl TraceRecord {
             }
             .unwrap_or_default();
         }
+        if let Some((f, at)) = self.link_at {
+            writeln!(text, "link-at {} {}", func(f), at.0).unwrap_or_default();
+        }
         writeln!(text, "stop {}", self.stop.written()).unwrap_or_default();
         text
     }
@@ -123,6 +127,7 @@ impl TraceRecord {
             .ok_or_else(|| refused(at, line))?;
         let mut events = Vec::new();
         let mut entered = Vec::new();
+        let mut link_at = None;
         for (at, line) in lines {
             if let Some(stop) = line.strip_prefix("stop ") {
                 let stop = parse_stop(stop).ok_or_else(|| refused(at, line))?;
@@ -132,7 +137,17 @@ impl TraceRecord {
                     entered,
                     events,
                     stop,
+                    link_at,
                 });
+            }
+            if let Some(place) = line.strip_prefix("link-at ")
+                && link_at.is_none()
+            {
+                let (f, opline) = place.split_once(' ').ok_or_else(|| refused(at, line))?;
+                let f = parse_func(f).ok_or_else(|| refused(at, line))?;
+                let opline = opline.parse().map_err(|_| refused(at, line))?;
+                link_at = Some((f, OplineIdx(opline)));
+                continue;
             }
             if let Some(slots) = line.strip_prefix("entered ")
                 && events.is_empty()

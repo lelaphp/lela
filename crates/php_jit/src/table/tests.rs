@@ -592,7 +592,7 @@ mod epoch {
     struct Publishing;
 
     impl Tier for Publishing {
-        fn safepoint(req: &mut Request, _: FrameRef, site: Site) -> Flow {
+        fn safepoint(req: &mut Request, _: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
             if site != Site::Entry || req.state::<Seen>().published.is_some() {
                 return Flow::Continue;
             }
@@ -663,7 +663,7 @@ mod epoch {
     struct Spent;
 
     impl Tier for Spent {
-        fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+        fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
             if let Some(engine) = req.engine::<crate::JitEngine>() {
                 let shared = &engine.shared;
                 let table = table::of(req, &shared.policy, &shared.perf);
@@ -674,7 +674,7 @@ mod epoch {
                     debug_assert!(whole.is_ok() && more.is_err(), "{whole:?} {more:?}");
                 }
             }
-            crate::dispatch::safepoint(req, frame, site)
+            crate::dispatch::safepoint(req, frame, site, held)
         }
 
         fn extension() -> Option<Extension> {

@@ -63,8 +63,13 @@ pub use frames::{
     entry, evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
 };
 use held::{Entered, Kept, Scope, Units};
-pub use sampled::{Building, Sample, building, class_number, numbered_class, on_heap, sample};
-pub use view::{Epoch, FuncRef, MapPtrRaw, UnitView, epoch, epoch_state, func, word};
+pub use sampled::{
+    Building, Sample, building, building_call, class_number, numbered_class, on_heap, sample,
+};
+pub use view::{
+    Epoch, FuncRef, Held, MapPtrRaw, UnitView, epoch, epoch_state, frame_cache, func, landing,
+    running_func,
+};
 
 pub use crate::api::values::ClassId;
 
@@ -118,8 +123,10 @@ pub enum Flow {
 /// The tier: one method at the safepoints, and the state it declares as
 /// an extension would.
 pub trait Tier: 'static {
-    /// Asked at the three sites and nowhere else.
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow;
+    /// Asked at the three sites and nowhere else, with `held`, the op
+    /// array the loop holds for `frame` (`jit-design.md` §2.2, #3144), so
+    /// the tier reads the site's word from what the loop has in hand.
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: Held<'_>) -> Flow;
 
     /// Which of php's execution hooks the tier replaces, as phpdbg
     /// replaces `zend_execute_ex`: every unit the engine compiles is
@@ -182,7 +189,7 @@ pub struct Nop;
 impl Tier for Nop {
     #[inline(always)] // jit-design.md §2.2: one constant, so the branch on `Flow` folds
     #[allow(clippy::inline_always)]
-    fn safepoint(_: &mut Request, _: FrameRef, _: Site) -> Flow {
+    fn safepoint(_: &mut Request, _: FrameRef, _: Site, _: Held<'_>) -> Flow {
         Flow::Continue
     }
 }
@@ -451,15 +458,19 @@ fn answered(req: &mut Request, flow: Flow, frame: FrameRef) -> Result<Stepped, F
     Ok(Stepped::Same(at))
 }
 
-/// The activation of a frame, its prologue having raised nothing
-/// (design §5.6, §4.3 seam 8): the interrupt check, then `Site::Entry`,
-/// then the frame the loop goes on in.
+/// The activation of a frame serving `code`, its prologue having
+/// raised nothing (design §5.6, §4.3 seam 8): the interrupt check, then
+/// `Site::Entry`, then the frame the loop goes on in.
 #[inline]
-fn activated<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
+fn activated<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+) -> Result<Stepped, Fatal> {
     if interrupt::check(req)? {
         return Ok(Stepped::Threw(frame));
     }
-    let flow = T::safepoint(req, frame, Site::Entry);
+    let flow = T::safepoint(req, frame, Site::Entry, Held::of(code));
     answered(req, flow, frame)
 }
 
@@ -659,7 +670,13 @@ fn serve<T: Tier, D: Telling>(req: &mut Request, entry: FrameRef) -> Result<(), 
         crate::observer::returned(req, entry, None);
         return Ok(());
     }
-    let flow = T::safepoint(req, entry, Site::Entry);
+    // The op array the entry frame serves, held for its site through a
+    // share of its unit, once a serving: the loop holds none of it yet.
+    let flow = {
+        let serving = exec::standing(req, entry)?;
+        let code = exec::serving_code(&serving, entry)?;
+        T::safepoint(req, entry, Site::Entry, Held::of(code))
+    };
     let first = answered(req, flow, entry)?;
     serve_frame::<T, D>(req, first)
 }
@@ -1065,7 +1082,7 @@ fn entered<T: Tier, D: Telling>(
             return Ok(Stepped::Threw(threw));
         }
     }
-    activated::<T>(req, callee)
+    activated::<T>(req, callee, code)
 }
 
 /// The internal error for a frame the loop was sent into that serves no
@@ -1114,25 +1131,107 @@ fn unwind_frame<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, 
 pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
     let serving = exec::standing(req, frame)?;
     let code = exec::serving_code(&serving, frame)?;
+    match stepped_over(req, frame, code)? {
+        Stepped::Pushed(callee) => {
+            let serving = exec::standing(req, callee)?;
+            let code = exec::serving_code(&serving, callee)?;
+            activated_over(req, callee, code)
+        }
+        stepped => Ok(stepped),
+    }
+}
+
+/// [`step`] over `held`, the op array a holder holds for `frame`, as
+/// compiled code steps an opline of the op array its trace recorded: no
+/// share of a unit is taken and the frame's function is not looked up
+/// (`jit-design.md` §5.2, #3147). A frame the handler pushed is activated
+/// over the op array `epoch`, the epoch the holder holds `held` in,
+/// holds for it, and over a share of its unit where the epoch holds none,
+/// a request's.
+pub fn step_held(
+    req: &mut Request,
+    frame: FrameRef,
+    held: Held<'_>,
+    epoch: &Epoch,
+) -> Result<Stepped, Fatal> {
+    match stepped_over(req, frame, held.code())? {
+        Stepped::Pushed(callee) => {
+            if let Some(code) = func(req, callee).and_then(|f| epoch.held(f)) {
+                return activated_over(req, callee, code.code());
+            }
+            let serving = exec::standing(req, callee)?;
+            let code = exec::serving_code(&serving, callee)?;
+            activated_over(req, callee, code)
+        }
+        stepped => Ok(stepped),
+    }
+}
+
+/// The `DO_UCALL`, `DO_FCALL` or `DO_FCALL_BY_NAME` at `frame`'s opline
+/// of `held`, made as compiled code makes a call to the callee its trace
+/// recorded, `callee`, which the `INIT_*` before it pushed: the handler's
+/// inline path, php's `i_init_func_execute_data` writing the header's
+/// words ([`Request::enter_call`]), and the callee's activation over
+/// `callee`, with no dispatch (`jit-design.md` §5.2, #3147). `Pushed`
+/// of the callee, or `Threw` of it where its prologue or the interrupt
+/// left a throwable pending. Where an observer of the opcode is
+/// declared, the opline is another, or the inline path refuses the call,
+/// the opline is stepped over `held` as [`step_held`] steps it.
+pub fn call_held(
+    req: &mut Request,
+    frame: FrameRef,
+    (held, callee): (Held<'_>, Held<'_>),
+    epoch: &Epoch,
+) -> Result<Stepped, Fatal> {
+    let at = req.vm().opline(frame);
+    let op = exec::opline_at(held.code(), at).ok_or_else(|| past_the_end(frame, at))?;
+    let flagged = match op.opcode {
+        php_unit::Opcode::DoUcall => false,
+        php_unit::Opcode::DoFcall | php_unit::Opcode::DoFcallByName => true,
+        _ => return step_held(req, frame, held, epoch),
+    };
+    if Declared::of(req).tells(op.opcode) {
+        return step_held(req, frame, held, epoch);
+    }
+    let returns_to = (op.out_type != php_unit::OperandKind::Unused).then_some(op.out);
+    let Some(pushed) = req.enter_call(returns_to, frame, flagged) else {
+        return step_held(req, frame, held, epoch);
+    };
+    // The callee the trace recorded, as its `INIT_*` guarded it; any
+    // other is served from its unit.
+    if running_func(req, pushed) == Some(callee.func()) {
+        return activated_over(req, pushed, callee.code());
+    }
+    let serving = exec::standing(req, pushed)?;
+    let code = exec::serving_code(&serving, pushed)?;
+    activated_over(req, pushed, code)
+}
+
+/// The one handler at `frame`'s opline over `code`, with `Nop` at the
+/// safepoints, the observers told as the loop tells them ([`step`]).
+#[inline]
+fn stepped_over(req: &mut Request, frame: FrameRef, code: &OpArray) -> Result<Stepped, Fatal> {
     let at = req.vm().opline(frame);
     let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
     crate::observer::tell_before(req, frame, op.opcode);
     let next = dispatch::dispatch::<Nop>(req, frame, code, op, at)?;
     #[cfg(debug_assertions)]
     req.sensed_after(code, op)?;
-    match settled(req, frame, at, next) {
-        Stepped::Pushed(callee) => {
-            let serving = exec::standing(req, callee)?;
-            let told = Declared::of(req);
-            let code = exec::serving_code(&serving, callee)?;
-            let start = req.vm().opline(callee);
-            let entry = exec::entry_of(code);
-            match entered::<Nop, Declared>(req, callee, code, (start, entry), told)? {
-                Stepped::Threw(at) => Ok(Stepped::Threw(at)),
-                _ => Ok(Stepped::Pushed(callee)),
-            }
-        }
-        stepped => Ok(stepped),
+    Ok(settled(req, frame, at, next))
+}
+
+/// A callee a step pushed, serving `code`, activated as the loop
+/// activates it, with `Nop` at its `Site::Entry` ([`step`]): `Threw` of
+/// it where its prologue or the interrupt left a throwable pending,
+/// `Pushed` of it otherwise.
+#[inline]
+fn activated_over(req: &mut Request, callee: FrameRef, code: &OpArray) -> Result<Stepped, Fatal> {
+    let told = Declared::of(req);
+    let start = req.vm().opline(callee);
+    let entry = exec::entry_of(code);
+    match entered::<Nop, Declared>(req, callee, code, (start, entry), told)? {
+        Stepped::Threw(at) => Ok(Stepped::Threw(at)),
+        _ => Ok(Stepped::Pushed(callee)),
     }
 }
 

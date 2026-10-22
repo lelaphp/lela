@@ -1111,6 +1111,7 @@ impl crate::tier::Tier for Declaring {
         _: &mut Request,
         _: php_heap::FrameRef,
         _: crate::tier::Site,
+        _: crate::tier::Held<'_>,
     ) -> crate::tier::Flow {
         crate::tier::Flow::Continue
     }

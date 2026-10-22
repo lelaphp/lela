@@ -330,15 +330,17 @@ struct Unwound {
 struct Panics;
 
 impl Tier for Panics {
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
         if record::recording(req) {
             resume_unwind(Box::new("a kernel panicked under a recording"));
         }
         if site != Site::Entry || function_of(req, frame).as_deref() != Some(b"f") {
             return Flow::Continue;
         }
-        let caught = catch_unwind(AssertUnwindSafe(|| super::safepoint(req, frame, site)));
-        let word = policy::read(tier::word(req, frame, SafepointIdx::ENTRY));
+        let caught = catch_unwind(AssertUnwindSafe(|| {
+            super::safepoint(req, frame, site, held)
+        }));
+        let word = policy::read(held.word(req, SafepointIdx::ENTRY));
         let after = record::recording(req);
         let trace = tier::trace_num(req);
         let unwound = req.state::<Unwound>();
@@ -439,13 +441,13 @@ struct Spied {
 struct Spy;
 
 impl Tier for Spy {
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
         let halves = |req: &Request| {
-            let word = tier::word(req, frame, site.idx());
+            let word = held.word(req, site.idx());
             [0, 1].map(|half| word.halves()[half].load(Ordering::Relaxed))
         };
         let before = halves(req);
-        let flow = super::safepoint(req, frame, site);
+        let flow = super::safepoint(req, frame, site, held);
         let after = halves(req);
         let spied = req.state::<Spied>();
         spied.sites += 1;
@@ -502,13 +504,13 @@ struct Asked {
 struct Counted;
 
 impl Tier for Counted {
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
         let halves = |req: &Request| {
-            let word = tier::word(req, frame, site.idx());
+            let word = held.word(req, site.idx());
             [0, 1].map(|half| word.halves()[half].load(Ordering::Relaxed))
         };
         let before = halves(req);
-        let flow = super::safepoint(req, frame, site);
+        let flow = super::safepoint(req, frame, site, held);
         let written = before != halves(req);
         let asked = req.state::<Asked>();
         match site {
@@ -580,19 +582,51 @@ fn a_tier_that_is_off_is_asked_at_no_back_edge() {
 }
 
 /// A loop in `$main` that no call activates is a root of its own: the
-/// entry's recording stops at the `eval`, whose code is no root, and the
-/// loop's header claims when its back-edge visits it, the recording
-/// handed back through the jump's `Resume`. php under the recipe writes
-/// the same `TRACE 2 start (loop) $main() …:4` line, after a return root
-/// at `$main`'s landing past the `eval` that aborts at the inner loop
-/// (`zend_jit_trace_setup_ret_counter`), which this tier does not root
-/// yet; its compiled loop leaves through php's `TRACE 2 exit 1 …:5`,
-/// the line past the loop the jump goes to, and grows php's side trace
-/// there, `TRACE 3 start (side trace 2/1) $main() …:5`, which goes on to
-/// the file's return.
+/// entry's recording aborts at the throwable `t()` throws, and the
+/// loop's header claims when its back edge visits it, the recording
+/// handed back through the jump's `Resume`, `TRACE 1 start (loop)`; its
+/// compiled loop leaves through php's `TRACE 1 exit 1 …:6`, the line past
+/// the loop the jump goes to, and grows php's side trace there, which
+/// goes on to the file's return. The pinned php under the recipe writes
+/// these lines, line for line.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_main_loop_no_call_activates_is_a_root_at_its_header() {
+    let engine = testing::engine::<Lane>(&DUMPED);
+    let program = "function t() { throw new Exception(\"x\"); }\ntry { t(); } catch (Exception $e) {}\n$s = 0;\nfor ($i = 0; $i < 3; $i++) { $s += $i; }\necho $s, \"\\n\";";
+    let served = testing::Scratch::new().serve(&engine, program);
+    assert_eq!(testing::stdout(&served), "3\n");
+    assert_eq!(
+        lines(&served),
+        [
+            "JIT: jit.mode=force",
+            "---- TRACE 1 start (enter) $main() body.php:3",
+            "---- TRACE 1 abort (exception)",
+            "",
+            "---- TRACE 1 start (loop) $main() body.php:5",
+            "---- TRACE 1 stop (loop)",
+            "---- TRACE 1 compiled",
+            "",
+            "     TRACE 1 exit 1 $main() body.php:6",
+            "---- TRACE 2 start (side trace 1/1) $main() body.php:6",
+            "---- TRACE 2 stop (return)",
+            "---- TRACE 2 compiled",
+            "",
+        ]
+    );
+}
+
+/// A return root is the caller's landing past the call, armed where a
+/// compiled trace hands on to the interpreter at that call (`jit-design.md`
+/// §2.2, #3036): the entry's trace stops at the `eval`, which arms
+/// `$main`'s landing past it, as php's `zend_jit_trace_setup_ret_counter`
+/// does, and the `eval`'d code's return lands there and roots `TRACE 2
+/// start (return) $main() …:3`, whose recording aborts at the loop php
+/// records next, `TRACE 2 start (loop) $main() …:4`. The pinned php under
+/// the recipe writes these lines, line for line.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_return_roots_at_the_landing_past_the_eval_its_trace_stopped_at() {
     let engine = testing::engine::<Lane>(&DUMPED);
     let program = "eval(\"\\$x = 1;\");\n$s = 0;\nfor ($i = 0; $i < 3; $i++) { $s += $i; }\necho $s, \"\\n\";";
     let served = testing::Scratch::new().serve(&engine, program);
@@ -605,6 +639,8 @@ fn a_main_loop_no_call_activates_is_a_root_at_its_header() {
             "---- TRACE 1 stop (exit to VM interpreter)",
             "---- TRACE 1 compiled",
             "",
+            "---- TRACE 2 start (return) $main() body.php:3",
+            "---- TRACE 2 abort (inner loop)",
             "---- TRACE 2 start (loop) $main() body.php:4",
             "---- TRACE 2 stop (loop)",
             "---- TRACE 2 compiled",
@@ -731,7 +767,7 @@ mod ran {
     struct Running;
 
     impl Tier for Running {
-        fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+        fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
             if site != Site::Entry || function_of(req, frame).as_deref() != Some(b"f") {
                 return Flow::Continue;
             }
@@ -896,7 +932,7 @@ mod ran {
     struct SideRuns<const PUBLISHED: bool>;
 
     impl<const PUBLISHED: bool> Tier for SideRuns<PUBLISHED> {
-        fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+        fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
             if site != Site::Entry || function_of(req, frame).as_deref() != Some(b"f") {
                 return Flow::Continue;
             }

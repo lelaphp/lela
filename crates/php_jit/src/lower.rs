@@ -181,6 +181,17 @@ pub(crate) const INTERRUPTED: u32 = u32::MAX - 2;
 /// nothing is stored.
 pub(crate) const DECLINED: u32 = u32::MAX - 3;
 
+/// What compiled code answers where a return past the trace's lowest
+/// frame finds the interpreter standing elsewhere than the trace goes on
+/// at (`types::Op::Back`'s `escapes`): php's `jit_stub_trace_escape`,
+/// which no exit point numbers, so no exit line is written and no word is
+/// bumped. Past every [`ExitId`](crate::types::ExitId), and none of
+/// [`ABANDONED`], [`UNWOUND`], [`INTERRUPTED`] and [`DECLINED`]. Nothing is
+/// stored, since the trace knows nothing of the frame it returned into;
+/// `enter` hands back the frame that stands, at the opline the return
+/// left it, whose handler `dispatch` runs as php's interpreter does.
+pub(crate) const ESCAPED: u32 = u32::MAX - 4;
+
 /// Where compiled code reads, in the `ExitCtx`, where it is entered
 /// (`enter::At`), a `u32` that is not zero at a loop's body
 /// (`types::BodyEntry`): the field `enter` lays down past the interrupt
@@ -224,16 +235,25 @@ fn stub_at(ir: &TraceIr) -> Option<OplineIdx> {
 /// pointer it writes through is its last argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kernel {
-    /// `step(cx, frame, opline: u32, stood: *mut Stood)`: the opline
-    /// served whole through `php_engine::step` (§5.2), and where the
-    /// interpreter stands after it written to `stood`.
+    /// `step(cx, frame, opline: u32, func: u32, stood: *mut Stood)`: the
+    /// opline served whole through `php_engine::tier::step_held` (§5.2)
+    /// over the op array the engine numbers `func`, the one the trace
+    /// recorded, and where the interpreter stands after it written to
+    /// `stood`.
     Step,
-    /// `push_call(cx, frame, opline: u32, callee: u32, stood: *mut
-    /// Stood)`: an inline `INIT_*`, served as its handler serves it where
+    /// `push_call(cx, frame, opline: u32, func: u32, callee: u32, stood:
+    /// *mut Stood)`: an inline `INIT_*` of the op array the engine numbers
+    /// `func`, served as its handler serves it where
     /// its callee resolves to the op array the engine numbers `callee`;
     /// where it resolves to another, nothing is pushed and `stood.call`
     /// is null.
     PushCall,
+    /// `call(cx, frame, opline: u32, func: u32, callee: u32, stood: *mut
+    /// Stood)`: a `DO_*CALL` of the op array the engine numbers `func`,
+    /// to the callee the trace recorded, which it numbers `callee`, made
+    /// through `php_engine::tier::call_held` with no dispatch, and where
+    /// the interpreter stands after it, in the callee, written to `stood`.
+    Call,
     /// `release(cx, frame, opline: u32, word: u64, type_info: u32)`:
     /// php's `zval_ptr_dtor` of the counted value the zval names, a
     /// destructor's throw answered as one.
@@ -246,9 +266,10 @@ pub(crate) enum Kernel {
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 4] = [
+    pub(crate) const ALL: [Kernel; 5] = [
         Kernel::Step,
         Kernel::PushCall,
+        Kernel::Call,
         Kernel::Release,
         Kernel::Copy,
     ];

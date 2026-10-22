@@ -169,7 +169,7 @@ pub(crate) struct Stepper<
 impl<const STEPS_LEAVING: bool, const ARMED: bool, const SEES: bool> Tier
     for Stepper<STEPS_LEAVING, ARMED, SEES>
 {
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: crate::tier::Held<'_>) -> Flow {
         if site != Site::Entry || frame != tier::entry(req) {
             return Flow::Continue;
         }
@@ -189,7 +189,7 @@ impl<const STEPS_LEAVING: bool, const ARMED: bool, const SEES: bool> Tier
 struct Firing;
 
 impl Tier for Firing {
-    fn safepoint(req: &mut Request, _: FrameRef, site: Site) -> Flow {
+    fn safepoint(req: &mut Request, _: FrameRef, site: Site, _: crate::tier::Held<'_>) -> Flow {
         if site == Site::Entry {
             fire(req);
         }

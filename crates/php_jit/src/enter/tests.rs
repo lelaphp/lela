@@ -8,12 +8,12 @@ use std::ptr;
 use super::*;
 
 /// A kernel that raises a fatal.
-fn refuse(_: &mut Tally, _: Room, _: OplineIdx, why: u64) -> Result<u64, Fatal> {
+fn refuse(_: &mut Tally, _: On<'_, '_>, why: u64) -> Result<u64, Fatal> {
     Err(Fatal::error(format!("refused {why}")))
 }
 
 /// A kernel that panics.
-fn explode(_: &mut Tally, _: Room, _: OplineIdx, _: u64) -> Result<u64, Fatal> {
+fn explode(_: &mut Tally, _: On<'_, '_>, _: u64) -> Result<u64, Fatal> {
     panic!("the kernel panicked")
 }
 
@@ -22,7 +22,7 @@ fn explode(_: &mut Tally, _: Room, _: OplineIdx, _: u64) -> Result<u64, Fatal> {
     clippy::unnecessary_wraps,
     reason = "a kernel answers a Result; this one never fails"
 )]
-fn throw(t: &mut Tally, _: Room, _: OplineIdx, n: u64) -> Result<u64, Fatal> {
+fn throw(t: &mut Tally, _: On<'_, '_>, n: u64) -> Result<u64, Fatal> {
     t.thrown = true;
     Ok(n)
 }
@@ -166,9 +166,8 @@ pub(crate) mod entered {
     use php_engine::tier::{
         self, Extension, ExtensionBuilder, Fatal, Flow, FrameRef, Request, Site, Tier, Under,
     };
-    use php_unit::OplineIdx;
 
-    use super::super::{Room, enter, standing, wrapped};
+    use super::super::{On, enter, standing, wrapped};
     use crate::lower::{Compiled, Stood};
     use crate::record::Start;
     use crate::table::{self, Outputs};
@@ -200,7 +199,7 @@ pub(crate) mod entered {
     struct Entering<P>(PhantomData<P>);
 
     impl<P: Plan> Tier for Entering<P> {
-        fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+        fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
             if site != Site::Entry {
                 return Flow::Continue;
             }
@@ -222,14 +221,16 @@ pub(crate) mod entered {
             else {
                 return Flow::Bail(Fatal::error("the body was not published"));
             };
-            match enter(req, frame, trace, crate::enter::At::First) {
+            match enter(req, frame, (&epoch, trace), crate::enter::At::First) {
                 Ok(crate::enter::Left::Exit(exited)) => {
                     req.state::<Seen>().exits.push((function, exited.exit.0));
                     Flow::Resume(exited.frame)
                 }
-                Ok(crate::enter::Left::Unwound(frame) | crate::enter::Left::Interrupted(frame)) => {
-                    Flow::Resume(frame)
-                }
+                Ok(
+                    crate::enter::Left::Unwound(frame)
+                    | crate::enter::Left::Interrupted(frame)
+                    | crate::enter::Left::Escaped(frame),
+                ) => Flow::Resume(frame),
                 Ok(crate::enter::Left::Declined) => Flow::Continue,
                 Err(fatal) => Flow::Bail(fatal),
             }
@@ -266,9 +267,10 @@ pub(crate) mod entered {
     struct Stepping;
 
     impl Plan for Stepping {
-        fn body(_: &mut Request, _: FrameRef, function: &[u8]) -> Option<Compiled> {
+        fn body(req: &mut Request, frame: FrameRef, function: &[u8]) -> Option<Compiled> {
+            let func = tier::func(req, frame).and_then(super::super::engine_offset)?;
             (function == b"f").then(|| {
-                let mut words = calling((wrapped::step as *const ()).addr(), 0, &[], true);
+                let mut words = calling((wrapped::step as *const ()).addr(), 0, &[func], true);
                 words.extend([
                     a64::unless_zero(2),
                     a64::load_w0(STOOD_OPLINE),
@@ -293,13 +295,13 @@ pub(crate) mod entered {
     }
 
     /// A kernel that panics.
-    fn explode(_: &mut Request, _: Room, _: OplineIdx) -> Result<u64, Fatal> {
+    fn explode(_: &mut Request, _: On<'_, '_>) -> Result<u64, Fatal> {
         panic!("the kernel panicked")
     }
 
     /// A kernel that re-enters PHP, calling `inner` from the frame it serves.
-    fn reenter(req: &mut Request, room: Room, at: OplineIdx) -> Result<u64, Fatal> {
-        let frame = standing(req, room, at)?;
+    fn reenter(req: &mut Request, on: On<'_, '_>) -> Result<u64, Fatal> {
+        let frame = standing(req, on.room, on.at)?;
         tier::call(req, Under::Frame(frame), b"inner", &[]);
         Ok(0)
     }
@@ -309,10 +311,14 @@ pub(crate) mod entered {
     /// The kernel `jit-design.md` §4.9 *Tested* asks for: the
     /// number of the trace that calls it kept, then the opline served
     /// whole as the `step` kernel serves it.
-    fn number(req: &mut Request, room: Room, at: OplineIdx) -> Result<Stood, Fatal> {
+    fn number(req: &mut Request, on: On<'_, '_>) -> Result<Stood, Fatal> {
         let running = tier::trace_num(req).raw();
         req.state::<Numbered>().0.push(running);
-        super::super::step(req, room, at)
+        let frame = standing(req, on.room, on.at)?;
+        let func = tier::func(req, frame)
+            .and_then(super::super::engine_offset)
+            .ok_or_else(|| Fatal::error("a numbered step of a request's op array"))?;
+        super::super::step(req, on, func)
     }
 
     kernels! { Request => mod numbered { number() -> Stood; } }
@@ -430,7 +436,13 @@ pub(crate) mod entered {
                 (_, Some(g)) => g.wrapping_add(1000),
                 (_, None) => u32::MAX,
             };
-            let mut words = calling((wrapped::push_call as *const ()).addr(), 0, &[callee], true);
+            let func = tier::func(req, frame).and_then(super::super::engine_offset)?;
+            let mut words = calling(
+                (wrapped::push_call as *const ()).addr(),
+                0,
+                &[func, callee],
+                true,
+            );
             words.extend([
                 a64::unless_zero(4),
                 a64::load_x0(STOOD_CALL),

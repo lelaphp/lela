@@ -78,7 +78,7 @@ impl Tier for Debugger {
     /// ([`executed`]).
     const HOLDS: bool = true;
 
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
         match site {
             Site::Entry => entered(req, frame),
             Site::Loop(_) | Site::Return(_) => Flow::Continue,

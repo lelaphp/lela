@@ -269,6 +269,7 @@ mod tests {
             _: &mut crate::tier::Request,
             _: crate::tier::FrameRef,
             _: crate::tier::Site,
+            _: crate::tier::Held<'_>,
         ) -> crate::tier::Flow {
             crate::tier::Flow::Continue
         }

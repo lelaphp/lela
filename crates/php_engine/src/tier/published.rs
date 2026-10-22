@@ -1,8 +1,10 @@
 //! The engine-owned form of the units an epoch's cache holds
 //! (`jit-design.md` §3.1, §3.2; design §5.14 *Identities*, §6.3): one
 //! [`Func`] per op array of each held unit, beside the unit, with one
-//! [`Word`] per entry of the op array's `safepoints`, all bits zero. The
-//! words are the engine's and never the unit's (ADR-0001).
+//! [`Word`] per entry of the op array's `safepoints`, all bits zero, and
+//! a landing word per opline, laid down sealed the first time a tier arms
+//! one (`jit-design.md` §2.2). The words are the engine's and never the
+//! unit's (ADR-0001).
 //!
 //! A held unit's op arrays took the engine's map-pointer offsets as it
 //! was published (`ZEND_MAP_PTR_NEW`), each its own and never another's,
@@ -14,8 +16,10 @@
 //! alone, an `eval`'s or an include no cache holds, took the request's
 //! offsets, and no row stands for it: it reads the sealed word.
 
+use std::sync::OnceLock;
+
 use php_unit::decl::Parameter;
-use php_unit::{MapPtrOffset, OpArray, PublishedUnit};
+use php_unit::{MapPtrOffset, OpArray, OplineIdx, PublishedUnit};
 
 use super::{SafepointIdx, Word};
 use crate::arena::Column;
@@ -29,11 +33,16 @@ use crate::exec::{self, Body};
 pub(super) static SEALED: Word = Word::sealed();
 
 /// One op array of a held unit, design §3.1's `Func`: the unit it is of,
-/// its place there, and one word per safepoint.
+/// its place there, one word per safepoint, and the landing words.
 pub(crate) struct Func {
     unit: PublishedUnit,
     body: Body,
     words: Box<[Word]>,
+    /// One word per opline, php's `zend_op_trace_info` of the opline a
+    /// return lands on, laid down sealed the first time a tier
+    /// arms a landing of the op array ([`Func::lay_landing`]), so an op
+    /// array no trace returns into costs no allocation.
+    landings: OnceLock<Box<[Word]>>,
 }
 
 impl Func {
@@ -76,6 +85,23 @@ impl Func {
             .ok()
             .and_then(|at| self.words.get(at))
             .unwrap_or(&SEALED)
+    }
+
+    /// The landing word of opline `at`: sealed until a tier armed it, and
+    /// past the last opline.
+    pub(crate) fn landing(&self, at: OplineIdx) -> &Word {
+        (self.landings.get())
+            .and_then(|words| words.get(usize::try_from(at.0).ok()?))
+            .unwrap_or(&SEALED)
+    }
+
+    /// The landing word of opline `at`, for a tier to arm: the op array's
+    /// landing words laid down sealed the first time; none past its last
+    /// opline.
+    pub(crate) fn lay_landing(&self, at: OplineIdx) -> Option<&Word> {
+        let oplines = self.op_array().map_or(0, |code| code.oplines.len());
+        let words = (self.landings).get_or_init(|| (0..oplines).map(|_| Word::sealed()).collect());
+        words.get(usize::try_from(at.0).ok()?)
     }
 }
 
@@ -120,6 +146,7 @@ impl Funcs {
                 unit: PublishedUnit::clone(unit),
                 body,
                 words,
+                landings: OnceLock::new(),
             };
             // A slot already written is another publication of the same
             // offset, which no publisher makes: the first stands.
@@ -170,17 +197,18 @@ fn bodies(unit: &PublishedUnit) -> impl Iterator<Item = (Body, &OpArray)> {
 mod tests {
     use std::sync::atomic::Ordering;
 
-    use php_unit::{OpArray, OplineIdx, Unit};
+    use php_unit::{OpArray, Opline, OplineIdx, Unit};
 
     use super::{Funcs, SEALED};
     use crate::tier::SafepointIdx;
 
-    /// A unit whose main op array has `safepoints` safepoints, published
-    /// at offset `first`.
+    /// A unit whose main op array has `safepoints` safepoints and as many
+    /// oplines, published at offset `first`.
     fn published(first: u32, safepoints: u32) -> php_unit::PublishedUnit {
         let mut unit = Unit {
             main: OpArray {
                 safepoints: (0..safepoints).map(OplineIdx).collect::<Vec<_>>().into(),
+                oplines: (0..safepoints).map(|_| Opline::default()).collect(),
                 ..OpArray::default()
             },
             ..Unit::default()
@@ -212,5 +240,40 @@ mod tests {
         assert!(next.get(10).is_none(), "below the epoch's first: sealed");
         next.publish(&published(11, 1));
         assert!(next.get(11).is_some());
+    }
+
+    /// An op array's landing words read sealed until a tier lays them
+    /// down, one per opline, each sealed until armed, and the same word
+    /// is read where it was laid; past the last opline there is none.
+    #[test]
+    fn landing_words_are_sealed_until_laid_and_one_per_opline() {
+        let funcs = Funcs::numbered_from(0);
+        funcs.publish(&published(0, 3));
+        let main = funcs.get(0).expect("the main op array has a row");
+        let sealed = |word: &crate::tier::Word| {
+            word.halves()
+                .iter()
+                .all(|half| half.load(Ordering::Relaxed) == u32::MAX)
+        };
+        assert!(std::ptr::addr_eq(
+            main.landing(OplineIdx(1)),
+            std::ptr::addr_of!(SEALED)
+        ));
+        let laid = main
+            .lay_landing(OplineIdx(1))
+            .expect("a landing within the op array");
+        assert!(sealed(laid));
+        assert!(!std::ptr::addr_eq(laid, std::ptr::addr_of!(SEALED)));
+        laid.halves()[1].store(0, Ordering::Relaxed);
+        assert_eq!(
+            main.landing(OplineIdx(1)).halves()[1].load(Ordering::Relaxed),
+            0
+        );
+        assert!(sealed(main.landing(OplineIdx(2))));
+        assert!(main.lay_landing(OplineIdx(3)).is_none());
+        assert!(std::ptr::addr_eq(
+            main.landing(OplineIdx(3)),
+            std::ptr::addr_of!(SEALED)
+        ));
     }
 }
