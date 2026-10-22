@@ -99,8 +99,8 @@ impl Request {
 /// 624
 /// ```
 ///
-/// and less by a constant php keeps, more where two constants alike are
-/// one string in php's table and two here, the engine reading `80` and
+/// and more where two constants alike are one string in php's table and
+/// two here, less by a constant php keeps, the engine reading `80` and
 /// `0`:
 ///
 /// ```php

@@ -829,10 +829,11 @@ fn lay_class(req: &mut Request, blocks: &mut ClassBlocks, class: &ClassDecl) -> 
 /// costs what opcache's lookup allocates, where `php -n` compiles it
 /// into the request's heap and keeps its op arrays' and declarations'
 /// blocks, and the strings it interns, to the request's end: a
-/// by-design divergence (#3224, landed by #3233). Two programs of one
-/// length, one of which reads an element, apart by the delayed oplines'
-/// stack alone here, `512`, and by the main op array's block too under
-/// php's:
+/// by-design divergence (#3224, landed by #3233). A request's primary
+/// file is one too (design §5.13), laid nothing here: two programs
+/// of one length, one of which reads an element, apart by the delayed
+/// oplines' stack alone here, `512`, and by the main op array's block too
+/// under php's:
 ///
 /// ```php
 /// $f = sys_get_temp_dir() . '/argv' . getmypid() . '.php';
