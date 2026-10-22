@@ -758,8 +758,10 @@ pub trait Intern {
 /// One string an [`Intern`] home made for an asker that holds it alone
 /// and hands it back with [`Intern::give_back`] once it has read it.
 /// Only [`Intern::intern_made`] makes one, and it is neither copied nor
-/// cloned, so a string another place keeps, a constant operand's or one a
-/// rewrite recorded, can never be handed back as one.
+/// cloned, so a string another place made, a constant operand's, is
+/// never a claim to hand back. Its [`Made::str`] is a view: the asker
+/// gives the claim back only once nothing it put the view in reads it
+/// again.
 #[derive(Debug)]
 pub struct Made(Str);
 

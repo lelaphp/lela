@@ -3985,12 +3985,18 @@ struct PermanentStrings<'a> {
     strings: &'a mut Strings,
     heap: CompileHeap<'a>,
     /// The request's copy of each string the compile made and has not
-    /// given back, beside the table's string it stands for, standing
-    /// until the compile ends.
-    standing: Vec<(php_heap::Str, php_heap::Str)>,
+    /// given back, standing until the compile ends.
+    standing: Vec<Standing>,
     /// Whom the compile's answer serves: [`Answers::Asker`] once the
     /// request's heap has refused one of its strings.
     answers: Answers,
+}
+
+/// The request's copy of one string a cache-bound compile made, beside
+/// the table's string it stands for, which a claim given back names.
+struct Standing {
+    interned: php_heap::Str,
+    copy: php_heap::Str,
 }
 
 impl<'a> PermanentStrings<'a> {
@@ -4007,39 +4013,42 @@ impl<'a> PermanentStrings<'a> {
 
     /// The string php's compile makes of `bytes` on the asking request's
     /// heap (`zend_string_init`, the string `concat_function` makes),
-    /// where the table's `interned` stands for it: given back at once
-    /// for a name startup interned, as `zend_new_interned_string`
-    /// releases the string it was handed for the permanent one, and
-    /// otherwise standing until the fold that made it has read it
-    /// ([`Intern::give_back`]) or the compile ends
+    /// asked of that heap before the table is: none where the compile is
+    /// the engine's, the empty string and one byte being the process's
+    /// (`ZSTR_CHAR`). The `Err` is the memory limit, and with it the
+    /// answer is the asking request's alone, which no cache holds; the
+    /// table is left as it stood.
+    fn charge(&mut self, bytes: &[u8]) -> Result<Option<php_heap::Str>, php_heap::Fatal> {
+        let CompileHeap::Request(heap) = &mut self.heap else {
+            return Ok(None);
+        };
+        if bytes.len() <= 1 {
+            return Ok(None);
+        }
+        heap.string(bytes).map(Some).inspect_err(|_| {
+            self.answers = Answers::Asker;
+        })
+    }
+
+    /// The request's `copy` of the string the table's `interned` stands
+    /// for: given back at once for a name startup interned, as
+    /// `zend_new_interned_string` releases the string it was handed for
+    /// the permanent one, and otherwise standing until the fold that made
+    /// it has read it ([`Intern::give_back`]) or the compile ends
     /// ([`PermanentStrings::settle`]), as each string a miss makes stands
     /// in its op array until opcache's persist. A string a published unit
     /// holds stands too: opcache's buffer takes a string only as a unit
     /// is persisted, where the engine's table also holds what an earlier
-    /// compile, a refused one among them, interned before it was done.
-    /// The empty string and one byte are the process's (`ZSTR_CHAR`). The
-    /// `Err` is the memory limit, and with it the answer is the asking
-    /// request's alone, which no cache holds.
-    fn charge(
-        &mut self,
-        bytes: &[u8],
-        interned: Option<php_heap::Str>,
-    ) -> Result<(), php_heap::Fatal> {
-        let CompileHeap::Request(heap) = &mut self.heap else {
-            return Ok(());
+    /// compile interned before it was done, so a fold refused once is
+    /// refused again.
+    fn stand(&mut self, copy: Option<php_heap::Str>, interned: Option<php_heap::Str>) {
+        let (CompileHeap::Request(heap), Some(copy)) = (&mut self.heap, copy) else {
+            return;
         };
-        if bytes.len() <= 1 {
-            return Ok(());
+        match interned {
+            Some(interned) => self.standing.push(Standing { interned, copy }),
+            None => heap.release_string(copy),
         }
-        match (heap.string(bytes), interned) {
-            (Ok(made), Some(interned)) => self.standing.push((interned, made)),
-            (Ok(made), None) => heap.release_string(made),
-            (Err(fatal), _) => {
-                self.answers = Answers::Asker;
-                return Err(fatal);
-            }
-        }
-        Ok(())
     }
 
     /// The compile ended: the request's copies given back, as opcache's
@@ -4047,8 +4056,8 @@ impl<'a> PermanentStrings<'a> {
     /// answer serves.
     fn settle(self) -> Answers {
         if let CompileHeap::Request(heap) = self.heap {
-            for (_, made) in self.standing {
-                heap.release_string(made);
+            for standing in self.standing {
+                heap.release_string(standing.copy);
             }
         }
         self.answers
@@ -4061,13 +4070,14 @@ impl Intern for PermanentStrings<'_> {
         bytes: &[u8],
         valid_utf8: bool,
     ) -> Result<php_heap::Str, php_heap::Fatal> {
+        let copy = self.charge(bytes)?;
         if let Some(held) = self.names.find(bytes) {
-            self.charge(bytes, None)?;
+            self.stand(copy, None);
             return Ok(held);
         }
-        let interned = self.strings.intern_marked(bytes, valid_utf8)?;
-        self.charge(bytes, Some(interned))?;
-        Ok(interned)
+        let interned = self.strings.intern_marked(bytes, valid_utf8);
+        self.stand(copy, interned.as_ref().ok().copied());
+        interned
     }
 
     /// The request's copy of a string the fold that made it has read,
@@ -4078,10 +4088,10 @@ impl Intern for PermanentStrings<'_> {
             return;
         };
         let string = made.str();
-        if let Some(at) = (self.standing.iter()).rposition(|(interned, _)| interned.is_same(string))
-        {
-            let (_, copy) = self.standing.swap_remove(at);
-            heap.release_string(copy);
+        let named = |standing: &Standing| standing.interned.is_same(string);
+        if let Some(at) = self.standing.iter().rposition(named) {
+            let standing = self.standing.swap_remove(at);
+            heap.release_string(standing.copy);
         }
     }
 

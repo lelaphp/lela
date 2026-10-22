@@ -127,10 +127,14 @@ impl Rewrites {
 #[derive(Default)]
 pub(super) struct Claims(Vec<(tree::Expr, Made)>);
 
+/// Where the claims made from a point on start ([`Claims::mark`]).
+#[derive(Clone, Copy)]
+pub(super) struct Mark(usize);
+
 impl Claims {
     /// Where the claims made from here on start.
-    pub(super) fn mark(&self) -> usize {
-        self.0.len()
+    pub(super) fn mark(&self) -> Mark {
+        Mark(self.0.len())
     }
 
     /// `made`, held by `node` alone.
@@ -139,11 +143,11 @@ impl Claims {
     }
 
     /// The claims made since `mark`, taken out.
-    pub(super) fn since(&mut self, mark: usize) -> Vec<(tree::Expr, Made)> {
-        if mark >= self.0.len() {
+    pub(super) fn since(&mut self, Mark(at): Mark) -> Vec<(tree::Expr, Made)> {
+        if at >= self.0.len() {
             return Vec::new();
         }
-        self.0.split_off(mark)
+        self.0.split_off(at)
     }
 }
 
@@ -154,17 +158,10 @@ impl Emit<'_> {
     /// read, `claims`, given back where they are an operand's own, the
     /// node `operands` names under its parentheses, with what replaced it,
     /// and every other kept, a string a deeper node made that an array or
-    /// a conditional holds among them. An operator that did not fold
-    /// keeps them all, since the compile reads its operands again.
-    pub(super) fn consume(
-        &mut self,
-        claims: Vec<(tree::Expr, Made)>,
-        operands: [tree::Expr; 2],
-        folded: bool,
-    ) {
-        if !folded {
-            return;
-        }
+    /// a conditional holds among them. An operator that did not fold calls
+    /// none of this and keeps them all, since the compile reads its
+    /// operands again.
+    pub(super) fn consume(&mut self, claims: Vec<(tree::Expr, Made)>, operands: [tree::Expr; 2]) {
         let peeled = operands.map(|operand| self.peel(operand));
         for (node, made) in claims {
             let Some(at) = peeled.iter().position(|operand| *operand == node) else {
