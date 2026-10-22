@@ -1671,19 +1671,57 @@ const UNCLOSED: &str = "unclosed";
 const PARTIAL: &str = "partial";
 
 /// The tickets the subjects of the merge commits of `range` name as `#n`,
-/// each once, in the order named.
+/// each once, in the order named. GitHub's own subject for a pull request
+/// merged there names the pull request, never a ticket: its ticket is the
+/// branch's, `t<n>` as `worktree add` names it (#3243).
 fn named_by_merges(root: &Path, range: &str) -> Result<Vec<Ticket>> {
     let subjects = crate::git::git(root, &["log", "--merges", "--format=%s", range], None)?;
     let mut named: Vec<Ticket> = Vec::new();
-    for word in subjects.split(|c: char| !(c == '#' || c.is_ascii_digit())) {
-        if let Some(Ok(number)) = word.strip_prefix('#').map(str::parse) {
-            let ticket = Ticket::new(number);
-            if !named.contains(&ticket) {
-                named.push(ticket);
+    let mut name = |number: u64| {
+        let ticket = Ticket::new(number);
+        if !named.contains(&ticket) {
+            named.push(ticket);
+        }
+    };
+    for subject in subjects.lines() {
+        if let Some(branch) = pull_request_branch(subject) {
+            if let Some(number) = branch_ticket(branch) {
+                name(number);
+            }
+            continue;
+        }
+        for word in subject.split(|c: char| !(c == '#' || c.is_ascii_digit())) {
+            if let Some(Ok(number)) = word.strip_prefix('#').map(str::parse) {
+                name(number);
             }
         }
     }
     Ok(named)
+}
+
+/// The branch of GitHub's subject `Merge pull request #<pr> from
+/// <owner>/<branch>`, or `None` for any other subject.
+fn pull_request_branch(subject: &str) -> Option<&str> {
+    let rest = subject.strip_prefix("Merge pull request #")?;
+    let (pr, from) = rest.split_once(" from ")?;
+    if pr.is_empty() || !pr.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let branch = from.split_whitespace().next()?;
+    Some(branch.split_once('/').map_or(branch, |(_, branch)| branch))
+}
+
+/// The ticket a branch laid by `worktree add` is for: `t<n>`, and `t<n>-`
+/// followed by a part's name, as `t2964-c`.
+fn branch_ticket(branch: &str) -> Option<u64> {
+    let digits = branch.strip_prefix('t')?;
+    let end = digits
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(digits.len());
+    match digits[end..].chars().next() {
+        None | Some('-') => digits[..end].parse().ok(),
+        Some(_) => None,
+    }
 }
 
 /// What `done` names of the merges since `base` (#2358): each ticket a
