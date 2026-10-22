@@ -45,8 +45,8 @@ use php_heap::{Arr, ROOM_BYTES, Ref, Zval, ZvalType};
 use php_unit::{MapPtrOffset, Opcode, OplineIdx};
 
 use super::{
-    ABANDONED, DECLINED, ENTRY_AT, ESCAPED, INTERRUPT_AT, INTERRUPTED, Kernel, Stood, Symbols,
-    UNWOUND, located,
+    ABANDONED, DECLINED, ENTRY_AT, ESCAPED, INTERRUPT_AT, INTERRUPTED, Kernel, STANDS_AT, Stood,
+    Symbols, UNWOUND, located,
 };
 use crate::record::Stop;
 use crate::types::{
@@ -335,6 +335,16 @@ impl<'a> Emit<'a> {
             }
             None => None,
         };
+        if super::ip_guarded(self.ir) {
+            // Where the frame stands as the trace enters, which `enter`
+            // laid down, held as where the last kernel left it.
+            let func = self.b.ins().load(I32, trusted(), cx, STANDS_AT);
+            let opline = self.b.ins().load(I32, trusted(), cx, STANDS_AT + 4);
+            self.b.ins().stack_store(I64, func, self.stood, STOOD_FUNC);
+            self.b
+                .ins()
+                .stack_store(I64, opline, self.stood, STOOD_OPLINE);
+        }
         for guard in self.ir.guards.iter().filter(|g| g.at == GuardAt::Entry) {
             self.guard(*guard)?;
         }
@@ -619,8 +629,8 @@ impl<'a> Emit<'a> {
 
     /// A guard held at entry or before an op: what it holds read from the
     /// value's slot, or from its register where a boolean is held to the
-    /// one the recording saw (#3076), leaving through its exit where it
-    /// does not hold.
+    /// one the recording saw (#3076), or at entry where the frame stands,
+    /// leaving through its exit where it does not hold.
     fn guard(&mut self, guard: Guard) -> Result<(), Abort> {
         match guard.check {
             Check::Type { value, tag: t } => {
@@ -676,6 +686,12 @@ impl<'a> Emit<'a> {
                 };
                 let other = self.b.ins().icmp_imm_s(cc, packed, 0);
                 self.leave_if(other, guard.exit)?;
+            }
+            // A side trace's IP guard, where its parent's exit left the
+            // frame where it stood: `trace` laid down where the frame
+            // stands as the last kernel's.
+            Check::Stands { func, opline } if guard.at == GuardAt::Entry => {
+                self.stands(func, opline, guard.exit)?;
             }
             Check::Direction { .. } | Check::Stands { .. } => {
                 return Err(mismatch("an op's own guard held before it"));

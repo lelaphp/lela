@@ -24,7 +24,7 @@ use super::{
     LoopHeader, Op, OpId, Operand, Place, Read, Repeat, Slot, Store, Stored, TraceIr, Unwind,
     UnwindId, Value, ValueId,
 };
-use crate::record::{self, Event, Start, Stop, TraceRecord};
+use crate::record::{self, Event, Landed, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 
 /// php's `ZEND_JIT_TRACE_MAX_EXITS`: the most exits one trace has.
@@ -296,6 +296,9 @@ impl<'a> Builder<'a> {
     fn walk(&mut self) -> Result<(), Abort> {
         let rec = self.rec;
         let events = rec.events.as_slice();
+        if rec.landed == Landed::Stood {
+            self.ip_guard();
+        }
         let unexecuted = match (rec.stop, events.last()) {
             (
                 Stop::Return
@@ -1319,6 +1322,30 @@ impl<'a> Builder<'a> {
         [op1, op2].into_iter().any(|operand| {
             matches!(operand, Operand::Value(value) if self.aliased(self.val(value).slot))
         })
+    }
+
+    /// A side trace whose parent's exit left the frame where it stood
+    /// holds, before anything else, that the frame stands at the opline
+    /// it was recorded from, php's IP guard
+    /// (`zend_jit_trace_opline_guard`, `Z/ext/opcache/jit/zend_jit_trace.c:4178-4180`):
+    /// its exit names no opline and knows nothing of the frame, as php
+    /// takes it before the side's stack holds a type, and grows a side
+    /// of its own.
+    fn ip_guard(&mut self) {
+        let first = self.rec.events.iter().find_map(|event| match event {
+            Event::Op { func, opline, .. } => Some((*func, *opline)),
+            _ => None,
+        });
+        if let Some((func, opline)) = first {
+            self.guards.push(Placed {
+                at: GuardAt::Entry,
+                check: Check::Stands { func, opline },
+                exit: Draft {
+                    at: At::Stands,
+                    ..self.start()
+                },
+            });
+        }
     }
 
     /// An exit at the trace's entry: the root's first opline, nothing to

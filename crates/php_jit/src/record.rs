@@ -317,6 +317,9 @@ pub(crate) struct TraceRecord {
     /// frame it starts in, php's stack map that `zend_jit_trace_build_tssa`
     /// reads a side's entry types from; empty for a root.
     pub(crate) entered: Vec<Entered>,
+    /// For a side trace, where its parent's exit left the interpreter;
+    /// [`Landed::Named`] for a root.
+    pub(crate) landed: Landed,
     pub(crate) events: Vec<Event>,
     pub(crate) stop: Stop,
     /// Where a trace that links hands on, the opline the trace it links
@@ -326,6 +329,19 @@ pub(crate) struct TraceRecord {
     /// `Z/ext/opcache/jit/zend_jit_ir.c:11188-11224`). None for any
     /// other stop.
     pub(crate) link_at: Option<(FuncRef, OplineIdx)>,
+}
+
+/// Where a side trace's parent exit left the interpreter, php's exit
+/// point's `opline`: at the opline the exit names, or where the frame
+/// stood, the exit naming none. A side of an exit that names none holds
+/// the opline it was recorded from at its first op, php's IP guard
+/// (`zend_jit_trace_opline_guard`, `Z/ext/opcache/jit/zend_jit_trace.c:4178-4180`),
+/// since the exit leaves the frame wherever it stood.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Landed {
+    #[default]
+    Named,
+    Stood,
 }
 
 /// One slot of the frame a side trace starts in whose type its parent's
@@ -488,7 +504,11 @@ pub(crate) fn run(
     policy: &Policy,
     opening: Opening,
 ) -> Result<(Recorded, Ended), Bailed> {
-    let Opening { entered, behind } = opening;
+    let Opening {
+        entered,
+        landed,
+        behind,
+    } = opening;
     let mut req = Recording::set(req);
     let mut view = UnitView::new(&req);
     let held = tier::func(&req, frame).filter(|root| view.hold(&req, *root));
@@ -509,6 +529,11 @@ pub(crate) fn run(
         } else {
             Vec::new()
         },
+        landed: if recorder.start.grew().is_some() {
+            landed
+        } else {
+            Landed::Named
+        },
         events: recorder.events,
         stop,
         link_at: matches!(stop, Stop::Link(_))
@@ -519,11 +544,13 @@ pub(crate) fn run(
 }
 
 /// What a recording begins with beside its frame: for a side trace,
-/// what its parent's exit knew of the frame's slots; for a loop, the
-/// condition it begins at behind the frame ([`behind`]).
+/// what its parent's exit knew of the frame's slots and where it left
+/// the interpreter; for a loop, the condition it begins at behind the
+/// frame ([`behind`]).
 #[derive(Debug, Default)]
 pub(crate) struct Opening {
     pub(crate) entered: Vec<Entered>,
+    pub(crate) landed: Landed,
     pub(crate) behind: Option<OplineIdx>,
 }
 
@@ -734,6 +761,7 @@ pub(crate) fn refused(req: &Request, frame: FrameRef, start: Start, stop: Stop) 
         start,
         root: tier::func(req, frame).unwrap_or(REQUEST_SCOPED),
         entered: Vec::new(),
+        landed: Landed::Named,
         events: Vec::new(),
         stop,
         link_at: None,

@@ -624,11 +624,16 @@ impl Draw {
                 .collect(),
             _ => Vec::new(),
         };
+        let landed = match start {
+            Start::Side { .. } if self.next(2) == 0 => super::Landed::Stood,
+            _ => super::Landed::Named,
+        };
         let link_at = matches!(stop, Stop::Link(_)).then(|| (self.func(), OplineIdx(self.next(9))));
         TraceRecord {
             start,
             root: self.func(),
             entered,
+            landed,
             events,
             stop,
             link_at,
