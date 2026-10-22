@@ -19,7 +19,8 @@
 //! type with what was followed to it and its class, `object#3`; a
 //! conditional jump is `taken` or `fell`; a side trace's start is
 //! `side <parent>/<exit>`, the slots its parent's exit knew the types of
-//! an `entered` line of `var:kind` after the root, and a link's stop
+//! an `entered` line of `var:kind` after the root, a `landed stood` line
+//! after it where the parent's exit names no opline, and a link's stop
 //! `link <trace>`, after a `link-at` line naming the op array and opline
 //! it hands on at.
 
@@ -29,7 +30,7 @@ use php_engine::tier::{self, FuncRef, Sample};
 use php_heap::ZvalType;
 use php_unit::{MapPtrOffset, OplineIdx};
 
-use super::{Entered, Event, Start, Stop, TraceRecord, func_name as func};
+use super::{Entered, Event, Landed, Start, Stop, TraceRecord, func_name as func};
 use crate::table::TraceId;
 use crate::types::ExitId;
 
@@ -73,6 +74,9 @@ impl TraceRecord {
                 .map(|slot| format!("{}:{}", slot.var, kind_name(slot.tag)))
                 .collect();
             writeln!(text, "entered {}", slots.join(" ")).unwrap_or_default();
+        }
+        if self.landed == Landed::Stood {
+            writeln!(text, "landed stood").unwrap_or_default();
         }
         for event in &self.events {
             match event {
@@ -127,6 +131,7 @@ impl TraceRecord {
             .ok_or_else(|| refused(at, line))?;
         let mut events = Vec::new();
         let mut entered = Vec::new();
+        let mut landed = Landed::Named;
         let mut link_at = None;
         for (at, line) in lines {
             if let Some(stop) = line.strip_prefix("stop ") {
@@ -135,6 +140,7 @@ impl TraceRecord {
                     start,
                     root,
                     entered,
+                    landed,
                     events,
                     stop,
                     link_at,
@@ -154,6 +160,14 @@ impl TraceRecord {
                 && entered.is_empty()
             {
                 entered = parse_entered(slots).ok_or_else(|| refused(at, line))?;
+                continue;
+            }
+            if line == "landed stood"
+                && start.grew().is_some()
+                && events.is_empty()
+                && landed == Landed::Named
+            {
+                landed = Landed::Stood;
                 continue;
             }
             events.push(parse_event(line).ok_or_else(|| refused(at, line))?);

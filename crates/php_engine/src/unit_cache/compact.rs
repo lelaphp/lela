@@ -74,6 +74,50 @@ enum Key<'a> {
 /// whose name a site before it took a slot for shares that slot, and
 /// every other takes as many as php's compiler gives it. An op array
 /// with no constant is left as the compiler sized it, as the pass is.
+///
+/// The count is over the compiler's oplines, so a site a pass before
+/// pass 11 drops or merges keeps its slot here, eight bytes more of a
+/// bound closure's cache than php's: a by-design divergence (#3223,
+/// landed by #3232). The CFG pass drops the calls after a `return`, in
+/// the third closure; the engine reads `400 416 408 400`:
+///
+/// ```php
+/// $src = '<?php return [function () { new stdClass; }, function () { new stdClass; abs(-1); floor(1.5); ceil(1.5); }, function () { new stdClass; return 1; foo(); bar(); }, function () { new stdClass; strlen("abc"); }];';
+/// file_put_contents(__DIR__ . '/drop.inc', $src); touch(__DIR__ . '/drop.inc', time() - 10);
+/// class A {}
+/// foreach (include __DIR__ . '/drop.inc' as $f) { $m = memory_get_usage(); $b = Closure::bind($f, null, A::class); echo memory_get_usage() - $m, " "; unset($b); }
+/// ```
+/// ```expect regime=immutable-literals exit=0
+/// 400 416 400 400
+/// ```
+///
+/// Pass 4 makes `\N\f()` an `INIT_FCALL` of the function the file
+/// declares, so it shares `f()`'s slot; the engine reads `400 408`:
+///
+/// ```php
+/// $src = '<?php namespace N; function f($a = 0) {} return [function () { new \stdClass; }, function () { new \stdClass; \N\f(); f(); }];';
+/// file_put_contents(__DIR__ . '/ns.inc', $src); touch(__DIR__ . '/ns.inc', time() - 10);
+/// class A {}
+/// foreach (include __DIR__ . '/ns.inc' as $f) { $m = memory_get_usage(); $b = Closure::bind($f, null, A::class); echo memory_get_usage() - $m, " "; unset($b); }
+/// ```
+/// ```expect regime=immutable-literals exit=0
+/// 400 400
+/// ```
+///
+/// And pass 4 drops a call of a function whose body is empty
+/// (`zend_try_inline_call`), its arguments sent by name or by place,
+/// where a call of one that returns its argument stands; the engine
+/// reads `408 408 408`:
+///
+/// ```php
+/// $src = '<?php class K { static function s($a = 0) {} static function t($a = 0) { return $a; } } return [function () { new stdClass; K::s(1); }, function () { new stdClass; K::s(a: 1); }, function () { new stdClass; K::t(a: 1); }];';
+/// file_put_contents(__DIR__ . '/inline.inc', $src); touch(__DIR__ . '/inline.inc', time() - 10);
+/// class A {}
+/// foreach (include __DIR__ . '/inline.inc' as $f) { $m = memory_get_usage(); $b = Closure::bind($f, null, A::class); echo memory_get_usage() - $m, " "; unset($b); }
+/// ```
+/// ```expect regime=immutable-literals exit=0
+/// 400 400 408
+/// ```
 pub(super) fn cache_size(code: &OpArray, first: u32) -> u32 {
     if code.literals.is_empty() {
         return code.cache_size;

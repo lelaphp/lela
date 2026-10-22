@@ -64,6 +64,7 @@ fn compiled(bytes: &[u8], exits: Vec<ExitSpec>) -> Compiled {
         leaves: None,
         stub: None,
         opens: None,
+        ip_guard: false,
         body: None,
         fuzzed: crate::lower::Fuzzed::default(),
         map_ptrs: Box::new([]),
@@ -592,6 +593,8 @@ mod epoch {
     struct Publishing;
 
     impl Tier for Publishing {
+        type State = ();
+
         fn safepoint(req: &mut Request, _: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
             if site != Site::Entry || req.state::<Seen>().published.is_some() {
                 return Flow::Continue;
@@ -663,6 +666,12 @@ mod epoch {
     struct Spent;
 
     impl Tier for Spent {
+        type State = crate::JitRequest;
+
+        fn lay(started: &tier::Started<'_>) -> Option<crate::JitRequest> {
+            crate::JitRequest::laid(*started)
+        }
+
         fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
             if let Some(engine) = req.engine::<crate::JitEngine>() {
                 let shared = &engine.shared;

@@ -265,6 +265,8 @@ mod tests {
     struct Debugging;
 
     impl crate::tier::Tier for Debugging {
+        type State = ();
+
         fn safepoint(
             _: &mut crate::tier::Request,
             _: crate::tier::FrameRef,

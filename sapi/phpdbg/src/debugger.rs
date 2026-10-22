@@ -27,6 +27,8 @@ use crate::shown;
 pub struct Debugger;
 
 impl Tier for Debugger {
+    type State = ();
+
     /// phpdbg's `zend_execute_ex = phpdbg_execute_ex`
     /// (`Z/sapi/phpdbg/phpdbg.c:167`); `zend_execute_internal` it leaves
     /// alone, so a native call is still `DO_ICALL` in its `print` and a

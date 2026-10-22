@@ -823,6 +823,47 @@ fn lay_class(req: &mut Request, blocks: &mut ClassBlocks, class: &ClassDecl) -> 
 
 /// What `unit` declares laid down ([`Laid`]); where the memory limit
 /// refuses a block, every one laid before it given back.
+///
+/// Only a unit the request compiled for itself is laid. A file is
+/// compiled as opcache compiles it in every regime (design §6.3), so it
+/// costs what opcache's lookup allocates, where `php -n` compiles it
+/// into the request's heap and keeps its op arrays' and declarations'
+/// blocks, and the strings it interns, to the request's end: a
+/// by-design divergence (#3224, landed by #3233). A request's primary
+/// file is one too (design §5.13), laid nothing here: two programs
+/// of one length, one of which reads an element, apart by the delayed
+/// oplines' stack alone here, `512`, and by the main op array's block too
+/// under php's:
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/argv' . getmypid() . '.php';
+/// $usage = function ($code) use ($f) {
+///     file_put_contents($f, "<?php $code echo memory_get_usage(), \"\\n\";");
+///     return (int) shell_exec(escapeshellarg(PHP_BINARY) . ' -n ' . escapeshellarg($f));
+/// };
+/// echo $usage('$x = $argv[0];') - $usage('$x = $argv;   '), "\n";
+/// unlink($f);
+/// ```
+/// ```expect process exit=0
+/// 576
+/// ```
+///
+/// An include that declares a function and a class with a property, and
+/// one whose main op array assigns an 18-byte constant, which the engine
+/// reads `96` and `256` (each file is written where its name's length
+/// stands still):
+///
+/// ```php
+/// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; $t = "$f." . getmypid(); file_put_contents($t, $src); touch($t, time() - 10); rename($t, $f); return $f; };
+/// $f = $put('w3233-decl.inc', '<?php function q1($a) { return "abcdefghijklmnop" . $a; } class K1 { public $p = 1; function m() {} }');
+/// $m = memory_get_usage(); include $f; echo memory_get_usage() - $m, "\n";
+/// $g = $put('w3233-literal.inc', '<?php $y = "qrstuvwxyzabcdefgh"; return 1;');
+/// $m = memory_get_usage(); include $g; echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect exit=0
+/// 1184
+/// 304
+/// ```
 pub(super) fn of_unit(req: &mut Request, unit: &Unit) -> Result<Laid, Thrown> {
     let mut laid = Laid::default();
     match lay(req, unit, &mut laid) {

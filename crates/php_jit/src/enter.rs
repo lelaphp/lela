@@ -81,8 +81,9 @@ impl Crossed for Request {
 /// The first argument of every trace and every kernel wrapper
 /// (`jit-design.md` §4.6): a local of the `enter` that made it, its
 /// address held by compiled code for exactly that call. Compiled code
-/// reads `req` at offset zero, `interrupt` at [`lower::INTERRUPT_AT`] and
-/// `at` at [`lower::ENTRY_AT`], and nothing else; `pending` has no C layout
+/// reads `req` at offset zero, `interrupt` at [`lower::INTERRUPT_AT`],
+/// `at` at [`lower::ENTRY_AT`] and `stands` at [`lower::STANDS_AT`], and
+/// nothing else; `pending` has no C layout
 /// and is the wrappers' alone. It borrows the request mutably for `'a`,
 /// so the request outlives it and nothing else touches the request
 /// while compiled code may.
@@ -92,6 +93,9 @@ pub(crate) struct ExitCtx<'a, R = Request> {
     interrupt: *const AtomicBool,
     /// Where the trace is entered.
     at: At,
+    /// Where the frame stands as the trace enters, laid down for a trace
+    /// whose first op holds it, php's IP guard; zero otherwise.
+    stands: Stands,
     pending: Option<Pending>,
     /// The epoch the trace was taken from, which holds every op array it
     /// recorded: what a kernel serves those op arrays out of
@@ -110,6 +114,21 @@ const _: () = assert!(
     lower::ENTRY_AT >= 0
         && offset_of!(ExitCtx<'static>, at) == lower::ENTRY_AT.unsigned_abs() as usize
 );
+const _: () = assert!(
+    lower::STANDS_AT >= 0
+        && offset_of!(ExitCtx<'static>, stands) == lower::STANDS_AT.unsigned_abs() as usize
+        && offset_of!(Stands, opline) == offset_of!(Stands, func) + 4
+);
+
+/// Where a frame stands, as compiled code compares it, the tail of a
+/// [`Stood`]: the engine offset of its op array and its opline, as
+/// [`where_stood`] reads them for a kernel.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+struct Stands {
+    func: u32,
+    opline: u32,
+}
 
 impl<'a, R: Crossed> ExitCtx<'a, R> {
     /// The `ExitCtx` over `req`, which it borrows for as long as it lives,
@@ -121,6 +140,7 @@ impl<'a, R: Crossed> ExitCtx<'a, R> {
             req: ptr::from_mut(req),
             interrupt,
             at: At::First,
+            stands: Stands::default(),
             pending: None,
             holding: None,
             lent: PhantomData,
@@ -723,10 +743,22 @@ pub(crate) fn enter(
     // this address, final and executable for as long as the trace, which
     // the borrow of the epoch's table keeps.
     let entry = unsafe { std::mem::transmute::<*const u8, Entry>(trace.entry().as_ptr()) };
+    // Where the frame stands as a kernel would report it, which the
+    // trace's IP guard holds as the last kernel's.
+    let stands = if trace.ip_guard {
+        let stood = where_stood(req, frame, None, Some(&Holding::of(epoch)))?;
+        Stands {
+            func: stood.func,
+            opline: stood.opline,
+        }
+    } else {
+        Stands::default()
+    };
     let before = tier::trace_num(req);
     tier::set_trace_num(req, TraceNum::from_raw(trace.id.get()));
     let mut cx = ExitCtx::new(&mut *req);
     cx.at = at;
+    cx.stands = stands;
     cx.holding = Some(Holding::of(epoch));
     // SAFETY: `cx` lives on this frame for the whole call and nothing but
     // the code and its wrappers touches the request meanwhile; `room` is
