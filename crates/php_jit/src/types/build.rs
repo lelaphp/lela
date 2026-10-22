@@ -510,7 +510,7 @@ impl<'a> Builder<'a> {
         let target = jump.and_then(|jump| jump.jump_target());
         self.successor = went(at, &op, target, len, branch);
         self.own_exit(idx, frame, &op, form, t1);
-        self.stands(idx, frame, &op, after.as_ref(), ahead);
+        self.stands(idx, (frame, at), &op, after.as_ref(), ahead, t1);
         if let Some(taken) = branch {
             let to = Branched {
                 taken,
@@ -599,20 +599,37 @@ impl<'a> Builder<'a> {
     /// php's IP guard after an opline whose handler may go elsewhere than
     /// the record says ([`may_exit`]), held by `zend_jit_trace_handler`
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:17129-17236`) to the opline the
-    /// trace serves next.
+    /// trace serves next; for a table's jump, an exit per opline it may
+    /// go to instead ([`arms`]), as php's `zend_jit_switch` takes them.
     fn stands(
         &mut self,
         idx: OpId,
-        frame: Frame,
+        (frame, here): (Frame, OplineIdx),
         op: &Opline,
         after: Option<&Opline>,
         ahead: &[Event],
+        t1: Types,
     ) {
         if !may_exit(op, after) {
             return;
         }
-        if let Some((func, opline)) = self.following(ahead) {
-            self.stands_at(idx, frame, func, opline);
+        let Some((func, opline)) = self.following(ahead) else {
+            return;
+        };
+        let arms = (func == self.frames[usize::from(frame.0)].func)
+            .then(|| arms(op, here, self.meta(frame).code, opline, t1))
+            .flatten();
+        match arms {
+            Some(arms) => {
+                for arm in arms {
+                    self.guards.push(Placed {
+                        at: GuardAt::Within(idx),
+                        check: Check::Arm { opline: arm },
+                        exit: draft(Point::After(idx), frame, At::Opline(arm)),
+                    });
+                }
+            }
+            None => self.stands_at(idx, frame, func, opline),
         }
     }
 
@@ -1690,9 +1707,10 @@ impl<'a> Builder<'a> {
                     let held = match placed.check {
                         Check::Type { value, tag } => Some((value, tag)),
                         Check::Layout { value, .. } => Some((value, ZvalType::Array)),
-                        Check::Deref { .. } | Check::Direction { .. } | Check::Stands { .. } => {
-                            None
-                        }
+                        Check::Deref { .. }
+                        | Check::Direction { .. }
+                        | Check::Stands { .. }
+                        | Check::Arm { .. } => None,
                     };
                     if let Some((value, tag)) = held
                         && !self.aliased(self.val(value).slot)
@@ -1784,7 +1802,7 @@ impl<'a> Builder<'a> {
             Check::Type { value, .. }
             | Check::Deref { value, .. }
             | Check::Layout { value, .. } => Some(self.val(value).slot),
-            Check::Direction { .. } | Check::Stands { .. } => None,
+            Check::Direction { .. } | Check::Stands { .. } | Check::Arm { .. } => None,
         }
     }
 
@@ -2228,6 +2246,50 @@ fn imm(op: &Opline) -> Imm {
         Opcode::AssignOp => lattice::binary_of(op.extended_value).map_or(Imm::None, Imm::Binary),
         _ => Imm::None,
     }
+}
+
+/// Where a table's jump at `at`, `SWITCH_LONG`, `SWITCH_STRING` or
+/// `MATCH` over a subject of `t1`, leaves a trace that goes on at `next`: an exit at
+/// each opline it may go to but `next`, in the order php's `zend_jit_switch`
+/// takes them (`Z/ext/opcache/jit/zend_jit_ir.c:16222-16337`): the
+/// default's, then for a `switch` over a subject that may be of its kind
+/// the `CASE` chain's past it, then each arm's in the table's order, one
+/// exit per opline. None for any other opline, and for a constant
+/// subject, whose one target is `next`.
+fn arms(
+    op: &Opline,
+    at: OplineIdx,
+    code: &OpArray,
+    next: OplineIdx,
+    t1: Types,
+) -> Option<Vec<OplineIdx>> {
+    let kind = match op.opcode {
+        Opcode::SwitchLong => Types::LONG,
+        Opcode::SwitchString => Types::STRING,
+        Opcode::Match => Types::LONG.or(Types::STRING),
+        _ => return None,
+    };
+    if op.op1_type == OperandKind::Const {
+        return Some(Vec::new());
+    }
+    let table = code.literals.get(op.op2 as usize)?.as_arr()?;
+    let mut arms = Vec::new();
+    let mut arm = |at: OplineIdx| {
+        if at != next && !arms.contains(&at) {
+            arms.push(at);
+        }
+    };
+    arm(OplineIdx(op.extended_value));
+    if !lattice::deref(t1).meets(kind) {
+        return Some(arms);
+    }
+    if op.opcode != Opcode::Match {
+        arm(OplineIdx(at.0 + 1));
+    }
+    for (_, target) in &table {
+        arm(OplineIdx(u32::try_from(target.as_long()?).ok()?));
+    }
+    Some(arms)
 }
 
 /// An exit with nothing to store beside the trace's registers and no

@@ -342,5 +342,6 @@ fn check(check: Check) -> String {
             format!("direction {}", if taken { "taken" } else { "fell" })
         }
         Check::Stands { func: f, opline } => format!("stands {} {:04}", func(f), opline.0),
+        Check::Arm { opline } => format!("arm {:04}", opline.0),
     }
 }

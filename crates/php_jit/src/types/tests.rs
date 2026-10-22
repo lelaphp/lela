@@ -163,6 +163,40 @@ fn a_trace_that_does_not_loop_holds_its_guards_at_the_read() -> Result<(), Strin
     Ok(())
 }
 
+/// A `match` takes an exit per opline its table may jump to but the one
+/// the trace goes on at, the default's first and then each arm's in the
+/// table's order, as php's `zend_jit_switch` takes them: its trace's
+/// `exit_4` at `0005`, the `UnhandledMatchError`, and `exit_5` at `0008`,
+/// the second arm (#3203). Each lands where the jump went.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_tables_jump_takes_an_exit_per_arm_as_phps_does() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f($keys) { $s = 0; foreach ($keys as $k) { $s += match ($k) { 'a' => 1, 'b' => 2 }; } return $s; }
+        echo f(['a', 'a', 'a', 'b', 'b', 'b']), \"\\n\";",
+    )?;
+    let arms: Vec<(u32, u16, Option<u32>)> = (ir.guards.iter())
+        .filter_map(|guard| match guard.check {
+            Check::Arm { opline } => Some((
+                opline.0,
+                guard.exit.0,
+                ir.exits[usize::from(guard.exit.0)].opline.map(|at| at.0),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        arms,
+        [(5, 4, Some(5)), (8, 5, Some(8))],
+        "{}",
+        dump::render(&ir)
+    );
+    let stands = (ir.guards.iter()).any(|guard| matches!(guard.check, Check::Stands { .. }));
+    assert!(!stands, "{}", dump::render(&ir));
+    Ok(())
+}
+
 /// `mandelbrot`'s escape loop, in the file's own code: every variable a
 /// symbol table reaches, guarded at each read and never narrowed.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]

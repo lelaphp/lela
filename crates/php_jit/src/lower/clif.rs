@@ -473,7 +473,7 @@ impl<'a> Emit<'a> {
                     let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, inner, tag(t));
                     self.decline_if(other);
                 }
-                Check::Direction { .. } | Check::Stands { .. } => {
+                Check::Direction { .. } | Check::Stands { .. } | Check::Arm { .. } => {
                     return Err(mismatch("a body entry past a guard it cannot hold"));
                 }
             }
@@ -716,7 +716,7 @@ impl<'a> Emit<'a> {
             Check::Stands { func, opline } if guard.at == GuardAt::Entry => {
                 self.stands(func, opline, guard.exit)?;
             }
-            Check::Direction { .. } | Check::Stands { .. } => {
+            Check::Direction { .. } | Check::Stands { .. } | Check::Arm { .. } => {
                 return Err(mismatch("an op's own guard held before it"));
             }
         }
@@ -812,7 +812,7 @@ impl<'a> Emit<'a> {
     }
 
     /// Leave through `exit` where `cond` is not zero and only there, never
-    /// failed by exit-fuzz: a jump's direction, whose exit lands where the
+    /// failed by exit-fuzz: a jump's direction or a table's arm, whose exit lands where the
     /// jump the guard did not expect went, and a refused call, whose exit
     /// is right only where nothing was pushed.
     fn leave_where(&mut self, cond: Value, exit: ExitId) -> Result<(), Abort> {
@@ -1104,6 +1104,14 @@ impl<'a> Emit<'a> {
                     self.leave_where(other, guard.exit)?;
                 }
                 Check::Stands { func, opline } => self.stands(func, opline, guard.exit)?,
+                Check::Arm { opline } => {
+                    let went = self.stood_word(I32, STOOD_OPLINE);
+                    let there = self
+                        .b
+                        .ins()
+                        .icmp_imm_u(IntCC::Equal, went, i64::from(opline.0));
+                    self.leave_where(there, guard.exit)?;
+                }
                 Check::Type { .. } | Check::Deref { .. } | Check::Layout { .. } => {
                     return Err(mismatch("a stepped opline holds a guard of another kind"));
                 }

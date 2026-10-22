@@ -386,6 +386,10 @@ pub(crate) enum Check {
     /// no opline, so the interpreter goes on where it stands and the exit
     /// is right whatever the guard held.
     Stands { func: FuncRef, opline: OplineIdx },
+    /// A table's jump went elsewhere than this opline: php's exit per
+    /// target of `zend_jit_switch`, taken where the stepped jump went
+    /// there and landing where it went, so exit-fuzz fails it never.
+    Arm { opline: OplineIdx },
 }
 
 /// How an array is laid out, php's `HASH_FLAG_PACKED` set or clear.
