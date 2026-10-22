@@ -168,11 +168,16 @@ impl Request {
             self.deprecated_class_constant(class, name, &constant)?;
         }
         // `ZEND_FETCH_CLASS_CONSTANT` updates a backed enum's constants
-        // whole before it reads one (`zend_update_class_constants`), and
+        // whole before it reads one (`zend_update_class_constants`), where
+        // `zend_get_class_constant_ex` updates the one it reads, so an
+        // expression of the enum's that names one of its constants reads
+        // it without updating the enum again; and
         // `zend_fetch_class_constant`'s `ZEND_CLASS_CONST_IS_CASE` arm
         // hands out a case as the enum's instance for it and not as the
         // expression it was written with.
-        self.update_enum_constants(class)?;
+        if fetch == ConstantFetch::Opline {
+            self.update_enum_constants(class)?;
+        }
         if is_case {
             return self.enum_case(class, name).map(|case| case.as_value());
         }
@@ -344,6 +349,17 @@ impl Request {
             let case = self.made_case(class, &name, Some(value))?;
             self.release(case.as_value());
         }
+        // Its other constants with them, in the table's order, each
+        // expression's copy given back as it is evaluated.
+        let constants: Vec<(ClassId, Box<[u8]>)> = (self.symbols().constants_in_order(class))
+            .into_iter()
+            .filter(|(_, constant)| !constant.is_case)
+            .map(|(declaring, constant)| (declaring, constant.name.0.clone()))
+            .collect();
+        for (declaring, name) in constants {
+            let value = self.evaluated_class_constant(declaring, &name)?;
+            self.release(value);
+        }
         let table = self.backed_enum_table(class)?;
         self.class_constants.enums_updated.push((class, table));
         Ok(())
@@ -502,7 +518,7 @@ impl Request {
     /// The first read costs the case's object, `zend_objects_new` at the
     /// enum's size, and nothing else: the case's constant expression is
     /// the unit's and stays, as opcache's persisted one does (an `eval`'d
-    /// enum's goes, [`Request::case_evaluated`]), where php
+    /// enum's goes, [`Request::constant_evaluated`]), where php
     /// -n frees the request's copy of it as it evaluates the case, 96
     /// bytes for a pure case, and so reads 40 bytes less than nothing
     /// (`trace:immutable-literal-arrays`):
@@ -622,7 +638,7 @@ impl Request {
         self.addref(&case.as_value());
         // `zval_update_constant_with_ctx` destroys the constant's
         // expression once the case stands in its place.
-        self.case_evaluated(class, name);
+        self.constant_evaluated(class, name);
         Ok(case)
     }
 
