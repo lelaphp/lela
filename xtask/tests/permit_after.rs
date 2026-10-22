@@ -830,6 +830,96 @@ fn a_harness_file_a_merge_staged_is_not_put_back() {
     );
 }
 
+/// A commit on a ticket's branch in a linked worktree of `root` that
+/// writes `path` as `content`, merged into `root` by a merge commit, as
+/// the coordinator merges a ticket in the main checkout.
+fn merge_committing(root: &Path, path: &str, content: &str) {
+    let (_base, linked) = linked_worktree(root);
+    std::fs::write(linked.join(path), content).unwrap();
+    Repo::at(&linked).git(&["add", "--", path]);
+    Repo::at(&linked).git(&["commit", "-qm", "a ticket's commit"]);
+    Repo::at(root).git(&["merge", "-q", "--no-ff", "-m", "Merge t1", "t1"]);
+}
+
+/// #3220, the fixture: another session's merge commit lands a row in the
+/// registry while a call whose line can write it runs in that checkout.
+/// History carries the change, so the file stands at `HEAD`'s blob, the
+/// call is not denied, and nothing is recorded: no reading, nothing
+/// `done` lists.
+#[test]
+fn the_fixture_a_harness_file_a_merge_commit_lands_during_the_call_stands_at_head() {
+    let root = scratch("landed");
+    let probe: serde_json::Value =
+        serde_json::from_str(&read(&fixture(), "after-landed.json")).unwrap();
+    let id = probe["tool_use_id"].as_str().unwrap();
+    let command = probe["tool_input"]["command"].as_str().unwrap();
+    let path = "docs/divergence.toml";
+    let merged = format!(
+        "{}\n# a by-design row a ticket's steer landed\n",
+        read(&root, path)
+    );
+    permit(
+        &root,
+        &stdin("PreToolUse", SESSION, id, &root, command),
+        &[],
+    )
+    .ok();
+    merge_committing(&root, path, &merged);
+    shell(&root, command);
+    let mut after = probe.clone();
+    after["cwd"] = root.to_str().unwrap().into();
+    let out = permit(&root, &after.to_string(), &["--after"]).ok();
+
+    assert_eq!(read(&root, path), merged, "the merge's file stands");
+    let status = Repo::at(&root).git(&["status", "--porcelain", "--", path]);
+    assert_eq!(status, "", "the checkout stands at HEAD");
+    let hook: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    assert!(hook.get("decision").is_none(), "nothing is denied: {out}");
+    let said = hook["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        said.contains(path) && said.contains("history carries"),
+        "{said}"
+    );
+    let reading = Store::of_workspace(&root)
+        .read("permit", "harness.self")
+        .unwrap();
+    assert!(reading.is_none(), "nothing is recorded: {reading:?}");
+    assert_eq!(unmet(&root), Vec::<String>::new());
+}
+
+/// #3220's other side: `HEAD` moves during the call for another file, and
+/// the call's line writes the pin back to `HEAD`'s blob over a person's
+/// edit. History never carried that change, so it is put back and denied.
+#[test]
+fn a_write_back_to_head_is_put_back_though_head_moved_for_another_file() {
+    let root = scratch("restored");
+    let pin = "oracle.toml";
+    let edited = format!("{}\n# a person's edit\n", read(&root, pin));
+    std::fs::write(root.join(pin), &edited).unwrap();
+    let command = format!("git show HEAD:{pin} > {pin}");
+    let (out, _) = through_the_hooks_while(&root, "toolu_restored", &command, || {
+        merge_committing(&root, "another-ticket.txt", "another ticket's file\n");
+    });
+    assert_eq!(read(&root, pin), edited, "the person's edit is put back");
+    assert_denied(&root, &out, pin, "");
+}
+
+/// #3220's third side: a call whose line writes the pin and commits it
+/// moves `HEAD` itself, so the history is the call's own and credits it
+/// with nothing: the write is put back and denied as before.
+#[test]
+fn a_write_the_call_commits_itself_is_put_back_and_denied() {
+    let root = scratch("self-commit");
+    let pin = "oracle.toml";
+    let was = read(&root, pin);
+    let command = format!("echo '# committed' >> {pin} && git commit -qm pin -- {pin}");
+    let (out, _) = through_the_hooks(&root, "toolu_self_commit", &command);
+    assert_eq!(read(&root, pin), was, "put back");
+    assert_denied(&root, &out, pin, "# committed");
+}
+
 /// #2597: a call that writes a harness file in its own worktree, its
 /// shell moved there by a leading `cd`, is put back and denied there, in
 /// that checkout's store, and the main checkout is not touched.

@@ -13,6 +13,7 @@
 //! them is the request's face, [`crate::api::request::UnitCache`], which
 //! `opcache_*` answer from, over the files of the request's epoch.
 
+mod compact;
 mod disk;
 mod wire;
 
@@ -433,7 +434,8 @@ pub(crate) enum Levels<'a> {
 /// `zend_compile_file` link handed down to compile in place of the
 /// file's own where one did, the path as written it is filed under too
 /// where given, how a hit is validated at the request time `now`, how
-/// new a file is kept, and where.
+/// new a file is kept, and where, and what opcache's optimizer makes of
+/// what it compiles.
 pub(crate) struct Asked<'a> {
     pub(crate) path: &'a [u8],
     pub(crate) source: Option<&'a [u8]>,
@@ -442,6 +444,99 @@ pub(crate) struct Asked<'a> {
     pub(crate) protection: u32,
     pub(crate) now: i64,
     pub(crate) levels: Levels<'a>,
+    pub(crate) optimizer: Optimizer,
+}
+
+/// What opcache's optimizer makes of a unit it persists that a request
+/// reads, `zend_optimize_script` under `opcache.optimization_level`, which
+/// `cache_script_in_shared_memory` and `cache_script_in_file_cache` call
+/// on what they compiled (`Z/ext/opcache/ZendAccelerator.c:1581`,
+/// `:1563`) and `preload_optimize` on what the preload holds (`:4425`,
+/// `:4441`). The engine
+/// runs none of its passes over what executes (design §6.1); of pass 11,
+/// `zend_optimizer_compact_literals`, it keeps the runtime cache size the
+/// pass counts, as the room each op array's cache takes of a request's
+/// heap ([`php_unit::OpArray::cache_room`], [`compact`]). So where the
+/// accelerator holds a file, sites naming one function or one class
+/// share one slot, and so do the sites naming one constant, and one
+/// property or one method of `$this` where the op array is sure of it, a
+/// method's or a closure's written in one; a closure's own cache,
+/// `emalloc`ed at that size, reads one bin however many it holds. A file
+/// compiled without the accelerator keeps the compiler's slot per site.
+/// Under the plain recipe each closure below takes one site of each
+/// more than the one before:
+///
+/// ```php
+/// $src = '<?php class S { function closures() { return [';
+/// for ($n = 1; $n <= 4; $n++) { $src .= 'function () { ' . str_repeat('new stdClass; array_keys($x); FOO; $this->p; $this->m(); ', $n) . '}, '; }
+/// file_put_contents(__DIR__ . '/sites.inc', $src . ']; } } return (new S)->closures();'); touch(__DIR__ . '/sites.inc', time() - 10);
+/// class A {} $a = new A;
+/// foreach (include __DIR__ . '/sites.inc' as $f) { $m = memory_get_usage(); $b = Closure::bind($f, $a, A::class); echo memory_get_usage() - $m, " "; unset($b); }
+/// ```
+/// ```expect
+/// 448 512 576 640
+/// ```
+/// ```php
+/// $src = '<?php class S { function closures() { return [';
+/// for ($n = 1; $n <= 4; $n++) { $src .= 'function () { ' . str_repeat('new stdClass; array_keys($x); FOO; $this->p; $this->m(); ', $n) . '}, '; }
+/// file_put_contents(__DIR__ . '/sites.inc', $src . ']; } } return (new S)->closures();'); touch(__DIR__ . '/sites.inc', time() - 10);
+/// class A {} $a = new A;
+/// foreach (include __DIR__ . '/sites.inc' as $f) { $m = memory_get_usage(); $b = Closure::bind($f, $a, A::class); echo memory_get_usage() - $m, " "; unset($b); }
+/// ```
+/// ```expect regime=immutable-literals
+/// 448 448 448 448
+/// ```
+///
+/// The count starts past the op array extensions' slots, the tier's
+/// where it starts:
+///
+/// ```php
+/// $src = '<?php class S { function closures() { return [';
+/// for ($n = 1; $n <= 4; $n++) { $src .= 'function () { ' . str_repeat('new stdClass; array_keys($x); FOO; $this->p; $this->m(); ', $n) . '}, '; }
+/// file_put_contents(__DIR__ . '/sites.inc', $src . ']; } } return (new S)->closures();'); touch(__DIR__ . '/sites.inc', time() - 10);
+/// class A {} $a = new A;
+/// foreach (include __DIR__ . '/sites.inc' as $f) { $m = memory_get_usage(); $b = Closure::bind($f, $a, A::class); echo memory_get_usage() - $m, " "; unset($b); }
+/// ```
+/// ```expect regime=jit-off
+/// 464 464 464 464
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Optimizer {
+    /// No pass: `opcache.optimization_level` leaves pass 11 out.
+    Off,
+    /// Pass 11's count, from the first slot past the op array
+    /// extensions' (`zend_op_array_extension_handles * sizeof(void*)`).
+    CompactLiterals { first: u32 },
+}
+
+impl Optimizer {
+    /// `ZEND_OPTIMIZER_PASS_11` (`Z/Zend/Optimizer/zend_optimizer.h:38`).
+    pub(crate) const PASS_11: i64 = 1 << 10;
+
+    /// The passes on a miss `persistent_compile_file` compiled under
+    /// `validation`: these with the accelerator on (every validation but
+    /// `EveryHit`) where it optimizes what it compiled, `optimizing`,
+    /// which with a restart pending it does only where a file cache keeps
+    /// the file, as `file_cache_compile_file` does
+    /// (`Z/ext/opcache/ZendAccelerator.c:2156-2163`); none where it
+    /// compiled as php without the accelerator does.
+    pub(crate) fn on_miss(self, validation: Validation, optimizing: bool) -> Optimizer {
+        if validation == Validation::EveryHit || !optimizing {
+            return Optimizer::Off;
+        }
+        self
+    }
+
+    /// What the passes leave of `unit`'s op arrays' caches, before the
+    /// unit is published.
+    pub(crate) fn optimized(self, mut unit: Unit) -> Unit {
+        if let Optimizer::CompactLiterals { first } = self {
+            for code in crate::exec::op_arrays_mut(&mut unit) {
+                code.cache_room = compact::cache_size(code, first);
+            }
+        }
+        unit
+    }
 }
 
 /// The unit [`UnitCache::file`] answers with: one held, published for
@@ -453,6 +548,26 @@ pub(crate) struct Asked<'a> {
 pub(crate) enum Compiled {
     Published(PublishedUnit),
     Alone(Box<Unit>),
+}
+
+/// Whom a compile's answer serves: every request that asks for the file,
+/// or the one that asked alone, whose `memory_limit` refused the compile
+/// (`crate::engine::CompileHeap`), which another request with room for
+/// it compiles again, as php compiles a file afresh where opcache cached
+/// nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Answers {
+    /// Any request: what a held unit answers.
+    Every,
+    /// The request that asked, and no other.
+    Asker,
+}
+
+/// A compile [`UnitCache::file`] ran: the unit or the refusal, and whom
+/// it answers.
+pub(crate) struct Fresh {
+    pub(crate) unit: Result<Unit, CompileError>,
+    pub(crate) answers: Answers,
 }
 
 /// What [`UnitCache::file`] answers: the unit, what it did with the
@@ -785,15 +900,20 @@ impl UnitCache {
     /// cache alone and counts nothing. Nothing where the file cannot be
     /// read. What is `compile`d or `decode`d takes no map-pointer offset
     /// until it is held, `share`d as it is; one held nowhere is answered
-    /// [`Compiled::Alone`], its caller's own (GH-8646).
-    pub(crate) fn file(
+    /// [`Compiled::Alone`], its caller's own (GH-8646), and so is one
+    /// that answers the request that asked alone ([`Answers::Asker`]).
+    /// `compile` and `publish` are handed `caller`, the request the file
+    /// is compiled and its classes published for, or nothing.
+    #[allow(clippy::too_many_arguments)] // the table, the question, the caller and the four steps, each one fact
+    pub(crate) fn file<A>(
         &self,
+        caller: &mut A,
         files: &Files,
         asked: Asked<'_>,
-        compile: impl FnOnce(&[u8]) -> Result<Unit, CompileError>,
+        compile: impl FnOnce(&mut A, &[u8]) -> Fresh,
         decode: impl FnOnce(&[u8]) -> Option<Unit>,
         share: impl FnOnce(Unit) -> PublishedUnit,
-        publish: impl FnOnce(&PublishedUnit) -> EarlyBound,
+        publish: impl FnOnce(&mut A, &PublishedUnit) -> EarlyBound,
     ) -> Answered {
         let Asked {
             path,
@@ -803,6 +923,7 @@ impl UnitCache {
             protection,
             now,
             levels,
+            optimizer,
         } = asked;
         let (memory, disk) = match levels {
             Levels::Memory => (true, None),
@@ -839,7 +960,7 @@ impl UnitCache {
             // Under its full path alone: `zend_file_cache_script_load`
             // files no key, which the next include adds after opening it.
             let unit = share(unit);
-            let early = publish(&unit);
+            let early = publish(caller, &unit);
             let read = Read {
                 unit: Ok(unit),
                 early,
@@ -860,15 +981,17 @@ impl UnitCache {
         let Some(source) = source_or_read(handed, path) else {
             return (None, Filed::Unheld, None);
         };
-        let unit = compile(&source);
+        let Fresh { unit, answers } = compile(caller, &source);
         let size = u64::try_from(source.len()).unwrap_or(u64::MAX);
         let unheld = stamped
             && observed.is_none_or(|stamp| {
                 protection > 0 && now.saturating_sub(i64::from(protection)) < stamp.seconds()
             });
-        if unheld || named_by_request(validation, &unit) {
+        if unheld || answers == Answers::Asker || named_by_request(validation, &unit) {
             return alone(unit, Filed::Compiled);
         }
+        let optimizer = optimizer.on_miss(validation, disk.is_some() || !files.restart_pending());
+        let unit = unit.map(|unit| optimizer.optimized(unit));
         if let (Some(disk), Ok(compiled)) = (&disk, &unit)
             && let Some(body) = wire::encode(compiled)
         {
@@ -880,7 +1003,7 @@ impl UnitCache {
         }
         let unit = unit.map(share);
         let early = match &unit {
-            Ok(compiled) => publish(compiled),
+            Ok(compiled) => publish(caller, compiled),
             Err(_) => Arc::new([]),
         };
         let read = Read {

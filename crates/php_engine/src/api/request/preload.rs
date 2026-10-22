@@ -332,18 +332,14 @@ impl Request {
         }
         let source = std::fs::read(String::from_utf8_lossy(path).as_ref()).ok()?;
         let shared = Arc::clone(&self.shared);
-        let bound = crate::multibyte::bound(self, shared.compile_multibyte());
-        let holds = |name: &[u8]| self.class_named(Bare::resolved(name)).is_some();
-        let request = crate::engine::ForRequest {
-            classes: php_compile::RequestClasses::new(&holds),
-            multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
-            keys_before: self.keys_made(),
-        };
-        let unit = shared.compile_file(&source, path, &self.cwd, self.stack_limit(), request);
+        let unit = self.compile_for_cache(&source, path).unit;
         if let Ok(unit) = &unit {
             self.count_keys_made(crate::unit_cache::keys_of(unit));
         }
-        let unit = unit.map(|unit| shared.publish_compiled(unit));
+        // The preload optimizes what it holds (`zend_optimize_script`
+        // in `preload_optimize`).
+        let optimizer = shared.optimizer();
+        let unit = unit.map(|unit| shared.publish_compiled(optimizer.optimized(unit)));
         if let (Ok(unit), Some(preloading)) = (&unit, &mut self.preloading) {
             let size = u64::try_from(source.len()).unwrap_or(u64::MAX);
             preloading

@@ -15,10 +15,11 @@
 //! nothing here decides what an opline is (#595).
 //!
 //! **What is refused.** A construct the tree parses and the emitter
-//! cannot emit yet is refused here, at the node's line, in the one-line
-//! `this compiler cannot read yet` shape at `Level::Parse`, which the
-//! phpt lane counts as unread; what the grammar does not parse is php's
-//! parse error from `Parsed::diagnostics`, raised before this walk runs.
+//! cannot emit yet is refused here, at the node's line, as
+//! [`crate::Raise::Unread`] in the one-line `this compiler cannot read
+//! yet` shape at `Level::Parse`, which the phpt lane counts as unread;
+//! what the grammar does not parse is php's parse error from
+//! `Parsed::diagnostics`, raised before this walk runs.
 
 use php_syntax::tree::{
     Block, ClassBody, ClassMember, Modifier, Node, NodeId, ParamList, Stmt, TokenId, TypeExpr,
@@ -337,15 +338,19 @@ impl Emit<'_> {
         }
     }
 
-    /// `InternalError`: the tree is not what the grammar promised
-    /// (design §10).
-    fn internal(&self, what: impl AsRef<str>) -> CompileError {
+    /// `InternalError` at the line the compiler stands on: the tree, or
+    /// the compile's own tables, are not what the grammar and the compile
+    /// promised (design §10), raised at `Level::Error`, so no fold
+    /// passes over it and no `eval` throws it as a parse error.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn internal(&self, what: impl AsRef<str>) -> CompileError {
         Refused {
             level: Level::Error,
             message: format!("InternalError: {}", what.as_ref()).into(),
             line: self.line,
             raised: Vec::new(),
-            thrown: false,
+            raise: crate::Raise::Fatal,
             stage: crate::Stage::Compiling,
             declared: None,
             keys_made: 0,
@@ -1313,7 +1318,7 @@ impl Emit<'_> {
                 .into(),
                 line: at,
                 raised: Vec::new(),
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,
@@ -1392,8 +1397,9 @@ impl Emit<'_> {
 }
 
 /// The refusal for a construct the emitter cannot emit yet, at the
-/// node's own line: the `Level::Parse` sentence the phpt lane reads as
-/// unread. Cold and a call of its own, so the sentence it formats is off
+/// node's own line: [`crate::Raise::Unread`] at `Level::Parse`, the one
+/// place the state and its sentence, which the phpt lane counts, are
+/// made. Cold and a call of its own, so the sentence it formats is off
 /// the stack of every recursive compile that may refuse (#3159).
 #[cold]
 #[inline(never)]
@@ -1403,7 +1409,7 @@ pub(super) fn unread(line: u32, what: &str) -> CompileError {
         message: format!("{what} this compiler cannot read yet").into(),
         line,
         raised: Vec::new(),
-        thrown: false,
+        raise: crate::Raise::Unread,
         stage: crate::Stage::Compiling,
         declared: None,
         keys_made: 0,
@@ -1429,7 +1435,7 @@ pub(super) fn refused(line: u32, message: impl Into<Cow<'static, str>>) -> Compi
         message: message.into(),
         line,
         raised: Vec::new(),
-        thrown: false,
+        raise: crate::Raise::Fatal,
         stage: crate::Stage::Compiling,
         declared: None,
         keys_made: 0,
@@ -1460,7 +1466,7 @@ pub(super) fn refused(line: u32, message: impl Into<Cow<'static, str>>) -> Compi
 /// ```
 pub(super) fn thrown(line: u32, message: impl Into<Cow<'static, str>>) -> CompileError {
     let mut thrown = refused(line, message);
-    thrown.thrown = true;
+    thrown.raise = crate::Raise::Thrown;
     thrown
 }
 

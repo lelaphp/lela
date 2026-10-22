@@ -326,7 +326,7 @@ fn a_variable_under_a_silence_is_fetched_by_name_and_its_value_freed_past_the_en
                 message: "Constant expression contains invalid operations".into(),
                 line: 1,
                 raised: Vec::new(),
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,

@@ -101,6 +101,16 @@ impl Intern for RequestStrings<'_> {
         Ok(s)
     }
 
+    /// A string the fold that made it has read, given up, as
+    /// `zend_eval_const_expr` frees an operand once the value it made stands; one
+    /// the engine's table holds is no string of the compile's.
+    fn give_back(&mut self, made: php_heap::Made) {
+        let string = made.str();
+        if self.made.take(Zval::string(string)) {
+            self.heap.release_string(string);
+        }
+    }
+
     /// A constant array of a unit this request alone serves, as php's
     /// compile leaves it where no cache keeps the unit
     /// (`zend_try_ct_eval_array`, `Z/Zend/zend_compile.c:10085`): a plain

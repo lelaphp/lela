@@ -6,7 +6,7 @@
 //! by name and number that read them all. Which classes a load bound
 //! early is [`Classes`]'s, whose field no file but this one reads.
 
-use php_heap::{FrameRef, Intern};
+use php_heap::{FrameRef, Heap, Intern};
 use php_link::LinkedClass;
 use php_unit::decl::{Bare, ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind};
 use php_unit::{Opcode, PublishedUnit, TopLevel, Unit};
@@ -2031,6 +2031,24 @@ impl Request {
             &mut strings,
             php_compile::RequestClasses::new(&holds),
             &mut self.compile_arena,
+            &self.cwd,
+        )
+    }
+
+    /// What a compile of a file bound for the cache is handed for this
+    /// request, which asked for it: the request's heap, which it is
+    /// charged to while it runs ([`crate::engine::CompileHeap`]), the
+    /// request's classes as the compiler asks after one, and its working
+    /// directory, borrowed apart so all three are handed to one compile.
+    pub(crate) fn compiling_for_cache<R>(
+        &mut self,
+        compile: impl FnOnce(&mut Heap, php_compile::RequestClasses<'_>, &std::path::Path) -> R,
+    ) -> R {
+        let (shared, declared, aliases) = (&self.shared, &self.declared, &self.aliases);
+        let holds = |name: &[u8]| class_in(shared, declared, aliases, name).is_some();
+        compile(
+            &mut self.heap,
+            php_compile::RequestClasses::new(&holds),
             &self.cwd,
         )
     }

@@ -21,7 +21,6 @@
     clippy::unimplemented
 )]
 
-mod delayed;
 mod emit;
 mod live;
 pub mod multibyte;
@@ -365,12 +364,8 @@ pub struct Refused {
     pub message: Cow<'static, str>,
     pub line: u32,
     pub raised: Vec<Diagnostic>,
-    /// Whether php throws the refusal as a `CompileError`,
-    /// `zend_throw_exception(zend_ce_compile_error)` from the parser's
-    /// modifier lists and two statements, rather than raising it as a
-    /// fatal: a `try` around the `include` or the `eval` catches it, and
-    /// uncaught it renders as the fatal at [`Refused::level`].
-    pub thrown: bool,
+    /// How php meets the refusal, or that php would have met none.
+    pub raise: Raise,
     /// Where php stood when it refused, which is where `zend_error`
     /// places it.
     pub stage: Stage,
@@ -385,6 +380,47 @@ pub struct Refused {
     /// php makes before `zend_compile` runs, the parser's and one it
     /// throws.
     pub keys_made: u32,
+}
+
+impl Refused {
+    /// Whether php's compile bailed out at the refusal, `zend_bailout`
+    /// out of `zend_compile` past what it had declared and counted: a
+    /// compile error, a heap fatal. A parse error, this compiler's own
+    /// refusal of what it cannot read yet, and a refusal php throws are
+    /// the parser's, made before `zend_compile` declared or counted
+    /// anything, which leave it as it returns: an `include` or an `eval`
+    /// throws the one php throws, and a parse error as the `ParseError`.
+    #[must_use]
+    pub fn bailed(&self) -> bool {
+        match self.raise {
+            Raise::Fatal => self.level != Level::Parse,
+            Raise::Thrown | Raise::Unread => false,
+        }
+    }
+}
+
+/// How a [`Refused`] reaches the request: php's fatal, php's thrown
+/// `CompileError`, or this compiler's own sentence where php would have
+/// compiled the source. Decided where the refusal is made and matched by
+/// each reader, never read back off the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Raise {
+    /// php raises it, `zend_error` at [`Refused::level`], and the
+    /// request ends.
+    Fatal,
+    /// php throws it as a `CompileError`,
+    /// `zend_throw_exception(zend_ce_compile_error)` from the parser's
+    /// modifier lists and two statements: a `try` around the `include` or
+    /// the `eval` catches it, and uncaught it renders as the fatal at
+    /// [`Refused::level`].
+    Thrown,
+    /// php would have compiled what stands here, and this compiler cannot
+    /// read it yet: its own sentence, `… this compiler cannot read yet`,
+    /// raised at `Level::Parse` as #163 framed it, which the phpt lane
+    /// counts as unread. A fold that meets one leaves the node unfolded
+    /// for the compile to read or refuse, as it leaves a node that is no
+    /// constant.
+    Unread,
 }
 
 /// What php's compile of a source had added to `CG(function_table)` and
@@ -575,7 +611,7 @@ fn compile_in(
             message: refused.message().into(),
             line: 0,
             raised: Vec::new(),
-            thrown: false,
+            raise: Raise::Fatal,
             stage: Stage::Opening,
             declared: None,
             keys_made: 0,
@@ -620,7 +656,7 @@ fn export_in(
             message: fatal.message.clone().into(),
             line: fatal.line,
             raised: Vec::new(),
-            thrown: false,
+            raise: Raise::Fatal,
             stage: Stage::Compiling,
             declared: None,
             keys_made: 0,
@@ -696,7 +732,7 @@ fn compile_scanned<'p>(
                 message: diagnostic.message.clone().into(),
                 line: diagnostic.line,
                 raised,
-                thrown: false,
+                raise: Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,

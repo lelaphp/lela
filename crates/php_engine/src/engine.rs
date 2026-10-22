@@ -47,7 +47,7 @@ use crate::natives::StubPlace;
 use crate::supplied::{Keyed, Resolved, Suppliers};
 use crate::tier::{BindLoops, Loop, Loops, Nop, Tier};
 pub(crate) use crate::unit_cache::Cached;
-use crate::unit_cache::{CompileRefused, UnitCache};
+use crate::unit_cache::{Answers, CompileRefused, Fresh, UnitCache};
 
 /// Everything a host knows about one request before it starts (design
 /// §4.3 seam 4): one plain `Send` value, handed over once.
@@ -1715,6 +1715,25 @@ impl Shared {
             .saturating_add(u32::from(tier))
     }
 
+    /// What opcache's optimizer makes of a unit the accelerator persists
+    /// ([`crate::unit_cache::Optimizer`]): pass 11's count where the
+    /// startup's `opcache.optimization_level` has its bit, from past the
+    /// op array extensions' slots, which is where the compiler's first
+    /// slot stands too; no pass where it has not, or where no extension
+    /// declares the entry.
+    pub(crate) fn optimizer(&self) -> crate::unit_cache::Optimizer {
+        use crate::unit_cache::Optimizer;
+        let level = self
+            .ini_default(b"opcache.optimization_level")
+            .map_or(0, ini_quantity);
+        if level & Optimizer::PASS_11 == 0 {
+            return Optimizer::Off;
+        }
+        Optimizer::CompactLiterals {
+            first: self.op_array_extensions().saturating_mul(exec::SLOT_BYTES),
+        }
+    }
+
     /// One source compiled with its constant strings interned into the
     /// engine's table, which is what publication is (design §5.2, §6.3):
     /// opcache's persist walks an op array's constants and re-interns
@@ -1728,38 +1747,44 @@ impl Shared {
         origin: Origin<'_>,
         stack: StackLimit,
     ) -> Result<PublishedUnit, CompileError> {
-        self.compile_shared(source, origin, stack)
+        (self
+            .compile_shared(source, origin, stack, CompileHeap::Engine)
+            .unit)
             .map(|unit| self.publish_compiled(unit))
     }
 
     /// [`Shared::publish`]'s compile alone: the constant strings in the
     /// engine's table and no map-pointer offset taken, for a caller that
     /// decides afterwards whether the unit is published
-    /// ([`Shared::publish_compiled`]) or the request's own.
+    /// ([`Shared::publish_compiled`]) or the request's own, and charged
+    /// to `heap` while it runs ([`CompileHeap`]).
     fn compile_shared(
         &self,
         source: &[u8],
         origin: Origin<'_>,
         stack: StackLimit,
-    ) -> Result<Unit, CompileError> {
+        heap: CompileHeap<'_>,
+    ) -> Fresh {
         let mut strings = self.interned.strings();
-        compile(
+        let mut home = PermanentStrings::new(&self.interned.names, &mut strings, heap);
+        let unit = compile(
             source,
             origin,
             self.compile_ini(),
             self.declared(),
             stack,
-            &mut PermanentStrings {
-                names: &self.interned.names,
-                strings: &mut strings,
-            },
+            &mut home,
             // A unit for every request is compiled on the thread that
             // asked, no request's arena at hand, so it brings its own.
             Laid {
                 arena: &mut php_compile::syntax::Arena::new(),
                 room: php_compile::Room::default(),
             },
-        )
+        );
+        Fresh {
+            unit,
+            answers: home.settle(),
+        }
     }
 
     /// `unit` published for every request: each op array given its
@@ -1960,17 +1985,22 @@ impl Shared {
             protection: 0,
             now: crate::unit_cache::now(),
             levels: crate::unit_cache::Levels::Memory,
+            optimizer: self.optimizer(),
         };
         let arena = self.arena.current();
         let (compiled, _, _) = self.units.file(
+            &mut (),
             &arena.files,
             asked,
-            |source| self.compile_file(source, path, cwd, stack, ForRequest::none(self.unbound())),
+            |(), source| {
+                let request = ForRequest::none(self.unbound());
+                self.compile_file(source, path, cwd, stack, request, CompileHeap::Engine)
+            },
             |_| None,
             |unit| self.publish_compiled(unit),
             // No request to publish its early-bound classes for, so
             // a request that loads it binds them as its own.
-            |_| Arc::new([]),
+            |(), _| Arc::new([]),
         );
         // With no request to own it, a unit held nowhere is published
         // all the same.
@@ -1986,10 +2016,7 @@ impl Shared {
         let mut strings = self.interned.strings();
         crate::unit_cache::decode(
             body,
-            &mut PermanentStrings {
-                names: &self.interned.names,
-                strings: &mut strings,
-            },
+            &mut PermanentStrings::new(&self.interned.names, &mut strings, CompileHeap::Engine),
         )
     }
 
@@ -2000,7 +2027,8 @@ impl Shared {
     /// request it compiles for had made, as opcache's miss compiles under
     /// the request's `CG(rtd_key_counter)` and persists the names it made
     /// ([`Request::count_keys_made`]); a unit compiled for no request
-    /// starts from none.
+    /// starts from none. The compile is charged to `heap` while it runs
+    /// ([`CompileHeap`]).
     pub(crate) fn compile_file(
         &self,
         source: &[u8],
@@ -2008,7 +2036,8 @@ impl Shared {
         cwd: &Path,
         stack: StackLimit,
         request: ForRequest<'_>,
-    ) -> Result<Unit, CompileError> {
+        heap: CompileHeap<'_>,
+    ) -> Fresh {
         self.compile_shared(
             source,
             Origin {
@@ -2018,6 +2047,7 @@ impl Shared {
                 request,
             },
             stack,
+            heap,
         )
     }
 
@@ -3947,14 +3977,111 @@ fn default_strings(functions: &[FunctionDecl], classes: &[ClassDecl]) -> Strings
     strings
 }
 
+/// The heap a compile bound for the cache runs on, which is what it is
+/// charged to while it runs (design §5.13, §6.3). php compiles a file on
+/// the heap of the request that includes it, with opcache and without
+/// it, and opcache's persist copies what the miss made into its segment
+/// and frees the request's copies once the compile is done. So the
+/// request's `memory_limit` holds the compile, the strings a fold of a
+/// constant expression makes among them, and none of it stands on the
+/// request after the compile; a hit compiles nothing and costs nothing.
+/// The unit's strings are the engine's either way (§5.2).
+pub(crate) enum CompileHeap<'a> {
+    /// No request asked: a unit the engine compiles for itself, whose
+    /// compile no request's limit holds.
+    Engine,
+    /// The heap of the request that asked.
+    Request(&'a mut php_heap::Heap),
+}
+
 /// php's one `interned_strings_permanent` as a shared compile reads it:
 /// the names the engine laid down at startup ([`permanent_names`]) first,
 /// so a unit's constant string that spells one is that one, flags and
 /// all, as `zend_new_interned_string` finds it, then the table units
-/// intern into, which a string that is in neither joins.
+/// intern into, which a string that is in neither joins. Each string the
+/// compile makes is charged to its [`CompileHeap`] as well.
 struct PermanentStrings<'a> {
     names: &'a Strings,
     strings: &'a mut Strings,
+    heap: CompileHeap<'a>,
+    /// The request's copy of each string the compile made and has not
+    /// given back, standing until the compile ends.
+    standing: Vec<Standing>,
+    /// Whom the compile's answer serves: [`Answers::Asker`] once the
+    /// request's heap has refused one of its strings.
+    answers: Answers,
+}
+
+/// The request's copy of one string a cache-bound compile made, beside
+/// the table's string it stands for, which a claim given back names.
+struct Standing {
+    interned: php_heap::Str,
+    copy: php_heap::Str,
+}
+
+impl<'a> PermanentStrings<'a> {
+    /// The home of a compile charged to `heap`.
+    fn new(names: &'a Strings, strings: &'a mut Strings, heap: CompileHeap<'a>) -> Self {
+        PermanentStrings {
+            names,
+            strings,
+            heap,
+            standing: Vec::new(),
+            answers: Answers::Every,
+        }
+    }
+
+    /// The string php's compile makes of `bytes` on the asking request's
+    /// heap (`zend_string_init`, the string `concat_function` makes),
+    /// asked of that heap before the table is: none where the compile is
+    /// the engine's, the empty string and one byte being the process's
+    /// (`ZSTR_CHAR`). The `Err` is the memory limit, and with it the
+    /// answer is the asking request's alone, which no cache holds; the
+    /// table is left as it stood.
+    fn charge(&mut self, bytes: &[u8]) -> Result<Option<php_heap::Str>, php_heap::Fatal> {
+        let CompileHeap::Request(heap) = &mut self.heap else {
+            return Ok(None);
+        };
+        if bytes.len() <= 1 {
+            return Ok(None);
+        }
+        heap.string(bytes).map(Some).inspect_err(|_| {
+            self.answers = Answers::Asker;
+        })
+    }
+
+    /// The request's `copy` of the string the table's `interned` stands
+    /// for: given back at once for a name startup interned, as
+    /// `zend_new_interned_string` releases the string it was handed for
+    /// the permanent one, and otherwise standing until the fold that made
+    /// it has read it ([`Intern::give_back`]) or the compile ends
+    /// ([`PermanentStrings::settle`]), as each string a miss makes stands
+    /// in its op array until opcache's persist. A string a published unit
+    /// holds stands too: opcache's buffer takes a string only as a unit
+    /// is persisted, where the engine's table also holds what an earlier
+    /// compile interned before it was done, so a fold refused once is
+    /// refused again.
+    fn stand(&mut self, copy: Option<php_heap::Str>, interned: Option<php_heap::Str>) {
+        let (CompileHeap::Request(heap), Some(copy)) = (&mut self.heap, copy) else {
+            return;
+        };
+        match interned {
+            Some(interned) => self.standing.push(Standing { interned, copy }),
+            None => heap.release_string(copy),
+        }
+    }
+
+    /// The compile ended: the request's copies given back, as opcache's
+    /// persist frees them once the unit is in its segment, and whom its
+    /// answer serves.
+    fn settle(self) -> Answers {
+        if let CompileHeap::Request(heap) = self.heap {
+            for standing in self.standing {
+                heap.release_string(standing.copy);
+            }
+        }
+        self.answers
+    }
 }
 
 impl Intern for PermanentStrings<'_> {
@@ -3963,9 +4090,28 @@ impl Intern for PermanentStrings<'_> {
         bytes: &[u8],
         valid_utf8: bool,
     ) -> Result<php_heap::Str, php_heap::Fatal> {
-        match self.names.find(bytes) {
-            Some(held) => Ok(held),
-            None => self.strings.intern_marked(bytes, valid_utf8),
+        let copy = self.charge(bytes)?;
+        if let Some(held) = self.names.find(bytes) {
+            self.stand(copy, None);
+            return Ok(held);
+        }
+        let interned = self.strings.intern_marked(bytes, valid_utf8);
+        self.stand(copy, interned.as_ref().ok().copied());
+        interned
+    }
+
+    /// The request's copy of a string the fold that made it has read,
+    /// given back, as `zend_eval_const_expr` frees an operand once the
+    /// value it made stands; the table's string stays, the unit's to share.
+    fn give_back(&mut self, made: php_heap::Made) {
+        let CompileHeap::Request(heap) = &mut self.heap else {
+            return;
+        };
+        let string = made.str();
+        let named = |standing: &Standing| standing.interned.is_same(string);
+        if let Some(at) = self.standing.iter().rposition(named) {
+            let standing = self.standing.swap_remove(at);
+            heap.release_string(standing.copy);
         }
     }
 
@@ -6103,13 +6249,13 @@ pub(crate) fn refused_program(req: &mut Request, refused: &CompileRefused, file:
 /// The refusal itself, past what was raised before it
 /// ([`refused_program`]).
 pub(crate) fn refusal_raised(req: &mut Request, refused: &CompileError, file: &[u8]) {
-    match (refused.stage, refused.thrown) {
+    match (refused.stage, refused.raise) {
         // Opened before anything compiled or ran: `zend_error` finds no
         // file compiling and none executing.
         (php_compile::Stage::Opening, _) => {
             req.end_in_compile_time(refused.level, &refused.message, b"Unknown", 0);
         }
-        (php_compile::Stage::Compiling, true) => {
+        (php_compile::Stage::Compiling, php_compile::Raise::Thrown) => {
             req.end_in_uncaught(
                 refused.level,
                 refused.message.as_bytes(),
@@ -6117,7 +6263,7 @@ pub(crate) fn refusal_raised(req: &mut Request, refused: &CompileError, file: &[
                 refused.line,
             );
         }
-        (php_compile::Stage::Compiling, false) => {
+        (php_compile::Stage::Compiling, php_compile::Raise::Fatal | php_compile::Raise::Unread) => {
             req.end_in_compile_time(refused.level, &refused.message, file, refused.line);
         }
     }

@@ -100,7 +100,7 @@ fn one_and_two_piece_interpolations_are_a_cast_and_a_fast_concat_and_the_rest_a_
                 message: "Constant expression contains invalid operations".into(),
                 line: 1,
                 raised: Vec::new(),
-                thrown: false,
+                raise: crate::Raise::Fatal,
                 stage: crate::Stage::Compiling,
                 declared: None,
                 keys_made: 0,

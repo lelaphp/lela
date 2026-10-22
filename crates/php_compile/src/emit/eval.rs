@@ -21,30 +21,63 @@
 
 use std::collections::HashMap;
 
-use php_heap::{Zval, ZvalType};
+use php_heap::{Made, Zval, ZvalType};
 use php_syntax::tree::{self, NodeId};
 use php_unit::Level;
 
 use super::{Emit, Fold, truth};
-use crate::CompileError;
+use crate::{CompileError, Raise};
 
 /// What a fold of a node answers where it has no value for it: the node
-/// is no constant, php's `zend_eval_const_expr` leaving it standing, or
+/// is no constant, php's `zend_eval_const_expr` leaving it standing; it
+/// is one this compiler cannot read yet ([`crate::Raise::Unread`]); or
 /// the compile refused. The first is the common answer, every variable
 /// and call an array expression holds, so it is a state of its own and no
 /// refusal: it allocates nothing, where a [`CompileError`] is a box
 /// (#3208). `why` is the sentence a compile that needed the constant
 /// refuses with ([`Emit::constant_value`]).
+///
+/// The first two leave the node unfolded, for the compile to meet as it
+/// stands; a refusal is the answer, whatever its level, since php's
+/// compile stops at it. A refusal is sorted into one of the two once,
+/// where it becomes an answer of a fold ([`From`]), and every fold
+/// matches the variant.
 #[derive(Debug)]
 pub(crate) enum Unfolded {
     NoConstant(&'static str),
+    Unread(CompileError),
     Refused(CompileError),
 }
 
 impl From<CompileError> for Unfolded {
     fn from(refused: CompileError) -> Unfolded {
-        Unfolded::Refused(refused)
+        match refused.raise {
+            Raise::Unread => Unfolded::Unread(refused),
+            Raise::Fatal | Raise::Thrown => Unfolded::Refused(refused),
+        }
     }
+}
+
+impl Unfolded {
+    /// What a node left unfolded because a child it waits on was answers:
+    /// the child's own answer where this compiler cannot read the child,
+    /// so the innermost cause is the one a compile that needs the value
+    /// refuses with, and `why` where the child is no constant.
+    fn of_node(self, why: &'static str) -> Unfolded {
+        match self {
+            Unfolded::NoConstant(_) => Unfolded::NoConstant(why),
+            Unfolded::Unread(_) | Unfolded::Refused(_) => self,
+        }
+    }
+}
+
+/// A child's fold as the node that waits on it reads it: the value, or
+/// the child left unfolded with why ([`Unfolded::NoConstant`] or
+/// [`Unfolded::Unread`]). A refusal is not one: [`Emit::child`] answers
+/// it as the node's own.
+enum Child {
+    Folded(Zval),
+    Unfolded(Unfolded),
 }
 
 /// What `zend_eval_const_expr` replaced a node of php's tree with: the
@@ -74,16 +107,91 @@ impl Rewrites {
             .get_or_insert_with(HashMap::new)
             .insert(expr, rewrite);
     }
+
+    /// The node's replacement gone with the node, as `zend_ast_destroy`
+    /// frees a child once the node over it stands as its value.
+    fn forget(&mut self, expr: tree::Expr) {
+        if let Some(rewrites) = &mut self.0 {
+            rewrites.remove(&expr);
+        }
+    }
+}
+
+/// The strings a fold made that the node it folded holds alone, each
+/// beside its node, the newest last: a node's own claim stands until the
+/// operator over it has folded, which gives it back as php's
+/// `zend_eval_const_expr` destroys the operand zvals once the value
+/// stands, or keeps it by dropping the claim. A claim is resolved by the
+/// operator that reads it ([`Emit::binary_constant`]), so the
+/// claims above a mark are only those of the operands being read.
+#[derive(Default)]
+pub(super) struct Claims(Vec<(tree::Expr, Made)>);
+
+/// Where the claims made from a point on start ([`Claims::mark`]).
+#[derive(Clone, Copy)]
+pub(super) struct Mark(usize);
+
+impl Claims {
+    /// Where the claims made from here on start.
+    pub(super) fn mark(&self) -> Mark {
+        Mark(self.0.len())
+    }
+
+    /// `made`, held by `node` alone.
+    pub(super) fn hold(&mut self, node: tree::Expr, made: Made) {
+        self.0.push((node, made));
+    }
+
+    /// The claims made since `mark`, taken out.
+    pub(super) fn since(&mut self, Mark(at): Mark) -> Vec<(tree::Expr, Made)> {
+        if at >= self.0.len() {
+            return Vec::new();
+        }
+        self.0.split_off(at)
+    }
 }
 
 impl Emit<'_> {
+    /// The operands of an operator that folded read for the last time,
+    /// `zend_eval_const_expr`'s `zend_ast_destroy` of its children once the
+    /// node is replaced by its value: the claims made while they were
+    /// read, `claims`, given back where they are an operand's own, the
+    /// node `operands` names under its parentheses, with what replaced it,
+    /// and every other kept, a string a deeper node made that an array or
+    /// a conditional holds among them. An operator that did not fold calls
+    /// none of this and keeps them all, since the compile reads its
+    /// operands again.
+    pub(super) fn consume(&mut self, claims: Vec<(tree::Expr, Made)>, operands: [tree::Expr; 2]) {
+        let peeled = operands.map(|operand| self.peel(operand));
+        for (node, made) in claims {
+            let Some(at) = peeled.iter().position(|operand| *operand == node) else {
+                continue;
+            };
+            let mut written = operands[at];
+            loop {
+                self.rewrites.forget(written);
+                if written == node {
+                    break;
+                }
+                match written {
+                    tree::Expr::ParenExpr(id) => match self.parsed.tree[id].inner {
+                        Some(inner) => written = inner,
+                        None => break,
+                    },
+                    _ => break,
+                }
+            }
+            self.strings.give_back(made);
+        }
+    }
+
     /// [`Self::constant_expr`] where a compile needs the value: a node
     /// that is no constant refused at the line the compile stands on, as
     /// a sentence of this compiler's own ([`Emit::fatal`]).
     pub(crate) fn constant_value(&mut self, expr: tree::Expr) -> Result<Zval, CompileError> {
         self.constant_expr(expr).map_err(|unfolded| match unfolded {
             Unfolded::NoConstant(why) => self.fatal(why),
-            Unfolded::Refused(refused) => refused,
+            Unfolded::Unread(refused) | Unfolded::Refused(refused) => refused,
         })
     }
 
@@ -138,8 +246,8 @@ impl Emit<'_> {
     /// not fold, since php evaluates every child before it reads either,
     /// and under a compile's fold the right one only once the left one
     /// has, as `zend_compile_expr` would have emitted the left one's
-    /// oplines. A compile error from either is the answer, the left one's
-    /// first.
+    /// oplines. A refusal from either is the answer, the left one's
+    /// first; a side left unfolded leaves the node unfolded.
     pub(super) fn constant_pair(
         &mut self,
         left: tree::Expr,
@@ -149,18 +257,23 @@ impl Emit<'_> {
             return Ok((self.constant_expr(left)?, self.constant_expr(right)?));
         }
         let left = match self.constant_expr(left) {
-            Err(Unfolded::Refused(refused)) if refused.level == Level::CompileError => {
-                return Err(refused.into());
-            }
+            Err(refused @ Unfolded::Refused(_)) => return Err(refused),
             left => left,
         };
-        let right = self.constant_expr(right);
-        match (left, right) {
-            (_, Err(Unfolded::Refused(refused))) if refused.level == Level::CompileError => {
-                Err(refused.into())
-            }
+        match (left, self.constant_expr(right)) {
+            (_, Err(refused @ Unfolded::Refused(_))) => Err(refused),
             (Ok(left), Ok(right)) => Ok((left, right)),
             (Err(unfolded), _) | (_, Err(unfolded)) => Err(unfolded),
+        }
+    }
+
+    /// [`Self::constant_expr`] over a child the node waits on: what it
+    /// folded to, or why it did not, and a refusal as the node's answer.
+    fn child(&mut self, expr: tree::Expr) -> Result<Child, Unfolded> {
+        match self.constant_expr(expr) {
+            Ok(value) => Ok(Child::Folded(value)),
+            Err(refused @ Unfolded::Refused(_)) => Err(refused),
+            Err(unfolded) => Ok(Child::Unfolded(unfolded)),
         }
     }
 
@@ -200,11 +313,12 @@ impl Emit<'_> {
         if self.fold == Fold::Compile {
             return Err(Unfolded::NoConstant("a `??` is no constant expression"));
         }
-        let Some(value) = self.constant_of(left)? else {
-            self.evaluate(right)?;
-            return Err(Unfolded::NoConstant(
-                "a `??` over a side that does not fold",
-            ));
+        let value = match self.child(left)? {
+            Child::Folded(value) => value,
+            Child::Unfolded(unfolded) => {
+                self.evaluate(right)?;
+                return Err(unfolded.of_node("a `??` over a side that does not fold"));
+            }
         };
         if value.kind() != ZvalType::Null {
             return Ok(value);
@@ -259,14 +373,15 @@ impl Emit<'_> {
         let node = &self.parsed.tree[id];
         let (cond, then, otherwise) = (node.cond, node.then, node.else_branch);
         let otherwise = self.required(otherwise, "a conditional")?;
-        let Some(value) = self.constant_of(cond)? else {
-            if let Some(then) = then {
-                self.evaluate(then)?;
+        let value = match self.child(cond)? {
+            Child::Folded(value) => value,
+            Child::Unfolded(unfolded) => {
+                if let Some(then) = then {
+                    self.evaluate(then)?;
+                }
+                self.evaluate(otherwise)?;
+                return Err(unfolded.of_node("a conditional over a condition that does not fold"));
             }
-            self.evaluate(otherwise)?;
-            return Err(Unfolded::NoConstant(
-                "a conditional over a condition that does not fold",
-            ));
         };
         if value.as_double().is_some_and(f64::is_nan) {
             self.raise(Level::Warning, "unexpected NAN value was coerced to bool");
@@ -282,13 +397,13 @@ impl Emit<'_> {
     /// child`: the child's fold where it folds, and otherwise the node
     /// replaced by the child, which the compile reads in its place.
     fn replaced_by(&mut self, node: tree::Expr, child: tree::Expr) -> Result<Zval, Unfolded> {
-        if let Some(value) = self.constant_of(child)? {
-            return Ok(value);
+        match self.child(child)? {
+            Child::Folded(value) => Ok(value),
+            Child::Unfolded(unfolded) => {
+                self.rewrites.record(node, Rewrite::Node(child));
+                Err(unfolded.of_node("a node replaced by a side that does not fold"))
+            }
         }
-        self.rewrites.record(node, Rewrite::Node(child));
-        Err(Unfolded::NoConstant(
-            "a node replaced by a side that does not fold",
-        ))
     }
 
     /// `zend_eval_const_expr`'s `ZEND_AST_AND` and `ZEND_AST_OR` arm
@@ -308,14 +423,14 @@ impl Emit<'_> {
         right: tree::Expr,
     ) -> Result<Zval, Unfolded> {
         if self.fold == Fold::EvalConstExpr {
-            let left = self.constant_of(left)?.map(truth);
-            let right = self.constant_of(right)?.map(truth);
+            let left = self.child(left)?;
+            let right = self.child(right)?;
             return match (left, right) {
-                (Some(held), _) if held == or => Ok(Zval::bool(held)),
-                (Some(_), Some(right)) => Ok(Zval::bool(right)),
-                _ => Err(Unfolded::NoConstant(
-                    "a short circuit over a side that does not fold",
-                )),
+                (Child::Folded(held), _) if truth(held) == or => Ok(Zval::bool(truth(held))),
+                (Child::Folded(_), Child::Folded(right)) => Ok(Zval::bool(truth(right))),
+                (Child::Unfolded(unfolded), _) | (Child::Folded(_), Child::Unfolded(unfolded)) => {
+                    Err(unfolded.of_node("a short circuit over a side that does not fold"))
+                }
             };
         }
         let held = truth(self.constant_expr(left)?);

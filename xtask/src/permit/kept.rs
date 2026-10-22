@@ -121,16 +121,14 @@ fn stands(checkout: &Path, kept: &Kept) -> Result<bool> {
 /// `git switch` or a merge leaves it: a change [`keep`] writes no record
 /// of.
 pub(super) fn at_head(checkout: &Path, path: &str) -> Result<bool> {
-    Ok(on_disk(&checkout.join(path)) == head_blob(checkout, path)?)
+    Ok(on_disk(&checkout.join(path)) == blob_at(checkout, "HEAD", path)?)
 }
 
-/// The blob of `path` at `HEAD`, `None` where `HEAD` has no such file.
-fn head_blob(checkout: &Path, path: &str) -> Result<Option<String>> {
-    let listing = git::git(checkout, &["ls-tree", "-r", "-z", "HEAD", "--", path], None)?;
-    Ok(listing
-        .split_once('\t')
-        .and_then(|(entry, _)| entry.rsplit(' ').next())
-        .map(str::to_owned))
+/// The blob of `path` at `commit`, `None` where `commit` has no such
+/// file.
+pub(super) fn blob_at(checkout: &Path, commit: &str, path: &str) -> Result<Option<String>> {
+    let blobs = git::blobs(checkout, commit, &[path])?;
+    Ok(blobs.into_iter().next().map(|(_, id)| id))
 }
 
 /// The record at `file`, `None` where there is none.

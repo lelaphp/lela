@@ -290,7 +290,8 @@ impl Request {
     /// A scope of the loop about to serve a frame php serves in the same
     /// `execute_ex` ([`StackLimit::nested`]): the limit moved below it
     /// by what the scope takes, until [`Self::stack_left`] puts it back;
-    /// none where the thread has no room for one.
+    /// none where the thread has no room for one, and on a fiber's
+    /// stack, whose limit cannot move.
     /// The charge is what a scope was measured to take, `first` before
     /// one was; the room left below it at least `room` and twice the
     /// charge, for what the scope's frames call, a native's call back

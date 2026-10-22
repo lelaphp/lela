@@ -74,10 +74,14 @@ pub struct StackLimit {
 /// frame that last entered the loop from a native.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Allowed {
-    /// A size `zend.max_allowed_stack_size` gave, `-1` among them, or a
-    /// fiber's stack: the loop's entry is held to the limit too.
+    /// A size `zend.max_allowed_stack_size` gave, `-1` among them: the
+    /// loop's entry is held to the limit too.
     #[default]
     Fixed,
+    /// A fiber's stack, its limit at its floor: held as
+    /// [`Allowed::Fixed`] is, and no scope of the loop is nested on it
+    /// ([`StackLimit::nested`]), since no limit below one can move.
+    Fiber,
     /// Detect: `span` bytes below the base, or below the frame a
     /// re-entry stands at, never past the floor; the loop's entry is
     /// held to the floor. `span` is the main thread's size, or the
@@ -202,7 +206,7 @@ impl StackLimit {
             base,
             limit,
             floor: limit,
-            allowed: Allowed::Fixed,
+            allowed: Allowed::Fiber,
         }
     }
 
@@ -245,13 +249,19 @@ impl StackLimit {
     /// the frame is what it was above it. The limit moves so whether its
     /// size was given or detected. What it was is handed back for
     /// [`left`](Self::left). None where the thread has less than `charge`
-    /// and `room` above its floor, or no known end, and the caller serves
-    /// the frame without moving it. With no limit there is none to move.
+    /// and `room` above its floor, or no known end, and on a fiber's
+    /// stack, whose limit is its floor ([`fiber`](Self::fiber)), so a
+    /// scope there would spend the fiber's own budget, which php's
+    /// `eval` leaves whole (#3192): the caller serves the frame without
+    /// moving it. With no limit there is none to move.
     #[inline]
     pub fn nested(&mut self, charge: usize, room: usize) -> Option<Reentered> {
         // A thread whose end is not known, the limit not worked out yet,
         // has no room to measure.
-        if self.floor == 0 || position() <= self.floor.saturating_add(charge).saturating_add(room) {
+        if self.allowed == Allowed::Fiber
+            || self.floor == 0
+            || position() <= self.floor.saturating_add(charge).saturating_add(room)
+        {
             return None;
         }
         let held = self.limit;
@@ -324,7 +334,7 @@ impl StackLimit {
             ).into(),
             line,
             raised: Vec::new(),
-            thrown: false,
+            raise: crate::Raise::Fatal,
             stage: crate::Stage::Compiling,
             declared: None,
             keys_made: 0,
@@ -352,7 +362,7 @@ impl StackLimit {
     #[must_use]
     pub fn entry_overflowed(&self) -> bool {
         let at = match self.allowed {
-            Allowed::Fixed => self.limit,
+            Allowed::Fixed | Allowed::Fiber => self.limit,
             Allowed::Detected { .. } => self.floor,
         };
         position() <= at
@@ -373,7 +383,7 @@ impl StackLimit {
     #[must_use]
     pub fn max_stack_size(&self) -> usize {
         match self.allowed {
-            Allowed::Fixed => self.base.saturating_sub(self.limit),
+            Allowed::Fixed | Allowed::Fiber => self.base.saturating_sub(self.limit),
             Allowed::Detected { span } => span,
         }
     }
@@ -541,6 +551,23 @@ mod tests {
         assert_eq!(stack.limit, 0x10_0000 + reserved);
         let wider = StackLimit::fiber(0x20_0000, 0x10_0000, 64 * 1024);
         assert_eq!(wider.limit, 0x10_0000 + 64 * 1024 * doubled);
+    }
+
+    /// On a fiber's stack no scope nests, however much of the stack is
+    /// left (#3192): its limit is its floor, so a scope's frames would
+    /// be the fiber's budget. Off a fiber the same stack nests one.
+    #[test]
+    fn a_fibers_stack_nests_no_scope() {
+        let here = position();
+        let mut fiber = StackLimit::fiber(here + 1024, here - 4 * 1024 * 1024, 0);
+        let limit = fiber.limit;
+        assert_eq!(fiber.nested(4096, 4096), None);
+        assert_eq!(fiber.limit, limit);
+        let mut fixed = StackLimit {
+            allowed: Allowed::Fixed,
+            ..fiber
+        };
+        assert!(fixed.nested(4096, 4096).is_some());
     }
 
     /// `Zend/tests/generators/bug71441.phpt`'s sum, two thousand `+`
