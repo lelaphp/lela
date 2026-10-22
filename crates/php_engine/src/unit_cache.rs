@@ -314,6 +314,35 @@ pub(crate) struct UnitCache {
     /// The build's identity, php's `zend_system_id`, which every unit
     /// the second level keeps carries and is read back by ([`Disk`]).
     pub(crate) build: [u8; BUILD],
+    /// The engine's interned strings, which the names a held file is
+    /// filed under join as opcache's buffer takes them ([`UnitCache::hold`],
+    /// [`UnitCache::add_key`]).
+    interned: crate::arena::Interned,
+}
+
+/// The keys of a unit's `function_table` and `class_table`: the lowered
+/// name of each function its compile bound and of each class it bound
+/// early, php's `lcname` (`zend_begin_func_decl`,
+/// `zend_compile_class_decl`). A class a `DECLARE_CLASS` binds is held
+/// under its runtime definition key, a constant of the unit already.
+fn table_keys(unit: &Unit) -> Vec<Vec<u8>> {
+    let mut early = vec![true; unit.classes.len()];
+    for (_, keyed) in &unit.runtime_keys {
+        if let Some(bound) = usize::try_from(*keyed)
+            .ok()
+            .and_then(|at| early.get_mut(at))
+        {
+            *bound = false;
+        }
+    }
+    let functions = unit.functions.iter().map(|(decl, _)| &decl.name);
+    let classes = (unit.classes.iter().zip(early))
+        .filter(|(_, early)| *early)
+        .map(|(decl, _)| &decl.name);
+    functions
+        .chain(classes)
+        .map(|name| name.0.to_ascii_lowercase())
+        .collect()
 }
 
 /// The files one epoch of the cache holds (design §5.14), what an
@@ -744,6 +773,7 @@ impl UnitCache {
         extended_info: bool,
         functions: &[php_unit::decl::FunctionDecl],
         classes: &[php_unit::decl::ClassDecl],
+        interned: crate::arena::Interned,
     ) -> UnitCache {
         let names = functions.iter().map(|decl| &*decl.name.0);
         let build = build_identity(
@@ -761,6 +791,7 @@ impl UnitCache {
             budget: OnceLock::new(),
             preloaded: OnceLock::new(),
             build,
+            interned,
         }
     }
 
@@ -802,7 +833,26 @@ impl UnitCache {
         if self.hash_full(files) {
             return;
         }
+        // `accel_new_interned_key`: the name as written is one of the
+        // buffer's strings from here, a unit's alone, as php persists
+        // no refusal.
+        if held.unit.is_ok() {
+            php_heap::Intern::intern(&mut *self.interned.strings(), &key.0).ok();
+        }
         files.held.alias(key, held);
+    }
+
+    /// The names `zend_accel_script_persist` interns beside the strings
+    /// of a unit it persists, once the unit is held under `path`: its
+    /// `filename`, the full path, and the keys of its `function_table`
+    /// and `class_table` ([`table_keys`]). A unit served without being
+    /// held is persisted by nothing, and names none.
+    pub(crate) fn persist_names(&self, path: &[u8], unit: &Unit) {
+        let mut strings = self.interned.strings();
+        php_heap::Intern::intern(&mut *strings, path).ok();
+        for key in table_keys(unit) {
+            php_heap::Intern::intern(&mut *strings, &key).ok();
+        }
     }
 
     /// The bounds the extension set, once: the first stands.
@@ -1111,6 +1161,7 @@ impl UnitCache {
             files.used.fetch_add(size, Ordering::Relaxed);
             if let Ok(unit) = &held.unit {
                 files.funcs.publish(unit);
+                self.persist_names(path, unit);
             }
         }
         held

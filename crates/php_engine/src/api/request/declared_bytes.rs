@@ -174,6 +174,10 @@ pub(super) struct ClassBlocks {
     /// `ce->interfaces`.
     interfaces: Option<Emalloc>,
     emalloced: Vec<Emalloc>,
+    /// Each case's constant expression, by the case's place among the
+    /// class's constants as its unit wrote them, until the case is
+    /// evaluated ([`Request::case_evaluated`]).
+    cases: Vec<(usize, Emalloc)>,
 }
 
 impl ClassBlocks {
@@ -194,6 +198,7 @@ impl ClassBlocks {
                 .into_iter()
                 .flatten(),
         );
+        emalloced.extend(self.cases.into_iter().map(|(_, block)| block));
         Blocks {
             emalloced,
             arrays: Vec::new(),
@@ -724,6 +729,7 @@ fn class(req: &mut Request, class: &ClassDecl) -> Result<ClassBlocks, Thrown> {
         statics: Slots::default(),
         interfaces: None,
         emalloced: Vec::new(),
+        cases: Vec::new(),
     };
     match lay_class(req, &mut blocks, class) {
         Ok(()) => Ok(blocks),
@@ -772,12 +778,11 @@ fn lay_class(req: &mut Request, blocks: &mut ClassBlocks, class: &ClassDecl) -> 
     // arena as its constant's value (`zend_const_expr_to_zval`'s
     // `zend_ast_copy`): the node and the class's and the case's names,
     // and the backing value's node where it has one.
-    for case in class.constants.iter().filter(|constant| constant.is_case) {
+    let cases = (class.constants.iter().enumerate()).filter(|(_, constant)| constant.is_case);
+    for (at, case) in cases {
         let backed = !matches!(case.value, ConstExpr::Null);
-        blocks.emalloced.push(Emalloc::new(
-            req,
-            CASE_AST + usize::from(backed) * AST_ZVAL,
-        )?);
+        let block = Emalloc::new(req, CASE_AST + usize::from(backed) * AST_ZVAL)?;
+        blocks.cases.push((at, block));
     }
     // `zend_compile_use_trait`'s `trait_names`, a `zend_class_name` a
     // trait, reallocated a `use` at a time; the names themselves are the
@@ -924,6 +929,62 @@ impl Request {
         }
         linked?;
         self.hold_trait_property_names(class)
+    }
+
+    /// The case `name` of `class` evaluated, which a unit the request
+    /// compiled for itself declared: its constant expression given back,
+    /// as `zval_update_constant_with_ctx` destroys the request's copy
+    /// once the case's object stands in its place. A cached file's is
+    /// opcache's and stays. So the first read of an `eval`'d enum's case
+    /// costs its object less its expression, and `cases()` and `from()`
+    /// give back each one they evaluate; a case read again costs what a
+    /// constant's read does:
+    ///
+    /// ```php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('enum E4: string { case A = "a"; case B = "b"; } enum E6 { case A; case B; case C; }');
+    /// m('$q = 1;');
+    /// echo m('$GLOBALS["x"] = E6::C;'), "\n";
+    /// echo m('$GLOBALS["x2"] = E6::C;'), "\n";
+    /// echo m('$GLOBALS["y"] = E4::from("b");'), "\n";
+    /// echo m('$GLOBALS["c"] = E6::cases();'), "\n";
+    /// enum F { case A; case B; }
+    /// echo m('$GLOBALS["f"] = F::B;'), "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 472
+    /// 32
+    /// 312
+    /// 136
+    /// 56
+    /// ```
+    pub(super) fn case_evaluated(&mut self, class: ClassId, name: &[u8]) {
+        if self.unit_strings.is_empty() {
+            return;
+        }
+        let Some((unit, at, constant)) = self.declared_row(class).and_then(|row| {
+            let written = row.unit.classes.get(row.at as usize)?;
+            let constant = (written.constants.iter()).position(|c| *c.name.0 == *name)?;
+            Some((
+                php_unit::PublishedUnit::as_ptr(&row.unit),
+                row.at as usize,
+                constant,
+            ))
+        }) else {
+            return;
+        };
+        let block = (self.unit_strings.class_slot(unit, at))
+            .and_then(Option::as_mut)
+            .and_then(|blocks| {
+                let place = blocks
+                    .cases
+                    .iter()
+                    .position(|(held, _)| *held == constant)?;
+                Some(blocks.cases.swap_remove(place).1)
+            });
+        if let Some(block) = block {
+            block.free(self);
+        }
     }
 
     /// The names `zend_declare_typed_property` makes for each property a

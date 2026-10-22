@@ -469,7 +469,12 @@ fn a_merge_landing_part_of_a_blocked_ticket_leaves_it_open_and_done_does_not_nam
 /// tickets, and the run's own, the last, set apart once it is held to be
 /// the run's (#2813).
 fn tickets_merged(root: &Path, tracker: &Tracker) -> (Vec<Reading>, Reading) {
-    let mut readings = merged(root, &manifest(), &tracker.gh(), "HEAD^1").unwrap();
+    tickets_merged_since(root, tracker, "HEAD^1")
+}
+
+/// [`tickets_merged`] over the merges since `since`.
+fn tickets_merged_since(root: &Path, tracker: &Tracker, since: &str) -> (Vec<Reading>, Reading) {
+    let mut readings = merged(root, &manifest(), &tracker.gh(), since).unwrap();
     let run = readings.pop().expect("the run's own reading");
     assert_eq!(
         (run.scope.as_str(), run.status),
@@ -567,6 +572,37 @@ fn a_merge_whose_tracker_fails_a_read_for_a_moment_still_closes_every_ticket_it_
     }
 }
 
+/// A pull request merged on GitHub (#3243): its subject, `Merge pull
+/// request #3167 from mitchellvanw/t3129` as b40d71039's, names the pull
+/// request, which `gh issue view` answers as `MERGED`. The ticket is the
+/// branch's: #29 closes, and the tracker is never asked for #30.
+#[test]
+fn a_pull_request_merged_on_github_names_its_branchs_ticket_and_not_its_own_number() {
+    let (root, tracker) = merged_with_ready(
+        "pull-request",
+        "t29",
+        "Merge pull request #30 from owner/t29",
+        &[(29, "nothing")],
+    );
+    let readings = tickets_merged(&root, &tracker).0;
+    let verdicts: Vec<(&str, Status)> = readings
+        .iter()
+        .map(|r| (r.scope.as_str(), r.status))
+        .collect();
+    assert_eq!(verdicts, [("29", Status::Pass)], "{readings:#?}");
+    let calls = tracker.calls();
+    assert!(
+        calls.iter().any(|c| c.starts_with("issue close 29 ")),
+        "#29 not closed: {calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.contains(" 30 ") || c.ends_with(" 30")),
+        "the pull request's number was asked for: {calls:?}"
+    );
+}
+
 /// A ticket the tracker will not answer for, every read asked again, is
 /// not passed over and does not take the run down (#2804): the tickets
 /// around it close, each close is recorded, and it is a failed reading
@@ -629,21 +665,39 @@ fn a_ticket_the_tracker_cannot_read_is_named_and_the_rest_of_the_merge_closes() 
     assert!(stranded(&root, &store, &head).unwrap().is_empty());
 }
 
-/// A merge made through GitHub names its pull request, `Merge pull
-/// request #30 from …`, and `gh issue view` answers a pull request too,
-/// in state `MERGED` (#3242; b40d71039 named #3167 so). The merge skips
-/// it with a reading that names it a pull request, which replaces the
-/// one that left it unclosed, so `done` names it no longer; an open
-/// issue the subject names is closed and a closed one passed over, as
-/// before, and nothing but the merge reads a pull request as a ticket.
+/// main's own history replayed (#3244): GitHub merged pull request #30
+/// as `Merge pull request #30 from owner/t29`, as b40d71039 merged #3167,
+/// and a builder then merged main into its branch as `Merge main into
+/// t31: the ftp wrapper (#30, #31, #32)`, as b519f1c89 named #3167 again.
+/// `gh issue view` answers a pull request too, in state `MERGED`. One run
+/// over both merges takes each case its one way: GitHub's own subject
+/// closes its branch's ticket, #29, and the other subject's #30 is
+/// skipped with a reading that names it a pull request, which replaces
+/// the one that left it unclosed, so `done` names it no longer; an open
+/// issue beside it is closed and a closed one passed over, as before, and
+/// nothing but the merge reads a pull request as a ticket.
 #[test]
 fn a_pull_request_a_merge_names_is_skipped_and_the_issues_beside_it_read_as_before() {
     let (root, tracker) = merged_with_ready(
         "pulled",
-        "t31",
-        "Merge pull request #30 from owner/t31 (#31, #32)",
-        &[(31, "nothing")],
+        "t29",
+        "Merge pull request #30 from owner/t29",
+        &[(29, "nothing")],
     );
+    let repo = Repo::at(&root);
+    repo.git(&["checkout", "-q", "-b", "t31"]);
+    repo.git(&["commit", "-q", "--allow-empty", "-m", "the ftp wrapper"]);
+    repo.git(&["config", "branch.t31.ready-31", "nothing"]);
+    repo.git(&["checkout", "-q", "main"]);
+    repo.git(&[
+        "merge",
+        "-q",
+        "--no-ff",
+        "t31",
+        "-m",
+        "Merge main into t31: the ftp wrapper (#30, #31, #32)",
+    ]);
+    tracker.with_issue(&with_body(31, TICKED));
     tracker.with_issue(&closed(32, TICKED));
     tracker.with_answer(
         30,
@@ -659,28 +713,36 @@ fn a_pull_request_a_merge_names_is_skipped_and_the_issues_beside_it_read_as_befo
     tracker.flaky(30, 0, 3);
     let dir = Tree::new("ticket-pulled-store").unwrap();
     let store = Store::at(dir.to_path_buf());
-    store.record(&tickets_merged(&root, &tracker).0).unwrap();
+    // Both merges, GitHub's and the builder's, from main before them.
+    let both = "HEAD~2";
+    store
+        .record(&tickets_merged_since(&root, &tracker, both).0)
+        .unwrap();
     let head = Repo::at(&root).git(&["rev-parse", "HEAD"]);
     assert_eq!(stranded(&root, &store, &head).unwrap().len(), 1);
 
-    let (readings, run) = tickets_merged(&root, &tracker);
+    let (readings, run) = tickets_merged_since(&root, &tracker, both);
     let verdicts: Vec<(&str, Status)> = readings
         .iter()
         .map(|r| (r.scope.as_str(), r.status))
         .collect();
     assert_eq!(
         verdicts,
-        [("31", Status::Pass), ("30", Status::Skip)],
+        [
+            ("31", Status::Pass),
+            ("29", Status::Pass),
+            ("30", Status::Skip)
+        ],
         "{readings:#?}"
     );
     assert!(
-        readings[1].message.contains("#30 is a pull request"),
+        readings[2].message.contains("#30 is a pull request"),
         "{}",
-        readings[1].message
+        readings[2].message
     );
     assert!(
         run.message.contains(
-            "name 2 ticket(s), 1 closed here, and skipped #30: pull request(s), not tickets"
+            "name 3 ticket(s), 2 closed here, and skipped #30: pull request(s), not tickets"
         ),
         "{}",
         run.message
@@ -688,13 +750,20 @@ fn a_pull_request_a_merge_names_is_skipped_and_the_issues_beside_it_read_as_befo
     assert_eq!(run.numbers["pulls"], 1.into());
     store.record(&readings).unwrap();
     assert!(stranded(&root, &store, &head).unwrap().is_empty());
+    let calls = tracker.calls();
+    for closes in [29, 31] {
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with(&format!("issue close {closes} "))),
+            "#{closes} not closed: {calls:?}"
+        );
+    }
     assert!(
-        !tracker
-            .calls()
+        !calls
             .iter()
             .any(|c| c.contains(" 30 ") || c.contains(" 32 ")),
-        "{:?}",
-        tracker.calls()
+        "{calls:?}"
     );
 }
 

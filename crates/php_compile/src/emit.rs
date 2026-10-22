@@ -499,6 +499,10 @@ pub(crate) struct Emit<'a> {
     /// `CG(active_class_entry)`: the class whose members are being
     /// compiled, and none outside a class body.
     active_class: Option<ActiveClass>,
+    /// The string the last fold a constant expression stands as was
+    /// read as ([`Self::folded`]), which a class constant's declaration
+    /// keeps ([`ActiveClass::strings`]).
+    folded_string: Option<Zval>,
     /// `CG(active_class_entry)->parent_name`: the name the class being
     /// compiled extends, which `parent` needs one of.
     active_parent: Option<Vec<u8>>,
@@ -1251,6 +1255,14 @@ impl Operated {
             Operated::Kept(value) => value,
         }
     }
+
+    /// The value, a view: a claim stays the holder's.
+    fn value(&self) -> Zval {
+        match self {
+            Operated::Made(made) => Zval::string(made.str()),
+            Operated::Kept(value) => *value,
+        }
+    }
 }
 
 /// What a magic constant folds to: `__LINE__`'s number, or the string
@@ -1285,6 +1297,11 @@ struct ActiveClass {
     /// parameter's type could not be held to the property's while the
     /// file compiles.
     hooked_variance_checks: u32,
+    /// The string each constant declared so far holds, by its place among
+    /// the declaration's constants, where its fold made one: the zval
+    /// `zend_declare_class_constant_ex` keeps, which a fold that reads
+    /// the constant shares (`ZVAL_COPY_OR_DUP`) rather than makes anew.
+    strings: Vec<(usize, Zval)>,
 }
 
 impl ActiveClass {
@@ -1298,7 +1315,15 @@ impl ActiveClass {
             anonymous,
             declaring: None,
             hooked_variance_checks: 0,
+            strings: Vec::new(),
         }
+    }
+
+    /// The string the constant at `at` holds, where its fold made one.
+    fn string_of(&self, at: usize) -> Option<Zval> {
+        (self.strings.iter())
+            .find(|(held, _)| *held == at)
+            .map(|(_, value)| *value)
     }
 }
 
@@ -1507,6 +1532,7 @@ impl<'a> Emit<'a> {
             namespacing: Namespacing::Global,
             imports: Imports::default(),
             active_class: None,
+            folded_string: None,
             active_parent: None,
             active_function: None,
             this_in_scope: false,
@@ -2086,22 +2112,14 @@ impl<'a> Emit<'a> {
         }
     }
 
-    /// [`Self::string_marked`] as a claim the one who asked holds alone
-    /// ([`Intern::intern_made`]).
+    /// [`Self::string`] as a claim the one who asked holds alone
+    /// ([`Intern::intern_made`]), of bytes known to be valid UTF-8 where
+    /// `utf8` says so ([`Intern::intern_marked`]): a number's text, a fold
+    /// of two marked strings.
     fn string_made(&mut self, bytes: &[u8], utf8: bool) -> Result<Made, CompileError> {
         self.strings
             .intern_made(bytes, utf8)
             .map_err(|fatal| self.fatal_of(fatal))
-    }
-
-    /// [`Self::string`] of bytes known to be valid UTF-8 where `utf8`
-    /// says so ([`Intern::intern_marked`]): a number's text, a fold of two
-    /// marked strings.
-    pub(crate) fn string_marked(&mut self, bytes: &[u8], utf8: bool) -> Result<Zval, CompileError> {
-        match self.strings.intern_marked(bytes, utf8) {
-            Ok(s) => Ok(Zval::string(s)),
-            Err(fatal) => Err(self.fatal_of(fatal)),
-        }
     }
 
     /// [`Self::constant_expr`] asked for a fold: the value where the
@@ -6131,14 +6149,16 @@ impl<'a> Emit<'a> {
     /// (`ZEND_AST_CONST_ENUM_INIT`) and never the scalar it is backed by;
     /// and no `ZEND_ACC_DEPRECATED` one, fetched as the program serves,
     /// where its deprecation is raised.
-    fn foldable_constant(&self, name: &[u8]) -> Option<&ConstExpr> {
+    /// The answer is the constant's place among the declaration's and
+    /// its value.
+    fn foldable_constant(&self, name: &[u8]) -> Option<(usize, &ConstExpr)> {
         if self.in_trait() {
             return None;
         }
-        (self.active_decl()?.constants.iter())
-            .find(|c| *c.name.0 == *name)
-            .filter(|c| !c.is_case && !attributes::is_deprecated(&c.attributes))
-            .map(|c| &c.value)
+        (self.active_decl()?.constants.iter().enumerate())
+            .find(|(_, c)| *c.name.0 == *name)
+            .filter(|(_, c)| !c.is_case && !attributes::is_deprecated(&c.attributes))
+            .map(|(at, c)| (at, &c.value))
     }
 
     /// `zend_compile_use_trait` (`Z/Zend/zend_compile.c:9137`) over each
@@ -6408,7 +6428,12 @@ impl<'a> Emit<'a> {
                 "Private constant {member} cannot be final as it is not visible to other classes"
             )));
         }
+        self.folded_string = None;
         let mut value = self.case_or_constant(backing, constant, name)?;
+        let made = self.folded_string.take().filter(|made| match &value {
+            ConstExpr::Str(bytes) => made.as_str().is_some_and(|s| s.bytes() == &**bytes),
+            _ => false,
+        });
         if let Some(ty) = &ty
             && let Err(kind) = valid_default(ty, &mut value)
         {
@@ -6442,6 +6467,11 @@ impl<'a> Emit<'a> {
         let Some(decl) = self.classes.get_mut(at) else {
             return Err(self.internal("a constant of a class the unit has not"));
         };
+        if let (Some(made), Some(active)) = (made, &mut self.active_class)
+            && active.at == at
+        {
+            active.strings.push((decl.constants.len(), made));
+        }
         decl.constants.push(ClassConstDecl {
             name: Name(constant.name.clone().into_boxed_slice()),
             visibility: constant.visibility,
@@ -8379,7 +8409,29 @@ impl<'a> Emit<'a> {
     /// [`Self::value_of`] as its reader holds it: a string made afresh
     /// for the read is the reader's alone ([`Operated::Made`]), which a
     /// fold gives back once the node over it stands, as php's operand
-    /// that `ZVAL_COPY_OR_DUP` copied out of the constant is freed there.
+    /// that `ZVAL_COPY_OR_DUP` duplicated is freed there. A constant of
+    /// the class being compiled is read as the string its fold made
+    /// ([`ActiveClass::strings`]), which `ZVAL_COPY_OR_DUP` shares, so
+    /// sixteen reads of a megabyte allocate nothing and the fold's peak
+    /// is its left operand and the string it joins. `A` is folded from a
+    /// short source, so the copy of the source php's scanner makes
+    /// (`zend_prepare_string_for_scanning`), which the engine does not,
+    /// is too small to hide a megabyte read afresh:
+    ///
+    /// ```php
+    /// $k = "    const B0 = 'abcdefgh';\n";
+    /// for ($i = 1; $i <= 16; $i++) { $k .= "    const B$i = self::B" . ($i - 1) . " . self::B" . ($i - 1) . ";\n"; }
+    /// $x = implode(' . ', array_fill(0, 16, 'self::A'));
+    /// $code = "class C {\n{$k}    const A = self::B16 . self::B16;\n    const X = $x;\n}";
+    /// $m = memory_get_usage();
+    /// memory_reset_peak_usage();
+    /// eval($code);
+    /// $peak = (memory_get_peak_usage() - $m) / 1e6;
+    /// echo abs($peak - 34.7) < 0.5 ? 'within 0.5 MB of 34.7 MB' : $peak, ' ', strlen(C::A), ' ', strlen(C::X), "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// within 0.5 MB of 34.7 MB 1048576 16777216
+    /// ```
     fn operated_of(&mut self, expr: &ConstExpr) -> Result<Option<Operated>, CompileError> {
         Ok(Some(match expr {
             ConstExpr::Null => Operated::Kept(Zval::null()),
@@ -8394,7 +8446,8 @@ impl<'a> Emit<'a> {
 
     /// A value `zend_eval_const_expr` folded, as the constant expression
     /// a declaration keeps.
-    fn folded(&self, folded: Zval) -> Result<ConstExpr, CompileError> {
+    fn folded(&mut self, folded: Zval) -> Result<ConstExpr, CompileError> {
+        self.folded_string = folded.as_str().map(|_| folded);
         folded_const_expr(folded).ok_or_else(|| self.unread("a constant expression"))
     }
 
@@ -14675,19 +14728,48 @@ impl<'a> Emit<'a> {
     /// are the one pair the guard lets through whatever they hold, a
     /// string that is no number refuses, and an operand the long
     /// conversion would not be exact over refuses too, since php will
-    /// not write the deprecation's answer into a constant.
+    /// not write the deprecation's answer into a constant. The string two
+    /// strings fold to and the text a number is joined as are given back
+    /// once read ([`Self::bitwise_made`], [`Self::stringified_made`]), so
+    /// neither joins opcache's buffer with the unit that folded them:
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/bitwise-' . getmypid() . '.php';
+    /// file_put_contents($f, '<?php class BW { const X = ("ab" | "cd") . "!"; const Y = 12 . "x"; const Z = 1.5 . "y"; }');
+    /// $n = fn () => opcache_get_status()['interned_strings_usage']['number_of_strings'];
+    /// $a = $n();
+    /// include $f;
+    /// echo $n() - $a, ' ', BW::X, ' ', BW::Y, ' ', BW::Z, "\n";
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 4 cf! 12x 1.5y
+    /// ```
     fn bitwise_fold(
         &mut self,
         op: BinaryOp,
         left: Zval,
         right: Zval,
     ) -> Result<Option<Zval>, CompileError> {
+        Ok(self.bitwise_made(op, left, right)?.map(Operated::kept))
+    }
+
+    /// [`Self::bitwise_fold`] as its reader holds it: the string two
+    /// strings fold to is the reader's alone ([`Operated::Made`]), which
+    /// the node over it gives back once it stands, as
+    /// `zend_eval_const_expr` destroys an operand's zval; a long is kept.
+    fn bitwise_made(
+        &mut self,
+        op: BinaryOp,
+        left: Zval,
+        right: Zval,
+    ) -> Result<Option<Operated>, CompileError> {
         if left.as_arr().is_some() || right.as_arr().is_some() {
             return Ok(None);
         }
         if let (Some(a), Some(b)) = (left.as_str(), right.as_str()) {
             let folded = bitwise_bytes(op, a.bytes(), b.bytes());
-            return Ok(Some(self.string(&folded)?));
+            return Ok(Some(Operated::Made(self.string_made(&folded, false)?)));
         }
         let (Some(a), Some(b)) = (number(left), number(right)) else {
             return Ok(None);
@@ -14695,7 +14777,7 @@ impl<'a> Emit<'a> {
         let (Some(a), Some(b)) = (long_compatible(a), long_compatible(b)) else {
             return Ok(None);
         };
-        Ok(Some(Zval::long(bitwise_longs(op, a, b))))
+        Ok(Some(Operated::Kept(Zval::long(bitwise_longs(op, a, b)))))
     }
 
     /// `zend_compile_binary_op`'s comparison arms and `zend_compile_greater`
@@ -14812,17 +14894,41 @@ impl<'a> Emit<'a> {
         if left.as_arr().is_some() || right.as_arr().is_some() {
             return Ok(None);
         }
-        let (Some(a), Some(b)) = (self.stringified(left)?, self.stringified(right)?) else {
-            return Ok(None);
+        let a = self.stringified_made(left)?;
+        let b = match self.stringified_made(right) {
+            Ok(b) => b,
+            Err(refused) => {
+                self.give_back_all([a, None]);
+                return Err(refused);
+            }
         };
-        let (Some(a), Some(b)) = (a.as_str(), b.as_str()) else {
-            return Ok(None);
+        let joined = match (&a, &b) {
+            (Some(a), Some(b)) => match (a.value().as_str(), b.value().as_str()) {
+                (Some(a), Some(b)) => {
+                    // `concat_function`'s `ZSTR_COPY_CONCAT_PROPERTIES_BOTH`,
+                    // then the interning that keeps a string the table
+                    // already holds as it is.
+                    let utf8 = a.is_valid_utf8() && b.is_valid_utf8();
+                    Some(self.string_made(&[a.bytes(), b.bytes()].concat(), utf8))
+                }
+                _ => None,
+            },
+            _ => None,
         };
-        let joined = [a.bytes(), b.bytes()].concat();
-        // `concat_function`'s `ZSTR_COPY_CONCAT_PROPERTIES_BOTH`, then the
-        // interning that keeps a string the table already holds as it is.
-        let utf8 = a.is_valid_utf8() && b.is_valid_utf8();
-        Ok(Some(self.string_made(&joined, utf8)?))
+        // The text an operand was converted to goes once the two are
+        // joined, as `concat_function` releases `op1_copy` and `op2_copy`.
+        self.give_back_all([a, b]);
+        joined.transpose()
+    }
+
+    /// Each claim among `operated` given back ([`Intern::give_back`]);
+    /// a kept value stays where it stands.
+    fn give_back_all<const N: usize>(&mut self, operated: [Option<Operated>; N]) {
+        for operated in operated.into_iter().flatten() {
+            if let Operated::Made(made) = operated {
+                self.strings.give_back(made);
+            }
+        }
     }
 
     /// A constant operand of a `.` as the string `zend_compile_binary_op`
@@ -14884,26 +14990,34 @@ impl<'a> Emit<'a> {
     /// NAN1NAN
     /// ```
     pub(crate) fn stringified(&mut self, value: Zval) -> Result<Option<Zval>, CompileError> {
+        Ok(self.stringified_made(value)?.map(Operated::kept))
+    }
+
+    /// [`Self::stringified`] as its reader holds it: a number's text is
+    /// made for the read alone ([`Operated::Made`]), as
+    /// `zval_get_string_func` makes the string `concat_function` frees
+    /// once the two are joined; a string, and the text of `null`,
+    /// `false` and `true`, which no allocation makes, are kept.
+    fn stringified_made(&mut self, value: Zval) -> Result<Option<Operated>, CompileError> {
         // `zend_long_to_str` and `zend_double_to_str` mark their text.
         if let Some(n) = value.as_long() {
-            return Ok(Some(self.string_marked(n.to_string().as_bytes(), true)?));
+            let text = self.string_made(n.to_string().as_bytes(), true)?;
+            return Ok(Some(Operated::Made(text)));
         }
         if let Some(d) = value.as_double() {
-            let text = self.string_marked(
-                double_to_string(d, self.precision, Exponent::Upper).as_bytes(),
-                true,
-            )?;
+            let text = double_to_string(d, self.precision, Exponent::Upper);
+            let text = self.string_made(text.as_bytes(), true)?;
             if d.is_nan() {
                 self.raise(Level::Warning, "unexpected NAN value was coerced to string");
             }
-            return Ok(Some(text));
+            return Ok(Some(Operated::Made(text)));
         }
-        match value.kind() {
-            ZvalType::String => Ok(Some(value)),
-            ZvalType::True => Ok(Some(self.string(b"1")?)),
-            ZvalType::Null | ZvalType::False => Ok(Some(self.string(b"")?)),
-            _ => Ok(None),
-        }
+        Ok(match value.kind() {
+            ZvalType::String => Some(Operated::Kept(value)),
+            ZvalType::True => Some(Operated::Kept(self.string(b"1")?)),
+            ZvalType::Null | ZvalType::False => Some(Operated::Kept(self.string(b"")?)),
+            _ => None,
+        })
     }
 
     /// `zend_try_ct_eval_cast` (`Z/Zend/zend_compile.c:12045`) over one
@@ -15989,7 +16103,12 @@ impl<'a> Emit<'a> {
         match TokenValue::of(self.parsed, Holder::Scalar(node), token) {
             Some(TokenValue::Int(n)) => Ok(Zval::long(n)),
             Some(TokenValue::Float(f)) => Ok(Zval::double(f)),
-            Some(TokenValue::Bytes(bytes)) => Ok(self.string(&bytes)?),
+            // The string php's scanner made, which `zend_ast_destroy`
+            // frees once a fold over it stands.
+            Some(TokenValue::Bytes(bytes)) => {
+                let made = self.string_made(&bytes, false)?;
+                Ok(self.claimed(tree::Expr::LiteralExpr(id), Operated::Made(made)))
+            }
             None => Err(self.unread("a literal").into()),
         }
     }
@@ -16005,7 +16124,8 @@ impl<'a> Emit<'a> {
                 bytes.extend(text);
             }
         }
-        Ok(self.string(&bytes)?)
+        let made = self.string_made(&bytes, false)?;
+        Ok(self.claimed(tree::Expr::NowdocExpr(id), Operated::Made(made)))
     }
 
     /// `ZEND_AST_CONST`: what [`Self::named_constant`] substitutes, and
@@ -16029,28 +16149,30 @@ impl<'a> Emit<'a> {
     /// compile that reads it leaves `CG(zend_lineno)` where it stood.
     fn string_constant(&mut self, expr: tree::Expr) -> Result<Zval, Unfolded> {
         let tree = &self.parsed.tree;
-        let parts: &[tree::StringPart] = match expr {
-            tree::Expr::InterpolatedStringExpr(id) => tree.list(tree[id].parts),
-            tree::Expr::HeredocExpr(id) => tree.list(tree[id].parts),
-            _ => &[],
+        let (parts, holder): (&[tree::StringPart], Holder<'_>) = match expr {
+            tree::Expr::InterpolatedStringExpr(id) => {
+                (tree.list(tree[id].parts), Holder::DoubleQuoted(&tree[id]))
+            }
+            tree::Expr::HeredocExpr(id) => (tree.list(tree[id].parts), Holder::Heredoc(&tree[id])),
+            _ => return Err(self.unread("a string").into()),
         };
-        if parts
-            .iter()
-            .any(|part| !matches!(part, tree::StringPart::LiteralStringPart(_)))
-        {
-            return Err(Unfolded::NoConstant(
-                "an interpolated string is no constant expression",
-            ));
+        let mut bytes = Vec::new();
+        for part in parts {
+            let tree::StringPart::LiteralStringPart(id) = *part else {
+                return Err(Unfolded::NoConstant(
+                    "an interpolated string is no constant expression",
+                ));
+            };
+            if let Some(TokenValue::Bytes(text)) =
+                (tree[id].text).and_then(|text| TokenValue::of(self.parsed, holder, text))
+            {
+                bytes.extend(text);
+            }
         }
-        let line = self.line;
-        let value = self.expr(expr);
-        self.line = line;
-        match value? {
-            Where::Constant(value) => Ok(value),
-            _ => Err(Unfolded::NoConstant(
-                "an interpolated string is no constant expression",
-            )),
-        }
+        // The one string the parser made of it, which `zend_ast_destroy`
+        // frees once a fold over it stands.
+        let made = self.string_made(&bytes, false)?;
+        Ok(self.claimed(expr, Operated::Made(made)))
     }
 
     /// `zend_try_ct_eval_unary_pm`: php folds unary `-` and `+` as the
@@ -16226,15 +16348,8 @@ impl<'a> Emit<'a> {
         right: tree::Expr,
     ) -> Result<Zval, Unfolded> {
         let mark = self.claims.mark();
-        let folded = self.constant_pair(left, right).and_then(|(a, b)| {
-            if op == BinaryOp::Concat {
-                let made = self.concat_made(a, b)?.ok_or(Unfolded::NoConstant(
-                    "a concatenation this compiler cannot fold yet",
-                ))?;
-                return Ok(Operated::Made(made));
-            }
-            self.constant_operands(op, a, b).map(Operated::Kept)
-        });
+        let folded =
+            (self.constant_pair(left, right)).and_then(|(a, b)| self.constant_operands(op, a, b));
         let claims = self.claims.since(mark);
         let folded = folded?;
         self.consume(claims, [left, right]);
@@ -16256,29 +16371,33 @@ impl<'a> Emit<'a> {
 
     /// The fold of [`Self::binary_constant`] over its two folded sides,
     /// out of the frame a left-nested chain stands in once per
-    /// operator.
+    /// operator: the string a concatenation or a bitwise operator over
+    /// two strings makes is the node's claim ([`Operated::Made`]), and
+    /// every other value is kept.
     fn constant_operands(
         &mut self,
         op: BinaryOp,
         left: Zval,
         right: Zval,
-    ) -> Result<Zval, Unfolded> {
+    ) -> Result<Operated, Unfolded> {
         if op == BinaryOp::Concat {
-            return self.concat_fold(left, right)?.ok_or(Unfolded::NoConstant(
+            let made = self.concat_made(left, right)?.ok_or(Unfolded::NoConstant(
                 "a concatenation this compiler cannot fold yet",
-            ));
+            ))?;
+            return Ok(Operated::Made(made));
         }
         if bitwise(op) {
             return self
-                .bitwise_fold(op, left, right)?
+                .bitwise_made(op, left, right)?
                 .ok_or(Unfolded::NoConstant(
                     "a bitwise operator this compiler cannot fold yet",
                 ));
         }
         if compares(op) {
-            return Ok(self.compare_fold(op, left, right));
+            return Ok(Operated::Kept(self.compare_fold(op, left, right)));
         }
         self.arithmetic_fold(op, left, right)?
+            .map(Operated::Kept)
             .ok_or(Unfolded::NoConstant(
                 "arithmetic this compiler cannot fold yet",
             ))
@@ -17794,9 +17913,17 @@ impl<'a> Emit<'a> {
         if !refers {
             return Ok(None);
         }
-        let Some(value) = self.foldable_constant(name).cloned() else {
+        let Some((at, value)) = self.foldable_constant(name) else {
             return Ok(None);
         };
+        let held = self
+            .active_class
+            .as_ref()
+            .and_then(|class| class.string_of(at));
+        if let Some(held) = held {
+            return Ok(Some(Operated::Kept(held)));
+        }
+        let value = value.clone();
         if let ConstExpr::ImmutableArray(array) = &value
             && !array_is_const(array.value())
         {
@@ -20318,6 +20445,7 @@ mod tests {
             namespacing: Namespacing::Unbracketed,
             imports: Imports::default(),
             active_class: None,
+            folded_string: None,
             active_parent: None,
             active_function: None,
             this_in_scope: false,
