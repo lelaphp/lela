@@ -152,6 +152,8 @@ Check: G5 under `force` with the time-limit and signal witnesses of §7; one `TR
 
 **65. Revision 65 (2026-10-22).** §4.3's sentence on the stepped forms and §4.6's `kernels!` listing state the call kernel and the held op arrays as #3147 and #3066 built them, under #3144's ruling and design §3.1: compiled code made each `DO_*CALL` through the step kernel, the generic dispatch, the observers' test and the `Stood`'s lookup of the frame's function, three crossings of about 25 ns per fib call where the interpreter serves the whole call in about 36 ns. `Kernel::Call` makes a `DO_*CALL` into the callee the trace follows by the handler's own inline path, `Request::enter_call`, and activates the callee over the op array the epoch holds (`tier::call_held`), stepping the opline as `step_held` does where an observer of the opcode is declared or the inline path refuses; a callee other than the one recorded, a `DO_FCALL` through a closure, is activated over its own op array and named so in the `Stood`, which the IP guard after the call holds. A kernel's `Stood` names the frame it leaves the interpreter in by its `EX(run_time_cache)` (`tier::running_func`), and a return's visit reads its caller's landing row the same way; the `ExitCtx`'s `enter::Holding` keeps the op array its kernels served last, so a kernel finds it again by one compare; a return's visit steps the `RETURN` over the op array the loop holds and enters the landing's trace out of one hold on the epoch. Measured by `/usr/bin/time -l` on php itself, fib(36) under `jit.compile=inline`: 23.6G cycles after revision 64, 15.9G after this, `opcache.jit=off` 7.0G; what is left is the crossing itself, which php's JIT does not make, and whether compiled code may write the frame is #3222's question for a person. This states what was built under the ruling on #3144 and design §3.1, reverses no ruling and no ADR, so there is no ADR; a person reads this row at the merge. Check: `grep -n 'pub fn call_held' crates/php_engine/src/tier.rs` and `grep -n 'struct Holding' crates/php_jit/src/enter.rs` each match; `a_call_another_function_answers_leaves_where_it_enters` passes.
 
+**NEXT. Revision NEXT (2026-10-22).** §2.2's interface block, §4's listing of the tier's state and §4.9's `visit` and `safepoint` sketches state the second half of the signature Mitchell ruled on #3144 (2026-10-21, a session), the tier's engine state resolved once, as #3227 built it. Revision 63 left this half waiting. `Tier` has an associated type, `State`: the tier's engine state, resolved once as the request is laid, and what its visits keep between them, as php's `JIT_G`. `Tier::lay` builds it, the engine binds that builder with the loop, and `tier::state` reads it at one place on the request with one type check and no lookup. `Nop`'s is `()`. php_jit's `JitRequest` is that state: `Shared` by `Arc`, with the recording exclusion and the submitted trace in `Cell`s. It is no longer a request state the tier's extension declares, and a visit reads none through `Request::engine` or `Request::state`. The ruling had the state handed to `safepoint`. That is not built: a site handler holds only the request, and a state borrowed from it cannot be passed beside `&mut Request` (E0502). The loop's holds are out of the handlers' reach without a dispatch parameter, which the shape #3227 adopted refuses, since one costs every handler a register (#3146, #3051). And an `Arc` per visit writes the engine's shared count. So the state is read where the request keeps it, and no handler's signature changes. Measured on the featured release build, fib(36) under `jit.compile=inline`, by `/usr/bin/time -l` on php, three pairs alternating with t3066's 5badf0e2c at load 5 to 7: 108.03G to 108.11G instructions before, 106.73G to 106.81G after; 15.05G to 15.29G cycles before, 14.99G to 15.02G after. In a release `sample`, `Request::state` fell from 49 samples to none, and `<T as Any>::type_id` from 21 to 6, the one check `tier::state` makes. This states what was built under the ruling on #3144. It reverses no ADR, so there is no ADR; a person reads this row at the merge. Check: `grep -n 'type State: Send' crates/php_engine/src/tier.rs` and `grep -n 'pub fn state<S: Any>' crates/php_engine/src/tier.rs` each match; `grep -n 'req.state::<\|req.engine::<' crates/php_jit/src/dispatch.rs` matches only `settled`'s read of the compiler.
+
 **If this is wrong, it is wrong in eight places.** First, that the write view of a dual-mapped arena costs nothing on the execute path: it does not touch it, but on aarch64 the cache maintenance after a write through the other alias is the part no source in the note settles (§4.4); on macOS aarch64, whose two views are one address, #2741's `mov; ret`, concurrent publish and reused-chunk tests pass (revision 19), and on Linux aarch64 the same tests through the two aliases are the check. Second, that every loop header and every return can be numbered by the compiler and found by its handler: a backward `JMP`, `JMPZ` or `JMPNZ` and a `RETURN*` leave `result` unused in php's op arrays (§3.1; verified at 8.5.9 in every handler body and every emission, `data/ops-extraction.md`), `ops.toml` says which field per opcode, and the compiler asserts that every backward jump it emits other than `FAST_RET` has a column and a header, so a disagreement is a compile-time failure on the first op array that has one. Third, that a `UnitView` can be owned rather than borrowed, so that `types::build` runs on a thread with no request (§4.1, §4.8); if engine-immutable classes turn out not to be shareable by `Arc`, the compile thread is kept and `build` alone moves back to the recording thread. Fourth, that the entry-frame slot on the VM stack is per fiber (§2.2). Fifth, that a 24-bit one-level id, a segmented read side borrowed with two loads per trace entry, and one worker do not measurably move G1, G4 or G6. Sixth, that one interrupt test per compiled loop iteration is enough and costs what php's does: a trace has at most one back-edge, the root's, and a recursive trace is bounded by `opcache.jit_max_recursive_calls`, so every trace without a loop runs a bounded number of oplines before the interpreter's own check; G2 carries the cost and the §7 witnesses the sufficiency. Seventh, that raising `Site::Entry` at activation is where php's counter fires: it is, for a function with no typed parameters, where php installs the counter after the `RECV*` run it skips (`zend_jit_trace.c:8983-9001`, `zend_execute.c:4426-4437`); for a typed function php's counter is on opline zero, before the `RECV` that may throw, so php counts such a call and this engine does not. That is no longer an open item but a `trace` row of the registry (§4.1), kept so that a throwing `RECV` is never inside a recording. Eighth, that all ones decodes as `blacklisted` in every future layout of the word: it is a one-line invariant of `policy` with a test, and the sealed word is the only bit pattern `php_engine` knows.
 
 ---
@@ -184,12 +186,20 @@ In `php_engine::tier`, on the tier face (§5.3):
 
 ```rust
 pub trait Tier: 'static {
+    /// The tier's state on a request: its engine state resolved once, as the request is laid, and
+    /// what its visits keep on the request between them, as php's tracing tier keeps `JIT_G`
+    /// (revision NEXT, #3144). Read at one place, `state`, with no lookup in the slot table the
+    /// extensions' states stand in. `Nop`'s is `()`, and so is every tier's that keeps none.
+    type State: Send + 'static;
     /// Called at three sites and nowhere else: in a backward `JMP*` handler with the jump
     /// target as `frame.opline` (Site::Loop); by the activation of a user frame, after its
     /// `RECV*` prologue has run without raising (Site::Entry); in `RETURN*` before the frame
     /// pops (Site::Return). `frame` is the frame the loop is executing, and `held` the op array
     /// the loop holds for it, which the site's word is read from (revision 63, #3144).
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: Held<'_>) -> Flow;
+    /// The state a request of the engine `started` is laid with, where the engine binds the tier's
+    /// loop; none where it binds `Nop`'s, and by default (revision NEXT).
+    fn lay(started: &Started<'_>) -> Option<Self::State> { None }
     /// Which of php's execution hooks the tier replaces, as phpdbg's does (design revision 58).
     const HOOKED: Hooked = Hooked::NONE;
     /// Whether the tier holds the frame `execute` enters until it executes it (revision 16).
@@ -231,8 +241,13 @@ pub enum Flow {
     Bail(Bailout),
 }
 
+/// The tier's state the request was laid with, where it is an `S`: one check of its type and no
+/// lookup (revision NEXT). None where the engine binds a loop that lays none, `Nop`'s.
+pub fn state<S: Any>(req: &Request) -> Option<&S>;
+
 pub struct Nop;
 impl Tier for Nop {
+    type State = ();
     #[inline(always)] fn safepoint(_: &mut Request, _: FrameRef, _: Site, _: Held<'_>) -> Flow { Flow::Continue }
 }
 
@@ -282,6 +297,8 @@ What a caller must know, beyond the signatures.
 *Invariants a `Resume` must satisfy.* The resume frame is on the VM stack (frames never move, design §5.6); `frame.opline` is an opline of that frame's op array; every slot the tier wrote holds a well-formed zval with its type byte; a pending exception, if any, is on `req` exactly as a kernel would have left it; and the request's interrupt flag, if set, has not been consumed, because the loop consumes it after the `Resume`. `execute` returns `Ok(())` exactly when the entry frame has returned; there is no second meaning.
 
 *Error modes.* `Bail` carries the same `Bailout` a kernel returns; there is no other error.
+
+*The tier's state.* A visit reads what the tier keeps, its engine state and what its visits leave each other, at one place the request is laid with, not from the slot table the extensions' states stand in, which a lookup hashes the type into, and not as an argument beside `req`. A site handler holds only the request, and a state borrowed from the request cannot be handed beside `&mut Request` (the compiler refuses it, E0502). The loop's own holds are out of the handlers' reach without a dispatch parameter, which costs every handler a register. And an `Arc` cloned per visit is an atomic write to the engine's shared count. So no handler and no dispatch signature carries it, and the five site handlers are as they were. The engine binds the tier's `lay` with its loop, so an engine that binds `Nop`'s lays nothing. The state is `Send` and the request's alone, so what a visit writes there it writes through `Cell`s, reading the whole state once through the request it holds shared (revision NEXT).
 
 *Cost.* `Nop` is one inlined function returning a constant; the branch on `Flow` folds; `Stepped` is a discriminant the loop already has in a register; `Site`'s payload is a `u32` the handler already loaded. The interrupt check after a `Resume` is one load per exit, never per opline.
 
@@ -441,21 +458,23 @@ The engine word. The design of record deleted r2 §5.14's feedback sentence (des
 
 ```rust
 impl Tier for Jit {
+    type State = JitRequest;                       // the tier's own, laid with the request (§2.2, revision NEXT)
     #[inline(always)]
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: Held<'_>) -> Flow { dispatch::safepoint(req, frame, site, held) }
+    fn lay(started: &Started<'_>) -> Option<JitRequest> { JitRequest::laid(started) }   // the engine state's `Shared`, once per request
     fn extension() -> Option<Extension> {
         Some(Extension::new("jit")
             .ini(policy::INI)                      // php's opcache.jit* names, plus jit.mode and jit.compile
-            .engine_state(JitEngine::new)          // fn(&StartupIni) -> JitEngine
-            .request_state::<JitRequest>())
+            .engine_state(JitEngine::new))         // fn(&StartupIni) -> JitEngine
     }
 }
 pub(crate) struct Shared { policy: Policy, backend: Option<Backend>, started: Box<[Note]>, told: AtomicBool, perf: Outputs }   // the table is the epoch's (§4.5, revision 27); no log (revision 34)
 pub(crate) struct JitEngine { compiler: Compiler, shared: Arc<Shared> }            // field order: the worker is joined before the table drops
-#[derive(Default)] pub(crate) struct JitRequest {
-    touched: BitSet,        // one bit per TraceId, first touch of the trace's map pointers
-    recording: bool,        // php's JIT_G(tracing): the request's recording exclusion, set and cleared by record's guard alone;
-                            // no fiber switch saves it (revision 30)
+pub struct JitRequest {                    // php's JIT_G, read by `tier::state` (revision NEXT)
+    shared: Arc<Shared>,                   // the engine state, resolved once as the request is laid
+    recording: Cell<bool>,                 // php's JIT_G(tracing): the request's recording exclusion, set and cleared by record's guard alone;
+                                           // no fiber switch saves it (revision 30)
+    submitted: Cell<Option<Submitted>>,    // the trace it submitted to the worker and has not reached (§4.8)
 }
 ```
 
@@ -790,7 +809,7 @@ pub(crate) fn visit(req: &mut Request, frame: FrameRef, word: &Word, holder: imp
     match policy::read(word) {
         State::Compiled(id) => Next::Enter(id),
         State::Cold => {
-            let policy = &req.engine::<JitEngine>().shared.policy;
+            let policy = &tier::state::<JitRequest>(req).shared.policy;              // the request's state, no lookup (revision NEXT)
             if policy::bump(word) >= policy.threshold(start) {
                 if record::recording(req) { return Next::Continue }                    // php bumps and does not trace while JIT_G(tracing) (revision 30)
                 match policy::claim(holder(), policy, start) { Some(claim) => hot(req, frame, claim), None => Next::Continue }
@@ -814,8 +833,8 @@ fn hot(req: &mut Request, frame: FrameRef, claim: Claim) -> Next {
 /// Outlined: only a `Bound::On` engine binds `Jit`'s loop and asks it (§4, revision 59).
 #[inline(never)]
 pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: Held<'_>) -> Flow {
-    let engine = req.engine::<JitEngine>();                                           // looked up once per asked safepoint
-    if engine.shared.policy.mode() == Mode::Off { return Flow::Continue }             // asked under Off all the same, no word is read or written
+    let state = tier::state::<JitRequest>(req);                                       // one type check, no lookup (§2.2, revision NEXT)
+    if state.shared.policy.mode() == Mode::Off { return Flow::Continue }              // asked under Off all the same, no word is read or written
     let at = site.idx();
     let holder = || Holder::Root { epoch: req.epoch(), func: held.func(), at };       // a hold on the request's epoch, as `Recorded.view`'s (§4.1)
     match visit(req, frame, held.word(req, at), holder, site.into()) {                // the word at the held op array's offset, no frame lookup
