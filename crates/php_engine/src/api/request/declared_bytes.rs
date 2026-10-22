@@ -64,11 +64,23 @@ const TRY_CATCH: usize = 16;
 const REFCOUNT: usize = 4;
 /// The size `zend_initialize_class_data` gives each of a class's tables.
 const CLASS_TABLE: u32 = 8;
-/// `zend_ast_size(4)` and the two `zend_ast_zval` children of an enum
-/// case's `ZEND_AST_CONST_ENUM_INIT`, its class's name and its own.
-const CASE_AST: usize = 88;
-/// `sizeof(zend_ast_zval)`, the node of a value written in place.
+/// `sizeof(zend_ast_ref)`, the counted header `zend_ast_copy` lays
+/// before the tree it copies.
+const AST_REF: usize = 8;
+/// `XtOffsetOf(zend_ast, child)`: a node's kind, attributes and line,
+/// before a pointer a child (`zend_ast_size`).
+const AST_HEAD: usize = 8;
+/// `XtOffsetOf(zend_ast_list, child)`: a list's head and its count,
+/// before a pointer an element (`zend_ast_list_size`).
+const AST_LIST_HEAD: usize = 16;
+/// `sizeof(zend_ast_zval)`, the node of a value written in place, and of
+/// a constant's name (`ZEND_AST_CONSTANT`).
 const AST_ZVAL: usize = 24;
+/// `sizeof(zend_ast_op_array)` and `sizeof(zend_ast_fcc)`, a closure's
+/// node and a first-class callable's.
+const AST_LEAF: usize = 16;
+/// `_ZSTR_HEADER_SIZE`, a `zend_string` before its bytes.
+const STRING_HEADER: usize = 24;
 /// `sizeof(zend_class_name)`, a name and its lowered form.
 const CLASS_NAME: usize = 16;
 /// `sizeof(zend_trait_precedence)`, with room for the one name of a
@@ -162,7 +174,8 @@ impl Laid {
 /// `properties_info`, `constants_table`), which its declarations fill
 /// and its link extends; its default property tables; `ce->interfaces`,
 /// which only its link lays; and what else its compile `emalloc`s, its
-/// `trait_names` and each case's constant expression.
+/// `trait_names` and the copy of each constant expression its constants
+/// and cases were written as.
 pub(super) struct ClassBlocks {
     functions: php_heap::EmbeddedArr,
     properties: php_heap::EmbeddedArr,
@@ -174,10 +187,11 @@ pub(super) struct ClassBlocks {
     /// `ce->interfaces`.
     interfaces: Option<Emalloc>,
     emalloced: Vec<Emalloc>,
-    /// Each case's constant expression, by the case's place among the
-    /// class's constants as its unit wrote them, until the case is
-    /// evaluated ([`Request::case_evaluated`]).
-    cases: Vec<(usize, Emalloc)>,
+    /// The blocks of each constant's and case's copied expression
+    /// ([`AstCopy`]), by the constant's place among the class's
+    /// constants as its unit wrote them, until the constant is evaluated
+    /// ([`Request::constant_evaluated`]).
+    copies: Vec<(usize, Emalloc)>,
 }
 
 impl ClassBlocks {
@@ -198,7 +212,7 @@ impl ClassBlocks {
                 .into_iter()
                 .flatten(),
         );
-        emalloced.extend(self.cases.into_iter().map(|(_, block)| block));
+        emalloced.extend(self.copies.into_iter().map(|(_, block)| block));
         Blocks {
             emalloced,
             arrays: Vec::new(),
@@ -698,6 +712,226 @@ pub(super) fn arg_infos(decl: &FunctionDecl, method: bool) -> usize {
     decl.parameters.len() + usize::from(returns)
 }
 
+/// What `zend_ast_copy` lays for one constant expression, as php's
+/// compile wrote its tree: one block of `zend_ast_tree_size` and the
+/// `zend_ast_ref` before it, and the strings its nodes hold
+/// (`ZVAL_COPY`), each a `zend_string` the scanner or the compile made
+/// for the tree, which stand as long as the copy does. A string of one
+/// byte is php's `ZSTR_CHAR` and the empty one `ZSTR_EMPTY`, interned
+/// and so no block; an enum case's own name and its class's are the
+/// constant's key and the class's name, which the node shares.
+///
+/// The six declarations and reads #3241 measured: an enum whose constant names a case, the enum
+/// without it, a class whose constant names one of a class not yet
+/// declared, and the first read of that constant, which gives the copy
+/// back; then a constant naming one by two longer names, an array still
+/// to evaluate, and a backed case whose value is an expression, each
+/// against its like written out; and a backed enum's first `from()`,
+/// which evaluates its constants with its cases and gives back their
+/// copies, so the constant's first read costs nothing:
+///
+/// ```php
+/// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+/// m('class W {}');
+/// echo m('enum S: string { case A = "abcdefgh"; case B = "x"; const K = self::B; }'), "\n";
+/// echo m('enum S2: string { case A = "abcdefgh"; case B = "x"; }'), "\n";
+/// echo m('class Q { const K = R::B; }'), "\n";
+/// echo m('class Q2 { }'), "\n";
+/// echo m('class R { const B = 1; }'), "\n";
+/// echo m('$GLOBALS["q"] = Q::K;'), "\n";
+/// $base = m('class C0 { const K = 1; }');
+/// echo m('class C1 { const K = Rlonger::Blonger; }') - $base, "\n";
+/// echo m('class C2 { const K = [1, "abcdefghij" . X1, Xlongname]; }') - $base, "\n";
+/// echo m('enum E4: int { case A = S::B === S::A ? 1 : 2; }') - m('enum E3: int { case A = 1; }'), "\n";
+/// m('enum S14: string { case A = "abcdefgh"; case B = "x"; const K = self::B; }');
+/// echo m('$GLOBALS["a"] = S14::from("x");'), ' ', m('$GLOBALS["b"] = S14::K;'), "\n";
+/// ```
+/// ```expect regime=jit-off exit=0
+/// 1864
+/// 1440
+/// 496
+/// 160
+/// 416
+/// 432
+/// 144
+/// 368
+/// 272
+/// 200 0
+/// ```
+struct AstCopy {
+    /// The tree's block, the header before it among its bytes.
+    tree: usize,
+    /// Each string a node holds, by its length.
+    strings: Vec<usize>,
+}
+
+impl AstCopy {
+    /// The `zend_ast_ref` alone, before the tree is laid after it.
+    const fn header() -> AstCopy {
+        AstCopy {
+            tree: AST_REF,
+            strings: Vec::new(),
+        }
+    }
+
+    /// The copy of a constant's expression.
+    fn of(expr: &ConstExpr) -> AstCopy {
+        let mut copy = AstCopy::header();
+        copy.expr(expr);
+        copy
+    }
+
+    /// The copy of a case's `ZEND_AST_CONST_ENUM_INIT`
+    /// (`zend_compile_enum_case`), its backing value the third child,
+    /// `NULL` for a pure case.
+    fn of_case(value: &ConstExpr) -> AstCopy {
+        let mut copy = AstCopy::header();
+        copy.enum_init();
+        if !matches!(value, ConstExpr::Null) {
+            copy.expr(value);
+        }
+        copy
+    }
+
+    /// A `ZEND_AST_CONST_ENUM_INIT` over its class's name and the case's,
+    /// which the class's name and the constant's key share, before its
+    /// value.
+    fn enum_init(&mut self) {
+        self.node(3);
+        self.tree += 2 * AST_ZVAL;
+    }
+
+    /// The blocks, the tree first, by their lengths.
+    fn blocks(&self) -> impl Iterator<Item = usize> + '_ {
+        std::iter::once(self.tree).chain(
+            self.strings
+                .iter()
+                .map(|len| (STRING_HEADER + len + 1).next_multiple_of(8)),
+        )
+    }
+
+    /// A node of `children` (`zend_ast_size`).
+    fn node(&mut self, children: usize) {
+        self.tree += AST_HEAD + children * POINTER;
+    }
+
+    /// A `ZEND_AST_ZVAL` of a string the tree holds.
+    fn string(&mut self, bytes: &[u8]) {
+        self.tree += AST_ZVAL;
+        if bytes.len() > 1 {
+            self.strings.push(bytes.len());
+        }
+    }
+
+    /// `zend_ast_tree_size` over `expr`'s node in php's tree, and the
+    /// strings it holds.
+    fn expr(&mut self, expr: &ConstExpr) {
+        match expr {
+            ConstExpr::Null
+            | ConstExpr::Bool(_)
+            | ConstExpr::Long { .. }
+            | ConstExpr::Double(_)
+            | ConstExpr::ImmutableArray(_) => self.tree += AST_ZVAL,
+            ConstExpr::Str(bytes) => self.string(bytes),
+            ConstExpr::Constant { name, .. } => self.string(&name.resolved().0),
+            ConstExpr::ClassConstant { class, name, .. } => {
+                self.node(2);
+                self.string(&class.0);
+                self.string(&name.0);
+            }
+            ConstExpr::DynamicClassConstant { class, name, .. } => {
+                self.node(2);
+                self.string(&class.0);
+                self.expr(name);
+            }
+            ConstExpr::EnumCase { .. } => self.enum_init(),
+            ConstExpr::ClassName { class, .. } => {
+                self.node(1);
+                self.string(&class.0);
+            }
+            ConstExpr::Unary { operand, .. }
+            | ConstExpr::Unpack(operand)
+            | ConstExpr::Cast { operand, .. } => {
+                self.node(1);
+                self.expr(operand);
+            }
+            ConstExpr::Binary { lhs, rhs, .. } => {
+                self.node(2);
+                self.expr(lhs);
+                self.expr(rhs);
+            }
+            ConstExpr::Dim { container, dim, .. } => {
+                self.node(2);
+                self.expr(container);
+                self.expr(dim);
+            }
+            ConstExpr::Prop { object, name, .. } => {
+                self.node(2);
+                self.expr(object);
+                self.expr(name);
+            }
+            ConstExpr::Conditional {
+                cond,
+                then,
+                otherwise,
+            } => {
+                self.node(3);
+                self.expr(cond);
+                if let Some(then) = then {
+                    self.expr(then);
+                }
+                self.expr(otherwise);
+            }
+            // `ZEND_AST_ARRAY`, a list of `ZEND_AST_ARRAY_ELEM`s, value
+            // then key, and of the `ZEND_AST_UNPACK` a spread stands as.
+            ConstExpr::Array { elements, .. } => {
+                self.tree += AST_LIST_HEAD + elements.len() * POINTER;
+                for (key, value) in elements {
+                    if !matches!(value, ConstExpr::Unpack(_)) {
+                        self.node(2);
+                    }
+                    self.expr(value);
+                    if let Some(key) = key {
+                        self.expr(key);
+                    }
+                }
+            }
+            // `ZEND_AST_NEW` over the class and the `ZEND_AST_ARG_LIST`,
+            // a named argument a `ZEND_AST_NAMED_ARG` over its name and
+            // its value.
+            ConstExpr::New {
+                class, arguments, ..
+            } => {
+                self.node(2);
+                self.string(&class.0);
+                self.tree += AST_LIST_HEAD + arguments.len() * POINTER;
+                for (name, value) in arguments {
+                    if let Some(name) = name {
+                        self.node(2);
+                        self.string(&name.0);
+                    }
+                    self.expr(value);
+                }
+            }
+            ConstExpr::Closure { .. } => self.tree += AST_LEAF,
+            // `ZEND_AST_CALL` and `ZEND_AST_STATIC_CALL` over the
+            // `ZEND_AST_CALLABLE_CONVERT` that stands for `...`.
+            ConstExpr::FunctionCallable { name, .. } => {
+                self.node(2);
+                self.string(&name.0);
+                self.tree += AST_LEAF;
+            }
+            ConstExpr::MethodCallable { class, method, .. } => {
+                self.node(3);
+                self.string(&class.0);
+                self.string(&method.0);
+                self.tree += AST_LEAF;
+            }
+            ConstExpr::ScopeClass => self.node(0),
+        }
+    }
+}
+
 /// What `zend_initialize_class_data` and the declarations of `class`
 /// leave on the heap beside its methods' op arrays: its methods', its
 /// properties' and its constants' tables, `zend_hash_init(…, 8, …)`
@@ -729,7 +963,7 @@ fn class(req: &mut Request, class: &ClassDecl) -> Result<ClassBlocks, Thrown> {
         statics: Slots::default(),
         interfaces: None,
         emalloced: Vec::new(),
-        cases: Vec::new(),
+        copies: Vec::new(),
     };
     match lay_class(req, &mut blocks, class) {
         Ok(()) => Ok(blocks),
@@ -774,15 +1008,21 @@ fn lay_class(req: &mut Request, blocks: &mut ClassBlocks, class: &ClassDecl) -> 
             table.count = count;
         }
     }
-    // Each case's `ZEND_AST_CONST_ENUM_INIT`, copied out of the compile's
-    // arena as its constant's value (`zend_const_expr_to_zval`'s
-    // `zend_ast_copy`): the node and the class's and the case's names,
-    // and the backing value's node where it has one.
-    let cases = (class.constants.iter().enumerate()).filter(|(_, constant)| constant.is_case);
-    for (at, case) in cases {
-        let backed = !matches!(case.value, ConstExpr::Null);
-        let block = Emalloc::new(req, CASE_AST + usize::from(backed) * AST_ZVAL)?;
-        blocks.cases.push((at, block));
+    // Each constant expression, copied out of the compile's arena as its
+    // constant's value (`zend_const_expr_to_zval`'s `zend_ast_copy`): a
+    // case's `ZEND_AST_CONST_ENUM_INIT`, and a constant's tree where the
+    // compile left one, which a value written out is not.
+    for (at, constant) in class.constants.iter().enumerate() {
+        let copy = if constant.is_case {
+            AstCopy::of_case(&constant.value)
+        } else if super::linking::is_literal(&constant.value) {
+            continue;
+        } else {
+            AstCopy::of(&constant.value)
+        };
+        for len in copy.blocks() {
+            blocks.copies.push((at, Emalloc::new(req, len)?));
+        }
     }
     // `zend_compile_use_trait`'s `trait_names`, a `zend_class_name` a
     // trait, reallocated a `use` at a time; the names themselves are the
@@ -972,10 +1212,11 @@ impl Request {
         self.hold_trait_property_names(class)
     }
 
-    /// The case `name` of `class` evaluated, which a unit the request
-    /// compiled for itself declared: its constant expression given back,
-    /// as `zval_update_constant_with_ctx` destroys the request's copy
-    /// once the case's object stands in its place. A cached file's is
+    /// The constant or case `name` of `class` evaluated, which a unit the
+    /// request compiled for itself declared: its constant expression's
+    /// copy given back ([`AstCopy`]), as `zval_update_constant_with_ctx`
+    /// destroys the request's copy once the value, or the case's object,
+    /// stands in its place. A cached file's is
     /// opcache's and stays. So the first read of an `eval`'d enum's case
     /// costs its object less its expression, and `cases()` and `from()`
     /// give back each one they evaluate; a case read again costs what a
@@ -999,7 +1240,7 @@ impl Request {
     /// 136
     /// 56
     /// ```
-    pub(super) fn case_evaluated(&mut self, class: ClassId, name: &[u8]) {
+    pub(super) fn constant_evaluated(&mut self, class: ClassId, name: &[u8]) {
         if self.unit_strings.is_empty() {
             return;
         }
@@ -1014,16 +1255,13 @@ impl Request {
         }) else {
             return;
         };
-        let block = (self.unit_strings.class_slot(unit, at))
-            .and_then(Option::as_mut)
-            .and_then(|blocks| {
-                let place = blocks
-                    .cases
-                    .iter()
-                    .position(|(held, _)| *held == constant)?;
-                Some(blocks.cases.swap_remove(place).1)
-            });
-        if let Some(block) = block {
+        let Some(blocks) = (self.unit_strings.class_slot(unit, at)).and_then(Option::as_mut) else {
+            return;
+        };
+        let copy: Vec<Emalloc> = (blocks.copies.extract_if(.., |(held, _)| *held == constant))
+            .map(|(_, block)| block)
+            .collect();
+        for block in copy {
             block.free(self);
         }
     }

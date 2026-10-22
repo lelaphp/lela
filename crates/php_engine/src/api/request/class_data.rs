@@ -578,6 +578,10 @@ impl Request {
             .row(declaring)
             .constants
             .push((name.into(), value));
+        // `zend_update_class_constant` destroys the expression once its
+        // value stands in its place, and keeps it where the evaluation
+        // or the type refused.
+        self.constant_evaluated(declaring, name);
         Ok(value)
     }
 
