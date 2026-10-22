@@ -67,7 +67,8 @@ pub use sampled::{
     Building, Sample, building, building_call, class_number, numbered_class, on_heap, sample,
 };
 pub use view::{
-    Epoch, FuncRef, Held, MapPtrRaw, UnitView, epoch, epoch_state, func, landing, running_func,
+    Epoch, FuncRef, Held, MapPtrRaw, UnitView, epoch, epoch_state, frame_cache, func, landing,
+    running_func,
 };
 
 pub use crate::api::values::ClassId;

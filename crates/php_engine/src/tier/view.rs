@@ -246,6 +246,22 @@ pub fn running_func(req: &Request, frame: FrameRef) -> Option<FuncRef> {
     func(req, frame)
 }
 
+/// The cache an activated user frame reads, `EX(run_time_cache)`, named
+/// as the op array whose own cache it is would be: the op array it runs
+/// where the cache is that op array's own, which a caller that holds that
+/// op array's row knows; a closure's or a trait method's copy's
+/// otherwise, which no op array's [`FuncRef`] names ([`running_func`]
+/// tells the two apart). None for a frame that is no activated user
+/// frame.
+#[must_use]
+pub fn frame_cache(req: &Request, frame: FrameRef) -> Option<FuncRef> {
+    let header = req.vm().at(frame)?;
+    header
+        .info
+        .user()
+        .then(|| FuncRef(header.runtime_cache().offset()))
+}
+
 /// The row of the op array whose own cache `header`'s frame reads, an
 /// activated user frame's, where the epoch holds one at that offset: none
 /// for a cache that is no op array's own (a closure's, a trait method's

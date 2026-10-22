@@ -314,6 +314,12 @@ impl<'a> Holding<'a> {
         }
     }
 
+    /// Whether the op array the engine numbers `func` is the one served
+    /// last, whose row the epoch holds at that offset.
+    fn served(&self, func: u32) -> bool {
+        self.last.get().is_some_and(|(last, _)| last == func)
+    }
+
     /// The op array the engine numbers `func`, as the epoch holds it.
     fn held(&self, func: u32) -> Option<Held<'a>> {
         if let Some((last, held)) = self.last.get()
@@ -423,7 +429,7 @@ fn step(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<Stood, Fatal> {
     let frame = standing(req, on.room, on.at)?;
     let (held, epoch) = held(on, func)?;
     let stepped = tier::step_held(req, frame, held, epoch)?;
-    stood(req, stepped, (frame, func))
+    stood(req, stepped, (frame, func), on.holding)
 }
 
 /// The `push_call` kernel (`jit-design.md` §4.3): the `INIT_*` at `at`
@@ -437,14 +443,14 @@ fn push_call(req: &mut Request, on: On<'_, '_>, func: u32, callee: u32) -> Resul
     let frame = standing(req, on.room, on.at)?;
     let (held, epoch) = held(on, func)?;
     if tier::primed(req, frame, held, on.at).and_then(engine_offset) != Some(callee) {
-        let refused = where_stood(req, frame, Some(func))?;
+        let refused = where_stood(req, frame, Some(func), on.holding)?;
         return Ok(Stood {
             call: ptr::null_mut(),
             ..refused
         });
     }
     let stepped = tier::step_held(req, frame, held, epoch)?;
-    stood(req, stepped, (frame, func))
+    stood(req, stepped, (frame, func), on.holding)
 }
 
 /// The `call` kernel (`jit-design.md` §5.2): the `DO_*CALL` at `at` of
@@ -459,7 +465,7 @@ fn call(req: &mut Request, on: On<'_, '_>, func: u32, callee: u32) -> Result<Sto
     let (entered, _) = held(on, callee)?;
     let (held, epoch) = held(on, func)?;
     let stepped = tier::call_held(req, frame, (held, entered), epoch)?;
-    stood(req, stepped, (frame, func))
+    stood(req, stepped, (frame, func), on.holding)
 }
 
 /// The op array the engine numbers `func`, as the epoch of the trace
@@ -513,11 +519,12 @@ fn stood(
     req: &mut Request,
     stepped: Stepped,
     (frame, func): (FrameRef, u32),
+    holding: Option<&Holding<'_>>,
 ) -> Result<Stood, Fatal> {
     match stepped {
-        Stepped::Same(at) => where_stood(req, at, (at == frame).then_some(func)),
+        Stepped::Same(at) => where_stood(req, at, (at == frame).then_some(func), holding),
         Stepped::Pushed(at) | Stepped::Popped(at) | Stepped::Moved(at) | Stepped::Threw(at) => {
-            where_stood(req, at, None)
+            where_stood(req, at, None, holding)
         }
         Stepped::Done => Err(internal(
             "a kernel's step ended the serving a trace runs in",
@@ -570,16 +577,23 @@ fn stood(
 /// ---- TRACE 5 compiled
 ///
 /// ```
-fn where_stood(req: &mut Request, frame: FrameRef, func: Option<u32>) -> Result<Stood, Fatal> {
+fn where_stood(
+    req: &mut Request,
+    frame: FrameRef,
+    func: Option<u32>,
+    holding: Option<&Holding<'_>>,
+) -> Result<Stood, Fatal> {
     let call = match tier::building_call(req).filter(|call| *call != frame) {
         Some(call) => tier::room(req, call).map_or(ptr::null_mut(), NonNull::as_ptr),
         None => ptr::null_mut(),
     };
     let room =
         tier::room(req, frame).ok_or_else(|| internal("a step went on in a frame with no room"))?;
-    let func = match func {
-        Some(func) => func,
-        None => tier::running_func(req, frame)
+    // A cache the hold served the op array of last is that op array's own.
+    let func = match (func, tier::frame_cache(req, frame).and_then(engine_offset)) {
+        (Some(func), _) => func,
+        (None, Some(cache)) if holding.is_some_and(|holding| holding.served(cache)) => cache,
+        (None, _) => tier::running_func(req, frame)
             .and_then(engine_offset)
             .unwrap_or(u32::MAX),
     };

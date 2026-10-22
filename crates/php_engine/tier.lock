@@ -100,6 +100,7 @@ tier::evaluate
 tier::evaluate_code
 tier::exit
 tier::frame
+tier::frame_cache
 tier::free_operands
 tier::func
 tier::interrupted
@@ -110,6 +111,7 @@ tier::on_heap
 tier::primed
 tier::restore
 tier::room
+tier::run_time_cache
 tier::running_func
 tier::safepoint_at
 tier::sample
