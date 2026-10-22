@@ -50,6 +50,7 @@ fn exit(link: Option<TraceId>) -> ExitSpec {
         stores: Vec::new(),
         known: Vec::new(),
         grows: Grows::Side,
+        layout: false,
         link,
     }
 }

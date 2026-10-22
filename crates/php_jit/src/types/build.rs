@@ -1692,7 +1692,10 @@ impl<'a> Builder<'a> {
                 Source::Interrupt(_) => self.interrupt(),
                 Source::End => self.end_draft.unwrap_or_else(|| self.start()),
             };
-            let spec = self.spec(&draft, &known);
+            let mut spec = self.spec(&draft, &known);
+            if let Source::Guard(at) = source {
+                spec.layout = matches!(self.guards[at].check, Check::Layout { .. });
+            }
             let func = (self.frames.get(usize::from(spec.frame.0)))
                 .ok_or_else(|| mismatch("an exit in no frame of the trace"))?
                 .func;
@@ -1764,15 +1767,22 @@ impl<'a> Builder<'a> {
     fn order(&self, closes: Closes) -> (Vec<(Order, Source)>, Option<End>) {
         let mut order: Vec<(Order, Source)> = Vec::new();
         for (at, guard) in self.guards.iter().enumerate() {
-            let key = match guard.at {
-                GuardAt::Entry => Order::Entry(self.guarded_slot(guard.check)),
-                GuardAt::Before(op) => Order::At(op, Stage::Before),
-                GuardAt::Within(op) => Order::At(op, Stage::Within),
+            let key = match (guard.at, guard.check) {
+                (GuardAt::Entry, check) => Order::Entry(self.guarded_slot(check)),
+                (GuardAt::Before(op), Check::Layout { .. }) => Order::At(op, Stage::Inside),
+                (GuardAt::Before(op), _) => Order::At(op, Stage::Before),
+                (GuardAt::Within(op), _) => Order::At(op, Stage::Within),
             };
             order.push((key, Source::Guard(at)));
         }
-        for (at, (op, ..)) in self.leaves.iter().enumerate() {
-            order.push((Order::At(*op, Stage::Leaves), Source::Leave(at)));
+        for (at, (op, leaves, _)) in self.leaves.iter().enumerate() {
+            let opens = matches!(leaves, Leaves::Unfinished)
+                && matches!(
+                    self.ops.get(op.index()),
+                    Some(Op::Line(line)) if line.opcode == Opcode::FetchDimR
+                );
+            let stage = if opens { Stage::Opens } else { Stage::Leaves };
+            order.push((Order::At(*op, stage), Source::Leave(at)));
         }
         let mut stubbed = None;
         match closes {
@@ -2192,6 +2202,7 @@ impl<'a> Builder<'a> {
             known,
             grows: draft.grows,
             link: draft.link,
+            layout: false,
         }
     }
 }
@@ -2415,11 +2426,19 @@ enum Order {
     End,
 }
 
-/// What happens at an op, in order: the guards before it, the guards it
-/// holds itself, then its own exit.
+/// What happens at an op, in the order php's code generator takes its
+/// exits: the guards before it on its operands' types; the exit an
+/// inline fetch opens its code with, php's `ZEND_JIT_EXIT_TO_VM` that
+/// `zend_jit_fetch_dim_read` takes first (`Z/ext/opcache/jit/zend_jit_ir.c:12540-12547`);
+/// the layout guard php takes inside the op's code, after it
+/// (`zend_jit_fetch_dimension_address_inner`, `:11966-11980`); the
+/// guards the op holds on what it computes; then any other exit of its
+/// own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Stage {
     Before,
+    Opens,
+    Inside,
     Within,
     Leaves,
 }

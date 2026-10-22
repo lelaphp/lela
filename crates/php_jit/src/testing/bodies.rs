@@ -147,6 +147,7 @@ pub(crate) fn landing(opline: u32, landing: Landing) -> ExitSpec {
         stores: Vec::new(),
         known: Vec::new(),
         grows: Grows::Side,
+        layout: false,
         link: None,
     }
 }

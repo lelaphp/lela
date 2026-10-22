@@ -228,6 +228,52 @@ fn spectralnorm_inlines_its_call() -> Result<(), String> {
     Ok(())
 }
 
+/// An inline fetch takes its exits in the order php's
+/// `zend_jit_fetch_dim_read` takes them: the exit its code opens with,
+/// php's `ZEND_JIT_EXIT_TO_VM`, before the guards on the element it
+/// copies, as `spectralnorm`'s `$u[$j]` at `0012` takes php's `exit_9`
+/// before `exit_10` and `exit_11` at `0013`; and a layout guard leaves
+/// through an exit of its own, php's `ZEND_JIT_EXIT_PACKED_GUARD`,
+/// which no type guard's place shares (#3203).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_fetch_takes_its_exits_in_phps_order() -> Result<(), String> {
+    let ir = golden(SPECTRALNORM)?;
+    let fetch = (ir.ops.iter()).find_map(|op| match op {
+        Op::Line(line) if line.opcode == Opcode::FetchDimR && line.form == Form::Inline => {
+            Some(line)
+        }
+        _ => None,
+    });
+    let fetch = fetch.ok_or("no inline FETCH_DIM_R")?;
+    let own = fetch.exit.ok_or("the fetch has no exit of its own")?;
+    let at = (ir.ops.iter()).position(|op| matches!(op, Op::Line(line) if line == fetch));
+    let at = OpId(u32::try_from(at.ok_or("no fetch")?).map_err(|e| e.to_string())?);
+    let elements: Vec<ExitId> = (ir.guards.iter())
+        .filter(|guard| guard.at == GuardAt::Within(at))
+        .map(|guard| guard.exit)
+        .collect();
+    assert_eq!(
+        elements,
+        [ExitId(own.0 + 1), ExitId(own.0 + 2)],
+        "{}",
+        dump::render(&ir)
+    );
+    let layouts: Vec<ExitId> = (ir.guards.iter())
+        .filter(|guard| matches!(guard.check, Check::Layout { .. }))
+        .map(|guard| guard.exit)
+        .collect();
+    let shared = (ir.guards.iter())
+        .any(|guard| !matches!(guard.check, Check::Layout { .. }) && layouts.contains(&guard.exit));
+    assert!(!layouts.is_empty() && !shared, "{}", dump::render(&ir));
+    assert!(
+        layouts
+            .iter()
+            .all(|exit| ir.exits[usize::from(exit.0)].layout)
+    );
+    Ok(())
+}
+
 /// The place of the first stepped opline of `opcode`.
 fn stepped(ir: &TraceIr, opcode: Opcode) -> Result<OpId, String> {
     ir.ops

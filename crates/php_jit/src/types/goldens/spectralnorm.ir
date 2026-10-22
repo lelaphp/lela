@@ -52,10 +52,10 @@ loop at 0, loop, interrupt exit 18
 0011 f1 RETURN #17 inline
      f0 back to #18
   -> #18 f0.T4 [double]
-0012 f0 FETCH_DIM_R #19, #3 inline leaves -> exit 16
+0012 f0 FETCH_DIM_R #19, #3 inline leaves -> exit 14
   -> #20 f0.T5 [double] reg
-  checks #20 double -> exit 14
-  checks #20 ref to double -> exit 15
+  checks #20 double -> exit 15
+  checks #20 ref to double -> exit 16
 0013 f0 MUL #18, #20 inline
   -> #21 f0.T6 [double] reg
 0014 f0 ASSIGN_OP #1, #21 inline
@@ -64,7 +64,7 @@ loop at 0, loop, interrupt exit 18
   -> #23 f0.CV5 [long] reg
   checks #23 long -> exit 17
 end: back to 0
-exit 0: f0 0016 plain
+exit 0: f0 0016 plain packed guard
 exit 1: f0 0016 plain f0.CV1:array
 exit 2: f0 0016 plain f0.CV1:array f0.CV3:long
 exit 3: f0 0016 plain f0.CV1:array f0.CV3:long f0.CV4:double
@@ -78,9 +78,9 @@ exit 10: f1 0006 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#10 f1.T3=#12 f1.CV0:long f1.C
 exit 11: f1 0007 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#10 f1.T4=#13 f1.CV0:long f1.CV1:long f1.CV2:long f1.T4:long
 exit 12: f1 0008 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#10 f1.T5=#14 f1.CV0:long f1.CV1:long f1.CV2:long f1.T5:long
 exit 13: f1 0009 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#10 f1.T6=#15 f1.CV0:long f1.CV1:long f1.CV2:long f1.T6:long
-exit 14: f0 0013 plain f0.CV4=#1 f0.CV5=#3 f0.T5=copied #20 f0.CV0:long f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long f0.T4:double
-exit 15: f0 0013 plain f0.CV4=#1 f0.CV5=#3 f0.T5=copied #20 through a reference f0.CV0:long f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long f0.T4:double
-exit 16: f0 0012 plain f0.CV4=#1 f0.CV5=#3 f0.CV0:long f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long f0.T4:double to vm
+exit 14: f0 0012 plain f0.CV4=#1 f0.CV5=#3 f0.CV0:long f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long f0.T4:double to vm
+exit 15: f0 0013 plain f0.CV4=#1 f0.CV5=#3 f0.T5=copied #20 f0.CV0:long f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long f0.T4:double
+exit 16: f0 0013 plain f0.CV4=#1 f0.CV5=#3 f0.T5=copied #20 through a reference f0.CV0:long f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long f0.T4:double
 exit 17: f0 0015 plain f0.CV4=#22 f0.CV5=#3 f0.CV0:long f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long
 exit 18: f0 0016 plain f0.CV4=#1 f0.CV5=#3 f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long to vm
 map 0: offset 2 slot 0

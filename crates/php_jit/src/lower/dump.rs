@@ -249,6 +249,9 @@ impl<'a> Dump<'a> {
         if exit.grows == Grows::Never {
             write!(text, " to vm")?;
         }
+        if exit.layout {
+            write!(text, " packed guard")?;
+        }
         if let Some(link) = exit.link {
             write!(text, " link {}", link.get())?;
         }

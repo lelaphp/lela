@@ -429,6 +429,11 @@ pub(crate) struct ExitSpec {
     pub(crate) known: Vec<Known>,
     pub(crate) grows: Grows,
     pub(crate) link: Option<TraceId>,
+    /// Whether a guard on an array's layout takes it, php's
+    /// `ZEND_JIT_EXIT_PACKED_GUARD` (`Z/ext/opcache/jit/zend_jit_ir.c:11967`,
+    /// `:13779`): a bit nothing reads but the reuse, so a layout guard
+    /// leaves through an exit of its own beside a type guard at its place.
+    pub(crate) layout: bool,
 }
 
 /// One slot whose type the trace knows where an exit leaves, php's
