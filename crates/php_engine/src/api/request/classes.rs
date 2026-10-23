@@ -2037,6 +2037,11 @@ impl Request {
             let class = class_in(shared, declared, aliases, class)?;
             defined_class_constant(tables, class_data, units, class, name)
         };
+        let decls = Seen {
+            tables,
+            declared,
+            aliases,
+        };
         let mut strings = super::memory::RequestStrings {
             shared,
             hold: self.shared_hold,
@@ -2045,7 +2050,7 @@ impl Request {
         };
         compile(
             &mut strings,
-            php_compile::RequestClasses::new(&holds),
+            php_compile::RequestClasses::new(&holds).seeing(&decls),
             php_compile::RequestConstants::new(&defined, &class_constants),
             &mut self.compile_arena,
             &self.cwd,
@@ -2532,6 +2537,22 @@ fn defined_class_constant(
             .class_decl(declaring)
             .is_some_and(|decl| decl.kind == ClassKind::Trait),
     })
+}
+
+/// The request's classes as a compile php runs without
+/// `ZEND_COMPILE_IGNORE_OTHER_FILES` reads their declarations
+/// ([`php_compile::RequestClasses::seeing`]).
+struct Seen<'r> {
+    tables: ClassLookup<'r>,
+    declared: &'r Keyed<Named>,
+    aliases: &'r Keyed<preload::Alias>,
+}
+
+impl php_compile::DeclaredClasses for Seen<'_> {
+    fn declared(&self, name: &[u8]) -> Option<&ClassDecl> {
+        let class = class_in(self.tables.shared, self.declared, self.aliases, name)?;
+        self.tables.class_decl(class)
+    }
 }
 
 /// The class `EG(class_table)` holds under `name`, any case: an engine's

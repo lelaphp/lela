@@ -7804,14 +7804,64 @@ impl<'a> Emit<'a> {
     }
 
     /// A class `CG(class_table)` holds while the file compiles: one the
-    /// engine declared, or one of the file's own that was bound early,
-    /// which a class declared by a `DECLARE_CLASS` is not yet.
+    /// engine declared, one of the file's own that was bound early,
+    /// which a class declared by a `DECLARE_CLASS` is not yet, and, for a
+    /// compile php runs without `ZEND_COMPILE_IGNORE_OTHER_FILES`, one
+    /// the request declared before it ([`crate::RequestClasses::declared`]).
+    ///
+    /// So an `eval`'d class whose parent the request declared is bound
+    /// early, as `zend_try_early_bind` binds it: it stands before the
+    /// `eval`'s code runs, and a name after it in the same compile reads
+    /// it, its constant substituted where the fetch and its cache slots
+    /// would stand (the file under the recipe's `TMPDIR`, so each
+    /// `eval`'s name has one length):
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3275-early-bound.inc';
+    /// file_put_contents($f, <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;');
+    /// m('class X9 { const K = 1; }');
+    /// echo m('class X10 extends X9 { const K = 1; } function f10() { return X10::K; }'), "\n";
+    /// eval('echo class_exists("X11", false) ? "bound" : "unbound", "\n"; class X11 extends X9 {}');
+    /// echo f10(), "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 640
+    /// bound
+    /// 1
+    /// ```
+    ///
+    /// A file the cache keeps is compiled under
+    /// `ZEND_COMPILE_IGNORE_OTHER_FILES`, so the same class there, its
+    /// parent declared by the file prepended to it, is left to its
+    /// `DECLARE_CLASS_DELAYED`, as opcache's dump of it reads in php:
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $p = $put('w3275-parent.inc', '<?php class X9 { const K = 1; }');
+    /// $c = $put('w3275-child.inc', '<?php class X10 extends X9 { const K = 2; } echo X10::K, "\n";');
+    /// $run = shell_exec(escapeshellarg(PHP_BINARY) . ' -n -d opcache.enable_cli=1 -d opcache.jit=off -d opcache.opt_debug_level=0x10000 -d auto_prepend_file=' . escapeshellarg($p) . ' ' . escapeshellarg($c) . ' 2>&1');
+    /// preg_match_all('/^(\d{4} DECLARE.*|\d)$/m', $run, $lines);
+    /// echo implode("\n", $lines[0]), "\n";
+    /// unlink($p);
+    /// unlink($c);
+    /// ```
+    /// ```expect process regime=jit-off
+    /// 0000 DECLARE_CLASS_DELAYED string("x10") string("x9")
+    /// 2
+    /// ```
     pub(super) fn bound_class(&self, name: &[u8]) -> Option<&ClassDecl> {
         if let Some((_, decl)) = self.known_classes.find(name) {
             return Some(decl);
         }
         (self.bound.iter().filter_map(|at| self.classes.get(*at)))
             .find(|decl| decl.name.0.eq_ignore_ascii_case(name))
+            .or_else(|| self.request_classes.declared(&name.to_ascii_lowercase()))
     }
 
     /// `ZEND_DECLARE_CLASS`, what php emits for a class it did not early
