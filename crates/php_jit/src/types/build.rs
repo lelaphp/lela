@@ -272,6 +272,9 @@ struct Builder<'a> {
     /// An inlined callee's untyped parameter, by the value it entered
     /// with, and the caller's register value it was sent from ([`Call::regs`]).
     held: HashMap<ValueId, ValueId>,
+    /// A caller's register value, by the first call into a frame above it
+    /// that stored it to its slot as it entered (`Op::Enter`'s `stores`).
+    spilled: HashMap<ValueId, OpId>,
     /// In a trace that does not loop, the guards held at the first read
     /// of what the root frame entered with, which php's allocator may
     /// load at entry ([`Builder::load_at_entry`]).
@@ -317,6 +320,7 @@ impl<'a> Builder<'a> {
                 _ => None,
             },
             held: HashMap::new(),
+            spilled: HashMap::new(),
             entry_reads: Vec::new(),
             sampled: HashMap::new(),
         };
@@ -1279,6 +1283,11 @@ impl<'a> Builder<'a> {
             if let (Declared::Untyped, Some(reg)) = (param.declared, sent.reg) {
                 self.held.insert(value, reg);
             }
+        }
+        for value in &stores {
+            // The first call that stores it: a caller makes calls one after
+            // another and stores the same value at each.
+            self.spilled.entry(*value).or_insert(idx);
         }
         self.ops.push(Op::Enter { frame, stores });
         Ok(())
@@ -2411,8 +2420,13 @@ impl<'a> Builder<'a> {
     /// zero, php's trace's first, as php's `zend_jit_trace_get_exit_point`
     /// reuses it for the test it takes at the trace's first opline
     /// (`Z/ext/opcache/jit/zend_jit_trace.c:7223`, the reuse at `:168-185`)
-    /// where the test stores no register, its stack map then php's
-    /// `RECV`'s.
+    /// where the test stores no register and lands as plainly, so that the
+    /// exit does what the test's own would. What the test knows of the
+    /// frame's types is not held to the `RECV`'s, as php's stack map
+    /// holds it, since this tier's `known` is not php's stack types there
+    /// and neither exit grows a side trace that would enter with it; the
+    /// pinned php reuses it on fib, `f(int $a, $b)` and
+    /// `f(int $a, $b, $c, int $d, $e = 1)` alike.
     fn reserve_recv_exits(&self, exits: &mut Exits) -> Result<Option<ExitId>, Abort> {
         if self.rec.start != Start::Enter {
             return Ok(None);
@@ -2424,21 +2438,20 @@ impl<'a> Builder<'a> {
         };
         let entry = (meta.code.safepoints.first().copied())
             .ok_or_else(|| mismatch("an entered op array with no entry safepoint"))?;
-        let mut reserved = None;
-        for _ in &recvs {
-            let id = exits.push(ExitSpec {
-                frame: Frame::ROOT,
-                opline: Some(entry),
-                landing: Landing::Plain,
-                stores: Vec::new(),
-                known: Vec::new(),
-                grows: Grows::Never,
-                link: None,
-                layout: false,
-            })?;
-            reserved.get_or_insert(id);
-        }
-        Ok(reserved.filter(|_| first == OplineIdx(0)))
+        let reserved = ExitSpec {
+            frame: Frame::ROOT,
+            opline: Some(entry),
+            landing: Landing::Plain,
+            stores: Vec::new(),
+            known: Vec::new(),
+            grows: Grows::Never,
+            link: None,
+            layout: false,
+        };
+        let ids = (recvs.iter())
+            .map(|_| exits.push(reserved.clone()))
+            .collect::<Result<Vec<ExitId>, Abort>>()?;
+        Ok(ids.first().copied().filter(|_| first == OplineIdx(0)))
     }
 
     /// What the slots hold at `point`; none at the trace's start, where
@@ -2924,23 +2937,16 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// The register values the calls into the trace's frames before
-    /// `point` stored to their slots as they entered (`Op::Enter`).
-    fn spilled_before(&self, point: Point) -> HashSet<ValueId> {
-        let ops = match point {
-            Point::Start => 0,
-            Point::Before(at) => at.index(),
-            Point::After(at) => at.index() + 1,
-            Point::End => self.ops.len(),
-        };
-        (self.ops.iter().take(ops))
-            .filter_map(|op| match op {
-                Op::Enter { stores, .. } => Some(stores),
-                _ => None,
-            })
-            .flatten()
-            .copied()
-            .collect()
+    /// Whether a call into a frame above `value`'s stored it to its slot
+    /// as it entered (`Op::Enter`) before `point`. A value lives in its
+    /// one slot, so the slot holds it from there on.
+    fn spilled_before(&self, value: ValueId, point: Point) -> bool {
+        self.spilled.get(&value).is_some_and(|&stored| match point {
+            Point::Start => false,
+            Point::Before(at) => stored < at,
+            Point::After(at) => stored <= at,
+            Point::End => true,
+        })
     }
 
     /// One exit's spec from its draft and the state it leaves, the values
@@ -2981,12 +2987,13 @@ impl<'a> Builder<'a> {
         // `stores`), so an exit from a frame above stores none of it, as
         // php's stack map, relative to the frame an exit lands in, holds
         // none of a caller's slots.
-        let spilled = self.spilled_before(draft.point);
         let mut stores: Vec<Store> = snapshot
             .values
             .iter()
             .filter(|(_, value)| self.val(*value).home == Home::Register)
-            .filter(|(slot, value)| slot.frame == draft.frame || !spilled.contains(value))
+            .filter(|(slot, value)| {
+                slot.frame == draft.frame || !self.spilled_before(*value, draft.point)
+            })
             .map(|(slot, value)| Store {
                 slot: *slot,
                 from: Stored::Value(*value),

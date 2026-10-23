@@ -1628,13 +1628,12 @@ fn an_entered_trace_numbers_phps_recv_exits_ahead_of_its_own() -> Result<(), Str
             Interrupt::Exit(exit) => exit,
             Interrupt::Stub(_) => return Err(format!("a stub: {rendered}")),
         };
+        // The test's own exit, where it takes one, is numbered last.
+        let last = u16::try_from(ir.exits.len().saturating_sub(1)).map_err(|e| e.to_string())?;
+        let interrupt_php = if reuses { ExitId(0) } else { ExitId(last) };
         assert_eq!(
-            (
-                reserved.min(recvs + 1),
-                directions.first().map(|exit| exit.0),
-                interrupt == ExitId(0)
-            ),
-            (recvs, Some(direction), reuses),
+            (reserved, directions.first().map(|exit| exit.0), interrupt),
+            (recvs, Some(direction), interrupt_php),
             "{program}\n{rendered}"
         );
         assert!(

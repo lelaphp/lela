@@ -343,6 +343,14 @@ pub(super) struct Param {
     pub(super) cv: u32,
     pub(super) number: u32,
     pub(super) declared: Declared,
+    /// `RECV`, `RECV_INIT` or `RECV_VARIADIC`.
+    pub(super) opcode: Opcode,
+    /// Whether its declaration names a type, php's
+    /// `ZEND_TYPE_IS_SET(arg_info->type)`: where the view does not list
+    /// it, a `RECV`'s mask other than `MAY_BE_ANY`, which reads `mixed`
+    /// and a `RECV_INIT`'s or a `RECV_VARIADIC`'s type, which no mask
+    /// names, as none.
+    pub(super) typed: bool,
 }
 
 /// What a parameter's declaration says it holds, php's `arg_info` as
@@ -384,10 +392,16 @@ pub(super) fn params(code: &OpArray, declared: Option<&[Parameter]>) -> Vec<Para
                     _ => Declared::Untyped,
                 },
             };
+            let typed = match parameter {
+                Some(p) => p.ty.is_some(),
+                None => op.opcode == Opcode::Recv && op.op2 != Type::MAY_BE_ANY,
+            };
             Some(Param {
                 cv: op.out,
                 number: op.op1,
                 declared,
+                opcode: op.opcode,
+                typed,
             })
         })
         .collect()
@@ -400,28 +414,17 @@ pub(super) fn params(code: &OpArray, declared: Option<&[Parameter]>) -> Vec<Para
 /// `ZEND_ACC_HAS_TYPE_HINTS`, without which php's entry trace starts past
 /// the prologue (`zend_jit_setup_hot_trace_counters`,
 /// `Z/ext/opcache/jit/zend_jit_trace.c:8983-9001`); and then one per
-/// `RECV` whose parameter has a type or that no `RECV` follows. A
-/// `RECV_INIT` and a `RECV_VARIADIC` take none. A parameter the view
-/// does not list has a type where its `RECV`'s mask is not `MAY_BE_ANY`.
+/// `RECV` whose parameter has a type ([`Param::typed`]) or that no `RECV`
+/// follows. A `RECV_INIT` and a `RECV_VARIADIC` take none.
 pub(super) fn recv_exits(code: &OpArray, declared: Option<&[Parameter]>) -> Vec<OplineIdx> {
-    let prologue = (code.oplines.iter()).take_while(|op| {
-        matches!(
-            op.opcode,
-            Opcode::Recv | Opcode::RecvInit | Opcode::RecvVariadic
-        )
-    });
-    let typed = |op: &Opline| match declared {
-        Some(list) => (list.get(op.op1.saturating_sub(1) as usize)).is_some_and(|p| p.ty.is_some()),
-        None => op.opcode == Opcode::Recv && op.op2 != Type::MAY_BE_ANY,
-    };
-    if !prologue.clone().any(typed) {
+    let params = params(code, declared);
+    if !params.iter().any(|param| param.typed) {
         return Vec::new();
     }
-    (prologue.enumerate())
-        .filter(|(at, op)| {
-            let next = code.oplines.get(at + 1).map(|next| next.opcode);
-            op.opcode == Opcode::Recv && (typed(op) || next != Some(Opcode::Recv))
-        })
+    let recv = |param: Option<&Param>| param.is_some_and(|param| param.opcode == Opcode::Recv);
+    // `params` are the prologue's oplines from the first, one each.
+    (params.iter().enumerate())
+        .filter(|&(at, param)| recv(Some(param)) && (param.typed || !recv(params.get(at + 1))))
         .filter_map(|(at, _)| u32::try_from(at).ok().map(OplineIdx))
         .collect()
 }
