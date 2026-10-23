@@ -570,9 +570,11 @@ impl Request {
     /// as evaluated in `declaring`'s scope, held to its type, and kept.
     /// One more owner is the caller's. A value its type refuses is given
     /// up with the `TypeError`, as `zend_update_class_constant` gives up
-    /// `tmp` (`Z/Zend/zend_API.c:1504`), and nothing is kept. In the
-    /// table of `holder`
-    /// ([`constant_holder`]): the value kept in its row, else
+    /// `tmp` (`Z/Zend/zend_API.c:1504`), and nothing is kept.
+    ///
+    /// The row is read in the table of `holder` ([`constant_holder`]),
+    /// `declaring` itself for a constant read where it is declared: the
+    /// value kept in its row, else
     /// `declaring`'s expression evaluated in `declaring`'s scope and kept
     /// there; the expression's copy given back only where `holder` is
     /// the declaring class.
@@ -708,7 +710,7 @@ impl Request {
             .class_constant_of(class, name)
             .map(|(declaring, constant)| (declaring, constant.is_case))
         else {
-            return Err(self.undefined_case(class, name));
+            return Err(self.undefined_class_constant(class, name));
         };
         self.update_enum_constants(declaring)?;
         if is_case {
@@ -765,32 +767,6 @@ impl Request {
         evaluated
     }
 
-    /// `object_properties_init`: each declared instance property's slot
-    /// takes its default, `zend_update_class_constants` having evaluated
-    /// the expression it was written as in the scope of the class that
-    /// declared it (`ce->properties_info_table[i]->ce`); a property with
-    /// no default is `null` where it is untyped and stays uninitialised
-    /// where it is typed, as `zend_declare_typed_property` leaves it.
-    /// The slots are [`Request::placed_properties`]', so an inherited
-    /// property takes the parent's default in the parent's slot.
-    ///
-    /// The defaults are evaluated before the object is made, as
-    /// `zend_update_class_constants` runs inside `object_init_ex` before
-    /// `zend_objects_new`, so an object a default makes, an enum's case
-    /// among them, takes its number in the object store before the object being made does.
-    ///
-    /// ```php
-    /// class A { public $p = E::V; }
-    /// enum E { case V; }
-    /// var_dump(new A);
-    /// ```
-    /// ```expect
-    /// object(A)#2 (1) {
-    ///   ["p"]=>
-    ///   enum(E::V)
-    /// }
-    /// ```
-    ///
     /// The default properties table of `class` once the class is
     /// updated, each slot's value with one more owner the object's, as
     /// `_object_properties_init` copies the table (`ZVAL_COPY_PROP`).
@@ -876,6 +852,32 @@ impl Request {
     /// array(1) packed interned {
     ///   [0]=>
     ///   string(1) "x" interned
+    /// }
+    /// ```
+    ///
+    /// What `object_properties_init` lays from it: each declared instance property's slot
+    /// takes its default, `zend_update_class_constants` having evaluated
+    /// the expression it was written as in the scope of the class that
+    /// declared it (`ce->properties_info_table[i]->ce`); a property with
+    /// no default is `null` where it is untyped and stays uninitialised
+    /// where it is typed, as `zend_declare_typed_property` leaves it.
+    /// The slots are [`Request::placed_properties`]', so an inherited
+    /// property takes the parent's default in the parent's slot.
+    ///
+    /// The defaults are evaluated before the object is made, as
+    /// `zend_update_class_constants` runs inside `object_init_ex` before
+    /// `zend_objects_new`, so an object a default makes, an enum's case
+    /// among them, takes its number in the object store before the object being made does.
+    ///
+    /// ```php
+    /// class A { public $p = E::V; }
+    /// enum E { case V; }
+    /// var_dump(new A);
+    /// ```
+    /// ```expect
+    /// object(A)#2 (1) {
+    ///   ["p"]=>
+    ///   enum(E::V)
     /// }
     /// ```
     pub(super) fn default_properties(

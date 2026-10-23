@@ -1602,7 +1602,9 @@ fn dtor_storage(req: &mut Request, object: PhpObject) {
         return;
     }
     drop_values(req, object);
-    // `clear_link_to_root` and `clear_link_to_leaf` clear the one link.
+    // php's `clear_link_to_root` under a parent and `clear_link_to_leaf`
+    // at a root are the same two writes: the link and its far end's
+    // cleared.
     clear_link_to_leaf(req, object);
     if let Some(above) = parent(req, object) {
         remove_child(req, above, object);

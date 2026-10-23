@@ -1708,6 +1708,8 @@ impl Shared {
         use crate::unit_cache::Optimizer;
         let level = self
             .ini_default(b"opcache.optimization_level")
+            // The one reading of a whole-number entry, without the
+            // sentence `Request::ini_quantity_warn` raises.
             .map_or(0, |value| crate::ini_quantity::parse(value).0);
         if level & Optimizer::PASS_11 == 0 {
             return Optimizer::Off;

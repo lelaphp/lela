@@ -63,7 +63,7 @@ const CHARSET_MAP: [(&[u8], Charset); 33] = [
 ];
 
 /// One test of a byte of a double-byte charset ([`Charset::next_char`]).
-type Test = fn(u32) -> bool;
+type ByteTest = fn(u32) -> bool;
 
 impl Charset {
     /// The charset `charset_map` names `name` by, ignoring case, as
@@ -111,10 +111,10 @@ impl Charset {
         // pair, whether one trails it, whether a byte that fails to trail
         // is read again as the next character's, and whether a byte that
         // leads none is a character of its own.
-        let big5_trail: Test = |n| (0x40..=0x7E).contains(&n) || (0xA1..=0xFE).contains(&n);
-        let gb_lead: Test = |c| c != 0x8E && c != 0x8F && c != 0xA0 && c != 0xFF;
-        let sjis_lead: Test = |c| c != 0x80 && c != 0xA0 && c < 0xFD;
-        let (first, trail, again, single): (Test, Test, Test, Test) = match self {
+        let big5_trail: ByteTest = |n| (0x40..=0x7E).contains(&n) || (0xA1..=0xFE).contains(&n);
+        let gb_lead: ByteTest = |c| c != 0x8E && c != 0x8F && c != 0xA0 && c != 0xFF;
+        let sjis_lead: ByteTest = |c| c != 0x80 && c != 0xA0 && c < 0xFD;
+        let (first, trail, again, single): (ByteTest, ByteTest, ByteTest, ByteTest) = match self {
             Charset::Utf8 => return next_utf8_char(s, pos),
             Charset::EucJp => return next_euc_jp_char(s, pos),
             Charset::Big5 => (

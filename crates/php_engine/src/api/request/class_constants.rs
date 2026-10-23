@@ -570,7 +570,7 @@ impl Request {
             .map_or(php_unit::decl::EnumBacking::Pure, |decl| decl.backing);
         let value = if backing == php_unit::decl::EnumBacking::Pure {
             if self.symbols().class_constant_of(class, name).is_none() {
-                return Err(self.undefined_case(class, name));
+                return Err(self.undefined_class_constant(class, name));
             }
             None
         } else {
@@ -600,7 +600,7 @@ impl Request {
             .class_constant_of(class, name)
             .map(|(_, constant)| constant.value.clone())
         else {
-            return Err(self.undefined_case(class, name));
+            return Err(self.undefined_class_constant(class, name));
         };
         match &expr {
             ConstExpr::Str(bytes) if self.declared_for_the_request(class) => {
@@ -668,7 +668,7 @@ impl Request {
     }
 
     /// php's `Error` for a case `class` does not declare.
-    pub(super) fn undefined_case(&mut self, class: ClassId, name: &[u8]) -> Thrown {
+    pub(super) fn undefined_class_constant(&mut self, class: ClassId, name: &[u8]) -> Thrown {
         let class = self.symbols().class_name(class);
         crate::api::raising::error(
             self,

@@ -42,13 +42,6 @@ pub(crate) struct Links {
     held: Vec<PublishedUnit>,
 }
 
-/// What a link read of the table beside what it linked: each class a
-/// check looked up by name, under the name as the declaration wrote it,
-/// which is the key `track_class_dependency` files it under and the name
-/// an inheritance cache's autoload hands the autoloader, with the class
-/// it found; whether a check read a class whose link is under way; and
-/// whether the traits' composition compared values the request
-/// evaluated.
 impl Links {
     /// Whether the cache served this request `unit`.
     fn holds(&self, unit: &PublishedUnit) -> bool {
@@ -56,6 +49,13 @@ impl Links {
     }
 }
 
+/// What a link read of the table beside what it linked: each class a
+/// check looked up by name, under the name as the declaration wrote it,
+/// which is the key `track_class_dependency` files it under and the name
+/// an inheritance cache's autoload hands the autoloader, with the class
+/// it found; whether a check read a class whose link is under way; and
+/// whether the traits' composition compared values the request
+/// evaluated.
 #[derive(Default)]
 pub(super) struct Read {
     names: Vec<(Box<[u8]>, Option<ClassId>)>,

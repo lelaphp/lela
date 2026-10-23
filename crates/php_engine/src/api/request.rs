@@ -1029,12 +1029,12 @@ impl Declared {
 /// declared at its top level, or one a `DECLARE_FUNCTION` bound where
 /// it stood. None for a method, whose declaration is its class's.
 fn user_function_decl(user: &UserFunction) -> Option<&FunctionDecl> {
-    let table = match user.body {
+    let (table, at) = match user.body {
         exec::Body::Function(at) => (&user.unit.functions, at),
         exec::Body::Dynamic(at) => (&user.unit.dynamic, at),
         exec::Body::Main | exec::Body::Method(_) | exec::Body::Hook(_) => return None,
     };
-    Some(&table.0.get(usize::try_from(table.1).ok()?)?.0)
+    Some(&table.get(usize::try_from(at).ok()?)?.0)
 }
 
 impl Request {

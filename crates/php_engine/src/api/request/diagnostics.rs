@@ -624,10 +624,7 @@ impl Request {
             if throwable && fatal_errors(level) {
                 self.exception_error(Level::Warning).ok();
             }
-        } else if self.raised.is_none()
-            && self.ini_flag(b"fatal_error_backtraces")
-            && fatal_errors(level)
-        {
+        } else if self.raised.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
             self.diagnostics.last_fatal_error_backtrace = Some(self.trace_as_string());
         }
         // The string the native raised is its caller's; the one made of
@@ -958,6 +955,26 @@ impl Request {
         if let Some((Some(trace), _)) = self.diagnostics.last_fatal_error_backtrace.take() {
             self.release(Value::array(trace));
         }
+    }
+
+    /// `fatal_error_backtraces`, `EG(fatal_error_backtrace_on)` through
+    /// `OnUpdateBool` (`Z/Zend/zend.c:263`), `PHP_INI_ALL`: whether a
+    /// fatal fetches its trace. The engine's default is php's, `1`, which
+    /// `fatal_error_backtraces_is_on_by_default` in `engine` holds; the
+    /// recipe's `fatal_error_backtraces=Off` reaches the table through the
+    /// ini scanner as the empty string, which is what php answers under
+    /// the same `-d`, and `ini_set()` moves it.
+    ///
+    /// ```php
+    /// var_dump(ini_get('fatal_error_backtraces'), ini_set('fatal_error_backtraces', '1'), ini_get('fatal_error_backtraces'));
+    /// ```
+    /// ```expect
+    /// string(0) ""
+    /// string(0) ""
+    /// string(1) "1"
+    /// ```
+    fn fatal_error_backtraces(&self) -> bool {
+        self.ini_flag(b"fatal_error_backtraces")
     }
 
     /// php's `display`, the first branch of `php_error_cb`: a diagnostic
