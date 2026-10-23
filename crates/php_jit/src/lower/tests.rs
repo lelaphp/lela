@@ -55,7 +55,7 @@ fn lowered(fixture: Fixture) -> Result<TraceIr, String> {
     let ir = goldens::built(fixture, &recorded)?;
     let backend = golden_backend().map_err(|e| format!("{e:?}"))?;
     let clif = backend
-        .clif(&ir)
+        .clif(&ir, None)
         .map_err(|abort| format!("{}: {abort:?}", fixture.name))?
         .display()
         .to_string();
@@ -71,7 +71,7 @@ fn lowered(fixture: Fixture) -> Result<TraceIr, String> {
     let host = Backend::new(&policy(&[]), symbols()).map_err(|e| format!("{e:?}"))?;
     for backend in [&backend, &host] {
         let compiled = backend
-            .compile(&ir, named(fixture))
+            .compile(&ir, named(fixture), None)
             .map_err(|abort| format!("{}: {abort:?}", fixture.name))?;
         assert!(!compiled.bytes.is_empty());
         assert!(compiled.align.is_power_of_two());
@@ -207,11 +207,12 @@ fn compiled(plan: &[(&str, &str)], program: &str) -> Result<(TraceIr, String), S
                     at: b"f".as_slice().into(),
                     line: 1,
                 },
+                None,
             )
             .map_err(|abort| format!("{abort:?}"))?;
     }
     let clif = golden
-        .clif(&ir)
+        .clif(&ir, None)
         .map_err(|abort| format!("{abort:?}"))?
         .display()
         .to_string();
@@ -599,7 +600,7 @@ fn a_side_trace_returning_an_array_its_parent_knew_compiles() -> Result<(), Stri
     let ir = crate::types::build(&record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
     let backend = golden_backend().map_err(|e| format!("{e:?}"))?;
     backend
-        .compile(&ir, named(SPECTRALNORM))
+        .compile(&ir, named(SPECTRALNORM), None)
         .map(|_| ())
         .map_err(|abort| format!("{abort:?}\n{}", super::dump::render(&ir)))
 }
@@ -637,7 +638,7 @@ fn a_body_entry_reads_where_the_frame_stands() -> Result<(), String> {
     );
     let backend = golden_backend().map_err(|e| format!("{e:?}"))?;
     let clif = backend
-        .clif(&ir)
+        .clif(&ir, None)
         .map_err(|abort| format!("{abort:?}"))?
         .display()
         .to_string();
@@ -648,6 +649,111 @@ fn a_body_entry_reads_where_the_frame_stands() -> Result<(), String> {
     assert!(
         matches!((read, branch), (Some(read), Some(branch)) if read < branch),
         "the stood is read after the entry branches:\n{clif}"
+    );
+    Ok(())
+}
+
+/// A trace's landing slots (`jit-design.md` §4.9): each written once, to
+/// the first trace entered at its landing, every key tagged so none is a
+/// free slot's zero, and a landing past the slots left to the crossing.
+#[test]
+fn a_landing_slot_names_the_first_trace_entered_at_its_landing() {
+    use super::{Entrance, LANDING_TAG, LANDINGS, LandingSlots, Stands};
+    let entrance = |trace| Entrance {
+        body: 0x1000,
+        trace,
+    };
+    let (first, second, third) = (entrance(1), entrance(2), entrance(3));
+    let slots = LandingSlots::new();
+    let key = LandingSlots::key(Stands { func: 0, opline: 0 });
+    assert_eq!(
+        key, LANDING_TAG,
+        "the first opline of op array 0 is no free slot"
+    );
+    slots.remember(key, &first);
+    slots.remember(key, &second);
+    let at = |entrance: &Entrance| std::ptr::from_ref(entrance).addr();
+    assert_eq!(slots.landed(key), Some(at(&first)));
+    let other = LandingSlots::key(Stands { func: 7, opline: 9 });
+    assert_eq!(other, 7 | 9 << 32 | LANDING_TAG);
+    slots.remember(other, &second);
+    assert_eq!(slots.landed(other), Some(at(&second)));
+    assert_eq!(LANDINGS, 2);
+    let past = LandingSlots::key(Stands {
+        func: 7,
+        opline: 10,
+    });
+    slots.remember(past, &third);
+    assert_eq!(slots.landed(past), None);
+}
+
+/// A link the trace was compiled against is a jump in its own bytes
+/// (#3229's ruling): its stores, the request's row of the linked trace,
+/// and a tail call to the linked body's address, a constant, with php's
+/// interrupt test before it where the trace is a side linking to its own
+/// looping root; with none to link to, its last exit as before.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_link_jumps_to_the_trace_it_links_to() -> Result<(), String> {
+    let ir = goldens::traced(
+        &[
+            ("record.function", "f"),
+            ("record.start", "enter"),
+            ("record.compiled", "g"),
+        ],
+        "function g($x) { return $x + 1; }
+        function f() { $a = g(1); return $a * 2; }
+        g(0); echo f(), \"\\n\";",
+    )?;
+    let backend = golden_backend().map_err(|e| format!("{e:?}"))?;
+    let lowered = |linked| -> Result<String, String> {
+        Ok(backend
+            .clif(&ir, linked)
+            .map_err(|abort| format!("{abort:?}"))?
+            .display()
+            .to_string())
+    };
+    let link = (ir.exits.iter())
+        .find_map(|exit| exit.link)
+        .ok_or("the trace links to nothing")?;
+    // The link stops at `g`'s entry, past its `RECV`, where the frame
+    // stands: its exit names no opline, and the linked trace opens there.
+    let end = (ir.exits.iter())
+        .find(|exit| exit.link.is_some())
+        .ok_or("no exit links")?;
+    assert_eq!(end.opline, None);
+    let g = (ir.frames.get(usize::from(end.frame.0)))
+        .and_then(|frame| match frame.func.offset() {
+            php_unit::MapPtrOffset::Engine(func) => Some(func),
+            php_unit::MapPtrOffset::Request(_) => None,
+        })
+        .ok_or("g's op array")?;
+    let body = 0x5000_0000_usize;
+    let linked = |interrupt| super::Linked {
+        body,
+        trace: link.get(),
+        interrupt,
+        opens: Some(super::Stands { func: g, opline: 1 }),
+    };
+    let plain = lowered(None)?;
+    assert!(!plain.contains("return_call_indirect"), "{plain}");
+    let clif = lowered(Some(linked(false)))?;
+    let constant = format!("iconst.i64 {body:#x}").replace("0x5000", "0x5000_");
+    assert!(
+        clif.contains("return_call_indirect") && clif.contains(&constant),
+        "the link jumps to the linked body:\n{clif}"
+    );
+    // A call made in place reads the interrupt too; the link's test is
+    // one read more.
+    let reads = |clif: &str| {
+        let pointer = format!("load.i64 notrap aligned v0+{INTERRUPT_AT}");
+        clif.lines().filter(|line| line.contains(&pointer)).count()
+    };
+    let tested = lowered(Some(linked(true)))?;
+    assert_eq!(
+        reads(&tested),
+        reads(&clif) + 1,
+        "a side's link to its looping root tests the interrupt:\n{tested}"
     );
     Ok(())
 }

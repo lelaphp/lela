@@ -20,7 +20,7 @@
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I32, I64};
-use cranelift_codegen::ir::{Block, InstBuilder, Value};
+use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, Value};
 use php_engine::tier::{FRAME, FrameLayout, PlainCall};
 
 use super::{
@@ -28,7 +28,7 @@ use super::{
     imm, leave_of, mismatch, trusted,
 };
 use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT};
-use crate::types::{Abort, End, ExitId, Frame, Imm, Line, Op, OpId, Operand, TraceIr};
+use crate::types::{Abort, End, ExitId, Frame, Imm, Line, OpId, Operand};
 
 /// The engine's frame layout, as compiled.
 const L: FrameLayout = FRAME;
@@ -43,26 +43,16 @@ const SLOT: u32 = L.slot();
 const _: () = assert!(L.header_bytes().is_multiple_of(8));
 
 /// Where the stack keeps its words.
-const TOP: i32 = at(L.top());
+pub(super) const TOP: i32 = at(L.top());
 const END: i32 = at(L.end());
 const FRAMES: i32 = at(L.frames());
 pub(super) const FRAMES_LEN: i32 = at(L.frames_len());
 const FRAMES_CAP: i32 = at(L.frames_cap());
 const INNERMOST: i32 = at(L.innermost());
 
-/// Whether `ir` pushes, makes or leaves a call in place, and so reads the
-/// stack.
-pub(super) fn in_place(ir: &TraceIr) -> bool {
-    ir.ops.iter().any(|op| match op {
-        Op::InitCall { plain, .. } => plain.is_some(),
-        Op::Line(line) => matches!(line.imm, Imm::Leave { .. } | Imm::Make { .. }),
-        Op::Enter { .. } | Op::Back { .. } => false,
-    })
-}
-
 impl Emit<'_> {
     /// The request's VM stack, read at entry.
-    fn stack(&self) -> Result<Value, Abort> {
+    pub(super) fn stack(&self) -> Result<Value, Abort> {
         self.stack
             .ok_or_else(|| mismatch("a call in place with no stack read"))
     }
@@ -89,7 +79,7 @@ impl Emit<'_> {
     }
 
     /// The bytes the top page has left past `top`, `EG(vm_stack_end) - top`.
-    fn left_past(&mut self, stack: Value, top: Value) -> Value {
+    pub(super) fn left_past(&mut self, stack: Value, top: Value) -> Value {
         let end = self.b.ins().load(I64, trusted(), stack, END);
         self.b.ins().isub(end, top)
     }
@@ -525,7 +515,11 @@ impl Emit<'_> {
         self.b.seal_block(join);
         if at_end.is_some() {
             let escape = self.escape_block();
-            self.b.ins().jump(escape, &[]);
+            let place = self
+                .returned_to
+                .ok_or_else(|| mismatch("a leave in place with no caller read"))?;
+            let place = self.b.use_var(place);
+            self.b.ins().jump(escape, &[BlockArg::Value(place)]);
             Ok(())
         } else {
             self.after_step(id, line)

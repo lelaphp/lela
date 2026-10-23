@@ -41,7 +41,7 @@ use php_unit::OplineIdx;
 
 use crate::Shared;
 use crate::compiler::{self, Job};
-use crate::enter::{self, At, Crossed as _, Exited, Left};
+use crate::enter::{self, Answered, At, Crossed as _, Exited, Left};
 use crate::policy::{
     self, Claim, Holder, JitDebug, Mode, Outcome, Place, Policy, State, TraceEvent,
 };
@@ -482,10 +482,16 @@ fn run_held(
         return None;
     }
     let entered = enter::enter(req, frame, (epoch, trace), at);
-    if matches!(entered, Ok(Left::Declined)) {
+    if matches!(
+        entered,
+        Ok(Answered {
+            left: Left::Declined,
+            ..
+        })
+    ) {
         return None;
     }
-    Some(followed(req, shared, (epoch, table), trace, entered))
+    Some(followed(req, shared, (epoch, table), entered))
 }
 
 /// What `trace` left through, `entered`, followed from trace to trace
@@ -537,19 +543,27 @@ fn followed<'t>(
     req: &mut Request,
     shared: &Shared,
     (epoch, table): (&'t Epoch, &'t table::Table),
-    mut trace: &'t table::Trace,
-    mut entered: Result<Left, Fatal>,
+    mut entered: Result<Answered<'t>, Fatal>,
 ) -> Flow {
     loop {
-        let exited = match entered {
-            Ok(Left::Exit(exited)) => exited,
-            Ok(Left::Unwound(frame)) => return Flow::Resume(frame),
+        // The trace that answered: the one entered, or one it jumped to.
+        let (left, mut trace) = match entered {
+            Ok(Answered { left, by }) => (left, by),
+            Err(fatal) => return Flow::Bail(fatal),
+        };
+        let exited = match left {
+            Left::Exit(exited) => exited,
+            Left::Unwound(frame) => return Flow::Resume(frame),
             // php's escape stub: no exit, no line and no word; the
             // interpreter runs the handler of the opline the return left
             // the frame at, a landing's trace where one is compiled there.
-            Ok(Left::Escaped(frame)) => match visit_landing(req, shared, frame, None) {
+            Left::Escaped(frame) => match visit_landing(req, shared, frame, None) {
                 Visited::Enter(id) => match table.get(id) {
                     Some(next) => {
+                        // The escaping trace's code goes on into it from
+                        // now on, as php's escape goes on into the
+                        // landing's handler.
+                        enter::remembered(req, frame, trace, next);
                         trace = next;
                         entered = enter::enter(req, frame, (epoch, trace), At::First);
                         continue;
@@ -566,7 +580,7 @@ fn followed<'t>(
             },
             // php's interrupt stub: the interrupt handled, and the trace
             // entered again at its header, its handler.
-            Ok(Left::Interrupted(header)) => match tier::interrupted(req) {
+            Left::Interrupted(header) => match tier::interrupted(req) {
                 Ok(false) => {
                     entered = enter::enter(req, header, (epoch, trace), At::First);
                     continue;
@@ -574,12 +588,11 @@ fn followed<'t>(
                 Ok(true) => return Flow::Resume(header),
                 Err(fatal) => return Flow::Bail(fatal),
             },
-            Ok(Left::Declined) => {
+            Left::Declined => {
                 return Flow::Bail(Fatal::error(
                     "InternalError: a trace declined an entry at its first op",
                 ));
             }
-            Err(fatal) => return Flow::Bail(fatal),
         };
         let frame = exited.frame;
         let Some(exit) = trace.exits.get(usize::from(exited.exit.0)) else {
