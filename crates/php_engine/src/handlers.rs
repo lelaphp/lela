@@ -23165,6 +23165,57 @@ pub(crate) fn jmp<T: Tier>(
 /// the target; a target at or before `at` is the back-edge, where the
 /// interrupt is tested and then the loop safepoint raised with
 /// `number`, the one the compiler wrote into the jump's `result`.
+///
+/// Under `Nop` the frame is stood at the target only where the
+/// interrupt is raised: every line read after a back-edge is the line
+/// of the opline that reads it, which stands the frame itself, a
+/// warning's, a backtrace's from a call, and a throwable's where it is
+/// caught and where nothing catches it, each on a line apart from the
+/// loop's condition.
+///
+/// ```php
+/// function g() { return debug_backtrace()[0]['line']; }
+/// function f($n) {
+///     $s = [];
+///     for ($i = 0;
+///          $i < $n;
+///          $i++)
+///     {
+///         $s[] = g();
+///         echo $v;
+///     }
+///     for ($i = 0; $i < 3;
+///          $i++) {
+///         try { if ($i) throw new Exception(); } catch (Exception $e) { $s[] = $e->getLine(); }
+///     }
+///     return $s;
+/// }
+/// echo implode(",", f(2)), "\n";
+/// $i = 0;
+/// do {
+///     $x = $i++ % 2 ? 1 : $undefined;
+/// } while ($i < 3);
+/// for ($i = 0; $i < 3;
+///      $i++)
+/// {
+///     if ($i == 2) throw new LogicException("e");
+/// }
+/// ```
+/// ```expect exit=255
+/// Warning: Undefined variable $v in %s on line 10
+///
+/// Warning: Undefined variable $v in %s on line 10
+/// 9,9,14,14
+///
+/// Warning: Undefined variable $undefined in %s on line 21
+///
+/// Warning: Undefined variable $undefined in %s on line 21
+///
+/// Fatal error: Uncaught LogicException: e in %s:26
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 26
+/// ```
 #[inline(always)] // the back-edge of every loop, in the loop
 #[allow(clippy::inline_always)]
 fn jumped<T: Tier>(
