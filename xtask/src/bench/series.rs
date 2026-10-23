@@ -19,7 +19,7 @@
 
 use std::fmt::Write as _;
 
-use super::{SWAMPED, Unit, rounded, sign, stats};
+use super::{Sign, Unit, rounded, sign, stats};
 use crate::manifest::Tolerance;
 use crate::reading::{Reading, Status};
 use crate::status::every::count;
@@ -48,7 +48,7 @@ impl Night {
             median: n("delta_median")? * share,
             q1: low.min(high),
             q3: low.max(high),
-            swamped: sign(reps, q1, q3) == SWAMPED,
+            swamped: sign(reps, q1, q3, unit) == Sign::Swamped,
         })
     }
 

@@ -29,8 +29,9 @@
 //! **One pair, or a pair per program.** A bar's [`Arms`] are one pair, or
 //! one pair per program of a set, each measured as a pair is and the
 //! reading carrying each program's ratio and their geomean, whose sign
-//! stands only where every program's does (§10's floor): the seven
-//! kernels and `Zend/bench.php`, which the G-bars measure ([`kernels`]).
+//! stands only where every program's does (§10's floor) and is `mixed`
+//! where they point both ways (#3127): the seven kernels and
+//! `Zend/bench.php`, which the G-bars measure ([`kernels`]).
 //!
 //! **Why the A/A verdict is a reading and not a refusal.** §4.3 is a
 //! quartile rule with no confidence level, so it resolves some unmeasured
@@ -239,27 +240,50 @@ fn stats(samples: &[f64]) -> Stats {
     }
 }
 
-/// §4.3: whether the paired delta's sign is established. `<=` and `>=` and
-/// not `<` and `>`, since a quartile exactly at zero still straddles it.
-fn sign_of(delta: &Stats) -> &'static str {
-    sign(delta.n, delta.q1, delta.q3)
+/// Whether a ratio's sign stands, and which way it points: a row's, by
+/// §4.3's quartiles, or a set's geomean, by its rows' (§10). Faster is the
+/// first arm taking less time, or answering more requests a second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Sign {
+    /// The quartiles straddle zero, or a row of the set's do: published
+    /// unsigned (§1.2), and the A/A control's bar for every row (§2).
+    Swamped,
+    Faster,
+    Slower,
+    /// A set whose rows all resolved, some each way: published unsigned
+    /// with the count each way, since a geomean near 1.00 over +20% and
+    /// −17% would claim no change while hiding a regression (#3127).
+    Mixed {
+        faster: usize,
+        slower: usize,
+    },
 }
 
-/// [`sign_of`] over a delta's reps and quartiles, as a reading keeps them:
-/// the one rule a run and a row of its reading judge by (`row`, #2646).
-pub(crate) fn sign(n: usize, q1: f64, q3: f64) -> &'static str {
-    if n < MIN_REPS_TO_RESOLVE || (q1 <= 0.0 && q3 >= 0.0) {
-        SWAMPED
-    } else {
-        RESOLVED
+impl Sign {
+    /// The verdict as the rendering, the reading and a row spell it.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Sign::Swamped => "NOISE-SWAMPED",
+            Sign::Faster | Sign::Slower => "resolved",
+            Sign::Mixed { .. } => "mixed",
+        }
     }
 }
 
-/// The verdict of a row whose sign the quartiles do not establish; the
-/// A/A control's bar is that every row reads this.
-const SWAMPED: &str = "NOISE-SWAMPED";
-/// The verdict of a row whose sign they do.
-const RESOLVED: &str = "resolved";
+/// §4.3 over a delta's reps and quartiles, as a reading keeps them: the
+/// one rule a run and a row of its reading judge by (`row`, #2646). `<=`
+/// and `>=` and not `<` and `>`, since a quartile exactly at zero still
+/// straddles it; a delta above zero is the first arm slower in a cost
+/// and faster in a rate ([`Unit::worse`]).
+pub(crate) fn sign(n: usize, q1: f64, q3: f64, unit: Unit) -> Sign {
+    if n < MIN_REPS_TO_RESOLVE || (q1 <= 0.0 && q3 >= 0.0) {
+        Sign::Swamped
+    } else if (q1 > 0.0) == (unit.worse() > 0.0) {
+        Sign::Slower
+    } else {
+        Sign::Faster
+    }
+}
 
 /// §5: how the two arms' bytes compared inside the rep that produced them.
 /// A disagreement is not a value here: it stops the run.
@@ -415,18 +439,22 @@ pub(crate) enum Held {
     Series,
     /// A series held to a bound: a fail where the bar's ratio, a set's
     /// geomean, is established above this, G1's 1.02 (design §9.2, #2947),
-    /// and a pass where it is at most this or its sign is not established,
-    /// as a swamped night is never a regression (protocol §1.2, §12).
+    /// or is `mixed`, whose value a bound is not read from (§10, #3127);
+    /// and a pass where it is at most this or swamped, as a swamped night
+    /// is never a regression (protocol §1.2, §12).
     Bound(f64),
 }
 
 impl Held {
     /// The reading's status for what a bar `took`: a control fails where a
     /// row's sign resolved, a bound where the ratio is established above
-    /// it or is no number, and a series is held to no bound.
+    /// it, is mixed or is no number, and a series is held to no bound.
     fn status(self, took: &Took) -> Status {
-        let Ratio { value, verdict } = took.ratio();
-        let above = |at_most| value.is_nan() || (verdict == RESOLVED && value > at_most);
+        let (value, sign) = (took.ratio(), took.sign());
+        let above = |at_most| {
+            let mixed = matches!(sign, Sign::Mixed { .. });
+            value.is_nan() || mixed || (sign == Sign::Slower && value > at_most)
+        };
         match self {
             Held::Control if took.resolved() > 0 => Status::Fail,
             Held::Bound(at_most) if above(at_most) => Status::Fail,
@@ -492,14 +520,6 @@ struct Took {
     rows: Vec<(Option<String>, Measured)>,
 }
 
-/// A ratio of the first arm to the second, a row's or the geomean of a
-/// set's, and whether its sign stands.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Ratio {
-    value: f64,
-    verdict: &'static str,
-}
-
 impl Took {
     /// Whether the bar is a set, its rows named by their programs, and not
     /// one pair.
@@ -507,22 +527,43 @@ impl Took {
         self.rows.iter().any(|(program, _)| program.is_some())
     }
 
+    /// How many rows resolved faster, and how many slower.
+    fn each_way(&self) -> [usize; 2] {
+        let way = |sign| {
+            (self.rows.iter())
+                .filter(|(_, row)| row.sign() == sign)
+                .count()
+        };
+        [way(Sign::Faster), way(Sign::Slower)]
+    }
+
     /// How many rows' paired deltas have their sign established.
     fn resolved(&self) -> usize {
-        let resolved = |(_, row): &&(_, Measured)| sign_of(&row.delta) == RESOLVED;
-        self.rows.iter().filter(resolved).count()
+        self.each_way().iter().sum()
     }
 
     /// The bar's ratio: the geometric mean of its rows' ratios, one row's
-    /// its own, its sign established only where every row's is, the floor
-    /// protocol §10 holds a geomean over workloads to.
-    fn ratio(&self) -> Ratio {
+    /// its own.
+    fn ratio(&self) -> f64 {
         let logs: f64 = self.rows.iter().map(|(_, row)| row.ratio().ln()).sum();
         #[allow(clippy::cast_precision_loss)]
-        let value = (logs / self.rows.len() as f64).exp();
-        let all = self.resolved() == self.rows.len() && !self.rows.is_empty();
-        let verdict = if all { RESOLVED } else { SWAMPED };
-        Ratio { value, verdict }
+        let rows = self.rows.len() as f64;
+        (logs / rows).exp()
+    }
+
+    /// The ratio's sign: one row's its own, and a set's established only
+    /// where every row's is, the floor protocol §10 holds a geomean over
+    /// workloads to, and signed only where every row points one way
+    /// (#3127).
+    fn sign(&self) -> Sign {
+        match self.each_way() {
+            [faster, slower] if self.rows.is_empty() || faster + slower < self.rows.len() => {
+                Sign::Swamped
+            }
+            [_, 0] => Sign::Faster,
+            [0, _] => Sign::Slower,
+            [faster, slower] => Sign::Mixed { faster, slower },
+        }
     }
 }
 
@@ -545,6 +586,11 @@ impl Measured {
     /// the medians, which carries no verdict (§2, §4.2).
     fn ratio(&self) -> f64 {
         1.0 + self.paired_pct / 100.0
+    }
+
+    /// The paired delta's sign (§4.3).
+    fn sign(&self) -> Sign {
+        sign(self.delta.n, self.delta.q1, self.delta.q3, self.unit)
     }
 }
 
@@ -1075,7 +1121,7 @@ fn rendered(
             row.delta.iqr,
             row.delta.q1,
             row.delta.q3,
-            sign_of(&row.delta),
+            row.sign().as_str(),
             row.correctness.as_str(),
         )
     }).collect();
@@ -1091,21 +1137,22 @@ fn rendered(
 }
 
 /// What a set's rendering and reading say of its rows taken together: the
-/// geomean, its verdict and how many rows resolved; nothing for a pair.
+/// geomean, its verdict and how many rows resolved each way; nothing for
+/// a pair.
 fn geomean(took: &Took) -> String {
     if !took.set() {
         return String::new();
     }
-    let ratio = took.ratio();
+    let [faster, slower] = took.each_way();
     let each: Vec<String> = (took.rows.iter())
         .filter_map(|(program, row)| Some(format!("{} {:.4}", program.as_ref()?, row.ratio())))
         .collect();
     format!(
-        "geomean ratio {:.4} over {} programs ({}), {}, {} of them resolved ({PROTOCOL} §10); ",
-        ratio.value,
+        "geomean ratio {:.4} over {} programs ({}), {}, {} of them resolved, {faster} faster and {slower} slower ({PROTOCOL} §10); ",
+        took.ratio(),
         took.rows.len(),
         each.join(", "),
-        ratio.verdict,
+        took.sign().as_str(),
         took.resolved(),
     )
 }
@@ -1134,8 +1181,8 @@ fn held_by(bar: &Shown<'_>, took: &Took) -> String {
 fn to_go(took: &Took) -> Option<f64> {
     // Every arm of a bar measures in one unit, the first row's.
     let (ratio, (_, first)) = (took.ratio(), took.rows.first()?);
-    (ratio.verdict == RESOLVED && ratio.value.is_finite())
-        .then(|| ((ratio.value - 1.0) * 100.0 * first.unit.worse()).max(0.0))
+    let signed = matches!(took.sign(), Sign::Faster | Sign::Slower);
+    (signed && ratio.is_finite()).then(|| ((ratio - 1.0) * 100.0 * first.unit.worse()).max(0.0))
 }
 
 /// A measured number as the store keeps it: to the microsecond, which is
@@ -1215,8 +1262,15 @@ fn recorded(
         numbers.extend(row_numbers(program.as_deref(), row));
     }
     if took.set() {
-        numbers.push(("geomean_ratio".to_owned(), took.ratio().value));
-        reading.count("resolved", u64::try_from(took.resolved())?)?;
+        numbers.push(("geomean_ratio".to_owned(), took.ratio()));
+        let [faster, slower] = took.each_way();
+        for (key, rows) in [
+            ("resolved", faster + slower),
+            ("faster", faster),
+            ("slower", slower),
+        ] {
+            reading.count(key, u64::try_from(rows)?)?;
+        }
     }
     for (key, value) in numbers {
         if value.is_finite() {
@@ -1245,7 +1299,7 @@ fn recorded(
                 row.delta.median,
                 row.unit.suffix(),
                 row.paired_pct,
-                sign_of(&row.delta),
+                row.sign().as_str(),
                 row.correctness.as_str(),
                 held_by(bar, took),
             )
@@ -1269,8 +1323,8 @@ fn recorded(
 mod tests {
     use super::Unit::{Ms, Rps};
     use super::{
-        Correctness, Held, Measured, RESOLVED, SWAMPED, Stats, Status, Stream, Took, Unit,
-        refuse_a_hosted_runner, sign_of, stats, to_go,
+        Correctness, Held, Measured, Sign, Stats, Status, Stream, Took, Unit,
+        refuse_a_hosted_runner, stats, to_go,
     };
 
     fn close(a: f64, b: f64) -> bool {
@@ -1292,15 +1346,21 @@ mod tests {
     }
 
     /// §4.3: three reps resolve nothing however far apart they are, and a
-    /// quartile exactly at zero straddles it.
+    /// quartile exactly at zero straddles it; a delta above zero is the
+    /// first arm slower in a time and faster in a rate.
     #[test]
     fn the_sign_is_established_only_above_the_floor_and_clear_of_zero() {
-        assert_eq!(sign_of(&stats(&[10.0, 10.0, 10.0])), SWAMPED);
-        assert_eq!(sign_of(&stats(&[10.0, 10.0, 10.0, 10.0])), RESOLVED);
-        assert_eq!(sign_of(&stats(&[0.0, 0.0, 0.0, 3.0])), SWAMPED);
-        assert_eq!(sign_of(&stats(&[-3.0, 0.0, 0.0, 0.0])), SWAMPED);
-        assert_eq!(sign_of(&stats(&[-1.0, -1.0, 1.0, 1.0])), SWAMPED);
-        assert_eq!(sign_of(&stats(&[-4.0, -3.0, -2.0, -1.0])), RESOLVED);
+        let of = |deltas: &[f64], unit| {
+            let s = stats(deltas);
+            super::sign(s.n, s.q1, s.q3, unit)
+        };
+        assert_eq!(of(&[10.0, 10.0, 10.0], Ms), Sign::Swamped);
+        assert_eq!(of(&[10.0, 10.0, 10.0, 10.0], Ms), Sign::Slower);
+        assert_eq!(of(&[10.0, 10.0, 10.0, 10.0], Rps), Sign::Faster);
+        assert_eq!(of(&[0.0, 0.0, 0.0, 3.0], Ms), Sign::Swamped);
+        assert_eq!(of(&[-3.0, 0.0, 0.0, 0.0], Ms), Sign::Swamped);
+        assert_eq!(of(&[-1.0, -1.0, 1.0, 1.0], Ms), Sign::Swamped);
+        assert_eq!(of(&[-4.0, -3.0, -2.0, -1.0], Ms), Sign::Faster);
     }
 
     /// One pair's row, its delta over `deltas` and its share `paired_pct`.
@@ -1358,20 +1418,32 @@ mod tests {
     }
 
     /// A set's ratio is the geomean of its rows', 0.5 and 2.0 making 1.0,
-    /// its sign established only where every row's is (protocol §10); a
-    /// control over a set fails on any one resolved row, and a bound on a
-    /// geomean established above it and not on a swamped one (#2947).
+    /// its sign established only where every row's is (protocol §10) and
+    /// signed only where every row points one way, `mixed` with the count
+    /// each way where they do not (#3127); a control over a set fails on
+    /// any one resolved row, and a bound on a geomean established above it
+    /// or mixed, and not on a swamped one (#2947).
     #[test]
     fn a_set_is_held_by_its_geomean_and_a_control_by_each_row() {
         let set = took(vec![row(Ms, &AHEAD, -50.0), row(Ms, &BEHIND, 100.0)], true);
-        assert!(close(set.ratio().value, 1.0), "{:?}", set.ratio());
-        assert_eq!((set.ratio().verdict, set.resolved()), (RESOLVED, 2));
+        assert!(close(set.ratio(), 1.0), "{}", set.ratio());
+        let mixed = Sign::Mixed {
+            faster: 1,
+            slower: 1,
+        };
+        assert_eq!((set.sign(), set.resolved()), (mixed, 2));
+        assert_eq!(to_go(&set), None, "a mixed geomean has no sign");
+        assert_eq!(
+            Held::Bound(1.02).status(&set),
+            Status::Fail,
+            "a bound is not read from a mixed geomean, near 1.00 as it is"
+        );
         let swamped = took(
             vec![row(Ms, &BEHIND, 10.0), row(Ms, &STRADDLES, 10.0)],
             true,
         );
-        assert!(close(swamped.ratio().value, 1.1));
-        assert_eq!((swamped.ratio().verdict, swamped.resolved()), (SWAMPED, 1));
+        assert!(close(swamped.ratio(), 1.1));
+        assert_eq!((swamped.sign(), swamped.resolved()), (Sign::Swamped, 1));
         assert_eq!(
             to_go(&swamped),
             None,
@@ -1379,9 +1451,14 @@ mod tests {
         );
         assert_eq!(Held::Control.status(&swamped), Status::Fail);
         assert_eq!(Held::Bound(1.02).status(&swamped), Status::Pass);
-        assert_eq!(Held::Bound(1.0).status(&set), Status::Pass, "at the bound");
+        let at = took(vec![row(Ms, &BEHIND, 0.0), row(Ms, &BEHIND, 0.0)], true);
+        assert_eq!(at.sign(), Sign::Slower);
+        assert_eq!(Held::Bound(1.0).status(&at), Status::Pass, "at the bound");
         let behind = took(vec![row(Ms, &BEHIND, 10.0), row(Ms, &BEHIND, 10.0)], true);
         assert_eq!(Held::Bound(1.02).status(&behind), Status::Fail);
+        let ahead = took(vec![row(Ms, &AHEAD, -10.0), row(Ms, &AHEAD, -10.0)], true);
+        assert_eq!(ahead.sign(), Sign::Faster);
+        assert_eq!(Held::Bound(1.02).status(&ahead), Status::Pass);
         let quiet = took(vec![row(Ms, &STRADDLES, 3.0), row(Ms, &AHEAD, 3.0)], true);
         assert_eq!(Held::Control.status(&quiet), Status::Fail);
         let quiet = took(
@@ -1391,7 +1468,9 @@ mod tests {
         assert_eq!(Held::Control.status(&quiet), Status::Pass);
         let shown = super::geomean(&set);
         assert!(
-            shown.contains("geomean ratio 1.0000 over 2 programs (p0 0.5000, p1 2.0000)"),
+            shown.contains(
+                "geomean ratio 1.0000 over 2 programs (p0 0.5000, p1 2.0000), mixed, 2 of them resolved, 1 faster and 1 slower"
+            ),
             "{shown}"
         );
         assert_eq!(

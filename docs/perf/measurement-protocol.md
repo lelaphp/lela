@@ -212,7 +212,14 @@ request-shaped arm has, paired under §2 to §5 rather than as percentiles
 set of programs pairs each program under §2 to §5, states each one's
 ratio as `1 + paired_pct / 100`, and their geometric mean, which inherits
 the floor — one `NOISE-SWAMPED` constituent and the aggregate is
-published unsigned.
+published unsigned. A geomean has a sign only when every row resolves
+the same way, as Mitchell ruled on #3127: one whose rows resolve in
+opposite directions is published unsigned as `mixed`, with the count
+each way, since +20% on one program and −17% on another make a geomean
+near 1.00, and signing it would claim no change while hiding a
+regression. A bar held to a bound does not read the value of a `mixed`
+geomean and fails on it, since a row of it resolved slower; a
+`NOISE-SWAMPED` one is never a regression (§1.2) and passes.
 
 ## 11. Where a workload lives
 
