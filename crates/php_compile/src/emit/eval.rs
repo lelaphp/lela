@@ -206,12 +206,12 @@ impl Emit<'_> {
     /// made while they were read given back once the node stands
     /// ([`Self::consume`]), as `zend_ast_destroy` frees a node's children
     /// once `zend_eval_const_expr` has replaced it by its value: the value
-    /// the node's own claim where the fold made its string
-    /// ([`Self::claimed`]). A value that is the string of one of those
-    /// claims, a cast of a string to a string, is the operand's own
-    /// handed on with one more owner (`ZVAL_COPY`) before the operand is
-    /// destroyed, so that claim becomes the node's and the others are
-    /// kept. A fold that does not stand gives nothing back, since the
+    /// the node's own claim where the fold made its string or its array
+    /// ([`Self::claimed`]). A value that is the string or the array of one
+    /// of those claims, a cast of a string to a string or `[1] ?? 2`, is
+    /// the operand's own handed on with one more owner (`ZVAL_COPY`)
+    /// before the operand is destroyed, so that claim becomes the node's
+    /// and the others are kept. A fold that does not stand gives nothing back, since the
     /// compile reads its children again.
     ///
     /// ```php
@@ -247,9 +247,13 @@ impl Emit<'_> {
         let mut claims = self.claims.since(mark);
         let folded = folded?;
         let value = folded.value();
-        let handed_on = value
-            .as_str()
-            .and_then(|s| claims.iter().position(|(_, made)| made.str().is_same(s)));
+        let handed_on = (value.as_str().is_some() || value.as_arr().is_some())
+            .then(|| {
+                claims
+                    .iter()
+                    .position(|(_, made)| made.value().is_same_value(value))
+            })
+            .flatten();
         if let Some(at) = handed_on {
             let (_, made) = claims.swap_remove(at);
             self.claims.hold(node, made);

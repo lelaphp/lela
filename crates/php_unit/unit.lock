@@ -108,10 +108,10 @@ decl::Type
 decl::Type::MAY_BE_ANY
 decl::Type::contains_code
 decl::Type::mask
-decl::UnitArray
-decl::UnitArray::is_empty
-decl::UnitArray::new
-decl::UnitArray::value
+decl::UnitValue
+decl::UnitValue::is_empty
+decl::UnitValue::new
+decl::UnitValue::value
 decl::Visibility
 decl::class_attribute_refusal
 decl::hook_attribute_refusal

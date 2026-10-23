@@ -2376,8 +2376,8 @@ fn evaluate_node(
         ConstExpr::Str(s) => Ok(Value::string(req.string(s)?)),
         // `ZVAL_COPY` of the unit's array: one more owner of a request's,
         // none of an `IS_ARRAY_IMMUTABLE`.
-        ConstExpr::UnitArray(array) => {
-            let value = Value::of_zval(array.value());
+        ConstExpr::UnitValue(held) => {
+            let value = Value::of_zval(held.value());
             req.addref(&value);
             Ok(value)
         }
