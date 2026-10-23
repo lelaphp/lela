@@ -903,7 +903,7 @@ impl AstCopy {
             | ConstExpr::Bool(_)
             | ConstExpr::Long { .. }
             | ConstExpr::Double(_)
-            | ConstExpr::UnitArray(_) => self.tree += AST_ZVAL,
+            | ConstExpr::UnitValue(_) => self.tree += AST_ZVAL,
             ConstExpr::Str(bytes) => self.string(bytes),
             ConstExpr::Constant { name, .. } => self.string(&name.resolved().0),
             ConstExpr::ClassConstant { class, name, .. } => {

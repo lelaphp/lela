@@ -2510,11 +2510,11 @@ impl<'r> ClassLookup<'r> {
 /// ```
 ///
 /// A request's class holds its constant's array from its declaration
-/// on ([`ConstExpr::UnitArray`]), so its first read lays nothing and a
+/// on ([`ConstExpr::UnitValue`]), so its first read lays nothing and a
 /// name in a later `eval` substitutes it, as php's
 /// `zend_try_ct_eval_class_const` copies it:
 ///
-/// [`ConstExpr::UnitArray`]: php_unit::decl::ConstExpr::UnitArray
+/// [`ConstExpr::UnitValue`]: php_unit::decl::ConstExpr::UnitValue
 ///
 /// ```php
 /// $f = sys_get_temp_dir() . '/w3267-array-constant.inc';
@@ -2579,7 +2579,7 @@ fn defined_class_constant(
         (None, ConstExpr::Str(bytes)) => {
             php_heap::Zval::string(tables.shared.existing_interned(bytes)?)
         }
-        (None, ConstExpr::UnitArray(array)) => array.value(),
+        (None, ConstExpr::UnitValue(array)) => array.value(),
         (None, _) => return None,
     };
     Some(php_compile::DefinedClassConstant {

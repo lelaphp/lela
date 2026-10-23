@@ -801,11 +801,11 @@ impl Request {
     /// ```
     ///
     /// An array the declaration wrote, every key and value folded, is
-    /// the unit's array ([`ConstExpr::UnitArray`]), immutable in a unit
+    /// the unit's array ([`ConstExpr::UnitValue`]), immutable in a unit
     /// the cache keeps, so a slot, a `static` and a constant copied from
     /// it take no owner, as opcache leaves php's table of defaults:
     ///
-    /// [`ConstExpr::UnitArray`]: php_unit::decl::ConstExpr::UnitArray
+    /// [`ConstExpr::UnitValue`]: php_unit::decl::ConstExpr::UnitValue
     ///
     /// ```php
     /// class C { public $arr = ['x']; public $n = [[1], 'a']; public $q = [PHP_INT_SIZE]; public static $s = ['y', 'k' => 1]; const K = ['z']; }

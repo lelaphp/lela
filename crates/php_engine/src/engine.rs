@@ -1767,8 +1767,8 @@ impl Shared {
             },
         );
         debug_assert!(
-            !(unit.as_ref().ok()).is_some_and(php_compile::values::holds_counted_array),
-            "a unit for every request holds a counted array"
+            !(unit.as_ref().ok()).is_some_and(php_compile::values::holds_counted_value),
+            "a unit for every request holds a counted value"
         );
         let answers = home.settle(strings_kept(&unit));
         Fresh { unit, answers }

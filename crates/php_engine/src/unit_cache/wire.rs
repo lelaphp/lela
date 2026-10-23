@@ -17,7 +17,7 @@ use php_unit::decl::{
     AliasModifier, Attribute, AttributeArgument, AttributeValidator, ClassConstDecl, ClassDecl,
     ClassFlags, ClassKind, ConstDecl, ConstExpr, ConstantName, DynamicProperties, EnumBacking,
     FunctionDecl, HookKind, MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl,
-    PropertyHooks, Radix, TraitAdaptation, TraitMethodRef, Type, UnitArray, Visibility,
+    PropertyHooks, Radix, TraitAdaptation, TraitMethodRef, Type, UnitValue, Visibility,
 };
 use php_unit::{
     AutoGlobal, BoundVar, ConstIdx, Diagnostic, Handler, HookBody, Level, LiveKind, LiveRange,
@@ -695,8 +695,8 @@ impl Wire for ConstExpr {
             } => (21u8, (class, (method, line))).put(out),
             ConstExpr::ScopeClass => 22u8.put(out),
             // A request's counted array is in no unit the cache keeps.
-            ConstExpr::UnitArray(array) if array.value().is_refcounted() => None,
-            ConstExpr::UnitArray(array) => (23u8, array.value()).put(out),
+            ConstExpr::UnitValue(array) if array.value().is_refcounted() => None,
+            ConstExpr::UnitValue(array) => (23u8, array.value()).put(out),
         }
     }
     fn take(r: &mut Reader<'_>) -> Option<Self> {
@@ -794,7 +794,7 @@ impl Wire for ConstExpr {
                 line: Wire::take(r)?,
             },
             22 => ConstExpr::ScopeClass,
-            23 => ConstExpr::UnitArray(UnitArray::new(Wire::take(r)?)?),
+            23 => ConstExpr::UnitValue(UnitValue::new(Wire::take(r)?)?),
             _ => return None,
         })
     }
