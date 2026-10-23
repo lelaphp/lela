@@ -39,11 +39,13 @@ pub(crate) fn halt_offset_key(file: &[u8]) -> Vec<u8> {
 /// extension that registers one while the request runs; or the program,
 /// `PHP_USER_CONSTANT`, with the file `zend_register_constant` read off
 /// `zend_get_executed_filename_ex` where one was executing.
-#[derive(Debug, Clone, PartialEq, Eq)]
 enum ConstantOwner {
     Core,
     Extension(ExtensionId),
-    User(Option<Box<[u8]>>),
+    /// `c->filename`, `zend_get_executed_filename_ex()` with one more
+    /// owner ([`Request::executed_file_string`]): an `eval`'s name string
+    /// among them, which the row keeps past the `eval`.
+    User(Option<Owner<PhpString>>),
 }
 
 /// `sizeof(zend_constant)`: the value, the name, the attributes and the
@@ -69,10 +71,6 @@ struct ConstantRow {
     /// holds for the bytes where any does ([`Request::declared_string`]);
     /// none where the memory limit refused it.
     named: Option<Owner<PhpString>>,
-    /// `c->filename`, `zend_get_executed_filename_ex()` with one more
-    /// owner, for a constant the program defines: an `eval`'s name
-    /// string among them, which the row keeps past the `eval`.
-    filename: Option<Owner<PhpString>>,
     owner: ConstantOwner,
     /// The key `EG(zend_constants)` holds the row under: the name with
     /// its namespace lowered, which every lookup compares against.
@@ -95,7 +93,6 @@ impl ConstantRow {
         ConstantRow {
             room,
             named,
-            filename: None,
             owner,
             given: name.clone(),
             name,
@@ -228,7 +225,11 @@ impl Request {
         if let Some(room) = row.room {
             room.free(self);
         }
-        for string in [row.named, row.filename].into_iter().flatten() {
+        let file = match row.owner {
+            ConstantOwner::User(file) => file,
+            ConstantOwner::Core | ConstantOwner::Extension(_) => None,
+        };
+        for string in [row.named, file].into_iter().flatten() {
             string.give_up(self);
         }
     }
@@ -388,13 +389,10 @@ impl Request {
         let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
         let room = self.constant_room();
         let named = self.declared_string(given).ok();
-        let filename = file
-            .as_deref()
-            .and_then(|file| self.executed_file_string(file).ok());
+        let file = file.and_then(|file| self.executed_file_string(&file).ok());
         self.constants.push(ConstantRow {
             room,
             named,
-            filename,
             owner: ConstantOwner::User(file),
             name: name.to_vec(),
             given: given.to_vec(),
@@ -695,7 +693,7 @@ impl<'r> Symbols<&'r Request> {
             .constants
             .find(name)
             .and_then(|(_, row)| match &row.owner {
-                ConstantOwner::User(file) => file.as_deref(),
+                ConstantOwner::User(file) => file.as_ref().map(|file| file.as_bytes()),
                 ConstantOwner::Core | ConstantOwner::Extension(_) => None,
             })
     }
@@ -834,7 +832,6 @@ impl Symbols<&mut Request> {
         self.0.constants.push(ConstantRow {
             room,
             named,
-            filename: None,
             owner: ConstantOwner::Extension(extension),
             name: name.to_vec(),
             given: name.to_vec(),

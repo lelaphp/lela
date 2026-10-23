@@ -2423,32 +2423,6 @@ impl<'r> ClassLookup<'r> {
         (self.declared_row(class)).is_some_and(|row| units.holds(PublishedUnit::as_ptr(&row.unit)))
     }
 
-    /// Whether `class` is php's class without `ZEND_ACC_IMMUTABLE`, whose
-    /// constants `zend_update_class_constant` evaluates in place: one the
-    /// request declared ([`Self::declared_for_the_request`]), and one of a
-    /// file the cache keeps that linked against such a class, its parent
-    /// or an interface, which `UPDATE_IS_CACHEABLE` keeps out of the
-    /// inheritance cache, so `zend_lazy_class_load`'s copy is the class
-    /// the request binds (`Z/Zend/zend_inheritance.c:3618`). The walk up
-    /// the parents stops at a depth of 64.
-    pub(super) fn mutable(self, units: super::unit_strings::UnitsHeld<'_>, class: ClassId) -> bool {
-        let mut at = Some(class);
-        for _ in 0..64 {
-            let Some(row) = at.and_then(|class| self.declared_row(class)) else {
-                return false;
-            };
-            let request = |class: ClassId| self.declared_for_the_request(units, class);
-            if units.holds(PublishedUnit::as_ptr(&row.unit))
-                || (row.bound.record.as_ref())
-                    .is_some_and(|record| record.interfaces.iter().copied().any(request))
-            {
-                return true;
-            }
-            at = row.bound.parent;
-        }
-        false
-    }
-
     /// Where an engine's class stands among the engine's; none for any
     /// other class.
     pub(super) fn native_class_at(self, class: ClassId) -> Option<usize> {
@@ -2526,26 +2500,28 @@ impl<'r> ClassLookup<'r> {
 /// substituted.
 ///
 /// php's mutable class is more than the request's own
-/// ([`ClassLookup::mutable`]): a class of a file the cache keeps whose
+/// ([`mutable`]): a class of a file the cache keeps whose
 /// parent an `eval` declared is `zend_lazy_class_load`'s copy, its
-/// constant substituted once read; and an `eval`'d child of a cached
-/// class holds its own copy of an inherited constant, substituted once
-/// read through the child and not before, a read through the parent
-/// leaving the copy unevaluated ([`Request::evaluated_through`]). Each
-/// line is a function naming the constant, compiled in an `eval` after
-/// what is read before it:
+/// constant substituted once read, its trait's as its parent's; and an
+/// `eval`'d child of a cached class holds its own copy of an inherited
+/// constant, substituted once read through the child and not before, a
+/// read through the parent leaving the copy unevaluated and each
+/// evaluating a value of its own ([`super::class_data::constant_holder`]): `C4::L`
+/// and `P4::L` make a string each. Each line but the last two is a
+/// function naming the constant, compiled in an `eval` after what is
+/// read before it:
 ///
 /// ```php
 /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
-/// $f = $put('w3276-cached.inc', '<?php class M1 extends E1 { const K = LATE1 + 1; } class P2 { const L = LATE2 + 1; }');
+/// $f = $put('w3276-cached.inc', '<?php class M1 extends E1 { const K = LATE1 + 1; } class P2 { const L = LATE2 + 1; } class M3 { use T3; const K = LATE1 + 3; } class P4 { const L = LATE2 . "abcdefghijklmnopqrstuvwxyz"; }');
 /// $g = $put('w3276-mutable.inc', <<<'PHP'
 /// <?php
 /// function m($code) { $m = memory_get_usage(); eval($code); return memory_get_usage() - $m; }
 /// m('class W {}'); m('$q0 = 1;');
 /// const LATE1 = 1; const LATE2 = 2;
-/// m('class E1 {}');
+/// m('class E1 {} trait T3 {}');
 /// include sys_get_temp_dir() . '/w3276-cached.inc';
-/// m('class C2 extends P2 {}');
+/// m('class C2 extends P2 {} class C4 extends P4 {}');
 /// echo m('function f1() { return M1::K; }'), "\n";
 /// eval('$GLOBALS["ga"] = M1::K;');
 /// echo m('function f2() { return M1::K; }'), "\n";
@@ -2554,6 +2530,10 @@ impl<'r> ClassLookup<'r> {
 /// eval('$GLOBALS["gc"] = C2::L;');
 /// echo m('function f5() { return C2::L; }'), "\n";
 /// echo m('function f6() { return P2::L; }'), "\n";
+/// eval('$GLOBALS["gd"] = M3::K;');
+/// echo m('function f7() { return M3::K; }'), "\n";
+/// echo m('$GLOBALS["ge"] = C4::L;'), "\n";
+/// echo m('$GLOBALS["gf"] = P4::L;'), "\n";
 /// PHP);
 /// include $g;
 /// unlink($f);
@@ -2565,6 +2545,9 @@ impl<'r> ClassLookup<'r> {
 /// 384
 /// 256
 /// 320
+/// 256
+/// 88
+/// 408
 /// ```
 fn defined_class_constant(
     tables: ClassLookup<'_>,
@@ -2578,10 +2561,10 @@ fn defined_class_constant(
     if constant.is_case {
         return None;
     }
-    let mutable = tables.mutable(units, declaring);
+    let mutable = mutable(declaring);
     // A class that copied the constant from an immutable one holds a
     // value of its own once evaluated through it (`do_inherit_class_constant`).
-    let evaluated = if declaring != class && !mutable && tables.mutable(units, class) {
+    let evaluated = if declaring != class && !mutable && super::classes::mutable(class) {
         class_data.evaluated_constant(class, name)
     } else {
         (class_data.evaluated_constant(declaring, name)).filter(|_| mutable)
@@ -2627,6 +2610,18 @@ impl php_compile::DeclaredClasses for Seen<'_> {
         let class = class_in(self.tables.shared, self.declared, self.aliases, name)?;
         self.tables.class_decl(class)
     }
+}
+
+/// Whether `class` is php's class without `ZEND_ACC_IMMUTABLE`, whose
+/// constants `zend_update_class_constant` evaluates in place: one only
+/// this request declared, never published for every request
+/// (`ClassId::is_published`). That is a class the request compiled for
+/// itself, and one of a file the cache keeps whose link took such a
+/// class, its parent, a trait or an interface, which `UPDATE_IS_CACHEABLE`
+/// keeps out of the inheritance cache, so the class the request binds is
+/// `zend_lazy_class_load`'s copy (`Z/Zend/zend_inheritance.c:3618`).
+pub(super) fn mutable(class: ClassId) -> bool {
+    !class.is_published()
 }
 
 /// The class `EG(class_table)` holds under `name`, any case: an engine's

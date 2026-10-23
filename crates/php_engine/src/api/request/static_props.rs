@@ -33,7 +33,9 @@ pub(super) struct StaticProps {
     /// `zend_class_init_statics` `emalloc`s, a zval for each of the
     /// class's `default_static_members_count` slots, an inherited one
     /// among them ([`Request::init_statics`]).
-    tables: WordMap<ClassId, Emalloc>,
+    /// A class whose chain has no slot is kept with none, so its next
+    /// access walks nothing.
+    tables: WordMap<ClassId, Option<Emalloc>>,
     /// The rows in the order their slots were laid down, which a debug
     /// build's teardown gives them up in.
     #[cfg(debug_assertions)]
@@ -69,7 +71,7 @@ impl Request {
         for value in laid.iter().filter_map(|info| slots.remove(info)) {
             self.release(value);
         }
-        for (_, table) in tables {
+        for table in tables.into_values().flatten() {
             table.free(self);
         }
     }
@@ -117,16 +119,27 @@ impl Request {
     /// 48  $GLOBALS["s3a"] = S3::$a;
     /// ```
     pub(super) fn init_statics(&mut self, class: ClassId) -> Result<(), Thrown> {
+        if self.static_props.tables.contains_key(&class) {
+            return Ok(());
+        }
         let lineage: Vec<ClassId> = self.symbols().lineage(class).collect();
         for class in lineage.into_iter().rev() {
-            if self.static_props.tables.contains_key(&class) || self.native_class(class) {
+            if self.static_props.tables.contains_key(&class) {
                 continue;
             }
-            let count = self.static_members(class);
-            if count > 0 {
-                let table = Emalloc::new(self, count * std::mem::size_of::<php_heap::Zval>())?;
-                self.static_props.tables.insert(class, table);
-            }
+            let count = if self.native_class(class) {
+                0
+            } else {
+                self.static_members(class)
+            };
+            let table = match count {
+                0 => None,
+                count => Some(Emalloc::new(
+                    self,
+                    count * std::mem::size_of::<php_heap::Zval>(),
+                )?),
+            };
+            self.static_props.tables.insert(class, table);
         }
         Ok(())
     }

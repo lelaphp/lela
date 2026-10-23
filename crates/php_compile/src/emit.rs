@@ -7861,7 +7861,7 @@ impl<'a> Emit<'a> {
         }
         (self.bound.iter().filter_map(|at| self.classes.get(*at)))
             .find(|decl| decl.name.0.eq_ignore_ascii_case(name))
-            .or_else(|| self.request_classes.declared(&name.to_ascii_lowercase()))
+            .or_else(|| self.request_classes.declared(self.arena.lowercase(name)))
     }
 
     /// `ZEND_DECLARE_CLASS`, what php emits for a class it did not early
@@ -8192,11 +8192,10 @@ impl<'a> Emit<'a> {
                     let operand = self.decoded_class(class)?;
                     match self.resolved_class_name(operand)? {
                         Some(Operated::Kept(folded)) => return self.folded(folded),
-                        // `self::class` and `parent::class` are the
-                        // class's own name string (`ZVAL_STR_COPY`), no
-                        // string of their own: the one made to fold is
-                        // given back, and the value's string is the
-                        // name's.
+                        // `self::class` is the class's own name string
+                        // (`ZVAL_STR_COPY`), no string of its own: the
+                        // one made to fold is given back, and the
+                        // value's string is the name's.
                         Some(Operated::Made(made)) => {
                             let folded = self.folded(Zval::string(made.str()));
                             self.folded_string = None;
@@ -17822,9 +17821,41 @@ impl<'a> Emit<'a> {
     /// class the program computes. `self`, `parent` and `static` are
     /// held to [`Self::ensure_valid_class_fetch_type`] first. A name
     /// written out is a string of its own, as php's scanner made one for
-    /// the token; `self` and `parent` are the name the class holds
-    /// (`ZVAL_STR_COPY`), a claim the caller keeps where it needs a
-    /// string or gives back where the name stands for it.
+    /// the token, and `parent` the class's `parent_name`, a string of its
+    /// own too; `self` is the class's name itself
+    /// (`ZVAL_STR_COPY(zv, CG(active_class_entry)->name)`), a claim the
+    /// caller keeps where it needs a string or gives back where the name
+    /// stands for it. So an `eval`'d class constant naming its own class
+    /// costs a string, its parent's a string, and `self::class` none (the
+    /// file under the recipe's `TMPDIR`, so each `eval`'s name has one
+    /// length):
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3268-resolved.inc';
+    /// file_put_contents($f, <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;');
+    /// foreach ([
+    ///     'class P10 {}',
+    ///     'class B10 { const K = B10::class; }',
+    ///     'class B12 { const K = self::class; }',
+    ///     'class B13 extends P10 { const K = parent::class; }',
+    ///     'class B16 { const K = B16::class, L = B16::class; }',
+    ///     '$GLOBALS["a"] = [B10::K, B12::K, B13::K, B16::K, B16::L];',
+    /// ] as $c) echo m($c), "  ", $c, "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 176  class P10 {}
+    /// 528  class B10 { const K = B10::class; }
+    /// 496  class B12 { const K = self::class; }
+    /// 528  class B13 extends P10 { const K = parent::class; }
+    /// 560  class B16 { const K = B16::class, L = B16::class; }
+    /// 728  $GLOBALS["a"] = [B10::K, B12::K, B13::K, B16::K, B16::L];
+    /// ```
     fn resolved_class_name(
         &mut self,
         operand: ClassOperand,
@@ -17849,10 +17880,10 @@ impl<'a> Emit<'a> {
             },
             _ => return Ok(None),
         };
-        Ok(Some(if fetch == FETCH_CLASS_DEFAULT {
-            Operated::Kept(self.string(&name)?)
-        } else {
+        Ok(Some(if fetch == FETCH_CLASS_SELF {
             Operated::Made(self.string_made(&name, false)?)
+        } else {
+            Operated::Kept(self.string(&name)?)
         }))
     }
 

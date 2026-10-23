@@ -29,13 +29,12 @@ pub(super) struct ClassData {
     /// evaluated, each held to its type, by name: `constants_table`'s
     /// rows once `zend_update_class_constant` replaced their expression,
     /// and the copies a class without `ZEND_ACC_IMMUTABLE` holds of what
-    /// it inherited from one with it ([`Request::evaluated_through`]).
+    /// it inherited from one with it ([`constant_holder`]).
     /// Each value's one owner is the row.
     constants: Vec<(Box<[u8]>, Value)>,
-    /// `mutable_data->constants_table` where the request separated it
-    /// ([`Request::separate_constants`]): the table's data, its rows
-    /// standing for the class's constants.
-    separated: Option<php_heap::EmbeddedArr>,
+    /// Where the class's constants table stands against its mutable
+    /// data ([`Request::separate_constants`]).
+    separated: Separation,
     /// `default_properties_table`, slot by slot in
     /// [`Request::placed_properties`]' order, as far as it has been
     /// evaluated: `None` for a typed slot with no default, which
@@ -49,6 +48,29 @@ pub(super) struct ClassData {
     /// What `new` reads of the class ([`Made`]), resolved on its first
     /// object in the request.
     made: Option<Made>,
+}
+
+/// Where a class's constants table stands against the request's
+/// mutable data, as `zend_class_constants_table` reads it.
+#[derive(Default)]
+enum Separation {
+    /// Not yet read.
+    #[default]
+    Unread,
+    /// Read where nothing separates it: the class's own table, a class
+    /// with no expression among its constants, a mutable one, a native
+    /// one or an enum.
+    Own,
+    /// `mutable_data->constants_table`, separated: the table's data, its
+    /// rows standing for the class's constants, which a debug build's
+    /// teardown gives back and a release build leaves to the heap.
+    Laid(
+        #[cfg_attr(
+            not(debug_assertions),
+            expect(dead_code, reason = "given back in a debug build's teardown alone")
+        )]
+        php_heap::EmbeddedArr,
+    ),
 }
 
 /// What `object_init_ex` reads of a class to make an object of it, which
@@ -206,7 +228,7 @@ impl Request {
             for value in data.defaults.into_iter().flatten() {
                 self.release(value);
             }
-            if let Some(table) = data.separated {
+            if let Separation::Laid(table) = data.separated {
                 let rows = table.arr();
                 for at in 0..rows.num_used() {
                     self.heap.array_take_at(rows, at);
@@ -492,8 +514,8 @@ impl Request {
                 .map(|(declaring, constant)| (declaring, constant.name.0.clone()))
                 .collect();
             for (declaring, name) in constants {
-                let value = self.evaluated_class_constant(declaring, &name)?;
-                self.evaluated_through(class, declaring, &name, &value);
+                let holder = constant_holder(class, declaring);
+                let value = self.evaluated_in(holder, declaring, &name)?;
                 self.release(value);
             }
         }
@@ -560,7 +582,21 @@ impl Request {
         declaring: ClassId,
         name: &[u8],
     ) -> Result<Value, Thrown> {
-        if let Some(value) = self.class_data.evaluated_constant(declaring, name) {
+        self.evaluated_in(declaring, declaring, name)
+    }
+
+    /// [`Request::evaluated_class_constant`] in the table of `holder`
+    /// ([`constant_holder`]): the value kept in its row, else
+    /// `declaring`'s expression evaluated in `declaring`'s scope and kept
+    /// there; the expression's copy given back only where `holder` is
+    /// the declaring class.
+    pub(crate) fn evaluated_in(
+        &mut self,
+        holder: ClassId,
+        declaring: ClassId,
+        name: &[u8],
+    ) -> Result<Value, Thrown> {
+        if let Some(value) = self.class_data.evaluated_constant(holder, name) {
             self.addref(&value);
             return Ok(value);
         }
@@ -595,15 +631,14 @@ impl Request {
             _ => evaluated.hand_on(),
         };
         self.addref(&value);
-        self.class_data
-            .rows
-            .row(declaring)
-            .constants
-            .push((name.into(), value));
+        let row = self.class_data.rows.row(holder);
+        row.constants.push((name.into(), value));
         // `zend_update_class_constant` destroys the expression once its
         // value stands in its place, and keeps it where the evaluation
         // or the type refused.
-        self.constant_evaluated(declaring, name);
+        if holder == declaring {
+            self.constant_evaluated(declaring, name);
+        }
         Ok(value)
     }
 
@@ -636,19 +671,12 @@ impl Request {
     /// 56  E8::A
     /// ```
     pub(super) fn separate_constants(&mut self, class: ClassId) -> Result<(), Thrown> {
-        let separated = |req: &Request, class: ClassId| {
-            (req.class_data.rows.get(class)).is_some_and(|data| data.separated.is_some())
-        };
-        let Some(decl) = self.symbols().class_decl(class) else {
+        let read = (self.class_data.rows.get(class))
+            .is_some_and(|data| !matches!(data.separated, Separation::Unread));
+        let Some(decl) = self.symbols().class_decl(class).filter(|_| !read) else {
             return Ok(());
         };
-        if decl.kind == ClassKind::Enum
-            || separated(self, class)
-            || self.native_class(class)
-            || self.mutable_class(class)
-        {
-            return Ok(());
-        }
+        let enumeration = decl.kind == ClassKind::Enum;
         let constants = self.symbols().constants_in_order(class);
         let expression = |constant: &php_unit::decl::ClassConstDecl| {
             !super::linking::is_literal(&constant.value)
@@ -656,7 +684,8 @@ impl Request {
         let ast = (constants.iter()).any(|(_, constant)| {
             expression(constant) || crate::attributes::Flags::of(&constant.attributes).deprecated
         });
-        if !ast {
+        if enumeration || !ast || self.native_class(class) || super::classes::mutable(class) {
+            self.class_data.rows.row(class).separated = Separation::Own;
             return Ok(());
         }
         let above: Vec<ClassId> = (constants.iter())
@@ -666,39 +695,12 @@ impl Request {
         let count = constants.len();
         let table = php_heap::EmbeddedArr::new(u32::try_from(count).unwrap_or(u32::MAX));
         let rows = table.arr();
-        self.class_data.rows.row(class).separated = Some(table);
+        self.class_data.rows.row(class).separated = Separation::Laid(table);
         super::declared_bytes::add_rows(self, rows, count)?;
         for declaring in above {
             self.separate_constants(declaring)?;
         }
         Ok(())
-    }
-
-    /// The constant `name` that `declaring` declares, evaluated to `value`
-    /// where it was read through `class`: php's class without
-    /// `ZEND_ACC_IMMUTABLE` that inherits it from an immutable one holds
-    /// a copy of its own (`do_inherit_class_constant`), which
-    /// `zend_update_class_constant` evaluates in place, so the value is
-    /// kept in `class`'s row too, one more owner, where
-    /// `zend_try_ct_eval_class_const` reads it ([`super::classes`]'s
-    /// `defined_class_constant`); a read through the declaring class
-    /// leaves the copy unevaluated.
-    pub(super) fn evaluated_through(
-        &mut self,
-        class: ClassId,
-        declaring: ClassId,
-        name: &[u8],
-        value: &Value,
-    ) {
-        if class == declaring || self.class_data.evaluated_constant(class, name).is_some() {
-            return;
-        }
-        if !self.mutable_class(class) || self.mutable_class(declaring) {
-            return;
-        }
-        self.addref(value);
-        let row = self.class_data.rows.row(class);
-        row.constants.push((name.into(), *value));
     }
 
     /// `zend_update_class_constant` over the constant `name` of `class`
@@ -757,14 +759,14 @@ impl Request {
     /// ```
     pub(crate) fn visited_class_constant(
         &mut self,
-        declaring: ClassId,
+        (holder, declaring): (ClassId, ClassId),
         name: &[u8],
         class_name: &str,
     ) -> Result<Value, Thrown> {
-        let data = self.class_data.rows.row(declaring);
-        if data.constants.iter().any(|(held, _)| **held == *name) {
-            return self.evaluated_class_constant(declaring, name);
+        if (self.class_data.evaluated_constant(holder, name)).is_some() {
+            return self.evaluated_in(holder, declaring, name);
         }
+        let data = self.class_data.rows.row(declaring);
         if data.visiting.iter().any(|held| **held == *name) {
             return Err(crate::api::raising::throw_error(
                 self,
@@ -776,7 +778,7 @@ impl Request {
             ));
         }
         data.visiting.push(name.into());
-        let evaluated = self.evaluated_class_constant(declaring, name);
+        let evaluated = self.evaluated_in(holder, declaring, name);
         if let Some(data) = self.class_data.rows.get_mut(declaring) {
             data.visiting.retain(|held| **held != *name);
         }
@@ -1003,5 +1005,23 @@ impl Symbols<&Request> {
             .filter(|data| data.updated)?;
         let (at, _, _) = self.0.placed_named(class, name)?;
         data.defaults.get(at).copied().flatten()
+    }
+}
+
+/// The class whose table holds the constant `name` that `declaring`
+/// declares as `class` reads it: `class` where it is php's class
+/// without `ZEND_ACC_IMMUTABLE` that inherits it from an immutable
+/// class, whose link copied the constant into a `zend_class_constant`
+/// of its own (`do_inherit_class_constant`), which
+/// `zend_update_class_constant` evaluates in place apart from the
+/// declaring class's; `declaring` otherwise, whose one constant every
+/// class reads. So a read through the declaring class leaves the
+/// copy unevaluated, and each evaluates its own value.
+pub(super) fn constant_holder(class: ClassId, declaring: ClassId) -> ClassId {
+    let copied = super::classes::mutable(class) && !super::classes::mutable(declaring);
+    if class != declaring && copied {
+        class
+    } else {
+        declaring
     }
 }

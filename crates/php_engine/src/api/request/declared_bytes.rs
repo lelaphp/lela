@@ -195,7 +195,7 @@ pub(super) struct ClassBlocks {
 /// What a copied constant expression is the value of, by its place among
 /// the class's declarations as its unit wrote them.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Of {
+enum CopyOf {
     /// A constant's or a case's, given back where it is evaluated
     /// ([`Request::constant_evaluated`]).
     Constant(usize),
@@ -213,7 +213,7 @@ enum Of {
 /// tables hold it, the declaring class's and each subclass's whose link
 /// copied the slot with one more owner (`do_inherit_property`).
 struct Copied {
-    of: Of,
+    of: CopyOf,
     holders: usize,
     blocks: Vec<Emalloc>,
 }
@@ -221,7 +221,7 @@ struct Copied {
 impl Copied {
     /// The blocks `copy` lays for what `of` names, held by the declaring
     /// class alone.
-    fn lay(req: &mut Request, of: Of, copy: &AstCopy) -> Result<Copied, Thrown> {
+    fn lay(req: &mut Request, of: CopyOf, copy: &AstCopy) -> Result<Copied, Thrown> {
         let mut laid = Copied {
             of,
             holders: 1,
@@ -1096,7 +1096,7 @@ fn lay_class(req: &mut Request, blocks: &mut ClassBlocks, class: &ClassDecl) -> 
         };
         blocks
             .copies
-            .push(Copied::lay(req, Of::Constant(at), &copy)?);
+            .push(Copied::lay(req, CopyOf::Constant(at), &copy)?);
     }
     for (at, property) in class.properties.iter().enumerate() {
         let Some(default) = (property.default.as_ref()).filter(|d| !super::linking::is_literal(d))
@@ -1104,9 +1104,9 @@ fn lay_class(req: &mut Request, blocks: &mut ClassBlocks, class: &ClassDecl) -> 
             continue;
         };
         let of = if property.is_instance {
-            Of::Default(at)
+            CopyOf::Default(at)
         } else {
-            Of::Static(at)
+            CopyOf::Static(at)
         };
         blocks
             .copies
@@ -1344,12 +1344,12 @@ impl Request {
         }) else {
             return;
         };
-        self.copy_released(unit, at, Of::Constant(constant));
+        self.copy_released(unit, at, CopyOf::Constant(constant));
     }
 
     /// One holder fewer of the copy of what `of` names in the class at
     /// `at` of `unit`, and its blocks given back with the last.
-    fn copy_released(&mut self, unit: *const Unit, at: usize, of: Of) {
+    fn copy_released(&mut self, unit: *const Unit, at: usize, of: CopyOf) {
         let Some(blocks) = (self.unit_strings.class_slot(unit, at)).and_then(Option::as_mut) else {
             return;
         };
@@ -1412,7 +1412,7 @@ impl Request {
         }) else {
             return;
         };
-        self.copy_released(unit, at, Of::Default(info.at as usize));
+        self.copy_released(unit, at, CopyOf::Default(info.at as usize));
     }
 
     /// One more holder of each instance default's copy `class`'s link
@@ -1436,7 +1436,8 @@ impl Request {
             else {
                 continue;
             };
-            if let Some(copied) = (blocks.copies.iter_mut()).find(|c| c.of == Of::Default(property))
+            if let Some(copied) =
+                (blocks.copies.iter_mut()).find(|c| c.of == CopyOf::Default(property))
             {
                 copied.holders += 1;
             }
