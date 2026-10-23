@@ -103,24 +103,64 @@ impl Emit<'_> {
     /// the guard, where the exit [`opens`](Emit::opens), and the exit's
     /// block otherwise.
     pub(super) fn guard_exit(&mut self, exit: ExitId) -> Result<(Block, Vec<BlockArg>), Abort> {
-        if !self.opens(exit) {
+        if !self.opens(exit) || !self.runs_in(exit) {
             return Ok((self.exit_block(exit)?, Vec::new()));
         }
-        let call = self.call_under_way();
+        let site = self.site()?;
         let at = usize::from(exit.0);
         let door = if let Some(door) = self.doors.get(at).copied().flatten() {
             door
         } else {
             let door = self.b.create_block();
             self.b.set_cold_block(door);
-            self.b.append_block_param(door, I64);
+            for _ in &site {
+                self.b.append_block_param(door, I64);
+            }
             *self
                 .doors
                 .get_mut(at)
                 .ok_or_else(|| mismatch("an exit past the trace's"))? = Some(door);
             door
         };
-        Ok((door, vec![BlockArg::Value(call)]))
+        Ok((door, site.map(BlockArg::Value).to_vec()))
+    }
+
+    /// Whether the code runs, where it leaves through `exit`, in a frame of
+    /// the op array the exit names its opline in. An exit is one for every
+    /// place that leaves with an equal spec, and a recursion's frames,
+    /// each one frame on from the last, leave through the exits of the
+    /// frame its header serves, so the frame an exit lands in is the one
+    /// the code runs in, as `enter`'s landing finds it standing innermost,
+    /// and not the frame the spec names.
+    ///
+    /// A recursion's direction exit, taken in a frame one or two calls
+    /// deep, enters the side trace grown from it on that frame, so the
+    /// leaf's `return $n` returns its own `$n`:
+    ///
+    /// ```php
+    /// function fib(int $n): int { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); }
+    /// echo fib(8), " ", fib(15), "\n";
+    /// ```
+    /// ```expect exit=0 regime=jit-force process
+    /// 21 610
+    /// ```
+    fn runs_in(&self, exit: ExitId) -> bool {
+        let func = |frame: crate::types::Frame| {
+            (self.ir.frames.get(usize::from(frame.0))).map(|frame| frame.func)
+        };
+        (self.ir.exits.get(usize::from(exit.0))).is_some_and(|spec| {
+            func(spec.frame).is_some() && func(spec.frame) == func(self.running)
+        })
+    }
+
+    /// Where the code stands at a place that leaves: the call under way,
+    /// the room of the frame it runs in and that frame's place, which an
+    /// exit's door lays the entry from.
+    fn site(&mut self) -> Result<[Value; 3], Abort> {
+        let call = self.call_under_way();
+        let room = self.room(self.running)?;
+        let place = self.frame_ref(self.running)?;
+        Ok([call, room, place])
     }
 
     /// The room of the innermost call under way, `EX(call)`, or zero where
@@ -146,11 +186,9 @@ impl Emit<'_> {
             };
             self.b.switch_to_block(door);
             self.b.seal_block(door);
-            let call = *self
-                .b
-                .block_params(door)
-                .first()
-                .ok_or_else(|| mismatch("a door that takes no call"))?;
+            let [call, room, place] = *self.b.block_params(door) else {
+                return Err(mismatch("a door that takes no site"));
+            };
             let spec = ir
                 .exits
                 .get(at)
@@ -162,7 +200,7 @@ impl Emit<'_> {
                 .ok_or_else(|| mismatch("an entry slot past the host's addresses"))?;
             let exit = ExitId(u16::try_from(at).map_err(|_| mismatch("too many exits"))?);
             let closed = self.answer_block(exit)?;
-            let leaving = self.exit_leaving(exit, call)?;
+            let leaving = self.exit_leaving(exit, [call, room, place])?;
             self.hand_on(leaving, Target::Slot(slot), closed)?;
         }
         Ok(())
@@ -211,11 +249,13 @@ impl Emit<'_> {
             .get(usize::from(exit.0))
             .ok_or_else(|| mismatch("an exit past the trace's"))?;
         match (self.joins.linked, spec.link) {
-            (Some(linked), Some(link)) if linked.trace == link.get() && self.jumps(exit) => {
-                let call = self.call_under_way();
+            (Some(linked), Some(link))
+                if linked.trace == link.get() && self.jumps(exit) && self.runs_in(exit) =>
+            {
+                let site = self.site()?;
                 self.stores(&spec.stores)?;
                 let closed = self.answer_block(exit)?;
-                let leaving = self.exit_leaving(exit, call)?;
+                let leaving = self.exit_leaving(exit, site)?;
                 self.hand_on(leaving, Target::Linked(linked), closed)
             }
             _ => {
@@ -317,11 +357,15 @@ impl Emit<'_> {
         self.divert_if(zero, closed);
     }
 
-    /// Where an exit leaves the frame (`enter::land`): the frame the exit
-    /// names, its place, `call` under way in it, the exit's op array and
-    /// opline, the stack's room, and the frame to be stood at the exit's
-    /// opline.
-    fn exit_leaving(&mut self, exit: ExitId, call: Value) -> Result<Leaving, Abort> {
+    /// Where an exit leaves the frame (`enter::land`), from the `site` it
+    /// leaves at: the call under way there, the room and the place of the
+    /// frame the code runs in, the exit's op array and opline, the
+    /// stack's room, and the frame to be stood at the exit's opline.
+    fn exit_leaving(
+        &mut self,
+        exit: ExitId,
+        [call, room, place]: [Value; 3],
+    ) -> Result<Leaving, Abort> {
         let ir = self.ir;
         let spec = ir
             .exits
@@ -340,8 +384,8 @@ impl Emit<'_> {
         let stack = self.stack()?;
         let top = self.b.ins().load(I64, trusted(), stack, TOP);
         Ok(Leaving {
-            room: self.room(spec.frame)?,
-            place: self.frame_ref(spec.frame)?,
+            room,
+            place,
             call,
             at,
             left: self.left_past(stack, top),
