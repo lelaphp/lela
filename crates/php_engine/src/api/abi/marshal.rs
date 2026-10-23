@@ -400,18 +400,23 @@ impl FromArgument for Callable {
     }
 }
 
+/// `inner` with `null` beside it: `T|null` over a union, `?T` else.
+fn or_null(inner: Type) -> Type {
+    match inner {
+        Type::Union(mut members) => {
+            members.push(Type::Null);
+            Type::Union(members)
+        }
+        other => Type::Nullable(Box::new(other)),
+    }
+}
+
 /// `?T`, or `T|null` over a union.
 impl<T: FromArgument> FromArgument for Option<T> {
     const BY_REF: bool = T::BY_REF;
     const MASK: u32 = nullable_mask(T::MASK);
     fn declared() -> Option<Type> {
-        T::declared().map(|inner| match inner {
-            Type::Union(mut members) => {
-                members.push(Type::Null);
-                Type::Union(members)
-            }
-            other => Type::Nullable(Box::new(other)),
-        })
+        T::declared().map(or_null)
     }
     fn accepts(value: &Value) -> bool {
         matches!(value.as_ref(), ValueRef::Null) || T::accepts(value)
@@ -702,11 +707,11 @@ impl<T> Clone for Raw<T> {
 impl<T> Copy for Raw<T> {}
 
 impl<T> Raw<T> {
-    /// `value` declared as `T`, to return.
-    pub(crate) fn returned(value: Value) -> Raw<T> {
+    /// `value` declared as `T`, passed at `position`; zero for a return.
+    pub(crate) fn at(value: Value, position: u32) -> Raw<T> {
         Raw {
             value,
-            position: 0,
+            position,
             held: PhantomData,
         }
     }
@@ -747,18 +752,10 @@ impl<T: FromArgument> FromArgument for Raw<T> {
         true
     }
     fn from_value(_: &mut Request, value: Value) -> Result<Self, Thrown> {
-        Ok(Raw {
-            value,
-            position: 0,
-            held: PhantomData,
-        })
+        Ok(Raw::at(value, 0))
     }
     fn hold(_: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
-        Ok(self::given(given).map(|given| Raw {
-            value: given.deref(),
-            position,
-            held: PhantomData,
-        }))
+        Ok(self::given(given).map(|given| Raw::at(given.deref(), position)))
     }
     /// The absent argument: the default evaluated and held to nothing, as
     /// a given one is, so an `arity = manual` body counts its arguments
@@ -770,11 +767,7 @@ impl<T: FromArgument> FromArgument for Raw<T> {
         position: u32,
     ) -> Result<Self, Thrown> {
         let value = default_value(req, absent, scope, position, (bits::ANY, || None))?;
-        Ok(Raw {
-            value,
-            position,
-            held: PhantomData,
-        })
+        Ok(Raw::at(value, position))
     }
 }
 
@@ -811,9 +804,7 @@ impl<T> Ref<T> {
     pub fn reference(&self) -> Option<PhpRef> {
         self.cell
     }
-}
 
-impl<T> Ref<T> {
     /// Assign through the reference, `ZEND_TRY_ASSIGN_REF`; nothing where
     /// the argument is absent. The value is taken as a native's return
     /// is ([`IntoReturn`]): an [`Owner`](crate::api::values::Owner) is
@@ -826,9 +817,7 @@ impl<T> Ref<T> {
         value.give_up(req);
         Ok(())
     }
-}
 
-impl<T> Ref<T> {
     /// `Z_PARAM_ARRAY_EX(.., 0, 1)`: the caller's array separated in
     /// place ([`PhpRef::separate_array`]), so the body changes it with no
     /// copy; none where the argument is absent or its referent is no
@@ -1164,13 +1153,7 @@ impl<C: Class> IntoReturn for Instance<C> {
 impl<T: IntoReturn> IntoReturn for Option<T> {
     const MASK: u32 = nullable_mask(T::MASK);
     fn declared() -> Option<Type> {
-        T::declared().map(|inner| match inner {
-            Type::Union(mut members) => {
-                members.push(Type::Null);
-                Type::Union(members)
-            }
-            other => Type::Nullable(Box::new(other)),
-        })
+        T::declared().map(or_null)
     }
     fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         match self {
