@@ -227,7 +227,6 @@ impl Tier for Nop {
     type State = ();
 
     #[inline(always)] // jit-design.md §2.2: one constant, so the branch on `Flow` folds
-    #[allow(clippy::inline_always)]
     fn safepoint(_: &mut Request, _: FrameRef, _: Site, _: Held<'_>) -> Flow {
         Flow::Continue
     }
@@ -238,7 +237,6 @@ impl Tier for Nop {
 /// frame stood at a back-edge's target, is written for every other
 /// tier alone. A constant of the instantiation, so the test folds.
 #[inline(always)] // a constant of the instantiation
-#[allow(clippy::inline_always)]
 pub(crate) fn interpreted<T: Tier>() -> bool {
     std::any::TypeId::of::<T>() == std::any::TypeId::of::<Nop>()
 }
@@ -451,7 +449,6 @@ impl Next {
 
     /// Where the handler sends the loop.
     #[inline(always)] // read once per opline by the loop: a shift and a compare
-    #[allow(clippy::inline_always)]
     pub(crate) const fn way(self) -> Way {
         // The low half is the opline or the frame, as the high half says.
         #[allow(clippy::cast_possible_truncation)]
@@ -517,6 +514,26 @@ mod dispatch {
     use crate::tier::{Next, Tier};
 
     include!(concat!(env!("OUT_DIR"), "/dispatch.rs"));
+
+    /// The arm of a handler the loop does not hold in its body: `handler`
+    /// called out of line, so what it holds live is its own and not the
+    /// loop's. An arm whose handler does not take its opline's place
+    /// stands the frame at `at` first, php's `SAVE_OPLINE()`.
+    #[cold]
+    #[inline(never)]
+    fn aside<F>(
+        req: &mut Request,
+        frame: FrameRef,
+        code: &OpArray,
+        op: &Opline,
+        at: u32,
+        handler: F,
+    ) -> Result<Next, Fatal>
+    where
+        F: FnOnce(&mut Request, FrameRef, &OpArray, &Opline, u32) -> Result<Next, Fatal>,
+    {
+        handler(req, frame, code, op, at)
+    }
 }
 
 /// What a handler's site, a backward `JMP*` or a `RETURN*`, does with a
@@ -882,8 +899,8 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
 /// and the edge it was taking up where every place is taken or where the
 /// edge left the scope. One body of the loop, called once a serving and
 /// once a scope.
-#[inline(always)] // the loop's body, called once a serving and once a scope
-#[allow(clippy::inline_always)]
+#[inline(always)]
+// the loop's body, called once a serving and once a scope
 // One function, so the optimiser reads every edge of the loop together:
 // the loop out of line, one copy for both callers, measured the call
 // edges 3 to 6% higher (#3051).
@@ -1116,7 +1133,6 @@ fn serve_held<'u, T: Tier, D: Telling>(
 /// Maximum call stack size of N bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
 /// ```
 #[inline(always)] // once a scope, in the loop's body
-#[allow(clippy::inline_always)]
 fn serve_took<T: Tier, D: Telling>(
     req: &mut Request,
     (first, frame): (Stepped, FrameRef),
@@ -1160,7 +1176,6 @@ fn serve_scope<T: Tier, D: Telling>(
 /// ([`exec::entry_of`]), and then its activation, the interrupt check
 /// and `Site::Entry`. `Threw` of the callee where a `RECV` raised.
 #[inline(always)] // once per call edge, in the loop
-#[allow(clippy::inline_always)]
 fn entered<T: Tier, D: Telling>(
     req: &mut Request,
     callee: FrameRef,

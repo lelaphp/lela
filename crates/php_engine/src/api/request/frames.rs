@@ -852,7 +852,6 @@ impl Request {
     /// int(0)
     /// ```
     #[inline(always)] // once per return, in the loop's RETURN arms
-    #[allow(clippy::inline_always)]
     pub(crate) fn leaves_plainly(
         &self,
         frame: FrameRef,
@@ -930,7 +929,6 @@ impl Request {
     /// caller standing at its call opline, which raises it there
     /// (`zend_rethrow_exception`): [`Stepped::Threw`] of the caller.
     #[inline(always)] // as `leaves_plainly`
-    #[allow(clippy::inline_always)]
     pub(crate) fn leave_plainly(&mut self, leave: PlainLeave, returned: Zval) -> Stepped {
         let served = (leave.cvs > 0 || leave.held) && self.give_up_owned(leave.cvs, leave.held);
         self.vm.stack.pop_frame(&mut self.heap);
@@ -1058,7 +1056,6 @@ impl Request {
     /// written from; `Unprimed` otherwise, which is the pass that looks
     /// the name up.
     #[inline(always)] // the hit path of every handler that reads such a slot, which an outlined call costs a fifth of
-    #[allow(clippy::inline_always)]
     pub(crate) fn cached_in_scope(&self, frame: FrameRef, slot: CacheSlot) -> exec::Cached {
         let Some(state) = self.frame_at(frame) else {
             return exec::Cached::Unprimed;
@@ -1319,7 +1316,6 @@ impl Request {
     /// and the observer's, as [`Request::call_room`] sizes any native's
     /// call.
     #[inline(always)] // the one call site is the frameless handler's
-    #[allow(clippy::inline_always)]
     pub(crate) fn push_frameless(
         &mut self,
         function: Function,
@@ -1354,7 +1350,6 @@ impl Request {
     /// record carrying one is popped as any call is
     /// ([`Request::pop_call`]), its borrowed operands left out.
     #[inline(always)] // the one call site is the frameless handler's
-    #[allow(clippy::inline_always)]
     pub(crate) fn pop_frameless(&mut self, owned: u8) {
         /// `ZEND_FRAMELESS_ICALL_3`'s, the most operands a frameless
         /// call passes.
@@ -1394,7 +1389,6 @@ impl Request {
     /// A native's call pushed with `room` slots past its header, its
     /// record named, laid in its `INIT_FCALL` ([`Request::push_room`]).
     #[inline(always)] // as `php_heap::VmStack::push_frame`
-    #[allow(clippy::inline_always)]
     pub(crate) fn push_native(
         &mut self,
         room: usize,
@@ -1589,7 +1583,6 @@ impl Request {
     /// A::p 2
     /// ```
     #[inline(always)] // once per call, in the loop's DO_*CALL arms
-    #[allow(clippy::inline_always)]
     pub(crate) fn enter_call(
         &mut self,
         returns_to: Option<u32>,
@@ -2117,7 +2110,6 @@ impl Request {
     /// int(1)
     /// ```
     #[inline(always)] // every native call's pop, the carrying case out of line
-    #[allow(clippy::inline_always)]
     pub(crate) fn pop_call(&mut self) {
         let call = self.vm.stack.current();
         // `EG(current_execute_data) = execute_data` before the arguments
@@ -2173,7 +2165,6 @@ impl Request {
     /// `zend_vm_stack_free_args` over the call `call`: each argument
     /// that counts owners given up, `zval_ptr_dtor_nogc`.
     #[inline(always)] // as `pop_call`
-    #[allow(clippy::inline_always)]
     fn release_arguments(&mut self, call: FrameRef) {
         let mut from = 0;
         while let Some((at, value)) = self.take_next_owner(call, from, usize::MAX) {

@@ -2079,7 +2079,6 @@ impl Vm {
     /// pages ([`php_heap::VmStack::push_frameless`]): its slots the
     /// `operands`; more than three is the engine's error.
     #[inline(always)] // the one call site is the frameless handler's
-    #[allow(clippy::inline_always)]
     pub(crate) fn push_frameless(
         &mut self,
         operands: &[Zval],
@@ -3164,7 +3163,6 @@ pub(crate) fn opline_at(code: &OpArray, at: u32) -> Option<&Opline> {
 /// brings to `u32::MAX`: the add does not wrap, and costs one
 /// instruction where a saturating one costs two.
 #[inline(always)] // one add, in the loop and its fused branches
-#[allow(clippy::inline_always)]
 pub(crate) const fn after(at: u32) -> u32 {
     at.wrapping_add(1)
 }
