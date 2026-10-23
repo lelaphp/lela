@@ -1,0 +1,423 @@
+//! A known callee's push, the call that makes it its frame and the
+//! callee's leave, written in place over the engine's frame layout
+//! (#3222's ruling, `jit-design.md` §5.3): php's `zend_jit_push_call_frame`,
+//! `zend_jit_do_fcall` with `i_init_func_execute_data` inline and
+//! `zend_jit_leave_func` (`Z/ext/opcache/jit/zend_jit_ir.c:8466-8650`,
+//! `:10016-10600`, `:11035-11263`). Every offset is
+//! [`php_engine::tier::FRAME`]'s, read here as Rust constants.
+//!
+//! Each writes what the engine's own push, call and leave write, as the
+//! parity test in `enter`'s tests holds it, and the [`super::Stood`] the
+//! kernel it stands in for would have written, so the code after it reads
+//! where the interpreter stands as it reads it after a kernel. Each falls
+//! back to that kernel where the engine's own path would refuse the plain
+//! case: the page's end or a full frame table at the push; the interrupt
+//! raised, or a callee's cache not yet laid down, at the call; and at the
+//! leave a frame that holds a receiver, a closure, an annex or arguments
+//! past its parameters, one a native's call made, one off the top page,
+//! or a caller's slot that holds a counted value. None takes an exit of
+//! its own: php's code takes none there.
+
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::types::{I8, I32, I64};
+use cranelift_codegen::ir::{Block, InstBuilder, Value};
+use php_engine::tier::{FRAME, FrameLayout, PlainCall};
+
+use super::{
+    COUNTED, Emit, Kernel, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE, STOOD_ROOM, Scalar,
+    imm, leave_of, mismatch, trusted,
+};
+use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT};
+use crate::types::{Abort, Imm, Line, Op, OpId, Operand, TraceIr};
+
+/// The engine's frame layout, as compiled.
+const L: FrameLayout = FRAME;
+
+/// A layout offset as the immediate a load or a store takes.
+const fn at(word: u32) -> i32 {
+    imm(word as usize)
+}
+
+/// A slot, `sizeof(zval)`.
+const SLOT: u32 = 16;
+const _: () = assert!(L.room().is_multiple_of(SLOT) && L.header_bytes().is_multiple_of(8));
+
+/// Where the stack keeps its words.
+const TOP: i32 = at(L.top());
+const END: i32 = at(L.end());
+const FRAMES: i32 = at(L.frames());
+pub(super) const FRAMES_LEN: i32 = at(L.frames_len());
+const FRAMES_CAP: i32 = at(L.frames_cap());
+const INNERMOST: i32 = at(L.innermost());
+
+/// Whether `ir` pushes, makes or leaves a call in place, and so reads the
+/// stack.
+pub(super) fn in_place(ir: &TraceIr) -> bool {
+    ir.ops.iter().any(|op| match op {
+        Op::InitCall { plain, .. } => plain.is_some(),
+        Op::Line(line) => matches!(line.imm, Imm::Leave | Imm::Make { .. }),
+        Op::Enter { .. } | Op::Back { .. } => false,
+    })
+}
+
+impl Emit<'_> {
+    /// The request's VM stack, read at entry.
+    fn stack(&self) -> Result<Value, Abort> {
+        self.stack
+            .ok_or_else(|| mismatch("a call in place with no stack read"))
+    }
+
+    /// `where_` and `then` blocks for a path in place and its kernel's,
+    /// the second cold.
+    fn split(&mut self) -> (Block, Block) {
+        let slow = self.b.create_block();
+        self.b.set_cold_block(slow);
+        (slow, self.b.create_block())
+    }
+
+    /// The `Stood` a kernel would write, written by code in place.
+    fn stand(&mut self, [frame, call, func, opline, room]: [Value; 5]) {
+        for (value, at) in [
+            (frame, STOOD_FRAME),
+            (call, STOOD_CALL),
+            (func, STOOD_FUNC),
+            (opline, STOOD_OPLINE),
+            (room, STOOD_ROOM),
+        ] {
+            self.b.ins().stack_store(I64, value, self.stood, at);
+        }
+    }
+
+    /// The bytes the top page has left past `top`, `EG(vm_stack_end) - top`.
+    fn left_past(&mut self, stack: Value, top: Value) -> Value {
+        let end = self.b.ins().load(I64, trusted(), stack, END);
+        self.b.ins().isub(end, top)
+    }
+
+    /// Where the request's header for `plain` is read from: its place
+    /// among the trace's calls in place, in bytes past [`IMAGES_AT`]'s
+    /// address.
+    fn header_of(&self, plain: &PlainCall) -> Result<i32, Abort> {
+        let at = (self.held.iter())
+            .position(|held| held == plain)
+            .ok_or_else(|| mismatch("a call in place the trace does not hold"))?;
+        i32::try_from(at * 8).map_err(|_| mismatch("too many calls in place"))
+    }
+
+    /// Whether the request is not ready for the trace's calls in place,
+    /// an `i8` ([`READY_AT`]).
+    fn unready(&mut self) -> Result<Value, Abort> {
+        let cx = self
+            .cx
+            .ok_or_else(|| mismatch("a call in place before the entry"))?;
+        let ready = self.b.ins().load(I32, trusted(), cx, READY_AT);
+        Ok(self.b.ins().icmp_imm_s(IntCC::Equal, ready, 0))
+    }
+
+    /// An inline `INIT_*` whose callee needs no guard pushed in place, as
+    /// `zend_jit_push_call_frame` pushes it and `push_call` lays it down:
+    /// the room taken off the top of the stack's top page, its link the
+    /// innermost room and the word moved to it, the header the push wrote
+    /// copied whole, every slot `UNDEF`, and its record on the frame table.
+    /// Where the page has less room than the frame takes or the table is
+    /// full, the opline is stepped, which pushes the same call; php's own
+    /// stack check, a guard before the push, leaves first where the page
+    /// is short of what the trace pushes ([`crate::types::Check::Room`]).
+    pub(super) fn push_in_place(&mut self, line: &Line, plain: &PlainCall) -> Result<(), Abort> {
+        let stack = self.stack()?;
+        let header = self.header_of(plain)?;
+        let unready = self.unready()?;
+        let used = i64::from(L.room() + SLOT * plain.slots());
+        let top = self.b.ins().load(I64, trusted(), stack, TOP);
+        let left = self.left_past(stack, top);
+        let short = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThan, left, used);
+        let len = self.b.ins().load(I64, trusted(), stack, FRAMES_LEN);
+        let cap = self.b.ins().load(I64, trusted(), stack, FRAMES_CAP);
+        let full = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, len, cap);
+        let refused = self.b.ins().bor(short, full);
+        let refused = self.b.ins().bor(refused, unready);
+        let (slow, join) = self.split();
+        self.divert_if(refused, slow);
+        // The link, the room linked before this one, and the header.
+        let below = self.b.ins().load(I64, trusted(), stack, INNERMOST);
+        self.b.ins().store(trusted(), below, top, 0);
+        let cx = self.cx.ok_or_else(|| mismatch("a push before the entry"))?;
+        let images = self.b.ins().load(I64, trusted(), cx, IMAGES_AT);
+        let header = self.b.ins().load(I64, trusted(), images, header);
+        for word in (0..L.header_bytes()).step_by(8) {
+            let value = self.b.ins().load(I64, trusted(), header, at(word));
+            self.b
+                .ins()
+                .store(trusted(), value, top, at(L.header() + word));
+        }
+        let zero = self.b.ins().iconst(I64, 0);
+        for slot in 0..plain.slots() {
+            let cell = L.room() + SLOT * slot;
+            self.b.ins().store(trusted(), zero, top, at(cell));
+            self.b.ins().store(trusted(), zero, top, at(cell + 8));
+        }
+        self.b.ins().store(trusted(), top, stack, INNERMOST);
+        // The record, then the table's length and the top.
+        let frames = self.b.ins().load(I64, trusted(), stack, FRAMES);
+        let offset = self.b.ins().imul_imm_s(len, i64::from(L.record()));
+        let record = self.b.ins().iadd(frames, offset);
+        let first = self.b.ins().iadd_imm_s(top, i64::from(L.room()));
+        self.b
+            .ins()
+            .store(trusted(), first, record, at(L.record_at()));
+        let slots = self.b.ins().iconst(I64, i64::from(plain.slots()));
+        self.b
+            .ins()
+            .store(trusted(), slots, record, at(L.record_len()));
+        let tag = self.b.ins().iconst(I8, i64::from(L.on_page()));
+        self.b
+            .ins()
+            .store(trusted(), tag, record, at(L.record_placed()));
+        let grown = self.b.ins().iadd_imm_s(len, 1);
+        self.b.ins().store(trusted(), grown, stack, FRAMES_LEN);
+        let past = self.b.ins().iadd_imm_s(top, used);
+        self.b.ins().store(trusted(), past, stack, TOP);
+        // Where the interpreter stands after the `INIT_*`: on past it in
+        // the frame, the call pushed under way.
+        let room = self.room(line.frame)?;
+        let func = self.func_of(line.frame)?;
+        let next = self.b.ins().iconst(I32, i64::from(line.opline.0 + 1));
+        let left = self.left_past(stack, past);
+        self.stand([room, top, func, next, left]);
+        self.b.ins().jump(join, &[]);
+        self.b.switch_to_block(slow);
+        self.b.seal_block(slow);
+        let [room, opline] = self.served(line)?;
+        let func = self.func_of(line.frame)?;
+        let stood = self.b.ins().stack_addr(I64, self.stood, 0);
+        self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?;
+        self.b.ins().jump(join, &[]);
+        self.b.switch_to_block(join);
+        self.b.seal_block(join);
+        Ok(())
+    }
+
+    /// A `DO_*CALL` of a call pushed in place made its callee's frame in
+    /// place, as `zend_jit_do_fcall` makes it with
+    /// `i_init_func_execute_data` inline and `Request::enter_call` writes
+    /// it: the flags, the opline past the prologue, the callee's own cache,
+    /// the slot of the caller's that takes the return and the caller
+    /// written over the pushed header, and the caller stood at the call,
+    /// php's `SET_EX_OPLINE`. Where the interrupt is raised, which the
+    /// callee's activation tests, or the callee's cache is not laid down,
+    /// [`Kernel::Call`] makes the call; where the callee serves a prologue
+    /// it does on every pass.
+    pub(super) fn make_in_place(
+        &mut self,
+        id: OpId,
+        line: &Line,
+        returns: Option<u32>,
+    ) -> Result<(), Abort> {
+        let (call, plain) = *self
+            .calls
+            .last()
+            .ok_or_else(|| mismatch("a call made with no call under way"))?;
+        let callee = self
+            .entered_by(id, line)
+            .ok_or_else(|| mismatch("a call made in place the trace does not follow"))?;
+        let (Some(activation), super::CallRoom::Held(var)) =
+            (plain.and_then(PlainCall::activation), call)
+        else {
+            return self.stepped(id, line);
+        };
+        let stack = self.stack()?;
+        let cx = self
+            .cx
+            .ok_or_else(|| mismatch("a call made before the entry"))?;
+        let interrupt = self.b.ins().load(I64, trusted(), cx, INTERRUPT_AT);
+        let raised = self.b.ins().load(I8, trusted(), interrupt, 0);
+        let raised = self.b.ins().icmp_imm_s(IntCC::NotEqual, raised, 0);
+        let unready = self.unready()?;
+        let refused = self.b.ins().bor(raised, unready);
+        let (slow, join) = self.split();
+        self.divert_if(refused, slow);
+        let room = self.b.use_var(var);
+        let flags = self.b.ins().load(I32, trusted(), room, at(L.info()));
+        let kept = self.b.ins().band_imm_u(flags, i64::from(activation.keep()));
+        let set = i64::from(activation.info(returns.is_some()));
+        let flags = self.b.ins().bor_imm_u(kept, set);
+        self.b.ins().store(trusted(), flags, room, at(L.info()));
+        let words = [
+            (L.opline(), activation.opline()),
+            (L.cache(), activation.cache()),
+            (
+                L.returns_to(),
+                returns.map_or(0, |slot| slot + L.numbered_from()),
+            ),
+        ];
+        for (field, word) in words {
+            let word = self.b.ins().iconst(I32, i64::from(word));
+            self.b.ins().store(trusted(), word, room, at(field));
+        }
+        let place = self.frame_ref(line.frame)?;
+        let place = self.b.ins().ireduce(I32, place);
+        let named = self.b.ins().iadd_imm_s(place, i64::from(L.numbered_from()));
+        self.b.ins().store(trusted(), named, room, at(L.caller()));
+        let from = self.room(line.frame)?;
+        let opline = self.b.ins().iconst(I32, i64::from(line.opline.0));
+        self.b.ins().store(trusted(), opline, from, at(L.opline()));
+        // Where the interpreter stands: in the callee, at its entry.
+        let none = self.b.ins().iconst(I64, 0);
+        let func = self.func_of(callee)?;
+        let entry = self.b.ins().iconst(I32, i64::from(activation.opline()));
+        let top = self.b.ins().load(I64, trusted(), stack, TOP);
+        let left = self.left_past(stack, top);
+        self.stand([room, none, func, entry, left]);
+        self.b.ins().jump(join, &[]);
+        self.b.switch_to_block(slow);
+        self.b.seal_block(slow);
+        self.step_kernel(id, line)?;
+        self.b.ins().jump(join, &[]);
+        self.b.switch_to_block(join);
+        self.b.seal_block(join);
+        self.after_step(id, line)
+    }
+
+    /// The place of the frame `line`'s `RETURN` leaves to, read off its
+    /// header's caller before it leaves, for the `Op::Back` after it.
+    pub(super) fn returns_to(&mut self, line: &Line) -> Result<Option<Value>, Abort> {
+        if self.stack.is_none() {
+            return Ok(None);
+        }
+        let room = self.room(line.frame)?;
+        let caller = self.b.ins().load(I32, trusted(), room, at(L.caller()));
+        let caller = self.b.ins().uextend(I64, caller);
+        let place = self
+            .b
+            .ins()
+            .iadd_imm_s(caller, -i64::from(L.numbered_from()));
+        let var = self.b.declare_var(I64);
+        self.b.def_var(var, place);
+        self.returned_to = Some(var);
+        Ok(Some(caller))
+    }
+
+    /// A function's `RETURN` that leaves its frame in place, as
+    /// `zend_jit_leave_func` leaves it and `Request::leave_plainly` leaves
+    /// a frame `leaves_plainly` finds: the value into the caller's slot
+    /// where the call reads it, the frame's record off the table, the word
+    /// moved back to its link and the top back to its room, and the caller
+    /// on past its call. `types` holds its variables uncounted and its
+    /// value a scalar ([`Imm::Leave`]); the frame's header and the caller's
+    /// slot are read here, and where the leave kernel would serve the
+    /// frame, the opline is stepped.
+    pub(super) fn leave_in_place(&mut self, id: OpId, line: &Line) -> Result<(), Abort> {
+        let returned = match line.op1 {
+            Operand::Unused => Scalar::Null,
+            operand => self.scalar(id, operand)?,
+        };
+        let stack = self.stack()?;
+        let caller = self
+            .returns_to(line)?
+            .ok_or_else(|| mismatch("a leave in place with no stack read"))?;
+        let room = self.room(line.frame)?;
+        let (slow, join) = self.split();
+        // What the header says the leave kernel serves: a receiver, a
+        // closure, an annex, a call not made a frame or arguments past
+        // the parameters, and a caller that is none or the loop's.
+        let this = self.b.ins().load(I64, trusted(), room, at(L.this()));
+        let closure = self.b.ins().load(I64, trusted(), room, at(L.closure()));
+        let held = self.b.ins().bor(this, closure);
+        let mut refused = self.b.ins().icmp_imm_s(IntCC::NotEqual, held, 0);
+        let annex = self.b.ins().load(I32, trusted(), room, at(L.annex()));
+        let info = self.b.ins().load(I32, trusted(), room, at(L.info()));
+        let flagged = self
+            .b
+            .ins()
+            .band_imm_u(info, i64::from(L.leaves_by_kernel()));
+        let owns = self.b.ins().bor(annex, flagged);
+        let owns = self.b.ins().icmp_imm_s(IntCC::NotEqual, owns, 0);
+        refused = self.b.ins().bor(refused, owns);
+        let none = self.b.ins().icmp_imm_s(IntCC::Equal, caller, 0);
+        let looped = self.b.ins().band_imm_u(caller, i64::from(L.caller_loop()));
+        let looped = self.b.ins().icmp_imm_s(IntCC::NotEqual, looped, 0);
+        let outside = self.b.ins().bor(none, looped);
+        refused = self.b.ins().bor(refused, outside);
+        self.divert_if(refused, slow);
+        // The frame is the table's last record, on the top page.
+        let len = self.b.ins().load(I64, trusted(), stack, FRAMES_LEN);
+        let frames = self.b.ins().load(I64, trusted(), stack, FRAMES);
+        let last = self.b.ins().iadd_imm_s(len, -1);
+        let offset = self.b.ins().imul_imm_s(last, i64::from(L.record()));
+        let record = self.b.ins().iadd(frames, offset);
+        let first = self.b.ins().load(I64, trusted(), record, at(L.record_at()));
+        let own = self.b.ins().iadd_imm_s(room, i64::from(L.room()));
+        let elsewhere = self.b.ins().icmp(IntCC::NotEqual, first, own);
+        let tag = self
+            .b
+            .ins()
+            .load(I8, trusted(), record, at(L.record_placed()));
+        let off_page = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::NotEqual, tag, i64::from(L.on_page()));
+        let refused = self.b.ins().bor(elsewhere, off_page);
+        self.divert_if(refused, slow);
+        // The caller's room, by its record, and the slot of its that takes
+        // the return, which holds nothing counted.
+        let place = self
+            .b
+            .ins()
+            .iadd_imm_s(caller, -i64::from(L.numbered_from()));
+        let offset = self.b.ins().imul_imm_s(place, i64::from(L.record()));
+        let record = self.b.ins().iadd(frames, offset);
+        let callers = self.b.ins().load(I64, trusted(), record, at(L.record_at()));
+        let named = self.b.ins().load(I32, trusted(), room, at(L.returns_to()));
+        let returns = self.b.ins().uextend(I64, named);
+        let taken = self
+            .b
+            .ins()
+            .iadd_imm_s(returns, -i64::from(L.numbered_from()));
+        let offset = self.b.ins().imul_imm_s(taken, i64::from(SLOT));
+        let target = self.b.ins().iadd(callers, offset);
+        let reads = self.b.ins().icmp_imm_s(IntCC::NotEqual, returns, 0);
+        let kind = self.b.ins().load(I32, trusted(), target, super::TYPE_AT);
+        let counted = self.b.ins().band_imm_u(kind, COUNTED);
+        let counted = self.b.ins().icmp_imm_s(IntCC::NotEqual, counted, 0);
+        let counted = self.b.ins().band(reads, counted);
+        self.divert_if(counted, slow);
+        self.when(reads, |emit| {
+            emit.write(target, 0, returned);
+            Ok(())
+        })?;
+        // The record off the table, the word and the top back.
+        self.b.ins().store(trusted(), last, stack, FRAMES_LEN);
+        let below = self.b.ins().load(I64, trusted(), room, 0);
+        self.b.ins().store(trusted(), below, stack, INNERMOST);
+        self.b.ins().store(trusted(), room, stack, TOP);
+        // The caller on past its call, `LOAD_NEXT_OPLINE()`.
+        let back = self.b.ins().iadd_imm_s(callers, -i64::from(L.room()));
+        let at_call = self.b.ins().load(I32, trusted(), back, at(L.opline()));
+        let past = self.b.ins().iadd_imm_s(at_call, 1);
+        self.b.ins().store(trusted(), past, back, at(L.opline()));
+        // Where the interpreter stands: in the caller, the call under way
+        // in it the record now on top where that is not the caller's own.
+        let under = self.b.ins().iadd_imm_s(len, -2);
+        let offset = self.b.ins().imul_imm_s(under, i64::from(L.record()));
+        let record = self.b.ins().iadd(frames, offset);
+        let first = self.b.ins().load(I64, trusted(), record, at(L.record_at()));
+        let built = self.b.ins().iadd_imm_s(first, -i64::from(L.room()));
+        let own = self.b.ins().icmp(IntCC::Equal, under, place);
+        let nothing = self.b.ins().iconst(I64, 0);
+        let call = self.b.ins().select(own, nothing, built);
+        let func = self.b.ins().load(I32, trusted(), back, at(L.cache()));
+        let left = self.left_past(stack, room);
+        self.stand([back, call, func, past, left]);
+        self.b.ins().jump(join, &[]);
+        self.b.switch_to_block(slow);
+        self.b.seal_block(slow);
+        self.step_kernel(id, line)?;
+        self.b.ins().jump(join, &[]);
+        self.b.switch_to_block(join);
+        self.b.seal_block(join);
+        self.after_step(id, line)
+    }
+}

@@ -13,57 +13,57 @@ entry
   guard #5 long -> exit 2
   guard #0 double -> exit 3
   guard #2 long -> exit 4
-loop at 0, loop, interrupt exit 19
+loop at 0, loop, interrupt exit 17
   #1 f0.CV4 [double] reg = phi(#0, #22)
   #3 f0.CV5 [long] reg = phi(#2, #23)
 0016 f0 IS_SMALLER #3, #4 fused inline
   checks direction taken -> exit 5
-0008 f0 INIT_FCALL const#4 inline map 0 leaves -> exit 6
-     f0 init e1
+0008 f0 INIT_FCALL const#4 inline map 0
+     f0 init e1 in-place
 0009 f0 SEND_VAR #5 inline
 0010 f0 SEND_VAR #3 inline
-0011 f0 DO_UCALL inline leaves -> exit 7
+0011 f0 DO_UCALL inline unwinds -> unwind 0
      f1 enter e1
   -> #6 f1.CV0 [long]
   -> #7 f1.CV1 [long]
 0002 f1 ADD #6, #7 inline
   -> #8 f1.T0 [long] reg
-  checks #8 long -> exit 8
+  checks #8 long -> exit 6
 0003 f1 ASSIGN #9, #8 inline
   -> #10 f1.CV2 [long] reg
 0004 f1 ADD #10, int(1) inline
   -> #11 f1.T2 [long] reg
-  checks #11 long -> exit 9
+  checks #11 long -> exit 7
 0005 f1 MUL #10, #11 inline
   -> #12 f1.T3 [long] reg
-  checks #12 long -> exit 10
+  checks #12 long -> exit 8
 0006 f1 DIV #12, int(2) inline
   -> #13 f1.T4 [long] reg
-  checks #13 long -> exit 11
+  checks #13 long -> exit 9
 0007 f1 ADD #13, #6 inline
   -> #14 f1.T5 [long] reg
-  checks #14 long -> exit 12
+  checks #14 long -> exit 10
 0008 f1 ADD #14, int(1) inline
   -> #15 f1.T6 [long] reg
-  checks #15 long -> exit 13
-0009 f1 DIV float(1), #15 inline leaves -> exit 14
+  checks #15 long -> exit 11
+0009 f1 DIV float(1), #15 inline leaves -> exit 12
   -> #16 f1.T7 [double] reg
 0010 f1 VERIFY_RETURN_TYPE #16 inline
   -> #17 f1.T7 [double] reg
 0011 f1 RETURN #17 inline
      f0 back to #18
   -> #18 f0.T4 [double]
-0012 f0 FETCH_DIM_R #19, #3 inline leaves -> exit 15
+0012 f0 FETCH_DIM_R #19, #3 inline leaves -> exit 13
   -> #20 f0.T5 [double] reg
-  checks #20 double -> exit 16
-  checks #20 ref to double -> exit 17
+  checks #20 double -> exit 14
+  checks #20 ref to double -> exit 15
 0013 f0 MUL #18, #20 inline
   -> #21 f0.T6 [double] reg
 0014 f0 ASSIGN_OP #1, #21 inline
   -> #22 f0.CV4 [double] reg
 0015 f0 PRE_INC #3 inline
   -> #23 f0.CV5 [long] reg
-  checks #23 long -> exit 18
+  checks #23 long -> exit 16
 end: back to 0
 exit 0: f0 0016 plain to vm
 exit 1: f0 0016 plain packed guard
@@ -71,18 +71,17 @@ exit 2: f0 0016 plain f0.CV1:array
 exit 3: f0 0016 plain f0.CV1:array f0.CV3:long
 exit 4: f0 0016 plain f0.CV1:array f0.CV3:long f0.CV4:double
 exit 5: f0 0018 plain f0.CV4=#1 f0.CV5=#3 f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long
-exit 6: f0 0008 plain f0.CV4=#1 f0.CV5=#3 f0.CV0:long f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long
-exit 7: f0 0011 restore call f0.CV4=#1 f0.CV5=#3 f0.CV0:long f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long
-exit 8: f1 0002 plain f0.CV4=#1 f0.CV5=#3 f1.CV0:long f1.CV1:long
-exit 9: f1 0004 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#10 f1.CV0:long f1.CV1:long f1.CV2:long
-exit 10: f1 0005 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#10 f1.T2=#11 f1.CV0:long f1.CV1:long f1.CV2:long f1.T2:long
-exit 11: f1 0006 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#10 f1.T3=#12 f1.CV0:long f1.CV1:long f1.CV2:long f1.T3:long
-exit 12: f1 0007 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#10 f1.T4=#13 f1.CV0:long f1.CV1:long f1.CV2:long f1.T4:long
-exit 13: f1 0008 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#10 f1.T5=#14 f1.CV0:long f1.CV1:long f1.CV2:long f1.T5:long
-exit 14: f1 0009 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#10 f1.T6=#15 f1.CV0:long f1.CV1:long f1.CV2:long f1.T6:long
-exit 15: f0 0012 plain f0.CV4=#1 f0.CV5=#3 f0.CV0:long f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long f0.T4:double to vm
-exit 16: f0 0013 plain f0.CV4=#1 f0.CV5=#3 f0.T5=copied #20 f0.CV0:long f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long f0.T4:double
-exit 17: f0 0013 plain f0.CV4=#1 f0.CV5=#3 f0.T5=copied #20 through a reference f0.CV0:long f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long f0.T4:double
-exit 18: f0 0015 plain f0.CV4=#22 f0.CV5=#3 f0.CV0:long f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long
-exit 19: f0 0016 plain f0.CV4=#1 f0.CV5=#3 f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long to vm
+exit 6: f1 0002 plain f0.CV4=#1 f0.CV5=#3 f1.CV0:long f1.CV1:long
+exit 7: f1 0004 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#10 f1.CV0:long f1.CV1:long f1.CV2:long
+exit 8: f1 0005 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#10 f1.T2=#11 f1.CV0:long f1.CV1:long f1.CV2:long f1.T2:long
+exit 9: f1 0006 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#10 f1.T3=#12 f1.CV0:long f1.CV1:long f1.CV2:long f1.T3:long
+exit 10: f1 0007 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#10 f1.T4=#13 f1.CV0:long f1.CV1:long f1.CV2:long f1.T4:long
+exit 11: f1 0008 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#10 f1.T5=#14 f1.CV0:long f1.CV1:long f1.CV2:long f1.T5:long
+exit 12: f1 0009 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#10 f1.T6=#15 f1.CV0:long f1.CV1:long f1.CV2:long f1.T6:long
+exit 13: f0 0012 plain f0.CV4=#1 f0.CV5=#3 f0.CV0:long f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long f0.T4:double to vm
+exit 14: f0 0013 plain f0.CV4=#1 f0.CV5=#3 f0.T5=copied #20 f0.CV0:long f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long f0.T4:double
+exit 15: f0 0013 plain f0.CV4=#1 f0.CV5=#3 f0.T5=copied #20 through a reference f0.CV0:long f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long f0.T4:double
+exit 16: f0 0015 plain f0.CV4=#22 f0.CV5=#3 f0.CV0:long f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long
+exit 17: f0 0016 plain f0.CV4=#1 f0.CV5=#3 f0.CV1:array f0.CV3:long f0.CV4:double f0.CV5:long to vm
+unwind 0: f0.CV4=#1 f0.CV5=#3
 map 0: offset 2 slot 0

@@ -188,9 +188,16 @@ impl<'a> Dump<'a> {
                 frame,
                 callee,
                 began,
+                plain,
             } => {
                 let target = callee.user().map_or("native".to_owned(), func);
-                writeln!(text, "     f{} {} {target}", frame.0, began.word())
+                let in_place = if plain.is_some() { " in-place" } else { "" };
+                writeln!(
+                    text,
+                    "     f{} {} {target}{in_place}",
+                    frame.0,
+                    began.word()
+                )
             }
             Op::Enter { frame } => {
                 let named = self

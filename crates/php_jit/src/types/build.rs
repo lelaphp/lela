@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use php_engine::tier::{FuncRef, MapPtrRaw, Sample, UnitView};
+use php_engine::tier::{FuncRef, MapPtrRaw, PlainCall, Sample, UnitView};
 use php_heap::ZvalType;
 use php_unit::decl::Parameter;
 use php_unit::{CacheSlot, Effects, OpArray, Opcode, OperandKind, Opline, OplineIdx};
@@ -165,6 +165,33 @@ struct Call {
     args: Vec<Sent>,
     /// For a native's call, what its declaration says it returns.
     returns: Option<Types>,
+    /// Its callee, as the recording wrote it down.
+    callee: Callee,
+    /// Whether compiled code pushed it in place ([`Op::InitCall`]'s
+    /// `plain`), and so makes it in place.
+    plain: bool,
+}
+
+/// What compiled code serves an inline opline's work in place of the
+/// kernel it would call, so that it takes none of the kernel's exits, as
+/// php's code generator takes none there: the push of a plain call, a
+/// send to a callee that takes the argument by value, the activation of
+/// a plain call, and the leave of a frame that holds nothing to give up.
+enum InPlace {
+    Push(PlainCall),
+    Send,
+    Make,
+    Leave,
+}
+
+/// What an inline opline serves in place, once its plain call is the
+/// call's ([`InPlace`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Served {
+    Push,
+    Send,
+    Make,
+    Leave,
 }
 
 /// What a send wrote into a call's argument: the types of what it sent,
@@ -201,6 +228,9 @@ struct Builder<'a> {
     checks: Vec<Placed>,
     leaves: Vec<(OpId, Leaves, Draft)>,
     calls: Vec<Call>,
+    /// The plain call the `INIT_*` just built pushes in place, for the
+    /// call it begins.
+    pushing: Option<PlainCall>,
     map_ptrs: Vec<MapPtrRaw>,
     phis: Vec<ValueId>,
     /// What the last return returned.
@@ -244,6 +274,7 @@ impl<'a> Builder<'a> {
             checks: Vec::new(),
             leaves: Vec::new(),
             calls: Vec::new(),
+            pushing: None,
             map_ptrs: Vec::new(),
             phis: Vec::new(),
             returned: Types::NULL,
@@ -452,6 +483,10 @@ impl<'a> Builder<'a> {
     }
 
     /// One recorded opline.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the one place an opline's guards, form, writes and exits meet"
+    )]
     fn line(
         &mut self,
         func: FuncRef,
@@ -490,6 +525,9 @@ impl<'a> Builder<'a> {
             samples,
         );
         let form = self.form(frame, &op, seen, next);
+        let in_place = (form == Form::Inline)
+            .then(|| self.in_place(frame, &op, next))
+            .flatten();
         self.sampled.insert(idx, samples);
         let map_ptr = self.map_ptr(func, &op, form);
         self.record_send(frame, &op, op1);
@@ -530,7 +568,14 @@ impl<'a> Builder<'a> {
             op1_def: written.op1,
             op2_def: written.op2,
             fused,
-            imm: imm(&op),
+            imm: match in_place {
+                Some(InPlace::Send) => Imm::Arg(op.op2),
+                Some(InPlace::Leave) => Imm::Leave,
+                Some(InPlace::Make) => Imm::Make {
+                    returns: (op.out_type != OperandKind::Unused).then_some(op.out),
+                },
+                _ => imm(&op),
+            },
             form,
             map_ptr,
             exit: None,
@@ -541,7 +586,16 @@ impl<'a> Builder<'a> {
         let jump = if fused { after } else { Some(op) };
         let target = jump.and_then(|jump| jump.jump_target());
         self.successor = went(at, &op, target, len, branch);
-        self.own_exit(idx, frame, &op, form, t1);
+        let in_place = in_place.map(|in_place| match in_place {
+            InPlace::Push(plain) => {
+                self.pushing = Some(plain);
+                Served::Push
+            }
+            InPlace::Send => Served::Send,
+            InPlace::Make => Served::Make,
+            InPlace::Leave => Served::Leave,
+        });
+        self.own_exit(idx, frame, &op, (form, in_place), t1);
         self.stands(idx, (frame, at), &op, after.as_ref(), ahead, t1);
         if let Some(taken) = branch {
             let to = Branched {
@@ -773,11 +827,21 @@ impl<'a> Builder<'a> {
     /// whose destructor may, an inline fetch from a temporary array,
     /// which frees it once its element is read, and an inline element
     /// write, which its handler serves where it cannot write in place.
-    fn own_exit(&mut self, idx: OpId, frame: Frame, op: &Opline, form: Form, old: Types) {
+    fn own_exit(
+        &mut self,
+        idx: OpId,
+        frame: Frame,
+        op: &Opline,
+        (form, in_place): (Form, Option<Served>),
+        old: Types,
+    ) {
         let Some(Op::Line(line)) = self.ops.get(idx.index()) else {
             return;
         };
-        let (at, op1, may_leave) = (line.opline, line.op1, inline_may_leave(line));
+        // What compiled code serves in place takes no exit of its own; a
+        // kernel it falls back to that throws unwinds.
+        let (at, op1) = (line.opline, line.op1);
+        let may_leave = inline_may_leave(line) && in_place.is_none();
         if form == Form::Inline && may_leave {
             let unfinished = draft(Point::Before(idx), frame, At::Opline(at));
             // An element a fetch does not find is the interpreter's to
@@ -802,6 +866,7 @@ impl<'a> Builder<'a> {
                 (op.opcode == Opcode::Assign && !old.within(UNCOUNTED))
                     || (op.opcode == Opcode::FetchDimR && self.is_temp(op1))
                     || op.opcode == Opcode::AssignDim
+                    || matches!(in_place, Some(Served::Make))
             }
             Form::Step => op.opcode.effects().contains(Effects::THROW),
         };
@@ -820,6 +885,10 @@ impl<'a> Builder<'a> {
                 self.ops.last(),
                 Some(Op::Line(line)) if line.form == Form::Inline
             );
+        let plain = self
+            .pushing
+            .take()
+            .filter(|plain| began == Began::Here && callee.user() == Some(plain.callee()));
         self.begin();
         self.calls.push(Call {
             inline,
@@ -828,13 +897,60 @@ impl<'a> Builder<'a> {
                 Callee::Native(returns) => Some(returns),
                 Callee::User(_) => None,
             },
+            callee,
+            plain: plain.is_some(),
         });
         self.ops.push(Op::InitCall {
             frame,
             callee,
             began,
+            plain,
         });
         Ok(())
+    }
+
+    /// What compiled code serves of the inline opline `op` of `frame` in
+    /// place, `next` being the record after it: the push of an `INIT_*`
+    /// whose callee the trace recorded where php's needs no guard, an
+    /// `INIT_FCALL` of a user function of the engine's arena or a call of
+    /// the frame's own op array, php's recursive call
+    /// (`zend_jit_init_fcall`, `Z/ext/opcache/jit/zend_jit_ir.c:8790-8906`),
+    /// which the view took as a plain call; a `SEND_VAL_EX` to a callee the
+    /// trace recorded that takes the argument by value, decided as php's
+    /// `zend_jit_send_val` decides it as it compiles (`:9466-9506`); the
+    /// `DO_*CALL` that makes a call pushed in place; and a function's
+    /// `RETURN` where no observer is declared.
+    fn in_place(&self, frame: Frame, op: &Opline, next: Option<&Event>) -> Option<InPlace> {
+        let func = self.frames[usize::from(frame.0)].func;
+        match op.opcode {
+            Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName => {
+                let Some(Event::InitCall {
+                    callee: Callee::User(callee),
+                    began: Began::Here,
+                }) = next
+                else {
+                    return None;
+                };
+                let known = op.opcode == Opcode::InitFcall || *callee == func;
+                let plain = self.view.call(*callee, op.extended_value)?;
+                known.then(|| InPlace::Push(plain.clone()))
+            }
+            Opcode::SendValEx if op.op2_type == OperandKind::Unused => {
+                let callee = self.calls.last()?.callee.user()?;
+                let params = self.view.parameters(callee)?;
+                sent_by_value(params, op.op2).then_some(InPlace::Send)
+            }
+            Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName => {
+                let made = matches!(next, Some(Event::Enter { .. }))
+                    && self.calls.last().is_some_and(|call| call.plain);
+                made.then_some(InPlace::Make)
+            }
+            Opcode::Return => {
+                let function = self.view.is_main(func) == Some(false);
+                (function && !self.view.observed()).then_some(InPlace::Leave)
+            }
+            _ => None,
+        }
     }
 
     /// What a send wrote into the call under way, where it sends a value.
@@ -2366,14 +2482,21 @@ fn fused(op: &Opline, after: Option<&Opline>, branch: Option<bool>) -> Option<Fu
     })
 }
 
+/// Whether the parameter numbered `n` of a user function declaring
+/// `params` takes its argument by value: php's `!ARG_MUST_BE_SENT_BY_REF`,
+/// a number past the declared parameters asking the variadic's.
+fn sent_by_value(params: &[Parameter], n: u32) -> bool {
+    let at = usize::try_from(n.saturating_sub(1)).unwrap_or(usize::MAX);
+    params
+        .get(at)
+        .or_else(|| params.last().filter(|param| param.variadic))
+        .is_none_or(|param| !param.by_ref || param.prefer_ref)
+}
+
 /// What `op` names beside its operands that its inline form reads.
 fn imm(op: &Opline) -> Imm {
     match op.opcode {
-        Opcode::SendVal | Opcode::SendVar | Opcode::SendValEx
-            if op.op2_type == OperandKind::Unused =>
-        {
-            Imm::Arg(op.op2)
-        }
+        Opcode::SendVal | Opcode::SendVar if op.op2_type == OperandKind::Unused => Imm::Arg(op.op2),
         Opcode::AssignOp => lattice::binary_of(op.extended_value).map_or(Imm::None, Imm::Binary),
         _ => Imm::None,
     }

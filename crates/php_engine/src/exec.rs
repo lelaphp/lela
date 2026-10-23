@@ -708,6 +708,45 @@ impl Header {
     pub(crate) const CALLEE_AT: usize = std::mem::offset_of!(Header, callee);
     pub(crate) const OPLINE_AT: usize = std::mem::offset_of!(Header, opline);
     pub(crate) const INFO_AT: usize = std::mem::offset_of!(Header, info);
+
+    /// Where compiled code that makes and leaves a plain call reads and
+    /// writes the rest of the words it touches, past the room's link
+    /// (`tier::FrameLayout`, `jit-design.md` §5.3): `EX(This)`, the
+    /// closure, `ZEND_CALL_NUM_ARGS`, the caller and the slot of its that
+    /// takes the return, `EX(run_time_cache)` and the annex.
+    pub(crate) const THIS_AT: usize = std::mem::offset_of!(Header, this);
+    pub(crate) const CLOSURE_AT: usize = std::mem::offset_of!(Header, closure);
+    pub(crate) const NUM_ARGS_AT: usize = std::mem::offset_of!(Header, num_args);
+    pub(crate) const CALLER_AT: usize = std::mem::offset_of!(Header, caller);
+    pub(crate) const RETURNS_TO_AT: usize = std::mem::offset_of!(Header, returns_to);
+    pub(crate) const CACHE_AT: usize = std::mem::offset_of!(Header, run_time_cache);
+    pub(crate) const ANNEX_AT: usize = std::mem::offset_of!(Header, annex);
+
+    /// The half-word a caller frame `frame` is written as, where an
+    /// opline of it made the call ([`CallerAt`]): its place and
+    /// [`Header::NUMBERED_FROM`].
+    #[cfg(test)]
+    pub(crate) fn caller_word(frame: FrameRef) -> u32 {
+        CallerAt::of(Caller::Opline(frame))
+            .0
+            .map_or(0, std::num::NonZeroU32::get)
+    }
+
+    /// The half-word the slot that takes a frame's return is written as,
+    /// zero for none ([`ReturnSlot`]): the slot and
+    /// [`Header::NUMBERED_FROM`].
+    #[cfg(test)]
+    pub(crate) fn returns_word(slot: Option<u32>) -> u32 {
+        slot.map_or(0, |slot| ReturnSlot::of(slot).0.get())
+    }
+
+    /// What a caller's place and a return slot are written past, so that
+    /// none is zero, which is the half-word's `None`.
+    pub(crate) const NUMBERED_FROM: u32 = 1;
+
+    /// The bit of the caller's half-word that says the call was served
+    /// from outside the loop ([`Caller::Loop`]).
+    pub(crate) const CALLER_LOOP: u32 = CallerAt::LOOP;
 }
 
 /// `ZEND_CALL_INFO`'s flags as this engine's frame has them, one bit
@@ -795,6 +834,16 @@ impl CallInfo {
     pub(crate) fn of(bits: u32) -> CallInfo {
         CallInfo(bits)
     }
+
+    /// The flags as compiled code writes them, the word itself.
+    pub(crate) fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// The flags a frame [`crate::api::request::Request::leaves_plainly`]
+    /// refuses to leave with no lookup: a call not made a user frame, and
+    /// arguments moved past the declared parameters.
+    pub(crate) const LEAVES_BY_KERNEL: u32 = Self::CALL | Self::EXTRA_ARGS;
 
     pub(crate) fn top_code(self) -> bool {
         self.has(Self::TOP_CODE)

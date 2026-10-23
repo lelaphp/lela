@@ -98,6 +98,10 @@ FreshStr::set_len
 GcStatus
 GcTable
 HEADER_AT
+HEADER_WORDS
+HeaderImage
+HeaderImage::address
+HeaderImage::of
 Heap
 Heap::addref
 Heap::array

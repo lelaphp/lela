@@ -1018,7 +1018,7 @@ impl<'p> Recorder<'p> {
             let went = match edge {
                 Stepped::Same(next) => {
                     frame = next;
-                    self.same(req, frame, &op, at, after.as_ref(), call)
+                    self.same(req, view, frame, (&op, at, after.as_ref()), call)
                 }
                 Stepped::Pushed(callee) => {
                     frame = callee;
@@ -1165,14 +1165,15 @@ impl<'p> Recorder<'p> {
 
     /// A step that went on in a frame: the direction of a conditional
     /// jump, or of the fused compare-and-branch the opline began,
-    /// written on its `Op`, and a call an `INIT_*` began written down.
+    /// written on its `Op`, and a call an `INIT_*` began written down,
+    /// a plain one taken into `view` for compiled code to write in place
+    /// ([`UnitView::hold_call`]).
     fn same(
         &mut self,
         req: &Request,
+        view: &mut UnitView,
         frame: FrameRef,
-        op: &Opline,
-        at: OplineIdx,
-        after: Option<&Opline>,
+        (op, at, after): (&Opline, OplineIdx, Option<&Opline>),
         before: Option<Building>,
     ) -> Went {
         let now = position(req, frame);
@@ -1201,8 +1202,12 @@ impl<'p> Recorder<'p> {
         if self.policy.max_polymorphic_calls() == 0 && call.target.is_some() && polymorphic(op) {
             self.megamorphic.push(call.call);
         }
+        let callee = Callee::of(req, call);
+        if callee.user().is_some() {
+            view.hold_call(req, call.call);
+        }
         self.events.push(Event::InitCall {
-            callee: Callee::of(req, call),
+            callee,
             began: Began::Here,
         });
         if self.count(1) {

@@ -40,7 +40,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use php_engine::tier::{self, Epoch, FuncRef, MapPtrRaw, Request, Word};
+use php_engine::tier::{self, Epoch, FuncRef, MapPtrRaw, PlainCall, Request, Word};
 use php_unit::OplineIdx;
 
 use crate::lower::{Compiled, Fuzzed, Mark};
@@ -192,6 +192,12 @@ pub(crate) struct Trace<P: Pages = Native> {
     /// held for as long as the code that names them.
     #[expect(dead_code, reason = "read and written by the trace's code alone")]
     pub(crate) fuzzed: Fuzzed,
+    /// The plain calls its code pushes in place, whose headers `enter`
+    /// lays out in the request ([`lower::Compiled::calls`]).
+    pub(crate) calls: Box<[PlainCall]>,
+    /// The callees of the calls its code makes in place whose caches
+    /// `enter` asks are laid down (`lower::Compiled::laid`).
+    pub(crate) laid: Box<[FuncRef]>,
     /// Every trace an exit links to, each once, ascending.
     #[cfg_attr(
         not(test),
@@ -690,6 +696,8 @@ impl<P: Pages> TraceTable<P> {
             map_ptrs: compiled.map_ptrs,
             marks: compiled.marks,
             fuzzed: compiled.fuzzed,
+            calls: compiled.calls,
+            laid: compiled.laid,
             links: links.into_boxed_slice(),
         });
         self.fill(id, trace)?;

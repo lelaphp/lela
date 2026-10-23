@@ -444,6 +444,48 @@ impl<H> Frame<H> {
     }
 }
 
+/// The words of a room past its link, php's `zend_execute_data` past
+/// `prev_execute_data`.
+pub const HEADER_WORDS: usize = (ROOM_BYTES - HEADER_AT) / size_of::<u64>();
+
+/// A frame header's bytes as a push lays them in a room, copied out of
+/// the header and never read as one again: what code that pushes the same
+/// call in place copies into its room, from the address this holds for
+/// as long as it lives (`jit-design.md` §5.3). Bytes and nothing else, so
+/// it is shared across threads as the code that reads it is.
+#[derive(Debug, Clone)]
+pub struct HeaderImage(Box<[MaybeUninit<u64>; HEADER_WORDS]>);
+
+impl HeaderImage {
+    /// The bytes of `header`, a header a push lays in a room whole, past
+    /// the link ([`Frame`]'s `FITS`); none for a header of another size.
+    #[must_use]
+    pub fn of<H>(header: &H) -> Option<HeaderImage> {
+        if size_of::<H>() != HEADER_WORDS * size_of::<u64>() || needs_drop::<H>() {
+            return None;
+        }
+        let mut words = Box::new([MaybeUninit::<u64>::uninit(); HEADER_WORDS]);
+        // SAFETY: the header is `size_of::<H>()` bytes, as many as the
+        // image's words were just allocated for, and the two do not
+        // overlap; an untyped copy carries whatever the bytes are, and no
+        // code reads them as a header again.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                std::ptr::from_ref(header).cast::<u8>(),
+                words.as_mut_ptr().cast::<u8>(),
+                size_of::<H>(),
+            );
+        };
+        Some(HeaderImage(words))
+    }
+
+    /// The address of the image's first byte.
+    #[must_use]
+    pub fn address(&self) -> usize {
+        self.0.as_ptr().addr()
+    }
+}
+
 /// A room no frame stands in, held where its owner holds it and not on
 /// the stack's pages: php's `execute_fake`, the `zend_execute_data` a
 /// generator object carries as a field, which a resumption through a

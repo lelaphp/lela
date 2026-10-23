@@ -51,7 +51,7 @@ use cranelift_codegen::ir::SourceLoc;
 use cranelift_codegen::isa::{self, OwnedTargetIsa};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::{Context, Final, MachSrcLoc};
-use php_engine::tier::{FuncRef, MapPtrRaw};
+use php_engine::tier::{FuncRef, MapPtrRaw, PlainCall};
 use php_unit::OplineIdx;
 
 use crate::policy::{JitDebug, Mode, Policy};
@@ -105,6 +105,16 @@ pub(crate) struct Compiled {
     /// the guard fails once, once per trace and so per process; the code
     /// holds their address, so they live as long as it. Empty otherwise.
     pub(crate) fuzzed: Fuzzed,
+    /// The plain calls the code pushes in place, in the order it reads
+    /// their headers in, the request's, at [`IMAGES_AT`].
+    pub(crate) calls: Box<[PlainCall]>,
+    /// The op arrays a call the code makes in place enters whose caches
+    /// `enter` asks are laid down in the request, as php's
+    /// `zend_jit_init_func_run_time_cache_helper` lays one down at the
+    /// push (`Z/ext/opcache/jit/zend_jit_ir.c:8840-8850`): every callee
+    /// but one of a recursive call, which runs in a frame of its own op
+    /// array and so finds its cache laid.
+    pub(crate) laid: Box<[FuncRef]>,
 }
 
 /// The bytes compiled code reads and writes under `jit.mode=exit-fuzz`
@@ -217,6 +227,29 @@ pub(crate) const INTERRUPT_AT: i32 = 8;
 /// there ([`Compiled::entry_stood`]).
 pub(crate) const STOOD_AT: i32 = 24;
 
+/// Where compiled code reads, in the `ExitCtx`, the address of the
+/// request's VM stack (`php_engine::tier::stack`), which it pushes and
+/// pops a plain call's frame on in place: past the `Stood`.
+pub(crate) const STACK_AT: i32 = 56;
+
+/// Where compiled code reads, in the `ExitCtx`, the address of the
+/// request's headers for the calls it pushes in place, one address a call
+/// in [`Compiled::calls`]' order, each `php_engine::tier::FRAME`'s
+/// `header_bytes` long (`php_engine::tier::call_image`).
+pub(crate) const IMAGES_AT: i32 = 64;
+
+/// Where compiled code reads, in the `ExitCtx`, the place on the stack of
+/// the frame the trace is entered on, a `u32`: the caller a call it makes
+/// in place from that frame names.
+pub(crate) const ROOT_AT: i32 = 72;
+
+/// Where compiled code reads, in the `ExitCtx`, whether it pushes and
+/// makes its calls in place in this request, a `u32` that is zero where a
+/// call's header is not the request's yet, its function not declared, or
+/// the cache of a callee it enters ([`Compiled::laid`]) is not laid down,
+/// so that it serves them through the kernels instead.
+pub(crate) const READY_AT: i32 = 76;
+
 /// Whether `ir`'s code reads where the frame stands as it enters: its
 /// first op holds it, php's IP guard; a call its frame began before
 /// the trace is under way before any kernel stood the frame, whose room
@@ -238,6 +271,41 @@ fn stood_at_entry(ir: &TraceIr) -> bool {
         });
     let room_held = (ir.guards.iter()).any(|guard| matches!(guard.check, Check::Room { .. }));
     ip_guarded || begun_before || room_held
+}
+
+/// The plain calls `ir` pushes in place, each once, which the compiled
+/// code's copies of their headers are read from.
+fn in_place(ir: &TraceIr) -> Box<[PlainCall]> {
+    let mut calls: Vec<PlainCall> = Vec::new();
+    for op in &ir.ops {
+        if let Op::InitCall {
+            plain: Some(plain), ..
+        } = op
+            && !calls.contains(plain)
+        {
+            calls.push(plain.clone());
+        }
+    }
+    calls.into_boxed_slice()
+}
+
+/// The callees of the calls `ir` pushes in place and is not the frame's own
+/// op array, whose caches `enter` asks are laid ([`Compiled::laid`]).
+fn laid(ir: &TraceIr) -> Box<[FuncRef]> {
+    let mut laid = Vec::new();
+    for op in &ir.ops {
+        if let Op::InitCall {
+            frame,
+            plain: Some(plain),
+            ..
+        } = op
+            && ir.frames.get(usize::from(frame.0)).map(|info| info.func) != Some(plain.callee())
+            && !laid.contains(&plain.callee())
+        {
+            laid.push(plain.callee());
+        }
+    }
+    laid.into_boxed_slice()
 }
 
 /// Where the trace's first recorded opline stands.
@@ -428,15 +496,21 @@ impl Backend {
     /// places them.
     pub(crate) fn compile(&self, ir: &TraceIr, name: TraceName) -> Result<Compiled, Abort> {
         let config = self.isa.frontend_config();
+        let calls = in_place(ir);
         // Under exit-fuzz a first pass counts the guards, one byte each.
         let fuzzed = if self.fuzz {
-            let (_, sites) = clif::lower(ir, config, &self.symbols, Some(clif::Fuzz::COUNTING))?;
+            let (_, sites) = clif::lower(
+                ir,
+                config,
+                (&self.symbols, &calls),
+                Some(clif::Fuzz::COUNTING),
+            )?;
             Fuzzed::new(sites)
         } else {
             Fuzzed::default()
         };
         let fuzz = self.fuzz.then(|| fuzzed.fuzz());
-        let (func, _) = clif::lower(ir, config, &self.symbols, fuzz)?;
+        let (func, _) = clif::lower(ir, config, (&self.symbols, &calls), fuzz)?;
         let mut ctx = Context::for_function(func);
         let code = ctx
             .compile(&*self.isa, &mut ControlPlane::default())
@@ -465,6 +539,8 @@ impl Backend {
             marks,
             name,
             fuzzed,
+            laid: laid(ir),
+            calls,
         })
     }
 
@@ -472,7 +548,14 @@ impl Backend {
     /// the goldens hold.
     #[cfg(test)]
     fn clif(&self, ir: &TraceIr) -> Result<cranelift_codegen::ir::Function, Abort> {
-        clif::lower(ir, self.isa.frontend_config(), &self.symbols, None).map(|(func, _)| func)
+        let calls = in_place(ir);
+        clif::lower(
+            ir,
+            self.isa.frontend_config(),
+            (&self.symbols, &calls),
+            None,
+        )
+        .map(|(func, _)| func)
     }
 }
 

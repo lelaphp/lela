@@ -135,6 +135,7 @@ impl JitRequest {
             submitter,
             recording: Cell::new(false),
             submitted: Cell::new(None),
+            headers: crate::enter::Headers::default(),
         }
     }
 }

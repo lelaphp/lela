@@ -403,9 +403,10 @@ fn a_fetch_takes_its_exits_in_phps_order() -> Result<(), String> {
 /// push frames holds the stack's room for them once, at its entry, its
 /// first exit, back to the interpreter at the loop's first opline, as
 /// php's trace for `$s += g($i)` takes `exit_0` `0009/----/0/VM`; a trace
-/// that does not loop holds it at each `INIT_*` instead, after the call's
-/// own exit, as `zend_jit_push_call_frame` follows `zend_jit_init_fcall`'s
-/// guard on the callee.
+/// that does not loop holds it at each `INIT_*` instead, in
+/// `zend_jit_push_call_frame`, an `INIT_FCALL` of a user function taking no
+/// exit of its own, as `zend_jit_init_fcall` holds no guard on such a
+/// callee (`Z/ext/opcache/jit/zend_jit_ir.c:8790-8906`, #3230).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_trace_holds_the_stacks_room_where_php_does() -> Result<(), String> {
@@ -443,10 +444,9 @@ fn a_trace_holds_the_stacks_room_where_php_does() -> Result<(), String> {
     let Some(Op::Line(line)) = linked.ops.get(init.index()) else {
         return Err("no INIT_FCALL".to_owned());
     };
-    let own = line.exit.ok_or("the INIT_FCALL has no exit of its own")?;
-    assert_eq!(
-        rooms(&linked),
-        [(GuardAt::Before(init), own.0 + 1)],
+    assert_eq!(line.exit, None, "{}", dump::render(&linked));
+    assert!(
+        matches!(rooms(&linked).as_slice(), [(GuardAt::Before(at), _)] if *at == init),
         "{}",
         dump::render(&linked)
     );

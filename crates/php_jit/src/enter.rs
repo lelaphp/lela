@@ -47,7 +47,7 @@ use std::ptr::{self, NonNull};
 use std::sync::atomic::AtomicBool;
 
 use php_engine::tier::{self, Epoch, Fatal, FrameRef, FuncRef, Held, Request, Stepped, TraceNum};
-use php_heap::Zval;
+use php_heap::{HeaderImage, Zval};
 use php_unit::{MapPtrOffset, OplineIdx};
 
 use crate::lower::{self, Stood};
@@ -82,8 +82,10 @@ impl Crossed for Request {
 /// (`jit-design.md` §4.6): a local of the `enter` that made it, its
 /// address held by compiled code for exactly that call. Compiled code
 /// reads `req` at offset zero, `interrupt` at [`lower::INTERRUPT_AT`],
-/// `at` at [`lower::ENTRY_AT`] and `stood` at [`lower::STOOD_AT`], and
-/// nothing else; `pending` has no C layout
+/// `at` at [`lower::ENTRY_AT`], `stood` at [`lower::STOOD_AT`], `stack` at
+/// [`lower::STACK_AT`], `images` at [`lower::IMAGES_AT`], `root` at
+/// [`lower::ROOT_AT`] and `ready` at [`lower::READY_AT`], and nothing
+/// else; `pending` has no C layout
 /// and is the wrappers' alone. It borrows the request mutably for `'a`,
 /// so the request outlives it and nothing else touches the request
 /// while compiled code may.
@@ -97,6 +99,19 @@ pub(crate) struct ExitCtx<'a, R = Request> {
     /// it, laid down for a trace whose code reads it there
     /// ([`Trace::entry_stood`]); null and zero otherwise.
     stood: Stood,
+    /// The request's VM stack, which code that pushes and leaves a plain
+    /// call in place moves the words of (`tier::stack`); null for a
+    /// stand-in request.
+    stack: *mut u8,
+    /// The request's headers of the calls the trace pushes in place, one
+    /// address a call ([`Images`]).
+    images: *const usize,
+    /// The place on the stack of the frame the trace is entered on.
+    root: u32,
+    /// Not zero where the trace pushes and makes its calls in place in
+    /// this request: each one's header is the request's, and the caches of
+    /// the callees it enters are laid down ([`Trace::laid`]).
+    ready: u32,
     pending: Option<Pending>,
     /// The epoch the trace was taken from, which holds every op array it
     /// recorded: what a kernel serves those op arrays out of
@@ -119,6 +134,22 @@ const _: () = assert!(
     lower::STOOD_AT >= 0
         && offset_of!(ExitCtx<'static>, stood) == lower::STOOD_AT.unsigned_abs() as usize
 );
+const _: () = assert!(
+    lower::STACK_AT >= 0
+        && offset_of!(ExitCtx<'static>, stack) == lower::STACK_AT.unsigned_abs() as usize
+);
+const _: () = assert!(
+    lower::IMAGES_AT >= 0
+        && offset_of!(ExitCtx<'static>, images) == lower::IMAGES_AT.unsigned_abs() as usize
+);
+const _: () = assert!(
+    lower::ROOT_AT >= 0
+        && offset_of!(ExitCtx<'static>, root) == lower::ROOT_AT.unsigned_abs() as usize
+);
+const _: () = assert!(
+    lower::READY_AT >= 0
+        && offset_of!(ExitCtx<'static>, ready) == lower::READY_AT.unsigned_abs() as usize
+);
 
 impl<'a, R: Crossed> ExitCtx<'a, R> {
     /// The `ExitCtx` over `req`, which it borrows for as long as it lives,
@@ -131,6 +162,10 @@ impl<'a, R: Crossed> ExitCtx<'a, R> {
             interrupt,
             at: At::First,
             stood: Stood::NOWHERE,
+            stack: ptr::null_mut(),
+            images: ptr::null(),
+            root: 0,
+            ready: 0,
             pending: None,
             holding: None,
             lent: PhantomData,
@@ -742,10 +777,18 @@ pub(crate) fn enter(
     } else {
         None
     };
+    // The stack the trace's calls in place are made on, their headers in
+    // this request, and whether they are made in place.
+    let stack = tier::stack(req).as_ptr();
+    let images = Images::of(req, trace);
+    let laid = trace.laid.iter().all(|callee| tier::laid(req, *callee));
+    let ready = images.ready() && laid;
     let before = tier::trace_num(req);
     tier::set_trace_num(req, TraceNum::from_raw(trace.id.get()));
     let mut cx = ExitCtx::new(&mut *req);
     cx.at = at;
+    (cx.stack, cx.images) = (stack, images.addresses());
+    (cx.root, cx.ready) = (frame.0, u32::from(ready));
     if let Some(stood) = stood {
         cx.stood = stood;
     }
@@ -791,6 +834,109 @@ pub(crate) fn enter(
         Answer::Abandoned => Err(internal(
             "a trace left through no exit of its own and kept nothing",
         )),
+    }
+}
+
+/// The request's headers of the calls a trace pushes in place, one address
+/// a call in its order (`lower::Compiled::calls`), each the header
+/// `push_call` lays down for the call in this request
+/// ([`tier::call_image`]), since the function's number and its record are
+/// the request's. A request keeps what it laid out for every trace it
+/// entered ([`Headers`]); the stand-in tiers of the tests, which keep no
+/// state of the tier's, lay them out for the one entry.
+enum Images {
+    /// None to read: the trace pushes nothing in place.
+    None,
+    /// The request's, kept in its state for as long as it runs.
+    Kept(*const usize),
+    /// Laid out for this entry alone: the headers, held while the code
+    /// reads them, and their addresses.
+    Own(
+        #[expect(dead_code, reason = "read by the code alone")] Box<[HeaderImage]>,
+        Box<[usize]>,
+    ),
+    /// A call's function is not the request's yet: the calls are served
+    /// through the kernels.
+    Unready,
+}
+
+impl Images {
+    /// The headers of `trace`'s calls in place as `req` lays them out.
+    fn of(req: &Request, trace: &Trace) -> Images {
+        if trace.calls.is_empty() {
+            return Images::None;
+        }
+        if let Some(state) = tier::state::<crate::JitRequest>(req) {
+            return state
+                .headers
+                .addresses(req, trace)
+                .map_or(Images::Unready, Images::Kept);
+        }
+        let Some(images) = (trace.calls.iter())
+            .map(|call| tier::call_image(req, call))
+            .collect::<Option<Box<[HeaderImage]>>>()
+        else {
+            return Images::Unready;
+        };
+        let addresses = images.iter().map(HeaderImage::address).collect();
+        Images::Own(images, addresses)
+    }
+
+    /// Whether every call's header is laid out.
+    fn ready(&self) -> bool {
+        !matches!(self, Images::Unready)
+    }
+
+    /// Where compiled code reads the addresses, null where it reads none.
+    fn addresses(&self) -> *const usize {
+        match self {
+            Images::Kept(at) => *at,
+            Images::Own(_, addresses) => addresses.as_ptr(),
+            Images::None | Images::Unready => ptr::null(),
+        }
+    }
+}
+
+/// What a request keeps of the headers its traces push calls in place
+/// with ([`Images`]): each call's header, by its callee and argument
+/// count, and each trace's addresses of them, by its number. A header's
+/// bytes and an address list stand where they were laid out for as long
+/// as the request runs, which is as long as the code that reads them can.
+#[derive(Debug, Default)]
+pub(crate) struct Headers(std::cell::RefCell<HeadersKept>);
+
+#[derive(Debug, Default)]
+struct HeadersKept {
+    calls: std::collections::HashMap<(FuncRef, u32), HeaderImage>,
+    traces: std::collections::HashMap<crate::table::TraceId, Box<[usize]>>,
+}
+
+impl Headers {
+    /// The addresses of `trace`'s headers in `req`, laid out the first time
+    /// the request enters it; none while a call's function is not the
+    /// request's.
+    fn addresses(&self, req: &Request, trace: &Trace) -> Option<*const usize> {
+        let mut kept = self.0.borrow_mut();
+        if let Some(addresses) = kept.traces.get(&trace.id) {
+            return Some(addresses.as_ptr());
+        }
+        let mut addresses = Vec::with_capacity(trace.calls.len());
+        for call in &trace.calls {
+            let key = (call.callee(), call.count());
+            let address = if let Some(image) = kept.calls.get(&key) {
+                image.address()
+            } else {
+                let image = tier::call_image(req, call)?;
+                let address = image.address();
+                kept.calls.insert(key, image);
+                address
+            };
+            addresses.push(address);
+        }
+        let addresses = addresses.into_boxed_slice();
+        let at = addresses.as_ptr();
+        kept.traces.insert(trace.id, addresses);
+        Some(at)
     }
 }
 
