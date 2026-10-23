@@ -1546,7 +1546,7 @@ impl<'p> Recorder<'p> {
 /// `op2` where they name a slot and the opcode reads a value there, and
 /// the `OP_DATA`'s `op1` after an assignment, whose class php does not
 /// record.
-fn sampled(
+pub(crate) fn sampled(
     req: &Request,
     frame: FrameRef,
     op: &Opline,

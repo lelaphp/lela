@@ -46,6 +46,7 @@ mod lower;
 mod observed;
 mod policy;
 mod record;
+mod stepping;
 mod table;
 #[cfg(test)]
 mod testing;
@@ -68,7 +69,15 @@ pub struct Jit;
 impl Tier for Jit {
     type State = JitRequest;
 
+    /// The site visited ([`dispatch::safepoint`]); in the bench's build of
+    /// the stepping arm alone, `cfg(php_jit_stepping)`, which only `xtask
+    /// bench` sets, the serving stepped to its end instead ([`stepping`],
+    /// #2946). Every other build's `cfg!` is `false` and the branch folds
+    /// away.
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
+        if cfg!(php_jit_stepping) {
+            return stepping::driven(req, frame);
+        }
         dispatch::safepoint(req, frame, site, held)
     }
 
