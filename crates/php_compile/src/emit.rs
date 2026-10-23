@@ -105,7 +105,7 @@ use php_heap::{
     Arr, Exponent, Fatal, Intern, Key, Made, Number, Scalar, Zval, ZvalType, double_to_string,
     numeric_prefix,
 };
-use php_link::{Exact, Indexed};
+use php_link::Indexed;
 use php_unit::decl::{
     AliasModifier, Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind,
     ConstDecl, ConstExpr, ConstantName, DynamicProperties, EnumBacking, FunctionDecl, HookKind,
@@ -472,7 +472,7 @@ pub(crate) struct Emit<'a> {
     /// What an `assert()` compiles to, [`Options::assertions`].
     assertions: assert::Assertions,
     /// The engine's persistent constants, [`Options::persistent`].
-    persistent: Indexed<'a, ConstDecl, Exact>,
+    persistent: crate::Persistent<'a>,
     /// The engine's natives, [`Options::functions`].
     functions: Indexed<'a, FunctionDecl, php_link::Folded>,
     /// The engine's classes, [`Options::classes`].
@@ -1253,7 +1253,8 @@ enum Found<'a> {
     /// A persistent constant the engine declared, its value a scalar
     /// written out.
     Declared(&'a ConstExpr),
-    /// A constant the request defined, a view of its value.
+    /// A constant whose table holds its value, a view of it: one the
+    /// request defined, or `PHP_SAPI` ([`crate::Persistent::host`]).
     Defined(Zval),
 }
 
@@ -7803,14 +7804,64 @@ impl<'a> Emit<'a> {
     }
 
     /// A class `CG(class_table)` holds while the file compiles: one the
-    /// engine declared, or one of the file's own that was bound early,
-    /// which a class declared by a `DECLARE_CLASS` is not yet.
+    /// engine declared, one of the file's own that was bound early,
+    /// which a class declared by a `DECLARE_CLASS` is not yet, and, for a
+    /// compile php runs without `ZEND_COMPILE_IGNORE_OTHER_FILES`, one
+    /// the request declared before it ([`crate::RequestClasses::declared`]).
+    ///
+    /// So an `eval`'d class whose parent the request declared is bound
+    /// early, as `zend_try_early_bind` binds it: it stands before the
+    /// `eval`'s code runs, and a name after it in the same compile reads
+    /// it, its constant substituted where the fetch and its cache slots
+    /// would stand (the file under the recipe's `TMPDIR`, so each
+    /// `eval`'s name has one length):
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3275-early-bound.inc';
+    /// file_put_contents($f, <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;');
+    /// m('class X9 { const K = 1; }');
+    /// echo m('class X10 extends X9 { const K = 1; } function f10() { return X10::K; }'), "\n";
+    /// eval('echo class_exists("X11", false) ? "bound" : "unbound", "\n"; class X11 extends X9 {}');
+    /// echo f10(), "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 640
+    /// bound
+    /// 1
+    /// ```
+    ///
+    /// A file the cache keeps is compiled under
+    /// `ZEND_COMPILE_IGNORE_OTHER_FILES`, so the same class there, its
+    /// parent declared by the file prepended to it, is left to its
+    /// `DECLARE_CLASS_DELAYED`, as opcache's dump of it reads in php:
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $p = $put('w3275-parent.inc', '<?php class X9 { const K = 1; }');
+    /// $c = $put('w3275-child.inc', '<?php class X10 extends X9 { const K = 2; } echo X10::K, "\n";');
+    /// $run = shell_exec(escapeshellarg(PHP_BINARY) . ' -n -d opcache.enable_cli=1 -d opcache.jit=off -d opcache.opt_debug_level=0x10000 -d auto_prepend_file=' . escapeshellarg($p) . ' ' . escapeshellarg($c) . ' 2>&1');
+    /// preg_match_all('/^(\d{4} DECLARE.*|\d)$/m', $run, $lines);
+    /// echo implode("\n", $lines[0]), "\n";
+    /// unlink($p);
+    /// unlink($c);
+    /// ```
+    /// ```expect process regime=jit-off
+    /// 0000 DECLARE_CLASS_DELAYED string("x10") string("x9")
+    /// 2
+    /// ```
     pub(super) fn bound_class(&self, name: &[u8]) -> Option<&ClassDecl> {
         if let Some((_, decl)) = self.known_classes.find(name) {
             return Some(decl);
         }
         (self.bound.iter().filter_map(|at| self.classes.get(*at)))
             .find(|decl| decl.name.0.eq_ignore_ascii_case(name))
+            .or_else(|| self.request_classes.declared(self.arena.lowercase(name)))
     }
 
     /// `ZEND_DECLARE_CLASS`, what php emits for a class it did not early
@@ -8139,8 +8190,19 @@ impl<'a> Emit<'a> {
                 // it (`zend_compile_const_expr_class_name`).
                 Scoped::ClassName { class } => {
                     let operand = self.decoded_class(class)?;
-                    if let Some(folded) = self.resolved_class_name(operand)? {
-                        return self.folded(folded);
+                    match self.resolved_class_name(operand)? {
+                        Some(Operated::Kept(folded)) => return self.folded(folded),
+                        // `self::class` is the class's own name string
+                        // (`ZVAL_STR_COPY`), no string of its own: the
+                        // one made to fold is given back, and the
+                        // value's string is the name's.
+                        Some(Operated::Made(made)) => {
+                            let folded = self.folded(Zval::string(made.str()));
+                            self.folded_string = None;
+                            self.strings.give_back(made);
+                            return folded;
+                        }
+                        None => {}
                     }
                     let ClassSpec::Name(token) = class else {
                         return Err(self.compile_error(
@@ -16490,6 +16552,7 @@ impl<'a> Emit<'a> {
             Scoped::ClassName { class } => {
                 let operand = self.decoded_class(class)?;
                 self.resolved_class_name(operand)?
+                    .map(Operated::kept)
                     .ok_or(Unfolded::NoConstant("a class name is fetched at run time"))
             }
         }
@@ -17756,8 +17819,47 @@ impl<'a> Emit<'a> {
     /// name it extends where the scope is known; nothing for `static`,
     /// for `self` and `parent` where the scope is not known, and for a
     /// class the program computes. `self`, `parent` and `static` are
-    /// held to [`Self::ensure_valid_class_fetch_type`] first.
-    fn resolved_class_name(&mut self, operand: ClassOperand) -> Result<Option<Zval>, CompileError> {
+    /// held to [`Self::ensure_valid_class_fetch_type`] first. A name
+    /// written out is a string of its own, as php's scanner made one for
+    /// the token, and `parent` the class's `parent_name`, a string of its
+    /// own too; `self` is the class's name itself
+    /// (`ZVAL_STR_COPY(zv, CG(active_class_entry)->name)`), a claim the
+    /// caller keeps where it needs a string or gives back where the name
+    /// stands for it. So an `eval`'d class constant naming its own class
+    /// costs a string, its parent's a string, and `self::class` none (the
+    /// file under the recipe's `TMPDIR`, so each `eval`'s name has one
+    /// length):
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3268-resolved.inc';
+    /// file_put_contents($f, <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;');
+    /// foreach ([
+    ///     'class P10 {}',
+    ///     'class B10 { const K = B10::class; }',
+    ///     'class B12 { const K = self::class; }',
+    ///     'class B13 extends P10 { const K = parent::class; }',
+    ///     'class B16 { const K = B16::class, L = B16::class; }',
+    ///     '$GLOBALS["a"] = [B10::K, B12::K, B13::K, B16::K, B16::L];',
+    /// ] as $c) echo m($c), "  ", $c, "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 176  class P10 {}
+    /// 528  class B10 { const K = B10::class; }
+    /// 496  class B12 { const K = self::class; }
+    /// 528  class B13 extends P10 { const K = parent::class; }
+    /// 560  class B16 { const K = B16::class, L = B16::class; }
+    /// 728  $GLOBALS["a"] = [B10::K, B12::K, B13::K, B16::K, B16::L];
+    /// ```
+    fn resolved_class_name(
+        &mut self,
+        operand: ClassOperand,
+    ) -> Result<Option<Operated>, CompileError> {
         let written = match operand {
             ClassOperand::Name(token) => self.text(token).to_vec(),
             ClassOperand::Value(value) => self.value_class_name(value)?,
@@ -17778,7 +17880,11 @@ impl<'a> Emit<'a> {
             },
             _ => return Ok(None),
         };
-        Ok(Some(self.string(&name)?))
+        Ok(Some(if fetch == FETCH_CLASS_SELF {
+            Operated::Made(self.string_made(&name, false)?)
+        } else {
+            Operated::Kept(self.string(&name)?)
+        }))
     }
 
     /// `zend_compile_class_name` (`Z/Zend/zend_compile.c:11105`),
@@ -17843,7 +17949,7 @@ impl<'a> Emit<'a> {
     fn class_name_of(&mut self, class: ClassSpec) -> Result<Where, CompileError> {
         let operand = self.decoded_class(class)?;
         if let Some(value) = self.resolved_class_name(operand)? {
-            return Ok(Where::Constant(value));
+            return Ok(Where::Constant(value.kept()));
         }
         // `class_ast->kind == ZEND_AST_ZVAL`: the fetch type of the name.
         let (op1_type, op1) = match operand {
@@ -20123,7 +20229,9 @@ impl<'a> Emit<'a> {
     /// ([`Substitution::NoPersistent`]). A constant's name is
     /// case-sensitive, and a leading `\` names the same global constant
     /// as none. The engine's persistent constants are looked for first
-    /// ([`Options::persistent`]): one `CONST_DEPRECATED` marks is refused
+    /// ([`Options::persistent`]), `PHP_SAPI` the host's name in every
+    /// compile, a file the cache keeps among them, as php registers it
+    /// `CONST_PERSISTENT`: one `CONST_DEPRECATED` marks is refused
     /// before anything else is read, so the `FETCH_CONSTANT` stands and
     /// the deprecation is raised where the constant is read, the bit
     /// being the `#[\Deprecated]` attribute on the declaration; and a
@@ -20148,6 +20256,27 @@ impl<'a> Emit<'a> {
     /// float(INF)
     /// float(-INF)
     /// ```
+    ///
+    /// A file the cache keeps substitutes `PHP_SAPI` too, where the
+    /// request's own constants are not handed its compile: `RETURN
+    /// string("cli")`, with no `FETCH_CONSTANT` and no cache slot, as
+    /// opcache's dump of the file reads in php:
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3272-sapi.inc';
+    /// file_put_contents("$f.tmp", '<?php function f1() { return PHP_SAPI; }');
+    /// touch("$f.tmp", time() - 10);
+    /// rename("$f.tmp", $f);
+    /// $dump = shell_exec(escapeshellarg(PHP_BINARY) . ' -n -d opcache.enable_cli=1 -d opcache.jit=off -d opcache.opt_debug_level=0x10000 ' . escapeshellarg($f) . ' 2>&1');
+    /// preg_match_all('/^\d{4} .*$/m', $dump, $ops);
+    /// echo implode("\n", $ops[0]), "\n";
+    /// unlink($f);
+    /// ```
+    /// ```expect process regime=jit-off
+    /// 0000 RETURN int(1)
+    /// 0000 RETURN string("cli")
+    /// 0001 RETURN null
+    /// ```
     fn ct_found(&self, name: &[u8]) -> Option<Found<'a>> {
         if self.substitution == Substitution::NoPersistent {
             return None;
@@ -20157,7 +20286,12 @@ impl<'a> Emit<'a> {
             at += 1;
         }
         let name = name.get(at..).unwrap_or(&[]);
-        if let Some((_, declared)) = self.persistent.find(name) {
+        if name == b"PHP_SAPI"
+            && let Some(host) = self.persistent.host
+        {
+            return Some(Found::Defined(host));
+        }
+        if let Some((_, declared)) = self.persistent.declared.find(name) {
             let deprecated = (declared.attributes.iter())
                 .any(|one| one.name.0.eq_ignore_ascii_case(b"Deprecated"));
             let scalar = matches!(

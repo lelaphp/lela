@@ -107,10 +107,12 @@ pub struct Options<'a> {
     /// once a request has started. An `eval`'s string begins after an
     /// open tag whatever it says.
     pub shebang: Shebang,
-    /// The persistent constants the engine's extensions declared
-    /// (`CONST_PERSISTENT`), which `zend_try_ct_eval_const` substitutes
-    /// where they are written; a name not here is fetched as the program serves.
-    pub persistent: Indexed<'a, ConstDecl, Exact>,
+    /// The engine's persistent constants, [`Persistent`], which
+    /// `zend_try_ct_eval_const` substitutes where they are written in
+    /// every compile, a file the cache keeps among them; a name not here
+    /// is the request's ([`Options::request_constants`]) or fetched as
+    /// the program serves.
+    pub persistent: Persistent<'a>,
     /// The natives the engine's bundle declared, php's `CG(function_table)`
     /// as `zend_compile_call` reads it: what `zend_try_compile_special_func`
     /// requires a name to be one of before it serves the call itself
@@ -194,7 +196,7 @@ impl Default for Options<'_> {
             short_open_tag: true,
             assertions: true,
             shebang: Shebang::Read,
-            persistent: Indexed::default(),
+            persistent: Persistent::default(),
             functions: Indexed::default(),
             frameless: &[],
             classes: Indexed::default(),
@@ -237,37 +239,95 @@ impl Hooked {
     };
 }
 
-/// The names of the classes a request has declared, as the compiler
-/// asks after one while a source compiles for it: php's
-/// `CG(class_table)` is `EG(class_table)` then, so a top-level class
-/// whose name the request already holds fails the `zend_hash_add_ptr`
-/// that would bind it early (`Z/Zend/zend_compile.c:9381`), and is left
-/// to its `DECLARE_CLASS_DELAYED`, which binds it as the unit loads where
-/// the name is free by then and raises the redeclaration where it stands
-/// where it is not (GH-8846). A parent is never looked for here: opcache
-/// compiles with `ZEND_COMPILE_IGNORE_OTHER_FILES`, and a class of
-/// another file is no parent an early bind takes. Asked by the lowered
-/// name; a source compiled for no request holds none.
+/// The rows of `EG(zend_constants)` php registers `CONST_PERSISTENT`,
+/// which `can_ct_eval_const`'s first arm (`Z/Zend/zend_compile.c:1650`)
+/// lets `zend_try_ct_eval_const` substitute in every compile, one opcache
+/// caches under `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION` among them: the
+/// constants the engine's extensions declared, and `PHP_SAPI`, which
+/// `php_module_startup` registers from `sapi_module.name`
+/// (`Z/main/main_arginfo.h:85`). php marks `PHP_SAPI` `CONST_NO_FILE_CACHE`
+/// as well, which only `opcache.file_cache`'s compile reads, and the
+/// engine has no file cache. One engine is built for one host
+/// ([`Persistent::host`]), so a unit its cache shares across requests
+/// substitutes the one name every request of it reads.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Persistent<'a> {
+    /// The constants the engine's extensions declared, each a scalar
+    /// written out or a declaration the compiler does not fold.
+    pub declared: Indexed<'a, ConstDecl, Exact>,
+    /// `PHP_SAPI`'s value, the name of the host the engine was built for,
+    /// a string nothing counts owners of; none for a compile no host's
+    /// engine runs, where the name is fetched as the program serves.
+    pub host: Option<php_heap::Zval>,
+}
+
+/// The classes a request has declared, as the compiler asks after one
+/// while a source compiles for it: php's `CG(class_table)` is
+/// `EG(class_table)` then, so a top-level class whose name the request
+/// already holds fails the `zend_hash_add_ptr` that would bind it early
+/// (`Z/Zend/zend_compile.c:9381`), and is left to its
+/// `DECLARE_CLASS_DELAYED`, which binds it as the unit loads where the
+/// name is free by then and raises the redeclaration where it stands
+/// where it is not (GH-8846). A compile php runs without
+/// `ZEND_COMPILE_IGNORE_OTHER_FILES`, an `eval`'s string and `-r`'s code,
+/// reads the classes themselves too ([`RequestClasses::seeing`]): a
+/// parent `zend_try_early_bind` binds a class to, and a class whose
+/// method is a callee the compile knows (`zend_compile_ignore_class`
+/// ignores none). opcache compiles a file it caches with that option, so
+/// another file's class is no parent an early bind takes there. Asked by
+/// the lowered name; a source compiled for no request holds none.
 #[derive(Clone, Copy)]
-pub struct RequestClasses<'a>(&'a dyn Fn(&[u8]) -> bool);
+pub struct RequestClasses<'a> {
+    holds: &'a dyn Fn(&[u8]) -> bool,
+    declared: Option<&'a dyn DeclaredClasses>,
+}
+
+/// The declarations of the classes a request holds, as
+/// [`RequestClasses::seeing`] reads them.
+pub trait DeclaredClasses {
+    /// The linked declaration of the class by the lowered `name`.
+    fn declared(&self, name: &[u8]) -> Option<&ClassDecl>;
+}
 
 impl<'a> RequestClasses<'a> {
-    /// The request's classes as `holds` answers for a lowered name.
+    /// The request's classes as `holds` answers for a lowered name, their
+    /// declarations unread, as a file the cache keeps is compiled.
     #[must_use]
     pub fn new(holds: &'a dyn Fn(&[u8]) -> bool) -> RequestClasses<'a> {
-        RequestClasses(holds)
+        RequestClasses {
+            holds,
+            declared: None,
+        }
+    }
+
+    /// These classes with their declarations, as `declared` answers: for
+    /// a compile without
+    /// `ZEND_COMPILE_IGNORE_OTHER_FILES`.
+    #[must_use]
+    pub fn seeing(self, declared: &'a dyn DeclaredClasses) -> RequestClasses<'a> {
+        RequestClasses {
+            declared: Some(declared),
+            ..self
+        }
     }
 
     /// Whether the request has declared a class by the lowered `name`.
     #[must_use]
     pub fn holds(&self, name: &[u8]) -> bool {
-        (self.0)(name)
+        (self.holds)(name)
+    }
+
+    /// The declaration of the class the request holds by the lowered
+    /// `name`, linked, where the compile reads it.
+    #[must_use]
+    pub fn declared(&self, name: &[u8]) -> Option<&'a ClassDecl> {
+        self.declared?.declared(name)
     }
 }
 
 impl Default for RequestClasses<'_> {
     fn default() -> Self {
-        RequestClasses(&|_| false)
+        RequestClasses::new(&|_| false)
     }
 }
 

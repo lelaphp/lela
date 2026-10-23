@@ -28,18 +28,21 @@ fn the_engine_s_persistent_constants_stand_for_their_values_where_they_are_writt
     use php_unit::decl::ConstExpr;
     let mut strings = php_heap::Strings::new();
     let options = Options {
-        persistent: indexed(vec![
-            ConstDecl {
-                name: Name(b"T_LNUMBER".to_vec().into_boxed_slice()),
-                value: ConstExpr::long(260),
-                attributes: Vec::new(),
-            },
-            ConstDecl {
-                name: Name(b"PHP_OS".to_vec().into_boxed_slice()),
-                value: ConstExpr::Str(b"Darwin".to_vec().into_boxed_slice()),
-                attributes: Vec::new(),
-            },
-        ]),
+        persistent: crate::Persistent {
+            declared: indexed(vec![
+                ConstDecl {
+                    name: Name(b"T_LNUMBER".to_vec().into_boxed_slice()),
+                    value: ConstExpr::long(260),
+                    attributes: Vec::new(),
+                },
+                ConstDecl {
+                    name: Name(b"PHP_OS".to_vec().into_boxed_slice()),
+                    value: ConstExpr::Str(b"Darwin".to_vec().into_boxed_slice()),
+                    attributes: Vec::new(),
+                },
+            ]),
+            host: None,
+        },
         ..Options::default()
     };
     let compiled = compile_parsed(

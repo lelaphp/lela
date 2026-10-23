@@ -393,11 +393,13 @@ pub mod test {
     /// the engine's own defaults as a host's `-d` lays it: one `(name,
     /// value)` pair each, the last of a name winning; and compiling with
     /// extended info where `extended_info` says so, as a host's `-e`
-    /// builds it.
+    /// builds it. It is built for php's CLI, whose requests the lanes
+    /// describe, so `PHP_SAPI` is the one name its cache substitutes.
     #[must_use]
     pub fn engine(ini: &[(&str, &str)], extended_info: bool) -> Engine {
         let extensions: Vec<_> = super::enabled().iter().map(|start| start()).collect();
         let mut builder = Engine::builder()
+            .sapi_name("cli")
             .extensions(extensions)
             .configure(super::CONFIGURE)
             .tier::<super::Tier>()

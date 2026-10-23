@@ -390,6 +390,39 @@ fn declared_names(unit: &Unit) -> HashSet<Vec<u8>, NameHasher> {
 /// 536  interface S3 { const K = "abcdefghij" . "5"; }
 /// 0  $GLOBALS["a"] = S3::K;
 /// ```
+///
+/// A class name a constant resolves to is such a value: `B10::class` and
+/// `Bxyz::class` a string of their own, as php's scanner made one for the
+/// name written, even where it names the class itself, whose own name is
+/// another string ([`Request::hold_compiled`] leaves the value to the
+/// constant); `self::class` the class's name itself (`ZVAL_STR_COPY`):
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/w3268-class-names.inc';
+/// file_put_contents($f, <<<'PHP'
+/// <?php
+/// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+/// m('class W {}'); m('$q0 = 1;');
+/// foreach ([
+///     'class B9 { const K = "abcdefghij"; }',
+///     'class B10 { const K = B10::class; }',
+///     'class B11 { const K = Bxyz::class; }',
+///     'class B12 { const K = self::class; }',
+///     '$GLOBALS["a"] = B10::K;',
+///     '$GLOBALS["b"] = [B9::K, B11::K, B12::K];',
+/// ] as $c) echo m($c), "  ", $c, "\n";
+/// PHP);
+/// include $f;
+/// unlink($f);
+/// ```
+/// ```expect regime=jit-off
+/// 536  class B9 { const K = "abcdefghij"; }
+/// 528  class B10 { const K = B10::class; }
+/// 528  class B11 { const K = Bxyz::class; }
+/// 496  class B12 { const K = self::class; }
+/// 512  $GLOBALS["a"] = B10::K;
+/// 216  $GLOBALS["b"] = [B9::K, B11::K, B12::K];
+/// ```
 fn class_constant_values(unit: &Unit) -> HashMap<&[u8], usize, NameHasher> {
     let mut values = HashMap::with_hasher(NameHasher);
     let constants = (unit.classes.iter())
@@ -448,6 +481,15 @@ impl Held {
 }
 
 impl UnitStrings {
+    /// The string `unit`, a unit the request compiled for itself, holds
+    /// as its file's name `file`: [`Held::file`], or its name among the
+    /// names of one that declares.
+    fn file_of(&self, unit: *const Unit, file: &[u8]) -> Option<PhpString> {
+        let held = (self.units.iter()).find(|held| std::ptr::eq(held.unit.as_ptr(), unit))?;
+        (held.file.into_iter().chain(held.names.iter().copied()))
+            .find(|name| name.as_bytes() == file)
+    }
+
     /// The string a request-only unit that lives holds for the name
     /// `bytes`, else the one the request keeps for it to its end
     /// ([`Request::kept_string`]); a view, no owner taken.
@@ -635,6 +677,39 @@ impl Request {
         (self.class_lookup()).declared_for_the_request(self.unit_strings.units_held(), class)
     }
 
+    /// `zend_get_executed_filename_ex()` for `file`, the bytes the
+    /// executing frame's file is named by, with one more owner: the
+    /// string the innermost frame's unit holds as its file's name where
+    /// the request compiled that unit for itself, as php's
+    /// `op_array->filename` is that unit's own string, so what keeps it
+    /// keeps that `eval`'s name and no other's of the same bytes; else
+    /// [`Request::declared_string`]'s. Where the body started and a
+    /// constant an `eval` defines each keep the `eval`'s own name, though
+    /// a class an `eval` of the same line declared holds one of the
+    /// same bytes (the file under the recipe's `TMPDIR`):
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3259-own-name.inc';
+    /// file_put_contents($f, "<?php\neval('class Kh {}'); \$m = memory_get_usage(); eval('echo \"a\";'); \$d = memory_get_usage() - \$m; eval('class Kc {}'); \$n = memory_get_usage(); eval('const KC = 1;'); \$e = memory_get_usage() - \$n; echo \"\\n\$d \$e\\n\";\n");
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// a
+    /// 144 184
+    /// ```
+    pub(crate) fn executed_file_string(
+        &mut self,
+        file: &[u8],
+    ) -> Result<crate::api::values::Owner<PhpString>, Thrown> {
+        let unit = (self.innermost_frame().and_then(crate::exec::FrameAt::unit))
+            .map(|(unit, _)| PublishedUnit::as_ptr(unit));
+        match unit.and_then(|unit| self.unit_strings.file_of(unit, file)) {
+            Some(own) => Ok(crate::api::values::Owner::take(self, own)),
+            None => self.declared_string(file),
+        }
+    }
+
     /// The constant strings the compile just made, given to `unit`, the
     /// unit it made: its main op array's held while it runs, the rest
     /// while the unit lives ([`main_constants`]). So an `eval` that
@@ -668,13 +743,20 @@ impl Request {
         // `eval`'s made none, and they are made as it is noted
         // ([`Request::hold_unit_names`]). A compile that made no string
         // has none of them to find.
+        let values = class_constant_values(unit);
         if !made.is_empty() {
             let mut seen = HashSet::with_hasher(NameHasher);
             for (index, name) in php_compile::op_array_names(unit).enumerate() {
-                let Some(at) = made
-                    .iter()
-                    .rposition(|z| z.as_str().is_some_and(|s| s.bytes() == name))
-                else {
+                let of_name = |z: &Zval| z.as_str().is_some_and(|s| s.bytes() == name);
+                // A class constant's value of the name's bytes is its
+                // class's, never the name: `class B10 { const K =
+                // B10::class; }` holds two strings, as php's scanner made
+                // one for each token.
+                let reserved = values.get(name).copied().unwrap_or(0);
+                if made.iter().filter(|z| of_name(z)).count() <= reserved {
+                    continue;
+                }
+                let Some(at) = made.iter().rposition(of_name) else {
                     continue;
                 };
                 if !seen.insert(name) {
@@ -698,10 +780,10 @@ impl Request {
         } else {
             made.drain(..).map(|z| (Owner::Main, z)).collect()
         };
-        let (names, values) = if owned.iter().any(|(owner, _)| *owner != Owner::Main) {
-            (declared_names(unit), class_constant_values(unit))
+        let names = if owned.iter().any(|(owner, _)| *owner != Owner::Main) {
+            declared_names(unit)
         } else {
-            (HashSet::default(), HashMap::default())
+            HashSet::default()
         };
         // What a declaration finds by its bytes: a name it is read by, or
         // a class constant's value.
@@ -797,6 +879,30 @@ impl Request {
     /// 1288
     /// 1464
     /// ```
+    ///
+    /// A class's name is interned where opcache holds its bytes, a file
+    /// the cache keeps naming the class (`zend_new_interned_string` in
+    /// `zend_compile_class_decl`), so the `eval` that declares it makes
+    /// no string for it; a function's name is made whatever the cache
+    /// holds:
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3259-interned-name.inc', <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;');
+    /// echo m('class Fooq {}'), "\n";
+    /// echo m('class Barq {}'), "\n";
+    /// $o = new Fooq;
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 112
+    /// 176
+    /// ```
     pub(crate) fn hold_unit_names(&mut self, unit: &PublishedUnit) -> Result<(), Thrown> {
         let at = self.unit_strings.held(unit);
         let Some(held) = self.unit_strings.units.get_mut(at) else {
@@ -820,9 +926,17 @@ impl Request {
                     .map(|made| made.as_bytes().to_vec())
                     .collect()
             });
+        // A class's name, the last of them, is `zend_new_interned_string`'s
+        // in `zend_compile_class_decl`: the interned string where opcache
+        // holds the bytes, no string of the unit's.
+        let first_class = php_compile::op_array_names(unit)
+            .count()
+            .saturating_sub(unit.classes.len());
         for (index, name) in php_compile::op_array_names(unit).enumerate() {
             let owner = name_owner(unit, index);
-            let made = file.is_some_and(|file| file.as_bytes() == name)
+            let interned = index >= first_class && self.shared.existing_interned(name).is_some();
+            let made = interned
+                || file.is_some_and(|file| file.as_bytes() == name)
                 || match owner {
                     // A definition's own, which its compile made with it.
                     Owner::Definition(_) => (self.unit_strings.units.get_mut(at))
