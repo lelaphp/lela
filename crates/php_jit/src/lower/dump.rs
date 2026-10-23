@@ -364,9 +364,17 @@ fn check(check: Check) -> String {
     match check {
         Check::Type { value, tag: t } => format!("#{} {}", value.0, tag(t)),
         Check::Deref { value, tag: t } => format!("#{} ref to {}", value.0, tag(t)),
-        Check::Layout { value, layout } => format!(
-            "#{} {}",
+        Check::Layout {
+            value,
+            layout,
+            read,
+        } => format!(
+            "#{} {}{}",
             value.0,
+            match read {
+                Read::InPlace => "",
+                Read::Through => "ref to ",
+            },
             match layout {
                 Layout::Packed => "packed",
                 Layout::Hash => "hash",

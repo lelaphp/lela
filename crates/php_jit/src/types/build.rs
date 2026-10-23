@@ -14,9 +14,10 @@ use php_unit::{CacheSlot, Effects, OpArray, Opcode, OperandKind, Opline, OplineI
 use super::lattice::{self, Types};
 use super::opcodes::{
     Declared, ISEMPTY, MAX_ARG_FLAG_NUM, Within, arith, assigned, check_sites, compiled_inline,
-    constant, constant_types, goes_one_way, guard_sites, held_as_is, inline_may_leave, is_call,
-    keeps_temporaries, may_exit, op1_types, out_types, packed_guard, param_types, params, reads,
-    reads_by_name, referenced, slot_of, within, writes, written, written_after_entry,
+    compound_in_place, constant, constant_types, goes_one_way, guard_sites, held_as_is,
+    inline_may_leave, is_call, keeps_temporaries, may_exit, op1_types, out_types, packed_guard,
+    param_types, params, reads, reads_by_name, referenced, slot_of, within, writes, written,
+    written_after_entry,
 };
 use super::{
     Abort, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo,
@@ -966,7 +967,7 @@ impl<'a> Builder<'a> {
                     || (op.opcode == Opcode::TypeCheck
                         && self.is_temp(op1)
                         && !old.within(UNCOUNTED))
-                    || op.opcode == Opcode::AssignDim
+                    || matches!(op.opcode, Opcode::AssignDim | Opcode::AssignDimOp)
                     || matches!(
                         op.opcode,
                         Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName
@@ -995,7 +996,7 @@ impl<'a> Builder<'a> {
         let plain = self
             .pushing
             .take()
-            .filter(|plain| began == Began::Here && callee.user() == Some(plain.callee()));
+            .filter(|plain| began == Began::Here && callee.user() == plain.callee());
         // A function's call by its full name serves the function the name
         // resolves to, the one recorded, since no function is declared
         // twice; a method's or a dynamic call's may serve another, and an
@@ -1122,15 +1123,28 @@ impl<'a> Builder<'a> {
         match op.opcode {
             Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName => {
                 let Some(Event::InitCall {
-                    callee: Callee::User(callee),
+                    callee,
                     began: Began::Here,
                 }) = next
                 else {
                     return None;
                 };
-                let known = op.opcode == Opcode::InitFcall || *callee == func;
-                let plain = self.view.call(*callee, op.extended_value)?;
-                known.then(|| InPlace::Push(plain.clone()))
+                let plain = match callee {
+                    // A function named in full, or the frame's own.
+                    Callee::User(callee) if op.opcode == Opcode::InitFcall || *callee == func => {
+                        self.view.call(*callee, op.extended_value)?
+                    }
+                    // A native named in full, which php's trace pushes as
+                    // it pushes a user function's call
+                    // (`zend_jit_push_call_frame`, `Z/ext/opcache/jit/zend_jit_ir.c:8466-8650`).
+                    Callee::Native(_) if op.opcode == Opcode::InitFcall => {
+                        let code = self.meta(frame).code;
+                        let name = code.literals.get(op.op2 as usize)?.str_bytes()?;
+                        self.view.native_call(name, op.extended_value)?
+                    }
+                    Callee::User(_) | Callee::Native(_) => return None,
+                };
+                Some(InPlace::Push(plain.clone()))
             }
             Opcode::SendValEx if op.op2_type == OperandKind::Unused => {
                 self.sends_by_value(op.op2)?.then_some(InPlace::Send)
@@ -1323,6 +1337,106 @@ impl<'a> Builder<'a> {
     /// The clobber rule (`jit-design.md` §4.2): after a call-effect
     /// kernel, every value of a live frame that a symbol table reaches or
     /// that may be a reference is read again.
+    ///
+    /// A kernel with no `call` effect may call user code too: `INIT_ARRAY`'s
+    /// and `ADD_ARRAY_ELEMENT`'s handler raise a null key's deprecation
+    /// through the error handler and release a duplicate key's value
+    /// (`Z/Zend/zend_vm_def.h:6278-6291`), and the release kernel compiled
+    /// code calls for a temporary runs a destructor. None clobbers, as
+    /// none has to: what that code can write is a variable a symbol table
+    /// reaches, whose every write [`Builder::define`] types as anything
+    /// and whose reads [`Builder::guard_use`] narrows for the reading
+    /// opline alone; a reference, whose inner type is held at every read;
+    /// or an array, which it separates before it writes it. So no fact the
+    /// trace keeps is one such code can change, as php's code generator
+    /// calls such an opline's handler and keeps every type and register
+    /// across it (`Z/ext/opcache/jit/zend_jit_trace.c:6480-6493`). An
+    /// error handler that writes a reference's inner value, a global, a
+    /// file's own variable and a reference's array at either site:
+    ///
+    /// ```php
+    /// function h() { global $g, $w; static $c = 0; if (++$c % 5 == 0) { $g = $c + 0.5; $GLOBALS['m'] = $c + 0.5; $GLOBALS['l'] = ["a" => 1, 2 => $c + 0.5]; $w(); } return true; }
+    /// set_error_handler('h');
+    /// function f(&$r, array &$v, $n, $k) {
+    ///     global $w; static $s = 0; $w = function () use (&$s) { $s = 0.5; }; $t = 0;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $r = $i; $s = $i; $v = [1, 2, 3]; $x = $v[2]; $a = [$k => 1]; $t = $t + $r + $s + $v[2];
+    ///         $r = $i; $s = $i; $v = [1, 2, 3]; $x = $v[2]; $a = [1, $k => 2]; $t = $t + $r + $s + $v[2];
+    ///     }
+    ///     return $t;
+    /// }
+    /// $g = 0; $l = []; $t = 0; $k = null;
+    /// echo f($g, $l, 8, null), " ";
+    /// for ($i = 0; $i < 8; $i++) { $m = $i; $a = [$k => 1]; $t = $t + $m; }
+    /// echo $t, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 189.5 45.5
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function h() { global $g, $w; static $c = 0; if (++$c % 5 == 0) { $g = $c + 0.5; $GLOBALS['m'] = $c + 0.5; $GLOBALS['l'] = ["a" => 1, 2 => $c + 0.5]; $w(); } return true; }
+    /// set_error_handler('h');
+    /// function f(&$r, array &$v, $n, $k) {
+    ///     global $w; static $s = 0; $w = function () use (&$s) { $s = 0.5; }; $t = 0;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $r = $i; $s = $i; $v = [1, 2, 3]; $x = $v[2]; $a = [$k => 1]; $t = $t + $r + $s + $v[2];
+    ///         $r = $i; $s = $i; $v = [1, 2, 3]; $x = $v[2]; $a = [1, $k => 2]; $t = $t + $r + $s + $v[2];
+    ///     }
+    ///     return $t;
+    /// }
+    /// $g = 0; $l = []; $t = 0; $k = null;
+    /// echo f($g, $l, 8, null), " ";
+    /// for ($i = 0; $i < 8; $i++) { $m = $i; $a = [$k => 1]; $t = $t + $m; }
+    /// echo $t, "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 189.5 45.5
+    /// ```
+    ///
+    /// A destructor that writes a reference's inner value, called at a
+    /// duplicate key, at `FETCH_DIM_R`'s release of its temporary and at
+    /// `TYPE_CHECK`'s:
+    ///
+    /// ```php
+    /// class D { function __destruct() { global $g; static $c = 0; if (++$c % 7 == 0) { $g = $c + 0.5; } } }
+    /// function f(&$r, $n) {
+    ///     $t = 0; $k = 1;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $o = new D; $r = $i; $a = [$k => $o, $k => ($o = null)]; $t = $t + $r;
+    ///         $o = new D; $r = $i; $v = [$o, $o = null][1]; $t = $t + $r;
+    ///         $o = new D; $r = $i; $v = is_array([$o, $o = null]); $t = $t + $r;
+    ///     }
+    ///     return $t;
+    /// }
+    /// $g = 0;
+    /// var_dump(f($g, 10));
+    /// ```
+    /// ```expect regime=jit-force process
+    /// float(186)
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// class D { function __destruct() { global $g; static $c = 0; if (++$c % 7 == 0) { $g = $c + 0.5; } } }
+    /// function f(&$r, $n) {
+    ///     $t = 0; $k = 1;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $o = new D; $r = $i; $a = [$k => $o, $k => ($o = null)]; $t = $t + $r;
+    ///         $o = new D; $r = $i; $v = [$o, $o = null][1]; $t = $t + $r;
+    ///         $o = new D; $r = $i; $v = is_array([$o, $o = null]); $t = $t + $r;
+    ///     }
+    ///     return $t;
+    /// }
+    /// $g = 0;
+    /// var_dump(f($g, 10));
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// float(186)
+    /// ```
     fn clobber(&mut self, idx: OpId) {
         let live: Vec<Frame> = self.stack.clone();
         for frame in live {
@@ -1587,11 +1701,33 @@ impl<'a> Builder<'a> {
         {
             let types = self.val(value).types;
             let slot = self.val(value).slot;
-            if types.either_layout() && !self.aliased(slot) {
+            if seen.referenced[0] {
+                // An array read through a reference, held to its layout at
+                // this read and narrowed for this opline alone, as its type
+                // is (`zend_jit_fetch_reference`, `Z/ext/opcache/jit/zend_jit_ir.c:16952-17010`).
+                if seen.types[0].either_layout() {
+                    seen.types[0] = seen.types[0].laid_out(layout);
+                    seen.inferred[0] = seen.types[0];
+                    self.guards.push(Placed {
+                        at: GuardAt::Before(idx),
+                        check: Check::Layout {
+                            value,
+                            layout,
+                            read: Read::Through,
+                        },
+                        exit: draft(Point::Before(idx), slot.frame, At::Opline(here)),
+                    });
+                }
+            } else if types.either_layout() && !self.aliased(slot) {
                 self.val_mut(value).types = types.laid_out(layout);
                 seen.types[0] = types.laid_out(layout);
                 seen.inferred[0] = types.laid_out(layout);
-                self.place(idx, here, value, Check::Layout { value, layout }, None);
+                let check = Check::Layout {
+                    value,
+                    layout,
+                    read: Read::InPlace,
+                };
+                self.place(idx, here, value, check, None);
             } else if self.aliased(slot)
                 && seen.types[0].either_layout()
                 && matches!(
@@ -1605,7 +1741,11 @@ impl<'a> Builder<'a> {
                 seen.types[0] = seen.types[0].laid_out(layout);
                 self.guards.push(Placed {
                     at: GuardAt::Before(idx),
-                    check: Check::Layout { value, layout },
+                    check: Check::Layout {
+                        value,
+                        layout,
+                        read: Read::InPlace,
+                    },
                     exit: draft(Point::Before(idx), slot.frame, At::Opline(here)),
                 });
             }
@@ -1902,6 +2042,7 @@ impl<'a> Builder<'a> {
                     && long(t2)
                     && scalar(td)
             }
+            Opcode::AssignDimOp => compound_in_place(op, t1, t2, td),
             // A send that moves what a temporary holds into the call, as
             // php's `zend_jit_send_var` moves a `TMP` or a `VAR` that is
             // no reference (`Z/ext/opcache/jit/zend_jit_ir.c:9628-9790`).
@@ -1923,15 +2064,19 @@ impl<'a> Builder<'a> {
                         .last()
                         .is_some_and(|call| call.last_send == LastSend::ByValue)
             }
-            Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName => {
-                matches!(
-                    next,
-                    Some(Event::InitCall {
-                        callee: Callee::User(_),
-                        began: Began::Here,
-                    })
-                )
-            }
+            Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName => match next {
+                Some(Event::InitCall {
+                    callee: Callee::User(_),
+                    began: Began::Here,
+                }) => true,
+                // A native's call is pushed in place or stepped: the
+                // `push_call` kernel knows a user function's alone.
+                Some(Event::InitCall {
+                    callee: Callee::Native(_),
+                    began: Began::Here,
+                }) => self.in_place(frame, op, next).is_some(),
+                _ => false,
+            },
             Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName => {
                 matches!(next, Some(Event::Enter { .. }))
             }
@@ -2193,15 +2338,7 @@ impl<'a> Builder<'a> {
                         check: placed.check,
                         exit: exits.take(spec, level.clone())?,
                     });
-                    let held = match placed.check {
-                        Check::Type { value, tag } => Some((value, tag)),
-                        Check::Layout { value, .. } => Some((value, ZvalType::Array)),
-                        Check::Deref { .. }
-                        | Check::Direction { .. }
-                        | Check::Stands { .. }
-                        | Check::Arm { .. }
-                        | Check::Room { .. } => None,
-                    };
+                    let held = stack_type(placed.check);
                     if let Some((value, tag)) = held
                         && !self.aliased(self.val(value).slot)
                     {
@@ -2588,10 +2725,8 @@ impl<'a> Builder<'a> {
             else {
                 continue;
             };
-            let (value, narrowed) = match check {
-                Check::Type { value, tag } => (value, Narrowed::Tag(tag)),
-                Check::Layout { value, layout } => (value, Narrowed::Layout(layout)),
-                _ => continue,
+            let Some((value, narrowed)) = Narrowed::of(check) else {
+                continue;
             };
             let phi = *self.val(value);
             let Def::Phi { entry, back } = phi.def else {
@@ -2641,9 +2776,10 @@ impl<'a> Builder<'a> {
                 at: GuardAt::Entry,
                 check: match check {
                     Check::Type { tag, .. } => Check::Type { value: entry, tag },
-                    Check::Layout { layout, .. } => Check::Layout {
+                    Check::Layout { layout, read, .. } => Check::Layout {
                         value: entry,
                         layout,
+                        read,
                     },
                     other => other,
                 },
@@ -2935,7 +3071,9 @@ fn returned(op: &Opline, code: &OpArray, t1: Types) -> Returned {
 fn imm(op: &Opline) -> Imm {
     match op.opcode {
         Opcode::SendVal | Opcode::SendVar if op.op2_type == OperandKind::Unused => Imm::Arg(op.op2),
-        Opcode::AssignOp => lattice::binary_of(op.extended_value).map_or(Imm::None, Imm::Binary),
+        Opcode::AssignOp | Opcode::AssignDimOp => {
+            lattice::binary_of(op.extended_value).map_or(Imm::None, Imm::Binary)
+        }
         Opcode::TypeCheck => Imm::Mask(op.extended_value),
         _ => Imm::None,
     }
@@ -3163,6 +3301,47 @@ enum Source {
 enum Narrowed {
     Tag(ZvalType),
     Layout(Layout),
+}
+
+impl Narrowed {
+    /// What a guard before an op narrows a loop's phi to, where it may
+    /// move to the loop's entry: a type, or a variable's layout; a
+    /// reference's array is held at each read, never once.
+    fn of(check: Check) -> Option<(ValueId, Narrowed)> {
+        match check {
+            Check::Type { value, tag } => Some((value, Narrowed::Tag(tag))),
+            Check::Layout {
+                value,
+                layout,
+                read: Read::InPlace,
+            } => Some((value, Narrowed::Layout(layout))),
+            _ => None,
+        }
+    }
+}
+
+/// The type a guard's exit and every exit after it know its slot holds,
+/// php's `SET_STACK_TYPE` past a guard: a type's, an array's held in place;
+/// none for a reference, whose type no stack map keeps, as php's
+/// `zend_jit_fetch_reference` sets none, nor for a guard on no slot.
+fn stack_type(check: Check) -> Option<(ValueId, ZvalType)> {
+    match check {
+        Check::Type { value, tag } => Some((value, tag)),
+        Check::Layout {
+            value,
+            read: Read::InPlace,
+            ..
+        } => Some((value, ZvalType::Array)),
+        Check::Layout {
+            read: Read::Through,
+            ..
+        }
+        | Check::Deref { .. }
+        | Check::Direction { .. }
+        | Check::Stands { .. }
+        | Check::Arm { .. }
+        | Check::Room { .. } => None,
+    }
 }
 
 fn restored(calls: bool) -> Landing {
