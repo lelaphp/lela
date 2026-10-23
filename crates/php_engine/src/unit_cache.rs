@@ -177,14 +177,15 @@ impl Stamp {
     }
 }
 
-/// One file the cache holds, php's `zend_persistent_script`: what it
-/// compiled to, the path it was compiled from and the stamp it was
-/// compiled at, and its `dynamic_members`, the hits since it was cached,
-/// when it was last served and when it is next validated. The unit is
+/// One file the cache holds, php's `zend_persistent_script`: the unit
+/// it compiled to, never a refusal, which php persists none of, the path
+/// it was compiled from and the stamp it was compiled at, and its
+/// `dynamic_members`, the hits since it was cached, when it was last
+/// served and when it is next validated. The unit is
 /// never changed; the members are atomics a racing request may write
 /// over, which costs at most one more stat.
 pub(crate) struct Held {
-    pub(crate) unit: Result<PublishedUnit, CompileError>,
+    pub(crate) unit: PublishedUnit,
     /// Its early-bound classes, published as it was held, which a
     /// request loading the unit declares by their numbers.
     pub(crate) early: EarlyBound,
@@ -212,10 +213,10 @@ pub(crate) struct Held {
 }
 
 /// What a file read from disk came to, for [`UnitCache::hold`]: the
-/// unit or the compiler's refusal, its early-bound classes published,
-/// the bytes it was read from and its stamp as observed.
+/// unit, its early-bound classes published, the bytes it was read from
+/// and its stamp as observed.
 struct Read {
-    unit: Result<PublishedUnit, CompileError>,
+    unit: PublishedUnit,
     early: EarlyBound,
     size: u64,
     observed: Option<Stamp>,
@@ -239,7 +240,7 @@ impl Held {
     /// before, `last_used` zero.
     pub(crate) fn preloaded(unit: PublishedUnit, path: Vec<u8>, size: u64, order: u64) -> Held {
         Held {
-            unit: Ok(unit),
+            unit,
             early: Arc::new([]),
             path,
             stamp: None,
@@ -713,8 +714,8 @@ pub(crate) fn hit_keys(validation: Validation, unit: &Unit) -> u32 {
 /// The unit `held` holds, answered as `filed` with its early-bound
 /// classes.
 fn answered_by(held: &Held, filed: Filed) -> Answered {
-    let unit = held.unit.clone().map(Compiled::Published);
-    (Some(unit), filed, Some(Arc::clone(&held.early)))
+    let unit = Compiled::Published(held.unit.clone());
+    (Some(Ok(unit)), filed, Some(Arc::clone(&held.early)))
 }
 
 /// A unit held nowhere, answered as `filed`.
@@ -861,11 +862,8 @@ impl UnitCache {
             return;
         }
         // `accel_new_interned_key`: the name as written is one of the
-        // buffer's strings from here, a unit's alone, as php persists
-        // no refusal.
-        if held.unit.is_ok() {
-            php_heap::Intern::intern(&mut *self.interned.strings(), &key.0).ok();
-        }
+        // buffer's strings from here.
+        php_heap::Intern::intern(&mut *self.interned.strings(), &key.0).ok();
         files.held.alias(key, held);
     }
 
@@ -1037,7 +1035,7 @@ impl UnitCache {
             let unit = share(unit);
             let early = publish(caller, &unit);
             let read = Read {
-                unit: Ok(unit),
+                unit,
                 early,
                 size: kept.size,
                 observed,
@@ -1061,22 +1059,23 @@ impl UnitCache {
         if unheld || answers == Answers::Asker || named_by_request(validation, &unit) {
             return alone(unit, Filed::Compiled);
         }
+        // php persists no refusal, so its corrupted copy stays filed.
+        let Ok(unit) = unit else {
+            return alone(unit, Filed::Compiled);
+        };
         let optimizer = optimizer.on_miss(validation, disk.is_some() || !files.restart_pending());
-        let unit = unit.map(|unit| optimizer.optimized(unit));
-        if let (Some(disk), Ok(compiled)) = (&disk, &unit)
-            && let Some(body) = wire::encode(compiled)
+        let unit = optimizer.optimized(unit);
+        if let Some(disk) = &disk
+            && let Some(body) = wire::encode(&unit)
         {
             let stamp = observed.filter(|_| validated).map_or(0, Stamp::seconds);
             disk.store(path, stamp, size, &body);
         }
         if !memory || files.restart_pending() || !self.room_for(files, size) {
-            return alone(unit, disk.map_or(Filed::Compiled, |_| Filed::Kept));
+            return alone(Ok(unit), disk.map_or(Filed::Compiled, |_| Filed::Kept));
         }
-        let unit = unit.map(share);
-        let early = match &unit {
-            Ok(compiled) => publish(caller, compiled),
-            Err(_) => Arc::new([]),
-        };
+        let unit = share(unit);
+        let early = publish(caller, &unit);
         let read = Read {
             unit,
             early,
@@ -1166,9 +1165,7 @@ impl UnitCache {
             .insert_over(UnitKey::full(path), Held::discarded, |replaced| {
                 built = true;
                 // `zend_accel_hash_update` puts the file in a discarded copy's
-                // entry, where that stands in its bucket's chain; a refusal,
-                // which php never puts in its hash, has none.
-                let replaced = replaced.filter(|was| was.unit.is_ok());
+                // entry, where that stands in its bucket's chain.
                 let next = || self.taken.fetch_add(1, Ordering::Relaxed);
                 Held {
                     unit,
@@ -1185,10 +1182,8 @@ impl UnitCache {
             });
         if built {
             files.used.fetch_add(size, Ordering::Relaxed);
-            if let Ok(unit) = &held.unit {
-                files.funcs.publish(unit);
-                self.persist_names(path, unit);
-            }
+            files.funcs.publish(&held.unit);
+            self.persist_names(path, &held.unit);
         }
         held
     }
@@ -1197,8 +1192,7 @@ impl UnitCache {
     /// where `force`, and otherwise where it changed since,
     /// `do_validate_timestamps` finding it filed under another full path,
     /// held with no stamp, or written at another second. Whether a unit
-    /// was held under the name at all; a refusal is none, as php
-    /// persists none, and so is a copy discarded already.
+    /// was held under the name at all; a copy discarded already is none.
     pub(crate) fn discard(
         &self,
         files: &Files,
@@ -1209,9 +1203,6 @@ impl UnitCache {
         let Some(held) = files.held.get(key).filter(|held| !held.discarded()) else {
             return false;
         };
-        if held.unit.is_err() {
-            return false;
-        }
         let changed = force
             || key.0 != held.path
             || held.stamp.is_none_or(|was| {
@@ -1274,7 +1265,7 @@ impl UnitCache {
     /// bucket of `ZCSG(hash)` and each bucket's chain newest first, a
     /// name's bucket `(zend_string_hash_val(name) ^ ZCG(root_hash)) %
     /// max_num_entries` (`Z/ext/opcache/zend_accelerator_hash.c:88-92`)
-    /// and the preload's names the first in; a refusal is none of either.
+    /// and the preload's names the first in.
     ///
     /// ```php
     /// function bucket($s, $p) {
@@ -1310,6 +1301,30 @@ impl UnitCache {
     /// B A C
     /// B A C
     /// ```
+    ///
+    /// A discarded copy whose recompile is refused stays listed, its
+    /// timestamp zeroed, as php persists no refusal in its place, and each
+    /// include of the file is a miss:
+    ///
+    /// ```php
+    /// $f = realpath(__DIR__) . '/refused.inc'; file_put_contents($f, '<?php return 1;'); touch($f, time() - 60);
+    /// include $f; include $f;
+    /// var_dump(opcache_invalidate($f, true));
+    /// file_put_contents($f, '<?php return ('); touch($f, time() - 30);
+    /// $s = fn () => array_values(array_intersect_key(opcache_get_status()['opcache_statistics'], ['hits' => 0, 'misses' => 0]));
+    /// [$h, $m] = $s();
+    /// foreach ([1, 2] as $_) { try { include $f; } catch (ParseError $e) { echo get_class($e), "\n"; } }
+    /// [$h2, $m2] = $s();
+    /// $listed = opcache_get_status(true)['scripts'][$f];
+    /// echo $h2 - $h, ' ', $m2 - $m, ' ', $listed['hits'], ' ', $listed['timestamp'], "\n";
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// bool(true)
+    /// ParseError
+    /// ParseError
+    /// 0 2 1 0
+    /// ```
     pub(crate) fn status(
         &self,
         files: &Files,
@@ -1317,7 +1332,6 @@ impl UnitCache {
         tier: TierStatus,
     ) -> CacheStatus {
         let mut held = files.held.held();
-        held.retain(|(_, held)| held.unit.is_ok());
         held.retain(|(_, held)| {
             self.preloaded()
                 .is_none_or(|preloaded| preloaded.script(&held.path).is_none())

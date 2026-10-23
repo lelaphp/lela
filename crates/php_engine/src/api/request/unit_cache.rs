@@ -25,8 +25,7 @@ use crate::exec::IncludeKind;
 use crate::supplied::chain::FileArgs;
 use crate::supplied::tell;
 use crate::unit_cache::{
-    Asked, Cached, CompileRefused, Disk, Filed, Fresh, Held, Levels, Stamp, Stat, UnitKey,
-    full_path,
+    Asked, Cached, Disk, Filed, Fresh, Held, Levels, Stamp, Stat, UnitKey, full_path,
 };
 
 /// What the `zend_file_handle` a file is compiled through holds when
@@ -407,12 +406,7 @@ impl Request {
         }
         let now = self.environment().request_time();
         self.arena.files.hit(held, validation, now);
-        let answer = Some(match &held.unit {
-            Ok(unit) => Ok(PublishedUnit::clone(unit)),
-            Err(error) => Err(CompileRefused::published(error.clone(), |unit| {
-                self.take_unit(unit)
-            })),
-        });
+        let answer = Some(Ok(PublishedUnit::clone(&held.unit)));
         let early = Some(Arc::clone(&held.early));
         self.note_load(&answer, validation, Filed::Hit, early);
         Ok(answer)
@@ -1013,9 +1007,6 @@ impl UnitCache<'_> {
         else {
             return Ok(false);
         };
-        if held.unit.is_err() {
-            return Ok(false);
-        }
         let validation = match req.admission(&held.path) {
             Admission::KeptOut | Admission::OnDisk { .. } => return Ok(false),
             Admission::Held { validation, .. } => validation,
