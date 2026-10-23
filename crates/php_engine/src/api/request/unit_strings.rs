@@ -286,10 +286,51 @@ fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Owner, Zval)> {
 }
 
 /// The names `unit`'s declarations are read by
-/// ([`php_compile::declared_names`]), as a set; the main op array's
-/// variables are not among them.
+/// ([`php_compile::declared_names`]), as a set, beside each class
+/// constant's string value: the string the compile made for it, written
+/// or folded, is the class's from its declaration, as php's
+/// `constants_table` holds the zval `zend_compile_class_const_decl` put
+/// there, and its first read finds it ([`Request::declared_string`])
+/// rather than make one. An enum case's is not, its value standing in
+/// the case's copied expression ([`declared_bytes::AstCopy`]). The main
+/// op array's variables are not among them.
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/w3263-class-values.inc';
+/// file_put_contents($f, <<<'PHP'
+/// <?php
+/// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+/// m('class W {}');
+/// foreach ([
+///     'class S1 { const K = "abcdefghij5"; }',
+///     '$GLOBALS["a"] = S1::K;',
+///     'class S2 { const K = "abcdefghij" . 5; }',
+///     '$GLOBALS["a"] = S2::K;',
+///     'interface S3 { const K = "abcdefghij" . "5"; }',
+///     '$GLOBALS["a"] = S3::K;',
+/// ] as $c) echo m($c), "  ", $c, "\n";
+/// PHP);
+/// include $f;
+/// unlink($f);
+/// ```
+/// ```expect regime=jit-off
+/// 536  class S1 { const K = "abcdefghij5"; }
+/// 888  $GLOBALS["a"] = S1::K;
+/// 536  class S2 { const K = "abcdefghij" . 5; }
+/// 0  $GLOBALS["a"] = S2::K;
+/// 536  interface S3 { const K = "abcdefghij" . "5"; }
+/// 0  $GLOBALS["a"] = S3::K;
+/// ```
 fn declared_names(unit: &Unit) -> HashSet<Vec<u8>, NameHasher> {
+    let values = (unit.classes.iter())
+        .flat_map(|class| &class.constants)
+        .filter(|constant| !constant.is_case)
+        .filter_map(|constant| match &constant.value {
+            php_unit::decl::ConstExpr::Str(value) => Some(Cow::Borrowed(&**value)),
+            _ => None,
+        });
     php_compile::declared_names(unit)
+        .chain(values)
         .map(Cow::into_owned)
         .collect()
 }
