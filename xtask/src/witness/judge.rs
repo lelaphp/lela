@@ -467,15 +467,25 @@ fn lacking<'w>(oracle: &Oracle<'_>, witness: &'w Witness) -> Result<Option<&'w s
 /// with: its crate's where the binary under test does not turn it on,
 /// and the tier's where its regime sets the lane's `jit.mode`, so the
 /// lane runs on a binary that carries the tier, as the phpt lane's
-/// `--jit` builds it (#2962).
+/// `--jit` builds it (#2962), or turns php's compiled tier on, so what a
+/// program sees of the tier is the tier's (#3193).
 fn features<'w>(witness: &'w Witness, regime: Option<&Regime>) -> Vec<&'w str> {
     let mut features: Vec<&str> = witness.feature.as_deref().into_iter().collect();
-    if regime.is_some_and(|regime| regime.sets(Lane::DIRECTIVE))
-        && !features.contains(&Lane::FEATURE)
-    {
+    if regime.is_some_and(tiered) && !features.contains(&Lane::FEATURE) {
         features.push(Lane::FEATURE);
     }
     features
+}
+
+/// Whether `regime` asks for the compiled tier: it names a lane, or sets
+/// `opcache.jit` to a setting `zend_jit_config` turns on, anything but
+/// `disable` and the forms of off (`Z/ext/opcache/jit/zend_jit.c:3655-3667`).
+fn tiered(regime: &Regime) -> bool {
+    let on = |setting: &str| {
+        let off = ["disable", "", "0", "off", "no", "false"];
+        !off.iter().any(|word| setting.eq_ignore_ascii_case(word))
+    };
+    regime.sets(Lane::DIRECTIVE) || regime.value("opcache.jit").is_some_and(on)
 }
 
 /// The run of record, and what it entered: the engine linked into the

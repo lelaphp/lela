@@ -34,9 +34,11 @@
 //! engine in ([`profile::featured`]), so the child it starts carries its
 //! own extension as the oracle's variant does, and the two lanes share
 //! one build (#2721). A `process` fence under a regime that sets the
-//! tier's `jit.mode` is served by `php` built with the tier's feature
-//! beside it, as the phpt lane's `--jit` builds it (#3053), so the lane
-//! the regime names runs on a binary that carries the tier (#2962).
+//! tier's `jit.mode`, or turns `opcache.jit` on, is served by `php`
+//! built with the tier's feature beside it, as the phpt lane's `--jit`
+//! builds it (#3053), so the lane the regime names runs on a binary that
+//! carries the tier (#2962), and so does a program that reads the tier
+//! (#3193).
 
 use std::collections::BTreeMap;
 use std::fs;
