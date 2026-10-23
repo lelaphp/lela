@@ -14,10 +14,12 @@ use std::sync::Arc;
 use php_compile::SourceKind;
 
 use super::Code;
+use super::include::unreadable;
 use super::{AccelServed, Request, Unresolved, is_cacheable_stream_path, is_wrapper_url};
 use crate::api::abi::{Admission, FileCache, Lookup, Validation};
 use crate::api::raising::Thrown;
 use crate::api::values::{Emalloc, PhpString};
+use crate::c_number::c_str;
 use crate::engine::{CompileHeap, ForRequest};
 use crate::exec::IncludeKind;
 use crate::supplied::chain::FileArgs;
@@ -1098,24 +1100,20 @@ impl UnitCache<'_> {
         // The plain files opener's guard, which warns under the native's
         // name: of the resolved path, and of the path as written where
         // none resolved; the stream's warning names the same.
-        let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
         let opened = match served {
             Some(served) => Ok(served),
-            None if nul => Err(None),
+            None if nul => Err((written.to_vec(), unreadable(c_str(written)))),
             None => match req.code_mut().resolve_path(written) {
                 Ok(path) => match req.environment_mut().check_open_basedir(&path, true) {
                     Ok(_) => match req.cached_file(&path, Some(written), HandlePath::Filename) {
                         Some(unit) => Ok((unit, path)),
-                        None => Err(Some((written.to_vec(), missing))),
+                        None => Err((written.to_vec(), unreadable(&path))),
                     },
-                    Err(refused) => Err(Some((path, refused.into()))),
+                    Err(refused) => Err((path, refused.into())),
                 },
                 Err(Unresolved::Missing(reason)) => {
                     let refused = req.environment_mut().check_open_basedir(written, true);
-                    Err(Some((
-                        written.to_vec(),
-                        refused.err().map_or(reason, Into::into),
-                    )))
+                    Err((written.to_vec(), refused.err().map_or(reason, Into::into)))
                 }
                 Err(Unresolved::Threw(thrown)) => return Err(thrown),
             },
@@ -1125,13 +1123,8 @@ impl UnitCache<'_> {
             Ok((Err(refused), path)) => {
                 return Err(req.refused_include(&refused, &path, php_compile::SourceKind::File));
             }
-            Err(failed) => {
-                let failed = match failed {
-                    Some((named, reason)) => {
-                        req.not_opened(IncludeKind::Include, &named, &reason, written)
-                    }
-                    None => req.failed_opening(IncludeKind::Include, written),
-                };
+            Err((named, reason)) => {
+                let failed = req.not_opened(IncludeKind::Include, &named, &reason, written);
                 return failed.map(|_| false);
             }
         };

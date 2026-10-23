@@ -1176,6 +1176,7 @@ impl Request {
             .split_once(" (os error")
             .map_or(reason.as_str(), |(text, _)| text);
         let opener = self.opener(kind);
+        let named = crate::c_number::c_str(named);
         self.wrapper_warning(&opener, named, &format!("Failed to open stream: {reason}"));
         self.failed_opening(kind, written)
     }
@@ -1183,7 +1184,33 @@ impl Request {
     /// `php_message_handler_for_zend`'s `ZMSG_FAILED_INCLUDE_FOPEN` and
     /// `ZMSG_FAILED_REQUIRE_FOPEN` (`Z/main/main.c:1746`): the warning
     /// and `false` for an `include`, the `Error` for a `require`, each
-    /// naming the path as written and `include_path` as the ini has it.
+    /// naming the path as written, up to a NUL byte in it as its
+    /// `estrdup` reads it, and `include_path` as the ini has it.
+    ///
+    /// ```php
+    /// set_include_path('.');
+    /// var_dump(include "gone\0.php");
+    /// try { require "gone\0.php"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Warning: include(): Failed opening 'gone' for inclusion (include_path='.') in %s on line 3
+    /// bool(false)
+    /// Failed opening required 'gone' (include_path='.')
+    /// ```
+    ///
+    /// `opcache_compile_file` opens the path as C reads it, so its stream
+    /// warns first:
+    ///
+    /// ```php
+    /// set_include_path('.');
+    /// var_dump(opcache_compile_file("gone\0.php"));
+    /// ```
+    /// ```expect regime=jit-off
+    /// Warning: opcache_compile_file(gone): Failed to open stream: No such file or directory in %s on line 3
+    ///
+    /// Warning: opcache_compile_file(): Failed opening 'gone' for inclusion (include_path='.') in %s on line 3
+    /// bool(false)
+    /// ```
     pub(super) fn failed_opening(
         &mut self,
         kind: IncludeKind,
@@ -1192,7 +1219,7 @@ impl Request {
         let include_path =
             String::from_utf8_lossy(self.ini().get(b"include_path").unwrap_or_default())
                 .into_owned();
-        let shown = String::from_utf8_lossy(written).into_owned();
+        let shown = String::from_utf8_lossy(crate::c_number::c_str(written)).into_owned();
         if kind.required() {
             return Err(crate::api::raising::error(
                 self,
@@ -1562,7 +1589,7 @@ fn readable(path: &[u8]) -> Result<(), std::io::Error> {
 
 /// Why the file at `path` cannot be read, as [`readable`] answers it; a
 /// file that opens now went and came back, and reads as gone.
-fn unreadable(path: &[u8]) -> std::io::Error {
+pub(super) fn unreadable(path: &[u8]) -> std::io::Error {
     readable(path)
         .err()
         .unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
