@@ -478,6 +478,7 @@ macro_rules! kernels {
 kernels! {
     Request => mod wrapped {
         Step => step(func: u32) -> Stood = tier::step_held;
+        Handle => handle(func: u32) = tier::step_held;
         PushCall => push_call(func: u32, callee: u32) -> Stood = tier::step_held;
         Call => call(func: u32, callee: u32) -> Stood = tier::call_held;
         Release => release(word: u64, type_info: u32) = tier::release;
@@ -493,6 +494,24 @@ fn step(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<Stood, Fatal> {
     let (held, epoch) = held(on, func)?;
     let stepped = tier::step_held(req, frame, held, epoch)?;
     stood(req, stepped, (frame, func), on.holding)
+}
+
+/// The `handle` kernel: the opline at `at` of the op array the engine
+/// numbers `func`, one whose handler goes on at the next opline of its
+/// frame or throws, served whole as [`step`] serves it, where the
+/// interpreter stands after it left to compiled code, which knows it: a
+/// throw is the request's pending throwable, which the wrapper answers
+/// as one.
+fn handle(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<(), Fatal> {
+    let frame = standing(req, on.room, on.at)?;
+    let (held, epoch) = held(on, func)?;
+    match tier::step_held(req, frame, held, epoch)? {
+        Stepped::Same(at) if at == frame => Ok(()),
+        Stepped::Threw(at) if at == frame => Ok(()),
+        _ => Err(internal(
+            "a handler compiled code serves in its frame went on elsewhere",
+        )),
+    }
 }
 
 /// The `push_call` kernel (`jit-design.md` §4.3): the `INIT_*` at `at`

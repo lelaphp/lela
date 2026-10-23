@@ -203,6 +203,7 @@ kernels! { Request => mod refusing { refused(func: u32) -> Stood; refused_call(f
 fn compiled(ir: &TraceIr) -> Option<Compiled> {
     let symbols = Symbols::new(|kernel| match kernel {
         Kernel::Step => (refusing::refused as *const ()).addr(),
+        Kernel::Handle => (super::super::super::wrapped::handle as *const ()).addr(),
         Kernel::PushCall | Kernel::Call => (refusing::refused_call as *const ()).addr(),
         Kernel::Release => (super::super::super::wrapped::release as *const ()).addr(),
     });

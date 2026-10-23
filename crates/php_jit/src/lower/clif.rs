@@ -292,6 +292,24 @@ fn leave_of(line: &Line) -> Option<Leave> {
     (line.exit.map(Leave::Exit)).or_else(|| line.unwind.map(Leave::Unwind))
 }
 
+/// Whether `opcode`'s handler goes on at the next opline of its frame,
+/// or throws, and does nothing else to the frame chain: what
+/// [`Kernel::Handle`] serves, building an array and adding to it, whose
+/// handlers php's code calls with no inline code of its own. An array
+/// built per turn, and a key the build throws at, caught in the frame:
+///
+/// ```php
+/// function pairs($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $p = [$i, $i * 2, "k" => $i]; $s += $p[1] + $p["k"]; } return $s; }
+/// function bad($n) { $c = 0; for ($i = 0; $i < $n; $i++) { try { $a = [$i => 1, ($i == 5 ? [] : $i + 1) => 2]; $c += count($a); } catch (TypeError $e) { $c += 100; } } return $c; }
+/// echo pairs(20), " ", bad(8), "\n";
+/// ```
+/// ```expect regime=jit-force process
+/// 570 114
+/// ```
+fn goes_on(opcode: Opcode) -> bool {
+    matches!(opcode, Opcode::InitArray | Opcode::AddArrayElement)
+}
+
 /// One trace's function as it is built.
 struct Emit<'a> {
     ir: &'a TraceIr,
@@ -1199,6 +1217,7 @@ impl<'a> Emit<'a> {
         // The `ExitCtx`, the frame's room and the opline come first.
         let params: &[Type] = match kernel {
             Kernel::Step => &[I64, I64, I32, I32, I64],
+            Kernel::Handle => &[I64, I64, I32, I32],
             Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
             Kernel::Release => &[I64, I64, I32, I64, I32],
         };
@@ -1270,6 +1289,16 @@ impl<'a> Emit<'a> {
                     &[room, opline, func, callee, stood],
                     leave_of(line),
                 )?;
+            }
+            None if goes_on(line.opcode) && self.within(at).is_empty() => {
+                self.call(Kernel::Handle, &[room, opline, func], leave_of(line))?;
+                // Where the interpreter stands after it: past it, in its
+                // frame, whose room and call are where they stood.
+                let next = self.b.ins().iconst(I32, i64::from(line.opline.0 + 1));
+                self.b.ins().stack_store(I64, func, self.stood, STOOD_FUNC);
+                self.b
+                    .ins()
+                    .stack_store(I64, next, self.stood, STOOD_OPLINE);
             }
             None => self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?,
         }
