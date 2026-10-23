@@ -976,6 +976,7 @@ fn adr_cite(manifest: &Manifest, adr: &[&str]) -> String {
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests {
     use super::*;
 

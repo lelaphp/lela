@@ -4,6 +4,7 @@
 //! holding this working tree's tracked files, so the harness the add builds
 //! in the worktree and asks for the local file is this one, and the store
 //! the retire appends to is the real store.
+#![cfg(tracked)]
 
 use std::ffi::OsString;
 use std::fs;

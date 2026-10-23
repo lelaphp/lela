@@ -1,6 +1,7 @@
 //! `xtask api-check` over the fixtures of `xtask/fixtures/api-check`, judged
 //! by the tracked manifest: locks, edges and bundle order (ticket #4). One
 //! fixture per rule the instrument evaluates must fail; `clean` must pass.
+#![cfg(tracked)]
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;

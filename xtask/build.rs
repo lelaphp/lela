@@ -23,7 +23,9 @@ mod inputs {
 
 use std::path::Path;
 
-use inputs::{MANIFEST_FILE, SOURCES_DIR, manifest_digest, source_files, sources_digest};
+use inputs::{
+    MANIFEST_FILE, SOURCES_DIR, manifest_digest, source_files, sources_digest, untracked,
+};
 
 fn main() {
     // Read when `build.rs` runs, not when it compiles: cargo runs one
@@ -55,6 +57,17 @@ fn main() {
     let code = sources_digest(&root).unwrap_or_default();
     println!("cargo::rustc-env=XTASK_MANIFEST_DIGEST={manifest}");
     println!("cargo::rustc-env=XTASK_SOURCES_DIGEST={code}");
+    // The tests that read the workspace's tracked files are built where it
+    // carries every one of them, and the build says which it lacks (#3188).
+    println!("cargo::rustc-check-cfg=cfg(tracked)");
+    match untracked(&root).as_slice() {
+        [] => println!("cargo::rustc-cfg=tracked"),
+        absent => println!(
+            "cargo::warning=the tests that read the workspace's tracked files are not built: {} has no {}",
+            root.display(),
+            absent.join(", ")
+        ),
+    }
     print_target_cfg();
 }
 

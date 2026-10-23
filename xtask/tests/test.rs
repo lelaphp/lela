@@ -4,6 +4,7 @@
 //! fails; it is run through the instrument's library entry, through the
 //! binary, and then through `done` over a scratch repository, which is
 //! the reading the ticket is for: a crate with a failing test is not done.
+#![cfg(tracked)]
 
 use std::path::{Path, PathBuf};
 

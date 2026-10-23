@@ -1281,4 +1281,5 @@ impl Manifest {
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests;

@@ -6,6 +6,7 @@
 //! beside them; here a reading is
 //! written by hand into the store, since what is under test is how `done`
 //! reads it, not how it was measured.
+#![cfg(tracked)]
 
 use std::path::{Path, PathBuf};
 

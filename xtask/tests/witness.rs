@@ -12,6 +12,7 @@
 //! this machine, unless the machine promised it (#38); the rest, the
 //! coverage half and the readings of a run with nothing to run, run
 //! anywhere.
+#![cfg(tracked)]
 
 use std::fs;
 use std::io::Write;

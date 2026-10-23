@@ -1932,4 +1932,5 @@ fn run_tests(
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests;

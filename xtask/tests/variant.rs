@@ -12,6 +12,7 @@
 //! two negative controls are the fixtures under `xtask/fixtures/oracle/`: a
 //! row naming a variant the pin lacks, and a variant whose binary's md5 is
 //! not its pin's.
+#![cfg(tracked)]
 
 use std::fs;
 use std::path::{Path, PathBuf};

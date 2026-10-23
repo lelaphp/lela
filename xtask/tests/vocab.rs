@@ -3,6 +3,7 @@
 //! scoped so that `Result` is not `result`. Every test here goes through the
 //! instrument, `check` in process or the binary, and reads the reading it
 //! writes; how the glossary itself is read is held beside the glossary.
+#![cfg(tracked)]
 
 use std::path::{Path, PathBuf};
 

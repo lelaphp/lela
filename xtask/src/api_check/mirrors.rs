@@ -488,6 +488,7 @@ php_on_the_next_line(void);
 
     /// A tree at neither place is absent, and one at a place that refuses
     /// it, here a `.git` git cannot read, is refused, never absent.
+    #[cfg(tracked)]
     #[test]
     fn a_tree_standing_where_the_pin_looks_and_refused_is_not_absent() {
         use super::Tree;

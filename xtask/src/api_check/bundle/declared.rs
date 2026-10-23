@@ -270,6 +270,7 @@ impl<'ast> Visit<'ast> for Scan {
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests {
 
     use super::*;

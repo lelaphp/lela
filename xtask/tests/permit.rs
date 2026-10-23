@@ -1,4 +1,5 @@
 //! `xtask permit`, the judge at the hook's call (harness-design.md §4.4).
+#![cfg(tracked)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

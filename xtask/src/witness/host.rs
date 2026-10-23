@@ -649,6 +649,7 @@ fn answered(request: &Request, listen: &str, fill: &dyn Fn(&str) -> String) -> R
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;

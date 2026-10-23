@@ -10,6 +10,7 @@
 //! The tests that spawn the oracle say so on stderr and return when the
 //! pinned binary is not on this machine, unless the machine promised it
 //! (#38); the rest run anywhere.
+#![cfg(tracked)]
 
 use std::fs;
 use std::path::{Path, PathBuf};

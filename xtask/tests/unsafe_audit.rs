@@ -1,7 +1,5 @@
 //! `xtask unsafe-audit` over the tracked workspace (design §4.1).
 
-use std::path::Path;
-
 use xtask::manifest::Manifest;
 use xtask::reading::{Outcome, Status};
 use xtask::unsafe_audit;
@@ -11,18 +9,19 @@ mod common {
 }
 use common::repo::Repo;
 
-fn workspace() -> &'static Path {
-    xtask::package_dir().parent().unwrap()
-}
-
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
 /// workspace, so a person's edit there is what may turn one red (#3091).
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).
+#[cfg(tracked)]
 mod tracked {
     use super::*;
+
+    fn workspace() -> &'static std::path::Path {
+        xtask::package_dir().parent().unwrap()
+    }
 
     #[test]
     fn the_tracked_workspace_has_no_unsafe_outside_the_homes() {

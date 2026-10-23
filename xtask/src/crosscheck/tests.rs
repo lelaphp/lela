@@ -4,7 +4,7 @@
 //! `tests/crosscheck.rs`, through `run`. Nothing here spawns php.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::*;
 use crate::common::registry::{Row, registry, rows};
@@ -192,6 +192,7 @@ fn the_two_columns_have_their_own_flag_scope_and_key() {
 /// the oracle's own under the pin's `extension_number_token` row, since
 /// both streams go through [`oracle::normalise`] before the verdict, and
 /// the same bytes against a pin without the row are not.
+#[cfg(tracked)]
 #[test]
 fn the_renumbered_fixture_is_a_pass_under_the_row_and_not_without_it() {
     let oracle = fs::read(fixtures().join("oracle.re")).unwrap();
@@ -351,6 +352,7 @@ fn the_oracles_bytes_are_kept_under_the_scope_and_the_digest() {
 /// run holding that rendering to the oracle's `php --re standard` fails,
 /// and the lane serves `standard` through the `php` binary instead; an
 /// extension no host adds to stays the linked engine's.
+#[cfg(tracked)]
 #[test]
 fn standard_is_the_binarys_since_the_linked_engine_lacks_a_hosts_natives() {
     let recipe = Manifest::load(&crate::built_root())
@@ -408,6 +410,7 @@ fn a_hosts_own_module_is_served_by_that_host_and_scoped_under_its_row() {
 
 /// A CGI-shaped host's head is the host's, and only a head of header
 /// lines is let go: a rendering that opens otherwise is held whole.
+#[cfg(tracked)]
 #[test]
 fn the_head_a_host_writes_is_let_go_and_a_body_alone_is_kept() {
     let rules = Manifest::load(&crate::built_root())
@@ -429,7 +432,8 @@ fn the_head_a_host_writes_is_let_go_and_a_body_alone_is_kept() {
 }
 
 /// Both columns of each of `names` pass over the tree as it is on disk.
-fn rendered(tree: &Path, manifest: &Manifest, store: &Store, names: &[&str]) {
+#[cfg(tracked)]
+fn rendered(tree: &std::path::Path, manifest: &Manifest, store: &Store, names: &[&str]) {
     for name in names {
         for column in Column::ALL {
             let mut reading = reading_of(
@@ -447,7 +451,8 @@ fn rendered(tree: &Path, manifest: &Manifest, store: &Store, names: &[&str]) {
 }
 
 /// Write `text` at `path` under the tree and stage it.
-fn staging(tree: &Path, path: &str, text: &str) {
+#[cfg(tracked)]
+fn staging(tree: &std::path::Path, path: &str, text: &str) {
     let at = tree.join(path);
     fs::create_dir_all(at.parent().unwrap()).unwrap();
     fs::write(&at, text).unwrap();
@@ -459,6 +464,7 @@ fn staging(tree: &Path, path: &str, text: &str) {
 /// nothing; a staged change to `ext/ctype` alone renders ctype alone, and
 /// once its readings are taken over what is staged, nothing; a staged
 /// `php_engine` change, in every extension's closure, renders every one.
+#[cfg(tracked)]
 #[test]
 fn a_staged_change_renders_again_the_extensions_whose_rendering_reads_it() {
     let tree = crate::key::fixture("crosscheck-staged");
@@ -490,6 +496,7 @@ fn a_staged_change_renders_again_the_extensions_whose_rendering_reads_it() {
 /// what is staged, since its key does not move with reflection
 /// ([`Reads::beyond`]); reflection's own key does, and its readings over
 /// what is staged stand.
+#[cfg(tracked)]
 #[test]
 fn a_staged_change_beyond_the_key_renders_again_though_the_reading_stands() {
     let tree = crate::key::fixture("crosscheck-beyond");
@@ -524,6 +531,7 @@ fn a_staged_change_beyond_the_key_renders_again_though_the_reading_stands() {
 /// carried extension again, though both pass over what is staged: an
 /// accepted `crosscheck:` row turns a rendering's fail into a pass, and
 /// the file is under no crate's key ([`sources::Outside::Every`], #1738).
+#[cfg(tracked)]
 #[test]
 fn a_staged_file_every_reading_reads_renders_every_extension_again() {
     let tree = crate::key::fixture("crosscheck-every");
@@ -541,6 +549,7 @@ fn a_staged_file_every_reading_reads_renders_every_extension_again() {
 /// A staged `Cargo.lock` that bumps a dependency only `ext/ctype`'s
 /// closure reaches renders ctype again and leaves reflection, whose
 /// closure the lock pins as `HEAD` does, unrendered (#1738).
+#[cfg(tracked)]
 #[test]
 fn a_staged_lock_renders_again_only_the_extensions_whose_closure_it_moves() {
     let tree = crate::key::fixture("crosscheck-lock");

@@ -320,6 +320,7 @@ fn a_new_row_with_covers_is_one_addition_to_the_registry() {
 /// know is refused and written nowhere, since written it would stop every
 /// instrument that reads the pin (#1161's `[sapi]`, which the reader
 /// learned in the same change), and a table it knows is an addition.
+#[cfg(tracked)]
 #[test]
 fn a_table_the_pins_reader_does_not_know_is_refused_and_one_it_knows_is_written() {
     let workspace = xtask::package_dir().join("..");

@@ -1403,6 +1403,7 @@ mod tests {
     /// whose row names an oracle variant beside its feature, which the
     /// lane runs on the engine built with it (#2029): `ext/zend_test` in
     /// the shipped manifest, `phpt` and not `crosscheck`.
+    #[cfg(tracked)]
     #[test]
     fn an_optional_crate_is_not_asked_for_a_phpt_reading_the_lane_never_writes() {
         let varied = Crate::named("ext/mbstring")

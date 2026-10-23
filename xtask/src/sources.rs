@@ -496,6 +496,7 @@ mod tests {
 
     /// A passing `clippy` reading over `php_heap` as it is on disk, the
     /// crate laid beside `xtask` and committed first.
+    #[cfg(tracked)]
     fn heap_passes(tree: &Tree, manifest: &Manifest, store: &Store) {
         fs::create_dir_all(tree.join("crates/php_heap/src")).unwrap();
         fs::write(tree.join("crates/php_heap/Cargo.toml"), "[package]\n").unwrap();
@@ -510,6 +511,7 @@ mod tests {
         store.record(&[reading]).unwrap();
     }
 
+    #[cfg(tracked)]
     fn standing_over(tree: &Tree, manifest: &Manifest, store: &Store) -> Vec<String> {
         let scopes = ["xtask".to_owned(), "php_heap".to_owned()];
         let standing = Standing::for_commit(tree, manifest, store, "clippy", &scopes).unwrap();
@@ -521,6 +523,7 @@ mod tests {
 
     /// A staged census is read by xtask's tests and by no build: xtask is
     /// measured again and every other crate's pass stands (#1312).
+    #[cfg(tracked)]
     #[test]
     fn a_staged_file_only_the_harness_reads_voids_xtasks_reading_alone() {
         let (tree, manifest, store) = repository("census");
@@ -535,6 +538,7 @@ mod tests {
 
     /// A staged lock voids the reading of a crate whose closure it moves,
     /// and leaves one whose closure it pins as before standing (#1312).
+    #[cfg(tracked)]
     #[test]
     fn a_staged_lock_voids_only_the_crates_whose_closure_it_moves() {
         let (tree, manifest, store) = repository("lock");
@@ -611,6 +615,7 @@ mod tests {
     /// (#1318, `xtask/fixtures/closure`): a staged change to `ext/ctype`
     /// alone leaves every other crate's pass standing, and one to
     /// `php_engine` leaves standing no crate built from it.
+    #[cfg(tracked)]
     #[test]
     fn a_staged_change_voids_the_readings_of_the_crates_built_from_it() {
         let tree = crate::key::fixture("standing");

@@ -22,6 +22,7 @@
 //! it, and until then the lane refuses the run naming it. These tests hand
 //! the pin the regime they hold the lane to, as the fixture-pin tests of
 //! the other lanes do, so the lane is measured before the pin moves.
+#![cfg(tracked)]
 
 use std::fs;
 use std::path::{Path, PathBuf};

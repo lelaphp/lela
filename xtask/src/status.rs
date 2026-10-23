@@ -1751,6 +1751,7 @@ pub(crate) fn grid<R: IntoIterator<Item = String>>(
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests {
     use super::{LOCAL_SECTIONS, Row, compared, local_template, outermost, outlived};
     use serde_json::json;

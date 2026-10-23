@@ -131,6 +131,7 @@ pub(crate) mod makala;
 mod process;
 pub(crate) mod row;
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests;
 mod watch;
 
@@ -1010,6 +1011,7 @@ fn covered(rule: Option<&Rule>, path: &Path) -> bool {
 /// and [`finish`]. `run` serves every crate's fences on one pool instead
 /// (#2212); a crate's tally is the same either way.
 #[cfg(test)]
+#[cfg(tracked)]
 pub(crate) fn judge(
     oracle: &Oracle<'_>,
     binary: &Binary,

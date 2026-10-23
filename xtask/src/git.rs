@@ -358,7 +358,7 @@ mod recorder {
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, PoisonError};
 
-    /// The questions asked of git in each directory [`asked`] listens at,
+    /// The questions asked of git in each directory `asked` listens at,
     /// or below it, each as its arguments.
     static ASKED: Mutex<BTreeMap<PathBuf, Vec<Vec<String>>>> = Mutex::new(BTreeMap::new());
 
@@ -383,6 +383,7 @@ mod recorder {
     /// (#2972). Each test lays a repository of its own, so its `root` is
     /// its own and no other test's questions are counted, from whichever
     /// thread they are asked (#2994).
+    #[cfg(tracked)]
     pub(crate) fn asked<T>(root: &Path, f: impl FnOnce() -> T) -> (T, Vec<Vec<String>>) {
         listening(|listeners| listeners.insert(root.to_path_buf(), Vec::new()));
         let out = f();
@@ -392,6 +393,7 @@ mod recorder {
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 pub(crate) use recorder::asked;
 
 fn utf8(stdout: Vec<u8>) -> Result<String> {

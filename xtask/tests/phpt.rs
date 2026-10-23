@@ -11,6 +11,7 @@
 //! since its bytes are not the oracle's. They say so on stderr and return
 //! when the pinned binary is not on this machine, unless the machine
 //! promised it (#38); the rest run anywhere.
+#![cfg(tracked)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -173,23 +174,6 @@ fn count(reading: &Reading, key: &str) -> i64 {
         Some(Number::Int(n)) => *n,
         other => panic!("{key} is {other:?} in {reading:#?}"),
     }
-}
-
-/// A repository that runs no php has no `[oracle]` row: its manifest
-/// loads with no pin, and `phpt`, which runs php under one, refuses naming
-/// the absent pin (#3181).
-#[test]
-fn a_manifest_with_no_oracle_row_loads_and_phpt_refuses_naming_the_pin() {
-    let root = Tree::new("phpt-no-pin").unwrap();
-    let budget = "total = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\nclean_build_release_s = 1\napi_items = 1\nbindings = 1\n";
-    fs::write(root.join("seams.toml"), format!("[budget]\n{budget}")).unwrap();
-    let manifest = Manifest::load(&root).unwrap();
-    assert!(manifest.pin.is_none() && manifest.pin_file().is_none());
-    let refused = phpt::run(&root, &manifest, &Registry::default(), &Ask::default()).unwrap_err();
-    assert!(
-        format!("{refused:#}").contains("seams.toml has no `[oracle]` row, so no oracle pin"),
-        "{refused:#}"
-    );
 }
 
 #[test]

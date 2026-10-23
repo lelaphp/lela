@@ -287,6 +287,7 @@ mod tests {
     /// Each program is committed where the protocol keeps its workloads
     /// (§11), and each arm runs it under the recipe, its regime and
     /// [`INI`], in that order, with the program's path last.
+    #[cfg(tracked)]
     #[test]
     fn each_program_is_committed_and_run_under_the_recipe_then_the_regime() {
         let root = crate::package_dir().parent().unwrap().to_path_buf();

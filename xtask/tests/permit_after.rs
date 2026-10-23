@@ -7,6 +7,7 @@
 //! path, is kept and named (#1895). Every test runs in a scratch
 //! repository holding copies of the harness's files; none writes this
 //! checkout's.
+#![cfg(tracked)]
 
 use std::path::Path;
 use std::process::Command;

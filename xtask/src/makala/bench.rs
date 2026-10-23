@@ -366,6 +366,7 @@ mod tests {
     /// its A/A control, and the throughput series at [`CLIENTS`] clients
     /// and its control, named by the workload's file and stating their
     /// clients (#2660).
+    #[cfg(tracked)]
     #[test]
     fn each_workload_is_a_latency_and_a_throughput_series_each_with_its_control() {
         let root = crate::package_dir().join("..");
