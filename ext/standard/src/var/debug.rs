@@ -172,7 +172,7 @@ use php_ext::values::{Key, Laziness, PhpArray, PhpObject, RecursionGuard, Value,
 /// ```
 #[php_function]
 fn debug_zval_dump(req: &mut Request, value: Value, values: Variadic<Value>) -> Result<(), Thrown> {
-    for value in std::iter::once(value).chain(values.0) {
+    for value in std::iter::once(value).chain(values) {
         dump(req, &value, 1)?;
     }
     Ok(())

@@ -1704,7 +1704,7 @@ impl SplFileObject {
         read_line_counted(req, this, false, false)?;
         let line = fs(req, this, |it| it.line.clone())?.unwrap_or_default();
         let scanned =
-            php_ext_standard::php_sscanf_internal(req, &line, format.as_bytes(), 2, vars.0.len())?;
+            php_ext_standard::php_sscanf_internal(req, &line, format.as_bytes(), 2, vars.len())?;
         Ok(crate::answered(scanned))
     }
 

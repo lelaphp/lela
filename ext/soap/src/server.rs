@@ -852,7 +852,7 @@ impl SoapServer {
         };
         service_of(req, object)?;
         // `ZVAL_COPY` of each argument into `soap_class.argv`.
-        let args: Vec<Owner<Value>> = args.0.into_iter().map(|a| Owner::take(req, a)).collect();
+        let args: Vec<Owner<Value>> = args.into_iter().map(|a| Owner::take(req, a)).collect();
         let old = match service_mut(req, object) {
             Some(s) => {
                 s.kind = ServiceKind::Class;

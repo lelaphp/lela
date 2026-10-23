@@ -9,7 +9,7 @@
 use php_heap::{FrameRef, Slot, Zval};
 
 use crate::api::call::Function;
-use crate::api::raising::Thrown;
+use crate::api::raising::{Thrown, throw_error};
 use crate::api::values::{ClassId, Owner, PhpObject, PhpString, TypeTag, Value};
 use crate::exec;
 
@@ -126,10 +126,9 @@ impl Request {
         (given, arguments)
     }
 
-    /// `Z_PARAM_VARIADIC` (`Z/Zend/zend_API.h:2181`) from `position`
-    /// on: the call's remaining arguments as they stand on the frame,
-    /// each a view the call keeps one owner of, and none where the call
-    /// gave fewer. A call that carries extra named arguments is
+    /// `ZEND_NUM_ARGS()` as `Z_PARAM_VARIADIC` (`Z/Zend/zend_API.h:2181`)
+    /// reads it, the tail running from its parameter to the count; zero
+    /// outside a native's body. A call that carries extra named arguments is
     /// `ZPP_ERROR_UNEXPECTED_EXTRA_NAMED`, php's `ArgumentCountError`
     /// from `zend_unexpected_extra_named_error`
     /// (`Z/Zend/zend_API.c:394`), since a variadic native that reads
@@ -155,23 +154,16 @@ impl Request {
     /// 1016 0
     /// 752 0
     /// ```
-    pub(crate) fn variadic_arguments(&mut self, position: u32) -> Result<Vec<Value>, Thrown> {
+    pub(crate) fn variadic_count(&mut self) -> Result<u32, Thrown> {
         let Some(call) = self.serving_call() else {
-            return Ok(Vec::new());
+            return Ok(0);
         };
-        if !call.extra_named().is_empty() {
-            let message = format!(
-                "{}() does not accept unknown named parameters",
-                self.active_native()
-            );
-            return Err(crate::api::raising::throw_error(
-                self,
-                "ArgumentCountError",
-                &message,
-            ));
+        if call.extra_named().is_empty() {
+            return Ok(call.num_args());
         }
-        let from = usize::try_from(position.saturating_sub(1)).unwrap_or(usize::MAX);
-        Ok(call.arguments().get(from..).unwrap_or_default().to_vec())
+        let native = self.active_native();
+        let message = format!("{native}() does not accept unknown named parameters");
+        Err(throw_error(self, "ArgumentCountError", &message))
     }
 
     /// `Z_PARAM_VARIADIC_WITH_NAMED`'s named half: the extra named

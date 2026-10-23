@@ -65,18 +65,6 @@ const fn union_mask(a: u32, b: u32) -> u32 {
     a | b
 }
 
-/// `inner` with `null` admitted: a union gains `null` as a member, any
-/// other type is `?inner`.
-fn nullable(inner: Type) -> Type {
-    match inner {
-        Type::Union(mut members) => {
-            members.push(Type::Null);
-            Type::Union(members)
-        }
-        other => Type::Nullable(Box::new(other)),
-    }
-}
-
 /// `?T`, held to what php refuses: `?mixed` and a nullable `null`.
 const fn nullable_mask(inner: u32) -> u32 {
     assert!(
@@ -414,12 +402,23 @@ impl FromArgument for Callable {
     }
 }
 
+/// `inner` with `null` beside it: `T|null` over a union, `?T` else.
+fn or_null(inner: Type) -> Type {
+    match inner {
+        Type::Union(mut members) => {
+            members.push(Type::Null);
+            Type::Union(members)
+        }
+        other => Type::Nullable(Box::new(other)),
+    }
+}
+
 /// `?T`, or `T|null` over a union.
 impl<T: FromArgument> FromArgument for Option<T> {
     const BY_REF: bool = T::BY_REF;
     const MASK: u32 = nullable_mask(T::MASK);
     fn declared() -> Option<Type> {
-        T::declared().map(nullable)
+        T::declared().map(or_null)
     }
     fn accepts(value: &Value) -> bool {
         matches!(value.as_ref(), ValueRef::Null) || T::accepts(value)
@@ -708,13 +707,8 @@ impl<T> Clone for Raw<T> {
 impl<T> Copy for Raw<T> {}
 
 impl<T> Raw<T> {
-    /// `value` declared as `T`, to return.
-    pub(crate) fn returned(value: Value) -> Raw<T> {
-        Raw::at(value, 0)
-    }
-
-    /// `value` as the argument at `position`.
-    fn at(value: Value, position: u32) -> Raw<T> {
+    /// `value` declared as `T`, passed at `position`; zero for a return.
+    pub(crate) fn at(value: Value, position: u32) -> Raw<T> {
         Raw {
             value,
             position,
@@ -876,20 +870,92 @@ impl<T: FromArgument> FromArgument for Ref<T> {
 
 /// The variadic tail of a native's parameters, each element held to
 /// `T`; a call that names an argument the tail cannot take is php's
-/// "does not accept unknown named parameters".
-#[derive(Debug, Clone, Default)]
-pub struct Variadic<T>(pub Vec<T>);
+/// "does not accept unknown named parameters". It reads as the slice of
+/// its elements and iterates them by value. `Z_PARAM_VARIADIC` points
+/// into the call's frame and allocates nothing; a tail of one element,
+/// the most a frameless call's carries, is held in place here, so it
+/// allocates nothing either, and a longer one is one `Vec`, sized once
+/// from the call's count.
+///
+/// A tail passed by value and one passed by reference, one, two and
+/// three elements long:
+///
+/// ```php
+/// $a = []; array_push($a, 1); array_push($a, 2, 3); array_push($a, 4, 5, 6);
+/// echo json_encode($a), " ", max(1, 7), max(1, 2, 8), max(1, 2, 3, 9), "\n";
+/// var_dump(sscanf("1", "%d", $x), $x);
+/// var_dump(sscanf("1 b", "%d %s", $x, $y), $x, $y);
+/// var_dump(sscanf("1 b 2.5", "%d %s %f", $x, $y, $z), $x, $y, $z);
+/// ```
+/// ```expect
+/// [1,2,3,4,5,6] 789
+/// int(1)
+/// int(1)
+/// int(2)
+/// int(1)
+/// string(1) "b"
+/// int(3)
+/// int(1)
+/// string(1) "b"
+/// float(2.5)
+/// ```
+#[derive(Debug, Clone)]
+pub struct Variadic<T>(Tail<T>);
 
-fn tail<T: FromArgument>(req: &mut Request, position: u32) -> Result<Vec<T>, Thrown> {
-    let count = u32::try_from(req.frames().argument_count()).unwrap_or(u32::MAX);
-    let mut out = Vec::new();
-    for at in position..=count {
-        let given = req.frames().argument(at).unwrap_or(Value::undef());
-        if let Some(held) = T::hold(req, given, at)? {
-            out.push(held);
+/// Where a [`Variadic`]'s elements stand: none or one in place, more on
+/// the heap.
+#[derive(Debug, Clone)]
+enum Tail<T> {
+    Few(Option<T>),
+    Many(Vec<T>),
+}
+
+impl<T> std::ops::Deref for Variadic<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        match &self.0 {
+            Tail::Few(one) => one.as_slice(),
+            Tail::Many(many) => many,
         }
     }
-    Ok(out)
+}
+
+impl<T> IntoIterator for Variadic<T> {
+    type Item = T;
+    type IntoIter = std::iter::Chain<std::option::IntoIter<T>, std::vec::IntoIter<T>>;
+    fn into_iter(self) -> Self::IntoIter {
+        match self.0 {
+            Tail::Few(one) => one.into_iter().chain(Vec::new()),
+            Tail::Many(many) => None.into_iter().chain(many),
+        }
+    }
+}
+
+/// The tail read off a call of `count` arguments from `position` on,
+/// `first` the argument there as the entry read it and each later one
+/// read off the frame: none or one in place, a longer one on the heap
+/// at once. An empty tail holds nothing, so no hold sees the `UNDEF`
+/// the entry reads past the call's arguments.
+fn tail<T: FromArgument>(
+    req: &mut Request,
+    first: Value,
+    position: u32,
+    count: u32,
+) -> Result<Variadic<T>, Thrown> {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    let mut held = match count.cmp(&position) {
+        Less => return Ok(Variadic(Tail::Few(None))),
+        Equal => return Ok(Variadic(Tail::Few(T::hold(req, first, position)?))),
+        Greater => Vec::with_capacity((count - position + 1) as usize),
+    };
+    held.extend(T::hold(req, first, position)?);
+    for at in position + 1..=count {
+        let given = req.frames().argument(at).unwrap_or(Value::undef());
+        if let Some(value) = T::hold(req, given, at)? {
+            held.push(value);
+        }
+    }
+    Ok(Variadic(Tail::Many(held)))
 }
 
 impl<T: FromArgument> FromArgument for Variadic<T> {
@@ -903,27 +969,21 @@ impl<T: FromArgument> FromArgument for Variadic<T> {
         true
     }
     fn from_value(_: &mut Request, _: Value) -> Result<Self, Thrown> {
-        Ok(Variadic(Vec::new()))
+        Ok(Variadic(Tail::Few(None)))
     }
     /// The tail is read off the call once, from `position` on, `given`
     /// standing first in it.
-    fn hold(req: &mut Request, _: Value, position: u32) -> Result<Option<Self>, Thrown> {
-        let given = req.variadic_arguments(position)?;
-        let mut held = Vec::with_capacity(given.len());
-        for (at, given) in (position..).zip(given) {
-            if let Some(value) = T::hold(req, given, at)? {
-                held.push(value);
-            }
-        }
-        Ok(Some(Variadic(held)))
+    fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
+        let count = req.variadic_count()?;
+        tail(req, given, position, count).map(Some)
     }
 }
 
 /// `Z_PARAM_VARIADIC_WITH_NAMED`: the tail, and the extra named
 /// arguments beside it, which `call_user_func` hands on.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct NamedVariadic<T> {
-    pub positional: Vec<T>,
+    pub positional: Variadic<T>,
     named: Vec<(PhpString, T)>,
 }
 
@@ -947,20 +1007,18 @@ impl<T: FromArgument> FromArgument for NamedVariadic<T> {
     }
     fn from_value(_: &mut Request, _: Value) -> Result<Self, Thrown> {
         Ok(NamedVariadic {
-            positional: Vec::new(),
+            positional: Variadic(Tail::Few(None)),
             named: Vec::new(),
         })
     }
     /// The positional tail is read off the call from `position` on,
     /// `given` standing first in it, and the named arguments after it.
-    fn hold(req: &mut Request, _: Value, position: u32) -> Result<Option<Self>, Thrown> {
-        let positional = tail(req, position)?;
-        let past = u32::try_from(req.frames().argument_count())
-            .unwrap_or(u32::MAX)
-            .saturating_add(1);
+    fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
+        let count = u32::try_from(req.frames().argument_count()).unwrap_or(u32::MAX);
+        let positional = tail(req, given, position, count)?;
         let mut named = Vec::new();
         for (name, value) in req.named_arguments() {
-            named.push((name, held_as::<T>(req, value, past)?));
+            named.push((name, held_as::<T>(req, value, count.saturating_add(1))?));
         }
         Ok(Some(NamedVariadic { positional, named }))
     }
@@ -1159,7 +1217,7 @@ impl<C: Class> IntoReturn for Instance<C> {
 impl<T: IntoReturn> IntoReturn for Option<T> {
     const MASK: u32 = nullable_mask(T::MASK);
     fn declared() -> Option<Type> {
-        T::declared().map(nullable)
+        T::declared().map(or_null)
     }
     fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         match self {

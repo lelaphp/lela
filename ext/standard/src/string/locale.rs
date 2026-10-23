@@ -307,7 +307,7 @@ pub(super) fn setlocale(
     rest: Variadic<Untyped<Value>>,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let given: Vec<Value> = std::iter::once(locales.0)
-        .chain(rest.0.into_iter().map(|rest| rest.0))
+        .chain(rest.into_iter().map(|rest| rest.0))
         .collect();
     let mut candidates: Vec<Value> = Vec::with_capacity(given.len());
     for (value, position) in given.into_iter().zip(2u32..) {

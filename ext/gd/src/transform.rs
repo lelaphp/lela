@@ -279,7 +279,7 @@ fn imagefilter(
             "be one of the IMG_FILTER_* filter constants",
         ));
     }
-    let args = &args.0[..];
+    let args = &args[..];
     let (min, max) = match filter {
         2 | 3 | 10 => (3, 3),
         4 => (5, 6),

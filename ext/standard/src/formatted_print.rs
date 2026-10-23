@@ -301,7 +301,7 @@ fn sprintf(
     format: PhpString,
     values: Variadic<Value>,
 ) -> Result<Owner<PhpString>, Thrown> {
-    formatted(req, format.as_bytes(), &values.0, Some(1))
+    formatted(req, format.as_bytes(), &values, Some(1))
 }
 
 /// `printf(string $format, mixed ...$values): int`, php's
@@ -323,7 +323,7 @@ fn sprintf(
 /// ```
 #[php_function]
 fn printf(req: &mut Request, format: PhpString, values: Variadic<Value>) -> Result<i64, Thrown> {
-    let formatted = formatted(req, format.as_bytes(), &values.0, Some(1))?;
+    let formatted = formatted(req, format.as_bytes(), &values, Some(1))?;
     req.response_mut().write(formatted.as_bytes());
     Ok(efree(req, formatted))
 }
@@ -452,7 +452,7 @@ fn fprintf(
     values: Variadic<Value>,
 ) -> Result<i64, Thrown> {
     let format = format.hold(req)?;
-    let formatted = formatted(req, format.as_bytes(), &values.0, Some(2))?;
+    let formatted = formatted(req, format.as_bytes(), &values, Some(2))?;
     if !formatted.is_empty() {
         stream.write(req, formatted.as_bytes());
     }

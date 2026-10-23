@@ -1139,7 +1139,7 @@ impl Fiber {
     ) -> Result<Owner<Value>, Thrown> {
         switch_refused(req)?;
         let named: Vec<(PhpString, Value)> = args.named().to_vec();
-        let back = start(req, this.object(), args.positional, named)?;
+        let back = start(req, this.object(), &args.positional, named)?;
         delegate(req, back)
     }
 
@@ -2068,7 +2068,7 @@ fn start_gc_fiber(req: &mut Request) {
         payload.callable = Some(callable);
     }
     req.fibers_mut().gc.fiber = Some(fiber);
-    let started = start(req, fiber, Vec::new(), Vec::new());
+    let started = start(req, fiber, &[], Vec::new());
     settle(req, started);
 }
 
@@ -2140,7 +2140,7 @@ fn gc_destructor_fiber(req: &mut Request) -> Result<Owner<Value>, Thrown> {
 fn start(
     req: &mut Request,
     this: PhpObject,
-    arguments: Vec<Value>,
+    arguments: &[Value],
     named: Vec<(PhpString, Value)>,
 ) -> Result<Transfer, Thrown> {
     let fiber = payload(req, this)?;
@@ -2156,6 +2156,7 @@ fn start(
             "Cannot start a fiber whose constructor was not called",
         ));
     };
+    let arguments = arguments.to_vec();
     let body = move |req: &mut Request| {
         let outcome = call_named_made(req, &callable, &arguments, &named);
         let held = payload(req, this)

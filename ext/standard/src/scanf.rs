@@ -418,7 +418,7 @@ pub(super) fn sscanf(
     format: PhpString,
     vars: Variadic<Ref<Value>>,
 ) -> Result<Option<Union<Owner<PhpArray>, i64>>, Thrown> {
-    let scanned = php_sscanf_internal(req, string.as_bytes(), format.as_bytes(), 3, vars.0.len())?;
+    let scanned = php_sscanf_internal(req, string.as_bytes(), format.as_bytes(), 3, vars.len())?;
     let answer = match scanned.as_ref() {
         ValueRef::Array(array) => Some(Union::A(Owner::take(req, array))),
         ValueRef::Int(n) => Some(Union::B(n)),

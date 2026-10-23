@@ -1442,7 +1442,7 @@ fn defined(req: &mut Request, constant_name: PhpString) -> Result<bool, Thrown> 
 /// ```
 #[php_function]
 fn var_dump(req: &mut Request, value: Value, values: Variadic<Value>) {
-    for (at, coerced) in (1u32..).zip(std::iter::once(value).chain(values.0)) {
+    for (at, coerced) in (1u32..).zip(std::iter::once(value).chain(values)) {
         let value = req
             .frames()
             .argument(at)
@@ -2464,10 +2464,12 @@ fn register_shutdown_function(
     args: Variadic<Value>,
 ) -> Result<(), Thrown> {
     let callback = Owner::take(req, callback);
-    for value in &args.0 {
+    for value in args.iter() {
         req.addref(value);
     }
-    req.code_mut().register_shutdown_function(callback, args.0)
+    let arguments = args.into_iter().collect();
+    req.code_mut()
+        .register_shutdown_function(callback, arguments)
 }
 
 /// `php_call_shutdown_functions` (`Z/ext/standard/basic_functions.c:1650`),
