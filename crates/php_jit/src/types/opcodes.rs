@@ -965,3 +965,101 @@ pub(super) fn within(opcode: Opcode, tag: ZvalType) -> Option<Within> {
         _ => None,
     }
 }
+
+/// Whether php's tracing code generator has a case that compiles `opcode`
+/// inline where nothing about its operands breaks it to the handler
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:4436-6477`): the calls, the sends
+/// and the returns, the comparisons and jumps, the fetches and writes of
+/// elements and properties, and the rest its switch lists; `NOP` and
+/// `JMP` compile to nothing (`:6480`).
+pub(super) fn compiled_inline(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::Nop
+            | Opcode::Jmp
+            | Opcode::AssignDimOp
+            | Opcode::PreIncObj
+            | Opcode::PreDecObj
+            | Opcode::PostIncObj
+            | Opcode::PostDecObj
+            | Opcode::AssignObjOp
+            | Opcode::AssignObj
+            | Opcode::AssignDim
+            | Opcode::QmAssign
+            | Opcode::InitFcall
+            | Opcode::InitFcallByName
+            | Opcode::InitNsFcallByName
+            | Opcode::SendVal
+            | Opcode::SendValEx
+            | Opcode::SendRef
+            | Opcode::SendVar
+            | Opcode::SendVarEx
+            | Opcode::SendVarNoRef
+            | Opcode::SendVarNoRefEx
+            | Opcode::SendFuncArg
+            | Opcode::CheckFuncArg
+            | Opcode::CheckUndefArgs
+            | Opcode::DoUcall
+            | Opcode::DoIcall
+            | Opcode::DoFcallByName
+            | Opcode::DoFcall
+            | Opcode::IsEqual
+            | Opcode::IsNotEqual
+            | Opcode::IsSmaller
+            | Opcode::IsSmallerOrEqual
+            | Opcode::Case
+            | Opcode::IsIdentical
+            | Opcode::IsNotIdentical
+            | Opcode::CaseStrict
+            | Opcode::Defined
+            | Opcode::Return
+            | Opcode::Bool
+            | Opcode::BoolNot
+            | Opcode::Jmpz
+            | Opcode::Jmpnz
+            | Opcode::JmpzEx
+            | Opcode::JmpnzEx
+            | Opcode::JmpFrameless
+            | Opcode::FetchDimFuncArg
+            | Opcode::FetchDimR
+            | Opcode::FetchDimIs
+            | Opcode::FetchListR
+            | Opcode::FetchDimW
+            | Opcode::FetchDimRw
+            | Opcode::FetchListW
+            | Opcode::IssetIsemptyDimObj
+            | Opcode::FetchObjFuncArg
+            | Opcode::FetchObjR
+            | Opcode::FetchObjIs
+            | Opcode::FetchObjW
+            | Opcode::FetchStaticPropFuncArg
+            | Opcode::FetchStaticPropR
+            | Opcode::FetchStaticPropIs
+            | Opcode::FetchStaticPropW
+            | Opcode::FetchStaticPropRw
+            | Opcode::FetchStaticPropUnset
+            | Opcode::BindGlobal
+            | Opcode::Recv
+            | Opcode::RecvInit
+            | Opcode::Free
+            | Opcode::FeFree
+            | Opcode::Echo
+            | Opcode::Strlen
+            | Opcode::Count
+            | Opcode::FetchThis
+            | Opcode::SwitchLong
+            | Opcode::SwitchString
+            | Opcode::Match
+            | Opcode::VerifyReturnType
+            | Opcode::FeResetR
+            | Opcode::FeFetchR
+            | Opcode::FetchConstant
+            | Opcode::InitMethodCall
+            | Opcode::InitStaticMethodCall
+            | Opcode::InitDynamicCall
+            | Opcode::FramelessIcall0
+            | Opcode::FramelessIcall1
+            | Opcode::FramelessIcall2
+            | Opcode::FramelessIcall3
+    )
+}

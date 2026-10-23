@@ -1122,11 +1122,13 @@ fn each_statement_takes_the_exits_php_takes() -> Result<(), String> {
 /// `0017` and `0019`, then each statement's `BOOL_NOT` and `JMPZ` guards
 /// (`0007`, `0008`, `0010`, `0011`, `0013`, `0014`), the increment's at
 /// `0016`, with no exit for a `JMPZ`'s direction
-/// (`Z/ext/opcache/jit/zend_jit_trace.c:5687-5691`, #3203). php's tenth,
-/// its interrupt test's at `0017`, is there because its code no longer
-/// uses the instruction pointer it entered with, its register allocator
-/// holding nothing (`:7214-7230`); here the loop takes the interrupt stub
-/// (#3277).
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:5687-5691`, #3203), and tenth
+/// its interrupt test's own at `0017`, php's `ZEND_JIT_EXIT_TO_VM`: no
+/// code of the trace's reads the instruction pointer it entered with,
+/// since php compiles every one of its oplines inline, the `BOOL_NOT`s by
+/// `zend_jit_bool_jmpznz` (`:5644-5654`) where this tier steps them, so
+/// `zend_jit_trace_uses_initial_ip` says no and the test takes an exit
+/// (`:7210-7228`, #3277).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_jump_its_guard_holds_one_way_takes_phps_exits() -> Result<(), String> {
@@ -1134,7 +1136,7 @@ fn a_jump_its_guard_holds_one_way_takes_phps_exits() -> Result<(), String> {
     let oplines: Vec<Option<u32>> = (ir.exits.iter())
         .map(|exit| exit.opline.map(|at| at.0))
         .collect();
-    let php = [17, 19, 7, 8, 10, 11, 13, 14, 16].map(Some);
+    let php = [17, 19, 7, 8, 10, 11, 13, 14, 16, 17].map(Some);
     assert_eq!(oplines, php, "{}", dump::render(&ir));
     Ok(())
 }

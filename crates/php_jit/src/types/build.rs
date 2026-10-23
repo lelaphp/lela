@@ -13,10 +13,10 @@ use php_unit::{CacheSlot, Effects, OpArray, Opcode, OperandKind, Opline, OplineI
 
 use super::lattice::{self, Types};
 use super::opcodes::{
-    Declared, Within, arith, assigned, check_sites, constant, constant_types, goes_one_way,
-    guard_sites, inline_may_leave, is_call, keeps_temporaries, may_exit, op1_types, out_types,
-    packed_guard, param_types, params, reads, reads_by_name, referenced, slot_of, within, writes,
-    written, written_after_entry,
+    Declared, ISEMPTY, Within, arith, assigned, check_sites, compiled_inline, constant,
+    constant_types, goes_one_way, guard_sites, inline_may_leave, is_call, keeps_temporaries,
+    may_exit, op1_types, out_types, packed_guard, param_types, params, reads, reads_by_name,
+    referenced, slot_of, within, writes, written, written_after_entry,
 };
 use super::{
     Abort, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo,
@@ -260,6 +260,10 @@ struct Builder<'a> {
     /// Per line, the operands' types its recording saw.
     sampled: HashMap<OpId, [Option<Sample>; 3]>,
 }
+
+/// php's `MAY_BE_RESOURCE`, `1 << IS_RESOURCE`, the mask a `TYPE_CHECK`
+/// for `is_resource()` names.
+const MAY_BE_RESOURCE: u32 = 1 << 9;
 
 impl<'a> Builder<'a> {
     fn new(rec: &'a TraceRecord, view: &'a UnitView) -> Result<Builder<'a>, Abort> {
@@ -2173,9 +2177,9 @@ impl<'a> Builder<'a> {
     /// from then on.
     fn uses_initial_ip(&self) -> bool {
         let mut tracking = true;
-        for op in &self.ops {
+        for (at, op) in self.ops.iter().enumerate() {
             match op {
-                Op::Line(line) if self.by_handler(line) => {
+                Op::Line(line) if self.by_handler(at, line) => {
                     if tracking {
                         return true;
                     }
@@ -2196,20 +2200,82 @@ impl<'a> Builder<'a> {
         false
     }
 
-    /// Whether php's code generator serves `line` through its handler,
-    /// `zend_jit_handler`, which sets the instruction pointer: an opline
-    /// stepped here, a division, which its switch has no case for, and
-    /// an `ADD`, `SUB` or `MUL` over a variable a symbol table reaches,
-    /// which its inference holds as possibly undefined
-    /// (`Z/ext/opcache/jit/zend_jit_trace.c:4538-4552`), whatever this
-    /// tier serves inline.
-    fn by_handler(&self, line: &Line) -> bool {
-        match (line.form, line.opcode) {
-            (Form::Step, _) | (Form::Inline, Opcode::Div) => true,
-            (Form::Inline, Opcode::Add | Opcode::Sub | Opcode::Mul) => {
-                self.over_aliased(line.op1, line.op2)
+    /// Whether php's code generator serves `line`, the op at `at`, through
+    /// its handler, `zend_jit_trace_handler`, which sets the instruction
+    /// pointer, whatever this tier serves inline or steps: an opline its
+    /// switch has no case for, or one whose case breaks to the handler
+    /// over what its operands may be (`Z/ext/opcache/jit/zend_jit_trace.c:4436-6477`).
+    /// A case it compiles inline sets no pointer and reads none: `BOOL_NOT`
+    /// is `zend_jit_bool_jmpznz` (`:5644-5654`), which this tier steps.
+    /// What an operand may be is what the recording saw of it where it saw
+    /// it, as php's `CHECK_OP_TRACE_TYPE` narrows it, and what `types`
+    /// holds of it otherwise; but the `ADD`, `SUB` and `MUL` case reads it
+    /// before it narrows, so a variable a symbol table reaches, which its
+    /// inference holds as possibly undefined, is served by the handler
+    /// there (`:4538-4552`).
+    fn by_handler(&self, at: usize, line: &Line) -> bool {
+        let code = self.meta(line.frame).code;
+        let Some(op) = code.oplines.get(line.opline.0 as usize) else {
+            return true;
+        };
+        let samples = OpId(u32::try_from(at).unwrap_or(u32::MAX));
+        let samples = self.sampled.get(&samples).copied().unwrap_or([None; 3]);
+        let seen = |n: usize, operand: Operand| match (operand, samples[n]) {
+            (Operand::Value(_), Some(sample)) if !sample.indirect => Types::of_tag(sample.kind),
+            (operand, _) => self.types_of(line.frame, operand),
+        };
+        let (t1, t2) = (seen(0, line.op1), seen(1, line.op2));
+        let cv1 = op.op1_type == OperandKind::Cv;
+        let long = |t: Types| t.meets(Types::LONG);
+        let number = |t: Types| t.meets(Types::LONG) || t.meets(Types::DOUBLE);
+        let string = |t: Types| t.meets(Types::STRING);
+        match op.opcode {
+            Opcode::PreInc | Opcode::PreDec | Opcode::PostInc | Opcode::PostDec => {
+                !cv1 || !long(t1)
             }
-            (Form::Inline, _) => false,
+            Opcode::BwOr
+            | Opcode::BwAnd
+            | Opcode::BwXor
+            | Opcode::Sl
+            | Opcode::Sr
+            | Opcode::Mod => !long(t1) || !long(t2),
+            Opcode::Add | Opcode::Sub | Opcode::Mul => {
+                let arrays = op.opcode == Opcode::Add
+                    && t1.kinds() == Types::ARRAY.kinds()
+                    && t2.kinds() == Types::ARRAY.kinds();
+                self.over_aliased(line.op1, line.op2) || (!arrays && (!number(t1) || !number(t2)))
+            }
+            Opcode::Concat | Opcode::FastConcat => {
+                t1.meets(Types::UNDEF) || t2.meets(Types::UNDEF) || !string(t1) || !string(t2)
+            }
+            Opcode::AssignOp => {
+                let served = match lattice::binary_of(op.extended_value) {
+                    Some(Opcode::Add | Opcode::Sub | Opcode::Mul) => number(t1) && number(t2),
+                    Some(
+                        Opcode::BwOr
+                        | Opcode::BwAnd
+                        | Opcode::BwXor
+                        | Opcode::Sl
+                        | Opcode::Sr
+                        | Opcode::Mod,
+                    ) => long(t1) && long(t2),
+                    Some(Opcode::Concat) => string(t1) && string(t2),
+                    _ => false,
+                };
+                !cv1 || op.out_type != OperandKind::Unused || !served
+            }
+            Opcode::Assign => !cv1,
+            Opcode::Cast => t1
+                .tag()
+                .is_none_or(|tag| op.extended_value != u32::from(tag as u8)),
+            Opcode::TypeCheck => op.extended_value == MAY_BE_RESOURCE,
+            Opcode::IssetIsemptyCv => op.extended_value & ISEMPTY != 0,
+            Opcode::InArray => {
+                matches!(op.op1_type, OperandKind::Var | OperandKind::Tmp)
+                    || t1.kinds() != Types::STRING
+            }
+            Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd => t2.kinds() != Types::STRING,
+            opcode => !compiled_inline(opcode),
         }
     }
 
