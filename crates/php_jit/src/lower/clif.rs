@@ -293,9 +293,10 @@ fn leave_of(line: &Line) -> Option<Leave> {
 }
 
 /// Whether `opcode`'s handler goes on at the next opline of its frame,
-/// or throws, and does nothing else to the frame chain: what
-/// [`Kernel::Handle`] serves, building an array and adding to it, whose
-/// handlers php's code calls with no inline code of its own. An array
+/// or throws, and does nothing else to the frame chain but pop a call it
+/// makes: what [`Kernel::Handle`] serves, building an array and adding
+/// to it, whose handlers php's code calls with no inline code of its own,
+/// and a native's call, whose handler php's code calls directly. An array
 /// built per turn, and a key the build throws at, caught in the frame:
 ///
 /// ```php
@@ -307,7 +308,10 @@ fn leave_of(line: &Line) -> Option<Leave> {
 /// 570 114
 /// ```
 fn goes_on(opcode: Opcode) -> bool {
-    matches!(opcode, Opcode::InitArray | Opcode::AddArrayElement)
+    matches!(
+        opcode,
+        Opcode::InitArray | Opcode::AddArrayElement | Opcode::DoIcall
+    )
 }
 
 /// One trace's function as it is built.
@@ -1302,49 +1306,22 @@ impl<'a> Emit<'a> {
                 )?;
             }
             None if goes_on(line.opcode) && self.within(at).is_empty() => {
-                self.call(Kernel::Handle, &[room, opline, func], leave_of(line))?;
-                // Where the interpreter stands after it: past it, in its
-                // frame, whose room and call are where they stood.
-                let next = self.b.ins().iconst(I32, i64::from(line.opline.0 + 1));
-                self.b.ins().stack_store(I64, func, self.stood, STOOD_FUNC);
-                self.b
-                    .ins()
-                    .stack_store(I64, next, self.stood, STOOD_OPLINE);
-            }
-            None if line.opcode == Opcode::DoIcall && self.within(at).is_empty() => {
-                match self.outer_call() {
-                    Some(outer) => {
-                        self.call(Kernel::Handle, &[room, opline, func], leave_of(line))?;
-                        // Past it, in its frame, the native's call popped
-                        // and the call under way the one it was sent in.
-                        let next = self.b.ins().iconst(I32, i64::from(line.opline.0 + 1));
-                        self.b.ins().stack_store(I64, func, self.stood, STOOD_FUNC);
-                        self.b
-                            .ins()
-                            .stack_store(I64, next, self.stood, STOOD_OPLINE);
-                        self.b.ins().stack_store(I64, outer, self.stood, STOOD_CALL);
-                    }
-                    None => {
-                        self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?;
-                    }
-                }
+                self.handled(line, [room, opline, func])?;
             }
             None => self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?,
         }
         Ok(())
     }
 
-    /// The room of the call under way past the innermost, the one a
-    /// `DO_ICALL` leaves standing as it pops its own, where compiled code
-    /// knows it: none under way is null, one it pushed is its room, and
-    /// one begun before the trace, whose room the push of the innermost
-    /// wrote over in the `Stood`, is not known (`None`), so the
-    /// `DO_ICALL` is stepped, which reads where it stands. A native's call
-    /// served by the handler with no step ([`Kernel::Handle`]), as php's
-    /// `zend_jit_do_fcall` calls `internal_function.handler` directly
-    /// (`Z/ext/opcache/jit/zend_jit_ir.c:10511-10600`); `sqrt` in a loop,
-    /// a native whose return is unused, one sent as another's argument,
-    /// and one that throws out of the loop:
+    /// `line` served by its handler through [`Kernel::Handle`], with no
+    /// step, and where the interpreter stands after it written: past it,
+    /// in its frame; for a native's `DO_ICALL`, which pops its call, the
+    /// call under way now read off the frame table, the record on top
+    /// where it is not the frame's own ([`Emit::call_left`]), as php's
+    /// `zend_jit_do_fcall` calls the native's handler directly and goes on
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:10511-10600`). `sqrt` in a loop, a
+    /// native whose return is unused, one sent as another's argument, and
+    /// one that throws out of the loop:
     ///
     /// ```php
     /// function f($n) {
@@ -1377,14 +1354,34 @@ impl<'a> Emit<'a> {
     /// [112.082845,45]
     /// str_repeat(): Argument #2 ($times) must be greater than or equal to 0
     /// ```
-    fn outer_call(&mut self) -> Option<Value> {
-        let Some(outer) = self.calls.len().checked_sub(2) else {
-            return Some(self.b.ins().iconst(I64, 0));
-        };
-        match self.calls.get(outer).map(|(room, _)| *room) {
-            Some(CallRoom::Held(var)) => Some(self.b.use_var(var)),
-            _ => None,
+    ///
+    /// A native that calls back into user code which writes what the
+    /// trace holds, a reference its closure binds, read after the call:
+    ///
+    /// ```php
+    /// function h($n) {
+    ///     $r = 0; $t = 0;
+    ///     $w = function ($x) use (&$r) { if ($x == 5) { $r = 0.5; } return $x; };
+    ///     for ($i = 0; $i < $n; $i++) { $r = $i; array_map($w, [$i]); $t = $t + $r; }
+    ///     return $t;
+    /// }
+    /// var_dump(h(8));
+    /// ```
+    /// ```expect regime=jit-force process
+    /// float(23.5)
+    /// ```
+    fn handled(&mut self, line: &Line, [room, opline, func]: [Value; 3]) -> Result<(), Abort> {
+        self.call(Kernel::Handle, &[room, opline, func], leave_of(line))?;
+        let next = self.b.ins().iconst(I32, i64::from(line.opline.0 + 1));
+        self.b.ins().stack_store(I64, func, self.stood, STOOD_FUNC);
+        self.b
+            .ins()
+            .stack_store(I64, next, self.stood, STOOD_OPLINE);
+        if line.opcode == Opcode::DoIcall {
+            let call = self.call_left(line.frame)?;
+            self.b.ins().stack_store(I64, call, self.stood, STOOD_CALL);
         }
+        Ok(())
     }
 
     /// What follows a stepped `line`: a call it made off the calls under
@@ -2135,6 +2132,49 @@ impl<'a> Emit<'a> {
     /// }
     /// float(1)
     /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function step(array &$v, array &$w, $n) {
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $k = $i % 4;
+    ///         $v[$k] -= 0.5 * $k; $w[$k] += $k; $w[$k] *= 3;
+    ///     }
+    /// }
+    /// $v = [1.0, 2.0, 3.0, 4.0]; $w = [0, 1, PHP_INT_MAX, 3];
+    /// step($v, $w, 8);
+    /// $w[1] = "7"; $copy = $v; step($v, $w, 8);
+    /// unset($v[2]); step($v, $w, 4);
+    /// $v["x"] = 1; step($v, $w, 4);
+    /// var_dump($v, $w, $copy[1]);
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// Warning: Undefined array key 2 in %s on line 5
+    /// array(5) {
+    ///   [0]=>
+    ///   float(1)
+    ///   [1]=>
+    ///   float(-1)
+    ///   [3]=>
+    ///   float(-5)
+    ///   [2]=>
+    ///   float(-2)
+    ///   ["x"]=>
+    ///   int(1)
+    /// }
+    /// array(4) {
+    ///   [0]=>
+    ///   int(0)
+    ///   [1]=>
+    ///   int(687)
+    ///   [2]=>
+    ///   float(6.723838214867132E+21)
+    ///   [3]=>
+    ///   int(5463)
+    /// }
+    /// float(1)
+    /// ```
     fn assign_dim_op(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         let Operand::Value(array) = line.op1 else {
             return Err(mismatch("an element's compound write to no array"));
@@ -2211,7 +2251,7 @@ impl<'a> Emit<'a> {
     }
 
     /// The array `slot` holds, in place or through the reference it holds,
-    /// as `read` says: php's `zend_jit_fetch_reference` past its guards.
+    /// as `read` says: php's `zend_jit_fetch_reference` past its guards (`Z/ext/opcache/jit/zend_jit_ir.c:16952-17010`).
     /// A by-reference array read by a long key, made a hash, then an array
     /// with a reference element, under the trace:
     ///

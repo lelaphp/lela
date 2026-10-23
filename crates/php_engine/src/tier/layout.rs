@@ -331,7 +331,7 @@ impl FrameLayout {
 /// pushes it, taken by a recording where the call stood built: what
 /// compiled code writes in place for the same callee and argument count,
 /// as php's trace writes a recorded `func`'s call
-/// (`zend_jit_push_call_frame`, which pushes a native's as a user
+/// (`zend_jit_push_call_frame`, `Z/ext/opcache/jit/zend_jit_ir.c:8466-8650`, which pushes a native's as a user
 /// function's). Its header is the one [`call_image`] lays out for the
 /// request the code runs in, since the function's number and its record
 /// are the request's.

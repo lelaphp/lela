@@ -1130,19 +1130,19 @@ impl<'a> Builder<'a> {
                     return None;
                 };
                 let plain = match callee {
-                    Callee::User(callee) => {
-                        let known = op.opcode == Opcode::InitFcall || *callee == func;
-                        known.then(|| self.view.call(*callee, op.extended_value))??
+                    // A function named in full, or the frame's own.
+                    Callee::User(callee) if op.opcode == Opcode::InitFcall || *callee == func => {
+                        self.view.call(*callee, op.extended_value)?
                     }
                     // A native named in full, which php's trace pushes as
                     // it pushes a user function's call
-                    // (`zend_jit_push_call_frame`, `:8466-8650`).
+                    // (`zend_jit_push_call_frame`, `Z/ext/opcache/jit/zend_jit_ir.c:8466-8650`).
                     Callee::Native(_) if op.opcode == Opcode::InitFcall => {
                         let code = self.meta(frame).code;
                         let name = code.literals.get(op.op2 as usize)?.str_bytes()?;
                         self.view.native_call(name, op.extended_value)?
                     }
-                    Callee::Native(_) => return None,
+                    Callee::User(_) | Callee::Native(_) => return None,
                 };
                 Some(InPlace::Push(plain.clone()))
             }
@@ -1704,7 +1704,7 @@ impl<'a> Builder<'a> {
             if seen.referenced[0] {
                 // An array read through a reference, held to its layout at
                 // this read and narrowed for this opline alone, as its type
-                // is (`zend_jit_fetch_reference`).
+                // is (`zend_jit_fetch_reference`, `Z/ext/opcache/jit/zend_jit_ir.c:16952-17010`).
                 if seen.types[0].either_layout() {
                     seen.types[0] = seen.types[0].laid_out(layout);
                     seen.inferred[0] = seen.types[0];
@@ -2338,15 +2338,7 @@ impl<'a> Builder<'a> {
                         check: placed.check,
                         exit: exits.take(spec, level.clone())?,
                     });
-                    let held = match placed.check {
-                        Check::Type { value, tag } => Some((value, tag)),
-                        Check::Layout { value, .. } => Some((value, ZvalType::Array)),
-                        Check::Deref { .. }
-                        | Check::Direction { .. }
-                        | Check::Stands { .. }
-                        | Check::Arm { .. }
-                        | Check::Room { .. } => None,
-                    };
+                    let held = stack_type(placed.check);
                     if let Some((value, tag)) = held
                         && !self.aliased(self.val(value).slot)
                     {
@@ -3325,6 +3317,30 @@ impl Narrowed {
             } => Some((value, Narrowed::Layout(layout))),
             _ => None,
         }
+    }
+}
+
+/// The type a guard's exit and every exit after it know its slot holds,
+/// php's `SET_STACK_TYPE` past a guard: a type's, an array's held in place;
+/// none for a reference, whose type no stack map keeps, as php's
+/// `zend_jit_fetch_reference` sets none, nor for a guard on no slot.
+fn stack_type(check: Check) -> Option<(ValueId, ZvalType)> {
+    match check {
+        Check::Type { value, tag } => Some((value, tag)),
+        Check::Layout {
+            value,
+            read: Read::InPlace,
+            ..
+        } => Some((value, ZvalType::Array)),
+        Check::Layout {
+            read: Read::Through,
+            ..
+        }
+        | Check::Deref { .. }
+        | Check::Direction { .. }
+        | Check::Stands { .. }
+        | Check::Arm { .. }
+        | Check::Room { .. } => None,
     }
 }
 
