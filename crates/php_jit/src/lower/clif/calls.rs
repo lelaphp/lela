@@ -28,7 +28,16 @@ use super::{
     imm, leave_of, mismatch, trusted,
 };
 use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT};
-use crate::types::{Abort, End, ExitId, Frame, Imm, Line, OpId, Operand};
+use crate::types::{Abort, End, ExitId, Frame, Imm, Line, OpId, Operand, Returned};
+
+/// What a leave in place writes into the caller's slot: a scalar, or a
+/// zval's two words, copied from a constant or moved from a temporary.
+#[derive(Clone, Copy)]
+enum Out {
+    Scalar(Scalar),
+    Copied(Value, Value),
+    Moved(Value, Value),
+}
 
 /// The engine's frame layout, as compiled.
 const L: FrameLayout = FRAME;
@@ -317,7 +326,8 @@ impl Emit<'_> {
     /// a frame `leaves_plainly` finds: the value into the caller's slot
     /// where the call reads it, the frame's record off the table, the word
     /// moved back to its link and the top back to its room, and the caller
-    /// on past its call. `types` holds its value a scalar ([`Imm::Leave`]);
+    /// on past its call. `types` holds its value a scalar, a constant no
+    /// reference counts or a temporary ([`Imm::Leave`], [`Returned`]);
     /// the frame's header, its variables where `types` does not hold them
     /// uncounted and the caller's slot are read here, and where the leave
     /// kernel would serve the frame, the opline is stepped.
@@ -363,10 +373,7 @@ impl Emit<'_> {
     /// 6765 338350
     /// ```
     pub(super) fn leave_in_place(&mut self, id: OpId, line: &Line) -> Result<(), Abort> {
-        let returned = match line.op1 {
-            Operand::Unused => Scalar::Null,
-            operand => self.scalar(id, operand)?,
-        };
+        let returned = self.returned(id, line)?;
         let stack = self.stack()?;
         let caller = self
             .returns_to(line)?
@@ -402,8 +409,23 @@ impl Emit<'_> {
         let counted = self.b.ins().icmp_imm_s(IntCC::NotEqual, counted, 0);
         let counted = self.b.ins().band(reads, counted);
         self.divert_if(counted, slow);
+        if let Out::Moved(_, info) = returned {
+            // What the caller does not read is given up, which the leave
+            // kernel does.
+            let owned = self.b.ins().band_imm_u(info, COUNTED);
+            let owned = self.b.ins().icmp_imm_s(IntCC::NotEqual, owned, 0);
+            let unread = self.b.ins().icmp_imm_s(IntCC::Equal, returns, 0);
+            let dropped = self.b.ins().band(owned, unread);
+            self.divert_if(dropped, slow);
+        }
         self.when(reads, |emit| {
-            emit.write(target, 0, returned);
+            match returned {
+                Out::Scalar(scalar) => emit.write(target, 0, scalar),
+                Out::Copied(word, info) | Out::Moved(word, info) => {
+                    emit.b.ins().store(trusted(), word, target, 0);
+                    emit.b.ins().store(trusted(), info, target, super::TYPE_AT);
+                }
+            }
             Ok(())
         })?;
         // The record off the table, the word and the top back.
@@ -431,6 +453,48 @@ impl Emit<'_> {
         self.left_or_not(id, line, (slow, join))
     }
 
+    /// What a `RETURN` left in place hands its caller ([`Returned`]): a
+    /// scalar, `null` for none; a constant's two words, read from the op
+    /// array the trace's epoch holds; or a temporary's, moved. A tree's
+    /// leaves returned as a constant and its nodes as the arrays built,
+    /// read back, and returns no caller reads, given up:
+    ///
+    /// ```php
+    /// function leaf($d) { if ($d === 0) { return [null, null]; } $e = $d - 1; return [leaf($e), leaf($e)]; }
+    /// function tally($t) { return $t[0] === null ? 1 : tally($t[0]) + tally($t[1]); }
+    /// function drop($n) { for ($i = 0; $i < $n; $i++) { leaf(2); } return $i; }
+    /// echo tally(leaf(10)), " ", drop(50), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 1024 50
+    /// ```
+    fn returned(&mut self, id: OpId, line: &Line) -> Result<Out, Abort> {
+        let Imm::Leave { value, .. } = line.imm else {
+            return Err(mismatch("a leave in place with no value named"));
+        };
+        let (zval, at, moved) = match (value, line.op1) {
+            (Returned::Scalar, Operand::Unused) => return Ok(Out::Scalar(Scalar::Null)),
+            (Returned::Scalar, operand) => return Ok(Out::Scalar(self.scalar(id, operand)?)),
+            (Returned::Constant(address), _) => {
+                let address = i64::try_from(address)
+                    .map_err(|_| mismatch("a constant past a 64-bit address"))?;
+                (self.b.ins().iconst(I64, address), 0, false)
+            }
+            (Returned::Moved, Operand::Value(value)) => {
+                let (room, at) = self.place(self.value(value)?.slot)?;
+                (room, at, true)
+            }
+            (Returned::Moved, _) => return Err(mismatch("a temporary moved from no slot")),
+        };
+        let word = self.b.ins().load(I64, trusted(), zval, at);
+        let info = self.b.ins().load(I32, trusted(), zval, at + super::TYPE_AT);
+        Ok(if moved {
+            Out::Moved(word, info)
+        } else {
+            Out::Copied(word, info)
+        })
+    }
+
     /// What the header of the frame in `room`, which leaves to `caller`,
     /// says the leave kernel serves: a receiver, a closure, an annex, a
     /// call not made a frame or arguments past the parameters, a caller
@@ -456,7 +520,7 @@ impl Emit<'_> {
         let looped = self.b.ins().icmp_imm_s(IntCC::NotEqual, looped, 0);
         let outside = self.b.ins().bor(none, looped);
         refused = self.b.ins().bor(refused, outside);
-        if let Imm::Leave { owners: true } = line.imm {
+        if let Imm::Leave { owners: true, .. } = line.imm {
             let owners = self.owners(room, line.frame)?;
             refused = self.b.ins().bor(refused, owners);
         }

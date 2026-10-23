@@ -432,6 +432,33 @@ pub(super) fn of_type(ty: Option<&Type>, variadic: bool) -> Types {
     }
 }
 
+/// The kinds a parameter's declared type `ty` holds as they are, which
+/// its `RECV` neither refuses nor coerces whatever the regime: the type
+/// byte's test php's `zend_jit_verify_arg_type` makes first, and skips
+/// where its stack map knows the argument of one of them
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:10766-10823`, the skip at
+/// `:10773-10781`). None for a type whose
+/// check reads more than the type byte, a class, `callable` or
+/// `iterable`, or `never`.
+pub(super) fn held_as_is(ty: &Type) -> Option<Types> {
+    Some(match ty {
+        Type::Mixed => Types::ANY.kinds(),
+        Type::Null => Types::NULL,
+        Type::Bool => Types::BOOL,
+        Type::False => Types::FALSE,
+        Type::True => Types::TRUE,
+        Type::Int => Types::LONG,
+        Type::Float => Types::DOUBLE,
+        Type::String => Types::STRING,
+        Type::Array => Types::of_tag(ZvalType::Array).kinds(),
+        Type::Nullable(inner) => held_as_is(inner)?.or(Types::NULL),
+        Type::Union(members) => members
+            .iter()
+            .try_fold(Types::NONE, |all, member| Some(all.or(held_as_is(member)?)))?,
+        _ => return None,
+    })
+}
+
 /// What a parameter holds once its `RECV` ran: what was sent where the
 /// declaration keeps it unchanged, what is declared otherwise, as php's
 /// trace SSA propagates an argument's type into an untyped parameter

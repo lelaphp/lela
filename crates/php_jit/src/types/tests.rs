@@ -19,14 +19,14 @@ use php_heap::ZvalType;
 use php_unit::{Opcode, OplineIdx};
 
 use super::{
-    Check, Def, End, ExitId, Form, Frame, Grows, GuardAt, Home, Interrupt, Landing, Op, OpId,
+    Check, Def, End, ExitId, Form, Frame, Grows, GuardAt, Home, Interrupt, Landing, Line, Op, OpId,
     Operand, Repeat, Slot, TraceIr, Types, ValueId, build,
 };
 use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
-    self, ARRAY_WRITE, FANNKUCH, FIB, Fixture, MANDELBROT, NBODY, SIEVE, SPECTRALNORM, held,
-    traced as built,
+    self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FANNKUCH, FIB, Fixture, MANDELBROT,
+    NBODY, SIEVE, SPECTRALNORM, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -55,6 +55,72 @@ fn fib_enters_and_recurses() -> Result<(), String> {
     let ir = golden(FIB)?;
     assert_eq!(ir.entry.stop, Stop::RecursiveCall);
     assert!(matches!(ir.end, End::Loop(header) if header.repeat == Repeat::Call));
+    Ok(())
+}
+
+/// `binary_trees`' `check_tree`, entered: the recursive calls by name
+/// send `$node[0]` and `$node[1]` to a parameter the trace knows is taken
+/// by value, so each `CHECK_FUNC_ARG` is inline, each
+/// `FETCH_DIM_FUNC_ARG` a `FETCH_DIM_R` and each `SEND_FUNC_ARG` a
+/// `SEND_VAR`, which moves the element into the call, as php's code
+/// generator compiles them (`Z/ext/opcache/jit/zend_jit_trace.c:5324-5390`,
+/// `:5822-5829`); nothing writes `$node`, so the callee's parameter is
+/// the array the send moved. The `=== null` over the element read is a
+/// `TYPE_CHECK`, inline, as php's `zend_jit_type_check` compiles it
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:5536-5563`).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn binary_trees_sends_its_nodes_elements_by_value() -> Result<(), String> {
+    let ir = golden(BINARY_TREES_CHECK)?;
+    let opcodes: Vec<(Opcode, Form)> = (ir.ops.iter())
+        .filter_map(|op| match op {
+            Op::Line(line) => Some((line.opcode, line.form)),
+            _ => None,
+        })
+        .collect();
+    for opcode in [
+        Opcode::CheckFuncArg,
+        Opcode::FetchDimFuncArg,
+        Opcode::SendFuncArg,
+        Opcode::TypeCheck,
+    ] {
+        assert!(
+            !opcodes.contains(&(opcode, Form::Step)),
+            "{opcode:?} stepped: {}",
+            dump::render(&ir)
+        );
+    }
+    assert!(opcodes.contains(&(Opcode::CheckFuncArg, Form::Inline)));
+    assert!(opcodes.contains(&(Opcode::SendVar, Form::Inline)));
+    Ok(())
+}
+
+/// `binary_trees`' `make_tree`, from its first call's landing: a
+/// `SEND_VAR_EX` of `$d` to the parameter the trace knows is taken by
+/// value is a `SEND_VAR`, inline, and leaves `$d` the long it was, as
+/// php's trace TSSA keeps the variable's type across it
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:2373-2382`).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn binary_trees_sends_a_long_by_value_and_keeps_its_type() -> Result<(), String> {
+    let ir = golden(BINARY_TREES_MAKE)?;
+    let sends: Vec<&Line> = (ir.ops.iter())
+        .filter_map(|op| match op {
+            Op::Line(line) if line.opline == OplineIdx(7) || line.opline == OplineIdx(11) => {
+                Some(line)
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(!sends.is_empty(), "{}", dump::render(&ir));
+    for send in sends {
+        assert_eq!(
+            (send.opcode, send.form, send.op1_def),
+            (Opcode::SendVar, Form::Inline, None),
+            "{}",
+            dump::render(&ir)
+        );
+    }
     Ok(())
 }
 
@@ -1365,7 +1431,14 @@ fn a_trace_that_stops_at_a_return_leaves_the_frame_in_place() -> Result<(), Stri
         return Err(format!("no last line: {rendered}"));
     };
     assert_eq!(last.opcode, Opcode::Return, "{rendered}");
-    assert_eq!(last.imm, super::Imm::Leave { owners: true }, "{rendered}");
+    assert_eq!(
+        last.imm,
+        super::Imm::Leave {
+            owners: true,
+            value: super::Returned::Scalar,
+        },
+        "{rendered}"
+    );
     assert_eq!(
         ir.exits
             .get(usize::from(exit.0))

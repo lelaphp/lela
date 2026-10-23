@@ -153,7 +153,7 @@ impl Builder<'_> {
                 let before = running;
                 running = match op {
                     Op::Line(line) => line.frame,
-                    Op::Enter { frame } | Op::Back { frame, .. } => *frame,
+                    Op::Enter { frame, .. } | Op::Back { frame, .. } => *frame,
                     Op::InitCall { .. } => running,
                 };
                 before
@@ -212,7 +212,7 @@ impl Builder<'_> {
                         }
                     })
                 }
-                Op::Enter { frame } => {
+                Op::Enter { frame, .. } => {
                     by_frame.insert(*frame, 0);
                     Some(now)
                 }
@@ -310,7 +310,7 @@ impl Builder<'_> {
                     calls.push(covered);
                     covered = Covered::default();
                 }
-                Op::Enter { frame } => {
+                Op::Enter { frame, .. } => {
                     entered.insert(*frame, calls.pop().unwrap_or_default());
                 }
                 Op::Back { .. } => {

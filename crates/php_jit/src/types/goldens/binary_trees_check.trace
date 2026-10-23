@@ -1,0 +1,21 @@
+start enter
+root e2
+op e2 1 array.packed - - -
+op e2 2 array.packed - - taken
+op e2 5 - - - -
+init e2
+op e2 6 - - - -
+op e2 7 array.packed - - -
+op e2 8 array.packed - - -
+op e2 9 - - - -
+enter e2
+op e2 1 array.packed - - -
+op e2 2 array.packed - - taken
+op e2 5 - - - -
+init e2
+op e2 6 - - - -
+op e2 7 array.packed - - -
+op e2 8 array.packed - - -
+op e2 9 - - - -
+enter e2
+stop recursive call

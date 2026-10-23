@@ -40,7 +40,7 @@ use cranelift_codegen::ir::{
 };
 use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use php_engine::tier::{FuncRef, PlainCall};
+use php_engine::tier::{FRAME, FuncRef, PlainCall};
 use php_heap::{Arr, ROOM_BYTES, Ref, Zval, ZvalType};
 use php_unit::{Opcode, OplineIdx};
 
@@ -292,6 +292,24 @@ fn leave_of(line: &Line) -> Option<Leave> {
     (line.exit.map(Leave::Exit)).or_else(|| line.unwind.map(Leave::Unwind))
 }
 
+/// Whether `opcode`'s handler goes on at the next opline of its frame,
+/// or throws, and does nothing else to the frame chain: what
+/// [`Kernel::Handle`] serves, building an array and adding to it, whose
+/// handlers php's code calls with no inline code of its own. An array
+/// built per turn, and a key the build throws at, caught in the frame:
+///
+/// ```php
+/// function pairs($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $p = [$i, $i * 2, "k" => $i]; $s += $p[1] + $p["k"]; } return $s; }
+/// function bad($n) { $c = 0; for ($i = 0; $i < $n; $i++) { try { $a = [$i => 1, ($i == 5 ? [] : $i + 1) => 2]; $c += count($a); } catch (TypeError $e) { $c += 100; } } return $c; }
+/// echo pairs(20), " ", bad(8), "\n";
+/// ```
+/// ```expect regime=jit-force process
+/// 570 114
+/// ```
+fn goes_on(opcode: Opcode) -> bool {
+    matches!(opcode, Opcode::InitArray | Opcode::AddArrayElement)
+}
+
 /// One trace's function as it is built.
 struct Emit<'a> {
     ir: &'a TraceIr,
@@ -468,15 +486,11 @@ impl<'a> Emit<'a> {
                 self.b.ins().jump(head, &[]);
                 self.b.switch_to_block(head);
                 self.b.set_srcloc(located(header.at.index()));
-                // The interrupt test, one load and one branch (§4.3); the
-                // bench's untested build alone leaves it out, to measure
-                // what it costs (#2960, §10).
-                if cfg!(not(php_jit_untested_loops)) {
-                    self.interrupt_test(match header.interrupt {
-                        Interrupt::Exit(exit) => Raised::Exit(exit),
-                        Interrupt::Stub(_) => Raised::Stub,
-                    })?;
-                }
+                // The interrupt test, one load and one branch (§4.3).
+                self.interrupt_test(match header.interrupt {
+                    Interrupt::Exit(exit) => Raised::Exit(exit),
+                    Interrupt::Stub(_) => Raised::Stub,
+                })?;
                 self.ops(split..self.ir.ops.len(), body)?;
                 let brought = phis
                     .iter()
@@ -744,7 +758,11 @@ impl<'a> Emit<'a> {
                 self.calls.push((CallRoom::Stood, None));
                 Ok(())
             }
-            Op::Enter { frame } => {
+            Op::Enter { frame, stores } => {
+                for &value in stores {
+                    let held = self.register(value)?;
+                    self.store(self.value(value)?.slot, held)?;
+                }
                 let room = self.stood_word(I64, STOOD_FRAME);
                 self.b.def_var(self.room_var(*frame)?, room);
                 self.running = *frame;
@@ -1029,8 +1047,13 @@ impl<'a> Emit<'a> {
     /// `Z/ext/opcache/jit/zend_jit_ir.c:17418-17432`). The byte the
     /// `ExitCtx`'s pointer names is loaded, and where it is not zero, or
     /// under exit-fuzz on the test's first pass, the code goes where
-    /// `raised` says.
+    /// `raised` says. The bench's untested build alone emits no test,
+    /// the header's nor the link's, to measure what it costs (#2960,
+    /// §10).
     fn interrupt_test(&mut self, raised: Raised) -> Result<(), Abort> {
+        if cfg!(php_jit_untested_loops) {
+            return Ok(());
+        }
         let pointer = if let Some(pointer) = self.interrupt {
             pointer
         } else {
@@ -1194,9 +1217,9 @@ impl<'a> Emit<'a> {
         // The `ExitCtx`, the frame's room and the opline come first.
         let params: &[Type] = match kernel {
             Kernel::Step => &[I64, I64, I32, I32, I64],
+            Kernel::Handle => &[I64, I64, I32, I32],
             Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
             Kernel::Release => &[I64, I64, I32, I64, I32],
-            Kernel::Copy => &[I64, I64, I32, I64, I32, I64],
         };
         sig.params
             .extend(params.iter().map(|ty| AbiParam::new(*ty)));
@@ -1267,6 +1290,16 @@ impl<'a> Emit<'a> {
                     leave_of(line),
                 )?;
             }
+            None if goes_on(line.opcode) && self.within(at).is_empty() => {
+                self.call(Kernel::Handle, &[room, opline, func], leave_of(line))?;
+                // Where the interpreter stands after it: past it, in its
+                // frame, whose room and call are where they stood.
+                let next = self.b.ins().iconst(I32, i64::from(line.opline.0 + 1));
+                self.b.ins().stack_store(I64, func, self.stood, STOOD_FUNC);
+                self.b
+                    .ins()
+                    .stack_store(I64, next, self.stood, STOOD_OPLINE);
+            }
             None => self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?,
         }
         Ok(())
@@ -1333,7 +1366,7 @@ impl<'a> Emit<'a> {
             return None;
         }
         match self.ir.ops.get(at.index() + 1) {
-            Some(Op::Enter { frame }) => Some(*frame),
+            Some(Op::Enter { frame, .. }) => Some(*frame),
             _ => None,
         }
     }
@@ -1484,6 +1517,8 @@ impl<'a> Emit<'a> {
             Opcode::FetchDimR => self.fetch(at, line),
             Opcode::AssignDim => self.assign_dim(at, line),
             Opcode::SendVal | Opcode::SendVar => self.send(at, line),
+            Opcode::CheckFuncArg => self.check_func_arg(),
+            Opcode::TypeCheck => self.type_check(at, line),
             // A send to a callee that takes the argument by value.
             Opcode::SendValEx if matches!(line.imm, Imm::Arg(_)) => self.send(at, line),
             Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName => match line.imm {
@@ -1697,9 +1732,9 @@ impl<'a> Emit<'a> {
                 let element = self.deref(element);
                 let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
                 let out_slot = self.value(out)?.slot;
-                self.copy(line, element, info, out_slot)?;
+                self.copy(element, info, out_slot)?;
             }
-            [in_place, through] => self.held_element(line, [*in_place, *through], element, out)?,
+            [in_place, through] => self.held_element([*in_place, *through], element, out)?,
             _ => {
                 return Err(mismatch(
                     "a fetch holds other guards than its element's two",
@@ -1733,7 +1768,6 @@ impl<'a> Emit<'a> {
     /// hold it, then written to what the fetch writes.
     fn held_element(
         &mut self,
-        line: &Line,
         [in_place, through]: [Guard; 2],
         element: Value,
         out: ValueId,
@@ -1764,7 +1798,7 @@ impl<'a> Emit<'a> {
         self.b.ins().brif(is_ref, referred, &[], direct, &[]);
         self.b.switch_to_block(direct);
         self.b.seal_block(direct);
-        self.element_guard(line, in_place, element, out, out_slot)?;
+        self.element_guard(in_place, element, out, out_slot)?;
         self.b.ins().jump(read, &[element.into()]);
         self.b.switch_to_block(referred);
         self.b.seal_block(referred);
@@ -1773,7 +1807,7 @@ impl<'a> Emit<'a> {
             .b
             .ins()
             .iadd_imm_s(reference, i64::from(imm(Ref::VALUE_AT)));
-        self.element_guard(line, through, inner, out, out_slot)?;
+        self.element_guard(through, inner, out, out_slot)?;
         self.b.ins().jump(read, &[inner.into()]);
         self.b.switch_to_block(read);
         self.b.seal_block(read);
@@ -1782,7 +1816,7 @@ impl<'a> Emit<'a> {
             self.define(out, read)
         } else {
             let info = self.b.ins().load(I32, trusted(), held, TYPE_AT);
-            self.copy(line, held, info, out_slot)
+            self.copy(held, info, out_slot)
         }
     }
 
@@ -1792,7 +1826,6 @@ impl<'a> Emit<'a> {
     /// fetch; go on otherwise.
     fn element_guard(
         &mut self,
-        line: &Line,
         guard: Guard,
         element: Value,
         out: ValueId,
@@ -1822,8 +1855,11 @@ impl<'a> Emit<'a> {
         self.b.seal_block(failed);
         if goes_on {
             // The exit goes on past the fetch: the element is the slot's,
-            // copied as the fetch copies it.
-            self.copy(line, element, info, out_slot)?;
+            // copied as the fetch copies it, through the reference it may
+            // be.
+            let element = self.deref(element);
+            let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
+            self.copy(element, info, out_slot)?;
         }
         let (to, args) = self.guard_exit(guard.exit)?;
         self.b.ins().jump(to, &args);
@@ -2000,14 +2036,43 @@ impl<'a> Emit<'a> {
         at
     }
 
-    /// The zval at `zval`, of type word `info`, copied to `slot` by
-    /// [`Kernel::Copy`].
-    fn copy(&mut self, line: &Line, zval: Value, info: Value, slot: Slot) -> Result<(), Abort> {
+    /// The zval at `zval`, no reference, of type word `info`, copied to
+    /// `slot` with one owner more where it is counted, php's `ZVAL_COPY`
+    /// with `GC_ADDREF` inline (`jit_ZVAL_COPY` and `jit_GC_ADDREF`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:1610-1613`, `:1672-1719`); the count saturates
+    /// beneath the heap's pin, as the heap's own adds do. A string, an
+    /// array and the array a reference element holds, each read by a long
+    /// key and kept past the writes after:
+    ///
+    /// ```php
+    /// function pick($a, $n) { $s = []; for ($i = 0; $i < $n; $i++) { $s[] = $a[$i % 3]; } return $s; }
+    /// $r = [7]; $b = [str_repeat("ab", 2), [1, 2], &$r];
+    /// $out = pick($b, 6);
+    /// $b[1][] = 3; $r[] = 8; unset($b);
+    /// echo json_encode($out), " ", json_encode($r), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// ["abab",[1,2],[7],"abab",[1,2],[7]] [7,8]
+    /// ```
+    fn copy(&mut self, zval: Value, info: Value, slot: Slot) -> Result<(), Abort> {
         let word = self.b.ins().load(I64, trusted(), zval, 0);
         let (room, at) = self.place(slot)?;
-        let out = self.b.ins().iadd_imm_s(room, i64::from(at));
-        let [room, opline] = self.served(line)?;
-        self.call(Kernel::Copy, &[room, opline, word, info, out], None)
+        self.b.ins().store(trusted(), word, room, at);
+        self.b.ins().store(trusted(), info, room, at + TYPE_AT);
+        let counted = self.b.ins().band_imm_u(info, COUNTED);
+        self.when(counted, |emit| {
+            let count_at = imm(Zval::COUNT_AT);
+            let count = emit.b.ins().load(I32, trusted(), word, count_at);
+            let bits = emit.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
+            let room = emit
+                .b
+                .ins()
+                .icmp_imm_u(IntCC::NotEqual, bits, i64::from(Zval::COUNT_BITS));
+            let room = emit.b.ins().uextend(I32, room);
+            let count = emit.b.ins().iadd(count, room);
+            emit.b.ins().store(trusted(), count, word, count_at);
+            Ok(())
+        })
     }
 
     /// A send of a scalar: the call's slot for the argument written.
@@ -2015,21 +2080,175 @@ impl<'a> Emit<'a> {
         let Imm::Arg(number) = line.imm else {
             return Err(mismatch("a send with no argument number"));
         };
-        let (call, _) = *self
-            .calls
-            .last()
-            .ok_or_else(|| mismatch("a send with no call under way"))?;
-        let held = self.scalar(at, line.op1)?;
-        let call = match call {
-            CallRoom::Held(var) => self.b.use_var(var),
-            CallRoom::Stood => self.stood_word(I64, STOOD_CALL),
-        };
-        let at = slot_offset(
+        let arg = slot_offset(
             number
                 .checked_sub(1)
                 .ok_or_else(|| mismatch("an argument numbered zero"))?,
         )?;
-        self.write(call, at, held);
+        if let Operand::Value(value) = line.op1
+            && Kind::of(self.value(value)?.types).is_none()
+            && self.value(value)?.slot.var >= self.frame_cvs(line.frame)?
+        {
+            // What a temporary holds, moved into the call whole, its
+            // owner with it, as `ZVAL_COPY_VALUE` moves it, and the slot
+            // it leaves `UNDEF`, as the handler takes the operand.
+            let (room, from) = self.place(self.value(value)?.slot)?;
+            let word = self.b.ins().load(I64, trusted(), room, from);
+            let info = self.b.ins().load(I32, trusted(), room, from + TYPE_AT);
+            let call = self.call_room()?;
+            self.b.ins().store(trusted(), word, call, arg);
+            self.b.ins().store(trusted(), info, call, arg + TYPE_AT);
+            let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+            self.b.ins().store(trusted(), undef, room, from + TYPE_AT);
+            return Ok(());
+        }
+        let held = self.scalar(at, line.op1)?;
+        let call = self.call_room()?;
+        self.write(call, arg, held);
+        Ok(())
+    }
+
+    /// A `TYPE_CHECK`, php's `zend_jit_type_check`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:8162-8330`): whether the value's
+    /// type is one the mask names, `mask >> type & 1`, from the type the
+    /// trace knows where it knows one and the slot's type byte otherwise;
+    /// branched on where a jump is fused to it, written where not. A
+    /// temporary it reads is given up after, `FREE_OP1`, through the
+    /// release kernel where it is counted, as php's code calls
+    /// `zval_ptr_dtor` there; its slot is left `UNDEF`, as the
+    /// handler takes the operand. A node's element held to `null` and
+    /// the elements of a list held to their types:
+    ///
+    /// ```php
+    /// function leaves($node) {
+    ///     if ($node[0] === null) { return 1; }
+    ///     return leaves($node[0]) + leaves($node[1]);
+    /// }
+    /// function kinds($a) {
+    ///     $s = "";
+    ///     foreach ($a as $v) {
+    ///         $s .= is_int($v) ? "i" : (is_string($v) ? "s" : (is_array($v) ? "a" : (is_null($v) ? "n" : (is_bool($v) ? "b" : "?"))));
+    ///     }
+    ///     return $s;
+    /// }
+    /// $t = [[[null, null], [null, null]], [null, null]];
+    /// echo leaves($t), " ", kinds([1, "x", [2], null, true, 1.5, false, "y" . 3]), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 3 isanb?bs
+    /// ```
+    fn type_check(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+        let Imm::Mask(mask) = line.imm else {
+            return Err(mismatch("a type check with no mask"));
+        };
+        let Operand::Value(value) = line.op1 else {
+            return Err(mismatch("a type check of no value"));
+        };
+        let asked = |tag: ZvalType| (mask >> u32::from(tag as u8)) & 1;
+        let answer = if Kind::of(self.value(value)?.types).is_some() {
+            if let Scalar::Bool(truth) = self.scalar(at, line.op1)? {
+                let (yes, no) = (asked(ZvalType::True), asked(ZvalType::False));
+                let truth = self.b.ins().icmp_imm_s(IntCC::NotEqual, truth, 0);
+                let yes = self.b.ins().iconst(I8, i64::from(yes));
+                let no = self.b.ins().iconst(I8, i64::from(no));
+                self.b.ins().select(truth, yes, no)
+            } else {
+                let tag = self
+                    .value(value)?
+                    .types
+                    .tag()
+                    .ok_or_else(|| mismatch("a scalar of no one type"))?;
+                self.b.ins().iconst(I8, i64::from(asked(tag)))
+            }
+        } else {
+            let (room, slot_at) = self.place(self.value(value)?.slot)?;
+            let byte = self.b.ins().load(I8, trusted(), room, slot_at + TYPE_AT);
+            let byte = self.b.ins().uextend(I32, byte);
+            let mask = self.b.ins().iconst(I32, i64::from(mask));
+            let shifted = self.b.ins().ushr(mask, byte);
+            let bit = self.b.ins().band_imm_u(shifted, 1);
+            self.b.ins().ireduce(I8, bit)
+        };
+        let slot = self.value(value)?.slot;
+        if slot.var >= self.frame_cvs(slot.frame)? && Kind::of(self.value(value)?.types).is_none() {
+            // `FREE_OP1`: the temporary out of its slot, then its owner
+            // given up.
+            let (room, slot_at) = self.place(slot)?;
+            let word = self.b.ins().load(I64, trusted(), room, slot_at);
+            let info = self.b.ins().load(I32, trusted(), room, slot_at + TYPE_AT);
+            let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+            self.b
+                .ins()
+                .store(trusted(), undef, room, slot_at + TYPE_AT);
+            let counted = self.b.ins().band_imm_u(info, COUNTED);
+            let [room_arg, opline] = self.served(line)?;
+            self.when(counted, |emit| {
+                emit.call(
+                    Kernel::Release,
+                    &[room_arg, opline, word, info],
+                    line.unwind.map(Leave::Unwind),
+                )
+            })?;
+        }
+        let jumps = match line.fused {
+            Some(Fused::Jmpz) => self.b.ins().icmp_imm_s(IntCC::Equal, answer, 0),
+            Some(Fused::Jmpnz) => self.b.ins().icmp_imm_s(IntCC::NotEqual, answer, 0),
+            None => {
+                if let Some(out) = line.out {
+                    self.define(out, Scalar::Bool(answer))?;
+                }
+                answer
+            }
+        };
+        self.direction(at, jumps)
+    }
+
+    /// The room of the call under way, php's `EX(call)`: in a register
+    /// where compiled code pushed it, as the kernel that pushed it stood
+    /// it otherwise.
+    fn call_room(&mut self) -> Result<Value, Abort> {
+        let (call, _) = *self
+            .calls
+            .last()
+            .ok_or_else(|| mismatch("an argument with no call under way"))?;
+        Ok(match call {
+            CallRoom::Held(var) => self.b.use_var(var),
+            CallRoom::Stood => self.stood_word(I64, STOOD_CALL),
+        })
+    }
+
+    /// A `CHECK_FUNC_ARG` of an argument the callee takes by value:
+    /// the call's bit that says the argument after it is taken by
+    /// reference cleared, as `zend_jit_check_func_arg` clears
+    /// `ZEND_CALL_SEND_ARG_BY_REF` (`Z/ext/opcache/jit/zend_jit_ir.c:9925-9960`).
+    /// The `FETCH_DIM_FUNC_ARG` and the `SEND_FUNC_ARG` after it are then
+    /// a read and a send by value, compiled inline, and a `SEND_VAR_EX` to
+    /// a parameter taken by value is a `SEND_VAR`, which leaves its
+    /// variable as it was; a parameter taken by reference is still the
+    /// handlers', a write to the element:
+    ///
+    /// ```php
+    /// function count_nodes($node) {
+    ///     if ($node[0] === null) { return 1; }
+    ///     return 1 + count_nodes($node[0]) + count_nodes($node[1]);
+    /// }
+    /// function make($d) { if ($d === 0) { return [null, null]; } $e = $d - 1; return [make($e), make($e)]; }
+    /// function mark(&$x) { $x = 7; }
+    /// function marks($a, $n) { for ($i = 0; $i < $n; $i++) { mark($a[$i]); } return $a; }
+    /// echo count_nodes(make(8)), " ", implode(",", marks([1, 2, 3], 3)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 511 7,7,7
+    /// ```
+    fn check_func_arg(&mut self) -> Result<(), Abort> {
+        let call = self.call_room()?;
+        let info = imm(FRAME.info() as usize);
+        let flags = self.b.ins().load(I32, trusted(), call, info);
+        let flags = self
+            .b
+            .ins()
+            .band_imm_u(flags, i64::from(!FRAME.send_by_ref()));
+        self.b.ins().store(trusted(), flags, call, info);
         Ok(())
     }
 

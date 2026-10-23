@@ -633,10 +633,13 @@ pub(crate) enum Kernel {
     /// php's `zval_ptr_dtor` of the counted value the zval names, a
     /// destructor's throw answered as one.
     Release,
-    /// `copy(cx, frame, opline: u32, word: u64, type_info: u32, out: *mut
-    /// Zval)`: php's `ZVAL_COPY_DEREF` of the value the zval names into
-    /// `out`.
-    Copy,
+    /// `handle(cx, frame, opline: u32, func: u32)`: an opline whose handler
+    /// goes on at the next opline of its frame, or throws, served through
+    /// `php_engine::tier::step_held` as [`Kernel::Step`] serves it, with
+    /// no `Stood` written: compiled code knows where the interpreter
+    /// stands after it, as php's code calls such an opline's handler
+    /// directly (`zend_jit_handler`, `Z/ext/opcache/jit/zend_jit_ir.c:4120-4157`).
+    Handle,
 }
 
 impl Kernel {
@@ -646,7 +649,7 @@ impl Kernel {
         Kernel::PushCall,
         Kernel::Call,
         Kernel::Release,
-        Kernel::Copy,
+        Kernel::Handle,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].

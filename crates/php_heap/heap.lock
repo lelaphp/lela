@@ -406,6 +406,8 @@ VmStack::top_and_frame_mut
 VmStack::top_mut
 VmStack::unlink_room
 Zval
+Zval::COUNT_AT
+Zval::COUNT_BITS
 Zval::FLAGS_AT
 Zval::TYPE_AT
 Zval::TYPE_REFCOUNTED

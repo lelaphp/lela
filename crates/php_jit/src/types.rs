@@ -249,8 +249,14 @@ pub(crate) enum Op {
         began: Began,
         plain: Option<PlainCall>,
     },
-    /// The frame a call pushed runs.
-    Enter { frame: Frame },
+    /// The frame a call pushed runs. `stores` are the values the caller
+    /// holds in registers, written to their slots as the call enters, so
+    /// that what reads the caller's frame where the trace does not, a
+    /// recursion's next turn, the interpreter past a recursive call or a
+    /// return trace, reads them there: php keeps no register across a call
+    /// into a frame its trace inlines (`zend_jit_trace_allocate_registers`,
+    /// `Z/ext/opcache/jit/zend_jit_trace.c:3169-3180`).
+    Enter { frame: Frame, stores: Vec<ValueId> },
     /// A return lands in `frame`, and `out` is what the call's slot holds
     /// after it, where the call keeps one. A return past the trace's
     /// lowest frame `escapes` unless the interpreter stands at that
@@ -341,7 +347,27 @@ pub(crate) enum Imm {
     /// variable its inference does not hold uncounted.
     Leave {
         owners: bool,
+        value: Returned,
     },
+    /// The types a `TYPE_CHECK` asks for, its `extended_value`: one bit
+    /// per type, `1 << IS_*`, php's `MAY_BE_*` mask.
+    Mask(u32),
+}
+
+/// What a `RETURN` left in place hands its caller, as
+/// `zend_jit_return` writes it (`Z/ext/opcache/jit/zend_jit_ir.c:11265-11400`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Returned {
+    /// A scalar, or nothing, `null`.
+    Scalar,
+    /// A constant no reference counts, an immutable array or an interned
+    /// string, copied as it is (`ZVAL_COPY_CONST`): the address of its
+    /// zval among the op array's constants, which the trace's epoch
+    /// holds.
+    Constant(usize),
+    /// What a temporary holds, moved whole with its owner
+    /// (`ZVAL_COPY_VALUE`), given up where the caller reads no return.
+    Moved,
 }
 
 /// An operand as the op reads it.
