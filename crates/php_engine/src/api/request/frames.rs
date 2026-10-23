@@ -1414,10 +1414,12 @@ impl Request {
         self.vm.stack.pop_frame(&mut self.heap);
     }
 
-    /// A native's call pushed with `room` slots past its header, its
-    /// record named, laid in its `INIT_FCALL` ([`Request::push_room`]).
+    /// A call pushed with `room` slots past its header, its record named,
+    /// laid whole in its `INIT_FCALL` ([`Request::push_room`]): the push
+    /// written in the handler's body, so the header goes into its room
+    /// as it is laid.
     #[inline(always)] // as `php_heap::VmStack::push_frame`
-    pub(crate) fn push_native(
+    pub(crate) fn push_laid(
         &mut self,
         room: usize,
         header: exec::Header,
