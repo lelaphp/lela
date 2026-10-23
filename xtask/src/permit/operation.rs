@@ -604,6 +604,21 @@ mod tests {
         dir
     }
 
+    /// A linked worktree of `dir` at `linked`, on a branch of its own.
+    fn worktree(dir: &Path, linked: &Path) {
+        git(
+            dir,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "t1",
+                linked.to_str().unwrap(),
+            ],
+        );
+    }
+
     fn merging(dir: &Path) {
         merging_in(dir, &git(dir, &["rev-parse", "HEAD"]));
     }
@@ -1011,17 +1026,7 @@ mod tests {
     fn a_linked_worktree_s_operation_is_read_from_its_own_git_dir() {
         let dir = repository("operation-worktree");
         let linked = dir.join("linked");
-        git(
-            &dir,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                "t1",
-                linked.to_str().unwrap(),
-            ],
-        );
+        worktree(&dir, &linked);
         merging(&dir);
         let add = "git add -- a";
         assert_eq!(standing(&linked, add, "s1", None), None);
@@ -1063,17 +1068,7 @@ mod tests {
         let dir = repository("operation-ran-in");
         let base = Tree::new("operation-ran-in-linked").unwrap();
         let linked = base.join("t1");
-        git(
-            &dir,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                "t1",
-                linked.to_str().unwrap(),
-            ],
-        );
+        worktree(&dir, &linked);
         std::fs::create_dir(linked.join("sub")).unwrap();
         let top = linked.canonicalize().unwrap();
         let ran_in = |line: &str| super::ran_in(&dir, Some(&Line::read(line)));
@@ -1098,17 +1093,7 @@ mod tests {
         let dir = repository("operation-ran-in-shapes");
         let base = Tree::new("operation-ran-in-shapes-linked").unwrap();
         let linked = base.join("t1");
-        git(
-            &dir,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                "t1",
-                linked.to_str().unwrap(),
-            ],
-        );
+        worktree(&dir, &linked);
         std::fs::create_dir(linked.join("sub")).unwrap();
         let top = linked.canonicalize().unwrap();
         let workspace = dir.canonicalize().unwrap();
