@@ -155,6 +155,7 @@ impl Request {
                 class_name.map_or_else(|| req.symbols().class_name(class), str::to_owned);
             format!("{class_name}::{}", String::from_utf8_lossy(name))
         };
+        self.separate_constants(class)?;
         let Some((declaring, constant)) = self.symbols().class_constant_of(class, name) else {
             let message = format!("Undefined constant {}", shown(self));
             return Err(crate::api::raising::throw_error(self, "Error", &message));

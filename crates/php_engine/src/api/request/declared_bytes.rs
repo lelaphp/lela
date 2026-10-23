@@ -506,7 +506,11 @@ impl Blocks {
 /// grows it. An uninitialised table is laid down as a hash at the first,
 /// as `zend_hash_real_init_mixed` lays a table a string key is first
 /// written to, never as the packed list an integer key would lay.
-fn add_rows(req: &mut Request, table: php_heap::Arr, count: usize) -> Result<(), Thrown> {
+pub(super) fn add_rows(
+    req: &mut Request,
+    table: php_heap::Arr,
+    count: usize,
+) -> Result<(), Thrown> {
     if count == 0 {
         return Ok(());
     }

@@ -27,9 +27,15 @@ pub(super) struct ClassData {
     updated: bool,
     /// The constants of the class's own declaration that were
     /// evaluated, each held to its type, by name: `constants_table`'s
-    /// rows once `zend_update_class_constant` replaced their expression. Each
-    /// value's one owner is the row.
+    /// rows once `zend_update_class_constant` replaced their expression,
+    /// and the copies a class without `ZEND_ACC_IMMUTABLE` holds of what
+    /// it inherited from one with it ([`Request::evaluated_through`]).
+    /// Each value's one owner is the row.
     constants: Vec<(Box<[u8]>, Value)>,
+    /// `mutable_data->constants_table` where the request separated it
+    /// ([`Request::separate_constants`]): the table's data, its rows
+    /// standing for the class's constants.
+    separated: Option<php_heap::EmbeddedArr>,
     /// `default_properties_table`, slot by slot in
     /// [`Request::placed_properties`]' order, as far as it has been
     /// evaluated: `None` for a typed slot with no default, which
@@ -199,6 +205,13 @@ impl Request {
             }
             for value in data.defaults.into_iter().flatten() {
                 self.release(value);
+            }
+            if let Some(table) = data.separated {
+                let rows = table.arr();
+                for at in 0..rows.num_used() {
+                    self.heap.array_take_at(rows, at);
+                }
+                table.free_data(&mut self.heap);
             }
         }
     }
@@ -471,6 +484,7 @@ impl Request {
             self.update_class_constants(parent)?;
         }
         if !native && !updated_as_declared {
+            self.separate_constants(class)?;
             let constants: Vec<(ClassId, Box<[u8]>)> = self
                 .symbols()
                 .constants_in_order(class)
@@ -591,6 +605,73 @@ impl Request {
         // or the type refused.
         self.constant_evaluated(declaring, name);
         Ok(value)
+    }
+
+    /// `CE_CONSTANTS_TABLE(ce)` (`zend_class_constants_table`) of `class`
+    /// where it is php's class with `ZEND_ACC_IMMUTABLE` and
+    /// `ZEND_ACC_HAS_AST_CONSTANTS`, a class of a file the cache keeps
+    /// with a constant still an expression or `#[\Deprecated]`: the
+    /// first read of any of its constants, or its update, separates its
+    /// table into the request's mutable data
+    /// (`zend_separate_class_constants_table`, `Z/Zend/zend_API.c:1443`),
+    /// `zend_hash_init` and `zend_hash_extend` at its count of constants
+    /// and a bucket each, the data on the request's heap; and the table
+    /// of each immutable class above it whose expression it inherited
+    /// (`CE_CONSTANTS_TABLE(c->ce)`). An enum's cases are no expression
+    /// a read separates here:
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3259-separated.inc', '<?php class G8 { const K = 1; const L = LATE + 1; const M = 3; } class H8 extends G8 { const N = 4; } class I8 { const K = 1; } enum E8 { case A; }');
+    /// const LATE = 5;
+    /// include $f;
+    /// foreach (['G8::K', 'G8::L', 'H8::N', 'I8::K', 'E8::A'] as $c) { $m = memory_get_usage(); $v = constant($c); echo memory_get_usage() - $m, "  $c\n"; }
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 320  G8::K
+    /// 0  G8::L
+    /// 320  H8::N
+    /// 0  I8::K
+    /// 56  E8::A
+    /// ```
+    pub(super) fn separate_constants(&mut self, class: ClassId) -> Result<(), Thrown> {
+        let separated = |req: &Request, class: ClassId| {
+            (req.class_data.rows.get(class)).is_some_and(|data| data.separated.is_some())
+        };
+        let Some(decl) = self.symbols().class_decl(class) else {
+            return Ok(());
+        };
+        if decl.kind == ClassKind::Enum
+            || separated(self, class)
+            || self.native_class(class)
+            || self.mutable_class(class)
+        {
+            return Ok(());
+        }
+        let constants = self.symbols().constants_in_order(class);
+        let expression = |constant: &php_unit::decl::ClassConstDecl| {
+            !super::linking::is_literal(&constant.value)
+        };
+        let ast = (constants.iter()).any(|(_, constant)| {
+            expression(constant) || crate::attributes::Flags::of(&constant.attributes).deprecated
+        });
+        if !ast {
+            return Ok(());
+        }
+        let above: Vec<ClassId> = (constants.iter())
+            .filter(|(declaring, constant)| *declaring != class && expression(constant))
+            .map(|(declaring, _)| *declaring)
+            .collect();
+        let count = constants.len();
+        let table = php_heap::EmbeddedArr::new(u32::try_from(count).unwrap_or(u32::MAX));
+        let rows = table.arr();
+        self.class_data.rows.row(class).separated = Some(table);
+        super::declared_bytes::add_rows(self, rows, count)?;
+        for declaring in above {
+            self.separate_constants(declaring)?;
+        }
+        Ok(())
     }
 
     /// The constant `name` that `declaring` declares, evaluated to `value`
