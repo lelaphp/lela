@@ -1612,6 +1612,21 @@ impl Request {
     /// Warning: The return value of function n() should either be used or intentionally ignored by casting it as (void) in %s on line 10
     /// A::p 2
     /// ```
+    ///
+    /// The caller is lent with the callee and stood at its call opline
+    /// there, so a backtrace reads the line of each call, an argument's
+    /// own call made while the outer call is being built included, and
+    /// each value is returned into the slot its caller's call names:
+    ///
+    /// ```php
+    /// function g($x) { return debug_backtrace()[0]['line'] . ':' . $x; }
+    /// function f($a, $b) { return "$a|$b|" . g(3); }
+    /// echo f(g(1),
+    ///     g(2)), "\n";
+    /// ```
+    /// ```expect
+    /// 4:1|5:2|3:3
+    /// ```
     #[inline(always)] // once per call, in the loop's DO_*CALL arms
     pub(crate) fn enter_call(
         &mut self,
