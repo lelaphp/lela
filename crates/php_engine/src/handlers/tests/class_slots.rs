@@ -479,17 +479,12 @@ fn a_class_constant_over_two_constants_is_served_off_its_slot() {
         req.cached(frame, CacheSlot(0)),
         Cached::ClassConstant { class: held, value, .. } if held == class && value.as_int() == Some(1)
     ));
-    let primed = req.primed_from(frame);
     let value = Value::int(99);
-    req.prime(
-        frame,
-        CacheSlot(0),
-        Cached::ClassConstant {
-            class,
-            primed,
-            value,
-        },
-    );
+    req.prime_scoped(frame, CacheSlot(0), |primed| Cached::ClassConstant {
+        class,
+        primed,
+        value,
+    });
     assert_eq!(
         fetched(&mut req),
         Some(99),

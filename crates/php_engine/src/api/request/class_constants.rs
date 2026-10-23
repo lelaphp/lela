@@ -81,21 +81,19 @@ impl Request {
     /// is named in the error as the opline names it, `ce->name`.
     pub(crate) fn class_constant(&mut self, class: ClassId, name: &[u8]) -> Result<Value, Thrown> {
         self.class_constant_fetched(class, name)
-            .map(|(value, _)| value)
+            .map(ConstantRead::value)
     }
 
     /// [`Request::class_constant`] as `ZEND_FETCH_CLASS_CONSTANT` reads
-    /// it, beside whether the opline may keep the value in its runtime
-    /// cache: a value the class's row or the request's case keeps to
-    /// request end, which is every one but a deprecated constant's
-    /// (`!is_constant_deprecated`, `Z/Zend/zend_vm_def.h:6142`).
+    /// it, which says whether the opline may keep the value in its
+    /// runtime cache ([`ConstantRead`]).
     pub(crate) fn class_constant_fetched(
         &mut self,
         class: ClassId,
         name: &[u8],
-    ) -> Result<(Value, bool), Thrown> {
+    ) -> Result<ConstantRead, Thrown> {
         let scope = self.executed_scope();
-        self.class_constant_found(class, name, None, scope, ConstantFetch::Opline)
+        self.read_class_constant(class, name, None, scope, ConstantFetch::Opline)
     }
 
     /// [`Request::class_constant`] with the class named in the error as
@@ -138,23 +136,22 @@ impl Request {
         scope: Option<ClassId>,
         fetch: ConstantFetch,
     ) -> Result<Value, Thrown> {
-        self.class_constant_found(class, name, Some(class_name), scope, fetch)
-            .map(|(value, _)| value)
+        self.read_class_constant(class, name, Some(class_name), scope, fetch)
+            .map(ConstantRead::value)
     }
 
     /// The body of [`Request::class_constant_from`] and
-    /// [`Request::class_constant_fetched`]: the value, and whether it is
-    /// no deprecated constant's. The class is named in an error as
+    /// [`Request::class_constant_fetched`]. The class is named in an error as
     /// `class_name` spells it, or as the linked class's own where none is
     /// given, which is worded only where an error is.
-    fn class_constant_found(
+    fn read_class_constant(
         &mut self,
         class: ClassId,
         name: &[u8],
         class_name: Option<&str>,
         scope: Option<ClassId>,
         fetch: ConstantFetch,
-    ) -> Result<(Value, bool), Thrown> {
+    ) -> Result<ConstantRead, Thrown> {
         let shown = |req: &Request| {
             let class_name =
                 class_name.map_or_else(|| req.symbols().class_name(class), str::to_owned);
@@ -189,7 +186,7 @@ impl Request {
             let message = format!("Cannot access trait constant {} directly", shown(self));
             return Err(crate::api::raising::throw_error(self, "Error", &message));
         }
-        let cacheable = deprecated.is_none();
+        let kept = deprecated.is_none();
         if let Some(constant) = deprecated {
             self.deprecated_class_constant(class, name, &constant)?;
         }
@@ -218,7 +215,13 @@ impl Request {
                 }
             }
         };
-        value.map(|value| (value, cacheable))
+        value.map(|value| {
+            if kept {
+                ConstantRead::Kept(value)
+            } else {
+                ConstantRead::Deprecated(value)
+            }
+        })
     }
 
     /// `zend_get_class_constant_ex` under `ZEND_FETCH_CLASS_SILENT`, as
@@ -791,6 +794,28 @@ pub(crate) enum ByValue {
     /// The request built no table for the enum: a native one, whose
     /// table is the stub's.
     Unbuilt,
+}
+
+/// A class constant's value as `ZEND_FETCH_CLASS_CONSTANT` reads it, one
+/// owner the caller's, by whether the opline may keep it in its runtime
+/// cache (`if (OP2_TYPE == IS_CONST && !is_constant_deprecated)
+/// CACHE_POLYMORPHIC_PTR(...)`, `Z/Zend/zend_vm_def.h:6142`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ConstantRead {
+    /// A value the class's row, or the request's case of an enum, keeps
+    /// an owner of to request end, which a slot may name past this read.
+    Kept(Value),
+    /// A deprecated constant's, whose every read raises the deprecation.
+    Deprecated(Value),
+}
+
+impl ConstantRead {
+    /// The value read, whichever it is.
+    pub(crate) fn value(self) -> Value {
+        match self {
+            ConstantRead::Kept(value) | ConstantRead::Deprecated(value) => value,
+        }
+    }
 }
 
 /// Which of php's two reads of a class constant a fetch is, which

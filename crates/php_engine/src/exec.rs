@@ -1644,6 +1644,25 @@ pub(crate) enum Cached {
     Hit,
 }
 
+impl Cached {
+    /// The frame a slot whose answer the access rule decides was primed
+    /// from; none for a slot that answers every scope alike.
+    pub(crate) fn primed_from(self) -> Option<PrimedFrom> {
+        match self {
+            Cached::ClassAndCallee { primed, .. }
+            | Cached::StaticProperty { primed, .. }
+            | Cached::ClassConstant { primed, .. } => Some(primed),
+            Cached::Unprimed
+            | Cached::Constant(_)
+            | Cached::Function(_)
+            | Cached::Class(_)
+            | Cached::Property { .. }
+            | Cached::Miss
+            | Cached::Hit => None,
+        }
+    }
+}
+
 /// The frame a slot whose answer the access rule decides was written
 /// from, [`Cached::ClassAndCallee`], [`Cached::StaticProperty`] and
 /// [`Cached::ClassConstant`]: the frame's scope, and its function where

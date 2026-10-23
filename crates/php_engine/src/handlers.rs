@@ -67,7 +67,7 @@ use crate::api::abi::{DimensionRead, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::{Thrown, non_static_method_call, none_pending, undefined_method};
 use crate::api::request::ropes::RopeAt;
-use crate::api::request::{CodeFrom, Opened, Raised, Request};
+use crate::api::request::{CodeFrom, ConstantRead, Opened, Raised, Request};
 use crate::api::values::walk::{self, Hold};
 use crate::api::values::{
     ClosureInfo, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
@@ -7172,8 +7172,11 @@ fn static_name<'c>(
 }
 
 /// What [`static_slot_at`] addressed: the property's row, which names
-/// its slot, and its name as `op1` carries it.
-type StaticSlot<'c> = (crate::api::request::PropertyInfo, Cow<'c, [u8]>);
+/// its slot and its declaration, and its name as `op1` carries it.
+struct StaticSlot<'c> {
+    info: crate::api::request::PropertyInfo,
+    name: Cow<'c, [u8]>,
+}
 
 /// `zend_fetch_static_property_address` (`Z/Zend/zend_execute.c:3793`),
 /// which every opline that addresses a `static` property's slot shares:
@@ -7230,6 +7233,36 @@ type StaticSlot<'c> = (crate::api::request::PropertyInfo, Cow<'c, [u8]>);
 /// Cannot assign array to property T::$n of type int
 /// 5
 /// ```
+///
+/// Each opline over a `static` property reads the slot its own number
+/// names, a compound assignment's on the `OP_DATA`, and a value the type
+/// converts is converted on every pass:
+///
+/// ```php
+/// class P { public static $n = 0; public static ?int $t = null; public static $a = []; }
+/// function steps() {
+///     for ($i = 0; $i < 2; $i++) {
+///         P::$n += 2; P::$n++; --P::$n; P::$t ??= 0; P::$t += 1; P::$a[] = $i;
+///         $r = &P::$n; $r++; unset($r);
+///         P::$t += 0.5;
+///     }
+///     return json_encode([P::$n, P::$t, isset(P::$n), empty(P::$t), count(P::$a)]);
+/// }
+/// echo steps(), "\n";
+/// echo steps(), "\n";
+/// ```
+/// ```expect
+///
+/// Deprecated: Implicit conversion from float 1.5 to int loses precision in %s on line 7
+///
+/// Deprecated: Implicit conversion from float 2.5 to int loses precision in %s on line 7
+/// [6,2,true,false,2]
+///
+/// Deprecated: Implicit conversion from float 3.5 to int loses precision in %s on line 7
+///
+/// Deprecated: Implicit conversion from float 4.5 to int loses precision in %s on line 7
+/// [12,4,true,false,4]
+/// ```
 fn static_slot_at<'c>(
     req: &mut Request,
     frame: FrameRef,
@@ -7241,13 +7274,14 @@ fn static_slot_at<'c>(
     let named = op.op1_type == OperandKind::Const;
     let mut asked = None;
     if named && let Cached::StaticProperty { class, info, .. } = req.cached_in_scope(frame, slot) {
-        let name = || Cow::Borrowed(exec::constant_str(code, ConstIdx(op.op1)).unwrap_or_default());
         if class_fixed(op.op2_type, op.op2) {
-            return Ok(Some((info, name())));
+            let name = static_name(req, frame, code, op)?;
+            return Ok(Some(StaticSlot { info, name }));
         }
         let now = class_operand(req, frame, code, op.op2_type, op.op2, None)?;
         if now == class {
-            return Ok(Some((info, name())));
+            let name = static_name(req, frame, code, op)?;
+            return Ok(Some(StaticSlot { info, name }));
         }
         asked = Some(now);
     }
@@ -7267,18 +7301,13 @@ fn static_slot_at<'c>(
         .class_decl(info.declaring)
         .is_some_and(|decl| decl.kind == php_unit::decl::ClassKind::Trait);
     if named && !on_trait {
-        let primed = req.primed_from(frame);
-        req.prime(
-            frame,
-            slot,
-            Cached::StaticProperty {
-                class,
-                primed,
-                info,
-            },
-        );
+        req.prime_scoped(frame, slot, |primed| Cached::StaticProperty {
+            class,
+            primed,
+            info,
+        });
     }
-    Ok(Some((info, name)))
+    Ok(Some(StaticSlot { info, name }))
 }
 
 /// `zend_fetch_this_var` (`Z/Zend/zend_execute.c:4185`): `$this` read
@@ -7431,7 +7460,7 @@ pub(crate) fn end_silence<T: Tier>(
 /// expression the declaration kept evaluated on this use
 /// (`zval_update_constant_ex`), into the temporary `result` names.
 /// The two cache slots php primes with the class and the constant are
-/// read before anything is looked up ([`class_constant_found`]).
+/// read before anything is looked up ([`fetch_class_constant_found`]).
 ///
 /// A name the program computes, `C::{expr}` (8.3), is read as any
 /// operand is: `class` names the class, and what is no string is php's
@@ -7533,7 +7562,7 @@ pub(crate) fn fetch_class_constant<T: Tier>(
     {
         return class_constant_served(req, frame, op, value);
     }
-    class_constant_found(req, frame, code, op, class)
+    fetch_class_constant_found(req, frame, code, op, class)
 }
 
 /// [`fetch_class_constant`] where its slot holds nothing for this pass:
@@ -7559,6 +7588,10 @@ pub(crate) fn fetch_class_constant<T: Tier>(
 /// echo O::old() + O::old(), "\n";
 /// enum S: string { case A = 'a'; static function a() { return self::A; } }
 /// var_dump(S::a() === S::a(), S::a()->value);
+/// function k() { return Later::K; }
+/// try { k(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// eval('class Later { const K = 5; }');
+/// var_dump(k(), k());
 /// ```
 /// ```expect
 /// AAA!BBA!AAA!BBA!
@@ -7573,9 +7606,12 @@ pub(crate) fn fetch_class_constant<T: Tier>(
 /// 2
 /// bool(true)
 /// string(1) "a"
+/// Class "Later" not found
+/// int(5)
+/// int(5)
 /// ```
 #[inline(never)]
-fn class_constant_found(
+fn fetch_class_constant_found(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
@@ -7614,23 +7650,20 @@ fn class_constant_found(
             .map(|name| name.into_value().hand_on());
         return computed_into(req, frame, op, value);
     }
-    let (value, cacheable) = match req.class_constant_fetched(class, &name) {
-        Ok(found) => found,
+    let value = match req.class_constant_fetched(class, &name) {
+        Ok(ConstantRead::Kept(value)) if op.op2_type == OperandKind::Const => {
+            req.prime_scoped(frame, CacheSlot(op.extended_value), |primed| {
+                Cached::ClassConstant {
+                    class,
+                    primed,
+                    value,
+                }
+            });
+            value
+        }
+        Ok(read) => read.value(),
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    if cacheable && op.op2_type == OperandKind::Const {
-        let primed = req.primed_from(frame);
-        let slot = CacheSlot(op.extended_value);
-        req.prime(
-            frame,
-            slot,
-            Cached::ClassConstant {
-                class,
-                primed,
-                value,
-            },
-        );
-    }
     set_out(req, frame, op, value);
     Ok(advance(req, frame))
 }
@@ -8033,7 +8066,14 @@ fn static_prop_place(
     // before the binding lays `null` in a slot nothing has written; then
     // the place.
     let slot = property_cache_slot(op);
-    let (info, name) = match static_slot_at(req, frame, code, op, slot, PropertyRead::Warning) {
+    let StaticSlot { info, name } = match static_slot_at(
+        req,
+        frame,
+        code,
+        op,
+        slot,
+        PropertyRead::Warning,
+    ) {
         Ok(Some(found)) => found,
         Ok(None) => {
             return Err(Fatal::error(
@@ -8053,12 +8093,16 @@ fn static_prop_place(
     } else {
         FetchFlag::of(op.extended_value)
     };
-    let typed = flag.and_then(|_| req.typed_static(info));
-    if let (Some(flag), Some(typed)) = (flag, &typed) {
-        let held = req.held_static(info);
-        if let Err(thrown) = refuse_fetch(req, &held, typed, &name, flag) {
-            return threw(req, frame, &thrown);
-        }
+    // The declaration's type is read where a refusal can stand: under
+    // `ZEND_FETCH_DIM_WRITE` only over a value an array would replace.
+    let held = req.held_static(info);
+    let typed = flag
+        .filter(|&flag| flag == FetchFlag::Ref || promotes_to_array(&held))
+        .and_then(|_| req.typed_static(info));
+    if let (Some(flag), Some(typed)) = (flag, &typed)
+        && let Err(thrown) = refuse_fetch(req, &held, typed, &name, flag)
+    {
+        return threw(req, frame, &thrown);
     }
     if req.lacks_set_access(info) {
         let held = req.held_static(info).deref();
@@ -8113,12 +8157,25 @@ fn fetch_static_prop(
     op: &Opline,
     fetch: PropertyRead,
 ) -> Edge {
-    let read = match static_slot_at(req, frame, code, op, property_cache_slot(op), fetch) {
-        Ok(Some((info, _))) => req.static_value(info, fetch),
-        Ok(None) => Ok(Value::null()),
-        Err(thrown) => Err(thrown),
-    };
+    let read = static_read(req, frame, code, op, property_cache_slot(op), fetch);
     computed_into(req, frame, op, read)
+}
+
+/// [`static_slot_at`] and the value its slot holds, one more owner of it
+/// ([`Request::static_value`]), `null` for the silent miss: the read of
+/// `FETCH_STATIC_PROP_R`, `_IS` and `ISSET_ISEMPTY_STATIC_PROP`.
+fn static_read(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    slot: CacheSlot,
+    read: PropertyRead,
+) -> Result<Value, Thrown> {
+    match static_slot_at(req, frame, code, op, slot, read)? {
+        Some(StaticSlot { info, .. }) => req.static_value(info, read),
+        None => Ok(Value::null()),
+    }
 }
 
 /// `ZEND_FETCH_OBJ_R` (`Z/Zend/zend_vm_def.h:2069`) over a property
@@ -9546,16 +9603,12 @@ fn refuse_fetch(
     name: &[u8],
     flag: FetchFlag,
 ) -> Result<(), Thrown> {
-    let shown = String::from_utf8_lossy(name).into_owned();
     match flag {
         FetchFlag::DimWrite => {
-            let promotes = matches!(
-                held.deref().as_ref(),
-                ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false)
-            );
-            if promotes && typed.ty.mask() & MAY_BE_ARRAY == 0 {
+            if promotes_to_array(held) && typed.ty.mask() & MAY_BE_ARRAY == 0 {
                 let class = req.symbols().class_name(typed.declaring);
                 let ty = php_unit::type_to_string(&typed.ty);
+                let shown = String::from_utf8_lossy(name);
                 return Err(crate::api::raising::throw_error(
                     req,
                     "TypeError",
@@ -9568,6 +9621,15 @@ fn refuse_fetch(
         FetchFlag::Ref => req.refuse_unwritten_ref(held, typed, name)?,
     }
     Ok(())
+}
+
+/// Whether a dimension written over `held` lays an array in its place:
+/// what is undefined, `null` or `false`.
+fn promotes_to_array(held: &Value) -> bool {
+    matches!(
+        held.deref().as_ref(),
+        ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false)
+    )
 }
 
 /// The property as a cell's type source, `ZEND_REF_ADD_TYPE_SOURCE`'s
@@ -14487,7 +14549,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
             return threw(req, frame, &thrown);
         }
     };
-    let Some((info, name)) = placed else {
+    let Some(StaticSlot { info, name }) = placed else {
         exec::free_operand(req, frame, data_type, data_at);
         return Ok(advance_over_data(req, frame, at));
     };
@@ -14527,29 +14589,46 @@ fn static_place<'c>(
     op: &Opline,
     slot: CacheSlot,
 ) -> Result<Option<Placed<'c>>, Thrown> {
-    match static_slot_at(req, frame, code, op, slot, PropertyRead::Warning)? {
-        Some((info, name)) => {
-            if let Some(thrown) = req.set_refused(info, "indirectly modify") {
-                return Err(thrown);
-            }
-            Ok(Some(Placed {
-                info,
-                name,
-                ty: req.property_decl(info).and_then(|p| p.ty.clone()),
-            }))
-        }
-        None => Ok(None),
+    let Some(StaticSlot { info, name }) =
+        static_slot_at(req, frame, code, op, slot, PropertyRead::Warning)?
+    else {
+        return Ok(None);
+    };
+    if let Some(thrown) = req.set_refused(info, "indirectly modify") {
+        return Err(thrown);
     }
+    let held_to = req
+        .property_decl(info)
+        .map_or(exec::SlotType::UNTYPED, exec::SlotType::set_reached);
+    Ok(Some(Placed {
+        info,
+        name,
+        held_to,
+    }))
 }
 
 /// What [`static_place`] addressed: the property's row, whose class
-/// declared it and names its slot, the property's name, and the
-/// declared type the write is held to, which is php's `prop_info` beside
-/// the slot.
+/// declared it and names its slot, the property's name, and what a write
+/// to the slot is held to, which is php's `prop_info` beside the slot,
+/// read where the set access was.
 struct Placed<'c> {
     info: crate::api::request::PropertyInfo,
     name: Cow<'c, [u8]>,
-    ty: Option<php_unit::decl::Type>,
+    held_to: exec::SlotType,
+}
+
+impl Placed<'_> {
+    /// The declared type `value` is to be verified against before it
+    /// lands: none where it lands as it stands
+    /// ([`exec::SlotType::admits`], `ZEND_TYPE_CONTAINS_CODE`), so the
+    /// declaration is read, and its type copied, only for a value the
+    /// type may coerce or refuse.
+    fn verified_against(&self, req: &Request, value: &Value) -> Option<php_unit::decl::Type> {
+        if self.held_to.admits(value.to_zval()) {
+            return None;
+        }
+        req.typed_static(self.info).map(|typed| typed.ty)
+    }
 }
 
 /// One kernel of two values, which is what `get_binary_op` hands php's
@@ -14759,10 +14838,11 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
             return threw(req, frame, &thrown);
         }
     };
-    let Some(Placed { info, name, ty }) = placed else {
+    let Some(placed) = placed else {
         exec::free_operand(req, frame, data_type, data_at);
         return Ok(advance_over_data(req, frame, at));
     };
+    let info = placed.info;
     let value = exec::take_operand(req, frame, code, data_type, data_at);
     let held = match req.static_value(info, PropertyRead::Warning) {
         Ok(held) => held,
@@ -14777,7 +14857,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     // read's owner and the slot's, so the append holds the only one.
     let in_place = is_concat(op.extended_value)
         && (held.as_php_string().is_some()
-            || ty.is_none()
+            || !placed.held_to.typed()
                 && req
                     .static_slot_cell(info)
                     .is_none_or(|cell| req.ref_type_sources(cell.heap()).is_empty()));
@@ -14823,10 +14903,10 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
         write_out(req, frame, op, &cell.get());
         return Ok(advance_over_data(req, frame, at));
     }
-    let stepped = match ty {
+    let stepped = match placed.verified_against(req, &stepped) {
         None => stepped,
         Some(ty) => {
-            let verdict = verified_op(req, &stepped, &ty, info, &name, strict);
+            let verdict = verified_op(req, &stepped, &ty, info, &placed.name, strict);
             // php gives the operation's value up and the slot keeps what
             // it held (`zval_ptr_dtor(&z_copy)`).
             match crate::ops::landed(req, stepped, verdict) {
@@ -14896,9 +14976,10 @@ fn static_prop_step(
         Ok(placed) => placed,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let Some(Placed { info, name, ty }) = placed else {
+    let Some(placed) = placed else {
         return Ok(advance(req, frame));
     };
+    let (info, name) = (placed.info, &placed.name);
     let held = match req.static_value(info, PropertyRead::Warning) {
         Ok(held) => held,
         Err(thrown) => return threw(req, frame, &thrown),
@@ -14911,14 +14992,14 @@ fn static_prop_step(
         }
     };
     let strict = req.frame_strict_types(frame);
-    let stepped = match ty {
+    let stepped = match placed.verified_against(req, &stepped) {
         None => stepped,
         Some(ty) if crate::ops::steps_past_int(&held, &stepped, &ty) => {
             let (thrown, limit) = crate::ops::incdec_prop_error(
                 req,
                 &ty,
                 info.declaring,
-                &name,
+                name,
                 (increment, crate::ops::Holder::Property),
             );
             req.release(held);
@@ -14930,7 +15011,7 @@ fn static_prop_step(
         }
         Some(ty) => {
             let verdict =
-                crate::ops::verify_property_type(req, &stepped, &ty, info.declaring, &name, strict);
+                crate::ops::verify_property_type(req, &stepped, &ty, info.declaring, name, strict);
             match crate::ops::landed(req, stepped, verdict) {
                 Ok(landed) => landed,
                 Err(thrown) => {
@@ -15189,7 +15270,12 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
             return threw(req, frame, &thrown);
         }
     };
-    let Some(Placed { info, name, ty }) = placed else {
+    let Some(Placed {
+        info,
+        name,
+        held_to,
+    }) = placed
+    else {
         exec::free_operand(req, frame, data_type, data_at);
         return Ok(advance_over_data(req, frame, at));
     };
@@ -15224,7 +15310,9 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     // write through any name bound to it is held to the type too. php
     // takes this arm only where the source is a place; a call that
     // returned by value is the notice and an assignment by value.
-    let typed = ty.filter(|_| !returns_function);
+    let typed = (held_to.typed() && !returns_function)
+        .then(|| req.typed_static(info).map(|typed| typed.ty))
+        .flatten();
     if let Some(ty) = typed.as_ref() {
         let strict = req.frame_strict_types(frame);
         match crate::ops::verify_prop_assignable_by_ref(
@@ -22232,12 +22320,7 @@ pub(crate) fn isset_isempty_static_prop<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let slot = CacheSlot(op.extended_value & !ISEMPTY);
-    let held = match static_slot_at(req, frame, code, op, slot, PropertyRead::Silent) {
-        Ok(Some((info, _))) => req.static_value(info, PropertyRead::Silent),
-        Ok(None) => Ok(Value::null()),
-        Err(thrown) => Err(thrown),
-    };
-    let held = match held {
+    let held = match static_read(req, frame, code, op, slot, PropertyRead::Silent) {
         Ok(held) => held,
         Err(thrown) => return threw(req, frame, &thrown),
     };

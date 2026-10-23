@@ -1067,10 +1067,7 @@ impl Request {
             .map
             .get(header.runtime_cache())
             .map_or(exec::Cached::Unprimed, |cache| cache.get(slot));
-        let (exec::Cached::ClassAndCallee { primed, .. }
-        | exec::Cached::StaticProperty { primed, .. }
-        | exec::Cached::ClassConstant { primed, .. }) = cached
-        else {
+        let Some(primed) = cached.primed_from() else {
             return cached;
         };
         let same = primed.function.is_some()
@@ -1080,10 +1077,24 @@ impl Request {
         if same { cached } else { exec::Cached::Unprimed }
     }
 
+    /// `CACHE_PTR(num, ptr)` for a slot whose answer the access rule
+    /// decides: what `make` builds over `frame` as the frame it was
+    /// primed from ([`exec::PrimedFrom`]), which
+    /// [`Request::cached_in_scope`] reads back.
+    pub(crate) fn prime_scoped(
+        &mut self,
+        frame: FrameRef,
+        slot: CacheSlot,
+        make: impl FnOnce(exec::PrimedFrom) -> exec::Cached,
+    ) {
+        let primed = self.primed_from(frame);
+        self.prime(frame, slot, make(primed));
+    }
+
     /// What a slot primed from `frame` names as the frame it was primed from
     /// ([`exec::PrimedFrom`]): its scope, and its function where it is no
     /// closure's.
-    pub(crate) fn primed_from(&self, frame: FrameRef) -> exec::PrimedFrom {
+    fn primed_from(&self, frame: FrameRef) -> exec::PrimedFrom {
         exec::PrimedFrom {
             function: self
                 .vm
@@ -1129,17 +1140,12 @@ impl Request {
         class: crate::api::values::ClassId,
         (function, instance): (Function, bool),
     ) {
-        let primed = self.primed_from(frame);
-        self.prime(
-            frame,
-            slot,
-            exec::Cached::ClassAndCallee {
-                class,
-                primed,
-                function,
-                instance,
-            },
-        );
+        self.prime_scoped(frame, slot, |primed| exec::Cached::ClassAndCallee {
+            class,
+            primed,
+            function,
+            instance,
+        });
     }
 
     /// `zobj->ce == CACHED_PTR_EX(cache_slot)` and the offset beside it

@@ -374,7 +374,16 @@ impl Request {
         // type and coerced by the weak rule where the writer's regime is
         // not strict, and php's `TypeError` where it neither satisfies
         // nor coerces, the value given up as php gives it up.
-        let ty = self.property_decl(info).and_then(|p| p.ty.clone());
+        // The declaration's type is copied only for a value it may
+        // coerce or refuse (`ZEND_TYPE_CONTAINS_CODE` first,
+        // [`crate::exec::SlotType::admits`]).
+        let held_to = self.property_decl(info).map_or(
+            crate::exec::SlotType::UNTYPED,
+            crate::exec::SlotType::set_reached,
+        );
+        let ty = (!held_to.admits(value.to_zval()))
+            .then(|| self.property_decl(info).and_then(|p| p.ty.clone()))
+            .flatten();
         if let Some(ty) = ty {
             let verdict =
                 crate::ops::verify_property_type(self, &value, &ty, declaring, name, strict);
